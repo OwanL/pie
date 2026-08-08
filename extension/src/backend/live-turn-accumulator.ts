@@ -35,7 +35,9 @@ export type BackendSemanticCandidate =
   | { kind: 'turn.phase'; phase: Exclude<LiveTurnPhase, 'reconciling_gap'>; inactivityBudgetMs?: number }
   | { kind: 'turn.text'; delta: string }
   | { kind: 'turn.reasoning'; delta: string }
-  | { kind: 'turn.toolDraft'; toolCallId: string; name: string; argumentsJson: string }
+  | { kind: 'turn.toolDraft'; action: 'start'; toolCallId: string; name: string }
+  | { kind: 'turn.toolDraft'; action: 'delta'; toolCallId: string; name: string; argumentsJsonDelta: string }
+  | { kind: 'turn.toolDraft'; action: 'end'; toolCallId: string; name: string; argumentsJson: string }
   | { kind: 'turn.extensionUi'; uiRequestId: string; action: 'opened' | 'closed' }
   | { kind: 'tool.started'; executionId: string; parentExecutionId: string | null; rootExecutionId: string; toolCallId: string; name: string; input: unknown; startedAt: number; parallelGroupId?: string }
   | { kind: 'tool.progress'; executionId: string; preview: ToolPreview }
@@ -49,6 +51,13 @@ const MAX_LIVE_TOOL_INPUT_PREVIEW_BYTES = 2 * 1024;
 const RETAINED_SETTLED_TOOL_DETAILS = 64;
 const COMPACTED_LIVE_INPUT = { liveCompacted: true, detail: 'Durability-confirmed tool input omitted from repair checkpoints.' } as const;
 const COMPACTED_LIVE_RESULT = { kind: 'generic', summary: 'Durability-confirmed tool result omitted from repair checkpoints.', liveCompacted: true } as const;
+const CHECKPOINT_BYTE_METADATA_PLACEHOLDER = 99_999_999;
+/* Sequence values grow while an accepted payload remains resident. Reserve
+ * their maximum JSON width up front so even a rejected next observation
+ * (9→10, 99→100, …) cannot push the retained checkpoint over its ceiling. */
+const CHECKPOINT_SEQUENCE_PLACEHOLDER = Number.MAX_SAFE_INTEGER;
+const JSON_NULL_BYTES = 4;
+const JSON_ARRAY_EMPTY_BYTES = 2;
 
 export class BackendLiveTurnAccumulator {
   private seq = 0;
@@ -61,6 +70,14 @@ export class BackendLiveTurnAccumulator {
   private aggregatePreviewBytes = 0;
   private textBytes = 0;
   private reasoningBytes = 0;
+  /** Exact/conservative serialized-byte components. Large previews are measured
+   * once when normalized and are never stringified again by this accounting. */
+  private readonly toolCheckpointBytesByExecutionId = new Map<string, number>();
+  private aggregateToolCheckpointBytes = 0;
+  private partsCheckpointBytes = 2;
+  private draftsCheckpointBytes = 2;
+  private toolExecutionIdsCheckpointBytes = 2;
+  private pendingUiCheckpointBytes = 2;
 
   constructor(private readonly identity: BackendLiveTurnIdentity) {
     this.turn = {
@@ -81,9 +98,13 @@ export class BackendLiveTurnAccumulator {
       textBytes: 0,
       reasoningBytes: 0,
       aggregatePreviewBytes: 0,
+      checkpointBytes: 0,
+      toolDraftsByCallId: {},
+      aggregateToolDraftBytes: 0,
       toolExecutionIds: [],
       pendingExtensionUiRequestIds: [],
     };
+    this.turn = { ...this.turn, checkpointBytes: this.estimateActiveCheckpointBytes(this.turn) };
   }
 
   get attemptId(): string {
@@ -94,12 +115,34 @@ export class BackendLiveTurnAccumulator {
     return this.seq;
   }
 
-  observe(candidate: Exclude<BackendSemanticCandidate, { kind: 'tool.progress' }>, occurredAt: number): TurnSemanticEnvelope;
-  observe(candidate: Extract<BackendSemanticCandidate, { kind: 'tool.progress' }>, occurredAt: number): TurnSemanticEnvelope | undefined;
+  observe(candidate: Exclude<BackendSemanticCandidate, { kind: 'tool.progress' | 'turn.toolDraft' }>, occurredAt: number): TurnSemanticEnvelope;
+  observe(candidate: Extract<BackendSemanticCandidate, { kind: 'tool.progress' | 'turn.toolDraft' }>, occurredAt: number): TurnSemanticEnvelope | undefined;
   observe(candidate: BackendSemanticCandidate, occurredAt: number): TurnSemanticEnvelope | undefined;
   observe(candidate: BackendSemanticCandidate, occurredAt: number): TurnSemanticEnvelope | undefined {
     if (candidate.kind === 'tool.progress') return this.observeToolProgress(candidate, occurredAt);
+    if (candidate.kind === 'turn.toolDraft' && this.turn.phase === 'aborting') {
+      const seq = ++this.seq;
+      return this.replaceWithRejected(seq, occurredAt, 'malformed_observation');
+    }
+    if (candidate.kind === 'turn.toolDraft'
+      && Object.values(this.tools).some((tool) => tool.transcriptToolCallId === candidate.toolCallId)) {
+      // Provider boundary replay after execution promotion is idempotent. It
+      // must not recreate a transient draft or consume a semantic sequence.
+      return undefined;
+    }
     const seq = ++this.seq;
+    const previousTurn = this.turn;
+    const candidateExecutionId = 'executionId' in candidate ? candidate.executionId : undefined;
+    const previousTool = candidateExecutionId ? this.tools[candidateExecutionId] : undefined;
+    const previousAggregatePreviewBytes = this.aggregatePreviewBytes;
+    const previousTextBytes = this.textBytes;
+    const previousReasoningBytes = this.reasoningBytes;
+    const previousExecutionPreviewBytes = candidateExecutionId
+      ? this.previewBytesByExecutionId.get(candidateExecutionId)
+      : undefined;
+    const settledLength = this.settledExecutionIds.length;
+    const previousTerminal = this.terminal;
+    const previousWatermark = this.watermark;
     const base = { ...this.base(seq, occurredAt) };
     let envelope: TurnSemanticEnvelope;
     switch (candidate.kind) {
@@ -150,13 +193,57 @@ export class BackendLiveTurnAccumulator {
         break;
       }
       case 'turn.toolDraft': {
-        const previous = this.turn.draftingToolCall?.toolCallId === candidate.toolCallId
-          ? this.turn.draftingToolCall.argumentsJson
-          : '';
-        const argumentsJson = previous + candidate.argumentsJson;
-        if (Buffer.byteLength(argumentsJson, 'utf8') > LIVE_PIPELINE_LIMITS.toolDraftBytes) return this.replaceWithRejected(seq, occurredAt, 'payload_oversize');
-        envelope = { ...base, kind: candidate.kind, draft: { toolCallId: candidate.toolCallId, name: candidate.name, argumentsJson } };
-        this.turn = { ...this.turn, seq, checkpointSeq: seq, draftingToolCall: envelope.draft, lastSemanticProgressAt: occurredAt };
+        const previous = ownRecordValue(this.turn.toolDraftsByCallId, candidate.toolCallId);
+        let draft: LiveTurnCheckpoint['turn']['toolDraftsByCallId'][string];
+        if (candidate.action === 'start') {
+          if (previous && previous.name !== candidate.name) {
+            return this.replaceWithRejected(seq, occurredAt, 'malformed_payload');
+          }
+          // Duplicate starts are idempotent and never reset accumulated JSON or
+          // demote a ready draft.
+          draft = previous ?? {
+            toolCallId: candidate.toolCallId,
+            name: candidate.name,
+            argumentsJson: '',
+            phase: 'drafting',
+          };
+        } else if (candidate.action === 'delta') {
+          if (!previous || previous.phase !== 'drafting' || previous.name !== candidate.name) {
+            return this.replaceWithRejected(seq, occurredAt, previous ? 'malformed_observation' : 'owner_missing');
+          }
+          draft = { ...previous, argumentsJson: previous.argumentsJson + candidate.argumentsJsonDelta };
+        } else {
+          if (!previous || previous.name !== candidate.name) {
+            return this.replaceWithRejected(seq, occurredAt, previous ? 'malformed_payload' : 'owner_missing');
+          }
+          if (previous.phase === 'ready' && previous.argumentsJson !== candidate.argumentsJson) {
+            return this.replaceWithRejected(seq, occurredAt, 'malformed_observation');
+          }
+          draft = { ...previous, argumentsJson: candidate.argumentsJson, phase: 'ready' };
+        }
+        if (toolDraftByteLength(draft) > LIVE_PIPELINE_LIMITS.toolDraftBytes) {
+          return this.replaceWithRejected(seq, occurredAt, 'payload_oversize');
+        }
+        const aggregateToolDraftBytes = this.turn.aggregateToolDraftBytes
+          - (previous ? toolDraftByteLength(previous) : 0)
+          + toolDraftByteLength(draft);
+        if (aggregateToolDraftBytes > LIVE_PIPELINE_LIMITS.toolDraftAggregateBytes) {
+          return this.replaceWithRejected(seq, occurredAt, 'payload_oversize');
+        }
+        envelope = { ...base, kind: candidate.kind, draft };
+        this.turn = {
+          ...this.turn,
+          seq,
+          checkpointSeq: seq,
+          phase: 'streaming',
+          phaseSince: this.turn.phase === 'streaming' ? this.turn.phaseSince : occurredAt,
+          lastSemanticProgressAt: occurredAt,
+          toolDraftsByCallId: { ...this.turn.toolDraftsByCallId, [draft.toolCallId]: draft },
+          aggregateToolDraftBytes,
+          parts: previous || this.turn.parts.some((part) => part.kind === 'tool' && part.toolCallId === draft.toolCallId)
+            ? this.turn.parts
+            : [...this.turn.parts, { kind: 'tool', toolCallId: draft.toolCallId }],
+        };
         break;
       }
       case 'turn.extensionUi': {
@@ -182,7 +269,11 @@ export class BackendLiveTurnAccumulator {
         break;
       }
       case 'tool.started': {
+        if (this.turn.phase === 'aborting') return this.replaceWithRejected(seq, occurredAt, 'malformed_observation');
         if (this.tools[candidate.executionId]) return this.replaceWithRejected(seq, occurredAt, 'malformed_observation');
+        if (Object.values(this.tools).some((tool) => tool.transcriptToolCallId === candidate.toolCallId)) {
+          return this.replaceWithRejected(seq, occurredAt, 'malformed_observation');
+        }
         // Tool inputs can contain whole prompts, generated schemas, or cyclic
         // extension-owned values. Live state only needs enough immutable input
         // to render the running card; the durability-confirmed transcript owns
@@ -194,7 +285,7 @@ export class BackendLiveTurnAccumulator {
           return this.replaceWithRejected(seq, occurredAt, 'payload_oversize');
         }
         envelope = { ...base, ...candidate, input };
-        this.tools[candidate.executionId] = {
+        this.setTool({
           executionId: candidate.executionId,
           parentExecutionId: candidate.parentExecutionId,
           rootExecutionId: candidate.rootExecutionId,
@@ -210,7 +301,10 @@ export class BackendLiveTurnAccumulator {
           phaseSince: occurredAt,
           lastProgressAt: occurredAt,
           previewBytes: 0,
-        };
+        });
+        const promotedDraft = ownRecordValue(this.turn.toolDraftsByCallId, candidate.toolCallId);
+        const toolDraftsByCallId = { ...this.turn.toolDraftsByCallId };
+        delete toolDraftsByCallId[candidate.toolCallId];
         this.turn = {
           ...this.turn,
           seq,
@@ -218,7 +312,9 @@ export class BackendLiveTurnAccumulator {
           phase: 'running_tool',
           phaseSince: occurredAt,
           lastSemanticProgressAt: occurredAt,
-          draftingToolCall: undefined,
+          toolDraftsByCallId,
+          aggregateToolDraftBytes: this.turn.aggregateToolDraftBytes
+            - (promotedDraft ? toolDraftByteLength(promotedDraft) : 0),
           parts: this.turn.parts.some((part) => part.kind === 'tool' && part.toolCallId === candidate.toolCallId)
             ? this.turn.parts
             : [...this.turn.parts, { kind: 'tool', toolCallId: candidate.toolCallId }],
@@ -241,7 +337,7 @@ export class BackendLiveTurnAccumulator {
           this.aggregatePreviewBytes -= previousPreviewBytes;
           this.previewBytesByExecutionId.delete(candidate.executionId);
         }
-        this.tools[candidate.executionId] = {
+        this.setTool({
           ...tool,
           seq,
           preview: undefined,
@@ -253,7 +349,7 @@ export class BackendLiveTurnAccumulator {
             durationMs: candidate.durationMs,
             durableEntryId: candidate.durableEntryId,
           },
-        };
+        });
         if (!tool.terminal) this.settledExecutionIds.push(candidate.executionId);
         this.turn = {
           ...this.turn,
@@ -272,7 +368,14 @@ export class BackendLiveTurnAccumulator {
         const durableMessage = compactDurableMessageDetails(candidate.durableMessage, this.identity.sessionPath);
         envelope = { ...base, ...candidate, durableMessage };
         this.terminal = durableMessage;
-        this.turn = { ...this.turn, seq, checkpointSeq: seq, lastSemanticProgressAt: occurredAt };
+        this.turn = {
+          ...this.turn,
+          seq,
+          checkpointSeq: seq,
+          lastSemanticProgressAt: occurredAt,
+          toolDraftsByCallId: {},
+          aggregateToolDraftBytes: 0,
+        };
         this.watermark = {
           sessionPath: this.identity.sessionPath,
           requestId: this.identity.requestId,
@@ -284,7 +387,39 @@ export class BackendLiveTurnAccumulator {
         break;
       }
     }
-    return envelope;
+    this.refreshTurnCollectionAccounting(previousTurn, this.turn);
+    let checkpointBytes = this.estimateActiveCheckpointBytes(this.turn);
+    if (!this.terminal && checkpointBytes > LIVE_PIPELINE_LIMITS.checkpointBytes) {
+      checkpointBytes = this.compactSettledToolsUntilFits(this.turn);
+    }
+    // Terminal checkpoints are low-frequency and include the compact durable
+    // message, so verify that body once. If it crosses the ceiling, compact
+    // oldest durability-confirmed details before rejecting terminalization.
+    if (this.terminal) checkpointBytes = this.compactSettledToolsForTerminalCheckpoint(checkpointBytes);
+    const checkpointLimit = this.terminal
+      ? LIVE_PIPELINE_LIMITS.terminalCheckpointBytes
+      : LIVE_PIPELINE_LIMITS.checkpointBytes;
+    if (checkpointBytes > checkpointLimit) {
+      this.turn = previousTurn;
+      this.terminal = previousTerminal;
+      this.watermark = previousWatermark;
+      this.rebuildTurnCollectionAccounting(previousTurn);
+      if (candidateExecutionId) {
+        if (previousTool) this.setTool(previousTool);
+        else this.deleteTool(candidateExecutionId);
+      }
+      this.settledExecutionIds.length = settledLength;
+      this.aggregatePreviewBytes = previousAggregatePreviewBytes;
+      this.textBytes = previousTextBytes;
+      this.reasoningBytes = previousReasoningBytes;
+      if (candidateExecutionId) {
+        if (previousExecutionPreviewBytes === undefined) this.previewBytesByExecutionId.delete(candidateExecutionId);
+        else this.previewBytesByExecutionId.set(candidateExecutionId, previousExecutionPreviewBytes);
+      }
+      return this.replaceWithRejected(seq, occurredAt, 'payload_oversize');
+    }
+    this.turn = { ...this.turn, checkpointBytes };
+    return { ...envelope, checkpointBytes };
   }
 
   reject(reason: RejectedObservationReason, occurredAt: number): TurnSemanticEnvelope {
@@ -301,7 +436,8 @@ export class BackendLiveTurnAccumulator {
           reasoningBytes: 0,
           toolExecutionIds: [...this.turn.toolExecutionIds],
           pendingExtensionUiRequestIds: [],
-          draftingToolCall: undefined,
+          toolDraftsByCallId: {},
+          aggregateToolDraftBytes: 0,
         }
       : this.turn;
     return {
@@ -311,6 +447,7 @@ export class BackendLiveTurnAccumulator {
       attemptId: this.identity.attemptId,
       checkpointSeq: this.seq,
       phase: this.turn.phase,
+      checkpointBytes: this.turn.checkpointBytes,
       turn: {
         ...terminalTurn,
         seq: this.seq,
@@ -333,6 +470,10 @@ export class BackendLiveTurnAccumulator {
     candidate: Extract<BackendSemanticCandidate, { kind: 'tool.progress' }>,
     occurredAt: number,
   ): TurnSemanticEnvelope | undefined {
+    if (this.turn.phase === 'aborting') {
+      const seq = ++this.seq;
+      return this.replaceWithRejected(seq, occurredAt, 'malformed_observation');
+    }
     const tool = this.tools[candidate.executionId];
     if (!tool) {
       const seq = ++this.seq;
@@ -383,7 +524,7 @@ export class BackendLiveTurnAccumulator {
       aggregatePreviewBytes,
       update,
     };
-    this.tools[candidate.executionId] = {
+    const nextTool: LiveToolRecord = {
       ...tool,
       seq,
       preview: candidate.preview,
@@ -391,16 +532,33 @@ export class BackendLiveTurnAccumulator {
       progressRevision,
       lastProgressAt: occurredAt,
     };
-    this.previewBytesByExecutionId.set(candidate.executionId, candidatePreviewBytes);
-    this.aggregatePreviewBytes = aggregatePreviewBytes;
-    this.turn = {
+    const nextTurn = {
       ...this.turn,
       seq,
       checkpointSeq: seq,
       lastSemanticProgressAt: occurredAt,
       aggregatePreviewBytes,
     };
-    return envelope;
+    let previousToolCheckpointBytes = this.toolCheckpointBytesByExecutionId.get(candidate.executionId) ?? 0;
+    const nextToolCheckpointBytes = estimateToolCheckpointBytes(nextTool);
+    let nextAggregateToolCheckpointBytes = this.aggregateToolCheckpointBytes
+      - previousToolCheckpointBytes + nextToolCheckpointBytes;
+    let checkpointBytes = this.estimateActiveCheckpointBytes(nextTurn, nextAggregateToolCheckpointBytes);
+    if (checkpointBytes > LIVE_PIPELINE_LIMITS.checkpointBytes) {
+      this.compactSettledToolsUntilFits(nextTurn, candidate.executionId, nextToolCheckpointBytes);
+      previousToolCheckpointBytes = this.toolCheckpointBytesByExecutionId.get(candidate.executionId) ?? 0;
+      nextAggregateToolCheckpointBytes = this.aggregateToolCheckpointBytes
+        - previousToolCheckpointBytes + nextToolCheckpointBytes;
+      checkpointBytes = this.estimateActiveCheckpointBytes(nextTurn, nextAggregateToolCheckpointBytes);
+    }
+    if (checkpointBytes > LIVE_PIPELINE_LIMITS.checkpointBytes) {
+      return this.replaceWithRejected(seq, occurredAt, 'payload_oversize');
+    }
+    this.setTool(nextTool);
+    this.previewBytesByExecutionId.set(candidate.executionId, candidatePreviewBytes);
+    this.aggregatePreviewBytes = aggregatePreviewBytes;
+    this.turn = { ...nextTurn, checkpointBytes };
+    return { ...envelope, checkpointBytes };
   }
 
   private compactSettledToolHistory(): void {
@@ -409,17 +567,177 @@ export class BackendLiveTurnAccumulator {
     const executionId = this.settledExecutionIds[compactIndex];
     const tool = executionId ? this.tools[executionId] : undefined;
     if (!tool?.terminal || isLiveCompactedValue(tool.terminal.result)) return;
-    this.tools[tool.executionId] = {
+    this.setTool({
       ...tool,
       immutableInput: COMPACTED_LIVE_INPUT,
       preview: undefined,
-      terminal: { ...tool.terminal, result: COMPACTED_LIVE_RESULT },
+      terminal: {
+        ...tool.terminal,
+        result: COMPACTED_LIVE_RESULT,
+        resultBytes: jsonByteLength(COMPACTED_LIVE_RESULT),
+      },
+    });
+  }
+
+  private compactSettledToolsForTerminalCheckpoint(activeEstimate: number): number {
+    // The small reserve covers the two cached byte fields changing width when
+    // the final conservative total is stored.
+    let checkpointBytes = Math.max(activeEstimate, jsonByteLength(this.checkpoint()) + 32);
+    for (const executionId of this.settledExecutionIds) {
+      if (checkpointBytes <= LIVE_PIPELINE_LIMITS.terminalCheckpointBytes) break;
+      const tool = this.tools[executionId];
+      if (!tool?.terminal || isLiveCompactedValue(tool.terminal.result)) continue;
+      this.setTool({
+        ...tool,
+        immutableInput: COMPACTED_LIVE_INPUT,
+        preview: undefined,
+        previewBytes: 0,
+        terminal: {
+          ...tool.terminal,
+          result: COMPACTED_LIVE_RESULT,
+          resultBytes: jsonByteLength(COMPACTED_LIVE_RESULT),
+        },
+      });
+      checkpointBytes = Math.max(
+        this.estimateActiveCheckpointBytes(this.turn),
+        jsonByteLength(this.checkpoint()) + 32,
+      );
+    }
+    return checkpointBytes;
+  }
+
+  private compactSettledToolsUntilFits(
+    turn: LiveTurnCheckpoint['turn'],
+    replacementExecutionId?: string,
+    replacementToolBytes?: number,
+  ): number {
+    let checkpointBytes = this.estimateWithToolReplacement(turn, replacementExecutionId, replacementToolBytes);
+    for (const executionId of this.settledExecutionIds) {
+      if (checkpointBytes <= LIVE_PIPELINE_LIMITS.checkpointBytes) break;
+      const tool = this.tools[executionId];
+      if (!tool?.terminal || isLiveCompactedValue(tool.terminal.result)) continue;
+      this.setTool({
+        ...tool,
+        immutableInput: COMPACTED_LIVE_INPUT,
+        preview: undefined,
+        previewBytes: 0,
+        terminal: {
+          ...tool.terminal,
+          result: COMPACTED_LIVE_RESULT,
+          resultBytes: jsonByteLength(COMPACTED_LIVE_RESULT),
+        },
+      });
+      checkpointBytes = this.estimateWithToolReplacement(turn, replacementExecutionId, replacementToolBytes);
+    }
+    return checkpointBytes;
+  }
+
+  private estimateWithToolReplacement(
+    turn: LiveTurnCheckpoint['turn'],
+    executionId?: string,
+    replacementBytes?: number,
+  ): number {
+    if (!executionId || replacementBytes === undefined) return this.estimateActiveCheckpointBytes(turn);
+    const previousBytes = this.toolCheckpointBytesByExecutionId.get(executionId) ?? 0;
+    return this.estimateActiveCheckpointBytes(
+      turn,
+      this.aggregateToolCheckpointBytes - previousBytes + replacementBytes,
+    );
+  }
+
+  private setTool(tool: LiveToolRecord): void {
+    const previousBytes = this.toolCheckpointBytesByExecutionId.get(tool.executionId) ?? 0;
+    const nextBytes = estimateToolCheckpointBytes(tool);
+    this.tools[tool.executionId] = tool;
+    this.toolCheckpointBytesByExecutionId.set(tool.executionId, nextBytes);
+    this.aggregateToolCheckpointBytes += nextBytes - previousBytes;
+  }
+
+  private deleteTool(executionId: string): void {
+    const previousBytes = this.toolCheckpointBytesByExecutionId.get(executionId) ?? 0;
+    delete this.tools[executionId];
+    this.toolCheckpointBytesByExecutionId.delete(executionId);
+    this.aggregateToolCheckpointBytes -= previousBytes;
+  }
+
+  private refreshTurnCollectionAccounting(previous: LiveTurnCheckpoint['turn'], next: LiveTurnCheckpoint['turn']): void {
+    if (previous.parts !== next.parts) {
+      this.partsCheckpointBytes = updatedPartsByteLength(previous.parts, next.parts, this.partsCheckpointBytes);
+    }
+    if (previous.toolDraftsByCallId !== next.toolDraftsByCallId) {
+      this.draftsCheckpointBytes = updatedRecordByteLength(
+        previous.toolDraftsByCallId,
+        next.toolDraftsByCallId,
+        this.draftsCheckpointBytes,
+      );
+    }
+    if (previous.toolExecutionIds !== next.toolExecutionIds) {
+      this.toolExecutionIdsCheckpointBytes = updatedStringArrayByteLength(
+        previous.toolExecutionIds,
+        next.toolExecutionIds,
+        this.toolExecutionIdsCheckpointBytes,
+      );
+    }
+    if (previous.pendingExtensionUiRequestIds !== next.pendingExtensionUiRequestIds) {
+      this.pendingUiCheckpointBytes = jsonByteLength(next.pendingExtensionUiRequestIds);
+    }
+  }
+
+  private rebuildTurnCollectionAccounting(turn: LiveTurnCheckpoint['turn']): void {
+    this.partsCheckpointBytes = livePartsByteLength(turn.parts);
+    this.draftsCheckpointBytes = recordByteLength(turn.toolDraftsByCallId);
+    this.toolExecutionIdsCheckpointBytes = jsonByteLength(turn.toolExecutionIds);
+    this.pendingUiCheckpointBytes = jsonByteLength(turn.pendingExtensionUiRequestIds);
+  }
+
+  private estimateActiveCheckpointBytes(
+    turn: LiveTurnCheckpoint['turn'],
+    aggregateToolCheckpointBytes = this.aggregateToolCheckpointBytes,
+  ): number {
+    const turnSkeleton = {
+      ...turn,
+      seq: CHECKPOINT_SEQUENCE_PLACEHOLDER,
+      checkpointSeq: CHECKPOINT_SEQUENCE_PLACEHOLDER,
+      checkpointBytes: CHECKPOINT_BYTE_METADATA_PLACEHOLDER,
+      parts: null,
+      toolDraftsByCallId: null,
+      toolExecutionIds: null,
+      pendingExtensionUiRequestIds: null,
     };
+    const turnBytes = jsonByteLength(turnSkeleton)
+      - (4 * JSON_NULL_BYTES)
+      + this.partsCheckpointBytes
+      + this.draftsCheckpointBytes
+      + this.toolExecutionIdsCheckpointBytes
+      + this.pendingUiCheckpointBytes;
+    const toolCount = this.toolCheckpointBytesByExecutionId.size;
+    const toolsBytes = JSON_ARRAY_EMPTY_BYTES
+      + aggregateToolCheckpointBytes
+      + Math.max(0, toolCount - 1);
+    const checkpointSkeleton = {
+      protocolVersion: this.identity.protocolVersion,
+      sessionPath: this.identity.sessionPath,
+      turnId: this.identity.turnId,
+      attemptId: this.identity.attemptId,
+      checkpointSeq: CHECKPOINT_SEQUENCE_PLACEHOLDER,
+      phase: turn.phase,
+      checkpointBytes: CHECKPOINT_BYTE_METADATA_PLACEHOLDER,
+      turn: null,
+      tools: null,
+      pendingExtensionUiRequestIds: null,
+    };
+    return jsonByteLength(checkpointSkeleton)
+      - (3 * JSON_NULL_BYTES)
+      + turnBytes
+      + toolsBytes
+      + this.pendingUiCheckpointBytes;
   }
 
   private replaceWithRejected(seq: number, occurredAt: number, reason: RejectedObservationReason): TurnSemanticEnvelope {
-    this.turn = { ...this.turn, seq, checkpointSeq: seq };
-    return { ...this.base(seq, occurredAt), kind: 'observation.rejected', reason };
+    const next = { ...this.turn, seq, checkpointSeq: seq };
+    const checkpointBytes = this.estimateActiveCheckpointBytes(next);
+    this.turn = { ...next, checkpointBytes };
+    return { ...this.base(seq, occurredAt), checkpointBytes, kind: 'observation.rejected', reason };
   }
 
   private base(seq: number, occurredAt: number) {
@@ -431,8 +749,107 @@ export class BackendLiveTurnAccumulator {
       attemptId: this.identity.attemptId,
       seq,
       occurredAt,
+      checkpointBytes: this.turn.checkpointBytes,
     };
   }
+}
+
+function estimateToolCheckpointBytes(tool: LiveToolRecord): number {
+  const skeleton = {
+    ...tool,
+    immutableInput: null,
+    preview: tool.preview === undefined ? undefined : null,
+    terminal: tool.terminal
+      ? { ...tool.terminal, result: null }
+      : undefined,
+  };
+  return jsonByteLength(skeleton)
+    - JSON_NULL_BYTES
+    + jsonByteLength(tool.immutableInput)
+    + (tool.preview === undefined ? 0 : tool.previewBytes - JSON_NULL_BYTES)
+    + (tool.terminal ? tool.terminal.resultBytes - JSON_NULL_BYTES : 0);
+}
+
+function livePartsByteLength(parts: LiveTurnCheckpoint['turn']['parts']): number {
+  if (parts.length === 0) return JSON_ARRAY_EMPTY_BYTES;
+  return JSON_ARRAY_EMPTY_BYTES
+    + parts.reduce((total, part) => total + jsonByteLength(part), 0)
+    + parts.length - 1;
+}
+
+function updatedPartsByteLength(
+  previous: LiveTurnCheckpoint['turn']['parts'],
+  next: LiveTurnCheckpoint['turn']['parts'],
+  currentBytes: number,
+): number {
+  if (next.length === previous.length + 1
+    && previous.every((part, index) => part === next[index])) {
+    return currentBytes + (previous.length > 0 ? 1 : 0) + jsonByteLength(next[next.length - 1]);
+  }
+  if (next.length === previous.length && next.length > 0
+    && previous.slice(0, -1).every((part, index) => part === next[index])) {
+    const previousLast = previous[previous.length - 1];
+    const nextLast = next[next.length - 1];
+    if (previousLast && nextLast
+      && previousLast.kind === nextLast.kind
+      && (previousLast.kind === 'text' || previousLast.kind === 'reasoning')
+      && (nextLast.kind === 'text' || nextLast.kind === 'reasoning')
+      && nextLast.text.startsWith(previousLast.text)) {
+      // Encoding each appended fragment independently is conservative when a
+      // surrogate pair happens to be split across semantic observations.
+      return currentBytes + jsonStringContentByteLength(nextLast.text.slice(previousLast.text.length));
+    }
+  }
+  return livePartsByteLength(next);
+}
+
+function updatedRecordByteLength<T>(
+  previous: Record<string, T>,
+  next: Record<string, T>,
+  currentBytes: number,
+): number {
+  const changed = Object.keys(next).filter((key) => ownRecordValue(previous, key) !== ownRecordValue(next, key));
+  const removed = Object.keys(previous).filter((key) => !Object.prototype.hasOwnProperty.call(next, key));
+  if (changed.length === 1 && removed.length === 0) {
+    const key = changed[0]!;
+    const previousValue = ownRecordValue(previous, key);
+    const nextValue = ownRecordValue(next, key);
+    if (nextValue === undefined) return jsonByteLength(next);
+    if (previousValue !== undefined) {
+      return currentBytes - jsonByteLength(previousValue) + jsonByteLength(nextValue);
+    }
+    const entryBytes = jsonByteLength(key) + 1 + jsonByteLength(nextValue);
+    return currentBytes + (Object.keys(previous).length > 0 ? 1 : 0) + entryBytes;
+  }
+  if (changed.length === 0 && removed.length === 1) return jsonByteLength(next);
+  return jsonByteLength(next);
+}
+
+function updatedStringArrayByteLength(previous: string[], next: string[], currentBytes: number): number {
+  if (next.length === previous.length + 1
+    && previous.every((value, index) => value === next[index])) {
+    return currentBytes + (previous.length > 0 ? 1 : 0) + jsonByteLength(next[next.length - 1]);
+  }
+  return jsonByteLength(next);
+}
+
+function jsonStringContentByteLength(value: string): number {
+  return jsonByteLength(value) - 2;
+}
+
+function recordByteLength(record: Record<string, unknown>): number {
+  return jsonByteLength(record);
+}
+
+function ownRecordValue<T>(record: Record<string, T>, key: string): T | undefined {
+  return Object.prototype.hasOwnProperty.call(record, key) ? record[key] : undefined;
+}
+
+function toolDraftByteLength(draft: { toolCallId: string; name: string; argumentsJson: string; phase: string }): number {
+  return Buffer.byteLength(
+    JSON.stringify({ toolCallId: draft.toolCallId, name: draft.name, argumentsJson: draft.argumentsJson, phase: draft.phase }),
+    'utf8',
+  );
 }
 
 function jsonByteLength(value: unknown): number {

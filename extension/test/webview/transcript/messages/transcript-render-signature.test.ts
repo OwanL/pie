@@ -44,6 +44,31 @@ test('transcript render signature changes for live status and content changes', 
   }), initial);
 });
 
+test('transcript render signature keeps authoritative message ids separate from UI render identity', () => {
+  const base = state();
+  const withRenderIdentity = {
+    ...base,
+    transcript: [{ ...base.transcript[0]!, renderIdentity: 'live-row' }],
+  };
+  const changedRenderIdentity = {
+    ...withRenderIdentity,
+    transcript: [{ ...withRenderIdentity.transcript[0]!, renderIdentity: 'other-ui-row' }],
+  };
+  assert.equal(
+    transcriptRenderSignature(changedRenderIdentity),
+    transcriptRenderSignature(withRenderIdentity),
+    'UI-only identity must not become protocol commit evidence',
+  );
+  assert.notEqual(
+    transcriptRenderSignature({
+      ...withRenderIdentity,
+      transcript: [{ ...withRenderIdentity.transcript[0]!, id: 'durable-id' }],
+    }),
+    transcriptRenderSignature(withRenderIdentity),
+    'authoritative message id remains signed',
+  );
+});
+
 test('transcript render signature rejects stale equal-length live content', () => {
   const base = state();
   const initial = transcriptRenderSignature(base);

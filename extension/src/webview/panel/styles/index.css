@@ -99,6 +99,7 @@
  */
 
 :root {
+  color-scheme: dark;
   /* Bespoke night palette: intentionally independent from the VS Code theme. */
   --panel-black: #020203;
   --panel-ink: #050506;
@@ -190,6 +191,22 @@
   --panel-code-surface: var(--panel-ink-2);
   --panel-input-surface: var(--panel-ink-2);
 
+  /* The user request remains the one conversational bubble. Its inverted,
+     light-graphite palette makes prompt boundaries easy to skim without the
+     glare of a pure-white card. Assistant and operational content continue to
+     share --panel-surface. */
+  --panel-user-surface: color-mix(in srgb, var(--panel-foreground) 72%, var(--panel-black));
+  --panel-user-surface-hover: color-mix(in srgb, var(--panel-foreground) 76%, var(--panel-black));
+  --panel-user-foreground: color-mix(in srgb, var(--panel-black) 88%, var(--panel-foreground));
+  --panel-user-border: color-mix(in srgb, var(--panel-black) 42%, transparent);
+  --panel-user-highlight: color-mix(in srgb, var(--panel-foreground) 18%, transparent);
+  --panel-user-link: color-mix(in srgb, var(--panel-accent) 20%, var(--panel-user-foreground));
+
+  /* Neutral structural rules separate dense regions without introducing
+     another content surface or decorative gradient. */
+  --panel-optical-edge: color-mix(in srgb, var(--panel-foreground) 14%, transparent);
+  --panel-optical-edge-strong: color-mix(in srgb, var(--panel-foreground) 22%, transparent);
+
   /* Semantic colors */
   --panel-danger-surface: rgba(255, 102, 119, 0.12);
   --panel-warning-surface: rgba(228, 184, 79, 0.12);
@@ -213,12 +230,12 @@
   --panel-gap-xl: 16px;
 
   /* Session tab surfaces */
-  --session-tabs-strip-surface: color-mix(in srgb, var(--panel-black) 84%, var(--panel-ink-3) 16%);
-  --session-tab-active-surface: color-mix(in srgb, var(--panel-ink-4) 86%, var(--panel-accent) 14%);
-  --session-tab-inactive-surface: color-mix(in srgb, var(--panel-control-surface) 88%, transparent 12%);
-  --session-tab-hover-surface: color-mix(in srgb, var(--panel-hover-surface) 62%, var(--panel-control-surface) 38%);
+  --session-tabs-strip-surface: color-mix(in srgb, var(--panel-black) 86%, var(--panel-ink-3));
+  --session-tab-active-surface: color-mix(in srgb, var(--panel-ink-4) 94%, var(--panel-accent) 6%);
+  --session-tab-inactive-surface: color-mix(in srgb, var(--panel-control-surface) 88%, var(--panel-black));
+  --session-tab-hover-surface: color-mix(in srgb, var(--panel-hover-surface) 62%, var(--panel-control-surface));
   --session-tab-outline: color-mix(in srgb, var(--panel-border) 82%, transparent 18%);
-  --session-tab-active-outline: color-mix(in srgb, var(--panel-accent) 26%, var(--panel-border));
+  --session-tab-active-outline: color-mix(in srgb, var(--panel-accent) 10%, var(--panel-border));
   --session-tab-shadow: var(--panel-shadow-xs);
   --session-tab-drag-shadow: var(--panel-shadow-md);
 
@@ -448,6 +465,20 @@
   }
   50% {
     opacity: 1;
+  }
+}
+
+/* Preserve every interaction while removing decorative movement for users
+   who request reduced motion. Tiny non-zero durations keep transitionend /
+   animationend-driven cleanup paths reliable. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
   }
 }
 

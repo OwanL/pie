@@ -8,21 +8,23 @@ import {
 } from './json-structural-patch.js';
 
 /** Transient live-pipeline protocol. Nothing in this file is a durable event log. */
-export const LIVE_PIPELINE_PROTOCOL_VERSION = 5;
+export const LIVE_PIPELINE_PROTOCOL_VERSION = 6;
 
 export const LIVE_PIPELINE_LIMITS = {
   textPartBytes: 512 * 1024,
   reasoningPartBytes: 512 * 1024,
   toolDraftBytes: 64 * 1024,
+  toolDraftAggregateBytes: 2 * 1024 * 1024,
   toolInputBytes: 3 * 1024,
   // Subagent previews carry the complete recursively renderable child transcript.
   // Generic tool normalizers remain independently tail-bounded; this larger
   // ceiling exists so transparency is not traded away for transport size.
   previewBytes: 30 * 1024 * 1024,
   toolPreviewAggregateBytes: 30 * 1024 * 1024,
-  // Recovery checkpoints carry the backend's complete assembled live state and
-  // therefore need headroom up to the aggregate preview ceiling. They remain
-  // one-shot RPC responses under the shared 32 MiB JSONL record limit.
+  // Recovery checkpoints carry the backend's complete assembled live state.
+  // The canonical aggregate includes JSON escaping and the entire structural
+  // envelope; 2 MiB remains for the JSON-RPC response under the shared 32 MiB
+  // record ceiling.
   checkpointBytes: 30 * 1024 * 1024,
   terminalCheckpointBytes: 30 * 1024 * 1024,
   pendingOwnerEvents: 64,
@@ -115,7 +117,10 @@ export type LiveAssistantPart =
 export interface LiveToolCallDraft {
   toolCallId: string;
   name: string;
+  /** Provider-emitted JSON text. It may be incomplete while drafting and must
+   * not be parsed as authoritative tool input. */
   argumentsJson: string;
+  phase: 'drafting' | 'ready';
 }
 
 export interface ToolBlocker {
@@ -151,7 +156,13 @@ export interface LiveTurnRecord {
   reasoningBytes: number;
   /** Cached aggregate of active tool preview JSON bytes for this turn. */
   aggregatePreviewBytes: number;
-  draftingToolCall?: LiveToolCallDraft;
+  /** Backend-calculated conservative UTF-8 bytes for the complete active
+   * recovery checkpoint after the latest accepted semantic observation. */
+  checkpointBytes: number;
+  /** Ordered multi-tool drafts keyed by stable provider tool-call ID. */
+  toolDraftsByCallId: Record<string, LiveToolCallDraft>;
+  /** Cached aggregate UTF-8 bytes of draft IDs, names, and raw arguments. */
+  aggregateToolDraftBytes: number;
   toolExecutionIds: string[];
   pendingExtensionUiRequestIds: string[];
   reconciliation?: GapReconciliationState;
@@ -215,6 +226,10 @@ export interface SemanticEnvelopeBase {
   attemptId: string;
   seq: number;
   occurredAt: number;
+  /** Canonical conservative bytes of the complete active checkpoint after this
+   * observation. Progress consumers trust this instead of reserializing the
+   * reconstructed preview. */
+  checkpointBytes: number;
 }
 
 export type TurnSemanticEnvelope =
@@ -249,9 +264,9 @@ export type TurnSemanticEnvelope =
       baseProgressRevision: number;
       progressRevision: number;
       /** Backend-calculated canonical preview bytes after this update. */
-      previewBytes?: number;
+      previewBytes: number;
       /** Backend-calculated aggregate active-preview bytes after this update. */
-      aggregatePreviewBytes?: number;
+      aggregatePreviewBytes: number;
       update:
         | { kind: 'snapshot'; preview: ToolPreview; operations?: JsonStructuralPatchOperation[] }
         | { kind: 'patch'; operations: JsonStructuralPatchOperation[] };
@@ -291,6 +306,8 @@ export interface LiveTurnCheckpoint {
   attemptId: string;
   checkpointSeq: number;
   phase: LiveTurnPhase;
+  /** Cached conservative byte ceiling for this serialized checkpoint. */
+  checkpointBytes: number;
   turn: LiveTurnRecord;
   tools: BoundedToolCheckpoint[];
   pendingExtensionUiRequestIds: string[];
@@ -321,6 +338,9 @@ export function isTurnSemanticEnvelope(value: unknown): value is TurnSemanticEnv
     || typeof value.attemptId !== 'string'
     || !Number.isSafeInteger(value.seq) || (value.seq as number) < 1
     || typeof value.occurredAt !== 'number' || !Number.isFinite(value.occurredAt)
+    || !optionalNonNegativeSafeInteger(value.checkpointBytes)
+    || value.checkpointBytes === undefined
+    || (value.checkpointBytes as number) > LIVE_PIPELINE_LIMITS.checkpointBytes
     || typeof value.kind !== 'string') return false;
   switch (value.kind) {
     case 'turn.started': return typeof value.canonicalMessageId === 'string'
@@ -329,15 +349,19 @@ export function isTurnSemanticEnvelope(value: unknown): value is TurnSemanticEnv
       && isFiniteNumber(value.startedAt);
     case 'turn.phase': return isLiveTurnPhase(value.phase) && value.phase !== 'reconciling_gap' && optionalFiniteNumber(value.inactivityBudgetMs);
     case 'turn.text': case 'turn.reasoning': return typeof value.delta === 'string';
-    case 'turn.toolDraft': return isRecord(value.draft) && typeof value.draft.toolCallId === 'string' && typeof value.draft.name === 'string' && typeof value.draft.argumentsJson === 'string';
+    case 'turn.toolDraft': return isRecord(value.draft)
+      && typeof value.draft.toolCallId === 'string' && value.draft.toolCallId.length > 0
+      && typeof value.draft.name === 'string' && value.draft.name.length > 0
+      && typeof value.draft.argumentsJson === 'string'
+      && (value.draft.phase === 'drafting' || value.draft.phase === 'ready');
     case 'turn.extensionUi': return typeof value.uiRequestId === 'string' && (value.action === 'opened' || value.action === 'closed');
     case 'tool.started': return typeof value.executionId === 'string' && (value.parentExecutionId === null || typeof value.parentExecutionId === 'string') && typeof value.rootExecutionId === 'string' && typeof value.toolCallId === 'string' && typeof value.name === 'string' && isFiniteNumber(value.startedAt) && (value.parallelGroupId === undefined || typeof value.parallelGroupId === 'string');
     case 'tool.progress': return typeof value.executionId === 'string'
       && Number.isSafeInteger(value.baseSeq) && (value.baseSeq as number) >= 1
       && Number.isSafeInteger(value.baseProgressRevision) && (value.baseProgressRevision as number) >= 0
       && Number.isSafeInteger(value.progressRevision) && (value.progressRevision as number) > (value.baseProgressRevision as number)
-      && optionalNonNegativeSafeInteger(value.previewBytes)
-      && optionalNonNegativeSafeInteger(value.aggregatePreviewBytes)
+      && isNonNegativeSafeInteger(value.previewBytes)
+      && isNonNegativeSafeInteger(value.aggregatePreviewBytes)
       && (value.seq as number) - (value.baseSeq as number)
         === (value.progressRevision as number) - (value.baseProgressRevision as number)
       && isToolProgressUpdate(value.update);
@@ -406,6 +430,9 @@ function isLiveTurnPhase(value: unknown): value is LiveTurnPhase {
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value); }
 function isFiniteNumber(value: unknown): value is number { return typeof value === 'number' && Number.isFinite(value); }
 function optionalFiniteNumber(value: unknown): boolean { return value === undefined || isFiniteNumber(value); }
+function isNonNegativeSafeInteger(value: unknown): boolean {
+  return Number.isSafeInteger(value) && (value as number) >= 0;
+}
 function optionalNonNegativeSafeInteger(value: unknown): boolean {
-  return value === undefined || (Number.isSafeInteger(value) && (value as number) >= 0);
+  return value === undefined || isNonNegativeSafeInteger(value);
 }

@@ -185,8 +185,9 @@ test('SessionsInterrupted restores the removed tail for a promoted optimistic ed
 
 test('SessionsInterrupted tombstones the active attempt and clears every pending event for the crashed session', () => {
   const base = {
-    protocolVersion: 5, sessionPath: '/live', requestId: 'request',
+    protocolVersion: 6, sessionPath: '/live', requestId: 'request',
     turnId: 'turn-active', attemptId: 'attempt-active', occurredAt: 100,
+    checkpointBytes: 30 * 1024 * 1024,
   } as const;
   let state = reducer(createInitialArchState(), {
     kind: 'TurnSemanticEventReceived',

@@ -148,3 +148,76 @@ test('per-place font sizes and link/muted color prefs are wired to CSS vars', as
   assert.match(prefsCss, /uiMutedColor,/);
   assert.match(prefsCss, /uiLinkColor,/);
 });
+
+test('unified transcript refinement keeps operational rows quiet and user prompts distinct', async () => {
+  const indexCss = await readStyleSource('index.css');
+  const transcriptCss = await readStyleSource('transcript.css');
+  const inlineEditorCss = await readStyleSource('inline-editor.css');
+  const composerCss = await readStyleSource('composer.css');
+  const fileChangesCss = await readStyleSource('file-changes.css');
+  const toolCallCss = await readStyleSource('tool-call.css');
+  const aggregateCss = await readStyleSource('aggregate-stats-strip.css');
+  const tabsCss = await readStyleSource('tabs.css');
+  const messageShell = await readWebviewSource('transcript/message-item/inner.tsx');
+  const reasoningBlock = await readWebviewSource('transcript/message-item/reasoning-block.tsx');
+
+  const assistantRule = transcriptCss.match(
+    /\.message-item-shell\[data-role="assistant"\],[\s\S]*?\.message-item-shell\[data-role="assistant"\]\[data-streaming="true"\]\s*\{([^}]*)\}/,
+  )?.[1] ?? '';
+  assert.match(assistantRule, /background:\s*var\(--panel-black\)/);
+  assert.match(assistantRule, /border-color:\s*transparent/);
+  assert.match(assistantRule, /box-shadow:\s*none/);
+
+  const userRule = transcriptCss.match(/\.message-item-shell\[data-role="user"\]\s*\{([^}]*)\}/)?.[1] ?? '';
+  assert.match(indexCss, /--panel-user-surface:\s*color-mix\(in srgb, var\(--panel-foreground\) 72%, var\(--panel-black\)\)/);
+  assert.match(indexCss, /--panel-user-foreground:\s*color-mix\(in srgb, var\(--panel-black\) 88%, var\(--panel-foreground\)\)/);
+  assert.match(indexCss, /--panel-user-link:\s*color-mix\(in srgb, var\(--panel-accent\) 20%, var\(--panel-user-foreground\)\)/);
+  assert.match(userRule, /background:\s*var\(--panel-user-surface\)/);
+  assert.match(userRule, /border-color:\s*var\(--panel-user-border\)/);
+  assert.match(userRule, /color:\s*var\(--panel-user-foreground\)/);
+  assert.match(userRule, /box-shadow:\s*inset 0 1px 0 var\(--panel-user-highlight\)/);
+  assert.match(transcriptCss, /\[data-role="user"\]:not\(\[data-synthetic="true"\]\) \.message-body code\s*\{[^}]*color:\s*var\(--panel-user-foreground\)/);
+  assert.match(transcriptCss, /\.message-user-image-caption\s*\{\s*color:\s*color-mix\(in srgb, var\(--panel-user-foreground\) 78%, var\(--panel-user-surface\)\)/);
+  assert.match(inlineEditorCss, /\[data-role="user"\]\[data-editing="true"\] \.inline-editor-textarea\s*\{[^}]*color:\s*var\(--panel-user-foreground\)/);
+  assert.match(messageShell, /role === 'user' && '.*rounded-lg px-2 py-1\.5/);
+  assert.doesNotMatch(reasoningBlock, /bg-control|rounded-md/);
+
+  const toolTitleRule = transcriptCss.match(/\.transcript-header-title-mono\s*\{([^}]*)\}/)?.[1] ?? '';
+  assert.doesNotMatch(toolTitleRule, /\b(?:background|border|padding)\s*:/);
+
+  assert.match(
+    composerCss,
+    /\.composer-shell:hover,\s*\.composer-shell:focus-within\s*\{[^}]*border-color:\s*transparent;[^}]*box-shadow:\s*none;/,
+  );
+  const sliverRule = fileChangesCss.match(/\.file-changes-sliver\s*\{([^}]*)\}/)?.[1] ?? '';
+  const drawerRule = fileChangesCss.match(/\.file-changes-drawer\s*\{([^}]*)\}/)?.[1] ?? '';
+  assert.match(sliverRule, /background:\s*transparent/);
+  assert.match(sliverRule, /border-right:\s*1px solid var\(--panel-optical-edge\)/);
+  assert.doesNotMatch(fileChangesCss, /\.file-changes-sliver::after|mask-image/);
+  assert.match(fileChangesCss, /\.file-changes-sliver:hover,[\s\S]*?border-right-color:\s*var\(--panel-optical-edge-strong\)/);
+  assert.match(fileChangesCss, /\.panel-main:has\(> \.file-changes-rail:not\(\.is-pinned\)\)[^{]*\{[^}]*padding-inline-start:\s*var\(--panel-gap-sm\)/);
+  assert.match(drawerRule, /background:\s*var\(--panel-black\)/);
+  assert.doesNotMatch(sliverRule, /(?:linear|radial)-gradient|backdrop-filter/);
+  assert.doesNotMatch(drawerRule, /(?:linear|radial)-gradient|backdrop-filter/);
+  assert.doesNotMatch(fileChangesCss, /backdrop-filter/);
+
+  assert.match(toolCallCss, /\.tool-call-header\s*\{[^}]*background:\s*transparent/);
+  assert.match(toolCallCss, /\.tool-call-header \.status-chip\s*\{[^}]*background:\s*transparent/);
+  assert.match(toolCallCss, /\.tool-call\.tool-call-subagent,[\s\S]*?\.tool-call-card\.tool-call-subagent\s*\{[^}]*border:\s*1px solid var\(--panel-border-subtle\);[^}]*background:\s*var\(--panel-card-surface\)/);
+  assert.match(toolCallCss, /\.tool-call\.tool-call-subagent \.subagent-header\[aria-expanded="false"\]\s*\{[^}]*background:\s*var\(--panel-subagent-header-surface\)/);
+  assert.match(toolCallCss, /\.subagent-header \.status-chip,[\s\S]*?background:\s*var\(--panel-control-surface\)/);
+  assert.match(toolCallCss, /\.subagent-messages\s*\{[^}]*background:\s*var\(--panel-code-surface\)/);
+  assert.match(toolCallCss, /\.tool-call-card\[data-provisional="true"\] > \.tool-call-header \.transcript-header-title-mono,[\s\S]*?color:\s*var\(--panel-muted\);[^}]*opacity:\s*1/);
+  assert.doesNotMatch(toolCallCss, /\.tool-call-card\[data-provisional="true"\]\s*\{[^}]*(?:background|border-inline-start)/);
+  assert.match(toolCallCss, /\.tool-call-provisional-input\s*\{[^}]*overflow-y:\s*auto;[^}]*white-space:\s*pre-wrap;[^}]*color:\s*var\(--panel-muted\)/);
+  assert.doesNotMatch(toolCallCss, /tool-call-provisional-status|tool-call-draft-cursor/);
+  assert.match(toolCallCss, /\.tool-call-live-preview\s*\{[^}]*background:\s*var\(--panel-code-surface\)/);
+  assert.match(toolCallCss, /\.tool-call-live-preview \.turn-activity-tail-content\[data-empty="true"\],[\s\S]*?display:\s*none;[\s\S]*?height:\s*0/);
+  assert.match(toolCallCss, /@media \(forced-colors: active\)[\s\S]*?\.tool-call-card\[data-provisional="true"\]/);
+  assert.match(transcriptCss, /\.reasoning-block\[data-streaming="true"\]\[data-provisional="true"\]\s*\{[^}]*border-inline-start:\s*2px/);
+  assert.match(transcriptCss, /\.message-item-shell\[data-role="user"\]\[data-queued="true"\] \.status-chip-neutral\s*\{[^}]*color:\s*var\(--panel-user-foreground\);[^}]*opacity:\s*1/);
+  assert.doesNotMatch(toolCallCss, /(?:linear|radial)-gradient|backdrop-filter|filter:\s*blur/);
+
+  assert.match(aggregateCss, /\.aggregate-strip\s*\{[^}]*height:\s*20px;[^}]*font-size:\s*9\.5px/);
+  assert.doesNotMatch(tabsCss, /\.session-tab-shell::before/);
+});

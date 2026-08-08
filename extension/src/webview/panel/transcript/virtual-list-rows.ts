@@ -2,6 +2,7 @@ import type { ChatMessage } from '../../../shared/protocol';
 import { AGENT_ACTIVITY_LABELS, type TurnActivityState } from './activity';
 import { estimateActivityTailHeight } from './activity-tail';
 import { isPruningResultMessage, pruningDetailsFromMessage, type PruningHeaderState } from './pruning';
+import { messageRenderIdentity } from './render-identity';
 
 export type TranscriptRow =
   | { kind: 'systemPrompts'; key: string }
@@ -47,7 +48,7 @@ function handlePruningMessage(
   if (!details) {
     acc.pendingPruning = null;
     if (showPruningMessages) {
-      acc.rows.push({ kind: 'message', key: `message:${message.id}`, message, transcriptIndex: index });
+      acc.rows.push({ kind: 'message', key: `message:${messageRenderIdentity(message)}`, message, transcriptIndex: index });
     }
     return;
   }
@@ -80,7 +81,7 @@ function pushAssistantRow(
   const row: TranscriptRow = acc.pendingPruning
     ? {
         kind: 'message',
-        key: `message:${message.id}`,
+        key: `message:${messageRenderIdentity(message)}`,
         message,
         requestCreatedAt: acc.latestUserMessage?.createdAt,
         pruningHeaderState: acc.pendingPruning.state,
@@ -88,7 +89,7 @@ function pushAssistantRow(
       }
     : {
         kind: 'message',
-        key: `message:${message.id}`,
+        key: `message:${messageRenderIdentity(message)}`,
         message,
         requestCreatedAt: acc.latestUserMessage?.createdAt,
         transcriptIndex: index,
@@ -122,7 +123,7 @@ function processSingleMessage(
     pushAssistantRow(acc, message, index);
     return;
   }
-  acc.rows.push({ kind: 'message', key: `message:${message.id}`, message, transcriptIndex: index });
+  acc.rows.push({ kind: 'message', key: `message:${messageRenderIdentity(message)}`, message, transcriptIndex: index });
 }
 
 function processTranscriptMessages(

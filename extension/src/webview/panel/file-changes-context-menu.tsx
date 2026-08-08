@@ -4,7 +4,8 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import type { FileChangeKind } from '../../shared/protocol';
 import { useMenuViewportClamp } from './components/useMenuViewportClamp';
-import { KIND_LABEL, basename } from './file-changes-stats';
+import { KIND_LABEL } from './file-changes-stats';
+import { formatPathWithParentDepth } from './file-path';
 
 export interface FileChangeContextMenuState {
   x: number;
@@ -27,11 +28,13 @@ export interface FileChangeContextMenuState {
  */
 export function FileChangeContextMenu({
   menu,
+  parentDepth,
   onRevert,
   onSetFileRead,
   onClose,
 }: {
   menu: FileChangeContextMenuState;
+  parentDepth?: number;
   onRevert: (path: string) => void;
   onSetFileRead: (path: string, read: boolean) => void;
   onClose: () => void;
@@ -106,7 +109,7 @@ export function FileChangeContextMenu({
       onMouseDown={(e) => e.stopPropagation()}
     >
       <div class="file-change-ctx-title" title={menu.path}>
-        {KIND_LABEL[menu.kind]} · {basename(menu.path)}
+        {KIND_LABEL[menu.kind]} · {parentDepth !== undefined ? formatPathWithParentDepth(menu.path, parentDepth) : menu.path}
       </div>
       <div class="context-menu-separator" />
       <button class="context-menu-item" role="menuitem" type="button" onClick={copyPath}>

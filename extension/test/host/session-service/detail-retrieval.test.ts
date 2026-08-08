@@ -8,12 +8,13 @@ import type { LazyDetailRef } from '../../../src/shared/protocol';
 import type { TurnSemanticEnvelope } from '../../../src/shared/live-pipeline-protocol';
 
 const base = {
-  protocolVersion: 5,
+  protocolVersion: 6,
   sessionPath: '/session.jsonl',
   requestId: 'request',
   turnId: 'turn',
   attemptId: 'attempt',
   occurredAt: 100,
+  checkpointBytes: 30 * 1024 * 1024,
 } as const;
 
 function apply(state: ReturnType<typeof createInitialArchState>, event: TurnSemanticEnvelope) {

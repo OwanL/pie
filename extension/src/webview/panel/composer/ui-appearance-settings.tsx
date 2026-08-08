@@ -1,12 +1,15 @@
 /** @jsxRuntime automatic */
 /** @jsxImportSource preact */
 
+import type { ComponentChildren } from 'preact';
 import {
   COMPOSER_INITIAL_ROWS_MAX,
   COMPOSER_INITIAL_ROWS_MIN,
   type ChatPrefs,
   type UiDensity,
 } from '../../../shared/protocol';
+import { CHAT_PREF_MENU_SECTIONS } from '../chat-prefs';
+import { ChatPrefItem } from './settings-menu-chat-prefs';
 import { DENSITY_OPTIONS, UI_THEME_PRESETS, matchUiThemePreset, uiThemePresetToPrefs } from './settings-menu-helpers';
 import type { OnSetPrefs } from './settings-menu-types';
 
@@ -111,6 +114,19 @@ export function UiGroupLabel({ label }: UiGroupLabelProps) {
   return <div class="toolbar-settings-ui-group-label">{label}</div>;
 }
 
+function UiSettingsGroup({ label, children }: { label: string; children: ComponentChildren }) {
+  return (
+    <section class="toolbar-settings-ui-group">
+      <UiGroupLabel label={label} />
+      <div class="toolbar-settings-ui-group-content">{children}</div>
+    </section>
+  );
+}
+
+const STATUS_DISPLAY_ITEMS = CHAT_PREF_MENU_SECTIONS
+  .find((section) => section.id === 'display')
+  ?.items ?? [];
+
 interface ColorRowProps {
   label: string;
   /** Current pref value; '' means "use bundled default". */
@@ -195,10 +211,9 @@ interface AppearanceSectionProps {
 export function AppearanceSection({ prefs, onSetPrefs }: AppearanceSectionProps) {
   return (
     <div class="toolbar-settings-appearance">
-      <ThemeSelect prefs={prefs} onSetPrefs={onSetPrefs} />
-
-      <UiGroupLabel label="Colors" />
-      <ColorRow
+      <UiSettingsGroup label="Theme & colors">
+        <ThemeSelect prefs={prefs} onSetPrefs={onSetPrefs} />
+        <ColorRow
         label="Background"
         value={prefs.uiBackground}
         defaultValue="#050506"
@@ -247,7 +262,9 @@ export function AppearanceSection({ prefs, onSetPrefs }: AppearanceSectionProps)
         onChange={(next) => onSetPrefs({ uiLinkColor: next })}
       />
 
-      <UiGroupLabel label="Shape" />
+      </UiSettingsGroup>
+
+      <UiSettingsGroup label="Spacing & shape">
       <div class="toolbar-settings-ui-control">
         <div class="toolbar-settings-ui-control-head">
           <span class="toolbar-settings-ui-control-label">Corner radius</span>
@@ -280,7 +297,29 @@ export function AppearanceSection({ prefs, onSetPrefs }: AppearanceSectionProps)
         <div class="toolbar-settings-item-hint">Spacing between elements. Compact tightens, spacious loosens.</div>
       </div>
 
-      <UiGroupLabel label="Layout" />
+      </UiSettingsGroup>
+
+      <UiSettingsGroup label="Files & paths">
+      <div class="toolbar-settings-ui-control">
+        <div class="toolbar-settings-ui-control-head">
+          <span class="toolbar-settings-ui-control-label">Path parent depth</span>
+          <span class="toolbar-settings-ui-control-value">{prefs.uiPathParentDepth}</span>
+        </div>
+        <input
+          type="range"
+          class="toolbar-settings-slider toolbar-settings-ui-slider"
+          min="0"
+          max="8"
+          step="1"
+          value={prefs.uiPathParentDepth}
+          onInput={(e) => onSetPrefs({ uiPathParentDepth: Number((e.target as HTMLInputElement).value) })}
+          aria-label="Path parent depth"
+        />
+        <div class="toolbar-settings-item-hint">Number of parent directories shown before a filename. 0 = filename only, 1 = parent/filename.</div>
+      </div>
+      </UiSettingsGroup>
+
+      <UiSettingsGroup label="Layout">
       <div class="toolbar-settings-ui-control">
         <div class="toolbar-settings-ui-control-head">
           <span class="toolbar-settings-ui-control-label">Message width</span>
@@ -317,6 +356,9 @@ export function AppearanceSection({ prefs, onSetPrefs }: AppearanceSectionProps)
         />
         <div class="toolbar-settings-item-hint">Rows available for typing before the composer starts expanding.</div>
       </div>
+      </UiSettingsGroup>
+
+      <UiSettingsGroup label="Content & navigation">
       <div class="toolbar-settings-ui-control">
         <div class="toolbar-settings-ui-control-head">
           <span class="toolbar-settings-ui-control-label">Expanded height</span>
@@ -369,7 +411,9 @@ export function AppearanceSection({ prefs, onSetPrefs }: AppearanceSectionProps)
         <div class="toolbar-settings-item-hint">Size of the user-message jump buttons beside the scrollbar — both the click target and the visible dot. Larger is easier to click and see.</div>
       </div>
 
-      <UiGroupLabel label="Typography" />
+      </UiSettingsGroup>
+
+      <UiSettingsGroup label="Typography">
       <div class="toolbar-settings-ui-control">
         <div class="toolbar-settings-ui-control-head">
           <span class="toolbar-settings-ui-control-label">Base text</span>
@@ -441,6 +485,15 @@ export function AppearanceSection({ prefs, onSetPrefs }: AppearanceSectionProps)
         />
         <div class="toolbar-settings-item-hint">Code and tool output. "Default" uses the bundled stack.</div>
       </div>
+      </UiSettingsGroup>
+
+      <UiSettingsGroup label="Status & usage">
+        <div class="toolbar-settings-list">
+          {STATUS_DISPLAY_ITEMS.map((item) => (
+            <ChatPrefItem key={item.key} item={item} prefs={prefs} onSetPrefs={onSetPrefs} />
+          ))}
+        </div>
+      </UiSettingsGroup>
     </div>
   );
 }

@@ -4,7 +4,6 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 
 import { renderMarkdown, reasoningSummary } from '../../markdown';
-import { cx } from '../../utils/cx';
 import { Collapsible } from '../../components/collapsible';
 import { ResizeHandle } from '../../components/resize-handle';
 import { useResizableHeight } from '../../components/use-resizable-height';
@@ -129,9 +128,10 @@ export function ReasoningBlock({ text, detailRef, autoExpand, collapsibleKey, on
       open={open}
       onToggle={setOpen}
       ariaLabel="Toggle reasoning details"
-      class={cx('rounded-md', open && 'bg-control/60')}
+      class="reasoning-block"
+      dataAttrs={streaming ? { 'data-streaming': 'true', 'data-provisional': 'true' } : undefined}
       headerClass="px-2 py-1"
-      bodyClass="px-2.5 pb-2.5 leading-relaxed text-foreground"
+      bodyClass="px-2 pb-2 leading-relaxed text-foreground"
       onContextMenu={onContextMenu}
       header={
         <>

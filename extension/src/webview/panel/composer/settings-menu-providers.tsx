@@ -202,7 +202,6 @@ export function ProvidersSection({ providers, prefs, onSetPrefs, providerGateSta
   );
   return (
     <div key="providers" class="toolbar-settings-section">
-      <div class="toolbar-settings-section-label">Providers</div>
       <div class="toolbar-settings-list">
         {providers.map((provider) => (
           <ProviderItem

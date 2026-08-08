@@ -58,6 +58,7 @@ test('DEFAULT_CHAT_PREFS shape', () => {
   assert.equal(DEFAULT_CHAT_PREFS.uiMutedColor, '');
   assert.equal(typeof DEFAULT_CHAT_PREFS.uiLinkColor, 'string');
   assert.equal(DEFAULT_CHAT_PREFS.uiLinkColor, '');
+  assert.equal(DEFAULT_CHAT_PREFS.uiPathParentDepth, 1);
 });
 
 test('resolveChatPrefs defaults and validates autonomous mode', () => {
@@ -74,6 +75,14 @@ test('resolveChatPrefs preserves valid composer rows and defaults malformed stor
       1,
       `invalid stored composer row count ${String(invalid)} should use the default`,
     );
+  }
+});
+
+test('resolveChatPrefs preserves valid path depth and defaults malformed stored values', () => {
+  assert.equal(resolveChatPrefs({ uiPathParentDepth: 0 }).uiPathParentDepth, 0);
+  assert.equal(resolveChatPrefs({ uiPathParentDepth: 8 }).uiPathParentDepth, 8);
+  for (const invalid of [-1, 9, 1.5, Number.NaN, '2']) {
+    assert.equal(resolveChatPrefs({ uiPathParentDepth: invalid as never }).uiPathParentDepth, 1);
   }
 });
 

@@ -284,12 +284,16 @@ test('upsertAssistantToolCall accepts compact renderable progress markers', () =
 
 test('upsertAssistantToolCall ignores late progress that would revive a terminal call', () => {
   const msg = assistant('m', {
-    toolCalls: [tc('t1', { result: 'final', status: 'failed', durationMs: 42 })],
+    toolCalls: [tc('t1', { name: 'durable', input: { path: 'durable' }, result: 'final', status: 'failed', durationMs: 42 })],
   });
 
-  upsertAssistantToolCall(msg, tc('t1', { result: 'late partial', status: 'running' }));
+  upsertAssistantToolCall(msg, tc('t1', {
+    name: 'late-draft', input: '{"path":', result: 'late partial', status: 'drafting',
+  }));
 
   assert.equal(msg.toolCalls?.[0].status, 'failed');
+  assert.equal(msg.toolCalls?.[0].name, 'durable');
+  assert.deepEqual(msg.toolCalls?.[0].input, { path: 'durable' });
   assert.equal(msg.toolCalls?.[0].result, 'final');
   const part = msg.parts?.find((candidate) => candidate.kind === 'toolCall');
   assert.equal(part?.kind === 'toolCall' && part.toolCall.status, 'failed');
@@ -313,6 +317,15 @@ test('upsertAssistantToolCall preserves an existing result when the incoming res
   upsertAssistantToolCall(msg, tc('t1', { status: 'completed' }));
   assert.equal(msg.toolCalls?.[0].result, 'kept');
   assert.equal(msg.toolCalls?.[0].status, 'completed');
+});
+
+test('upsertAssistantToolCall allows provisional drafting → ready → running promotion', () => {
+  const msg = assistant('m', { toolCalls: [tc('t1', { status: 'drafting', input: '{"path":' })] });
+  upsertAssistantToolCall(msg, tc('t1', { status: 'ready', input: '{"path":"README.md"}' }));
+  assert.equal(msg.toolCalls?.[0]?.status, 'ready');
+  upsertAssistantToolCall(msg, tc('t1', { status: 'running', input: { path: 'README.md' } }));
+  assert.equal(msg.toolCalls?.[0]?.status, 'running');
+  assert.deepEqual(msg.toolCalls?.[0]?.input, { path: 'README.md' });
 });
 
 test('upsertAssistantToolCall carries an incoming parallelGroupId onto an existing tool call', () => {

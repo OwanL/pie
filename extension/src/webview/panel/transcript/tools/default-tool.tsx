@@ -17,7 +17,9 @@ function renderDefaultTool({ toolCall, prefs, workingDirectory, onOpenFile, onCo
     <ToolCallCard
       toolCall={toolCall}
       autoExpand={prefs.autoExpandToolCalls}
+      activityTailLines={prefs.activityTailLines}
       workingDirectory={workingDirectory}
+      prefs={prefs}
       onOpenFile={onOpenFile}
       onContextMenu={handleContextMenu}
     />

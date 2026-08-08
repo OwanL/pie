@@ -20,7 +20,7 @@ function pruningDetails(overrides: Partial<PruningDetails> = {}): PruningDetails
   };
 }
 
-test('PruningHeaderButton renders a compact shared chip label with full summary in title', () => {
+test('PruningHeaderButton renders compact prepass metadata with full summary in title', () => {
   const html = renderToString(h(PruningHeaderButton, {
     details: pruningDetails(),
     expanded: false,
@@ -29,7 +29,8 @@ test('PruningHeaderButton renders a compact shared chip label with full summary 
   }));
 
   assert.match(html, /panel-chip panel-chip-pruning panel-chip-muted panel-chip-interactive/);
-  assert.match(html, /<span class="panel-chip-label">2\/15 skills · 3\/4 tools · ✂ 1500<\/span>/);
+  assert.match(html, /<span class="pruning-header-kicker">Prepass<\/span>/);
+  assert.match(html, /<span class="panel-chip-label">2\/15 skills · 3\/4 tools · 1\.5k saved<\/span>/);
   assert.match(html, /title="Kept 2\/15 skills, Kept 3\/4 tools · Saved 1500 tokens"/);
   assert.doesNotMatch(html, /max-w-\[30ch\]/);
 });

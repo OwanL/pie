@@ -4,6 +4,8 @@ import test from 'node:test';
 import { h } from 'preact';
 import renderToString from 'preact-render-to-string';
 
+import { DEFAULT_CHAT_PREFS } from '../../../../src/shared/protocol';
+
 async function readToolCallCss() {
   return readFile(new URL('../../../../src/webview/panel/styles/tool-call.css', import.meta.url), 'utf8');
 }
@@ -35,6 +37,25 @@ test('collapsed tool-call headers use the shared path hierarchy', async () => {
   assert.match(html, /transcript-header-summary-link group/);
   assert.match(html, /flex-\[0_0_var\(--tool-call-size-column-width\)\]/);
   assert.match(html, /ml-auto/);
+});
+
+test('collapsed path labels honor depth while retaining the full path tooltip', async () => {
+  const { ToolCallHeader } = await import('../../../../src/webview/panel/transcript/tool-call-card.tsx');
+  const html = renderToString(h(ToolCallHeader, {
+    open: false,
+    name: 'read',
+    status: 'completed',
+    summary: 'dira/dirb/dirc/example.ts',
+    summaryPath: '/repo/dira/dirb/dirc/example.ts',
+    prefs: { ...DEFAULT_CHAT_PREFS, uiPathParentDepth: 1 },
+    onToggle: () => {},
+    onOpenFile: () => {},
+  }));
+
+  assert.match(html, /dirc\//);
+  assert.match(html, />example\.ts</);
+  assert.doesNotMatch(html, />dira\//);
+  assert.match(html, /title="\/repo\/dira\/dirb\/dirc\/example\.ts"/);
 });
 
 test('collapsed bash headers emphasize the shell verb over the path context', async () => {
@@ -88,6 +109,14 @@ test('expanded bash headers suppress the command summary while the terminal body
   assert.match(html, />bash</);
   assert.doesNotMatch(html, /transcript-header-summary-command/);
   assert.doesNotMatch(html, />rm</);
+});
+
+test('transcript scrollbar keeps a broad hit area with a quiet visible thumb', async () => {
+  const css = await readTranscriptCss();
+
+  assert.match(css, /\.transcript::-webkit-scrollbar\s*\{[^}]*width:\s*10px/);
+  assert.match(css, /\.transcript::-webkit-scrollbar-thumb\s*\{[^}]*background-clip:\s*padding-box[^}]*border:\s*3px solid transparent/);
+  assert.match(css, /\.transcript-message-rail\s*\{[^}]*right:\s*10px/);
 });
 
 test('shared collapsed-header typography is defined in transcript.css', async () => {

@@ -5,6 +5,7 @@ import type { ChatMessage, ChatPrefs } from '../../../shared/protocol';
 
 import { MessageItem } from './message-item';
 import type { RenderToolCall, TranscriptContextMenuHandler } from './types';
+import { messageRenderIdentity } from './render-identity';
 
 export interface TranscriptMessageListProps {
   messages: ChatMessage[];
@@ -55,7 +56,7 @@ export function TranscriptMessageList({
     }
     return (
       <MessageItem
-        key={collapsibleKey ? `${message.id}-${collapsibleKey}` : message.id}
+        key={collapsibleKey ? `${messageRenderIdentity(message)}-${collapsibleKey}` : messageRenderIdentity(message)}
         message={message}
         isStreaming={false}
         prefs={prefs}

@@ -40,13 +40,15 @@ export interface SdkSessionEvent {
     toolCallId?: string;
   };
   assistantMessageEvent?: {
-    type: 'text_delta' | 'thinking_delta' | 'toolcall_start' | 'toolcall_delta' | string;
+    type: 'text_delta' | 'thinking_delta' | 'toolcall_start' | 'toolcall_delta' | 'toolcall_end' | string;
     delta?: string;
     thinking?: string;
     contentIndex?: number;
     partial?: {
-      content?: Array<{ type?: string; id?: string; name?: string }>;
+      content?: Array<{ type?: string; id?: string; name?: string; arguments?: unknown }>;
     };
+    /** Full finalized call supplied by the pinned SDK on toolcall_end. */
+    toolCall?: { type?: string; id?: string; name?: string; arguments?: unknown };
   };
   toolCallId?: string;
   toolName?: string;

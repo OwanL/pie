@@ -5,7 +5,10 @@ import {
   type MessageScrollAnchor,
 } from './scroll-anchor';
 
-export function useScrollState(scrollRef: { current: HTMLDivElement | null }) {
+export function useScrollState(
+  scrollRef: { current: HTMLDivElement | null },
+  programmaticScrollTargetRef: { current: number | null },
+) {
   const [isAtBottom, setIsAtBottom] = useState(true);
   // Reactive mirror of `autoFollowRef.current`. The ref gives synchronous
   // reads inside scroll/layout handlers; this state makes `useAutoFollow`
@@ -15,10 +18,16 @@ export function useScrollState(scrollRef: { current: HTMLDivElement | null }) {
   const [autoFollow, setAutoFollowState] = useState(true);
   const autoFollowRef = useRef(true);
   const lastScrollTopRef = useRef(0);
-  // True only during recent downward scroll events. The scrolled-up anchor
-  // yields while this is set so continuous scrollbar/middle-button dragging
-  // toward the live edge cannot be counteracted by streaming row remeasures.
-  const isScrollingTowardBottomRef = useRef(false);
+  // Manual scrollbar/wheel/touch/keyboard interaction owns scrollTop until it
+  // settles. Anchor restoration and pagination must yield in both directions;
+  // otherwise virtual row remeasurement can fight an upward thumb drag.
+  const [manualScrollActive, setManualScrollActiveState] = useState(false);
+  const manualScrollActiveRef = useRef(false);
+  const setManualScrollActive = useCallback((next: boolean) => {
+    if (manualScrollActiveRef.current === next) return;
+    manualScrollActiveRef.current = next;
+    setManualScrollActiveState(next);
+  }, []);
 
   // Co-located setter: updates the synchronous ref and reactive state together
   // so they never diverge. It is gated on actual boundary changes.
@@ -33,12 +42,14 @@ export function useScrollState(scrollRef: { current: HTMLDivElement | null }) {
     if (!el) return;
     // Jumps must be instant regardless of theme or inherited scroll behavior.
     const prior = el.style.scrollBehavior;
+    const before = el.scrollTop;
     el.style.scrollBehavior = 'auto';
     el.scrollTop = el.scrollHeight;
     el.style.scrollBehavior = prior;
+    programmaticScrollTargetRef.current = el.scrollTop === before ? null : el.scrollTop;
     lastScrollTopRef.current = el.scrollTop;
     setIsAtBottom(true);
-  }, [scrollRef]);
+  }, [programmaticScrollTargetRef, scrollRef]);
 
   return {
     isAtBottom,
@@ -47,7 +58,9 @@ export function useScrollState(scrollRef: { current: HTMLDivElement | null }) {
     setAutoFollow,
     autoFollowRef,
     lastScrollTopRef,
-    isScrollingTowardBottomRef,
+    manualScrollActive,
+    manualScrollActiveRef,
+    setManualScrollActive,
     scrollToBottom,
   };
 }

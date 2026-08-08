@@ -38,6 +38,27 @@ test('AppearanceSection shows Custom when colors do not match a preset', () => {
   assert.match(html, /<option selected value>Custom</);
 });
 
+test('AppearanceSection groups controls semantically and owns status/usage visibility', () => {
+  const html = renderToString(h(AppearanceSection, {
+    prefs: prefsWith({}),
+    onSetPrefs: () => undefined,
+  }));
+
+  for (const heading of [
+    'Theme &amp; colors',
+    'Spacing &amp; shape',
+    'Files &amp; paths',
+    'Layout',
+    'Content &amp; navigation',
+    'Typography',
+    'Status &amp; usage',
+  ]) {
+    assert.match(html, new RegExp(heading));
+  }
+  assert.match(html, /Hide bottom usage strip/);
+  assert.match(html, /Hide session cost/);
+});
+
 test('AppearanceSection renders all color rows with default swatches and reset buttons', () => {
   const html = renderToString(h(AppearanceSection, {
     prefs: prefsWith({}),
@@ -105,6 +126,16 @@ test('AppearanceSection renders the density select with comfortable selected by 
   assert.match(html, /<option\b(?=[^>]*selected)(?=[^>]*value="comfortable")[^>]*>Comfortable</);
   assert.match(html, />Compact</);
   assert.match(html, />Spacious</);
+});
+
+test('AppearanceSection renders the path-depth slider with filename-only support', () => {
+  const html = renderToString(h(AppearanceSection, {
+    prefs: prefsWith({ uiPathParentDepth: 0 }),
+    onSetPrefs: () => undefined,
+  }));
+
+  assert.match(html, /Path parent depth/);
+  assert.match(html, /<input[^>]*type="range"[^>]*min="0"[^>]*max="8"[^>]*step="1"[^>]*value="0"[^>]*aria-label="Path parent depth"/);
 });
 
 test('AppearanceSection renders the message-width slider with the current value', () => {

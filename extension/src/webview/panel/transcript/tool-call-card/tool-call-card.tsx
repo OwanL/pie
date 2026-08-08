@@ -9,13 +9,18 @@ import { useEffect, useId, useRef, useState } from 'preact/hooks';
 import { CollapsibleCloseFooter } from '../../components/collapsible-close-footer';
 import { CollapsibleGutter } from '../../components/collapsible-gutter';
 import { textFromToolResult } from '../highlight';
-import { useCollapsibleOpen } from '../use-collapsible-open';
+import { toolDisclosureKey, useCollapsibleOpen } from '../use-collapsible-open';
 import { useLazyDetail } from '../lazy-detail-store';
+import { TurnActivityTailBody } from '../activity-tail-preview';
+import { deriveToolTail } from '../activity-tail';
+import { normalizeToolCallName } from '../../../../shared/tool-call-analysis';
+import { DEFAULT_CHAT_PREFS, type ChatPrefs } from '../../../../shared/protocol';
 
 import { formatToolCallResultForDisplay } from './format';
 import { isCommandSummaryTool, buildToolCallHeaderSummaryModel } from './summary-model';
 import { ToolCallBody } from './tool-call-body';
 import { ToolCallHeader } from './tool-call-header';
+import { provisionalToolSummary } from './provisional';
 import type { ToolResultPruningBadgeData } from '../tool-result-pruning-badge';
 import {
   TOOL_CALL_CLOSE_GRACE_MS,
@@ -27,8 +32,10 @@ import {
 interface ToolCallCardProps {
   toolCall: ToolCall;
   autoExpand: boolean;
+  activityTailLines?: number;
   className?: string;
   workingDirectory: string | null;
+  prefs?: ChatPrefs;
   onOpenFile: (path: string) => void;
   onContextMenu: (e: MouseEvent) => void;
 }
@@ -36,15 +43,22 @@ interface ToolCallCardProps {
 export function ToolCallCard({
   toolCall,
   autoExpand,
+  activityTailLines,
   className,
   workingDirectory,
+  prefs = DEFAULT_CHAT_PREFS,
   onOpenFile,
   onContextMenu,
 }: ToolCallCardProps) {
-  const [open, setOpen] = useCollapsibleOpen(`tool:${toolCall.id}`, autoExpand);
+  const isProvisional = toolCall.status === 'drafting' || toolCall.status === 'ready';
+  // Provisional rows are visible by default but their raw argument body is not
+  // auto-opened, including for shell tools. Execution can still auto-show the
+  // shell terminal once status reaches running.
+  const [open, setOpen] = useCollapsibleOpen(toolDisclosureKey(toolCall.id), autoExpand && !isProvisional);
   const presentation = getToolCallPresentation(toolCall, { workingDirectory });
   const isShell = isCommandSummaryTool(toolCall.name);
   const isRunning = toolCall.status === 'running';
+  const provisionalSummary = provisionalToolSummary(toolCall);
 
   // ── Post-completion grace + animated close (shell auto-show path only) ──
   // Shell tools auto-show their body while running. When a quick command
@@ -185,12 +199,24 @@ export function ToolCallCard({
   // `pruningBadge` into `result.details` (rules that fired + tokens saved).
   // Surfaced in the header so it's visible even when the card is collapsed.
   const pruningBadge = (toolCall.result as { details?: { pruningBadge?: ToolResultPruningBadgeData } } | null | undefined)?.details?.pruningBadge;
-  const summaryModel = buildToolCallHeaderSummaryModel(
-    toolCall.name,
-    presentation.summary,
-    presentation.summaryPath,
-    toolCall,
-  );
+  const headerSummary = provisionalSummary
+    ? `${provisionalSummary.field ? `${provisionalSummary.field}: ` : ''}${provisionalSummary.text}`
+    : presentation.summary;
+  const headerSummaryPath = provisionalSummary ? undefined : presentation.summaryPath;
+  const summaryModel = provisionalSummary
+    ? { kind: 'text' as const, text: headerSummary ?? '' }
+    : buildToolCallHeaderSummaryModel(
+        toolCall.name,
+        presentation.summary,
+        presentation.summaryPath,
+        toolCall,
+      );
+  const inlineLivePreview = !open
+    && isRunning
+    && !isShell
+    && normalizeToolCallName(toolCall.name) !== 'subagent'
+      ? deriveToolTail(toolCall, activityTailLines)
+      : null;
 
   // Close the card via the animated `closing` path (shared by the manual
   // header/chevron toggle and the bottom `CollapsibleCloseFooter`). Routes
@@ -247,23 +273,17 @@ export function ToolCallCard({
   return (
     <div
       class={cx(
-        // `overflow-clip` (not `hidden`): clips children to the rounded card
-        // corners identically without establishing a scroll container. (The
-        // header is no longer sticky, so this no longer exists to free a
-        // sticky header — it just keeps the corners clipped cleanly.)
-        'overflow-clip rounded-xl border-l-2 border-l-transparent bg-card shadow-sm transition-all duration-150 hover:bg-control-hover hover:shadow-md',
-        // Stable hook so the header can mirror the card's hover state
-        // (see `.tool-call-card:hover .tool-call-header` in tool-call.css) —
-        // without it the opaque header would keep `bg-card` while the card
-        // body lifts to `bg-control-hover`, leaving a darker strip at the top.
-        'tool-call-card',
+        // Tool calls are editorial transcript rows, not nested cards. The
+        // body still clips during collapse without adding a raised surface.
+        'tool-call-card overflow-clip border-x-0 border-t-0 border-b border-border-subtle bg-transparent transition-colors duration-100',
         'forced-colors:border forced-colors:border-[ButtonText]',
-        toolCall.status === 'failed' && 'border-l-danger/50',
-        toolCall.status === 'completed' && 'border-l-success/60',
         justCompleted && 'tool-call-just-completed',
-        presentation.variant === 'skill-load' && 'bg-accent/5 skill-load-glow',
         className,
       )}
+      data-status={toolCall.status}
+      data-provisional={isProvisional ? 'true' : undefined}
+      role="group"
+      aria-label={`${presentation.name} tool call, ${toolCall.status === 'drafting' ? 'Drafting' : toolCall.status === 'ready' ? 'Ready' : toolCall.status}`}
       onContextMenu={(e) => { e.preventDefault(); onContextMenu(toMouseEvent(e)); }}
     >
       <ToolCallHeader
@@ -271,17 +291,23 @@ export function ToolCallCard({
         bodyVisible={isShell && showBody}
         name={presentation.name}
         status={toolCall.status}
-        summary={presentation.summary}
-        summaryPath={presentation.summaryPath}
+        summary={headerSummary}
+        summaryPath={headerSummaryPath}
         summaryModel={summaryModel ?? undefined}
         sizeHint={presentation.sizeHint}
         errorDetail={errorDetail}
         pruningBadge={pruningBadge}
         durationMs={toolCall.durationMs}
         ariaControls={renderBody ? bodyId : undefined}
+        prefs={prefs}
         onOpenFile={onOpenFile}
         onToggle={toggleOpen}
       />
+      {inlineLivePreview && !renderBody && (
+        <div class="tool-call-live-preview" role="status" aria-label={`${presentation.name} live result preview`}>
+          <TurnActivityTailBody tail={inlineLivePreview.tail} continuous />
+        </div>
+      )}
       {renderBody && (
         <div
           id={bodyId}
@@ -318,7 +344,7 @@ export function ToolCallCard({
                 )}
               </div>
             ) : (
-              <ToolCallBody toolCall={renderedToolCall} onOpenFile={onOpenFile} />
+              <ToolCallBody toolCall={renderedToolCall} prefs={prefs} onOpenFile={onOpenFile} />
             )}
             {/* The footer is a close affordance for a *manually opened* body.
               The auto-shown shell body (running / post-completion grace) is

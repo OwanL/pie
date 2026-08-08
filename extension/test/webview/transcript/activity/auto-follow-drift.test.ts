@@ -75,6 +75,7 @@ function Probe({
   pagingSuspended = false,
   onLoadOlder = noop,
   onJumpToLatest = noop,
+  sessionKey = '/s',
 }: {
   totalSize: number;
   busy: boolean;
@@ -84,11 +85,12 @@ function Probe({
   pagingSuspended?: boolean;
   onLoadOlder?: () => void;
   onJumpToLatest?: () => void;
+  sessionKey?: string;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const r = useTranscriptScroll({
     scrollRef,
-    sessionKey: '/s',
+    sessionKey,
     transcriptWindow: { ...TRANSCRIPT_WINDOW, hasNewer, hasOlder },
     transcript: transcript ?? STABLE_TRANSCRIPT,
     transcriptLength: 1,
@@ -472,7 +474,7 @@ test('isAtBottom remains true when followed content grows', () => {
   assert.equal(capture.r!.isAtBottom, true, 'the Bottom control must not flash while exact follow is active');
 });
 
-test('downward manual scrolling is exposed so the anchor can yield', () => {
+test('manual scrolling in either direction is exposed so the anchor can yield', () => {
   mountProbe(false);
   settle();
 
@@ -482,7 +484,105 @@ test('downward manual scrolling is exposed so the anchor can yield', () => {
   el.dispatchEvent(new Event('scroll'));
 
   assert.equal(capture.r!.autoFollowRef.current, false, 'still away from bottom');
-  assert.equal(capture.r!.isScrollingTowardBottomRef.current, true, 'downward interaction signal should be active');
+  assert.equal(capture.r!.manualScrollActiveRef.current, true, 'manual interaction ownership should be active');
+});
+
+test('pointerless downward thumb movement reacquires manual ownership after the prior latch settles', () => {
+  mountProbe(false);
+  settle();
+
+  let idleReset: TimerHandler | undefined;
+  const originalSetTimeout = window.setTimeout;
+  window.setTimeout = ((callback: TimerHandler) => {
+    idleReset = callback;
+    return 1;
+  }) as typeof window.setTimeout;
+  try {
+    scrollTopValue -= 240;
+    el.dispatchEvent(new Event('scroll'));
+    assert.equal(capture.r!.autoFollowRef.current, false);
+    assert.equal(capture.r!.manualScrollActiveRef.current, true);
+
+    const settleUpwardMove = idleReset;
+    if (typeof settleUpwardMove === 'function') settleUpwardMove();
+    assert.equal(capture.r!.manualScrollActiveRef.current, false);
+
+    idleReset = undefined;
+    scrollTopValue += 40;
+    el.dispatchEvent(new Event('scroll'));
+    assert.equal(capture.r!.manualScrollActiveRef.current, true, 'detached downward movement must own scroll without pointerdown');
+    assert.equal(typeof idleReset, 'function');
+  } finally {
+    window.setTimeout = originalSetTimeout;
+  }
+});
+
+test('programmatic anchor movement does not acquire manual scroll ownership', () => {
+  mountProbe(false);
+  settle();
+
+  capture.r!.autoFollowRef.current = false;
+  scrollTopValue -= 40;
+  capture.r!.programmaticScrollTargetRef.current = scrollTopValue;
+  el.dispatchEvent(new Event('scroll'));
+
+  assert.equal(capture.r!.programmaticScrollTargetRef.current, null, 'the expected browser event is consumed');
+  assert.equal(capture.r!.manualScrollActiveRef.current, false, 'app-owned anchor movement must not start the manual latch');
+});
+
+test('coalesced pointerless thumb movement overrides the expected programmatic position', () => {
+  mountProbe(false);
+  settle();
+
+  capture.r!.autoFollowRef.current = false;
+  const expectedAnchorTop = scrollTopValue - 40;
+  capture.r!.programmaticScrollTargetRef.current = expectedAnchorTop;
+  scrollTopValue = expectedAnchorTop - 24;
+  el.dispatchEvent(new Event('scroll'));
+
+  assert.equal(capture.r!.programmaticScrollTargetRef.current, null);
+  assert.equal(capture.r!.manualScrollActiveRef.current, true, 'a mismatched coalesced position belongs to the user');
+});
+
+test('session switch clears reactive manual ownership and pending programmatic target', () => {
+  mountProbe(false);
+  settle();
+
+  scrollTopValue -= 80;
+  el.dispatchEvent(new Event('scroll'));
+  capture.r!.programmaticScrollTargetRef.current = scrollTopValue + 10;
+  assert.equal(capture.r!.manualScrollActiveRef.current, true);
+
+  tick += 1;
+  act(() => {
+    render(h(Probe, { totalSize: tick, busy: false, sessionKey: '/next' }), container);
+  });
+
+  assert.equal(capture.r!.manualScrollActiveRef.current, false);
+  assert.equal(capture.r!.programmaticScrollTargetRef.current, null);
+});
+
+test('touchcancel releases manual ownership through the idle settle path', () => {
+  mountProbe(false);
+  settle();
+
+  let idleReset: TimerHandler | undefined;
+  const originalSetTimeout = window.setTimeout;
+  window.setTimeout = ((callback: TimerHandler) => {
+    idleReset = callback;
+    return 1;
+  }) as typeof window.setTimeout;
+  try {
+    el.dispatchEvent(new Event('touchstart'));
+    assert.equal(capture.r!.manualScrollActiveRef.current, true);
+    el.dispatchEvent(new Event('touchcancel'));
+    assert.equal(typeof idleReset, 'function');
+    const settleTouch = idleReset;
+    if (typeof settleTouch === 'function') settleTouch();
+    assert.equal(capture.r!.manualScrollActiveRef.current, false);
+  } finally {
+    window.setTimeout = originalSetTimeout;
+  }
 });
 
 test('anchor yield survives a pause during a scrollbar or middle-button drag', () => {
@@ -499,17 +599,21 @@ test('anchor yield survives a pause during a scrollbar or middle-button drag', (
     scrollTopValue -= 240;
     el.dispatchEvent(new Event('scroll'));
     el.dispatchEvent(new MouseEvent('pointerdown', { button: 0 }));
+    // The pointerdown cancels the pre-existing upward-scroll fallback timer.
+    // Reset the test capture because this lightweight timer mock does not
+    // emulate clearTimeout removing the previously captured callback.
+    idleReset = undefined;
     scrollTopValue += 40;
     el.dispatchEvent(new Event('scroll'));
 
-    assert.equal(capture.r!.isScrollingTowardBottomRef.current, true, 'an active pointer gesture must keep the anchor yielded');
+    assert.equal(capture.r!.manualScrollActiveRef.current, true, 'an active pointer gesture must keep the anchor yielded');
     assert.equal(idleReset, undefined, 'active pointer gestures must not arm the idle reset');
 
     window.dispatchEvent(new MouseEvent('pointerup', { button: 0 }));
     assert.equal(typeof idleReset, 'function', 'release arms the idle reset');
     const runIdleReset = idleReset as TimerHandler | undefined;
     if (typeof runIdleReset === 'function') runIdleReset();
-    assert.equal(capture.r!.isScrollingTowardBottomRef.current, false, 'anchoring resumes after the idle reset');
+    assert.equal(capture.r!.manualScrollActiveRef.current, false, 'anchoring resumes after the idle reset');
   } finally {
     window.setTimeout = originalSetTimeout;
   }

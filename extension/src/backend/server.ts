@@ -188,6 +188,8 @@ export class BackendServer {
   private readonly sessionCatalog = new SessionCatalog();
   /** Deduplicates concurrent opens/preloads for the same cold session. */
   private readonly pendingSessionContexts = new Map<string, Promise<SessionContext>>();
+  /** Serializes prompt persistence and live prompt rebuilds for each session. */
+  private readonly pendingSystemPromptToggleApplications = new Map<string, Promise<void>>();
   private systemPromptModulePromise?: Promise<SdkSystemPromptModule>;
   /** Disposer for the session-review sidecar watcher (see `startReviewWatcher`). */
   private stopReviewWatcher?: () => void;
@@ -596,7 +598,7 @@ export class BackendServer {
 
       // Load persisted picker state before installing guards: both prompt
       // rebuilds and extension-driven tool changes consult this live set.
-      const persistedDisabled = readSystemPromptTogglesForSession(sessionPath);
+      const persistedDisabled = await readSystemPromptTogglesForSession(sessionPath);
       context.systemPromptDisabledEntries = persistedDisabled;
 
       // The SDK rebuilds its base prompt whenever active tools or extension
@@ -1030,6 +1032,24 @@ export class BackendServer {
     sessionPath: string,
     disabledEntries: readonly string[],
   ): Promise<void> {
+    const previous = this.pendingSystemPromptToggleApplications.get(sessionPath) ?? Promise.resolve();
+    const application = previous.catch(() => undefined).then(() => (
+      this.applySystemPromptTogglesNow(sessionPath, disabledEntries)
+    ));
+    this.pendingSystemPromptToggleApplications.set(sessionPath, application);
+    try {
+      await application;
+    } finally {
+      if (this.pendingSystemPromptToggleApplications.get(sessionPath) === application) {
+        this.pendingSystemPromptToggleApplications.delete(sessionPath);
+      }
+    }
+  }
+
+  private async applySystemPromptTogglesNow(
+    sessionPath: string,
+    disabledEntries: readonly string[],
+  ): Promise<void> {
     const context = this.sessionContexts.get(sessionPath);
     if (!context) return;
     const next = [...new Set(disabledEntries)];
@@ -1056,7 +1076,7 @@ export class BackendServer {
       context.systemPromptToolsBeforeDisable = undefined;
     }
 
-    writeSystemPromptTogglesForSession(sessionPath, next);
+    await writeSystemPromptTogglesForSession(sessionPath, next);
     await this.applySystemPromptTogglesToBasePrompt(context, next);
   }
 

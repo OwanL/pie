@@ -3,6 +3,7 @@
 
 import type { FileChangeKind } from '../../shared/protocol';
 import { KIND_LABEL } from './file-changes-stats';
+import { formatPathWithParentDepth } from './file-path';
 
 export function LineStats({
   additions,
@@ -34,15 +35,18 @@ export function FileName({
   path,
   kind,
   disabled,
+  parentDepth,
   onClick,
 }: {
   path: string;
   kind: FileChangeKind;
   disabled?: boolean;
+  parentDepth?: number;
   onClick: () => void;
 }) {
-  const parts = path.split(/[/\\]/);
-  const name = parts.pop() ?? path;
+  const displayPath = parentDepth !== undefined ? formatPathWithParentDepth(path, parentDepth) : path;
+  const parts = displayPath.split('/');
+  const name = parts.pop() ?? displayPath;
   const dir = parts.join('/');
   const label = disabled
     ? `${KIND_LABEL[kind]}: ${path} (deleted)`

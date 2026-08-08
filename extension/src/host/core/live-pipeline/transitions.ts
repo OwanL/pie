@@ -8,6 +8,7 @@ import {
 } from '../../../shared/live-pipeline-protocol.js';
 import { applyJsonPatch, type JsonSafeValue } from '../../../shared/json-structural-patch.js';
 import { incrementLiveRevision, pendingOwnerKey, pruneExpiredTerminalAttempts, terminalAttemptKey } from './model.js';
+import { reconcileDurableTerminalToolMetadata } from './terminal-reconciliation.js';
 
 export type LiveTransitionResult =
   | { classification: 'applied'; state: LivePipelineState }
@@ -39,12 +40,17 @@ export function applyLiveSemanticEnvelope(
   event: TurnSemanticEnvelope,
   tombstoneExpiresAt: number,
 ): LiveTransitionResult {
+  if (!Number.isSafeInteger(event.checkpointBytes)
+    || event.checkpointBytes < 0
+    || event.checkpointBytes > LIVE_PIPELINE_LIMITS.checkpointBytes) {
+    return { classification: 'invalid', state: current, reason: 'canonical checkpoint capacity exceeded' };
+  }
   const tombstoneKey = terminalAttemptKey(event.turnId, event.attemptId);
   if (current.terminalAttempts[tombstoneKey]) {
     return { classification: 'duplicate_or_late', state: current };
   }
 
-  const owner = current.turnsBySession[event.sessionPath];
+  let owner = current.turnsBySession[event.sessionPath];
   if (event.kind === 'turn.started') {
     if (event.seq !== 1) return gapWithoutOwner(current, event);
     if (owner) {
@@ -71,6 +77,9 @@ export function applyLiveSemanticEnvelope(
       textBytes: 0,
       reasoningBytes: 0,
       aggregatePreviewBytes: 0,
+      checkpointBytes: event.checkpointBytes,
+      toolDraftsByCallId: {},
+      aggregateToolDraftBytes: 0,
       toolExecutionIds: [],
       pendingExtensionUiRequestIds: [],
     };
@@ -94,6 +103,8 @@ export function applyLiveSemanticEnvelope(
       return enterGap(current, owner, event);
     }
   } else if (event.seq !== owner.seq + 1) return enterGap(current, owner, event);
+
+  owner = { ...owner, checkpointBytes: event.checkpointBytes };
 
   if (event.kind === 'observation.rejected') {
     const state = withTurn(current, event.sessionPath, {
@@ -155,8 +166,34 @@ export function applyLiveSemanticEnvelope(
   }
 
   if (event.kind === 'turn.toolDraft') {
-    if (Buffer.byteLength(event.draft.argumentsJson, 'utf8') > LIVE_PIPELINE_LIMITS.toolDraftBytes) {
+    if (owner.phase === 'aborting') {
+      return { classification: 'invalid', state: current, reason: 'tool draft progress after aborting' };
+    }
+    const alreadyPromoted = owner.toolExecutionIds.some((executionId) =>
+      current.toolsByExecutionId[executionId]?.transcriptToolCallId === event.draft.toolCallId,
+    );
+    if (alreadyPromoted) {
+      // A provider boundary replay after execution promotion advances the
+      // observed sequence but cannot recreate the removed transient draft.
+      return appliedTurn(current, event.sessionPath, { ...owner, seq: event.seq });
+    }
+    const previous = ownRecordValue(owner.toolDraftsByCallId, event.draft.toolCallId);
+    if ((!previous && event.draft.phase !== 'drafting')
+      || (previous && previous.name !== event.draft.name)
+      || (previous?.phase === 'ready'
+        && (event.draft.phase !== 'ready' || previous.argumentsJson !== event.draft.argumentsJson))
+      || (previous?.phase === 'drafting' && event.draft.phase === 'drafting'
+        && !event.draft.argumentsJson.startsWith(previous.argumentsJson))) {
+      return { classification: 'invalid', state: current, reason: 'invalid tool draft lifecycle' };
+    }
+    if (toolDraftByteLength(event.draft) > LIVE_PIPELINE_LIMITS.toolDraftBytes) {
       return { classification: 'invalid', state: current, reason: 'tool draft exceeds live byte limit' };
+    }
+    const aggregateToolDraftBytes = owner.aggregateToolDraftBytes
+      - (previous ? toolDraftByteLength(previous) : 0)
+      + toolDraftByteLength(event.draft);
+    if (aggregateToolDraftBytes > LIVE_PIPELINE_LIMITS.toolDraftAggregateBytes) {
+      return { classification: 'invalid', state: current, reason: 'aggregate tool drafts exceed live byte limit' };
     }
     return appliedTurn(current, event.sessionPath, {
       ...owner,
@@ -164,7 +201,11 @@ export function applyLiveSemanticEnvelope(
       phase: 'streaming',
       phaseSince: owner.phase === 'streaming' ? owner.phaseSince : event.occurredAt,
       lastSemanticProgressAt: event.occurredAt,
-      draftingToolCall: event.draft,
+      toolDraftsByCallId: { ...owner.toolDraftsByCallId, [event.draft.toolCallId]: event.draft },
+      aggregateToolDraftBytes,
+      parts: previous || owner.parts.some((part) => part.kind === 'tool' && part.toolCallId === event.draft.toolCallId)
+        ? owner.parts
+        : [...owner.parts, { kind: 'tool', toolCallId: event.draft.toolCallId }],
     });
   }
 
@@ -189,11 +230,20 @@ export function applyLiveSemanticEnvelope(
   }
 
   if (event.kind === 'tool.started') {
+    if (owner.phase === 'aborting') {
+      return { classification: 'invalid', state: current, reason: 'tool start after aborting' };
+    }
     if (jsonByteLength(event.input) > LIVE_PIPELINE_LIMITS.toolInputBytes) {
       return { classification: 'invalid', state: current, reason: 'tool input exceeds live byte limit' };
     }
     if (current.toolsByExecutionId[event.executionId]) {
       return { classification: 'invalid', state: current, reason: 'execution id already exists' };
+    }
+    const duplicateCallId = owner.toolExecutionIds.some((executionId) =>
+      current.toolsByExecutionId[executionId]?.transcriptToolCallId === event.toolCallId,
+    );
+    if (duplicateCallId) {
+      return { classification: 'invalid', state: current, reason: 'tool call id already belongs to a live execution' };
     }
     const tool = {
       executionId: event.executionId,
@@ -216,13 +266,18 @@ export function applyLiveSemanticEnvelope(
       ...current,
       toolsByExecutionId: { ...current.toolsByExecutionId, [event.executionId]: tool },
     };
+    const promotedDraft = ownRecordValue(owner.toolDraftsByCallId, event.toolCallId);
+    const toolDraftsByCallId = { ...owner.toolDraftsByCallId };
+    delete toolDraftsByCallId[event.toolCallId];
     state = withTurn(state, event.sessionPath, {
       ...owner,
       seq: event.seq,
       phase: 'running_tool',
       phaseSince: event.occurredAt,
       lastSemanticProgressAt: event.occurredAt,
-      draftingToolCall: undefined,
+      toolDraftsByCallId,
+      aggregateToolDraftBytes: owner.aggregateToolDraftBytes
+        - (promotedDraft ? toolDraftByteLength(promotedDraft) : 0),
       parts: owner.parts.some((part) => part.kind === 'tool' && part.toolCallId === event.toolCallId)
         ? owner.parts
         : [...owner.parts, { kind: 'tool', toolCallId: event.toolCallId }],
@@ -232,6 +287,9 @@ export function applyLiveSemanticEnvelope(
   }
 
   if (event.kind === 'tool.progress') {
+    if (owner.phase === 'aborting') {
+      return { classification: 'invalid', state: current, reason: 'tool progress after aborting' };
+    }
     const tool = current.toolsByExecutionId[event.executionId];
     if (!tool || tool.turnId !== owner.turnId || tool.attemptId !== owner.attemptId) {
       return queueOwnerPending(current, event);
@@ -260,15 +318,14 @@ export function applyLiveSemanticEnvelope(
       }
       preview = patched.value;
     }
-    // The backend assembled and measured the canonical preview before emitting
-    // this envelope. Trust that same-process metadata when present so a tiny
-    // structural append does not stringify the reconstructed multi-MiB value.
-    // The fallback retains compatibility with older v5 envelope producers.
-    const previewBytes = event.previewBytes ?? jsonByteLength(preview);
+    // Protocol v6 requires backend-measured canonical counters. Trust that
+    // same-process metadata so a tiny structural append never stringifies the
+    // reconstructed multi-MiB value merely to enforce capacity.
+    const previewBytes = event.previewBytes;
     const aggregatePreviewBytes = owner.aggregatePreviewBytes - tool.previewBytes + previewBytes;
     if (previewBytes > LIVE_PIPELINE_LIMITS.previewBytes
       || aggregatePreviewBytes > LIVE_PIPELINE_LIMITS.toolPreviewAggregateBytes
-      || (event.aggregatePreviewBytes !== undefined && event.aggregatePreviewBytes !== aggregatePreviewBytes)) {
+      || event.aggregatePreviewBytes !== aggregatePreviewBytes) {
       return { classification: 'invalid', state: current, reason: 'aggregate tool preview capacity exceeded' };
     }
     const state = withTurn({
@@ -350,9 +407,13 @@ export function applyLiveSemanticEnvelope(
       expiresAt: tombstoneExpiresAt,
     },
   }, event.occurredAt, LIVE_PIPELINE_LIMITS.terminalTombstones);
+  const liveTools = owner.toolExecutionIds
+    .map((executionId) => current.toolsByExecutionId[executionId])
+    .filter((tool): tool is NonNullable<typeof tool> => tool !== undefined);
+  const terminal = reconcileDurableTerminalToolMetadata(event.durableMessage, owner, liveTools);
   let state: LivePipelineState = { ...current, turnsBySession: turns, toolsByExecutionId: tools, pendingOwnerEvents: pending, terminalAttempts };
   state = incrementLiveRevision(state, event.sessionPath);
-  return { classification: 'committed', state, terminal: event.durableMessage };
+  return { classification: 'committed', state, terminal };
 }
 
 function appliedTurn(state: LivePipelineState, sessionPath: string, turn: LivePipelineState['turnsBySession'][string]): LiveTransitionResult {
@@ -383,6 +444,17 @@ function enterGap(state: LivePipelineState, owner: LivePipelineState['turnsBySes
     reconciliation: { expectedSeq, observedSeq: event.seq, attempts: 0, status: 'requested' },
   });
   return { classification: 'gap', state: next, expectedSeq, observedSeq: event.seq };
+}
+
+function ownRecordValue<T>(record: Record<string, T>, key: string): T | undefined {
+  return Object.prototype.hasOwnProperty.call(record, key) ? record[key] : undefined;
+}
+
+function toolDraftByteLength(draft: { toolCallId: string; name: string; argumentsJson: string; phase: string }): number {
+  return Buffer.byteLength(
+    JSON.stringify({ toolCallId: draft.toolCallId, name: draft.name, argumentsJson: draft.argumentsJson, phase: draft.phase }),
+    'utf8',
+  );
 }
 
 function jsonByteLength(value: unknown): number {

@@ -1,35 +1,39 @@
-/* ── Subagent collapsed header ───────────────────────────────────────────── */
-/* When collapsed the header acts as the entire visible tile */
+/* ── Subagent container and collapsed header ────────────────────────────── */
+/* Delegated work is a higher-level unit than an ordinary tool call. Give only
+   subagents a bounded opaque surface; generic operational rows stay flat. */
+.tool-call.tool-call-subagent,
+.tool-call-card.tool-call-subagent {
+  border: 1px solid var(--panel-border-subtle);
+  border-radius: var(--panel-radius-md);
+  background: var(--panel-card-surface);
+  box-shadow: none;
+}
 
+/* When collapsed the header acts as the entire visible tile. */
 .tool-call.tool-call-subagent .subagent-header[aria-expanded="false"] {
   background: var(--panel-subagent-header-surface);
-  box-shadow: inset 0 0 0 1px var(--panel-subagent-header-border);
-  border-radius: var(--panel-radius-md);
+  box-shadow: none;
+  border-radius: calc(var(--panel-radius-md) - 1px);
 }
 
 .tool-call.tool-call-subagent:hover .subagent-header[aria-expanded="false"] {
   background: var(--panel-subagent-header-surface-hover);
 }
 
-/* ── Pending ask_user indicator (blinking border on collapsed subagent) ──── */
-
-@keyframes subagent-pending-ask-user-pulse {
-  0%, 100% { opacity: 0; }
-  50% { opacity: 1; }
+/* A malformed or unavailable structured result falls back to ToolCallCard;
+   retain the same delegated-work identity on that path. */
+.tool-call-card.tool-call-subagent > .tool-call-header {
+  background: var(--panel-subagent-header-surface);
 }
 
-/* Accent ring + glow live on a ::after overlay so only opacity is animated
-   (compositor-friendly); the header keeps its steady border underneath. */
-.tool-call.tool-call-subagent.pending-ask-user .subagent-header[aria-expanded="false"]::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  pointer-events: none;
-  box-shadow: inset 0 0 0 2px var(--panel-accent), 0 0 8px 0 color-mix(in srgb, var(--panel-accent) 30%, transparent);
-  opacity: 0;
-  animation: subagent-pending-ask-user-pulse 1.4s ease-in-out infinite;
-  will-change: opacity;
+.tool-call-card.tool-call-subagent > .tool-call-header:hover {
+  background: var(--panel-subagent-header-surface-hover);
+}
+
+/* Pending input stays semantic but local: tint the activity dot instead of
+   drawing an animated ring around the entire row. */
+.tool-call.tool-call-subagent.pending-ask-user .subagent-activity-dot {
+  background: var(--panel-warning);
 }
 
 /* ── Tool-call header (expand/collapse hitbox) ──────────────────────── */
@@ -47,25 +51,78 @@
    `overflow: clip` so its rounded corners still clip cleanly. */
 
 .tool-call-header {
-  background: var(--panel-card-surface);
+  background: transparent;
   transition: background var(--panel-transition-fast);
 }
 
 .tool-call-header:hover {
-  background: var(--panel-control-hover);
+  background: color-mix(in srgb, var(--panel-foreground) 4%, transparent);
 }
 
-/* Mirror the card's hover state on the header so it doesn't read as a
-   darker strip when the body (not the header) is hovered. Hovering the header
-   itself also triggers the card hover, so this single rule covers both. */
-.tool-call-card:hover .tool-call-header {
-  background: var(--panel-control-hover);
-}
-
-/* Inset outline so the focus ring stays inside the card's clipped corners. */
+/* Inset outline so keyboard focus remains visible without persistent chrome. */
 .tool-call-header:focus-visible {
   outline: 1px solid var(--panel-accent);
   outline-offset: -1px;
+}
+
+/* Drafts use the regular tool-call surface and geometry. Muting only their
+   text preserves contrast for the small Input label while execution can take
+   over with no badge, extra chrome, or layout shift. */
+.tool-call-card[data-provisional="true"] > .tool-call-header .transcript-header-title-mono,
+.tool-call-card[data-provisional="true"] > .tool-call-header .transcript-header-summary-mono,
+.tool-call-card[data-provisional="true"] > .tool-call-header .transcript-header-summary-emphasis,
+.tool-call-card[data-provisional="true"] > .tool-call-header .transcript-header-summary-subtle,
+.tool-call-card[data-provisional="true"] > .tool-call-header .transcript-header-summary-command {
+  color: var(--panel-muted);
+  opacity: 1;
+}
+
+/* Ordinary tool statuses remain quiet semantic text. */
+.tool-call-header .status-chip {
+  min-height: auto;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  letter-spacing: 0.04em;
+}
+
+.tool-call-header .status-chip.has-error-detail:hover,
+.tool-call-header .status-chip.has-error-detail[data-copied] {
+  border-color: transparent;
+  background: transparent;
+  text-decoration: underline;
+}
+
+/* Subagent status is part of the delegated-work hierarchy, so terminal states
+   regain a compact opaque badge. Scope this restoration away from generic
+   tool rows, including the structured-result fallback path. */
+.subagent-header .status-chip,
+.tool-call-card.tool-call-subagent > .tool-call-header .status-chip {
+  min-height: 18px;
+  padding: 1px 6px;
+  border: 1px solid var(--panel-border-subtle);
+  border-radius: var(--panel-radius-sm);
+  background: var(--panel-control-surface);
+  letter-spacing: 0.04em;
+}
+
+.subagent-header .status-chip-completed,
+.tool-call-card.tool-call-subagent > .tool-call-header .status-chip-completed {
+  border-color: color-mix(in srgb, var(--panel-success) 18%, var(--panel-border));
+  background: color-mix(in srgb, var(--panel-success) 8%, var(--panel-control-surface));
+}
+
+.subagent-header .status-chip-failed,
+.tool-call-card.tool-call-subagent > .tool-call-header .status-chip-failed {
+  border-color: color-mix(in srgb, var(--panel-danger) 24%, var(--panel-border));
+  background: color-mix(in srgb, var(--panel-danger) 12%, var(--panel-control-surface));
+}
+
+.subagent-header .status-chip-interrupted,
+.tool-call-card.tool-call-subagent > .tool-call-header .status-chip-interrupted {
+  border-color: color-mix(in srgb, var(--panel-warning) 22%, var(--panel-border));
+  background: color-mix(in srgb, var(--panel-warning) 10%, var(--panel-control-surface));
 }
 
 /* ── Tool-call body ──────────────────────────────────────────────────────── */
@@ -91,6 +148,28 @@
 
 .tool-call-section + .tool-call-section {
   margin-top: 8px;
+}
+
+.tool-call-provisional-input {
+  max-height: var(--expanded-section-max-height);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--panel-muted);
+  user-select: text;
+}
+
+/* Collapsed running non-shell tools own their live result preview inline. */
+.tool-call-live-preview {
+  padding: 5px 9px 6px;
+  border-top: 1px solid var(--panel-border-subtle);
+  background: var(--panel-code-surface);
+  overflow: hidden;
+}
+
+.tool-call-live-preview .turn-activity-tail {
+  color: var(--panel-foreground-soft);
 }
 
 /* Preserve exact whitespace for tool output preformatted blocks */
@@ -187,7 +266,7 @@
   gap: 7px;
   min-width: 0;
   padding: 4px 8px;
-  border-radius: 8px;
+  border-radius: calc(var(--panel-radius-md) - 1px);
   cursor: pointer;
   /* `relative` (not `sticky`): the header used to pin to the top of the
      transcript scroll viewport so the collapse control stayed reachable in a
@@ -202,14 +281,12 @@
   position: relative;
   top: auto;
   z-index: auto;
-  background: var(--panel-card-surface);
-  transition:
-    background var(--panel-transition-fast),
-    box-shadow var(--panel-transition-normal);
+  background: var(--panel-subagent-header-surface);
+  transition: background var(--panel-transition-fast);
 }
 
 .subagent-header:hover {
-  background: var(--panel-control-hover);
+  background: var(--panel-subagent-header-surface-hover);
 }
 
 /* Inset focus ring on the keyboard-focused toggle (mirrors .tool-call-header). */
@@ -218,15 +295,6 @@
   outline-offset: -1px;
 }
 
-/* Mirror the card's hover state on the header so it doesn't read as a
-   darker strip when the body (not the header) is hovered. Hovering the header
-   itself also triggers the card hover, so this single rule covers both. The
-   collapsed-state hover rule (above, higher specificity) keeps the
-   subagent-specific hover surface when collapsed, so this only governs the
-   expanded/open state. */
-.tool-call.tool-call-subagent:hover .subagent-header {
-  background: var(--panel-control-hover);
-}
 
 .subagent-header-content {
   display: flex;
@@ -267,8 +335,7 @@
   flex: 0 0 auto;
   border-radius: 50%;
   background: var(--panel-accent);
-  box-shadow: 0 0 0 0 color-mix(in srgb, var(--panel-accent) 35%, transparent);
-  animation: subagent-activity-pulse 1.6s ease-out infinite;
+  animation: subagent-activity-pulse 1.6s ease-in-out infinite;
 }
 
 .subagent-activity-label {
@@ -296,8 +363,8 @@
 }
 
 @keyframes subagent-activity-pulse {
-  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--panel-accent) 35%, transparent); }
-  65%, 100% { box-shadow: 0 0 0 5px transparent; }
+  0%, 100% { opacity: 0.45; }
+  50% { opacity: 1; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -308,17 +375,17 @@
    It reuses the main transcript's bounded activity-tail renderer, giving a
    running worker useful preview rows without reserving blank space. */
 .subagent-live-preview {
-  margin: 0 1px 1px;
+  margin: 0;
   padding: 5px 8px 6px;
   border-top: 1px solid var(--panel-border-subtle);
-  border-radius: 0 0 calc(var(--panel-radius-md) - 1px) calc(var(--panel-radius-md) - 1px);
+  border-radius: 0;
   background: var(--panel-code-surface);
-  box-shadow: inset 2px 0 0 color-mix(in srgb, var(--panel-accent) 32%, transparent);
+  box-shadow: none;
   overflow: hidden;
 }
 
 .tool-call.tool-call-subagent:has(> .subagent-live-preview) .subagent-header[aria-expanded="false"] {
-  border-radius: var(--panel-radius-md) var(--panel-radius-md) 0 0;
+  border-radius: 0;
   box-shadow: none;
 }
 
@@ -327,7 +394,7 @@
 }
 
 .subagent-live-preview .turn-activity-tail-label {
-  color: var(--panel-accent);
+  color: var(--panel-foreground-soft);
 }
 
 .subagent-live-preview .turn-activity-tail-content {
@@ -336,10 +403,11 @@
   font-size: 11px;
 }
 
-/* Before concrete child output arrives, the compact preview contains only its
-   useful task row. Do not reserve the normal output-row budget for an empty
-   "Generating…" placeholder; lifecycle remains visible in the card header. */
-.subagent-live-preview .turn-activity-tail-content:empty {
+/* Before concrete output arrives, compact previews contain only their useful
+   tool/task row. Do not reserve the normal output-row budget for an empty
+   placeholder; lifecycle remains visible in the owning card header. */
+.tool-call-live-preview .turn-activity-tail-content[data-empty="true"],
+.subagent-live-preview .turn-activity-tail-content[data-empty="true"] {
   display: none;
   height: 0;
   min-height: 0;
@@ -382,10 +450,15 @@
 
 .subagent-telemetry-item {
   flex: 0 0 auto;
-  padding: 1px 5px;
-  border: 1px solid color-mix(in srgb, var(--panel-border) 72%, transparent);
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--panel-code-surface) 68%, transparent);
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.subagent-telemetry-item + .subagent-telemetry-item::before {
+  content: '·';
+  margin-right: 5px;
+  color: var(--panel-border);
 }
 
 .subagent-context-label {
@@ -453,59 +526,64 @@
   .subagent-activity-detail { max-width: 100px; }
 }
 
-/* ── Subagent parallel group ─────────────────────────────────────────────── */
-/* Left accent spine visually connects independent parallel agent blocks. Each
-   child also carries a horizontal connector tick (see
-   `.subagent-parallel-child::before`) so every member clearly belongs to the
-   same parallel call — not just an unrelated stack of cards. The connector
-   lives on the wrapper, not the card, because the card clips overflow. */
+/* ── Parallel groups ─────────────────────────────────────────────────────── */
+/* One quiet 1px spine is enough to mark a batch. Keep the offset shallow and
+   omit connector ticks so parallel work remains distinct without reading as a
+   tree diagram. */
 
 .subagent-parallel-group {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  padding-left: 12px;
-  border-left: 2px solid color-mix(in srgb, var(--panel-accent) 28%, var(--panel-border));
+  gap: 3px;
+  padding-left: 7px;
+  margin-block: 5px;
+  border-left: 1px solid color-mix(in srgb, var(--panel-accent) 24%, var(--panel-border));
 }
 
-/* Per-child connector: a short horizontal tick bridging the group's left spine
-   to each card's header. Hosted on the wrapper because the card's
-   `overflow: clip` would otherwise cut a pseudo-element placed outside it. */
 .subagent-parallel-child {
   position: relative;
 }
 
-.subagent-parallel-child::before {
+/* Generic batches use per-row slices because mixed runs stay in the ordinary
+   tool list rather than being reparented into a group wrapper. Adjacent slices
+   overlap the list gap to form one continuous vertical line. */
+.tool-call-parallel-child {
+  position: relative;
+  padding-left: 7px;
+}
+
+.tool-call-parallel-start {
+  margin-top: 5px;
+}
+
+.tool-call-parallel-end {
+  margin-bottom: 5px;
+}
+
+.tool-call-parallel-child::before {
   content: '';
   position: absolute;
-  left: -12px;
-  top: 14px;
-  width: 12px;
-  height: 2px;
-  border-radius: 2px;
-  background: color-mix(in srgb, var(--panel-accent) 30%, var(--panel-border));
+  left: 0;
+  top: -3px;
+  bottom: -3px;
+  width: 1px;
+  background: color-mix(in srgb, var(--panel-accent) 22%, var(--panel-border));
   pointer-events: none;
 }
 
-/* ── Parallel tool-call group ────────────────────────────────────────────── */
-/* Left accent border visually connects sibling tool calls that the agent
-   fired in parallel (e.g. two bash calls in one batch). Mirrors the
-   subagent parallel-group treatment so parallel items read as one related
-   group instead of two unrelated sequential cards. */
+.tool-call-parallel-start::before {
+  top: 0;
+}
 
-.tool-call-parallel-group {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding-left: 8px;
-  border-left: 2px solid color-mix(in srgb, var(--panel-accent) 16%, var(--panel-border));
+.tool-call-parallel-end::before {
+  bottom: 0;
 }
 
 /* ── Parallel batch: finished-while-block-active marker ──────────────────── */
 /* While a parallel batch is still in flight (at least one sibling `running`),
    the completed members get a muted, struck-through header so the still-active
    calls stand out. The mark is transient: once every member finishes the
-   wrapper class is no longer applied (see content.tsx), so the cards revert to
+   marker class is no longer applied (see content.tsx), so the cards revert to
    their normal completed styling and "done" reads as implicit. Failed members
    are never marked here — their failure treatment stays prominent. */
 .tool-call-parallel-item-done .tool-call-header,
@@ -545,14 +623,15 @@
 
 .subagent-messages {
   --subagent-thread-gutter: 10px;
-  --subagent-thread-inset: 18px;
+  --subagent-thread-inset: 14px;
   border-top: 1px solid var(--panel-border);
+  border-inline-start: 1px solid var(--panel-border-subtle);
   margin-inline-start: var(--subagent-thread-inset);
   display: flex;
   flex-direction: column;
   cursor: default;
   user-select: text;
-  background: var(--panel-control-surface);
+  background: var(--panel-code-surface);
 }
 
 .subagent-messages-scroll {
@@ -737,8 +816,7 @@
 }
 
 .tool-call-terminal[data-running="true"] .tool-call-terminal-pre {
-  /* Subtle top accent while executing */
-  box-shadow: inset 0 1px 0 0 color-mix(in srgb, var(--panel-accent) 35%, transparent);
+  box-shadow: none;
 }
 
 /* Terminal footer: a truncation notice (with a clickable full-log path) and/or
@@ -774,28 +852,21 @@
   white-space: nowrap;
 }
 
-/* ── Tool-result-pruner inline ✂ badge (header) ─────────────────────────── */
-/* Subtle chip shown in the tool-call header when the tool-result-pruner
-   extension losslessly rewrote a tool's output (ANSI strip, whitespace trim,
-   blank-run collapse, JSON minify). Sits next to the duration so it stays
-   visible when the card is collapsed. Mirrors the muted, monospace,
-   tabular-nums tone of the duration label and the .tool-call-truncated-text
-   ellipsis pattern; the soft muted background echoes the .status-chip chip
-   look without its uppercase/dot styling. */
+/* Tool-result pruning is quiet metadata, not another badge. */
 .tool-result-pruning-badge {
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
   min-width: 0;
   max-width: 260px;
-  padding: 0 5px;
-  border-radius: var(--panel-radius-sm);
-  background: color-mix(in srgb, var(--panel-muted) 8%, transparent);
+  padding: 0;
+  background: transparent;
   color: var(--panel-muted);
   font-family: var(--vscode-editor-font-family, monospace);
-  font-size: 10px;
+  font-size: 9.5px;
   line-height: 1.4;
   font-variant-numeric: tabular-nums;
+  opacity: 0.72;
 }
 
 .tool-result-pruning-badge-text {
@@ -822,10 +893,9 @@
 .tool-call-terminal-exit {
   flex: 0 0 auto;
   margin-left: auto;
-  padding: 0 5px;
-  border: 1px solid color-mix(in srgb, var(--panel-danger) 30%, transparent);
-  border-radius: var(--panel-radius-sm);
-  background: color-mix(in srgb, var(--panel-danger) 10%, transparent);
+  padding: 0;
+  border: 0;
+  background: transparent;
   font-family: var(--vscode-editor-font-family, monospace);
   font-size: 10px;
   font-weight: 600;
@@ -857,33 +927,14 @@
   will-change: transform;
 }
 
-/* ── Tool-call completion pulse ──────────────────────────────────────────── */
-/* Brief success-tinted ring flash on the card when a tool call finishes, so
-   the user notices completion. Applied for ~TOOL_CALL_COMPLETION_PULSE_MS via
-   the `tool-call-just-completed` class. The ::before overlay is an inset
-   box-shadow ring so it highlights the card edges without washing out the
-   header text / terminal output. */
-
-.tool-call-just-completed {
-  position: relative;
+/* Completion feedback is confined to the tool-name text—no card ring/glow. */
+.tool-call-just-completed .transcript-header-title-mono {
+  animation: tool-call-completed-text 700ms var(--panel-ease-out);
 }
 
-.tool-call-just-completed::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  pointer-events: none;
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--panel-success) 55%, transparent);
-  opacity: 0;
-  /* 700ms — keep in sync with TOOL_CALL_COMPLETION_PULSE_MS in tool-call-card.tsx */
-  animation: tool-call-completed-flash 700ms var(--panel-ease-out);
-}
-
-@keyframes tool-call-completed-flash {
-  0% { opacity: 0; }
-  20% { opacity: 1; }
-  100% { opacity: 0; }
+@keyframes tool-call-completed-text {
+  0%, 100% { color: color-mix(in srgb, var(--panel-foreground) 80%, var(--panel-muted)); }
+  24% { color: color-mix(in srgb, var(--panel-success) 72%, var(--panel-foreground)); }
 }
 
 /* ── Tool-call body expand/collapse wrapper ──────────────────────────────── */
@@ -993,27 +1044,31 @@
   flex: 1 1 auto;
 }
 
-/* Compact option chips (numResults / provider / recency / …). Only
-   non-default knobs are emitted, so this stays a single muted line. */
+/* Non-default search options form one muted metadata line. */
 .web-search-options {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
+  gap: 4px 6px;
   margin-top: 6px;
 }
 
 .web-search-option {
   display: inline-flex;
   align-items: center;
-  padding: 1px 7px;
-  border-radius: 999px;
-  background: var(--panel-control-hover);
-  border: 1px solid var(--panel-border-subtle);
+  padding: 0;
+  background: transparent;
+  border: 0;
   font-family: var(--vscode-editor-font-family, monospace);
   font-size: 10px;
   line-height: 1.5;
   color: var(--panel-muted);
   white-space: nowrap;
+}
+
+.web-search-option + .web-search-option::before {
+  content: '·';
+  margin-right: 6px;
+  color: var(--panel-border);
 }
 
 /* Synthesised answer: markdown prose bounded to the shared section max
@@ -1048,11 +1103,25 @@
 }
 
 @media (forced-colors: active) {
+  .tool-call-card[data-provisional="true"],
+  .tool-call-live-preview,
+  .subagent-parallel-group {
+    border-color: ButtonText;
+    background-color: Canvas;
+  }
+  .tool-call-parallel-child::before {
+    background: ButtonText;
+  }
+  .tool-call.tool-call-subagent,
+  .tool-call-card.tool-call-subagent,
+  .subagent-header .status-chip {
+    border-color: ButtonText;
+  }
   .tool-call-body {
     border-top-color: ButtonText;
   }
   .subagent-messages {
-    border-top-color: ButtonText;
+    border-color: ButtonText;
   }
   .tool-call-terminal-command,
   .tool-call-terminal-pre {
@@ -1080,15 +1149,14 @@
    Terminal failures and user interruptions retain distinct semantic colors;
    the two non-terminal states distinguish queued from active siblings. */
 
-/* Idle (dispatched but not yet started): drop the accent-tinted surface for a
-   neutral one and dim the header text, so waiting agents recede behind
-   active siblings. */
-.tool-call.tool-call-subagent.idle .subagent-header[aria-expanded="false"] {
+/* Idle workers recede through typography and a neutral header while retaining
+   the container boundary shared by every delegated task. */
+.tool-call.tool-call-subagent.idle > .subagent-header {
   background: var(--panel-control-surface);
-  box-shadow: inset 0 0 0 1px var(--panel-border-subtle);
+  box-shadow: none;
 }
 
-.tool-call.tool-call-subagent.idle:hover .subagent-header[aria-expanded="false"] {
+.tool-call.tool-call-subagent.idle:hover > .subagent-header {
   background: var(--panel-control-hover);
 }
 
@@ -1102,62 +1170,45 @@
   opacity: 0.65;
 }
 
-/* A finished child recedes behind active siblings: use a darker neutral
-   surface with no accent tint. The running sheen is status-scoped, so it also
-   disappears as soon as the child's explicit exit code settles. Apply this to
-   both isolated and grouped cards, expanded or collapsed. */
-.tool-call.tool-call-subagent.completed .subagent-header {
-  background: var(--panel-ink-3);
-  box-shadow: inset 0 0 0 1px var(--panel-border-subtle);
+/* Lifecycle changes the bounded header/border rather than adding rings,
+   sheens, gradients, or shadows. */
+.tool-call.tool-call-subagent.running {
+  border-color: var(--panel-subagent-header-border);
 }
 
-.tool-call.tool-call-subagent.completed:hover .subagent-header {
+.tool-call.tool-call-subagent.running > .subagent-header {
+  background: var(--panel-subagent-header-surface);
+}
+
+.tool-call.tool-call-subagent.completed > .subagent-header {
+  background: var(--panel-ink-3);
+}
+
+.tool-call.tool-call-subagent.failed {
+  border-color: color-mix(in srgb, var(--panel-danger) 28%, var(--panel-border));
+}
+
+.tool-call.tool-call-subagent.failed > .subagent-header {
+  background: color-mix(in srgb, var(--panel-danger) 6%, var(--panel-subagent-header-surface));
+}
+
+.tool-call.tool-call-subagent.interrupted {
+  border-color: color-mix(in srgb, var(--panel-warning) 26%, var(--panel-border));
+}
+
+.tool-call.tool-call-subagent.interrupted > .subagent-header {
+  background: color-mix(in srgb, var(--panel-warning) 6%, var(--panel-subagent-header-surface));
+}
+
+.tool-call.tool-call-subagent.running:hover > .subagent-header {
+  background: var(--panel-subagent-header-surface-hover);
+}
+
+.tool-call.tool-call-subagent.completed:hover > .subagent-header {
   background: var(--panel-ink-4);
 }
 
-/* Terminal failures are not just a chip: tint the collapsed card edge so the
-   stopped child remains legible in dense parallel groups. Interruptions use
-   warning rather than danger because they are intentional/user-driven. */
-.tool-call.tool-call-subagent.failed .subagent-header[aria-expanded="false"] {
-  background: color-mix(in srgb, var(--panel-danger) 5%, var(--panel-subagent-header-surface));
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--panel-danger) 35%, var(--panel-subagent-header-border));
-}
-
-.tool-call.tool-call-subagent.interrupted .subagent-header[aria-expanded="false"] {
-  background: color-mix(in srgb, var(--panel-warning) 5%, var(--panel-subagent-header-surface));
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--panel-warning) 35%, var(--panel-subagent-header-border));
-}
-
-/* Running (started, actively working): a slow accent-tinted sheen sweeps
-   across the header. `::before` is used (the pending-ask_user pulse owns
-   `::after`); the band is translated via `transform` only so the sweep stays
-   compositor-friendly. `overflow: clip` on the running header keeps the band
-   within the rounded corners without establishing a scroll container. */
-@keyframes subagent-running-sheen {
-  0%   { transform: translateX(-150%); }
-  100% { transform: translateX(350%); }
-}
-
-.tool-call.tool-call-subagent.running .subagent-header {
-  overflow: clip;
-}
-
-.tool-call.tool-call-subagent.running .subagent-header::before {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 45%;
-  height: 100%;
-  border-radius: inherit;
-  pointer-events: none;
-  background: linear-gradient(
-    100deg,
-    transparent,
-    color-mix(in srgb, var(--panel-accent) 18%, transparent),
-    transparent
-  );
-  transform: translateX(-150%);
-  animation: subagent-running-sheen 2.6s var(--panel-ease-in-out) infinite;
-  will-change: transform;
+.tool-call.tool-call-subagent.failed:hover > .subagent-header,
+.tool-call.tool-call-subagent.interrupted:hover > .subagent-header {
+  background: var(--panel-subagent-header-surface-hover);
 }

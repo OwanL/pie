@@ -182,7 +182,7 @@ test('arrival-order: live turn start before send acknowledgement commits the pen
   const started = reducer(sent.state, {
     kind: 'TurnSemanticEventReceived',
     envelope: {
-      protocolVersion: 5,
+      protocolVersion: 6,
       kind: 'turn.started',
       sessionPath: '/s',
       requestId: 'request-live',
@@ -190,6 +190,7 @@ test('arrival-order: live turn start before send acknowledgement commits the pen
       attemptId: 'attempt-live',
       seq: 1,
       occurredAt: 2,
+      checkpointBytes: 30 * 1024 * 1024,
       canonicalMessageId: 'assistant-live',
       startedAt: 2,
     },

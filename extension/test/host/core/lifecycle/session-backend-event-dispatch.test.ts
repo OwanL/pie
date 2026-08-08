@@ -43,13 +43,14 @@ function createHandlers() {
 test('dispatchSessionBackendEvent validates sequenced live envelopes', () => {
   const { handlers, calls } = createHandlers();
   const payload = {
-    protocolVersion: 5, sessionPath: '/workspace/session.jsonl', requestId: 'request',
+    protocolVersion: 6, sessionPath: '/workspace/session.jsonl', requestId: 'request',
     turnId: 'turn', attemptId: 'attempt', seq: 1, occurredAt: 100,
+    checkpointBytes: 30 * 1024 * 1024,
     kind: 'turn.started', canonicalMessageId: 'message', startedAt: 90,
   };
   dispatchSessionBackendEvent({ event: 'live.semantic', payload }, handlers);
   dispatchSessionBackendEvent({ event: 'live.semantic', payload: { ...payload, seq: 0 } }, handlers);
-  dispatchSessionBackendEvent({ event: 'live.semantic', payload: { ...payload, protocolVersion: 6 } }, handlers);
+  dispatchSessionBackendEvent({ event: 'live.semantic', payload: { ...payload, protocolVersion: 5 } }, handlers);
   dispatchSessionBackendEvent({ event: 'live.semantic', payload: {
     ...payload, kind: 'tool.progress', executionId: 'execution', seq: 100, baseSeq: 1,
     baseProgressRevision: 0, progressRevision: 1,

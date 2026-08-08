@@ -277,7 +277,9 @@ function renderAskUserTool({
     <ToolCallCard
       toolCall={toolCall}
       autoExpand={prefs.autoExpandToolCalls}
+      activityTailLines={prefs.activityTailLines}
       workingDirectory={workingDirectory}
+      prefs={prefs}
       onOpenFile={onOpenFile}
       onContextMenu={(e) => onContextMenu(getToolCallContextType('ask_user'), JSON.stringify(toolCall, null, 2), e)}
     />

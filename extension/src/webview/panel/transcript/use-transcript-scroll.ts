@@ -90,8 +90,10 @@ interface UseTranscriptScrollResult {
   /** Live ref to the auto-follow state (true while pinned to the bottom).
    *  Read by scroll-anchoring to know when NOT to pin the top visible row. */
   autoFollowRef: { current: boolean };
-  /** Recent downward manual-scroll signal used by the scrolled-up anchor. */
-  isScrollingTowardBottomRef: { current: boolean };
+  /** True while a manual scrollbar/wheel/touch/keyboard interaction owns scroll. */
+  manualScrollActiveRef: { current: boolean };
+  /** Count of browser scroll events expected from app-owned scrollTop writes. */
+  programmaticScrollTargetRef: { current: number | null };
   /** Reactive setter for auto-follow. Used by the user-message rail to
    *  disengage stick-to-bottom before jumping to a prompt so exact follow does
    *  not immediately re-pin to the bottom. */
@@ -125,6 +127,9 @@ export function useTranscriptScroll({
   const previousLoadedStartRef = useRef(transcriptWindow.loadedStart);
   const previousLoadedEndRef = useRef(transcriptWindow.loadedEnd);
   const pendingJumpToLatestSnapRef = useRef(false);
+  // App-owned scrollTop writes tag the browser scroll event they produce so
+  // the pointerless native-thumb fallback does not misclassify them as manual.
+  const programmaticScrollTargetRef = useRef<number | null>(null);
 
   // The true bottom (scrollHeight - clientHeight) used by exact auto-follow.
   // Refreshed on every content/viewport height change (keyed on totalSize + a
@@ -138,9 +143,11 @@ export function useTranscriptScroll({
     setAutoFollow,
     autoFollowRef,
     lastScrollTopRef,
-    isScrollingTowardBottomRef,
+    manualScrollActive,
+    manualScrollActiveRef,
+    setManualScrollActive,
     scrollToBottom,
-  } = useScrollState(scrollRef);
+  } = useScrollState(scrollRef, programmaticScrollTargetRef);
   const {
     isLoadingOlder,
     setIsLoadingOlder,
@@ -215,7 +222,9 @@ export function useTranscriptScroll({
     scrollRef,
     autoFollowRef,
     lastScrollTopRef,
-    isScrollingTowardBottomRef,
+    manualScrollActiveRef,
+    setManualScrollActive,
+    programmaticScrollTargetRef,
     setIsAtBottom,
     setAutoFollow,
     transcriptWindow.hasOlder,
@@ -242,6 +251,8 @@ export function useTranscriptScroll({
     previousLoadedEndRef,
     pendingJumpToLatestSnapRef,
     setAutoFollow,
+    manualScrollActive,
+    programmaticScrollTargetRef,
   );
 
   const followTargetRevision = useRefreshFollowTarget(scrollRef, totalSize, transcript, sessionKey, cachedTargetRef);
@@ -258,11 +269,13 @@ export function useTranscriptScroll({
     totalSize,
     transcript,
     sessionKey,
+    programmaticScrollTargetRef,
   );
 
   return {
     autoFollowRef,
-    isScrollingTowardBottomRef,
+    manualScrollActiveRef,
+    programmaticScrollTargetRef,
     setAutoFollow,
     isAtBottom,
     isInitialPositioning,

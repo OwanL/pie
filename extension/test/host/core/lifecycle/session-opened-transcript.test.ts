@@ -354,6 +354,57 @@ test('idle session.opened prefers the incoming transcript', () => {
   assert.equal(result.transcriptWindow.loadedEnd, 2);
 });
 
+test('idle session.opened falls back to exact durable message id without carrying authoritative tool fields', () => {
+  const localCall = {
+    id: 'tool-1', name: 'local-name', input: { local: true }, result: 'local-result',
+    status: 'completed' as const, parallelGroupId: 'batch-1', executionId: 'execution-1',
+    startedAt: 10, durationMs: 20, seq: 3,
+  };
+  const incomingCall = {
+    id: 'tool-1', name: 'durable-name', input: { durable: true }, result: 'durable-result',
+    status: 'failed' as const,
+  };
+  const result = resolveSessionOpenedTranscript({
+    busy: false,
+    localTranscript: [{
+      ...assistantMessage('assistant-1', 'local', 'completed'), renderIdentity: 'live-row',
+      parts: [{ kind: 'toolCall', toolCall: localCall }], toolCalls: [localCall],
+    }],
+    incomingTranscript: [{
+      ...assistantMessage('assistant-1', 'authoritative', 'error'),
+      parts: [{ kind: 'toolCall', toolCall: incomingCall }], toolCalls: [incomingCall],
+    }],
+    incomingTranscriptWindow: window({ totalCount: 1, loadedEnd: 1 }),
+  });
+
+  const message = result.transcript[0];
+  const part = message?.parts?.[0];
+  const call = part?.kind === 'toolCall' ? part.toolCall : undefined;
+  assert.equal(message?.renderIdentity, 'live-row');
+  assert.equal(message?.markdown, 'authoritative');
+  assert.equal(call?.name, 'durable-name');
+  assert.deepEqual(call?.input, { durable: true });
+  assert.equal(call?.result, 'durable-result');
+  assert.equal(call?.status, 'failed');
+  assert.equal(call?.parallelGroupId, 'batch-1');
+  assert.equal(call?.executionId, 'execution-1');
+  assert.deepEqual(message?.toolCalls?.[0], call);
+});
+
+test('idle session.opened does not copy metadata across different durable entries sharing an id', () => {
+  const result = resolveSessionOpenedTranscript({
+    busy: false,
+    localTranscript: [{
+      ...assistantMessage('assistant-1', 'old', 'completed'), durableEntryId: 'old-entry', renderIdentity: 'old-row',
+    }],
+    incomingTranscript: [{
+      ...assistantMessage('assistant-1', 'new', 'completed'), durableEntryId: 'new-entry',
+    }],
+    incomingTranscriptWindow: window({ totalCount: 1, loadedEnd: 1 }),
+  });
+  assert.equal(result.transcript[0]?.renderIdentity, undefined);
+});
+
 test('session.opened restores deduplicated tool result mirrors from complete ordered parts', () => {
   const fullSubagentResult = {
     content: [{ type: 'text', text: 'child answer' }],

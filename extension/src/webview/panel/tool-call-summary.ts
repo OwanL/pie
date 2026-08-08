@@ -96,7 +96,9 @@ function summarizePathCandidate(rawValue: string, workingDirectory?: string | nu
 
   return {
     summary: truncatePathText(value),
-    summaryPath: workingDirectory ? joinFileSystemPath(workingDirectory, value) : undefined,
+    // Keep the complete untruncated relative path when no workspace base is
+    // available; display shortening must never alter tooltip/open semantics.
+    summaryPath: workingDirectory ? joinFileSystemPath(workingDirectory, value) : value,
   };
 }
 

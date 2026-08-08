@@ -336,7 +336,7 @@ test('message.send accepts requests, handles preflight rejection, and guards con
   assert.equal(typeof (accepted as { requestId: string }).requestId, 'string');
   assert.equal(acceptedHarness.busyEvents.at(-1), true);
   assert.ok(acceptedHarness.context.activeRequest?.id);
-  assert.equal(acceptedHarness.context.activeRequest?.liveTurnAccumulator?.checkpoint().protocolVersion, 5);
+  assert.equal(acceptedHarness.context.activeRequest?.liveTurnAccumulator?.checkpoint().protocolVersion, 6);
   const succeeded = acceptedHarness.emitted.find((e) =>
     e.event === 'message.custom'
     && (e.payload as { message?: { customType?: string } }).message?.customType === 'preflight-succeeded');
@@ -1430,7 +1430,7 @@ test('session.truncateAfter leaves the model untouched when the new context alre
 
 test('liveTurn.checkpoint returns active and terminal-grace in-memory authority', async () => {
   const accumulator = new BackendLiveTurnAccumulator({
-    protocolVersion: 5, sessionPath: '/repo/session.jsonl', requestId: 'request-live',
+    protocolVersion: 6, sessionPath: '/repo/session.jsonl', requestId: 'request-live',
     turnId: 'turn-live', attemptId: 'attempt-live', canonicalMessageId: 'message-live', startedAt: 100,
   });
   accumulator.observe({ kind: 'turn.started' }, 100);

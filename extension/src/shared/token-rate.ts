@@ -187,11 +187,27 @@ function estimatedOutputTokens(message: ChatMessage | null): number {
   return estimateTextTokens(message.markdown ?? '') + estimateTextTokens(message.thinking ?? '');
 }
 
+function provisionalToolCallTokens(message: ChatMessage | null): Array<{ id: string; tokens: number }> {
+  if (!message) return [];
+  const provisional = (message.toolCalls ?? [])
+    .filter((toolCall) => toolCall.status === 'drafting' || toolCall.status === 'ready')
+    .map((toolCall) => ({
+      id: toolCall.id,
+      tokens: estimateTextTokens(toolCall.name)
+        + estimateTextTokens(toolCall.argumentsText ?? (typeof toolCall.input === 'string' ? toolCall.input : '')),
+    }));
+  const legacy = message.draftingToolCall;
+  if (legacy && !provisional.some((entry) => entry.id === legacy.id)) {
+    provisional.push({
+      id: legacy.id,
+      tokens: estimateTextTokens(legacy.name) + estimateTextTokens(legacy.argumentsText),
+    });
+  }
+  return provisional;
+}
+
 function estimatedDraftingToolCallTokens(message: ChatMessage | null): number {
-  const draft = message?.draftingToolCall;
-  return draft
-    ? estimateTextTokens(draft.name) + estimateTextTokens(draft.argumentsText)
-    : 0;
+  return provisionalToolCallTokens(message).reduce((total, draft) => total + draft.tokens, 0);
 }
 
 /** Estimated model output currently visible on a streaming assistant message.
@@ -201,25 +217,26 @@ export function estimateLiveAssistantOutputTokens(message: ChatMessage | null): 
   return estimatedOutputTokens(message) + estimatedDraftingToolCallTokens(message);
 }
 
-/** Track model-generated tool-call name + JSON independently from reply content.
- * `draftingToolCall` is transient and is replaced when tool execution starts;
- * counting its growth by tool id includes it in live throughput without
- * polluting the same-message continuation baseline. */
+/** Track model-generated tool-call names + raw JSON independently from reply
+ * content. Multiple provider calls may draft in parallel; promotion removes
+ * only the matching id and leaves sibling baselines intact. */
 function measureDraftingToolCall(
   acc: Accumulator,
   message: ChatMessage | null,
 ): { tokens: number; delta: number } {
-  const draft = message?.draftingToolCall;
-  if (!draft) {
-    acc.draftingTokensById.clear();
-    return { tokens: 0, delta: 0 };
+  const drafts = provisionalToolCallTokens(message);
+  const currentIds = new Set(drafts.map((draft) => draft.id));
+  let tokens = 0;
+  let delta = 0;
+  for (const draft of drafts) {
+    tokens += draft.tokens;
+    delta += Math.max(0, draft.tokens - (acc.draftingTokensById.get(draft.id) ?? 0));
+    acc.draftingTokensById.set(draft.id, draft.tokens);
   }
-
-  const tokens = estimatedDraftingToolCallTokens(message);
-  const previous = acc.draftingTokensById.get(draft.id) ?? 0;
-  acc.draftingTokensById.clear();
-  acc.draftingTokensById.set(draft.id, tokens);
-  return { tokens, delta: Math.max(0, tokens - previous) };
+  for (const id of acc.draftingTokensById.keys()) {
+    if (!currentIds.has(id)) acc.draftingTokensById.delete(id);
+  }
+  return { tokens, delta };
 }
 
 /**

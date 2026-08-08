@@ -30,14 +30,31 @@ export type DetailResult =
   | { sessionPath: string; key: string; status: 'loaded'; value: unknown; sizeBytes: number }
   | { sessionPath: string; key: string; status: 'failure' | 'unavailable' | 'stale'; message: string };
 
+export type ToolCallStatus = 'drafting' | 'ready' | 'running' | 'completed' | 'failed';
+
+export type ToolCallPhase =
+  | 'drafting'
+  | 'ready'
+  | 'queued'
+  | 'preparing'
+  | 'running'
+  | 'waiting_input'
+  | 'retry_wait'
+  | 'aborting'
+  | 'completed'
+  | 'failed';
+
 export interface ToolCall {
   id: string;
   name: string;
   input: unknown;
+  /** Raw provider-emitted argument JSON for a provisional call. This may be
+   * incomplete while `status` is `drafting`; `input` is not a parsed authority. */
+  argumentsText?: string;
   result?: unknown;
   /** Compact retrieval identity when a large result is omitted from snapshots. */
   detailRef?: LazyDetailRef;
-  status: 'running' | 'completed' | 'failed';
+  status: ToolCallStatus;
   /** Epoch milliseconds when the backend began executing this tool call. */
   startedAt?: number;
   /** Wall-clock execution time in milliseconds, set when the call resolves. */
@@ -59,8 +76,8 @@ export interface ToolCall {
   executionId?: string;
   /** Host-only sequenced lifecycle revision used by transcript commit evidence. */
   seq?: number;
-  /** Host-only live phase used by transcript commit evidence. */
-  phase?: string;
+  /** Host-only live/provisional phase used by transcript commit evidence. */
+  phase?: ToolCallPhase;
   /** Stable SDK session entry containing this terminal result. */
   durableEntryId?: string;
 }
@@ -152,6 +169,13 @@ export type ChatMessagePart =
 
 export interface ChatMessage {
   id: string;
+  /**
+   * Host-projected identity used only to preserve UI render and scroll
+   * continuity when a live assistant row hands off to a durable message whose
+   * authoritative `id` differs. It is non-authoritative and must never be used
+   * for editing, detail retrieval, commit evidence, or protocol ownership.
+   */
+  renderIdentity?: string;
   role: 'user' | 'assistant' | 'system';
   createdAt: string;
   markdown: string;

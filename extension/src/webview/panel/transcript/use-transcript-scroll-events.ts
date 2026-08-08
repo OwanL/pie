@@ -6,7 +6,9 @@ export function useScrollEventsEffect(
   scrollRef: { current: HTMLDivElement | null },
   autoFollowRef: { current: boolean },
   lastScrollTopRef: { current: number },
-  isScrollingTowardBottomRef: { current: boolean },
+  manualScrollActiveRef: { current: boolean },
+  setManualScrollActive: (v: boolean) => void,
+  programmaticScrollTargetRef: { current: number | null },
   setIsAtBottom: (v: boolean) => void,
   setAutoFollow: (v: boolean) => void,
   hasOlder: boolean,
@@ -25,40 +27,79 @@ export function useScrollEventsEffect(
     const el = scrollRef.current;
     if (!el) return;
 
-    let downwardScrollIdleTimer: number | null = null;
+    let manualScrollIdleTimer: number | null = null;
     let pointerGestureActive = false;
-    const clearDownwardIdleTimer = () => {
-      if (downwardScrollIdleTimer === null) return;
-      window.clearTimeout(downwardScrollIdleTimer);
-      downwardScrollIdleTimer = null;
+    let inputIntentActive = false;
+    const clearManualIdleTimer = () => {
+      if (manualScrollIdleTimer === null) return;
+      window.clearTimeout(manualScrollIdleTimer);
+      manualScrollIdleTimer = null;
     };
-    const scheduleDownwardIdleReset = () => {
-      clearDownwardIdleTimer();
+    const finishManualInteraction = () => {
+      inputIntentActive = false;
+      setManualScrollActive(false);
+      manualScrollIdleTimer = null;
+      // Loading older rows changes the scroll range and thumb mapping. Defer
+      // that request until the user has released the native thumb.
+      if (el.scrollTop <= 120 && hasOlderRef.current) requestOlderPageRef.current();
+    };
+    const scheduleManualIdleReset = () => {
+      clearManualIdleTimer();
       if (pointerGestureActive) return;
-      downwardScrollIdleTimer = window.setTimeout(() => {
-        isScrollingTowardBottomRef.current = false;
-        downwardScrollIdleTimer = null;
-      }, 180);
+      manualScrollIdleTimer = window.setTimeout(finishManualInteraction, 220);
+    };
+    const beginManualInteraction = () => {
+      setManualScrollActive(true);
+      clearManualIdleTimer();
     };
     const onPointerDown = (event: PointerEvent) => {
       if (event.button !== 0 && event.button !== 1) return;
       pointerGestureActive = true;
-      clearDownwardIdleTimer();
+      beginManualInteraction();
     };
     const onPointerEnd = () => {
       if (!pointerGestureActive) return;
       pointerGestureActive = false;
-      if (isScrollingTowardBottomRef.current) scheduleDownwardIdleReset();
+      scheduleManualIdleReset();
+    };
+    const onWheel = () => {
+      inputIntentActive = true;
+      beginManualInteraction();
+      scheduleManualIdleReset();
+    };
+    const onTouchStart = () => {
+      inputIntentActive = true;
+      beginManualInteraction();
+    };
+    const onTouchEnd = () => scheduleManualIdleReset();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(event.key)) return;
+      inputIntentActive = true;
+      beginManualInteraction();
+      scheduleManualIdleReset();
     };
     const onScroll = () => {
       const next = el.scrollTop;
       const previous = lastScrollTopRef.current;
-      if (next > previous + 1) {
-        isScrollingTowardBottomRef.current = true;
-        scheduleDownwardIdleReset();
-      } else if (next < previous - 1) {
-        isScrollingTowardBottomRef.current = false;
-        clearDownwardIdleTimer();
+      const expectedProgrammaticTop = programmaticScrollTargetRef.current;
+      const programmatic = expectedProgrammaticTop !== null
+        && Math.abs(next - expectedProgrammaticTop) <= 1;
+      // Consume the expectation even on mismatch. A different position means
+      // browser coalescing included genuine thumb movement, which must win.
+      if (expectedProgrammaticTop !== null) programmaticScrollTargetRef.current = null;
+      // Pointer/input intent owns both scroll directions. Once detached from
+      // auto-follow, any untagged movement is also treated as manual; this
+      // covers Chromium builds that omit pointerdown for the native scrollbar
+      // gutter without mistaking Pie's own anchor/follow writes for dragging.
+      // The upward clause handles the first move away from a followed bottom.
+      if (!programmatic && (
+        pointerGestureActive
+        || inputIntentActive
+        || next < previous - 1
+        || (!autoFollowRef.current && Math.abs(next - previous) > 1)
+      )) {
+        beginManualInteraction();
+        scheduleManualIdleReset();
       }
       const metrics = { scrollHeight: el.scrollHeight, scrollTop: next, clientHeight: el.clientHeight };
       const follow = resolveAutoFollowState({
@@ -72,21 +113,34 @@ export function useScrollEventsEffect(
       // Keep the visual bottom state metric-based rather than equating it with
       // follow ownership; the user can be detached while still near the edge.
       setIsAtBottom(isNearBottom(metrics));
-      if (el.scrollTop <= 120 && hasOlderRef.current) requestOlderPageRef.current();
+      if (!manualScrollActiveRef.current && el.scrollTop <= 120 && hasOlderRef.current) {
+        requestOlderPageRef.current();
+      }
     };
 
     el.addEventListener('scroll', onScroll, { passive: true });
     el.addEventListener('pointerdown', onPointerDown, { passive: true });
+    el.addEventListener('wheel', onWheel, { passive: true });
+    el.addEventListener('touchstart', onTouchStart, { passive: true });
+    el.addEventListener('touchend', onTouchEnd, { passive: true });
+    el.addEventListener('touchcancel', onTouchEnd, { passive: true });
+    el.addEventListener('keydown', onKeyDown);
     window.addEventListener('pointerup', onPointerEnd, { passive: true });
     window.addEventListener('pointercancel', onPointerEnd, { passive: true });
 
     return () => {
       el.removeEventListener('scroll', onScroll);
       el.removeEventListener('pointerdown', onPointerDown);
+      el.removeEventListener('wheel', onWheel);
+      el.removeEventListener('touchstart', onTouchStart);
+      el.removeEventListener('touchend', onTouchEnd);
+      el.removeEventListener('touchcancel', onTouchEnd);
+      el.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('pointerup', onPointerEnd);
       window.removeEventListener('pointercancel', onPointerEnd);
-      clearDownwardIdleTimer();
-      isScrollingTowardBottomRef.current = false;
+      clearManualIdleTimer();
+      setManualScrollActive(false);
+      programmaticScrollTargetRef.current = null;
     };
-  }, [scrollRef, sessionKey, autoFollowRef, lastScrollTopRef, isScrollingTowardBottomRef, setIsAtBottom, setAutoFollow]);
+  }, [scrollRef, sessionKey, autoFollowRef, lastScrollTopRef, manualScrollActiveRef, setManualScrollActive, programmaticScrollTargetRef, setIsAtBottom, setAutoFollow]);
 }

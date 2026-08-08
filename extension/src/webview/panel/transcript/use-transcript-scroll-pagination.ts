@@ -22,18 +22,27 @@ export function usePaginationTrackingEffect(
   previousLoadedEndRef: { current: number },
   pendingJumpToLatestSnapRef: { current: boolean },
   setAutoFollow: (v: boolean) => void,
+  manualScrollActive: boolean,
+  programmaticScrollTargetRef: { current: number | null },
 ) {
   useLayoutEffect(() => {
     const prevStart = previousLoadedStartRef.current;
     const prevEnd = previousLoadedEndRef.current;
-    previousLoadedStartRef.current = loadedStart;
-    previousLoadedEndRef.current = loadedEnd;
 
     const el = scrollRef.current;
     if (!el) return;
 
-    if (loadingOlderRef.current && loadedStart < prevStart) {
-      restoreMessageScrollAnchor(el, pendingOlderAnchorRef.current);
+    const olderPageArrived = loadingOlderRef.current && loadedStart < prevStart;
+    const latestPageArrived = pendingJumpToLatestSnapRef.current && !hasNewer;
+    // A native thumb drag owns scrollTop. Keep the previous window markers and
+    // pending anchors intact so this effect retries once the interaction ends.
+    if (manualScrollActive && (olderPageArrived || latestPageArrived)) return;
+
+    previousLoadedStartRef.current = loadedStart;
+    previousLoadedEndRef.current = loadedEnd;
+
+    if (olderPageArrived) {
+      restoreMessageScrollAnchor(el, pendingOlderAnchorRef.current, programmaticScrollTargetRef);
       loadingOlderRef.current = false;
       setIsLoadingOlder(false);
       pendingOlderAnchorRef.current = null;
@@ -57,5 +66,5 @@ export function usePaginationTrackingEffect(
       setAutoFollow(true);
       scrollToBottom();
     }
-  }, [scrollToBottom, transcriptLength, hasNewer, hasOlder, loadedEnd, loadedStart]);
+  }, [scrollToBottom, transcriptLength, hasNewer, hasOlder, loadedEnd, loadedStart, manualScrollActive, programmaticScrollTargetRef]);
 }

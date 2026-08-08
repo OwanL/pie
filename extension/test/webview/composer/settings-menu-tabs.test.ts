@@ -69,11 +69,16 @@ test('the menu is tabbed and defaults to Chat; switching tabs swaps content', ()
   const tabIds = Array.from(menu.querySelectorAll('.toolbar-settings-tab')).map((t) => t.getAttribute('data-tab'));
   assert.deepEqual(tabIds, ['chat', 'history', 'appearance']);
 
-  // Chat is active by default and renders its Transcript section without
-  // absorbing the independently owned history-compaction controls.
+  // Chat is active by default. Transcript behavior, completion notifications,
+  // and diagnostics stay here; status/usage visibility moved to Appearance.
   assert.ok(menu.querySelector('.toolbar-settings-tab[data-tab="chat"].active'), 'Chat tab should be active by default');
-  assert.match(menu.querySelector('.toolbar-settings-menu-body')!.textContent!, /Transcript/);
-  assert.doesNotMatch(menu.querySelector('.toolbar-settings-menu-body')!.textContent!, /History compaction/);
+  const chatText = menu.querySelector('.toolbar-settings-menu-body')!.textContent!;
+  assert.match(chatText, /Transcript/);
+  assert.match(chatText, /Completion notifications/);
+  assert.match(chatText, /Sound volume/);
+  assert.match(chatText, /Diagnostics/);
+  assert.doesNotMatch(chatText, /Hide bottom usage strip/);
+  assert.doesNotMatch(chatText, /History compaction/);
 
   // History is a first-class settings category, not a subsection of Chat.
   act(() => { click(menu.querySelector('.toolbar-settings-tab[data-tab="history"]')); });
@@ -81,9 +86,13 @@ test('the menu is tabbed and defaults to Chat; switching tabs swaps content', ()
   assert.match(body.textContent!, /History compaction/);
   assert.doesNotMatch(body.textContent!, /Transcript/);
 
-  // Switch to Appearance — its content replaces History's.
+  // Switch to Appearance — layout, theme, and status/usage visibility now live
+  // together under semantic groups.
   act(() => { click(menu.querySelector('.toolbar-settings-tab[data-tab="appearance"]')); });
+  assert.match(body.textContent!, /Theme & colors/);
   assert.match(body.textContent!, /Corner radius/);
+  assert.match(body.textContent!, /Status & usage/);
+  assert.match(body.textContent!, /Hide bottom usage strip/);
   assert.doesNotMatch(body.textContent!, /History compaction/);
 });
 
@@ -93,10 +102,25 @@ test('Extensions and Providers tabs appear only when their content exists', () =
     { id: 'm1', name: 'Model One', provider: 'test', reasoning: false, inputKinds: ['text'] },
   ];
   mount(extensions, models);
+  const trigger = container.querySelector('.toolbar-settings-trigger');
+  assert.equal(trigger?.getAttribute('aria-label'), 'Settings');
   const menu = openMenu();
 
   const tabIds = Array.from(menu.querySelectorAll('.toolbar-settings-tab')).map((t) => t.getAttribute('data-tab'));
   assert.deepEqual(tabIds, ['chat', 'history', 'appearance', 'extensions', 'providers']);
+
+  act(() => { click(menu.querySelector('.toolbar-settings-tab[data-tab="extensions"]')); });
+  assert.equal(
+    Array.from(menu.querySelectorAll('.toolbar-settings-section-label')).some((label) => label.textContent === 'Extensions'),
+    false,
+    'the active Extensions tab should not repeat its own label in the body',
+  );
+  act(() => { click(menu.querySelector('.toolbar-settings-tab[data-tab="providers"]')); });
+  assert.equal(
+    Array.from(menu.querySelectorAll('.toolbar-settings-section-label')).some((label) => label.textContent === 'Providers'),
+    false,
+    'the active Providers tab should not repeat its own label in the body',
+  );
 });
 
 // Bash settings now live under the Warm Bash extension in the Extensions tab

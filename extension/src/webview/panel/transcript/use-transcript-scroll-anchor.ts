@@ -12,9 +12,10 @@ interface UseTranscriptScrollAnchorArgs {
   virtualizer: Virtualizer<HTMLDivElement, HTMLDivElement>;
   /** True while pinned to the bottom; anchoring only runs when this is false. */
   autoFollowRef: { current: boolean };
-  /** Set during recent downward scroll events so anchoring yields to an active
-   *  scrollbar, wheel, trackpad, or middle-button move toward the bottom. */
-  isScrollingTowardBottomRef: { current: boolean };
+  /** True while manual scrolling owns scrollTop in either direction. */
+  manualScrollActiveRef: { current: boolean };
+  /** Browser scroll events expected from app-owned scrollTop writes. */
+  programmaticScrollTargetRef: { current: number | null };
   totalSize: number;
   /** Pagination in flight — anchoring is suppressed to avoid fighting the
    *  dedicated load-older scroll-anchor restore. */
@@ -26,9 +27,9 @@ const RESTORE_EPSILON_PX = 1;
 
 export function shouldApplyScrollAnchorDelta(
   delta: number | null,
-  isScrollingTowardBottom: boolean,
+  manualScrollActive: boolean,
 ): delta is number {
-  return !isScrollingTowardBottom
+  return !manualScrollActive
     && delta !== null
     && Math.abs(delta) >= RESTORE_EPSILON_PX;
 }
@@ -69,7 +70,8 @@ export function useTranscriptScrollAnchor({
   scrollRef,
   virtualizer,
   autoFollowRef,
-  isScrollingTowardBottomRef,
+  manualScrollActiveRef,
+  programmaticScrollTargetRef,
   totalSize,
   isLoadingOlder,
   isLoadingNewer,
@@ -111,24 +113,25 @@ export function useTranscriptScrollAnchor({
     ) {
       const candidates = buildCandidates(virtualizer.getVirtualItems());
       const delta = resolveScrollAnchorDelta(prev, candidates, el.scrollTop);
-      // An anchor restore preserves reading position while idle, but must never
-      // fight deliberate movement toward the live edge. Continuous scrollbar
-      // and middle-button scrolling otherwise loses the same few pixels on
-      // every streaming remeasure and can become unable to reach the bottom.
-      if (shouldApplyScrollAnchorDelta(delta, isScrollingTowardBottomRef.current)) {
+      // An anchor restore preserves reading position while idle, but manual
+      // scrollbar/wheel/touch/keyboard interaction owns scrollTop in either
+      // direction until it settles.
+      if (shouldApplyScrollAnchorDelta(delta, manualScrollActiveRef.current)) {
         // Force an instant restore even if a theme or future style adds smooth
         // scrolling. Save/override/restore inline `scroll-behavior` the same
         // way `scrollToBottom` does, wrapped in try/finally so the prior value
         // is always restored.
         const prior = el.style.scrollBehavior;
+        const before = el.scrollTop;
         try {
           el.style.scrollBehavior = 'auto';
           el.scrollTop += delta;
         } finally {
           el.style.scrollBehavior = prior;
         }
+        programmaticScrollTargetRef.current = el.scrollTop === before ? null : el.scrollTop;
       }
     }
     captureAnchor();
-  }, [totalSize, scrollRef, virtualizer, autoFollowRef, isScrollingTowardBottomRef, captureAnchor, isLoadingOlder, isLoadingNewer]);
+  }, [totalSize, scrollRef, virtualizer, autoFollowRef, manualScrollActiveRef, programmaticScrollTargetRef, captureAnchor, isLoadingOlder, isLoadingNewer]);
 }

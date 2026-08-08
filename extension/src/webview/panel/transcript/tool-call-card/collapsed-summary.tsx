@@ -8,10 +8,12 @@ import type { ToolCallHeaderSummaryModel } from './types';
 export function CollapsedSummary({
   model,
   summaryPath,
+  parentDepth,
   onOpenFile,
 }: {
   model: ToolCallHeaderSummaryModel;
   summaryPath?: string;
+  parentDepth?: number;
   onOpenFile: (path: string) => void;
 }) {
   if (model.kind === 'text') {
@@ -25,7 +27,7 @@ export function CollapsedSummary({
   if (model.kind === 'path') {
     return (
       <span class="block min-w-0 max-w-full flex-1" title={summaryPath ?? model.title ?? model.text}>
-        <ClickablePathButton path={summaryPath ?? model.title ?? model.text} displayText={model.text} onOpenFile={onOpenFile} />
+        <ClickablePathButton path={summaryPath ?? model.title ?? model.text} displayText={model.text} parentDepth={parentDepth} onOpenFile={onOpenFile} />
       </span>
     );
   }
@@ -38,7 +40,7 @@ export function CollapsedSummary({
         <span class="transcript-header-command-details">
           {model.detail && <span class="transcript-header-command-tail transcript-header-summary-mono">{model.detail}</span>}
           {model.pathLeadingQuote && <span class="transcript-header-command-tail transcript-header-summary-subtle">{model.pathLeadingQuote}</span>}
-          {model.pathText && <ClickablePathButton path={model.pathText} displayText={model.pathText} />}
+          {model.pathText && <ClickablePathButton path={model.pathText} displayText={model.pathText} parentDepth={parentDepth} />}
           {model.pathTrailingQuote && <span class="transcript-header-command-tail transcript-header-summary-subtle">{model.pathTrailingQuote}</span>}
           {model.suffix && <span class="transcript-header-command-tail transcript-header-summary-subtle">{model.suffix}</span>}
         </span>

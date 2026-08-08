@@ -1,15 +1,9 @@
 import type { ChatMessage, ChatPrefs, PruningSettings, ToolCall } from '../../../shared/protocol';
 import type { LiveTurnPhase } from '../../../shared/live-pipeline-protocol';
 import { assistantPartsFromMessage, toolCallsFromMessageParts } from '../../../shared/chat-message-parts';
-import { normalizeToolCallName } from '../../../shared/tool-call-analysis';
 import { estimateTextTokens } from '../../../shared/tokenize';
 import { isPruningResultMessage } from './pruning';
-import {
-  deriveMultiToolTail,
-  deriveRunningToolTail,
-  deriveStreamingTail,
-  type TurnActivityTail,
-} from './activity-tail';
+import type { TurnActivityTail } from './activity-tail';
 
 export const AGENT_ACTIVITY_LABELS = {
   pruning: 'pruning skills/tools',
@@ -162,34 +156,70 @@ export function deriveTurnActivityState({
   const assistant = lastAssistantMessage(currentTurnMessages);
 
   if (assistant) {
-    if (assistant.status === 'streaming') {
-      const pendingModelLabel = formatModelLabel(assistant.modelId || pendingAssistantModelId, assistant.thinkingLevel || pendingAssistantThinkingLevel);
-      const draft = assistant.draftingToolCall;
-      if (draft) {
-        const tokens = estimateTextTokens(draft.argumentsText);
-        const toolName = draft.name || 'tool';
-        const tokenDetail = `${tokens} ${tokens === 1 ? 'token' : 'tokens'}`;
+    const pendingModelLabel = formatModelLabel(
+      assistant.modelId || pendingAssistantModelId,
+      assistant.thinkingLevel || pendingAssistantThinkingLevel,
+    );
+    const toolCalls = toolCallsFromAssistant(assistant);
+    const provisionalTools = toolCalls.filter((tool) => tool.status === 'drafting' || tool.status === 'ready');
+    const legacyDraft = provisionalTools.length === 0 ? assistant.draftingToolCall : undefined;
+
+    if (provisionalTools.length > 0 || legacyDraft) {
+      const active = provisionalTools.at(-1);
+      const toolName = active?.name || legacyDraft?.name || 'tool';
+      const argumentsText = active?.argumentsText ?? legacyDraft?.argumentsText ?? '';
+      const tokens = estimateTextTokens(argumentsText);
+      const tokenDetail = `${tokens} ${tokens === 1 ? 'token' : 'tokens'}`;
+      const ready = active?.status === 'ready';
+      return {
+        phase: 'draftingTool',
+        label: ready ? `${toolName} call ready` : `drafting ${toolName} call`,
+        detail: tokenDetail,
+        tone: 'active',
+        ariaLabel: ready
+          ? `${toolName} tool call is ready, ${tokenDetail}`
+          : `Agent is drafting a ${toolName} tool call, ${tokenDetail}`,
+        pendingModelLabel,
+      };
+    }
+
+    const runningTools = toolCalls.filter((tool) => tool.status === 'running');
+    if (runningTools.length > 0) {
+      // Unified lifecycle: each tool card owns its inline live preview (and a
+      // ReasoningBlock owns streamed reasoning). This footer state reports only
+      // lifecycle/count metadata; restoring a tail here would duplicate the
+      // same live content below the owning row.
+      if (runningTools.length === 1) {
+        const toolName = runningTools[0]!.name;
         return {
-          phase: 'draftingTool',
-          label: `drafting ${toolName} call`,
-          detail: tokenDetail,
+          phase: 'runningTool',
+          label: `running ${toolName}`,
           tone: 'active',
-          ariaLabel: `Agent is drafting a ${toolName} tool call, ${tokenDetail}`,
-          pendingModelLabel,
+          ariaLabel: `Agent is running ${toolName}`,
+          runningToolName: toolName,
         };
       }
-      const streaming = deriveStreamingTail(assistantPartsFromMessage(assistant), prefs.activityTailLines);
-      if (streaming) {
-        // `deriveStreamingTail` only surfaces reasoning (reply text is shown in
-        // the message body above, not duplicated here), so a present tail is
-        // always a reasoning tail.
+      const summary = `running ${runningTools.length} tools`;
+      return {
+        phase: 'runningTool',
+        label: summary,
+        detail: runningTools.map((tool) => tool.name).join(', '),
+        tone: 'active',
+        ariaLabel: `Agent is ${summary}`,
+        runningToolSummary: summary,
+      };
+    }
+
+    if (assistant.status === 'streaming') {
+      const parts = assistantPartsFromMessage(assistant);
+      const lastPart = parts?.at(-1);
+      if (lastPart?.kind === 'reasoning') {
         return {
           phase: 'streaming',
           label: 'reasoning',
           tone: 'active',
           ariaLabel: 'Agent is reasoning',
           pendingModelLabel,
-          tail: streaming.tail,
         };
       }
       return {
@@ -201,65 +231,12 @@ export function deriveTurnActivityState({
       };
     }
 
-    const toolCalls = toolCallsFromAssistant(assistant);
-    const runningTools = toolCalls.filter((tc) => tc.status === 'running');
-    
-    if (runningTools.length > 0) {
-      const phase = 'runningTool';
-      if (runningTools.length === 1) {
-        const tool = runningTools[0]!;
-        const toolName = tool.name;
-        // Subagent calls already own rich live previews in their cards. Keep
-        // only the compact turn-level status strip rather than duplicating the
-        // child activity in bottom transcript preview rows.
-        const ownsInlinePreview = normalizeToolCallName(toolName) === 'subagent';
-        const derived = ownsInlinePreview
-          ? null
-          : deriveRunningToolTail(tool, prefs.activityTailLines);
-        if (derived) {
-          return {
-            phase,
-            label: derived.label,
-            detail: undefined,
-            tone: 'active',
-            ariaLabel: `Agent is running ${toolName}`,
-            runningToolName: toolName,
-            tail: derived.tail,
-          };
-        }
-        return {
-          phase,
-          label: `running ${toolName}`,
-          detail: undefined,
-          tone: 'active',
-          ariaLabel: `Agent is running ${toolName}`,
-          runningToolName: toolName,
-        };
-      } else {
-        const summary = `running ${runningTools.length} tools`;
-        // When any sibling is a subagent, its own card already previews the
-        // live child activity — suppress the duplicate bottom multi-tool
-        // preview rows, leaving only the compact status strip (label/detail).
-        const anySubagent = runningTools.some((tc) => normalizeToolCallName(tc.name) === 'subagent');
-        const derived = anySubagent ? null : deriveMultiToolTail(runningTools, prefs.activityTailLines);
-        return {
-          phase,
-          label: summary,
-          detail: runningTools.map((tc) => tc.name).join(', '),
-          tone: 'active',
-          ariaLabel: `Agent is ${summary}`,
-          runningToolSummary: summary,
-          tail: derived?.tail,
-        };
-      }
-    }
-
     return {
       phase: 'thinking',
       label: AGENT_ACTIVITY_LABELS.thinking,
       tone: 'processing',
       ariaLabel: 'Agent is thinking',
-      pendingModelLabel: formatModelLabel(assistant.modelId || pendingAssistantModelId, assistant.thinkingLevel || pendingAssistantThinkingLevel),
+      pendingModelLabel,
     };
   }
 

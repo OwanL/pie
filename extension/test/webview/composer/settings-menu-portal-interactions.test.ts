@@ -28,11 +28,6 @@ function click(el: Element | null): void {
   el!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
 }
 
-function mousedown(el: Element | null): void {
-  assert.ok(el, 'target element not found');
-  el!.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-}
-
 function mount() {
   const extensions: ExtensionInfo[] = [
     { id: 'skill-pruner', label: 'Skill Pruner', description: 'Prunes skills' },
@@ -103,7 +98,7 @@ test('Escape closes only the ModelPicker, leaving the settings menu open', () =>
   );
 });
 
-// Regression: selecting a model row (a mousedown on the portaled dropdown)
+// Regression: selecting a model row in the portaled dropdown
 // must not dismiss the settings menu. Previously the menu's outside-click
 // guard closed the menu because the portaled dropdown is not a DOM descendant
 // of the menu container.
@@ -113,8 +108,8 @@ test('selecting a prepass model row keeps the settings menu open', () => {
 
   const rows = document.querySelectorAll('.model-picker-row');
   assert.ok(rows.length >= 2, 'expected at least two model rows');
-  // mousedown on the second row selects it (the row's onMouseDown handler).
-  act(() => { mousedown(rows[1]); });
+  // Activate the second row through its click semantics (also used by AT).
+  act(() => { click(rows[1]); });
 
   assert.ok(
     container.querySelector('.toolbar-settings-menu'),

@@ -398,6 +398,20 @@ test('validateWebviewToHostMessage validates setPrefs patches and rejects unknow
       `invalid initial composer row count ${invalid} should be rejected`,
     );
   }
+  for (const valid of [0, 1, 8]) {
+    assert.equal(
+      validateWebviewToHostMessage({ type: 'setPrefs', prefs: { uiPathParentDepth: valid } }).ok,
+      true,
+      `path parent depth ${valid} should validate`,
+    );
+  }
+  for (const invalid of [-1, 9, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+    assert.equal(
+      validateWebviewToHostMessage({ type: 'setPrefs', prefs: { uiPathParentDepth: invalid } }).ok,
+      false,
+      `invalid path parent depth ${invalid} should be rejected`,
+    );
+  }
   // ── New per-place font sizes ────────────────────────────────────────
   assert.equal(
     validateWebviewToHostMessage({ type: 'setPrefs', prefs: { uiBaseFontSize: 13 } }).ok,

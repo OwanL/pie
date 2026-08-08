@@ -125,6 +125,15 @@ test('ModelPicker dropdown renders a search input when opened', () => {
   const listbox = document.getElementById(controlsId!);
   assert.ok(listbox, 'aria-controls should point to an existing listbox element');
   assert.equal(listbox!.getAttribute('role'), 'listbox');
+
+  // The compact table retains the information needed to compare models.
+  assert.match(dropdown.querySelector('.model-picker-header')?.textContent ?? '', /Model/);
+  assert.match(dropdown.querySelector('.model-picker-header')?.textContent ?? '', /In/);
+  assert.match(dropdown.querySelector('.model-picker-header')?.textContent ?? '', /Out/);
+  assert.match(dropdown.querySelector('.model-picker-header')?.textContent ?? '', /Img/);
+  assert.match(dropdown.textContent ?? '', /\$1\.00/);
+  assert.match(dropdown.textContent ?? '', /\$2\.00/);
+  assert.equal(dropdown.querySelectorAll('.model-picker-col-images').length, MODELS.length + 1);
 });
 
 test('typing into the search input filters the visible rows', () => {

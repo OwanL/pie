@@ -6,6 +6,7 @@ import { cx } from '../../utils/cx';
 import { CollapsibleChevron } from '../../components/chevron';
 import { formatDuration } from '../header';
 import { StatusChip } from '../status-chip';
+import { DEFAULT_CHAT_PREFS, type ChatPrefs } from '../../../../shared/protocol';
 
 import { CollapsedSummary } from './collapsed-summary';
 import { ToolCallStatusGlyph } from './status-glyph';
@@ -32,6 +33,7 @@ interface ToolCallHeaderProps {
    *  Only passed when the body is actually mounted (see ToolCallCard) so the
    *  reference never points at a missing element. */
   ariaControls?: string;
+  prefs?: ChatPrefs;
   onOpenFile: (path: string) => void;
   /** Toggle the card's expanded state. The header is the toggle target so the
    *  card body stays a plain region (its selectable/copyable content remains
@@ -39,13 +41,15 @@ interface ToolCallHeaderProps {
   onToggle: () => void;
 }
 
-export function ToolCallHeader({ open, bodyVisible, name, nameTitle, status, summary, summaryPath, summaryModel, sizeHint, errorDetail, pruningBadge, durationMs, ariaControls, onOpenFile, onToggle }: ToolCallHeaderProps) {
-  const statusTone =
-    status === 'failed' ? 'failed'
-    : null;
-  const statusLabel =
-    status === 'failed' ? 'Failed'
-    : null;
+export function ToolCallHeader({ open, bodyVisible, name, nameTitle, status, summary, summaryPath, summaryModel, sizeHint, errorDetail, pruningBadge, durationMs, ariaControls, prefs = DEFAULT_CHAT_PREFS, onOpenFile, onToggle }: ToolCallHeaderProps) {
+  const statusTone = status === 'failed' ? 'failed' : null;
+  const statusLabel = status === 'failed' ? 'Failed' : null;
+  const accessibleStatus =
+    status === 'drafting' ? 'Drafting'
+    : status === 'ready' ? 'Ready'
+    : status === 'running' ? 'Running'
+    : status === 'failed' ? 'Failed'
+    : 'Completed';
   const collapsedSummaryModel = summaryModel ?? buildToolCallHeaderSummaryModel(name, summary, summaryPath);
   // Hide the header summary while the tool body is already visible (e.g.
   // shell tools that auto-expand while running). The body renders its own
@@ -71,10 +75,11 @@ export function ToolCallHeader({ open, bodyVisible, name, nameTitle, status, sum
   // the card.
   return (
     <div
-      class="tool-call-header flex w-full min-h-[28px] cursor-pointer select-none items-center gap-[7px] px-2.5 py-[4px]"
+      class="tool-call-header flex w-full min-h-[26px] cursor-pointer select-none items-center gap-1.5 px-2 py-[3px]"
       role="button"
       aria-expanded={open}
       aria-controls={ariaControls}
+      aria-label={`${name} tool call, ${accessibleStatus}. ${open ? 'Collapse' : 'Expand'} details`}
       title={open ? 'Collapse' : 'Expand'}
       tabIndex={0}
       onClick={onToggle}
@@ -83,7 +88,7 @@ export function ToolCallHeader({ open, bodyVisible, name, nameTitle, status, sum
       <div class={cx('flex min-w-0 flex-1 items-center', (showSummary || showSizeHint) ? 'gap-1.5' : 'gap-2')}>
         <span class="transcript-header-title-mono min-w-0 flex-[0_1_auto] truncate" title={nameTitle}>{name}</span>
         {showSummary && collapsedSummaryModel ? (
-          <CollapsedSummary model={collapsedSummaryModel} summaryPath={summaryPath} onOpenFile={onOpenFile} />
+          <CollapsedSummary model={collapsedSummaryModel} summaryPath={summaryPath} parentDepth={prefs.uiPathParentDepth} onOpenFile={onOpenFile} />
         ) : null}
         {showSizeHint && <span class="ml-auto block min-w-0 max-w-[var(--tool-call-size-column-width)] flex-[0_0_var(--tool-call-size-column-width)] truncate text-right font-mono text-[10px] text-muted/50">{sizeHint}</span>}
       </div>

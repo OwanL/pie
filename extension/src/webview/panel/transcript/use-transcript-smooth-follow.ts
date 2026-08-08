@@ -112,6 +112,7 @@ export function useAutoFollow(
   totalSize: number,
   transcript: readonly ChatMessage[],
   sessionKey: string | null,
+  programmaticScrollTargetRef: { current: number | null },
 ) {
   useLayoutEffect(() => {
     const el = scrollRef.current;
@@ -120,12 +121,14 @@ export function useAutoFollow(
     const target = cachedTargetRef.current;
     if (el.scrollTop !== target) {
       const priorScrollBehavior = el.style.scrollBehavior;
+      const before = el.scrollTop;
       try {
         el.style.scrollBehavior = 'auto';
         el.scrollTop = target;
       } finally {
         el.style.scrollBehavior = priorScrollBehavior;
       }
+      programmaticScrollTargetRef.current = el.scrollTop === before ? null : el.scrollTop;
     }
 
     lastScrollTopRef.current = el.scrollTop;
@@ -142,5 +145,6 @@ export function useAutoFollow(
     totalSize,
     transcript,
     sessionKey,
+    programmaticScrollTargetRef,
   ]);
 }

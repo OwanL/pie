@@ -20,7 +20,10 @@ import { MessageFooter } from './footer';
 import { MessageItemHeader, MessageHeaderActions } from './header';
 
 interface MessageItemShellProps {
+  /** Authoritative transcript id retained for protocol/debug semantics. */
   messageId: string;
+  /** UI-only identity used by DOM scroll-anchor restoration. */
+  renderIdentity: string;
   role: ChatMessage['role'];
   /** Message status — used to dim queued (follow-up) user messages. */
   status: ChatMessage['status'];
@@ -40,6 +43,7 @@ interface MessageItemShellProps {
 
 export function MessageItemShell({
   messageId,
+  renderIdentity,
   role,
   status,
   customType,
@@ -64,19 +68,20 @@ export function MessageItemShell({
         // the content. User bubbles stay content-fit; system messages stretch
         // the full width. No width transition is added (would re-introduce
         // horizontal motion).
-        'flex min-w-0 flex-col gap-2 rounded-xl px-3 py-2.5',
-        'transition-[background-color,box-shadow] duration-[var(--panel-duration-normal)]',
+        'message-item-shell flex min-w-0 flex-col gap-2',
+        'transition-[background-color] duration-[var(--panel-duration-normal)]',
         'forced-colors:border forced-colors:border-[ButtonText]',
         role === 'assistant' &&
-          'self-start w-[min(var(--message-assistant-width),100%)] max-w-[min(var(--message-assistant-width),100%)] max-[340px]:w-[min(var(--message-assistant-width-narrow),100%)] max-[340px]:max-w-[min(var(--message-assistant-width-narrow),100%)] rounded-xl bg-card shadow-sm',
-        role === 'user' && 'w-fit max-w-[var(--message-assistant-width)] self-end rounded-xl shadow-none',
-        role === 'user' && !isSyntheticSend && 'bg-accent/15',
-        role === 'system' && 'w-auto max-w-none self-stretch bg-surface shadow-none',
-        role === 'user' && status === 'queued' && 'opacity-60 ring-1 ring-border-subtle',
-        isClickableUserMsg && 'cursor-pointer hover:ring-1 hover:ring-border-subtle hover:bg-accent/20',
+          'self-start w-[min(var(--message-assistant-width),100%)] max-w-[min(var(--message-assistant-width),100%)] px-1 py-2 max-[340px]:w-[min(var(--message-assistant-width-narrow),100%)] max-[340px]:max-w-[min(var(--message-assistant-width-narrow),100%)]',
+        role === 'user' && 'w-fit max-w-[var(--message-assistant-width)] self-end rounded-lg px-2 py-1.5',
+        role === 'system' && 'w-auto max-w-none self-stretch px-2 py-2',
+        role === 'user' && status === 'queued' && 'opacity-60',
+        isClickableUserMsg && 'cursor-pointer',
       )}
       data-message-id={messageId}
+      data-scroll-anchor-id={renderIdentity}
       data-role={role}
+      data-synthetic={isSyntheticSend ? 'true' : undefined}
       data-queued={role === 'user' && status === 'queued' ? 'true' : undefined}
       data-entered={entered ? 'true' : undefined}
       data-editing={isEditing ? 'true' : undefined}

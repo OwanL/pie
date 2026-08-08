@@ -4,14 +4,17 @@ import test from 'node:test';
 import { selectViewState } from '../../../../src/host/core/projection';
 import { createInitialArchState, reducer } from '../../../../src/host/core/reducer';
 import type { TurnSemanticEnvelope } from '../../../../src/shared/live-pipeline-protocol';
+import type { SessionOpenedPayload } from '../../../../src/shared/protocol';
+import { buildTranscriptRows } from '../../../../src/webview/panel/transcript/virtual-list-rows';
 
 const base = {
-  protocolVersion: 5,
+  protocolVersion: 6,
   sessionPath: '/session.jsonl',
   requestId: 'request',
   turnId: 'turn',
   attemptId: 'attempt',
   occurredAt: 100,
+  checkpointBytes: 30 * 1024 * 1024,
 };
 
 function dispatch(state: ReturnType<typeof createInitialArchState>, envelope: TurnSemanticEnvelope) {
@@ -53,7 +56,16 @@ test('sequenced live events project without mutating durable transcript and term
   assert.equal(liveView.transcript.at(-1)?.markdown, 'live');
   assert.equal(liveView.transcript.at(-1)?.modelId, 'provider/model');
   assert.equal(liveView.transcript.at(-1)?.thinkingLevel, 'high');
+  assert.equal(liveView.transcript.at(-1)?.renderIdentity, 'message');
   assert.equal(liveView.liveTurnPhase, 'streaming');
+  const liveRow = buildTranscriptRows({
+    transcript: liveView.transcript,
+    systemPromptCount: 0,
+    hasOlder: false,
+    hasNewer: false,
+    busy: true,
+  }).at(-1);
+  assert.equal(liveRow?.key, 'message:message');
 
   const terminalMessage = {
     id: 'durable-assistant', role: 'assistant' as const, createdAt: new Date(120).toISOString(),
@@ -66,13 +78,175 @@ test('sequenced live events project without mutating durable transcript and term
   });
 
   assert.equal(committed.state.livePipeline.turnsBySession[base.sessionPath], undefined);
-  assert.deepEqual(committed.state.transcript.bySession[base.sessionPath], [terminalMessage]);
+  const committedMessage = committed.state.transcript.bySession[base.sessionPath]?.[0];
+  assert.equal(committedMessage?.id, 'durable-assistant', 'durable transcript ownership keeps the SDK id');
+  assert.equal(committedMessage?.durableEntryId, 'entry-assistant');
+  assert.equal(committedMessage?.renderIdentity, 'message');
+  const durableView = selectViewState(committed.state);
+  const durableRow = buildTranscriptRows({
+    transcript: durableView.transcript,
+    systemPromptCount: 0,
+    hasOlder: false,
+    hasNewer: false,
+    busy: false,
+  }).at(-1);
+  assert.equal(durableRow?.key, liveRow?.key, 'live and durable projections retain one virtual row key');
   assert.equal(
     committed.state.settings.pendingExtensionUIRequestsBySession[base.sessionPath],
     undefined,
     'a committed terminal cannot leave an actionable extension UI request behind',
   );
   assert.equal(selectViewState(committed.state).liveTurnPhase, null);
+});
+
+test('terminal commit preserves parallel metadata in ordered parts and the toolCalls mirror', () => {
+  let state = createInitialArchState();
+  state.transcript.bySession[base.sessionPath] = [];
+  state = dispatch(state, {
+    ...base, kind: 'turn.started', seq: 1, canonicalMessageId: 'message', startedAt: 90,
+  }).state;
+  state = dispatch(state, {
+    ...base, kind: 'tool.started', seq: 2, executionId: 'execution', parentExecutionId: null,
+    rootExecutionId: 'execution', toolCallId: 'tool', name: 'read', input: { path: 'live' },
+    startedAt: 95, parallelGroupId: 'batch',
+  }).state;
+  state = dispatch(state, {
+    ...base, kind: 'tool.terminal', seq: 3, executionId: 'execution', status: 'completed',
+    result: 'live', durableEntryId: 'tool-entry',
+  }).state;
+  const durableCall = {
+    id: 'tool', name: 'read', input: { path: 'durable' }, result: 'durable',
+    status: 'completed' as const, durableEntryId: 'tool-entry',
+  };
+  state = dispatch(state, {
+    ...base, kind: 'turn.terminal', seq: 4, terminalKind: 'completed', durableEntryId: 'assistant-entry',
+    durableMessage: {
+      id: 'message', role: 'assistant', createdAt: new Date(100).toISOString(), markdown: '',
+      status: 'completed', durableEntryId: 'assistant-entry',
+      parts: [{ kind: 'toolCall', toolCall: durableCall }], toolCalls: [durableCall],
+    },
+  }).state;
+  const committed = state.transcript.bySession[base.sessionPath]?.[0];
+  const part = committed?.parts?.[0];
+  const partCall = part?.kind === 'toolCall' ? part.toolCall : undefined;
+  assert.equal(partCall?.parallelGroupId, 'batch');
+  assert.equal(committed?.toolCalls?.[0]?.parallelGroupId, 'batch');
+  assert.deepEqual(committed?.toolCalls?.[0], partCall);
+  assert.deepEqual(partCall?.input, { path: 'durable' });
+  assert.equal(partCall?.result, 'durable');
+});
+
+test('idle session.opened preserves reconciled render and batch identity while durable content stays authoritative', () => {
+  let state = createInitialArchState();
+  state.sessions.activeSessionPath = base.sessionPath;
+  state.sessions.sessions = [{
+    path: base.sessionPath, name: 'session', cwd: '/', modifiedAt: '2026-08-07T00:00:00.000Z', messageCount: 0,
+  }];
+  state.transcript.bySession[base.sessionPath] = [];
+  state = dispatch(state, {
+    ...base, kind: 'turn.started', seq: 1, canonicalMessageId: 'live-assistant', startedAt: 90,
+  }).state;
+  state = dispatch(state, {
+    ...base, kind: 'turn.toolDraft', seq: 2,
+    draft: { toolCallId: 'tool', name: 'draft-name', argumentsJson: '{"draft":', phase: 'drafting' },
+  }).state;
+  state = dispatch(state, {
+    ...base, kind: 'tool.started', seq: 3, executionId: 'execution', parentExecutionId: null,
+    rootExecutionId: 'execution', toolCallId: 'tool', name: 'live-name', input: { live: true },
+    startedAt: 95, parallelGroupId: 'batch',
+  }).state;
+  state = dispatch(state, {
+    ...base, kind: 'tool.terminal', seq: 4, executionId: 'execution', status: 'completed',
+    result: 'live-result', durationMs: 25, durableEntryId: 'tool-entry',
+  }).state;
+  const firstDurableCall = {
+    id: 'tool', name: 'first-durable-name', input: { durable: 1 }, result: 'first-durable-result',
+    status: 'completed' as const, durableEntryId: 'tool-entry',
+  };
+  state = dispatch(state, {
+    ...base, kind: 'turn.terminal', seq: 5, terminalKind: 'completed', durableEntryId: 'assistant-entry',
+    durableMessage: {
+      id: 'first-durable-assistant', role: 'assistant', createdAt: new Date(100).toISOString(),
+      markdown: 'first durable content', status: 'completed', durableEntryId: 'assistant-entry',
+      parts: [{ kind: 'toolCall', toolCall: firstDurableCall }], toolCalls: [firstDurableCall],
+    },
+  }).state;
+
+  const beforeRefresh = selectViewState(state);
+  const beforeRow = buildTranscriptRows({
+    transcript: beforeRefresh.transcript, systemPromptCount: 0,
+    hasOlder: false, hasNewer: false, busy: false,
+  }).at(-1);
+  assert.equal(beforeRow?.key, 'message:live-assistant');
+
+  const refreshedCall = {
+    id: 'tool', name: 'refreshed-durable-name', input: { durable: 2 }, result: 'refreshed-result',
+    status: 'failed' as const, durableEntryId: 'tool-entry',
+  };
+  const opened: SessionOpenedPayload = {
+    session: {
+      path: base.sessionPath, cwd: '/', name: 'session', modifiedAt: '2026-08-07T00:00:00.000Z', messageCount: 1,
+    },
+    transcript: [{
+      id: 'refreshed-durable-assistant', role: 'assistant', createdAt: new Date(110).toISOString(),
+      markdown: 'authoritative refreshed content', status: 'error', durableEntryId: 'assistant-entry',
+      errorDetail: 'authoritative error',
+      parts: [{ kind: 'toolCall', toolCall: refreshedCall }], toolCalls: [refreshedCall],
+    }],
+    transcriptWindow: {
+      totalCount: 1, loadedStart: 0, loadedEnd: 1, hasOlder: false, hasNewer: false,
+      isPartial: false, hasUserMessages: false,
+    },
+    busy: false,
+  };
+  state = reducer(state, { kind: 'SessionOpened', sessionPath: base.sessionPath, payload: opened }).state;
+
+  const refreshed = state.transcript.bySession[base.sessionPath]?.[0];
+  const refreshedPart = refreshed?.parts?.[0];
+  const refreshedPartCall = refreshedPart?.kind === 'toolCall' ? refreshedPart.toolCall : undefined;
+  assert.equal(refreshed?.id, 'refreshed-durable-assistant');
+  assert.equal(refreshed?.markdown, 'authoritative refreshed content');
+  assert.equal(refreshed?.status, 'error');
+  assert.equal(refreshed?.renderIdentity, 'live-assistant');
+  assert.equal(refreshedPartCall?.name, 'refreshed-durable-name');
+  assert.deepEqual(refreshedPartCall?.input, { durable: 2 });
+  assert.equal(refreshedPartCall?.result, 'refreshed-result');
+  assert.equal(refreshedPartCall?.status, 'failed');
+  assert.equal(refreshedPartCall?.parallelGroupId, 'batch');
+  assert.equal(refreshedPartCall?.executionId, 'execution');
+  assert.equal(refreshedPartCall?.startedAt, 95);
+  assert.equal(refreshedPartCall?.durationMs, 25);
+  assert.equal(refreshedPartCall?.seq, 4);
+  assert.deepEqual(refreshed?.toolCalls?.[0], refreshedPartCall);
+  const afterRow = buildTranscriptRows({
+    transcript: selectViewState(state).transcript, systemPromptCount: 0,
+    hasOlder: false, hasNewer: false, busy: false,
+  }).at(-1);
+  assert.equal(afterRow?.key, beforeRow?.key);
+});
+
+test('terminal append does not reconcile metadata across conflicting durable entries sharing an id', () => {
+  let state = createInitialArchState();
+  state.transcript.bySession[base.sessionPath] = [{
+    id: 'shared-id', role: 'assistant', createdAt: new Date(80).toISOString(), markdown: 'old',
+    status: 'completed', durableEntryId: 'old-entry', renderIdentity: 'old-render',
+  }];
+  state = dispatch(state, {
+    ...base, kind: 'turn.started', seq: 1, canonicalMessageId: 'new-live-render', startedAt: 90,
+  }).state;
+  state = dispatch(state, {
+    ...base, kind: 'turn.terminal', seq: 2, terminalKind: 'completed', durableEntryId: 'new-entry',
+    durableMessage: {
+      id: 'shared-id', role: 'assistant', createdAt: new Date(100).toISOString(), markdown: 'new',
+      status: 'completed', durableEntryId: 'new-entry',
+    },
+  }).state;
+
+  const transcript = state.transcript.bySession[base.sessionPath];
+  assert.equal(transcript?.length, 2);
+  assert.equal(transcript?.[0]?.renderIdentity, 'old-render');
+  assert.equal(transcript?.[1]?.durableEntryId, 'new-entry');
+  assert.equal(transcript?.[1]?.renderIdentity, 'new-live-render');
 });
 
 test('a delayed checkpoint cannot revive an attempt after its terminal tombstone', () => {
@@ -82,12 +256,13 @@ test('a delayed checkpoint cannot revive an attempt after its terminal tombstone
   }).state;
   const active = state.livePipeline.turnsBySession[base.sessionPath]!;
   const delayedCheckpoint = {
-    protocolVersion: 5 as const,
+    protocolVersion: 6 as const,
     sessionPath: base.sessionPath,
     turnId: base.turnId,
     attemptId: base.attemptId,
     checkpointSeq: 1,
     phase: active.phase,
+    checkpointBytes: active.checkpointBytes,
     turn: { ...active, checkpointSeq: 1 },
     tools: [],
     pendingExtensionUiRequestIds: [],
@@ -141,12 +316,13 @@ test('sequence gaps request a checkpoint and a terminal checkpoint repairs misse
     status: 'terminal_grace',
     watermark: { ...base, finalSeq: 4, terminalKind: 'completed' },
     checkpoint: {
-      protocolVersion: 5,
+      protocolVersion: 6,
       sessionPath: base.sessionPath,
       turnId: base.turnId,
       attemptId: base.attemptId,
       checkpointSeq: 4,
       phase: 'streaming',
+      checkpointBytes: turn.checkpointBytes,
       turn: {
         ...turn, seq: 4, checkpointSeq: 4, phase: 'streaming',
         parts: [{ kind: 'text', text: 'authoritative' }], textBytes: Buffer.byteLength('authoritative', 'utf8'),
@@ -156,7 +332,7 @@ test('sequence gaps request a checkpoint and a terminal checkpoint repairs misse
       terminal,
     },
   });
-  assert.deepEqual(repaired.state.transcript.bySession[base.sessionPath], [terminal]);
+  assert.deepEqual(repaired.state.transcript.bySession[base.sessionPath], [{ ...terminal, renderIdentity: 'message' }]);
   assert.equal(repaired.state.livePipeline.turnsBySession[base.sessionPath], undefined);
   assert.equal(repaired.state.settings.pendingExtensionUIRequestsBySession[base.sessionPath], undefined);
   const lateStart = dispatch(repaired.state, {
@@ -230,7 +406,7 @@ test('exhausted checkpoint repair clears the owned attempt and its pending gap s
   assert.equal(state.transcript.bySession[base.sessionPath]?.at(-1)?.status, 'interrupted');
 });
 
-test('checkpoint repair replays a coalesced v5 progress range from the checkpoint base', () => {
+test('checkpoint repair replays a coalesced v6 progress range from the checkpoint base', () => {
   let state = createInitialArchState();
   state = dispatch(state, {
     ...base, kind: 'turn.started', seq: 1, canonicalMessageId: 'message', startedAt: 90,
@@ -241,7 +417,7 @@ test('checkpoint repair replays a coalesced v5 progress range from the checkpoin
   }).state;
   const queued = dispatch(state, {
     ...base, kind: 'tool.progress', seq: 6, baseSeq: 4, executionId: 'execution',
-    baseProgressRevision: 2, progressRevision: 4,
+    baseProgressRevision: 2, progressRevision: 4, previewBytes: 4, aggregatePreviewBytes: 4,
     update: { kind: 'patch', operations: [{
       op: 'appendString', path: ['children', 0, 'streamingText'], value: 'cd',
     }] },
@@ -254,8 +430,9 @@ test('checkpoint repair replays a coalesced v5 progress range from the checkpoin
     turnId: base.turnId, attemptId: base.attemptId, ok: true, occurredAt: 140,
     status: 'active', watermark: null,
     checkpoint: {
-      protocolVersion: 5, sessionPath: base.sessionPath, turnId: base.turnId,
+      protocolVersion: 6, sessionPath: base.sessionPath, turnId: base.turnId,
       attemptId: base.attemptId, checkpointSeq: 4, phase: 'running_tool',
+      checkpointBytes: owner.checkpointBytes,
       turn: {
         ...owner, seq: 4, checkpointSeq: 4, phase: 'running_tool', reconciliation: undefined,
         aggregatePreviewBytes: Buffer.byteLength(JSON.stringify({
@@ -284,6 +461,58 @@ test('checkpoint repair replays a coalesced v5 progress range from the checkpoin
   assert.equal(preview?.kind === 'subagent' ? preview.children[0]?.streamingText : undefined, 'abcd');
 });
 
+test('host transitions reject a second tool.started reusing a durability-confirmed tool-call id', () => {
+  let state = createInitialArchState();
+  state.transcript.bySession[base.sessionPath] = [];
+  state = dispatch(state, {
+    ...base, kind: 'turn.started', seq: 1, canonicalMessageId: 'message', startedAt: 90,
+  }).state;
+  state = dispatch(state, {
+    ...base, kind: 'tool.started', seq: 2, executionId: 'exec-a', parentExecutionId: null,
+    rootExecutionId: 'exec-a', toolCallId: 'tool-a', name: 'read', input: { path: 'x' }, startedAt: 95,
+  }).state;
+  state = dispatch(state, {
+    ...base, kind: 'tool.terminal', seq: 3, executionId: 'exec-a', status: 'completed',
+    result: 'ok', durableEntryId: 'tool-entry',
+  }).state;
+  const duplicate = dispatch(state, {
+    ...base, kind: 'tool.started', seq: 4, executionId: 'exec-b', parentExecutionId: null,
+    rootExecutionId: 'exec-b', toolCallId: 'tool-a', name: 'read', input: { path: 'y' }, startedAt: 96,
+  });
+  assert.equal(duplicate.state.livePipeline.toolsByExecutionId['exec-b'], undefined);
+  assert.equal(duplicate.state.livePipeline.toolsByExecutionId['exec-a']?.terminal?.durableEntryId, 'tool-entry');
+  assert.ok(duplicate.effects.some((effect) => effect.kind === 'RequestLiveTurnCheckpoint'));
+});
+
+test('host transitions count toolDraftBytes against the complete serialized draft payload', () => {
+  let state = createInitialArchState();
+  state.transcript.bySession[base.sessionPath] = [];
+  state = dispatch(state, {
+    ...base, kind: 'turn.started', seq: 1, canonicalMessageId: 'message', startedAt: 90,
+  }).state;
+
+  const oversizedId = 'id-'.repeat(30_000);
+  const rejectedId = dispatch(state, {
+    ...base, kind: 'turn.toolDraft', seq: 2,
+    draft: { toolCallId: oversizedId, name: 'read', argumentsJson: '{}', phase: 'drafting' },
+  });
+  assert.ok(rejectedId.effects.some((effect) => effect.kind === 'RequestLiveTurnCheckpoint'));
+  assert.equal(rejectedId.state.livePipeline.turnsBySession[base.sessionPath]?.seq, 1);
+
+  const oversizedName = 'n'.repeat(70 * 1024);
+  const rejectedName = dispatch(rejectedId.state, {
+    ...base, kind: 'turn.toolDraft', seq: 2,
+    draft: { toolCallId: 'ok-id', name: oversizedName, argumentsJson: '{}', phase: 'drafting' },
+  });
+  assert.ok(rejectedName.effects.some((effect) => effect.kind === 'RequestLiveTurnCheckpoint'));
+
+  const accepted = dispatch(rejectedName.state, {
+    ...base, kind: 'turn.toolDraft', seq: 2,
+    draft: { toolCallId: 'normal', name: 'read', argumentsJson: '{}', phase: 'drafting' },
+  });
+  assert.equal(accepted.state.livePipeline.turnsBySession[base.sessionPath]?.toolDraftsByCallId.normal?.name, 'read');
+});
+
 test('checkpoint repair replays a newer envelope that arrived after checkpoint creation', () => {
   let state = createInitialArchState();
   state = dispatch(state, {
@@ -297,8 +526,9 @@ test('checkpoint repair replays a newer envelope that arrived after checkpoint c
     turnId: base.turnId, attemptId: base.attemptId, ok: true, occurredAt: 140,
     status: 'active', watermark: null,
     checkpoint: {
-      protocolVersion: 5, sessionPath: base.sessionPath, turnId: base.turnId,
+      protocolVersion: 6, sessionPath: base.sessionPath, turnId: base.turnId,
       attemptId: base.attemptId, checkpointSeq: 2, phase: 'streaming',
+      checkpointBytes: turn.checkpointBytes,
       turn: {
         ...turn, seq: 2, checkpointSeq: 2, phase: 'streaming',
         parts: [{ kind: 'text', text: 'before' }], textBytes: Buffer.byteLength('before', 'utf8'),

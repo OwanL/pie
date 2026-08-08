@@ -229,6 +229,29 @@ test('streaming tool-call arguments count as generated output', () => {
   assert.equal(second.rate, secondTokens - firstTokens);
 });
 
+test('multiple provisional ToolCall rows retain independent token baselines', () => {
+  const acc = createAccumulator(BASE_NOW);
+  const firstA = tokenText(20);
+  const secondA = tokenText(40);
+  const draftB = tokenText(30);
+  tickTokenRate(acc, [streamingMessage({
+    toolCalls: [
+      { id: 'a', name: 'read', input: firstA, argumentsText: firstA, status: 'drafting' },
+      { id: 'b', name: 'bash', input: draftB, argumentsText: draftB, status: 'drafting' },
+    ],
+  })], BASE_NOW + 1_000);
+  tickTokenRate(acc, [streamingMessage({
+    toolCalls: [
+      { id: 'a', name: 'read', input: secondA, argumentsText: secondA, status: 'ready' },
+      { id: 'b', name: 'bash', input: draftB, argumentsText: draftB, status: 'drafting' },
+    ],
+  })], BASE_NOW + 2_000);
+  assert.equal(acc.draftingTokensById.size, 2);
+  const expected = estimateTextTokens('read') + estimateTextTokens(secondA)
+    + estimateTextTokens('bash') + estimateTextTokens(draftB);
+  assert.equal(acc.cumTokens, expected);
+});
+
 test('tool execution pauses the clock without double-counting its draft or swallowing continuation text', () => {
   const acc = createAccumulator(BASE_NOW);
   const initialText = tokenText(100);

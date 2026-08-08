@@ -619,12 +619,13 @@ function gitSha(): string {
 
 function benchLargePreviewProgress(sizeMiB: number): LargePreviewResult {
   const base = {
-    protocolVersion: 5,
+    protocolVersion: 6,
     sessionPath: '/perf-large.jsonl',
     requestId: 'request-large',
     turnId: 'turn-large',
     attemptId: 'attempt-large',
     occurredAt: 1,
+    checkpointBytes: 30 * 1024 * 1024,
   } as const;
   const apply = (state: ReturnType<typeof createEmptyLivePipelineState>, event: TurnSemanticEnvelope) => (
     applyLiveSemanticEnvelope(state, event, 60_000).state

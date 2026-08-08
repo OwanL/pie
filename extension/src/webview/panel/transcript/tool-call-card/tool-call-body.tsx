@@ -6,6 +6,7 @@ import { isEmptyToolCallInput } from '../../../../shared/chat-message-parts';
 import { extractExitCode, normalizeToolCallName } from '../../../../shared/tool-call-analysis';
 import { ClickablePathButton } from '../../file-path';
 import { ResizablePre } from '../../components/resizable-pre';
+import { DEFAULT_CHAT_PREFS, type ChatPrefs } from '../../../../shared/protocol';
 import {
   formatValueAsHighlightedYaml,
   highlightToolResultText,
@@ -20,12 +21,25 @@ import { hasImageToolResult, ToolResultContentParts } from './tool-result-conten
 
 interface ToolCallBodyProps {
   toolCall: ToolCall;
+  prefs?: ChatPrefs;
   onOpenFile: (path: string) => void;
 }
 
-export function ToolCallBody({ toolCall, onOpenFile }: ToolCallBodyProps) {
+export function ToolCallBody({ toolCall, prefs = DEFAULT_CHAT_PREFS, onOpenFile }: ToolCallBodyProps) {
   const isShell = isCommandSummaryTool(toolCall.name);
   const isRunning = toolCall.status === 'running';
+  const isProvisional = toolCall.status === 'drafting' || toolCall.status === 'ready';
+
+  if (isProvisional) {
+    return (
+      <div class="tool-call-body" onClick={(e) => e.stopPropagation()}>
+        <div class="tool-call-section">
+          <div class="tool-call-section-label">Input</div>
+          <pre class="tool-call-pre tool-call-provisional-input"><code>{toolCall.argumentsText || '(empty)'}</code></pre>
+        </div>
+      </div>
+    );
+  }
 
   if (isShell) {
     const text = textFromToolResult(toolCall.result) ?? '';
@@ -86,7 +100,7 @@ export function ToolCallBody({ toolCall, onOpenFile }: ToolCallBodyProps) {
                 <span class="tool-call-truncated-fulllog">
                   <span class="tool-call-truncated-fulllog-sep" aria-hidden="true">·</span>
                   <span class="tool-call-truncated-fulllog-label">Full log:</span>
-                  <ClickablePathButton path={fullLogPath} displayText={fullLogPath} onOpenFile={onOpenFile} />
+                  <ClickablePathButton path={fullLogPath} displayText={fullLogPath} parentDepth={prefs.uiPathParentDepth} onOpenFile={onOpenFile} />
                 </span>
               )}
             </div>

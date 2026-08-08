@@ -199,40 +199,90 @@
 
 .panel-chip-pruning {
   height: 18px;
-  gap: 6px;
-  padding: 0 8px;
+  gap: 5px;
+  padding: 0 2px;
+  border: 0;
+  border-radius: 2px;
+  background: transparent;
+  color: color-mix(in srgb, var(--panel-foreground) 58%, var(--panel-muted));
   font-family: var(--panel-font-mono);
-  font-size: 10px;
-  font-weight: 700;
+  font-size: 9.5px;
+  font-weight: 500;
   line-height: 1;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  letter-spacing: 0.01em;
+  text-transform: none;
 }
 
 .panel-chip-pruning .panel-chip-label {
   max-width: min(52ch, 100%);
 }
 
+/* The completed prepass is transcript metadata, not a standalone badge. A
+   small kicker and disclosure chevron preserve hierarchy and affordance while
+   the shell itself stays on the assistant surface. */
+.pruning-header-kicker {
+  display: inline-flex;
+  align-items: center;
+  padding-right: 6px;
+  border-right: 1px solid var(--panel-border-subtle);
+  color: var(--panel-muted);
+  font-family: var(--vscode-font-family, sans-serif);
+  font-size: 8.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
 .panel-chip-pruning.panel-chip-interactive {
   cursor: pointer;
 }
 
-.panel-chip-pruning.panel-chip-accent,
+.panel-chip-pruning.panel-chip-interactive:hover,
+.panel-chip-pruning.panel-chip-interactive:focus-visible {
+  border-color: transparent;
+  background: transparent;
+  color: var(--panel-foreground-soft);
+}
+
+.panel-chip-pruning.panel-chip-interactive:hover .panel-chip-label {
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, currentColor 45%, transparent);
+  text-underline-offset: 2px;
+}
+
+.panel-chip-pruning.panel-chip-accent {
+  color: var(--panel-foreground-soft);
+}
+
+.panel-chip-pruning.panel-chip-accent .pruning-header-kicker {
+  color: color-mix(in srgb, var(--panel-accent) 72%, var(--panel-muted));
+}
+
 .panel-chip-pruning.panel-chip-danger {
+  color: var(--panel-danger);
   opacity: 1;
 }
 
 .panel-chip-pruning .panel-chip-trailing {
+  display: inline-flex;
+  align-items: center;
   font-size: 9px;
-  opacity: 0.7;
+  opacity: 0.62;
+}
+
+.pruning-header-pending-row .panel-chip-pruning-pending {
+  color: var(--panel-muted);
+}
+
+.pruning-header-pending-row .panel-chip-warning {
+  background: transparent;
+  color: var(--panel-warning);
 }
 
 /* ── Expanded pruning diagnostics panel ─────────────────────────────────── */
-/* Replaces the former flat label/value grid with a scannable layout: a stat
-   tile row (kept/total + tokens saved + prepass meta), color-coded skill/tool
-   tag sections, contextual banners, and collapsed sub-sections for the
-   reasoning and raw prepass prompts/output. The collapsed chip
-   (PruningHeaderButton) is unchanged. */
+/* A scannable, editorial detail layout: a compact stat row, skill/tool
+   sections, contextual banners, and collapsed sub-sections for reasoning and
+   raw prepass prompts/output. It deliberately shares the assistant surface. */
 
 .pruning-detail-list {
   display: flex;
@@ -242,17 +292,17 @@
 }
 
 .pruning-diagnostics-panel {
-  margin-top: 8px;
-  padding: 12px;
-  border-radius: var(--panel-radius-lg);
-  background: color-mix(in srgb, var(--panel-control-surface) 50%, transparent);
-  font-size: 12px;
+  margin-top: 7px;
+  padding: 9px 0 2px 10px;
+  border-inline-start: 1px solid var(--panel-border-subtle);
+  background: transparent;
+  font-size: 11px;
   line-height: 1.45;
 }
 
 .pruning-diagnostics-panel.failed {
-  border: 1px solid color-mix(in srgb, var(--panel-danger) 15%, transparent);
-  background: color-mix(in srgb, var(--panel-danger) 5%, transparent);
+  border-inline-start-color: color-mix(in srgb, var(--panel-danger) 45%, var(--panel-border));
+  background: transparent;
 }
 
 .pruning-diagnostics-inline {
@@ -297,33 +347,32 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
+  gap: 7px 10px;
 }
 
 .pruning-stat-tile {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  padding: 5px 9px;
   min-width: 0;
-  border: 1px solid color-mix(in srgb, var(--panel-border) 50%, transparent);
-  border-radius: var(--panel-radius-sm);
-  background: var(--panel-code-surface);
+  padding-right: 10px;
+  border-right: 1px solid var(--panel-border-subtle);
+  background: transparent;
 }
 
 .pruning-stat-value {
   font-family: var(--panel-font-mono);
-  font-size: 13px;
+  font-size: 11px;
   font-weight: 600;
   line-height: 1.1;
   font-variant-numeric: tabular-nums;
-  color: var(--panel-foreground);
+  color: var(--panel-foreground-soft);
 }
 
 .pruning-stat-label {
-  font-size: 9px;
+  font-size: 8.5px;
   font-weight: 600;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.06em;
   line-height: 1;
   text-transform: uppercase;
   color: var(--panel-muted);
@@ -352,29 +401,24 @@
 .pruning-mode-badge {
   display: inline-flex;
   align-items: center;
-  height: 16px;
-  padding: 0 6px;
-  border: 1px solid color-mix(in srgb, var(--panel-border) 60%, transparent);
-  border-radius: var(--panel-radius-sm);
-  background: var(--panel-control-surface);
+  height: 14px;
+  padding: 0;
+  border: 0;
+  background: transparent;
   color: var(--panel-muted);
   font-family: var(--panel-font-mono);
-  font-size: 9px;
-  font-weight: 700;
+  font-size: 8.5px;
+  font-weight: 600;
   line-height: 1;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
 }
 
 .pruning-mode-shadow {
-  border-color: color-mix(in srgb, var(--panel-accent) 30%, transparent);
-  background: color-mix(in srgb, var(--panel-accent) 12%, transparent);
-  color: var(--panel-accent);
+  color: color-mix(in srgb, var(--panel-accent) 72%, var(--panel-muted));
 }
 
 .pruning-mode-off {
-  border-color: color-mix(in srgb, var(--panel-danger) 30%, transparent);
-  background: color-mix(in srgb, var(--panel-danger) 12%, transparent);
   color: var(--panel-danger);
 }
 
@@ -410,7 +454,7 @@
 .pruning-tag-list {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
+  gap: 3px 9px;
   min-width: 0;
 }
 
@@ -418,10 +462,10 @@
   display: inline-flex;
   align-items: center;
   max-width: 100%;
-  padding: 1px 6px;
-  border-radius: var(--panel-radius-sm);
+  padding: 0;
+  background: transparent;
   font-family: var(--panel-font-mono);
-  font-size: 10px;
+  font-size: 9.5px;
   line-height: 1.4;
   white-space: nowrap;
   overflow: hidden;
@@ -429,13 +473,18 @@
 }
 
 .pruning-tag-kept {
-  background: color-mix(in srgb, var(--panel-accent) 12%, transparent);
-  color: color-mix(in srgb, var(--panel-accent) 88%, var(--panel-foreground));
+  color: color-mix(in srgb, var(--panel-foreground) 76%, var(--panel-muted));
+}
+
+.pruning-tag-kept::before {
+  content: '+';
+  margin-right: 3px;
+  color: color-mix(in srgb, var(--panel-accent) 72%, var(--panel-muted));
 }
 
 .pruning-tag-pruned {
-  background: color-mix(in srgb, var(--panel-control-surface) 70%, transparent);
   color: var(--panel-muted);
+  opacity: 0.68;
   text-decoration: line-through;
   text-decoration-color: color-mix(in srgb, var(--panel-muted) 55%, transparent);
 }

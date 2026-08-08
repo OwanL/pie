@@ -1331,7 +1331,7 @@ test('tool execution and message end events cover completed payloads and fallbac
 test('sequenced production path emits only typed live envelopes with a durable terminal', () => {
   const { deps, emitted } = createDeps({ captureLive: true });
   const accumulator = new BackendLiveTurnAccumulator({
-    protocolVersion: 5,
+    protocolVersion: 6,
     sessionPath: '/workspace/session.jsonl',
     requestId: 'req-live',
     turnId: 'turn-live',
@@ -1378,10 +1378,77 @@ test('sequenced production path emits only typed live envelopes with a durable t
   assert.equal(typeof envelopes.at(-1)?.durableMessage.providerLatencyMs, 'number');
 });
 
+test('toolcall_start/delta/end preserve raw JSON and finalize only the matching semantic draft', () => {
+  const { deps, emitted } = createDeps({ captureLive: true });
+  const accumulator = new BackendLiveTurnAccumulator({
+    protocolVersion: 6, sessionPath: '/workspace/session.jsonl', requestId: 'req-drafts',
+    turnId: 'turn-drafts', attemptId: 'attempt-drafts', canonicalMessageId: 'req-drafts:1', startedAt: 100,
+  });
+  const context = createContext({
+    activeRequest: { id: 'req-drafts', messageIndex: 0, aborted: false, liveTurnAccumulator: accumulator },
+  });
+  handleSdkSessionEvent(deps, context, { type: 'message_start', message: { role: 'assistant' } });
+  const partialA = { content: [{ type: 'toolCall', id: 'tool-a', name: 'read' }] };
+  const partialB = { content: [
+    { type: 'toolCall', id: 'tool-a', name: 'read' },
+    { type: 'toolCall', id: 'tool-b', name: 'bash' },
+  ] };
+  handleSdkSessionEvent(deps, context, {
+    type: 'message_update', message: { role: 'assistant' },
+    assistantMessageEvent: { type: 'toolcall_start', contentIndex: 0, partial: partialA },
+  });
+  handleSdkSessionEvent(deps, context, {
+    type: 'message_update', message: { role: 'assistant' },
+    assistantMessageEvent: { type: 'toolcall_delta', contentIndex: 0, delta: '{ "path" : ', partial: partialA },
+  });
+  handleSdkSessionEvent(deps, context, {
+    type: 'message_update', message: { role: 'assistant' },
+    assistantMessageEvent: { type: 'toolcall_start', contentIndex: 1, partial: partialB },
+  });
+  handleSdkSessionEvent(deps, context, {
+    type: 'message_update', message: { role: 'assistant' },
+    assistantMessageEvent: {
+      type: 'toolcall_end', contentIndex: 0,
+      toolCall: { type: 'toolCall', id: 'tool-a', name: 'read', arguments: { path: 'README.md' } },
+      partial: partialB,
+    },
+  });
+
+  const drafts = emitted
+    .filter((entry) => entry.event === 'live.semantic' && (entry.payload as any).kind === 'turn.toolDraft')
+    .map((entry) => (entry.payload as any).draft);
+  assert.deepEqual(drafts.map((draft) => [draft.toolCallId, draft.phase]), [
+    ['tool-a', 'drafting'], ['tool-a', 'drafting'], ['tool-b', 'drafting'], ['tool-a', 'ready'],
+  ]);
+  assert.equal(drafts[1]?.argumentsJson, '{ "path" : ', 'incomplete provider JSON remains raw');
+  assert.equal(drafts[3]?.argumentsJson, '{"path":"README.md"}', 'end stores the full finalized serialization');
+  assert.equal(accumulator.checkpoint().turn.toolDraftsByCallId['tool-b']?.phase, 'drafting');
+});
+
+test('malformed toolcall events consume a rejected semantic observation', () => {
+  const { deps, emitted } = createDeps({ captureLive: true });
+  const accumulator = new BackendLiveTurnAccumulator({
+    protocolVersion: 6, sessionPath: '/workspace/session.jsonl', requestId: 'req-malformed-draft',
+    turnId: 'turn-malformed-draft', attemptId: 'attempt-malformed-draft',
+    canonicalMessageId: 'req-malformed-draft:1', startedAt: 100,
+  });
+  const context = createContext({
+    activeRequest: { id: 'req-malformed-draft', messageIndex: 0, aborted: false, liveTurnAccumulator: accumulator },
+  });
+  handleSdkSessionEvent(deps, context, { type: 'message_start', message: { role: 'assistant' } });
+  handleSdkSessionEvent(deps, context, {
+    type: 'message_update', message: { role: 'assistant' },
+    assistantMessageEvent: { type: 'toolcall_delta', contentIndex: -1, delta: '{}' },
+  });
+  const rejected = emitted.find((entry) =>
+    entry.event === 'live.semantic' && (entry.payload as any).kind === 'observation.rejected');
+  assert.equal((rejected?.payload as any)?.reason, 'malformed_payload');
+});
+
 test('concurrent semantic tool starts carry one stable parallel group into live records', () => {
   const { deps, emitted } = createDeps({ captureLive: true });
   const accumulator = new BackendLiveTurnAccumulator({
-    protocolVersion: 5, sessionPath: '/workspace/session.jsonl', requestId: 'req-parallel',
+    protocolVersion: 6, sessionPath: '/workspace/session.jsonl', requestId: 'req-parallel',
     turnId: 'turn-parallel', attemptId: 'attempt-parallel', canonicalMessageId: 'req-parallel:1', startedAt: 100,
   });
   const context = createContext({
@@ -1491,7 +1558,7 @@ test('pre-first-semantic inactivity retires and replaces a runtime even when abo
         provider: 'umans', modelId: 'umans-test',
         lastProviderErrorForDiagnostics: 'upstream header phase stalled for 30000ms',
         liveTurnAccumulator: new BackendLiveTurnAccumulator({
-          protocolVersion: 5, sessionPath: '/workspace/session.jsonl', requestId: 'req-semantic-timeout',
+          protocolVersion: 6, sessionPath: '/workspace/session.jsonl', requestId: 'req-semantic-timeout',
           turnId: 'turn-timeout', attemptId: 'attempt-timeout', canonicalMessageId: 'req-semantic-timeout:1', startedAt: Date.now(),
         }),
       },

@@ -4,6 +4,7 @@
 import { MessageItem } from '../message-item';
 import { useRecovery } from '../message-item/footer';
 import { registerRowRenderer, type RowRendererProps } from '../registry';
+import { messageRenderIdentity } from '../render-identity';
 
 function renderMessage({
   row,
@@ -38,7 +39,7 @@ function renderMessage({
 
   return (
     <MessageItem
-      key={row.message.id}
+      key={messageRenderIdentity(row.message)}
       message={row.message}
       isStreaming={isStreaming}
       prefs={prefs}

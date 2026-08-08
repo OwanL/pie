@@ -30,7 +30,9 @@ export function applyLiveTurnCheckpoint(
   const checkpointByteLimit = checkpoint.terminal
     ? LIVE_PIPELINE_LIMITS.terminalCheckpointBytes
     : LIVE_PIPELINE_LIMITS.checkpointBytes;
-  if (encodedBytes > checkpointByteLimit) {
+  if (encodedBytes > checkpointByteLimit
+    || encodedBytes > checkpoint.checkpointBytes
+    || checkpoint.turn.checkpointBytes !== checkpoint.checkpointBytes) {
     return { classification: 'oversize', state: current };
   }
   if (checkpoint.protocolVersion !== LIVE_PIPELINE_PROTOCOL_VERSION
@@ -139,6 +141,8 @@ function isCheckpointShape(value: unknown): value is LiveTurnCheckpoint {
     || typeof value.turnId !== 'string'
     || typeof value.attemptId !== 'string'
     || typeof value.checkpointSeq !== 'number'
+    || !isNonNegativeSafeInteger(value.checkpointBytes)
+    || value.checkpointBytes > LIVE_PIPELINE_LIMITS.terminalCheckpointBytes
     || !isLiveTurnPhase(value.phase)
     || !isLiveTurnPhase(value.turn.phase)
     || value.phase !== value.turn.phase
@@ -154,6 +158,9 @@ function isCheckpointShape(value: unknown): value is LiveTurnCheckpoint {
     || !isNonNegativeSafeInteger(value.turn.textBytes)
     || !isNonNegativeSafeInteger(value.turn.reasoningBytes)
     || !isNonNegativeSafeInteger(value.turn.aggregatePreviewBytes)
+    || !isNonNegativeSafeInteger(value.turn.checkpointBytes)
+    || !isRecord(value.turn.toolDraftsByCallId)
+    || !isNonNegativeSafeInteger(value.turn.aggregateToolDraftBytes)
     || value.turn.checkpointSeq !== value.checkpointSeq
     || typeof value.turn.startedAt !== 'number'
     || !Number.isFinite(value.turn.startedAt)
@@ -165,11 +172,12 @@ function isCheckpointShape(value: unknown): value is LiveTurnCheckpoint {
     && (part.kind === 'tool'
       ? typeof part.toolCallId === 'string'
       : (part.kind === 'text' || part.kind === 'reasoning') && typeof part.text === 'string'))) return false;
-  if (value.turn.draftingToolCall !== undefined
-    && (!isRecord(value.turn.draftingToolCall)
-      || typeof value.turn.draftingToolCall.toolCallId !== 'string'
-      || typeof value.turn.draftingToolCall.name !== 'string'
-      || typeof value.turn.draftingToolCall.argumentsJson !== 'string')) return false;
+  if (!Object.entries(value.turn.toolDraftsByCallId).every(([toolCallId, draft]) =>
+    isRecord(draft)
+      && typeof draft.toolCallId === 'string' && draft.toolCallId === toolCallId && toolCallId.length > 0
+      && typeof draft.name === 'string' && draft.name.length > 0
+      && typeof draft.argumentsJson === 'string'
+      && (draft.phase === 'drafting' || draft.phase === 'ready'))) return false;
   if (!value.tools.every((tool) => isRecord(tool)
     && typeof tool.executionId === 'string'
     && (tool.parentExecutionId === null || typeof tool.parentExecutionId === 'string')
@@ -235,11 +243,19 @@ function isNonNegativeSafeInteger(value: unknown): value is number {
 
 function validateCheckpointPayload(checkpoint: LiveTurnCheckpoint): 'valid' | 'oversize' | 'malformed' {
   if (checkpoint.pendingExtensionUiRequestIds.length > LIVE_PIPELINE_LIMITS.extensionUiRequests
-    || checkpoint.turn.pendingExtensionUiRequestIds.length > LIVE_PIPELINE_LIMITS.extensionUiRequests
-    || (checkpoint.turn.draftingToolCall
-      && Buffer.byteLength(checkpoint.turn.draftingToolCall.argumentsJson, 'utf8') > LIVE_PIPELINE_LIMITS.toolDraftBytes)) {
+    || checkpoint.turn.pendingExtensionUiRequestIds.length > LIVE_PIPELINE_LIMITS.extensionUiRequests) {
     return 'oversize';
   }
+  let aggregateToolDraftBytes = 0;
+  for (const [toolCallId, draft] of Object.entries(checkpoint.turn.toolDraftsByCallId)) {
+    if (toolDraftByteLength(draft) > LIVE_PIPELINE_LIMITS.toolDraftBytes) return 'oversize';
+    if (toolCallId !== draft.toolCallId
+      || !checkpoint.turn.parts.some((part) => part.kind === 'tool' && part.toolCallId === toolCallId)) return 'malformed';
+    aggregateToolDraftBytes += toolDraftByteLength(draft);
+  }
+  if (aggregateToolDraftBytes > LIVE_PIPELINE_LIMITS.toolDraftAggregateBytes) return 'oversize';
+  if (checkpoint.turn.aggregateToolDraftBytes !== aggregateToolDraftBytes) return 'malformed';
+
   let textBytes = 0;
   let reasoningBytes = 0;
   for (const part of checkpoint.turn.parts) {
@@ -279,6 +295,13 @@ function validateCheckpointPayload(checkpoint: LiveTurnCheckpoint): 'valid' | 'o
 
 function isLiveCompactedValue(value: unknown): boolean {
   return typeof value === 'object' && value !== null && (value as { liveCompacted?: unknown }).liveCompacted === true;
+}
+
+function toolDraftByteLength(draft: { toolCallId: string; name: string; argumentsJson: string; phase: string }): number {
+  return Buffer.byteLength(
+    JSON.stringify({ toolCallId: draft.toolCallId, name: draft.name, argumentsJson: draft.argumentsJson, phase: draft.phase }),
+    'utf8',
+  );
 }
 
 function jsonByteLength(value: unknown): number {

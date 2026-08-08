@@ -374,7 +374,8 @@ export function TranscriptVirtualList({
 
   const {
     autoFollowRef,
-    isScrollingTowardBottomRef,
+    manualScrollActiveRef,
+    programmaticScrollTargetRef,
     setAutoFollow,
     isAtBottom,
     isInitialPositioning,
@@ -414,7 +415,8 @@ export function TranscriptVirtualList({
     scrollRef,
     virtualizer,
     autoFollowRef,
-    isScrollingTowardBottomRef,
+    manualScrollActiveRef,
+    programmaticScrollTargetRef,
     totalSize,
     isLoadingOlder,
     isLoadingNewer,

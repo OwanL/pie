@@ -91,13 +91,25 @@
 /* When a user message enters edit mode, the shell gets a visual indicator */
 
 [data-role="user"][data-editing="true"] {
-  background: color-mix(in srgb, var(--panel-accent) 8%, transparent);
-  box-shadow:
-    0 0 0 1px color-mix(in srgb, var(--panel-accent) 12%, transparent),
-    var(--panel-shadow-sm);
+  background: var(--panel-user-surface);
+  border-color: var(--panel-user-border);
+  box-shadow: inset 0 1px 0 var(--panel-user-highlight);
 }
 
+[data-role="user"][data-editing="true"] .inline-editor-textarea {
+  background: color-mix(in srgb, var(--panel-user-surface) 92%, var(--panel-black));
+  border-color: var(--panel-user-border);
+  color: var(--panel-user-foreground);
+}
 
+[data-role="user"][data-editing="true"] .inline-editor-textarea:focus {
+  border-color: color-mix(in srgb, var(--panel-user-foreground) 38%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--panel-user-foreground) 12%, transparent);
+}
+
+[data-role="user"][data-editing="true"] .inline-editor-textarea::placeholder {
+  color: color-mix(in srgb, var(--panel-user-foreground) 58%, var(--panel-user-surface));
+}
 
 @media (forced-colors: active) {
   .inline-editor-textarea {

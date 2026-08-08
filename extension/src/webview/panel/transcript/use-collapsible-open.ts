@@ -5,6 +5,11 @@ import { syncCollapsibleOpenState } from '../collapsible-state';
 const collapsibleOpenByKey = new Map<string, boolean>();
 const collapsibleDefaultByKey = new Map<string, boolean>();
 
+/** One disclosure identity shared by generic and specialized tool renderers. */
+export function toolDisclosureKey(toolCallId: string): string {
+  return `tool:${toolCallId}`;
+}
+
 /** Clear the module-level collapsible cache. Called on host-instance change
  *  (backend restart) to prevent stale open/closed state from a previous backend
  *  instance. NOT called on session switch — keys are globally-unique

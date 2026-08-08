@@ -108,6 +108,7 @@ export const PanelMain = memo(function PanelMain({
           onRevertFile={handlers.handleRevertFile}
           readFilePaths={readFilePaths}
           onSetFileRead={handlers.handleSetFileRead}
+          prefs={prefs}
         />
       )}
       <div class="panel-content">

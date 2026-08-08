@@ -4,6 +4,7 @@
 import type { JSX } from 'preact';
 
 import {
+  formatPathWithParentDepth,
   normalizePathSeparators,
   trimTrailingPathSeparators,
   normalizeComparablePath,
@@ -11,7 +12,7 @@ import {
   truncatePathText,
 } from '../../shared/path-utils.js';
 
-export { normalizePathSeparators, trimTrailingPathSeparators, normalizeComparablePath, relativePathFromBase, truncatePathText };
+export { formatPathWithParentDepth, normalizePathSeparators, trimTrailingPathSeparators, normalizeComparablePath, relativePathFromBase, truncatePathText };
 
 function looksLikeFileLeaf(value: string): boolean {
   const leaf = value.trim();
@@ -55,11 +56,13 @@ export function splitSummaryPath(summary: string): { pathSection: string | null;
 export interface ClickablePathButtonProps {
   path: string;
   displayText: string;
+  parentDepth?: number;
   onOpenFile?: (path: string) => void;
 }
 
-export function ClickablePathButton({ path, displayText, onOpenFile }: ClickablePathButtonProps): JSX.Element {
-  const { pathSection, fileSection } = splitSummaryPath(displayText);
+export function ClickablePathButton({ path, displayText, parentDepth, onOpenFile }: ClickablePathButtonProps): JSX.Element {
+  const visibleText = parentDepth !== undefined ? formatPathWithParentDepth(displayText, parentDepth) : displayText;
+  const { pathSection, fileSection } = splitSummaryPath(visibleText);
   if (!fileSection) {
     return (
       <span class="transcript-header-path-preview" title={path}>

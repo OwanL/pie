@@ -2,14 +2,15 @@
 /** @jsxImportSource preact */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks';
-import type { FileChangeEntry } from '../../shared/protocol';
+import { DEFAULT_CHAT_PREFS, type FileChangeEntry, type ChatPrefs } from '../../shared/protocol';
 import { cx } from './utils/cx';
 import { ResizeHandle } from './components/resize-handle';
 import { useResizableWidth } from './components/use-resizable-width';
 import { LineStats, FileName } from './file-changes-row';
 import { FileChangeContextMenu } from './file-changes-context-menu';
 import type { FileChangeContextMenuState } from './file-changes-context-menu';
-import { computeDiffTotals, computeKindStats, KIND_ORDER, KIND_LABEL, basename } from './file-changes-stats';
+import { computeDiffTotals, computeKindStats, KIND_ORDER, KIND_LABEL } from './file-changes-stats';
+import { formatPathWithParentDepth } from './file-path';
 
 // Re-export the public surface previously bundled in this module so existing
 // import paths (`./file-changes-panel`) keep resolving unchanged.
@@ -28,6 +29,7 @@ interface FileChangesPanelProps {
   readFilePaths: string[];
   /** Mark a changed file read/unread (right-click action). */
   onSetFileRead: (filePath: string, read: boolean) => void;
+  prefs?: ChatPrefs;
 }
 
 // Hover-intent / dismiss delays for the peek overlay (STATE_CONTRACT
@@ -45,6 +47,7 @@ export function FileChangesPanel({
   onRevertFile,
   readFilePaths,
   onSetFileRead,
+  prefs = DEFAULT_CHAT_PREFS,
 }: FileChangesPanelProps) {
   const pinned = expanded;
   const [hasNewChanges, setHasNewChanges] = useState(false);
@@ -112,6 +115,7 @@ export function FileChangesPanel({
           path={change.path}
           kind={change.kind}
           disabled={change.kind === 'deleted'}
+          parentDepth={prefs.uiPathParentDepth}
           onClick={() => onOpenInEditor(change.path)}
         />
         <LineStats
@@ -277,7 +281,7 @@ export function FileChangesPanel({
               return (
                 <span key={c.path} class={cx('sliver-file', `kind-${c.kind}`, readSet.has(c.path) && 'is-read')} title={`${c.path} · ${KIND_LABEL[c.kind]}`}>
                   <span class="sliver-file-row">
-                    <span class="sliver-file-name">{basename(c.path)}</span>
+                    <span class="sliver-file-name">{formatPathWithParentDepth(c.path, prefs.uiPathParentDepth)}</span>
                   </span>
                   <span class="sliver-file-row sliver-file-stats">
                     {a ? <span class="sliver-file-add">+{a}</span> : null}
@@ -364,6 +368,7 @@ export function FileChangesPanel({
       {ctxMenu && (
         <FileChangeContextMenu
           menu={ctxMenu}
+          parentDepth={prefs.uiPathParentDepth}
           onRevert={onRevertFile}
           onSetFileRead={onSetFileRead}
           onClose={closeCtxMenu}

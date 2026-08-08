@@ -13,6 +13,7 @@ import { useCaptureHeight, useMessageEntrance, useMessageItemDerived, useMessage
 import { MessageItemInner, MessageItemShell } from './message-item/inner';
 import { userImagePartsToInputs } from './parts';
 import { MessageCommitContext, useCommittedMessageLeaf } from './commit-registry';
+import { messageRenderIdentity } from './render-identity';
 
 export { ReasoningBlock } from './message-item/reasoning-block';
 
@@ -87,9 +88,10 @@ export function MessageItemView({
 
   const { messageBodyRef, capturedHeight } = useCaptureHeight(message.role);
 
-  // Plays the entrance animation only the first time a message id is seen,
-  // so virtualized remounts don't replay it.
-  const entered = useMessageEntrance(message.id, sessionKey);
+  const renderIdentity = messageRenderIdentity(message);
+  // Entrance state is render-only, so it follows the same host-projected
+  // identity as row keys and scroll anchoring across live→durable handoff.
+  const entered = useMessageEntrance(renderIdentity, sessionKey);
 
   const initialInputs = useMemo(() => userImagePartsToInputs(message), [message]);
   const commitOwner = useMemo(() => ({
@@ -116,6 +118,7 @@ export function MessageItemView({
   return (
     <MessageItemShell
       messageId={message.id}
+      renderIdentity={renderIdentity}
       role={message.role}
       status={message.status}
       customType={message.customType}

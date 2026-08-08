@@ -3,10 +3,11 @@ import test from 'node:test';
 
 import { BackendLiveTurnAccumulator, LiveTurnCheckpointRegistry } from '../../../src/backend/live-turn-accumulator';
 import { normalizeToolProgress } from '../../../src/backend/tool-progress-normalizer';
+import { LIVE_PIPELINE_LIMITS } from '../../../src/shared/live-pipeline-protocol';
 
 function accumulator() {
   return new BackendLiveTurnAccumulator({
-    protocolVersion: 5,
+    protocolVersion: 6,
     sessionPath: '/session.jsonl',
     requestId: 'request',
     turnId: 'turn',
@@ -42,6 +43,123 @@ test('backend accumulator reserves every candidate sequence including rejections
   assert.equal(value.checkpoint().checkpointSeq, 4);
   assert.equal(value.checkpoint().turn.modelId, 'provider/model');
   assert.equal(value.checkpoint().turn.thinkingLevel, 'high');
+});
+
+test('backend accumulator retains ordered sibling drafts and promotes only the matching call', () => {
+  const value = accumulator();
+  value.observe({ kind: 'turn.started' }, 100);
+  value.observe({ kind: 'turn.reasoning', delta: 'plan' }, 101);
+  value.observe({ kind: 'turn.toolDraft', action: 'start', toolCallId: 'tool-a', name: 'read' }, 102);
+  value.observe({ kind: 'turn.text', delta: 'between' }, 103);
+  value.observe({ kind: 'turn.toolDraft', action: 'start', toolCallId: 'tool-b', name: 'bash' }, 104);
+  value.observe({
+    kind: 'turn.toolDraft', action: 'delta', toolCallId: 'tool-a', name: 'read',
+    argumentsJsonDelta: '{"path":',
+  }, 105);
+  const ready = value.observe({
+    kind: 'turn.toolDraft', action: 'end', toolCallId: 'tool-a', name: 'read',
+    argumentsJson: '{"path":"README.md"}',
+  }, 106);
+  assert.equal(ready?.kind === 'turn.toolDraft' ? ready.draft.phase : undefined, 'ready');
+  assert.deepEqual(value.checkpoint().turn.parts, [
+    { kind: 'reasoning', text: 'plan' },
+    { kind: 'tool', toolCallId: 'tool-a' },
+    { kind: 'text', text: 'between' },
+    { kind: 'tool', toolCallId: 'tool-b' },
+  ]);
+
+  // Duplicate provider boundaries are idempotent and cannot reset finalized JSON.
+  value.observe({ kind: 'turn.toolDraft', action: 'start', toolCallId: 'tool-a', name: 'read' }, 107);
+  value.observe({
+    kind: 'turn.toolDraft', action: 'end', toolCallId: 'tool-a', name: 'read',
+    argumentsJson: '{"path":"README.md"}',
+  }, 108);
+  value.observe({
+    kind: 'tool.started', executionId: 'exec-a', parentExecutionId: null, rootExecutionId: 'exec-a',
+    toolCallId: 'tool-a', name: 'read', input: { path: 'README.md' }, startedAt: 109,
+  }, 109);
+  const checkpoint = value.checkpoint();
+  assert.equal(checkpoint.turn.toolDraftsByCallId['tool-a'], undefined);
+  assert.equal(checkpoint.turn.toolDraftsByCallId['tool-b']?.phase, 'drafting');
+  assert.equal(checkpoint.turn.parts.filter((part) => part.kind === 'tool').length, 2);
+  assert.ok(checkpoint.turn.aggregateToolDraftBytes > 0);
+  const promotedSeq = checkpoint.checkpointSeq;
+  assert.equal(value.observe({ kind: 'turn.toolDraft', action: 'start', toolCallId: 'tool-a', name: 'read' }, 110), undefined);
+  assert.equal(value.observe({
+    kind: 'turn.toolDraft', action: 'end', toolCallId: 'tool-a', name: 'read',
+    argumentsJson: '{"path":"README.md"}',
+  }, 111), undefined);
+  assert.equal(value.checkpoint().checkpointSeq, promotedSeq);
+  assert.equal(value.checkpoint().turn.toolDraftsByCallId['tool-a'], undefined);
+});
+
+test('prototype-like tool-call IDs remain ordinary Record keys', () => {
+  const value = accumulator();
+  value.observe({ kind: 'turn.started' }, 100);
+  const observed = value.observe({
+    kind: 'turn.toolDraft', action: 'start', toolCallId: 'constructor', name: 'Object',
+  }, 101);
+  assert.equal(observed?.kind, 'turn.toolDraft');
+  assert.equal(
+    Object.values(value.checkpoint().turn.toolDraftsByCallId).find((draft) => draft.toolCallId === 'constructor')?.toolCallId,
+    'constructor',
+  );
+});
+
+test('backend accumulator rejects malformed and oversized draft observations and clears drafts at terminal', () => {
+  const value = accumulator();
+  value.observe({ kind: 'turn.started' }, 100);
+  const missingStart = value.observe({
+    kind: 'turn.toolDraft', action: 'delta', toolCallId: 'missing', name: 'bash', argumentsJsonDelta: '{}',
+  }, 101);
+  assert.equal(missingStart?.kind, 'observation.rejected');
+  value.observe({ kind: 'turn.toolDraft', action: 'start', toolCallId: 'large', name: 'bash' }, 102);
+  const oversize = value.observe({
+    kind: 'turn.toolDraft', action: 'delta', toolCallId: 'large', name: 'bash',
+    argumentsJsonDelta: 'x'.repeat(64 * 1024 + 1),
+  }, 103);
+  assert.equal(oversize?.kind, 'observation.rejected');
+
+  let aggregateRejected = false;
+  for (let index = 0; index < 40 && !aggregateRejected; index += 1) {
+    const toolCallId = `aggregate-${index}`;
+    value.observe({ kind: 'turn.toolDraft', action: 'start', toolCallId, name: 'bash' }, 200 + index * 2);
+    const observation = value.observe({
+      kind: 'turn.toolDraft', action: 'delta', toolCallId, name: 'bash',
+      argumentsJsonDelta: 'y'.repeat(64 * 1024),
+    }, 201 + index * 2);
+    aggregateRejected = observation?.kind === 'observation.rejected';
+  }
+  assert.equal(aggregateRejected, true, 'aggregate draft bytes remain bounded across sibling calls');
+  value.observe({
+    kind: 'turn.terminal', terminalKind: 'interrupted', durableEntryId: 'terminal-entry',
+    durableMessage: {
+      id: 'message', role: 'assistant', createdAt: new Date(104).toISOString(), markdown: '',
+      status: 'interrupted', durableEntryId: 'terminal-entry',
+    },
+  }, 104);
+  assert.deepEqual(value.checkpoint().turn.toolDraftsByCallId, {});
+  assert.equal(value.checkpoint().turn.aggregateToolDraftBytes, 0);
+});
+
+test('backend accumulator rejects tool starts and progress after aborting', () => {
+  const value = accumulator();
+  value.observe({ kind: 'turn.started' }, 100);
+  value.observe({
+    kind: 'tool.started', executionId: 'execution', parentExecutionId: null, rootExecutionId: 'execution',
+    toolCallId: 'tool', name: 'bash', input: {}, startedAt: 101,
+  }, 101);
+  value.observe({ kind: 'turn.phase', phase: 'aborting' }, 102);
+  const progress = value.observe({
+    kind: 'tool.progress', executionId: 'execution', preview: { kind: 'generic', summary: 'late' },
+  }, 103);
+  const start = value.observe({
+    kind: 'tool.started', executionId: 'late-execution', parentExecutionId: null, rootExecutionId: 'late-execution',
+    toolCallId: 'late-tool', name: 'read', input: {}, startedAt: 104,
+  }, 104);
+  assert.equal(progress?.kind, 'observation.rejected');
+  assert.equal(start.kind, 'observation.rejected');
+  assert.equal(value.checkpoint().tools.length, 1);
 });
 
 test('normal subagent normalization feeds a JSON-safe accumulator snapshot', () => {
@@ -301,7 +419,181 @@ test('settled tool history is semantically compacted while recent tool UX detail
   assert.equal((checkpoint.tools[0]?.immutableInput as { liveCompacted?: boolean }).liveCompacted, true);
   assert.equal((checkpoint.tools[0]?.terminal?.result as { liveCompacted?: boolean }).liveCompacted, true);
   assert.equal((checkpoint.tools.at(-1)?.terminal?.result as { kind?: string }).kind, 'text');
-  assert.ok(Buffer.byteLength(JSON.stringify(checkpoint), 'utf8') < 2 * 1024 * 1024);
+  const actualBytes = Buffer.byteLength(JSON.stringify(checkpoint), 'utf8');
+  assert.ok(actualBytes < 2 * 1024 * 1024);
+  assert.ok(actualBytes <= checkpoint.checkpointBytes, 'many compact metadata records remain canonically accounted');
+});
+
+test('checkpoint pressure compacts oldest durability-confirmed details before rejecting new live work', () => {
+  const value = accumulator();
+  value.observe({ kind: 'turn.started' }, 100);
+  value.observe({
+    kind: 'tool.started', executionId: 'settled', parentExecutionId: null, rootExecutionId: 'settled',
+    toolCallId: 'settled-tool', name: 'ask_user', input: {}, startedAt: 101,
+  }, 101);
+  value.observe({
+    kind: 'tool.terminal', executionId: 'settled', status: 'completed',
+    result: { answer: 'a'.repeat(4 * 1024 * 1024) }, durableEntryId: 'settled-entry',
+  }, 102);
+  value.observe({
+    kind: 'tool.started', executionId: 'running', parentExecutionId: null, rootExecutionId: 'running',
+    toolCallId: 'running-tool', name: 'subagent', input: {}, startedAt: 103,
+  }, 103);
+  const accepted = value.observe({
+    kind: 'tool.progress', executionId: 'running', preview: {
+      kind: 'subagent', mode: 'single', omittedChildren: 0,
+      children: [{ id: 'worker', phase: 'running', streamingText: 'x'.repeat(27 * 1024 * 1024), messages: [] }],
+    },
+  }, 104);
+  assert.equal(accepted?.kind, 'tool.progress');
+  const checkpoint = value.checkpoint();
+  assert.equal((checkpoint.tools[0]?.terminal?.result as { liveCompacted?: boolean }).liveCompacted, true);
+  assert.ok(Buffer.byteLength(JSON.stringify(checkpoint), 'utf8') <= checkpoint.checkpointBytes);
+});
+
+test('terminal checkpoint pressure compacts settled details before accepting terminalization', () => {
+  const value = accumulator();
+  value.observe({ kind: 'turn.started' }, 100);
+  value.observe({
+    kind: 'tool.started', executionId: 'settled', parentExecutionId: null, rootExecutionId: 'settled',
+    toolCallId: 'settled-tool', name: 'ask_user', input: {}, startedAt: 101,
+  }, 101);
+  assert.equal(value.observe({
+    kind: 'tool.terminal', executionId: 'settled', status: 'completed',
+    result: { answer: 'a'.repeat(27 * 1024 * 1024) }, durableEntryId: 'settled-entry',
+  }, 102).kind, 'tool.terminal');
+
+  const terminal = value.observe({
+    kind: 'turn.terminal', terminalKind: 'completed', durableEntryId: 'assistant-entry',
+    durableMessage: {
+      id: 'message', role: 'assistant', createdAt: new Date(103).toISOString(),
+      markdown: 'x'.repeat(4 * 1024 * 1024), status: 'completed', durableEntryId: 'assistant-entry',
+    },
+  }, 103);
+  assert.equal(terminal.kind, 'turn.terminal');
+  const checkpoint = value.checkpoint();
+  assert.equal((checkpoint.tools[0]?.terminal?.result as { liveCompacted?: boolean }).liveCompacted, true);
+  const actualBytes = Buffer.byteLength(JSON.stringify(checkpoint), 'utf8');
+  assert.ok(actualBytes <= checkpoint.checkpointBytes);
+  assert.ok(checkpoint.checkpointBytes <= LIVE_PIPELINE_LIMITS.terminalCheckpointBytes);
+  assert.equal(value.lifecycleWatermark()?.finalSeq, terminal.seq);
+});
+
+test('canonical checkpoint capacity includes escaping, drafts, previews, tool metadata, and envelope bytes', () => {
+  const value = accumulator();
+  const started = value.observe({ kind: 'turn.started' }, 100);
+  assert.ok(started.checkpointBytes > 0);
+
+  // Raw UTF-8 counters alone understate these strings because each newline is
+  // escaped in the checkpoint JSON.
+  assert.equal(value.observe({ kind: 'turn.text', delta: '\n'.repeat(192 * 1024) }, 101).kind, 'turn.text');
+  assert.equal(value.observe({ kind: 'turn.reasoning', delta: '\\"'.repeat(128 * 1024) }, 102).kind, 'turn.reasoning');
+  for (let index = 0; index < 8; index += 1) {
+    const toolCallId = `draft-${index}`;
+    value.observe({ kind: 'turn.toolDraft', action: 'start', toolCallId, name: 'bash' }, 110 + index * 2);
+    assert.equal(value.observe({
+      kind: 'turn.toolDraft', action: 'delta', toolCallId, name: 'bash',
+      argumentsJsonDelta: '\n'.repeat(24 * 1024),
+    }, 111 + index * 2)?.kind, 'turn.toolDraft');
+  }
+  value.observe({
+    kind: 'tool.started', executionId: 'aggregate-execution', parentExecutionId: null,
+    rootExecutionId: 'aggregate-execution', toolCallId: 'aggregate-tool', name: 'subagent',
+    input: { task: 'recursive' }, startedAt: 140,
+  }, 140);
+  const acceptedPreview = {
+    kind: 'subagent' as const, mode: 'single' as const, omittedChildren: 0,
+    children: [{ id: 'worker', phase: 'running' as const, streamingText: 'x'.repeat(27 * 1024 * 1024), messages: [] }],
+  };
+  const accepted = value.observe({
+    kind: 'tool.progress', executionId: 'aggregate-execution', preview: acceptedPreview,
+  }, 141);
+  assert.equal(accepted?.kind, 'tool.progress');
+  const checkpoint = value.checkpoint();
+  const actualBytes = Buffer.byteLength(JSON.stringify(checkpoint), 'utf8');
+  assert.equal(checkpoint.checkpointBytes, checkpoint.turn.checkpointBytes);
+  assert.ok(actualBytes <= checkpoint.checkpointBytes, `${actualBytes} <= ${checkpoint.checkpointBytes}`);
+  assert.ok(checkpoint.checkpointBytes <= LIVE_PIPELINE_LIMITS.checkpointBytes);
+
+  const rejected = value.observe({
+    kind: 'tool.progress', executionId: 'aggregate-execution', preview: {
+      ...acceptedPreview,
+      children: [{ ...acceptedPreview.children[0]!, streamingText: 'x'.repeat(29 * 1024 * 1024) }],
+    },
+  }, 142);
+  assert.equal(rejected?.kind, 'observation.rejected');
+  assert.equal(rejected?.kind === 'observation.rejected' ? rejected.reason : undefined, 'payload_oversize');
+  assert.equal(
+    (value.checkpoint().tools[0]?.preview as { children?: Array<{ streamingText?: string }> }).children?.[0]?.streamingText?.length,
+    27 * 1024 * 1024,
+    'unrepresentable progress is rejected before replacing canonical state',
+  );
+});
+
+test('checkpoint accounting reserves sequence-width growth across rejected observations', () => {
+  const value = accumulator();
+  value.observe({ kind: 'turn.started' }, 100);
+
+  for (const boundary of [10, 100]) {
+    while (value.currentSeq < boundary - 1) {
+      value.reject('malformed_observation', 100 + value.currentSeq);
+    }
+
+    const before = value.checkpoint();
+    const beforeActual = Buffer.byteLength(JSON.stringify(before), 'utf8');
+    assert.ok(
+      before.checkpointBytes - beforeActual >= 3,
+      `sequence ${boundary - 1} checkpoint must reserve the ${boundary} digit-width transition`,
+    );
+
+    const rejected = value.reject('payload_oversize', 100 + boundary);
+    assert.equal(rejected.seq, boundary);
+    const after = value.checkpoint();
+    const afterActual = Buffer.byteLength(JSON.stringify(after), 'utf8');
+    assert.ok(afterActual <= after.checkpointBytes, `${afterActual} <= ${after.checkpointBytes}`);
+    assert.ok(after.checkpointBytes <= LIVE_PIPELINE_LIMITS.checkpointBytes);
+  }
+});
+
+test('backend accumulator rejects a second tool.started reusing a durability-confirmed tool-call id', () => {
+  const value = accumulator();
+  value.observe({ kind: 'turn.started' }, 100);
+  value.observe({
+    kind: 'tool.started', executionId: 'exec-a', parentExecutionId: null, rootExecutionId: 'exec-a',
+    toolCallId: 'tool-a', name: 'read', input: { path: 'x' }, startedAt: 101,
+  }, 101);
+  value.observe({
+    kind: 'tool.terminal', executionId: 'exec-a', status: 'completed', result: 'ok', durableEntryId: 'entry-a',
+  }, 102);
+  const duplicate = value.observe({
+    kind: 'tool.started', executionId: 'exec-b', parentExecutionId: null, rootExecutionId: 'exec-b',
+    toolCallId: 'tool-a', name: 'read', input: { path: 'y' }, startedAt: 103,
+  }, 103);
+  assert.equal(duplicate.kind, 'observation.rejected');
+  assert.equal(value.checkpoint().tools.length, 1);
+  assert.equal(value.checkpoint().tools[0]?.terminal?.durableEntryId, 'entry-a');
+});
+
+test('backend accumulator counts toolDraftBytes against the complete serialized draft payload', () => {
+  const value = accumulator();
+  value.observe({ kind: 'turn.started' }, 100);
+  const oversizedId = 'id-'.repeat(30_000);
+  const rejectedId = value.observe({
+    kind: 'turn.toolDraft', action: 'start', toolCallId: oversizedId, name: 'read',
+  }, 101);
+  assert.equal(rejectedId?.kind, 'observation.rejected');
+
+  const oversizedName = 'n'.repeat(70 * 1024);
+  const rejectedName = value.observe({
+    kind: 'turn.toolDraft', action: 'start', toolCallId: 'ok-id', name: oversizedName,
+  }, 102);
+  assert.equal(rejectedName?.kind, 'observation.rejected');
+
+  const accepted = value.observe({
+    kind: 'turn.toolDraft', action: 'start', toolCallId: 'normal', name: 'read',
+  }, 103);
+  assert.equal(accepted?.kind, 'turn.toolDraft');
+  assert.equal(value.checkpoint().turn.toolDraftsByCallId.normal?.name, 'read');
 });
 
 test('terminal checkpoint registry is memory-only and bounded by grace', () => {

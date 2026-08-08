@@ -30,7 +30,7 @@ import { ToolCallCard } from './tool-call-card';
 import { TranscriptMessageList } from './transcript-message-list';
 import type { RenderToolCall, TranscriptContextMenuHandler } from './types';
 import { getToolRenderer } from './registry';
-import { useCollapsibleOpen } from './use-collapsible-open';
+import { toolDisclosureKey, useCollapsibleOpen } from './use-collapsible-open';
 import { type LazyDetailState, useLazyDetail } from './lazy-detail-store';
 import { useStickToBottom } from './use-stick-to-bottom';
 import { SubagentCallContext } from './subagent-call-context';
@@ -548,10 +548,9 @@ function SubagentSingleBlock({
   renderToolCall,
   multipleResults,
 }: SubagentSingleBlockProps) {
-  const collapsibleKey = multipleResults
-    ? `subagent:${toolCall.id}-${index}`
-    : `subagent:${toolCall.id}`;
-  const [open, setOpen] = useCollapsibleOpen(collapsibleKey, prefs.autoExpandSubagentCalls);
+  // The generic draft card and this specialized renderer share one cache key,
+  // so renderer/content promotion cannot reset a user's disclosure choice.
+  const [open, setOpen] = useCollapsibleOpen(toolDisclosureKey(toolCall.id), prefs.autoExpandSubagentCalls);
   useEffect(() => {
     if (open && toolCall.detailRef) onLoadDetail?.();
   }, [open, toolCall.detailRef?.key, onLoadDetail]);
@@ -655,15 +654,14 @@ function SubagentSingleBlock({
   };
 
   return (
-    // `overflow-clip` (not `hidden`): clips children to the rounded card
-    // corners but does NOT establish a scroll container. (The header is no
-    // longer sticky, so this no longer exists to free a sticky header.)
+    // Delegated work is a higher-level transcript unit than an ordinary tool:
+    // keep its thread bounded while lifecycle remains compact and semantic.
     <div
-      class={cx('tool-call tool-call-subagent', 'border border-border-subtle rounded-xl bg-card shadow-sm overflow-clip transition-[border-color,background,box-shadow] duration-150 hover:border-border hover:bg-control-hover hover:shadow-md forced-colors:border forced-colors:border-[ButtonText]', status, hasPendingAskUser && 'pending-ask-user')}
+      class={cx('tool-call tool-call-subagent', 'border border-border-subtle rounded-md bg-card overflow-clip transition-[border-color,background] duration-100 forced-colors:border forced-colors:border-[ButtonText]', status, hasPendingAskUser && 'pending-ask-user')}
       onContextMenu={(e) => { e.preventDefault(); onContextMenu(toMouseEvent(e)); }}
     >
       <div
-        class={cx('subagent-header min-h-[28px] select-none', isNested && 'subagent-header-nested')}
+        class={cx('subagent-header min-h-[26px] select-none', isNested && 'subagent-header-nested')}
         role="button"
         tabIndex={0}
         aria-expanded={open}
@@ -775,8 +773,10 @@ function SubagentBlock({
       <ToolCallCard
         toolCall={toolCall}
         autoExpand={prefs.autoExpandSubagentCalls}
+        activityTailLines={prefs.activityTailLines}
         className="tool-call-subagent"
         workingDirectory={workingDirectory}
+        prefs={prefs}
         onOpenFile={onOpenFile}
         onContextMenu={onContextMenu}
       />
@@ -789,9 +789,8 @@ function SubagentBlock({
     return (
       <div class="subagent-parallel-group">
         {result.results.map((singleResult, index) => (
-          // Each child is wrapped so a per-child connector strip (the left spine
-          // + horizontal tick) can mark it as a member of this parallel call —
-          // the card itself clips overflow, so the connector lives on the wrapper.
+          // Keep a stable wrapper per child while the group owns the single
+          // shallow vertical batch marker outside each card's clipping boundary.
           <div class="subagent-parallel-child" key={index}>
             <SubagentSingleBlock
               singleResult={singleResult}
@@ -861,6 +860,7 @@ function areToolCallItemPropsEqual(previous: ToolCallItemProps, next: ToolCallIt
   return left.id === right.id
     && left.name === right.name
     && left.status === right.status
+    && left.argumentsText === right.argumentsText
     && left.startedAt === right.startedAt
     && left.durationMs === right.durationMs
     && left.parallelGroupId === right.parallelGroupId
@@ -922,7 +922,9 @@ function ToolCallItemBody({
     <ToolCallCard
       toolCall={renderedToolCall}
       autoExpand={prefs.autoExpandToolCalls}
+      activityTailLines={prefs.activityTailLines}
       workingDirectory={workingDirectory}
+      prefs={prefs}
       onOpenFile={onOpenFile}
       onContextMenu={handleContextMenu}
     />
@@ -936,7 +938,20 @@ export function ToolCallItem(props: ToolCallItemProps) {
   // revision reaches the canonical leaf even when an equivalent structured
   // clone can reuse historical markdown/tool/subagent rendering.
   useCommittedToolLeaf(props.toolCall);
-  return <MemoizedToolCallItemBody {...props} />;
+  const lifecycleKey = toolDisclosureKey(props.toolCall.id);
+  return (
+    // Renderer content may promote from generic draft to a specialized card;
+    // ask_user may replace that draft with its interactive prompt. This outer
+    // tool-id boundary remains the single lifecycle owner in either case.
+    <div
+      key={lifecycleKey}
+      class="tool-call-lifecycle-boundary"
+      data-tool-call-id={props.toolCall.id}
+      data-tool-lifecycle-key={lifecycleKey}
+    >
+      <MemoizedToolCallItemBody {...props} />
+    </div>
+  );
 }
 
 /** Subagent renderer exposed for registry registration. */

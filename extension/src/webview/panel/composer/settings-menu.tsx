@@ -82,7 +82,7 @@ const TAB_LABEL: Record<SettingsTab, string> = {
  *  user clicks between categories (which differ in content height) — the inner
  *  .toolbar-settings-menu-body scrolls any overflow. Sized to be comfortably
  *  larger than the old content-driven default. */
-const SETTINGS_MENU_HEIGHT = 600;
+const SETTINGS_MENU_HEIGHT = 500;
 
 /** Small line icons for the vertical category sidebar. 14px viewBox, stroked to
  *  match the rest of the composer UI. */
@@ -158,7 +158,7 @@ const NESTED_LABELS: { key: 'small' | 'medium' | 'frontier'; label: string }[] =
 const APPEARANCE_SETTING_LABELS = [
   'Theme', 'Background color', 'Text color', 'Border color', 'Accent color',
   'Muted text color', 'Link color', 'Corner radius', 'Density', 'Message width',
-  'Initial composer rows', 'Expanded section height', 'Activity preview rows', 'Message rail markers',
+  'Path parent depth', 'Initial composer rows', 'Expanded section height', 'Activity preview rows', 'Message rail markers',
   'Base text size', 'Composer text size', 'Expanded section text size',
   'Sans-serif font', 'Monospace font',
 ];
@@ -513,8 +513,9 @@ function SettingsTabBody(props: SettingsTabBodyProps) {
     <>
       {effectiveTab === 'chat' && (
         <>
-          <ChatPrefSections prefs={prefs} onSetPrefs={onSetPrefs} />
+          <ChatPrefSections prefs={prefs} onSetPrefs={onSetPrefs} sectionIds={['transcript']} />
           <SoundSection prefs={prefs} onSetPrefs={onSetPrefs} />
+          <ChatPrefSections prefs={prefs} onSetPrefs={onSetPrefs} sectionIds={['diagnostics']} />
         </>
       )}
       {effectiveTab === 'history' && (
@@ -583,6 +584,7 @@ export function ComposerSettingsMenu({ prefs, pruningSettings, pruningCatalog, p
   const triggerRef = useRef<HTMLButtonElement>(null);
   const settingsMenuRef = useRef<HTMLDivElement>(null);
   const tablistRef = useRef<HTMLDivElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
 
   // Close the menu and refocus the trigger button.
   const closeMenu = useCallback((refocus?: boolean) => {
@@ -664,10 +666,13 @@ export function ComposerSettingsMenu({ prefs, pruningSettings, pruningCatalog, p
       el.style.maxHeight = `${avail}px`;
     };
     fit();
-    const t = window.setTimeout(fit, 320);
+    const frame = window.requestAnimationFrame(() => {
+      fit();
+      searchInputRef.current?.focus();
+    });
     window.addEventListener('resize', fit);
     return () => {
-      window.clearTimeout(t);
+      window.cancelAnimationFrame(frame);
       window.removeEventListener('resize', fit);
     };
   }, [open]);
@@ -726,8 +731,8 @@ export function ComposerSettingsMenu({ prefs, pruningSettings, pruningCatalog, p
     if (ids.length === 0) return;
     const idx = ids.indexOf(effectiveTab);
     let next: SettingsTab | null = null;
-    if (event.key === 'ArrowDown') next = ids[(idx + 1) % ids.length];
-    else if (event.key === 'ArrowUp') next = ids[(idx - 1 + ids.length) % ids.length];
+    if (event.key === 'ArrowDown' || event.key === 'ArrowRight') next = ids[(idx + 1) % ids.length];
+    else if (event.key === 'ArrowUp' || event.key === 'ArrowLeft') next = ids[(idx - 1 + ids.length) % ids.length];
     else if (event.key === 'Home') next = ids[0];
     else if (event.key === 'End') next = ids[ids.length - 1];
     if (!next) return;
@@ -742,12 +747,12 @@ export function ComposerSettingsMenu({ prefs, pruningSettings, pruningCatalog, p
 
   return (
     <div ref={menuRef} class="toolbar-settings">
-      <Tooltip content={open ? null : 'Chat settings'} placement="top">
+      <Tooltip content={open ? null : 'Settings'} placement="top">
         <button
           ref={triggerRef}
           class={`toolbar-settings-trigger${open ? ' open' : ''}`}
           type="button"
-          aria-label="Chat settings"
+          aria-label="Settings"
           aria-haspopup="dialog"
           aria-expanded={open}
           onClick={() => (open ? closeMenu() : setOpen(true))}
@@ -760,7 +765,7 @@ export function ComposerSettingsMenu({ prefs, pruningSettings, pruningCatalog, p
       </Tooltip>
 
       {open && (
-        <div ref={settingsMenuRef} class="toolbar-settings-menu" role="dialog" aria-label="Chat settings">
+        <div ref={settingsMenuRef} class="toolbar-settings-menu" role="dialog" aria-label="Settings">
           <div class="toolbar-settings-header">
             <span class="toolbar-settings-title">Settings</span>
             <button
@@ -781,6 +786,7 @@ export function ComposerSettingsMenu({ prefs, pruningSettings, pruningCatalog, p
               <line x1="10.5" y1="10.5" x2="14" y2="14" />
             </svg>
             <input
+              ref={searchInputRef}
               class="toolbar-settings-search-input"
               type="text"
               placeholder="Search settings…"

@@ -347,6 +347,17 @@ test('getToolCallPresentation truncates oversized file names even when no parent
   assert.ok(presentation.summary.endsWith('...'));
 });
 
+test('getToolCallPresentation keeps an untruncated relative action path without a workspace base', () => {
+  const relativePath = `${'deep/'.repeat(60)}file.ts`;
+  const presentation = getToolCallPresentation(makeToolCall({
+    name: 'read',
+    input: { path: relativePath },
+  }));
+
+  assert.ok(presentation.summary && presentation.summary.length <= 240);
+  assert.equal(presentation.summaryPath, relativePath);
+});
+
 test('getToolCallPresentation ignores blank path candidates and falls back to other readable fields', () => {
   const presentation = getToolCallPresentation(makeToolCall({
     name: 'read',

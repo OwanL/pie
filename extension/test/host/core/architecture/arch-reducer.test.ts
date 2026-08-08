@@ -1670,6 +1670,16 @@ test('reducer: SetPrefs normalizes malformed composer row counts before exposing
   assert.equal(result.effects[0]?.kind, 'SetPrefsRpc');
 });
 
+test('reducer: SetPrefs normalizes malformed path parent depth before exposing prefs', () => {
+  const result = reducer(initialArchState, {
+    kind: 'Command',
+    cmd: { kind: 'SetPrefs', corrId: 'c-path-depth', prefs: { uiPathParentDepth: 99 } },
+  });
+
+  assert.equal(result.state.settings.prefs.uiPathParentDepth, 1);
+  assert.equal(result.effects[0]?.kind, 'SetPrefsRpc');
+});
+
 test('reducer: SetPrefs not touching suppressCompletionNotifications leaves unreadFinishedSessionPaths unchanged', () => {
   const state: ArchState = {
     ...initialArchState,

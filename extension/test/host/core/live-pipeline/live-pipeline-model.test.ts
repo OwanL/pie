@@ -6,17 +6,22 @@ import { interruptLivePipelineForRestart } from '../../../../src/host/core/live-
 import { createEmptyLivePipelineState, pruneExpiredTerminalAttempts } from '../../../../src/host/core/live-pipeline/model';
 import { projectTranscriptView } from '../../../../src/host/core/live-pipeline/projection';
 import { applyLiveSemanticEnvelope } from '../../../../src/host/core/live-pipeline/transitions';
-import type { LiveTurnCheckpoint, TurnSemanticEnvelope } from '../../../../src/shared/live-pipeline-protocol';
+import {
+  isTurnSemanticEnvelope,
+  type LiveTurnCheckpoint,
+  type TurnSemanticEnvelope,
+} from '../../../../src/shared/live-pipeline-protocol';
 import { diffJsonValues, type JsonSafeValue } from '../../../../src/shared/json-structural-patch';
 import { transcriptRenderSignature } from '../../../../src/shared/transcript-render-signature';
 
 const base = {
-  protocolVersion: 5,
+  protocolVersion: 6,
   sessionPath: '/session.jsonl',
   requestId: 'request-1',
   turnId: 'turn-1',
   attemptId: 'attempt-1',
   occurredAt: 1_000,
+  checkpointBytes: 30 * 1024 * 1024,
 };
 
 function start(seq = 1): TurnSemanticEnvelope {
@@ -56,12 +61,13 @@ test('checkpoint replacement is atomic and retains only newer pending envelopes'
   const withGap = apply(started, { ...base, kind: 'turn.text', seq: 3, delta: 'gap' }).state;
   const owner = withGap.turnsBySession[base.sessionPath]!;
   const checkpoint: LiveTurnCheckpoint = {
-    protocolVersion: 5,
+    protocolVersion: 6,
     sessionPath: base.sessionPath,
     turnId: base.turnId,
     attemptId: base.attemptId,
     checkpointSeq: 3,
     phase: 'streaming',
+    checkpointBytes: owner.checkpointBytes,
     turn: {
       ...owner,
       seq: 3,
@@ -90,10 +96,10 @@ test('checkpoint replacement is atomic and retains only newer pending envelopes'
     },
   });
   assert.equal(terminalWithoutDurability.classification, 'malformed');
-  const wrongVersion = applyLiveTurnCheckpoint(repaired.state, { ...checkpoint, protocolVersion: 6 });
+  const wrongVersion = applyLiveTurnCheckpoint(repaired.state, { ...checkpoint, protocolVersion: 5 });
   assert.equal(wrongVersion.classification, 'malformed');
   const structurallyMalformed = applyLiveTurnCheckpoint(repaired.state, {
-    protocolVersion: 5, sessionPath: base.sessionPath,
+    protocolVersion: 6, sessionPath: base.sessionPath,
   } as never);
   assert.equal(structurallyMalformed.classification, 'malformed');
   const invalidPhase = applyLiveTurnCheckpoint(repaired.state, {
@@ -106,12 +112,13 @@ test('checkpoint older than the applied semantic sequence is stale and cannot re
   const started = apply(createEmptyLivePipelineState(), start()).state;
   const initialOwner = started.turnsBySession[base.sessionPath]!;
   const baseCheckpoint: LiveTurnCheckpoint = {
-    protocolVersion: 5,
+    protocolVersion: 6,
     sessionPath: base.sessionPath,
     turnId: base.turnId,
     attemptId: base.attemptId,
     checkpointSeq: 2,
     phase: 'streaming',
+    checkpointBytes: initialOwner.checkpointBytes,
     turn: {
       ...initialOwner,
       seq: 2,
@@ -161,12 +168,13 @@ test('terminal repair checkpoints may use one-shot transport headroom for large 
     markdown: 'x'.repeat(3 * 1024 * 1024), status: 'completed' as const, durableEntryId: 'terminal-entry',
   };
   const checkpoint: LiveTurnCheckpoint = {
-    protocolVersion: 5,
+    protocolVersion: 6,
     sessionPath: base.sessionPath,
     turnId: base.turnId,
     attemptId: base.attemptId,
     checkpointSeq: 1,
     phase: owner.phase,
+    checkpointBytes: owner.checkpointBytes,
     turn: { ...owner, checkpointSeq: 1 },
     tools: [],
     pendingExtensionUiRequestIds: [],
@@ -183,18 +191,21 @@ test('active recovery checkpoints preserve a complete multi-megabyte recursive s
     ...base, kind: 'tool.started', seq: 2, executionId: 'execution-1', parentExecutionId: null,
     rootExecutionId: 'execution-1', toolCallId: 'tool-1', name: 'subagent', input: {}, startedAt: 1_100,
   }).state;
+  const preview = {
+    kind: 'subagent' as const, mode: 'single' as const, omittedChildren: 0,
+    children: [{ id: 'worker', phase: 'running' as const, streamingText: 'x'.repeat(3 * 1024 * 1024), messages: [] }],
+  };
+  const previewBytes = Buffer.byteLength(JSON.stringify(preview), 'utf8');
   state = apply(state, {
     ...base, kind: 'tool.progress', seq: 3, baseSeq: 2, executionId: 'execution-1',
-    baseProgressRevision: 0, progressRevision: 1,
-    update: { kind: 'snapshot', preview: {
-      kind: 'subagent', mode: 'single', omittedChildren: 0,
-      children: [{ id: 'worker', phase: 'running', streamingText: 'x'.repeat(3 * 1024 * 1024), messages: [] }],
-    } },
+    baseProgressRevision: 0, progressRevision: 1, previewBytes, aggregatePreviewBytes: previewBytes,
+    update: { kind: 'snapshot', preview },
   }).state;
   const turn = state.turnsBySession[base.sessionPath]!;
   const checkpoint: LiveTurnCheckpoint = {
-    protocolVersion: 5, sessionPath: base.sessionPath, turnId: base.turnId, attemptId: base.attemptId,
-    checkpointSeq: 3, phase: turn.phase, turn: { ...turn, checkpointSeq: 3 },
+    protocolVersion: 6, sessionPath: base.sessionPath, turnId: base.turnId, attemptId: base.attemptId,
+    checkpointSeq: 3, phase: turn.phase, checkpointBytes: turn.checkpointBytes,
+    turn: { ...turn, checkpointSeq: 3 },
     tools: [state.toolsByExecutionId['execution-1']!], pendingExtensionUiRequestIds: [],
   };
   assert.ok(Buffer.byteLength(JSON.stringify(checkpoint), 'utf8') > 2 * 1024 * 1024);
@@ -221,12 +232,13 @@ test('checkpoint repair preserves richer settled-tool details already received b
   const owner = state.turnsBySession[base.sessionPath]!;
   const existingTool = state.toolsByExecutionId['execution-1']!;
   const repaired = applyLiveTurnCheckpoint(state, {
-    protocolVersion: 5,
+    protocolVersion: 6,
     sessionPath: base.sessionPath,
     turnId: base.turnId,
     attemptId: base.attemptId,
     checkpointSeq: 3,
     phase: owner.phase,
+    checkpointBytes: owner.checkpointBytes,
     turn: { ...owner, checkpointSeq: 3 },
     tools: [{
       ...existingTool,
@@ -290,6 +302,138 @@ test('projection preserves durable ordering when there is no active turn', () =>
   assert.equal(view.activeTurn, null);
 });
 
+test('multiple interleaved drafts project as ordered provisional ToolCall rows and promote independently', () => {
+  let state = apply(createEmptyLivePipelineState(), start()).state;
+  state = apply(state, { ...base, kind: 'turn.reasoning', seq: 2, delta: 'plan' }).state;
+  state = apply(state, {
+    ...base, kind: 'turn.toolDraft', seq: 3,
+    draft: { toolCallId: 'tool-a', name: 'read', argumentsJson: '', phase: 'drafting' },
+  }).state;
+  state = apply(state, { ...base, kind: 'turn.text', seq: 4, delta: 'between' }).state;
+  state = apply(state, {
+    ...base, kind: 'turn.toolDraft', seq: 5,
+    draft: { toolCallId: 'tool-b', name: 'bash', argumentsJson: '{"command":', phase: 'drafting' },
+  }).state;
+  state = apply(state, {
+    ...base, kind: 'turn.toolDraft', seq: 6,
+    draft: { toolCallId: 'tool-a', name: 'read', argumentsJson: '{"path":"README.md"}', phase: 'ready' },
+  }).state;
+
+  const projected = projectTranscriptView([], state, base.sessionPath).activeTurn!;
+  assert.deepEqual(projected.parts?.map((part) => part.kind === 'toolCall'
+    ? ['tool', part.toolCall.id, part.toolCall.status]
+    : [part.kind, part.text]), [
+    ['reasoning', 'plan'], ['tool', 'tool-a', 'ready'], ['text', 'between'], ['tool', 'tool-b', 'drafting'],
+  ]);
+  assert.equal(projected.toolCalls?.[1]?.input, '{"command":');
+  assert.equal(projected.toolCalls?.[1]?.argumentsText, '{"command":');
+
+  state = apply(state, {
+    ...base, kind: 'tool.started', seq: 7, executionId: 'execution-a', parentExecutionId: null,
+    rootExecutionId: 'execution-a', toolCallId: 'tool-a', name: 'read',
+    input: { path: 'README.md' }, startedAt: 1_100,
+  }).state;
+  const promoted = projectTranscriptView([], state, base.sessionPath).activeTurn!;
+  assert.deepEqual(promoted.toolCalls?.map((tool) => [tool.id, tool.status]), [
+    ['tool-a', 'running'], ['tool-b', 'drafting'],
+  ]);
+  assert.equal(state.turnsBySession[base.sessionPath]?.toolDraftsByCallId['tool-b']?.argumentsJson, '{"command":');
+
+  const duplicateBoundary = apply(state, {
+    ...base, kind: 'turn.toolDraft', seq: 8,
+    draft: { toolCallId: 'tool-a', name: 'read', argumentsJson: '{"path":"README.md"}', phase: 'ready' },
+  });
+  assert.equal(duplicateBoundary.classification, 'applied');
+  assert.equal(duplicateBoundary.state.turnsBySession[base.sessionPath]?.phase, 'running_tool');
+  assert.equal(duplicateBoundary.state.turnsBySession[base.sessionPath]?.toolDraftsByCallId['tool-a'], undefined);
+});
+
+test('host draft state handles prototype-like tool-call IDs safely', () => {
+  let state = apply(createEmptyLivePipelineState(), start()).state;
+  const drafted = apply(state, {
+    ...base, kind: 'turn.toolDraft', seq: 2,
+    draft: { toolCallId: 'constructor', name: 'Object', argumentsJson: '', phase: 'drafting' },
+  });
+  assert.equal(drafted.classification, 'applied');
+  state = drafted.state;
+  assert.equal(projectTranscriptView([], state, base.sessionPath).activeTurn?.toolCalls?.[0]?.id, 'constructor');
+});
+
+test('multi-draft checkpoints roundtrip and validate cached aggregate bytes', () => {
+  let state = apply(createEmptyLivePipelineState(), start()).state;
+  state = apply(state, {
+    ...base, kind: 'turn.toolDraft', seq: 2,
+    draft: { toolCallId: 'tool-a', name: 'read', argumentsJson: '{"path":', phase: 'drafting' },
+  }).state;
+  state = apply(state, {
+    ...base, kind: 'turn.toolDraft', seq: 3,
+    draft: { toolCallId: 'tool-b', name: 'bash', argumentsJson: '', phase: 'drafting' },
+  }).state;
+  state = apply(state, {
+    ...base, kind: 'turn.toolDraft', seq: 4,
+    draft: { toolCallId: 'tool-b', name: 'bash', argumentsJson: '{}', phase: 'ready' },
+  }).state;
+  const turn = state.turnsBySession[base.sessionPath]!;
+  const checkpoint: LiveTurnCheckpoint = {
+    protocolVersion: 6, sessionPath: base.sessionPath, turnId: base.turnId, attemptId: base.attemptId,
+    checkpointSeq: 4, phase: turn.phase, checkpointBytes: turn.checkpointBytes,
+    turn: { ...turn, checkpointSeq: 4 },
+    tools: [], pendingExtensionUiRequestIds: [],
+  };
+  const restored = applyLiveTurnCheckpoint(createEmptyLivePipelineState(), checkpoint);
+  assert.equal(restored.classification, 'applied');
+  assert.deepEqual(restored.state.turnsBySession[base.sessionPath]?.toolDraftsByCallId, turn.toolDraftsByCallId);
+  const malformed = applyLiveTurnCheckpoint(createEmptyLivePipelineState(), {
+    ...checkpoint, turn: { ...checkpoint.turn, aggregateToolDraftBytes: checkpoint.turn.aggregateToolDraftBytes + 1 },
+  });
+  assert.equal(malformed.classification, 'malformed');
+  const underreported = applyLiveTurnCheckpoint(createEmptyLivePipelineState(), {
+    ...checkpoint,
+    checkpointBytes: 1,
+    turn: { ...checkpoint.turn, checkpointBytes: 1 },
+  });
+  assert.equal(underreported.classification, 'oversize', 'recovery serialization verifies cached conservative bytes');
+});
+
+test('draft validation rejects malformed, oversized, and abort-late progress', () => {
+  const malformed = { ...base, kind: 'turn.toolDraft', seq: 1, draft: {
+    toolCallId: '', name: 'bash', argumentsJson: '', phase: 'drafting',
+  } };
+  assert.equal(isTurnSemanticEnvelope(malformed), false);
+
+  let state = apply(createEmptyLivePipelineState(), start()).state;
+  const oversize = apply(state, {
+    ...base, kind: 'turn.toolDraft', seq: 2,
+    draft: { toolCallId: 'tool', name: 'bash', argumentsJson: 'x'.repeat(64 * 1024 + 1), phase: 'drafting' },
+  });
+  assert.equal(oversize.classification, 'invalid');
+  state = apply(state, { ...base, kind: 'turn.phase', seq: 2, phase: 'aborting' }).state;
+  const late = apply(state, {
+    ...base, kind: 'turn.toolDraft', seq: 3,
+    draft: { toolCallId: 'tool', name: 'bash', argumentsJson: '', phase: 'drafting' },
+  });
+  assert.equal(late.classification, 'invalid');
+  assert.equal(late.state.turnsBySession[base.sessionPath]?.toolDraftsByCallId['tool'], undefined);
+  const lateStart = apply(state, {
+    ...base, kind: 'tool.started', seq: 3, executionId: 'late-execution', parentExecutionId: null,
+    rootExecutionId: 'late-execution', toolCallId: 'late-tool', name: 'read', input: {}, startedAt: 1_200,
+  });
+  assert.equal(lateStart.classification, 'invalid');
+
+  let withTool = apply(createEmptyLivePipelineState(), start()).state;
+  withTool = apply(withTool, {
+    ...base, kind: 'tool.started', seq: 2, executionId: 'execution', parentExecutionId: null,
+    rootExecutionId: 'execution', toolCallId: 'running-tool', name: 'bash', input: {}, startedAt: 1_100,
+  }).state;
+  withTool = apply(withTool, { ...base, kind: 'turn.phase', seq: 3, phase: 'aborting' }).state;
+  const lateProgress = apply(withTool, {
+    ...base, kind: 'tool.progress', seq: 4, baseSeq: 3, executionId: 'execution',
+    baseProgressRevision: 0, progressRevision: 1, previewBytes: 1, aggregatePreviewBytes: 1,
+    update: { kind: 'snapshot', preview: { kind: 'generic', summary: 'late' } },
+  });
+  assert.equal(lateProgress.classification, 'invalid');
+});
+
 test('projected live tool progress advances commit identity without hashing preview payloads', () => {
   let state = apply(createEmptyLivePipelineState(), start()).state;
   state = apply(state, {
@@ -300,7 +444,7 @@ test('projected live tool progress advances commit identity without hashing prev
   const before = projectTranscriptView([], state, base.sessionPath).activeTurn!;
   state = apply(state, {
     ...base, kind: 'tool.progress', seq: 3, baseSeq: 2, executionId: 'execution-1',
-    baseProgressRevision: 0, progressRevision: 1,
+    baseProgressRevision: 0, progressRevision: 1, previewBytes: 42, aggregatePreviewBytes: 42,
     update: { kind: 'snapshot', preview: { kind: 'generic', summary: 'new preview' } },
   }).state;
   const after = projectTranscriptView([], state, base.sessionPath).activeTurn!;
@@ -338,15 +482,19 @@ test('host patch assembly reconstructs the same recursive preview as a full snap
       } }],
     }] }],
   };
+  const initialBytes = Buffer.byteLength(JSON.stringify(initial), 'utf8');
+  const nextBytes = Buffer.byteLength(JSON.stringify(next), 'utf8');
   const withInitial = apply(baseState, {
     ...base, kind: 'tool.progress', seq: 3, baseSeq: 2, executionId: 'execution-1',
     baseProgressRevision: 0, progressRevision: 1,
+    previewBytes: initialBytes, aggregatePreviewBytes: initialBytes,
     update: { kind: 'snapshot', preview: initial },
   });
   assert.equal(withInitial.classification, 'applied');
   const reconstructed = apply(withInitial.state, {
     ...base, kind: 'tool.progress', seq: 4, baseSeq: 3, executionId: 'execution-1',
     baseProgressRevision: 1, progressRevision: 2,
+    previewBytes: nextBytes, aggregatePreviewBytes: nextBytes,
     update: { kind: 'patch', operations: diffJsonValues(initial as JsonSafeValue, next as JsonSafeValue) },
   });
   assert.equal(reconstructed.classification, 'applied');
@@ -354,6 +502,7 @@ test('host patch assembly reconstructs the same recursive preview as a full snap
   const full = apply(baseState, {
     ...base, kind: 'tool.progress', seq: 4, baseSeq: 2, executionId: 'execution-1',
     baseProgressRevision: 0, progressRevision: 2,
+    previewBytes: nextBytes, aggregatePreviewBytes: nextBytes,
     update: { kind: 'snapshot', preview: next },
   });
   assert.equal(full.classification, 'applied');
@@ -471,7 +620,7 @@ test('host rejects a missing patch range so reducer recovery can request a check
   }).state;
   const gap = apply(state, {
     ...base, kind: 'tool.progress', seq: 5, baseSeq: 4, executionId: 'execution-1',
-    baseProgressRevision: 2, progressRevision: 3,
+    baseProgressRevision: 2, progressRevision: 3, previewBytes: 0, aggregatePreviewBytes: 0,
     update: { kind: 'patch', operations: [] },
   });
   assert.equal(gap.classification, 'gap');
@@ -479,7 +628,7 @@ test('host rejects a missing patch range so reducer recovery can request a check
 
   const malformedRange = apply(state, {
     ...base, kind: 'tool.progress', seq: 100, baseSeq: 2, executionId: 'execution-1',
-    baseProgressRevision: 0, progressRevision: 1,
+    baseProgressRevision: 0, progressRevision: 1, previewBytes: 0, aggregatePreviewBytes: 0,
     update: { kind: 'snapshot', preview: { kind: 'generic', summary: 'invalid jump' } },
   });
   assert.equal(malformedRange.classification, 'gap');
@@ -543,6 +692,58 @@ test('tool and turn terminals require durable evidence and terminal tombstones b
   assert.equal(late.classification, 'duplicate_or_late');
 });
 
+test('turn terminal reconciliation preserves live batch identity without replacing durable authority', () => {
+  let state = apply(createEmptyLivePipelineState(), start()).state;
+  state = apply(state, {
+    ...base, kind: 'tool.started', seq: 2, executionId: 'execution-a', parentExecutionId: null,
+    rootExecutionId: 'execution-a', toolCallId: 'tool-a', name: 'read', input: { path: 'live' },
+    startedAt: 1_100, parallelGroupId: 'batch-1',
+  }).state;
+  state = apply(state, {
+    ...base, kind: 'tool.terminal', seq: 3, executionId: 'execution-a', status: 'completed',
+    result: 'live result', durationMs: 25, durableEntryId: 'tool-entry',
+  }).state;
+  const durableCall = {
+    id: 'tool-a', name: 'read', input: { path: 'durable' }, result: 'durable result',
+    status: 'completed' as const, durableEntryId: 'tool-entry',
+  };
+  const terminal = apply(state, {
+    ...base, kind: 'turn.terminal', seq: 4, terminalKind: 'completed', durableEntryId: 'assistant-entry',
+    durableMessage: {
+      id: 'message-1', role: 'assistant', createdAt: new Date(1_200).toISOString(), markdown: 'done',
+      status: 'completed', durableEntryId: 'assistant-entry',
+      parts: [{ kind: 'toolCall', toolCall: durableCall }], toolCalls: [durableCall],
+    },
+  });
+  assert.equal(terminal.classification, 'committed');
+  if (terminal.classification !== 'committed') return;
+  const part = terminal.terminal.parts?.[0];
+  const partCall = part?.kind === 'toolCall' ? part.toolCall : undefined;
+  assert.equal(partCall?.parallelGroupId, 'batch-1');
+  assert.equal(terminal.terminal.toolCalls?.[0]?.parallelGroupId, 'batch-1');
+  assert.equal(partCall?.executionId, 'execution-a');
+  assert.deepEqual(partCall?.input, { path: 'durable' });
+  assert.equal(partCall?.result, 'durable result');
+  assert.equal(partCall?.status, 'completed');
+  assert.deepEqual(terminal.terminal.toolCalls?.[0], partCall);
+});
+
+test('protocol v6 rejects progress without canonical preview byte counters', () => {
+  assert.equal(isTurnSemanticEnvelope({
+    ...base, kind: 'tool.progress', seq: 2, baseSeq: 1, executionId: 'execution-1',
+    baseProgressRevision: 0, progressRevision: 1,
+    update: { kind: 'snapshot', preview: { kind: 'generic', summary: 'missing counters' } },
+  }), false);
+});
+
+test('host rejects semantic states whose backend canonical checkpoint metadata exceeds capacity', () => {
+  const rejected = apply(createEmptyLivePipelineState(), {
+    ...start(), checkpointBytes: 30 * 1024 * 1024 + 1,
+  });
+  assert.equal(rejected.classification, 'invalid');
+  assert.equal(rejected.state.turnsBySession[base.sessionPath], undefined);
+});
+
 test('aggregate live content and extension UI ownership remain bounded', () => {
   let state = apply(createEmptyLivePipelineState(), start()).state;
   const halfLimit = 'x'.repeat(256 * 1024);
@@ -580,6 +781,19 @@ test('terminal tombstone capacity retains the newest insertion when expiries tie
   const retained = pruneExpiredTerminalAttempts(attempts, 100, 128);
   assert.ok(retained.fresh);
   assert.equal(Object.keys(retained).length, 128);
+});
+
+test('interrupted materialization drops unconfirmed drafts', () => {
+  let state = apply(createEmptyLivePipelineState(), start()).state;
+  state = apply(state, { ...base, kind: 'turn.text', seq: 2, delta: 'partial' }).state;
+  state = apply(state, {
+    ...base, kind: 'turn.toolDraft', seq: 3,
+    draft: { toolCallId: 'draft-only', name: 'bash', argumentsJson: '{"command":', phase: 'drafting' },
+  }).state;
+  const restarted = interruptLivePipelineForRestart(state, 2_000, 20_000);
+  assert.equal(restarted.interruptedBySession[base.sessionPath]?.markdown, 'partial');
+  assert.deepEqual(restarted.interruptedBySession[base.sessionPath]?.toolCalls, []);
+  assert.deepEqual(restarted.interruptedBySession[base.sessionPath]?.parts, [{ kind: 'text', text: 'partial' }]);
 });
 
 test('restart interrupts active text and keeps only durability-confirmed terminal tools', () => {

@@ -2,11 +2,12 @@
 /** @jsxImportSource preact */
 
 import type { ChatPrefs, ExtensionInfo, ModelInfo, PruningCatalog, PruningResult, PruningSettings, ProviderGateStats, SystemPromptEntry, ThinkingLevel, ToolResultPruningSettings } from '../../../shared/protocol';
-import { THINKING_LEVEL_LABELS } from '../../../shared/thinking-level.js';
+import { THINKING_LEVEL_LABELS, THINKING_LEVEL_OPTIONS } from '../../../shared/thinking-level.js';
 
 import { useMemo } from 'preact/hooks';
 
-import { ToolbarChip, ToolbarIndicatorChip, ToolbarRunStatusChip, ToolbarSelectChip } from '../components/panel-chip';
+import { ToolbarChip, ToolbarIndicatorChip, ToolbarRunStatusChip } from '../components/panel-chip';
+import { ChoicePicker } from '../components/choice-picker';
 import { ModelPicker } from '../components/model-picker';
 import { SystemPromptToggleMenu } from './system-prompt-toggle-menu';
 import { formatModelSpec, orderModelsForPicker, parseModelSpec } from './model-list';
@@ -124,21 +125,14 @@ export function ComposerToolbar({
         ) : null}
 
         {supportsReasoning && (
-          <ToolbarSelectChip
+          <ChoicePicker
             value={selectedLevel}
             label={THINKING_LEVEL_LABELS[selectedLevel]}
-            width="reasoning"
-            onChange={(e) => {
-              const target = e.target as HTMLSelectElement;
-              onModelChange(selectedModel, selectedProvider, target.value as ThinkingLevel);
-            }}
             ariaLabel="Reasoning level"
-            title="Reasoning level"
-          >
-            {(Object.keys(THINKING_LEVEL_LABELS) as ThinkingLevel[]).map((level) => (
-              <option key={level} value={level}>{THINKING_LEVEL_LABELS[level]}</option>
-            ))}
-          </ToolbarSelectChip>
+            title="Reasoning effort"
+            options={THINKING_LEVEL_OPTIONS}
+            onChange={(level) => onModelChange(selectedModel, selectedProvider, level)}
+          />
         )}
 
         <SubagentProviderMenu

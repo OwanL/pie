@@ -1,18 +1,19 @@
 export interface MessageScrollAnchor {
+  /** UI-only row identity; it may differ from the authoritative message id. */
   messageId: string;
   offsetTop: number;
 }
 
 export function captureMessageScrollAnchor(container: HTMLDivElement): MessageScrollAnchor | null {
   const containerTop = container.getBoundingClientRect().top;
-  const candidates = Array.from(container.querySelectorAll<HTMLElement>('[data-message-id]'));
+  const candidates = Array.from(container.querySelectorAll<HTMLElement>('[data-scroll-anchor-id]'));
   for (const candidate of candidates) {
     const rect = candidate.getBoundingClientRect();
     if (rect.bottom <= containerTop) {
       continue;
     }
 
-    const messageId = candidate.dataset.messageId;
+    const messageId = candidate.dataset.scrollAnchorId;
     if (!messageId) {
       continue;
     }
@@ -29,14 +30,15 @@ export function captureMessageScrollAnchor(container: HTMLDivElement): MessageSc
 export function restoreMessageScrollAnchor(
   container: HTMLDivElement,
   anchor: MessageScrollAnchor | null,
+  programmaticScrollTargetRef?: { current: number | null },
 ): void {
   if (!anchor) {
     return;
   }
 
   const containerTop = container.getBoundingClientRect().top;
-  const candidates = Array.from(container.querySelectorAll<HTMLElement>('[data-message-id]'));
-  const match = candidates.find((candidate) => candidate.dataset.messageId === anchor.messageId);
+  const candidates = Array.from(container.querySelectorAll<HTMLElement>('[data-scroll-anchor-id]'));
+  const match = candidates.find((candidate) => candidate.dataset.scrollAnchorId === anchor.messageId);
   if (!match) {
     return;
   }
@@ -52,10 +54,14 @@ export function restoreMessageScrollAnchor(
   // `scroll-behavior` the same way `scrollToBottom` does, wrapped in try/finally
   // so the saved value is always restored (manual scroll keeps its smooth feel).
   const prior = container.style.scrollBehavior;
+  const before = container.scrollTop;
   try {
     container.style.scrollBehavior = 'auto';
     container.scrollTop += delta;
   } finally {
     container.style.scrollBehavior = prior;
+  }
+  if (programmaticScrollTargetRef) {
+    programmaticScrollTargetRef.current = container.scrollTop === before ? null : container.scrollTop;
   }
 }

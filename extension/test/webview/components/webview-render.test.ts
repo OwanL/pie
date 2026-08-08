@@ -7,6 +7,9 @@ import { h } from 'preact';
 import renderToString from 'preact-render-to-string';
 
 import { TurnActivityStrip } from '../../../src/webview/panel/transcript/turn-activity-strip.tsx';
+import { provisionalToolSummary } from '../../../src/webview/panel/transcript/tool-call-card/provisional.ts';
+import { ToolCallBody } from '../../../src/webview/panel/transcript/tool-call-card/tool-call-body.tsx';
+import { toolDisclosureKey } from '../../../src/webview/panel/transcript/use-collapsible-open.ts';
 
 import {
   DEFAULT_CHAT_PREFS,
@@ -184,12 +187,8 @@ test('rendered MessageItem covers assistant, editable user, and image-user branc
 
 test('parallel tool calls share a parallel-group strip while sequential calls do not', async () => {
   const { MessageItem } = await loadWebviewModules();
-
-  const parallelHtml = renderToString(h(MessageItem, {
-    message: assistantMessage([
-      { kind: 'toolCall', toolCall: toolCall({ id: 'p-a', name: 'bash', parallelGroupId: 'batch-1' }) },
-      { kind: 'toolCall', toolCall: toolCall({ id: 'p-b', name: 'bash', parallelGroupId: 'batch-1' }) },
-    ]),
+  const renderToolRun = (parts: ChatMessagePart[]) => renderToString(h(MessageItem, {
+    message: assistantMessage(parts),
     isStreaming: false,
     prefs: DEFAULT_CHAT_PREFS,
     readonly: true,
@@ -204,11 +203,25 @@ test('parallel tool calls share a parallel-group strip while sequential calls do
     isLastAssistantMessage: false,
   }));
 
-  // A parallel batch renders a single connecting strip wrapping both cards.
-  assert.match(parallelHtml, /class="tool-call-parallel-group"/);
+  const provisionalHtml = renderToolRun([
+    { kind: 'toolCall', toolCall: toolCall({ id: 'p-a', name: 'bash', status: 'drafting' }) },
+    { kind: 'toolCall', toolCall: toolCall({ id: 'p-b', name: 'bash', status: 'drafting' }) },
+  ]);
+  const parallelHtml = renderToolRun([
+    { kind: 'toolCall', toolCall: toolCall({ id: 'p-a', name: 'bash', status: 'drafting', parallelGroupId: 'batch-1' }) },
+    { kind: 'toolCall', toolCall: toolCall({ id: 'p-b', name: 'bash', status: 'drafting', parallelGroupId: 'batch-1' }) },
+  ]);
+
+  // The provisional run already has the final first-tool-keyed parent/child
+  // shape. Verification annotates only the children; it never creates a new
+  // batch parent that would reparent mounted tool cards.
+  assert.doesNotMatch(provisionalHtml, /tool-call-parallel-child|data-parallel-group-id/);
+  assert.doesNotMatch(parallelHtml, /tool-call-parallel-group/);
+  assert.equal((parallelHtml.match(/data-parallel-group-id="batch-1"/g) ?? []).length, 2);
+  assert.equal((parallelHtml.match(/tool-call-parallel-child/g) ?? []).length, 2);
+  assert.equal((parallelHtml.match(/tool-call-parallel-start/g) ?? []).length, 1);
+  assert.equal((parallelHtml.match(/tool-call-parallel-end/g) ?? []).length, 1);
   assert.match(parallelHtml, /rendered-tool">p-a[\s\S]*rendered-tool">p-b/);
-  // Exactly one strip for a 2-member batch.
-  assert.equal((parallelHtml.match(/tool-call-parallel-group/g) ?? []).length, 1);
 
   const sequentialHtml = renderToString(h(MessageItem, {
     message: assistantMessage([
@@ -230,7 +243,23 @@ test('parallel tool calls share a parallel-group strip while sequential calls do
   }));
 
   // Distinct batch ids → no parallel strip; each call renders independently.
-  assert.doesNotMatch(sequentialHtml, /tool-call-parallel-group/);
+  assert.doesNotMatch(sequentialHtml, /tool-call-parallel-child|data-parallel-group-id/);
+
+  const mixedHtml = renderToolRun([
+    { kind: 'toolCall', toolCall: toolCall({ id: 'm-a1', name: 'bash', parallelGroupId: 'batch-A' }) },
+    { kind: 'toolCall', toolCall: toolCall({ id: 'm-a2', name: 'read', parallelGroupId: 'batch-A' }) },
+    { kind: 'toolCall', toolCall: toolCall({ id: 'm-b', name: 'read', parallelGroupId: 'batch-B' }) },
+  ]);
+  assert.equal((mixedHtml.match(/data-parallel-group-id="batch-A"/g) ?? []).length, 2, 'A keeps its verified strip');
+  assert.doesNotMatch(mixedHtml, /data-parallel-group-id="batch-B"/, 'solo B remains flat');
+  assert.match(mixedHtml, /m-a1[\s\S]*m-a2[\s\S]*m-b/, 'mixed children retain one run order');
+
+  const disjointHtml = renderToolRun([
+    { kind: 'toolCall', toolCall: toolCall({ id: 'd-a1', name: 'bash', parallelGroupId: 'batch-A' }) },
+    { kind: 'toolCall', toolCall: toolCall({ id: 'd-b', name: 'read', parallelGroupId: 'batch-B' }) },
+    { kind: 'toolCall', toolCall: toolCall({ id: 'd-a2', name: 'read', parallelGroupId: 'batch-A' }) },
+  ]);
+  assert.doesNotMatch(disjointHtml, /tool-call-parallel-child|data-parallel-group-id/, 'non-contiguous solo ids do not falsely group');
 
   const legacyHtml = renderToString(h(MessageItem, {
     message: assistantMessage([
@@ -252,7 +281,193 @@ test('parallel tool calls share a parallel-group strip while sequential calls do
   }));
 
   // Calls without a parallelGroupId (legacy sessions) never group.
-  assert.doesNotMatch(legacyHtml, /tool-call-parallel-group/);
+  assert.doesNotMatch(legacyHtml, /tool-call-parallel-child|data-parallel-group-id/);
+
+  const contentSource = await readFile(new URL('../../../src/webview/panel/transcript/message-item/content.tsx', import.meta.url), 'utf8');
+  // Preact does not include keys in its SSR output, so verify both stable keys
+  // directly: the run parent is anchored to its first call and each card to
+  // its own call id.
+  assert.match(contentSource, /key={`tool-run-\$\{firstCall\.id\}`}/);
+  assert.match(contentSource, /key={`tool-\$\{part\.toolCall\.id\}`}/);
+  assert.doesNotMatch(contentSource, /key={`tool-\$\{part\.toolCall\.id\}-\$\{index\}`}/);
+});
+
+test('message and nested-list render keys use host-projected identity while protocol ids stay authoritative', async () => {
+  const { MessageItem } = await loadWebviewModules();
+  const html = renderToString(h(MessageItem, {
+    message: assistantMessage([], { id: 'durable-id', renderIdentity: 'live-row-id' }),
+    isStreaming: false,
+    prefs: DEFAULT_CHAT_PREFS,
+    readonly: true,
+    workingDirectory: '/repo',
+    editingId: null,
+    onEditRequest: noop,
+    onEditConfirm: noop,
+    onEditCancel: noop,
+    onOpenFile: noop,
+    onContextMenu: noopContextMenu,
+    renderToolCall: () => null,
+  }));
+  assert.match(html, /data-message-id="durable-id"/);
+  assert.match(html, /data-scroll-anchor-id="live-row-id"/);
+
+  const rowSource = await readFile(new URL('../../../src/webview/panel/transcript/rows/message-row.tsx', import.meta.url), 'utf8');
+  const nestedSource = await readFile(new URL('../../../src/webview/panel/transcript/transcript-message-list.tsx', import.meta.url), 'utf8');
+  const anchorSource = await readFile(new URL('../../../src/webview/panel/transcript/scroll-anchor.ts', import.meta.url), 'utf8');
+  assert.match(rowSource, /key=\{messageRenderIdentity\(row\.message\)\}/);
+  assert.match(nestedSource, /key=\{collapsibleKey \? `\$\{messageRenderIdentity\(message\)\}-\$\{collapsibleKey\}` : messageRenderIdentity\(message\)\}/);
+  assert.match(anchorSource, /\[data-scroll-anchor-id\]/);
+  assert.doesNotMatch(anchorSource, /\[data-message-id\]/);
+});
+
+test('tool renderers share one disclosure key behind a stable ToolCallItem lifecycle boundary', async () => {
+  assert.equal(toolDisclosureKey('call-1'), 'tool:call-1');
+  const [itemSource, genericSource, searchSource] = await Promise.all([
+    readFile(new URL('../../../src/webview/panel/transcript/tool-call-item.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../../../src/webview/panel/transcript/tool-call-card/tool-call-card.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../../../src/webview/panel/transcript/tools/web-search-tool.tsx', import.meta.url), 'utf8'),
+  ]);
+  assert.match(itemSource, /key=\{lifecycleKey\}/);
+  assert.match(itemSource, /data-tool-lifecycle-key=\{lifecycleKey\}/);
+  assert.match(itemSource, /useCollapsibleOpen\(toolDisclosureKey\(toolCall\.id\), prefs\.autoExpandSubagentCalls\)/);
+  assert.match(genericSource, /useCollapsibleOpen\(toolDisclosureKey\(toolCall\.id\), autoExpand && !isProvisional\)/);
+  assert.match(searchSource, /useCollapsibleOpen\(toolDisclosureKey\(toolCall\.id\), prefs\.autoExpandToolCalls\)/);
+  assert.doesNotMatch(itemSource, /`subagent:\$\{toolCall\.id\}/);
+
+  const { ToolCallItem } = await loadWebviewModules();
+  const html = renderToString(h(ToolCallItem, {
+    toolCall: toolCall({ id: 'stable-call', name: 'unknown_tool', status: 'drafting' }),
+    prefs: DEFAULT_CHAT_PREFS,
+    workingDirectory: '/repo',
+    onOpenFile: noop,
+    onContextMenu: noopContextMenu,
+    renderToolCall: () => null,
+  }));
+  assert.match(html, /class="tool-call-lifecycle-boundary"/);
+  assert.match(html, /data-tool-call-id="stable-call"/);
+  assert.match(html, /data-tool-lifecycle-key="tool:stable-call"/);
+});
+
+test('provisional tool summaries safely handle partial JSON and prefer useful known fields', () => {
+  const partial = provisionalToolSummary(toolCall({
+    status: 'drafting',
+    argumentsText: '{"command":"npm test -- --filter <unsafe',
+    input: '{"command":"npm test -- --filter <unsafe',
+  }));
+  assert.deepEqual(partial, {
+    field: 'command',
+    text: 'npm test -- --filter <unsafe',
+  });
+
+  const ready = provisionalToolSummary(toolCall({
+    status: 'ready',
+    argumentsText: '{"query":"safe lifecycle rendering","count":5}',
+    input: '{"query":"safe lifecycle rendering","count":5}',
+  }));
+  assert.deepEqual(ready, { field: 'query', text: 'safe lifecycle rendering' });
+
+  const malformed = provisionalToolSummary(toolCall({
+    status: 'drafting',
+    argumentsText: '{not-json: <img src=x onerror=alert(1)>',
+    input: '{not-json: <img src=x onerror=alert(1)>',
+  }));
+  assert.equal(malformed?.field, undefined);
+  assert.match(malformed?.text ?? '', /<img src=x/);
+});
+
+test('ToolCallCard keeps provisional states badge-free while retaining accessible lifecycle labels', () => {
+  const draftingHtml = renderToString(h(toolCallCardModule.ToolCallCard, {
+    toolCall: toolCall({
+      id: 'draft-card',
+      name: 'bash',
+      status: 'drafting',
+      input: '{"command":"npm te',
+      argumentsText: '{"command":"npm te',
+      result: undefined,
+    }),
+    autoExpand: true,
+    workingDirectory: '/repo',
+    onOpenFile: noop,
+    onContextMenu: noop,
+  }));
+  assert.match(draftingHtml, /data-status="drafting"/);
+  assert.match(draftingHtml, /data-provisional="true"/);
+  assert.match(draftingHtml, /command: npm te/);
+  assert.match(draftingHtml, /aria-label="bash tool call, Drafting/);
+  assert.doesNotMatch(draftingHtml, /status-chip-neutral|tool-call-draft-cursor|>Drafting<|tool-call-body-terminal|Raw arguments/);
+
+  const readyHtml = renderToString(h(toolCallCardModule.ToolCallCard, {
+    toolCall: toolCall({
+      id: 'ready-card',
+      name: 'bash',
+      status: 'ready',
+      input: '{"command":"npm test"}',
+      argumentsText: '{"command":"npm test"}',
+      result: undefined,
+    }),
+    autoExpand: true,
+    workingDirectory: '/repo',
+    onOpenFile: noop,
+    onContextMenu: noop,
+  }));
+  assert.match(readyHtml, /data-status="ready"/);
+  assert.match(readyHtml, /aria-label="bash tool call, Ready/);
+  assert.doesNotMatch(readyHtml, /status-chip-neutral|tool-call-draft-cursor|>Ready<|tool-call-body-terminal|Raw arguments/);
+});
+
+test('provisional raw arguments render as escaped text even when malformed', () => {
+  const html = renderToString(h(ToolCallBody, {
+    toolCall: toolCall({
+      status: 'drafting',
+      input: '<img src=x onerror=alert(1)>',
+      argumentsText: '{"path":"<img src=x onerror=alert(1)>',
+      result: undefined,
+    }),
+    onOpenFile: noop,
+  }));
+  assert.match(html, />Input</);
+  assert.match(html, /tool-call-pre tool-call-provisional-input/);
+  assert.match(html, /&lt;img src=x onerror=alert\(1\)>/);
+  assert.doesNotMatch(html, /<img\b/);
+  assert.doesNotMatch(html, /dangerouslySetInnerHTML/);
+});
+
+test('collapsed running non-shell tools own their live result preview inline', () => {
+  const html = renderToString(h(toolCallCardModule.ToolCallCard, {
+    toolCall: toolCall({
+      id: 'running-read-preview',
+      name: 'read',
+      status: 'running',
+      input: { path: '/repo/src/a.ts' },
+      result: { content: [{ type: 'text', text: 'latest streamed result' }], details: {} },
+    }),
+    autoExpand: false,
+    activityTailLines: 2,
+    workingDirectory: '/repo',
+    onOpenFile: noop,
+    onContextMenu: noop,
+  }));
+  assert.match(html, /data-status="running"/);
+  assert.match(html, /tool-call-live-preview/);
+  assert.match(html, /latest streamed result/);
+  assert.doesNotMatch(html, /data-provisional/);
+
+  const awaitingOutputHtml = renderToString(h(toolCallCardModule.ToolCallCard, {
+    toolCall: toolCall({
+      id: 'running-read-awaiting-output',
+      name: 'read',
+      status: 'running',
+      input: { path: '/repo/src/pending.ts' },
+      result: undefined,
+    }),
+    autoExpand: false,
+    activityTailLines: 3,
+    workingDirectory: '/repo',
+    onOpenFile: noop,
+    onContextMenu: noop,
+  }));
+  assert.match(awaitingOutputHtml, /tool-call-live-preview/);
+  assert.match(awaitingOutputHtml, /data-empty="true"/);
 });
 
 test('rendered tool-call components cover collapsed summaries, expanded bodies, and subagent metadata', async () => {
@@ -966,7 +1181,7 @@ test('a completed parallel child shows the same finished UI while its sibling ke
   assert.match(html, /Waiting for output/);
 });
 
-test('parallel subagent children each get a connector-strip wrapper tying them to the call', async () => {
+test('parallel subagent children share one minimally indented batch wrapper', async () => {
   const { ToolCallItem } = await loadWebviewModules();
 
   const html = renderToString(h(ToolCallItem, {
@@ -999,15 +1214,19 @@ test('parallel subagent children each get a connector-strip wrapper tying them t
   assert.equal((html.match(/subagent-agent-name/g) ?? []).length, 2);
 });
 
-test('subagent parallel-group CSS draws a per-child connector strip to the spine', async () => {
+test('parallel-group CSS uses one thin shallow spine without connector ticks', async () => {
   const css = await readFile(new URL('../../../src/webview/panel/styles/tool-call.css', import.meta.url), 'utf8');
-  assert.match(css, /\.subagent-parallel-group\s*\{[^}]*padding-left:\s*12px/);
-  assert.match(css, /\.subagent-parallel-group\s*\{[^}]*border-left:\s*2px/);
-  assert.match(css, /\.subagent-parallel-child\s*\{[^}]*position:\s*relative/);
-  // The connector tick bridges the spine gap to each card's header.
-  assert.match(css, /\.subagent-parallel-child::before\s*\{[^}]*left:\s*-12px/);
-  assert.match(css, /\.subagent-parallel-child::before\s*\{[^}]*width:\s*12px/);
-  assert.match(css, /\.subagent-parallel-child::before\s*\{[^}]*top:\s*14px/);
+  assert.match(css, /\.subagent-parallel-group\s*\{[^}]*gap:\s*3px/);
+  assert.match(css, /\.subagent-parallel-group\s*\{[^}]*padding-left:\s*7px/);
+  assert.match(css, /\.subagent-parallel-group\s*\{[^}]*border-left:\s*1px solid color-mix/);
+  assert.doesNotMatch(css, /\.subagent-parallel-child::before\s*\{/);
+
+  assert.match(css, /\.tool-call-parallel-child\s*\{[^}]*padding-left:\s*7px/);
+  assert.match(css, /\.tool-call-parallel-child::before\s*\{[^}]*top:\s*-3px[^}]*bottom:\s*-3px[^}]*width:\s*1px/);
+  assert.doesNotMatch(css, /\.tool-call-parallel-child::after\s*\{/);
+  assert.match(css, /\.tool-call-parallel-start::before\s*\{[^}]*top:\s*0/);
+  assert.match(css, /\.tool-call-parallel-end::before\s*\{[^}]*bottom:\s*0/);
+  assert.doesNotMatch(css, /\.tool-call-parallel-group\s*\{/);
 });
 
 test('rendered SystemPromptMessage covers summary fallbacks, suppressed summaries, and token estimate branches', async () => {
@@ -1695,6 +1914,8 @@ test('ReasoningBlock renders a streaming cursor while open and streaming', () =>
     onContextMenu: noopContextMenu,
   }));
   assert.match(html, /reasoning-stream-cursor/);
+  assert.match(html, /data-streaming="true"/);
+  assert.match(html, /data-provisional="true"/);
 });
 
 test('ReasoningBlock omits the streaming cursor when not streaming', () => {

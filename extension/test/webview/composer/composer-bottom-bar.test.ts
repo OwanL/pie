@@ -89,7 +89,7 @@ test('composer controls render in the agreed bottom-bar order', () => {
   }));
 
   assertOrdered(html, [
-    'aria-label="Chat settings"',
+    'aria-label="Settings"',
     'aria-label="Model"',
     'aria-label="Reasoning level"',
     'aria-label="Subagent providers:',

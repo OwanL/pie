@@ -18,6 +18,16 @@ import assert from 'node:assert/strict';
 import { chatMessageEqual } from '../../../../src/webview/panel/transcript/message-equal';
 import type { ChatMessage, ToolCall } from '../../../../src/shared/protocol';
 
+const CHAT_MESSAGE_TOP_LEVEL_FIELDS = [
+  'id', 'renderIdentity', 'role', 'createdAt', 'markdown', 'userParts', 'parts',
+  'thinking', 'thinkingDetailRef', 'draftingToolCall', 'modelId', 'provider',
+  'thinkingLevel', 'status', 'errorDetail', 'toolCalls', 'toolStateRevision',
+  'durationMs', 'turnLatencyMs', 'overheadMs', 'providerLatencyMs',
+  'providerQueueMs', 'providerQueueAttemptCount', 'usage', 'customType',
+  'customDetails', 'durableEntryId',
+] as const satisfies readonly (keyof ChatMessage)[];
+type MissingChatMessageField = Exclude<keyof ChatMessage, typeof CHAT_MESSAGE_TOP_LEVEL_FIELDS[number]>;
+
 function makeBaseMessage(): ChatMessage {
   const toolCall: ToolCall = {
     id: 'tc-1',
@@ -30,6 +40,7 @@ function makeBaseMessage(): ChatMessage {
   };
   return {
     id: 'msg-1',
+    renderIdentity: 'render-msg-1',
     role: 'assistant',
     createdAt: '2026-01-01T00:00:00.000Z',
     markdown: 'Hello **world**.',
@@ -40,7 +51,12 @@ function makeBaseMessage(): ChatMessage {
       { kind: 'toolCall', toolCall },
     ],
     thinking: 'deciding what to say',
+    thinkingDetailRef: {
+      key: 'reasoning:msg-1', kind: 'reasoning', source: 'durable', sessionPath: '/s',
+      messageId: 'msg-1', sizeBytes: 22, summary: 'deciding', available: true,
+    },
     modelId: 'claude-test',
+    provider: 'anthropic',
     thinkingLevel: 'medium',
     status: 'completed',
     errorDetail: undefined,
@@ -50,6 +66,8 @@ function makeBaseMessage(): ChatMessage {
     turnLatencyMs: 420,
     overheadMs: 120,
     providerLatencyMs: 300,
+    providerQueueMs: 40,
+    providerQueueAttemptCount: 1,
     usage: {
       inputTokens: 100,
       outputTokens: 50,
@@ -59,6 +77,7 @@ function makeBaseMessage(): ChatMessage {
     },
     customType: undefined,
     customDetails: undefined,
+    durableEntryId: 'entry-msg-1',
   };
 }
 
@@ -66,6 +85,12 @@ function makeBaseMessage(): ChatMessage {
 function freshClone(message: ChatMessage): ChatMessage {
   return JSON.parse(JSON.stringify(message)) as ChatMessage;
 }
+
+test('ChatMessage top-level equality coverage is compile-time complete', () => {
+  const complete: [MissingChatMessageField] extends [never] ? true : never = true;
+  assert.equal(complete, true);
+  assert.equal(new Set(CHAT_MESSAGE_TOP_LEVEL_FIELDS).size, CHAT_MESSAGE_TOP_LEVEL_FIELDS.length);
+});
 
 test('chatMessageEqual returns true for the same reference', () => {
   const m = makeBaseMessage();
@@ -97,13 +122,15 @@ test('detects markdown difference by content even when length is unchanged', () 
   assert.equal(chatMessageEqual(a, b), false);
 });
 
-test('detects id / role / status / createdAt / modelId / thinkingLevel differences', () => {
+test('detects identity / role / status / provider-model differences', () => {
   for (const [field, value] of [
     ['id', 'msg-2'],
+    ['renderIdentity', 'render-msg-2'],
     ['role', 'user'],
     ['status', 'streaming'],
     ['createdAt', '2026-02-02T00:00:00.000Z'],
     ['modelId', 'gpt-test'],
+    ['provider', 'openai'],
     ['thinkingLevel', 'high'],
   ] as const) {
     const a = makeBaseMessage();
@@ -123,6 +150,9 @@ test('detects thinking / errorDetail / customType / latency / duration / usage d
     { field: 'turnLatencyMs', value: 1 },
     { field: 'overheadMs', value: 2 },
     { field: 'providerLatencyMs', value: 3 },
+    { field: 'providerQueueMs', value: 4 },
+    { field: 'providerQueueAttemptCount', value: 2 },
+    { field: 'durableEntryId', value: 'entry-msg-2' },
     { field: 'usage', value: { inputTokens: 999, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 1000 } },
   ];
   for (const { field, value } of cases) {
@@ -131,6 +161,13 @@ test('detects thinking / errorDetail / customType / latency / duration / usage d
     (b as unknown as Record<string, unknown>)[field] = value;
     assert.equal(chatMessageEqual(a, b), false, `should detect ${field} difference`);
   }
+});
+
+test('detects thinking detail identity differences', () => {
+  const a = makeBaseMessage();
+  const b = freshClone(a);
+  b.thinkingDetailRef!.key = 'reasoning:msg-2';
+  assert.equal(chatMessageEqual(a, b), false);
 });
 
 test('detects nested parts difference (toolCall result landing)', () => {

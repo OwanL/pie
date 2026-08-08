@@ -381,14 +381,13 @@ test('estimateActivityTailHeight scales with rendered rows and is zero without a
 
 // ── deriveTurnActivityState integration ─────────────────────────────────────
 
-test('deriveTurnActivityState attaches a reasoning tail while the model streams thinking tokens', () => {
+test('deriveTurnActivityState keeps reasoning lifecycle-only when ReasoningBlock owns the stream', () => {
   const transcript = [userMessage(), streamingAssistant([{ kind: 'reasoning', text: 'planning the work' }])];
   const state = deriveFor(transcript);
   assert.ok(state);
   assert.equal(state!.phase, 'streaming');
   assert.equal(state!.label, 'reasoning');
-  assert.ok(state!.tail);
-  assert.equal(state!.tail!.kind, 'reasoning');
+  assert.equal(state!.tail, undefined);
 });
 
 test('deriveTurnActivityState identifies a streaming tool-call draft and reports its token count', () => {
@@ -407,7 +406,38 @@ test('deriveTurnActivityState identifies a streaming tool-call draft and reports
   assert.match(state!.ariaLabel, /^Agent is drafting a bash tool call, \d+ tokens?$/);
 });
 
-test('deriveTurnActivityState attaches a tool tail while bash is running', () => {
+test('deriveTurnActivityState represents projected drafting and ready tool rows without a duplicate tail', () => {
+  const drafting = streamingAssistant([{
+    kind: 'toolCall',
+    toolCall: makeToolCall({
+      id: 'draft-1',
+      name: 'read',
+      status: 'drafting',
+      input: '{"path":',
+      argumentsText: '{"path":',
+    }),
+  }]);
+  const draftState = deriveFor([userMessage(), drafting]);
+  assert.equal(draftState?.label, 'drafting read call');
+  assert.equal(draftState?.tail, undefined);
+
+  const ready = streamingAssistant([{
+    kind: 'toolCall',
+    toolCall: makeToolCall({
+      id: 'draft-1',
+      name: 'read',
+      status: 'ready',
+      input: '{"path":"src/a.ts"}',
+      argumentsText: '{"path":"src/a.ts"}',
+    }),
+  }]);
+  const readyState = deriveFor([userMessage(), ready]);
+  assert.equal(readyState?.label, 'read call ready');
+  assert.match(readyState?.ariaLabel ?? '', /^read tool call is ready/);
+  assert.equal(readyState?.tail, undefined);
+});
+
+test('deriveTurnActivityState keeps running-tool lifecycle-only when the card owns output', () => {
   const assistant: ChatMessage = {
     id: 'assistant-1',
     role: 'assistant',
@@ -423,10 +453,9 @@ test('deriveTurnActivityState attaches a tool tail while bash is running', () =>
   const state = deriveFor(transcript);
   assert.ok(state);
   assert.equal(state!.phase, 'runningTool');
-  assert.equal(state!.label, 'bash');
-  assert.ok(state!.tail);
-  assert.equal(state!.tail!.kind, 'tool');
-  assert.equal(state!.tail!.inputLine, 'npm run test');
+  assert.equal(state!.label, 'running bash');
+  assert.equal(state!.runningToolName, 'bash');
+  assert.equal(state!.tail, undefined);
 });
 
 test('deriveTurnActivityState omits a tail for a running ask_user (the prompt UI is the surface)', () => {
@@ -498,7 +527,7 @@ test('deriveTurnActivityState suppresses the multi-tool preview rows when any ru
   assert.equal(state!.tail, undefined);
 });
 
-test('deriveTurnActivityState keeps the multi-tool preview rows when no running tool is a subagent', () => {
+test('deriveTurnActivityState keeps multi-tool activity lifecycle-only because each card owns its preview', () => {
   const assistant: ChatMessage = {
     id: 'assistant-1',
     role: 'assistant',
@@ -515,7 +544,6 @@ test('deriveTurnActivityState keeps the multi-tool preview rows when no running 
   assert.ok(state);
   assert.equal(state!.phase, 'runningTool');
   assert.equal(state!.label, 'running 2 tools');
-  // No subagent in the batch → the multi-tool preview rows are still derived.
-  assert.ok(state!.tail, 'multi-tool tail still derived when no subagent is running');
-  assert.equal(state!.tail!.kind, 'tool');
+  assert.equal(state!.detail, 'bash, read');
+  assert.equal(state!.tail, undefined);
 });

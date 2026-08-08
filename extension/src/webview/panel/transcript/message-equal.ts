@@ -39,12 +39,14 @@ export function chatMessageEqual(a: ChatMessage, b: ChatMessage): boolean {
   // structural comparisons below.
   if (
     a.id !== b.id ||
+    a.renderIdentity !== b.renderIdentity ||
     a.role !== b.role ||
     a.status !== b.status ||
     a.createdAt !== b.createdAt ||
     a.markdown !== b.markdown ||
     a.thinking !== b.thinking ||
     a.modelId !== b.modelId ||
+    a.provider !== b.provider ||
     a.thinkingLevel !== b.thinkingLevel ||
     a.errorDetail !== b.errorDetail ||
     a.toolStateRevision !== b.toolStateRevision ||
@@ -52,7 +54,10 @@ export function chatMessageEqual(a: ChatMessage, b: ChatMessage): boolean {
     a.turnLatencyMs !== b.turnLatencyMs ||
     a.overheadMs !== b.overheadMs ||
     a.providerLatencyMs !== b.providerLatencyMs ||
-    a.customType !== b.customType
+    a.providerQueueMs !== b.providerQueueMs ||
+    a.providerQueueAttemptCount !== b.providerQueueAttemptCount ||
+    a.customType !== b.customType ||
+    a.durableEntryId !== b.durableEntryId
   ) {
     return false;
   }
@@ -66,6 +71,7 @@ export function chatMessageEqual(a: ChatMessage, b: ChatMessage): boolean {
   // allocates nothing and early-exits on the first differing leaf (see
   // `deepEqual`).
   if (!deepEqual(a.parts, b.parts)) return false;
+  if (!deepEqual(a.thinkingDetailRef, b.thinkingDetailRef)) return false;
   if (!deepEqual(a.toolCalls, b.toolCalls)) return false;
   if (!deepEqual(a.draftingToolCall, b.draftingToolCall)) return false;
   if (!deepEqual(a.userParts, b.userParts)) return false;

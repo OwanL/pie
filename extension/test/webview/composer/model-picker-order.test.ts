@@ -72,12 +72,13 @@ test('orderModelsForPicker does not treat subagent ineligibility as a parent-cha
   assert.ok(ordered.every((entry) => !entry.title.includes('Subagent eligibility warning')));
 });
 
-test('orderModelsForPicker strips provider text only from the compact selected label', () => {
+test('orderModelsForPicker avoids repeating provider branding in row and selected labels', () => {
   const [entry] = orderModelsForPicker([
     model('deepseek', { name: 'Ollama Cloud: Deepseek V4 pro', subagent: { eligible: true } }),
   ]);
-  assert.equal(entry.label, 'test · Ollama Cloud: Deepseek V4 pro');
+  assert.equal(entry.label, 'test · Deepseek V4 pro');
   assert.equal(entry.selectedLabel, 'Deepseek V4 pro');
+  assert.equal(entry.title, 'Ollama Cloud: Deepseek V4 pro');
 });
 
 test('orderModelsForPicker uses model id as deterministic tiebreak when names match', () => {

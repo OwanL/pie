@@ -104,6 +104,8 @@ export type UiDensity = 'compact' | 'comfortable' | 'spacious';
 
 export const COMPOSER_INITIAL_ROWS_MIN = 1;
 export const COMPOSER_INITIAL_ROWS_MAX = 6;
+export const UI_PATH_PARENT_DEPTH_MIN = 0;
+export const UI_PATH_PARENT_DEPTH_MAX = 8;
 
 /** How proactive history-compaction thresholds are interpreted. */
 export type HistoryCompactionThresholdMode = 'percentage' | 'tokens';
@@ -478,6 +480,12 @@ export interface ChatPrefs {
    *  message bodies and prompts. Empty string falls back to --panel-accent
    *  (the bundled default link appearance). */
   uiLinkColor: string;
+  /** Number of parent directory segments to show before a filename in
+   *  structured path labels (tool-call summaries, full-log links, and changed-
+   *  file rows). 0 shows only the filename, 1 shows parent/filename, N shows N
+   *  parents plus filename. The full path is always preserved for tooltips and
+   *  open/copy actions. Range 0..8; default 1. */
+  uiPathParentDepth: number;
   /** Max width (%) of chat bubbles (sets --message-assistant-width). Also
    *  scales the narrow variant up by 4 points (clamped to 100). The bundled
    *  default is 88. */
@@ -621,6 +629,7 @@ export const DEFAULT_CHAT_PREFS: ChatPrefs = {
   uiAccentColor: '',
   uiMutedColor: '',
   uiLinkColor: '',
+  uiPathParentDepth: 1,
   uiMessageWidth: 88,
   uiBackground: '',
   uiForeground: '',
@@ -832,6 +841,15 @@ export function normalizeComposerInitialRows(value: unknown): number {
     : DEFAULT_CHAT_PREFS.composerInitialRows;
 }
 
+export function normalizeUiPathParentDepth(value: unknown): number {
+  return typeof value === 'number'
+    && Number.isInteger(value)
+    && value >= UI_PATH_PARENT_DEPTH_MIN
+    && value <= UI_PATH_PARENT_DEPTH_MAX
+    ? value
+    : DEFAULT_CHAT_PREFS.uiPathParentDepth;
+}
+
 export function resolveChatPrefs(prefs?: Partial<ChatPrefs> | null): ChatPrefs {
   return {
     ...DEFAULT_CHAT_PREFS,
@@ -840,6 +858,7 @@ export function resolveChatPrefs(prefs?: Partial<ChatPrefs> | null): ChatPrefs {
       ? prefs.autonomousMode
       : DEFAULT_CHAT_PREFS.autonomousMode,
     composerInitialRows: normalizeComposerInitialRows(prefs?.composerInitialRows),
+    uiPathParentDepth: normalizeUiPathParentDepth(prefs?.uiPathParentDepth),
     extensionToggles: {
       ...DEFAULT_CHAT_PREFS.extensionToggles,
       ...(prefs?.extensionToggles ?? {}),

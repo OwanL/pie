@@ -10,6 +10,7 @@ import { AGENT_ACTIVITY_LABELS } from './activity';
 import { AgentActivityLabel } from './activity-label';
 import { PruningDiagnostics } from './pruning-details';
 import { formatPruningSummary, pruningTotals, type PruningHeaderState } from './pruning';
+import { formatCompactTokens } from '../utils/format-tokens';
 
 interface PruningHeaderChipProps {
   state: PruningHeaderState;
@@ -38,9 +39,9 @@ function formatPruningChipLabel(details: PruningDetails, fallbackText?: string):
   const parts: string[] = [];
   if (skillsTotal > 0) parts.push(`${skillsKept}/${skillsTotal} skills`);
   if (toolsTotal > 0) parts.push(`${toolsKept}/${toolsTotal} tools`);
-  if (parts.length > 0) parts.push(`✂ ${tokensSaved}`);
+  if (tokensSaved > 0) parts.push(`${formatCompactTokens(tokensSaved)} saved`);
 
-  return parts.length > 0 ? parts.join(' · ') : fallbackText || 'Pruning complete';
+  return parts.length > 0 ? parts.join(' · ') : fallbackText || 'Complete';
 }
 
 export function PruningHeaderChip({ state, expanded, onToggle, onCancel }: PruningHeaderChipProps) {
@@ -80,8 +81,8 @@ export function PruningHeaderButton({ details, expanded, fallbackText, onToggle 
       ariaLabel={failed ? `Pruning failed: ${details.prepassError}` : summary}
       title={failed && details.prepassError ? details.prepassError : summary}
       onClick={onToggle}
-      leading={failed ? '⚠' : undefined}
-      label={chipLabel}
+      leading={failed ? '⚠' : <span class="pruning-header-kicker">Prepass</span>}
+      label={failed ? 'Prepass failed' : chipLabel}
       trailing={<CollapsibleChevron open={expanded} size={9} />}
     />
   );

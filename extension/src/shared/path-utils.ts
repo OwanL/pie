@@ -71,6 +71,35 @@ function truncatePathParentFromLeft(parentPath: string, maxLength: number): stri
   return pathSuffix || slicedParentPath.replace(/^[\\/]+/, '');
 }
 
+/**
+ * Render a path with at most `parentDepth` parent directory segments before
+ * the filename. `parentDepth = 0` shows only the filename; `parentDepth = 1`
+ * shows the immediate parent + filename; larger values include progressively
+ * more ancestors. The full original path is preserved by callers for tooltips
+ * and open/copy actions; this only produces the displayed label.
+ *
+ * Separators are normalized to '/' for display. Paths without a separator
+ * (already a bare filename) pass through unchanged.
+ */
+export function formatPathWithParentDepth(path: string, parentDepth: number): string {
+  if (!path || parentDepth < 0) return path;
+
+  const normalized = normalizePathSeparators(path);
+  const parts = normalized.split('/').filter((part) => part.length > 0);
+  if (parts.length === 0) return path;
+
+  const fileName = parts[parts.length - 1];
+  const parentParts = parts.slice(0, -1);
+
+  if (parentDepth === 0 || parentParts.length === 0) {
+    return fileName;
+  }
+
+  const start = Math.max(0, parentParts.length - parentDepth);
+  const selectedParents = parentParts.slice(start);
+  return `${selectedParents.join('/')}/${fileName}`;
+}
+
 export function truncatePathText(value: string): string {
   if (value.length <= PATH_SUMMARY_MAX_LENGTH) {
     return value;

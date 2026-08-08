@@ -4,6 +4,7 @@
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import type { JSX } from 'preact';
 import type { ChatPrefs, ModelInfo } from '../../../shared/protocol';
+import { useAnchoredOverlay } from '../components/anchored-overlay';
 import { getSubagentBucketProviders, isSubagentProviderEnabled, setSubagentProviderEnabled } from '../chat-prefs';
 import { Tooltip } from '../components/tooltip';
 import { cx } from '../utils/cx';
@@ -20,6 +21,16 @@ export function SubagentProviderMenu({ sessionPath, prefs, availableModels, onSe
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+
+  useAnchoredOverlay({
+    open,
+    triggerRef,
+    overlayRef: menuRef,
+    preferredDirection: 'up',
+    preferredWidth: 260,
+    minHeight: 110,
+    maxHeight: 320,
+  });
 
   const providers = useMemo(
     () => getSubagentBucketProviders(prefs, availableModels, sessionPath),
@@ -77,8 +88,9 @@ export function SubagentProviderMenu({ sessionPath, prefs, availableModels, onSe
       </Tooltip>
       {open && (
         <div ref={menuRef} class="system-prompt-toggle-dropdown subagent-provider-dropdown" role="dialog" aria-label="Subagent provider toggles">
-          <div class="system-prompt-toggle-header"><span class="toolbar-settings-title">Subagent providers</span></div>
-          <div class="toolbar-settings-item-hint" style="padding: 0 10px 6px">Only affects subagents in this chat.</div>
+          <div class="system-prompt-toggle-header">
+            <span class="system-prompt-toggle-title">Subagent providers</span>
+          </div>
           <div class="system-prompt-toggle-body">
             {providers.map((provider) => {
               const enabled = isSubagentProviderEnabled(prefs, provider, sessionPath);

@@ -22,6 +22,14 @@
 .composer-shell {
   container-name: composer-shell;
   container-type: inline-size;
+  border-color: transparent;
+  box-shadow: none;
+}
+
+.composer-shell:hover,
+.composer-shell:focus-within {
+  border-color: transparent;
+  box-shadow: none;
 }
 
 .composer-bottom-bar {
@@ -348,25 +356,19 @@
   z-index: 200;
   display: flex;
   flex-direction: column;
-  /* Fixed width keeps the menu from drifting horizontally as the user clicks
-     between categories (whose content widths differ). 600px is comfortably
-     larger than the old 560px floor and fits the flexible interior layouts. */
-  width: 600px;
-  min-width: 600px;
-  max-width: 660px;
-  /* Height is pinned at runtime by the settings-menu useLayoutEffect (a fixed
-     value capped to the available vertical space) so the menu doesn't grow or
-     shrink when switching tabs. This CSS max-height is just a safety cap. */
+  /* Stable on a wide panel, fluid inside a narrow VS Code sidebar. */
+  width: min(620px, calc(100vw - 16px));
+  min-width: 0;
+  max-width: calc(100vw - 16px);
+  /* Height is pinned at runtime so tab changes never shift the menu. */
   min-height: 0;
-  max-height: calc(100vh - 32px);
+  max-height: calc(100vh - 16px);
   padding: var(--panel-gap-md);
   border: 1px solid var(--panel-border);
   border-radius: var(--panel-radius-lg);
-  background: var(--panel-overlay-surface);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
+  background: color-mix(in srgb, var(--panel-overlay-surface) 95%, var(--panel-black));
   box-shadow: var(--panel-shadow-overlay);
-  animation: panel-scale-in var(--panel-duration-entrance) var(--panel-ease-out-expo);
+  animation: picker-popover-in var(--panel-duration-instant) var(--panel-ease-out);
   transform-origin: bottom left;
 }
 
@@ -376,14 +378,14 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 2px 2px var(--panel-gap-sm);
+  min-height: 26px;
+  padding: 0 0 var(--panel-gap-sm);
 }
 
 .toolbar-settings-title {
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+  letter-spacing: 0;
   color: var(--panel-foreground);
 }
 
@@ -430,10 +432,11 @@
   flex-direction: column;
   flex: 1 1 auto;
   min-width: 0;
-  gap: var(--panel-gap-sm);
+  gap: var(--panel-gap-xs);
   min-height: 0;
   overflow-y: auto;
-  padding-right: 2px;
+  overscroll-behavior: contain;
+  padding: 0 2px 0 0;
 }
 
 /* ── Settings menu: search + category sidebar ──────────────────────────── */
@@ -460,7 +463,8 @@
 .toolbar-settings-search-input {
   width: 100%;
   min-width: 0;
-  padding: 4px var(--panel-gap-md) 4px calc(var(--panel-gap-sm) + 16px);
+  min-height: 30px;
+  padding: 5px 28px 5px calc(var(--panel-gap-sm) + 16px);
   border: 1px solid var(--panel-border-subtle);
   border-radius: var(--panel-radius-md);
   background: var(--panel-control-surface);
@@ -504,7 +508,7 @@
   display: flex;
   flex-direction: column;
   flex: 0 0 auto;
-  width: 132px;
+  width: 108px;
   gap: 1px;
   padding-right: var(--panel-gap-md);
   border-right: 1px solid var(--panel-border);
@@ -516,9 +520,9 @@
   align-items: center;
   gap: var(--panel-gap-sm);
   width: 100%;
-  padding: 6px var(--panel-gap-sm);
-  border: none;
-  border-left: 2px solid transparent;
+  min-height: 28px;
+  padding: 4px 6px;
+  border: 1px solid transparent;
   border-radius: var(--panel-radius-md);
   background: transparent;
   color: var(--panel-muted);
@@ -550,9 +554,10 @@
 }
 
 .toolbar-settings-tab.active {
-  background: var(--panel-accent-surface);
-  color: var(--panel-accent-strong);
-  border-left-color: var(--panel-accent);
+  background: var(--panel-control-hover);
+  color: var(--panel-foreground);
+  border-color: transparent;
+  box-shadow: inset 2px 0 0 var(--panel-accent);
 }
 
 .toolbar-settings-tab:focus-visible {
@@ -628,7 +633,7 @@
 .toolbar-settings-appearance {
   display: flex;
   flex-direction: column;
-  gap: var(--panel-gap-sm);
+  gap: 0;
 }
 
 .toolbar-settings-section {
@@ -662,9 +667,10 @@
   display: grid;
   grid-template-columns: 14px minmax(0, 1fr) auto;
   align-items: center;
-  gap: var(--panel-gap-md);
+  gap: 8px;
   width: 100%;
-  padding: 5px var(--panel-gap-md);
+  min-height: 30px;
+  padding: 4px 7px;
   border: none;
   border-radius: var(--panel-radius-md);
   background: transparent;
@@ -696,9 +702,9 @@
   justify-content: center;
   width: 14px;
   height: 14px;
-  border: 1px solid var(--panel-border);
-  border-radius: var(--panel-radius-sm);
-  background: transparent;
+  border: 1px solid var(--panel-border-subtle);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--panel-control-surface) 70%, transparent);
   color: var(--panel-accent);
 }
 
@@ -760,10 +766,11 @@
   display: flex;
   flex-direction: column;
   gap: 1px;
-  background: var(--panel-control-surface);
+  margin: 2px 0 5px 22px;
+  background: color-mix(in srgb, var(--panel-control-surface) 72%, transparent);
   border: 1px solid var(--panel-border-subtle);
-  border-radius: var(--panel-radius-sm);
-  padding: var(--panel-gap-md);
+  border-radius: var(--panel-radius-md);
+  padding: 8px;
 }
 
 /* ── Pruning settings ────────────────────────────────────────────────────── */
@@ -793,11 +800,12 @@
 }
 
 .toolbar-settings-select {
-  background: var(--panel-control-surface);
+  color-scheme: dark;
+  background: var(--panel-input-surface);
   color: inherit;
   border: 1px solid var(--panel-border-subtle);
   border-radius: var(--panel-radius-sm);
-  padding: 3px var(--panel-gap-md);
+  padding: 3px 8px;
   font-size: 11px;
   min-width: 0;
   max-width: 60%;
@@ -830,7 +838,7 @@
 }
 
 .toolbar-settings-stepper-btn {
-  background: var(--panel-control-surface);
+  background: var(--panel-input-surface);
   color: inherit;
   border: 1px solid var(--panel-border-subtle);
   border-radius: var(--panel-radius-sm);
@@ -886,8 +894,18 @@
 
 .toolbar-settings-sound-controls {
   display: flex;
+  min-width: 0;
   align-items: center;
+  justify-content: flex-end;
   gap: var(--panel-gap-sm);
+}
+
+.toolbar-settings-control-value {
+  min-width: 30px;
+  color: var(--panel-muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
 }
 
 .toolbar-settings-slider {
@@ -929,6 +947,41 @@
   background: var(--panel-control-hover);
 }
 
+/* In a genuinely narrow sidebar the category rail becomes a horizontal strip
+   instead of squeezing the controls into an unusable second column. */
+@media (max-width: 520px) {
+  .toolbar-settings-menu {
+    width: calc(100vw - 12px);
+    max-width: calc(100vw - 12px);
+    padding: 8px;
+  }
+
+  .toolbar-settings-layout {
+    flex-direction: column;
+    gap: 7px;
+  }
+
+  .toolbar-settings-tabs {
+    flex-direction: row;
+    width: 100%;
+    padding: 0 0 7px;
+    border-right: 0;
+    border-bottom: 1px solid var(--panel-border-subtle);
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+  }
+
+  .toolbar-settings-tab {
+    width: auto;
+    flex: 0 0 auto;
+  }
+
+  .toolbar-settings-tab-icon { display: none; }
+  .toolbar-settings-mode-row,
+  .toolbar-settings-stepper-row { align-items: flex-start; }
+  .toolbar-settings-select { max-width: 54%; }
+}
+
 .toolbar-settings-test-btn:disabled {
   opacity: 0.4;
   cursor: default;
@@ -941,7 +994,7 @@
 .toolbar-settings-ui-control {
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 2px;
 }
 
 .toolbar-settings-ui-control-head {
@@ -1020,13 +1073,31 @@
   cursor: default;
 }
 
-/* ── UI flyout group labels ──────────────────────────────────────────────── */
-/* Small uppercase headings that divide the many flyout controls into         */
-/* scannable groups: Theme, Colors, Shape, Layout, Typography.                */
+/* ── Appearance groups ───────────────────────────────────────────────────── */
+/* Semantic groups keep the long Appearance pane scannable without repeating */
+/* the active category label or wrapping every control in its own card.       */
+
+.toolbar-settings-ui-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--panel-gap-xs);
+}
+
+.toolbar-settings-ui-group + .toolbar-settings-ui-group {
+  margin-top: var(--panel-gap-md);
+  padding-top: var(--panel-gap-md);
+  border-top: 1px solid var(--panel-border);
+}
+
+.toolbar-settings-ui-group-content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--panel-gap-sm);
+}
 
 .toolbar-settings-ui-group-label {
-  padding: 3px var(--panel-gap-xs) 0;
-  font-size: 10px;
+  padding: 0 var(--panel-gap-xs);
+  font-size: 9.5px;
   line-height: 1.3;
   text-transform: uppercase;
   letter-spacing: 0.12em;
@@ -1138,6 +1209,14 @@
 }
 
 @media (forced-colors: active) {
+  .composer-shell,
+  .composer-shell:hover,
+  .composer-shell:focus-within {
+    border-color: ButtonText;
+  }
+  .composer-shell:focus-within {
+    outline: 1px solid Highlight;
+  }
   .toolbar-settings-trigger {
     border-color: ButtonText;
   }
@@ -1286,31 +1365,38 @@
 }
 
 .system-prompt-toggle-dropdown {
-  position: absolute;
-  left: 0;
-  bottom: calc(100% + var(--panel-gap-sm));
-  z-index: 200;
+  position: fixed;
+  z-index: 300;
   display: flex;
   flex-direction: column;
-  min-width: 260px;
-  max-width: 360px;
-  max-height: calc(100vh - 32px);
-  padding: var(--panel-gap-md);
+  box-sizing: border-box;
+  min-width: 0;
+  padding: 2px;
   border: 1px solid var(--panel-border);
   border-radius: var(--panel-radius-lg);
-  background: var(--panel-overlay-surface);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
+  background: color-mix(in srgb, var(--panel-overlay-surface) 95%, var(--panel-black));
   box-shadow: var(--panel-shadow-overlay);
-  animation: panel-scale-in var(--panel-duration-entrance) var(--panel-ease-out-expo);
+  overflow: hidden;
+  animation: picker-popover-in var(--panel-duration-instant) var(--panel-ease-out);
   transform-origin: bottom left;
+}
+
+.system-prompt-toggle-dropdown[data-placement="down"] {
+  transform-origin: top left;
 }
 
 .system-prompt-toggle-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 2px 2px var(--panel-gap-sm);
+  min-height: 23px;
+  padding: 1px 3px 2px;
+}
+
+.system-prompt-toggle-title {
+  color: var(--panel-foreground);
+  font-size: 11.5px;
+  font-weight: 600;
 }
 
 .system-prompt-toggle-reset {
@@ -1331,11 +1417,20 @@
 .system-prompt-toggle-body {
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: 0;
   overflow-y: auto;
+  overscroll-behavior: contain;
   min-height: 0;
-  max-height: 320px;
-  padding-right: 2px;
+  padding-right: 1px;
+}
+
+.system-prompt-toggle-dropdown .toolbar-settings-item {
+  min-height: 27px;
+  padding: 2px 4px;
+}
+
+.subagent-provider-dropdown .toolbar-settings-item {
+  min-height: 25px;
 }
 
 /* Two-line label: title on top, muted summary underneath. Reuses the
@@ -1353,7 +1448,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 10px;
+  font-size: 9.5px;
   color: var(--panel-muted);
 }
 

@@ -1,7 +1,7 @@
 import { produce } from 'immer';
 
 import type { ArchState } from '../arch-state.js';
-import { mergePruningSettings, mergeToolResultPruningSettings, normalizeComposerInitialRows, normalizeNestedAllowedBuckets, normalizeSubagentBuckets, type ChatPrefs, type ComposerInput } from '../../../shared/protocol.js';
+import { mergePruningSettings, mergeToolResultPruningSettings, normalizeComposerInitialRows, normalizeNestedAllowedBuckets, normalizeSubagentBuckets, normalizeUiPathParentDepth, type ChatPrefs, type ComposerInput } from '../../../shared/protocol.js';
 import type { Command } from '../commands.js';
 import type { ReducerResult } from './helpers.js';
 import { addToArray, appendLocalUserMessage, truncateLocalTranscriptAfter } from './helpers.js';
@@ -466,6 +466,9 @@ export function handleSetPrefs(state: ArchState, cmd: Extract<Command, { kind: '
     }),
     ...(cmd.prefs.composerInitialRows !== undefined && {
       composerInitialRows: normalizeComposerInitialRows(cmd.prefs.composerInitialRows),
+    }),
+    ...(cmd.prefs.uiPathParentDepth !== undefined && {
+      uiPathParentDepth: normalizeUiPathParentDepth(cmd.prefs.uiPathParentDepth),
     }),
     // Normalize subagentNestedAllowedBuckets so ArchState always holds a
     // complete {small,medium,frontier} object (missing keys default to true)

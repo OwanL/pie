@@ -208,7 +208,7 @@ test('ordered stdout writer never coalesces or supersedes sequenced semantic pro
   assert.deepEqual(written.map((line) => JSON.parse(line)).slice(1).map((entry) => entry.payload.seq), [2, 3, 4, 5]);
 });
 
-test('stalled stdout coalesces contiguous v5 subagent patches without duplicating recursive snapshots', async () => {
+test('stalled stdout coalesces contiguous v6 subagent patches without duplicating recursive snapshots', async () => {
   const written: string[] = [];
   const callbacks: Array<() => void> = [];
   const fatal: Error[] = [];
@@ -226,8 +226,9 @@ test('stalled stdout coalesces contiguous v5 subagent patches without duplicatin
 
   const recursiveText = 'x'.repeat(512 * 1024);
   const basePayload = {
-    protocolVersion: 5, sessionPath: '/s', requestId: 'request', turnId: 'turn',
+    protocolVersion: 6, sessionPath: '/s', requestId: 'request', turnId: 'turn',
     attemptId: 'attempt', executionId: 'execution', kind: 'tool.progress', occurredAt: 1,
+    checkpointBytes: 30 * 1024 * 1024,
   };
   writer.write({
     event: 'live.semantic',

@@ -35,7 +35,13 @@ export function projectLiveTurn(
   tools: readonly LiveToolRecord[],
   status: Extract<ChatMessage['status'], 'streaming' | 'interrupted'>,
 ): ChatMessage {
-  const toolByCallId = new Map(tools.map((tool) => [tool.transcriptToolCallId, tool]));
+  const toolByCallId = Object.create(null) as Record<string, LiveToolRecord>;
+  for (const tool of tools) {
+    const existing = toolByCallId[tool.transcriptToolCallId];
+    // A duplicate running execution must not shadow a durability-confirmed terminal.
+    if (existing?.terminal && !tool.terminal) continue;
+    toolByCallId[tool.transcriptToolCallId] = tool;
+  }
   const parts: ChatMessagePart[] = [];
   let markdown = '';
   let thinking = '';
@@ -54,10 +60,27 @@ export function projectLiveTurn(
       thinking += projected.text;
       parts.push(projected);
     } else {
-      const tool = toolByCallId.get(part.toolCallId);
+      const tool = toolByCallId[part.toolCallId];
+      const draft = Object.prototype.hasOwnProperty.call(turn.toolDraftsByCallId, part.toolCallId)
+        ? turn.toolDraftsByCallId[part.toolCallId]
+        : undefined;
       if (tool) parts.push({
         kind: 'toolCall',
         toolCall: projectLiveTool(tool, turn.sessionPath, turn.canonicalMessageId),
+      });
+      else if (draft) parts.push({
+        kind: 'toolCall',
+        toolCall: {
+          id: draft.toolCallId,
+          name: draft.name,
+          // Keep the raw JSON text intact. Incomplete JSON is not parsed into a
+          // synthetic authoritative input object.
+          input: draft.argumentsJson,
+          argumentsText: draft.argumentsJson,
+          status: draft.phase,
+          phase: draft.phase,
+          seq: turn.seq,
+        },
       });
     }
   }
@@ -66,6 +89,10 @@ export function projectLiveTurn(
     .map((part) => part.toolCall);
   return {
     id: turn.canonicalMessageId,
+    // Render-only continuity survives a terminal handoff even when the durable
+    // SDK message id is different. Protocol and transcript ownership continue
+    // to use `id`.
+    renderIdentity: turn.canonicalMessageId,
     role: 'assistant',
     createdAt: new Date(turn.startedAt).toISOString(),
     modelId: turn.modelId,

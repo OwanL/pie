@@ -224,16 +224,29 @@ function useMergedTranscript(viewState: ViewState, optimisticMessages: Optimisti
 
 function useFocusRefresh(postMessage: (msg: WebviewToHostMessage) => void) {
   useEffect(() => {
-    const refreshState = () => postMessage({ type: 'refreshState' });
+    let frame = 0;
+    let lastRefreshAt = Number.NEGATIVE_INFINITY;
+    const refreshState = () => {
+      if (document.hidden) return;
+      const now = performance.now();
+      // VS Code commonly emits visibilitychange and focus as one transition.
+      // Collapse that pair (and focus chatter) so settings.get/models.list do
+      // not repeat synchronous metadata checks back-to-back.
+      if (now - lastRefreshAt < 500 || frame !== 0) return;
+      frame = window.requestAnimationFrame(() => {
+        frame = 0;
+        lastRefreshAt = performance.now();
+        postMessage({ type: 'refreshState' });
+      });
+    };
     const handleVisibilityChange = () => {
-      if (!document.hidden) {
-        refreshState();
-      }
+      if (!document.hidden) refreshState();
     };
 
     window.addEventListener('focus', refreshState);
     document.addEventListener('visibilitychange', handleVisibilityChange);
     return () => {
+      window.cancelAnimationFrame(frame);
       window.removeEventListener('focus', refreshState);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };

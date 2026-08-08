@@ -124,6 +124,56 @@ function renderCard(toolCall: ToolCall) {
 const BODY_WRAP = '.tool-call-body-wrap';
 const BODY = '.tool-call-body';
 
+test('one stable ToolCallCard owns drafting, ready, and running shell lifecycle', () => {
+  const id = 'bash-provisional-lifecycle';
+  renderCard({
+    id,
+    name: 'bash',
+    input: '{"command":"npm te',
+    argumentsText: '{"command":"npm te',
+    status: 'drafting',
+  });
+  const root = container.querySelector('.tool-call-card');
+  assert.ok(root);
+  assert.equal(root.getAttribute('data-status'), 'drafting');
+  assert.equal(root.getAttribute('data-provisional'), 'true');
+  assert.doesNotMatch(root.textContent ?? '', /Drafting/);
+  assert.equal(root.querySelector('.status-chip-neutral'), null);
+  assert.equal(root.querySelector('.tool-call-draft-cursor'), null);
+  assert.ok(!root.querySelector(BODY_WRAP), 'draft input body is not auto-shown');
+
+  renderCard({
+    id,
+    name: 'bash',
+    input: '{"command":"npm test"}',
+    argumentsText: '{"command":"npm test"}',
+    status: 'ready',
+  });
+  const readyRoot = container.querySelector('.tool-call-card');
+  assert.equal(readyRoot, root, 'stable id keeps the same card DOM node');
+  assert.equal(readyRoot?.getAttribute('data-status'), 'ready');
+  assert.doesNotMatch(readyRoot?.textContent ?? '', /Ready/);
+  assert.equal(readyRoot?.querySelector('.status-chip-neutral'), null);
+  assert.ok(!readyRoot?.querySelector(BODY_WRAP), 'ready input body is not auto-shown');
+  act(() => {
+    (readyRoot?.querySelector('.tool-call-header') as HTMLElement).click();
+  });
+  assert.match(readyRoot?.querySelector(BODY)?.textContent ?? '', /Input[\s\S]*"command":"npm test"/);
+
+  renderCard({
+    id,
+    name: 'bash',
+    input: { command: 'npm test' },
+    result: { content: [{ type: 'text', text: 'running tests' }], details: {} },
+    status: 'running',
+  });
+  const runningRoot = container.querySelector('.tool-call-card');
+  assert.equal(runningRoot, root, 'execution continues in the same card DOM node');
+  assert.equal(runningRoot?.getAttribute('data-status'), 'running');
+  assert.equal(runningRoot?.getAttribute('data-provisional'), null);
+  assert.ok(runningRoot?.querySelector(BODY_WRAP), 'shell terminal appears only once running');
+});
+
 test('shell auto-shown body lingers after completion, then animates closed via the fallback timer', () => {
   const timers = useFakeTimers();
   try {

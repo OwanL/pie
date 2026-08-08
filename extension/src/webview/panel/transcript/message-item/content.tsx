@@ -37,46 +37,26 @@ function AssistantParts({
   onContextMenu,
   getMessageRaw,
 }: AssistantPartsProps) {
-  // Group consecutive tool-call parts that share a `parallelGroupId` so a
-  // parallel batch (e.g. two bash calls fired together) renders with the
-  // parallel indentation strip instead of reading as two unrelated sequential
-  // cards. Only defined group ids merge; calls without one (legacy sessions)
-  // and batches of size 1 render as ordinary single tool-call entries.
+  // Keep every consecutive tool-call run under one parent from its first
+  // provisional card onward. Verified parallel batches are child annotations,
+  // never replacement parents: mixed adjacent batches therefore stay under the
+  // same first-tool-keyed wrapper without reparenting live cards.
   type ToolCallPart = Extract<ChatMessagePart, { kind: 'toolCall' }>;
-  type RenderItem =
-    | { type: 'single'; part: ChatMessagePart; index: number }
-    | { type: 'parallel'; groupId: string; items: Array<{ part: ToolCallPart; index: number }> };
+  type ToolCallRun = { type: 'toolCalls'; items: Array<{ part: ToolCallPart; index: number }> };
+  type RenderItem = ToolCallRun | { type: 'single'; part: Exclude<ChatMessagePart, ToolCallPart>; index: number };
 
   const items: RenderItem[] = [];
   let i = 0;
   while (i < parts.length) {
     const part = parts[i];
-    if (
-      part.kind === 'toolCall' &&
-      typeof part.toolCall.parallelGroupId === 'string' &&
-      part.toolCall.parallelGroupId.length > 0
-    ) {
-      const groupId = part.toolCall.parallelGroupId;
-      const batch: Array<{ part: ToolCallPart; index: number }> = [
-        { part, index: i },
-      ];
+    if (part.kind === 'toolCall') {
+      const run: ToolCallRun['items'] = [{ part, index: i }];
       let j = i + 1;
-      while (j < parts.length) {
-        const nextPart = parts[j];
-        if (
-          nextPart.kind !== 'toolCall' ||
-          nextPart.toolCall.parallelGroupId !== groupId
-        ) {
-          break;
-        }
-        batch.push({ part: nextPart, index: j });
+      while (j < parts.length && parts[j].kind === 'toolCall') {
+        run.push({ part: parts[j] as ToolCallPart, index: j });
         j += 1;
       }
-      if (batch.length > 1) {
-        items.push({ type: 'parallel', groupId, items: batch });
-      } else {
-        items.push({ type: 'single', part, index: i });
-      }
+      items.push({ type: 'toolCalls', items: run });
       i = j;
       continue;
     }
@@ -88,30 +68,69 @@ function AssistantParts({
   return (
     <>
       {items.map((item) => {
-        if (item.type === 'parallel') {
-          // While at least one sibling in the batch is still running, mark the
-          // finished (completed) members so the user can see at a glance which
-          // calls have settled vs which are still active. The mark is
-          // transient: once every member is done, `blockActive` flips false and
-          // no member carries the class — "done" is then implicit. Failed
-          // members are excluded so their failure treatment stays prominent.
-          const blockActive = item.items.some(
-            ({ part }) => part.toolCall.status === 'running',
-          );
+        if (item.type === 'toolCalls') {
+          const firstCall = item.items[0].part.toolCall;
+          const annotations: Array<{
+            groupId: string;
+            start: boolean;
+            end: boolean;
+            active: boolean;
+          } | undefined> = Array(item.items.length).fill(undefined);
+
+          // A run may contain multiple adjacent batches. Only contiguous
+          // segments of at least two calls with the same non-empty id earn the
+          // visual strip; solo and distinct ids remain flat.
+          let segmentStart = 0;
+          while (segmentStart < item.items.length) {
+            const groupId = item.items[segmentStart].part.toolCall.parallelGroupId;
+            let segmentEnd = segmentStart + 1;
+            while (
+              typeof groupId === 'string'
+              && groupId.length > 0
+              && segmentEnd < item.items.length
+              && item.items[segmentEnd].part.toolCall.parallelGroupId === groupId
+            ) {
+              segmentEnd += 1;
+            }
+            if (typeof groupId === 'string' && groupId.length > 0 && segmentEnd - segmentStart >= 2) {
+              const active = item.items.slice(segmentStart, segmentEnd).some(
+                ({ part }) => part.toolCall.status === 'drafting'
+                  || part.toolCall.status === 'ready'
+                  || part.toolCall.status === 'running',
+              );
+              for (let childIndex = segmentStart; childIndex < segmentEnd; childIndex += 1) {
+                annotations[childIndex] = {
+                  groupId,
+                  start: childIndex === segmentStart,
+                  end: childIndex === segmentEnd - 1,
+                  active,
+                };
+              }
+            }
+            segmentStart = segmentEnd;
+          }
+
           return (
-            <div class="tool-call-parallel-group" key={`pg-${messageId}-${item.groupId}`}>
-              {item.items.map(({ part, index }) => (
-                <div
-                  class={
-                    blockActive && part.toolCall.status === 'completed'
-                      ? 'tool-call-list tool-call-parallel-item-done'
-                      : 'tool-call-list'
-                  }
-                  key={`tool-${part.toolCall.id}-${index}`}
-                >
-                  {renderToolCall(part.toolCall, onContextMenu)}
-                </div>
-              ))}
+            <div class="tool-call-list" key={`tool-run-${firstCall.id}`}>
+              {item.items.map(({ part }, childIndex) => {
+                const annotation = annotations[childIndex];
+                const childClasses = [
+                  'tool-call-run-child',
+                  annotation && 'tool-call-parallel-child',
+                  annotation?.start && 'tool-call-parallel-start',
+                  annotation?.end && 'tool-call-parallel-end',
+                  annotation?.active && part.toolCall.status === 'completed' && 'tool-call-parallel-item-done',
+                ].filter(Boolean).join(' ');
+                return (
+                  <div
+                    class={childClasses}
+                    data-parallel-group-id={annotation?.groupId}
+                    key={`tool-${part.toolCall.id}`}
+                  >
+                    {renderToolCall(part.toolCall, onContextMenu)}
+                  </div>
+                );
+              })}
             </div>
           );
         }
@@ -128,14 +147,6 @@ function AssistantParts({
               streaming={isCurrentlyStreaming && index === parts.length - 1}
               onContextMenu={(e) => onContextMenu('reasoning', part.text, e)}
             />
-          );
-        }
-
-        if (part.kind === 'toolCall') {
-          return (
-            <div class="tool-call-list" key={`tool-${part.toolCall.id}-${index}`}>
-              {renderToolCall(part.toolCall, onContextMenu)}
-            </div>
           );
         }
 

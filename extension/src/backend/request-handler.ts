@@ -1307,7 +1307,9 @@ async function handleLiveTurnCheckpoint(
   const checkpointByteLimit = checkpoint.terminal
     ? LIVE_PIPELINE_LIMITS.terminalCheckpointBytes
     : LIVE_PIPELINE_LIMITS.checkpointBytes;
-  if (encodedBytes > checkpointByteLimit) {
+  if (encodedBytes > checkpointByteLimit
+    || encodedBytes > checkpoint.checkpointBytes
+    || checkpoint.turn.checkpointBytes !== checkpoint.checkpointBytes) {
     return { status: 'oversize', checkpoint: null, watermark: accumulator.lifecycleWatermark() ?? null };
   }
   if (getBackendLivePipelineTraceHealth().enabled) {

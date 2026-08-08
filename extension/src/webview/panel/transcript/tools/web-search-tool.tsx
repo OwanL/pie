@@ -21,7 +21,9 @@ import {
   type ToolCallHeaderSummaryModel,
 } from '../tool-call-card';
 import { registerToolRenderer, type ToolRendererProps } from '../registry';
-import { useCollapsibleOpen } from '../use-collapsible-open';
+import { toolDisclosureKey, useCollapsibleOpen } from '../use-collapsible-open';
+import { deriveToolTail } from '../activity-tail';
+import { TurnActivityTailBody } from '../activity-tail-preview';
 import type { TranscriptContextMenuHandler } from '../types';
 
 // ─── Input type ──────────────────────────────────────────────────────────────
@@ -215,7 +217,7 @@ function WebSearchCard({
   onOpenFile,
   onContextMenu,
 }: WebSearchCardProps) {
-  const [open, setOpen] = useCollapsibleOpen(`tool:${toolCall.id}`, prefs.autoExpandToolCalls);
+  const [open, setOpen] = useCollapsibleOpen(toolDisclosureKey(toolCall.id), prefs.autoExpandToolCalls);
   const contextType = getToolCallContextType('web_search');
   const handleContextMenu = (e: MouseEvent) =>
     onContextMenu(contextType, JSON.stringify(toolCall, null, 2), e);
@@ -249,17 +251,20 @@ function WebSearchCard({
 
   const headerSummary = buildHeaderSummary(parsed);
   const summaryModel: ToolCallHeaderSummaryModel = { kind: 'text', text: headerSummary };
+  const inlineLivePreview = !open && toolCall.status === 'running'
+    ? deriveToolTail(toolCall, prefs.activityTailLines)
+    : null;
 
   return (
     <div
       class={cx(
-        'overflow-clip rounded-xl border-l-2 border-l-transparent bg-card shadow-sm transition-all duration-150 hover:bg-control-hover hover:shadow-md',
-        'tool-call-card',
+        'tool-call-card overflow-clip border-x-0 border-t-0 border-b border-border-subtle bg-transparent transition-colors duration-100',
         'forced-colors:border forced-colors:border-[ButtonText]',
-        toolCall.status === 'failed' && 'border-l-danger/50',
-        toolCall.status === 'completed' && 'border-l-success/60',
         justCompleted && 'tool-call-just-completed',
       )}
+      data-status={toolCall.status}
+      role="group"
+      aria-label={`web_search tool call, ${toolCall.status}`}
       onContextMenu={(e) => { e.preventDefault(); handleContextMenu(toMouseEvent(e)); }}
     >
       <ToolCallHeader
@@ -270,9 +275,15 @@ function WebSearchCard({
         summaryModel={summaryModel}
         errorDetail={errorDetail}
         durationMs={toolCall.durationMs}
+        prefs={prefs}
         onOpenFile={onOpenFile}
         onToggle={() => setOpen((v) => !v)}
       />
+      {inlineLivePreview && (
+        <div class="tool-call-live-preview" role="status" aria-label="web_search live result preview">
+          <TurnActivityTailBody tail={inlineLivePreview.tail} continuous />
+        </div>
+      )}
       {open && (
         <div class="tool-call-body-wrap">
           <div class="tool-call-body-inner">
@@ -303,7 +314,9 @@ function renderWebSearchTool({
       <ToolCallCard
         toolCall={toolCall}
         autoExpand={prefs.autoExpandToolCalls}
+        activityTailLines={prefs.activityTailLines}
         workingDirectory={workingDirectory}
+        prefs={prefs}
         onOpenFile={onOpenFile}
         onContextMenu={handleContextMenu}
       />

@@ -123,12 +123,13 @@ export function orderModelsForPicker(
     const { model, ineligible } = entry;
     const prefix = ineligible ? '⚠ ' : '';
 
-    // Prefix the dropdown label with the provider id so models that exist under
-    // multiple providers (e.g. gpt-5.5 under both github-copilot and openai-codex)
-    // are unambiguous in the picker. The closed toolbar trigger keeps the compact
-    // stripped name (see selectedLabel below).
-    const dropdownLabel = `${prefix}${model.provider} · ${model.name}`;
-    const selectedLabel = `${prefix}${stripProviderPrefix(model.name)}`;
+    // Keep one provider-qualified identity without repeating a provider-branded
+    // prefix from the catalog name (for example, avoid
+    // "github-copilot · Copilot: GPT-5"). The full catalog name remains in the
+    // tooltip and searchable model metadata.
+    const compactName = stripProviderPrefix(model.name);
+    const dropdownLabel = `${prefix}${model.provider} · ${compactName}`;
+    const selectedLabel = `${prefix}${compactName}`;
 
     const titleParts = [model.name];
 

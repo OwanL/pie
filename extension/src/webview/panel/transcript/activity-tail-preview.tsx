@@ -192,6 +192,7 @@ export function TurnActivityTailBody({ tail, continuous = false }: TurnActivityT
     lines.length >= 2,
   );
   const showFade = hasContent && overflows;
+  const contentEmpty = !hasContent && !(cursor && !hasComposite);
 
   return (
     <div class={cx('turn-activity-tail', kind)} data-kind={kind} aria-hidden="true">
@@ -206,15 +207,15 @@ export function TurnActivityTailBody({ tail, continuous = false }: TurnActivityT
         </div>
       )}
       {/*
-        The content block always renders so its reserved height holds the output
-        rows (2 for tools/subagents below the composite, 2 for reasoning/reply).
-        Empty when a tool has no output yet; otherwise holds the joined tail text
-        (source newlines collapsed) which wraps to fill the width, with the caret
-        at the end. The lone-caret branch covers the rare case of a tail with no
-        composite and no content but a live cursor.
+        The content block normally reserves the configured output-row budget.
+        Its explicit empty signal lets owning tool/subagent previews collapse
+        that budget before concrete output arrives without depending on DOM
+        whitespace or :empty behavior. The lone-caret branch covers the rare
+        tail with no composite and no content but a live cursor.
       */}
       <div
         ref={refs.containerRef}
+        data-empty={contentEmpty ? 'true' : undefined}
         class={cx(
           'turn-activity-tail-content',
           singleRow && 'turn-activity-tail-content-single-row',

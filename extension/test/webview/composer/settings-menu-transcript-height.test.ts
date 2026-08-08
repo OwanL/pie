@@ -108,7 +108,7 @@ test('settings menu keeps a fixed height when switching tabs', () => {
   act(() => { window.dispatchEvent(new Event('resize')); });
 
   const fixedHeight = menu.style.height;
-  assert.ok(fixedHeight, 'menu should have an explicit height set after sizing');
+  assert.equal(fixedHeight, '500px', 'menu uses the compact stable design height when space allows');
   assert.equal(menu.style.maxHeight, '692px', 'max-height still tracks the viewport cap');
 
   // Switching tabs must not change the height (the original resize complaint).

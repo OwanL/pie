@@ -34,7 +34,12 @@ import type {
   WebviewToHostMessage,
 } from './protocol';
 import { isThinkingLevel, THINKING_LEVEL_SET } from './thinking-level.js';
-import { COMPOSER_INITIAL_ROWS_MAX, COMPOSER_INITIAL_ROWS_MIN } from './protocol/settings.js';
+import {
+  COMPOSER_INITIAL_ROWS_MAX,
+  COMPOSER_INITIAL_ROWS_MIN,
+  UI_PATH_PARENT_DEPTH_MAX,
+  UI_PATH_PARENT_DEPTH_MIN,
+} from './protocol/settings.js';
 
 export type ValidationResult<T> =
   | { ok: true; value: T }
@@ -318,12 +323,13 @@ function validateChatPrefsPatch(value: unknown): value is Partial<ChatPrefs> {
     composerInitialRows: [COMPOSER_INITIAL_ROWS_MIN, COMPOSER_INITIAL_ROWS_MAX],
     expandedSectionFontSize: [8, 32],
     expandedSectionMaxHeight: [80, 1600],
+    uiPathParentDepth: [UI_PATH_PARENT_DEPTH_MIN, UI_PATH_PARENT_DEPTH_MAX],
     uiMessageWidth: [40, 100],
     uiCornerRadius: [0, 24],
     activityTailLines: [1, 12],
     uiMessageRailSize: [8, 40],
   };
-  const integerNumericKeys = new Set(['composerInitialRows']);
+  const integerNumericKeys = new Set(['composerInitialRows', 'uiPathParentDepth']);
   const stringKeys: Array<keyof ChatPrefs> = [
     'uiFontSans',
     'uiFontMono',

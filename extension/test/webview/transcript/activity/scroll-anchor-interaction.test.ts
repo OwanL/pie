@@ -3,16 +3,16 @@ import assert from 'node:assert/strict';
 
 import { shouldApplyScrollAnchorDelta } from '../../../../src/webview/panel/transcript/use-transcript-scroll-anchor';
 
-test('scroll anchor yields while the user moves toward the bottom', () => {
+test('scroll anchor yields throughout manual interaction in either direction', () => {
   assert.equal(
     shouldApplyScrollAnchorDelta(-24, true),
     false,
-    'an upward correction must not fight a downward scrollbar or middle-button drag',
+    'an upward correction must not fight a manual scrollbar or middle-button drag',
   );
   assert.equal(
     shouldApplyScrollAnchorDelta(24, true),
     false,
-    'all anchoring should pause until the active downward interaction settles',
+    'all anchoring should pause until the manual interaction settles',
   );
 });
 

@@ -147,13 +147,17 @@ export function upsertAssistantToolCall(message: ChatMessage, toolCall: ToolCall
     // Tool lifecycle is monotonic. A late tool.progress/tool.started event must
     // not revive a completed/failed call or replace its final result with a
     // partial snapshot.
-    const wouldReviveTerminalCall = existing.status !== 'running' && nextToolCall.status === 'running';
+    const existingIsTerminal = existing.status === 'completed' || existing.status === 'failed';
+    const nextIsProvisionalOrRunning = nextToolCall.status === 'drafting'
+      || nextToolCall.status === 'ready'
+      || nextToolCall.status === 'running';
+    const wouldReviveTerminalCall = existingIsTerminal && nextIsProvisionalOrRunning;
 
-    if (nextToolCall.name) {
+    if (!wouldReviveTerminalCall && nextToolCall.name) {
       mergedToolCall.name = nextToolCall.name;
     }
 
-    if (!isEmptyToolCallInput(nextToolCall.input)) {
+    if (!wouldReviveTerminalCall && !isEmptyToolCallInput(nextToolCall.input)) {
       mergedToolCall.input = nextToolCall.input;
     }
 

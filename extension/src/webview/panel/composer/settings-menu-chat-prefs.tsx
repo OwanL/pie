@@ -5,9 +5,9 @@ import type { ChatPrefs } from '../../../shared/protocol';
 import { CHAT_PREF_MENU_SECTIONS, toggleChatPref } from '../chat-prefs';
 import type { OnSetPrefs } from './settings-menu-types';
 
-type ChatPrefItemDef = (typeof CHAT_PREF_MENU_SECTIONS)[number]['items'][number];
+export type ChatPrefItemDef = (typeof CHAT_PREF_MENU_SECTIONS)[number]['items'][number];
 
-function ChatPrefItem({ item, prefs, onSetPrefs }: { item: ChatPrefItemDef; prefs: ChatPrefs; onSetPrefs: OnSetPrefs }) {
+export function ChatPrefItem({ item, prefs, onSetPrefs }: { item: ChatPrefItemDef; prefs: ChatPrefs; onSetPrefs: OnSetPrefs }) {
   const checked = prefs[item.key];
   return (
     <button
@@ -27,10 +27,21 @@ function ChatPrefItem({ item, prefs, onSetPrefs }: { item: ChatPrefItemDef; pref
   );
 }
 
-export function ChatPrefSections({ prefs, onSetPrefs }: { prefs: ChatPrefs; onSetPrefs: OnSetPrefs }) {
+export function ChatPrefSections({
+  prefs,
+  onSetPrefs,
+  sectionIds,
+}: {
+  prefs: ChatPrefs;
+  onSetPrefs: OnSetPrefs;
+  sectionIds?: readonly string[];
+}) {
+  const sections = sectionIds
+    ? CHAT_PREF_MENU_SECTIONS.filter((section) => sectionIds.includes(section.id))
+    : CHAT_PREF_MENU_SECTIONS;
   return (
     <>
-      {CHAT_PREF_MENU_SECTIONS.map((section) => (
+      {sections.map((section) => (
         <div key={section.id} class="toolbar-settings-section">
           {section.label && <div class="toolbar-settings-section-label">{section.label}</div>}
           <div class="toolbar-settings-list">

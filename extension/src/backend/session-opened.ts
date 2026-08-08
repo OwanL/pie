@@ -110,7 +110,11 @@ export function buildSessionOpenedLiveCheckpoint(
   if (!checkpoint || checkpoint.terminal) return undefined;
   try {
     const bytes = Buffer.byteLength(JSON.stringify(checkpoint), 'utf8');
-    return bytes <= LIVE_PIPELINE_LIMITS.checkpointBytes ? checkpoint : undefined;
+    return bytes <= LIVE_PIPELINE_LIMITS.checkpointBytes
+      && bytes <= checkpoint.checkpointBytes
+      && checkpoint.turn.checkpointBytes === checkpoint.checkpointBytes
+      ? checkpoint
+      : undefined;
   } catch {
     return undefined;
   }

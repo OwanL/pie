@@ -1,10 +1,11 @@
 /** @jsxRuntime automatic */
 /** @jsxImportSource preact */
 
-import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'preact/hooks';
 import { createPortal } from 'preact/compat';
 import type { JSX } from 'preact';
 import { formatModelSpec, type ModelPickerEntry } from '../composer/model-list';
+import { focusAdjacentControl, useAnchoredOverlay } from './anchored-overlay';
 import { CollapsibleChevron } from './chevron';
 import { Tooltip } from './tooltip';
 
@@ -144,59 +145,17 @@ function useDropdownPosition(
   dropdownDirection: 'up' | 'down',
   listRef: { current: HTMLDivElement | null },
   triggerRef: { current: HTMLButtonElement | null },
+  compact?: boolean,
 ) {
-  useLayoutEffect(() => {
-    if (!open) return;
-    const dropdown = listRef.current;
-    const trigger = triggerRef.current;
-    if (!dropdown || !trigger) return;
-
-    const gap = 4; // matches the previous calc(100% + 4px) offset
-    const margin = 8; // viewport edge padding
-
-    const position = () => {
-      const rect = trigger.getBoundingClientRect();
-      // Horizontal: align the dropdown's left edge to the trigger, then clamp
-      // inward so a wide list never overflows the viewport's right edge (the
-      // common case inside the narrow settings menu).
-      let left = rect.left;
-      const maxLeft = window.innerWidth - dropdown.offsetWidth - margin;
-      if (left > maxLeft) left = Math.max(margin, maxLeft);
-      dropdown.style.left = `${left}px`;
-
-      if (dropdownDirection === 'down') {
-        const top = rect.bottom + gap;
-        dropdown.style.top = `${top}px`;
-        dropdown.style.bottom = '';
-        // Cap height to the space below the trigger so the list scrolls
-        // instead of running off the viewport bottom.
-        const available = window.innerHeight - top - margin;
-        dropdown.style.maxHeight = `${Math.min(420, Math.max(120, available))}px`;
-      } else {
-        // Up: anchor the dropdown's bottom edge `gap` above the trigger.
-        dropdown.style.bottom = `${window.innerHeight - rect.top + gap}px`;
-        dropdown.style.top = '';
-        // No inline maxHeight for 'up' — the CSS max-height: 420px cap wins,
-        // matching prior behavior (the trigger sits low in the panel, so there
-        // is ordinarily ample room above it).
-      }
-    };
-
-    position();
-    // Re-measure once the entrance animation settles, in case async content
-    // (font loads, row hydration) changed the dropdown's width after layout.
-    const t = window.setTimeout(position, 320);
-    // The portal no longer tracks the trigger automatically, so follow the
-    // viewport on resize and any ancestor scroll (capture phase catches
-    // scrolls in nested scroll containers like the settings menu body).
-    window.addEventListener('resize', position);
-    window.addEventListener('scroll', position, true);
-    return () => {
-      window.clearTimeout(t);
-      window.removeEventListener('resize', position);
-      window.removeEventListener('scroll', position, true);
-    };
-  }, [open, dropdownDirection]);
+  useAnchoredOverlay({
+    open,
+    triggerRef,
+    overlayRef: listRef,
+    preferredDirection: dropdownDirection,
+    preferredWidth: compact ? 360 : 420,
+    minHeight: 140,
+    maxHeight: 400,
+  });
 }
 
 function useScrollActiveItem(
@@ -229,7 +188,7 @@ function useHandleSelect(
 function useTriggerKeyDown(setOpen: (value: boolean) => void) {
   return useCallback(
     (e: JSX.TargetedKeyboardEvent<HTMLButtonElement>) => {
-      if (e.key === 'ArrowDown' || e.key === 'Enter' || e.key === ' ') {
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'Enter' || e.key === ' ') {
         e.preventDefault();
         setOpen(true);
       }
@@ -244,6 +203,7 @@ function useListKeyDown(
   handleSelect: (modelId: string) => void,
   setOpen: (value: boolean) => void,
   setActiveIndex: (updater: (prev: number) => number) => void,
+  triggerRef: { current: HTMLButtonElement | null },
 ) {
   return useCallback(
     (e: JSX.TargetedKeyboardEvent<HTMLInputElement>) => {
@@ -252,7 +212,9 @@ function useListKeyDown(
       // Tab must close even when the current search has no results; otherwise
       // focus leaves while the portaled dropdown remains visibly stranded.
       if (action === 'close') {
+        e.preventDefault();
         setOpen(false);
+        focusAdjacentControl(triggerRef.current, e.shiftKey);
         return;
       }
       if (entries.length === 0) return;
@@ -286,11 +248,13 @@ function useModelPicker({
   entries,
   onChange,
   dropdownDirection,
+  compact,
 }: {
   value: string;
   entries: ModelPickerEntry[];
   onChange: (modelId: string) => void;
   dropdownDirection: 'up' | 'down';
+  compact?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(-1);
@@ -312,13 +276,13 @@ function useModelPicker({
     const q = query.trim().toLowerCase();
     if (!q) return entries;
     return entries.filter((e) =>
-      `${e.label} ${e.model.id} ${e.model.provider}`.toLowerCase().includes(q),
+      `${e.label} ${e.model.name} ${e.model.id} ${e.model.provider}`.toLowerCase().includes(q),
     );
   }, [entries, query]);
 
   useFocusOnOpen(open, selectedIndex, setActiveIndex, inputRef, setQuery);
   useClickOutside(open, setOpen, triggerRef, listRef);
-  useDropdownPosition(open, dropdownDirection, listRef, triggerRef);
+  useDropdownPosition(open, dropdownDirection, listRef, triggerRef, compact);
   useScrollActiveItem(open, activeIndex, itemRefs);
 
   // Keep activeIndex within the filtered list if the underlying entries change
@@ -332,7 +296,7 @@ function useModelPicker({
 
   const handleSelect = useHandleSelect(onChange, setOpen, triggerRef);
   const onTriggerKeyDown = useTriggerKeyDown(setOpen);
-  const onListKeyDown = useListKeyDown(filteredEntries, activeIndex, handleSelect, setOpen, setActiveIndex);
+  const onListKeyDown = useListKeyDown(filteredEntries, activeIndex, handleSelect, setOpen, setActiveIndex, triggerRef);
   const onSearchInput = useCallback((e: JSX.TargetedEvent<HTMLInputElement>) => {
     setQuery(e.currentTarget.value);
     setActiveIndex(0);
@@ -422,6 +386,7 @@ interface ModelPickerRowProps {
   setItemRef: (el: HTMLDivElement | null) => void;
   onMouseEnter: () => void;
   onMouseDown: (e: JSX.TargetedMouseEvent<HTMLDivElement>) => void;
+  onClick: () => void;
 }
 
 function ModelPickerRow({
@@ -432,6 +397,7 @@ function ModelPickerRow({
   setItemRef,
   onMouseEnter,
   onMouseDown,
+  onClick,
 }: ModelPickerRowProps) {
   return (
     <div
@@ -444,9 +410,11 @@ function ModelPickerRow({
       title={entry.title}
       onMouseEnter={onMouseEnter}
       onMouseDown={onMouseDown}
+      onClick={onClick}
     >
       <span class="model-picker-col model-picker-col-name">
-        {entry.label}
+        <span class="model-picker-selection" aria-hidden="true">{isSelected ? '✓' : ''}</span>
+        <span class="model-picker-name">{entry.label}</span>
       </span>
       <span class="model-picker-col model-picker-col-price">
         {entry.tokenInPrice || '—'}
@@ -454,7 +422,7 @@ function ModelPickerRow({
       <span class="model-picker-col model-picker-col-price">
         {entry.tokenOutPrice || '—'}
       </span>
-      <span class="model-picker-col model-picker-col-images">
+      <span class="model-picker-col model-picker-col-images" aria-label={entry.supportsImages ? 'Supports images' : 'Text only'}>
         {entry.supportsImages ? '✓' : '—'}
       </span>
     </div>
@@ -503,6 +471,10 @@ function ModelPickerDropdown({
   return (
     <div ref={listRef} class={getDropdownClass(dropdownDirection, compact)}>
       <div class="model-picker-searchbar">
+        <svg class="model-picker-search-icon" width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+          <circle cx="7" cy="7" r="4.5" />
+          <path d="m10.5 10.5 3 3" />
+        </svg>
         <input
           ref={inputRef}
           class="model-picker-search"
@@ -521,12 +493,12 @@ function ModelPickerDropdown({
           onInput={onSearchInput}
           onKeyDown={onKeyDown}
         />
-        <div class="model-picker-header" aria-hidden="true">
-          <span class="model-picker-col model-picker-col-name">Model</span>
-          <span class="model-picker-col model-picker-col-price">In</span>
-          <span class="model-picker-col model-picker-col-price">Out</span>
-          <span class="model-picker-col model-picker-col-images">Img</span>
-        </div>
+      </div>
+      <div class="model-picker-header" aria-hidden="true">
+        <span class="model-picker-col model-picker-col-name">Model</span>
+        <span class="model-picker-col model-picker-col-price">In</span>
+        <span class="model-picker-col model-picker-col-price">Out</span>
+        <span class="model-picker-col model-picker-col-images">Img</span>
       </div>
       <div id={listId} class="model-picker-rows" role="listbox" aria-label={ariaLabel}>
         {entries.length === 0 ? (
@@ -546,10 +518,10 @@ function ModelPickerDropdown({
                 setItemRef={(el) => { itemRefs.current[i] = el; }}
                 onMouseEnter={() => setActiveIndex(i)}
                 onMouseDown={(e) => {
-                  // prevent focus loss so the item is clicked properly
+                  // Keep the combobox focused until click commits the option.
                   e.preventDefault();
-                  handleSelect(formatModelSpec(entry.model));
                 }}
+                onClick={() => handleSelect(formatModelSpec(entry.model))}
               />
             );
           })
@@ -574,7 +546,7 @@ export function ModelPicker({
   disabled,
   dropdownDirection = 'up',
 }: ModelPickerProps) {
-  const state = useModelPicker({ value, entries, onChange, dropdownDirection });
+  const state = useModelPicker({ value, entries, onChange, dropdownDirection, compact });
 
   const triggerClass = getTriggerClass(compact);
   const wrapperClass = getWrapperClass(compact);

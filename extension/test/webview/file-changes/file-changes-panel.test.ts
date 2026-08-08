@@ -97,8 +97,8 @@ test('FileChangesPanel collapsed: renders sliver + aggregate header (SSR-safe)',
   assert.match(html, /sliver-file kind-modified/);
   assert.doesNotMatch(html, /sliver-file-dot/);
   assert.doesNotMatch(html, /sliver-file-glyph/);
-  assert.match(html, /sliver-file-name">a.ts/);
-  assert.match(html, /sliver-file-name">b.ts/);
+  assert.match(html, /sliver-file-name">src\/a.ts/);
+  assert.match(html, /sliver-file-name">src\/b.ts/);
   assert.match(html, /sliver-file-stats/);
   assert.match(html, /sliver-file-add">\+20/);
   assert.match(html, /sliver-file-del">-5/);

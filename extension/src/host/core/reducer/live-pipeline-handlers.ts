@@ -9,6 +9,10 @@ import { findPendingTurnOwner, type ReducerResult } from './helpers.js';
 import { applyLiveTurnCheckpoint } from '../live-pipeline/checkpoint.js';
 import { interruptLivePipelineForRestart } from '../live-pipeline/cleanup.js';
 import { applyLiveSemanticEnvelope } from '../live-pipeline/transitions.js';
+import {
+  reconcileDurableMessageRenderMetadata,
+  reconcileDurableTerminalToolMetadata,
+} from '../live-pipeline/terminal-reconciliation.js';
 import { withIncrementedWindowCounts } from '../transcript-window.js';
 import { pendingOwnerKey, pruneExpiredTerminalAttempts, terminalAttemptKey } from '../live-pipeline/model.js';
 
@@ -97,7 +101,11 @@ export function handleLiveTurnCheckpointResult(
     for (const executionId of event.checkpoint.turn.toolExecutionIds) delete tools[executionId];
     const pendingOwnerEvents = { ...next.livePipeline.pendingOwnerEvents };
     delete pendingOwnerEvents[pendingOwnerKey(event.turnId, event.attemptId)];
-    const terminal = event.checkpoint.terminal;
+    const terminal = reconcileDurableTerminalToolMetadata(
+      event.checkpoint.terminal,
+      event.checkpoint.turn,
+      event.checkpoint.tools,
+    );
     const terminalKind = terminal.status === 'interrupted'
       ? 'interrupted' as const
       : terminal.status === 'error' ? 'error' as const : 'completed' as const;
@@ -222,14 +230,27 @@ function commitPromotedSend(
 function appendDurableTerminal(state: ArchState, sessionPath: string, terminal: ChatMessage): ArchState {
   return produce(state, (draft) => {
     const list = draft.transcript.bySession[sessionPath] ??= [];
-    const durableIndex = terminal.durableEntryId
-      ? list.findIndex((message) => message.durableEntryId === terminal.durableEntryId)
+    const durableEntryIndex = terminal.durableEntryId
+      ? list.findIndex((message) => message.role === 'assistant'
+        && message.durableEntryId === terminal.durableEntryId)
+      : -1;
+    const durableIdIndex = durableEntryIndex < 0
+      ? list.findIndex((message) => message.role === 'assistant'
+        && message.id === terminal.id
+        && (terminal.durableEntryId === undefined || message.durableEntryId === undefined))
       : -1;
     const streamingIndex = list.findIndex((message) =>
       message.role === 'assistant' && message.status === 'streaming',
     );
-    const index = durableIndex >= 0 ? durableIndex : streamingIndex;
-    if (index >= 0) list[index] = terminal;
+    const index = durableEntryIndex >= 0
+      ? durableEntryIndex
+      : durableIdIndex >= 0 ? durableIdIndex : streamingIndex;
+    if (index >= 0) {
+      const previous = list[index];
+      list[index] = previous?.role === 'assistant' && previous.status !== 'streaming'
+        ? reconcileDurableMessageRenderMetadata(terminal, previous)
+        : terminal;
+    }
     else {
       list.push(terminal);
       draft.transcript.windowBySession[sessionPath] = withIncrementedWindowCounts(

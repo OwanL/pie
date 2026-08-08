@@ -1,7 +1,7 @@
 /* ── Left-side file-changes rail ────────────────────────────────────────── */
 /* Peek-vs-pin policy (changed-files-rail design, decision D1):
  *  - Collapsed: a thin full-height sliver (count + aggregate churn + a
- *    scrollable per-file preview whose names are colored by kind, D2)
+ *    scrollable, visually quiet per-file preview, D2)
  *    — the only persistent footprint when not pinned.
  *  - Peek (hover/tap): an ephemeral overlay floating over the transcript
  *    edge (D3); reserves no layout space.
@@ -11,7 +11,7 @@
  * drag width are webview-local (STATE_CONTRACT § Webview-Local State). */
 
 .file-changes-rail {
-  --file-changes-sliver-width: 56px;
+  --file-changes-sliver-width: 48px;
   --file-changes-drawer-width: 260px;
 
   position: relative;
@@ -31,21 +31,12 @@
 }
 
 /* ── Kind color (single source of truth) ─────────────────────────────────── */
-/* The bare `kind-*` class rides alongside `.file-change-item` (drawer rows)
-   and `.sliver-file` (collapsed per-file entries). It sets `--kind-color`,
-   consumed by the drawer `.file-change-name` and the sliver `.sliver-file-name`
-   text color — kind is encoded on the file NAME, not via dots/bars/chips.
-   Readability-first palette: the pure saturated status colors (success /
-   warning / danger) were unreadable as file-name text, so names use calm
-   neutrals instead — created→soft green tint toward white, modified→foreground
-   white, deleted→muted grey. The per-row +/- line stats (stat-additions /
-   stat-deletions / sliver-file-add / sliver-file-del) keep the saturated
-   green/red for at-a-glance diff semantics; only the name color is calmed. */
-.kind-created {
-  --kind-color: color-mix(in srgb, var(--panel-success) 55%, var(--panel-foreground));
-}
+/* File names stay neutral so the +/- deltas carry the diff color signal. This
+   makes a dense rail calmer and avoids painting every created path green.
+   Deleted names remain muted as a secondary semantic cue. */
+.kind-created,
 .kind-modified {
-  --kind-color: var(--panel-foreground);
+  --kind-color: color-mix(in srgb, var(--panel-foreground) 84%, var(--panel-muted));
 }
 .kind-deleted {
   --kind-color: var(--panel-muted);
@@ -53,11 +44,11 @@
 
 /* ── Collapsed sliver (D2) ────────────────────────────────────────────────── */
 /* A thin full-height strip: a count at the top, aggregate +/- churn, and a
-   scrollable per-file preview whose names are colored by kind.
-   Kept narrow (56px) so the transcript keeps most of the width, but wide
-   enough for the truncated basenames to read at a glance. Per-kind counts
-   survive in the sliver's hover `title`; the former dot+count legend was
-   removed as redundant once each per-file name is colored by kind.
+   scrollable per-file preview whose names recede until the rail is approached.
+   Kept narrow (48px) so the transcript keeps most of the width, but wide
+   enough for truncated basenames to identify recent files. Per-kind counts
+   survive in the sliver's hover `title`; the former dot+count legend remains
+   unnecessary because the expanded drawer carries the complete metadata.
    The former stacked +/- "health-bar" (green/red on a dark track) was removed:
    it read as noise and didn't convey magnitude at a glance. */
 
@@ -68,9 +59,10 @@
   gap: var(--panel-gap-xs);
   width: var(--file-changes-sliver-width);
   padding: var(--panel-gap-sm) 0 var(--panel-gap-xs);
-  border: none;
-  border-right: 1px solid var(--panel-border-subtle);
-  background: color-mix(in srgb, var(--panel-card-surface) 34%, transparent);
+  border: 0;
+  border-right: 1px solid var(--panel-optical-edge);
+  background: transparent;
+  box-shadow: none;
   color: var(--panel-foreground-soft);
   cursor: pointer;
   flex-shrink: 0;
@@ -81,11 +73,21 @@
     border-color var(--panel-transition-fast);
 }
 
+/* A continuous neutral rule explains the full-height rail without turning
+   the shared matte surface into another decorated panel. */
 .file-changes-sliver:hover,
 .file-changes-rail.is-peeking .file-changes-sliver {
-  background: var(--panel-control-hover);
+  border-right-color: var(--panel-optical-edge-strong);
+  background: color-mix(in srgb, var(--panel-foreground) 3%, transparent);
   color: var(--panel-foreground);
-  border-right-color: var(--panel-accent);
+}
+
+/* The sliver remains a useful full-height overview, but it should read as an
+   intentional rail rather than accidental transcript indentation. Tighten
+   only the content gap beside the collapsed rail; pinned drawers retain the
+   normal transcript inset. */
+.panel-main:has(> .file-changes-rail:not(.is-pinned)) > .panel-content .transcript {
+  padding-inline-start: var(--panel-gap-sm);
 }
 
 /* Tight top summary: count + aggregate churn share one vertical cluster. */
@@ -110,7 +112,7 @@
 
 /* ── Collapsed magnitude (how-much at a glance) ───────────────────────────── */
 /* The aggregate +/- churn for the whole turn (e.g. +30 -12) — a compact,
-   tabular-nums readout of how much changed. Sits under the count in the 56px
+   tabular-nums readout of how much changed. Sits under the count in the 48px
    sliver; green/red echo the per-row line-stats palette. */
 .file-changes-sliver-magnitude {
   display: flex;
@@ -118,9 +120,8 @@
   align-items: center;
   gap: 0;
   flex-shrink: 0;
-  padding: 1px 5px;
-  border-radius: var(--panel-radius-sm);
-  background: color-mix(in srgb, var(--panel-foreground) 3%, transparent);
+  padding: 1px 0;
+  background: transparent;
   font-family: var(--panel-font-mono);
   font-size: 8px;
   line-height: 1.25;
@@ -137,7 +138,7 @@
 
 /* ── Collapsed file list (fills the sliver's vertical space) ─────────────── */
 /* The sliver is full-height; below the summary, list the affected files. Each
-   file occupies two rows — row 1 is the kind-colored truncated basename, row 2
+   file occupies two rows — row 1 is the neutral truncated basename, row 2
    is the per-file +/- churn — so the tall sliver's vertical room surfaces
    per-file magnitude (extending the aggregate +/- total down to each file) at
    a glance. Scrollable in place so a packed sliver (many files) can be skimmed
@@ -163,10 +164,17 @@
   margin-top: 2px;
   padding: var(--panel-gap-xs) 0;
   border-top: 1px solid var(--panel-border-subtle);
+  opacity: 0.5;
+  transition: opacity var(--panel-transition-fast);
+}
+
+.file-changes-sliver:hover .file-changes-sliver-files,
+.file-changes-rail.is-peeking .file-changes-sliver-files {
+  opacity: 0.92;
 }
 
 /* A thin scrollbar for the narrow sliver preview — the global 6px webkit
-   scrollbar eats too much of the 56px width. */
+   scrollbar eats too much of the 48px width. */
 .file-changes-sliver-files::-webkit-scrollbar {
   width: 4px;
 }
@@ -191,8 +199,7 @@
      `overflow:hidden` zeroes the automatic min-height, so without this the
      rows shrink to ~5px and never overflow). */
   flex-shrink: 0;
-  padding: 1px 3px;
-  border-radius: var(--panel-radius-sm);
+  padding: 2px 3px;
   font-family: var(--panel-font-mono);
   font-size: 9px;
   line-height: 1.25;
@@ -203,7 +210,7 @@
 }
 
 .sliver-file:hover {
-  background: var(--panel-control-hover);
+  background: color-mix(in srgb, var(--panel-foreground) 4%, transparent);
 }
 
 .sliver-file-row {
@@ -274,7 +281,7 @@
   overflow: hidden;
   pointer-events: none;
   border-right: 1px solid transparent;
-  background: var(--panel-card-surface);
+  background: var(--panel-black);
   transform: translateX(-6px);
   transition:
     opacity var(--panel-transition-fast),
@@ -309,12 +316,10 @@
   z-index: 300;
   opacity: 1;
   pointer-events: auto;
-  border-right: 1px solid color-mix(in srgb, var(--panel-border) 55%, var(--panel-accent) 45%);
-  border-radius: 0 var(--panel-radius-lg) var(--panel-radius-lg) 0;
-  background: var(--panel-card-surface);
-  box-shadow:
-    28px 0 60px -24px rgba(0, 0, 0, 0.72),
-    8px 0 22px -10px rgba(0, 0, 0, 0.4);
+  border-right: 1px solid var(--panel-border);
+  border-radius: 0;
+  background: var(--panel-black);
+  box-shadow: 12px 0 24px -22px color-mix(in srgb, var(--panel-black) 92%, transparent);
   transform: translateX(0);
 }
 
@@ -328,6 +333,7 @@
   min-height: 0;
   display: flex;
   flex-direction: column;
+  background: var(--panel-black);
 }
 
 /* ── Drawer header + aggregate (D7) ──────────────────────────────────────── */
@@ -336,14 +342,12 @@
   display: flex;
   align-items: center;
   gap: var(--panel-gap-sm);
-  padding: var(--panel-gap-sm) var(--panel-gap-md);
-  border-bottom: 1px solid var(--panel-border);
-  background: color-mix(in srgb, var(--panel-control-surface) 82%, var(--panel-card-surface) 18%);
-  /* A faint inner top highlight raises the header into a distinct bar that
-     caps the body — visual separation between header and the file list below. */
-  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--panel-foreground) 5%, transparent);
+  padding: 6px var(--panel-gap-md);
+  border-bottom: 1px solid var(--panel-border-subtle);
+  background: transparent;
+  box-shadow: none;
   flex-shrink: 0;
-  min-height: 36px;
+  min-height: 32px;
 }
 
 .file-changes-aggregate {
@@ -396,14 +400,12 @@
   scrollbar-gutter: stable;
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  padding: var(--panel-gap-xs);
+  gap: 0;
+  padding: 0 var(--panel-gap-xs);
 }
 
-/* Card-like rows: a faint always-on border gives each row a subtle edge so
-   rows read as discrete entries (visual separation the header/body/rows
-   pass wants), without hairline dividers. The file NAME is colored by kind
-   (via `--kind-color` on `.file-change-name`). */
+/* Editorial rows use spacing and a neutral separator rather than individual
+   card borders. File names stay neutral while +/- stats retain semantics. */
 .file-change-item {
   position: relative;
   display: flex;
@@ -415,34 +417,29 @@
      the automatic min-height, so without this the rows shrink below their
      line height and clip their text when the list is long). */
   flex-shrink: 0;
-  padding: var(--panel-gap-xs) var(--panel-gap-sm);
-  border: 1px solid color-mix(in srgb, var(--panel-border-subtle) 35%, transparent);
-  border-radius: var(--panel-radius-sm);
+  padding: 5px var(--panel-gap-sm);
+  border: none;
+  border-bottom: 1px solid color-mix(in srgb, var(--panel-border-subtle) 60%, transparent);
+  border-radius: 0;
   overflow: hidden;
   transition:
     background var(--panel-transition-fast),
-    border-color var(--panel-transition-fast),
-    box-shadow var(--panel-transition-fast),
     opacity var(--panel-transition-fast);
 }
 
 .file-change-item:hover {
-  background: var(--panel-control-hover);
-  border-color: color-mix(in srgb, var(--panel-accent) 38%, var(--panel-border-subtle));
-  /* Left accent stripe: a clear "this row is active" affordance (no reflow —
-     inset shadow, not a border width change). */
-  box-shadow: inset 2px 0 0 var(--panel-accent);
+  background: color-mix(in srgb, var(--panel-foreground) 4%, transparent);
 }
 
 /* Read files: darkened (email-like "reviewed"). Dimmed but still
    interactive — hover lifts them back toward full strength so the actions
    (open, diff, revert, mark unread) stay usable. */
 .file-change-item.is-read {
-  opacity: 0.5;
+  opacity: 0.6;
 }
 
 .file-change-item.is-read:hover {
-  opacity: 0.85;
+  opacity: 0.9;
 }
 
 .file-change-item.is-read .file-change-name {
@@ -452,7 +449,7 @@
 /* Collapsed sliver: dim read entries in place (the sliver keeps derivation
    order — reordering the narrow preview would be jarring). */
 .sliver-file.is-read {
-  opacity: 0.5;
+  opacity: 0.42;
 }
 
 /* ── Read/unread group divider ──────────────────────────────────────────── */
@@ -528,14 +525,14 @@
   text-decoration: line-through;
 }
 
-/* Basename: colored by kind (via `--kind-color`). The hitbox + hover
+/* Basename: neutral except for the muted deleted state (via `--kind-color`). The hitbox + hover
    affordance live on the path-text button; this span only carries the kind
    color + the never-shrink layout so the basename stays fully visible. */
 .file-change-name {
   flex: 0 0 auto;
   min-width: 0;
   color: var(--kind-color);
-  font-size: 12px;
+  font-size: 11.5px;
   font-weight: 500;
   line-height: 1.25;
   white-space: nowrap;
@@ -557,48 +554,35 @@
   unicode-bidi: isolate;
   font-size: 10px;
   color: var(--panel-muted);
-  opacity: 0.85;
+  opacity: 0.82;
 }
 
-/* Line stats double as the diff action for the row. Reads as text at rest;
-   on hover it lifts into a discrete rounded pill so the click target is
-   discoverable. Border-radius + horizontal padding live at rest so the pill
-   doesn't jump on hover. Fixed 2-column grid (5ch each, tabular-nums) keeps
-   +N in column 1 and -N in column 2 at consistent horizontal positions across
-   all rows — an absent value renders an empty cell that still reserves its
-   5ch, so a no-deletions row's +N stays put for vertical eye-scanning. */
+/* Line stats double as the diff action. Fixed tabular columns preserve scan
+   alignment, while an underline—not a pill—signals the interactive state. */
 .file-change-stats {
   display: inline-grid;
-  grid-template-columns: 5ch 5ch;
-  column-gap: 4px;
+  grid-template-columns: 4.5ch 4.5ch;
+  column-gap: 3px;
   justify-items: end;
   align-items: center;
   flex-shrink: 0;
   border: none;
   background: transparent;
-  padding: 1px 5px;
-  border-radius: var(--panel-radius-sm);
+  padding: 0 2px;
   color: inherit;
   font-size: 10px;
   font-weight: 500;
   font-variant-numeric: tabular-nums;
-  opacity: 0.8;
+  opacity: 0.75;
   cursor: pointer;
-  transition:
-    opacity var(--panel-transition-fast),
-    color var(--panel-transition-fast),
-    background var(--panel-transition-fast);
+  transition: opacity var(--panel-transition-fast);
 }
 
 .file-change-stats:hover {
   opacity: 1;
-  background: var(--panel-control-hover);
 }
 
-/* Underline the +N/-N text on hover so the diff action reads as a link — the
-   pill background alone was not an obvious click affordance. Targeted at the
-   spans (rather than the inline-grid button) so the underline reliably paints
-   under each number across browsers. */
+/* Target the spans so the underline paints reliably under each number. */
 .file-change-stats:hover .stat-additions,
 .file-change-stats:hover .stat-deletions {
   text-decoration: underline;

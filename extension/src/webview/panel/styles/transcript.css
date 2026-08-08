@@ -7,6 +7,8 @@
   overflow-y: auto;
   overflow-x: hidden;
   overflow-anchor: none;
+  scrollbar-gutter: stable;
+  scrollbar-color: var(--vscode-scrollbarSlider-background) transparent;
   /* Keep native scroll behavior instant so exact bottom pinning, manual
      wheel/keyboard input, and anchor restores never compete with CSS scroll
      animation. */
@@ -16,6 +18,27 @@
   flex-direction: column;
   gap: var(--panel-gap-sm);
   align-items: flex-start;
+}
+
+/* The transcript gets a wider native hit area than the global scrollbar while
+   retaining a quiet 4px resting thumb. This makes long virtual transcripts
+   practical to drag without introducing a visually heavy rail. */
+.transcript::-webkit-scrollbar {
+  width: 10px;
+}
+
+.transcript::-webkit-scrollbar-thumb {
+  background: var(--vscode-scrollbarSlider-background);
+  background-clip: padding-box;
+  border: 3px solid transparent;
+  border-radius: 999px;
+}
+
+.transcript::-webkit-scrollbar-thumb:hover,
+.transcript::-webkit-scrollbar-thumb:active {
+  background: var(--vscode-scrollbarSlider-hoverBackground);
+  background-clip: padding-box;
+  border-width: 2px;
 }
 
 .transcript.transcript-virtual {
@@ -45,26 +68,26 @@
 /* Shared hierarchy used by reasoning, tool, subagent, and prompt dropdowns */
 
 .transcript-header-label {
-  font-size: 10px;
+  font-size: 9.5px;
   font-weight: 600;
   line-height: 1;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--panel-muted);
 }
 
 .transcript-header-title-mono {
   font-family: var(--vscode-editor-font-family, monospace);
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 600;
-  line-height: 1.2;
-  color: color-mix(in srgb, var(--panel-foreground) 90%, var(--panel-muted) 10%);
+  line-height: 1.25;
+  color: color-mix(in srgb, var(--panel-foreground) 80%, var(--panel-muted) 20%);
 }
 
 .transcript-header-summary {
-  font-size: 11px;
+  font-size: 10.5px;
   line-height: 1.3;
-  color: color-mix(in srgb, var(--panel-foreground) 74%, var(--panel-muted) 26%);
+  color: color-mix(in srgb, var(--panel-foreground) 70%, var(--panel-muted) 30%);
 }
 
 .transcript-header-summary-mono,
@@ -116,13 +139,13 @@
 
 .transcript-header-summary-link:hover .transcript-header-summary-subtle,
 .transcript-header-summary-link:focus-visible .transcript-header-summary-subtle {
-  opacity: 1;
-  color: var(--panel-accent);
+  opacity: 0.9;
+  color: var(--panel-foreground-soft);
 }
 
 .transcript-header-summary-link:hover .transcript-header-summary-emphasis,
 .transcript-header-summary-link:focus-visible .transcript-header-summary-emphasis {
-  color: var(--panel-accent);
+  color: var(--panel-foreground);
 }
 
 .transcript-header-path-preview {
@@ -291,8 +314,8 @@
    The rail is a non-scrolling overlay: a sibling of the `.transcript` scroll
    container inside `.transcript-virtual-wrap`. Because it sits outside the
    scroll container, it stays fixed over the viewport while content scrolls
-   beneath it. It lives in the right-edge padding gutter (just left of the 6px
-   webkit scrollbar) so it never overlaps message content. */
+   beneath it. It lives in the right-edge padding gutter (just left of the 10px
+   transcript scrollbar hit area) so it never overlaps message content. */
 
 .transcript-virtual-wrap {
   position: relative;
@@ -306,9 +329,9 @@
   position: absolute;
   top: 0;
   bottom: 0;
-  /* Sit immediately to the left of the 6px webkit scrollbar (global width).
+  /* Sit immediately to the left of the transcript's 10px scrollbar hit area.
      `right: 0` would overlap the scrollbar and block dragging it. */
-  right: 6px;
+  right: 10px;
   width: 10px;
   pointer-events: none;
   z-index: 5;
@@ -937,6 +960,89 @@
   transform: scale(0.95);
 }
 
+/* ── Message surfaces ───────────────────────────────────────────────────── */
+/* Assistant replies share the transcript surface so they read as content,
+   not inset cards. The compact user bubble remains the conversational anchor. */
+
+.message-item-shell {
+  position: relative;
+  isolation: isolate;
+  border: 1px solid transparent;
+}
+
+.message-item-shell[data-role="assistant"],
+.message-item-shell[data-role="assistant"][data-streaming="true"] {
+  background: var(--panel-black);
+  border-color: transparent;
+  box-shadow: none;
+}
+
+.message-item-shell[data-role="user"] {
+  background: var(--panel-user-surface);
+  border-color: var(--panel-user-border);
+  color: var(--panel-user-foreground);
+  box-shadow: inset 0 1px 0 var(--panel-user-highlight);
+}
+
+.message-item-shell[data-role="user"]:hover {
+  background: var(--panel-user-surface-hover);
+  border-color: color-mix(in srgb, var(--panel-black) 52%, transparent);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--panel-foreground) 24%, transparent);
+}
+
+.message-item-shell[data-role="user"][data-queued="true"] {
+  opacity: 0.78;
+}
+
+/* The queued label sits on the light user bubble, so use the same dark
+   foreground as the queued message text instead of the global muted status
+   color intended for dark transcript surfaces. The shell already applies the
+   queued-state opacity; do not compound it on this small label. */
+.message-item-shell[data-role="user"][data-queued="true"] .status-chip-neutral {
+  color: var(--panel-user-foreground);
+  opacity: 1;
+}
+
+.message-item-shell[data-role="user"][data-synthetic="true"] {
+  background: var(--panel-card-surface);
+  border-style: dashed;
+  border-color: var(--panel-border-subtle);
+  color: var(--panel-foreground-soft);
+  box-shadow: none;
+}
+
+.message-item-shell[data-role="system"] {
+  background: var(--panel-black);
+  border-color: transparent;
+}
+
+/* Reasoning is an editorial transcript row: compact at rest, with the open
+   body flowing into the same surface instead of becoming a nested card. */
+.reasoning-block {
+  background: transparent;
+  border-bottom: 1px solid color-mix(in srgb, var(--panel-border-subtle) 62%, transparent);
+}
+
+.reasoning-block[data-streaming="true"][data-provisional="true"] {
+  border-inline-start: 2px solid color-mix(in srgb, var(--panel-accent) 24%, var(--panel-border));
+  background: color-mix(in srgb, var(--panel-control-surface) 70%, var(--panel-black));
+}
+
+.reasoning-block .collapsible-header {
+  min-height: 26px;
+  border-radius: 0;
+}
+
+.reasoning-block .collapsible-header:hover {
+  background: color-mix(in srgb, var(--panel-foreground) 4%, transparent);
+}
+
+.reasoning-block .collapsible-close-footer {
+  min-height: 22px;
+  margin-top: 2px;
+  border-radius: 0;
+}
+
 /* ── Message body (markdown prose) ──────────────────────────────────────── */
 
 .message-body {
@@ -1142,6 +1248,59 @@
   text-decoration: underline;
 }
 
+/* Inverted user prompts need their own prose contrast system. Keep inline code
+   integrated with the light graphite surface; retain dark code blocks so the
+   shared syntax palette remains readable. Synthetic sends intentionally keep
+   the normal dark transcript palette. */
+.message-item-shell[data-role="user"]:not([data-synthetic="true"]) .message-body a {
+  color: var(--panel-user-link);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--panel-user-link) 52%, transparent);
+  text-underline-offset: 2px;
+}
+
+.message-item-shell[data-role="user"]:not([data-synthetic="true"]) .message-body code {
+  color: var(--panel-user-foreground);
+  background: color-mix(in srgb, var(--panel-black) 13%, transparent);
+  border: 1px solid color-mix(in srgb, var(--panel-black) 16%, transparent);
+}
+
+.message-item-shell[data-role="user"]:not([data-synthetic="true"]) .message-body pre,
+.message-item-shell[data-role="user"]:not([data-synthetic="true"]) .code-block {
+  color: var(--panel-foreground);
+  background: var(--panel-code-surface);
+  border-color: color-mix(in srgb, var(--panel-black) 34%, transparent);
+}
+
+.message-item-shell[data-role="user"]:not([data-synthetic="true"]) .message-body pre code {
+  color: inherit;
+  background: transparent;
+  border: 0;
+}
+
+.message-item-shell[data-role="user"]:not([data-synthetic="true"]) .message-body blockquote,
+.message-item-shell[data-role="user"]:not([data-synthetic="true"]) .message-user-image-caption {
+  color: color-mix(in srgb, var(--panel-user-foreground) 78%, var(--panel-user-surface));
+}
+
+.message-item-shell[data-role="user"]:not([data-synthetic="true"]) .message-body blockquote {
+  border-left-color: var(--panel-user-border);
+}
+
+.message-item-shell[data-role="user"]:not([data-synthetic="true"]) .message-body th,
+.message-item-shell[data-role="user"]:not([data-synthetic="true"]) .message-body td {
+  border-color: color-mix(in srgb, var(--panel-black) 20%, transparent);
+}
+
+.message-item-shell[data-role="user"]:not([data-synthetic="true"]) .message-body th {
+  background: color-mix(in srgb, var(--panel-black) 10%, transparent);
+}
+
+.message-item-shell[data-role="user"]:not([data-synthetic="true"]) ::selection {
+  background: var(--panel-user-foreground);
+  color: var(--panel-user-surface);
+}
+
 /* ── User image attachments ──────────────────────────────────────────────── */
 
 .message-user-image {
@@ -1226,8 +1385,21 @@
 }
 
 @media (forced-colors: active) {
+  .message-item-shell[data-role],
+  .message-item-shell[data-role="user"]:hover,
+  .message-item-shell[data-role][data-streaming],
+  .message-item-shell[data-role][data-synthetic] {
+    border-color: ButtonText;
+    box-shadow: none;
+  }
+
   .system-prompt-card {
     border: 1px solid ButtonText;
+  }
+
+  .reasoning-block[data-streaming="true"][data-provisional="true"] {
+    border-color: ButtonText;
+    background: Canvas;
   }
 }
 

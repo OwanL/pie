@@ -1,6 +1,7 @@
 import type { ChatMessage, TranscriptWindow } from '../../shared/protocol';
 import { restoreToolCallResultsFromParts } from '../../shared/chat-message-parts';
 import { normalizeTranscriptWindow } from './transcript-window';
+import { reconcileDurableMessageRenderMetadata } from './live-pipeline/terminal-reconciliation';
 
 export interface SessionOpenedTranscriptResolution {
   preserveLocal: boolean;
@@ -122,6 +123,25 @@ function hasEquivalentIncomingAssistantByToolCallIds(options: {
     }
   }
   return { equivalent: false };
+}
+
+function reconcileIncomingDurableRenderMetadata(
+  incomingTranscript: ChatMessage[],
+  localTranscript: ChatMessage[],
+): ChatMessage[] {
+  return incomingTranscript.map((incoming) => {
+    if (incoming.role !== 'assistant' || incoming.status === 'streaming') return incoming;
+    const durableEntryMatch = incoming.durableEntryId
+      ? localTranscript.find((message) => message.role === 'assistant'
+        && message.status !== 'streaming'
+        && message.durableEntryId === incoming.durableEntryId)
+      : undefined;
+    const previous = durableEntryMatch ?? localTranscript.find((message) => message.role === 'assistant'
+      && message.status !== 'streaming'
+      && message.id === incoming.id
+      && (incoming.durableEntryId === undefined || message.durableEntryId === undefined));
+    return previous ? reconcileDurableMessageRenderMetadata(incoming, previous) : incoming;
+  });
 }
 
 function mergeIncomingWithEphemeralLocal(
@@ -248,18 +268,22 @@ export function resolveSessionOpenedTranscript({
   // `parts`; restore the legacy flat mirror only after the JSON transport has
   // been crossed so host consumers keep their existing full-detail view.
   const hydratedIncomingTranscript = incomingTranscript.map(restoreToolCallResultsFromParts);
+  const reconciledIncomingTranscript = reconcileIncomingDurableRenderMetadata(
+    hydratedIncomingTranscript,
+    localTranscript,
+  );
   const preserveLocal = busy && hasEphemeralLocalTranscript(localTranscript);
 
   if (!preserveLocal) {
     return {
       preserveLocal,
-      transcript: hydratedIncomingTranscript,
-      transcriptWindow: normalizeTranscriptWindow(hydratedIncomingTranscript, incomingTranscriptWindow),
+      transcript: reconciledIncomingTranscript,
+      transcriptWindow: normalizeTranscriptWindow(reconciledIncomingTranscript, incomingTranscriptWindow),
       aliases: [],
     };
   }
 
-  const merged = mergeIncomingWithEphemeralLocal(hydratedIncomingTranscript, localTranscript);
+  const merged = mergeIncomingWithEphemeralLocal(reconciledIncomingTranscript, localTranscript);
   const mergedWindow: TranscriptWindow = {
     ...incomingTranscriptWindow,
     totalCount: incomingTranscriptWindow.totalCount + merged.appendedCount,

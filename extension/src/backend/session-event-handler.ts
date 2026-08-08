@@ -187,6 +187,7 @@ const FIRST_CONTENT_EVENT_TYPES = new Set([
   'thinking_delta',
   'toolcall_start',
   'toolcall_delta',
+  'toolcall_end',
 ]);
 
 const DEFAULT_UNEXPECTED_INTERRUPT_REASON =
@@ -912,29 +913,59 @@ export function handleSdkSessionEvent(
       }
 
       const toolCallEvent = event.assistantMessageEvent;
-      if (toolCallEvent?.type === 'toolcall_start' || toolCallEvent?.type === 'toolcall_delta') {
+      if (toolCallEvent?.type === 'toolcall_start'
+        || toolCallEvent?.type === 'toolcall_delta'
+        || toolCallEvent?.type === 'toolcall_end') {
         const contentIndex = toolCallEvent.contentIndex;
-        const content = contentIndex === undefined
-          ? undefined
-          : toolCallEvent.partial?.content?.[contentIndex];
-        if (content?.type === 'toolCall' && content.id && content.name) {
+        const partialContent = Number.isSafeInteger(contentIndex) && (contentIndex as number) >= 0
+          ? toolCallEvent.partial?.content?.[contentIndex as number]
+          : undefined;
+        const finalized = toolCallEvent.type === 'toolcall_end' ? toolCallEvent.toolCall : undefined;
+        const observed = finalized ?? partialContent;
+        const toolCallId = observed?.id?.trim() ?? '';
+        const name = observed?.name?.trim() ?? '';
+        const validShape = Number.isSafeInteger(contentIndex) && (contentIndex as number) >= 0
+          && observed?.type === 'toolCall' && toolCallId.length > 0 && name.length > 0
+          && (toolCallEvent.type !== 'toolcall_delta' || typeof toolCallEvent.delta === 'string');
+        let finalizedArgumentsJson: string | undefined;
+        if (validShape && toolCallEvent.type === 'toolcall_end') {
+          try {
+            finalizedArgumentsJson = JSON.stringify(finalized?.arguments);
+          } catch {
+            finalizedArgumentsJson = undefined;
+          }
+        }
+        if (!validShape || (toolCallEvent.type === 'toolcall_end' && finalizedArgumentsJson === undefined)) {
+          emitRejectedObservation(deps, context, 'malformed_payload');
+        } else {
           context.activeRequest.lastProviderErrorForDiagnostics = undefined;
           clearSettledProviderIncident(context);
           renewSemanticLease(deps, context);
-          emitSemanticCandidate(deps, context, {
-            kind: 'turn.toolDraft',
-            toolCallId: content.id,
-            name: content.name,
-            argumentsJson: toolCallEvent.type === 'toolcall_delta' ? toolCallEvent.delta ?? '' : '',
-          });
-          if (!context.activeRequest.liveTurnAccumulator) deps.emit('message.toolCallDelta', {
-            requestId: context.activeRequest.id,
-            sessionPath: context.sessionPath,
-            messageId: context.activeRequest.currentMessageId,
-            toolCallId: content.id,
-            name: content.name,
-            delta: toolCallEvent.type === 'toolcall_delta' ? toolCallEvent.delta ?? '' : '',
-          } satisfies MessageToolCallDeltaPayload);
+          if (toolCallEvent.type === 'toolcall_start') {
+            emitSemanticCandidate(deps, context, {
+              kind: 'turn.toolDraft', action: 'start', toolCallId, name,
+            });
+          } else if (toolCallEvent.type === 'toolcall_delta') {
+            emitSemanticCandidate(deps, context, {
+              kind: 'turn.toolDraft', action: 'delta', toolCallId, name,
+              argumentsJsonDelta: toolCallEvent.delta!,
+            });
+          } else {
+            emitSemanticCandidate(deps, context, {
+              kind: 'turn.toolDraft', action: 'end', toolCallId, name,
+              argumentsJson: finalizedArgumentsJson!,
+            });
+          }
+          if (!context.activeRequest.liveTurnAccumulator && toolCallEvent.type !== 'toolcall_end') {
+            deps.emit('message.toolCallDelta', {
+              requestId: context.activeRequest.id,
+              sessionPath: context.sessionPath,
+              messageId: context.activeRequest.currentMessageId,
+              toolCallId,
+              name,
+              delta: toolCallEvent.type === 'toolcall_delta' ? toolCallEvent.delta! : '',
+            } satisfies MessageToolCallDeltaPayload);
+          }
         }
       }
 

@@ -120,7 +120,6 @@ interface ExtensionsSectionProps {
 export function ExtensionsSection({ availableExtensions, prefs, onSetPrefs, expandedExt, setExpandedExt, pruningSettings, toolResultPruningSettings, modelEntries, availableModels, skillCatalog, toolCatalog, onSetPruningSettings, onSetToolResultPruningSettings }: ExtensionsSectionProps) {
   return (
     <div key="extensions" class="toolbar-settings-section">
-      <div class="toolbar-settings-section-label">Extensions</div>
       <div class="toolbar-settings-list">
         {availableExtensions.map((ext) => (
           <ExtensionItem

@@ -5,6 +5,7 @@ import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import type { JSX } from 'preact';
 
 import type { SystemPromptEntry } from '../../../shared/protocol';
+import { useAnchoredOverlay } from '../components/anchored-overlay';
 import { Tooltip } from '../components/tooltip';
 import { cx } from '../utils/cx';
 
@@ -50,6 +51,16 @@ export function SystemPromptToggleMenu({ prompts, onSetToggles }: SystemPromptTo
   const [pending, setPending] = useState<Record<string, boolean>>({});
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+
+  useAnchoredOverlay({
+    open,
+    triggerRef,
+    overlayRef: menuRef,
+    preferredDirection: 'up',
+    preferredWidth: 320,
+    minHeight: 120,
+    maxHeight: 380,
+  });
 
   // Only entries with a stable `id` that are `toggleable` appear as checkboxes.
   // Display-only entries (`toggleable === false`, e.g. the provider card) are
@@ -197,7 +208,7 @@ export function SystemPromptToggleMenu({ prompts, onSetToggles }: SystemPromptTo
       {open && (
         <div ref={menuRef} class="system-prompt-toggle-dropdown" role="dialog" aria-label="System prompt toggles">
           <div class="system-prompt-toggle-header">
-            <span class="toolbar-settings-title">System prompts</span>
+            <span class="system-prompt-toggle-title">System prompts</span>
             {disabledCount > 0 && (
               <button
                 type="button"
