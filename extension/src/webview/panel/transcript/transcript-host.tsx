@@ -19,7 +19,8 @@ import type {
   ThinkingLevel,
   TranscriptWindow,
 } from '../../../shared/protocol';
-import { useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
+import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
+import { memo } from 'preact/compat';
 import type { TranscriptContextMenuHandler, TranscriptVirtualListProps } from './types';
 import { TranscriptView } from '.';
 import { buildTranscriptRows } from './virtual-list-rows';
@@ -35,7 +36,7 @@ interface TranscriptSurfaceProps extends TranscriptVirtualListProps {
   isActive: boolean;
 }
 
-function TranscriptSurface({
+const TranscriptSurface = memo(function TranscriptSurface({
   sessionPath,
   isActive,
   sessionKey,
@@ -104,7 +105,7 @@ function TranscriptSurface({
       />
     </div>
   );
-}
+});
 
 export interface TranscriptHostProps {
   openTabPaths: string[];
@@ -241,6 +242,18 @@ export function TranscriptHost({
     if (mountGeneration === 0 || !hostRef.current) {
       return reportBlocked('leaf_missing');
     }
+    // Transcript evidence is a point-in-time acknowledgement, not a permanent
+    // constraint on later webview-local UI. In particular, adding an immediate
+    // optimistic row or switching the optimistic active tab after a target
+    // committed changes the rendered structure before the host's confirming
+    // snapshot arrives. Re-validating the already-settled target then emitted
+    // spurious structure_mismatch warnings; repeated interactions could feed
+    // the recovery watchdog even though Chromium had already proven that
+    // revision. New authoritative state always carries a new revision and still
+    // goes through the full validation below.
+    const committedTargetPrefix = `${target.viewGeneration}:${target.revision}:${mountGeneration}:${target.expectedTranscriptIdentity}:`;
+    if (lastCommitRef.current.startsWith(committedTargetPrefix)) return;
+
     if (target.state.activeSessionPath !== activeSessionPath
       || (activeSessionPath !== null && !target.state.openTabPaths.includes(activeSessionPath))) {
       return reportBlocked('structure_mismatch');
@@ -298,18 +311,18 @@ export function TranscriptHost({
 
   // Wrap the callbacks from the parent with postMessage so they carry
   // the active session path as part of the control message.
-  const loadOlder = () => postMessage({
+  const loadOlder = useCallback(() => postMessage({
     type: 'loadOlderTranscript',
     sessionPath: activeSessionPath,
-  });
-  const loadNewer = () => postMessage({
+  }), [postMessage, activeSessionPath]);
+  const loadNewer = useCallback(() => postMessage({
     type: 'loadNewerTranscript',
     sessionPath: activeSessionPath,
-  });
-  const jumpToLatest = () => postMessage({
+  }), [postMessage, activeSessionPath]);
+  const jumpToLatest = useCallback(() => postMessage({
     type: 'jumpToLatestTranscript',
     sessionPath: activeSessionPath,
-  });
+  }), [postMessage, activeSessionPath]);
 
   return (
     <div

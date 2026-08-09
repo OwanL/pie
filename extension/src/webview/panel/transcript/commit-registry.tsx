@@ -33,15 +33,23 @@ export type CommitLeaf =
   | { kind: 'reasoning'; messageId: string; partIndex: number; text: string; policy: 'displayed' | 'collapsed' }
   | { kind: 'tool'; messageId: string; toolCallId: string; status: ToolCall['status']; executionId: string; attempt: number; seq: number; phase: string; revision: number };
 
+type ReportCommitLeaf = (key: string, leaf: CommitLeaf | null) => void;
+
 interface CommitRegistryValue {
   target: TranscriptCommitTarget | null;
-  reportLeaf: (key: string, leaf: CommitLeaf | null) => void;
+  reportLeaf: ReportCommitLeaf;
   leaves: ReadonlyMap<string, CommitLeaf>;
   version: number;
   mountHost: () => number;
   unmountHost: (generation: number) => void;
   commitAppSurface: (surface: AppCommitSurface) => void;
 }
+
+// Leaf writers need only this stable callback. Keeping them on the dynamic
+// registry context made every version increment rerender every mounted leaf;
+// one streamed update therefore traversed all historical tools in the active
+// assistant turn a second time.
+const CommitReporterContext = createContext<ReportCommitLeaf>(() => undefined);
 
 const EMPTY_LEAVES = new Map<string, CommitLeaf>();
 const CommitRegistryContext = createContext<CommitRegistryValue>({
@@ -62,37 +70,44 @@ interface TranscriptCommitProviderProps {
 }
 
 /**
- * Stores only bounded, renderer-owned leaf metadata. A target change swaps the
- * registry map, so effects left over from an older revision cannot satisfy the
- * new revision. The expected opaque identity is posted only after TranscriptHost
- * independently proves that these leaves represent the authoritative snapshot.
+ * Stores renderer-owned metadata for mounted transcript leaves. Evidence stays
+ * attached to the mounted DOM across target revisions; the target comparator
+ * prevents stale values from satisfying changed authoritative content. The
+ * expected opaque identity is posted only after TranscriptHost independently
+ * proves that these leaves represent the authoritative snapshot.
  */
 export function TranscriptCommitProvider({ target, postMessage, appSurface, children }: TranscriptCommitProviderProps) {
-  const targetKey = target ? `${target.viewGeneration}:${target.revision}` : 'none';
-  const leavesRef = useRef<{ key: string; values: Map<string, CommitLeaf> }>({ key: targetKey, values: new Map() });
-  if (leavesRef.current.key !== targetKey) {
-    leavesRef.current = { key: targetKey, values: new Map() };
-  }
+  // Leaf evidence describes the currently mounted DOM, not one transport
+  // revision. Preserve it while snapshot revisions advance: structured-cloned
+  // host state commonly changes only the active tail, and clearing this map on
+  // every ~150ms streaming snapshot forced every mounted message/tool leaf in a
+  // long assistant turn to unregister and re-register. Tool-heavy turns can
+  // contain hundreds of mounted leaves, turning each token batch into a full
+  // commit-registry rebuild and making unrelated controls, scrolling, and tab
+  // switching contend with that work.
+  //
+  // A preserved stale leaf cannot acknowledge newer content:
+  // decideTranscriptCommit compares every relevant value (text, role/status,
+  // tool lifecycle) with the new target. Changed components update their leaf
+  // in layout effects; unmounted components remove it. Keeping evidence across
+  // revision-only targets therefore retains the same safety while making the
+  // common unchanged-DOM path O(changed leaves), not O(all mounted leaves).
+  const leavesRef = useRef<Map<string, CommitLeaf>>(new Map());
   const [registryVersion, setRegistryVersion] = useState(0);
   const mountGenerationRef = useRef(0);
   const lastAppCommitRef = useRef('');
-  const acceptedLeafKeys = useMemo(
-    () => expectedCommitLeafKeys(target?.state.transcript ?? []),
-    [target],
-  );
   const reportLeaf = useCallback((key: string, leaf: CommitLeaf | null) => {
     const registry = leavesRef.current;
-    if (registry.key !== targetKey || !acceptedLeafKeys.has(key)) return;
-    const previous = registry.values.get(key);
+    const previous = registry.get(key);
     if (leaf === null) {
       if (!previous) return;
-      registry.values.delete(key);
+      registry.delete(key);
     } else {
       if (sameLeaf(previous, leaf)) return;
-      registry.values.set(key, leaf);
+      registry.set(key, leaf);
     }
     setRegistryVersion((version) => version + 1);
-  }, [targetKey, acceptedLeafKeys]);
+  }, []);
   const mountHost = useCallback(() => {
     mountGenerationRef.current += 1;
     return mountGenerationRef.current;
@@ -112,7 +127,7 @@ export function TranscriptCommitProvider({ target, postMessage, appSurface, chil
 
   const value = useMemo<CommitRegistryValue>(() => ({
     target,
-    leaves: leavesRef.current.values,
+    leaves: leavesRef.current,
     version: registryVersion,
     reportLeaf,
     mountHost,
@@ -134,7 +149,11 @@ export function TranscriptCommitProvider({ target, postMessage, appSurface, chil
     commitAppSurface(committedSurface);
   }, [target, appSurface, commitAppSurface]);
 
-  return <CommitRegistryContext.Provider value={value}>{children}</CommitRegistryContext.Provider>;
+  return (
+    <CommitReporterContext.Provider value={reportLeaf}>
+      <CommitRegistryContext.Provider value={value}>{children}</CommitRegistryContext.Provider>
+    </CommitReporterContext.Provider>
+  );
 }
 
 export function useTranscriptCommitRegistry(): CommitRegistryValue {
@@ -154,25 +173,21 @@ export interface MessageCommitOwner {
 export const MessageCommitContext = createContext<MessageCommitOwner | null>(null);
 
 export function useCommittedMessageLeaf(message: ChatMessage): void {
-  const registry = useTranscriptCommitRegistry();
-  const targetKey = registry.target ? `${registry.target.viewGeneration}:${registry.target.revision}` : 'none';
+  const reportLeaf = useContext(CommitReporterContext);
   useLayoutEffect(() => {
-    if (!registry.target) return;
     const key = `message:${message.id}`;
-    registry.reportLeaf(key, { kind: 'message', messageId: message.id, role: message.role, status: message.status });
-    return () => registry.reportLeaf(key, null);
-  }, [registry.reportLeaf, registry.target, targetKey, message.id, message.role, message.status]);
+    reportLeaf(key, { kind: 'message', messageId: message.id, role: message.role, status: message.status });
+    return () => reportLeaf(key, null);
+  }, [reportLeaf, message.id, message.role, message.status]);
 }
 
 export function useCommittedTextLeaf(messageId: string, partIndex: number, text: string): void {
-  const registry = useTranscriptCommitRegistry();
-  const targetKey = registry.target ? `${registry.target.viewGeneration}:${registry.target.revision}` : 'none';
+  const reportLeaf = useContext(CommitReporterContext);
   useLayoutEffect(() => {
-    if (!registry.target) return;
     const key = `text:${messageId}:${partIndex}`;
-    registry.reportLeaf(key, { kind: 'text', messageId, partIndex, text });
-    return () => registry.reportLeaf(key, null);
-  }, [registry.reportLeaf, registry.target, targetKey, messageId, partIndex, text]);
+    reportLeaf(key, { kind: 'text', messageId, partIndex, text });
+    return () => reportLeaf(key, null);
+  }, [reportLeaf, messageId, partIndex, text]);
 }
 
 export function useCommittedReasoningLeaf(
@@ -181,33 +196,30 @@ export function useCommittedReasoningLeaf(
   text: string,
   policy: 'displayed' | 'collapsed',
 ): void {
-  const registry = useTranscriptCommitRegistry();
-  const targetKey = registry.target ? `${registry.target.viewGeneration}:${registry.target.revision}` : 'none';
+  const reportLeaf = useContext(CommitReporterContext);
   useLayoutEffect(() => {
-    if (!registry.target) return;
     const key = `reasoning:${messageId}:${partIndex}`;
-    registry.reportLeaf(key, { kind: 'reasoning', messageId, partIndex, text, policy });
-    return () => registry.reportLeaf(key, null);
-  }, [registry.reportLeaf, registry.target, targetKey, messageId, partIndex, text, policy]);
+    reportLeaf(key, { kind: 'reasoning', messageId, partIndex, text, policy });
+    return () => reportLeaf(key, null);
+  }, [reportLeaf, messageId, partIndex, text, policy]);
 }
 
 export function useCommittedToolLeaf(toolCall: ToolCall): void {
-  const registry = useTranscriptCommitRegistry();
+  const reportLeaf = useContext(CommitReporterContext);
   const owner = useContext(MessageCommitContext);
-  const targetKey = registry.target ? `${registry.target.viewGeneration}:${registry.target.revision}` : 'none';
   const lifecycle = toolLifecycle(toolCall, owner?.toolStateRevision ?? 0);
   useLayoutEffect(() => {
-    if (!registry.target || !owner) return;
+    if (!owner) return;
     const key = `tool:${owner.messageId}:${toolCall.id}`;
-    registry.reportLeaf(key, {
+    reportLeaf(key, {
       kind: 'tool',
       messageId: owner.messageId,
       toolCallId: toolCall.id,
       status: toolCall.status,
       ...lifecycle,
     });
-    return () => registry.reportLeaf(key, null);
-  }, [registry.reportLeaf, registry.target, targetKey, owner?.messageId, toolCall.id, toolCall.status, lifecycle.executionId, lifecycle.attempt, lifecycle.seq, lifecycle.phase, lifecycle.revision]);
+    return () => reportLeaf(key, null);
+  }, [reportLeaf, owner?.messageId, toolCall.id, toolCall.status, lifecycle.executionId, lifecycle.attempt, lifecycle.seq, lifecycle.phase, lifecycle.revision]);
 }
 
 export interface TranscriptModelEvidence {
@@ -322,30 +334,6 @@ function messageToolsMatch(message: ChatMessage, leaves: ReadonlyMap<string, Com
     }
   }
   return true;
-}
-
-function expectedCommitLeafKeys(transcript: readonly ChatMessage[]): ReadonlySet<string> {
-  const keys = new Set<string>();
-  for (const messageId of relevantMessageIds(transcript)) {
-    const message = transcript.find((candidate) => candidate.id === messageId);
-    if (!message) continue;
-    keys.add(`message:${message.id}`);
-    const parts = assistantPartsFromMessage(message) ?? [];
-    for (let index = 0; index < parts.length; index += 1) {
-      const part = parts[index]!;
-      if (part.kind === 'text') keys.add(`text:${message.id}:${index}`);
-      else if (part.kind === 'reasoning') keys.add(`reasoning:${message.id}:${index}`);
-      else if (part.kind === 'toolCall') keys.add(`tool:${message.id}:${part.toolCall.id}`);
-    }
-    const userParts = getRenderableUserParts(message);
-    if (message.role === 'user' && userParts) {
-      for (let index = 0; index < userParts.length; index += 1) {
-        if (userParts[index]?.kind === 'text') keys.add(`text:${message.id}:${index}`);
-      }
-    }
-    if (parts.length === 0 && !userParts) keys.add(`text:${message.id}:0`);
-  }
-  return keys;
 }
 
 function relevantMessageIds(transcript: readonly ChatMessage[]): string[] {

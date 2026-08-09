@@ -1,5 +1,5 @@
 /**
- * `RequestTracker` — promise + timeout + cancel bookkeeping for in-flight
+ * `RequestTracker` — promise + timeout bookkeeping for in-flight
  * JSON-RPC requests, keyed by request id (`req-NN`).
  *
  * Brief B (phase-scoped timers): the tracker timeout owns the **pre-ack**
@@ -14,7 +14,7 @@
  * with a cancel error. Brief E (round 3) uses this to cancel an in-flight
  * `message.send` on interrupt; session close / backend stop reject all via
  * `rejectAll`. The signal listener is detached on every settle path
- * (resolve / reject / rejectAll / timeout / cancel) so no listener leaks.
+ * (resolve / reject / rejectAll / timeout) so no listener leaks.
  */
 
 /** Options for an in-flight request. The per-call `timeoutMs` overrides the
@@ -26,7 +26,7 @@ export interface RequestOptions {
   signal?: AbortSignal;
 }
 
-/** A cancel error produced by the tracker's abort path or `cancel`. Carries a
+/** A cancel error produced by the tracker's abort path. Carries a
  *  stable `name`/`code` so Brief E/H can distinguish a cancel from a backend
  *  failure when mapping to a user-facing message (cross-realm safe via the
  *  name check, not just `instanceof`). */
@@ -40,8 +40,8 @@ export class CancelError extends Error {
 
 /** Build a descriptive cancel error for a request id. Exported so callers
  *  (Brief E) can recognise / construct cancel errors with a stable shape. */
-export function cancelledError(id: string, reason?: string): CancelError {
-  return new CancelError(reason ? `Request ${id} was cancelled: ${reason}` : `Request ${id} was cancelled.`);
+export function cancelledError(id: string): CancelError {
+  return new CancelError(`Request ${id} was cancelled.`);
 }
 
 export class RequestTracker<TResult = unknown> {
@@ -138,15 +138,6 @@ export class RequestTracker<TResult = unknown> {
     this.pending.delete(id);
     entry.reject(error);
     return true;
-  }
-
-  /** Cancel a single in-flight request by id (rejects with a cancel error).
-   *  Returns true if a pending request was cancelled. The preferred cancel
-   *  mechanism is the per-call `AbortSignal` (caller-owned, e.g. Brief E's
-   *  interrupt); this is a lower-level escape hatch for callers that hold the
-   *  `req-NN` id. */
-  cancel(id: string, reason?: string): boolean {
-    return this.reject(id, cancelledError(id, reason));
   }
 
   rejectAll(error: Error): void {

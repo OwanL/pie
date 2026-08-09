@@ -28,7 +28,7 @@ function emptyDiagnostics(count: number) {
 
 test('join coverage classifies session_id, path_fallback, and both unmatched reasons without heuristic joins', async () => {
   const source = deepClone(await loadFixture());
-  const [runA, runB, runC, runD] = source.completedRuns;
+  const [runA, runB, , runD] = source.completedRuns;
 
   // A: stable session-header id on the run → joined by session_id.
   runA!.sessionId = 'sess-A';

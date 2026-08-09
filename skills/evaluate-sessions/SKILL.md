@@ -96,150 +96,205 @@ support for every active core and outcome-supporting classification.
 Overall attainment and the quality index are derived from the canonical ledger by the
 review tool. Never ask a reviewer to choose them or hand-calculate them.
 
-## Lean workflow
+## Compaction-safe workflow
 
-Complete each phase for the whole batch before moving to the next. Independent calls
-may be emitted as sibling subagent calls in parallel.
+The session-review tool owns workflow recovery; model context does not. Process each
+unreviewed target **end-to-end and persist it before starting the next target**. Never
+fetch evidence or accumulate role outputs for the whole batch up front. The only
+parallel calls permitted are the two independent proposals or the two independent
+classifiers for the current target.
 
-### 1. Snapshot and evidence
+Every delegated role must carry the exact `workflowRef` returned by
+`getReviewStatus` in the subagent tool's `workflowRef` argument. The child never sees
+that opaque value. The parent session JSONL retains the tagged call, final JSON output,
+and authoritative runtime details even after history compaction. Do not copy model,
+provider, prompt hash, bucket, or tool-call IDs into a draft; `recordRecoveredReview`
+recovers and validates them itself.
 
-1. Call `listSelected` for named/pinned targets; otherwise call `listOpen` only for an
-   explicit all-open request.
+### 1. Snapshot
+
+1. Call `listSelected` for named/pinned targets; call `listOpen` only for an explicit
+   all-open request.
 2. Partition once into unreviewed and already-reviewed targets.
-3. Call `getEvidence` once for every unreviewed target. Give every reviewer the exact
-   same target-specific bundle and preserve its manifest.
-4. Queue already-reviewed targets for `closeReviewed` using their existing review ID.
+3. Queue already-reviewed targets for closure using their existing review IDs.
+4. Work through unreviewed targets one at a time using phases 2–7 below.
 
-Do not ask questions or record new reviews in this phase.
+After backend restart or history compaction, list again and call `getReviewStatus` for
+the current target. It rehydrates issued evidence manifests and completed tagged roles
+from the orchestrator JSONL. Never rerun a role reported complete. If the next role
+needs the evidence bundle and it is no longer in context, call `getEvidence` again; the
+static target produces the same bounded bundle/manifest.
 
-### 2. Independent requirement proposals
+### 2. Evidence and independent proposals
 
-For every unreviewed target, launch two isolated proposal reviewers: one requested
-`small`, one `medium` by default; use two `small` reviewers only when explicitly
-constrained. Give each only the blinded bundle.
+Call `getEvidence` for only this target, then call `getReviewStatus` to obtain role
+refs bound to that exact evidence manifest. Give the exact bounded bundle—not a parent-written summary—to both proposal
+reviewers. Request `small` for `proposal-small` and `medium` for `proposal-medium`.
+Require JSON only:
 
-Require compact structured output containing:
+```json
+{
+  "criteria": [{
+    "criterionId": "stable-id",
+    "statement": "observable outcome",
+    "origin": "explicit",
+    "importance": "core",
+    "taxonomy": {
+      "activity": "implement",
+      "surface": ["application_logic"],
+      "evidenceMode": ["static_inspection"]
+    }
+  }],
+  "candidateHumanQuestion": {
+    "criterionId": "stable-id",
+    "domain": "surface",
+    "expectedObservation": "neutral expected observation",
+    "proposedQuestion": "neutral question",
+    "options": ["Observed", "Not observed", "Unable to check"]
+  }
+}
+```
 
-1. proposed criterion definitions, without classifications;
-2. at most one material human-only uncertainty/question.
+Choose one valid enum per field. Other taxonomy values are: activity `debug`,
+`investigate`, `explain`, `design`, `operate`, `verify`, `other`; surface `ui`,
+`api_integration`, `data`, `tests`, `documentation`, `configuration`, `infrastructure`,
+`developer_tooling`, `agent_harness`, `external_system`, `communication`, `other`;
+evidence mode `automated_check`, `runtime_observation`, `human_observation`,
+`external_confirmation`, `reasoning_or_sources`, `other`. `origin` also permits
+`necessary_implied`; importance also permits `supporting` and `optional`.
 
-Do not pass one proposal to the other reviewer. Do not ask users, run tools, choose an
-overall result, or write records. Preserve runtime provenance from each successful
-subagent result exactly. Use the authoritative `details.results[0]`: map its parent
-call ID to `toolCallId`, requested bucket to `requestedBucket`, effective bucket to
-`bucket`, downgrade flag to `bucketDowngraded`, model to `modelId`, and copy provider,
-family, thinking level, and prompt hash. For coordination and adjudication, request
-`medium` for the mixed profile and `small` for the small-only profile. Do not infer
-any provenance from prose.
+Omit `candidateHumanQuestion` when unnecessary. Do not classify, ask users, run tools,
+or choose an overall. Call `getReviewStatus` after the results. An invalid latest role
+is a phase-boundary failure: retry only that role with the same bundle and workflow ref.
 
 ### 3. Consolidate and freeze
 
-Run one isolated coordinator after both proposals exist for a target. Request `medium`
-for the mixed profile or `small` for the small-only profile. It receives the same bundle
-and both proposals and returns only:
+The status response supplies both validated proposals. Give those proposals and the
+same evidence bundle to one fresh coordinator, requested `medium`, using the
+`consolidation` ref. Require JSON only:
 
-- one deduplicated, immutable definition-only ledger;
-- zero or one highest-importance human question;
-- proposal IDs and concise merge notes.
+```json
+{
+  "frozenLedger": [{
+    "criterionId": "stable-id",
+    "statement": "observable outcome",
+    "origin": "explicit",
+    "importance": "core",
+    "taxonomy": { "activity": "implement", "surface": ["application_logic"], "evidenceMode": ["static_inspection"] }
+  }],
+  "dedupNotes": ["concise merge note"]
+}
+```
 
-Do not classify or modify the ledger after this phase. Finish consolidation for every
-target before asking any human question.
+Optionally add `selectedHumanQuestion` using the proposal question object shape when one
+is material. Do not classify or
+modify the frozen ledger after this role. Call `getReviewStatus` to validate and obtain
+the next handoff.
 
 ### 4. Optional human verification
 
-Ask questions sequentially, only when the bundle cannot resolve a material human-
-observable issue: visual/interaction behavior, semantics/tone, accessibility,
-external account, device, or permission boundary.
+If status reports `human-verification`, ask exactly the selected neutral question with
+minimum observation steps and observed/not-observed/unable options. Bind `reviewMeta`
+to the target ID/path and the selected criterion/domain/expected observation. The tool
+recovers the complete call and response from JSONL, so do not transcribe it elsewhere.
+After the answer, call `getReviewStatus` again.
 
-Ask at most one neutral question per affected target. Include minimum observation steps,
-the exact criterion/surface, a neutral expected observation, observed/not observed/
-unable-to-check options, and a custom-answer path when useful. Bind `reviewMeta` to the
-target ID, current path, criterion, domain, and expected observation.
-
-Store the complete question and response. For cancellation or no answer, omit `answer`
-rather than storing an empty answer; preserve the state and timestamp. Mark affected
-criteria `not_assessable` when necessary and lower confidence or coverage. Do not begin
-classification until every target has answered or been marked unavailable.
+Ask only for materially human-observable behavior: visual/interaction behavior,
+semantics/tone, accessibility, external accounts, devices, or permission boundaries.
+Cancellation or no answer remains valid unavailable evidence.
 
 ### 5. Fresh independent classification
 
-For every target, launch two **fresh** isolated classifiers with the selected profile
-and `thinkingLevel: medium`. Give both the same final bundle: blinded evidence, frozen
-ledger, and that target's human response.
+Give both fresh classifiers the exact same evidence bundle, immutable ledger from
+status, and recovered human response if present. Request `small` for
+`classification-small`, `medium` for `classification-medium`, and
+`thinkingLevel: medium` for both. Require JSON only:
 
-Require compact structured output containing:
+```json
+{
+  "criteria": [{
+    "criterionId": "frozen-id",
+    "status": "met",
+    "reason": "none",
+    "evidenceRefs": ["bundle reference"]
+  }],
+  "process": {
+    "requirementDiscipline": "proportionate",
+    "verificationDiscipline": "proportionate",
+    "scopeControl": "controlled",
+    "recovery": "not_needed",
+    "finalClaimAccuracy": "accurate"
+  },
+  "evidence": {
+    "requirements": "clear",
+    "artifacts": "direct",
+    "execution": "direct",
+    "human": "not_needed",
+    "limitations": ["concrete limitation"]
+  },
+  "confidence": "high"
+}
+```
 
-- every frozen criterion exactly once with status, reason, and evidence references;
-- all process dimensions;
-- evidence coverage and limitations;
-- confidence.
+Every frozen criterion appears exactly once. Status/reason pairs must follow the
+criterion-classification table above. Do not repeat criterion definitions, propose an
+overall, mutate the ledger, ask users, run tools, or write records. Call
+`getReviewStatus`; retry only an invalid/missing role.
 
-Do not require or persist a proposed overall. Do not mutate the ledger, ask users, run
-tools, or write records. Consume structured subagent results directly. If one classifier
-fails, retry only that missing role once with the identical bundle.
+### 6. Reconcile only when requested
 
-### 6. Reconcile
+`getReviewStatus` deterministically compares validated components. If it reports
+`adjudication`, give a fresh `medium`, high-thinking adjudicator the exact status
+handoff (ledger, both components, and exact `materialFields`) plus the same evidence.
+Require JSON only:
 
-Compare the two classifications. Use one fresh adjudicator with `thinkingLevel: high`
-only for material disagreement, including:
+```json
+{
+  "resolvedFields": [{
+    "field": "exact field from materialFields",
+    "value": "resolved enum/string value",
+    "rationale": "evidence-grounded rationale",
+    "evidenceRefs": ["bundle reference"]
+  }]
+}
+```
 
-- any core status disagreement;
-- any disagreement involving `blocked`, `not_assessable`, or `superseded`;
-- a two-step supporting/optional status disagreement;
-- unequal human evidence;
-- incompatible process values or any final-claim-accuracy disagreement;
-- incomparable evidence coverage values.
+Resolve every and only listed field. A material criterion status also has a listed
+reason field. Do not alter the ledger or resolve non-material differences; the tool
+performs permitted deterministic merges, unions limitations, and selects lower
+confidence. Call `getReviewStatus` after adjudication.
 
-The adjudicator receives both classifications and the same immutable bundle. It may
-resolve disputed fields with evidence references but may not change the frozen ledger.
+### 7. Persist and close immediately
 
-Without material disagreement, use only the permitted adjacent deterministic merges:
-`met/partly_met → partly_met`, `partly_met/unmet → unmet`, clear/partly_clear →
-partly_clear, direct/partial → partial, partial/reported_only → reported_only, and the
-corresponding conservative adjacent process merges. Do not average categories or invent
-conservative values for off-scale pairs. Union limitations and use lower confidence.
+When status reports `ready-to-record`, call `recordRecoveredReview` with the target
+session ID. It reconstructs the compact draft, reviewer outputs, human evidence,
+evidence manifest, and authentic runtime provenance from JSONL, then derives and
+validates canonical fields. Never create a temporary draft, manually copy runtime
+metadata, or use raw session scripts.
 
-### 7. Compact persistence and closure
+After a successful or duplicate record, call `closeReviewed` immediately with the
+returned review ID. A pending/retrying outbox action is a valid asynchronous closure
+request. Only then proceed to the next target. This per-target commit boundary ensures
+a later failure cannot discard completed reviews.
 
-Prefer a compact review draft. It should contain only:
-
-- target identity and frozen ledger;
-- the two proposals and consolidation result;
-- the two fresh component classifications;
-- human evidence, if any;
-- adjudication, if any;
-- authentic reviewer runtime provenance and the issued evidence manifest.
-
-Do not hand-assemble derived ledger/process/evidence/confidence/attainment fields,
-comparison-only overalls, duplicate ledger hashes, pipeline projections, or transport
-metadata. The session-review tool compiles and validates those fields. It fills IDs and
-timestamps when omitted, but reviewer runtime facts must come from completed subagent
-results.
-
-For a batch, write one JSON array to an OS temporary file and call `recordReviews`.
-For one target, use `recordReview`; it accepts the same compact draft. Review recording
-is once-only and idempotent. A duplicate returns the existing review ID.
-
-After each successful or duplicate record, enqueue closure. For a batch, use
-`closeReviewedBatch`; otherwise use `closeReviewed`. A pending or retrying outbox action
-is a valid asynchronous closure request—report its status and do not re-record. Include
-already-reviewed targets from phase 1. Call `closeSelf` only after every closure has
-been requested and any returned failure is reported. `closeSelf` must be the last tool
-call.
+After every target closure has been requested and failures reported, call `closeSelf`.
+It must be the last tool call.
 
 ## Tool contract
 
-Use only these actions:
+Use only these session-review actions:
 
-- `listSelected` / `listOpen` — snapshot targets;
-- `getEvidence` — issue bounded blinded evidence;
-- `recordReview` / `recordReviews` — compile, validate, and durably persist reviews;
+- `listSelected` / `listOpen` — snapshot targets and rehydrate durable workflow state;
+- `getEvidence` — issue/reissue one target's bounded blinded evidence;
+- `getReviewStatus` — recover/validate tagged roles and return the next bounded handoff;
+- `recordRecoveredReview` — compile and persist a ready tagged pipeline;
 - `closeReviewed` / `closeReviewedBatch` — enqueue target closure;
 - `closeSelf` — enqueue evaluator closure.
 
-Use `subagent` for isolated roles and copy its returned runtime provenance exactly. Use
-`ask_user` only for phase-4 human verification. If a required action or reviewer result
-is unavailable, report the blocker and leave affected unreviewed targets open.
+The direct `recordReview`/`recordReviews` actions are legacy compatibility routes, not
+part of this workflow. Use `subagent` only with status-issued workflow refs. Use
+`ask_user` only for phase-4 human verification. If a required role remains unavailable
+after one identical retry, report the blocker and leave only that target unreviewed.
 
 ## Final response
 

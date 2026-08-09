@@ -262,9 +262,8 @@
   --turn-activity-min-height: 22px;
   --activity-chip-max-width: 220px;
 
-  /* Component-specific durations (deprecated — prefer --panel-duration-* above) */
+  /* Component-specific duration (deprecated — prefer --panel-duration-* above) */
   --status-chip-transition-duration: var(--panel-duration-normal);
-  --turn-activity-transition-duration: var(--panel-duration-normal);
 }
 
 /* ── Transition utilities ─────────────────────────────────────────────────── */
@@ -479,6 +478,15 @@
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+  }
+
+  /* Progress wheels communicate that work is still live, so keep their
+     continuous rotation while suppressing decorative motion elsewhere. */
+  .loading-wheel,
+  .tool-call-status-spinner,
+  .composer-retry-spinner {
+    animation-duration: 0.72s !important;
+    animation-iteration-count: infinite !important;
   }
 }
 

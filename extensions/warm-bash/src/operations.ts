@@ -120,7 +120,6 @@ export function createWarmBashOperations(opts: WarmBashOpsOpts): BashOperations 
             onData,
             signal,
             timeout,
-            hasHeredoc: c.hasHeredoc,
           });
           if (opts.metrics) opts.metrics.totalWarm++;
           return r;

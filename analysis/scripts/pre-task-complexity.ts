@@ -152,7 +152,3 @@ export function computePreTaskComplexityProfile(runs: PreparedRunRow[]): PreTask
     ...extractPreTaskSignals(run),
   })));
 }
-
-export function computePreTaskComplexityScores(runs: PreparedRunRow[]): Map<string, number> {
-  return computePreTaskComplexityProfile(runs).scores;
-}

@@ -1,6 +1,17 @@
 /** Contracts for the `session_review` tool. */
 
-export type ReviewAction = 'listOpen' | 'listSelected' | 'getEvidence' | 'recordReview' | 'recordReviews' | 'closeReviewed' | 'closeReviewedBatch' | 'closeSelf';
+export type ReviewAction = 'listOpen' | 'listSelected' | 'getEvidence' | 'getReviewStatus' | 'recordRecoveredReview' | 'recordReview' | 'recordReviews' | 'closeReviewed' | 'closeReviewedBatch' | 'closeSelf';
+
+/** Durable role identity written into `subagent.workflowRef`. The session-review
+ * tool recovers these calls from the orchestrator JSONL, so history compaction
+ * never becomes a workflow-state boundary. */
+export type ReviewWorkflowRole =
+  | 'proposal-small'
+  | 'proposal-medium'
+  | 'consolidation'
+  | 'classification-small'
+  | 'classification-medium'
+  | 'adjudication';
 
 export interface OpenTabSummary {
   path: string;
@@ -316,11 +327,11 @@ export const sessionReviewSchema = {
   properties: {
     action: {
       type: 'string',
-      enum: ['listOpen', 'listSelected', 'getEvidence', 'recordReview', 'recordReviews', 'closeReviewed', 'closeReviewedBatch', 'closeSelf'],
-      description: 'Session review action. listSelected returns pinned targets; getEvidence returns a blinded bundle; recording and closure are separate.',
+      enum: ['listOpen', 'listSelected', 'getEvidence', 'getReviewStatus', 'recordRecoveredReview', 'recordReview', 'recordReviews', 'closeReviewed', 'closeReviewedBatch', 'closeSelf'],
+      description: 'Session review action. getReviewStatus recovers tagged reviewer roles after history compaction; recordRecoveredReview compiles them from the durable orchestrator JSONL. Recording and closure remain separate.',
     },
     sessionPath: { type: 'string', description: 'Absolute session JSONL path returned by listOpen/listSelected.' },
-    sessionId: { type: 'string', description: 'Stable session-header ID (required for closeReviewed; checked against sessionPath when supplied).' },
+    sessionId: { type: 'string', description: 'Stable session-header ID (required for review status/recovery and closeReviewed; checked against sessionPath when supplied).' },
     reviewId: { type: 'string', description: 'Persisted review ID required by closeReviewed.' },
     review: {
       oneOf: [

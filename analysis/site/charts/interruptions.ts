@@ -1,6 +1,5 @@
 import type { ChartEntry, ChartContext } from '../lib.ts';
-import { CHART_COLORS, categoricalHeight, modelFamilyKey } from '../lib.ts';
-import type { PreparedRunRow } from '../../scripts/contracts.ts';
+import { CHART_COLORS } from '../lib.ts';
 
 export const interruptionCharts: ChartEntry[] = [
   {

@@ -2,7 +2,7 @@ import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 
 import * as path from 'node:path';
 
-import { sessionChangesSchema } from './src/types.js';
+import { MAX_DIFF_PATHS, sessionChangesSchema } from './src/types.js';
 import type { SessionChangesParams, FileChange } from './src/types.js';
 import { parseSessionFileChanges } from './src/session-jsonl.js';
 import type { ParsedSession } from './src/session-jsonl.js';
@@ -27,6 +27,8 @@ function isDisabledByToggle(): boolean {
 
 /** Minimal context shape the tool needs: the calling session's file path + cwd.
  *  (ExtensionContext exposes a ReadonlySessionManager with both.) */
+const DIFF_CONCURRENCY = 4;
+
 interface ToolExecuteCtx {
   sessionManager: {
     getSessionFile(): string | undefined;
@@ -123,6 +125,26 @@ async function diffOne(
   });
 }
 
+async function diffPaths(
+  paths: string[],
+  parsed: ParsedSession,
+  context: number,
+): Promise<DiffOutput[]> {
+  const results = new Array<DiffOutput>(paths.length);
+  let nextIndex = 0;
+  const workers = Array.from(
+    { length: Math.min(DIFF_CONCURRENCY, paths.length) },
+    async () => {
+      while (nextIndex < paths.length) {
+        const index = nextIndex++;
+        results[index] = await diffOne(paths[index]!, parsed, context);
+      }
+    },
+  );
+  await Promise.all(workers);
+  return results;
+}
+
 export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: 'session_changes',
@@ -177,12 +199,15 @@ export default function (pi: ExtensionAPI) {
       if (paths.length === 0) {
         return err('diff requires a non-empty path array (e.g. ["src/x.ts"]).');
       }
-      const context = typeof p.context === 'number' && p.context >= 0 ? p.context : 0;
+      if (paths.length > MAX_DIFF_PATHS) {
+        return err(`diff accepts at most ${MAX_DIFF_PATHS} paths per call.`);
+      }
+      if (!paths.every((rel) => typeof rel === 'string' && rel.length > 0)) {
+        return err('diff path entries must be non-empty strings.');
+      }
+      const context = Number.isInteger(p.context) && p.context! >= 0 && p.context! <= 100 ? p.context! : 0;
 
-      const results = await Promise.all(
-        paths.map((rel) => diffOne(rel, parsed, context)),
-      );
-      return ok(renderDiffs(results));
+      return ok(renderDiffs(await diffPaths(paths, parsed, context)));
     },
   });
 }

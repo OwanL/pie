@@ -10,6 +10,7 @@
  */
 
 export type SessionChangesAction = 'list' | 'diff';
+export const MAX_DIFF_PATHS = 20;
 
 /** A derived file change (mirrors pie's FileChangeEntry — re-typed locally to
  *  avoid coupling this extension to the host protocol barrel). */
@@ -59,13 +60,15 @@ export const sessionChangesSchema = {
     },
     path: {
       type: 'array',
-      items: { type: 'string' },
+      items: { type: 'string', minLength: 1 },
+      maxItems: MAX_DIFF_PATHS,
       description: 'diff: array of file paths from the list manifest, relative to the session cwd. Pass ["path"] for a single file.',
     },
     context: {
       type: 'integer',
       minimum: 0,
-      description: 'diff: lines of surrounding diff context (default 0, changes-only). Raise when surrounding code is needed.',
+      maximum: 100,
+      description: 'diff: lines of surrounding diff context (default 0, changes-only; maximum 100). Raise when surrounding code is needed.',
     },
   },
   required: ['action'],

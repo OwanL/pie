@@ -113,6 +113,7 @@ export class PieExtension implements vscode.Disposable {
   private readonly statsService: StatsService;
   private readonly service: SessionService;
   private shutdownPromise: Promise<void> | null = null;
+  private statusBarUpdateScheduled = false;
 
   private readonly messageRouter: MessageRouter;
 
@@ -716,7 +717,12 @@ export class PieExtension implements vscode.Disposable {
         : false,
     });
     this.sidebarProvider.scheduleState();
+    if (this.statusBarUpdateScheduled) {
+      return;
+    }
+    this.statusBarUpdateScheduled = true;
     queueMicrotask(() => {
+      this.statusBarUpdateScheduled = false;
       this.updateStatusBar(
         this.archState.settings.notice
           ? 'Error'

@@ -74,17 +74,16 @@ import {
   normalizePromptText,
   TOOLS_ENTRY_ID,
 } from './system-prompts';
-import {
-  buildDisplayTranscriptCache,
-  buildPagedTranscriptWindow,
-  isDisplayTranscriptCacheStale,
-} from './transcript-window';
-import type { SessionEntryLike } from './transcript';
+import { buildPagedTranscriptWindow } from './transcript-window';
 import { createRuntimeFactory } from './runtime-factory.js';
 import { createSessionManagerFence } from './session-manager-fence';
 import { installAuxiliaryLlmMeter } from './auxiliary-llm-meter';
 import { backendTrace, backendError, backendInfo, backendWarn } from './log';
-import { buildSessionOpenedPayload as buildSessionOpenedPayloadHelper, normalizeDanglingTranscript } from './session-opened.js';
+import {
+  buildSessionOpenedPayload as buildSessionOpenedPayloadHelper,
+  ensureDisplayTranscriptCache,
+  normalizeDanglingTranscript,
+} from './session-opened.js';
 import { deduplicateToolCallResultsForTransport } from '../shared/chat-message-parts.js';
 import { findDurableDetail } from '../shared/lazy-details.js';
 import { LIVE_PIPELINE_LIMITS } from '../shared/live-pipeline-protocol.js';
@@ -686,14 +685,6 @@ export class BackendServer {
     }
   }
 
-  private ensureDisplayTranscriptCache(context: SessionContext) {
-    const entries = (context.session.sessionManager.getBranch() ?? []) as SessionEntryLike[];
-    if (isDisplayTranscriptCacheStale(context.displayTranscriptCache, entries)) {
-      context.displayTranscriptCache = buildDisplayTranscriptCache(entries, context.sessionPath);
-    }
-    return context.displayTranscriptCache!;
-  }
-
   private getPinnedStreamingMessageId(context: SessionContext): string | undefined {
     return context.activeRequest?.currentMessageId ?? context.activeRequest?.lastAssistantMessageId;
   }
@@ -705,7 +696,7 @@ export class BackendServer {
     loadedEnd?: number,
   ): Promise<TranscriptPagePayload> {
     const context = await this.ensureSessionContext(sessionPath);
-    const cache = this.ensureDisplayTranscriptCache(context);
+    const cache = ensureDisplayTranscriptCache(context);
     const page = buildPagedTranscriptWindow(cache, {
       direction,
       loadedStart,
@@ -728,7 +719,7 @@ export class BackendServer {
       return { sessionPath, key: ref.key, status: 'unavailable', message: 'Live detail is owned by the extension host.' };
     }
     const context = await this.ensureSessionContext(sessionPath);
-    const found = findDurableDetail(this.ensureDisplayTranscriptCache(context).transcript, ref);
+    const found = findDurableDetail(ensureDisplayTranscriptCache(context).transcript, ref);
     if (found.status === 'unavailable') {
       return { sessionPath, key: ref.key, status: 'unavailable', message: 'The durable detail is no longer available.' };
     }

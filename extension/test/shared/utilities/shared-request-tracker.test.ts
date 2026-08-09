@@ -141,18 +141,6 @@ test('resolve detaches the abort listener so a later abort is a no-op (no late r
   assert.equal(await p, 'value');
 });
 
-test('cancel(id, reason) rejects a pending request with a descriptive cancel error', async () => {
-  const tracker = new RequestTracker<string>();
-  const p = tracker.create('id', LONG_TIMEOUT);
-  assert.equal(tracker.cancel('id', 'interrupted'), true);
-  await assert.rejects(p, /was cancelled: interrupted/);
-});
-
-test('cancel returns false for an unknown id', () => {
-  const tracker = new RequestTracker<string>();
-  assert.equal(tracker.cancel('nope'), false);
-});
-
 test('rejectAll detaches abort listeners (a later abort does not throw)', async () => {
   const tracker = new RequestTracker<string>();
   const c1 = new AbortController();

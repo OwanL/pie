@@ -14,7 +14,7 @@ function appendRuntimeCalls(file: string, reviews: SessionReviewV2[]): void {
   for (const runtime of runtimes) {
     const record = runtime as ReviewerRuntime;
     fs.appendFileSync(file, `${JSON.stringify({
-      type: 'message', message: { role: 'assistant', content: [{ type: 'toolCall', id: record.toolCallId, name: 'subagent', arguments: { bucket: record.requestedBucket, task: record.promptHash } }] },
+      type: 'message', message: { role: 'assistant', content: [{ type: 'toolCall', id: record.toolCallId, name: 'subagent', arguments: { agent: 'reviewer', bucket: record.requestedBucket, task: record.promptHash } }] },
     })}\n${JSON.stringify({
       type: 'message', message: { role: 'toolResult', toolCallId: record.toolCallId, toolName: 'subagent', details: { results: [{
         parentToolCallId: record.toolCallId, requestedBucket: record.requestedBucket, bucket: record.bucket, bucketDowngraded: record.bucketDowngraded,

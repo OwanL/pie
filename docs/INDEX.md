@@ -11,8 +11,11 @@ This folder contains active design contracts, implementation plans, and operatio
 ## Active plans (in progress)
 
 - [HANDOFF_SUBAGENT_PROVIDER_RESILIENCE.md](HANDOFF_SUBAGENT_PROVIDER_RESILIENCE.md) — P0 implementation handoff replacing total-duration subagent timeouts with progress-aware phase leases, bounded local settlement, provider circuit breaking, orphan cleanup, and queued-message liveness.
-- [TOOL-RESULT-PRUNING.md](TOOL-RESULT-PRUNING.md) — design and contract for the implemented deterministic `tool_result` middleware (strip ANSI, minify JSON, prune permission columns, collapse blank lines) before results enter context. One of three context-lean layers (history compaction / skill pruning / tool-result pruning — see `AGENTS.md`). Runtime code lives in `extensions/tool-result-pruner/`; the document remains the behavioral reference and records future lossy/recall considerations.
-- [SESSION-CHANGES-TOOL.md](SESSION-CHANGES-TOOL.md) — design for a `session_changes` tool that lets an agent inspect its own session's file changes (`list` / `diff` actions), as a compaction-surviving **change manifest** for feeding a `reviewer` subagent. **Implemented.** A new `extensions/session-changes/` extension mirroring `session-reviewer`, re-deriving from the session JSONL (compaction appends a cursor, doesn't delete — non-lossy). Extracts two shared modules: the per-tool-call derivation core (generic over `{id,name,input}`) and `FileDiffService`'s git-baseline walk. Output is most-compact and empirically tuned: `list`=TSV, `diff`=minified unified diff at `context=0` (with a `context` escape hatch), text-only with inline truncation. Own-session defaults via `ctx.sessionManager.getSessionFile()`.
+
+## Implemented design references
+
+- [TOOL-RESULT-PRUNING.md](TOOL-RESULT-PRUNING.md) — design and contract for the deterministic `tool_result` middleware (strip ANSI, minify JSON, prune permission columns, collapse blank lines) before results enter context. One of three context-lean layers (history compaction / skill pruning / tool-result pruning — see `AGENTS.md`). Runtime code lives in `extensions/tool-result-pruner/`; the document remains the behavioral reference and records future lossy/recall considerations.
+- [SESSION-CHANGES-TOOL.md](SESSION-CHANGES-TOOL.md) — design rationale for the implemented `session_changes` tool, which exposes a session-scoped change manifest (`list` / `diff`) for feeding a `reviewer` subagent. Runtime code lives in `extensions/session-changes/`; shared derivation and git-baseline helpers live under `extension/src/shared/`.
 
 ## Operational references
 

@@ -7,8 +7,8 @@ import * as path from 'node:path';
 import listTool from '../index';
 
 // Drive the ACTUAL tool's `execute` (via a fake pi.registerTool) so the
-// env-glue layer — `sessionPath` defaulting, `path: string | string[]`
-// normalization, action dispatch, error/toggle paths — is pinned against
+// env-glue layer — `sessionPath` defaulting, path-array validation,
+// action dispatch, and error/toggle paths — is pinned against
 // regression. (The unit-testable cores — JSONL join, renderers, git diff —
 // live in session-jsonl/render/diff.test.ts; this covers the dispatch glue.)
 let tool: any;
@@ -272,6 +272,32 @@ test('execute: diff with empty path array → isError', async () => {
     const res = await exe({ action: 'diff', sessionPath, path: [] });
     assert.equal(res.isError, true);
     assert.match(textOf(res), /non-empty/);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('execute: diff caps paths per call', async () => {
+  const { dir, sessionPath } = await makeSession();
+  try {
+    const res = await exe({
+      action: 'diff',
+      sessionPath,
+      path: Array.from({ length: 21 }, (_, index) => `file-${index}.ts`),
+    });
+    assert.equal(res.isError, true);
+    assert.match(textOf(res), /at most 20 paths/);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('execute: diff rejects empty path entries', async () => {
+  const { dir, sessionPath } = await makeSession();
+  try {
+    const res = await exe({ action: 'diff', sessionPath, path: [''] });
+    assert.equal(res.isError, true);
+    assert.match(textOf(res), /non-empty strings/);
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }

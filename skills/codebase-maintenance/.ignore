@@ -31,6 +31,7 @@ extension/test/fixtures/
 *.bundle.*
 *.chunk.*
 *.generated.*
+*.d.mts
 *.pb.*
 *_pb2.py
 *_pb2_grpc.py

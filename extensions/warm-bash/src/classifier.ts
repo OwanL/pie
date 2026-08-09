@@ -43,7 +43,6 @@ export interface Classification {
   rest: string;
   /** Peeled `cd` target (relative), or null when there was no leading cd. */
   cwd: string | null;
-  hasHeredoc: boolean;
   /** Present only for kind === "simple". */
   program?: string;
   args?: string[];
@@ -51,7 +50,7 @@ export interface Classification {
 
 export function classify(command: string): Classification {
   const c = command.trim();
-  if (!c) return { kind: "shell", rest: c, cwd: null, hasHeredoc: false };
+  if (!c) return { kind: "shell", rest: c, cwd: null };
 
   let cwd: string | null = null;
   let rest = c;
@@ -70,24 +69,23 @@ export function classify(command: string): Classification {
     rest = cd[2]!;
   }
 
-  const hasHeredoc = HEREDOC.test(rest);
-  if (hasHeredoc) return { kind: "shell", rest, cwd, hasHeredoc: true };
+  if (HEREDOC.test(rest)) return { kind: "shell", rest, cwd };
 
   // Strip quoted spans so operators/globs/vars inside quotes don't route to shell.
   const stripped = rest.replace(QUOTED, "");
-  if (OPERATORS.test(stripped)) return { kind: "shell", rest, cwd, hasHeredoc };
-  if (/[*?~]/.test(stripped)) return { kind: "shell", rest, cwd, hasHeredoc }; // bare glob/tilde
-  if (/\$/.test(stripped)) return { kind: "shell", rest, cwd, hasHeredoc }; // var expansion
-  if (/\\/.test(stripped)) return { kind: "shell", rest, cwd, hasHeredoc }; // unquoted backslash escape
-  if (/\{[^{}]*,[^{}]*\}/.test(stripped)) return { kind: "shell", rest, cwd, hasHeredoc }; // brace expansion
-  if (/^\s*\w+=/.test(rest)) return { kind: "shell", rest, cwd, hasHeredoc }; // env-assignment prefix
+  if (OPERATORS.test(stripped)) return { kind: "shell", rest, cwd };
+  if (/[*?~]/.test(stripped)) return { kind: "shell", rest, cwd }; // bare glob/tilde
+  if (/\$/.test(stripped)) return { kind: "shell", rest, cwd }; // var expansion
+  if (/\\/.test(stripped)) return { kind: "shell", rest, cwd }; // unquoted backslash escape
+  if (/\{[^{}]*,[^{}]*\}/.test(stripped)) return { kind: "shell", rest, cwd }; // brace expansion
+  if (/^\s*\w+=/.test(rest)) return { kind: "shell", rest, cwd }; // env-assignment prefix
 
   const tokens = tokenize(rest);
-  if (tokens.length === 0) return { kind: "shell", rest, cwd, hasHeredoc };
+  if (tokens.length === 0) return { kind: "shell", rest, cwd };
   const program = tokens[0]!;
-  if (BUILTINS.has(program)) return { kind: "shell", rest, cwd, hasHeredoc };
+  if (BUILTINS.has(program)) return { kind: "shell", rest, cwd };
 
-  return { kind: "simple", rest, cwd, hasHeredoc, program, args: tokens.slice(1) };
+  return { kind: "simple", rest, cwd, program, args: tokens.slice(1) };
 }
 
 /** Strip one layer of surrounding single/double quotes. Exported for auto-prune.ts. */

@@ -188,6 +188,26 @@ function validateManifest(value: unknown, path: string): void {
   for (const key of ['modelId', 'provider', 'thinkingLevel', 'family']) if (!stripped.includes(key)) fail(`${path}.blinding.stripped must include ${key}`);
 }
 
+/** Phase-boundary validators used by the compaction-safe recovery path. They
+ * share the canonical record validator's exact enums and definition matching,
+ * so an invalid reviewer response is rejected before the next role runs. */
+export function validateCriterionDefinitions(value: unknown, path = 'criteria'): CriterionDefinition[] {
+  if (!Array.isArray(value)) fail(`${path} must be an array`);
+  const result = value.map((item, index) => definition(item, `${path}[${index}]`, true));
+  unique(result.map((criterion) => criterion.criterionId), path);
+  return result;
+}
+export function validateClassifiedCriteria(value: unknown, frozen: CriterionDefinition[], path = 'criteria'): ClassifiedCriterion[] {
+  if (!Array.isArray(value)) fail(`${path} must be an array`);
+  const result = value.map((item, index) => classified(item, `${path}[${index}]`));
+  validateClassifiesFrozen(result, frozen, path);
+  return result;
+}
+export function validateReviewProcessVector(value: unknown, path = 'process'): void { processVector(value, path); }
+export function validateReviewEvidenceVector(value: unknown, path = 'evidence'): ReviewEvidenceVector { return evidenceVector(value, path); }
+export function validateReviewConfidence(value: unknown, path = 'confidence'): void { member(value, confidenceValues, path); }
+export function validateReviewHumanQuestionCandidate(value: unknown, path = 'candidateHumanQuestion'): void { humanQuestionCandidate(value, path); }
+
 /** Throws with a precise invariant failure and returns the narrowed record. */
 export function validateSessionReviewV2(value: unknown): SessionReviewV2 {
   const v = object(value, 'review');

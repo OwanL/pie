@@ -35,7 +35,6 @@ import {
 	SkillPruningResult,
 	ToolPruningResult,
 	PrepassUsage,
-	buildHint,
 	buildReplacement,
 	buildDecision,
 	buildFeedbackMessage,
@@ -296,7 +295,7 @@ export default function register(pi: ExtensionAPI) {
 				if (match) {
 					const includedSkills = visibleSkills.filter((s) => skillSelection.includedSkillNames.includes(s.name));
 					const excludedSkills = visibleSkills.filter((s) => skillSelection.excludedSkillNames.includes(s.name));
-					const replacement = buildReplacement(getFormatSkillsForPromptImpl()(includedSkills), buildHint(skillSelection.excludedSkillNames));
+					const replacement = buildReplacement(getFormatSkillsForPromptImpl()(includedSkills));
 					newSkillBlock = replacement;
 					originalSkillBlock = match[0];
 

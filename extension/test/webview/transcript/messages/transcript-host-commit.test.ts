@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import { h, render } from 'preact';
+import { memo } from 'preact/compat';
 import { useLayoutEffect } from 'preact/hooks';
 import type { ChatMessage, ToolCall } from '../../../../src/shared/protocol/messages';
 
@@ -37,19 +38,38 @@ test.before(async () => {
   ({ TranscriptHost } = await import('../../../../src/webview/panel/transcript/transcript-host'));
 });
 
-function ToolCommitLeaf({ tool }: { tool: ToolCall }) {
+function ToolCommitLeaf({ tool, onRender }: { tool: ToolCall; onRender?: () => void }) {
+  onRender?.();
   commitRegistryModule.useCommittedToolLeaf(tool);
   return null;
 }
 
-function CommitRegistryProbe({ message, observe }: { message: ChatMessage; observe: (size: number) => void }) {
+const MemoizedToolLeafList = memo(function MemoizedToolLeafList({
+  message,
+  onToolLeafRender,
+}: {
+  message: ChatMessage;
+  onToolLeafRender?: () => void;
+}) {
+  return h(commitRegistryModule.MessageCommitContext.Provider, {
+    value: { messageId: message.id, toolStateRevision: message.toolStateRevision ?? 0 },
+    children: message.toolCalls?.map((tool) => h(ToolCommitLeaf, { key: tool.id, tool, onRender: onToolLeafRender })),
+  });
+});
+
+function CommitRegistryProbe({
+  message,
+  observe,
+  onToolLeafRender,
+}: {
+  message: ChatMessage;
+  observe: (size: number) => void;
+  onToolLeafRender?: () => void;
+}) {
   commitRegistryModule.useCommittedMessageLeaf(message);
   const registry = commitRegistryModule.useTranscriptCommitRegistry();
   useLayoutEffect(() => observe(registry.leaves.size), [registry.version, registry.leaves, observe]);
-  return h(commitRegistryModule.MessageCommitContext.Provider, {
-    value: { messageId: message.id, toolStateRevision: message.toolStateRevision ?? 0 },
-    children: message.toolCalls?.map((tool) => h(ToolCommitLeaf, { key: tool.id, tool })),
-  });
+  return h(MemoizedToolLeafList, { message, onToolLeafRender });
 }
 
 test('mounted commit provider retains every accepted leaf above the former 512-leaf boundary', async () => {
@@ -88,17 +108,81 @@ test('mounted commit provider retains every accepted leaf above the former 512-l
     },
   };
   const observedSizes: number[] = [];
+  let toolLeafRenders = 0;
 
   render(h(TranscriptCommitProvider, {
     target,
     appSurface: 'transcript',
     postMessage() {},
-    children: h(CommitRegistryProbe, { message, observe: (size) => observedSizes.push(size) }),
+    children: h(CommitRegistryProbe, {
+      message,
+      observe: (size) => observedSizes.push(size),
+      onToolLeafRender: () => { toolLeafRenders += 1; },
+    }),
   }), root);
   await new Promise((resolve) => setImmediate(resolve));
   render(null, root);
 
   assert.equal(Math.max(...observedSizes), 513, 'message plus 512 live tool leaves must exceed the old boundary');
+  assert.equal(toolLeafRenders, tools.length, 'registry bookkeeping must not rerender every leaf consumer');
+});
+
+test('commit registry preserves mounted leaf evidence across revision-only targets', async () => {
+  const root = document.getElementById('root')!;
+  const tool: ToolCall = { id: 'stable-tool', name: 'read', input: {}, status: 'completed' };
+  const message: ChatMessage = {
+    id: 'stable-message',
+    role: 'assistant',
+    createdAt: new Date(0).toISOString(),
+    markdown: '',
+    status: 'completed',
+    toolCalls: [tool],
+    parts: [{ kind: 'toolCall', toolCall: tool }],
+  };
+  const window = {
+    loadedStart: 0, loadedEnd: 1, totalCount: 1,
+    hasOlder: false, hasNewer: false, isPartial: false, hasUserMessages: false,
+  };
+  const maps: Array<ReadonlyMap<string, unknown>> = [];
+  function RegistryMapProbe() {
+    commitRegistryModule.useCommittedMessageLeaf(message);
+    const registry = commitRegistryModule.useTranscriptCommitRegistry();
+    useLayoutEffect(() => {
+      maps.push(registry.leaves);
+    }, [registry.target, registry.leaves]);
+    return h(commitRegistryModule.MessageCommitContext.Provider, {
+      value: { messageId: message.id, toolStateRevision: 0 },
+      children: h(ToolCommitLeaf, { tool }),
+    });
+  }
+  const target = (revision: number) => ({
+    revision,
+    viewGeneration: 1,
+    expectedTranscriptIdentity: `identity-${revision}`,
+    acceptedAt: 1,
+    state: {
+      transcript: [message], transcriptWindow: window,
+      activeSessionPath: '/stable', openTabPaths: ['/stable'],
+    },
+  });
+
+  render(h(TranscriptCommitProvider, {
+    target: target(1), appSurface: 'transcript', postMessage() {}, children: h(RegistryMapProbe, {}),
+  }), root);
+  await new Promise((resolve) => setImmediate(resolve));
+  const firstMap = maps.at(-1);
+  assert.ok(firstMap);
+  assert.equal(firstMap.size, 2);
+
+  render(h(TranscriptCommitProvider, {
+    target: target(2), appSurface: 'transcript', postMessage() {}, children: h(RegistryMapProbe, {}),
+  }), root);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(maps.at(-1), firstMap, 'an unchanged mounted DOM leaf map must survive a snapshot revision');
+  assert.equal(maps.at(-1)?.size, 2);
+  render(null, root);
+  assert.equal(firstMap.size, 0, 'unmounted DOM leaves must be released from preserved evidence');
 });
 
 test('app commit reports only a transcript block that survives the render grace period', async () => {
@@ -174,9 +258,37 @@ test('app commit reports only a transcript block that survives the render grace 
       false,
       'the transient first layout must cancel its warning timer',
     );
+    assert.ok(messages.some((message) => message.type === 'transcriptCommitted' && message.payload.revision === 7));
 
+    // Webview-local optimistic rows and tab selection may change after the
+    // authoritative target was already proven. They must not retroactively
+    // reopen that settled target and emit the structure_mismatch warnings seen
+    // in the live log.
+    messages.length = 0;
+    const optimistic: ChatMessage = {
+      id: 'local-pending', role: 'user', createdAt: '', markdown: 'Pending', status: 'completed',
+    };
     render(h(TranscriptCommitProvider, {
       target,
+      appSurface: 'transcript',
+      postMessage: (message: any) => messages.push(message),
+      children: h(TranscriptHost, {
+        ...hostProps,
+        openTabPaths: ['/local'],
+        activeSessionPath: '/local',
+        transcript: [optimistic],
+      } as never),
+    }), root);
+    flushTimers();
+    assert.equal(
+      messages.some((message) => message.type === 'transcriptCommitBlocked'),
+      false,
+      'local optimistic transcript and tab state cannot invalidate a target that already committed',
+    );
+
+    const uncommittedTarget = { ...target, revision: 8 };
+    render(h(TranscriptCommitProvider, {
+      target: uncommittedTarget,
       appSurface: 'transcript',
       postMessage: (message: any) => messages.push(message),
       children: h(TranscriptHost, {

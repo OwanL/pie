@@ -67,66 +67,12 @@ export interface PruningFeedbackMessage {
 }
 
 /**
- * Compose the final PruningResult envelope plus optional audit decision.
- */
-export function buildPruningPayload(
-	skillResult: SkillPruningResult | null,
-	toolResult: ToolPruningResult | null,
-	activeConfig: PruningConfig,
-	pruningError: string | null,
-	latencyMs: number,
-	prepassThinkingLevel: string,
-	rawResponse: string,
-	rawThinking: string,
-	rawSystemPrompt: string,
-	rawUserMessage: string,
-	skillSafeguardReason?: string | null,
-	toolSafeguardReason?: string | null,
-	_excludedSkillPaths?: string[],
-	_includedSkillPaths?: string[],
-): { result: PruningResult; decision?: PruningDecision } {
-	const safeguardReason = (skillSafeguardReason && toolSafeguardReason)
-		? `${skillSafeguardReason} · ${toolSafeguardReason}`
-		: (skillSafeguardReason ?? toolSafeguardReason ?? undefined);
-
-	const result: PruningResult = {
-		includedSkills: skillResult?.included ?? [],
-		excludedSkills: skillResult?.excluded ?? [],
-		includedTools: toolResult?.included ?? [],
-		excludedTools: toolResult?.excluded ?? [],
-		mode: activeConfig.mode,
-		skillTokensSaved: skillResult?.tokensSaved ?? 0,
-		toolTokensSaved: toolResult?.tokensSaved ?? 0,
-		prepassModel: activeConfig.model,
-		prepassThinkingLevel: prepassThinkingLevel,
-		prepassResponse: rawResponse || undefined,
-		prepassThinking: rawThinking || undefined,
-		prepassSystemPrompt: rawSystemPrompt || undefined,
-		prepassUserMessage: rawUserMessage || undefined,
-		prepassLatencyMs: latencyMs,
-		prepassError: pruningError || undefined,
-		prepassSafeguardReason: safeguardReason,
-	};
-
-	return { result };
-}
-
-/** Hidden skill names are disclosed only through request_capability polling. */
-export function buildHint(_excludedNames: string[]): string {
-	return "";
-}
-
-/**
  * Strip a single leading blank line, then re-prefix with two newlines so
  * the new skill block slots cleanly into the surrounding system prompt.
- * The hint is appended when present.
+ * Hidden skill names are disclosed only through request_capability polling.
  */
-export function buildReplacement(newBlock: string, hint: string): string {
-	const stripped = newBlock.replace(/^\n\n/, "");
-	if (hint === "") {
-		return `\n\n${stripped}`;
-	}
-	return `\n\n${stripped}\n${hint}`;
+export function buildReplacement(newBlock: string): string {
+	return `\n\n${newBlock.replace(/^\n\n/, "")}`;
 }
 
 /**

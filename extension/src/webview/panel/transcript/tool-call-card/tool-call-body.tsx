@@ -81,13 +81,11 @@ export function ToolCallBody({ toolCall, prefs = DEFAULT_CHAT_PREFS, onOpenFile 
             <code class="hljs language-bash" dangerouslySetInnerHTML={{ __html: highlightToolResultText(command, 'bash') }} />
           </div>
         )}
-        <div class="tool-call-terminal" data-running={isRunning ? 'true' : undefined}>
-          {text ? (
+        {text && (
+          <div class="tool-call-terminal" data-running={isRunning ? 'true' : undefined}>
             <TerminalOutput text={text} running={isRunning} />
-          ) : (
-            <div class="tool-call-terminal-empty">{isRunning ? 'Executing…' : '(no output)'}</div>
-          )}
-        </div>
+          </div>
+        )}
         {showFooter && (
           <div class="tool-call-terminal-footer">
             <div class="tool-call-terminal-footer-main">

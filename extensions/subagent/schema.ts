@@ -61,6 +61,11 @@ export const SubagentParams = Type.Object(
 			description: "Exact discovered agent name to invoke (e.g. 'worker', 'scout', 'reviewer').",
 		}),
 		task: Type.String({ description: "One concrete task to delegate to the agent" }),
+		workflowRef: Type.Optional(Type.String({
+			minLength: 1,
+			maxLength: 512,
+			description: "Optional opaque workflow correlation issued by another tool. It is persisted on the parent tool call but is not added to the child's prompt.",
+		})),
 		userContext: UserContextSchema,
 		confirmProjectAgents: Type.Optional(
 			Type.Boolean({

@@ -183,7 +183,7 @@ set "PI_CODING_AGENT_AUTH_DIR=%TARGET_AUTH_DIR%"
 del "%IN_TREE_AUTH%" >nul 2>nul
 > "%REPO_ROOT%\auth.json.removed" (
   echo Relocated to: %TARGET_AUTH%
-  echo See: docs/internal/SECRET_AND_STORAGE_RELOCATION_PLAN.md
+  echo See: SECURITY.md
 )
 echo ==^> auth.json moved to '%TARGET_AUTH%' and PI_CODING_AGENT_AUTH_DIR set.
 goto :after_relocate

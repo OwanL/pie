@@ -92,11 +92,8 @@ function formatTokenCount(tokens: number): string {
   return formatTokens(tokens);
 }
 
-function formatTokenValue(tokens: number | null, kind: ContextWindowBreakdownKind): string {
-  if (tokens === null) return 'unknown';
-  const formatted = formatTokenCount(tokens);
-  if (kind === 'estimated') return formatted;
-  return formatted;
+function formatTokenValue(tokens: number | null): string {
+  return tokens === null ? 'unknown' : formatTokenCount(tokens);
 }
 
 function formatTooltipEntry(entry: ContextWindowBreakdownEntry): string {
@@ -427,21 +424,21 @@ function buildFooterEntries(summary: ContextWindowSummary): ContextWindowBreakdo
     {
       key: 'window.used',
       label: 'Used',
-      value: formatTokenValue(summary.usedTokens, summary.usedKind),
+      value: formatTokenValue(summary.usedTokens),
       kind: summary.usedKind,
       tokens: summary.usedTokens,
     },
     {
       key: 'window.remaining',
       label: 'Remaining',
-      value: formatTokenValue(summary.remainingTokens, summary.remainingKind),
+      value: formatTokenValue(summary.remainingTokens),
       kind: summary.remainingKind,
       tokens: summary.remainingTokens,
     },
     {
       key: 'window.total',
       label: 'Total',
-      value: summary.totalWindow > 0 ? formatTokenValue(summary.totalWindow, 'exact') : 'unknown',
+      value: summary.totalWindow > 0 ? formatTokenValue(summary.totalWindow) : 'unknown',
       kind: summary.totalWindow > 0 ? 'exact' : 'unknown',
       tokens: summary.totalWindow > 0 ? summary.totalWindow : null,
     },
@@ -525,7 +522,7 @@ function buildFullEntries(
   const entries: ContextWindowBreakdownEntry[] = contributors.map((item, index) => ({
     key: `contributor:${index}`,
     label: item.label,
-    value: formatTokenValue(item.tokens, 'estimated'),
+    value: formatTokenValue(item.tokens),
     kind: 'estimated',
     tokens: item.tokens,
     note: item.note,
@@ -534,7 +531,7 @@ function buildFullEntries(
     entries.push({
       key: 'other',
       label: 'Other',
-      value: formatTokenValue(otherTokens, otherKind),
+      value: formatTokenValue(otherTokens),
       kind: otherKind,
       tokens: otherTokens,
       note: otherNote,

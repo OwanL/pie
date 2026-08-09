@@ -1,10 +1,8 @@
 // Internal types for the tool-result-pruner extension.
 //
-// See docs/TOOL-RESULT-PRUNING.md for the design. This MVP implements only the
-// LOSSLESS tier (§7.2): ANSI strip, trailing-whitespace trim, blank-run
-// collapse, JSON minify. Lossy-recoverable rules (ls -l, git log, tabular,
-// stack traces) + the recall stash land in a follow-up pass; the Rule /
-// RuleContext / Profile types are shaped so they slot in unchanged.
+// See docs/TOOL-RESULT-PRUNING.md for the design. The pipeline includes both
+// the lossless tier (ANSI strip, trailing-whitespace trim, blank-run collapse,
+// JSON minify) and lossy-recoverable rules backed by the recall stash.
 
 /** Named profile selecting which rules are eligible. */
 export type Profile = "default" | "security";

@@ -12,8 +12,6 @@ import { isInSubagentContext } from "../../../shared/subagent-context.js";
 import { ASK_USER_TOOL_NAME, isAutonomousModeEnabled } from "../../../shared/autonomous-mode.js";
 
 export {
-	buildPruningPayload,
-	buildHint,
 	buildReplacement,
 	buildDecision,
 	buildFeedbackMessage,

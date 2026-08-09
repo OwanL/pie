@@ -12,7 +12,6 @@ export interface SharedWarmBashState {
   poolCfg: SharedPoolConfig | null;
   generation: number;
   metrics: Map<string, WarmBashMetrics>;
-  activeSessions: Set<string>;
   processCleanupInstalled: boolean;
 }
 
@@ -26,7 +25,6 @@ export function getSharedWarmBashState(): SharedWarmBashState {
       poolCfg: null,
       generation: 0,
       metrics: new Map(),
-      activeSessions: new Set(),
       processCleanupInstalled: false,
     };
   }

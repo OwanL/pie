@@ -14,7 +14,7 @@ function appendRuntimeCalls(file: string, review: SessionReviewV2): void {
   const runtimes: ReviewerRuntime[] = [...review.proposals, review.consolidation, ...review.components, ...(review.adjudication ? [review.adjudication] : [])];
   for (const runtime of runtimes) {
     fs.appendFileSync(file, `${JSON.stringify({
-      type: 'message', message: { role: 'assistant', content: [{ type: 'toolCall', id: runtime.toolCallId, name: 'subagent', arguments: { bucket: runtime.requestedBucket, task: runtime.promptHash } }] },
+      type: 'message', message: { role: 'assistant', content: [{ type: 'toolCall', id: runtime.toolCallId, name: 'subagent', arguments: { agent: 'reviewer', bucket: runtime.requestedBucket, task: runtime.promptHash } }] },
     })}\n${JSON.stringify({
       type: 'message', message: { role: 'toolResult', toolCallId: runtime.toolCallId, toolName: 'subagent', details: { results: [{
         parentToolCallId: runtime.toolCallId, requestedBucket: runtime.requestedBucket, bucket: runtime.bucket, bucketDowngraded: runtime.bucketDowngraded,
@@ -25,7 +25,7 @@ function appendRuntimeCalls(file: string, review: SessionReviewV2): void {
 }
 
 test('tool exposes only the V2 action surface', () => {
-  assert.deepEqual(sessionReviewSchema.properties.action.enum, ['listOpen', 'listSelected', 'getEvidence', 'recordReview', 'recordReviews', 'closeReviewed', 'closeReviewedBatch', 'closeSelf']);
+  assert.deepEqual(sessionReviewSchema.properties.action.enum, ['listOpen', 'listSelected', 'getEvidence', 'getReviewStatus', 'recordRecoveredReview', 'recordReview', 'recordReviews', 'closeReviewed', 'closeReviewedBatch', 'closeSelf']);
   assert.equal(sessionReviewSchema.properties.action.enum.includes('setReview' as never), false);
   assert.equal(sessionReviewSchema.properties.action.enum.includes('getTranscript' as never), false);
 });

@@ -1800,6 +1800,39 @@ test('ToolCallCard terminal footer shows the exit-code badge without a truncatio
   assert.doesNotMatch(html, /Full log:/);
 });
 
+test('ToolCallCard omits the terminal output row when a bash call has no output', () => {
+  const cases = [
+    toolCall({
+      id: 'terminal-empty-running',
+      name: 'bash',
+      input: { command: 'sleep 1' },
+      status: 'running',
+      result: undefined,
+    }),
+    toolCall({
+      id: 'terminal-empty-completed',
+      name: 'bash',
+      input: { command: 'true' },
+      status: 'completed',
+      result: { content: [{ type: 'text', text: '' }] },
+    }),
+  ];
+
+  for (const emptyCall of cases) {
+    const html = renderToString(h(toolCallCardModule.ToolCallCard, {
+      toolCall: emptyCall,
+      autoExpand: true,
+      workingDirectory: '/repo',
+      onOpenFile: noop,
+      onContextMenu: noopContextMenu,
+    }));
+
+    assert.match(html, /tool-call-terminal-command/);
+    assert.doesNotMatch(html, /class="tool-call-terminal"/);
+    assert.doesNotMatch(html, /Executing…|\(no output\)|tool-call-terminal-empty/);
+  }
+});
+
 test('ToolCallCard terminal footer is absent for a successful command with no exit signal', () => {
   const html = renderToString(h(toolCallCardModule.ToolCallCard, {
     toolCall: toolCall({

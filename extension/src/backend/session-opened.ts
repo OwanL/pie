@@ -202,7 +202,7 @@ export function getPromptOptions(session: unknown): SdkBuildSystemPromptOptions 
   return { ...options, activeExtensions };
 }
 
-function ensureDisplayTranscriptCache(context: SessionContext) {
+export function ensureDisplayTranscriptCache(context: SessionContext) {
   const entries = (context.session.sessionManager.getBranch?.() ?? []) as SessionEntryLike[];
   if (isDisplayTranscriptCacheStale(context.displayTranscriptCache, entries)) {
     context.displayTranscriptCache = buildDisplayTranscriptCache(entries, context.sessionPath);

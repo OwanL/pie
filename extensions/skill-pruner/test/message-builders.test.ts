@@ -19,27 +19,13 @@ import assert from "node:assert/strict";
 delete process.env.PIE_EXTENSION_TOGGLES_JSON;
 
 import {
-	buildHint,
 	buildReplacement,
 	buildDecision,
 	estimateToolTokens,
-	buildPruningPayload,
 	buildFeedbackMessage,
 } from "../src/message-builders.js";
 import { estimateTokens } from "../logger.js";
-import type { PruningConfig } from "../types.js";
 import type { SkillPruningResult, ToolPruningResult } from "../src/pruning-types.js";
-
-function config(overrides: Partial<PruningConfig> = {}): PruningConfig {
-	return {
-		mode: "auto",
-		model: "gpt-5-mini",
-		provider: "github-copilot",
-		thinkingLevel: "minimal",
-		skills: { strategy: "discretion", ceiling: 8, pinned: [], alwaysKeep: [] },
-		...overrides,
-	};
-}
 
 function skillResult(overrides: Partial<SkillPruningResult> = {}): SkillPruningResult {
 	return { included: ["a"], excluded: ["b"], tokensSaved: 100, ...overrides };
@@ -50,39 +36,21 @@ function toolResult(overrides: Partial<ToolPruningResult> = {}): ToolPruningResu
 }
 
 // ---------------------------------------------------------------------------
-// buildHint
-// ---------------------------------------------------------------------------
-
-test("buildHint: empty excluded list -> empty string", () => {
-	assert.equal(buildHint([]), "");
-});
-
-test("buildHint: hidden skill names are never passively disclosed", () => {
-	assert.equal(buildHint(["duckdb-query-optimization", "frontend-design"]), "");
-	assert.equal(buildHint(["solo"]), "");
-});
-
-// ---------------------------------------------------------------------------
 // buildReplacement
 // ---------------------------------------------------------------------------
 
-test("buildReplacement: wraps block with two leading newlines when no hint", () => {
-	assert.equal(buildReplacement("SKILLS_BLOCK", ""), "\n\nSKILLS_BLOCK");
+test("buildReplacement: wraps block with two leading newlines", () => {
+	assert.equal(buildReplacement("SKILLS_BLOCK"), "\n\nSKILLS_BLOCK");
 });
 
 test("buildReplacement: strips a single leading blank line then re-prefixes", () => {
 	// leading \n\n is stripped then re-added -> net unchanged prefix
-	assert.equal(buildReplacement("\n\nSKILLS_BLOCK", ""), "\n\nSKILLS_BLOCK");
-});
-
-test("buildReplacement: pruned skill names add no passive hint", () => {
-	const hint = buildHint(["x"]);
-	assert.equal(buildReplacement("SKILLS_BLOCK", hint), "\n\nSKILLS_BLOCK");
+	assert.equal(buildReplacement("\n\nSKILLS_BLOCK"), "\n\nSKILLS_BLOCK");
 });
 
 test("buildReplacement: only the first leading \\n\\n is stripped", () => {
 	// regex is /^\n\n/ (single occurrence); remaining leading newlines stay
-	assert.equal(buildReplacement("\n\n\nSKILLS", ""), "\n\n\nSKILLS");
+	assert.equal(buildReplacement("\n\n\nSKILLS"), "\n\n\nSKILLS");
 });
 
 // ---------------------------------------------------------------------------
@@ -285,81 +253,6 @@ test("estimateToolTokens: longer description yields strictly more tokens for sam
 	const short = [{ name: "x", description: "a" }] as any[];
 	const long = [{ name: "x", description: "a".repeat(200) }] as any[];
 	assert.ok(estimateToolTokens(long, ["x"]) > estimateToolTokens(short, ["x"]));
-});
-
-// ---------------------------------------------------------------------------
-// buildPruningPayload
-// ---------------------------------------------------------------------------
-
-test("buildPruningPayload: composes result envelope from skill/tool results", () => {
-	const { result } = buildPruningPayload(
-		skillResult({ included: ["a"], excluded: ["b"], tokensSaved: 100 }),
-		toolResult({ included: ["read"], excluded: ["edit"], tokensSaved: 50 }),
-		config({ mode: "auto" }),
-		null,
-		123,
-		"minimal",
-		'{"skills":["a"]}',
-		"thinking...",
-		"system prompt",
-		"user message",
-	);
-	assert.deepEqual(result.includedSkills, ["a"]);
-	assert.deepEqual(result.excludedSkills, ["b"]);
-	assert.deepEqual(result.includedTools, ["read"]);
-	assert.deepEqual(result.excludedTools, ["edit"]);
-	assert.equal(result.mode, "auto");
-	assert.equal(result.skillTokensSaved, 100);
-	assert.equal(result.toolTokensSaved, 50);
-	assert.equal(result.prepassModel, "gpt-5-mini");
-	assert.equal(result.prepassThinkingLevel, "minimal");
-	assert.equal(result.prepassLatencyMs, 123);
-	assert.equal(result.prepassResponse, '{"skills":["a"]}');
-	assert.equal(result.prepassThinking, "thinking...");
-	assert.equal(result.prepassSystemPrompt, "system prompt");
-	assert.equal(result.prepassUserMessage, "user message");
-	assert.equal(result.prepassError, undefined);
-	assert.equal(result.prepassSafeguardReason, undefined);
-});
-
-test("buildPruningPayload: null results default to empty arrays and zero saved", () => {
-	const { result } = buildPruningPayload(null, null, config(), null, 0, "minimal", "", "", "", "", undefined, undefined);
-	assert.deepEqual(result.includedSkills, []);
-	assert.deepEqual(result.excludedSkills, []);
-	assert.deepEqual(result.includedTools, []);
-	assert.deepEqual(result.excludedTools, []);
-	assert.equal(result.skillTokensSaved, 0);
-	assert.equal(result.toolTokensSaved, 0);
-	assert.equal(result.prepassError, undefined);
-	assert.equal(result.prepassSafeguardReason, undefined);
-});
-
-test("buildPruningPayload: pruningError surfaced as prepassError", () => {
-	const { result } = buildPruningPayload(null, null, config(), "model unavailable", 0, "minimal", "", "", "", "");
-	assert.equal(result.prepassError, "model unavailable");
-});
-
-test("buildPruningPayload: fail-open reason joined with ' · ' when both skill and tool present", () => {
-	const { result } = buildPruningPayload(null, null, config(), null, 0, "minimal", "", "", "", "", "skill reason", "tool reason");
-	assert.equal(result.prepassSafeguardReason, "skill reason · tool reason");
-});
-
-test("buildPruningPayload: only skill fail-open reason surfaces when tool reason absent", () => {
-	const { result } = buildPruningPayload(null, null, config(), null, 0, "minimal", "", "", "", "", "skill reason", undefined);
-	assert.equal(result.prepassSafeguardReason, "skill reason");
-});
-
-test("buildPruningPayload: only tool fail-open reason surfaces when skill reason absent", () => {
-	const { result } = buildPruningPayload(null, null, config(), null, 0, "minimal", "", "", "", "", undefined, "tool reason");
-	assert.equal(result.prepassSafeguardReason, "tool reason");
-});
-
-test("buildPruningPayload: empty rawResponse becomes undefined prepassResponse", () => {
-	const { result } = buildPruningPayload(null, null, config(), null, 0, "minimal", "", "t", "s", "u");
-	assert.equal(result.prepassResponse, undefined);
-	assert.equal(result.prepassThinking, "t");
-	assert.equal(result.prepassSystemPrompt, "s");
-	assert.equal(result.prepassUserMessage, "u");
 });
 
 // ---------------------------------------------------------------------------

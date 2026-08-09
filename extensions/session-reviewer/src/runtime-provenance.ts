@@ -52,6 +52,8 @@ function assertRuntime(record: ReviewerRuntime, index: TranscriptIndex): void {
   const result = index.results.get(record.toolCallId);
   if (!call || call.name !== 'subagent' || !result || result.toolName !== 'subagent') throw new Error(`reviewer ${record.reviewerId} is not bound to a completed prior subagent call`);
   const input = call.arguments as Record<string, unknown> | undefined;
+  if (input?.agent !== 'reviewer') throw new Error(`reviewer ${record.reviewerId} is not bound to the reviewer agent`);
+  if (input.bucket !== record.requestedBucket) throw new Error(`reviewer ${record.reviewerId} requested bucket does not match its subagent call`);
   const actual = runtimeResult(result, record.toolCallId);
   const expected: Record<string, unknown> = {
     requestedBucket: record.requestedBucket,

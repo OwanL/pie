@@ -2,7 +2,7 @@
 
 **Status:** **Implemented (2026-07-09; broadened 2026-07-28).** Grill-passed, plan-audited against the live SDK/codebase — compaction non-lossiness, `ReadonlySessionManager` API, the pure derivation core, `resolveBaselineRef`, and subagent-transcript persistence all verified; the §5 toolCall↔toolResult join was under-specified and is now corrected. The 2026-07-28 broadening adds cwd-aware path-identity canonicalization (parent/subagent + spelling variants), failed-tool reconciliation in the live path, created-claim verification against git at diff time, and deletion verification against the filesystem — see §6. The code is now authoritative; this doc remains the design rationale. See `extensions/session-changes/` (tool) + `extension/src/shared/file-change-derivation.ts` / `git-baseline.ts` / `file-path.ts` (extracted core). The §8 equivalence test (host `ChatMessage[]` vs extension `SessionEntry[]`) pins option A's "shared logic, not shared value" — its teeth are a subagent call whose separate `toolResult` carries inner transcripts (a), a failed edit whose `toolResult.isError` is set (b), and a parent/subagent path-spelling merge (c).
 
-A companion to `TOOL-RESULT-PRUNING.md` (same "grill-passed, not-yet-started" category). Sits alongside `session_review` as a second session-introspection tool.
+A companion to the implemented `TOOL-RESULT-PRUNING.md` design. Sits alongside `session_review` as a second session-introspection tool.
 
 ---
 
@@ -67,7 +67,7 @@ session_changes { action: 'diff', sessionPath?, path[], context? }   → unified
 ```
 
 - `sessionPath` (optional) — defaults to the calling session via `ctx.sessionManager.getSessionFile()` (see §5). When provided (a session file path, same convention as `session_review.getTranscript`), targets another session through the same parse path.
-- `path` (`diff` only) — **array** of file paths (relative to session cwd, as the manifest reports them). Pass `["path"]` for a single file.
+- `path` (`diff` only) — **array** of up to 20 file paths (relative to session cwd, as the manifest reports them). Pass `["path"]` for a single file. Diff work runs with bounded concurrency to cap child-process and buffer usage.
 - Manifest and diff-header paths inside the session cwd are rendered relative to it, even when the original tool call used an absolute path. Paths outside the cwd remain absolute. The output does not repeat the cwd because pi already provides it in the agent's system prompt.
 - `context` (`diff` only, optional) — lines of surrounding diff context. **Default `0`** (changes-only); see §4.
 

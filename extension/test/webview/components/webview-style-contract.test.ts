@@ -23,6 +23,15 @@ test('global focus fallback lives in Tailwind base so component outline utilitie
   // tokens.css merged into index.css — focus-visible belongs to @layer base only
 });
 
+test('reduced motion preserves essential progress-wheel animation', async () => {
+  const indexCss = await readStyleSource('index.css');
+  const reducedMotion = indexCss.slice(indexCss.indexOf('@media (prefers-reduced-motion: reduce)'));
+
+  for (const spinner of ['loading-wheel', 'tool-call-status-spinner', 'composer-retry-spinner']) {
+    assert.match(reducedMotion, new RegExp(`\\.${spinner}[\\s\\S]*animation-iteration-count:\\s*infinite\\s*!important`));
+  }
+});
+
 test('panel chip styling is centralized instead of embedded in feature components', async () => {
   const indexCss = await readStyleSource('index.css');
   const panelChipCss = await readStyleSource('panel-chip.css');
@@ -159,6 +168,7 @@ test('unified transcript refinement keeps operational rows quiet and user prompt
   const aggregateCss = await readStyleSource('aggregate-stats-strip.css');
   const tabsCss = await readStyleSource('tabs.css');
   const messageShell = await readWebviewSource('transcript/message-item/inner.tsx');
+  const messageHeader = await readWebviewSource('transcript/message-item/header.tsx');
   const reasoningBlock = await readWebviewSource('transcript/message-item/reasoning-block.tsx');
 
   const assistantRule = transcriptCss.match(
@@ -167,6 +177,11 @@ test('unified transcript refinement keeps operational rows quiet and user prompt
   assert.match(assistantRule, /background:\s*var\(--panel-black\)/);
   assert.match(assistantRule, /border-color:\s*transparent/);
   assert.match(assistantRule, /box-shadow:\s*none/);
+  assert.match(messageHeader, /role === 'assistant' \? 'message-assistant-header' : undefined/);
+  assert.match(
+    transcriptCss,
+    /\.message-assistant-header\s*\{[^}]*padding-bottom:\s*5px;[^}]*border-bottom:\s*1px solid color-mix\(in srgb, var\(--panel-accent\) 24%, var\(--panel-border-subtle\)\)/,
+  );
 
   const userRule = transcriptCss.match(/\.message-item-shell\[data-role="user"\]\s*\{([^}]*)\}/)?.[1] ?? '';
   assert.match(indexCss, /--panel-user-surface:\s*color-mix\(in srgb, var\(--panel-foreground\) 72%, var\(--panel-black\)\)/);

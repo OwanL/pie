@@ -166,7 +166,7 @@ fi
 
 # Relocate credentials before executing any third-party pi package code.
 # ── Relocate auth.json out of the working tree ─────────────────────────────────
-# See docs/internal/SECRET_AND_STORAGE_RELOCATION_PLAN.md Phase 2.
+# See SECURITY.md for the credential-storage policy.
 auth_dir_env="${PI_CODING_AGENT_AUTH_DIR:-}"
 in_tree_auth="$repo_root/auth.json"
 
@@ -189,7 +189,7 @@ if [[ -f "$in_tree_auth" && -z "$auth_dir_env" ]]; then
     if node "$repo_root/scripts/install/run.mjs" relocate-auth "$in_tree_auth" "$target_auth"; then
       # Remove the in-tree file and leave a breadcrumb
       rm -f "$in_tree_auth"
-      printf 'Relocated to: %s\nSee: docs/internal/SECRET_AND_STORAGE_RELOCATION_PLAN.md\n' "$target_auth" \
+      printf 'Relocated to: %s\nSee: SECURITY.md\n' "$target_auth" \
         > "$repo_root/auth.json.removed"
 
       # Persist the env var in the shell rc

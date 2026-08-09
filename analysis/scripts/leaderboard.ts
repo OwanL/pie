@@ -108,14 +108,10 @@ function transcriptProcessValue(session: PreparedHistoricalSessionSummary): numb
 }
 function logit(value: number): number { const p = clamp(value, 0.01, 0.99); return Math.log(p / (1 - p)); }
 function logistic(value: number): number { return 1 / (1 + Math.exp(-value)); }
-function sourceMass(observations: Observation[], source: Source): number {
-  return observations.filter((o) => o.source === source).reduce((sum, o) => sum + o.share, 0);
-}
 function sourceCount(observations: Observation[], source: Source): number {
   return observations.filter((o) => o.source === source).length;
 }
 
-function emptyDimension(): LeaderboardDimension { return { value: null, lowerBound: null, shrunk: null, n: 0 }; }
 function nativeDimension(values: number[], native: (value: number) => number): LeaderboardDimension {
   const observed = mean(values);
   return { value: observed === null ? null : round(native(observed), 3), lowerBound: null, shrunk: null, n: values.length };

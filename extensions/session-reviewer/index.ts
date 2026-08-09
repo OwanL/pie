@@ -7,6 +7,7 @@ import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { buildBlindedEvidence, readSessionIdentity } from './src/evidence.js';
 import { compileReviewDraft, isSessionReviewDraft } from './src/draft.js';
 import { hashCanonicalJson } from './src/hash.js';
+import { compileRecoveredReview, getReviewRecoveryStatus, recoveredEvidenceManifests } from './src/recovery.js';
 import { validateRuntimeProvenance } from './src/runtime-provenance.js';
 import { sessionReviewSchema } from './src/types.js';
 import type { EvidenceManifest, ReviewClosureTarget, SessionReviewDraft, SessionReviewParams, SessionReviewV2 } from './src/types.js';
@@ -223,7 +224,7 @@ export default function (pi: ExtensionAPI) {
     description: 'Session evaluation: list open/pinned sessions, fetch blinded evidence, compile and persist canonical reviews, and enqueue explicit closure actions.',
     promptSnippet: 'List, inspect, and review open app sessions.',
     promptGuidelines: [
-      'List before getEvidence. Review only selected targets, exclude (self), and do not re-rate already-reviewed sessions. Prefer compact drafts or a temporary JSON file; use recordReviews and closeReviewedBatch for independent batches. Persistence never closes a target; use closeReviewed after recording and closeSelf as the final action.',
+      'List before review work. Review only selected targets, exclude (self), and do not re-rate already-reviewed sessions. For resumable reviews, tag each delegated role with the workflowRef from getReviewStatus, process one target end-to-end, then use recordRecoveredReview and closeReviewed immediately. History compaction does not lose tagged work: call getReviewStatus to resume from the orchestrator JSONL. Persistence never closes a target; closeSelf remains the final action.',
     ],
     parameters: sessionReviewSchema,
 
@@ -239,7 +240,10 @@ export default function (pi: ExtensionAPI) {
           orchestratorPath: current,
           targetsByPath: new Map(sessions.map((session) => [session.sessionPath, session])),
           targetsById: new Map(sessions.map((session) => [session.sessionId, session])),
-          evidenceBySessionId: new Map(),
+          // Tool-result details are durable in the orchestrator JSONL even when
+          // history compaction removes their text from the model context. Rehydrate
+          // issued manifests so backend/session restart is also resumable.
+          evidenceBySessionId: recoveredEvidenceManifests(current),
         });
         return ok(renderList(sessions, p.action === 'listSelected'), { sessions });
       }
@@ -263,6 +267,47 @@ export default function (pi: ExtensionAPI) {
             identityFallback: bundle.identityFallback,
             manifest: bundle.manifest,
           });
+        } catch (error) { return err((error as Error).message); }
+      }
+
+      if (p.action === 'getReviewStatus') {
+        if (!p.sessionId) return err('getReviewStatus requires sessionId from listOpen/listSelected.');
+        const scope = snapshotFor(ctx);
+        if (!scope) return err('List targets in this reviewer session before recovering review work.');
+        const target = eligibleTarget(scope, p.sessionPath, p.sessionId);
+        if (!target || !target.reviewEligible) return err('Review status target is not an eligible unrated selected/open snapshot member.');
+        const issued = scope.evidenceBySessionId.get(target.sessionId) ?? [];
+        const evidenceManifest = issued[issued.length - 1];
+        if (!evidenceManifest) return err('Fetch evidence for this target before requesting review status.');
+        try {
+          const status = getReviewRecoveryStatus(scope.orchestratorPath, target.sessionId, evidenceManifest);
+          return ok(JSON.stringify(status), status);
+        } catch (error) { return err((error as Error).message); }
+      }
+
+      if (p.action === 'recordRecoveredReview') {
+        if (!p.sessionId) return err('recordRecoveredReview requires sessionId from listOpen/listSelected.');
+        const scope = snapshotFor(ctx);
+        if (!scope) return err('List targets in this reviewer session before recording.');
+        const target = eligibleTarget(scope, p.sessionPath, p.sessionId);
+        if (!target || !target.reviewEligible) return err('Recovered review target is not an eligible unrated selected/open snapshot member.');
+        const issued = scope.evidenceBySessionId.get(target.sessionId) ?? [];
+        const evidenceManifest = issued[issued.length - 1];
+        if (!evidenceManifest) return err('Fetch evidence for this target before recording; no issued manifest is recoverable.');
+        try {
+          const orchestratorIdentity = readSessionIdentity(scope.orchestratorPath).sessionId;
+          const review = validateSessionReviewV2(compileRecoveredReview({
+            orchestratorPath: scope.orchestratorPath,
+            orchestratorSessionId: orchestratorIdentity,
+            sessionId: target.sessionId,
+            sessionPathAtReview: target.sessionPath,
+            identityFallback: target.identityFallback,
+            evidenceManifest,
+          }));
+          validateReviewTarget(review, scope);
+          const result = await recordReviewOnce(review);
+          if (!result.written) return ok(`Session ${review.sessionId} already has canonical production review ${result.reviewId}; no duplicate was written.`, result);
+          return ok(`Recovered and recorded ${review.kind} review ${review.reviewId} for session ${review.sessionId}.\nStored in ${result.file}. No closure action was written.`, result);
         } catch (error) { return err((error as Error).message); }
       }
 

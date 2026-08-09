@@ -29,9 +29,6 @@ export interface WarmExecOpts {
   onData: (data: Buffer) => void;
   signal?: AbortSignal;
   timeout?: number;
-  /** True when the command contains a heredoc — `</dev/null` is still safe but
-   *  we keep the flag for future tightening. */
-  hasHeredoc?: boolean;
 }
 
 interface WarmWorker {

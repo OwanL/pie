@@ -231,7 +231,6 @@ export default function (pi: ExtensionAPI) {
     const poolCfgNow = currentPoolCfg();
     const opsCfgNow = currentOpsCfg();
     reconcilePool(poolCfgNow);
-    shared.activeSessions.add(sessionId);
 
     // Global ops-config change (fastPath / autoPrune) → rebuild every session's
     // tool so its operations picks up the new flags. Cheap; no pool change.
@@ -341,7 +340,6 @@ export default function (pi: ExtensionAPI) {
     // Per-session teardown. The shared pool is NOT disposed here — it persists
     // for the process lifetime (or until the idle target is set to 0) so the
     // configured idle target is maintained across sessions.
-    shared.activeSessions.delete(id);
     tools.delete(id);
     sessionCwd.delete(id);
     toolOpsCfg.delete(id);

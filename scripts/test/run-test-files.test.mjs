@@ -83,6 +83,14 @@ test('classifyTestFile keeps script tests repo-rooted like the scripts package g
   assert.match(fwd(d.tsxBin), /(^|\/)node_modules\/tsx\/dist\/cli\.mjs$/);
 });
 
+test('classifyTestFile keeps experiment tests repo-rooted and marks them serial', () => {
+  const d = classifyTestFile(repoRoot, 'scripts/experiments/test/broker.test.mjs');
+  assert.equal(d.id, 'scripts');
+  assert.equal(fwd(d.cwd), fwd(repoRoot));
+  assert.equal(d.relativeFilePath, 'scripts/experiments/test/broker.test.mjs');
+  assert.equal(d.serial, true);
+});
+
 test('classifyTestFile classifies extensions/* files (cwd=repoRoot) and sets the subagent --tsconfig', () => {
   const d = classifyTestFile(repoRoot, 'extensions/subagent/test/agents.test.ts');
   assert.equal(d.id, 'subagent');
@@ -129,11 +137,26 @@ test('groupFilesByPackage retains repo-relative script paths for execution', () 
     tsxConfig: undefined,
     tsxBin: resolveLocalTsx(repoRoot),
     files: ['scripts/test/run-test-files.test.mjs'],
+    serial: false,
   }]);
   assert.deepEqual(buildTsxArgs(groups[0]), [
     '--test',
     '--test-force-exit',
     'scripts/test/run-test-files.test.mjs',
+  ]);
+});
+
+test('groupFilesByPackage serializes a scripts group containing experiment tests', () => {
+  const groups = groupFilesByPackage(repoRoot, [
+    'scripts/test/run-test-files.test.mjs',
+    'scripts/experiments/test/broker.test.mjs',
+  ]);
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].serial, true);
+  assert.deepEqual(buildTsxArgs(groups[0]).slice(0, 3), [
+    '--test',
+    '--test-force-exit',
+    '--test-concurrency=1',
   ]);
 });
 

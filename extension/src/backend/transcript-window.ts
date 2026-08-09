@@ -201,14 +201,17 @@ export function buildPagedTranscriptWindow(
   const pageSize = options.pageSize ?? TRANSCRIPT_WINDOW_BUDGETS.pageSize;
   const maxLoadedCount = options.maxLoadedCount ?? TRANSCRIPT_WINDOW_BUDGETS.maxLoadedCount;
   const pinnedIndex = resolvePinnedIndex(cache, options.pinnedMessageId);
-  const fallbackTail = buildTailTranscriptWindow(cache, {
-    tailCount: options.tailCount,
-    maxLoadedCount,
-    pinnedMessageId: options.pinnedMessageId,
-  }).transcriptWindow;
+  const hasCompleteBounds = options.loadedStart !== undefined && options.loadedEnd !== undefined;
+  const fallbackTail = hasCompleteBounds
+    ? undefined
+    : buildTailTranscriptWindow(cache, {
+        tailCount: options.tailCount,
+        maxLoadedCount,
+        pinnedMessageId: options.pinnedMessageId,
+      }).transcriptWindow;
 
-  const currentStart = options.loadedStart ?? fallbackTail.loadedStart;
-  const currentEnd = options.loadedEnd ?? fallbackTail.loadedEnd;
+  const currentStart = options.loadedStart ?? fallbackTail?.loadedStart ?? 0;
+  const currentEnd = options.loadedEnd ?? fallbackTail?.loadedEnd ?? totalCount;
 
   const baseRange = normalizeRange(currentStart, currentEnd, totalCount);
   const requestedRange = direction === 'older'

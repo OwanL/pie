@@ -731,8 +731,8 @@
 
 /* ── Tool-call terminal output (bash/shell) ──────────────────────────────── */
 /* Live, streaming stdout/stderr rendered as a terminal pane. While the tool
-   is running the pane is shown even when the card is collapsed, so execution
-   is visible as it happens. */
+   is running, non-empty output is shown even when the card is collapsed so
+   execution is visible without rendering an empty placeholder row. */
 
 .tool-call-body-terminal {
   padding: 0;
@@ -794,14 +794,6 @@
   font-family: inherit;
   background: transparent;
   padding: 0;
-}
-
-.tool-call-terminal-empty {
-  padding: 8px 10px;
-  font-family: var(--vscode-editor-font-family, monospace);
-  font-size: 12px;
-  color: var(--panel-muted);
-  font-style: italic;
 }
 
 /* Blinking block cursor while output is streaming */

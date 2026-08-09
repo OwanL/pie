@@ -977,6 +977,14 @@
   box-shadow: none;
 }
 
+/* Keep replies on the shared transcript surface while giving their compact
+   metadata header a clear boundary. The accent-tinted hairline is structural,
+   not a card border, so long replies remain visually light. */
+.message-assistant-header {
+  padding-bottom: 5px;
+  border-bottom: 1px solid color-mix(in srgb, var(--panel-accent) 24%, var(--panel-border-subtle));
+}
+
 .message-item-shell[data-role="user"] {
   background: var(--panel-user-surface);
   border-color: var(--panel-user-border);
@@ -1400,6 +1408,10 @@
   .reasoning-block[data-streaming="true"][data-provisional="true"] {
     border-color: ButtonText;
     background: Canvas;
+  }
+
+  .message-assistant-header {
+    border-bottom-color: ButtonText;
   }
 }
 

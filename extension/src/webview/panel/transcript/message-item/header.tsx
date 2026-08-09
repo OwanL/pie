@@ -87,6 +87,7 @@ export function MessageItemHeader({
       title={assistantMetaTooltip ?? undefined}
       actions={actions}
       align={role === 'user' ? 'end' : 'start'}
+      className={role === 'assistant' ? 'message-assistant-header' : undefined}
     />
   );
 }
