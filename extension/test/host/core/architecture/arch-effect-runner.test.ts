@@ -236,7 +236,7 @@ test('live checkpoint repair bypasses mutation queues so active-session work can
   assert.deepEqual(meaningfulCalls[0], {
     kind: 'request',
     method: 'liveTurn.checkpoint',
-    params: { sessionPath: '/active' },
+    params: { sessionPath: '/active', turnId: 'turn-1', attemptId: 'attempt-1' },
   });
   assert.equal(events[0]?.kind, 'LiveTurnCheckpointResult');
   assert.equal(events[0]?.ok, true);

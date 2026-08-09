@@ -38,13 +38,6 @@ export interface MessageItemProps {
   pruningHeaderState?: PruningHeaderState;
   /** Structured in-flight activity for the current turn (last assistant row only). */
   activityState?: TurnActivityState | null;
-  /**
-   * Precomputed recovery affordance for assistant error/interrupted messages
-   * (located via the transcript window in the row builder). Passed in — rather
-   * than the raw transcript array — so MessageItem's memo survives streaming
-   * tokens (the array reference changes every token).
-   */
-  recovery?: { kind: 'available'; userId: string } | { kind: 'unloaded' } | null;
   /** Stable per-session key used to scope the message entrance tracker so old
    *  sessions' ids are released when the session changes. */
   sessionKey?: string | null;
@@ -70,7 +63,6 @@ export function MessageItemView({
   requestCreatedAt,
   pruningHeaderState,
   activityState,
-  recovery,
   sessionKey,
   onCancelPrepass,
 }: MessageItemProps) {
@@ -107,7 +99,6 @@ export function MessageItemView({
     activityState,
     editingId,
     readonly,
-    recovery,
     combinedParts,
     combinedMarkdown,
     combinedThinking,
@@ -156,8 +147,6 @@ export function MessageItemView({
         messageBodyRef={messageBodyRef}
         hasActivityFooter={derived.hasActivityFooter}
         footerActivityState={derived.footerActivityState}
-        recovery={derived.recovery}
-        onEditRequest={onEditRequest}
         onEditConfirm={onEditConfirm}
         onEditCancel={onEditCancel}
         onCancelPrepass={onCancelPrepass}
@@ -182,8 +171,8 @@ export const MessageItem = memo(MessageItemView, areMessageItemPropsEqual);
  *
  * The remaining props are all either stable across snapshots (handlers are
  * `useCallback`-stable from `useAppHandlers`; `prefs` is reference-stabilized
- * in `hydrateViewState`; `recovery` is interned by `userId`; `renderToolCall`
- * is `useCallback`-stable) or primitives (`isStreaming`, `editingId`,
+ * in `hydrateViewState`; `renderToolCall` is `useCallback`-stable) or
+ * primitives (`isStreaming`, `editingId`,
  * `requestCreatedAt`, `sessionKey`, …), so shallow `===` is correct for them.
  *
  * `activityState` and `pruningHeaderState` are fresh references on every
@@ -213,7 +202,6 @@ export function areMessageItemPropsEqual(prev: MessageItemProps, next: MessageIt
     prev.renderToolCall === next.renderToolCall &&
     prev.pruningHeaderState === next.pruningHeaderState &&
     prev.activityState === next.activityState &&
-    prev.recovery === next.recovery &&
     prev.onCancelPrepass === next.onCancelPrepass
   );
 }

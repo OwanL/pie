@@ -69,7 +69,6 @@ test('TranscriptMessageList adds the owning request time to nested assistant hea
 
 test('TranscriptMessageList renders read-only when readonly is set', () => {
   const html = render({ readonly: true });
-  // Read-only nested transcripts expose no edit/retry affordances.
-  assert.doesNotMatch(html, /message-retry-btn/);
+  // Read-only nested transcripts expose no edit affordances.
   assert.doesNotMatch(html, /message-edit/);
 });

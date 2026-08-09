@@ -45,6 +45,11 @@ export interface SessionPathParams {
   sessionPath: string;
 }
 
+export interface LiveTurnCheckpointParams extends SessionPathParams {
+  turnId?: string;
+  attemptId?: string;
+}
+
 export interface MessageSendParams {
   sessionPath: string;
   text: string;
@@ -155,6 +160,24 @@ export function validateSessionPath(method: string, params: unknown): SessionPat
   const sessionPath = params['sessionPath'] as string;
   rejectPendingSessionPath(method, sessionPath);
   return { sessionPath };
+}
+
+export function validateLiveTurnCheckpoint(params: unknown): LiveTurnCheckpointParams {
+  if (!isObj(params)) fail('liveTurn.checkpoint', 'expected an object');
+  const { sessionPath } = validateSessionPath('liveTurn.checkpoint', params);
+  const turnId = params['turnId'];
+  const attemptId = params['attemptId'];
+  if ((turnId !== undefined && (typeof turnId !== 'string' || !turnId))
+    || (attemptId !== undefined && (typeof attemptId !== 'string' || !attemptId))) {
+    fail('liveTurn.checkpoint', 'turnId and attemptId must be non-empty strings when provided');
+  }
+  if ((turnId === undefined) !== (attemptId === undefined)) {
+    fail('liveTurn.checkpoint', 'turnId and attemptId must be provided together');
+  }
+  return {
+    sessionPath,
+    ...(typeof turnId === 'string' ? { turnId, attemptId: attemptId as string } : {}),
+  };
 }
 
 export function validateSessionCreate(params: unknown): SessionCreateParams {

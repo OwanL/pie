@@ -437,7 +437,11 @@ export class EffectRunner {
             status: 'active' | 'terminal_grace' | 'inactive' | 'backend_restarted' | 'oversize';
             checkpoint: LiveTurnCheckpoint | null;
             watermark: LiveLifecycleWatermark | null;
-          }>('liveTurn.checkpoint', { sessionPath: effect.sessionPath }, { timeoutMs: 5_000 });
+          }>('liveTurn.checkpoint', {
+            sessionPath: effect.sessionPath,
+            turnId: effect.turnId,
+            attemptId: effect.attemptId,
+          }, { timeoutMs: 5_000 });
           if (isLivePipelineTraceEnabled()) recordLivePipelineTrace({
             process: 'host',
             stage: response.checkpoint ? 'host.checkpoint.received' : 'host.checkpoint.failed',

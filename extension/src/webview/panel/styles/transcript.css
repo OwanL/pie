@@ -860,54 +860,7 @@
 
 
 
-/* ── Message recovery (retry / error detail) ─────────────────────────────── */
-/* Controls shown below failed or interrupted assistant turns */
-
-.message-recovery {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 4px;
-  margin-top: 2px;
-}
-
-.message-retry-btn {
-  background: none;
-  border: none;
-  color: var(--panel-foreground);
-  cursor: pointer;
-  font-size: 11px;
-  padding: 2px 5px;
-  border-radius: 4px;
-  opacity: 0.7;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  transition:
-    background var(--panel-transition-fast),
-    opacity var(--panel-transition-fast),
-    transform var(--panel-duration-fast) var(--panel-ease-spring);
-}
-
-.message-retry-btn:hover {
-  opacity: 1;
-  background: var(--panel-control-hover);
-}
-
-.message-retry-btn:active:not(:disabled) {
-  transform: scale(0.95);
-}
-
-.message-retry-btn:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-
-.message-retry-hint {
-  font-size: 11px;
-  color: var(--panel-muted);
-  margin-left: 6px;
-}
+/* ── Message error detail ───────────────────────────────────────────────── */
 
 .message-error-detail {
   margin: 4px 0 6px;

@@ -89,7 +89,6 @@ export function useMessageItemDerived({
   activityState,
   editingId,
   readonly,
-  recovery,
   combinedParts,
   combinedMarkdown,
   combinedThinking,
@@ -102,10 +101,6 @@ export function useMessageItemDerived({
   activityState?: TurnActivityState | null;
   editingId: string | null;
   readonly?: boolean;
-  /** Precomputed recovery affordance for assistant error/interrupted messages.
-   *  Computed by the row builder (pure useRecovery) and passed in so the
-   *  transcript array never reaches this memoized component. */
-  recovery?: { kind: 'available'; userId: string } | { kind: 'unloaded' } | null;
   combinedParts: ReturnType<typeof assistantPartsFromMessage> | undefined;
   combinedMarkdown: string;
   combinedThinking: string;
@@ -181,7 +176,6 @@ export function useMessageItemDerived({
   return {
     isCurrentlyStreaming,
     isEditing,
-    recovery: recovery ?? null,
     statusLabel,
     statusTone,
     replyMeta,

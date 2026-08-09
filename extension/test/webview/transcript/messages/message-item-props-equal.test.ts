@@ -57,7 +57,6 @@ function makeBaseProps(): MessageItemProps {
     isLastAssistantMessage: false,
     pruningHeaderState: undefined,
     activityState: undefined,
-    recovery: undefined,
     sessionKey: 'sess',
   };
 }
@@ -148,17 +147,9 @@ test('detects activityState presence (undefined vs a value)', () => {
   assert.equal(areMessageItemPropsEqual(prev, next), false);
 });
 
-test('detects recovery reference change', () => {
+test('treats both-undefined activityState / pruningHeaderState as equal', () => {
   const prev = makeBaseProps();
   const next = makeEqualProps();
-  next.recovery = { kind: 'available', userId: 'u1' };
-  assert.equal(areMessageItemPropsEqual(prev, next), false);
-});
-
-test('treats both-undefined recovery / activityState / pruningHeaderState as equal', () => {
-  const prev = makeBaseProps();
-  const next = makeEqualProps();
-  assert.equal(prev.recovery, next.recovery);
   assert.equal(prev.activityState, next.activityState);
   assert.equal(prev.pruningHeaderState, next.pruningHeaderState);
   assert.equal(areMessageItemPropsEqual(prev, next), true);

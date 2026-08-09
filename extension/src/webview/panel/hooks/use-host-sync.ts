@@ -89,6 +89,9 @@ export interface OptimisticUserMessage {
   localId: string;
   text: string;
   sessionPath: string;
+  /** Captured at submit time so a busy-session send is immediately rendered at
+   * the queued boundary, before the first authoritative host snapshot lands. */
+  queued: boolean;
 }
 
 export interface HostSyncState {
@@ -188,37 +191,37 @@ function useHydrateViewState() {
   }, []);
 }
 
+export function mergeOptimisticTranscript(
+  viewState: ViewState,
+  optimisticMessages: OptimisticUserMessage[],
+): ChatMessage[] {
+  if (optimisticMessages.length === 0) return viewState.transcript;
+
+  const activeSessionPath = viewState.activeSession?.path;
+  if (!activeSessionPath) return viewState.transcript;
+
+  const hostIds = new Set(viewState.transcript.map((m) => m.id));
+  const pendingForSession = optimisticMessages.filter(
+    (m) => m.sessionPath === activeSessionPath && !hostIds.has(m.localId),
+  );
+  if (pendingForSession.length === 0) return viewState.transcript;
+
+  const now = new Date().toISOString();
+  const chatMessages: ChatMessage[] = pendingForSession.map((m) => ({
+    id: m.localId,
+    role: 'user' as const,
+    createdAt: now,
+    markdown: m.text,
+    status: m.queued ? 'queued' as const : 'completed' as const,
+  }));
+  return [...viewState.transcript, ...chatMessages];
+}
+
 function useMergedTranscript(viewState: ViewState, optimisticMessages: OptimisticUserMessage[]): ChatMessage[] {
-  return useMemo(() => {
-    if (optimisticMessages.length === 0) {
-      return viewState.transcript;
-    }
-
-    const activeSessionPath = viewState.activeSession?.path;
-    if (!activeSessionPath) {
-      return viewState.transcript;
-    }
-
-    const hostIds = new Set(viewState.transcript.map((m) => m.id));
-    const pendingForSession = optimisticMessages.filter(
-      (m) => m.sessionPath === activeSessionPath && !hostIds.has(m.localId),
-    );
-
-    if (pendingForSession.length === 0) {
-      return viewState.transcript;
-    }
-
-    const now = new Date().toISOString();
-    const chatMessages: ChatMessage[] = pendingForSession.map((m) => ({
-      id: m.localId,
-      role: 'user' as const,
-      createdAt: now,
-      markdown: m.text,
-      status: 'completed' as const,
-    }));
-
-    return [...viewState.transcript, ...chatMessages];
-  }, [viewState.transcript, viewState.activeSession?.path, optimisticMessages]);
+  return useMemo(
+    () => mergeOptimisticTranscript(viewState, optimisticMessages),
+    [viewState.transcript, viewState.activeSession?.path, optimisticMessages],
+  );
 }
 
 

@@ -1594,17 +1594,14 @@ test('rendered MessageItem keeps pruning pending state in the header without an 
   assert.doesNotMatch(html, /message-typing-indicator/);
 });
 
-test('rendered failed assistant turn exposes copyable error detail and an edit-previous-prompt recovery action', async () => {
+test('rendered failed assistant turn exposes copyable error detail without a redundant edit-previous-prompt action', async () => {
   const { MessageItem } = await loadWebviewModules();
-  const { useRecovery } = await import('../../../src/webview/panel/transcript/message-item/footer.tsx');
 
-  const userMsg = userMessage({ id: 'user-99', markdown: 'Do the thing' });
   const failedAssistant = assistantMessage([{ kind: 'text', text: 'Partial' }], {
     id: 'assistant-99',
     status: 'error',
     errorDetail: 'Backend connection reset',
   });
-  const transcript = [userMsg, failedAssistant];
 
   const html = renderToString(h(MessageItem, {
     message: failedAssistant,
@@ -1620,46 +1617,12 @@ test('rendered failed assistant turn exposes copyable error detail and an edit-p
     onContextMenu: noopContextMenu,
     renderToolCall: () => null,
     isLastAssistantMessage: false,
-    recovery: useRecovery(failedAssistant, transcript, 1, false),
   }));
 
-  // Error detail is shown with a copy affordance.
   assert.match(html, /Backend connection reset/);
   assert.match(html, /aria-label="Copy error detail"/);
-  // Recovery action targets the previous user prompt.
-  assert.match(html, /message-retry-btn/);
-  assert.match(html, /Edit previous prompt/);
+  assert.doesNotMatch(html, /Edit previous prompt/);
   assert.doesNotMatch(html, /Load older messages to retry/);
-});
-
-test('rendered failed assistant turn disables recovery when the previous prompt is outside the loaded window', async () => {
-  const { MessageItem } = await loadWebviewModules();
-  const { useRecovery } = await import('../../../src/webview/panel/transcript/message-item/footer.tsx');
-
-  const failedAssistant = assistantMessage([{ kind: 'text', text: 'Partial' }], {
-    id: 'assistant-100',
-    status: 'interrupted',
-  });
-
-  const html = renderToString(h(MessageItem, {
-    message: failedAssistant,
-    isStreaming: false,
-    prefs: DEFAULT_CHAT_PREFS,
-    readonly: false,
-    workingDirectory: '/repo',
-    editingId: null,
-    onEditRequest: noop,
-    onEditConfirm: noop,
-    onEditCancel: noop,
-    onOpenFile: noop,
-    onContextMenu: noopContextMenu,
-    renderToolCall: () => null,
-    isLastAssistantMessage: false,
-    recovery: useRecovery(failedAssistant, [failedAssistant], 0, true),
-  }));
-
-  assert.match(html, /Load older messages to retry/);
-  assert.doesNotMatch(html, /message-retry-btn/);
 });
 
 test('rendered TurnActivityStrip covers all tones, standalone/inline variants, and runningDot states', async () => {

@@ -79,6 +79,7 @@ export function AppBody({ adapter }: AppBodyProps) {
     activeSessionPathRef,
     setDraftRestore,
     addOptimisticMessage,
+    viewState.busy,
     setContextMenu,
     setInterrupting,
   );

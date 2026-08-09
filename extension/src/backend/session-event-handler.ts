@@ -19,8 +19,8 @@ import type {
 } from '../shared/protocol';
 import { COMPACTION_METRICS_CUSTOM_TYPE } from '../shared/protocol';
 import type { SdkSessionEvent } from './sdk';
-import type { BackendSemanticCandidate } from './live-turn-accumulator';
-import type { TurnSemanticEnvelope } from '../shared/live-pipeline-protocol';
+import { BackendLiveTurnAccumulator, type BackendSemanticCandidate } from './live-turn-accumulator';
+import { LIVE_PIPELINE_PROTOCOL_VERSION, type TurnSemanticEnvelope } from '../shared/live-pipeline-protocol';
 import { estimateCumulativeSubagentTokens, normalizeToolProgress } from './tool-progress-normalizer';
 import {
   mapAssistantMessage,
@@ -731,6 +731,89 @@ function liveExecutionId(context: SessionContext, toolCallId: string): string {
   return `${attemptId ?? 'unknown'}:${toolCallId}`;
 }
 
+/** Close the live reply that precedes an injected queued user message, then
+ * allocate a fresh semantic owner for the assistant output that follows it.
+ * The SDK keeps both segments inside one agent run, but the transcript has a
+ * real user-message boundary and therefore must expose two assistant rows. */
+function startQueuedFollowUpSegment(
+  deps: BackendSessionEventHandlerDeps,
+  context: SessionContext,
+  occurredAt: number,
+): void {
+  const active = context.activeRequest;
+  const previousAccumulator = active?.liveTurnAccumulator;
+  if (!active || !previousAccumulator) return;
+
+  if (!previousAccumulator.lifecycleWatermark()) {
+    const pending = active.pendingQueuedBoundaryTerminal;
+    if (!pending) {
+      emitRejectedObservation(deps, context, 'owner_missing');
+      return;
+    }
+    const branch = context.session.sessionManager?.getBranch?.() as SessionEntryLike[] | undefined;
+    const refreshed = branch
+      ? [...mapTranscript(branch)].reverse().find((entry) =>
+          entry.role === 'assistant' && entry.durableEntryId === pending.durableEntryId)
+      : undefined;
+    const runtime = pending.durableMessage;
+    const durableMessage = {
+      ...(refreshed ?? runtime),
+      modelId: runtime.modelId ?? refreshed?.modelId,
+      provider: runtime.provider ?? refreshed?.provider,
+      thinkingLevel: runtime.thinkingLevel ?? refreshed?.thinkingLevel,
+      durationMs: runtime.durationMs ?? refreshed?.durationMs,
+      turnLatencyMs: runtime.turnLatencyMs,
+      overheadMs: runtime.overheadMs,
+      providerLatencyMs: runtime.providerLatencyMs,
+      providerQueueMs: runtime.providerQueueMs,
+      providerQueueAttemptCount: runtime.providerQueueAttemptCount,
+      errorDetail: runtime.errorDetail ?? refreshed?.errorDetail,
+      durableEntryId: pending.durableEntryId,
+    };
+    emitSemanticCandidate(deps, context, {
+      kind: 'turn.terminal',
+      terminalKind: durableMessage.status === 'interrupted' ? 'interrupted' : 'completed',
+      userInitiated: durableMessage.status === 'interrupted' ? active.aborted === true : undefined,
+      ...pending,
+      durableMessage,
+    }, occurredAt);
+  }
+
+  // Do not introduce a second owner unless the old one was successfully
+  // terminalized. The oversize/rejected path will abort and repair normally.
+  if (!previousAccumulator.lifecycleWatermark()) return;
+  context.terminalLiveTurn = {
+    accumulator: previousAccumulator,
+    expiresAt: occurredAt + 10_000,
+  };
+  active.liveTurnAccumulator = new BackendLiveTurnAccumulator({
+    protocolVersion: LIVE_PIPELINE_PROTOCOL_VERSION,
+    sessionPath: context.sessionPath,
+    requestId: active.id,
+    turnId: randomUUID(),
+    attemptId: randomUUID(),
+    canonicalMessageId: `${active.id}:${active.messageIndex + 1}`,
+    modelId: active.modelId,
+    thinkingLevel: active.thinkingLevel,
+    startedAt: occurredAt,
+  });
+  active.pendingQueuedBoundaryTerminal = undefined;
+  active.pendingErrorTerminal = undefined;
+  active.pendingDurableToolTerminals?.clear();
+  active.toolStartTimes?.clear();
+  active.toolStartMetadata?.clear();
+  active.toolParallelGroupByCallId?.clear();
+  active.providerQueueByTurn?.clear();
+  active.turnBoundaryAt = occurredAt;
+  // The SDK emitted turn_start before it injected the queued user row. That
+  // earlier timestamp belongs to the closed segment; delivery is the first
+  // truthful provider-boundary timestamp available for this new reply.
+  active.turnStartedAt = occurredAt;
+  active.currentMessageId = undefined;
+  active.currentMessageStartedAt = undefined;
+  active.providerFirstDeltaAt = undefined;
+}
+
 export function handleSdkSessionEvent(
   deps: BackendSessionEventHandlerDeps,
   context: SessionContext,
@@ -780,13 +863,14 @@ export function handleSdkSessionEvent(
       // it again at message_start/semantic deltas.
       const providerLeaseMs = resolveProviderSemanticInactivityMs(context.activeRequest.provider);
       renewSemanticLease(deps, context, providerLeaseMs, 'provider');
-      const liveSeq = context.activeRequest.liveTurnAccumulator?.currentSeq ?? 0;
+      const accumulator = context.activeRequest.liveTurnAccumulator;
+      const liveSeq = accumulator?.currentSeq ?? 0;
       if (liveSeq === 0) {
         emitSemanticCandidate(deps, context, { kind: 'turn.started' }, context.activeRequest.turnStartedAt);
         emitSemanticCandidate(deps, context, {
           kind: 'turn.phase', phase: 'preparing', inactivityBudgetMs: providerLeaseMs,
         }, context.activeRequest.turnStartedAt);
-      } else {
+      } else if (!accumulator?.lifecycleWatermark()) {
         emitSemanticCandidate(deps, context, {
           kind: 'turn.phase', phase: 'waiting_provider', inactivityBudgetMs: providerLeaseMs,
         }, context.activeRequest.turnStartedAt);
@@ -795,18 +879,15 @@ export function handleSdkSessionEvent(
     }
 
     case 'message_start': {
-      // Steering: the agent loop emits `message_start` with role 'user'
-      // when it injects a queued steering message into the current turn
-      // (delivered after the in-flight tool calls finish, before the next LLM
-      // call). Forward it as `message.queuedDelivered` so the host promotes its
-      // optimistic 'queued' transcript message to 'completed'. This fires
-      // within the same agent run (context.activeRequest is still the original
-      // send's request); the subsequent assistant `message_start` for this turn
-      // appends a new assistant message under the same requestId, reusing the
-      // existing streaming path. The normal (non-queued) user prompt does NOT
-      // emit a user-role message_start — the host inserts that optimistically
-      // — so this branch only fires for injected queued messages.
+      // Steering/follow-up delivery occurs inside the same SDK agent run, but
+      // it is still a real transcript boundary. Terminalize the reply above the
+      // queued row and create a fresh live owner so subsequent assistant output
+      // renders as a separate reply below the now-delivered user message.
+      // The normal (non-queued) prompt does not emit user-role message_start in
+      // this subscribed stream, so this branch only handles injected messages.
       if (event.message?.role === 'user') {
+        const deliveredAt = Date.now();
+        startQueuedFollowUpSegment(deps, context, deliveredAt);
         // Handoff §F: correlate this delivery to the host's optimistic localId
         // by shifting the next id from the FIFO queue we built in
         // `handleMessageSend`. An empty sentinel means the original send carried
@@ -1363,7 +1444,17 @@ export function handleSdkSessionEvent(
 
       const stopReason = typeof event.message.stopReason === 'string' ? event.message.stopReason : '';
       const expectsToolExecution = stopReason === 'toolUse' || stopReason === 'tool_use';
-      if (!expectsToolExecution) {
+      if (expectsToolExecution && context.activeRequest.liveTurnAccumulator) {
+        // Steering is injected only after these tools settle. Retain the
+        // durability-confirmed assistant candidate so that user-message
+        // boundary can close this reply even though ordinary tool-use
+        // intermediates remain folded while no queued message intervenes.
+        context.activeRequest.pendingQueuedBoundaryTerminal = {
+          durableMessage: message,
+          durableEntryId: event.sessionEntryId,
+        };
+      } else if (!expectsToolExecution) {
+        context.activeRequest.pendingQueuedBoundaryTerminal = undefined;
         // The queue observations above now belong to this emitted terminal.
         // Tool-use intermediates are not emitted, so retain their observations
         // until the later terminal that represents the complete durable turn.

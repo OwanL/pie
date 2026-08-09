@@ -57,7 +57,8 @@ export function useAppHandlers(
   postMessage: (msg: WebviewToHostMessage) => void,
   activeSessionPathRef: { current: string | null },
   setDraftRestore: (value: null) => void,
-  addOptimisticMessage: (msg: { localId: string; text: string; sessionPath: string }) => void,
+  addOptimisticMessage: (msg: { localId: string; text: string; sessionPath: string; queued: boolean }) => void,
+  isBusy: boolean,
   setContextMenu: (state: ContextMenuState | null) => void,
   /** Brief E: set true synchronously on interrupt so the webview reflects
    *  "stopping…" within one frame (before the host round-trip clears
@@ -72,10 +73,10 @@ export function useAppHandlers(
     setDraftRestore(null);
 
     const localId = createLocalMessageId();
-    addOptimisticMessage({ localId, text, sessionPath });
+    addOptimisticMessage({ localId, text, sessionPath, queued: isBusy });
 
     postMessage({ type: 'send', sessionPath, text, localId });
-  }, [postMessage, activeSessionPathRef, setDraftRestore, addOptimisticMessage]);
+  }, [postMessage, activeSessionPathRef, setDraftRestore, addOptimisticMessage, isBusy]);
 
   // Brief H: retry re-sends the restored draft. Mirrors `handleSend` (optimistic
   // message + draft-restore clear) but posts `retrySend` so the host can disable
@@ -89,10 +90,10 @@ export function useAppHandlers(
     setDraftRestore(null);
 
     const localId = createLocalMessageId();
-    addOptimisticMessage({ localId, text, sessionPath });
+    addOptimisticMessage({ localId, text, sessionPath, queued: isBusy });
 
     postMessage({ type: 'retrySend', sessionPath, text, localId, disablePruning });
-  }, [postMessage, activeSessionPathRef, setDraftRestore, addOptimisticMessage]);
+  }, [postMessage, activeSessionPathRef, setDraftRestore, addOptimisticMessage, isBusy]);
 
   const handleInterrupt = useCallback(() => {
     const sessionPath = activeSessionPathRef.current;

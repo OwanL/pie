@@ -1378,6 +1378,89 @@ test('sequenced production path emits only typed live envelopes with a durable t
   assert.equal(typeof envelopes.at(-1)?.durableMessage.providerLatencyMs, 'number');
 });
 
+test('queued delivery terminalizes the current reply and starts a separate assistant segment', () => {
+  const { deps, emitted } = createDeps({ captureLive: true });
+  const accumulator = new BackendLiveTurnAccumulator({
+    protocolVersion: 6,
+    sessionPath: '/workspace/session.jsonl',
+    requestId: 'req-queued-boundary',
+    turnId: 'turn-before-queue',
+    attemptId: 'attempt-before-queue',
+    canonicalMessageId: 'req-queued-boundary:1',
+    startedAt: 100,
+  });
+  const branch = [{
+    id: 'entry-before-queue',
+    type: 'message',
+    timestamp: '2026-01-01T00:00:00.000Z',
+    message: {
+      role: 'assistant' as const,
+      content: [{ type: 'text', text: 'before queue' }],
+      stopReason: 'toolUse',
+    },
+  }];
+  const context = createContext({
+    session: {
+      sessionManager: { getBranch: () => branch },
+    } as unknown as SessionContext['session'],
+    queuedLocalIds: ['local-queued'],
+    activeRequest: {
+      id: 'req-queued-boundary',
+      messageIndex: 0,
+      aborted: false,
+      liveTurnAccumulator: accumulator,
+    },
+  });
+
+  handleSdkSessionEvent(deps, context, { type: 'turn_start' });
+  handleSdkSessionEvent(deps, context, { type: 'message_start', message: { role: 'assistant' } });
+  handleSdkSessionEvent(deps, context, {
+    type: 'message_update', message: { role: 'assistant' },
+    assistantMessageEvent: { type: 'text_delta', delta: 'before queue' },
+  });
+  handleSdkSessionEvent(deps, context, {
+    type: 'message_end', sessionEntryId: 'entry-before-queue',
+    message: branch[0]!.message,
+  });
+
+  // The SDK starts the next provider turn before injecting its queued user row.
+  handleSdkSessionEvent(deps, context, { type: 'turn_start' });
+  handleSdkSessionEvent(deps, context, {
+    type: 'message_start',
+    message: { role: 'user', content: [{ type: 'text', text: 'queued follow-up' }] },
+  });
+  handleSdkSessionEvent(deps, context, { type: 'message_start', message: { role: 'assistant' } });
+  handleSdkSessionEvent(deps, context, {
+    type: 'message_update', message: { role: 'assistant' },
+    assistantMessageEvent: { type: 'text_delta', delta: 'after queue' },
+  });
+
+  const boundaryTerminalIndex = emitted.findIndex((entry) =>
+    entry.event === 'live.semantic'
+      && (entry.payload as any).kind === 'turn.terminal'
+      && (entry.payload as any).turnId === 'turn-before-queue');
+  const deliveredIndex = emitted.findIndex((entry) => entry.event === 'message.queuedDelivered');
+  const nextStartedIndex = emitted.findIndex((entry) =>
+    entry.event === 'live.semantic'
+      && (entry.payload as any).kind === 'turn.started'
+      && (entry.payload as any).turnId !== 'turn-before-queue');
+
+  assert.ok(boundaryTerminalIndex >= 0, 'the pre-queue reply receives a durable terminal');
+  assert.ok(boundaryTerminalIndex < deliveredIndex, 'the old reply closes before the user row is delivered');
+  assert.ok(deliveredIndex < nextStartedIndex, 'new assistant output starts below the delivered user row');
+  assert.equal((emitted[boundaryTerminalIndex]!.payload as any).durableMessage.markdown, 'before queue');
+  assert.equal((emitted[deliveredIndex]!.payload as any).localId, 'local-queued');
+  assert.equal(
+    context.activeRequest?.turnStartedAt,
+    context.activeRequest?.turnBoundaryAt,
+    'the new segment timing begins at delivery, not the SDK turn_start that preceded it',
+  );
+  const nextPart = context.activeRequest?.liveTurnAccumulator?.checkpoint().turn.parts.at(-1);
+  assert.equal(nextPart?.kind, 'text');
+  assert.equal(nextPart?.kind === 'text' ? nextPart.text : undefined, 'after queue');
+  assert.notEqual(context.activeRequest?.liveTurnAccumulator?.attemptId, 'attempt-before-queue');
+});
+
 test('toolcall_start/delta/end preserve raw JSON and finalize only the matching semantic draft', () => {
   const { deps, emitted } = createDeps({ captureLive: true });
   const accumulator = new BackendLiveTurnAccumulator({

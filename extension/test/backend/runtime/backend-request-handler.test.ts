@@ -1443,13 +1443,36 @@ test('liveTurn.checkpoint returns active and terminal-grace in-memory authority'
   assert.equal(active.status, 'active');
   assert.equal(active.checkpoint.checkpointSeq, 1);
 
-  harness.context.activeRequest = undefined;
+  const nextAccumulator = new BackendLiveTurnAccumulator({
+    protocolVersion: 6, sessionPath: '/repo/session.jsonl', requestId: 'request-live',
+    turnId: 'turn-next', attemptId: 'attempt-next', canonicalMessageId: 'message-next', startedAt: 200,
+  });
+  nextAccumulator.observe({ kind: 'turn.started' }, 200);
+  harness.context.activeRequest = {
+    id: 'request-live', messageIndex: 1, aborted: false, liveTurnAccumulator: nextAccumulator,
+  };
   harness.context.terminalLiveTurn = { accumulator, expiresAt: Date.now() + 1_000 };
   const terminal = await handleBackendRequest(harness.deps, {
-    id: 'checkpoint-terminal', method: 'liveTurn.checkpoint', params: { sessionPath: harness.context.sessionPath },
+    id: 'checkpoint-terminal', method: 'liveTurn.checkpoint',
+    params: {
+      sessionPath: harness.context.sessionPath,
+      turnId: 'turn-live',
+      attemptId: 'attempt-live',
+    },
   }) as any;
   assert.equal(terminal.status, 'terminal_grace');
   assert.equal(terminal.checkpoint.turnId, 'turn-live');
+
+  const next = await handleBackendRequest(harness.deps, {
+    id: 'checkpoint-next', method: 'liveTurn.checkpoint',
+    params: {
+      sessionPath: harness.context.sessionPath,
+      turnId: 'turn-next',
+      attemptId: 'attempt-next',
+    },
+  }) as any;
+  assert.equal(next.status, 'active');
+  assert.equal(next.checkpoint.turnId, 'turn-next');
 });
 
 test('extension_ui.response rejects expired ownership instead of acknowledging a no-op', async () => {

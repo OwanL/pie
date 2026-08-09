@@ -123,8 +123,6 @@ interface MessageItemInnerProps {
   messageBodyRef: RefObject<HTMLDivElement>;
   hasActivityFooter: boolean | undefined;
   footerActivityState: TurnActivityState | null;
-  recovery: { kind: 'available'; userId: string } | { kind: 'unloaded' } | null;
-  onEditRequest: (messageId: string) => void;
   onEditConfirm: (messageId: string, text: string, inputs?: ComposerInput[], queued?: boolean) => void;
   onEditCancel: () => void;
   onCancelPrepass?: () => void;
@@ -157,8 +155,6 @@ export function MessageItemInner({
   messageBodyRef,
   hasActivityFooter,
   footerActivityState,
-  recovery,
-  onEditRequest,
   onEditConfirm,
   onEditCancel,
   onCancelPrepass,
@@ -231,8 +227,6 @@ export function MessageItemInner({
           <MessageFooter
             hasActivityFooter={hasActivityFooter}
             footerActivityState={footerActivityState}
-            recovery={recovery}
-            onEditRequest={onEditRequest}
           />
         </>
       )}

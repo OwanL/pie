@@ -8,6 +8,7 @@ import { toErrorMessage } from '../shared/error-message';
 import { LIVE_PIPELINE_LIMITS, LIVE_PIPELINE_PROTOCOL_VERSION } from '../shared/live-pipeline-protocol';
 import { enrichConnectionError } from '../shared/error-message';
 import {
+  validateLiveTurnCheckpoint,
   validateLoadTranscriptPage,
   validateMessageSend,
   validateMessageReplaceQueue,
@@ -1290,15 +1291,26 @@ async function handleLiveTurnCheckpoint(
   deps: BackendRequestHandlerDeps,
   request: RequestEnvelope,
 ): Promise<unknown> {
-  const params = validateSessionPath('liveTurn.checkpoint', request.params);
+  const params = validateLiveTurnCheckpoint(request.params);
   const context = deps.getSessionContext(params.sessionPath);
   if (!context) return { status: 'backend_restarted', checkpoint: null, watermark: null };
   const now = Date.now();
   if (context.terminalLiveTurn && context.terminalLiveTurn.expiresAt <= now) {
     context.terminalLiveTurn = undefined;
   }
-  const accumulator = context.activeRequest?.liveTurnAccumulator
-    ?? context.terminalLiveTurn?.accumulator;
+  const activeAccumulator = context.activeRequest?.liveTurnAccumulator;
+  const terminalAccumulator = context.terminalLiveTurn?.accumulator;
+  const matchesRequestedAttempt = (accumulator: BackendLiveTurnAccumulator | undefined): accumulator is BackendLiveTurnAccumulator =>
+    !!accumulator
+      && (params.turnId === undefined
+        || (accumulator.turnId === params.turnId && accumulator.attemptId === params.attemptId));
+  const accumulator = params.turnId === undefined
+    ? activeAccumulator ?? terminalAccumulator
+    : matchesRequestedAttempt(activeAccumulator)
+      ? activeAccumulator
+      : matchesRequestedAttempt(terminalAccumulator)
+        ? terminalAccumulator
+        : undefined;
   if (!accumulator) return { status: 'inactive', checkpoint: null, watermark: null };
   const checkpoint = accumulator.checkpoint();
   let encodedBytes: number;
@@ -1320,7 +1332,7 @@ async function handleLiveTurnCheckpoint(
     });
   }
   return {
-    status: context.activeRequest ? 'active' : 'terminal_grace',
+    status: accumulator === activeAccumulator ? 'active' : 'terminal_grace',
     checkpoint,
     watermark: accumulator.lifecycleWatermark() ?? null,
   };

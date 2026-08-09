@@ -107,6 +107,10 @@ export class BackendLiveTurnAccumulator {
     this.turn = { ...this.turn, checkpointBytes: this.estimateActiveCheckpointBytes(this.turn) };
   }
 
+  get turnId(): string {
+    return this.identity.turnId;
+  }
+
   get attemptId(): string {
     return this.identity.attemptId;
   }

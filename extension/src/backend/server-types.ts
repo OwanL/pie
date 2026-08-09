@@ -82,6 +82,15 @@ export interface ActiveRequest {
   providerIncidentNoticeKeys?: Set<string>;
   /** Bounded settlement watchdog for terminal quota exhaustion. */
   quotaSettlementTimer?: ReturnType<typeof setTimeout>;
+  /** A durability-confirmed assistant segment that ended in tool use. When a
+   * queued user message is injected after those tools settle, this candidate
+   * closes the current UI reply before a fresh live accumulator is created for
+   * the assistant output that follows the queued user row. */
+  pendingQueuedBoundaryTerminal?: {
+    durableMessage: ChatMessage;
+    durableEntryId: string;
+    reason?: string;
+  };
   /** Error message_end is observed before agent_end reveals whether the SDK
    * will retry. Hold the terminal candidate until willRetry=false so a
    * transient attempt cannot tombstone the still-running live turn. */
