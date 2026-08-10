@@ -43,3 +43,17 @@ test('compaction button distinguishes no-session and busy disabled reasons', () 
   act(() => button.click());
   assert.equal(calls, 0);
 });
+
+test('compaction button shows a live compacting state with a spinner', () => {
+  let calls = 0;
+  act(() => render(h(CompactionButton, { availability: 'compacting', onCompact: () => { calls += 1; } }), container));
+  const button = container.querySelector('button') as HTMLButtonElement;
+  assert.equal(button.disabled, true, 'compacting button is disabled');
+  assert.equal(button.getAttribute('aria-label'), 'Compacting conversation history…');
+  assert.equal(button.getAttribute('aria-busy'), 'true');
+  assert.ok(button.classList.contains('compacting'), 'compacting class drives the accent styling');
+  assert.ok(container.querySelector('.compaction-trigger-spinner'), 'spinner replaces the icon while compacting');
+  assert.equal(container.querySelector('svg'), null, 'icon is hidden while compacting');
+  act(() => button.click());
+  assert.equal(calls, 0);
+});

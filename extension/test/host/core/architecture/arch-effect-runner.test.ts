@@ -124,6 +124,33 @@ test('a failed system-prompt toggle persist surfaces a notice instead of failing
   assert.match((notices[0] as { notice: string }).notice, /Failed to save the system-prompt setting/);
 });
 
+test('EffectRunner rolls privacy mode back and notifies when analytics cleanup fails', async () => {
+  const dispatchedEvents: Event[] = [];
+  const { deps, calls, commands } = makeEffectRunnerDeps({
+    dispatchEvent: (event) => dispatchedEvents.push(event),
+  });
+  deps.statsService.setSessionPrivacy = async () => { throw new Error('analytics store locked'); };
+  const runner = new EffectRunner(deps);
+
+  runner.run({ kind: 'SetPrivacyMode', corrId: 'privacy-1', sessionPath: '/private.jsonl', enabled: true });
+  await settle();
+
+  assert.deepEqual(commands, [{
+    kind: 'Command',
+    cmd: {
+      kind: 'SetPrivacyMode',
+      corrId: 'privacy-cleanup-failed:privacy-1',
+      sessionPath: '/private.jsonl',
+      enabled: false,
+    },
+  }]);
+  assert.ok(dispatchedEvents.some((event) => event.kind === 'NoticeShown'
+    && event.notice?.includes('analytics store locked')));
+  assert.ok(calls.some((call) => call.kind === 'log'
+    && call.level === 'warn'
+    && call.message === 'privacy analytics cleanup failed'));
+});
+
 test('EffectRunner routes CompactRpc through the target session queue', async () => {
   const { deps, calls, events } = makeEffectRunnerDeps();
   const runner = new EffectRunner(deps);

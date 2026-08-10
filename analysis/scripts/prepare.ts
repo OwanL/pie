@@ -259,9 +259,8 @@ function normalizeThinkingLevel(value: string | null | undefined): ThinkingLevel
     case 'medium':
     case 'high':
     case 'xhigh':
-      return normalized;
     case 'max':
-      return 'xhigh';
+      return normalized;
     default:
       return null;
   }
@@ -1132,6 +1131,11 @@ export function prepareSourceAnalytics(source: SourceAnalyticsPayload): Prepared
   }
   const sessionReviewsV2: PreparedSessionReviewV2Row[] = (source.sessionReviewsV2 ?? []).map((review) => {
     const matchedRuns = runsBySessionId.get(review.sessionId) ?? [];
+    const runModelFamilies = [...new Set(matchedRuns.map((run) => run.modelFamily).filter((family): family is string => family !== null))].sort();
+    const historical = historicalBySessionId.get(review.sessionId);
+    const transcriptModelFamilies = !review.identityFallback && historical
+      ? [...new Set(historical.attributions.filter((attribution) => attribution.modelFamily !== '(unknown)' && attribution.share > 0).map((attribution) => attribution.modelFamily))].sort()
+      : [];
     const attainment = deriveReviewAttainment(review.ledger);
     const activeCriteria = review.ledger.filter((criterion) => criterion.status !== 'superseded');
     const assessable = activeCriteria.filter((criterion) => criterion.status !== 'not_assessable').length;
@@ -1145,7 +1149,10 @@ export function prepareSourceAnalytics(source: SourceAnalyticsPayload): Prepared
         ? (runsByNormalizedPath.has(normalizeSessionPath(review.sessionPathAtReview)) ? 'identity_conflict_at_path' : 'no_run_for_identity')
         : null,
       runIds: matchedRuns.map((run) => run.runId).sort(),
-      modelFamilies: [...new Set(matchedRuns.map((run) => run.modelFamily).filter((family): family is string => family !== null))].sort(),
+      // Successful transcript work supplements joined-run families because run
+      // snapshots may cover only part of a mixed-model session. This does not
+      // change join status or make absent per-family run metrics available.
+      modelFamilies: [...new Set([...runModelFamilies, ...transcriptModelFamilies])].sort(),
       criteria: review.ledger.map((criterion) => ({
         criterionId: criterion.criterionId, importance: criterion.importance, origin: criterion.origin,
         activity: criterion.taxonomy.activity, surfaces: criterion.taxonomy.surface,

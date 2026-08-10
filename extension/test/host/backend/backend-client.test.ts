@@ -74,6 +74,7 @@ test('BackendClient.start resolves when backend.ready arrives immediately as std
   const fakeProc = new FakeChildProcess();
   let nextProc = fakeProc as unknown as cp.ChildProcess;
   let spawnOptions: cp.SpawnOptions | undefined;
+  let spawnArgs: readonly string[] | undefined;
   moduleWithLoad._load = function patchedLoad(request: string, parent: unknown, isMain: boolean) {
     if (request === 'vscode') {
       return {
@@ -100,7 +101,8 @@ test('BackendClient.start resolves when backend.ready arrives immediately as std
     if (request === 'node:child_process' || request === 'child_process') {
       return {
         ...cp,
-        spawn: ((_command: string, _args?: readonly string[], options?: cp.SpawnOptions) => {
+        spawn: ((_command: string, args?: readonly string[], options?: cp.SpawnOptions) => {
+          spawnArgs = args;
           spawnOptions = options;
           return nextProc;
         }) as typeof cp.spawn,
@@ -122,6 +124,7 @@ test('BackendClient.start resolves when backend.ready arrives immediately as std
 
     assert.equal(payload.protocolVersion, PROTOCOL_VERSION);
     assert.equal(payload.sdkPath, '/mock/sdk');
+    assert.deepEqual(spawnArgs?.slice(-2), ['--hostPid', String(process.pid)]);
     assert.equal((spawnOptions?.env as NodeJS.ProcessEnv | undefined)?.PIE_EDITOR_VERSION, '1.102.3-test');
     assert.equal((spawnOptions?.env as NodeJS.ProcessEnv | undefined)?.PIE_TRUSTED_SDK_ROOT, undefined);
     const spawnedEnv = spawnOptions?.env as NodeJS.ProcessEnv | undefined;

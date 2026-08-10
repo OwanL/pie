@@ -176,6 +176,10 @@ function makeAgents(): any[] {
 	return [{ name: "worker", description: "d", systemPrompt: "", source: "user", filePath: "w.md" }];
 }
 
+function assignedModels(...models: string[]) {
+	return models.map((model) => ({ model, thinkingLevel: "high" as const }));
+}
+
 function selCtx(over: Record<string, unknown> = {}): any {
 	return {
 		modelConfig: [],
@@ -414,7 +418,7 @@ test("executeSingleMode accumulates usage from two retry attempts into the final
 		selCtx({
 			alwaysParentModel: false,
 			fallbackOnProviderFailure: true,
-			bucketAssignments: { small: [], medium: ["model-a", "model-b"], frontier: [] },
+			bucketAssignments: { small: [], medium: assignedModels("model-a", "model-b"), frontier: [] },
 			registryModels: models,
 		}),
 		"t-usage-accum",

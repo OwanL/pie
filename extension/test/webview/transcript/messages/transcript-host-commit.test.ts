@@ -27,6 +27,15 @@ Object.defineProperty(globalThis, 'cancelAnimationFrame', {
   writable: true,
   value: (handle: number) => clearTimeout(handle),
 });
+Object.defineProperty(globalThis, 'ResizeObserver', {
+  configurable: true,
+  writable: true,
+  value: class ResizeObserver {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  },
+});
 
 let TranscriptCommitProvider: typeof import('../../../../src/webview/panel/transcript/commit-registry').TranscriptCommitProvider;
 let TranscriptHost: typeof import('../../../../src/webview/panel/transcript/transcript-host').TranscriptHost;
@@ -310,22 +319,39 @@ test('app commit reports only a transcript block that survives the render grace 
   }
 });
 
-test('switching the active session remounts the transcript surface', () => {
+test('switching session props preserves the transcript host and surface while committing the new session content', async () => {
   const root = document.getElementById('root')!;
-  const window = {
+  const offsetWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetWidth');
+  const offsetHeight = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetHeight');
+  const originalWindowRaf = window.requestAnimationFrame;
+  const originalWindowCaf = window.cancelAnimationFrame;
+  window.requestAnimationFrame = globalThis.requestAnimationFrame;
+  window.cancelAnimationFrame = globalThis.cancelAnimationFrame;
+  Object.defineProperties(HTMLElement.prototype, {
+    offsetWidth: { configurable: true, get: () => 320 },
+    offsetHeight: { configurable: true, get: () => 640 },
+  });
+  const transcriptWindow = {
     loadedStart: 0,
-    loadedEnd: 0,
-    totalCount: 0,
+    loadedEnd: 1,
+    totalCount: 1,
     hasOlder: false,
     hasNewer: false,
     isPartial: false,
-    hasUserMessages: false,
+    hasUserMessages: true,
   };
+  const sessionA: ChatMessage[] = [{
+    id: 'message-a', role: 'user', createdAt: '', markdown: 'Session A content', status: 'completed',
+  }];
+  const sessionB: ChatMessage[] = [{
+    id: 'message-b', role: 'user', createdAt: '', markdown: 'Session B content', status: 'completed',
+  }];
+  const messages: any[] = [];
   const props = {
     openTabPaths: ['/session/a', '/session/b'],
     activeSessionPath: '/session/a',
-    transcript: [],
-    transcriptWindow: window,
+    transcript: sessionA,
+    transcriptWindow,
     transcriptLoaded: true,
     busy: false,
     prefs: { showPruningMessages: true },
@@ -339,20 +365,52 @@ test('switching the active session remounts the transcript surface', () => {
     onEditCancel() {},
     onOpenFile() {},
     onContextMenu() {},
-    postMessage() {},
+    postMessage: (message: any) => messages.push(message),
   };
+  const target = (revision: number, activeSessionPath: string, transcript: ChatMessage[], identity: string) => ({
+    revision,
+    viewGeneration: 1,
+    expectedTranscriptIdentity: identity,
+    acceptedAt: 1,
+    state: { transcript, transcriptWindow, activeSessionPath, openTabPaths: props.openTabPaths },
+  });
+  const renderHost = (commitTarget: ReturnType<typeof target>, hostProps: typeof props) => render(h(TranscriptCommitProvider, {
+    target: commitTarget,
+    appSurface: 'transcript',
+    postMessage: props.postMessage,
+    children: h(TranscriptHost, hostProps as never),
+  }), root);
 
-  render(h(TranscriptHost, props as never), root);
+  renderHost(target(1, '/session/a', sessionA, 'identity-a'), props);
+  await new Promise((resolve) => setImmediate(resolve));
+  const firstHost = root.querySelector('.transcript-host');
   const firstSurface = root.querySelector('.transcript-surface');
+  assert.ok(firstHost);
   assert.ok(firstSurface);
+  assert.match(root.textContent ?? '', /Session A content/);
+  assert.ok(messages.some((message) => message.type === 'transcriptCommitted' && message.payload.revision === 1));
 
-  render(h(TranscriptHost, {
+  renderHost(target(2, '/session/b', sessionB, 'identity-b'), {
     ...props,
     activeSessionPath: '/session/b',
-  } as never), root);
+    transcript: sessionB,
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  const secondHost = root.querySelector('.transcript-host');
   const secondSurface = root.querySelector('.transcript-surface');
-  assert.ok(secondSurface);
 
-  assert.notEqual(secondSurface, firstSurface, 'session identity must be a component remount boundary');
+  assert.equal(secondHost, firstHost, 'the transcript host must stay mounted across session switches');
+  assert.equal(secondSurface, firstSurface, 'the transcript surface must stay mounted across session switches');
+  assert.equal(secondSurface?.getAttribute('data-session-path'), '/session/b');
+  assert.match(root.textContent ?? '', /Session B content/);
+  assert.doesNotMatch(root.textContent ?? '', /Session A content/);
+  assert.ok(messages.some((message) => message.type === 'transcriptCommitted'
+    && message.payload.revision === 2 && message.payload.identity === 'identity-b'));
   render(null, root);
+  Object.defineProperties(HTMLElement.prototype, {
+    offsetWidth: offsetWidth!,
+    offsetHeight: offsetHeight!,
+  });
+  window.requestAnimationFrame = originalWindowRaf;
+  window.cancelAnimationFrame = originalWindowCaf;
 });

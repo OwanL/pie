@@ -14,11 +14,32 @@ import { parseJsonOrThrow } from "../../../shared/error-message.js";
 
 // --- Types ---
 
-/** Thinking effort levels, lightest → heaviest. */
-export type ThinkingLevel = "minimal" | "low" | "medium" | "high" | "xhigh";
+/** Pi reasoning levels. `off` is the explicit no-reasoning assignment. */
+export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+export const THINKING_LEVELS: readonly ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+/** Mirror Pi's exact model-level reasoning contract. Standard levels through
+ * `high` are supported unless explicitly null; `xhigh`/`max` are opt-in, and
+ * non-reasoning models support only `off`. */
+export function getRuntimeThinkingSupport(model: {
+  reasoning?: unknown;
+  thinkingLevelMap?: Partial<Record<ThinkingLevel, string | null>>;
+}): ReadonlySet<ThinkingLevel> {
+  if (model.reasoning !== true) return new Set(["off"]);
+  const supported = new Set<ThinkingLevel>();
+  for (const level of ["off", "minimal", "low", "medium", "high"] as const) {
+    if (model.thinkingLevelMap?.[level] !== null) supported.add(level);
+  }
+  for (const level of ["xhigh", "max"] as const) {
+    const mapped = model.thinkingLevelMap?.[level];
+    if (mapped !== undefined && mapped !== null) supported.add(level);
+  }
+  return supported;
+}
 
 /** Simplified model config entry (from model-profiles.yaml). */
 export interface SimpleModelConfig {
+  provider?: string;
   id: string;
   eligible: boolean;
   thinking: ThinkingLevel[];
@@ -51,11 +72,19 @@ export function qualifiedModelSpec(provider: string, id: string): string {
   return `${provider}/${id}`;
 }
 
-/** Per-bucket lists of legacy bare ids or canonical `provider/id` specs. */
+/** One explicit model/reasoning assignment in a bucket. `model` is normally
+ * provider-qualified (`provider/id`), but a bare id remains useful for manual
+ * configuration and is resolved against the enabled runtime registry. */
+export interface BucketAssignment {
+  model: string;
+  thinkingLevel: ThinkingLevel;
+}
+
+/** Per-bucket explicit model/reasoning assignments. */
 export interface BucketAssignments {
-  small: string[];
-  medium: string[];
-  frontier: string[];
+  small: BucketAssignment[];
+  medium: BucketAssignment[];
+  frontier: BucketAssignment[];
 }
 
 /** The three valid bucket keys, ordered from highest tier to lowest (for downgrade walks). */
@@ -183,11 +212,11 @@ function emptyBuckets(): BucketAssignments {
 /**
  * Parse the user-configured bucket JSON (from {@link SUBAGENT_BUCKETS_ENV}).
  *
- * Accepts `{ small: string[], medium: string[], frontier: string[] }` — extra
- * keys are ignored and missing keys default to empty. Non-array values and
- * non-string / empty entries are dropped; duplicate specs within a bucket are
- * de-duplicated. Provider-qualified duplicates with the same bare id remain
- * distinct (a spec may legitimately appear in more than one bucket).
+ * Accepts `{ small: BucketAssignment[], medium: BucketAssignment[], frontier:
+ * BucketAssignment[] }` — extra keys are ignored and missing keys default to
+ * empty. Legacy string entries and malformed objects are deliberately dropped
+ * so existing buckets require explicit reasoning reconfiguration. Duplicate
+ * models within a bucket are de-duplicated (the first assignment wins).
  *
  * Returns empty assignments for undefined / malformed input so the caller
  * falls back to the active model. Never throws.
@@ -211,10 +240,17 @@ export function parseBucketConfig(raw: string | undefined): BucketAssignments {
     if (!Array.isArray(value)) continue;
     const seen = new Set<string>();
     for (const entry of value) {
-      if (typeof entry === "string" && entry.length > 0 && !seen.has(entry)) {
-        seen.add(entry);
-        out[key].push(entry);
-      }
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+      const { model, thinkingLevel } = entry as Record<string, unknown>;
+      const normalizedModel = typeof model === "string" ? model.trim() : "";
+      if (
+        !normalizedModel
+        || typeof thinkingLevel !== "string"
+        || !(THINKING_LEVELS as readonly string[]).includes(thinkingLevel)
+        || seen.has(normalizedModel)
+      ) continue;
+      seen.add(normalizedModel);
+      out[key].push({ model: normalizedModel, thinkingLevel: thinkingLevel as ThinkingLevel });
     }
   }
   return out;

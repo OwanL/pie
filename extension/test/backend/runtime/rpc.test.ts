@@ -9,6 +9,7 @@ import {
   validateSessionOpen,
   validateSettingsSet,
 } from '../../../src/backend/rpc';
+import { THINKING_LEVELS } from '../../../src/shared/thinking-level';
 
 test('validateMessageSend requires an explicit sessionPath', () => {
   assert.throws(
@@ -188,37 +189,19 @@ test('validateRuntimePrefsSet defaults missing toggle maps to empty', () => {
   assert.deepEqual(validateRuntimePrefsSet({}), { providerToggles: {}, extensionToggles: {}, autonomousMode: undefined, subagentAlwaysParentModel: undefined, subagentRouteAroundSaturatedProviders: undefined, subagentFallbackOnProviderFailure: undefined, subagentMaxDepth: undefined, subagentMaxTreeSessions: undefined, subagentMaxInflight: undefined, bashWarmPoolSize: undefined, bashFastPath: undefined, bashShellPath: undefined, bashWarmupTimeoutMs: undefined, bashDefaultTimeout: undefined, subagentBuckets: undefined, subagentNestedAllowedBuckets: undefined, subagentDropTools: undefined, providerConcurrency: undefined });
 });
 
-test('validateRuntimePrefsSet accepts a subagentBuckets patch', () => {
-  assert.deepEqual(
-    validateRuntimePrefsSet({
-      subagentBuckets: { small: ['haiku'], medium: ['sonnet'], frontier: ['opus'] },
-    }),
-    {
-      providerToggles: {},
-      extensionToggles: {},
-      autonomousMode: undefined,
-      subagentAlwaysParentModel: undefined,
-      subagentRouteAroundSaturatedProviders: undefined,
-      subagentFallbackOnProviderFailure: undefined,
-      subagentMaxDepth: undefined,
-      subagentMaxTreeSessions: undefined,
-      subagentMaxInflight: undefined,
-      bashWarmPoolSize: undefined,
-      bashFastPath: undefined,
-      bashShellPath: undefined,
-      bashWarmupTimeoutMs: undefined,
-      bashDefaultTimeout: undefined,
-      subagentBuckets: { small: ['haiku'], medium: ['sonnet'], frontier: ['opus'] },
-      subagentNestedAllowedBuckets: undefined,
-      subagentDropTools: undefined,
-      providerConcurrency: undefined,
-    },
-  );
+test('validateRuntimePrefsSet accepts all seven exact subagent thinking levels', () => {
+  assert.deepEqual(THINKING_LEVELS, ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
+  const assignments = THINKING_LEVELS.map((thinkingLevel, index) => ({
+    model: `provider/model-${index}`,
+    thinkingLevel,
+  }));
+  const result = validateRuntimePrefsSet({ subagentBuckets: { small: assignments } });
+  assert.deepEqual(result.subagentBuckets, { small: assignments, medium: [], frontier: [] });
 });
 
 test('validateRuntimePrefsSet allows partial subagentBuckets and drops missing keys to empty', () => {
   assert.deepEqual(
-    validateRuntimePrefsSet({ subagentBuckets: { medium: ['sonnet'] } }),
+    validateRuntimePrefsSet({ subagentBuckets: { medium: [{ model: 'anthropic/sonnet', thinkingLevel: 'medium' }] } }),
     {
       providerToggles: {},
       extensionToggles: {},
@@ -234,7 +217,11 @@ test('validateRuntimePrefsSet allows partial subagentBuckets and drops missing k
       bashShellPath: undefined,
       bashWarmupTimeoutMs: undefined,
       bashDefaultTimeout: undefined,
-      subagentBuckets: { small: [], medium: ['sonnet'], frontier: [] },
+      subagentBuckets: {
+        small: [],
+        medium: [{ model: 'anthropic/sonnet', thinkingLevel: 'medium' }],
+        frontier: [],
+      },
       subagentNestedAllowedBuckets: undefined,
       subagentDropTools: undefined,
       providerConcurrency: undefined,
@@ -242,10 +229,10 @@ test('validateRuntimePrefsSet allows partial subagentBuckets and drops missing k
   );
 });
 
-test('validateRuntimePrefsSet rejects non-string entries in subagentBuckets', () => {
+test('validateRuntimePrefsSet rejects string-only bucket entries', () => {
   assert.throws(
-    () => validateRuntimePrefsSet({ subagentBuckets: { small: ['ok', 5] } }),
-    /subagentBuckets\.small must be an array of strings/,
+    () => validateRuntimePrefsSet({ subagentBuckets: { small: ['provider/model'] } }),
+    /subagentBuckets\.small entries must be objects with model and thinkingLevel/,
   );
 });
 

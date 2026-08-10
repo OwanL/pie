@@ -72,7 +72,7 @@ const CHART_COLORS = {
   muted: '#b9b1a3',
   grid: 'rgba(255,255,255,0.05)',
 };
-const THINKING_LEVEL_ORDER = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'];
+const THINKING_LEVEL_ORDER = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 
 /** Minimal Vega view handle stored for cleanup on re-render. */
 interface VegaView {
@@ -149,11 +149,11 @@ export function sessionReviewAnalyticsHtml(data: SessionReviewAnalyticsData | nu
 function normalizeThinkingLevel(value: string | null | undefined): string | null {
   const normalized = value?.trim().toLowerCase();
   if (!normalized) return null;
-  return normalized === 'max' ? 'xhigh' : normalized;
+  return normalized;
 }
 
 function formatThinkingLevelLabel(value: string): string {
-  return value === 'xhigh' ? 'max' : value;
+  return value;
 }
 
 function sortNatural(values: string[]): string[] {

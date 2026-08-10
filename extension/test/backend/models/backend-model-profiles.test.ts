@@ -30,6 +30,7 @@ const EXPECTED_MODELS = [
     name: 'Profiled Model',
     provider: 'mock',
     reasoning: true,
+    thinkingLevels: ['off', 'minimal', 'low', 'medium', 'high'],
     inputKinds: ['text'],
     contextWindow: 1000,
     maxTokens: 100,
@@ -40,6 +41,7 @@ const EXPECTED_MODELS = [
     name: 'Unprofiled Model',
     provider: 'mock',
     reasoning: false,
+    thinkingLevels: ['off'],
     inputKinds: ['text'],
     contextWindow: undefined,
     maxTokens: undefined,
@@ -104,6 +106,16 @@ test('models.list includes subagent profile metadata from the backend agentDir',
   assert.deepEqual(result, EXPECTED_MODELS);
 });
 
+test('session.opened is busy and compacting when opened during history compaction', async () => {
+  const { server, sessionPath } = makeServerWithSession();
+  server.sessionContexts.get(sessionPath).session.isCompacting = true;
+
+  const payload = await server.buildSessionOpenedPayload(sessionPath);
+
+  assert.equal(payload.busy, true);
+  assert.equal(payload.isCompacting, true);
+});
+
 test('session.opened carries whole-session usage even when its transcript payload is windowed', async () => {
   const branch = Array.from({ length: 61 }, (_, index) => [
     {
@@ -128,12 +140,35 @@ test('session.opened carries whole-session usage even when its transcript payloa
   const { server, sessionPath } = makeServerWithSession(branch);
 
   const payload = await server.buildSessionOpenedPayload(sessionPath);
+  const warmPayload = await server.buildSessionOpenedPayload(sessionPath);
 
   assert.equal(payload.transcriptWindow.isPartial, true);
+  assert.strictEqual(warmPayload.sessionUsage, payload.sessionUsage);
   assert.equal(payload.sessionUsage.samples.filter((sample: { kind: string }) => sample.kind === 'assistant').length, 61);
   const reportedCost = payload.sessionUsage.samples
     .reduce((total: number, sample: { reportedCostUsd?: number }) => total + (sample.reportedCostUsd ?? 0), 0);
   assert.ok(Math.abs(reportedCost - 0.61) < 1e-9);
+
+  branch.push({
+    type: 'message',
+    id: 'user-new',
+    timestamp: '2026-01-01T01:59:00.000Z',
+    message: { role: 'user', content: 'new prompt' },
+  }, {
+    type: 'message',
+    id: 'assistant-new',
+    timestamp: '2026-01-01T02:00:00.000Z',
+    message: {
+      role: 'assistant',
+      content: [{ type: 'text', text: 'new answer' }],
+      model: 'profiled-model',
+      provider: 'mock',
+      usage: { input: 2_000, output: 200, totalTokens: 2_200, cost: { total: 0.02 } },
+    },
+  });
+  const changedPayload = await server.buildSessionOpenedPayload(sessionPath);
+  assert.notStrictEqual(changedPayload.sessionUsage, payload.sessionUsage);
+  assert.equal(changedPayload.sessionUsage.samples.filter((sample: { kind: string }) => sample.kind === 'assistant').length, 62);
 });
 
 test('session.opened payload includes subagent profile metadata from the backend agentDir', async () => {

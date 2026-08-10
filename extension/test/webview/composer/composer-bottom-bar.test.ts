@@ -48,7 +48,7 @@ test('composer controls render in the agreed bottom-bar order', () => {
   const prefs = {
     ...DEFAULT_CHAT_PREFS,
     subagentBuckets: {
-      small: ['test-provider/test-model'],
+      small: [{ model: 'test-provider/test-model', thinkingLevel: 'high' as const }],
       medium: [],
       frontier: [],
     },
@@ -84,6 +84,8 @@ test('composer controls render in the agreed bottom-bar order', () => {
       paused: false,
     },
     runStatus: { text: 'LIVE', tone: 'open', title: 'Run is live' },
+    compacting: false,
+    lastCompaction: null,
     onModelChange: () => {},
     onCompact: () => {},
   }));
@@ -123,6 +125,8 @@ test('composer uses the configured initial textarea rows and defaults to one', (
     transcriptWindow: EMPTY_TRANSCRIPT_WINDOW,
     pendingComposerInputs: [],
     tokenRateBySession: {},
+    compacting: false,
+    lastCompaction: null,
     postMessage: () => {},
     onSend: () => {},
     onRetrySend: () => {},

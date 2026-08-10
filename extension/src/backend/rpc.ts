@@ -12,11 +12,14 @@ export { MAX_IMAGE_INPUT_BYTES } from '../shared/image-constraints';
 export interface BackendArgs {
   sdkPath: string;
   cwd: string;
+  /** Extension-host PID used to reap the backend after a host crash. */
+  hostPid?: number;
 }
 
 export function parseArgs(argv: string[]): BackendArgs {
   let sdkPath = '';
   let cwd = process.cwd();
+  let hostPid: number | undefined;
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -29,6 +32,14 @@ export function parseArgs(argv: string[]): BackendArgs {
     if (arg === '--cwd' && value) {
       cwd = value;
       index += 1;
+      continue;
+    }
+    if (arg === '--hostPid' && value) {
+      const parsed = Number(value);
+      if (Number.isSafeInteger(parsed) && parsed > 0) {
+        hostPid = parsed;
+      }
+      index += 1;
     }
   }
 
@@ -36,7 +47,7 @@ export function parseArgs(argv: string[]): BackendArgs {
     throw new Error('Missing required --sdkPath argument.');
   }
 
-  return { sdkPath, cwd };
+  return { sdkPath, cwd, ...(hostPid === undefined ? {} : { hostPid }) };
 }
 
 // ─── RPC parameter validation ────────────────────────────────────────────────
@@ -439,8 +450,8 @@ const BUCKET_FIELD_KEYS = ['small', 'medium', 'frontier'] as const;
 
 /**
  * Validate an optional `subagentBuckets` payload. Accepts `undefined` (omitted)
- * or an object whose `small`/`medium`/`frontier` fields are each a string
- * array. Missing bucket keys are allowed (treated as empty by the reducer).
+ * or an object whose `small`/`medium`/`frontier` fields are arrays of explicit
+ * `{ model, thinkingLevel }` assignments. Missing bucket keys are allowed.
  * Returns a normalized {@link SubagentBuckets} with copies of the arrays, or
  * `undefined` when omitted so the host can skip the env update.
  */
@@ -453,14 +464,31 @@ function validateOptionalSubagentBuckets(
     fail(method, 'subagentBuckets must be an object when provided');
   }
   const src = raw as Record<string, unknown>;
+  const validLevels = new Set<string>(THINKING_LEVELS);
   const out: SubagentBuckets = { small: [], medium: [], frontier: [] };
   for (const key of BUCKET_FIELD_KEYS) {
     const v = src[key];
     if (v === undefined) continue;
-    if (!Array.isArray(v) || !v.every((entry) => typeof entry === 'string')) {
-      fail(method, `subagentBuckets.${key} must be an array of strings when provided`);
+    if (!Array.isArray(v)) {
+      fail(method, `subagentBuckets.${key} must be an array of model/reasoning assignments when provided`);
     }
-    out[key] = [...(v as string[])];
+    out[key] = (v as unknown[]).map((entry) => {
+      if (!isObj(entry) || Array.isArray(entry)) {
+        fail(method, `subagentBuckets.${key} entries must be objects with model and thinkingLevel`);
+      }
+      const assignment = entry as Record<string, unknown>;
+      if (Object.keys(assignment).some((field) => field !== 'model' && field !== 'thinkingLevel')
+        || typeof assignment.model !== 'string'
+        || assignment.model.trim().length === 0
+        || typeof assignment.thinkingLevel !== 'string'
+        || !validLevels.has(assignment.thinkingLevel)) {
+        fail(method, `subagentBuckets.${key} entries require a non-empty model and supported thinkingLevel`);
+      }
+      return {
+        model: assignment.model.trim(),
+        thinkingLevel: assignment.thinkingLevel as ThinkingLevel,
+      };
+    });
   }
   return out;
 }

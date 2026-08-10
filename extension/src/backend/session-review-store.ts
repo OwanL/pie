@@ -304,6 +304,57 @@ export function mergeReviewsIntoSummaries(
   return merged;
 }
 
+/** Remove review and closure-outbox records belonging to a forgotten private
+ * session. These sidecars live outside the SDK transcript and otherwise keep
+ * the session identity/path recoverable after the transcript is deleted. */
+export function forgetSessionReviewSidecars(sessionPath: string, sessionId?: string): void {
+  const dir = getReviewsDir();
+  if (!dir || !sessionPath) return;
+  const identity = sessionId ?? resolveSessionIdentity(sessionPath).sessionId;
+  let firstFailure: unknown;
+  for (const fileName of [REVIEWS_FILE, REVIEW_CLOSURE_ACTIONS_FILE]) {
+    const filePath = path.join(dir, fileName);
+    let raw: string;
+    try {
+      raw = fs.readFileSync(filePath, 'utf8');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') firstFailure ??= error;
+      continue;
+    }
+    const kept: string[] = [];
+    for (const line of raw.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      let parsed: Record<string, unknown> | undefined;
+      try {
+        const value = JSON.parse(trimmed);
+        if (value && typeof value === 'object' && !Array.isArray(value)) parsed = value as Record<string, unknown>;
+      } catch {
+        // Preserve malformed records rather than deleting unrelated data.
+      }
+      const belongsToSession = parsed && (
+        parsed.sessionId === identity
+        || parsed.targetSessionId === identity
+        || parsed.targetSessionPath === sessionPath
+      );
+      if (!belongsToSession) kept.push(line);
+    }
+    const next = kept.length > 0 ? `${kept.join('\n')}\n` : '';
+    if (next === raw) continue;
+    const tmpPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+    try {
+      fs.writeFileSync(tmpPath, next, 'utf8');
+      fs.renameSync(tmpPath, filePath);
+    } catch (error) {
+      firstFailure ??= error;
+      try { fs.unlinkSync(tmpPath); } catch { /* best effort */ }
+    }
+  }
+  cachedReviewsFingerprint = undefined;
+  cachedReviews = undefined;
+  if (firstFailure) throw firstFailure;
+}
+
 export function ensureReviewsDir(): void {
   const dir = getReviewsDir();
   if (!dir) return;

@@ -11,6 +11,18 @@ export type TranscriptRow =
   | { kind: 'typingIndicator'; key: string; activityState?: TurnActivityState | null }
   | { kind: 'bottomGap'; key: string; hiddenCount?: number };
 
+/** Scope virtual row identity to the owning session. The transcript surface
+ * stays mounted across tab switches, so unscoped durable message ids could
+ * otherwise preserve row-local expansion/edit state across forked sessions
+ * that share those ids. */
+export function scopeTranscriptRowsToSession(
+  rows: readonly TranscriptRow[],
+  sessionKey: string | null,
+): TranscriptRow[] {
+  const prefix = `${sessionKey ?? 'none'}:`;
+  return rows.map((row) => ({ ...row, key: `${prefix}${row.key}` }));
+}
+
 interface BuildTranscriptRowsOptions {
   transcript: readonly ChatMessage[];
   systemPromptCount: number;

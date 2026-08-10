@@ -1,4 +1,4 @@
-import type { ChatPrefs, ModelInfo } from '../../shared/protocol';
+import type { ChatPrefs, ModelInfo, SubagentBucketAssignment } from '../../shared/protocol';
 
 export type BooleanPrefKey =
   | 'autoExpandReasoning'
@@ -169,13 +169,14 @@ export function getSubagentBucketProviders(
   availableModels: ModelInfo[],
   sessionPath?: string | null,
 ): string[] {
-  const specs = [
+  const assignments = [
     ...prefs.subagentBuckets.small,
     ...prefs.subagentBuckets.medium,
     ...prefs.subagentBuckets.frontier,
   ];
   const providers = new Set<string>();
-  for (const spec of specs) {
+  for (const assignment of assignments) {
+    const spec = assignment.model;
     const slash = spec.indexOf('/');
     if (slash > 0 && slash < spec.length - 1) {
       const provider = spec.substring(0, slash);
@@ -253,16 +254,17 @@ export function setSubagentProviderEnabled(
   };
 }
 
-/** Replace one bucket's provider-qualified model-spec list, preserving the other two buckets. */
-export function setBucketModels(
+/** Replace one bucket's explicit model/reasoning assignments, preserving
+ * the other two buckets and copying entries to avoid caller aliasing. */
+export function setBucketAssignments(
   prefs: ChatPrefs,
   bucket: 'small' | 'medium' | 'frontier',
-  models: string[],
+  assignments: SubagentBucketAssignment[],
 ): Partial<ChatPrefs> {
   return {
     subagentBuckets: {
       ...prefs.subagentBuckets,
-      [bucket]: [...models],
+      [bucket]: assignments.map((entry) => ({ ...entry })),
     },
   };
 }

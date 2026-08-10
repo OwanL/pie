@@ -210,6 +210,11 @@ class FakeScheduler implements CleanupScheduler {
 function setMockBehavior(b: unknown): void {
 	(globalThis as { __MOCK_SDK_BEHAVIOR__?: unknown }).__MOCK_SDK_BEHAVIOR__ = b;
 }
+
+function assignedModels(...models: string[]) {
+	return models.map((model) => ({ model, thinkingLevel: "high" as const }));
+}
+
 afterEach(() => { setMockBehavior(undefined); });
 
 async function flushAsync(): Promise<void> {
@@ -291,6 +296,7 @@ test("execute(): productive run beyond 15 simulated minutes renews the real sett
 	));
 
 	assert.equal(response.isError, undefined, "productive run must not be force-settled");
+	assert.equal(response.details.results[0]?.thinkingLevel, "high", "missing getThinkingLevel should use the high fallback");
 	assert.match((response.content?.[0] as { text?: string } | undefined)?.text ?? "", /more than 15 simulated minutes/);
 	assert.ok(clock.elapsed() > 900_000, `simulated time ${clock.elapsed()}ms should exceed 15 minutes`);
 });
@@ -396,7 +402,7 @@ test("execute(): injected clock drives Retry-After wait and provider failover", 
 		process.env.PIE_SUBAGENT_SETTLEMENT_GRACE_MS = "0";
 		process.env.PIE_SUBAGENT_BUCKETS_JSON = JSON.stringify({
 			small: [],
-			medium: ["model-a", "model-b"],
+			medium: assignedModels("model-a", "model-b"),
 			frontier: [],
 		});
 
@@ -444,7 +450,7 @@ test("execute(): injected clock drives Retry-After wait and provider failover", 
 
 		// Wait for the retry_wait phase to be published, then deterministically
 		// advance the fake clock through the Retry-After delay.
-		while (!phases.includes("retry_wait") && clock.elapsed() < 100) {
+		for (let i = 0; i < 100 && !phases.includes("retry_wait"); i++) {
 			await Promise.resolve();
 		}
 		await clock.advance(2_000);

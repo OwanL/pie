@@ -25,6 +25,10 @@ function usage(over: Partial<{ input: number; output: number; cacheRead: number;
 	return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0, ...over };
 }
 
+function assignedModels(...models: string[]) {
+	return models.map((model) => ({ model, thinkingLevel: "high" as const }));
+}
+
 function result(over: Partial<SingleResult> = {}): SingleResult {
 	return {
 		agent: "worker",
@@ -261,7 +265,7 @@ test("transient provider timeout retries on another model in the same bucket", a
 		const response: any = await execSingle(
 			{ agent: "worker", task: "do work", bucket: "medium" }, ctx, makeAgents(),
 			() => undefined, { depth: 0, trail: [] }, noOpDetails, undefined, noSignal(),
-			selCtx({ alwaysParentModel: false, fallbackOnProviderFailure: true, bucketAssignments: { small: [], medium: ["model-a", "model-b"], frontier: [] }, registryModels: models }),
+			selCtx({ alwaysParentModel: false, fallbackOnProviderFailure: true, bucketAssignments: { small: [], medium: assignedModels("model-a", "model-b"), frontier: [] }, registryModels: models }),
 			"t-retry", undefined, undefined, undefined, { clock },
 		);
 
@@ -326,7 +330,7 @@ test("a retry attempt cannot receive a stale trailing update from the failed att
 			{ agent: "worker", task: "do work", bucket: "medium" }, ctx, makeAgents(),
 			() => undefined, { depth: 0, trail: [] }, noOpDetails,
 			(update: any) => publishedModels.push(update.details.results[0]?.selectedModel), noSignal(),
-			selCtx({ alwaysParentModel: false, fallbackOnProviderFailure: true, bucketAssignments: { small: [], medium: ["model-a", "model-b"], frontier: [] }, registryModels: models }),
+			selCtx({ alwaysParentModel: false, fallbackOnProviderFailure: true, bucketAssignments: { small: [], medium: assignedModels("model-a", "model-b"), frontier: [] }, registryModels: models }),
 			"t-retry-terminal-fence", undefined, undefined, undefined, { clock: new FakeClock() },
 		);
 		assert.equal(response.isError, undefined);
@@ -365,7 +369,7 @@ test("exhausted bucket does not fall back outside the bucket or report an unstar
 	const response: any = await execSingle(
 		{ agent: "worker", task: "do work", bucket: "medium" }, ctx, makeAgents(),
 		() => undefined, { depth: 0, trail: [] }, noOpDetails, undefined, noSignal(),
-		selCtx({ alwaysParentModel: false, fallbackOnProviderFailure: true, bucketAssignments: { small: [], medium: ["bucket-model"], frontier: [] }, registryModels: models }),
+		selCtx({ alwaysParentModel: false, fallbackOnProviderFailure: true, bucketAssignments: { small: [], medium: assignedModels("bucket-model"), frontier: [] }, registryModels: models }),
 		"t-exhausted", undefined, undefined, undefined, { clock: new FakeClock() },
 	);
 	assert.equal(response.isError, true);
@@ -384,7 +388,7 @@ test("provider fallback toggle off surfaces the first transient failure", async 
 	const response: any = await execSingle(
 		{ agent: "worker", task: "do work", bucket: "medium" }, makeCtx(), makeAgents(),
 		() => undefined, { depth: 0, trail: [] }, noOpDetails, undefined, noSignal(),
-		selCtx({ alwaysParentModel: false, fallbackOnProviderFailure: false, bucketAssignments: { small: [], medium: ["active-model", "other-model"], frontier: [] } }),
+		selCtx({ alwaysParentModel: false, fallbackOnProviderFailure: false, bucketAssignments: { small: [], medium: assignedModels("active-model", "other-model"), frontier: [] } }),
 		"t-no-retry", undefined,
 	);
 	assert.equal(response.isError, true);
@@ -417,7 +421,7 @@ test("executeSingleMode: parent abort is terminal and never starts a fallback mo
 	};
 	const selection = selCtx({
 		alwaysParentModel: false,
-		bucketAssignments: { small: [], medium: ["model-a", "model-b"], frontier: [] },
+		bucketAssignments: { small: [], medium: assignedModels("model-a", "model-b"), frontier: [] },
 	});
 
 	const r: any = await execSingle(

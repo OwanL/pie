@@ -104,6 +104,11 @@ function makeCtx(models: any[] = []) {
 function makeAgents(): any[] {
 	return [{ name: "worker", description: "d", systemPrompt: "", source: "user", filePath: "w.md" }];
 }
+
+function assignedModels(...models: string[]) {
+	return models.map((model) => ({ model, thinkingLevel: "high" as const }));
+}
+
 function selCtx(over: Record<string, unknown> = {}): any {
 	return {
 		modelConfig: [],
@@ -313,7 +318,7 @@ test("Retry-After hint is parsed, clamped, and recorded in attempt analytics", a
 		selCtx({
 			alwaysParentModel: false,
 			fallbackOnProviderFailure: true,
-			bucketAssignments: { small: [], medium: ["model-a", "model-b"], frontier: [] },
+			bucketAssignments: { small: [], medium: assignedModels("model-a", "model-b"), frontier: [] },
 			registryModels: models,
 		}),
 		"t-retry-after",
@@ -396,7 +401,7 @@ test("bounded exponential backoff is used when no Retry-After hint is present", 
 		selCtx({
 			alwaysParentModel: false,
 			fallbackOnProviderFailure: true,
-			bucketAssignments: { small: [], medium: ["model-a", "model-b"], frontier: [] },
+			bucketAssignments: { small: [], medium: assignedModels("model-a", "model-b"), frontier: [] },
 			registryModels: models,
 		}),
 		"t-backoff",
@@ -462,7 +467,7 @@ test("retry wait is immediately abortable", async () => {
 		selCtx({
 			alwaysParentModel: false,
 			fallbackOnProviderFailure: true,
-			bucketAssignments: { small: [], medium: ["model-a", "model-b"], frontier: [] },
+			bucketAssignments: { small: [], medium: assignedModels("model-a", "model-b"), frontier: [] },
 			registryModels: models,
 		}),
 		"t-abort-wait",
@@ -533,7 +538,7 @@ test("retry wait publishes a running snapshot with advanced progressGeneration",
 		selCtx({
 			alwaysParentModel: false,
 			fallbackOnProviderFailure: true,
-			bucketAssignments: { small: [], medium: ["model-a", "model-b"], frontier: [] },
+			bucketAssignments: { small: [], medium: assignedModels("model-a", "model-b"), frontier: [] },
 			registryModels: models,
 		}),
 		"t-retry-wait-gen",
@@ -616,7 +621,7 @@ test("provider-aware failover excludes every configured model of the failed prov
 		selCtx({
 			alwaysParentModel: false,
 			fallbackOnProviderFailure: true,
-			bucketAssignments: { small: [], medium: ["model-a", "model-b", "model-c"], frontier: [] },
+			bucketAssignments: { small: [], medium: assignedModels("model-a", "model-b", "model-c"), frontier: [] },
 			registryModels: models,
 		}),
 		"t-same-provider",
@@ -669,7 +674,7 @@ test("provider-aware failover preserves a qualified duplicate on another provide
 			fallbackOnProviderFailure: true,
 			bucketAssignments: {
 				small: [],
-				medium: ["github-copilot/gpt-5.4", "openai-codex/gpt-5.4"],
+				medium: assignedModels("github-copilot/gpt-5.4", "openai-codex/gpt-5.4"),
 				frontier: [],
 			},
 			allowedModelIds: new Set([
@@ -732,7 +737,7 @@ test("auth failures are never retried", async () => {
 		selCtx({
 			alwaysParentModel: false,
 			fallbackOnProviderFailure: true,
-			bucketAssignments: { small: [], medium: ["model-a", "model-b"], frontier: [] },
+			bucketAssignments: { small: [], medium: assignedModels("model-a", "model-b"), frontier: [] },
 			registryModels: models,
 		}),
 		"t-auth",
@@ -783,7 +788,7 @@ test("partial output prevents retry", async () => {
 		selCtx({
 			alwaysParentModel: false,
 			fallbackOnProviderFailure: true,
-			bucketAssignments: { small: [], medium: ["model-a", "model-b"], frontier: [] },
+			bucketAssignments: { small: [], medium: assignedModels("model-a", "model-b"), frontier: [] },
 			registryModels: models,
 		}),
 		"t-partial",
@@ -837,7 +842,7 @@ test("shared tree budget is charged per actual dispatched attempt including retr
 		selCtx({
 			alwaysParentModel: false,
 			fallbackOnProviderFailure: true,
-			bucketAssignments: { small: [], medium: ["model-a", "model-b"], frontier: [] },
+			bucketAssignments: { small: [], medium: assignedModels("model-a", "model-b"), frontier: [] },
 			registryModels: models,
 		}),
 		"t-budget",
@@ -898,7 +903,7 @@ test("tree budget exhaustion stops further attempts without synthetic undispatch
 		selCtx({
 			alwaysParentModel: false,
 			fallbackOnProviderFailure: true,
-			bucketAssignments: { small: [], medium: ["model-a", "model-b"], frontier: [] },
+			bucketAssignments: { small: [], medium: assignedModels("model-a", "model-b"), frontier: [] },
 			registryModels: models,
 		}),
 		"t-budget-exhaust",
@@ -956,7 +961,7 @@ test("per-attempt analytics records are bounded and include attempt identity", a
 		selCtx({
 			alwaysParentModel: false,
 			fallbackOnProviderFailure: true,
-			bucketAssignments: { small: [], medium: ["model-a", "model-b", "model-c"], frontier: [] },
+			bucketAssignments: { small: [], medium: assignedModels("model-a", "model-b", "model-c"), frontier: [] },
 			registryModels: models,
 		}),
 		"t-analytics",
@@ -1022,7 +1027,7 @@ test("attempt records satisfy the host-analytics extraction contract", async () 
 		selCtx({
 			alwaysParentModel: false,
 			fallbackOnProviderFailure: true,
-			bucketAssignments: { small: [], medium: ["model-a", "model-b"], frontier: [] },
+			bucketAssignments: { small: [], medium: assignedModels("model-a", "model-b"), frontier: [] },
 			registryModels: models,
 		}),
 		"t-extraction-contract",
@@ -1114,7 +1119,7 @@ test("provider exclusion prefers result.provider over model-id registry lookup",
 		selCtx({
 			alwaysParentModel: false,
 			fallbackOnProviderFailure: true,
-			bucketAssignments: { small: [], medium: ["shared-id", "model-b"], frontier: [] },
+			bucketAssignments: { small: [], medium: assignedModels("shared-id", "model-b"), frontier: [] },
 			registryModels: models,
 		}),
 		"t-provider-preference",

@@ -387,7 +387,11 @@ test('runtimePrefs.set mirrors subagentBuckets into the backend environment', as
   });
 
   delete process.env[SUBAGENT_BUCKETS_ENV];
-  const buckets = { small: ['haiku'], medium: ['sonnet'], frontier: ['opus'] };
+  const buckets = {
+    small: [{ model: 'anthropic/haiku', thinkingLevel: 'off' as const }],
+    medium: [{ model: 'anthropic/sonnet', thinkingLevel: 'medium' as const }],
+    frontier: [{ model: 'anthropic/opus', thinkingLevel: 'high' as const }],
+  };
   const result = (await handleBackendRequest({} as any, {
     id: 'test-runtime-prefs-buckets',
     method: 'runtimePrefs.set',

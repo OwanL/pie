@@ -128,6 +128,52 @@ export class SessionTabActions {
     const archState = this.getArchState();
     const existing = archState.sessions.sessions.find((s) => s.path === sessionPath);
     const wasOpenTab = archState.sessions.openTabPaths.includes(sessionPath);
+    const transcriptLoaded = Object.prototype.hasOwnProperty.call(
+      archState.transcript.windowBySession,
+      sessionPath,
+    );
+
+    // Fast path for an already-open, host-hydrated tab. Selection is entirely
+    // host-owned, and background backend events are explicitly session-scoped,
+    // so reopening the backend runtime and rebuilding metadata is unnecessary
+    // for an ordinary tab click. This also keeps rapid clicks out of the global
+    // create/open lifecycle FIFO.
+    if (
+      wasOpenTab
+      && existing
+      && !existing.isPlaceholder
+      && transcriptLoaded
+      && this.state.isSessionRuntimeKnown(sessionPath)
+    ) {
+      // A previous cold open may still be queued/in flight. Keep its request
+      // record for operation cleanup, but revoke its right to reactivate that
+      // older target when session.opened eventually arrives.
+      this.state.supersedeSelectionOwnership();
+      if (archState.sessions.activeSessionPath !== sessionPath) {
+        const corrId = crypto.randomUUID();
+        this.dispatchArch({
+          kind: 'Command',
+          cmd: { kind: 'SelectSession', corrId, sessionPath },
+        });
+        this.dispatchArch({
+          kind: 'Command',
+          cmd: {
+            kind: 'PersistTabs',
+            corrId,
+            openTabPaths: archState.sessions.openTabPaths,
+            activeSessionPath: sessionPath,
+            pinnedTabPaths: archState.sessions.pinnedTabPaths,
+            pinnedTabGroups: archState.sessions.pinnedTabGroups,
+          },
+        });
+      }
+      this.state.touchSessionTranscript(sessionPath);
+      this.state.evictInactiveTranscriptWindows();
+      this.scheduleRender();
+      bootLog('session-tabs', 'session.select.warm', { sessionPath });
+      return;
+    }
+
     const requestEpoch = this.state.bumpSessionDataEpoch(sessionPath);
     const selectionToken = this.state.beginSelectionRequest(
       sessionPath,

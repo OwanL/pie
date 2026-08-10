@@ -11,7 +11,7 @@ import { compileRecoveredReview, getReviewRecoveryStatus, recoveredEvidenceManif
 import { validateRuntimeProvenance } from './src/runtime-provenance.js';
 import { sessionReviewSchema } from './src/types.js';
 import type { EvidenceManifest, ReviewClosureTarget, SessionReviewDraft, SessionReviewParams, SessionReviewV2 } from './src/types.js';
-import { enqueueClosure, readOpenTabs, readReviewStore, recordReviewOnce } from './src/store.js';
+import { enqueueClosure, readClosureActions, readOpenTabs, readReviewStore, recordReviewOnce } from './src/store.js';
 import { validateSessionReviewV2 } from './src/validation.js';
 
 function isDisabledByToggle(): boolean {
@@ -72,6 +72,33 @@ function closureEligibleTarget(snapshot: OrchestratorSnapshot, sessionPath?: str
   const target = sessionPath ? snapshot.targetsByPath.get(sessionPath) : sessionId ? snapshot.targetsById.get(sessionId) : undefined;
   if (!target || (sessionId && target.sessionId !== sessionId) || target.isSelf) return undefined;
   return target;
+}
+
+/** Return the unfinished target whose evidence has been issued in this
+ * orchestrator. Evidence is the workflow boundary: allowing another target
+ * before the current one is recorded and closed recreates the history/context
+ * explosion that recovery is intended to prevent. */
+function activeReviewTargets(snapshot: OrchestratorSnapshot): ListedSession[] {
+  const reviews = readReviewStore().canonicalBySessionId;
+  const closures = readClosureActions();
+  return [...snapshot.evidenceBySessionId.keys()].flatMap((sessionId) => {
+    const target = snapshot.targetsById.get(sessionId);
+    if (!target) return [];
+    const review = reviews.get(sessionId);
+    if (review && closures.some((action) =>
+      action.kind === 'closeReviewed'
+      && action.targetSessionId === sessionId
+      && action.reviewId === review.reviewId
+      && (action.status === 'pending' || action.status === 'retrying' || action.status === 'succeeded'))
+    ) return [];
+    return [target];
+  });
+}
+
+function reviewTurnError(snapshot: OrchestratorSnapshot, sessionId: string): string | undefined {
+  const blocker = activeReviewTargets(snapshot).find((target) => target.sessionId !== sessionId);
+  if (!blocker) return undefined;
+  return `Target ${blocker.sessionId} (${truncate(blocker.name, 40)}) is still the active review target. Record its review and request closeReviewed before starting another target.`;
 }
 
 function listSessions(ctx: ToolExecuteCtx, selectedOnly: boolean): ListedSession[] {
@@ -224,7 +251,7 @@ export default function (pi: ExtensionAPI) {
     description: 'Session evaluation: list open/pinned sessions, fetch blinded evidence, compile and persist canonical reviews, and enqueue explicit closure actions.',
     promptSnippet: 'List, inspect, and review open app sessions.',
     promptGuidelines: [
-      'List before review work. Review only selected targets, exclude (self), and do not re-rate already-reviewed sessions. For resumable reviews, tag each delegated role with the workflowRef from getReviewStatus, process one target end-to-end, then use recordRecoveredReview and closeReviewed immediately. History compaction does not lose tagged work: call getReviewStatus to resume from the orchestrator JSONL. Persistence never closes a target; closeSelf remains the final action.',
+      'List before review work. Review only selected targets, exclude (self), and do not re-rate already-reviewed sessions. The tool permits only one active evidence target: process it end-to-end, record it, and request closeReviewed before starting another. For resumable reviews, tag each delegated role with the workflowRef from getReviewStatus; history compaction does not lose tagged work. Never call closeSelf automatically. Only call it with confirmSelf:true when the user explicitly asked to close this evaluator session.'
     ],
     parameters: sessionReviewSchema,
 
@@ -255,6 +282,8 @@ export default function (pi: ExtensionAPI) {
         const target = eligibleTarget(scope, p.sessionPath);
         if (!target) return err('Evidence target is not an eligible selected/open snapshot member (self and running sessions are excluded).');
         if (!target.reviewEligible) return err('Evidence is only fetched for unrated review targets; already-reviewed sessions are closure-only.');
+        const turnError = reviewTurnError(scope, target.sessionId);
+        if (turnError) return err(turnError);
         try {
           const bundle = buildBlindedEvidence(target.sessionPath, typeof p.maxTurns === 'number' ? p.maxTurns : 40, p.artifacts ?? []);
           if (bundle.sessionId !== target.sessionId || bundle.identityFallback !== target.identityFallback) return err('Target identity changed after the list snapshot; list targets again.');
@@ -276,6 +305,8 @@ export default function (pi: ExtensionAPI) {
         if (!scope) return err('List targets in this reviewer session before recovering review work.');
         const target = eligibleTarget(scope, p.sessionPath, p.sessionId);
         if (!target || !target.reviewEligible) return err('Review status target is not an eligible unrated selected/open snapshot member.');
+        const turnError = reviewTurnError(scope, target.sessionId);
+        if (turnError) return err(turnError);
         const issued = scope.evidenceBySessionId.get(target.sessionId) ?? [];
         const evidenceManifest = issued[issued.length - 1];
         if (!evidenceManifest) return err('Fetch evidence for this target before requesting review status.');
@@ -291,6 +322,8 @@ export default function (pi: ExtensionAPI) {
         if (!scope) return err('List targets in this reviewer session before recording.');
         const target = eligibleTarget(scope, p.sessionPath, p.sessionId);
         if (!target || !target.reviewEligible) return err('Recovered review target is not an eligible unrated selected/open snapshot member.');
+        const turnError = reviewTurnError(scope, target.sessionId);
+        if (turnError) return err(turnError);
         const issued = scope.evidenceBySessionId.get(target.sessionId) ?? [];
         const evidenceManifest = issued[issued.length - 1];
         if (!evidenceManifest) return err('Fetch evidence for this target before recording; no issued manifest is recoverable.');
@@ -317,6 +350,8 @@ export default function (pi: ExtensionAPI) {
         if (!scope) return err('List targets in this reviewer session before recording.');
         try {
           const review = prepareReview(p.review, p.reviewPath, scope);
+          const turnError = reviewTurnError(scope, review.sessionId);
+          if (turnError) throw new Error(turnError);
           validateReviewTarget(review, scope);
           const result = await recordReviewOnce(review);
           if (!result.written) {
@@ -331,10 +366,15 @@ export default function (pi: ExtensionAPI) {
         if (!scope) return err('List targets in this reviewer session before recording.');
         try {
           const inputs = reviewBatchInput(p.reviews, p.reviewsPath);
-          const results = await Promise.all(inputs.map(async (input, index) => {
+          const prepared = inputs.map((input, index) => ({ index, review: prepareReview(input, undefined, scope) }));
+          const sessionIds = new Set(prepared.map(({ review }) => review.sessionId));
+          if (sessionIds.size !== 1) throw new Error('recordReviews accepts only one active target at a time; record and close each target before continuing.');
+          const [sessionId] = sessionIds;
+          const turnError = reviewTurnError(scope, sessionId!);
+          if (turnError) throw new Error(turnError);
+          for (const { review } of prepared) validateReviewTarget(review, scope);
+          const results = await Promise.all(prepared.map(async ({ review, index }) => {
             try {
-              const review = prepareReview(input, undefined, scope);
-              validateReviewTarget(review, scope);
               const result = await recordReviewOnce(review);
               return { index, ...compactRecordResult(review, result) };
             } catch (error) {
@@ -360,7 +400,7 @@ export default function (pi: ExtensionAPI) {
         }
         try {
           const result = await enqueueClosure({ kind: 'closeReviewed', targetSessionId: p.sessionId, targetSessionPath: target.sessionPath, reviewId: p.reviewId });
-          return ok(`${result.existing ? 'Reused' : 'Enqueued'} closeReviewed action ${result.action.actionId} (${result.action.status}).\nOutbox: ${result.file}. reviews.jsonl was not modified.`, result);
+          return ok(`${result.existing ? 'Reused' : 'Enqueued'} closeReviewed action ${result.action.actionId} (${result.action.status}).\nThe host will remove this target from the open/pinned tab lists; normal session persistence or privacy cleanup still follows the host close path.\nOutbox: ${result.file}. reviews.jsonl was not modified.`, result);
         } catch (error) { return err((error as Error).message); }
       }
 
@@ -389,13 +429,14 @@ export default function (pi: ExtensionAPI) {
       }
 
       if (p.action === 'closeSelf') {
+        if (p.confirmSelf !== true) return err('closeSelf is disabled by default. It requires confirmSelf:true and an explicit user request to close this evaluator session.');
         const sessionPath = orchestratorPath(ctx);
         if (!sessionPath) return err('closeSelf could not determine the current reviewer session.');
         if (!snapshotFor(ctx)) return err('List targets in this reviewer session before closing self.');
         const identity = readSessionIdentity(sessionPath);
         try {
           const result = await enqueueClosure({ kind: 'closeSelf', targetSessionId: identity.sessionId, targetSessionPath: sessionPath });
-          return ok(`${result.existing ? 'Reused' : 'Enqueued'} closeSelf action ${result.action.actionId} (${result.action.status}). No review was written. End the turn now.`, result);
+          return ok(`${result.existing ? 'Reused' : 'Enqueued'} closeSelf action ${result.action.actionId} (${result.action.status}). This removes the evaluator tab from the open/pinned tab lists; normal session persistence or privacy cleanup still follows the host close path. No review was written. End the turn now.`, result);
         } catch (error) { return err((error as Error).message); }
       }
 

@@ -730,9 +730,9 @@ export function createEvidenceReliability(prepared: PreparedAnalyticsData): Evid
   const reviewedWithQuality = prepared.sessionReviewsV2.filter((review) => review.attainment.qualityIndexV1 !== null);
   const reviewedSessionCount = reviewedWithQuality.length;
 
-  // Attribute each reviewed session to its joined-run model families with equal
-  // fractional split (mirrors the leaderboard's fallback). Unmatched reviews, or
-  // reviews whose joined runs expose no family, contribute no family mass.
+  // Attribute each reviewed session to its prepared model families with equal
+  // fractional split. Prepared families union joined-run evidence with stable
+  // transcript successful-work attribution.
   const familyMass = new Map<string, number>();
   let attributedSessionCount = 0;
   for (const review of reviewedWithQuality) {
@@ -773,7 +773,7 @@ export function createEvidenceReliability(prepared: PreparedAnalyticsData): Evid
     familyShares,
     notes: [
       'These diagnostics qualify how much weight to place on qualityIndexV1-based recommendations: a dominant family, few effective reviewed families, or ceiling saturation all reduce how discriminating the evidence is.',
-      'Family attribution uses equal fractional split across a session\'s joined-run families (no transcript-only evidence); unmatched reviews are counted toward ceiling saturation but cannot be attributed to a family.',
+      'Family attribution uses equal fractional split across a session\'s prepared families, which union joined-run evidence with stable-ID transcript successful-work attribution. Reviews without either remain unattributed; path-fallback reviews are excluded from ranking but remain visible here as unattributed ceiling-saturation counts.',
       'perfectRate is the share of reviewed sessions at the exact qualityIndexV1 ceiling (100); achievedBandRate is the share in the top \'achieved\' band ([85, 100]). High rates mean the index cannot distinguish good from great outcomes.',
     ],
   };

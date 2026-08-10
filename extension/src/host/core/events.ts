@@ -380,6 +380,36 @@ export interface BusyChangedEvent {
   running: boolean;
 }
 
+/** Emitted when a history-compaction (`/compact`) LLM call starts. The backend
+ *  re-arms busy at the same time, but this event is the only way the UI can
+ *  distinguish "compacting" from a generic run (compaction emits no
+ *  `message_start`/`message_end`). */
+export interface CompactionStartedEvent {
+  kind: 'CompactionStarted';
+  sessionPath: string;
+}
+
+/** Emitted when a history-compaction (`/compact`) LLM call finishes — whether
+ *  it produced a result or failed/aborted. Clears the "Compacting…" indicator
+ *  and records the completion chip metrics when the SDK reported them. */
+export interface CompactionEndedEvent {
+  kind: 'CompactionEnded';
+  sessionPath: string;
+  /** Epoch milliseconds when the compaction LLM call finished. */
+  occurredAt: number;
+  /** Prompt tokens before compaction, when the SDK reported them. */
+  tokensBefore?: number;
+  /** Post-compaction token estimate, when the SDK reported it. */
+  estimatedTokensAfter?: number;
+}
+
+/** Emitted by the EffectRunner when a session's `lastCompactionBySession`
+ *  entry expires (bounded TTL), so the transient "Compacted" chip disappears. */
+export interface LastCompactionClearedEvent {
+  kind: 'LastCompactionCleared';
+  sessionPath: string;
+}
+
 /** Emitted when a session finishes streaming (complement to BusyChanged). */
 export interface BusyCompletedEvent {
   kind: 'BusyCompleted';
@@ -776,6 +806,9 @@ export type BackendEvent =
   | MessageFinishedEvent
   | BusyChangedEvent
   | BusyCompletedEvent
+  | CompactionStartedEvent
+  | CompactionEndedEvent
+  | LastCompactionClearedEvent
   | ContextUsageChangedEvent
   | SessionListChangedEvent
   | CustomMessageEvent

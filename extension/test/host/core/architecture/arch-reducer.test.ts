@@ -1724,18 +1724,18 @@ test('reducer: SetPrefs normalizes a partial subagentBuckets patch into a comple
     cmd: {
       kind: 'SetPrefs',
       corrId: 'c-prefs-buckets',
-      // Partial patch: only `medium` provided, and with a bad entry.
+      // Partial patch: only `medium` provided, and with malformed assignments.
       // @ts-expect-error intentionally partial/malformed for the normalization test
-      prefs: { subagentBuckets: { medium: ['sonnet', 5, ''] } },
+      prefs: { subagentBuckets: { medium: [{ model: 'sonnet', thinkingLevel: 'bogus' }, 5, ''] } },
     },
   };
 
   const result = reducer(initialArchState, event);
 
-  // Missing keys filled to empty arrays; non-string/empty entries dropped.
+  // Missing keys filled to empty arrays; malformed entries are dropped.
   assert.deepEqual(result.state.settings.prefs.subagentBuckets, {
     small: [],
-    medium: ['sonnet'],
+    medium: [],
     frontier: [],
   });
 });

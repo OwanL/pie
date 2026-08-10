@@ -217,6 +217,74 @@ test('setPrefs mirrors providerConcurrency and subagentDropTools to the backend 
   assert.equal((runtimePrefsSet.params as any).subagentRouteAroundSaturatedProviders, true);
 });
 
+test('private close does not reopen a deleted transcript when the final analytics scrub fails', async () => {
+  const context = createExtensionContext();
+  const archState = createInitialArchState();
+  const dispatched: Event[] = [];
+  const backendRequests: string[] = [];
+  let privacyCalls = 0;
+  const service = new SessionServiceCtor(
+    context,
+    { request: async (method: string) => { backendRequests.push(method); return {}; } } as any,
+    () => undefined,
+    () => undefined,
+    (event) => { dispatched.push(event); },
+    () => archState,
+    undefined,
+    {
+      ...NOOP_RUN_OBSERVER,
+      setSessionPrivacy: async () => {
+        privacyCalls += 1;
+        if (privacyCalls === 2) throw new Error('late analytics scrub failed');
+      },
+    },
+  );
+  const tabCalls: string[] = [];
+  const tabs = (service as unknown as { tabs: {
+    openSession(path: string): void;
+    closeSession(path: string, nextPath: string | null): Promise<void>;
+  } }).tabs;
+  tabs.openSession = (path) => { tabCalls.push(`open:${path}`); };
+  tabs.closeSession = async (path) => { tabCalls.push(`close:${path}`); };
+
+  await service.closeSession('/sessions/private.jsonl', null, true);
+
+  assert.deepEqual(backendRequests, ['session.forget']);
+  assert.deepEqual(tabCalls, ['close:/sessions/private.jsonl']);
+  assert.equal(privacyCalls, 2);
+  assert.ok(dispatched.some((event) => event.kind === 'Command' && event.cmd.kind === 'PersistTabs'));
+});
+
+test('private close retains its retry marker and reopens when backend deletion fails', async () => {
+  const context = createExtensionContext();
+  const archState = createInitialArchState();
+  const dispatched: Event[] = [];
+  const service = new SessionServiceCtor(
+    context,
+    { request: async () => { throw new Error('delete failed'); } } as any,
+    () => undefined,
+    () => undefined,
+    (event) => { dispatched.push(event); },
+    () => archState,
+    undefined,
+    NOOP_RUN_OBSERVER,
+  );
+  const tabCalls: string[] = [];
+  const tabs = (service as unknown as { tabs: {
+    openSession(path: string): void;
+    closeSession(path: string, nextPath: string | null): Promise<void>;
+  } }).tabs;
+  tabs.openSession = (path) => { tabCalls.push(`open:${path}`); };
+  tabs.closeSession = async (path) => { tabCalls.push(`close:${path}`); };
+
+  await assert.rejects(service.closeSession('/sessions/private.jsonl', null, true), /delete failed/);
+
+  assert.deepEqual(tabCalls, ['open:/sessions/private.jsonl']);
+  assert.ok(dispatched.some((event) => event.kind === 'Command'
+    && event.cmd.kind === 'SetPrivacyMode'
+    && event.cmd.enabled === true));
+});
+
 // Restore the real module loader after all tests so later tests are unaffected.
 test.after(() => {
   uninstallVscodeMock?.();

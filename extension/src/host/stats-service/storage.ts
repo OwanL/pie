@@ -7,6 +7,7 @@ import { atomicWriteText as atomicWriteTextImpl } from '../../shared/atomic-writ
 import { withTransientFsRetry, defaultFsRetryDelay, type FsRetryDelay } from '../../shared/fs-retry';
 import { readOptionalText } from '../shared/checkpoint-io';
 import { appendPieError, appendPieLog } from '../util/pie-log';
+import { resolveSessionIdentity } from '../../backend/session-review-store';
 import { workspaceHash } from './helpers';
 import { writeCheckpointToDisk } from './persistence';
 import { readCheckpointSlots } from '../run-analytics/checkpoint';
@@ -17,6 +18,7 @@ import {
   type RunAnalyticsExportPayload,
   type RunAnalyticsQueryResult,
 } from '../run-analytics/query';
+import { forgetGlobalSideChannels, inferGlobalLogRoot } from '../run-analytics/side-channel';
 import {
   RUN_ANALYTICS_SCHEMA_VERSION,
   coerceRunSnapshot,
@@ -361,6 +363,104 @@ export class RunAnalyticsStorage {
     return await queryRunAnalyticsStore(this.storageDir);
   }
 
+  /** Remove every run-analytics footprint for one private session. This is
+   * serialized with ordinary analytics writes so a late batched append cannot
+   * recreate the record after privacy mode is enabled. */
+  async forgetSession(sessionPath: string, sessionId?: string): Promise<void> {
+    if (this.disposed || !sessionPath) return;
+    this.cancelPersistTimer();
+    this.persistenceQueue = this.persistenceQueue
+      .catch((error) => this.recordPersistError(error))
+      .then(async () => {
+        const effectiveSessionId = sessionId ?? (() => {
+          try { return resolveSessionIdentity(sessionPath).sessionId; } catch { return undefined; }
+        })();
+        for (const [runId, snapshot] of this.pendingSnapshots) {
+          if (snapshot.sessionPath === sessionPath
+            || (effectiveSessionId && snapshot.sessionId === effectiveSessionId)) {
+            this.pendingSnapshots.delete(runId);
+          }
+        }
+        await fs.mkdir(this.storageDir, { recursive: true });
+
+        // Legacy stores are re-merged on startup to recover late writes from an
+        // old process. Scrub the same private identity from every source now,
+        // otherwise restart would resurrect data removed from the canonical
+        // store. Both A/B checkpoint slots are rewritten because either can be
+        // selected after a crash.
+        const storageDirs = [...new Set([this.storageDir, ...this.legacyStorageDirs])];
+        for (const storageDir of storageDirs) {
+          await this.forgetSessionFromStorageDir(storageDir, sessionPath, effectiveSessionId);
+        }
+        this.historyMetadata.delete('run-snapshots.jsonl');
+
+        const sideChannelRoots = [...new Set(storageDirs.map(inferGlobalLogRoot))];
+        for (const root of sideChannelRoots) {
+          await forgetGlobalSideChannels(root, sessionPath, effectiveSessionId);
+        }
+        this.markAutoExportDirty();
+      });
+    await this.persistenceQueue;
+    await this.queueAutoExport(true, true);
+  }
+
+  private async forgetSessionFromStorageDir(
+    storageDir: string,
+    sessionPath: string,
+    sessionId?: string,
+  ): Promise<void> {
+    const belongsToSession = (run: { sessionPath?: unknown; sessionId?: unknown } | null | undefined): boolean => (
+      run?.sessionPath === sessionPath
+      || (!!sessionId && run?.sessionId === sessionId)
+    );
+    const historyPath = path.join(storageDir, 'run-snapshots.jsonl');
+    try {
+      const raw = await this.readFile(historyPath, 'utf8');
+      const kept = raw.split(/\r?\n/).filter((line) => {
+        const trimmed = line.trim();
+        if (!trimmed) return false;
+        try {
+          const parsed = JSON.parse(trimmed) as { run?: { sessionPath?: unknown; sessionId?: unknown } };
+          return !belongsToSession(parsed.run);
+        } catch {
+          // Preserve malformed lines; privacy cleanup must not destroy
+          // unrelated diagnostics that cannot be safely classified.
+          return true;
+        }
+      });
+      const rewritten = kept.length > 0 ? `${kept.join('\n')}\n` : '';
+      if (rewritten !== raw) await this.atomicWriteText(historyPath, rewritten);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+
+    for (const slot of ['a', 'b'] as const) {
+      const checkpointPath = path.join(storageDir, `open-runs.${slot}.json`);
+      try {
+        const raw = await this.readFile(checkpointPath, 'utf8');
+        const parsed = JSON.parse(raw) as {
+          sessions?: Record<string, {
+            currentRun?: { sessionPath?: unknown; sessionId?: unknown } | null;
+            lastRun?: { sessionPath?: unknown; sessionId?: unknown } | null;
+          }>;
+        };
+        if (!parsed.sessions) continue;
+        let changed = false;
+        for (const [storedPath, state] of Object.entries(parsed.sessions)) {
+          if (storedPath === sessionPath
+            || belongsToSession(state.currentRun)
+            || belongsToSession(state.lastRun)) {
+            delete parsed.sessions[storedPath];
+            changed = true;
+          }
+        }
+        if (changed) await this.atomicWriteText(checkpointPath, JSON.stringify(parsed, null, 2));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
+    }
+  }
+
   /** Read only data already persisted to disk. Used by the aggregate cache so
    * its one-second live refresh never forces a persistence flush. */
   async queryPersistedRunAnalytics(): Promise<RunAnalyticsQueryResult> {
@@ -372,9 +472,13 @@ export class RunAnalyticsStorage {
     return [...this.pendingSnapshots.values()];
   }
 
-  async exportRunAnalytics(targetPath: string): Promise<RunAnalyticsExportPayload> {
+  async exportRunAnalytics(
+    targetPath: string,
+    excludeSessionPaths?: ReadonlySet<string>,
+    excludeSessionIds?: ReadonlySet<string>,
+  ): Promise<RunAnalyticsExportPayload> {
     await this.flush();
-    const payload = await exportRunAnalyticsStore(this.storageDir, targetPath, this.now);
+    const payload = await exportRunAnalyticsStore(this.storageDir, targetPath, this.now, excludeSessionPaths, excludeSessionIds);
     if (path.resolve(targetPath) === path.resolve(this.autoExportPath)) {
       this.autoExportDirtyVersion = 0;
       this.autoExportFailureCount = 0;
@@ -789,7 +893,7 @@ export class RunAnalyticsStorage {
     this.autoExportTimer.unref?.();
   }
 
-  private async queueAutoExport(force: boolean): Promise<void> {
+  private async queueAutoExport(force: boolean, failOnError = false): Promise<void> {
     if (this.disposed && !force) return;
     this.cancelAutoExportTimer();
     this.persistenceQueue = this.persistenceQueue
@@ -808,6 +912,7 @@ export class RunAnalyticsStorage {
           }
         } else {
           this.autoExportFailureCount += 1;
+          if (force && failOnError) throw new Error('Run analytics auto-export cleanup failed.');
         }
         if (this.autoExportDirtyVersion > 0) {
           this.markAutoExportDirty();

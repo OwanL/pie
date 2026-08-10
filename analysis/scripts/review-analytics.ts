@@ -177,10 +177,16 @@ function validateCanonicalEnvelope(value: Record<string, unknown>, ledger: Class
   if (!isRecord(value.consolidation) || !coerceReviewer(value.consolidation, 'consolidation')) return false;
   const consolidationId = nonEmpty(value.consolidation.consolidationId);
   const consolidationProvenance = isRecord(value.consolidation.provenance) ? value.consolidation.provenance : null;
+  // The consolidation's frozen ledger is redundant with the top-level record and
+  // is optional: the writer stopped emitting it (simplified V2 schema) and the
+  // canonical validator only checks it when supplied. Mirror that here so newer
+  // records are not rejected as invalid_payload. When supplied it must still
+  // exactly match the canonical frozen ledger/hash.
+  const consolidationFrozenSupplied = value.consolidation.frozenLedger !== undefined || value.consolidation.frozenLedgerSha256 !== undefined;
   if (!consolidationId || !isoDate(value.consolidation.consolidatedAt) || value.consolidation.rubricVersion !== value.rubricVersion
     || value.consolidation.requestedBucket !== orchestrationBucket
-    || value.consolidation.frozenLedgerSha256 !== value.frozenLedgerSha256
-    || !isDeepStrictEqual(value.consolidation.frozenLedger, frozenRaw) || !consolidationProvenance
+    || (consolidationFrozenSupplied && (value.consolidation.frozenLedgerSha256 !== value.frozenLedgerSha256
+      || !isDeepStrictEqual(value.consolidation.frozenLedger, frozenRaw))) || !consolidationProvenance
     || !Array.isArray(consolidationProvenance.fromProposals)
     || !isDeepStrictEqual([...consolidationProvenance.fromProposals].sort(), [...proposalIds].sort())) return false;
 

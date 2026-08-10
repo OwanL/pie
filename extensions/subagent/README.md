@@ -64,15 +64,20 @@ matching bucket's eligible model list. Every eligible model is used once per
 cycle, and each new cycle is reshuffled to avoid a fixed ordering bias.
 
 The bucket contents are **user-configured** in the pie settings UI
-(Extensions → subagent → "Model buckets"), where you add any number of models
-to each bucket. New entries use canonical `provider/id` specs, allowing the same
+(Extensions → subagent → "Model buckets"). Every entry is an explicit
+`{ model: "provider/id", thinkingLevel }` assignment; the model and its
+reasoning setting travel together, so a call chooses only a bucket and cannot
+override reasoning. Supported levels are `off`, `minimal`, `low`, `medium`,
+`high`, `xhigh`, and `max`, subject to the selected runtime model's exact
+capabilities. New entries use canonical `provider/id` specs, allowing the same
 bare id from multiple providers to coexist and participate independently in
 balanced selection, provider toggles, capacity routing, hard requirements, and
-provider-failure fallback. Legacy bare ids remain supported and retain their
-historical any-enabled-provider resolution. The config is persisted in
-`ChatPrefs.subagentBuckets` and
-mirrored to the in-process subagent extension via the `PIE_SUBAGENT_BUCKETS_JSON`
-env var (set by the pie host on startup and on every change).
+provider-failure fallback. A manually configured bare `model` is still handled
+sensibly, but persisted legacy string-only entries are dropped and must be
+reconfigured with an explicit reasoning level. The config is persisted in
+`ChatPrefs.subagentBuckets` and mirrored to the in-process subagent extension
+via the `PIE_SUBAGENT_BUCKETS_JSON` env var (set by the pie host on startup and
+on every change).
 
 - When the requested bucket has no eligible model, selection walks down through
   cheaper buckets (`frontier` → `medium` → `small`) and uses the highest one
@@ -105,9 +110,13 @@ env var (set by the pie host on startup and on every change).
   preventing duplicate externally-visible work. Disable the setting to surface
   the first provider failure directly.
 
-Model selection still reads `<pi-config>/model-profiles.yaml` (`.json`
-fallback) for thinking-level support lookups — the shared registry, also
-consumed by pie's model picker.
+For provider-qualified entries, selection prefers the runtime registry's
+`reasoning`/`thinkingLevelMap` support and excludes an assignment whose explicit
+level is unsupported; it never relaxes or clamps to a nearby level. Model
+profiles remain a compatibility fallback for manually supplied bare specs.
+
+Empty buckets and "Always use parent model" inherit the immediate caller's
+current thinking level (`pi.getThinkingLevel()`), rather than assuming `high`.
 
 ### Optional hard model requirements
 
@@ -207,8 +216,9 @@ parent model", which takes precedence (and skips bucket selection) when enabled.
 
 ## Removed parameters and routes
 
-The public schema is `{ agent, task, userContext?, cwd?, bucket?, thinkingLevel?, confirmProjectAgents?, modelRequirements? }`.
+The public schema is `{ agent, task, userContext?, cwd?, bucket?, confirmProjectAgents?, modelRequirements? }`.
 
+- `thinkingLevel` was removed from calls and agent frontmatter. `prepareArguments` strips it from resumed legacy calls.
 - `agentScope` was removed; discovery always covers user and project agent directories. `prepareArguments` strips this legacy field.
 - `tasks` and `chain` batch routes were removed. Old one-item batches are migrated by `prepareArguments`; multi-item batches fail schema validation with guidance to use sibling calls or later turns.
 
@@ -314,9 +324,12 @@ Repeated identical `onUpdate` snapshots do not renew it.
 `PIE_SUBAGENT_SETTLEMENT_MS` can override the inactivity budget or disable it
 with `0`. Parent cancellation remains immediate.
 
-Phase-specific queue/header/first-token/tool leases are planned but are **not
-current runtime controls**. Provider-aware retry backoff/`Retry-After` is now
-active: failed transient attempts record bounded per-attempt analytics, exclude
+Phase-specific inactivity leases are active by default: queued 10m,
+preparing 2m, provider/header wait 5m, streaming/first-token progress 3m,
+running tools 15m, retry wait 3m, and orphan cleanup 1m. The latest observable
+child phase selects the lease; an explicit `PIE_SUBAGENT_SETTLEMENT_MS` override
+continues to control every phase for compatibility. Provider-aware retry
+backoff/`Retry-After` is also active: failed transient attempts record bounded per-attempt analytics, exclude
 every configured model of the failed provider from fallback, and wait with a
 clamped Retry-After hint or bounded exponential backoff before replaying a
 safe turn. Auth/client failures and any turn with visible output or tool side

@@ -24,7 +24,7 @@ import { SessionService } from './session-service';
 import { TokenRateService } from './token-rate-service';
 import { AggregateStatsService } from './aggregate-stats-service';
 import { EMPTY_PROVIDER_GATE_STATS, type ProviderGateStats } from '../shared/protocol/aggregate-stats';
-import { OPEN_TABS_STORAGE_KEY, ACTIVE_SESSION_STORAGE_KEY, PINNED_TABS_STORAGE_KEY, PINNED_TAB_GROUPS_STORAGE_KEY } from './session-service/state';
+import { OPEN_TABS_STORAGE_KEY, ACTIVE_SESSION_STORAGE_KEY, PINNED_TABS_STORAGE_KEY, PINNED_TAB_GROUPS_STORAGE_KEY, PRIVATE_SESSION_PATHS_STORAGE_KEY } from './session-service/state';
 import { StatsService } from './stats-service';
 import { toErrorMessage } from './util/error-message';
 import type { WebviewToHostMessage, ViewState, SessionSummary } from '../shared/protocol';
@@ -238,7 +238,7 @@ export class PieExtension implements vscode.Disposable {
         // post-reorder state) rather than re-reading the service's internal
         // state; session names are looked up from the current archState solely
         // to enrich the persisted { path, name } objects.
-        persistTabs: async (openTabPaths, activeSessionPath, pinnedTabPaths, pinnedTabGroups) => {
+        persistTabs: async (openTabPaths, activeSessionPath, pinnedTabPaths, pinnedTabGroups, privateSessionPaths) => {
           const sessions = this.archState.sessions.sessions;
           const tabObjects = openTabPaths
             .filter((p) => !isPendingTabPath(p))
@@ -269,6 +269,13 @@ export class PieExtension implements vscode.Disposable {
               context.globalState.update(ACTIVE_SESSION_STORAGE_KEY, persistedActiveSessionPath),
               context.globalState.update(PINNED_TABS_STORAGE_KEY, persistedPinnedTabPaths),
               context.globalState.update(PINNED_TAB_GROUPS_STORAGE_KEY, persistedPinnedTabGroups),
+              context.globalState.update(
+                PRIVATE_SESSION_PATHS_STORAGE_KEY,
+                (privateSessionPaths ?? Object.entries(this.archState.sessions.privacyModeBySession)
+                  .filter(([, enabled]) => enabled)
+                  .map(([sessionPath]) => sessionPath))
+                  .filter((sessionPath) => !isPendingTabPath(sessionPath)),
+              ),
             ]);
           } catch (err) {
             appendPieLog('warn', 'globalState', 'tab persistence failed', {
@@ -355,8 +362,23 @@ export class PieExtension implements vscode.Disposable {
     return queueWaitSeconds * 1000;
   }
 
+  /** Seed privacy markers before analytics/aggregate services start. This
+   * prevents a cold-start aggregate read from briefly exposing runs belonging
+   * to private sessions while session tabs are still being restored. */
+  private hydratePrivacyMarkers(): void {
+    const paths = this.context.globalState.get<unknown[]>(PRIVATE_SESSION_PATHS_STORAGE_KEY) ?? [];
+    for (const sessionPath of paths) {
+      if (typeof sessionPath !== 'string' || !sessionPath) continue;
+      this.dispatchArchEvent({
+        kind: 'Command',
+        cmd: { kind: 'SetPrivacyMode', corrId: `privacy-start:${Date.now()}:${sessionPath}`, sessionPath, enabled: true, persist: false },
+      });
+    }
+  }
+
   async start(): Promise<void> {
     this.updateStatusBar('Starting');
+    this.hydratePrivacyMarkers();
     this.tokenRateService.start();
     this.aggregateStatsService.start();
     await this.statsService.start();

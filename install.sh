@@ -261,15 +261,36 @@ if (
 ); then
   vsix="$(find "$repo_root/extension" -maxdepth 1 -name 'pie-*.vsix' -type f -print | sort | tail -1)"
 else
-  echo "WARN: Extension build failed. Close VS Code if it is using files under extension/node_modules, then re-run." >&2
+  echo "ERROR: Extension build failed. Close VS Code if it is using files under extension/node_modules, then re-run." >&2
+  exit 1
+fi
+if [[ -z "$vsix" ]]; then
+  echo "ERROR: Extension packaging completed without producing a pie-*.vsix file." >&2
+  exit 1
 fi
 code_cli=""
 if command -v code >/dev/null 2>&1; then code_cli="$(command -v code)";
 elif command -v code-insiders >/dev/null 2>&1; then code_cli="$(command -v code-insiders)"; fi
-if [[ -n "$code_cli" && -n "$vsix" ]]; then
-  "$code_cli" --install-extension "$vsix" --force || echo "WARN: VS Code extension install failed; install $vsix manually" >&2
-elif [[ -n "$vsix" ]]; then
+if [[ -n "$code_cli" ]]; then
+  if ! "$code_cli" --install-extension "$vsix" --force; then
+    echo "ERROR: VS Code extension install failed; install $vsix manually, then re-run the installer." >&2
+    exit 1
+  fi
+else
   echo "WARN: VS Code CLI unavailable; install $vsix manually" >&2
+fi
+
+# The old backend may have remained alive while dependencies and the VSIX were
+# built, retaining its pre-migration process environment. Reconcile the source
+# once more at the end; the operation is append-only and idempotent.
+if [[ -n "$previous_session_dir" ]]; then
+  echo "==> Finalizing displaced outcomes after extension installation"
+  node "$repo_root/scripts/migrate-outcomes-store.mjs" \
+    --source-session-dir "$previous_session_dir" \
+    --dest "$repo_root/data/outcomes" || {
+      echo "ERROR: Final outcomes migration failed." >&2
+      exit 1
+    }
 fi
 
 cat <<EOM

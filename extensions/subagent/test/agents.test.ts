@@ -11,64 +11,24 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { formatAgentList, parseBucketAndThinking, type AgentConfig } from "../agents.js";
+import { formatAgentList, parseBucket, type AgentConfig } from "../agents.js";
 
 // ============================================================
-// parseBucketAndThinking — INPUT TESTS
+// bucket parsing — INPUT TESTS
 // ============================================================
 
-test("parseBucketAndThinking: returns empty for undefined inputs", () => {
-	const result = parseBucketAndThinking(undefined, undefined);
-	assert.equal(result.bucket, undefined);
-	assert.equal(result.thinkingLevel, undefined);
+test("parseBucket accepts every bucket and trims whitespace", () => {
+	assert.equal(parseBucket(" small "), "small");
+	assert.equal(parseBucket("medium"), "medium");
+	assert.equal(parseBucket(" frontier "), "frontier");
 });
 
-test("parseBucketAndThinking: returns empty for empty strings", () => {
-	const result = parseBucketAndThinking("", "");
-	assert.equal(result.bucket, undefined);
-	assert.equal(result.thinkingLevel, undefined);
-});
-
-test("parseBucketAndThinking: returns empty for whitespace-only strings", () => {
-	const result = parseBucketAndThinking("   ", "   ");
-	assert.equal(result.bucket, undefined);
-	assert.equal(result.thinkingLevel, undefined);
-});
-
-test("parseBucketAndThinking: parses valid bucket and thinkingLevel", () => {
-	const result = parseBucketAndThinking("medium", "high");
-	assert.equal(result.bucket, "medium");
-	assert.equal(result.thinkingLevel, "high");
-});
-
-test("parseBucketAndThinking: handles whitespace and caps legacy xhigh", () => {
-	const result = parseBucketAndThinking("  small  ", "  xhigh  ");
-	assert.equal(result.bucket, "small");
-	assert.equal(result.thinkingLevel, "high");
-});
-
-test("parseBucketAndThinking: rejects invalid bucket names", () => {
-	assert.equal(parseBucketAndThinking("tiny", undefined).bucket, undefined);
-	assert.equal(parseBucketAndThinking("large", undefined).bucket, undefined);
-	assert.equal(parseBucketAndThinking("frontier ", undefined).bucket, "frontier");
-});
-
-test("parseBucketAndThinking: rejects invalid thinking levels and caps levels above high", () => {
-	assert.equal(parseBucketAndThinking(undefined, "max").thinkingLevel, "high");
-	assert.equal(parseBucketAndThinking(undefined, "off").thinkingLevel, undefined);
-	assert.equal(parseBucketAndThinking(undefined, "xhigh").thinkingLevel, "high");
-});
-
-test("parseBucketAndThinking: parses only bucket when thinkingLevel omitted", () => {
-	const result = parseBucketAndThinking("frontier", undefined);
-	assert.equal(result.bucket, "frontier");
-	assert.equal(result.thinkingLevel, undefined);
-});
-
-test("parseBucketAndThinking: parses only thinkingLevel when bucket omitted", () => {
-	const result = parseBucketAndThinking(undefined, "low");
-	assert.equal(result.bucket, undefined);
-	assert.equal(result.thinkingLevel, "low");
+test("parseBucket rejects missing, empty, and invalid buckets", () => {
+	assert.equal(parseBucket(undefined), undefined);
+	assert.equal(parseBucket(""), undefined);
+	assert.equal(parseBucket("   "), undefined);
+	assert.equal(parseBucket("tiny"), undefined);
+	assert.equal(parseBucket("large"), undefined);
 });
 
 // ============================================================
@@ -170,7 +130,7 @@ test("AgentConfig: required fields are present", () => {
 	assert.equal(agent.tools, undefined);
 	assert.equal(agent.model, undefined);
 	assert.equal(agent.bucket, undefined);
-	assert.equal(agent.thinkingLevel, undefined);
+	assert.equal("thinkingLevel" in agent, false);
 });
 
 test("AgentConfig: optional fields can be set", () => {
@@ -183,12 +143,11 @@ test("AgentConfig: optional fields can be set", () => {
 		tools: ["bash", "read"],
 		model: "gpt-5.4",
 		bucket: "medium",
-		thinkingLevel: "high",
 	};
 	assert.deepEqual(agent.tools, ["bash", "read"]);
 	assert.equal(agent.model, "gpt-5.4");
 	assert.equal(agent.bucket, "medium");
-	assert.equal(agent.thinkingLevel, "high");
+	assert.equal("thinkingLevel" in agent, false);
 });
 
 // ============================================================
@@ -597,7 +556,7 @@ test("discoverAgents: string cwd still works (backward compatible)", async (t) =
 	assert.equal(result.projectAgentsDir, fs.realpathSync(agentsDir));
 });
 
-test("loadAgentsFromDir: parses bucket and thinkingLevel from frontmatter", async (t) => {
+test("loadAgentsFromDir: ignores legacy thinkingLevel frontmatter while parsing bucket", async (t) => {
 	const { discoverAgents } = await import("../agents.js");
 	const tmpDir = path.join(os.tmpdir(), `pi-agent-test-bucket-${Date.now()}`);
 	const agentsDir = path.join(tmpDir, "agents");
@@ -605,7 +564,7 @@ test("loadAgentsFromDir: parses bucket and thinkingLevel from frontmatter", asyn
 
 	fs.writeFileSync(path.join(agentsDir, "bucketed.md"), `---
 name: bucketed
-description: Has bucket and thinkingLevel
+description: Has bucket and legacy thinkingLevel
 bucket: medium
 thinkingLevel: high
 ---
@@ -616,7 +575,7 @@ body
 	const result = discoverAgents(tmpDir, "project");
 	assert.equal(result.agents.length, 1);
 	assert.equal(result.agents[0].bucket, "medium");
-	assert.equal(result.agents[0].thinkingLevel, "high");
+	assert.equal("thinkingLevel" in result.agents[0], false);
 });
 
 test("loadAgentsFromDir: invalid bucket is ignored", async (t) => {

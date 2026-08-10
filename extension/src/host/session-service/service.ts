@@ -183,9 +183,46 @@ export class SessionService implements vscode.Disposable {
     this.tabs.openSession(sessionPath);
   }
 
-  async closeSession(sessionPath: string, nextPath: string | null): Promise<void> {
+  async closeSession(sessionPath: string, nextPath: string | null, privacyMode = false): Promise<void> {
     this.clearDetailCacheForSession(sessionPath);
+    if (privacyMode) {
+      // The reducer evicts the privacy marker before this effect runs, so
+      // explicitly scrub the observer before the ordinary close callback can
+      // finalize anything. Reopen only while the transcript still exists: a
+      // successful session.forget is the irreversible deletion boundary.
+      try {
+        await this.runObserver.setSessionPrivacy?.(sessionPath, true);
+        await this.backend.request('session.forget', { sessionPath });
+      } catch (error) {
+        this.dispatchArch({
+          kind: 'Command',
+          cmd: { kind: 'SetPrivacyMode', corrId: `privacy-retry:${Date.now()}`, sessionPath, enabled: true },
+        });
+        this.tabs.openSession(sessionPath);
+        throw error;
+      }
+      // Runtime disposal may emit a final warm-bash/session summary. The first
+      // scrub already committed privacy before deletion, so this second pass is
+      // best-effort and must never attempt to reopen a deleted transcript.
+      await Promise.resolve(this.runObserver.setSessionPrivacy?.(sessionPath, true)).catch(() => undefined);
+    }
     await this.tabs.closeSession(sessionPath, nextPath);
+    if (privacyMode) {
+      // The close effect initially persisted the marker as a retry guard;
+      // clear it only after backend deletion and host cleanup both succeed.
+      const archState = this.getArchState();
+      this.dispatchArch({
+        kind: 'Command',
+        cmd: {
+          kind: 'PersistTabs',
+          corrId: `private-cleared:${Date.now()}`,
+          openTabPaths: archState.sessions.openTabPaths,
+          activeSessionPath: archState.sessions.activeSessionPath,
+          pinnedTabPaths: archState.sessions.pinnedTabPaths,
+          pinnedTabGroups: archState.sessions.pinnedTabGroups,
+        },
+      });
+    }
   }
 
   duplicateSession(sessionPath: string): void {

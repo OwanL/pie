@@ -51,6 +51,7 @@ import type {
   DrainBackendReadyQueueEffect,
   StartBackendReadyWatchdogEffect,
   CancelBackendReadyWatchdogEffect,
+  ClearLastCompactionEffect,
   PostImperativeMessage,
 } from './effects';
 import { toErrorMessage } from '../util/error-message';
@@ -84,7 +85,7 @@ export interface QueueRouter {
  * existing `globalState`-backed tab persistence helper.
  */
 export interface TabPersistenceSink {
-  persistTabs(openTabPaths: string[], activeSessionPath: string | null, pinnedTabPaths: string[], pinnedTabGroups: string[][]): Promise<void>;
+  persistTabs(openTabPaths: string[], activeSessionPath: string | null, pinnedTabPaths: string[], pinnedTabGroups: string[][], privateSessionPaths?: string[]): Promise<void>;
 }
 
 /** Logger sink for `Log`. Matches the audit-log surface used elsewhere. */
@@ -121,7 +122,7 @@ export interface SessionServiceLike {
   loadOlderTranscript(sessionPath: string): Promise<void>;
   loadNewerTranscript(sessionPath: string): Promise<void>;
   jumpToLatestTranscript(sessionPath: string): Promise<void>;
-  closeSession(sessionPath: string, nextPath: string | null): Promise<void>;
+  closeSession(sessionPath: string, nextPath: string | null, privacyMode?: boolean): Promise<void>;
   setPruningSettings(updates: Partial<PruningSettings>): Promise<void>;
   setToolResultPruningSettings(updates: Partial<ToolResultPruningSettings>): Promise<void>;
   /** Recover from a failed/timed-out selection: finish the request and
@@ -141,6 +142,8 @@ export interface StatsServiceLike {
   onMessageEdited(sessionPath: string, messageId: string): void;
   startNewTask(sessionPath: string): void;
   continueTask(sessionPath: string): void;
+  /** Remove any in-memory and persisted analytics for a private session. */
+  setSessionPrivacy?(sessionPath: string, enabled: boolean): Promise<void> | void;
 }
 
 /** Opaque handle returned by {@link TimerSink.schedule}. Stored & passed back to cancel. */
@@ -280,6 +283,10 @@ export class EffectRunner {
    *  cancel-by-session. */
   private inFlightSends: Map<string, InFlightSend> = new Map();
 
+  /** Per-session timers that expire the transient "Compacted" chip
+   *  (`ClearLastCompaction` effect → `LastCompactionCleared` on fire). */
+  private lastCompactionTimers: Map<string, TimerHandle> = new Map();
+
   /** Secondary index: which corrId owns the in-flight send for a session
    *  (one at a time under FIFO serialization). Used by `abortInFlightSend`. */
   private inFlightSendBySession: Map<string, string> = new Map();
@@ -336,6 +343,7 @@ export class EffectRunner {
       ShowModelSwitchConfirm: (e) => this.handleShowModelSwitchConfirm(e),
       SetModelRpc: (e) => this.handleSetModelRpc(e),
       SetPrefsRpc: (e) => this.handleSetPrefsRpc(e),
+      SetPrivacyMode: (e) => this.handleSetPrivacyMode(e),
       SetSystemPromptTogglesRpc: (e) => this.handleSetSystemPromptTogglesRpc(e),
       Log: (e) => this.handleLog(e),
       PostImperative: (e) => this.handlePostImperative(e),
@@ -349,6 +357,9 @@ export class EffectRunner {
       //    point (the reducer emits this in `handleMessageStarted` where it
       //    drops `pending.promoted`). ──
       ClearSendTimer: (e) => this.clearInFlightSend(e.corrId),
+      // ── Transient "Compacted" chip TTL: expire the host-owned entry after a
+      //    bounded delay so the chip does not linger. ──
+      ClearLastCompaction: (e) => this.handleClearLastCompaction(e),
       HydrateModel: (e) => this.handleHydrateModel(e),
       // ── Template rows (pure 1:1 effect → *Result). ──
       FileDiff: this.templateRow({ resultKind: 'FileDiffResult', withSessionPath: true, call: (e, d) => d.fileDiffService.openFileDiff(e.sessionPath, e.filePath) }),
@@ -361,8 +372,8 @@ export class EffectRunner {
       OpenFileInEditor: this.templateRow({ resultKind: 'OpenFileInEditorResult', withSessionPath: false, call: (e, d) => d.fileDiffService.openFileInEditor(e.sessionPath, e.filePath) }),
       SetPruningSettings: this.templateRow({ resultKind: 'SetPruningSettingsResult', withSessionPath: false, call: (e, d) => d.service.setPruningSettings(e.settings) }),
       SetToolResultPruningSettings: this.templateRow({ resultKind: 'SetToolResultPruningSettingsResult', withSessionPath: false, call: (e, d) => d.service.setToolResultPruningSettings(e.settings) }),
-      CloseSession: this.templateRow({ resultKind: 'CloseSessionResult', withSessionPath: true, call: (e, d) => d.service.closeSession(e.sessionPath, e.nextPath) }),
-      PersistTabs: this.templateRow({ resultKind: 'PersistTabsResult', withSessionPath: false, call: (e, d) => d.tabs.persistTabs(e.openTabPaths, e.activeSessionPath, e.pinnedTabPaths, e.pinnedTabGroups) }),
+      CloseSession: this.templateRow({ resultKind: 'CloseSessionResult', withSessionPath: true, call: (e, d) => d.service.closeSession(e.sessionPath, e.nextPath, e.privacyMode === true) }),
+      PersistTabs: this.templateRow({ resultKind: 'PersistTabsResult', withSessionPath: false, call: (e, d) => d.tabs.persistTabs(e.openTabPaths, e.activeSessionPath, e.pinnedTabPaths, e.pinnedTabGroups, e.privateSessionPaths) }),
     };
   }
 
@@ -608,6 +619,43 @@ export class EffectRunner {
     this.prefsQueue = operation.then(() => undefined, () => undefined);
   }
 
+  /** Privacy is host-local. The reducer has already updated the mode before
+   * this effect runs; the stats service removes any pre-existing in-memory and
+   * persisted analytics for the session when enabling it. A failed cleanup
+   * rolls the optimistic mode back so the UI never promises privacy while old
+   * analytics remain durable. */
+  private handleSetPrivacyMode(effect: Extract<Effect, { kind: 'SetPrivacyMode' }>): void {
+    const handleFailure = (error: unknown): void => {
+      const message = toErrorMessage(error);
+      this.deps.log.log('warn', 'privacy analytics cleanup failed', {
+        sessionPath: effect.sessionPath,
+        error: message,
+      });
+      if (!effect.enabled) return;
+      this.deps.dispatchCommand({
+        kind: 'Command',
+        cmd: {
+          kind: 'SetPrivacyMode',
+          corrId: `privacy-cleanup-failed:${effect.corrId}`,
+          sessionPath: effect.sessionPath,
+          enabled: false,
+        },
+      });
+      this.deps.dispatchEvent({
+        kind: 'NoticeShown',
+        notice: `Privacy mode could not be enabled because existing analytics could not be removed: ${message}`,
+      });
+    };
+    try {
+      const operation = this.deps.statsService.setSessionPrivacy?.(effect.sessionPath, effect.enabled);
+      if (operation && typeof (operation as Promise<void>).then === 'function') {
+        void (operation as Promise<void>).catch(handleFailure);
+      }
+    } catch (error) {
+      handleFailure(error);
+    }
+  }
+
   /** `SetSystemPromptTogglesRpc` — serialized through the target session
    *  queue. The picker emits a complete disabled set after every click; FIFO
    *  ordering ensures an older partial set cannot finish after the final set,
@@ -752,6 +800,21 @@ export class EffectRunner {
    *  no result, synchronous. */
   private handleCancelBackendReadyWatchdog(_effect: CancelBackendReadyWatchdogEffect): void {
     this.clearBackendReadyWatchdog();
+  }
+
+  /** `ClearLastCompaction` — schedule a bounded TTL timer per session; on fire,
+   *  dispatch `LastCompactionCleared` so the transient "Compacted" chip
+   *  disappears. A newer compaction for the same session replaces the pending
+   *  timer (the reducer emits a fresh effect each time). */
+  private handleClearLastCompaction(effect: ClearLastCompactionEffect): void {
+    const existing = this.lastCompactionTimers.get(effect.sessionPath);
+    if (existing !== undefined) {
+      this.timer.cancel(existing);
+    }
+    this.lastCompactionTimers.set(effect.sessionPath, this.timer.schedule(() => {
+      this.lastCompactionTimers.delete(effect.sessionPath);
+      this.deps.dispatchEvent({ kind: 'LastCompactionCleared', sessionPath: effect.sessionPath });
+    }, effect.ttlMs));
   }
 
   /** `HydrateModel` — IIFE; `service.hydrateModelState(sessionPath)`. No
@@ -962,6 +1025,10 @@ export class EffectRunner {
     }
     this.inFlightSends.clear();
     this.inFlightSendBySession.clear();
+    for (const timer of this.lastCompactionTimers.values()) {
+      this.timer.cancel(timer);
+    }
+    this.lastCompactionTimers.clear();
   }
 
   /**

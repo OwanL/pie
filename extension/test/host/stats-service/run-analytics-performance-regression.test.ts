@@ -17,6 +17,7 @@ import {
   type RunSnapshot,
 } from '../../../src/host/run-analytics';
 import { EMPTY_PROVIDER_GATE_STATS } from '../../../src/shared/protocol/aggregate-stats';
+import { serializeJsonLine } from '../../../src/shared/jsonl';
 
 async function withTempDir(run: (dir: string) => Promise<void>): Promise<void> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-analytics-perf-regression-'));
@@ -137,6 +138,73 @@ test('persist job batches each pending JSONL file and throttles automatic export
     await storage.dispose();
     const shutdownExport = JSON.parse(await fs.readFile(autoExportPath, 'utf8')) as { completedRuns: { runId: string }[] };
     assert.deepEqual(shutdownExport.completedRuns.map((entry) => entry.runId), ['r1', 'r2']);
+  });
+});
+
+test('private analytics cleanup scrubs legacy stores so restart cannot resurrect them', async () => {
+  await withTempDir(async (root) => {
+    const workspaceId = 'private-legacy-restart';
+    const dataOutcomesRootPath = path.join(root, 'canonical', 'data', 'outcomes');
+    const legacyUsageDataRootPath = path.join(root, 'legacy');
+    const legacyStorageDir = path.join(legacyUsageDataRootPath, 'runs', workspaceHash(workspaceId));
+    const sessionPath = '/sessions/private.jsonl';
+    const sessionId = 'private-session-id';
+    const now = new Date().toISOString();
+    const privateRun = {
+      ...validSnapshot('private-run', now),
+      sessionPath,
+      sessionId,
+      status: 'closed',
+      finalizedAt: now,
+      outputTokens: 99,
+    } as RunSnapshot;
+    const logEntry = serializeJsonLine({
+      schemaVersion: RUN_ANALYTICS_SCHEMA_VERSION,
+      kind: 'run_snapshot',
+      recordedAt: now,
+      run: privateRun,
+    });
+    const checkpoint = {
+      schemaVersion: RUN_ANALYTICS_SCHEMA_VERSION,
+      seq: 1,
+      sessions: {
+        [sessionPath]: {
+          currentRun: null,
+          lastRun: privateRun,
+          nextTaskIntent: null,
+          queuedUnsupportedInputCount: 0,
+          busyStartedAt: null,
+        },
+      },
+    };
+    await fs.mkdir(legacyStorageDir, { recursive: true });
+    await fs.writeFile(path.join(legacyStorageDir, 'run-snapshots.jsonl'), `${logEntry}\n`, 'utf8');
+    await fs.writeFile(path.join(legacyStorageDir, 'open-runs.a.json'), JSON.stringify(checkpoint), 'utf8');
+
+    const options = {
+      dataOutcomesRootPath,
+      legacyUsageDataRootPath,
+      workspaceId,
+      now: () => new Date(),
+      serializeSessions: () => ({}),
+    };
+    const storage = new RunAnalyticsStorage(options);
+    await storage.start();
+    assert.equal((await storage.queryRunAnalytics()).completedRuns.length, 1,
+      'startup imports the displaced legacy run before it is forgotten');
+
+    await storage.forgetSession(sessionPath, sessionId);
+    await storage.dispose();
+
+    const restarted = new RunAnalyticsStorage(options);
+    await restarted.start();
+    const afterRestart = await restarted.queryRunAnalytics();
+    assert.deepEqual(afterRestart.completedRuns, []);
+    assert.deepEqual(afterRestart.openRuns, []);
+    assert.doesNotMatch(await fs.readFile(path.join(legacyStorageDir, 'run-snapshots.jsonl'), 'utf8'), /private-run/);
+    const scrubbedCheckpoint = JSON.parse(await fs.readFile(path.join(legacyStorageDir, 'open-runs.a.json'), 'utf8'));
+    assert.equal(sessionPath in scrubbedCheckpoint.sessions, false);
+    await restarted.dispose();
   });
 });
 
@@ -749,6 +817,124 @@ test('AggregateStatsService pending finalized snapshots override stale persisted
     await recomputeAggregate(service);
     assert.equal(service.getAggregateStats().runCount, 1, 'same runId is not double counted');
     assert.equal(service.getAggregateStats().totalOutputTokens, 20, 'pending scored snapshot replaces stale tokens');
+  });
+});
+
+test('AggregateStatsService ingests appended snapshots incrementally without re-reading completed history', async () => {
+  await withTempDir(async (storageDir) => {
+    const snapshotsPath = path.join(storageDir, 'run-snapshots.jsonl');
+    const now = new Date().toISOString();
+    const first = {
+      ...validSnapshot('incremental-r1', now),
+      status: 'closed',
+      finalizedAt: now,
+      outputTokens: 10,
+    } as RunSnapshot;
+    const writeLine = (run: RunSnapshot): Promise<void> => fs.appendFile(snapshotsPath, serializeJsonLine({
+      schemaVersion: RUN_ANALYTICS_SCHEMA_VERSION,
+      kind: 'run_snapshot',
+      recordedAt: now,
+      run,
+    }) + '\n', 'utf8');
+    await fs.mkdir(storageDir, { recursive: true });
+    await writeLine(first);
+
+    let persistedQueries = 0;
+    const service = new AggregateStatsService({
+      getArchState: () => ({ sessions: { runningSessionPaths: [], openTabPaths: [] } }) as never,
+      statsService: {
+        getStorageDir: () => storageDir,
+        queryPersistedRunAnalytics: async () => {
+          persistedQueries += 1;
+          return { completedRuns: [first], openRuns: [] };
+        },
+        getOpenRuns: () => [],
+        getPendingCompletedRuns: () => [],
+      } as never,
+      tokenRateService: { getRates: () => ({}) } as never,
+      getAgentDir: () => null,
+      fetchProviderGateStats: async () => EMPTY_PROVIDER_GATE_STATS,
+      onChanged: () => undefined,
+    });
+
+    await recomputeAggregate(service);
+    assert.equal(service.getAggregateStats().totalOutputTokens, 10);
+    assert.equal(persistedQueries, 1, 'first recompute queries persisted history');
+
+    // Append a second run (the normal completion path) — the next recompute
+    // must parse only the suffix, not re-read the whole file.
+    const second = {
+      ...validSnapshot('incremental-r2', now),
+      status: 'closed',
+      finalizedAt: now,
+      outputTokens: 20,
+    } as RunSnapshot;
+    await writeLine(second);
+    await recomputeAggregate(service);
+    assert.equal(service.getAggregateStats().totalOutputTokens, 30, 'appended run is folded into the aggregate');
+    assert.equal(persistedQueries, 1, 'appended history is ingested incrementally without a full re-read');
+
+    // Re-appending an existing runId (crash retry / re-finalize) must replace
+    // the stale entry rather than double-count it.
+    const reFinalized = {
+      ...second,
+      outputTokens: 25,
+      updatedAt: new Date(Date.parse(now) + 1_000).toISOString(),
+      finalizedAt: new Date(Date.parse(now) + 1_000).toISOString(),
+    } as RunSnapshot;
+    await writeLine(reFinalized);
+    await recomputeAggregate(service);
+    assert.equal(service.getAggregateStats().totalOutputTokens, 35, 're-appended runId replaces rather than duplicates');
+    assert.equal(persistedQueries, 1, 'replacement is also handled without a full re-read');
+  });
+});
+
+test('AggregateStatsService retains an incrementally persisted run after its pending bridge clears', async () => {
+  await withTempDir(async (storageDir) => {
+    const snapshotsPath = path.join(storageDir, 'run-snapshots.jsonl');
+    const now = new Date().toISOString();
+    const writeLine = (run: RunSnapshot): Promise<void> => fs.appendFile(snapshotsPath, serializeJsonLine({
+      schemaVersion: RUN_ANALYTICS_SCHEMA_VERSION,
+      kind: 'run_snapshot',
+      recordedAt: now,
+      run,
+    }) + '\n', 'utf8');
+    await fs.mkdir(storageDir, { recursive: true });
+    await fs.writeFile(snapshotsPath, '', 'utf8');
+
+    const completed = {
+      ...validSnapshot('pending-incremental', now),
+      status: 'closed',
+      finalizedAt: now,
+      outputTokens: 42,
+    } as RunSnapshot;
+    let pending: RunSnapshot[] = [completed];
+    const service = new AggregateStatsService({
+      getArchState: () => ({ sessions: { runningSessionPaths: [], openTabPaths: [] } }) as never,
+      statsService: {
+        getStorageDir: () => storageDir,
+        queryPersistedRunAnalytics: async () => ({ completedRuns: [], openRuns: [] }),
+        getOpenRuns: () => [],
+        getPendingCompletedRuns: () => pending,
+      } as never,
+      tokenRateService: { getRates: () => ({}) } as never,
+      getAgentDir: () => null,
+      fetchProviderGateStats: async () => EMPTY_PROVIDER_GATE_STATS,
+      onChanged: () => undefined,
+    });
+
+    await recomputeAggregate(service);
+    assert.equal(service.getAggregateStats().totalOutputTokens, 42);
+
+    await writeLine(completed);
+    await recomputeAggregate(service);
+    assert.equal(service.getAggregateStats().totalOutputTokens, 42,
+      'persisted data remains excluded while the pending snapshot is authoritative');
+
+    pending = [];
+    await recomputeAggregate(service);
+    assert.equal(service.getAggregateStats().totalOutputTokens, 42,
+      'clearing the pending bridge promotes the cached persisted run without another file change');
   });
 });
 

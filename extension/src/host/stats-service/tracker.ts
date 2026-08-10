@@ -889,6 +889,14 @@ export class SessionRunTracker {
     this.runState.persist();
   }
 
+  /** Drop private-session analytics without finalizing or persisting a run. */
+  discardSession(sessionPath: string): void {
+    this.busySessionPaths.delete(sessionPath);
+    this.runState.sessions.delete(sessionPath);
+    this.dispatchArchEvent({ kind: 'ActiveRunSummaryChanged', sessionPath, summary: null });
+    this.scheduleRender();
+  }
+
   onSessionClosed(sessionPath: string): void {
     this.busySessionPaths.delete(sessionPath);
     if (this.runState.sessions.get(sessionPath)?.currentRun) {

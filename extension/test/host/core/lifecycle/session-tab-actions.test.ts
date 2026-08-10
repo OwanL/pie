@@ -39,6 +39,79 @@ async function waitFor(predicate: () => boolean, attempts = 20): Promise<void> {
   assert.fail('Timed out waiting for predicate to become true.');
 }
 
+test('openSession selects an already-open hydrated tab without a backend lifecycle effect', () => {
+  const sessionA = '/workspace/session-a.jsonl';
+  const sessionB = '/workspace/session-b.jsonl';
+  let archState = createInitialArchState();
+  archState = {
+    ...archState,
+    sessions: {
+      ...archState.sessions,
+      sessions: [
+        { path: sessionA, name: 'A', cwd: '/workspace', modifiedAt: '2026-01-01T00:00:00.000Z', messageCount: 1 },
+        { path: sessionB, name: 'B', cwd: '/workspace', modifiedAt: '2026-01-01T00:00:00.000Z', messageCount: 1 },
+      ],
+      openTabPaths: [sessionA, sessionB],
+      activeSessionPath: sessionA,
+    },
+    transcript: {
+      ...archState.transcript,
+      bySession: {
+        [sessionB]: [{ id: 'b-1', role: 'user', createdAt: '2026-01-01T00:00:00.000Z', markdown: 'warm', status: 'completed' }],
+      },
+      windowBySession: {
+        [sessionB]: {
+          totalCount: 1,
+          loadedStart: 0,
+          loadedEnd: 1,
+          hasOlder: false,
+          hasNewer: false,
+          isPartial: false,
+          hasUserMessages: true,
+        },
+      },
+    },
+  };
+  const effects: Array<{ kind: string }> = [];
+  const getArchState = () => archState;
+  const dispatchArch = (event: Event) => {
+    const result = reducer(archState, event);
+    archState = result.state;
+    effects.push(...result.effects);
+  };
+  const context = createExtensionContext();
+  const backendRequests: string[] = [];
+  const backend = {
+    request: async (method: string) => { backendRequests.push(method); },
+  } as any;
+  const state = new SessionServiceState(context, backend, () => undefined, getArchState, dispatchArch, 0);
+  const tabs = new SessionTabActions({
+    context,
+    scheduleRender: () => undefined,
+    runObserver: NOOP_RUN_OBSERVER,
+    state,
+    getArchState,
+    dispatchArch,
+  });
+
+  state.markSessionRuntimeKnown(sessionB);
+  const staleToken = state.beginSelectionRequest('/workspace/cold-session.jsonl');
+  assert.equal(state.isCurrentSelectionToken(staleToken), true);
+
+  tabs.openSession(sessionB);
+
+  assert.equal(archState.sessions.activeSessionPath, sessionB);
+  assert.equal(state.isCurrentSelectionToken(staleToken), false, 'the pending cold open must not steal focus later');
+  assert.ok(state.getSelectionRequest(staleToken), 'the stale request remains available for operation cleanup');
+  assert.deepEqual(effects.map((effect) => effect.kind), ['PersistTabs']);
+  assert.deepEqual(backendRequests, []);
+
+  state.resetRuntimeState();
+  effects.length = 0;
+  tabs.openSession(sessionB);
+  assert.ok(effects.some((effect) => effect.kind === 'OpenSession'), 'a backend restart must force runtime rehydration');
+});
+
 test('openSession serializes backend session.open requests through the lifecycle queue', async () => {
   // After the MVI migration the reducer owns the optimistic tab setup and the
   // runner owns the backend `session.open` RPC (serialized via the lifecycle

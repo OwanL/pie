@@ -28,6 +28,7 @@ test('tool exposes only the V2 action surface', () => {
   assert.deepEqual(sessionReviewSchema.properties.action.enum, ['listOpen', 'listSelected', 'getEvidence', 'getReviewStatus', 'recordRecoveredReview', 'recordReview', 'recordReviews', 'closeReviewed', 'closeReviewedBatch', 'closeSelf']);
   assert.equal(sessionReviewSchema.properties.action.enum.includes('setReview' as never), false);
   assert.equal(sessionReviewSchema.properties.action.enum.includes('getTranscript' as never), false);
+  assert.equal(sessionReviewSchema.properties.confirmSelf.type, 'boolean');
 });
 
 test('list snapshots scope evidence and closure to eligible targets in the orchestrator session', async () => {
@@ -110,8 +111,12 @@ test('vertical slice lists selected, issues evidence, records once, then enqueue
     const closed = await tool.execute('5', { action: 'closeReviewed', sessionId: 'target-id', reviewId: 'target-review', sessionPath }, undefined, undefined, ctx);
     assert.equal(closed.isError, false, closed.content[0].text);
     assert.equal(fs.readFileSync(path.join(dir, 'reviews.jsonl'), 'utf8'), reviewsBeforeClose);
-    const selfClosed = await tool.execute('6', { action: 'closeSelf' }, undefined, undefined, ctx);
+    const selfWithoutConfirmation = await tool.execute('6a', { action: 'closeSelf' }, undefined, undefined, ctx);
+    assert.equal(selfWithoutConfirmation.isError, true);
+    assert.match(selfWithoutConfirmation.content[0].text, /confirmSelf:true/);
+    const selfClosed = await tool.execute('6b', { action: 'closeSelf', confirmSelf: true }, undefined, undefined, ctx);
     assert.equal(selfClosed.isError, false);
+    assert.match(selfClosed.content[0].text, /removes the evaluator tab/);
     const actions = fs.readFileSync(path.join(dir, 'closure-actions.jsonl'), 'utf8').trim().split('\n').map((line: string) => JSON.parse(line));
     assert.deepEqual(actions.map((a: any) => a.kind), ['closeReviewed', 'closeSelf']);
     assert.equal(actions[1].reviewId, undefined);

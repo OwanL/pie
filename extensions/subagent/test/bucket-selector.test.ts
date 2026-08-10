@@ -1,8 +1,7 @@
 /**
  * Tests for the bucket-selector module.
  *
- * Covers: selectModel, nearestSupportedThinking (re-implemented for
- * direct testing since it's not exported), loadModelConfig,
+ * Covers: selectModel, loadModelConfig,
  * parseProviderToggles, getDisabledProviders, and
  * getAllowedModelIdsForProviders.
  */
@@ -20,7 +19,7 @@ import {
   resolveSubagentProviderToggles,
   getDisabledProviders,
   getAllowedModelIdsForProviders,
-  nearestSupportedThinking,
+  getRuntimeThinkingSupport,
   parseBucketConfig,
   readBucketAssignments,
   PROVIDER_TOGGLES_ENV,
@@ -31,75 +30,19 @@ import {
 import type { ThinkingLevel, ModelProviderRef, BucketAssignments, SimpleModelConfig } from "../bucket-selector.js";
 
 // ============================================================
-// nearestSupportedThinking
+// runtime thinking support
 // ============================================================
 
-describe("nearestSupportedThinking", () => {
-  it("returns the requested level if supported", () => {
-    assert.equal(nearestSupportedThinking("high", ["low", "high", "xhigh"]), "high");
-    assert.equal(nearestSupportedThinking("minimal", ["minimal"]), "minimal");
-    assert.equal(nearestSupportedThinking("medium", ["low", "medium", "high"]), "medium");
-  });
-
-  it("returns undefined when no levels are supported at all", () => {
-    assert.equal(nearestSupportedThinking("medium", []), undefined);
-    assert.equal(nearestSupportedThinking("high", []), undefined);
-  });
-
-  it("walks to adjacent levels when exact level not found", () => {
-    // Requested "high" but only "medium" supported → one step lower
-    assert.equal(nearestSupportedThinking("high", ["medium"]), "medium");
-    // Requested "high" but only "xhigh" supported → one step higher
-    assert.equal(nearestSupportedThinking("high", ["xhigh"]), "xhigh");
-    // Requested "low" but only "minimal" supported → one step lower
-    assert.equal(nearestSupportedThinking("low", ["minimal"]), "minimal");
-  });
-
-  it("prefers lower over higher at same offset", () => {
-    // Both medium and xhigh are 1 step from high → medium (lower) wins
-    assert.equal(nearestSupportedThinking("high", ["medium", "xhigh"]), "medium");
-    // Both low and high are 1 step from medium → low (lower) wins
-    assert.equal(nearestSupportedThinking("medium", ["low", "high"]), "low");
-  });
-
-  it("walks outward from medium (center)", () => {
-    // From "medium": offset 1 → low, high; offset 2 → minimal, xhigh
-    assert.equal(nearestSupportedThinking("medium", ["low"]), "low");
-    assert.equal(nearestSupportedThinking("medium", ["high"]), "high");
-    assert.equal(nearestSupportedThinking("medium", ["minimal"]), "minimal");
-    assert.equal(nearestSupportedThinking("medium", ["xhigh"]), "xhigh");
-    // When both minimal and xhigh available (offset 2), minimal (lower) wins
-    assert.equal(nearestSupportedThinking("medium", ["minimal", "xhigh"]), "minimal");
-  });
-
-  it("walks outward from high (right-of-center)", () => {
-    // From "high": offset 1 → medium, xhigh; offset 2 → low; offset 3 → minimal
-    assert.equal(nearestSupportedThinking("high", ["medium"]), "medium");
-    assert.equal(nearestSupportedThinking("high", ["xhigh"]), "xhigh");
-    assert.equal(nearestSupportedThinking("high", ["low"]), "low");
-    assert.equal(nearestSupportedThinking("high", ["minimal"]), "minimal");
-  });
-
-  it("walks outward from minimal (left edge)", () => {
-    // From "minimal": offset 1 → low; offset 2 → medium; offset 3 → high; offset 4 → xhigh
-    assert.equal(nearestSupportedThinking("minimal", ["low"]), "low");
-    assert.equal(nearestSupportedThinking("minimal", ["medium"]), "medium");
-    assert.equal(nearestSupportedThinking("minimal", ["high"]), "high");
-    assert.equal(nearestSupportedThinking("minimal", ["xhigh"]), "xhigh");
-  });
-
-  it("walks outward from xhigh (right edge)", () => {
-    // From "xhigh": offset 1 → high; offset 2 → medium; offset 3 → low; offset 4 → minimal
-    assert.equal(nearestSupportedThinking("xhigh", ["high"]), "high");
-    assert.equal(nearestSupportedThinking("xhigh", ["medium"]), "medium");
-    assert.equal(nearestSupportedThinking("xhigh", ["low"]), "low");
-    assert.equal(nearestSupportedThinking("xhigh", ["minimal"]), "minimal");
-  });
-
-  it("returns undefined when no supported level exists in walk range", () => {
-    // All levels are in THINKING_ORDER so this can't happen with valid levels,
-    // but if supported is empty we already return undefined
-    assert.equal(nearestSupportedThinking("medium", []), undefined);
+describe("getRuntimeThinkingSupport", () => {
+  it("mirrors Pi null exclusions and distinct extended levels", () => {
+    assert.deepEqual(
+      [...getRuntimeThinkingSupport({
+        reasoning: true,
+        thinkingLevelMap: { minimal: null, xhigh: null, max: "max" },
+      })],
+      ["off", "low", "medium", "high", "max"],
+    );
+    assert.deepEqual([...getRuntimeThinkingSupport({ reasoning: false })], ["off"]);
   });
 });
 
@@ -123,7 +66,11 @@ describe("selectModel", () => {
   it("returns a model from the bucket when assignments are populated", () => {
     const assignments: BucketAssignments = {
       small: [],
-      medium: ["model-a", "model-b", "model-c"],
+      medium: [
+        { model: "model-a", thinkingLevel: "medium" },
+        { model: "model-b", thinkingLevel: "medium" },
+        { model: "model-c", thinkingLevel: "medium" },
+      ],
       frontier: [],
     };
     const config = makeConfig([
@@ -134,7 +81,7 @@ describe("selectModel", () => {
 
     // Run multiple times to verify we always get a valid model from the pool
     for (let i = 0; i < 20; i++) {
-      const result = selectModel("medium", undefined, assignments, config, undefined, undefined, ACTIVE_MODEL);
+      const result = selectModel("medium", assignments, config, undefined, undefined, ACTIVE_MODEL, undefined);
       assert.equal(result.fallback, false);
       assert.equal(result.bucket, "medium");
       assert.ok(["model-a", "model-b", "model-c"].includes(result.modelId));
@@ -145,14 +92,18 @@ describe("selectModel", () => {
   it("distributes selections evenly without favoring a model", () => {
     const assignments: BucketAssignments = {
       small: [],
-      medium: ["fair-a", "fair-b", "fair-c"],
+      medium: [
+        { model: "fair-a", thinkingLevel: "medium" },
+        { model: "fair-b", thinkingLevel: "medium" },
+        { model: "fair-c", thinkingLevel: "medium" },
+      ],
       frontier: [],
     };
-    const config = makeConfig(assignments.medium.map((id) => ({ id })));
-    const counts = new Map(assignments.medium.map((id) => [id, 0]));
+    const config = makeConfig(assignments.medium.map(({ model: id }) => ({ id })));
+    const counts = new Map(assignments.medium.map(({ model }) => [model, 0]));
 
     for (let i = 0; i < 30; i++) {
-      const result = selectModel("medium", undefined, assignments, config, undefined, undefined, ACTIVE_MODEL);
+      const result = selectModel("medium", assignments, config, undefined, undefined, ACTIVE_MODEL, undefined);
       counts.set(result.modelId, counts.get(result.modelId)! + 1);
     }
 
@@ -164,18 +115,22 @@ describe("selectModel", () => {
       "github-copilot/gpt-5.4",
       "openai-codex/gpt-5.4",
     ];
-    const assignments: BucketAssignments = { small: [], medium: specs, frontier: [] };
+    const assignments: BucketAssignments = {
+      small: [],
+      medium: specs.map((model) => ({ model, thinkingLevel: "high" })),
+      frontier: [],
+    };
     const counts = new Map(specs.map((spec) => [spec, 0]));
 
     for (let i = 0; i < 20; i++) {
       const result = selectModel(
         "medium",
-        "high",
         assignments,
         makeConfig([{ id: "gpt-5.4", thinking: ["high"] }]),
         new Set([...specs, "gpt-5.4"]),
         undefined,
         ACTIVE_MODEL,
+        undefined,
       );
       counts.set(result.modelId, counts.get(result.modelId)! + 1);
     }
@@ -186,17 +141,21 @@ describe("selectModel", () => {
   it("applies provider toggles and hard requirements to exact qualified duplicates", () => {
     const assignments: BucketAssignments = {
       small: [],
-      medium: ["github-copilot/gpt-5.4", "openai-codex/gpt-5.4", "gpt-5.4"],
+      medium: [
+        { model: "github-copilot/gpt-5.4", thinkingLevel: "high" },
+        { model: "openai-codex/gpt-5.4", thinkingLevel: "high" },
+        { model: "gpt-5.4", thinkingLevel: "high" },
+      ],
       frontier: [],
     };
     const result = selectModel(
       "medium",
-      undefined,
       assignments,
       [],
       new Set(["openai-codex/gpt-5.4", "gpt-5.4"]),
       undefined,
       ACTIVE_MODEL,
+      undefined,
       undefined,
       new Set(["openai-codex/gpt-5.4", "gpt-5.4"]),
     );
@@ -205,7 +164,7 @@ describe("selectModel", () => {
   });
 
   it("returns fallback (active model) when bucket is empty", () => {
-    const result = selectModel("medium", undefined, EMPTY_ASSIGNMENTS, [], undefined, undefined, ACTIVE_MODEL);
+    const result = selectModel("medium", EMPTY_ASSIGNMENTS, [], undefined, undefined, ACTIVE_MODEL, undefined);
     assert.equal(result.fallback, true);
     assert.equal(result.modelId, ACTIVE_MODEL);
     assert.equal(result.bucket, "medium");
@@ -214,95 +173,79 @@ describe("selectModel", () => {
 
   it("returns fallback when all models in bucket are excluded via excludeModels", () => {
     const assignments: BucketAssignments = {
-      small: ["model-x"],
+      small: [{ model: "model-x", thinkingLevel: "medium" }],
       medium: [],
       frontier: [],
     };
     const config = makeConfig([{ id: "model-x" }]);
     const exclude = new Set(["model-x"]);
 
-    const result = selectModel("small", undefined, assignments, config, undefined, exclude, ACTIVE_MODEL);
+    const result = selectModel("small", assignments, config, undefined, exclude, ACTIVE_MODEL, undefined);
     assert.equal(result.fallback, true);
     assert.equal(result.modelId, ACTIVE_MODEL);
     assert.deepEqual(result.pool, []);
   });
 
-  it("filters by thinkingLevel — excludes models that don't support it", () => {
+  it("excludes unsupported assignments instead of clamping their reasoning level", () => {
     const assignments: BucketAssignments = {
-      small: [],
-      medium: ["model-low-only", "model-all"],
-      frontier: [],
-    };
-    const config = makeConfig([
-      { id: "model-low-only", thinking: ["low"] },
-      { id: "model-all", thinking: ["low", "medium", "high"] },
-    ]);
-
-    // Requesting "high" — only model-all supports it
-    const result = selectModel("medium", "high", assignments, config, undefined, undefined, ACTIVE_MODEL);
-    assert.equal(result.fallback, false);
-    assert.equal(result.modelId, "model-all");
-    assert.deepEqual(result.pool, ["model-all"]);
-  });
-
-  it("falls back to nearest supported thinking level when no models support the requested level", () => {
-    const assignments: BucketAssignments = {
-      small: ["model-mid"],
+      small: [{ model: "model-mid", thinkingLevel: "xhigh" }],
       medium: [],
       frontier: [],
     };
-    const config = makeConfig([
-      { id: "model-mid", thinking: ["low", "medium"] },
-    ]);
+    const config = makeConfig([{ id: "model-mid", thinking: ["low", "medium"] }]);
 
-    // Requesting "xhigh" but model only supports low/medium → should relax to "medium" (nearest to xhigh via walk)
-    // Walk from xhigh: offset 1→high (no), offset 2→medium (yes!)
-    const result = selectModel("small", "xhigh", assignments, config, undefined, undefined, ACTIVE_MODEL);
-    assert.equal(result.fallback, false);
-    assert.equal(result.modelId, "model-mid");
-    // The relaxed thinkingLevel should be "medium" (nearest supported to "xhigh")
+    const result = selectModel("small", assignments, config, undefined, undefined, ACTIVE_MODEL, "medium");
+    assert.equal(result.fallback, true);
+    assert.equal(result.modelId, ACTIVE_MODEL);
     assert.equal(result.thinkingLevel, "medium");
   });
 
-  it("uses unfiltered pool when relaxation fails (no supported thinking levels)", () => {
+  it("uses assignment reasoning rather than the caller's reasoning", () => {
     const assignments: BucketAssignments = {
       small: [],
-      medium: ["restricted-model"],
+      medium: [{ model: "model-all", thinkingLevel: "high" }],
       frontier: [],
     };
-    const config = makeConfig([
-      { id: "restricted-model", thinking: [] }, // supports nothing
-    ]);
+    const config = makeConfig([{ id: "model-all", thinking: ["low", "medium", "high"] }]);
 
-    const result = selectModel("medium", "high", assignments, config, undefined, undefined, ACTIVE_MODEL);
-    // When no models support any thinking level, relaxation fails and
-    // the code falls back to the unfiltered pool (picks any model).
+    const result = selectModel("medium", assignments, config, undefined, undefined, ACTIVE_MODEL, "low");
     assert.equal(result.fallback, false);
-    assert.equal(result.modelId, "restricted-model");
+    assert.equal(result.modelId, "model-all");
     assert.equal(result.thinkingLevel, "high");
   });
 
+  it("uses caller reasoning only for active-parent fallback", () => {
+    const result = selectModel("medium", EMPTY_ASSIGNMENTS, [], undefined, undefined, ACTIVE_MODEL, "xhigh");
+    assert.equal(result.fallback, true);
+    assert.equal(result.modelId, ACTIVE_MODEL);
+    assert.equal(result.thinkingLevel, "xhigh");
+  });
+
   it("returns fallback: true when falling back to active model", () => {
-    const result = selectModel("frontier", undefined, EMPTY_ASSIGNMENTS, [], undefined, undefined, ACTIVE_MODEL);
+    const result = selectModel("frontier", EMPTY_ASSIGNMENTS, [], undefined, undefined, ACTIVE_MODEL, undefined);
     assert.equal(result.fallback, true);
   });
 
   it("returns fallback: false when a model is selected from pool", () => {
     const assignments: BucketAssignments = {
-      small: ["model-s"],
+      small: [{ model: "model-s", thinkingLevel: "medium" }],
       medium: [],
       frontier: [],
     };
     const config = makeConfig([{ id: "model-s" }]);
 
-    const result = selectModel("small", undefined, assignments, config, undefined, undefined, ACTIVE_MODEL);
+    const result = selectModel("small", assignments, config, undefined, undefined, ACTIVE_MODEL, undefined);
     assert.equal(result.fallback, false);
   });
 
   it("filters by allowedModelIds (provider allowlist)", () => {
     const assignments: BucketAssignments = {
       small: [],
-      medium: ["model-a", "model-b", "model-c"],
+      medium: [
+        { model: "model-a", thinkingLevel: "medium" },
+        { model: "model-b", thinkingLevel: "medium" },
+        { model: "model-c", thinkingLevel: "medium" },
+      ],
       frontier: [],
     };
     const config = makeConfig([
@@ -312,7 +255,7 @@ describe("selectModel", () => {
     ]);
     const allowed = new Set(["model-b"]);
 
-    const result = selectModel("medium", undefined, assignments, config, allowed, undefined, ACTIVE_MODEL);
+    const result = selectModel("medium", assignments, config, allowed, undefined, ACTIVE_MODEL, undefined);
     assert.equal(result.fallback, false);
     assert.equal(result.modelId, "model-b");
     assert.deepEqual(result.pool, ["model-b"]);
@@ -320,9 +263,9 @@ describe("selectModel", () => {
 
   it("falls back to the next lower bucket when provider toggles remove the requested tier", () => {
     const assignments: BucketAssignments = {
-      small: ["small-enabled"],
-      medium: ["medium-enabled"],
-      frontier: ["frontier-disabled"],
+      small: [{ model: "small-enabled", thinkingLevel: "medium" }],
+      medium: [{ model: "medium-enabled", thinkingLevel: "medium" }],
+      frontier: [{ model: "frontier-disabled", thinkingLevel: "medium" }],
     };
     const config = makeConfig([
       { id: "small-enabled" },
@@ -332,12 +275,12 @@ describe("selectModel", () => {
 
     const result = selectModel(
       "frontier",
-      undefined,
       assignments,
       config,
       new Set(["small-enabled", "medium-enabled"]),
       undefined,
       ACTIVE_MODEL,
+      undefined,
     );
 
     assert.equal(result.fallback, false);
@@ -348,9 +291,9 @@ describe("selectModel", () => {
 
   it("walks past unavailable intermediate buckets without upgrading", () => {
     const assignments: BucketAssignments = {
-      small: ["small-enabled"],
-      medium: ["medium-disabled"],
-      frontier: ["frontier-enabled"],
+      small: [{ model: "small-enabled", thinkingLevel: "medium" }],
+      medium: [{ model: "medium-disabled", thinkingLevel: "medium" }],
+      frontier: [{ model: "frontier-enabled", thinkingLevel: "medium" }],
     };
     const config = makeConfig([
       { id: "small-enabled" },
@@ -360,12 +303,12 @@ describe("selectModel", () => {
 
     const result = selectModel(
       "medium",
-      undefined,
       assignments,
       config,
       new Set(["small-enabled", "frontier-enabled"]),
       undefined,
       ACTIVE_MODEL,
+      undefined,
     );
 
     assert.equal(result.bucket, "small");
@@ -375,13 +318,13 @@ describe("selectModel", () => {
   it("does not fall back to an active model excluded by provider toggles", () => {
     const assignments: BucketAssignments = {
       small: [],
-      medium: ["model-a"],
+      medium: [{ model: "model-a", thinkingLevel: "medium" }],
       frontier: [],
     };
     const config = makeConfig([{ id: "model-a" }]);
     const allowed = new Set(["model-z"]); // neither bucket nor active model is available
 
-    const result = selectModel("medium", undefined, assignments, config, allowed, undefined, ACTIVE_MODEL);
+    const result = selectModel("medium", assignments, config, allowed, undefined, ACTIVE_MODEL, undefined);
     assert.equal(result.fallback, true);
     assert.equal(result.modelId, "");
   });
@@ -389,14 +332,17 @@ describe("selectModel", () => {
   it("combines excludeModels and allowedModelIds filters", () => {
     const assignments: BucketAssignments = {
       small: [],
-      medium: ["model-a", "model-b"],
+      medium: [
+        { model: "model-a", thinkingLevel: "medium" },
+        { model: "model-b", thinkingLevel: "medium" },
+      ],
       frontier: [],
     };
     const config = makeConfig([{ id: "model-a" }, { id: "model-b" }]);
     const allowed = new Set(["model-a", "model-b"]);
     const exclude = new Set(["model-a"]);
 
-    const result = selectModel("medium", undefined, assignments, config, allowed, exclude, ACTIVE_MODEL);
+    const result = selectModel("medium", assignments, config, allowed, exclude, ACTIVE_MODEL, undefined);
     assert.equal(result.fallback, false);
     assert.equal(result.modelId, "model-b");
   });
@@ -404,19 +350,22 @@ describe("selectModel", () => {
   it("soft-filters saturated model ids when another bucket candidate has capacity", () => {
     const assignments: BucketAssignments = {
       small: [],
-      medium: ["busy-model", "open-model"],
+      medium: [
+        { model: "busy-model", thinkingLevel: "medium" },
+        { model: "open-model", thinkingLevel: "medium" },
+      ],
       frontier: [],
     };
     const config = makeConfig([{ id: "busy-model" }, { id: "open-model" }]);
 
     const result = selectModel(
       "medium",
-      undefined,
       assignments,
       config,
       new Set(["busy-model", "open-model"]),
       undefined,
       ACTIVE_MODEL,
+      undefined,
       new Set(["open-model"]),
     );
 
@@ -427,7 +376,10 @@ describe("selectModel", () => {
 
   it("fails open to the old bucket pool when every eligible model is saturated", () => {
     const assignments: BucketAssignments = {
-      small: ["busy-a", "busy-b"],
+      small: [
+        { model: "busy-a", thinkingLevel: "medium" },
+        { model: "busy-b", thinkingLevel: "medium" },
+      ],
       medium: [],
       frontier: [],
     };
@@ -435,12 +387,12 @@ describe("selectModel", () => {
 
     const result = selectModel(
       "small",
-      undefined,
       assignments,
       config,
       new Set(["busy-a", "busy-b"]),
       undefined,
       ACTIVE_MODEL,
+      undefined,
       new Set(),
     );
 
@@ -451,18 +403,18 @@ describe("selectModel", () => {
 
   it("keeps old selection behavior when capacity routing is disabled", () => {
     const assignments: BucketAssignments = {
-      small: ["model-a"],
+      small: [{ model: "model-a", thinkingLevel: "medium" }],
       medium: [],
       frontier: [],
     };
     const result = selectModel(
       "small",
-      undefined,
       assignments,
       makeConfig([{ id: "model-a" }]),
       new Set(["model-a"]),
       undefined,
       ACTIVE_MODEL,
+      undefined,
     );
 
     assert.equal(result.fallback, false);
@@ -470,42 +422,117 @@ describe("selectModel", () => {
     assert.deepEqual(result.pool, ["model-a"]);
   });
 
-  it("models not in config are treated as supporting all thinking levels", () => {
+  it("models not in config are treated as supporting their explicit assignment", () => {
     const assignments: BucketAssignments = {
       small: [],
-      medium: ["unknown-model"],
+      medium: [{ model: "unknown-model", thinkingLevel: "xhigh" }],
       frontier: [],
     };
     // No config entries for unknown-model → treated as supporting all levels
     const config: SimpleModelConfig[] = [];
 
-    const result = selectModel("medium", "xhigh", assignments, config, undefined, undefined, ACTIVE_MODEL);
+    const result = selectModel("medium", assignments, config, undefined, undefined, ACTIVE_MODEL, undefined);
     assert.equal(result.fallback, false);
     assert.equal(result.modelId, "unknown-model");
+    assert.equal(result.thinkingLevel, "xhigh");
+  });
+
+  it("honors exact provider-qualified runtime and profile support", () => {
+    const assignments: BucketAssignments = {
+      small: [],
+      medium: [
+        { model: "github-copilot/gpt-5.4", thinkingLevel: "high" },
+        { model: "openai-codex/gpt-5.4", thinkingLevel: "high" },
+      ],
+      frontier: [],
+    };
+    const profiles: SimpleModelConfig[] = [
+      { provider: "github-copilot", id: "gpt-5.4", eligible: true, thinking: ["high"], disabled_reason: null },
+      { provider: "openai-codex", id: "gpt-5.4", eligible: true, thinking: ["low"], disabled_reason: null },
+    ];
+
+    const profileResult = selectModel("medium", assignments, profiles, undefined, undefined, ACTIVE_MODEL, undefined);
+    assert.deepEqual(profileResult.pool, ["github-copilot/gpt-5.4"]);
+
+    const runtimeResult = selectModel(
+      "medium",
+      assignments,
+      profiles,
+      undefined,
+      undefined,
+      ACTIVE_MODEL,
+      undefined,
+      undefined,
+      undefined,
+      new Map([
+        ["github-copilot/gpt-5.4", new Set<ThinkingLevel>(["low"])],
+        ["openai-codex/gpt-5.4", new Set<ThinkingLevel>(["high"])],
+      ]),
+    );
+    assert.deepEqual(runtimeResult.pool, ["openai-codex/gpt-5.4"]);
+  });
+
+  it("requires every possible provider for a bare assignment to support its level", () => {
+    const assignments: BucketAssignments = {
+      small: [],
+      medium: [{ model: "shared", thinkingLevel: "max" }],
+      frontier: [],
+    };
+    const unsupportedProfiles: SimpleModelConfig[] = [
+      { provider: "one", id: "shared", eligible: true, thinking: ["high"], disabled_reason: null },
+      { provider: "two", id: "shared", eligible: true, thinking: ["low"], disabled_reason: null },
+    ];
+    assert.equal(
+      selectModel("medium", assignments, unsupportedProfiles, undefined, undefined, ACTIVE_MODEL, "medium").fallback,
+      true,
+    );
+
+    const mixedRuntimeSupport = new Map<string, ReadonlySet<ThinkingLevel>>([
+      ["one/shared", new Set(["high"])],
+      ["two/shared", new Set(["max"])],
+    ]);
+    assert.equal(
+      selectModel(
+        "medium", assignments, unsupportedProfiles, undefined, undefined, ACTIVE_MODEL, "medium",
+        undefined, undefined, mixedRuntimeSupport,
+      ).fallback,
+      true,
+    );
+
+    const uniformRuntimeSupport = new Map<string, ReadonlySet<ThinkingLevel>>([
+      ["one/shared", new Set(["max"])],
+      ["two/shared", new Set(["max"])],
+    ]);
+    const selected = selectModel(
+      "medium", assignments, unsupportedProfiles, undefined, undefined, ACTIVE_MODEL, "medium",
+      undefined, undefined, uniformRuntimeSupport,
+    );
+    assert.equal(selected.modelId, "shared");
+    assert.equal(selected.thinkingLevel, "max");
   });
 
   it("undefined excludeModels and allowedModelIds are treated as no filter", () => {
     const assignments: BucketAssignments = {
-      small: ["model-s"],
+      small: [{ model: "model-s", thinkingLevel: "medium" }],
       medium: [],
       frontier: [],
     };
     const config = makeConfig([{ id: "model-s" }]);
 
-    const result = selectModel("small", undefined, assignments, config, undefined, undefined, ACTIVE_MODEL);
+    const result = selectModel("small", assignments, config, undefined, undefined, ACTIVE_MODEL, undefined);
     assert.equal(result.fallback, false);
     assert.equal(result.modelId, "model-s");
   });
 
-  it("preserves thinkingLevel in result when provided", () => {
+  it("returns the assignment thinkingLevel", () => {
     const assignments: BucketAssignments = {
       small: [],
-      medium: ["model-m"],
+      medium: [{ model: "model-m", thinkingLevel: "high" }],
       frontier: [],
     };
     const config = makeConfig([{ id: "model-m" }]);
 
-    const result = selectModel("medium", "high", assignments, config, undefined, undefined, ACTIVE_MODEL);
+    const result = selectModel("medium", assignments, config, undefined, undefined, ACTIVE_MODEL, "low");
     assert.equal(result.thinkingLevel, "high");
   });
 });
@@ -776,24 +803,50 @@ describe("PROVIDER_TOGGLES_ENV", () => {
 // ============================================================
 
 describe("parseBucketConfig", () => {
-  it("parses a valid bucket config", () => {
-    const result = parseBucketConfig(
-      JSON.stringify({ small: ["haiku"], medium: ["sonnet"], frontier: ["opus"] }),
-    );
-    assert.deepEqual(result, { small: ["haiku"], medium: ["sonnet"], frontier: ["opus"] });
+  it("parses all seven exact thinking levels, including distinct xhigh and max", () => {
+    const result = parseBucketConfig(JSON.stringify({
+      small: [
+        { model: "off", thinkingLevel: "off" },
+        { model: "minimal", thinkingLevel: "minimal" },
+        { model: "low", thinkingLevel: "low" },
+      ],
+      medium: [
+        { model: "medium", thinkingLevel: "medium" },
+        { model: "high", thinkingLevel: "high" },
+      ],
+      frontier: [
+        { model: "xhigh", thinkingLevel: "xhigh" },
+        { model: "max", thinkingLevel: "max" },
+      ],
+    }));
+    assert.deepEqual(result, {
+      small: [
+        { model: "off", thinkingLevel: "off" },
+        { model: "minimal", thinkingLevel: "minimal" },
+        { model: "low", thinkingLevel: "low" },
+      ],
+      medium: [
+        { model: "medium", thinkingLevel: "medium" },
+        { model: "high", thinkingLevel: "high" },
+      ],
+      frontier: [
+        { model: "xhigh", thinkingLevel: "xhigh" },
+        { model: "max", thinkingLevel: "max" },
+      ],
+    });
   });
 
-  it("keeps qualified duplicates and de-duplicates only identical specs", () => {
+  it("keeps qualified models and drops duplicate models after the first assignment", () => {
     const result = parseBucketConfig(JSON.stringify({
       medium: [
-        "github-copilot/gpt-5.4",
-        "openai-codex/gpt-5.4",
-        "github-copilot/gpt-5.4",
+        { model: "github-copilot/gpt-5.4", thinkingLevel: "high" },
+        { model: "openai-codex/gpt-5.4", thinkingLevel: "low" },
+        { model: "github-copilot/gpt-5.4", thinkingLevel: "max" },
       ],
     }));
     assert.deepEqual(result.medium, [
-      "github-copilot/gpt-5.4",
-      "openai-codex/gpt-5.4",
+      { model: "github-copilot/gpt-5.4", thinkingLevel: "high" },
+      { model: "openai-codex/gpt-5.4", thinkingLevel: "low" },
     ]);
   });
 
@@ -816,40 +869,68 @@ describe("parseBucketConfig", () => {
   });
 
   it("defaults missing bucket keys to empty arrays", () => {
-    assert.deepEqual(parseBucketConfig(JSON.stringify({ medium: ["sonnet"] })), {
+    assert.deepEqual(parseBucketConfig(JSON.stringify({
+      medium: [{ model: "sonnet", thinkingLevel: "medium" }],
+    })), {
       small: [],
-      medium: ["sonnet"],
+      medium: [{ model: "sonnet", thinkingLevel: "medium" }],
       frontier: [],
     });
   });
 
   it("ignores unknown bucket keys", () => {
-    const result = parseBucketConfig(
-      JSON.stringify({ small: ["haiku"], extra: ["x"], medium: [], frontier: [] }),
-    );
-    assert.deepEqual(result, { small: ["haiku"], medium: [], frontier: [] });
+    const result = parseBucketConfig(JSON.stringify({
+      small: [{ model: "haiku", thinkingLevel: "low" }],
+      extra: [{ model: "x", thinkingLevel: "max" }],
+      medium: [],
+      frontier: [],
+    }));
+    assert.deepEqual(result, {
+      small: [{ model: "haiku", thinkingLevel: "low" }],
+      medium: [],
+      frontier: [],
+    });
   });
 
   it("drops non-array bucket values", () => {
-    const result = parseBucketConfig(
-      JSON.stringify({ small: "haiku", medium: 5, frontier: ["opus"] }),
-    );
-    assert.deepEqual(result, { small: [], medium: [], frontier: ["opus"] });
+    const result = parseBucketConfig(JSON.stringify({
+      small: "haiku",
+      medium: 5,
+      frontier: [{ model: "opus", thinkingLevel: "max" }],
+    }));
+    assert.deepEqual(result, {
+      small: [],
+      medium: [],
+      frontier: [{ model: "opus", thinkingLevel: "max" }],
+    });
   });
 
-  it("drops non-string and empty-string entries, keeping order", () => {
-    const result = parseBucketConfig(
-      JSON.stringify({ small: ["haiku", 5, "", null, "mini", "haiku"] }),
-    );
-    // duplicate "haiku" is de-duplicated; non-string/empty entries dropped
-    assert.deepEqual(result.small, ["haiku", "mini"]);
+  it("drops legacy string entries and malformed assignments", () => {
+    const result = parseBucketConfig(JSON.stringify({
+      small: [
+        "legacy-haiku",
+        5,
+        null,
+        {},
+        { model: "", thinkingLevel: "low" },
+        { model: "invalid-level", thinkingLevel: "ultra" },
+        { model: "valid", thinkingLevel: "minimal" },
+      ],
+    }));
+    assert.deepEqual(result.small, [{ model: "valid", thinkingLevel: "minimal" }]);
   });
 
   it("allows the same model id in more than one bucket", () => {
-    const result = parseBucketConfig(
-      JSON.stringify({ small: ["shared"], medium: ["shared"], frontier: ["shared"] }),
-    );
-    assert.deepEqual(result, { small: ["shared"], medium: ["shared"], frontier: ["shared"] });
+    const result = parseBucketConfig(JSON.stringify({
+      small: [{ model: "shared", thinkingLevel: "low" }],
+      medium: [{ model: "shared", thinkingLevel: "medium" }],
+      frontier: [{ model: "shared", thinkingLevel: "high" }],
+    }));
+    assert.deepEqual(result, {
+      small: [{ model: "shared", thinkingLevel: "low" }],
+      medium: [{ model: "shared", thinkingLevel: "medium" }],
+      frontier: [{ model: "shared", thinkingLevel: "high" }],
+    });
   });
 });
 
@@ -857,15 +938,15 @@ describe("readBucketAssignments", () => {
   const previous = process.env[SUBAGENT_BUCKETS_ENV];
   it("reads + parses the env var", () => {
     process.env[SUBAGENT_BUCKETS_ENV] = JSON.stringify({
-      small: ["haiku"],
-      medium: ["sonnet"],
-      frontier: ["opus"],
+      small: [{ model: "haiku", thinkingLevel: "low" }],
+      medium: [{ model: "sonnet", thinkingLevel: "medium" }],
+      frontier: [{ model: "opus", thinkingLevel: "max" }],
     });
     try {
       assert.deepEqual(readBucketAssignments(), {
-        small: ["haiku"],
-        medium: ["sonnet"],
-        frontier: ["opus"],
+        small: [{ model: "haiku", thinkingLevel: "low" }],
+        medium: [{ model: "sonnet", thinkingLevel: "medium" }],
+        frontier: [{ model: "opus", thinkingLevel: "max" }],
       });
     } finally {
       if (previous === undefined) delete process.env[SUBAGENT_BUCKETS_ENV];

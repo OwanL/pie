@@ -44,6 +44,8 @@ function mount(autonomousMode: boolean, onSetPrefs: (prefs: Partial<ChatPrefs>) 
       sessionCostIndicator: null,
       tokenRateIndicator: { label: '', ariaLabel: '', tooltip: '', state: 'idle', paused: false },
       runStatus: null,
+      compacting: false,
+      lastCompaction: null,
       onModelChange: () => undefined,
       onCompact: () => undefined,
     }), container);

@@ -1128,6 +1128,110 @@
   gap: var(--panel-gap-xs);
 }
 
+.toolbar-settings-bucket-assignment {
+  display: flex;
+  align-items: center;
+  gap: var(--panel-gap-xs);
+  max-width: 100%;
+}
+
+.toolbar-settings-bucket-assignment .toolbar-settings-keep-select {
+  width: auto;
+  min-width: 86px;
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: var(--panel-radius-sm);
+}
+
+/* Inline "add model" row: model name + reasoning pills + add/cancel buttons */
+.toolbar-settings-bucket-add-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--panel-gap-xs);
+  width: 100%;
+  padding: 2px;
+  border: 1px dashed var(--panel-border-subtle);
+  border-radius: var(--panel-radius-sm);
+  background: var(--panel-control-surface);
+}
+
+.toolbar-settings-bucket-add-model {
+  padding: 0 4px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--panel-foreground);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 140px;
+}
+
+.toolbar-settings-bucket-levels {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px;
+}
+
+.toolbar-settings-bucket-level {
+  padding: 1px 6px;
+  border: 1px solid var(--panel-border-subtle);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--panel-muted);
+  font-size: 9.5px;
+  line-height: 1.4;
+  cursor: pointer;
+  transition: background var(--panel-transition-fast), color var(--panel-transition-fast), border-color var(--panel-transition-fast);
+}
+
+.toolbar-settings-bucket-level:hover {
+  background: var(--panel-control-hover);
+  color: var(--panel-foreground);
+}
+
+.toolbar-settings-bucket-level.selected {
+  background: var(--panel-accent);
+  border-color: var(--panel-accent);
+  color: var(--panel-accent-foreground, var(--panel-foreground));
+}
+
+.toolbar-settings-bucket-add-btn,
+.toolbar-settings-bucket-cancel-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  padding: 1px 5px;
+  border: 1px solid var(--panel-border-subtle);
+  border-radius: var(--panel-radius-sm);
+  background: var(--panel-control-surface);
+  color: var(--panel-foreground);
+  font-size: 10px;
+  line-height: 1.4;
+  cursor: pointer;
+  transition: background var(--panel-transition-fast), color var(--panel-transition-fast);
+}
+
+.toolbar-settings-bucket-add-btn {
+  margin-left: auto;
+}
+
+.toolbar-settings-bucket-add-btn:hover:not(:disabled),
+.toolbar-settings-bucket-cancel-btn:hover {
+  background: var(--panel-control-hover);
+}
+
+.toolbar-settings-bucket-add-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.toolbar-settings-bucket-cancel-btn {
+  color: var(--panel-muted);
+}
+
 .toolbar-settings-keep-chip {
   display: inline-flex;
   align-items: center;
@@ -1163,6 +1267,9 @@
 
 .toolbar-settings-keep-picker-wrap {
   display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--panel-gap-xs);
 }
 
 .toolbar-settings-keep-select {
@@ -1305,6 +1412,9 @@
   color: var(--panel-accent);
 }
 
+/* Privacy mode is host-owned and ephemeral, so its pressed state remains
+   visible without requiring the tooltip. */
+.privacy-mode-trigger.active,
 /* Autonomous mode is a durable behavior switch, so its pressed state remains
    visible without requiring the tooltip. */
 .autonomous-mode-trigger.active {
@@ -1313,11 +1423,57 @@
   color: var(--panel-accent-strong);
 }
 
+.privacy-mode-trigger.active:hover,
+.privacy-mode-trigger.active:focus-visible,
 .autonomous-mode-trigger.active:hover,
 .autonomous-mode-trigger.active:focus-visible {
   border-color: color-mix(in srgb, var(--panel-accent) 68%, transparent);
   background: var(--panel-accent-surface);
   color: var(--panel-accent-strong);
+}
+
+/* History compaction in progress: the trigger swaps its icon for a spinner
+   and takes the accent treatment so the running compaction is visible at a
+   glance (the button is disabled while compacting — the spinner replaces the
+   icon, so the disabled opacity must not wash it out). */
+.compaction-trigger.compacting {
+  border-color: color-mix(in srgb, var(--panel-accent) 48%, transparent);
+  background: var(--panel-accent-surface);
+  color: var(--panel-accent-strong);
+  cursor: default;
+  opacity: 1;
+}
+
+.compaction-trigger-spinner {
+  flex: 0 0 auto;
+  width: 12px;
+  height: 12px;
+  box-sizing: border-box;
+  border-radius: 999px;
+  border: 1.5px solid color-mix(in srgb, var(--panel-accent) 30%, transparent);
+  border-top-color: var(--panel-accent);
+  animation: panel-loading-wheel-spin 0.72s linear infinite;
+  will-change: transform;
+}
+
+/* "Compacting…" status chip in the indicators row. */
+.compaction-chip-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.compaction-chip-spinner {
+  flex: 0 0 auto;
+  width: 10px;
+  height: 10px;
+  box-sizing: border-box;
+  border-radius: 999px;
+  border: 1.5px solid color-mix(in srgb, var(--panel-accent) 30%, transparent);
+  border-top-color: var(--panel-accent);
+  animation: panel-loading-wheel-spin 0.72s linear infinite;
+  will-change: transform;
 }
 
 /* Match the subagent provider trigger to the other bottom-bar icon controls. */

@@ -1,20 +1,22 @@
 /** @jsxRuntime automatic */
 /** @jsxImportSource preact */
 
-import { useEffect, useMemo, useState } from 'preact/hooks';
-import type { ChatPrefs, ModelInfo } from '../../../shared/protocol';
+import type { JSX } from 'preact';
+import { useMemo, useState, useEffect, useRef } from 'preact/hooks';
+import type { ChatPrefs, ModelInfo, SubagentBucketAssignment, ThinkingLevel } from '../../../shared/protocol';
+import { THINKING_LEVEL_LABELS, THINKING_LEVEL_OPTIONS } from '../../../shared/thinking-level.js';
 import {
   getSubagentBucketProviders,
   isSubagentProviderEnabled,
-  setBucketModels,
+  setBucketAssignments,
   setNestedAllowedBucket,
   setSubagentDropTools,
   setSubagentProviderDefaultEnabled,
   toggleChatPref,
 } from '../chat-prefs';
 import {
-  addProviderQualifiedModelSpec,
   filterEnabledProviders,
+  getModelThinkingLevels,
   isModelSelectedBySpec,
   orderModelsForPicker,
   parseModelSpec,
@@ -51,74 +53,152 @@ const NESTED_TOGGLE_DEFS: readonly { key: BucketKey; label: string }[] = [
 interface BucketModelsEditorProps {
   label: string;
   hint: string;
-  selected: string[];
+  selected: SubagentBucketAssignment[];
   availableModels: ModelInfo[];
   modelEntries: ReturnType<typeof orderModelsForPicker>;
-  onChange: (modelSpecs: string[]) => void;
+  onChange: (assignments: SubagentBucketAssignment[]) => void;
 }
 
-/**
- * Editor for a single bucket's model list. Selected models render as removable
- * chips labelled with provider-qualified model names. The shared searchable
- * {@link ModelPicker} is the only model-selection surface, matching the main
- * composer picker. Persisted values are canonical `provider/id` specs so two
- * providers exposing the same model id remain independently selectable.
- *
- * Legacy bare ids and models no longer in the registry still render as raw
- * removable chips. Runtime selection keeps backward compatibility for those
- * values, while every new choice is provider-qualified.
- */
+/** Editor for one bucket's explicit model/reasoning assignments. Adding a
+ * model is a single inline flow: pick a model from the searchable picker,
+ * choose a reasoning level from the exposed pill buttons (pre-selected to a
+ * sensible default), and confirm with one click or the Enter key. */
 function BucketModelsEditor({ label, hint, selected, availableModels, modelEntries, onChange }: BucketModelsEditorProps) {
+  const [pendingModel, setPendingModel] = useState('');
+  const [pendingThinkingLevel, setPendingThinkingLevel] = useState<ThinkingLevel | ''>('');
+  const addRowRef = useRef<HTMLDivElement>(null);
+  const pickerWrapRef = useRef<HTMLDivElement>(null);
+  const selectedModels = selected.map((entry) => entry.model);
   const labelFor = (spec: string): string => {
     const parsed = parseModelSpec(spec);
-    const matches = availableModels.filter((model) =>
+    const match = availableModels.find((model) =>
       model.id === parsed.id && (!parsed.provider || model.provider === parsed.provider));
-    if (matches.length === 0) return spec;
-    if (!parsed.provider && matches.length > 1) {
-      return `Any enabled provider · ${parsed.id} (legacy)`;
-    }
-    return `${matches[0].provider} · ${matches[0].name}`;
+    return match ? `${match.provider} · ${match.name}` : spec;
   };
   const isSelected = (model: ModelInfo): boolean =>
-    isModelSelectedBySpec(model, selected, availableModels);
-
+    isModelSelectedBySpec(model, selectedModels, availableModels);
   const availableOptions = useMemo(
     () => modelEntries.filter((entry) => !isSelected(entry.model)),
-    [availableModels, modelEntries, selected],
+    [availableModels, modelEntries, selectedModels.join('\u0000')],
   );
+  const pendingParsed = parseModelSpec(pendingModel);
+  const pendingModelInfo = availableModels.find((model) =>
+    model.id === pendingParsed.id && (!pendingParsed.provider || model.provider === pendingParsed.provider));
+  const pendingSupportedLevels = getModelThinkingLevels(pendingModelInfo);
 
-  // Optimistic specs just added but not yet reflected in the host-persisted
-  // `selected` prop. Without this gate a slow host round-trip can double-add.
-  const [pending, setPending] = useState<string[]>([]);
+  // Pick a sensible default reasoning level for the newly selected model so
+  // the user can add it in one click. Prefer medium for reasoning models,
+  // then low, then the first supported level; non-reasoning models fall back
+  // to off.
   useEffect(() => {
-    if (pending.length === 0) return;
-    const remaining = pending.filter((spec) => !selected.includes(spec));
-    if (remaining.length !== pending.length) setPending(remaining);
-  }, [selected, pending]);
+    if (!pendingModel) {
+      setPendingThinkingLevel('');
+      return;
+    }
+    const defaults: ThinkingLevel[] = ['medium', 'low', 'high', 'xhigh', 'max', 'minimal', 'off'];
+    const defaultLevel = defaults.find((level) => pendingSupportedLevels.includes(level))
+      ?? pendingSupportedLevels[0]
+      ?? 'off';
+    setPendingThinkingLevel(defaultLevel);
+  }, [pendingModel]);
 
-  const addModel = (spec: string) => {
-    if (!spec || selected.includes(spec) || pending.includes(spec)) return;
-    setPending((cur) => [...cur, spec]);
-    onChange(addProviderQualifiedModelSpec(selected, spec));
-    window.setTimeout(() => setPending((cur) => cur.filter((x) => x !== spec)), 2000);
+  // Focus management: move focus into the add row when it appears with a
+  // selected reasoning level, and back to the picker trigger when a pending
+  // add is cancelled or completed so keyboard users stay in context. The
+  // previous-value guard prevents stealing focus on initial mount.
+  const prevPendingModel = useRef(pendingModel);
+  useEffect(() => {
+    if (!pendingModel) {
+      if (prevPendingModel.current) {
+        const trigger = pickerWrapRef.current?.querySelector('[aria-haspopup="listbox"]') as HTMLButtonElement | null;
+        trigger?.focus();
+      }
+      prevPendingModel.current = '';
+      return;
+    }
+    prevPendingModel.current = pendingModel;
+    if (!pendingThinkingLevel) return;
+    const addBtn = addRowRef.current?.querySelector('.toolbar-settings-bucket-add-btn') as HTMLButtonElement | null;
+    if (addBtn && !addBtn.disabled) {
+      addBtn.focus();
+    } else {
+      const firstPill = addRowRef.current?.querySelector('.toolbar-settings-bucket-level') as HTMLButtonElement | null;
+      firstPill?.focus();
+    }
+  }, [pendingModel, pendingThinkingLevel]);
+
+  const addAssignment = () => {
+    if (!pendingModel || !pendingThinkingLevel || selectedModels.includes(pendingModel)) return;
+    onChange([...selected, { model: pendingModel, thinkingLevel: pendingThinkingLevel }]);
+    setPendingModel('');
+    setPendingThinkingLevel('');
   };
-  const removeModel = (spec: string) => onChange(selected.filter((x) => x !== spec));
+  const cancelAdd = () => {
+    setPendingModel('');
+    setPendingThinkingLevel('');
+  };
+  const removeModel = (spec: string) => onChange(selected.filter((entry) => entry.model !== spec));
+  const updateThinkingLevel = (spec: string, thinkingLevel: ThinkingLevel) =>
+    onChange(selected.map((entry) => entry.model === spec ? { ...entry, thinkingLevel } : entry));
+
+  const handleKeyDown = (e: JSX.TargetedKeyboardEvent<HTMLDivElement>) => {
+    // Only treat Enter as "confirm add" when the event target is the add row
+    // itself or another non-interactive descendant. Buttons, selects and inputs
+    // have their own default Enter/Space behavior (Add, Cancel, reasoning pills)
+    // and must not be hijacked by the wrapper handler.
+    if (e.key === 'Enter' && pendingModel && pendingThinkingLevel) {
+      const target = e.target as HTMLElement;
+      const interactive = target.closest('button, select, input, textarea');
+      if (interactive) return;
+      e.preventDefault();
+      addAssignment();
+    } else if (e.key === 'Escape' && pendingModel) {
+      e.preventDefault();
+      e.stopPropagation();
+      cancelAdd();
+    }
+  };
 
   return (
-    <div class="toolbar-settings-keep-picker">
+    <div class="toolbar-settings-keep-picker" onKeyDown={handleKeyDown}>
       <div class="toolbar-settings-keep-picker-label">{label}</div>
       <div class="toolbar-settings-item-hint">{hint}</div>
       {selected.length > 0 && (
         <div class="toolbar-settings-keep-chips">
-          {selected.map((spec) => (
-            <PickerTag
-              key={spec}
-              value={spec}
-              label={labelFor(spec)}
-              removeLabel={`Remove ${labelFor(spec)} from ${label}`}
-              onRemove={() => removeModel(spec)}
-            />
-          ))}
+          {selected.map((entry) => {
+            const parsed = parseModelSpec(entry.model);
+            const model = availableModels.find((candidate) =>
+              candidate.id === parsed.id && (!parsed.provider || candidate.provider === parsed.provider));
+            const options = THINKING_LEVEL_OPTIONS.filter((option) =>
+              getModelThinkingLevels(model).includes(option.value));
+            // If the model has been removed from the catalog, still surface its
+            // persisted reasoning level so the user can see and remove it.
+            const optionValues = new Set(options.map((o) => o.value));
+            if (!optionValues.has(entry.thinkingLevel)) {
+              options.push({
+                value: entry.thinkingLevel,
+                label: THINKING_LEVEL_LABELS[entry.thinkingLevel],
+              });
+            }
+            return (
+              <div class="toolbar-settings-bucket-assignment" key={entry.model}>
+                <PickerTag
+                  value={entry.model}
+                  label={labelFor(entry.model)}
+                  removeLabel={`Remove ${labelFor(entry.model)} from ${label}`}
+                  onRemove={() => removeModel(entry.model)}
+                />
+                <select
+                  class="toolbar-settings-keep-select"
+                  value={entry.thinkingLevel}
+                  aria-label={`Reasoning for ${labelFor(entry.model)} in ${label}`}
+                  onChange={(event) => updateThinkingLevel(entry.model, (event.target as HTMLSelectElement).value as ThinkingLevel)}
+                >
+                  {options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                </select>
+              </div>
+            );
+          })}
         </div>
       )}
       {selected.length === 0 && (
@@ -128,21 +208,71 @@ function BucketModelsEditor({ label, hint, selected, availableModels, modelEntri
             <line x1="6" y1="4.9" x2="6" y2="7.1" />
             <circle cx="6" cy="8.6" r="0.55" fill="currentColor" stroke="none" />
           </svg>
-          <span>No models — falls back to the parent model</span>
+          <span>No assignments — inherits the parent model and reasoning</span>
         </div>
       )}
-      <div class="toolbar-settings-keep-picker-wrap">
-        <ModelPicker
-          compact
-          dropdownDirection="down"
-          value=""
-          label={availableOptions.length === 0 ? 'No models available' : 'Add model…'}
-          ariaLabel={`Add model to ${label} bucket`}
-          title={`Add model to ${label} bucket`}
-          entries={availableOptions}
-          disabled={availableOptions.length === 0}
-          onChange={addModel}
-        />
+      <div class="toolbar-settings-keep-picker-wrap" ref={pickerWrapRef}>
+        {!pendingModel && (
+          <ModelPicker
+            compact
+            dropdownDirection="down"
+            value=""
+            label={availableOptions.length === 0 ? 'No models available' : 'Add model…'}
+            ariaLabel={`Choose model for ${label} bucket`}
+            title={`Choose model for ${label} bucket`}
+            entries={availableOptions}
+            disabled={availableOptions.length === 0}
+            onChange={(spec) => {
+              setPendingModel(spec);
+            }}
+          />
+        )}
+        {pendingModel && (
+          <div ref={addRowRef} class="toolbar-settings-bucket-add-row" role="group" aria-label={`Add ${labelFor(pendingModel)} to ${label}`}>
+            <span class="toolbar-settings-bucket-add-model">{labelFor(pendingModel)}</span>
+            <div class="toolbar-settings-bucket-levels" role="radiogroup" aria-label="Reasoning level">
+              {pendingSupportedLevels.map((level) => {
+                const option = THINKING_LEVEL_OPTIONS.find((o) => o.value === level)!;
+                const active = pendingThinkingLevel === level;
+                return (
+                  <button
+                    key={level}
+                    type="button"
+                    role="radio"
+                    aria-checked={active}
+                    class={`toolbar-settings-bucket-level${active ? ' selected' : ''}`}
+                    onClick={() => setPendingThinkingLevel(level)}
+                  >
+                    {option.label}
+                  </button>
+                );
+              })}
+            </div>
+            <button
+              type="button"
+              class="toolbar-settings-bucket-add-btn"
+              disabled={!pendingThinkingLevel}
+              onClick={addAssignment}
+            >
+              <svg width="12" height="12" viewBox="0 0 13 13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <line x1="6.5" y1="2.5" x2="6.5" y2="10.5" />
+                <line x1="2.5" y1="6.5" x2="10.5" y2="6.5" />
+              </svg>
+              <span>Add</span>
+            </button>
+            <button
+              type="button"
+              class="toolbar-settings-bucket-cancel-btn"
+              aria-label="Cancel adding model"
+              onClick={cancelAdd}
+            >
+              <svg width="12" height="12" viewBox="0 0 13 13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <line x1="3" y1="3" x2="10" y2="10" />
+                <line x1="10" y1="3" x2="3" y2="10" />
+              </svg>
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -338,7 +468,7 @@ export function SubagentSection({ prefs, onSetPrefs, availableModels, modelEntri
           selected={prefs.subagentBuckets[def.key] ?? []}
           availableModels={availableModels}
           modelEntries={bucketModelEntries}
-          onChange={(models) => onSetPrefs(setBucketModels(prefs, def.key, models))}
+          onChange={(assignments) => onSetPrefs(setBucketAssignments(prefs, def.key, assignments))}
         />
       ))}
 

@@ -280,11 +280,25 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
 
   /** Request one immediate authoritative full snapshot. */
   postState(): void {
+    this.postImmediateState(false);
+  }
+
+  /**
+   * Request an interaction-critical snapshot for an explicit tab selection.
+   * It may supersede an older accepted streaming snapshot rather than making
+   * the click wait for that transcript's commit deadline.
+   */
+  postSelectionState(): void {
+    this.postImmediateState(true);
+  }
+
+  private postImmediateState(priority: boolean): void {
     if (this.scheduleTimer !== undefined) {
       clearTimeout(this.scheduleTimer);
       this.scheduleTimer = undefined;
     }
-    this.delivery.markDirty();
+    if (priority) this.delivery.markPriorityDirty();
+    else this.delivery.markDirty();
     this.armReadinessProbeIfStuck();
   }
 

@@ -71,6 +71,8 @@ export interface RunObserver {
   onModelConfigChanged(sessionPath: string, modelId: string | undefined, thinkingLevel: ThinkingLevel | undefined, provider?: string): void;
   onUnsupportedInputAttempt(sessionPath: string): void;
   onSessionClosed(sessionPath: string): void;
+  /** Scrub analytics when a session enters privacy mode. */
+  setSessionPrivacy?(sessionPath: string, enabled: boolean): Promise<void>;
   replaceSessionPath(oldPath: string, newPath: string): void;
 }
 
@@ -94,6 +96,7 @@ export const NOOP_RUN_OBSERVER: RunObserver = {
   onModelConfigChanged: () => undefined,
   onUnsupportedInputAttempt: () => undefined,
   onSessionClosed: () => undefined,
+  setSessionPrivacy: async () => undefined,
   replaceSessionPath: () => undefined,
 };
 

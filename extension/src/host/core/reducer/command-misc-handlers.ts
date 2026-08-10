@@ -1,11 +1,11 @@
 import { produce } from 'immer';
 
 import type { ArchState } from '../arch-state.js';
+import { isPendingTabPath } from '../../../shared/tab-behavior.js';
 import { mergePruningSettings, mergeToolResultPruningSettings, normalizeComposerInitialRows, normalizeNestedAllowedBuckets, normalizeSubagentBuckets, normalizeUiPathParentDepth, type ChatPrefs, type ComposerInput } from '../../../shared/protocol.js';
 import type { Command } from '../commands.js';
 import type { ReducerResult } from './helpers.js';
 import { addToArray, appendLocalUserMessage, truncateLocalTranscriptAfter } from './helpers.js';
-import { isPendingTabPath } from '../../../shared/tab-behavior.js';
 import { BACKEND_READY_TIMEOUT_MS } from '../../../shared/backend-ready-timeout.js';
 
 export function handleInterrupt(state: ArchState, cmd: Extract<Command, { kind: 'Interrupt' }>): ReducerResult {
@@ -431,6 +431,32 @@ export function handleRespondExtensionUI(state: ArchState, cmd: Extract<Command,
       { kind: 'ExtensionUiResponseRpc', corrId: cmd.corrId, sessionPath: cmd.sessionPath, response: cmd.response },
     ],
   };
+}
+
+export function handleSetPrivacyMode(state: ArchState, cmd: Extract<Command, { kind: 'SetPrivacyMode' }>): ReducerResult {
+  // Pending create/duplicate sentinels are not durable sessions. Ignore a
+  // privacy intent for them rather than racing session.create and later losing
+  // the mode during pending-path replacement.
+  if (!cmd.sessionPath || isPendingTabPath(cmd.sessionPath)) return { state, effects: [] };
+  const nextState = produce(state, (draft) => {
+    if (cmd.enabled) draft.sessions.privacyModeBySession[cmd.sessionPath] = true;
+    else delete draft.sessions.privacyModeBySession[cmd.sessionPath];
+  });
+  const effects = [
+    { kind: 'SetPrivacyMode' as const, corrId: cmd.corrId, sessionPath: cmd.sessionPath, enabled: cmd.enabled },
+    ...(cmd.persist === false ? [] : [{
+      kind: 'PersistTabs' as const,
+      corrId: cmd.corrId,
+      openTabPaths: nextState.sessions.openTabPaths,
+      activeSessionPath: nextState.sessions.activeSessionPath,
+      pinnedTabPaths: nextState.sessions.pinnedTabPaths,
+      pinnedTabGroups: nextState.sessions.pinnedTabGroups,
+      privateSessionPaths: Object.entries(nextState.sessions.privacyModeBySession)
+        .filter(([, enabled]) => enabled)
+        .map(([sessionPath]) => sessionPath),
+    }]),
+  ];
+  return { state: nextState, effects };
 }
 
 export function handleSetPrefs(state: ArchState, cmd: Extract<Command, { kind: 'SetPrefs' }>): ReducerResult {

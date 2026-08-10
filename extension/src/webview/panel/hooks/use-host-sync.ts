@@ -40,6 +40,8 @@ export const EMPTY_VIEW_STATE: ViewState = {
   pinnedTabGroups: [],
   runningSessionPaths: [],
   startingModelSessionPaths: [],
+  compactingSessionPaths: [],
+  lastCompactionBySession: {},
   unreadFinishedSessionPaths: [],
   activeSession: null,
   transcript: [],

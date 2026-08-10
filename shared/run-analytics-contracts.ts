@@ -29,7 +29,7 @@ import type {
 
 // ─── Leaf primitives ────────────────────────────────────────────────────────
 
-export type ThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+export type ThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
 /**
  * Per-assistant-message token usage. Mirrors the fields on the pi-ai `Usage`

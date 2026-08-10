@@ -159,10 +159,14 @@ interface ToolbarChipProps {
   tone?: PanelChipTone;
   /** Tooltip placement; defaults to `'top'` so toolbar tooltips open upward. */
   placement?: 'top' | 'bottom';
+  /** ARIA role for the chip (e.g. `'status'` for live announcements). */
+  role?: JSX.AriaRole;
+  /** ARIA live region mode; pair with `role="status"` for announcements. */
+  ariaLive?: 'off' | 'polite' | 'assertive';
 }
 
-export function ToolbarChip({ label, title, tooltip, tooltipNode, ariaLabel, tone = 'muted', placement = 'top' }: ToolbarChipProps) {
-  return <PanelChip variant="toolbar" tone={tone} label={label} title={title} tooltip={tooltip} tooltipNode={tooltipNode} ariaLabel={ariaLabel} placement={placement} />;
+export function ToolbarChip({ label, title, tooltip, tooltipNode, ariaLabel, tone = 'muted', placement = 'top', role, ariaLive }: ToolbarChipProps) {
+  return <PanelChip variant="toolbar" tone={tone} label={label} title={title} tooltip={tooltip} tooltipNode={tooltipNode} ariaLabel={ariaLabel} placement={placement} role={role} ariaLive={ariaLive} />;
 }
 
 export type ToolbarIndicatorKind = 'tokens' | 'cost' | 'context' | 'speed';

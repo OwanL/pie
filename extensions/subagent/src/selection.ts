@@ -26,7 +26,6 @@ import {
 import { selectModel } from "../bucket-selector.js";
 import { getCapacityAvailableModelIds } from "./provider-capacity.js";
 import type { RuntimeModelRef } from "./runtime-provenance.js";
-import { capSubagentThinkingLevel } from "./thinking-level.js";
 
 /** Runtime input kind a model may accept. Mirrors the pi-ai `Model.input` tuple
  *  element type; kept local so this leaf module does not import the SDK type
@@ -83,6 +82,13 @@ export interface SelectionContext {
 	allowedModelIds: Set<string> | undefined;
 	/** User-configured bucket assignments (read once from the env mirror). */
 	bucketAssignments: BucketAssignments | undefined;
+	/** Exact provider-qualified runtime reasoning support, when the registry
+	 * exposes it through `reasoning` / `thinkingLevelMap`. */
+	runtimeThinkingSupport?: import("../bucket-selector.js").RuntimeThinkingSupport;
+	/** Reasoning level of the immediate caller, from `pi.getThinkingLevel()`.
+	 * Empty buckets and always-parent routing inherit this rather than assuming
+	 * a costly implicit default. */
+	callerThinkingLevel?: ThinkingLevel;
 	/** When true, skip bucket selection and always use the parent's active model. */
 	alwaysParentModel: boolean;
 	/** Opt-in soft routing around providers without an immediately claimable slot. */
@@ -125,7 +131,7 @@ export interface ResolvedModel {
 	thinkingLevel: ThinkingLevel | undefined;
 	selection: {
 		modelId: string;
-		thinkingLevel: ThinkingLevel | undefined;
+		thinkingLevel?: ThinkingLevel;
 		bucket: string;
 		pool: string[];
 		fallback: boolean;
@@ -161,14 +167,13 @@ export async function resolveModel(
 	selectionCtx: SelectionContext,
 	activeModelId: string,
 	perCallBucket?: string,
-	perCallThinkingLevel?: ThinkingLevel,
 	excludeModels?: Set<string>,
 	childDepth?: number,
 ): Promise<ResolvedModel> {
 	const requestedBucket = perCallBucket ?? agent.bucket ?? "medium";
-	// Subagents default to high and never exceed it, even when an old tool call
-	// or agent frontmatter still carries the formerly-supported xhigh value.
-	const thinkingLevel = capSubagentThinkingLevel(perCallThinkingLevel ?? agent.thinkingLevel);
+	// Only bucket assignments select reasoning. Parent-model fallback inherits
+	// the immediate caller's current level; it deliberately has no implicit high.
+	const thinkingLevel = selectionCtx.callerThinkingLevel;
 
 	// Hard model requirement state. An absent/empty requirement preserves
 	// current selection behaviour (no fields are stamped on results). When
@@ -307,21 +312,17 @@ export async function resolveModel(
 		: undefined;
 	const selected = selectModel(
 		bucket,
-		thinkingLevel,
 		assignments,
 		selectionCtx.modelConfig,
 		selectionCtx.allowedModelIds,
 		excludeModels,
 		activeModelId,
+		thinkingLevel,
 		capacityAvailableModelIds,
 		requirementQualifiedModelIds,
+		selectionCtx.runtimeThinkingSupport,
 	);
-	// Model-profile relaxation may return xhigh for unusual profiles that omit
-	// high. Keep the execution metadata and SDK request under the same ceiling.
-	const selection = {
-		...selected,
-		thinkingLevel: capSubagentThinkingLevel(selected.thinkingLevel),
-	};
+	const selection = selected;
 
 	// selectModel falls back to the caller's active model when every eligible
 	// bucket at or below the request is empty. A hard requirement is enforced

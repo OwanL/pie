@@ -27,6 +27,7 @@ function createHandlers() {
     onRetryStarted: (payload) => calls.push({ name: 'retry.started', payload }),
     onRetryEnded: (payload) => calls.push({ name: 'retry.ended', payload }),
     onRetryMeasured: (payload) => calls.push({ name: 'retry.measured', payload }),
+    onCompactionStarted: (payload) => calls.push({ name: 'compaction.started', payload }),
     onCompaction: (payload) => calls.push({ name: 'compaction.ended', payload }),
     onAuxiliaryLlmUsage: (payload) => calls.push({ name: 'auxiliary-llm.usage', payload }),
     onOperationalError: (payload) => calls.push({ name: 'operational-error', payload }),
@@ -227,6 +228,48 @@ test('dispatchSessionBackendEvent routes retry.stuck payloads', () => {
   dispatchSessionBackendEvent({ event: 'retry.stuck', payload }, handlers);
 
   assert.deepEqual(calls, [{ name: 'retry.stuck', payload }]);
+});
+
+test('dispatchSessionBackendEvent routes compaction.started payloads', () => {
+  const { handlers, calls } = createHandlers();
+  const payload = { sessionPath: '/workspace/session.jsonl' };
+
+  dispatchSessionBackendEvent({ event: 'compaction.started', payload }, handlers);
+
+  assert.deepEqual(calls, [{ name: 'compaction.started', payload }]);
+});
+
+test('dispatchSessionBackendEvent routes compaction.ended payloads with token metrics', () => {
+  const { handlers, calls } = createHandlers();
+  const payload = {
+    sessionPath: '/workspace/session.jsonl',
+    occurredAt: 1_700_000_000_000,
+    tokensBefore: 120_000,
+    estimatedTokensAfter: 30_000,
+  };
+
+  dispatchSessionBackendEvent({ event: 'compaction.ended', payload }, handlers);
+
+  assert.deepEqual(calls, [{ name: 'compaction.ended', payload }]);
+});
+
+test('dispatchSessionBackendEvent drops a malformed compaction.started payload', () => {
+  const { handlers, calls } = createHandlers();
+  // Missing `sessionPath` — fails the guard, must be dropped.
+  dispatchSessionBackendEvent({ event: 'compaction.started', payload: {} }, handlers);
+
+  assert.deepEqual(calls, []);
+});
+
+test('dispatchSessionBackendEvent drops a malformed compaction.ended payload', () => {
+  const { handlers, calls } = createHandlers();
+  // `tokensBefore` is a string — fails the guard, must be dropped.
+  dispatchSessionBackendEvent({
+    event: 'compaction.ended',
+    payload: { sessionPath: '/workspace/session.jsonl', tokensBefore: '120000' },
+  }, handlers);
+
+  assert.deepEqual(calls, []);
 });
 
 test('dispatchSessionBackendEvent drops a malformed operational-error payload', () => {

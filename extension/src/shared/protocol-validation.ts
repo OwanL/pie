@@ -180,23 +180,28 @@ function isStringBooleanRecord(value: unknown): value is Record<string, boolean>
   return true;
 }
 
-function isStringArray(value: unknown): value is string[] {
-  return Array.isArray(value) && value.every((entry) => typeof entry === 'string');
-}
-
 function hasOnlyKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
   const allowed = new Set(keys);
   return Object.keys(value).every((key) => allowed.has(key));
 }
 
+/** A valid explicit model/reasoning assignment for a subagent bucket. */
+function isSubagentBucketAssignment(value: unknown): boolean {
+  return isObject(value)
+    && hasOnlyKeys(value, ['model', 'thinkingLevel'])
+    && typeof value.model === 'string'
+    && value.model.trim().length > 0
+    && isThinkingLevel(value.thinkingLevel);
+}
+
 /** A valid `SubagentBuckets` patch: object with optional `small`/`medium`/
- *  `frontier` string-array fields. Extra keys are tolerated (the reducer
- *  normalizes via `resolveChatPrefs`). */
+ * `frontier` assignment-array fields. Extra bucket keys are tolerated (the
+ * reducer normalizes them away), but legacy string entries are rejected. */
 function isSubagentBucketsPatch(value: unknown): boolean {
   if (!isObject(value)) return false;
   for (const key of ['small', 'medium', 'frontier'] as const) {
     const v = value[key];
-    if (v !== undefined && !isStringArray(v)) return false;
+    if (v !== undefined && (!Array.isArray(v) || !v.every(isSubagentBucketAssignment))) return false;
   }
   return true;
 }
@@ -586,6 +591,11 @@ export function validateWebviewToHostMessage(
       if (!validateChatPrefsPatch(value.prefs)) return fail('setPrefs: invalid `prefs` patch');
       return { ok: true, value: value as WebviewToHostMessage };
 
+    case 'setPrivacyMode':
+      if (!isString(value.sessionPath)) return fail('setPrivacyMode: missing string `sessionPath`');
+      if (typeof value.enabled !== 'boolean') return fail('setPrivacyMode: missing boolean `enabled`');
+      return { ok: true, value: value as WebviewToHostMessage };
+
     case 'setPruningSettings':
       if (!validatePruningSettingsPatch(value.settings)) return fail('setPruningSettings: invalid `settings` patch');
       return { ok: true, value: value as WebviewToHostMessage };
@@ -657,6 +667,16 @@ export function validateWebviewToHostMessage(
       if (!isString((value.response as { id?: unknown }).id)) {
         return fail('extensionUiResponse: missing string `response.id`');
       }
+      return { ok: true, value: value as WebviewToHostMessage };
+
+    case 'log':
+      // H4: webview → host log routing. The webview cannot import host
+      // utilities, so it forwards diagnostic logs; the host routes them through
+      // `appendPieLog`. Without this case every webview log produced a
+      // `message.invalid` audit entry (and the log was dropped).
+      if (value.level !== 'warn' && value.level !== 'error') return fail('log: invalid `level`');
+      if (!isString(value.scope)) return fail('log: missing string `scope`');
+      if (!isString(value.message)) return fail('log: missing string `message`');
       return { ok: true, value: value as WebviewToHostMessage };
 
     default:

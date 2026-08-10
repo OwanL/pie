@@ -19,6 +19,10 @@ import {
 test('parseArgs reads sdkPath and cwd and errors when sdkPath is missing', () => {
   assert.deepEqual(parseArgs(['--sdkPath', '/sdk', '--cwd', '/repo']), { sdkPath: '/sdk', cwd: '/repo' });
   assert.deepEqual(parseArgs(['--cwd', '/repo', '--sdkPath', '/sdk']), { sdkPath: '/sdk', cwd: '/repo' });
+  assert.deepEqual(parseArgs(['--sdkPath', '/sdk', '--cwd', '/repo', '--hostPid', '1234']), {
+    sdkPath: '/sdk', cwd: '/repo', hostPid: 1234,
+  });
+  assert.deepEqual(parseArgs(['--sdkPath', '/sdk', '--hostPid', 'not-a-pid']), { sdkPath: '/sdk', cwd: process.cwd() });
   assert.throws(() => parseArgs(['--cwd', '/repo']), /Missing required --sdkPath argument/);
 });
 
@@ -103,5 +107,6 @@ test('runtime prefs and settings validators reject invalid object shapes', () =>
     /resolved session/,
   );
   assert.throws(() => validateSettingsSet({ defaultModel: 123 }), /defaultModel must be a string/);
-  assert.throws(() => validateSettingsSet({ defaultThinkingLevel: 'max' }), /defaultThinkingLevel must be one of/);
+  assert.deepEqual(validateSettingsSet({ defaultThinkingLevel: 'max' }), { defaultThinkingLevel: 'max' });
+  assert.throws(() => validateSettingsSet({ defaultThinkingLevel: 'extreme' }), /defaultThinkingLevel must be one of/);
 });

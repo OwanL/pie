@@ -34,6 +34,7 @@ export interface AppHandlers {
   handleMovePinnedItem: (sourcePath: string, toItemIndex: number) => void;
   handleCancelEdit: () => void;
   handleSetPrefs: (partial: Partial<ChatPrefs>) => void;
+  handleSetPrivacyMode: (enabled: boolean) => void;
   handleSetSystemPromptToggles: (disabledEntries: string[]) => void;
   handleSetPruningSettings: (partial: Partial<PruningSettings>) => void;
   handleSetToolResultPruningSettings: (partial: Partial<ToolResultPruningSettings>) => void;
@@ -124,6 +125,11 @@ export function useAppHandlers(
     postMessage({ type: 'cancelEdit', sessionPath });
   }, [postMessage, activeSessionPathRef]);
   const handleSetPrefs = useCallback((partial: Partial<ChatPrefs>) => postMessage({ type: 'setPrefs', prefs: partial }), [postMessage]);
+  const handleSetPrivacyMode = useCallback((enabled: boolean) => {
+    const sessionPath = activeSessionPathRef.current;
+    if (!sessionPath) return;
+    postMessage({ type: 'setPrivacyMode', sessionPath, enabled });
+  }, [postMessage, activeSessionPathRef]);
   const handleSetSystemPromptToggles = useCallback((disabledEntries: string[]) => {
     const sessionPath = activeSessionPathRef.current;
     if (!sessionPath) return;
@@ -257,6 +263,7 @@ export function useAppHandlers(
       handleMovePinnedItem,
       handleCancelEdit,
       handleSetPrefs,
+      handleSetPrivacyMode,
       handleSetSystemPromptToggles,
       handleSetPruningSettings,
       handleSetToolResultPruningSettings,
@@ -291,6 +298,7 @@ export function useAppHandlers(
       handleMovePinnedItem,
       handleCancelEdit,
       handleSetPrefs,
+      handleSetPrivacyMode,
       handleSetSystemPromptToggles,
       handleSetPruningSettings,
       handleSetToolResultPruningSettings,

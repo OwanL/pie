@@ -130,6 +130,17 @@ test('V2 coercion enforces rubric and index versions', () => {
   assert.equal(coerceSessionReviewV2(wrongIndex), null);
 });
 
+test('V2 coercion accepts consolidation without a redundant frozen ledger', () => {
+  const review = deepClone(RAW_V2_REVIEW);
+  delete review.consolidation.frozenLedger;
+  delete review.consolidation.frozenLedgerSha256;
+  assert.ok(coerceSessionReviewV2(review), 'simplified consolidation (no frozen ledger) is accepted');
+
+  const mismatched = deepClone(RAW_V2_REVIEW);
+  mismatched.consolidation.frozenLedgerSha256 = '0'.repeat(64);
+  assert.equal(coerceSessionReviewV2(mismatched), null, 'supplied consolidation frozen ledger must still match');
+});
+
 test('V2 coercion accepts mixed and small-only profiles with matching orchestration buckets', () => {
   assert.ok(coerceSessionReviewV2(deepClone(RAW_V2_REVIEW)), 'small+medium profile is accepted');
   const smallOnly = asSmallOnly(RAW_V2_REVIEW);

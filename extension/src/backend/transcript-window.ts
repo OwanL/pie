@@ -5,6 +5,7 @@ import type {
 } from '../shared/protocol';
 import { TRANSCRIPT_WINDOW_BUDGETS } from '../shared/transcript-window';
 import { compactDurableMessageDetails } from '../shared/lazy-details';
+import { buildSessionUsageSnapshot, type SessionUsageSnapshot } from '../shared/session-usage';
 import { mapTranscript, type SessionEntryLike } from './transcript';
 
 export interface DisplayTranscriptCache {
@@ -12,6 +13,8 @@ export interface DisplayTranscriptCache {
   transcript: ChatMessage[];
   /** Compact transport projection used by ordinary transcript windows. */
   transportTranscript?: ChatMessage[];
+  /** Whole-branch usage derived with the durable transcript projection. */
+  sessionUsage: SessionUsageSnapshot;
   hasUserMessages: boolean;
   branchEntryCount: number;
   branchLastEntryId?: string;
@@ -125,10 +128,12 @@ function deriveCacheFingerprint(entries: SessionEntryLike[]): {
 export function buildDisplayTranscriptCache(entries: SessionEntryLike[], sessionPath = ''): DisplayTranscriptCache {
   const transcript = mapTranscript(entries);
   const transportTranscript = transcript.map((message) => compactDurableMessageDetails(message, sessionPath));
+  const sessionUsage = buildSessionUsageSnapshot(transcript);
   const { branchEntryCount, branchLastEntryId } = deriveCacheFingerprint(entries);
   return {
     transcript,
     transportTranscript,
+    sessionUsage,
     hasUserMessages: transcript.some((message) => message.role === 'user'),
     branchEntryCount,
     branchLastEntryId,

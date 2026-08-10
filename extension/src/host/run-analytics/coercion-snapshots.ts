@@ -359,6 +359,7 @@ function buildRunSnapshot(candidate: Partial<RunSnapshot>): RunSnapshot {
     finalizedAt: c.finalizedAt,
     finalizationReason,
     modelId: c.modelId,
+    provider: typeof candidate.provider === 'string' ? candidate.provider : undefined,
     thinkingLevel: c.thinkingLevel as ThinkingLevel | undefined,
     mixedModelConfig: c.mixedModelConfig,
     mixedTreatmentConfig: candidate.mixedTreatmentConfig === true,

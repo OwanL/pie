@@ -31,6 +31,8 @@ export interface PanelMainProps {
   transcriptWindow: ViewState['transcriptWindow'];
   transcriptLoaded: ViewState['transcriptLoaded'];
   busy: ViewState['busy'];
+  /** True while the active session runs a history-compaction LLM call. */
+  compacting: boolean;
   liveTurnPhase: ViewState['liveTurnPhase'];
   prefs: ViewState['prefs'];
   pruningSettings: ViewState['pruningSettings'];
@@ -82,6 +84,7 @@ export const PanelMain = memo(function PanelMain({
   transcriptWindow,
   transcriptLoaded,
   busy,
+  compacting,
   liveTurnPhase,
   prefs,
   pruningSettings,
@@ -138,6 +141,7 @@ export const PanelMain = memo(function PanelMain({
           transcriptWindow={transcriptWindow}
           transcriptLoaded={transcriptLoaded}
           busy={busy}
+          compacting={compacting}
           liveTurnPhase={liveTurnPhase}
           prefs={prefs}
           pruningSettings={pruningSettings}

@@ -145,6 +145,11 @@ test('tagged review pipeline survives history compaction and backend restart', a
     assert.equal(persisted.components[1].modelId, 'model-classification-medium');
     assert.equal(persisted.provenance.orchestratorSessionId, 'self-id');
 
+    const closed = await restartedTool.execute('close-target', {
+      action: 'closeReviewed', sessionId: 'target-id', reviewId: recorded.details.review.reviewId, sessionPath: targetPath,
+    }, undefined, undefined, ctx);
+    assert.equal(closed.isError, false, closed.content[0].text);
+
     const laterEvidence = await restartedTool.execute('later-evidence', { action: 'getEvidence', sessionPath: laterTargetPath }, undefined, undefined, ctx);
     assert.equal(laterEvidence.isError, false);
     const laterStatus = await restartedTool.execute('later-status', { action: 'getReviewStatus', sessionId: 'later-target-id' }, undefined, undefined, ctx);
@@ -318,7 +323,7 @@ test('recovery rejects non-reviewer agents and role-inappropriate requested buck
   }
 });
 
-test('selected human verification is evidence-current, exact, and required before recording', () => {
+test('selected human verification is evidence-current and optional during recovery', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'session-review-human-recovery-'));
   const selfPath = path.join(dir, 'self.jsonl');
   const manifest: EvidenceManifest = {
@@ -353,11 +358,11 @@ test('selected human verification is evidence-current, exact, and required befor
     appendCompletePipeline(selfPath, 'target-id', reviewEvidenceKey(manifest), selected);
     appendAnswer('mismatched-answer', 'Is some unrelated behavior correct?');
 
-    assert.equal(getReviewRecoveryStatus(selfPath, 'target-id', manifest).next, 'human-verification');
-    assert.throws(() => compileRecoveredReview({
+    assert.equal(getReviewRecoveryStatus(selfPath, 'target-id', manifest).next, 'ready-to-record');
+    assert.equal(compileRecoveredReview({
       orchestratorPath: selfPath, orchestratorSessionId: 'self-id', sessionId: 'target-id',
       sessionPathAtReview: 'target.jsonl', evidenceManifest: manifest,
-    }), /human verification must be completed/);
+    }).humanCheck, undefined);
 
     appendAnswer('current-answer', selected.proposedQuestion);
     assert.equal(getReviewRecoveryStatus(selfPath, 'target-id', manifest).next, 'ready-to-record');

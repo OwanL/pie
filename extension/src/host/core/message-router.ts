@@ -14,6 +14,7 @@ import { resolveSettingsPath } from '../util/settings-path';
 export interface SidebarProviderLike {
   reveal(): void;
   postState(): void;
+  postSelectionState?(): void;
   postImperative(msg: any): void;
 }
 
@@ -217,6 +218,9 @@ export class MessageRouter {
 
       case 'setPrefs':
         return this.onSetPrefs(msg as Extract<WebviewToHostMessage, { type: 'setPrefs' }>);
+
+      case 'setPrivacyMode':
+        return this.onSetPrivacyMode(msg as Extract<WebviewToHostMessage, { type: 'setPrivacyMode' }>);
 
       case 'setPruningSettings':
         return await this.onSetPruningSettings(msg as Extract<WebviewToHostMessage, { type: 'setPruningSettings' }>);
@@ -534,7 +538,10 @@ export class MessageRouter {
     // could not restore the previous active tab on failure.
     this.dispatchEvent({ kind: 'Command', cmd: { kind: 'SetEditingMessage', corrId: crypto.randomUUID(), sessionPath: msg.sessionPath, messageId: null } });
     this.service.openSession(msg.sessionPath);
-    this.sidebarProvider.postState();
+    // Explicit selection is interaction-critical: do not make it wait behind
+    // an accepted streaming snapshot's transcript-commit gate.
+    if (this.sidebarProvider.postSelectionState) this.sidebarProvider.postSelectionState();
+    else this.sidebarProvider.postState();
   }
 
   private onDuplicateSession(msg: Extract<WebviewToHostMessage, { type: 'duplicateSession' }>): void {
@@ -810,6 +817,20 @@ export class MessageRouter {
       kind: 'Command',
       cmd: { kind: 'SetPrefs', corrId: crypto.randomUUID(), prefs: msg.prefs },
     });
+  }
+
+  private onSetPrivacyMode(msg: Extract<WebviewToHostMessage, { type: 'setPrivacyMode' }>): void {
+    if (!msg.sessionPath || !this.getArchState().sessions.openTabPaths.includes(msg.sessionPath)) return;
+    this.dispatchEvent({
+      kind: 'Command',
+      cmd: {
+        kind: 'SetPrivacyMode',
+        corrId: crypto.randomUUID(),
+        sessionPath: msg.sessionPath,
+        enabled: msg.enabled,
+      },
+    });
+    this.scheduleRender();
   }
 
   private async onSetPruningSettings(msg: Extract<WebviewToHostMessage, { type: 'setPruningSettings' }>): Promise<void> {

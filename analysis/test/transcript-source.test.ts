@@ -68,6 +68,19 @@ test('reconstructs only the active parentId branch', () => {
   assert.deepEqual(summary.attributions.map((row) => [row.modelId, row.thinkingLevel]), [['active-model', 'high']]);
 });
 
+test('max thinking level is preserved in transcript attribution', () => {
+  const raw = transcript([
+    header(),
+    { type: 'thinking_level_change', id: 'think', parentId: null, timestamp: '2026-01-01T00:00:00.500Z', thinkingLevel: 'max' },
+    user('user', 'think', 'active prompt'),
+    assistant('active', 'user', 'active-model', 'stop', 100),
+  ]);
+
+  const summary = summarizeTranscriptJsonl(raw, 'C:\\Repo\\session.jsonl');
+  assert.ok(summary);
+  assert.deepEqual(summary.attributions.map((row) => [row.modelId, row.thinkingLevel]), [['active-model', 'max']]);
+});
+
 test('excludes failed-only model attempts from attribution and retains terminal counts', () => {
   const summary = summarizeTranscriptJsonl(transcript([
     header(), user('u', null, 'prompt'),

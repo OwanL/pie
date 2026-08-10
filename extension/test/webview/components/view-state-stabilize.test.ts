@@ -19,9 +19,9 @@ test('pickStable reuses full structured-cloned prefs with nested JSON-like confi
   const stable = structuredClone({
     ...DEFAULT_CHAT_PREFS,
     subagentBuckets: {
-      small: ['small-model'],
-      medium: ['medium-model'],
-      frontier: ['frontier-model'],
+      small: [{ model: 'test/small-model', thinkingLevel: 'low' }],
+      medium: [{ model: 'test/medium-model', thinkingLevel: 'medium' }],
+      frontier: [{ model: 'test/frontier-model', thinkingLevel: 'high' }],
     },
     subagentProviderTogglesBySession: {
       '/session/a': { openai: true, anthropic: false },
@@ -39,8 +39,8 @@ test('pickStable adopts a structured-cloned prefs candidate after a nested leaf 
   const stable = structuredClone({
     ...DEFAULT_CHAT_PREFS,
     subagentBuckets: {
-      small: ['small-model'],
-      medium: ['medium-model'],
+      small: [{ model: 'test/small-model', thinkingLevel: 'low' }],
+      medium: [{ model: 'test/medium-model', thinkingLevel: 'medium' }],
       frontier: [],
     },
     subagentProviderTogglesBySession: {

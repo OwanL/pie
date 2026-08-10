@@ -427,9 +427,6 @@ export function compileRecoveredReview(input: {
   evidenceManifest: EvidenceManifest;
 }): SessionReviewV2 {
   const pieces = recoverPieces(input.orchestratorPath, input.sessionId, reviewEvidenceKey(input.evidenceManifest));
-  if (pieces.consolidation.selectedHumanQuestion && !pieces.humanCheck) {
-    throw new Error('selected human verification must be completed before recording a recovered review');
-  }
   const draft: SessionReviewDraft = {
     sessionId: input.sessionId,
     sessionPathAtReview: input.sessionPathAtReview,
@@ -458,7 +455,7 @@ export interface ReviewRecoveryStatus {
   completedRoles: ReviewWorkflowRole[];
   invalidRoles: Array<{ role: ReviewWorkflowRole; error: string }>;
   missingRoles: ReviewWorkflowRole[];
-  next: ReviewWorkflowRole | 'human-verification' | 'ready-to-record';
+  next: ReviewWorkflowRole | 'ready-to-record';
   handoff?: unknown;
 }
 
@@ -513,10 +510,6 @@ export function getReviewRecoveryStatus(orchestratorPath: string, sessionId: str
   }
 
   const humanCheck = recoverHumanCheck(index, sessionId, consolidation.selectedHumanQuestion, consolidationRole.result.line);
-  if (consolidation.selectedHumanQuestion && !humanCheck) {
-    return response('human-verification', { selectedHumanQuestion: consolidation.selectedHumanQuestion });
-  }
-
   const components = new Map<ReviewWorkflowRole, ReviewerAssessmentDraft>();
   for (const role of ['classification-small', 'classification-medium'] as const) {
     const value = recovered.get(role);

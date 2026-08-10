@@ -1,6 +1,6 @@
 ---
 name: evaluate-sessions
-description: "Use when asked to assess, audit, grade, benchmark, or review one or more agent sessions or their delivered work—especially requirement attainment, outcome quality, process discipline, evidence, or the accuracy of final claims. Apply an evidence-based session-evaluation workflow with blinded review, scoped human verification, and explicit target closure; not ordinary code review, debugging, or implementation."
+description: "Use when asked to assess, audit, grade, benchmark, or review one or more agent sessions or their delivered work—especially requirement attainment, outcome quality, process discipline, evidence, or the accuracy of final claims. Apply an evidence-based session-evaluation workflow with blinded review and explicit target closure; not ordinary code review, debugging, or implementation."
 ---
 
 # Evaluate sessions
@@ -26,7 +26,7 @@ Do not use it for ordinary code review, debugging, implementation, or general fe
   evidence to weigh, not proof.
 - Freeze the requirements before classifying results. Retain changed or withdrawn
   requirements as `superseded`.
-- Human responses are evidence for one criterion or surface, never an overall score.
+- If available, human responses are evidence for one criterion or surface, never an overall score; human input is not required to complete a review.
 - Persist before closing. Never write sidecars, import the internal store, fabricate
   provenance, or replace the review tool with a script.
 
@@ -117,7 +117,7 @@ recovers and validates them itself.
    all-open request.
 2. Partition once into unreviewed and already-reviewed targets.
 3. Queue already-reviewed targets for closure using their existing review IDs.
-4. Work through unreviewed targets one at a time using phases 2–7 below.
+4. Work through unreviewed targets one at a time using phases 2–6 below.
 
 After backend restart or history compaction, list again and call `getReviewStatus` for
 the current target. It rehydrates issued evidence manifests and completed tagged roles
@@ -144,14 +144,7 @@ Require JSON only:
       "surface": ["application_logic"],
       "evidenceMode": ["static_inspection"]
     }
-  }],
-  "candidateHumanQuestion": {
-    "criterionId": "stable-id",
-    "domain": "surface",
-    "expectedObservation": "neutral expected observation",
-    "proposedQuestion": "neutral question",
-    "options": ["Observed", "Not observed", "Unable to check"]
-  }
+  }]
 }
 ```
 
@@ -163,9 +156,9 @@ evidence mode `automated_check`, `runtime_observation`, `human_observation`,
 `external_confirmation`, `reasoning_or_sources`, `other`. `origin` also permits
 `necessary_implied`; importance also permits `supporting` and `optional`.
 
-Omit `candidateHumanQuestion` when unnecessary. Do not classify, ask users, run tools,
-or choose an overall. Call `getReviewStatus` after the results. An invalid latest role
-is a phase-boundary failure: retry only that role with the same bundle and workflow ref.
+Do not classify, ask users, run tools, or choose an overall. Call `getReviewStatus`
+after the results. An invalid latest role is a phase-boundary failure: retry only that
+role with the same bundle and workflow ref.
 
 ### 3. Consolidate and freeze
 
@@ -186,29 +179,15 @@ same evidence bundle to one fresh coordinator, requested `medium`, using the
 }
 ```
 
-Optionally add `selectedHumanQuestion` using the proposal question object shape when one
-is material. Do not classify or
-modify the frozen ledger after this role. Call `getReviewStatus` to validate and obtain
-the next handoff.
+Do not classify or modify the frozen ledger after this role. Call `getReviewStatus` to
+validate and obtain the next handoff.
 
-### 4. Optional human verification
-
-If status reports `human-verification`, ask exactly the selected neutral question with
-minimum observation steps and observed/not-observed/unable options. Bind `reviewMeta`
-to the target ID/path and the selected criterion/domain/expected observation. The tool
-recovers the complete call and response from JSONL, so do not transcribe it elsewhere.
-After the answer, call `getReviewStatus` again.
-
-Ask only for materially human-observable behavior: visual/interaction behavior,
-semantics/tone, accessibility, external accounts, devices, or permission boundaries.
-Cancellation or no answer remains valid unavailable evidence.
-
-### 5. Fresh independent classification
+### 4. Fresh independent classification
 
 Give both fresh classifiers the exact same evidence bundle, immutable ledger from
 status, and recovered human response if present. Request `small` for
-`classification-small`, `medium` for `classification-medium`, and
-`thinkingLevel: medium` for both. Require JSON only:
+`classification-small` and `medium` for `classification-medium`; each bucket's
+user-configured assignment owns the model and reasoning level. Require JSON only:
 
 ```json
 {
@@ -241,7 +220,7 @@ criterion-classification table above. Do not repeat criterion definitions, propo
 overall, mutate the ledger, ask users, run tools, or write records. Call
 `getReviewStatus`; retry only an invalid/missing role.
 
-### 6. Reconcile only when requested
+### 5. Reconcile only when requested
 
 `getReviewStatus` deterministically compares validated components. If it reports
 `adjudication`, give a fresh `medium`, high-thinking adjudicator the exact status
@@ -264,7 +243,7 @@ reason field. Do not alter the ledger or resolve non-material differences; the t
 performs permitted deterministic merges, unions limitations, and selects lower
 confidence. Call `getReviewStatus` after adjudication.
 
-### 7. Persist and close immediately
+### 6. Persist and close immediately
 
 When status reports `ready-to-record`, call `recordRecoveredReview` with the target
 session ID. It reconstructs the compact draft, reviewer outputs, human evidence,
@@ -274,11 +253,14 @@ metadata, or use raw session scripts.
 
 After a successful or duplicate record, call `closeReviewed` immediately with the
 returned review ID. A pending/retrying outbox action is a valid asynchronous closure
-request. Only then proceed to the next target. This per-target commit boundary ensures
-a later failure cannot discard completed reviews.
+request. Only then proceed to the next target. The tool enforces this one-target
+commit boundary so later evidence cannot create a large parallel context or discard
+completed reviews.
 
-After every target closure has been requested and failures reported, call `closeSelf`.
-It must be the last tool call.
+Do not call `closeSelf` as routine cleanup. The evaluator is not one of the pinned
+targets: leave it open after a completed review, or after a blocker such as a reviewer
+429. Only if the user explicitly asks to close this evaluator session may you call
+`closeSelf` with `confirmSelf: true`, as the final tool call.
 
 ## Tool contract
 
@@ -289,15 +271,18 @@ Use only these session-review actions:
 - `getReviewStatus` — recover/validate tagged roles and return the next bounded handoff;
 - `recordRecoveredReview` — compile and persist a ready tagged pipeline;
 - `closeReviewed` / `closeReviewedBatch` — enqueue target closure;
-- `closeSelf` — enqueue evaluator closure.
+- `closeSelf` — enqueue evaluator closure only with `confirmSelf: true` after an explicit user request.
 
 The direct `recordReview`/`recordReviews` actions are legacy compatibility routes, not
-part of this workflow. Use `subagent` only with status-issued workflow refs. Use
-`ask_user` only for phase-4 human verification. If a required role remains unavailable
-after one identical retry, report the blocker and leave only that target unreviewed.
+part of this workflow. The tool rejects evidence/review work for a second target until
+the current target has been recorded and its closure requested. Use `subagent` only
+with status-issued workflow refs. Human input is not required by this workflow. If a
+required role remains unavailable after one identical retry, report the blocker, leave
+that target unreviewed, and keep the evaluator session open.
 
 ## Final response
 
 Give a compact per-target summary: session ID/path, new or existing review ID, delivered
 and controllable attainment, confidence, closure status, and important limitations.
-Then call `closeSelf` as the final tool action and make no further tool calls.
+Do not close the evaluator session unless the user explicitly requested that; if so,
+call `closeSelf` with `confirmSelf: true` as the final tool action.

@@ -204,6 +204,7 @@ function finalizeSessionOpening(
   sessionPath: string,
   selectionToken: SessionOpenedPayload['selectionToken'],
 ): void {
+  deps.state.markSessionRuntimeKnown(sessionPath);
   deps.state.touchSessionTranscript(sessionPath);
   deps.state.evictInactiveTranscriptWindows();
   deps.state.finishSelectionRequest(selectionToken);

@@ -37,6 +37,7 @@ import type {
   ActiveRunSummary,
   UserContentPart,
   InlineEditDraft,
+  LastCompactionSummary,
 } from '../../shared/protocol';
 import type { NoticeKind } from '../../shared/error-mapping.js';
 import type { LivePipelineState, LiveTurnPhase } from '../../shared/live-pipeline-protocol.js';
@@ -107,6 +108,15 @@ export interface SessionsState {
   pinnedTabGroups: string[][];
   /** Session paths currently streaming a response. */
   runningSessionPaths: string[];
+  /** Session paths currently running a history-compaction (`/compact`) LLM
+   *  call. Always a subset of `runningSessionPaths` (the backend re-arms busy
+   *  while compacting); tracked separately so the UI can show a live
+   *  "Compacting…" indicator instead of a generic busy state. */
+  compactingSessionPaths: string[];
+  /** Most recent completed compaction per session (absent entry = none since
+   *  host start). Drives the transient "Compacted · freed N tokens" chip;
+   *  entries expire via the `ClearLastCompaction` effect. */
+  lastCompactionBySession: Record<string, LastCompactionSummary | null>;
   /** Sessions that finished while not the active tab. */
   unreadFinishedSessionPaths: string[];
   /** Currently viewed session path. */
@@ -115,6 +125,10 @@ export interface SessionsState {
   workspaceCwd: string | null;
   /** Per-session analytics factors (used for pruning catalog). */
   analyticsFactorsBySession: Record<string, SessionAnalyticsFactors | null>;
+  /** Session-scoped privacy mode. Only the path marker is persisted so a host
+   *  restart cannot reopen a private session as ordinary; transcript/content is
+   *  never persisted through this field and the marker is removed on close. */
+  privacyModeBySession: Record<string, boolean>;
   /** Per-session interrupt-in-flight flag (formerly SessionArchState). */
   interruptInFlightBySession: Record<string, boolean>;
   /** Per-session live auto-retry status (absent entry = no retry in flight).
@@ -467,10 +481,13 @@ export function createInitialArchState(): ArchState {
       pinnedTabPaths: [],
       pinnedTabGroups: [],
       runningSessionPaths: [],
+      compactingSessionPaths: [],
+      lastCompactionBySession: {},
       unreadFinishedSessionPaths: [],
       activeSessionPath: null,
       workspaceCwd: null,
       analyticsFactorsBySession: {},
+      privacyModeBySession: {},
       interruptInFlightBySession: {},
       retryStatusBySession: {},
       reviewClosedRunningPaths: [],

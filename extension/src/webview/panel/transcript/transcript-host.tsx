@@ -3,9 +3,9 @@
 
 /**
  * TranscriptHost renders a single TranscriptSurface for the active session
- * path only. Switching tabs remounts the surface for the newly active path,
- * so virtualizer measurements, scroll position, and collapsible state reset
- * on each tab switch (no hidden-but-mounted inactive surfaces are kept).
+ * path only. Switching tabs updates that surface in place; sessionKey resets
+ * session-scoped virtualizer, scroll, and render state without remounting the
+ * host or surface.
  */
 
 import type {
@@ -45,6 +45,7 @@ const TranscriptSurface = memo(function TranscriptSurface({
   transcriptLoaded,
   loadingStatus,
   busy,
+  compacting,
   liveTurnPhase,
   prefs,
   pruningSettings,
@@ -83,6 +84,7 @@ const TranscriptSurface = memo(function TranscriptSurface({
         transcriptLoaded={transcriptLoaded}
         loadingStatus={loadingStatus}
         busy={busy}
+        compacting={compacting}
         liveTurnPhase={liveTurnPhase}
         prefs={prefs}
         pruningSettings={pruningSettings}
@@ -117,6 +119,7 @@ export interface TranscriptHostProps {
   transcriptLoaded: boolean;
   loadingStatus?: string;
   busy: boolean;
+  compacting?: boolean;
   liveTurnPhase?: TranscriptVirtualListProps['liveTurnPhase'];
   prefs: ChatPrefs;
   pruningSettings: PruningSettings;
@@ -159,6 +162,7 @@ export function TranscriptHost({
   transcriptLoaded,
   loadingStatus,
   busy,
+  compacting,
   liveTurnPhase,
   prefs,
   pruningSettings,
@@ -333,7 +337,6 @@ export function TranscriptHost({
     >
       {activeSessionPath && openTabPaths.includes(activeSessionPath) && (
         <TranscriptSurface
-          key={activeSessionPath}
           sessionPath={activeSessionPath}
           isActive
           sessionKey={sessionKey ?? activeSessionPath}
@@ -342,6 +345,7 @@ export function TranscriptHost({
           transcriptLoaded={transcriptLoaded}
           loadingStatus={loadingStatus}
           busy={busy}
+          compacting={compacting}
           liveTurnPhase={liveTurnPhase}
           prefs={prefs}
           pruningSettings={pruningSettings}

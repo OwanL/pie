@@ -304,6 +304,7 @@ export type Command =
   | SetModelCommand
   | HydrateModelCommand
   | SetPrefsCommand
+  | SetPrivacyModeCommand
   | SelectSessionCommand
   | CloseTabCommand
   | OpenFileDiffCommand
@@ -347,6 +348,16 @@ export interface HydrateModelCommand extends CommandBase {
 export interface SetPrefsCommand extends CommandBase {
   kind: 'SetPrefs';
   prefs: Partial<ChatPrefs>;
+}
+
+/** Toggle host-only privacy mode for one session. */
+export interface SetPrivacyModeCommand extends CommandBase {
+  kind: 'SetPrivacyMode';
+  sessionPath: string;
+  enabled: boolean;
+  /** Startup hydration updates host state without rewriting stale retry
+   *  markers before their backend forget operation runs. */
+  persist?: boolean;
 }
 
 export interface SelectSessionCommand extends CommandBase {

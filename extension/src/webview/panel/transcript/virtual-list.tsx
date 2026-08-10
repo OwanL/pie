@@ -20,7 +20,7 @@ import type {
 } from './types';
 import { TranscriptVirtualRow } from './virtual-list-row';
 import { extractRangeWithPinnedIndexes } from './virtual-range';
-import { buildTranscriptRows, estimateTranscriptRowSize, type TranscriptRow } from './virtual-list-rows';
+import { buildTranscriptRows, estimateTranscriptRowSize, scopeTranscriptRowsToSession, type TranscriptRow } from './virtual-list-rows';
 
 
 
@@ -35,20 +35,24 @@ function getRowRole(row: TranscriptRow | undefined): string | null {
 }
 
 function useTranscriptRows({
+  sessionKey,
   transcript,
   systemPrompts,
   transcriptWindow,
   busy,
+  compacting,
   liveTurnPhase,
   prefs,
   pruningSettings,
   pendingAssistantModelId,
   pendingAssistantThinkingLevel,
 }: {
+  sessionKey: string | null;
   transcript: ChatMessage[];
   systemPrompts: SystemPromptEntry[];
   transcriptWindow: TranscriptWindow;
   busy: boolean;
+  compacting?: boolean;
   liveTurnPhase?: TranscriptVirtualListProps['liveTurnPhase'];
   prefs: ChatPrefs;
   pruningSettings: PruningSettings;
@@ -57,15 +61,16 @@ function useTranscriptRows({
 }) {
   const activityState = useMemo(() => deriveTurnActivityState({
     busy,
+    compacting,
     transcript,
     prefs,
     pruningSettings,
     pendingAssistantModelId,
     pendingAssistantThinkingLevel,
     liveTurnPhase,
-  }), [busy, transcript, prefs, pruningSettings, pendingAssistantModelId, pendingAssistantThinkingLevel, liveTurnPhase]);
+  }), [busy, compacting, transcript, prefs, pruningSettings, pendingAssistantModelId, pendingAssistantThinkingLevel, liveTurnPhase]);
 
-  const rows = useMemo(() => buildTranscriptRows({
+  const rows = useMemo(() => scopeTranscriptRowsToSession(buildTranscriptRows({
     transcript,
     systemPromptCount: systemPrompts.length,
     hasOlder: transcriptWindow.hasOlder,
@@ -77,7 +82,7 @@ function useTranscriptRows({
     activityState,
     pendingAssistantModelId,
     pendingAssistantThinkingLevel,
-  }), [systemPrompts.length, transcript, transcriptWindow.hasOlder, transcriptWindow.hasNewer, transcriptWindow.loadedStart, transcriptWindow.loadedEnd, transcriptWindow.totalCount, busy, prefs.showPruningMessages, activityState, pendingAssistantModelId, pendingAssistantThinkingLevel]);
+  }), sessionKey), [sessionKey, systemPrompts.length, transcript, transcriptWindow.hasOlder, transcriptWindow.hasNewer, transcriptWindow.loadedStart, transcriptWindow.loadedEnd, transcriptWindow.totalCount, busy, prefs.showPruningMessages, activityState, pendingAssistantModelId, pendingAssistantThinkingLevel]);
 
   return rows;
 }
@@ -305,6 +310,7 @@ export function TranscriptVirtualList({
   transcript,
   transcriptWindow,
   busy,
+  compacting,
   liveTurnPhase,
   prefs,
   pruningSettings,
@@ -326,10 +332,12 @@ export function TranscriptVirtualList({
   onCancelPrepass,
 }: TranscriptVirtualListProps) {
   const rows = useTranscriptRows({
+    sessionKey,
     transcript,
     systemPrompts,
     transcriptWindow,
     busy,
+    compacting,
     liveTurnPhase,
     prefs,
     pruningSettings,

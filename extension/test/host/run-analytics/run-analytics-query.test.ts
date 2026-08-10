@@ -61,6 +61,7 @@ test('queryRunAnalyticsStore returns finalized snapshots and checkpointed open r
       });
       draft.settings.modelSettings = {
         defaultModel: 'claude',
+        defaultProvider: 'anthropic',
         defaultThinkingLevel: 'medium',
       };
       draft.sessions.analyticsFactorsBySession[sessionPath] = ANALYTICS_FACTORS;
@@ -88,10 +89,12 @@ test('queryRunAnalyticsStore returns finalized snapshots and checkpointed open r
     assert.equal(secondRunId, 'id-3');
     assert.equal(result.completedRuns.length, 1);
     assert.equal(result.completedRuns[0]?.runId, 'id-1');
+    assert.equal(result.completedRuns[0]?.provider, 'anthropic');
     assert.equal(result.completedRuns[0]?.experimentAssignment, 'treatment-a');
     assert.equal(result.completedRuns[0]?.analyticsFactors?.promptHash, 'prompt-hash');
     assert.equal(result.openRuns.length, 1);
     assert.equal(result.openRuns[0]?.runId, 'id-3');
+    assert.equal(result.openRuns[0]?.provider, 'anthropic');
 
     await stats.shutdown();
   });

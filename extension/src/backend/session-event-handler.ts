@@ -1635,6 +1635,10 @@ export function handleSdkSessionEvent(
       // (whether successful or not).
       context.compactionStartedAt = Date.now();
       deps.emitBusyChanged(context, true);
+      // Host-facing signal so the UI can show a live "Compacting…" indicator
+      // (compaction emits no message_start/message_end, so busy alone reads as
+      // a generic run).
+      deps.emit('compaction.started', { sessionPath: context.sessionPath });
       return;
     }
     case 'compaction_end': {
@@ -1667,8 +1671,17 @@ export function handleSdkSessionEvent(
       // so a later `compaction_start` (re-arm) does not inherit a stale mark.
       context.compactionStartedAt = undefined;
       // Emit a host-facing signal so run-analytics can count this billable
-      // compaction LLM call against the run.
-      deps.emit('compaction.ended', { sessionPath: context.sessionPath });
+      // compaction LLM call against the run, and so the UI can clear its
+      // "Compacting…" indicator and surface a "Compacted" chip. Token metrics
+      // come from the SDK result when the compaction produced one.
+      deps.emit('compaction.ended', {
+        sessionPath: context.sessionPath,
+        occurredAt: Date.now(),
+        ...(event.result ? {
+          tokensBefore: readTokenCount((event.result as { tokensBefore?: unknown }).tokensBefore),
+          estimatedTokensAfter: readPostCompactionEstimatedTokens(event.result),
+        } : {}),
+      });
       return;
     }
     case 'auto_retry_start': {

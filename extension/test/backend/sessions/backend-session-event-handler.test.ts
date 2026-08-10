@@ -91,6 +91,60 @@ function createDeps(options: { captureLive?: boolean } = {}) {
   };
 }
 
+test('compaction_start emits compaction.started and re-arms busy', () => {
+  const { deps, emitted, busy } = createDeps();
+  const context = createContext();
+
+  handleSdkSessionEvent(deps, context, { type: 'compaction_start', reason: 'threshold' });
+
+  assert.deepEqual(busy, [true]);
+  assert.deepEqual(emitted, [{ event: 'compaction.started', payload: { sessionPath: context.sessionPath } }]);
+});
+
+test('compaction_end emits compaction.ended with token metrics and occurredAt', () => {
+  const { deps, emitted } = createDeps();
+  const context = createContext();
+
+  handleSdkSessionEvent(deps, context, { type: 'compaction_start', reason: 'threshold' });
+  emitted.length = 0; // drop the started event; assert only the ended payload
+  handleSdkSessionEvent(deps, context, {
+    type: 'compaction_end',
+    reason: 'threshold',
+    result: {
+      summary: 'Condensed history',
+      firstKeptEntryId: 'kept-entry',
+      tokensBefore: 100_000,
+      estimatedTokensAfter: 12_345.9,
+      details: {},
+    },
+  });
+
+  assert.equal(emitted.length, 1);
+  assert.equal(emitted[0].event, 'compaction.ended');
+  const payload = emitted[0].payload as { sessionPath: string; occurredAt: number; tokensBefore: number; estimatedTokensAfter: number };
+  assert.equal(payload.sessionPath, context.sessionPath);
+  assert.equal(typeof payload.occurredAt, 'number');
+  assert.equal(payload.tokensBefore, 100_000);
+  assert.equal(payload.estimatedTokensAfter, 12_345);
+});
+
+test('compaction_end emits compaction.ended without token metrics when the result is absent', () => {
+  const { deps, emitted } = createDeps();
+  const context = createContext();
+
+  handleSdkSessionEvent(deps, context, { type: 'compaction_start', reason: 'threshold' });
+  emitted.length = 0;
+  handleSdkSessionEvent(deps, context, { type: 'compaction_end', reason: 'threshold' });
+
+  assert.equal(emitted.length, 1);
+  assert.equal(emitted[0].event, 'compaction.ended');
+  const payload = emitted[0].payload as Record<string, unknown>;
+  assert.equal(payload.sessionPath, context.sessionPath);
+  assert.equal(typeof payload.occurredAt, 'number');
+  assert.equal('tokensBefore' in payload, false);
+  assert.equal('estimatedTokensAfter' in payload, false);
+});
+
 test('compaction_end publishes the SDK post-compaction estimate immediately', () => {
   const { deps, contextUsageEstimates, sessionOpened } = createDeps();
   const context = createContext();

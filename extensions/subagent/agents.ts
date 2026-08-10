@@ -7,8 +7,6 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { ThinkingLevel } from "./bucket-selector.js";
-import { MAX_SUBAGENT_THINKING_LEVEL, SUBAGENT_THINKING_LEVELS } from "./src/thinking-level.js";
 
 export type AgentScope = "user" | "project" | "both";
 
@@ -19,8 +17,6 @@ export interface AgentConfig {
 	model?: string;
 	/** Bucket hint for model selection: "small", "medium", or "frontier". */
 	bucket?: string;
-	/** Optional thinking level hint for model selection. */
-	thinkingLevel?: ThinkingLevel;
 	/**
 	 * Optional allowlist restricting which agents this agent may spawn via the
 	 * subagent tool. When omitted, the agent may spawn any agent (default).
@@ -72,7 +68,6 @@ function parseFrontmatter<T extends Record<string, string>>(content: string): { 
 }
 
 const VALID_BUCKETS = new Set(["small", "medium", "frontier"]);
-const VALID_THINKING_LEVELS = new Set<string>(SUBAGENT_THINKING_LEVELS);
 
 /**
  * Parse a frontmatter `tools` value into a list of tool names. Accepts both a
@@ -89,18 +84,9 @@ function parseToolsList(rawTools: string | undefined): string[] | undefined {
 	return tools.length > 0 ? tools : undefined;
 }
 
-export function parseBucketAndThinking(rawBucket: string | undefined, rawThinking: string | undefined): { bucket?: string; thinkingLevel?: ThinkingLevel } {
+export function parseBucket(rawBucket: string | undefined): string | undefined {
 	const bucket = rawBucket?.trim();
-	const thinking = rawThinking?.trim();
-	const thinkingLevel = thinking === "xhigh" || thinking === "max"
-		? MAX_SUBAGENT_THINKING_LEVEL
-		: thinking && VALID_THINKING_LEVELS.has(thinking)
-			? thinking as ThinkingLevel
-			: undefined;
-	return {
-		bucket: bucket && VALID_BUCKETS.has(bucket) ? bucket : undefined,
-		thinkingLevel,
-	};
+	return bucket && VALID_BUCKETS.has(bucket) ? bucket : undefined;
 }
 
 function loadAgentsFromDir(dir: string, source: "user" | "project"): AgentConfig[] {
@@ -144,7 +130,7 @@ function loadAgentsFromDir(dir: string, source: "user" | "project"): AgentConfig
 			? undefined
 			: (parseToolsList(frontmatter.canSpawn) ?? []);
 
-		const { bucket, thinkingLevel } = parseBucketAndThinking(frontmatter.bucket, frontmatter.thinkingLevel);
+		const bucket = parseBucket(frontmatter.bucket);
 
 		agents.push({
 			name: frontmatter.name,
@@ -152,7 +138,6 @@ function loadAgentsFromDir(dir: string, source: "user" | "project"): AgentConfig
 			tools: tools && tools.length > 0 ? tools : undefined,
 			model: frontmatter.model,
 			bucket,
-			thinkingLevel,
 			canSpawn,
 			systemPrompt: body,
 			source,

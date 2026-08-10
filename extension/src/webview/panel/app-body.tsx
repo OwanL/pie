@@ -200,6 +200,7 @@ export function AppBody({ adapter }: AppBodyProps) {
         transcriptWindow={viewState.transcriptWindow}
         transcriptLoaded={viewState.transcriptLoaded}
         busy={transcriptBusy}
+        compacting={viewState.compactingSessionPaths.includes(derived.activeSessionPath ?? '')}
         liveTurnPhase={viewState.liveTurnPhase}
         prefs={viewState.prefs}
         pruningSettings={viewState.pruningSettings}
@@ -224,6 +225,7 @@ export function AppBody({ adapter }: AppBodyProps) {
         retryStatus={viewState.retryStatus}
         interrupting={interrupting}
         activeSession={viewState.activeSession}
+        privacyMode={viewState.privacyMode}
         modelSettings={viewState.modelSettings}
         availableModels={viewState.availableModels}
         availableExtensions={viewState.availableExtensions}
@@ -244,6 +246,8 @@ export function AppBody({ adapter }: AppBodyProps) {
         pendingComposerInputs={viewState.pendingComposerInputs}
         activeRunSummary={viewState.activeRunSummary}
         tokenRateBySession={viewState.tokenRateBySession}
+        compacting={viewState.compactingSessionPaths.includes(derived.activeSessionPath ?? '')}
+        lastCompaction={viewState.lastCompactionBySession[derived.activeSessionPath ?? ''] ?? null}
         handlers={handlers}
       />
 

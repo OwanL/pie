@@ -53,19 +53,19 @@ test('a session spanning multiple families is split equally across them', () => 
   assert.equal(reliability.dominantFamily!.share, 0.5);
 });
 
-test('unmatched reviews count toward ceiling saturation but cannot be attributed to a family', () => {
+test('unmatched reviews with stable transcript attribution count toward family reliability', () => {
   const run = makeRun({ runId: 'a1', modelId: 'glm-5.2' });
   const joined = makeReview(run, 'r1', 100);
-  const orphan = makeReview(run, 'r2', 100, { runIds: [], joinKey: 'unmatched', unmatchedReason: 'no_run_for_identity', sessionId: 'orphan', modelFamilies: [] });
+  const orphan = makeReview(run, 'r2', 100, { runIds: [], joinKey: 'unmatched', unmatchedReason: 'no_run_for_identity', sessionId: 'orphan', modelFamilies: ['claude-opus-5'] });
   const data = makePrepared([run], [joined, orphan]);
   const reliability = createEvidenceReliability(data);
   assert.equal(reliability.reviewedSessionCount, 2);
-  assert.equal(reliability.attributedSessionCount, 1);
-  assert.equal(reliability.unattributedCount, 1);
+  assert.equal(reliability.attributedSessionCount, 2);
+  assert.equal(reliability.unattributedCount, 0);
   assert.equal(reliability.ceilingSaturation.perfectRate, 1); // both at 100
-  assert.equal(reliability.effectiveReviewedFamilies, 1);
-  assert.equal(reliability.dominantFamily!.family, 'glm-5.2');
-  assert.equal(reliability.dominantFamily!.share, 1);
+  assert.equal(reliability.effectiveReviewedFamilies, 2);
+  assert.deepEqual(reliability.familyShares.map((entry) => entry.family).sort(), ['claude-opus-5', 'glm-5.2']);
+  assert.equal(reliability.dominantFamily!.share, 0.5);
 });
 
 test('zero reviews yield an empty but well-formed reliability bundle', () => {

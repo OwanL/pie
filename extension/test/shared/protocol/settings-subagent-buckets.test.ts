@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
+import type { ChatPrefs } from '../../../src/shared/protocol';
 import {
   ALL_NESTED_BUCKETS_ALLOWED,
   DEFAULT_CHAT_PREFS,
@@ -44,24 +45,47 @@ test('normalizeSubagentBuckets returns empty buckets for non-object input', () =
   assert.deepEqual(normalizeSubagentBuckets('nope'), { small: [], medium: [], frontier: [] });
 });
 
-test('normalizeSubagentBuckets coerces a well-formed value', () => {
+test('normalizeSubagentBuckets coerces explicit model/reasoning assignments', () => {
   assert.deepEqual(
-    normalizeSubagentBuckets({ small: ['haiku'], medium: ['sonnet'], frontier: ['opus'] }),
-    { small: ['haiku'], medium: ['sonnet'], frontier: ['opus'] },
+    normalizeSubagentBuckets({
+      small: [{ model: 'anthropic/haiku', thinkingLevel: 'off' }],
+      medium: [{ model: 'anthropic/sonnet', thinkingLevel: 'high' }],
+      frontier: [{ model: 'anthropic/opus', thinkingLevel: 'max' }],
+    }),
+    {
+      small: [{ model: 'anthropic/haiku', thinkingLevel: 'off' }],
+      medium: [{ model: 'anthropic/sonnet', thinkingLevel: 'high' }],
+      frontier: [{ model: 'anthropic/opus', thinkingLevel: 'max' }],
+    },
   );
 });
 
-test('normalizeSubagentBuckets drops non-array / non-string entries', () => {
+test('normalizeSubagentBuckets drops legacy string bucket preferences', () => {
   assert.deepEqual(
-    normalizeSubagentBuckets({ small: 'haiku', medium: [1, 'sonnet', null, ''], frontier: ['opus'] }),
-    { small: [], medium: ['sonnet'], frontier: ['opus'] },
+    normalizeSubagentBuckets({ small: ['haiku'], medium: ['sonnet'], frontier: ['opus'] }),
+    { small: [], medium: [], frontier: [] },
+  );
+});
+
+test('normalizeSubagentBuckets drops malformed assignments', () => {
+  assert.deepEqual(
+    normalizeSubagentBuckets({
+      small: 'haiku',
+      medium: [1, { model: 'sonnet', thinkingLevel: 'bogus' }, { model: '', thinkingLevel: 'low' }],
+      frontier: [{ model: 'opus', thinkingLevel: 'high' }, 'legacy'],
+    }),
+    { small: [], medium: [], frontier: [{ model: 'opus', thinkingLevel: 'high' }] },
   );
 });
 
 test('normalizeSubagentBuckets defaults missing bucket keys to empty', () => {
   assert.deepEqual(
-    normalizeSubagentBuckets({ medium: ['sonnet'] }),
-    { small: [], medium: ['sonnet'], frontier: [] },
+    normalizeSubagentBuckets({ medium: [{ model: 'anthropic/sonnet', thinkingLevel: 'medium' }] }),
+    {
+      small: [],
+      medium: [{ model: 'anthropic/sonnet', thinkingLevel: 'medium' }],
+      frontier: [],
+    },
   );
 });
 
@@ -72,17 +96,35 @@ test('resolveChatPrefs fills subagentBuckets from defaults when absent', () => {
 
 test('resolveChatPrefs normalizes a malformed stored subagentBuckets', () => {
   const resolved = resolveChatPrefs({
-    // @ts-expect-error intentionally malformed stored value
-    subagentBuckets: { small: 'haiku', medium: [1, 'sonnet'], frontier: null },
+    subagentBuckets: {
+      small: 'haiku',
+      medium: [{ model: 'sonnet', thinkingLevel: 'bogus' }],
+      frontier: null,
+    } as unknown as ChatPrefs['subagentBuckets'],
   });
-  assert.deepEqual(resolved.subagentBuckets, { small: [], medium: ['sonnet'], frontier: [] });
+  assert.deepEqual(resolved.subagentBuckets, { small: [], medium: [], frontier: [] });
 });
 
 test('resolveChatPrefs preserves a valid stored subagentBuckets', () => {
   const resolved = resolveChatPrefs({
-    subagentBuckets: { small: ['haiku'], medium: ['sonnet'], frontier: ['opus'] },
+    subagentBuckets: {
+      small: [{ model: 'anthropic/haiku', thinkingLevel: 'off' }],
+      medium: [{ model: 'anthropic/sonnet', thinkingLevel: 'medium' }],
+      frontier: [{ model: 'anthropic/opus', thinkingLevel: 'xhigh' }],
+    },
   });
-  assert.deepEqual(resolved.subagentBuckets, { small: ['haiku'], medium: ['sonnet'], frontier: ['opus'] });
+  assert.deepEqual(resolved.subagentBuckets, {
+    small: [{ model: 'anthropic/haiku', thinkingLevel: 'off' }],
+    medium: [{ model: 'anthropic/sonnet', thinkingLevel: 'medium' }],
+    frontier: [{ model: 'anthropic/opus', thinkingLevel: 'xhigh' }],
+  });
+});
+
+test('thinking levels keep xhigh and max as distinct supported values', () => {
+  const levels = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
+  assert.notEqual(levels.indexOf('xhigh'), levels.indexOf('max'));
+  assert.equal(normalizeSubagentBuckets({ small: [{ model: 'm', thinkingLevel: 'xhigh' }] }).small[0]?.thinkingLevel, 'xhigh');
+  assert.equal(normalizeSubagentBuckets({ small: [{ model: 'm', thinkingLevel: 'max' }] }).small[0]?.thinkingLevel, 'max');
 });
 
 test('DEFAULT_CHAT_PREFS seeds all nested buckets allowed', () => {

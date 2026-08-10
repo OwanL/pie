@@ -99,10 +99,24 @@ export async function exportRunAnalyticsStore(
   storageDir: string,
   targetPath: string,
   now: () => Date = () => new Date(),
+  excludeSessionPaths?: ReadonlySet<string>,
+  excludeSessionIds?: ReadonlySet<string>,
 ): Promise<RunAnalyticsExportPayload> {
   const result = await queryRunAnalyticsStore(storageDir);
+  if (excludeSessionPaths && excludeSessionPaths.size > 0) {
+    result.completedRuns = result.completedRuns.filter((run) => !excludeSessionPaths.has(run.sessionPath));
+    result.openRuns = result.openRuns.filter((run) => !excludeSessionPaths.has(run.sessionPath));
+  }
   const logRoot = inferGlobalLogRoot(storageDir);
   const sideChannels = await readGlobalSideChannels(logRoot);
+  if (excludeSessionPaths || excludeSessionIds) {
+    const pathExcluded = excludeSessionPaths ?? new Set<string>();
+    const idExcluded = excludeSessionIds ?? new Set<string>();
+    sideChannels.pruningDecisions = sideChannels.pruningDecisions.filter((entry) => !pathExcluded.has(entry.sessionPath) && !idExcluded.has(entry.sessionId));
+    sideChannels.pruningEvents = sideChannels.pruningEvents.filter((entry) => !idExcluded.has(entry.sessionId));
+    sideChannels.toolResultPruningEvents = sideChannels.toolResultPruningEvents.filter((entry) => !idExcluded.has(entry.sessionId));
+    sideChannels.warmBashSummaries = sideChannels.warmBashSummaries.filter((entry) => !idExcluded.has(entry.sessionId));
+  }
   const payload: RunAnalyticsExportPayload = {
     schemaVersion: RUN_ANALYTICS_SCHEMA_VERSION,
     exportedAt: now().toISOString(),

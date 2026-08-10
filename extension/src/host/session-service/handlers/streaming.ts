@@ -6,6 +6,7 @@ import type { Event } from '../../core/events';
 import type {
   AuxiliaryLlmUsagePayload,
   CompactionPayload,
+  CompactionStartedPayload,
   MessageAbortedPayload,
   MessageDeltaPayload,
   MessageFinishedPayload,
@@ -349,13 +350,32 @@ export function onRetryEnded(payload: RetryEndedPayload, deps: HandlerDeps): voi
 
 /** Count a history-compaction (`/compact`) LLM call against the relevant run.
  *  Compaction emits no `message_start`/`message_end`, so this backend event is
- *  the only signal that can drive the run-analytics counter. */
+ *  the only signal that can drive the run-analytics counter. It also clears the
+ *  host's "Compacting…" indicator and records the completion chip metrics. */
 export function onCompaction(payload: CompactionPayload, deps: HandlerDeps): void {
   const sessionPath = deps.requireEventSessionPath('compaction.ended', payload.sessionPath);
   if (!sessionPath) {
     return;
   }
   deps.runObserver.onCompaction(sessionPath);
+  deps.dispatchArch({
+    kind: 'CompactionEnded',
+    sessionPath,
+    occurredAt: payload.occurredAt ?? Date.now(),
+    ...(payload.tokensBefore !== undefined ? { tokensBefore: payload.tokensBefore } : {}),
+    ...(payload.estimatedTokensAfter !== undefined ? { estimatedTokensAfter: payload.estimatedTokensAfter } : {}),
+  });
+}
+
+/** Surface a live "Compacting…" indicator when a history-compaction LLM call
+ *  starts (the backend re-arms busy at the same time, but busy alone reads as a
+ *  generic run). */
+export function onCompactionStarted(payload: CompactionStartedPayload, deps: HandlerDeps): void {
+  const sessionPath = deps.requireEventSessionPath('compaction.started', payload.sessionPath);
+  if (!sessionPath) {
+    return;
+  }
+  deps.dispatchArch({ kind: 'CompactionStarted', sessionPath });
 }
 
 export function onAuxiliaryLlmUsage(payload: AuxiliaryLlmUsagePayload, deps: HandlerDeps): void {

@@ -12,9 +12,11 @@ import type {
 import { RunAnalyticsStorage } from './storage';
 import { SessionRunTracker } from './tracker';
 import type { RunObserver, StatsServiceOptions } from './types';
+import { resolveSessionIdentity } from '../../backend/session-review-store';
 
 export class StatsService implements RunObserver {
   private readonly scheduleRender: () => void;
+  private readonly getArchState: NonNullable<StatsServiceOptions['getArchState']>;
   private readonly tracker: SessionRunTracker;
   private readonly storage: RunAnalyticsStorage;
   private startPromise: Promise<void> | null = null;
@@ -24,6 +26,7 @@ export class StatsService implements RunObserver {
     this.scheduleRender = options.scheduleRender ?? (() => undefined);
     const dispatchArchEvent = options.dispatchArchEvent ?? ((_event) => { /* no-op if not provided */ });
     const getArchState = options.getArchState ?? (() => { throw new Error('getArchState not provided'); });
+    this.getArchState = getArchState;
     const now = options.now ?? defaultNow;
     const createId = options.createId ?? defaultCreateId;
     const getExperimentAssignment = options.getExperimentAssignment ?? (() => null);
@@ -81,11 +84,27 @@ export class StatsService implements RunObserver {
     }
   }
 
+  private isPrivateSession(sessionPath: string): boolean {
+    return this.getArchState().sessions.privacyModeBySession[sessionPath] === true;
+  }
+
+  /** Enable/disable host-side privacy bookkeeping. Enabling immediately drops
+   *  the current in-memory run and removes any already-written analytics for
+   *  this session; the mode itself remains host-only. */
+  async setSessionPrivacy(sessionPath: string, enabled: boolean): Promise<void> {
+    if (!enabled) return;
+    this.tracker.discardSession(sessionPath);
+    const sessionId = this.getArchState().sessions.sessions.find((session) => session.path === sessionPath)?.sessionId;
+    await this.storage.forgetSession(sessionPath, sessionId);
+  }
+
   prepareForSend(sessionPath: string, inputs: ComposerInput[], initialUserMessage = ''): string {
+    if (this.isPrivateSession(sessionPath)) return 'private-run';
     return this.tracker.prepareForSend(sessionPath, inputs, initialUserMessage);
   }
 
   onAssistantTurnStarted(sessionPath: string, turnId: string): void {
+    if (this.isPrivateSession(sessionPath)) return;
     this.tracker.onAssistantTurnStarted(sessionPath, turnId);
   }
 
@@ -95,6 +114,7 @@ export class StatsService implements RunObserver {
     occurredAt: string,
     details: unknown,
   ): void {
+    if (this.isPrivateSession(sessionPath)) return;
     this.tracker.onSkillPruningUsage(sessionPath, messageId, occurredAt, details);
   }
 
@@ -106,22 +126,27 @@ export class StatsService implements RunObserver {
     status?: TurnThroughputStatus,
     latency?: TurnLatencyMeasurement,
   ): void {
+    if (this.isPrivateSession(sessionPath)) return;
     this.tracker.onAssistantTurnEnded(sessionPath, turnId, durationMs, usage, status, latency);
   }
 
   onToolStarted(sessionPath: string, toolCall: ToolCall): void {
+    if (this.isPrivateSession(sessionPath)) return;
     this.tracker.onToolStarted(sessionPath, toolCall);
   }
 
   onToolFinished(sessionPath: string, toolCall: ToolCall): void {
+    if (this.isPrivateSession(sessionPath)) return;
     this.tracker.onToolFinished(sessionPath, toolCall);
   }
 
   onInterrupted(sessionPath: string): void {
+    if (this.isPrivateSession(sessionPath)) return;
     this.tracker.onInterrupted(sessionPath);
   }
 
   onCompaction(sessionPath: string): void {
+    if (this.isPrivateSession(sessionPath)) return;
     this.tracker.onCompaction(sessionPath);
   }
 
@@ -129,6 +154,7 @@ export class StatsService implements RunObserver {
     sessionPath: string,
     sample: Omit<AuxiliaryLlmUsagePayload, 'sessionPath'>,
   ): void {
+    if (this.isPrivateSession(sessionPath)) return;
     this.tracker.onAuxiliaryLlmUsage(sessionPath, sample);
   }
 
@@ -136,6 +162,7 @@ export class StatsService implements RunObserver {
     sessionPath: string,
     timing?: { sourceId: string; occurredAt: string; attempt: number; scheduledDelayMs: number },
   ): void {
+    if (this.isPrivateSession(sessionPath)) return;
     this.tracker.onAutoRetry(sessionPath, timing);
   }
 
@@ -145,26 +172,32 @@ export class StatsService implements RunObserver {
     measuredDelayMs: number | undefined,
     durationMs: number,
   ): void {
+    if (this.isPrivateSession(sessionPath)) return;
     this.tracker.onAutoRetryMeasured(sessionPath, sourceId, measuredDelayMs, durationMs);
   }
 
   onMessageEdited(sessionPath: string, _messageId: string): void {
+    if (this.isPrivateSession(sessionPath)) return;
     this.tracker.onMessageEdited(sessionPath);
   }
 
   onTruncatedAfter(sessionPath: string, _messageId: string): void {
+    if (this.isPrivateSession(sessionPath)) return;
     this.tracker.onTruncatedAfter(sessionPath);
   }
 
   onBackendError(sessionPath: string | undefined, code: string): void {
+    if (!sessionPath || this.isPrivateSession(sessionPath)) return;
     this.tracker.onBackendError(sessionPath, code);
   }
 
   onContextUsageChanged(sessionPath: string, tokens: number | null, limit: number): void {
+    if (this.isPrivateSession(sessionPath)) return;
     this.tracker.onContextUsageChanged(sessionPath, tokens, limit);
   }
 
   onBusyChanged(sessionPath: string, busy: boolean): void {
+    if (this.isPrivateSession(sessionPath)) return;
     this.tracker.onBusyChanged(sessionPath, busy);
   }
 
@@ -174,14 +207,20 @@ export class StatsService implements RunObserver {
     thinkingLevel: ThinkingLevel | undefined,
     provider?: string,
   ): void {
+    if (this.isPrivateSession(sessionPath)) return;
     this.tracker.onModelConfigChanged(sessionPath, modelId, thinkingLevel, provider);
   }
 
   onUnsupportedInputAttempt(sessionPath: string): void {
+    if (this.isPrivateSession(sessionPath)) return;
     this.tracker.onUnsupportedInputAttempt(sessionPath);
   }
 
   onSessionClosed(sessionPath: string): void {
+    if (this.isPrivateSession(sessionPath)) {
+      this.tracker.discardSession(sessionPath);
+      return;
+    }
     this.tracker.onSessionClosed(sessionPath);
   }
 
@@ -190,10 +229,12 @@ export class StatsService implements RunObserver {
   }
 
   startNewTask(sessionPath: string): void {
+    if (this.isPrivateSession(sessionPath)) return;
     this.tracker.startNewTask(sessionPath);
   }
 
   continueTask(sessionPath: string): void {
+    if (this.isPrivateSession(sessionPath)) return;
     this.tracker.continueTask(sessionPath);
   }
 
@@ -201,9 +242,16 @@ export class StatsService implements RunObserver {
     this.tracker.onExperimentAssignmentChanged(assignment);
   }
 
+  private filterPrivateAnalytics(result: RunAnalyticsQueryResult): RunAnalyticsQueryResult {
+    return {
+      completedRuns: result.completedRuns.filter((run) => !this.isPrivateSession(run.sessionPath)),
+      openRuns: result.openRuns.filter((run) => !this.isPrivateSession(run.sessionPath)),
+    };
+  }
+
   async queryRunAnalytics(): Promise<RunAnalyticsQueryResult> {
     await this.start();
-    return await this.storage.queryRunAnalytics();
+    return this.filterPrivateAnalytics(await this.storage.queryRunAnalytics());
   }
 
   /** The resolved run-analytics storage directory (see {@link RunAnalyticsStorage.getStorageDir}). */
@@ -213,26 +261,37 @@ export class StatsService implements RunObserver {
 
   /** Current in-memory runs for live aggregate updates; does not touch disk. */
   getOpenRuns(): RunSnapshot[] {
-    return this.tracker.getOpenRuns();
+    return this.tracker.getOpenRuns().filter((run) => !this.isPrivateSession(run.sessionPath));
   }
 
   /** Finalized snapshots waiting for their batched JSONL append. This is the
    * completion bridge used by AggregateStatsService, preserving finalized
    * status/outcome/timestamps rather than its last observed open snapshot. */
   getPendingCompletedRuns(): RunSnapshot[] {
-    return this.storage.getPendingCompletedRuns();
+    return this.storage.getPendingCompletedRuns().filter((run) => !this.isPrivateSession(run.sessionPath));
   }
 
   /** Query the completed-data cache source without forcing pending analytics
    * to flush. Intended for mtime-gated host rollups. */
   async queryPersistedRunAnalytics(): Promise<RunAnalyticsQueryResult> {
     await this.start();
-    return await this.storage.queryPersistedRunAnalytics();
+    return this.filterPrivateAnalytics(await this.storage.queryPersistedRunAnalytics());
   }
 
   async exportRunAnalytics(targetPath: string): Promise<RunAnalyticsExportPayload> {
     await this.start();
-    return await this.storage.exportRunAnalytics(targetPath);
+    const privatePaths = new Set(
+      Object.entries(this.getArchState().sessions.privacyModeBySession)
+        .filter(([, enabled]) => enabled)
+        .map(([sessionPath]) => sessionPath),
+    );
+    const privateIds = new Set<string>();
+    for (const sessionPath of privatePaths) {
+      const summaryId = this.getArchState().sessions.sessions.find((session) => session.path === sessionPath)?.sessionId;
+      if (summaryId) privateIds.add(summaryId);
+      try { privateIds.add(resolveSessionIdentity(sessionPath).sessionId); } catch { /* path filtering remains authoritative */ }
+    }
+    return await this.storage.exportRunAnalytics(targetPath, privatePaths, privateIds);
   }
 
   async flush(): Promise<void> {

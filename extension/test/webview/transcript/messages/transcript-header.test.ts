@@ -54,8 +54,8 @@ test('assistantReplyMeta omits missing pieces instead of rendering placeholders'
     assistantReplyMeta(assistantMessage({ thinkingLevel: 'xhigh' })),
     {
       model: null,
-      reasoning: 'max',
-      compactText: 'max',
+      reasoning: 'xhigh',
+      compactText: 'xhigh',
     },
   );
 });
@@ -79,7 +79,8 @@ test('assistantReplyMeta returns null when no assistant header metadata exists',
 test('formatThinkingLevelLabel uses lower-case compact transcript labels', () => {
   assert.equal(formatThinkingLevelLabel('minimal'), 'minimal');
   assert.equal(formatThinkingLevelLabel('high'), 'high');
-  assert.equal(formatThinkingLevelLabel('xhigh'), 'max');
+  assert.equal(formatThinkingLevelLabel('xhigh'), 'xhigh');
+  assert.equal(formatThinkingLevelLabel('max'), 'max');
   assert.equal(formatThinkingLevelLabel(undefined), null);
 });
 

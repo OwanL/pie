@@ -23,7 +23,12 @@ function makeSelectionCtx(overrides: Partial<SelectionContext> = {}): SelectionC
 		modelConfig: [],
 		disabledProviders: new Set(),
 		allowedModelIds: undefined,
-		bucketAssignments: { small: ["haiku"], medium: ["sonnet"], frontier: ["opus"] },
+		bucketAssignments: {
+			small: [{ model: "haiku", thinkingLevel: "minimal" }],
+			medium: [{ model: "sonnet", thinkingLevel: "high" }],
+			frontier: [{ model: "opus", thinkingLevel: "max" }],
+		},
+		callerThinkingLevel: "low",
 		alwaysParentModel: false,
 		nestedAllowedBuckets: { small: true, medium: true, frontier: true },
 		...overrides,
@@ -49,20 +54,16 @@ test("resolveModel short-circuits to parent model when alwaysParentModel is true
 	assert.deepEqual(resolved.selection.pool, []);
 });
 
-test("resolveModel defaults subagents to high reasoning", async () => {
+test("resolveModel uses the bucket assignment reasoning level", async () => {
 	const resolved = await resolveModel(makeAgent(), makeSelectionCtx(), "parent-model", "medium");
 	assert.equal(resolved.thinkingLevel, "high");
 	assert.equal(resolved.selection.thinkingLevel, "high");
 });
 
-test("resolveModel caps per-call and agent reasoning above high", async () => {
-	const perCall = await resolveModel(makeAgent(), makeSelectionCtx(), "parent-model", "medium", "xhigh");
-	assert.equal(perCall.thinkingLevel, "high");
-	assert.equal(perCall.selection.thinkingLevel, "high");
-
-	const fromAgent = await resolveModel(makeAgent({ thinkingLevel: "xhigh" }), makeSelectionCtx(), "parent-model", "medium");
-	assert.equal(fromAgent.thinkingLevel, "high");
-	assert.equal(fromAgent.selection.thinkingLevel, "high");
+test("resolveModel inherits caller reasoning for always-parent fallback", async () => {
+	const resolved = await resolveModel(makeAgent(), makeSelectionCtx({ alwaysParentModel: true, callerThinkingLevel: "xhigh" }), "parent-model", "medium");
+	assert.equal(resolved.thinkingLevel, "xhigh");
+	assert.equal(resolved.selection.thinkingLevel, "xhigh");
 });
 
 test("resolveModel routes around saturated providers when enabled", async (t) => {
@@ -79,7 +80,7 @@ test("resolveModel routes around saturated providers when enabled", async (t) =>
 				{ id: "busy-model", provider: "busy" },
 				{ id: "open-model", provider: "open" },
 			],
-			bucketAssignments: { small: [], medium: ["busy-model", "open-model"], frontier: [] },
+			bucketAssignments: { small: [], medium: [{ model: "busy-model", thinkingLevel: "high" }, { model: "open-model", thinkingLevel: "max" }], frontier: [] },
 		}),
 		"parent-model",
 		"medium",
@@ -103,7 +104,7 @@ test("resolveModel keeps the original bucket when every provider is saturated", 
 				{ id: "model-a", provider: "busyA" },
 				{ id: "model-b", provider: "busyB" },
 			],
-			bucketAssignments: { small: [], medium: ["model-a", "model-b"], frontier: [] },
+			bucketAssignments: { small: [], medium: [{ model: "model-a", thinkingLevel: "high" }, { model: "model-b", thinkingLevel: "high" }], frontier: [] },
 		}),
 		"parent-model",
 		"medium",
@@ -125,7 +126,7 @@ test("alwaysParentModel takes precedence over live capacity routing", async (t) 
 			alwaysParentModel: true,
 			routeAroundSaturatedProviders: true,
 			registryModels: [{ id: "open-model", provider: "open" }],
-			bucketAssignments: { small: [], medium: ["open-model"], frontier: [] },
+			bucketAssignments: { small: [], medium: [{ model: "open-model", thinkingLevel: "high" }], frontier: [] },
 		}),
 		"parent-model",
 		"medium",
@@ -139,7 +140,7 @@ test("resolveModel returns empty modelId when parent is excluded and alwaysParen
 	const agent = makeAgent();
 	const ctx = makeSelectionCtx({ alwaysParentModel: true });
 	const excluded = new Set(["parent-model"]);
-	const resolved = await resolveModel(agent, ctx, "parent-model", "frontier", undefined, excluded);
+	const resolved = await resolveModel(agent, ctx, "parent-model", "frontier", excluded);
 	assert.equal(resolved.modelOverride, "");
 	assert.equal(resolved.selection.fallback, true);
 });

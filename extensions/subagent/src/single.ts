@@ -29,7 +29,6 @@ import {
 	type SelectionContext,
 } from "./selection.js";
 import type { ParentBridge } from "./parent-extension-ui-bridge-proxy.js";
-import type { ThinkingLevel } from "../bucket-selector.js";
 import { compactSingleResult } from "./result-compaction.js";
 import { textContent } from "./text-content.js";
 import { buildParentUserContext } from "./user-context.js";
@@ -75,7 +74,6 @@ interface RunWithModelRetryArgs {
 	agent: AgentConfig;
 	excludeModels: Set<string>;
 	bucket: string | undefined;
-	thinkingLevel: string | undefined;
 	activeModelId: string;
 	selectionCtx: SelectionContext;
 	childDepth: number;
@@ -131,7 +129,6 @@ async function runWithModelRetry(args: RunWithModelRetryArgs): Promise<SingleRes
 			args.selectionCtx,
 			args.activeModelId,
 			args.bucket,
-			args.thinkingLevel as ThinkingLevel | undefined,
 			excludeModels,
 			args.childDepth,
 		);
@@ -349,7 +346,6 @@ export async function executeSingleTask(args: {
 		agent,
 		excludeModels: new Set<string>(),
 		bucket: params.bucket,
-		thinkingLevel: params.thinkingLevel,
 		activeModelId: ctx.model?.id ?? "",
 		selectionCtx,
 		childDepth: runtimeCtx.depth + 1,

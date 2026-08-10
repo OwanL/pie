@@ -4,8 +4,10 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import type { SessionReviewV2Source, SourceAnalyticsPayload } from '../scripts/contracts.ts';
+import { createModelLeaderboard } from '../scripts/leaderboard.ts';
 import { prepareSourceAnalytics } from '../scripts/prepare.ts';
 import { coerceSessionReviewV2 } from '../scripts/review-analytics.ts';
+import { createEvidenceReliability } from '../scripts/site-data.ts';
 import { sessionPathHash } from '../scripts/hash.ts';
 import { deepClone, loadFixture } from './helpers.ts';
 
@@ -71,6 +73,107 @@ test('join coverage classifies session_id, path_fallback, and both unmatched rea
     byJoinKey: { session_id: 1, path_fallback: 1, unmatched: 2 },
     unmatchedByReason: { no_run_for_identity: 1, identity_conflict_at_path: 1 },
   });
+});
+
+test('stable transcript attribution is retained when a valid review has no run', async () => {
+  const source = deepClone(await loadFixture());
+  source.completedRuns = [];
+  source.openRuns = [];
+  source.historicalSessions = [{
+    sessionId: 'sess-transcript', normalizedSessionPath: '/orphan/transcript.jsonl',
+    startedAt: '2026-05-10T12:00:00.000Z', endedAt: '2026-05-10T12:05:00.000Z', firstUserMessageChars: 100,
+    attributions: [{
+      modelId: 'claude-opus-5', thinkingLevel: 'high', share: 1,
+      successfulAssistantTurns: 1, attributedTokens: 100,
+    }],
+    successfulAssistantTurns: 1, errorAssistantTurns: 0, abortedAssistantTurns: 0,
+    inputTokens: 100, outputTokens: 100, cacheReadTokens: 0, cacheWriteTokens: 0,
+    reportedCostUsd: null, toolCallCount: 0, toolErrorCount: 0, terminalStatus: 'success',
+    mixedModel: false, sourceProvenance: ['configured'],
+  }];
+  source.sessionReviewsV2 = [baseReview({
+    reviewId: 'review-transcript', sessionId: 'sess-transcript', sessionPathAtReview: '/orphan/transcript.jsonl', identityFallback: false,
+  })];
+  source.sessionReviewV2Diagnostics = emptyDiagnostics(1);
+
+  const review = prepareSourceAnalytics(source).sessionReviewsV2[0]!;
+  assert.equal(review.joinKey, 'unmatched');
+  assert.equal(review.unmatchedReason, 'no_run_for_identity');
+  assert.deepEqual(review.runIds, []);
+  assert.deepEqual(review.modelFamilies, ['claude-opus-5']);
+});
+
+test('stable transcript attribution survives preparation into evidence reliability when coverage is missing', async () => {
+  const source = deepClone(await loadFixture());
+  source.completedRuns = [];
+  source.openRuns = [];
+  source.historicalSessions = [{
+    sessionId: 'sess-reliability', normalizedSessionPath: '/orphan/reliability.jsonl',
+    startedAt: '2026-05-10T12:00:00.000Z', endedAt: '2026-05-10T12:05:00.000Z', firstUserMessageChars: 100,
+    attributions: [{
+      modelId: 'claude-opus-5', thinkingLevel: 'high', share: 1,
+      successfulAssistantTurns: 1, attributedTokens: 100,
+    }],
+    successfulAssistantTurns: 1, errorAssistantTurns: 0, abortedAssistantTurns: 0,
+    inputTokens: 100, outputTokens: 100, cacheReadTokens: 0, cacheWriteTokens: 0,
+    reportedCostUsd: null, toolCallCount: 0, toolErrorCount: 0, terminalStatus: 'success',
+    mixedModel: false, sourceProvenance: ['configured'],
+  }];
+  source.sessionReviewsV2 = [baseReview({
+    reviewId: 'review-reliability', sessionId: 'sess-reliability', sessionPathAtReview: '/orphan/reliability.jsonl', identityFallback: false,
+  })];
+  source.sessionReviewV2Diagnostics = emptyDiagnostics(1);
+
+  const prepared = prepareSourceAnalytics(source);
+  const review = prepared.sessionReviewsV2[0]!;
+  assert.equal(review.joinKey, 'unmatched');
+  assert.equal(review.unmatchedReason, 'no_run_for_identity');
+  assert.deepEqual(review.runIds, []);
+  assert.deepEqual(review.modelFamilies, ['claude-opus-5']);
+
+  const reliability = createEvidenceReliability(prepared);
+  assert.equal(reliability.reviewedSessionCount, 1);
+  assert.equal(reliability.attributedSessionCount, 1);
+  assert.equal(reliability.unattributedCount, 0);
+  assert.equal(reliability.effectiveReviewedFamilies, 1);
+  assert.deepEqual(reliability.familyShares.map((entry) => entry.family), ['claude-opus-5']);
+  assert.equal(reliability.familyShares[0]!.reviewedSessionCount, 1);
+  assert.equal(reliability.familyShares[0]!.share, 1);
+  assert.equal(reliability.dominantFamily!.family, 'claude-opus-5');
+});
+
+test('stable transcript attribution remains safe when a run at the same path has a conflicting identity', async () => {
+  const source = deepClone(await loadFixture());
+  const [run] = source.completedRuns;
+  run!.sessionId = 'different-run-session';
+  source.completedRuns = [run!];
+  source.openRuns = [];
+  source.historicalSessions = [{
+    sessionId: 'reviewed-transcript-session', normalizedSessionPath: run!.sessionPath,
+    startedAt: '2026-05-10T12:00:00.000Z', endedAt: '2026-05-10T12:05:00.000Z', firstUserMessageChars: 100,
+    attributions: [{
+      modelId: 'claude-opus-5', thinkingLevel: 'high', share: 1,
+      successfulAssistantTurns: 1, attributedTokens: 100,
+    }],
+    successfulAssistantTurns: 1, errorAssistantTurns: 0, abortedAssistantTurns: 0,
+    inputTokens: 100, outputTokens: 100, cacheReadTokens: 0, cacheWriteTokens: 0,
+    reportedCostUsd: null, toolCallCount: 0, toolErrorCount: 0, terminalStatus: 'success',
+    mixedModel: false, sourceProvenance: ['configured'],
+  }];
+  source.sessionReviewsV2 = [baseReview({
+    reviewId: 'review-conflict', sessionId: 'reviewed-transcript-session', sessionPathAtReview: run!.sessionPath, identityFallback: false,
+  })];
+  source.sessionReviewV2Diagnostics = emptyDiagnostics(1);
+
+  const prepared = prepareSourceAnalytics(source);
+  const review = prepared.sessionReviewsV2[0]!;
+  assert.equal(review.joinKey, 'unmatched');
+  assert.equal(review.unmatchedReason, 'identity_conflict_at_path');
+  assert.deepEqual(review.modelFamilies, ['claude-opus-5']);
+  const opus = createModelLeaderboard(prepared).rows.find((row) => row.modelId === 'claude-opus-5')!;
+  assert.equal(opus.reviewEvidenceMass, 1);
+  assert.equal(opus.transcriptOnlySessionCount, 1);
+  assert.equal(opus.providers[0]!.transcriptEvidenceMass, 1);
 });
 
 test('path-fallback review does not manufacture a join against a run carrying a different stable header', async () => {

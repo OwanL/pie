@@ -42,7 +42,7 @@ function compactReview(review: SessionReviewV2): SessionReviewDraft {
   };
 }
 
-test('recordReviews and closeReviewedBatch process canonical and compact targets', async () => {
+test('review work is single-target and legacy batch routes remain bounded', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'session-review-batch-'));
   const targetPaths = ['one', 'two'].map((name) => {
     const file = path.join(dir, `${name}.jsonl`);
@@ -64,33 +64,53 @@ test('recordReviews and closeReviewedBatch process canonical and compact targets
   const ctx = { sessionManager: { getSessionFile: () => selfPath } };
   try {
     assert.equal((await tool.execute('list', { action: 'listSelected' }, undefined, undefined, ctx)).isError, false);
-    const evidence = await Promise.all(targetPaths.map((sessionPath) => tool.execute(`evidence-${sessionPath}`, { action: 'getEvidence', sessionPath }, undefined, undefined, ctx)));
-    assert.equal(evidence.every((result: any) => !result.isError), true);
-    const fullReviews = targetPaths.map((sessionPath, index) => validReview({
-      reviewId: `batch-review-${index}`,
-      sessionId: evidence[index].details.sessionId,
-      identityFallback: evidence[index].details.identityFallback,
-      sessionPathAtReview: sessionPath,
-      provenance: { ...validReview().provenance, orchestratorSessionId: 'self-id', evidenceManifest: evidence[index].details.manifest },
-    }));
-    const compact = compactReview(fullReviews[1]!);
-    const compiledCompact = compileReviewDraft(compact, { orchestratorSessionId: 'self-id' });
-    appendRuntimeCalls(selfPath, [fullReviews[0]!, compiledCompact]);
+    const firstEvidence = await tool.execute('evidence-one', { action: 'getEvidence', sessionPath: targetPaths[0] }, undefined, undefined, ctx);
+    assert.equal(firstEvidence.isError, false, firstEvidence.content[0].text);
+    const blockedEvidence = await tool.execute('evidence-two-blocked', { action: 'getEvidence', sessionPath: targetPaths[1] }, undefined, undefined, ctx);
+    assert.equal(blockedEvidence.isError, true);
+    assert.match(blockedEvidence.content[0].text, /active review target/);
 
-    const recorded = await tool.execute('record-batch', { action: 'recordReviews', reviews: [fullReviews[0], compact] }, undefined, undefined, ctx);
-    assert.equal(recorded.isError, false, recorded.content[0].text);
-    assert.equal(recorded.details.results.length, 2);
-    assert.equal(recorded.details.results.every((result: any) => result.written), true);
-    assert.equal(recorded.details.results[0].reviewId, 'batch-review-0');
-    assert.match(recorded.details.results[1].reviewId, /^review-/);
-
-    const closed = await tool.execute('close-batch', {
-      action: 'closeReviewedBatch',
-      closures: recorded.details.results.map((result: any, index: number) => ({ sessionId: evidence[index].details.sessionId, reviewId: result.reviewId, sessionPath: targetPaths[index] })),
+    const firstReview = validReview({
+      reviewId: 'batch-review-0',
+      sessionId: firstEvidence.details.sessionId,
+      identityFallback: firstEvidence.details.identityFallback,
+      sessionPathAtReview: targetPaths[0],
+      provenance: { ...validReview().provenance, orchestratorSessionId: 'self-id', evidenceManifest: firstEvidence.details.manifest },
+    });
+    appendRuntimeCalls(selfPath, [firstReview]);
+    const firstRecorded = await tool.execute('record-one', { action: 'recordReviews', reviews: [firstReview] }, undefined, undefined, ctx);
+    assert.equal(firstRecorded.isError, false, firstRecorded.content[0].text);
+    assert.equal(firstRecorded.details.results.length, 1);
+    assert.equal(firstRecorded.details.results[0].reviewId, 'batch-review-0');
+    const firstClosed = await tool.execute('close-one', {
+      action: 'closeReviewed', sessionId: firstEvidence.details.sessionId, reviewId: firstRecorded.details.results[0].reviewId, sessionPath: targetPaths[0],
     }, undefined, undefined, ctx);
-    assert.equal(closed.isError, false, closed.content[0].text);
-    assert.equal(closed.details.results.length, 2);
-    assert.equal(closed.details.results.every((result: any) => result.status === 'pending'), true);
+    assert.equal(firstClosed.isError, false, firstClosed.content[0].text);
+
+    const secondEvidence = await tool.execute('evidence-two', { action: 'getEvidence', sessionPath: targetPaths[1] }, undefined, undefined, ctx);
+    assert.equal(secondEvidence.isError, false, secondEvidence.content[0].text);
+    const secondReview = validReview({
+      reviewId: 'batch-review-1',
+      sessionId: secondEvidence.details.sessionId,
+      identityFallback: secondEvidence.details.identityFallback,
+      sessionPathAtReview: targetPaths[1],
+      provenance: { ...validReview().provenance, orchestratorSessionId: 'self-id', evidenceManifest: secondEvidence.details.manifest },
+    });
+    const compact = compactReview(secondReview);
+    const compiledCompact = compileReviewDraft(compact, { orchestratorSessionId: 'self-id' });
+    appendRuntimeCalls(selfPath, [compiledCompact]);
+    const secondRecorded = await tool.execute('record-two', { action: 'recordReviews', reviews: [compact] }, undefined, undefined, ctx);
+    assert.equal(secondRecorded.isError, false, secondRecorded.content[0].text);
+    assert.equal(secondRecorded.details.results.length, 1);
+    assert.match(secondRecorded.details.results[0].reviewId, /^review-/);
+
+    const secondClosed = await tool.execute('close-two', {
+      action: 'closeReviewedBatch',
+      closures: [{ sessionId: secondEvidence.details.sessionId, reviewId: secondRecorded.details.results[0].reviewId, sessionPath: targetPaths[1] }],
+    }, undefined, undefined, ctx);
+    assert.equal(secondClosed.isError, false, secondClosed.content[0].text);
+    assert.equal(secondClosed.details.results.length, 1);
+    assert.equal(secondClosed.details.results[0].status, 'pending');
     const actions = fs.readFileSync(path.join(dir, 'closure-actions.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line));
     assert.deepEqual(actions.map((action) => action.kind), ['closeReviewed', 'closeReviewed']);
   } finally {

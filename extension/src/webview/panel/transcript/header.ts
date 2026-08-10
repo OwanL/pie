@@ -82,6 +82,8 @@ export function formatThinkingLevelLabel(level: ThinkingLevel | undefined): stri
     case 'high':
       return 'high';
     case 'xhigh':
+      return 'xhigh';
+    case 'max':
       return 'max';
     default:
       return null;

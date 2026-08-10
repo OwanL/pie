@@ -188,8 +188,9 @@ export function handleCloseSession(state: ArchState, cmd: Extract<Command, { kin
   });
   const wasActive = state.sessions.activeSessionPath === sessionPath;
   const nextActivePath = wasActive ? (nextPath ?? null) : state.sessions.activeSessionPath;
+  const privacyMode = state.sessions.privacyModeBySession[sessionPath] === true;
 
-  if (state.sessions.runningSessionPaths.includes(sessionPath)) {
+  if (state.sessions.runningSessionPaths.includes(sessionPath) && !privacyMode) {
     // Closing a running tab means hide, not teardown. Preserve transcript,
     // live-pipeline, pending ownership, composer inputs, file changes, and run
     // analytics while the backend continues. A later webview ready handshake
@@ -226,9 +227,12 @@ export function handleCloseSession(state: ArchState, cmd: Extract<Command, { kin
     };
   }
 
+  // Private sessions are forgotten even when their turn is still running. The
+  // backend forget operation retires/aborts that runtime before deleting its
+  // transcript, so closing the tab cannot leave a private session recoverable.
   // Idle close performs the existing teardown. Clear per-session keyed maps +
   // drop the tab arrays while retaining the durable session summary.
-  const evicted = evictSession(state, sessionPath, { removeSummary: false, removeTabs: true });
+  const evicted = evictSession(state, sessionPath, { removeSummary: privacyMode, removeTabs: true });
   const nextState = {
     ...evicted.state,
     sessions: {
@@ -239,8 +243,25 @@ export function handleCloseSession(state: ArchState, cmd: Extract<Command, { kin
   return {
     state: nextState,
     effects: [
-      { kind: 'PersistTabs', corrId: cmd.corrId, openTabPaths: nextState.sessions.openTabPaths, activeSessionPath: nextActivePath, pinnedTabPaths: nextState.sessions.pinnedTabPaths, pinnedTabGroups: nextState.sessions.pinnedTabGroups },
-      { kind: 'CloseSession', corrId: cmd.corrId, sessionPath, nextPath },
+      {
+        kind: 'PersistTabs',
+        corrId: cmd.corrId,
+        openTabPaths: nextState.sessions.openTabPaths,
+        activeSessionPath: nextActivePath,
+        pinnedTabPaths: nextState.sessions.pinnedTabPaths,
+        pinnedTabGroups: nextState.sessions.pinnedTabGroups,
+        // Keep the marker durable until the backend forget succeeds. The
+        // service reopens the tab on failure so the user can retry deletion.
+        privateSessionPaths: privacyMode
+          ? [...new Set([
+              sessionPath,
+              ...Object.entries(nextState.sessions.privacyModeBySession)
+                .filter(([, enabled]) => enabled)
+                .map(([privatePath]) => privatePath),
+            ])]
+          : undefined,
+      },
+      { kind: 'CloseSession', corrId: cmd.corrId, sessionPath, nextPath, privacyMode },
     ],
   };
 }

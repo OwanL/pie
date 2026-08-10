@@ -42,6 +42,9 @@ import {
   handleSessionNameDerived,
   handleBusyChanged,
   handleBusyCompleted,
+  handleCompactionStarted,
+  handleCompactionEnded,
+  handleLastCompactionCleared,
   handleContextUsageChanged,
   handleSessionMetadataChanged,
   handleRunningSessionsChanged,
@@ -186,6 +189,18 @@ export function reducer(state: ArchState, event: Event): ReducerResult {
 
     case 'BusyCompleted': {
       return handleBusyCompleted(state, event);
+    }
+
+    case 'CompactionStarted': {
+      return handleCompactionStarted(state, event);
+    }
+
+    case 'CompactionEnded': {
+      return handleCompactionEnded(state, event);
+    }
+
+    case 'LastCompactionCleared': {
+      return handleLastCompactionCleared(state, event);
     }
 
     case 'ContextUsageChanged': {

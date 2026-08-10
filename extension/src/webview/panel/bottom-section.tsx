@@ -24,6 +24,7 @@ export interface BottomSectionProps {
    *  "Stopping…" affordance so the click reflects within one frame. */
   interrupting: boolean;
   activeSession: ViewState['activeSession'];
+  privacyMode?: boolean;
   modelSettings: ViewState['modelSettings'];
   availableModels: ViewState['availableModels'];
   availableExtensions: ViewState['availableExtensions'];
@@ -46,7 +47,11 @@ export interface BottomSectionProps {
   pendingComposerInputs: ViewState['pendingComposerInputs'];
   activeRunSummary: ViewState['activeRunSummary'];
   tokenRateBySession: ViewState['tokenRateBySession'];
-  handlers: Pick<AppHandlers, 'handleSend' | 'handleRetrySend' | 'handleInterrupt' | 'handleAddComposerInput' | 'handleRemoveComposerInput' | 'handleModelChange' | 'handleSetPrefs' | 'handleSetSystemPromptToggles' | 'handleSetPruningSettings' | 'handleSetToolResultPruningSettings'>;
+  /** True while the active session runs a history-compaction LLM call. */
+  compacting: boolean;
+  /** Most recent completed compaction for the active session (transient chip). */
+  lastCompaction: ViewState['lastCompactionBySession'][string];
+  handlers: Pick<AppHandlers, 'handleSend' | 'handleRetrySend' | 'handleInterrupt' | 'handleAddComposerInput' | 'handleRemoveComposerInput' | 'handleModelChange' | 'handleSetPrefs' | 'handleSetPrivacyMode' | 'handleSetSystemPromptToggles' | 'handleSetPruningSettings' | 'handleSetToolResultPruningSettings'>;
 }
 
 export const BottomSection = memo(function BottomSection({
@@ -59,6 +64,7 @@ export const BottomSection = memo(function BottomSection({
   retryStatus,
   interrupting,
   activeSession,
+  privacyMode = false,
   modelSettings,
   availableModels,
   availableExtensions,
@@ -79,6 +85,8 @@ export const BottomSection = memo(function BottomSection({
   pendingComposerInputs,
   activeRunSummary,
   tokenRateBySession,
+  compacting,
+  lastCompaction,
   handlers,
 }: BottomSectionProps) {
   if (!hasActiveTabs || needsSessionRecovery) return null;
@@ -103,6 +111,7 @@ export const BottomSection = memo(function BottomSection({
         activeModelId={activeSession?.modelId}
         activeProvider={activeSession?.provider}
         activeThinkingLevel={activeSession?.thinkingLevel}
+        privacyMode={privacyMode}
         modelSettings={modelSettings}
         availableModels={availableModels}
         availableExtensions={availableExtensions}
@@ -122,6 +131,8 @@ export const BottomSection = memo(function BottomSection({
         pendingComposerInputs={pendingComposerInputs}
         activeRunSummary={activeRunSummary}
         tokenRateBySession={tokenRateBySession}
+        compacting={compacting}
+        lastCompaction={lastCompaction}
         focusTrigger={activeSession?.path}
         onSend={handlers.handleSend}
         onRetrySend={handlers.handleRetrySend}
@@ -130,6 +141,7 @@ export const BottomSection = memo(function BottomSection({
         onRemoveInput={handlers.handleRemoveComposerInput}
         onModelChange={handlers.handleModelChange}
         onSetPrefs={handlers.handleSetPrefs}
+        onSetPrivacyMode={handlers.handleSetPrivacyMode}
         onSetSystemPromptToggles={handlers.handleSetSystemPromptToggles}
         onSetPruningSettings={handlers.handleSetPruningSettings}
         onSetToolResultPruningSettings={handlers.handleSetToolResultPruningSettings}

@@ -315,18 +315,25 @@ export function resolveHistoryCompactionEffectiveSettings(
   };
 }
 
+/** One explicit subagent model/reasoning assignment. Model identity is a
+ * canonical `provider/id` spec. Reasoning is user-owned bucket policy, never a
+ * tool-call or agent-frontmatter override. */
+export interface SubagentBucketAssignment {
+  model: string;
+  thinkingLevel: ThinkingLevel;
+}
+
 /**
  * User-configured model buckets for subagent model selection. Each bucket is a
- * list of canonical `provider/id` specs; legacy bare ids remain accepted for
- * backward compatibility. `selectModel` uses the highest eligible bucket at or
- * below the request. Exhausting those buckets falls back to the parent's active
- * model. Mirrored to the in-process subagent extension
- * via {@link SUBAGENT_BUCKETS_ENV}.
+ * list of explicit provider-qualified model/reasoning assignments. `selectModel`
+ * uses the highest eligible bucket at or below the request. Exhausting those
+ * buckets falls back to the parent's active model and reasoning level. Mirrored
+ * to the in-process subagent extension via {@link SUBAGENT_BUCKETS_ENV}.
  */
 export interface SubagentBuckets {
-  small: string[];
-  medium: string[];
-  frontier: string[];
+  small: SubagentBucketAssignment[];
+  medium: SubagentBucketAssignment[];
+  frontier: SubagentBucketAssignment[];
 }
 
 /** Empty buckets — the default before the user configures any models. */
@@ -424,11 +431,10 @@ export interface ChatPrefs {
    *  The upstream SDK default is 600s; this caps the worst-case hang for a
    *  simple command. Range [1, 600]. Mirrored via PIE_BASH_DEFAULT_TIMEOUT. */
   bashDefaultTimeout: number;
-  /** User-configured provider-qualified model specs per bucket for subagent model selection. The
-   *  subagent tool picks from a balanced random cycle in the highest eligible bucket at
-   *  or below the request; exhaustion falls back to the parent's active model.
-   *  Mirrored to the in-process subagent extension via PIE_SUBAGENT_BUCKETS_JSON.
-   *  Default: all empty. */
+  /** User-configured provider-qualified model/reasoning assignments per bucket.
+   *  The subagent tool picks from a balanced random cycle in the highest eligible
+   *  bucket at or below the request; exhaustion inherits the parent's active
+   *  model and reasoning. Mirrored via PIE_SUBAGENT_BUCKETS_JSON. Default: empty. */
   subagentBuckets: SubagentBuckets;
   /** Per-tier allowlist restricting which buckets nested subagents (depth ≥ 1)
    *  may use. A nested subagent requesting a disallowed tier is downgraded to the
@@ -793,15 +799,25 @@ export const EMPTY_TRANSCRIPT_WINDOW: TranscriptWindow = {
 };
 
 /**
- * Coerce an unknown stored value into a valid {@link SubagentBuckets}, dropping
- * non-array / non-string entries. Canonical `provider/id` specs and legacy bare
- * ids are both preserved. Used by {@link resolveChatPrefs} so a
- * malformed or partially-stored value (e.g. from an older version) can never
- * produce an ill-typed `subagentBuckets` at runtime.
+ * Coerce an unknown stored value into valid explicit bucket assignments.
+ * Legacy string-only entries are deliberately dropped: assigning them a
+ * reasoning level would recreate the hidden cost policy this shape removes.
  */
 export function normalizeSubagentBuckets(value: unknown): SubagentBuckets {
-  const coerce = (v: unknown): string[] =>
-    Array.isArray(v) ? v.filter((entry): entry is string => typeof entry === 'string' && entry.length > 0) : [];
+  const coerce = (candidate: unknown): SubagentBucketAssignment[] => {
+    if (!Array.isArray(candidate)) return [];
+    const out: SubagentBucketAssignment[] = [];
+    const seen = new Set<string>();
+    for (const raw of candidate) {
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
+      const entry = raw as Record<string, unknown>;
+      const model = typeof entry.model === 'string' ? entry.model.trim() : '';
+      if (!model || !isThinkingLevel(entry.thinkingLevel) || seen.has(model)) continue;
+      seen.add(model);
+      out.push({ model, thinkingLevel: entry.thinkingLevel });
+    }
+    return out;
+  };
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return { ...EMPTY_SUBAGENT_BUCKETS };
   }

@@ -12,6 +12,7 @@ import type {
   ComposerInputDraft,
   ContextWindowUsage,
   ExtensionInfo,
+  LastCompactionSummary,
   ModelInfo,
   ModelSettings,
   PruningCatalog,
@@ -59,6 +60,7 @@ interface ComposerProps {
   activeModelId?: string;
   activeProvider?: string;
   activeThinkingLevel?: ThinkingLevel;
+  privacyMode?: boolean;
   modelSettings: ModelSettings | null;
   availableModels: ModelInfo[];
   availableExtensions: ExtensionInfo[];
@@ -76,6 +78,10 @@ interface ComposerProps {
   pendingComposerInputs: ComposerInput[];
   activeRunSummary?: ActiveRunSummary | null;
   tokenRateBySession: Record<string, TokenRateIndicatorState>;
+  /** True while the active session runs a history-compaction LLM call. */
+  compacting: boolean;
+  /** Most recent completed compaction for the active session (transient chip). */
+  lastCompaction: LastCompactionSummary | null;
   focusTrigger?: string;
   postMessage: (msg: WebviewToHostMessage) => void;
   onSend: (text: string) => void;
@@ -88,6 +94,7 @@ interface ComposerProps {
   onRemoveInput: (inputId: string) => void;
   onModelChange: (model: string, provider: string | undefined, thinkingLevel: ThinkingLevel) => void;
   onSetPrefs: (prefs: Partial<ChatPrefs>) => void;
+  onSetPrivacyMode?: (enabled: boolean) => void;
   /** Apply the complete disabled-entry set for the active session's system
    *  prompts. The backend re-emits `session.opened` to update the displayed
    *  entries + toggle state. */
@@ -112,6 +119,7 @@ function ComposerView({
   activeModelId,
   activeProvider,
   activeThinkingLevel,
+  privacyMode = false,
   modelSettings,
   availableModels,
   availableExtensions,
@@ -129,6 +137,8 @@ function ComposerView({
   pendingComposerInputs,
   activeRunSummary,
   tokenRateBySession,
+  compacting,
+  lastCompaction,
   focusTrigger,
   postMessage,
   onSend,
@@ -138,6 +148,7 @@ function ComposerView({
   onRemoveInput,
   onModelChange,
   onSetPrefs,
+  onSetPrivacyMode,
   onSetSystemPromptToggles,
   onSetPruningSettings,
   onSetToolResultPruningSettings,
@@ -331,6 +342,8 @@ function ComposerView({
             toolResultPruningSettings={toolResultPruningSettings}
             providerGateStats={providerGateStats}
             onSetPrefs={onSetPrefs}
+            privacyMode={privacyMode}
+            onSetPrivacyMode={onSetPrivacyMode}
             onSetSystemPromptToggles={onSetSystemPromptToggles}
             systemPrompts={systemPrompts}
             onSetPruningSettings={onSetPruningSettings}
@@ -346,6 +359,8 @@ function ComposerView({
             sessionCostIndicator={sessionCostIndicator}
             tokenRateIndicator={tokenRateIndicator}
             runStatus={runControls.status}
+            compacting={compacting}
+            lastCompaction={lastCompaction}
             onModelChange={onModelChange}
             onCompact={onCompact}
           />

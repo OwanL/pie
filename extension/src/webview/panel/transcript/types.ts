@@ -37,6 +37,10 @@ export interface TranscriptCommonProps {
   transcriptLoaded: boolean;
   loadingStatus?: string;
   busy: boolean;
+  /** True while the active session runs a history-compaction LLM call; the
+   *  activity row labels it "compacting history" instead of a generic
+   *  thinking/preparing state. */
+  compacting?: boolean;
   liveTurnPhase?: LiveTurnPhase | null;
   prefs: ChatPrefs;
   pruningSettings: PruningSettings;

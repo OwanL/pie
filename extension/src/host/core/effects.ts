@@ -131,6 +131,8 @@ export interface PersistTabsEffect extends EffectBase {
   activeSessionPath: string | null;
   pinnedTabPaths: string[];
   pinnedTabGroups: string[][];
+  /** Persist only the session-scoped privacy markers; never session content. */
+  privateSessionPaths?: string[];
 }
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
@@ -164,6 +166,15 @@ export interface ShowModelSwitchConfirmEffect extends EffectBase {
 export interface SetPrefsRpcEffect extends EffectBase {
   kind: 'SetPrefsRpc';
   prefs: Partial<ChatPrefs>;
+}
+
+/** Apply privacy bookkeeping outside the pure reducer. The mode itself lives
+ *  only in ArchState; the effect discards any already-open analytics state and
+ *  scrubs analytics records when privacy is enabled. */
+export interface SetPrivacyModeEffect extends EffectBase {
+  kind: 'SetPrivacyMode';
+  sessionPath: string;
+  enabled: boolean;
 }
 
 /** Push the complete disabled-entry set for a session's system prompts to the
@@ -273,6 +284,8 @@ export interface SetToolResultPruningSettingsEffect extends EffectBase {
 export interface CloseSessionEffect extends EffectBase {
   kind: 'CloseSession';
   sessionPath: string;
+  /** Private sessions must be forgotten instead of retained for reopening. */
+  privacyMode?: boolean;
   /** The next tab to activate after closing, computed by the reducer via
    *  `getNextVisibleTabPathOnClose` (pure). null if no tabs remain. The runner
    *  uses this to decide whether to recursively `openSession(nextPath)` —
@@ -307,6 +320,7 @@ export type Effect =
   | LogEffect
   | SetModelRpcEffect
   | SetPrefsRpcEffect
+  | SetPrivacyModeEffect
   | SetSystemPromptTogglesRpcEffect
   | ShowModelSwitchConfirmEffect
   | HydrateModelEffect
@@ -336,7 +350,8 @@ export type Effect =
   | StartBackendReadyWatchdogEffect
   | CancelBackendReadyWatchdogEffect
   | MarkPrepassSucceededEffect
-  | ClearSendTimerEffect;
+  | ClearSendTimerEffect
+  | ClearLastCompactionEffect;
 
 /**
  * Drain queued sends when a pending session path resolves to a real path.
@@ -360,6 +375,16 @@ export interface DrainPendingSendQueueEffect extends EffectBase {
 export interface DrainBackendReadyQueueEffect extends EffectBase {
   kind: 'DrainBackendReadyQueue';
   entries: BackendReadyQueueEntry[];
+}
+
+/** Expire a session's transient "Compacted" chip after a bounded TTL. The
+ *  runner schedules a timer and dispatches `LastCompactionCleared` on fire. */
+export interface ClearLastCompactionEffect extends EffectBase {
+  kind: 'ClearLastCompaction';
+  corrId: string;
+  sessionPath: string;
+  /** TTL in milliseconds before the chip disappears. */
+  ttlMs: number;
 }
 
 /**

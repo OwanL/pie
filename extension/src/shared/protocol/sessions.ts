@@ -147,6 +147,11 @@ export interface SessionOpenedPayload {
   transcript: ChatMessage[];
   transcriptWindow: TranscriptWindow;
   busy: boolean;
+  /** True while the session is running a history-compaction LLM call
+   *  (`isStreaming`/`activeRequest` are both false then, so `busy` alone
+   *  cannot distinguish compaction from idle). Lets the host restore the
+   *  "Compacting…" indicator when a session is opened mid-compaction. */
+  isCompacting?: boolean;
   /** Atomic recovery snapshot for a busy session. A tab open must not depend
    * on the host having received every earlier streaming event: this checkpoint
    * reconstructs the complete in-progress assistant/tool turn. When absent,
@@ -396,10 +401,26 @@ export interface RetryMeasuredPayload {
 }
 
 /** Emitted by the backend when a history-compaction (`/compact`) LLM call
+ *  starts. The host uses it to surface a live "Compacting…" indicator (the
+ *  SDK emits no `message_start`/`message_end` for compaction, so without this
+ *  event the session would read as idle or generically busy). */
+export interface CompactionStartedPayload {
+  sessionPath: string;
+}
+
+/** Emitted by the backend when a history-compaction (`/compact`) LLM call
  *  finishes. Compaction emits no `message_start`/`message_end`, so this event is
- *  the only signal the host has to count it against the run. */
+ *  the only signal the host has to count it against the run. When the compaction
+ *  produced a result, the payload also carries the token metrics so the UI can
+ *  report how much context was freed. */
 export interface CompactionPayload {
   sessionPath: string;
+  /** Epoch milliseconds when the compaction LLM call finished. */
+  occurredAt?: number;
+  /** Prompt tokens before compaction (from the SDK result). */
+  tokensBefore?: number;
+  /** Post-compaction token estimate (from the SDK result). */
+  estimatedTokensAfter?: number;
 }
 
 /** Exact usage from an SDK LLM request that bypasses assistant message events. */

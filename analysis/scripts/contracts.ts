@@ -768,6 +768,7 @@ export interface PreparedSessionReviewV2Row {
   /** Why the review could not be joined; null unless `joinKey === 'unmatched'`. */
   unmatchedReason: ReviewJoinUnmatchedReason | null;
   runIds: string[];
+  /** Union of joined-run families and stable transcript successful-work families. */
   modelFamilies: string[];
   criteria: PreparedSessionReviewCriterionRow[];
   attainment: {
@@ -1003,9 +1004,9 @@ export interface ModelLeaderboardRow {
   effectiveTaskCount: number;
   /** Completed stable model/treatment runs retained for provenance. */
   attributableRunCount: number;
-  /** Distinct task groups among attributable completed stable model/treatment runs. */
+  /** Distinct canonical run task groups plus stable transcript-attributed reviewed sessions. */
   attributableTaskCount: number;
-  /** effectiveTaskCount / attributableTaskCount; null when there are no attributable task groups. */
+  /** effectiveTaskCount / attributableTaskCount; null when there are no attributable tasks. */
   scoringCoverage: number | null;
   /** Whether task-level V2 review coverage is below the minimum required for ranking. */
   scoringCoverageGateFailed: boolean;
@@ -1346,9 +1347,9 @@ export interface EvidenceReliabilityData {
   cohortLabel: string;
   /** Reviews with a non-null qualityIndexV1 (the cohort the diagnostics qualify). */
   reviewedSessionCount: number;
-  /** Reviewed sessions attributed to at least one model family via joined runs. */
+  /** Reviewed sessions attributed to at least one model family via prepared families (joined runs unioned with stable transcript successful-work attribution). */
   attributedSessionCount: number;
-  /** Reviewed sessions with no attributable family (unmatched or no family on joined runs). */
+  /** Reviewed sessions with no attributable family (no joined-run family and no stable transcript attribution; path-fallback reviews remain visible here but are excluded from ranking). */
   unattributedCount: number;
   /** Distinct model families with at least one attributed reviewed session. */
   effectiveReviewedFamilies: number;

@@ -375,6 +375,16 @@ function subtractUsage(left: TokenCounts, right: TokenCounts): TokenCounts {
   };
 }
 
+function providerForSample(
+  sampleModelId: string | undefined,
+  sampleProvider: string | undefined,
+  runModelId: string | undefined,
+  runProvider: string | undefined,
+): string | undefined {
+  if (sampleProvider) return sampleProvider;
+  return !sampleModelId || sampleModelId === runModelId ? runProvider : undefined;
+}
+
 function usageForModel(
   model: string,
   occurredAtMs: number,
@@ -442,7 +452,7 @@ function attributedRunUsage(
       Number.isNaN(occurredAtMs) ? fallbackMs : occurredAtMs,
       counts,
       pricingMap,
-      sample.provider ?? run.provider,
+      providerForSample(sample.modelId, sample.provider, run.modelId, run.provider),
       sample.reportedCostUsd,
     ));
     parentRemaining = subtractUsage(parentRemaining, counts);
@@ -471,7 +481,7 @@ function attributedRunUsage(
       Number.isNaN(occurredAtMs) ? fallbackMs : occurredAtMs,
       counts,
       pricingMap,
-      sample.provider ?? run.provider,
+      providerForSample(sample.modelId, sample.provider, run.modelId, run.provider),
       sample.reportedCostUsd,
     ));
   }
@@ -506,7 +516,7 @@ function attributedRunUsage(
       Number.isNaN(occurredAtMs) ? fallbackMs : occurredAtMs,
       counts,
       pricingMap,
-      sample.provider ?? run.provider,
+      providerForSample(sample.modelId, sample.provider, run.modelId, run.provider),
       equalUsage(counts, sampleCounts) ? sample.reportedCostUsd : undefined,
     ));
     remaining = subtractUsage(remaining, counts);
@@ -522,7 +532,13 @@ function attributedRunUsage(
         .filter((modelId): modelId is string => !!modelId && modelId !== run.modelId),
     );
     const fallbackModel = hintedModels.size === 1 ? [...hintedModels][0]! : runModel;
-    usage.push(usageForModel(fallbackModel, fallbackMs, remaining, pricingMap, run.provider));
+    usage.push(usageForModel(
+      fallbackModel,
+      fallbackMs,
+      remaining,
+      pricingMap,
+      providerForSample(fallbackModel, undefined, run.modelId, run.provider),
+    ));
   }
 
   return usage;
@@ -562,7 +578,7 @@ function distributeUsageForSeries(
         && providerForModel(
           sample.modelId ?? run.modelId,
           pricingMap,
-          sample.provider ?? run.provider,
+          providerForSample(sample.modelId, sample.provider, run.modelId, run.provider),
         ) === group.provider);
     const sampleOutput = samples.reduce((sum, entry) => sum + entry.sample.outputTokens, 0);
     if (samples.length === 0) {
@@ -744,7 +760,11 @@ export function accumulateAggregateStats(
     // observation; forwarded subagent samples are already present here once.
     for (const sample of run.turnThroughputSamples) {
       if (sample.status !== 'completed' || sample.generationDurationMs <= 0) continue;
-      const sampleProvider = providerForModel(sample.modelId ?? run.modelId, pricingMap, sample.provider ?? run.provider);
+      const sampleProvider = providerForModel(
+        sample.modelId ?? run.modelId,
+        pricingMap,
+        providerForSample(sample.modelId, sample.provider, run.modelId, run.provider),
+      );
       const sampleAcc = providerAcc(sampleProvider);
       sampleAcc.throughputOutputTokens += sample.outputTokens;
       sampleAcc.throughputGenerationMs += sample.generationDurationMs;
@@ -823,7 +843,11 @@ export function accumulateAggregateStats(
       if (Number.isNaN(sMs)) continue;
       if (sample.status !== 'completed' || sample.generationDurationMs <= 0) continue;
       const date = localDateString(sMs);
-      const sProvider = providerForModel(sample.modelId ?? run.modelId, pricingMap, sample.provider ?? run.provider);
+      const sProvider = providerForModel(
+        sample.modelId ?? run.modelId,
+        pricingMap,
+        providerForSample(sample.modelId, sample.provider, run.modelId, run.provider),
+      );
       const sModel = canonicalModel(sample.modelId ?? run.modelId, pricingMap);
       const hourDate = new Date(sMs);
       hourDate.setMinutes(0, 0, 0);
@@ -918,11 +942,8 @@ function mergeProviderMap(
   }
 }
 
-/** Merge independently accumulated run sets without revisiting their runs. */
-export function mergeAggregateStatsAccumulators(
-  ...accumulators: AggregateStatsAccumulator[]
-): AggregateStatsAccumulator {
-  const merged: AggregateStatsAccumulator = {
+function createEmptyAccumulator(): AggregateStatsAccumulator {
+  return {
     byProvider: new Map(),
     byDay: new Map(),
     throughputByDay: new Map(),
@@ -942,104 +963,119 @@ export function mergeAggregateStatsAccumulators(
     runCount: 0,
     subagentLifecycle: createSubagentLifecycleStats(),
   };
+}
 
-  for (const source of accumulators) {
-    mergeProviderMap(merged.byProvider, source.byProvider);
-    for (const [date, sourceDay] of source.byDay) {
-      let targetDay = merged.byDay.get(date);
-      if (!targetDay) {
-        targetDay = {
-          date,
-          byProvider: new Map(),
-          byModel: new Map(),
-          runCount: 0,
-          inputTokens: 0,
-          outputTokens: 0,
-          toolCallCount: 0,
-          touchedFileCount: 0,
-        };
-        merged.byDay.set(date, targetDay);
-      }
-      mergeProviderMap(targetDay.byProvider, sourceDay.byProvider);
-      for (const [model, cost] of sourceDay.byModel) {
-        targetDay.byModel.set(model, (targetDay.byModel.get(model) ?? 0) + cost);
-      }
-      targetDay.runCount += sourceDay.runCount;
-      targetDay.inputTokens += sourceDay.inputTokens;
-      targetDay.outputTokens += sourceDay.outputTokens;
-      targetDay.toolCallCount += sourceDay.toolCallCount;
-      targetDay.touchedFileCount += sourceDay.touchedFileCount;
+/** Merge one accumulator's contribution into an existing target in place.
+ *  Used by the aggregate service to fold newly-appended runs into a cached
+ *  completed accumulator without re-accumulating the whole history. */
+export function mergeAccumulatorInto(
+  target: AggregateStatsAccumulator,
+  source: AggregateStatsAccumulator,
+): void {
+  mergeProviderMap(target.byProvider, source.byProvider);
+  for (const [date, sourceDay] of source.byDay) {
+    let targetDay = target.byDay.get(date);
+    if (!targetDay) {
+      targetDay = {
+        date,
+        byProvider: new Map(),
+        byModel: new Map(),
+        runCount: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        toolCallCount: 0,
+        touchedFileCount: 0,
+      };
+      target.byDay.set(date, targetDay);
     }
-    for (const [date, sourceProviders] of source.throughputByDay) {
-      let targetProviders = merged.throughputByDay.get(date);
-      if (!targetProviders) {
-        targetProviders = new Map();
-        merged.throughputByDay.set(date, targetProviders);
-      }
-      for (const [provider, sourceThroughput] of sourceProviders) {
-        let targetThroughput = targetProviders.get(provider);
-        if (!targetThroughput) {
-          targetThroughput = { provider, outputTokens: 0, generationDurationMs: 0, sampleCount: 0 };
-          targetProviders.set(provider, targetThroughput);
-        }
-        targetThroughput.outputTokens += sourceThroughput.outputTokens;
-        targetThroughput.generationDurationMs += sourceThroughput.generationDurationMs;
-        targetThroughput.sampleCount += sourceThroughput.sampleCount;
-      }
+    mergeProviderMap(targetDay.byProvider, sourceDay.byProvider);
+    for (const [model, cost] of sourceDay.byModel) {
+      targetDay.byModel.set(model, (targetDay.byModel.get(model) ?? 0) + cost);
     }
-    for (const sessionPath of source.sessionPaths) merged.sessionPaths.add(sessionPath);
-    merged.totalCost += source.totalCost;
-    merged.totalInputTokens += source.totalInputTokens;
-    merged.totalOutputTokens += source.totalOutputTokens;
-    merged.totalCacheReadTokens += source.totalCacheReadTokens;
-    merged.totalCacheWriteTokens += source.totalCacheWriteTokens;
-    merged.totalThroughputOutputTokens += source.totalThroughputOutputTokens;
-    merged.totalThroughputGenerationMs += source.totalThroughputGenerationMs;
-    merged.runCount += source.runCount;
-    addSubagentLifecycleStats(merged.subagentLifecycle, source.subagentLifecycle);
-
-    for (const [date, samples] of source.costSamplesByDay) {
-      const target = merged.costSamplesByDay.get(date);
-      if (target) target.push(...samples);
-      else merged.costSamplesByDay.set(date, [...samples]);
+    targetDay.runCount += sourceDay.runCount;
+    targetDay.inputTokens += sourceDay.inputTokens;
+    targetDay.outputTokens += sourceDay.outputTokens;
+    targetDay.toolCallCount += sourceDay.toolCallCount;
+    targetDay.touchedFileCount += sourceDay.touchedFileCount;
+  }
+  for (const [date, sourceProviders] of source.throughputByDay) {
+    let targetProviders = target.throughputByDay.get(date);
+    if (!targetProviders) {
+      targetProviders = new Map();
+      target.throughputByDay.set(date, targetProviders);
     }
-    for (const [date, samples] of source.tokenSamplesByDay) {
-      const target = merged.tokenSamplesByDay.get(date);
-      if (target) target.push(...samples);
-      else merged.tokenSamplesByDay.set(date, [...samples]);
-    }
-    for (const [date, sourceHours] of source.throughputByHourByDay) {
-      let targetHours = merged.throughputByHourByDay.get(date);
-      if (!targetHours) {
-        targetHours = new Map();
-        merged.throughputByHourByDay.set(date, targetHours);
+    for (const [provider, sourceThroughput] of sourceProviders) {
+      let targetThroughput = targetProviders.get(provider);
+      if (!targetThroughput) {
+        targetThroughput = { provider, outputTokens: 0, generationDurationMs: 0, sampleCount: 0 };
+        targetProviders.set(provider, targetThroughput);
       }
-      for (const [hourMs, sourceHour] of sourceHours) {
-        let targetHour = targetHours.get(hourMs);
-        if (!targetHour) {
-          targetHour = { byProvider: new Map(), byModel: new Map() };
-          targetHours.set(hourMs, targetHour);
-        }
-        for (const [provider, values] of sourceHour.byProvider) {
-          const target = targetHour.byProvider.get(provider) ?? { out: 0, genMs: 0 };
-          target.out += values.out;
-          target.genMs += values.genMs;
-          targetHour.byProvider.set(provider, target);
-        }
-        for (const [model, values] of sourceHour.byModel) {
-          const target = targetHour.byModel.get(model) ?? { out: 0, genMs: 0 };
-          target.out += values.out;
-          target.genMs += values.genMs;
-          targetHour.byModel.set(model, target);
-        }
-      }
-    }
-    if (source.lastRun && source.lastRunEndedMs > merged.lastRunEndedMs) {
-      merged.lastRunEndedMs = source.lastRunEndedMs;
-      merged.lastRun = source.lastRun;
+      targetThroughput.outputTokens += sourceThroughput.outputTokens;
+      targetThroughput.generationDurationMs += sourceThroughput.generationDurationMs;
+      targetThroughput.sampleCount += sourceThroughput.sampleCount;
     }
   }
+  for (const sessionPath of source.sessionPaths) target.sessionPaths.add(sessionPath);
+  target.totalCost += source.totalCost;
+  target.totalInputTokens += source.totalInputTokens;
+  target.totalOutputTokens += source.totalOutputTokens;
+  target.totalCacheReadTokens += source.totalCacheReadTokens;
+  target.totalCacheWriteTokens += source.totalCacheWriteTokens;
+  target.totalThroughputOutputTokens += source.totalThroughputOutputTokens;
+  target.totalThroughputGenerationMs += source.totalThroughputGenerationMs;
+  target.runCount += source.runCount;
+  addSubagentLifecycleStats(target.subagentLifecycle, source.subagentLifecycle);
 
+  for (const [date, samples] of source.costSamplesByDay) {
+    const existing = target.costSamplesByDay.get(date);
+    if (existing) existing.push(...samples);
+    else target.costSamplesByDay.set(date, [...samples]);
+  }
+  for (const [date, samples] of source.tokenSamplesByDay) {
+    const existing = target.tokenSamplesByDay.get(date);
+    if (existing) existing.push(...samples);
+    else target.tokenSamplesByDay.set(date, [...samples]);
+  }
+  for (const [date, sourceHours] of source.throughputByHourByDay) {
+    let targetHours = target.throughputByHourByDay.get(date);
+    if (!targetHours) {
+      targetHours = new Map();
+      target.throughputByHourByDay.set(date, targetHours);
+    }
+    for (const [hourMs, sourceHour] of sourceHours) {
+      let targetHour = targetHours.get(hourMs);
+      if (!targetHour) {
+        targetHour = { byProvider: new Map(), byModel: new Map() };
+        targetHours.set(hourMs, targetHour);
+      }
+      for (const [provider, values] of sourceHour.byProvider) {
+        const entry = targetHour.byProvider.get(provider) ?? { out: 0, genMs: 0 };
+        entry.out += values.out;
+        entry.genMs += values.genMs;
+        targetHour.byProvider.set(provider, entry);
+      }
+      for (const [model, values] of sourceHour.byModel) {
+        const entry = targetHour.byModel.get(model) ?? { out: 0, genMs: 0 };
+        entry.out += values.out;
+        entry.genMs += values.genMs;
+        targetHour.byModel.set(model, entry);
+      }
+    }
+  }
+  if (source.lastRun && source.lastRunEndedMs > target.lastRunEndedMs) {
+    target.lastRunEndedMs = source.lastRunEndedMs;
+    target.lastRun = source.lastRun;
+  }
+}
+
+/** Merge independently accumulated run sets without revisiting their runs. */
+export function mergeAggregateStatsAccumulators(
+  ...accumulators: AggregateStatsAccumulator[]
+): AggregateStatsAccumulator {
+  const merged = createEmptyAccumulator();
+  for (const source of accumulators) {
+    mergeAccumulatorInto(merged, source);
+  }
   return merged;
 }
 

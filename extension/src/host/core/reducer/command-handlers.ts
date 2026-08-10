@@ -18,6 +18,7 @@ import {
   handleDismissNotice,
   handleRespondExtensionUI,
   handleSetPrefs,
+  handleSetPrivacyMode,
   handleStartNewTask,
   handleContinueTask,
   handleSetPruningSettings,
@@ -114,6 +115,10 @@ export function handleCommand(state: ArchState, cmd: Command): ReducerResult {
 
     case 'SetPrefs': {
       return handleSetPrefs(state, cmd);
+    }
+
+    case 'SetPrivacyMode': {
+      return handleSetPrivacyMode(state, cmd);
     }
 
     case 'SelectSession': {

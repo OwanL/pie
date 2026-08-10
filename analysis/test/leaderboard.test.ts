@@ -214,13 +214,13 @@ test('three accepted V2 reviews are review-backed and excluded reviews cannot ra
   assert.equal(unranked.rank, null);
 });
 
-test('unmatched V2 reviews with transcript attribution do not enter ranking evidence', async () => {
+test('unmatched stable-ID V2 reviews use transcript attribution as ranking evidence', async () => {
   const run = makeRun({ runId: 'joined', modelId: 'reviewed-model', sessionId: 'joined-session' });
   const orphanRun = makeRun({ runId: 'orphan', modelId: 'reviewed-model', sessionId: 'orphan-session' });
   const orphanReview = makeReview(orphanRun, 'orphan-review', 100, [reviewer('small-orphan', 'small')], {
     joinKey: 'unmatched', unmatchedReason: 'no_run_for_identity', runIds: [], modelFamilies: [],
   });
-  const prepared = await preparedForLeaderboard([run], [orphanReview]);
+  const prepared = await preparedForLeaderboard([], [orphanReview]);
   prepared.historicalSessions = [{
     sessionId: orphanRun.sessionId,
     sessionPathHash: 'orphan-session-path-hash',
@@ -237,9 +237,42 @@ test('unmatched V2 reviews with transcript attribution do not enter ranking evid
   }];
 
   const row = createModelLeaderboard(prepared).rows.find((candidate) => candidate.modelId === 'reviewed-model')!;
-  assert.equal(row.reviewEvidenceMass, 0);
-  assert.equal(row.scoringCoverage, 0);
-  assert.equal(row.rank, null);
+  assert.equal(row.reviewEvidenceMass, 1);
+  assert.equal(row.v2ReviewCount, 1);
+  assert.equal(row.canonicalTaskCount, 0, 'transcript attribution does not manufacture a canonical run task');
+  assert.equal(row.attributableTaskCount, 1);
+  assert.equal(row.scoringCoverage, 1);
+  assert.equal(row.transcriptOnlySessionCount, 1, 'review and process evidence dedupe the same transcript session');
+  assert.equal(row.providers[0]!.transcriptOnlySessionCount, 1);
+  assert.equal(row.rank, 1);
+});
+
+test('successful transcript work supplements missing joined-run families', async () => {
+  const run = makeRun({ runId: 'partial-run', modelId: 'gpt-5.6-sol', sessionId: 'mixed-session' });
+  const review = makeReview(run, 'mixed-review', 100, [reviewer('small-mixed', 'small')]);
+  const prepared = await preparedForLeaderboard([run], [review]);
+  prepared.historicalSessions = [{
+    sessionId: run.sessionId, sessionPathHash: run.sessionPathHash,
+    startedAt: run.startedAt, endedAt: run.finalizedAt, firstUserMessageChars: 100,
+    attributions: [
+      { modelId: 'gpt-5.6-sol', modelFamily: 'gpt-5.6-sol', thinkingLevel: 'high', share: 0.25, successfulAssistantTurns: 1, attributedTokens: 25 },
+      { modelId: 'claude-opus-5', modelFamily: 'claude-opus-5', thinkingLevel: 'high', share: 0.75, successfulAssistantTurns: 1, attributedTokens: 75 },
+    ],
+    successfulAssistantTurns: 2, errorAssistantTurns: 0, abortedAssistantTurns: 0,
+    inputTokens: 100, outputTokens: 100, cacheReadTokens: 0, cacheWriteTokens: 0,
+    reportedCostUsd: null, toolCallCount: 0, toolErrorCount: 0, terminalStatus: 'success',
+    mixedModel: true, sourceProvenance: ['configured'], matchedCanonical: true, transcriptOnly: false,
+  }];
+
+  const rows = createModelLeaderboard(prepared).rows;
+  const sol = rows.find((row) => row.modelId === 'gpt-5.6-sol')!;
+  const opus = rows.find((row) => row.modelId === 'claude-opus-5')!;
+  assert.equal(sol.reviewEvidenceMass, 0.25);
+  assert.equal(sol.transcriptOnlySessionCount, 0);
+  assert.equal(sol.providers[0]!.transcriptEvidenceMass, 0);
+  assert.equal(opus.reviewEvidenceMass, 0.75);
+  assert.equal(opus.canonicalTaskCount, 0);
+  assert.equal(opus.transcriptOnlySessionCount, 1);
 });
 
 test('reviews of superseded canonical retries do not double-count one task', async () => {

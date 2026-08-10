@@ -13,6 +13,7 @@ export const AGENT_ACTIVITY_LABELS = {
   draftingTool: 'drafting tool call',
   runningTools: 'running tools',
   thinking: 'thinking',
+  compacting: 'compacting history',
 } as const;
 
 /**
@@ -22,7 +23,7 @@ export const AGENT_ACTIVITY_LABELS = {
  */
 export interface TurnActivityState {
   /** Primary in-flight phase identifier. */
-  phase: 'preparing' | 'pruning' | 'startingModel' | 'thinking' | 'draftingTool' | 'runningTool' | 'streaming' | 'providerStatus';
+  phase: 'preparing' | 'pruning' | 'startingModel' | 'thinking' | 'draftingTool' | 'runningTool' | 'streaming' | 'providerStatus' | 'compacting';
   /** Human-readable label for this phase */
   label: string;
   /** Additional detail text (e.g., specific tool name, tool count) */
@@ -48,6 +49,11 @@ export interface TurnActivityState {
 
 interface PendingActivityOptions {
   busy: boolean;
+  /** True while the active session runs a history-compaction LLM call. Takes
+   *  precedence over transcript-derived phases: compaction emits no
+   *  message_start/message_end, so the transcript would otherwise read as a
+   *  stale "thinking"/"preparing" state. */
+  compacting?: boolean;
   transcript: readonly ChatMessage[];
   prefs: Pick<ChatPrefs, 'extensionToggles' | 'activityTailLines'>;
   pruningSettings: Pick<PruningSettings, 'mode'>;
@@ -124,6 +130,7 @@ function formatModelLabel(modelId?: string, thinkingLevel?: ChatMessage['thinkin
  */
 export function deriveTurnActivityState({
   busy,
+  compacting = false,
   transcript,
   prefs,
   pruningSettings,
@@ -133,6 +140,18 @@ export function deriveTurnActivityState({
 }: PendingActivityOptions): TurnActivityState | null {
   if (!busy) {
     return null;
+  }
+
+  // History compaction is a billable LLM call with no message_start/message_end:
+  // the transcript shows no live assistant row, so label the activity directly
+  // instead of falling through to a misleading "thinking"/"preparing" state.
+  if (compacting) {
+    return {
+      phase: 'compacting',
+      label: AGENT_ACTIVITY_LABELS.compacting,
+      tone: 'processing',
+      ariaLabel: 'Agent is compacting conversation history',
+    };
   }
 
   // Provider lifecycle status used to render inside the composer. Surface it in

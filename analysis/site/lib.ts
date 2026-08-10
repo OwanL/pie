@@ -128,7 +128,7 @@ export function modelColorScale(models?: readonly string[]): { range: string[] }
   return { range: MODEL_PALETTE };
 }
 
-export const THINKING_LEVEL_ORDER = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'];
+export const THINKING_LEVEL_ORDER = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 
 export function average(values: number[]): number | null {
   if (values.length === 0) {
@@ -193,14 +193,11 @@ export function normalizeThinkingLevel(value: string | null | undefined): string
   if (!normalized) {
     return null;
   }
-  if (normalized === 'max') {
-    return 'xhigh';
-  }
   return normalized;
 }
 
 export function formatThinkingLevelLabel(value: string): string {
-  return value === 'xhigh' ? 'max' : value;
+  return value;
 }
 
 export function sortNatural(values: string[]): string[] {

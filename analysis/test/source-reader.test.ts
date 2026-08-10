@@ -186,7 +186,7 @@ test('missing optional fields are coerced safely', async () => {
   });
 });
 
-test('max thinking level alias is accepted and normalized to xhigh', async () => {
+test('max thinking level is accepted and preserved', async () => {
   await withTempDir(async (dir) => {
     const fixture = deepClone(await loadFixture());
     (fixture.completedRuns[0] as any).thinkingLevel = 'max';
@@ -194,7 +194,7 @@ test('max thinking level alias is accepted and normalized to xhigh', async () =>
     await fs.writeFile(filePath, JSON.stringify(fixture), 'utf8');
 
     const loaded = await readSourceAnalyticsPayload(filePath);
-    assert.equal(loaded.completedRuns[0]?.thinkingLevel, 'xhigh');
+    assert.equal(loaded.completedRuns[0]?.thinkingLevel, 'max');
   });
 });
 

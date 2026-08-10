@@ -16,7 +16,7 @@ import {
 } from '../../../shared/protocol';
 import { THINKING_LEVEL_OPTIONS } from '../../../shared/thinking-level.js';
 import { ModelPicker } from '../components/model-picker';
-import { formatModelSpec, orderModelsForPicker, parseModelSpec, type ModelPickerEntry } from './model-list';
+import { formatModelSpec, getModelThinkingLevels, orderModelsForPicker, parseModelSpec, type ModelPickerEntry } from './model-list';
 import type { OnSetPrefs } from './settings-menu-types';
 
 interface Props {
@@ -27,11 +27,6 @@ interface Props {
   activeModel?: { provider?: string; id: string };
   onSetPrefs: OnSetPrefs;
 }
-
-const SUMMARY_THINKING_LEVEL_OPTIONS: { value: HistoryCompactionSummaryThinkingLevel; label: string }[] = [
-  { value: 'inherit', label: 'Inherit' },
-  ...THINKING_LEVEL_OPTIONS,
-];
 
 function formatTokens(tokens: number): string {
   if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(tokens % 1_000_000 === 0 ? 0 : 1)}m`;
@@ -155,6 +150,16 @@ export function HistoryCompactionSection({
     : undefined;
   const summaryModelLabel = summaryModelEntry?.label
     ?? (settings.summaryModel ? summaryModelValue : 'Active model');
+  const activeModelInfo = activeModel
+    ? availableModels.find((model) => model.id === activeModel.id
+      && (!activeModel.provider || model.provider === activeModel.provider))
+    : undefined;
+  const effectiveSummaryModel = summaryModelEntry?.model ?? activeModelInfo;
+  const summaryThinkingOptions: Array<{ value: HistoryCompactionSummaryThinkingLevel; label: string }> = [
+    { value: 'inherit', label: 'Inherit' },
+    ...THINKING_LEVEL_OPTIONS.filter((option) =>
+      getModelThinkingLevels(effectiveSummaryModel).includes(option.value)),
+  ];
 
   const update = (next: HistoryCompactionSettings) => {
     onSetPrefs({ historyCompaction: resolveHistoryCompactionSettings(next) } satisfies Partial<ChatPrefs>);
@@ -191,16 +196,23 @@ export function HistoryCompactionSection({
   };
 
   const updateSummaryModel = (value: string) => {
-    if (!value) {
-      update({ ...settings, summaryModel: null });
-      return;
+    const selected = value
+      ? (() => {
+          const { provider, id } = parseModelSpec(value);
+          return provider ? availableModels.find((model) => model.provider === provider && model.id === id) : undefined;
+        })()
+      : activeModelInfo;
+    if (value && !selected) return;
+    let summaryThinkingLevel = settings.summaryThinkingLevel;
+    if (summaryThinkingLevel !== 'inherit' && selected) {
+      const supported = getModelThinkingLevels(selected);
+      if (!supported.includes(summaryThinkingLevel)) summaryThinkingLevel = supported[0] ?? 'off';
     }
-    const { provider, id } = parseModelSpec(value);
-    if (!provider) return;
-    const selected = availableModels.find((m) => m.provider === provider && m.id === id);
-    if (selected) {
-      update({ ...settings, summaryModel: { provider: selected.provider, id: selected.id } });
-    }
+    update({
+      ...settings,
+      summaryModel: value && selected ? { provider: selected.provider, id: selected.id } : null,
+      summaryThinkingLevel,
+    });
   };
 
   const toggleActiveProfile = () => {
@@ -349,7 +361,7 @@ export function HistoryCompactionSection({
             aria-label="Summary thinking level"
             onChange={(event) => updateSummaryThinkingLevel((event.target as HTMLSelectElement).value as HistoryCompactionSummaryThinkingLevel)}
           >
-            {SUMMARY_THINKING_LEVEL_OPTIONS.map((opt) => (
+            {summaryThinkingOptions.map((opt) => (
               <option key={opt.value} value={opt.value}>{opt.label}</option>
             ))}
           </select>

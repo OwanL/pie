@@ -16,6 +16,10 @@ import type { LiveTurnCheckpoint } from '../../../shared/live-pipeline-protocol.
 
 const BACKEND_EXIT_TOMBSTONE_GRACE_MS = 15_000;
 
+/** How long the transient "Compacted · freed N tokens" chip stays visible
+ *  after a compaction finishes (host-owned TTL; the webview never times it). */
+export const LAST_COMPACTION_CHIP_TTL_MS = 10_000;
+
 function mergeSessionSummaryPreservingLocalName(
   existing: SessionSummary | undefined,
   incoming: SessionSummary,
@@ -151,6 +155,12 @@ export function handleSessionOpened(state: ArchState, event: Extract<Event, { ki
   const nextRunningSessionPaths = payload.busy
     ? addToArray(state.sessions.runningSessionPaths, sessionPath)
     : state.sessions.runningSessionPaths;
+  // A session opened mid-compaction carries `isCompacting` (the backend's
+  // `isStreaming`/`activeRequest` are both false while compaction runs, so
+  // `busy` alone cannot restore the "Compacting…" indicator).
+  const nextCompactingSessionPaths = payload.isCompacting === true
+    ? addToArray(state.sessions.compactingSessionPaths, sessionPath)
+    : state.sessions.compactingSessionPaths;
 
   // Preserve review fields across `session.opened`'s full-replace upsert.
   // `payload.session` comes from `buildCurrentSummary`, which merges the
@@ -209,6 +219,7 @@ export function handleSessionOpened(state: ArchState, event: Extract<Event, { ki
     sessions: {
       ...next.sessions,
       runningSessionPaths: nextRunningSessionPaths,
+      compactingSessionPaths: nextCompactingSessionPaths,
       sessions: upsertSessionSummary(next.sessions.sessions, guardedSummary),
       ...(payload.analyticsFactors && {
         analyticsFactorsBySession: {
@@ -398,6 +409,72 @@ export function handleBusyChanged(state: ArchState, event: Extract<Event, { kind
   };
 }
 
+/** Surface a live "Compacting…" indicator when a history-compaction LLM call
+ *  starts. The backend re-arms busy at the same time, so the session is also in
+ *  `runningSessionPaths`; this separate marker lets the UI label the activity. */
+export function handleCompactionStarted(state: ArchState, event: Extract<Event, { kind: 'CompactionStarted' }>): ReducerResult {
+  return {
+    state: {
+      ...state,
+      sessions: {
+        ...state.sessions,
+        compactingSessionPaths: addToArray(state.sessions.compactingSessionPaths, event.sessionPath),
+      },
+    },
+    effects: [],
+  };
+}
+
+/** Clear the "Compacting…" indicator when a history-compaction LLM call
+ *  finishes (success, failure, or abort) and record the transient "Compacted"
+ *  chip. The chip expires after `LAST_COMPACTION_CHIP_TTL_MS` via the
+ *  `ClearLastCompaction` effect. */
+export function handleCompactionEnded(state: ArchState, event: Extract<Event, { kind: 'CompactionEnded' }>): ReducerResult {
+  const summary = {
+    at: event.occurredAt,
+    ...(event.tokensBefore !== undefined ? { tokensBefore: event.tokensBefore } : {}),
+    ...(event.estimatedTokensAfter !== undefined ? { estimatedTokensAfter: event.estimatedTokensAfter } : {}),
+  };
+  return {
+    state: {
+      ...state,
+      sessions: {
+        ...state.sessions,
+        compactingSessionPaths: removeFromArray(state.sessions.compactingSessionPaths, event.sessionPath),
+        lastCompactionBySession: {
+          ...state.sessions.lastCompactionBySession,
+          [event.sessionPath]: summary,
+        },
+      },
+    },
+    effects: [{
+      kind: 'ClearLastCompaction',
+      corrId: `clear-last-compaction:${event.sessionPath}:${event.occurredAt}`,
+      sessionPath: event.sessionPath,
+      ttlMs: LAST_COMPACTION_CHIP_TTL_MS,
+    }],
+  };
+}
+
+/** Expire a session's transient "Compacted" chip (fired by the
+ *  `ClearLastCompaction` effect timer). */
+export function handleLastCompactionCleared(state: ArchState, event: Extract<Event, { kind: 'LastCompactionCleared' }>): ReducerResult {
+  if (!(event.sessionPath in state.sessions.lastCompactionBySession)) {
+    return { state, effects: [] };
+  }
+  const { [event.sessionPath]: _expired, ...remaining } = state.sessions.lastCompactionBySession;
+  return {
+    state: {
+      ...state,
+      sessions: {
+        ...state.sessions,
+        lastCompactionBySession: remaining,
+      },
+    },
+    effects: [],
+  };
+}
+
 export function handleBusyCompleted(state: ArchState, _event: Extract<Event, { kind: 'BusyCompleted' }>): ReducerResult {
   return { state, effects: [] };
 }
@@ -448,6 +525,9 @@ export function handleRunningSessionsChanged(state: ArchState, event: Extract<Ev
       sessions: {
         ...state.sessions,
         runningSessionPaths: event.sessionPaths,
+        // Compaction re-arms busy, so compacting paths are always a subset of
+        // running paths; a backend exit (empty list) must clear them too.
+        compactingSessionPaths: state.sessions.compactingSessionPaths.filter((p) => running.has(p)),
         reviewClosedRunningPaths: state.sessions.reviewClosedRunningPaths.filter((p) => running.has(p)),
       },
     },
@@ -825,6 +905,13 @@ export function handlePendingPathReplaced(state: ArchState, event: Extract<Event
       draft.sessions.analyticsFactorsBySession[newSessionPath] =
         draft.sessions.analyticsFactorsBySession[oldPendingPath] ?? null;
       delete draft.sessions.analyticsFactorsBySession[oldPendingPath];
+    }
+
+    // Move host-only privacy mode when a new session placeholder resolves to
+    // its backend-assigned path.
+    if (draft.sessions.privacyModeBySession[oldPendingPath] === true) {
+      draft.sessions.privacyModeBySession[newSessionPath] = true;
+      delete draft.sessions.privacyModeBySession[oldPendingPath];
     }
 
     // Clear the pending send queue for the old path — the entries are emitted

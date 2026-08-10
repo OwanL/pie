@@ -131,7 +131,7 @@ test('buildCurrentSummary falls back to startup cwd and normalizes thinking leve
   assert.equal(summary.messageCount, 2);
   assert.equal(summary.modelId, 'claude-test');
   assert.equal(summary.provider, undefined);
-  assert.equal(summary.thinkingLevel, undefined);
+  assert.equal(summary.thinkingLevel, 'max');
 });
 
 test('listAvailableModels derives input kinds and tolerates missing or failing registries', () => {
@@ -148,9 +148,18 @@ test('listAvailableModels derives input kinds and tolerates missing or failing r
             name: 'Claude Sonnet',
             provider: 'anthropic',
             reasoning: true,
+            thinkingLevelMap: { minimal: null, xhigh: 'xhigh', max: 'max' },
             input: ['text', 'image'],
             contextWindow: 200000,
             maxTokens: 8192,
+          }, {
+            id: 'plain-model',
+            name: 'Plain Model',
+            provider: 'plain',
+            reasoning: false,
+            input: ['text'],
+            contextWindow: 32000,
+            maxTokens: 4096,
           }],
           find: () => undefined,
         },
@@ -163,9 +172,19 @@ test('listAvailableModels derives input kinds and tolerates missing or failing r
     name: 'Claude Sonnet',
     provider: 'anthropic',
     reasoning: true,
+    thinkingLevels: ['off', 'low', 'medium', 'high', 'xhigh', 'max'],
     inputKinds: ['text', 'image'],
     contextWindow: 200000,
     maxTokens: 8192,
+  }, {
+    id: 'plain-model',
+    name: 'Plain Model',
+    provider: 'plain',
+    reasoning: false,
+    thinkingLevels: ['off'],
+    inputKinds: ['text'],
+    contextWindow: 32000,
+    maxTokens: 4096,
   }]);
 
   const failingContext = makeContext({

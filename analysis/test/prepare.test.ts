@@ -275,12 +275,12 @@ test('prepareSourceAnalytics exposes tool failure reason rows', async () => {
   )));
 });
 
-test('prepareSourceAnalytics normalizes max thinking level alias to xhigh', async () => {
+test('prepareSourceAnalytics preserves max thinking level', async () => {
   const fixture = deepClone(await loadFixture());
   (fixture.completedRuns[0] as any).thinkingLevel = 'max';
 
   const prepared = prepareSourceAnalytics(fixture);
-  assert.equal(prepared.runs[0]?.thinkingLevel, 'xhigh');
+  assert.equal(prepared.runs[0]?.thinkingLevel, 'max');
 });
 
 test('prepareSourceAnalytics deduplicates run ids across completed and open snapshots', async () => {
@@ -803,7 +803,7 @@ test('prepareSourceAnalytics normalizes all supported thinking levels and blank 
   assert.equal(byId.get(targetRuns[3]!.runId)?.thinkingLevel, 'medium');
   assert.equal(byId.get(targetRuns[4]!.runId)?.thinkingLevel, 'high');
   assert.equal(byId.get(targetRuns[5]!.runId)?.thinkingLevel, 'xhigh');
-  assert.equal(byId.get(targetRuns[6]!.runId)?.thinkingLevel, 'xhigh');
+  assert.equal(byId.get(targetRuns[6]!.runId)?.thinkingLevel, 'max');
   assert.equal(byId.get(targetRuns[7]!.runId)?.thinkingLevel, null);
 });
 

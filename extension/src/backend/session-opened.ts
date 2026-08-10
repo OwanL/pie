@@ -7,7 +7,6 @@ import { buildSessionAnalyticsFactors } from './session-analytics';
 import { buildCurrentSummary, listAvailableModels } from './session-metadata';
 import { buildTailTranscriptWindow, buildDisplayTranscriptCache, isDisplayTranscriptCacheStale } from './transcript-window';
 import { deduplicateToolCallResultsForTransport } from '../shared/chat-message-parts';
-import { buildSessionUsageSnapshot } from '../shared/session-usage';
 import type { SessionOpenedPayload, SystemPromptEntry, TranscriptMode } from '../shared/protocol';
 import type { SessionContext, SessionPromptState } from './server-types';
 import type { SdkBuildSystemPromptOptions } from './sdk';
@@ -84,7 +83,12 @@ export async function buildSessionOpenedPayload(
     session: buildCurrentSummary(context, deps.startupCwd),
     transcript: transportTranscript,
     transcriptWindow: transcriptSlice.transcriptWindow,
-    busy: context.session.isStreaming || !!context.activeRequest,
+    busy: context.session.isStreaming || !!context.activeRequest || context.session.isCompacting === true,
+    // Compaction re-arms busy via `compaction_start`, but `isStreaming` /
+    // `activeRequest` are both false while it runs. Carry the explicit flag so
+    // a session opened mid-compaction still shows the "Compacting…" indicator
+    // instead of reading as idle.
+    isCompacting: context.session.isCompacting === true,
     ...(liveTurnCheckpoint ? { liveTurnCheckpoint } : {}),
     selectionToken,
     ...(mode === 'skip' && { transcriptSkipped: true }),
@@ -96,7 +100,7 @@ export async function buildSessionOpenedPayload(
     // Cost/token indicators must describe the whole durable branch, not the
     // bounded transcript slice sent to the renderer. The full mapped cache is
     // already available here, so this adds no session-file scan.
-    sessionUsage: buildSessionUsageSnapshot(cache.transcript),
+    sessionUsage: cache.sessionUsage,
   };
 }
 

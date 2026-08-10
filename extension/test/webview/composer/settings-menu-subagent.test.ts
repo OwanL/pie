@@ -1,11 +1,15 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { h } from 'preact';
+import { h, render } from 'preact';
 import renderToString from 'preact-render-to-string';
+import { act } from 'preact/test-utils';
+
+import { installDom } from '../../_helpers/dom';
+installDom();
 
 import { SubagentSection } from '../../../src/webview/panel/composer/settings-menu-subcomponents';
-import { filterEnabledProviders, orderModelsForPicker } from '../../../src/webview/panel/composer/model-list';
+import { filterEnabledProviders, getModelThinkingLevels, orderModelsForPicker } from '../../../src/webview/panel/composer/model-list';
 import { DEFAULT_CHAT_PREFS } from '../../../src/shared/protocol';
 import type { ChatPrefs, ModelInfo } from '../../../src/shared/protocol';
 
@@ -14,10 +18,10 @@ function prefsWith(overrides: Partial<ChatPrefs>): ChatPrefs {
 }
 
 const AVAILABLE_MODELS: ModelInfo[] = [
-  { id: 'haiku', name: 'Haiku', provider: 'anthropic', reasoning: false, inputKinds: ['text'] },
-  { id: 'sonnet', name: 'Sonnet', provider: 'anthropic', reasoning: true, inputKinds: ['text', 'image'] },
-  { id: 'opus', name: 'Opus', provider: 'anthropic', reasoning: true, inputKinds: ['text', 'image'] },
-  { id: 'gpt-5', name: 'GPT-5', provider: 'openai', reasoning: true, inputKinds: ['text'] },
+  { id: 'haiku', name: 'Haiku', provider: 'anthropic', reasoning: false, thinkingLevels: ['off'], inputKinds: ['text'] },
+  { id: 'sonnet', name: 'Sonnet', provider: 'anthropic', reasoning: true, thinkingLevels: ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'], inputKinds: ['text', 'image'] },
+  { id: 'opus', name: 'Opus', provider: 'anthropic', reasoning: true, thinkingLevels: ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'], inputKinds: ['text', 'image'] },
+  { id: 'gpt-5', name: 'GPT-5', provider: 'openai', reasoning: true, thinkingLevels: ['off', 'minimal', 'low', 'medium', 'high', 'max'], inputKinds: ['text'] },
 ];
 
 test('SubagentSection renders the inline container, toggle, buckets, and nesting controls', () => {
@@ -80,7 +84,11 @@ test('SubagentSection renders default toggles only for providers used by subagen
   const html = renderToString(
     h(SubagentSection, {
       prefs: prefsWith({
-        subagentBuckets: { small: ['haiku'], medium: ['gpt-5'], frontier: [] },
+        subagentBuckets: {
+          small: [{ model: 'anthropic/haiku', thinkingLevel: 'off' }],
+          medium: [{ model: 'openai/gpt-5', thinkingLevel: 'medium' }],
+          frontier: [],
+        },
         subagentProviderDefaults: { anthropic: false },
       }),
       onSetPrefs: () => undefined,
@@ -105,7 +113,11 @@ test('SubagentSection renders selected bucket models as chips labelled with mode
   const html = renderToString(
     h(SubagentSection, {
       prefs: prefsWith({
-        subagentBuckets: { small: ['haiku'], medium: ['sonnet'], frontier: ['opus'] },
+        subagentBuckets: {
+          small: [{ model: 'anthropic/haiku', thinkingLevel: 'off' }],
+          medium: [{ model: 'anthropic/sonnet', thinkingLevel: 'high' }],
+          frontier: [{ model: 'anthropic/opus', thinkingLevel: 'max' }],
+        },
       }),
       onSetPrefs: () => undefined,
       availableModels: AVAILABLE_MODELS,
@@ -117,15 +129,31 @@ test('SubagentSection renders selected bucket models as chips labelled with mode
   assert.match(html, /toolbar-settings-keep-chip[^>]*>[\s\S]*?Haiku</);
   assert.match(html, /toolbar-settings-keep-chip[^>]*>[\s\S]*?Sonnet</);
   assert.match(html, /toolbar-settings-keep-chip[^>]*>[\s\S]*?Opus</);
+  // Each selected assignment exposes its current reasoning level.
+  assert.match(html, /aria-label="Reasoning for anthropic · Sonnet in Medium"/);
+  assert.match(html, /aria-label="Reasoning for anthropic · Opus in Frontier"/);
+  assert.match(html, /X-High/);
+  assert.match(html, /Max/);
   // All buckets populated → no empty-bucket warnings.
-  assert.doesNotMatch(html, /falls back to the parent model/);
+  assert.doesNotMatch(html, /inherits the parent model/);
+});
+
+test('SubagentSection only offers reasoning levels supported by each model', () => {
+  assert.deepEqual(getModelThinkingLevels(AVAILABLE_MODELS[0]), ['off']);
+  assert.deepEqual(getModelThinkingLevels(AVAILABLE_MODELS[1]), ['off', 'minimal', 'low', 'medium', 'high', 'xhigh']);
+  assert.deepEqual(getModelThinkingLevels(AVAILABLE_MODELS[2]), ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
+  assert.deepEqual(getModelThinkingLevels(AVAILABLE_MODELS[3]), ['off', 'minimal', 'low', 'medium', 'high', 'max']);
 });
 
 test('SubagentSection add-model selects list only models not already in their bucket', () => {
   const html = renderToString(
     h(SubagentSection, {
       prefs: prefsWith({
-        subagentBuckets: { small: ['haiku'], medium: [], frontier: [] },
+        subagentBuckets: {
+          small: [{ model: 'anthropic/haiku', thinkingLevel: 'off' }],
+          medium: [],
+          frontier: [],
+        },
       }),
       onSetPrefs: () => undefined,
       availableModels: AVAILABLE_MODELS,
@@ -135,13 +163,12 @@ test('SubagentSection add-model selects list only models not already in their bu
 
   // The "small" bucket already has haiku; the medium/frontier buckets are empty
   // so every model is selectable there. At minimum the add-model options exist.
-  assert.match(html, /Add model…</);
-  // Every bucket uses the shared searchable model picker rather than a native select.
-  assert.match(html, /aria-label="Add model to Small bucket"/);
-  assert.doesNotMatch(html, /<select/);
+  assert.match(html, /Add model…/);
+  // Every bucket uses the shared searchable model picker.
+  assert.match(html, /aria-label="Choose model for Small bucket"/);
   // The two empty buckets (medium, frontier) each show an empty-bucket warning;
   // the populated small bucket does not.
-  const warnCount = (html.match(/falls back to the parent model/g) ?? []).length;
+  const warnCount = (html.match(/inherits the parent model/g) ?? []).length;
   assert.equal(warnCount, 2);
 });
 
@@ -162,13 +189,19 @@ test('SubagentSection renders an empty-bucket warning per empty bucket', () => {
   // Each of the three empty buckets renders a warning row.
   const warnCount = (html.match(/toolbar-settings-bucket-warning/g) ?? []).length;
   assert.equal(warnCount, 3);
-  assert.match(html, /No models — falls back to the parent model/);
+  assert.match(html, /No assignments — inherits the parent model and reasoning/);
 });
 
 test('SubagentSection does not warn for a bucket that has models', () => {
   const html = renderToString(
     h(SubagentSection, {
-      prefs: prefsWith({ subagentBuckets: { small: ['haiku'], medium: ['sonnet'], frontier: [] } }),
+      prefs: prefsWith({
+        subagentBuckets: {
+          small: [{ model: 'anthropic/haiku', thinkingLevel: 'off' }],
+          medium: [{ model: 'anthropic/sonnet', thinkingLevel: 'medium' }],
+          frontier: [],
+        },
+      }),
       onSetPrefs: () => undefined,
       availableModels: AVAILABLE_MODELS,
       modelEntries: orderModelsForPicker(AVAILABLE_MODELS),
@@ -176,7 +209,7 @@ test('SubagentSection does not warn for a bucket that has models', () => {
   );
 
   // Only the empty frontier bucket warns.
-  const warnCount = (html.match(/falls back to the parent model/g) ?? []).length;
+  const warnCount = (html.match(/inherits the parent model/g) ?? []).length;
   assert.equal(warnCount, 1);
 });
 
@@ -196,9 +229,126 @@ test('SubagentSection add-model options exclude disabled-provider models (Compos
   );
 
   // The filtered entry list still leaves the shared picker enabled for GPT-5.
-  assert.match(html, /aria-label="Add model to Small bucket"/);
-  assert.doesNotMatch(html, /aria-label="Add model to Small bucket"[^>]*disabled/);
-  assert.doesNotMatch(html, /<select/);
+  assert.match(html, /aria-label="Choose model for Small bucket"/);
+  assert.doesNotMatch(html, /aria-label="Choose model for Small bucket"[^>]*disabled/);
+  assert.doesNotMatch(html, /toolbar-settings-bucket-add-row/);
+});
+
+test('SubagentSection selects a default reasoning level and adds with one click', () => {
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  const calls: Partial<ChatPrefs>[] = [];
+  try {
+    act(() => render(h(SubagentSection, {
+      prefs: prefsWith({ subagentBuckets: { small: [], medium: [], frontier: [] } }),
+      onSetPrefs: (patch) => calls.push(patch),
+      availableModels: AVAILABLE_MODELS,
+      modelEntries: orderModelsForPicker(AVAILABLE_MODELS),
+    }), container));
+
+    const chooseModel = container.querySelector('[aria-label="Choose model for Small bucket"]') as HTMLButtonElement | null;
+    assert.ok(chooseModel);
+    assert.equal(container.querySelector('.toolbar-settings-bucket-add-row'), null, 'no add row before picking a model');
+
+    act(() => { chooseModel!.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    const modelRow = [...document.querySelectorAll('.model-picker-row')]
+      .find((row) => row.textContent?.includes('Sonnet'));
+    assert.ok(modelRow, 'Sonnet should be available in the model step');
+    act(() => { modelRow!.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+
+    // The add row appears with reasoning pills pre-selected to the default.
+    const addRow = container.querySelector('.toolbar-settings-bucket-add-row');
+    assert.ok(addRow, 'add row should appear after picking a model');
+    const selectedLevel = addRow!.querySelector('.toolbar-settings-bucket-level.selected') as HTMLButtonElement | null;
+    assert.ok(selectedLevel, 'a default reasoning level should be pre-selected');
+    assert.equal(selectedLevel!.textContent?.trim(), 'Medium');
+
+    const add = [...addRow!.querySelectorAll('button')].find((button) => button.textContent?.includes('Add')) as HTMLButtonElement | undefined;
+    assert.ok(add);
+    assert.equal(add!.disabled, false, 'pre-selected reasoning enables the add button');
+
+    // The user can change to a different reasoning level before adding.
+    const xhigh = [...addRow!.querySelectorAll('.toolbar-settings-bucket-level')]
+      .find((button) => button.textContent?.trim() === 'X-High') as HTMLButtonElement | undefined;
+    assert.ok(xhigh);
+    act(() => { xhigh!.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    assert.equal(addRow!.querySelector('.toolbar-settings-bucket-level.selected')?.textContent?.trim(), 'X-High');
+
+    act(() => { add!.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    assert.deepEqual(calls.at(-1)?.subagentBuckets?.small, [{ model: 'anthropic/sonnet', thinkingLevel: 'xhigh' }]);
+  } finally {
+    act(() => render(null, container));
+    container.remove();
+    document.querySelectorAll('.model-picker-dropdown').forEach((element) => element.remove());
+  }
+});
+
+test('SubagentSection can cancel the pending model with the cancel button', () => {
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  const calls: Partial<ChatPrefs>[] = [];
+  try {
+    act(() => render(h(SubagentSection, {
+      prefs: prefsWith({ subagentBuckets: { small: [], medium: [], frontier: [] } }),
+      onSetPrefs: (patch) => calls.push(patch),
+      availableModels: AVAILABLE_MODELS,
+      modelEntries: orderModelsForPicker(AVAILABLE_MODELS),
+    }), container));
+
+    const chooseModel = container.querySelector('[aria-label="Choose model for Small bucket"]') as HTMLButtonElement | null;
+    assert.ok(chooseModel);
+    act(() => { chooseModel!.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    const modelRow = [...document.querySelectorAll('.model-picker-row')]
+      .find((row) => row.textContent?.includes('Haiku'));
+    assert.ok(modelRow);
+    act(() => { modelRow!.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+
+    const cancel = container.querySelector('[aria-label="Cancel adding model"]') as HTMLButtonElement | null;
+    assert.ok(cancel);
+    act(() => { cancel!.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+
+    assert.equal(container.querySelector('.toolbar-settings-bucket-add-row'), null);
+    assert.equal(calls.length, 0, 'cancelling should not emit a pref change');
+  } finally {
+    act(() => render(null, container));
+    container.remove();
+    document.querySelectorAll('.model-picker-dropdown').forEach((element) => element.remove());
+  }
+});
+
+test('SubagentSection preselects Off as the default for non-reasoning models', () => {
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  const calls: Partial<ChatPrefs>[] = [];
+  try {
+    act(() => render(h(SubagentSection, {
+      prefs: prefsWith({ subagentBuckets: { small: [], medium: [], frontier: [] } }),
+      onSetPrefs: (patch) => calls.push(patch),
+      availableModels: AVAILABLE_MODELS,
+      modelEntries: orderModelsForPicker(AVAILABLE_MODELS),
+    }), container));
+
+    const chooseModel = container.querySelector('[aria-label="Choose model for Small bucket"]') as HTMLButtonElement | null;
+    assert.ok(chooseModel);
+    act(() => { chooseModel!.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    const modelRow = [...document.querySelectorAll('.model-picker-row')]
+      .find((row) => row.textContent?.includes('Haiku'));
+    assert.ok(modelRow);
+    act(() => { modelRow!.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+
+    const addRow = container.querySelector('.toolbar-settings-bucket-add-row');
+    assert.ok(addRow);
+    assert.equal(addRow!.querySelector('.toolbar-settings-bucket-level.selected')?.textContent?.trim(), 'Off');
+
+    const add = [...addRow!.querySelectorAll('button')].find((button) => button.textContent?.includes('Add')) as HTMLButtonElement | undefined;
+    assert.ok(add);
+    act(() => { add!.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    assert.deepEqual(calls.at(-1)?.subagentBuckets?.small, [{ model: 'anthropic/haiku', thinkingLevel: 'off' }]);
+  } finally {
+    act(() => render(null, container));
+    container.remove();
+    document.querySelectorAll('.model-picker-dropdown').forEach((element) => element.remove());
+  }
 });
 
 test('SubagentSection keeps same-id models from different providers as distinct bucket chips', () => {
@@ -211,7 +361,10 @@ test('SubagentSection keeps same-id models from different providers as distinct 
       prefs: prefsWith({
         subagentBuckets: {
           small: [],
-          medium: ['github-copilot/gpt-5.6-sol', 'openai-codex/gpt-5.6-sol'],
+          medium: [
+            { model: 'github-copilot/gpt-5.6-sol', thinkingLevel: 'high' },
+            { model: 'openai-codex/gpt-5.6-sol', thinkingLevel: 'high' },
+          ],
           frontier: [],
         },
       }),
@@ -227,7 +380,7 @@ test('SubagentSection keeps same-id models from different providers as distinct 
   assert.match(html, /Remove openai-codex · GPT-5\.6 SOL from Medium/);
 });
 
-test('SubagentSection labels ambiguous legacy ids without pretending they belong to one provider', () => {
+test('SubagentSection labels provider-qualified assignments with their provider', () => {
   const duplicateModels: ModelInfo[] = [
     { id: 'shared', name: 'Copilot Shared', provider: 'github-copilot', reasoning: true, inputKinds: ['text'] },
     { id: 'shared', name: 'Codex Shared', provider: 'openai-codex', reasoning: true, inputKinds: ['text'] },
@@ -235,7 +388,11 @@ test('SubagentSection labels ambiguous legacy ids without pretending they belong
   const html = renderToString(
     h(SubagentSection, {
       prefs: prefsWith({
-        subagentBuckets: { small: [], medium: [], frontier: ['shared'] },
+        subagentBuckets: {
+          small: [],
+          medium: [],
+          frontier: [{ model: 'github-copilot/shared', thinkingLevel: 'high' }],
+        },
       }),
       onSetPrefs: () => undefined,
       availableModels: duplicateModels,
@@ -243,8 +400,8 @@ test('SubagentSection labels ambiguous legacy ids without pretending they belong
     }),
   );
 
-  assert.match(html, /Any enabled provider · shared \(legacy\)/);
-  assert.doesNotMatch(html, /github-copilot · Copilot Shared/);
+  assert.match(html, /github-copilot · Copilot Shared/);
+  assert.doesNotMatch(html, /Any enabled provider · shared \(legacy\)/);
   assert.doesNotMatch(html, /openai-codex · Codex Shared/);
 });
 
@@ -254,7 +411,11 @@ test('SubagentSection still labels a selected bucket chip whose provider is disa
   // availableModels list), so the user can see and remove it.
   const prefs = prefsWith({
     providerToggles: { anthropic: false },
-    subagentBuckets: { small: ['haiku'], medium: [], frontier: [] },
+    subagentBuckets: {
+      small: [{ model: 'anthropic/haiku', thinkingLevel: 'off' }],
+      medium: [],
+      frontier: [],
+    },
   });
   const enabledEntries = orderModelsForPicker(filterEnabledProviders(AVAILABLE_MODELS, prefs.providerToggles));
   const html = renderToString(
@@ -269,4 +430,165 @@ test('SubagentSection still labels a selected bucket chip whose provider is disa
   assert.match(html, /toolbar-settings-keep-chip[^>]*>[\s\S]*?Haiku</);
   // And it is no longer offered as an addable option.
   assert.doesNotMatch(html, /<option[^>]*value="haiku"/);
+});
+
+test('SubagentSection can remove and edit reasoning on existing bucket assignments', () => {
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  const calls: Partial<ChatPrefs>[] = [];
+  try {
+    act(() => render(h(SubagentSection, {
+      prefs: prefsWith({
+        subagentBuckets: {
+          small: [],
+          medium: [{ model: 'anthropic/sonnet', thinkingLevel: 'medium' }],
+          frontier: [],
+        },
+      }),
+      onSetPrefs: (patch) => calls.push(patch),
+      availableModels: AVAILABLE_MODELS,
+      modelEntries: orderModelsForPicker(AVAILABLE_MODELS),
+    }), container));
+
+    // Change the reasoning level on the existing chip.
+    const reasoningSelect = container.querySelector('select[aria-label="Reasoning for anthropic · Sonnet in Medium"]') as HTMLSelectElement | null;
+    assert.ok(reasoningSelect);
+    act(() => {
+      reasoningSelect!.value = 'low';
+      reasoningSelect!.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    assert.deepEqual(calls.at(-1)?.subagentBuckets?.medium, [{ model: 'anthropic/sonnet', thinkingLevel: 'low' }]);
+
+    // Remove the assignment.
+    const removeBtn = container.querySelector('[aria-label="Remove anthropic · Sonnet from Medium"]') as HTMLButtonElement | null;
+    assert.ok(removeBtn);
+    act(() => { removeBtn!.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    assert.deepEqual(calls.at(-1)?.subagentBuckets?.medium, []);
+  } finally {
+    act(() => render(null, container));
+    container.remove();
+    document.querySelectorAll('.model-picker-dropdown').forEach((element) => element.remove());
+  }
+});
+
+test('SubagentSection preserves persisted reasoning levels for models no longer in the catalog', () => {
+  const html = renderToString(
+    h(SubagentSection, {
+      prefs: prefsWith({
+        subagentBuckets: {
+          small: [{ model: 'anthropic/retired', thinkingLevel: 'high' }],
+          medium: [],
+          frontier: [],
+        },
+      }),
+      onSetPrefs: () => undefined,
+      availableModels: AVAILABLE_MODELS,
+      modelEntries: orderModelsForPicker(AVAILABLE_MODELS),
+    }),
+  );
+
+  // The chip label falls back to the raw spec, but the persisted reasoning
+  // level is still offered in the chip's select.
+  assert.match(html, /anthropic\/retired/);
+  assert.match(html, /value="high"/);
+  assert.match(html, /High/);
+});
+
+test('SubagentSection handles keyboard focus and Enter/Escape in the add row', () => {
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  const calls: Partial<ChatPrefs>[] = [];
+  try {
+    act(() => render(h(SubagentSection, {
+      prefs: prefsWith({ subagentBuckets: { small: [], medium: [], frontier: [] } }),
+      onSetPrefs: (patch) => calls.push(patch),
+      availableModels: AVAILABLE_MODELS,
+      modelEntries: orderModelsForPicker(AVAILABLE_MODELS),
+    }), container));
+
+    const chooseModel = container.querySelector('[aria-label="Choose model for Small bucket"]') as HTMLButtonElement | null;
+    assert.ok(chooseModel);
+    act(() => { chooseModel!.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    const modelRow = [...document.querySelectorAll('.model-picker-row')]
+      .find((row) => row.textContent?.includes('Sonnet'));
+    assert.ok(modelRow);
+    act(() => { modelRow!.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+
+    // Focus moves to the Add button once a model is selected.
+    const addBtn = container.querySelector('.toolbar-settings-bucket-add-btn') as HTMLButtonElement | null;
+    assert.ok(addBtn);
+    assert.ok(document.activeElement === addBtn, 'Add button should receive focus after picking a model');
+
+    // In a real browser, pressing Enter on the focused Add button fires its
+    // click handler. jsdom does not synthesize that click, so dispatch both
+    // events to verify the button is ready to confirm the assignment.
+    act(() => { addBtn!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); });
+    act(() => { addBtn!.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    assert.deepEqual(calls.at(-1)?.subagentBuckets?.small, [{ model: 'anthropic/sonnet', thinkingLevel: 'medium' }]);
+
+    // Re-open the picker and select a model again to test Escape.
+    const chooseModel2 = container.querySelector('[aria-label="Choose model for Small bucket"]') as HTMLButtonElement | null;
+    assert.ok(chooseModel2);
+    act(() => { chooseModel2!.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    const modelRow2 = [...document.querySelectorAll('.model-picker-row')]
+      .find((row) => row.textContent?.includes('Haiku'));
+    assert.ok(modelRow2);
+    act(() => { modelRow2!.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+
+    // Escape on the add row cancels without emitting a pref change.
+    const beforeCount = calls.length;
+    const addRow = container.querySelector('.toolbar-settings-bucket-add-row');
+    assert.ok(addRow);
+    act(() => { addRow!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); });
+    assert.equal(calls.length, beforeCount, 'Escape should not emit a pref change');
+    assert.equal(container.querySelector('.toolbar-settings-bucket-add-row'), null);
+    // Focus returns to the picker trigger.
+    const trigger = container.querySelector('[aria-label="Choose model for Small bucket"]') as HTMLButtonElement | null;
+    assert.ok(document.activeElement === trigger, 'focus should return to the picker trigger after cancel');
+  } finally {
+    act(() => render(null, container));
+    container.remove();
+    document.querySelectorAll('.model-picker-dropdown').forEach((element) => element.remove());
+  }
+});
+
+test('SubagentSection Enter on reasoning pill selects that level instead of adding', () => {
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  const calls: Partial<ChatPrefs>[] = [];
+  try {
+    act(() => render(h(SubagentSection, {
+      prefs: prefsWith({ subagentBuckets: { small: [], medium: [], frontier: [] } }),
+      onSetPrefs: (patch) => calls.push(patch),
+      availableModels: AVAILABLE_MODELS,
+      modelEntries: orderModelsForPicker(AVAILABLE_MODELS),
+    }), container));
+
+    const chooseModel = container.querySelector('[aria-label="Choose model for Small bucket"]') as HTMLButtonElement | null;
+    assert.ok(chooseModel);
+    act(() => { chooseModel!.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    const modelRow = [...document.querySelectorAll('.model-picker-row')]
+      .find((row) => row.textContent?.includes('Sonnet'));
+    assert.ok(modelRow);
+    act(() => { modelRow!.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+
+    // Focus a reasoning pill and click it: it should select that level, not add.
+    const addRow = container.querySelector('.toolbar-settings-bucket-add-row');
+    assert.ok(addRow);
+    const xhigh = [...addRow!.querySelectorAll('.toolbar-settings-bucket-level')]
+      .find((button) => button.textContent?.trim() === 'X-High') as HTMLButtonElement | undefined;
+    assert.ok(xhigh);
+    act(() => { xhigh!.focus(); });
+    act(() => { xhigh!.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    assert.equal(addRow!.querySelector('.toolbar-settings-bucket-level.selected')?.textContent?.trim(), 'X-High');
+    assert.equal(calls.length, 0, 'clicking a reasoning pill should not add the model');
+
+    // Pressing Enter on the wrapper background (non-interactive target) now adds.
+    act(() => { addRow!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); });
+    assert.deepEqual(calls.at(-1)?.subagentBuckets?.small, [{ model: 'anthropic/sonnet', thinkingLevel: 'xhigh' }]);
+  } finally {
+    act(() => render(null, container));
+    container.remove();
+    document.querySelectorAll('.model-picker-dropdown').forEach((element) => element.remove());
+  }
 });

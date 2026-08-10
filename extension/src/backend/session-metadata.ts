@@ -6,6 +6,7 @@ import { parseJsonOrThrow, toErrorMessage } from '../shared/error-message';
 import type {
   ModelInfo,
   SessionSummary,
+  ThinkingLevel,
 } from '../shared/protocol';
 import { normalizeThinkingLevel, resolveModelInputKinds } from './message-inputs';
 import type { SdkModule, SdkSessionInfo } from './sdk';
@@ -216,6 +217,27 @@ export function resolveActiveModel(context: SessionContext): ActiveModelInfo {
   }
 }
 
+const MODEL_THINKING_LEVELS: readonly ThinkingLevel[] = [
+  'off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max',
+];
+
+/** Mirror Pi's model-level reasoning contract for the webview catalog. Standard
+ * levels through `high` (including `off`) exist unless explicitly mapped to
+ * null; extended `xhigh`/`max` exist only when the model maps them. */
+export function resolveModelThinkingLevels(model: Record<string, unknown>): ThinkingLevel[] {
+  if (model.reasoning !== true) return ['off'];
+  const rawMap = model.thinkingLevelMap;
+  const map = rawMap && typeof rawMap === 'object' && !Array.isArray(rawMap)
+    ? rawMap as Record<string, unknown>
+    : undefined;
+  return MODEL_THINKING_LEVELS.filter((level) => {
+    const mapped = map?.[level];
+    if (mapped === null) return false;
+    if (level === 'xhigh' || level === 'max') return mapped !== undefined;
+    return true;
+  });
+}
+
 export function listAvailableModels(context?: SessionContext, agentDir?: string): ModelInfo[] {
   if (!context) {
     return [];
@@ -231,6 +253,7 @@ export function listAvailableModels(context?: SessionContext, agentDir?: string)
         name: model.name,
         provider: model.provider,
         reasoning: model.reasoning,
+        thinkingLevels: resolveModelThinkingLevels(model as unknown as Record<string, unknown>),
         inputKinds: resolveModelInputKinds(model as unknown as Record<string, unknown>),
         contextWindow: model.contextWindow,
         maxTokens: model.maxTokens,

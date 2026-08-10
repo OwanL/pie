@@ -28,7 +28,7 @@ export interface TranscriptDiscoveryOptions {
   configuredSessionsDir?: string;
 }
 
-const THINKING_LEVELS = new Set<ThinkingLevel>(['off', 'minimal', 'low', 'medium', 'high', 'xhigh']);
+const THINKING_LEVELS = new Set<ThinkingLevel>(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
 const SUCCESS_STOP_REASONS = new Set(['stop', 'toolUse']);
 
 function isRecord(value: unknown): value is JsonRecord {
@@ -45,7 +45,7 @@ function optionalTimestamp(value: unknown): string | null {
 
 function normalizeThinking(value: unknown): ThinkingLevel | null {
   if (typeof value !== 'string') return null;
-  const normalized = value.trim().toLowerCase() === 'max' ? 'xhigh' : value.trim().toLowerCase();
+  const normalized = value.trim().toLowerCase();
   return THINKING_LEVELS.has(normalized as ThinkingLevel) ? normalized as ThinkingLevel : null;
 }
 

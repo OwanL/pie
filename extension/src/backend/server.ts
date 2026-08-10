@@ -45,6 +45,7 @@ import {
   readSystemPromptTogglesForSession,
   writeSystemPromptTogglesForSession,
 } from './system-prompt-toggle-store';
+import { forgetPrivateSessionArtifacts } from './private-session-artifacts';
 import {
   loadSdk,
   loadSdkInternalModule,
@@ -187,6 +188,9 @@ export class BackendServer {
   private readonly sessionCatalog = new SessionCatalog();
   /** Deduplicates concurrent opens/preloads for the same cold session. */
   private readonly pendingSessionContexts = new Map<string, Promise<SessionContext>>();
+  /** Paths currently being forgotten; prevents a racing open from installing
+   *  a runtime after its transcript has been removed. */
+  private readonly forgottenSessionPaths = new Set<string>();
   /** Serializes prompt persistence and live prompt rebuilds for each session. */
   private readonly pendingSystemPromptToggleApplications = new Map<string, Promise<void>>();
   private systemPromptModulePromise?: Promise<SdkSystemPromptModule>;
@@ -217,10 +221,13 @@ export class BackendServer {
    *  polling, late SDK events) so a dying backend cannot push post-shutdown
    *  state to a host that is already tearing it down. */
   private disposed = false;
+  private hostWatchdogTimer?: ReturnType<typeof setInterval>;
+  private readonly hostPid?: number;
 
-  constructor(options: { sdkPath: string; cwd: string }) {
+  constructor(options: { sdkPath: string; cwd: string; hostPid?: number }) {
     this.sdkPath = options.sdkPath;
     this.startupCwd = options.cwd;
+    this.hostPid = options.hostPid;
   }
 
   private getSessionDir(): string | undefined {
@@ -448,8 +455,10 @@ export class BackendServer {
 
     process.stdin.on('end', () => {
       detachReader();
-      void this.dispose();
+      void this.dispose().finally(() => process.exit(0));
     });
+
+    this.startHostWatchdog();
 
     this.emit('backend.ready', {
       sdkPath: this.sdkPath,
@@ -460,6 +469,38 @@ export class BackendServer {
     });
 
     this.startReviewReconciliation();
+  }
+
+  /**
+   * Stdio EOF is not sufficient when Node is launched through a process
+   * manager: the manager can retain the pipe after the extension host dies.
+   * Keep a low-cost, unref'd ownership check so a backend cannot outlive its
+   * host indefinitely. The host PID is optional for compatibility with direct
+   * backend launches and unit tests.
+   */
+  private startHostWatchdog(): void {
+    const hostPid = this.hostPid;
+    if (hostPid === undefined || hostPid === process.pid) return;
+
+    const checkHost = (): void => {
+      try {
+        process.kill(hostPid, 0);
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code !== 'ESRCH') return;
+        this.stopHostWatchdog();
+        backendWarn('backend', 'extension host disappeared; stopping backend', { hostPid });
+        void this.dispose().finally(() => process.exit(0));
+      }
+    };
+
+    this.hostWatchdogTimer = setInterval(checkHost, 2_000);
+    this.hostWatchdogTimer.unref?.();
+  }
+
+  private stopHostWatchdog(): void {
+    if (this.hostWatchdogTimer) clearInterval(this.hostWatchdogTimer);
+    this.hostWatchdogTimer = undefined;
   }
 
   private createRuntimeFactory() {
@@ -525,6 +566,14 @@ export class BackendServer {
         });
     }
 
+    if (this.forgottenSessionPaths.has(context.sessionPath)) {
+      context.retired = true;
+      context.sessionManagerFence?.invalidate();
+      try { context.uiBridge?.dispose(); } catch { /* best effort */ }
+      try { context.unsubscribe(); } catch { /* best effort */ }
+      try { await context.runtime.dispose(); } catch { /* best effort */ }
+      throw new BackendError('SESSION_NOT_FOUND', `The session was forgotten while it was opening: ${context.sessionPath}`);
+    }
     this.sessionContexts.set(context.sessionPath, context);
     return context;
   }
@@ -648,6 +697,9 @@ export class BackendServer {
   }
 
   private async ensureSessionContext(sessionPath: string): Promise<SessionContext> {
+    if (this.forgottenSessionPaths.has(sessionPath)) {
+      throw new BackendError('SESSION_NOT_FOUND', `The session has been forgotten: ${sessionPath}`);
+    }
     const existing = this.sessionContexts.get(sessionPath);
     if (existing) {
       if (existing.recoveryPromise) {
@@ -704,7 +756,7 @@ export class BackendServer {
       pinnedMessageId: this.getPinnedStreamingMessageId(context),
     });
 
-    const busy = context.session.isStreaming || !!context.activeRequest;
+    const busy = context.session.isStreaming || !!context.activeRequest || context.session.isCompacting === true;
     const transcript = busy ? page.transcript : normalizeDanglingTranscript(page.transcript);
     return {
       sessionPath: context.sessionPath,
@@ -1281,6 +1333,63 @@ export class BackendServer {
     }
   }
 
+  /** Retire a private session runtime and remove every durable session-side
+   *  artifact. Called only after the host has chosen privacy mode; ordinary
+   *  tab closes intentionally keep sessions reopenable. */
+  private async forgetSession(sessionPath: string): Promise<void> {
+    this.forgottenSessionPaths.add(sessionPath);
+    const pending = this.pendingSessionContexts.get(sessionPath);
+    if (pending) await pending.catch(() => undefined);
+    const context = this.sessionContexts.get(sessionPath);
+    if (context) {
+      context.retired = true;
+      context.sessionManagerFence?.invalidate();
+      context.willRetryWatchdogClear?.();
+      context.willRetryWatchdogClear = undefined;
+      const active = context.activeRequest;
+      if (active) {
+        active.aborted = true;
+        if (active.promptSafetyTimer) clearTimeout(active.promptSafetyTimer);
+        if (active.semanticLeaseTimer) clearTimeout(active.semanticLeaseTimer);
+        if (active.quotaSettlementTimer) clearTimeout(active.quotaSettlementTimer);
+        active.pendingDurableToolTerminals?.clear();
+        context.activeRequest = undefined;
+        await Promise.race([
+          Promise.resolve().then(() => context.session.abort()).catch(() => undefined),
+          new Promise<void>((resolve) => setTimeout(resolve, 5_000)),
+        ]);
+      }
+      try { context.uiBridge?.dispose(); } catch { /* best effort */ }
+      try { context.unsubscribe(); } catch { /* best effort */ }
+      try {
+        await Promise.race([
+          Promise.resolve(context.runtime.dispose()).catch(() => undefined),
+          new Promise<void>((resolve) => setTimeout(resolve, 5_000)),
+        ]);
+      } finally {
+        this.sessionContexts.delete(sessionPath);
+      }
+    }
+
+    let transcriptDeleted = false;
+    try {
+      // Review/system-prompt sidecars are fallible and must be removed before
+      // transcript deletion commits; otherwise a cleanup failure could leave a
+      // recoverable private transcript with its forget tombstone removed.
+      await forgetPrivateSessionArtifacts(sessionPath);
+      transcriptDeleted = true;
+      this.sessionCatalog.remove(sessionPath);
+      if (this.viewedSessionPath === sessionPath) this.viewedSessionPath = undefined;
+    } catch (error) {
+      // Once transcript deletion commits the tombstone is permanent. There are
+      // deliberately no fallible operations after that boundary.
+      if (!transcriptDeleted) this.forgottenSessionPaths.delete(sessionPath);
+      throw error;
+    }
+    // Keep the successful tombstone for the life of this backend process so a
+    // queued session.open cannot recreate the deleted file after this RPC.
+  }
+
   private async handleRequest(request: RequestEnvelope): Promise<unknown> {
     const sessionDir = this.getSessionDir();
     return await handleBackendRequest({
@@ -1302,6 +1411,7 @@ export class BackendServer {
         this.applySystemPromptToggles(sessionPath, disabledEntries)
       ),
       setAutonomousMode: (enabled) => this.setAutonomousMode(enabled),
+      forgetSession: (sessionPath) => this.forgetSession(sessionPath),
       loadTranscriptPage: (sessionPath, direction, loadedStart, loadedEnd) => (
         this.loadTranscriptPage(sessionPath, direction, loadedStart, loadedEnd)
       ),
@@ -1452,6 +1562,7 @@ export class BackendServer {
     // `emitSessionListChanged`.
     if (this.disposed) return;
     this.disposed = true;
+    this.stopHostWatchdog();
 
     const contexts = [...this.sessionContexts.values()];
     this.sessionContexts.clear();

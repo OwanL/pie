@@ -237,6 +237,18 @@ call "%CODE_CLI%" --install-extension "%VSIX%" || (
 REM --- write pie.agentDir to VS Code User settings --------------------------
 node "%RUNNER%" write-vscode-agent-dir "%REPO_ROOT%" || goto :error
 
+REM The old backend may have remained alive during build/install with its stale
+REM process environment. Reconcile displaced authorities once more; merging is
+REM append-only and idempotent. Doctor detects any writes made after this pass.
+if defined PROCESS_SESSION_DIR (
+  echo ==^> Finalizing process-level displaced outcomes after extension installation
+  node "%REPO_ROOT%\scripts\migrate-outcomes-store.mjs" --source-session-dir "%PROCESS_SESSION_DIR%" --dest "%REPO_ROOT%\data\outcomes" || goto :error
+)
+if defined EXISTING_SESSION_DIR if /i not "%EXISTING_SESSION_DIR%"=="%PROCESS_SESSION_DIR%" (
+  echo ==^> Finalizing user-level displaced outcomes after extension installation
+  node "%REPO_ROOT%\scripts\migrate-outcomes-store.mjs" --source-session-dir "%EXISTING_SESSION_DIR%" --dest "%REPO_ROOT%\data\outcomes" || goto :error
+)
+
 echo.
 echo All done. Reload VSCode to activate the pie panel.
 

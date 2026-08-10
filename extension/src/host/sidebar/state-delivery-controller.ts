@@ -198,6 +198,8 @@ export class StateDeliveryController<T> {
   private retryAttempts = 0;
   private retryExhausted = false;
   private deliverySuspended = false;
+  /** Latest interaction-critical desired generation not yet accepted. */
+  private priorityDesiredGeneration = 0;
   private overflowReported = false;
   private visible = true;
   private disposed = false;
@@ -210,15 +212,19 @@ export class StateDeliveryController<T> {
 
   /** Marks newer host state desired. The state itself remains lazy. */
   markDirty(): number {
-    if (this.disposed) return this.desiredGeneration;
-    this.desiredGeneration += 1;
-    if (this.retryExhausted) {
-      this.retryExhausted = false;
-      this.retryAttempts = 0;
-      this.deliverySuspended = false;
-    }
-    this.flush();
-    return this.desiredGeneration;
+    return this.markDesired(false);
+  }
+
+  /**
+   * Marks an interaction-critical state change (currently explicit session
+   * selection). Unlike ordinary streaming updates, this may retire an older
+   * accepted-but-uncommitted snapshot and post the latest state immediately.
+   * VS Code preserves postMessage order, so the renderer still observes the
+   * old snapshot before the replacement; late evidence for the retired
+   * revision is intentionally classified as stale.
+   */
+  markPriorityDirty(): number {
+    return this.markDesired(true);
   }
 
   /** Retries after readiness/reload/visibility eligibility changes. */
@@ -290,14 +296,28 @@ export class StateDeliveryController<T> {
       this.disposed
       || !this.dirty
       || this.activeOperation
-      || this.accepted.length > 0
       || this.retryTimer !== undefined
       || !this.visible
       || this.deliverySuspended
     ) return;
+
     if (!this.options.isEligible()) {
       this.options.onDeliveryBlocked?.();
       return;
+    }
+
+    const priorityPending = this.priorityDesiredGeneration > this.lastAcceptedDesiredGeneration;
+    if (this.accepted.length > 0) {
+      if (!priorityPending) return;
+      // Explicit selection must not sit behind a streaming transcript commit.
+      // Retire the old acceptance before posting the ordered replacement so
+      // its delayed receipt/commit/paint evidence remains telemetry-only.
+      this.retiredAcceptedRevisionHighWater = Math.max(
+        this.retiredAcceptedRevisionHighWater,
+        ...this.accepted.map((entry) => entry.revision),
+      );
+      this.accepted = [];
+      this.clearCommitTimer();
     }
     this.startPost(false);
   }
@@ -469,6 +489,24 @@ export class StateDeliveryController<T> {
     return this.desiredGeneration > this.lastAcceptedDesiredGeneration;
   }
 
+  private markDesired(priority: boolean): number {
+    if (this.disposed) return this.desiredGeneration;
+    this.desiredGeneration += 1;
+    if (priority) {
+      this.priorityDesiredGeneration = this.desiredGeneration;
+      // A user interaction should not inherit the delay from a failed older
+      // streaming post; it gets a fresh immediate attempt.
+      this.clearRetryTimer();
+    }
+    if (this.retryExhausted) {
+      this.retryExhausted = false;
+      this.retryAttempts = 0;
+      this.deliverySuspended = false;
+    }
+    this.flush();
+    return this.desiredGeneration;
+  }
+
   private startPost(readinessProbe: boolean, resolveProbe?: (accepted: boolean) => void): boolean {
     if (
       this.disposed
@@ -629,6 +667,9 @@ export class StateDeliveryController<T> {
       return;
     }
 
+    const retryDelayMs = this.priorityDesiredGeneration > this.lastAcceptedDesiredGeneration
+      ? 0
+      : this.options.retryDelayMs;
     this.retryTimer = this.options.clock.setTimeout(() => {
       this.retryTimer = undefined;
       if (this.disposed || !this.visible) {
@@ -643,7 +684,7 @@ export class StateDeliveryController<T> {
       }
       this.retryAttempts += 1;
       this.flush();
-    }, this.options.retryDelayMs);
+    }, retryDelayMs);
     this.telemetry('retry-scheduled', undefined, String(this.retryAttempts + 1));
   }
 

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { coerceRunSnapshot } from '../../../src/host/run-analytics/coercion-snapshots';
 import { computeAggregateStats, pricingForModel, providerForModel } from '../../../src/host/stats-service/aggregate-stats';
 import type { RunSnapshot } from '../../../src/host/run-analytics';
 import type { ModelPricingRecord } from '../../../../shared/pricing-core';
@@ -38,8 +39,8 @@ function run(overrides: Partial<RunSnapshot>): RunSnapshot {
   } as RunSnapshot;
 }
 
-function price(provider: string, input: number): ModelPricingRecord {
-  return { id: 'gpt-5.6-sol', provider, pricing: { input, output: 0, cacheRead: 0, cacheWrite: 0 } };
+function price(provider: string, input: number, id = 'gpt-5.6-sol'): ModelPricingRecord {
+  return { id, provider, pricing: { input, output: 0, cacheRead: 0, cacheWrite: 0 } };
 }
 
 test('ambiguous bare model ids never borrow provider or pricing', () => {
@@ -48,6 +49,47 @@ test('ambiguous bare model ids never borrow provider or pricing', () => {
   assert.equal(pricingForModel('gpt-5.6-sol', map), null);
   assert.equal(providerForModel('gpt-5.6-sol', map, 'openai-codex'), 'openai-codex');
   assert.equal(pricingForModel('gpt-5.6-sol', map, 'openai-codex')?.input, 5);
+});
+
+test('persisted provider attribution survives coercion and prices ambiguous model ids', () => {
+  const map = new Map([['gpt-5.6-sol', [price('github-copilot', 2), price('openai-codex', 5)]]]);
+  const snapshot = coerceRunSnapshot(run({
+    modelId: 'gpt-5.6-sol', provider: 'openai-codex', inputTokens: 100_000,
+  }));
+  assert.ok(snapshot);
+  const stats = computeAggregateStats([snapshot], map, NOW, [], {}, 0);
+  assert.equal(stats.todayCostByProvider.find((entry) => entry.provider === 'openai-codex')?.cost, 0.5);
+  assert.equal(stats.todayCostByProvider.some((entry) => entry.provider === 'unknown'), false);
+});
+
+test('a run provider is not borrowed by a different provider-less model sample', () => {
+  const map = new Map([
+    ['parent-model', [price('openai-codex', 5, 'parent-model')]],
+    ['gpt-5.6-sol', [price('github-copilot', 2), price('openai-codex', 5)]],
+  ]);
+  const snapshot = run({
+    modelId: 'parent-model', provider: 'openai-codex', inputTokens: 100_000,
+    turnThroughputSamples: [{
+      endedAt: new Date(NOW - 500).toISOString(), inputTokens: 100_000, outputTokens: 0,
+      cacheReadTokens: 0, cacheWriteTokens: 0, generationDurationMs: 1,
+      concurrentBusySessions: 1, status: 'completed', modelId: 'gpt-5.6-sol',
+      turnLatencyMs: null, overheadMs: null, providerLatencyMs: null,
+    }],
+  });
+  const stats = computeAggregateStats([snapshot], map, NOW, [], {}, 0);
+  assert.equal(stats.todayCostByProvider.find((entry) => entry.provider === 'unknown')?.inputTokens, 100_000);
+  assert.equal(stats.todayCostByProvider.find((entry) => entry.provider === 'openai-codex'), undefined);
+
+  const auxiliaryStats = computeAggregateStats([run({
+    modelId: 'parent-model', provider: 'openai-codex',
+    auxiliaryLlmUsage: [{
+      kind: 'history_compaction', sourceId: 'different-model', occurredAt: new Date(NOW - 100).toISOString(),
+      modelId: 'gpt-5.6-sol', inputTokens: 50_000, outputTokens: 0,
+      cacheReadTokens: 0, cacheWriteTokens: 0,
+    }],
+  })], map, NOW, [], {}, 0);
+  assert.equal(auxiliaryStats.todayCostByProvider.find((entry) => entry.provider === 'unknown')?.inputTokens, 50_000);
+  assert.equal(auxiliaryStats.todayCostByProvider.find((entry) => entry.provider === 'openai-codex'), undefined);
 });
 
 test('mixed same-id parent turns and auxiliary summaries remain provider-discrete', () => {

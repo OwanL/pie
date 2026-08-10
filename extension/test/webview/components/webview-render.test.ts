@@ -1589,7 +1589,7 @@ test('rendered MessageItem keeps pruning pending state in the header without an 
   }));
 
   assert.match(html, /role="status"/);
-  assert.match(html, /gpt-5\.4 max/);
+  assert.match(html, /gpt-5\.4 xhigh/);
   assert.match(html, /agent-activity-text">pruning skills\/tools<\/span>/);
   assert.doesNotMatch(html, /message-typing-indicator/);
 });

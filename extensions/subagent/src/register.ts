@@ -24,10 +24,8 @@ import { SubagentParams, prepareSubagentArguments, BUCKET_GUIDANCE as BUCKET_GUI
 import { renderSubagentCall, renderSubagentResult } from "../render.js";
 import { execute } from "./execute.js";
 import type { OnUpdateCallback } from "../types.js";
-import { MAX_SUBAGENT_THINKING_LEVEL, SUBAGENT_THINKING_LEVELS } from "./thinking-level.js";
 
-const THINKING_LEVEL_HINT = `Optional thinkingLevel: ${SUBAGENT_THINKING_LEVELS.join(", ")} (maximum and default: ${MAX_SUBAGENT_THINKING_LEVEL}).`;
-const BUCKET_GUIDANCE = `${BUCKET_GUIDANCE_BASE} ${THINKING_LEVEL_HINT}`;
+const BUCKET_GUIDANCE = BUCKET_GUIDANCE_BASE;
 
 /** Root of the pi-config repo, resolved from this extension's known position.
  *  Used as a stable fallback discovery cwd so the agent list is populated even

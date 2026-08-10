@@ -60,6 +60,32 @@ test('SessionCatalog scans once and overlays live session metadata', async () =>
   assert.equal(second.filter((item) => item.name === 'Live canonical').length, 1);
 });
 
+test('SessionCatalog immediately excludes a forgotten path from cached and in-flight discovery', async () => {
+  const configuredDir = path.resolve('/configured/sessions');
+  const canonicalPath = path.join(configuredDir, 'canonical.jsonl');
+  let resolveDiscovery!: (value: Array<Record<string, unknown>>) => void;
+  const discovery = new Promise<Array<Record<string, unknown>>>((resolve) => { resolveDiscovery = resolve; });
+  const sdk = {
+    SessionManager: {
+      listAll: async () => await discovery,
+    },
+  } as unknown as SdkModule;
+  const catalog = new SessionCatalog();
+
+  const pending = catalog.list(sdk, configuredDir);
+  catalog.remove(canonicalPath);
+  resolveDiscovery([{
+    path: canonicalPath,
+    cwd: '/repo',
+    name: 'Canonical',
+    modified: new Date('2026-01-01T00:00:00.000Z'),
+    messageCount: 1,
+  }]);
+
+  assert.deepEqual(await pending, []);
+  assert.deepEqual(await catalog.list(sdk, configuredDir, [summary(canonicalPath, 'Live', '2026-01-02T00:00:00.000Z')]), []);
+});
+
 test('SessionCatalog invalidates only when the visible JSONL inventory changes', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-session-catalog-'));
   try {

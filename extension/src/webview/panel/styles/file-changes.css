@@ -144,7 +144,10 @@
    a glance. Scrollable in place so a packed sliver (many files) can be skimmed
    without pinning — the primary affordance on touch, where there's no
    hover-peek; on desktop, hover still peeks the full interactive list. Each
-   entry's outer span carries the full path + kind label as a hover title. */
+   entry's outer span carries the full path + kind label as a hover title.
+   The list rests at 80% opacity — quiet enough to recede behind the
+   transcript, bright enough to stay legible — and lifts to full strength on
+   hover/peek. */
 .file-changes-sliver-files {
   flex: 1 1 auto;
   min-height: 0;
@@ -163,14 +166,14 @@
   scrollbar-width: thin;
   margin-top: 2px;
   padding: var(--panel-gap-xs) 0;
-  border-top: 1px solid var(--panel-border-subtle);
-  opacity: 0.5;
+  border-top: 1px solid var(--panel-border);
+  opacity: 0.8;
   transition: opacity var(--panel-transition-fast);
 }
 
 .file-changes-sliver:hover .file-changes-sliver-files,
 .file-changes-rail.is-peeking .file-changes-sliver-files {
-  opacity: 0.92;
+  opacity: 1;
 }
 
 /* A thin scrollbar for the narrow sliver preview — the global 6px webkit
@@ -224,11 +227,13 @@
 
 /* Row 2: per-file line churn (+N/-N). min-height keeps every entry two rows
    tall even when a file has no line stats (rare), so the list rhythm stays
-   uniform. Small indent to read as a tidy second row under the name. */
+   uniform. Small indent to read as a tidy second row under the name. Full-
+   strength semantic colors so per-file churn stays legible at the sliver's
+   small size (the list-level opacity already provides the quieting). */
 .sliver-file-stats {
   min-height: 1.25em;
   padding-left: 2px;
-  opacity: 0.8;
+  opacity: 1;
 }
 
 .sliver-file-add {
@@ -447,9 +452,10 @@
 }
 
 /* Collapsed sliver: dim read entries in place (the sliver keeps derivation
-   order — reordering the narrow preview would be jarring). */
+   order — reordering the narrow preview would be jarring). Kept proportional
+   to the drawer's 0.6 read dimming (0.5 × the list's 0.8 resting opacity). */
 .sliver-file.is-read {
-  opacity: 0.42;
+  opacity: 0.5;
 }
 
 /* ── Read/unread group divider ──────────────────────────────────────────── */

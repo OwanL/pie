@@ -27,6 +27,10 @@ import type { ModelRequirements, SingleResult, SubagentDetails } from "../types.
 
 const IMAGE_REQ: ModelRequirements = { inputKinds: ["image"] };
 
+function assignedModels(...models: string[]) {
+	return models.map((model) => ({ model, thinkingLevel: "high" as const }));
+}
+
 function makeAgent(overrides: Partial<AgentConfig> = {}): AgentConfig {
 	return {
 		name: "scout",
@@ -75,7 +79,7 @@ function registry(models: Model<any>[]) {
 test("resolveModel: no requirement preserves current selection behaviour", async () => {
 	resetFairSelectionBags();
 	const ctx = makeSelectionCtx({
-		bucketAssignments: { small: [], medium: ["text-only-a", "text-only-b"], frontier: [] },
+		bucketAssignments: { small: [], medium: assignedModels("text-only-a", "text-only-b"), frontier: [] },
 	});
 	const resolved = await resolveModel(makeAgent(), ctx, "parent-model", "medium");
 	assert.equal(resolved.modelOverride, "text-only-a");
@@ -90,7 +94,7 @@ test("resolveModel: image requirement filters text-only models from the requeste
 		modelRequirements: IMAGE_REQ,
 		requirementQualifiedModelIds: new Set(["image-model"]),
 		callerModelInput: ["text", "image"],
-		bucketAssignments: { small: [], medium: ["text-only-model", "image-model"], frontier: [] },
+		bucketAssignments: { small: [], medium: assignedModels("text-only-model", "image-model"), frontier: [] },
 	});
 	const resolved = await resolveModel(makeAgent(), ctx, "parent-model", "medium");
 	assert.equal(resolved.modelOverride, "image-model");
@@ -107,7 +111,7 @@ test("resolveModel: image requirement walks down to a lower bucket for an image-
 		modelRequirements: IMAGE_REQ,
 		requirementQualifiedModelIds: new Set(["image-small"]),
 		callerModelInput: ["text", "image"],
-		bucketAssignments: { small: ["image-small"], medium: ["text-only-medium"], frontier: [] },
+		bucketAssignments: { small: assignedModels("image-small"), medium: assignedModels("text-only-medium"), frontier: [] },
 	});
 	const resolved = await resolveModel(makeAgent(), ctx, "parent-model", "medium");
 	// selectModel walks down to the small bucket (the only image-capable model).
@@ -122,7 +126,7 @@ test("resolveModel: incompatible active-model fallback produces a local selectio
 		modelRequirements: IMAGE_REQ,
 		requirementQualifiedModelIds: new Set(),
 		callerModelInput: ["text"],
-		bucketAssignments: { small: ["text-only-small"], medium: ["text-only-medium"], frontier: [] },
+		bucketAssignments: { small: assignedModels("text-only-small"), medium: assignedModels("text-only-medium"), frontier: [] },
 	});
 	const resolved = await resolveModel(makeAgent(), ctx, "parent-text-model", "medium");
 	assert.equal(resolved.modelOverride, "");
@@ -139,7 +143,7 @@ test("resolveModel: qualified active model remains a valid fallback under the re
 		modelRequirements: IMAGE_REQ,
 		requirementQualifiedModelIds: new Set(),
 		callerModelInput: ["text", "image"],
-		bucketAssignments: { small: [], medium: ["text-only-medium"], frontier: [] },
+		bucketAssignments: { small: [], medium: assignedModels("text-only-medium"), frontier: [] },
 	});
 	const resolved = await resolveModel(makeAgent(), ctx, "parent-image-model", "medium");
 	assert.equal(resolved.modelOverride, "parent-image-model");
@@ -154,7 +158,7 @@ test("resolveModel: always-parent plus an incompatible parent produces a local s
 		alwaysParentModel: true,
 		modelRequirements: IMAGE_REQ,
 		callerModelInput: ["text"],
-		bucketAssignments: { small: ["image-small"], medium: ["image-medium"], frontier: [] },
+		bucketAssignments: { small: assignedModels("image-small"), medium: assignedModels("image-medium"), frontier: [] },
 	});
 	const resolved = await resolveModel(makeAgent(), ctx, "parent-text-model", "medium");
 	assert.equal(resolved.modelOverride, "");
@@ -168,7 +172,7 @@ test("resolveModel: always-parent plus a qualified parent is allowed", async () 
 		alwaysParentModel: true,
 		modelRequirements: IMAGE_REQ,
 		callerModelInput: ["text", "image"],
-		bucketAssignments: { small: ["image-small"], medium: ["image-medium"], frontier: [] },
+		bucketAssignments: { small: assignedModels("image-small"), medium: assignedModels("image-medium"), frontier: [] },
 	});
 	const resolved = await resolveModel(makeAgent(), ctx, "parent-image-model", "medium");
 	assert.equal(resolved.modelOverride, "parent-image-model");
@@ -183,9 +187,13 @@ test("resolveModel: nested-bucket exhaustion plus an incompatible parent produce
 		requirementQualifiedModelIds: new Set(),
 		callerModelInput: ["text"],
 		nestedAllowedBuckets: { small: false, medium: false, frontier: false },
-		bucketAssignments: { small: ["image-small"], medium: ["image-medium"], frontier: ["image-frontier"] },
+		bucketAssignments: {
+			small: assignedModels("image-small"),
+			medium: assignedModels("image-medium"),
+			frontier: assignedModels("image-frontier"),
+		},
 	});
-	const resolved = await resolveModel(makeAgent(), ctx, "parent-text-model", "frontier", undefined, undefined, 1);
+	const resolved = await resolveModel(makeAgent(), ctx, "parent-text-model", "frontier", undefined, 1);
 	assert.equal(resolved.modelOverride, "");
 	assert.equal(resolved.modelRequirementsSatisfied, false);
 	assert.match(resolved.requirementDiagnostic!, /No enabled image-capable model/);
@@ -375,7 +383,7 @@ test("executeSingleTask: local selection error short-circuits before dispatching
 		modelRequirements: IMAGE_REQ,
 		requirementQualifiedModelIds: new Set(),
 		callerModelInput: ["text"],
-		bucketAssignments: { small: ["text-only-small"], medium: ["text-only-medium"], frontier: [] },
+		bucketAssignments: { small: assignedModels("text-only-small"), medium: assignedModels("text-only-medium"), frontier: [] },
 	});
 	let runAttemptCalls = 0;
 	const response: any = await executeSingleTask({
@@ -421,7 +429,7 @@ test("executeSingleTask: provider retry never escapes to a text-only model", asy
 		modelRequirements: IMAGE_REQ,
 		requirementQualifiedModelIds: new Set(["img-a", "img-b"]),
 		callerModelInput: ["text"],
-		bucketAssignments: { small: [], medium: ["img-a", "img-b", "text-only"], frontier: [] },
+		bucketAssignments: { small: [], medium: assignedModels("img-a", "img-b", "text-only"), frontier: [] },
 		registryModels: models,
 		fallbackOnProviderFailure: true,
 	});
@@ -488,7 +496,7 @@ test("executeSingleTask: exhausting every image model yields a requirement error
 		modelRequirements: IMAGE_REQ,
 		requirementQualifiedModelIds: new Set(["img-a"]),
 		callerModelInput: ["text"],
-		bucketAssignments: { small: [], medium: ["img-a", "text-only"], frontier: [] },
+		bucketAssignments: { small: [], medium: assignedModels("img-a", "text-only"), frontier: [] },
 		registryModels: models,
 		fallbackOnProviderFailure: true,
 	});
@@ -544,7 +552,7 @@ test("executeSingleTask: running, terminal, and retried snapshots retain require
 		modelRequirements: IMAGE_REQ,
 		requirementQualifiedModelIds: new Set(["img-a", "img-b"]),
 		callerModelInput: ["text"],
-		bucketAssignments: { small: [], medium: ["img-a", "img-b"], frontier: [] },
+		bucketAssignments: { small: [], medium: assignedModels("img-a", "img-b"), frontier: [] },
 		registryModels: models,
 		fallbackOnProviderFailure: true,
 	});

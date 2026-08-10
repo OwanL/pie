@@ -97,6 +97,7 @@ export interface SessionEntryLike {
   tokensBefore?: number;
   thinkingLevel?: string;
   modelId?: string;
+  provider?: string;
   message?: MessageLike;
   customType?: string;
   display?: boolean;
@@ -285,10 +286,14 @@ function mapAssistantTurn(
     ? entryTs - message.timestamp
     : undefined;
   const assistantModelId = message.model ?? state.currentModelId;
-  const assistantProvider = message.provider ?? state.currentProvider;
+  const hasDistinctModel = !!message.model && message.model !== state.currentModelId;
+  const assistantProvider = message.provider ?? (hasDistinctModel ? undefined : state.currentProvider);
   const assistantThinkingLevel = state.currentThinkingLevel;
   const turnUsage = usageFromMessage(message);
-  if (message.model) state.currentModelId = message.model;
+  if (message.model) {
+    state.currentModelId = message.model;
+    if (hasDistinctModel && !message.provider) state.currentProvider = undefined;
+  }
   if (message.provider) state.currentProvider = message.provider;
 
   const currentAssistant = state.currentAssistant;
@@ -365,9 +370,7 @@ function mergeAssistantTurn(
   if (update.modelId) {
     current.modelId = update.modelId;
   }
-  if (update.provider) {
-    current.provider = update.provider;
-  }
+  current.provider = update.provider;
   if (update.thinkingLevel) {
     current.thinkingLevel = update.thinkingLevel;
   }
@@ -555,6 +558,7 @@ function dispatchEntry(entry: SessionEntryLike, state: MapLoopState): MapResult 
   switch (entry.type) {
     case 'model_change':
       state.currentModelId = entry.modelId;
+      state.currentProvider = entry.provider;
       return { kind: 'skip' };
     case 'thinking_level_change':
       state.currentThinkingLevel = normalizeThinkingLevel(entry.thinkingLevel);

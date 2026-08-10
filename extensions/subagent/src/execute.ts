@@ -28,6 +28,7 @@ import { createInvalidAgentResult, summarizeInvalidAgentResults } from "../valid
 import {
 	type BucketSelection,
 	type ThinkingLevel,
+	type RuntimeThinkingSupport,
 	type BucketAssignments,
 	type SimpleModelConfig,
 	type NestedAllowedBuckets,
@@ -42,6 +43,7 @@ import {
 	resolveSubagentProviderToggles,
 	readBucketAssignments,
 	readNestedAllowedBuckets,
+	getRuntimeThinkingSupport,
 	qualifiedModelSpec,
 	downgradeBucketForNested,
 	selectModel,
@@ -473,6 +475,7 @@ function setupModelSelection(
 	ctx: ToolContext,
 	runtimeCtx: SubagentRuntimeContext,
 	modelRequirements?: import("../types.js").ModelRequirements,
+	callerThinkingLevel?: ThinkingLevel,
 ): SelectionContext {
 	const modelConfigPath = path.join(CONFIG_ROOT, "model-profiles.json");
 	let modelConfig: SimpleModelConfig[] = [];
@@ -497,9 +500,27 @@ function setupModelSelection(
 	for (const provider of subagentDisabled) disabledProviders.add(provider);
 	const availableModels = ctx.modelRegistry.getAvailable();
 	const enabledModels = availableModels.filter((m) => !disabledProviders.has(m.provider));
+	// Minimal test/runtime registries may only expose getAvailable(). Fall back to
+	// that snapshot when the broader registry enumeration is unavailable.
+	const enabledRegistryModels = (ctx.modelRegistry.getAll?.() ?? availableModels)
+		.filter((model) => !disabledProviders.has(model.provider));
 	const allowedModelIds = new Set<string>(
 		enabledModels.flatMap((m) => [m.id, qualifiedModelSpec(m.provider, m.id)]),
 	);
+	// Prefer exact runtime support for provider-qualified bucket entries. Include
+	// every enabled declaration that execution resolution can choose via getAll(),
+	// not only currently available declarations, so a bare id cannot be admitted
+	// and then resolved to an unsupported caller/default provider.
+	const runtimeThinkingSupport = new Map<string, ReadonlySet<ThinkingLevel>>();
+	for (const model of enabledRegistryModels) {
+		runtimeThinkingSupport.set(
+			qualifiedModelSpec(model.provider, model.id),
+			getRuntimeThinkingSupport(model as typeof model & {
+				reasoning?: unknown;
+				thinkingLevelMap?: Partial<Record<ThinkingLevel, string | null>>;
+			}),
+		);
+	}
 
 	// Hard model requirement snapshot. Capability comes from the runtime
 	// `Model.input` array on `modelRegistry.getAvailable()` — `SimpleModelConfig`
@@ -526,6 +547,8 @@ function setupModelSelection(
 		disabledProviders,
 		allowedModelIds,
 		bucketAssignments,
+		runtimeThinkingSupport,
+		callerThinkingLevel,
 		alwaysParentModel: readAlwaysParentModel(),
 		routeAroundSaturatedProviders: readRouteAroundSaturatedProviders(),
 		fallbackOnProviderFailure: readFallbackOnProviderFailure(),
@@ -636,7 +659,10 @@ export async function execute(
 		};
 	}
 
-	const selectionCtx = setupModelSelection(ctx, runtimeCtx, params.modelRequirements);
+	// Older/minimal ExtensionAPI test doubles may not expose the newer getter.
+	// Keep the historical subagent default when it is unavailable.
+	const callerThinkingLevel = _pi.getThinkingLevel?.() ?? "high";
+	const selectionCtx = setupModelSelection(ctx, runtimeCtx, params.modelRequirements, callerThinkingLevel);
 	const requestedAgent = agents.find((candidate) => candidate.name === params.agent);
 	const provenanceSeed = {
 		promptHash: hashDelegatedPrompt(params.task),

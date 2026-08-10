@@ -12,13 +12,11 @@ import test from 'node:test';
  * and asserts they produce identical coerced outputs, so silent drift between
  * the duplicates is caught.
  *
- * The two implementations have three known, pre-existing divergences (documented
- * in the "known divergences" test below): the extension omits the top-level and
- * auxiliary-usage `provider` keys, recomputes `failureCountsByName` differently
- * for legacy per-tool result-issue kinds, and defaults `providerQueueAttemptCount`
- * to 0 instead of omitting it. The matrix avoids the latter two by construction
- * and normalizes the `provider` key so the remaining shared coercion logic is
- * compared like-for-like.
+ * The two implementations have two known, pre-existing divergences (documented
+ * in the "known divergences" test below): the extension recomputes
+ * `failureCountsByName` differently for legacy per-tool result-issue kinds and
+ * defaults `providerQueueAttemptCount` to 0 instead of omitting it. The matrix
+ * avoids both by construction so all shared coercion logic is compared directly.
  */
 
 import { coerceRunSnapshot as extensionCoerce } from '../../../src/host/run-analytics/coercion-snapshots';
@@ -26,18 +24,9 @@ import { coerceRunSnapshot as analysisCoerce } from '../../../../analysis/script
 
 type AnySnapshot = Record<string, unknown>;
 
-/** Strip the `provider` keys the extension omits but the analysis emits. */
+/** Persisted JSON does not distinguish an absent key from an undefined key. */
 function normalizeForParity<T>(value: T): T {
-  if (!value || typeof value !== 'object') return value;
-  const clone = structuredClone(value) as Record<string, unknown>;
-  delete clone.provider;
-  const auxiliary = clone.auxiliaryLlmUsage;
-  if (Array.isArray(auxiliary)) {
-    for (const sample of auxiliary) {
-      if (sample && typeof sample === 'object') delete (sample as AnySnapshot).provider;
-    }
-  }
-  return clone as T;
+  return JSON.parse(JSON.stringify(value)) as T;
 }
 
 function validBase(): AnySnapshot {
@@ -109,6 +98,7 @@ const EDGE_CASES: Array<{ name: string; snapshot: AnySnapshot }> = [
       finalizedAt: '2026-01-01T00:05:00.000Z',
       finalizationReason: 'new_task',
       modelId: 'gpt-4.1',
+      provider: 'openai',
       thinkingLevel: 'high',
       mixedTreatmentConfig: true,
       treatmentChangeKinds: ['model', 'thinking', 'model'],
@@ -345,14 +335,7 @@ test('analysis is lenient where the extension is strict (counter/array coercion 
 });
 
 test('known divergences are pinned (fail loudly if either side is changed without the other)', () => {
-  // 1. Top-level provider: analysis preserves it; the extension omits the key entirely.
-  const withProvider = { ...validBase(), provider: 'openai' };
-  const aProvider = analysisCoerce(withProvider)!;
-  const eProvider = extensionCoerce(withProvider)!;
-  assert.equal(aProvider.provider, 'openai');
-  assert.ok(!('provider' in eProvider), 'extension must not emit top-level provider');
-
-  // 2. Legacy per-tool result-issue kinds: analysis recomputes failureCountsByName
+  // 1. Legacy per-tool result-issue kinds: analysis recomputes failureCountsByName
   //    (subtracts the result-issue total); the extension leaves the raw value.
   const legacyPerTool = {
     ...validBase(),
@@ -365,7 +348,7 @@ test('known divergences are pinned (fail loudly if either side is changed withou
   assert.equal(analysisCoerce(legacyPerTool)!.toolUsage.failureCountsByName.bash, 1, 'analysis subtracts legacy result-issue total (3 - 2)');
   assert.equal(extensionCoerce(legacyPerTool)!.toolUsage.failureCountsByName.bash, 3, 'extension keeps the raw failureCountsByName value');
 
-  // 3. providerQueueAttemptCount: extension defaults to 0; analysis omits the key.
+  // 2. providerQueueAttemptCount: extension defaults to 0; analysis omits the key.
   const noQueueAttempt = {
     ...validBase(),
     turnThroughputSamples: [{ endedAt: '2026-01-01T00:00:00.000Z', outputTokens: 5, generationDurationMs: 100, concurrentBusySessions: 1, status: 'completed' }],

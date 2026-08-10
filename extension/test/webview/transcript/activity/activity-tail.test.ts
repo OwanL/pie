@@ -381,6 +381,35 @@ test('estimateActivityTailHeight scales with rendered rows and is zero without a
 
 // ── deriveTurnActivityState integration ─────────────────────────────────────
 
+test('deriveTurnActivityState labels a running compaction as compacting history', () => {
+  // Compaction emits no message_start/message_end: the transcript still shows
+  // the previous completed turn, which would otherwise read as "thinking".
+  const transcript = [userMessage(), streamingAssistant([])];
+  const state = deriveTurnActivityState({
+    busy: true,
+    compacting: true,
+    transcript,
+    prefs: { extensionToggles: {}, activityTailLines: 2 },
+    pruningSettings: { mode: 'auto' },
+  });
+  assert.ok(state);
+  assert.equal(state!.phase, 'compacting');
+  assert.equal(state!.label, 'compacting history');
+  assert.equal(state!.ariaLabel, 'Agent is compacting conversation history');
+  assert.equal(state!.tone, 'processing');
+});
+
+test('deriveTurnActivityState ignores compacting when the session is idle', () => {
+  const state = deriveTurnActivityState({
+    busy: false,
+    compacting: true,
+    transcript: [],
+    prefs: { extensionToggles: {}, activityTailLines: 2 },
+    pruningSettings: { mode: 'auto' },
+  });
+  assert.equal(state, null);
+});
+
 test('deriveTurnActivityState keeps reasoning lifecycle-only when ReasoningBlock owns the stream', () => {
   const transcript = [userMessage(), streamingAssistant([{ kind: 'reasoning', text: 'planning the work' }])];
   const state = deriveFor(transcript);

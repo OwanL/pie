@@ -1,4 +1,4 @@
-import type { ModelInfo } from '../../../shared/protocol';
+import type { ModelInfo, ThinkingLevel } from '../../../shared/protocol';
 
 /** Canonical identity used by every webview model picker. The first slash is
  * the separator so model ids may contain additional slashes. */
@@ -29,6 +29,19 @@ export function filterEnabledProviders(
   providerToggles: Record<string, boolean>,
 ): ModelInfo[] {
   return models.filter((m) => providerToggles[m.provider] !== false);
+}
+
+/** Exact runtime-supported levels for a provider-qualified model. The fallback
+ * only serves older snapshots that predate `thinkingLevels`; production model
+ * catalogs always carry the explicit list. */
+export function getModelThinkingLevels(model: ModelInfo | undefined): ThinkingLevel[] {
+  if (!model) return [];
+  if (Array.isArray(model.thinkingLevels) && model.thinkingLevels.length > 0) {
+    return [...model.thinkingLevels];
+  }
+  return model.reasoning
+    ? ['off', 'minimal', 'low', 'medium', 'high']
+    : ['off'];
 }
 
 export function isModelSelectedBySpec(

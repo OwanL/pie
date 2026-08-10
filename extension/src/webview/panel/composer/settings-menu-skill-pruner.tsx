@@ -3,7 +3,7 @@
 
 import { DEFAULT_PRUNING_SETTINGS, type ChatPrefs, type ModelInfo, type PruningSettings, type PruningMode, type ThinkingLevel } from '../../../shared/protocol';
 import { toggleChatPref } from '../chat-prefs';
-import { formatModelSpec, orderModelsForPicker, parseModelSpec } from './model-list';
+import { formatModelSpec, getModelThinkingLevels, orderModelsForPicker, parseModelSpec } from './model-list';
 import { ModelPicker } from '../components/model-picker';
 import { PRUNING_MODE_OPTIONS, THINKING_LEVEL_OPTIONS } from './settings-menu-helpers';
 import { AlwaysKeepPicker } from '../components/always-keep-picker';
@@ -33,6 +33,12 @@ export function SkillPrunerSettings({ prefs, pruningSettings, modelEntries, avai
   const autoSkipBelowTokens = pruningSettings.autoSkipBelowTokens === undefined
     ? DEFAULT_PRUNING_SETTINGS.autoSkipBelowTokens!
     : pruningSettings.autoSkipBelowTokens;
+  const selectedModel = availableModels.find((model) =>
+    model.id === pruningSettings.model
+    && (!pruningSettings.provider || model.provider === pruningSettings.provider));
+  const supportedThinkingLevels = getModelThinkingLevels(selectedModel);
+  const thinkingOptions = THINKING_LEVEL_OPTIONS.filter((option) =>
+    supportedThinkingLevels.includes(option.value));
 
   return (
     <div class="toolbar-settings-ext-settings">
@@ -120,7 +126,11 @@ export function SkillPrunerSettings({ prefs, pruningSettings, modelEntries, avai
             const { id, provider } = parseModelSpec(spec);
             const selected = availableModels.find((m) => m.id === id && (!provider || m.provider === provider));
             if (selected) {
-              onSetPruningSettings({ model: selected.id, provider: selected.provider });
+              const supported = getModelThinkingLevels(selected);
+              const thinkingLevel = supported.includes(pruningSettings.thinkingLevel)
+                ? pruningSettings.thinkingLevel
+                : (supported[0] ?? 'off');
+              onSetPruningSettings({ model: selected.id, provider: selected.provider, thinkingLevel });
             }
           }}
         />
@@ -133,7 +143,7 @@ export function SkillPrunerSettings({ prefs, pruningSettings, modelEntries, avai
           onChange={(e) => onSetPruningSettings({ thinkingLevel: (e.target as HTMLSelectElement).value as ThinkingLevel })}
           aria-label="Pruning thinking level"
         >
-          {THINKING_LEVEL_OPTIONS.map((opt) => (
+          {thinkingOptions.map((opt) => (
             <option key={opt.value} value={opt.value}>{opt.label}</option>
           ))}
         </select>

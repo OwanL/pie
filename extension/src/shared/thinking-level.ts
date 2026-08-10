@@ -11,7 +11,8 @@
 
 import type { ThinkingLevel } from './protocol/models.js';
 
-/** All thinking levels, ordered low → high. */
+/** All Pi thinking levels, ordered low → high. Values stay one-to-one
+ * with the runtime: `xhigh` and `max` are distinct provider controls. */
 export const THINKING_LEVELS: readonly ThinkingLevel[] = [
   'off',
   'minimal',
@@ -19,6 +20,7 @@ export const THINKING_LEVELS: readonly ThinkingLevel[] = [
   'medium',
   'high',
   'xhigh',
+  'max',
 ];
 
 /** Picker options (value + human label) for the thinking-level selector. */
@@ -28,7 +30,8 @@ export const THINKING_LEVEL_OPTIONS: readonly { value: ThinkingLevel; label: str
   { value: 'low', label: 'Low' },
   { value: 'medium', label: 'Medium' },
   { value: 'high', label: 'High' },
-  { value: 'xhigh', label: 'Max' },
+  { value: 'xhigh', label: 'X-High' },
+  { value: 'max', label: 'Max' },
 ];
 
 /** Per-level display labels (exhaustive over the union). */
@@ -38,7 +41,8 @@ export const THINKING_LEVEL_LABELS: Readonly<Record<ThinkingLevel, string>> = {
   low: 'Low',
   medium: 'Medium',
   high: 'High',
-  xhigh: 'Max',
+  xhigh: 'X-High',
+  max: 'Max',
 };
 
 /** Membership set for validation. */

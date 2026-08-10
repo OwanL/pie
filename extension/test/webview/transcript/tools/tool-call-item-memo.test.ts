@@ -63,7 +63,11 @@ test('ToolCallItem holds its memo barrier across host-style cloned prefs after s
   };
   const stablePrefs: ChatPrefs = structuredClone({
     ...DEFAULT_CHAT_PREFS,
-    subagentBuckets: { small: ['small-model'], medium: [], frontier: [] },
+    subagentBuckets: {
+      small: [{ model: 'test/small-model', thinkingLevel: 'low' }],
+      medium: [],
+      frontier: [],
+    },
     subagentProviderTogglesBySession: { '/session/a': { openai: true } },
     providerConcurrency: { openai: { maxConcurrentRequests: 2 } },
   });
@@ -74,7 +78,7 @@ test('ToolCallItem holds its memo barrier across host-style cloned prefs after s
   assert.equal(bodyRenders, 1, 'equivalent hydrated prefs must not reopen the heavy tool body');
 
   const changedCandidate = structuredClone(stablePrefs);
-  changedCandidate.subagentBuckets.medium.push('medium-model');
+  changedCandidate.subagentBuckets.medium.push({ model: 'test/medium-model', thinkingLevel: 'medium' });
   const changedPrefs = pickStable(stablePrefs, changedCandidate);
   mountTool(structuredClone(completed), changedPrefs);
   assert.equal(bodyRenders, 2, 'a nested preference change must cross the tool memo barrier');

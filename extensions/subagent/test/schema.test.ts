@@ -9,13 +9,14 @@ test("BUCKET_GUIDANCE describes every model bucket", () => {
 	assert.match(BUCKET_GUIDANCE, /frontier/);
 });
 
-test("SubagentParams exposes one required task shape", () => {
+test("SubagentParams exposes one required task shape without a reasoning override", () => {
 	assert.equal(SubagentParams.type, "object");
 	assert.deepEqual(SubagentParams.required, ["agent", "task"]);
 	const props = SubagentParams.properties as Record<string, unknown>;
 	assert.deepEqual(Object.keys(props), [
-		"agent", "task", "workflowRef", "userContext", "confirmProjectAgents", "cwd", "bucket", "thinkingLevel", "modelRequirements",
+		"agent", "task", "workflowRef", "userContext", "confirmProjectAgents", "cwd", "bucket", "modelRequirements",
 	]);
+	assert.equal("thinkingLevel" in props, false);
 	assert.equal("tasks" in props, false);
 	assert.equal("chain" in props, false);
 	assert.equal("agentScope" in props, false);
@@ -25,8 +26,7 @@ test("SubagentParams enum and default metadata remain intact", () => {
 	const props = SubagentParams.properties as Record<string, any>;
 	assert.deepEqual(props.bucket.enum, ["small", "medium", "frontier"]);
 	assert.equal(props.bucket.default, "medium");
-	assert.deepEqual(props.thinkingLevel.enum, ["minimal", "low", "medium", "high"]);
-	assert.equal(props.thinkingLevel.default, "high");
+	assert.equal(props.thinkingLevel, undefined);
 	assert.deepEqual(props.userContext.enum, ["latest", "all"]);
 	assert.equal(props.userContext.default, undefined);
 	assert.equal(props.confirmProjectAgents.default, true);
@@ -52,7 +52,6 @@ test("SubagentParams accepts a valid single task", () => {
 		confirmProjectAgents: true,
 		cwd: "/repo",
 		bucket: "medium",
-		thinkingLevel: "low",
 	}), true);
 });
 
@@ -69,12 +68,12 @@ test("prepareSubagentArguments migrates only one-item legacy batches", () => {
 	);
 });
 
-test("prepareSubagentArguments caps legacy reasoning levels above high", () => {
+test("prepareSubagentArguments strips legacy reasoning overrides", () => {
 	assert.deepEqual(prepareSubagentArguments({ agent: "worker", task: "a", thinkingLevel: "xhigh" }), {
-		agent: "worker", task: "a", thinkingLevel: "high",
+		agent: "worker", task: "a",
 	});
 	assert.deepEqual(prepareSubagentArguments({ chain: [{ agent: "worker", task: "a", thinkingLevel: "max" }] }), {
-		agent: "worker", task: "a", thinkingLevel: "high",
+		agent: "worker", task: "a",
 	});
 });
 
@@ -84,6 +83,7 @@ test("SubagentParams rejects removed routes and malformed values", () => {
 	assert.equal(Value.Check(SubagentParams, { agent: "worker", task: "a", tasks: [] }), false);
 	assert.equal(Value.Check(SubagentParams, { agent: "worker", task: "a", bucket: "huge" }), false);
 	assert.equal(Value.Check(SubagentParams, { agent: "worker", task: "a", userContext: "full" }), false);
+	assert.equal(Value.Check(SubagentParams, { agent: "worker", task: "a", thinkingLevel: "high" }), false);
 	assert.equal(Value.Check(SubagentParams, { agent: "worker", task: "a", thinkingLevel: "xhigh" }), false);
 	assert.equal(Value.Check(SubagentParams, { agent: "worker", task: "a", thinkingLevel: "max" }), false);
 	assert.equal(Value.Check(SubagentParams, { agent: "worker" }), false);

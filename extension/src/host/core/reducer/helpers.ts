@@ -170,6 +170,7 @@ export function evictSession(
   const { [sp]: _i, ...remainingInterrupts } = state.sessions.interruptInFlightBySession;
   const { [sp]: _rtry, ...remainingRetryStatus } = state.sessions.retryStatusBySession;
   const { [sp]: _a, ...remainingAnalytics } = state.sessions.analyticsFactorsBySession;
+  const { [sp]: _privacy, ...remainingPrivacyModes } = state.sessions.privacyModeBySession;
   const { [sp]: _ct, ...remainingTurns } = state.pending.currentTurnBySession;
   const { [sp]: _m, ...remainingModels } = state.settings.availableModelsBySession;
   const { [sp]: _cu, ...remainingContext } = state.settings.contextUsageBySession;
@@ -239,9 +240,13 @@ export function evictSession(
   const nextRunningPaths = removeSummary
     ? removeFromArray(state.sessions.runningSessionPaths, sp)
     : state.sessions.runningSessionPaths;
+  const nextCompactingPaths = removeSummary
+    ? removeFromArray(state.sessions.compactingSessionPaths, sp)
+    : state.sessions.compactingSessionPaths;
   const nextReviewClosedRunningPaths = removeSummary
     ? removeFromArray(state.sessions.reviewClosedRunningPaths, sp)
     : state.sessions.reviewClosedRunningPaths;
+  const { [sp]: _lastCompaction, ...remainingLastCompaction } = state.sessions.lastCompactionBySession;
 
   // ── Tab arrays (removeTabs: close the tab) ──
   const nextOpenTabPaths = removeTabs
@@ -293,10 +298,13 @@ export function evictSession(
         pinnedTabPaths: nextPinnedPaths,
         pinnedTabGroups: nextPinnedGroups,
         runningSessionPaths: nextRunningPaths,
+        compactingSessionPaths: nextCompactingPaths,
+        lastCompactionBySession: remainingLastCompaction,
         reviewClosedRunningPaths: nextReviewClosedRunningPaths,
         unreadFinishedSessionPaths: nextUnreadPaths,
         activeSessionPath: nextActivePath,
         analyticsFactorsBySession: remainingAnalytics,
+        privacyModeBySession: remainingPrivacyModes,
         interruptInFlightBySession: remainingInterrupts,
         retryStatusBySession: remainingRetryStatus,
       },

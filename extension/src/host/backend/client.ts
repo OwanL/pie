@@ -57,6 +57,45 @@ function utf8Tail(value: string, maxBytes: number): string {
  *  to SIGKILL. */
 const STOP_KILL_TIMEOUT_MS = 5_000;
 
+/**
+ * A PATH-discovered Node executable may be a process-managing shim (for
+ * example proto's Windows shim). Node's ChildProcess handle then refers to
+ * the shim, not the real backend descendant, so ChildProcess.kill() alone can
+ * strand the backend. Terminate the whole tree on Windows and retain the
+ * direct kill fallback for non-Windows and test doubles.
+ */
+function terminateProcessTree(proc: cp.ChildProcess, signal?: NodeJS.Signals): void {
+  if (process.platform === 'win32' && typeof proc.pid === 'number') {
+    const killer = cp.spawn(
+      'taskkill.exe',
+      ['/PID', String(proc.pid), '/T', '/F'],
+      { windowsHide: true, stdio: 'ignore' },
+    );
+    let fallbackAttempted = false;
+    const fallbackKill = (): void => {
+      if (fallbackAttempted) return;
+      fallbackAttempted = true;
+      try {
+        proc.kill(signal);
+      } catch {
+        // The process may already have exited while taskkill was starting.
+      }
+    };
+    killer.once('error', fallbackKill);
+    killer.once('exit', (code) => {
+      if (code !== 0) fallbackKill();
+    });
+    killer.unref?.();
+    return;
+  }
+
+  try {
+    proc.kill(signal);
+  } catch {
+    // The process may already have exited; the exit handler will settle state.
+  }
+}
+
 /** Default timeout for backend RPC calls if no per-method override is set. */
 const DEFAULT_RPC_TIMEOUT_MS = 30_000;
 
@@ -164,7 +203,12 @@ export class BackendClient implements vscode.Disposable {
 
     const proc = cp.spawn(
       options.nodePath,
-      [options.backendPath, '--sdkPath', options.sdkPath, '--cwd', options.cwd],
+      [
+        options.backendPath,
+        '--sdkPath', options.sdkPath,
+        '--cwd', options.cwd,
+        '--hostPid', String(process.pid),
+      ],
       {
         cwd: options.cwd,
         env: backendEnv,
@@ -204,7 +248,7 @@ export class BackendClient implements vscode.Disposable {
         generation,
         error: toErrorMessage(error),
       });
-      proc.kill();
+      terminateProcessTree(proc);
     });
 
     proc.on('exit', (code) => {
@@ -344,7 +388,7 @@ export class BackendClient implements vscode.Disposable {
             maxLineBytes,
             preview,
           });
-          if (this.proc === proc) proc.kill();
+          if (this.proc === proc) terminateProcessTree(proc);
         },
       });
     });
@@ -419,9 +463,9 @@ export class BackendClient implements vscode.Disposable {
         this.killEscalationProcess = undefined;
       }
       appendPieLog('warn', 'backend', 'backend did not exit on SIGTERM, escalating to SIGKILL');
-      proc.kill('SIGKILL');
+      terminateProcessTree(proc, 'SIGKILL');
     }, STOP_KILL_TIMEOUT_MS);
-    proc.kill();
+    terminateProcessTree(proc);
   }
 
   private handleLine(line: string): void {

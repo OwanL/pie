@@ -80,6 +80,7 @@ async function persistSystemPromptTogglesForSession(
   file: string,
   sessionPath: string,
   disabledEntries: readonly string[],
+  strict = false,
 ): Promise<void> {
   let tempFile: string | undefined;
   try {
@@ -98,6 +99,7 @@ async function persistSystemPromptTogglesForSession(
     await fs.rename(tempFile, file);
   } catch (error) {
     backendTrace('systemPromptToggles', 'write.failed', { level: 'debug', error: toErrorMessage(error), file });
+    if (strict) throw error;
     // Non-fatal: in-memory state still drives the live session.
   } finally {
     if (tempFile) {
@@ -115,12 +117,13 @@ async function persistSystemPromptTogglesForSession(
 export async function writeSystemPromptTogglesForSession(
   sessionPath: string,
   disabledEntries: readonly string[],
+  strict = false,
 ): Promise<void> {
   const file = getTogglesFilePath();
   if (!file) return;
 
   const write = pendingWrite.then(() => (
-    persistSystemPromptTogglesForSession(file, sessionPath, disabledEntries)
+    persistSystemPromptTogglesForSession(file, sessionPath, disabledEntries, strict)
   ));
   // A best-effort persistence failure must not block a later update.
   pendingWrite = write.catch(() => undefined);

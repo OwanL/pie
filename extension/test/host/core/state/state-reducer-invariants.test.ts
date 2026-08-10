@@ -690,6 +690,7 @@ test('ViewState: all fields are present in initial state', () => {
     'workspaceCwd', 'systemPrompts', 'modelSettings', 'availableModels', 'contextUsage',
     'prefs', 'fileChanges', 'readFilePaths', 'availableExtensions', 'pruningResult', 'pruningSettings',
     'pruningCatalog', 'editingMessageId', 'editingDraft', 'pendingExtensionUIRequest', 'pendingExtensionUIRequestsBySession',
+    'compactingSessionPaths', 'lastCompactionBySession',
   ];
 
   for (const key of requiredKeys) {
@@ -703,6 +704,8 @@ test('ViewState: all fields are present in initial state', () => {
   assert.deepEqual(vs.sessions, []);
   assert.deepEqual(vs.openTabPaths, []);
   assert.deepEqual(vs.runningSessionPaths, []);
+  assert.deepEqual(vs.compactingSessionPaths, []);
+  assert.deepEqual(vs.lastCompactionBySession, {});
   assert.equal(vs.activeSession, null);
   assert.deepEqual(vs.transcript, []);
   assert.equal(vs.transcriptLoaded, false);

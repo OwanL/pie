@@ -204,12 +204,26 @@ test('handleBackendRequest covers handshake and session orchestration methods', 
     { event: 'session.list.changed' },
   ]);
 
+  harness.deps.buildSessionOpenedPayload = async (sessionPath, selectionToken) => ({
+    sessionPath,
+    selectionToken,
+    transcript: [{ id: 'durable-1' }],
+  } as any);
   const opened = await handleBackendRequest(harness.deps, {
     id: '4',
     method: 'session.open',
     params: { sessionPath: '/repo/session.jsonl', selectionToken: 'sel-2' },
   });
-  assert.deepEqual(opened, { sessionPath: '/repo/session.jsonl', selectionToken: 'sel-2' });
+  assert.deepEqual(opened, { ok: true, sessionPath: '/repo/session.jsonl' });
+  assert.deepEqual(harness.emitted.at(-2), {
+    event: 'session.opened',
+    payload: {
+      sessionPath: '/repo/session.jsonl',
+      selectionToken: 'sel-2',
+      transcript: [{ id: 'durable-1' }],
+    },
+  });
+  harness.deps.buildSessionOpenedPayload = async (sessionPath, selectionToken) => ({ sessionPath, selectionToken } as any);
 
   const preloaded = await handleBackendRequest(harness.deps, {
     id: '5',
@@ -830,6 +844,18 @@ test('message.interrupt hard-stops compaction when interrupted during the post-a
   assert.equal(aborted.branchSummary, true);
   assert.equal(aborted.bash, true);
   assert.equal(aborted.retry, true);
+});
+
+test('session.open re-arms busy while history compaction is active', async () => {
+  const harness = createHarness({ sessionOverrides: { isCompacting: true } });
+
+  await handleBackendRequest(harness.deps, {
+    id: 'open-compacting',
+    method: 'session.open',
+    params: { sessionPath: '/repo/session.jsonl' },
+  });
+
+  assert.deepEqual(harness.busyEvents, [true]);
 });
 
 test('message.interrupt is idempotent when truly idle', async () => {

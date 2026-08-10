@@ -139,6 +139,56 @@ test('one unsettled or uncommitted post coalesces many host changes to the lates
   assert.deepEqual(h.controller.getDebugState().acceptedRevisions, [2]);
 });
 
+test('priority state retires an accepted streaming snapshot and posts without waiting for commit', async () => {
+  const h = harness(() => true);
+  h.controller.markDirty();
+  await settle();
+  assert.deepEqual(h.controller.getDebugState().acceptedRevisions, [1]);
+
+  h.controller.markPriorityDirty();
+  await settle();
+
+  assert.equal(h.posts.length, 2);
+  assert.deepEqual(h.builds.map((build) => build.desiredGeneration), [1, 2]);
+  assert.deepEqual(h.controller.getDebugState().acceptedRevisions, [2]);
+
+  const generation = h.controller.getDebugState().viewGeneration;
+  h.controller.transcriptCommitted(transcriptCommit(1, generation));
+  assert.equal(h.defects.length, 0, 'retired selection predecessor evidence is stale, not defective');
+  assert.ok(h.telemetry.some((event) => event.kind === 'commit-stale'));
+});
+
+test('priority state coalesces behind an unsettled post then supersedes it after acceptance', async () => {
+  const first = deferred<boolean>();
+  const h = harness(() => h.posts.length === 1 ? first.promise : true);
+  h.controller.markDirty();
+  h.controller.markPriorityDirty();
+  h.controller.markPriorityDirty();
+  assert.equal(h.posts.length, 1);
+
+  first.resolve(true);
+  await settle();
+
+  assert.equal(h.posts.length, 2);
+  assert.deepEqual(h.builds.map((build) => build.desiredGeneration), [1, 3]);
+  assert.deepEqual(h.controller.getDebugState().acceptedRevisions, [2]);
+});
+
+test('priority state retries without the normal delay when the older unsettled post fails', async () => {
+  const first = deferred<boolean>();
+  const h = harness(() => h.posts.length === 1 ? first.promise : true, { retryDelayMs: 50 });
+  h.controller.markDirty();
+  h.controller.markPriorityDirty();
+
+  first.resolve(false);
+  await settle();
+  assert.equal(h.posts.length, 1);
+
+  h.clock.advance(0);
+  await settle();
+  assert.equal(h.posts.length, 2, 'priority retry uses a zero-delay task instead of the normal retry budget');
+});
+
 test('renderer block retires a stale acceptance only when newer host state is coalesced', async () => {
   const h = harness(() => true);
   h.controller.markDirty();

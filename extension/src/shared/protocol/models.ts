@@ -47,6 +47,9 @@ export interface ModelInfo {
   name: string;
   provider: string;
   reasoning: boolean;
+  /** Exact Pi reasoning controls supported by this provider-qualified model.
+   * `xhigh` and `max` remain distinct; unsupported levels are omitted. */
+  thinkingLevels?: ThinkingLevel[];
   /** Explicit input capabilities. Backends must default to `['text']` when unsure. */
   inputKinds: ModelInputKind[];
   contextWindow?: number;

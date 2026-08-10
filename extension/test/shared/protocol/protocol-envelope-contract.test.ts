@@ -36,6 +36,8 @@ function emptyViewState(): ViewState {
     pinnedTabPaths: [],
     pinnedTabGroups: [],
     runningSessionPaths: [],
+    compactingSessionPaths: [],
+    lastCompactionBySession: {},
     unreadFinishedSessionPaths: [],
     activeSession: null,
     transcript: [],

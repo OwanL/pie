@@ -30,6 +30,9 @@ export const OPEN_TABS_STORAGE_KEY = 'openTabPaths';
 export const ACTIVE_SESSION_STORAGE_KEY = 'activeSessionPath';
 export const PINNED_TABS_STORAGE_KEY = 'pinnedTabPaths';
 export const PINNED_TAB_GROUPS_STORAGE_KEY = 'pinnedTabGroups';
+/** Paths of sessions whose ephemeral mode must survive a host restart. This
+ * stores only the privacy marker, never transcript/session contents. */
+export const PRIVATE_SESSION_PATHS_STORAGE_KEY = 'privateSessionPaths';
 const DEFAULT_SELECTION_REQUEST_TIMEOUT_MS = 60_000;
 
 interface InFlightReviewClosureAttempt extends ReviewAutoCloseAttempt {
@@ -46,6 +49,8 @@ export class SessionServiceState {
   private readonly selectionRequestTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly sessionDataEpochs = new Map<string, number>();
   private readonly preloadingSessionPaths = new Set<string>();
+  /** Session runtimes confirmed by session.opened in the current backend generation. */
+  private readonly knownRuntimeSessionPaths = new Set<string>();
   private readonly suppressNextCompletionNotification = new Set<string>();
   private readonly requestSessionPathById = new Map<string, string>();
   private readonly transcriptTouchedAtBySession = new Map<string, number>();
@@ -76,6 +81,14 @@ export class SessionServiceState {
     this.onPreloadedSessionOpened = handler;
   }
 
+  markSessionRuntimeKnown(sessionPath: string): void {
+    this.knownRuntimeSessionPaths.add(sessionPath);
+  }
+
+  isSessionRuntimeKnown(sessionPath: string): boolean {
+    return this.knownRuntimeSessionPaths.has(sessionPath);
+  }
+
   resetRuntimeState(): void {
     this.busySeqMap.clear();
     this.lifecycleQueue = Promise.resolve();
@@ -87,6 +100,7 @@ export class SessionServiceState {
     this.selectionRequests.clear();
     this.sessionDataEpochs.clear();
     this.preloadingSessionPaths.clear();
+    this.knownRuntimeSessionPaths.clear();
     this.suppressNextCompletionNotification.clear();
     this.requestSessionPathById.clear();
     this.transcriptTouchedAtBySession.clear();
@@ -235,6 +249,15 @@ export class SessionServiceState {
 
   isCurrentSelectionToken(selectionToken?: string): boolean {
     return !!selectionToken && this.currentSelectionToken === selectionToken;
+  }
+
+  /**
+   * Relinquish focus ownership from any in-flight create/open without deleting
+   * its request record. The stale operation still owns cleanup and cache
+   * refresh, but its eventual session.opened payload cannot steal selection.
+   */
+  supersedeSelectionOwnership(): void {
+    this.currentSelectionToken = null;
   }
 
   finishSelectionRequest(selectionToken?: string): void {
@@ -504,6 +527,7 @@ export class SessionServiceState {
     this.sessionOperationQueues.delete(sessionPath);
     this.sessionDataEpochs.delete(sessionPath);
     this.preloadingSessionPaths.delete(sessionPath);
+    this.knownRuntimeSessionPaths.delete(sessionPath);
     this.suppressNextCompletionNotification.delete(sessionPath);
     this.transcriptTouchedAtBySession.delete(sessionPath);
     for (const [requestId, mappedSessionPath] of this.requestSessionPathById) {

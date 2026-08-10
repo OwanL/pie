@@ -24,6 +24,7 @@ import type {
   AuxiliaryLlmUsagePayload,
   BusyChangedPayload,
   CompactionPayload,
+  CompactionStartedPayload,
   ContextUsageChangedPayload,
   CustomMessagePayload,
   ErrorPayload,
@@ -392,10 +393,20 @@ export function isRetryMeasuredPayload(value: unknown): value is RetryMeasuredPa
   );
 }
 
+export function isCompactionStartedPayload(value: unknown): value is CompactionStartedPayload {
+  return (
+    isObject(value)
+    && isString(value.sessionPath)
+  );
+}
+
 export function isCompactionPayload(value: unknown): value is CompactionPayload {
   return (
     isObject(value)
     && isString(value.sessionPath)
+    && isOptionalFiniteNumber(value.occurredAt)
+    && isOptionalFiniteNumber(value.tokensBefore)
+    && isOptionalFiniteNumber(value.estimatedTokensAfter)
   );
 }
 

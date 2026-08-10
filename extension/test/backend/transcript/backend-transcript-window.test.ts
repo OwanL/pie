@@ -23,6 +23,7 @@ function buildMessages(count: number): ChatMessage[] {
 function buildCache(count: number): DisplayTranscriptCache {
   return {
     transcript: buildMessages(count),
+    sessionUsage: { samples: [] },
     hasUserMessages: true,
     branchEntryCount: count,
     branchLastEntryId: `entry-${count - 1}`,
@@ -122,6 +123,7 @@ test('buildDisplayTranscriptCache records transcript fingerprints and stale dete
   assert.equal(cache.branchLastEntryId, 'entry-2');
   assert.equal(cache.hasUserMessages, true);
   assert.equal(cache.transcript.length, 2);
+  assert.deepEqual(cache.sessionUsage.samples, []);
   assert.equal(isDisplayTranscriptCacheStale(cache, entries as any), false);
   assert.equal(isDisplayTranscriptCacheStale(cache, [...entries, { id: 'entry-3' }] as any), true);
 });

@@ -176,6 +176,8 @@ export interface BackendRequestHandlerDeps {
   ): Promise<void>;
   /** Apply autonomous-mode tool exclusion to all live session runtimes. */
   setAutonomousMode(enabled: boolean): void;
+  /** Retire a session runtime and delete its transcript/sidecars. */
+  forgetSession?(sessionPath: string): Promise<void>;
   loadTranscriptPage(
     sessionPath: string,
     direction: TranscriptPageDirection,
@@ -321,7 +323,10 @@ async function handleSessionCreate(
     params.selectionToken,
   );
   deps.emit('session.opened', createPayload);
-  deps.emitBusyChanged(context, context.session.isStreaming || !!context.activeRequest);
+  deps.emitBusyChanged(
+    context,
+    context.session.isStreaming || !!context.activeRequest || context.session.isCompacting === true,
+  );
   void deps.emitSessionListChanged();
   return createPayload;
 }
@@ -339,9 +344,14 @@ async function handleSessionOpen(
     params.transcript,
   );
   deps.emit('session.opened', openPayload);
-  deps.emitBusyChanged(context, context.session.isStreaming || !!context.activeRequest);
+  deps.emitBusyChanged(
+    context,
+    context.session.isStreaming || !!context.activeRequest || context.session.isCompacting === true,
+  );
   void deps.emitSessionListChanged();
-  return openPayload;
+  // The authoritative snapshot is the session.opened event above. Return only
+  // a small acknowledgement instead of duplicating the transcript payload.
+  return { ok: true, sessionPath: context.sessionPath };
 }
 
 async function handleSessionDuplicate(
@@ -363,7 +373,10 @@ async function handleSessionDuplicate(
     params.selectionToken,
   );
   deps.emit('session.opened', duplicatePayload);
-  deps.emitBusyChanged(context, context.session.isStreaming || !!context.activeRequest);
+  deps.emitBusyChanged(
+    context,
+    context.session.isStreaming || !!context.activeRequest || context.session.isCompacting === true,
+  );
   void deps.emitSessionListChanged();
   return duplicatePayload;
 }
@@ -375,6 +388,17 @@ async function handleSessionPreload(
   const params = validateSessionPath('session.preload', request.params);
   const context = await deps.ensureSessionContext(params.sessionPath);
   return await deps.buildSessionOpenedPayload(context.sessionPath);
+}
+
+async function handleSessionForget(
+  deps: BackendRequestHandlerDeps,
+  request: RequestEnvelope,
+): Promise<unknown> {
+  const params = validateSessionPath('session.forget', request.params);
+  if (!deps.forgetSession) throw new BackendError('UNAVAILABLE', 'Session forget is unavailable.');
+  await deps.forgetSession(params.sessionPath);
+  await deps.emitSessionListChanged();
+  return { sessionPath: params.sessionPath, forgotten: true };
 }
 
 async function handleSessionLoadTranscriptPage(
@@ -1359,6 +1383,7 @@ const handlers: Record<string, RequestHandler> = {
   'session.open': handleSessionOpen,
   'session.duplicate': handleSessionDuplicate,
   'session.preload': handleSessionPreload,
+  'session.forget': handleSessionForget,
   'session.loadTranscriptPage': handleSessionLoadTranscriptPage,
   'session.loadDetail': handleSessionLoadDetail,
   'session.truncateAfter': handleSessionTruncateAfter,

@@ -67,7 +67,7 @@ export const DEFAULT_STAGING_EXPORTS_DIR = fileURLToPath(new URL('../data/export
 export const DEFAULT_OUTCOMES_ROOT = path.join(CONFIG_ROOT, 'data', 'outcomes');
 
 const INPUT_KINDS = new Set<InputKind>(['filesystemPathRef', 'imageBlob', 'fileBlob']);
-const THINKING_LEVELS = new Set<ThinkingLevel>(['off', 'minimal', 'low', 'medium', 'high', 'xhigh']);
+const THINKING_LEVELS = new Set<ThinkingLevel>(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
 const PRUNING_MODES = new Set<PruningMode>(['auto', 'shadow', 'off', 'custom']);
 const FINALIZATION_REASONS = new Set<RunFinalizationReason>(['closed', 'new_task']);
 const TREATMENT_CHANGE_KINDS = new Set<TreatmentChangeKind>([
@@ -810,9 +810,6 @@ function coerceThinkingLevel(value: unknown): ThinkingLevel | undefined {
   const normalized = value.trim().toLowerCase();
   if (!normalized) {
     return undefined;
-  }
-  if (normalized === 'max') {
-    return 'xhigh';
   }
   return THINKING_LEVELS.has(normalized as ThinkingLevel) ? normalized as ThinkingLevel : undefined;
 }

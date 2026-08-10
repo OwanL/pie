@@ -40,6 +40,10 @@ const ONLY_MEDIUM: NestedAllowedBuckets = { small: false, medium: true, frontier
 const ONLY_FRONTIER: NestedAllowedBuckets = { small: false, medium: false, frontier: true };
 const NONE: NestedAllowedBuckets = { small: false, medium: false, frontier: false };
 
+function assignedModels(...models: string[]) {
+	return models.map((model) => ({ model, thinkingLevel: "high" as const }));
+}
+
 // ============================================================
 // downgradeBucketForNested — pure tier resolution
 // ============================================================
@@ -151,7 +155,11 @@ function makeSelectionCtx(overrides: Partial<SelectionContext> = {}): SelectionC
 		modelConfig: [],
 		disabledProviders: new Set(),
 		allowedModelIds: undefined,
-		bucketAssignments: { small: ["haiku"], medium: ["sonnet"], frontier: ["opus"] },
+		bucketAssignments: {
+			small: assignedModels("haiku"),
+			medium: assignedModels("sonnet"),
+			frontier: assignedModels("opus"),
+		},
 		alwaysParentModel: false,
 		nestedAllowedBuckets: { ...ALL_NESTED_BUCKETS_ALLOWED },
 		...overrides,
@@ -171,7 +179,7 @@ test("resolveModel: childDepth omitted → no downgrade even when allowlist rest
 test("resolveModel: childDepth 0 (root) → no downgrade", async () => {
 	const agent = makeAgent();
 	const ctx = makeSelectionCtx({ nestedAllowedBuckets: NO_FRONTIER });
-	const resolved = await resolveModel(agent, ctx, "parent-model", "frontier", undefined, undefined, 0);
+	const resolved = await resolveModel(agent, ctx, "parent-model", "frontier", undefined, 0);
 	assert.equal(resolved.bucket, "frontier");
 	assert.equal(resolved.modelOverride, "opus");
 	assert.equal(resolved.bucketDowngradeReason, undefined);
@@ -180,7 +188,7 @@ test("resolveModel: childDepth 0 (root) → no downgrade", async () => {
 test("resolveModel: childDepth ≥ 1 + opus disallowed → downgraded to sonnet with diagnostic", async () => {
 	const agent = makeAgent();
 	const ctx = makeSelectionCtx({ nestedAllowedBuckets: NO_FRONTIER });
-	const resolved = await resolveModel(agent, ctx, "parent-model", "frontier", undefined, undefined, 1);
+	const resolved = await resolveModel(agent, ctx, "parent-model", "frontier", undefined, 1);
 	assert.equal(resolved.bucket, "medium");
 	assert.equal(resolved.modelOverride, "sonnet");
 	assert.equal(resolved.selection.fallback, false);
@@ -191,7 +199,7 @@ test("resolveModel: childDepth ≥ 1 + opus disallowed → downgraded to sonnet 
 test("resolveModel: childDepth ≥ 1 + requested tier allowed → no downgrade", async () => {
 	const agent = makeAgent();
 	const ctx = makeSelectionCtx({ nestedAllowedBuckets: NO_FRONTIER });
-	const resolved = await resolveModel(agent, ctx, "parent-model", "medium", undefined, undefined, 2);
+	const resolved = await resolveModel(agent, ctx, "parent-model", "medium", undefined, 2);
 	assert.equal(resolved.bucket, "medium");
 	assert.equal(resolved.modelOverride, "sonnet");
 	assert.equal(resolved.bucketDowngradeReason, undefined);
@@ -200,7 +208,7 @@ test("resolveModel: childDepth ≥ 1 + requested tier allowed → no downgrade",
 test("resolveModel: childDepth ≥ 1 + no bucket allowed → falls back to active model with diagnostic", async () => {
 	const agent = makeAgent();
 	const ctx = makeSelectionCtx({ nestedAllowedBuckets: NONE });
-	const resolved = await resolveModel(agent, ctx, "parent-model", "frontier", undefined, undefined, 1);
+	const resolved = await resolveModel(agent, ctx, "parent-model", "frontier", undefined, 1);
 	assert.equal(resolved.modelOverride, "parent-model");
 	assert.equal(resolved.selection.fallback, true);
 	assert.equal(resolved.selection.pool.length, 0);
@@ -210,7 +218,7 @@ test("resolveModel: childDepth ≥ 1 + no bucket allowed → falls back to activ
 test("resolveModel: alwaysParentModel short-circuits before the nested cap (no downgrade reason)", async () => {
 	const agent = makeAgent();
 	const ctx = makeSelectionCtx({ alwaysParentModel: true, nestedAllowedBuckets: NO_FRONTIER });
-	const resolved = await resolveModel(agent, ctx, "parent-model", "frontier", undefined, undefined, 1);
+	const resolved = await resolveModel(agent, ctx, "parent-model", "frontier", undefined, 1);
 	assert.equal(resolved.modelOverride, "parent-model");
 	assert.equal(resolved.selection.fallback, true);
 	assert.equal(resolved.bucketDowngradeReason, undefined);
@@ -220,7 +228,7 @@ test("resolveModel: nested cap coexists with bucket pool (downgraded tier still 
 	const agent = makeAgent({ bucket: "frontier" }); // agent default = opus
 	const ctx = makeSelectionCtx({ nestedAllowedBuckets: NO_FRONTIER });
 	// No per-call bucket → uses agent.bucket ("frontier") → downgraded to medium.
-	const resolved = await resolveModel(agent, ctx, "parent-model", undefined, undefined, undefined, 1);
+	const resolved = await resolveModel(agent, ctx, "parent-model", undefined, undefined, 1);
 	assert.equal(resolved.bucket, "medium");
 	assert.equal(resolved.modelOverride, "sonnet");
 	assert.deepEqual(resolved.selection.pool, ["sonnet"]);

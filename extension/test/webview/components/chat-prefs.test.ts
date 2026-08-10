@@ -11,7 +11,7 @@ import {
   isAskUserForSubagentsEnabled,
   isSubagentProviderEnabled,
   setAskUserForSubagents,
-  setBucketModels,
+  setBucketAssignments,
   setNestedAllowedBucket,
   setSubagentProviderDefaultEnabled,
   setSubagentProviderEnabled,
@@ -225,7 +225,11 @@ test('subagent provider defaults are inherited and session overrides take preced
 test('subagent provider helpers only list bucket-backed providers and update defaults immutably', () => {
   const configured: ChatPrefs = {
     ...prefs,
-    subagentBuckets: { small: ['haiku'], medium: ['gpt-5'], frontier: ['haiku'] },
+    subagentBuckets: {
+      small: [{ model: 'anthropic/haiku', thinkingLevel: 'off' }],
+      medium: [{ model: 'openai/gpt-5', thinkingLevel: 'medium' }],
+      frontier: [{ model: 'anthropic/haiku', thinkingLevel: 'low' }],
+    },
   };
   const providers = getSubagentBucketProviders(configured, [
     { id: 'haiku', name: 'Haiku', provider: 'anthropic', reasoning: false, inputKinds: ['text'] },
@@ -244,7 +248,10 @@ test('subagent provider helpers preserve providers from qualified duplicate-id b
     ...prefs,
     subagentBuckets: {
       small: [],
-      medium: ['github-copilot/gpt-5.6-sol', 'openai-codex/gpt-5.6-sol'],
+      medium: [
+        { model: 'github-copilot/gpt-5.6-sol', thinkingLevel: 'high' },
+        { model: 'openai-codex/gpt-5.6-sol', thinkingLevel: 'high' },
+      ],
       frontier: [],
     },
   };
@@ -266,7 +273,7 @@ test('subagent provider helpers preserve explicit routes for legacy bare-id buck
     ...prefs,
     subagentBuckets: {
       small: [],
-      medium: ['gpt-5.6-sol'],
+      medium: [{ model: 'gpt-5.6-sol', thinkingLevel: 'high' }],
       frontier: [],
     },
     subagentProviderDefaults: { 'openai-codex': true, anthropic: false },
@@ -296,13 +303,17 @@ test('setSubagentProviderEnabled scopes provider state to one session', () => {
   assert.deepEqual(prefs.subagentProviderTogglesBySession, {});
 });
 
-test('setBucketModels replaces one bucket without mutating source prefs', () => {
+test('setBucketAssignments replaces one bucket without mutating source prefs', () => {
   const before = prefs.subagentBuckets;
-  const patch = setBucketModels(prefs, 'medium', ['sonnet', 'opus']);
+  const assignments = [
+    { model: 'anthropic/sonnet', thinkingLevel: 'high' as const },
+    { model: 'anthropic/opus', thinkingLevel: 'xhigh' as const },
+  ];
+  const patch = setBucketAssignments(prefs, 'medium', assignments);
   assert.deepEqual(patch, {
     subagentBuckets: {
       small: [],
-      medium: ['sonnet', 'opus'],
+      medium: assignments,
       frontier: [],
     },
   });
@@ -311,20 +322,32 @@ test('setBucketModels replaces one bucket without mutating source prefs', () => 
   assert.equal(prefs.subagentBuckets, before);
 });
 
-test('setBucketModels preserves the other two buckets', () => {
+test('setBucketAssignments preserves the other two buckets', () => {
   const populated: ChatPrefs = {
     ...prefs,
-    subagentBuckets: { small: ['haiku'], medium: ['sonnet'], frontier: ['opus'] },
+    subagentBuckets: {
+      small: [{ model: 'anthropic/haiku', thinkingLevel: 'off' }],
+      medium: [{ model: 'anthropic/sonnet', thinkingLevel: 'medium' }],
+      frontier: [{ model: 'anthropic/opus', thinkingLevel: 'high' }],
+    },
   };
-  const patch = setBucketModels(populated, 'frontier', ['opus', 'gpt-5']);
+  const assignments = [
+    { model: 'anthropic/opus', thinkingLevel: 'xhigh' as const },
+    { model: 'openai/gpt-5', thinkingLevel: 'max' as const },
+  ];
+  const patch = setBucketAssignments(populated, 'frontier', assignments);
   assert.deepEqual(patch, {
     subagentBuckets: {
-      small: ['haiku'],
-      medium: ['sonnet'],
-      frontier: ['opus', 'gpt-5'],
+      small: [{ model: 'anthropic/haiku', thinkingLevel: 'off' }],
+      medium: [{ model: 'anthropic/sonnet', thinkingLevel: 'medium' }],
+      frontier: assignments,
     },
   });
-  assert.deepEqual(populated.subagentBuckets, { small: ['haiku'], medium: ['sonnet'], frontier: ['opus'] });
+  assert.deepEqual(populated.subagentBuckets, {
+    small: [{ model: 'anthropic/haiku', thinkingLevel: 'off' }],
+    medium: [{ model: 'anthropic/sonnet', thinkingLevel: 'medium' }],
+    frontier: [{ model: 'anthropic/opus', thinkingLevel: 'high' }],
+  });
 });
 
 test('setNestedAllowedBucket toggles one tier without mutating source prefs', () => {

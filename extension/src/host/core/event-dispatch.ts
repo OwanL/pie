@@ -2,6 +2,7 @@ import type {
   AuxiliaryLlmUsagePayload,
   BusyChangedPayload,
   CompactionPayload,
+  CompactionStartedPayload,
   ContextUsageChangedPayload,
   CustomMessagePayload,
   ErrorPayload,
@@ -30,6 +31,7 @@ import {
   isAuxiliaryLlmUsagePayload,
   isBusyChangedPayload,
   isCompactionPayload,
+  isCompactionStartedPayload,
   isContextUsageChangedPayload,
   isCustomMessagePayload,
   isErrorPayload,
@@ -77,6 +79,7 @@ export interface SessionBackendEventHandlers {
   onRetryStarted(payload: RetryStartedPayload): void;
   onRetryEnded(payload: RetryEndedPayload): void;
   onRetryMeasured(payload: RetryMeasuredPayload): void;
+  onCompactionStarted(payload: CompactionStartedPayload): void;
   onCompaction(payload: CompactionPayload): void;
   onAuxiliaryLlmUsage(payload: AuxiliaryLlmUsagePayload): void;
   onOperationalError(payload: OperationalErrorPayload): void;
@@ -173,6 +176,9 @@ export function dispatchSessionBackendEvent(
       return;
     case 'retry.measured':
       dispatch(event, isRetryMeasuredPayload, handlers.onRetryMeasured);
+      return;
+    case 'compaction.started':
+      dispatch(event, isCompactionStartedPayload, handlers.onCompactionStarted);
       return;
     case 'compaction.ended':
       dispatch(event, isCompactionPayload, handlers.onCompaction);

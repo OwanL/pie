@@ -7,6 +7,18 @@ import type { LiveTurnPhase } from '../live-pipeline-protocol.js';
 import type { TokenRateIndicatorState } from '../token-rate.js';
 import type { NoticeKind } from '../error-mapping.js';
 
+/** Most recent completed history compaction for a session, surfaced as a
+ *  transient "Compacted · freed N tokens" chip. Host-owned; cleared after a
+ *  bounded TTL (`ClearLastCompaction` effect) so the chip does not linger. */
+export interface LastCompactionSummary {
+  /** Epoch milliseconds when the compaction LLM call finished. */
+  at: number;
+  /** Prompt tokens before compaction, when the SDK reported them. */
+  tokensBefore?: number;
+  /** Post-compaction token estimate, when the SDK reported it. */
+  estimatedTokensAfter?: number;
+}
+
 /** Labels a human-verification question about a reviewed session. The owning
  * request's `sessionPath` remains the reviewer session; these fields never
  * participate in prompt routing. */
@@ -121,6 +133,21 @@ export interface ViewState {
    *  from active streaming. Derived host-side from `prepassBySession` (phase
    *  'succeeded' while a promoted op exists). */
   startingModelSessionPaths: string[];
+  /** Session paths currently running a history-compaction (`/compact`) LLM
+   *  call. Compaction emits no `message_start`/`message_end`, so this is the
+   *  only signal the UI has to show a live "Compacting…" indicator instead of
+   *  a generic busy/thinking state. Always a subset of `runningSessionPaths`
+   *  (the backend re-arms busy while compacting). */
+  compactingSessionPaths: string[];
+  /** Most recent completed compaction per session, or null when the session
+   *  has not compacted since the host started (or the entry expired). The
+   *  webview renders a transient "Compacted · freed N tokens" chip from this;
+   *  the host clears the entry after a bounded TTL via `ClearLastCompaction`.
+   *  Absent entry = no recent compaction. */
+  lastCompactionBySession: Record<string, LastCompactionSummary | null>;
+  /** Whether the active session is ephemeral. Private sessions do not collect
+   *  run analytics and are removed from disk when closed. */
+  privacyMode?: boolean;
   unreadFinishedSessionPaths: string[];
   activeSession: SessionSummary | null;
   transcript: ChatMessage[];
@@ -353,6 +380,9 @@ type WebviewToHostMessagePayload =
       defaultThinkingLevel: ThinkingLevel;
     }
   | { type: 'setPrefs'; prefs: Partial<ChatPrefs> }
+  /** Toggle the active session's ephemeral/privacy mode. The setting is host
+   *  state only and is deliberately not persisted. */
+  | { type: 'setPrivacyMode'; sessionPath: string; enabled: boolean }
   | { type: 'setPruningSettings'; settings: Partial<PruningSettings> }
   | { type: 'setToolResultPruningSettings'; settings: Partial<ToolResultPruningSettings> }
   | { type: 'startEdit'; sessionPath: string; messageId: string }

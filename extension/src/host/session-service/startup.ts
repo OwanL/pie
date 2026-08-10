@@ -20,7 +20,7 @@ import type { ChatPrefs, SessionSummary } from '../../shared/protocol';
 import { findStartupSessionToOpen } from '../../shared/review-auto-close';
 import { SessionService } from './service';
 import { SessionServiceEvents } from './events';
-import { SessionServiceState } from './state';
+import { PRIVATE_SESSION_PATHS_STORAGE_KEY, SessionServiceState } from './state';
 import { buildRestoredSessionSummaries } from '../core/restored-session-summaries';
 import { bootLog } from '../util/audit';
 import { toErrorMessage } from '../util/error-message';
@@ -91,6 +91,9 @@ function computeRestorePlan(options: StartSessionBackendOptions) {
   // <2, restores contiguity) when OpenTabsChanged is dispatched.
   const storedRawGroups = options.context.globalState.get<unknown>('pinnedTabGroups');
   const storedGroups = normalizeStoredPinnedTabGroups(storedRawGroups);
+  const storedPrivate = (options.context.globalState.get<unknown[]>(PRIVATE_SESSION_PATHS_STORAGE_KEY) ?? [])
+    .filter((value): value is string => typeof value === 'string' && value.length > 0);
+  const restoredPrivate = storedPrivate.filter((sessionPath) => restoredTabs.includes(sessionPath));
   const restoredSessionPlan = buildRestoredSessionPlan(restoredTabs, preferredStartupPath);
   const { startupPath: restoredStartupPath, preloadPaths } = restoredSessionPlan;
   return {
@@ -104,11 +107,47 @@ function computeRestorePlan(options: StartSessionBackendOptions) {
     storedPinned,
     restoredPinnedTabs,
     storedGroups,
+    storedPrivate,
+    restoredPrivate,
   };
 }
 
-function applyRestoredTabPaths(options: StartSessionBackendOptions, restoredTabs: string[], restoredPinnedTabs: string[], restoredGroups: string[][]): void {
+function applyRestoredTabPaths(options: StartSessionBackendOptions, restoredTabs: string[], restoredPinnedTabs: string[], restoredGroups: string[][], restoredPrivate: string[]): void {
   options.dispatchArch({ kind: 'OpenTabsChanged', openTabPaths: restoredTabs, pinnedTabPaths: restoredPinnedTabs, pinnedTabGroups: restoredGroups });
+  for (const sessionPath of restoredPrivate) {
+    options.dispatchArch({
+      kind: 'Command',
+      cmd: { kind: 'SetPrivacyMode', corrId: `privacy:${Date.now()}:${sessionPath}`, sessionPath, enabled: true, persist: false },
+    });
+  }
+}
+
+async function forgetPrivatePathsNotRestored(
+  options: StartSessionBackendOptions,
+  storedPrivate: string[],
+  restoredTabs: string[],
+): Promise<void> {
+  const pending = [...new Set(storedPrivate)].filter((sessionPath) => !restoredTabs.includes(sessionPath));
+  if (pending.length === 0) return;
+  const remaining = new Set(storedPrivate);
+  await Promise.all(pending.map(async (sessionPath) => {
+    try {
+      await options.backend.request('session.forget', { sessionPath });
+      remaining.delete(sessionPath);
+      options.dispatchArch({
+        kind: 'Command',
+        cmd: { kind: 'SetPrivacyMode', corrId: `privacy-cleared:${Date.now()}:${sessionPath}`, sessionPath, enabled: false, persist: false },
+      });
+    } catch (error) {
+      appendPieLog('warn', 'startup', 'private session cleanup failed; retaining retry marker', {
+        sessionPath,
+        error: toErrorMessage(error),
+      });
+    }
+  }));
+  await Promise.resolve(options.context.globalState.update(PRIVATE_SESSION_PATHS_STORAGE_KEY, [...remaining])).catch((error) => {
+    appendPieLog('warn', 'startup', `globalState.update failed for ${PRIVATE_SESSION_PATHS_STORAGE_KEY}`, { error: toErrorMessage(error) });
+  });
 }
 
 function persistIfTabStateChanged(
@@ -481,9 +520,11 @@ export async function startSessionBackend(options: StartSessionBackendOptions): 
     storedPinned,
     restoredPinnedTabs,
     storedGroups,
+    storedPrivate,
+    restoredPrivate,
   } = computeRestorePlan(options);
 
-  applyRestoredTabPaths(options, restoredTabs, restoredPinnedTabs, storedGroups);
+  applyRestoredTabPaths(options, restoredTabs, restoredPinnedTabs, storedGroups, restoredPrivate);
 
   // The reducer reconciles pinned tabs + groups against the restored open
   // tabs (drops invalid members, dissolves <2, restores group contiguity).
@@ -568,6 +609,8 @@ export async function startSessionBackend(options: StartSessionBackendOptions): 
   });
 
   bootLogBackendReadyDispatched(options);
+
+  await forgetPrivatePathsNotRestored(options, storedPrivate, restoredTabs);
 
   if (restoreError) {
     bootLog('session-startup', 'restore.failed', {

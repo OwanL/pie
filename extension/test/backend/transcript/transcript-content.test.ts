@@ -67,7 +67,8 @@ test('userPartsFromContent lowers text and valid image parts only', () => {
 test('normalizeThinkingLevel accepts known values and rejects unknown ones', () => {
   assert.equal(normalizeThinkingLevel('high'), 'high');
   assert.equal(normalizeThinkingLevel('xhigh'), 'xhigh');
-  assert.equal(normalizeThinkingLevel('max'), undefined);
+  assert.equal(normalizeThinkingLevel('max'), 'max');
+  assert.notEqual(normalizeThinkingLevel('xhigh'), normalizeThinkingLevel('max'));
   assert.equal(normalizeThinkingLevel(undefined), undefined);
 });
 
@@ -343,4 +344,80 @@ test('assistant transcript mapping preserves the serving provider', () => {
     },
   }];
   assert.equal(mapTranscript(entries)[0]?.provider, 'github-copilot');
+
+  const providerFromModelChange: SessionEntryLike[] = [
+    {
+      id: 'model-change',
+      timestamp: '2026-01-01T00:00:00.000Z',
+      type: 'model_change',
+      provider: 'openai-codex',
+      modelId: 'shared-model',
+    },
+    {
+      id: 'assistant-3',
+      timestamp: '2026-01-01T00:00:01.000Z',
+      type: 'message',
+      message: {
+        role: 'assistant',
+        model: 'shared-model',
+        content: [{ type: 'text', text: 'provider inherited' }],
+      },
+    },
+  ];
+  assert.equal(mapTranscript(providerFromModelChange)[0]?.provider, 'openai-codex');
+
+  const changedModelWithoutProvider: SessionEntryLike[] = [
+    {
+      id: 'model-change-2',
+      timestamp: '2026-01-01T00:00:00.000Z',
+      type: 'model_change',
+      provider: 'openai-codex',
+      modelId: 'first-model',
+    },
+    {
+      id: 'assistant-4',
+      timestamp: '2026-01-01T00:00:01.000Z',
+      type: 'message',
+      message: {
+        role: 'assistant',
+        model: 'different-model',
+        content: [{ type: 'text', text: 'provider must stay unknown' }],
+      },
+    },
+  ];
+  assert.equal(mapTranscript(changedModelWithoutProvider)[0]?.provider, undefined);
+
+  const mergedChangedModelWithoutProvider: SessionEntryLike[] = [
+    {
+      id: 'model-change-3',
+      timestamp: '2026-01-01T00:00:00.000Z',
+      type: 'model_change',
+      provider: 'openai-codex',
+      modelId: 'first-model',
+    },
+    {
+      id: 'assistant-5',
+      timestamp: '2026-01-01T00:00:01.000Z',
+      type: 'message',
+      message: {
+        role: 'assistant',
+        model: 'first-model',
+        content: [{ type: 'text', text: 'first segment' }],
+      },
+    },
+    {
+      id: 'assistant-6',
+      timestamp: '2026-01-01T00:00:02.000Z',
+      type: 'message',
+      message: {
+        role: 'assistant',
+        model: 'different-model',
+        content: [{ type: 'text', text: 'second segment' }],
+      },
+    },
+  ];
+  const merged = mapTranscript(mergedChangedModelWithoutProvider);
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0]?.modelId, 'different-model');
+  assert.equal(merged[0]?.provider, undefined);
 });

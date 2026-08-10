@@ -146,9 +146,12 @@ See git history (commit `d581d83`) for historical context on the migration from 
   that same root, never selected by cwd. The backend uses the canonical session
   root for create and fork, and listing reads it (plus its
   per-cwd subdirectories) exclusively — the legacy `<agentDir>/sessions` root is
-  retired once a canonical root is configured. The installer's verified copy/merge
-  is the authority for legacy content, and `npm run doctor` detects any newly
-  stranded legacy sessions instead of the runtime scanning legacy roots forever.
+  retired once a canonical root is configured. The installer performs a second
+  idempotent outcomes merge after extension installation to capture writes from
+  an old backend that retained its pre-migration process environment. Migration
+  sources are registered as bounded receipts, and `npm run doctor` detects both
+  newly stranded legacy sessions and post-migration outcomes writes instead of
+  the runtime scanning legacy roots forever.
   Listing caches a path-deduplicated canonical inventory, overlays live sessions
   and fresh reviews, and polls a cheap JSONL filename signature so external
   additions/removals invalidate the cache. Missing roots count as empty;

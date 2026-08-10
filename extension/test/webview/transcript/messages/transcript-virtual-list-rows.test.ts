@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { buildTranscriptRows, estimateTranscriptRowSize } from '../../../../src/webview/panel/transcript/virtual-list-rows';
+import { buildTranscriptRows, estimateTranscriptRowSize, scopeTranscriptRowsToSession } from '../../../../src/webview/panel/transcript/virtual-list-rows';
 import { deriveTurnActivityState, type TurnActivityState } from '../../../../src/webview/panel/transcript/activity';
 import type { ChatMessage, PruningDetails } from '../../../../src/shared/protocol';
 
@@ -17,6 +17,23 @@ function makeMessage(id: string, role: ChatMessage['role']): ChatMessage {
     createdAt: '2026-05-16T00:00:00.000Z',
   } as unknown as ChatMessage;
 }
+
+test('session-scoped row keys isolate local row state across forked sessions with shared message ids', () => {
+  const rows = buildTranscriptRows({
+    transcript: [makeMessage('shared-message', 'assistant')],
+    systemPromptCount: 0,
+    hasOlder: false,
+    hasNewer: false,
+    busy: false,
+  });
+
+  const first = scopeTranscriptRowsToSession(rows, '/session/first');
+  const second = scopeTranscriptRowsToSession(rows, '/session/second');
+
+  assert.notEqual(first[0]?.key, second[0]?.key);
+  assert.match(first[0]?.key ?? '', /^\/session\/first:/);
+  assert.match(second[0]?.key ?? '', /^\/session\/second:/);
+});
 
 function makePruningDetails(): PruningDetails {
   return {
