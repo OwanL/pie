@@ -155,6 +155,25 @@
           }
         },
         {
+          "id": "gemini-3-flash-preview:cloud",
+          "name": "Ollama Cloud: Gemini 3 Flash Preview",
+          "reasoning": true,
+          "family": "gemini-3-flash-preview",
+          "input": [
+            "text",
+            "image"
+          ],
+          "maxImagesPerRequest": 1,
+          "contextWindow": 1048576,
+          "maxTokens": 65536,
+          "cost": {
+            "input": 0.5,
+            "output": 3,
+            "cacheRead": 0.05,
+            "cacheWrite": 0
+          }
+        },
+        {
           "id": "gemma4:31b-cloud",
           "name": "Ollama Cloud: Gemma 4 31B",
           "reasoning": true,

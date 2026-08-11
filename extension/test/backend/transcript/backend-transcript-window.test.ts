@@ -128,6 +128,59 @@ test('buildDisplayTranscriptCache records transcript fingerprints and stale dete
   assert.equal(isDisplayTranscriptCacheStale(cache, [...entries, { id: 'entry-3' }] as any), true);
 });
 
+test('session-opened tails and transcript pages use compact transport rows while retaining durable nested details', () => {
+  const recursiveTranscript = 'nested transcript '.repeat(64 * 1024);
+  const entries = [
+    {
+      id: 'entry-assistant',
+      timestamp: '2026-01-01T00:00:00.000Z',
+      type: 'message',
+      message: {
+        role: 'assistant',
+        content: [{
+          type: 'toolCall',
+          id: 'subagent-call',
+          name: 'subagent',
+          arguments: { agent: 'worker', task: 'inspect' },
+        }],
+        stopReason: 'toolUse',
+      },
+    },
+    {
+      id: 'entry-tool-result',
+      timestamp: '2026-01-01T00:00:01.000Z',
+      type: 'message',
+      message: {
+        role: 'toolResult',
+        toolCallId: 'subagent-call',
+        toolName: 'subagent',
+        content: [{ type: 'text', text: 'done' }],
+        details: {
+          mode: 'single',
+          results: [{
+            agent: 'worker',
+            task: 'inspect',
+            exitCode: 0,
+            messages: [{ role: 'assistant', content: [{ type: 'text', text: recursiveTranscript }] }],
+          }],
+        },
+      },
+    },
+  ] as any[];
+
+  const cache = buildDisplayTranscriptCache(entries as any, '/workspace/session.jsonl');
+  assert.ok(cache.transportTranscript);
+  const durableBytes = Buffer.byteLength(JSON.stringify(cache.transcript), 'utf8');
+  const transportBytes = Buffer.byteLength(JSON.stringify(cache.transportTranscript), 'utf8');
+  assert.ok(durableBytes > 1_000_000, 'backend detail source retains the complete recursive transcript');
+  assert.ok(transportBytes < durableBytes / 4, 'ordinary transcript transport uses the lazy-detail projection');
+
+  const tail = buildTailTranscriptWindow(cache);
+  const page = buildPagedTranscriptWindow(cache, { direction: 'latest' });
+  assert.strictEqual(tail.transcript[0], cache.transportTranscript[0]);
+  assert.strictEqual(page.transcript[0], cache.transportTranscript[0]);
+});
+
 test('buildTailTranscriptWindow keeps pinned streaming messages visible outside the tail window', () => {
   const cache = buildCache(20);
 

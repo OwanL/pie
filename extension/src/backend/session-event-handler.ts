@@ -20,7 +20,7 @@ import type {
 import { COMPACTION_METRICS_CUSTOM_TYPE } from '../shared/protocol';
 import type { SdkSessionEvent } from './sdk';
 import { BackendLiveTurnAccumulator, type BackendSemanticCandidate } from './live-turn-accumulator';
-import { LIVE_PIPELINE_PROTOCOL_VERSION, type TurnSemanticEnvelope } from '../shared/live-pipeline-protocol';
+import { LIVE_PIPELINE_LIMITS, LIVE_PIPELINE_PROTOCOL_VERSION, type TurnSemanticEnvelope } from '../shared/live-pipeline-protocol';
 import { estimateCumulativeSubagentTokens, normalizeToolProgress } from './tool-progress-normalizer';
 import {
   mapAssistantMessage,
@@ -41,6 +41,9 @@ import { isBackendLivePipelineTraceEnabled, recordBackendLivePipelineTrace } fro
  * turns (no text/thinking) are still measured.
  */
 export const TOOL_PROGRESS_MAX_BYTES = 256 * 1024;
+/** Leave the same two-MiB envelope headroom as live checkpoints before a
+ * durability-confirmed terminal event reaches the shared JSONL writer. */
+export const TOOL_TERMINAL_PAYLOAD_MAX_BYTES = LIVE_PIPELINE_LIMITS.checkpointBytes;
 
 /** Produce a transport-safe clone only when native JSON serialization fails.
  * Live tool partials can contain BigInts or cycles from nested/custom tools;
@@ -70,8 +73,9 @@ function serializeToolProgress(value: unknown): { serialized: string; safeValue:
   }
 }
 
-/** Keep high-frequency progress events transport-safe. The terminal
- * tool.finished result remains authoritative and is never bounded here. */
+/** Keep high-frequency progress events transport-safe. Terminal results use
+ * the same renderable fallback only when their complete event would exceed the
+ * separate terminal transport budget. */
 export function boundToolProgress(value: unknown, maxBytes = TOOL_PROGRESS_MAX_BYTES): unknown {
   const serializedProgress = serializeToolProgress(value);
   if (!serializedProgress) return { $toolProgress: 'unserializable' };
@@ -178,6 +182,62 @@ export function boundToolProgress(value: unknown, maxBytes = TOOL_PROGRESS_MAX_B
     originalBytes: bytes,
     preview: prefix,
   };
+}
+
+function terminalResultPreview(value: unknown, maxBytes = TOOL_PROGRESS_MAX_BYTES): unknown {
+  const bounded = boundToolProgress(value, maxBytes);
+  if (!bounded || typeof bounded !== 'object' || Array.isArray(bounded)) return bounded;
+  const record = bounded as Record<string, unknown>;
+  if (record.$toolProgress === undefined) return bounded;
+  const { $toolProgress, ...preview } = record;
+  return {
+    ...preview,
+    $toolResult: $toolProgress,
+    transportNotice: 'Complete terminal result omitted because it exceeded the backend transport limit.',
+  };
+}
+
+/**
+ * A persisted SDK tool result may be much larger than its live rendering
+ * preview, especially when nested subagents contain both an assistant
+ * tool-call snapshot and the matching toolResult message. The JSONL writer is
+ * intentionally fatal for an oversized critical event, so enforce the
+ * producer-owned bound before `tool.finished` reaches that final invariant.
+ * The durable session remains authoritative; this explicit preview is only
+ * the event/side-effect representation and never masquerades as complete.
+ */
+export function boundToolFinishedPayload(
+  payload: ToolFinishedPayload,
+  maxBytes = TOOL_TERMINAL_PAYLOAD_MAX_BYTES,
+): ToolFinishedPayload {
+  const serialized = serializeToolProgress(payload);
+  if (serialized && Buffer.byteLength(serialized.serialized, 'utf8') <= maxBytes) {
+    return serialized.safeValue as ToolFinishedPayload;
+  }
+
+  const resultPreviewBytes = Math.min(
+    TOOL_PROGRESS_MAX_BYTES,
+    Math.max(512, Math.floor(maxBytes / 2)),
+  );
+  let bounded: ToolFinishedPayload = {
+    ...payload,
+    result: terminalResultPreview(payload.result, resultPreviewBytes),
+  };
+  const boundedResult = serializeToolProgress(bounded);
+  if (boundedResult && Buffer.byteLength(boundedResult.serialized, 'utf8') <= maxBytes) {
+    return boundedResult.safeValue as ToolFinishedPayload;
+  }
+
+  const input = serializeToolProgress(payload.input);
+  bounded = {
+    ...bounded,
+    input: {
+      $toolInput: input ? 'truncated' : 'unserializable',
+      ...(input ? { originalBytes: Buffer.byteLength(input.serialized, 'utf8') } : {}),
+      transportNotice: 'Complete tool input omitted because the terminal event exceeded the backend transport limit.',
+    },
+  };
+  return bounded;
 }
 
 const FIRST_CONTENT_EVENT_TYPES = new Set([
@@ -1299,19 +1359,28 @@ export function handleSdkSessionEvent(
           return;
         }
         context.activeRequest.pendingDurableToolTerminals?.delete(toolCallId);
-        emitSemanticCandidate(deps, context, {
-          kind: 'tool.terminal',
-          executionId: liveExecutionId(context, toolCallId),
-          status: terminal.status,
-          result: terminal.result,
-          durationMs: terminal.durationMs,
-          durableEntryId: event.sessionEntryId,
-        });
-        deps.emit('tool.finished', {
+        const transportTerminal = boundToolFinishedPayload({
           ...terminal,
           durableEntryId: event.sessionEntryId,
           ...(context.activeRequest.liveTurnAccumulator ? { canonicalLive: true } : {}),
         } satisfies ToolFinishedPayload);
+        if (transportTerminal.result !== terminal.result || transportTerminal.input !== terminal.input) {
+          logBackendDiagnostic('warn', 'tool.terminalTransportBounded', {
+            requestId: context.activeRequest.id,
+            sessionPath: context.sessionPath,
+            toolCallId,
+            toolName: terminal.name,
+          });
+        }
+        emitSemanticCandidate(deps, context, {
+          kind: 'tool.terminal',
+          executionId: liveExecutionId(context, toolCallId),
+          status: terminal.status,
+          result: transportTerminal.result,
+          durationMs: terminal.durationMs,
+          durableEntryId: event.sessionEntryId,
+        });
+        deps.emit('tool.finished', transportTerminal);
         if (isBackendLivePipelineTraceEnabled()) {
           recordBackendLivePipelineTrace({
             stage: 'backend.persistence.confirmed',

@@ -229,6 +229,16 @@ profiles:
       - high
     disabled_reason: null
   - provider: ollama
+    id: gemini-3-flash-preview:cloud
+    eligible: true
+    thinking:
+      - minimal
+      - low
+      - medium
+      - high
+      - xhigh
+    disabled_reason: null
+  - provider: ollama
     id: glm-5.2:cloud
     eligible: true
     thinking:

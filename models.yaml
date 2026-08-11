@@ -74,6 +74,7 @@ profileOrder:
   - deepseek-v4-flash:0731-cloud
   - deepseek-v4-pro:cloud
   - deepseek-v4-flash:cloud
+  - gemini-3-flash-preview:cloud
   - glm-5.2:cloud
   - glm-5.1:cloud
   - kimi-k2.7-code:cloud
@@ -264,6 +265,29 @@ providers:
           cacheWrite: 0
         eligible: true
         thinking:
+          - medium
+          - high
+          - xhigh
+        disabledReason: null
+      - id: gemini-3-flash-preview:cloud
+        name: "Ollama Cloud: Gemini 3 Flash Preview"
+        reasoning: true
+        family: gemini-3-flash-preview
+        input:
+          - text
+          - image
+        maxImagesPerRequest: 1
+        contextWindow: 1048576
+        maxTokens: 65536
+        pricing:
+          input: 0.5
+          output: 3
+          cacheRead: 0.05
+          cacheWrite: 0
+        eligible: true
+        thinking:
+          - minimal
+          - low
           - medium
           - high
           - xhigh
@@ -1216,11 +1240,6 @@ providers:
 # an active provider/id identity (validated by sync-models).
 historicalModels:
   # Ollama Cloud models retired in June/July 2026.
-  - provider: ollama
-    id: gemini-3-flash-preview:cloud
-    name: "Ollama Cloud: Gemini 3 Flash Preview"
-    family: gemini-3-flash-preview
-    pricing: { input: 0.5, output: 3, cacheRead: 0.05, cacheWrite: 0 }
   - provider: ollama
     id: glm-4.7:cloud
     name: "Ollama Cloud: GLM 4.7"

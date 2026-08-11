@@ -41,6 +41,43 @@ test("terminalization preserves complete reasoning, tool inputs/results, and fin
 	assert.match(encoded, /final answer/);
 });
 
+test("terminalization serializes completed nested tool results once while retaining running progress", () => {
+	const completedResult = {
+		content: [{ type: "text", text: "completed nested output" }],
+		details: { mode: "single", results: [{ agent: "scout", messages: [] }] },
+	};
+	const runningResult = {
+		content: [{ type: "text", text: "running nested output" }],
+		details: { mode: "single", results: [{ agent: "reviewer", messages: [] }] },
+	};
+	const terminal = compactSingleResult(result([
+		{
+			role: "assistant",
+			content: [
+				{ type: "toolCall", id: "completed", name: "subagent", arguments: {}, result: completedResult },
+				{ type: "toolCall", id: "running", name: "subagent", arguments: {}, result: runningResult },
+			],
+		},
+		{
+			role: "toolResult",
+			toolCallId: "completed",
+			toolName: "subagent",
+			content: completedResult.content,
+			details: completedResult.details,
+		},
+	]));
+
+	const assistantParts = (terminal.messages[0] as any).content;
+	assert.equal(assistantParts[0].result, undefined, "matching toolResult owns the completed result");
+	assert.match(
+		JSON.stringify(assistantParts[1].result),
+		/running nested output/,
+		"inline progress remains when no toolResult exists",
+	);
+	assert.match(JSON.stringify(terminal.messages[1]), /completed nested output/);
+	assert.equal(JSON.stringify(terminal.messages).match(/completed nested output/g)?.length, 1);
+});
+
 test("terminalization clears only live-only fields and does not cap output", () => {
 	const longOutput = "x".repeat(100_000);
 	const terminal = compactSingleResult(result([], {

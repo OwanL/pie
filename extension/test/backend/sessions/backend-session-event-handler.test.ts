@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { Writable } from 'node:stream';
 
 import {
+  boundToolFinishedPayload,
   handleSdkSessionEvent as handleSdkSessionEventImpl,
   resolveProviderSemanticInactivityMs,
   summarizeToolResult,
@@ -10,6 +12,7 @@ import {
 import type { SdkSessionEvent } from '../../../src/backend/sdk';
 import type { SessionContext } from '../../../src/backend/server-types';
 import { BackendLiveTurnAccumulator } from '../../../src/backend/live-turn-accumulator';
+import { OrderedJsonlWriter } from '../../../src/backend/server-io';
 
 interface EmittedEvent {
   event: string;
@@ -770,6 +773,189 @@ test('tool execution events emit progress only when an active assistant message 
   // Context usage is the latest assistant prompt footprint. Tool boundaries do
   // not change it, so they must not resolve the full SDK branch.
   assert.equal(getContextUsageChangedCount(), 0);
+});
+
+test('nested subagent terminal result stays within the backend JSONL transport limit on legacy and live paths', () => {
+  const { deps, emitted } = createDeps();
+  const context = createContext({
+    activeRequest: {
+      id: 'req-large-subagent',
+      messageIndex: 1,
+      lastAssistantMessageId: 'req-large-subagent:1',
+      aborted: false,
+    },
+  });
+  const repeatedTranscript = 'x'.repeat(17 * 1024 * 1024);
+  const nestedResult = {
+    content: [{ type: 'text', text: repeatedTranscript }],
+    details: { mode: 'single', results: [] },
+  };
+  const result = {
+    content: [{ type: 'text', text: 'nested worker finished' }],
+    details: {
+      mode: 'single',
+      results: [{
+        agent: 'worker',
+        task: 'exercise nested result transport',
+        exitCode: 0,
+        messages: [
+          {
+            role: 'assistant',
+            content: [{
+              type: 'toolCall',
+              id: 'nested-call',
+              name: 'subagent',
+              arguments: { agent: 'scout', task: 'inspect' },
+              result: nestedResult,
+            }],
+          },
+          {
+            role: 'toolResult',
+            toolCallId: 'nested-call',
+            toolName: 'subagent',
+            content: nestedResult.content,
+            details: nestedResult.details,
+            isError: false,
+          },
+        ],
+      }],
+    },
+  };
+
+  handleSdkSessionEvent(deps, context, {
+    type: 'tool_execution_end',
+    toolCallId: 'outer-subagent',
+    toolName: 'subagent',
+    result,
+    isError: false,
+  });
+
+  const payload = emitted.find((entry) => entry.event === 'tool.finished')?.payload as {
+    result?: { $toolResult?: string; originalBytes?: number };
+  } | undefined;
+  assert.ok(payload, 'durability-confirmed terminal event is emitted');
+  assert.equal(payload.result?.$toolResult, 'truncated');
+  assert.ok((payload.result?.originalBytes ?? 0) > 32 * 1024 * 1024);
+  let fatal: Error | undefined;
+  const writer = new OrderedJsonlWriter(new Writable({
+    write(_chunk, _encoding, callback) { callback(); },
+  }), {
+    onFatal(error) { fatal = error; },
+  });
+
+  assert.doesNotThrow(() => writer.write({ event: 'tool.finished', payload }));
+  assert.equal(fatal, undefined);
+
+  const live = createDeps({ captureLive: true });
+  const accumulator = new BackendLiveTurnAccumulator({
+    protocolVersion: 6,
+    sessionPath: '/workspace/session.jsonl',
+    requestId: 'req-large-subagent-live',
+    turnId: 'turn-large-subagent-live',
+    attemptId: 'attempt-large-subagent-live',
+    canonicalMessageId: 'req-large-subagent-live:1',
+    startedAt: Date.now(),
+  });
+  const liveContext = createContext({
+    activeRequest: {
+      id: 'req-large-subagent-live',
+      messageIndex: 1,
+      lastAssistantMessageId: 'req-large-subagent-live:1',
+      aborted: false,
+      liveTurnAccumulator: accumulator,
+    },
+  });
+  handleSdkSessionEvent(live.deps, liveContext, {
+    type: 'tool_execution_start',
+    toolCallId: 'outer-subagent-live',
+    toolName: 'subagent',
+    args: { agent: 'worker', task: 'exercise live nested result transport' },
+  });
+  handleSdkSessionEvent(live.deps, liveContext, {
+    type: 'tool_execution_end',
+    toolCallId: 'outer-subagent-live',
+    toolName: 'subagent',
+    result,
+    isError: false,
+  });
+
+  const liveTerminal = live.emitted.find((entry) =>
+    entry.event === 'live.semantic' && (entry.payload as { kind?: string }).kind === 'tool.terminal');
+  assert.ok(liveTerminal, 'sequenced live path emits the durability-confirmed tool terminal');
+  const liveResult = (liveTerminal.payload as { result?: { $toolResult?: string } }).result;
+  assert.equal(liveResult?.$toolResult, 'truncated');
+  assert.doesNotThrow(() => writer.write(liveTerminal));
+  assert.equal(fatal, undefined);
+});
+
+test('terminal transport bounding preserves small payload identity and explicitly bounds large result or input', () => {
+  const small = {
+    requestId: 'req-small',
+    sessionPath: '/workspace/session.jsonl',
+    messageId: 'message-small',
+    toolCallId: 'tool-small',
+    name: 'bash',
+    input: { command: 'printf ok' },
+    result: { output: 'ok' },
+    status: 'completed' as const,
+  };
+  assert.strictEqual(boundToolFinishedPayload(small, 1_024), small);
+
+  const largeResult = boundToolFinishedPayload({
+    ...small,
+    toolCallId: 'tool-large-result',
+    result: 'x'.repeat(4_096),
+  }, 1_024);
+  assert.equal((largeResult.result as { $toolResult?: string }).$toolResult, 'truncated');
+  assert.ok(Buffer.byteLength(JSON.stringify(largeResult), 'utf8') <= 1_024);
+
+  const largeInput = boundToolFinishedPayload({
+    ...small,
+    toolCallId: 'tool-large-input',
+    input: { command: 'x'.repeat(4_096) },
+  }, 1_024);
+  assert.equal((largeInput.input as { $toolInput?: string }).$toolInput, 'truncated');
+  assert.ok(Buffer.byteLength(JSON.stringify(largeInput), 'utf8') <= 1_024);
+
+  const throwingResult = Object.defineProperty({}, 'boom', {
+    enumerable: true,
+    get() { throw new Error('cannot serialize'); },
+  });
+  const unserializable = boundToolFinishedPayload({
+    ...small,
+    toolCallId: 'tool-unserializable-result',
+    name: 'subagent',
+    result: throwingResult,
+  }, 1_024);
+  assert.equal((unserializable.result as { $toolResult?: string }).$toolResult, 'unserializable');
+
+  const accumulator = new BackendLiveTurnAccumulator({
+    protocolVersion: 6,
+    sessionPath: small.sessionPath,
+    requestId: small.requestId,
+    turnId: 'turn-unserializable-result',
+    attemptId: 'attempt-unserializable-result',
+    canonicalMessageId: small.messageId,
+    startedAt: 0,
+  });
+  accumulator.observe({
+    kind: 'tool.started',
+    executionId: 'execution-unserializable-result',
+    parentExecutionId: null,
+    rootExecutionId: 'execution-unserializable-result',
+    toolCallId: 'tool-unserializable-result',
+    name: 'subagent',
+    input: {},
+    startedAt: 0,
+  }, 0);
+  const liveUnserializable = accumulator.observe({
+    kind: 'tool.terminal',
+    executionId: 'execution-unserializable-result',
+    status: 'completed',
+    result: unserializable.result,
+    durableEntryId: 'entry-unserializable-result',
+  }, 1) as { result?: { $toolResult?: string } } | undefined;
+  assert.equal(liveUnserializable?.result?.$toolResult, 'unserializable');
 });
 
 test('tool terminal publication waits for the persisted toolResult entry id', () => {

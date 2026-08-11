@@ -27,12 +27,13 @@ export function compactSingleResult(result: SingleResult): SingleResult {
 }
 
 function terminalizeNestedSubagents(messages: Message[]): Message[] {
+	const durableToolResultIds = collectDurableToolResultIds(messages);
 	return messages.map((message) => {
 		const raw = message as Message & Record<string, unknown>;
 		if (raw.role === "assistant" && Array.isArray(raw.content)) {
 			return {
 				...raw,
-				content: raw.content.map((part) => terminalizeContentPart(part)),
+				content: raw.content.map((part) => terminalizeContentPart(part, durableToolResultIds)),
 			} as Message;
 		}
 		if (raw.role === "toolResult" && raw.toolName === "subagent") {
@@ -42,10 +43,40 @@ function terminalizeNestedSubagents(messages: Message[]): Message[] {
 	});
 }
 
-function terminalizeContentPart(part: unknown): unknown {
+/** Completed nested tools can appear twice in the SDK message snapshot: once
+ * on the assistant tool-call part and again in the matching toolResult message.
+ * The nested transcript renderer already treats toolResult as authoritative.
+ * Keep that durable copy and omit only the redundant assistant mirror so each
+ * recursively nested result is serialized once rather than doubling at every
+ * delegation depth. Running tools without a durable result retain their inline
+ * progress result. */
+function collectDurableToolResultIds(messages: Message[]): Set<string> {
+	const ids = new Set<string>();
+	for (const message of messages) {
+		const raw = message as Message & Record<string, unknown>;
+		if (raw.role === "toolResult" && raw.toolCallId != null) {
+			ids.add(String(raw.toolCallId));
+			continue;
+		}
+		if (raw.role !== "user" || !Array.isArray(raw.content)) continue;
+		for (const part of raw.content) {
+			if (!part || typeof part !== "object" || Array.isArray(part)) continue;
+			const record = part as unknown as Record<string, unknown>;
+			if (record.type === "toolResult" && record.id != null) ids.add(String(record.id));
+		}
+	}
+	return ids;
+}
+
+function terminalizeContentPart(part: unknown, durableToolResultIds: Set<string>): unknown {
 	if (!part || typeof part !== "object" || Array.isArray(part)) return part;
 	const record = part as Record<string, unknown>;
-	if (record.type !== "toolCall" || record.name !== "subagent" || record.result === undefined) return part;
+	if (record.type !== "toolCall" || record.result === undefined) return part;
+	if (record.id != null && durableToolResultIds.has(String(record.id))) {
+		const { result: _duplicateResult, ...deduplicated } = record;
+		return deduplicated;
+	}
+	if (record.name !== "subagent") return part;
 	return { ...record, result: terminalizeNestedResult(record.result) };
 }
 

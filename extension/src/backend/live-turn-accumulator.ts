@@ -867,16 +867,22 @@ function isLiveCompactedValue(value: unknown): boolean {
 }
 
 function normalizeLiveToolTerminalResult(toolName: string, value: unknown): unknown {
+  const terminalTransportMarker = typeof value === 'object' && value !== null
+    ? (value as { $toolResult?: unknown }).$toolResult
+    : undefined;
+  const transportBounded = terminalTransportMarker === 'truncated'
+    || terminalTransportMarker === 'unserializable';
   // ask_user has a dedicated completed-state renderer that needs the selected
-  // answer from the real terminal payload. Its progress preview describes the
-  // unanswered prompt and must not replace that result while the turn remains
-  // live. Other tools retain their existing bounded preview normalization.
-  if (toolName.trim().toLowerCase() !== 'ask_user') {
+  // answer from the real terminal payload. Explicit terminal transport markers
+  // must also survive normalization; turning one into a plausible empty
+  // subagent preview would hide that the complete value lives only durably.
+  if (toolName.trim().toLowerCase() !== 'ask_user' && !transportBounded) {
     return normalizeToolProgress(toolName, value);
   }
-  const serialized = stringifyLiveJsonSafe(value, '[Unserializable ask_user result]');
+  const fallback = transportBounded ? '[Unserializable bounded tool result]' : '[Unserializable ask_user result]';
+  const serialized = stringifyLiveJsonSafe(value, fallback);
   try { return JSON.parse(serialized) as unknown; }
-  catch { return '[Unserializable ask_user result]'; }
+  catch { return fallback; }
 }
 
 function stringifyLiveJsonSafe(value: unknown, fallback: string): string {

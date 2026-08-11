@@ -2,18 +2,6 @@
   "models": [
     {
       "provider": "ollama",
-      "id": "gemini-3-flash-preview:cloud",
-      "name": "Ollama Cloud: Gemini 3 Flash Preview",
-      "cost": {
-        "input": 0.5,
-        "output": 3,
-        "cacheRead": 0.05,
-        "cacheWrite": 0
-      },
-      "family": "gemini-3-flash-preview"
-    },
-    {
-      "provider": "ollama",
       "id": "glm-4.7:cloud",
       "name": "Ollama Cloud: GLM 4.7",
       "cost": {

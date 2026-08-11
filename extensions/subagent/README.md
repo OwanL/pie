@@ -359,12 +359,8 @@ export PI_SUBAGENT_TIMEOUT_MS=600000
 
 ## Persisted result size
 
-Live updates retain the child transcript needed for rich progress rendering. Once a child settles, the result persisted in the parent session is compacted:
+Live updates and terminal results retain the complete child transcript needed for rich recursive rendering. Terminalization clears only live activity fields; it does not cap reasoning, intermediate prose, tool output, or `finalOutput`.
 
-- the final answer is stored once in bounded `finalOutput` (32,000 characters),
-- reasoning and duplicate final prose are removed from nested messages,
-- intermediate prose and tool output are capped,
-- tool-call metadata remains available for transcript rendering and `session_changes` file-change derivation,
-- nested subagent tool results are compacted recursively.
+The SDK can expose a completed nested tool result twice: on the assistant's tool-call part and in the matching durable `toolResult` message. New terminal results omit only that redundant assistant mirror once the matching `toolResult` exists. The authoritative `toolResult` keeps the complete content/details, and running tools without a durable result retain their inline progress. This lossless deduplication prevents each delegation depth from multiplying the serialized parent result while preserving transcript rendering, usage accounting, and `session_changes` derivation.
 
 Legacy stored parallel/chain results remain renderable, but new calls only produce single-result details.
