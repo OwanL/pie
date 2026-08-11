@@ -14,6 +14,7 @@
 
 import type { ModelPricingRecord, ModelTokenPricing } from '../../backend/pricing';
 import { pricingForPromptTokens } from '../../../../shared/pricing-core.js';
+import { resolvePricingCatalogKey, stripProviderPrefix } from '../../shared/model-id';
 import type {
   AggregateDailyCost,
   AggregateDailyModelCost,
@@ -302,7 +303,10 @@ function createProviderAccumulator(provider: string): ProviderAccumulator {
 }
 
 function canonicalModel(modelId: string | undefined, pricingMap: Map<string, ModelPricingRecord[]>): string {
-  return modelId && pricingMap.has(modelId) ? modelId : 'unknown';
+  // Provider-qualified ids (e.g. `ollama/glm-5.2:cloud`) resolve to their bare
+  // catalog key so subagent/child usage is labeled and priced under the real
+  // model instead of folding into 'unknown'.
+  return resolvePricingCatalogKey(modelId, (key) => pricingMap.has(key)) ?? 'unknown';
 }
 
 /** Resolve the provider name for a model id (first priced provider), or `'unknown'`. */
@@ -311,9 +315,15 @@ export function providerForModel(
   pricingMap: Map<string, ModelPricingRecord[]>,
   preferredProvider?: string,
 ): string {
-  if (!modelId) return 'unknown';
-  const records = pricingMap.get(modelId);
+  // A recorded provider is authoritative even when the model id is unknown to
+  // the catalog: an unregistered/unpriced id must not erase which provider
+  // actually served the usage (it would otherwise land in 'unknown' with real
+  // reported cost attached).
   if (preferredProvider) return preferredProvider;
+  if (!modelId) return 'unknown';
+  const key = resolvePricingCatalogKey(modelId, (candidate) => pricingMap.has(candidate));
+  if (!key) return 'unknown';
+  const records = pricingMap.get(key)!;
   if (!records || records.length === 0) return 'unknown';
   const providers = new Set(records.map((record) => record.provider));
   if (providers.size !== 1) return 'unknown';
@@ -327,7 +337,9 @@ export function pricingForModel(
   preferredProvider?: string,
 ): ModelTokenPricing | null {
   if (!modelId) return null;
-  const records = pricingMap.get(modelId);
+  const key = resolvePricingCatalogKey(modelId, (candidate) => pricingMap.has(candidate));
+  if (!key) return null;
+  const records = pricingMap.get(key)!;
   if (!records) return null;
   if (preferredProvider) {
     return records.find((record) => record.provider === preferredProvider)?.pricing ?? null;
@@ -382,7 +394,10 @@ function providerForSample(
   runProvider: string | undefined,
 ): string | undefined {
   if (sampleProvider) return sampleProvider;
-  return !sampleModelId || sampleModelId === runModelId ? runProvider : undefined;
+  // Compare provider-qualified ids against the bare run id so a prefixed
+  // duplicate of the run model (`openai-codex/gpt-5.6-sol` vs `gpt-5.6-sol`)
+  // inherits the run provider like the identical bare id would.
+  return !sampleModelId || stripProviderPrefix(sampleModelId) === runModelId ? runProvider : undefined;
 }
 
 function usageForModel(
@@ -395,13 +410,15 @@ function usageForModel(
 ): AttributedUsage {
   // Unknown/stale model IDs are folded into one stable bucket. This keeps every
   // model/provider breakdown bounded by the current pricing catalog plus one,
-  // rather than by the number of distinct IDs in historical snapshots.
-  const attributedModel = canonicalModel(model === 'unknown' ? undefined : model, pricingMap);
-  const pricing = pricingForModel(attributedModel === 'unknown' ? undefined : attributedModel, pricingMap, preferredProvider);
+  // rather than by the number of distinct IDs in historical snapshots. The
+  // canonicalization is prefix-tolerant, and the recorded provider stays
+  // authoritative even when the id cannot be resolved (see providerForModel).
+  const attributedModel = canonicalModel(model, pricingMap);
+  const pricing = pricingForModel(attributedModel, pricingMap, preferredProvider);
   return {
     ...counts,
     model: attributedModel,
-    provider: providerForModel(attributedModel === 'unknown' ? undefined : attributedModel, pricingMap, preferredProvider),
+    provider: providerForModel(attributedModel, pricingMap, preferredProvider),
     occurredAtMs,
     cost: typeof reportedCostUsd === 'number' && Number.isFinite(reportedCostUsd) && reportedCostUsd >= 0
       ? reportedCostUsd

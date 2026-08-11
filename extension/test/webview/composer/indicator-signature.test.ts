@@ -142,6 +142,28 @@ test('subagentCostSignature is stable while only the streaming message text grow
   assert.equal(subagentCostSignature(grown), sig);
 });
 
+test('subagentCostSignature changes as live typed child usage grows', () => {
+  const base = [msg({
+    id: 's',
+    status: 'streaming',
+    toolCalls: [{
+      id: 'tc1', name: 'subagent', input: {}, status: 'running', seq: 1,
+      result: {
+        kind: 'subagent', mode: 'single', children: [{
+          id: 'worker', phase: 'running', provider: 'github-copilot', model: 'gpt-5.6-sol',
+          usage: { input: 10, output: 20, cacheRead: 30, cacheWrite: 40, cost: 0.1 },
+        }],
+      },
+    }],
+  })];
+  const before = subagentCostSignature(base);
+  const grown = structuredClone(base);
+  const result = grown[0].toolCalls![0].result as { children: Array<{ usage: { cost: number } }> };
+  result.children[0].usage.cost = 2.5;
+
+  assert.notEqual(subagentCostSignature(grown), before);
+});
+
 test('subagentCostSignature changes when the last message tool call completes (result lands)', () => {
   const base = [msg({
     id: 's',

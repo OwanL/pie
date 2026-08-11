@@ -485,6 +485,48 @@ test('Part B (busy, idle transcript): all indicator walks are independent of del
   );
 });
 
+test('Part B: the parent cost indicator updates as typed live subagent usage grows', () => {
+  let latest: ReturnType<typeof useComposerIndicators> | undefined;
+  function Probe({ inputs }: { inputs: IndicatorsInputs }) {
+    latest = useComposerIndicators(inputs);
+    return null;
+  }
+  let transcript: ChatMessage[] = [{
+    ...makeStreamingAssistant('live-parent', 'delegating'),
+    toolCalls: [{
+      id: 'live-subagent', name: 'subagent', input: {}, status: 'running', seq: 1,
+      result: {
+        kind: 'subagent', mode: 'single', omittedChildren: 0,
+        children: [{
+          id: 'reviewer', phase: 'running', agent: 'reviewer', provider: 'github-copilot', model: 'gpt-5.6-sol',
+          usage: { input: 10, output: 20, cacheRead: 30, cacheWrite: 40, cost: 0.1, contextTokens: 100, turns: 1 },
+        }],
+      },
+    }],
+  }];
+
+  act(() => {
+    render(h(Probe, { inputs: stableInputs({ transcript, busy: true }) }), container);
+  });
+  const first = latest?.sessionCostIndicator;
+  assert.ok(first);
+  assert.match(first.tooltip, /github-copilot \/ gpt-5\.6-sol:\s+\$0\.1000/);
+
+  transcript = structuredClone(transcript);
+  const toolCall = transcript[0].toolCalls![0];
+  toolCall.seq = 2;
+  const result = toolCall.result as { children: Array<{ usage: { cost: number } }> };
+  result.children[0].usage.cost = 2.5;
+  act(() => {
+    render(h(Probe, { inputs: stableInputs({ transcript, busy: true }) }), container);
+  });
+  const grown = latest?.sessionCostIndicator;
+
+  assert.ok(grown);
+  assert.match(grown.tooltip, /github-copilot \/ gpt-5\.6-sol:\s+\$2\.5000/);
+  assert.notEqual(grown.tooltip, first.tooltip);
+});
+
 test('Part B: fresh structured-cloned whole-session usage does not reopen transcript cost walks', () => {
   const { Probe, tracker } = makeIndicatorsProbe();
   const base = buildTranscriptWithSubagentCall();

@@ -185,6 +185,18 @@ test('estimateRunCostUsd computes the known cost for a priced model', () => {
   approx(estimateRunCostUsd('m1', usage, map)!, 33);
 });
 
+test('estimateRunCostUsd prices provider-qualified ids without double-prefixing', () => {
+  // Subagent/child usage records `provider/id` ids that are already valid
+  // catalog keys; the provider must not be prepended a second time.
+  const map = new Map([['ollama/glm-5.2:cloud', PRICED]]);
+  const usage: TokenUsageForCost = { inputTokens: 1_000_000, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+  approx(estimateRunCostUsd('ollama/glm-5.2:cloud', usage, map, 'ollama')!, 3);
+  // A bare id still resolves through the provider-qualified key.
+  approx(estimateRunCostUsd('glm-5.2:cloud', usage, map, 'ollama')!, 3);
+  // A provider mismatch stays unpriced rather than borrowing another provider's rate.
+  assert.equal(estimateRunCostUsd('ollama/glm-5.2:cloud', usage, map, 'openai-codex'), null);
+});
+
 test('default pricing includes retired models without restoring them to the active catalog', () => {
   const map = loadModelPricingMap();
   const retired = map.get('github-copilot/gpt-5.4');

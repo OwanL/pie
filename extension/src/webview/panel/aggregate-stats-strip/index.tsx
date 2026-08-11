@@ -63,7 +63,7 @@ function AggregateStatsStripView({ stats }: AggregateStatsStripProps) {
     >
       <Tooltip contentNode={todayCostTooltipNode(stats)} placement="top" freezeWhileVisible>
         <span class="aggregate-strip-seg aggregate-strip-seg--primary">
-          today <Num value={todayCost} format={formatCostAdaptive} width={8} class="aggregate-strip-cost" />
+          all runs today <Num value={todayCost} format={formatCostAdaptive} width={8} class="aggregate-strip-cost" />
         </span>
       </Tooltip>
       <Sep />
@@ -268,7 +268,7 @@ function Legend({ items }: { items: { key: string; value: string }[] }): JSX.Ele
 
 function ariaLabel(s: AggregateStats): string {
   if (!s.ready) return 'Usage stats: computing.';
-  return `Today ${formatCostAdaptive(s.todayCost)}. This week ${formatCostAdaptive(s.weekCost)}. `
+  return `All runs today ${formatCostAdaptive(s.todayCost)}. This week ${formatCostAdaptive(s.weekCost)}. `
     + `${s.openTabCount} open tabs, ${s.runningSessionCount} running.`;
 }
 
@@ -276,7 +276,7 @@ function ariaLabel(s: AggregateStats): string {
 
 function todayCostTooltipNode(s: AggregateStats): JSX.Element {
   if (!s.ready) return <div class="rich-tooltip"><div class="rich-tooltip-sub">Computing usage stats…</div></div>;
-  const sub: string[] = [`${s.todayRunCount} run${s.todayRunCount === 1 ? '' : 's'}`];
+  const sub: string[] = [`Across all sessions · ${s.todayRunCount} run${s.todayRunCount === 1 ? '' : 's'}`];
   if (s.todayInputTokens > 0 || s.todayOutputTokens > 0) {
     sub.push(`↓${formatCompactTokens(s.todayInputTokens)} in  ↑${formatCompactTokens(s.todayOutputTokens)} out`);
   }
@@ -286,7 +286,7 @@ function todayCostTooltipNode(s: AggregateStats): JSX.Element {
   return (
     <div class="rich-tooltip">
       <div class="rich-tooltip-head">
-        <span>Today</span>
+        <span>All runs today</span>
         <span class="rich-tooltip-head-value">{formatCostAdaptive(s.todayCost)}</span>
       </div>
       <div class="rich-tooltip-sub">{sub.join('  ·  ')}</div>

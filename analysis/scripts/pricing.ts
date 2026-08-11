@@ -161,7 +161,12 @@ export function estimateRunCostUsd(
   if (!modelId) {
     return null;
   }
-  const pricing = provider ? pricingMap.get(`${provider}/${modelId}`) : pricingMap.get(modelId);
+  // Subagent/child usage records provider-qualified ids (`ollama/glm-5.2:cloud`)
+  // that are already valid catalog keys; only prefix a bare id.
+  const key = provider
+    ? modelId.startsWith(`${provider}/`) ? modelId : `${provider}/${modelId}`
+    : modelId;
+  const pricing = pricingMap.get(key);
   if (!pricing) {
     return null;
   }

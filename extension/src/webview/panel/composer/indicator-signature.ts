@@ -1,4 +1,5 @@
 import type { ChatMessage, SystemPromptEntry } from '../../../shared/protocol';
+import { getSubagentResultEntries } from '../../../shared/subagent-result';
 import { isRecord } from '../../../shared/type-guards';
 
 /**
@@ -96,19 +97,18 @@ export function systemPromptsSignature(systemPrompts: readonly SystemPromptEntry
 
 /**
  * O(trailing queued follow-ups + active message tool calls). Guards
- * {@link extractSubagentDirectCost}, which sums `cost` from completed subagent
- * tool calls across the transcript. Completed subagent results are immutable
- * once landed; the only NEW completed calls during a turn arrive on the
- * streaming message, so `length + last-non-queued-message tool-call
- * id/status/name/result-presence` captures every transition without walking the
- * whole transcript. Mirrors
+ * the parent-session cost indicator, which snapshots reported or priced
+ * subagent usage across the transcript. Terminal results are immutable once landed;
+ * typed live previews update their child usage as turns finish. The active
+ * tool's monotonic revision gates this fingerprint, and the usage fields below
+ * make it change only when accounting changes rather than whenever live prose
+ * grows. Mirrors
  * `toolCallsFromMessage` (prefers `toolCalls` when non-empty, else the `parts`
  * tool-call entries) so the fingerprint tracks exactly the calls the walk sees.
  */
 function subagentResultCostFingerprint(rawResult: unknown, depth = 0): string {
   if (depth >= 6 || !isRecord(rawResult)) return '';
-  const details = isRecord(rawResult.details) ? rawResult.details : rawResult;
-  const results = Array.isArray(details.results) ? details.results : [];
+  const results = getSubagentResultEntries(rawResult);
   return results.map((result, index) => {
     if (!isRecord(result)) return `${index}:`;
     const usage = isRecord(result.usage) ? result.usage : undefined;

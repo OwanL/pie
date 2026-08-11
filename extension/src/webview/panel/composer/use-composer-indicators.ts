@@ -12,6 +12,7 @@ import type {
   TranscriptWindow,
 } from '../../../shared/protocol';
 import type { TokenRateIndicatorState } from '../../../shared/token-rate';
+import { stripProviderPrefix } from '../../../shared/model-id';
 import { buildContextWindowBreakdown } from '../context-window/breakdown';
 import { buildContextWindowIndicatorState } from '../context-window/indicator';
 import {
@@ -195,11 +196,17 @@ export function useComposerIndicators({
   );
 
   // Stable pricing resolver so the completed-cost memo doesn't see a fresh
-  // function ref every snapshot.
+  // function ref every snapshot. Provider-qualified ids (subagent/child usage
+  // records e.g. `ollama/glm-5.2:cloud`) are normalized to their bare id so
+  // the registry key (`provider\u0000id`) matches; without this the lookup
+  // misses and child cost falls back to zero/unpriced.
   const resolvePricing = useMemo(
-    () => (modelId: string, provider?: string) => provider
-      ? modelPricing.byProviderAndId.get(`${provider}\0${modelId}`)
-      : modelPricing.uniqueById.get(modelId),
+    () => (modelId: string, provider?: string) => {
+      const bareId = stripProviderPrefix(modelId);
+      return provider
+        ? modelPricing.byProviderAndId.get(`${provider}\u0000${bareId}`)
+        : modelPricing.uniqueById.get(bareId);
+    },
     [modelPricing],
   );
 

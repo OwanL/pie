@@ -8,6 +8,8 @@ export type SessionUsageKind = 'assistant' | 'subagent' | 'skill_pruning_prepass
 /** One independently billable model invocation retained outside transcript windows. */
 export interface SessionUsageSample {
   sourceId: string;
+  /** Stable subagent-result group shared by its aggregate and attempt samples. */
+  groupId?: string;
   kind: SessionUsageKind;
   modelId?: string;
   provider?: string;
@@ -153,7 +155,9 @@ function addSubagentToolSamples(
   path: string,
   depth: number,
 ): void {
-  if (toolCall.status === 'failed' || depth > 8) return;
+  // A failed outer call can still contain child attempts that reached the
+  // provider and incurred billable usage. Status must not erase that cost.
+  if (depth > 8) return;
   const results = getSubagentResultEntries(toolCall.result);
   if (results.length === 0) return;
 
@@ -165,6 +169,7 @@ function addSubagentToolSamples(
       : typeof rawResult.selectedModel === 'string' ? rawResult.selectedModel : undefined;
     const resultProvider = typeof rawResult.provider === 'string' ? rawResult.provider : undefined;
     const resultUsage = subagentUsage(rawResult.usage);
+    const groupId = `subagent:${toolCall.id}:${path}${resultIndex}`;
     let remaining = resultUsage;
     let attributedReportedCost = 0;
 
@@ -187,11 +192,18 @@ function addSubagentToolSamples(
           ? attempt.attemptId.trim()
           : String(attemptIndex);
         samples.push({
-          sourceId: `subagent:${toolCall.id}:${path}${resultIndex}:attempt:${attemptId}`,
+          sourceId: `${groupId}:attempt:${attemptId}`,
+          groupId,
           kind: 'subagent',
           modelId: typeof attempt.model === 'string' ? attempt.model : resultModelId,
           provider: typeof attempt.provider === 'string' ? attempt.provider : resultProvider,
           ...bounded,
+          // When only the result aggregate reports an exact cost, its residual
+          // sample below owns that cost. Mark unpriced attempts as known-zero
+          // so catalog pricing cannot be added on top of the exact aggregate.
+          ...(bounded.reportedCostUsd === undefined && resultUsage?.reportedCostUsd !== undefined
+            ? { reportedCostUsd: 0 }
+            : {}),
         });
         attributedReportedCost += bounded.reportedCostUsd ?? 0;
         if (remaining) remaining = subtractUsage(remaining, bounded);
@@ -204,7 +216,8 @@ function addSubagentToolSamples(
     if (remaining && remaining.totalTokens > 0) {
       const { reportedCostUsd: _aggregateCost, ...remainingUsage } = remaining;
       samples.push({
-        sourceId: `subagent:${toolCall.id}:${path}${resultIndex}`,
+        sourceId: groupId,
+        groupId,
         kind: 'subagent',
         modelId: resultModelId,
         provider: resultProvider,
@@ -213,7 +226,8 @@ function addSubagentToolSamples(
       });
     } else if (residualReportedCost !== undefined && residualReportedCost > 0) {
       samples.push({
-        sourceId: `subagent:${toolCall.id}:${path}${resultIndex}:residual-cost`,
+        sourceId: `${groupId}:residual-cost`,
+        groupId,
         kind: 'subagent',
         modelId: resultModelId,
         provider: resultProvider,
@@ -268,6 +282,7 @@ export function buildSessionUsageSnapshot(transcript: ChatMessage[]): SessionUsa
 export function sessionUsageSignature(snapshot: SessionUsageSnapshot | null | undefined): string {
   return JSON.stringify((snapshot?.samples ?? []).map((sample) => [
     sample.sourceId,
+    sample.groupId ?? '',
     sample.kind,
     sample.modelId ?? '',
     sample.provider ?? '',
@@ -281,14 +296,35 @@ export function sessionUsageSignature(snapshot: SessionUsageSnapshot | null | un
   ]));
 }
 
-/** Merge a durable full-session baseline with fresher loaded/live rows by stable source id. */
+function sessionUsageGroupId(sample: SessionUsageSample): string {
+  if (sample.groupId) return sample.groupId;
+  if (sample.kind !== 'subagent' || !sample.sourceId.startsWith('subagent:')) return sample.sourceId;
+
+  // Before groupId existed, attempt and residual source ids retained the
+  // aggregate result id as a prefix. Recover that group for cross-version
+  // baseline/overlay replacement while keeping sourceId as the fallback.
+  for (const marker of [':attempt:', ':residual-cost']) {
+    const markerIndex = sample.sourceId.lastIndexOf(marker);
+    if (markerIndex > 0) return sample.sourceId.slice(0, markerIndex);
+  }
+  return sample.sourceId;
+}
+
+/** Merge a durable full-session baseline with fresher loaded/live rows.
+ * Exact sources replace exact sources; a fresher subagent result replaces every
+ * aggregate/attempt representation from the same stable result group. */
 export function mergeSessionUsageSnapshots(
   baseline: SessionUsageSnapshot | null | undefined,
   overlay: SessionUsageSnapshot | null | undefined,
 ): SessionUsageSnapshot {
+  const overlaySamples = overlay?.samples ?? [];
+  const overlayGroups = new Set(overlaySamples.map(sessionUsageGroupId));
   const merged = new Map<string, SessionUsageSample>();
-  for (const sample of baseline?.samples ?? []) merged.set(sample.sourceId, sample);
-  for (const sample of overlay?.samples ?? []) merged.set(sample.sourceId, sample);
+  for (const sample of baseline?.samples ?? []) {
+    if (overlayGroups.has(sessionUsageGroupId(sample))) continue;
+    merged.set(sample.sourceId, sample);
+  }
+  for (const sample of overlaySamples) merged.set(sample.sourceId, sample);
   return { samples: [...merged.values()] };
 }
 

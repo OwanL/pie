@@ -1,3 +1,4 @@
+import { qualifyModelId as qualifyBillingModelId } from '../../../shared/model-id';
 import type { AssistantUsage, ChatMessage, ContextWindowUsage, PruningDetails, ToolCall } from '../../../shared/protocol';
 import { formatToolResult } from '../../../shared/tool-result-format';
 import { getSubagentResultEntries, type RawMessage } from '../../../shared/subagent-result';
@@ -248,31 +249,46 @@ function mergeModelCosts(target: Map<string, ModelCostBreakdown>, source: Map<st
   }
 }
 
-function formatProviderModelCosts(models: Map<string, ModelCostBreakdown>): string[] {
+interface FormattedProviderModelCosts {
+  lines: string[];
+  /** Sum of the exact four-decimal amounts rendered in `lines`. */
+  displayedKnownCostUnits: number;
+}
+
+const COST_DETAIL_SCALE = 10_000;
+
+function costDetailUnits(cost: number): number {
+  return Math.round(Math.max(0, cost) * COST_DETAIL_SCALE);
+}
+
+function formatCostDetailUnits(units: number): string {
+  return `$${(units / COST_DETAIL_SCALE).toFixed(4)}`;
+}
+
+function formatProviderModelCosts(models: Map<string, ModelCostBreakdown>): FormattedProviderModelCosts {
   const entries = Array.from(models.values())
     .filter((entry) => entry.hasKnownCost || entry.unpricedTokens > 0)
     .sort((a, b) => a.modelId.localeCompare(b.modelId));
 
-  if (entries.length === 0) return [];
+  if (entries.length === 0) return { lines: [], displayedKnownCostUnits: 0 };
 
-  const lines = ['Session cost by provider / model:'];
+  const lines = ['Session cost by provider / model (whole branch):'];
+  let displayedKnownCostUnits = 0;
   for (const entry of entries) {
     const separator = entry.modelId.indexOf('/');
     const billingIdentity = separator > 0
       ? `${entry.modelId.slice(0, separator)} / ${entry.modelId.slice(separator + 1)}`
       : `Unknown provider / ${entry.modelId}`;
-    const cost = entry.hasKnownCost ? formatCostDetail(entry.cost) : 'unavailable';
+    const units = costDetailUnits(entry.cost);
+    const cost = entry.hasKnownCost ? formatCostDetailUnits(units) : 'unavailable';
+    if (entry.hasKnownCost) displayedKnownCostUnits += units;
     const partial = entry.unpricedTokens > 0 ? '*' : '';
     const unavailableUsage = !entry.hasKnownCost && entry.unpricedTokens > 0
       ? ` (${formatCostTokens(entry.unpricedTokens)})`
       : '';
     lines.push(`  ${billingIdentity}: ${cost}${partial}${unavailableUsage}`);
   }
-  return lines;
-}
-
-function formatCostDetail(cost: number): string {
-  return `$${Math.max(0, cost).toFixed(4)}`;
+  return { lines, displayedKnownCostUnits };
 }
 
 function formatCostTokens(tokens: number): string {
@@ -426,7 +442,8 @@ function addSubagentToolCallCost(
   depth: number,
   pricingForModel?: TokenPricingResolver,
 ): void {
-  if (toolCall.status === 'failed') return;
+  // A failed outer call can still contain child attempts that reached the
+  // provider and incurred billable usage. Status must not erase that cost.
   const results = getSubagentResultEntries(toolCall.result);
   if (results.length === 0) return;
 
@@ -458,9 +475,7 @@ function addSubagentToolCallCost(
       let resultCost = 0;
       for (const item of attributedUsages) {
         const modelId = normalizeModelId(
-          item.modelId && item.provider && !item.modelId.startsWith(`${item.provider}/`)
-            ? `${item.provider}/${item.modelId}`
-            : item.modelId,
+          qualifyBillingModelId(item.modelId, item.provider),
           depth <= 1 ? 'Unknown subagent model' : 'Unknown nested subagent model',
         );
         const estimatedPricing = item.modelId ? pricingForModel?.(item.modelId, item.provider) : undefined;
@@ -531,9 +546,7 @@ function buildPruningPrepassSummary(
 ): { cost: number; usage: CostUsage; modelId?: string; hasUsage: boolean; hasKnownCost: boolean } {
   const empty = { cost: 0, usage: emptyCostUsage(), hasUsage: false, hasKnownCost: false };
   if (!details?.prepassModel) return empty;
-  const billingModelId = details.prepassProvider
-    ? `${details.prepassProvider}/${details.prepassModel}`
-    : details.prepassModel;
+  const billingModelId = qualifyBillingModelId(details.prepassModel, details.prepassProvider);
   // Resolve the prepass model's OWN pricing — do NOT fall back to the
   // selected model's pricing. The prepass model is usually a different
   // (often cheaper/local) model; pricing it at the selected model's rate
@@ -599,7 +612,7 @@ function addCompletedUsageCost(
   summary.cacheReadTokens += usage.cacheReadTokens;
   summary.cacheWriteTokens += usage.cacheWriteTokens;
   summary.totalTokens += usage.totalTokens;
-  const billingModelId = modelId && provider ? `${provider}/${modelId}` : modelId;
+  const billingModelId = qualifyBillingModelId(modelId, provider);
   if (billingModelId) summary.modelIds.add(billingModelId);
   const reportedCost = usage.reportedCostUsd;
   const hasKnownCost = pricing !== undefined || reportedCost !== undefined;
@@ -663,7 +676,7 @@ export function extractSubagentCostSummaryFromSnapshot(
     summary.directCost += cost;
     summary.directResultCount += 1;
     const modelId = normalizeModelId(
-      sample.modelId && sample.provider ? `${sample.provider}/${sample.modelId}` : sample.modelId,
+      qualifyBillingModelId(sample.modelId, sample.provider),
       'Unknown subagent model',
     );
     addModelCost(summary.modelCosts, modelId, usage, cost, hasKnownCost, hasKnownCost ? 0 : usage.totalTokens);
@@ -738,7 +751,7 @@ export function buildSessionCostIndicator(
       const cost = sample.reportedCostUsd ?? (samplePricing ? costFromUsage(usage, samplePricing) : 0);
       const hasKnownCost = sample.reportedCostUsd !== undefined || samplePricing !== undefined;
       const modelId = normalizeModelId(
-        sample.modelId && sample.provider ? `${sample.provider}/${sample.modelId}` : sample.modelId,
+        qualifyBillingModelId(sample.modelId, sample.provider),
         'Unknown pruning prepass model',
       );
       prepassCost += cost;
@@ -767,9 +780,7 @@ export function buildSessionCostIndicator(
     );
   }
   if (liveEstimate) {
-    const liveBillingModelId = selectedModelId && selectedProvider
-      ? `${selectedProvider}/${selectedModelId}`
-      : selectedModelId;
+    const liveBillingModelId = qualifyBillingModelId(selectedModelId, selectedProvider);
     const hasKnownLiveCost = pricing !== undefined;
     addModelCost(
       modelCosts,
@@ -791,24 +802,28 @@ export function buildSessionCostIndicator(
     );
   }
 
-  const tooltipLines = formatProviderModelCosts(modelCosts);
+  const formattedModelCosts = formatProviderModelCosts(modelCosts);
+  const tooltipLines = formattedModelCosts.lines;
   const unpricedTokens = Array.from(modelCosts.values())
     .reduce((total, entry) => total + entry.unpricedTokens, 0);
   const hasIncompleteCost = unpricedTokens > 0;
   const hasAnyKnownCost = Array.from(modelCosts.values()).some((entry) => entry.hasKnownCost);
 
   if (tooltipLines.length === 0) {
-    tooltipLines.push('Session cost by provider / model:', '  No priced usage');
+    tooltipLines.push('Session cost by provider / model (whole branch):', '  No priced usage');
   }
   if (hasIncompleteCost) {
     tooltipLines.push('', `* Excludes ${formatCostTokens(unpricedTokens)} pending billing details or pricing.`);
   }
+  // Make the displayed subtotal reconcile with the independently rounded rows.
+  // Full-precision totalCost remains authoritative for the compact label.
+  const displayedTotal = formatCostDetailUnits(formattedModelCosts.displayedKnownCostUnits);
   tooltipLines.push(
     hasIncompleteCost
       ? hasAnyKnownCost
-        ? `Known subtotal: ${formatCostDetail(totalCost)}`
+        ? `Known subtotal: ${displayedTotal}`
         : 'Total: unavailable'
-      : `Total: ${formatCostDetail(totalCost)}`,
+      : `Total: ${displayedTotal}`,
   );
 
   const label = hasIncompleteCost

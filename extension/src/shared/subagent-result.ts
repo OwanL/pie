@@ -366,7 +366,9 @@ export function getSubagentResultEntries(rawResult: unknown): Record<string, unk
     ? rawResult.results
     : isRecord(rawResult.details) && Array.isArray(rawResult.details.results)
       ? rawResult.details.results
-      : [];
+      : rawResult.kind === 'subagent' && Array.isArray(rawResult.children)
+        ? rawResult.children
+        : [];
   return direct.filter((entry): entry is Record<string, unknown> => isRecord(entry));
 }
 

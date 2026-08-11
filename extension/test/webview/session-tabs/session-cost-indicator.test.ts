@@ -117,6 +117,54 @@ test('whole-session accounting prevents a partial transcript window from underco
   assert.match(result.tooltip, /anthropic \/ claude:\s+\$18\.0000/);
 });
 
+test('replacing aggregate subagent usage with attempt usage does not double-count', () => {
+  const transcript = (withAttempts: boolean) => [{
+    id: 'parent', role: 'assistant' as const, createdAt: '', markdown: '', status: 'completed' as const,
+    toolCalls: [{
+      id: 'subagent-call', name: 'subagent', input: {}, status: 'completed' as const,
+      result: { details: { results: [{
+        model: 'worker-model', provider: 'openai',
+        usage: { input: 10_000, output: 1_000, cacheRead: 0, cacheWrite: 0, cost: 0.07 },
+        ...(withAttempts ? {
+          attemptRecords: [{
+            attemptId: 'worker-attempt', model: 'openai/worker-model', provider: 'openai',
+            usage: { input: 10_000, output: 1_000, cacheRead: 0, cacheWrite: 0, cost: 0.07 },
+          }],
+        } : {}),
+      }] } },
+    }],
+  }];
+  const baseline = buildSessionUsageSnapshot(transcript(false) as never);
+  const overlay = buildSessionUsageSnapshot(transcript(true) as never);
+
+  assert.equal(baseline.samples.length, 1);
+  assert.equal(overlay.samples.length, 1);
+  assert.equal(baseline.samples[0]?.groupId, overlay.samples[0]?.groupId);
+  baseline.samples.push({
+    sourceId: 'subagent:unrelated-call:0',
+    groupId: 'subagent:unrelated-call:0',
+    kind: 'subagent',
+    modelId: 'other-model',
+    provider: 'other-provider',
+    inputTokens: 1,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    totalTokens: 1,
+    reportedCostUsd: 0.03,
+  });
+  const legacyBaseline = {
+    samples: baseline.samples.map(({ groupId: _groupId, ...sample }) => sample),
+  };
+
+  const accounting = mergeSessionUsageSnapshots(legacyBaseline, overlay);
+  const summary = extractSubagentCostSummaryFromSnapshot(accounting);
+  assert.equal(accounting.samples.length, 2);
+  assert.equal(summary.totalCost, 0.1);
+  assert.equal(summary.modelCosts.get('openai/worker-model')?.cost, 0.07);
+  assert.equal(summary.modelCosts.get('other-provider/other-model')?.cost, 0.03);
+});
+
 test('whole-session accounting includes every pruning prepass rather than only the latest', () => {
   const pruningMessages = [0.01, 0.02].map((cost, index) => ({
     id: `pruning-${index}`,
@@ -159,6 +207,42 @@ test('whole-session accounting includes every pruning prepass rather than only t
   assert.ok(result);
   assert.equal(result.label, '$0.03');
   assert.match(result.tooltip, /openai \/ pruner:\s+\$0\.0300/);
+});
+
+test('displayed provider/model rows add exactly to the displayed total', () => {
+  const accounting = {
+    samples: [
+      {
+        sourceId: 'assistant:a', kind: 'assistant' as const, provider: 'provider-a', modelId: 'model-a',
+        inputTokens: 1, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 1,
+        reportedCostUsd: 1.00004,
+      },
+      {
+        sourceId: 'assistant:b', kind: 'assistant' as const, provider: 'provider-b', modelId: 'model-b',
+        inputTokens: 1, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 1,
+        reportedCostUsd: 2.00004,
+      },
+    ],
+  };
+  const summary = buildSessionTokenUsageFromSnapshot(accounting);
+  const result = buildSessionCostIndicator(
+    summary,
+    undefined,
+    'Selected',
+    buildCompletedCostSummaryFromSnapshot(accounting, undefined, undefined),
+    extractSubagentCostSummaryFromSnapshot(accounting),
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    accounting,
+  );
+
+  assert.ok(result);
+  assert.match(result.tooltip, /provider-a \/ model-a:\s+\$1\.0000/);
+  assert.match(result.tooltip, /provider-b \/ model-b:\s+\$2\.0000/);
+  assert.match(result.tooltip, /Total: \$3\.0000/);
 });
 
 test('buildSessionCostIndicator computes cost across all channels', () => {
@@ -250,6 +334,74 @@ test('buildSessionCostIndicator shows sub-agent costs from transcript', () => {
   assert.match(result.tooltip, /Unknown provider \/ Unknown subagent model:\s+\$0\.0500/);
   assert.match(result.tooltip, /Unknown provider \/ Selected model:\s+\$0\.0600/);
   assert.match(result.tooltip, /Total: \$0\.1100/);
+});
+
+test('live typed subagent previews contribute their reported costs to the parent session total', () => {
+  const transcript = [{
+    id: 'live-parent', role: 'assistant' as const, createdAt: '', markdown: '', status: 'streaming' as const,
+    toolCalls: [{
+      id: 'parallel-review', name: 'subagent', input: {}, status: 'running' as const,
+      result: {
+        kind: 'subagent', mode: 'parallel', omittedChildren: 0,
+        children: [
+          {
+            id: 'engine-review', phase: 'running', agent: 'reviewer', provider: 'github-copilot', model: 'gpt-5.6-sol',
+            usage: { input: 50, output: 10_000, cacheRead: 2_000_000, cacheWrite: 100_000, cost: 2.378, contextTokens: 100_000, turns: 20 },
+          },
+          {
+            id: 'frontend-review', phase: 'running', agent: 'reviewer', provider: 'github-copilot', model: 'gpt-5.6-sol',
+            usage: { input: 40, output: 9_000, cacheRead: 1_800_000, cacheWrite: 120_000, cost: 2.954, contextTokens: 120_000, turns: 18 },
+          },
+          {
+            id: 'verification', phase: 'completed', agent: 'worker', provider: 'ollama', model: 'deepseek-v4-flash:0731-cloud',
+            usage: { input: 1_500_000, output: 18_000, cacheRead: 0, cacheWrite: 0, cost: 0.229, contextTokens: 70_000, turns: 40 },
+          },
+        ],
+      },
+    }],
+  }];
+  const accounting = buildSessionUsageSnapshot(transcript as never);
+  const summary = buildSessionTokenUsageFromSnapshot(accounting);
+  const subagents = extractSubagentCostSummaryFromSnapshot(accounting);
+  const result = buildSessionCostIndicator(
+    summary,
+    undefined,
+    'Selected model',
+    buildCompletedCostSummaryFromSnapshot(accounting, undefined, undefined),
+    subagents,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    accounting,
+  );
+
+  assert.equal(accounting.samples.length, 3);
+  assert.ok(Math.abs(subagents.totalCost - 5.561) < 1e-9);
+  assert.ok(result);
+  assert.equal(result.label, '$5.56');
+  assert.match(result.tooltip, /github-copilot \/ gpt-5\.6-sol:\s+\$5\.3320/);
+  assert.match(result.tooltip, /ollama \/ deepseek-v4-flash:0731-cloud:\s+\$0\.2290/);
+  assert.match(result.tooltip, /Total: \$5\.5610/);
+});
+
+test('failed outer subagent calls retain billable child usage', () => {
+  const accounting = buildSessionUsageSnapshot([{
+    id: 'failed-parent', role: 'assistant' as const, createdAt: '', markdown: '', status: 'completed' as const,
+    toolCalls: [{
+      id: 'failed-subagent', name: 'subagent', input: {}, status: 'failed' as const,
+      result: { details: { results: [{
+        provider: 'openai-codex', model: 'worker-model',
+        usage: { input: 10_000, output: 1_000, cacheRead: 0, cacheWrite: 0, cost: 0.42 },
+      }] } },
+    }],
+  }] as never);
+  const summary = extractSubagentCostSummaryFromSnapshot(accounting);
+
+  assert.equal(accounting.samples.length, 1);
+  assert.equal(summary.totalCost, 0.42);
+  assert.equal(summary.modelCosts.get('openai-codex/worker-model')?.cost, 0.42);
 });
 
 test('buildSessionCostIndicator rolls direct and nested sub-agent costs into model totals', () => {
@@ -384,8 +536,12 @@ test('whole-session subagent accounting preserves top-level cost when attempt re
     }],
   }];
   const accounting = buildSessionUsageSnapshot(transcript);
-  const summary = extractSubagentCostSummaryFromSnapshot(accounting);
+  const summary = extractSubagentCostSummaryFromSnapshot(
+    accounting,
+    () => ({ input: 100, output: 100, cacheRead: 100, cacheWrite: 100 }),
+  );
 
+  assert.equal(accounting.samples.find((sample) => sample.sourceId.includes(':attempt:'))?.reportedCostUsd, 0);
   assert.equal(summary.totalCost, 0.07);
   assert.equal(summary.modelCosts.get('openai/worker-model')?.cost, 0.07);
 });

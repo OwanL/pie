@@ -92,6 +92,76 @@ test('a run provider is not borrowed by a different provider-less model sample',
   assert.equal(auxiliaryStats.todayCostByProvider.find((entry) => entry.provider === 'openai-codex'), undefined);
 });
 
+test('provider-qualified subagent ids resolve to their real provider, not unknown', () => {
+  const map = new Map([
+    ['gpt-5.6-sol', [price('github-copilot', 2), price('openai-codex', 5)]],
+    ['glm-5.2:cloud', [price('ollama', 1.2, 'glm-5.2:cloud')]],
+  ]);
+  // A child session records its model as `provider/id`; the catalog keys by
+  // the bare id. The recorded provider must win and the reported cost must
+  // land in the real provider bucket instead of 'unknown'.
+  const snapshot = run({
+    modelId: 'gpt-5.6-sol', provider: 'openai-codex',
+    toolUsage: {
+      ...run({}).toolUsage,
+      subagentCallCount: 1, subagentTaskCount: 1, subagentAgentNames: [],
+      subagentInputTokens: 1_000_000, subagentOutputTokens: 0,
+      subagentCacheReadTokens: 0, subagentCacheWriteTokens: 0,
+    },
+    auxiliaryLlmUsage: [{
+      kind: 'subagent', sourceId: 'child-1', occurredAt: new Date(NOW - 100).toISOString(),
+      modelId: 'ollama/glm-5.2:cloud', provider: 'ollama',
+      inputTokens: 1_000_000, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0,
+      reportedCostUsd: 1.2,
+    }],
+  });
+  const stats = computeAggregateStats([snapshot], map, NOW, [], {}, 0);
+  const providers = new Map(stats.todayCostByProvider.map((entry) => [entry.provider, entry]));
+  assert.equal(providers.get('unknown'), undefined);
+  assert.equal(providers.get('ollama')?.cost, 1.2);
+  assert.equal(providers.get('ollama')?.inputTokens, 1_000_000);
+});
+
+test('provider-qualified single-provider ids resolve via the catalog without a recorded provider', () => {
+  const map = new Map([['glm-5.2:cloud', [price('ollama', 1.2, 'glm-5.2:cloud')]]]);
+  assert.equal(providerForModel('ollama/glm-5.2:cloud', map), 'ollama');
+  assert.equal(pricingForModel('ollama/glm-5.2:cloud', map)?.input, 1.2);
+  // A prefixed duplicate of the run model inherits the run provider.
+  const snapshot = run({
+    modelId: 'glm-5.2:cloud', provider: 'ollama', inputTokens: 100_000,
+    turnThroughputSamples: [{
+      endedAt: new Date(NOW - 500).toISOString(), inputTokens: 100_000, outputTokens: 0,
+      cacheReadTokens: 0, cacheWriteTokens: 0, generationDurationMs: 1,
+      concurrentBusySessions: 1, status: 'completed', modelId: 'ollama/glm-5.2:cloud',
+      turnLatencyMs: null, overheadMs: null, providerLatencyMs: null,
+    }],
+  });
+  const stats = computeAggregateStats([snapshot], map, NOW, [], {}, 0);
+  const providers = new Map(stats.todayCostByProvider.map((entry) => [entry.provider, entry]));
+  assert.equal(providers.get('unknown'), undefined);
+  assert.equal(providers.get('ollama')?.inputTokens, 100_000);
+});
+
+test('a recorded provider survives an unpriced model id instead of degrading to unknown', () => {
+  const map = new Map([['gpt-5.6-sol', [price('github-copilot', 2), price('openai-codex', 5)]]]);
+  // Model id not in the catalog at all, but the run recorded its provider and
+  // the provider reported an exact cost: the cost must stay with the provider.
+  const snapshot = run({
+    modelId: 'some-unregistered-model', provider: 'openai-codex', inputTokens: 10_000,
+    turnThroughputSamples: [{
+      endedAt: new Date(NOW - 500).toISOString(), inputTokens: 10_000, outputTokens: 0,
+      cacheReadTokens: 0, cacheWriteTokens: 0, generationDurationMs: 1,
+      concurrentBusySessions: 1, status: 'completed', modelId: 'some-unregistered-model',
+      provider: 'openai-codex', reportedCostUsd: 0.25,
+      turnLatencyMs: null, overheadMs: null, providerLatencyMs: null,
+    }],
+  });
+  const stats = computeAggregateStats([snapshot], map, NOW, [], {}, 0);
+  const providers = new Map(stats.todayCostByProvider.map((entry) => [entry.provider, entry]));
+  assert.equal(providers.get('unknown'), undefined);
+  assert.equal(providers.get('openai-codex')?.cost, 0.25);
+});
+
 test('mixed same-id parent turns and auxiliary summaries remain provider-discrete', () => {
   const map = new Map([['gpt-5.6-sol', [price('github-copilot', 2), price('openai-codex', 5)]]]);
   const snapshot = run({

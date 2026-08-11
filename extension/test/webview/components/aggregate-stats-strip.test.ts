@@ -20,6 +20,11 @@ function renderRate(runningSessionCount: number, rollingRate = runningSessionCou
   }));
 }
 
+test('aggregate stats strip labels today cost as all-run accounting', () => {
+  const html = renderRate(0);
+  assert.match(html, /all runs today/);
+});
+
 test('aggregate stats strip does not present historical throughput as live while idle', () => {
   const html = renderRate(0);
   assert.match(html, /aggregate-strip-rate[^>]*>—<\/span><span class="aggregate-strip-unit"> tok\/s/);
