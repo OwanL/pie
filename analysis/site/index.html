@@ -16,6 +16,8 @@
           <div><span>Workspace:</span> <strong id="workspace-key">—</strong></div>
           <div><span>Export:</span> <strong id="source-exported-at">—</strong></div>
           <div><span>Data:</span> <strong id="data-mode">—</strong></div>
+          <div><span>Latest run:</span> <strong id="latest-run">—</strong></div>
+          <div><span>Overview freshness:</span> <strong id="overview-freshness">—</strong></div>
         </div>
       </header>
 
@@ -67,7 +69,7 @@
       <section class="dashboard-section" aria-labelledby="model-choice-heading">
         <p class="section-kicker">Model choice</p>
         <h2 id="model-choice-heading">Compare models using canonical V2 criterion evidence</h2>
-        <p>Ranks are provisional cohort-relative estimates. Sparse review evidence and overlapping rank intervals remain conspicuous while every available rank stays visible. Runtime telemetry is diagnostic and has zero ranking weight.</p>
+        <p>Ranks are provisional cohort-relative estimates. Sparse review evidence and overlapping rank intervals remain conspicuous while every available rank stays visible. V2 review evidence remains cohort-level; runtime diagnostics use current-harness runs and have zero ranking weight.</p>
         <div class="charts">
           <section class="chart span-2" aria-label="V2 model leaderboard"><h3>V2 model leaderboard <span class="note" id="leaderboard-note">—</span></h3><div id="chart-leaderboard" class="chart-slot" role="img" aria-label="V2 review-quality score per model family with 80% interval"></div></section>
           <section class="chart span-2" aria-label="Leaderboard detail cards"><h3>Ranked families <span class="note">cards reflow on mobile</span></h3><div id="leaderboard-cards" class="leaderboard-cards-shell" aria-live="polite"></div></section>
@@ -91,9 +93,10 @@
       </section>
 
       <section class="dashboard-section" aria-labelledby="cost-heading">
-        <p class="section-kicker">Cost &amp; performance</p>
+        <p class="section-kicker">Cost &amp; performance · all-history objective telemetry</p>
         <h2 id="cost-heading">Understand spend, token use, and throughput</h2>
-        <p>Operational views use the complete filtered runtime cohort.</p>
+        <p><strong>All-history objective telemetry.</strong> Cost, cache, raw token volume, provider throughput, tool duration, file-type activity, inputs, and subagent cost use the complete filtered all-history cohort.</p>
+        <p><strong>Current-harness diagnostics.</strong> Token efficiency, cost efficiency, cost/minute, context growth, runtime trend, and model runtime efficiency use current-harness runs.</p>
         <div class="charts">
           <section class="chart span-2" aria-label="Cost by model"><h3>Cost by model <span class="note" id="cost-by-model-note">—</span></h3><div id="chart-cost-by-model" class="chart-slot"></div></section>
           <section class="chart span-2" aria-label="Average cost per session by model"><h3>Average cost per session by model <span class="note" id="cost-per-session-by-model-note">—</span></h3><div id="chart-cost-per-session-by-model" class="chart-slot"></div></section>
@@ -116,8 +119,8 @@
       </section>
 
       <details class="diagnostic-block" id="diagnostics-runtime">
-        <summary>Runtime telemetry diagnostics</summary>
-        <p class="diagnostic-intro">Measured-only timing excludes missing historical samples rather than presenting them as zero. Open runs are excluded.</p>
+        <summary>Runtime telemetry diagnostics <span class="note">current-harness diagnostics; selected objective views are all-history</span></summary>
+        <p class="diagnostic-intro"><strong>Current-harness diagnostics:</strong> runtime friction, tool overlap, latency decomposition, compaction/retry, verification kind, mutation, busy fragmentation, and token coverage. Tool execution duration and image inputs remain all-history objective telemetry. Measured-only timing excludes missing samples rather than presenting them as zero. Open runs are excluded.</p>
         <div class="charts">
           <section class="chart span-2" aria-label="Runtime friction timing"><h3>Runtime friction timing <span class="note" id="runtime-friction-timing-note">—</span></h3><div id="chart-runtime-friction-timing" class="chart-slot"></div></section>
           <section class="chart span-2" aria-label="Cumulative vs critical-path tool time"><h3>Cumulative vs critical-path tool time <span class="note" id="tool-time-overlap-note">—</span></h3><div id="chart-tool-time-overlap" class="chart-slot"></div></section>
@@ -134,12 +137,14 @@
       </details>
 
       <details class="diagnostic-block" id="diagnostics-pruning">
-        <summary>Pruning, errors &amp; file diagnostics</summary>
+        <summary>Pruning, errors &amp; file diagnostics <span class="note">current-harness diagnostics; file-type activity is all-history</span></summary>
+        <p class="diagnostic-intro"><strong>Current-harness diagnostics:</strong> all pruning, backend errors, and files reviewed. File-type activity remains all-history objective telemetry.</p>
         <div class="charts">
           <section class="chart span-2" aria-label="Pruning tokens saved"><h3>Pruning tokens saved <span class="note" id="pruning-tokens-trend-note">—</span></h3><div id="chart-pruning-tokens-trend" class="chart-slot"></div></section>
           <section class="chart" aria-label="Pruner latency"><h3>Pruner latency <span class="note" id="pruning-latency-note">—</span></h3><div id="chart-pruning-latency" class="chart-slot"></div></section>
           <section class="chart" aria-label="Most pruned skills"><h3>Most pruned skills <span class="note" id="pruning-top-skills-note">—</span></h3><div id="chart-pruning-top-skills" class="chart-slot"></div></section>
           <section class="chart" aria-label="Most pruned tools"><h3>Most pruned tools <span class="note" id="pruning-top-tools-note">—</span></h3><div id="chart-pruning-top-tools" class="chart-slot"></div></section>
+          <section class="chart span-2" aria-label="Tool-result pruning impact"><h3>Tool-result pruning impact <span class="note">current-harness filtered cohort</span></h3><div id="tool-result-pruning-impact" aria-live="polite"></div></section>
           <section class="chart" aria-label="Over-pruning signals"><h3>Over-pruning signals <span class="note" id="pruning-recovery-rate-note">—</span></h3><div id="chart-pruning-recovery-rate" class="chart-slot"></div></section>
           <section class="chart" aria-label="Backend errors by code"><h3>Backend errors by code <span class="note" id="backend-errors-by-code-note">—</span></h3><div id="chart-backend-errors-by-code" class="chart-slot"></div></section>
           <section class="chart" aria-label="Backend errors trend"><h3>Backend errors trend <span class="note" id="backend-errors-trend-note">—</span></h3><div id="chart-backend-errors-trend" class="chart-slot"></div></section>

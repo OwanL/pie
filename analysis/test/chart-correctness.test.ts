@@ -8,8 +8,9 @@ import type {
   PreparedTurnThroughputRow,
 } from '../scripts/contracts.ts';
 import { modelFamilyKey } from '../site/lib.ts';
-import { pruningRecoveryMetrics, pruningRecoverySpec } from '../site/charts/pruning.ts';
+import { pruningRecoveryMetrics, pruningRecoverySpec, toolResultPruningImpactHtml } from '../site/charts/pruning.ts';
 import { runtimeFrictionTimingRows, toolTimeOverlapRows } from '../site/charts/latency-friction.ts';
+import { toolDurationRows } from '../site/charts/toolduration.ts';
 import {
   effectiveThroughputRows,
   throughputByModelRows,
@@ -38,11 +39,12 @@ test('pruning recovery transform keeps recoveries/decision separate from miss pe
     { event: 'skill_read' },
     { event: 'skill_miss' },
     { event: 'shadow_miss_candidate' },
+    { event: 'skill_recovered' },
   ] as PreparedPruningSignalRow[];
 
   const metrics = pruningRecoveryMetrics(decisions, signals);
   assert.equal(metrics.toolRecoveriesPerDecision, 1.5);
-  assert.equal(metrics.skillMissRate, 0.4);
+  assert.equal(metrics.skillMissRate, 3 / 6, 'skill_recovered is a miss with the same denominator semantics as createPruningImpact');
 
   const spec = pruningRecoverySpec(metrics) as unknown as {
     vconcat: Array<{ encoding: { x: { title: string; axis: { format: string } } } }>;
@@ -76,6 +78,7 @@ test('latency/friction transforms exclude absent timing and expose overlap', () 
     runs: [
       { runId: 'measured', status: 'closed', modelId: 'm', modelFamily: 'family', skillPruningPrepassDurationMs: 300, toolDurationMs: 1000, criticalPathDurationMs: 700 },
       { runId: 'unmeasured', status: 'closed', modelId: 'm', modelFamily: 'family', skillPruningPrepassDurationMs: null, toolDurationMs: 900, criticalPathDurationMs: null },
+      { runId: 'open', status: 'open', modelId: 'm', modelFamily: 'family', skillPruningPrepassDurationMs: 900, toolDurationMs: 9000, criticalPathDurationMs: 8000 },
     ],
     turnThroughputRows: [
       { runId: 'measured', providerQueueMs: 50 },
@@ -98,6 +101,49 @@ test('latency/friction transforms exclude absent timing and expose overlap', () 
     ['Critical path', 700, 1],
     ['Parallel overlap', 300, 1],
   ]);
+  assert.equal(runtimeFrictionTimingRows({ ...ctx, runs: [...ctx.runs, { runId: 'open-only', status: 'open', skillPruningPrepassDurationMs: 999 }] } as any).some((row) => row.medianMs === 999), false, 'open-run timing is excluded');
+});
+
+test('overlap stack uses component aggregates as its cumulative reference', () => {
+  const ctx = {
+    runs: [
+      { runId: 'a', status: 'closed', modelFamily: 'family', toolDurationMs: 2, criticalPathDurationMs: 1 },
+      { runId: 'b', status: 'closed', modelFamily: 'family', toolDurationMs: 4, criticalPathDurationMs: 2 },
+    ],
+  } as any;
+  const rows = toolTimeOverlapRows(ctx);
+  const critical = rows.find((row) => row.component === 'Critical path')!.medianMs;
+  const overlap = rows.find((row) => row.component === 'Parallel overlap')!.medianMs;
+  const cumulative = rows.find((row) => row.component === 'Cumulative')!.medianMs;
+  assert.equal(cumulative, critical + overlap);
+  assert.deepEqual({ cumulative, critical, overlap }, { cumulative: 3, critical: 2, overlap: 1 }, 'rounding preserves the displayed stack total');
+});
+
+test('tool duration aggregates means over timed calls, not total calls', () => {
+  const rows = toolDurationRows({
+    runs: [{ runId: 'run', status: 'closed' }],
+    toolRows: [
+      { runId: 'run', toolName: 'bash', totalDurationMs: 1000, callCount: 10, timedCallCount: 2, failureCount: 0 },
+    ],
+  } as any);
+  assert.deepEqual(rows[0], { tool: 'bash', totalDurationSec: 1, meanDurationSec: 0.5, timedCallCount: 2 });
+});
+
+test('tool-result pruning impact helper surfaces filtered savings and rankings', () => {
+  const html = toolResultPruningImpactHtml({
+    schemaVersion: 7,
+    rows: [
+      { runId: 'selected', toolName: 'bash', rules: ['ansi-strip', 'minify-json'], beforeTokens: 100, afterTokens: 40, tokensSaved: 60 },
+      { runId: 'other', toolName: 'read', rules: ['ansi-strip'], beforeTokens: 1000, afterTokens: 0, tokensSaved: 1000 },
+    ],
+    summary: { totalEvents: 2, totalTokensSaved: 1060, totalBeforeTokens: 1100, totalAfterTokens: 40, byRule: [], byTool: [] },
+  } as any, [{ runId: 'selected' }] as any);
+  assert.match(html, /Events:<\/strong> 1/);
+  assert.match(html, /Total token savings:<\/strong> 60/);
+  assert.match(html, /Savings ratio:<\/strong> 60\.0%/);
+  assert.match(html, /ansi-strip/);
+  assert.match(html, /bash/);
+  assert.ok(!html.includes('read'), 'filtered impact excludes other runs');
 });
 
 test('throughput transforms group provider ids by family and use concurrency-bin medians with visible n', () => {

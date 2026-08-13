@@ -1,3 +1,4 @@
+import * as fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
@@ -32,6 +33,7 @@ import { handleSdkSessionEvent } from './session-event-handler';
 import {
   buildCurrentSummary,
   listAvailableModels,
+  listConfiguredModels,
   resolveActiveModel,
 } from './session-metadata';
 import { SessionCatalog } from './session-catalog';
@@ -76,7 +78,7 @@ import {
   TOOLS_ENTRY_ID,
 } from './system-prompts';
 import { buildPagedTranscriptWindow } from './transcript-window';
-import { createRuntimeFactory } from './runtime-factory.js';
+import { createRuntimeFactory, ServiceLoadingGate } from './runtime-factory.js';
 import { createSessionManagerFence } from './session-manager-fence';
 import { installAuxiliaryLlmMeter } from './auxiliary-llm-meter';
 import { backendTrace, backendError, backendInfo, backendWarn } from './log';
@@ -89,6 +91,11 @@ import { deduplicateToolCallResultsForTransport } from '../shared/chat-message-p
 import { findDurableDetail } from '../shared/lazy-details.js';
 import { LIVE_PIPELINE_LIMITS } from '../shared/live-pipeline-protocol.js';
 import { ASK_USER_TOOL_NAME } from '../../../shared/autonomous-mode.js';
+import {
+  buildBrowseSessionOpenedPayload,
+  openSessionBrowseSnapshot,
+  type SessionBrowseSnapshot,
+} from './session-browser.js';
 
 export function extractPreviewRequestId(preview: string): string | undefined {
   const match = /"id"\s*:\s*"([^"\\]{1,200})"/.exec(preview);
@@ -140,6 +147,58 @@ function resolveRuntimeDisposeGraceMs(): number {
   return Number.isFinite(override) && override > 0 ? override : 5_000;
 }
 
+/** Timer seam for the bounded runtime-disposal policy. The production
+ * scheduler uses ordinary unref'd timers; tests can advance the grace window
+ * without waiting on wall-clock time. */
+export interface RuntimeDisposeScheduler {
+  setTimeout(callback: () => void, delayMs: number): ReturnType<typeof setTimeout>;
+  clearTimeout(timer: ReturnType<typeof setTimeout>): void;
+}
+
+interface PreparedViewedSessionTransition {
+  changed: boolean;
+  revision: number;
+  hadPrevious: boolean;
+  previous?: string;
+}
+
+const defaultRuntimeDisposeScheduler: RuntimeDisposeScheduler = {
+  setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
+  clearTimeout: (timer) => clearTimeout(timer),
+};
+
+function disposeRuntimeBounded(
+  runtime: Pick<SessionContext['runtime'], 'dispose'>,
+  sessionPath: string | undefined,
+  scheduler: RuntimeDisposeScheduler,
+): Promise<void> {
+  let graceTimer: ReturnType<typeof setTimeout> | undefined;
+  const grace = new Promise<void>((resolve) => {
+    graceTimer = scheduler.setTimeout(resolve, resolveRuntimeDisposeGraceMs());
+    (graceTimer as { unref?: () => void }).unref?.();
+  });
+  let dispose: Promise<void>;
+  try {
+    dispose = Promise.resolve(runtime.dispose());
+  } catch (error) {
+    backendWarn('backend-session', 'session runtime dispose threw', {
+      ...(sessionPath ? { sessionPath } : {}),
+      error: toErrorMessage(error),
+    });
+    dispose = Promise.resolve();
+  }
+  return Promise.race([dispose, grace])
+    .catch((error) => {
+      backendWarn('backend-session', 'session runtime dispose failed', {
+        ...(sessionPath ? { sessionPath } : {}),
+        error: toErrorMessage(error),
+      });
+    })
+    .finally(() => {
+      if (graceTimer) scheduler.clearTimeout(graceTimer);
+    });
+}
+
 /** Surface swallowed promise rejections and uncaught exceptions on stderr (the
  *  host captures backend stderr) instead of letting them die invisibly. We
  *  deliberately do NOT `process.exit` — the host's backend-exit detection
@@ -182,12 +241,29 @@ export class BackendServer {
   private agentDir = '';
   private authStorage: unknown;
   private viewedSessionPath?: string;
+  /** Monotonic fence preventing a slow session.open from overwriting a newer
+   * host-local visual transition after its durable read completes. */
+  private viewedSessionRevision = 0;
   /** Process-wide user preference mirrored by runtimePrefs.set. */
   private autonomousMode = false;
   private readonly sessionContexts = new Map<string, SessionContext>();
   private readonly sessionCatalog = new SessionCatalog();
-  /** Deduplicates concurrent opens/preloads for the same cold session. */
+  /** Deduplicates concurrent lazy promotions for the same cold session. */
   private readonly pendingSessionContexts = new Map<string, Promise<SessionContext>>();
+  /** Generation owner recorded on snapshots built through the public browse
+   * path. Publication uses it to replace a payload superseded after its final
+   * awaited ownership check. Transition-internal hydration payloads bypass it. */
+  private readonly sessionOpenedPayloadOwners = new WeakMap<object, SessionContext | undefined>();
+  /** Non-serialized generation stamp checked synchronously at correlated stdout
+   * publication, after the request handler's final await has unwound. */
+  private readonly browseResponseOwners = new WeakMap<object, {
+    sessionPath: string;
+    owner?: SessionContext;
+    fingerprint?: string;
+  }>();
+  /** Predecessor captured when a cold session first becomes viewed. Promotion
+   * consumes this immutable identity instead of rereading viewedSessionPath. */
+  private readonly browsePreviousSessionFiles = new Map<string, string | undefined>();
   /** Paths currently being forgotten; prevents a racing open from installing
    *  a runtime after its transcript has been removed. */
   private readonly forgottenSessionPaths = new Set<string>();
@@ -221,13 +297,26 @@ export class BackendServer {
    *  polling, late SDK events) so a dying backend cannot push post-shutdown
    *  state to a host that is already tearing it down. */
   private disposed = false;
+  /** Backend-wide FIFO admission gate for `sdk.createAgentSessionServices`;
+   *  shared by every runtime-factory invocation this server creates (all
+   *  sessions/cwds). Service creation is serialized so concurrent session
+   *  opens cannot saturate the process during an active generation; results
+   *  are never cached or shared — each admitted call creates fresh services. */
+  private readonly serviceLoadingGate = new ServiceLoadingGate();
+  private readonly runtimeDisposeScheduler: RuntimeDisposeScheduler;
   private hostWatchdogTimer?: ReturnType<typeof setInterval>;
   private readonly hostPid?: number;
 
-  constructor(options: { sdkPath: string; cwd: string; hostPid?: number }) {
+  constructor(options: {
+    sdkPath: string;
+    cwd: string;
+    hostPid?: number;
+    runtimeDisposeScheduler?: RuntimeDisposeScheduler;
+  }) {
     this.sdkPath = options.sdkPath;
     this.startupCwd = options.cwd;
     this.hostPid = options.hostPid;
+    this.runtimeDisposeScheduler = options.runtimeDisposeScheduler ?? defaultRuntimeDisposeScheduler;
   }
 
   private getSessionDir(): string | undefined {
@@ -504,7 +593,11 @@ export class BackendServer {
   }
 
   private createRuntimeFactory() {
-    return createRuntimeFactory(this.sdk, this.authStorage, this.startupCwd);
+    return createRuntimeFactory(this.sdk, this.authStorage, this.startupCwd, this.serviceLoadingGate);
+  }
+
+  private disposeRuntimeBounded(runtime: SessionContext['runtime'], sessionPath?: string): Promise<void> {
+    return disposeRuntimeBounded(runtime, sessionPath, this.runtimeDisposeScheduler);
   }
 
   private resolveSessionPath(session: SdkSession): string | undefined {
@@ -515,11 +608,78 @@ export class BackendServer {
     return sessionPath ? this.sessionContexts.get(sessionPath) : undefined;
   }
 
+  private prepareViewedSessionPath(sessionPath: string): PreparedViewedSessionTransition {
+    const prepared: PreparedViewedSessionTransition = {
+      changed: false,
+      revision: this.viewedSessionRevision,
+      hadPrevious: this.browsePreviousSessionFiles.has(sessionPath),
+      previous: this.browsePreviousSessionFiles.get(sessionPath),
+    };
+    if (this.forgottenSessionPaths.has(sessionPath) || this.viewedSessionPath === sessionPath) {
+      return prepared;
+    }
+    prepared.changed = true;
+    this.browsePreviousSessionFiles.set(sessionPath, this.viewedSessionPath);
+    return prepared;
+  }
+
+  private discardPreparedViewedSessionPath(
+    sessionPath: string,
+    prepared?: PreparedViewedSessionTransition,
+  ): void {
+    if (!prepared?.changed || prepared.revision !== this.viewedSessionRevision
+      || this.sessionContexts.has(sessionPath) || this.pendingSessionContexts.has(sessionPath)) return;
+    if (prepared.hadPrevious) this.browsePreviousSessionFiles.set(sessionPath, prepared.previous);
+    else this.browsePreviousSessionFiles.delete(sessionPath);
+  }
+
+  private commitPreparedViewedSessionPath(
+    sessionPath: string,
+    prepared?: PreparedViewedSessionTransition,
+  ): boolean {
+    if (!prepared?.changed || prepared.revision !== this.viewedSessionRevision
+      || this.forgottenSessionPaths.has(sessionPath)) return false;
+    this.viewedSessionPath = sessionPath;
+    this.viewedSessionRevision += 1;
+    return true;
+  }
+
+  private recordViewedSessionTransition(
+    sessionPath: string,
+    previousSessionPath: string | null,
+  ): boolean {
+    if (this.forgottenSessionPaths.has(sessionPath) || previousSessionPath === sessionPath) return false;
+    this.browsePreviousSessionFiles.set(sessionPath, previousSessionPath ?? undefined);
+    this.viewedSessionPath = sessionPath;
+    this.viewedSessionRevision += 1;
+    return true;
+  }
+
+  private setViewedSessionPath(sessionPath: string | undefined): void {
+    if ((sessionPath && this.forgottenSessionPaths.has(sessionPath))
+      || this.viewedSessionPath === sessionPath) return;
+    this.viewedSessionPath = sessionPath;
+    this.viewedSessionRevision += 1;
+  }
+
+  private setViewedSessionPathIfCurrent(sessionPath: string, revision: unknown): boolean {
+    if (revision !== this.viewedSessionRevision || this.forgottenSessionPaths.has(sessionPath)) return false;
+    this.setViewedSessionPath(sessionPath);
+    return true;
+  }
+
   private async createSessionContext(
     sessionManager: SdkSessionManager,
     reason: SessionContextCreationReason,
+    previousSessionFile?: string,
+    previousSessionFileCaptured = false,
   ): Promise<SessionContext> {
-    const context = await this.buildSessionContext({ sessionManager, reason });
+    const context = await this.buildSessionContext({
+      sessionManager,
+      reason,
+      previousSessionFile,
+      previousSessionFileCaptured,
+    });
 
     const existing = this.sessionContexts.get(context.sessionPath);
     if (existing) {
@@ -544,26 +704,7 @@ export class BackendServer {
       // A provider teardown can wedge the old runtime. The replacement becomes
       // authoritative immediately; old disposal is bounded best-effort and
       // must not block local recovery or the next send.
-      let dispose: Promise<void>;
-      try {
-        dispose = Promise.resolve(existing.runtime.dispose());
-      } catch (error) {
-        backendWarn('backend-session', 'replaced runtime disposal failed', {
-          sessionPath: context.sessionPath,
-          error: toErrorMessage(error),
-        });
-        dispose = Promise.resolve();
-      }
-      let disposeGraceTimer: ReturnType<typeof setTimeout> | undefined;
-      const disposeGrace = new Promise<void>((resolve) => {
-        disposeGraceTimer = setTimeout(resolve, resolveRuntimeDisposeGraceMs());
-        disposeGraceTimer.unref?.();
-      });
-      void Promise.race([dispose, disposeGrace])
-        .catch(() => undefined)
-        .finally(() => {
-          if (disposeGraceTimer) clearTimeout(disposeGraceTimer);
-        });
+      void this.disposeRuntimeBounded(existing.runtime, existing.sessionPath);
     }
 
     if (this.forgottenSessionPaths.has(context.sessionPath)) {
@@ -571,8 +712,22 @@ export class BackendServer {
       context.sessionManagerFence?.invalidate();
       try { context.uiBridge?.dispose(); } catch { /* best effort */ }
       try { context.unsubscribe(); } catch { /* best effort */ }
-      try { await context.runtime.dispose(); } catch { /* best effort */ }
+      await this.disposeRuntimeBounded(context.runtime, context.sessionPath);
       throw new BackendError('SESSION_NOT_FOUND', `The session was forgotten while it was opening: ${context.sessionPath}`);
+    }
+    // A runtime whose service creation was admitted before shutdown but which
+    // settled after disposal began must not be installed; tear it down through
+    // the same ownership path as a forgotten session.
+    if (this.disposed) {
+      context.retired = true;
+      context.sessionManagerFence?.invalidate();
+      try { context.uiBridge?.dispose(); } catch { /* best effort */ }
+      try { context.unsubscribe(); } catch { /* best effort */ }
+      await this.disposeRuntimeBounded(context.runtime, context.sessionPath);
+      throw new BackendError(
+        'SERVER_SHUTTING_DOWN',
+        `The backend is shutting down; the session runtime was not installed: ${context.sessionPath}`,
+      );
     }
     this.sessionContexts.set(context.sessionPath, context);
     return context;
@@ -581,22 +736,30 @@ export class BackendServer {
   private async buildSessionContext(options: {
     sessionManager: SdkSessionManager;
     reason: SessionContextCreationReason;
+    previousSessionFile?: string;
+    previousSessionFileCaptured?: boolean;
   }): Promise<SessionContext> {
     return await timed('buildSessionContext', async () => {
       const { sessionManager, reason } = options;
       const { manager: fencedSessionManager, fence: sessionManagerFence } = createSessionManagerFence(sessionManager);
-      const previousSessionFile = this.viewedSessionPath;
+      const previousSessionFile = options.previousSessionFileCaptured
+        ? options.previousSessionFile
+        : options.previousSessionFile ?? this.viewedSessionPath;
+      const currentSessionFile = sessionManager.getSessionFile();
+      const safePreviousSessionFile = previousSessionFile && previousSessionFile !== currentSessionFile
+        ? previousSessionFile
+        : undefined;
       let runtime: SessionContext['runtime'] | undefined;
       try {
       runtime = await this.sdk.createAgentSessionRuntime(this.createRuntimeFactory(), {
         cwd: fencedSessionManager.getCwd() || this.startupCwd,
         agentDir: this.agentDir,
         sessionManager: fencedSessionManager,
-        sessionStartEvent: previousSessionFile
+        sessionStartEvent: safePreviousSessionFile
           ? {
               type: 'session_start',
               reason,
-              previousSessionFile,
+              previousSessionFile: safePreviousSessionFile,
             }
           : undefined,
       });
@@ -685,11 +848,9 @@ export class BackendServer {
       } catch (error) {
         sessionManagerFence.invalidate();
         if (runtime) {
-          try {
-            await runtime.dispose();
-          } catch {
-            // Construction failure remains authoritative; disposal is best effort.
-          }
+          // Construction failure remains authoritative; disposal is bounded
+          // best effort so a wedged SDK runtime cannot strand the open.
+          await this.disposeRuntimeBounded(runtime);
         }
         throw error;
       }
@@ -699,6 +860,18 @@ export class BackendServer {
   private async ensureSessionContext(sessionPath: string): Promise<SessionContext> {
     if (this.forgottenSessionPaths.has(sessionPath)) {
       throw new BackendError('SESSION_NOT_FOUND', `The session has been forgotten: ${sessionPath}`);
+    }
+    // A registered promotion/replacement owns this path atomically even when
+    // its new context has already been installed but its hydration publication
+    // has not completed yet. Loop because a successor can register while any
+    // predecessor is being awaited.
+    while (true) {
+      const pending = this.pendingSessionContexts.get(sessionPath);
+      if (!pending) break;
+      await pending;
+      if (this.disposed || this.forgottenSessionPaths.has(sessionPath)) {
+        throw new BackendError('SESSION_NOT_FOUND', `The session is no longer available: ${sessionPath}`);
+      }
     }
     const existing = this.sessionContexts.get(sessionPath);
     if (existing) {
@@ -721,17 +894,93 @@ export class BackendServer {
       return existing;
     }
 
-    const pending = this.pendingSessionContexts.get(sessionPath);
-    if (pending) {
-      return await pending;
-    }
-
-    const creation = this.createSessionContext(this.sdk.SessionManager.open(sessionPath), 'resume');
+    const previousSessionFile = this.browsePreviousSessionFiles.get(sessionPath);
+    const creation = this.createSessionContext(
+      this.sdk.SessionManager.open(sessionPath),
+      'resume',
+      previousSessionFile,
+      true,
+    ).then(async (context) => {
+      try {
+        // Publish runtime metadata before the first mutation can start streaming.
+        // This one-time refresh belongs to the single-flight promotion promise.
+        if (this.disposed || this.forgottenSessionPaths.has(sessionPath)) {
+          throw new BackendError('SESSION_NOT_FOUND', `The session is no longer available: ${sessionPath}`);
+        }
+        const payload = await this.buildHotSessionOpenedPayload(sessionPath);
+        if (this.disposed || this.forgottenSessionPaths.has(sessionPath)
+          || this.sessionContexts.get(sessionPath) !== context) {
+          throw new BackendError('SESSION_NOT_FOUND', `The promoted session is no longer authoritative: ${sessionPath}`);
+        }
+        // A successor transition may have queued behind this promotion while
+        // hydration was building. Complete this owner so the successor can run,
+        // but do not publish metadata it already superseded.
+        if (this.pendingSessionContexts.get(sessionPath) === creation) {
+          this.emit('session.opened', payload);
+        }
+        this.browsePreviousSessionFiles.delete(sessionPath);
+        return context;
+      } catch (error) {
+        if (this.sessionContexts.get(sessionPath) === context) this.sessionContexts.delete(sessionPath);
+        context.retired = true;
+        context.sessionManagerFence?.invalidate();
+        try { context.uiBridge?.dispose(); } catch { /* best effort */ }
+        try { context.unsubscribe(); } catch { /* best effort */ }
+        await this.disposeRuntimeBounded(context.runtime, context.sessionPath);
+        throw error;
+      }
+    });
     this.pendingSessionContexts.set(sessionPath, creation);
     try {
-      return await creation;
+      await creation;
     } finally {
       if (this.pendingSessionContexts.get(sessionPath) === creation) {
+        this.pendingSessionContexts.delete(sessionPath);
+      }
+    }
+    // A transition can reserve the path as soon as the promotion promise is
+    // released. Re-enter the owner loop rather than returning an intermediate.
+    return await this.ensureSessionContext(sessionPath);
+  }
+
+  private async transitionSessionContext(
+    sessionPath: string,
+    transition: () => Promise<SessionContext>,
+  ): Promise<SessionContext> {
+    if (this.forgottenSessionPaths.has(sessionPath)) {
+      throw new BackendError('SESSION_NOT_FOUND', `The session has been forgotten: ${sessionPath}`);
+    }
+    const previous = this.pendingSessionContexts.get(sessionPath);
+    let predecessor: SessionContext | undefined;
+    const owned = (async () => {
+      try {
+        if (previous) await previous;
+        if (this.forgottenSessionPaths.has(sessionPath) || this.disposed) {
+          throw new BackendError('SESSION_NOT_FOUND', `The session is no longer available: ${sessionPath}`);
+        }
+        predecessor = this.sessionContexts.get(sessionPath);
+        return await transition();
+      } catch (error) {
+        // Once a replacement transition fails, the predecessor can no longer
+        // be trusted: truncate may already have atomically rewritten the file.
+        // Fence it so later reads/mutations reopen durable authority instead of
+        // serving a pre-transition branch.
+        if (predecessor && this.sessionContexts.get(sessionPath) === predecessor) {
+          predecessor.retired = true;
+          predecessor.sessionManagerFence?.invalidate();
+          try { predecessor.uiBridge?.dispose(); } catch { /* best effort */ }
+          try { predecessor.unsubscribe(); } catch { /* best effort */ }
+          this.sessionContexts.delete(sessionPath);
+          void this.disposeRuntimeBounded(predecessor.runtime, predecessor.sessionPath);
+        }
+        throw error;
+      }
+    })();
+    this.pendingSessionContexts.set(sessionPath, owned);
+    try {
+      return await owned;
+    } finally {
+      if (this.pendingSessionContexts.get(sessionPath) === owned) {
         this.pendingSessionContexts.delete(sessionPath);
       }
     }
@@ -741,47 +990,166 @@ export class BackendServer {
     return context.activeRequest?.currentMessageId ?? context.activeRequest?.lastAssistantMessageId;
   }
 
+  /** Resolve an already-owned runtime without promoting a cold browse. Pending
+   * promotion/replacement always wins, and every awaited owner is rechecked for
+   * a successor before it can be used. */
+  private async resolveBrowseContext(sessionPath: string): Promise<SessionContext | undefined> {
+    while (true) {
+      if (this.disposed || this.forgottenSessionPaths.has(sessionPath)) {
+        throw new BackendError('SESSION_NOT_FOUND', `The session is no longer available: ${sessionPath}`);
+      }
+      const pending = this.pendingSessionContexts.get(sessionPath);
+      if (pending) {
+        try {
+          await pending;
+        } catch (error) {
+          // The owner removes itself in its finally block. If it was replaced
+          // or cleared while rejecting, re-evaluate cold/hot authority rather
+          // than making a tokened browse refresh inherit the failed promotion.
+          if (this.pendingSessionContexts.get(sessionPath) !== pending) continue;
+          throw error;
+        }
+        continue;
+      }
+      const context = this.sessionContexts.get(sessionPath);
+      if (!context) return undefined;
+      if (context.recoveryPromise) {
+        await context.recoveryPromise;
+        continue;
+      }
+      if (context.retired) {
+        throw new BackendError('SESSION_RUNTIME_RECOVERY_FAILED', `The session runtime is no longer authoritative: ${sessionPath}`);
+      }
+      return context;
+    }
+  }
+
+  private async readColdBrowseFileFingerprint(sessionPath: string): Promise<string> {
+    const stat = await fs.stat(sessionPath, { bigint: true });
+    return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
+  }
+
+  private readColdBrowseFileFingerprintSync(sessionPath: string): string {
+    const stat = fsSync.statSync(sessionPath, { bigint: true });
+    return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
+  }
+
+  /** Open a stable durable snapshot. A file rewrite during any read causes a
+   * fresh SessionManager.open; a promotion/replacement at any await boundary is
+   * joined and returned as the authoritative hot owner instead. */
+  private async openFreshColdBrowseSnapshot(
+    sessionPath: string,
+    availableModels: readonly import('../shared/protocol').ModelInfo[] = [],
+  ): Promise<{ context: SessionContext } | { browse: SessionBrowseSnapshot; fingerprint: string }> {
+    const maxAttempts = 3;
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      const existing = await this.resolveBrowseContext(sessionPath);
+      if (existing) return { context: existing };
+      const before = await this.readColdBrowseFileFingerprint(sessionPath);
+      const afterBeforeStat = await this.resolveBrowseContext(sessionPath);
+      if (afterBeforeStat) return { context: afterBeforeStat };
+
+      const browse = await openSessionBrowseSnapshot({
+        manager: this.sdk.SessionManager.open(sessionPath),
+        sessionPath,
+        startupCwd: this.startupCwd,
+        availableModels,
+      });
+      const afterOpen = await this.resolveBrowseContext(sessionPath);
+      if (afterOpen) return { context: afterOpen };
+      const after = await this.readColdBrowseFileFingerprint(sessionPath);
+      const afterFinalStat = await this.resolveBrowseContext(sessionPath);
+      if (afterFinalStat) return { context: afterFinalStat };
+      if (before === after) return { browse, fingerprint: after };
+    }
+    throw new BackendError(
+      'SESSION_CHANGED_DURING_READ',
+      `The session changed repeatedly while it was being read: ${sessionPath}`,
+    );
+  }
+
   private async loadTranscriptPage(
     sessionPath: string,
     direction: TranscriptPageDirection,
     loadedStart?: number,
     loadedEnd?: number,
   ): Promise<TranscriptPagePayload> {
-    const context = await this.ensureSessionContext(sessionPath);
-    const cache = ensureDisplayTranscriptCache(context);
-    const page = buildPagedTranscriptWindow(cache, {
-      direction,
-      loadedStart,
-      loadedEnd,
-      pinnedMessageId: this.getPinnedStreamingMessageId(context),
-    });
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const source = await this.openFreshColdBrowseSnapshot(sessionPath);
+      if (this.disposed || this.forgottenSessionPaths.has(sessionPath)) {
+        throw new BackendError('SESSION_NOT_FOUND', `The session is no longer available: ${sessionPath}`);
+      }
+      const pending = this.pendingSessionContexts.get(sessionPath);
+      const current = this.sessionContexts.get(sessionPath);
+      if (pending || ('context' in source ? current !== source.context : current !== undefined)) continue;
+      if ('browse' in source
+        && this.readColdBrowseFileFingerprintSync(sessionPath) !== source.fingerprint) continue;
 
-    const busy = context.session.isStreaming || !!context.activeRequest || context.session.isCompacting === true;
-    const transcript = busy ? page.transcript : normalizeDanglingTranscript(page.transcript);
-    return {
-      sessionPath: context.sessionPath,
-      transcript: transcript.map(deduplicateToolCallResultsForTransport),
-      transcriptWindow: page.transcriptWindow,
-      busy,
-    };
+      const context = 'context' in source ? source.context : undefined;
+      const cache = 'context' in source
+        ? ensureDisplayTranscriptCache(source.context)
+        : source.browse.cache;
+      const page = buildPagedTranscriptWindow(cache, {
+        direction,
+        loadedStart,
+        loadedEnd,
+        pinnedMessageId: context ? this.getPinnedStreamingMessageId(context) : undefined,
+      });
+      const busy = context
+        ? context.session.isStreaming || !!context.activeRequest || context.session.isCompacting === true
+        : false;
+      const transcript = busy ? page.transcript : normalizeDanglingTranscript(page.transcript);
+      const result: TranscriptPagePayload = {
+        sessionPath,
+        transcript: transcript.map(deduplicateToolCallResultsForTransport),
+        transcriptWindow: page.transcriptWindow,
+        busy,
+      };
+      this.browseResponseOwners.set(result, {
+        sessionPath,
+        ...('context' in source ? { owner: source.context } : { fingerprint: source.fingerprint }),
+      });
+      return result;
+    }
+    throw new BackendError('SESSION_CHANGED_DURING_READ', `The session changed repeatedly while it was being paged: ${sessionPath}`);
   }
 
   private async loadDetail(sessionPath: string, ref: LazyDetailRef): Promise<DetailResult> {
     if (ref.source !== 'durable') {
       return { sessionPath, key: ref.key, status: 'unavailable', message: 'Live detail is owned by the extension host.' };
     }
-    const context = await this.ensureSessionContext(sessionPath);
-    const found = findDurableDetail(ensureDisplayTranscriptCache(context).transcript, ref);
-    if (found.status === 'unavailable') {
-      return { sessionPath, key: ref.key, status: 'unavailable', message: 'The durable detail is no longer available.' };
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const source = await this.openFreshColdBrowseSnapshot(sessionPath);
+      if (this.disposed || this.forgottenSessionPaths.has(sessionPath)) {
+        throw new BackendError('SESSION_NOT_FOUND', `The session is no longer available: ${sessionPath}`);
+      }
+      const pending = this.pendingSessionContexts.get(sessionPath);
+      const current = this.sessionContexts.get(sessionPath);
+      if (pending || ('context' in source ? current !== source.context : current !== undefined)) continue;
+      if ('browse' in source
+        && this.readColdBrowseFileFingerprintSync(sessionPath) !== source.fingerprint) continue;
+
+      const transcript = 'context' in source
+        ? ensureDisplayTranscriptCache(source.context).transcript
+        : source.browse.cache.transcript;
+      const found = findDurableDetail(transcript, ref);
+      let result: DetailResult;
+      if (found.status === 'unavailable') {
+        result = { sessionPath, key: ref.key, status: 'unavailable', message: 'The durable detail is no longer available.' };
+      } else if (found.sizeBytes > LIVE_PIPELINE_LIMITS.previewBytes) {
+        result = { sessionPath, key: ref.key, status: 'unavailable', message: 'The detail exceeds the supported retrieval size.' };
+      } else if (found.sizeBytes !== ref.sizeBytes) {
+        result = { sessionPath, key: ref.key, status: 'stale', message: 'The durable detail changed; refresh the session and retry.' };
+      } else {
+        result = { sessionPath, key: ref.key, status: 'loaded', value: found.value, sizeBytes: found.sizeBytes };
+      }
+      this.browseResponseOwners.set(result, {
+        sessionPath,
+        ...('context' in source ? { owner: source.context } : { fingerprint: source.fingerprint }),
+      });
+      return result;
     }
-    if (found.sizeBytes > LIVE_PIPELINE_LIMITS.previewBytes) {
-      return { sessionPath, key: ref.key, status: 'unavailable', message: 'The detail exceeds the supported retrieval size.' };
-    }
-    if (found.sizeBytes !== ref.sizeBytes) {
-      return { sessionPath, key: ref.key, status: 'stale', message: 'The durable detail changed; refresh the session and retry.' };
-    }
-    return { sessionPath, key: ref.key, status: 'loaded', value: found.value, sizeBytes: found.sizeBytes };
+    throw new BackendError('SESSION_CHANGED_DURING_READ', `The session changed repeatedly while detail was being read: ${sessionPath}`);
   }
 
   private resolveCurrentContextWindow(context: SessionContext): number | undefined {
@@ -1151,12 +1519,13 @@ export class BackendServer {
     }
   }
 
-  private async buildSessionOpenedPayload(
+  private async buildHotSessionOpenedPayload(
     sessionPath: string,
     selectionToken?: string,
     transcript?: import('../shared/protocol').TranscriptMode,
+    transport?: import('../shared/transcript-window').SessionSnapshotTransport,
   ): Promise<SessionOpenedPayload> {
-    return await timed('buildSessionOpenedPayload', () => buildSessionOpenedPayloadHelper(sessionPath, {
+    return await buildSessionOpenedPayloadHelper(sessionPath, {
       getContextUsage: (context) => this.getContextUsage(context),
       readHarnessSystemPrompt: (context) => this.readHarnessSystemPrompt(context),
       buildSystemPrompts: (context, override) => this.buildSystemPrompts(context, override),
@@ -1165,7 +1534,71 @@ export class BackendServer {
       getSessionContext: (path) => this.getSessionContext(path),
       agentDir: this.agentDir,
       startupCwd: this.startupCwd,
-    }, selectionToken, transcript));
+    }, selectionToken, transcript, transport);
+  }
+
+  private async buildAuthoritativeHotSessionOpenedPayload(
+    sessionPath: string,
+    selectionToken?: string,
+    transcript?: import('../shared/protocol').TranscriptMode,
+    transport?: import('../shared/transcript-window').SessionSnapshotTransport,
+  ): Promise<SessionOpenedPayload> {
+    while (true) {
+      const owner = await this.resolveBrowseContext(sessionPath);
+      if (!owner) throw new BackendError('SESSION_NOT_FOUND', `Unknown session: ${sessionPath}`);
+      const payload = await this.buildHotSessionOpenedPayload(sessionPath, selectionToken, transcript, transport);
+      if (this.disposed || this.forgottenSessionPaths.has(sessionPath)) {
+        throw new BackendError('SESSION_NOT_FOUND', `The session is no longer available: ${sessionPath}`);
+      }
+      if (this.pendingSessionContexts.has(sessionPath)
+        || this.sessionContexts.get(sessionPath) !== owner) continue;
+      this.sessionOpenedPayloadOwners.set(payload, owner);
+      this.browseResponseOwners.set(payload, { sessionPath, owner });
+      return payload;
+    }
+  }
+
+  private async buildSessionOpenedPayload(
+    sessionPath: string,
+    selectionToken?: string,
+    transcript?: import('../shared/protocol').TranscriptMode,
+    transport?: import('../shared/transcript-window').SessionSnapshotTransport,
+  ): Promise<SessionOpenedPayload> {
+    return await timed('buildSessionOpenedPayload', async () => {
+      const initialOwner = await this.resolveBrowseContext(sessionPath);
+      if (initialOwner) {
+        return await this.buildAuthoritativeHotSessionOpenedPayload(sessionPath, selectionToken, transcript, transport);
+      }
+      const availableModels = await listConfiguredModels(this.agentDir);
+      const afterCatalog = await this.resolveBrowseContext(sessionPath);
+      if (afterCatalog) {
+        return await this.buildAuthoritativeHotSessionOpenedPayload(sessionPath, selectionToken, transcript, transport);
+      }
+      const modelSettings = await this.readModelSettings();
+      const afterSettings = await this.resolveBrowseContext(sessionPath);
+      if (afterSettings) {
+        return await this.buildAuthoritativeHotSessionOpenedPayload(sessionPath, selectionToken, transcript, transport);
+      }
+      const source = await this.openFreshColdBrowseSnapshot(sessionPath, availableModels);
+      if ('context' in source) {
+        return await this.buildAuthoritativeHotSessionOpenedPayload(sessionPath, selectionToken, transcript, transport);
+      }
+      if (this.pendingSessionContexts.has(sessionPath) || this.sessionContexts.has(sessionPath)
+        || this.readColdBrowseFileFingerprintSync(sessionPath) !== source.fingerprint) {
+        return await this.buildSessionOpenedPayload(sessionPath, selectionToken, transcript, transport);
+      }
+      const payload = buildBrowseSessionOpenedPayload({
+        browse: source.browse,
+        modelSettings,
+        availableModels,
+        selectionToken,
+        transcript,
+        transport,
+      });
+      this.sessionOpenedPayloadOwners.set(payload, undefined);
+      this.browseResponseOwners.set(payload, { sessionPath, fingerprint: source.fingerprint });
+      return payload;
+    });
   }
 
   private async emitSessionListChanged(): Promise<void> {
@@ -1273,6 +1706,36 @@ export class BackendServer {
     // (recovery replacement emissions, catalog polling, late SDK events) cannot
     // push stale state to a host that is already tearing the backend down.
     if (this.disposed) return;
+    if (event === 'session.opened' && payload && typeof payload === 'object') {
+      const opened = payload as Partial<SessionOpenedPayload>;
+      const sessionPath = opened.session?.path;
+      if (typeof sessionPath === 'string') {
+        // Final publication fence: ownership can change after the payload's
+        // last awaited check but before its caller resumes to emit. Rebuild on
+        // the winning generation while preserving selection ownership instead
+        // of silently dropping the tokened open event.
+        if (this.forgottenSessionPaths.has(sessionPath)) return;
+        if (this.sessionOpenedPayloadOwners.has(payload as object)) {
+          const payloadOwner = this.sessionOpenedPayloadOwners.get(payload as object);
+          const currentOwner = this.sessionContexts.get(sessionPath);
+          if (this.pendingSessionContexts.has(sessionPath) || currentOwner !== payloadOwner) {
+            void this.buildSessionOpenedPayload(
+              sessionPath,
+              opened.selectionToken,
+              opened.transcriptSkipped ? 'skip' : 'tail',
+            ).then((authoritative) => this.emit('session.opened', authoritative)).catch((error) => {
+              backendWarn('backend-session', 'sessionOpened.publicationRefreshFailed', {
+                sessionPath,
+                error: toErrorMessage(error),
+              });
+            });
+            return;
+          }
+        }
+        if (opened.runtimeReady === false
+          && (this.pendingSessionContexts.has(sessionPath) || this.sessionContexts.has(sessionPath))) return;
+      }
+    }
     if (event === 'extension_ui.request' && payload && typeof payload === 'object') {
       const request = payload as { sessionPath?: unknown; id?: unknown };
       if (typeof request.sessionPath === 'string' && typeof request.id === 'string') {
@@ -1311,6 +1774,22 @@ export class BackendServer {
     writeStdout({ event, payload });
   }
 
+  private isBrowseResponseCurrent(result: unknown): boolean {
+    if (!result || typeof result !== 'object') return true;
+    const stamp = this.browseResponseOwners.get(result as object);
+    if (!stamp) return true;
+    if (this.disposed || this.forgottenSessionPaths.has(stamp.sessionPath)
+      || this.pendingSessionContexts.has(stamp.sessionPath)) return false;
+    const current = this.sessionContexts.get(stamp.sessionPath);
+    if (stamp.owner) return current === stamp.owner;
+    if (current || !stamp.fingerprint) return false;
+    try {
+      return this.readColdBrowseFileFingerprintSync(stamp.sessionPath) === stamp.fingerprint;
+    } catch {
+      return false;
+    }
+  }
+
   private async handleLine(line: string): Promise<void> {
     let request: RequestEnvelope;
     try {
@@ -1322,7 +1801,20 @@ export class BackendServer {
 
     backendTrace('request', 'received', { id: request.id, method: request.method });
     try {
-      const result = await timed(`request:${request.method}:${request.id}`, () => this.handleRequest(request));
+      let result = await timed(`request:${request.method}:${request.id}`, () => this.handleRequest(request));
+      // Correlated browse responses do not pass through emit(), so perform the
+      // generation/file fence at the actual writer boundary. The check and
+      // write are synchronous with no event-loop gap; a superseded result is
+      // rebuilt from the winning hot owner or fresh durable file.
+      for (let attempt = 0; !this.isBrowseResponseCurrent(result); attempt += 1) {
+        if (attempt >= 2) {
+          throw new BackendError(
+            'SESSION_CHANGED_DURING_READ',
+            `The session changed repeatedly while ${request.method} was being published.`,
+          );
+        }
+        result = await this.handleRequest(request);
+      }
       backendTrace('request', 'handled', { id: request.id, method: request.method });
       writeStdout(responseOk(request.id, result));
     } catch (error) {
@@ -1338,6 +1830,7 @@ export class BackendServer {
    *  tab closes intentionally keep sessions reopenable. */
   private async forgetSession(sessionPath: string): Promise<void> {
     this.forgottenSessionPaths.add(sessionPath);
+    this.browsePreviousSessionFiles.delete(sessionPath);
     const pending = this.pendingSessionContexts.get(sessionPath);
     if (pending) await pending.catch(() => undefined);
     const context = this.sessionContexts.get(sessionPath);
@@ -1362,10 +1855,7 @@ export class BackendServer {
       try { context.uiBridge?.dispose(); } catch { /* best effort */ }
       try { context.unsubscribe(); } catch { /* best effort */ }
       try {
-        await Promise.race([
-          Promise.resolve(context.runtime.dispose()).catch(() => undefined),
-          new Promise<void>((resolve) => setTimeout(resolve, 5_000)),
-        ]);
+        await this.disposeRuntimeBounded(context.runtime, context.sessionPath);
       } finally {
         this.sessionContexts.delete(sessionPath);
       }
@@ -1379,7 +1869,7 @@ export class BackendServer {
       await forgetPrivateSessionArtifacts(sessionPath);
       transcriptDeleted = true;
       this.sessionCatalog.remove(sessionPath);
-      if (this.viewedSessionPath === sessionPath) this.viewedSessionPath = undefined;
+      if (this.viewedSessionPath === sessionPath) this.setViewedSessionPath(undefined);
     } catch (error) {
       // Once transcript deletion commits the tombstone is permanent. There are
       // deliberately no fallible operations after that boundary.
@@ -1401,11 +1891,30 @@ export class BackendServer {
       getSessionContext: (sessionPath) => this.getSessionContext(sessionPath),
       createSessionContext: (sessionManager, reason) => this.createSessionContext(sessionManager, reason),
       ensureSessionContext: (sessionPath) => this.ensureSessionContext(sessionPath),
-      setViewedSessionPath: (sessionPath) => {
-        this.viewedSessionPath = sessionPath;
-      },
-      buildSessionOpenedPayload: (sessionPath, selectionToken, transcript) => (
-        this.buildSessionOpenedPayload(sessionPath, selectionToken, transcript)
+      isSessionTransitionPending: (sessionPath) => this.pendingSessionContexts.has(sessionPath),
+      transitionSessionContext: (sessionPath, transition) => this.transitionSessionContext(sessionPath, transition),
+      prepareViewedSessionPath: (sessionPath) => this.prepareViewedSessionPath(sessionPath),
+      discardPreparedViewedSessionPath: (sessionPath, token) => this.discardPreparedViewedSessionPath(
+        sessionPath,
+        token as PreparedViewedSessionTransition | undefined,
+      ),
+      commitPreparedViewedSessionPath: (sessionPath, token) => this.commitPreparedViewedSessionPath(
+        sessionPath,
+        token as PreparedViewedSessionTransition | undefined,
+      ),
+      recordViewedSessionTransition: (sessionPath, previousSessionPath) => (
+        this.recordViewedSessionTransition(sessionPath, previousSessionPath)
+      ),
+      captureViewedSessionRevision: () => this.viewedSessionRevision,
+      setViewedSessionPathIfCurrent: (sessionPath, revision) => (
+        this.setViewedSessionPathIfCurrent(sessionPath, revision)
+      ),
+      setViewedSessionPath: (sessionPath) => this.setViewedSessionPath(sessionPath),
+      buildSessionOpenedPayload: (sessionPath, selectionToken, transcript, transport) => (
+        this.buildSessionOpenedPayload(sessionPath, selectionToken, transcript, transport)
+      ),
+      buildTransitionSessionOpenedPayload: (sessionPath) => (
+        this.buildHotSessionOpenedPayload(sessionPath)
       ),
       applySystemPromptToggles: (sessionPath, disabledEntries) => (
         this.applySystemPromptToggles(sessionPath, disabledEntries)
@@ -1416,12 +1925,18 @@ export class BackendServer {
         this.loadTranscriptPage(sessionPath, direction, loadedStart, loadedEnd)
       ),
       loadDetail: (sessionPath, ref) => this.loadDetail(sessionPath, ref),
+      transferBrowseResponseOwnership: (source, target) => {
+        const owner = this.browseResponseOwners.get(source);
+        if (owner) this.browseResponseOwners.set(target, owner);
+      },
       emit: (event, payload) => this.emit(event, payload),
       emitBusyChanged: (context, busy) => this.emitBusyChanged(context, busy),
       emitContextUsageChanged: (sessionContext) => this.emitContextUsageChanged(sessionContext),
       emitSessionListChanged: () => this.emitSessionListChanged(),
       listSessions: () => this.listSessionSummaries(),
-      listAvailableModels: (context) => listAvailableModels(context, this.agentDir),
+      listAvailableModels: async (context) => context
+        ? listAvailableModels(context, this.agentDir)
+        : await listConfiguredModels(this.agentDir),
       readModelSettings: () => this.readModelSettings(),
       writeModelSettings: (updates) => this.writeModelSettings(updates),
     }, request);
@@ -1531,19 +2046,38 @@ export class BackendServer {
       }
     });
 
-    const replacementPromise = Promise.resolve()
-      .then(() => this.createSessionContext(
-        this.sdk.SessionManager.open(context.sessionPath),
-        'resume',
-      ))
-      .then(async (replacement) => {
+    const replacementPromise = this.transitionSessionContext(
+      context.sessionPath,
+      async () => {
+        const replacement = await this.createSessionContext(
+          this.sdk.SessionManager.open(context.sessionPath),
+          'resume',
+        );
         this.emitBusyChanged(replacement, false);
         await Promise.allSettled([
-          this.emitSessionOpened(replacement.sessionPath),
+          (async () => {
+            // This callback is itself the pendingSessionContexts owner for the
+            // path. The public build/emit path resolves that owner first, so
+            // calling it here would await this transition's own promise.
+            try {
+              if (this.disposed || this.forgottenSessionPaths.has(replacement.sessionPath)
+                || this.sessionContexts.get(replacement.sessionPath) !== replacement) return;
+              const payload = await this.buildHotSessionOpenedPayload(replacement.sessionPath);
+              if (this.disposed || this.forgottenSessionPaths.has(replacement.sessionPath)
+                || this.sessionContexts.get(replacement.sessionPath) !== replacement) return;
+              this.emit('session.opened', payload);
+            } catch (error) {
+              backendWarn('backend-session', 'emitSessionOpened.failed', {
+                sessionPath: replacement.sessionPath,
+                error: toErrorMessage(error),
+              });
+            }
+          })(),
           this.emitSessionListChanged(),
         ]);
         return replacement;
-      });
+      },
+    );
     context.recoveryPromise = replacementPromise;
     void replacementPromise.catch((error) => {
       this.emit('operational-error', {
@@ -1563,6 +2097,11 @@ export class BackendServer {
     if (this.disposed) return;
     this.disposed = true;
     this.stopHostWatchdog();
+    // Reject queued session service creations: a queued open must not hang
+    // behind an admitted creation while the host is tearing the backend down.
+    // An admitted in-flight creation is allowed to settle; the late runtime it
+    // produces is refused installation by the ownership check above.
+    this.serviceLoadingGate.dispose();
 
     const contexts = [...this.sessionContexts.values()];
     this.sessionContexts.clear();
@@ -1582,6 +2121,7 @@ export class BackendServer {
     this.stopProviderIncidentObserver?.();
     this.stopProviderIncidentObserver = undefined;
     this.providerAttemptOwners.clear();
+    this.browsePreviousSessionFiles.clear();
 
     // Teardown is best-effort per context: one cleanup that throws or rejects
     // must not strand this context's remaining cleanup or any later context.
@@ -1624,43 +2164,12 @@ export class BackendServer {
       }
     };
 
-    // Bound `runtime.dispose()` so a wedged provider teardown can never block
-    // shutdown. Mirrors the replacement-path grace in `createSessionContext`
-    // (resolveRuntimeDisposeGraceMs) so shutdown and recovery share one bound.
-    const disposeRuntimeBounded = (context: SessionContext): Promise<void> => {
-      let graceTimer: ReturnType<typeof setTimeout> | undefined;
-      const grace = new Promise<void>((resolve) => {
-        graceTimer = setTimeout(resolve, resolveRuntimeDisposeGraceMs());
-        graceTimer.unref?.();
-      });
-      let dispose: Promise<void>;
-      try {
-        dispose = Promise.resolve(context.runtime.dispose());
-      } catch (error) {
-        backendWarn('backend-session', 'session runtime dispose threw', {
-          sessionPath: context.sessionPath,
-          error: toErrorMessage(error),
-        });
-        dispose = Promise.resolve();
-      }
-      return Promise.race([dispose, grace])
-        .catch((error) => {
-          backendWarn('backend-session', 'session runtime dispose failed', {
-            sessionPath: context.sessionPath,
-            error: toErrorMessage(error),
-          });
-        })
-        .finally(() => {
-          if (graceTimer) clearTimeout(graceTimer);
-        });
-    };
-
     const teardownContext = async (context: SessionContext): Promise<void> => {
       clearContextTimers(context);
       runCleanup('session UI bridge dispose', () => context.uiBridge?.dispose());
       runCleanup('session event unsubscribe', () => context.unsubscribe());
       runCleanup('session manager fence invalidation', () => context.sessionManagerFence?.invalidate());
-      await disposeRuntimeBounded(context);
+      await this.disposeRuntimeBounded(context.runtime, context.sessionPath);
     };
 
     for (const context of contexts) {

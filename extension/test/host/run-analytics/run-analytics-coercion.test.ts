@@ -71,6 +71,35 @@ function makeRunSnapshot(): RunSnapshot {
   };
 }
 
+test('coerceRunSnapshot preserves harness revision and fingerprint', () => {
+  const base = makeRunSnapshot();
+
+  const stamped = coerceRunSnapshot({
+    ...base,
+    harnessRevision: 'pie-harness-2026-08',
+    harnessFingerprint: 'ab'.repeat(32),
+  });
+  assert.ok(stamped);
+  assert.equal(stamped?.harnessRevision, 'pie-harness-2026-08');
+  assert.equal(stamped?.harnessFingerprint, 'ab'.repeat(32));
+
+  // Historical snapshots without the fields coerce cleanly (absent, not null).
+  const legacy = coerceRunSnapshot(base);
+  assert.ok(legacy);
+  assert.equal(legacy?.harnessRevision, undefined);
+  assert.equal(legacy?.harnessFingerprint, undefined);
+
+  // Non-string values are dropped, not accepted.
+  const malformed = coerceRunSnapshot({
+    ...base,
+    harnessRevision: 42,
+    harnessFingerprint: {},
+  });
+  assert.ok(malformed);
+  assert.equal(malformed?.harnessRevision, undefined);
+  assert.equal(malformed?.harnessFingerprint, undefined);
+});
+
 test('coerceSessionAnalyticsFactors accepts only supported shapes and values', () => {
   assert.equal(coerceSessionAnalyticsFactors(null), null);
   assert.equal(coerceSessionAnalyticsFactors('invalid'), null);

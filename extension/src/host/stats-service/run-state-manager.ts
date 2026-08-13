@@ -21,6 +21,8 @@ import {
   type RunSnapshot,
   type TreatmentChangeKind,
   type FunctionalSettingsSnapshot,
+  CURRENT_HARNESS_REVISION,
+  deriveHarnessFingerprint,
 } from '../run-analytics';
 import {
   emptySessionRunState,
@@ -128,6 +130,8 @@ export class SessionRunStateManager {
     const stableSessionId = sessionSummary?.identityFallback === true
       ? undefined
       : sessionSummary?.sessionId?.trim() || undefined;
+    const analyticsFactors = this.getCurrentAnalyticsFactors(sessionPath);
+    const functionalSettings = this.getCurrentFunctionalSettings();
 
     return {
       sessionPath,
@@ -144,8 +148,10 @@ export class SessionRunStateManager {
       mixedTreatmentConfig: false,
       treatmentChangeKinds: [],
       experimentAssignment: normalizeExperimentAssignment(this.getExperimentAssignment()),
-      analyticsFactors: this.getCurrentAnalyticsFactors(sessionPath),
-      functionalSettings: this.getCurrentFunctionalSettings(),
+      analyticsFactors,
+      functionalSettings,
+      harnessRevision: CURRENT_HARNESS_REVISION,
+      harnessFingerprint: deriveHarnessFingerprint(CURRENT_HARNESS_REVISION, analyticsFactors, functionalSettings),
       sendCount: 0,
       assistantTurnCount: 0,
       assistantTurnDurationMs: 0,

@@ -234,6 +234,7 @@ export function costTrendByProviderRows(
 export const costCharts: ChartEntry[] = [
   {
     id: 'chart-cost-by-model',
+    runCohort: 'all-history',
     render: async (ctx: ChartContext) => {
       const cohort = costByModelCohortRows(ctx.runs).filter((row) => row.withCostCount > 0);
       const rows = groupCostByModel(ctx.runs);
@@ -271,6 +272,7 @@ export const costCharts: ChartEntry[] = [
   },
   {
     id: 'chart-cost-per-session-by-model',
+    runCohort: 'all-history',
     render: async (ctx: ChartContext) => {
       // Per-session average is only meaningful for models with ≥1 priced session;
       // a $0 bar would otherwise conflate "free model" with "no pricing".
@@ -306,6 +308,7 @@ export const costCharts: ChartEntry[] = [
   },
   {
     id: 'chart-cost-trend',
+    runCohort: 'all-history',
     render: async (ctx: ChartContext) => {
       const rows = costTrendRows(ctx.runs);
       ctx.setNote('cost-trend-note', `Daily estimated spend across ${rows.length} active days.`, ctx.renderToken);
@@ -344,6 +347,7 @@ export const costCharts: ChartEntry[] = [
   },
   {
     id: 'chart-cost-trend-by-provider',
+    runCohort: 'all-history',
     render: async (ctx: ChartContext) => {
       const rows = costTrendByProviderRows(ctx.runs, ctx.turnThroughputRows);
       const providerCount = new Set(rows.map((r) => r.provider)).size;

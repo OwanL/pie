@@ -50,13 +50,13 @@ export function MessageItemView({
   isStreaming,
   prefs,
   readonly,
-  workingDirectory: _workingDirectory,
+  workingDirectory,
   editingId,
   editingDraft,
   onEditRequest,
   onEditConfirm,
   onEditCancel,
-  onOpenFile: _onOpenFile,
+  onOpenFile,
   onContextMenu,
   renderToolCall,
   isLastAssistantMessage,
@@ -142,6 +142,8 @@ export function MessageItemView({
         combinedParts={combinedParts}
         renderableUserParts={renderableUserParts}
         prefs={prefs}
+        workingDirectory={workingDirectory}
+        onOpenFile={onOpenFile}
         renderToolCall={renderToolCall}
         onContextMenu={onContextMenu}
         messageBodyRef={messageBodyRef}

@@ -38,6 +38,8 @@ test('outcomeDimensionSpec renders group means as points with 95% CI rules and n
   const layers = specLayers(spec);
   // rule (CI), circle (mean), text (n label)
   assert.equal(layers.length, 3);
+  assert.deepEqual((spec.data as { values: Array<{ value: string }> }).values.map((value) => value.value), ['verified', 'unverified'], 'one datum per group prevents duplicate means/labels');
+  assert.deepEqual(layers[0]!.transform, [{ filter: 'datum.ciAvailable' }]);
   assert.equal((layers[0]!.mark as { type: string }).type, 'rule');
   assert.equal((layers[1]!.mark as { type: string }).type, 'circle');
   assert.equal((layers[2]!.mark as { type: string }).type, 'text');

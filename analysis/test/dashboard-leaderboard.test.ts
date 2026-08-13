@@ -9,6 +9,7 @@ import {
   applyFilters,
   coverageSummary,
   leaderboardRows,
+  overviewCardValues,
   sessionReviewAnalyticsHtml,
 } from '../site/app.ts';
 import { loadFixture } from './helpers.ts';
@@ -47,6 +48,9 @@ test('dashboard makes sparse evidence and rank uncertainty conspicuous while ret
   const html = await readFile(new URL('../site/index.html', import.meta.url), 'utf8');
   assert.match(html, /Sparse review evidence and overlapping rank intervals/);
   assert.equal((html.match(/class="toggle"/g) ?? []).length, 1);
+  assert.match(html, /id="latest-run"/);
+  assert.match(html, /id="overview-freshness"/);
+  assert.match(html, /id="tool-result-pruning-impact"/);
 });
 
 test('default filters preserve the runtime cohort and family-keyed model filtering', async () => {
@@ -62,9 +66,9 @@ test('default filters preserve the runtime cohort and family-keyed model filteri
 
 test('coverage summary reports only runtime completion and telemetry coverage', () => {
   const runs = [
-    { status: 'open', totalEstimatedCostUsd: 1, tokenReportedTurnCount: 1, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, mixedModelConfig: false },
-    { status: 'closed', totalEstimatedCostUsd: 2, tokenReportedTurnCount: 1, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, mixedModelConfig: false },
-    { status: 'closed', totalEstimatedCostUsd: null, tokenReportedTurnCount: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, mixedModelConfig: true },
+    { status: 'open', totalEstimatedCostUsd: 1, tokenReportedTurnCount: 1, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, mixedModelConfig: false, identityFallback: false },
+    { status: 'closed', totalEstimatedCostUsd: 2, tokenReportedTurnCount: 1, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, mixedModelConfig: false, identityFallback: false },
+    { status: 'closed', totalEstimatedCostUsd: null, tokenReportedTurnCount: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, mixedModelConfig: true, identityFallback: true },
   ] as any[];
   assert.deepEqual(coverageSummary(runs), {
     selectedRunCount: 3,
@@ -72,7 +76,20 @@ test('coverage summary reports only runtime completion and telemetry coverage', 
     priced: { count: 1, percentage: 1 / 2 },
     tokenTelemetry: { count: 1, percentage: 1 / 2 },
     mixedModel: { count: 1, percentage: 1 / 2 },
+    stableIdentity: { count: 1, percentage: 1 / 2 },
   });
+});
+
+test('filtered overview values use filtered result issues and the even-sample median', () => {
+  const runs = [
+    { runId: 'a', status: 'closed', updatedAt: '2026-01-01T00:00:00.000Z', busyDurationMs: 1000, toolCallCount: 2, toolFailureCount: 0, resultIssueCount: 1 },
+    { runId: 'b', status: 'closed', updatedAt: '2026-01-02T00:00:00.000Z', busyDurationMs: 3000, toolCallCount: 2, toolFailureCount: 0, resultIssueCount: 0 },
+    { runId: 'open', status: 'open', updatedAt: '2026-01-03T00:00:00.000Z', busyDurationMs: 9000, toolCallCount: 9, toolFailureCount: 0, resultIssueCount: 9 },
+  ] as any[];
+  const values = overviewCardValues(runs, {} as any, false);
+  assert.equal(values.busy, 2000, 'filtered cards use the canonical even-sample median');
+  assert.equal(values.resultIssues, 0.25, 'result issues are divided by completed filtered tool calls');
+  assert.equal(values.latestRunTimestamp, '2026-01-02T00:00:00.000Z', 'open runs do not define overview freshness');
 });
 
 test('session review analytics renders V2 ingestion diagnostics including rejection reasons', async () => {

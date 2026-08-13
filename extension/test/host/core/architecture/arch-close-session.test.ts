@@ -82,7 +82,7 @@ function closeCmd(corrId: string, sessionPath: string): Event {
   return { kind: 'Command', cmd: { kind: 'CloseSession', corrId, sessionPath } };
 }
 
-test('CloseSession removes the tab from openTabPaths + clears per-session maps + selects the next tab, and emits PersistTabs + CloseSession', () => {
+test('CloseSession removes the tab, selects the next tab, and emits persistence, cleanup, and viewed-transition effects', () => {
   // [A, B] with active=A. Closing A → nextPath=B (the remaining tab slides left).
   const state = buildState({
     openTabs: [A, B],
@@ -99,14 +99,19 @@ test('CloseSession removes the tab from openTabPaths + clears per-session maps +
   assert.deepEqual(out.state.sessions.sessions, [SUMMARY_A, SUMMARY_B]);
   // Next tab B selected (wasActive=true, nextPath=B).
   assert.equal(out.state.sessions.activeSessionPath, B);
-  // Effects: PersistTabs + CloseSession (with nextPath=B).
-  assert.equal(out.effects.length, 2);
-  assert.equal(out.effects[0]?.kind, 'PersistTabs');
-  assert.equal(out.effects[1]?.kind, 'CloseSession');
-  if (out.effects[1]?.kind === 'CloseSession') {
-    assert.equal(out.effects[1].sessionPath, A);
-    assert.equal(out.effects[1].nextPath, B);
+  // Effects: PersistTabs + CloseSession + runtime-free viewed transition.
+  assert.deepEqual(out.effects.map((effect) => effect.kind), [
+    'PersistTabs', 'CloseSession', 'NotifySessionViewed',
+  ]);
+  const closeEffect = out.effects.find((effect) => effect.kind === 'CloseSession');
+  if (closeEffect?.kind === 'CloseSession') {
+    assert.equal(closeEffect.sessionPath, A);
+    assert.equal(closeEffect.nextPath, B);
+    assert.equal(closeEffect.selectionChanged, true);
   }
+  assert.deepEqual(out.effects.find((effect) => effect.kind === 'NotifySessionViewed'), {
+    kind: 'NotifySessionViewed', corrId: 'c1', sessionPath: B, previousSessionPath: A,
+  });
 });
 
 test('CloseSession does NOT remove the session summary (unlike removeSessionFromState — the session persists for reopening)', () => {

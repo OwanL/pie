@@ -4,6 +4,7 @@ import type { ArchState } from '../arch-state.js';
 import type { Event } from '../events.js';
 import type { ReducerResult } from './helpers.js';
 import { stripReqIds } from '../../../shared/error-mapping.js';
+import { modelSettingsMatchForHydration } from '../../../shared/protocol.js';
 import type {
   ComposerInput,
   ContextWindowUsage,
@@ -195,10 +196,7 @@ export function handleModelSettingsHydrated(
   event: Extract<Event, { kind: 'ModelSettingsHydrated' }>,
 ): ReducerResult {
   const current = state.settings.modelSettings;
-  if (current
-    && current.defaultModel === event.modelSettings.defaultModel
-    && current.defaultProvider === event.modelSettings.defaultProvider
-    && current.defaultThinkingLevel === event.modelSettings.defaultThinkingLevel) {
+  if (modelSettingsMatchForHydration(current, event.modelSettings)) {
     return { state, effects: [] };
   }
   return {

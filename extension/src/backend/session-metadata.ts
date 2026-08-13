@@ -238,6 +238,37 @@ export function resolveModelThinkingLevels(model: Record<string, unknown>): Thin
   });
 }
 
+export async function listConfiguredModels(agentDir: string): Promise<ModelInfo[]> {
+  try {
+    const raw = await fs.readFile(path.join(agentDir, 'models.json'), 'utf8');
+    const parsed = parseJsonOrThrow<{ providers?: Record<string, { models?: Array<Record<string, unknown>> }> }>(raw, 'models.json');
+    const profiles = loadSubagentProfiles(agentDir);
+    const result: ModelInfo[] = [];
+    for (const [provider, config] of Object.entries(parsed.providers ?? {})) {
+      for (const model of config.models ?? []) {
+        if (typeof model.id !== 'string' || typeof model.name !== 'string') continue;
+        const info: ModelInfo = {
+          id: model.id,
+          name: model.name,
+          provider,
+          reasoning: model.reasoning === true,
+          thinkingLevels: resolveModelThinkingLevels(model),
+          inputKinds: resolveModelInputKinds(model),
+          ...(typeof model.contextWindow === 'number' ? { contextWindow: model.contextWindow } : {}),
+          ...(typeof model.maxTokens === 'number' ? { maxTokens: model.maxTokens } : {}),
+        };
+        const profile = findSubagentProfile(profiles, provider, model.id);
+        if (profile) info.subagent = profile;
+        result.push(info);
+      }
+    }
+    return result;
+  } catch (error) {
+    backendTrace('sessionMetadata', 'listConfiguredModels.failed', { level: 'debug', error: toErrorMessage(error) });
+    return [];
+  }
+}
+
 export function listAvailableModels(context?: SessionContext, agentDir?: string): ModelInfo[] {
   if (!context) {
     return [];

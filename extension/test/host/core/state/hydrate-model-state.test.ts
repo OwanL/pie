@@ -27,9 +27,10 @@ function createExtensionContext(): any {
   };
 }
 
-function fakeBackend(responses: Record<string, unknown>) {
+function fakeBackend(responses: Record<string, unknown>, requestedMethods?: string[]) {
   return {
     request: async (method: string, _params?: unknown) => {
+      requestedMethods?.push(method);
       if (method in responses) {
         return responses[method];
       }
@@ -157,6 +158,129 @@ test('hydrateModelState dispatches ModelSettingsHydrated (not SetModel) when glo
   // The per-session model badge must be left untouched.
   const updatedSummary = getArchState().sessions.sessions.find((s) => s.path === SESSION);
   assert.equal(updatedSummary?.modelId, 'umans-glm-5.2', 'per-session model badge must not be clobbered by hydrate');
+});
+
+test('hydrateModelState applies a known provider change for the same model without promoting a cold runtime', async () => {
+  const SESSION = '/workspace/cold-session.jsonl';
+  const currentSettings: ModelSettings = {
+    defaultModel: 'gpt-5.5',
+    defaultProvider: 'github-copilot',
+    defaultThinkingLevel: 'medium',
+  };
+  const backendSettings: ModelSettings = {
+    defaultModel: 'gpt-5.5',
+    defaultProvider: 'openai-codex',
+    defaultThinkingLevel: 'medium',
+  };
+  const summary: SessionSummary = {
+    path: SESSION,
+    name: 'Cold session',
+    cwd: '/workspace',
+    modifiedAt: '2024-01-01T00:00:00.000Z',
+    messageCount: 0,
+    modelId: 'gpt-5.5',
+    provider: 'github-copilot',
+    thinkingLevel: 'medium',
+  };
+
+  let archState = setupArchState(currentSettings, summary);
+  const getArchState = () => archState;
+  const dispatched: Event[] = [];
+  const dispatchArch = (event: Event) => {
+    dispatched.push(event);
+    archState = reducer(archState, event).state;
+  };
+
+  const context = createExtensionContext();
+  const requestedMethods: string[] = [];
+  const models: ModelInfo[] = [{
+    id: 'gpt-5.5', provider: 'openai-codex', name: 'GPT-5.5', reasoning: true, inputKinds: ['text'],
+  }];
+  const backend = fakeBackend({ 'settings.get': backendSettings, 'models.list': models }, requestedMethods);
+  const state = new SessionServiceState(context, backend, () => undefined, getArchState, dispatchArch, 0);
+  const messages = new SessionMessageActions({
+    context,
+    backend,
+    scheduleRender: () => undefined,
+    state,
+    createNewSession: () => '',
+    getArchState,
+    dispatchArch,
+  });
+
+  await messages.hydrateModelState(SESSION);
+
+  const hydrated = dispatched.find((event) => event.kind === 'ModelSettingsHydrated');
+  assert.ok(hydrated && hydrated.kind === 'ModelSettingsHydrated');
+  assert.equal(hydrated.modelSettings.defaultProvider, 'openai-codex');
+  assert.equal(getArchState().settings.modelSettings?.defaultProvider, 'openai-codex');
+  assert.equal(
+    getArchState().sessions.sessions.find((session) => session.path === SESSION)?.provider,
+    'github-copilot',
+    'hydration must not change the cold session badge or live model',
+  );
+  assert.equal(
+    dispatched.some((event) => event.kind === 'Command' && event.cmd.kind === 'SetModel'),
+    false,
+    'hydration must not dispatch a live model switch that could promote the cold runtime',
+  );
+  assert.deepEqual([...requestedMethods].sort(), ['models.list', 'settings.get']);
+});
+
+test('hydrateModelState treats an omitted provider as legacy-compatible', async () => {
+  const SESSION = '/workspace/legacy-session.jsonl';
+  const currentSettings: ModelSettings = {
+    defaultModel: 'gpt-5.5',
+    defaultProvider: 'github-copilot',
+    defaultThinkingLevel: 'medium',
+  };
+  const backendSettings: ModelSettings = {
+    defaultModel: 'gpt-5.5',
+    defaultThinkingLevel: 'medium',
+  };
+  const summary: SessionSummary = {
+    path: SESSION,
+    name: 'Legacy session',
+    cwd: '/workspace',
+    modifiedAt: '2024-01-01T00:00:00.000Z',
+    messageCount: 0,
+    modelId: 'gpt-5.5',
+    provider: 'github-copilot',
+    thinkingLevel: 'medium',
+  };
+
+  let archState = setupArchState(currentSettings, summary);
+  const getArchState = () => archState;
+  const dispatched: Event[] = [];
+  const dispatchArch = (event: Event) => {
+    dispatched.push(event);
+    archState = reducer(archState, event).state;
+  };
+
+  const context = createExtensionContext();
+  const models: ModelInfo[] = [{
+    id: 'gpt-5.5', provider: 'github-copilot', name: 'GPT-5.5', reasoning: true, inputKinds: ['text'],
+  }];
+  const backend = fakeBackend({ 'settings.get': backendSettings, 'models.list': models });
+  const state = new SessionServiceState(context, backend, () => undefined, getArchState, dispatchArch, 0);
+  const messages = new SessionMessageActions({
+    context,
+    backend,
+    scheduleRender: () => undefined,
+    state,
+    createNewSession: () => '',
+    getArchState,
+    dispatchArch,
+  });
+
+  await messages.hydrateModelState(SESSION);
+
+  assert.equal(
+    dispatched.find((event) => event.kind === 'ModelSettingsHydrated'),
+    undefined,
+    'missing provider data must not turn a legacy snapshot into a model switch',
+  );
+  assert.equal(getArchState().settings.modelSettings?.defaultProvider, 'github-copilot');
 });
 
 test('hydrateModelState skips ModelSettingsHydrated when summary has no per-session model yet but global settings match', async () => {

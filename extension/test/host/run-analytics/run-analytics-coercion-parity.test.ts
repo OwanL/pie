@@ -103,6 +103,8 @@ const EDGE_CASES: Array<{ name: string; snapshot: AnySnapshot }> = [
       mixedTreatmentConfig: true,
       treatmentChangeKinds: ['model', 'thinking', 'model'],
       experimentAssignment: 'treatment-a',
+      harnessRevision: 'pie-harness-2026-08',
+      harnessFingerprint: 'a3f9c1e7b2d84650a3f9c1e7b2d84650a3f9c1e7b2d84650a3f9c1e7b2d84650',
       contextTokens: 12000,
       contextLimit: 200000,
       initialUserMessageChars: 142,

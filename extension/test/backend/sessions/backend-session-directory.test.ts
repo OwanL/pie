@@ -92,7 +92,7 @@ test('backend RPCs use the configured directory while explicit legacy opens keep
       params: { sessionPath: legacyPath },
     }) as { sessionPath: string };
     assert.equal(opened.sessionPath, legacyPath);
-    assert.deepEqual(openCalls, [[legacyPath]]);
+    assert.deepEqual(openCalls, [], 'the stubbed browse payload owns file reading; session.open must not invoke the runtime-promotion seam');
   } finally {
     if (previous === undefined) delete process.env.PI_CODING_AGENT_SESSION_DIR;
     else process.env.PI_CODING_AGENT_SESSION_DIR = previous;

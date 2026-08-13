@@ -29,7 +29,11 @@ test("SubagentParams enum and default metadata remain intact", () => {
 	assert.equal(props.thinkingLevel, undefined);
 	assert.deepEqual(props.userContext.enum, ["latest", "all"]);
 	assert.equal(props.userContext.default, undefined);
-	assert.equal(props.confirmProjectAgents.default, true);
+	assert.equal(
+		props.confirmProjectAgents.default,
+		undefined,
+		"the optional per-call override must remain absent so settings.json can control the default",
+	);
 });
 
 test("userContext guidance binds each mode to its condition within its prompt budget", () => {

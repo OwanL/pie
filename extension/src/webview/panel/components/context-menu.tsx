@@ -37,11 +37,13 @@ export function ContextMenu({
   menu,
   prefs,
   onSetPrefs,
+  onOpenFile,
   onClose,
 }: {
   menu: ContextMenuState;
   prefs: ChatPrefs;
   onSetPrefs: (p: Partial<ChatPrefs>) => void;
+  onOpenFile: (path: string) => void;
   onClose: () => void;
 }) {
   const { ref, pos } = useMenuViewportClamp({
@@ -100,6 +102,37 @@ export function ContextMenu({
   });
 
   const style = `position:fixed;top:${pos.top}px;left:${pos.left}px`;
+
+  if (menu.type === 'filePath') {
+    return (
+      <div ref={ref} class="block-context-menu" role="menu" style={style} onMouseDown={(e) => e.stopPropagation()}>
+        <button
+          class="context-menu-item"
+          role="menuitem"
+          type="button"
+          onClick={() => {
+            onOpenFile(menu.rawData);
+            onClose();
+          }}
+        >
+          <svg class="context-menu-check" width="13" height="13" viewBox="0 0 13 13" aria-hidden="true" style="opacity:0" />
+          Open File
+        </button>
+        <button
+          class="context-menu-item"
+          role="menuitem"
+          type="button"
+          onClick={() => {
+            navigator.clipboard.writeText(menu.rawData);
+            onClose();
+          }}
+        >
+          <svg class="context-menu-check" width="13" height="13" viewBox="0 0 13 13" aria-hidden="true" style="opacity:0" />
+          Copy Path
+        </button>
+      </div>
+    );
+  }
 
   const prefType: ChatPrefContextType | null = menu.type === 'message' ? null : menu.type;
   const checked = prefType ? getChatPrefContextValue(prefs, prefType) : false;

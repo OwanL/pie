@@ -2,6 +2,7 @@ import type { ThinkingLevel, ModelSettings, ModelInfo, ContextWindowUsage } from
 import type { ChatMessage, ToolCall } from './messages.js';
 import type { LiveTurnCheckpoint, ToolPreview } from '../live-pipeline-protocol.js';
 import type { SessionUsageSnapshot } from '../session-usage.js';
+import { SESSION_SNAPSHOT_TOO_LARGE_CODE } from './core.js';
 export type { SessionUsageSnapshot } from '../session-usage.js';
 import type {
   SessionAnalyticsFactors,
@@ -147,6 +148,10 @@ export interface SessionOpenedPayload {
   transcript: ChatMessage[];
   transcriptWindow: TranscriptWindow;
   busy: boolean;
+  /** Whether the backend has materialized the execution runtime for this
+   * session. Cold durable browsing explicitly reports false; hot snapshots
+   * report true. Omission is accepted only for legacy peers and means ready. */
+  runtimeReady?: boolean;
   /** True while the session is running a history-compaction LLM call
    *  (`isStreaming`/`activeRequest` are both false then, so `busy` alone
    *  cannot distinguish compaction from idle). Lets the host restore the
@@ -157,6 +162,21 @@ export interface SessionOpenedPayload {
    * reconstructs the complete in-progress assistant/tool turn. When absent,
    * the backend keeps the durable assistant tail visible as a fail-safe. */
   liveTurnCheckpoint?: LiveTurnCheckpoint;
+  /** Bounded identity retained when transport fitting must omit an oversized
+   * live checkpoint. It lets a host with no prior LiveTurnRecord request the
+   * exact in-memory checkpoint instead of depending on stale local identity. */
+  liveTurnRecoveryIdentity?: {
+    turnId: string;
+    attemptId: string;
+  };
+  /** The full lossless transcript snapshot could not fit even after whole-row
+   * culling. This event is metadata-only: a host with a loaded window preserves
+   * it, while a cold host keeps the explicit empty/gapped window and surfaces
+   * the bounded notice. The durable transcript is never byte-truncated. */
+  snapshotUnavailable?: {
+    code: typeof SESSION_SNAPSHOT_TOO_LARGE_CODE;
+    message: string;
+  };
   selectionToken?: string;
   /** When true, `transcript`/`transcriptWindow` are NOT authoritative — the
    *  host already holds the loaded transcript and must keep its existing

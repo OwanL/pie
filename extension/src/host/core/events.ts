@@ -569,7 +569,7 @@ export interface SessionMetadataChangedEvent {
 }
 
 /** Emitted by `hydrateModelState` to sync the global `modelSettings` (the
- *  persisted default model + thinking level) read-only from the backend into
+ *  persisted default model, provider, and thinking level) read-only from the backend into
  *  ArchState. Unlike `SetModel`, this does NOT switch the focused session's
  *  live model, touch the per-session model badge, or persist anything — it
  *  only corrects ArchState's global default when `settings.get` reports a

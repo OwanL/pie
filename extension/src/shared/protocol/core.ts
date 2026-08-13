@@ -3,7 +3,10 @@
  * extension host and the backend process. The host refuses to start the backend
  * unless the values match.
  */
-export const PROTOCOL_VERSION = 10;
+export const PROTOCOL_VERSION = 14;
+
+/** Stable RPC error returned when a lossless required session snapshot row cannot fit. */
+export const SESSION_SNAPSHOT_TOO_LARGE_CODE = 'SESSION_SNAPSHOT_TOO_LARGE' as const;
 
 /**
  * Wire-protocol version for the host↔webview channel. Bump when changing the

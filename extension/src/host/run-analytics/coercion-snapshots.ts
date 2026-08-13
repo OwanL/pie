@@ -372,6 +372,8 @@ function buildRunSnapshot(candidate: Partial<RunSnapshot>): RunSnapshot {
           : null,
     analyticsFactors: coerceSessionAnalyticsFactors(candidate.analyticsFactors),
     functionalSettings: coerceFunctionalSettings(candidate.functionalSettings),
+    harnessRevision: typeof candidate.harnessRevision === 'string' ? candidate.harnessRevision : undefined,
+    harnessFingerprint: typeof candidate.harnessFingerprint === 'string' ? candidate.harnessFingerprint : undefined,
     ...(candidate.initialUserMessageChars === undefined
       ? {}
       : { initialUserMessageChars: toNonNegativeInteger(candidate.initialUserMessageChars) }),

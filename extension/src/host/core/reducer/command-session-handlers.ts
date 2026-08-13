@@ -2,7 +2,7 @@ import type { ArchState } from '../arch-state.js';
 import type { Command } from '../commands.js';
 import type { ReducerResult } from './helpers.js';
 import { evictSession, removeFromArray, addToArray } from './helpers.js';
-import { getNextVisibleTabPathOnClose, moveOpenTabPath, insertTabRespectingPinnedPrefix, cleanPinnedTabGroups } from '../../../shared/tab-behavior.js';
+import { getNextVisibleTabPathOnClose, moveOpenTabPath, insertTabRespectingPinnedPrefix, cleanPinnedTabGroups, isPendingTabPath } from '../../../shared/tab-behavior.js';
 
 export function handleOpenSession(state: ArchState, cmd: Extract<Command, { kind: 'OpenSession' }>): ReducerResult {
   const { sessionPath, placeholderSummary, selectionToken } = cmd;
@@ -216,14 +216,24 @@ export function handleCloseSession(state: ArchState, cmd: Extract<Command, { kin
     };
     return {
       state: nextState,
-      effects: [{
-        kind: 'PersistTabs',
-        corrId: cmd.corrId,
-        openTabPaths: nextOpenTabPaths,
-        activeSessionPath: nextActivePath,
-        pinnedTabPaths: nextPinnedTabPaths,
-        pinnedTabGroups: nextPinnedTabGroups,
-      }],
+      effects: [
+        {
+          kind: 'PersistTabs',
+          corrId: cmd.corrId,
+          openTabPaths: nextOpenTabPaths,
+          activeSessionPath: nextActivePath,
+          pinnedTabPaths: nextPinnedTabPaths,
+          pinnedTabGroups: nextPinnedTabGroups,
+        },
+        ...(wasActive && nextActivePath && !isPendingTabPath(nextActivePath)
+          ? [{
+              kind: 'NotifySessionViewed' as const,
+              corrId: cmd.corrId,
+              sessionPath: nextActivePath,
+              previousSessionPath: sessionPath,
+            }]
+          : []),
+      ],
     };
   }
 
@@ -261,7 +271,15 @@ export function handleCloseSession(state: ArchState, cmd: Extract<Command, { kin
             ])]
           : undefined,
       },
-      { kind: 'CloseSession', corrId: cmd.corrId, sessionPath, nextPath, privacyMode },
+      { kind: 'CloseSession', corrId: cmd.corrId, sessionPath, nextPath, privacyMode, selectionChanged: wasActive },
+      ...(wasActive && nextActivePath && !isPendingTabPath(nextActivePath)
+        ? [{
+            kind: 'NotifySessionViewed' as const,
+            corrId: cmd.corrId,
+            sessionPath: nextActivePath,
+            previousSessionPath: sessionPath,
+          }]
+        : []),
     ],
   };
 }

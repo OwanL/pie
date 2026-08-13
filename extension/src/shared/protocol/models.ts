@@ -15,6 +15,30 @@ export interface ModelSettings {
   defaultProvider?: string;
 }
 
+/**
+ * Compare model settings for a read-only hydration update.
+ *
+ * Provider identity is part of the model identity when both sides carry it.
+ * Older settings/state snapshots may omit `defaultProvider`, so an omitted
+ * provider remains a wildcard for compatibility with those snapshots.
+ */
+export function modelSettingsMatchForHydration(
+  current: ModelSettings | null | undefined,
+  hydrated: ModelSettings,
+): boolean {
+  if (!current) {
+    return false;
+  }
+
+  const providersMatch = current.defaultProvider === undefined
+    || hydrated.defaultProvider === undefined
+    || current.defaultProvider === hydrated.defaultProvider;
+
+  return current.defaultModel === hydrated.defaultModel
+    && providersMatch
+    && current.defaultThinkingLevel === hydrated.defaultThinkingLevel;
+}
+
 export type ModelInputKind = 'text' | 'image';
 
 /**

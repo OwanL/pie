@@ -10,6 +10,7 @@ This folder contains active design contracts, implementation plans, and operatio
 
 ## Active plans (in progress)
 
+- [SESSION_RUNTIME_ISOLATION_PLAN.md](SESSION_RUNTIME_ISOLATION_PLAN.md) — P0 implementation handoff for a lightweight coordinator plus one process-isolated worker per hot root session, preserving cold browse/control liveness and complete demand-driven subagent detail.
 - [HANDOFF_SUBAGENT_PROVIDER_RESILIENCE.md](HANDOFF_SUBAGENT_PROVIDER_RESILIENCE.md) — P0 implementation handoff replacing total-duration subagent timeouts with progress-aware phase leases, bounded local settlement, provider circuit breaking, orphan cleanup, and queued-message liveness.
 
 ## Implemented design references

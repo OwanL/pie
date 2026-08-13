@@ -131,7 +131,7 @@ export function useMessageItemDerived({
     // AssistantParts when combinedParts exists). Compaction summaries likewise
     // parse only after their collapsed card is opened.
     if ((message.role === 'assistant' && combinedParts) || message.customType === 'compaction-summary') return '';
-    return renderMarkdown(combinedMarkdown);
+    return renderMarkdown(combinedMarkdown, true, message.role === 'assistant');
   }, [message.role, message.customType, combinedParts, combinedMarkdown]);
   const getMessageRaw = useCallback(
     () => buildMessageRaw(message, combinedMarkdown, combinedThinking, combinedToolCalls, combinedParts as ReturnType<typeof assistantPartsFromMessage>),

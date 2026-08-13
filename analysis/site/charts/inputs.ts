@@ -4,6 +4,7 @@ import { CHART_COLORS, categoricalHeight, modelFamilyKey } from '../lib.ts';
 export const inputCharts: ChartEntry[] = [
   {
     id: 'chart-multimodal-inputs',
+    runCohort: 'all-history',
     render: async (ctx: ChartContext) => {
       const completed = ctx.runs.filter((r) => r.status !== 'open');
       const map = new Map<string, { images: number; bytes: number; runs: number }>();

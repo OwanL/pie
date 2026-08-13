@@ -135,6 +135,25 @@ function isContextWindowUsage(value: unknown): value is ContextWindowUsage {
   );
 }
 
+function isOptionalLiveTurnRecoveryIdentity(value: unknown): boolean {
+  return value === undefined || (
+    isObject(value)
+    && isString(value.turnId)
+    && value.turnId.length > 0
+    && isString(value.attemptId)
+    && value.attemptId.length > 0
+  );
+}
+
+function isOptionalSnapshotUnavailable(value: unknown): boolean {
+  return value === undefined || (
+    isObject(value)
+    && value.code === 'SESSION_SNAPSHOT_TOO_LARGE'
+    && isString(value.message)
+    && value.message.length > 0
+  );
+}
+
 // ─── per-event payload guards ────────────────────────────────────────────────
 
 export function isSessionOpenedPayload(value: unknown): value is SessionOpenedPayload {
@@ -144,6 +163,9 @@ export function isSessionOpenedPayload(value: unknown): value is SessionOpenedPa
     && isChatMessageArray(value.transcript)
     && isTranscriptWindow(value.transcriptWindow)
     && isBoolean(value.busy)
+    && (value.runtimeReady === undefined || isBoolean(value.runtimeReady))
+    && isOptionalLiveTurnRecoveryIdentity(value.liveTurnRecoveryIdentity)
+    && isOptionalSnapshotUnavailable(value.snapshotUnavailable)
   );
 }
 

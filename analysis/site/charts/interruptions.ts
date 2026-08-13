@@ -4,6 +4,7 @@ import { CHART_COLORS } from '../lib.ts';
 export const interruptionCharts: ChartEntry[] = [
   {
     id: 'chart-interruption-signals',
+    runCohort: 'current-harness',
     render: async (ctx: ChartContext) => {
       const completed = ctx.runs.filter((r) => r.status !== 'open');
       const interrupted = completed.filter((r) => r.interruptedCount > 0).length;

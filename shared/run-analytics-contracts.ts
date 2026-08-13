@@ -466,6 +466,19 @@ export interface RunSnapshot {
   analyticsFactors: SessionAnalyticsFactors | null;
   /** Functional settings snapshot captured at run start; null for runs recorded before tracking existed. */
   functionalSettings: FunctionalSettingsSnapshot | null;
+  /**
+   * Stable identifier of the harness (extension + agent stack) that recorded
+   * this run, stamped at run start. Absent on historical runs recorded before
+   * stamping existed; consumers attribute runs to the current harness vs.
+   * other harnesses via the cohort classifier (see `analysis/scripts/cohorts.ts`).
+   */
+  harnessRevision?: string;
+  /**
+   * Deterministic, privacy-safe digest of the harness revision plus the
+   * analytics factors / functional settings already captured on this snapshot.
+   * The fingerprint adds no further raw treatment data. Absent on historical runs.
+   */
+  harnessFingerprint?: string;
   /** Privacy-safe size of the user-authored message that started this run, in Unicode code points. Optional for historical snapshots; content is never stored here. */
   initialUserMessageChars?: number;
   sendCount: number;
@@ -540,3 +553,11 @@ export interface RunSnapshot {
 
 /** Schema version stamped on every persisted run-analytics artifact. */
 export const RUN_ANALYTICS_SCHEMA_VERSION = 1;
+
+/**
+ * Revision stamped on every run recorded by the current harness. Stable by
+ * design: bump it only when the harness materially changes, so previously
+ * stamped runs classify as `incompatible` rather than silently drifting into
+ * the current cohort.
+ */
+export const CURRENT_HARNESS_REVISION = 'pie-harness-2026-08';

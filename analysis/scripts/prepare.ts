@@ -28,6 +28,7 @@ import {
   type VerificationCommandKind,
 } from './contracts.ts';
 import { existingHashPrefix, sessionPathHash } from './hash.ts';
+import { classifyHarnessCohort } from './cohorts.ts';
 import { loadModelPricingMap, estimateRunCostUsd, type TokenUsageForCost } from './pricing.ts';
 import { loadModelFamilyMap, resolveModelFamily, resolveModelProvider } from './model-family.ts';
 import { normalizeSessionPath } from './transcript-source.ts';
@@ -378,6 +379,7 @@ function prepareRun(
     : null;
 
   const prepassTokens = aggregateSkillPruningPrepassTokens(run);
+  const harnessCohort = classifyHarnessCohort(run);
 
   return {
     runId: run.runId,
@@ -385,6 +387,10 @@ function prepareRun(
     sessionId: identity.sessionId,
     identityFallback: identity.identityFallback,
     sessionPathHash: sessionPathHash(run.sessionPath),
+    harnessRevision: normalizeNullableText(run.harnessRevision),
+    harnessFingerprint: normalizeNullableText(run.harnessFingerprint),
+    harnessStatus: harnessCohort.status,
+    isCurrentHarness: harnessCohort.isCurrentHarness,
     status: run.status,
     startedAt: run.startedAt,
     startedDay,

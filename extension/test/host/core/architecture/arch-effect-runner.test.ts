@@ -151,6 +151,37 @@ test('EffectRunner rolls privacy mode back and notifies when analytics cleanup f
     && call.message === 'privacy analytics cleanup failed'));
 });
 
+test('EffectRunner grants only cold promotion a longer pre-ack send budget', async () => {
+  const observed: Array<{ sessionPath: string; timeoutMs?: number }> = [];
+  let runtimeReady = false;
+  const backend: EffectRunnerDeps['backend'] = {
+    async request<T>(_method: string, params?: unknown, options?: import('../../../../src/shared/request-tracker').RequestOptions): Promise<T> {
+      observed.push({
+        sessionPath: (params as { sessionPath: string }).sessionPath,
+        ...(options?.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+      });
+      return { requestId: `request-${observed.length}` } as T;
+    },
+  };
+  const { deps } = makeEffectRunnerDeps({
+    backend,
+    serviceOverrides: { isSessionRuntimeReady: () => runtimeReady },
+  });
+  const runner = new EffectRunner(deps);
+
+  runner.run({ kind: 'SendRpc', corrId: 'cold-send', sessionPath: '/cold', text: 'cold', inputs: [], composedText: 'cold', localId: 'local-cold' });
+  await settle();
+  runtimeReady = true;
+  runner.run({ kind: 'SendRpc', corrId: 'hot-send', sessionPath: '/hot', text: 'hot', inputs: [], composedText: 'hot', localId: 'local-hot' });
+  await settle();
+
+  assert.deepEqual(observed, [
+    { sessionPath: '/cold', timeoutMs: 60_000 },
+    { sessionPath: '/hot' },
+  ]);
+  runner.dispose();
+});
+
 test('EffectRunner routes CompactRpc through the target session queue', async () => {
   const { deps, calls, events } = makeEffectRunnerDeps();
   const runner = new EffectRunner(deps);

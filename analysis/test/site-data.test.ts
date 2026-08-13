@@ -3,7 +3,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import test from 'node:test';
 
-import { SITE_DATA_FILE_NAMES } from '../scripts/contracts.ts';
+import { CURRENT_HARNESS_REVISION, SITE_DATA_FILE_NAMES } from '../scripts/contracts.ts';
 import { buildSiteDataBundle, readSiteDataBundle, validateSiteDataBundle, writeSiteData } from '../scripts/site-data.ts';
 import { prepareSourceAnalytics } from '../scripts/prepare.ts';
 import { deepClone, loadFixture, withTempDir } from './helpers.ts';
@@ -110,7 +110,9 @@ test('site data validation rejects malformed tool usage and diagnostics payloads
 });
 
 test('leaderboard validation requires V2 review evidence, current tiers, and valid intervals', async () => {
-  const bundle = buildSiteDataBundle(prepareSourceAnalytics(await loadFixture()));
+  const fixture = deepClone(await loadFixture());
+  for (const run of [...fixture.completedRuns, ...fixture.openRuns]) run.harnessRevision = CURRENT_HARNESS_REVISION;
+  const bundle = buildSiteDataBundle(prepareSourceAnalytics(fixture));
   const missingEvidence = deepClone(bundle) as any;
   delete missingEvidence.modelLeaderboard.rows[0].reviewEvidenceMass;
   assert.throws(() => validateSiteDataBundle(missingEvidence), /reviewEvidenceMass is invalid/);

@@ -4,6 +4,7 @@ import { CHART_COLORS, categoricalHeight, selectedRunIds } from '../lib.ts';
 export const fileTypeCharts: ChartEntry[] = [
   {
     id: 'chart-file-type-activity',
+    runCohort: 'all-history',
     render: async (ctx: ChartContext) => {
       const runIds = selectedRunIds(ctx.runs);
       const map = new Map<string, { read: number; write: number; edit: number; runs: Set<string> }>();
@@ -57,6 +58,7 @@ export const fileTypeCharts: ChartEntry[] = [
   },
   {
     id: 'chart-files-reviewed',
+    runCohort: 'current-harness',
     render: async (ctx: ChartContext) => {
       // Distinct files reviewed (read) per run — the breadth-of-investigation signal that
       // mirrors `editRevisitRate`'s churn signal. Only runs with attributable per-file reads

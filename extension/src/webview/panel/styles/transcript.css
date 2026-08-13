@@ -1050,6 +1050,28 @@
   font-size: 12px;
 }
 
+/* Inline markdown paths are rendered as delegated link targets because the
+   markdown body itself is mounted with dangerouslySetInnerHTML. */
+.message-body .file-path-link {
+  cursor: pointer;
+}
+
+.message-body code.file-path-link {
+  color: var(--panel-link);
+}
+
+.message-body .file-path-link:hover,
+.message-body .file-path-link:focus-visible {
+  color: var(--panel-foreground);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.message-body code.file-path-link:focus-visible {
+  outline: 1px solid var(--panel-accent);
+  outline-offset: 2px;
+}
+
 .message-body pre code {
   background: transparent;
   padding: 0;

@@ -128,6 +128,12 @@ export interface SessionOpenParams extends SessionPathParams {
   transcript?: TranscriptMode;
 }
 
+export interface SessionViewedParams extends SessionPathParams {
+  /** Host-observed predecessor for this actual visual selection transition.
+   * `null` means no session was previously selected. */
+  previousSessionPath: string | null;
+}
+
 export interface SessionDuplicateParams {
   sessionPath: string;
   selectionToken?: string;
@@ -216,6 +222,20 @@ export function validateSessionOpen(params: unknown): SessionOpenParams {
     selectionToken: readSelectionToken('session.open', params),
     transcript: transcript as SessionOpenParams['transcript'],
   };
+}
+
+export function validateSessionViewed(params: unknown): SessionViewedParams {
+  if (!isObj(params)) fail('session.viewed', 'expected an object');
+  const { sessionPath } = validateSessionPath('session.viewed', params);
+  const previous = params['previousSessionPath'];
+  if (previous !== null && typeof previous !== 'string') {
+    fail('session.viewed', 'previousSessionPath must be a string or null');
+  }
+  if (typeof previous === 'string') {
+    if (!previous) fail('session.viewed', 'previousSessionPath must be non-empty when provided');
+    rejectPendingSessionPath('session.viewed', previous);
+  }
+  return { sessionPath, previousSessionPath: previous as string | null };
 }
 
 export interface LoadTranscriptPageParams extends SessionPathParams {

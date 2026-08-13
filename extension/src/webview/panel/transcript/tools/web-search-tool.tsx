@@ -132,7 +132,7 @@ function WebSearchBody({ toolCall, parsed }: WebSearchBodyProps) {
   // keep it as cheap plain text so a long answer doesn't re-run marked.parse
   // on every delta; it settles into formatted prose on completion.
   const resultHtml = useMemo(
-    () => (!isRunning && resultText !== undefined ? renderMarkdown(resultText) : ''),
+    () => (!isRunning && resultText !== undefined ? renderMarkdown(resultText, true, false) : ''),
     [isRunning, resultText],
   );
 

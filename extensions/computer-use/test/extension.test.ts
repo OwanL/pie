@@ -48,6 +48,25 @@ test('extension registers exactly one sequential computer tool and session-owned
   assert.ok(handlers.has('session_shutdown'));
 });
 
+test('repeated module evaluations install process teardown only once', () => {
+  // The pi loader re-evaluates the extension module on every session create; the
+  // install-once flag must survive re-evaluation or exit/beforeExit listeners
+  // accumulate (MaxListenersExceededWarning). Earlier tests may already have
+  // installed teardown, so assert the invariant: a first load adds at most one
+  // listener per signal and further loads add none.
+  const exitBefore = process.listenerCount('exit');
+  const beforeExitBefore = process.listenerCount('beforeExit');
+  registeredTool();
+  const exitAfterFirst = process.listenerCount('exit');
+  const beforeExitAfterFirst = process.listenerCount('beforeExit');
+  registeredTool();
+  registeredTool();
+  assert.equal(process.listenerCount('exit'), exitAfterFirst);
+  assert.equal(process.listenerCount('beforeExit'), beforeExitAfterFirst);
+  assert.ok(exitAfterFirst - exitBefore <= 1);
+  assert.ok(beforeExitAfterFirst - beforeExitBefore <= 1);
+});
+
 test('disabled and validation failures reject with bounded computer errors instead of pseudo-error results', async () => {
   const tool = registeredTool(); const previous = process.env.PIE_EXTENSION_TOGGLES_JSON;
   process.env.PIE_EXTENSION_TOGGLES_JSON = JSON.stringify({ 'computer-use': false });

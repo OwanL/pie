@@ -4,9 +4,10 @@ export function serializeJsonLine(value: unknown): string {
   return `${JSON.stringify(value)}\n`;
 }
 
-/** Shared JSONL record limit. Twenty MiB of raw image data expands to about
- * 26.7 MiB after base64 encoding; 32 MiB leaves room for the RPC envelope. */
+/** Shared hard limit for one complete UTF-8 JSONL record, including LF. */
 export const JSONL_MAX_LINE_BYTES = 32 * 1024 * 1024;
+/** Producer budget reserved for the final RPC/event envelope and transport diagnostics. */
+export const JSONL_ENVELOPE_HEADROOM_BYTES = 2 * 1024 * 1024;
 export const JSONL_OVERFLOW_PREVIEW_BYTES = 256;
 
 export interface JsonlLineReaderOptions {

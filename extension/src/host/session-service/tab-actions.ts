@@ -7,6 +7,7 @@ import { auditLog, bootLog } from '../util/audit';
 import {
   isPendingTabPath,
 } from '../../shared/tab-behavior';
+import { toErrorMessage } from '../../shared/error-message';
 import type { SessionSummary } from '../../shared/protocol';
 import type { ScheduleRender } from './types';
 import { SessionServiceState } from './state';
@@ -20,6 +21,11 @@ interface SessionTabActionsOptions {
   state: SessionServiceState;
   getArchState: () => ArchState;
   dispatchArch: (event: Event) => void;
+  /** Runtime-free backend notification for host-local visual transitions. */
+  notifySessionViewed?: (
+    sessionPath: string,
+    previousSessionPath: string | null,
+  ) => Promise<unknown>;
 }
 
 export class SessionTabActions {
@@ -29,6 +35,8 @@ export class SessionTabActions {
   private readonly state: SessionServiceState;
   private readonly getArchState: () => ArchState;
   private readonly dispatchArch: (event: Event) => void;
+  private readonly notifySessionViewed?: SessionTabActionsOptions['notifySessionViewed'];
+  private visualTransitionEpoch = 0;
 
   constructor(options: SessionTabActionsOptions) {
     this.context = options.context;
@@ -37,6 +45,45 @@ export class SessionTabActions {
     this.state = options.state;
     this.getArchState = options.getArchState;
     this.dispatchArch = options.dispatchArch;
+    this.notifySessionViewed = options.notifySessionViewed;
+  }
+
+  private notifyViewedTransition(
+    sessionPath: string,
+    previousSessionPath: string | null,
+    transitionEpoch: number,
+  ): void {
+    if (!this.notifySessionViewed) return;
+    const resolvedPreviousSessionPath = previousSessionPath && !isPendingTabPath(previousSessionPath)
+      ? previousSessionPath
+      : null;
+    let request: Promise<unknown>;
+    try {
+      // BackendClient writes the JSONL request before returning this promise,
+      // preserving click→execute order without awaiting backend work or
+      // delaying the local visual selection.
+      request = this.notifySessionViewed(sessionPath, resolvedPreviousSessionPath);
+    } catch (error) {
+      request = Promise.reject(error);
+    }
+    void request.catch((error) => {
+      auditLog('session-service', 'session.viewed.failed', {
+        sessionPath,
+        previousSessionPath: resolvedPreviousSessionPath,
+        message: toErrorMessage(error),
+      });
+      // Selection remains host-authoritative. Surface only a still-current
+      // failure; a stale rejection from an older click must not replace the
+      // notice belonging to a newer tab.
+      if (this.visualTransitionEpoch === transitionEpoch
+        && this.getArchState().sessions.activeSessionPath === sessionPath) {
+        this.dispatchArch({
+          kind: 'NoticeShown',
+          notice: `Conversation selected, but backend view tracking failed: ${toErrorMessage(error)}`,
+        });
+        this.scheduleRender();
+      }
+    });
   }
 
   createNewSession(): string {
@@ -55,6 +102,7 @@ export class SessionTabActions {
     // synchronously so the composer fallback caller can address the new
     // session immediately.
     const pendingPath = this.state.createPendingSessionPath();
+    this.visualTransitionEpoch += 1;
     const cwd = this.getArchState().sessions.workspaceCwd ?? '';
     const selectionToken = this.state.beginSelectionRequest(pendingPath, pendingPath);
 
@@ -90,6 +138,9 @@ export class SessionTabActions {
   }
 
   openSession(sessionPath: string): void {
+    const transitionEpoch = this.getArchState().sessions.activeSessionPath !== sessionPath
+      ? ++this.visualTransitionEpoch
+      : this.visualTransitionEpoch;
     // Pending paths are host-only sentinels. A tab click may race the
     // create/duplicate response; select the existing optimistic tab, but never
     // pass its sentinel to session.open. The SDK would otherwise normalize it
@@ -110,6 +161,12 @@ export class SessionTabActions {
       this.scheduleRender();
       return;
     }
+
+    // A foreground selection has priority over restored/background hydration.
+    // Cancel both queued and in-flight preload work for this path before the
+    // new selection epoch is minted; the preload record fence suppresses any
+    // stale session.opened payload that resolves later.
+    this.state.cancelPreload(sessionPath);
 
     // Host-side entry: generate the impure bits the reducer can't (the data
     // epoch + Date.now placeholder modifiedAt + the selection token), then
@@ -143,18 +200,20 @@ export class SessionTabActions {
       && existing
       && !existing.isPlaceholder
       && transcriptLoaded
-      && this.state.isSessionRuntimeKnown(sessionPath)
+      && this.state.isSessionSnapshotKnown(sessionPath)
     ) {
       // A previous cold open may still be queued/in flight. Keep its request
       // record for operation cleanup, but revoke its right to reactivate that
       // older target when session.opened eventually arrives.
       this.state.supersedeSelectionOwnership();
       if (archState.sessions.activeSessionPath !== sessionPath) {
+        const previousSessionPath = archState.sessions.activeSessionPath;
         const corrId = crypto.randomUUID();
         this.dispatchArch({
           kind: 'Command',
           cmd: { kind: 'SelectSession', corrId, sessionPath },
         });
+        this.notifyViewedTransition(sessionPath, previousSessionPath, transitionEpoch);
         this.dispatchArch({
           kind: 'Command',
           cmd: {
@@ -224,7 +283,7 @@ export class SessionTabActions {
     this.scheduleRender();
   }
 
-  async closeSession(sessionPath: string, nextPath: string | null): Promise<void> {
+  async closeSession(sessionPath: string, nextPath: string | null, selectionChanged = false): Promise<void> {
     // Thin host-side cleanup — the reducer already did the tab-close +
     // per-session map clearing + select-next-tab (via the CloseSession Command
     // handler, which computed nextPath and passed it through the Effect). This
@@ -259,6 +318,13 @@ export class SessionTabActions {
       nextPath,
       sessionPath,
     });
+
+    if (selectionChanged) {
+      // The reducer emits the runtime-free backend notification for a resolved
+      // successor. This host-local epoch only invalidates failures from older
+      // fast-path notifications after the close changed visual selection.
+      this.visualTransitionEpoch += 1;
+    }
 
     this.state.clearSelectionRequestsForPath(sessionPath);
     this.runObserver.onSessionClosed(sessionPath);
@@ -315,6 +381,7 @@ export class SessionTabActions {
     }
 
     const pendingPath = this.state.createPendingSessionPath();
+    this.visualTransitionEpoch += 1;
     const selectionToken = this.state.beginSelectionRequest(pendingPath, pendingPath);
 
     const placeholderSummary: SessionSummary = {

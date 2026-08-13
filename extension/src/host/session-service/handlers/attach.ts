@@ -42,13 +42,27 @@ export function applySessionOpenedPayload(
 
   logSessionOpened(payload, deps, flags);
 
-  handlePendingPathReplacement(deps, flags.selectionRequest, session.path);
+  handlePendingPathReplacement(
+    deps,
+    flags.selectionRequest,
+    session.path,
+    session.identityFallback === true ? undefined : session.sessionId?.trim() || undefined,
+  );
 
   const transcriptResolution = resolveAndDispatch(payload, deps, session.path, flags.staleSessionData);
 
   applyPostDispatchState(deps, payload, session.path, flags, transcriptResolution.transcript);
 
-  finalizeSessionOpening(deps, session.path, selectionToken);
+  if (payload.snapshotUnavailable) {
+    deps.dispatchArch({
+      kind: 'Error',
+      sessionPath: session.path,
+      error: payload.snapshotUnavailable.message,
+      detail: `${payload.snapshotUnavailable.code}: the durable transcript was not truncated for transport.`,
+    });
+  }
+
+  finalizeSessionOpening(deps, payload);
 }
 
 function computeOpeningFlags(payload: SessionOpenedPayload, deps: ApplySessionOpenedDeps) {
@@ -97,6 +111,7 @@ function handlePendingPathReplacement(
   deps: ApplySessionOpenedDeps,
   selectionRequest: ReturnType<typeof computeOpeningFlags>['selectionRequest'],
   sessionPath: string,
+  stableSessionId: string | undefined,
 ): void {
   if (!selectionRequest?.pendingPath || selectionRequest.pendingPath === sessionPath) {
     return;
@@ -110,7 +125,7 @@ function handlePendingPathReplacement(
     newSessionPath: sessionPath,
   });
 
-  deps.runObserver.replaceSessionPath(pendingPath, sessionPath);
+  deps.runObserver.replaceSessionPath(pendingPath, sessionPath, stableSessionId);
   deps.state.clearSessionScope(pendingPath, true);
 }
 
@@ -138,13 +153,14 @@ function resolveAndDispatch(
   // transcript still wins.
   const hostRunning = deps.getArchState().sessions.runningSessionPaths.includes(sessionPath);
   const preserveBusy = payload.busy || staleSessionData || hostRunning;
+  const transcriptUnavailable = payload.snapshotUnavailable !== undefined;
   // Skip-transcript path: the backend omitted the tail window because the
   // host requested `transcript: 'skip'` (it already has the transcript loaded
   // and the session is idle). Keep the host's existing transcript + window
   // instead of merging/replacing with the empty incoming snapshot — otherwise
   // the view would clear. File-change derivation below uses the kept transcript.
   const existingWindow = deps.getArchState().transcript.windowBySession[sessionPath];
-  const transcriptResolution = payload.transcriptSkipped && existingWindow
+  const transcriptResolution = (payload.transcriptSkipped || transcriptUnavailable) && existingWindow
     ? { preserveLocal: true, transcript: localTranscript, transcriptWindow: existingWindow, aliases: [] as Array<{ aliasId: string; canonicalId: string }> }
     : resolveSessionOpenedTranscript({
         busy: preserveBusy,
@@ -201,10 +217,16 @@ function applyPostDispatchState(
 
 function finalizeSessionOpening(
   deps: ApplySessionOpenedDeps,
-  sessionPath: string,
-  selectionToken: SessionOpenedPayload['selectionToken'],
+  payload: SessionOpenedPayload,
 ): void {
-  deps.state.markSessionRuntimeKnown(sessionPath);
+  const sessionPath = payload.session.path;
+  const selectionToken = payload.selectionToken;
+  deps.state.markSessionSnapshotKnown(sessionPath);
+  // Protocol-v13 explicitly distinguishes durable browse hydration from an
+  // execution runtime. Omission remains legacy-compatible and means ready.
+  if (payload.runtimeReady !== false) {
+    deps.state.markSessionRuntimeKnown(sessionPath);
+  }
   deps.state.touchSessionTranscript(sessionPath);
   deps.state.evictInactiveTranscriptWindows();
   deps.state.finishSelectionRequest(selectionToken);
@@ -259,6 +281,11 @@ export function handleBusyChangedPayload(
     running: payload.busy,
   });
   deps.runObserver.onBusyChanged(sessionPath, payload.busy);
+  // The reducer has now applied the authoritative host running state. If the
+  // last generating session became idle, deterministically resume the FIFO
+  // background preload pump; the pump re-checks the full running set before
+  // launching anything.
+  if (!payload.busy) deps.state.resumePreloads();
 
   // Clear pending extension UI request when the session finishes.
   if (!payload.busy) {

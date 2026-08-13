@@ -81,9 +81,9 @@ export function readAlwaysParentModel(): boolean {
 
 /**
  * Reads the `subagent.confirmProjectAgents` value from a settings.json file.
- * Returns undefined when the file or key is absent, so callers fall back to
- * the per-call parameter (which itself defaults to true). A per-call
- * `confirmProjectAgents` value always takes precedence over this setting.
+ * Returns undefined when the file or key is absent, so callers ultimately
+ * fall back to true. An explicit per-call `confirmProjectAgents` value always
+ * takes precedence over this setting.
  *
  * Exported separately from `readSubagentConfirmDefault` so the parsing logic
  * can be unit-tested against an arbitrary path.

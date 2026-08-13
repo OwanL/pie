@@ -11,6 +11,7 @@ import {
   validateSessionDuplicate,
   validateSessionOpen,
   validateSessionPath,
+  validateSessionViewed,
   validateSettingsSet,
   validateSystemPromptTogglesSet,
   validateTruncateAfter,
@@ -39,6 +40,23 @@ test('session create/open validators reject invalid payloads and selection token
   assert.throws(() => validateSessionCreate({ cwd: 123 }), /cwd must be a string/);
   assert.throws(() => validateSessionCreate({ selectionToken: 123 }), /selectionToken must be a string/);
   assert.throws(() => validateSessionOpen({ sessionPath: '/repo/session.jsonl', selectionToken: 123 }), /selectionToken must be a string/);
+});
+
+test('session viewed validator requires an explicit resolved predecessor or null', () => {
+  assert.deepEqual(validateSessionViewed({
+    sessionPath: '/repo/b.jsonl',
+    previousSessionPath: '/repo/a.jsonl',
+  }), {
+    sessionPath: '/repo/b.jsonl',
+    previousSessionPath: '/repo/a.jsonl',
+  });
+  assert.deepEqual(validateSessionViewed({ sessionPath: '/repo/a.jsonl', previousSessionPath: null }), {
+    sessionPath: '/repo/a.jsonl', previousSessionPath: null,
+  });
+  assert.throws(() => validateSessionViewed({ sessionPath: '/repo/a.jsonl' }), /string or null/);
+  assert.throws(() => validateSessionViewed({
+    sessionPath: '/repo/a.jsonl', previousSessionPath: '__pending__:1-abc',
+  }), /resolved session/);
 });
 
 test('session duplicate validator requires a sessionPath and optionally accepts selectionToken', () => {

@@ -118,6 +118,8 @@ interface MessageItemInnerProps {
   combinedParts: ReturnType<typeof assistantPartsFromMessage> | undefined;
   renderableUserParts: ReturnType<typeof getRenderableUserParts> | undefined;
   prefs: ChatPrefs;
+  workingDirectory: string | null;
+  onOpenFile: (path: string) => void;
   renderToolCall: RenderToolCall;
   onContextMenu: TranscriptContextMenuHandler;
   messageBodyRef: RefObject<HTMLDivElement>;
@@ -150,6 +152,8 @@ export function MessageItemInner({
   combinedParts,
   renderableUserParts,
   prefs,
+  workingDirectory,
+  onOpenFile,
   renderToolCall,
   onContextMenu,
   messageBodyRef,
@@ -218,6 +222,8 @@ export function MessageItemInner({
             html={html}
             isCurrentlyStreaming={isCurrentlyStreaming}
             messageBodyRef={messageBodyRef}
+            workingDirectory={workingDirectory}
+            onOpenFile={onOpenFile}
             prefs={prefs}
             renderToolCall={renderToolCall}
             onContextMenu={onContextMenu}

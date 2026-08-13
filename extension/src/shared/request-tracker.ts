@@ -18,12 +18,16 @@
  */
 
 /** Options for an in-flight request. The per-call `timeoutMs` overrides the
- *  caller-supplied method default; `signal` aborts the request cleanly. */
+ *  caller-supplied method default; `signal` aborts the local waiter cleanly. */
 export interface RequestOptions {
   /** Per-call timeout budget (ms). Overrides the method default. */
   timeoutMs?: number;
-  /** Abort signal — aborting rejects the request with a cancel error. */
+  /** Abort signal — aborting rejects the local request waiter. */
   signal?: AbortSignal;
+  /** Internal transport-settlement hook. When supplied, local cancellation or
+   * timeout retains correlation bookkeeping until a backend response, write
+   * failure, or backend shutdown proves the physical request has settled. */
+  onTransportSettled?: () => void;
 }
 
 /** A cancel error produced by the tracker's abort path. Carries a
@@ -50,59 +54,78 @@ export class RequestTracker<TResult = unknown> {
     {
       resolve: (value: TResult) => void;
       reject: (error: Error) => void;
-      timeout: ReturnType<typeof setTimeout>;
+      timeout?: ReturnType<typeof setTimeout>;
       signal?: AbortSignal;
       onAbort?: () => void;
+      onTransportSettled?: () => void;
+      applicationSettled: boolean;
     }
   >();
 
-  create(id: string, timeoutMs: number, signal?: AbortSignal): Promise<TResult> {
+  create(
+    id: string,
+    timeoutMs: number,
+    signal?: AbortSignal,
+    onTransportSettled?: () => void,
+  ): Promise<TResult> {
     return new Promise<TResult>((resolve, reject) => {
       const entry: {
         resolve: (value: TResult) => void;
         reject: (error: Error) => void;
-        timeout: ReturnType<typeof setTimeout>;
+        timeout?: ReturnType<typeof setTimeout>;
         signal?: AbortSignal;
         onAbort?: () => void;
+        onTransportSettled?: () => void;
+        applicationSettled: boolean;
       } = {
         resolve,
         reject,
-        // Assigned below; the closures capture `entry` so they read the real
-        // timeout once it is scheduled.
-        timeout: undefined as unknown as ReturnType<typeof setTimeout>,
+        timeout: undefined,
         signal,
         onAbort: undefined,
+        onTransportSettled,
+        applicationSettled: false,
       };
 
-      // Abort path: a caller-owned cancel hook (Brief E interrupt / session
-      // close via rejectAll is a separate path). Detaches its own listener.
+      const detachAbort = (): void => {
+        if (entry.signal && entry.onAbort) {
+          entry.signal.removeEventListener('abort', entry.onAbort);
+        }
+      };
+
+      // Abort rejects the caller immediately. For callers that need physical
+      // concurrency accounting, retain a correlation tombstone until the
+      // backend transport actually settles; JSON-RPC cancellation is local.
       const onAbort = (): void => {
-        if (!this.pending.has(id)) return;
-        clearTimeout(entry.timeout);
-        this.pending.delete(id);
-        if (entry.signal && entry.onAbort) {
-          entry.signal.removeEventListener('abort', entry.onAbort);
-        }
+        if (!this.pending.has(id) || entry.applicationSettled) return;
+        if (entry.timeout) clearTimeout(entry.timeout);
+        entry.timeout = undefined;
+        detachAbort();
+        entry.applicationSettled = true;
         entry.reject(cancelledError(id));
+        if (!entry.onTransportSettled) this.pending.delete(id);
       };
 
-      // Timeout path: owns the pre-ack window. On fire, reject + detach.
+      // Timeout owns the local pre-ack window. A transport-settlement observer
+      // keeps a tombstone after timeout for the same physical-slot guarantee.
       entry.timeout = setTimeout(() => {
-        this.pending.delete(id);
-        if (entry.signal && entry.onAbort) {
-          entry.signal.removeEventListener('abort', entry.onAbort);
-        }
+        entry.timeout = undefined;
+        detachAbort();
+        entry.applicationSettled = true;
         reject(new Error(`Timed out waiting for response to ${id}`));
+        if (!entry.onTransportSettled) this.pending.delete(id);
       }, timeoutMs);
 
       if (signal) {
+        entry.onAbort = onAbort;
         if (signal.aborted) {
-          // Already aborted: reject synchronously without storing the entry.
-          clearTimeout(entry.timeout);
+          if (entry.timeout) clearTimeout(entry.timeout);
+          entry.timeout = undefined;
+          entry.applicationSettled = true;
           reject(cancelledError(id));
+          if (onTransportSettled) this.pending.set(id, entry);
           return;
         }
-        entry.onAbort = onAbort;
         signal.addEventListener('abort', onAbort);
       }
 
@@ -116,12 +139,16 @@ export class RequestTracker<TResult = unknown> {
       return false;
     }
 
-    clearTimeout(entry.timeout);
+    if (entry.timeout) clearTimeout(entry.timeout);
     if (entry.signal && entry.onAbort) {
       entry.signal.removeEventListener('abort', entry.onAbort);
     }
     this.pending.delete(id);
-    entry.resolve(value);
+    if (!entry.applicationSettled) {
+      entry.applicationSettled = true;
+      entry.resolve(value);
+    }
+    entry.onTransportSettled?.();
     return true;
   }
 
@@ -131,23 +158,31 @@ export class RequestTracker<TResult = unknown> {
       return false;
     }
 
-    clearTimeout(entry.timeout);
+    if (entry.timeout) clearTimeout(entry.timeout);
     if (entry.signal && entry.onAbort) {
       entry.signal.removeEventListener('abort', entry.onAbort);
     }
     this.pending.delete(id);
-    entry.reject(error);
+    if (!entry.applicationSettled) {
+      entry.applicationSettled = true;
+      entry.reject(error);
+    }
+    entry.onTransportSettled?.();
     return true;
   }
 
   rejectAll(error: Error): void {
     for (const [id, entry] of this.pending.entries()) {
-      clearTimeout(entry.timeout);
+      if (entry.timeout) clearTimeout(entry.timeout);
       if (entry.signal && entry.onAbort) {
         entry.signal.removeEventListener('abort', entry.onAbort);
       }
       this.pending.delete(id);
-      entry.reject(error);
+      if (!entry.applicationSettled) {
+        entry.applicationSettled = true;
+        entry.reject(error);
+      }
+      entry.onTransportSettled?.();
     }
   }
 }

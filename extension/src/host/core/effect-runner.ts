@@ -115,6 +115,9 @@ export interface SessionServiceLike {
    *  `session.opened` to update host state, so no *Result event is expected. */
   setSystemPromptToggles(sessionPath: string, disabledEntries: readonly string[]): Promise<void>;
   bumpSessionDataEpoch(sessionPath: string): void;
+  /** Current-generation runtime readiness. Cold sends receive only the service
+   * initialization acknowledgement budget; hot sends retain the short guard. */
+  isSessionRuntimeReady?(sessionPath: string): boolean;
   /** Notify the run-analytics observer that a session's model config changed
    *  (disk-persisting side effect, not ArchState). Effect-side concern. */
   onModelConfigChanged(sessionPath: string, modelId: string, thinkingLevel: ThinkingLevel, provider?: string): void;
@@ -122,7 +125,7 @@ export interface SessionServiceLike {
   loadOlderTranscript(sessionPath: string): Promise<void>;
   loadNewerTranscript(sessionPath: string): Promise<void>;
   jumpToLatestTranscript(sessionPath: string): Promise<void>;
-  closeSession(sessionPath: string, nextPath: string | null, privacyMode?: boolean): Promise<void>;
+  closeSession(sessionPath: string, nextPath: string | null, privacyMode?: boolean, selectionChanged?: boolean): Promise<void>;
   setPruningSettings(updates: Partial<PruningSettings>): Promise<void>;
   setToolResultPruningSettings(updates: Partial<ToolResultPruningSettings>): Promise<void>;
   /** Recover from a failed/timed-out selection: finish the request and
@@ -339,6 +342,9 @@ export class EffectRunner {
       OpenSession: (e) => this.runLifecycle(e),
       CreateSession: (e) => this.runLifecycle(e),
       DuplicateSession: (e) => this.runLifecycle(e),
+      // Runtime-free visual transition notification; direct and unqueued so it
+      // cannot wait behind runtime lifecycle work.
+      NotifySessionViewed: (e) => this.handleNotifySessionViewed(e),
       // ── Special kinds (non-template control flow → named handlers). ──
       ShowModelSwitchConfirm: (e) => this.handleShowModelSwitchConfirm(e),
       SetModelRpc: (e) => this.handleSetModelRpc(e),
@@ -372,7 +378,7 @@ export class EffectRunner {
       OpenFileInEditor: this.templateRow({ resultKind: 'OpenFileInEditorResult', withSessionPath: false, call: (e, d) => d.fileDiffService.openFileInEditor(e.sessionPath, e.filePath) }),
       SetPruningSettings: this.templateRow({ resultKind: 'SetPruningSettingsResult', withSessionPath: false, call: (e, d) => d.service.setPruningSettings(e.settings) }),
       SetToolResultPruningSettings: this.templateRow({ resultKind: 'SetToolResultPruningSettingsResult', withSessionPath: false, call: (e, d) => d.service.setToolResultPruningSettings(e.settings) }),
-      CloseSession: this.templateRow({ resultKind: 'CloseSessionResult', withSessionPath: true, call: (e, d) => d.service.closeSession(e.sessionPath, e.nextPath, e.privacyMode === true) }),
+      CloseSession: this.templateRow({ resultKind: 'CloseSessionResult', withSessionPath: true, call: (e, d) => d.service.closeSession(e.sessionPath, e.nextPath, e.privacyMode === true, e.selectionChanged === true) }),
       PersistTabs: this.templateRow({ resultKind: 'PersistTabsResult', withSessionPath: false, call: (e, d) => d.tabs.persistTabs(e.openTabPaths, e.activeSessionPath, e.pinnedTabPaths, e.pinnedTabGroups, e.privateSessionPaths) }),
     };
   }
@@ -673,6 +679,23 @@ export class EffectRunner {
         // reverts on the next backend read.
         this.deps.dispatchEvent({ kind: 'NoticeShown', notice: 'Failed to save the system-prompt setting. See the pie log for details.' });
       }
+    });
+  }
+
+  private handleNotifySessionViewed(
+    effect: Extract<Effect, { kind: 'NotifySessionViewed' }>,
+  ): void {
+    void this.deps.backend.request('session.viewed', {
+      sessionPath: effect.sessionPath,
+      previousSessionPath: effect.previousSessionPath,
+    }, { timeoutMs: 5_000 }).catch((error) => {
+      // Running-tab close has already committed its visual successor. Never
+      // roll that selection back or block persistence on this notification.
+      this.deps.log.log('warn', 'session.viewed notification failed', {
+        sessionPath: effect.sessionPath,
+        previousSessionPath: effect.previousSessionPath,
+        error: toErrorMessage(error),
+      });
     });
   }
 
@@ -1103,12 +1126,16 @@ export class EffectRunner {
         try {
           service.bumpSessionDataEpoch(effect.sessionPath);
           statsService.prepareForSend(effect.sessionPath, effect.inputs, effect.text);
+          const coldPromotion = service.isSessionRuntimeReady?.(effect.sessionPath) === false;
           const response = await backend.request<{ requestId?: string; queued?: boolean }>('message.send', {
             sessionPath: effect.sessionPath,
             text: effect.text,
             inputs: effect.inputs,
             localId: effect.localId,
-          }, { signal: send.abort.signal });
+          }, {
+            signal: send.abort.signal,
+            ...(coldPromotion ? { timeoutMs: 60_000 } : {}),
+          });
           // Early-ack succeeded: stamp requestId so the send-timer's fire
           // callback can dispatch PreflightFailed (post-ack) if the turn
           // never commits. The send-timer stays armed — cleared at the commit

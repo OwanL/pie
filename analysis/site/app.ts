@@ -1,10 +1,11 @@
 import embed from 'vega-embed';
 
 import { createModelLeaderboardFromRuns } from '../scripts/leaderboard.ts';
-import { renderChartEntries, type ChartContext, modelColorScale, renderJoinUnmatchedReasonsHtml } from './lib.ts';
+import { median, renderChartEntries, type ChartContext, modelColorScale, renderJoinUnmatchedReasonsHtml } from './lib.ts';
 import { newCharts } from './charts/index.ts';
 import { deriveActionabilityInsights, renderInsightCards } from './actionability.ts';
 import { evidenceReliabilityHtml } from './charts/outcomes.ts';
+import { toolResultPruningImpactHtml } from './charts/pruning.ts';
 import { toErrorMessage } from '../../shared/error-message.js';
 
 import type {
@@ -23,6 +24,7 @@ import type {
   SessionReviewAnalyticsData,
   SiteManifest,
   TokenThroughputData,
+  ToolResultPruningImpactData,
   ToolUsageData,
 } from '../scripts/contracts.ts';
 
@@ -32,6 +34,7 @@ interface DashboardData {
   runSummary: RunSummaryData;
   toolUsage: ToolUsageData;
   pruningImpact: PruningImpactData;
+  toolResultPruningImpact: ToolResultPruningImpactData;
   backendErrors: BackendErrorData;
   fileExtensions: FileExtensionData;
   tokenThroughput: TokenThroughputData;
@@ -196,6 +199,11 @@ export function applyFilters(runs: PreparedRunRow[], filters: FilterState): Prep
   });
 }
 
+/** Runs attributed to the current harness after the dashboard's global filters. */
+export function currentHarnessRuns(runs: PreparedRunRow[]): PreparedRunRow[] {
+  return runs.filter((run) => run.isCurrentHarness === true);
+}
+
 function estimatedRunCostUsd(run: PreparedRunRow): number | null {
   return typeof run.totalEstimatedCostUsd === 'number' && Number.isFinite(run.totalEstimatedCostUsd) ? run.totalEstimatedCostUsd : null;
 }
@@ -211,6 +219,7 @@ export interface CoverageSummary {
   priced: CoverageMetric;
   tokenTelemetry: CoverageMetric;
   mixedModel: CoverageMetric;
+  stableIdentity: CoverageMetric;
 }
 
 export function coverageSummary(runs: PreparedRunRow[]): CoverageSummary {
@@ -222,43 +231,94 @@ export function coverageSummary(runs: PreparedRunRow[]): CoverageSummary {
     priced: metric(completed.filter((run) => estimatedRunCostUsd(run) !== null).length, completed.length),
     tokenTelemetry: metric(completed.filter(hasReportedParentTokenUsage).length, completed.length),
     mixedModel: metric(completed.filter((run) => run.mixedModelConfig).length, completed.length),
+    stableIdentity: metric(completed.filter((run) => run.identityFallback === false).length, completed.length),
+  };
+}
+
+function latestCompletedRunTimestamp(runs: PreparedRunRow[]): string | null {
+  return runs
+    .filter((run) => run.status !== 'open')
+    .map((run) => run.updatedAt)
+    .filter((timestamp): timestamp is string => typeof timestamp === 'string' && timestamp.length > 0)
+    .sort()
+    .at(-1) ?? null;
+}
+
+function formatTimestamp(timestamp: string | null): string {
+  if (!timestamp) return '—';
+  const date = new Date(timestamp);
+  return Number.isNaN(date.getTime()) ? timestamp : date.toLocaleString();
+}
+
+export interface OverviewCardValues {
+  completed: number;
+  open: number;
+  verification: number | null;
+  failures: number | null;
+  resultIssues: number | null;
+  busy: number | null;
+  cost: number | null;
+  latestRunTimestamp: string | null;
+}
+
+/** Derive filtered overview values; only the unfiltered cohort may use the aggregate artifact. */
+export function overviewCardValues(
+  runs: PreparedRunRow[],
+  overview: OverviewData,
+  usePrecomputed: boolean,
+  currentRuns: PreparedRunRow[] = runs,
+): OverviewCardValues {
+  const completed = runs.filter((run) => run.status !== 'open');
+  const currentCompleted = currentRuns.filter((run) => run.status !== 'open');
+  const costs = completed.map(estimatedRunCostUsd).filter((value): value is number => value !== null);
+  const toolCalls = completed.reduce((sum, run) => sum + run.toolCallCount, 0);
+  const toolFailures = completed.reduce((sum, run) => sum + run.toolFailureCount, 0);
+  const currentToolCalls = currentCompleted.reduce((sum, run) => sum + run.toolCallCount, 0);
+  const currentResultIssues = currentCompleted.reduce((sum, run) => sum + run.resultIssueCount, 0);
+  const allHistory = usePrecomputed ? {
+    completed: overview.totalCompletedRuns,
+    open: overview.totalOpenRuns,
+    failures: overview.toolFailureRate,
+    busy: overview.medianBusyDurationMs,
+    cost: overview.totalEstimatedCostUsd,
+    latestRunTimestamp: overview.latestRunTimestamp,
+  } : {
+    completed: completed.length,
+    open: runs.filter((run) => run.status === 'open').length,
+    failures: toolCalls ? toolFailures / toolCalls : null,
+    busy: median(completed.map((run) => run.busyDurationMs)),
+    cost: costs.length ? costs.reduce((sum, value) => sum + value, 0) : null,
+    latestRunTimestamp: latestCompletedRunTimestamp(runs),
+  };
+  return {
+    ...allHistory,
+    verification: currentCompleted.length ? currentCompleted.filter((run) => run.verificationTotalCount > 0).length / currentCompleted.length : null,
+    resultIssues: currentToolCalls ? currentResultIssues / currentToolCalls : null,
   };
 }
 
 function renderCoverageBanner(runs: PreparedRunRow[]): void {
   const coverage = coverageSummary(runs);
-  const item = (label: string, metric: CoverageMetric) => `<span class="coverage-item"><strong>${label}</strong><span>${metric.count}/${label === 'Completed' ? coverage.selectedRunCount : coverage.completed.count} (${percentage(metric.percentage)})</span></span>`;
-  byId('coverage-banner').innerHTML = `<div class="coverage-copy"><strong>Filtered cohort: ${coverage.selectedRunCount} runs</strong><span>Runtime cards and charts use this cohort. V2 review analytics and ranks remain cohort-level.</span></div><div class="coverage-metrics">${item('Completed', coverage.completed)}${item('Priced', coverage.priced)}${item('Token telemetry', coverage.tokenTelemetry)}${item('Mixed-model', coverage.mixedModel)}</div>`;
+  const currentCompletedCount = currentHarnessRuns(runs).filter((run) => run.status !== 'open').length;
+  const item = (label: string, metric: CoverageMetric, denominator: number) => `<span class="coverage-item"><strong>${label}</strong><span>${metric.count}/${denominator} (${percentage(metric.percentage)})</span></span>`;
+  byId('coverage-banner').innerHTML = `<div class="coverage-copy"><strong>Filtered cohort: ${coverage.selectedRunCount} all-history runs · ${currentCompletedCount} completed current-harness runs</strong><span>Cost, tool failures, median time, and raw volume use all-history telemetry. Harness-sensitive cards and diagnostics use current-harness runs. V2 review analytics and ranks remain cohort-level.</span></div><div class="coverage-metrics">${item('Completed', coverage.completed, coverage.selectedRunCount)}${item('Priced', coverage.priced, coverage.completed.count)}${item('Token telemetry', coverage.tokenTelemetry, coverage.completed.count)}${item('Mixed-model', coverage.mixedModel, coverage.completed.count)}${item('Stable identity', coverage.stableIdentity, coverage.completed.count)}</div>`;
 }
 
-function renderCards(runs: PreparedRunRow[], overview: OverviewData, usePrecomputed: boolean): void {
-  const completed = runs.filter((run) => run.status !== 'open');
-  const costs = completed.map(estimatedRunCostUsd).filter((value): value is number => value !== null);
-  const toolCalls = completed.reduce((sum, run) => sum + run.toolCallCount, 0);
-  const toolFailures = completed.reduce((sum, run) => sum + run.toolFailureCount, 0);
-  const busy = [...completed.map((run) => run.busyDurationMs)].sort((a, b) => a - b);
-  const medianBusy = busy.length === 0 ? null : busy[Math.floor((busy.length - 1) / 2)] ?? null;
-  const values = usePrecomputed ? {
-    completed: overview.totalCompletedRuns,
-    open: overview.totalOpenRuns,
-    verification: overview.verificationRunRate,
-    failures: overview.toolFailureRate,
-    busy: overview.medianBusyDurationMs,
-    cost: overview.totalEstimatedCostUsd,
-  } : {
-    completed: completed.length,
-    open: runs.filter((run) => run.status === 'open').length,
-    verification: completed.length ? completed.filter((run) => run.verificationTotalCount > 0).length / completed.length : null,
-    failures: toolCalls ? toolFailures / toolCalls : null,
-    busy: medianBusy,
-    cost: costs.length ? costs.reduce((sum, value) => sum + value, 0) : null,
-  };
+function renderCards(runs: PreparedRunRow[], currentRuns: PreparedRunRow[], overview: OverviewData, usePrecomputed: boolean): void {
+  const values = overviewCardValues(runs, overview, usePrecomputed, currentRuns);
+  const latestRun = formatTimestamp(values.latestRunTimestamp);
+  const freshness = values.latestRunTimestamp
+    ? `${usePrecomputed ? 'complete' : 'filtered'} cohort through ${latestRun}`
+    : 'No completed run telemetry';
+  byId('latest-run').textContent = latestRun;
+  byId('overview-freshness').textContent = freshness;
   const cards = [
-    { label: 'Runs', value: String(values.completed + values.open), detail: `${values.completed} completed · ${values.open} open` },
-    { label: 'Verification', value: percentage(values.verification), detail: 'completed runs with checks' },
-    { label: 'Tool failures', value: percentage(values.failures), detail: 'of tool calls' },
-    { label: 'Median time', value: values.busy === null ? '—' : `${Math.round(values.busy / 1000)}s`, detail: 'busy duration' },
-    { label: 'Cost', value: values.cost === null ? '—' : `$${values.cost.toFixed(2)}`, detail: 'complete estimated spend' },
+    { label: 'Runs', value: String(values.completed + values.open), detail: `${values.completed} completed · ${values.open} open · all-history` },
+    { label: 'Verification', value: percentage(values.verification), detail: 'current-harness completed runs with checks' },
+    { label: 'Tool failures', value: percentage(values.failures), detail: 'all-history tool calls' },
+    { label: 'Result issues', value: percentage(values.resultIssues), detail: 'current-harness tool calls' },
+    { label: 'Median time', value: values.busy === null ? '—' : `${Math.round(values.busy / 1000)}s`, detail: 'all-history busy duration' },
+    { label: 'Cost', value: values.cost === null ? '—' : `$${values.cost.toFixed(2)}`, detail: 'all-history complete estimated spend' },
   ];
   byId('overview-cards').innerHTML = cards.map((card) => `<article class="metric-card"><p>${card.label}</p><strong>${card.value}</strong><p>${card.detail}</p></article>`).join('');
 }
@@ -500,17 +560,19 @@ async function renderRuntimeSummary(runs: PreparedRunRow[], renderToken: number)
     const key = `${modelFamilyKey(run)} · ${formatThinkingLevelLabel(normalizeThinkingLevel(run.thinkingLevel) ?? 'off')}`;
     groups.set(key, [...(groups.get(key) ?? []), run.busyDurationMs / 60000]);
   }
-  const efficiency = [...groups.entries()].map(([model, values]) => ({ model, medianBusyMinutes: [...values].sort((a, b) => a - b)[Math.floor((values.length - 1) / 2)] ?? 0, runCount: values.length })).sort((a, b) => a.medianBusyMinutes - b.medianBusyMinutes);
-  setNote('model-efficiency-note', `${efficiency.length} model/reasoning groups; median completed-run busy duration.`, renderToken);
-  await renderSpec('chart-model-efficiency', efficiency.length === 0 ? null : { width: 'container', height: Math.max(220, efficiency.length * 30), data: { values: efficiency }, mark: { type: 'bar', cornerRadiusEnd: 3 }, encoding: { y: { field: 'model', type: 'nominal', sort: efficiency.map((row) => row.model), title: null }, x: { field: 'medianBusyMinutes', type: 'quantitative', title: 'Median busy minutes' }, color: { value: CHART_COLORS.accent }, tooltip: [{ field: 'model' }, { field: 'medianBusyMinutes', format: '.1f' }, { field: 'runCount', title: 'Runs' }] } }, 'No completed runs match the filters.', renderToken);
+  const efficiency = [...groups.entries()].map(([model, values]) => ({ model, medianBusyMinutes: median(values) ?? 0, runCount: values.length })).sort((a, b) => a.medianBusyMinutes - b.medianBusyMinutes);
+  setNote('model-efficiency-note', `${efficiency.length} model/reasoning groups; median current-harness completed-run busy duration.`, renderToken);
+  await renderSpec('chart-model-efficiency', efficiency.length === 0 ? null : { width: 'container', height: Math.max(220, efficiency.length * 30), data: { values: efficiency }, mark: { type: 'bar', cornerRadiusEnd: 3 }, encoding: { y: { field: 'model', type: 'nominal', sort: efficiency.map((row) => row.model), title: null }, x: { field: 'medianBusyMinutes', type: 'quantitative', title: 'Median busy minutes' }, color: { value: CHART_COLORS.accent }, tooltip: [{ field: 'model' }, { field: 'medianBusyMinutes', format: '.1f' }, { field: 'runCount', title: 'Runs' }] } }, 'No current-harness completed runs match the filters.', renderToken);
 }
 
-async function renderCharts(runs: PreparedRunRow[], toolRows: PreparedToolUsageRow[], data: DashboardData, renderToken: number): Promise<void> {
+async function renderCharts(runs: PreparedRunRow[], currentRuns: PreparedRunRow[], toolRows: PreparedToolUsageRow[], data: DashboardData, renderToken: number): Promise<void> {
   await renderLeaderboard(data.modelLeaderboard, renderToken);
   await renderQualityVsCost(data.modelLeaderboard, renderToken);
-  await renderRuntimeSummary(runs, renderToken);
+  await renderRuntimeSummary(currentRuns, renderToken);
   const context: ChartContext = {
     runs,
+    currentHarnessRuns: currentRuns,
+    runCohort: 'all-history',
     toolRows,
     turnThroughputRows: data.tokenThroughput.rows,
     retryTimingRows: data.retryTiming.rows,
@@ -588,10 +650,11 @@ function debounce<T extends (...args: never[]) => void>(fn: T, waitMs: number): 
 
 async function main(): Promise<void> {
   const [manifest, runSummary] = await Promise.all([fetchJson<SiteManifest>('./data/manifest.json'), fetchJson<RunSummaryData>('./data/run-summary.json')]);
-  const [overview, toolUsage, pruningImpact, backendErrors, fileExtensions, tokenThroughput, retryTiming, modelLeaderboard, sessionReviewAnalytics, outcomeCorrelations, evidenceReliability] = await Promise.all([
+  const [overview, toolUsage, pruningImpact, toolResultPruningImpact, backendErrors, fileExtensions, tokenThroughput, retryTiming, modelLeaderboard, sessionReviewAnalytics, outcomeCorrelations, evidenceReliability] = await Promise.all([
     fetchJson<OverviewData>('./data/overview.json'),
     fetchJson<ToolUsageData>('./data/tool-usage.json'),
     fetchJson<PruningImpactData>('./data/pruning-impact.json'),
+    fetchJson<ToolResultPruningImpactData>('./data/tool-result-pruning-impact.json'),
     fetchJson<BackendErrorData>('./data/backend-errors.json'),
     fetchJson<FileExtensionData>('./data/file-types.json'),
     fetchJson<TokenThroughputData>('./data/token-throughput.json'),
@@ -601,7 +664,7 @@ async function main(): Promise<void> {
     fetchOptionalJson<OutcomeCorrelationData>('./data/outcome-correlations.json'),
     fetchOptionalJson<EvidenceReliabilityData>('./data/evidence-reliability.json'),
   ]);
-  const data: DashboardData = { manifest, overview, runSummary, toolUsage, pruningImpact, backendErrors, fileExtensions, tokenThroughput, retryTiming, modelLeaderboard: modelLeaderboard ?? createModelLeaderboardFromRuns(runSummary.rows), sessionReviewAnalytics, outcomeCorrelations, evidenceReliability };
+  const data: DashboardData = { manifest, overview, runSummary, toolUsage, pruningImpact, toolResultPruningImpact, backendErrors, fileExtensions, tokenThroughput, retryTiming, modelLeaderboard: modelLeaderboard ?? createModelLeaderboardFromRuns(runSummary.rows), sessionReviewAnalytics, outcomeCorrelations, evidenceReliability };
   byId('session-review-analytics').innerHTML = sessionReviewAnalyticsHtml(sessionReviewAnalytics);
   renderCohortInsights(data);
   byId('generated-at').textContent = new Date(manifest.generatedAt).toLocaleString();
@@ -621,9 +684,12 @@ async function main(): Promise<void> {
     const filters = currentFilters();
     updateFiltersActiveCount(filters);
     const filtered = applyFilters(allRuns, filters);
+    const filteredCurrentHarnessRuns = currentHarnessRuns(filtered);
     renderCoverageBanner(filtered);
-    renderCards(filtered, overview, JSON.stringify(filters) === JSON.stringify(DEFAULT_FILTERS));
-    await renderCharts(filtered, toolUsage.rows, data, renderToken);
+    const usePrecomputed = JSON.stringify(filters) === JSON.stringify(DEFAULT_FILTERS);
+    renderCards(filtered, filteredCurrentHarnessRuns, overview, usePrecomputed);
+    byId('tool-result-pruning-impact').innerHTML = toolResultPruningImpactHtml(data.toolResultPruningImpact, filteredCurrentHarnessRuns);
+    await renderCharts(filtered, filteredCurrentHarnessRuns, toolUsage.rows, data, renderToken);
   };
   byId('filters').addEventListener('change', () => void render());
   byId('filter-reset').addEventListener('click', () => { resetFilters(); void render(); });

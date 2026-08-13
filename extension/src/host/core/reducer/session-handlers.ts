@@ -41,7 +41,13 @@ function mergeSessionSummaryPreservingLocalName(
     // failed) must not wipe a previously-known review, so preserve the
     // existing value when the incoming summary doesn't carry one.
     sessionId: incoming.sessionId ?? existing.sessionId,
-    identityFallback: incoming.identityFallback ?? existing.identityFallback,
+    // `identityFallback` qualifies the identity arriving in the same summary.
+    // Stable backend summaries intentionally omit the false value, so carrying
+    // an older `true` across that refresh would incorrectly mark the new stable
+    // sessionId as path-derived and make run analytics drop it.
+    identityFallback: incoming.sessionId !== undefined
+      ? incoming.identityFallback === true
+      : existing.identityFallback,
     reviewed: incoming.reviewed ?? existing.reviewed,
     reviewId: incoming.reviewId ?? existing.reviewId,
     reviewedAt: incoming.reviewedAt ?? existing.reviewedAt,
@@ -103,9 +109,11 @@ export function handleSessionOpened(state: ArchState, event: Extract<Event, { ki
   // incoming snapshot. Metadata (session summary, busy, analytics, models,
   // contextUsage, systemPrompts) is still applied below.
   const existingWindow = state.transcript.windowBySession[sessionPath];
-  const skipped = payload.transcriptSkipped === true && existingWindow !== undefined;
+  const transcriptUnavailable = payload.snapshotUnavailable !== undefined;
+  const skipped = (payload.transcriptSkipped === true || transcriptUnavailable) && existingWindow !== undefined;
   const editingMessageId = state.transcript.editingMessageIdBySession[sessionPath];
   const preserveInlineEdit = payload.transcriptSkipped !== true
+    && !transcriptUnavailable
     && existingWindow !== undefined
     && !!editingMessageId
     && localTranscript.some((message) => message.id === editingMessageId)
@@ -190,6 +198,7 @@ export function handleSessionOpened(state: ArchState, event: Extract<Event, { ki
     ? {
         ...openedSummary,
         modelId: inFlightSetModel.modelSettings.defaultModel,
+        provider: inFlightSetModel.modelSettings.defaultProvider,
         thinkingLevel: inFlightSetModel.modelSettings.defaultThinkingLevel,
       }
     : openedSummary;
@@ -285,16 +294,18 @@ export function handleSessionOpened(state: ArchState, event: Extract<Event, { ki
     next = applyAuthoritativeOpenedCheckpoint(next, sessionPath, payload.liveTurnCheckpoint);
   } else if (payload.busy) {
     // The backend kept the durable assistant tail visible because it could not
-    // provide an atomic checkpoint. If the host still knows the attempt
-    // identity, request a repair without making the transcript depend on it.
+    // provide an atomic checkpoint. Prefer the bounded recovery identity from
+    // this authoritative open; unlike local live state it also works for a
+    // cold host that never observed turn.started.
     const liveTurn = next.livePipeline.turnsBySession[sessionPath];
-    if (liveTurn) {
+    const recoveryIdentity = payload.liveTurnRecoveryIdentity ?? liveTurn;
+    if (recoveryIdentity) {
       effects.push({
         kind: 'RequestLiveTurnCheckpoint',
-        corrId: `live-checkpoint:${liveTurn.turnId}:${liveTurn.attemptId}:session-opened`,
+        corrId: `live-checkpoint:${recoveryIdentity.turnId}:${recoveryIdentity.attemptId}:session-opened`,
         sessionPath,
-        turnId: liveTurn.turnId,
-        attemptId: liveTurn.attemptId,
+        turnId: recoveryIdentity.turnId,
+        attemptId: recoveryIdentity.attemptId,
       });
     }
   }

@@ -6,20 +6,20 @@ import { createModelLeaderboard, createModelLeaderboardFromRuns } from '../scrip
 import { prepareSourceAnalytics } from '../scripts/prepare.ts';
 import { deepClone, loadFixture } from './helpers.ts';
 
-test('V2 model leaderboard is review-only and leaves runtime-only families unranked', async () => {
+test('V2 model leaderboard is review-only and discards legacy runtime-only families', async () => {
   const prepared = prepareSourceAnalytics(await loadFixture());
   const leaderboard = createModelLeaderboard(prepared);
   assert.equal(leaderboard.schemaVersion, 7);
   assert.deepEqual(leaderboard.sourceWeights, { review: 1, process: 0 });
   assert.deepEqual(leaderboard.shrinkage, { review: 8, process: 20 });
-  assert.ok(leaderboard.rows.some((row) => row.modelId !== '(unknown)'));
-  assert.ok(leaderboard.rows.every((row) => row.rank === null && row.compositeScore === null));
+  assert.equal(leaderboard.rows.length, 0, 'legacy runtime without V2 review evidence is not a harness-comparison row');
   assert.match(leaderboard.notes.join(' '), /review-only/i);
 });
 
 test('run-only compatibility path collapses thinking levels to one family row', async () => {
   const prepared = prepareSourceAnalytics(await loadFixture());
-  const first = prepared.runs.find((run) => run.modelFamily !== null)!;
+  const fixtureRun = prepared.runs.find((run) => run.modelFamily !== null)!;
+  const first = { ...fixtureRun, isCurrentHarness: true, harnessStatus: 'current' as const };
   const altered = { ...first, runId: `${first.runId}-thinking`, taskGroupId: `${first.taskGroupId}-thinking`, thinkingLevel: first.thinkingLevel === 'high' ? 'low' as const : 'high' as const };
   const data = createModelLeaderboardFromRuns([first, altered]);
   assert.equal(data.rows.length, 1);
@@ -35,6 +35,10 @@ function makeRun(overrides: Partial<PreparedRunRow> & { runId: string; modelId: 
     sessionId: overrides.sessionId ?? `session-${overrides.runId}`,
     identityFallback: overrides.identityFallback ?? false,
     sessionPathHash: overrides.sessionPathHash ?? `hash-${overrides.runId}`,
+    harnessRevision: overrides.harnessRevision ?? null,
+    harnessFingerprint: overrides.harnessFingerprint ?? null,
+    harnessStatus: overrides.harnessStatus ?? 'current',
+    isCurrentHarness: overrides.isCurrentHarness ?? true,
     status: overrides.status ?? 'closed',
     startedAt: overrides.startedAt ?? '2026-05-10T12:00:00.000Z',
     startedDay: overrides.startedDay ?? '2026-05-10',

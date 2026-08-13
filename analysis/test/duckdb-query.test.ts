@@ -231,7 +231,9 @@ test('runs table maps every scalar PreparedRunRow field (no silent drops)', asyn
   // PreparedRunRow fields intentionally NOT mapped to the flat runs table:
   // nested objects/arrays whose sub-fields ARE extracted (verification_test_count
   // etc. come from verificationCountsByKind) or that are only consumed by the
-  // dashboard path (skillEntries, the fs* functional-settings fields).
+  // dashboard path (skillEntries, the fs* functional-settings fields), or
+  // harness-cohort fields not yet surfaced to DuckDB (harnessRevision,
+  // harnessFingerprint, harnessStatus, isCurrentHarness).
   const excluded = new Set([
     'skillEntries',
     'fsSubagentAlwaysParentModel',
@@ -241,6 +243,10 @@ test('runs table maps every scalar PreparedRunRow field (no silent drops)', asyn
     'fsToolResultPruningEnabled',
     'fsToolResultPruningProfile',
     'verificationCountsByKind',
+    'harnessRevision',
+    'harnessFingerprint',
+    'harnessStatus',
+    'isCurrentHarness',
   ]);
 
   const sampleRun = prepared.runs[0];

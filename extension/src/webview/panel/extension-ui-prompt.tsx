@@ -99,8 +99,8 @@ interface PromptContentProps {
 }
 
 function PromptContent({ eyebrow, text, context, remaining }: PromptContentProps) {
-  const questionHtml = useMemo(() => renderMarkdown(text), [text]);
-  const contextHtml = useMemo(() => (context ? renderMarkdown(context) : ''), [context]);
+  const questionHtml = useMemo(() => renderMarkdown(text, true, false), [text]);
+  const contextHtml = useMemo(() => (context ? renderMarkdown(context, true, false) : ''), [context]);
   const hasMeta = !!eyebrow || remaining !== null;
   return (
     <div class="ext-prompt-content">

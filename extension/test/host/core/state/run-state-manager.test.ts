@@ -11,6 +11,7 @@ import {
   type PersistedSessionRunState,
   type RunSnapshot,
   type TreatmentChangeKind,
+  CURRENT_HARNESS_REVISION,
 } from '../../../../src/host/run-analytics';
 import { SessionRunStateManager } from '../../../../src/host/stats-service/run-state-manager';
 import { toPersistedSessionState } from '../../../../src/host/stats-service/helpers';
@@ -150,6 +151,47 @@ test('createRunSnapshot seeds an open run from arch state with no counted activi
   assert.equal(run.mixedModelConfig, false);
   assert.equal(run.mixedTreatmentConfig, false);
   assert.deepEqual(run.treatmentChangeKinds, []);
+});
+
+test('createRunSnapshot stamps the current harness revision and a deterministic fingerprint', () => {
+  const h = createHarness();
+  const sessionPath = '/workspace/session-rsm.jsonl';
+  const state = h.manager.getOrCreateSessionState(sessionPath);
+  const run = h.manager.createRunSnapshot(sessionPath, state);
+
+  assert.equal(run.harnessRevision, CURRENT_HARNESS_REVISION, 'new runs carry the current harness revision');
+  assert.ok(run.harnessFingerprint, 'new runs carry a harness fingerprint');
+  assert.match(run.harnessFingerprint!, /^[0-9a-f]{64}$/, 'fingerprint is a full sha256 hex digest');
+
+  // Deterministic: an identical capture produces the identical fingerprint.
+  const repeat = h.manager.createRunSnapshot(sessionPath, state);
+  assert.equal(repeat.harnessFingerprint, run.harnessFingerprint, 'identical factors/settings hash identically');
+
+  // Sensitive to captured analytics factors.
+  h.mutateArch((draft) => {
+    draft.sessions.analyticsFactorsBySession[sessionPath] = baseAnalyticsFactors('b');
+  });
+  const factorsChanged = h.manager.createRunSnapshot(sessionPath, state);
+  assert.notEqual(factorsChanged.harnessFingerprint, run.harnessFingerprint, 'factor changes flip the fingerprint');
+
+  // Sensitive to functional settings.
+  h.mutateArch((draft) => {
+    draft.settings.pruningSettings.mode = 'shadow';
+  });
+  const settingsChanged = h.manager.createRunSnapshot(sessionPath, state);
+  assert.notEqual(settingsChanged.harnessFingerprint, run.harnessFingerprint, 'setting changes flip the fingerprint');
+
+  // Array-order-insensitive: the same unordered capture hashes identically
+  // across repeated captures (members are sorted before digesting).
+  const unordered = baseAnalyticsFactors('a');
+  unordered.selectedToolIds = ['bash', 'read'];
+  unordered.activeExtensions = ['z-ext', 'a-ext'];
+  h.mutateArch((draft) => {
+    draft.sessions.analyticsFactorsBySession[sessionPath] = unordered;
+  });
+  const first = h.manager.createRunSnapshot(sessionPath, state);
+  const second = h.manager.createRunSnapshot(sessionPath, state);
+  assert.equal(first.harnessFingerprint, second.harnessFingerprint);
 });
 
 test('createRunSnapshot falls back to default model settings when the session row omits them', () => {

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { normalizeDanglingTranscript, stripActiveAssistantTail } from '../../../src/backend/session-opened';
+import { buildSessionOpenedLiveSnapshot, normalizeDanglingTranscript, stripActiveAssistantTail } from '../../../src/backend/session-opened';
 
 test('busy session snapshots omit the persisted active assistant bubble owned by LivePipelineState', () => {
   const rows = [
@@ -13,6 +13,27 @@ test('busy session snapshots omit the persisted active assistant bubble owned by
     rows[1]!,
     { ...rows[0]!, id: 'new-user' },
   ]), [rows[1], { ...rows[0]!, id: 'new-user' }], 'a prior durable assistant before the active user is preserved');
+});
+
+test('oversized busy checkpoint still retains bounded recovery identity', () => {
+  const checkpoint = {
+    terminal: false,
+    turnId: 'turn-oversized',
+    attemptId: 'attempt-oversized',
+    checkpointBytes: 1,
+    turn: { checkpointBytes: 1 },
+  };
+  const snapshot = buildSessionOpenedLiveSnapshot({
+    activeRequest: {
+      liveTurnAccumulator: { checkpoint: () => checkpoint },
+    },
+  } as any);
+
+  assert.equal(snapshot.checkpoint, undefined);
+  assert.deepEqual(snapshot.recoveryIdentity, {
+    turnId: 'turn-oversized',
+    attemptId: 'attempt-oversized',
+  });
 });
 
 test('inactive session reopen interrupts dangling tools but preserves durability-confirmed terminals', () => {

@@ -8,6 +8,16 @@ import { createSessionManagerFence, FENCED_ENTRY_ID } from '../../../src/backend
 import type { SdkSessionManager } from '../../../src/backend/sdk';
 import type { SessionContext } from '../../../src/backend/server-types';
 
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((settle) => { resolve = settle; });
+  return { promise, resolve };
+}
+
+function tick(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
 test('stuck recovery terminalizes once and replaces a runtime without awaiting abort', async () => {
   const server = new BackendServer({ sdkPath: '/unused', cwd: '/repo' }) as any;
   const calls: string[] = [];
@@ -66,7 +76,7 @@ test('stuck recovery terminalizes once and replaces a runtime without awaiting a
   server.sessionContexts.set('/s', context);
   server.emit = (event: string, payload: unknown) => events.push({ event, payload });
   server.emitBusyChanged = (_context: SessionContext, busy: boolean) => events.push({ event: 'busy.changed', payload: busy });
-  server.emitSessionOpened = async () => {};
+  server.buildHotSessionOpenedPayload = async () => ({ session: { path: '/s' }, runtimeReady: true });
   server.emitSessionListChanged = async () => {};
 
   server.recoverStuckSession(context, 'stalled');
@@ -99,6 +109,109 @@ test('stuck recovery terminalizes once and replaces a runtime without awaiting a
   ]);
   assert.equal(calls.includes('open'), true);
   assert.equal(calls.includes('createSessionContext'), true);
+});
+
+test('stuck recovery publishes its transition-local snapshot and releases future ensure/send waiters', async () => {
+  const server = new BackendServer({ sdkPath: '/unused', cwd: '/repo' }) as any;
+  const events: Array<{ event: string; payload?: any }> = [];
+  const checkpoint = { marker: 'terminal-checkpoint' };
+  const context = {
+    sessionPath: '/s',
+    busySeq: 4,
+    activeRequest: {
+      id: 'request-recovery',
+      messageIndex: 1,
+      currentMessageId: 'assistant-recovery',
+      aborted: false,
+      liveTurnAccumulator: checkpoint,
+    },
+    session: {
+      isStreaming: true,
+      clearQueue: () => undefined,
+      abortRetry: () => undefined,
+      abortCompaction: () => undefined,
+      abortBranchSummary: () => undefined,
+      abortBash: () => undefined,
+      abort: () => new Promise<void>(() => undefined),
+    },
+  } as unknown as SessionContext;
+  const replacement = {
+    sessionPath: '/s',
+    busySeq: 0,
+    session: {
+      isStreaming: false,
+      prompt: async () => undefined,
+    },
+  } as unknown as SessionContext;
+  const payload = {
+    session: { path: '/s' },
+    runtimeReady: true,
+    busy: false,
+    liveTurnCheckpoint: checkpoint,
+  };
+  const hotPayload = deferred<any>();
+  const publicPayload = deferred<any>();
+  let hotBuilds = 0;
+  let publicBuilds = 0;
+
+  server.sdk = { SessionManager: { open: () => ({}) } };
+  server.createSessionContext = async () => {
+    replacement.busySeq = context.busySeq;
+    replacement.terminalLiveTurn = context.terminalLiveTurn;
+    server.sessionContexts.set('/s', replacement);
+    return replacement;
+  };
+  server.buildHotSessionOpenedPayload = async () => {
+    hotBuilds += 1;
+    assert.equal(server.pendingSessionContexts.has('/s'), true, 'hydration remains inside transition ownership');
+    assert.equal(server.sessionContexts.get('/s'), replacement);
+    assert.equal(replacement.terminalLiveTurn?.accumulator, checkpoint);
+    return await hotPayload.promise;
+  };
+  // This deferred is the regression seam: the public builder joins
+  // pendingSessionContexts. Calling it from the owning transition would wait
+  // forever on itself, while the transition-local hot builder can proceed.
+  server.buildSessionOpenedPayload = async () => {
+    publicBuilds += 1;
+    return await publicPayload.promise;
+  };
+  server.emit = (event: string, eventPayload?: unknown) => events.push({ event, payload: eventPayload });
+  server.emitSessionListChanged = async () => { events.push({ event: 'session.list.changed' }); };
+  server.sessionContexts.set('/s', context);
+
+  server.recoverStuckSession(context, 'stalled');
+  const recovery = context.recoveryPromise as Promise<SessionContext>;
+  assert.ok(recovery);
+  const futureEnsure = server.ensureSessionContext('/s');
+  const futureSend = server.handleRequest({
+    id: 'future-send',
+    method: 'message.send',
+    params: { sessionPath: '/s', text: 'after recovery', inputs: [], localId: 'local-after-recovery' },
+  });
+
+  await tick();
+  assert.equal(hotBuilds, 1);
+  assert.equal(publicBuilds, 0, 'the transition must not enter the public owner-resolving builder');
+  assert.equal(events.some((entry) => entry.event === 'session.opened'), false);
+
+  hotPayload.resolve(payload);
+  publicPayload.resolve(payload);
+  const [recovered, ensured, sendResult] = await Promise.all([recovery, futureEnsure, futureSend]);
+  await tick();
+
+  assert.equal(recovered, replacement);
+  assert.equal(ensured, replacement);
+  assert.equal(typeof (sendResult as { requestId?: unknown }).requestId, 'string');
+  assert.equal(server.pendingSessionContexts.size, 0);
+  assert.equal(replacement.busySeq, 5, 'replacement preserves the predecessor sequence before publishing idle');
+  assert.equal(replacement.terminalLiveTurn?.accumulator, checkpoint, 'terminal checkpoint remains available after replacement');
+  assert.deepEqual(
+    events.filter((entry) => entry.event === 'session.opened').map((entry) => entry.payload),
+    [payload],
+  );
+  const eventNames = events.map((entry) => entry.event);
+  assert.ok(eventNames.indexOf('message.aborted') < eventNames.indexOf('busy.changed'));
+  assert.ok(eventNames.indexOf('busy.changed') < eventNames.indexOf('session.opened'));
 });
 
 test('ensureSessionContext waits for the authoritative recovery runtime', async () => {
@@ -233,7 +346,7 @@ test('throwing best-effort cleanup cannot strand a retired runtime without repla
   };
   server.emit = (event: string, payload: unknown) => events.push({ event, payload });
   server.emitBusyChanged = () => undefined;
-  server.emitSessionOpened = async () => undefined;
+  server.buildHotSessionOpenedPayload = async () => ({ session: { path: '/s' }, runtimeReady: true });
   server.emitSessionListChanged = async () => undefined;
   server.sessionContexts.set('/s', context);
 
@@ -287,7 +400,7 @@ test('recoverStuckSession invalidates the old session manager fence before repla
   };
   server.emit = () => undefined;
   server.emitBusyChanged = () => undefined;
-  server.emitSessionOpened = async () => undefined;
+  server.buildHotSessionOpenedPayload = async () => ({ session: { path: '/s' }, runtimeReady: true });
   server.emitSessionListChanged = async () => undefined;
   server.sessionContexts.set('/s', context);
 

@@ -19,7 +19,7 @@ export type BooleanPrefKey =
 
 export type ChatPrefKey = keyof ChatPrefs;
 export type ChatPrefContextType = 'reasoning' | 'toolCalls' | 'subagentCalls';
-export type TranscriptContextMenuType = ChatPrefContextType | 'message';
+export type TranscriptContextMenuType = ChatPrefContextType | 'message' | 'filePath';
 
 export interface ExtensionToggleItem {
   id: string;

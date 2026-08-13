@@ -206,6 +206,34 @@ test('StatsService records run outcomes and persists snapshot metrics', async ()
   });
 });
 
+test('StatsService carries stable identity from pending-path replacement into the run snapshot', async () => {
+  await withTempDir(async (tempDir) => {
+    const pendingPath = '__pending__/new-session';
+    const sessionPath = '/workspace/session-new.jsonl';
+    let idCounter = 0;
+    const archState = createInitialArchState();
+    const stats = new StatsService({
+      dataOutcomesRootPath: path.join(tempDir, 'data', 'outcomes'),
+      legacyUsageDataRootPath: tempDir,
+      workspaceId: 'workspace-a',
+      getArchState: () => archState,
+      createId: () => `id-${++idCounter}`,
+    });
+
+    await stats.start();
+    stats.prepareForSend(pendingPath, []);
+    stats.replaceSessionPath(pendingPath, sessionPath, 'stable-new-session');
+    await stats.shutdown();
+
+    const storageDir = await getRunStorageDir(tempDir);
+    const entries = await readJsonl(path.join(storageDir, 'run-snapshots.jsonl')) as Array<{
+      run: { sessionPath: string; sessionId?: string };
+    }>;
+    assert.equal(entries.at(-1)?.run.sessionPath, sessionPath);
+    assert.equal(entries.at(-1)?.run.sessionId, 'stable-new-session');
+  });
+});
+
 test('StatsService migrates legacy analytics files into data/outcomes', async () => {
   await withTempDir(async (tempDir) => {
     let archState = createInitialArchState();

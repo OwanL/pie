@@ -17,7 +17,7 @@ import * as readline from 'node:readline';
 const SESSION_PATH = '/mock/sessions/test-session.jsonl';
 const SESSION_NAME = 'Test Session';
 const CWD = '/mock';
-const PROTOCOL_VERSION = 10;
+const PROTOCOL_VERSION = 14;
 const HANDSHAKE = {
   sdkPath: '/mock/sdk',
   agentDir: '/mock/agent',

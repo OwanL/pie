@@ -31,6 +31,7 @@ function isNoOpModelSelection(state: ArchState, sessionPath: string, modelSettin
   }
 
   return currentSummary.modelId === modelSettings.defaultModel
+    && currentSummary.provider === modelSettings.defaultProvider
     && currentSummary.thinkingLevel === modelSettings.defaultThinkingLevel;
 }
 

@@ -908,7 +908,7 @@ export class SessionRunTracker {
     this.scheduleRender();
   }
 
-  replaceSessionPath(oldPath: string, newPath: string): void {
+  replaceSessionPath(oldPath: string, newPath: string, stableSessionId?: string): void {
     if (!oldPath || !newPath || oldPath === newPath) {
       return;
     }
@@ -922,10 +922,18 @@ export class SessionRunTracker {
     }
 
     if (state.currentRun) {
-      state.currentRun = { ...state.currentRun, sessionPath: newPath };
+      state.currentRun = {
+        ...state.currentRun,
+        sessionPath: newPath,
+        ...(stableSessionId ? { sessionId: stableSessionId } : {}),
+      };
     }
     if (state.lastRun) {
-      state.lastRun = { ...state.lastRun, sessionPath: newPath };
+      state.lastRun = {
+        ...state.lastRun,
+        sessionPath: newPath,
+        ...(stableSessionId ? { sessionId: stableSessionId } : {}),
+      };
     }
 
     // Only append a snapshot when there is no active currentRun (i.e. the rename

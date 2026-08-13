@@ -17,6 +17,7 @@ import {
   validateSessionDuplicate,
   validateSessionOpen,
   validateSessionPath,
+  validateSessionViewed,
   validateSettingsSet,
   validateSystemPromptTogglesSet,
   validateTruncateAfter,
@@ -30,6 +31,10 @@ import { buildPromptText, lowerImageInputs, normalizeThinkingLevel } from './mes
 import type { SessionContext, SessionContextCreationReason } from './server-types';
 import { BackendLiveTurnAccumulator } from './live-turn-accumulator';
 import { BackendError } from './server-io';
+import {
+  boundTranscriptSnapshot,
+  type SessionSnapshotTransport,
+} from '../shared/transcript-window';
 import {
   getBackendLivePipelineTraceHealth,
   recordBackendLivePipelineTrace,
@@ -162,12 +167,38 @@ export interface BackendRequestHandlerDeps {
     reason: SessionContextCreationReason,
   ): Promise<SessionContext>;
   ensureSessionContext(sessionPath: string): Promise<SessionContext>;
+  isSessionTransitionPending?(sessionPath: string): boolean;
+  /** Register a per-path authoritative replacement before any async mutation. */
+  transitionSessionContext?(
+    sessionPath: string,
+    transition: () => Promise<SessionContext>,
+  ): Promise<SessionContext>;
+  /** Capture predecessor identity without publishing a new viewed path. The
+   * opaque rollback token restores prior browse state when the open fails. */
+  prepareViewedSessionPath?(sessionPath: string): unknown;
+  discardPreparedViewedSessionPath?(sessionPath: string, rollbackToken?: unknown): void;
+  /** Commit a prepared open only if no newer visual selection superseded it. */
+  commitPreparedViewedSessionPath?(sessionPath: string, rollbackToken?: unknown): boolean;
+  /** Record a host-local visual transition without opening the durable file or
+   * materializing execution services. */
+  recordViewedSessionTransition?(
+    sessionPath: string,
+    previousSessionPath: string | null,
+  ): boolean;
+  /** Fence asynchronous create/duplicate selection commits against a newer
+   * session.viewed transition that arrives while runtime creation is pending. */
+  captureViewedSessionRevision?(): unknown;
+  setViewedSessionPathIfCurrent?(sessionPath: string, revision: unknown): boolean;
   setViewedSessionPath(sessionPath: string | undefined): void;
   buildSessionOpenedPayload(
     sessionPath: string,
     selectionToken?: string,
     transcript?: import('../shared/protocol').TranscriptMode,
+    transport?: SessionSnapshotTransport,
   ): Promise<SessionOpenedPayload>;
+  /** Build from the replacement installed by the transition currently owning
+   * this path; bypasses joining that transition's own promise. */
+  buildTransitionSessionOpenedPayload?(sessionPath: string): Promise<SessionOpenedPayload>;
   /** Apply a complete disabled-entry set for a session: persist to the sidecar,
    *  rewrite the SDK base prompt, and re-emit `session.opened`. */
   applySystemPromptToggles(
@@ -185,12 +216,15 @@ export interface BackendRequestHandlerDeps {
     loadedEnd?: number,
   ): Promise<TranscriptPagePayload>;
   loadDetail?(sessionPath: string, ref: LazyDetailRef): Promise<DetailResult>;
+  /** Preserve the backend's non-serialized browse generation stamp when a
+   * transport fitter returns a replacement object. */
+  transferBrowseResponseOwnership?(source: object, target: object): void;
   emit(event: string, payload?: unknown): void;
   emitBusyChanged(context: SessionContext, busy: boolean): void;
   emitContextUsageChanged(context: SessionContext): void;
   emitSessionListChanged(): Promise<void>;
   listSessions(): Promise<SessionSummary[]>;
-  listAvailableModels(context?: SessionContext): ModelInfo[];
+  listAvailableModels(context?: SessionContext): ModelInfo[] | Promise<ModelInfo[]>;
   readModelSettings(): Promise<ModelSettings>;
   writeModelSettings(updates: Partial<ModelSettings>): Promise<ModelSettings>;
   /** FP-C2b: provider-gate metrics accessor for the prompt-safety-timer defer
@@ -312,12 +346,17 @@ async function handleSessionCreate(
   request: RequestEnvelope,
 ): Promise<unknown> {
   const params = validateSessionCreate(request.params);
+  const viewedRevision = deps.captureViewedSessionRevision?.();
   const cwd = params.cwd || deps.startupCwd;
   const context = await deps.createSessionContext(
     deps.sdk.SessionManager.create(cwd, deps.sessionDir),
     'new',
   );
-  deps.setViewedSessionPath(context.sessionPath);
+  if (deps.setViewedSessionPathIfCurrent && viewedRevision !== undefined) {
+    deps.setViewedSessionPathIfCurrent(context.sessionPath, viewedRevision);
+  } else {
+    deps.setViewedSessionPath(context.sessionPath);
+  }
   const createPayload = await deps.buildSessionOpenedPayload(
     context.sessionPath,
     params.selectionToken,
@@ -328,7 +367,7 @@ async function handleSessionCreate(
     context.session.isStreaming || !!context.activeRequest || context.session.isCompacting === true,
   );
   void deps.emitSessionListChanged();
-  return createPayload;
+  return { ok: true, sessionPath: context.sessionPath };
 }
 
 async function handleSessionOpen(
@@ -336,22 +375,53 @@ async function handleSessionOpen(
   request: RequestEnvelope,
 ): Promise<unknown> {
   const params = validateSessionOpen(request.params);
-  const context = await deps.ensureSessionContext(params.sessionPath);
-  deps.setViewedSessionPath(context.sessionPath);
-  const openPayload = await deps.buildSessionOpenedPayload(
-    context.sessionPath,
-    params.selectionToken,
-    params.transcript,
-  );
+  // Record browse-time predecessor identity before the viewed path changes.
+  // Building a cold payload is deliberately SessionManager-only. The viewed
+  // path commits only after the durable read succeeds.
+  const viewedPathRollback = deps.prepareViewedSessionPath?.(params.sessionPath);
+  let openPayload: SessionOpenedPayload;
+  try {
+    openPayload = await deps.buildSessionOpenedPayload(
+      params.sessionPath,
+      params.selectionToken,
+      params.transcript,
+    );
+  } catch (error) {
+    deps.discardPreparedViewedSessionPath?.(params.sessionPath, viewedPathRollback);
+    throw error;
+  }
+  if (deps.commitPreparedViewedSessionPath) {
+    deps.commitPreparedViewedSessionPath(params.sessionPath, viewedPathRollback);
+  } else {
+    deps.setViewedSessionPath(params.sessionPath);
+  }
   deps.emit('session.opened', openPayload);
-  deps.emitBusyChanged(
-    context,
-    context.session.isStreaming || !!context.activeRequest || context.session.isCompacting === true,
-  );
+  const context = deps.getSessionContext(params.sessionPath);
+  if (context) {
+    deps.emitBusyChanged(
+      context,
+      context.session.isStreaming || !!context.activeRequest || context.session.isCompacting === true,
+    );
+  }
   void deps.emitSessionListChanged();
   // The authoritative snapshot is the session.opened event above. Return only
   // a small acknowledgement instead of duplicating the transcript payload.
-  return { ok: true, sessionPath: context.sessionPath };
+  return { ok: true, sessionPath: params.sessionPath };
+}
+
+async function handleSessionViewed(
+  deps: BackendRequestHandlerDeps,
+  request: RequestEnvelope,
+): Promise<unknown> {
+  const params = validateSessionViewed(request.params);
+  if (!deps.recordViewedSessionTransition) {
+    throw new BackendError('UNAVAILABLE', 'Viewed-session transition tracking is unavailable.');
+  }
+  const changed = deps.recordViewedSessionTransition(
+    params.sessionPath,
+    params.previousSessionPath,
+  );
+  return { ok: true, sessionPath: params.sessionPath, changed };
 }
 
 async function handleSessionDuplicate(
@@ -359,15 +429,22 @@ async function handleSessionDuplicate(
   request: RequestEnvelope,
 ): Promise<unknown> {
   const params = validateSessionDuplicate(request.params);
+  const viewedRevision = deps.captureViewedSessionRevision?.();
   const sourceContext = deps.getSessionContext(params.sessionPath);
-  const sourceCwd = sourceContext?.session.sessionManager.getCwd() ?? deps.startupCwd;
+  const sourceCwd = sourceContext?.session.sessionManager.getCwd()
+    || deps.sdk.SessionManager.open(params.sessionPath).getCwd()
+    || deps.startupCwd;
   const forkedManager = deps.sdk.SessionManager.forkFrom(
     params.sessionPath,
     sourceCwd,
     deps.sessionDir,
   );
   const context = await deps.createSessionContext(forkedManager, 'new');
-  deps.setViewedSessionPath(context.sessionPath);
+  if (deps.setViewedSessionPathIfCurrent && viewedRevision !== undefined) {
+    deps.setViewedSessionPathIfCurrent(context.sessionPath, viewedRevision);
+  } else {
+    deps.setViewedSessionPath(context.sessionPath);
+  }
   const duplicatePayload = await deps.buildSessionOpenedPayload(
     context.sessionPath,
     params.selectionToken,
@@ -378,7 +455,7 @@ async function handleSessionDuplicate(
     context.session.isStreaming || !!context.activeRequest || context.session.isCompacting === true,
   );
   void deps.emitSessionListChanged();
-  return duplicatePayload;
+  return { ok: true, sessionPath: context.sessionPath };
 }
 
 async function handleSessionPreload(
@@ -386,8 +463,12 @@ async function handleSessionPreload(
   request: RequestEnvelope,
 ): Promise<unknown> {
   const params = validateSessionPath('session.preload', request.params);
-  const context = await deps.ensureSessionContext(params.sessionPath);
-  return await deps.buildSessionOpenedPayload(context.sessionPath);
+  return await deps.buildSessionOpenedPayload(
+    params.sessionPath,
+    undefined,
+    'tail',
+    { kind: 'response', requestId: request.id },
+  );
 }
 
 async function handleSessionForget(
@@ -406,12 +487,20 @@ async function handleSessionLoadTranscriptPage(
   request: RequestEnvelope,
 ): Promise<unknown> {
   const params = validateLoadTranscriptPage(request.params);
-  return await deps.loadTranscriptPage(
+  const page = await deps.loadTranscriptPage(
     params.sessionPath,
     params.direction,
     params.loadedStart,
     params.loadedEnd,
   );
+  const active = deps.getSessionContext(params.sessionPath)?.activeRequest;
+  const bounded = boundTranscriptSnapshot(page, {
+    transport: { kind: 'response', requestId: request.id },
+    requestedEdge: params.direction === 'older' ? 'older' : 'newer',
+    requiredMessageId: active?.currentMessageId ?? active?.lastAssistantMessageId,
+  });
+  deps.transferBrowseResponseOwnership?.(page, bounded);
+  return bounded;
 }
 
 async function handleSessionLoadDetail(
@@ -461,61 +550,71 @@ async function handleSessionTruncateAfter(
   // surprise after a `setModel` the user explicitly made). We re-apply the
   // captured choice to the fresh context below so the model survives a
   // transcript truncation. See STATE_CONTRACT § Optimistic Reconciliation.
-  const previousModelId = existingCtx?.session.model?.id;
-  const previousThinkingLevel = existingCtx?.session.thinkingLevel;
+  const durableContext = existingCtx ? undefined : deps.sdk.SessionManager.open(params.sessionPath).buildSessionContext?.();
+  const previousModelId = existingCtx?.session.model?.id ?? durableContext?.model?.modelId;
+  const previousProvider = existingCtx?.session.model?.provider ?? durableContext?.model?.provider;
+  const previousThinkingLevel = existingCtx?.session.thinkingLevel ?? durableContext?.thinkingLevel;
 
-  const raw = await fs.readFile(params.sessionPath, 'utf8');
-  const keepLines: string[] = [];
-  for (const line of raw.split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    try {
-      const entry = JSON.parse(trimmed) as { id?: string };
-      if (entry.id === params.entryId) break;
-      keepLines.push(line);
-    } catch {
-      // skip malformed lines
+  const replace = async (): Promise<SessionContext> => {
+    const raw = await fs.readFile(params.sessionPath, 'utf8');
+    const keepLines: string[] = [];
+    for (const line of raw.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        const entry = JSON.parse(trimmed) as { id?: string };
+        if (entry.id === params.entryId) break;
+        keepLines.push(line);
+      } catch {
+        // skip malformed lines
+      }
     }
-  }
-  const newContent = keepLines.length > 0 ? keepLines.join('\n') + '\n' : '';
-  // Atomically replace the transcript: write to a temp file in the same
-  // directory (same filesystem → `fs.rename` is atomic) then rename over the
-  // original. A crash mid-write leaves the original intact instead of
-  // truncating/corrupting it. UUID suffix keeps the temp name collision-safe
-  // under rapid repeated truncation.
-  const dir = path.dirname(params.sessionPath);
-  const tmpPath = path.join(
-    dir,
-    `.${path.basename(params.sessionPath)}.${crypto.randomUUID()}.tmp`,
-  );
-  await fs.writeFile(tmpPath, newContent, 'utf8');
-  try {
-    await fs.rename(tmpPath, params.sessionPath);
-  } catch (renameError) {
-    await fs.rm(tmpPath, { force: true }).catch(() => {});
-    throw renameError;
-  }
+    const newContent = keepLines.length > 0 ? keepLines.join('\n') + '\n' : '';
+    // Atomically replace the transcript: write to a temp file in the same
+    // directory (same filesystem → `fs.rename` is atomic) then rename over the
+    // original. A crash mid-write leaves the original intact instead of
+    // truncating/corrupting it. UUID suffix keeps the temp name collision-safe
+    // under rapid repeated truncation.
+    const dir = path.dirname(params.sessionPath);
+    const tmpPath = path.join(
+      dir,
+      `.${path.basename(params.sessionPath)}.${crypto.randomUUID()}.tmp`,
+    );
+    await fs.writeFile(tmpPath, newContent, 'utf8');
+    try {
+      await fs.rename(tmpPath, params.sessionPath);
+    } catch (renameError) {
+      await fs.rm(tmpPath, { force: true }).catch(() => {});
+      throw renameError;
+    }
 
-  const context = await deps.createSessionContext(
-    deps.sdk.SessionManager.open(params.sessionPath),
-    'resume',
-  );
-  deps.setViewedSessionPath(context.sessionPath);
+    const replacement = await deps.createSessionContext(
+      deps.sdk.SessionManager.open(params.sessionPath),
+      'resume',
+    );
 
-  // Re-apply the user's model choice if the truncate dropped its
-  // `model_change` entry (the fresh context opened with a different model).
-  // Best-effort: a failure is logged but does NOT abort the truncate — the
-  // worst case is the pre-switch model, which is the status quo without this
-  // fix. `setModel` appends a fresh `model_change` (and `setThinkingLevel` a
-  // `thinking_level_change`) so the choice is durable across future
-  // truncates/reopens, not just this one.
-  await reapplyModelAfterTruncate(context, previousModelId, previousThinkingLevel);
+    // Re-apply the user's model choice if the truncate dropped its
+    // `model_change` entry (the fresh context opened with a different model).
+    await reapplyModelAfterTruncate(replacement, previousModelId, previousProvider, previousThinkingLevel);
+    // Hydration publication is part of transition ownership. A concurrent
+    // runtime action waiting on this path cannot resume and stream before the
+    // authoritative post-truncate snapshot is enqueued.
+    const payload = await (deps.buildTransitionSessionOpenedPayload?.(replacement.sessionPath)
+      ?? deps.buildSessionOpenedPayload(replacement.sessionPath));
+    deps.emit('session.opened', payload);
+    deps.emitBusyChanged(replacement, false);
+    return replacement;
+  };
 
-  const truncatePayload = await deps.buildSessionOpenedPayload(context.sessionPath);
-  deps.emit('session.opened', truncatePayload);
-  deps.emitBusyChanged(context, false);
+  // Registration is synchronous and happens before the first file await, so a
+  // concurrent send joins this replacement rather than promoting a second
+  // authoritative runtime from the pre-truncate file.
+  const context = deps.transitionSessionContext
+    ? await deps.transitionSessionContext(params.sessionPath, replace)
+    : await replace();
+
   void deps.emitSessionListChanged();
-  return truncatePayload;
+  return { ok: true, sessionPath: context.sessionPath };
 }
 
 /** Re-apply a model + thinking level captured before a truncate to the freshly
@@ -527,12 +626,16 @@ async function handleSessionTruncateAfter(
 async function reapplyModelAfterTruncate(
   context: SessionContext,
   previousModelId: string | undefined,
+  previousProvider: string | undefined,
   previousThinkingLevel: string | undefined,
 ): Promise<void> {
   if (!previousModelId && !previousThinkingLevel) {
     return;
   }
-  const modelChanged = !!previousModelId && context.session.model?.id !== previousModelId;
+  const modelChanged = !!previousModelId && (
+    context.session.model?.id !== previousModelId
+    || (!!previousProvider && context.session.model?.provider !== previousProvider)
+  );
   const thinkingChanged = !!previousThinkingLevel && context.session.thinkingLevel !== previousThinkingLevel;
   if (!modelChanged && !thinkingChanged) {
     return;
@@ -540,7 +643,8 @@ async function reapplyModelAfterTruncate(
   try {
     if (modelChanged && previousModelId && typeof context.session.setModel === 'function') {
       const available = context.runtime.services?.modelRegistry?.getAvailable() ?? [];
-      const info = available.find((model) => model.id === previousModelId);
+      const info = available.find((model) => model.id === previousModelId && model.provider === previousProvider)
+        ?? (!previousProvider ? available.find((model) => model.id === previousModelId) : undefined);
       if (!info) {
         throw new Error(`Model no longer available in this session: ${previousModelId}`);
       }
@@ -638,6 +742,13 @@ async function handleMessageSend(
 ): Promise<unknown> {
   const params = validateMessageSend(request.params);
   let context = await deps.ensureSessionContext(params.sessionPath);
+  // An existing-hot lookup can resolve just before truncate/recovery reserves
+  // the path. Rejoin that synchronously visible owner before claiming active
+  // work; after this check activeRequest is installed without another await,
+  // so a later truncate observes STREAMING_BUSY instead of replacing us.
+  while (deps.isSessionTransitionPending?.(params.sessionPath)) {
+    context = await deps.ensureSessionContext(params.sessionPath);
+  }
   if (context.recoveryPromise) {
     try {
       context = await context.recoveryPromise;
@@ -890,10 +1001,7 @@ async function handleMessageCompact(
   request: RequestEnvelope,
 ): Promise<unknown> {
   const params = validateSessionPath('message.compact', request.params);
-  const context = deps.getSessionContext(params.sessionPath);
-  if (!context) {
-    throw new BackendError('SESSION_NOT_FOUND', `Cannot compact an unopened session: ${params.sessionPath}`);
-  }
+  const context = await deps.ensureSessionContext(params.sessionPath);
   if (context.activeRequest || context.session.isStreaming || context.session.isCompacting) {
     throw new BackendError('REQUEST_IN_PROGRESS', 'Cannot compact while this session is running.');
   }
@@ -1014,16 +1122,22 @@ async function handleMessageInterrupt(
       userInitiated: true,
     } satisfies MessageAbortedPayload);
     deps.emitBusyChanged(context, false);
-    context.recoveryPromise = deps.createSessionContext(
-      deps.sdk.SessionManager.open(params.sessionPath),
-      'resume',
-    ).then(async (replacement) => {
+    const createReplacement = async () => {
+      const replacement = await deps.createSessionContext(
+        deps.sdk.SessionManager.open(params.sessionPath),
+        'resume',
+      );
       await Promise.allSettled([
-        deps.buildSessionOpenedPayload(replacement.sessionPath).then((payload) => deps.emit('session.opened', payload)),
+        (deps.buildTransitionSessionOpenedPayload?.(replacement.sessionPath)
+          ?? deps.buildSessionOpenedPayload(replacement.sessionPath))
+          .then((payload) => deps.emit('session.opened', payload)),
         deps.emitSessionListChanged(),
       ]);
       return replacement;
-    });
+    };
+    context.recoveryPromise = deps.transitionSessionContext
+      ? deps.transitionSessionContext(params.sessionPath, createReplacement)
+      : createReplacement();
     void context.recoveryPromise.catch((error) => {
       deps.emit('operational-error', {
         code: 'SESSION_RUNTIME_RECOVERY_FAILED',
@@ -1144,6 +1258,7 @@ async function handleSystemPromptTogglesSet(
   request: RequestEnvelope,
 ): Promise<unknown> {
   const params = validateSystemPromptTogglesSet(request.params);
+  await deps.ensureSessionContext(params.sessionPath);
   await deps.applySystemPromptToggles(params.sessionPath, params.disabledEntries);
   const payload = await deps.buildSessionOpenedPayload(params.sessionPath);
   deps.emit('session.opened', payload);
@@ -1176,7 +1291,7 @@ async function handleModelsList(
   request: RequestEnvelope,
 ): Promise<unknown> {
   const params = validateSessionPath('models.list', request.params);
-  return deps.listAvailableModels(await deps.ensureSessionContext(params.sessionPath));
+  return await deps.listAvailableModels(deps.getSessionContext(params.sessionPath));
 }
 
 async function handleSettingsGet(
@@ -1381,6 +1496,7 @@ const handlers: Record<string, RequestHandler> = {
   'session.list': handleSessionList,
   'session.create': handleSessionCreate,
   'session.open': handleSessionOpen,
+  'session.viewed': handleSessionViewed,
   'session.duplicate': handleSessionDuplicate,
   'session.preload': handleSessionPreload,
   'session.forget': handleSessionForget,

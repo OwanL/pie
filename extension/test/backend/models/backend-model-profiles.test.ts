@@ -5,6 +5,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 import { BackendServer } from '../../../src/backend/index';
+import { SESSION_SNAPSHOT_MAX_LINE_BYTES, sessionSnapshotLineBytes } from '../../../src/shared/transcript-window';
 
 const MODELS = [
   {
@@ -114,6 +115,7 @@ test('session.opened is busy and compacting when opened during history compactio
 
   assert.equal(payload.busy, true);
   assert.equal(payload.isCompacting, true);
+  assert.equal(payload.runtimeReady, true);
 });
 
 test('session.opened carries whole-session usage even when its transcript payload is windowed', async () => {
@@ -169,6 +171,48 @@ test('session.opened carries whole-session usage even when its transcript payloa
   const changedPayload = await server.buildSessionOpenedPayload(sessionPath);
   assert.notStrictEqual(changedPayload.sessionUsage, payload.sessionUsage);
   assert.equal(changedPayload.sessionUsage.samples.filter((sample: { kind: string }) => sample.kind === 'assistant').length, 62);
+});
+
+test('session.opened degrades an individually oversized durable row to a bounded explicit unavailable snapshot', async () => {
+  const branch = [{
+    type: 'message',
+    id: 'oversized-user',
+    timestamp: '2026-01-01T00:00:00.000Z',
+    message: {
+      role: 'user',
+      content: [{ type: 'image', data: 'a'.repeat(31 * 1024 * 1024), mimeType: 'image/png' }],
+    },
+  }];
+  const { server, sessionPath } = makeServerWithSession(branch);
+
+  const payload = await server.buildSessionOpenedPayload(sessionPath);
+
+  assert.equal(payload.snapshotUnavailable?.code, 'SESSION_SNAPSHOT_TOO_LARGE');
+  assert.equal(payload.transcript.length, 0);
+  assert.equal(payload.transcriptWindow.totalCount, 1);
+  assert.equal(payload.transcriptWindow.loadedStart, 1);
+  assert.equal(payload.transcriptWindow.loadedEnd, 1);
+  assert.ok(sessionSnapshotLineBytes(payload, { kind: 'event', event: 'session.opened' }) <= SESSION_SNAPSHOT_MAX_LINE_BYTES);
+});
+
+test('hot session.opened final fallback drops huge summary and runtime catalog metadata', async () => {
+  const { server, sessionPath } = makeServerWithSession();
+  const huge = 'x'.repeat(31 * 1024 * 1024);
+  const context = server.sessionContexts.get(sessionPath);
+  context.session.sessionManager.getSessionName = () => huge;
+  context.runtime.services.modelRegistry.getAvailable = () => [{
+    id: 'huge-model', provider: 'mock', name: huge, reasoning: false,
+  }];
+
+  const payload = await server.buildSessionOpenedPayload(sessionPath, 'hot-selection');
+
+  assert.equal(payload.snapshotUnavailable?.code, 'SESSION_SNAPSHOT_TOO_LARGE');
+  assert.equal(payload.session.path, sessionPath);
+  assert.equal(payload.session.name, 'Conversation snapshot unavailable');
+  assert.equal(payload.selectionToken, 'hot-selection');
+  assert.equal(payload.runtimeReady, true);
+  assert.equal(payload.availableModels, undefined);
+  assert.ok(sessionSnapshotLineBytes(payload, { kind: 'event', event: 'session.opened' }) <= SESSION_SNAPSHOT_MAX_LINE_BYTES);
 });
 
 test('session.opened payload includes subagent profile metadata from the backend agentDir', async () => {

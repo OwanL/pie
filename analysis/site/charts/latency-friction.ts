@@ -8,8 +8,9 @@ interface TimingComponentRow {
 }
 
 export function runtimeFrictionTimingRows(ctx: ChartContext): TimingComponentRow[] {
-  const runIds = selectedRunIds(ctx.runs);
-  const prepass = ctx.runs
+  const completed = completedRuns(ctx.runs);
+  const runIds = selectedRunIds(completed);
+  const prepass = completed
     .map((run) => run.skillPruningPrepassDurationMs)
     .filter((value): value is number => value !== null);
   const queue = ctx.turnThroughputRows
@@ -88,13 +89,20 @@ export function toolTimeOverlapRows(ctx: ChartContext): ToolOverlapRow[] {
   return [...byModel.entries()]
     .sort(([left], [right]) => left.localeCompare(right))
     .flatMap(([model, values]) => {
-      const cumulative = median(values.map((value) => value.cumulative)) ?? 0;
       const critical = median(values.map((value) => value.critical)) ?? 0;
       const overlap = median(values.map((value) => Math.max(0, value.cumulative - value.critical))) ?? 0;
+      // Medians do not generally distribute over subtraction. Treat the
+      // component medians as the displayed aggregate, so the stack total and
+      // its cumulative reference are algebraically identical.
+      const criticalMs = Math.round(critical);
+      const cumulativeMs = Math.round(critical + overlap);
+      // Round the displayed overlap as the residual, rather than independently,
+      // so the integer stack total always equals the displayed reference.
+      const overlapMs = cumulativeMs - criticalMs;
       return [
-        { model, component: 'Cumulative' as const, medianMs: Math.round(cumulative), runCount: values.length, medianCumulativeMs: Math.round(cumulative) },
-        { model, component: 'Critical path' as const, medianMs: Math.round(critical), runCount: values.length, medianCumulativeMs: Math.round(cumulative) },
-        { model, component: 'Parallel overlap' as const, medianMs: Math.round(overlap), runCount: values.length, medianCumulativeMs: Math.round(cumulative) },
+        { model, component: 'Cumulative' as const, medianMs: cumulativeMs, runCount: values.length, medianCumulativeMs: cumulativeMs },
+        { model, component: 'Critical path' as const, medianMs: criticalMs, runCount: values.length, medianCumulativeMs: cumulativeMs },
+        { model, component: 'Parallel overlap' as const, medianMs: overlapMs, runCount: values.length, medianCumulativeMs: cumulativeMs },
       ];
     });
 }
@@ -107,7 +115,7 @@ async function renderToolTimeOverlap(ctx: ChartContext): Promise<void> {
     'tool-time-overlap-note',
     rows.length === 0
       ? 'No runs with critical-path tool timing match the current filters; historical absence is not treated as zero overlap.'
-      : `${runCount} measured runs across ${modelCount} models. Stacked bars show critical path + parallel overlap, which sum to cumulative tool time (overlap = cumulative − critical path, computed per run before aggregation).`,
+      : `${runCount} measured runs across ${modelCount} models. Stacked bars show critical path + parallel overlap; the displayed cumulative reference is their aggregate sum (overlap = cumulative − critical path, computed per run before aggregation).`,
     ctx.renderToken,
   );
   const models = [...new Set(rows.map((row) => row.model))];
@@ -132,7 +140,7 @@ async function renderToolTimeOverlap(ctx: ChartContext): Promise<void> {
         { field: 'model', type: 'nominal' as const, title: 'Model' },
         { field: 'component', type: 'nominal' as const, title: 'Component' },
         { field: 'medianMs', type: 'quantitative' as const, title: 'Median component (ms)', format: ',.0f' },
-        { field: 'medianCumulativeMs', type: 'quantitative' as const, title: 'Median cumulative (ms)', format: ',.0f' },
+        { field: 'medianCumulativeMs', type: 'quantitative' as const, title: 'Displayed cumulative reference (ms)', format: ',.0f' },
         { field: 'runCount', type: 'quantitative' as const, title: 'Measured runs' },
       ],
     },
@@ -141,6 +149,6 @@ async function renderToolTimeOverlap(ctx: ChartContext): Promise<void> {
 }
 
 export const latencyFrictionCharts: ChartEntry[] = [
-  { id: 'chart-runtime-friction-timing', render: renderRuntimeFrictionTiming },
-  { id: 'chart-tool-time-overlap', render: renderToolTimeOverlap },
+  { id: 'chart-runtime-friction-timing', runCohort: 'current-harness', render: renderRuntimeFrictionTiming },
+  { id: 'chart-tool-time-overlap', runCohort: 'current-harness', render: renderToolTimeOverlap },
 ];

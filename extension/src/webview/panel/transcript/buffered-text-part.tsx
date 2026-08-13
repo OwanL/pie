@@ -5,6 +5,8 @@ import type { JSX } from 'preact';
 import { useEffect, useRef, useState } from 'preact/hooks';
 
 import { renderMarkdown } from '../markdown';
+import { handleDelegatedFilePathClick, handleDelegatedFilePathContextMenu, handleDelegatedFilePathKeyDown } from './file-path-interactions';
+import type { TranscriptContextMenuHandler } from './types';
 import { useBufferedText } from './use-buffered-text';
 import { useCommittedTextLeaf } from './commit-registry';
 
@@ -13,7 +15,10 @@ interface BufferedTextPartProps {
   index: number;
   text: string;
   streaming: boolean;
+  workingDirectory: string | null;
+  onOpenFile: (path: string) => void;
   onContextMenu: (e: JSX.TargetedMouseEvent<HTMLDivElement>) => void;
+  onFilePathContextMenu: TranscriptContextMenuHandler;
 }
 
 /** Re-parse streamed markdown at most this often (ms): bounds marked+DOMPurify cost and reduces mid-token flicker. */
@@ -55,7 +60,7 @@ function hasSelectionInBody(el: HTMLDivElement | null): boolean {
  * timeout) — otherwise each distinct html string resets innerHTML, recreating
  * DOM nodes and clearing the user's Selection up to 10x/s.
  */
-export function BufferedTextPart({ messageId, index, text, streaming, onContextMenu }: BufferedTextPartProps) {
+export function BufferedTextPart({ messageId, index, text, streaming, workingDirectory, onOpenFile, onContextMenu, onFilePathContextMenu }: BufferedTextPartProps) {
   const visibleText = useBufferedText(text, streaming);
   const initialText = streaming ? visibleText : text;
   const [rendered, setRendered] = useState(() => ({
@@ -156,7 +161,14 @@ export function BufferedTextPart({ messageId, index, text, streaming, onContextM
       class={`message-body${streaming ? ' streaming-text' : ''}`}
       ref={bodyRef}
       dangerouslySetInnerHTML={{ __html: rendered.html }}
+      onClick={(e) => {
+        handleDelegatedFilePathClick(e, workingDirectory, onOpenFile);
+      }}
+      onKeyDown={(e) => {
+        handleDelegatedFilePathKeyDown(e, workingDirectory, onOpenFile);
+      }}
       onContextMenu={(e) => {
+        if (handleDelegatedFilePathContextMenu(e, workingDirectory, onFilePathContextMenu)) return;
         e.preventDefault();
         onContextMenu(e);
       }}

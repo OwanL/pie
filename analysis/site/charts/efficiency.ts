@@ -92,6 +92,7 @@ function tokenEfficiencyByModel(runs: PreparedRunRow[]) {
 export const efficiencyCharts: ChartEntry[] = [
   {
     id: 'chart-cache-hit-by-model',
+    runCohort: 'all-history',
     render: async (ctx: ChartContext) => {
       const rows = cacheByModel(ctx.runs);
       ctx.setNote('cache-hit-by-model-note', `Median cache-read hit ratio by model (≥2 runs). Cache hit = cacheRead / (cacheRead + input).`, ctx.renderToken);
@@ -117,6 +118,7 @@ export const efficiencyCharts: ChartEntry[] = [
   },
   {
     id: 'chart-cache-hit-trend',
+    runCohort: 'all-history',
     render: async (ctx: ChartContext) => {
       const rows = cacheTrend(ctx.runs);
       ctx.setNote('cache-hit-trend-note', `Daily mean cache-hit ratio across ${rows.length} days.`, ctx.renderToken);
@@ -141,6 +143,7 @@ export const efficiencyCharts: ChartEntry[] = [
   },
   {
     id: 'chart-token-volume',
+    runCohort: 'all-history',
     render: async (ctx: ChartContext) => {
       const rows = tokenVolumeByModel(ctx.runs);
       ctx.setNote('token-volume-note', `Total token volume (millions) by component, top ${rows.length} models.`, ctx.renderToken);
@@ -173,6 +176,7 @@ export const efficiencyCharts: ChartEntry[] = [
   },
   {
     id: 'chart-token-efficiency-by-model',
+    runCohort: 'current-harness',
     render: async (ctx: ChartContext) => {
       const rows = tokenEfficiencyByModel(ctx.runs);
       ctx.setNote('token-efficiency-by-model-note', `Median output tokens per mutated line by model (≥2 runs); higher = more verbose.`, ctx.renderToken);

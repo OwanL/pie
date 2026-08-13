@@ -88,6 +88,13 @@ export interface SdkSessionManager {
   getSessionName: () => string | undefined;
   getBranch: () => SessionEntryLike[];
   getEntries: () => SessionEntryLike[];
+  /** Runtime-free durable context projection supplied by SessionManager. */
+  buildSessionContext?: () => {
+    messages: unknown[];
+    thinkingLevel: string;
+    model: { provider: string; modelId: string } | null;
+  };
+  getHeader?: () => unknown;
 }
 
 export interface SdkImageContent {

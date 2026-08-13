@@ -124,6 +124,10 @@ const RPC_TIMEOUTS_MS: Record<string, number> = {
   'session.create': 60_000,
   'session.open': 60_000,
   'session.preload': 60_000,
+  // Forget waits for any admitted promotion teardown before committing
+  // deletion. Match service initialization rather than timing out and letting
+  // a late backend delete race the host's rollback reopen.
+  'session.forget': 60_000,
   'session.loadTranscriptPage': 30_000,
   'settings.set': 60_000,
   'settings.get': 15_000,
@@ -397,21 +401,28 @@ export class BackendClient implements vscode.Disposable {
   /** Issue a JSON-RPC request and await its response.
    *
    *  `options.timeoutMs` overrides the method default (`RPC_TIMEOUTS_MS`);
-   *  `options.signal` aborts an in-flight request cleanly (Brief E cancels an
-   *  in-flight `message.send` on interrupt; session stop rejects all via
-   *  `rejectAll`). The tracker timeout owns the pre-ack window. */
+   *  `options.signal` aborts only the local waiter because the JSON-RPC
+   *  transport has no cancellation frame. `onTransportSettled` lets the
+   *  preload scheduler retain its physical background-concurrency slot until
+   *  the correlated response, write failure, or backend shutdown arrives. */
   async request<TResult = unknown>(
     method: string,
     params?: unknown,
     options?: RequestOptions,
   ): Promise<TResult> {
     if (!this.proc?.stdin) {
+      options?.onTransportSettled?.();
       throw new Error('Backend is not running');
     }
 
     const id = `req-${++this.requestCounter}`;
     const timeoutMs = options?.timeoutMs ?? RPC_TIMEOUTS_MS[method] ?? DEFAULT_RPC_TIMEOUT_MS;
-    const responsePromise = this.requests.create(id, timeoutMs, options?.signal);
+    const responsePromise = this.requests.create(
+      id,
+      timeoutMs,
+      options?.signal,
+      options?.onTransportSettled,
+    );
 
     bootTraceSync('backend-client', 'request.sent', { id, method, timeoutMs });
     try {

@@ -65,6 +65,35 @@ test('reducer: SessionListChanged preserves summaries for open active tabs missi
   assert.equal(result.state.sessions.activeSessionPath, '/session/a');
 });
 
+test('reducer: stable session identity clears a stale path-fallback marker', () => {
+  const path = '/session/a';
+  const fallbackSummary: SessionSummary = {
+    path,
+    name: 'Session A',
+    cwd: '/workspace',
+    modifiedAt: '2026-08-12T00:00:00.000Z',
+    messageCount: 1,
+    sessionId: 'path-hash',
+    identityFallback: true,
+  };
+  const state: ArchState = {
+    ...initialArchState,
+    sessions: { ...initialArchState.sessions, sessions: [fallbackSummary] },
+  };
+
+  const result = reducer(state, {
+    kind: 'SessionListChanged',
+    sessionSummaries: [{
+      ...fallbackSummary,
+      sessionId: 'stable-header-id',
+      identityFallback: undefined,
+    }],
+  });
+
+  assert.equal(result.state.sessions.sessions[0]?.sessionId, 'stable-header-id');
+  assert.equal(result.state.sessions.sessions[0]?.identityFallback, false);
+});
+
 test('reducer: Interrupt command sets interruptInFlight and returns InterruptRpc effect', () => {
   const event: Event = {
     kind: 'Command',

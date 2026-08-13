@@ -1,6 +1,6 @@
 import type { ChartEntry, ChartContext } from '../lib.ts';
-import { CHART_COLORS, categoricalHeight, median, selectedRunIds, sum } from '../lib.ts';
-import type { PreparedPruningEventRow, PreparedPruningSignalRow } from '../../scripts/contracts.ts';
+import { CHART_COLORS, categoricalHeight, escapeHtml, median, selectedRunIds, sum } from '../lib.ts';
+import type { PreparedPruningEventRow, PreparedPruningSignalRow, PreparedRunRow, ToolResultPruningImpactData } from '../../scripts/contracts.ts';
 
 function filteredPruning(ctx: ChartContext): PreparedPruningEventRow[] {
   const runIds = selectedRunIds(ctx.runs);
@@ -55,7 +55,7 @@ export function pruningRecoveryMetrics(
   let toolRecoveries = 0;
   let successfulSkillReads = 0;
   for (const signal of signals) {
-    if (signal.event === 'skill_miss' || signal.event === 'shadow_miss_candidate') skillMisses += 1;
+    if (signal.event === 'skill_miss' || signal.event === 'shadow_miss_candidate' || signal.event === 'skill_recovered') skillMisses += 1;
     else if (signal.event === 'tool_recovered') toolRecoveries += 1;
     else if (signal.event === 'skill_read') successfulSkillReads += 1;
   }
@@ -131,9 +131,53 @@ export function pruningRecoverySpec(metrics: PruningRecoveryMetrics) {
   };
 }
 
+interface ToolResultPruningDisplayRow {
+  name: string;
+  count: number;
+  tokensSaved: number;
+  beforeTokens?: number;
+  afterTokens?: number;
+}
+
+function toolResultPruningList(title: string, rows: ToolResultPruningDisplayRow[], empty: string): string {
+  return `<article><h4>${title}</h4>${rows.length === 0 ? `<p>${empty}</p>` : `<ul>${rows.map((row) => `<li><strong>${escapeHtml(row.name)}</strong>: ${row.count} event${row.count === 1 ? '' : 's'} · ${Math.round(row.tokensSaved).toLocaleString()} tokens saved</li>`).join('')}</ul>`}</article>`;
+}
+
+/** Render filtered tool-result-pruning health metrics without hiding the multi-rule attribution. */
+export function toolResultPruningImpactHtml(data: ToolResultPruningImpactData, runs: PreparedRunRow[]): string {
+  const runIds = selectedRunIds(runs);
+  const rows = data.rows.filter((row) => runIds.has(row.runId));
+  const totalTokensSaved = sum(rows.map((row) => row.tokensSaved));
+  const totalBeforeTokens = sum(rows.map((row) => row.beforeTokens));
+  const totalAfterTokens = sum(rows.map((row) => row.afterTokens));
+  const savingsRatio = totalBeforeTokens > 0 ? totalTokensSaved / totalBeforeTokens : null;
+  const rules = new Map<string, ToolResultPruningDisplayRow>();
+  const tools = new Map<string, ToolResultPruningDisplayRow>();
+  for (const row of rows) {
+    for (const rule of row.rules) {
+      const current = rules.get(rule) ?? { name: rule, count: 0, tokensSaved: 0 };
+      current.count += 1;
+      current.tokensSaved += row.tokensSaved;
+      rules.set(rule, current);
+    }
+    const current = tools.get(row.toolName) ?? { name: row.toolName, count: 0, tokensSaved: 0, beforeTokens: 0, afterTokens: 0 };
+    current.count += 1;
+    current.tokensSaved += row.tokensSaved;
+    current.beforeTokens = (current.beforeTokens ?? 0) + row.beforeTokens;
+    current.afterTokens = (current.afterTokens ?? 0) + row.afterTokens;
+    tools.set(row.toolName, current);
+  }
+  const sortRows = (left: ToolResultPruningDisplayRow, right: ToolResultPruningDisplayRow) => right.tokensSaved - left.tokensSaved || right.count - left.count || left.name.localeCompare(right.name);
+  const topRules = [...rules.values()].sort(sortRows).slice(0, 8);
+  const topTools = [...tools.values()].sort(sortRows).slice(0, 8);
+  const ratioLabel = savingsRatio === null ? '—' : `${(savingsRatio * 100).toFixed(1)}%`;
+  return `<div class="review-diagnostic-grid"><article><h4>Tool-result pruning summary</h4><p><strong>Events:</strong> ${rows.length.toLocaleString()}</p><p><strong>Total token savings:</strong> ${Math.round(totalTokensSaved).toLocaleString()}</p><p><strong>Savings ratio:</strong> ${ratioLabel} <span class="note">(${Math.round(totalBeforeTokens).toLocaleString()} before → ${Math.round(totalAfterTokens).toLocaleString()} after)</span></p><p class="note">Rule savings are attributed once per rule firing; multi-rule events can therefore appear in more than one rule total.</p></article>${toolResultPruningList('Top rules', topRules, 'No tool-result pruning rules match the current filters.')} ${toolResultPruningList('Top tools', topTools, 'No tool-result pruning tools match the current filters.')}</div>`;
+}
+
 export const pruningCharts: ChartEntry[] = [
   {
     id: 'chart-pruning-tokens-trend',
+    runCohort: 'current-harness',
     render: async (ctx: ChartContext) => {
       const rows = filteredPruning(ctx);
       const trend = tokensSavedTrend(rows);
@@ -172,6 +216,7 @@ export const pruningCharts: ChartEntry[] = [
   },
   {
     id: 'chart-pruning-latency',
+    runCohort: 'current-harness',
     render: async (ctx: ChartContext) => {
       const rows = filteredPruning(ctx);
       const latencies = rows.map((r) => r.llmLatencyMs).filter((v) => Number.isFinite(v) && v > 0);
@@ -193,6 +238,7 @@ export const pruningCharts: ChartEntry[] = [
   },
   {
     id: 'chart-pruning-top-skills',
+    runCohort: 'current-harness',
     render: async (ctx: ChartContext) => {
       const rows = filteredPruning(ctx);
       const top = topPrunedNames(rows, 'prunedSkillNames', 15);
@@ -217,6 +263,7 @@ export const pruningCharts: ChartEntry[] = [
   },
   {
     id: 'chart-pruning-top-tools',
+    runCohort: 'current-harness',
     render: async (ctx: ChartContext) => {
       const rows = filteredPruning(ctx);
       const top = topPrunedNames(rows, 'prunedToolNames', 15);
@@ -241,6 +288,7 @@ export const pruningCharts: ChartEntry[] = [
   },
   {
     id: 'chart-pruning-recovery-rate',
+    runCohort: 'current-harness',
     render: async (ctx: ChartContext) => {
       const metrics = pruningRecoveryMetrics(filteredPruning(ctx), filteredPruningSignals(ctx));
       const recoveriesText = metrics.toolRecoveriesPerDecision === null

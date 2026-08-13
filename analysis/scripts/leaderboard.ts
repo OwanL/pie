@@ -5,7 +5,6 @@ import {
   type ModelLeaderboardProviderBreakdown,
   type ModelLeaderboardRow,
   type PreparedAnalyticsData,
-  type PreparedHistoricalSessionSummary,
   type PreparedRunRow,
   type TaskComplexityBand,
 } from './contracts.ts';
@@ -99,13 +98,6 @@ function canonicalProcessValue(run: PreparedRunRow): number | null {
     { value: tools, weight: 0.2 },
   ]);
 }
-function transcriptProcessValue(session: PreparedHistoricalSessionSummary): number | null {
-  const terminal = session.terminalStatus === 'success' ? 1
-    : session.terminalStatus === 'error' || session.terminalStatus === 'aborted' ? 0 : null;
-  const tools = session.toolCallCount > 0
-    ? 1 - Math.min(1, session.toolErrorCount / Math.max(1, session.toolCallCount)) : null;
-  return weightedAvailable([{ value: null, weight: 0.5 }, { value: terminal, weight: 0.3 }, { value: tools, weight: 0.2 }]);
-}
 function logit(value: number): number { const p = clamp(value, 0.01, 0.99); return Math.log(p / (1 - p)); }
 function logistic(value: number): number { return 1 / (1 + Math.exp(-value)); }
 function sourceCount(observations: Observation[], source: Source): number {
@@ -128,9 +120,18 @@ export function createModelLeaderboard(prepared: PreparedAnalyticsData): ModelLe
 
 function buildLeaderboard(prepared: Pick<PreparedAnalyticsData, 'runs' | 'sessionReviewsV2' | 'historicalSessions'>): ModelLeaderboardData {
   const completed = prepared.runs.filter((run) => run.status !== 'open');
+  const currentHarnessCompleted = completed.filter((run) => run.isCurrentHarness === true);
   const stable = completed.filter((run) => !run.mixedModelConfig && !run.mixedTreatmentConfig);
+  const currentHarnessStable = currentHarnessCompleted.filter((run) => !run.mixedModelConfig && !run.mixedTreatmentConfig);
   const canonicalRepresentatives = latestByTaskAndFamily(stable);
+  const currentHarnessCanonicalRepresentatives = latestByTaskAndFamily(currentHarnessStable);
   const canonicalRepresentativeRunIds = new Set(canonicalRepresentatives.map((run) => run.runId));
+  const currentHarnessCanonicalTaskIdsByFamily = new Map<string, Set<string>>();
+  for (const run of currentHarnessCanonicalRepresentatives) {
+    const tasks = currentHarnessCanonicalTaskIdsByFamily.get(familyOf(run)) ?? new Set<string>();
+    tasks.add(taskOf(run));
+    currentHarnessCanonicalTaskIdsByFamily.set(familyOf(run), tasks);
+  }
 
   const preTasks: PreTaskComplexityTask[] = selectPreTaskComplexityRepresentativeRuns(stable).map((run) => ({
     taskId: `canonical:${taskOf(run)}`,
@@ -155,7 +156,9 @@ function buildLeaderboard(prepared: Pick<PreparedAnalyticsData, 'runs' | 'sessio
   };
 
   const observations: Observation[] = [];
-  for (const run of canonicalRepresentatives) {
+  // Runtime process observations are deliberately current-harness-only. The
+  // review channel above still uses the full historical run population.
+  for (const run of currentHarnessCanonicalRepresentatives) {
     const family = familyOf(run);
     const taskId = `canonical:${taskOf(run)}`;
     const band = complexity.bands.get(taskId) ?? 'medium';
@@ -235,17 +238,6 @@ function buildLeaderboard(prepared: Pick<PreparedAnalyticsData, 'runs' | 'sessio
     }
   }
 
-  for (const session of prepared.historicalSessions.filter((item) => item.transcriptOnly)) {
-    const value = transcriptProcessValue(session);
-    if (value === null) continue;
-    const attributed = session.attributions.filter((a) => a.modelFamily !== '(unknown)' && a.share > 0);
-    const total = attributed.reduce((sum, a) => sum + a.share, 0);
-    if (!total) continue;
-    const band = complexity.bands.get(`transcript:${session.sessionPathHash}`) ?? 'medium';
-    for (const attribution of attributed) {
-      observations.push({ family: attribution.modelFamily, source: 'process', value, share: attribution.share / total, taskId: session.sessionPathHash, band, transcriptOnly: true, mixed: attributed.length > 1, complexityScore: complexity.scores.get(`transcript:${session.sessionPathHash}`) ?? NEUTRAL });
-    }
-  }
 
   const families = new Map<string, FamilyStats>();
   const getFamily = (family: string): FamilyStats => {
@@ -256,7 +248,10 @@ function buildLeaderboard(prepared: Pick<PreparedAnalyticsData, 'runs' | 'sessio
     }
     return value;
   };
-  for (const run of completed) {
+  // Seed runtime-only diagnostics from the current harness. Historical families
+  // remain visible only when a V2 review observation below supplies quality
+  // evidence; legacy runtime alone must not create empty leaderboard rows.
+  for (const run of currentHarnessCompleted) {
     const stats = getFamily(familyOf(run));
     stats.canonicalRuns.push(run);
     const thinking = thinkingOf(run.thinkingLevel);
@@ -272,10 +267,10 @@ function buildLeaderboard(prepared: Pick<PreparedAnalyticsData, 'runs' | 'sessio
     stats.observations.push(observation);
     if (observation.transcriptOnly) stats.transcriptSessions.add(observation.taskId);
   }
-  for (const session of prepared.historicalSessions.filter((item) => item.transcriptOnly || transcriptOnlyReviewFamiliesBySessionId.has(item.sessionId))) {
-    const reviewFamilies = transcriptOnlyReviewFamiliesBySessionId.get(session.sessionId);
+  for (const session of prepared.historicalSessions.filter((item) => transcriptOnlyReviewFamiliesBySessionId.has(item.sessionId))) {
+    const reviewFamilies = transcriptOnlyReviewFamiliesBySessionId.get(session.sessionId)!;
     for (const attribution of session.attributions.filter((a) => a.modelFamily !== '(unknown)' && a.share > 0
-      && (session.transcriptOnly || reviewFamilies?.has(a.modelFamily)))) {
+      && reviewFamilies.has(a.modelFamily))) {
       const stats = getFamily(attribution.modelFamily);
       // Count every unique transcript-only session attributed to a family regardless of
       // process-value availability (processEvidenceMass stays separate, from observations).
@@ -290,6 +285,12 @@ function buildLeaderboard(prepared: Pick<PreparedAnalyticsData, 'runs' | 'sessio
       p.transcriptSessionIds.add(session.sessionPathHash);
       p.transcriptEvidenceMass += attribution.share;
       stats.providers.set(attribution.modelId, p);
+    }
+  }
+
+  for (const stats of families.values()) {
+    if (stats.providers.size === 0) {
+      stats.providers.set('(unknown)', { runCount: 0, transcriptSessionIds: new Set(), transcriptEvidenceMass: 0 });
     }
   }
 
@@ -350,7 +351,7 @@ function buildLeaderboard(prepared: Pick<PreparedAnalyticsData, 'runs' | 'sessio
     spread[source] = logits.length ? Math.sqrt(logits.reduce((sum, value) => sum + (value - center) ** 2, 0) / logits.length) : 0;
   }
 
-  const workload = computeWorkloadIntensityScores(completed);
+  const workload = computeWorkloadIntensityScores(currentHarnessCompleted);
   const eligibleReviewedSessionIds = new Set(prepared.sessionReviewsV2
     .filter((review) => review.attainment.qualityIndexV1 !== null
       && !review.identityFallback
@@ -378,6 +379,7 @@ function buildLeaderboard(prepared: Pick<PreparedAnalyticsData, 'runs' | 'sessio
     const evidenceTier: EvidenceTier = reviewMass >= 3 ? 'review-backed' : reviewMass > 0 ? 'thin-review' : 'telemetry-only';
     const reviewObservations = stats.observations.filter((observation) => observation.source === 'review');
     const canonicalTasks = new Set(canonicalRepresentatives.filter((run) => familyOf(run) === stats.family).map(taskOf));
+    const currentHarnessCanonicalTasks = currentHarnessCanonicalTaskIdsByFamily.get(stats.family) ?? new Set<string>();
     const transcriptReviewTasks = new Set(reviewObservations.filter((observation) => observation.transcriptOnly).map((observation) => observation.taskId));
     const attributableTaskCount = canonicalTasks.size + transcriptReviewTasks.size;
     const toolValues = stats.canonicalRuns.filter((run) => run.toolCallCount > 0).map((run) => 1 - Math.min(1, run.toolFailureCount / run.toolCallCount));
@@ -410,13 +412,13 @@ function buildLeaderboard(prepared: Pick<PreparedAnalyticsData, 'runs' | 'sessio
       attributableTaskCount,
       scoringCoverage: attributableTaskCount ? round(reviewMass / attributableTaskCount) : null,
       scoringCoverageGateFailed: false,
-      mixedModelExcludedCount: stats.canonicalRuns.filter((run) => eligibleReviewedSessionIds.has(run.sessionId) && run.mixedModelConfig).length,
-      mixedTreatmentExcludedCount: stats.canonicalRuns.filter((run) => eligibleReviewedSessionIds.has(run.sessionId) && !run.mixedModelConfig && run.mixedTreatmentConfig).length,
+      mixedModelExcludedCount: completed.filter((run) => familyOf(run) === stats.family && eligibleReviewedSessionIds.has(run.sessionId) && run.mixedModelConfig).length,
+      mixedTreatmentExcludedCount: completed.filter((run) => familyOf(run) === stats.family && eligibleReviewedSessionIds.has(run.sessionId) && !run.mixedModelConfig && run.mixedTreatmentConfig).length,
       v2ReviewCount: round(reviewMass),
       meanQualityIndexV1: source.review.direct === null ? null : round(source.review.direct * 100, 1),
       reviewEvidenceCount: sourceCount(stats.observations, 'review'), reviewEvidenceMass: round(reviewMass),
       processEvidenceCount: sourceCount(stats.observations, 'process'), processEvidenceMass: round(source.process.mass),
-      canonicalTaskCount: canonicalTasks.size, transcriptOnlySessionCount: stats.transcriptSessions.size,
+      canonicalTaskCount: currentHarnessCanonicalTasks.size, transcriptOnlySessionCount: stats.transcriptSessions.size,
       mixedAttributionMass: round(mixedAttributionMass), evidenceTier,
       reviewChannelScore: source.review.direct === null ? null : round(source.review.theta),
       processChannelScore: source.process.direct === null ? null : round(source.process.theta),
@@ -476,7 +478,7 @@ function buildLeaderboard(prepared: Pick<PreparedAnalyticsData, 'runs' | 'sessio
       notes: ['Ex-ante task bands remain diagnostic. V2 quality rank is not case-mix adjusted and cannot inherit runtime population weights.'],
     },
     notes: [
-      'Rows are canonical model families across all thinking levels. Only families with attributable stable-ID V2 review mass are ranked; other observed families remain visible as diagnostics.',
+      'Rows are canonical model families across all thinking levels. Families appear only with attributable stable-ID V2 review mass or completed current-harness runtime telemetry. Only review-backed families are ranked; runtime fields use completed current-harness runs only.',
       'The model/harness rank is review-only: it uses only deterministically derived V2 qualityIndexV1 criterion attainment. Runtime process, coverage, confidence, blockers, cost, and latency have zero ranking weight.',
       'V2 reviews use stable sessionId attribution. Canonical run joins collapse retries deterministically to the latest stable run per task and family; successful transcript token shares supplement contributing families whose run snapshot is absent and preserve unmatched stable-ID review quality. Transcript-only family shares remain excluded from run-dependent metrics and canonical task counts. Path-fallback, identityFallback, and unblinded reviews are excluded. Mixed-model attribution shares sum to one review.',
       'Accepted mixed-bucket and small-only V2 reviewer profiles participate under the same qualityIndexV1 rules.',

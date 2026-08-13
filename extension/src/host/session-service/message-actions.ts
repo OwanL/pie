@@ -8,6 +8,7 @@ import { toErrorMessage } from '../util/error-message';
 
 
 import { isPendingTabPath } from '../../shared/tab-behavior';
+import { modelSettingsMatchForHydration } from '../../shared/protocol';
 import type {
   ModelInfo,
   ModelSettings,
@@ -113,10 +114,10 @@ export class SessionMessageActions {
         this.backend.request<ModelInfo[]>('models.list', { sessionPath }),
       ]);
 
-      // Sync the global `modelSettings` (persisted default model + thinking
-      // level) read-only from the backend. This is a HYDRATE, not a user model
-      // switch: it must not touch the focused session's live model or persist
-      // anything, so we dispatch `ModelSettingsHydrated` (read-only ArchState
+      // Sync the global `modelSettings` (persisted default model, provider,
+      // and thinking level) read-only from the backend. This is a HYDRATE,
+      // not a user model switch: it must not touch the focused session's live
+      // model or persist anything, so we dispatch `ModelSettingsHydrated` (read-only ArchState
       // update) instead of `SetModel`. The previous implementation dispatched
       // `SetModel` whenever the session's per-session model differed from the
       // global default — a legitimate state (a session can run a non-default
@@ -126,9 +127,7 @@ export class SessionMessageActions {
       // clobbered the session's per-session model on top of that.
       const archState = this.getArchState();
       const currentSettings = archState.settings.modelSettings;
-      const settingsInSync = currentSettings
-        && currentSettings.defaultModel === modelSettings.defaultModel
-        && currentSettings.defaultThinkingLevel === modelSettings.defaultThinkingLevel;
+      const settingsInSync = modelSettingsMatchForHydration(currentSettings, modelSettings);
       if (!settingsInSync) {
         this.dispatchArch({ kind: 'ModelSettingsHydrated', modelSettings });
       }

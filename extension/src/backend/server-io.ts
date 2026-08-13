@@ -1,6 +1,7 @@
 import type { Writable } from 'node:stream';
 import { JSONL_MAX_LINE_BYTES, serializeJsonLine } from '../shared/jsonl';
 import type { ErrorPayload, EventEnvelope, ResponseEnvelope } from '../shared/protocol';
+import { SessionSnapshotTooLargeError } from '../shared/transcript-window';
 import {
   compactJsonPatchOperations,
   DEFAULT_JSON_PATCH_LIMITS,
@@ -493,6 +494,9 @@ export class BackendError extends Error {
 }
 
 export function extractRequestError(error: unknown): ErrorPayload & { data?: unknown } {
+  if (error instanceof SessionSnapshotTooLargeError) {
+    return { code: error.code, message: error.message, data: error.data };
+  }
   if (error instanceof BackendError) {
     const payload: ErrorPayload & { data?: unknown } = { code: error.code, message: error.message };
     if (error.data !== undefined) payload.data = error.data;

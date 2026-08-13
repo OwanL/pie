@@ -73,7 +73,7 @@ export interface RunObserver {
   onSessionClosed(sessionPath: string): void;
   /** Scrub analytics when a session enters privacy mode. */
   setSessionPrivacy?(sessionPath: string, enabled: boolean): Promise<void>;
-  replaceSessionPath(oldPath: string, newPath: string): void;
+  replaceSessionPath(oldPath: string, newPath: string, stableSessionId?: string): void;
 }
 
 export const NOOP_RUN_OBSERVER: RunObserver = {

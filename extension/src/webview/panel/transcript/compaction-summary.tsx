@@ -92,7 +92,7 @@ function modelLine(details: CompactionSummaryDetails): string | null {
  */
 export function CompactionSummary({ summary, details }: CompactionSummaryProps) {
   const [open, setOpen] = useState(false);
-  const html = useMemo(() => (open ? renderMarkdown(summary) : ''), [open, summary]);
+  const html = useMemo(() => (open ? renderMarkdown(summary, true, false) : ''), [open, summary]);
 
   const reason = details ? reasonLabel(details.reason) : null;
   const tokens = details ? tokenRange(details) : null;

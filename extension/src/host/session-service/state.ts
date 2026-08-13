@@ -41,15 +41,48 @@ interface InFlightReviewClosureAttempt extends ReviewAutoCloseAttempt {
   errors: string[];
 }
 
+interface PreloadRecord {
+  readonly id: number;
+  readonly generation: number;
+  readonly sessionPath: string;
+  readonly requestEpoch: number;
+  readonly abortController: AbortController;
+  cancelled: boolean;
+  transportSettled: boolean;
+  hostWaiterSettled: boolean;
+}
+
+class LifecycleTaskStaleGenerationError extends Error {
+  constructor() {
+    super('Lifecycle task did not start because the backend runtime was reset.');
+    this.name = 'LifecycleTaskStaleGenerationError';
+  }
+}
+
 export class SessionServiceState {
   private readonly busySeqMap = new Map<string, number>();
   private lifecycleQueue = Promise.resolve();
+  /** Number of foreground lifecycle tasks queued or in flight in the current
+   * backend generation. Background preload work stays paused until all of them
+   * settle, not merely until the first request starts. */
+  private foregroundLifecycleTasks = 0;
+  private lifecycleGeneration = 0;
   private readonly sessionOperationQueues = new Map<string, Promise<void>>();
   private readonly selectionRequests = new Map<string, SelectionRequest>();
   private readonly selectionRequestTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly sessionDataEpochs = new Map<string, number>();
-  private readonly preloadingSessionPaths = new Set<string>();
-  /** Session runtimes confirmed by session.opened in the current backend generation. */
+  /** Background session.preload work is deliberately separate from the
+   * foreground lifecycle queue. It is FIFO and single-flight so restored
+   * sessions cannot stampede the backend during startup. */
+  private readonly preloadQueue: PreloadRecord[] = [];
+  private readonly preloadRecordsByPath = new Map<string, PreloadRecord>();
+  private activePreloadRecord: PreloadRecord | undefined;
+  private preloadGeneration = 0;
+  private preloadRecordCounter = 0;
+  private preloadPumpScheduled = false;
+  /** Durable browse snapshots known in the current backend generation. */
+  private readonly knownSnapshotSessionPaths = new Set<string>();
+  /** Execution runtimes confirmed in the current backend generation. */
   private readonly knownRuntimeSessionPaths = new Set<string>();
   private readonly suppressNextCompletionNotification = new Set<string>();
   private readonly requestSessionPathById = new Map<string, string>();
@@ -81,8 +114,16 @@ export class SessionServiceState {
     this.onPreloadedSessionOpened = handler;
   }
 
+  markSessionSnapshotKnown(sessionPath: string): void {
+    this.knownSnapshotSessionPaths.add(sessionPath);
+  }
+
   markSessionRuntimeKnown(sessionPath: string): void {
     this.knownRuntimeSessionPaths.add(sessionPath);
+  }
+
+  isSessionSnapshotKnown(sessionPath: string): boolean {
+    return this.knownSnapshotSessionPaths.has(sessionPath);
   }
 
   isSessionRuntimeKnown(sessionPath: string): boolean {
@@ -91,7 +132,18 @@ export class SessionServiceState {
 
   resetRuntimeState(): void {
     this.busySeqMap.clear();
+    this.preloadGeneration += 1;
+    for (const record of this.preloadRecordsByPath.values()) {
+      record.cancelled = true;
+      record.abortController.abort();
+    }
+    this.preloadQueue.length = 0;
+    this.preloadRecordsByPath.clear();
+    this.activePreloadRecord = undefined;
+    this.preloadPumpScheduled = false;
     this.lifecycleQueue = Promise.resolve();
+    this.foregroundLifecycleTasks = 0;
+    this.lifecycleGeneration += 1;
     this.sessionOperationQueues.clear();
     for (const timer of this.selectionRequestTimers.values()) {
       clearTimeout(timer);
@@ -99,7 +151,7 @@ export class SessionServiceState {
     this.selectionRequestTimers.clear();
     this.selectionRequests.clear();
     this.sessionDataEpochs.clear();
-    this.preloadingSessionPaths.clear();
+    this.knownSnapshotSessionPaths.clear();
     this.knownRuntimeSessionPaths.clear();
     this.suppressNextCompletionNotification.clear();
     this.requestSessionPathById.clear();
@@ -395,12 +447,35 @@ export class SessionServiceState {
   }
 
   enqueueLifecycle<T>(task: () => Promise<T>): Promise<T> {
-    const next = this.lifecycleQueue.catch(() => undefined).then(task);
+    this.foregroundLifecycleTasks += 1;
+    const lifecycleGeneration = this.lifecycleGeneration;
+    // Foreground work fences an already-admitted preload immediately. Aborting
+    // only rejects the host waiter; the active slot remains occupied until the
+    // backend transport response arrives.
+    this.fenceActivePreload();
+    const next = this.lifecycleQueue.catch(() => undefined).then(() => {
+      if (lifecycleGeneration !== this.lifecycleGeneration) {
+        throw new LifecycleTaskStaleGenerationError();
+      }
+      return task();
+    });
     this.lifecycleQueue = next.then(() => undefined, () => undefined);
+    const settleForegroundLifecycle = (): void => {
+      if (lifecycleGeneration !== this.lifecycleGeneration) return;
+      this.foregroundLifecycleTasks -= 1;
+      this.schedulePreloadPump();
+    };
+    void next.then(settleForegroundLifecycle, settleForegroundLifecycle);
     return next;
   }
 
   enqueueSessionOperation<T>(sessionPath: string, task: () => Promise<T>): Promise<T> {
+    // Send/edit reducers mark the session running before their effect reaches
+    // this queue, so fence active background application at generation start
+    // rather than waiting for the first backend busy event.
+    if (this.getArchState().sessions.runningSessionPaths.length > 0) {
+      this.fenceActivePreload();
+    }
     const previous = this.sessionOperationQueues.get(sessionPath) ?? Promise.resolve();
     const result = previous.catch(() => undefined).then(task);
     const barrier = result.then(() => undefined, () => undefined);
@@ -410,6 +485,11 @@ export class SessionServiceState {
       if (this.sessionOperationQueues.get(sessionPath) === barrier) {
         this.sessionOperationQueues.delete(sessionPath);
       }
+      // RPC failures can clear the authoritative running marker without a
+      // separate busy=false event. Re-check here after the reducer's result
+      // dispatch so queued preloads cannot remain stranded behind a failed
+      // send/edit/interrupt operation.
+      this.schedulePreloadPump();
     });
 
     return result;
@@ -523,10 +603,11 @@ export class SessionServiceState {
   }
 
   clearSessionScope(sessionPath: string, removeSessionSummary = false): void {
+    this.cancelPreload(sessionPath);
     this.busySeqMap.delete(sessionPath);
     this.sessionOperationQueues.delete(sessionPath);
     this.sessionDataEpochs.delete(sessionPath);
-    this.preloadingSessionPaths.delete(sessionPath);
+    this.knownSnapshotSessionPaths.delete(sessionPath);
     this.knownRuntimeSessionPaths.delete(sessionPath);
     this.suppressNextCompletionNotification.delete(sessionPath);
     this.transcriptTouchedAtBySession.delete(sessionPath);
@@ -567,12 +648,39 @@ export class SessionServiceState {
     }
   }
 
+  /** Remove a background preload from the queue, or abort it when it is
+   * already in flight. Foreground selection calls this before it creates its
+   * selection request, so a stale preload cannot apply a payload to the newly
+   * selected session. */
+  cancelPreload(sessionPath: string): void {
+    const record = this.preloadRecordsByPath.get(sessionPath);
+    if (!record) return;
+
+    record.cancelled = true;
+    record.abortController.abort();
+    // BackendClient cancellation is local: retain an in-flight record as the
+    // single background transport slot until its correlated response (or
+    // backend shutdown) settles. Queued records can be discarded immediately.
+    if (this.activePreloadRecord !== record) {
+      this.preloadRecordsByPath.delete(sessionPath);
+    }
+    this.schedulePreloadPump();
+  }
+
+  /** Called after the authoritative host running/busy state changes. */
+  resumePreloads(): void {
+    if (this.getArchState().sessions.runningSessionPaths.length > 0) {
+      this.fenceActivePreload();
+    }
+    this.schedulePreloadPump();
+  }
+
   preloadSession(sessionPath: string): void {
     if (!sessionPath || isPendingTabPath(sessionPath)) {
       return;
     }
 
-    if (this.preloadingSessionPaths.has(sessionPath)) {
+    if (this.preloadRecordsByPath.has(sessionPath)) {
       return;
     }
 
@@ -580,26 +688,112 @@ export class SessionServiceState {
       return;
     }
 
-    this.preloadingSessionPaths.add(sessionPath);
-    const requestEpoch = this.getSessionDataEpoch(sessionPath);
-    void this.backend.request<SessionOpenedPayload>('session.preload', { sessionPath })
-      .then((payload) => {
-        if (this.getSessionDataEpoch(sessionPath) !== requestEpoch) {
-          return;
-        }
-        if (!this.getArchState().sessions.openTabPaths.includes(sessionPath)) {
-          return;
-        }
-        this.onPreloadedSessionOpened?.(payload);
-      })
-      .catch((error) => {
+    const record: PreloadRecord = {
+      id: ++this.preloadRecordCounter,
+      generation: this.preloadGeneration,
+      sessionPath,
+      requestEpoch: this.getSessionDataEpoch(sessionPath),
+      abortController: new AbortController(),
+      cancelled: false,
+      transportSettled: false,
+      hostWaiterSettled: false,
+    };
+    this.preloadRecordsByPath.set(sessionPath, record);
+    this.preloadQueue.push(record);
+    // Defer the first pump. In startup, openSession dispatches its lifecycle
+    // effect before publishBackendReady enqueues background preloads; this
+    // makes the foreground session.open dispatch the first backend operation.
+    this.schedulePreloadPump();
+  }
+
+  private schedulePreloadPump(): void {
+    if (this.preloadPumpScheduled) return;
+    this.preloadPumpScheduled = true;
+    void Promise.resolve().then(() => {
+      this.preloadPumpScheduled = false;
+      this.pumpPreloads();
+    });
+  }
+
+  private pumpPreloads(): void {
+    if (this.foregroundLifecycleTasks > 0
+      || this.activePreloadRecord
+      || this.getArchState().sessions.runningSessionPaths.length > 0) {
+      return;
+    }
+
+    while (this.preloadQueue.length > 0) {
+      const record = this.preloadQueue.shift();
+      if (!record || !this.isCurrentPreloadRecord(record)) continue;
+      this.activePreloadRecord = record;
+      void this.runPreload(record);
+      return;
+    }
+  }
+
+  private isCurrentPreloadRecord(record: PreloadRecord): boolean {
+    return !record.cancelled
+      && record.generation === this.preloadGeneration
+      && this.preloadRecordsByPath.get(record.sessionPath) === record;
+  }
+
+  private fenceActivePreload(): void {
+    const record = this.activePreloadRecord;
+    if (!record || record.cancelled) return;
+    record.cancelled = true;
+    // Abort fences payload application immediately, but BackendClient retains
+    // transport settlement bookkeeping because JSON-RPC has no request-cancel
+    // frame. `handlePreloadTransportSettled` alone releases the active slot.
+    record.abortController.abort();
+  }
+
+  private handlePreloadTransportSettled(record: PreloadRecord): void {
+    if (record.transportSettled) return;
+    record.transportSettled = true;
+    // Keep the record active through the host promise continuation as well as
+    // the physical response. This closes the response-to-application microtask
+    // window in which newly-started generation must still be able to fence it.
+    this.releasePreloadRecordIfSettled(record);
+  }
+
+  private releasePreloadRecordIfSettled(record: PreloadRecord): void {
+    if (!record.transportSettled || !record.hostWaiterSettled) return;
+    if (this.activePreloadRecord === record) {
+      this.activePreloadRecord = undefined;
+    }
+    if (this.preloadRecordsByPath.get(record.sessionPath) === record) {
+      this.preloadRecordsByPath.delete(record.sessionPath);
+    }
+    this.schedulePreloadPump();
+  }
+
+  private async runPreload(record: PreloadRecord): Promise<void> {
+    try {
+      const payload = await this.backend.request<SessionOpenedPayload>(
+        'session.preload',
+        { sessionPath: record.sessionPath },
+        {
+          signal: record.abortController.signal,
+          onTransportSettled: () => this.handlePreloadTransportSettled(record),
+        },
+      );
+      if (!this.isCurrentPreloadRecord(record)) return;
+      if (this.getSessionDataEpoch(record.sessionPath) !== record.requestEpoch) return;
+      if (!this.getArchState().sessions.openTabPaths.includes(record.sessionPath)) return;
+      this.onPreloadedSessionOpened?.(payload);
+    } catch (error) {
+      // Cancellation and stale generations are expected during selection,
+      // close, generation, and restart. The transport-settlement callback,
+      // rather than this local waiter, releases the single-flight slot.
+      if (this.isCurrentPreloadRecord(record)) {
         auditLog('session-service', 'session.preload.failed', {
-          sessionPath,
+          sessionPath: record.sessionPath,
           message: toErrorMessage(error),
         });
-      })
-      .finally(() => {
-        this.preloadingSessionPaths.delete(sessionPath);
-      });
+      }
+    } finally {
+      record.hostWaiterSettled = true;
+      this.releasePreloadRecordIfSettled(record);
+    }
   }
 }

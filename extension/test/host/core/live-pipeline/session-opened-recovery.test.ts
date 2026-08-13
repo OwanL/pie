@@ -95,6 +95,57 @@ test('busy session.opened atomically replaces a stale/tombstoned live turn from 
   assert.equal(result.effects.length, 0);
 });
 
+test('busy open without a checkpoint uses bounded recovery identity when the host has no prior live turn', () => {
+  const opened = payload();
+  delete opened.liveTurnCheckpoint;
+  opened.liveTurnRecoveryIdentity = { turnId: 'turn-1', attemptId: 'attempt-1' };
+
+  const result = reducer(initialArchState, { kind: 'SessionOpened', sessionPath, payload: opened });
+
+  assert.deepEqual(result.effects, [{
+    kind: 'RequestLiveTurnCheckpoint',
+    corrId: 'live-checkpoint:turn-1:attempt-1:session-opened',
+    sessionPath,
+    turnId: 'turn-1',
+    attemptId: 'attempt-1',
+  }]);
+});
+
+test('snapshotUnavailable preserves an already-loaded transcript instead of treating the empty transport window as authoritative', () => {
+  const existing = payload().transcript[0]!;
+  const before: ArchState = {
+    ...initialArchState,
+    transcript: {
+      ...initialArchState.transcript,
+      bySession: { [sessionPath]: [existing] },
+      windowBySession: {
+        [sessionPath]: {
+          totalCount: 1,
+          loadedStart: 0,
+          loadedEnd: 1,
+          hasOlder: false,
+          hasNewer: false,
+          isPartial: false,
+          hasUserMessages: true,
+        },
+      },
+    },
+  };
+  const opened = payload();
+  opened.busy = false;
+  delete opened.liveTurnCheckpoint;
+  opened.transcript = [];
+  opened.snapshotUnavailable = {
+    code: 'SESSION_SNAPSHOT_TOO_LARGE',
+    message: 'Lossless snapshot unavailable.',
+  };
+
+  const result = reducer(before, { kind: 'SessionOpened', sessionPath, payload: opened });
+
+  assert.deepEqual(result.state.transcript.bySession[sessionPath], [existing]);
+  assert.deepEqual(result.state.transcript.windowBySession[sessionPath], before.transcript.windowBySession[sessionPath]);
+});
+
 test('busy open without a checkpoint keeps the durable assistant tail visible and requests repair', () => {
   const checkpoint = liveCheckpoint('stale live');
   const before: ArchState = {

@@ -238,6 +238,28 @@ test('SetModel to an image-capable model with pending images applies without a m
   assert.equal(out.effects[0]?.kind, 'SetModelRpc');
 });
 
+test('SetModel with the same model id but a different provider is not a no-op', () => {
+  const s = buildState({ sessionModelId: 'model-a', defaultModel: 'model-a' });
+  s.settings.modelSettings = { defaultModel: 'model-a', defaultProvider: 'provider-b', defaultThinkingLevel: 'medium' };
+  s.sessions.sessions[0] = {
+    ...s.sessions.sessions[0]!,
+    modelId: 'model-a',
+    provider: 'provider-a',
+    thinkingLevel: 'medium',
+  };
+
+  const result = reducer(s, {
+    kind: 'Command',
+    cmd: {
+      kind: 'SetModel', corrId: 'provider-switch', sessionPath: SESSION,
+      modelSettings: { defaultModel: 'model-a', defaultProvider: 'provider-b', defaultThinkingLevel: 'medium' },
+    },
+  });
+
+  assert.equal(result.effects.some((effect) => effect.kind === 'SetModelRpc'), true);
+  assert.equal(result.state.sessions.sessions[0]?.provider, 'provider-b');
+});
+
 test('SetModel is a no-op when the requested model settings already match state and session summary', () => {
   const base = buildState({
     defaultModel: 'image-model',

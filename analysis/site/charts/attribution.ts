@@ -63,6 +63,7 @@ function subagentCostRows(runs: PreparedRunRow[]): SubagentCostRow[] {
 
 const subagentCostChart: ChartEntry = {
   id: 'chart-subagent-cost-attribution',
+  runCohort: 'all-history',
   render: async (ctx: ChartContext) => {
     const cohort = subagentCostRows(ctx.runs);
     const rows = cohort.slice(0, 12);
@@ -169,6 +170,7 @@ function contextGrowthPoints(ctx: ChartContext): { points: ContextGrowthPoint[];
 
 const contextGrowthChart: ChartEntry = {
   id: 'chart-context-growth',
+  runCohort: 'current-harness',
   render: async (ctx: ChartContext) => {
     const { points, models } = contextGrowthPoints(ctx);
     const runCount = new Set(points.map((p) => p.runId)).size;
@@ -268,6 +270,7 @@ function frictionRows(runs: PreparedRunRow[]): FrictionRow[] {
 
 const frictionChart: ChartEntry = {
   id: 'chart-compaction-retry-friction',
+  runCohort: 'current-harness',
   render: async (ctx: ChartContext) => {
     const rows = frictionRows(ctx.runs);
     const compactedRuns = rows.reduce((s, r) => s + r.runsCompacted, 0);

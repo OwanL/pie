@@ -574,30 +574,37 @@ function renderTokenCoverage(ctx: ChartContext) {
 export const insightsCharts: ChartEntry[] = [
   {
     id: 'chart-latency-decomposition',
+    runCohort: 'current-harness',
     render: async (ctx: ChartContext) => renderLatencyDecomposition(ctx),
   },
   {
     id: 'chart-cost-efficiency',
+    runCohort: 'current-harness',
     render: async (ctx: ChartContext) => renderCostEfficiency(ctx),
   },
   {
     id: 'chart-cost-per-minute',
+    runCohort: 'current-harness',
     render: async (ctx: ChartContext) => renderCostPerMinute(ctx),
   },
   {
     id: 'chart-verification-kind-breakdown',
+    runCohort: 'current-harness',
     render: async (ctx: ChartContext) => renderVerificationKindBreakdown(ctx),
   },
   {
     id: 'chart-net-mutation',
+    runCohort: 'current-harness',
     render: async (ctx: ChartContext) => renderNetMutation(ctx),
   },
   {
     id: 'chart-busy-fragmentation',
+    runCohort: 'current-harness',
     render: async (ctx: ChartContext) => renderBusyFragmentation(ctx),
   },
   {
     id: 'chart-token-coverage',
+    runCohort: 'current-harness',
     render: async (ctx: ChartContext) => renderTokenCoverage(ctx),
   },
 ];

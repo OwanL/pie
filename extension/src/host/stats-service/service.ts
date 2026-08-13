@@ -224,8 +224,8 @@ export class StatsService implements RunObserver {
     this.tracker.onSessionClosed(sessionPath);
   }
 
-  replaceSessionPath(oldPath: string, newPath: string): void {
-    this.tracker.replaceSessionPath(oldPath, newPath);
+  replaceSessionPath(oldPath: string, newPath: string, stableSessionId?: string): void {
+    this.tracker.replaceSessionPath(oldPath, newPath, stableSessionId);
   }
 
   startNewTask(sessionPath: string): void {

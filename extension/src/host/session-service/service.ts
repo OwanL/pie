@@ -79,6 +79,11 @@ export class SessionService implements vscode.Disposable {
       state: this.state,
       getArchState,
       dispatchArch,
+      notifySessionViewed: (sessionPath, previousSessionPath) => this.backend.request(
+        'session.viewed',
+        { sessionPath, previousSessionPath },
+        { timeoutMs: 5_000 },
+      ),
     });
     this.messages = new SessionMessageActions({
       context,
@@ -172,6 +177,10 @@ export class SessionService implements vscode.Disposable {
     this.state.handleSelectionFailure(selectionToken, notice);
   }
 
+  isSessionRuntimeReady(sessionPath: string): boolean {
+    return this.state.isSessionRuntimeKnown(sessionPath);
+  }
+
   getOpenTranscriptMode(sessionPath: string): TranscriptMode {
     const arch = this.getArchState();
     const loaded = arch.transcript.windowBySession[sessionPath] !== undefined;
@@ -183,7 +192,7 @@ export class SessionService implements vscode.Disposable {
     this.tabs.openSession(sessionPath);
   }
 
-  async closeSession(sessionPath: string, nextPath: string | null, privacyMode = false): Promise<void> {
+  async closeSession(sessionPath: string, nextPath: string | null, privacyMode = false, selectionChanged = false): Promise<void> {
     this.clearDetailCacheForSession(sessionPath);
     if (privacyMode) {
       // The reducer evicts the privacy marker before this effect runs, so
@@ -206,7 +215,7 @@ export class SessionService implements vscode.Disposable {
       // best-effort and must never attempt to reopen a deleted transcript.
       await Promise.resolve(this.runObserver.setSessionPrivacy?.(sessionPath, true)).catch(() => undefined);
     }
-    await this.tabs.closeSession(sessionPath, nextPath);
+    await this.tabs.closeSession(sessionPath, nextPath, selectionChanged);
     if (privacyMode) {
       // The close effect initially persisted the marker as a retry guard;
       // clear it only after backend deletion and host cleanup both succeed.

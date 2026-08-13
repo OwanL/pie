@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import { prepareSourceAnalytics } from '../scripts/prepare.ts';
 import type { PreparedRunRow } from '../scripts/contracts.ts';
+import { CURRENT_HARNESS_REVISION } from '../scripts/contracts.ts';
 import { deepClone, loadFixture } from './helpers.ts';
 
 test('prepareSourceAnalytics builds the derived row model', async () => {
@@ -14,6 +15,36 @@ test('prepareSourceAnalytics builds the derived row model', async () => {
   assert.ok(prepared.runs.every((run) => run.initialUserMessageChars === null), 'historical fixture defaults ex-ante prompt size to unknown');
   assert.ok(prepared.toolUsage.some((row) => row.toolName === 'subagent'));
   assert.ok(prepared.verificationUsage.some((row) => row.kind === 'test'));
+});
+
+test('prepareSourceAnalytics populates harness cohort fields', async () => {
+  const fixture = deepClone(await loadFixture());
+  const run = fixture.completedRuns[0] as any;
+  // Fixture runs start 2026-05-10, before harness stamping existed.
+
+  const prepared = prepareSourceAnalytics(fixture);
+  const row = prepared.runs.find((r) => r.runId === run.runId)!;
+  assert.equal(row.harnessRevision, null, 'un-stamped historical run has no revision');
+  assert.equal(row.harnessFingerprint, null, 'un-stamped historical run has no fingerprint');
+  assert.equal(row.harnessStatus, 'legacy', 'pre-boundary un-stamped runs are legacy');
+  assert.equal(row.isCurrentHarness, false);
+
+  // A stamped current-revision run classifies as current.
+  run.harnessRevision = CURRENT_HARNESS_REVISION;
+  run.harnessFingerprint = 'ab'.repeat(32);
+  const stamped = prepareSourceAnalytics(fixture);
+  const stampedRow = stamped.runs.find((r) => r.runId === run.runId)!;
+  assert.equal(stampedRow.harnessRevision, CURRENT_HARNESS_REVISION);
+  assert.equal(stampedRow.harnessFingerprint, 'ab'.repeat(32));
+  assert.equal(stampedRow.harnessStatus, 'current', 'explicit current revision match wins over era');
+  assert.equal(stampedRow.isCurrentHarness, true);
+
+  // A mismatched revision classifies as incompatible.
+  run.harnessRevision = 'other-harness-2026-08';
+  const mismatched = prepareSourceAnalytics(fixture);
+  const mismatchedRow = mismatched.runs.find((r) => r.runId === run.runId)!;
+  assert.equal(mismatchedRow.harnessStatus, 'incompatible');
+  assert.equal(mismatchedRow.isCurrentHarness, false);
 });
 
 test('prepareSourceAnalytics preserves privacy-safe initial message size', async () => {

@@ -36,7 +36,7 @@ function getCollapsedSummary(prompt: SystemPromptEntry): string {
 function SystemPromptCard({ prompt }: SystemPromptCardProps) {
   const [open, setOpen] = useState(false);
   const summary = getCollapsedSummary(prompt);
-  const html = useMemo(() => (open ? renderMarkdown(prompt.text) : ''), [open, prompt.text]);
+  const html = useMemo(() => (open ? renderMarkdown(prompt.text, true, false) : ''), [open, prompt.text]);
   const showSummary = !open && !!summary;
 
   return (

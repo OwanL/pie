@@ -120,6 +120,22 @@ test('untracked behavior values are reported as groups but excluded from differe
   assert.equal(dim.differences.length, 0);
 });
 
+test('legacy joined runs retain objective behaviors but not harness-sensitive behavior attribution', () => {
+  const run = makeRun({
+    runId: 'legacy', modelId: 'glm-5.2', isCurrentHarness: false, harnessStatus: 'legacy',
+    verificationTotalCount: 1, thinkingLevel: 'high', initialUserMessageChars: 50,
+    compactionCount: 2, fsPruningMode: 'auto', fsSubagentAlwaysParentModel: false,
+  });
+  const data = makePrepared([run], [makeReview(run, 'legacy-review', 80)]);
+
+  assert.equal(findGroup(findDimension(data, 'verificationUsage'), 'verified').sessionCount, 1);
+  assert.equal(findGroup(findDimension(data, 'thinkingLevel'), 'high').sessionCount, 1);
+  assert.equal(findDimension(data, 'compaction').includedSessionCount, 0);
+  assert.equal(findDimension(data, 'compaction').untrackedSessionCount, 1);
+  assert.equal(findDimension(data, 'pruningMode').untrackedSessionCount, 1);
+  assert.equal(findDimension(data, 'subagentParentModel').untrackedSessionCount, 1);
+});
+
 test('unmatched reviews are excluded from every dimension but counted separately', () => {
   const run = makeRun({ runId: 'x1', modelId: 'glm-5.2', verificationTotalCount: 1, initialUserMessageChars: 5 });
   const joined = makeReview(run, 'rj', 80);

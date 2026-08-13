@@ -142,6 +142,7 @@ export function AppBody({ adapter }: AppBodyProps) {
           menu={contextMenu}
           prefs={viewState.prefs}
           onSetPrefs={handlers.handleSetPrefs}
+          onOpenFile={handlers.handleOpenFile}
           onClose={closeContextMenu}
         />
       )}

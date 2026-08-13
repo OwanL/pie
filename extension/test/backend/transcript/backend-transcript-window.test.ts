@@ -8,7 +8,12 @@ import {
   isDisplayTranscriptCacheStale,
   type DisplayTranscriptCache,
 } from '../../../src/backend/transcript-window';
-import type { ChatMessage } from '../../../src/shared/protocol';
+import type { ChatMessage, TranscriptPagePayload } from '../../../src/shared/protocol';
+import {
+  boundTranscriptSnapshot,
+  SessionSnapshotTooLargeError,
+  sessionSnapshotLineBytes,
+} from '../../../src/shared/transcript-window';
 
 function buildMessages(count: number): ChatMessage[] {
   return Array.from({ length: count }, (_, index) => ({
@@ -193,6 +198,146 @@ test('buildTailTranscriptWindow keeps pinned streaming messages visible outside 
   assert.deepEqual({ start: tail.loadedStart, end: tail.loadedEnd }, { start: 2, end: 7 });
   assert.equal(tail.hasOlder, true);
   assert.equal(tail.hasNewer, true);
+});
+
+test('snapshot transport removes whole oversized markdown rows and keeps exact requested-edge metadata', () => {
+  const payload: TranscriptPagePayload = {
+    sessionPath: '/repo/session.jsonl',
+    transcript: [
+      { ...buildMessages(1)[0]!, id: 'old-huge', markdown: 'x'.repeat(8_000) },
+      { ...buildMessages(1)[0]!, id: 'middle-huge', markdown: 'y'.repeat(8_000) },
+      { ...buildMessages(1)[0]!, id: 'requested-newer', markdown: 'keep' },
+    ],
+    transcriptWindow: { totalCount: 10, loadedStart: 7, loadedEnd: 10, hasOlder: true, hasNewer: false, isPartial: true, hasUserMessages: true },
+    busy: false,
+  };
+  const transport = { kind: 'response' as const, requestId: 'page-request' };
+  const requiredOnly = { ...payload, transcript: [payload.transcript[2]!], transcriptWindow: { ...payload.transcriptWindow, loadedStart: 9 } };
+  const bounded = boundTranscriptSnapshot(payload, {
+    transport,
+    requestedEdge: 'newer',
+    maxLineBytes: sessionSnapshotLineBytes(requiredOnly, transport) + 8,
+  });
+
+  assert.deepEqual(bounded.transcript.map((message) => message.id), ['requested-newer']);
+  assert.deepEqual(bounded.transcriptWindow, {
+    totalCount: 10, loadedStart: 9, loadedEnd: 10,
+    hasOlder: true, hasNewer: false, isPartial: true, hasUserMessages: true,
+  });
+});
+
+test('snapshot transport retains an older requested edge and a pinned row while culling the opposite edge', () => {
+  const transcript = [
+    { ...buildMessages(1)[0]!, id: 'pinned', markdown: 'keep' },
+    { ...buildMessages(1)[0]!, id: 'newer-huge', markdown: 'z'.repeat(8_000) },
+  ];
+  const payload: TranscriptPagePayload = {
+    sessionPath: '/repo/session.jsonl', transcript,
+    transcriptWindow: { totalCount: 5, loadedStart: 1, loadedEnd: 3, hasOlder: true, hasNewer: true, isPartial: true, hasUserMessages: true },
+    busy: true,
+  };
+  const transport = { kind: 'response' as const, requestId: 'older-page' };
+  const requiredOnly = { ...payload, transcript: [transcript[0]!], transcriptWindow: { ...payload.transcriptWindow, loadedEnd: 2 } };
+  const bounded = boundTranscriptSnapshot(payload, {
+    transport,
+    requestedEdge: 'older',
+    requiredMessageId: 'pinned',
+    maxLineBytes: sessionSnapshotLineBytes(requiredOnly, transport) + 8,
+  });
+
+  assert.deepEqual(bounded.transcript.map((message) => message.id), ['pinned']);
+  assert.equal(bounded.transcriptWindow.loadedStart, 1);
+  assert.equal(bounded.transcriptWindow.loadedEnd, 2);
+  assert.equal(bounded.transcriptWindow.hasNewer, true);
+});
+
+test('snapshot transport omits an oversized live checkpoint before restoring normalized durable rows', () => {
+  const transport = { kind: 'event' as const, event: 'session.opened' as const };
+  const user = { ...buildMessages(1)[0]!, id: 'user', markdown: 'go' };
+  const durableAssistant = { ...buildMessages(2)[1]!, id: 'durable-assistant', markdown: 'durable' };
+  const payload = {
+    session: { path: '/repo/session.jsonl' },
+    transcript: [user],
+    transcriptWindow: { totalCount: 2, loadedStart: 0, loadedEnd: 2, hasOlder: false, hasNewer: false, isPartial: false, hasUserMessages: true },
+    busy: true,
+    liveTurnCheckpoint: { markdown: 'c'.repeat(8_000) },
+    liveTurnRecoveryIdentity: { turnId: 'turn-1', attemptId: 'attempt-1' },
+  };
+  const fallback = { transcript: [user, durableAssistant], transcriptWindow: payload.transcriptWindow };
+  const fallbackPayload = { ...payload, ...fallback, liveTurnCheckpoint: undefined };
+  const bounded = boundTranscriptSnapshot(payload, {
+    transport,
+    requestedEdge: 'newer',
+    checkpointFallback: fallback,
+    maxLineBytes: sessionSnapshotLineBytes(fallbackPayload, transport) + 8,
+  });
+
+  assert.equal(bounded.liveTurnCheckpoint, undefined);
+  assert.deepEqual(bounded.liveTurnRecoveryIdentity, { turnId: 'turn-1', attemptId: 'attempt-1' });
+  assert.deepEqual(bounded.transcript.map((message) => message.id), ['user', 'durable-assistant']);
+});
+
+test('session.opened transport returns an explicit metadata-only fallback when its required row cannot fit', () => {
+  const imageRow: ChatMessage = {
+    ...buildMessages(1)[0]!,
+    id: 'required-image',
+    markdown: '',
+    userParts: [{ kind: 'image', mimeType: 'image/png', dataBase64: 'a'.repeat(8_000) }],
+  };
+  const transport = { kind: 'event' as const, event: 'session.opened' as const };
+  const payload = {
+    session: { path: '/repo/session.jsonl' },
+    transcript: [imageRow],
+    transcriptWindow: { totalCount: 1, loadedStart: 0, loadedEnd: 1, hasOlder: false, hasNewer: false, isPartial: false, hasUserMessages: true },
+    busy: false,
+    sessionUsage: { totalInputTokens: 1 },
+  };
+  const unavailableFallback = {
+    ...payload,
+    transcript: [] as ChatMessage[],
+    transcriptWindow: { ...payload.transcriptWindow, loadedStart: 1, hasOlder: true, isPartial: true },
+    snapshotUnavailable: {
+      code: 'SESSION_SNAPSHOT_TOO_LARGE' as const,
+      message: 'Lossless snapshot unavailable.',
+    },
+  };
+
+  const bounded = boundTranscriptSnapshot(payload, {
+    transport,
+    requestedEdge: 'newer',
+    requiredMessageId: imageRow.id,
+    unavailableFallback,
+    maxLineBytes: 1_024,
+  });
+
+  assert.strictEqual(bounded, unavailableFallback);
+  assert.equal(bounded.transcript.length, 0);
+  assert.equal(unavailableFallback.snapshotUnavailable.code, 'SESSION_SNAPSHOT_TOO_LARGE');
+  assert.deepEqual(bounded.sessionUsage, { totalInputTokens: 1 });
+  assert.ok(sessionSnapshotLineBytes(bounded, transport) <= 1_024);
+});
+
+test('snapshot transport throws typed overflow rather than truncating one required image row', () => {
+  const imageRow: ChatMessage = {
+    ...buildMessages(1)[0]!,
+    id: 'required-image',
+    markdown: '',
+    userParts: [{ kind: 'image', mimeType: 'image/png', dataBase64: 'a'.repeat(8_000) }],
+  };
+  const payload: TranscriptPagePayload = {
+    sessionPath: '/repo/session.jsonl', transcript: [imageRow],
+    transcriptWindow: { totalCount: 1, loadedStart: 0, loadedEnd: 1, hasOlder: false, hasNewer: false, isPartial: false, hasUserMessages: true },
+    busy: false,
+  };
+
+  assert.throws(() => boundTranscriptSnapshot(payload, {
+    transport: { kind: 'response', requestId: 'image-page' },
+    requestedEdge: 'newer',
+    requiredMessageId: imageRow.id,
+    maxLineBytes: 1_024,
+  }), (error) => error instanceof SessionSnapshotTooLargeError
+    && error.code === 'SESSION_SNAPSHOT_TOO_LARGE'
+    && error.data.requiredMessageId === imageRow.id);
 });
 
 test('buildPagedTranscriptWindow latest falls back to tail settings and clamps invalid ranges', () => {

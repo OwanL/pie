@@ -63,7 +63,7 @@ function AggregateStatsStripView({ stats }: AggregateStatsStripProps) {
     >
       <Tooltip contentNode={todayCostTooltipNode(stats)} placement="top" freezeWhileVisible>
         <span class="aggregate-strip-seg aggregate-strip-seg--primary">
-          all runs today <Num value={todayCost} format={formatCostAdaptive} width={8} class="aggregate-strip-cost" />
+          24h <Num value={todayCost} format={formatCostAdaptive} width={8} class="aggregate-strip-cost" />
         </span>
       </Tooltip>
       <Sep />

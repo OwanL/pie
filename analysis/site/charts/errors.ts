@@ -4,6 +4,7 @@ import { CHART_COLORS, categoricalHeight, selectedRunIds } from '../lib.ts';
 export const errorCharts: ChartEntry[] = [
   {
     id: 'chart-backend-errors-by-code',
+    runCohort: 'current-harness',
     render: async (ctx: ChartContext) => {
       const runIds = selectedRunIds(ctx.runs);
       const counts = new Map<string, { count: number; runs: Set<string> }>();
@@ -41,6 +42,7 @@ export const errorCharts: ChartEntry[] = [
   },
   {
     id: 'chart-backend-errors-trend',
+    runCohort: 'current-harness',
     render: async (ctx: ChartContext) => {
       const runIds = selectedRunIds(ctx.runs);
       const map = new Map<string, number>();

@@ -370,6 +370,36 @@ test('coerceRunSnapshot sanitizes nested rollups and optional fields', async () 
   assert.equal(fallback?.verification.totalCount, 0);
 });
 
+test('coerceRunSnapshot preserves harness revision and fingerprint', async () => {
+  const fixture = await loadFixture();
+  const run = deepClone(fixture.completedRuns[0]) as any;
+
+  const stamped = coerceRunSnapshot({
+    ...run,
+    harnessRevision: 'pie-harness-2026-08',
+    harnessFingerprint: 'f0'.repeat(32),
+  });
+  assert.ok(stamped);
+  assert.equal(stamped?.harnessRevision, 'pie-harness-2026-08');
+  assert.equal(stamped?.harnessFingerprint, 'f0'.repeat(32));
+
+  // Historical snapshots without the fields coerce cleanly (absent, not null).
+  const legacy = coerceRunSnapshot(run);
+  assert.ok(legacy);
+  assert.equal(legacy?.harnessRevision, undefined);
+  assert.equal(legacy?.harnessFingerprint, undefined);
+
+  // Non-string values are dropped, not accepted.
+  const malformed = coerceRunSnapshot({
+    ...run,
+    harnessRevision: 42,
+    harnessFingerprint: ['not-a-string'],
+  });
+  assert.ok(malformed);
+  assert.equal(malformed?.harnessRevision, undefined);
+  assert.equal(malformed?.harnessFingerprint, undefined);
+});
+
 test('coerceRunSnapshot preserves neutral verification-pending result issues', async () => {
   const fixture = await loadFixture();
   const raw = deepClone(fixture.completedRuns[0]) as any;

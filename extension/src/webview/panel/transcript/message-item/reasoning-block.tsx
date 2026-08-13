@@ -57,7 +57,7 @@ export function ReasoningBlock({ text, detailRef, autoExpand, collapsibleKey, on
   // is always rendered. When closed, render '' (no parse). This mirrors the
   // BufferedTextPart throttle but reasoning reveals the full text immediately
   // (no progressive reveal), so only the parse is throttled.
-  const [rendered, setRendered] = useState(() => ({ html: open ? renderMarkdown(displayText) : '', text: displayText }));
+  const [rendered, setRendered] = useState(() => ({ html: open ? renderMarkdown(displayText, true, false) : '', text: displayText }));
   const lastParseAtRef = useRef(0);
   const timerRef = useRef<number | null>(null);
   // Latest text read by the scheduled (trailing) parse so it always reflects
@@ -83,7 +83,7 @@ export function ReasoningBlock({ text, detailRef, autoExpand, collapsibleKey, on
         clearTimeout(timerRef.current);
         timerRef.current = null;
       }
-      setRendered({ html: renderMarkdown(textRef.current), text: textRef.current });
+      setRendered({ html: renderMarkdown(textRef.current, true, false), text: textRef.current });
       return;
     }
 
@@ -94,7 +94,7 @@ export function ReasoningBlock({ text, detailRef, autoExpand, collapsibleKey, on
     timerRef.current = window.setTimeout(() => {
       timerRef.current = null;
       lastParseAtRef.current = Date.now();
-      setRendered({ html: renderMarkdown(textRef.current), text: textRef.current });
+      setRendered({ html: renderMarkdown(textRef.current, true, false), text: textRef.current });
     }, REASONING_PARSE_TRAILING_MS);
   }, [displayText, open]);
 

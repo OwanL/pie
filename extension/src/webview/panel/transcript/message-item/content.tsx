@@ -16,6 +16,7 @@ import {
   userImageSrc,
 } from '../parts';
 import type { RenderToolCall, TranscriptContextMenuHandler } from '../types';
+import { handleDelegatedFilePathClick, handleDelegatedFilePathContextMenu, handleDelegatedFilePathKeyDown } from '../file-path-interactions';
 import { ReasoningBlock } from './reasoning-block';
 
 interface AssistantPartsProps {
@@ -23,6 +24,8 @@ interface AssistantPartsProps {
   parts: NonNullable<ReturnType<typeof assistantPartsFromMessage>>;
   prefs: ChatPrefs;
   isCurrentlyStreaming: boolean;
+  workingDirectory: string | null;
+  onOpenFile: (path: string) => void;
   renderToolCall: RenderToolCall;
   onContextMenu: TranscriptContextMenuHandler;
   getMessageRaw: () => string;
@@ -33,6 +36,8 @@ function AssistantParts({
   parts,
   prefs,
   isCurrentlyStreaming,
+  workingDirectory,
+  onOpenFile,
   renderToolCall,
   onContextMenu,
   getMessageRaw,
@@ -161,6 +166,9 @@ function AssistantParts({
             // to every part would spin up a never-stopping rAF loop per part
             // for the whole streaming duration (see use-buffered-text).
             streaming={isCurrentlyStreaming && index === parts.length - 1}
+            workingDirectory={workingDirectory}
+            onOpenFile={onOpenFile}
+            onFilePathContextMenu={onContextMenu}
             onContextMenu={(e) => {
               onContextMenu('message', getMessageRaw(), toMouseEvent(e));
             }}
@@ -184,7 +192,7 @@ interface UserTextPartProps {
  *  messages on every token). Only the first text part forwards the shared body
  *  ref so the inline editor's height capture keeps working. */
 const UserTextPart = memo(function UserTextPart({ messageId, index, text, messageBodyRef }: UserTextPartProps) {
-  const html = useMemo(() => renderMarkdown(text), [text]);
+  const html = useMemo(() => renderMarkdown(text, true, false), [text]);
   useCommittedTextLeaf(messageId, index, text);
   return (
     <div
@@ -244,18 +252,27 @@ interface StaticMessageBodyProps {
   html: string;
   role: ChatMessage['role'];
   messageBodyRef: RefObject<HTMLDivElement>;
+  workingDirectory: string | null;
+  onOpenFile: (path: string) => void;
   onContextMenu: TranscriptContextMenuHandler;
   getMessageRaw: () => string;
 }
 
-function StaticMessageBody({ messageId, text, html, role, messageBodyRef, onContextMenu, getMessageRaw }: StaticMessageBodyProps) {
+function StaticMessageBody({ messageId, text, html, role, messageBodyRef, workingDirectory, onOpenFile, onContextMenu, getMessageRaw }: StaticMessageBodyProps) {
   useCommittedTextLeaf(messageId, 0, text);
   return (
     <div
       class="message-body"
       ref={role === 'user' ? messageBodyRef : undefined}
       dangerouslySetInnerHTML={{ __html: html }}
+      onClick={role === 'assistant' ? (e) => {
+        handleDelegatedFilePathClick(e, workingDirectory, onOpenFile);
+      } : undefined}
+      onKeyDown={role === 'assistant' ? (e) => {
+        handleDelegatedFilePathKeyDown(e, workingDirectory, onOpenFile);
+      } : undefined}
       onContextMenu={role === 'assistant' ? (e) => {
+        if (handleDelegatedFilePathContextMenu(e, workingDirectory, onContextMenu)) return;
         e.preventDefault();
         onContextMenu('message', getMessageRaw(), toMouseEvent(e));
       } : undefined}
@@ -271,6 +288,8 @@ interface MessageContentProps {
   html: string;
   isCurrentlyStreaming: boolean;
   messageBodyRef: RefObject<HTMLDivElement>;
+  workingDirectory: string | null;
+  onOpenFile: (path: string) => void;
   prefs: ChatPrefs;
   renderToolCall: RenderToolCall;
   onContextMenu: TranscriptContextMenuHandler;
@@ -285,6 +304,8 @@ export function MessageContent({
   html,
   isCurrentlyStreaming,
   messageBodyRef,
+  workingDirectory,
+  onOpenFile,
   prefs,
   renderToolCall,
   onContextMenu,
@@ -297,6 +318,8 @@ export function MessageContent({
         parts={combinedParts}
         prefs={prefs}
         isCurrentlyStreaming={isCurrentlyStreaming}
+        workingDirectory={workingDirectory}
+        onOpenFile={onOpenFile}
         renderToolCall={renderToolCall}
         onContextMenu={onContextMenu}
         getMessageRaw={getMessageRaw}
@@ -319,6 +342,8 @@ export function MessageContent({
       html={html}
       role={role}
       messageBodyRef={messageBodyRef}
+      workingDirectory={workingDirectory}
+      onOpenFile={onOpenFile}
       onContextMenu={onContextMenu}
       getMessageRaw={getMessageRaw}
     />

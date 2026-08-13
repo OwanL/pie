@@ -1,6 +1,14 @@
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
 
+import {
+  escapeMarkdownHtmlAttribute,
+  escapeMarkdownHtmlText,
+  isLocalFilePath,
+  localFilePathReference,
+  MARKDOWN_FILE_PATH_CLASS,
+  MARKDOWN_FILE_PATH_ATTRIBUTE,
+} from './markdown-file-path';
 import { highlightCodeBlock } from './transcript/highlight';
 import { LruCache } from './utils/lru-cache';
 
@@ -19,6 +27,22 @@ function escapeHtml(value: string): string {
 
 marked.use({
   renderer: {
+    codespan({ text }) {
+      const escapedText = escapeMarkdownHtmlText(text);
+      if (!isLocalFilePath(text)) {
+        return `<code>${escapedText}</code>`;
+      }
+
+      return `<code class="${MARKDOWN_FILE_PATH_CLASS}" ${MARKDOWN_FILE_PATH_ATTRIBUTE}="${escapeMarkdownHtmlAttribute(text)}" role="link" tabindex="0">${escapedText}</code>`;
+    },
+    link({ href, title, tokens }) {
+      const pathReference = localFilePathReference(href);
+      if (!pathReference) return false;
+
+      const text = this.parser.parseInline(tokens);
+      const titleAttribute = title ? ` title="${escapeMarkdownHtmlAttribute(title)}"` : '';
+      return `<a href="${escapeMarkdownHtmlAttribute(href)}" class="${MARKDOWN_FILE_PATH_CLASS}" ${MARKDOWN_FILE_PATH_ATTRIBUTE}="${escapeMarkdownHtmlAttribute(pathReference)}" role="link" tabindex="0"${titleAttribute}>${text}</a>`;
+    },
     code({ text, lang }: { text: string; lang?: string }) {
       const { html, language } = highlightCodeBlock(text, lang);
       const lineCount = text.split('\n').length;
@@ -90,9 +114,22 @@ const markdownCache = new LruCache<string, string>(MARKDOWN_CACHE_MAX, {
 export const MARKDOWN_CACHE_MAX_ENTRIES = MARKDOWN_CACHE_MAX;
 export const MARKDOWN_CACHE_MAX_BYTES = MARKDOWN_CACHE_MAX_WEIGHT;
 
-export function renderMarkdown(text: string, cache = true): string {
+function stripInteractiveFilePathMarkup(html: string): string {
+  return html.replace(/<([a-z][\w:-]*)([^>]*\sdata-pie-file-path="[^"]*"[^>]*)>/gi, (_match, tag: string, attrs: string) => (
+    `<${tag}${attrs
+      .replace(/\sclass="file-path-link"/g, '')
+      .replace(/\sdata-pie-file-path="[^"]*"/g, '')
+      .replace(/\srole="link"/g, '')
+      .replace(/\stabindex="0"/g, '')}>`
+  ));
+}
+
+export function renderMarkdown(text: string, cache = true, interactiveFilePaths = true): string {
+  // The same markdown can be rendered in an assistant reply and in a prompt or
+  // user bubble. Keep those sanitized HTML variants in separate cache entries.
+  const cacheKey = `${interactiveFilePaths ? 'paths' : 'plain'}:${text}`;
   if (cache) {
-    const cached = markdownCache.get(text);
+    const cached = markdownCache.get(cacheKey);
     if (cached !== undefined) {
       return cached;
     }
@@ -103,8 +140,9 @@ export function renderMarkdown(text: string, cache = true): string {
   const withTableWrappers = raw
     .replace(/<table>/g, '<div class="md-table-wrap"><table>')
     .replace(/<\/table>/g, '</table></div>');
-  const html = DOMPurify.sanitize(withTableWrappers, { RETURN_DOM: false });
-  if (cache) markdownCache.set(text, html);
+  const sanitizedHtml = DOMPurify.sanitize(withTableWrappers, { RETURN_DOM: false });
+  const html = interactiveFilePaths ? sanitizedHtml : stripInteractiveFilePathMarkup(sanitizedHtml);
+  if (cache) markdownCache.set(cacheKey, html);
   return html;
 }
 

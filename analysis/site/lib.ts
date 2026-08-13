@@ -51,10 +51,17 @@ export type RenderSpecFn = (
 
 export type SetNoteFn = (id: string, text: string, renderToken: number) => void;
 
+/** Cohort used by a chart's run-backed telemetry. */
+export type ChartRunCohort = 'all-history' | 'current-harness' | 'artifact';
+
 /** Context handed to every chart entry's render function. */
 export interface ChartContext {
-  /** Runs after global filters have been applied. */
+  /** Runs scoped to the active chart entry's explicit cohort. */
   runs: PreparedRunRow[];
+  /** Filtered current-harness runs, retained so the registry can scope entries without losing the all-history selection. */
+  currentHarnessRuns: PreparedRunRow[];
+  /** Cohort represented by `runs`; artifact entries consume V2/outcome data instead of run telemetry. */
+  runCohort: ChartRunCohort;
   /** All tool-usage rows (filter to ctx.runs via runId when needed). */
   toolRows: PreparedToolUsageRow[];
   /** All per-turn throughput rows (filter to ctx.runs via runId when needed). */
@@ -79,6 +86,8 @@ export interface ChartContext {
 export interface ChartEntry {
   /** DOM id of the chart slot (`<div id="chart-...">`). */
   id: string;
+  /** Explicit run/data cohort for this entry. */
+  runCohort: ChartRunCohort;
   /** Render this chart into its slot. Should be resilient to empty data. */
   render: (ctx: ChartContext) => Promise<void>;
 }
@@ -356,7 +365,12 @@ export async function renderChartEntries(entries: ChartEntry[], ctx: ChartContex
       const entry = entries[cursor]!;
       cursor += 1;
       try {
-        await entry.render(ctx);
+        const entryContext: ChartContext = {
+          ...ctx,
+          runs: entry.runCohort === 'current-harness' ? ctx.currentHarnessRuns : ctx.runs,
+          runCohort: entry.runCohort,
+        };
+        await entry.render(entryContext);
       } catch (error) {
         const target = document.getElementById(entry.id);
         if (target) {

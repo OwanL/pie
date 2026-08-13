@@ -6,13 +6,15 @@ import test from 'node:test';
 
 import { formatInterruptWatchdogDuration, handleBackendRequest, type BackendRequestHandlerDeps } from '../../../src/backend/request-handler';
 import { handleSdkSessionEvent, type BackendSessionEventHandlerDeps } from '../../../src/backend/session-event-handler';
-import { BackendError } from '../../../src/backend/server-io';
+import { BackendError, extractRequestError } from '../../../src/backend/server-io';
 import type { ModelSettings } from '../../../src/shared/protocol';
 import type { SessionContext } from '../../../src/backend/server-types';
 import type { SdkSessionEvent } from '../../../src/backend/sdk';
 import { ProviderGate } from '../../../src/backend/provider-gate';
 import { BackendLiveTurnAccumulator } from '../../../src/backend/live-turn-accumulator';
 import { ExtensionUIBridge } from '../../../src/backend/extension-ui-bridge';
+import { JSONL_MAX_LINE_BYTES } from '../../../src/shared/jsonl';
+import { SESSION_SNAPSHOT_MAX_LINE_BYTES, sessionSnapshotLineBytes } from '../../../src/shared/transcript-window';
 
 interface Harness {
   deps: BackendRequestHandlerDeps;
@@ -24,6 +26,7 @@ interface Harness {
   openCalls: string[];
   writtenSettings: Partial<ModelSettings>[];
   emitContextUsageChangedCalls: SessionContext[];
+  viewedTransitions: Array<{ sessionPath: string; previousSessionPath: string | null }>;
 }
 
 function createHarness(overrides: {
@@ -39,6 +42,7 @@ function createHarness(overrides: {
   const writtenSettings: Partial<ModelSettings>[] = [];
   const appliedToggles: Array<{ sessionPath: string; disabledEntries: string[] }> = [];
   const emitContextUsageChangedCalls: SessionContext[] = [];
+  const viewedTransitions: Array<{ sessionPath: string; previousSessionPath: string | null }> = [];
   let viewedSessionPath: string | undefined;
   const modelSettings = overrides.modelSettings ?? { defaultModel: 'model-a', defaultThinkingLevel: 'medium' };
 
@@ -112,15 +116,32 @@ function createHarness(overrides: {
     setViewedSessionPath(sessionPath) {
       viewedSessionPath = sessionPath;
     },
+    recordViewedSessionTransition(sessionPath, previousSessionPath) {
+      if (sessionPath === previousSessionPath) return false;
+      viewedTransitions.push({ sessionPath, previousSessionPath });
+      viewedSessionPath = sessionPath;
+      return true;
+    },
     async buildSessionOpenedPayload(sessionPath, selectionToken) {
-      return { sessionPath, selectionToken } as any;
+      return {
+        session: { path: sessionPath, cwd: '/repo', name: 'Session', modifiedAt: '2026-01-01T00:00:00.000Z', messageCount: 0 },
+        transcript: [],
+        transcriptWindow: { totalCount: 0, loadedStart: 0, loadedEnd: 0, hasOlder: false, hasNewer: false, isPartial: false, hasUserMessages: false },
+        busy: false,
+        selectionToken,
+      };
     },
     async applySystemPromptToggles(sessionPath, disabledEntries) {
       appliedToggles.push({ sessionPath, disabledEntries: [...disabledEntries] });
     },
     setAutonomousMode: () => undefined,
-    async loadTranscriptPage(sessionPath, direction, loadedStart, loadedEnd) {
-      return { sessionPath, direction, loadedStart, loadedEnd } as any;
+    async loadTranscriptPage(sessionPath) {
+      return {
+        sessionPath,
+        transcript: [],
+        transcriptWindow: { totalCount: 0, loadedStart: 0, loadedEnd: 0, hasOlder: false, hasNewer: false, isPartial: false, hasUserMessages: false },
+        busy: false,
+      };
     },
     emit(event, payload) {
       emitted.push({ event, payload });
@@ -164,6 +185,7 @@ function createHarness(overrides: {
     openCalls,
     writtenSettings,
     emitContextUsageChangedCalls,
+    viewedTransitions,
   } as Harness;
 }
 
@@ -184,7 +206,7 @@ test('handleBackendRequest covers handshake and session orchestration methods', 
     sdkPath: '/sdk',
     agentDir: '/agent',
     sdkVersion: '1.0.0',
-    protocolVersion: 10,
+    protocolVersion: 14,
   });
 
   const listed = await handleBackendRequest(harness.deps, { id: '2', method: 'session.list' });
@@ -195,42 +217,39 @@ test('handleBackendRequest covers handshake and session orchestration methods', 
     method: 'session.create',
     params: { cwd: '/custom', selectionToken: 'sel-1' },
   });
-  assert.deepEqual(created, { sessionPath: '/repo/session.jsonl', selectionToken: 'sel-1' });
+  assert.deepEqual(created, { ok: true, sessionPath: '/repo/session.jsonl' });
   assert.equal(harness.viewedSessionPath, '/repo/session.jsonl');
   assert.deepEqual(harness.createCalls[0], { cwd: '/custom', reason: 'new' });
   assert.deepEqual(harness.busyEvents, [false]);
-  assert.deepEqual(harness.emitted.slice(0, 2), [
-    { event: 'session.opened', payload: { sessionPath: '/repo/session.jsonl', selectionToken: 'sel-1' } },
-    { event: 'session.list.changed' },
-  ]);
+  assert.equal(harness.emitted[0]?.event, 'session.opened');
+  assert.equal((harness.emitted[0]?.payload as { selectionToken?: string }).selectionToken, 'sel-1');
+  assert.deepEqual(harness.emitted[1], { event: 'session.list.changed' });
 
-  harness.deps.buildSessionOpenedPayload = async (sessionPath, selectionToken) => ({
-    sessionPath,
-    selectionToken,
-    transcript: [{ id: 'durable-1' }],
-  } as any);
   const opened = await handleBackendRequest(harness.deps, {
     id: '4',
     method: 'session.open',
     params: { sessionPath: '/repo/session.jsonl', selectionToken: 'sel-2' },
   });
   assert.deepEqual(opened, { ok: true, sessionPath: '/repo/session.jsonl' });
-  assert.deepEqual(harness.emitted.at(-2), {
-    event: 'session.opened',
-    payload: {
-      sessionPath: '/repo/session.jsonl',
-      selectionToken: 'sel-2',
-      transcript: [{ id: 'durable-1' }],
-    },
+  assert.equal(harness.emitted.at(-2)?.event, 'session.opened');
+  assert.equal((harness.emitted.at(-2)?.payload as { selectionToken?: string }).selectionToken, 'sel-2');
+
+  const viewed = await handleBackendRequest(harness.deps, {
+    id: '4b',
+    method: 'session.viewed',
+    params: { sessionPath: '/repo/session.jsonl', previousSessionPath: '/repo/previous.jsonl' },
   });
-  harness.deps.buildSessionOpenedPayload = async (sessionPath, selectionToken) => ({ sessionPath, selectionToken } as any);
+  assert.deepEqual(viewed, { ok: true, sessionPath: '/repo/session.jsonl', changed: true });
+  assert.deepEqual(harness.viewedTransitions, [{
+    sessionPath: '/repo/session.jsonl', previousSessionPath: '/repo/previous.jsonl',
+  }]);
 
   const preloaded = await handleBackendRequest(harness.deps, {
     id: '5',
     method: 'session.preload',
     params: { sessionPath: '/repo/session.jsonl' },
   });
-  assert.deepEqual(preloaded, { sessionPath: '/repo/session.jsonl', selectionToken: undefined });
+  assert.equal((preloaded as { session: { path: string } }).session.path, '/repo/session.jsonl');
 
   const page = await handleBackendRequest(harness.deps, {
     id: '6',
@@ -239,9 +258,9 @@ test('handleBackendRequest covers handshake and session orchestration methods', 
   });
   assert.deepEqual(page, {
     sessionPath: '/repo/session.jsonl',
-    direction: 'older',
-    loadedStart: 1,
-    loadedEnd: 2,
+    transcript: [],
+    transcriptWindow: { totalCount: 0, loadedStart: 0, loadedEnd: 0, hasOlder: false, hasNewer: false, isPartial: false, hasUserMessages: false },
+    busy: false,
   });
 
   const models = await handleBackendRequest(harness.deps, {
@@ -253,6 +272,149 @@ test('handleBackendRequest covers handshake and session orchestration methods', 
 
   const settings = await handleBackendRequest(harness.deps, { id: '8', method: 'settings.get' });
   assert.deepEqual(settings, { defaultModel: 'model-a', defaultThinkingLevel: 'medium' });
+});
+
+test('cold open/preload and models refresh do not cross the runtime-promotion seam', async () => {
+  const harness = createHarness();
+  let promotions = 0;
+  harness.deps.getSessionContext = () => undefined;
+  harness.deps.ensureSessionContext = async () => {
+    promotions += 1;
+    throw new Error('unexpected promotion');
+  };
+  harness.deps.buildSessionOpenedPayload = async (sessionPath, selectionToken) => ({
+    session: { path: sessionPath, cwd: '/repo', name: 'Cold', modifiedAt: '2026-01-01T00:00:00.000Z', messageCount: 0 },
+    transcript: [],
+    transcriptWindow: { totalCount: 0, loadedStart: 0, loadedEnd: 0, hasOlder: false, hasNewer: false, isPartial: false, hasUserMessages: false },
+    busy: false,
+    runtimeReady: false,
+    selectionToken,
+  });
+  harness.deps.listAvailableModels = async () => [];
+
+  await handleBackendRequest(harness.deps, {
+    id: 'cold-open', method: 'session.open', params: { sessionPath: '/cold.jsonl', selectionToken: 'cold-token' },
+  });
+  const preload = await handleBackendRequest(harness.deps, {
+    id: 'cold-preload', method: 'session.preload', params: { sessionPath: '/cold.jsonl' },
+  }) as import('../../../src/shared/protocol').SessionOpenedPayload;
+  await handleBackendRequest(harness.deps, {
+    id: 'cold-models', method: 'models.list', params: { sessionPath: '/cold.jsonl' },
+  });
+
+  assert.equal(promotions, 0);
+  assert.equal(preload.runtimeReady, false);
+  assert.equal((harness.emitted.find((item) => item.event === 'session.opened')?.payload as { runtimeReady?: boolean }).runtimeReady, false);
+});
+
+test('explicit cold runtime mutations promote while live-only stop requests do not', async () => {
+  const harness = createHarness();
+  let promotions = 0;
+  harness.deps.getSessionContext = () => undefined;
+  harness.deps.ensureSessionContext = async () => {
+    promotions += 1;
+    return harness.context;
+  };
+
+  const interrupted = await handleBackendRequest(harness.deps, {
+    id: 'cold-stop', method: 'message.interrupt', params: { sessionPath: '/cold.jsonl' },
+  }).then(() => 'resolved', (error) => (error as Error).message);
+  assert.match(interrupted, /Cannot interrupt an unopened session/);
+  assert.equal(promotions, 0);
+
+  await handleBackendRequest(harness.deps, {
+    id: 'cold-compact', method: 'message.compact', params: { sessionPath: '/cold.jsonl' },
+  });
+  assert.equal(promotions, 1);
+});
+
+test('create, duplicate, and truncate keep successful slim acknowledgements when session.opened reports a bounded unavailable snapshot', async () => {
+  await withTempDir(async (dir) => {
+    const harness = createHarness();
+    const snapshotUnavailable = {
+      code: 'SESSION_SNAPSHOT_TOO_LARGE' as const,
+      message: 'The lossless session transcript snapshot exceeded the transport limit.',
+    };
+    harness.deps.buildSessionOpenedPayload = async (sessionPath, selectionToken) => ({
+      session: { path: sessionPath, cwd: '/repo', name: 'Session', modifiedAt: '2026-01-01T00:00:00.000Z', messageCount: 1 },
+      transcript: [],
+      transcriptWindow: { totalCount: 1, loadedStart: 1, loadedEnd: 1, hasOlder: true, hasNewer: false, isPartial: true, hasUserMessages: true },
+      busy: false,
+      selectionToken,
+      snapshotUnavailable,
+    });
+    harness.context.session.sessionManager = { getCwd: () => '/repo' } as SessionContext['session']['sessionManager'];
+    harness.deps.sdk.SessionManager.forkFrom = ((_sourcePath: string, cwd: string) => ({ cwd })) as unknown as typeof harness.deps.sdk.SessionManager.forkFrom;
+
+    const created = await handleBackendRequest(harness.deps, {
+      id: 'create-unavailable', method: 'session.create', params: { cwd: '/repo', selectionToken: 'create-token' },
+    });
+    const duplicated = await handleBackendRequest(harness.deps, {
+      id: 'duplicate-unavailable', method: 'session.duplicate', params: { sessionPath: harness.context.sessionPath, selectionToken: 'duplicate-token' },
+    });
+
+    const sessionPath = path.join(dir, 'session.jsonl');
+    await fs.writeFile(sessionPath, [
+      JSON.stringify({ id: 'keep', type: 'message' }),
+      JSON.stringify({ id: 'stop', type: 'message' }),
+    ].join('\n') + '\n');
+    harness.context.sessionPath = sessionPath;
+    const truncated = await handleBackendRequest(harness.deps, {
+      id: 'truncate-unavailable', method: 'session.truncateAfter', params: { sessionPath, entryId: 'stop' },
+    });
+
+    assert.deepEqual(created, { ok: true, sessionPath: '/repo/session.jsonl' });
+    assert.deepEqual(duplicated, { ok: true, sessionPath: '/repo/session.jsonl' });
+    assert.deepEqual(truncated, { ok: true, sessionPath });
+    const opened = harness.emitted.filter((entry) => entry.event === 'session.opened');
+    assert.equal(opened.length, 3);
+    assert.ok(opened.every((entry) => (entry.payload as { snapshotUnavailable?: unknown }).snapshotUnavailable));
+    assert.equal((await fs.readFile(sessionPath, 'utf8')).includes('"stop"'), false, 'truncate mutation committed');
+  });
+});
+
+test('session page transport culls oversized images with headroom and types a required-row overflow before enqueue', async () => {
+  const harness = createHarness();
+  const oversizedImage = {
+    id: 'oversized-image', role: 'user' as const, createdAt: '2026-01-01T00:00:00.000Z', markdown: '', status: 'completed' as const,
+    userParts: [{ kind: 'image' as const, mimeType: 'image/png', dataBase64: 'a'.repeat(31 * 1024 * 1024) }],
+  };
+  const requiredTail = {
+    id: 'required-tail', role: 'assistant' as const, createdAt: '2026-01-01T00:00:01.000Z', markdown: 'keep', status: 'completed' as const,
+  };
+  harness.deps.loadTranscriptPage = async (sessionPath) => ({
+    sessionPath,
+    transcript: [oversizedImage, requiredTail],
+    transcriptWindow: { totalCount: 2, loadedStart: 0, loadedEnd: 2, hasOlder: false, hasNewer: false, isPartial: false, hasUserMessages: true },
+    busy: false,
+  });
+
+  const bounded = await handleBackendRequest(harness.deps, {
+    id: 'bounded-page', method: 'session.loadTranscriptPage',
+    params: { sessionPath: '/repo/session.jsonl', direction: 'latest' },
+  }) as import('../../../src/shared/protocol').TranscriptPagePayload;
+  assert.deepEqual(bounded.transcript.map((message) => message.id), ['required-tail']);
+  assert.ok(sessionSnapshotLineBytes(bounded, { kind: 'response', requestId: 'bounded-page' }) <= SESSION_SNAPSHOT_MAX_LINE_BYTES);
+  assert.ok(SESSION_SNAPSHOT_MAX_LINE_BYTES < JSONL_MAX_LINE_BYTES, 'snapshot producer reserves explicit envelope headroom');
+
+  harness.deps.loadTranscriptPage = async (sessionPath) => ({
+    sessionPath,
+    transcript: [oversizedImage],
+    transcriptWindow: { totalCount: 1, loadedStart: 0, loadedEnd: 1, hasOlder: false, hasNewer: false, isPartial: false, hasUserMessages: true },
+    busy: false,
+  });
+  let caught: unknown;
+  try {
+    await handleBackendRequest(harness.deps, {
+      id: 'oversized-page', method: 'session.loadTranscriptPage',
+      params: { sessionPath: '/repo/session.jsonl', direction: 'latest' },
+    });
+  } catch (error) {
+    caught = error;
+  }
+  assert.ok(caught);
+  assert.deepEqual(extractRequestError(caught).code, 'SESSION_SNAPSHOT_TOO_LARGE');
+  assert.equal(harness.emitted.length, 0, 'the handler rejects before any event/writer enqueue');
 });
 
 test('session.loadDetail validates and delegates bounded retrieval identity', async () => {
@@ -308,6 +470,24 @@ test('session.create returns a session from the configured backend session direc
   assert.equal(created.sessionPath, path.join(configuredDir, 'new-session.jsonl'));
 });
 
+test('session.duplicate reads a cold source cwd without promoting the source runtime', async () => {
+  const harness = createHarness();
+  const sourcePath = '/other-workspace/source.jsonl';
+  harness.deps.getSessionContext = () => undefined;
+  let forkCwd = '';
+  harness.deps.sdk.SessionManager.open = (() => ({ getCwd: () => '/other-workspace' })) as any;
+  harness.deps.sdk.SessionManager.forkFrom = ((_source: string, cwd: string) => {
+    forkCwd = cwd;
+    return { cwd, sessionPath: '/repo/fork.jsonl' };
+  }) as any;
+
+  await handleBackendRequest(harness.deps, {
+    id: 'duplicate-cold-cwd', method: 'session.duplicate', params: { sessionPath: sourcePath },
+  });
+
+  assert.equal(forkCwd, '/other-workspace');
+});
+
 test('session.duplicate returns a fork from the configured backend session directory', async () => {
   const harness = createHarness();
   const configuredDir = path.resolve('/configured/sessions');
@@ -338,6 +518,35 @@ test('session.duplicate returns a fork from the configured backend session direc
   }) as { sessionPath: string };
 
   assert.equal(duplicated.sessionPath, path.join(configuredDir, 'forked-session.jsonl'));
+});
+
+test('concurrent cold message.send requests share one promotion', async () => {
+  const harness = createHarness();
+  let creations = 0;
+  let pending: Promise<SessionContext> | undefined;
+  harness.deps.getSessionContext = () => undefined;
+  harness.deps.ensureSessionContext = async () => {
+    pending ??= Promise.resolve().then(() => {
+      creations += 1;
+      return harness.context;
+    });
+    return await pending;
+  };
+
+  const [first, second] = await Promise.all([
+    handleBackendRequest(harness.deps, {
+      id: 'cold-send-1', method: 'message.send',
+      params: { sessionPath: harness.context.sessionPath, text: 'first', inputs: [], localId: 'local-1' },
+    }),
+    handleBackendRequest(harness.deps, {
+      id: 'cold-send-2', method: 'message.send',
+      params: { sessionPath: harness.context.sessionPath, text: 'second', inputs: [], localId: 'local-2' },
+    }),
+  ]);
+
+  assert.equal(creations, 1);
+  assert.ok((first as { requestId?: string }).requestId || (second as { requestId?: string }).requestId);
+  assert.ok((first as { queued?: boolean }).queued || (second as { queued?: boolean }).queued);
 });
 
 test('message.send accepts requests, handles preflight rejection, and guards concurrent sends', async () => {
@@ -941,8 +1150,8 @@ test('session.truncateAfter rewrites the file and recreates the session context'
       params: { sessionPath, entryId: 'stop-here' },
     });
 
-    assert.deepEqual(result, { sessionPath });
-    assert.deepEqual(harness.openCalls, [sessionPath]);
+    assert.deepEqual(result, { ok: true, sessionPath });
+    assert.deepEqual(harness.openCalls, [sessionPath, sessionPath], 'cold truncate reads durable model state before reopening the runtime');
     assert.deepEqual(harness.createCalls.at(-1), { cwd: '/repo', reason: 'resume' });
     const rewritten = await fs.readFile(sessionPath, 'utf8');
     assert.equal(rewritten, `${JSON.stringify({ id: 'keep-1', message: 'keep' })}\n`);
@@ -1393,12 +1602,68 @@ test('session.truncateAfter re-applies the user\'s model when the truncate dropp
       'setThinkingLevel must be restored after setModel re-clamps');
     assert.equal(reopenedSession.model?.id, 'model-b');
     assert.equal(reopenedSession.thinkingLevel, 'high');
-    // The session.opened payload reflects the restored model.
-    assert.equal((result as { session?: { modelId?: string } }).session?.modelId, 'model-b');
+    // The authoritative session.opened event reflects the restored model; the
+    // correlated truncate result is intentionally only an acknowledgement.
+    assert.deepEqual(result, { ok: true, sessionPath });
+    const opened = emitted.find((entry) => entry.event === 'session.opened');
+    assert.equal((opened?.payload as { session?: { modelId?: string } }).session?.modelId, 'model-b');
     // The file was still rewritten (the model_change entry is dropped from
     // disk; the in-memory re-apply is what restores the choice).
     const rewritten = await fs.readFile(sessionPath, 'utf8');
     assert.equal(rewritten, `${JSON.stringify({ id: 'keep-1', message: 'keep' })}\n`);
+  });
+});
+
+test('cold session.truncateAfter preserves durable model and thinking state', async () => {
+  await withTempDir(async (dir) => {
+    const sessionPath = path.join(dir, 'session.jsonl');
+    await fs.writeFile(sessionPath, [
+      JSON.stringify({ id: 'keep', type: 'message' }),
+      JSON.stringify({ id: 'stop', type: 'message' }),
+    ].join('\n') + '\n');
+    const harness = createHarness();
+    harness.deps.getSessionContext = () => undefined;
+    let openCount = 0;
+    harness.deps.sdk.SessionManager.open = (() => {
+      openCount += 1;
+      return openCount === 1
+        ? { buildSessionContext: () => ({ messages: [], model: { provider: 'mock', modelId: 'model-b' }, thinkingLevel: 'high' }) }
+        : { sessionPath };
+    }) as any;
+    const applied: string[] = [];
+    const reopened: SessionContext = {
+      ...harness.context,
+      sessionPath,
+      runtime: {
+        services: {
+          modelRegistry: {
+            getAvailable: () => [{ id: 'model-b', provider: 'mock' }],
+            find: () => ({ id: 'model-b', provider: 'mock' }),
+          },
+        },
+      },
+      session: {
+        ...harness.context.session,
+        model: { id: 'model-a', provider: 'mock' },
+        thinkingLevel: 'low',
+        setModel: async () => {
+          applied.push('model-b');
+          reopened.session.model = { id: 'model-b', provider: 'mock' };
+        },
+        setThinkingLevel: (level: string) => {
+          applied.push(level);
+          reopened.session.thinkingLevel = level;
+        },
+      },
+    } as unknown as SessionContext;
+    harness.deps.createSessionContext = async () => reopened;
+
+    await handleBackendRequest(harness.deps, {
+      id: 'truncate-cold-model', method: 'session.truncateAfter', params: { sessionPath, entryId: 'stop' },
+    });
+
+    assert.deepEqual(applied, ['model-b', 'high']);
+    assert.equal(openCount, 2);
   });
 });
 

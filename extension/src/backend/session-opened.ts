@@ -7,7 +7,12 @@ import { buildSessionAnalyticsFactors } from './session-analytics';
 import { buildCurrentSummary, listAvailableModels } from './session-metadata';
 import { buildTailTranscriptWindow, buildDisplayTranscriptCache, isDisplayTranscriptCacheStale } from './transcript-window';
 import { deduplicateToolCallResultsForTransport } from '../shared/chat-message-parts';
-import type { SessionOpenedPayload, SystemPromptEntry, TranscriptMode } from '../shared/protocol';
+import {
+  boundTranscriptSnapshot,
+  buildSlimSessionOpenedUnavailableFallback,
+  type SessionSnapshotTransport,
+} from '../shared/transcript-window';
+import { SESSION_SNAPSHOT_TOO_LARGE_CODE, type SessionOpenedPayload, type SystemPromptEntry, type TranscriptMode } from '../shared/protocol';
 import type { SessionContext, SessionPromptState } from './server-types';
 import type { SdkBuildSystemPromptOptions } from './sdk';
 import type { SessionEntryLike } from './transcript';
@@ -32,6 +37,7 @@ export async function buildSessionOpenedPayload(
   deps: BuildSessionOpenedPayloadDeps,
   selectionToken?: string,
   transcript: TranscriptMode = 'tail',
+  transport: SessionSnapshotTransport = { kind: 'event', event: 'session.opened' },
 ): Promise<SessionOpenedPayload> {
   const context = deps.getSessionContext(sessionPath);
   if (!context) {
@@ -65,31 +71,34 @@ export async function buildSessionOpenedPayload(
   const mode: TranscriptMode = transcript === 'skip' && !streaming ? 'skip' : 'tail';
 
   const cache = ensureDisplayTranscriptCache(context);
-  const liveTurnCheckpoint = buildSessionOpenedLiveCheckpoint(context);
+  const liveTurnSnapshot = buildSessionOpenedLiveSnapshot(context);
+  const liveTurnCheckpoint = liveTurnSnapshot.checkpoint;
+  const liveTurnRecoveryIdentity = liveTurnSnapshot.recoveryIdentity;
   const rawTranscriptSlice = mode === 'skip'
     ? { transcript: [] as SessionOpenedPayload['transcript'], transcriptWindow: emptySkipWindow(cache) }
     : buildTailTranscriptWindow(cache, {
         pinnedMessageId: deps.getPinnedStreamingMessageId(context),
       });
-  const transcriptSlice = {
-    ...rawTranscriptSlice,
-    transcript: streaming && liveTurnCheckpoint
-      ? stripActiveAssistantTail(rawTranscriptSlice.transcript)
-      : normalizeDanglingTranscript(rawTranscriptSlice.transcript),
-  };
-  const transportTranscript = transcriptSlice.transcript.map(deduplicateToolCallResultsForTransport);
+  const durableTranscript = normalizeDanglingTranscript(rawTranscriptSlice.transcript)
+    .map(deduplicateToolCallResultsForTransport);
+  const transportTranscript = (streaming && liveTurnCheckpoint
+    ? stripActiveAssistantTail(rawTranscriptSlice.transcript)
+    : normalizeDanglingTranscript(rawTranscriptSlice.transcript))
+    .map(deduplicateToolCallResultsForTransport);
 
-  return {
+  const payload: SessionOpenedPayload = {
     session: buildCurrentSummary(context, deps.startupCwd),
     transcript: transportTranscript,
-    transcriptWindow: transcriptSlice.transcriptWindow,
+    transcriptWindow: rawTranscriptSlice.transcriptWindow,
     busy: context.session.isStreaming || !!context.activeRequest || context.session.isCompacting === true,
+    runtimeReady: true,
     // Compaction re-arms busy via `compaction_start`, but `isStreaming` /
     // `activeRequest` are both false while it runs. Carry the explicit flag so
     // a session opened mid-compaction still shows the "Compacting…" indicator
     // instead of reading as idle.
     isCompacting: context.session.isCompacting === true,
     ...(liveTurnCheckpoint ? { liveTurnCheckpoint } : {}),
+    ...(liveTurnRecoveryIdentity ? { liveTurnRecoveryIdentity } : {}),
     selectionToken,
     ...(mode === 'skip' && { transcriptSkipped: true }),
     systemPrompts,
@@ -102,26 +111,74 @@ export async function buildSessionOpenedPayload(
     // already available here, so this adds no session-file scan.
     sessionUsage: cache.sessionUsage,
   };
+
+  const snapshotUnavailable = {
+    code: SESSION_SNAPSHOT_TOO_LARGE_CODE,
+    message: 'The lossless session transcript snapshot exceeded the transport limit. Existing transcript state was preserved where available.',
+  } as const;
+  const emptyTranscriptWindow = emptyUnavailableWindow(rawTranscriptSlice.transcriptWindow);
+  const { liveTurnCheckpoint: _checkpoint, ...metadata } = payload;
+  const metadataUnavailableFallback: SessionOpenedPayload = {
+    ...metadata,
+    transcript: [],
+    transcriptWindow: emptyTranscriptWindow,
+    snapshotUnavailable,
+  };
+  // The final fallback is independent of user/configuration-owned metadata:
+  // names, catalogs, settings, prompts, reviews and usage cannot make it grow.
+  const slimUnavailableFallback = buildSlimSessionOpenedUnavailableFallback(
+    payload,
+    emptyTranscriptWindow,
+  );
+
+  return boundTranscriptSnapshot(payload, {
+    transport,
+    requestedEdge: 'newer',
+    requiredMessageId: deps.getPinnedStreamingMessageId(context),
+    ...(liveTurnCheckpoint ? {
+      checkpointFallback: {
+        transcript: durableTranscript,
+        transcriptWindow: rawTranscriptSlice.transcriptWindow,
+      },
+    } : {}),
+    unavailableFallback: [metadataUnavailableFallback, slimUnavailableFallback],
+  });
 }
 
-/** Build the atomic busy-open recovery snapshot. If it cannot be represented
- * within the protocol bound, return no checkpoint; the caller then keeps the
- * durable assistant tail visible instead of creating a false-empty session. */
+/** Build the atomic busy-open recovery snapshot. If it cannot be represented,
+ * retain only its bounded attempt identity so a cold host can still request the
+ * exact checkpoint while keeping the durable assistant tail visible. */
+export function buildSessionOpenedLiveSnapshot(
+  context: Pick<SessionContext, 'activeRequest'>,
+): {
+  checkpoint?: LiveTurnCheckpoint;
+  recoveryIdentity?: NonNullable<SessionOpenedPayload['liveTurnRecoveryIdentity']>;
+} {
+  let candidate: LiveTurnCheckpoint | undefined;
+  try {
+    candidate = context.activeRequest?.liveTurnAccumulator?.checkpoint();
+  } catch {
+    return {};
+  }
+  if (!candidate || candidate.terminal) return {};
+  const recoveryIdentity = { turnId: candidate.turnId, attemptId: candidate.attemptId };
+  try {
+    const bytes = Buffer.byteLength(JSON.stringify(candidate), 'utf8');
+    const checkpoint = bytes <= LIVE_PIPELINE_LIMITS.checkpointBytes
+      && bytes <= candidate.checkpointBytes
+      && candidate.turn.checkpointBytes === candidate.checkpointBytes
+      ? candidate
+      : undefined;
+    return { checkpoint, recoveryIdentity };
+  } catch {
+    return { recoveryIdentity };
+  }
+}
+
 export function buildSessionOpenedLiveCheckpoint(
   context: Pick<SessionContext, 'activeRequest'>,
 ): LiveTurnCheckpoint | undefined {
-  const checkpoint = context.activeRequest?.liveTurnAccumulator?.checkpoint();
-  if (!checkpoint || checkpoint.terminal) return undefined;
-  try {
-    const bytes = Buffer.byteLength(JSON.stringify(checkpoint), 'utf8');
-    return bytes <= LIVE_PIPELINE_LIMITS.checkpointBytes
-      && bytes <= checkpoint.checkpointBytes
-      && checkpoint.turn.checkpointBytes === checkpoint.checkpointBytes
-      ? checkpoint
-      : undefined;
-  } catch {
-    return undefined;
-  }
+  return buildSessionOpenedLiveSnapshot(context).checkpoint;
 }
 
 export function stripActiveAssistantTail(
@@ -158,6 +215,23 @@ export function normalizeDanglingTranscript(
       parts,
     };
   });
+}
+
+/** Exact zero-row window used when the full lossless snapshot cannot fit.
+ * Unlike transcriptSkipped this can reach a cold host, so its gap metadata
+ * truthfully identifies that no durable rows were transported. */
+function emptyUnavailableWindow(
+  original: SessionOpenedPayload['transcriptWindow'],
+): SessionOpenedPayload['transcriptWindow'] {
+  const edge = original.loadedEnd;
+  return {
+    ...original,
+    loadedStart: edge,
+    loadedEnd: edge,
+    hasOlder: edge > 0,
+    hasNewer: edge < original.totalCount,
+    isPartial: original.totalCount > 0,
+  };
 }
 
 /** Sentinel window for a skipped-transcript response. The host ignores these

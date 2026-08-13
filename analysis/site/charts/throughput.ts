@@ -202,6 +202,7 @@ export function throughputVsConcurrencySpec(rows: ThroughputConcurrencyRow[], mo
 export const throughputCharts: ChartEntry[] = [
   {
     id: 'chart-throughput-over-time',
+    runCohort: 'all-history',
     render: async (ctx: ChartContext) => {
       const rows = relevantRows(ctx);
       const models = modelDomain(rows);
@@ -216,6 +217,7 @@ export const throughputCharts: ChartEntry[] = [
   },
   {
     id: 'chart-throughput-by-model',
+    runCohort: 'all-history',
     render: async (ctx: ChartContext) => {
       const table = throughputByModelRows(relevantRows(ctx));
       ctx.setNote(
@@ -229,6 +231,7 @@ export const throughputCharts: ChartEntry[] = [
   },
   {
     id: 'chart-throughput-vs-concurrency',
+    runCohort: 'all-history',
     render: async (ctx: ChartContext) => {
       const samples = relevantRows(ctx);
       const rows = throughputConcurrencyRows(samples);

@@ -117,9 +117,9 @@ function AskUserCompleted({ toolCall, parsedInput, parsedResult, onContextMenu }
 }) {
   const contextType = getToolCallContextType('ask_user');
   const handleContextMenu = (e: MouseEvent) => onContextMenu(contextType, JSON.stringify(toolCall, null, 2), e);
-  const questionHtml = useMemo(() => renderMarkdown(parsedInput.question), [parsedInput.question]);
+  const questionHtml = useMemo(() => renderMarkdown(parsedInput.question, true, false), [parsedInput.question]);
   const contextHtml = useMemo(
-    () => (parsedInput.context ? renderMarkdown(parsedInput.context) : ''),
+    () => (parsedInput.context ? renderMarkdown(parsedInput.context, true, false) : ''),
     [parsedInput.context],
   );
 
@@ -233,8 +233,8 @@ function renderAskUserTool({
     // and a gentle nudge that the UI is loading. This handles the brief moment
     // before the extension_ui.request event reaches the webview.
     if (parsedInput) {
-      const questionHtml = renderMarkdown(parsedInput.question);
-      const contextHtml = parsedInput.context ? renderMarkdown(parsedInput.context) : '';
+      const questionHtml = renderMarkdown(parsedInput.question, true, false);
+      const contextHtml = parsedInput.context ? renderMarkdown(parsedInput.context, true, false) : '';
       return (
         <div class="ask-user-prompt ask-user-prompt-loading">
           <div class="ask-user-header">

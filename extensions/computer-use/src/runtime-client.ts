@@ -407,10 +407,29 @@ export class RuntimeRegistry {
   get size(): number { return this.clients.size; }
 }
 
-export const runtimeRegistry = new RuntimeRegistry();
-let teardownInstalled = false;
+// The pi extension loader (jiti, moduleCache: false) re-evaluates this module on
+// every session create. Module-scope state would reset on each evaluation,
+// re-registering process teardown listeners (MaxListenersExceededWarning) and
+// orphaning sidecar clients tracked by a discarded registry. Hold the singleton
+// registry and the install-once flag on globalThis so every evaluation shares
+// them; Symbol.for keeps the key stable across re-evaluations.
+const RUNTIME_GLOBAL_KEY = Symbol.for('pie.computer-use.runtime');
+interface RuntimeGlobals { registry: RuntimeRegistry; teardownInstalled: boolean; }
+function runtimeGlobals(): RuntimeGlobals {
+  const holder = globalThis as Record<PropertyKey, unknown>;
+  const existing = holder[RUNTIME_GLOBAL_KEY] as RuntimeGlobals | undefined;
+  if (existing) return existing;
+  const value: RuntimeGlobals = { registry: new RuntimeRegistry(), teardownInstalled: false };
+  Object.defineProperty(holder, RUNTIME_GLOBAL_KEY, { value, writable: false, configurable: false, enumerable: false });
+  return value;
+}
+
+export const runtimeRegistry: RuntimeRegistry = runtimeGlobals().registry;
+
 export function installProcessTeardown(): void {
-  if (teardownInstalled) return; teardownInstalled = true;
-  process.once('beforeExit', () => { void runtimeRegistry.shutdownAll(); });
-  process.once('exit', () => runtimeRegistry.killAllSync());
+  const state = runtimeGlobals();
+  if (state.teardownInstalled) return;
+  state.teardownInstalled = true;
+  process.once('beforeExit', () => { void state.registry.shutdownAll(); });
+  process.once('exit', () => state.registry.killAllSync());
 }

@@ -889,6 +889,8 @@ export function coerceRunSnapshot(value: unknown): RunSnapshot | null {
       : null,
     analyticsFactors: coerceSessionAnalyticsFactors(value.analyticsFactors),
     functionalSettings: coerceFunctionalSettings(value.functionalSettings),
+    harnessRevision: coerceOptionalString(value.harnessRevision),
+    harnessFingerprint: coerceOptionalString(value.harnessFingerprint),
     ...(typeof value.initialUserMessageChars === 'number' && Number.isFinite(value.initialUserMessageChars)
       ? { initialUserMessageChars: toNonNegativeInteger(value.initialUserMessageChars) }
       : {}),

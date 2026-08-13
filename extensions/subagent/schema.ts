@@ -56,11 +56,13 @@ export const SubagentParams = Type.Object(
 			description: "Optional opaque workflow correlation issued by another tool. It is persisted on the parent tool call but is not added to the child's prompt.",
 		})),
 		userContext: UserContextSchema,
+		// Do not put a JSON Schema `default` on this optional override. Some tool
+		// consumers materialize schema defaults into the call, which would turn an
+		// omitted value into an explicit `true` and bypass the settings.json default.
 		confirmProjectAgents: Type.Optional(
 			Type.Boolean({
 				description:
-					"Prompt before running project-local agents. Default: true, unless overridden by the `subagent.confirmProjectAgents` setting in settings.json. A per-call value takes precedence over the setting.",
-				default: true,
+					"Prompt before running project-local agents. Omit to use `subagent.confirmProjectAgents` from settings.json (or true when unset); an explicit call value takes precedence.",
 			}),
 		),
 		cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),

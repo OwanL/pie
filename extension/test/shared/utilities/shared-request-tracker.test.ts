@@ -129,6 +129,22 @@ test('create with an already-aborted signal rejects synchronously and does not s
   assert.equal(tracker.resolve('pre', 'x'), false);
 });
 
+test('transport settlement remains observable after local cancellation', async () => {
+  const tracker = new RequestTracker<string>();
+  const controller = new AbortController();
+  let transportSettlements = 0;
+  const p = tracker.create('preload', LONG_TIMEOUT, controller.signal, () => {
+    transportSettlements += 1;
+  });
+
+  controller.abort();
+  await assert.rejects(p, /was cancelled/);
+  assert.equal(transportSettlements, 0, 'local cancellation is not physical transport settlement');
+  assert.equal(tracker.resolve('preload', 'late response'), true, 'correlation tombstone accepts the late response');
+  assert.equal(transportSettlements, 1);
+  assert.equal(tracker.resolve('preload', 'duplicate response'), false);
+});
+
 test('resolve detaches the abort listener so a later abort is a no-op (no late reject, no leak)', async () => {
   const tracker = new RequestTracker<string>();
   const controller = new AbortController();

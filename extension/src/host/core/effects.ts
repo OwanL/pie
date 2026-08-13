@@ -125,6 +125,12 @@ export interface CreateSessionEffect extends EffectBase {
   selectionToken: string;
 }
 
+export interface NotifySessionViewedEffect extends EffectBase {
+  kind: 'NotifySessionViewed';
+  sessionPath: string;
+  previousSessionPath: string | null;
+}
+
 export interface PersistTabsEffect extends EffectBase {
   kind: 'PersistTabs';
   openTabPaths: string[];
@@ -292,6 +298,8 @@ export interface CloseSessionEffect extends EffectBase {
    *  only when nextPath is NOT already summarized/pending (the edge case where
    *  a tab is open but its session hasn't been loaded yet). */
   nextPath: string | null;
+  /** Whether closing this tab changed the visual selection. */
+  selectionChanged?: boolean;
 }
 
 export interface DuplicateSessionEffect extends EffectBase {
@@ -316,6 +324,7 @@ export type Effect =
   | TruncateRpcEffect
   | OpenSessionEffect
   | CreateSessionEffect
+  | NotifySessionViewedEffect
   | PersistTabsEffect
   | LogEffect
   | SetModelRpcEffect

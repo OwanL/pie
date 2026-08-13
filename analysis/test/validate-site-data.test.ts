@@ -2,12 +2,15 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { buildSiteDataBundle, validateSiteDataBundle } from '../scripts/site-data.ts';
+import { CURRENT_HARNESS_REVISION } from '../scripts/contracts.ts';
 import { prepareSourceAnalytics } from '../scripts/prepare.ts';
 import { validateSiteDataBundleNumericFields } from '../scripts/validate-site-data.ts';
 import { deepClone, loadFixture } from './helpers.ts';
 
 async function bundle() {
-  return buildSiteDataBundle(prepareSourceAnalytics(await loadFixture()));
+  const fixture = deepClone(await loadFixture());
+  for (const run of [...fixture.completedRuns, ...fixture.openRuns]) run.harnessRevision = CURRENT_HARNESS_REVISION;
+  return buildSiteDataBundle(prepareSourceAnalytics(fixture));
 }
 
 test('numeric validator accepts a valid V2-only bundle', async () => {

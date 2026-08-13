@@ -84,13 +84,9 @@ export function outcomeDimensionSpec(dimension: OutcomeCorrelationDimension): Re
   const points = groupPoints(dimension);
   if (points.length === 0) return null;
 
-  const values = points.flatMap((point) => {
-    const rows: Array<Record<string, unknown>> = [{ ...point, mark: 'mean' }];
-    if (point.ciAvailable) {
-      rows.push({ ...point, mark: 'ci' });
-    }
-    return rows;
-  });
+  // Keep one datum per group. Separate mean/CI layers can otherwise render
+  // the same group twice when a confidence interval is available.
+  const values = points.map((point) => ({ ...point }));
 
   const lowNCount = points.filter((p) => p.lowN).length;
   const description = `${dimensionTitle(dimension)}: ${dimension.description} Group means of qualityIndexV1 with 95% Student-t confidence intervals. ${lowNCount > 0 ? `${lowNCount} group(s) have fewer than ${LOW_N_THRESHOLD} sessions.` : ''}`;
@@ -102,6 +98,7 @@ export function outcomeDimensionSpec(dimension: OutcomeCorrelationDimension): Re
     data: { values },
     layer: [
       {
+        transform: [{ filter: 'datum.ciAvailable' }],
         mark: { type: 'rule' as const, size: 3, opacity: 0.7 },
         encoding: {
           x: { field: 'value', type: 'nominal' as const, title: null, sort: points.map((p) => p.value), axis: { labelAngle: 0, labelLimit: 120 } },
@@ -178,6 +175,7 @@ async function renderOutcomeDimension(ctx: ChartContext, name: OutcomeCorrelatio
 
 export const outcomeCharts: ChartEntry[] = DIMENSION_ORDER.map((name) => ({
   id: `chart-outcome-${name}`,
+  runCohort: 'artifact' as const,
   render: async (ctx: ChartContext) => renderOutcomeDimension(ctx, name),
 }));
 

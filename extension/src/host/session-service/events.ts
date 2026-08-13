@@ -176,6 +176,10 @@ export class SessionServiceEvents {
       onExtensionUIRequest: (payload) => onExtensionUIRequest(payload, deps),
       onError: (payload) => onError(payload, deps),
     });
+    // Some backend failure/terminal paths reconcile the host running marker
+    // without emitting a separate busy=false event. Re-check after every
+    // backend event; the pump itself remains guarded by authoritative state.
+    this.state.resumePreloads();
   }
 
   private onBusyChanged(payload: BusyChangedPayload): void {

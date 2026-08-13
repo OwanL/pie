@@ -33,7 +33,7 @@ export type {
 /** Analysis accepts the stable session-header identity when present in newer exports. */
 export type RunSnapshot = BaseRunSnapshot & { sessionId?: string };
 
-export { RUN_ANALYTICS_SCHEMA_VERSION } from '../../shared/run-analytics-contracts.js';
+export { RUN_ANALYTICS_SCHEMA_VERSION, CURRENT_HARNESS_REVISION } from '../../shared/run-analytics-contracts.js';
 
 export const SITE_DATA_SCHEMA_VERSION = 7;
 export const DATA_MODE_LOCAL_DEFAULT = 'local-default';
@@ -64,6 +64,19 @@ export type SiteDataFileName = (typeof SITE_DATA_FILE_NAMES)[number];
 
 export type VerificationState = 'none' | 'passing' | 'failing';
 export type VerificationCountBucket = '0' | '1' | '2-3' | '4+';
+
+/**
+ * Harness cohort classification for a run, resolved by the pure classifier in
+ * `cohorts.ts` from the stamped harness revision and the run's start time:
+ * - `current`: revision matches the current harness, or (historically) the run
+ *   started inside the current-harness era before identity was required.
+ * - `legacy`: started before the historical-current boundary, before harness
+ *   stamping existed.
+ * - `unknown`: started at/after the identity-required boundary without a
+ *   revision — the run cannot be attributed to the current harness.
+ * - `incompatible`: carries a revision that is not the current harness's.
+ */
+export type HarnessCohortStatus = 'current' | 'legacy' | 'unknown' | 'incompatible';
 
 export type CriterionOrigin = 'explicit' | 'necessary_implied';
 export type CriterionImportance = 'core' | 'supporting' | 'optional';
@@ -261,6 +274,14 @@ export interface PreparedRunRow {
   sessionId: string;
   identityFallback: boolean;
   sessionPathHash: string;
+  /** Harness revision stamped at run start; null for runs recorded before stamping existed. */
+  harnessRevision: string | null;
+  /** Deterministic privacy-safe digest of the revision plus captured analytics factors/functional settings; null for historical runs. */
+  harnessFingerprint: string | null;
+  /** Harness cohort classification resolved from the stamped revision and start time. */
+  harnessStatus: HarnessCohortStatus;
+  /** True when the run is attributed to the current harness (harnessStatus === 'current'). */
+  isCurrentHarness: boolean;
   status: ActiveRunStatus;
   startedAt: string;
   startedDay: string;

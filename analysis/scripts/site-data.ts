@@ -673,14 +673,24 @@ export function createOutcomeCorrelations(prepared: PreparedAnalyticsData): Outc
       continue;
     }
     const representative = representativeRun(joinedRuns)!;
+    const currentHarnessJoinedRuns = joinedRuns.filter((run) => run.isCurrentHarness);
+    const currentHarnessRepresentative = representativeRun(currentHarnessJoinedRuns);
     rawSessions.push({
       quality,
+      // Verification, thinking, and prompt size are direct session observations
+      // that remain interpretable across harness revisions.
       verificationUsage: joinedRuns.some((run) => run.verificationTotalCount > 0) ? 'verified' : 'unverified',
-      compaction: joinedRuns.reduce((sum, run) => sum + run.compactionCount, 0) >= 1 ? 'compacted' : 'none',
       thinkingLevel: representative.thinkingLevel ?? '(unspecified)',
       promptChars: representative.initialUserMessageChars ?? null,
-      pruningMode: representative.fsPruningMode ?? '(untracked)',
-      subagentParentModel: representative.fsSubagentAlwaysParentModel === null ? '(untracked)' : String(representative.fsSubagentAlwaysParentModel),
+      // History compaction and functional settings describe harness behavior;
+      // never infer them from legacy/incompatible runs.
+      compaction: currentHarnessJoinedRuns.length === 0
+        ? '(untracked)'
+        : currentHarnessJoinedRuns.reduce((sum, run) => sum + run.compactionCount, 0) >= 1 ? 'compacted' : 'none',
+      pruningMode: currentHarnessRepresentative?.fsPruningMode ?? '(untracked)',
+      subagentParentModel: currentHarnessRepresentative?.fsSubagentAlwaysParentModel == null
+        ? '(untracked)'
+        : String(currentHarnessRepresentative.fsSubagentAlwaysParentModel),
     });
   }
 
@@ -700,7 +710,7 @@ export function createOutcomeCorrelations(prepared: PreparedAnalyticsData): Outc
   const untracked = new Set(['(untracked)']);
   const dimensions: OutcomeCorrelationDimension[] = [
     buildOutcomeDimension('verificationUsage', 'Whether the session ran any verification command (test/build/lint/typecheck/format).', sessions, (s) => s.verificationUsage, new Set()),
-    buildOutcomeDimension('compaction', 'Whether any history-compaction (/compact) call occurred across the session\'s runs.', sessions, (s) => s.compaction, new Set()),
+    buildOutcomeDimension('compaction', 'Whether any history-compaction (/compact) call occurred across the session\'s current-harness runs.', sessions, (s) => s.compaction, untracked),
     buildOutcomeDimension('thinkingLevel', 'Thinking level of the session\'s representative (latest) run.', sessions, (s) => s.thinkingLevel, new Set(['(unspecified)'])),
     buildOutcomeDimension('promptSizeBand', 'Ex-ante prompt size (initial user message chars) banded into cohort terciles.', sessions, (s) => s.promptSizeBand, untracked),
     buildOutcomeDimension('pruningMode', 'Skill-pruning mode at the representative run\'s start.', sessions, (s) => s.pruningMode, untracked),
@@ -720,7 +730,7 @@ export function createOutcomeCorrelations(prepared: PreparedAnalyticsData): Outc
       'Associations are observational and cwd-agnostic: behaviors are grouping variables, not controlled treatments. A non-zero mean difference does not imply that the behavior caused the outcome.',
       'The outcome is the canonical V2 qualityIndexV1, unchanged. This bundle only reads the index for grouping; it never recomputes or alters the quality formula.',
       'Each group reports its sample count (n) and a 95% Student-t confidence interval for the mean; differences use a 95% Welch (unequal-variance) interval. Intervals widen honestly as n shrinks and are null when n < 2.',
-      'Unmatched reviews (no joinable run) are excluded from every dimension because their behavior cannot be attributed; they remain counted in evidence-reliability.json.',
+      'Unmatched reviews (no joinable run) are excluded from every dimension because their behavior cannot be attributed; they remain counted in evidence-reliability.json. Harness-sensitive dimensions use current-harness joined runs only and mark sessions with no eligible run as untracked.',
       'Prompt-size bands are relative cohort terciles, so band boundaries shift with the observed population — compare within a snapshot, not across snapshots with different cohorts.',
     ],
   };
