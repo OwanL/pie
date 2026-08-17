@@ -82,11 +82,11 @@ function parseReport(output) {
   return line ? JSON.parse(line.slice(REPORT_PREFIX.length)) : null;
 }
 
-function run(command, args, cwd, onSpawn = undefined) {
+function run(command, args, cwd, onSpawn = undefined, extraEnv = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd,
-      env: { ...process.env, FORCE_COLOR: '0' },
+      env: { ...process.env, FORCE_COLOR: '0', ...extraEnv },
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
     });
@@ -158,6 +158,17 @@ async function main() {
   }
 
   const tempDir = await mkdtemp(path.join(os.tmpdir(), 'pie-extension-fast-'));
+  // Fresh per-wave trace directories: every spawned test process inherits the
+  // wave's PIE_LIVE_PIPELINE_TRACE_DIR, so trace-writing tests (writer-trace,
+  // diagnostics-trace, request-handler, service-loading-gate) no longer append
+  // to the shared canonical %TEMP% file that accumulates across runs and
+  // rotates at 2 MiB mid-run — a rotation between a test's before/after read
+  // silently lost that test's records and flaked. A fresh dir stays far below
+  // the rotation threshold for the whole wave.
+  const traceDirs = [
+    await mkdtemp(path.join(os.tmpdir(), 'pie-extension-fast-traces-bundled-')),
+    await mkdtemp(path.join(os.tmpdir(), 'pie-extension-fast-traces-unsafe-')),
+  ];
   let unsafeChild;
   try {
     const tsxCli = path.join(extensionRoot, 'node_modules', 'tsx', 'dist', 'cli.mjs');
@@ -171,6 +182,7 @@ async function main() {
       [tsxCli, ...isolatedArgs, ...unsafe],
       extensionRoot,
       (child) => { unsafeChild = child; },
+      { PIE_LIVE_PIPELINE_TRACE_DIR: traceDirs[1] },
     );
 
     const { build } = extensionRequire('esbuild');
@@ -235,7 +247,7 @@ async function main() {
     }));
     const bundledFiles = [...standaloneBundles, ...batchFiles, ...scopedBatchFiles];
     const results = await Promise.all([
-      run(process.execPath, [...bundledArgs, ...bundledFiles], extensionRoot),
+      run(process.execPath, [...bundledArgs, ...bundledFiles], extensionRoot, undefined, { PIE_LIVE_PIPELINE_TRACE_DIR: traceDirs[0] }),
       unsafeRun,
     ]);
     const report = mergeReports(results, performance.now() - startedAt);
@@ -244,6 +256,7 @@ async function main() {
   } finally {
     if (unsafeChild?.exitCode === null && unsafeChild?.signalCode === null) unsafeChild.kill();
     await rm(tempDir, { recursive: true, force: true });
+    await Promise.all(traceDirs.map((dir) => rm(dir, { recursive: true, force: true })));
   }
 }
 
