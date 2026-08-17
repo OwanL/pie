@@ -19,7 +19,7 @@ function entry(id: string, role: 'user' | 'assistant', text: string) {
   };
 }
 
-async function makeColdServer() {
+async function makeColdServer(options: { sessionCatalog?: any } = {}) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-cold-browse-'));
   const sessionPath = path.join(dir, 'session.jsonl');
   await fs.writeFile(sessionPath, [
@@ -35,11 +35,25 @@ async function makeColdServer() {
   let sessionName: string | undefined;
   let managerOpens = 0;
   let runtimeCreations = 0;
-  const server = new BackendServer({ sdkPath: '/unused', cwd: dir }) as any;
+  const server = new BackendServer({
+    sdkPath: '/unused',
+    cwd: dir,
+    sessionCatalog: options.sessionCatalog,
+  }) as any;
   server.agentDir = dir;
   server.sdk = {
     VERSION: 'test-sdk',
     SessionManager: {
+      async listAll() {
+        return [{
+          path: sessionPath,
+          cwd: dir,
+          name: sessionName,
+          firstMessage: 'hello',
+          modified: new Date('2026-08-13T00:00:00.000Z'),
+          messageCount: durableBranch.length,
+        }];
+      },
       open(openedPath: string) {
         managerOpens += 1;
         const snapshot = [...durableBranch];
@@ -112,9 +126,13 @@ test('cold open/preload/page/detail projections remain runtime-free and pages re
   }
 });
 
-test('cold models.list is configured-catalog-only and does not promote', async () => {
+test('cold list and models.list use coordinator metadata without promotion', async () => {
   const h = await makeColdServer();
   try {
+    const sessions = await h.server.handleRequest({
+      id: 'list-cold', method: 'session.list',
+    });
+    assert.deepEqual(sessions.map((session: { path: string }) => session.path), [h.sessionPath]);
     const models = await h.server.handleRequest({
       id: 'models-cold', method: 'models.list', params: { sessionPath: h.sessionPath },
     });
@@ -227,44 +245,21 @@ test('cold page joins a promotion that starts during its durable read and does n
   }
 });
 
-test('cold detail reopens after a concurrent file rewrite and never returns obsolete content', async () => {
+test('cold detail reads the current durable file without promoting a runtime', async () => {
   const h = await makeColdServer();
   try {
-    h.replaceBranch([entry('user-1', 'user', 'hello'), {
-      type: 'message', id: 'assistant-reasoning', timestamp: '2026-08-13T00:00:01.000Z',
-      message: { role: 'assistant', content: [{ type: 'thinking', thinking: 'old' }], usage: { input: 1, output: 1, totalTokens: 2 } },
-    }]);
-    let releaseSecondFingerprint!: () => void;
-    let markSecondStarted!: () => void;
-    const secondFingerprintStarted = new Promise<void>((resolve) => { markSecondStarted = resolve; });
-    const secondFingerprintBlocked = new Promise<void>((resolve) => { releaseSecondFingerprint = resolve; });
-    let fingerprintCalls = 0;
-    h.server.readColdBrowseFileFingerprint = async () => {
-      fingerprintCalls += 1;
-      if (fingerprintCalls === 2) {
-        markSecondStarted();
-        await secondFingerprintBlocked;
-        return 'version-2';
-      }
-      return fingerprintCalls === 1 ? 'version-1' : 'version-2';
-    };
-    h.server.readColdBrowseFileFingerprintSync = () => 'version-2';
-
-    const detailPromise = h.server.loadDetail(h.sessionPath, {
-      key: 'reasoning-old', sessionPath: h.sessionPath, kind: 'reasoning', source: 'durable',
-      messageId: 'assistant-reasoning', partIndex: 0, summary: 'old', available: true, sizeBytes: 3,
-    });
-    await secondFingerprintStarted;
     h.replaceBranch([entry('user-1', 'user', 'hello')]);
     await fs.writeFile(h.sessionPath, [
       JSON.stringify({ type: 'session', id: 'stable-session-id', version: 3, cwd: h.dir }),
       JSON.stringify(entry('user-1', 'user', 'hello')),
     ].join('\n') + '\n');
-    releaseSecondFingerprint();
 
-    const detail = await detailPromise;
+    const detail = await h.server.loadDetail(h.sessionPath, {
+      key: 'reasoning-old', sessionPath: h.sessionPath, kind: 'reasoning', source: 'durable',
+      messageId: 'assistant-reasoning', partIndex: 0, summary: 'old', available: true, sizeBytes: 3,
+    });
     assert.equal(detail.status, 'unavailable');
-    assert.ok(h.counts().managerOpens >= 2, 'the changed file is reopened before detail lookup');
+    assert.equal(h.counts().runtimeCreations, 0);
   } finally {
     await fs.rm(h.dir, { recursive: true, force: true });
   }
@@ -317,6 +312,188 @@ test('host-local preloaded cold selections stay runtime-free and promotion consu
   }
 });
 
+test('cold create retains its exact manager until one legacy promotion and publishes runtime-ready first', async () => {
+  const h = await makeColdServer();
+  try {
+    const createdPath = path.join(h.dir, 'retained-create.jsonl');
+    await fs.writeFile(createdPath, `${JSON.stringify({ type: 'session', id: 'retained', version: 3, cwd: h.dir })}\n`);
+    const createdManager = h.server.sdk.SessionManager.open(createdPath);
+    const opensBeforeCreate = h.counts().managerOpens;
+    h.server.sdk.SessionManager.create = () => createdManager;
+    h.server.emitSessionListChanged = async () => undefined;
+    const emitted: Array<{ event: string; payload?: any }> = [];
+    h.server.emit = (event: string, payload?: unknown) => emitted.push({ event, payload });
+
+    const created = await h.server.handleRequest({
+      id: 'create-retained', method: 'session.create',
+      params: {
+        cwd: h.dir,
+        selectionToken: 'create-selection',
+        operationId: 'create-operation',
+        operationAttempt: 2,
+      },
+    });
+    assert.equal(created.sessionPath, createdPath);
+    const coldOpened = emitted.find((record) => record.event === 'session.opened')?.payload;
+    assert.equal(coldOpened.runtimeReady, false);
+    assert.equal(coldOpened.operationId, 'create-operation');
+    assert.equal(coldOpened.operationAttempt, 2);
+    assert.equal(h.counts().managerOpens, opensBeforeCreate, 'cold publication does not reopen the retained manager');
+
+    let installedManager: unknown;
+    let installedReason: unknown;
+    const hotContext = { sessionPath: createdPath } as SessionContext;
+    h.server.createSessionContext = async (manager: unknown, reason: unknown) => {
+      installedManager = manager;
+      installedReason = reason;
+      h.server.sessionContexts.set(createdPath, hotContext);
+      return hotContext;
+    };
+    h.server.buildHotSessionOpenedPayload = async () => ({
+      session: { path: createdPath }, runtimeReady: true, busy: false,
+    });
+
+    await h.server.ensureSessionContext(createdPath);
+    assert.equal(installedManager, createdManager, 'first promotion consumes the exact process-local manager');
+    assert.equal(installedReason, 'new', 'deferred promotion preserves create lifecycle semantics');
+    assert.equal(h.counts().managerOpens, opensBeforeCreate, 'promotion does not reopen a retained manager');
+    assert.equal(h.server.coldSessionManagerHandles.size, 0);
+    assert.deepEqual(
+      emitted.filter((record) => record.event === 'session.opened').map((record) => record.payload.runtimeReady),
+      [false, true],
+      'runtime-ready metadata is emitted before the initiating execution can continue',
+    );
+  } finally {
+    await fs.rm(h.dir, { recursive: true, force: true });
+  }
+});
+
+test('an externally rewritten retained session evicts its stale manager and reopens once', async () => {
+  const h = await makeColdServer();
+  try {
+    const createdPath = path.join(h.dir, 'externally-rewritten.jsonl');
+    await fs.writeFile(createdPath, `${JSON.stringify({ type: 'session', id: 'rewritten', version: 3, cwd: h.dir })}\n`);
+    const createdManager = h.server.sdk.SessionManager.open(createdPath);
+    h.server.sdk.SessionManager.create = () => createdManager;
+    h.server.emit = () => undefined;
+    h.server.emitSessionListChanged = async () => undefined;
+    await h.server.handleRequest({ id: 'create-rewritten', method: 'session.create', params: { cwd: h.dir } });
+    const opensBeforeRewrite = h.counts().managerOpens;
+
+    h.append(entry('assistant-after-rewrite', 'assistant', 'external'));
+    await fs.appendFile(createdPath, `${JSON.stringify(entry('assistant-after-rewrite', 'assistant', 'external'))}\n`);
+    const payload = await h.server.buildSessionOpenedPayload(createdPath);
+
+    assert.equal(payload.runtimeReady, false);
+    assert.equal(h.counts().managerOpens, opensBeforeRewrite + 1);
+    assert.equal(h.server.coldSessionManagerHandles.size, 0, 'the stale handle is not selected again');
+  } finally {
+    await fs.rm(h.dir, { recursive: true, force: true });
+  }
+});
+
+test('public JSONL app.ping reaches the response writer before a blocked cold catalog operation is released', async () => {
+  let markStarted!: () => void;
+  let releaseList!: () => void;
+  const started = new Promise<void>((resolve) => { markStarted = resolve; });
+  const blocked = new Promise<void>((resolve) => { releaseList = resolve; });
+  const catalog = {
+    invalidateIfInventoryChanged: async () => false,
+    list: async () => {
+      markStarted();
+      await blocked;
+      return [];
+    },
+    refresh: () => undefined,
+    remove: () => undefined,
+  };
+  const h = await makeColdServer({ sessionCatalog: catalog });
+  const originalWrite = process.stdout.write;
+  const responses: Array<{ id: string; ok: boolean; result?: any }> = [];
+  let markPingWritten!: () => void;
+  let markListWritten!: () => void;
+  const pingWritten = new Promise<void>((resolve) => { markPingWritten = resolve; });
+  const listWritten = new Promise<void>((resolve) => { markListWritten = resolve; });
+  (process.stdout as any).write = (chunk: unknown, encodingOrCallback?: unknown, callback?: unknown) => {
+    const text = typeof chunk === 'string' ? chunk : String(chunk);
+    const done = typeof encodingOrCallback === 'function' ? encodingOrCallback : callback;
+    let captured = false;
+    for (const line of text.trim().split('\n')) {
+      try {
+        const response = JSON.parse(line) as { id?: unknown; ok?: unknown; result?: unknown };
+        if ((response.id === 'causal-ping' || response.id === 'blocked-list')
+            && typeof response.ok === 'boolean') {
+          responses.push(response as { id: string; ok: boolean; result?: any });
+          if (response.id === 'causal-ping') markPingWritten();
+          else markListWritten();
+          captured = true;
+        }
+      } catch {
+        // Non-protocol test-runner output stays on the real stdout stream.
+      }
+    }
+    if (!captured) {
+      return (originalWrite as any).call(process.stdout, chunk, encodingOrCallback, callback);
+    }
+    if (typeof done === 'function') done(null);
+    return true;
+  };
+
+  let released = false;
+  try {
+    const listing = h.server.handleLine(JSON.stringify({ id: 'blocked-list', method: 'session.list' }));
+    await started;
+    const pingHandling = h.server.handleLine(JSON.stringify({ id: 'causal-ping', method: 'app.ping' }));
+    let pingDeadline: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        pingWritten,
+        new Promise<never>((_resolve, reject) => {
+          pingDeadline = setTimeout(
+            () => reject(new Error('correlated app.ping did not cross the JSONL writer before the causal deadline')),
+            5_000,
+          );
+        }),
+      ]);
+    } finally {
+      if (pingDeadline) clearTimeout(pingDeadline);
+    }
+
+    assert.equal(released, false, 'the correlated ping response crossed the writer before release');
+    assert.deepEqual(responses.map((response) => response.id), ['causal-ping']);
+    assert.equal(responses[0]?.ok, true);
+    assert.equal(responses[0]?.result?.sdkVersion, 'test-sdk');
+
+    released = true;
+    releaseList();
+    await Promise.all([listing, pingHandling, listWritten]);
+    assert.deepEqual(
+      responses.map((response) => response.id),
+      ['causal-ping', 'blocked-list'],
+      'responses stay FIFO within the response lane once each handler settles',
+    );
+  } finally {
+    releaseList();
+    (process.stdout as any).write = originalWrite;
+    await fs.rm(h.dir, { recursive: true, force: true });
+  }
+});
+
+test('cold forget routes through the store and removes the durable session without runtime creation', async () => {
+  const h = await makeColdServer();
+  try {
+    h.server.emit = () => undefined;
+    h.server.emitSessionListChanged = async () => undefined;
+    assert.deepEqual(await h.server.handleRequest({
+      id: 'forget-cold', method: 'session.forget', params: { sessionPath: h.sessionPath },
+    }), { sessionPath: h.sessionPath, forgotten: true });
+    assert.equal(await fs.stat(h.sessionPath).then(() => true, () => false), false);
+    assert.equal(h.counts().runtimeCreations, 0);
+  } finally {
+    await fs.rm(h.dir, { recursive: true, force: true });
+  }
+});
+
 test('a slow create cannot overwrite a newer host-local viewed transition', async () => {
   const h = await makeColdServer();
   try {
@@ -324,23 +501,21 @@ test('a slow create cannot overwrite a newer host-local viewed transition', asyn
     const b = h.sessionPath;
     const createdPath = path.join(h.dir, 'created.jsonl');
     h.server.viewedSessionPath = a;
-    h.server.sdk.SessionManager.create = () => ({ createdPath });
+    await fs.writeFile(createdPath, `${JSON.stringify({ type: 'session', id: 'created', version: 3, cwd: h.dir })}\n`);
+    h.server.sdk.SessionManager.create = () => h.server.sdk.SessionManager.open(createdPath);
     h.server.emit = () => undefined;
     h.server.emitSessionListChanged = async () => undefined;
-    h.server.buildSessionOpenedPayload = async (sessionPath: string, selectionToken?: string) => ({
-      session: { path: sessionPath }, selectionToken, transcript: [], busy: false,
-    });
     let releaseCreate!: () => void;
     let createStarted!: () => void;
     const blocked = new Promise<void>((resolve) => { releaseCreate = resolve; });
     const started = new Promise<void>((resolve) => { createStarted = resolve; });
-    h.server.createSessionContext = async () => {
-      createStarted();
-      await blocked;
-      return {
-        sessionPath: createdPath,
-        session: { isStreaming: false, isCompacting: false },
-      } as SessionContext;
+    const originalBuild = h.server.buildSessionOpenedPayload.bind(h.server);
+    h.server.buildSessionOpenedPayload = async (...args: unknown[]) => {
+      if (args[0] === createdPath) {
+        createStarted();
+        await blocked;
+      }
+      return await originalBuild(...args);
     };
 
     const create = h.server.handleRequest({

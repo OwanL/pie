@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { basename } from 'node:path';
 
+import { createHardenedLivePipelineTraceIdentifier } from '../../../src/shared/live-pipeline-trace';
 import type { LivePipelineTraceSink } from '../../../src/host/util/live-pipeline-trace-store';
 import { LivePipelineTraceStore } from '../../../src/host/util/live-pipeline-trace-store';
 
@@ -25,7 +26,7 @@ class MemorySink implements LivePipelineTraceSink {
   async remove(filePath: string) { this.removed.push(filePath); this.files.delete(filePath); }
 }
 
-function createStore(sink: MemorySink, options: Partial<ConstructorParameters<typeof LivePipelineTraceStore>[0]> = {}) {
+function createStore(sink: LivePipelineTraceSink, options: Partial<ConstructorParameters<typeof LivePipelineTraceStore>[0]> = {}) {
   return new LivePipelineTraceStore({
     enabled: true,
     process: 'host',
@@ -95,6 +96,62 @@ test('flush writes metadata plus trace-health and no raw identifier/content fiel
   ]);
 });
 
+test('sink preserves optional dedupe, payload classification, and byte metadata', async () => {
+  const sink = new MemorySink(); const store = createStore(sink);
+  assert.equal(store.record({
+    ...event(), outcome: 'duplicate', payloadClass: 'compact',
+    sourcePayloadBytes: 8_192, producedPayloadBytes: 96,
+  }), true);
+  await store.flush();
+  const emitted = records(sink);
+  assert.deepEqual(
+    (({ outcome, payloadClass, sourcePayloadBytes, producedPayloadBytes }) => ({
+      outcome, payloadClass, sourcePayloadBytes, producedPayloadBytes,
+    }))(emitted[0]!),
+    {
+      outcome: 'duplicate', payloadClass: 'compact', sourcePayloadBytes: 8_192, producedPayloadBytes: 96,
+    },
+  );
+});
+
+test('flush drains records added while a flush is already in flight', async () => {
+  const sink = new MemorySink();
+  let releaseAppend: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => { releaseAppend = resolve; });
+  let appendStarted: () => void = () => undefined;
+  const started = new Promise<void>((resolve) => { appendStarted = resolve; });
+  const gatedSink: LivePipelineTraceSink = {
+    append: async (filePath, data) => {
+      appendStarted();
+      await gate;
+      await sink.append(filePath, data);
+    },
+    size: (filePath) => sink.size(filePath),
+    rotate: (sourcePath, targetPath) => sink.rotate(sourcePath, targetPath),
+    list: () => sink.list(),
+    remove: (filePath) => sink.remove(filePath),
+  };
+  const store = createStore(gatedSink);
+  store.record(event('one'));
+  const first = store.flush(); // in flight; batches 'one'
+  await started;
+  store.record(event('two')); // recorded after the in-flight batch splice
+  let secondSettled = false;
+  const second = store.flush().then(() => { secondSettled = true; });
+  // Neither flush may resolve while 'two' is still buffered.
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(secondSettled, false, 'a flush must not settle while records remain buffered');
+  releaseAppend();
+  await Promise.all([first, second]);
+  assert.equal(store.getHealth().emitted, 2);
+  assert.equal(store.getHealth().unflushed, 0);
+  assert.equal(
+    records(sink).filter((record) => record.stage === 'host.reducer.applied').length,
+    2,
+    'both records must be persisted inside the awaited flush window',
+  );
+});
+
 test('sink failures are swallowed and retain records for retry', async () => {
   const sink = new MemorySink(); sink.failAppend = true; const store = createStore(sink);
   store.record(event()); await store.flush();
@@ -117,4 +174,24 @@ test('size and age/file-count retention remain bounded', async () => {
   assert.equal(store.getHealth().rotations, 2);
   assert.ok(store.getHealth().retainedFiles <= 1);
   assert.ok(sink.removed.length >= 1);
+});
+
+test('records carry a monotonic process-local sequence and shared run identity', async () => {
+  const sink = new MemorySink(); const store = createStore(sink);
+  store.record(event('one')); store.record(event('two'));
+  await store.flush();
+  const emitted = records(sink);
+  assert.equal(emitted.length, 3);
+  assert.deepEqual(emitted.map((r) => r.processSeq), [0, 1, 2]);
+  const runHash = createHardenedLivePipelineTraceIdentifier('run-1', 'test-hmac-key');
+  for (const record of emitted) assert.equal(record.runIdHash, runHash);
+  assert.equal(JSON.stringify(emitted).includes('run-1'), false);
+});
+
+test('rejected records do not consume the process sequence', async () => {
+  const sink = new MemorySink(); const store = createStore(sink);
+  assert.equal(store.record({ ...event(), stage: 'not-a-stage' as never }), false);
+  assert.equal(store.record(event()), true);
+  await store.flush();
+  assert.deepEqual(records(sink).map((r) => r.processSeq), [0, 1]);
 });

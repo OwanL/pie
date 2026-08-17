@@ -239,6 +239,27 @@ export function isTextOnlyToolResult(result: unknown): boolean {
 }
 
 /** Format an arbitrary value as highlighted YAML HTML. Strings render as-is. */
+/** Serialize an arbitrary result value to the YAML text used for display. */
+export function stringifyValueAsYamlText(value: unknown): string {
+  if (value === undefined || value === null) {
+    return '';
+  }
+  if (typeof value === 'string') {
+    return value;
+  }
+  try {
+    // lineWidth: 0 disables line wrapping so code/paths stay intact.
+    return stringifyYaml(value, { indent: 2, lineWidth: 0 });
+  } catch {
+    // YAML serialization can fail (e.g. cycles); fall back to JSON, then String.
+    try {
+      return JSON.stringify(value, null, 2);
+    } catch {
+      return String(value);
+    }
+  }
+}
+
 export function formatValueAsHighlightedYaml(value: unknown): string {
   if (value === undefined || value === null) {
     return '';
@@ -246,17 +267,5 @@ export function formatValueAsHighlightedYaml(value: unknown): string {
   if (typeof value === 'string') {
     return escapeHtml(value);
   }
-  let text: string;
-  try {
-    // lineWidth: 0 disables line wrapping so code/paths stay intact.
-    text = stringifyYaml(value, { indent: 2, lineWidth: 0 });
-  } catch {
-    // YAML serialization can fail (e.g. cycles); fall back to JSON, then String.
-    try {
-      text = JSON.stringify(value, null, 2);
-    } catch {
-      text = String(value);
-    }
-  }
-  return highlight(text, 'yaml');
+  return highlight(stringifyValueAsYamlText(value), 'yaml');
 }

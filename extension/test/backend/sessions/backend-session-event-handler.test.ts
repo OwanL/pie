@@ -7,6 +7,7 @@ import {
   handleSdkSessionEvent as handleSdkSessionEventImpl,
   resolveProviderSemanticInactivityMs,
   summarizeToolResult,
+  TOOL_PROGRESS_MAX_BYTES,
   type BackendSessionEventHandlerDeps,
 } from '../../../src/backend/session-event-handler';
 import type { SdkSessionEvent } from '../../../src/backend/sdk';
@@ -775,6 +776,45 @@ test('tool execution events emit progress only when an active assistant message 
   assert.equal(getContextUsageChangedCount(), 0);
 });
 
+test('live semantic tool starts bound oversized input before worker transport', () => {
+  const { deps, emitted } = createDeps({ captureLive: true });
+  const accumulator = new BackendLiveTurnAccumulator({
+    protocolVersion: 6,
+    sessionPath: '/workspace/session.jsonl',
+    requestId: 'req-large-tool-start',
+    turnId: 'turn-large-tool-start',
+    attemptId: 'attempt-large-tool-start',
+    canonicalMessageId: 'req-large-tool-start:1',
+    startedAt: Date.now(),
+  });
+  const context = createContext({
+    activeRequest: {
+      id: 'req-large-tool-start',
+      messageIndex: 1,
+      lastAssistantMessageId: 'req-large-tool-start:1',
+      aborted: false,
+      liveTurnAccumulator: accumulator,
+    },
+  });
+
+  const oversizedInput = 'x'.repeat(TOOL_PROGRESS_MAX_BYTES * 2);
+  handleSdkSessionEvent(deps, context, {
+    type: 'tool_execution_start',
+    toolCallId: 'tool-large-start',
+    toolName: 'write',
+    args: { content: oversizedInput },
+  });
+
+  const semantic = emitted.find((entry) => entry.event === 'live.semantic')?.payload as {
+    kind?: string;
+    input?: unknown;
+  } | undefined;
+  assert.equal(semantic?.kind, 'tool.started');
+  assert.ok(semantic?.input);
+  assert.ok(Buffer.byteLength(JSON.stringify(semantic.input), 'utf8') <= TOOL_PROGRESS_MAX_BYTES);
+  assert.equal(JSON.stringify(semantic.input).includes(oversizedInput), false);
+});
+
 test('nested subagent terminal result stays within the backend JSONL transport limit on legacy and live paths', () => {
   const { deps, emitted } = createDeps();
   const context = createContext({
@@ -834,8 +874,9 @@ test('nested subagent terminal result stays within the backend JSONL transport l
     result?: { $toolResult?: string; originalBytes?: number };
   } | undefined;
   assert.ok(payload, 'durability-confirmed terminal event is emitted');
-  assert.equal(payload.result?.$toolResult, 'truncated');
-  assert.ok((payload.result?.originalBytes ?? 0) > 32 * 1024 * 1024);
+  assert.equal(payload.result?.$toolResult, undefined);
+  assert.ok(Buffer.byteLength(JSON.stringify(payload.result), 'utf8') < 64 * 1024);
+  assert.equal(JSON.stringify(payload.result).includes(repeatedTranscript), false, 'recursive terminal body stays off the ordinary lane');
   let fatal: Error | undefined;
   const writer = new OrderedJsonlWriter(new Writable({
     write(_chunk, _encoding, callback) { callback(); },
@@ -883,7 +924,8 @@ test('nested subagent terminal result stays within the backend JSONL transport l
     entry.event === 'live.semantic' && (entry.payload as { kind?: string }).kind === 'tool.terminal');
   assert.ok(liveTerminal, 'sequenced live path emits the durability-confirmed tool terminal');
   const liveResult = (liveTerminal.payload as { result?: { $toolResult?: string } }).result;
-  assert.equal(liveResult?.$toolResult, 'truncated');
+  assert.equal(liveResult?.$toolResult, undefined);
+  assert.equal(JSON.stringify(liveResult).includes(repeatedTranscript), false);
   assert.doesNotThrow(() => writer.write(liveTerminal));
   assert.equal(fatal, undefined);
 });
@@ -899,7 +941,15 @@ test('terminal transport bounding preserves small payload identity and explicitl
     result: { output: 'ok' },
     status: 'completed' as const,
   };
-  assert.strictEqual(boundToolFinishedPayload(small, 1_024), small);
+  let smallMeasurement: { producedPayloadBytes?: number } | undefined;
+  assert.strictEqual(boundToolFinishedPayload(small, 1_024, (measurement) => {
+    smallMeasurement = measurement;
+  }), small);
+  assert.equal(
+    smallMeasurement?.producedPayloadBytes,
+    Buffer.byteLength(JSON.stringify(small), 'utf8'),
+    'terminal transport bytes reuse the existing complete terminal serialization',
+  );
 
   const largeResult = boundToolFinishedPayload({
     ...small,
@@ -927,7 +977,7 @@ test('terminal transport bounding preserves small payload identity and explicitl
     name: 'subagent',
     result: throwingResult,
   }, 1_024);
-  assert.equal((unserializable.result as { $toolResult?: string }).$toolResult, 'unserializable');
+  assert.equal((unserializable.result as { $toolResult?: string }).$toolResult, 'detail-available');
 
   const accumulator = new BackendLiveTurnAccumulator({
     protocolVersion: 6,
@@ -955,7 +1005,7 @@ test('terminal transport bounding preserves small payload identity and explicitl
     result: unserializable.result,
     durableEntryId: 'entry-unserializable-result',
   }, 1) as { result?: { $toolResult?: string } } | undefined;
-  assert.equal(liveUnserializable?.result?.$toolResult, 'unserializable');
+  assert.equal(liveUnserializable?.result?.$toolResult, 'detail-available');
 });
 
 test('tool terminal publication waits for the persisted toolResult entry id', () => {
@@ -1219,6 +1269,7 @@ test('willRetry watchdog emits operational-error + retry.stuck when a retry back
     const retryStuck = emitted.find((e) => e.event === 'retry.stuck');
     assert.ok(opError, 'emits operational-error');
     assert.deepEqual(opError?.payload, {
+      incidentId: 'retry-stuck:req-stuck:0:0',
       code: 'RETRY_STUCK',
       message: (opError?.payload as { message: string }).message,
       sessionPath: '/workspace/session.jsonl',
@@ -1675,6 +1726,18 @@ test('queued delivery terminalizes the current reply and starts a separate assis
     assistantMessageEvent: { type: 'text_delta', delta: 'after queue' },
   });
 
+  const terminalsBeforeReplay = emitted.filter((entry) =>
+    entry.event === 'live.semantic' && (entry.payload as any).kind === 'turn.terminal').length;
+  handleSdkSessionEvent(deps, context, {
+    type: 'message_end', sessionEntryId: 'entry-before-queue',
+    message: branch[0]!.message,
+  });
+  assert.equal(
+    emitted.filter((entry) => entry.event === 'live.semantic' && (entry.payload as any).kind === 'turn.terminal').length,
+    terminalsBeforeReplay,
+    'a replayed pre-queue assistant completion cannot terminalize the new segment',
+  );
+
   const boundaryTerminalIndex = emitted.findIndex((entry) =>
     entry.event === 'live.semantic'
       && (entry.payload as any).kind === 'turn.terminal'
@@ -1893,6 +1956,7 @@ test('pre-first-semantic inactivity retires and replaces a runtime even when abo
     assert.match(recoveries[0]?.reason ?? '', /provider stopped producing semantic response events/i);
     const operationalError = emitted.find((entry) => entry.event === 'operational-error');
     assert.deepEqual(operationalError?.payload, {
+      incidentId: 'semantic-timeout:req-semantic-timeout:provider',
       code: 'PROVIDER_SEMANTIC_TIMEOUT',
       message: 'The provider stopped producing semantic response events.',
       detail: [

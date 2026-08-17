@@ -55,6 +55,10 @@ export function applySetModelOptimistic(
       : undefined;
 
   return produce(state, (draft) => {
+    // Advance before applying the optimistic write. Hydration results capture
+    // this value at request start and older results are rejected below.
+    draft.settings.modelWriteFence += 1;
+
     // Global default model (what new sessions / the picker fall back to).
     draft.settings.modelSettings = modelSettings;
 
@@ -169,18 +173,80 @@ export function revertSetModel(state: ArchState, corrId: string, error: string |
   });
 }
 
+function isStaleHydrationResult(
+  state: ArchState,
+  event: {
+    sessionPath: string;
+    backendGeneration: number;
+    hydrationRevision: number;
+    modelWriteFence: number;
+  },
+  scope: 'global-settings' | 'session-catalog',
+): boolean {
+  const settings = state.settings;
+  // A result from an exited backend must never repopulate the new generation.
+  if (event.backendGeneration < settings.modelBackendGeneration) {
+    return true;
+  }
+  // Settings are global, so a later hydration started for another session also
+  // supersedes this result. Catalog revisions remain scoped to their path.
+  const currentRevision = scope === 'global-settings'
+    ? settings.modelHydrationRevision
+    : settings.modelHydrationRevisionBySession[event.sessionPath] ?? 0;
+  if (event.hydrationRevision < currentRevision) {
+    return true;
+  }
+  // SetModel advances this fence before its optimistic state is applied. Only
+  // an explicit hydration started after that write may replace settings or
+  // capability metadata.
+  return event.modelWriteFence < settings.modelWriteFence;
+}
+
+function nextModelHydrationSettings(
+  state: ArchState,
+  event: {
+    backendGeneration: number;
+    hydrationRevision: number;
+    sessionPath: string;
+  },
+): ArchState['settings'] {
+  const settings = state.settings;
+  return {
+    ...settings,
+    modelBackendGeneration: Math.max(settings.modelBackendGeneration, event.backendGeneration),
+    modelHydrationRevisionBySession: {
+      ...settings.modelHydrationRevisionBySession,
+      [event.sessionPath]: Math.max(
+        settings.modelHydrationRevisionBySession[event.sessionPath] ?? 0,
+        event.hydrationRevision,
+      ),
+    },
+  };
+}
+
 export function handleAvailableModelsChanged(
   state: ArchState,
   event: Extract<Event, { kind: 'AvailableModelsChanged' }>,
 ): ReducerResult {
+  if (isStaleHydrationResult(state, event, 'session-catalog')) {
+    return { state, effects: [] };
+  }
+  const settings = nextModelHydrationSettings(state, event);
   return {
     state: {
       ...state,
       settings: {
-        ...state.settings,
+        ...settings,
         availableModelsBySession: {
-          ...state.settings.availableModelsBySession,
+          ...settings.availableModelsBySession,
           [event.sessionPath]: event.models,
+        },
+        // A successful empty catalog is still authoritative. Hydration failures
+        // do not dispatch this event, so a provisional catalog is never cleared
+        // merely because one branch failed.
+        availableModelsStatusBySession: {
+          ...settings.availableModelsStatusBySession,
+          [event.sessionPath]: 'authoritative',
         },
       },
     },
@@ -195,15 +261,22 @@ export function handleModelSettingsHydrated(
   state: ArchState,
   event: Extract<Event, { kind: 'ModelSettingsHydrated' }>,
 ): ReducerResult {
-  const current = state.settings.modelSettings;
-  if (modelSettingsMatchForHydration(current, event.modelSettings)) {
+  if (isStaleHydrationResult(state, event, 'global-settings')) {
     return { state, effects: [] };
+  }
+  const current = state.settings.modelSettings;
+  const hydratedSettings = nextModelHydrationSettings(state, event);
+  if (modelSettingsMatchForHydration(current, event.modelSettings)) {
+    return {
+      state: hydratedSettings === state.settings ? state : { ...state, settings: hydratedSettings },
+      effects: [],
+    };
   }
   return {
     state: {
       ...state,
       settings: {
-        ...state.settings,
+        ...hydratedSettings,
         modelSettings: event.modelSettings,
       },
     },

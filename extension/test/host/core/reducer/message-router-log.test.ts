@@ -123,7 +123,12 @@ test('ready restores running sessions hidden from persisted tabs', async () => {
   const router = new MessageRouterCtor(
     (event) => events.push(event),
     () => ({
-      sessions: { activeSessionPath: null, openTabPaths: ['/idle'], runningSessionPaths: ['/running'] },
+      sessions: {
+        activeSessionPath: null,
+        openTabPaths: ['/idle'],
+        runningSessionPaths: ['/running'],
+        intentionallyHiddenRunningPaths: [],
+      },
       settings: { backendReady: true, notice: null }, transcript: { windowBySession: {} },
     } as never),
     {} as never,
@@ -140,7 +145,35 @@ test('ready restores running sessions hidden from persisted tabs', async () => {
   assert.equal(posts, 1);
 });
 
-test('ready does not resurrect a review-closure-hidden running tab (closeSelf)', async () => {
+test('ready does not resurrect an ordinary-user-hidden running tab', async () => {
+  const events: unknown[] = [];
+  const router = new MessageRouterCtor(
+    (event) => events.push(event),
+    () => ({
+      sessions: {
+        activeSessionPath: null,
+        openTabPaths: [],
+        runningSessionPaths: ['/user-closed'],
+        intentionallyHiddenRunningPaths: ['/user-closed'],
+      },
+      settings: { backendReady: true, notice: null }, transcript: { windowBySession: {} },
+    } as never),
+    {} as never,
+    { reveal: () => undefined, postState: () => undefined, postImperative: () => undefined },
+    () => undefined,
+    (text: string) => ({ name: text, isPlaceholder: false }),
+    () => false,
+  );
+
+  await router.handle({ type: 'ready' });
+  assert.deepEqual(
+    events.filter((event) => (event as { kind?: string }).kind === 'TabOpened'),
+    [],
+    'a user-hidden running tab remains hidden after renderer recovery',
+  );
+});
+
+test('ready does not resurrect an intentionally hidden running tab (closeSelf)', async () => {
   const events: unknown[] = [];
   const router = new MessageRouterCtor(
     (event) => events.push(event),
@@ -149,7 +182,7 @@ test('ready does not resurrect a review-closure-hidden running tab (closeSelf)',
         activeSessionPath: null,
         openTabPaths: [],
         runningSessionPaths: ['/self', '/ordinary'],
-        reviewClosedRunningPaths: ['/self'],
+        intentionallyHiddenRunningPaths: ['/self'],
       },
       settings: { backendReady: true, notice: null }, transcript: { windowBySession: {} },
     } as never),
@@ -164,13 +197,13 @@ test('ready does not resurrect a review-closure-hidden running tab (closeSelf)',
   const opened = events
     .filter((event) => (event as { kind?: string }).kind === 'TabOpened')
     .map((event) => (event as { sessionPath?: string }).sessionPath);
-  assert.deepEqual(opened, ['/ordinary'], 'only the ordinary hidden running tab is restored; the review-closure-hidden closeSelf tab stays hidden');
-  // The first restored ordinary tab is selected (not the review-closed self).
+  assert.deepEqual(opened, ['/ordinary'], 'only the accidentally omitted running tab is restored; the intentionally hidden closeSelf tab stays hidden');
+  // The first restored accidental omission is selected (not the intentionally hidden self).
   const select = events.find((event) => (event as { cmd?: { kind?: string } }).cmd?.kind === 'SelectSession') as { cmd?: { sessionPath?: string } } | undefined;
   assert.equal(select?.cmd?.sessionPath, '/ordinary');
 });
 
-test('ready restores a pinned hidden running tab but not its review-closed neighbor', async () => {
+test('ready restores an accidentally omitted pinned running tab but not its intentionally hidden neighbor', async () => {
   const events: unknown[] = [];
   const router = new MessageRouterCtor(
     (event) => events.push(event),
@@ -179,7 +212,7 @@ test('ready restores a pinned hidden running tab but not its review-closed neigh
         activeSessionPath: null,
         openTabPaths: [],
         runningSessionPaths: ['/pinned', '/closed'],
-        reviewClosedRunningPaths: ['/closed'],
+        intentionallyHiddenRunningPaths: ['/closed'],
       },
       settings: { backendReady: true, notice: null }, transcript: { windowBySession: {} },
     } as never),
@@ -194,7 +227,7 @@ test('ready restores a pinned hidden running tab but not its review-closed neigh
   const opened = events
     .filter((event) => (event as { kind?: string }).kind === 'TabOpened')
     .map((event) => (event as { sessionPath?: string }).sessionPath);
-  assert.deepEqual(opened, ['/pinned'], 'the ordinary pinned hidden running tab is restored; the review-closed running tab is not');
+  assert.deepEqual(opened, ['/pinned'], 'the accidentally omitted pinned running tab is restored; the intentionally hidden running tab is not');
 });
 
 test('replayed close interaction IDs are deduplicated before command dispatch', async () => {

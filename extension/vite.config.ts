@@ -24,6 +24,8 @@ export default defineConfig(({ mode }) => {
           input: {
             extension: path.join(srcDir, 'extension.ts'),
             backend: path.join(srcDir, 'backend', 'index.ts'),
+            'worker-entry': path.join(srcDir, 'backend', 'worker-entry.ts'),
+            'phase4-worker-command-extension': path.join(rootDir, 'test', 'fixtures', 'phase4-worker-command-extension.ts'),
           },
           output: {
             entryFileNames: '[name].js',

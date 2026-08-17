@@ -12,6 +12,11 @@ import { isBackendLivePipelineTraceEnabled, recordBackendLivePipelineTrace } fro
 interface QueuedLine {
   line: string;
   bytes: number;
+  /** Stable per-enqueue identity; pairs queued with settled/dropped trace
+   *  records. Coalescing/replacement never reuses an identity: the replaced
+   *  queued entry receives a dropped record and the surviving entry keeps its
+   *  own fresh writerSeq. */
+  writerSeq: number;
   progressKey?: string;
   /** Sequenced semantic records must never be dropped or reordered. */
   sequencedSemantic: boolean;
@@ -21,6 +26,7 @@ interface QueuedLine {
   queuedAt: number;
   trace?: WriterTraceMetadata;
   semanticProgress?: SemanticProgressMetadata;
+  writeStartedAt?: number;
 }
 
 interface SemanticProgressMetadata {
@@ -39,6 +45,7 @@ interface WriterTraceMetadata {
   identifiers: { session?: string; request?: string; turn?: string; attempt?: string; message?: string; tool?: string };
   eventKind: 'text' | 'reasoning' | 'tool_draft' | 'tool_start' | 'tool_progress' | 'tool_terminal' | 'turn_start' | 'turn_terminal' | 'control' | 'checkpoint' | 'snapshot' | 'render';
   eventSeq?: number;
+  lane: 'response' | 'control' | 'lifecycle' | 'progress' | 'detail';
 }
 
 export interface OrderedJsonlWriterOptions {
@@ -70,6 +77,9 @@ export class OrderedJsonlWriter {
   private failed = false;
   private readonly terminalToolKeys = new Set<string>();
   private readonly terminalToolKeyOrder: string[] = [];
+  private nextWriterSeq = 1;
+  /** The frame currently being written to the OS, if any. */
+  private activeEntry?: QueuedLine;
 
   constructor(private readonly stream: Writable, options: OrderedJsonlWriterOptions = {}) {
     this.maxQueuedBytes = options.maxQueuedBytes ?? 2 * JSONL_MAX_LINE_BYTES;
@@ -87,6 +97,7 @@ export class OrderedJsonlWriter {
     let entry: QueuedLine = {
       line,
       bytes: Buffer.byteLength(line),
+      writerSeq: this.nextWriterSeq++,
       progressKey: progressKey(value),
       sequencedSemantic: isSequencedSemanticEnvelope(value),
       response: isResponseEnvelope(value),
@@ -95,7 +106,10 @@ export class OrderedJsonlWriter {
       semanticProgress: semanticProgressMetadata(value),
     };
     if (entry.bytes > JSONL_MAX_LINE_BYTES) {
-      if (entry.progressKey && !entry.sequencedSemantic) return;
+      if (entry.progressKey && !entry.sequencedSemantic) {
+        this.traceDropped(entry, 'writer_progress_dropped');
+        return;
+      }
       if (entry.response) {
         const responseId = (value as { id: string }).id;
         line = serializeJsonLine(responseError(
@@ -106,18 +120,23 @@ export class OrderedJsonlWriter {
         entry = {
           line,
           bytes: Buffer.byteLength(line),
+          writerSeq: this.nextWriterSeq++,
           sequencedSemantic: false,
           response: true,
           queuedAt: performance.now(),
           trace: isBackendLivePipelineTraceEnabled() ? writerTraceMetadata(value) : undefined,
         };
       } else {
+        this.traceDropped(entry, 'writer_overflow');
         this.fail(`Fatal JSONL stdout record overflow (${entry.bytes} > ${JSONL_MAX_LINE_BYTES} bytes).`);
       }
     }
 
     const terminalKey = terminalToolKey(value);
-    if (entry.progressKey && !entry.sequencedSemantic && this.terminalToolKeys.has(entry.progressKey)) return;
+    if (entry.progressKey && !entry.sequencedSemantic && this.terminalToolKeys.has(entry.progressKey)) {
+      this.traceDropped(entry, 'writer_progress_dropped');
+      return;
+    }
 
     if (this.writing && entry.semanticProgress) {
       const previousEventIndex = this.findLastQueuedEventIndex();
@@ -144,6 +163,7 @@ export class OrderedJsonlWriter {
           };
           this.queue[previousEventIndex] = replacement;
           this.queuedBytes = replacementBytes;
+          this.traceDropped(previous, 'writer_progress_coalesced');
           this.traceQueued(replacement);
           return;
         }
@@ -156,6 +176,7 @@ export class OrderedJsonlWriter {
         if (entry.bytes <= JSONL_MAX_LINE_BYTES && latestEventBytes <= this.maxQueuedBytes) {
           this.queue[previousEventIndex] = entry;
           this.queuedBytes = latestReplacementBytes;
+          this.traceDropped(previous, 'writer_progress_coalesced');
           this.traceQueued(entry);
           return;
         }
@@ -171,11 +192,15 @@ export class OrderedJsonlWriter {
         if (staleSeq !== undefined && nextSeq !== undefined && nextSeq <= staleSeq) return;
         const replacementBytes = this.queuedBytes - stale.bytes + entry.bytes;
         const replacementEventBytes = replacementBytes - this.queuedResponseBytes;
-        if (replacementEventBytes > this.maxQueuedBytes) return;
+        if (replacementEventBytes > this.maxQueuedBytes) {
+          this.traceDropped(entry, 'writer_progress_dropped');
+          return;
+        }
         // Replace at the original position: moving fresh progress to the tail
         // could place it after a terminal/response event already queued.
         this.queue[staleIndex] = entry;
         this.queuedBytes = replacementBytes;
+        this.traceDropped(stale, 'writer_progress_coalesced');
         this.traceQueued(entry);
         return;
       }
@@ -188,6 +213,7 @@ export class OrderedJsonlWriter {
         if (stale) {
           this.queuedBytes -= stale.bytes;
           if (stale.response) this.queuedResponseBytes -= stale.bytes;
+          this.traceDropped(stale, 'writer_progress_superseded');
         }
       }
     }
@@ -195,12 +221,17 @@ export class OrderedJsonlWriter {
     if (this.writing) {
       const eventBytes = this.queuedBytes - this.queuedResponseBytes;
       if (entry.response && this.queuedResponseBytes + entry.bytes > this.maxQueuedResponseBytes) {
+        this.traceDropped(entry, 'writer_overflow');
         this.fail(
           `Fatal JSONL stdout response queue overflow (${this.queuedResponseBytes + entry.bytes} > ${this.maxQueuedResponseBytes} bytes).`,
         );
       }
       if (!entry.response && eventBytes + entry.bytes > this.maxQueuedBytes) {
-        if (entry.progressKey && !entry.sequencedSemantic) return;
+        if (entry.progressKey && !entry.sequencedSemantic) {
+          this.traceDropped(entry, 'writer_progress_dropped');
+          return;
+        }
+        this.traceDropped(entry, 'writer_overflow');
         this.fail(
           `Fatal JSONL stdout event queue overflow (${eventBytes + entry.bytes} > ${this.maxQueuedBytes} bytes).`,
         );
@@ -257,8 +288,11 @@ export class OrderedJsonlWriter {
     this.queuedBytes -= entry.bytes;
     if (entry.response) this.queuedResponseBytes -= entry.bytes;
     this.writing = true;
-    this.stream.write(entry.line, (error?: Error | null) => {
+    this.activeEntry = entry;
+    entry.writeStartedAt = performance.now();
+    const settleWrite = (error?: Error | null): void => {
       this.writing = false;
+      this.activeEntry = undefined;
       this.traceSettled(entry, !!error);
       if (error) {
         this.failed = true;
@@ -266,19 +300,64 @@ export class OrderedJsonlWriter {
         return;
       }
       this.pump();
-    });
+    };
+    try {
+      this.stream.write(entry.line, settleWrite);
+    } catch (error) {
+      settleWrite(error instanceof Error ? error : new Error(String(error)));
+    }
   }
 
   private traceQueued(entry: QueuedLine): void {
     if (!entry.trace) return;
+    const active = this.activeEntry;
     recordBackendLivePipelineTrace({
       stage: 'backend.writer.queued',
       kind: 'start',
       identifiers: entry.trace.identifiers,
       eventKind: entry.trace.eventKind,
       eventSeq: entry.trace.eventSeq,
+      writerSeq: entry.writerSeq,
+      activeWriteSeq: active?.writerSeq,
+      activeWriteLane: active?.trace?.lane,
+      // Drain semantics at enqueue: this frame joins the tail and the
+      // response-priority lane drains before events, so a frame enqueued here
+      // is never ahead of a response present in the writer — even when it
+      // sits before one in array order.
+      aheadOfResponse: false,
+      // A queued response ahead of this frame (FIFO within the response lane;
+      // responses also drain before queued events). The entry itself is
+      // already in the queue at this point, so it is excluded.
+      queuedBehindResponse: this.queue.some((queued) => queued.response && queued !== entry),
       queueDepth: this.queue.length,
       queueBytes: this.queuedBytes,
+      queueOldestAgeMs: this.queue.length > 0
+        ? Math.max(0, performance.now() - (this.queue[0]?.queuedAt ?? performance.now()))
+        : 0,
+      producedPayloadBytes: entry.bytes,
+      writerLane: entry.trace.lane,
+      phase: 'write',
+    });
+  }
+
+  private traceDropped(entry: QueuedLine, reasonCode: 'writer_progress_coalesced' | 'writer_progress_dropped' | 'writer_progress_superseded' | 'writer_overflow'): void {
+    if (!entry.trace) return;
+    recordBackendLivePipelineTrace({
+      stage: 'backend.writer.settled',
+      kind: reasonCode === 'writer_overflow' ? 'failure' : 'false',
+      identifiers: entry.trace.identifiers,
+      eventKind: entry.trace.eventKind,
+      eventSeq: entry.trace.eventSeq,
+      writerSeq: entry.writerSeq,
+      producedPayloadBytes: entry.bytes,
+      queueDepth: this.queue.length,
+      queueBytes: this.queuedBytes,
+      queueOldestAgeMs: this.queue.length > 0
+        ? Math.max(0, performance.now() - (this.queue[0]?.queuedAt ?? performance.now()))
+        : 0,
+      writerLane: entry.trace.lane,
+      phase: 'write',
+      reasonCode,
     });
   }
 
@@ -290,9 +369,23 @@ export class OrderedJsonlWriter {
       identifiers: entry.trace.identifiers,
       eventKind: entry.trace.eventKind,
       eventSeq: entry.trace.eventSeq,
-      durationMs: Math.max(0, performance.now() - entry.queuedAt),
+      writerSeq: entry.writerSeq,
+      durationMs: entry.writeStartedAt === undefined
+        ? undefined
+        : Math.max(0, entry.writeStartedAt - entry.queuedAt),
+      writeDurationMs: entry.writeStartedAt === undefined ? undefined : Math.max(0, performance.now() - entry.writeStartedAt),
+      // The settling frame was the active OS write: the response-priority
+      // lane could not preempt the in-flight write, so it was ahead of any
+      // response queued behind it at settle time.
+      aheadOfResponse: !failed && this.queue.some((queued) => queued.response),
       queueDepth: this.queue.length,
       queueBytes: this.queuedBytes,
+      queueOldestAgeMs: this.queue.length > 0
+        ? Math.max(0, performance.now() - (this.queue[0]?.queuedAt ?? performance.now()))
+        : 0,
+      producedPayloadBytes: entry.bytes,
+      writerLane: entry.trace.lane,
+      phase: 'write',
       reasonCode: failed ? 'writer_failure' : undefined,
     });
   }
@@ -317,7 +410,22 @@ function writerTraceMetadata(value: unknown): WriterTraceMetadata {
     eventSeq: typeof payload.seq === 'number' && Number.isSafeInteger(payload.seq) && payload.seq >= 0
       ? payload.seq
       : undefined,
+    lane: isResponseEnvelope(value) ? 'response' : writerLane(event, payload),
   };
+}
+
+function writerLane(event: string, payload: Record<string, unknown>): WriterTraceMetadata['lane'] {
+  if (event.startsWith('detail.')) return 'detail';
+  if (event === 'live.semantic') {
+    const kind = payload.kind;
+    if (kind === 'tool.started' || kind === 'tool.terminal' || kind === 'turn.started' || kind === 'turn.terminal') return 'lifecycle';
+    if (kind === 'turn.text' || kind === 'turn.reasoning' || kind === 'turn.toolDraft' || kind === 'tool.progress') return 'progress';
+  }
+  if (event === 'session.opened' || event === 'message.started' || event === 'message.finished' || event === 'message.aborted'
+    || event === 'tool.started' || event === 'tool.finished') return 'lifecycle';
+  if (event === 'live.semantic' || event === 'message.delta' || event === 'message.thinking'
+    || event === 'message.toolCallDelta' || event === 'tool.progress') return 'progress';
+  return 'control';
 }
 
 function writerSemanticEventKind(kind: unknown): WriterTraceMetadata['eventKind'] {

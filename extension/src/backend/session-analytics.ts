@@ -133,6 +133,7 @@ async function buildSkillFactors(skills: SdkSkill[] | undefined): Promise<Sessio
 export async function buildSessionAnalyticsFactors(options: {
   harnessPrompt?: string;
   promptOptions?: SdkBuildSystemPromptOptions;
+  activeExtensionIds?: string[];
 }): Promise<SessionAnalyticsFactors> {
   const promptOptions = options.promptOptions;
   const harnessPromptHash = hashOptionalText(options.harnessPrompt);
@@ -172,7 +173,7 @@ export async function buildSessionAnalyticsFactors(options: {
     ? sha256Hex(stableJson(hashSkillsForStableComparison(skills)))
     : null;
   const activeExtensions = [...new Set(
-    (promptOptions?.activeExtensions ?? [])
+    [...(promptOptions?.activeExtensions ?? []), ...(options.activeExtensionIds ?? [])]
       .filter((ext): ext is string => typeof ext === 'string')
       .map((ext) => ext.trim())
       .filter((ext) => ext.length > 0),

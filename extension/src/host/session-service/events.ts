@@ -11,6 +11,7 @@ import { dispatchSessionBackendEvent } from '../core/event-dispatch';
 import type { OnSessionCompleted, ScheduleRender } from './types';
 import type { Event } from '../core/events';
 import type { ArchState } from '../core/arch-state';
+import type { CoordinatorToHostDetailMessage } from '../../shared/protocol/subagent-detail';
 import { SessionServiceState } from './state';
 import { onMessageDelta, onMessageThinking, onMessageToolCallDelta, onMessageStarted, onMessageFinished, onMessageAborted, onPreflightFailed, onQueuedDelivered, onRetryStarted, onRetryEnded, onRetryMeasured, onRetryStuck, onCompaction, onCompactionStarted, onAuxiliaryLlmUsage } from './handlers/streaming.js';
 import { onToolStarted, onToolFinished, onToolProgress } from './handlers/tools.js';
@@ -27,6 +28,9 @@ interface SessionServiceEventsOptions {
   state: SessionServiceState;
   dispatchArch: (event: Event) => void;
   getArchState: () => ArchState;
+  /** Phase 5: routes one of the six coordinator→host detail stream variants
+   *  to the host's detail subscription service. */
+  onDetailStream?: (message: CoordinatorToHostDetailMessage) => void;
 }
 
 export class SessionServiceEvents {
@@ -39,6 +43,7 @@ export class SessionServiceEvents {
   private exitDisposable?: vscode.Disposable;
   private readonly dispatchArch: (event: Event) => void;
   private readonly getArchState: () => ArchState;
+  private readonly onDetailStream?: (message: CoordinatorToHostDetailMessage) => void;
 
   constructor(options: SessionServiceEventsOptions) {
     this.context = options.context;
@@ -48,6 +53,7 @@ export class SessionServiceEvents {
     this.dispatchArch = options.dispatchArch;
     this.state = options.state;
     this.getArchState = options.getArchState;
+    this.onDetailStream = options.onDetailStream;
   }
 
   attach(backend: BackendClient): void {
@@ -175,6 +181,7 @@ export class SessionServiceEvents {
       onContextUsageChanged: (payload) => onContextUsageChanged(payload, deps),
       onExtensionUIRequest: (payload) => onExtensionUIRequest(payload, deps),
       onError: (payload) => onError(payload, deps),
+      onDetailStream: (message) => this.onDetailStream?.(message),
     });
     // Some backend failure/terminal paths reconcile the host running marker
     // without emitting a separate busy=false event. Re-check after every

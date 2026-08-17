@@ -238,7 +238,13 @@ export function resolveModelThinkingLevels(model: Record<string, unknown>): Thin
   });
 }
 
-export async function listConfiguredModels(agentDir: string): Promise<ModelInfo[]> {
+export type ModelCatalogLoadResult =
+  | { ok: true; models: ModelInfo[] }
+  | { ok: false; models: []; error: string };
+
+/** Load configured models without conflating a valid empty catalog with an I/O
+ * or parse failure. Callers that publish catalog authority must inspect `ok`. */
+export async function loadConfiguredModels(agentDir: string): Promise<ModelCatalogLoadResult> {
   try {
     const raw = await fs.readFile(path.join(agentDir, 'models.json'), 'utf8');
     const parsed = parseJsonOrThrow<{ providers?: Record<string, { models?: Array<Record<string, unknown>> }> }>(raw, 'models.json');
@@ -262,39 +268,54 @@ export async function listConfiguredModels(agentDir: string): Promise<ModelInfo[
         result.push(info);
       }
     }
-    return result;
+    return { ok: true, models: result };
   } catch (error) {
-    backendTrace('sessionMetadata', 'listConfiguredModels.failed', { level: 'debug', error: toErrorMessage(error) });
-    return [];
+    const message = toErrorMessage(error);
+    backendTrace('sessionMetadata', 'listConfiguredModels.failed', { level: 'debug', error: message });
+    return { ok: false, models: [], error: message };
   }
 }
 
-export function listAvailableModels(context?: SessionContext, agentDir?: string): ModelInfo[] {
+/** Compatibility projection for callers where an empty fallback is explicitly
+ * acceptable. Authority-publishing paths use `loadConfiguredModels` instead. */
+export async function listConfiguredModels(agentDir: string): Promise<ModelInfo[]> {
+  return (await loadConfiguredModels(agentDir)).models;
+}
+
+export function loadAvailableModels(context?: SessionContext, agentDir?: string): ModelCatalogLoadResult {
   if (!context) {
-    return [];
+    return { ok: true, models: [] };
   }
 
   const profiles = agentDir ? loadSubagentProfiles(agentDir) : new Map();
 
   try {
     const models = context.runtime.services?.modelRegistry?.getAvailable() ?? [];
-    return models.map((model) => {
-      const info: ModelInfo = {
-        id: model.id,
-        name: model.name,
-        provider: model.provider,
-        reasoning: model.reasoning,
-        thinkingLevels: resolveModelThinkingLevels(model as unknown as Record<string, unknown>),
-        inputKinds: resolveModelInputKinds(model as unknown as Record<string, unknown>),
-        contextWindow: model.contextWindow,
-        maxTokens: model.maxTokens,
-      };
-      const profile = findSubagentProfile(profiles, model.provider, model.id);
-      if (profile) info.subagent = profile;
-      return info;
-    });
+    return {
+      ok: true,
+      models: models.map((model) => {
+        const info: ModelInfo = {
+          id: model.id,
+          name: model.name,
+          provider: model.provider,
+          reasoning: model.reasoning,
+          thinkingLevels: resolveModelThinkingLevels(model as unknown as Record<string, unknown>),
+          inputKinds: resolveModelInputKinds(model as unknown as Record<string, unknown>),
+          contextWindow: model.contextWindow,
+          maxTokens: model.maxTokens,
+        };
+        const profile = findSubagentProfile(profiles, model.provider, model.id);
+        if (profile) info.subagent = profile;
+        return info;
+      }),
+    };
   } catch (error) {
-    backendTrace('sessionMetadata', 'listAvailableModels.failed', { level: 'debug', error: toErrorMessage(error) });
-    return [];
+    const message = toErrorMessage(error);
+    backendTrace('sessionMetadata', 'listAvailableModels.failed', { level: 'debug', error: message });
+    return { ok: false, models: [], error: message };
   }
+}
+
+export function listAvailableModels(context?: SessionContext, agentDir?: string): ModelInfo[] {
+  return loadAvailableModels(context, agentDir).models;
 }

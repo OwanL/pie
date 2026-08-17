@@ -109,7 +109,7 @@ function buildBaseState(): ArchState {
 }
 
 function sessionOpenedEvent(payload: SessionOpenedPayload): Event {
-  return { kind: 'SessionOpened', sessionPath: '/s', payload };
+  return { kind: 'SessionOpened', backendGeneration: 0, modelWriteFence: 0, modelHydrationRevision: 0, catalogHydrationRevision: 0, sessionPath: '/s', payload };
 }
 
 test('busy session.opened records messageIdAlias when SDK message is deduped against local streaming row', () => {

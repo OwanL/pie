@@ -1,9 +1,9 @@
 /** @jsxRuntime automatic */
 /** @jsxImportSource preact */
 
-import { useContext, useEffect, useId, useMemo, useRef, useState } from 'preact/hooks';
+import { useCallback, useContext, useEffect, useId, useMemo, useRef, useState } from 'preact/hooks';
 import { memo } from 'preact/compat';
-import type { ChatPrefs, ToolCall } from '../../../shared/protocol';
+import type { ChatMessage, ChatPrefs, ToolCall } from '../../../shared/protocol';
 import { shouldOpenSubagentContextMenu } from './interactions';
 import { handleTranscriptClick } from './transcript-click-handler';
 import { getToolCallContextType } from '../chat-prefs';
@@ -27,11 +27,16 @@ import {
 } from './subagent';
 import { StatusChip } from './status-chip';
 import { ToolCallCard } from './tool-call-card';
+import { MessageItem } from './message-item';
 import { TranscriptMessageList } from './transcript-message-list';
+import { NestedVirtualList, NESTED_VIRTUALIZE_MIN_MESSAGES, estimateNestedMessageHeight } from './nested-virtual-list';
+import { messageRenderIdentity } from './render-identity';
 import type { RenderToolCall, TranscriptContextMenuHandler } from './types';
 import { getToolRenderer } from './registry';
 import { toolDisclosureKey, useCollapsibleOpen } from './use-collapsible-open';
 import { type LazyDetailState, useLazyDetail } from './lazy-detail-store';
+import { useDetailSubscription } from './detail-subscription-store';
+import type { LiveSubagentDetailAddress } from '../../../shared/protocol/subagent-detail';
 import { useStickToBottom } from './use-stick-to-bottom';
 import { SubagentCallContext } from './subagent-call-context';
 import { ACTIVITY_TAIL_MAX_LINES } from './activity-tail';
@@ -448,6 +453,41 @@ function SubagentMessages({
   const nestedCollapsibleDefaultsKey = `${prefs.autoExpandReasoning ? 'r1' : 'r0'}-${prefs.autoExpandToolCalls ? 't1' : 't0'}`;
   const { scrollRef, height, startResize, minHeight, maxHeight, canResize, resizeBy, reset } = useResizableHeight<HTMLDivElement>();
   const { handleScroll } = useStickToBottom<HTMLDivElement>(scrollRef, [messages]);
+  const noop = () => {};
+  // The nested transcript is virtualized when it outgrows a small threshold:
+  // only the viewport rows (+ overscan) mount, keyed by stable message
+  // identity, so a huge recursive detail never mounts every row at once.
+  const virtualize = messages.length > NESTED_VIRTUALIZE_MIN_MESSAGES;
+  // Per-row request-time attribution, mirroring TranscriptMessageList: each
+  // assistant row references the createdAt of the nearest preceding delivered
+  // user message.
+  const requestCreatedAtByIndex = useMemo(() => {
+    const result: Array<string | undefined> = [];
+    let latest: string | undefined;
+    for (const message of messages) {
+      if (message.role === 'user' && message.status !== 'queued') latest = message.createdAt;
+      result.push(latest);
+    }
+    return result;
+  }, [messages]);
+  const renderNestedRow = useCallback((message: ChatMessage, rowIndex: number) => (
+    <MessageItem
+      key={nestedCollapsibleDefaultsKey ? `${messageRenderIdentity(message)}-${nestedCollapsibleDefaultsKey}` : messageRenderIdentity(message)}
+      message={message}
+      isStreaming={false}
+      prefs={prefs}
+      readonly
+      workingDirectory={workingDirectory}
+      editingId={null}
+      onEditRequest={noop}
+      onEditConfirm={noop}
+      onEditCancel={noop}
+      onOpenFile={onOpenFile}
+      onContextMenu={onNestedContextMenu}
+      renderToolCall={renderToolCall}
+      requestCreatedAt={message.role === 'assistant' ? requestCreatedAtByIndex[rowIndex] : undefined}
+    />
+  ), [nestedCollapsibleDefaultsKey, prefs, workingDirectory, onOpenFile, onNestedContextMenu, renderToolCall, requestCreatedAtByIndex]);
 
   return (
     <div
@@ -506,16 +546,30 @@ function SubagentMessages({
             )}
           </div>
         )}
-        <TranscriptMessageList
-          messages={messages}
-          prefs={prefs}
-          workingDirectory={workingDirectory}
-          onOpenFile={onOpenFile}
-          onContextMenu={onNestedContextMenu}
-          renderToolCall={renderToolCall}
-          readonly
-          collapsibleKey={nestedCollapsibleDefaultsKey}
-        />
+        {virtualize ? (
+          <NestedVirtualList
+            rows={messages}
+            getKey={(message) => (
+              nestedCollapsibleDefaultsKey
+                ? `${messageRenderIdentity(message)}-${nestedCollapsibleDefaultsKey}`
+                : messageRenderIdentity(message)
+            )}
+            estimateHeight={estimateNestedMessageHeight}
+            scrollRef={scrollRef}
+            renderRow={renderNestedRow}
+          />
+        ) : (
+          <TranscriptMessageList
+            messages={messages}
+            prefs={prefs}
+            workingDirectory={workingDirectory}
+            onOpenFile={onOpenFile}
+            onContextMenu={onNestedContextMenu}
+            renderToolCall={renderToolCall}
+            readonly
+            collapsibleKey={nestedCollapsibleDefaultsKey}
+          />
+        )}
       </div>
       {canResize && !isNested && (
         <ResizeHandle
@@ -551,9 +605,79 @@ function SubagentSingleBlock({
   // The generic draft card and this specialized renderer share one cache key,
   // so renderer/content promotion cannot reset a user's disclosure choice.
   const [open, setOpen] = useCollapsibleOpen(toolDisclosureKey(toolCall.id), prefs.autoExpandSubagentCalls);
+
+  // Source attribution for nested ask_user prompts: carry this subagent's
+  // call id (matching the SDK's subagentCallId stamping), agent name, and
+  // nesting depth (parent depth + 1; top-level subagent = 1) down to the
+  // nested transcript so ask_user prompts can label who is asking.
+  const parentSubagentCtx = useContext(SubagentCallContext);
+  const subagentDepth = (parentSubagentCtx?.depth ?? 0) + 1;
+  const subagentCallId = multipleResults ? `${toolCall.id}:${index}` : toolCall.id;
+  // Nested (depth ≥ 2) subagents live inside a parent subagent's bounded
+  // scroll region. A nested header/body establishing its own scroll container
+  // creates nested-scroll confusion, so nested blocks use a free-flowing body
+  // (no max-height / overflow). Both depth-1 and nested headers are now
+  // `relative` (non-pinning) so there is no header overlap; the nested
+  // modifier still marks the free-flowing body.
+  const isNested = subagentDepth > 1;
+
+  // Phase 5 page-backed detail: a producer-stamped child is live-addressable
+  // and subscribes to its complete transcript on expansion (never while
+  // collapsed). Depth-1 children carry the address in their live preview;
+  // nested children combine the enclosing subscription's immutable address
+  // root with their own complete producer lineage. Children without an
+  // address (legacy durable refs) keep the generic one-shot detail path.
+  const detailAddress = useMemo<LiveSubagentDetailAddress | undefined>(() => {
+    if (singleResult.detailAddress) return singleResult.detailAddress;
+    const root = parentSubagentCtx?.detailRoot;
+    if (root && singleResult.liveAddressable === true
+      && singleResult.lineage && singleResult.lineage.length > 0) {
+      return { ...root, lineage: singleResult.lineage };
+    }
+    return undefined;
+  }, [singleResult.detailAddress, singleResult.liveAddressable, singleResult.lineage, parentSubagentCtx?.detailRoot]);
+  const subscription = useDetailSubscription({
+    detailKey: `subagent:${toolCall.id}:${index}`,
+    address: detailAddress,
+    expanded: open,
+  });
+  // Collapsed bounded previews need no full detail; the generic one-shot path
+  // fires only for non-addressable (legacy) refs.
   useEffect(() => {
-    if (open && toolCall.detailRef) onLoadDetail?.();
-  }, [open, toolCall.detailRef?.key, onLoadDetail]);
+    if (open && toolCall.detailRef && !detailAddress) onLoadDetail?.();
+  }, [open, toolCall.detailRef?.key, detailAddress, onLoadDetail]);
+  // The expanded body renders the subscribed canonical child record when it is
+  // ready; the compact preview stays authoritative for the header/lifecycle.
+  const subscribedValue = detailAddress && subscription.value !== null
+    ? subscription.value as Partial<SubagentSingleResult>
+    : undefined;
+  const renderResult = useMemo<SubagentSingleResult>(
+    () => (subscribedValue ? { ...singleResult, ...subscribedValue } : singleResult),
+    [singleResult, subscribedValue],
+  );
+  const detailPending = detailAddress
+    ? subscription.status === 'idle'
+      || subscription.status === 'subscribing'
+      || subscription.status === 'loading'
+      || subscription.status === 'rebasing'
+    : !!toolCall.detailRef && detailState?.status !== 'loaded';
+  const detailFailed = detailAddress
+    ? subscription.status === 'error'
+    : detailState?.status === 'failure'
+      || detailState?.status === 'unavailable'
+      || detailState?.status === 'stale';
+  const detailRetryable = detailAddress
+    ? subscription.error?.retryable === true
+    : true;
+  const detailErrorMessage = detailAddress
+    ? subscription.error?.message
+    : detailState?.status === 'failure' || detailState?.status === 'unavailable' || detailState?.status === 'stale'
+      ? detailState.message
+      : undefined;
+  const retryDetail = detailAddress ? subscription.retry : onRetryDetail;
+  const detailLoadingLabel = detailAddress && subscription.status === 'rebasing'
+    ? 'Refreshing subagent transcript…'
+    : 'Loading subagent transcript…';
   const status = singleResultStatus(singleResult, toolCall.status, multipleResults);
   const errorDetail = status === 'failed' || status === 'interrupted'
     ? subagentErrorDetail(singleResult)
@@ -589,20 +713,6 @@ function SubagentSingleBlock({
       && (req.subagentCallId === toolCall.id || req.subagentCallId.startsWith(`${toolCall.id}:`)),
   );
 
-  // Source attribution for nested ask_user prompts: carry this subagent's
-  // call id (matching the SDK's subagentCallId stamping), agent name, and
-  // nesting depth (parent depth + 1; top-level subagent = 1) down to the
-  // nested transcript so ask_user prompts can label who is asking.
-  const parentSubagentCtx = useContext(SubagentCallContext);
-  const subagentDepth = (parentSubagentCtx?.depth ?? 0) + 1;
-  const subagentCallId = multipleResults ? `${toolCall.id}:${index}` : toolCall.id;
-  // Nested (depth ≥ 2) subagents live inside a parent subagent's bounded
-  // scroll region. A nested header/body establishing its own scroll container
-  // creates nested-scroll confusion, so nested blocks use a free-flowing body
-  // (no max-height / overflow). Both depth-1 and nested headers are now
-  // `relative` (non-pinning) so there is no header overlap; the nested
-  // modifier still marks the free-flowing body.
-  const isNested = subagentDepth > 1;
   // Stable id for the body region so the header can reference it via
   // `aria-controls` (only when the body is mounted, i.e. open or closing).
   const bodyId = useId();
@@ -712,23 +822,37 @@ function SubagentSingleBlock({
           onTransitionEnd={onBodyTransitionEnd}
         >
           <div class="collapsible-body-clip">
-            {toolCall.detailRef && detailState?.status !== 'loaded' ? (
+            {detailPending ? (
               <div id={bodyId} class="subagent-messages p-3" role="status">
-                {detailState?.status === 'failure'
-                  || detailState?.status === 'unavailable'
-                  || detailState?.status === 'stale' ? (
-                    <div>
-                      <div>{detailState.message}</div>
-                      <button type="button" class="mt-2 text-accent underline" onClick={onRetryDetail}>Retry</button>
-                    </div>
-                  ) : (
-                    <span>Loading subagent transcript…</span>
-                  )}
+                {detailFailed ? (
+                  <div>
+                    <div>{detailErrorMessage ?? 'Failed to load subagent detail.'}</div>
+                    {detailRetryable && (
+                      <button type="button" class="mt-2 text-accent underline" onClick={retryDetail}>Retry</button>
+                    )}
+                  </div>
+                ) : (
+                  <span>{detailLoadingLabel}</span>
+                )}
               </div>
             ) : (
-              <SubagentCallContext.Provider value={{ id: subagentCallId, agent: singleResult.agent, depth: subagentDepth }}>
+              <SubagentCallContext.Provider
+                value={{
+                  id: subagentCallId,
+                  agent: singleResult.agent,
+                  depth: subagentDepth,
+                  ...(detailAddress
+                    ? { detailRoot: {
+                        sessionPath: detailAddress.sessionPath,
+                        turnId: detailAddress.turnId,
+                        rootToolCallId: detailAddress.rootToolCallId,
+                        rootAttemptId: detailAddress.rootAttemptId,
+                      } }
+                    : {}),
+                }}
+              >
                 <SubagentMessages
-                  singleResult={singleResult}
+                  singleResult={renderResult}
                   toolCall={toolCall}
                   index={index}
                   prefs={prefs}

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { compactSingleResult } from "../src/result-compaction.js";
+import { compactSingleResult, compactSubagentDetails, readRecursiveProjectionCounters } from "../src/result-compaction.js";
 import type { SingleResult } from "../types.js";
 
 function result(messages: any[], over: Partial<SingleResult> = {}): SingleResult {
@@ -114,4 +114,53 @@ test("terminalization recursively preserves nested subagent details", () => {
 	assert.equal(nested.transcriptCompacted, false);
 	assert.match(JSON.stringify(nested.messages), /nested reasoning/);
 	assert.match(JSON.stringify(nested.messages), /nested final/);
+});
+
+test("terminal recursive traversal accumulates exact child, message, and depth counters", () => {
+	const leaf = result([
+		{ role: "assistant", content: [{ type: "text", text: "leaf" }] },
+		{ role: "toolResult", toolName: "read", content: [{ type: "text", text: "done" }] },
+	]);
+	const middle = result([{
+		role: "toolResult",
+		toolCallId: "sa-middle",
+		toolName: "subagent",
+		details: { mode: "single", results: [leaf] },
+	}]);
+	const outer = result([{
+		role: "toolResult",
+		toolCallId: "sa-outer",
+		toolName: "subagent",
+		details: { mode: "single", results: [middle] },
+	}]);
+	const counters = { childCount: 0, messageCount: 0, maxRecursiveDepth: 0, durationMs: 0 };
+	const compacted = compactSingleResult(outer, counters);
+	assert.equal(counters.childCount, 3);
+	assert.equal(counters.messageCount, 4);
+	assert.equal(counters.maxRecursiveDepth, 3);
+	assert.ok(
+		Number.isFinite(counters.durationMs) && counters.durationMs >= 0,
+		"the traversal measures its own duration inside the existing pass",
+	);
+	assert.deepEqual(
+		readRecursiveProjectionCounters({ mode: "single", agentScope: "both", projectAgentsDir: null, results: [{ ...compacted }] }),
+		counters,
+		"content-free counters and duration survive the provenance-style result spread",
+	);
+});
+
+test("compactSubagentDetails measures one duration segment per top-level result without double counting", () => {
+	const nested = result([{ role: "assistant", content: [{ type: "text", text: "nested" }] }]);
+	const first = result([{
+		role: "toolResult",
+		toolCallId: "sa-1",
+		toolName: "subagent",
+		details: { mode: "single", results: [nested] },
+	}]);
+	const second = result([{ role: "assistant", content: [{ type: "text", text: "sibling" }] }]);
+	const counters = { childCount: 0, messageCount: 0, maxRecursiveDepth: 0, durationMs: 0 };
+	compactSubagentDetails({ mode: "single", agentScope: "both", projectAgentsDir: null, results: [first, second] }, counters);
+	assert.equal(counters.childCount, 3, "both top-level results plus the nested result");
+	assert.equal(counters.maxRecursiveDepth, 2);
+	assert.ok(Number.isFinite(counters.durationMs) && counters.durationMs >= 0);
 });

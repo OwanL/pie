@@ -4,6 +4,67 @@ import type { ReducerResult } from './helpers.js';
 import { evictSession, removeFromArray, addToArray } from './helpers.js';
 import { getNextVisibleTabPathOnClose, moveOpenTabPath, insertTabRespectingPinnedPrefix, cleanPinnedTabGroups, isPendingTabPath } from '../../../shared/tab-behavior.js';
 
+/** Seed a pending picker from the last catalog known to the host. A duplicate
+ * prefers its real predecessor; a new session prefers the active real tab and
+ * then any configured/session catalog still in memory. The selected model's
+ * provider-qualified metadata is merged back in when the chosen catalog is
+ * stale or filtered, so reasoning controls do not flash to a non-reasoning
+ * fallback while the durable target is unresolved. */
+function provisionalCatalogForPendingSession(
+  state: ArchState,
+  placeholderSummary: Extract<Command, { kind: 'CreateSession' | 'DuplicateSession' }>['placeholderSummary'],
+  predecessorPath?: string,
+): import('../../../shared/protocol.js').ModelInfo[] {
+  const catalogs = Object.entries(state.settings.availableModelsBySession)
+    .filter(([path, models]) => !isPendingTabPath(path) && models.length > 0);
+  const activePath = state.sessions.activeSessionPath;
+  const preferredPaths = [predecessorPath, activePath].filter(
+    (path): path is string => !!path && !isPendingTabPath(path),
+  );
+  const preferred = preferredPaths
+    .map((path) => state.settings.availableModelsBySession[path])
+    .find((models): models is import('../../../shared/protocol.js').ModelInfo[] => !!models && models.length > 0);
+  const base = preferred ?? catalogs[0]?.[1] ?? [];
+  const predecessor = preferredPaths
+    .map((path) => state.sessions.sessions.find((session) => session.path === path))
+    .find((session): session is NonNullable<typeof session> => !!session);
+  const selectedModelId = placeholderSummary.modelId
+    ?? predecessor?.modelId
+    ?? state.settings.modelSettings?.defaultModel;
+  const selectedProvider = placeholderSummary.provider
+    ?? predecessor?.provider
+    ?? state.settings.modelSettings?.defaultProvider;
+  if (!selectedModelId) return [...base];
+
+  const knownModels = catalogs.flatMap(([, models]) => models);
+  const selectedKnown = selectedProvider
+    ? knownModels.find((model) => model.id === selectedModelId && model.provider === selectedProvider)
+    : knownModels.find((model) => model.id === selectedModelId);
+  if (!selectedKnown || base.some((model) => model.id === selectedKnown.id && model.provider === selectedKnown.provider)) {
+    return [...base];
+  }
+  return [...base, selectedKnown];
+}
+
+function seedPendingModelCatalog(
+  state: ArchState,
+  sessionPath: string,
+  placeholderSummary: Extract<Command, { kind: 'CreateSession' | 'DuplicateSession' }>['placeholderSummary'],
+  predecessorPath?: string,
+): ArchState['settings'] {
+  return {
+    ...state.settings,
+    availableModelsBySession: {
+      ...state.settings.availableModelsBySession,
+      [sessionPath]: provisionalCatalogForPendingSession(state, placeholderSummary, predecessorPath),
+    },
+    availableModelsStatusBySession: {
+      ...state.settings.availableModelsStatusBySession,
+      [sessionPath]: 'provisional',
+    },
+  };
+}
+
 export function handleOpenSession(state: ArchState, cmd: Extract<Command, { kind: 'OpenSession' }>): ReducerResult {
   const { sessionPath, placeholderSummary, selectionToken } = cmd;
   // Optimistic tab setup — was imperative dispatchArch calls in the service
@@ -33,7 +94,7 @@ export function handleOpenSession(state: ArchState, cmd: Extract<Command, { kind
       openTabPaths: nextOpenTabPaths,
       activeSessionPath: sessionPath,
       unreadFinishedSessionPaths: state.sessions.unreadFinishedSessionPaths.filter((p) => p !== sessionPath),
-      reviewClosedRunningPaths: removeFromArray(state.sessions.reviewClosedRunningPaths, sessionPath),
+      intentionallyHiddenRunningPaths: removeFromArray(state.sessions.intentionallyHiddenRunningPaths, sessionPath),
     },
   };
   return {
@@ -46,7 +107,35 @@ export function handleOpenSession(state: ArchState, cmd: Extract<Command, { kind
 }
 
 export function handleCreateSession(state: ArchState, cmd: Extract<Command, { kind: 'CreateSession' }>): ReducerResult {
-  const { sessionPath, cwd, placeholderSummary, selectionToken } = cmd;
+  const { sessionPath, cwd, placeholderSummary, selectionToken, operationId } = cmd;
+  const existingOperation = operationId ? state.pending.createOperations[operationId] : undefined;
+  if (existingOperation?.status === 'delayed-awaiting-outcome'
+    && existingOperation.pendingPath === sessionPath
+    && existingOperation.selectionToken === selectionToken) {
+    const nextState = {
+      ...state,
+      pending: {
+        ...state.pending,
+        createOperations: {
+          ...state.pending.createOperations,
+          [operationId!]: { ...existingOperation, status: 'pending' as const, attempt: existingOperation.attempt + 1 },
+        },
+      },
+      sessions: existingOperation.hidden
+        ? state.sessions
+        : {
+            ...state.sessions,
+            sessions: state.sessions.sessions.map((summary) => summary.path === sessionPath
+              ? { ...summary, creationState: 'pending' as const, createOperationId: operationId }
+              : summary),
+          },
+    };
+    return {
+      state: nextState,
+      effects: [{ kind: 'CreateSession', corrId: cmd.corrId, sessionPath, cwd, selectionToken, ...(operationId ? { operationId, operationAttempt: existingOperation.attempt + 1 } : {}) }],
+    };
+  }
+  if (existingOperation?.status === 'succeeded') return { state, effects: [] };
   // Optimistic tab setup — was imperative dispatchArch calls in the
   // service (SessionSummaryUpserted + TabOpened + SelectSession +
   // RunningSessionsChanged + ActiveRunSummaryChanged(null) + saveOpenTabs).
@@ -60,9 +149,12 @@ export function handleCreateSession(state: ArchState, cmd: Extract<Command, { ki
   // the old saveOpenTabs() call.
   const sessions = state.sessions.sessions;
   const alreadySummarized = sessions.some((s) => s.path === sessionPath);
+  const pendingSummary = operationId
+    ? { ...placeholderSummary, creationState: 'pending' as const, createOperationId: operationId }
+    : placeholderSummary;
   const nextSessions = alreadySummarized
     ? sessions
-    : [placeholderSummary, ...sessions];
+    : [pendingSummary, ...sessions];
   const nextOpenTabPaths = state.sessions.openTabPaths.includes(sessionPath)
     ? state.sessions.openTabPaths
     : [...state.sessions.openTabPaths, sessionPath];
@@ -76,7 +168,25 @@ export function handleCreateSession(state: ArchState, cmd: Extract<Command, { ki
       activeSessionPath: sessionPath,
       runningSessionPaths: nextRunningPaths,
       unreadFinishedSessionPaths: state.sessions.unreadFinishedSessionPaths.filter((p) => p !== sessionPath),
-      reviewClosedRunningPaths: removeFromArray(state.sessions.reviewClosedRunningPaths, sessionPath),
+      intentionallyHiddenRunningPaths: removeFromArray(state.sessions.intentionallyHiddenRunningPaths, sessionPath),
+    },
+    settings: seedPendingModelCatalog(state, sessionPath, placeholderSummary),
+    pending: {
+      ...state.pending,
+      createOperations: operationId
+        ? {
+            ...state.pending.createOperations,
+            [operationId]: {
+              operationId,
+              kind: 'create' as const,
+              pendingPath: sessionPath,
+              selectionToken,
+              status: 'pending' as const,
+              attempt: 1,
+              cwd,
+            },
+          }
+        : state.pending.createOperations,
     },
     composer: {
       ...state.composer,
@@ -90,7 +200,7 @@ export function handleCreateSession(state: ArchState, cmd: Extract<Command, { ki
     state: nextState,
     effects: [
       { kind: 'PersistTabs', corrId: cmd.corrId, openTabPaths: nextOpenTabPaths, activeSessionPath: sessionPath, pinnedTabPaths: state.sessions.pinnedTabPaths, pinnedTabGroups: state.sessions.pinnedTabGroups },
-      { kind: 'CreateSession', corrId: cmd.corrId, sessionPath, cwd, selectionToken },
+      { kind: 'CreateSession', corrId: cmd.corrId, sessionPath, cwd, selectionToken, ...(operationId ? { operationId, operationAttempt: 1 } : {}) },
     ],
   };
 }
@@ -115,6 +225,55 @@ export function handleSelectSession(state: ArchState, cmd: Extract<Command, { ki
 
 export function handleCloseSession(state: ArchState, cmd: Extract<Command, { kind: 'CloseSession' }>): ReducerResult {
   const { sessionPath } = cmd;
+  const pendingCreate = Object.values(state.pending.createOperations)
+    .find((operation) => operation.pendingPath === sessionPath
+      && (operation.status === 'pending' || operation.status === 'delayed-awaiting-outcome'));
+  if (pendingCreate) {
+    // Hiding a delayed create is not definitive cancellation. Keep the ledger,
+    // queued sends, and selection request alive so a late matching opened event
+    // can resolve the hidden operation without reopening or focusing it.
+    const nextOpenTabPaths = state.sessions.openTabPaths.filter((path) => path !== sessionPath);
+    const nextPinnedTabPaths = state.sessions.pinnedTabPaths.filter((path) => path !== sessionPath);
+    const nextPinnedTabGroups = cleanPinnedTabGroups(state.sessions.pinnedTabGroups, nextPinnedTabPaths);
+    const wasActive = state.sessions.activeSessionPath === sessionPath;
+    const nextPath = wasActive
+      ? getNextVisibleTabPathOnClose({
+          closingPath: sessionPath,
+          openTabPaths: state.sessions.openTabPaths,
+          sessions: state.sessions.sessions,
+          workspaceCwd: state.sessions.workspaceCwd,
+          activeSessionPath: state.sessions.activeSessionPath,
+        })
+      : state.sessions.activeSessionPath;
+    const nextState = {
+      ...state,
+      sessions: {
+        ...state.sessions,
+        openTabPaths: nextOpenTabPaths,
+        pinnedTabPaths: nextPinnedTabPaths,
+        pinnedTabGroups: nextPinnedTabGroups,
+        activeSessionPath: wasActive ? (nextPath ?? null) : state.sessions.activeSessionPath,
+      },
+      pending: {
+        ...state.pending,
+        createOperations: {
+          ...state.pending.createOperations,
+          [pendingCreate.operationId]: { ...pendingCreate, hidden: true },
+        },
+      },
+    };
+    return {
+      state: nextState,
+      effects: [{
+        kind: 'PersistTabs',
+        corrId: cmd.corrId,
+        openTabPaths: nextOpenTabPaths,
+        activeSessionPath: nextState.sessions.activeSessionPath,
+        pinnedTabPaths: nextPinnedTabPaths,
+        pinnedTabGroups: nextPinnedTabGroups,
+      }],
+    };
+  }
   // A repeated or delayed user close for a tab that is already hidden is a
   // no-op. Explicit outbox retries are different: after a crash or failed
   // terminal append the durable action may still be pending while the tab is
@@ -139,7 +298,7 @@ export function handleCloseSession(state: ArchState, cmd: Extract<Command, { kin
           ...state,
           sessions: {
             ...state.sessions,
-            reviewClosedRunningPaths: addToArray(state.sessions.reviewClosedRunningPaths, sessionPath),
+            intentionallyHiddenRunningPaths: addToArray(state.sessions.intentionallyHiddenRunningPaths, sessionPath),
           },
         },
         effects: [persistEffect],
@@ -194,15 +353,15 @@ export function handleCloseSession(state: ArchState, cmd: Extract<Command, { kin
     // Closing a running tab means hide, not teardown. Preserve transcript,
     // live-pipeline, pending ownership, composer inputs, file changes, and run
     // analytics while the backend continues. A later webview ready handshake
-    // prominently restores hidden running tabs; users can also reopen from the
-    // session list immediately. A review-closure hide is marked so the ready
-    // handshake does not resurrect a tab the reviewer intentionally closed.
+    // restores only running tabs whose absence was accidental; users can also
+    // reopen an intentionally hidden session from the session list.
     const nextOpenTabPaths = state.sessions.openTabPaths.filter((path) => path !== sessionPath);
     const nextPinnedTabPaths = state.sessions.pinnedTabPaths.filter((path) => path !== sessionPath);
     const nextPinnedTabGroups = cleanPinnedTabGroups(state.sessions.pinnedTabGroups, nextPinnedTabPaths);
-    const nextReviewClosedRunningPaths = cmd.reviewClosure
-      ? addToArray(state.sessions.reviewClosedRunningPaths, sessionPath)
-      : state.sessions.reviewClosedRunningPaths;
+    const nextIntentionallyHiddenRunningPaths = addToArray(
+      state.sessions.intentionallyHiddenRunningPaths,
+      sessionPath,
+    );
     const nextState = {
       ...state,
       sessions: {
@@ -211,7 +370,7 @@ export function handleCloseSession(state: ArchState, cmd: Extract<Command, { kin
         pinnedTabPaths: nextPinnedTabPaths,
         pinnedTabGroups: nextPinnedTabGroups,
         activeSessionPath: nextActivePath,
-        reviewClosedRunningPaths: nextReviewClosedRunningPaths,
+        intentionallyHiddenRunningPaths: nextIntentionallyHiddenRunningPaths,
       },
     };
     return {
@@ -285,7 +444,35 @@ export function handleCloseSession(state: ArchState, cmd: Extract<Command, { kin
 }
 
 export function handleDuplicateSession(state: ArchState, cmd: Extract<Command, { kind: 'DuplicateSession' }>): ReducerResult {
-  const { sessionPath, sourceSessionPath, placeholderSummary, selectionToken } = cmd;
+  const { sessionPath, sourceSessionPath, placeholderSummary, selectionToken, operationId } = cmd;
+  const existingOperation = operationId ? state.pending.createOperations[operationId] : undefined;
+  if (existingOperation?.status === 'delayed-awaiting-outcome'
+    && existingOperation.pendingPath === sessionPath
+    && existingOperation.selectionToken === selectionToken) {
+    const nextState = {
+      ...state,
+      pending: {
+        ...state.pending,
+        createOperations: {
+          ...state.pending.createOperations,
+          [operationId!]: { ...existingOperation, status: 'pending' as const, attempt: existingOperation.attempt + 1 },
+        },
+      },
+      sessions: existingOperation.hidden
+        ? state.sessions
+        : {
+            ...state.sessions,
+            sessions: state.sessions.sessions.map((summary) => summary.path === sessionPath
+              ? { ...summary, creationState: 'pending' as const, createOperationId: operationId }
+              : summary),
+          },
+    };
+    return {
+      state: nextState,
+      effects: [{ kind: 'DuplicateSession', corrId: cmd.corrId, sessionPath, sourceSessionPath, selectionToken, ...(operationId ? { operationId, operationAttempt: existingOperation.attempt + 1 } : {}) }],
+    };
+  }
+  if (existingOperation?.status === 'succeeded') return { state, effects: [] };
   // Optimistic tab setup — was imperative dispatchArch calls in the
   // service (SessionSummaryUpserted + TabOpened(insertAfter=source) +
   // SelectSession + RunningSessionsChanged + ActiveRunSummaryChanged(null)
@@ -302,9 +489,12 @@ export function handleDuplicateSession(state: ArchState, cmd: Extract<Command, {
   // appears next to its source in the tab bar.
   const sessions = state.sessions.sessions;
   const alreadySummarized = sessions.some((s) => s.path === sessionPath);
+  const pendingSummary = operationId
+    ? { ...placeholderSummary, creationState: 'pending' as const, createOperationId: operationId }
+    : placeholderSummary;
   const nextSessions = alreadySummarized
     ? sessions
-    : [placeholderSummary, ...sessions];
+    : [pendingSummary, ...sessions];
   // Open the tab adjacent to the source (insertAfter), mirroring
   // handleTabOpened: if the source is open, splice right after it; else
   // append at end.
@@ -335,7 +525,25 @@ export function handleDuplicateSession(state: ArchState, cmd: Extract<Command, {
       activeSessionPath: sessionPath,
       runningSessionPaths: nextRunningPaths,
       unreadFinishedSessionPaths: state.sessions.unreadFinishedSessionPaths.filter((p) => p !== sessionPath),
-      reviewClosedRunningPaths: removeFromArray(state.sessions.reviewClosedRunningPaths, sessionPath),
+      intentionallyHiddenRunningPaths: removeFromArray(state.sessions.intentionallyHiddenRunningPaths, sessionPath),
+    },
+    settings: seedPendingModelCatalog(state, sessionPath, placeholderSummary, sourceSessionPath),
+    pending: {
+      ...state.pending,
+      createOperations: operationId
+        ? {
+            ...state.pending.createOperations,
+            [operationId]: {
+              operationId,
+              kind: 'duplicate' as const,
+              pendingPath: sessionPath,
+              selectionToken,
+              status: 'pending' as const,
+              attempt: 1,
+              sourceSessionPath,
+            },
+          }
+        : state.pending.createOperations,
     },
     composer: {
       ...state.composer,
@@ -349,7 +557,7 @@ export function handleDuplicateSession(state: ArchState, cmd: Extract<Command, {
     state: nextState,
     effects: [
       { kind: 'PersistTabs', corrId: cmd.corrId, openTabPaths: nextOpenTabPaths, activeSessionPath: sessionPath, pinnedTabPaths: state.sessions.pinnedTabPaths, pinnedTabGroups: state.sessions.pinnedTabGroups },
-      { kind: 'DuplicateSession', corrId: cmd.corrId, sessionPath, sourceSessionPath, selectionToken },
+      { kind: 'DuplicateSession', corrId: cmd.corrId, sessionPath, sourceSessionPath, selectionToken, ...(operationId ? { operationId, operationAttempt: 1 } : {}) },
     ],
   };
 }

@@ -29,6 +29,7 @@ export interface SessionTabProps {
   onPointerDown: (event: PointerEvent, sourceIndex: number, sourcePath: string) => void;
   onClick: (tabPath: string) => void;
   onClose: (tabPath: string) => void;
+  onRetryCreate?: (operationId: string) => void;
 }
 
 // Memoized so non-source tabs skip re-render during a drag (the parent
@@ -51,6 +52,7 @@ export const SessionTab = memo(function SessionTab({
   onPointerDown,
   onClick,
   onClose,
+  onRetryCreate,
 }: SessionTabProps) {
   const session = sessionByPath.get(tabPath);
   const label = session?.name ?? 'New Session';
@@ -58,14 +60,17 @@ export const SessionTab = memo(function SessionTab({
   const isAttention = !!hasPendingExtensionUIRequest;
   const isRunning = runningPathSet.has(tabPath);
   const isPreparing = isPendingTabPath(tabPath);
+  const isCreationDelayed = session?.creationState === 'delayed';
   const isStartingModel = isRunning && startingModelPathSet.has(tabPath);
   const isUnreadFinished = unreadFinishedPathSet.has(tabPath);
   const originalIndex = openIndexByPath.get(tabPath) ?? index;
   const title = hasPendingExtensionUIRequest
     ? `${label} (waiting for your answer)`
-    : isPreparing
-      ? `${label} (preparing in background — you can type or send now)`
-      : isUnreadFinished
+    : isCreationDelayed
+      ? `${label} (creation delayed — retry or wait for completion)`
+      : isPreparing
+        ? `${label} (preparing in background — you can type or send now)`
+        : isUnreadFinished
           ? `${label} (finished, unread)`
           : label;
 
@@ -76,6 +81,7 @@ export const SessionTab = memo(function SessionTab({
   if (isPinned) classBits.push('pinned');
   if (isDropTarget) classBits.push('drop-target-on');
   if (isRunning) classBits.push('running');
+  if (isCreationDelayed) classBits.push('creation-delayed');
 
   return (
     <div
@@ -119,6 +125,20 @@ export const SessionTab = memo(function SessionTab({
           </>
         )}
       </button>
+      {isCreationDelayed && session?.createOperationId && onRetryCreate && (
+        <button
+          class="session-tab-retry"
+          type="button"
+          aria-label={`Retry creating ${label}`}
+          title="Retry session creation"
+          onClick={(event) => {
+            event.stopPropagation();
+            onRetryCreate?.(session.createOperationId!);
+          }}
+        >
+          ↻
+        </button>
+      )}
       {!isPinned && (
         <button
           class="session-tab-close"

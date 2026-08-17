@@ -132,6 +132,8 @@ export interface CreateSessionResultEvent {
   ok: boolean;
   /** The session path the backend allocated, if ok. */
   sessionPath?: string;
+  /** Stable create operation identity, when supplied by the effect. */
+  operationId?: string;
   error?: string;
 }
 
@@ -275,6 +277,8 @@ export interface DuplicateSessionResultEvent {
   ok: boolean;
   /** The pending session path of the copy, if ok. */
   sessionPath?: string;
+  /** Stable duplicate operation identity, when supplied by the effect. */
+  operationId?: string;
   error?: string;
 }
 
@@ -465,6 +469,14 @@ export interface SessionOpenedEvent {
   kind: 'SessionOpened';
   sessionPath: string;
   payload: SessionOpenedPayload;
+  /** Host-side ownership metadata captured when the lifecycle request started.
+   * Unsolicited current-runtime refreshes capture the current values. */
+  backendGeneration: number;
+  modelWriteFence: number;
+  /** Global settings hydration revision captured at request start. */
+  modelHydrationRevision: number;
+  /** Catalog hydration revision for this session captured at request start. */
+  catalogHydrationRevision: number;
 }
 
 /** Emitted by the host when a session tab is closed. */
@@ -580,6 +592,12 @@ export interface SessionMetadataChangedEvent {
 export interface ModelSettingsHydratedEvent {
   kind: 'ModelSettingsHydrated';
   modelSettings: ModelSettings;
+  /** Stable path whose hydration supplied this global settings read. */
+  sessionPath: string;
+  /** Required ownership metadata captured when this hydration started. */
+  backendGeneration: number;
+  hydrationRevision: number;
+  modelWriteFence: number;
 }
 
 /** Emitted when available models for a session change. */
@@ -587,6 +605,10 @@ export interface AvailableModelsChangedEvent {
   kind: 'AvailableModelsChanged';
   sessionPath: string;
   models: ModelInfo[];
+  /** Required ownership metadata captured when this hydration started. */
+  backendGeneration: number;
+  hydrationRevision: number;
+  modelWriteFence: number;
 }
 
 /** Emitted when pending extension UI requests for a session are cleared. */
@@ -698,6 +720,38 @@ export interface SessionScopeClearedEvent {
   kind: 'SessionScopeCleared';
   sessionPath: string;
   removeSessionSummary: boolean;
+}
+
+/** The local create/duplicate acknowledgement timed out. This is not a
+ * definitive backend failure: the ledger retains the pending tab and queue so
+ * a later session.opened can reconcile the durable result. */
+export interface CreateOperationDelayedEvent {
+  kind: 'CreateOperationDelayed';
+  operationId: string;
+  pendingPath: string;
+  selectionToken: string;
+  /** Attempt that timed out; absent only for compatibility with direct host
+   * events from older callers. */
+  attempt?: number;
+  notice?: string;
+  ownsSelection?: boolean;
+}
+
+/** A matching session.opened proved the durable create/duplicate succeeded. */
+export interface CreateOperationSucceededEvent {
+  kind: 'CreateOperationSucceeded';
+  operationId: string;
+  pendingPath: string;
+  sessionPath: string;
+}
+
+/** A definitive backend failure or backend-generation death ended one create
+ * operation. Cleanup is deliberately scoped to its pending path. */
+export interface CreateOperationFailedEvent {
+  kind: 'CreateOperationFailed';
+  operationId: string;
+  pendingPath: string;
+  error: string;
 }
 
 /** Emitted when a tab is opened (added to openTabPaths). */
@@ -848,6 +902,9 @@ export type HostEvent =
   | AssistantMessageErrorStampedEvent
   | ComposerInputsReplacedEvent
   | PendingPathReplacedEvent
+  | CreateOperationDelayedEvent
+  | CreateOperationSucceededEvent
+  | CreateOperationFailedEvent
   | TranscriptTrimmedEvent
   | RunningSessionsChangedEvent
   | UnreadFinishedSessionsChangedEvent

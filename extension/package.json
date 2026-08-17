@@ -160,6 +160,7 @@
     "typecheck:computer-use": "tsc --noEmit -p ../extensions/computer-use/tsconfig.json",
     "typecheck:image-context-guard": "tsc --noEmit -p ../extensions/image-context-guard/tsconfig.json",
     "test": "node ../scripts/run-tests.mjs --fast --package extension",
+    "test:large-detail": "tsx --test test/large-detail.e2e.ts",
     "perf": "tsx ./test/perf/streaming-pipeline.perf.ts",
     "perf:analytics": "tsx ./test/perf/analytics.perf.ts",
     "prepackage": "npm run build -- --no-sync",

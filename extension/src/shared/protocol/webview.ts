@@ -6,6 +6,16 @@ import type { AggregateStats } from './aggregate-stats.js';
 import type { LiveTurnPhase } from '../live-pipeline-protocol.js';
 import type { TokenRateIndicatorState } from '../token-rate.js';
 import type { NoticeKind } from '../error-mapping.js';
+import type {
+  DetailChecksum,
+  DetailCursor,
+  DetailErrorCode,
+  DetailPagePayload,
+  DetailPageRef,
+  DetailRebaseReason,
+  LiveSubagentDetailAddress,
+} from './subagent-detail.js';
+import type { JsonStructuralPatchOperation } from '../json-structural-patch.js';
 
 /** Most recent completed history compaction for a session, surfaced as a
  *  transient "Compacted · freed N tokens" chip. Host-owned; cleared after a
@@ -105,6 +115,32 @@ export interface RenderFailurePayload {
   revision: number | null;
   surface: 'app' | 'transcript' | 'transcript-suspense' | 'unknown';
   classification: 'component_error' | 'uncaught_error' | 'unhandled_rejection' | 'unknown';
+}
+
+// ─── Public subagent detail subscription protocol (Phase 5) ──────────────────
+//
+// Explicit expansion subscribes to the complete child transcript through a
+// closed key-scoped subscription. The webview owns `detailKey` (opaque,
+// identifies the expanded card); the host owns the subscription lifecycle:
+// exactly one active subscription per `{viewGeneration, detailKey}`, minted
+// subscription IDs, exact generation/address owners, and bounded tombstones.
+// Detail pages/deltas never enter `ViewState`; they cross only as the six
+// imperative stream variants below.
+
+/** Host-minted identity carried on every host→webview detail imperative. A
+ *  generation change (host, view, backend, or worker) invalidates the stream;
+ *  the webview drops any imperative whose route does not match the key-scoped
+ *  subscription it opened. */
+export interface HostDetailRoute {
+  hostInstanceId: string;
+  hostGeneration: number;
+  viewGeneration: number;
+  backendGeneration: number;
+  coordinatorGeneration: number;
+  workerId?: string;
+  workerGeneration?: number;
+  detailKey: string;
+  subscriptionId: string;
 }
 
 /** The full view state sent from the extension host to the webview. */
@@ -211,6 +247,8 @@ export interface ViewState {
   systemPrompts: SystemPromptEntry[];
   modelSettings: ModelSettings | null;
   availableModels: ModelInfo[];
+  /** Freshness of the active session's picker catalog. */
+  availableModelsStatus: 'provisional' | 'loading' | 'authoritative';
   contextUsage: ContextWindowUsage | null;
   prefs: ChatPrefs;
   /** Extensions discovered from the backend (tools + hooks). */
@@ -304,6 +342,48 @@ export type HostToWebviewMessage =
       type: 'detailResult';
       result: DetailResult;
     }
+  // ── Phase 5 subagent detail stream. The six variants below are the ONLY
+  //    stream content; subscribe/unsubscribe/fetchPages acknowledgements are
+  //    correlated control responses and never carry pages. Each message
+  //    carries the full `HostDetailRoute` so a stale or cross-key message can
+  //    never be applied to the wrong expanded subtree. ──
+  | (HostDetailRoute & {
+      type: 'detail.start';
+      address: LiveSubagentDetailAddress;
+      source: 'live' | 'durable';
+      baselineRevision: number;
+      pageCount: number;
+      totalBytes: number;
+    })
+  | (HostDetailRoute & {
+      type: 'detail.page';
+      ref: DetailPageRef;
+      payload: DetailPagePayload;
+      payloadBytes: number;
+      checksum: DetailChecksum;
+    })
+  | (HostDetailRoute & {
+      type: 'detail.delta';
+      baseRevision: number;
+      revision: number;
+      operations: JsonStructuralPatchOperation[];
+    })
+  | (HostDetailRoute & {
+      type: 'detail.rebase';
+      currentRevision: number;
+      reason: DetailRebaseReason;
+    })
+  | (HostDetailRoute & {
+      type: 'detail.terminal';
+      revision: number;
+      durableRef: LazyDetailRef;
+    })
+  | (HostDetailRoute & {
+      type: 'detail.error';
+      code: DetailErrorCode;
+      message: string;
+      retryable: boolean;
+    })
   | {
       /** Posted by the host when a session completes under the completion-
        *  notification policy (paired with the window-flash alert). Fire-and-
@@ -360,7 +440,32 @@ type WebviewToHostMessagePayload =
   | { type: 'openSession'; sessionPath: string }
   | { type: 'closeSession'; sessionPath: string; interactionId?: string }
   | { type: 'requestDetail'; sessionPath: string; ref: LazyDetailRef }
+  // ── Phase 5: demand-driven subagent detail. `viewGeneration` and `detailKey`
+  //    are required (not the optional wrapper field): the host records the
+  //    exact renderer owner before forwarding any stream content. The host
+  //    mints the `subscriptionId`; the webview learns it from `detail.start`.
+  //    Generic one-shot tool/reasoning details keep using `requestDetail`. ──
+  | {
+      type: 'detail.subscribe';
+      viewGeneration: number;
+      detailKey: string;
+      address: LiveSubagentDetailAddress;
+      cursor?: DetailCursor;
+    }
+  | {
+      type: 'detail.unsubscribe';
+      viewGeneration: number;
+      detailKey: string;
+      reason: 'collapse' | 'unmount' | 'session-change';
+    }
+  | {
+      type: 'detail.fetchPages';
+      viewGeneration: number;
+      detailKey: string;
+      ref: DetailPageRef;
+    }
   | { type: 'duplicateSession'; sessionPath: string }
+  | { type: 'retryCreateOperation'; operationId: string }
   | { type: 'moveSessionTab'; sessionPath?: string; fromIndex: number; toIndex: number }
   | { type: 'togglePinTab'; sessionPath: string }
   | { type: 'groupPinnedTab'; sourcePath: string; targetPath: string }

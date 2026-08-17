@@ -81,6 +81,12 @@ export class SessionCatalog {
     return true;
   }
 
+  /** Explicit mutation invalidation for coordinator-owned cold commits whose
+   * content may change without changing the filename inventory. */
+  refresh(): void {
+    this.invalidate();
+  }
+
   private invalidate(): void {
     this.cacheGeneration += 1;
     this.basePromise = undefined;

@@ -332,7 +332,10 @@ test('tool renderers share one disclosure key behind a stable ToolCallItem lifec
   assert.match(itemSource, /useCollapsibleOpen\(toolDisclosureKey\(toolCall\.id\), prefs\.autoExpandSubagentCalls\)/);
   assert.match(genericSource, /useCollapsibleOpen\(toolDisclosureKey\(toolCall\.id\), autoExpand && !isProvisional\)/);
   assert.match(searchSource, /useCollapsibleOpen\(toolDisclosureKey\(toolCall\.id\), prefs\.autoExpandToolCalls\)/);
-  assert.doesNotMatch(itemSource, /`subagent:\$\{toolCall\.id\}/);
+  // The subagent detail key must never be a bare `${toolCall.id}` hardcode —
+  // the Phase 5 key is index-qualified (`subagent:${toolCall.id}:${index}`)
+  // so parallel-group children own distinct key-scoped subscriptions.
+  assert.doesNotMatch(itemSource, /`subagent:\$\{toolCall\.id\}`/);
 
   const { ToolCallItem } = await loadWebviewModules();
   const html = renderToString(h(ToolCallItem, {

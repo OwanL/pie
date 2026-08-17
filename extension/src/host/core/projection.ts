@@ -359,6 +359,9 @@ function projectViewState(state: ArchState): ViewState {
 
   const activeAvailableModels: ModelInfo[] =
     activePath ? settings.availableModelsBySession[activePath] ?? EMPTY_AVAILABLE_MODELS : EMPTY_AVAILABLE_MODELS;
+  const activeAvailableModelsStatus: 'provisional' | 'loading' | 'authoritative' = activePath
+    ? settings.availableModelsStatusBySession[activePath] ?? 'loading'
+    : 'authoritative';
 
   const activeContextUsage: ContextWindowUsage | null =
     activePath ? settings.contextUsageBySession[activePath] ?? null : null;
@@ -441,6 +444,7 @@ function projectViewState(state: ArchState): ViewState {
     systemPrompts: activeSystemPrompts,
     modelSettings: settings.modelSettings,
     availableModels: activeAvailableModels,
+    availableModelsStatus: activeAvailableModelsStatus,
     contextUsage: activeContextUsage,
     prefs: settings.prefs,
     fileChanges: activeFileChanges,

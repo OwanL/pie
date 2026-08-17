@@ -166,6 +166,9 @@ export function isSessionOpenedPayload(value: unknown): value is SessionOpenedPa
     && (value.runtimeReady === undefined || isBoolean(value.runtimeReady))
     && isOptionalLiveTurnRecoveryIdentity(value.liveTurnRecoveryIdentity)
     && isOptionalSnapshotUnavailable(value.snapshotUnavailable)
+    && isOptionalString(value.operationId)
+    && (value.operationAttempt === undefined
+      || (Number.isInteger(value.operationAttempt) && (value.operationAttempt as number) >= 1))
   );
 }
 
@@ -453,6 +456,7 @@ export function isAuxiliaryLlmUsagePayload(value: unknown): value is AuxiliaryLl
 export function isOperationalErrorPayload(value: unknown): value is OperationalErrorPayload {
   return (
     isObject(value)
+    && isOptionalString(value.incidentId)
     && isString(value.code)
     && isString(value.message)
     && isOptionalString(value.detail)

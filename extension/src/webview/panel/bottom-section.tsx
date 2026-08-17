@@ -27,6 +27,7 @@ export interface BottomSectionProps {
   privacyMode?: boolean;
   modelSettings: ViewState['modelSettings'];
   availableModels: ViewState['availableModels'];
+  availableModelsStatus: ViewState['availableModelsStatus'];
   availableExtensions: ViewState['availableExtensions'];
   contextUsage: ViewState['contextUsage'];
   prefs: ViewState['prefs'];
@@ -67,6 +68,7 @@ export const BottomSection = memo(function BottomSection({
   privacyMode = false,
   modelSettings,
   availableModels,
+  availableModelsStatus,
   availableExtensions,
   contextUsage,
   prefs,
@@ -114,6 +116,7 @@ export const BottomSection = memo(function BottomSection({
         privacyMode={privacyMode}
         modelSettings={modelSettings}
         availableModels={availableModels}
+        availableModelsStatus={availableModelsStatus}
         availableExtensions={availableExtensions}
         contextUsage={contextUsage}
         prefs={prefs}

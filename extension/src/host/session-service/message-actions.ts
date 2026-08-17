@@ -24,6 +24,21 @@ import type { ScheduleRender } from './types';
 import type { ArchState } from '../core/arch-state';
 import type { Event } from '../core/events';
 
+interface HydrateModelMetadata {
+  backendGeneration?: number;
+  hydrationRevision?: number;
+  modelWriteFence?: number;
+}
+
+interface InFlightHydration {
+  /** The fence is fixed at the actual request start. A later SetModel must be
+   *  able to reject this shared request even when another caller joins it. */
+  readonly modelWriteFence: number;
+  readonly hydrationRevision: number;
+  followUp?: { hydrationRevision: number; modelWriteFence: number };
+  promise: Promise<void>;
+}
+
 interface SessionMessageActionsOptions {
   context: vscode.ExtensionContext;
   backend: BackendClient;
@@ -42,6 +57,8 @@ export class SessionMessageActions {
   private readonly createNewSession: () => string;
   private readonly getArchState: () => ArchState;
   private readonly dispatchArch: (event: Event) => void;
+  private readonly inFlightHydrations = new Map<string, InFlightHydration>();
+  private hydrationRevision = 0;
 
   constructor(options: SessionMessageActionsOptions) {
     this.context = options.context;
@@ -107,38 +124,113 @@ export class SessionMessageActions {
     await this.loadTranscriptPage('latest', requestedSessionPath);
   }
 
-  async hydrateModelState(sessionPath: string): Promise<void> {
-    try {
-      const [modelSettings, models] = await Promise.all([
+  async hydrateModelState(sessionPath: string, metadata: HydrateModelMetadata = {}): Promise<void> {
+    // A pending path is a host-only picker sentinel. In particular, never let
+    // a normalized form such as `C:\\repo\\__pending__:1` reach models.list.
+    if (!sessionPath || isPendingTabPath(sessionPath)) {
+      return;
+    }
+
+    const backendGeneration = metadata.backendGeneration ?? this.state.getBackendGeneration();
+    const hydrationRevision = metadata.hydrationRevision ?? this.hydrationRevision + 1;
+    this.hydrationRevision = Math.max(this.hydrationRevision, hydrationRevision);
+    const modelWriteFence = metadata.modelWriteFence ?? this.getArchState().settings.modelWriteFence;
+    const key = `${backendGeneration}:${sessionPath}`;
+    const existing = this.inFlightHydrations.get(key);
+    if (existing) {
+      // A joined caller never relabels transport work that already started.
+      // Coalesce only the newest requested revision into one follow-up read;
+      // the old result keeps its original revision and will be rejected if a
+      // newer global hydration has started meanwhile.
+      if (hydrationRevision > existing.hydrationRevision
+        && hydrationRevision > (existing.followUp?.hydrationRevision ?? existing.hydrationRevision)) {
+        existing.followUp = { hydrationRevision, modelWriteFence };
+      }
+      await existing.promise;
+      if (existing.followUp?.hydrationRevision === hydrationRevision
+        && this.state.getBackendGeneration() === backendGeneration) {
+        if (this.inFlightHydrations.get(key) === existing) this.inFlightHydrations.delete(key);
+        return await this.hydrateModelState(sessionPath, {
+          backendGeneration,
+          hydrationRevision,
+          modelWriteFence: existing.followUp.modelWriteFence,
+        });
+      }
+      return;
+    }
+
+    const record: InFlightHydration = {
+      modelWriteFence,
+      hydrationRevision,
+      promise: Promise.resolve(),
+    };
+    const isCurrentGeneration = (): boolean =>
+      this.state.getBackendGeneration() === backendGeneration
+      && !isPendingTabPath(sessionPath);
+
+    const run = (async () => {
+      // Start both reads independently. A settings failure must not suppress a
+      // valid catalog, and a catalog failure must not suppress valid settings.
+      const settingsRequest = Promise.resolve().then(() =>
         this.backend.request<ModelSettings>('settings.get'),
+      );
+      const modelsRequest = Promise.resolve().then(() =>
         this.backend.request<ModelInfo[]>('models.list', { sessionPath }),
-      ]);
+      );
 
-      // Sync the global `modelSettings` (persisted default model, provider,
-      // and thinking level) read-only from the backend. This is a HYDRATE,
-      // not a user model switch: it must not touch the focused session's live
-      // model or persist anything, so we dispatch `ModelSettingsHydrated` (read-only ArchState
-      // update) instead of `SetModel`. The previous implementation dispatched
-      // `SetModel` whenever the session's per-session model differed from the
-      // global default — a legitimate state (a session can run a non-default
-      // model) — which then ran `settings.set` with `isChangingModel=true`,
-      // tripping the backend's busy-session guard with a spurious
-      // REQUEST_IN_PROGRESS error while a turn was streaming, and would have
-      // clobbered the session's per-session model on top of that.
-      const archState = this.getArchState();
-      const currentSettings = archState.settings.modelSettings;
-      const settingsInSync = modelSettingsMatchForHydration(currentSettings, modelSettings);
-      if (!settingsInSync) {
-        this.dispatchArch({ kind: 'ModelSettingsHydrated', modelSettings });
-      }
+      const applySettings = settingsRequest.then((modelSettings) => {
+        if (!isCurrentGeneration()) return;
+        const currentSettings = this.getArchState().settings.modelSettings;
+        if (!modelSettingsMatchForHydration(currentSettings, modelSettings)) {
+          this.dispatchArch({
+            kind: 'ModelSettingsHydrated',
+            sessionPath,
+            modelSettings,
+            backendGeneration,
+            hydrationRevision: record.hydrationRevision,
+            modelWriteFence: record.modelWriteFence,
+          });
+        }
+        this.scheduleRender();
+      }).catch((err) => {
+        auditLog('session-service', 'hydrateModelState.settingsFailed', {
+          error: toErrorMessage(err),
+          backendGeneration,
+          hydrationRevision: record.hydrationRevision,
+        });
+      });
 
-      const existing = archState.settings.availableModelsBySession[sessionPath] ?? [];
-      if (models.length > 0 || existing.length === 0) {
-        this.dispatchArch({ kind: 'AvailableModelsChanged', sessionPath, models });
+      const applyModels = modelsRequest.then((models) => {
+        if (!isCurrentGeneration()) return;
+        this.dispatchArch({
+          kind: 'AvailableModelsChanged',
+          sessionPath,
+          models,
+          backendGeneration,
+          hydrationRevision: record.hydrationRevision,
+          modelWriteFence: record.modelWriteFence,
+        });
+        this.scheduleRender();
+      }).catch((err) => {
+        auditLog('session-service', 'hydrateModelState.modelsFailed', {
+          error: toErrorMessage(err),
+          backendGeneration,
+          hydrationRevision: record.hydrationRevision,
+          sessionPath,
+        });
+      });
+
+      await Promise.allSettled([applySettings, applyModels]);
+    })();
+
+    record.promise = run;
+    this.inFlightHydrations.set(key, record);
+    try {
+      await run;
+    } finally {
+      if (this.inFlightHydrations.get(key) === record) {
+        this.inFlightHydrations.delete(key);
       }
-      this.scheduleRender();
-    } catch (err) {
-      auditLog('session-service', 'hydrateModelState.failed', { error: toErrorMessage(err) });
     }
   }
 

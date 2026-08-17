@@ -196,7 +196,7 @@ test('a failed attempt at the retry budget becomes terminal failed and is not re
   });
 });
 
-test('a running closeSelf that succeeds after PersistTabs only stays a hide and marks the tab review-closed', async () => {
+test('a running closeSelf that succeeds after PersistTabs only stays an intentional hide', async () => {
   await withReviewsDir((dir) => {
     const sessionPath = '/running-self';
     const arch: ArchState = {

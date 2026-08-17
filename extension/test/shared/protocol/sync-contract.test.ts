@@ -11,6 +11,7 @@ import {
   type ComposerInput,
   type ContextUsageChangedPayload,
   type HostToWebviewMessage,
+  type LiveSubagentDetailAddress,
   type ModelInfo,
   type SessionAnalyticsFactors,
   type SessionOpenedPayload,
@@ -210,6 +211,7 @@ test('HostToWebviewMessage state envelope carries hostInstanceId and revision', 
       systemPrompts: [],
       modelSettings: null,
       availableModels: [],
+  availableModelsStatus: 'authoritative',
       contextUsage: null,
       prefs: DEFAULT_CHAT_PREFS,
       availableExtensions: [],
@@ -478,6 +480,220 @@ test('HostToWebviewMessage.sendRejected carries the text draft payload and optio
     assert.equal(withInputs.inputs?.length, 1);
     assert.equal(withInputs.inputs?.[0]?.id, 'in1');
   }
+});
+
+test('detail.subscribe/unsubscribe/fetchPages carry the required renderer owner identity', () => {
+  // `viewGeneration` and `detailKey` are REQUIRED (not the optional wrapper
+  // field): the host records the exact renderer owner before forwarding any
+  // stream content. The webview mints nothing — the host returns the
+  // subscription ID inside `detail.start`.
+  const subscribe: WebviewToHostMessage = {
+    type: 'detail.subscribe',
+    viewGeneration: 7,
+    detailKey: 'subagent:msg-1:tool-1',
+    address: {
+      sessionPath: '/workspace/session.jsonl',
+      turnId: 'turn-1',
+      rootToolCallId: 'tool-1',
+      rootAttemptId: 'attempt-1',
+      lineage: [{ childId: 'child-1', spawningToolCallId: 'tool-1', attemptId: 'attempt-1' }],
+    },
+    cursor: { revision: 3, pageIndex: 0 },
+  };
+  assert.equal(subscribe.type, 'detail.subscribe');
+  if (subscribe.type === 'detail.subscribe') {
+    assert.equal(subscribe.viewGeneration, 7);
+    assert.equal(subscribe.detailKey, 'subagent:msg-1:tool-1');
+    assert.equal(subscribe.address.rootToolCallId, 'tool-1');
+    assert.deepEqual(subscribe.cursor, { revision: 3, pageIndex: 0 });
+  }
+
+  const unsubscribe: WebviewToHostMessage = {
+    type: 'detail.unsubscribe',
+    viewGeneration: 7,
+    detailKey: 'subagent:msg-1:tool-1',
+    reason: 'collapse',
+  };
+  assert.equal(unsubscribe.type, 'detail.unsubscribe');
+  if (unsubscribe.type === 'detail.unsubscribe') {
+    assert.equal(unsubscribe.reason, 'collapse');
+  }
+
+  const fetchPages: WebviewToHostMessage = {
+    type: 'detail.fetchPages',
+    viewGeneration: 7,
+    detailKey: 'subagent:msg-1:tool-1',
+    ref: { baselineRevision: 5, pageIndex: 3, pageCount: 8 },
+  };
+  assert.equal(fetchPages.type, 'detail.fetchPages');
+  if (fetchPages.type === 'detail.fetchPages') {
+    assert.deepEqual(fetchPages.ref, { baselineRevision: 5, pageIndex: 3, pageCount: 8 });
+  }
+});
+
+test('HostToWebviewMessage detail stream variants carry the full HostDetailRoute', () => {
+  // The six stream variants are the ONLY stream content: every message
+  // carries the full route so a stale or cross-key message can never be
+  // applied to the wrong expanded subtree. Pages/deltas never enter
+  // `ViewState`; they cross only as these imperatives.
+  const route = {
+    hostInstanceId: 'host-instance-1',
+    hostGeneration: 0,
+    viewGeneration: 7,
+    backendGeneration: 3,
+    coordinatorGeneration: 1,
+    workerId: 'worker-1',
+    workerGeneration: 1,
+    detailKey: 'subagent:msg-1:tool-1',
+    subscriptionId: 'subscription-1',
+  };
+
+  const start: HostToWebviewMessage = {
+    type: 'detail.start',
+    ...route,
+    address: {
+      sessionPath: '/workspace/session.jsonl',
+      turnId: 'turn-1',
+      rootToolCallId: 'tool-1',
+      rootAttemptId: 'attempt-1',
+      lineage: [{ childId: 'child-1', spawningToolCallId: 'tool-1', attemptId: 'attempt-1' }],
+    },
+    source: 'live',
+    baselineRevision: 1,
+    pageCount: 1,
+    totalBytes: 4,
+  };
+  assert.equal(start.type, 'detail.start');
+  if (start.type === 'detail.start') {
+    assert.equal(start.source, 'live');
+    assert.equal(start.subscriptionId, 'subscription-1');
+    assert.equal(start.backendGeneration, 3);
+  }
+
+  const page: HostToWebviewMessage = {
+    type: 'detail.page',
+    ...route,
+    ref: { baselineRevision: 1, pageIndex: 0, pageCount: 1 },
+    payload: {
+      kind: 'json-segment', encoding: 'utf8-json', segmentId: 'segment-1', semanticPath: [],
+      startByte: 0, endByte: 4, totalBytes: 4, startCodePoint: 0, endCodePoint: 4, totalCodePoints: 4,
+      text: 'null',
+    },
+    payloadBytes: 4,
+    checksum: 'c'.repeat(64),
+  };
+  assert.equal(page.type, 'detail.page');
+  if (page.type === 'detail.page') {
+    assert.equal(page.ref.pageIndex, 0);
+    assert.equal(page.workerGeneration, 1);
+  }
+
+  const delta: HostToWebviewMessage = {
+    type: 'detail.delta',
+    ...route,
+    baseRevision: 1,
+    revision: 2,
+    operations: [{ op: 'set', path: ['exitCode'], value: 0 }],
+  };
+  assert.equal(delta.type, 'detail.delta');
+  if (delta.type === 'detail.delta') {
+    assert.deepEqual(delta.operations, [{ op: 'set', path: ['exitCode'], value: 0 }]);
+  }
+
+  const rebase: HostToWebviewMessage = { type: 'detail.rebase', ...route, currentRevision: 4, reason: 'gap' };
+  assert.equal(rebase.type, 'detail.rebase');
+  if (rebase.type === 'detail.rebase') {
+    assert.equal(rebase.reason, 'gap');
+    assert.equal(rebase.currentRevision, 4);
+  }
+
+  const terminal: HostToWebviewMessage = {
+    type: 'detail.terminal',
+    ...route,
+    revision: 5,
+    durableRef: {
+      sessionPath: '/workspace/session.jsonl',
+      messageId: 'msg-1',
+      key: 'durable:tool:msg-1:tool-1',
+      kind: 'tool-result',
+      source: 'durable',
+      sizeBytes: 1024,
+      summary: 'exit code 0',
+      available: true,
+    },
+  };
+  assert.equal(terminal.type, 'detail.terminal');
+  if (terminal.type === 'detail.terminal') {
+    assert.equal(terminal.durableRef.key, 'durable:tool:msg-1:tool-1');
+    assert.equal(terminal.revision, 5);
+  }
+
+  const error: HostToWebviewMessage = {
+    type: 'detail.error',
+    ...route,
+    code: 'NOT_FOUND',
+    message: 'The subagent detail is no longer addressable.',
+    retryable: false,
+  };
+  assert.equal(error.type, 'detail.error');
+  if (error.type === 'detail.error') {
+    assert.equal(error.retryable, false);
+    assert.equal(error.subscriptionId, 'subscription-1');
+  }
+});
+
+test('webview behavior contract: collapsed cards never subscribe; expansion subscribes once; collapse unsubscribes', () => {
+  // STATE_CONTRACT § Ordinary state transport: a collapsed subagent card
+  // renders only its bounded compact preview and sends NO detail.subscribe;
+  // expansion sends exactly one subscribe carrying the current
+  // viewGeneration/detailKey/address; collapse — including during the close
+  // animation — immediately unsubscribes. This is the webview-side half of
+  // the Phase 5 contract (the host half is covered by the detail stream
+  // route tests above).
+  const {
+    clearDetailSubscriptionStore,
+    closeDetailSubscription,
+    openDetailSubscription,
+    setDetailStoreContext,
+  } = require('../../../src/webview/panel/transcript/detail-subscription-store') as typeof import('../../../src/webview/panel/transcript/detail-subscription-store');
+  clearDetailSubscriptionStore();
+  const posts: WebviewToHostMessage[] = [];
+  setDetailStoreContext({ hostInstanceId: 'h1', viewGeneration: 9, postMessage: (message) => posts.push(message) });
+
+  const address: LiveSubagentDetailAddress = {
+    sessionPath: '/workspace/session.jsonl',
+    turnId: 'turn-1',
+    rootToolCallId: 'tool-1',
+    rootAttemptId: 'attempt-1',
+    lineage: [{ childId: 'child-1', spawningToolCallId: 'tool-1', attemptId: 'attempt-1' }],
+  };
+
+  // Collapsed: nothing posted.
+  assert.equal(posts.length, 0, 'collapsed state is subscription-free');
+
+  // Expansion: exactly one subscribe with the current generation + key + address.
+  openDetailSubscription({ detailKey: 'subagent:msg-1:tool-1', address });
+  openDetailSubscription({ detailKey: 'subagent:msg-1:tool-1', address });
+  assert.equal(posts.length, 1, 're-expansion of the same owner is idempotent');
+  const subscribe = posts[0];
+  assert.equal(subscribe.type, 'detail.subscribe');
+  if (subscribe.type === 'detail.subscribe') {
+    assert.equal(subscribe.viewGeneration, 9);
+    assert.equal(subscribe.detailKey, 'subagent:msg-1:tool-1');
+    assert.equal(subscribe.address.rootToolCallId, 'tool-1');
+  }
+
+  // Collapse: immediate unsubscribe (also during the close animation).
+  closeDetailSubscription('subagent:msg-1:tool-1', 'collapse');
+  assert.equal(posts.length, 2);
+  const unsubscribe = posts[1];
+  assert.equal(unsubscribe.type, 'detail.unsubscribe');
+  if (unsubscribe.type === 'detail.unsubscribe') {
+    assert.equal(unsubscribe.viewGeneration, 9);
+    assert.equal(unsubscribe.reason, 'collapse');
+  }
+  closeDetailSubscription('subagent:msg-1:tool-1', 'unmount');
+  assert.equal(posts.length, 2, 'unmount after collapse does not double-post');
 });
 
 test('changed-files peek/hover overlay is webview-local, not host state', () => {

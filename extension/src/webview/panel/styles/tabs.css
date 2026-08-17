@@ -508,8 +508,9 @@ body.session-tab-dragging {
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--panel-success) 12%, transparent);
 }
 
-/* ── Close button ────────────────────────────────────────────────────────── */
+/* ── Close / delayed-create retry buttons ───────────────────────────────── */
 
+.session-tab-retry,
 .session-tab-close {
   width: 20px;
   height: 20px;
@@ -536,6 +537,14 @@ body.session-tab-dragging {
     transform var(--panel-duration-fast) var(--panel-ease-spring);
 }
 
+.session-tab-retry {
+  color: var(--panel-warning);
+  opacity: 0.9;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.session-tab-retry:active:not(:disabled),
 .session-tab-close:active:not(:disabled) {
   transform: scale(0.88);
 }
@@ -546,6 +555,8 @@ body.session-tab-dragging {
   opacity: 0.88;
 }
 
+.session-tab-retry:hover,
+.session-tab-retry:focus-visible,
 .session-tab-close:hover,
 .session-tab-close:focus-visible {
   background: var(--panel-control-hover);

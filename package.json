@@ -16,6 +16,7 @@
     "test:all": "node ./scripts/run-tests.mjs --fast",
     "test:coverage": "node ./scripts/run-tests.mjs",
     "test:integration": "node ./scripts/run-tests.mjs --fast --integration",
+    "test:large-detail": "npm --prefix extension run test:large-detail",
     "test:file": "node ./scripts/run-test-files.mjs",
     "test:changed": "node ./scripts/run-affected-tests.mjs",
     "test:scripts": "node ./scripts/run-tests.mjs --fast --package scripts",

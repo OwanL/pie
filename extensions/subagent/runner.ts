@@ -26,7 +26,7 @@ import { getFinalOutput } from "./formatting.js";
 import type { ThinkingLevel, BucketSelection } from "./bucket-selector.js";
 import { resolveExecutionModel } from "./model-resolution.js";
 import { formatRequirementDiagnostic, requirementIsActive } from "./src/selection.js";
-import type { ModelRequirements, OnUpdateCallback, SingleResult, SubagentAttemptPhase, SubagentDetails, SubagentTurnThroughputSample } from "./types.js";
+import type { ModelRequirements, OnUpdateCallback, SingleResult, SubagentAttemptPhase, SubagentChildIdentity, SubagentDetails, SubagentTurnThroughputSample } from "./types.js";
 import { createInvalidAgentResult } from "./validation.js";
 import { toErrorMessage } from "../../shared/error-message.js";
 import { subagentContext } from "../../shared/subagent-context.js";
@@ -47,6 +47,7 @@ import {
 import { inflightSemaphore, type Release } from "./src/concurrency-limit.js";
 import { globalOrphanRegistry, type OrphanCleanupRegistry } from "./src/cleanup.js";
 import type { RetryClock } from "./src/retry.js";
+import { isRuntimeTraceEnabled, recordRuntimeTrace } from "./src/runtime-trace.js";
 
 type SubagentSkillsOverride = (base: { skills: Skill[]; diagnostics: ResourceDiagnostic[] }) => { skills: Skill[]; diagnostics: ResourceDiagnostic[] };
 
@@ -135,6 +136,7 @@ interface SubagentSdk {
 
 let cachedSdkPromise: Promise<SubagentSdk> | undefined;
 let orphanAttemptCounter = 0;
+let childIdentityCounter = 0;
 
 /**
  * Generate a stable, globally-unique attempt identity. The same id is used for
@@ -143,6 +145,20 @@ let orphanAttemptCounter = 0;
  */
 export function nextAttemptIdentity(agentName: string, toolCallId: string | undefined): string {
 	return `${agentName}:${toolCallId ?? "no-tool-call"}:${orphanAttemptCounter++}`;
+}
+
+/** Allocate producer identity once when a logical child is created. */
+export function nextChildIdentity(agentName: string, toolCallId: string): string {
+	return `${agentName}:${toolCallId}:child:${childIdentityCounter++}`;
+}
+
+export function extendSubagentLineage(
+	parent: readonly SubagentChildIdentity[] | undefined,
+	childId: string,
+	spawningToolCallId: string,
+	attemptId: string,
+): SubagentChildIdentity[] {
+	return [...(parent ?? []).map((identity) => ({ ...identity })), { childId, spawningToolCallId, attemptId }];
 }
 
 async function loadSubagentSdk(): Promise<SubagentSdk> {
@@ -220,6 +236,8 @@ export interface SubagentRuntimeContext {
 	keptSkills?: string[] | "keep-all";
 	/** One process-wide permit held for the complete root-tree lifetime. */
 	processPermitScope?: ProcessPermitScope;
+	/** Immutable producer lineage of the currently executing ancestor attempt. */
+	lineage?: SubagentChildIdentity[];
 }
 
 // Pi loads every AgentSession's extensions through a fresh jiti instance with
@@ -405,6 +423,7 @@ function createUpdateEmitter(
 	onUpdate: OnUpdateCallback | undefined,
 	makeDetails: (results: SingleResult[]) => SubagentDetails,
 	streamingTextRef: { value: string },
+	toolCallId?: string,
 ): UpdateEmitter {
 	let lastEmittedAt = 0;
 	let emittedFirstStreamingUpdate = false;
@@ -414,11 +433,30 @@ function createUpdateEmitter(
 		pendingTimer = undefined;
 		if (closed || !onUpdate) return;
 		lastEmittedAt = Date.now();
+		const startedAt = performance.now();
 		const finalOutput = getFinalOutput(result.messages);
 		const text = finalOutput || streamingTextRef.value || "(running...)";
+		const details = makeDetails([result]);
+		const durationMs = Math.max(0, performance.now() - startedAt);
+		const runtimeContext = readRuntimeContext();
+		// This is the producer-side source update. Its recursive payload is
+		// already present in the update, but no producer byte counter exists here.
+		recordRuntimeTrace({
+			phase: "source_update",
+			durationMs,
+			childCount: 1,
+			messageCount: result.messages.length,
+			payloadClass: "source",
+			availabilityReason: "source_preview_not_serialized_at_producer_boundary",
+			identifiers: {
+				session: runtimeContext.rootSessionPath,
+				attempt: result.attemptId,
+				tool: toolCallId,
+			},
+		});
 		onUpdate({
 			content: [textContent(text)],
-			details: makeDetails([result]),
+			details,
 		});
 	};
 	const emit = ((immediate = true) => {
@@ -536,7 +574,14 @@ function recordAssistantMessage(
  * Updates that arrive before the assistant message is committed are buffered by
  * the subscription and replayed once its `message_end` arrives.
  */
-function progressFingerprint(value: unknown): string {
+interface ProgressFingerprintTrace {
+	childCount?: number;
+	messageCount?: number;
+	attemptId?: string;
+	producedPayloadBytes?: number;
+}
+
+function progressFingerprint(value: unknown, trace?: ProgressFingerprintTrace): string {
 	// Nested modern subagent updates expose unique attempt ids and monotonic
 	// progress generations. They are a complete cheap revision key for the
 	// recursive result, avoiding JSON.stringify over multi-megabyte transcripts
@@ -548,29 +593,64 @@ function progressFingerprint(value: unknown): string {
 			: undefined;
 		const results = Array.isArray(details?.results) ? details.results : undefined;
 		if (results && results.length > 0) {
+			trace && (trace.childCount = results.length);
+			let messageCount = 0;
 			const revisions = results.map((item) => {
 				if (!item || typeof item !== "object") return undefined;
 				const result = item as Record<string, unknown>;
+				if (Array.isArray(result.messages)) messageCount += result.messages.length;
+				if (trace && trace.attemptId === undefined && typeof result.attemptId === "string") {
+					trace.attemptId = result.attemptId;
+				}
 				return typeof result.attemptId === "string" && Number.isSafeInteger(result.progressGeneration)
 					? `${result.attemptId}:${result.progressGeneration}`
 					: undefined;
 			});
+			if (trace) trace.messageCount = messageCount;
 			if (revisions.every((revision): revision is string => revision !== undefined)) {
-				return `subagent:${revisions.join("|")}`;
+				const fingerprint = `subagent:${revisions.join("|")}`;
+				if (trace && isRuntimeTraceEnabled()) trace.producedPayloadBytes = Buffer.byteLength(fingerprint, "utf8");
+				return fingerprint;
 			}
 		}
 	}
 	const seen = new WeakSet<object>();
+	const serializationStartedAt = performance.now();
 	try {
-		return JSON.stringify(value, (_key, candidate) => {
+		const serialized = JSON.stringify(value, (_key, candidate) => {
 			if (typeof candidate === "bigint") return `${candidate}n`;
 			if (typeof candidate === "object" && candidate !== null) {
 				if (seen.has(candidate)) return "[Circular]";
 				seen.add(candidate);
 			}
 			return candidate;
-		}) ?? String(value);
+		});
+		const fingerprint = serialized ?? String(value);
+		// Avoid a second full pass over a large existing fingerprint when the
+		// backend has not installed a sink. The JSON.stringify above is producer
+		// behavior; byte accounting is telemetry-only.
+		const producedPayloadBytes = isRuntimeTraceEnabled()
+			? Buffer.byteLength(fingerprint, "utf8")
+			: undefined;
+		if (trace) trace.producedPayloadBytes = producedPayloadBytes;
+		const runtimeContext = readRuntimeContext();
+		// Fingerprint keys for dedupe decisions are not compact-event bytes, so
+		// they deliberately carry no payload class: a consumer summing a class
+		// must never count them as compact-event bytes.
+		recordRuntimeTrace({
+			phase: "serialize",
+			durationMs: Math.max(0, performance.now() - serializationStartedAt),
+			producedPayloadBytes,
+			identifiers: { session: runtimeContext.rootSessionPath, attempt: trace?.attemptId },
+		});
+		return fingerprint;
 	} catch {
+		const runtimeContext = readRuntimeContext();
+		recordRuntimeTrace({
+			phase: "serialize",
+			durationMs: Math.max(0, performance.now() - serializationStartedAt),
+			identifiers: { session: runtimeContext.rootSessionPath, attempt: trace?.attemptId },
+		});
 		return String(value);
 	}
 }
@@ -583,10 +663,26 @@ function isNewToolProgress(
 	toolCallId: string,
 	partialResult: unknown,
 ): boolean {
-	const fingerprint = progressFingerprint(partialResult);
-	if (toolProgress.get(toolCallId) === fingerprint) return false;
-	toolProgress.set(toolCallId, fingerprint);
-	return true;
+	const startedAt = performance.now();
+	const fingerprintTrace: ProgressFingerprintTrace = {};
+	const fingerprint = progressFingerprint(partialResult, fingerprintTrace);
+	const duplicate = toolProgress.get(toolCallId) === fingerprint;
+	if (!duplicate) toolProgress.set(toolCallId, fingerprint);
+	const runtimeContext = readRuntimeContext();
+	recordRuntimeTrace({
+		phase: "dedupe",
+		outcome: duplicate ? "duplicate" : "changed",
+		durationMs: Math.max(0, performance.now() - startedAt),
+		producedPayloadBytes: fingerprintTrace.producedPayloadBytes,
+		childCount: fingerprintTrace.childCount,
+		messageCount: fingerprintTrace.messageCount,
+		identifiers: {
+			session: runtimeContext.rootSessionPath,
+			attempt: fingerprintTrace.attemptId,
+			tool: toolCallId,
+		},
+	});
+	return !duplicate;
 }
 
 function applyToolExecutionUpdate(
@@ -1287,11 +1383,18 @@ export async function runSingleAgent(
 		currentResult.activityDetail = requirementDiagnostic;
 		currentResult.activitySince = now;
 		currentResult.completedAt = now;
+		const traceContext = readRuntimeContext();
+		recordRuntimeTrace({
+			phase: "terminal",
+			childCount: 1,
+			messageCount: 0,
+			identifiers: { session: traceContext.rootSessionPath, tool: _toolCallId },
+		});
 		return currentResult;
 	}
 	const streamingTextRef = { value: "" };
 	const streamingReasoningRef = { value: "" };
-	const emitUpdate = createUpdateEmitter(currentResult, onUpdate, makeDetails, streamingTextRef);
+	const emitUpdate = createUpdateEmitter(currentResult, onUpdate, makeDetails, streamingTextRef, _toolCallId);
 
 	const sdk = _internal?.sdk ?? (await loadSubagentSdk());
 	const promptTimeoutMs = _internal?.timeoutMs ?? resolveSubagentTimeoutMs();
@@ -1480,10 +1583,31 @@ export async function runSingleAgent(
 			cause: (err as { name?: string } | null)?.name === "AbortError" ? "aborted" : "error",
 			error: currentResult.errorMessage,
 		});
-		onUpdate?.({
-			content: [textContent(`⚠ ${agentName}: ${currentResult.errorMessage}`)],
-			details: makeDetails([currentResult]),
+		const preSpawnUpdateStartedAt = performance.now();
+		const details = makeDetails([currentResult]);
+		const traceContext = readRuntimeContext();
+		recordRuntimeTrace({
+			phase: "source_update",
+			durationMs: Math.max(0, performance.now() - preSpawnUpdateStartedAt),
+			childCount: 1,
+			messageCount: currentResult.messages.length,
+			payloadClass: "source",
+			availabilityReason: "source_preview_not_serialized_at_producer_boundary",
+			identifiers: { session: traceContext.rootSessionPath, attempt: currentResult.attemptId, tool: _toolCallId },
 		});
+		try {
+			onUpdate?.({
+				content: [textContent(`⚠ ${agentName}: ${currentResult.errorMessage}`)],
+				details,
+			});
+		} finally {
+			recordRuntimeTrace({
+				phase: "terminal",
+				childCount: 1,
+				messageCount: currentResult.messages.length,
+				identifiers: { session: traceContext.rootSessionPath, attempt: currentResult.attemptId, tool: _toolCallId },
+			});
+		}
 		emitUpdate.close();
 		// Reclaim any orphaned exit-signal listeners the loader leaked before
 		// the pre-spawn phase failed (reload may have run partially). See the
@@ -1522,30 +1646,46 @@ export async function runSingleAgent(
 	const cleanupOwnedSession = (): void => {
 		if (sessionCleanedUp) return;
 		sessionCleanedUp = true;
-		// Publish terminal lifecycle state before teardown. Parallel siblings can
-		// keep the enclosing tool call live, so the webview cannot rely on the
-		// durability-gated tool result to learn that this child has finished.
+		const terminalStartedAt = performance.now();
 		try {
-			if (currentResult.exitCode !== -1) emitUpdate();
-		} catch {
-			// A parent update consumer must not prevent session/permit cleanup.
-		}
-		// Stop attempt-owned publication before teardown or a fallback attempt can
-		// begin. This clears any trailing throttled update from the old attempt.
-		emitUpdate.close();
-		// Fence the SDK callback before cancelling UI or disposing the session;
-		// either operation may synchronously flush provider/extension callbacks.
-		teardownSession(unsubscribe, session, cancelProxy);
-		// Reclaim the orphaned exit-signal listeners the SDK's loader leaked
-		// during this session (see `snapshotSignalListeners` above). Runs after
-		// `teardownSession` so the session's own disposal has settled; the
-		// reclaimed closures are pure no-arg pool-disposers that are no-ops on
-		// a live host anyway. No-op for the mock SDK / a fixed upstream.
-		reclaimOrphanedSignalListeners(signalListenersBefore);
-		if (ownedProcessPermit) {
-			ownedProcessPermit();
-			if (runtimeContext.processPermitScope?.release === ownedProcessPermit) runtimeContext.processPermitScope = undefined;
-			ownedProcessPermit = undefined;
+			// Publish terminal lifecycle state before teardown. Parallel siblings can
+			// keep the enclosing tool call live, so the webview cannot rely on the
+			// durability-gated tool result to learn that this child has finished.
+			try {
+				if (currentResult.exitCode !== -1) emitUpdate();
+			} catch {
+				// A parent update consumer must not prevent session/permit cleanup.
+			}
+			// Stop attempt-owned publication before teardown or a fallback attempt can
+			// begin. This clears any trailing throttled update from the old attempt.
+			emitUpdate.close();
+			// Fence the SDK callback before cancelling UI or disposing the session;
+			// either operation may synchronously flush provider/extension callbacks.
+			teardownSession(unsubscribe, session, cancelProxy);
+			// Reclaim the orphaned exit-signal listeners the SDK's loader leaked
+			// during this session (see `snapshotSignalListeners` above). Runs after
+			// `teardownSession` so the session's own disposal has settled; the
+			// reclaimed closures are pure no-arg pool-disposers that are no-ops on
+			// a live host anyway. No-op for the mock SDK / a fixed upstream.
+			reclaimOrphanedSignalListeners(signalListenersBefore);
+			if (ownedProcessPermit) {
+				ownedProcessPermit();
+				if (runtimeContext.processPermitScope?.release === ownedProcessPermit) runtimeContext.processPermitScope = undefined;
+				ownedProcessPermit = undefined;
+			}
+		} finally {
+			const runtimeContext = readRuntimeContext();
+			recordRuntimeTrace({
+				phase: "terminal",
+				durationMs: Math.max(0, performance.now() - terminalStartedAt),
+				childCount: 1,
+				messageCount: currentResult.messages.length,
+				identifiers: {
+					session: runtimeContext.rootSessionPath,
+					attempt: currentResult.attemptId,
+					tool: _toolCallId,
+				},
+			});
 		}
 	};
 	// Variables used by the prompt phase are created before setup so setup

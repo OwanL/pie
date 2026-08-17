@@ -38,6 +38,30 @@ export interface BackendClientOptions {
   readyTimeoutMs?: number;
 }
 
+export interface CorrelatedBackendFailure {
+  backendGeneration: number;
+  requestId: string;
+  method: string;
+  code: string;
+  message: string;
+  sessionPath?: string;
+}
+
+/** Error returned by a correlated backend response. Its stable identity/code
+ * let the host assign analytics and notice ownership without a duplicate public
+ * `error` event. */
+export class BackendRpcError extends Error {
+  constructor(
+    readonly requestId: string,
+    readonly method: string,
+    readonly code: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'BackendRpcError';
+  }
+}
+
 /** Maximum number of bytes of stderr we keep in memory (ring buffer). */
 const STDERR_BUFFER_LIMIT = 64 * 1024;
 // Retain enough raw prefix context that a ring-buffer trim cannot normally
@@ -129,6 +153,11 @@ const RPC_TIMEOUTS_MS: Record<string, number> = {
   // a late backend delete race the host's rollback reopen.
   'session.forget': 60_000,
   'session.loadTranscriptPage': 30_000,
+  // Phase 5 demand-driven subagent detail. Subscribe awaits the worker's
+  // correlated `detail.start`; fetch awaits the requested page baseline match.
+  'detail.subscribe': 30_000,
+  'detail.unsubscribe': 15_000,
+  'detail.fetch': 30_000,
   'settings.set': 60_000,
   'settings.get': 15_000,
   'models.list': 15_000,
@@ -142,6 +171,8 @@ const RPC_TIMEOUTS_MS: Record<string, number> = {
 };
 
 export class BackendClient implements vscode.Disposable {
+  private readonly correlatedFailures = new vscode.EventEmitter<CorrelatedBackendFailure>();
+  readonly onDidCorrelatedRequestFail = this.correlatedFailures.event;
   private readonly events = new vscode.EventEmitter<EventEnvelope>();
   private readonly exits = new vscode.EventEmitter<{ code: number | null; stderr: string }>();
   private readonly requests = new RequestTracker<ResponseEnvelope>();
@@ -160,6 +191,11 @@ export class BackendClient implements vscode.Disposable {
   readonly onExit = this.exits.event;
 
   constructor(private readonly options: BackendClientOptions = {}) {}
+
+  /** Host-authoritative generation allocated for the latest spawn attempt. */
+  getGeneration(): number {
+    return this.generation;
+  }
 
   /**
    * Start the backend. Safe to call again after a previous backend exited
@@ -205,6 +241,11 @@ export class BackendClient implements vscode.Disposable {
     if (agentDirEnv) backendEnv.PI_CODING_AGENT_DIR = agentDirEnv;
     if (sessionDirEnv) backendEnv.PI_CODING_AGENT_SESSION_DIR = sessionDirEnv;
 
+    // Allocate the host-authoritative backend generation before spawning so
+    // the child can stamp every coordinator/worker/detail fence with the same
+    // identity the host uses to reject stale traffic after restart.
+    const generation = this.generation + 1;
+    this.generation = generation;
     const proc = cp.spawn(
       options.nodePath,
       [
@@ -212,6 +253,7 @@ export class BackendClient implements vscode.Disposable {
         '--sdkPath', options.sdkPath,
         '--cwd', options.cwd,
         '--hostPid', String(process.pid),
+        '--backendGeneration', String(generation),
       ],
       {
         cwd: options.cwd,
@@ -231,7 +273,6 @@ export class BackendClient implements vscode.Disposable {
     });
 
     this.proc = proc;
-    const generation = ++this.generation;
 
     if (!proc.stdout || !proc.stderr || !proc.stdin) {
       this.proc = undefined;
@@ -330,6 +371,9 @@ export class BackendClient implements vscode.Disposable {
         try {
           const payload = event.payload as BackendReadyPayload;
           assertProtocolVersion('backend.ready', payload.protocolVersion);
+          if (payload.backendGeneration !== undefined && payload.backendGeneration !== generation) {
+            throw new Error(`Backend generation mismatch: expected ${generation}, received ${payload.backendGeneration}.`);
+          }
           finishResolve(payload);
         } catch (error) {
           finishReject(error instanceof Error ? error : new Error(String(error)));
@@ -437,7 +481,19 @@ export class BackendClient implements vscode.Disposable {
       const response = await responsePromise;
       bootTraceSync('backend-client', 'response.received', { id, method });
       if (!response.ok) {
-        throw new Error(response.error.message);
+        const sessionPath = params && typeof params === 'object'
+          && typeof (params as { sessionPath?: unknown }).sessionPath === 'string'
+          ? (params as { sessionPath: string }).sessionPath
+          : undefined;
+        this.correlatedFailures.fire({
+          backendGeneration: this.generation,
+          requestId: id,
+          method,
+          code: response.error.code,
+          message: response.error.message,
+          ...(sessionPath ? { sessionPath } : {}),
+        });
+        throw new BackendRpcError(id, method, response.error.code, response.error.message);
       }
       return response.result as TResult;
     } catch (error) {
@@ -639,6 +695,7 @@ export class BackendClient implements vscode.Disposable {
     this.requests.rejectAll(new Error('Backend client disposed.'));
     this.events.dispose();
     this.exits.dispose();
+    this.correlatedFailures.dispose();
   }
 }
 

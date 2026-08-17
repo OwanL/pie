@@ -55,6 +55,9 @@ import {
   handleSessionSummariesReplaced,
   handleSessionScopeCleared,
   handlePendingPathReplaced,
+  handleCreateOperationDelayed,
+  handleCreateOperationSucceeded,
+  handleCreateOperationFailed,
   handleTabOpened,
   handleOpenTabsChanged,
   handleSessionsInterrupted,
@@ -274,6 +277,16 @@ export function reducer(state: ArchState, event: Event): ReducerResult {
 
     case 'PendingPathReplaced': {
       return handlePendingPathReplaced(state, event);
+    }
+
+    case 'CreateOperationDelayed': {
+      return handleCreateOperationDelayed(state, event);
+    }
+    case 'CreateOperationSucceeded': {
+      return handleCreateOperationSucceeded(state, event);
+    }
+    case 'CreateOperationFailed': {
+      return handleCreateOperationFailed(state, event);
     }
 
     case 'TranscriptTrimmed': {

@@ -25,6 +25,7 @@ export interface SessionServiceLike {
   createNewSession(): string;
   openSession(sessionPath: string): void;
   duplicateSession(sessionPath: string): void;
+  retryCreateOperation(operationId: string): boolean;
   loadOlderTranscript(sessionPath?: string): Promise<void>;
   loadNewerTranscript(sessionPath?: string): Promise<void>;
   jumpToLatestTranscript(sessionPath?: string): Promise<void>;
@@ -166,8 +167,21 @@ export class MessageRouter {
       case 'requestDetail':
         return await this.onRequestDetail(msg as Extract<WebviewToHostMessage, { type: 'requestDetail' }>);
 
+      case 'detail.subscribe':
+        return this.onDetailSubscribe(msg as Extract<WebviewToHostMessage, { type: 'detail.subscribe' }>);
+
+      case 'detail.unsubscribe':
+        return this.onDetailUnsubscribe(msg as Extract<WebviewToHostMessage, { type: 'detail.unsubscribe' }>);
+
+      case 'detail.fetchPages':
+        return this.onDetailFetchPages(msg as Extract<WebviewToHostMessage, { type: 'detail.fetchPages' }>);
+
       case 'duplicateSession':
         return await this.onDuplicateSession(msg as Extract<WebviewToHostMessage, { type: 'duplicateSession' }>);
+
+      case 'retryCreateOperation':
+        this.service.retryCreateOperation(msg.operationId);
+        return;
 
       case 'moveSessionTab':
         return this.onMoveSessionTab(msg as Extract<WebviewToHostMessage, { type: 'moveSessionTab' }>);
@@ -281,19 +295,19 @@ export class MessageRouter {
   // ---------------------------------------------------------------------------
 
   private onReady(): void {
-    // A running tab may have been intentionally hidden while its backend turn
-    // continued. On renderer reload, prominently restore every such tab even
-    // though the persisted open-tab list omits it. Host-owned live state never
-    // left ArchState, so this is a cheap tab projection repair, not a reopen RPC.
+    // A running tab may have been absent from the persisted open-tab list
+    // during renderer reload. Host-owned live state never left ArchState, so
+    // repairing an unmarked omission is a cheap tab projection repair, not a
+    // reopen RPC.
     //
-    // Review-closure-hidden running tabs (closeReviewed/closeSelf) are excluded:
-    // their hide is a durable outbox action, not an accidental pre-reload hide,
-    // so resurrecting them would undo the reviewer's explicit closure. The
-    // marker is host-owned and survives the webview reload boundary.
+    // Every explicit running-tab close is intentional, whether it came from
+    // ordinary user interaction or a durable review closure. Preserve that
+    // host-owned intent across renderer reloads; only an unmarked omission is
+    // repaired here.
     const arch = this.getArchState();
-    const reviewClosed = new Set(arch.sessions.reviewClosedRunningPaths);
     const hiddenRunning = arch.sessions.runningSessionPaths.filter(
-      (sessionPath) => !arch.sessions.openTabPaths.includes(sessionPath) && !reviewClosed.has(sessionPath),
+      (sessionPath) => !arch.sessions.openTabPaths.includes(sessionPath)
+        && !arch.sessions.intentionallyHiddenRunningPaths.includes(sessionPath),
     );
     for (const sessionPath of hiddenRunning) {
       this.dispatchEvent({ kind: 'TabOpened', sessionPath });
@@ -309,7 +323,7 @@ export class MessageRouter {
 
   private async onRefreshState(): Promise<void> {
     const activeSessionPath = this.getArchState().sessions.activeSessionPath;
-    if (activeSessionPath) {
+    if (activeSessionPath && !this.isPendingTabPathFn(activeSessionPath)) {
       // Phase 2: route through the CQRS reducer + effect runner instead of
       // calling the service directly. The HydrateModel effect is fire-and-forget;
       // the service's dispatched ModelSettingsHydrated/AvailableModelsChanged events apply
@@ -786,6 +800,53 @@ export class MessageRouter {
     this.dispatchEvent({
       kind: 'Command',
       cmd: { kind: 'SetFileRead', corrId: crypto.randomUUID(), sessionPath: msg.sessionPath, filePath: msg.filePath, read: msg.read },
+    });
+  }
+
+  // ─── Phase 5 detail subscription routing ───────────────────────────────────
+  // The webview owns `detailKey`; every message carries its exact renderer
+  // `viewGeneration`. Commands flow through the reducer (which stores nothing)
+  // to the EffectRunner, which mints the subscription ID and hands the
+  // subscription lifecycle to the session service. Stream content returns as
+  // detail imperatives carrying the full `HostDetailRoute`.
+
+  private onDetailSubscribe(msg: Extract<WebviewToHostMessage, { type: 'detail.subscribe' }>): void {
+    this.dispatchEvent({
+      kind: 'Command',
+      cmd: {
+        kind: 'DetailSubscribe',
+        corrId: crypto.randomUUID(),
+        viewGeneration: msg.viewGeneration,
+        detailKey: msg.detailKey,
+        address: msg.address,
+        ...(msg.cursor !== undefined ? { cursor: msg.cursor } : {}),
+      },
+    });
+  }
+
+  private onDetailUnsubscribe(msg: Extract<WebviewToHostMessage, { type: 'detail.unsubscribe' }>): void {
+    this.dispatchEvent({
+      kind: 'Command',
+      cmd: {
+        kind: 'DetailUnsubscribe',
+        corrId: crypto.randomUUID(),
+        viewGeneration: msg.viewGeneration,
+        detailKey: msg.detailKey,
+        reason: msg.reason,
+      },
+    });
+  }
+
+  private onDetailFetchPages(msg: Extract<WebviewToHostMessage, { type: 'detail.fetchPages' }>): void {
+    this.dispatchEvent({
+      kind: 'Command',
+      cmd: {
+        kind: 'DetailFetchPages',
+        corrId: crypto.randomUUID(),
+        viewGeneration: msg.viewGeneration,
+        detailKey: msg.detailKey,
+        ref: msg.ref,
+      },
     });
   }
 

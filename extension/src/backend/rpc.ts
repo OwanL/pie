@@ -3,6 +3,14 @@ import { ALL_NESTED_BUCKETS_ALLOWED, DEFAULT_HISTORY_COMPACTION_SETTINGS } from 
 import { ALLOWED_IMAGE_MIME_TYPES, decodedBase64ByteLength, MAX_AGGREGATE_IMAGE_INPUT_BYTES, MAX_IMAGE_INPUT_BYTES } from '../shared/image-constraints';
 import { THINKING_LEVELS } from '../shared/thinking-level.js';
 import { isPendingTabPath } from '../shared/tab-behavior.js';
+import {
+  isDetailCursor,
+  isDetailPageRef,
+  isLiveSubagentDetailAddress,
+  type DetailCursor,
+  type DetailPageRef,
+  type LiveSubagentDetailAddress,
+} from '../shared/protocol/subagent-detail.js';
 import { BackendError } from './server-io';
 
 export { MAX_IMAGE_INPUT_BYTES } from '../shared/image-constraints';
@@ -12,6 +20,8 @@ export { MAX_IMAGE_INPUT_BYTES } from '../shared/image-constraints';
 export interface BackendArgs {
   sdkPath: string;
   cwd: string;
+  /** Host-authoritative process generation, shared by public/detail/worker fences. */
+  backendGeneration: number;
   /** Extension-host PID used to reap the backend after a host crash. */
   hostPid?: number;
 }
@@ -20,6 +30,7 @@ export function parseArgs(argv: string[]): BackendArgs {
   let sdkPath = '';
   let cwd = process.cwd();
   let hostPid: number | undefined;
+  let backendGeneration = 1;
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -40,6 +51,15 @@ export function parseArgs(argv: string[]): BackendArgs {
         hostPid = parsed;
       }
       index += 1;
+      continue;
+    }
+    if (arg === '--backendGeneration' && value) {
+      const parsed = Number(value);
+      if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+        throw new Error('Invalid --backendGeneration argument.');
+      }
+      backendGeneration = parsed;
+      index += 1;
     }
   }
 
@@ -47,7 +67,7 @@ export function parseArgs(argv: string[]): BackendArgs {
     throw new Error('Missing required --sdkPath argument.');
   }
 
-  return { sdkPath, cwd, ...(hostPid === undefined ? {} : { hostPid }) };
+  return { sdkPath, cwd, backendGeneration, ...(hostPid === undefined ? {} : { hostPid }) };
 }
 
 // ─── RPC parameter validation ────────────────────────────────────────────────
@@ -118,6 +138,12 @@ export function validateMessageReplaceQueue(params: unknown): MessageReplaceQueu
 export interface SessionCreateParams {
   cwd?: string;
   selectionToken?: string;
+  /** Host-generated create-operation identity, stable across retries. Additive
+   *  optional during compatibility rollout: when present the backend dedupes
+   *  concurrent/retried `session.create` RPCs by it, reuses a completed durable
+   *  result, and echoes it on the resulting `session.opened`. */
+  operationId?: string;
+  operationAttempt?: number;
 }
 
 export interface SessionOpenParams extends SessionPathParams {
@@ -137,14 +163,24 @@ export interface SessionViewedParams extends SessionPathParams {
 export interface SessionDuplicateParams {
   sessionPath: string;
   selectionToken?: string;
+  /** Host-generated create-operation identity, stable across retries. Additive
+   *  optional during compatibility rollout: when present the backend dedupes
+   *  concurrent/retried `session.duplicate` RPCs by it, reuses a completed
+   *  durable result, and echoes it on the resulting `session.opened`. */
+  operationId?: string;
+  operationAttempt?: number;
 }
 
 export function validateSessionDuplicate(params: unknown): SessionDuplicateParams {
   if (!isObj(params)) fail('session.duplicate', 'expected an object');
   const { sessionPath } = validateSessionPath('session.duplicate', params);
+  const operationId = readOperationId('session.duplicate', params);
+  const operationAttempt = readOperationAttempt('session.duplicate', params);
   return {
     sessionPath,
     selectionToken: readSelectionToken('session.duplicate', params),
+    ...(operationId !== undefined ? { operationId } : {}),
+    ...(operationAttempt !== undefined ? { operationAttempt } : {}),
   };
 }
 
@@ -162,6 +198,24 @@ function readSelectionToken(method: string, params: Record<string, unknown>): st
     fail(method, 'selectionToken must be a string when provided');
   }
   return selectionToken as string | undefined;
+}
+
+/** Optional `operationId` for create/duplicate dedupe (§6.3). Must be a
+ *  non-empty string when provided so it can serve as a stable ledger key. */
+function readOperationId(method: string, params: Record<string, unknown>): string | undefined {
+  const operationId = params['operationId'];
+  if (operationId !== undefined && (typeof operationId !== 'string' || !operationId)) {
+    fail(method, 'operationId must be a non-empty string when provided');
+  }
+  return operationId as string | undefined;
+}
+
+function readOperationAttempt(method: string, params: Record<string, unknown>): number | undefined {
+  const attempt = params['operationAttempt'];
+  if (attempt !== undefined && (!Number.isInteger(attempt) || (attempt as number) < 1)) {
+    fail(method, 'operationAttempt must be a positive integer when provided');
+  }
+  return attempt as number | undefined;
 }
 
 function rejectPendingSessionPath(method: string, sessionPath: string): void {
@@ -204,9 +258,13 @@ export function validateSessionCreate(params: unknown): SessionCreateParams {
   if (cwd !== undefined && typeof cwd !== 'string') {
     fail('session.create', 'cwd must be a string when provided');
   }
+  const operationId = readOperationId('session.create', params);
+  const operationAttempt = readOperationAttempt('session.create', params);
   return {
     cwd: cwd as string | undefined,
     selectionToken: readSelectionToken('session.create', params),
+    ...(operationId !== undefined ? { operationId } : {}),
+    ...(operationAttempt !== undefined ? { operationAttempt } : {}),
   };
 }
 
@@ -887,4 +945,94 @@ export function validateSystemPromptTogglesSet(params: unknown): SystemPromptTog
     disabledEntries.push(entry);
   }
   return { sessionPath: sessionPath as string, disabledEntries };
+}
+
+// ─── Phase 5 detail subscription RPC validation ─────────────────────────────
+// The wire shapes mirror `HostToCoordinatorDetailMessage` from
+// `shared/protocol/subagent-detail.ts`; the JSONL `id` becomes `requestId` at
+// the server routing seam, so these validators accept everything except it.
+
+export interface DetailSubscribeParams {
+  subscriptionId: string;
+  address: LiveSubagentDetailAddress;
+  cursor?: DetailCursor;
+  maxPageBytes: number;
+}
+
+export interface DetailUnsubscribeParams {
+  subscriptionId: string;
+  reason: 'collapse' | 'rebase' | 'session-change' | 'host-dispose';
+}
+
+export interface DetailFetchParams {
+  subscriptionId: string;
+  address: LiveSubagentDetailAddress;
+  ref: DetailPageRef;
+  maxPageBytes: number;
+}
+
+function readSubscriptionId(method: string, params: Record<string, unknown>): string {
+  const subscriptionId = params['subscriptionId'];
+  if (typeof subscriptionId !== 'string' || !subscriptionId) {
+    fail(method, 'subscriptionId must be a non-empty string');
+  }
+  return subscriptionId as string;
+}
+
+function readMaxPageBytes(method: string, params: Record<string, unknown>): number {
+  const maxPageBytes = params['maxPageBytes'];
+  if (typeof maxPageBytes !== 'number' || !Number.isSafeInteger(maxPageBytes) || maxPageBytes <= 0) {
+    fail(method, 'maxPageBytes must be a positive safe integer');
+  }
+  return maxPageBytes as number;
+}
+
+export function validateDetailSubscribe(params: unknown): DetailSubscribeParams {
+  if (!isObj(params)) fail('detail.subscribe', 'expected an object');
+  const record = params as Record<string, unknown>;
+  const subscriptionId = readSubscriptionId('detail.subscribe', record);
+  const maxPageBytes = readMaxPageBytes('detail.subscribe', record);
+  if (!isLiveSubagentDetailAddress(record['address'])) {
+    fail('detail.subscribe', 'address must be a valid live subagent detail address');
+  }
+  const cursor = record['cursor'];
+  if (cursor !== undefined && !isDetailCursor(cursor)) {
+    fail('detail.subscribe', 'cursor must be a valid detail cursor when provided');
+  }
+  return {
+    subscriptionId,
+    address: record['address'] as LiveSubagentDetailAddress,
+    ...(cursor !== undefined ? { cursor: cursor as DetailCursor } : {}),
+    maxPageBytes,
+  };
+}
+
+export function validateDetailUnsubscribe(params: unknown): DetailUnsubscribeParams {
+  if (!isObj(params)) fail('detail.unsubscribe', 'expected an object');
+  const record = params as Record<string, unknown>;
+  const subscriptionId = readSubscriptionId('detail.unsubscribe', record);
+  const reason = record['reason'];
+  if (reason !== 'collapse' && reason !== 'rebase' && reason !== 'session-change' && reason !== 'host-dispose') {
+    fail('detail.unsubscribe', `reason must be one of collapse, rebase, session-change, host-dispose`);
+  }
+  return { subscriptionId, reason: reason as DetailUnsubscribeParams['reason'] };
+}
+
+export function validateDetailFetch(params: unknown): DetailFetchParams {
+  if (!isObj(params)) fail('detail.fetch', 'expected an object');
+  const record = params as Record<string, unknown>;
+  const subscriptionId = readSubscriptionId('detail.fetch', record);
+  const maxPageBytes = readMaxPageBytes('detail.fetch', record);
+  if (!isLiveSubagentDetailAddress(record['address'])) {
+    fail('detail.fetch', 'address must be a valid live subagent detail address');
+  }
+  if (!isDetailPageRef(record['ref'])) {
+    fail('detail.fetch', 'ref must be a valid detail page ref');
+  }
+  return {
+    subscriptionId,
+    address: record['address'] as LiveSubagentDetailAddress,
+    ref: record['ref'] as DetailPageRef,
+    maxPageBytes,
+  };
 }

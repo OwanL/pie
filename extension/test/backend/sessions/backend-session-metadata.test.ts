@@ -9,6 +9,8 @@ import {
   deriveSessionName,
   listAvailableModels,
   listSessions,
+  loadAvailableModels,
+  loadConfiguredModels,
   resolveActiveModel,
 } from '../../../src/backend/session-metadata';
 import { NEW_SESSION_NAME } from '../../../src/shared/session-name';
@@ -200,6 +202,35 @@ test('listAvailableModels derives input kinds and tolerates missing or failing r
     } as SessionContext['runtime'],
   });
   assert.deepEqual(listAvailableModels(failingContext), []);
+});
+
+test('catalog loaders distinguish valid empty catalogs from retrieval failures', async () => {
+  await withTempDir(async (dir) => {
+    await fs.writeFile(path.join(dir, 'models.json'), JSON.stringify({ providers: {} }), 'utf8');
+    assert.deepEqual(await loadConfiguredModels(dir), { ok: true, models: [] });
+  });
+
+  await withTempDir(async (dir) => {
+    const failed = await loadConfiguredModels(dir);
+    assert.equal(failed.ok, false);
+    assert.deepEqual(failed.models, []);
+  });
+
+  const failingContext = makeContext({
+    runtime: {
+      session: {} as any,
+      dispose: async () => undefined,
+      services: {
+        modelRegistry: {
+          getAvailable: () => { throw new Error('registry unavailable'); },
+          find: () => undefined,
+        },
+      },
+    } as SessionContext['runtime'],
+  });
+  const failedRuntimeCatalog = loadAvailableModels(failingContext);
+  assert.equal(failedRuntimeCatalog.ok, false);
+  assert.deepEqual(failedRuntimeCatalog.models, []);
 });
 
 test('resolveActiveModel names the active provider/model from the registry and tolerates failures', () => {

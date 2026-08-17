@@ -66,6 +66,7 @@ function emptyViewState(): ViewState {
     systemPrompts: [],
     modelSettings: null,
     availableModels: [],
+  availableModelsStatus: 'authoritative',
     contextUsage: null,
     prefs: DEFAULT_CHAT_PREFS,
     availableExtensions: [],

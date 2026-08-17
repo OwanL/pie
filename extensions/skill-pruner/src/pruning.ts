@@ -26,6 +26,8 @@ export {
 	completeOllamaNative,
 	resolveModel,
 	resolveAuth,
+	isLocalOllamaModel,
+	isOllamaModel,
 	prepassTimeoutMs,
 	buildPrepassThinkingAttempts,
 	hasUsablePrepassResponse,
@@ -36,6 +38,7 @@ export {
 	resolvePrepassBudgets,
 	runPruningPrepass,
 	LLM_TIMEOUT_MS_BY_THINKING_LEVEL,
+	DEFAULT_OLLAMA_PREPASS_MAX_OUTPUT_TOKENS,
 } from "./prepass.js";
 
 /** Re-exported so tests can drive the shared AsyncLocalStorage signal that

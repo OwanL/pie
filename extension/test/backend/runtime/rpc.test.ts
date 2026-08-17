@@ -2,14 +2,31 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  parseArgs,
+  validateDetailFetch,
+  validateDetailSubscribe,
+  validateDetailUnsubscribe,
   validateLoadTranscriptPage,
   validateMessageSend,
   validateRuntimePrefsSet,
   validateSessionCreate,
+  validateSessionDuplicate,
   validateSessionOpen,
   validateSettingsSet,
 } from '../../../src/backend/rpc';
 import { THINKING_LEVELS } from '../../../src/shared/thinking-level';
+
+test('parseArgs carries the host-authoritative backend generation and validates it', () => {
+  assert.deepEqual(
+    parseArgs(['--sdkPath', '/sdk', '--cwd', '/work', '--backendGeneration', '7', '--hostPid', '123']),
+    { sdkPath: '/sdk', cwd: '/work', backendGeneration: 7, hostPid: 123 },
+  );
+  assert.equal(parseArgs(['--sdkPath', '/sdk']).backendGeneration, 1);
+  assert.throws(
+    () => parseArgs(['--sdkPath', '/sdk', '--backendGeneration', '0']),
+    /Invalid --backendGeneration/,
+  );
+});
 
 test('validateMessageSend requires an explicit sessionPath', () => {
   assert.throws(
@@ -85,6 +102,49 @@ test('validateSessionCreate accepts an optional selection token', () => {
   );
 });
 
+test('validateSessionCreate accepts operation identity and positive attempt fences', () => {
+  assert.deepEqual(
+    validateSessionCreate({ cwd: '/workspace', selectionToken: 'selection:1', operationId: 'op-1', operationAttempt: 2 }),
+    { cwd: '/workspace', selectionToken: 'selection:1', operationId: 'op-1', operationAttempt: 2 },
+  );
+  assert.deepEqual(
+    validateSessionCreate({ operationId: 'op-2' }),
+    { cwd: undefined, selectionToken: undefined, operationId: 'op-2' },
+  );
+  assert.deepEqual(
+    validateSessionCreate({ cwd: '/workspace' }),
+    { cwd: '/workspace', selectionToken: undefined },
+    'operationId is omitted entirely when absent',
+  );
+  assert.throws(
+    () => validateSessionCreate({ operationId: '' }),
+    /operationId must be a non-empty string/,
+  );
+  assert.throws(
+    () => validateSessionCreate({ operationId: 42 }),
+    /operationId must be a non-empty string/,
+  );
+  assert.throws(
+    () => validateSessionCreate({ operationId: 'op', operationAttempt: 0 }),
+    /operationAttempt must be a positive integer/,
+  );
+});
+
+test('validateSessionDuplicate accepts operation identity and attempt fences', () => {
+  assert.deepEqual(
+    validateSessionDuplicate({ sessionPath: '/workspace/session.jsonl', selectionToken: 'selection:3', operationId: 'op-dup-1', operationAttempt: 3 }),
+    { sessionPath: '/workspace/session.jsonl', selectionToken: 'selection:3', operationId: 'op-dup-1', operationAttempt: 3 },
+  );
+  assert.throws(
+    () => validateSessionDuplicate({ sessionPath: '/workspace/session.jsonl', operationId: '' }),
+    /operationId must be a non-empty string/,
+  );
+  assert.throws(
+    () => validateSessionDuplicate({ sessionPath: '/workspace/session.jsonl', operationId: 'op', operationAttempt: 1.5 }),
+    /operationAttempt must be a positive integer/,
+  );
+});
+
 test('validateSessionOpen accepts an optional selection token', () => {
   assert.deepEqual(
     validateSessionOpen({ sessionPath: '/workspace/session.jsonl', selectionToken: 'selection:2' }),
@@ -105,6 +165,53 @@ test('validateSessionOpen accepts an optional transcript mode', () => {
     () => validateSessionOpen({ sessionPath: '/s.jsonl', transcript: 'bogus' }),
     /transcript must be 'tail' or 'skip'/,
   );
+});
+
+test('validateDetailSubscribe accepts the coordinator wire shape and rejects malformed addresses', () => {
+  const address = {
+    sessionPath: '/repo/session.jsonl', turnId: 'turn-1', rootToolCallId: 'tool-1', rootAttemptId: 'attempt-1',
+    lineage: [{ childId: 'child-1', spawningToolCallId: 'tool-1', attemptId: 'attempt-1' }],
+  };
+  assert.deepEqual(
+    validateDetailSubscribe({ subscriptionId: 'subscription-1', address, maxPageBytes: 4096 }),
+    { subscriptionId: 'subscription-1', address, maxPageBytes: 4096 },
+  );
+  assert.deepEqual(
+    validateDetailSubscribe({ subscriptionId: 'subscription-1', address, cursor: { revision: 1, pageIndex: 0 }, maxPageBytes: 4096 }),
+    { subscriptionId: 'subscription-1', address, cursor: { revision: 1, pageIndex: 0 }, maxPageBytes: 4096 },
+  );
+  assert.throws(() => validateDetailSubscribe({ address, maxPageBytes: 4096 }), /subscriptionId/);
+  assert.throws(() => validateDetailSubscribe({ subscriptionId: '', address, maxPageBytes: 4096 }), /subscriptionId/);
+  assert.throws(() => validateDetailSubscribe({ subscriptionId: 's', address: { ...address, rootToolCallId: 42 }, maxPageBytes: 4096 }), /address/);
+  assert.throws(() => validateDetailSubscribe({ subscriptionId: 's', address, maxPageBytes: -1 }), /maxPageBytes/);
+  assert.throws(() => validateDetailSubscribe({ subscriptionId: 's', address, cursor: { pageIndex: 0 }, maxPageBytes: 4096 }), /cursor/);
+  assert.throws(() => validateDetailSubscribe('bad'), /expected an object/);
+});
+
+test('validateDetailUnsubscribe accepts close reasons and rejects others', () => {
+  assert.deepEqual(validateDetailUnsubscribe({ subscriptionId: 'subscription-1', reason: 'collapse' }), {
+    subscriptionId: 'subscription-1', reason: 'collapse',
+  });
+  assert.deepEqual(validateDetailUnsubscribe({ subscriptionId: 'subscription-1', reason: 'host-dispose' }), {
+    subscriptionId: 'subscription-1', reason: 'host-dispose',
+  });
+  assert.throws(() => validateDetailUnsubscribe({ subscriptionId: 'subscription-1' }), /reason/);
+  assert.throws(() => validateDetailUnsubscribe({ subscriptionId: 'subscription-1', reason: 'evict' }), /reason/);
+  assert.throws(() => validateDetailUnsubscribe({ reason: 'collapse' }), /subscriptionId/);
+});
+
+test('validateDetailFetch requires the exact page ref of the active baseline', () => {
+  const address = {
+    sessionPath: '/repo/session.jsonl', turnId: 'turn-1', rootToolCallId: 'tool-1', rootAttemptId: 'attempt-1',
+    lineage: [{ childId: 'child-1', spawningToolCallId: 'tool-1', attemptId: 'attempt-1' }],
+  };
+  assert.deepEqual(
+    validateDetailFetch({ subscriptionId: 'subscription-1', address, ref: { baselineRevision: 1, pageIndex: 0, pageCount: 2 }, maxPageBytes: 4096 }),
+    { subscriptionId: 'subscription-1', address, ref: { baselineRevision: 1, pageIndex: 0, pageCount: 2 }, maxPageBytes: 4096 },
+  );
+  assert.throws(() => validateDetailFetch({ subscriptionId: 's', address, ref: { baselineRevision: 1, pageIndex: 0 }, maxPageBytes: 4096 }), /ref/);
+  assert.throws(() => validateDetailFetch({ subscriptionId: 's', address, maxPageBytes: 4096 }), /ref/);
+  assert.throws(() => validateDetailFetch({ subscriptionId: 's', address: null, ref: { baselineRevision: 1, pageIndex: 0, pageCount: 1 }, maxPageBytes: 4096 }), /address/);
 });
 
 test('validateLoadTranscriptPage accepts direction and loaded range', () => {

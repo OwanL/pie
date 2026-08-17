@@ -63,6 +63,7 @@ interface ComposerProps {
   privacyMode?: boolean;
   modelSettings: ModelSettings | null;
   availableModels: ModelInfo[];
+  availableModelsStatus?: 'provisional' | 'loading' | 'authoritative';
   availableExtensions: ExtensionInfo[];
   contextUsage: ContextWindowUsage | null;
   prefs: ChatPrefs;
@@ -122,6 +123,7 @@ function ComposerView({
   privacyMode = false,
   modelSettings,
   availableModels,
+  availableModelsStatus = 'authoritative',
   availableExtensions,
   contextUsage,
   prefs,
@@ -350,6 +352,7 @@ function ComposerView({
             onSetToolResultPruningSettings={onSetToolResultPruningSettings}
             availableExtensions={availableExtensions}
             availableModels={availableModels}
+            availableModelsStatus={availableModelsStatus}
             selectedModel={selectedModel}
             selectedProvider={selectedProvider}
             selectedLevel={selectedLevel}

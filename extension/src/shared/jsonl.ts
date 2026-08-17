@@ -15,6 +15,11 @@ export interface JsonlLineReaderOptions {
   maxLineBytes?: number;
   /** Called once for each discarded overlong line. Preview is bounded. */
   onOverflow?: (diagnostic: { maxLineBytes: number; preview: string }) => void;
+  /** Public JSONL keeps its historical EOF partial-line behavior by default.
+   * Dedicated transports can require LF framing instead. */
+  emitTrailingLineOnEnd?: boolean;
+  /** Called when EOF finds a retained, delimiterless line that was not emitted. */
+  onIncomplete?: (diagnostic: { byteLength: number; preview: string }) => void;
 }
 
 export function attachJsonlLineReader(
@@ -75,7 +80,13 @@ export function attachJsonlLineReader(
   };
 
   const onEnd = () => {
-    if (!discarding && byteLength > 0) emit();
+    if (!discarding && byteLength > 0) {
+      if (options.emitTrailingLineOnEnd === false) {
+        const previewLength = Math.min(byteLength, JSONL_OVERFLOW_PREVIEW_BYTES);
+        options.onIncomplete?.({ byteLength, preview: storage.toString('utf8', 0, previewLength) });
+        reset();
+      } else emit();
+    }
     reset();
   };
 

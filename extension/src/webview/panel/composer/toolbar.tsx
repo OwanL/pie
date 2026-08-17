@@ -72,6 +72,7 @@ interface ComposerToolbarProps {
   onSetToolResultPruningSettings: (settings: Partial<ToolResultPruningSettings>) => void;
   availableExtensions: ExtensionInfo[];
   availableModels: ModelInfo[];
+  availableModelsStatus?: 'provisional' | 'loading' | 'authoritative';
   systemPrompts: SystemPromptEntry[];
   selectedModel: string;
   selectedProvider?: string;
@@ -107,6 +108,7 @@ export function ComposerToolbar({
   onSetToolResultPruningSettings,
   availableExtensions,
   availableModels,
+  availableModelsStatus = 'authoritative',
   systemPrompts,
   selectedModel,
   selectedProvider,
@@ -149,6 +151,16 @@ export function ComposerToolbar({
     <>
       <div class="composer-controls">
         <ComposerSettingsMenu prefs={prefs} pruningSettings={pruningSettings} pruningCatalog={pruningCatalog} pruningResult={pruningResult} toolResultPruningSettings={toolResultPruningSettings} availableExtensions={availableExtensions} availableModels={availableModels} providerGateStats={providerGateStats} activeContextWindow={selectedModelEntry?.model.contextWindow} activeModel={{ provider: selectedProvider, id: selectedModel }} onSetPrefs={onSetPrefs} onSetPruningSettings={onSetPruningSettings} onSetToolResultPruningSettings={onSetToolResultPruningSettings} />
+
+        {availableModelsStatus !== 'authoritative' && (
+          <ToolbarChip
+            tone="accent"
+            role="status"
+            ariaLive="polite"
+            label={availableModelsStatus === 'provisional' ? 'Models updating…' : 'Models loading…'}
+            tooltip="The visible model list is temporary while Pie loads the authoritative catalog for this session."
+          />
+        )}
 
         {filteredModels.length > 0 ? (
           <ModelPicker

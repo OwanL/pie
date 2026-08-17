@@ -132,6 +132,7 @@ test('CloseSession hides a running tab without clearing recoverable state or fin
 
   assert.deepEqual(out.state.sessions.openTabPaths, [B]);
   assert.deepEqual(out.state.sessions.runningSessionPaths, [A]);
+  assert.deepEqual(out.state.sessions.intentionallyHiddenRunningPaths, [A]);
   assert.deepEqual(out.state.transcript.bySession[A], SAMPLE_MESSAGES);
   assert.deepEqual(out.state.composer.activeRunSummaryBySession[A], STALE_RUN_SUMMARY);
   assert.deepEqual(out.effects.map((effect) => effect.kind), ['PersistTabs']);

@@ -30,6 +30,7 @@ const CRITICAL_FIELDS: FieldSpec[] = [
   { path: 'openTabPaths', type: 'array' },
   { path: 'systemPrompts', type: 'array' },
   { path: 'availableModels', type: 'array' },
+  { path: 'availableModelsStatus', type: 'string' },
   { path: 'availableExtensions', type: 'array' },
   { path: 'aggregateStats', type: 'object' },
   { path: 'fileChanges', type: 'array' },

@@ -176,6 +176,12 @@ export function handleSessionOpened(state: ArchState, event: Extract<Event, { ki
   // known V2 review state.
   const existingForOpened = state.sessions.sessions.find((s) => s.path === payload.session.path);
   const openedSummary = mergeSessionSummaryPreservingLocalName(existingForOpened, payload.session);
+  const staleModelOwnership = event.backendGeneration < state.settings.modelBackendGeneration
+    || event.modelWriteFence < state.settings.modelWriteFence;
+  const staleGlobalModelSettings = staleModelOwnership
+    || event.modelHydrationRevision < state.settings.modelHydrationRevision;
+  const staleSessionCatalog = staleModelOwnership
+    || event.catalogHydrationRevision < (state.settings.modelHydrationRevisionBySession[sessionPath] ?? 0);
 
   // Defensive model-picker hardening (STATE_CONTRACT § Optimistic
   // Reconciliation). An in-flight optimistic `SetModel` owns the model state
@@ -201,7 +207,14 @@ export function handleSessionOpened(state: ArchState, event: Extract<Event, { ki
         provider: inFlightSetModel.modelSettings.defaultProvider,
         thinkingLevel: inFlightSetModel.modelSettings.defaultThinkingLevel,
       }
-    : openedSummary;
+    : staleModelOwnership && existingForOpened
+      ? {
+          ...openedSummary,
+          modelId: existingForOpened.modelId,
+          provider: existingForOpened.provider,
+          thinkingLevel: existingForOpened.thinkingLevel,
+        }
+      : openedSummary;
 
   // Any aliases discovered while merging must be stored so that later
   // backend events carrying the SDK-assigned message id resolve to the
@@ -240,16 +253,22 @@ export function handleSessionOpened(state: ArchState, event: Extract<Event, { ki
     settings: {
       ...next.settings,
       backendReady: true,
-      ...(payload.availableModels && {
+      ...(!staleModelOwnership && {
+        modelBackendGeneration: Math.max(next.settings.modelBackendGeneration, event.backendGeneration),
+      }),
+      ...(!staleSessionCatalog && payload.availableModels !== undefined && {
         availableModelsBySession: {
           ...next.settings.availableModelsBySession,
           [sessionPath]: payload.availableModels,
         },
+        availableModelsStatusBySession: {
+          ...next.settings.availableModelsStatusBySession,
+          [sessionPath]: 'authoritative' as const,
+        },
       }),
-      // Apply the global default from settings.json UNLESS an in-flight
-      // optimistic SetModel owns it (see `inFlightSetModel` above) — a stale
-      // pre-write reading must not revert the user's just-made choice.
-      ...(!inFlightSetModel && payload.modelSettings && {
+      // Apply the global default from settings.json only while this event still
+      // owns the model-write fence and no optimistic SetModel owns the path.
+      ...(!staleGlobalModelSettings && !inFlightSetModel && payload.modelSettings && {
         modelSettings: payload.modelSettings,
       }),
       ...(payload.contextUsage !== undefined && {
@@ -392,6 +411,7 @@ export function handleBusyChanged(state: ArchState, event: Extract<Event, { kind
         sessions: {
           ...state.sessions,
           runningSessionPaths: removeFromArray(state.sessions.runningSessionPaths, event.sessionPath),
+          intentionallyHiddenRunningPaths: removeFromArray(state.sessions.intentionallyHiddenRunningPaths, event.sessionPath),
         },
       },
       effects: terminalRepairEffects,
@@ -406,6 +426,7 @@ export function handleBusyChanged(state: ArchState, event: Extract<Event, { kind
       sessions: {
         ...state.sessions,
         runningSessionPaths: removeFromArray(state.sessions.runningSessionPaths, event.sessionPath),
+        intentionallyHiddenRunningPaths: removeFromArray(state.sessions.intentionallyHiddenRunningPaths, event.sessionPath),
         ...(isActive
           ? {}
           : {
@@ -539,7 +560,7 @@ export function handleRunningSessionsChanged(state: ArchState, event: Extract<Ev
         // Compaction re-arms busy, so compacting paths are always a subset of
         // running paths; a backend exit (empty list) must clear them too.
         compactingSessionPaths: state.sessions.compactingSessionPaths.filter((p) => running.has(p)),
-        reviewClosedRunningPaths: state.sessions.reviewClosedRunningPaths.filter((p) => running.has(p)),
+        intentionallyHiddenRunningPaths: state.sessions.intentionallyHiddenRunningPaths.filter((p) => running.has(p)),
       },
     },
     effects: [],
@@ -846,6 +867,80 @@ export function handleSessionScopeCleared(state: ArchState, event: Extract<Event
   });
 }
 
+export function handleCreateOperationDelayed(state: ArchState, event: Extract<Event, { kind: 'CreateOperationDelayed' }>): ReducerResult {
+  const operation = state.pending.createOperations[event.operationId];
+  if (!operation
+    || operation.pendingPath !== event.pendingPath
+    || operation.selectionToken !== event.selectionToken
+    || (event.attempt !== undefined && operation.attempt !== event.attempt)
+    || operation.status === 'succeeded'
+    || operation.status === 'failed') {
+    return { state, effects: [] };
+  }
+  const next = produce(state, (draft) => {
+    draft.pending.createOperations[event.operationId] = {
+      ...operation,
+      status: 'delayed-awaiting-outcome',
+    };
+    const summary = draft.sessions.sessions.find((item) => item.path === event.pendingPath);
+    if (summary) summary.creationState = 'delayed';
+    if (event.ownsSelection && event.notice) {
+      draft.settings.notice = event.notice;
+      draft.settings.noticeKind = null;
+      draft.settings.noticeRaw = null;
+    }
+  });
+  return { state: next, effects: [] };
+}
+
+export function handleCreateOperationSucceeded(state: ArchState, event: Extract<Event, { kind: 'CreateOperationSucceeded' }>): ReducerResult {
+  const operation = state.pending.createOperations[event.operationId];
+  if (!operation
+    || operation.pendingPath !== event.pendingPath
+    || operation.status === 'failed'
+    || (operation.status === 'succeeded' && operation.resolvedSessionPath !== event.sessionPath)) {
+    return { state, effects: [] };
+  }
+  if (operation.status === 'succeeded') return { state, effects: [] };
+  return {
+    state: {
+      ...state,
+      pending: {
+        ...state.pending,
+        createOperations: {
+          ...state.pending.createOperations,
+          [event.operationId]: {
+            ...operation,
+            status: 'succeeded',
+            resolvedSessionPath: event.sessionPath,
+          },
+        },
+      },
+    },
+    effects: [],
+  };
+}
+
+export function handleCreateOperationFailed(state: ArchState, event: Extract<Event, { kind: 'CreateOperationFailed' }>): ReducerResult {
+  const operation = state.pending.createOperations[event.operationId];
+  if (!operation || operation.pendingPath !== event.pendingPath || operation.status === 'succeeded') {
+    return { state, effects: [] };
+  }
+  return {
+    state: {
+      ...state,
+      pending: {
+        ...state.pending,
+        createOperations: {
+          ...state.pending.createOperations,
+          [event.operationId]: { ...operation, status: 'failed' },
+        },
+      },
+    },
+    effects: [],
+  };
+}
+
 export function handlePendingPathReplaced(state: ArchState, event: Extract<Event, { kind: 'PendingPathReplaced' }>): ReducerResult {
   const { oldPendingPath, newSessionPath } = event;
   // Read the queued sends BEFORE the produce draft (we need them for the
@@ -853,10 +948,25 @@ export function handlePendingPathReplaced(state: ArchState, event: Extract<Event
   const queuedSends = state.pending.sendQueueBySession[oldPendingPath] ?? [];
 
   const nextState = produce(state, (draft) => {
+    // Normally SessionOpened has already inserted the durable summary. When a
+    // post-commit publication failure leaves only the RPC acknowledgement,
+    // promote the pending placeholder itself so the resolved tab is not
+    // summary-less. Lifecycle-only fields never leak onto the durable summary.
+    const hasDurableSummary = draft.sessions.sessions.some((summary) => summary.path === newSessionPath);
+    draft.sessions.sessions = draft.sessions.sessions.flatMap((summary) => {
+      if (summary.path !== oldPendingPath) return [summary];
+      if (hasDurableSummary) return [];
+      const { creationState: _creationState, createOperationId: _createOperationId, ...rest } = summary;
+      return [{ ...rest, path: newSessionPath }];
+    });
+
     // Replace in openTabPaths
     draft.sessions.openTabPaths = draft.sessions.openTabPaths.map(
       (p: string) => (p === oldPendingPath ? newSessionPath : p),
     );
+    if (draft.sessions.activeSessionPath === oldPendingPath) {
+      draft.sessions.activeSessionPath = newSessionPath;
+    }
 
     // Replace in unreadFinishedSessionPaths (dedupe)
     draft.sessions.unreadFinishedSessionPaths = [
@@ -883,6 +993,24 @@ export function handlePendingPathReplaced(state: ArchState, event: Extract<Event
       oldPendingPath,
       newSessionPath,
     );
+
+    // Transfer the provisional model catalog before the attach path clears the
+    // old pending scope. The following successful session.opened may replace
+    // it authoritatively; until then the picker keeps the known catalog and
+    // reasoning levels under the durable path.
+    if (Object.prototype.hasOwnProperty.call(draft.settings.availableModelsBySession, oldPendingPath)) {
+      draft.settings.availableModelsBySession[newSessionPath] =
+        draft.settings.availableModelsBySession[oldPendingPath] ?? [];
+      draft.settings.availableModelsStatusBySession[newSessionPath] =
+        draft.settings.availableModelsStatusBySession[oldPendingPath] ?? 'provisional';
+      delete draft.settings.availableModelsBySession[oldPendingPath];
+      delete draft.settings.availableModelsStatusBySession[oldPendingPath];
+    }
+    if (Object.prototype.hasOwnProperty.call(draft.settings.modelHydrationRevisionBySession, oldPendingPath)) {
+      draft.settings.modelHydrationRevisionBySession[newSessionPath] =
+        draft.settings.modelHydrationRevisionBySession[oldPendingPath] ?? 0;
+      delete draft.settings.modelHydrationRevisionBySession[oldPendingPath];
+    }
 
     // Move composer inputs
     const oldInputs = draft.composer.pendingComposerInputsBySession[oldPendingPath];
@@ -923,6 +1051,19 @@ export function handlePendingPathReplaced(state: ArchState, event: Extract<Event
     if (draft.sessions.privacyModeBySession[oldPendingPath] === true) {
       draft.sessions.privacyModeBySession[newSessionPath] = true;
       delete draft.sessions.privacyModeBySession[oldPendingPath];
+    }
+
+    // A hidden create with queued work is about to become a hidden running
+    // session. Persist that intent under the durable path before the async
+    // drain starts so a renderer reload cannot reopen/focus it in the gap.
+    const hiddenOperation = Object.values(draft.pending.createOperations).find(
+      (operation) => operation.pendingPath === oldPendingPath
+        && operation.status === 'succeeded'
+        && operation.hidden,
+    );
+    if (hiddenOperation && queuedSends.length > 0
+      && !draft.sessions.intentionallyHiddenRunningPaths.includes(newSessionPath)) {
+      draft.sessions.intentionallyHiddenRunningPaths.push(newSessionPath);
     }
 
     // Clear the pending send queue for the old path — the entries are emitted
@@ -972,7 +1113,7 @@ export function handleTabOpened(state: ArchState, event: Extract<Event, { kind: 
       sessions: {
         ...state.sessions,
         openTabPaths: nextOpenTabPaths,
-        reviewClosedRunningPaths: removeFromArray(state.sessions.reviewClosedRunningPaths, event.sessionPath),
+        intentionallyHiddenRunningPaths: removeFromArray(state.sessions.intentionallyHiddenRunningPaths, event.sessionPath),
       },
     },
     effects: [],
@@ -1012,7 +1153,7 @@ export function handleOpenTabsChanged(state: ArchState, event: Extract<Event, { 
         unreadFinishedSessionPaths: state.sessions.unreadFinishedSessionPaths.filter((p) =>
           openTabPaths.includes(p),
         ),
-        reviewClosedRunningPaths: state.sessions.reviewClosedRunningPaths.filter((p) => !openTabPaths.includes(p)),
+        intentionallyHiddenRunningPaths: state.sessions.intentionallyHiddenRunningPaths.filter((p) => !openTabPaths.includes(p)),
       },
     },
     effects: [],

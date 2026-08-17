@@ -9,6 +9,7 @@ import type {
   MessageStartedPayload,
   MessageThinkingPayload,
   MessageToolCallDeltaPayload,
+  PreflightFailedPayload,
   QueuedDeliveredPayload,
   RetryEndedPayload,
   RetryMeasuredPayload,
@@ -18,10 +19,16 @@ import type {
   ToolStartedPayload,
 } from '../shared/protocol';
 import { COMPACTION_METRICS_CUSTOM_TYPE } from '../shared/protocol';
+import { compactSubagentResultPreview } from '../shared/lazy-details';
 import type { SdkSessionEvent } from './sdk';
 import { BackendLiveTurnAccumulator, type BackendSemanticCandidate } from './live-turn-accumulator';
 import { LIVE_PIPELINE_LIMITS, LIVE_PIPELINE_PROTOCOL_VERSION, type TurnSemanticEnvelope } from '../shared/live-pipeline-protocol';
-import { estimateCumulativeSubagentTokens, normalizeToolProgress } from './tool-progress-normalizer';
+import {
+  estimateCumulativeSubagentTokens,
+  normalizeToolProgress,
+  type SubagentDetailAddressRoot,
+  type ToolProgressRecursiveCounters,
+} from './tool-progress-normalizer';
 import {
   mapAssistantMessage,
   mapCustomMessage,
@@ -40,10 +47,13 @@ import { isBackendLivePipelineTraceEnabled, recordBackendLivePipelineTrace } fro
  * split. Covers text, thinking, and tool-call content blocks so pure tool-call
  * turns (no text/thinking) are still measured.
  */
-export const TOOL_PROGRESS_MAX_BYTES = 256 * 1024;
-/** Leave the same two-MiB envelope headroom as live checkpoints before a
- * durability-confirmed terminal event reaches the shared JSONL writer. */
-export const TOOL_TERMINAL_PAYLOAD_MAX_BYTES = LIVE_PIPELINE_LIMITS.checkpointBytes;
+export const TOOL_PROGRESS_MAX_BYTES = 192 * 1024;
+/** Keep tool events below the dedicated worker's ordinary-frame ceiling while
+ * retaining the larger shared JSONL limit for the legacy backend path. */
+export const TOOL_TERMINAL_PAYLOAD_MAX_BYTES = Math.min(
+  LIVE_PIPELINE_LIMITS.checkpointBytes,
+  TOOL_PROGRESS_MAX_BYTES,
+);
 
 /** Produce a transport-safe clone only when native JSON serialization fails.
  * Live tool partials can contain BigInts or cycles from nested/custom tools;
@@ -206,12 +216,38 @@ function terminalResultPreview(value: unknown, maxBytes = TOOL_PROGRESS_MAX_BYTE
  * The durable session remains authoritative; this explicit preview is only
  * the event/side-effect representation and never masquerades as complete.
  */
+export interface TerminalTransportMeasurement {
+  /** Bytes of the bounded event representation produced for transport. This
+   * is not the durable SDK append size. */
+  producedPayloadBytes?: number;
+  availabilityReason?: 'sdk_durability_boundary_exposes_no_serialized_byte_counter';
+}
+/** Retain the old type name for focused integrations; the measurement itself
+ * now describes terminal transport, never a durable append. */
+export type TerminalAppendMeasurement = TerminalTransportMeasurement;
+
 export function boundToolFinishedPayload(
   payload: ToolFinishedPayload,
   maxBytes = TOOL_TERMINAL_PAYLOAD_MAX_BYTES,
+  observeMeasurement?: (measurement: TerminalTransportMeasurement) => void,
 ): ToolFinishedPayload {
+  // Subagent terminal detail is already durable at this call site. Ordinary
+  // lifecycle transport carries only its compact card projection regardless
+  // of size; exact recursive detail switches to the durable authority stream.
+  if (payload.name?.trim().toLowerCase() === 'subagent') {
+    payload = {
+      ...payload,
+      result: compactSubagentResultPreview(payload.result) ?? {
+        $toolResult: 'detail-available',
+        transportNotice: 'Recursive subagent detail is available only through the durable detail authority.',
+      },
+    };
+  }
   const serialized = serializeToolProgress(payload);
   if (serialized && Buffer.byteLength(serialized.serialized, 'utf8') <= maxBytes) {
+    recordTerminalTransportMeasurement(payload, {
+      producedPayloadBytes: Buffer.byteLength(serialized.serialized, 'utf8'),
+    }, observeMeasurement);
     return serialized.safeValue as ToolFinishedPayload;
   }
 
@@ -225,6 +261,9 @@ export function boundToolFinishedPayload(
   };
   const boundedResult = serializeToolProgress(bounded);
   if (boundedResult && Buffer.byteLength(boundedResult.serialized, 'utf8') <= maxBytes) {
+    recordTerminalTransportMeasurement(payload, {
+      producedPayloadBytes: Buffer.byteLength(boundedResult.serialized, 'utf8'),
+    }, observeMeasurement);
     return boundedResult.safeValue as ToolFinishedPayload;
   }
 
@@ -237,8 +276,59 @@ export function boundToolFinishedPayload(
       transportNotice: 'Complete tool input omitted because the terminal event exceeded the backend transport limit.',
     },
   };
+  const finalBounded = serializeToolProgress(bounded);
+  if (finalBounded) {
+    const finalBytes = Buffer.byteLength(finalBounded.serialized, 'utf8');
+    if (finalBytes <= maxBytes) {
+      recordTerminalTransportMeasurement(payload, { producedPayloadBytes: finalBytes }, observeMeasurement);
+      return finalBounded.safeValue as ToolFinishedPayload;
+    }
+    const minimal: ToolFinishedPayload = {
+      ...payload,
+      input: { $toolInput: 'truncated', transportNotice: 'Complete tool input omitted at the terminal transport boundary.' },
+      result: { $toolResult: 'truncated', transportNotice: 'Complete tool result omitted at the terminal transport boundary.' },
+    };
+    const serializedMinimal = serializeToolProgress(minimal);
+    if (serializedMinimal) {
+      const minimalBytes = Buffer.byteLength(serializedMinimal.serialized, 'utf8');
+      if (minimalBytes <= maxBytes) {
+        recordTerminalTransportMeasurement(payload, { producedPayloadBytes: minimalBytes }, observeMeasurement);
+        return serializedMinimal.safeValue as ToolFinishedPayload;
+      }
+    }
+    throw new RangeError('Terminal tool event identity exceeds the producer transport budget.');
+  }
+  recordTerminalTransportMeasurement(payload, {
+    availabilityReason: 'sdk_durability_boundary_exposes_no_serialized_byte_counter',
+  }, observeMeasurement);
   return bounded;
 }
+
+function recordTerminalTransportMeasurement(
+  payload: ToolFinishedPayload,
+  measurement: TerminalTransportMeasurement,
+  observer?: (measurement: TerminalTransportMeasurement) => void,
+): void {
+  observer?.(measurement);
+  if (!isBackendLivePipelineTraceEnabled() || payload.name?.trim().toLowerCase() !== 'subagent') return;
+  recordBackendLivePipelineTrace({
+    stage: 'backend.subagent',
+    kind: measurement.producedPayloadBytes === undefined ? 'observation' : 'success',
+    phase: 'terminal',
+    payloadClass: 'terminal_transport',
+    producedPayloadBytes: measurement.producedPayloadBytes,
+    availabilityReason: measurement.availabilityReason,
+    identifiers: {
+      session: payload.sessionPath,
+      request: payload.requestId,
+      message: payload.durableEntryId,
+      tool: payload.toolCallId,
+    },
+    processRole: 'coordinator',
+    pid: process.pid,
+  });
+}
+
 
 const FIRST_CONTENT_EVENT_TYPES = new Set([
   'text_start',
@@ -287,6 +377,7 @@ function armWillRetryWatchdog(
   context.willRetryWatchdogTimer = setTimeout(() => {
     context.willRetryWatchdogTimer = undefined;
     deps.emit('operational-error', {
+      incidentId: `retry-stuck:${context.activeRequest?.id ?? context.sessionPath}:${delayMs}:${grace}`,
       code: 'RETRY_STUCK',
       message: `A retry has not completed within ${windowMs}ms (delayMs=${delayMs} + ${grace}ms grace). The provider may be down mid-backoff or an extension hook blocked the retry. Reload the window if the session stays wedged.`,
       sessionPath: context.sessionPath,
@@ -486,6 +577,20 @@ export interface BackendSessionEventHandlerDeps {
   emitSessionListChanged(): Promise<void>;
   /** Terminalize a stuck runtime locally and replace it before the session becomes reusable. */
   recoverStuckSession(context: SessionContext, reason: string): void;
+  observeSubagentDetail?(root: SubagentDetailAddressRoot, details: unknown): void;
+  terminalizeSubagentDetail?(root: SubagentDetailAddressRoot, durableEntryId: string): void;
+}
+
+function subagentDetailRoot(context: SessionContext, rootToolCallId: string): SubagentDetailAddressRoot | undefined {
+  if (!rootToolCallId) return undefined;
+  const checkpoint = context.activeRequest?.liveTurnAccumulator?.checkpoint();
+  if (!checkpoint) return undefined;
+  return {
+    sessionPath: context.sessionPath,
+    turnId: checkpoint.turnId,
+    rootToolCallId,
+    rootAttemptId: checkpoint.attemptId,
+  };
 }
 
 function readPostCompactionEstimatedTokens(result: unknown): number | undefined {
@@ -722,6 +827,7 @@ function renewSemanticLease(
       ...(lastProviderError ? { lastProviderError: lastProviderError.slice(0, 4_096) } : {}),
     });
     deps.emit('operational-error', {
+      incidentId: `semantic-timeout:${requestId}:${leaseKind}`,
       code: leaseKind === 'tool' ? 'TOOL_INACTIVITY_TIMEOUT' : 'PROVIDER_SEMANTIC_TIMEOUT',
       message: reason,
       detail,
@@ -741,12 +847,46 @@ function emitSemanticCandidate(
 ): TurnSemanticEnvelope | undefined {
   const accumulator = context.activeRequest?.liveTurnAccumulator;
   if (!accumulator) return undefined;
+  const mappingStartedAt = performance.now();
   const envelope = accumulator.observe(candidate, occurredAt);
+  if (isBackendLivePipelineTraceEnabled()) {
+    const canonical = envelope as (Record<string, unknown> & {
+      kind?: string;
+      turnId?: string;
+      attemptId?: string;
+      executionId?: string;
+      seq?: number;
+      progressRevision?: number;
+      previewBytes?: number;
+    }) | undefined;
+    recordBackendLivePipelineTrace({
+      stage: canonical?.kind === 'observation.rejected' ? 'backend.observation.rejected' : 'backend.mapped',
+      kind: canonical ? (canonical.kind === 'observation.rejected' ? 'rejected' : 'success') : 'false',
+      phase: 'backend_mapping',
+      durationMs: Math.max(0, performance.now() - mappingStartedAt),
+      identifiers: {
+        session: context.sessionPath,
+        ...(context.activeRequest?.id ? { request: context.activeRequest.id } : {}),
+        ...(canonical?.turnId ? { turn: canonical.turnId } : {}),
+        ...(canonical?.attemptId ? { attempt: canonical.attemptId } : {}),
+        ...(canonical?.executionId ? { tool: canonical.executionId } : {}),
+      },
+      eventKind: canonicalTraceEventKind(candidate.kind),
+      eventSeq: canonical?.seq,
+      checkpointSeq: canonical?.seq,
+      revision: canonical?.progressRevision,
+      toolStateRevision: canonical?.progressRevision,
+      snapshotBytes: canonical?.previewBytes,
+      processRole: 'coordinator',
+      pid: process.pid,
+    });
+  }
   if (!envelope) return undefined;
   deps.emit('live.semantic', envelope);
   if (envelope.kind === 'observation.rejected' && envelope.reason === 'payload_oversize') {
     logBackendDiagnostic('warn', 'semantic.payloadOversize', { candidateKind: candidate.kind });
     deps.emit('operational-error', {
+      incidentId: `turn-too-large:${context.activeRequest?.id ?? context.sessionPath}`,
       code: 'TURN_TOO_LARGE',
       message: 'The active response exceeded the bounded live-pipeline record limit and was interrupted.',
       sessionPath: context.sessionPath,
@@ -890,6 +1030,9 @@ export function handleSdkSessionEvent(
         ...(active?.currentMessageId ? { message: active.currentMessageId } : {}),
       },
       eventKind: sdkTraceEventKind(event.type),
+      phase: sdkTracePhase(event.type),
+      processRole: 'coordinator',
+      pid: process.pid,
     });
   }
   switch (event.type) {
@@ -1162,13 +1305,16 @@ export function handleSdkSessionEvent(
       const parallelGroupId = runningSiblingId
         ? parallelGroups.get(runningSiblingId) ?? randomUUID()
         : randomUUID();
+      const boundedInput = event.args === undefined
+        ? undefined
+        : boundToolProgress(event.args, TOOL_PROGRESS_MAX_BYTES);
       toolStartTimes.set(toolCallId, startedAt);
       parallelGroups.set(toolCallId, parallelGroupId);
       context.activeRequest.toolStartTimes = toolStartTimes;
       context.activeRequest.toolParallelGroupByCallId = parallelGroups;
       const toolStartMetadata = context.activeRequest.toolStartMetadata
         ?? new Map<string, { name: string; input: unknown }>();
-      toolStartMetadata.set(toolCallId, { name: event.toolName ?? '', input: event.args });
+      toolStartMetadata.set(toolCallId, { name: event.toolName ?? '', input: boundedInput });
       context.activeRequest.toolStartMetadata = toolStartMetadata;
 
       const executionId = liveExecutionId(context, toolCallId);
@@ -1179,7 +1325,7 @@ export function handleSdkSessionEvent(
         rootExecutionId: executionId,
         toolCallId,
         name: event.toolName ?? '',
-        input: event.args,
+        input: boundedInput,
         startedAt,
         parallelGroupId,
       }, startedAt);
@@ -1190,7 +1336,7 @@ export function handleSdkSessionEvent(
         messageId: context.activeRequest.lastAssistantMessageId,
         toolCallId,
         name: event.toolName ?? '',
-        input: event.args,
+        input: boundedInput,
         startedAt,
         parallelGroupId,
       } satisfies ToolStartedPayload);
@@ -1205,10 +1351,22 @@ export function handleSdkSessionEvent(
       }
 
       renewSemanticLease(deps, context, configuredLeaseMs('PIE_TOOL_INACTIVITY_MS', TOOL_INACTIVITY_MS), 'tool');
+      const detailRoot = subagentDetailRoot(context, event.toolCallId ?? '');
+      if (detailRoot && (event.toolName ?? '').trim().toLowerCase() === 'subagent') {
+        deps.observeSubagentDetail?.(detailRoot, event.partialResult);
+      }
+      const recursiveCounters: ToolProgressRecursiveCounters | undefined = isBackendLivePipelineTraceEnabled()
+        ? { childCount: 0, messageCount: 0, maxRecursiveDepth: 0 }
+        : undefined;
+      // Normalize once and share the complete JSON-safe recursive preview with
+      // both publication paths. Counter collection is folded into that same
+      // traversal and is disabled without diagnostics.
+      const preview = normalizeToolProgress(event.toolName ?? '', event.partialResult, recursiveCounters, detailRoot);
       emitSemanticCandidate(deps, context, {
         kind: 'tool.progress',
         executionId: liveExecutionId(context, event.toolCallId ?? ''),
-        preview: normalizeToolProgress(event.toolName ?? '', event.partialResult),
+        preview,
+        recursiveCounters,
       });
 
       if (!context.activeRequest.liveTurnAccumulator) deps.emit('tool.progress', {
@@ -1216,7 +1374,7 @@ export function handleSdkSessionEvent(
         sessionPath: context.sessionPath,
         messageId: context.activeRequest.lastAssistantMessageId,
         toolCallId: event.toolCallId ?? '',
-        preview: normalizeToolProgress(event.toolName ?? '', event.partialResult),
+        preview,
       } satisfies ToolProgressPayload);
       // Same rationale as message_update above: the context-window footprint
       // is static during tool execution (no new assistant usage until
@@ -1310,6 +1468,19 @@ export function handleSdkSessionEvent(
         return;
       }
 
+      // SDK adapters can replay a durable assistant boundary after the first
+      // message_end. The live accumulator owns the accepted terminal identity;
+      // pending error/steering terminals cover the two durability-gated paths.
+      if (event.message.role === 'assistant' && event.sessionEntryId) {
+        const active = context.activeRequest;
+        if (active.liveTurnAccumulator?.terminalDurableEntryId() === event.sessionEntryId
+          || context.terminalLiveTurn?.accumulator.terminalDurableEntryId() === event.sessionEntryId
+          || active.pendingErrorTerminal?.durableEntryId === event.sessionEntryId
+          || active.pendingQueuedBoundaryTerminal?.durableEntryId === event.sessionEntryId) {
+          return;
+        }
+      }
+
       if (event.message.role === 'custom') {
         if ((event.message as { customType?: string }).customType === 'pruning-result' && context.activeRequest.emittedPruningResultEntryId) {
           return;
@@ -1359,6 +1530,10 @@ export function handleSdkSessionEvent(
           return;
         }
         context.activeRequest.pendingDurableToolTerminals?.delete(toolCallId);
+        const terminalDetailRoot = subagentDetailRoot(context, toolCallId);
+        if (terminalDetailRoot && terminal.name?.trim().toLowerCase() === 'subagent') {
+          deps.terminalizeSubagentDetail?.(terminalDetailRoot, event.sessionEntryId);
+        }
         const transportTerminal = boundToolFinishedPayload({
           ...terminal,
           durableEntryId: event.sessionEntryId,
@@ -1382,17 +1557,29 @@ export function handleSdkSessionEvent(
         });
         deps.emit('tool.finished', transportTerminal);
         if (isBackendLivePipelineTraceEnabled()) {
-          recordBackendLivePipelineTrace({
-            stage: 'backend.persistence.confirmed',
-            kind: 'success',
+          const persistenceTrace = {
+            stage: 'backend.persistence.confirmed' as const,
+            kind: 'success' as const,
             identifiers: {
               session: context.sessionPath,
               request: context.activeRequest.id,
               message: event.sessionEntryId,
               tool: toolCallId,
             },
-            eventKind: 'tool_terminal',
-          });
+            eventKind: 'tool_terminal' as const,
+          };
+          if (terminal.name?.trim().toLowerCase() === 'subagent') {
+            // The SDK has confirmed the durable entry, but exposes no serialized
+            // append-byte counter. The bounded event above is transport bytes,
+            // not evidence for this durability boundary.
+            recordBackendLivePipelineTrace({
+              ...persistenceTrace,
+              payloadClass: 'terminal_append',
+              availabilityReason: 'sdk_durability_boundary_exposes_no_serialized_byte_counter',
+            });
+          } else {
+            recordBackendLivePipelineTrace(persistenceTrace);
+          }
         }
         return;
       }
@@ -1632,6 +1819,18 @@ export function handleSdkSessionEvent(
       const modelId = context.activeRequest?.modelId;
       const userInitiated = context.activeRequest?.aborted === true;
       const interruptedWithoutMessage = !!requestId && !messageId;
+      const pendingExtensionCommand = context.pendingExtensionCommand;
+      const extensionCommandWithoutAgent = (
+        context.activeRequest?.extensionCommand === true && interruptedWithoutMessage
+      ) || (
+        pendingExtensionCommand !== undefined
+        && pendingExtensionCommand.session === context.session
+        && pendingExtensionCommand.sessionPath === context.sessionPath
+        && pendingExtensionCommand.sessionOwnershipEpoch === (context.sessionOwnershipEpoch ?? 0)
+        && (requestId === undefined || requestId === pendingExtensionCommand.requestId)
+        && !messageId
+      );
+      const extensionCommandRequestId = pendingExtensionCommand?.requestId ?? requestId;
       const liveAccumulator = context.activeRequest?.liveTurnAccumulator;
       const pendingErrorTerminal = context.activeRequest?.pendingErrorTerminal;
       if (liveAccumulator && pendingErrorTerminal) {
@@ -1648,6 +1847,16 @@ export function handleSdkSessionEvent(
         context.terminalLiveTurn = { accumulator: liveAccumulator, expiresAt: Date.now() + 10_000 };
       }
 
+      if (extensionCommandWithoutAgent && extensionCommandRequestId) {
+        deps.emit('preflight.failed', {
+          requestId: extensionCommandRequestId,
+          sessionPath: pendingExtensionCommand?.sessionPath ?? context.sessionPath,
+          error: 'Extension command ended without starting an agent turn.',
+        } satisfies PreflightFailedPayload);
+      }
+      if (pendingExtensionCommand?.requestId === extensionCommandRequestId) {
+        context.pendingExtensionCommand = undefined;
+      }
       deps.emitBusyChanged(context, false);
       deps.emitContextUsageChanged(context);
 
@@ -1843,6 +2052,12 @@ export function handleSdkSessionEvent(
   }
 }
 
+function sdkTracePhase(eventType: string) {
+  if (eventType.startsWith('tool_execution')) return 'tool_execution' as const;
+  if (eventType.includes('retry')) return 'retry_backoff' as const;
+  return 'semantic_stream' as const;
+}
+
 function sdkTraceEventKind(eventType: string) {
   if (eventType === 'message_update') return 'text' as const;
   if (eventType === 'tool_execution_start') return 'tool_start' as const;
@@ -1850,6 +2065,18 @@ function sdkTraceEventKind(eventType: string) {
   if (eventType === 'tool_execution_end') return 'tool_terminal' as const;
   if (eventType === 'message_start') return 'turn_start' as const;
   if (eventType === 'message_end' || eventType === 'agent_end') return 'turn_terminal' as const;
+  return 'control' as const;
+}
+
+function canonicalTraceEventKind(candidate: BackendSemanticCandidate['kind']) {
+  if (candidate === 'turn.text') return 'text' as const;
+  if (candidate === 'turn.reasoning') return 'reasoning' as const;
+  if (candidate === 'turn.toolDraft') return 'tool_draft' as const;
+  if (candidate === 'tool.started') return 'tool_start' as const;
+  if (candidate === 'tool.progress') return 'tool_progress' as const;
+  if (candidate === 'tool.terminal') return 'tool_terminal' as const;
+  if (candidate === 'turn.started') return 'turn_start' as const;
+  if (candidate === 'turn.terminal') return 'turn_terminal' as const;
   return 'control' as const;
 }
 

@@ -102,7 +102,7 @@ function skipOpenedEvent(): Event {
     availableModels: refreshedAvailableModels,
     sessionUsage: wholeSessionUsage,
   };
-  return { kind: 'SessionOpened', sessionPath, payload };
+  return { kind: 'SessionOpened', backendGeneration: 0, modelWriteFence: 0, modelHydrationRevision: 0, catalogHydrationRevision: 0, sessionPath, payload };
 }
 
 test('SessionOpened with transcriptSkipped keeps the existing transcript + window and applies metadata', () => {
@@ -131,7 +131,7 @@ test('SessionOpened without transcriptSkipped replaces the transcript with the i
     transcriptWindow: { ...existingWindow, totalCount: 1, loadedEnd: 1 },
     busy: false,
   };
-  const { state } = reducer(before, { kind: 'SessionOpened', sessionPath, payload });
+  const { state } = reducer(before, { kind: 'SessionOpened', backendGeneration: 0, modelWriteFence: 0, modelHydrationRevision: 0, catalogHydrationRevision: 0, sessionPath, payload });
 
   // No skip flag → authoritative incoming snapshot replaces the local one.
   assert.deepEqual(state.transcript.bySession[sessionPath], incoming);

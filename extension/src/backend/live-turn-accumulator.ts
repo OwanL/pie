@@ -16,7 +16,23 @@ import {
   type JsonSafeValue,
 } from '../shared/json-structural-patch.js';
 import { compactDurableMessageDetails } from '../shared/lazy-details.js';
-import { normalizeToolProgress } from './tool-progress-normalizer.js';
+import { normalizeToolProgress, type ToolProgressRecursiveCounters } from './tool-progress-normalizer.js';
+import {
+  isBackendLivePipelineTraceEnabled,
+  recordBackendLivePipelineTrace,
+  recordPhase5DetailAvailability,
+} from './live-pipeline-trace-runtime';
+
+export interface ToolProgressMeasurement {
+  outcome: 'changed' | 'duplicate';
+  /** The normalized ToolPreview is not the SDK source payload. The backend has
+   * no producer serialization counter for that source boundary. */
+  sourcePayloadBytes?: number;
+  producedPayloadBytes?: number;
+  availabilityReason?: 'source_preview_not_serialized_at_producer_boundary';
+  revision?: number;
+  counters?: ToolProgressRecursiveCounters;
+}
 
 export interface BackendLiveTurnIdentity {
   protocolVersion: number;
@@ -40,7 +56,7 @@ export type BackendSemanticCandidate =
   | { kind: 'turn.toolDraft'; action: 'end'; toolCallId: string; name: string; argumentsJson: string }
   | { kind: 'turn.extensionUi'; uiRequestId: string; action: 'opened' | 'closed' }
   | { kind: 'tool.started'; executionId: string; parentExecutionId: string | null; rootExecutionId: string; toolCallId: string; name: string; input: unknown; startedAt: number; parallelGroupId?: string }
-  | { kind: 'tool.progress'; executionId: string; preview: ToolPreview }
+  | { kind: 'tool.progress'; executionId: string; preview: ToolPreview; recursiveCounters?: ToolProgressRecursiveCounters }
   | { kind: 'tool.terminal'; executionId: string; status: 'completed' | 'failed'; result: unknown; durationMs?: number; durableEntryId: string }
   | { kind: 'turn.terminal'; terminalKind: 'completed' | 'interrupted' | 'error'; userInitiated?: boolean; reason?: string; durableMessage: ChatMessage; durableEntryId: string };
 
@@ -58,6 +74,7 @@ const CHECKPOINT_BYTE_METADATA_PLACEHOLDER = 99_999_999;
 const CHECKPOINT_SEQUENCE_PLACEHOLDER = Number.MAX_SAFE_INTEGER;
 const JSON_NULL_BYTES = 4;
 const JSON_ARRAY_EMPTY_BYTES = 2;
+let serializationSample = 0;
 
 export class BackendLiveTurnAccumulator {
   private seq = 0;
@@ -78,8 +95,12 @@ export class BackendLiveTurnAccumulator {
   private draftsCheckpointBytes = 2;
   private toolExecutionIdsCheckpointBytes = 2;
   private pendingUiCheckpointBytes = 2;
+  private lastProgressMeasurement?: ToolProgressMeasurement;
 
-  constructor(private readonly identity: BackendLiveTurnIdentity) {
+  constructor(
+    private readonly identity: BackendLiveTurnIdentity,
+    private readonly observeProgressMeasurement?: (measurement: ToolProgressMeasurement) => void,
+  ) {
     this.turn = {
       turnId: identity.turnId,
       attemptId: identity.attemptId,
@@ -133,6 +154,22 @@ export class BackendLiveTurnAccumulator {
       // Provider boundary replay after execution promotion is idempotent. It
       // must not recreate a transient draft or consume a semantic sequence.
       return undefined;
+    }
+    if (candidate.kind === 'tool.terminal') {
+      const previousTerminal = this.tools[candidate.executionId]?.terminal;
+      if (previousTerminal) {
+        // Durability-confirmed completion is a tombstone. A repeated SDK
+        // boundary is a no-op; a conflicting completion is rejected without
+        // producing another terminal event.
+        if (previousTerminal.durableEntryId === candidate.durableEntryId) return undefined;
+        const seq = ++this.seq;
+        return this.replaceWithRejected(seq, occurredAt, 'malformed_observation');
+      }
+    }
+    if (candidate.kind === 'turn.terminal' && this.terminal) {
+      if (this.terminal.durableEntryId === candidate.durableEntryId) return undefined;
+      const seq = ++this.seq;
+      return this.replaceWithRejected(seq, occurredAt, 'malformed_observation');
     }
     const seq = ++this.seq;
     const previousTurn = this.turn;
@@ -330,6 +367,7 @@ export class BackendLiveTurnAccumulator {
         const tool = this.tools[candidate.executionId];
         if (!tool) return this.replaceWithRejected(seq, occurredAt, 'owner_missing');
         if (!candidate.durableEntryId) return this.replaceWithRejected(seq, occurredAt, 'malformed_payload');
+        if (tool.terminal) return this.replaceWithRejected(seq, occurredAt, 'malformed_observation');
         const boundedResult = normalizeLiveToolTerminalResult(tool.name, candidate.result);
         const resultBytes = jsonByteLength(boundedResult);
         if (resultBytes > LIVE_PIPELINE_LIMITS.previewBytes) {
@@ -470,10 +508,83 @@ export class BackendLiveTurnAccumulator {
     return this.watermark ? { ...this.watermark } : undefined;
   }
 
+  /** Durable identity of the accepted terminal, when one exists. This is a
+   * cheap dedupe seam for SDK message_end handling; it does not materialize a
+   * checkpoint or inspect recursive terminal detail. */
+  terminalDurableEntryId(): string | undefined {
+    return this.terminal?.durableEntryId;
+  }
+
   private observeToolProgress(
     candidate: Extract<BackendSemanticCandidate, { kind: 'tool.progress' }>,
     occurredAt: number,
   ): TurnSemanticEnvelope | undefined {
+    const startedAt = performance.now();
+    const result = this.observeToolProgressMeasured(candidate, occurredAt);
+    if (this.lastProgressMeasurement) this.observeProgressMeasurement?.({ ...this.lastProgressMeasurement });
+    const toolName = this.tools[candidate.executionId]?.name.trim().toLowerCase();
+    if (isBackendLivePipelineTraceEnabled() && toolName === 'subagent') {
+      recordPhase5DetailAvailability();
+      const metadata = result as (TurnSemanticEnvelope & { previewBytes?: number; progressRevision?: number }) | undefined;
+      const traceKind = metadata?.kind === 'observation.rejected' ? 'rejected' : result ? 'success' : 'false';
+      const measurement = this.lastProgressMeasurement;
+      const identifiers = {
+        session: this.identity.sessionPath,
+        request: this.identity.requestId,
+        turn: this.identity.turnId,
+        attempt: this.identity.attemptId,
+        tool: candidate.executionId,
+      };
+      if (measurement) {
+        recordBackendLivePipelineTrace({
+          stage: 'backend.subagent',
+          kind: traceKind,
+          phase: 'measure',
+          outcome: measurement.outcome,
+          payloadClass: 'source',
+          sourcePayloadBytes: measurement.sourcePayloadBytes,
+          availabilityReason: measurement.sourcePayloadBytes === undefined
+            ? measurement.availabilityReason
+            : undefined,
+          childCount: measurement.counters?.childCount,
+          messageCount: measurement.counters?.messageCount,
+          maxRecursiveDepth: measurement.counters?.maxRecursiveDepth,
+          identifiers,
+          revision: measurement.revision,
+          processRole: 'coordinator',
+          pid: process.pid,
+        });
+      }
+      const currentTool = this.tools[candidate.executionId];
+      recordBackendLivePipelineTrace({
+        stage: 'backend.subagent',
+        kind: traceKind,
+        phase: 'diff',
+        durationMs: Math.max(0, performance.now() - startedAt),
+        outcome: measurement?.outcome,
+        payloadClass: measurement?.producedPayloadBytes === undefined ? undefined : 'compact',
+        producedPayloadBytes: measurement?.producedPayloadBytes,
+        childCount: measurement?.counters?.childCount,
+        messageCount: measurement?.counters?.messageCount,
+        maxRecursiveDepth: measurement?.counters?.maxRecursiveDepth,
+        identifiers,
+        snapshotBytes: metadata?.previewBytes,
+        checkpointSeq: typeof metadata?.seq === 'number' ? metadata.seq : undefined,
+        revision: measurement?.revision ?? currentTool?.progressRevision,
+        toolStateRevision: measurement?.revision ?? currentTool?.progressRevision,
+        eventSeq: typeof metadata?.seq === 'number' ? metadata.seq : undefined,
+        processRole: 'coordinator',
+        pid: process.pid,
+      });
+    }
+    return result;
+  }
+
+  private observeToolProgressMeasured(
+    candidate: Extract<BackendSemanticCandidate, { kind: 'tool.progress' }>,
+    occurredAt: number,
+  ): TurnSemanticEnvelope | undefined {
+    this.lastProgressMeasurement = undefined;
     if (this.turn.phase === 'aborting') {
       const seq = ++this.seq;
       return this.replaceWithRejected(seq, occurredAt, 'malformed_observation');
@@ -496,12 +607,28 @@ export class BackendLiveTurnAccumulator {
     const operations = previous
       ? diffJsonValues(previous as JsonSafeValue, candidate.preview as JsonSafeValue)
       : [];
-    if (previous && operations.length === 0) return undefined;
+    const previousPreviewBytes = this.previewBytesByExecutionId.get(candidate.executionId) ?? 0;
+    if (previous && operations.length === 0) {
+      // Both values are JSON-safe and structurally equal. Object key order may
+      // differ, but that cannot change UTF-8 byte length, so the retained exact
+      // preview counter is also exact for this duplicate source update.
+      this.lastProgressMeasurement = {
+        outcome: 'duplicate',
+        availabilityReason: 'source_preview_not_serialized_at_producer_boundary',
+        revision: tool.progressRevision ?? 0,
+        counters: candidate.recursiveCounters?.available === false ? undefined : candidate.recursiveCounters,
+      };
+      return undefined;
+    }
 
     const seq = ++this.seq;
     const baseSeq = seq - 1;
     const candidatePreviewBytes = jsonByteLength(candidate.preview);
-    const previousPreviewBytes = this.previewBytesByExecutionId.get(candidate.executionId) ?? 0;
+    this.lastProgressMeasurement = {
+      outcome: 'changed',
+      availabilityReason: 'source_preview_not_serialized_at_producer_boundary',
+      counters: candidate.recursiveCounters?.available === false ? undefined : candidate.recursiveCounters,
+    };
     const aggregatePreviewBytes = this.aggregatePreviewBytes - previousPreviewBytes + candidatePreviewBytes;
     if (aggregatePreviewBytes > LIVE_PIPELINE_LIMITS.toolPreviewAggregateBytes) {
       return this.replaceWithRejected(seq, occurredAt, 'payload_oversize');
@@ -509,14 +636,18 @@ export class BackendLiveTurnAccumulator {
 
     const baseProgressRevision = tool.progressRevision ?? 0;
     const progressRevision = baseProgressRevision + 1;
+    if (this.lastProgressMeasurement) this.lastProgressMeasurement.revision = progressRevision;
     const snapshotUpdate = { kind: 'snapshot' as const, preview: candidate.preview };
     const patchUpdate = { kind: 'patch' as const, operations };
-    // candidatePreviewBytes was already measured for aggregate accounting; do
-    // not serialize the multi-megabyte snapshot a second time merely to choose
-    // the wire form. The small constant covers the snapshot wrapper syntax.
-    const update = previous && jsonByteLength(patchUpdate) < candidatePreviewBytes + 32
+    const snapshotUpdateBytes = jsonByteLength({ kind: 'snapshot', preview: null }) - JSON_NULL_BYTES + candidatePreviewBytes;
+    const patchUpdateBytes = previous ? jsonByteLength(patchUpdate) : Number.POSITIVE_INFINITY;
+    // Reuse the preview and patch counters already required by aggregate
+    // accounting and wire-form selection. Only the tiny snapshot wrapper is
+    // serialized here; the recursive preview is not stringified again.
+    const update = previous && patchUpdateBytes < snapshotUpdateBytes
       ? patchUpdate
       : snapshotUpdate;
+    const updateBytes = update === patchUpdate ? patchUpdateBytes : snapshotUpdateBytes;
     const envelope: TurnSemanticEnvelope = {
       ...this.base(seq, occurredAt),
       kind: 'tool.progress',
@@ -562,7 +693,12 @@ export class BackendLiveTurnAccumulator {
     this.previewBytesByExecutionId.set(candidate.executionId, candidatePreviewBytes);
     this.aggregatePreviewBytes = aggregatePreviewBytes;
     this.turn = { ...nextTurn, checkpointBytes };
-    return { ...envelope, checkpointBytes };
+    const producedEnvelope = { ...envelope, checkpointBytes };
+    const envelopeSkeletonBytes = jsonByteLength({ ...producedEnvelope, update: null });
+    if (this.lastProgressMeasurement) {
+      this.lastProgressMeasurement.producedPayloadBytes = envelopeSkeletonBytes - JSON_NULL_BYTES + updateBytes;
+    }
+    return producedEnvelope;
   }
 
   private compactSettledToolHistory(): void {
@@ -858,8 +994,24 @@ function toolDraftByteLength(draft: { toolCallId: string; name: string; argument
 
 function jsonByteLength(value: unknown): number {
   if (value === undefined) return 0;
-  try { return Buffer.byteLength(JSON.stringify(value), 'utf8'); }
-  catch { return Number.POSITIVE_INFINITY; }
+  const startedAt = performance.now();
+  try {
+    const bytes = Buffer.byteLength(JSON.stringify(value), 'utf8');
+    if (isBackendLivePipelineTraceEnabled() && (serializationSample++ & 15) === 0) {
+      recordBackendLivePipelineTrace({
+        stage: 'backend.mapped',
+        kind: 'observation',
+        phase: 'serialize',
+        durationMs: Math.max(0, performance.now() - startedAt),
+        producedPayloadBytes: bytes,
+        processRole: 'coordinator',
+        pid: process.pid,
+      });
+    }
+    return bytes;
+  } catch {
+    return Number.POSITIVE_INFINITY;
+  }
 }
 
 function isLiveCompactedValue(value: unknown): boolean {
@@ -871,7 +1023,8 @@ function normalizeLiveToolTerminalResult(toolName: string, value: unknown): unkn
     ? (value as { $toolResult?: unknown }).$toolResult
     : undefined;
   const transportBounded = terminalTransportMarker === 'truncated'
-    || terminalTransportMarker === 'unserializable';
+    || terminalTransportMarker === 'unserializable'
+    || terminalTransportMarker === 'detail-available';
   // ask_user has a dedicated completed-state renderer that needs the selected
   // answer from the real terminal payload. Explicit terminal transport markers
   // must also survive normalization; turning one into a plausible empty

@@ -100,7 +100,7 @@ function midEditState(): ArchState {
 }
 
 function sessionOpenedEvent(payload: SessionOpenedPayload): Event {
-  return { kind: 'SessionOpened', sessionPath: '/s', payload };
+  return { kind: 'SessionOpened', backendGeneration: 0, modelWriteFence: 0, modelHydrationRevision: 0, catalogHydrationRevision: 0, sessionPath: '/s', payload };
 }
 
 test('mid-edit idle truncate snapshot (busy:false) preserves the optimistic edit message', () => {

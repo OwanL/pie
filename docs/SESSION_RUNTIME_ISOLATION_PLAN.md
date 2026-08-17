@@ -1,6 +1,6 @@
 # Session runtime isolation implementation plan
 
-**Status:** Proposed, not started  
+**Status:** Active — Phases 0–6 implemented; Phase 7 is at staged default-on with the bounded legacy rollback seam retained
 **Priority:** P0 liveness and correctness  
 **Scope:** `extension/src/backend/`, host/backend reconciliation, lazy subagent detail delivery, and deterministic integration tests  
 **Out of scope for this document:** production implementation
@@ -65,7 +65,7 @@ The renderer must show explicit `loading`, `retry`, `stale/rebasing`, and `unava
 
 ### 3.3 Contract supersession and collapse/re-expand
 
-Implementation of this plan will **SUPERSEDE**, not add to, the current `docs/STATE_CONTRACT.md` rule that a mounted collapsed subagent requests full detail immediately. The replacement contract is: a collapsed card renders only its bounded compact preview with no detail subscription; only explicit expansion subscribes to complete detail. Current code and the authoritative contract are not yet aligned with that target and must be reconciled together in Phase 5, with matching `sync-contract.test.ts`, lazy-detail routing, webview mount/expand/collapse, and no-subscriber traffic tests.
+Phase 5 **superseded**, rather than added to, the former `docs/STATE_CONTRACT.md` rule that a mounted collapsed subagent requests full detail immediately. The implemented contract is: a collapsed card renders only its bounded compact preview with no detail subscription; only explicit expansion subscribes to complete detail. The authoritative contract, `sync-contract.test.ts`, lazy-detail routing, webview mount/expand/collapse behavior, and no-subscriber traffic tests now enforce that rule.
 
 Collapsing a card:
 
@@ -121,32 +121,37 @@ Per-root worker isolation is the required architecture now. Per-child process is
 
 ## 5. Evidence-first instrumentation and failing test
 
-### 5.1 First implementation commit: spawned-backend liveness test
+### 5.1 First implementation commit: two spawned-backend liveness tests
 
-Add a real spawned-process integration harness before moving code. Do not use an in-memory `BackendServer` test for the acceptance claim; an in-memory test shares the test runner's event loop and cannot prove process isolation.
+Add a real spawned-process integration harness before moving code. Do not use an in-memory `BackendServer` test for either acceptance claim; an in-memory test shares the test runner's event loop and cannot prove process isolation.
 
 Likely files:
 
 - new `extension/test/backend/runtime/backend-session-worker-liveness.test.ts`;
-- new blocking extension fixture under `extension/test/fixtures/` or a temporary `PI_CODING_AGENT_DIR` assembled by the test;
-- extend `extension/test/fixtures/mock-backend.mjs` only for host reconciliation tests, not for the process-isolation proof;
+- two blocking extension fixtures under `extension/test/fixtures/`, or a temporary `PI_CODING_AGENT_DIR` assembled by the test;
+- extend `extension/test/fixtures/mock-backend.mjs` only for host reconciliation tests, not for process-isolation proof;
 - reuse process startup helpers from `extension/test/backend/runtime/backend-request-handler.test.ts`, `backend-service-loading-gate.test.ts`, and `backend-cold-session-browse.test.ts` where practical.
 
-The fixture extension exposes a deterministic synchronous block in a session-A execution hook. Use `Atomics.wait` with a finite duration when supported and a bounded busy loop as the compatibility path. The block should be long enough for realistic Windows CI scheduling (for example several seconds), not a 50 ms timing trick.
+Create two independent spawned scenarios:
 
-Test sequence:
+1. an extension blocks synchronously in a session-A execution hook;
+2. a separate extension blocks synchronously in its factory/resource bootstrap while A's worker is being promoted.
 
-1. Spawn the backend/coordinator with two durable sessions and the blocking extension enabled only when session A is promoted.
-2. Send an execution request to A and wait for an instrumentation event proving entry into the synchronous block.
-3. While A remains blocked, concurrently issue:
+Each fixture synchronously writes an `entered` marker, then blocks while polling an externally controlled `release` marker, with a generous finite safety deadline that fails the fixture rather than hanging CI forever. The test owns the release marker and creates it in `finally`, including assertion-failure and teardown paths. Do not use a fixed-duration sleep as the release mechanism.
+
+For each scenario:
+
+1. Spawn the backend/coordinator with two durable sessions and enable the relevant blocking fixture only in A's worker.
+2. Trigger A execution/promotion and wait until the external `entered` marker proves the synchronous block is active.
+3. While the marker remains unreleased, concurrently issue:
    - `app.ping`;
    - cold `session.open` or transcript-page access for session B;
    - `settings.get`;
    - `models.list` for stable session B.
-4. Assert every control response is received **before** the fixture reports that A unblocked.
-5. Assert A eventually continues or is interruptible after the fixture releases.
+4. Record receipt of every response, assert all were received while the release marker was still absent, and only then release A in the test's `finally` cleanup.
+5. Assert A eventually continues or is interruptible, and clean up the complete spawned process tree.
 
-The desired liveness assertion must fail against the legacy monolithic backend. Preserve that evidence in the PR history and trace artifact. If the evidence harness lands before isolation, quarantine only with an explicit known-failure marker and issue/phase reference; do not weaken the ordering assertion. Remove the marker when the worker path lands.
+This is causal responses-before-release evidence, not a tight duration benchmark; use generous safety deadlines for Windows CI. Both desired assertions must fail against the legacy monolithic backend. Preserve that evidence in the PR history and trace artifact. If the harness lands before isolation, quarantine only with explicit known-failure markers and issue/phase references; do not weaken ordering. Remove both markers when the worker path lands.
 
 ### 5.2 Instrumentation contract
 
@@ -328,9 +333,22 @@ The coordinator owns:
 - compact last-known live checkpoints and worker event forwarding;
 - the existing response-priority host writer.
 
-The coordinator must not call `createAgentSessionServices`, load user extensions/resources, construct an `AgentSession`, run provider callbacks, execute tools, or normalize recursive subagent details. Its cold durable adapter must be measured and must not import the full runtime stack merely to browse. Reuse `session-browser.ts`, `session-catalog.ts`, `session-metadata.ts`, and transcript helpers after extracting any accidental runtime dependency.
+The coordinator must not call `createAgentSessionServices`, load user extensions/resources, construct an `AgentSession`, run provider callbacks, execute tools, or normalize recursive subagent details. A top-level SDK import used only for the cold-store API is an evidence-driven seam, not an absolute prohibition; §7.2 determines where that import and its operations execute. Reuse `session-browser.ts`, `session-catalog.ts`, `session-metadata.ts`, and transcript helpers after extracting accidental runtime dependencies.
 
-### 7.2 Worker ownership
+### 7.2 `ColdSessionStore` seam
+
+The SDK's top-level `SessionManager` currently owns session-format migration and the supported create, open, fork, and tree semantics. Define a narrow `ColdSessionStore` adapter over that API for list/open snapshot, transcript/page/detail reads, create, duplicate/fork, tree projection, and metadata changes. Preserve SDK behavior for header/session-directory naming, parent links, active leaf/branch/context construction, entry identities, and automatic v1/v2→v3 migration. Do not casually parse-and-rewrite or reimplement the session format in coordinator code.
+
+The coordinator logically owns this adapter and every cold-operation lease, but measurement decides its execution location:
+
+- first measure top-level SDK import and representative `ColdSessionStore` operations against explicit control-plane event-loop-delay and `app.ping` budgets;
+- if they stay within budget, use the supported SDK wrapper in the coordinator without creating `AgentSessionServices`, a resource loader, an `AgentSession`, or user extensions;
+- if import or an operation misses budget, run the **same adapter** in a bounded dedicated browse/migration helper process. Bound helper count, requests, frame bytes, and cancellation; coordinator ping and unrelated controls must remain responsive while it imports, migrates, or scans;
+- in either placement, the coordinator acquires the logical cold lease and the adapter rechecks ownership immediately before every read publication and write commit. A helper result is discarded if promotion, forget, replacement, or generation ownership changed while it ran.
+
+Parity tests must cover legacy v1 and v2 migration to v3, create/fork/duplicate and tree/leaf/context semantics, concurrent cold reads around promotion or mutation, and the immediate pre-publication/pre-commit ownership recheck in both in-process and helper-backed execution. The helper is isolation for the supported adapter, not a license to invent another session format.
+
+### 7.3 Worker ownership
 
 One worker owns one hot root session at a time. It owns:
 
@@ -346,7 +364,7 @@ One worker owns one hot root session at a time. It owns:
 
 A worker never serves an unrelated root session. A blocked A worker therefore cannot block B's worker or the coordinator.
 
-### 7.3 Cold-to-hot ownership states
+### 7.4 Cold-to-hot ownership states
 
 Use an explicit per-session owner state:
 
@@ -367,7 +385,39 @@ Rules:
 
 Cold model selection and metadata-only operations should remain coordinator-owned where they can be performed losslessly without runtime creation. Execution operations include send/edit execution, history compaction, live interrupt, extension-UI continuation, and any action that invokes SDK/extensions/tools. An idle cold truncate may remain a coordinator durable operation; a hot truncate routes to the worker.
 
+### 7.5 SDK-driven session replacement ownership checkpoint
+
+The pinned SDK permits extensions and commands to call `ctx.newSession()`, `ctx.fork()`, and `ctx.switchSession()`. Those flows replace `runtime.session`, can change `runtime.session.sessionFile`, and preserve a defined extension lifecycle. A worker may therefore never treat a changed `runtime.session` or session file as implicit permission to start writing a different path.
+
+Phase 4 begins with an ownership-protocol spike and must establish this sequence before enabling extension-driven replacement:
+
+1. Before any destination file create/open/write, the worker sends a replacement intent containing source lease/generation, operation identity, requested destination or creation parameters, and lifecycle reason.
+2. Under the coordinator's per-path ownership lock, the coordinator validates policy, resolves and reserves the exact destination, and fences cold writes. The reservation is bound to the source worker generation and operation; no destination worker, coordinator writer, or other write owner may coexist with it.
+3. Only a coordinator-authorized SDK adapter may continue. At its supported **pre-write barrier**, after old-session writes are quiesced and the old manager is closed, the coordinator atomically releases the source lease and converts the destination reservation into the same worker generation's sole-writer lease. Only the returned one-use authorization permits destination create/open-for-write/append and destination streaming. There is no interval with two write leases or with an unleased destination write.
+4. Cancellation or failure before that barrier releases the reservation without changing source ownership. Failure or crash after transfer leaves the destination lease fenced until process death, durable fingerprints, and lease state are reconciled; it never silently rolls ownership back to the source.
+5. Every source append/truncate after transfer is rejected as stale, and every destination write before transfer commit is rejected. No new worker may own the destination until the old process is confirmed dead or has acknowledged release.
+
+Preserve SDK `session_before_switch`/`session_before_fork`, `session_shutdown`, resource reload/rebind, `session_start`, cancellation, and `withSession` behavior. Public `session.opened`, selection-token/operation ownership, pending replacement reconciliation, and runtime-ready-before-stream ordering must describe the actual destination path without stealing selection.
+
+If the pinned SDK has no supported hook before destination creation/write, **Phase 4 is blocked**: add a fail-closed adapter or obtain an upstream pre-write seam. Observing `runtime.session`/`sessionFile` only after replacement is not sufficient. Tests cover new, fork/clone, and switch conflicts; extension cancellation; crash after reservation and mid-transfer; destination-owner collision; and stale old-session writes after commit.
+
+### 7.6 Bootstrap, patch, build, and teardown prerequisites
+
+`extension/src/backend/sdk.ts` currently patches files in a shared installed SDK, while Vite's node build emits only `extension.js` and `backend.js`. Before any real worker starts:
+
+- implement one coordinator-owned, cross-process-locked pre-spawn patch barrier, or move to immutable build-time patching. It runs once per SDK path/version, verifies the durability/retry patch fingerprints, and fails startup closed on unsupported state;
+- workers must never race writes to shared SDK files. They receive a verified patch identity and may only validate it before import;
+- add `worker-entry.ts` as a dedicated Vite node input with a stable packaged output path, include it in installed/package artifacts, and spawn that artifact rather than a source TypeScript path;
+- add build tests for all node entries and a packaged-artifact test that installs/unpacks the produced shape, starts the coordinator, spawns a real worker entry, completes readiness/IPC, and exits cleanly;
+- coordinator shutdown, worker restart, failed bootstrap, runtime crash, and test cleanup terminate the complete worker process tree, including tool/subagent descendants spawned after readiness. POSIX uses the worker process group. Before bootstrap, Windows assigns the worker to a private kernel Job held by a guardian process with `KILL_ON_JOB_CLOSE`; coordinator/guardian death, explicit kill, or runtime crash cleanup therefore does not depend on PID snapshots or live parent links.
+
+These are Phase 2 prerequisites, not rollout cleanup.
+
 ## 8. Private coordinator/worker IPC v1
+
+Private frames use two dedicated inherited descriptors: one coordinator→worker JSONL pipe and one worker→coordinator JSONL pipe. Node child-process object IPC is not an ingress because it deserializes before application bounds can run; workers have no `process.send` or `message` listener. Worker `stdout` and `stderr` are diagnostic-only: Pi extensions may call `console.log`, `console.error`, or write directly to either stream, so those streams can never carry private framed IPC and diagnostic bytes can never poison protocol parsing. Drain diagnostics independently with bounded logging/backpressure behavior. Each descriptor applies the shared bounded JSONL reader before `JSON.parse`; senders serialize JSON+LF and verify its exact byte cap before the OS write.
+
+Transport/build acceptance pins and tests this two-descriptor transport. Tests inject extension factory, hook, tool, and nested-subagent stdout/stderr noise (including JSON-looking lines, partial lines, and output around the diagnostic bound) while commands, heartbeats, detail pages, and exits remain synchronized. Also test IPC close/malformed/oversize handling, generation rejection, coordinator shutdown, packaged worker spawn, and complete process-tree cleanup.
 
 Create a private protocol separate from `PROTOCOL_VERSION`, likely in:
 
@@ -409,9 +459,11 @@ type CoordinatorToWorkerFrame =
   | { kind: 'command'; requestId: string; operation: WorkerOperation; payload: unknown }
   | { kind: 'interrupt'; requestId: string; targetRequestId?: string; reason: string }
   | { kind: 'sync'; domain: 'settings' | 'catalog' | 'auth' | 'runtimePrefs' | 'providerPolicy'; revision: number; payload: unknown }
+  | { kind: 'ownership.consumed'; requestId: string; authorizationId: string; lease: SdkSessionWriteLease }
   | { kind: 'provider.leaseResult'; requestId: string; leaseId?: string; status: 'granted' | 'rejected' | 'cancelled'; payload?: unknown }
+  | { kind: 'provider.cancelAck'; requestId: string; targetRequestId: string; status: 'queued' | 'granted' | 'not-found'; leaseId?: string }
   | { kind: 'extensionUi.response'; requestId: string; uiRequestId: string; subagentCallId?: string; toolCallId?: string; payload: unknown }
-  | { kind: 'detail.subscribe'; requestId: string; subscriptionId: string; address: LiveSubagentDetailAddress; lastRevision?: number; maxPageBytes: number }
+  | { kind: 'detail.subscribe'; requestId: string; subscriptionId: string; address: LiveSubagentDetailAddress; cursor?: DetailCursor; maxPageBytes: number }
   | { kind: 'detail.unsubscribe'; requestId: string; subscriptionId: string };
 
 type WorkerToCoordinatorFrame =
@@ -419,7 +471,9 @@ type WorkerToCoordinatorFrame =
   | { kind: 'response'; requestId: string; ok: boolean; result?: unknown; error?: WorkerError }
   | { kind: 'event'; event: WorkerEventName; payload: unknown }
   | { kind: 'heartbeat'; payload: WorkerHeartbeat }
+  | { kind: 'ownership.consume'; requestId: string; authorization: SdkSessionTransferAuthorization; canonicalDestinationPath: string }
   | { kind: 'provider.leaseRequest' | 'provider.observation' | 'provider.release'; requestId: string; leaseId?: string; payload: unknown }
+  | { kind: 'provider.cancel'; requestId: string; targetRequestId: string; reason: string }
   | { kind: 'extensionUi.request'; requestId: string; uiRequestId: string; subagentCallId?: string; toolCallId?: string; payload: unknown }
   | { kind: 'detail.subscribed'; requestId: string; subscriptionId: string; baselineRevision: number; pageCount: number; totalBytes: number }
   | { kind: 'detail.page'; subscriptionId: string; baselineRevision: number; pageIndex: number; pageCount: number; payload: unknown; payloadBytes: number; checksum: string }
@@ -449,11 +503,11 @@ Extension-UI identity is the existing `uiRequestId` plus optional exact `subagen
 - retain the shared 32 MiB hard frame/record limit and stricter producer headroom; do not allow an IPC frame larger than a host JSONL record simply because it is private;
 - ordinary control, heartbeat, compact progress, and terminal metadata must be much smaller than the hard limit and have explicit semantic bounds;
 - complete expanded detail uses bounded pages/segments. A single huge tool output is represented by exact paged content, not byte-truncated JSON;
-- readers discard an overlong line through LF and fail the offending worker generation; correlated coordinator requests receive a typed failure;
+- each dedicated-FD reader discards an overlong frame through its delimiter before deserialization and fails the offending worker generation; malformed or gapped current-generation JSONL fails likewise. Correlated coordinator requests receive a typed failure;
 - writers maintain bounded response/control, lifecycle, and detail queues. Responses/control drain before progress, FIFO within a lane; an active OS write is not preempted;
 - only contiguous same-owner progress/detail patches may compose. Terminal/durable handoff records are never dropped or coalesced away;
 - on detail backpressure, stop producing deltas for that subscription and issue `rebase-required` at the newest retained revision. Do not enqueue an unbounded history;
-- coordinator-to-host ordinary snapshots remain compact even while a detail subscription is active. Detail is forwarded through a key-scoped imperative/event channel, not copied into `ViewState`.
+- coordinator-to-host ordinary snapshots remain compact even while a detail subscription is active. Detail is forwarded through the closed public protocol in §9, not copied into `ViewState`.
 
 ### 8.4 Heartbeat, crash, restart, and interrupt
 
@@ -522,7 +576,68 @@ The coordinator retains a bounded compact checkpoint per hot root:
 
 On worker crash, this checkpoint supports truthful interrupted rendering and diagnostics. It is explicitly last-known and may be stale. If a durability-confirmed terminal handoff exists, cold durable detail is authoritative. If not, expanded live detail becomes `stale/unavailable` with retry after restart; the UI must not claim a non-durable recursive body is exact.
 
-## 9. Demand-driven subagent detail protocol
+## 9. Public coordinator → host → webview detail protocol
+
+Private worker IPC is not the public UI contract. Add closed typed unions at both remaining boundaries; no open `event: string` or `payload: unknown` may cross validation.
+
+```ts
+type HostToCoordinatorDetailMessage =
+  | { kind: 'detail.subscribe'; requestId: string; subscriptionId: string; address: LiveSubagentDetailAddress; cursor?: DetailCursor; maxPageBytes: number }
+  | { kind: 'detail.unsubscribe'; requestId: string; subscriptionId: string; reason: 'collapse' | 'rebase' | 'session-change' | 'host-dispose' };
+
+type CoordinatorToHostDetailMessage =
+  | { kind: 'detail.start'; subscriptionId: string; address: LiveSubagentDetailAddress; source: 'live' | 'durable'; baselineRevision: number; pageCount: number; totalBytes: number; fence: BackendDetailFence }
+  | { kind: 'detail.page'; subscriptionId: string; baselineRevision: number; pageIndex: number; pageCount: number; payload: DetailPagePayload; payloadBytes: number; checksum: string; fence: BackendDetailFence }
+  | { kind: 'detail.delta'; subscriptionId: string; baseRevision: number; revision: number; operations: JsonStructuralPatchOperation[]; fence: BackendDetailFence }
+  | { kind: 'detail.rebase'; subscriptionId: string; currentRevision: number; reason: 'gap' | 'backpressure' | 'evicted' | 'generation-change'; fence: BackendDetailFence }
+  | { kind: 'detail.terminal'; subscriptionId: string; revision: number; durableRef: LazyDetailRef; fence: BackendDetailFence }
+  | { kind: 'detail.error'; subscriptionId: string; code: DetailErrorCode; message: string; retryable: boolean; fence: BackendDetailFence };
+```
+
+`BackendDetailFence` contains backend/coordinator generation and, for a live source, worker ID/generation. `DetailCursor` is revision/segment progress only and is not identity. `DetailPagePayload`, patch operations, refs, and error codes are closed validated types. Subscribe/unsubscribe RPC acknowledgements remain correlated control responses; stream content is only the six coordinator-to-host variants above.
+
+The webview boundary mirrors the same state machine:
+
+```ts
+type WebviewToHostDetailMessage =
+  | { kind: 'detail.subscribe'; viewGeneration: number; detailKey: string; address: LiveSubagentDetailAddress; cursor?: DetailCursor }
+  | { kind: 'detail.unsubscribe'; viewGeneration: number; detailKey: string; reason: 'collapse' | 'unmount' | 'session-change' };
+
+interface HostDetailRoute {
+  hostInstanceId: string;
+  hostGeneration: number;
+  viewGeneration: number;
+  backendGeneration: number;
+  coordinatorGeneration: number;
+  workerId?: string;
+  workerGeneration?: number;
+  detailKey: string;
+  subscriptionId: string;
+}
+
+type HostToWebviewDetailMessage =
+  | (HostDetailRoute & { kind: 'detail.start'; address: LiveSubagentDetailAddress; source: 'live' | 'durable'; baselineRevision: number; pageCount: number; totalBytes: number })
+  | (HostDetailRoute & { kind: 'detail.page'; baselineRevision: number; pageIndex: number; pageCount: number; payload: DetailPagePayload; payloadBytes: number; checksum: string })
+  | (HostDetailRoute & { kind: 'detail.delta'; baseRevision: number; revision: number; operations: JsonStructuralPatchOperation[] })
+  | (HostDetailRoute & { kind: 'detail.rebase'; currentRevision: number; reason: 'gap' | 'backpressure' | 'evicted' | 'generation-change' })
+  | (HostDetailRoute & { kind: 'detail.terminal'; revision: number; durableRef: LazyDetailRef })
+  | (HostDetailRoute & { kind: 'detail.error'; code: DetailErrorCode; message: string; retryable: boolean });
+```
+
+A host or backend generation change invalidates the stream; a view generation change invalidates renderer ownership.
+
+Routing/ownership rules:
+
+- webview expansion asks the host to subscribe; the `EffectRunner` allocates the backend subscription ID and routes subscribe/unsubscribe through the owning session service. Reducers may request effects and track compact loading/error metadata, but never hold pages or execute I/O;
+- the host owns exactly one active subscription record per `{hostInstanceId, viewGeneration, detailKey}` and records its exact session/address/backend/worker owner before forwarding content;
+- collapse/unmount immediately discards the webview's heavy key store, sends unsubscribe, and leaves a bounded host tombstone until acknowledgement, worker/backend death, or expiry. Late start/page/delta/terminal messages matching a tombstone are dropped and cannot recreate UI;
+- all generations, address, subscription ID, page/revision order, byte counts, and checksums are validated before forwarding. Gaps emit `detail.rebase`; typed terminal/error states close or transition the subscription exactly once;
+- the webview uses a key-scoped store keyed by `detailKey` plus subscription ID. Applying one page/delta must notify only that expanded subtree, not replace `ViewState` or rerender unrelated cards;
+- ordinary `ViewState` contains only bounded compact previews and cheap detail status/cursor metadata. It never contains baseline pages, deltas, complete transcripts, or huge output segments.
+
+Protocol tests exhaustively validate every union variant and reject unknown/missing fields, stale backend/worker/host/view generations, wrong owners, duplicate terminal/error settlement, post-unsubscribe traffic, and cross-key rerenders.
+
+## 10. Demand-driven subagent detail protocol
 
 Likely implementation points:
 
@@ -537,23 +652,31 @@ Likely implementation points:
 - `extension/src/shared/protocol/event-payloads.ts` and `webview.ts`;
 - webview lazy-detail store/hooks and transcript tool components under `extension/src/webview/panel/transcript/tools/`.
 
-### 9.1 Address and subscription
+### 10.1 Address and subscription
 
-A live detail address includes the complete ownership tuple, not just a tool name or array index:
+A live detail address includes immutable producer identity, not a revision, tool name, or array index:
 
 ```ts
+interface SubagentChildIdentity {
+  childId: string;             // producer-issued identity for this child attempt
+  spawningToolCallId: string;  // stable subagent tool call that created it
+  attemptId: string;
+}
+
 interface LiveSubagentDetailAddress {
   sessionPath: string;
   turnId: string;
-  toolCallId: string;
-  attemptId: string;
-  revision: number;
+  rootToolCallId: string;
+  rootAttemptId: string;
+  lineage: readonly SubagentChildIdentity[]; // root child through target, non-empty
 }
 ```
 
-The transport also carries coordinator/worker generation and a host-minted `subscriptionId`. Nested addresses include their parent detail identity and stable child/tool identities; never address a child only by its current display index.
+The subagent producer must issue a stable `childId`/attempt identity for every single, parallel, chain, and nested child when it is created. Every descendant carries the stable ancestor lineage at every depth; reordering, filtering, insertion, parallel completion, or rebasing cannot change the address. Array indexes are display order only. `revision` is solely a `DetailCursor`/delta-order field and is never part of `LiveSubagentDetailAddress`.
 
-Expansion sends subscribe with the last cached revision if any. The owning worker responds with:
+The transport also carries coordinator/worker generation and a host-minted `subscriptionId`. Migration parsing may synthesize a best-effort display key for old durable details that lack producer identity, but that fallback is display-only: it cannot subscribe to, merge, or own live deltas.
+
+Expansion sends subscribe with the last cached cursor if any. The owning worker responds with:
 
 - a bounded baseline when it fits; or
 - a manifest plus ordered pages/segments captured at baseline revision R;
@@ -561,19 +684,19 @@ Expansion sends subscribe with the last cached revision if any. The owning worke
 
 Updates that occur while baseline pages are being delivered are retained only as a bounded post-R delta window. If that window cannot be retained, send `rebase-required`; the renderer discards the partial body and requests a fresh baseline.
 
-### 9.2 Baseline and delta semantics
+### 10.2 Baseline and delta semantics
 
 The baseline is a complete semantic transcript projection at one revision. Pages split on semantic record/part boundaries where possible. An individually oversized output uses exact content segments with byte ranges/checksums and deterministic reassembly. No page pretends to be a complete result when it is not.
 
 The subscribe request negotiates `maxPageBytes`; the coordinator clamps it to a configured target and to a value whose complete serialized IPC and host-imperative envelopes remain below the existing 30 MiB producer budget and 32 MiB hard record ceiling. Each page reports exact UTF-8 `payloadBytes`, ordered `pageIndex/pageCount`, baseline revision, and a content checksum. A large string/blob segment carries semantic part identity plus `[startByte,endByte,totalBytes]`; splits occur only at UTF-8 boundaries. The receiver verifies envelope bytes, checksum, contiguity, non-overlap, page count, and total bytes before committing the baseline. Pages and the bounded post-baseline delta window may be discarded on collapse, gap, checksum failure, or worker loss and restarted from a fresh baseline.
 
-There is no fixed total-detail byte rejection analogous to today's `server.ts::loadDetail` check against `LIVE_PIPELINE_LIMITS.previewBytes`. Replace that check for subagent transcript/long-output refs with paged retrieval from the live worker or durable transcript. The full detail remains bounded by the actual canonical/durable source and receiver cache policy, not by one frame; only one page and a bounded reassembly window need cross the transport at once. Generic details that remain single-frame may retain their current limit. Add tests directly covering a detail whose total exceeds `LIVE_PIPELINE_LIMITS.previewBytes`, exact segment reassembly, non-ASCII split boundaries, bad checksum, missing page, retry/rebase, and durable reload. The configured page target is a rollout tuning value selected by §12 measurements, not a change to the hard safety ceilings.
+There is no fixed total-detail byte rejection analogous to today's `server.ts::loadDetail` check against `LIVE_PIPELINE_LIMITS.previewBytes`. Replace that check for subagent transcript/long-output refs with paged retrieval from the live worker or durable transcript. The full detail remains bounded by the actual canonical/durable source and receiver cache policy, not by one frame; only one page and a bounded reassembly window need cross the transport at once. Generic details that remain single-frame may retain their current limit. Add tests directly covering a detail whose total exceeds `LIVE_PIPELINE_LIMITS.previewBytes`, exact segment reassembly, non-ASCII split boundaries, bad checksum, missing page, retry/rebase, and durable reload. The configured page target is a rollout tuning value selected by §13 measurements, not a change to the hard safety ceilings.
 
 Deltas are restricted operations already supported by the live structural patch model: set/delete, string append, and array append, with stable child/message/tool keys. They update only the subscribed detail store. Duplicate revisions are idempotent; a gap or base mismatch rebases.
 
 The worker should build the compact card and subscriber deltas incrementally from the source update. It must not clone/normalize/diff/measure the complete recursive tree separately for every downstream consumer. Normalize a changed branch once, maintain revisioned canonical detail in the worker, update compact tails/counters incrementally, and serialize only demanded pages/deltas.
 
-### 9.3 Durable terminal handoff
+### 10.3 Durable terminal handoff
 
 Terminal ordering is:
 
@@ -586,7 +709,7 @@ Terminal ordering is:
 
 A terminal payload that exceeds one frame is never embedded whole in the lifecycle event; its durable reference plus paged retrieval is the handoff. Long terminal output remains accessible after restart.
 
-### 9.4 Ordinary state bounds
+### 10.4 Ordinary state bounds
 
 Add deterministic counters to prove:
 
@@ -597,15 +720,28 @@ Add deterministic counters to prove:
 - collapse stops detail traffic after unsubscribe acknowledgement, except an already-active bounded write;
 - re-expand receives a current baseline and ordered deltas, not accumulated historical event replay.
 
-## 10. PR-sized implementation phases
+### 10.5 Bounded page-backed renderer and cache ownership
+
+“Complete” means every message and output byte remains navigable and retrievable; it does not mean the whole recursive transcript is simultaneously mounted in the DOM or retained in RAM.
+
+- virtualize each nested message list and nested subagent subtree. Page records by stable semantic identity, and render huge tool inputs/outputs as independently virtualized exact byte/semantic segments rather than one giant string node;
+- keep active subscription metadata plus the current viewport/reassembly pages in a dedicated bounded active-subscription store, pinned separately from the generic 32-entry/64-MiB one-shot lazy-detail LRU. The generic LRU cannot evict ownership/cursor state for an expanded card;
+- the active store is still bounded: offscreen pages and oversized output segments may be evicted while metadata/checksums/cursors remain. Re-entering the viewport re-fetches exact content from the live worker's canonical state or, after terminal handoff, the durable source;
+- never concatenate a detail larger than the active budget merely to pass it to the renderer. Verify and commit pages/segments independently at semantic boundaries;
+- collapse unsubscribes, removes subscription metadata after the tombstone lifecycle, and immediately discards all heavy pages, segment buffers, and virtualizer measurements for that key.
+
+Fast tests inject tiny page/cache/viewport budgets to force eviction, offscreen navigation, live and durable re-fetch, nested virtualization, oversized-segment reassembly, and collapse cleanup deterministically. Add a separate opt-in end-to-end integration test whose exact detail exceeds the current 64-MiB cache; it must prove end-to-end navigation/re-fetch and terminal equality but stay outside canonical `npm test` so the ordinary development suite is not slowed.
+
+## 11. PR-sized implementation phases
 
 Each phase must be independently reviewable and preserve a backend-generation rollback seam. Do not mix broad host reducer refactors with worker extraction.
 
 ### Phase 0 — Evidence and observability
 
 **Dependencies:** none.  
-**Deliverables:** spawned blocking-extension harness, legacy failing liveness assertion/characterization, phase/event-loop/writer/subagent instrumentation, trace artifact schema.  
-**Exit:** incident phases can be distinguished without logging content or adding full-tree serialization.
+**Deliverables:** two spawned blocking-extension harnesses (execution hook and synchronous factory/resource bootstrap), legacy failing causal liveness assertions/characterization, phase/event-loop/writer/subagent instrumentation, trace artifact schema.
+
+**Exit:** both blocks are externally entered/released with fail-safe cleanup, and incident phases can be distinguished without logging content or adding full-tree serialization.
 
 ### Phase 1 — Independent host/backend correctness
 
@@ -618,31 +754,41 @@ Split this into multiple PRs if needed: model hydration, error ownership, create
 ### Phase 2 — Private IPC and supervisor skeleton behind a flag
 
 **Dependencies:** Phase 0.  
-**Deliverables:** `WORKER_IPC_VERSION`, bounded reader/writer, spawn/ready/heartbeat/exit, generation fences, response correlation, process-tree kill, test worker, no Pi runtime yet.  
-**Exit:** stale frames, oversize frames, writer backpressure, missed heartbeat, soft interrupt, kill, and restart are deterministic.
+**Deliverables:** two dedicated inherited directional FDs (no Node object IPC); `WORKER_IPC_VERSION`; pre-deserialization bounded reader/exact-cap writer; spawn/ready/heartbeat/exit; generation fences; response correlation; independent diagnostic stdout/stderr draining; coordinator-owned locked SDK patch barrier; dedicated bundled worker entry/package output; POSIX process-group and Windows kernel-Job guardian process-tree kill; test worker; no Pi runtime yet.
+
+**Exit:** extension stdout/stderr cannot enter IPC, stale/malformed/oversize frames and writer backpressure are deterministic, patch writes cannot race, missed heartbeat/soft interrupt/kill/restart clean the process tree, and the packaged-artifact spawn test passes.
 
 Select one backend mode for an entire coordinator generation via an internal rollout flag such as `PIE_SESSION_RUNTIME_ISOLATION=0|1`. Do not mix legacy and worker write ownership for different sessions in the same generation during early rollout.
 
 ### Phase 3 — Lightweight coordinator and cold operations
 
+**Status:** Implemented (2026-08-15). Phase 4 routing is now integrated.
 **Dependencies:** Phase 2; Phase 1 create semantics.  
-**Deliverables:** extract cold session/catalog/settings/models/create/open paths from `BackendServer`; coordinator starts and answers them without SDK runtime/resource/extension initialization; cold create/open remains runtime-free.  
-**Exit:** cold browse tests pass and instrumentation proves no runtime factory/extension load occurred.
+**Deliverables:** implement `ColdSessionStore`; extract cold session/catalog/settings/models/create/open paths from `BackendServer`; measure top-level SDK import/operations and choose coordinator or bounded helper execution; cold create/open remains runtime-free.
+
+**Exit:** v1/v2→v3 migration, create/fork/tree, concurrent read, and ownership-recheck parity tests pass; coordinator never creates `AgentSessionServices` or loads user extensions; ping budgets determine and document the placement. The SDK patch barrier now fail-closes on the pinned `SessionManager.create` seam and atomically publishes the SDK-owned v3 header before returning the exact retained manager/path; its separately fingerprinted identity is validated by coordinators and workers, and the create ledger records a durable path only after that return. Isolated coordinators import only the cold config/auth/session exports, not the package root or history-compaction internals, and do not mutate `AgentSession.prototype`; legacy/runtime-worker loading remains full. Measurement selected the in-process adapter: the one-time cold SDK module import is bounded by the 15 s contended-Windows startup budget, representative cold operations by a 1 s event-loop probe, and a causal public JSONL test proves the correlated `app.ping` response crosses the response writer before a suspended cold catalog operation is released. A helper-backed placement was therefore not implemented; `COLD_SESSION_STORE_PLACEMENT` and its tests pin that decision.
 
 ### Phase 4 — One hot root per worker
 
+**Status:** Implemented (2026-08-15): transactional cold promotion, one-hot-root worker routing, SDK replacement rekey, priority interrupt, crash reconciliation, and coordinator-authoritative settings/prefs sync are integrated.
 **Dependencies:** Phases 2–3.  
-**Deliverables:** move `createAgentSessionRuntime`, session subscription, runtime factory, extension UI endpoint, live accumulator, tool/provider execution, and session writes into the worker; implement promotion and ownership state; runtime-ready-before-stream ordering.  
-**Exit:** the spawned blocking-extension test passes: coordinator controls and cold B answer before A unblocks.
+**Blocking checkpoint:** prove a supported pre-write seam for SDK-driven `newSession`/fork/clone/switch. If the pinned SDK lacks one, Phase 4 stops for a fail-closed adapter or upstream seam; post-write observation is not acceptable.
+
+**Deliverables:** move `createAgentSessionRuntime`, session subscription, runtime factory, extension UI endpoint, live accumulator, tool/provider execution, and session writes into the worker; implement promotion, atomic replacement lease transfer, and runtime-ready-before-stream ordering while preserving SDK lifecycle and public `session.opened`/selection semantics.
+
+**Exit:** both spawned blocking-extension tests pass causally, and new/fork/clone/switch conflict, cancellation, crash-mid-transfer, and stale-old-write tests prove no target owner overlap.
 
 ### Phase 5 — Subagent detail decoupling
 
-**Dependencies:** Phase 4 for final routing; protocol/store pieces can be prepared earlier.  
-**Deliverables:** compact card projection; demand-driven baseline/pages/deltas; gap rebase; collapse unsubscribe; exact durable terminal handoff; explicit UI states; no recursive trees in ordinary lanes.  
-**Exit:** large recursive live-subagent stress passes in collapsed, expanded, collapsed-again, re-expanded, terminal, and restart states.
+**Status:** Implemented (2026-08-15). Producer-issued identities, worker/live and coordinator/durable paged authorities, the closed coordinator→host→webview protocol, host ownership/tombstones, expansion/collapse subscriptions, bounded page-backed rendering, eviction/refetch, rebase, durable terminal handoff, and the opt-in >64-MiB verification are in place. Generic one-shot `session.loadDetail` remains bounded for compatibility.
+**Dependencies:** Phase 4 for final routing; protocol/store pieces can be prepared earlier.
+**Deliverables:** producer-issued stable child identities/lineages; complete closed coordinator→host→webview detail protocol; `EffectRunner`/session-service ownership and tombstones; compact card projection; demand-driven baseline/pages/deltas; bounded page-backed virtualized renderer; gap rebase; collapse unsubscribe; exact durable terminal handoff; explicit UI states; no recursive trees in ordinary lanes. Supersede the mounted-collapsed immediate-detail rule in `STATE_CONTRACT.md` and update matching sync-contract tests in the same implementation PR.
+
+**Exit:** small-budget paging/eviction/re-fetch tests and large recursive live-subagent stress pass in collapsed, expanded, collapsed-again, re-expanded, terminal, and restart states; the opt-in >64-MiB end-to-end detail test passes outside `npm test`.
 
 ### Phase 6 — Cross-worker global services and failure recovery
 
+**Status:** Implemented (2026-08-15). Per-provider coordinator admission and global circuits, classified worker observations, monotonic settings/auth/catalog/runtime-policy sync, exact extension-UI ownership, bounded recovery checkpoints, crash/restart reconciliation, and write-owner tracing are integrated. The opt-in spawned matrix kills one of two hot workers while provider/UI work is pending and proves unrelated streaming/coordinator controls, typed terminalization without replay, descendant cleanup, exact lease/UI release, confirmed-exit replacement, and single-writer generations.
 **Dependencies:** Phase 4; detail crash behavior from Phase 5.  
 **Deliverables:** coordinator provider leases/circuits; settings/auth/catalog revision sync; extension-UI request/response routing; bounded last-known checkpoint; worker crash/kill/restart reconciliation; single-writer enforcement.  
 **Exit:** crash/kill/lease/UI/single-writer matrix passes with no impact on unrelated sessions.
@@ -651,50 +797,59 @@ Provider admission may need to move into Phase 4 if no safe temporary way exists
 
 ### Phase 7 — Rollout, defaults, and legacy removal
 
+**Status:** In progress (2026-08-15). Isolated mode is default for new backend generations after all deterministic, spawned crash/liveness, build, and package gates passed. `PIE_SESSION_RUNTIME_ISOLATION=0` remains the documented one-restart legacy rollback during the bounded observation window; monolithic hot ownership must not be deleted until that window and telemetry comparison complete without a critical fallback.
 **Dependencies:** all correctness gates.  
 **Deliverables:** opt-in dogfood, telemetry comparison, staged default-on, documented rollback, then deletion of monolithic hot-runtime ownership after the rollback window.  
 **Exit:** completion criteria below hold for the default path and no critical regression requires fallback.
 
-## 11. Deterministic test matrix
+## 12. Deterministic test matrix
 
-### 11.1 Hard correctness gates
+### 12.1 Hard correctness gates
 
 These are pass/fail gates. Use causal ordering and fake clocks rather than tight microbenchmarks.
 
 | Scenario | Required assertion | Likely test location |
 |---|---|---|
-| Sync-blocking extension in A | `app.ping`, cold B open/page, `settings.get`, and stable-B `models.list` respond before A unblocks | new `backend-session-worker-liveness.test.ts` |
-| Synchronous SDK/resource/extension bootstrap | coordinator controls remain responsive while worker bootstrap blocks | liveness test + `backend-service-loading-gate.test.ts` |
-| Large recursive live subagent (~incident scale) | expanded detail is complete/live/incremental; collapsed ordinary traffic stays bounded; collapse stops heavy traffic; re-expand rebases correctly | new backend detail integration test + webview nested-subagent tests |
+| Sync-blocking execution hook in A | fixture writes `entered`; controls for ping/cold B/settings/models are received before the test creates `release`; `finally` releases and cleans the tree | new `backend-session-worker-liveness.test.ts` |
+| Synchronous extension factory/resource bootstrap | separate fixture uses the same entered/release protocol; coordinator controls respond before release while A promotes | liveness test + `backend-service-loading-gate.test.ts` |
+| IPC diagnostic isolation | JSON-looking, partial, and bounded-large stdout/stderr from factory/hooks/tools/subagents never parses as IPC or disrupts command/detail ordering | new worker IPC transport test |
+| Build/package spawn | build emits backend, extension, and dedicated worker entries; packaged artifact spawns worker, reaches ready, and cleans its process tree | build/package integration test |
+| Cold store parity | supported v1/v2→v3 migration, create/fork/duplicate/tree/context behavior, concurrent reads, and final ownership rechecks match in-process/helper adapters | cold-session-store tests |
+| SDK session replacement | new/fork/clone/switch reserve before write, preserve lifecycle/`session.opened` selection, reject conflicts and stale writes, and fail closed on cancel/crash mid-transfer | worker ownership + replacement integration tests |
+| Large recursive live subagent (~incident scale) | expanded detail is complete/live/incremental; collapsed ordinary traffic stays bounded; collapse stops heavy traffic; stable identities survive reorder; re-expand rebases correctly | new backend detail integration test + webview nested-subagent tests |
+| Public detail protocol | closed variants, all generation fences, owner/tombstone routing, and key-scoped updates reject stale/cross-key/post-collapse traffic | protocol sync + host EffectRunner/session-service + webview store tests |
+| Page-backed renderer | tiny injected budgets force nested virtualization, page/segment eviction, live/durable re-fetch, and collapse cleanup without content loss | fast webview/detail store tests |
+| >64-MiB detail | complete detail remains navigable/re-fetchable and terminal-equal without all content in DOM/RAM | opt-in end-to-end integration test, excluded from `npm test` |
+| Collapsed contract supersession | mounted collapsed preview sends no subscribe; expansion alone subscribes; collapse unsubscribes | `sync-contract.test.ts` + webview lazy-detail tests |
 | Pending picker | no pending-path `models.list`; configured/predecessor catalog and known reasoning remain visible while loading | `hydrate-model-state.test.ts`, composer picker tests |
 | Independent hydration | settings success applies when models fail and vice versa | `hydrate-model-state.test.ts` |
 | Hydration vs `SetModel` | old hydrate result cannot revert optimistic/successful user selection; duplicate refresh joins | `arch-set-model.test.ts` |
 | Correlated error | one RPC error produces one public notice/event ownership | backend error + host client/reducer tests |
 | Late create | timeout keeps delayed tab; retry is idempotent; late `session.opened` reconciles once and drains queued sends once | create ordering/reconciliation tests |
 | Intentional hide | renderer ready/reload does not reopen user-hidden or review-hidden running tab; accidental omission still repairs | close/review/handshake tests |
-| Worker crash | only root A terminalizes; coordinator, B, settings/models, and cold browsing continue | new worker-supervision integration test |
+| Worker crash | only root A terminalizes; coordinator, B, settings/models, and cold browsing continue; all A descendants are cleaned up | new worker-supervision integration test |
 | Soft interrupt then kill | soft path settles when responsive; wedged worker is killed after grace without replay | worker supervision test with fake clock/process fixture |
 | Single writer | no overlapping write owners; stale worker append rejected; replacement waits for exit | new worker ownership test |
 | Provider lease | limits/circuit/half-open are global across workers; crash releases leases exactly once | `provider-gate.test.ts` plus worker integration |
 | Extension UI response | nested request routes to exact worker generation once; stale response rejected; fallback ownership survives collapse | extension UI bridge + host architecture integration |
 | Durable terminal handoff | after collapse/restart, exact child transcript and long output load from durable source | backend detail + webview lazy-detail tests |
-| IPC gap/overflow | stale/gapped/oversize frames fail or rebase explicitly; stream remains synchronized where contract permits | new worker IPC test |
+| IPC gap/overflow | stale/gapped/malformed/oversize frames fail or rebase explicitly; stream remains synchronized where contract permits | new worker IPC test |
 
 The recursive stress fixture should generate realistic nested messages, reasoning, tool inputs/results, nested subagents, and at least one long output. It must assert semantic equality at terminal, not merely card presence.
 
-### 11.2 Windows CI budgets
+### 12.2 Windows CI budgets
 
 Use generous causal windows:
 
-- make the blocking fixture last several seconds;
-- allow control responses a multi-second CI budget while still requiring their timestamps to precede A's unblock timestamp;
+- give each entered/release fixture a generous multi-second safety deadline, but release it causally from test cleanup rather than after a fixed sleep;
+- allow control responses a multi-second CI budget while still requiring receipt before the test creates the release marker;
 - allow process spawn/kill extra Windows headroom;
 - inject clocks for heartbeat, grace, circuit, and retry tests rather than sleeping production durations;
 - retry only known OS process-observation races, never failed semantic assertions.
 
 A hard gate should say “B responded before A unblocked,” not “ping was under 100 ms.”
 
-### 11.3 Performance telemetry and trend budgets
+### 12.3 Performance telemetry and trend budgets
 
 Keep these separate from correctness gates initially:
 
@@ -709,7 +864,7 @@ Keep these separate from correctness gates initially:
 
 Trend budgets warn and produce artifacts before they become hard gates. Promote a budget to a hard threshold only after Windows CI distributions are measured and stable.
 
-## 12. Capacity and measurement decision points
+## 13. Capacity and measurement decision points
 
 Do not encode an arbitrary fixed worker count in the architecture.
 
@@ -723,7 +878,7 @@ Required behavior:
 
 Before choosing defaults, benchmark on supported Windows setups:
 
-1. cold coordinator startup/RSS;
+1. cold coordinator startup/RSS, top-level SDK import cost, and representative in-process/helper `ColdSessionStore` event-loop delay;
 2. one idle initialized worker RSS;
 3. one streaming/tool/subagent worker peak RSS;
 4. worker bootstrap latency with warm/cold filesystem caches;
@@ -738,7 +893,7 @@ Decision points:
 - consider optional per-child isolation only if per-root isolation passes global liveness but root-worker measurements still show unacceptable child-induced stalls;
 - do not raise byte limits or worker concurrency to hide an amplification bug.
 
-## 13. Rollout and rollback
+## 14. Rollout and rollback
 
 Use a backend-generation feature flag, initially internal/environment-controlled:
 
@@ -763,23 +918,23 @@ Rules:
 - protocol version mismatch fails closed with actionable logs;
 - rollback preserves durable transcripts/settings and may interrupt only currently live, non-durable work under the existing backend-restart contract.
 
-## 14. Likely file/component map
+## 15. Likely file/component map
 
 | Area | Existing files to change or extract | Likely new files |
 |---|---|---|
-| Coordinator entry/control | `extension/src/backend/index.ts`, `server.ts`, `request-handler.ts`, `rpc.ts`, `server-io.ts` | `worker-supervisor.ts`, `worker-client.ts`, `worker-protocol.ts` |
-| Worker runtime | `runtime-factory.ts`, `sdk.ts`, `server-types.ts`, `session-event-handler.ts`, `extension-ui-bridge.ts`, system-prompt/runtime helpers | `worker-entry.ts`, `worker-server.ts` |
-| Cold durable ownership | `session-browser.ts`, `session-catalog.ts`, `session-metadata.ts`, `session-opened.ts`, transcript modules | optional focused cold-store module only if extraction needs one |
+| Coordinator entry/control | `extension/src/backend/index.ts`, `server.ts`, `request-handler.ts`, `rpc.ts`, `server-io.ts`, `sdk.ts`, `vite.config.ts`, build/package scripts | `worker-supervisor.ts`, `worker-client.ts`, `worker-protocol.ts`, SDK patch-barrier module |
+| Worker runtime | `runtime-factory.ts`, `server-types.ts`, `session-event-handler.ts`, `extension-ui-bridge.ts`, system-prompt/runtime helpers | bundled `worker-entry.ts`, `worker-server.ts` |
+| Cold durable ownership | `session-browser.ts`, `session-catalog.ts`, `session-metadata.ts`, `session-opened.ts`, transcript modules | `cold-session-store.ts` plus bounded helper entry/client if measurements require it |
 | Provider global state | `provider-gate.ts`, provider progress/incident modules | coordinator admission adapter and worker lease adapter, preferably adjacent to `provider-gate.ts` |
-| Live/detail protocol | `live-turn-accumulator.ts`, `tool-progress-normalizer.ts`, shared `live-pipeline-protocol.ts`, `lazy-details.ts`, protocol payload files | focused detail subscription/store module in backend/worker if needed |
-| Subagent producer | `extensions/subagent/runner.ts`, `types.ts`, `src/execute.ts`, `src/result-compaction.ts` | no new abstraction unless needed for revisioned detail store |
-| Host CQRS/routing | host `core/{arch-state,commands,events,effects,effect-runner,message-router,projection}.ts`, reducer handlers, session service | no parallel state system |
-| Webview detail | lazy-detail hooks/store, transcript tool components, `use-host-sync.ts` | key-scoped subscription helper if current lazy store cannot represent revisions |
+| Live/detail protocol | `live-turn-accumulator.ts`, `tool-progress-normalizer.ts`, shared `live-pipeline-protocol.ts`, `lazy-details.ts`, backend↔host and host↔webview protocol payload files | focused canonical detail/subscription modules in worker/backend |
+| Subagent producer | `extensions/subagent/runner.ts`, `types.ts`, `src/execute.ts`, `src/result-compaction.ts` | stable child-identity support only where existing producer state cannot hold it |
+| Host CQRS/routing | host `core/{arch-state,commands,events,effects,effect-runner,message-router,projection}.ts`, reducer handlers, session service | bounded subscription owner/tombstone registry, not a parallel state system |
+| Webview detail | lazy-detail hooks/store, transcript tool components, `use-host-sync.ts` | key-scoped page store and nested/segment virtualizer integration |
 | Tests | existing backend runtime/session, host architecture/lifecycle/state, webview lazy/subagent suites | spawned liveness, worker IPC/supervision/ownership/detail integration tests |
 
 Keep target modules narrow. Do not move cold catalog, provider policy, and transcript rendering into one new “manager.”
 
-## 15. Verification commands during implementation
+## 16. Verification commands during implementation
 
 From repository root, use focused tests while iterating, then the canonical gates:
 
@@ -792,35 +947,39 @@ npm run extension:build
 
 `npm test` is the canonical development test command. Any edit under `extension/src/` also requires the extension build, which syncs the installed extension. Before default-on rollout, run the spawned integration matrix on Windows and the manual UX reliability smoke scenarios that cover session selection, backend restart, streaming, expansion/collapse, extension UI, and late reconciliation.
 
-Performance telemetry/trend runs are additional evidence; they do not replace `npm test`, typecheck, build, or deterministic integration assertions.
+Performance telemetry/trend runs are additional evidence; they do not replace `npm test`, typecheck, build, or deterministic integration assertions. Phase 5 also adds a clearly named opt-in large-detail command (for example `npm run test:large-detail`) for the >64-MiB end-to-end case; it is deliberately not invoked by `npm test`.
 
-## 16. Documentation updates when implementation lands
+## 17. Documentation updates when implementation lands
 
 This plan is not an authoritative runtime contract. As phases land:
 
 - update `docs/ARCHITECTURE.md` with the coordinator/per-root-worker process diagram, cold/hot ownership, provider admission, and crash flow;
-- update authoritative `docs/STATE_CONTRACT.md` with additive detail subscription semantics, intentional-hide ownership, create late reconciliation, model hydration fences, worker-generation recovery, and single-writer invariants;
-- update protocol contract tests whenever `STATE_CONTRACT.md` changes, especially `extension/test/shared/protocol/sync-contract.test.ts`;
+- update authoritative `docs/STATE_CONTRACT.md` with the new detail subscription semantics, explicitly superseding its mounted-collapsed immediate-detail rule, plus intentional-hide ownership, create late reconciliation, model hydration fences, worker-generation recovery, and single-writer invariants;
+- update protocol contract tests whenever `STATE_CONTRACT.md` changes, especially `extension/test/shared/protocol/sync-contract.test.ts`, including collapsed-no-subscribe/expand-subscribe/collapse-unsubscribe coverage;
 - update `docs/UX_RELIABILITY_SMOKE_TEST.md` or its current replacement with worker block/crash, expansion/collapse, and extension-UI scenarios;
 - move/remove this plan from Active plans in `docs/INDEX.md` once the implementation and contract docs are complete.
 
-## 17. Completion criteria
+## 18. Completion criteria
 
 Implementation is complete only when all of the following are true:
 
-1. The spawned synchronous-block test proves ping, cold session B, settings, and models respond before blocked session A resumes.
-2. Coordinator traces show no SDK resource/extension/tool/subagent work on its event loop.
-3. Cold create/open creates no runtime; first execution promotes exactly once and publishes runtime-ready metadata before streaming.
-4. Every hot root has its own worker/process generation and sole live session-file writer.
-5. A blocked/crashed/killed A worker does not block or corrupt B or the coordinator; no operation is silently replayed.
-6. Provider capacity, circuit, and half-open probe ownership remain global across workers; crash releases leases exactly once.
-7. Settings/auth/catalog revisions and extension-UI requests route correctly across worker restart and reject stale generations.
-8. Pending-path hydration, independent hydration settlement, `SetModel` fencing, correlated-error single surfacing, late create reconciliation, and intentional hide all pass focused tests.
-9. Collapsed subagent traffic remains bounded independently of recursive transcript size.
-10. Expansion shows the complete child transcript and live incremental reasoning/text/tool/nested-subagent updates; collapse removes heavy state/subscription; re-expand uses baseline plus ordered deltas.
-11. Long output remains accessible and terminal detail is exact/durable after collapse, worker retirement, and backend/session reopen.
-12. Gap, stale, loading, retry, and unavailable detail states are explicit and tested; nested `ask_user` fallback remains actionable.
-13. No arbitrary fixed worker count or busy-worker eviction policy is introduced; bootstrap concurrency and idle retention defaults are justified by Windows measurements and configurable.
-14. Hard correctness gates pass under realistic Windows budgets; performance telemetry is stable enough for default-on rollout.
-15. `npm test`, `npm run typecheck`, `npm run extension:build`, spawned integration verification, and relevant manual UX smoke checks pass.
-16. `ARCHITECTURE.md`, authoritative `STATE_CONTRACT.md`, protocol tests, and the documentation index describe the implemented—not merely planned—contract.
+1. Both spawned synchronous-block tests—execution hook and extension factory/resource bootstrap—prove ping, cold session B, settings, and models respond after `entered` and before the test creates `release`; `finally` releases and cleans every descendant.
+2. Private frames use two dedicated inherited directional FDs with pre-deserialization JSONL bounds and exact-cap serialization; no Node object IPC remains. Worker stdout/stderr remain diagnostic-only under noisy extensions, and packaged output contains a spawnable dedicated worker entry.
+3. One locked pre-spawn or immutable build-time SDK patch barrier runs before workers; workers never race shared patch writes and validate the same patch identity.
+4. Coordinator traces show no `AgentSessionServices`, user extension/resource, `AgentSession`, provider/tool, or subagent work on its event loop.
+5. `ColdSessionStore` preserves supported v1/v2→v3 migration, create/fork/duplicate/tree/context behavior and ownership rechecks; measurements justify coordinator or bounded-helper execution while ping remains responsive.
+6. Cold create/open creates no runtime; first execution promotes exactly once and publishes runtime-ready metadata before streaming.
+7. Every hot root has its own worker/process generation and sole live session-file writer. SDK-driven new/fork/clone/switch is pre-authorized and atomically transfers ownership with no destination owner overlap, including conflict, cancellation, crash-mid-transfer, and stale-write cases.
+8. A blocked/crashed/killed A worker does not block or corrupt B or the coordinator; its process tree is cleaned and no operation is silently replayed.
+9. Provider capacity, circuit, and half-open probe ownership remain global across workers; crash releases leases exactly once.
+10. Settings/auth/catalog revisions and extension-UI requests route correctly across worker restart and reject stale generations; nested `ask_user` fallback remains actionable.
+11. Pending-path hydration, independent hydration settlement, `SetModel` fencing, correlated-error single surfacing, late create reconciliation, and intentional hide all pass focused tests.
+12. Producer-issued stable child IDs/attempts and full ancestor lineages address parallel, chain, and nested detail at every depth; revision remains only a cursor and legacy synthesized identities cannot own live deltas.
+13. The closed coordinator→host→webview detail protocol enforces backend/worker/host/view generations, subscription owners/tombstones, `EffectRunner`/session-service routing, and key-scoped webview updates without putting detail pages in `ViewState`.
+14. The authoritative contract and sync tests supersede mounted-collapsed immediate detail: collapsed cards use bounded previews with no subscription; expansion subscribes; collapse unsubscribes and discards heavy state.
+15. Expansion shows the complete child transcript and live incremental reasoning/text/tool/nested-subagent updates through a bounded page-backed virtualized renderer. Evicted/offscreen pages and huge segments re-fetch exactly from live or durable authority.
+16. Long output remains accessible and terminal detail is exact/durable after collapse, worker retirement, backend/session reopen, and the opt-in >64-MiB end-to-end case; gap, stale, loading, retry, rebase, and unavailable states are explicit.
+17. No arbitrary fixed worker count or busy-worker eviction policy is introduced; bootstrap concurrency and idle retention defaults are configurable and justified by Windows measurements.
+18. Hard correctness gates pass under realistic Windows budgets; performance telemetry is stable enough for default-on rollout.
+19. `npm test`, `npm run typecheck`, `npm run extension:build`, packaged/spawned integration verification, opt-in large-detail verification, and relevant manual UX smoke checks pass.
+20. `ARCHITECTURE.md`, authoritative `STATE_CONTRACT.md`, protocol tests, and the documentation index describe the implemented—not merely planned—contract.

@@ -105,7 +105,7 @@ test('a newer compaction replaces the pending chip entry and re-arms the TTL', (
 test('session.opened with isCompacting restores the compacting marker', () => {
   const initial = createInitialArchState();
   const { state } = apply(initial, {
-    kind: 'SessionOpened',
+    kind: 'SessionOpened', backendGeneration: 0, modelWriteFence: 0, modelHydrationRevision: 0, catalogHydrationRevision: 0,
     sessionPath: '/s',
     payload: {
       session: { path: '/s', name: 'S', cwd: '/', modifiedAt: '', messageCount: 0 },

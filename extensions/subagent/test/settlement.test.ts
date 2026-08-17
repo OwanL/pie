@@ -210,6 +210,133 @@ test("execute(): a dispatch that never reports progress is force-settled after P
 	assert.equal(response.details.results[0]?.exitCode, 1);
 });
 
+test("execute(): trace phases describe clone and terminal work, not timeout selection", async () => {
+	const sinkKey = Symbol.for("pie.runtime-trace-sink.v1");
+	const target = globalThis as Record<PropertyKey, unknown>;
+	const previous = target[sinkKey];
+	const events: Array<Record<string, unknown>> = [];
+	target[sinkKey] = (event: unknown) => events.push(event as Record<string, unknown>);
+	process.env.PIE_SUBAGENT_SETTLEMENT_MS = "40";
+	process.env.PIE_SUBAGENT_SETTLEMENT_GRACE_MS = "0";
+	setMockBehavior({
+		onPrompt: (emit: (event: unknown) => void) => {
+			emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "partial" } });
+			return new Promise<void>(() => {});
+		},
+	});
+	try {
+		await within(2000, execute(
+			"tool-trace-phases",
+			{ agent: "worker", task: "trace work" } as never,
+			new AbortController().signal,
+			() => undefined,
+			makeCtx() as never,
+			{ getAllTools: () => [] } as never,
+			() => false,
+		));
+	} finally {
+		if (previous === undefined) delete target[sinkKey];
+		else target[sinkKey] = previous;
+	}
+
+	assert.ok(events.some((event) => event.phase === "source_update" && event.payloadClass === "source"));
+	assert.ok(events.some((event) => event.phase === "clone" && event.childCount === 1));
+	assert.ok(events.some((event) => event.phase === "dedupe" && event.outcome === "changed"), "the execute-boundary observer emits its closed dedupe outcome");
+	assert.ok(events.some((event) => event.phase === "recursive_projection"
+		&& event.payloadClass === undefined
+		&& event.childCount === 1), "the terminal compactSubagentDetails traversal is a recursive projection, not a durable append");
+	assert.ok(events.some((event) => event.phase === "terminal"
+		&& event.payloadClass === undefined
+		&& event.childCount === 1
+		&& event.messageCount === 0
+		&& event.maxRecursiveDepth === 1));
+	assert.equal(events.some((event) => event.payloadClass === "terminal_append"), false, "execute has not crossed the SDK durability boundary");
+	assert.equal(events.some((event) => event.phase === "measure"), false, "timeout selection is not payload measurement");
+	assert.equal(events.some((event) => event.phase === "json_safe_normalization"), false, "no producer claims JSON-safe normalization for the recursive terminalization");
+});
+
+test("execute(): a normal nested terminal emits recursive_projection with measured duration before terminal", async () => {
+	const sinkKey = Symbol.for("pie.runtime-trace-sink.v1");
+	const target = globalThis as Record<PropertyKey, unknown>;
+	const previous = target[sinkKey];
+	const events: Array<Record<string, unknown>> = [];
+	target[sinkKey] = (event: unknown) => events.push(event as Record<string, unknown>);
+	process.env.PIE_SUBAGENT_SETTLEMENT_MS = "0"; // net OFF → the normal success terminal path
+	const nestedDetails = {
+		mode: "single",
+		results: [{
+			agent: "scout",
+			task: "nested",
+			exitCode: 0,
+			messages: [{ role: "assistant", content: [{ type: "text", text: "nested final" }] }],
+			usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 2, turns: 1 },
+		}],
+	};
+	setMockBehavior({
+		onPrompt: (emit: (event: unknown) => void) => {
+			emit({
+				type: "message_end",
+				message: {
+					role: "assistant",
+					content: [{ type: "toolCall", id: "nested-call", name: "subagent", arguments: {} }],
+					usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { total: 0 } },
+					model: "m",
+					stopReason: "toolUse",
+				},
+			});
+			emit({ type: "tool_execution_start", toolCallId: "nested-call", toolName: "subagent" });
+			emit({
+				type: "tool_execution_update",
+				toolCallId: "nested-call",
+				partialResult: {
+					content: [{ type: "text", text: "nested running" }],
+					details: nestedDetails,
+				},
+			});
+			emit({ type: "tool_execution_end", toolCallId: "nested-call", toolName: "subagent" });
+			emit({
+				type: "message_end",
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "done" }],
+					usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { total: 0 } },
+					model: "m",
+					stopReason: "completed",
+				},
+			});
+		},
+	});
+	try {
+		const response = await within(5000, execute(
+			"tool-settle-normal-nested",
+			{ agent: "worker", task: "do nested work" } as never,
+			new AbortController().signal,
+			() => undefined,
+			makeCtx() as never,
+			{ getAllTools: () => [] } as never,
+			() => false,
+		));
+		assert.equal(response.isError, undefined, "the normal nested completion must not be force-settled");
+	} finally {
+		if (previous === undefined) delete target[sinkKey];
+		else target[sinkKey] = previous;
+	}
+
+	const projections = events.filter((event) => event.phase === "recursive_projection");
+	assert.equal(projections.length, 1, "the normal terminal emits exactly one recursive_projection");
+	const projection = projections[0]!;
+	assert.equal(projection.payloadClass, undefined);
+	assert.ok(
+		typeof projection.durationMs === "number" && (projection.durationMs as number) >= 0,
+		"recursive_projection carries the duration measured inside the terminal traversal",
+	);
+	assert.equal(projection.childCount, 2, "outer result plus the nested subagent result");
+	assert.equal(projection.messageCount, 3, "two outer messages plus the nested result message");
+	assert.equal(projection.maxRecursiveDepth, 2, "the nested result is projected one level deep");
+	const projectionIndex = events.indexOf(projection);
+	assert.equal(events[projectionIndex + 1]?.phase, "terminal", "the measured projection precedes the terminal handoff");
+});
+
 test("execute(): periodic credible progress renews the inactivity deadline", async () => {
 	process.env.PIE_SUBAGENT_SETTLEMENT_MS = "100";
 	process.env.PIE_SUBAGENT_SETTLEMENT_GRACE_MS = "0";

@@ -24,6 +24,22 @@ import type { OnSessionCompleted, PostImperative, ScheduleRender } from './types
 import type { Event } from '../core/events';
 import type { ArchState } from '../core/arch-state';
 import { resolveLiveDetail } from './detail-retrieval';
+import type { LiveSubagentDetailAddress, DetailCursor, DetailPageRef } from '../../shared/protocol/subagent-detail';
+import { DetailSubscriptionService } from './detail-subscriptions';
+
+/** Host-owned identities the Phase 5 detail subscription service fences its
+ *  imperatives with: the current webview document generation and the current
+ *  extension-host instance identity. Wired from `SidebarViewProvider` in
+ *  extension-host. */
+export interface DetailHostInfo {
+  getHostInstanceId(): string;
+  getViewGeneration(): number;
+}
+
+const DEFAULT_DETAIL_HOST_INFO: DetailHostInfo = {
+  getHostInstanceId: () => 'host',
+  getViewGeneration: () => 0,
+};
 
 const PREFS_STORAGE_KEY = 'chatPrefs';
 const PRUNING_STORAGE_KEY = 'pruningSettings';
@@ -42,12 +58,14 @@ export class SessionService implements vscode.Disposable {
   private readonly tabs: SessionTabActions;
   private readonly messages: SessionMessageActions;
   private readonly getArchState: () => ArchState;
+  private readonly detailSubscriptions: DetailSubscriptionService;
   private readonly dispatchArch: (event: Event) => void;
   private readonly detailCache = new Map<string, { result: DetailResult; bytes: number }>();
   private readonly detailRequests = new Map<string, Promise<DetailResult>>();
   private readonly detailEpochBySession = new Map<string, number>();
   private detailCacheBytes = 0;
   private detailGeneration = 0;
+  private readonly correlatedFailureSubscription: vscode.Disposable;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -58,11 +76,28 @@ export class SessionService implements vscode.Disposable {
     getArchState: () => ArchState,
     onSessionCompleted?: OnSessionCompleted,
     private readonly runObserver: RunObserver = NOOP_RUN_OBSERVER,
+    private readonly detailHostInfo: DetailHostInfo = DEFAULT_DETAIL_HOST_INFO,
   ) {
     this.getArchState = getArchState;
     this.dispatchArch = dispatchArch;
 
     this.state = new SessionServiceState(context, backend, scheduleRender, getArchState, dispatchArch);
+    this.detailSubscriptions = new DetailSubscriptionService({
+      backend,
+      postImperative,
+      getHostInstanceId: () => this.detailHostInfo.getHostInstanceId(),
+      getViewGeneration: () => this.detailHostInfo.getViewGeneration(),
+      getBackendGeneration: () => this.state.getBackendGeneration(),
+    });
+    this.correlatedFailureSubscription = typeof backend.onDidCorrelatedRequestFail === 'function'
+      ? backend.onDidCorrelatedRequestFail((failure) => {
+          if (!this.state.claimOperationalIncident(undefined, failure.requestId, failure.backendGeneration)) return;
+          // The owning EffectResult remains responsible for rollback/user notice;
+          // this shared identity registry owns the single analytics record and
+          // suppresses a legacy operational-error echo with the same requestId.
+          this.runObserver.onBackendError(failure.sessionPath, failure.code);
+        })
+      : { dispose: () => undefined };
     this.events = new SessionServiceEvents({
       context,
       scheduleRender,
@@ -71,6 +106,7 @@ export class SessionService implements vscode.Disposable {
       state: this.state,
       dispatchArch,
       getArchState,
+      onDetailStream: (message) => this.detailSubscriptions.handleStream(message),
     });
     this.tabs = new SessionTabActions({
       context,
@@ -131,6 +167,11 @@ export class SessionService implements vscode.Disposable {
     this.state.bindRequestSessionPath(requestId, sessionPath);
   }
 
+  /** Retain a timed-out create/duplicate operation for late success. */
+  handleCreateOperationDelayed(selectionToken: string, operationId: string, notice: string, expectedAttempt?: number): void {
+    this.state.handleCreateOperationDelayed(selectionToken, operationId, notice, expectedAttempt);
+  }
+
   /** Feed correlated close/persistence results to the V2 closure outbox
    *  observer before the reducer consumes its no-op result handlers. */
   handleReviewClosureEffectResult(
@@ -147,11 +188,15 @@ export class SessionService implements vscode.Disposable {
 
   async restart(): Promise<void> {
     this.detailGeneration += 1;
+    this.detailSubscriptions.reset();
     this.detailCache.clear();
     this.detailCacheBytes = 0;
     this.events.detach();
+    this.state.failPendingCreateOperations('PI backend generation ended while the session was being created.');
     await this.backend.stop();
-    this.state.resetRuntimeState();
+    // startSessionBackend owns the single generation reset for the replacement
+    // process. Resetting here as well would drift host failure identities one
+    // generation ahead of BackendClient after every restart.
     this.dispatchArch({ kind: 'RunningSessionsChanged', sessionPaths: [] });
     this.dispatchArch({ kind: 'BackendReadyChanged', ready: false });
     this.dispatchArch({ kind: 'NoticeShown', notice: null });
@@ -161,20 +206,81 @@ export class SessionService implements vscode.Disposable {
 
   dispose(): void {
     this.detailGeneration += 1;
+    this.detailSubscriptions.reset();
     this.detailCache.clear();
     this.detailCacheBytes = 0;
     this.events.detach();
+    this.correlatedFailureSubscription.dispose();
   }
 
   createNewSession(): string {
     return this.tabs.createNewSession();
   }
 
+  // ─── Phase 5 detail subscription ownership (public routing) ────────────────
+
+  /** Subscribe a renderer-owned detail key. The EffectRunner mints the
+   *  `subscriptionId`; the service records the exact owner and forwards the
+   *  coordinator's `detail.start` only for that owner. */
+  subscribeDetail(options: {
+    subscriptionId: string;
+    viewGeneration: number;
+    detailKey: string;
+    address: LiveSubagentDetailAddress;
+    cursor?: DetailCursor;
+  }): void {
+    this.detailSubscriptions.subscribe(
+      options.subscriptionId,
+      options.viewGeneration,
+      options.detailKey,
+      options.address,
+      options.cursor,
+    );
+  }
+
+  /** Collapse/unmount/session-change: discard the owner, tombstone its
+   *  subscription, and notify the backend best-effort. */
+  unsubscribeDetail(options: {
+    viewGeneration: number;
+    detailKey: string;
+    reason: 'collapse' | 'unmount' | 'session-change';
+  }): void {
+    this.detailSubscriptions.unsubscribe(options.viewGeneration, options.detailKey, options.reason);
+  }
+
+  /** Refetch a page of the active baseline for a subscribed key. */
+  fetchDetailPages(options: {
+    viewGeneration: number;
+    detailKey: string;
+    ref: DetailPageRef;
+  }): void {
+    this.detailSubscriptions.fetchPages(options.viewGeneration, options.detailKey, options.ref);
+  }
+
+  captureSelectionRequestStart(selectionToken: string, operationAttempt?: number): void {
+    this.state.captureSelectionRequestStart(selectionToken, operationAttempt);
+  }
+
+  handleCreateOperationAcknowledged(selectionToken: string, operationId: string, sessionPath: string): void {
+    const pendingPath = this.state.handleCreateOperationAcknowledged(selectionToken, operationId, sessionPath);
+    if (pendingPath) this.runObserver.replaceSessionPath(pendingPath, sessionPath, undefined);
+  }
+
+  /** Re-arm a delayed create/duplicate with the same operation identity. */
+  retryCreateOperation(operationId: string): boolean {
+    return this.tabs.retryCreateSession(operationId);
+  }
+
+  /** Fail delayed creates when the backend generation dies. */
+  failPendingCreateOperations(notice: string): void {
+    this.state.failPendingCreateOperations(notice);
+  }
+
   /** Effect-side delegate: recover from a failed/timed-out selection by
    *  finishing the request and dispatching the reducer transitions that undo
    *  the optimistic tab setup. */
-  handleSelectionFailure(selectionToken: string, notice: string): void {
-    this.state.handleSelectionFailure(selectionToken, notice);
+  handleSelectionFailure(selectionToken: string, notice: string, expectedAttempt?: number): void {
+    this.state.handleSelectionFailure(selectionToken, notice, expectedAttempt);
   }
 
   isSessionRuntimeReady(sessionPath: string): boolean {
@@ -326,8 +432,11 @@ export class SessionService implements vscode.Disposable {
     this.runObserver.onModelConfigChanged(sessionPath, modelId, thinkingLevel, provider);
   }
 
-  async hydrateModelState(sessionPath: string): Promise<void> {
-    await this.messages.hydrateModelState(sessionPath);
+  async hydrateModelState(sessionPath: string, metadata?: {
+    hydrationRevision?: number;
+    modelWriteFence?: number;
+  }): Promise<void> {
+    await this.messages.hydrateModelState(sessionPath, metadata);
   }
 
   normalizeAttachUris(uris: vscode.Uri[]): vscode.Uri[] {

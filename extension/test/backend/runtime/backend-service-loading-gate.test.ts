@@ -5,6 +5,11 @@ import { BackendServer } from '../../../src/backend';
 import { ServiceLoadingGateDisposedError } from '../../../src/backend/runtime-factory';
 import type { RuntimeDisposeScheduler } from '../../../src/backend/server';
 import { BackendError } from '../../../src/backend/server-io';
+import {
+  flushBackendLivePipelineTrace,
+  isBackendLivePipelineTraceEnabled,
+  setBackendLivePipelineTraceEnabled,
+} from '../../../src/backend/live-pipeline-trace-runtime';
 
 /**
  * Deterministic fake-SDK coverage for the backend-wide service-loading
@@ -400,4 +405,64 @@ test('a runtime created after disposal is not installed and is disposed through 
 
   assert.deepEqual(disposed, ['runtime'], 'the late-created runtime is disposed exactly once');
   assert.equal(server.sessionContexts.size, 0, 'the late runtime is never installed');
+});
+
+test('event-loop monitor is gated behind diagnostics trace enablement and stops on toggle/dispose', async () => {
+  const { sdk } = makeFakeSdk();
+  const server = makeServer(sdk);
+  const wasEnabled = isBackendLivePipelineTraceEnabled();
+  try {
+    setBackendLivePipelineTraceEnabled(false);
+    server.startEventLoopMonitor();
+    assert.equal(server.eventLoopDelayTimer, undefined, 'monitor must not start while diagnostics are disabled');
+    assert.equal(server.eventLoopDelayMonitor, undefined, 'native monitor must not start while diagnostics are disabled');
+
+    setBackendLivePipelineTraceEnabled(true);
+    server.startEventLoopMonitor();
+    assert.ok(server.eventLoopDelayTimer, 'sampling timer starts once diagnostics are enabled');
+    assert.ok(server.eventLoopDelayMonitor, 'native monitor starts once diagnostics are enabled');
+
+    // Toggle-off through the production line path stops the monitor only after
+    // handleLine emits the matching handler_finished completion.
+    const originalWrite = process.stdout.write;
+    (process.stdout as any).write = (chunk: unknown, encodingOrCallback?: unknown, callback?: unknown) => {
+      const text = typeof chunk === 'string' ? chunk : String(chunk);
+      const done = typeof encodingOrCallback === 'function' ? encodingOrCallback : callback;
+      if (!text.trimStart().startsWith('{')) {
+        if (typeof encodingOrCallback === 'function') return (originalWrite as any).call(process.stdout, chunk, encodingOrCallback);
+        if (callback !== undefined) return (originalWrite as any).call(process.stdout, chunk, encodingOrCallback, callback);
+        return (originalWrite as any).call(process.stdout, chunk, encodingOrCallback);
+      }
+      if (typeof done === 'function') done(null);
+      return true;
+    };
+    try {
+      await server.handleLine(JSON.stringify({
+        id: 'monitor-toggle-off',
+        method: 'diagnostics.livePipeline.setEnabled',
+        params: { enabled: false },
+      }));
+      assert.equal(server.eventLoopDelayTimer, undefined, 'toggle-off stops the sampling timer');
+      assert.equal(server.eventLoopDelayMonitor, undefined, 'toggle-off disables the native monitor');
+
+      // Toggle-on restarts it.
+      await server.handleLine(JSON.stringify({
+        id: 'monitor-toggle-on',
+        method: 'diagnostics.livePipeline.setEnabled',
+        params: { enabled: true },
+      }));
+      assert.ok(server.eventLoopDelayTimer, 'toggle-on restarts the sampling timer');
+      assert.ok(server.eventLoopDelayMonitor, 'toggle-on re-enables the native monitor');
+    } finally {
+      (process.stdout as any).write = originalWrite;
+    }
+
+    // Dispose stops it.
+    await server.dispose();
+    assert.equal(server.eventLoopDelayTimer, undefined, 'dispose stops the sampling timer');
+    assert.equal(server.eventLoopDelayMonitor, undefined, 'dispose disables the native monitor');
+  } finally {
+    setBackendLivePipelineTraceEnabled(wasEnabled);
+    await flushBackendLivePipelineTrace();
+  }
 });

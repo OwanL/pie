@@ -124,7 +124,10 @@ test('BackendClient.start resolves when backend.ready arrives immediately as std
 
     assert.equal(payload.protocolVersion, PROTOCOL_VERSION);
     assert.equal(payload.sdkPath, '/mock/sdk');
-    assert.deepEqual(spawnArgs?.slice(-2), ['--hostPid', String(process.pid)]);
+    assert.deepEqual(spawnArgs?.slice(-4), [
+      '--hostPid', String(process.pid),
+      '--backendGeneration', '1',
+    ]);
     assert.equal((spawnOptions?.env as NodeJS.ProcessEnv | undefined)?.PIE_EDITOR_VERSION, '1.102.3-test');
     assert.equal((spawnOptions?.env as NodeJS.ProcessEnv | undefined)?.PIE_TRUSTED_SDK_ROOT, undefined);
     const spawnedEnv = spawnOptions?.env as NodeJS.ProcessEnv | undefined;
@@ -132,11 +135,33 @@ test('BackendClient.start resolves when backend.ready arrives immediately as std
     assert.equal(spawnedEnv?.PI_CODING_AGENT_SESSION_DIR, path.join(agentDir, 'data/outcomes/sessions'));
     assert.equal(spawnedEnv?.PIE_REVIEWS_DIR, path.join(agentDir, 'data/outcomes/session-reviews'));
 
+    const correlatedFailures: any[] = [];
+    const failureSubscription = client.onDidCorrelatedRequestFail((failure) => correlatedFailures.push(failure));
+    const rejected = client.request('session.open', { sessionPath: '/mock/failure.jsonl' });
+    fakeProc.stdout.write(JSON.stringify({
+      id: 'req-1', ok: false, error: { code: 'SESSION_OPEN_FAILED', message: 'open failed' },
+    }) + '\n');
+    await assert.rejects(rejected, (error: any) => {
+      assert.equal(error.name, 'BackendRpcError');
+      assert.equal(error.requestId, 'req-1');
+      assert.equal(error.code, 'SESSION_OPEN_FAILED');
+      return true;
+    });
+    assert.deepEqual(correlatedFailures, [{
+      backendGeneration: 1,
+      requestId: 'req-1',
+      method: 'session.open',
+      code: 'SESSION_OPEN_FAILED',
+      message: 'open failed',
+      sessionPath: '/mock/failure.jsonl',
+    }]);
+    failureSubscription.dispose();
+
     Object.defineProperty(fakeProc.stdin, 'write', {
       configurable: true,
       value: () => { throw new Error('EPIPE'); },
     });
-    await assert.rejects(client.request('app.ping'), /Failed to write backend request req-1: EPIPE/);
+    await assert.rejects(client.request('app.ping'), /Failed to write backend request req-2: EPIPE/);
 
     client.dispose();
     const stalledProc = new NeverReadyChildProcess();

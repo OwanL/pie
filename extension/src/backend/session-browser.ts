@@ -115,8 +115,15 @@ function skippedWindow(cache: SessionBrowseSnapshot['cache']): SessionOpenedPayl
 export function buildBrowseSessionOpenedPayload(options: {
   browse: SessionBrowseSnapshot;
   modelSettings: ModelSettings;
-  availableModels: ModelInfo[];
+  /** Omitted when catalog loading failed; an empty array is a successful,
+   * authoritative empty catalog. */
+  availableModels?: ModelInfo[];
   selectionToken?: string;
+  /** Create-operation identity echoed from the creating RPC (§6.3), so the
+   *  host can reconcile late success with the exact operation even when the
+   *  snapshot had to fall back to the cold browse path. */
+  operationId?: string;
+  operationAttempt?: number;
   transcript?: TranscriptMode;
   transport?: SessionSnapshotTransport;
 }): SessionOpenedPayload {
@@ -133,9 +140,11 @@ export function buildBrowseSessionOpenedPayload(options: {
     busy: false,
     runtimeReady: false,
     selectionToken: options.selectionToken,
+    operationId: options.operationId,
+    operationAttempt: options.operationAttempt,
     ...(mode === 'skip' ? { transcriptSkipped: true } : {}),
     modelSettings: options.modelSettings,
-    availableModels: options.availableModels,
+    ...(options.availableModels !== undefined ? { availableModels: options.availableModels } : {}),
     contextUsage: options.browse.contextUsage,
     sessionUsage: options.browse.cache.sessionUsage,
   };

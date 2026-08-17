@@ -34,6 +34,14 @@ export interface RequestOptions {
  *  stable `name`/`code` so Brief E/H can distinguish a cancel from a backend
  *  failure when mapping to a user-facing message (cross-realm safe via the
  *  name check, not just `instanceof`). */
+export class RequestTimeoutError extends Error {
+  readonly code = 'PIE_RPC_TIMEOUT' as const;
+  constructor(readonly requestId: string) {
+    super(`Timed out waiting for response to ${requestId}`);
+    this.name = 'RequestTimeoutError';
+  }
+}
+
 export class CancelError extends Error {
   readonly code = 'PIE_CANCELLED' as const;
   constructor(message: string) {
@@ -112,7 +120,7 @@ export class RequestTracker<TResult = unknown> {
         entry.timeout = undefined;
         detachAbort();
         entry.applicationSettled = true;
-        reject(new Error(`Timed out waiting for response to ${id}`));
+        reject(new RequestTimeoutError(id));
         if (!entry.onTransportSettled) this.pending.delete(id);
       }, timeoutMs);
 

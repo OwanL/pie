@@ -588,6 +588,14 @@ export async function startSessionBackend(options: StartSessionBackendOptions): 
     return;
   }
 
+  // The backend client's spawn generation is the source of truth for every
+  // coordinator/worker/detail fence. Setup failures can advance host lifecycle
+  // state without spawning, so reconcile only after readiness succeeds.
+  const acknowledgedGeneration = typeof (options.backend as BackendClient & { getGeneration?: () => number }).getGeneration === 'function'
+    ? options.backend.getGeneration()
+    : options.state.getBackendGeneration();
+  options.state.adoptBackendGeneration(acknowledgedGeneration);
+
   await sendRuntimePrefsWithLogging(options, restoredStartupPath);
 
   bootLog('session-startup', 'publishBackendReady.calling', {

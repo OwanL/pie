@@ -1,5 +1,6 @@
 import type { ChatMessage, ToolCall } from './protocol/messages.js';
 import type { ThinkingLevel } from './protocol/models.js';
+import type { LiveSubagentDetailAddress, SubagentChildIdentity } from './protocol/subagent-detail.js';
 import { isThinkingLevel } from './thinking-level.js';
 import {
   DEFAULT_JSON_PATCH_LIMITS,
@@ -62,6 +63,13 @@ export type ToolPreview =
 
 export interface SubagentChildPreview {
   id: string;
+  childId?: string;
+  attemptId?: string;
+  lineage?: readonly SubagentChildIdentity[];
+  /** False for synthesized legacy display identity. Such cards may render
+   * durable history but cannot own a live subscription. */
+  liveAddressable?: boolean;
+  detailAddress?: LiveSubagentDetailAddress;
   phase: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
   agent?: string;
   task?: string;
@@ -89,6 +97,8 @@ export interface SubagentChildPreview {
    * stays monotonic without repeatedly tokenizing the complete transcript. */
   cumulativeOutputTokens?: number;
   runningTools?: string[];
+  /** Compatibility-only field for old durable/checkpoint parsing. New ordinary
+   * live producers always omit it. */
   messages?: unknown[];
   finalOutput?: string;
   transcriptCompacted?: boolean;

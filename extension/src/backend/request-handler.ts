@@ -25,10 +25,11 @@ import {
   validateOpenTabsSet,
 } from './rpc';
 import { ProviderGate, type ProviderGateMetrics } from './provider-gate';
+import { CreateOperationLedger } from './create-operation-ledger';
 import { resolveActiveModel } from './session-metadata';
 import type { SdkModule, SdkSessionManager } from './sdk';
 import { buildPromptText, lowerImageInputs, normalizeThinkingLevel } from './message-inputs';
-import type { SessionContext, SessionContextCreationReason } from './server-types';
+import type { ActiveRequest, SessionContext, SessionContextCreationReason } from './server-types';
 import { BackendLiveTurnAccumulator } from './live-turn-accumulator';
 import { BackendError } from './server-io';
 import {
@@ -160,13 +161,19 @@ export interface BackendRequestHandlerDeps {
   agentDir: string;
   startupCwd: string;
   sessionDir?: string;
-  sdk: SdkModule;
+  sdk: Pick<SdkModule, 'VERSION' | 'SessionManager'>;
   getSessionContext(sessionPath?: string): SessionContext | undefined;
   createSessionContext(
     sessionManager: SdkSessionManager,
     reason: SessionContextCreationReason,
   ): Promise<SessionContext>;
   ensureSessionContext(sessionPath: string): Promise<SessionContext>;
+  /** Runtime-free coordinator operations. Production wires these to the one
+   * generation-scoped ColdSessionStore and retains its process-local manager
+   * handle for the first legacy promotion (or later isolated worker transfer). */
+  createColdSession?(cwd?: string): { sessionPath: string };
+  duplicateColdSession?(sessionPath: string): { sessionPath: string };
+  truncateColdSessionAfter?(sessionPath: string, entryId: string): Promise<{ sessionPath: string }>;
   isSessionTransitionPending?(sessionPath: string): boolean;
   /** Register a per-path authoritative replacement before any async mutation. */
   transitionSessionContext?(
@@ -186,7 +193,7 @@ export interface BackendRequestHandlerDeps {
     previousSessionPath: string | null,
   ): boolean;
   /** Fence asynchronous create/duplicate selection commits against a newer
-   * session.viewed transition that arrives while runtime creation is pending. */
+   * session.viewed transition that arrives while cold publication is pending. */
   captureViewedSessionRevision?(): unknown;
   setViewedSessionPathIfCurrent?(sessionPath: string, revision: unknown): boolean;
   setViewedSessionPath(sessionPath: string | undefined): void;
@@ -195,10 +202,19 @@ export interface BackendRequestHandlerDeps {
     selectionToken?: string,
     transcript?: import('../shared/protocol').TranscriptMode,
     transport?: SessionSnapshotTransport,
+    operationId?: string,
+    operationAttempt?: number,
   ): Promise<SessionOpenedPayload>;
   /** Build from the replacement installed by the transition currently owning
    * this path; bypasses joining that transition's own promise. */
   buildTransitionSessionOpenedPayload?(sessionPath: string): Promise<SessionOpenedPayload>;
+  /** Generation/process-scoped create-operation ledger (§6.3) deduplicating
+   *  concurrent/retried `session.create`/`session.duplicate` by the optional
+   *  host-generated `operationId`. Optional so existing callers/tests that do
+   *  not wire one keep working: when absent the handler falls back to a ledger
+   *  scoped to this deps object (two deps configurations never share an
+   *  operation ledger). */
+  createOperationLedger?: CreateOperationLedger;
   /** Apply a complete disabled-entry set for a session: persist to the sidecar,
    *  rewrite the SDK base prompt, and re-emit `session.opened`. */
   applySystemPromptToggles(
@@ -240,6 +256,35 @@ export interface BackendRequestHandlerDeps {
    *  (mirrors FP-C2a's `EffectRunnerDeps.resolveSessionProvider`). Optional +
    *  fail-open: when absent the provider is unresolved → the timer fires. */
   resolveSessionProvider?: (context: SessionContext) => string | undefined;
+  /** Called only after the selected handler has validated its request params. */
+  onRequestValidated?: () => void;
+  /** The server owns the request completion span when it may retry a browse
+   *  operation; dispatch-level phases (`route_selected`, `handler_started`)
+   *  are still recorded here at their real moments. */
+  suppressRequestTrace?: boolean;
+  /** Called after the diagnostics trace enablement toggle has been applied, so
+   *  the server can start/stop trace-gated monitors (e.g. the event-loop
+   *  monitor) in lockstep with the store. */
+  onLivePipelineTraceEnabledChange?: (enabled: boolean) => void;
+  /** Monotonic diagnostics-toggle generation reserved at production request
+   *  receipt (before any awaited handler work) and bound to this exact
+   *  request. Concurrent toggle requests are ordered by receipt, not
+   *  settlement; the off transition applies only while this generation is
+   *  still the latest requested one. Absent for standalone callers, which
+   *  apply the off immediately after the handler settles. */
+  livePipelineTraceToggleGeneration?: number;
+  /** Production may defer an off transition until its request's completion
+   *  record has been emitted. The request id is mandatory so concurrent
+   *  requests and retries cannot consume one another's pending transition.
+   *  The generation is the one reserved at request receipt for this exact
+   *  request; the off applies only while it is still the latest requested
+   *  generation. The apply callback is invoked exactly once at that
+   *  completion boundary, after the trace store has been disabled. */
+  deferLivePipelineTraceDisable?: (requestId: string, generation: number, onApplied?: () => void) => boolean;
+}
+
+function markRequestValidated(deps: BackendRequestHandlerDeps): void {
+  deps.onRequestValidated?.();
 }
 
 type RequestHandler = (deps: BackendRequestHandlerDeps, request: RequestEnvelope) => Promise<unknown>;
@@ -252,6 +297,7 @@ async function handleAppPing(
   deps: BackendRequestHandlerDeps,
   _request: RequestEnvelope,
 ): Promise<unknown> {
+  markRequestValidated(deps);
   return {
     sdkPath: deps.sdkPath,
     agentDir: deps.agentDir,
@@ -265,6 +311,7 @@ async function handleRuntimePrefsSet(
   request: RequestEnvelope,
 ): Promise<unknown> {
   const params = validateRuntimePrefsSet(request.params);
+  markRequestValidated(deps);
   process.env[PROVIDER_TOGGLES_ENV] = JSON.stringify(params.providerToggles);
   if (params.subagentProviderDefaults !== undefined) {
     process.env[SUBAGENT_PROVIDER_DEFAULTS_ENV] = JSON.stringify(params.subagentProviderDefaults);
@@ -338,7 +385,75 @@ async function handleSessionList(
   deps: BackendRequestHandlerDeps,
   _request: RequestEnvelope,
 ): Promise<unknown> {
+  markRequestValidated(deps);
   return await deps.listSessions();
+}
+
+/** Per-deps fallback create-operation ledger. Request handlers dedupe
+ *  `session.create`/`session.duplicate` by the optional `operationId` even
+ *  when the caller did not wire a process-scoped ledger (existing test
+ *  harnesses build `BackendRequestHandlerDeps` without one). The WeakMap
+ *  scopes the fallback to one deps object, so two independent deps
+ *  configurations never share an operation ledger. */
+const fallbackCreateOperationLedgers = new WeakMap<BackendRequestHandlerDeps, CreateOperationLedger>();
+
+function getCreateOperationLedger(deps: BackendRequestHandlerDeps): CreateOperationLedger {
+  const wired = deps.createOperationLedger;
+  if (wired) return wired;
+  let fallback = fallbackCreateOperationLedgers.get(deps);
+  if (!fallback) {
+    fallback = new CreateOperationLedger();
+    fallbackCreateOperationLedgers.set(deps, fallback);
+  }
+  return fallback;
+}
+
+/** Shared post-durable-create publication phase for `session.create` and
+ * `session.duplicate`. Durable manager-handle installation is already complete
+ * before this runs; publication remains runtime-free and therefore reports the
+ * cold store's `runtimeReady:false` snapshot. */
+async function publishCreatedSession(
+  deps: BackendRequestHandlerDeps,
+  sessionPath: string,
+  params: { selectionToken?: string; operationId?: string; operationAttempt?: number },
+): Promise<{ sessionPath: string }> {
+  const viewedRevision = deps.captureViewedSessionRevision?.();
+  if (deps.setViewedSessionPathIfCurrent && viewedRevision !== undefined) {
+    deps.setViewedSessionPathIfCurrent(sessionPath, viewedRevision);
+  } else {
+    deps.setViewedSessionPath(sessionPath);
+  }
+  const payload = await deps.buildSessionOpenedPayload(
+    sessionPath,
+    params.selectionToken,
+    undefined,
+    undefined,
+    params.operationId,
+    params.operationAttempt,
+  );
+  deps.emit('session.opened', payload);
+  void deps.emitSessionListChanged();
+  return { sessionPath };
+}
+
+function sessionManagerPath(manager: SdkSessionManager): string {
+  const sessionPath = manager.getSessionFile?.();
+  if (!sessionPath) throw new BackendError('SESSION_CREATE_FAILED', 'The SDK did not allocate a durable session path.');
+  return sessionPath;
+}
+
+function createColdSession(deps: BackendRequestHandlerDeps, cwd?: string): { sessionPath: string } {
+  if (deps.createColdSession) return deps.createColdSession(cwd);
+  const manager = deps.sdk.SessionManager.create(cwd || deps.startupCwd, deps.sessionDir);
+  return { sessionPath: sessionManagerPath(manager) };
+}
+
+function duplicateColdSession(deps: BackendRequestHandlerDeps, sourcePath: string): { sessionPath: string } {
+  if (deps.duplicateColdSession) return deps.duplicateColdSession(sourcePath);
+  const sourceCwd = deps.sdk.SessionManager.open(sourcePath).getCwd() || deps.startupCwd;
+  return {
+    sessionPath: sessionManagerPath(deps.sdk.SessionManager.forkFrom(sourcePath, sourceCwd, deps.sessionDir)),
+  };
 }
 
 async function handleSessionCreate(
@@ -346,28 +461,43 @@ async function handleSessionCreate(
   request: RequestEnvelope,
 ): Promise<unknown> {
   const params = validateSessionCreate(request.params);
-  const viewedRevision = deps.captureViewedSessionRevision?.();
-  const cwd = params.cwd || deps.startupCwd;
-  const context = await deps.createSessionContext(
-    deps.sdk.SessionManager.create(cwd, deps.sessionDir),
-    'new',
-  );
-  if (deps.setViewedSessionPathIfCurrent && viewedRevision !== undefined) {
-    deps.setViewedSessionPathIfCurrent(context.sessionPath, viewedRevision);
-  } else {
-    deps.setViewedSessionPath(context.sessionPath);
+  markRequestValidated(deps);
+  if (params.operationId !== undefined) {
+    // §6.3 idempotent create: dedupe concurrent/retried RPCs by the stable
+    // host-generated operation identity. A retry can never create a second
+    // durable session; a completed result is reused, and a durable path left
+    // behind by a failed publication is resumed instead of recreated.
+    const result = await getCreateOperationLedger(deps).run({
+      operationId: params.operationId,
+      execute: async (registerDurablePath) => {
+        const created = createColdSession(deps, params.cwd);
+        // The server callback installs the process-local manager handle before
+        // returning. Only then may the ledger record the durable commit.
+        registerDurablePath(created.sessionPath);
+        return await publishCreatedSession(deps, created.sessionPath, params);
+      },
+      resume: async (durablePath) => {
+        return await publishCreatedSession(deps, durablePath, params);
+      },
+      republish: async (sessionPath) => {
+        // Best-effort: the durable result is committed; a lost first
+        // `session.opened` must not fail the retry ack.
+        const payload = await deps.buildSessionOpenedPayload(
+          sessionPath,
+          params.selectionToken,
+          undefined,
+          undefined,
+          params.operationId,
+          params.operationAttempt,
+        );
+        deps.emit('session.opened', payload);
+      },
+    });
+    return { ok: true, sessionPath: result.sessionPath };
   }
-  const createPayload = await deps.buildSessionOpenedPayload(
-    context.sessionPath,
-    params.selectionToken,
-  );
-  deps.emit('session.opened', createPayload);
-  deps.emitBusyChanged(
-    context,
-    context.session.isStreaming || !!context.activeRequest || context.session.isCompacting === true,
-  );
-  void deps.emitSessionListChanged();
-  return { ok: true, sessionPath: context.sessionPath };
+  const created = createColdSession(deps, params.cwd);
+  const result = await publishCreatedSession(deps, created.sessionPath, params);
+  return { ok: true, sessionPath: result.sessionPath };
 }
 
 async function handleSessionOpen(
@@ -375,6 +505,7 @@ async function handleSessionOpen(
   request: RequestEnvelope,
 ): Promise<unknown> {
   const params = validateSessionOpen(request.params);
+  markRequestValidated(deps);
   // Record browse-time predecessor identity before the viewed path changes.
   // Building a cold payload is deliberately SessionManager-only. The viewed
   // path commits only after the durable read succeeds.
@@ -414,6 +545,7 @@ async function handleSessionViewed(
   request: RequestEnvelope,
 ): Promise<unknown> {
   const params = validateSessionViewed(request.params);
+  markRequestValidated(deps);
   if (!deps.recordViewedSessionTransition) {
     throw new BackendError('UNAVAILABLE', 'Viewed-session transition tracking is unavailable.');
   }
@@ -429,33 +561,38 @@ async function handleSessionDuplicate(
   request: RequestEnvelope,
 ): Promise<unknown> {
   const params = validateSessionDuplicate(request.params);
-  const viewedRevision = deps.captureViewedSessionRevision?.();
-  const sourceContext = deps.getSessionContext(params.sessionPath);
-  const sourceCwd = sourceContext?.session.sessionManager.getCwd()
-    || deps.sdk.SessionManager.open(params.sessionPath).getCwd()
-    || deps.startupCwd;
-  const forkedManager = deps.sdk.SessionManager.forkFrom(
-    params.sessionPath,
-    sourceCwd,
-    deps.sessionDir,
-  );
-  const context = await deps.createSessionContext(forkedManager, 'new');
-  if (deps.setViewedSessionPathIfCurrent && viewedRevision !== undefined) {
-    deps.setViewedSessionPathIfCurrent(context.sessionPath, viewedRevision);
-  } else {
-    deps.setViewedSessionPath(context.sessionPath);
+  markRequestValidated(deps);
+  if (params.operationId !== undefined) {
+    // §6.3 idempotent duplicate: same ledger semantics as `session.create`.
+    const result = await getCreateOperationLedger(deps).run({
+      operationId: params.operationId,
+      execute: async (registerDurablePath) => {
+        const duplicate = duplicateColdSession(deps, params.sessionPath);
+        registerDurablePath(duplicate.sessionPath);
+        return await publishCreatedSession(deps, duplicate.sessionPath, params);
+      },
+      resume: async (durablePath) => {
+        return await publishCreatedSession(deps, durablePath, params);
+      },
+      republish: async (sessionPath) => {
+        // Best-effort: the durable result is committed; a lost first
+        // `session.opened` must not fail the retry ack.
+        const payload = await deps.buildSessionOpenedPayload(
+          sessionPath,
+          params.selectionToken,
+          undefined,
+          undefined,
+          params.operationId,
+          params.operationAttempt,
+        );
+        deps.emit('session.opened', payload);
+      },
+    });
+    return { ok: true, sessionPath: result.sessionPath };
   }
-  const duplicatePayload = await deps.buildSessionOpenedPayload(
-    context.sessionPath,
-    params.selectionToken,
-  );
-  deps.emit('session.opened', duplicatePayload);
-  deps.emitBusyChanged(
-    context,
-    context.session.isStreaming || !!context.activeRequest || context.session.isCompacting === true,
-  );
-  void deps.emitSessionListChanged();
-  return { ok: true, sessionPath: context.sessionPath };
+  const duplicate = duplicateColdSession(deps, params.sessionPath);
+  const result = await publishCreatedSession(deps, duplicate.sessionPath, params);
+  return { ok: true, sessionPath: result.sessionPath };
 }
 
 async function handleSessionPreload(
@@ -463,6 +600,7 @@ async function handleSessionPreload(
   request: RequestEnvelope,
 ): Promise<unknown> {
   const params = validateSessionPath('session.preload', request.params);
+  markRequestValidated(deps);
   return await deps.buildSessionOpenedPayload(
     params.sessionPath,
     undefined,
@@ -476,6 +614,7 @@ async function handleSessionForget(
   request: RequestEnvelope,
 ): Promise<unknown> {
   const params = validateSessionPath('session.forget', request.params);
+  markRequestValidated(deps);
   if (!deps.forgetSession) throw new BackendError('UNAVAILABLE', 'Session forget is unavailable.');
   await deps.forgetSession(params.sessionPath);
   await deps.emitSessionListChanged();
@@ -487,6 +626,7 @@ async function handleSessionLoadTranscriptPage(
   request: RequestEnvelope,
 ): Promise<unknown> {
   const params = validateLoadTranscriptPage(request.params);
+  markRequestValidated(deps);
   const page = await deps.loadTranscriptPage(
     params.sessionPath,
     params.direction,
@@ -525,6 +665,7 @@ async function handleSessionLoadDetail(
     || !Number.isSafeInteger(candidate.sizeBytes) || (candidate.sizeBytes ?? -1) < 0) {
     throw new BackendError('INVALID_PARAMS', 'session.loadDetail requires sessionPath and ref.');
   }
+  markRequestValidated(deps);
   if (!deps.loadDetail) {
     return { sessionPath, key: (ref as LazyDetailRef).key, status: 'unavailable', message: 'Detail retrieval is unavailable.' };
   }
@@ -536,10 +677,22 @@ async function handleSessionTruncateAfter(
   request: RequestEnvelope,
 ): Promise<unknown> {
   const params = validateTruncateAfter(request.params);
+  markRequestValidated(deps);
 
   const existingCtx = deps.getSessionContext(params.sessionPath);
   if (existingCtx?.activeRequest || existingCtx?.session.isStreaming) {
     throw new BackendError('STREAMING_BUSY', 'Cannot truncate a session that is currently streaming.');
+  }
+
+  if (!existingCtx) {
+    if (!deps.truncateColdSessionAfter) {
+      throw new BackendError('UNAVAILABLE', 'Cold session truncate is unavailable.');
+    }
+    const result = await deps.truncateColdSessionAfter(params.sessionPath, params.entryId);
+    const payload = await deps.buildSessionOpenedPayload(result.sessionPath);
+    deps.emit('session.opened', payload);
+    void deps.emitSessionListChanged();
+    return { ok: true, sessionPath: result.sessionPath };
   }
 
   // Capture the user's chosen model + thinking level BEFORE truncating. The
@@ -550,10 +703,9 @@ async function handleSessionTruncateAfter(
   // surprise after a `setModel` the user explicitly made). We re-apply the
   // captured choice to the fresh context below so the model survives a
   // transcript truncation. See STATE_CONTRACT § Optimistic Reconciliation.
-  const durableContext = existingCtx ? undefined : deps.sdk.SessionManager.open(params.sessionPath).buildSessionContext?.();
-  const previousModelId = existingCtx?.session.model?.id ?? durableContext?.model?.modelId;
-  const previousProvider = existingCtx?.session.model?.provider ?? durableContext?.model?.provider;
-  const previousThinkingLevel = existingCtx?.session.thinkingLevel ?? durableContext?.thinkingLevel;
+  const previousModelId = existingCtx.session.model?.id;
+  const previousProvider = existingCtx.session.model?.provider;
+  const previousThinkingLevel = existingCtx.session.thinkingLevel;
 
   const replace = async (): Promise<SessionContext> => {
     const raw = await fs.readFile(params.sessionPath, 'utf8');
@@ -671,26 +823,30 @@ async function reapplyModelAfterTruncate(
 function clearActiveRequest(
   context: SessionContext,
   requestId: string,
+  expected?: ActiveRequest,
 ): void {
-  if (context.activeRequest?.id === requestId) {
-    // Defensive: clear the pre-commit safety-net timer if it is still armed
-    // (e.g. interrupt / preflight failure paths). The primary clear is the
-    // commit-point clear in `session-event-handler.ts`.
-    if (context.activeRequest.promptSafetyTimer) {
-      clearTimeout(context.activeRequest.promptSafetyTimer);
-      context.activeRequest.promptSafetyTimer = undefined;
-    }
-    if (context.activeRequest.semanticLeaseTimer) {
-      clearTimeout(context.activeRequest.semanticLeaseTimer);
-      context.activeRequest.semanticLeaseTimer = undefined;
-    }
-    if (context.activeRequest.quotaSettlementTimer) {
-      clearTimeout(context.activeRequest.quotaSettlementTimer);
-      context.activeRequest.quotaSettlementTimer = undefined;
-    }
-    context.activeRequest.pendingDurableToolTerminals?.clear();
-    context.activeRequest = undefined;
+  const active = context.activeRequest;
+  if (!active || active.id !== requestId || (expected && active !== expected)) return;
+  // Defensive: clear the pre-commit safety-net timer if it is still armed
+  // (e.g. interrupt / preflight failure paths). The primary clear is the
+  // commit-point clear in `session-event-handler.ts`.
+  if (active.promptSafetyTimer) {
+    clearTimeout(active.promptSafetyTimer);
+    active.promptSafetyTimer = undefined;
   }
+  if (active.semanticLeaseTimer) {
+    clearTimeout(active.semanticLeaseTimer);
+    active.semanticLeaseTimer = undefined;
+  }
+  if (active.quotaSettlementTimer) {
+    clearTimeout(active.quotaSettlementTimer);
+    active.quotaSettlementTimer = undefined;
+  }
+  active.pendingDurableToolTerminals?.clear();
+  if (context.pendingExtensionCommand?.requestId === requestId) {
+    context.pendingExtensionCommand = undefined;
+  }
+  context.activeRequest = undefined;
 }
 
 function reportPromptFailure(
@@ -698,6 +854,7 @@ function reportPromptFailure(
   context: SessionContext,
   requestId: string,
   error: Error,
+  expected?: ActiveRequest,
 ): void {
   deps.emit('error', {
     code: 'MESSAGE_SEND_FAILED',
@@ -707,7 +864,7 @@ function reportPromptFailure(
     message: enrichConnectionError(error),
     requestId,
   } satisfies ErrorPayload);
-  clearActiveRequest(context, requestId);
+  clearActiveRequest(context, requestId, expected);
   deps.emitBusyChanged(context, false);
 }
 
@@ -727,13 +884,16 @@ function emitPreflightFailed(
   context: SessionContext,
   requestId: string,
   message: string,
+  expected?: ActiveRequest,
+  sessionPath = context.sessionPath,
 ): void {
   deps.emit('preflight.failed', {
     requestId,
-    sessionPath: context.sessionPath,
+    sessionPath,
     error: message,
   } satisfies PreflightFailedPayload);
-  clearActiveRequest(context, requestId);
+  clearActiveRequest(context, requestId, expected);
+  deps.emitBusyChanged(context, false);
 }
 
 async function handleMessageSend(
@@ -741,6 +901,7 @@ async function handleMessageSend(
   request: RequestEnvelope,
 ): Promise<unknown> {
   const params = validateMessageSend(request.params);
+  markRequestValidated(deps);
   let context = await deps.ensureSessionContext(params.sessionPath);
   // An existing-hot lookup can resolve just before truncate/recovery reserves
   // the path. Rejoin that synchronously visible owner before claiming active
@@ -830,6 +991,7 @@ async function handleMessageSend(
     modelId,
     provider,
     thinkingLevel,
+    extensionCommand: params.text.startsWith('/'),
     // The first turn has no preceding tool call, so its latency window opens at
     // prompt-send. Subsequent turns overwrite this on `tool_execution_end`.
     turnBoundaryAt: Date.now(),
@@ -839,6 +1001,30 @@ async function handleMessageSend(
   const images = lowerImageInputs(params.inputs);
   const imagePayload = images.length > 0 ? images : undefined;
   const promptText = buildPromptText(params.text, params.inputs);
+  const isExtensionCommand = params.text.startsWith('/');
+  // `WorkerRuntimeHost.bindSession` reuses the context object when an extension
+  // command replaces the SDK session. Capture every part of the ownership
+  // identity before invoking the SDK: a late preflight/final callback must not
+  // publish into the replacement (or clear its request).
+  const ownedRequest = context.activeRequest!;
+  const ownedSession = context.session;
+  const ownedSessionPath = context.sessionPath;
+  const ownedSessionOwnershipEpoch = context.sessionOwnershipEpoch ?? 0;
+  const ownsRequest = (): boolean => (
+    !context.retired
+    && context.activeRequest === ownedRequest
+    && context.session === ownedSession
+    && context.sessionPath === ownedSessionPath
+    && (context.sessionOwnershipEpoch ?? 0) === ownedSessionOwnershipEpoch
+  );
+  if (isExtensionCommand) {
+    context.pendingExtensionCommand = {
+      requestId,
+      session: ownedSession,
+      sessionPath: ownedSessionPath,
+      sessionOwnershipEpoch: ownedSessionOwnershipEpoch,
+    };
+  }
 
   // Early ack: resolve {requestId} as soon as the prompt is QUEUED (before the
   // pruning prepass), so a slow prepass can no longer time out `message.send`.
@@ -883,7 +1069,7 @@ async function handleMessageSend(
   const resolveSessionProvider = deps.resolveSessionProvider
     ?? ((ctx) => resolveActiveModel(ctx).provider);
   const onPromptSafetyTimerFire = () => {
-    if (!context.activeRequest || context.activeRequest.id !== requestId) return;
+    if (!ownsRequest()) return;
     if (preflightFailed) return;
 
     const elapsed = Date.now() - firstArmedAt;
@@ -905,7 +1091,7 @@ async function handleMessageSend(
       // armed handle replaces `promptSafetyTimer` so the commit-point clear in
       // `session-event-handler.ts` (and `clearActiveRequest`) clears the LIVE
       // handle, not the already-fired original.
-      context.activeRequest.promptSafetyTimer = setTimeout(onPromptSafetyTimerFire, PROMPT_TIMEOUT_MS);
+      ownedRequest.promptSafetyTimer = setTimeout(onPromptSafetyTimerFire, PROMPT_TIMEOUT_MS);
       return;
     }
 
@@ -915,7 +1101,7 @@ async function handleMessageSend(
     void context.session.abort().catch(() => {
       // Best-effort abort; the failure is surfaced via `preflight.failed` below.
     });
-    emitPreflightFailed(deps, context, requestId, decision.reason);
+    emitPreflightFailed(deps, context, requestId, decision.reason, ownedRequest, ownedSessionPath);
   };
   const promptTimer = setTimeout(onPromptSafetyTimerFire, PROMPT_TIMEOUT_MS);
   context.activeRequest.promptSafetyTimer = promptTimer;
@@ -926,7 +1112,7 @@ async function handleMessageSend(
         source: 'rpc',
         images: imagePayload,
         preflightResult: (success) => {
-          if (context.retired) return;
+          if (!ownsRequest()) return;
           if (preflightFailed) return;
           if (success) {
             // Explicit phase boundary for the host watchdog. This internal
@@ -934,7 +1120,7 @@ async function handleMessageSend(
             // durable pruning-result entry independently supplies the UI summary.
             deps.emit('message.custom', {
               requestId,
-              sessionPath: context.sessionPath,
+              sessionPath: ownedSessionPath,
               message: {
                 id: `${requestId}:preflight-succeeded`,
                 role: 'system',
@@ -951,7 +1137,14 @@ async function handleMessageSend(
             deps.emitBusyChanged(context, true);
           } else {
             preflightFailed = true;
-            emitPreflightFailed(deps, context, requestId, 'Prompt rejected before PI accepted the request.');
+            emitPreflightFailed(
+              deps,
+              context,
+              requestId,
+              'Prompt rejected before PI accepted the request.',
+              ownedRequest,
+              ownedSessionPath,
+            );
           }
         },
       })
@@ -963,13 +1156,20 @@ async function handleMessageSend(
         // pre-commit failure → emit `preflight.failed` so the host reverts via
         // `pending.promoted`. `preflightFailed` guards a double emit when
         // `preflightResult(false)` already settled.
-        if (context.retired || preflightFailed) return;
-        if (context.activeRequest?.currentMessageId) {
-          reportPromptFailure(deps, context, requestId, error);
+        if (!ownsRequest() || preflightFailed) return;
+        if (ownedRequest.messageIndex > 0 || ownedRequest.lastAssistantMessageId || ownedRequest.currentMessageId) {
+          reportPromptFailure(deps, context, requestId, error, ownedRequest);
           return;
         }
         preflightFailed = true;
-        emitPreflightFailed(deps, context, requestId, enrichConnectionError(error) || 'Prompt failed before streaming started.');
+        emitPreflightFailed(
+          deps,
+          context,
+          requestId,
+          enrichConnectionError(error) || 'Prompt failed before streaming started.',
+          ownedRequest,
+          ownedSessionPath,
+        );
       })
       .finally(() => {
         // Defensive clear: the commit-point clear in `session-event-handler.ts`
@@ -977,8 +1177,28 @@ async function handleMessageSend(
         // covers the settle-without-commit case (reject) and any race where the
         // commit-point clear was skipped.
         clearTimeout(promptTimer);
-        if (context.activeRequest?.promptSafetyTimer === promptTimer) {
-          context.activeRequest.promptSafetyTimer = undefined;
+        if (ownsRequest()) {
+          if (ownedRequest.promptSafetyTimer) clearTimeout(ownedRequest.promptSafetyTimer);
+          ownedRequest.promptSafetyTimer = undefined;
+        }
+        // Extension commands are allowed to complete without an agent run.
+        // They still received the early message.send ack, so close the exact
+        // request here rather than leaving the host/backend busy forever. A
+        // real agent turn has crossed message_start (messageIndex/lastAssistantMessageId)
+        // and is left to the normal SDK event lifecycle.
+        if (isExtensionCommand && ownsRequest()
+          && ownedRequest.messageIndex === 0
+          && !ownedRequest.lastAssistantMessageId
+          && !ownedRequest.currentMessageId) {
+          preflightFailed = true;
+          emitPreflightFailed(
+            deps,
+            context,
+            requestId,
+            'Extension command completed without starting an agent turn.',
+            ownedRequest,
+            ownedSessionPath,
+          );
         }
       });
   } catch (syncError) {
@@ -986,10 +1206,10 @@ async function handleMessageSend(
     // as a pre-ack failure: clear activeRequest and let the RPC reject so the
     // host dispatches `SendResult{ok:false}` and reverts via `pending.ops`.
     clearTimeout(promptTimer);
-    if (context.activeRequest?.promptSafetyTimer === promptTimer) {
-      context.activeRequest.promptSafetyTimer = undefined;
+    if (ownsRequest() && ownedRequest.promptSafetyTimer === promptTimer) {
+      ownedRequest.promptSafetyTimer = undefined;
     }
-    clearActiveRequest(context, requestId);
+    clearActiveRequest(context, requestId, ownedRequest);
     throw syncError;
   }
 
@@ -1001,6 +1221,7 @@ async function handleMessageCompact(
   request: RequestEnvelope,
 ): Promise<unknown> {
   const params = validateSessionPath('message.compact', request.params);
+  markRequestValidated(deps);
   const context = await deps.ensureSessionContext(params.sessionPath);
   if (context.activeRequest || context.session.isStreaming || context.session.isCompacting) {
     throw new BackendError('REQUEST_IN_PROGRESS', 'Cannot compact while this session is running.');
@@ -1014,6 +1235,7 @@ async function handleMessageInterrupt(
   request: RequestEnvelope,
 ): Promise<unknown> {
   const params = validateSessionPath('message.interrupt', request.params);
+  markRequestValidated(deps);
   const context = deps.getSessionContext(params.sessionPath);
   if (!context) {
     throw new BackendError('SESSION_NOT_FOUND', `Cannot interrupt an unopened session: ${params.sessionPath}`);
@@ -1113,6 +1335,7 @@ async function handleMessageInterrupt(
     }
     context.activeRequest = undefined;
     deps.emit('operational-error', {
+      incidentId: `interrupt-stuck:${abortRequestId ?? request.id}`,
       code: 'INTERRUPT_ABORT_STUCK', message, requestId: abortRequestId, sessionPath: params.sessionPath,
     });
     if (abortRequestId) deps.emit('message.aborted', {
@@ -1140,6 +1363,7 @@ async function handleMessageInterrupt(
       : createReplacement();
     void context.recoveryPromise.catch((error) => {
       deps.emit('operational-error', {
+        incidentId: `interrupt-recovery:${abortRequestId ?? request.id}`,
         code: 'SESSION_RUNTIME_RECOVERY_FAILED',
         message: `Could not replace the stalled session runtime: ${toErrorMessage(error)}`,
         sessionPath: params.sessionPath,
@@ -1171,6 +1395,7 @@ async function handleMessageReplaceQueue(
   request: RequestEnvelope,
 ): Promise<unknown> {
   const params = validateMessageReplaceQueue(request.params);
+  markRequestValidated(deps);
   const context = deps.getSessionContext(params.sessionPath);
   if (!context) {
     throw new BackendError('SESSION_NOT_FOUND', `Cannot edit the queue for an unopened session: ${params.sessionPath}`);
@@ -1226,6 +1451,7 @@ async function handleMessageClearQueue(
   request: RequestEnvelope,
 ): Promise<unknown> {
   const params = validateSessionPath('message.clearQueue', request.params);
+  markRequestValidated(_deps);
   const context = _deps.getSessionContext(params.sessionPath);
   if (!context) {
     throw new BackendError('SESSION_NOT_FOUND', `Cannot clear queue for an unopened session: ${params.sessionPath}`);
@@ -1245,6 +1471,7 @@ async function handleOpenTabsSet(
   request: RequestEnvelope,
 ): Promise<unknown> {
   const params = validateOpenTabsSet(request.params);
+  markRequestValidated(_deps);
   process.env['PIE_OPEN_TABS'] = JSON.stringify(params.tabs);
   return { ok: true, count: params.tabs.length };
 }
@@ -1258,6 +1485,7 @@ async function handleSystemPromptTogglesSet(
   request: RequestEnvelope,
 ): Promise<unknown> {
   const params = validateSystemPromptTogglesSet(request.params);
+  markRequestValidated(deps);
   await deps.ensureSessionContext(params.sessionPath);
   await deps.applySystemPromptToggles(params.sessionPath, params.disabledEntries);
   const payload = await deps.buildSessionOpenedPayload(params.sessionPath);
@@ -1270,6 +1498,7 @@ async function handleExtensionUiResponse(
   request: RequestEnvelope,
 ): Promise<unknown> {
   const params = validateExtensionUiResponse(request.params);
+  markRequestValidated(deps);
   const context = deps.getSessionContext(params.sessionPath);
   if (!context?.uiBridge) {
     throw new BackendError('NO_UI_BRIDGE', `No UI bridge for session: ${params.sessionPath}`);
@@ -1291,6 +1520,7 @@ async function handleModelsList(
   request: RequestEnvelope,
 ): Promise<unknown> {
   const params = validateSessionPath('models.list', request.params);
+  markRequestValidated(deps);
   return await deps.listAvailableModels(deps.getSessionContext(params.sessionPath));
 }
 
@@ -1298,6 +1528,7 @@ async function handleSettingsGet(
   deps: BackendRequestHandlerDeps,
   _request: RequestEnvelope,
 ): Promise<unknown> {
+  markRequestValidated(deps);
   return await deps.readModelSettings();
 }
 
@@ -1306,6 +1537,7 @@ async function handleSettingsSet(
   request: RequestEnvelope,
 ): Promise<unknown> {
   const params = validateSettingsSet(request.params);
+  markRequestValidated(deps);
   const { sessionPath, ...rawUpdates } = params;
   const previousSettings = await deps.readModelSettings();
   const targetContext = sessionPath ? await deps.ensureSessionContext(sessionPath) : undefined;
@@ -1412,18 +1644,34 @@ async function handleSettingsSet(
   }
 }
 
+/** Shared param parse for `diagnostics.livePipeline.setEnabled`. Returns the
+ *  desired enablement for a well-formed request, or `undefined` when the
+ *  params are not a valid boolean toggle. The handler rejects the undefined
+ *  case with INVALID_PARAMS; the dispatch uses the same parse to place the
+ *  toggle at the request boundary (see `handleBackendRequest`), and the
+ *  server uses it to reserve the toggle generation at request receipt. */
+export function parseLivePipelineToggleParams(params: unknown): { enabled: boolean } | undefined {
+  const candidate = params && typeof params === 'object'
+    ? params as Record<string, unknown>
+    : undefined;
+  return typeof candidate?.enabled === 'boolean' ? { enabled: candidate.enabled } : undefined;
+}
+
 async function handleLivePipelineTraceSetEnabled(
-  _deps: BackendRequestHandlerDeps,
+  deps: BackendRequestHandlerDeps,
   request: RequestEnvelope,
 ): Promise<unknown> {
-  const params = request.params && typeof request.params === 'object'
-    ? request.params as Record<string, unknown>
-    : undefined;
-  if (typeof params?.enabled !== 'boolean') {
+  const toggle = parseLivePipelineToggleParams(request.params);
+  if (!toggle) {
     throw new BackendError('INVALID_PARAMS', 'diagnostics.livePipeline.setEnabled requires boolean enabled.');
   }
-  setBackendLivePipelineTraceEnabled(params.enabled);
-  return { enabled: params.enabled, health: getBackendLivePipelineTraceHealth() };
+  markRequestValidated(deps);
+  // The toggle itself is applied by the dispatch at the request boundary —
+  // before `route_selected` for an enable, after `handler_finished` for a
+  // disable — so this request's own trace is recorded under the state it
+  // establishes. Return only the desired enablement; the dispatch composes
+  // the public `{ enabled, health }` response after the boundary application.
+  return { enabled: toggle.enabled };
 }
 
 async function handleLiveTurnCheckpoint(
@@ -1431,6 +1679,7 @@ async function handleLiveTurnCheckpoint(
   request: RequestEnvelope,
 ): Promise<unknown> {
   const params = validateLiveTurnCheckpoint(request.params);
+  markRequestValidated(deps);
   const context = deps.getSessionContext(params.sessionPath);
   if (!context) return { status: 'backend_restarted', checkpoint: null, watermark: null };
   const now = Date.now();
@@ -1481,6 +1730,7 @@ async function handleProviderGateMetrics(
   _deps: BackendRequestHandlerDeps,
   _request: RequestEnvelope,
 ): Promise<unknown> {
+  markRequestValidated(_deps);
   // In-memory read of the host-side provider gate (wraps globalThis.fetch in
   // the backend process). Returns {enabled:false, providers:[]} when the gate
   // is not installed (no provider has a concurrency config) — the host strip
@@ -1519,9 +1769,165 @@ const handlers: Record<string, RequestHandler> = {
   'diagnostics.livePipeline.setEnabled': handleLivePipelineTraceSetEnabled,
 };
 
+/** Closed route catalog for settlement-coverage tests: every registered
+ *  request method must record exactly one validation settlement and one
+ *  completion (see the route-settlement test). */
+export const BACKEND_REQUEST_METHODS: readonly string[] = Object.keys(handlers);
+
 export async function handleBackendRequest(
   deps: BackendRequestHandlerDeps,
   request: RequestEnvelope,
 ): Promise<unknown> {
-  return handlers[request.method]?.(deps, request) ?? unknownMethodResponse(request.method);
+  const handler: RequestHandler | undefined = Object.prototype.hasOwnProperty.call(handlers, request.method)
+    ? handlers[request.method]
+    : undefined;
+  const requestStartedAt = performance.now();
+  // The server owns the completion span when it may retry a browse operation
+  // (`suppressRequestTrace`) or when it already wired its own validation
+  // callback; standalone callers get a self-contained span. Dispatch-level
+  // phases below are always recorded at their real moments.
+  const ownsCompletion = !deps.suppressRequestTrace && !deps.onRequestValidated;
+  // The diagnostics toggle is applied at the request boundary, not inside the
+  // handler, so the toggle request's own trace is coherent under the state it
+  // establishes: an enable is applied BEFORE the first trace record (the
+  // prefix would otherwise be dropped while the store is still disabled), and
+  // a disable is applied AFTER the completion record (the completion would
+  // otherwise be dropped once the store turns off). Invalid toggles parse to
+  // `undefined` and never touch enablement.
+  const toggleRequest = request.method === 'diagnostics.livePipeline.setEnabled'
+    ? parseLivePipelineToggleParams(request.params)
+    : undefined;
+  if (toggleRequest?.enabled) {
+    setBackendLivePipelineTraceEnabled(true);
+    deps.onLivePipelineTraceEnabledChange?.(true);
+  }
+  // Dispatch selection: the route is chosen here, before any handler work.
+  if (handler) {
+    recordBackendLivePipelineTrace({
+      stage: 'backend.request',
+      kind: 'transition',
+      phase: 'route_selected',
+      identifiers: { request: request.id },
+      processRole: 'coordinator',
+      pid: process.pid,
+    });
+  }
+  // Validation settlement: `request_validated` is emitted only after the
+  // selected handler has actually validated its params (see
+  // `markRequestValidated`), and `handler_started` denotes execution AFTER
+  // validation — the settlement hook runs synchronously between the handler's
+  // validator and its first await, so both records land at their real
+  // moments. There is no general request queue, so no `handler_queued` phase
+  // is claimed. A known route that throws before settling validation gets an
+  // explicit `request_validated:failure` in the catch below, so no route can
+  // silently lack a validation settlement.
+  let validationSettled = false;
+  const traceRequestValidated = (): void => {
+    validationSettled = true;
+    // The server owns the request span (retry-aware browse operations) and
+    // wires its own once-per-request `request_validated` settlement.
+    deps.onRequestValidated?.();
+    if (ownsCompletion) {
+      recordBackendLivePipelineTrace({
+        stage: 'backend.request',
+        kind: 'success',
+        phase: 'request_validated',
+        identifiers: { request: request.id },
+        processRole: 'coordinator',
+        pid: process.pid,
+      });
+    }
+    recordBackendLivePipelineTrace({
+      stage: 'backend.request',
+      kind: 'start',
+      phase: 'handler_started',
+      identifiers: { request: request.id },
+      processRole: 'coordinator',
+      pid: process.pid,
+    });
+  };
+  const handlerDeps = {
+    ...deps,
+    onRequestValidated: traceRequestValidated,
+    // Resolve the fallback ledger against the ORIGINAL deps object: the
+    // spread below is a fresh object per call, so keying the WeakMap by
+    // `handlerDeps` would give every concurrent/retried request its own
+    // ledger and silently break `operationId` dedupe. Carrying the
+    // original-deps ledger through the spread keeps one ledger per deps
+    // configuration while the handler still sees a wired ledger.
+    createOperationLedger: getCreateOperationLedger(deps),
+  };
+  // Exactly one finish/error completion per request: the success record is
+  // emitted only after the handler settles, and a failure record is never
+  // emitted once a success record was already written.
+  let completionEmitted = false;
+  try {
+    if (!handler) return unknownMethodResponse(request.method);
+    const result = await handler(handlerDeps, request);
+    if (ownsCompletion) {
+      recordBackendLivePipelineTrace({
+        stage: 'backend.request',
+        kind: 'success',
+        phase: 'handler_finished',
+        durationMs: Math.max(0, performance.now() - requestStartedAt),
+        identifiers: { request: request.id },
+        processRole: 'coordinator',
+        pid: process.pid,
+      });
+      completionEmitted = true;
+    }
+    if (toggleRequest && !toggleRequest.enabled) {
+      // A production server can reserve this exact request id and finish the
+      // transition after it emits handler_finished. The reserved generation
+      // (captured at request receipt, before any awaited handler work) gates
+      // the application: an older off settling after a newer on must not
+      // disable tracing. Standalone callers have no completion boundary to
+      // defer across, so they apply the disable here.
+      const deferred = deps.deferLivePipelineTraceDisable?.(
+        request.id,
+        deps.livePipelineTraceToggleGeneration ?? 0,
+        () => deps.onLivePipelineTraceEnabledChange?.(false),
+      ) === true;
+      if (!deferred) {
+        setBackendLivePipelineTraceEnabled(false);
+        deps.onLivePipelineTraceEnabledChange?.(false);
+      }
+    }
+    if (toggleRequest) {
+      // The handler returns only the desired enablement; compose the public
+      // response here so `health` reflects the state AFTER the boundary
+      // application (post-enable for off→on, post-disable for on→off).
+      return { enabled: toggleRequest.enabled, health: getBackendLivePipelineTraceHealth() };
+    }
+    return result;
+  } catch (error) {
+    if (handler && !validationSettled) {
+      // The selected route threw before its validation settlement: the
+      // failure is parameter validation, recorded explicitly ahead of the
+      // request's failure completion so a validation stall or invalid request
+      // is distinguishable from a handler failure.
+      recordBackendLivePipelineTrace({
+        stage: 'backend.request',
+        kind: 'failure',
+        phase: 'request_validated',
+        identifiers: { request: request.id },
+        reasonCode: 'malformed_payload',
+        processRole: 'coordinator',
+        pid: process.pid,
+      });
+    }
+    if (ownsCompletion && !completionEmitted) {
+      recordBackendLivePipelineTrace({
+        stage: 'backend.request',
+        kind: 'failure',
+        phase: 'handler_finished',
+        durationMs: Math.max(0, performance.now() - requestStartedAt),
+        identifiers: { request: request.id },
+        reasonCode: 'unknown_unattributable',
+        processRole: 'coordinator',
+        pid: process.pid,
+      });
+    }
+    throw error;
+  }
 }

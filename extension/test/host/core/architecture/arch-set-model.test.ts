@@ -132,7 +132,7 @@ test('SessionOpened does not clobber an in-flight optimistic SetModel (global de
   // A stale session.opened arrives before settings.set commits: its
   // modelSettings + per-session badge still reflect the PRE-switch state.
   const staleOpened: Event = {
-    kind: 'SessionOpened',
+    kind: 'SessionOpened', backendGeneration: 0, modelWriteFence: 0, modelHydrationRevision: 0, catalogHydrationRevision: 0,
     sessionPath: SESSION,
     payload: {
       session: { path: SESSION, name: 'S', cwd: '/w', modifiedAt: '2024-01-01T00:00:00.000Z', messageCount: 0, modelId: 'old-model', thinkingLevel: 'medium' },
@@ -155,13 +155,71 @@ test('SessionOpened does not clobber an in-flight optimistic SetModel (global de
   assert.ok(afterOpened.pending.setModelByCorrId.c1);
 });
 
+test('SessionOpened captured before a completed SetModel cannot later replace its catalog or model metadata', () => {
+  const oldCatalog: ModelInfo[] = [{ ...TEXT_ONLY_MODEL, id: 'old-model' }];
+  const newCatalog: ModelInfo[] = [{ ...IMAGE_MODEL, id: 'new-model' }];
+  const afterSet = reduceFrom(
+    buildState({ defaultModel: 'old-model', sessionModelId: 'old-model', availableModels: newCatalog }),
+    cmd('c1', 'new-model', SESSION, 'high', 'p'),
+    result('c1', true),
+  );
+  assert.equal(afterSet.pending.setModelByCorrId.c1, undefined);
+  assert.equal(afterSet.settings.modelWriteFence, 1);
+
+  const staleOpened: Event = {
+    kind: 'SessionOpened', backendGeneration: 0, modelWriteFence: 0, modelHydrationRevision: 0, catalogHydrationRevision: 0,
+    sessionPath: SESSION,
+    payload: {
+      session: { path: SESSION, name: 'S', cwd: '/w', modifiedAt: '2024-01-01T00:00:00.000Z', messageCount: 0, modelId: 'old-model', thinkingLevel: 'medium' },
+      transcript: [],
+      transcriptWindow: { totalCount: 0, loadedStart: 0, loadedEnd: 0, hasOlder: false, hasNewer: false, isPartial: false, hasUserMessages: false },
+      busy: false,
+      modelSettings: { defaultModel: 'old-model', defaultThinkingLevel: 'medium' },
+      availableModels: oldCatalog,
+    },
+  };
+  const afterOpened = reduceFrom(afterSet, staleOpened);
+  assert.equal(afterOpened.settings.modelSettings?.defaultModel, 'new-model');
+  assert.equal(afterOpened.sessions.sessions.find((s) => s.path === SESSION)?.modelId, 'new-model');
+  assert.deepEqual(afterOpened.settings.availableModelsBySession[SESSION], newCatalog);
+});
+
+test('SessionOpened started before a newer hydration cannot replace settings or catalog', () => {
+  const newerCatalog: ModelInfo[] = [{ ...IMAGE_MODEL, id: 'newer-catalog' }];
+  const base = buildState({ defaultModel: 'old-model', sessionModelId: 'old-model', availableModels: newerCatalog });
+  const hydrating: ArchState = {
+    ...base,
+    settings: {
+      ...base.settings,
+      modelHydrationRevision: 2,
+      modelHydrationRevisionBySession: { [SESSION]: 2 },
+      modelSettings: { defaultModel: 'newer-settings', defaultThinkingLevel: 'high' },
+    },
+  };
+  const staleOpened: Event = {
+    kind: 'SessionOpened', backendGeneration: 0, modelWriteFence: 0, modelHydrationRevision: 1, catalogHydrationRevision: 1,
+    sessionPath: SESSION,
+    payload: {
+      session: { path: SESSION, name: 'S', cwd: '/w', modifiedAt: '2024-01-01T00:00:00.000Z', messageCount: 0, modelId: 'old-model' },
+      transcript: [],
+      transcriptWindow: { totalCount: 0, loadedStart: 0, loadedEnd: 0, hasOlder: false, hasNewer: false, isPartial: false, hasUserMessages: false },
+      busy: false,
+      modelSettings: { defaultModel: 'stale-settings', defaultThinkingLevel: 'low' },
+      availableModels: [{ ...TEXT_ONLY_MODEL, id: 'stale-catalog' }],
+    },
+  };
+  const after = reduceFrom(hydrating, staleOpened);
+  assert.equal(after.settings.modelSettings?.defaultModel, 'newer-settings');
+  assert.deepEqual(after.settings.availableModelsBySession[SESSION], newerCatalog);
+});
+
 test('SessionOpened applies payload modelSettings when no SetModel is in flight (hydration path preserved)', () => {
   // No pending SetModel: the payload's modelSettings is the authoritative
   // hydration from settings.json and must be applied (regression guard for
   // the in-flight guard above being too aggressive).
   const base = buildState({ defaultModel: 'old-model', sessionModelId: 'old-model' });
   const opened: Event = {
-    kind: 'SessionOpened',
+    kind: 'SessionOpened', backendGeneration: 0, modelWriteFence: 0, modelHydrationRevision: 0, catalogHydrationRevision: 0,
     sessionPath: SESSION,
     payload: {
       session: { path: SESSION, name: 'S', cwd: '/w', modifiedAt: '2024-01-01T00:00:00.000Z', messageCount: 0, modelId: 'hydrated-model', thinkingLevel: 'low' },

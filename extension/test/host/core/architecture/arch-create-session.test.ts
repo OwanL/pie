@@ -55,8 +55,8 @@ function buildState(opts: BuildOpts = {}): ArchState {
   };
 }
 
-function createCmd(corrId: string, sessionPath: string = PENDING, placeholder: SessionSummary = PLACEHOLDER, cwd = '/w', selectionToken = 'tok'): Event {
-  return { kind: 'Command', cmd: { kind: 'CreateSession', corrId, sessionPath, cwd, placeholderSummary: placeholder, selectionToken } };
+function createCmd(corrId: string, sessionPath: string = PENDING, placeholder: SessionSummary = PLACEHOLDER, cwd = '/w', selectionToken = 'tok', operationId?: string): Event {
+  return { kind: 'Command', cmd: { kind: 'CreateSession', corrId, sessionPath, cwd, placeholderSummary: placeholder, selectionToken, ...(operationId ? { operationId } : {}) } };
 }
 
 test('CreateSession inserts the placeholder summary, opens + selects the tab, clears running/run-summary, and emits PersistTabs + CreateSession', () => {
@@ -101,6 +101,63 @@ test('CreateSession clears a stale running marker and overwrites a stale active-
 
   assert.deepEqual(out.state.sessions.runningSessionPaths, [OLD]);
   assert.equal(out.state.composer.activeRunSummaryBySession[PENDING], null);
+});
+
+test('a create timeout retains the delayed ledger, pending tab, queued sends, and stable retry identity', () => {
+  const operationId = 'create-op-1';
+  const created = reducer(buildState(), createCmd('c-timeout', PENDING, PLACEHOLDER, '/w', 'tok-timeout', operationId));
+  const queued = {
+    corrId: 'queued-1', text: 'after create', inputs: [], composedText: 'after create',
+    localId: 'local-1', userParts: undefined, previousSummary: null, timestamp: 1,
+  };
+  const queuedState: ArchState = {
+    ...created.state,
+    pending: {
+      ...created.state.pending,
+      sendQueueBySession: { [PENDING]: [queued] },
+    },
+  };
+  const delayed = reducer(queuedState, {
+    kind: 'CreateOperationDelayed', operationId, pendingPath: PENDING,
+    selectionToken: 'tok-timeout', notice: 'still creating', ownsSelection: true,
+  });
+  assert.equal(delayed.state.pending.createOperations[operationId]?.status, 'delayed-awaiting-outcome');
+  assert.equal(delayed.state.sessions.openTabPaths.includes(PENDING), true);
+  assert.equal(delayed.state.sessions.sessions[0]?.creationState, 'delayed');
+  assert.deepEqual(delayed.state.pending.sendQueueBySession[PENDING], [queued]);
+
+  const retried = reducer(delayed.state, createCmd('c-retry', PENDING, PLACEHOLDER, '/w', 'tok-timeout', operationId));
+  assert.equal(retried.state.pending.createOperations[operationId]?.status, 'pending');
+  assert.deepEqual(retried.state.pending.sendQueueBySession[PENDING], [queued]);
+  const retryEffect = retried.effects.find((effect) => effect.kind === 'CreateSession');
+  assert.equal(retryEffect?.kind, 'CreateSession');
+  if (retryEffect?.kind === 'CreateSession') assert.equal(retryEffect.operationId, operationId);
+});
+
+test('hiding a delayed create preserves its ledger and queued sends without reopening on late success', () => {
+  const operationId = 'create-op-hidden';
+  const created = reducer(buildState(), createCmd('c-hidden', PENDING, PLACEHOLDER, '/w', 'tok-hidden', operationId));
+  const delayed = reducer(created.state, {
+    kind: 'CreateOperationDelayed', operationId, pendingPath: PENDING,
+    selectionToken: 'tok-hidden', ownsSelection: true,
+  });
+  const queue = [{
+    corrId: 'queued-hidden', text: 'queued', inputs: [], composedText: 'queued',
+    localId: 'local-hidden', previousSummary: null, timestamp: 1,
+  }];
+  const withQueue = {
+    ...delayed.state,
+    pending: { ...delayed.state.pending, sendQueueBySession: { [PENDING]: queue } },
+  } as ArchState;
+  const hidden = reducer(withQueue, {
+    kind: 'Command', cmd: { kind: 'CloseSession', corrId: 'close-hidden', sessionPath: PENDING },
+  });
+  assert.equal(hidden.state.sessions.openTabPaths.includes(PENDING), false);
+  assert.equal(hidden.state.sessions.activeSessionPath, OLD);
+  assert.equal(hidden.state.pending.createOperations[operationId]?.hidden, true);
+  assert.deepEqual(hidden.state.pending.sendQueueBySession[PENDING], queue);
+  assert.equal(hidden.effects.length, 1);
+  assert.equal(hidden.effects[0]?.kind, 'PersistTabs');
 });
 
 test('the optimistic CreateSession setup is fully undone by the host-side failure path (SessionScopeCleared + SelectSession-fallback)', () => {

@@ -12,6 +12,8 @@ export interface ActiveRequest {
   modelId?: string;
   /** Provider selected when this request started. */
   provider?: string;
+  /** The prompt was dispatched as an extension command (`/name ...`). */
+  extensionCommand?: boolean;
   thinkingLevel?: ThinkingLevel;
   /** Monotonic SDK turn identity used to keep provider-attempt timing attached
    * to the turn that initiated it, even when a stale attempt settles later. */
@@ -120,6 +122,10 @@ export interface SessionContext {
   runtime: SdkRuntime;
   session: SdkSession;
   sessionPath: string;
+  /** Monotonic runtime/session binding generation. Async callbacks that belong
+   * to a previous SDK session must not publish into a replacement binding,
+   * including a self-reopen that keeps the same path. */
+  sessionOwnershipEpoch?: number;
   unsubscribe: () => void;
   activeRequest?: ActiveRequest;
   /** Per-session monotonic counter for `busy.changed` events. */
@@ -166,6 +172,15 @@ export interface SessionContext {
    *  back to the exact optimistic message. Cleared on interrupt/clearQueue.
    *  Absent/empty → fall back to FIFO matching in the host reducer. */
   queuedLocalIds?: string[];
+  /** A public extension-command send that has not crossed an agent
+   *  message_start. Retained separately so a replacement can terminalize the
+   *  early-ack request even if source abort events clear activeRequest first. */
+  pendingExtensionCommand?: {
+    requestId: string;
+    session: SdkSession;
+    sessionPath: string;
+    sessionOwnershipEpoch: number;
+  };
   /** Short-lived in-memory terminal checkpoint retained for host gap repair. */
   terminalLiveTurn?: { accumulator: BackendLiveTurnAccumulator; expiresAt: number };
   /** Replacement runtime created after provider abort teardown failed. */

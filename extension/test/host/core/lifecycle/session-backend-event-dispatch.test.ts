@@ -36,6 +36,7 @@ function createHandlers() {
     onContextUsageChanged: (payload) => calls.push({ name: 'contextUsage.changed', payload }),
     onExtensionUIRequest: (payload) => calls.push({ name: 'extension_ui.request', payload }),
     onError: (payload) => calls.push({ name: 'error', payload }),
+    onDetailStream: (payload) => calls.push({ name: 'detail.stream', payload }),
   };
 
   return { handlers, calls };

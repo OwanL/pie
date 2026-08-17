@@ -35,10 +35,14 @@ const {
 	resolveAuth,
 	isTransportError,
 	isTransportErrorMessage,
+	isLocalOllamaModel,
+	isOllamaModel,
 	PREPASS_MAX_TRANSPORT_RETRIES,
+	DEFAULT_OLLAMA_PREPASS_MAX_OUTPUT_TOKENS,
 	LLM_TIMEOUT_MS_BY_THINKING_LEVEL,
 	getRecentConversation,
 	completeOllamaNative,
+	buildPrepassThinkingAttempts,
 	subagentContext,
 	SKILLS_BLOCK_RE,
 } = require("../src/pruning.ts") as typeof import("../src/pruning.js");
@@ -793,6 +797,34 @@ test("completeOllamaNative surfaces HTTP status for transport retry classificati
 		),
 		/Ollama API error \(503\): busy/,
 	);
+});
+
+test("isLocalOllamaModel keeps Ollama Cloud models on the generic completion path", () => {
+	assert.equal(isLocalOllamaModel({ provider: "ollama", id: "qwen3.5:9b" }), true);
+	assert.equal(isLocalOllamaModel({ provider: "ollama", id: "deepseek-v4-flash:0731-cloud" }), false);
+	assert.equal(isLocalOllamaModel({ provider: "ollama", name: "Ollama Cloud: DeepSeek V4 Flash", id: "deepseek-v4-flash" }), false);
+	assert.equal(isLocalOllamaModel({ provider: "github-copilot", id: "deepseek-v4-flash:0731-cloud" }), false);
+});
+
+test("Ollama prepasses get a bounded default output budget", async () => {
+	const cfg = config({ provider: "ollama", model: "deepseek-v4-flash:0731-cloud" });
+	const seenOptions: Array<{ maxTokens?: number; signal?: AbortSignal }> = [];
+	const completeFn = async (_model: unknown, _context: unknown, options: { maxTokens?: number; signal?: AbortSignal }) => {
+		seenOptions.push(options);
+		return { text: '{"pruneSkills":[],"pruneTools":[]}', stopReason: "stop" };
+	};
+	await runPruningPrepass(
+		{ modelRegistry: modelRegistryStub({ id: cfg.model, provider: cfg.provider, baseUrl: "http://localhost:11434/v1" }) },
+		{ userPrompt: "do something", skills: visibleSkills, tools: allTools, config: cfg },
+		cfg,
+		completeFn as any,
+	);
+	assert.equal(seenOptions[0]?.maxTokens, DEFAULT_OLLAMA_PREPASS_MAX_OUTPUT_TOKENS);
+});
+
+test("off prepass thinking does not fall through to a slower reasoning attempt", () => {
+	assert.deepEqual(buildPrepassThinkingAttempts("off"), ["off"]);
+	assert.deepEqual(buildPrepassThinkingAttempts("minimal"), ["minimal"]);
 });
 
 test("runPruningPrepass: forwards output controls but omits temperature for non-local models", async () => {

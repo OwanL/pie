@@ -1,8 +1,10 @@
 import * as fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import { monitorEventLoopDelay } from 'node:perf_hooks';
 
 import { rewritePieHarnessPrompt } from '../../../shared/pie-harness-prompt.js';
+import { BoundedEventLoopHistogram } from '../shared/live-pipeline-trace';
 import { attachJsonlLineReader, JSONL_MAX_LINE_BYTES } from '../shared/jsonl';
 import { toErrorMessage, parseJsonOrThrow } from '../shared/error-message';
 import { updateSettingsJsonObject } from '../shared/settings-json-update';
@@ -27,13 +29,22 @@ import {
 import { getDefaultAuthDir, ensureDir, isInsideGitWorkTree, migrateAuthFile } from './auth.js';
 import { deriveContextUsageFromBranch } from './context-usage';
 import { ExtensionUIBridge } from './extension-ui-bridge';
-import { handleBackendRequest } from './request-handler';
-import { resolveBackendSessionDir } from './session-directory';
+import { handleBackendRequest, parseLivePipelineToggleParams } from './request-handler';
+import {
+  validateDetailFetch,
+  validateDetailSubscribe,
+  validateDetailUnsubscribe,
+  validateTruncateAfter,
+  type DetailFetchParams,
+  type DetailSubscribeParams,
+  type DetailUnsubscribeParams,
+} from './rpc';
+import { backendSessionPathKey, resolveBackendSessionDir } from './session-directory';
 import { handleSdkSessionEvent } from './session-event-handler';
 import {
   buildCurrentSummary,
-  listAvailableModels,
-  listConfiguredModels,
+  loadAvailableModels,
+  loadConfiguredModels,
   resolveActiveModel,
 } from './session-metadata';
 import { SessionCatalog } from './session-catalog';
@@ -49,8 +60,12 @@ import {
 } from './system-prompt-toggle-store';
 import { forgetPrivateSessionArtifacts } from './private-session-artifacts';
 import {
+  coordinatorSdkLoadMode,
+  ensureSdkPatchBarrier,
+  isFullSdkModule,
   loadSdk,
   loadSdkInternalModule,
+  type ColdCoordinatorSdkModule,
   type SdkModule,
   type SdkSession,
   type SdkSessionEvent,
@@ -58,10 +73,17 @@ import {
   type SdkSystemPromptModule,
 } from './sdk';
 import { ProviderGate } from './provider-gate.js';
+import { CreateOperationLedger } from './create-operation-ledger';
 import { observeProviderTransport } from './provider-progress-bus.js';
 import { observeProviderIncidents, providerIncidentCode } from './provider-incident.js';
 import { BackendError, extractRequestError, log, responseError, responseOk, writeStdout } from './server-io';
-import { isBackendLivePipelineTraceEnabled, recordBackendLivePipelineTrace } from './live-pipeline-trace-runtime';
+import {
+  flushBackendLivePipelineTrace,
+  getBackendLivePipelineTraceHealth,
+  isBackendLivePipelineTraceEnabled,
+  recordBackendLivePipelineTrace,
+  setBackendLivePipelineTraceEnabled,
+} from './live-pipeline-trace-runtime';
 import {
   type SessionContext,
   type SessionContextCreationReason,
@@ -91,11 +113,34 @@ import { deduplicateToolCallResultsForTransport } from '../shared/chat-message-p
 import { findDurableDetail } from '../shared/lazy-details.js';
 import { LIVE_PIPELINE_LIMITS } from '../shared/live-pipeline-protocol.js';
 import { ASK_USER_TOOL_NAME } from '../../../shared/autonomous-mode.js';
-import {
-  buildBrowseSessionOpenedPayload,
-  openSessionBrowseSnapshot,
-  type SessionBrowseSnapshot,
-} from './session-browser.js';
+import { isPhase3IsolatedCoordinatorOperationAllowed, type RuntimeIsolationMode } from './runtime-isolation-mode';
+import { ColdSessionStore, StaleColdSessionLeaseError, type ColdSessionManagerHandle } from './cold-session-store';
+import { DurableDetailStore, type ResolvedDurableDetail } from './durable-detail-store';
+import type { BackendDetailFence, LiveSubagentDetailAddress } from '../shared/protocol/subagent-detail';
+import { WorkerSupervisor } from './worker-supervisor';
+import { SessionOwnershipAuthority } from './session-ownership-authority';
+import { WorkerRuntimeRouter } from './worker-runtime-router';
+import type { WorkerJsonObject, WorkerJsonValue } from './worker-protocol';
+
+const ISOLATED_PROMOTION_METHODS = new Set([
+  'message.send',
+  'message.compact',
+  'systemPromptToggles.set',
+]);
+
+/** Live worker detail errors that mean the worker no longer retains the
+ *  source and the durable JSONL is authoritative. */
+function isLiveDetailGoneError(error: unknown): boolean {
+  return error instanceof Error
+    && (error.message.startsWith('NOT_FOUND:') || error.message.startsWith('NOT_LIVE_ADDRESSABLE:'));
+}
+
+function requestSessionPath(params: unknown): string | undefined {
+  return params && typeof params === 'object' && !Array.isArray(params)
+    && typeof (params as { sessionPath?: unknown }).sessionPath === 'string'
+    ? (params as { sessionPath: string }).sessionPath
+    : undefined;
+}
 
 export function extractPreviewRequestId(preview: string): string | undefined {
   const match = /"id"\s*:\s*"([^"\\]{1,200})"/.exec(preview);
@@ -233,9 +278,11 @@ function installBackendFatalHandlers(): void {
 }
 
 export class BackendServer {
-  private sdk!: SdkModule;
+  private sdk!: SdkModule | ColdCoordinatorSdkModule;
   private readonly sdkPath: string;
   private readonly startupCwd: string;
+  /** Host-authoritative generation shared by backend, coordinator, worker, and detail fences. */
+  private readonly backendGeneration: number;
   private sessionDir?: string;
   private sessionDirResolved = false;
   private agentDir = '';
@@ -246,8 +293,22 @@ export class BackendServer {
   private viewedSessionRevision = 0;
   /** Process-wide user preference mirrored by runtimePrefs.set. */
   private autonomousMode = false;
+  private runtimePrefs: WorkerJsonObject = {};
   private readonly sessionContexts = new Map<string, SessionContext>();
-  private readonly sessionCatalog = new SessionCatalog();
+  private readonly sessionCatalog: SessionCatalog;
+  /** One runtime-free store is installed after SDK load and shares the
+   * coordinator generation/catalog/settings authority. */
+  private coldSessionStore?: ColdSessionStore;
+  /** Newly created/forked/truncated managers remain process-local and are
+   * transferred exactly once on first legacy promotion. Keys are normalized
+   * only for ownership lookup; public paths retain their original spelling. */
+  private readonly coldSessionManagerHandles = new Map<string, {
+    handle: ColdSessionManagerHandle;
+    creationReason: SessionContextCreationReason;
+  }>();
+  /** Cold destructive mutations reserve their path before the first await so
+   * promotion cannot install a writer while truncate/forget owns the file. */
+  private readonly pendingColdSessionMutations = new Map<string, Promise<unknown>>();
   /** Deduplicates concurrent lazy promotions for the same cold session. */
   private readonly pendingSessionContexts = new Map<string, Promise<SessionContext>>();
   /** Generation owner recorded on snapshots built through the public browse
@@ -278,6 +339,11 @@ export class BackendServer {
   /** Last cheap snapshot of the append-only review/closure files. Used by the
    * catalog poll to recover when fs.watch drops or coalesces an event. */
   private reviewSidecarFingerprint = getReviewSidecarFingerprint();
+  /** Auth-file fingerprint baseline; a moved fingerprint refreshes workers. */
+  private authFingerprint = '';
+  /** models.json fingerprint baseline; a moved fingerprint re-broadcasts the
+   *  configured catalog authority to hot workers. */
+  private modelsJsonFingerprint = '';
   /** Cached active-action state belongs to `reviewSidecarFingerprint`; an
    * unchanged poll must not synchronously reparse the growing sidecars. */
   private reviewClosureReconciliationPending = false;
@@ -297,26 +363,75 @@ export class BackendServer {
    *  polling, late SDK events) so a dying backend cannot push post-shutdown
    *  state to a host that is already tearing it down. */
   private disposed = false;
+  /** All shutdown callers join one teardown. A second EOF/watchdog signal must
+   * not observe `disposed` and exit while the first caller still owns workers. */
+  private disposePromise?: Promise<void>;
   /** Backend-wide FIFO admission gate for `sdk.createAgentSessionServices`;
    *  shared by every runtime-factory invocation this server creates (all
    *  sessions/cwds). Service creation is serialized so concurrent session
    *  opens cannot saturate the process during an active generation; results
    *  are never cached or shared — each admitted call creates fresh services. */
   private readonly serviceLoadingGate = new ServiceLoadingGate();
+  /** Generation/process-scoped create-operation ledger (§6.3): dedupes
+   *  concurrent/retried `session.create`/`session.duplicate` by the optional
+   *  host-generated `operationId` and retains in-flight and completed durable
+   *  results for this backend generation. A backend restart (generation
+   *  death) naturally drops the ledger with the process. */
+  private readonly createOperationLedger = new CreateOperationLedger();
   private readonly runtimeDisposeScheduler: RuntimeDisposeScheduler;
+  private readonly runtimeIsolationMode: RuntimeIsolationMode;
+  private readonly workerEntryPath?: string;
+  private workerSupervisor?: WorkerSupervisor;
+  private sessionOwnershipAuthority?: SessionOwnershipAuthority;
+  private workerRuntimeRouter?: WorkerRuntimeRouter;
+  private durableDetailStore?: DurableDetailStore;
+  private authPath = '';
   private hostWatchdogTimer?: ReturnType<typeof setInterval>;
   private readonly hostPid?: number;
+  private eventLoopDelayMonitor?: ReturnType<typeof monitorEventLoopDelay>;
+  private eventLoopHistogram?: BoundedEventLoopHistogram;
+  private eventLoopDelayTimer?: ReturnType<typeof setInterval>;
+  private eventLoopNextSampleAt?: number;
+  /** Request identities whose successful diagnostics off transition must be
+   * completed by handleLine after its matching handler_finished record. Each
+   * entry also owns the one monitor callback for that transition. */
+  private readonly pendingLivePipelineTraceDisables = new Map<string, {
+    generation: number;
+    onApplied: () => void;
+  }>();
+  /** Monotonic diagnostics-toggle generation. Advanced once per received
+   * toggle request (on or off) at request receipt, so concurrent requests are
+   * ordered by receipt, not settlement. A newer request supersedes older
+   * deferred off requests without allowing their completion to turn the
+   * global trace back off. */
+  private livePipelineTraceToggleGeneration = 0;
 
   constructor(options: {
     sdkPath: string;
     cwd: string;
+    backendGeneration?: number;
     hostPid?: number;
     runtimeDisposeScheduler?: RuntimeDisposeScheduler;
+    runtimeIsolationMode?: RuntimeIsolationMode;
+    workerEntryPath?: string;
+    /** Test seam for causally blocking a cold catalog operation at the public
+     * JSONL/writer boundary. Production always constructs the default. */
+    sessionCatalog?: SessionCatalog;
   }) {
     this.sdkPath = options.sdkPath;
     this.startupCwd = options.cwd;
+    this.backendGeneration = options.backendGeneration ?? 1;
+    if (!Number.isSafeInteger(this.backendGeneration) || this.backendGeneration <= 0) {
+      throw new Error('backendGeneration must be a positive safe integer.');
+    }
     this.hostPid = options.hostPid;
     this.runtimeDisposeScheduler = options.runtimeDisposeScheduler ?? defaultRuntimeDisposeScheduler;
+    this.runtimeIsolationMode = options.runtimeIsolationMode ?? 'legacy';
+    this.workerEntryPath = options.workerEntryPath;
+    this.sessionCatalog = options.sessionCatalog ?? new SessionCatalog();
+    if (this.runtimeIsolationMode === 'isolated' && !this.workerEntryPath) {
+      throw new Error('Isolated session runtime mode requires a bundled worker entry path.');
+    }
   }
 
   private getSessionDir(): string | undefined {
@@ -330,14 +445,141 @@ export class BackendServer {
     return this.sessionDir;
   }
 
+  private initializeColdSessionStore(): ColdSessionStore {
+    this.coldSessionStore ??= new ColdSessionStore({
+      sdk: this.sdk,
+      coordinatorGeneration: this.backendGeneration,
+      startupCwd: this.startupCwd,
+      agentDir: this.agentDir,
+      sessionDir: this.getSessionDir(),
+      sessionCatalog: this.sessionCatalog,
+    });
+    return this.coldSessionStore;
+  }
+
+  private coldManagerKey(sessionPath: string): string {
+    return backendSessionPathKey(sessionPath);
+  }
+
+  private retainColdSessionManager(
+    handle: ColdSessionManagerHandle,
+    creationReason: SessionContextCreationReason,
+  ): void {
+    const key = this.coldManagerKey(handle.sessionPath);
+    if (this.coldSessionManagerHandles.has(key)) {
+      throw new BackendError('SESSION_OWNERSHIP_CONFLICT', `A cold manager is already retained for ${handle.sessionPath}.`);
+    }
+    this.coldSessionManagerHandles.set(key, { handle, creationReason });
+  }
+
+  private assertColdCoordinatorOwner(sessionPath: string): void {
+    if (this.getSessionContext(sessionPath) || this.getPendingSessionContext(sessionPath)) {
+      throw new BackendError(
+        'ISOLATED_RUNTIME_ROUTING_UNAVAILABLE',
+        `Session ${sessionPath} has a hot or promoting owner; Phase 4 isolated-runtime routing is unavailable.`,
+      );
+    }
+  }
+
+  private async runColdSessionMutation<T>(sessionPath: string, operation: () => Promise<T>): Promise<T> {
+    const key = this.coldManagerKey(sessionPath);
+    if (this.pendingColdSessionMutations.has(key)) {
+      throw new BackendError('SESSION_OWNERSHIP_CONFLICT', `A cold mutation is already active for ${sessionPath}.`);
+    }
+    const pending = Promise.resolve().then(operation);
+    this.pendingColdSessionMutations.set(key, pending);
+    try {
+      return await pending;
+    } finally {
+      if (this.pendingColdSessionMutations.get(key) === pending) {
+        this.pendingColdSessionMutations.delete(key);
+      }
+    }
+  }
+
+  private registerColdResult(result: object): void {
+    const stamp = this.initializeColdSessionStore().ownershipStamp(result)?.[0];
+    if (stamp) {
+      this.browseResponseOwners.set(result, {
+        sessionPath: stamp.sessionPath,
+        fingerprint: stamp.fingerprint,
+      });
+    }
+  }
+
   async start(): Promise<void> {
     // Install fatal handlers first so even an early spawn-time rejection is
     // surfaced. Idempotent (module-level guard).
     installBackendFatalHandlers();
-    await timed('start.loadSdk', async () => {
-      this.sdk = await loadSdk(this.sdkPath);
-      this.agentDir = this.sdk.getAgentDir();
-      this.getSessionDir();
+    if (this.runtimeIsolationMode === 'isolated') {
+      // Phase 2 creates the generation-scoped supervisor and verifies the stable
+      // worker artifact. Hot operations fail closed below until Phase 4 routing;
+      // they must never fall through to this process's legacy runtime path. The
+      // coordinator owns the patching barrier and workers only validate it.
+      const sdkPatchIdentity = await ensureSdkPatchBarrier(this.sdkPath);
+      this.workerSupervisor = new WorkerSupervisor({
+        workerEntryPath: this.workerEntryPath!,
+        coordinatorGeneration: this.backendGeneration,
+        sdkPatchIdentity,
+        onWorkerStateChange: (rootSessionPath, snapshot, identity) => {
+          void this.workerRuntimeRouter?.handleWorkerStateChange(rootSessionPath, snapshot, identity).catch((error) => {
+            backendError('backend-worker', 'runtime state reconciliation failed', {
+              rootSessionPath,
+              error: toErrorMessage(error),
+            });
+          });
+        },
+        onWorkerFrame: (rootSessionPath, frame) => {
+          void this.workerRuntimeRouter?.handleWorkerFrame(rootSessionPath, frame).catch((error) => {
+            backendError('backend-worker', 'runtime frame failed', {
+              rootSessionPath,
+              error: toErrorMessage(error),
+            });
+          });
+        },
+        onDiagnostic: (rootSessionPath, stream, tail) => {
+          backendError('backend-worker', `worker ${stream}`, { rootSessionPath, tail });
+        },
+      });
+      await this.workerSupervisor.initialize();
+    }
+    const sdkStartedAt = performance.now();
+    recordBackendLivePipelineTrace({
+      stage: 'backend.runtime',
+      kind: 'start',
+      phase: 'sdk_import',
+      processRole: 'coordinator',
+      pid: process.pid,
+    });
+    try {
+      await timed('start.loadSdk', async () => {
+        this.sdk = await loadSdk(
+          this.sdkPath,
+          coordinatorSdkLoadMode(this.runtimeIsolationMode === 'isolated'),
+        );
+        this.agentDir = this.sdk.getAgentDir();
+        this.getSessionDir();
+        this.initializeColdSessionStore();
+      });
+    } catch (error) {
+      recordBackendLivePipelineTrace({
+        stage: 'backend.runtime',
+        kind: 'failure',
+        phase: 'sdk_import',
+        durationMs: Math.max(0, performance.now() - sdkStartedAt),
+        reasonCode: 'unknown_unattributable',
+        processRole: 'coordinator',
+        pid: process.pid,
+      });
+      throw error;
+    }
+    recordBackendLivePipelineTrace({
+      stage: 'backend.runtime',
+      kind: 'success',
+      phase: 'sdk_import',
+      durationMs: Math.max(0, performance.now() - sdkStartedAt),
+      processRole: 'coordinator',
+      pid: process.pid,
     });
 
     // Install the host-side provider gate BEFORE any session runtime is
@@ -461,6 +703,7 @@ export class BackendServer {
       if (!emitted.has(noticeKey)) {
         emitted.add(noticeKey);
         this.emit('operational-error', {
+          incidentId: `provider:${active.id}:${noticeKey}`,
           code: providerIncidentCode(incident.kind),
           message: incident.userMessage,
           detail: incident.detail,
@@ -513,8 +756,78 @@ export class BackendServer {
       // Ensure the auth directory exists so the SDK can write to it.
       await ensureDir(path.dirname(authPath));
 
+      this.authPath = authPath;
       this.authStorage = this.sdk.AuthStorage.create(authPath);
     });
+
+    if (this.runtimeIsolationMode === 'isolated') {
+      const coldStore = this.initializeColdSessionStore();
+      this.sessionOwnershipAuthority = new SessionOwnershipAuthority({
+        coldLeaseAuthority: coldStore.leases,
+      });
+      this.durableDetailStore = new DurableDetailStore({
+        resolve: (sessionPath, address, durableRef) => this.resolveDurableDetail(sessionPath, address, durableRef),
+        emit: (message) => {
+          this.emit('detail.stream', message as unknown as WorkerJsonObject);
+          return true;
+        },
+      });
+      this.workerRuntimeRouter = new WorkerRuntimeRouter({
+        supervisor: this.workerSupervisor!,
+        coordinatorGeneration: this.backendGeneration,
+        coldStore,
+        ownership: this.sessionOwnershipAuthority,
+        emit: (event, payload) => this.emit(event, payload),
+        emitDetail: (message) => this.emit('detail.stream', message as unknown as WorkerJsonObject),
+        onSessionReplaced: (sourcePath, destinationPath) => {
+          if (this.viewedSessionPath && backendSessionPathKey(this.viewedSessionPath) === backendSessionPathKey(sourcePath)) {
+            this.recordViewedSessionTransition(destinationPath, sourcePath);
+            this.setViewedSessionPath(destinationPath);
+          }
+        },
+        writeModelSettings: (updates) => this.writeModelSettings(updates),
+        readModelSettings: () => this.readModelSettings(),
+        readRuntimePrefs: () => ({ ...this.runtimePrefs }),
+        buildPromotionSnapshot: async (sessionPath) => {
+          const retainedKey = this.coldManagerKey(sessionPath);
+          const retained = this.coldSessionManagerHandles.get(retainedKey);
+          const exactSessionPath = retained?.handle.sessionPath ?? sessionPath;
+          const openedPayload = await this.buildSessionOpenedPayload(exactSessionPath, undefined, 'tail');
+          return {
+            sdkPath: this.sdkPath,
+            agentDir: this.agentDir,
+            startupCwd: this.startupCwd,
+            sessionDir: this.getSessionDir() ?? path.join(this.agentDir, 'sessions'),
+            openedPayload,
+            modelSettings: await this.readModelSettings(),
+            creationReason: retained?.creationReason ?? 'resume',
+            exactSessionPath,
+            runtimePrefs: { ...this.runtimePrefs },
+            commitPromotion: () => {
+              if (retained && this.coldSessionManagerHandles.get(retainedKey) === retained) {
+                this.coldSessionManagerHandles.delete(retainedKey);
+                coldStore.retireHandle(retained.handle);
+              }
+            },
+            abortPromotion: () => {
+              if (retained && this.coldSessionManagerHandles.get(retainedKey) === retained) {
+                coldStore.refreshHandle(retained.handle);
+              }
+            },
+            authPath: this.authPath || path.join(this.agentDir, 'auth.json'),
+            authFingerprint: await fs.stat(this.authPath || path.join(this.agentDir, 'auth.json'))
+              .then((stat) => `${stat.size}:${stat.mtimeMs}`)
+              .catch(() => 'missing'),
+          };
+        },
+      });
+      this.authFingerprint = await fs.stat(this.authPath || path.join(this.agentDir, 'auth.json'))
+        .then((stat) => `${stat.size}:${stat.mtimeMs}`)
+        .catch(() => 'missing');
+      this.modelsJsonFingerprint = await fs.stat(path.join(this.agentDir, 'models.json'))
+        .then((stat) => `${stat.size}:${stat.mtimeMs}`)
+        .catch(() => 'missing');
+    }
 
     // Attach the stdin reader BEFORE emitting backend.ready so that any
     // request the client sends immediately after receiving ready is captured,
@@ -544,20 +857,312 @@ export class BackendServer {
 
     process.stdin.on('end', () => {
       detachReader();
-      void this.dispose().finally(() => process.exit(0));
+      void this.dispose().then(
+        () => process.exit(0),
+        (error) => { log(`backend disposal failed closed: ${toErrorMessage(error)}`); process.exitCode = 1; },
+      );
     });
 
     this.startHostWatchdog();
+    // The event-loop monitor is diagnostics-only: it must not run (native
+    // histogram + interval sampling) while the live-pipeline trace is
+    // disabled. The toggle handler restarts it when diagnostics are enabled.
+    if (isBackendLivePipelineTraceEnabled()) {
+      this.startEventLoopMonitor();
+    }
 
+    // Record readiness before publishing the public event. The trace therefore
+    // cannot claim readiness after a host has already observed it.
+    recordBackendLivePipelineTrace({
+      stage: 'process.lifecycle',
+      kind: 'success',
+      phase: 'backend_mapping',
+      readiness: 'ready',
+      processRole: 'coordinator',
+      pid: process.pid,
+    });
     this.emit('backend.ready', {
       sdkPath: this.sdkPath,
       agentDir: this.agentDir,
+      backendGeneration: this.backendGeneration,
       sdkVersion: this.sdk.VERSION,
       protocolVersion: PROTOCOL_VERSION,
       authPath,
     });
 
     this.startReviewReconciliation();
+  }
+
+  /** Opt-in packaged-artifact probe through the real cold store, promotion
+   * router, full worker SDK/runtime, command transport, and retirement. */
+  async runPhase2WorkerSmoke(_sessionPath: string): Promise<void> {
+    if (this.runtimeIsolationMode !== 'isolated' || !this.workerRuntimeRouter) {
+      throw new Error('Worker promotion smoke requires an initialized isolated coordinator.');
+    }
+    const store = this.initializeColdSessionStore();
+    const handle = store.create({ cwd: this.startupCwd });
+    const switchTarget = store.create({ cwd: this.startupCwd });
+    (switchTarget.manager as typeof switchTarget.manager & {
+      appendCustomEntry(customType: string, data?: unknown): string;
+    }).appendCustomEntry('phase4-switch-fork-source', { durable: true });
+    this.retainColdSessionManager(handle, 'new');
+    this.retainColdSessionManager(switchTarget, 'new');
+    const commandResultPath = process.env.PIE_PHASE4_EXTENSION_FIXTURE_RESULT;
+    if (!commandResultPath) throw new Error('Packaged extension replacement smoke requires PIE_PHASE4_EXTENSION_FIXTURE_RESULT.');
+    await fs.rm(commandResultPath, { force: true });
+    const first = await this.workerRuntimeRouter.promote(handle.sessionPath);
+    let currentPath = handle.sessionPath;
+    try {
+      await this.workerRuntimeRouter.routeExisting({
+        id: 'packaged-worker-promotion-smoke',
+        method: 'models.list',
+        params: { sessionPath: handle.sessionPath },
+      });
+      await this.handleRequest({
+        id: 'packaged-worker-prefs-smoke',
+        method: 'runtimePrefs.set',
+        params: { providerToggles: {}, extensionToggles: {}, autonomousMode: true },
+      });
+      const beforeSettings = await this.readModelSettings();
+      const nextThinkingLevel: ThinkingLevel = beforeSettings.defaultThinkingLevel === 'low' ? 'medium' : 'low';
+      const updatedSettings = await this.handleRequest({
+        id: 'packaged-worker-settings-smoke',
+        method: 'settings.set',
+        params: { sessionPath: handle.sessionPath, defaultThinkingLevel: nextThinkingLevel },
+      }) as ModelSettings;
+      if (updatedSettings.defaultThinkingLevel !== nextThinkingLevel
+        || (await this.readModelSettings()).defaultThinkingLevel !== nextThinkingLevel) {
+        throw new Error('Session-scoped worker settings mutation did not commit through the coordinator.');
+      }
+      const waitForCommandResult = async <T>(label: string): Promise<T> => {
+        const deadline = Date.now() + 30_000;
+        while (Date.now() < deadline) {
+          try {
+            return JSON.parse(await fs.readFile(commandResultPath, 'utf8')) as T;
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+            await new Promise<void>((resolve) => setTimeout(resolve, 10));
+          }
+        }
+        throw new Error(`Timed out waiting for packaged extension command result: ${label}`);
+      };
+      const dispatchNoAgentExtensionCommand = async (sessionPath: string): Promise<void> => {
+        await fs.rm(commandResultPath, { force: true });
+        const encodedResultPath = Buffer.from(commandResultPath).toString('base64url');
+        const result = await this.workerRuntimeRouter!.routeExisting({
+          id: 'packaged-worker-public-no-agent-command',
+          method: 'message.send',
+          params: { sessionPath, text: `/phase4-no-agent ${encodedResultPath}`, inputs: [] },
+        }) as { requestId?: string };
+        if (typeof result.requestId !== 'string') {
+          throw new Error('Packaged public no-agent extension command did not receive an early acknowledgement.');
+        }
+        const completed = await waitForCommandResult('no-agent');
+        if (!completed || typeof (completed as { sessionPath?: unknown }).sessionPath !== 'string') {
+          throw new Error('Packaged no-agent extension command returned an invalid result.');
+        }
+      };
+      await dispatchNoAgentExtensionCommand(currentPath);
+
+      const sourcePaths: string[] = [];
+      const dispatchExtensionReplacement = async (
+        action: 'new' | 'switch' | 'fork',
+        sourcePath: string,
+        switchPath?: string,
+      ): Promise<string> => {
+        await fs.rm(commandResultPath, { force: true });
+        const encodedArgs = Buffer.from(JSON.stringify({ action, resultPath: commandResultPath, switchPath }))
+          .toString('base64url');
+        const result = await this.workerRuntimeRouter!.routeExisting({
+          id: `packaged-worker-public-extension-command:${action}`,
+          method: 'message.send',
+          params: { sessionPath: sourcePath, text: `/phase4-replace ${encodedArgs}`, inputs: [] },
+        }) as { requestId?: string };
+        if (typeof result.requestId !== 'string') {
+          throw new Error(`Packaged public ${action} extension command did not receive an early acknowledgement.`);
+        }
+        const replacement = await waitForCommandResult(action) as {
+          action: string;
+          sourcePath: string;
+          finalPath: string;
+        };
+        if (replacement.action !== action || typeof replacement.sourcePath !== 'string'
+            || typeof replacement.finalPath !== 'string') {
+          throw new Error(`Packaged extension command returned an invalid ${action} replacement result.`);
+        }
+        sourcePaths.push(replacement.sourcePath);
+        return replacement.finalPath;
+      };
+      currentPath = await dispatchExtensionReplacement('new', currentPath);
+      currentPath = await dispatchExtensionReplacement('switch', currentPath, switchTarget.sessionPath);
+      currentPath = await dispatchExtensionReplacement('fork', currentPath);
+      await fs.writeFile(commandResultPath, JSON.stringify({ sourcePaths, finalPath: currentPath }));
+      const destinationRoute = this.workerRuntimeRouter.getRoute(currentPath);
+      if (destinationRoute.state !== 'hot' || destinationRoute.owner.workerId !== first.owner.workerId) {
+        throw new Error('Extension replacement destination was not rekeyed to the initiating coordinator owner.');
+      }
+      const destinationOwnership = await this.sessionOwnershipAuthority!.inspect(currentPath);
+      if (destinationOwnership?.state !== 'hot'
+          || destinationOwnership.owner.workerId !== first.owner.workerId
+          || !destinationOwnership.transferConsumed) {
+        throw new Error('Extension replacement destination did not reach consumed hot ownership.');
+      }
+      const durableDestination = await fs.readFile(currentPath, 'utf8');
+      if (!durableDestination.includes('phase4-extension-durable')) {
+        throw new Error('Extension replacement destination marker was not durable before command completion.');
+      }
+      for (const releasedPath of [...new Set(sourcePaths)]) {
+        if (releasedPath === currentPath) continue;
+        if (this.workerRuntimeRouter.getRoute(releasedPath).state !== 'cold') {
+          throw new Error(`Extension replacement source was not released as cold: ${releasedPath}`);
+        }
+        const reused = await this.workerRuntimeRouter.promote(releasedPath);
+        if (reused.owner.workerId === first.owner.workerId) {
+          throw new Error('Released extension replacement source was not reusable by an independent worker.');
+        }
+        await this.workerRuntimeRouter.routeExisting({
+          id: `packaged-worker-source-reuse:${releasedPath}`,
+          method: 'models.list',
+          params: { sessionPath: releasedPath },
+        });
+        await this.workerRuntimeRouter.retire(releasedPath, 'packaged extension replacement source reuse complete');
+      }
+      const truncated = await this.handleRequest({
+        id: 'packaged-worker-hot-truncate-smoke',
+        method: 'session.truncateAfter',
+        params: { sessionPath: currentPath, entryId: 'missing-smoke-entry' },
+      }) as { sessionPath: string };
+      currentPath = truncated.sessionPath;
+      const replacement = this.workerRuntimeRouter.getRoute(truncated.sessionPath);
+      if (replacement.state !== 'hot' || replacement.owner.workerId === first.owner.workerId) {
+        throw new Error('Hot truncate did not publish a fresh worker generation.');
+      }
+      await this.workerRuntimeRouter.routeExisting({
+        id: 'packaged-worker-post-truncate-smoke',
+        method: 'models.list',
+        params: { sessionPath: truncated.sessionPath },
+      });
+      const futureWorkerSettings = await this.workerRuntimeRouter.routeExisting({
+        id: 'packaged-worker-future-settings-smoke',
+        method: 'settings.set',
+        params: { sessionPath: truncated.sessionPath, defaultThinkingLevel: nextThinkingLevel },
+      }) as WorkerJsonObject;
+      if (futureWorkerSettings.defaultThinkingLevel !== nextThinkingLevel) {
+        throw new Error('Fresh worker did not receive authoritative coordinator settings.');
+      }
+    } finally {
+      if (this.workerRuntimeRouter.hasHotOwner(currentPath)) {
+        await this.workerRuntimeRouter.retire(currentPath, 'packaged promotion smoke complete');
+      }
+    }
+  }
+
+  private startEventLoopMonitor(): void {
+    if (this.eventLoopDelayTimer) return;
+    // Diagnostics gate: never start the native monitor or its sampling timer
+    // while the live-pipeline trace is disabled.
+    if (!isBackendLivePipelineTraceEnabled()) return;
+    const nativeMonitor = monitorEventLoopDelay({ resolution: 20 });
+    nativeMonitor.enable();
+    this.eventLoopDelayMonitor = nativeMonitor;
+    this.eventLoopHistogram = new BoundedEventLoopHistogram();
+    const intervalMs = 1_000;
+    this.eventLoopNextSampleAt = performance.now() + intervalMs;
+    this.eventLoopDelayTimer = setInterval(() => {
+      if (this.disposed) return;
+      if (!isBackendLivePipelineTraceEnabled()) {
+        // Toggle-off safety net: never keep sampling once diagnostics are
+        // disabled, even if the toggle callback wiring was missed.
+        this.stopEventLoopMonitor();
+        return;
+      }
+      const now = performance.now();
+      const expected = this.eventLoopNextSampleAt ?? now;
+      const driftMs = now - expected;
+      // The interval sample is a real coordinator scheduling observation. It
+      // is deliberately kept separate from the native monitor's aggregate
+      // mean/max, which supplies the finer-grained delay evidence.
+      this.eventLoopHistogram?.record(Math.max(0, driftMs));
+      this.eventLoopHistogram?.recordDrift(driftMs);
+      this.eventLoopNextSampleAt = now + intervalMs;
+      const mean = Number.isFinite(nativeMonitor.mean) ? nativeMonitor.mean / 1e6 : 0;
+      const max = Number.isFinite(nativeMonitor.max) ? nativeMonitor.max / 1e6 : 0;
+      recordBackendLivePipelineTrace({
+        stage: 'backend.event_loop',
+        kind: 'observation',
+        phase: 'backend_mapping',
+        eventLoopDelayMs: Math.max(0, mean),
+        eventLoopMaxDelayMs: Math.max(0, max),
+        eventLoopHistogram: this.eventLoopHistogram?.snapshot(),
+        processRole: 'coordinator',
+        pid: process.pid,
+      });
+      nativeMonitor.reset();
+      this.eventLoopHistogram?.reset();
+    }, intervalMs);
+    this.eventLoopDelayTimer.unref?.();
+  }
+
+  private stopEventLoopMonitor(): void {
+    if (this.eventLoopDelayTimer) clearInterval(this.eventLoopDelayTimer);
+    this.eventLoopDelayTimer = undefined;
+    this.eventLoopDelayMonitor?.disable();
+    this.eventLoopDelayMonitor = undefined;
+    this.eventLoopHistogram = undefined;
+    this.eventLoopNextSampleAt = undefined;
+  }
+
+  /** Reserve a monotonic diagnostics-toggle generation at request receipt.
+   * Every received toggle request (on or off) advances the generation, so
+   * concurrent requests are ordered by receipt, not settlement. Superseded
+   * pending off entries can no longer apply and are pruned here; their exact
+   * identities are never reused. */
+  private reserveLivePipelineTraceToggle(): number {
+    this.livePipelineTraceToggleGeneration += 1;
+    for (const [requestId, pending] of this.pendingLivePipelineTraceDisables) {
+      if (pending.generation < this.livePipelineTraceToggleGeneration) {
+        this.pendingLivePipelineTraceDisables.delete(requestId);
+      }
+    }
+    return this.livePipelineTraceToggleGeneration;
+  }
+
+  private deferLivePipelineTraceDisable(requestId: string, generation: number, onApplied?: () => void): boolean {
+    if (this.disposed) return false;
+    // Set semantics are intentional: a retry of the same request identity
+    // remains deferred until handleLine's final attempt completes. The
+    // callback is replaced by a retry's callback, but can still run only once.
+    this.pendingLivePipelineTraceDisables.set(requestId, {
+      generation,
+      onApplied: onApplied ?? (() => this.stopEventLoopMonitor()),
+    });
+    return true;
+  }
+
+  private completeLivePipelineTraceDisable(requestId: string): boolean {
+    const pending = this.pendingLivePipelineTraceDisables.get(requestId);
+    if (!pending) return false;
+    this.pendingLivePipelineTraceDisables.delete(requestId);
+    // A newer on request wins over an older deferred off request. The exact
+    // request entry is still removed here, but it must not change global state.
+    if (pending.generation !== this.livePipelineTraceToggleGeneration) return false;
+    // These synchronous state changes form one transition at the request's
+    // completion boundary: no monitor sample can be scheduled after tracing is
+    // disabled, and no later request can consume this request's pending state.
+    setBackendLivePipelineTraceEnabled(false);
+    pending.onApplied();
+    return true;
+  }
+
+  private markLivePipelineTraceEnabled(): void {
+    // The generation was already reserved at request receipt
+    // (`reserveLivePipelineTraceToggle`); applying the enable here only
+    // starts the trace-gated monitor.
+    this.startEventLoopMonitor();
+  }
+
+  private cancelLivePipelineTraceDisable(requestId: string): void {
+    this.pendingLivePipelineTraceDisables.delete(requestId);
   }
 
   /**
@@ -579,7 +1184,10 @@ export class BackendServer {
         if (code !== 'ESRCH') return;
         this.stopHostWatchdog();
         backendWarn('backend', 'extension host disappeared; stopping backend', { hostPid });
-        void this.dispose().finally(() => process.exit(0));
+        void this.dispose().then(
+          () => process.exit(0),
+          (error) => { log(`backend disposal failed closed: ${toErrorMessage(error)}`); process.exitCode = 1; },
+        );
       }
     };
 
@@ -592,8 +1200,21 @@ export class BackendServer {
     this.hostWatchdogTimer = undefined;
   }
 
+  private requireFullSdk(): SdkModule {
+    if (!isFullSdkModule(this.sdk)) {
+      throw new BackendError(
+        'ISOLATED_RUNTIME_ROUTING_UNAVAILABLE',
+        'The isolated coordinator did not load the SDK execution runtime.',
+      );
+    }
+    return this.sdk;
+  }
+
   private createRuntimeFactory() {
-    return createRuntimeFactory(this.sdk, this.authStorage, this.startupCwd, this.serviceLoadingGate);
+    // Isolated public routing fails before this legacy-only helper is reached;
+    // the cast preserves narrow test doubles that intercept runtime creation
+    // without invoking the supplied factory.
+    return createRuntimeFactory(this.sdk as SdkModule, this.authStorage, this.startupCwd, this.serviceLoadingGate);
   }
 
   private disposeRuntimeBounded(runtime: SessionContext['runtime'], sessionPath?: string): Promise<void> {
@@ -605,7 +1226,33 @@ export class BackendServer {
   }
 
   private getSessionContext(sessionPath?: string): SessionContext | undefined {
-    return sessionPath ? this.sessionContexts.get(sessionPath) : undefined;
+    if (!sessionPath) return undefined;
+    const direct = this.sessionContexts.get(sessionPath);
+    if (direct) return direct;
+    const key = this.coldManagerKey(sessionPath);
+    for (const [candidatePath, context] of this.sessionContexts) {
+      if (this.coldManagerKey(candidatePath) === key) return context;
+    }
+    return undefined;
+  }
+
+  private getPendingSessionContext(sessionPath: string): Promise<SessionContext> | undefined {
+    const direct = this.pendingSessionContexts.get(sessionPath);
+    if (direct) return direct;
+    const key = this.coldManagerKey(sessionPath);
+    for (const [candidatePath, pending] of this.pendingSessionContexts) {
+      if (this.coldManagerKey(candidatePath) === key) return pending;
+    }
+    return undefined;
+  }
+
+  private isSessionForgotten(sessionPath: string): boolean {
+    if (this.forgottenSessionPaths.has(sessionPath)) return true;
+    const key = this.coldManagerKey(sessionPath);
+    for (const candidatePath of this.forgottenSessionPaths) {
+      if (this.coldManagerKey(candidatePath) === key) return true;
+    }
+    return false;
   }
 
   private prepareViewedSessionPath(sessionPath: string): PreparedViewedSessionTransition {
@@ -615,7 +1262,7 @@ export class BackendServer {
       hadPrevious: this.browsePreviousSessionFiles.has(sessionPath),
       previous: this.browsePreviousSessionFiles.get(sessionPath),
     };
-    if (this.forgottenSessionPaths.has(sessionPath) || this.viewedSessionPath === sessionPath) {
+    if (this.isSessionForgotten(sessionPath) || this.viewedSessionPath === sessionPath) {
       return prepared;
     }
     prepared.changed = true;
@@ -638,7 +1285,7 @@ export class BackendServer {
     prepared?: PreparedViewedSessionTransition,
   ): boolean {
     if (!prepared?.changed || prepared.revision !== this.viewedSessionRevision
-      || this.forgottenSessionPaths.has(sessionPath)) return false;
+      || this.isSessionForgotten(sessionPath)) return false;
     this.viewedSessionPath = sessionPath;
     this.viewedSessionRevision += 1;
     return true;
@@ -648,7 +1295,7 @@ export class BackendServer {
     sessionPath: string,
     previousSessionPath: string | null,
   ): boolean {
-    if (this.forgottenSessionPaths.has(sessionPath) || previousSessionPath === sessionPath) return false;
+    if (this.isSessionForgotten(sessionPath) || previousSessionPath === sessionPath) return false;
     this.browsePreviousSessionFiles.set(sessionPath, previousSessionPath ?? undefined);
     this.viewedSessionPath = sessionPath;
     this.viewedSessionRevision += 1;
@@ -656,14 +1303,14 @@ export class BackendServer {
   }
 
   private setViewedSessionPath(sessionPath: string | undefined): void {
-    if ((sessionPath && this.forgottenSessionPaths.has(sessionPath))
+    if ((sessionPath && this.isSessionForgotten(sessionPath))
       || this.viewedSessionPath === sessionPath) return;
     this.viewedSessionPath = sessionPath;
     this.viewedSessionRevision += 1;
   }
 
   private setViewedSessionPathIfCurrent(sessionPath: string, revision: unknown): boolean {
-    if (revision !== this.viewedSessionRevision || this.forgottenSessionPaths.has(sessionPath)) return false;
+    if (revision !== this.viewedSessionRevision || this.isSessionForgotten(sessionPath)) return false;
     this.setViewedSessionPath(sessionPath);
     return true;
   }
@@ -682,7 +1329,11 @@ export class BackendServer {
     });
 
     const existing = this.sessionContexts.get(context.sessionPath);
+    context.sessionOwnershipEpoch = (existing?.sessionOwnershipEpoch ?? 0) + 1;
     if (existing) {
+      // A replacement installs a new context object. Fence the predecessor
+      // before any late prompt callback can publish through its old closure.
+      existing.retired = true;
       context.busySeq = existing.busySeq;
       if (existing.terminalLiveTurn && existing.terminalLiveTurn.expiresAt > Date.now()) {
         context.terminalLiveTurn = existing.terminalLiveTurn;
@@ -707,7 +1358,7 @@ export class BackendServer {
       void this.disposeRuntimeBounded(existing.runtime, existing.sessionPath);
     }
 
-    if (this.forgottenSessionPaths.has(context.sessionPath)) {
+    if (this.isSessionForgotten(context.sessionPath)) {
       context.retired = true;
       context.sessionManagerFence?.invalidate();
       try { context.uiBridge?.dispose(); } catch { /* best effort */ }
@@ -751,7 +1402,7 @@ export class BackendServer {
         : undefined;
       let runtime: SessionContext['runtime'] | undefined;
       try {
-      runtime = await this.sdk.createAgentSessionRuntime(this.createRuntimeFactory(), {
+      runtime = await this.requireFullSdk().createAgentSessionRuntime(this.createRuntimeFactory(), {
         cwd: fencedSessionManager.getCwd() || this.startupCwd,
         agentDir: this.agentDir,
         sessionManager: fencedSessionManager,
@@ -784,6 +1435,7 @@ export class BackendServer {
         runtime,
         session,
         sessionPath,
+        sessionOwnershipEpoch: 0,
         unsubscribe: () => undefined,
         busySeq: 0,
         lastContextUsage: undefined,
@@ -803,8 +1455,40 @@ export class BackendServer {
         sessionPath,
         (event, payload) => this.emit(event, payload),
       );
-      context.unsubscribe = session.subscribe((event: SdkSessionEvent) => {
-        this.handleSessionEvent(context, event);
+      const subscriptionStartedAt = performance.now();
+      recordBackendLivePipelineTrace({
+        stage: 'backend.runtime',
+        kind: 'start',
+        phase: 'subscriptions',
+        identifiers: { session: sessionPath },
+        processRole: 'coordinator',
+        pid: process.pid,
+      });
+      try {
+        context.unsubscribe = session.subscribe((event: SdkSessionEvent) => {
+          this.handleSessionEvent(context, event);
+        });
+      } catch (error) {
+        recordBackendLivePipelineTrace({
+          stage: 'backend.runtime',
+          kind: 'failure',
+          phase: 'subscriptions',
+          durationMs: Math.max(0, performance.now() - subscriptionStartedAt),
+          identifiers: { session: sessionPath },
+          reasonCode: 'unknown_unattributable',
+          processRole: 'coordinator',
+          pid: process.pid,
+        });
+        throw error;
+      }
+      recordBackendLivePipelineTrace({
+        stage: 'backend.runtime',
+        kind: 'success',
+        phase: 'subscriptions',
+        durationMs: Math.max(0, performance.now() - subscriptionStartedAt),
+        identifiers: { session: sessionPath },
+        processRole: 'coordinator',
+        pid: process.pid,
       });
 
       // Load persisted picker state before installing guards: both prompt
@@ -815,20 +1499,52 @@ export class BackendServer {
       // The SDK rebuilds its base prompt whenever active tools or extension
       // resources change. Guard that synchronous rebuild so it cannot silently
       // restore entries the picker disabled.
-      const promptState = this.getSessionPromptState(context);
-      if (typeof promptState._rebuildSystemPrompt === 'function') {
-        const { buildSystemPrompt } = await this.getSystemPromptModule();
-        installSystemPromptToggleRebuildGuard(
-          promptState,
+      const promptGuardStartedAt = performance.now();
+      recordBackendLivePipelineTrace({
+        stage: 'backend.runtime',
+        kind: 'start',
+        phase: 'prompt_guards',
+        identifiers: { session: sessionPath },
+        processRole: 'coordinator',
+        pid: process.pid,
+      });
+      try {
+        const promptState = this.getSessionPromptState(context);
+        if (typeof promptState._rebuildSystemPrompt === 'function') {
+          const { buildSystemPrompt } = await this.getSystemPromptModule();
+          installSystemPromptToggleRebuildGuard(
+            promptState,
+            () => context.systemPromptDisabledEntries ?? [],
+            buildSystemPrompt,
+          );
+        }
+        installSystemPromptToolToggleGuard(
+          session,
           () => context.systemPromptDisabledEntries ?? [],
-          buildSystemPrompt,
         );
+        installAutonomousModeToolGuard(session, () => this.autonomousMode);
+      } catch (error) {
+        recordBackendLivePipelineTrace({
+          stage: 'backend.runtime',
+          kind: 'failure',
+          phase: 'prompt_guards',
+          durationMs: Math.max(0, performance.now() - promptGuardStartedAt),
+          identifiers: { session: sessionPath },
+          reasonCode: 'unknown_unattributable',
+          processRole: 'coordinator',
+          pid: process.pid,
+        });
+        throw error;
       }
-      installSystemPromptToolToggleGuard(
-        session,
-        () => context.systemPromptDisabledEntries ?? [],
-      );
-      installAutonomousModeToolGuard(session, () => this.autonomousMode);
+      recordBackendLivePipelineTrace({
+        stage: 'backend.runtime',
+        kind: 'success',
+        phase: 'prompt_guards',
+        durationMs: Math.max(0, performance.now() - promptGuardStartedAt),
+        identifiers: { session: sessionPath },
+        processRole: 'coordinator',
+        pid: process.pid,
+      });
 
       // Disabling Tools controls both prompt prose and the provider's separate
       // tool-schema field. Capture the initial active set so a later re-enable
@@ -858,22 +1574,26 @@ export class BackendServer {
   }
 
   private async ensureSessionContext(sessionPath: string): Promise<SessionContext> {
-    if (this.forgottenSessionPaths.has(sessionPath)) {
+    if (this.isSessionForgotten(sessionPath)) {
       throw new BackendError('SESSION_NOT_FOUND', `The session has been forgotten: ${sessionPath}`);
     }
-    // A registered promotion/replacement owns this path atomically even when
-    // its new context has already been installed but its hydration publication
-    // has not completed yet. Loop because a successor can register while any
-    // predecessor is being awaited.
+    // A registered cold mutation or promotion/replacement owns this path
+    // atomically even when its publication has not completed yet. Loop because
+    // a successor can register while any predecessor is being awaited.
     while (true) {
-      const pending = this.pendingSessionContexts.get(sessionPath);
+      const coldMutation = this.pendingColdSessionMutations.get(this.coldManagerKey(sessionPath));
+      if (coldMutation) {
+        await coldMutation;
+        continue;
+      }
+      const pending = this.getPendingSessionContext(sessionPath);
       if (!pending) break;
       await pending;
-      if (this.disposed || this.forgottenSessionPaths.has(sessionPath)) {
+      if (this.disposed || this.isSessionForgotten(sessionPath)) {
         throw new BackendError('SESSION_NOT_FOUND', `The session is no longer available: ${sessionPath}`);
       }
     }
-    const existing = this.sessionContexts.get(sessionPath);
+    const existing = this.getSessionContext(sessionPath);
     if (existing) {
       if (existing.recoveryPromise) {
         try {
@@ -895,21 +1615,39 @@ export class BackendServer {
     }
 
     const previousSessionFile = this.browsePreviousSessionFiles.get(sessionPath);
-    const creation = this.createSessionContext(
-      this.sdk.SessionManager.open(sessionPath),
-      'resume',
-      previousSessionFile,
-      true,
-    ).then(async (context) => {
+    const store = this.initializeColdSessionStore();
+    const handleKey = this.coldManagerKey(sessionPath);
+    const retained = this.coldSessionManagerHandles.get(handleKey);
+    let contextCreation: Promise<SessionContext>;
+    if (retained) {
+      this.coldSessionManagerHandles.delete(handleKey);
+      contextCreation = store.handoff(retained.handle, (manager) => this.createSessionContext(
+        manager,
+        retained.creationReason,
+        previousSessionFile,
+        true,
+      ));
+    } else {
+      // Promotion steals cold ownership synchronously before SessionManager.open
+      // or any runtime await. Every in-flight cold result is stale from here.
+      store.leases.invalidate(sessionPath);
+      contextCreation = this.createSessionContext(
+        this.sdk.SessionManager.open(sessionPath),
+        'resume',
+        previousSessionFile,
+        true,
+      );
+    }
+    const creation = contextCreation.then(async (context) => {
       try {
         // Publish runtime metadata before the first mutation can start streaming.
         // This one-time refresh belongs to the single-flight promotion promise.
-        if (this.disposed || this.forgottenSessionPaths.has(sessionPath)) {
+        if (this.disposed || this.isSessionForgotten(sessionPath)) {
           throw new BackendError('SESSION_NOT_FOUND', `The session is no longer available: ${sessionPath}`);
         }
         const payload = await this.buildHotSessionOpenedPayload(sessionPath);
-        if (this.disposed || this.forgottenSessionPaths.has(sessionPath)
-          || this.sessionContexts.get(sessionPath) !== context) {
+        if (this.disposed || this.isSessionForgotten(sessionPath)
+          || this.getSessionContext(sessionPath) !== context) {
           throw new BackendError('SESSION_NOT_FOUND', `The promoted session is no longer authoritative: ${sessionPath}`);
         }
         // A successor transition may have queued behind this promotion while
@@ -947,15 +1685,17 @@ export class BackendServer {
     sessionPath: string,
     transition: () => Promise<SessionContext>,
   ): Promise<SessionContext> {
-    if (this.forgottenSessionPaths.has(sessionPath)) {
+    if (this.isSessionForgotten(sessionPath)) {
       throw new BackendError('SESSION_NOT_FOUND', `The session has been forgotten: ${sessionPath}`);
     }
+    this.initializeColdSessionStore().leases.invalidate(sessionPath);
+    this.coldSessionManagerHandles.delete(this.coldManagerKey(sessionPath));
     const previous = this.pendingSessionContexts.get(sessionPath);
     let predecessor: SessionContext | undefined;
     const owned = (async () => {
       try {
         if (previous) await previous;
-        if (this.forgottenSessionPaths.has(sessionPath) || this.disposed) {
+        if (this.isSessionForgotten(sessionPath) || this.disposed) {
           throw new BackendError('SESSION_NOT_FOUND', `The session is no longer available: ${sessionPath}`);
         }
         predecessor = this.sessionContexts.get(sessionPath);
@@ -995,10 +1735,15 @@ export class BackendServer {
    * a successor before it can be used. */
   private async resolveBrowseContext(sessionPath: string): Promise<SessionContext | undefined> {
     while (true) {
-      if (this.disposed || this.forgottenSessionPaths.has(sessionPath)) {
+      if (this.disposed || this.isSessionForgotten(sessionPath)) {
         throw new BackendError('SESSION_NOT_FOUND', `The session is no longer available: ${sessionPath}`);
       }
-      const pending = this.pendingSessionContexts.get(sessionPath);
+      const coldMutation = this.pendingColdSessionMutations.get(this.coldManagerKey(sessionPath));
+      if (coldMutation) {
+        await coldMutation;
+        continue;
+      }
+      const pending = this.getPendingSessionContext(sessionPath);
       if (pending) {
         try {
           await pending;
@@ -1011,7 +1756,7 @@ export class BackendServer {
         }
         continue;
       }
-      const context = this.sessionContexts.get(sessionPath);
+      const context = this.getSessionContext(sessionPath);
       if (!context) return undefined;
       if (context.recoveryPromise) {
         await context.recoveryPromise;
@@ -1024,48 +1769,9 @@ export class BackendServer {
     }
   }
 
-  private async readColdBrowseFileFingerprint(sessionPath: string): Promise<string> {
-    const stat = await fs.stat(sessionPath, { bigint: true });
-    return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
-  }
-
   private readColdBrowseFileFingerprintSync(sessionPath: string): string {
     const stat = fsSync.statSync(sessionPath, { bigint: true });
     return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
-  }
-
-  /** Open a stable durable snapshot. A file rewrite during any read causes a
-   * fresh SessionManager.open; a promotion/replacement at any await boundary is
-   * joined and returned as the authoritative hot owner instead. */
-  private async openFreshColdBrowseSnapshot(
-    sessionPath: string,
-    availableModels: readonly import('../shared/protocol').ModelInfo[] = [],
-  ): Promise<{ context: SessionContext } | { browse: SessionBrowseSnapshot; fingerprint: string }> {
-    const maxAttempts = 3;
-    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-      const existing = await this.resolveBrowseContext(sessionPath);
-      if (existing) return { context: existing };
-      const before = await this.readColdBrowseFileFingerprint(sessionPath);
-      const afterBeforeStat = await this.resolveBrowseContext(sessionPath);
-      if (afterBeforeStat) return { context: afterBeforeStat };
-
-      const browse = await openSessionBrowseSnapshot({
-        manager: this.sdk.SessionManager.open(sessionPath),
-        sessionPath,
-        startupCwd: this.startupCwd,
-        availableModels,
-      });
-      const afterOpen = await this.resolveBrowseContext(sessionPath);
-      if (afterOpen) return { context: afterOpen };
-      const after = await this.readColdBrowseFileFingerprint(sessionPath);
-      const afterFinalStat = await this.resolveBrowseContext(sessionPath);
-      if (afterFinalStat) return { context: afterFinalStat };
-      if (before === after) return { browse, fingerprint: after };
-    }
-    throw new BackendError(
-      'SESSION_CHANGED_DURING_READ',
-      `The session changed repeatedly while it was being read: ${sessionPath}`,
-    );
   }
 
   private async loadTranscriptPage(
@@ -1075,40 +1781,42 @@ export class BackendServer {
     loadedEnd?: number,
   ): Promise<TranscriptPagePayload> {
     for (let attempt = 0; attempt < 3; attempt += 1) {
-      const source = await this.openFreshColdBrowseSnapshot(sessionPath);
-      if (this.disposed || this.forgottenSessionPaths.has(sessionPath)) {
-        throw new BackendError('SESSION_NOT_FOUND', `The session is no longer available: ${sessionPath}`);
+      const context = await this.resolveBrowseContext(sessionPath);
+      if (!context) {
+        try {
+          const result = await this.initializeColdSessionStore().loadPage(
+            sessionPath,
+            direction,
+            loadedStart,
+            loadedEnd,
+          );
+          if (await this.resolveBrowseContext(sessionPath)) continue;
+          this.registerColdResult(result);
+          return result;
+        } catch (error) {
+          if (error instanceof StaleColdSessionLeaseError) continue;
+          throw error;
+        }
       }
-      const pending = this.pendingSessionContexts.get(sessionPath);
-      const current = this.sessionContexts.get(sessionPath);
-      if (pending || ('context' in source ? current !== source.context : current !== undefined)) continue;
-      if ('browse' in source
-        && this.readColdBrowseFileFingerprintSync(sessionPath) !== source.fingerprint) continue;
-
-      const context = 'context' in source ? source.context : undefined;
-      const cache = 'context' in source
-        ? ensureDisplayTranscriptCache(source.context)
-        : source.browse.cache;
-      const page = buildPagedTranscriptWindow(cache, {
+      if (this.runtimeIsolationMode === 'isolated') this.assertColdCoordinatorOwner(sessionPath);
+      if (this.disposed || this.isSessionForgotten(sessionPath)
+        || this.getPendingSessionContext(sessionPath)
+        || this.getSessionContext(sessionPath) !== context) continue;
+      const page = buildPagedTranscriptWindow(ensureDisplayTranscriptCache(context), {
         direction,
         loadedStart,
         loadedEnd,
-        pinnedMessageId: context ? this.getPinnedStreamingMessageId(context) : undefined,
+        pinnedMessageId: this.getPinnedStreamingMessageId(context),
       });
-      const busy = context
-        ? context.session.isStreaming || !!context.activeRequest || context.session.isCompacting === true
-        : false;
-      const transcript = busy ? page.transcript : normalizeDanglingTranscript(page.transcript);
+      const busy = context.session.isStreaming || !!context.activeRequest || context.session.isCompacting === true;
       const result: TranscriptPagePayload = {
         sessionPath,
-        transcript: transcript.map(deduplicateToolCallResultsForTransport),
+        transcript: (busy ? page.transcript : normalizeDanglingTranscript(page.transcript))
+          .map(deduplicateToolCallResultsForTransport),
         transcriptWindow: page.transcriptWindow,
         busy,
       };
-      this.browseResponseOwners.set(result, {
-        sessionPath,
-        ...('context' in source ? { owner: source.context } : { fingerprint: source.fingerprint }),
-      });
+      this.browseResponseOwners.set(result, { sessionPath, owner: context });
       return result;
     }
     throw new BackendError('SESSION_CHANGED_DURING_READ', `The session changed repeatedly while it was being paged: ${sessionPath}`);
@@ -1119,20 +1827,23 @@ export class BackendServer {
       return { sessionPath, key: ref.key, status: 'unavailable', message: 'Live detail is owned by the extension host.' };
     }
     for (let attempt = 0; attempt < 3; attempt += 1) {
-      const source = await this.openFreshColdBrowseSnapshot(sessionPath);
-      if (this.disposed || this.forgottenSessionPaths.has(sessionPath)) {
-        throw new BackendError('SESSION_NOT_FOUND', `The session is no longer available: ${sessionPath}`);
+      const context = await this.resolveBrowseContext(sessionPath);
+      if (!context) {
+        try {
+          const result = await this.initializeColdSessionStore().loadDetail(sessionPath, ref);
+          if (await this.resolveBrowseContext(sessionPath)) continue;
+          this.registerColdResult(result);
+          return result;
+        } catch (error) {
+          if (error instanceof StaleColdSessionLeaseError) continue;
+          throw error;
+        }
       }
-      const pending = this.pendingSessionContexts.get(sessionPath);
-      const current = this.sessionContexts.get(sessionPath);
-      if (pending || ('context' in source ? current !== source.context : current !== undefined)) continue;
-      if ('browse' in source
-        && this.readColdBrowseFileFingerprintSync(sessionPath) !== source.fingerprint) continue;
-
-      const transcript = 'context' in source
-        ? ensureDisplayTranscriptCache(source.context).transcript
-        : source.browse.cache.transcript;
-      const found = findDurableDetail(transcript, ref);
+      if (this.runtimeIsolationMode === 'isolated') this.assertColdCoordinatorOwner(sessionPath);
+      if (this.disposed || this.isSessionForgotten(sessionPath)
+        || this.getPendingSessionContext(sessionPath)
+        || this.getSessionContext(sessionPath) !== context) continue;
+      const found = findDurableDetail(ensureDisplayTranscriptCache(context).transcript, ref);
       let result: DetailResult;
       if (found.status === 'unavailable') {
         result = { sessionPath, key: ref.key, status: 'unavailable', message: 'The durable detail is no longer available.' };
@@ -1143,13 +1854,103 @@ export class BackendServer {
       } else {
         result = { sessionPath, key: ref.key, status: 'loaded', value: found.value, sizeBytes: found.sizeBytes };
       }
-      this.browseResponseOwners.set(result, {
-        sessionPath,
-        ...('context' in source ? { owner: source.context } : { fingerprint: source.fingerprint }),
-      });
+      this.browseResponseOwners.set(result, { sessionPath, owner: context });
       return result;
     }
     throw new BackendError('SESSION_CHANGED_DURING_READ', `The session changed repeatedly while detail was being read: ${sessionPath}`);
+  }
+
+  // ─── Phase 5 detail routing: live worker vs coordinator durable authority ──
+
+  /** Route `detail.subscribe`. A hot session's live source wins (the worker's
+   *  canonical store is authoritative while the subagent runs); a terminal or
+   *  cold source is answered by the durable paged authority directly from the
+   *  durable JSONL. A live NOT_FOUND/NOT_LIVE_ADDRESSABLE means the worker no
+   *  longer retains the source (terminal or evicted) and the durable JSONL is
+   *  authoritative, so it falls back to durable. */
+  private async routeDetailSubscribe(requestId: string, params: DetailSubscribeParams): Promise<void> {
+    const router = this.workerRuntimeRouter;
+    if (!router) {
+      throw new BackendError('UNKNOWN_METHOD', 'Detail subscription routing is unavailable.');
+    }
+    const fence = this.detailFence();
+    const sessionPath = params.address.sessionPath;
+    if (router.hasHotOwner(sessionPath)) {
+      try {
+        await router.subscribeDetail({
+          kind: 'detail.subscribe',
+          requestId,
+          subscriptionId: params.subscriptionId,
+          address: params.address,
+          ...(params.cursor !== undefined ? { cursor: params.cursor } : {}),
+          maxPageBytes: params.maxPageBytes,
+        });
+        return;
+      } catch (error) {
+        if (!isLiveDetailGoneError(error)) throw error;
+        // The live source is gone (terminal handoff or eviction); the durable
+        // JSONL now owns the exact detail.
+      }
+    }
+    const durable = this.durableDetailStore;
+    if (!durable) {
+      throw new BackendError('UNKNOWN_METHOD', 'Durable detail subscription routing is unavailable.');
+    }
+    await durable.subscribe(requestId, params.subscriptionId, params.address, params.maxPageBytes, fence);
+  }
+
+  private async routeDetailUnsubscribe(requestId: string, params: DetailUnsubscribeParams): Promise<void> {
+    const router = this.workerRuntimeRouter;
+    const durable = this.durableDetailStore;
+    if (!router && !durable) {
+      throw new BackendError('UNKNOWN_METHOD', 'Detail subscription routing is unavailable.');
+    }
+    // Both registries no-op for subscription ids they do not own.
+    durable?.unsubscribe(requestId, params.subscriptionId);
+    if (router) {
+      await router.unsubscribeDetail({
+        kind: 'detail.unsubscribe',
+        requestId,
+        subscriptionId: params.subscriptionId,
+        reason: params.reason,
+      });
+    }
+  }
+
+  private async routeDetailFetch(requestId: string, params: DetailFetchParams): Promise<void> {
+    const router = this.workerRuntimeRouter;
+    const durable = this.durableDetailStore;
+    if (durable?.owns(params.subscriptionId)) {
+      await durable.fetch(requestId, params.subscriptionId, params.address, params.ref, params.maxPageBytes, this.detailFence());
+      return;
+    }
+    if (!router) {
+      throw new BackendError('UNKNOWN_METHOD', 'Detail subscription routing is unavailable.');
+    }
+    router.fetchDetail({
+      kind: 'detail.fetch',
+      requestId,
+      subscriptionId: params.subscriptionId,
+      address: params.address,
+      ref: params.ref,
+      maxPageBytes: params.maxPageBytes,
+    });
+  }
+
+  /** Coordinator-owned durable detail authority: resolve the address against
+   *  the durable JSONL under the cold ownership lease (stable cold reads are
+   *  permitted while a worker owns the path; the terminal tool result is
+   *  written before the terminal handoff). */
+  private async resolveDurableDetail(
+    sessionPath: string,
+    address: LiveSubagentDetailAddress,
+    durableRef?: LazyDetailRef,
+  ): Promise<ResolvedDurableDetail> {
+    return await this.initializeColdSessionStore().resolveDurableDetail(sessionPath, address, durableRef);
+  }
+
+  private detailFence(): BackendDetailFence {
+    return { backendGeneration: this.backendGeneration, coordinatorGeneration: this.backendGeneration };
   }
 
   private resolveCurrentContextWindow(context: SessionContext): number | undefined {
@@ -1250,11 +2051,42 @@ export class BackendServer {
   }
 
   private async getSystemPromptModule(): Promise<SdkSystemPromptModule> {
-    this.systemPromptModulePromise ??= loadSdkInternalModule<SdkSystemPromptModule>(
+    if (this.systemPromptModulePromise) return await this.systemPromptModulePromise;
+    const startedAt = performance.now();
+    recordBackendLivePipelineTrace({
+      stage: 'backend.runtime',
+      kind: 'start',
+      phase: 'sdk_import',
+      processRole: 'coordinator',
+      pid: process.pid,
+    });
+    this.systemPromptModulePromise = loadSdkInternalModule<SdkSystemPromptModule>(
       this.sdkPath,
       path.join('core', 'system-prompt.js'),
     );
-    return await this.systemPromptModulePromise;
+    try {
+      const module = await this.systemPromptModulePromise;
+      recordBackendLivePipelineTrace({
+        stage: 'backend.runtime',
+        kind: 'success',
+        phase: 'sdk_import',
+        durationMs: Math.max(0, performance.now() - startedAt),
+        processRole: 'coordinator',
+        pid: process.pid,
+      });
+      return module;
+    } catch (error) {
+      recordBackendLivePipelineTrace({
+        stage: 'backend.runtime',
+        kind: 'failure',
+        phase: 'sdk_import',
+        durationMs: Math.max(0, performance.now() - startedAt),
+        reasonCode: 'unknown_unattributable',
+        processRole: 'coordinator',
+        pid: process.pid,
+      });
+      throw error;
+    }
   }
 
   private getSessionPromptState(context: SessionContext): SessionPromptState {
@@ -1306,7 +2138,7 @@ export class BackendServer {
     return buildSessionSystemPrompts({
       harnessPrompt,
       promptOptions,
-      formatSkillsForPrompt: this.sdk.formatSkillsForPrompt,
+      formatSkillsForPrompt: (this.sdk as Partial<SdkModule>).formatSkillsForPrompt,
       tools,
       activeProvider: resolveActiveModel(context),
       disabledEntries: context.systemPromptDisabledEntries,
@@ -1430,6 +2262,7 @@ export class BackendServer {
   private setAutonomousMode(enabled: boolean): void {
     if (this.autonomousMode === enabled) return;
     this.autonomousMode = enabled;
+    if (this.runtimeIsolationMode === 'isolated') return;
     for (const context of this.sessionContexts.values()) {
       this.applyAutonomousModeToContext(context, enabled);
     }
@@ -1500,7 +2333,7 @@ export class BackendServer {
     return await this.readModelSettings();
   }
 
-  private async emitSessionOpened(sessionPath: string, selectionToken?: string): Promise<void> {
+  private async emitSessionOpened(sessionPath: string, selectionToken?: string, operationId?: string): Promise<void> {
     if (this.disposed || !this.sessionContexts.has(sessionPath)) {
       return;
     }
@@ -1509,7 +2342,7 @@ export class BackendServer {
     // and swallow instead of becoming an unhandled rejection that leaves the
     // host waiting on a `session.opened` that never arrives.
     try {
-      const payload = await this.buildSessionOpenedPayload(sessionPath, selectionToken);
+      const payload = await this.buildSessionOpenedPayload(sessionPath, selectionToken, undefined, undefined, operationId);
       this.emit('session.opened', payload);
     } catch (error) {
       backendWarn('backend-session', 'emitSessionOpened.failed', {
@@ -1524,6 +2357,8 @@ export class BackendServer {
     selectionToken?: string,
     transcript?: import('../shared/protocol').TranscriptMode,
     transport?: import('../shared/transcript-window').SessionSnapshotTransport,
+    operationId?: string,
+    operationAttempt?: number,
   ): Promise<SessionOpenedPayload> {
     return await buildSessionOpenedPayloadHelper(sessionPath, {
       getContextUsage: (context) => this.getContextUsage(context),
@@ -1534,7 +2369,7 @@ export class BackendServer {
       getSessionContext: (path) => this.getSessionContext(path),
       agentDir: this.agentDir,
       startupCwd: this.startupCwd,
-    }, selectionToken, transcript, transport);
+    }, selectionToken, transcript, transport, operationId, operationAttempt);
   }
 
   private async buildAuthoritativeHotSessionOpenedPayload(
@@ -1542,16 +2377,18 @@ export class BackendServer {
     selectionToken?: string,
     transcript?: import('../shared/protocol').TranscriptMode,
     transport?: import('../shared/transcript-window').SessionSnapshotTransport,
+    operationId?: string,
+    operationAttempt?: number,
   ): Promise<SessionOpenedPayload> {
     while (true) {
       const owner = await this.resolveBrowseContext(sessionPath);
       if (!owner) throw new BackendError('SESSION_NOT_FOUND', `Unknown session: ${sessionPath}`);
-      const payload = await this.buildHotSessionOpenedPayload(sessionPath, selectionToken, transcript, transport);
-      if (this.disposed || this.forgottenSessionPaths.has(sessionPath)) {
+      const payload = await this.buildHotSessionOpenedPayload(sessionPath, selectionToken, transcript, transport, operationId, operationAttempt);
+      if (this.disposed || this.isSessionForgotten(sessionPath)) {
         throw new BackendError('SESSION_NOT_FOUND', `The session is no longer available: ${sessionPath}`);
       }
-      if (this.pendingSessionContexts.has(sessionPath)
-        || this.sessionContexts.get(sessionPath) !== owner) continue;
+      if (this.getPendingSessionContext(sessionPath)
+        || this.getSessionContext(sessionPath) !== owner) continue;
       this.sessionOpenedPayloadOwners.set(payload, owner);
       this.browseResponseOwners.set(payload, { sessionPath, owner });
       return payload;
@@ -1563,41 +2400,69 @@ export class BackendServer {
     selectionToken?: string,
     transcript?: import('../shared/protocol').TranscriptMode,
     transport?: import('../shared/transcript-window').SessionSnapshotTransport,
+    operationId?: string,
+    operationAttempt?: number,
   ): Promise<SessionOpenedPayload> {
     return await timed('buildSessionOpenedPayload', async () => {
       const initialOwner = await this.resolveBrowseContext(sessionPath);
       if (initialOwner) {
-        return await this.buildAuthoritativeHotSessionOpenedPayload(sessionPath, selectionToken, transcript, transport);
+        if (this.runtimeIsolationMode === 'isolated') this.assertColdCoordinatorOwner(sessionPath);
+        return await this.buildAuthoritativeHotSessionOpenedPayload(sessionPath, selectionToken, transcript, transport, operationId, operationAttempt);
       }
-      const availableModels = await listConfiguredModels(this.agentDir);
+      const catalog = await loadConfiguredModels(this.agentDir);
+      const availableModels = catalog.models;
       const afterCatalog = await this.resolveBrowseContext(sessionPath);
       if (afterCatalog) {
-        return await this.buildAuthoritativeHotSessionOpenedPayload(sessionPath, selectionToken, transcript, transport);
+        if (this.runtimeIsolationMode === 'isolated') this.assertColdCoordinatorOwner(sessionPath);
+        return await this.buildAuthoritativeHotSessionOpenedPayload(sessionPath, selectionToken, transcript, transport, operationId, operationAttempt);
       }
       const modelSettings = await this.readModelSettings();
       const afterSettings = await this.resolveBrowseContext(sessionPath);
       if (afterSettings) {
-        return await this.buildAuthoritativeHotSessionOpenedPayload(sessionPath, selectionToken, transcript, transport);
+        if (this.runtimeIsolationMode === 'isolated') this.assertColdCoordinatorOwner(sessionPath);
+        return await this.buildAuthoritativeHotSessionOpenedPayload(sessionPath, selectionToken, transcript, transport, operationId, operationAttempt);
       }
-      const source = await this.openFreshColdBrowseSnapshot(sessionPath, availableModels);
-      if ('context' in source) {
-        return await this.buildAuthoritativeHotSessionOpenedPayload(sessionPath, selectionToken, transcript, transport);
+      const store = this.initializeColdSessionStore();
+      const retained = this.coldSessionManagerHandles.get(this.coldManagerKey(sessionPath));
+      try {
+        const options = {
+          modelSettings,
+          availableModels: catalog.ok ? availableModels : undefined,
+          selectionToken,
+          transcript,
+          transport,
+          operationId,
+          operationAttempt,
+        };
+        const payload = retained
+          ? await store.openHandleSnapshot(retained.handle, options)
+          : await store.openSnapshot(sessionPath, options);
+        if (this.getPendingSessionContext(sessionPath) || this.getSessionContext(sessionPath)) {
+          return await this.buildSessionOpenedPayload(sessionPath, selectionToken, transcript, transport, operationId, operationAttempt);
+        }
+        this.sessionOpenedPayloadOwners.set(payload, undefined);
+        this.registerColdResult(payload);
+        return payload;
+      } catch (error) {
+        if (error instanceof StaleColdSessionLeaseError) {
+          if (retained
+            && this.coldSessionManagerHandles.get(this.coldManagerKey(sessionPath)) === retained) {
+            // An external durable rewrite invalidates a retained empty manager.
+            // Evict it once; the retry reopens current durable authority rather
+            // than selecting the same stale handle forever.
+            this.coldSessionManagerHandles.delete(this.coldManagerKey(sessionPath));
+            return await this.buildSessionOpenedPayload(sessionPath, selectionToken, transcript, transport, operationId, operationAttempt);
+          }
+          if (this.getPendingSessionContext(sessionPath) || this.getSessionContext(sessionPath)) {
+            return await this.buildSessionOpenedPayload(sessionPath, selectionToken, transcript, transport, operationId, operationAttempt);
+          }
+          throw new BackendError(
+            'SESSION_CHANGED_DURING_READ',
+            `The session changed while its cold snapshot was being built: ${sessionPath}`,
+          );
+        }
+        throw error;
       }
-      if (this.pendingSessionContexts.has(sessionPath) || this.sessionContexts.has(sessionPath)
-        || this.readColdBrowseFileFingerprintSync(sessionPath) !== source.fingerprint) {
-        return await this.buildSessionOpenedPayload(sessionPath, selectionToken, transcript, transport);
-      }
-      const payload = buildBrowseSessionOpenedPayload({
-        browse: source.browse,
-        modelSettings,
-        availableModels,
-        selectionToken,
-        transcript,
-        transport,
-      });
-      this.sessionOpenedPayloadOwners.set(payload, undefined);
-      this.browseResponseOwners.set(payload, { sessionPath, fingerprint: source.fingerprint });
-      return payload;
     });
   }
 
@@ -1607,10 +2472,12 @@ export class BackendServer {
     // session-list scan must log and swallow instead of becoming an unhandled
     // rejection; the next catalog poll/emit refreshes the list opportunistically.
     try {
+      const sessions = await this.listSessionSummaries();
       const payload: SessionListChangedPayload = {
-        sessions: await this.listSessionSummaries(),
+        sessions,
         activeSessionPath: this.viewedSessionPath,
       };
+      this.coldSessionStore?.transferOwnershipStamp(sessions, payload);
       this.emit('session.list.changed', payload);
     } catch (error) {
       backendWarn('backend-session', 'emitSessionListChanged.failed', {
@@ -1620,10 +2487,17 @@ export class BackendServer {
   }
 
   private async listSessionSummaries(): Promise<SessionSummary[]> {
+    if (this.runtimeIsolationMode === 'isolated' && (this.sessionContexts.size > 0 || this.pendingSessionContexts.size > 0)) {
+      throw new BackendError(
+        'ISOLATED_RUNTIME_ROUTING_UNAVAILABLE',
+        'Hot session listing requires Phase 4 isolated-runtime routing.',
+      );
+    }
     const liveSummaries = [...this.sessionContexts.values()]
       .filter((context) => !context.retired)
       .map((context) => buildCurrentSummary(context, this.startupCwd));
-    return await this.sessionCatalog.list(this.sdk, this.getSessionDir(), liveSummaries, this.agentDir);
+    const result = await this.initializeColdSessionStore().list(liveSummaries);
+    return result;
   }
 
   /** Start durable closure reconciliation. The watcher is a low-latency hint;
@@ -1686,6 +2560,44 @@ export class BackendServer {
         && this.sessionCatalogPollingActive) {
         await this.emitSessionListChanged();
       }
+
+      // Phase 6 monotonic sync: auth fingerprint refresh bumps/broadcasts (or
+      // retires unacknowledging workers) and a moved models.json re-broadcasts
+      // the configured catalog authority. Both are best-effort poll extensions;
+      // the next poll retries a failed broadcast.
+      if (this.runtimeIsolationMode === 'isolated' && this.workerRuntimeRouter) {
+        try {
+          const authPath = this.authPath || path.join(this.agentDir, 'auth.json');
+          const authFingerprint = await fs.stat(authPath)
+            .then((stat) => `${stat.size}:${stat.mtimeMs}`)
+            .catch(() => 'missing');
+          if (authFingerprint !== this.authFingerprint) {
+            this.authFingerprint = authFingerprint;
+            await this.workerRuntimeRouter.refreshAuth(authFingerprint, authPath);
+          }
+        } catch (error) {
+          backendWarn('backend-session', 'authFingerprintPoll.failed', {
+            error: toErrorMessage(error),
+          });
+        }
+        try {
+          const modelsPath = path.join(this.agentDir, 'models.json');
+          const modelsFingerprint = await fs.stat(modelsPath)
+            .then((stat) => `${stat.size}:${stat.mtimeMs}`)
+            .catch(() => 'missing');
+          if (modelsFingerprint !== this.modelsJsonFingerprint) {
+            this.modelsJsonFingerprint = modelsFingerprint;
+            const catalog = await loadConfiguredModels(this.agentDir);
+            if (catalog.ok) {
+              await this.workerRuntimeRouter.syncCatalog(catalog.models as unknown as WorkerJsonValue[]);
+            }
+          }
+        } catch (error) {
+          backendWarn('backend-session', 'modelsJsonPoll.failed', {
+            error: toErrorMessage(error),
+          });
+        }
+      }
     } finally {
       this.sessionCatalogPollInFlight = false;
     }
@@ -1706,23 +2618,59 @@ export class BackendServer {
     // (recovery replacement emissions, catalog polling, late SDK events) cannot
     // push stale state to a host that is already tearing the backend down.
     if (this.disposed) return;
+    if (event === 'session.list.changed' && payload && typeof payload === 'object'
+      && this.coldSessionStore?.ownershipStamp(payload as object)) {
+      try {
+        this.coldSessionStore.publishSync(payload, () => undefined);
+      } catch (error) {
+        if (!(error instanceof StaleColdSessionLeaseError)) throw error;
+        void this.emitSessionListChanged();
+        return;
+      }
+    }
     if (event === 'session.opened' && payload && typeof payload === 'object') {
       const opened = payload as Partial<SessionOpenedPayload>;
       const sessionPath = opened.session?.path;
       if (typeof sessionPath === 'string') {
-        // Final publication fence: ownership can change after the payload's
-        // last awaited check but before its caller resumes to emit. Rebuild on
-        // the winning generation while preserving selection ownership instead
-        // of silently dropping the tokened open event.
-        if (this.forgottenSessionPaths.has(sessionPath)) return;
-        if (this.sessionOpenedPayloadOwners.has(payload as object)) {
-          const payloadOwner = this.sessionOpenedPayloadOwners.get(payload as object);
-          const currentOwner = this.sessionContexts.get(sessionPath);
-          if (this.pendingSessionContexts.has(sessionPath) || currentOwner !== payloadOwner) {
+        const coldStamps = this.coldSessionStore?.ownershipStamp(payload as object);
+        if (coldStamps) {
+          try {
+            this.coldSessionStore!.publishSync(payload, () => undefined);
+          } catch (error) {
+            if (!(error instanceof StaleColdSessionLeaseError)) throw error;
+            if (this.isSessionForgotten(sessionPath)) return;
             void this.buildSessionOpenedPayload(
               sessionPath,
               opened.selectionToken,
               opened.transcriptSkipped ? 'skip' : 'tail',
+              undefined,
+              opened.operationId,
+              opened.operationAttempt,
+            ).then((authoritative) => this.emit('session.opened', authoritative)).catch((refreshError) => {
+              backendWarn('backend-session', 'sessionOpened.coldPublicationRefreshFailed', {
+                sessionPath,
+                error: toErrorMessage(refreshError),
+              });
+            });
+            return;
+          }
+        }
+        // Final publication fence: ownership can change after the payload's
+        // last awaited check but before its caller resumes to emit. Rebuild on
+        // the winning generation while preserving selection ownership instead
+        // of silently dropping the tokened open event.
+        if (this.isSessionForgotten(sessionPath)) return;
+        if (this.sessionOpenedPayloadOwners.has(payload as object)) {
+          const payloadOwner = this.sessionOpenedPayloadOwners.get(payload as object);
+          const currentOwner = this.getSessionContext(sessionPath);
+          if (this.getPendingSessionContext(sessionPath) || currentOwner !== payloadOwner) {
+            void this.buildSessionOpenedPayload(
+              sessionPath,
+              opened.selectionToken,
+              opened.transcriptSkipped ? 'skip' : 'tail',
+              undefined,
+              opened.operationId,
+              opened.operationAttempt,
             ).then((authoritative) => this.emit('session.opened', authoritative)).catch((error) => {
               backendWarn('backend-session', 'sessionOpened.publicationRefreshFailed', {
                 sessionPath,
@@ -1733,7 +2681,7 @@ export class BackendServer {
           }
         }
         if (opened.runtimeReady === false
-          && (this.pendingSessionContexts.has(sessionPath) || this.sessionContexts.has(sessionPath))) return;
+          && (this.getPendingSessionContext(sessionPath) || this.getSessionContext(sessionPath))) return;
       }
     }
     if (event === 'extension_ui.request' && payload && typeof payload === 'object') {
@@ -1776,11 +2724,18 @@ export class BackendServer {
 
   private isBrowseResponseCurrent(result: unknown): boolean {
     if (!result || typeof result !== 'object') return true;
+    if (this.coldSessionStore?.ownershipStamp(result as object)) {
+      try {
+        this.coldSessionStore.publishSync(result, () => undefined);
+      } catch {
+        return false;
+      }
+    }
     const stamp = this.browseResponseOwners.get(result as object);
     if (!stamp) return true;
-    if (this.disposed || this.forgottenSessionPaths.has(stamp.sessionPath)
-      || this.pendingSessionContexts.has(stamp.sessionPath)) return false;
-    const current = this.sessionContexts.get(stamp.sessionPath);
+    if (this.disposed || this.isSessionForgotten(stamp.sessionPath)
+      || this.getPendingSessionContext(stamp.sessionPath)) return false;
+    const current = this.getSessionContext(stamp.sessionPath);
     if (stamp.owner) return current === stamp.owner;
     if (current || !stamp.fingerprint) return false;
     try {
@@ -1790,7 +2745,7 @@ export class BackendServer {
     }
   }
 
-  private async handleLine(line: string): Promise<void> {
+  async handleLine(line: string): Promise<void> {
     let request: RequestEnvelope;
     try {
       request = parseJsonOrThrow<RequestEnvelope>(line, 'request envelope');
@@ -1800,8 +2755,46 @@ export class BackendServer {
     }
 
     backendTrace('request', 'received', { id: request.id, method: request.method });
+    // Reserve the diagnostics-toggle generation at production request
+    // receipt, before any awaited handler work, so concurrent toggle requests
+    // are ordered by receipt, not settlement. The reserved generation is
+    // bound to this exact request and gates its off transition at completion:
+    // an older off settling after a newer on must not disable tracing or stop
+    // the event-loop monitor. Invalid toggles never reserve (they never
+    // apply), so they cannot supersede a valid request's transition.
+    const toggleGeneration = request.method === 'diagnostics.livePipeline.setEnabled'
+      && parseLivePipelineToggleParams(request.params)
+      ? this.reserveLivePipelineTraceToggle()
+      : undefined;
+    recordBackendLivePipelineTrace({
+      stage: 'backend.request',
+      kind: 'observation',
+      phase: 'request_received',
+      identifiers: { request: request.id },
+      processRole: 'coordinator',
+      pid: process.pid,
+    });
+    const requestStartedAt = performance.now();
+    let requestValidated = false;
+    const onRequestValidated = (): void => {
+      if (requestValidated) return;
+      requestValidated = true;
+      recordBackendLivePipelineTrace({
+        stage: 'backend.request',
+        kind: 'success',
+        phase: 'request_validated',
+        identifiers: { request: request.id },
+        processRole: 'coordinator',
+        pid: process.pid,
+      });
+    };
+    const invoke = () => this.handleRequest(request, onRequestValidated, toggleGeneration);
+    // Exactly one finish/error completion per request: the success record is
+    // emitted only after the final (possibly retried) handler run settles, and
+    // a later response-write failure must not also emit a failure completion.
+    let completionEmitted = false;
     try {
-      let result = await timed(`request:${request.method}:${request.id}`, () => this.handleRequest(request));
+      let result = await timed(`request:${request.method}:${request.id}`, invoke);
       // Correlated browse responses do not pass through emit(), so perform the
       // generation/file fence at the actual writer boundary. The check and
       // write are synchronous with no event-loop gap; a superseded result is
@@ -1813,15 +2806,49 @@ export class BackendServer {
             `The session changed repeatedly while ${request.method} was being published.`,
           );
         }
-        result = await this.handleRequest(request);
+        result = await invoke();
       }
       backendTrace('request', 'handled', { id: request.id, method: request.method });
+      recordBackendLivePipelineTrace({
+        stage: 'backend.request',
+        kind: 'success',
+        phase: 'handler_finished',
+        durationMs: Math.max(0, performance.now() - requestStartedAt),
+        identifiers: { request: request.id },
+        processRole: 'coordinator',
+        pid: process.pid,
+      });
+      completionEmitted = true;
+      if (this.completeLivePipelineTraceDisable(request.id)
+        && result && typeof result === 'object' && 'health' in result) {
+        // handleBackendRequest composes the same public response shape before
+        // returning, while the server owns the actual off transition. Refresh
+        // only the already-public health field after the atomic transition.
+        result = { ...result, health: getBackendLivePipelineTraceHealth() };
+      }
       writeStdout(responseOk(request.id, result));
     } catch (error) {
+      this.cancelLivePipelineTraceDisable(request.id);
       const details = extractRequestError(error);
+      // A correlated handler failure has exactly one public owner: the RPC
+      // response. Emitting a second generic `error` event made the host show and
+      // count the same failure twice. Structured trace/stderr remains the
+      // diagnostic channel; later asynchronous incidents use their dedicated
+      // event families and identities.
       backendTrace('request', 'error', { level: 'warn', id: request.id, method: request.method, code: details.code, message: details.message });
+      if (!completionEmitted) {
+        recordBackendLivePipelineTrace({
+          stage: 'backend.request',
+          kind: 'failure',
+          phase: 'handler_finished',
+          durationMs: Math.max(0, performance.now() - requestStartedAt),
+          identifiers: { request: request.id },
+          reasonCode: 'unknown_unattributable',
+          processRole: 'coordinator',
+          pid: process.pid,
+        });
+      }
       writeStdout(responseError(request.id, details.code, details.message, details.data));
-      this.emit('error', details);
     }
   }
 
@@ -1829,11 +2856,35 @@ export class BackendServer {
    *  artifact. Called only after the host has chosen privacy mode; ordinary
    *  tab closes intentionally keep sessions reopenable. */
   private async forgetSession(sessionPath: string): Promise<void> {
+    const hasHotOwner = !!this.getSessionContext(sessionPath) || !!this.getPendingSessionContext(sessionPath);
+    if (this.runtimeIsolationMode === 'isolated' && hasHotOwner) {
+      this.assertColdCoordinatorOwner(sessionPath);
+    }
+    if (!hasHotOwner) {
+      this.forgottenSessionPaths.add(sessionPath);
+      this.browsePreviousSessionFiles.delete(sessionPath);
+      const store = this.initializeColdSessionStore();
+      try {
+        await this.runColdSessionMutation(sessionPath, async () => {
+          store.leases.invalidate(sessionPath);
+          this.coldSessionManagerHandles.delete(this.coldManagerKey(sessionPath));
+          await store.forget(sessionPath);
+        });
+        if (this.viewedSessionPath === sessionPath) this.setViewedSessionPath(undefined);
+      } catch (error) {
+        this.forgottenSessionPaths.delete(sessionPath);
+        throw error;
+      }
+      return;
+    }
+
+    this.initializeColdSessionStore().leases.invalidate(sessionPath);
+    this.coldSessionManagerHandles.delete(this.coldManagerKey(sessionPath));
     this.forgottenSessionPaths.add(sessionPath);
     this.browsePreviousSessionFiles.delete(sessionPath);
-    const pending = this.pendingSessionContexts.get(sessionPath);
+    const pending = this.getPendingSessionContext(sessionPath);
     if (pending) await pending.catch(() => undefined);
-    const context = this.sessionContexts.get(sessionPath);
+    const context = this.getSessionContext(sessionPath);
     if (context) {
       context.retired = true;
       context.sessionManagerFence?.invalidate();
@@ -1880,18 +2931,154 @@ export class BackendServer {
     // queued session.open cannot recreate the deleted file after this RPC.
   }
 
-  private async handleRequest(request: RequestEnvelope): Promise<unknown> {
+  private async handleRequest(
+    request: RequestEnvelope,
+    onRequestValidated?: () => void,
+    livePipelineTraceToggleGeneration?: number,
+  ): Promise<unknown> {
+    if (this.runtimeIsolationMode === 'isolated') {
+      const router = this.workerRuntimeRouter;
+      if (router) {
+        const sessionPath = requestSessionPath(request.params);
+        const routeState = sessionPath ? router.getRoute(sessionPath) : undefined;
+        if (routeState?.state === 'transitioning' && request.method !== 'session.truncateAfter') {
+          throw new BackendError(
+            'SESSION_TRANSITION_IN_PROGRESS',
+            `Session transition is already in progress for ${sessionPath}.`,
+          );
+        }
+        if (request.method === 'message.interrupt' && sessionPath && router.hasHotOwner(sessionPath)) {
+          onRequestValidated?.();
+          const result = await router.interrupt(sessionPath, `public request ${request.id}`);
+          return result.soft
+            ? { interrupted: true, settled: true }
+            : { interrupted: true, settled: false, teardownTimedOut: true };
+        }
+        // Phase 5 demand-driven subagent detail. These are router/store-level
+        // operations, not worker runtime commands: subscribe/unsubscribe/fetch
+        // settle as correlated control responses while stream content crosses
+        // only through the six `detail.stream` events. Hot live sources are
+        // answered by the owning worker; terminal/cold sources are answered by
+        // the coordinator's durable paged authority directly from the durable
+        // JSONL (never one >30 MiB response).
+        if (request.method === 'detail.subscribe' || request.method === 'detail.unsubscribe' || request.method === 'detail.fetch') {
+          onRequestValidated?.();
+          if (request.method === 'detail.subscribe') {
+            const params = validateDetailSubscribe(request.params);
+            await this.routeDetailSubscribe(request.id, params);
+          } else if (request.method === 'detail.unsubscribe') {
+            const params = validateDetailUnsubscribe(request.params);
+            await this.routeDetailUnsubscribe(request.id, params);
+          } else {
+            const params = validateDetailFetch(request.params);
+            await this.routeDetailFetch(request.id, params);
+          }
+          return { accepted: true };
+        }
+        if (request.method === 'session.truncateAfter' && sessionPath) {
+          const transition = router.getRoute(sessionPath);
+          if (transition.state === 'promoting') await transition.promotion;
+          else if (transition.state === 'retiring') await transition.retirement;
+        }
+        if (request.method === 'session.truncateAfter' && sessionPath
+            && (router.hasHotOwner(sessionPath) || router.getRoute(sessionPath).state === 'transitioning')) {
+          const params = validateTruncateAfter(request.params);
+          onRequestValidated?.();
+          // Install the transition synchronously before the first interrupt
+          // await. Same-entry retries join this exact transaction; every other
+          // path-scoped command is fenced by SESSION_TRANSITION_IN_PROGRESS.
+          return await router.runHotTransition(
+            sessionPath,
+            `hot-truncate:${params.entryId}`,
+            async (transition) => {
+              await transition.interrupt(`hot truncate ${request.id}`);
+              await transition.retire('hot truncate quiesced');
+              const store = this.initializeColdSessionStore();
+              const handle = await this.runColdSessionMutation(sessionPath, async () => {
+                const truncated = await store.truncateAfter(sessionPath, params.entryId);
+                this.retainColdSessionManager(truncated, 'resume');
+                return truncated;
+              });
+              await transition.promote(handle.sessionPath);
+              void this.emitSessionListChanged();
+              return { ok: true, sessionPath: handle.sessionPath };
+            },
+          );
+        }
+        if (request.method === 'session.forget' && sessionPath && router.hasHotOwner(sessionPath)) {
+          await router.retire(sessionPath, 'session forgotten');
+        } else if (sessionPath && WorkerRuntimeRouter.isHotOperation(request.method)) {
+          if (request.method === 'extension_ui.response' && !router.hasHotOwner(sessionPath)) {
+            // A response for a session whose worker is gone (crashed, retired,
+            // or replaced) is correlated typed-stale: never promote a fresh
+            // worker just to reject it, and never invoke any worker callback.
+            throw new BackendError('UI_REQUEST_NOT_PENDING', 'The extension UI request is no longer pending.');
+          }
+          const shouldPromote = ISOLATED_PROMOTION_METHODS.has(request.method)
+            || request.method === 'settings.set';
+          if (shouldPromote) return await router.route(request);
+          if (router.hasHotOwner(sessionPath)) return await router.routeExisting(request);
+          if (!isPhase3IsolatedCoordinatorOperationAllowed(request.method, request.params)) {
+            throw new BackendError('SESSION_NOT_FOUND', `No hot worker owns ${sessionPath}.`);
+          }
+        }
+      }
+      if (!isPhase3IsolatedCoordinatorOperationAllowed(request.method, request.params)) {
+        throw new BackendError(
+          'ISOLATED_RUNTIME_ROUTING_UNAVAILABLE',
+          router
+            ? `Operation ${request.method} requires an isolated runtime owner and cannot use the coordinator runtime.`
+            : `Operation ${request.method} requires Phase 4 isolated-runtime routing; Phase 4 isolated-runtime routing is unavailable.`,
+        );
+      }
+    }
     const sessionDir = this.getSessionDir();
-    return await handleBackendRequest({
+    const result = await handleBackendRequest({
       sdkPath: this.sdkPath,
       agentDir: this.agentDir,
       startupCwd: this.startupCwd,
       sessionDir,
       sdk: this.sdk,
-      getSessionContext: (sessionPath) => this.getSessionContext(sessionPath),
+      getSessionContext: (sessionPath) => {
+        const context = this.getSessionContext(sessionPath);
+        if (this.runtimeIsolationMode === 'isolated'
+          && (context || (sessionPath && this.getPendingSessionContext(sessionPath)))) {
+          this.assertColdCoordinatorOwner(sessionPath!);
+        }
+        return context;
+      },
       createSessionContext: (sessionManager, reason) => this.createSessionContext(sessionManager, reason),
       ensureSessionContext: (sessionPath) => this.ensureSessionContext(sessionPath),
-      isSessionTransitionPending: (sessionPath) => this.pendingSessionContexts.has(sessionPath),
+      createColdSession: (cwd) => {
+        const handle = this.initializeColdSessionStore().create({ cwd });
+        this.retainColdSessionManager(handle, 'new');
+        return { sessionPath: handle.sessionPath };
+      },
+      duplicateColdSession: (sessionPath) => {
+        if (this.runtimeIsolationMode === 'isolated') this.assertColdCoordinatorOwner(sessionPath);
+        const handle = this.initializeColdSessionStore().duplicate(sessionPath);
+        this.retainColdSessionManager(handle, 'new');
+        return { sessionPath: handle.sessionPath };
+      },
+      truncateColdSessionAfter: async (sessionPath, entryId) => {
+        const hasOwner = !!this.getSessionContext(sessionPath) || !!this.getPendingSessionContext(sessionPath);
+        if (hasOwner) {
+          if (this.runtimeIsolationMode === 'isolated') this.assertColdCoordinatorOwner(sessionPath);
+          throw new BackendError('REQUEST_IN_PROGRESS', `Cannot cold-truncate an owned session: ${sessionPath}`);
+        }
+        const store = this.initializeColdSessionStore();
+        const handle = await this.runColdSessionMutation(sessionPath, async () => {
+          store.leases.invalidate(sessionPath);
+          this.coldSessionManagerHandles.delete(this.coldManagerKey(sessionPath));
+          const truncated = await store.truncateAfter(sessionPath, entryId);
+          // Retention is part of the mutation owner. A promotion waiting on the
+          // mutation cannot resume between durable commit and handle install.
+          this.retainColdSessionManager(truncated, 'resume');
+          return truncated;
+        });
+        return { sessionPath: handle.sessionPath };
+      },
+      isSessionTransitionPending: (sessionPath) => !!this.getPendingSessionContext(sessionPath),
       transitionSessionContext: (sessionPath, transition) => this.transitionSessionContext(sessionPath, transition),
       prepareViewedSessionPath: (sessionPath) => this.prepareViewedSessionPath(sessionPath),
       discardPreparedViewedSessionPath: (sessionPath, token) => this.discardPreparedViewedSessionPath(
@@ -1910,9 +3097,10 @@ export class BackendServer {
         this.setViewedSessionPathIfCurrent(sessionPath, revision)
       ),
       setViewedSessionPath: (sessionPath) => this.setViewedSessionPath(sessionPath),
-      buildSessionOpenedPayload: (sessionPath, selectionToken, transcript, transport) => (
-        this.buildSessionOpenedPayload(sessionPath, selectionToken, transcript, transport)
+      buildSessionOpenedPayload: (sessionPath, selectionToken, transcript, transport, operationId, operationAttempt) => (
+        this.buildSessionOpenedPayload(sessionPath, selectionToken, transcript, transport, operationId, operationAttempt)
       ),
+      createOperationLedger: this.createOperationLedger,
       buildTransitionSessionOpenedPayload: (sessionPath) => (
         this.buildHotSessionOpenedPayload(sessionPath)
       ),
@@ -1928,18 +3116,56 @@ export class BackendServer {
       transferBrowseResponseOwnership: (source, target) => {
         const owner = this.browseResponseOwners.get(source);
         if (owner) this.browseResponseOwners.set(target, owner);
+        this.coldSessionStore?.transferOwnershipStamp(source, target);
       },
       emit: (event, payload) => this.emit(event, payload),
       emitBusyChanged: (context, busy) => this.emitBusyChanged(context, busy),
       emitContextUsageChanged: (sessionContext) => this.emitContextUsageChanged(sessionContext),
       emitSessionListChanged: () => this.emitSessionListChanged(),
       listSessions: () => this.listSessionSummaries(),
-      listAvailableModels: async (context) => context
-        ? listAvailableModels(context, this.agentDir)
-        : await listConfiguredModels(this.agentDir),
+      listAvailableModels: async (context) => {
+        const catalog = context
+          ? loadAvailableModels(context, this.agentDir)
+          : await loadConfiguredModels(this.agentDir);
+        if (!catalog.ok) {
+          throw new BackendError('MODEL_CATALOG_UNAVAILABLE', `Unable to load the model catalog: ${catalog.error}`);
+        }
+        return catalog.models;
+      },
       readModelSettings: () => this.readModelSettings(),
       writeModelSettings: (updates) => this.writeModelSettings(updates),
+      onRequestValidated,
+      suppressRequestTrace: true,
+      livePipelineTraceToggleGeneration,
+      deferLivePipelineTraceDisable: (requestId, generation, onApplied) => (
+        this.deferLivePipelineTraceDisable(requestId, generation, onApplied)
+      ),
+      onLivePipelineTraceEnabledChange: (enabled) => {
+        if (enabled) this.markLivePipelineTraceEnabled();
+        else this.stopEventLoopMonitor();
+      },
     }, request);
+    if (this.runtimeIsolationMode === 'isolated' && request.method === 'runtimePrefs.set'
+      && result && typeof result === 'object' && !Array.isArray(result)) {
+      this.runtimePrefs = JSON.parse(JSON.stringify(result)) as WorkerJsonObject;
+      await this.workerRuntimeRouter?.syncRuntimePrefs(this.runtimePrefs);
+      const providerConcurrency = this.runtimePrefs.providerConcurrency;
+      await this.workerRuntimeRouter?.syncProviderPolicy(
+        providerConcurrency && typeof providerConcurrency === 'object' && !Array.isArray(providerConcurrency)
+          ? providerConcurrency as WorkerJsonObject
+          : {},
+      );
+    }
+    if (this.runtimeIsolationMode === 'isolated' && request.method === 'settings.set'
+      && (!request.params || typeof request.params !== 'object' || !('sessionPath' in request.params))
+      && result && typeof result === 'object' && !Array.isArray(result)) {
+      // A global settings write bypasses worker routing (session-scoped writes
+      // are routed to the owning worker, which persists and broadcasts). Hot
+      // workers must not serve the pre-write snapshot, so re-broadcast the
+      // coordinator-authoritative values after the write settles.
+      await this.workerRuntimeRouter?.syncSettings();
+    }
+    return result;
   }
 
   private handleSessionEvent(context: SessionContext, event: SdkSessionEvent): void {
@@ -2081,6 +3307,7 @@ export class BackendServer {
     context.recoveryPromise = replacementPromise;
     void replacementPromise.catch((error) => {
       this.emit('operational-error', {
+        incidentId: `session-recovery:${requestId}`,
         code: 'SESSION_RUNTIME_RECOVERY_FAILED',
         message: `Failed to replace the stuck session runtime: ${toErrorMessage(error)}`,
         sessionPath: context.sessionPath,
@@ -2090,13 +3317,47 @@ export class BackendServer {
   }
 
   async dispose(): Promise<void> {
-    // Idempotent: stdin-end and host dispose (or a re-entrant call) must not
-    // run teardown twice. The flag also suppresses stale events from in-flight
-    // async paths via the `disposed` guard on `emit`/`emitSessionOpened`/
-    // `emitSessionListChanged`.
-    if (this.disposed) return;
+    if (!this.disposePromise) this.disposePromise = this.disposeOnce();
+    await this.disposePromise;
+  }
+
+  private async disposeOnce(): Promise<void> {
+    // Idempotent ownership is provided by disposePromise. The flag suppresses
+    // stale events from in-flight async paths via the `disposed` guard on
+    // `emit`/`emitSessionOpened`/`emitSessionListChanged`.
+    recordBackendLivePipelineTrace({
+      stage: 'process.lifecycle',
+      kind: 'success',
+      phase: 'backend_mapping',
+      readiness: 'not_ready',
+      processRole: 'coordinator',
+      pid: process.pid,
+    });
     this.disposed = true;
+    if (this.coldSessionStore) this.coldSessionStore.leases.advanceCoordinatorGeneration(2);
+    this.coldSessionManagerHandles.clear();
+    this.pendingLivePipelineTraceDisables.clear();
     this.stopHostWatchdog();
+    this.stopEventLoopMonitor();
+    let workerSupervisorDisposeError: unknown;
+    if (this.workerRuntimeRouter) {
+      try {
+        await this.workerRuntimeRouter.dispose();
+        this.workerRuntimeRouter = undefined;
+      } catch (error) {
+        workerSupervisorDisposeError = error;
+        log(`worker runtime router disposal failed closed: ${toErrorMessage(error)}`);
+      }
+    }
+    if (this.workerSupervisor) {
+      try {
+        await this.workerSupervisor.dispose();
+        this.workerSupervisor = undefined;
+      } catch (error) {
+        workerSupervisorDisposeError = error;
+        log(`worker supervisor disposal failed closed: ${toErrorMessage(error)}`);
+      }
+    }
     // Reject queued session service creations: a queued open must not hang
     // behind an admitted creation while the host is tearing the backend down.
     // An admitted in-flight creation is allowed to settle; the late runtime it
@@ -2210,6 +3471,8 @@ export class BackendServer {
         }
       }));
     }
+    await flushBackendLivePipelineTrace();
+    if (workerSupervisorDisposeError) throw workerSupervisorDisposeError;
   }
 }
 

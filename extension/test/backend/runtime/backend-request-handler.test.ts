@@ -4,7 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import test from 'node:test';
 
-import { formatInterruptWatchdogDuration, handleBackendRequest, type BackendRequestHandlerDeps } from '../../../src/backend/request-handler';
+import { formatInterruptWatchdogDuration, handleBackendRequest, BACKEND_REQUEST_METHODS, type BackendRequestHandlerDeps } from '../../../src/backend/request-handler';
 import { handleSdkSessionEvent, type BackendSessionEventHandlerDeps } from '../../../src/backend/session-event-handler';
 import { BackendError, extractRequestError } from '../../../src/backend/server-io';
 import type { ModelSettings } from '../../../src/shared/protocol';
@@ -15,6 +15,13 @@ import { BackendLiveTurnAccumulator } from '../../../src/backend/live-turn-accum
 import { ExtensionUIBridge } from '../../../src/backend/extension-ui-bridge';
 import { JSONL_MAX_LINE_BYTES } from '../../../src/shared/jsonl';
 import { SESSION_SNAPSHOT_MAX_LINE_BYTES, sessionSnapshotLineBytes } from '../../../src/shared/transcript-window';
+import {
+  flushBackendLivePipelineTrace,
+  getBackendLivePipelineTracePath,
+  isBackendLivePipelineTraceEnabled,
+  setBackendLivePipelineTraceEnabled,
+} from '../../../src/backend/live-pipeline-trace-runtime';
+import { readBackendRequestTracePhases } from '../../helpers/backend-live-pipeline-trace';
 
 interface Harness {
   deps: BackendRequestHandlerDeps;
@@ -113,6 +120,13 @@ function createHarness(overrides: {
       assert.equal(sessionPath, context.sessionPath);
       return context;
     },
+    createColdSession(cwd) {
+      createCalls.push({ cwd: cwd || '/startup', reason: 'new' });
+      return { sessionPath: context.sessionPath };
+    },
+    duplicateColdSession() {
+      return { sessionPath: context.sessionPath };
+    },
     setViewedSessionPath(sessionPath) {
       viewedSessionPath = sessionPath;
     },
@@ -122,13 +136,16 @@ function createHarness(overrides: {
       viewedSessionPath = sessionPath;
       return true;
     },
-    async buildSessionOpenedPayload(sessionPath, selectionToken) {
+    async buildSessionOpenedPayload(sessionPath, selectionToken, _transcript, _transport, operationId, operationAttempt) {
       return {
         session: { path: sessionPath, cwd: '/repo', name: 'Session', modifiedAt: '2026-01-01T00:00:00.000Z', messageCount: 0 },
         transcript: [],
         transcriptWindow: { totalCount: 0, loadedStart: 0, loadedEnd: 0, hasOlder: false, hasNewer: false, isPartial: false, hasUserMessages: false },
         busy: false,
+        runtimeReady: false,
         selectionToken,
+        operationId,
+        operationAttempt,
       };
     },
     async applySystemPromptToggles(sessionPath, disabledEntries) {
@@ -220,7 +237,7 @@ test('handleBackendRequest covers handshake and session orchestration methods', 
   assert.deepEqual(created, { ok: true, sessionPath: '/repo/session.jsonl' });
   assert.equal(harness.viewedSessionPath, '/repo/session.jsonl');
   assert.deepEqual(harness.createCalls[0], { cwd: '/custom', reason: 'new' });
-  assert.deepEqual(harness.busyEvents, [false]);
+  assert.deepEqual(harness.busyEvents, [], 'cold create does not emit runtime busy state');
   assert.equal(harness.emitted[0]?.event, 'session.opened');
   assert.equal((harness.emitted[0]?.payload as { selectionToken?: string }).selectionToken, 'sel-1');
   assert.deepEqual(harness.emitted[1], { event: 'session.list.changed' });
@@ -454,12 +471,11 @@ test('session.create returns a session from the configured backend session direc
     cwd,
     sessionPath: path.join(sessionDir ?? sdkFallbackDir, 'new-session.jsonl'),
   })) as unknown as typeof harness.deps.sdk.SessionManager.create;
-  harness.deps.createSessionContext = async (sessionManager, reason) => {
-    const manager = sessionManager as unknown as { sessionPath: string };
-    harness.createCalls.push({ cwd: '/custom', reason });
-    return { ...harness.context, sessionPath: manager.sessionPath };
+  harness.deps.createColdSession = (cwd) => {
+    const manager = harness.deps.sdk.SessionManager.create(cwd || harness.deps.startupCwd, harness.deps.sessionDir) as unknown as { sessionPath: string };
+    return { sessionPath: manager.sessionPath };
   };
-  harness.deps.buildSessionOpenedPayload = async (sessionPath) => ({ sessionPath } as any);
+  harness.deps.buildSessionOpenedPayload = async (sessionPath) => ({ sessionPath, runtimeReady: false } as any);
 
   const created = await handleBackendRequest(harness.deps, {
     id: 'create-canonical',
@@ -480,6 +496,11 @@ test('session.duplicate reads a cold source cwd without promoting the source run
     forkCwd = cwd;
     return { cwd, sessionPath: '/repo/fork.jsonl' };
   }) as any;
+  harness.deps.duplicateColdSession = (sessionPath) => {
+    const sourceCwd = harness.deps.sdk.SessionManager.open(sessionPath).getCwd();
+    const manager = harness.deps.sdk.SessionManager.forkFrom(sessionPath, sourceCwd) as unknown as { sessionPath: string };
+    return { sessionPath: manager.sessionPath };
+  };
 
   await handleBackendRequest(harness.deps, {
     id: 'duplicate-cold-cwd', method: 'session.duplicate', params: { sessionPath: sourcePath },
@@ -504,12 +525,15 @@ test('session.duplicate returns a fork from the configured backend session direc
     cwd: targetCwd,
     sessionPath: path.join(sessionDir ?? sdkFallbackDir, 'forked-session.jsonl'),
   })) as unknown as typeof harness.deps.sdk.SessionManager.forkFrom;
-  harness.deps.createSessionContext = async (sessionManager, reason) => {
-    const manager = sessionManager as unknown as { cwd: string; sessionPath: string };
-    harness.createCalls.push({ cwd: manager.cwd, reason });
-    return { ...harness.context, sessionPath: manager.sessionPath };
+  harness.deps.duplicateColdSession = (sourcePath) => {
+    const manager = harness.deps.sdk.SessionManager.forkFrom(
+      sourcePath,
+      '/source-cwd',
+      harness.deps.sessionDir,
+    ) as unknown as { sessionPath: string };
+    return { sessionPath: manager.sessionPath };
   };
-  harness.deps.buildSessionOpenedPayload = async (sessionPath) => ({ sessionPath } as any);
+  harness.deps.buildSessionOpenedPayload = async (sessionPath) => ({ sessionPath, runtimeReady: false } as any);
 
   const duplicated = await handleBackendRequest(harness.deps, {
     id: 'duplicate-canonical',
@@ -601,6 +625,62 @@ test('message.send accepts requests, handles preflight rejection, and guards con
     'Prompt rejected before PI accepted the request.',
   );
   assert.equal(rejectedHarness.context.activeRequest, undefined);
+});
+
+test('message.send ignores stale preflight settlement after session replacement', async () => {
+  let preflightResult: ((success: boolean) => void) | undefined;
+  let resolvePrompt: (() => void) | undefined;
+  const harness = createHarness({
+    sessionOverrides: {
+      prompt: async (_text: string, options?: { preflightResult?: (success: boolean) => void }) => {
+        preflightResult = options?.preflightResult;
+        await new Promise<void>((resolve) => { resolvePrompt = resolve; });
+      },
+    },
+  });
+
+  const sent = await handleBackendRequest(harness.deps, {
+    id: 'replacement-stale-preflight',
+    method: 'message.send',
+    params: { sessionPath: harness.context.sessionPath, text: '/replace', inputs: [] },
+  });
+  assert.equal(typeof (sent as { requestId: string }).requestId, 'string');
+  const originalSession = harness.context.session;
+  const originalPath = harness.context.sessionPath;
+  harness.context.session = { ...originalSession } as SessionContext['session'];
+  harness.context.sessionPath = '/repo/replacement.jsonl';
+  harness.context.sessionOwnershipEpoch = (harness.context.sessionOwnershipEpoch ?? 0) + 1;
+  harness.context.activeRequest = undefined;
+
+  preflightResult?.(true);
+  resolvePrompt?.();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.equal(harness.context.sessionPath, '/repo/replacement.jsonl');
+  assert.equal(harness.emitted.some((entry) => entry.event === 'message.custom'), false);
+  assert.deepEqual(harness.busyEvents, [], 'stale preflight must not mark the replacement busy');
+  assert.equal(originalPath, '/repo/session.jsonl');
+});
+
+test('message.send terminalizes an ordinary no-agent extension command', async () => {
+  const harness = createHarness({
+    sessionOverrides: {
+      prompt: async (_text: string, options?: { preflightResult?: (success: boolean) => void }) => {
+        options?.preflightResult?.(true);
+      },
+    },
+  });
+
+  const sent = await handleBackendRequest(harness.deps, {
+    id: 'ordinary-extension-command',
+    method: 'message.send',
+    params: { sessionPath: harness.context.sessionPath, text: '/ordinary', inputs: [] },
+  });
+  assert.equal(typeof (sent as { requestId: string }).requestId, 'string');
+  assert.equal(harness.context.activeRequest, undefined);
+  assert.deepEqual(harness.busyEvents, [true, false]);
+  const terminal = harness.emitted.find((entry) => entry.event === 'preflight.failed');
+  assert.equal((terminal?.payload as { sessionPath?: string }).sessionPath, harness.context.sessionPath);
 });
 
 // Regression: the backend pre-commit safety-net timer (PROMPT_TIMEOUT_MS) MUST
@@ -756,6 +836,7 @@ test('message.interrupt terminalizes locally and replaces runtime when remote te
     const operationalErrors = harness.emitted.filter((entry) => entry.event === 'operational-error');
     assert.equal(operationalErrors.length, 1, 'one stuck interrupt must surface one recovery notice');
     assert.deepEqual(operationalErrors[0]?.payload, {
+      incidentId: 'interrupt-stuck:req-stuck-abort',
       code: 'INTERRUPT_ABORT_STUCK',
       message: 'Stop did not settle within 5ms, so Pie ended the turn locally and is refreshing the session runtime.',
       requestId: 'req-stuck-abort',
@@ -1120,7 +1201,7 @@ test('compaction_start/compaction_end re-arm busy so a compaction call stays int
   assert.equal(harness.emitted.some((entry) => entry.event === 'session.list.changed'), true);
 });
 
-test('session.truncateAfter rewrites the file and recreates the session context', async () => {
+test('cold session.truncateAfter delegates the durable rewrite without creating a runtime', async () => {
   await withTempDir(async (dir) => {
     const sessionPath = path.join(dir, 'session.jsonl');
     await fs.writeFile(sessionPath, [
@@ -1131,18 +1212,22 @@ test('session.truncateAfter rewrites the file and recreates the session context'
     ].join('\n') + '\n', 'utf8');
 
     const harness = createHarness();
-    const reopenedContext = { ...harness.context, sessionPath };
     harness.context.sessionPath = sessionPath;
     harness.deps.getSessionContext = () => undefined;
-    harness.deps.sdk.SessionManager.open = (openedPath: string) => {
-      harness.openCalls.push(openedPath);
-      return { cwd: '/repo', sessionPath: openedPath } as any;
+    harness.deps.truncateColdSessionAfter = async (openedPath, entryId) => {
+      const rows = (await fs.readFile(openedPath, 'utf8')).split('\n');
+      const kept: string[] = [];
+      for (const row of rows) {
+        if (!row.trim()) continue;
+        try {
+          if ((JSON.parse(row) as { id?: string }).id === entryId) break;
+          kept.push(row);
+        } catch { /* cold store omits malformed rows */ }
+      }
+      await fs.writeFile(openedPath, kept.length > 0 ? `${kept.join('\n')}\n` : '', 'utf8');
+      return { sessionPath: openedPath };
     };
-    harness.deps.createSessionContext = async (_manager, reason) => {
-      harness.createCalls.push({ cwd: '/repo', reason });
-      return reopenedContext;
-    };
-    harness.deps.buildSessionOpenedPayload = async (openedPath) => ({ sessionPath: openedPath } as any);
+    harness.deps.buildSessionOpenedPayload = async (openedPath) => ({ sessionPath: openedPath, runtimeReady: false } as any);
 
     const result = await handleBackendRequest(harness.deps, {
       id: '1',
@@ -1151,11 +1236,11 @@ test('session.truncateAfter rewrites the file and recreates the session context'
     });
 
     assert.deepEqual(result, { ok: true, sessionPath });
-    assert.deepEqual(harness.openCalls, [sessionPath, sessionPath], 'cold truncate reads durable model state before reopening the runtime');
-    assert.deepEqual(harness.createCalls.at(-1), { cwd: '/repo', reason: 'resume' });
+    assert.deepEqual(harness.openCalls, []);
+    assert.deepEqual(harness.createCalls, []);
     const rewritten = await fs.readFile(sessionPath, 'utf8');
     assert.equal(rewritten, `${JSON.stringify({ id: 'keep-1', message: 'keep' })}\n`);
-    assert.deepEqual(harness.emitted.at(-2), { event: 'session.opened', payload: { sessionPath } });
+    assert.deepEqual(harness.emitted.at(-2), { event: 'session.opened', payload: { sessionPath, runtimeReady: false } });
   });
 });
 
@@ -1351,6 +1436,251 @@ test('handleBackendRequest rejects unknown methods', async () => {
     async () => await handleBackendRequest(harness.deps, { id: '1', method: 'missing.method' }),
     /Unknown method: missing.method/,
   );
+});
+
+test('request producer records one ordered route-to-completion trace', async () => {
+  const harness = createHarness();
+  const before = await fs.readFile(getBackendLivePipelineTracePath(), 'utf8').catch(() => '');
+  const wasEnabled = isBackendLivePipelineTraceEnabled();
+  setBackendLivePipelineTraceEnabled(true);
+  try {
+    await handleBackendRequest(harness.deps, { id: 'trace-request-order', method: 'app.ping' });
+    await assert.rejects(handleBackendRequest(harness.deps, {
+      id: 'trace-invalid', method: 'session.open', params: {},
+    }));
+  } finally {
+    setBackendLivePipelineTraceEnabled(wasEnabled);
+    await flushBackendLivePipelineTrace();
+  }
+  // Records are matched by the exact HMAC request identity this test
+  // generated, so concurrent trace-producing tests cannot alter the sequence.
+  const phases = await readBackendRequestTracePhases(before, ['trace-request-order', 'trace-invalid']);
+  // Truthful ordering: route_selected at dispatch selection, request_validated
+  // after the handler actually validated its params, handler_started only
+  // after validation (execution, not validation, is what it denotes), and
+  // exactly one completion per request. The invalid request fails validation,
+  // so it records an explicit request_validated failure BEFORE its failure
+  // completion and never starts a handler. No handler_queued phase is claimed
+  // because there is no general request queue.
+  assert.deepEqual(phases, [
+    'route_selected:transition',
+    'request_validated:success',
+    'handler_started:start',
+    'handler_finished:success',
+    'route_selected:transition',
+    'request_validated:failure',
+    'handler_finished:failure',
+  ]);
+});
+
+test('unknown methods record no route/start and exactly one failure completion', async () => {
+  const harness = createHarness();
+  const before = await fs.readFile(getBackendLivePipelineTracePath(), 'utf8').catch(() => '');
+  const wasEnabled = isBackendLivePipelineTraceEnabled();
+  setBackendLivePipelineTraceEnabled(true);
+  try {
+    await assert.rejects(handleBackendRequest(harness.deps, { id: 'trace-unknown', method: 'missing.method' }));
+  } finally {
+    setBackendLivePipelineTraceEnabled(wasEnabled);
+    await flushBackendLivePipelineTrace();
+  }
+  const phases = await readBackendRequestTracePhases(before, ['trace-unknown']);
+  // No route was selected and no handler ran; the single failure completion
+  // is the request's terminal record.
+  assert.deepEqual(phases, ['handler_finished:failure']);
+});
+
+test('a validated request that fails records request_validated and exactly one failure completion', async () => {
+  const harness = createHarness({
+    sessionOverrides: { isStreaming: true, steer: async () => { throw new Error('queue failed'); } },
+  });
+  const before = await fs.readFile(getBackendLivePipelineTracePath(), 'utf8').catch(() => '');
+  const wasEnabled = isBackendLivePipelineTraceEnabled();
+  setBackendLivePipelineTraceEnabled(true);
+  try {
+    await assert.rejects(handleBackendRequest(harness.deps, {
+      id: 'trace-validated-failure', method: 'message.send',
+      params: { sessionPath: harness.context.sessionPath, text: 'queued', inputs: [], localId: 'local-failed' },
+    }), /queue failed/);
+  } finally {
+    setBackendLivePipelineTraceEnabled(wasEnabled);
+    await flushBackendLivePipelineTrace();
+  }
+  const phases = await readBackendRequestTracePhases(before, ['trace-validated-failure']);
+  assert.deepEqual(phases, [
+    'route_selected:transition',
+    'request_validated:success',
+    'handler_started:start',
+    'handler_finished:failure',
+  ]);
+});
+
+test('every registered route records a validation settlement and one completion', async () => {
+  const harness = createHarness();
+  const wasEnabled = isBackendLivePipelineTraceEnabled();
+  setBackendLivePipelineTraceEnabled(true);
+  try {
+    for (const method of BACKEND_REQUEST_METHODS) {
+      const before = await fs.readFile(getBackendLivePipelineTracePath(), 'utf8').catch(() => '');
+      // Empty params exercise the route's validator; no-param routes settle
+      // immediately. The outcome (success or any failure) is irrelevant — the
+      // settlement/completion invariant must hold either way.
+      await handleBackendRequest(harness.deps, { id: `route-settlement-${method}`, method, params: {} })
+        .catch(() => undefined);
+      const phases = await readBackendRequestTracePhases(before, [`route-settlement-${method}`]);
+      const validated = phases.filter((phase) => phase.startsWith('request_validated:'));
+      const finished = phases.filter((phase) => phase.startsWith('handler_finished:'));
+      assert.equal(validated.length, 1, `${method} must settle validation exactly once, got ${JSON.stringify(phases)}`);
+      assert.equal(finished.length, 1, `${method} must complete exactly once, got ${JSON.stringify(phases)}`);
+      assert.equal(phases[0], 'route_selected:transition', `${method} must open with route selection, got ${JSON.stringify(phases)}`);
+      if (validated[0] === 'request_validated:success') {
+        // Execution is denoted only after validation: handler_started sits
+        // between the validation settlement and the completion.
+        assert.deepEqual(phases.slice(0, 3), [
+          'route_selected:transition',
+          'request_validated:success',
+          'handler_started:start',
+        ], `${method} must start execution after validation, got ${JSON.stringify(phases)}`);
+      } else {
+        // Invalid params produce an explicit validation failure before the
+        // failure completion and never start a handler.
+        assert.equal(validated[0], 'request_validated:failure', `${method} got ${JSON.stringify(phases)}`);
+        assert.deepEqual(phases, [
+          'route_selected:transition',
+          'request_validated:failure',
+          'handler_finished:failure',
+        ], `${method} must record the validation failure before the completion, got ${JSON.stringify(phases)}`);
+      }
+    }
+  } finally {
+    setBackendLivePipelineTraceEnabled(wasEnabled);
+    await flushBackendLivePipelineTrace();
+  }
+});
+
+test('diagnostics.livePipeline.setEnabled notifies the server of the new enablement', async () => {
+  const harness = createHarness();
+  const changes: boolean[] = [];
+  harness.deps.onLivePipelineTraceEnabledChange = (enabled) => changes.push(enabled);
+  const wasEnabled = isBackendLivePipelineTraceEnabled();
+  try {
+    const result = await handleBackendRequest(harness.deps, {
+      id: 'trace-toggle-on', method: 'diagnostics.livePipeline.setEnabled', params: { enabled: true },
+    }) as { enabled: boolean };
+    assert.equal(result.enabled, true);
+    assert.deepEqual(changes, [true]);
+    await handleBackendRequest(harness.deps, {
+      id: 'trace-toggle-off', method: 'diagnostics.livePipeline.setEnabled', params: { enabled: false },
+    });
+    assert.deepEqual(changes, [true, false]);
+  } finally {
+    setBackendLivePipelineTraceEnabled(wasEnabled);
+    await flushBackendLivePipelineTrace();
+  }
+});
+
+test('diagnostics.livePipeline.setEnabled rejects non-boolean enabled', async () => {
+  const harness = createHarness();
+  await assert.rejects(
+    handleBackendRequest(harness.deps, {
+      id: 'trace-toggle-bad', method: 'diagnostics.livePipeline.setEnabled', params: { enabled: 'yes' },
+    }),
+    (error: unknown) => error instanceof BackendError && error.code === 'INVALID_PARAMS',
+  );
+});
+
+test('diagnostics.livePipeline.setEnabled off→on records the full success trace and settles state/callback', async () => {
+  const harness = createHarness();
+  const changes: boolean[] = [];
+  harness.deps.onLivePipelineTraceEnabledChange = (enabled) => changes.push(enabled);
+  const before = await fs.readFile(getBackendLivePipelineTracePath(), 'utf8').catch(() => '');
+  const wasEnabled = isBackendLivePipelineTraceEnabled();
+  setBackendLivePipelineTraceEnabled(false);
+  try {
+    const result = await handleBackendRequest(harness.deps, {
+      id: 'trace-toggle-off-to-on', method: 'diagnostics.livePipeline.setEnabled', params: { enabled: true },
+    }) as { enabled: boolean; health: { enabled: boolean } };
+    assert.equal(result.enabled, true);
+    assert.equal(result.health.enabled, true, 'response health must reflect the post-enable state');
+    assert.equal(isBackendLivePipelineTraceEnabled(), true, 'store must be enabled after the request settles');
+    assert.deepEqual(changes, [true], 'server callback must fire once, in lockstep with the store');
+  } finally {
+    setBackendLivePipelineTraceEnabled(wasEnabled);
+    await flushBackendLivePipelineTrace();
+  }
+  const phases = await readBackendRequestTracePhases(before, ['trace-toggle-off-to-on']);
+  // The enable is applied at the request boundary BEFORE the first trace
+  // record, so the enabling request's own prefix is recorded under the new
+  // state: one coherent route_selected → request_validated → handler_started
+  // → handler_finished success trace.
+  assert.deepEqual(phases, [
+    'route_selected:transition',
+    'request_validated:success',
+    'handler_started:start',
+    'handler_finished:success',
+  ]);
+});
+
+test('diagnostics.livePipeline.setEnabled on→off records the full success trace and settles state/callback', async () => {
+  const harness = createHarness();
+  const changes: boolean[] = [];
+  harness.deps.onLivePipelineTraceEnabledChange = (enabled) => changes.push(enabled);
+  const before = await fs.readFile(getBackendLivePipelineTracePath(), 'utf8').catch(() => '');
+  const wasEnabled = isBackendLivePipelineTraceEnabled();
+  setBackendLivePipelineTraceEnabled(true);
+  try {
+    const result = await handleBackendRequest(harness.deps, {
+      id: 'trace-toggle-on-to-off', method: 'diagnostics.livePipeline.setEnabled', params: { enabled: false },
+    }) as { enabled: boolean; health: { enabled: boolean } };
+    assert.equal(result.enabled, false);
+    assert.equal(result.health.enabled, false, 'response health must reflect the post-disable state');
+    assert.equal(isBackendLivePipelineTraceEnabled(), false, 'store must be disabled after the request settles');
+    assert.deepEqual(changes, [false], 'server callback must fire once, in lockstep with the store');
+  } finally {
+    setBackendLivePipelineTraceEnabled(wasEnabled);
+    await flushBackendLivePipelineTrace();
+  }
+  const phases = await readBackendRequestTracePhases(before, ['trace-toggle-on-to-off']);
+  // The disable is applied at the request boundary AFTER the completion
+  // record, so the disabling request's own trace completes under the old
+  // (enabled) state: one coherent route_selected → request_validated →
+  // handler_started → handler_finished success trace.
+  assert.deepEqual(phases, [
+    'route_selected:transition',
+    'request_validated:success',
+    'handler_started:start',
+    'handler_finished:success',
+  ]);
+});
+
+test('diagnostics.livePipeline.setEnabled invalid toggle keeps a truthful failure trace and does not mutate enablement', async () => {
+  const harness = createHarness();
+  const changes: boolean[] = [];
+  harness.deps.onLivePipelineTraceEnabledChange = (enabled) => changes.push(enabled);
+  const before = await fs.readFile(getBackendLivePipelineTracePath(), 'utf8').catch(() => '');
+  const wasEnabled = isBackendLivePipelineTraceEnabled();
+  setBackendLivePipelineTraceEnabled(true);
+  try {
+    await assert.rejects(
+      handleBackendRequest(harness.deps, {
+        id: 'trace-toggle-invalid', method: 'diagnostics.livePipeline.setEnabled', params: { enabled: 'yes' },
+      }),
+      (error: unknown) => error instanceof BackendError && error.code === 'INVALID_PARAMS',
+    );
+    assert.equal(isBackendLivePipelineTraceEnabled(), true, 'invalid toggle must not mutate enablement');
+    assert.deepEqual(changes, [], 'invalid toggle must not notify the server');
+  } finally {
+    setBackendLivePipelineTraceEnabled(wasEnabled);
+    await flushBackendLivePipelineTrace();
+  }
+  const phases = await readBackendRequestTracePhases(before, ['trace-toggle-invalid']);
+  // The invalid toggle never reaches the boundary application: the failure
+  // trace is recorded under the unchanged enablement.
+  assert.deepEqual(phases, [
+    'route_selected:transition',
+    'request_validated:failure',
+    'handler_finished:failure',
+  ]);
 });
 
 test('handleBackendRequest unknown method throws BackendError with UNKNOWN_METHOD code', async () => {
@@ -1614,7 +1944,7 @@ test('session.truncateAfter re-applies the user\'s model when the truncate dropp
   });
 });
 
-test('cold session.truncateAfter preserves durable model and thinking state', async () => {
+test('cold session.truncateAfter emits a runtime-free authoritative snapshot', async () => {
   await withTempDir(async (dir) => {
     const sessionPath = path.join(dir, 'session.jsonl');
     await fs.writeFile(sessionPath, [
@@ -1623,47 +1953,25 @@ test('cold session.truncateAfter preserves durable model and thinking state', as
     ].join('\n') + '\n');
     const harness = createHarness();
     harness.deps.getSessionContext = () => undefined;
-    let openCount = 0;
-    harness.deps.sdk.SessionManager.open = (() => {
-      openCount += 1;
-      return openCount === 1
-        ? { buildSessionContext: () => ({ messages: [], model: { provider: 'mock', modelId: 'model-b' }, thinkingLevel: 'high' }) }
-        : { sessionPath };
-    }) as any;
-    const applied: string[] = [];
-    const reopened: SessionContext = {
-      ...harness.context,
-      sessionPath,
-      runtime: {
-        services: {
-          modelRegistry: {
-            getAvailable: () => [{ id: 'model-b', provider: 'mock' }],
-            find: () => ({ id: 'model-b', provider: 'mock' }),
-          },
-        },
-      },
-      session: {
-        ...harness.context.session,
-        model: { id: 'model-a', provider: 'mock' },
-        thinkingLevel: 'low',
-        setModel: async () => {
-          applied.push('model-b');
-          reopened.session.model = { id: 'model-b', provider: 'mock' };
-        },
-        setThinkingLevel: (level: string) => {
-          applied.push(level);
-          reopened.session.thinkingLevel = level;
-        },
-      },
-    } as unknown as SessionContext;
-    harness.deps.createSessionContext = async () => reopened;
+    let truncateCalls = 0;
+    harness.deps.truncateColdSessionAfter = async (openedPath, entryId) => {
+      truncateCalls += 1;
+      assert.equal(openedPath, sessionPath);
+      assert.equal(entryId, 'stop');
+      return { sessionPath: openedPath };
+    };
+    harness.deps.buildSessionOpenedPayload = async (openedPath) => ({
+      session: { path: openedPath }, runtimeReady: false, busy: false,
+    } as any);
 
     await handleBackendRequest(harness.deps, {
       id: 'truncate-cold-model', method: 'session.truncateAfter', params: { sessionPath, entryId: 'stop' },
     });
 
-    assert.deepEqual(applied, ['model-b', 'high']);
-    assert.equal(openCount, 2);
+    assert.equal(truncateCalls, 1);
+    assert.equal(harness.createCalls.length, 0);
+    const opened = harness.emitted.find((event) => event.event === 'session.opened');
+    assert.equal((opened?.payload as { runtimeReady?: boolean }).runtimeReady, false);
   });
 });
 

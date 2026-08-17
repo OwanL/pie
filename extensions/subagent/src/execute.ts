@@ -50,7 +50,11 @@ import {
 } from "../bucket-selector.js";
 import { makeDetails } from "./helpers.js";
 import { executeSingleTask, type SingleSubagentParams } from "./single.js";
-import { compactSubagentDetails } from "./result-compaction.js";
+import {
+	compactSubagentDetails,
+	readRecursiveProjectionCounters,
+	type RecursiveProjectionCounters,
+} from "./result-compaction.js";
 import {
 	readAlwaysParentModelFromEnv,
 	readRouteAroundSaturatedProviders,
@@ -58,6 +62,7 @@ import {
 import type { ParentBridge } from "./parent-extension-ui-bridge-proxy.js";
 import { readFallbackOnProviderFailure } from "./provider-failure.js";
 import { hashDelegatedPrompt, loadModelFamilies, withRuntimeProvenance } from "./runtime-provenance.js";
+import { isRuntimeTraceEnabled, recordRuntimeTrace, type RuntimeTraceIdentifiers } from "./runtime-trace.js";
 // Model-selection primitives live in ./selection.ts and remain re-exported
 // here for compatibility with existing focused tests and integrations.
 import {
@@ -225,26 +230,53 @@ export function resolveSettlementGraceMs(): number {
  * Do not include timestamps: a producer repeatedly stamping Date.now() is not
  * credible work and must not keep a hung tree alive. */
 function legacyProgressFingerprint(result: SingleResult): string {
-	return JSON.stringify([
+	const startedAt = performance.now();
+	const fingerprint = JSON.stringify([
 		result.agent, result.task, result.step, result.exitCode, result.model,
 		result.stopReason, result.errorMessage, result.activityPhase, result.activityDetail,
 		result.streaming, result.streamingText, result.streamingReasoning, result.runningTools,
 		result.messages.length, result.usage.turns, result.usage.input, result.usage.output,
 		result.retryCount, result.failedModel, result.selectedModel,
 	]);
+	const producedPayloadBytes = isRuntimeTraceEnabled() ? Buffer.byteLength(fingerprint, "utf8") : undefined;
+	const runtimeContext = readRuntimeContext();
+	// Semantic fingerprint keys are not compact-event bytes; they deliberately
+	// carry no payload class so class sums never count them as such.
+	recordRuntimeTrace({
+		phase: "serialize",
+		durationMs: Math.max(0, performance.now() - startedAt),
+		producedPayloadBytes,
+		childCount: 1,
+		messageCount: result.messages.length,
+		identifiers: { session: runtimeContext.rootSessionPath, attempt: result.attemptId },
+	});
+	return fingerprint;
 }
 
 /** Identify one stable child attempt. A generation reset is only credible
  * when this identity changes (for example, a model retry moves to another
  * provider/model); agent/task/step alone are not enough. */
 function progressAttemptIdentity(result: SingleResult): string {
-	return JSON.stringify([
+	const startedAt = performance.now();
+	const identity = JSON.stringify([
 		result.agent,
 		result.task,
 		result.step ?? null,
 		result.provider ?? null,
 		result.model ?? null,
 	]);
+	const producedPayloadBytes = isRuntimeTraceEnabled() ? Buffer.byteLength(identity, "utf8") : undefined;
+	const runtimeContext = readRuntimeContext();
+	// Attempt-identity keys are fingerprint bytes, not compact-event bytes.
+	recordRuntimeTrace({
+		phase: "serialize",
+		durationMs: Math.max(0, performance.now() - startedAt),
+		producedPayloadBytes,
+		childCount: 1,
+		messageCount: result.messages.length,
+		identifiers: { session: runtimeContext.rootSessionPath, attempt: result.attemptId },
+	});
+	return identity;
 }
 
 /** Tracks the latest per-child progress sequence at this execute boundary.
@@ -252,30 +284,68 @@ function progressAttemptIdentity(result: SingleResult): string {
  * value observed for the same attempt. Keeping a high-water mark is important:
  * a stale 5 → 4 → 5 sequence must not turn the final 5 into fresh progress.
  * Legacy snapshots use a semantic fingerprint until an explicit generation is
- * observed, so duplicate callbacks still do not renew the settlement lease. */
-export function createProgressObserver(): (details: SubagentDetails | undefined) => boolean {
+ * observed, so duplicate callbacks still do not renew the settlement lease.
+ *
+ * Every call emits one closed dedupe outcome (changed | duplicate) so the
+ * settlement-lease decision itself is traceable. The fingerprints/identities
+ * are already byte-counted by their own serialize events; this event carries
+ * no payload class. */
+export function createProgressObserver(
+	/** Correlation identifiers for this execute boundary (e.g. the parent tool
+	 *  call), merged into every emitted dedupe outcome. */
+	traceIdentifiers?: RuntimeTraceIdentifiers,
+): (details: SubagentDetails | undefined) => boolean {
 	type ProgressState = {
 		identity: string;
 		highWaterGeneration?: number;
 		sawGeneration: boolean;
 		fingerprint: string;
 	};
-	const previous = new Map<number, ProgressState>();
+	const previous = new Map<string, ProgressState>();
 	return (details) => {
-		if (!details?.results) return false;
+		const startedAt = performance.now();
+		const emitDedupeOutcome = (
+			outcome: "changed" | "duplicate",
+			childCount: number,
+			messageCount: number,
+			attemptId?: string,
+		): void => {
+			const runtimeContext = readRuntimeContext();
+			recordRuntimeTrace({
+				phase: "dedupe",
+				outcome,
+				durationMs: Math.max(0, performance.now() - startedAt),
+				childCount,
+				messageCount,
+				identifiers: {
+					session: runtimeContext.rootSessionPath,
+					attempt: attemptId,
+					...traceIdentifiers,
+				},
+			});
+		};
+		if (!details?.results) {
+			emitDedupeOutcome("duplicate", 0, 0);
+			return false;
+		}
 		let progressed = false;
+		let messageCount = 0;
+		let attemptId: string | undefined;
 		for (let index = 0; index < details.results.length; index++) {
 			const result = details.results[index];
+			const childKey = result.childId ?? `legacy-index:${index}`;
+			if (attemptId === undefined && typeof result.attemptId === "string") attemptId = result.attemptId;
+			messageCount += result.messages.length;
 			const generation = Number.isSafeInteger(result.progressGeneration) && result.progressGeneration! >= 0
 				? result.progressGeneration
 				: undefined;
 			const fingerprint = legacyProgressFingerprint(result);
 			const identity = progressAttemptIdentity(result);
-			const before = previous.get(index);
+			const before = previous.get(childKey);
 			if (!before || before.identity !== identity) {
 				// A changed attempt identity is the one allowed generation reset.
 				progressed = true;
-				previous.set(index, {
+				previous.set(childKey, {
 					identity,
 					highWaterGeneration: generation,
 					sawGeneration: generation !== undefined,
@@ -299,6 +369,7 @@ export function createProgressObserver(): (details: SubagentDetails | undefined)
 			}
 			before.fingerprint = fingerprint;
 		}
+		emitDedupeOutcome(progressed ? "changed" : "duplicate", details.results.length, messageCount, attemptId);
 		return progressed;
 	};
 }
@@ -708,25 +779,49 @@ export async function execute(
 	// Retain the latest immutable progress snapshot at the execute boundary. If
 	// the net fires, completed siblings and partial child output must survive;
 	// only children that are still running are terminalized.
+	type DetailTraceMetadata = {
+		childCount: number;
+		messageCount: number;
+		cloneDurationMs: number;
+		attemptId?: string;
+	};
 	let latestDetails: SubagentDetails | undefined;
+	let latestTraceMetadata: DetailTraceMetadata | undefined;
 	let activeSettlementMs = resolveSettlementMs();
-	const captureDetails = (details: SubagentDetails | undefined): void => {
-		if (!details?.results) return;
+	const captureDetails = (details: SubagentDetails | undefined): DetailTraceMetadata | undefined => {
+		if (!details?.results) return undefined;
 		const previous = latestDetails?.results ?? [];
+		let messageCount = 0;
+		let attemptId: string | undefined;
+		const cloneStartedAt = performance.now();
 		latestDetails = {
 			...details,
-			results: details.results.map((result, index) => ({
-				...previous[index],
-				...result,
-				// Preserve partial prose/reasoning across the settlement-triggered abort update.
-				streamingText: result.streamingText ?? previous[index]?.streamingText,
-				streamingReasoning: result.streamingReasoning ?? previous[index]?.streamingReasoning,
-			})),
+			results: details.results.map((result, index) => {
+				messageCount += result.messages.length;
+				if (attemptId === undefined) attemptId = result.attemptId;
+				return {
+					...previous[index],
+					...result,
+					// Preserve partial prose/reasoning across the settlement-triggered abort update.
+					streamingText: result.streamingText ?? previous[index]?.streamingText,
+					streamingReasoning: result.streamingReasoning ?? previous[index]?.streamingReasoning,
+				};
+			}),
 		};
+		const metadata: DetailTraceMetadata = {
+			childCount: details.results.length,
+			messageCount,
+			cloneDurationMs: Math.max(0, performance.now() - cloneStartedAt),
+			attemptId,
+		};
+		latestTraceMetadata = metadata;
+		// This is timeout selection, not measurement of the payload. Keep the
+		// settlement budget out of the payload trace phases.
 		activeSettlementMs = resolvePhaseInactivityMs(latestDetails);
+		return metadata;
 	};
 	let renewSettlementDeadline: (() => void) | undefined;
-	const observeProgress = createProgressObserver();
+	const observeProgress = createProgressObserver({ tool: _toolCallId });
 	let acceptDispatchUpdates = true;
 	const deliverUpdate = (partial: Parameters<OnUpdateCallback>[0]): void => {
 		try { onUpdate?.(partial); } catch (error) {
@@ -735,7 +830,23 @@ export async function execute(
 	};
 	const preservingOnUpdate: OnUpdateCallback = (partial) => {
 		if (!acceptDispatchUpdates) return;
-		captureDetails(partial.details);
+		const metadata = captureDetails(partial.details);
+		if (metadata) {
+			// captureDetails performs the existing shallow snapshot/merge. It does
+			// not clone or walk nested message bodies, so this is a clone boundary,
+			// not a recursive projection.
+			recordRuntimeTrace({
+				phase: "clone",
+				durationMs: metadata.cloneDurationMs,
+				childCount: metadata.childCount,
+				messageCount: metadata.messageCount,
+				identifiers: {
+					session: runtimeCtx.rootSessionPath,
+					attempt: metadata.attemptId,
+					tool: _toolCallId,
+				},
+			});
+		}
 		// Never treat callback frequency as progress. Runner-owned results advance
 		// progressGeneration for lifecycle/model/tool/terminal activity (including
 		// propagated nested children); old snapshots fall back to semantic changes.
@@ -754,31 +865,65 @@ export async function execute(
 		errorMessage: cause,
 	}];
 	const terminalDetails = (cause: string): SubagentDetails => {
-		if (!latestDetails) return compactSubagentDetails(makeDetailsBound(fallbackResults(cause)));
-		return compactSubagentDetails({
-			...latestDetails,
-			results: latestDetails.results.map((result) => {
-				// exitCode is authoritative; runningTools/streaming can be stale when
-				// the nested lifecycle ends without its final event.
-				if (result.exitCode !== -1) return result;
-				return {
-					...result,
-					exitCode: 1,
-					streaming: false,
-					runningTools: [],
-					activityPhase: "failed",
-					activityDetail: cause,
-					stopReason: "error",
-					errorMessage: result.errorMessage ?? cause,
-					stderr: result.stderr || cause,
-				};
-			}),
+		const handoffStartedAt = performance.now();
+		const metadata = latestTraceMetadata ?? { childCount: 1, messageCount: 0, cloneDurationMs: 0 };
+		const projectionStartedAt = performance.now();
+		const recursiveCounters: RecursiveProjectionCounters = {
+			childCount: 0,
+			messageCount: 0,
+			maxRecursiveDepth: 0,
+			durationMs: 0,
+		};
+		const projected = !latestDetails
+			? compactSubagentDetails(makeDetailsBound(fallbackResults(cause)), recursiveCounters)
+			: compactSubagentDetails({
+				...latestDetails,
+				results: latestDetails.results.map((result) => {
+					// exitCode is authoritative; runningTools/streaming can be stale when
+					// the nested lifecycle ends without its final event.
+					if (result.exitCode !== -1) return result;
+					return {
+						...result,
+						exitCode: 1,
+						streaming: false,
+						runningTools: [],
+						activityPhase: "failed",
+						activityDetail: cause,
+						stopReason: "error",
+						errorMessage: result.errorMessage ?? cause,
+						stderr: result.stderr || cause,
+					};
+				}),
+			}, recursiveCounters);
+		const runtimeContext = readRuntimeContext();
+		// compactSubagentDetails recursively projects nested subagent results to
+		// their terminal form; that traversal is a recursive projection, not
+		// JSON-safe normalization.
+		recordRuntimeTrace({
+			phase: "recursive_projection",
+			durationMs: Math.max(0, performance.now() - projectionStartedAt),
+			childCount: recursiveCounters.childCount,
+			messageCount: recursiveCounters.messageCount,
+			maxRecursiveDepth: recursiveCounters.maxRecursiveDepth,
+			identifiers: { session: runtimeContext.rootSessionPath, attempt: metadata.attemptId, tool: _toolCallId },
 		});
+		// The handoff is the existing terminal projection/return boundary. Its
+		// serialized byte size is intentionally unavailable: this producer does
+		// not serialize the recursive detail merely to measure it.
+		recordRuntimeTrace({
+			phase: "terminal",
+			durationMs: Math.max(0, performance.now() - handoffStartedAt),
+			childCount: recursiveCounters.childCount,
+			messageCount: recursiveCounters.messageCount,
+			maxRecursiveDepth: recursiveCounters.maxRecursiveDepth,
+			identifiers: { session: runtimeContext.rootSessionPath, attempt: metadata.attemptId, tool: _toolCallId },
+		});
+		return projected;
 	};
 
 	const settlementMs = resolveSettlementMs();
 	if (settlementMs <= 0) {
-		return dispatchSingle(
+		const winner = await dispatchSingle(
 			params,
 			ctx,
 			agents,
@@ -793,6 +938,38 @@ export async function execute(
 			allToolNames,
 			settlementClock,
 		);
+		const metadata = latestTraceMetadata;
+		const recursiveCounters = readRecursiveProjectionCounters(winner.details);
+		const runtimeContext = readRuntimeContext();
+		// The terminal result was projected inside the runner's own
+		// compactSingleResult traversal, which measured its duration alongside
+		// the counters on the same symbol metadata. Emit that measured
+		// projection before the terminal handoff; nothing here re-walks or
+		// re-serializes the recursive payload.
+		recordRuntimeTrace({
+			phase: "recursive_projection",
+			durationMs: recursiveCounters?.durationMs,
+			childCount: recursiveCounters?.childCount,
+			messageCount: recursiveCounters?.messageCount,
+			maxRecursiveDepth: recursiveCounters?.maxRecursiveDepth,
+			identifiers: {
+				session: runtimeContext.rootSessionPath,
+				attempt: metadata?.attemptId ?? winner.details?.results?.[0]?.attemptId,
+				tool: _toolCallId,
+			},
+		});
+		recordRuntimeTrace({
+			phase: "terminal",
+			childCount: recursiveCounters?.childCount,
+			messageCount: recursiveCounters?.messageCount,
+			maxRecursiveDepth: recursiveCounters?.maxRecursiveDepth,
+			identifiers: {
+				session: runtimeContext.rootSessionPath,
+				attempt: metadata?.attemptId ?? winner.details?.results?.[0]?.attemptId,
+				tool: _toolCallId,
+			},
+		});
+		return winner;
 	}
 
 	// Combine the parent signal with a settlement controller so a settlement
@@ -861,6 +1038,35 @@ export async function execute(
 			// Dispatch returned first (normal case AND the abort-quickly case,
 			// because on settlement abort runner.ts aborts and returns its own
 			// abort result, which dispatchToMode turns into the response).
+			const metadata = latestTraceMetadata;
+			const recursiveCounters = readRecursiveProjectionCounters(winner.details);
+			const runtimeContext = readRuntimeContext();
+			// Same measured recursive projection as the settlement-off path: the
+			// runner's compactSingleResult traversal measured its own duration
+			// alongside the counters; emit it before the terminal handoff.
+			recordRuntimeTrace({
+				phase: "recursive_projection",
+				durationMs: recursiveCounters?.durationMs,
+				childCount: recursiveCounters?.childCount,
+				messageCount: recursiveCounters?.messageCount,
+				maxRecursiveDepth: recursiveCounters?.maxRecursiveDepth,
+				identifiers: {
+					session: runtimeContext.rootSessionPath,
+					attempt: metadata?.attemptId ?? winner.details?.results?.[0]?.attemptId,
+					tool: _toolCallId,
+				},
+			});
+			recordRuntimeTrace({
+				phase: "terminal",
+				childCount: recursiveCounters?.childCount,
+				messageCount: recursiveCounters?.messageCount,
+				maxRecursiveDepth: recursiveCounters?.maxRecursiveDepth,
+				identifiers: {
+					session: runtimeContext.rootSessionPath,
+					attempt: metadata?.attemptId ?? winner.details?.results?.[0]?.attemptId,
+					tool: _toolCallId,
+				},
+			});
 			return winner;
 		}
 

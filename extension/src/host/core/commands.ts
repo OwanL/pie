@@ -11,6 +11,7 @@
  */
 
 import type { ComposerInput, ComposerInputDraft, SessionSummary, UserContentPart, ExtensionUIResponsePayload, PruningMode } from '../../shared/protocol';
+import type { LiveSubagentDetailAddress, DetailCursor, DetailPageRef } from '../../shared/protocol/subagent-detail';
 
 import type { ModelSettings, ChatPrefs } from '../../shared/protocol';
 
@@ -142,6 +143,11 @@ export interface CreateSessionCommand extends CommandBase {
    *  optimistically activates the pending tab, so failure recovery can restore
    *  it. Flowed through to the runner for the backend session.create RPC. */
   selectionToken: string;
+  /** Stable host-generated identity reused when the local create waiter is
+   *  retried. Optional for compatibility with older internal callers. */
+  operationId?: string;
+  /** Attempt fence for a retried create operation. */
+  operationAttempt?: number;
 }
 
 /** Persist the tab order / active tab / pinned tabs to globalState. */
@@ -287,6 +293,34 @@ export interface SetSystemPromptTogglesCommand extends CommandBase {
   disabledEntries: string[];
 }
 
+// ─── Phase 5 detail subscription commands ───────────────────────────────────
+// The webview owns `detailKey`; the EffectRunner mints the `subscriptionId`
+// and the session service owns the subscription lifecycle. The reducer stores
+// nothing: these commands only emit side-effect records, keeping pages and
+// stream state out of `ArchState`.
+
+export interface DetailSubscribeCommand extends CommandBase {
+  kind: 'DetailSubscribe';
+  viewGeneration: number;
+  detailKey: string;
+  address: LiveSubagentDetailAddress;
+  cursor?: DetailCursor;
+}
+
+export interface DetailUnsubscribeCommand extends CommandBase {
+  kind: 'DetailUnsubscribe';
+  viewGeneration: number;
+  detailKey: string;
+  reason: 'collapse' | 'unmount' | 'session-change';
+}
+
+export interface DetailFetchPagesCommand extends CommandBase {
+  kind: 'DetailFetchPages';
+  viewGeneration: number;
+  detailKey: string;
+  ref: DetailPageRef;
+}
+
 export type Command =
   | SendCommand
   | EditCommand
@@ -332,7 +366,10 @@ export type Command =
   | UngroupPinnedTabCommand
   | SetFileChangesExpandedCommand
   | SetFileReadCommand
-  | SetSystemPromptTogglesCommand;
+  | SetSystemPromptTogglesCommand
+  | DetailSubscribeCommand
+  | DetailUnsubscribeCommand
+  | DetailFetchPagesCommand;
 export interface SetModelCommand extends CommandBase {
   kind: 'SetModel';
   sessionPath: string;
@@ -390,9 +427,8 @@ export interface CloseSessionCommand extends CommandBase {
    *  when an earlier optimistic command already hid the tab. */
   ensureClosed?: boolean;
   /** True when this close originates from a V2 review closure outbox action
-   *  (closeReviewed/closeSelf). The reducer marks a running target as
-   *  review-closure-hidden so the webview ready handshake does not resurrect
-   *  its tab. */
+   *  (closeReviewed/closeSelf). The durable reason is retained separately
+   *  from the host-owned intentional-hide intent. */
   reviewClosure?: boolean;
 }
 
@@ -418,6 +454,11 @@ export interface DuplicateSessionCommand extends CommandBase {
    *  optimistically activates the copy tab, so failure recovery can restore it.
    *  Flowed through to the runner for the backend `session.duplicate` RPC. */
   selectionToken: string;
+  /** Stable host-generated identity reused when the local duplicate waiter is
+   *  retried. Optional for compatibility with older internal callers. */
+  operationId?: string;
+  /** Attempt fence for a retried duplicate operation. */
+  operationAttempt?: number;
 }
 
 export interface MoveSessionTabCommand extends CommandBase {

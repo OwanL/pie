@@ -37,6 +37,16 @@ export const LLM_TIMEOUT_MS_BY_THINKING_LEVEL: Record<string, number> = {
 	xhigh: 90_000,
 };
 
+/** Ollama prepasses are small classification calls. Keep a slow or reasoning
+ * cloud model from consuming its full catalog output allowance before it can
+ * emit the JSON keep list. Explicit `prepass.maxOutputTokens` still wins. */
+export const DEFAULT_OLLAMA_PREPASS_MAX_OUTPUT_TOKENS = 1_024;
+
+/** Ollama model calls include local model loading and gateway queue time. The
+ * shorter default budget keeps a failed optimization from blocking a turn for
+ * the general remote-model timeout budget. Explicit timeout overrides win. */
+const DEFAULT_OLLAMA_PREPASS_TIMEOUT_MS = 15_000;
+
 /**
  * Max transport-level retries (5xx / network errors) per thinking-level
  * attempt, with exponential backoff between them. This is distinct from the
@@ -209,13 +219,30 @@ export async function completeOllamaNative(
 	};
 }
 
+function isOllamaCloudModel(model: unknown): boolean {
+	const modelObj = model as { id?: unknown; name?: unknown };
+	return (typeof modelObj.id === "string" && /(?:-|:)cloud$/i.test(modelObj.id))
+		|| (typeof modelObj.name === "string" && /^Ollama Cloud:/i.test(modelObj.name));
+}
+
+export function isLocalOllamaModel(model: unknown): boolean {
+	const modelObj = model as { id?: unknown; provider?: unknown };
+	return modelObj.provider === "ollama"
+		&& typeof modelObj.id === "string"
+		&& !isOllamaCloudModel(model);
+}
+
+export function isOllamaModel(model: unknown): boolean {
+	return (model as { provider?: unknown }).provider === "ollama";
+}
+
 export function getCompleteFn(_ctx: unknown): CompleteSimpleFn | null {
 	const override = getCompleteFnOverride();
 	if (override === false) return null;
 	if (override) return override;
 
 	const adapter: CompleteSimpleFn = async (model, context, options) => {
-		if ((model as { provider?: unknown })?.provider === "ollama") {
+		if (isLocalOllamaModel(model)) {
 			return completeOllamaNative(model, context, options);
 		}
 		if (state._piCompleteSimple === undefined) {
@@ -359,7 +386,7 @@ export function prepassTimeoutMs(thinkingLevel: string, attemptIndex: number = 0
 }
 
 export function buildPrepassThinkingAttempts(thinkingLevel: string): string[] {
-	if (thinkingLevel === "minimal") {
+	if (thinkingLevel === "off" || thinkingLevel === "minimal") {
 		return [thinkingLevel];
 	}
 	return [...new Set([thinkingLevel, "minimal"])];
@@ -551,24 +578,23 @@ export async function runPruningPrepass(
 	// merged over the built-in defaults. Absent fields keep the calibrated
 	// defaults — see LLM_TIMEOUT_MS_BY_THINKING_LEVEL / PREPASS_MAX_TRANSPORT_RETRIES.
 	const { timeoutOverrides, maxTransportRetries, transportBackoffBaseMs, maxOutputTokens } = resolvePrepassBudgets(activeConfig);
+	const effectiveTimeoutOverrides = timeoutOverrides ?? (isOllamaModel(model)
+		? { minimal: DEFAULT_OLLAMA_PREPASS_TIMEOUT_MS, low: DEFAULT_OLLAMA_PREPASS_TIMEOUT_MS }
+		: undefined);
+	const effectiveMaxOutputTokens = maxOutputTokens ?? (isOllamaModel(model)
+		? DEFAULT_OLLAMA_PREPASS_MAX_OUTPUT_TOKENS
+		: undefined);
 	// Remote APIs vary in whether they accept sampling overrides (notably the
 	// Codex backend rejects `temperature`). Keep this experiment-only knob on
 	// the native local Ollama path, where its support is known and controlled.
-	const modelDescriptor = model as { id?: unknown; name?: unknown; provider?: unknown };
-	const isOllamaCloudModel = (typeof modelDescriptor.id === "string"
-		&& /(?:-|:)cloud$/i.test(modelDescriptor.id))
-		|| (typeof modelDescriptor.name === "string" && /^Ollama Cloud:/i.test(modelDescriptor.name));
-	const isLocalOllamaModel = modelDescriptor.provider === "ollama"
-		&& typeof modelDescriptor.id === "string"
-		&& !isOllamaCloudModel;
-	const temperature = isLocalOllamaModel ? activeConfig.prepass?.temperature : undefined;
+	const temperature = isLocalOllamaModel(model) ? activeConfig.prepass?.temperature : undefined;
 	const buildAttemptOptions = (thinkingLevel: string, timeoutMs: number): Record<string, unknown> => ({
 		reasoning: thinkingLevel,
 		// Disable pi-ai retries so only the classified manual loop below
 		// controls retry count and backoff (avoids nested amplification).
 		maxRetries: 0,
 		...(temperature !== undefined ? { temperature } : {}),
-		...(maxOutputTokens !== undefined ? { maxTokens: maxOutputTokens } : {}),
+		...(effectiveMaxOutputTokens !== undefined ? { maxTokens: effectiveMaxOutputTokens } : {}),
 		signal: AbortSignal.timeout(timeoutMs),
 		...auth,
 	});
@@ -591,7 +617,7 @@ export async function runPruningPrepass(
 
 	for (let index = 0; index < attempts.length; index++) {
 		const thinkingLevel = attempts[index];
-		const timeoutMs = prepassTimeoutMs(thinkingLevel, index, timeoutOverrides);
+		const timeoutMs = prepassTimeoutMs(thinkingLevel, index, effectiveTimeoutOverrides);
 		try {
 			const result = await runLlmPruningWithParseRecovery(
 				llmInput,

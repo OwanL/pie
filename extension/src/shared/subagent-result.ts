@@ -1,4 +1,6 @@
 import type { ToolCall } from './protocol';
+import type { LiveSubagentDetailAddress, SubagentChildIdentity } from './protocol/subagent-detail';
+import { isLiveSubagentDetailAddress } from './protocol/subagent-detail';
 import type { LifecycleValueSource, SubagentAttemptPhase, SubagentAttemptSample } from '../../../shared/run-analytics-contracts.js';
 import { isRecord } from './type-guards';
 
@@ -59,6 +61,17 @@ export interface SubagentUsageSummary {
 export interface SubagentSingleResult {
   agent: string;
   task: string;
+  /** Producer-issued logical child identity (Phase 5 detail addressing). */
+  childId?: string;
+  /** Complete root-to-target producer lineage. Legacy durable results without
+   *  this field may render, but are explicitly not live-addressable. */
+  lineage?: SubagentChildIdentity[];
+  /** True when the producer stamped a stable addressable identity. */
+  liveAddressable?: boolean;
+  /** Immutable producer-owned address for the Phase 5 page-backed detail
+   *  subscription. Absent for legacy/durable refs that cannot own live
+   *  deltas; those keep the generic one-shot detail path. */
+  detailAddress?: LiveSubagentDetailAddress;
   /** Parent-context mode requested for this delegation. */
   parentUserContextMode?: 'latest' | 'all';
   /** Exact bounded parent-context packet inserted into the child prompt. */
@@ -392,6 +405,17 @@ export function getRenderableSubagentResult(rawResult: unknown): SubagentResult 
       const exitCode = explicitExit ?? (phase === 'completed' ? 0 : phase === 'failed' || phase === 'cancelled' ? 1 : -1);
       const summary = typeof candidate.summary === 'string' ? candidate.summary : undefined;
       const streamingText = typeof candidate.streamingText === 'string' ? candidate.streamingText : undefined;
+      const lineage = Array.isArray(candidate.lineage)
+        ? candidate.lineage.filter((entry): entry is SubagentChildIdentity => {
+          return !!entry && typeof entry === 'object'
+            && typeof entry.childId === 'string'
+            && typeof entry.spawningToolCallId === 'string'
+            && typeof entry.attemptId === 'string';
+        })
+        : undefined;
+      const detailAddress = candidate.detailAddress !== undefined && isLiveSubagentDetailAddress(candidate.detailAddress)
+        ? candidate.detailAddress
+        : undefined;
       const messages: RawMessage[] = summary && !streamingText
         ? [{ role: 'assistant', content: [{ type: 'text', text: summary }] }]
         : [];
@@ -400,6 +424,9 @@ export function getRenderableSubagentResult(rawResult: unknown): SubagentResult 
         task,
         exitCode,
         messages,
+        ...(lineage && lineage.length > 0 ? { lineage } : {}),
+        ...(candidate.liveAddressable === true ? { liveAddressable: true as const } : {}),
+        ...(detailAddress ? { detailAddress } : {}),
         ...(candidate.parentUserContextMode === 'latest' || candidate.parentUserContextMode === 'all'
           ? { parentUserContextMode: candidate.parentUserContextMode }
           : {}),

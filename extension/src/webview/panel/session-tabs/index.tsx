@@ -33,6 +33,7 @@ interface SessionTabsProps {
   onMovePinnedItem: (sourcePath: string, toItemIndex: number) => void;
   onNew: () => void;
   onDuplicate: (path: string) => void;
+  onRetryCreate?: (operationId: string) => void;
   onTogglePin: (path: string) => void;
   onGroupPinnedTab: (sourcePath: string, targetPath: string) => void;
   onMergePinnedGroups: (sourcePath: string, targetPath: string) => void;
@@ -96,6 +97,7 @@ function areSessionTabsPropsEqual(
     && previous.onMovePinnedItem === next.onMovePinnedItem
     && previous.onNew === next.onNew
     && previous.onDuplicate === next.onDuplicate
+    && previous.onRetryCreate === next.onRetryCreate
     && previous.onTogglePin === next.onTogglePin
     && previous.onGroupPinnedTab === next.onGroupPinnedTab
     && previous.onMergePinnedGroups === next.onMergePinnedGroups
@@ -132,6 +134,7 @@ function SessionTabsView({
   onMovePinnedItem,
   onNew,
   onDuplicate,
+  onRetryCreate,
   onTogglePin,
   onGroupPinnedTab,
   onMergePinnedGroups,
@@ -500,6 +503,7 @@ function SessionTabsView({
               onPointerDown={onPointerDown}
               onClick={onClick}
               onClose={onClose}
+              onRetryCreate={onRetryCreate}
             />
           ),
         ])}
@@ -523,6 +527,7 @@ function SessionTabsView({
             onPointerDown={onPointerDown}
             onClick={onClick}
             onClose={onClose}
+            onRetryCreate={onRetryCreate}
           />,
         ])}
         <DropGap index={renderedUnpinnedPaths.length} dropIndex={activeUnpinnedGap} tabHeight={dropTabHeight} dragGapWidth={dragGapWidth} />

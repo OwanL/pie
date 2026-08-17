@@ -12,6 +12,7 @@ const store = new LivePipelineTraceStore({
   traceRunId,
   hmacKey,
   fileName: 'live-pipeline-host.jsonl',
+  directory: process.env.PIE_LIVE_PIPELINE_TRACE_DIR?.trim() || undefined,
 });
 let flushTimer: ReturnType<typeof setTimeout> | undefined;
 

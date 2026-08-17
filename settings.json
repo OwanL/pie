@@ -1,7 +1,7 @@
 {
-  "defaultModel": "gpt-5.6-luna",
-  "defaultThinkingLevel": "xhigh",
-  "defaultProvider": "github-copilot",
+  "defaultModel": "deepseek-v4-flash:0731-cloud",
+  "defaultThinkingLevel": "high",
+  "defaultProvider": "ollama",
   "retry": {
     "enabled": true,
     "maxRetries": 8,
@@ -17,11 +17,20 @@
     "npm:pi-web-access@0.13.0"
   ],
   "pruning": {
-    "model": "gpt-5.6-luna",
-    "provider": "openai-codex",
-    "thinkingLevel": "low",
+    "model": "deepseek-v4-flash:0731-cloud",
+    "provider": "ollama",
+    "thinkingLevel": "off",
     "prepass": {
-      "temperature": 0.2
+      "temperature": 0.2,
+      "maxOutputTokens": 1024,
+      "timeoutMs": {
+        "minimal": 15000,
+        "low": 15000,
+        "medium": 15000,
+        "high": 15000,
+        "xhigh": 15000
+      },
+      "maxTransportRetries": 0
     },
     "skills": {
       "strategy": "discretion",

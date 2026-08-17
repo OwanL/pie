@@ -12,12 +12,14 @@ import {
   highlightToolResultText,
   isTextOnlyToolResult,
   languageForToolInput,
+  stringifyValueAsYamlText,
   textFromToolResult,
 } from '../highlight';
 
 import { isCommandSummaryTool } from './summary-model';
 import { TerminalOutput } from './terminal-output';
 import { hasImageToolResult, ToolResultContentParts } from './tool-result-content';
+import { SegmentedText, getToolTextSegmentThreshold } from './segmented-text';
 
 interface ToolCallBodyProps {
   toolCall: ToolCall;
@@ -83,7 +85,7 @@ export function ToolCallBody({ toolCall, prefs = DEFAULT_CHAT_PREFS, onOpenFile 
         )}
         {text && (
           <div class="tool-call-terminal" data-running={isRunning ? 'true' : undefined}>
-            <TerminalOutput text={text} running={isRunning} />
+            <TerminalOutput text={text} running={isRunning} identity={`${toolCall.id}:terminal`} />
           </div>
         )}
         {showFooter && (
@@ -116,6 +118,12 @@ export function ToolCallBody({ toolCall, prefs = DEFAULT_CHAT_PREFS, onOpenFile 
   // A result carrying image-typed content parts must take the mixed-content
   // render path so image base64 is never serialized as YAML/text.
   const hasImage = hasImageToolResult(toolCall.result);
+  // Serialized YAML of a huge structured result is itself a huge string node;
+  // segment it like the text path so no single DOM text node exceeds the
+  // bounded segment budget. Text-only results skip this (their text is the
+  // render source above; re-serializing a huge string as YAML is wasteful).
+  const yamlText = hasImage || resultIsTextOnly ? undefined : stringifyValueAsYamlText(toolCall.result);
+  const segmentThreshold = getToolTextSegmentThreshold();
   // Infer a highlight language for file-content tools (read/grep/glob/find/cat)
   // from the tool's input path. edit/write results are short confirmations,
   // so they fall through to plain/JSON-detect highlighting.
@@ -149,7 +157,23 @@ export function ToolCallBody({ toolCall, prefs = DEFAULT_CHAT_PREFS, onOpenFile 
             <ToolResultContentParts result={toolCall.result} languageHint={resultLanguageHint} />
           ) : resultIsTextOnly && resultText !== undefined ? (
             <ResizablePre class="tool-call-pre tool-call-pre-resizable hljs-scope" minHeight={80}>
-              <code class="hljs" dangerouslySetInnerHTML={{ __html: highlightToolResultText(resultText, resultLanguageHint) }} />
+              <SegmentedText
+                text={resultText}
+                identity={`${toolCall.id}:result`}
+                renderSegment={(segmentText) => (
+                  <code class="hljs" dangerouslySetInnerHTML={{ __html: highlightToolResultText(segmentText, resultLanguageHint) }} />
+                )}
+              />
+            </ResizablePre>
+          ) : yamlText !== undefined && yamlText.length > segmentThreshold ? (
+            <ResizablePre class="tool-call-pre tool-call-pre-resizable hljs-scope" minHeight={80}>
+              <SegmentedText
+                text={yamlText}
+                identity={`${toolCall.id}:result`}
+                renderSegment={(segmentText) => (
+                  <code class="hljs language-yaml" dangerouslySetInnerHTML={{ __html: highlightToolResultText(segmentText, 'yaml') }} />
+                )}
+              />
             </ResizablePre>
           ) : (
             <ResizablePre class="tool-call-pre tool-call-pre-resizable hljs-scope" minHeight={80}>

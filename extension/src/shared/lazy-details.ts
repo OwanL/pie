@@ -57,53 +57,6 @@ function compactUnknownPreview(value: unknown, maxChars = SUBAGENT_PREVIEW_TEXT_
   return compact;
 }
 
-function compactToolActivityMessages(value: unknown): unknown[] {
-  if (!Array.isArray(value)) return [];
-  let latestToolCall:
-    | { id: string; name: string; arguments?: unknown; result?: unknown }
-    | undefined;
-  const toolResults = new Map<string, Record<string, unknown>>();
-
-  for (const message of value) {
-    if (!isRecord(message)) continue;
-    if (message.role === 'toolResult' && message.toolCallId != null) {
-      toolResults.set(String(message.toolCallId), message);
-    }
-    if (message.role !== 'assistant' || !Array.isArray(message.content)) continue;
-    for (const part of message.content) {
-      if (!isRecord(part) || part.type !== 'toolCall' || part.id == null || typeof part.name !== 'string') continue;
-      latestToolCall = {
-        id: String(part.id),
-        name: part.name,
-        arguments: compactUnknownPreview(part.arguments, SUBAGENT_PREVIEW_TASK_CHARS),
-        result: compactUnknownPreview(part.result),
-      };
-    }
-  }
-
-  if (!latestToolCall) return [];
-  const assistantPart: Record<string, unknown> = {
-    type: 'toolCall',
-    id: latestToolCall.id,
-    name: latestToolCall.name,
-    arguments: latestToolCall.arguments,
-  };
-  if (latestToolCall.result !== undefined) assistantPart.result = latestToolCall.result;
-  const compact: unknown[] = [{ role: 'assistant', content: [assistantPart] }];
-  const terminal = toolResults.get(latestToolCall.id);
-  if (terminal) {
-    const rawResult = terminal.content ?? terminal.details;
-    compact.push({
-      role: 'toolResult',
-      toolCallId: latestToolCall.id,
-      toolName: boundedStart(terminal.toolName ?? latestToolCall.name, 256),
-      content: compactUnknownPreview(rawResult),
-      isError: terminal.isError === true,
-    });
-  }
-  return compact;
-}
-
 function compactSubagentChild(value: unknown): Record<string, unknown> | undefined {
   if (!isRecord(value)) return undefined;
   const child: Record<string, unknown> = {
@@ -111,11 +64,19 @@ function compactSubagentChild(value: unknown): Record<string, unknown> | undefin
     agent: boundedStart(value.agent, 256),
     task: boundedStart(value.task, SUBAGENT_PREVIEW_TASK_CHARS),
     exitCode: value.exitCode,
-    messages: compactToolActivityMessages(value.messages),
+    messages: [],
   };
   const copy = (key: string, candidate: unknown = value[key]): void => {
     if (candidate !== undefined) child[key] = candidate;
   };
+  copy('childId', boundedStart(value.childId, 512));
+  copy('attemptId', boundedStart(value.attemptId, 512));
+  copy('lineage', Array.isArray(value.lineage) ? value.lineage.slice(0, 64).map((item) => compactUnknownPreview(item, 1024)) : undefined);
+  copy('liveAddressable', value.liveAddressable === true);
+  // The immutable live detail address (root identity + lineage) is small and
+  // must survive the compact preview so an expanded card can open the Phase 5
+  // page-backed subscription without a backend round-trip.
+  copy('detailAddress', value.detailAddress);
   copy('parentUserContextMode');
   copy('model', boundedStart(value.model, 256));
   copy('provider', boundedStart(value.provider, 256));
@@ -278,10 +239,9 @@ export function compactToolCallDetail(
 ): ToolCall {
   if (tool.result === undefined || tool.detailRef) return tool;
   const sizeBytes = options.sizeBytes ?? jsonBytes(tool.result);
-  if (sizeBytes <= LAZY_DETAIL_THRESHOLD_BYTES) return tool;
-  const preview = tool.name === 'subagent'
-    ? compactSubagentResultPreview(tool.result)
-    : undefined;
+  const isSubagent = tool.name.trim().toLowerCase() === 'subagent';
+  if (!isSubagent && sizeBytes <= LAZY_DETAIL_THRESHOLD_BYTES) return tool;
+  const preview = isSubagent ? compactSubagentResultPreview(tool.result) : undefined;
   return {
     ...tool,
     result: preview,

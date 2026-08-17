@@ -4,8 +4,9 @@
 import { ResizeHandle } from '../../components/resize-handle';
 import { useResizableHeight } from '../../components/use-resizable-height';
 import { useStickToBottom } from '../use-stick-to-bottom';
+import { SegmentedText } from './segmented-text';
 
-export function TerminalOutput({ text, running }: { text: string; running: boolean }) {
+export function TerminalOutput({ text, running, identity }: { text: string; running: boolean; identity: string }) {
   const { scrollRef, height, startResize, minHeight, maxHeight, canResize, resizeBy, reset } = useResizableHeight<HTMLPreElement>();
   const { handleScroll } = useStickToBottom<HTMLPreElement>(scrollRef, [text]);
 
@@ -28,7 +29,11 @@ export function TerminalOutput({ text, running }: { text: string; running: boole
         onScroll={handleScroll}
         style={height ? { height: `${height}px`, maxHeight: 'none' } : undefined}
       >
-        <code>{text}</code>
+        <SegmentedText
+          text={text}
+          identity={identity}
+          renderSegment={(segmentText) => <code>{segmentText}</code>}
+        />
         {running && <span class="tool-call-terminal-cursor" aria-hidden="true" />}
       </pre>
       {canResize && (

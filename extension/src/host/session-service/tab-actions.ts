@@ -102,16 +102,21 @@ export class SessionTabActions {
     // synchronously so the composer fallback caller can address the new
     // session immediately.
     const pendingPath = this.state.createPendingSessionPath();
+    const operationId = crypto.randomUUID();
     this.visualTransitionEpoch += 1;
     const cwd = this.getArchState().sessions.workspaceCwd ?? '';
-    const selectionToken = this.state.beginSelectionRequest(pendingPath, pendingPath);
+    const selectionToken = this.state.beginSelectionRequest(pendingPath, pendingPath, false, false, undefined, operationId);
 
+    const configuredModel = this.getArchState().settings.modelSettings;
     const placeholderSummary: SessionSummary = {
       path: pendingPath,
       name: 'New Session',
       cwd,
       modifiedAt: new Date().toISOString(),
       messageCount: 0,
+      modelId: configuredModel?.defaultModel,
+      provider: configuredModel?.defaultProvider,
+      thinkingLevel: configuredModel?.defaultThinkingLevel,
       isPlaceholder: true,
     };
 
@@ -119,6 +124,7 @@ export class SessionTabActions {
       cwd,
       pendingPath,
       selectionToken,
+      operationId,
     });
 
     this.dispatchArch({
@@ -130,6 +136,7 @@ export class SessionTabActions {
         cwd,
         placeholderSummary,
         selectionToken,
+        operationId,
       },
     });
     this.scheduleRender();
@@ -381,8 +388,9 @@ export class SessionTabActions {
     }
 
     const pendingPath = this.state.createPendingSessionPath();
+    const operationId = crypto.randomUUID();
     this.visualTransitionEpoch += 1;
-    const selectionToken = this.state.beginSelectionRequest(pendingPath, pendingPath);
+    const selectionToken = this.state.beginSelectionRequest(pendingPath, pendingPath, false, false, undefined, operationId);
 
     const placeholderSummary: SessionSummary = {
       path: pendingPath,
@@ -390,6 +398,9 @@ export class SessionTabActions {
       cwd: source.cwd,
       modifiedAt: new Date().toISOString(),
       messageCount: source.messageCount,
+      modelId: source.modelId,
+      provider: source.provider,
+      thinkingLevel: source.thinkingLevel,
       isPlaceholder: true,
     };
 
@@ -397,6 +408,7 @@ export class SessionTabActions {
       sourceSessionPath,
       pendingPath,
       selectionToken,
+      operationId,
     });
 
     this.dispatchArch({
@@ -408,8 +420,64 @@ export class SessionTabActions {
         sourceSessionPath,
         placeholderSummary,
         selectionToken,
+        operationId,
       },
     });
     this.scheduleRender();
+  }
+
+  /** Retry a delayed create/duplicate without minting a new operation identity.
+   * This is host-owned so any future retry UI cannot accidentally create a new
+   * pending tab or lose the original queued sends. */
+  retryCreateSession(operationId: string): boolean {
+    const operation = this.getArchState().pending.createOperations[operationId];
+    if (!operation || operation.status !== 'delayed-awaiting-outcome') return false;
+    const summary = this.getArchState().sessions.sessions.find((item) => item.path === operation.pendingPath);
+    if ((!summary && !operation.hidden) || (operation.kind === 'duplicate' && !operation.sourceSessionPath)) return false;
+    if (!this.state.retryCreateOperation(operationId)) return false;
+    const corrId = crypto.randomUUID();
+    if (operation.kind === 'create') {
+      this.dispatchArch({
+        kind: 'Command',
+        cmd: {
+          kind: 'CreateSession',
+          corrId,
+          sessionPath: operation.pendingPath,
+          cwd: operation.cwd ?? summary?.cwd ?? this.getArchState().sessions.workspaceCwd ?? '',
+          placeholderSummary: summary ?? {
+            path: operation.pendingPath,
+            name: 'New Session',
+            cwd: operation.cwd ?? this.getArchState().sessions.workspaceCwd ?? '',
+            modifiedAt: new Date().toISOString(),
+            messageCount: 0,
+            isPlaceholder: true,
+          },
+          selectionToken: operation.selectionToken,
+          operationId,
+        },
+      });
+    } else if (operation.sourceSessionPath) {
+      this.dispatchArch({
+        kind: 'Command',
+        cmd: {
+          kind: 'DuplicateSession',
+          corrId,
+          sessionPath: operation.pendingPath,
+          sourceSessionPath: operation.sourceSessionPath,
+          placeholderSummary: summary ?? {
+            path: operation.pendingPath,
+            name: 'Session copy',
+            cwd: this.getArchState().sessions.workspaceCwd ?? '',
+            modifiedAt: new Date().toISOString(),
+            messageCount: 0,
+            isPlaceholder: true,
+          },
+          selectionToken: operation.selectionToken,
+          operationId,
+        },
+      });
+    }
+    this.scheduleRender();
+    return true;
   }
 }

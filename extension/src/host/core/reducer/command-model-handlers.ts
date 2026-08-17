@@ -36,12 +36,30 @@ function isNoOpModelSelection(state: ArchState, sessionPath: string, modelSettin
 }
 
 export function handleHydrateModel(state: ArchState, cmd: Extract<Command, { kind: 'HydrateModel' }>): ReducerResult {
-  // No state change: emit a fire-and-forget effect. The runner calls the
-  // service; the service's dispatched ModelSettingsHydrated/AvailableModelsChanged
-  // events apply the results, so no *Result event is produced here.
+  // Pending paths are host-only placeholders, including their normalized
+  // pseudo-path variants. They have no durable backend file to hydrate.
+  if (isPendingTabPath(cmd.sessionPath)) {
+    return { state, effects: [] };
+  }
+
+  // Capture the hydration revision and the model-write fence before either
+  // asynchronous branch starts. The service carries both values onto each
+  // result so a late response cannot undo an optimistic SetModel.
+  const hydrationRevision = state.settings.modelHydrationRevision + 1;
+  const nextState = produce(state, (draft) => {
+    draft.settings.modelHydrationRevision = hydrationRevision;
+    draft.settings.modelHydrationRevisionBySession[cmd.sessionPath] = hydrationRevision;
+    draft.settings.availableModelsStatusBySession[cmd.sessionPath] = 'loading';
+  });
   return {
-    state,
-    effects: [{ kind: 'HydrateModel', corrId: cmd.corrId, sessionPath: cmd.sessionPath }],
+    state: nextState,
+    effects: [{
+      kind: 'HydrateModel',
+      corrId: cmd.corrId,
+      sessionPath: cmd.sessionPath,
+      hydrationRevision,
+      modelWriteFence: state.settings.modelWriteFence,
+    }],
   };
 }
 

@@ -37,6 +37,9 @@ export function AppBody({ adapter }: AppBodyProps) {
 
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const closeContextMenu = useCallback(() => setContextMenu(null), []);
+  const retryCreateOperation = useCallback((operationId: string) => {
+    postMessage({ type: 'retryCreateOperation', operationId });
+  }, [postMessage]);
 
   // Tracks which request IDs have an interactive inline prompt actually
   // mounted in the transcript. This is ephemeral DOM-presence bookkeeping,
@@ -175,6 +178,7 @@ export function AppBody({ adapter }: AppBodyProps) {
           onMove={handlers.handleMoveTab}
           onNew={handlers.handleNewSession}
           onDuplicate={handlers.handleDuplicateTab}
+          onRetryCreate={retryCreateOperation}
           onTogglePin={handlers.handleTogglePinTab}
           onGroupPinnedTab={handlers.handleGroupPinnedTab}
           onMergePinnedGroups={handlers.handleMergePinnedGroups}
@@ -229,6 +233,7 @@ export function AppBody({ adapter }: AppBodyProps) {
         privacyMode={viewState.privacyMode}
         modelSettings={viewState.modelSettings}
         availableModels={viewState.availableModels}
+        availableModelsStatus={viewState.availableModelsStatus}
         availableExtensions={viewState.availableExtensions}
         contextUsage={viewState.contextUsage}
         prefs={viewState.prefs}

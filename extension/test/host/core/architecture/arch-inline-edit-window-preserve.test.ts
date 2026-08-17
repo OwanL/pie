@@ -126,7 +126,7 @@ test('an authoritative SessionOpened tail refresh cannot omit the active inline 
     busy: false,
   };
 
-  const result = reducer(before, { kind: 'SessionOpened', sessionPath, payload });
+  const result = reducer(before, { kind: 'SessionOpened', backendGeneration: 0, modelWriteFence: 0, modelHydrationRevision: 0, catalogHydrationRevision: 0, sessionPath, payload });
 
   assert.strictEqual(result.state.transcript.bySession[sessionPath], before.transcript.bySession[sessionPath]);
   assert.strictEqual(result.state.transcript.windowBySession[sessionPath], before.transcript.windowBySession[sessionPath]);
@@ -150,7 +150,7 @@ test('an authoritative shrink deferred during editing is applied on Cancel', () 
   const incoming = Array.from({ length: 200 }, (_, index) => message(index));
   const incomingWindow = window(0, 200, 200);
   const result = reducer(before, {
-    kind: 'SessionOpened',
+    kind: 'SessionOpened', backendGeneration: 0, modelWriteFence: 0, modelHydrationRevision: 0, catalogHydrationRevision: 0,
     sessionPath,
     payload: {
       session: { ...session, messageCount: 200 },

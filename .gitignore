@@ -22,6 +22,10 @@ auth.json.*
 /git/
 /npm/
 
+# Copilot model-discovery runtime cache (written to the agent dir)
+.copilot-catalog-sync.json
+.copilot-catalog-sync.json.*.tmp
+
 # Package manager artifacts
 node_modules/
 .pnpm-store/

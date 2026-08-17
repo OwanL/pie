@@ -61,6 +61,29 @@ export interface SidebarViewProviderOptions {
   acceptedLedgerCapacity?: number;
 }
 
+/** Imperative message types that survive a not-ready/reloading webview: they
+ *  are queued and flushed on readiness, and requeued when delivery fails.
+ *  Phase 5 detail streams are included because the host keeps the subscription
+ *  owner alive regardless of renderer readiness; dropping the stream would
+ *  orphan the expanded card (a stale-route message is still rejected later by
+ *  the webview's view-generation check). */
+const RECOVERABLE_IMPERATIVE_TYPES: ReadonlySet<string> = new Set([
+  'sendRejected',
+  'detailResult',
+  'detail.start',
+  'detail.page',
+  'detail.delta',
+  'detail.rebase',
+  'detail.terminal',
+  'detail.error',
+]);
+
+type RecoverableImperative = Extract<HostToWebviewMessage, { type: 'sendRejected' | 'detailResult' | 'detail.start' | 'detail.page' | 'detail.delta' | 'detail.rebase' | 'detail.terminal' | 'detail.error' }>;
+
+function isRecoverableImperative(message: HostToWebviewMessage): message is RecoverableImperative {
+  return RECOVERABLE_IMPERATIVE_TYPES.has(message.type);
+}
+
 /** VS Code sidebar orchestration around the explicit state-delivery owner. */
 export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   private view?: vscode.WebviewView;
@@ -332,7 +355,7 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
       throw new Error('State envelopes must be posted by StateDeliveryController.');
     }
     if (!this.view || !this.webviewReady || this.hotReloader.isReloading()) {
-      if (msg.type === 'sendRejected' || msg.type === 'detailResult') {
+      if (isRecoverableImperative(msg)) {
         this.pendingImperatives.push(msg);
         this.delivery.markDirty();
         this.armReadinessProbeIfStuck();
@@ -340,6 +363,20 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
       return;
     }
     this.postImperativeToWebview(msg);
+  }
+
+  /** Stable host identity for Phase 5 detail routing: every host→webview
+   *  detail imperative carries it so the renderer can detect a host counter
+   *  reset (e.g. the view is re-resolved). */
+  getHostInstanceId(): string {
+    return this.hostInstanceId;
+  }
+
+  /** Current renderer generation used to fence Phase 5 subscription owners.
+   *  A webview reload increments it; subscriptions opened by the replaced
+   *  document are invalidated and their late stream traffic is dropped. */
+  getViewGeneration(): number {
+    return this.delivery.getDebugState().viewGeneration;
   }
 
   private getResolveAssets(): NonNullable<SidebarViewProviderOptions['resolveAssets']> {
@@ -515,7 +552,7 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
     const view = this.view;
     if (!view) return;
     void Promise.resolve(view.webview.postMessage(message)).then((delivered) => {
-      if (!delivered && (message.type === 'sendRejected' || message.type === 'detailResult') && this.view === view) {
+      if (!delivered && isRecoverableImperative(message) && this.view === view) {
         this.requeueRecoverableImperative(message, view);
       }
     }, (error: unknown) => {
@@ -523,14 +560,14 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
         errorType: error instanceof Error ? error.name : typeof error,
         messageType: message.type,
       });
-      if ((message.type === 'sendRejected' || message.type === 'detailResult') && this.view === view) {
+      if (isRecoverableImperative(message) && this.view === view) {
         this.requeueRecoverableImperative(message, view);
       }
     });
   }
 
   private requeueRecoverableImperative(
-    message: Extract<HostToWebviewMessage, { type: 'sendRejected' | 'detailResult' }>,
+    message: RecoverableImperative,
     view: vscode.WebviewView,
   ): void {
     if (this.view !== view) return;

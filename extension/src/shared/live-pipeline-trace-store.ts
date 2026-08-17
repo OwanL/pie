@@ -75,7 +75,7 @@ export class LivePipelineTraceStore {
   private readonly random: () => number;
   private readonly sink: LivePipelineTraceSink;
   private readonly queue: LivePipelineTraceRecord[] = [];
-  private flushing: Promise<void> | undefined;
+  private flushing: Promise<boolean> | undefined;
   private emitted = 0;
   private sampled = 0;
   private dropped = 0;
@@ -83,6 +83,7 @@ export class LivePipelineTraceStore {
   private rotations = 0;
   private currentBytes = 0;
   private retainedFiles = 0;
+  private processSeq = 0;
 
   constructor(options: LivePipelineTraceStoreOptions) {
     this.enabled = options.enabled ?? false;
@@ -125,7 +126,10 @@ export class LivePipelineTraceStore {
         hmacKey: this.hmacKey,
         wallTimestampMs: this.wallClock(),
         monoMs: this.monoClock(),
+        runId: this.traceRunId,
+        processSeq: this.processSeq,
       }));
+      this.processSeq += 1;
       return true;
     } catch {
       this.dropped += 1;
@@ -134,10 +138,21 @@ export class LivePipelineTraceStore {
   }
 
   async flush(): Promise<void> {
-    if (this.flushing) return this.flushing;
-    if (this.queue.length === 0) return;
-    this.flushing = this.flushQueuedRecords().finally(() => { this.flushing = undefined; });
-    return this.flushing;
+    // Drain until the queue is empty. A flush that resolves while records
+    // buffered after its batch splice remain queued would surface those
+    // records in a later, unrelated causal window (for example the next
+    // test's trace slice), so callers wait for full quiescence. Persistent
+    // sink failures stay bounded: the failed batch is re-queued and the loop
+    // stops instead of retrying forever.
+    for (;;) {
+      if (this.flushing !== undefined) {
+        await this.flushing;
+        continue;
+      }
+      if (this.queue.length === 0) return;
+      this.flushing = this.flushQueuedRecords().finally(() => { this.flushing = undefined; });
+      if (!(await this.flushing)) return;
+    }
   }
 
   async close(): Promise<void> { await this.flush(); }
@@ -158,7 +173,7 @@ export class LivePipelineTraceStore {
     };
   }
 
-  private async flushQueuedRecords(): Promise<void> {
+  private async flushQueuedRecords(): Promise<boolean> {
     const batch = this.queue.splice(0, this.queue.length);
     const projectedHealth = this.healthMetadata(batch.length, 0);
     let healthRecord: LivePipelineTraceRecord;
@@ -173,11 +188,14 @@ export class LivePipelineTraceStore {
         hmacKey: this.hmacKey,
         wallTimestampMs: this.wallClock(),
         monoMs: this.monoClock(),
+        runId: this.traceRunId,
+        processSeq: this.processSeq,
       });
+      this.processSeq += 1;
     } catch {
       this.queue.unshift(...batch);
       this.dropped += 1;
-      return;
+      return false;
     }
     const data = `${[...batch, healthRecord].map((record) => JSON.stringify(record)).join('\n')}\n`;
     const bytes = Buffer.byteLength(data, 'utf8');
@@ -193,7 +211,9 @@ export class LivePipelineTraceStore {
         this.queue.pop();
         this.dropped += 1;
       }
+      return false;
     }
+    return true;
   }
 
   private healthMetadata(additionalEmitted: number, unflushed: number): LivePipelineTraceHealthMetadata {

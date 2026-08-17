@@ -40,6 +40,28 @@ test('pending new-session tab shows background preparation without disabling int
   assert.doesNotMatch(html, /session-tab-main[^>]*disabled/);
 });
 
+test('delayed create exposes an explicit retry affordance', () => {
+  const tabPath = `${PENDING_SESSION_PREFIX}delayed`;
+  const summary: SessionSummary = {
+    path: tabPath, name: 'New Session', cwd: '/workspace',
+    modifiedAt: '2026-01-01T00:00:00.000Z', messageCount: 0,
+    creationState: 'delayed', createOperationId: 'create-op-1',
+  };
+  const html = renderToString(h(SessionTab, {
+    tabPath, index: 0,
+    sessionByPath: new Map([[tabPath, summary]]),
+    openIndexByPath: new Map([[tabPath, 0]]),
+    runningPathSet: new Set<string>(), startingModelPathSet: new Set<string>(),
+    unreadFinishedPathSet: new Set<string>(), activePath: tabPath,
+    hasPendingExtensionUIRequest: false, isPinned: false, isDropTarget: false,
+    onContextMenu: () => undefined, onPointerDown: () => undefined,
+    onClick: () => undefined, onClose: () => undefined,
+    onRetryCreate: () => undefined,
+  }));
+  assert.match(html, /session-tab-retry/);
+  assert.match(html, /Retry session creation/);
+});
+
 test('tab omits run and review badges', () => {
   const tabPath = '/sessions/reviewed';
   const summary: SessionSummary = {

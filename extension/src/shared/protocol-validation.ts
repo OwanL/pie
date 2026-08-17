@@ -32,6 +32,8 @@ import type {
   TranscriptCommitBlockedPayload,
   ThinkingLevel,
   WebviewToHostMessage,
+  HostDetailRoute,
+  HostToWebviewMessage,
 } from './protocol';
 import { isThinkingLevel, THINKING_LEVEL_SET } from './thinking-level.js';
 import {
@@ -40,6 +42,14 @@ import {
   UI_PATH_PARENT_DEPTH_MAX,
   UI_PATH_PARENT_DEPTH_MIN,
 } from './protocol/settings.js';
+import {
+  isDetailCursor,
+  isDetailPageRef,
+  isLiveSubagentDetailAddress,
+  type DetailChecksum,
+  type DetailPagePayload,
+  type DetailRebaseReason,
+} from './protocol/subagent-detail.js';
 
 export type ValidationResult<T> =
   | { ok: true; value: T }
@@ -448,6 +458,107 @@ function validateToolResultPruningSettingsPatch(value: unknown): value is Partia
   return true;
 }
 
+const DETAIL_KEY_MAX_BYTES = 512;
+const DETAIL_REASON_SET: ReadonlySet<string> = new Set(['collapse', 'unmount', 'session-change']);
+const DETAIL_REBASE_REASON_SET: ReadonlySet<string> = new Set(['gap', 'backpressure', 'evicted', 'generation-change']);
+const DETAIL_ERROR_CODE_SET: ReadonlySet<string> = new Set([
+  'INVALID_ADDRESS', 'NOT_LIVE_ADDRESSABLE', 'NOT_FOUND', 'STALE_CURSOR',
+  'CHECKSUM_MISMATCH', 'SUBSCRIPTION_CONFLICT', 'UNAVAILABLE', 'INTERNAL_ERROR',
+]);
+
+function isDetailKey(value: unknown): value is string {
+  return isString(value) && value.length > 0 && utf8Length(value) <= DETAIL_KEY_MAX_BYTES;
+}
+
+function utf8Length(value: string): number {
+  return new TextEncoder().encode(value).byteLength;
+}
+
+function validateHostDetailRoute(value: Record<string, unknown>): value is HostDetailRoute & Record<string, unknown> {
+  return isString(value.hostInstanceId) && value.hostInstanceId.length > 0
+    && isNonNegativeSafeInteger(value.hostGeneration)
+    && isNonNegativeSafeInteger(value.viewGeneration)
+    && Number.isSafeInteger(value.backendGeneration) && (value.backendGeneration as number) > 0
+    && Number.isSafeInteger(value.coordinatorGeneration) && (value.coordinatorGeneration as number) > 0
+    && isDetailKey(value.detailKey)
+    && isString(value.subscriptionId) && value.subscriptionId.length > 0
+    && (value.workerId === undefined || isString(value.workerId))
+    && (value.workerGeneration === undefined || Number.isSafeInteger(value.workerGeneration))
+    && (value.workerId === undefined) === (value.workerGeneration === undefined);
+}
+
+function validateJsonPatchOperations(value: unknown): boolean {
+  if (!Array.isArray(value) || value.length > 4_096) return false;
+  return value.every((operation) => {
+    if (!isObject(operation) || !Array.isArray(operation.path) || operation.path.length > 128) return false;
+    if (operation.op === 'delete') return true;
+    if (operation.op === 'appendString') return typeof operation.value === 'string';
+    if (operation.op === 'appendArray') return Array.isArray(operation.value);
+    return operation.op === 'set';
+  });
+}
+
+function validateDetailPagePayload(value: unknown): value is DetailPagePayload {
+  return isObject(value)
+    && value.kind === 'json-segment' && value.encoding === 'utf8-json'
+    && isString(value.segmentId) && isString(value.text)
+    && Array.isArray(value.semanticPath)
+    && isNonNegativeSafeInteger(value.startByte) && isNonNegativeSafeInteger(value.endByte)
+    && isNonNegativeSafeInteger(value.totalBytes) && isNonNegativeSafeInteger(value.startCodePoint)
+    && isNonNegativeSafeInteger(value.endCodePoint) && isNonNegativeSafeInteger(value.totalCodePoints);
+}
+
+function isDetailChecksum(value: unknown): value is DetailChecksum {
+  return typeof value === 'string' && /^[a-f0-9]{64}$/u.test(value);
+}
+
+/**
+ * Validate a host→webview detail imperative. Unlike ordinary `HostToWebviewMessage`
+ * values (which are host-constructed), these cross the webview trust boundary
+ * from `postMessage`, so the renderer validates every field before applying it
+ * to its key-scoped store.
+ */
+export function validateHostToWebviewDetailMessage(
+  value: unknown,
+): value is Extract<HostToWebviewMessage, { type: `detail.${string}` }> {
+  if (!isObject(value) || !isString(value.type)) return false;
+  const route = validateHostDetailRoute(value);
+  if (!route) return false;
+  switch (value.type) {
+    case 'detail.start':
+      return isLiveSubagentDetailAddress(value.address)
+        && (value.source === 'live' || value.source === 'durable')
+        && isNonNegativeSafeInteger(value.baselineRevision)
+        && Number.isSafeInteger(value.pageCount) && (value.pageCount as number) > 0
+        && isNonNegativeSafeInteger(value.totalBytes);
+    case 'detail.page':
+      return isDetailPageRef(value.ref)
+        && validateDetailPagePayload(value.payload)
+        && isNonNegativeSafeInteger(value.payloadBytes)
+        && isDetailChecksum(value.checksum);
+    case 'detail.delta':
+      return isNonNegativeSafeInteger(value.baseRevision)
+        && Number.isSafeInteger(value.revision) && (value.revision as number) > (value.baseRevision as number)
+        && validateJsonPatchOperations(value.operations);
+    case 'detail.rebase':
+      return isNonNegativeSafeInteger(value.currentRevision)
+        && isString(value.reason) && DETAIL_REBASE_REASON_SET.has(value.reason as DetailRebaseReason);
+    case 'detail.terminal':
+      return isNonNegativeSafeInteger(value.revision)
+        && isObject(value.durableRef) && isString(value.durableRef.key)
+        && (value.durableRef.kind === 'tool-result' || value.durableRef.kind === 'reasoning')
+        && (value.durableRef.source === 'durable' || value.durableRef.source === 'live')
+        && isString(value.durableRef.sessionPath) && isString(value.durableRef.messageId)
+        && isNonNegativeSafeInteger(value.durableRef.sizeBytes)
+        && isString(value.durableRef.summary) && typeof value.durableRef.available === 'boolean';
+    case 'detail.error':
+      return isString(value.code) && DETAIL_ERROR_CODE_SET.has(value.code as string)
+        && isString(value.message) && typeof value.retryable === 'boolean';
+    default:
+      return false;
+  }
+}
+
 /**
  * Validate a JSON value as a `WebviewToHostMessage`. Returns a discriminated
  * union: `{ ok: true, value }` on success, `{ ok: false, reason }` on failure.
@@ -480,6 +591,18 @@ export function validateWebviewToHostMessage(
 
     case 'openFilePicker':
     case 'newSession':
+    case 'showLogs':
+    case 'openSettings':
+    case 'restartBackend':
+      return { ok: true, value: value as WebviewToHostMessage };
+
+    case 'retrySend':
+      if (!isString(value.sessionPath)) return fail('retrySend: missing string `sessionPath`');
+      if (!isString(value.text)) return fail('retrySend: missing string `text`');
+      if (!isString(value.localId)) return fail('retrySend: missing string `localId`');
+      if (value.disablePruning !== undefined && typeof value.disablePruning !== 'boolean') {
+        return fail('retrySend: `disablePruning` must be a boolean when provided');
+      }
       return { ok: true, value: value as WebviewToHostMessage };
 
     case 'openFile':
@@ -522,6 +645,10 @@ export function validateWebviewToHostMessage(
       if (!isString(value.sessionPath)) return fail('compact: missing `sessionPath`');
       return { ok: true, value: value as WebviewToHostMessage };
 
+    case 'clearQueue':
+      if (!isString(value.sessionPath)) return fail('clearQueue: missing string `sessionPath`');
+      return { ok: true, value: value as WebviewToHostMessage };
+
     case 'requestDetail':
       if (!isString(value.sessionPath)) return fail('requestDetail: missing string `sessionPath`');
       if (!isObject(value.ref) || !isString(value.ref.key)
@@ -541,6 +668,25 @@ export function validateWebviewToHostMessage(
       }
       return { ok: true, value: value as WebviewToHostMessage };
 
+    case 'detail.subscribe':
+      if (!isNonNegativeSafeInteger(value.viewGeneration)) return fail('detail.subscribe: invalid `viewGeneration`');
+      if (!isDetailKey(value.detailKey)) return fail('detail.subscribe: invalid `detailKey`');
+      if (!isLiveSubagentDetailAddress(value.address)) return fail('detail.subscribe: invalid `address`');
+      if (value.cursor !== undefined && !isDetailCursor(value.cursor)) return fail('detail.subscribe: invalid `cursor`');
+      return { ok: true, value: value as WebviewToHostMessage };
+
+    case 'detail.unsubscribe':
+      if (!isNonNegativeSafeInteger(value.viewGeneration)) return fail('detail.unsubscribe: invalid `viewGeneration`');
+      if (!isDetailKey(value.detailKey)) return fail('detail.unsubscribe: invalid `detailKey`');
+      if (!isString(value.reason) || !DETAIL_REASON_SET.has(value.reason)) return fail('detail.unsubscribe: invalid `reason`');
+      return { ok: true, value: value as WebviewToHostMessage };
+
+    case 'detail.fetchPages':
+      if (!isNonNegativeSafeInteger(value.viewGeneration)) return fail('detail.fetchPages: invalid `viewGeneration`');
+      if (!isDetailKey(value.detailKey)) return fail('detail.fetchPages: invalid `detailKey`');
+      if (!isDetailPageRef(value.ref)) return fail('detail.fetchPages: invalid `ref`');
+      return { ok: true, value: value as WebviewToHostMessage };
+
     case 'closeSession':
       if (!isString(value.sessionPath)) return fail('closeSession: missing string `sessionPath`');
       if (!isOptionalString(value.interactionId)) return fail('closeSession: invalid `interactionId`');
@@ -550,6 +696,10 @@ export function validateWebviewToHostMessage(
     case 'duplicateSession':
     case 'togglePinTab':
       if (!isString(value.sessionPath)) return fail(`${type}: missing string \`sessionPath\``);
+      return { ok: true, value: value as WebviewToHostMessage };
+
+    case 'retryCreateOperation':
+      if (!isString(value.operationId)) return fail('retryCreateOperation: missing string `operationId`');
       return { ok: true, value: value as WebviewToHostMessage };
 
     case 'moveSessionTab':
@@ -667,6 +817,11 @@ export function validateWebviewToHostMessage(
       if (!isString((value.response as { id?: unknown }).id)) {
         return fail('extensionUiResponse: missing string `response.id`');
       }
+      return { ok: true, value: value as WebviewToHostMessage };
+
+    case 'setFileChangesExpanded':
+      if (!isString(value.sessionPath)) return fail('setFileChangesExpanded: missing string `sessionPath`');
+      if (typeof value.expanded !== 'boolean') return fail('setFileChangesExpanded: missing boolean `expanded`');
       return { ok: true, value: value as WebviewToHostMessage };
 
     case 'log':

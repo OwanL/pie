@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { deriveActiveExtensionIds, getPromptOptions } from '../../../src/backend/session-opened';
+import { deriveActiveExtensionIds, getLoadedExtensionIds, getPromptOptions } from '../../../src/backend/session-opened';
 
 test('deriveActiveExtensionIds identifies local and package extensions from loaded paths', () => {
   assert.deepEqual(deriveActiveExtensionIds([
@@ -42,4 +42,14 @@ test('getPromptOptions reports loaded extension paths independently of selected 
     'existing-extension',
     'subagent',
   ]);
+});
+
+test('getLoadedExtensionIds reports extensions when prompt options are unavailable', () => {
+  const session = {
+    _extensionRunner: {
+      getExtensionPaths: () => ['/home/me/.pi/extensions/skill-pruner/index.ts'],
+    },
+  };
+  assert.deepEqual(getLoadedExtensionIds(session), ['skill-pruner']);
+  assert.equal(getPromptOptions(session), undefined);
 });

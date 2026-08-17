@@ -240,11 +240,15 @@ export function onMessageAborted(
       deps.dispatchArch({
         kind: 'NoticeShown',
         notice: `${existing} — ${reason}`,
+        noticeKind: 'operational-error',
+        noticeRaw: `${existing} — ${reason}`,
       });
     } else {
       deps.dispatchArch({
         kind: 'NoticeShown',
         notice: reason,
+        noticeKind: 'operational-error',
+        noticeRaw: reason,
       });
     }
   }

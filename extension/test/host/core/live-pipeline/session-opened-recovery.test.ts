@@ -77,7 +77,7 @@ test('busy session.opened atomically replaces a stale/tombstoned live turn from 
   };
 
   const result = reducer(before, {
-    kind: 'SessionOpened',
+    kind: 'SessionOpened', backendGeneration: 0, modelWriteFence: 0, modelHydrationRevision: 0, catalogHydrationRevision: 0,
     sessionPath,
     payload: payload(),
   });
@@ -100,7 +100,7 @@ test('busy open without a checkpoint uses bounded recovery identity when the hos
   delete opened.liveTurnCheckpoint;
   opened.liveTurnRecoveryIdentity = { turnId: 'turn-1', attemptId: 'attempt-1' };
 
-  const result = reducer(initialArchState, { kind: 'SessionOpened', sessionPath, payload: opened });
+  const result = reducer(initialArchState, { kind: 'SessionOpened', backendGeneration: 0, modelWriteFence: 0, modelHydrationRevision: 0, catalogHydrationRevision: 0, sessionPath, payload: opened });
 
   assert.deepEqual(result.effects, [{
     kind: 'RequestLiveTurnCheckpoint',
@@ -140,7 +140,7 @@ test('snapshotUnavailable preserves an already-loaded transcript instead of trea
     message: 'Lossless snapshot unavailable.',
   };
 
-  const result = reducer(before, { kind: 'SessionOpened', sessionPath, payload: opened });
+  const result = reducer(before, { kind: 'SessionOpened', backendGeneration: 0, modelWriteFence: 0, modelHydrationRevision: 0, catalogHydrationRevision: 0, sessionPath, payload: opened });
 
   assert.deepEqual(result.state.transcript.bySession[sessionPath], [existing]);
   assert.deepEqual(result.state.transcript.windowBySession[sessionPath], before.transcript.windowBySession[sessionPath]);
@@ -175,7 +175,7 @@ test('busy open without a checkpoint keeps the durable assistant tail visible an
     isPartial: false,
   };
 
-  const result = reducer(before, { kind: 'SessionOpened', sessionPath, payload: opened });
+  const result = reducer(before, { kind: 'SessionOpened', backendGeneration: 0, modelWriteFence: 0, modelHydrationRevision: 0, catalogHydrationRevision: 0, sessionPath, payload: opened });
   assert.equal(
     result.state.transcript.bySession[sessionPath]?.at(-1)?.markdown,
     'Forty-five tools of durable work',

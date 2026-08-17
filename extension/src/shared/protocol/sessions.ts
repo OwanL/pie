@@ -55,6 +55,11 @@ export interface SessionSummary {
    * refreshes without resorting to string-content heuristics.
    */
   isPlaceholder?: boolean;
+  /** Host-only lifecycle hint for a create/duplicate tab. It is omitted once
+   * the durable session is resolved. */
+  creationState?: 'pending' | 'delayed';
+  /** Host-only retry identity for a pending/delayed create operation. */
+  createOperationId?: string;
   /** Stable ID from the session JSONL header. Falls back to the normalized
    *  path hash only when the header is missing or malformed. */
   sessionId?: string;
@@ -135,6 +140,8 @@ export interface SystemPromptEntry {
 export interface BackendReadyPayload {
   sdkPath: string;
   agentDir: string;
+  /** Host-authoritative backend process generation. Optional only for legacy peers. */
+  backendGeneration?: number;
   /** Version string of the loaded `@mariozechner/pi-coding-agent` SDK. */
   sdkVersion: string;
   /** Wire protocol version. Must match `PROTOCOL_VERSION` in the host. */
@@ -178,6 +185,20 @@ export interface SessionOpenedPayload {
     message: string;
   };
   selectionToken?: string;
+  /** SDK-driven runtime replacement source. The host atomically rekeys the
+   * selected/open tab from this released source to `session.path`; this is not
+   * a create/duplicate operation identity or a reusable selection token. */
+  replacesSessionPath?: string;
+  /** Host-generated create-operation identity (additive optional). When a
+   *  `session.create`/`session.duplicate` carried an `operationId`, the
+   *  resulting `session.opened` echoes it so the host can reconcile a late
+   *  success with the exact operation across retries. Absent for legacy
+   *  peers and for `session.opened` events that are not create/duplicate
+   *  publications. */
+  operationId?: string;
+  /** Attempt that produced this publication; pairs with operationId so host
+   * request-start fences remain exact across timed-out retries. */
+  operationAttempt?: number;
   /** When true, `transcript`/`transcriptWindow` are NOT authoritative — the
    *  host already holds the loaded transcript and must keep its existing
    *  `bySession`/`windowBySession` entries. The backend omits the (potentially
@@ -477,6 +498,8 @@ export interface AuxiliaryLlmUsagePayload {
  *  behind the notice's More control. It does NOT roll back optimistic state
  *  or abort a turn — the watchdogs already performed their side effects. */
 export interface OperationalErrorPayload {
+  /** Identity of this asynchronous incident, distinct from any RPC response. */
+  incidentId?: string;
   /** Stable machine code (e.g. `INTERRUPT_ABORT_STUCK`, `RETRY_STUCK`). */
   code: string;
   /** Plain-language message safe to surface to the user. */

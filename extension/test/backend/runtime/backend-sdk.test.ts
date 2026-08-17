@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
@@ -8,9 +8,43 @@ import test from 'node:test';
 import {
   applySdkRetryHotPatch,
   applySdkTerminalDurabilityPatch,
+  coordinatorSdkLoadMode,
+  ensureSdkPatchBarrier,
   loadSdk,
   loadSdkInternalModule,
 } from '../../../src/backend/sdk';
+
+const SESSION_MANAGER_PATCH_SOURCE = `
+import { randomUUID } from "crypto";
+import { appendFileSync, closeSync, createReadStream, existsSync, mkdirSync, openSync, readdirSync, readSync, statSync, writeFileSync, } from "fs";
+import { resolve } from "path";
+export const CURRENT_SESSION_VERSION = 3;
+const normalizePath = (value) => value;
+const getDefaultSessionDir = (cwd) => cwd;
+export class SessionManager {
+  flushed = false;
+  constructor(cwd, dir) {
+    this.cwd = cwd;
+    this.dir = dir;
+    this.sessionFile = resolve(dir, randomUUID() + ".jsonl");
+    this.header = { type: "session", version: 3, id: randomUUID(), timestamp: new Date().toISOString(), cwd };
+  }
+  getCwd() { return this.cwd; }
+  getSessionFile() { return this.sessionFile; }
+  getHeader() { return this.header; }
+  getSessionName() { return undefined; }
+  getBranch() { return []; }
+  getEntries() { return []; }
+  static listAll() { return Promise.resolve([]); }
+  static open(sessionPath) { const manager = new SessionManager('/repo', resolve(sessionPath, '..')); manager.sessionFile = sessionPath; return manager; }
+  static forkFrom(_sourcePath, cwd, sessionDir) { return SessionManager.create(cwd, sessionDir); }
+  static continueRecent(cwd, sessionDir) { return SessionManager.create(cwd, sessionDir); }
+  static create(cwd, sessionDir, options) {
+        const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(cwd);
+        return new SessionManager(cwd, dir, undefined, true, options);
+  }
+}
+`;
 
 const DURABILITY_PATCH_SOURCE = `
         // Notify all listeners
@@ -28,20 +62,57 @@ const DURABILITY_PATCH_SOURCE = `
 `;
 
 async function withSdkDir(files: Record<string, string>, run: (sdkDir: string) => Promise<void>): Promise<void> {
-  const sdkDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-sdk-contract-test-'));
+  const extensionRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
+  const sdkDir = await fs.mkdtemp(path.join(extensionRoot, '.pie-sdk-contract-test-'));
   const previousTrustedRoot = process.env.PIE_TRUSTED_SDK_ROOT;
+  const previousFixtureFingerprints = process.env.PIE_SDK_PATCH_FIXTURE_FINGERPRINTS;
   process.env.PIE_TRUSTED_SDK_ROOT = sdkDir;
   try {
-    await fs.writeFile(path.join(sdkDir, 'package.json'), JSON.stringify({ type: 'module' }), 'utf8');
+    const requiresBarrier = !!files['dist/index.js'] || !!files['dist/config.js'];
+    if (requiresBarrier) {
+      const pinnedSdkPath = path.join(extensionRoot, 'node_modules', '@earendil-works', 'pi-coding-agent');
+      await fs.cp(path.join(pinnedSdkPath, 'dist'), path.join(sdkDir, 'dist'), { recursive: true });
+      await fs.mkdir(path.join(sdkDir, 'node_modules', '@earendil-works'), { recursive: true });
+      await fs.symlink(
+        path.join(pinnedSdkPath, 'node_modules', '@earendil-works', 'pi-agent-core'),
+        path.join(sdkDir, 'node_modules', '@earendil-works', 'pi-agent-core'),
+        process.platform === 'win32' ? 'junction' : 'dir',
+      );
+    }
+    await fs.writeFile(
+      path.join(sdkDir, 'package.json'),
+      JSON.stringify({ type: 'module', version: '0.80.6-test' }),
+      'utf8',
+    );
+    if (!requiresBarrier && !files['dist/core/session-manager.js']) {
+      files = { 'dist/core/session-manager.js': SESSION_MANAGER_PATCH_SOURCE, ...files };
+    }
     for (const [relativePath, content] of Object.entries(files)) {
       const absolutePath = path.join(sdkDir, relativePath);
       await fs.mkdir(path.dirname(absolutePath), { recursive: true });
       await fs.writeFile(absolutePath, content, 'utf8');
     }
+    if (requiresBarrier) {
+      const patchTargets = [
+        'dist/core/agent-session.js',
+        'node_modules/@earendil-works/pi-ai/dist/utils/retry.js',
+        'dist/core/session-manager.js',
+        'dist/core/agent-session-runtime.js',
+      ];
+      process.env.PIE_SDK_PATCH_FIXTURE_FINGERPRINTS = JSON.stringify({
+        sdkVersion: '0.80.6-test',
+        pristineSha256ByRelativePath: Object.fromEntries(await Promise.all(patchTargets.map(async (relativePath) => [
+          relativePath,
+          createHash('sha256').update(await fs.readFile(path.join(sdkDir, relativePath))).digest('hex'),
+        ]))),
+      });
+    }
     await run(sdkDir);
   } finally {
     if (previousTrustedRoot === undefined) delete process.env.PIE_TRUSTED_SDK_ROOT;
     else process.env.PIE_TRUSTED_SDK_ROOT = previousTrustedRoot;
+    if (previousFixtureFingerprints === undefined) delete process.env.PIE_SDK_PATCH_FIXTURE_FINGERPRINTS;
+    else process.env.PIE_SDK_PATCH_FIXTURE_FINGERPRINTS = previousFixtureFingerprints;
     await fs.rm(sdkDir, { recursive: true, force: true });
   }
 }
@@ -192,6 +263,9 @@ test('terminal durability patch fails closed on unsupported SDK shape', async ()
 test('loadSdk imports allowed ESM SDK modules that satisfy the contract', async () => {
   await withSdkDir({
     'dist/core/agent-session.js': DURABILITY_PATCH_SOURCE,
+    'node_modules/@earendil-works/pi-ai/dist/utils/retry.js': `
+      const RETRYABLE = ["stream ended before message_stop",];
+    `,
     'dist/index.js': `
       export const VERSION = 'test-sdk';
       export class AgentSession {
@@ -235,9 +309,86 @@ test('loadSdk imports allowed ESM SDK modules that satisfy the contract', async 
   });
 });
 
+test('isolated coordinators select cold SDK loading while legacy coordinators retain full mode', () => {
+  assert.deepEqual(coordinatorSdkLoadMode(true), { mode: 'cold-coordinator' });
+  assert.deepEqual(coordinatorSdkLoadMode(false), { mode: 'coordinator' });
+});
+
+test('cold coordinator mode imports only runtime-free exports and leaves AgentSession/compaction untouched', async () => {
+  await withSdkDir({
+    'dist/core/agent-session.js': DURABILITY_PATCH_SOURCE,
+    'node_modules/@earendil-works/pi-ai/dist/utils/retry.js': `
+      const RETRYABLE = ["stream ended before message_stop",];
+    `,
+    'dist/config.js': `
+      export const VERSION = 'cold-test-sdk';
+      export const getAgentDir = () => '/cold-agent';
+      export const getSessionsDir = () => '/cold-sessions';
+    `,
+    'dist/core/auth-storage.js': `
+      export const AuthStorage = { create: (filePath) => ({ filePath }) };
+    `,
+    'dist/index.js': `
+      globalThis.__pieFullSdkEntryLoaded = true;
+      export class AgentSession {}
+    `,
+    'dist/core/compaction/index.js': `
+      globalThis.__pieInternalCompactionModuleLoaded = true;
+      export const prepareCompaction = () => undefined;
+      export const compact = async () => ({});
+    `,
+  }, async (sdkDir) => {
+    const globals = globalThis as {
+      __pieFullSdkEntryLoaded?: boolean;
+      __pieInternalCompactionModuleLoaded?: boolean;
+    };
+    delete globals.__pieFullSdkEntryLoaded;
+    delete globals.__pieInternalCompactionModuleLoaded;
+
+    const sdk = await loadSdk(sdkDir, { mode: 'cold-coordinator' });
+
+    assert.equal(sdk.VERSION, 'cold-test-sdk');
+    assert.equal(sdk.getAgentDir(), '/cold-agent');
+    assert.deepEqual(await sdk.SessionManager.listAll(), []);
+    assert.equal(globals.__pieFullSdkEntryLoaded, undefined);
+    assert.equal(globals.__pieInternalCompactionModuleLoaded, undefined);
+    assert.equal('AgentSession' in sdk, false);
+    assert.equal('createAgentSessionRuntime' in sdk, false);
+  });
+});
+
+test('loadSdk worker mode rejects a bad SDK fingerprint before evaluating the SDK entry', async () => {
+  await withSdkDir({
+    'dist/core/agent-session.js': DURABILITY_PATCH_SOURCE,
+    'node_modules/@earendil-works/pi-ai/dist/utils/retry.js': `
+      const RETRYABLE = ["stream ended before message_stop",];
+    `,
+    'dist/index.js': `globalThis.__pieBadFingerprintSdkImported = true;`,
+  }, async (sdkDir) => {
+    delete (globalThis as { __pieBadFingerprintSdkImported?: boolean }).__pieBadFingerprintSdkImported;
+    const identity = await ensureSdkPatchBarrier(sdkDir);
+    const wrongIdentity = {
+      ...identity,
+      retryClassifier: { ...identity.retryClassifier, sha256: '0'.repeat(64) },
+    };
+
+    await assert.rejects(
+      loadSdk(sdkDir, { mode: 'worker', patchIdentity: wrongIdentity }),
+      /SHA-256 fingerprint verification failed/,
+    );
+    assert.equal(
+      (globalThis as { __pieBadFingerprintSdkImported?: boolean }).__pieBadFingerprintSdkImported,
+      undefined,
+    );
+  });
+});
+
 test('loadSdk rejects modules that are missing required exports', async () => {
   await withSdkDir({
     'dist/core/agent-session.js': DURABILITY_PATCH_SOURCE,
+    'node_modules/@earendil-works/pi-ai/dist/utils/retry.js': `
+      const RETRYABLE = ["stream ended before message_stop",];
+    `,
     'dist/index.js': `export const VERSION = 'broken-sdk'; export const getAgentDir = () => '/agent';`,
   }, async (sdkDir) => {
     await assert.rejects(

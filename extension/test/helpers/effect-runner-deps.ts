@@ -27,6 +27,7 @@ import type {
 import type { FileDiffService } from '../../src/host/core/file-diff-service';
 import type { EffectResultEvent, CommandEvent, Event } from '../../src/host/core/events';
 import type { ThinkingLevel } from '../../src/shared/protocol';
+import type { LiveSubagentDetailAddress, DetailCursor, DetailPageRef } from '../../src/shared/protocol/subagent-detail';
 import type { RequestOptions } from '../../src/shared/request-tracker';
 
 export type Call =
@@ -39,7 +40,10 @@ export type Call =
   | { kind: 'bumpEpoch'; sessionPath: string }
   | { kind: 'onModelConfigChanged'; sessionPath: string; modelId: string; thinkingLevel: string; provider?: string }
   | { kind: 'handleSelectionFailure'; token: string; notice: string }
-  | { kind: 'applySessionOpened'; payload: unknown };
+  | { kind: 'applySessionOpened'; payload: unknown }
+  | { kind: 'subscribeDetail'; subscriptionId: string; viewGeneration: number; detailKey: string; address: LiveSubagentDetailAddress; cursor?: DetailCursor }
+  | { kind: 'unsubscribeDetail'; viewGeneration: number; detailKey: string; reason: 'collapse' | 'unmount' | 'session-change' }
+  | { kind: 'fetchDetailPages'; viewGeneration: number; detailKey: string; ref: DetailPageRef };
 
 export interface MakeEffectRunnerDepsOpts {
   /** Custom request implementation. Ignored when `backend` is supplied. */
@@ -148,6 +152,21 @@ export function makeEffectRunnerDeps(opts: MakeEffectRunnerDepsOpts = {}): MakeE
     async hydrateModelState() {},
     async setPrefs() {},
     async setSystemPromptToggles() {},
+    subscribeDetail(options: {
+      subscriptionId: string;
+      viewGeneration: number;
+      detailKey: string;
+      address: LiveSubagentDetailAddress;
+      cursor?: DetailCursor;
+    }) {
+      calls.push({ kind: 'subscribeDetail', ...options });
+    },
+    unsubscribeDetail(options: { viewGeneration: number; detailKey: string; reason: 'collapse' | 'unmount' | 'session-change' }) {
+      calls.push({ kind: 'unsubscribeDetail', ...options });
+    },
+    fetchDetailPages(options: { viewGeneration: number; detailKey: string; ref: DetailPageRef }) {
+      calls.push({ kind: 'fetchDetailPages', ...options });
+    },
     bumpSessionDataEpoch(sessionPath: string) {
       calls.push({ kind: 'bumpEpoch', sessionPath });
     },

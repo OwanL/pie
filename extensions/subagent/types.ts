@@ -57,7 +57,19 @@ export interface SubagentTurnThroughputSample {
  * intentionally excluded: retry backoff is reported separately per attempt. */
 export type SubagentAttemptPhase = "queued" | "preparing" | "waiting_provider" | "streaming" | "running_tool" | "orphaned_cleanup";
 
+export interface SubagentChildIdentity {
+	childId: string;
+	spawningToolCallId: string;
+	attemptId: string;
+}
+
 export interface SingleResult {
+	/** Producer-issued logical child identity. Stable across display reordering. */
+	childId?: string;
+	/** Complete root-to-target producer lineage. Legacy durable results without
+	 * this field may render, but are explicitly not live-addressable. */
+	lineage?: SubagentChildIdentity[];
+	liveAddressable?: boolean;
 	agent: string;
 	agentSource: "user" | "project" | "unknown";
 	task: string;

@@ -226,6 +226,21 @@ export function handleSendResult(state: ArchState, event: Extract<Event, { kind:
         pending.sessionPath,
       );
     }
+    const hiddenFirstRun = Object.values(draft.pending.createOperations).find(
+      (operation) => operation.status === 'succeeded'
+        && operation.hidden
+        && operation.resolvedSessionPath === pending.sessionPath,
+    );
+    const hasRemainingSend = Object.values(restOps).some(
+      (operation) => operation.sessionPath === pending.sessionPath,
+    );
+    if (hiddenFirstRun && !hasRemainingSend
+      && !draft.sessions.runningSessionPaths.includes(pending.sessionPath)) {
+      draft.sessions.intentionallyHiddenRunningPaths = removeFromArray(
+        draft.sessions.intentionallyHiddenRunningPaths,
+        pending.sessionPath,
+      );
+    }
     // Brief H: map the raw RPC error (which may carry a `req-NN` id) to a
     // plain-language notice + a failure kind that the webview renders recovery
     // buttons for. A user-initiated cancel (Brief E abort) returns null →
@@ -350,6 +365,19 @@ export function handlePreflightFailed(state: ArchState, event: Extract<Event, { 
       draft.sessions.runningSessionPaths,
       snapshot.sessionPath,
     );
+    const hiddenFirstRun = Object.values(draft.pending.createOperations).find(
+      (operation) => operation.status === 'succeeded'
+        && operation.hidden
+        && operation.resolvedSessionPath === snapshot.sessionPath,
+    );
+    const hasRemainingSend = Object.values(restOps).some((operation) => operation.sessionPath === snapshot.sessionPath)
+      || Object.values(restPromoted).some((operation) => operation.sessionPath === snapshot.sessionPath);
+    if (hiddenFirstRun && !hasRemainingSend) {
+      draft.sessions.intentionallyHiddenRunningPaths = removeFromArray(
+        draft.sessions.intentionallyHiddenRunningPaths,
+        snapshot.sessionPath,
+      );
+    }
     // The send will never stream — drop its requestId→localId mapping
     if (event.requestId) {
       delete draft.pending.requestIdToLocalId[event.requestId];

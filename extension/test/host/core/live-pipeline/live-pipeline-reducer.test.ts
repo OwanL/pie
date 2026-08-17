@@ -199,7 +199,7 @@ test('idle session.opened preserves reconciled render and batch identity while d
     },
     busy: false,
   };
-  state = reducer(state, { kind: 'SessionOpened', sessionPath: base.sessionPath, payload: opened }).state;
+  state = reducer(state, { kind: 'SessionOpened', backendGeneration: 0, modelWriteFence: 0, modelHydrationRevision: 0, catalogHydrationRevision: 0, sessionPath: base.sessionPath, payload: opened }).state;
 
   const refreshed = state.transcript.bySession[base.sessionPath]?.[0];
   const refreshedPart = refreshed?.parts?.[0];

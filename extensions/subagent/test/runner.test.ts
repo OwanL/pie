@@ -177,6 +177,55 @@ test("runSingleAgent publishes its terminal lifecycle before a successful run se
 	assert.equal(updates.at(-1)?.details.results[0]?.exitCode, 0);
 });
 
+test("runner trace labels only source and dedupe work at the producer boundary", async () => {
+	const sinkKey = Symbol.for("pie.runtime-trace-sink.v1");
+	const target = globalThis as Record<PropertyKey, unknown>;
+	const previous = target[sinkKey];
+	const events: Array<Record<string, unknown>> = [];
+	target[sinkKey] = (event: unknown) => events.push(event as Record<string, unknown>);
+	try {
+		const partial = {
+			details: {
+				results: [{ attemptId: "nested-attempt", progressGeneration: 1, messages: [] }],
+			},
+		};
+		const { sdk } = createFakeSdk({
+			onPrompt: async (emit) => {
+				emit({
+					type: "message_end",
+					message: {
+						role: "assistant",
+						content: [{ type: "toolCall", id: "nested-call", name: "subagent", arguments: {} }],
+						stopReason: "toolUse",
+						usage: { input: 1, output: 1 },
+					},
+				});
+				emit({ type: "tool_execution_update", toolCallId: "nested-call", partialResult: partial });
+				emit({ type: "tool_execution_update", toolCallId: "nested-call", partialResult: partial });
+				emit({
+					type: "message_end",
+					message: { role: "assistant", content: [{ type: "text", text: "done" }], stopReason: "completed", usage: { output: 1 } },
+				});
+			},
+		});
+		await runFakeAgent(sdk, () => {});
+	} finally {
+		if (previous === undefined) delete target[sinkKey];
+		else target[sinkKey] = previous;
+	}
+
+	const dedupe = events.filter((event) => event.phase === "dedupe");
+	assert.deepEqual(dedupe.map((event) => [event.outcome, event.payloadClass]), [
+		["changed", undefined],
+		["duplicate", undefined],
+	]);
+	assert.ok(events.some((event) => event.phase === "source_update" && event.payloadClass === "source"));
+	assert.ok(events.some((event) => event.phase === "terminal"));
+	assert.equal(events.some((event) => event.phase === "measure"), false, "runner does not measure settlement budgets");
+	assert.equal(events.some((event) => event.phase === "recursive_projection"), false, "tool attachment is not recursive projection");
+	assert.equal(events.some((event) => event.payloadClass === "compact"), false, "fingerprint bytes are not labeled compact-event bytes");
+});
+
 test("runSingleAgent executes a qualified bucket spec on its exact provider", async () => {
 	const github = { id: "gpt-5.4", provider: "github-copilot", contextWindow: 128_000 } as any;
 	const codex = { id: "gpt-5.4", provider: "openai-codex", contextWindow: 128_000 } as any;

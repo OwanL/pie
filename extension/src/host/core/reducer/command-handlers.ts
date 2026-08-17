@@ -66,6 +66,11 @@ import {
   handleSetFileRead,
   handleSetSystemPromptToggles,
 } from './command-file-handlers.js';
+import {
+  handleDetailSubscribe,
+  handleDetailUnsubscribe,
+  handleDetailFetchPages,
+} from './command-detail-handlers.js';
 
 export function handleCommand(state: ArchState, cmd: Command): ReducerResult {
   switch (cmd.kind) {
@@ -147,6 +152,18 @@ export function handleCommand(state: ArchState, cmd: Command): ReducerResult {
 
     case 'SetSystemPromptToggles': {
       return handleSetSystemPromptToggles(state, cmd);
+    }
+
+    case 'DetailSubscribe': {
+      return handleDetailSubscribe(state, cmd);
+    }
+
+    case 'DetailUnsubscribe': {
+      return handleDetailUnsubscribe(state, cmd);
+    }
+
+    case 'DetailFetchPages': {
+      return handleDetailFetchPages(state, cmd);
     }
 
     case 'CloseSession': {

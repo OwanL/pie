@@ -463,7 +463,7 @@ test('projected live tool progress advances commit identity without hashing prev
   assert.notEqual(signature(before), signature(after));
 });
 
-test('host patch assembly reconstructs the same recursive preview as a full snapshot', () => {
+test('host patch assembly reconstructs the same compact preview as a full snapshot', () => {
   let baseState = apply(createEmptyLivePipelineState(), start()).state;
   baseState = apply(baseState, {
     ...base, kind: 'tool.started', seq: 2, executionId: 'execution-1',
@@ -472,15 +472,11 @@ test('host patch assembly reconstructs the same recursive preview as a full snap
   }).state;
   const initial = {
     kind: 'subagent' as const, mode: 'single' as const, omittedChildren: 0,
-    children: [{ id: 'worker', phase: 'running' as const, streamingText: 'hello', messages: [] }],
+    children: [{ id: 'worker', phase: 'running' as const, streamingText: 'hello' }],
   };
   const next = {
     ...initial,
-    children: [{ ...initial.children[0]!, streamingText: 'hello world', messages: [{
-      role: 'assistant', content: [{ type: 'toolCall', name: 'subagent', result: {
-        details: { results: [{ agent: 'scout', exitCode: -1, messages: [] }] },
-      } }],
-    }] }],
+    children: [{ ...initial.children[0]!, streamingText: 'hello world' }],
   };
   const initialBytes = Buffer.byteLength(JSON.stringify(initial), 'utf8');
   const nextBytes = Buffer.byteLength(JSON.stringify(next), 'utf8');
@@ -510,7 +506,10 @@ test('host patch assembly reconstructs the same recursive preview as a full snap
     reconstructed.state.toolsByExecutionId['execution-1']?.preview,
     full.state.toolsByExecutionId['execution-1']?.preview,
   );
-  assert.deepEqual(projectTranscriptView([], reconstructed.state, base.sessionPath).liveTools[0]?.result, next);
+  const projected = projectTranscriptView([], reconstructed.state, base.sessionPath).liveTools[0]?.result as any;
+  assert.equal(projected.kind, 'subagent');
+  assert.equal(projected.children[0]?.streamingText, 'hello world');
+  assert.deepEqual(projected.children[0]?.messages, []);
 });
 
 test('frequent patches against 3, 15, and 30 MiB recursive previews use backend byte metadata without serialization', () => {

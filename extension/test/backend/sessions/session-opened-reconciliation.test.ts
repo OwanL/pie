@@ -2,6 +2,22 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { buildSessionOpenedLiveSnapshot, normalizeDanglingTranscript, stripActiveAssistantTail } from '../../../src/backend/session-opened';
+import { isSessionOpenedPayload } from '../../../src/shared/protocol/event-payloads';
+
+test('session.opened accepts an additive create operation identity for late reconciliation', () => {
+  const payload = {
+    session: { path: '/workspace/session.jsonl', name: 'Session', cwd: '/workspace', modifiedAt: '2026-01-01T00:00:00.000Z', messageCount: 0 },
+    transcript: [],
+    transcriptWindow: { totalCount: 0, loadedStart: 0, loadedEnd: 0, hasOlder: false, hasNewer: false, isPartial: false, hasUserMessages: false },
+    busy: false,
+    selectionToken: 'selection-1',
+    operationId: 'create-operation-1',
+    operationAttempt: 2,
+  };
+  assert.equal(isSessionOpenedPayload(payload), true);
+  assert.equal(isSessionOpenedPayload({ ...payload, operationId: undefined, operationAttempt: undefined }), true);
+  assert.equal(isSessionOpenedPayload({ ...payload, operationAttempt: 0 }), false);
+});
 
 test('busy session snapshots omit the persisted active assistant bubble owned by LivePipelineState', () => {
   const rows = [

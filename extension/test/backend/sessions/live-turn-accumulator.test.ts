@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { BackendLiveTurnAccumulator, LiveTurnCheckpointRegistry } from '../../../src/backend/live-turn-accumulator';
+import { BackendLiveTurnAccumulator, LiveTurnCheckpointRegistry, type ToolProgressMeasurement } from '../../../src/backend/live-turn-accumulator';
 import { normalizeToolProgress } from '../../../src/backend/tool-progress-normalizer';
 import { LIVE_PIPELINE_LIMITS } from '../../../src/shared/live-pipeline-protocol';
 
-function accumulator() {
+function accumulator(observeProgressMeasurement?: (measurement: ToolProgressMeasurement) => void) {
   return new BackendLiveTurnAccumulator({
     protocolVersion: 6,
     sessionPath: '/session.jsonl',
@@ -16,7 +16,7 @@ function accumulator() {
     modelId: 'provider/model',
     thinkingLevel: 'high',
     startedAt: 100,
-  });
+  }, observeProgressMeasurement);
 }
 
 test('backend accumulator exposes lightweight identity and sequence metadata', () => {
@@ -201,6 +201,28 @@ test('backend accumulator preserves completed ask_user answers for the live tran
   assert.deepEqual(value.checkpoint().tools[0]?.terminal?.result, result);
 });
 
+test('backend accumulator emits a measurement per diff observation, including duplicates', () => {
+  const measurements: ToolProgressMeasurement[] = [];
+  const value = accumulator((measurement) => measurements.push(measurement));
+  value.observe({ kind: 'turn.started' }, 100);
+  value.observe({
+    kind: 'tool.started', executionId: 'execution', parentExecutionId: null, rootExecutionId: 'execution',
+    toolCallId: 'tool', name: 'subagent', input: {}, startedAt: 110,
+  }, 110);
+  const preview = {
+    kind: 'subagent' as const, mode: 'single' as const, omittedChildren: 0,
+    children: [{ id: 'worker', phase: 'running' as const, streamingText: 'progress', messages: [] }],
+  };
+  const changed = value.observe({ kind: 'tool.progress', executionId: 'execution', preview }, 120);
+  assert.equal(changed?.kind, 'tool.progress');
+  const duplicate = value.observe({ kind: 'tool.progress', executionId: 'execution', preview }, 121);
+  assert.equal(duplicate, undefined, 'a structurally equal source preview is a duplicate observation');
+  assert.deepEqual(measurements.map((measurement) => measurement.outcome), ['changed', 'duplicate']);
+  assert.equal(measurements[0]?.revision, 1);
+  assert.equal(measurements[1]?.revision, 1, 'the duplicate carries the candidate existing progress revision');
+  assert.equal(value.currentSeq, changed?.seq, 'duplicate observations consume no semantic sequence');
+});
+
 test('backend accumulator emits one full subagent preview then incremental patches and suppresses duplicates', () => {
   const value = accumulator();
   value.observe({ kind: 'turn.started' }, 100);
@@ -236,6 +258,45 @@ test('backend accumulator emits one full subagent preview then incremental patch
   assert.equal(patch.progressRevision, 2);
   assert.ok(Buffer.byteLength(JSON.stringify(patch), 'utf8') < Buffer.byteLength(JSON.stringify(nextPreview), 'utf8'));
   assert.deepEqual(value.checkpoint().tools[0]?.preview, nextPreview, 'checkpoint retains the fully assembled preview');
+});
+
+test('backend accumulator ignores duplicate durability-confirmed tool completion', () => {
+  const value = accumulator();
+  value.observe({ kind: 'turn.started' }, 100);
+  value.observe({
+    kind: 'tool.started', executionId: 'execution', parentExecutionId: null, rootExecutionId: 'execution',
+    toolCallId: 'tool', name: 'read', input: {}, startedAt: 110,
+  }, 110);
+  const firstToolTerminal = value.observe({
+    kind: 'tool.terminal', executionId: 'execution', status: 'completed', result: 'done', durableEntryId: 'tool-entry',
+  }, 120);
+  const toolSeq = value.currentSeq;
+  const duplicateToolTerminal = value.observe({
+    kind: 'tool.terminal', executionId: 'execution', status: 'completed', result: 'done', durableEntryId: 'tool-entry',
+  }, 121);
+  assert.equal(firstToolTerminal?.kind, 'tool.terminal');
+  assert.equal(duplicateToolTerminal, undefined);
+  assert.equal(value.currentSeq, toolSeq, 'duplicate tool completion does not consume a sequence');
+
+  const firstTurnTerminal = value.observe({
+    kind: 'turn.terminal', terminalKind: 'completed', durableEntryId: 'assistant-entry',
+    durableMessage: {
+      id: 'message', role: 'assistant', createdAt: new Date(130).toISOString(), markdown: 'done',
+      status: 'completed', durableEntryId: 'assistant-entry',
+    },
+  }, 130);
+  const turnSeq = value.currentSeq;
+  const duplicateTurnTerminal = value.observe({
+    kind: 'turn.terminal', terminalKind: 'completed', durableEntryId: 'assistant-entry',
+    durableMessage: {
+      id: 'message', role: 'assistant', createdAt: new Date(130).toISOString(), markdown: 'done',
+      status: 'completed', durableEntryId: 'assistant-entry',
+    },
+  }, 131);
+  assert.equal(firstTurnTerminal?.kind, 'turn.terminal');
+  assert.equal(duplicateTurnTerminal, undefined);
+  assert.equal(value.currentSeq, turnSeq, 'duplicate assistant completion does not consume a sequence');
+  assert.equal(value.lifecycleWatermark()?.finalSeq, turnSeq);
 });
 
 test('backend accumulator rejects progress after a durability-confirmed tool terminal', () => {
@@ -594,6 +655,50 @@ test('backend accumulator counts toolDraftBytes against the complete serialized 
   }, 103);
   assert.equal(accepted?.kind, 'turn.toolDraft');
   assert.equal(value.checkpoint().turn.toolDraftsByCallId.normal?.name, 'read');
+});
+
+test('compact trace reuses exact preview/envelope counters without a second recursive stringify', () => {
+  let measurement: {
+    sourcePayloadBytes?: number; producedPayloadBytes?: number;
+    availabilityReason?: string;
+    counters?: { childCount: number; messageCount: number; maxRecursiveDepth: number };
+  } | undefined;
+  const value = new BackendLiveTurnAccumulator({
+    protocolVersion: 6, sessionPath: '/session.jsonl', requestId: 'request', turnId: 'turn',
+    attemptId: 'attempt', canonicalMessageId: 'message', startedAt: 100,
+  }, (candidate) => { measurement = candidate; });
+  value.observe({ kind: 'turn.started' }, 100);
+  value.observe({
+    kind: 'tool.started', executionId: 'execution', parentExecutionId: null,
+    rootExecutionId: 'execution', toolCallId: 'tool', name: 'subagent', input: {}, startedAt: 110,
+  }, 110);
+  const counters = { childCount: 2, messageCount: 3, maxRecursiveDepth: 2 };
+  const preview = normalizeToolProgress('subagent', {
+    details: { mode: 'single', results: [{
+      agent: 'outer', messages: [{ role: 'toolResult', toolName: 'subagent', details: {
+        mode: 'single', results: [{ agent: 'inner', messages: [{ role: 'assistant', content: 'done' }] }],
+      } }],
+    }] },
+  });
+  const originalStringify = JSON.stringify;
+  let recursivePreviewStringifies = 0;
+  JSON.stringify = ((candidate: unknown, ...args: unknown[]) => {
+    if (candidate === preview) recursivePreviewStringifies += 1;
+    return (originalStringify as (...values: unknown[]) => string)(candidate, ...args);
+  }) as typeof JSON.stringify;
+  let envelope;
+  try {
+    envelope = value.observe({ kind: 'tool.progress', executionId: 'execution', preview, recursiveCounters: counters }, 120);
+    assert.ok(envelope);
+    assert.equal(recursivePreviewStringifies, 1, 'aggregate accounting is the only complete-preview stringify');
+  } finally {
+    JSON.stringify = originalStringify;
+  }
+
+  assert.equal(measurement?.sourcePayloadBytes, undefined, 'normalized ToolPreview bytes are not source bytes');
+  assert.equal(measurement?.availabilityReason, 'source_preview_not_serialized_at_producer_boundary');
+  assert.equal(measurement?.producedPayloadBytes, Buffer.byteLength(originalStringify(envelope), 'utf8'));
+  assert.deepEqual(measurement?.counters, counters);
 });
 
 test('terminal checkpoint registry is memory-only and bounded by grace', () => {

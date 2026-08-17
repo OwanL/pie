@@ -4,7 +4,7 @@
  */
 
 import { buildSessionAnalyticsFactors } from './session-analytics';
-import { buildCurrentSummary, listAvailableModels } from './session-metadata';
+import { buildCurrentSummary, loadAvailableModels } from './session-metadata';
 import { buildTailTranscriptWindow, buildDisplayTranscriptCache, isDisplayTranscriptCacheStale } from './transcript-window';
 import { deduplicateToolCallResultsForTransport } from '../shared/chat-message-parts';
 import {
@@ -38,6 +38,8 @@ export async function buildSessionOpenedPayload(
   selectionToken?: string,
   transcript: TranscriptMode = 'tail',
   transport: SessionSnapshotTransport = { kind: 'event', event: 'session.opened' },
+  operationId?: string,
+  operationAttempt?: number,
 ): Promise<SessionOpenedPayload> {
   const context = deps.getSessionContext(sessionPath);
   if (!context) {
@@ -45,12 +47,15 @@ export async function buildSessionOpenedPayload(
   }
 
   const harnessPrompt = await deps.readHarnessSystemPrompt(context);
+  const promptOptions = getPromptOptions(context.session);
+  const activeExtensionIds = getLoadedExtensionIds(context.session);
   const [systemPrompts, modelSettings, analyticsFactors] = await Promise.all([
     deps.buildSystemPrompts(context, harnessPrompt),
     deps.readModelSettings(),
     buildSessionAnalyticsFactors({
       harnessPrompt,
-      promptOptions: getPromptOptions(context.session),
+      promptOptions,
+      activeExtensionIds,
     }),
   ]);
 
@@ -86,6 +91,7 @@ export async function buildSessionOpenedPayload(
     : normalizeDanglingTranscript(rawTranscriptSlice.transcript))
     .map(deduplicateToolCallResultsForTransport);
 
+  const catalog = loadAvailableModels(context, deps.agentDir);
   const payload: SessionOpenedPayload = {
     session: buildCurrentSummary(context, deps.startupCwd),
     transcript: transportTranscript,
@@ -100,11 +106,13 @@ export async function buildSessionOpenedPayload(
     ...(liveTurnCheckpoint ? { liveTurnCheckpoint } : {}),
     ...(liveTurnRecoveryIdentity ? { liveTurnRecoveryIdentity } : {}),
     selectionToken,
+    operationId,
+    operationAttempt,
     ...(mode === 'skip' && { transcriptSkipped: true }),
     systemPrompts,
     analyticsFactors,
     modelSettings,
-    availableModels: listAvailableModels(context, deps.agentDir),
+    ...(catalog.ok ? { availableModels: catalog.models } : {}),
     contextUsage: contextUsage ?? undefined,
     // Cost/token indicators must describe the whole durable branch, not the
     // bounded transcript slice sent to the renderer. The full mapped cache is
@@ -275,9 +283,14 @@ export function getPromptOptions(session: unknown): SdkBuildSystemPromptOptions 
   const options = promptState._baseSystemPromptOptions;
   if (!options) return undefined;
 
-  const loadedIds = deriveActiveExtensionIds(promptState._extensionRunner?.getExtensionPaths?.() ?? []);
+  const loadedIds = getLoadedExtensionIds(session);
   const activeExtensions = [...new Set([...(options.activeExtensions ?? []), ...loadedIds])].sort();
   return { ...options, activeExtensions };
+}
+
+export function getLoadedExtensionIds(session: unknown): string[] {
+  const promptState = session as SessionPromptState;
+  return deriveActiveExtensionIds(promptState._extensionRunner?.getExtensionPaths?.() ?? []);
 }
 
 export function ensureDisplayTranscriptCache(context: SessionContext) {

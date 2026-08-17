@@ -107,6 +107,9 @@ export function onError(payload: ErrorPayload, deps: HandlerDeps): void {
   // may belong to a backgrounded tab; stamping the error on whatever is active
   // pollutes the wrong transcript and confuses the user.
   const sessionPath = deps.state.resolveRequestSessionPath(payload.requestId);
+  if (!deps.state.claimOperationalIncident(undefined, payload.requestId)) {
+    return;
+  }
   deps.runObserver.onBackendError(sessionPath ?? undefined, payload.code);
   deps.dispatchArch({ kind: 'Error', sessionPath: sessionPath ?? '', error: payload.message });
   if (sessionPath) {
@@ -139,6 +142,9 @@ export function onError(payload: ErrorPayload, deps: HandlerDeps): void {
 export function onOperationalError(payload: OperationalErrorPayload, deps: HandlerDeps): void {
   const sessionPath = deps.requireEventSessionPath('operational-error', payload.sessionPath);
   if (!sessionPath) {
+    return;
+  }
+  if (!deps.state.claimOperationalIncident(payload.incidentId, payload.requestId)) {
     return;
   }
   const detail = formatOperationalErrorDetail(payload);

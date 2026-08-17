@@ -58,6 +58,7 @@ import {
 import { appendPieLog } from '../util/pie-log.js';
 import { isLivePipelineTraceEnabled, recordLivePipelineTrace } from '../util/live-pipeline-trace-runtime.js';
 import { isLiveLifecycleWatermark, isTurnSemanticEnvelope, type LiveLifecycleWatermark, type TurnSemanticEnvelope } from '../../shared/live-pipeline-protocol.js';
+import { isCoordinatorToHostDetailMessage, type CoordinatorToHostDetailMessage } from '../../shared/protocol/subagent-detail.js';
 
 export interface SessionBackendEventHandlers {
   onSessionOpened(payload: SessionOpenedPayload): void;
@@ -88,6 +89,8 @@ export interface SessionBackendEventHandlers {
   onContextUsageChanged(payload: ContextUsageChangedPayload): void;
   onExtensionUIRequest(payload: ExtensionUIRequestPayload): void;
   onError(payload: ErrorPayload): void;
+  /** Phase 5: one of the six coordinator→host detail stream variants. */
+  onDetailStream(message: CoordinatorToHostDetailMessage): void;
 }
 
 /**
@@ -203,6 +206,9 @@ export function dispatchSessionBackendEvent(
       return;
     case 'error':
       dispatch(event, isErrorPayload, handlers.onError);
+      return;
+    case 'detail.stream':
+      dispatch(event, isCoordinatorToHostDetailMessage, handlers.onDetailStream);
       return;
   }
   tracePayloadValidation(event, false, 'unsupported_observation');

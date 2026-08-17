@@ -43,6 +43,9 @@ import type {
   SetModelRpcEffect,
   SetPrefsRpcEffect,
   SetSystemPromptTogglesRpcEffect,
+  DetailSubscribeRpcEffect,
+  DetailUnsubscribeRpcEffect,
+  DetailFetchPagesRpcEffect,
   HydrateModelEffect,
   LogEffect,
   PostImperativeEffect,
@@ -58,7 +61,8 @@ import { toErrorMessage } from '../util/error-message';
 import type { EffectResultEvent, CommandEvent } from './events';
 import type { FileDiffService } from './file-diff-service';
 import type { ChatPrefs, ComposerInput, ProviderGateStats, PruningMode, PruningSettings, ToolResultPruningSettings, ThinkingLevel, UserContentPart } from '../../shared/protocol';
-import type { RequestOptions } from '../../shared/request-tracker';
+import type { LiveSubagentDetailAddress, DetailCursor, DetailPageRef } from '../../shared/protocol/subagent-detail';
+import { RequestTimeoutError, type RequestOptions } from '../../shared/request-tracker';
 import type { LiveLifecycleWatermark, LiveTurnCheckpoint } from '../../shared/live-pipeline-protocol';
 import { isLivePipelineTraceEnabled, recordLivePipelineTrace } from '../util/live-pipeline-trace-runtime.js';
 
@@ -108,12 +112,39 @@ export interface ModalSink {
 }
 
 export interface SessionServiceLike {
-  hydrateModelState(sessionPath: string): Promise<void>;
+  hydrateModelState(sessionPath: string, metadata?: {
+    hydrationRevision?: number;
+    modelWriteFence?: number;
+  }): Promise<void>;
   setPrefs(prefs: Partial<ChatPrefs>): Promise<void>;
   /** Push the complete disabled-entry set for a session's system prompts to the
    *  backend (`systemPromptToggles.set`). Fire-and-forget: the backend re-emits
    *  `session.opened` to update host state, so no *Result event is expected. */
   setSystemPromptToggles(sessionPath: string, disabledEntries: readonly string[]): Promise<void>;
+  /** Phase 5: subscribe a renderer-owned detail key. The runner mints the
+   *  `subscriptionId`; the service records the exact owner and routes the
+   *  coordinator's stream imperatives for it. Fire-and-forget: failures
+   *  surface as `detail.error` imperatives, not *Result events. */
+  subscribeDetail(options: {
+    subscriptionId: string;
+    viewGeneration: number;
+    detailKey: string;
+    address: LiveSubagentDetailAddress;
+    cursor?: DetailCursor;
+  }): void;
+  /** Phase 5: discard the owner for a detail key, tombstone its subscription,
+   *  and notify the backend best-effort. */
+  unsubscribeDetail(options: {
+    viewGeneration: number;
+    detailKey: string;
+    reason: 'collapse' | 'unmount' | 'session-change';
+  }): void;
+  /** Phase 5: refetch a page of the active baseline for a subscribed key. */
+  fetchDetailPages(options: {
+    viewGeneration: number;
+    detailKey: string;
+    ref: DetailPageRef;
+  }): void;
   bumpSessionDataEpoch(sessionPath: string): void;
   /** Current-generation runtime readiness. Cold sends receive only the service
    * initialization acknowledgement budget; hot sends retain the short guard. */
@@ -131,7 +162,14 @@ export interface SessionServiceLike {
   /** Recover from a failed/timed-out selection: finish the request and
    *  dispatch the reducer transitions that undo the optimistic tab setup
    *  (CloseTab / SelectSession-fallback / SessionScopeCleared / NoticeShown). */
-  handleSelectionFailure(selectionToken: string, notice: string): void;
+  handleSelectionFailure(selectionToken: string, notice: string, expectedAttempt?: number): void;
+  /** Retain a timed-out create/duplicate operation instead of rolling back. */
+  handleCreateOperationDelayed?(selectionToken: string, operationId: string, notice: string, expectedAttempt?: number): void;
+  /** Refresh lifecycle metadata fences at actual RPC start (after queue wait). */
+  captureSelectionRequestStart?(selectionToken: string, operationAttempt?: number): void;
+  /** Reconcile an authoritative durable acknowledgement when session.opened is
+   * delayed or publication failed after creation committed. */
+  handleCreateOperationAcknowledged?(selectionToken: string, operationId: string, sessionPath: string): void;
   /** Decide whether a `session.open` for `sessionPath` can skip the
    *  transcript round-trip: returns `'skip'` when the host already has the
    *  session's transcript window loaded and the session is not actively
@@ -351,6 +389,9 @@ export class EffectRunner {
       SetPrefsRpc: (e) => this.handleSetPrefsRpc(e),
       SetPrivacyMode: (e) => this.handleSetPrivacyMode(e),
       SetSystemPromptTogglesRpc: (e) => this.handleSetSystemPromptTogglesRpc(e),
+      DetailSubscribeRpc: (e) => this.handleDetailSubscribeRpc(e),
+      DetailUnsubscribeRpc: (e) => this.handleDetailUnsubscribeRpc(e),
+      DetailFetchPagesRpc: (e) => this.handleDetailFetchPagesRpc(e),
       Log: (e) => this.handleLog(e),
       PostImperative: (e) => this.handlePostImperative(e),
       OpenFile: (e) => this.handleOpenFile(e),
@@ -682,6 +723,37 @@ export class EffectRunner {
     });
   }
 
+  // ─── Phase 5 detail subscription effects ───────────────────────────────────
+  // Fire-and-forget: the session service owns the subscription lifecycle and
+  // stream content crosses as imperatives, never as *Result events. The
+  // runner mints the subscription ID here so the service never guesses one.
+
+  private handleDetailSubscribeRpc(effect: DetailSubscribeRpcEffect): void {
+    this.deps.service.subscribeDetail({
+      subscriptionId: crypto.randomUUID(),
+      viewGeneration: effect.viewGeneration,
+      detailKey: effect.detailKey,
+      address: effect.address,
+      ...(effect.cursor !== undefined ? { cursor: effect.cursor } : {}),
+    });
+  }
+
+  private handleDetailUnsubscribeRpc(effect: DetailUnsubscribeRpcEffect): void {
+    this.deps.service.unsubscribeDetail({
+      viewGeneration: effect.viewGeneration,
+      detailKey: effect.detailKey,
+      reason: effect.reason,
+    });
+  }
+
+  private handleDetailFetchPagesRpc(effect: DetailFetchPagesRpcEffect): void {
+    this.deps.service.fetchDetailPages({
+      viewGeneration: effect.viewGeneration,
+      detailKey: effect.detailKey,
+      ref: effect.ref,
+    });
+  }
+
   private handleNotifySessionViewed(
     effect: Extract<Effect, { kind: 'NotifySessionViewed' }>,
   ): void {
@@ -848,7 +920,10 @@ export class EffectRunner {
     // *Result event is produced here.
     void (async () => {
       try {
-        await this.deps.service.hydrateModelState(effect.sessionPath);
+        await this.deps.service.hydrateModelState(effect.sessionPath, {
+          hydrationRevision: effect.hydrationRevision,
+          modelWriteFence: effect.modelWriteFence,
+        });
       } catch (err) {
         this.deps.log.log('error', `hydrateModelState failed: ${toErrorMessage(err)}`);
       }
@@ -1274,6 +1349,7 @@ export class EffectRunner {
           // First load and any running session get the full authoritative
           // snapshot.
           const transcript = service.getOpenTranscriptMode(effect.sessionPath);
+          service.captureSelectionRequestStart?.(effect.selectionToken);
           await backend.request('session.open', { sessionPath: effect.sessionPath, selectionToken: effect.selectionToken, transcript });
           dispatch({
             kind: 'OpenSessionResult',
@@ -1308,11 +1384,26 @@ export class EffectRunner {
       // CreateSession.
       void queues.enqueueLifecycle(async () => {
         try {
-          await backend.request('session.duplicate', { sessionPath: effect.sourceSessionPath, selectionToken: effect.selectionToken });
-          dispatch({ kind: 'DuplicateSessionResult', corrId: effect.corrId, sessionPath: effect.sessionPath, ok: true });
+          service.captureSelectionRequestStart?.(effect.selectionToken, effect.operationAttempt);
+          const response = await backend.request<{ sessionPath?: string }>('session.duplicate', {
+            sessionPath: effect.sourceSessionPath,
+            selectionToken: effect.selectionToken,
+            ...(effect.operationId ? { operationId: effect.operationId } : {}),
+            ...(effect.operationAttempt !== undefined ? { operationAttempt: effect.operationAttempt } : {}),
+          });
+          const resolvedPath = response.sessionPath ?? effect.sessionPath;
+          if (effect.operationId && response.sessionPath) {
+            service.handleCreateOperationAcknowledged?.(effect.selectionToken, effect.operationId, response.sessionPath);
+          }
+          dispatch({ kind: 'DuplicateSessionResult', corrId: effect.corrId, sessionPath: resolvedPath, ...(effect.operationId ? { operationId: effect.operationId } : {}), ok: true });
         } catch (err) {
-          service.handleSelectionFailure(effect.selectionToken, `Failed to duplicate session: ${toErrorMessage(err)}`);
-          dispatch({ kind: 'DuplicateSessionResult', corrId: effect.corrId, sessionPath: effect.sessionPath, ok: false, error: toErrorMessage(err) });
+          const message = toErrorMessage(err);
+          if (effect.operationId && isLocalRequestTimeout(err) && service.handleCreateOperationDelayed) {
+            service.handleCreateOperationDelayed(effect.selectionToken, effect.operationId, `Timed out waiting to duplicate session. The session is still being created; retry or wait for completion.`, effect.operationAttempt);
+          } else {
+            service.handleSelectionFailure(effect.selectionToken, `Failed to duplicate session: ${message}`, effect.operationAttempt);
+          }
+          dispatch({ kind: 'DuplicateSessionResult', corrId: effect.corrId, sessionPath: effect.sessionPath, ...(effect.operationId ? { operationId: effect.operationId } : {}), ok: false, error: message });
         }
       });
       return;
@@ -1329,21 +1420,37 @@ export class EffectRunner {
     // recovery path.
     void queues.enqueueLifecycle(async () => {
       try {
-        await backend.request('session.create', { cwd: effect.cwd, selectionToken: effect.selectionToken });
+        service.captureSelectionRequestStart?.(effect.selectionToken, effect.operationAttempt);
+        const response = await backend.request<{ sessionPath?: string }>('session.create', {
+          cwd: effect.cwd,
+          selectionToken: effect.selectionToken,
+          ...(effect.operationId ? { operationId: effect.operationId } : {}),
+          ...(effect.operationAttempt !== undefined ? { operationAttempt: effect.operationAttempt } : {}),
+        });
+        if (effect.operationId && response.sessionPath) {
+          service.handleCreateOperationAcknowledged?.(effect.selectionToken, effect.operationId, response.sessionPath);
+        }
         dispatch({
           kind: 'CreateSessionResult',
           corrId: effect.corrId,
-          sessionPath: effect.sessionPath,
+          sessionPath: response.sessionPath ?? effect.sessionPath,
+          ...(effect.operationId ? { operationId: effect.operationId } : {}),
           ok: true,
         });
       } catch (err) {
-        service.handleSelectionFailure(effect.selectionToken, `Failed to create session: ${toErrorMessage(err)}`);
+        const message = toErrorMessage(err);
+        if (effect.operationId && isLocalRequestTimeout(err) && service.handleCreateOperationDelayed) {
+          service.handleCreateOperationDelayed(effect.selectionToken, effect.operationId, `Timed out waiting to create session. The session is still being created; retry or wait for completion.`, effect.operationAttempt);
+        } else {
+          service.handleSelectionFailure(effect.selectionToken, `Failed to create session: ${message}`, effect.operationAttempt);
+        }
         dispatch({
           kind: 'CreateSessionResult',
           corrId: effect.corrId,
           sessionPath: effect.sessionPath,
+          ...(effect.operationId ? { operationId: effect.operationId } : {}),
           ok: false,
-          error: toErrorMessage(err),
+          error: message,
         });
       }
     });
@@ -1351,6 +1458,15 @@ export class EffectRunner {
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
+
+/** Only the transport deadline is ambiguous loss of acknowledgement. Backend
+ * operational failures may contain similar words and must remain definitive. */
+function isLocalRequestTimeout(error: unknown): boolean {
+  return error instanceof RequestTimeoutError
+    || (typeof error === 'object' && error !== null
+      && (error as { name?: unknown }).name === 'RequestTimeoutError'
+      && (error as { code?: unknown }).code === 'PIE_RPC_TIMEOUT');
+}
 
 /** RPC kinds that reach the generic double-wrap path in {@link runRpc} after
  *  Send/Edit have been short-circuited to their dedicated handlers. Kept

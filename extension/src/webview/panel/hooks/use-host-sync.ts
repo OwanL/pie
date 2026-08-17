@@ -11,6 +11,12 @@ import {
   receiveLazyDetailResult,
   setLazyDetailPostMessage,
 } from '../transcript/lazy-detail-store';
+import {
+  clearDetailSubscriptionStore,
+  receiveDetailImperative,
+  setDetailStoreContext,
+  type DetailStreamMessage,
+} from '../transcript/detail-subscription-store';
 
 import type {
   ChatMessage,
@@ -64,6 +70,7 @@ export const EMPTY_VIEW_STATE: ViewState = {
   systemPrompts: [],
   modelSettings: null,
   availableModels: [],
+  availableModelsStatus: 'authoritative',
   contextUsage: null,
   prefs: { ...DEFAULT_CHAT_PREFS },
   availableExtensions: [],
@@ -412,6 +419,7 @@ function handleStateMessage(msg: HostToWebviewMessage, ctx: HostMessageContext) 
     if (hostChanged) {
       clearCollapsibleCache();
       clearLazyDetailCache();
+      clearDetailSubscriptionStore();
     }
   } else {
     // Brief D length/identity guard: the optimistic overlay is reconciled
@@ -440,6 +448,15 @@ function handleStateMessage(msg: HostToWebviewMessage, ctx: HostMessageContext) 
 
   ctx.setViewState(hydratedState);
   ctx.setCommitTarget(commitTarget);
+  // Phase 5 detail subscriptions are key-scoped webview state: refresh the
+  // store context (current host instance, view generation, and the control
+  // post function) after every snapshot so expansions always subscribe with
+  // the exact generation the host expects.
+  setDetailStoreContext({
+    hostInstanceId: m.hostInstanceId,
+    viewGeneration: m.viewGeneration,
+    postMessage: ctx.postMessage,
+  });
 }
 
 function handlePlayCompletionSound(msg: HostToWebviewMessage) {
@@ -614,6 +631,14 @@ export function useHostSync(
       if (!event.data || typeof event.data.type !== 'string') return;
       if (event.data.type === 'detailResult' && event.data.result) {
         receiveLazyDetailResult(event.data.result);
+        return;
+      }
+      // Phase 5 detail stream imperatives (detail.start/page/delta/rebase/
+      // terminal/error) are routed to the key-scoped subscription store. They
+      // carry the full HostDetailRoute; the store drops stale/cross-key
+      // traffic and never lets it touch ViewState.
+      if (event.data.type.startsWith('detail.') && typeof event.data.detailKey === 'string' && event.data.subscriptionId) {
+        receiveDetailImperative(event.data as DetailStreamMessage);
         return;
       }
       dispatchHostMessage(event.data as HostToWebviewMessage, {

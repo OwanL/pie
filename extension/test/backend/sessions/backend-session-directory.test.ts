@@ -47,10 +47,16 @@ test('backend RPCs use the configured directory while explicit legacy opens keep
     server.sdk = {
       VERSION: 'test',
       SessionManager: {
-        create: (cwd: string, sessionDir?: string) => ({
-          cwd,
-          sessionPath: path.join(sessionDir ?? sdkFallbackDir, 'created.jsonl'),
-        }),
+        create: (cwd: string, sessionDir?: string) => {
+          const sessionPath = path.join(sessionDir ?? sdkFallbackDir, 'created.jsonl');
+          return {
+            getCwd: () => cwd,
+            getSessionFile: () => sessionPath,
+            getSessionName: () => undefined,
+            getBranch: () => [],
+            getEntries: () => [],
+          };
+        },
         listAll: async (sessionDir?: string) => {
           listedDirs.push(sessionDir);
           return [];

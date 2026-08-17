@@ -6,3 +6,4 @@ export * from './sessions.js';
 export * from './settings.js';
 export * from './aggregate-stats.js';
 export * from './webview.js';
+export * from './subagent-detail.js';

@@ -67,13 +67,13 @@ function buildState(opts: BuildOpts = {}): ArchState {
   };
 }
 
-function createCmd(corrId: string, opts: { pending?: string; source?: string; placeholder?: SessionSummary; selectionToken?: string } = {}): Event {
+function createCmd(corrId: string, opts: { pending?: string; source?: string; placeholder?: SessionSummary; selectionToken?: string; operationId?: string } = {}): Event {
   const pending = opts.pending ?? PENDING;
   const source = opts.source ?? OLD;
   const placeholder = opts.placeholder ?? PLACEHOLDER;
   return {
     kind: 'Command',
-    cmd: { kind: 'DuplicateSession', corrId, sessionPath: pending, sourceSessionPath: source, placeholderSummary: placeholder, selectionToken: opts.selectionToken ?? 'tok' },
+    cmd: { kind: 'DuplicateSession', corrId, sessionPath: pending, sourceSessionPath: source, placeholderSummary: placeholder, selectionToken: opts.selectionToken ?? 'tok', ...(opts.operationId ? { operationId: opts.operationId } : {}) },
   };
 }
 
@@ -95,6 +95,25 @@ test('DuplicateSession inserts the placeholder copy summary, opens the tab adjac
     { kind: 'PersistTabs', corrId: 'c1', openTabPaths: [OLD, PENDING], activeSessionPath: PENDING, pinnedTabPaths: [], pinnedTabGroups: [] },
     { kind: 'DuplicateSession', corrId: 'c1', sessionPath: PENDING, sourceSessionPath: OLD, selectionToken: 'tok' },
   ]);
+});
+
+test('DuplicateSession timeout retry keeps one operation identity and the pending copy', () => {
+  const operationId = 'duplicate-op-1';
+  const created = reducer(buildState(), createCmd('duplicate-1', { operationId, selectionToken: 'duplicate-token' }));
+  const delayed = reducer(created.state, {
+    kind: 'CreateOperationDelayed', operationId, pendingPath: PENDING,
+    selectionToken: 'duplicate-token', notice: 'still duplicating', ownsSelection: true,
+  });
+  assert.equal(delayed.state.pending.createOperations[operationId]?.status, 'delayed-awaiting-outcome');
+  assert.equal(delayed.state.sessions.openTabPaths.includes(PENDING), true);
+  const retried = reducer(delayed.state, createCmd('duplicate-2', { operationId, selectionToken: 'duplicate-token' }));
+  assert.equal(retried.state.pending.createOperations[operationId]?.status, 'pending');
+  const effect = retried.effects.find((item) => item.kind === 'DuplicateSession');
+  assert.equal(effect?.kind, 'DuplicateSession');
+  if (effect?.kind === 'DuplicateSession') {
+    assert.equal(effect.operationId, operationId);
+    assert.equal(effect.sourceSessionPath, OLD);
+  }
 });
 
 test('DuplicateSession does not duplicate the summary or tab if the pending path is already present', () => {

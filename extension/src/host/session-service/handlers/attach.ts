@@ -42,12 +42,38 @@ export function applySessionOpenedPayload(
 
   logSessionOpened(payload, deps, flags);
 
-  handlePendingPathReplacement(
-    deps,
-    flags.selectionRequest,
-    session.path,
-    session.identityFallback === true ? undefined : session.sessionId?.trim() || undefined,
-  );
+  if (payload.replacesSessionPath && payload.replacesSessionPath !== session.path) {
+    deps.dispatchArch({
+      kind: 'PendingPathReplaced',
+      oldPendingPath: payload.replacesSessionPath,
+      newSessionPath: session.path,
+    });
+    deps.runObserver.replaceSessionPath(
+      payload.replacesSessionPath,
+      session.path,
+      session.identityFallback === true ? undefined : session.sessionId?.trim() || undefined,
+    );
+    deps.state.clearSessionScope(payload.replacesSessionPath, true);
+  }
+
+  if (flags.createResolution?.fresh && flags.createResolution.operation) {
+    deps.dispatchArch({
+      kind: 'CreateOperationSucceeded',
+      operationId: flags.createResolution.operation.operationId,
+      pendingPath: flags.createResolution.operation.pendingPath,
+      sessionPath: session.path,
+    });
+  }
+
+  if (flags.createResolution?.fresh && flags.createResolution.operation) {
+    handlePendingPathReplacement(
+      deps,
+      flags.selectionRequest,
+      flags.createResolution.operation,
+      session.path,
+      session.identityFallback === true ? undefined : session.sessionId?.trim() || undefined,
+    );
+  }
 
   const transcriptResolution = resolveAndDispatch(payload, deps, session.path, flags.staleSessionData);
 
@@ -62,23 +88,52 @@ export function applySessionOpenedPayload(
     });
   }
 
-  finalizeSessionOpening(deps, payload);
+  finalizeSessionOpening(deps, payload, flags);
 }
 
 function computeOpeningFlags(payload: SessionOpenedPayload, deps: ApplySessionOpenedDeps) {
   const { session, selectionToken } = payload;
+  const archState = deps.getArchState();
   const selectionRequest = deps.state.getSelectionRequest(selectionToken);
+  const operation = payload.operationId
+    ? archState.pending.createOperations[payload.operationId]
+    : selectionRequest?.operationId
+      ? archState.pending.createOperations[selectionRequest.operationId]
+      : undefined;
+  const operationMatches = !!operation
+    && (!payload.operationId || operation.operationId === payload.operationId)
+    && (!payload.operationId || selectionToken === operation.selectionToken)
+    && (!payload.operationId || !!selectionToken)
+    && operation.pendingPath !== session.path;
+  const fresh = operationMatches
+    && (operation.status === 'pending' || operation.status === 'delayed-awaiting-outcome');
+  const duplicate = operationMatches
+    && operation.status === 'succeeded'
+    && operation.resolvedSessionPath === session.path;
+  const rejected = !!payload.operationId && (!operation || !operationMatches || operation.status === 'failed');
+  const createResolution = operation
+    ? { operation, fresh, duplicate, rejected, hidden: operation.hidden === true }
+    : undefined;
   const staleSessionData = selectionRequest?.requestEpoch !== undefined
     && deps.state.getSessionDataEpoch(session.path) !== selectionRequest.requestEpoch;
-  const shouldOpenTab = !!selectionRequest || deps.getArchState().sessions.openTabPaths.includes(session.path);
-  const shouldActivate = selectionToken
-    ? deps.state.isCurrentSelectionToken(selectionToken)
-    : (deps.getArchState().sessions.activeSessionPath === session.path
+  const replacementSource = payload.replacesSessionPath;
+  const replacementWasOpen = !!replacementSource
+    && archState.sessions.openTabPaths.includes(replacementSource);
+  const replacementWasActive = !!replacementSource
+    && archState.sessions.activeSessionPath === replacementSource;
+  const shouldOpenTab = rejected
+    ? archState.sessions.openTabPaths.includes(session.path)
+    : (createResolution?.fresh
+        ? !createResolution.hidden
+        : !!selectionRequest || replacementWasOpen || archState.sessions.openTabPaths.includes(session.path));
+  const shouldActivate = !createResolution?.hidden && !rejected && (replacementWasActive || (selectionToken
+    ? (deps.state.isCurrentSelectionToken(selectionToken) && !duplicate)
+    : (archState.sessions.activeSessionPath === session.path
         || (!!selectionRequest?.pendingPath
             && selectionRequest.pendingPath !== session.path
-            && deps.getArchState().sessions.activeSessionPath === selectionRequest.pendingPath));
+            && archState.sessions.activeSessionPath === selectionRequest.pendingPath))));
 
-  return { selectionRequest, staleSessionData, shouldOpenTab, shouldActivate };
+  return { selectionRequest, staleSessionData, shouldOpenTab, shouldActivate, createResolution };
 }
 
 function logSessionOpened(
@@ -110,14 +165,12 @@ function logSessionOpened(
 function handlePendingPathReplacement(
   deps: ApplySessionOpenedDeps,
   selectionRequest: ReturnType<typeof computeOpeningFlags>['selectionRequest'],
+  operation: NonNullable<ReturnType<typeof computeOpeningFlags>['createResolution']>['operation'],
   sessionPath: string,
   stableSessionId: string | undefined,
 ): void {
-  if (!selectionRequest?.pendingPath || selectionRequest.pendingPath === sessionPath) {
-    return;
-  }
-
-  const pendingPath = selectionRequest.pendingPath;
+  const pendingPath = operation.pendingPath ?? selectionRequest?.pendingPath;
+  if (!pendingPath || pendingPath === sessionPath) return;
 
   deps.dispatchArch({
     kind: 'PendingPathReplaced',
@@ -177,10 +230,21 @@ function resolveAndDispatch(
     ...(preserveStreamingState && { systemPrompts: undefined }),
   };
 
+  const selectionRequest = deps.state.getSelectionRequest(payload.selectionToken);
+  const requestFences = payload.operationAttempt !== undefined
+    ? selectionRequest?.modelFencesByOperationAttempt?.[payload.operationAttempt]
+    : selectionRequest;
   deps.dispatchArch({
     kind: 'SessionOpened',
     sessionPath,
     payload: resolvedPayload,
+    backendGeneration: requestFences?.backendGeneration ?? deps.state.getBackendGeneration(),
+    // An unsolicited snapshot has no host request-start fence. Treat its model
+    // metadata as unfenced rather than stamping it fresh at receipt; lifecycle
+    // snapshots carry the exact values captured by their SelectionRequest.
+    modelWriteFence: requestFences?.modelWriteFence ?? -1,
+    modelHydrationRevision: requestFences?.modelHydrationRevision ?? -1,
+    catalogHydrationRevision: requestFences?.catalogHydrationRevision ?? -1,
   });
 
   return transcriptResolution;
@@ -204,12 +268,15 @@ function applyPostDispatchState(
     && flags.selectionRequest?.pendingPath
     && flags.selectionRequest.pendingPath !== sessionPath
     && deps.getArchState().sessions.activeSessionPath === flags.selectionRequest.pendingPath
+    && !flags.createResolution?.hidden
+    && !flags.createResolution?.rejected
   ) {
     deps.dispatchArch({ kind: 'Command', cmd: { kind: 'SelectSession', corrId: `select:${Date.now()}`, sessionPath } });
   }
-  if (payload.analyticsFactors) {
+  const activeExtensionIds = payload.analyticsFactors?.activeExtensions ?? [];
+  if (activeExtensionIds.length > 0 || deps.getArchState().settings.availableExtensions.length === 0) {
     deps.dispatchArch({ kind: 'AvailableExtensionsChanged', extensions: deriveAvailableExtensions(
-      payload.analyticsFactors.activeExtensions,
+      activeExtensionIds,
     ) });
   }
   deps.dispatchArch({ kind: 'FileChangesUpdated', sessionPath, fileChanges: deriveFileChangesFromTranscript(transcript, resolveSessionCwd(deps.getArchState().sessions.sessions, deps.getArchState().sessions.workspaceCwd, sessionPath)) });
@@ -218,6 +285,7 @@ function applyPostDispatchState(
 function finalizeSessionOpening(
   deps: ApplySessionOpenedDeps,
   payload: SessionOpenedPayload,
+  flags: ReturnType<typeof computeOpeningFlags>,
 ): void {
   const sessionPath = payload.session.path;
   const selectionToken = payload.selectionToken;
@@ -229,7 +297,12 @@ function finalizeSessionOpening(
   }
   deps.state.touchSessionTranscript(sessionPath);
   deps.state.evictInactiveTranscriptWindows();
-  deps.state.finishSelectionRequest(selectionToken);
+  // A mismatched/old-generation create event may refresh durable cache, but it
+  // cannot consume the current operation's waiter. Only the matching late
+  // success (or an ordinary open) settles selection ownership.
+  if (!flags.createResolution?.rejected) {
+    deps.state.finishSelectionRequest(selectionToken);
+  }
   deps.state.assertSelectionInvariant('onSessionOpened');
   const archState = deps.getArchState();
   deps.dispatchArch({
@@ -359,9 +432,20 @@ export function attach(
         activityBySession[sessionPath] = runningTool ? 'running a tool' : 'generating';
       }
     }
+    const exitNotice = `PI backend stopped${code !== null ? ` (code ${code})` : ''}`;
+    // A dead generation is definitive for delayed creates: unlike a local RPC
+    // timeout, no future event from this process can complete them. Fail only
+    // those operation-ledger entries before clearing generation-scoped host
+    // waiters; resolved operations remain tombstoned and stale opened events
+    // cannot replace them.
+    deps.state.failPendingCreateOperations(exitNotice);
+    // Clear dead-process runtime state now, but generation ownership advances
+    // exactly once when the replacement process starts. BackendClient follows
+    // the same spawn-scoped generation rule.
+    deps.state.resetRuntimeState({ advanceBackendGeneration: false });
     bootLog('session-events', 'backend.exited', {
       code,
-      notice: `PI backend stopped${code !== null ? ` (code ${code})` : ''}`,
+      notice: exitNotice,
       runningSessionPaths,
     });
     for (const event of backendExitEvents(runningSessionPaths, code, stderr, Date.now(), activityBySession)) {

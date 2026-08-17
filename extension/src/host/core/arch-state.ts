@@ -46,6 +46,7 @@ import {
   DEFAULT_PRUNING_SETTINGS,
   DEFAULT_TOOL_RESULT_PRUNING_SETTINGS,
 } from '../../shared/protocol';
+import { deriveBundledExtensions } from '../../shared/bundled-extensions.js';
 
 // ---------------------------------------------------------------------------
 // Transcript sub-state
@@ -138,12 +139,12 @@ export interface SessionsState {
    *  `willRetry` gate on `agent_end` keeps `busy` true throughout). */
   retryStatusBySession: Record<string, RetryStatus>;
   /** Running session paths whose tab was intentionally hidden by an explicit
-   *  V2 review closure action (closeReviewed/closeSelf). The webview ready
-   *  handshake restores ordinary hidden running tabs but must NOT resurrect
-   *  these — their closure is a durable outbox action, not an accidental hide.
+   *  close. This covers ordinary user closes and V2 review closure actions
+   *  (closeReviewed/closeSelf); the durable review outbox reason remains on
+   *  the close command, while this host-owned intent controls renderer recovery.
    *  Host-owned so it survives webview reloads; pruned when a path is reopened
    *  or no longer running. */
-  reviewClosedRunningPaths: string[];
+  intentionallyHiddenRunningPaths: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -163,6 +164,19 @@ export interface SettingsState {
   toolResultPruningSettings: ToolResultPruningSettings;
   /** Available models per session. */
   availableModelsBySession: Record<string, ModelInfo[]>;
+  /** Whether a per-session model catalog is provisional while a durable path is
+   *  being resolved or metadata is loading. This is host-only state; the picker
+   *  continues to render the retained catalog rather than flashing empty. */
+  availableModelsStatusBySession: Record<string, 'provisional' | 'loading' | 'authoritative'>;
+  /** Backend generation associated with the newest accepted model hydration. */
+  modelBackendGeneration: number;
+  /** Monotonic hydration command revision, used to fence out-of-order results. */
+  modelHydrationRevision: number;
+  /** Monotonic optimistic model-write fence. Hydration started before this
+   *  fence cannot overwrite the user's model choice or its known capabilities. */
+  modelWriteFence: number;
+  /** Last accepted hydration revision per stable session path. */
+  modelHydrationRevisionBySession: Record<string, number>;
   /** Context window usage per session. */
   contextUsageBySession: Record<string, ContextWindowUsage | null>;
   /** Whether the PI backend is connected and ready. */
@@ -289,6 +303,30 @@ export interface PendingOp {
  *  disambiguates the terminal phases (`succeeded` within the promoted window,
  *  `failed` after the promoted op is dropped) and carries the post-hoc latency
  *  for the high-latency hint. An absent entry means `idle`. */
+export type CreateOperationStatus = 'pending' | 'delayed-awaiting-outcome' | 'succeeded' | 'failed';
+
+/** Host-owned ledger entry for one create/duplicate operation. The operation
+ * identity is stable across local acknowledgement retries; the pending path
+ * is never reused by another operation. */
+export interface CreateOperation {
+  operationId: string;
+  kind: 'create' | 'duplicate';
+  pendingPath: string;
+  selectionToken: string;
+  status: CreateOperationStatus;
+  /** Monotonic local attempt fence. Retries keep operationId but stale
+   * acknowledgements/errors from an older waiter cannot settle the retry. */
+  attempt: number;
+  /** Durable path learned from the authoritative session.opened event or ack. */
+  resolvedSessionPath?: string;
+  /** Duplicate source, retained so a delayed retry can reconstruct its RPC. */
+  sourceSessionPath?: string;
+  cwd?: string;
+  /** A hidden delayed operation still resolves and drains sends, but must not
+   * reopen or focus its tab when the late success arrives. */
+  hidden?: boolean;
+}
+
 export interface PrepassPhaseState {
   phase: 'running' | 'succeeded' | 'failed';
   /** Prepass LLM latency (ms) from the pruning-result `CustomMessage`'s
@@ -430,6 +468,8 @@ export interface PendingState {
   requestIdToLocalId: Record<string, { sessionPath: string; localId: string }>;
   /** Sends queued while the target session was a pending tab, keyed by pending path. */
   sendQueueBySession: Record<string, PendingSendQueueEntry[]>;
+  /** Create/duplicate operation ledger, keyed by host-generated operation ID. */
+  createOperations: Record<string, CreateOperation>;
   /** Sends queued while the backend was not yet ready, keyed by session path. */
   backendReadyQueueBySession: Record<string, BackendReadyQueueEntry[]>;
   /** Per-session pruning prepass phase for the live status chip (Brief F).
@@ -490,20 +530,25 @@ export function createInitialArchState(): ArchState {
       privacyModeBySession: {},
       interruptInFlightBySession: {},
       retryStatusBySession: {},
-      reviewClosedRunningPaths: [],
+      intentionallyHiddenRunningPaths: [],
     },
     settings: {
       modelSettings: null,
       pruningSettings: { ...DEFAULT_PRUNING_SETTINGS },
       toolResultPruningSettings: { ...DEFAULT_TOOL_RESULT_PRUNING_SETTINGS, rules: { ...DEFAULT_TOOL_RESULT_PRUNING_SETTINGS.rules } },
       availableModelsBySession: {},
+      availableModelsStatusBySession: {},
+      modelBackendGeneration: 0,
+      modelHydrationRevision: 0,
+      modelWriteFence: 0,
+      modelHydrationRevisionBySession: {},
       contextUsageBySession: {},
       backendReady: false,
       notice: null,
       noticeKind: null,
       noticeRaw: null,
       prefs: { ...DEFAULT_CHAT_PREFS },
-      availableExtensions: [],
+      availableExtensions: deriveBundledExtensions(),
       pendingExtensionUIRequestsBySession: {},
     },
     composer: {
@@ -532,6 +577,7 @@ export function createInitialArchState(): ArchState {
       currentTurnBySession: {},
       requestIdToLocalId: {},
       sendQueueBySession: {},
+      createOperations: {},
       backendReadyQueueBySession: {},
       prepassBySession: {},
     },

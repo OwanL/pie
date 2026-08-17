@@ -18,7 +18,7 @@ test('tool progress adapters emit typed bounded previews', () => {
   assert.deepEqual(question, { kind: 'question', promptSummary: 'Choose', optionCount: 2 });
 });
 
-test('subagent previews retain every sibling and complete recursively renderable transcript', () => {
+test('subagent previews retain every sibling but remove recursive transcript bodies', () => {
   const children = Array.from({ length: 40 }, (_, index) => ({
     id: `child-${index}`,
     status: index % 2 === 0 ? 'completed' : 'running',
@@ -31,7 +31,8 @@ test('subagent previews retain every sibling and complete recursively renderable
   if (preview.kind === 'subagent') {
     assert.equal(preview.children.length, 40);
     assert.equal(preview.omittedChildren, 0);
-    assert.equal(JSON.stringify(preview).includes('must cross intact'), true);
+    assert.equal(JSON.stringify(preview).includes('must cross intact'), false);
+    assert.ok(preview.children.every((child) => child.liveAddressable === false));
   }
 });
 
@@ -65,11 +66,27 @@ test('subagent previews understand the real details.results progress shape', () 
     assert.equal(preview.children[0]?.usage?.input, 1200);
     assert.equal(preview.children[0]?.contextWindow, 200000);
     assert.equal(preview.children[0]?.startedAt, 1000);
-    assert.match(JSON.stringify(preview.children[0]?.messages), /live reasoning/);
+    assert.equal(preview.children[0]?.messages, undefined);
+    assert.equal(preview.children[0]?.liveAddressable, false, 'legacy identity is display-only');
   }
 });
 
-test('subagent previews retain full streaming text plus a cumulative counter including nested descendants', () => {
+test('producer identity yields a live address while synthesized legacy identity remains non-addressable', () => {
+  const identity = { childId: 'child-1', spawningToolCallId: 'tool-1', attemptId: 'attempt-1' };
+  const preview = normalizeToolProgress('subagent', { details: { results: [{
+    ...identity, lineage: [identity], liveAddressable: true,
+    agent: 'worker', task: 'work', exitCode: -1, messages: [],
+  }] } }, undefined, {
+    sessionPath: 'C:/sessions/root.jsonl', turnId: 'turn-1', rootToolCallId: 'tool-1', rootAttemptId: 'root-attempt',
+  });
+  assert.equal(preview.kind, 'subagent');
+  if (preview.kind === 'subagent') {
+    assert.equal(preview.children[0]?.liveAddressable, true);
+    assert.deepEqual(preview.children[0]?.detailAddress?.lineage, [identity]);
+  }
+});
+
+test('subagent previews retain bounded streaming text plus a cumulative counter including nested descendants', () => {
   const longStream = 'The quick brown fox jumps over the lazy dog. '.repeat(1_000);
   const preview = normalizeToolProgress('subagent', {
     details: {
@@ -94,7 +111,7 @@ test('subagent previews retain full streaming text plus a cumulative counter inc
   assert.equal(preview.kind, 'subagent');
   if (preview.kind === 'subagent') {
     const child = preview.children[0]!;
-    assert.equal(child.streamingText, longStream, 'the live transcript is not reduced to a tail');
+    assert.equal(child.streamingText, longStream.slice(-8_192), 'collapsed live output is a bounded tail');
     assert.ok(
       (child.cumulativeOutputTokens ?? 0) > 10_000,
       'counter reflects the complete stream plus nested output, not only the bounded visible tail',
@@ -124,7 +141,7 @@ test('modern subagent counters include the in-progress tool-call draft', () => {
   }
 });
 
-test('unchanged modern subagent revision reuses its recursive normalized preview', () => {
+test('unchanged modern subagent revision reuses its compact normalized preview', () => {
   const child = {
     attemptId: 'attempt-cache-1', progressGeneration: 7,
     agent: 'worker', task: 'large task', exitCode: -1,
@@ -140,6 +157,35 @@ test('unchanged modern subagent revision reuses its recursive normalized preview
     details: { mode: 'single', results: [{ ...child, progressGeneration: 8 }] },
   });
   assert.notEqual(advanced, first, 'a new generation invalidates the normalization cache');
+});
+
+test('ordinary-lane counters prove recursive transcript bodies were not traversed and survive cache reuse', () => {
+  const nested = {
+    agent: 'leaf', attemptId: 'leaf-1', progressGeneration: 1, messages: [
+      { role: 'assistant', content: [{ type: 'text', text: 'leaf answer' }] },
+      { role: 'toolResult', toolName: 'read', content: [{ type: 'text', text: 'done' }] },
+    ],
+  };
+  const middle = {
+    agent: 'middle', attemptId: 'middle-1', progressGeneration: 1, messages: [{
+      role: 'toolResult', toolName: 'subagent', details: { mode: 'single', results: [nested] },
+    }],
+  };
+  const outer = {
+    agent: 'outer', attemptId: 'outer-1', progressGeneration: 1, messages: [{
+      role: 'toolResult', toolName: 'subagent', details: { mode: 'single', results: [middle] },
+    }],
+  };
+  const first = { childCount: 0, messageCount: 0, maxRecursiveDepth: 0 };
+  const preview = normalizeToolProgress('subagent', { details: { mode: 'single', results: [outer] } }, first);
+  assert.deepEqual(first, { childCount: 1, messageCount: 0, maxRecursiveDepth: 1, available: true });
+
+  const cached = { childCount: 0, messageCount: 0, maxRecursiveDepth: 0 };
+  assert.equal(
+    normalizeToolProgress('subagent', { details: { mode: 'single', results: [outer] } }, cached),
+    preview,
+  );
+  assert.deepEqual(cached, first, 'cached normalization reuses counters maintained by the original traversal');
 });
 
 test('generic preview handles cyclic, bigint and throwing values without throwing', () => {

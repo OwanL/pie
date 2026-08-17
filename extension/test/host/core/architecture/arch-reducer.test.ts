@@ -1129,7 +1129,7 @@ test('reducer: DuplicateSession command optimistically opens the copy tab adjace
   }
 });
 
-test('reducer: HydrateModel command produces HydrateModel effect, state unchanged', () => {
+test('reducer: HydrateModel command produces a loading HydrateModel effect', () => {
   const event: Event = {
     kind: 'Command',
     cmd: { kind: 'HydrateModel', corrId: 'c-hydrate', sessionPath: '/s' },
@@ -1137,7 +1137,9 @@ test('reducer: HydrateModel command produces HydrateModel effect, state unchange
 
   const result = reducer(initialArchState, event);
 
-  assert.deepEqual(result.state, initialArchState);
+  assert.notDeepEqual(result.state, initialArchState);
+  assert.equal(result.state.settings.availableModelsStatusBySession['/s'], 'loading');
+  assert.equal(result.state.settings.modelHydrationRevision, 1);
   assert.equal(result.effects.length, 1);
   assert.equal(result.effects[0]?.kind, 'HydrateModel');
   if (result.effects[0]?.kind === 'HydrateModel') {

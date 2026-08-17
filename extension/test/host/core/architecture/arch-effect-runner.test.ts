@@ -1193,3 +1193,44 @@ test('EffectRunner SendRpc does NOT touch pruning for a normal send (no priorPru
   assert.equal(pruningCalls.length, 0, 'a normal send (no priorPruningMode) never restores pruning');
   runner.dispose();
 });
+
+test('EffectRunner mints the subscription ID and routes Phase 5 detail effects to the session service', async () => {
+  const { deps, calls } = makeEffectRunnerDeps();
+  const runner = new EffectRunner(deps);
+  const address = {
+    sessionPath: '/a/session.jsonl', turnId: 'turn-1', rootToolCallId: 'tool-1', rootAttemptId: 'attempt-1',
+    lineage: [{ childId: 'child-1', spawningToolCallId: 'tool-1', attemptId: 'attempt-1' }],
+  };
+
+  runner.run({
+    kind: 'DetailSubscribeRpc', corrId: 'c-sub', viewGeneration: 3, detailKey: 'subagent:msg:tool',
+    address, cursor: { revision: 1 },
+  });
+  runner.run({
+    kind: 'DetailUnsubscribeRpc', corrId: 'c-unsub', viewGeneration: 3, detailKey: 'subagent:msg:tool', reason: 'collapse',
+  });
+  runner.run({
+    kind: 'DetailFetchPagesRpc', corrId: 'c-fetch', viewGeneration: 3, detailKey: 'subagent:msg:tool',
+    ref: { baselineRevision: 1, pageIndex: 0, pageCount: 2 },
+  });
+  await settle();
+
+  const detailCalls = calls.filter((call) => call.kind === 'subscribeDetail' || call.kind === 'unsubscribeDetail' || call.kind === 'fetchDetailPages');
+  assert.equal(detailCalls.length, 3);
+  const subscribe = detailCalls[0];
+  assert.equal(subscribe?.kind, 'subscribeDetail');
+  if (subscribe?.kind === 'subscribeDetail') {
+    assert.equal(typeof subscribe.subscriptionId, 'string');
+    assert.ok(subscribe.subscriptionId.length > 0, 'the runner mints the subscription ID');
+    assert.equal(subscribe.viewGeneration, 3);
+    assert.equal(subscribe.detailKey, 'subagent:msg:tool');
+    assert.deepEqual(subscribe.address, address);
+    assert.deepEqual(subscribe.cursor, { revision: 1 });
+  }
+  assert.deepEqual(detailCalls[1], { kind: 'unsubscribeDetail', viewGeneration: 3, detailKey: 'subagent:msg:tool', reason: 'collapse' });
+  assert.deepEqual(detailCalls[2], {
+    kind: 'fetchDetailPages', viewGeneration: 3, detailKey: 'subagent:msg:tool',
+    ref: { baselineRevision: 1, pageIndex: 0, pageCount: 2 },
+  });
+  runner.dispose();
+});

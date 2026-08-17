@@ -101,7 +101,7 @@ function createExtensionContext() {
   } as any;
 }
 
-function makeHarness() {
+function makeHarness(runObserver = NOOP_RUN_OBSERVER) {
   const context = createExtensionContext();
   const backend = new BackendClientCtor();
   const dispatched: Event[] = [];
@@ -120,11 +120,36 @@ function makeHarness() {
     dispatchArch,
     getArchState,
     undefined,
-    NOOP_RUN_OBSERVER,
+    runObserver,
   );
 
   return { context, backend, service, dispatched, getArchState };
 }
+
+test('correlated backend failures produce exactly one analytics record per request identity', () => {
+  const backendErrors: Array<{ sessionPath?: string; code: string }> = [];
+  const { backend, service } = makeHarness({
+    ...NOOP_RUN_OBSERVER,
+    onBackendError: (sessionPath, code) => backendErrors.push({ sessionPath, code }),
+  });
+  const failure = {
+    backendGeneration: 1, requestId: 'req-1', method: 'session.open',
+    code: 'SESSION_OPEN_FAILED', message: 'failed', sessionPath: '/session.jsonl',
+  };
+  (backend as any).correlatedFailures.fire(failure);
+  (backend as any).correlatedFailures.fire(failure);
+  assert.equal(
+    (service as any).state.claimOperationalIncident(undefined, 'req-1', 1),
+    false,
+    'a legacy operational-error echo shares the correlated response registry',
+  );
+  (backend as any).correlatedFailures.fire({ ...failure, requestId: 'req-2' });
+  assert.deepEqual(backendErrors, [
+    { sessionPath: '/session.jsonl', code: 'SESSION_OPEN_FAILED' },
+    { sessionPath: '/session.jsonl', code: 'SESSION_OPEN_FAILED' },
+  ]);
+  service.dispose();
+});
 
 test('setPrefs persists prefs without dispatching a recursive SetPrefs command', async () => {
   const { service, dispatched, context } = makeHarness();

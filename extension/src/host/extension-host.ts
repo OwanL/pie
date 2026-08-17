@@ -153,6 +153,10 @@ export class PieExtension implements vscode.Disposable {
         this.handleSessionCompleted(event);
       },
       this.statsService,
+      {
+        getHostInstanceId: () => this.sidebarProvider.getHostInstanceId(),
+        getViewGeneration: () => this.sidebarProvider.getViewGeneration(),
+      },
     );
 
     this.tokenRateService = new TokenRateService({

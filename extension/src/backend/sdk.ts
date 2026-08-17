@@ -1,4 +1,3 @@
-import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -11,8 +10,28 @@ import {
   type ThinkingLevel,
 } from '../shared/protocol';
 import { backendWarn } from './log';
+import {
+  ensureSdkPatchBarrier,
+  validateSdkPatchBarrier,
+  type SdkPatchIdentity,
+} from './sdk-patch-barrier';
 import type { SessionEntryLike } from './transcript';
 import type { MessageLike } from './transcript/types';
+
+export {
+  SDK_PATCH_IDENTITY_VERSION,
+  applySdkRetryHotPatch,
+  applySdkTerminalDurabilityPatch,
+  ensureSdkPatchBarrier,
+  resolveSdkPatchBarrierLockPath,
+  validateSdkPatchBarrier,
+  type SdkPatchBarrierOptions,
+  type SdkPatchFileIdentity,
+  type SdkRetryHotPatchResult,
+  type SdkTerminalDurabilityPatchResult,
+  type SdkColdCreateDurabilityPatchResult,
+} from './sdk-patch-barrier';
+export type { SdkPatchIdentity } from './sdk-patch-barrier';
 
 // ─── Minimal SDK contract ────────────────────────────────────────────────────
 // We type only the surface the backend actually consumes. SDK breaking changes
@@ -75,14 +94,93 @@ export interface SdkSessionEvent {
   success?: boolean;
   /** `auto_retry_end`: final error on a failed/exhausted/cancelled retry. */
   finalError?: string;
-  /** History-compaction lifecycle metadata. */
-  reason?: 'manual' | 'threshold' | 'overflow';
+  /** Session lifecycle or history-compaction reason metadata. */
+  reason?: 'manual' | 'threshold' | 'overflow' | 'new' | 'resume' | 'fork';
+  previousSessionFile?: string;
   /** Stable SDK session-entry ID, attached by Pie's persistence-order patch. */
   sessionEntryId?: string;
 }
 
+export interface SdkWorkerOwnershipIdentity {
+  coordinatorGeneration: number;
+  workerId: string;
+  workerGeneration: number;
+}
+
+export interface SdkSessionWriteLease extends SdkWorkerOwnershipIdentity {
+  canonicalSessionPath: string;
+  ownershipRevision: number;
+  nonce: string;
+}
+
+export interface SdkSessionOwnershipFingerprint {
+  exists: boolean;
+  size: number;
+  sha256: string | null;
+}
+
+export type SdkSessionReplacementReason =
+  | 'new'
+  | 'switch'
+  | 'root-fork'
+  | 'branch-fork'
+  | 'clone'
+  | 'import'
+  | 'self-reopen';
+
+export interface SdkSessionReplacementIntent {
+  operationId: string;
+  reason: SdkSessionReplacementReason;
+  source: SdkSessionWriteLease;
+  destinationPath: string;
+  destinationMustNotExist: boolean;
+  requestedPath?: string;
+  importSourcePath?: string;
+  parentSessionPath?: string;
+  entryId?: string;
+  position?: 'before' | 'at';
+}
+
+export interface SdkSessionOwnershipReservation {
+  reservationId: string;
+  operationId: string;
+  canonicalSourcePath: string;
+  canonicalDestinationPath: string;
+  ownershipRevision: number;
+  nonce: string;
+  destinationFingerprint: SdkSessionOwnershipFingerprint;
+}
+
+export interface SdkSessionTransferAuthorization {
+  authorizationId: string;
+  reservationId: string;
+  canonicalDestinationPath: string;
+  ownershipRevision: number;
+  nonce: string;
+  destinationLease: SdkSessionWriteLease;
+}
+
+/** Supported Pie adapter consumed by the patched pinned SDK in worker mode.
+ * Legacy/cold callers omit it and retain the SDK's ordinary durable behavior. */
+export interface SdkSessionOwnershipAdapter {
+  reserveReplacement(intent: SdkSessionReplacementIntent): Promise<SdkSessionOwnershipReservation>;
+  abortPrecommit(reservation: SdkSessionOwnershipReservation, reason: string): Promise<void>;
+  commitTransfer(
+    reservation: SdkSessionOwnershipReservation,
+    sourceLease: SdkSessionWriteLease,
+  ): Promise<SdkSessionTransferAuthorization>;
+  consumeTransferAuthorization(
+    authorization: SdkSessionTransferAuthorization,
+    canonicalDestinationPath: string,
+  ): Promise<SdkSessionWriteLease>;
+  assertWriteLease(lease: SdkSessionWriteLease, canonicalPath: string, seam: string): void;
+  runtimeReady(lease: SdkSessionWriteLease, canonicalPath: string): Promise<void>;
+  failClosed(error: unknown): Promise<never>;
+}
+
 export interface SdkSessionManager {
   getCwd: () => string;
+  getSessionDir?: () => string;
   getSessionId?: () => string;
   getSessionFile: () => string | undefined;
   getSessionName: () => string | undefined;
@@ -95,6 +193,9 @@ export interface SdkSessionManager {
     model: { provider: string; modelId: string } | null;
   };
   getHeader?: () => unknown;
+  attachPieWriteLease?: (adapter: SdkSessionOwnershipAdapter, lease: SdkSessionWriteLease) => void;
+  revokePieWriteLease?: () => void;
+  activatePiePrepared?: (authorization: SdkSessionTransferAuthorization) => SdkSessionWriteLease;
 }
 
 export interface SdkImageContent {
@@ -118,6 +219,54 @@ export interface SdkToolInfo {
   sourceInfo?: unknown;
 }
 
+export interface SdkReplacedSessionContext {
+  sessionManager: SdkSessionManager;
+  sendMessage: (message: unknown, options?: unknown) => Promise<void>;
+  sendUserMessage: (content: unknown, options?: unknown) => Promise<void>;
+}
+
+export interface SdkSessionReplacementOptions {
+  withSession?: (context: SdkReplacedSessionContext) => Promise<void>;
+}
+
+export interface SdkNewSessionOptions extends SdkSessionReplacementOptions {
+  parentSession?: string;
+  setup?: (sessionManager: SdkSessionManager) => Promise<void>;
+}
+
+export interface SdkForkOptions extends SdkSessionReplacementOptions {
+  position?: 'before' | 'at';
+}
+
+export interface SdkNavigateTreeOptions {
+  summarize?: boolean;
+  customInstructions?: string;
+  replaceInstructions?: boolean;
+  label?: string;
+}
+
+export interface SdkExtensionError {
+  extensionPath: string;
+  event: string;
+  error: string;
+  stack?: string;
+}
+
+export interface SdkExtensionBindings {
+  uiContext: unknown;
+  mode: 'rpc';
+  commandContextActions: {
+    waitForIdle: () => Promise<void>;
+    newSession: (options?: SdkNewSessionOptions) => Promise<{ cancelled: boolean }>;
+    fork: (entryId: string, options?: SdkForkOptions) => Promise<{ cancelled: boolean }>;
+    navigateTree: (targetId: string, options?: SdkNavigateTreeOptions) => Promise<{ cancelled: boolean }>;
+    switchSession: (sessionPath: string, options?: SdkSessionReplacementOptions) => Promise<{ cancelled: boolean }>;
+    reload: () => Promise<void>;
+  };
+  shutdownHandler?: () => void;
+  onError?: (error: SdkExtensionError) => void;
+}
+
 export interface SdkSession {
   model?: { id: string; provider?: string; contextWindow?: number; maxTokens?: number };
   thinkingLevel?: string;
@@ -127,6 +276,10 @@ export interface SdkSession {
   messages: unknown[];
   sessionManager: SdkSessionManager;
   subscribe: (listener: (event: SdkSessionEvent) => void) => () => void;
+  bindExtensions: (bindings: SdkExtensionBindings) => Promise<void>;
+  waitForIdle: () => Promise<void>;
+  navigateTree: (targetId: string, options?: SdkNavigateTreeOptions) => Promise<{ cancelled: boolean }>;
+  reload: () => Promise<void>;
   prompt: (text: string, options?: SdkPromptOptions) => Promise<void>;
   /** Manually summarize older history to free context. */
   compact: (customInstructions?: string) => Promise<unknown>;
@@ -207,6 +360,8 @@ export interface SdkSystemPromptModule {
 
 export interface SdkRuntime {
   session: SdkSession;
+  /** Present only on the Phase 4 patched pinned SDK runtime. */
+  ownershipAdapter?: SdkSessionOwnershipAdapter;
   services: {
     modelRegistry: {
       getAvailable: () => Array<{
@@ -230,6 +385,11 @@ export interface SdkRuntime {
     resourceLoader?: unknown;
     diagnostics?: unknown[];
   };
+  /** Rebind host-owned subscription/UI state after SDK session replacement. */
+  setRebindSession?: (rebind: (session: SdkSession) => void | Promise<void>) => void;
+  newSession?: (options?: SdkNewSessionOptions) => Promise<{ cancelled: boolean }>;
+  fork?: (entryId: string, options?: SdkForkOptions) => Promise<{ cancelled: boolean; text?: string }>;
+  switchSession?: (sessionPath: string, options?: SdkSessionReplacementOptions) => Promise<{ cancelled: boolean }>;
   dispose: () => Promise<void>;
 }
 
@@ -268,232 +428,57 @@ export interface SdkModule {
     create: (cwd: string, sessionDir?: string) => SdkSessionManager;
     open: (sessionPath: string) => SdkSessionManager;
     forkFrom: (sourcePath: string, targetCwd: string, sessionDir?: string) => SdkSessionManager;
+    preparePieCreate?: (
+      cwd: string,
+      sessionDir: string,
+      options: { parentSession?: string } | undefined,
+      adapter: SdkSessionOwnershipAdapter,
+    ) => SdkSessionManager;
+    preparePieOpen?: (
+      sessionPath: string,
+      sessionDir: string | undefined,
+      cwdOverride: string | undefined,
+      adapter: SdkSessionOwnershipAdapter,
+    ) => SdkSessionManager;
+    preparePieBranched?: (
+      source: SdkSessionManager,
+      leafId: string,
+      adapter: SdkSessionOwnershipAdapter,
+    ) => SdkSessionManager;
+    preparePieImport?: (
+      sourcePath: string,
+      destinationPath: string,
+      sessionDir: string,
+      cwdOverride: string | undefined,
+      adapter: SdkSessionOwnershipAdapter,
+    ) => SdkSessionManager;
     listAll: (sessionDir?: string) => Promise<SdkSessionInfo[]>;
   };
   createAgentSessionServices: (options: unknown) => Promise<unknown>;
   createAgentSessionFromServices: (options: unknown) => Promise<unknown>;
-  createAgentSessionRuntime: (factory: unknown, options: unknown) => Promise<SdkRuntime>;
+  createAgentSessionRuntime: (factory: unknown, options: {
+    cwd: string;
+    agentDir: string;
+    sessionManager: SdkSessionManager;
+    sessionStartEvent?: SdkSessionEvent;
+    ownershipAdapter?: SdkSessionOwnershipAdapter;
+    writeLease?: SdkSessionWriteLease;
+  }) => Promise<SdkRuntime>;
 }
+
+/** Runtime-free SDK surface loaded by an isolated coordinator. Importing this
+ * surface must not evaluate the package root, compaction internals, or the
+ * AgentSession implementation. */
+export type ColdCoordinatorSdkModule = Pick<
+  SdkModule,
+  'VERSION' | 'getAgentDir' | 'AuthStorage' | 'SessionManager'
+>;
 
 // ─── Loader ──────────────────────────────────────────────────────────────────
 
 const dynamicImport = new Function('specifier', 'return import(specifier)') as (
   specifier: string,
 ) => Promise<unknown>;
-
-/**
- * Permitted parent directories for the SDK. The configured `sdkPath` must
- * resolve to a child of one of these locations to be loaded — defence in depth
- * against an attacker-controlled `--sdkPath` pointing at arbitrary code.
- *
- * Beyond the user profile and system program directories, the npm global
- * prefix (`NPM_CONFIG_PREFIX`, set by npm in every process it spawns) and the
- * host-supplied `PIE_TRUSTED_SDK_ROOT` are allowed so an SDK installed globally
- * under a non-standard prefix (e.g. `C:\nvm4w\nodejs` for nvm-windows, or a
- * proto-managed prefix) is loadable. The host derives `PIE_TRUSTED_SDK_ROOT`
- * from the sdkPath it resolved via `npm root -g`, so that root is
- * trusted-by-construction.
- */
-function isPathAllowed(sdkPath: string): boolean {
-  const normalized = path.resolve(sdkPath);
-  const allowedRoots = [
-    process.env['ProgramFiles'],
-    process.env['ProgramFiles(x86)'],
-    process.env['LOCALAPPDATA'],
-    process.env['APPDATA'],
-    process.env['HOME'],
-    process.env['USERPROFILE'],
-    process.env['NPM_CONFIG_PREFIX'],
-    process.env['PIE_TRUSTED_SDK_ROOT'],
-    '/usr/local',
-    '/usr/lib',
-    '/opt',
-  ].filter((r): r is string => typeof r === 'string' && r.length > 0);
-
-  return allowedRoots.some((root) => {
-    const r = path.resolve(root);
-    return normalized === r || normalized.startsWith(r + path.sep);
-  });
-}
-
-function assertAllowedSdkPath(sdkPath: string): void {
-  if (!isPathAllowed(sdkPath)) {
-    throw new Error(
-      `Refusing to load SDK from disallowed path: ${sdkPath}. ` +
-        `Set pie.sdkPath in VS Code settings (or the PI_SDK_PATH env var) to a directory under your user profile, system program directories, or the npm global prefix.`,
-    );
-  }
-}
-
-// ─── SDK retry-classifier hot-patch ──────────────────────────────────────────
-// The SDK's transient-error retry classifier has moved between versions:
-//  - Legacy: an inline regex in `dist/core/agent-session.js`
-//    (`/...|stream ended before message_stop|.../i.test(err)`).
-//  - Current: a pattern array in
-//    `node_modules/@earendil-works/pi-ai/dist/utils/retry.js`
-//    (`"stream ended before message_stop",`), joined into a RegExp by
-//    `buildProviderErrorPattern`. The host prefers the local extension
-//    `node_modules` SDK (runtime-resolution priority 3), which ships this
-//    current shape. The hot-patch MUST handle the array shape or it silently
-//    no-ops (`unsupported-shape`) and stream cuts/stalls are never retried.
-//
-// The patterns added cover saturation-induced failure modes that pi-ai
-// surfaces as `stopReason=error` but the upstream classifier does NOT match:
-//  - `stream ended before a terminal response event`: pi-ai throws this when
-//    an OpenAI Responses SSE stream ends without `response.completed`/
-//    `response.incomplete`/`response.failed`. This is EXACTLY what the
-//    host-side ProviderGate's stream-liveness watchdog produces when it
-//    terminates a stalled upstream (it errors the stream, which the Responses
-//    parser does not recognise as a terminal event) — and what an upstream
-//    truncation produces. Without this pattern, a stalled/truncated stream is
-//    a silent interruption (never retried) instead of a retried turn.
-//  - `upstream stream stalled` / `upstream header phase stalled` /
-//    `upstream transport circuit open`: the ProviderGate's own terminal error
-//    texts, should they ever surface in an errorMessage. Belt-and-suspenders —
-//    the synthetic 503/504 paths are also retryable by status.
-const RETRY_HOT_PATCH_INSERTS = [
-  'stream ended before a terminal response event',
-  'upstream stream stalled',
-  'upstream header phase stalled',
-  'upstream transport circuit open',
-] as const;
-type RetryHotPatchShape = 'array' | 'inline';
-interface RetryHotPatchCandidate {
-  /** Path segments relative to the SDK root. */
-  rel: readonly string[];
-  /** Literal substring unique to this file's shape. The replacement appends the
-   *  missing patterns in the shape-appropriate syntax at this location. */
-  needle: string;
-  shape: RetryHotPatchShape;
-}
-// Current shape first (the host-preferred local SDK ships it), then the legacy
-// inline shape so a global npm install that still has the inline classifier is
-// also covered.
-const RETRY_HOT_PATCH_CANDIDATES: readonly RetryHotPatchCandidate[] = [
-  {
-    // Quoted array entry WITH trailing comma so it does NOT match the comment
-    // line above that also mentions `stream ended before message_stop`.
-    rel: ['node_modules', '@earendil-works', 'pi-ai', 'dist', 'utils', 'retry.js'],
-    needle: '"stream ended before message_stop",',
-    shape: 'array',
-  },
-  {
-    rel: ['dist', 'core', 'agent-session.js'],
-    needle: 'stream ended before message_stop',
-    shape: 'inline',
-  },
-];
-
-function logRetryHotPatchResult(sdkPath: string, result: SdkRetryHotPatchResult): void {
-  console.warn(`[pie:backend] ${JSON.stringify({
-    ts: new Date().toISOString(),
-    pid: process.pid,
-    scope: 'backend-sdk',
-    event: 'retry-hotpatch',
-    sdkPath,
-    result,
-  })}`);
-}
-
-export type SdkRetryHotPatchResult =
-  | 'patched'
-  | 'already-present'
-  | 'missing-target'
-  | 'unsupported-shape';
-
-/** Build the replacement text for `needle` in the given shape, appending the
- *  missing retryable patterns in the shape-appropriate syntax.
- *  - `array`: `"stream ended before message_stop", "pat1", "pat2", ...,`
- *    (new array entries after the matched one).
- *  - `inline`: `stream ended before message_stop|pat1|pat2|...` (new regex
- *    alternatives after the matched alternative). */
-function buildRetryHotPatchReplacement(
-  needle: string,
-  shape: RetryHotPatchShape,
-  inserts: readonly string[],
-): string {
-  if (shape === 'array') {
-    return `${needle} ${inserts.map((p) => `"${p}"`).join(', ')},`;
-  }
-  return `${needle}|${inserts.join('|')}`;
-}
-
-export async function applySdkRetryHotPatch(sdkPath: string): Promise<SdkRetryHotPatchResult> {
-  assertAllowedSdkPath(sdkPath);
-
-  let foundAnyFile = false;
-  for (const candidate of RETRY_HOT_PATCH_CANDIDATES) {
-    const filePath = path.join(sdkPath, ...candidate.rel);
-    let source: string;
-    try {
-      source = await fs.readFile(filePath, 'utf8');
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
-      throw error;
-    }
-    foundAnyFile = true;
-
-    const missingInserts = RETRY_HOT_PATCH_INSERTS.filter((pattern) => !source.includes(pattern));
-    if (missingInserts.length === 0) return 'already-present';
-    if (!source.includes(candidate.needle)) continue; // wrong shape — try next candidate
-
-    await fs.writeFile(
-      filePath,
-      source.replace(
-        candidate.needle,
-        buildRetryHotPatchReplacement(candidate.needle, candidate.shape, missingInserts),
-      ),
-      'utf8',
-    );
-    return 'patched';
-  }
-
-  return foundAnyFile ? 'unsupported-shape' : 'missing-target';
-}
-
-export type SdkTerminalDurabilityPatchResult =
-  | 'patched'
-  | 'already-present'
-  | 'missing-target'
-  | 'unsupported-shape';
-
-/**
- * Patch SDK 0.80.x so message_end subscribers run only after the session entry
- * append returns, and receive its stable `sessionEntryId`. Extension hooks still
- * run before persistence; Pie's backend subscriber uses the post-persistence
- * public event. This changes no session format and introduces no journal.
- */
-export async function applySdkTerminalDurabilityPatch(
-  sdkPath: string,
-): Promise<SdkTerminalDurabilityPatchResult> {
-  assertAllowedSdkPath(sdkPath);
-  const filePath = path.join(sdkPath, 'dist', 'core', 'agent-session.js');
-  let source: string;
-  try {
-    source = await fs.readFile(filePath, 'utf8');
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 'missing-target';
-    throw error;
-  }
-  if (source.includes('sessionEntryId = this.sessionManager.appendMessage')) return 'already-present';
-
-  const notifyNeedle = `        // Notify all listeners\n        this._emit(event.type === "agent_end" ? { ...event, willRetry: this._willRetryAfterAgentEnd(event) } : event);\n        // Handle session persistence`;
-  const notifyReplacement = `        // Notify non-terminal events immediately. message_end is published only\n        // after append returns below, with its stable sessionEntryId.\n        const emittedEvent = event.type === "agent_end" ? { ...event, willRetry: this._willRetryAfterAgentEnd(event) } : event;\n        if (event.type !== "message_end")\n            this._emit(emittedEvent);\n        // Handle session persistence`;
-  const customNeedle = `                this.sessionManager.appendCustomMessageEntry(event.message.customType, event.message.content, event.message.display, event.message.details);`;
-  const customReplacement = `                const sessionEntryId = this.sessionManager.appendCustomMessageEntry(event.message.customType, event.message.content, event.message.display, event.message.details);\n                this._emit({ ...emittedEvent, sessionEntryId });`;
-  const regularNeedle = `                this.sessionManager.appendMessage(event.message);\n            }\n            // Other message types`;
-  const regularReplacement = `                const sessionEntryId = this.sessionManager.appendMessage(event.message);\n                this._emit({ ...emittedEvent, sessionEntryId });\n            }\n            else {\n                this._emit(emittedEvent);\n            }\n            // Other message types`;
-
-  if (!source.includes(notifyNeedle) || !source.includes(customNeedle) || !source.includes(regularNeedle)) {
-    return 'unsupported-shape';
-  }
-  source = source
-    .replace(notifyNeedle, notifyReplacement)
-    .replace(customNeedle, customReplacement)
-    .replace(regularNeedle, regularReplacement);
-  await fs.writeFile(filePath, source, 'utf8');
-  return 'patched';
-}
 
 interface HistoryCompactionUsage {
   tokens: number | null;
@@ -917,16 +902,70 @@ export function applySdkHistoryCompactionRuntimePatch(
   return 'patched';
 }
 
-export async function loadSdk(sdkPath: string): Promise<SdkModule> {
-  assertAllowedSdkPath(sdkPath);
-  const durabilityPatchResult = await applySdkTerminalDurabilityPatch(sdkPath);
-  if (durabilityPatchResult === 'missing-target' || durabilityPatchResult === 'unsupported-shape') {
-    throw new Error(`SDK terminal durability patch failed: ${durabilityPatchResult}.`);
-  }
-  const patchResult = await applySdkRetryHotPatch(sdkPath);
-  logRetryHotPatchResult(sdkPath, patchResult);
+export type SdkLoadMode =
+  | { mode: 'coordinator' }
+  | { mode: 'cold-coordinator' }
+  | { mode: 'worker'; patchIdentity: unknown };
 
-  const entryUrl = pathToFileURL(path.join(sdkPath, 'dist', 'index.js')).href;
+export function isFullSdkModule(sdk: SdkModule | ColdCoordinatorSdkModule): sdk is SdkModule {
+  return typeof (sdk as Partial<SdkModule>).createAgentSessionRuntime === 'function';
+}
+
+export function coordinatorSdkLoadMode(isolated: boolean): SdkLoadMode {
+  return isolated ? { mode: 'cold-coordinator' } : { mode: 'coordinator' };
+}
+
+export async function loadSdk(
+  sdkPath: string,
+  mode: { mode: 'cold-coordinator' },
+): Promise<ColdCoordinatorSdkModule>;
+export async function loadSdk(
+  sdkPath: string,
+  mode?: Exclude<SdkLoadMode, { mode: 'cold-coordinator' }>,
+): Promise<SdkModule>;
+export async function loadSdk(
+  sdkPath: string,
+  mode: SdkLoadMode,
+): Promise<SdkModule | ColdCoordinatorSdkModule>;
+export async function loadSdk(
+  sdkPath: string,
+  mode: SdkLoadMode = { mode: 'coordinator' },
+): Promise<SdkModule | ColdCoordinatorSdkModule> {
+  // This is the mandatory pre-import boundary. Coordinators may patch while
+  // holding the shared lock; workers receive the resulting closed identity and
+  // are read-only validators. Keep every dynamic SDK import below this await.
+  const patchIdentity: SdkPatchIdentity = mode.mode === 'worker'
+    ? await validateSdkPatchBarrier(sdkPath, mode.patchIdentity)
+    : await ensureSdkPatchBarrier(sdkPath);
+  const verifiedSdkPath = patchIdentity.sdkPath;
+
+  if (mode.mode === 'cold-coordinator') {
+    const [config, auth, sessions] = await Promise.all([
+      dynamicImport(pathToFileURL(path.join(verifiedSdkPath, 'dist', 'config.js')).href),
+      dynamicImport(pathToFileURL(path.join(verifiedSdkPath, 'dist', 'core', 'auth-storage.js')).href),
+      dynamicImport(pathToFileURL(path.join(verifiedSdkPath, 'dist', 'core', 'session-manager.js')).href),
+    ]) as [Partial<SdkModule>, Partial<SdkModule>, Partial<SdkModule>];
+    const cold = {
+      VERSION: config.VERSION,
+      getAgentDir: config.getAgentDir,
+      AuthStorage: auth.AuthStorage,
+      SessionManager: sessions.SessionManager,
+    } as Partial<ColdCoordinatorSdkModule>;
+    if (typeof cold.VERSION !== 'string'
+        || typeof cold.getAgentDir !== 'function'
+        || typeof cold.AuthStorage?.create !== 'function'
+        || typeof cold.SessionManager?.create !== 'function'
+        || typeof cold.SessionManager?.open !== 'function'
+        || typeof cold.SessionManager?.forkFrom !== 'function'
+        || typeof cold.SessionManager?.listAll !== 'function') {
+      throw new Error(
+        `SDK at ${verifiedSdkPath} is missing required cold coordinator exports.`,
+      );
+    }
+    return cold as ColdCoordinatorSdkModule;
+  }
+
+  const entryUrl = pathToFileURL(path.join(verifiedSdkPath, 'dist', 'index.js')).href;
   const mod = (await dynamicImport(entryUrl)) as Partial<SdkModule>;
 
   if (
@@ -936,7 +975,7 @@ export async function loadSdk(sdkPath: string): Promise<SdkModule> {
     typeof mod.createAgentSessionRuntime !== 'function'
   ) {
     throw new Error(
-      `SDK at ${sdkPath} is missing required exports (expected pi-coding-agent contract).`,
+      `SDK at ${verifiedSdkPath} is missing required exports (expected pi-coding-agent contract).`,
     );
   }
 
@@ -948,8 +987,9 @@ export async function loadSdk(sdkPath: string): Promise<SdkModule> {
   const compactionModule = typed.prepareCompaction && typed.compact
     ? typed
     : await loadSdkInternalModule<Pick<SdkModule, 'prepareCompaction' | 'compact'>>(
-        sdkPath,
+        verifiedSdkPath,
         path.join('core', 'compaction', 'index.js'),
+        mode,
       );
   if (typeof compactionModule.prepareCompaction !== 'function'
       || typeof compactionModule.compact !== 'function') {
@@ -969,8 +1009,11 @@ export async function loadSdk(sdkPath: string): Promise<SdkModule> {
 export async function loadSdkInternalModule<TModule>(
   sdkPath: string,
   relativePath: string,
+  mode: SdkLoadMode = { mode: 'coordinator' },
 ): Promise<TModule> {
-  assertAllowedSdkPath(sdkPath);
-  const entryUrl = pathToFileURL(path.join(sdkPath, 'dist', relativePath)).href;
+  const patchIdentity = mode.mode === 'worker'
+    ? await validateSdkPatchBarrier(sdkPath, mode.patchIdentity)
+    : await ensureSdkPatchBarrier(sdkPath);
+  const entryUrl = pathToFileURL(path.join(patchIdentity.sdkPath, 'dist', relativePath)).href;
   return (await dynamicImport(entryUrl)) as TModule;
 }

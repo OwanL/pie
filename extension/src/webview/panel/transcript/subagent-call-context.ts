@@ -2,6 +2,7 @@
 /** @jsxImportSource preact */
 
 import { createContext } from 'preact';
+import type { LiveSubagentDetailAddress } from '../../../shared/protocol/subagent-detail';
 
 /**
  * Context that carries the enclosing subagent's identity through nested
@@ -17,6 +18,11 @@ import { createContext } from 'preact';
  *   on ask_user prompts so the user knows who is asking.
  * - `depth` — nesting depth (1 = top-level subagent, 2 = subagent-of-subagent,
  *   …), shown on nested-subagent prompts to make the call stack legible.
+ * - `detailRoot` — the immutable address root (session/turn/root tool call +
+ *   root attempt) of the enclosing Phase 5 detail subscription. A nested
+ *   live-addressable child combines it with its own complete producer lineage
+ *   to derive the address it subscribes with. Absent for cards rendered from
+ *   legacy (non-live-addressable) details.
  *
  * `undefined` means we're at the top level (main agent transcript) — no
  * enclosing subagent, so ask_user prompts render without a source label.
@@ -25,6 +31,7 @@ export interface SubagentCallContextValue {
   id: string;
   agent: string;
   depth: number;
+  detailRoot?: Pick<LiveSubagentDetailAddress, 'sessionPath' | 'turnId' | 'rootToolCallId' | 'rootAttemptId'>;
 }
 
 export const SubagentCallContext = createContext<SubagentCallContextValue | undefined>(undefined);

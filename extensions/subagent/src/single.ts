@@ -8,6 +8,8 @@ import {
 	consumeTreeSlot,
 	getMaxTreeSessions,
 	nextAttemptIdentity,
+	nextChildIdentity,
+	extendSubagentLineage,
 	type SubagentRuntimeContext,
 } from "../runner.js";
 import type { Static } from "@mariozechner/pi-ai";
@@ -16,6 +18,7 @@ import {
 	MAX_MODEL_RETRIES,
 	type OnUpdateCallback,
 	type SingleResult,
+	type SubagentChildIdentity,
 	type SubagentDetails,
 	type SubagentResult,
 	type SubagentAttemptRecord,
@@ -77,7 +80,8 @@ interface RunWithModelRetryArgs {
 	activeModelId: string;
 	selectionCtx: SelectionContext;
 	childDepth: number;
-	buildRuntime: () => SubagentRuntimeContext;
+	buildRuntime: (identity: SubagentChildIdentity) => SubagentRuntimeContext;
+	childId: string;
 	signal: AbortSignal | undefined;
 	toolCallId: string;
 	task: string;
@@ -117,11 +121,15 @@ async function runWithModelRetry(args: RunWithModelRetryArgs): Promise<SingleRes
 	for (let attempt = 0; attempt <= MAX_MODEL_RETRIES; attempt++) {
 		if (attempt > 0) retryCount++; // tentative count; undone if no eligible model
 
-		const runtimeCtx = args.buildRuntime();
+		const selectionRuntimeCtx = args.buildRuntime({
+			childId: args.childId,
+			spawningToolCallId: args.toolCallId,
+			attemptId: 'selection-only',
+		});
 		// Preserve the immediate tree-limit failure at entry without charging an
 		// undispatched attempt. Retries perform the same check after model
 		// eligibility is known.
-		if (attempt === 0 && runtimeCtx.budget && runtimeCtx.budget.sessions >= getMaxTreeSessions()) {
+		if (attempt === 0 && selectionRuntimeCtx.budget && selectionRuntimeCtx.budget.sessions >= getMaxTreeSessions()) {
 			throw new Error(`Sub-agent tree session limit reached (max ${getMaxTreeSessions()} sessions across the nested tree).`);
 		}
 		const resolved = await resolveModel(
@@ -182,14 +190,14 @@ async function runWithModelRetry(args: RunWithModelRetryArgs): Promise<SingleRes
 
 		// Charge only an attempt that is about to dispatch. A missing retry target
 		// therefore consumes neither tree budget nor attempt analytics.
-		if (runtimeCtx.budget && runtimeCtx.budget.sessions >= getMaxTreeSessions()) {
+		if (selectionRuntimeCtx.budget && selectionRuntimeCtx.budget.sessions >= getMaxTreeSessions()) {
 			if (attempt === 0) {
 				throw new Error(`Sub-agent tree session limit reached (max ${getMaxTreeSessions()} sessions across the nested tree).`);
 			}
 			retryCount--;
 			break;
 		}
-		const treeLimitError = consumeTreeSlot(runtimeCtx.budget);
+		const treeLimitError = consumeTreeSlot(selectionRuntimeCtx.budget);
 		if (treeLimitError) {
 			if (attempt === 0) throw new Error(treeLimitError);
 			retryCount--;
@@ -197,6 +205,20 @@ async function runWithModelRetry(args: RunWithModelRetryArgs): Promise<SingleRes
 		}
 
 		const attemptId = nextAttemptIdentity(args.agent.name, args.toolCallId);
+		const identity: SubagentChildIdentity = {
+			childId: args.childId,
+			spawningToolCallId: args.toolCallId,
+			attemptId,
+		};
+		const runtimeCtx = args.buildRuntime(identity);
+		const lineage = [...(runtimeCtx.lineage ?? [])];
+		const stampIdentity = (current: SingleResult): SingleResult => ({
+			...current,
+			childId: identity.childId,
+			lineage,
+			liveAddressable: true,
+			attemptId,
+		});
 		const onAttemptUpdate: OnUpdateCallback | undefined = args.onUpdate
 			? (partial) => {
 				const results = partial.details?.results;
@@ -208,7 +230,7 @@ async function runWithModelRetry(args: RunWithModelRetryArgs): Promise<SingleRes
 					...partial,
 					details: args.makeDetails(results.map((current) => {
 						const enriched = {
-							...current,
+							...stampIdentity(current),
 							usage: usageWithPriorAttempts(current.usage, cumulativeUsage),
 						};
 						// Selection is known before dispatch, so expose its effective
@@ -221,8 +243,8 @@ async function runWithModelRetry(args: RunWithModelRetryArgs): Promise<SingleRes
 			}
 			: undefined;
 		result = await subagentRuntime.run(runtimeCtx, () => args.runAttempt(resolved, attemptId, onAttemptUpdate));
+		Object.assign(result, stampIdentity(result));
 		attachSelectionMetadata(result, resolved);
-		result.attemptId = attemptId;
 		attemptRecords.push(buildAttemptRecord(result, nextBackoffMs));
 		addUsage(cumulativeUsage, result.usage);
 
@@ -342,6 +364,7 @@ export async function executeSingleTask(args: {
 	// Snapshot optional parent context once so provider retries receive the same
 	// lean handoff even if the parent transcript advances while an attempt runs.
 	const parentUserContext = buildParentUserContext(params.userContext, ctx.sessionManager);
+	const childId = nextChildIdentity(agent.name, args.toolCallId);
 	const result = await runWithModelRetry({
 		agent,
 		excludeModels: new Set<string>(),
@@ -355,7 +378,8 @@ export async function executeSingleTask(args: {
 		clock: _internal?.clock ?? realRetryClock,
 		makeDetails: makeDetailsWithProvenance,
 		onUpdate,
-		buildRuntime: () => ({
+		childId,
+		buildRuntime: (identity) => ({
 			depth: runtimeCtx.depth + 1,
 			trail: [...runtimeCtx.trail, params.agent],
 			canSpawn: agent.canSpawn,
@@ -364,6 +388,7 @@ export async function executeSingleTask(args: {
 			subagentProviderToggles: runtimeCtx.subagentProviderToggles,
 			keptSkills: runtimeCtx.keptSkills,
 			processPermitScope: runtimeCtx.processPermitScope,
+			lineage: extendSubagentLineage(runtimeCtx.lineage, identity.childId, identity.spawningToolCallId, identity.attemptId),
 		}),
 		runAttempt: injectedRunAttempt
 			? (resolved, attemptId, onAttemptUpdate) => injectedRunAttempt(resolved, attemptId, onAttemptUpdate)

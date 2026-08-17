@@ -173,6 +173,8 @@ export function evictSession(
   const { [sp]: _privacy, ...remainingPrivacyModes } = state.sessions.privacyModeBySession;
   const { [sp]: _ct, ...remainingTurns } = state.pending.currentTurnBySession;
   const { [sp]: _m, ...remainingModels } = state.settings.availableModelsBySession;
+  const { [sp]: _ms, ...remainingModelStatuses } = state.settings.availableModelsStatusBySession;
+  const { [sp]: _mr, ...remainingModelRevisions } = state.settings.modelHydrationRevisionBySession;
   const { [sp]: _cu, ...remainingContext } = state.settings.contextUsageBySession;
   const { [sp]: _eui, ...remainingExtUI } = state.settings.pendingExtensionUIRequestsBySession;
   const { [sp]: _ci, ...remainingComposer } = state.composer.pendingComposerInputsBySession;
@@ -243,9 +245,9 @@ export function evictSession(
   const nextCompactingPaths = removeSummary
     ? removeFromArray(state.sessions.compactingSessionPaths, sp)
     : state.sessions.compactingSessionPaths;
-  const nextReviewClosedRunningPaths = removeSummary
-    ? removeFromArray(state.sessions.reviewClosedRunningPaths, sp)
-    : state.sessions.reviewClosedRunningPaths;
+  const nextIntentionallyHiddenRunningPaths = removeSummary
+    ? removeFromArray(state.sessions.intentionallyHiddenRunningPaths, sp)
+    : state.sessions.intentionallyHiddenRunningPaths;
   const { [sp]: _lastCompaction, ...remainingLastCompaction } = state.sessions.lastCompactionBySession;
 
   // ── Tab arrays (removeTabs: close the tab) ──
@@ -300,7 +302,7 @@ export function evictSession(
         runningSessionPaths: nextRunningPaths,
         compactingSessionPaths: nextCompactingPaths,
         lastCompactionBySession: remainingLastCompaction,
-        reviewClosedRunningPaths: nextReviewClosedRunningPaths,
+        intentionallyHiddenRunningPaths: nextIntentionallyHiddenRunningPaths,
         unreadFinishedSessionPaths: nextUnreadPaths,
         activeSessionPath: nextActivePath,
         analyticsFactorsBySession: remainingAnalytics,
@@ -311,6 +313,8 @@ export function evictSession(
       settings: {
         ...state.settings,
         availableModelsBySession: remainingModels,
+        availableModelsStatusBySession: remainingModelStatuses,
+        modelHydrationRevisionBySession: remainingModelRevisions,
         contextUsageBySession: remainingContext,
         pendingExtensionUIRequestsBySession: remainingExtUI,
       },

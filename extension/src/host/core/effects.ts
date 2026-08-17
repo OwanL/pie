@@ -18,6 +18,7 @@
  */
 
 import type { ComposerInput, ModelSettings, ChatPrefs, HostToWebviewMessage, PruningMode, UserContentPart } from '../../shared/protocol';
+import type { LiveSubagentDetailAddress, DetailCursor, DetailPageRef } from '../../shared/protocol/subagent-detail';
 import type { PendingSendQueueEntry } from './arch-state';
 import type { BackendReadyQueueEntry } from './arch-state';
 
@@ -123,6 +124,10 @@ export interface CreateSessionEffect extends EffectBase {
   /** Selection token (minted before the Command dispatched) for the backend
    *  session.create RPC. */
   selectionToken: string;
+  /** Stable host-generated identity reused across create retries. */
+  operationId?: string;
+  /** Attempt fence for stale timeout/error settlement. */
+  operationAttempt?: number;
 }
 
 export interface NotifySessionViewedEffect extends EffectBase {
@@ -194,12 +199,43 @@ export interface SetSystemPromptTogglesRpcEffect extends EffectBase {
   disabledEntries: string[];
 }
 
+// ─── Phase 5 detail subscription effects ─────────────────────────────────────
+// The EffectRunner mints the `subscriptionId` and routes each effect to the
+// owning session service. All three are fire-and-forget: stream content
+// reaches the webview as detail imperatives, never as *Result events, so the
+// reducer stores no pages or stream state.
+
+export interface DetailSubscribeRpcEffect extends EffectBase {
+  kind: 'DetailSubscribeRpc';
+  viewGeneration: number;
+  detailKey: string;
+  address: LiveSubagentDetailAddress;
+  cursor?: DetailCursor;
+}
+
+export interface DetailUnsubscribeRpcEffect extends EffectBase {
+  kind: 'DetailUnsubscribeRpc';
+  viewGeneration: number;
+  detailKey: string;
+  reason: 'collapse' | 'unmount' | 'session-change';
+}
+
+export interface DetailFetchPagesRpcEffect extends EffectBase {
+  kind: 'DetailFetchPagesRpc';
+  viewGeneration: number;
+  detailKey: string;
+  ref: DetailPageRef;
+}
+
 /** Hydrate a session's model state from the backend (fire-and-forget; the
  *  service's dispatched SetModel/AvailableModelsChanged events apply the
  *  results, so this effect emits no *Result event). */
 export interface HydrateModelEffect extends EffectBase {
   kind: 'HydrateModel';
   sessionPath: string;
+  /** Captured by the pure reducer before the asynchronous requests start. */
+  hydrationRevision?: number;
+  modelWriteFence?: number;
 }
 
 // ─── Real side effects ────────────────────────────────────────────────────────
@@ -311,6 +347,10 @@ export interface DuplicateSessionEffect extends EffectBase {
   /** Selection token (minted before the Command dispatched) for the backend
    *  `session.duplicate` RPC. */
   selectionToken: string;
+  /** Stable host-generated identity reused across duplicate retries. */
+  operationId?: string;
+  /** Attempt fence for stale timeout/error settlement. */
+  operationAttempt?: number;
 }
 
 export type Effect =
@@ -331,6 +371,9 @@ export type Effect =
   | SetPrefsRpcEffect
   | SetPrivacyModeEffect
   | SetSystemPromptTogglesRpcEffect
+  | DetailSubscribeRpcEffect
+  | DetailUnsubscribeRpcEffect
+  | DetailFetchPagesRpcEffect
   | ShowModelSwitchConfirmEffect
   | HydrateModelEffect
   | PostImperativeEffect

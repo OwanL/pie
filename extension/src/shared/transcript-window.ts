@@ -95,6 +95,9 @@ export function buildSlimSessionOpenedUnavailableFallback(
     ...(payload.selectionToken
       ? { selectionToken: boundedUtf8(payload.selectionToken, SLIM_SELECTION_BYTES) }
       : {}),
+    ...(payload.operationId
+      ? { operationId: boundedUtf8(payload.operationId, SLIM_SELECTION_BYTES) }
+      : {}),
     snapshotUnavailable: {
       code: SESSION_SNAPSHOT_TOO_LARGE_CODE,
       message: SNAPSHOT_UNAVAILABLE_MESSAGE,
