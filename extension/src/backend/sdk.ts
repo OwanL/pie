@@ -907,14 +907,6 @@ export type SdkLoadMode =
   | { mode: 'cold-coordinator' }
   | { mode: 'worker'; patchIdentity: unknown };
 
-export function isFullSdkModule(sdk: SdkModule | ColdCoordinatorSdkModule): sdk is SdkModule {
-  return typeof (sdk as Partial<SdkModule>).createAgentSessionRuntime === 'function';
-}
-
-export function coordinatorSdkLoadMode(isolated: boolean): SdkLoadMode {
-  return isolated ? { mode: 'cold-coordinator' } : { mode: 'coordinator' };
-}
-
 export async function loadSdk(
   sdkPath: string,
   mode: { mode: 'cold-coordinator' },

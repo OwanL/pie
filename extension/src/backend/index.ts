@@ -5,7 +5,6 @@ import { log } from './server-io';
 import { BackendServer } from './server';
 import { installProviderTrafficObserver } from './provider-traffic-observer';
 import { flushBackendLivePipelineTrace, recordBackendLivePipelineTrace } from './live-pipeline-trace-runtime';
-import { resolveRuntimeIsolationMode } from './runtime-isolation-mode';
 
 export { BackendServer } from './server';
 
@@ -30,10 +29,8 @@ async function main(): Promise<void> {
   // set PIE_PROVIDER_TRAFFIC_LOG=0 to disable. Must run before any fetch.
     installProviderTrafficObserver();
     const args = parseArgs(process.argv.slice(2));
-    const runtimeIsolationMode = resolveRuntimeIsolationMode();
     server = new BackendServer({
       ...args,
-      runtimeIsolationMode,
       workerEntryPath: path.join(__dirname, 'worker-entry.js'),
     });
     await server.start();

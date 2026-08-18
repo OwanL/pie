@@ -8,7 +8,6 @@ import test from 'node:test';
 import {
   applySdkRetryHotPatch,
   applySdkTerminalDurabilityPatch,
-  coordinatorSdkLoadMode,
   ensureSdkPatchBarrier,
   loadSdk,
   loadSdkInternalModule,
@@ -307,11 +306,6 @@ test('loadSdk imports allowed ESM SDK modules that satisfy the contract', async 
     assert.deepEqual(await sdk.SessionManager.listAll(), []);
     assert.equal(systemPromptModule.buildSystemPrompt({ cwd: '/repo' }), '{"cwd":"/repo"}');
   });
-});
-
-test('isolated coordinators select cold SDK loading while legacy coordinators retain full mode', () => {
-  assert.deepEqual(coordinatorSdkLoadMode(true), { mode: 'cold-coordinator' });
-  assert.deepEqual(coordinatorSdkLoadMode(false), { mode: 'coordinator' });
 });
 
 test('cold coordinator mode imports only runtime-free exports and leaves AgentSession/compaction untouched', async () => {

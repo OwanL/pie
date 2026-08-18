@@ -78,7 +78,6 @@ test('packaged isolated backend drives public message.send extension commands th
       windowsHide: true,
       env: {
         ...process.env,
-        PIE_SESSION_RUNTIME_ISOLATION: '1',
         PIE_PHASE2_PACKAGE_SMOKE: '1',
         PIE_PROVIDER_TRAFFIC_LOG: '0',
         PIE_PHASE4_EXTENSION_FIXTURE_RESULT: commandResultPath,

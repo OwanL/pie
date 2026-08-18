@@ -182,6 +182,32 @@ test('writer rejects invalid, oversize, and over-capacity frames without assigni
   assert.equal(target.sent.length, 1);
 });
 
+test('writer admits a single large control frame that exceeds the lane capacity', () => {
+  const target = new FakeSendTarget();
+  const writer = new BoundedWorkerIpcWriter(target, { maxQueuedControlBytes: 1024 });
+  const largeTranscript = 'x'.repeat(8 * 1024);
+  const promote: WorkerIpcFrameDraft = {
+    ...frameBase,
+    kind: 'runtime.promote',
+    requestId: 'promote',
+    operationId: 'operation-1',
+    payload: {
+      sdkPath: '/sdk', agentDir: '/agent', startupCwd: '/work', sessionDir: '/sessions',
+      sessionPath: '/session.jsonl', creationReason: 'resume',
+      writeLease: {
+        coordinatorGeneration: 1, workerId: 'worker', workerGeneration: 1,
+        canonicalSessionPath: '/session.jsonl', ownershipRevision: 1, nonce: 'nonce',
+      },
+      openedPayload: { runtimeReady: false, transcript: [{ role: 'user', text: largeTranscript }] },
+      modelSettings: { defaultModel: 'gpt' },
+    },
+  };
+  const result = writer.enqueue(promote);
+  assert.equal(result.accepted, true, 'a single large control frame is not rejected by the lane capacity');
+  assert.equal(target.sent.length, 1);
+  assert.equal(target.sent[0]?.kind, 'runtime.promote');
+});
+
 test('false send return reports backpressure and waits for the callback before continuing', () => {
   const target = new FakeSendTarget();
   target.returnValue = false;

@@ -603,8 +603,23 @@ export type WorkerFrameValidation<T extends WorkerIpcFrame> =
 
 type ShapeResult<T> = { ok: true; value: T } | { ok: false; detail: string };
 
-export function workerIpcFrameByteLimit(kind: string): number {
-  return kind === 'heartbeat' ? WORKER_IPC_MAX_HEARTBEAT_FRAME_BYTES : WORKER_IPC_MAX_ORDINARY_FRAME_BYTES;
+export function workerIpcFrameByteLimit(frame: unknown): number {
+  const kind = isRecord(frame) && typeof frame.kind === 'string' ? frame.kind : undefined;
+  if (kind === 'heartbeat') return WORKER_IPC_MAX_HEARTBEAT_FRAME_BYTES;
+  if (kind === 'runtime.event') {
+    // `session.opened` re-emits the full promotion snapshot (including the
+    // bounded transcript) so the host observes a runtime-hydrated open. It is
+    // the one ordinary-kind frame that legitimately approaches the wire cap.
+    return isRecord(frame) && frame.event === 'session.opened'
+      ? WORKER_IPC_MAX_FRAME_BYTES
+      : WORKER_IPC_MAX_ORDINARY_FRAME_BYTES;
+  }
+  if (kind === 'detail.page' || kind === 'detail.delta') return WORKER_IPC_MAX_ORDINARY_FRAME_BYTES;
+  // Control, response, and lifecycle frames (runtime.promote, runtime.command,
+  // sync, ownership, provider, detail.start/terminal, etc.) are request/response
+  // correlated and low-volume; they may carry large payloads such as the
+  // promotion snapshot or the configured model catalog.
+  return WORKER_IPC_MAX_FRAME_BYTES;
 }
 
 export function measureWorkerIpcMessage(value: unknown): { ok: true; bytes: number; serialized: string } | { ok: false; detail: string } {
@@ -720,7 +735,7 @@ function validateFrame<T extends WorkerIpcFrame>(
 
   const rawKind = isRecord(value) && typeof value.kind === 'string' ? value.kind : undefined;
   if (rawKind !== undefined) {
-    const semanticLimit = workerIpcFrameByteLimit(rawKind);
+    const semanticLimit = workerIpcFrameByteLimit(value);
     if (wireBytes > semanticLimit) {
       return invalidSize(rawKind === 'heartbeat' ? 'heartbeat_frame_too_large' : 'ordinary_frame_too_large', wireBytes, semanticLimit);
     }

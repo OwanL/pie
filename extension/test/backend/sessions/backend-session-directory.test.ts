@@ -7,7 +7,6 @@ import test from 'node:test';
 
 import { BackendServer } from '../../../src/backend';
 import { getReviewSidecarFingerprint, readReviews } from '../../../src/backend/session-review-store';
-import type { SessionContext } from '../../../src/backend/server-types';
 
 type PollingTestServer = {
   agentDir: string;
@@ -26,7 +25,7 @@ type PollingTestServer = {
 };
 
 function createPollingTestServer(): PollingTestServer {
-  const server = new BackendServer({ sdkPath: '/unused', cwd: '/workspace' }) as unknown as PollingTestServer;
+  const server = new BackendServer({ workerEntryPath: '/worker-entry.js', sdkPath: '/unused', cwd: '/workspace' }) as unknown as PollingTestServer;
   server.agentDir = path.resolve('/agent');
   server.sessionDir = path.resolve('/configured/sessions');
   server.sessionDirResolved = true;
@@ -42,7 +41,7 @@ test('backend RPCs use the configured directory while explicit legacy opens keep
   try {
     const listedDirs: Array<string | undefined> = [];
     const openCalls: unknown[][] = [];
-    const server = new BackendServer({ sdkPath: '/unused', cwd: '/workspace' }) as any;
+    const server = new BackendServer({ workerEntryPath: '/worker-entry.js', sdkPath: '/unused', cwd: '/workspace' }) as any;
     server.agentDir = path.resolve('/agent');
     server.sdk = {
       VERSION: 'test',
@@ -67,15 +66,8 @@ test('backend RPCs use the configured directory while explicit legacy opens keep
         },
       },
     };
-    server.createSessionContext = async (manager: { cwd: string; sessionPath: string }) => ({
-      sessionPath: manager.sessionPath,
-      busySeq: 0,
-      unsubscribe: () => undefined,
-      session: { isStreaming: false },
-    }) as SessionContext;
     server.buildSessionOpenedPayload = async (sessionPath: string) => ({ sessionPath });
     server.emit = () => undefined;
-    server.emitBusyChanged = () => undefined;
     server.emitSessionListChanged = async () => undefined;
 
     const result = await server.handleRequest({

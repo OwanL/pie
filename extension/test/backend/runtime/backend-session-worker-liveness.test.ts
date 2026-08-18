@@ -497,7 +497,6 @@ function startBackend(
       PIE_LIVE_PIPELINE_TRACE_RUN_ID: fixture.runId,
       PIE_LIVE_PIPELINE_TRACE_KEY: fixture.traceKey,
       PIE_PROVIDER_TRAFFIC_LOG: "0",
-      PIE_SESSION_RUNTIME_ISOLATION: "1",
     },
     stdio: ["pipe", "pipe", "pipe"],
     shell: false,

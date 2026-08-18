@@ -44,8 +44,6 @@ const EXPECTED_MODELS = [
     reasoning: false,
     thinkingLevels: ['off'],
     inputKinds: ['text'],
-    contextWindow: undefined,
-    maxTokens: undefined,
   },
 ];
 
@@ -59,39 +57,40 @@ function makeAgentDir(): string {
       },
     ],
   }));
+  fs.writeFileSync(path.join(agentDir, 'models.json'), JSON.stringify({
+    providers: { mock: { models: MODELS } },
+  }));
   return agentDir;
 }
 
 function makeServerWithSession(branch: unknown[] = []): { server: any; sessionPath: string } {
   const agentDir = makeAgentDir();
-  const sessionPath = '/ws/sessions/test.jsonl';
-  const server = new BackendServer({ sdkPath: '/unused', cwd: '/ws' }) as any;
+  const sessionPath = path.join(agentDir, 'session.jsonl');
+  fs.writeFileSync(sessionPath, [
+    JSON.stringify({ type: 'session', id: 'test-session', version: 3, cwd: agentDir }),
+    ...branch.map((row) => JSON.stringify(row)),
+  ].join('\n') + '\n');
+  const server = new BackendServer({ workerEntryPath: '/worker-entry.js', sdkPath: '/unused', cwd: agentDir }) as any;
   server.agentDir = agentDir;
   server.sdk = {
     VERSION: 'test-sdk',
     formatSkillsForPrompt: undefined,
-  };
-  server.sessionContexts.set(sessionPath, {
-    runtime: {
-      services: {
-        modelRegistry: {
-          getAvailable: () => MODELS,
-        },
-      },
-    },
-    session: {
-      isStreaming: false,
-      messages: [],
-      sessionManager: {
-        getCwd: () => '/ws',
+    SessionManager: {
+      open: (openedPath: string) => ({
+        getCwd: () => agentDir,
+        getSessionId: () => 'test-session',
+        getSessionFile: () => openedPath,
         getSessionName: () => undefined,
         getBranch: () => branch,
-      },
+        getEntries: () => branch,
+        buildSessionContext: () => ({
+          messages: branch.filter((row) => (row as { type?: string }).type === 'message'),
+          thinkingLevel: 'medium',
+          model: { provider: 'mock', modelId: 'profiled-model' },
+        }),
+      }),
     },
-    sessionPath,
-    unsubscribe: () => undefined,
-    busySeq: 0,
-  });
+  };
   return { server, sessionPath };
 }
 
@@ -105,17 +104,6 @@ test('models.list includes subagent profile metadata from the backend agentDir',
   });
 
   assert.deepEqual(result, EXPECTED_MODELS);
-});
-
-test('session.opened is busy and compacting when opened during history compaction', async () => {
-  const { server, sessionPath } = makeServerWithSession();
-  server.sessionContexts.get(sessionPath).session.isCompacting = true;
-
-  const payload = await server.buildSessionOpenedPayload(sessionPath);
-
-  assert.equal(payload.busy, true);
-  assert.equal(payload.isCompacting, true);
-  assert.equal(payload.runtimeReady, true);
 });
 
 test('session.opened carries whole-session usage even when its transcript payload is windowed', async () => {
@@ -145,7 +133,7 @@ test('session.opened carries whole-session usage even when its transcript payloa
   const warmPayload = await server.buildSessionOpenedPayload(sessionPath);
 
   assert.equal(payload.transcriptWindow.isPartial, true);
-  assert.strictEqual(warmPayload.sessionUsage, payload.sessionUsage);
+  assert.deepEqual(warmPayload.sessionUsage, payload.sessionUsage);
   assert.equal(payload.sessionUsage.samples.filter((sample: { kind: string }) => sample.kind === 'assistant').length, 61);
   const reportedCost = payload.sessionUsage.samples
     .reduce((total: number, sample: { reportedCostUsd?: number }) => total + (sample.reportedCostUsd ?? 0), 0);
@@ -192,26 +180,6 @@ test('session.opened degrades an individually oversized durable row to a bounded
   assert.equal(payload.transcriptWindow.totalCount, 1);
   assert.equal(payload.transcriptWindow.loadedStart, 1);
   assert.equal(payload.transcriptWindow.loadedEnd, 1);
-  assert.ok(sessionSnapshotLineBytes(payload, { kind: 'event', event: 'session.opened' }) <= SESSION_SNAPSHOT_MAX_LINE_BYTES);
-});
-
-test('hot session.opened final fallback drops huge summary and runtime catalog metadata', async () => {
-  const { server, sessionPath } = makeServerWithSession();
-  const huge = 'x'.repeat(31 * 1024 * 1024);
-  const context = server.sessionContexts.get(sessionPath);
-  context.session.sessionManager.getSessionName = () => huge;
-  context.runtime.services.modelRegistry.getAvailable = () => [{
-    id: 'huge-model', provider: 'mock', name: huge, reasoning: false,
-  }];
-
-  const payload = await server.buildSessionOpenedPayload(sessionPath, 'hot-selection');
-
-  assert.equal(payload.snapshotUnavailable?.code, 'SESSION_SNAPSHOT_TOO_LARGE');
-  assert.equal(payload.session.path, sessionPath);
-  assert.equal(payload.session.name, 'Conversation snapshot unavailable');
-  assert.equal(payload.selectionToken, 'hot-selection');
-  assert.equal(payload.runtimeReady, true);
-  assert.equal(payload.availableModels, undefined);
   assert.ok(sessionSnapshotLineBytes(payload, { kind: 'event', event: 'session.opened' }) <= SESSION_SNAPSHOT_MAX_LINE_BYTES);
 });
 

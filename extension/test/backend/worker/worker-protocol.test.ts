@@ -283,8 +283,9 @@ test('generation and sequence fences distinguish stale frames from invalid curre
 test('protocol enforces UTF-8 hard and tighter ordinary frame bounds before dispatch', () => {
   const ordinaryOversize = parseWorkerToCoordinatorFrame({
     ...base,
-    kind: 'fatal',
-    error: { code: 'INTERNAL_ERROR', phase: 'ipc', message: 'é'.repeat(WORKER_IPC_MAX_ORDINARY_FRAME_BYTES) },
+    kind: 'runtime.event',
+    event: 'message.delta',
+    payload: { text: 'é'.repeat(WORKER_IPC_MAX_ORDINARY_FRAME_BYTES) },
   }, expected);
   assert.equal(ordinaryOversize.status, 'invalid');
   if (ordinaryOversize.status === 'invalid') assert.equal(ordinaryOversize.reason, 'ordinary_frame_too_large');
@@ -308,4 +309,38 @@ test('protocol enforces UTF-8 hard and tighter ordinary frame bounds before disp
   }, expected);
   assert.equal(hardOversize.status, 'invalid');
   if (hardOversize.status === 'invalid') assert.equal(hardOversize.reason, 'frame_too_large');
+});
+
+test('protocol allows large control and session.opened frames up to the wire cap', () => {
+  const largeTranscript = 'x'.repeat(WORKER_IPC_MAX_ORDINARY_FRAME_BYTES * 2);
+  const lease = {
+    coordinatorGeneration: base.coordinatorGeneration,
+    workerId: base.workerId,
+    workerGeneration: base.workerGeneration,
+    canonicalSessionPath: base.leasePath,
+    ownershipRevision: base.leaseRevision,
+    nonce: 'source-nonce',
+  };
+
+  const promote = parseCoordinatorToWorkerFrame({
+    ...base,
+    kind: 'runtime.promote',
+    requestId: 'promote',
+    operationId: 'operation-1',
+    payload: {
+      sdkPath: 'C:/sdk', agentDir: 'C:/agent', startupCwd: 'C:/work', sessionDir: 'C:/sessions',
+      sessionPath: base.leasePath, creationReason: 'resume', writeLease: lease,
+      openedPayload: { runtimeReady: false, transcript: [{ role: 'user', text: largeTranscript }] },
+      modelSettings: { defaultModel: 'gpt' },
+    },
+  }, expected);
+  assert.equal(promote.status, 'accepted', 'runtime.promote may carry a large promotion snapshot');
+
+  const sessionOpened = parseWorkerToCoordinatorFrame({
+    ...base,
+    kind: 'runtime.event',
+    event: 'session.opened',
+    payload: { sessionPath: base.leasePath, transcript: [{ role: 'user', text: largeTranscript }] },
+  }, expected);
+  assert.equal(sessionOpened.status, 'accepted', 'session.opened may re-emit a large transcript');
 });

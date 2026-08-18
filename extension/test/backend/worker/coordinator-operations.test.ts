@@ -6,41 +6,25 @@ import * as path from 'node:path';
 import test from 'node:test';
 
 import { BackendServer } from '../../../src/backend/server';
-import {
-  isPhase3IsolatedCoordinatorOperationAllowed,
-  resolveRuntimeIsolationMode,
-} from '../../../src/backend/runtime-isolation-mode';
+import { isCoordinatorOperationAllowed } from '../../../src/backend/coordinator-operations';
 
-test('runtime isolation mode resolves once with legacy default and fails closed on invalid values', () => {
-  assert.equal(resolveRuntimeIsolationMode(undefined), 'isolated');
-  assert.equal(resolveRuntimeIsolationMode('0'), 'legacy');
-  assert.equal(resolveRuntimeIsolationMode('1'), 'isolated');
-  for (const value of ['', 'true', '01', '2', 'off', ' 1 ']) {
-    assert.throws(() => resolveRuntimeIsolationMode(value), /must be unset, 0, or 1/);
-  }
+test('backend construction fails closed without a bundled worker artifact path', () => {
+  assert.throws(() => new BackendServer({ sdkPath: '/sdk', cwd: '/cwd' }), /requires a bundled worker entry path/);
 });
 
-test('isolated backend construction fails closed without a bundled worker artifact path', () => {
-  assert.throws(() => new BackendServer({
-    sdkPath: '/sdk',
-    cwd: '/cwd',
-    runtimeIsolationMode: 'isolated',
-  }), /requires a bundled worker entry path/);
-});
-
-test('Phase 3 isolated operation catalog includes runtime-free durable mutations only', () => {
+test('coordinator operation catalog includes runtime-free durable mutations only', () => {
   for (const method of ['app.ping', 'diagnostics.livePipeline.setEnabled', 'provider_gate.metrics', 'session.list', 'session.create', 'session.open', 'session.duplicate', 'session.preload', 'session.loadTranscriptPage', 'session.loadDetail', 'session.truncateAfter', 'models.list', 'settings.get']) {
-    assert.equal(isPhase3IsolatedCoordinatorOperationAllowed(method, {}), true, method);
+    assert.equal(isCoordinatorOperationAllowed(method, {}), true, method);
   }
-  assert.equal(isPhase3IsolatedCoordinatorOperationAllowed('settings.set', { defaultModel: 'x' }), true);
-  assert.equal(isPhase3IsolatedCoordinatorOperationAllowed('settings.set', { sessionPath: '/hot', defaultModel: 'x' }), false);
+  assert.equal(isCoordinatorOperationAllowed('settings.set', { defaultModel: 'x' }), true);
+  assert.equal(isCoordinatorOperationAllowed('settings.set', { sessionPath: '/hot', defaultModel: 'x' }), false);
   for (const method of ['message.send', 'message.compact', 'message.interrupt', 'extension_ui.response', 'systemPromptToggles.set', 'liveTurn.checkpoint']) {
-    assert.equal(isPhase3IsolatedCoordinatorOperationAllowed(method, {}), false, method);
+    assert.equal(isCoordinatorOperationAllowed(method, {}), false, method);
   }
 });
 
-test('isolated create/duplicate/truncate stay runtime and extension free while hot paths fail closed', async () => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-phase3-isolated-'));
+test('cold create/duplicate/truncate stay runtime and extension free while hot paths fail closed', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-coordinator-cold-'));
   try {
     let runtimeCreations = 0;
     let serviceCreations = 0;
@@ -58,7 +42,6 @@ test('isolated create/duplicate/truncate stay runtime and extension free while h
     const server = new BackendServer({
       sdkPath: '/sdk',
       cwd: root,
-      runtimeIsolationMode: 'isolated',
       workerEntryPath: '/worker-entry.js',
     }) as any;
     server.agentDir = root;
@@ -111,14 +94,13 @@ test('isolated create/duplicate/truncate stay runtime and extension free while h
     }
     assert.equal(serviceCreations, 0, 'createAgentSessionServices is never reached');
     assert.equal(runtimeCreations, 0, 'runtime/extension loading is never reached');
-    assert.equal(server.sessionContexts.size, 0, 'no AgentSession context is installed');
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
 });
 
 test('cold truncate retains its replacement inside the mutation owner and rejects a competing mutation without invalidating it', async () => {
-  const server = new BackendServer({ sdkPath: '/sdk', cwd: '/cwd' }) as any;
+  const server = new BackendServer({ sdkPath: '/sdk', cwd: '/cwd', workerEntryPath: '/worker-entry.js' }) as any;
   server.agentDir = '/agent';
   server.sdk = { VERSION: 'test', SessionManager: {} };
   server.emit = () => undefined;
@@ -153,23 +135,4 @@ test('cold truncate retains its replacement inside the mutation owner and reject
   release();
   await first;
   assert.equal(server.coldSessionManagerHandles.get(server.coldManagerKey('/cold.jsonl')).handle, handle);
-});
-
-test('isolated cold truncate fails closed for equivalent path spellings when a hot owner exists', async () => {
-  const server = new BackendServer({
-    sdkPath: '/sdk', cwd: '/cwd', runtimeIsolationMode: 'isolated', workerEntryPath: '/worker-entry.js',
-  }) as any;
-  server.agentDir = '/agent';
-  server.sdk = { VERSION: 'test', SessionManager: {} };
-  const hotPath = path.resolve('/owned/session.jsonl');
-  const aliasPath = `${path.dirname(hotPath)}${path.sep}.${path.sep}${path.basename(hotPath)}`;
-  assert.notEqual(aliasPath, hotPath);
-  server.sessionContexts.set(hotPath, { sessionPath: hotPath });
-  await assert.rejects(
-    server.handleRequest({
-      v: 1, id: 'truncate-hot', method: 'session.truncateAfter',
-      params: { sessionPath: aliasPath, entryId: 'entry' },
-    }),
-    /Phase 4 isolated-runtime routing is unavailable/,
-  );
 });

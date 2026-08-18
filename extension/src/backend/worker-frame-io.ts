@@ -187,12 +187,9 @@ export class BoundedWorkerIpcWriter {
     if (wireBytes > WORKER_IPC_MAX_FRAME_BYTES) {
       return this.reject(options.onSettled, 'oversize', sizeDetail(wireBytes, WORKER_IPC_MAX_FRAME_BYTES));
     }
-    const rawKind = typeof candidate.kind === 'string' ? candidate.kind : undefined;
-    if (rawKind !== undefined) {
-      const semanticLimit = workerIpcFrameByteLimit(rawKind);
-      if (wireBytes > semanticLimit) {
-        return this.reject(options.onSettled, 'oversize', sizeDetail(wireBytes, semanticLimit));
-      }
+    const semanticLimit = workerIpcFrameByteLimit(candidate);
+    if (wireBytes > semanticLimit) {
+      return this.reject(options.onSettled, 'oversize', sizeDetail(wireBytes, semanticLimit));
     }
 
     // Retain the actual JSON representation. Undefined optional keys disappear
@@ -228,7 +225,11 @@ export class BoundedWorkerIpcWriter {
     }
 
     const nextLaneBytes = this.queuedBytes[lane] + pending.bytes;
-    if (nextLaneBytes > this.capacities[lane]) {
+    // A single frame may exceed the lane's reserved capacity (it is bounded by
+    // the semantic frame limit above), but only when the lane is otherwise
+    // empty. This lets a large promotion snapshot or session.opened pass while
+    // still bounding the backlog of many queued frames under backpressure.
+    if (this.queuedBytes[lane] > 0 && nextLaneBytes > this.capacities[lane]) {
       return this.reject(options.onSettled, 'capacity', capacityDetail(lane, nextLaneBytes, this.capacities[lane]));
     }
     this.lanes[lane].push(pending);
@@ -288,7 +289,7 @@ export class BoundedWorkerIpcWriter {
 
     const frame = { ...pending.draft, seq: this.nextSeq } as WorkerIpcFrame;
     const measured = measureWorkerIpcMessage(frame);
-    const semanticLimit = workerIpcFrameByteLimit(frame.kind);
+    const semanticLimit = workerIpcFrameByteLimit(frame);
     if (!measured.ok || measured.bytes + 1 > WORKER_IPC_MAX_FRAME_BYTES || measured.bytes + 1 > semanticLimit) {
       this.fail(new Error(measured.ok
         ? sizeDetail(measured.bytes + 1, Math.min(WORKER_IPC_MAX_FRAME_BYTES, semanticLimit))

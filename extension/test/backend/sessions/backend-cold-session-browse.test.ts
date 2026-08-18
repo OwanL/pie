@@ -5,7 +5,6 @@ import * as path from 'node:path';
 import test from 'node:test';
 
 import { BackendServer } from '../../../src/backend';
-import type { SessionContext } from '../../../src/backend/server-types';
 import { SESSION_SNAPSHOT_MAX_LINE_BYTES, sessionSnapshotLineBytes } from '../../../src/shared/transcript-window';
 
 function entry(id: string, role: 'user' | 'assistant', text: string) {
@@ -34,8 +33,7 @@ async function makeColdServer(options: { sessionCatalog?: any } = {}) {
   let durableBranch: any[] = [entry('user-1', 'user', 'hello')];
   let sessionName: string | undefined;
   let managerOpens = 0;
-  let runtimeCreations = 0;
-  const server = new BackendServer({
+  const server = new BackendServer({ workerEntryPath: '/worker-entry.js',
     sdkPath: '/unused',
     cwd: dir,
     sessionCatalog: options.sessionCatalog,
@@ -73,10 +71,6 @@ async function makeColdServer(options: { sessionCatalog?: any } = {}) {
       },
     },
   };
-  server.createSessionContext = async () => {
-    runtimeCreations += 1;
-    throw new Error('cold browsing must not create a runtime');
-  };
   return {
     dir,
     server,
@@ -84,7 +78,7 @@ async function makeColdServer(options: { sessionCatalog?: any } = {}) {
     append(row: any) { durableBranch = [...durableBranch, row]; },
     replaceBranch(rows: any[]) { durableBranch = [...rows]; },
     setSessionName(name: string | undefined) { sessionName = name; },
-    counts: () => ({ managerOpens, runtimeCreations }),
+    counts: () => ({ managerOpens }),
   };
 }
 
@@ -120,7 +114,7 @@ test('cold open/preload/page/detail projections remain runtime-free and pages re
       sizeBytes: 1,
     });
     assert.equal(detail.status, 'unavailable');
-    assert.deepEqual(h.counts(), { managerOpens: 4, runtimeCreations: 0 });
+    assert.deepEqual(h.counts(), { managerOpens: 4 });
   } finally {
     await fs.rm(h.dir, { recursive: true, force: true });
   }
@@ -137,40 +131,7 @@ test('cold list and models.list use coordinator metadata without promotion', asy
       id: 'models-cold', method: 'models.list', params: { sessionPath: h.sessionPath },
     });
     assert.deepEqual(models.map((model: { id: string }) => model.id), ['model-a']);
-    assert.deepEqual(h.counts(), { managerOpens: 0, runtimeCreations: 0 });
-  } finally {
-    await fs.rm(h.dir, { recursive: true, force: true });
-  }
-});
-
-test('open racing promotion joins the hot refresh and never publishes a stale cold snapshot', async () => {
-  const h = await makeColdServer();
-  try {
-    let releaseSettings!: () => void;
-    const settingsBlocked = new Promise<void>((resolve) => { releaseSettings = resolve; });
-    h.server.readModelSettings = async () => {
-      await settingsBlocked;
-      return { defaultModel: 'model-a', defaultThinkingLevel: 'medium' };
-    };
-    const hotContext = { sessionPath: h.sessionPath } as SessionContext;
-    h.server.createSessionContext = async () => {
-      h.server.sessionContexts.set(h.sessionPath, hotContext);
-      return hotContext;
-    };
-    h.server.buildHotSessionOpenedPayload = async (_path: string, selectionToken?: string) => ({
-      session: { path: h.sessionPath }, runtimeReady: true, busy: false, selectionToken,
-    });
-    h.server.emit = () => undefined;
-
-    const browse = h.server.buildSessionOpenedPayload(h.sessionPath, 'selection-race');
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    const promotion = h.server.ensureSessionContext(h.sessionPath);
-    releaseSettings();
-
-    const [payload, promoted] = await Promise.all([browse, promotion]);
-    assert.equal(promoted, hotContext);
-    assert.equal(payload.runtimeReady, true);
-    assert.equal(payload.selectionToken, 'selection-race');
+    assert.deepEqual(h.counts(), { managerOpens: 0 });
   } finally {
     await fs.rm(h.dir, { recursive: true, force: true });
   }
@@ -202,49 +163,6 @@ test('cold session.opened has a metadata-independent bounded fallback for huge n
   }
 });
 
-test('cold page joins a promotion that starts during its durable read and does not return stale busy:false', async () => {
-  const h = await makeColdServer();
-  try {
-    let releaseFingerprint!: () => void;
-    const fingerprintBlocked = new Promise<void>((resolve) => { releaseFingerprint = resolve; });
-    let fingerprintCalls = 0;
-    h.server.readColdBrowseFileFingerprint = async () => {
-      fingerprintCalls += 1;
-      if (fingerprintCalls === 1) await fingerprintBlocked;
-      return 'stable';
-    };
-    h.server.readColdBrowseFileFingerprintSync = () => 'stable';
-    const hotRows = [entry('user-hot', 'user', 'hot'), entry('assistant-hot', 'assistant', 'authoritative')];
-    const hotContext = {
-      sessionPath: h.sessionPath,
-      session: {
-        isStreaming: true,
-        isCompacting: false,
-        sessionManager: { getBranch: () => hotRows },
-      },
-      activeRequest: { id: 'active' },
-    } as unknown as SessionContext;
-    h.server.createSessionContext = async () => {
-      h.server.sessionContexts.set(h.sessionPath, hotContext);
-      return hotContext;
-    };
-    h.server.buildHotSessionOpenedPayload = async () => ({ session: { path: h.sessionPath }, runtimeReady: true });
-    h.server.emit = () => undefined;
-
-    const pagePromise = h.server.loadTranscriptPage(h.sessionPath, 'latest');
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    const promotionPromise = h.server.ensureSessionContext(h.sessionPath);
-    await promotionPromise;
-    releaseFingerprint();
-
-    const page = await pagePromise;
-    assert.equal(page.busy, true);
-    assert.deepEqual(page.transcript.map((message: { id: string }) => message.id), ['user-hot', 'assistant-hot']);
-  } finally {
-    await fs.rm(h.dir, { recursive: true, force: true });
-  }
-});
-
 test('cold detail reads the current durable file without promoting a runtime', async () => {
   const h = await makeColdServer();
   try {
@@ -259,110 +177,6 @@ test('cold detail reads the current durable file without promoting a runtime', a
       messageId: 'assistant-reasoning', partIndex: 0, summary: 'old', available: true, sizeBytes: 3,
     });
     assert.equal(detail.status, 'unavailable');
-    assert.equal(h.counts().runtimeCreations, 0);
-  } finally {
-    await fs.rm(h.dir, { recursive: true, force: true });
-  }
-});
-
-test('host-local preloaded cold selections stay runtime-free and promotion consumes the latest real predecessor', async () => {
-  const h = await makeColdServer();
-  try {
-    const a = path.join(h.dir, 'a.jsonl');
-    const b = h.sessionPath;
-    const c = path.join(h.dir, 'c.jsonl');
-    const header = JSON.stringify({ type: 'session', id: 'stable-session-id', version: 3, cwd: h.dir });
-    await Promise.all([a, c].map((file) => fs.writeFile(file, `${header}\n`)));
-    h.server.viewedSessionPath = a;
-    h.server.emit = () => undefined;
-    h.server.emitSessionListChanged = async () => undefined;
-
-    // Startup hydration knows B and C durably but must not treat either preload
-    // as a viewed transition or materialize execution services.
-    await h.server.handleRequest({ id: 'preload-b', method: 'session.preload', params: { sessionPath: b } });
-    await h.server.handleRequest({ id: 'preload-c', method: 'session.preload', params: { sessionPath: c } });
-    assert.equal(h.counts().runtimeCreations, 0);
-
-    for (const [id, sessionPath, previousSessionPath] of [
-      ['view-b', b, a],
-      ['view-c', c, b],
-      ['revisit-b', b, c],
-      ['same-b', b, b],
-    ] as const) {
-      await h.server.handleRequest({
-        id, method: 'session.viewed', params: { sessionPath, previousSessionPath },
-      });
-    }
-    assert.equal(h.counts().runtimeCreations, 0, 'view notifications do not create runtimes or reread transcripts');
-
-    let capturedPrevious: string | undefined;
-    const hotContext = { sessionPath: b } as SessionContext;
-    h.server.createSessionContext = async (_manager: unknown, _reason: unknown, previousSessionFile?: string) => {
-      capturedPrevious = previousSessionFile;
-      h.server.sessionContexts.set(b, hotContext);
-      return hotContext;
-    };
-    h.server.buildHotSessionOpenedPayload = async () => ({ session: { path: b }, runtimeReady: true });
-    await h.server.ensureSessionContext(b);
-
-    assert.equal(capturedPrevious, c, 'A→preloaded B→cold C→B promotes B with C');
-    assert.notEqual(capturedPrevious, b, 'same-path B→B is a no-op');
-  } finally {
-    await fs.rm(h.dir, { recursive: true, force: true });
-  }
-});
-
-test('cold create retains its exact manager until one legacy promotion and publishes runtime-ready first', async () => {
-  const h = await makeColdServer();
-  try {
-    const createdPath = path.join(h.dir, 'retained-create.jsonl');
-    await fs.writeFile(createdPath, `${JSON.stringify({ type: 'session', id: 'retained', version: 3, cwd: h.dir })}\n`);
-    const createdManager = h.server.sdk.SessionManager.open(createdPath);
-    const opensBeforeCreate = h.counts().managerOpens;
-    h.server.sdk.SessionManager.create = () => createdManager;
-    h.server.emitSessionListChanged = async () => undefined;
-    const emitted: Array<{ event: string; payload?: any }> = [];
-    h.server.emit = (event: string, payload?: unknown) => emitted.push({ event, payload });
-
-    const created = await h.server.handleRequest({
-      id: 'create-retained', method: 'session.create',
-      params: {
-        cwd: h.dir,
-        selectionToken: 'create-selection',
-        operationId: 'create-operation',
-        operationAttempt: 2,
-      },
-    });
-    assert.equal(created.sessionPath, createdPath);
-    const coldOpened = emitted.find((record) => record.event === 'session.opened')?.payload;
-    assert.equal(coldOpened.runtimeReady, false);
-    assert.equal(coldOpened.operationId, 'create-operation');
-    assert.equal(coldOpened.operationAttempt, 2);
-    assert.equal(h.counts().managerOpens, opensBeforeCreate, 'cold publication does not reopen the retained manager');
-
-    let installedManager: unknown;
-    let installedReason: unknown;
-    const hotContext = { sessionPath: createdPath } as SessionContext;
-    h.server.createSessionContext = async (manager: unknown, reason: unknown) => {
-      installedManager = manager;
-      installedReason = reason;
-      h.server.sessionContexts.set(createdPath, hotContext);
-      return hotContext;
-    };
-    h.server.buildHotSessionOpenedPayload = async () => ({
-      session: { path: createdPath }, runtimeReady: true, busy: false,
-    });
-
-    await h.server.ensureSessionContext(createdPath);
-    assert.equal(installedManager, createdManager, 'first promotion consumes the exact process-local manager');
-    assert.equal(installedReason, 'new', 'deferred promotion preserves create lifecycle semantics');
-    assert.equal(h.counts().managerOpens, opensBeforeCreate, 'promotion does not reopen a retained manager');
-    assert.equal(h.server.coldSessionManagerHandles.size, 0);
-    assert.deepEqual(
-      emitted.filter((record) => record.event === 'session.opened').map((record) => record.payload.runtimeReady),
-      [false, true],
-      'runtime-ready metadata is emitted before the initiating execution can continue',
-    );
   } finally {
     await fs.rm(h.dir, { recursive: true, force: true });
   }
@@ -488,7 +302,6 @@ test('cold forget routes through the store and removes the durable session witho
       id: 'forget-cold', method: 'session.forget', params: { sessionPath: h.sessionPath },
     }), { sessionPath: h.sessionPath, forgotten: true });
     assert.equal(await fs.stat(h.sessionPath).then(() => true, () => false), false);
-    assert.equal(h.counts().runtimeCreations, 0);
   } finally {
     await fs.rm(h.dir, { recursive: true, force: true });
   }
@@ -529,7 +342,6 @@ test('a slow create cannot overwrite a newer host-local viewed transition', asyn
     await create;
 
     assert.equal(h.server.viewedSessionPath, b);
-    assert.equal(h.counts().runtimeCreations, 0);
   } finally {
     await fs.rm(h.dir, { recursive: true, force: true });
   }
@@ -570,7 +382,6 @@ test('a slow cold session.open cannot overwrite a newer host-local viewed transi
 
     assert.equal(h.server.viewedSessionPath, b);
     assert.equal(h.server.browsePreviousSessionFiles.get(b), c);
-    assert.equal(h.counts().runtimeCreations, 0);
   } finally {
     await fs.rm(h.dir, { recursive: true, force: true });
   }

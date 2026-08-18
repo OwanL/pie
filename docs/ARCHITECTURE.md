@@ -9,7 +9,7 @@ pie is a VS Code extension that provides a chat interface to a local PI (Program
 - **Extension host** — the VS Code extension process. Owns all application state, serializes mutations, and projects state to the webview.
 - **Webview** — a Preact single-page app rendered in a VS Code sidebar panel. Displays the chat UI and dispatches user intents back to the host.
 
-Isolated mode is the default for each new backend generation. Legacy mode retains the previous single PI backend process as the bounded rollback seam: launch with `PIE_SESSION_RUNTIME_ISOLATION=0` and restart the backend. `1` explicitly selects isolation; any other value fails startup closed. Mode never changes inside a generation, rollback preserves durable transcripts/settings, and only currently non-durable live work follows the normal backend-restart interruption contract.
+Isolated mode is the sole runtime path for every backend generation. The coordinator never creates an `AgentSession`; all hot session execution runs in per-root workers. There is no legacy in-process runtime and no runtime-mode flag — Git history is the rollback mechanism if a regression is discovered.
 
 ---
 

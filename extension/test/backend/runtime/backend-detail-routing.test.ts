@@ -36,7 +36,6 @@ function createIsolatedServer() {
   const server = new BackendServer({
     sdkPath: '/sdk',
     cwd: '/repo',
-    runtimeIsolationMode: 'isolated',
     workerEntryPath: '/worker.js',
   });
   const subscribed: unknown[] = [];
@@ -117,23 +116,23 @@ test('isolated server rejects malformed detail payloads with INVALID_PARAMS', as
   );
 });
 
-test('detail RPCs fail closed outside isolated runtime routing', async () => {
-  const legacy = new BackendServer({ sdkPath: '/sdk', cwd: '/repo' });
-  const port = legacy as unknown as ServerDetailTestPort;
-  // In legacy mode the coordinator has no router and no worker runtime; the
-  // detail RPCs are not in the legacy request catalog, so they fail closed as
-  // unknown methods instead of reaching any SDK path.
+test('detail RPCs fail closed without an initialized worker router', async () => {
+  const server = new BackendServer({ sdkPath: '/sdk', cwd: '/repo', workerEntryPath: '/worker.js' });
+  const port = server as unknown as ServerDetailTestPort;
+  // Without `start()` the coordinator has no router; the detail RPCs are not
+  // in the coordinator operation catalog, so they fail closed as unavailable
+  // instead of reaching any SDK path.
   await assert.rejects(
     port.handleRequest(envelope('detail.subscribe', { subscriptionId: 's', address: ADDRESS, maxPageBytes: 4096 })),
-    (error: unknown) => error instanceof BackendError && error.code === 'UNKNOWN_METHOD',
+    (error: unknown) => error instanceof BackendError && error.code === 'ISOLATED_RUNTIME_ROUTING_UNAVAILABLE',
   );
   await assert.rejects(
     port.handleRequest(envelope('detail.unsubscribe', { subscriptionId: 's', reason: 'collapse' })),
-    (error: unknown) => error instanceof BackendError && error.code === 'UNKNOWN_METHOD',
+    (error: unknown) => error instanceof BackendError && error.code === 'ISOLATED_RUNTIME_ROUTING_UNAVAILABLE',
   );
   await assert.rejects(
     port.handleRequest(envelope('detail.fetch', { subscriptionId: 's', address: ADDRESS, ref: { baselineRevision: 1, pageIndex: 0, pageCount: 1 }, maxPageBytes: 4096 })),
-    (error: unknown) => error instanceof BackendError && error.code === 'UNKNOWN_METHOD',
+    (error: unknown) => error instanceof BackendError && error.code === 'ISOLATED_RUNTIME_ROUTING_UNAVAILABLE',
   );
 });
 

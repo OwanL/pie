@@ -323,9 +323,6 @@ function startBackend(dir: string, fixture: Awaited<ReturnType<typeof createMatr
       PIE_P6_MATRIX_DEADLINE_MS: String(PROVIDER_HOLD_DEADLINE_MS),
       PI_DIAG: '1',
       PIE_PROVIDER_TRAFFIC_LOG: '1',
-      // Phase 7 gate: leave PIE_SESSION_RUNTIME_ISOLATION unset and exercise
-      // the production default-on coordinator/worker path.
-      PIE_SESSION_RUNTIME_ISOLATION: undefined,
       PIE_WRITE_OWNERSHIP_TRACE_DIR: fixture.traceDir,
     },
     stdio: ['pipe', 'pipe', 'pipe'],

@@ -3,32 +3,24 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
 
-import { rewritePieHarnessPrompt } from '../../../shared/pie-harness-prompt.js';
 import { BoundedEventLoopHistogram } from '../shared/live-pipeline-trace';
 import { attachJsonlLineReader, JSONL_MAX_LINE_BYTES } from '../shared/jsonl';
 import { toErrorMessage, parseJsonOrThrow } from '../shared/error-message';
 import { updateSettingsJsonObject } from '../shared/settings-json-update';
 import {
   PROTOCOL_VERSION,
-  type BusyChangedPayload,
-  type ContextUsageChangedPayload,
-  type ContextWindowUsage,
   type DetailResult,
   type LazyDetailRef,
-  type MessageAbortedPayload,
   type ModelSettings,
   type RequestEnvelope,
   type SessionListChangedPayload,
   type SessionOpenedPayload,
   type SessionSummary,
-  type SystemPromptEntry,
   type ThinkingLevel,
   type TranscriptPageDirection,
   type TranscriptPagePayload,
 } from '../shared/protocol';
 import { getDefaultAuthDir, ensureDir, isInsideGitWorkTree, migrateAuthFile } from './auth.js';
-import { deriveContextUsageFromBranch } from './context-usage';
-import { ExtensionUIBridge } from './extension-ui-bridge';
 import { handleBackendRequest, parseLivePipelineToggleParams } from './request-handler';
 import {
   validateDetailFetch,
@@ -40,12 +32,9 @@ import {
   type DetailUnsubscribeParams,
 } from './rpc';
 import { backendSessionPathKey, resolveBackendSessionDir } from './session-directory';
-import { handleSdkSessionEvent } from './session-event-handler';
 import {
-  buildCurrentSummary,
   loadAvailableModels,
   loadConfiguredModels,
-  resolveActiveModel,
 } from './session-metadata';
 import { SessionCatalog } from './session-catalog';
 import {
@@ -54,28 +43,14 @@ import {
   hasActiveReviewClosureActions,
   startReviewWatcher,
 } from './session-review-store';
-import {
-  readSystemPromptTogglesForSession,
-  writeSystemPromptTogglesForSession,
-} from './system-prompt-toggle-store';
 import { forgetPrivateSessionArtifacts } from './private-session-artifacts';
 import {
-  coordinatorSdkLoadMode,
   ensureSdkPatchBarrier,
-  isFullSdkModule,
   loadSdk,
-  loadSdkInternalModule,
   type ColdCoordinatorSdkModule,
-  type SdkModule,
-  type SdkSession,
-  type SdkSessionEvent,
-  type SdkSessionManager,
-  type SdkSystemPromptModule,
 } from './sdk';
 import { ProviderGate } from './provider-gate.js';
 import { CreateOperationLedger } from './create-operation-ledger';
-import { observeProviderTransport } from './provider-progress-bus.js';
-import { observeProviderIncidents, providerIncidentCode } from './provider-incident.js';
 import { BackendError, extractRequestError, log, responseError, responseOk, writeStdout } from './server-io';
 import {
   flushBackendLivePipelineTrace,
@@ -85,35 +60,10 @@ import {
   setBackendLivePipelineTraceEnabled,
 } from './live-pipeline-trace-runtime';
 import {
-  type SessionContext,
   type SessionContextCreationReason,
-  type SessionPromptState,
 } from './server-types';
-import {
-  buildSessionSystemPrompts,
-  buildToggledSystemPrompt,
-  captureOriginalSystemPromptOptions,
-  installAutonomousModeToolGuard,
-  installSystemPromptToggleRebuildGuard,
-  installSystemPromptToolToggleGuard,
-  normalizePromptText,
-  TOOLS_ENTRY_ID,
-} from './system-prompts';
-import { buildPagedTranscriptWindow } from './transcript-window';
-import { createRuntimeFactory, ServiceLoadingGate } from './runtime-factory.js';
-import { createSessionManagerFence } from './session-manager-fence';
-import { installAuxiliaryLlmMeter } from './auxiliary-llm-meter';
 import { backendTrace, backendError, backendInfo, backendWarn } from './log';
-import {
-  buildSessionOpenedPayload as buildSessionOpenedPayloadHelper,
-  ensureDisplayTranscriptCache,
-  normalizeDanglingTranscript,
-} from './session-opened.js';
-import { deduplicateToolCallResultsForTransport } from '../shared/chat-message-parts.js';
-import { findDurableDetail } from '../shared/lazy-details.js';
-import { LIVE_PIPELINE_LIMITS } from '../shared/live-pipeline-protocol.js';
-import { ASK_USER_TOOL_NAME } from '../../../shared/autonomous-mode.js';
-import { isPhase3IsolatedCoordinatorOperationAllowed, type RuntimeIsolationMode } from './runtime-isolation-mode';
+import { isCoordinatorOperationAllowed } from './coordinator-operations';
 import { ColdSessionStore, StaleColdSessionLeaseError, type ColdSessionManagerHandle } from './cold-session-store';
 import { DurableDetailStore, type ResolvedDurableDetail } from './durable-detail-store';
 import type { BackendDetailFence, LiveSubagentDetailAddress } from '../shared/protocol/subagent-detail';
@@ -180,68 +130,12 @@ function timed<T>(label: string, op: () => T | Promise<T>): T | Promise<T> {
  *  `start()` is invoked more than once. */
 let backendFatalHandlersInstalled = false;
 const SESSION_CATALOG_POLL_INTERVAL_MS = 10_000;
-/** Grace bound for `runtime.dispose()` during replacement and shutdown. A
- *  provider teardown can wedge an SDK runtime; disposal is bounded best-effort
- *  so it can never block recovery or shutdown. Shared by `createSessionContext`
- *  (replacement) and `dispose()` (shutdown) so the bound stays consistent.
- *  `PIE_RUNTIME_DISPOSE_GRACE_MS` overrides the bound (mirroring
- *  `PIE_WILLRETRY_WATCHDOG_GRACE_MS`) so disposal-bound tests need not wait the
- *  full production window. */
-function resolveRuntimeDisposeGraceMs(): number {
-  const override = Number(process.env.PIE_RUNTIME_DISPOSE_GRACE_MS);
-  return Number.isFinite(override) && override > 0 ? override : 5_000;
-}
-
-/** Timer seam for the bounded runtime-disposal policy. The production
- * scheduler uses ordinary unref'd timers; tests can advance the grace window
- * without waiting on wall-clock time. */
-export interface RuntimeDisposeScheduler {
-  setTimeout(callback: () => void, delayMs: number): ReturnType<typeof setTimeout>;
-  clearTimeout(timer: ReturnType<typeof setTimeout>): void;
-}
 
 interface PreparedViewedSessionTransition {
   changed: boolean;
   revision: number;
   hadPrevious: boolean;
   previous?: string;
-}
-
-const defaultRuntimeDisposeScheduler: RuntimeDisposeScheduler = {
-  setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
-  clearTimeout: (timer) => clearTimeout(timer),
-};
-
-function disposeRuntimeBounded(
-  runtime: Pick<SessionContext['runtime'], 'dispose'>,
-  sessionPath: string | undefined,
-  scheduler: RuntimeDisposeScheduler,
-): Promise<void> {
-  let graceTimer: ReturnType<typeof setTimeout> | undefined;
-  const grace = new Promise<void>((resolve) => {
-    graceTimer = scheduler.setTimeout(resolve, resolveRuntimeDisposeGraceMs());
-    (graceTimer as { unref?: () => void }).unref?.();
-  });
-  let dispose: Promise<void>;
-  try {
-    dispose = Promise.resolve(runtime.dispose());
-  } catch (error) {
-    backendWarn('backend-session', 'session runtime dispose threw', {
-      ...(sessionPath ? { sessionPath } : {}),
-      error: toErrorMessage(error),
-    });
-    dispose = Promise.resolve();
-  }
-  return Promise.race([dispose, grace])
-    .catch((error) => {
-      backendWarn('backend-session', 'session runtime dispose failed', {
-        ...(sessionPath ? { sessionPath } : {}),
-        error: toErrorMessage(error),
-      });
-    })
-    .finally(() => {
-      if (graceTimer) scheduler.clearTimeout(graceTimer);
-    });
 }
 
 /** Surface swallowed promise rejections and uncaught exceptions on stderr (the
@@ -278,7 +172,7 @@ function installBackendFatalHandlers(): void {
 }
 
 export class BackendServer {
-  private sdk!: SdkModule | ColdCoordinatorSdkModule;
+  private sdk!: ColdCoordinatorSdkModule;
   private readonly sdkPath: string;
   private readonly startupCwd: string;
   /** Host-authoritative generation shared by backend, coordinator, worker, and detail fences. */
@@ -291,10 +185,7 @@ export class BackendServer {
   /** Monotonic fence preventing a slow session.open from overwriting a newer
    * host-local visual transition after its durable read completes. */
   private viewedSessionRevision = 0;
-  /** Process-wide user preference mirrored by runtimePrefs.set. */
-  private autonomousMode = false;
   private runtimePrefs: WorkerJsonObject = {};
-  private readonly sessionContexts = new Map<string, SessionContext>();
   private readonly sessionCatalog: SessionCatalog;
   /** One runtime-free store is installed after SDK load and shares the
    * coordinator generation/catalog/settings authority. */
@@ -309,17 +200,10 @@ export class BackendServer {
   /** Cold destructive mutations reserve their path before the first await so
    * promotion cannot install a writer while truncate/forget owns the file. */
   private readonly pendingColdSessionMutations = new Map<string, Promise<unknown>>();
-  /** Deduplicates concurrent lazy promotions for the same cold session. */
-  private readonly pendingSessionContexts = new Map<string, Promise<SessionContext>>();
-  /** Generation owner recorded on snapshots built through the public browse
-   * path. Publication uses it to replace a payload superseded after its final
-   * awaited ownership check. Transition-internal hydration payloads bypass it. */
-  private readonly sessionOpenedPayloadOwners = new WeakMap<object, SessionContext | undefined>();
   /** Non-serialized generation stamp checked synchronously at correlated stdout
    * publication, after the request handler's final await has unwound. */
   private readonly browseResponseOwners = new WeakMap<object, {
     sessionPath: string;
-    owner?: SessionContext;
     fingerprint?: string;
   }>();
   /** Predecessor captured when a cold session first becomes viewed. Promotion
@@ -328,9 +212,6 @@ export class BackendServer {
   /** Paths currently being forgotten; prevents a racing open from installing
    *  a runtime after its transcript has been removed. */
   private readonly forgottenSessionPaths = new Set<string>();
-  /** Serializes prompt persistence and live prompt rebuilds for each session. */
-  private readonly pendingSystemPromptToggleApplications = new Map<string, Promise<void>>();
-  private systemPromptModulePromise?: Promise<SdkSystemPromptModule>;
   /** Disposer for the session-review sidecar watcher (see `startReviewWatcher`). */
   private stopReviewWatcher?: () => void;
   private sessionCatalogPollTimer?: ReturnType<typeof setInterval>;
@@ -347,16 +228,6 @@ export class BackendServer {
   /** Cached active-action state belongs to `reviewSidecarFingerprint`; an
    * unchanged poll must not synchronously reparse the growing sidecars. */
   private reviewClosureReconciliationPending = false;
-  private stopProviderProgressObserver?: () => void;
-  private stopProviderIncidentObserver?: () => void;
-  /** Captures request+turn ownership at an attempt's first synchronous gate
-   * observation so a late acquisition cannot be charged to a newer request. */
-  private readonly providerAttemptOwners = new Map<string, {
-    context: SessionContext;
-    requestId: string;
-    turnSequence: number;
-    retryId?: string;
-  }>();
 
   /** True once `dispose()` has begun. Suppresses stale events and payload
    *  builds from in-flight async paths (recovery replacement emissions, catalog
@@ -366,20 +237,12 @@ export class BackendServer {
   /** All shutdown callers join one teardown. A second EOF/watchdog signal must
    * not observe `disposed` and exit while the first caller still owns workers. */
   private disposePromise?: Promise<void>;
-  /** Backend-wide FIFO admission gate for `sdk.createAgentSessionServices`;
-   *  shared by every runtime-factory invocation this server creates (all
-   *  sessions/cwds). Service creation is serialized so concurrent session
-   *  opens cannot saturate the process during an active generation; results
-   *  are never cached or shared — each admitted call creates fresh services. */
-  private readonly serviceLoadingGate = new ServiceLoadingGate();
   /** Generation/process-scoped create-operation ledger (§6.3): dedupes
    *  concurrent/retried `session.create`/`session.duplicate` by the optional
    *  host-generated `operationId` and retains in-flight and completed durable
    *  results for this backend generation. A backend restart (generation
    *  death) naturally drops the ledger with the process. */
   private readonly createOperationLedger = new CreateOperationLedger();
-  private readonly runtimeDisposeScheduler: RuntimeDisposeScheduler;
-  private readonly runtimeIsolationMode: RuntimeIsolationMode;
   private readonly workerEntryPath?: string;
   private workerSupervisor?: WorkerSupervisor;
   private sessionOwnershipAuthority?: SessionOwnershipAuthority;
@@ -411,8 +274,6 @@ export class BackendServer {
     cwd: string;
     backendGeneration?: number;
     hostPid?: number;
-    runtimeDisposeScheduler?: RuntimeDisposeScheduler;
-    runtimeIsolationMode?: RuntimeIsolationMode;
     workerEntryPath?: string;
     /** Test seam for causally blocking a cold catalog operation at the public
      * JSONL/writer boundary. Production always constructs the default. */
@@ -425,12 +286,10 @@ export class BackendServer {
       throw new Error('backendGeneration must be a positive safe integer.');
     }
     this.hostPid = options.hostPid;
-    this.runtimeDisposeScheduler = options.runtimeDisposeScheduler ?? defaultRuntimeDisposeScheduler;
-    this.runtimeIsolationMode = options.runtimeIsolationMode ?? 'legacy';
     this.workerEntryPath = options.workerEntryPath;
     this.sessionCatalog = options.sessionCatalog ?? new SessionCatalog();
-    if (this.runtimeIsolationMode === 'isolated' && !this.workerEntryPath) {
-      throw new Error('Isolated session runtime mode requires a bundled worker entry path.');
+    if (!this.workerEntryPath) {
+      throw new Error('The session runtime requires a bundled worker entry path.');
     }
   }
 
@@ -472,15 +331,6 @@ export class BackendServer {
     this.coldSessionManagerHandles.set(key, { handle, creationReason });
   }
 
-  private assertColdCoordinatorOwner(sessionPath: string): void {
-    if (this.getSessionContext(sessionPath) || this.getPendingSessionContext(sessionPath)) {
-      throw new BackendError(
-        'ISOLATED_RUNTIME_ROUTING_UNAVAILABLE',
-        `Session ${sessionPath} has a hot or promoting owner; Phase 4 isolated-runtime routing is unavailable.`,
-      );
-    }
-  }
-
   private async runColdSessionMutation<T>(sessionPath: string, operation: () => Promise<T>): Promise<T> {
     const key = this.coldManagerKey(sessionPath);
     if (this.pendingColdSessionMutations.has(key)) {
@@ -511,38 +361,35 @@ export class BackendServer {
     // Install fatal handlers first so even an early spawn-time rejection is
     // surfaced. Idempotent (module-level guard).
     installBackendFatalHandlers();
-    if (this.runtimeIsolationMode === 'isolated') {
-      // Phase 2 creates the generation-scoped supervisor and verifies the stable
-      // worker artifact. Hot operations fail closed below until Phase 4 routing;
-      // they must never fall through to this process's legacy runtime path. The
-      // coordinator owns the patching barrier and workers only validate it.
-      const sdkPatchIdentity = await ensureSdkPatchBarrier(this.sdkPath);
-      this.workerSupervisor = new WorkerSupervisor({
-        workerEntryPath: this.workerEntryPath!,
-        coordinatorGeneration: this.backendGeneration,
-        sdkPatchIdentity,
-        onWorkerStateChange: (rootSessionPath, snapshot, identity) => {
-          void this.workerRuntimeRouter?.handleWorkerStateChange(rootSessionPath, snapshot, identity).catch((error) => {
-            backendError('backend-worker', 'runtime state reconciliation failed', {
-              rootSessionPath,
-              error: toErrorMessage(error),
-            });
+    // Create the generation-scoped supervisor and verify the stable worker
+    // artifact. The coordinator owns the patching barrier and workers only
+    // validate it.
+    const sdkPatchIdentity = await ensureSdkPatchBarrier(this.sdkPath);
+    this.workerSupervisor = new WorkerSupervisor({
+      workerEntryPath: this.workerEntryPath!,
+      coordinatorGeneration: this.backendGeneration,
+      sdkPatchIdentity,
+      onWorkerStateChange: (rootSessionPath, snapshot, identity) => {
+        void this.workerRuntimeRouter?.handleWorkerStateChange(rootSessionPath, snapshot, identity).catch((error) => {
+          backendError('backend-worker', 'runtime state reconciliation failed', {
+            rootSessionPath,
+            error: toErrorMessage(error),
           });
-        },
-        onWorkerFrame: (rootSessionPath, frame) => {
-          void this.workerRuntimeRouter?.handleWorkerFrame(rootSessionPath, frame).catch((error) => {
-            backendError('backend-worker', 'runtime frame failed', {
-              rootSessionPath,
-              error: toErrorMessage(error),
-            });
+        });
+      },
+      onWorkerFrame: (rootSessionPath, frame) => {
+        void this.workerRuntimeRouter?.handleWorkerFrame(rootSessionPath, frame).catch((error) => {
+          backendError('backend-worker', 'runtime frame failed', {
+            rootSessionPath,
+            error: toErrorMessage(error),
           });
-        },
-        onDiagnostic: (rootSessionPath, stream, tail) => {
-          backendError('backend-worker', `worker ${stream}`, { rootSessionPath, tail });
-        },
-      });
-      await this.workerSupervisor.initialize();
-    }
+        });
+      },
+      onDiagnostic: (rootSessionPath, stream, tail) => {
+        backendError('backend-worker', `worker ${stream}`, { rootSessionPath, tail });
+      },
+    });
+    await this.workerSupervisor.initialize();
     const sdkStartedAt = performance.now();
     recordBackendLivePipelineTrace({
       stage: 'backend.runtime',
@@ -555,7 +402,7 @@ export class BackendServer {
       await timed('start.loadSdk', async () => {
         this.sdk = await loadSdk(
           this.sdkPath,
-          coordinatorSdkLoadMode(this.runtimeIsolationMode === 'isolated'),
+          { mode: 'cold-coordinator' },
         );
         this.agentDir = this.sdk.getAgentDir();
         this.getSessionDir();
@@ -608,125 +455,6 @@ export class BackendServer {
       }
     });
 
-    this.stopProviderProgressObserver = observeProviderTransport((observation) => {
-      const currentContext = [...this.sessionContexts.values()].find((candidate) =>
-        candidate.session.sessionManager.getSessionId?.() === observation.sessionId,
-      );
-      const currentRequest = currentContext?.activeRequest;
-      let owner = this.providerAttemptOwners.get(observation.attemptId);
-      if (!owner && (observation.kind === 'gate_queue' || observation.kind === 'gate_acquired')
-        && currentContext && currentRequest && currentRequest.providerTurnSequence !== undefined) {
-        owner = {
-          context: currentContext,
-          requestId: currentRequest.id,
-          turnSequence: currentRequest.providerTurnSequence,
-          retryId: currentRequest.retryTiming?.retryId,
-        };
-        this.providerAttemptOwners.set(observation.attemptId, owner);
-      }
-
-      const ownerRequest = owner?.context.activeRequest;
-      const ownsCurrentRequest = owner !== undefined && ownerRequest?.id === owner.requestId;
-      if (owner && ownerRequest?.id === owner.requestId) {
-        if (owner.retryId !== undefined
-          && ownerRequest.retryTiming?.retryId === owner.retryId
-          && ownerRequest.retryTiming.providerAttemptStartedAt === undefined
-          && (observation.kind === 'gate_queue' || observation.kind === 'gate_acquired')) {
-          ownerRequest.retryTiming.providerAttemptStartedAt = observation.occurredAt;
-        }
-        if (observation.kind === 'gate_acquired'
-          && typeof observation.queueDurationMs === 'number'
-          && Number.isFinite(observation.queueDurationMs)) {
-          const queueByTurn = ownerRequest.providerQueueByTurn ?? new Map();
-          const previous = queueByTurn.get(owner.turnSequence) ?? { durationMs: 0, attemptCount: 0 };
-          queueByTurn.set(owner.turnSequence, {
-            durationMs: previous.durationMs + Math.max(0, Math.trunc(observation.queueDurationMs)),
-            attemptCount: previous.attemptCount + 1,
-          });
-          ownerRequest.providerQueueByTurn = queueByTurn;
-        }
-      }
-      if (observation.kind === 'gate_rejected' || observation.kind === 'headers_received'
-        || observation.kind === 'transport_terminal' || observation.kind === 'transport_error') {
-        this.providerAttemptOwners.delete(observation.attemptId);
-      }
-
-      const context = owner?.context ?? currentContext;
-      const accumulator = ownsCurrentRequest ? ownerRequest.liveTurnAccumulator : undefined;
-      const checkpointSeq = accumulator?.currentSeq ?? 0;
-      if (context && accumulator && checkpointSeq > 0) {
-        if (observation.kind === 'gate_queue') {
-          this.emit('live.semantic', accumulator.observe({ kind: 'turn.phase', phase: 'queued', inactivityBudgetMs: 120_000 }, observation.occurredAt));
-        } else if (observation.kind === 'headers_wait' || observation.kind === 'headers_received') {
-          this.emit('live.semantic', accumulator.observe({ kind: 'turn.phase', phase: 'waiting_provider', inactivityBudgetMs: 120_000 }, observation.occurredAt));
-        }
-      }
-      if (context && isBackendLivePipelineTraceEnabled()) {
-        recordBackendLivePipelineTrace({
-          stage: 'provider.phase.transition',
-          kind: 'transition',
-          identifiers: {
-            session: context.sessionPath,
-            ...(ownsCurrentRequest && owner ? { request: owner.requestId } : {}),
-            attempt: observation.attemptId,
-          },
-          phase: observation.kind === 'gate_queue'
-            ? 'provider_gate_queue'
-            : observation.kind === 'headers_wait'
-              ? 'headers'
-              : observation.kind === 'headers_received'
-                ? 'pre_first_semantic'
-                : observation.kind === 'raw_chunk'
-                  ? 'semantic_stream'
-                  : 'terminal',
-        });
-      }
-    });
-
-    this.stopProviderIncidentObserver = observeProviderIncidents((incident) => {
-      const context = [...this.sessionContexts.values()].find((candidate) =>
-        candidate.session.sessionManager.getSessionId?.() === incident.sessionId,
-      );
-      const active = context?.activeRequest;
-      if (!context || !active) return;
-
-      active.latestProviderIncident = incident;
-      active.lastProviderErrorForDiagnostics = incident.userMessage;
-      const noticeKey = [
-        incident.kind,
-        incident.providerHost,
-        incident.status ?? '',
-        incident.retryAt ?? '',
-      ].join(':');
-      const emitted = active.providerIncidentNoticeKeys ?? new Set<string>();
-      active.providerIncidentNoticeKeys = emitted;
-      if (!emitted.has(noticeKey)) {
-        emitted.add(noticeKey);
-        this.emit('operational-error', {
-          incidentId: `provider:${active.id}:${noticeKey}`,
-          code: providerIncidentCode(incident.kind),
-          message: incident.userMessage,
-          detail: incident.detail,
-          sessionPath: context.sessionPath,
-          requestId: active.id,
-        });
-      }
-
-      // A terminal quota response cannot recover by waiting on the same
-      // provider. Give the SDK a short window to publish its normal terminal
-      // message, then fence/replace the runtime if it remains busy. This turns
-      // hidden SDK backoff into a bounded, explicit failure.
-      if (incident.kind === 'quota_exhausted' && !active.quotaSettlementTimer) {
-        const requestId = active.id;
-        active.quotaSettlementTimer = setTimeout(() => {
-          const current = context.activeRequest;
-          if (current?.id !== requestId || current.latestProviderIncident?.kind !== 'quota_exhausted') return;
-          this.recoverStuckSession(context, current.latestProviderIncident.userMessage);
-        }, 15_000);
-        active.quotaSettlementTimer.unref?.();
-      }
-    });
-
     const authDir = process.env.PI_CODING_AGENT_AUTH_DIR?.trim();
     let authPath = '';
 
@@ -760,19 +488,18 @@ export class BackendServer {
       this.authStorage = this.sdk.AuthStorage.create(authPath);
     });
 
-    if (this.runtimeIsolationMode === 'isolated') {
-      const coldStore = this.initializeColdSessionStore();
-      this.sessionOwnershipAuthority = new SessionOwnershipAuthority({
-        coldLeaseAuthority: coldStore.leases,
-      });
-      this.durableDetailStore = new DurableDetailStore({
-        resolve: (sessionPath, address, durableRef) => this.resolveDurableDetail(sessionPath, address, durableRef),
-        emit: (message) => {
-          this.emit('detail.stream', message as unknown as WorkerJsonObject);
-          return true;
-        },
-      });
-      this.workerRuntimeRouter = new WorkerRuntimeRouter({
+    const coldStore = this.initializeColdSessionStore();
+    this.sessionOwnershipAuthority = new SessionOwnershipAuthority({
+      coldLeaseAuthority: coldStore.leases,
+    });
+    this.durableDetailStore = new DurableDetailStore({
+      resolve: (sessionPath, address, durableRef) => this.resolveDurableDetail(sessionPath, address, durableRef),
+      emit: (message) => {
+        this.emit('detail.stream', message as unknown as WorkerJsonObject);
+        return true;
+      },
+    });
+    this.workerRuntimeRouter = new WorkerRuntimeRouter({
         supervisor: this.workerSupervisor!,
         coordinatorGeneration: this.backendGeneration,
         coldStore,
@@ -827,7 +554,6 @@ export class BackendServer {
       this.modelsJsonFingerprint = await fs.stat(path.join(this.agentDir, 'models.json'))
         .then((stat) => `${stat.size}:${stat.mtimeMs}`)
         .catch(() => 'missing');
-    }
 
     // Attach the stdin reader BEFORE emitting backend.ready so that any
     // request the client sends immediately after receiving ready is captured,
@@ -896,8 +622,8 @@ export class BackendServer {
   /** Opt-in packaged-artifact probe through the real cold store, promotion
    * router, full worker SDK/runtime, command transport, and retirement. */
   async runPhase2WorkerSmoke(_sessionPath: string): Promise<void> {
-    if (this.runtimeIsolationMode !== 'isolated' || !this.workerRuntimeRouter) {
-      throw new Error('Worker promotion smoke requires an initialized isolated coordinator.');
+    if (!this.workerRuntimeRouter) {
+      throw new Error('Worker promotion smoke requires an initialized coordinator.');
     }
     const store = this.initializeColdSessionStore();
     const handle = store.create({ cwd: this.startupCwd });
@@ -1200,51 +926,11 @@ export class BackendServer {
     this.hostWatchdogTimer = undefined;
   }
 
-  private requireFullSdk(): SdkModule {
-    if (!isFullSdkModule(this.sdk)) {
-      throw new BackendError(
-        'ISOLATED_RUNTIME_ROUTING_UNAVAILABLE',
-        'The isolated coordinator did not load the SDK execution runtime.',
-      );
-    }
-    return this.sdk;
-  }
 
-  private createRuntimeFactory() {
-    // Isolated public routing fails before this legacy-only helper is reached;
-    // the cast preserves narrow test doubles that intercept runtime creation
-    // without invoking the supplied factory.
-    return createRuntimeFactory(this.sdk as SdkModule, this.authStorage, this.startupCwd, this.serviceLoadingGate);
-  }
 
-  private disposeRuntimeBounded(runtime: SessionContext['runtime'], sessionPath?: string): Promise<void> {
-    return disposeRuntimeBounded(runtime, sessionPath, this.runtimeDisposeScheduler);
-  }
 
-  private resolveSessionPath(session: SdkSession): string | undefined {
-    return session.sessionFile ?? session.sessionManager.getSessionFile();
-  }
 
-  private getSessionContext(sessionPath?: string): SessionContext | undefined {
-    if (!sessionPath) return undefined;
-    const direct = this.sessionContexts.get(sessionPath);
-    if (direct) return direct;
-    const key = this.coldManagerKey(sessionPath);
-    for (const [candidatePath, context] of this.sessionContexts) {
-      if (this.coldManagerKey(candidatePath) === key) return context;
-    }
-    return undefined;
-  }
 
-  private getPendingSessionContext(sessionPath: string): Promise<SessionContext> | undefined {
-    const direct = this.pendingSessionContexts.get(sessionPath);
-    if (direct) return direct;
-    const key = this.coldManagerKey(sessionPath);
-    for (const [candidatePath, pending] of this.pendingSessionContexts) {
-      if (this.coldManagerKey(candidatePath) === key) return pending;
-    }
-    return undefined;
-  }
 
   private isSessionForgotten(sessionPath: string): boolean {
     if (this.forgottenSessionPaths.has(sessionPath)) return true;
@@ -1274,8 +960,7 @@ export class BackendServer {
     sessionPath: string,
     prepared?: PreparedViewedSessionTransition,
   ): void {
-    if (!prepared?.changed || prepared.revision !== this.viewedSessionRevision
-      || this.sessionContexts.has(sessionPath) || this.pendingSessionContexts.has(sessionPath)) return;
+    if (!prepared?.changed || prepared.revision !== this.viewedSessionRevision) return;
     if (prepared.hadPrevious) this.browsePreviousSessionFiles.set(sessionPath, prepared.previous);
     else this.browsePreviousSessionFiles.delete(sessionPath);
   }
@@ -1315,459 +1000,6 @@ export class BackendServer {
     return true;
   }
 
-  private async createSessionContext(
-    sessionManager: SdkSessionManager,
-    reason: SessionContextCreationReason,
-    previousSessionFile?: string,
-    previousSessionFileCaptured = false,
-  ): Promise<SessionContext> {
-    const context = await this.buildSessionContext({
-      sessionManager,
-      reason,
-      previousSessionFile,
-      previousSessionFileCaptured,
-    });
-
-    const existing = this.sessionContexts.get(context.sessionPath);
-    context.sessionOwnershipEpoch = (existing?.sessionOwnershipEpoch ?? 0) + 1;
-    if (existing) {
-      // A replacement installs a new context object. Fence the predecessor
-      // before any late prompt callback can publish through its old closure.
-      existing.retired = true;
-      context.busySeq = existing.busySeq;
-      if (existing.terminalLiveTurn && existing.terminalLiveTurn.expiresAt > Date.now()) {
-        context.terminalLiveTurn = existing.terminalLiveTurn;
-      }
-      const cleanup = (operation: string, action: () => void): void => {
-        try {
-          action();
-        } catch (error) {
-          backendWarn('backend-session', `replaced runtime ${operation} failed`, {
-            sessionPath: context.sessionPath,
-            error: toErrorMessage(error),
-          });
-        }
-      };
-      cleanup('watchdog cleanup', () => existing.willRetryWatchdogClear?.());
-      cleanup('UI disposal', () => existing.uiBridge?.dispose());
-      cleanup('unsubscribe', () => existing.unsubscribe());
-      cleanup('session manager fence', () => existing.sessionManagerFence?.invalidate());
-      // A provider teardown can wedge the old runtime. The replacement becomes
-      // authoritative immediately; old disposal is bounded best-effort and
-      // must not block local recovery or the next send.
-      void this.disposeRuntimeBounded(existing.runtime, existing.sessionPath);
-    }
-
-    if (this.isSessionForgotten(context.sessionPath)) {
-      context.retired = true;
-      context.sessionManagerFence?.invalidate();
-      try { context.uiBridge?.dispose(); } catch { /* best effort */ }
-      try { context.unsubscribe(); } catch { /* best effort */ }
-      await this.disposeRuntimeBounded(context.runtime, context.sessionPath);
-      throw new BackendError('SESSION_NOT_FOUND', `The session was forgotten while it was opening: ${context.sessionPath}`);
-    }
-    // A runtime whose service creation was admitted before shutdown but which
-    // settled after disposal began must not be installed; tear it down through
-    // the same ownership path as a forgotten session.
-    if (this.disposed) {
-      context.retired = true;
-      context.sessionManagerFence?.invalidate();
-      try { context.uiBridge?.dispose(); } catch { /* best effort */ }
-      try { context.unsubscribe(); } catch { /* best effort */ }
-      await this.disposeRuntimeBounded(context.runtime, context.sessionPath);
-      throw new BackendError(
-        'SERVER_SHUTTING_DOWN',
-        `The backend is shutting down; the session runtime was not installed: ${context.sessionPath}`,
-      );
-    }
-    this.sessionContexts.set(context.sessionPath, context);
-    return context;
-  }
-
-  private async buildSessionContext(options: {
-    sessionManager: SdkSessionManager;
-    reason: SessionContextCreationReason;
-    previousSessionFile?: string;
-    previousSessionFileCaptured?: boolean;
-  }): Promise<SessionContext> {
-    return await timed('buildSessionContext', async () => {
-      const { sessionManager, reason } = options;
-      const { manager: fencedSessionManager, fence: sessionManagerFence } = createSessionManagerFence(sessionManager);
-      const previousSessionFile = options.previousSessionFileCaptured
-        ? options.previousSessionFile
-        : options.previousSessionFile ?? this.viewedSessionPath;
-      const currentSessionFile = sessionManager.getSessionFile();
-      const safePreviousSessionFile = previousSessionFile && previousSessionFile !== currentSessionFile
-        ? previousSessionFile
-        : undefined;
-      let runtime: SessionContext['runtime'] | undefined;
-      try {
-      runtime = await this.requireFullSdk().createAgentSessionRuntime(this.createRuntimeFactory(), {
-        cwd: fencedSessionManager.getCwd() || this.startupCwd,
-        agentDir: this.agentDir,
-        sessionManager: fencedSessionManager,
-        sessionStartEvent: safePreviousSessionFile
-          ? {
-              type: 'session_start',
-              reason,
-              previousSessionFile: safePreviousSessionFile,
-            }
-          : undefined,
-      });
-
-      // Runtime model registries contain the effective request URLs after
-      // built-in defaults and credential-specific OAuth rewrites are applied.
-      // Feed those URLs into the already-installed gate so configured providers
-      // without a static models.json baseUrl (and providers whose URL changes at
-      // runtime) are gated and reported like ordinary custom providers.
-      const modelRegistry = runtime.services?.modelRegistry;
-      ProviderGate.getInstance()?.registerModelBaseUrls(
-        modelRegistry?.getAll?.() ?? modelRegistry?.getAvailable?.() ?? [],
-      );
-
-      const session = runtime.session;
-      const sessionPath = this.resolveSessionPath(session);
-      if (!sessionPath) {
-        throw new Error('The PI session did not expose a session path.');
-      }
-
-      const context: SessionContext = {
-        runtime,
-        session,
-        sessionPath,
-        sessionOwnershipEpoch: 0,
-        unsubscribe: () => undefined,
-        busySeq: 0,
-        lastContextUsage: undefined,
-        sessionManagerFence,
-      };
-
-      // Wire the ExtensionUI bridge so extensions can ask questions through the webview.
-      const uiBridge = new ExtensionUIBridge(context.sessionPath, (event, payload) => this.emit(event, payload));
-      context.uiBridge = uiBridge;
-      const extensionRunner = (session as unknown as { extensionRunner?: { setUIContext?: (ctx: unknown) => void } }).extensionRunner;
-      if (extensionRunner?.setUIContext) {
-        extensionRunner.setUIContext(uiBridge);
-      }
-
-      installAuxiliaryLlmMeter(
-        session,
-        sessionPath,
-        (event, payload) => this.emit(event, payload),
-      );
-      const subscriptionStartedAt = performance.now();
-      recordBackendLivePipelineTrace({
-        stage: 'backend.runtime',
-        kind: 'start',
-        phase: 'subscriptions',
-        identifiers: { session: sessionPath },
-        processRole: 'coordinator',
-        pid: process.pid,
-      });
-      try {
-        context.unsubscribe = session.subscribe((event: SdkSessionEvent) => {
-          this.handleSessionEvent(context, event);
-        });
-      } catch (error) {
-        recordBackendLivePipelineTrace({
-          stage: 'backend.runtime',
-          kind: 'failure',
-          phase: 'subscriptions',
-          durationMs: Math.max(0, performance.now() - subscriptionStartedAt),
-          identifiers: { session: sessionPath },
-          reasonCode: 'unknown_unattributable',
-          processRole: 'coordinator',
-          pid: process.pid,
-        });
-        throw error;
-      }
-      recordBackendLivePipelineTrace({
-        stage: 'backend.runtime',
-        kind: 'success',
-        phase: 'subscriptions',
-        durationMs: Math.max(0, performance.now() - subscriptionStartedAt),
-        identifiers: { session: sessionPath },
-        processRole: 'coordinator',
-        pid: process.pid,
-      });
-
-      // Load persisted picker state before installing guards: both prompt
-      // rebuilds and extension-driven tool changes consult this live set.
-      const persistedDisabled = await readSystemPromptTogglesForSession(sessionPath);
-      context.systemPromptDisabledEntries = persistedDisabled;
-
-      // The SDK rebuilds its base prompt whenever active tools or extension
-      // resources change. Guard that synchronous rebuild so it cannot silently
-      // restore entries the picker disabled.
-      const promptGuardStartedAt = performance.now();
-      recordBackendLivePipelineTrace({
-        stage: 'backend.runtime',
-        kind: 'start',
-        phase: 'prompt_guards',
-        identifiers: { session: sessionPath },
-        processRole: 'coordinator',
-        pid: process.pid,
-      });
-      try {
-        const promptState = this.getSessionPromptState(context);
-        if (typeof promptState._rebuildSystemPrompt === 'function') {
-          const { buildSystemPrompt } = await this.getSystemPromptModule();
-          installSystemPromptToggleRebuildGuard(
-            promptState,
-            () => context.systemPromptDisabledEntries ?? [],
-            buildSystemPrompt,
-          );
-        }
-        installSystemPromptToolToggleGuard(
-          session,
-          () => context.systemPromptDisabledEntries ?? [],
-        );
-        installAutonomousModeToolGuard(session, () => this.autonomousMode);
-      } catch (error) {
-        recordBackendLivePipelineTrace({
-          stage: 'backend.runtime',
-          kind: 'failure',
-          phase: 'prompt_guards',
-          durationMs: Math.max(0, performance.now() - promptGuardStartedAt),
-          identifiers: { session: sessionPath },
-          reasonCode: 'unknown_unattributable',
-          processRole: 'coordinator',
-          pid: process.pid,
-        });
-        throw error;
-      }
-      recordBackendLivePipelineTrace({
-        stage: 'backend.runtime',
-        kind: 'success',
-        phase: 'prompt_guards',
-        durationMs: Math.max(0, performance.now() - promptGuardStartedAt),
-        identifiers: { session: sessionPath },
-        processRole: 'coordinator',
-        pid: process.pid,
-      });
-
-      // Disabling Tools controls both prompt prose and the provider's separate
-      // tool-schema field. Capture the initial active set so a later re-enable
-      // can restore it, including after reopening a persisted disabled session.
-      if (persistedDisabled.includes(TOOLS_ENTRY_ID)) {
-        context.systemPromptToolsBeforeDisable = session.getActiveToolNames?.()
-          ?? session.getAllTools?.().map((tool) => tool.name)
-          ?? [];
-        session.setActiveToolsByName?.([]);
-      }
-      if (persistedDisabled.length > 0) {
-        await this.applySystemPromptTogglesToBasePrompt(context, persistedDisabled);
-      }
-      this.applyAutonomousModeToContext(context, this.autonomousMode);
-
-      return context;
-      } catch (error) {
-        sessionManagerFence.invalidate();
-        if (runtime) {
-          // Construction failure remains authoritative; disposal is bounded
-          // best effort so a wedged SDK runtime cannot strand the open.
-          await this.disposeRuntimeBounded(runtime);
-        }
-        throw error;
-      }
-    });
-  }
-
-  private async ensureSessionContext(sessionPath: string): Promise<SessionContext> {
-    if (this.isSessionForgotten(sessionPath)) {
-      throw new BackendError('SESSION_NOT_FOUND', `The session has been forgotten: ${sessionPath}`);
-    }
-    // A registered cold mutation or promotion/replacement owns this path
-    // atomically even when its publication has not completed yet. Loop because
-    // a successor can register while any predecessor is being awaited.
-    while (true) {
-      const coldMutation = this.pendingColdSessionMutations.get(this.coldManagerKey(sessionPath));
-      if (coldMutation) {
-        await coldMutation;
-        continue;
-      }
-      const pending = this.getPendingSessionContext(sessionPath);
-      if (!pending) break;
-      await pending;
-      if (this.disposed || this.isSessionForgotten(sessionPath)) {
-        throw new BackendError('SESSION_NOT_FOUND', `The session is no longer available: ${sessionPath}`);
-      }
-    }
-    const existing = this.getSessionContext(sessionPath);
-    if (existing) {
-      if (existing.recoveryPromise) {
-        try {
-          return await existing.recoveryPromise;
-        } catch (error) {
-          throw new BackendError(
-            'SESSION_RUNTIME_RECOVERY_FAILED',
-            `The session runtime could not be replaced: ${toErrorMessage(error)}`,
-          );
-        }
-      }
-      if (existing.retired) {
-        throw new BackendError(
-          'SESSION_RUNTIME_RECOVERY_FAILED',
-          `The session runtime for ${sessionPath} was retired without a replacement.`,
-        );
-      }
-      return existing;
-    }
-
-    const previousSessionFile = this.browsePreviousSessionFiles.get(sessionPath);
-    const store = this.initializeColdSessionStore();
-    const handleKey = this.coldManagerKey(sessionPath);
-    const retained = this.coldSessionManagerHandles.get(handleKey);
-    let contextCreation: Promise<SessionContext>;
-    if (retained) {
-      this.coldSessionManagerHandles.delete(handleKey);
-      contextCreation = store.handoff(retained.handle, (manager) => this.createSessionContext(
-        manager,
-        retained.creationReason,
-        previousSessionFile,
-        true,
-      ));
-    } else {
-      // Promotion steals cold ownership synchronously before SessionManager.open
-      // or any runtime await. Every in-flight cold result is stale from here.
-      store.leases.invalidate(sessionPath);
-      contextCreation = this.createSessionContext(
-        this.sdk.SessionManager.open(sessionPath),
-        'resume',
-        previousSessionFile,
-        true,
-      );
-    }
-    const creation = contextCreation.then(async (context) => {
-      try {
-        // Publish runtime metadata before the first mutation can start streaming.
-        // This one-time refresh belongs to the single-flight promotion promise.
-        if (this.disposed || this.isSessionForgotten(sessionPath)) {
-          throw new BackendError('SESSION_NOT_FOUND', `The session is no longer available: ${sessionPath}`);
-        }
-        const payload = await this.buildHotSessionOpenedPayload(sessionPath);
-        if (this.disposed || this.isSessionForgotten(sessionPath)
-          || this.getSessionContext(sessionPath) !== context) {
-          throw new BackendError('SESSION_NOT_FOUND', `The promoted session is no longer authoritative: ${sessionPath}`);
-        }
-        // A successor transition may have queued behind this promotion while
-        // hydration was building. Complete this owner so the successor can run,
-        // but do not publish metadata it already superseded.
-        if (this.pendingSessionContexts.get(sessionPath) === creation) {
-          this.emit('session.opened', payload);
-        }
-        this.browsePreviousSessionFiles.delete(sessionPath);
-        return context;
-      } catch (error) {
-        if (this.sessionContexts.get(sessionPath) === context) this.sessionContexts.delete(sessionPath);
-        context.retired = true;
-        context.sessionManagerFence?.invalidate();
-        try { context.uiBridge?.dispose(); } catch { /* best effort */ }
-        try { context.unsubscribe(); } catch { /* best effort */ }
-        await this.disposeRuntimeBounded(context.runtime, context.sessionPath);
-        throw error;
-      }
-    });
-    this.pendingSessionContexts.set(sessionPath, creation);
-    try {
-      await creation;
-    } finally {
-      if (this.pendingSessionContexts.get(sessionPath) === creation) {
-        this.pendingSessionContexts.delete(sessionPath);
-      }
-    }
-    // A transition can reserve the path as soon as the promotion promise is
-    // released. Re-enter the owner loop rather than returning an intermediate.
-    return await this.ensureSessionContext(sessionPath);
-  }
-
-  private async transitionSessionContext(
-    sessionPath: string,
-    transition: () => Promise<SessionContext>,
-  ): Promise<SessionContext> {
-    if (this.isSessionForgotten(sessionPath)) {
-      throw new BackendError('SESSION_NOT_FOUND', `The session has been forgotten: ${sessionPath}`);
-    }
-    this.initializeColdSessionStore().leases.invalidate(sessionPath);
-    this.coldSessionManagerHandles.delete(this.coldManagerKey(sessionPath));
-    const previous = this.pendingSessionContexts.get(sessionPath);
-    let predecessor: SessionContext | undefined;
-    const owned = (async () => {
-      try {
-        if (previous) await previous;
-        if (this.isSessionForgotten(sessionPath) || this.disposed) {
-          throw new BackendError('SESSION_NOT_FOUND', `The session is no longer available: ${sessionPath}`);
-        }
-        predecessor = this.sessionContexts.get(sessionPath);
-        return await transition();
-      } catch (error) {
-        // Once a replacement transition fails, the predecessor can no longer
-        // be trusted: truncate may already have atomically rewritten the file.
-        // Fence it so later reads/mutations reopen durable authority instead of
-        // serving a pre-transition branch.
-        if (predecessor && this.sessionContexts.get(sessionPath) === predecessor) {
-          predecessor.retired = true;
-          predecessor.sessionManagerFence?.invalidate();
-          try { predecessor.uiBridge?.dispose(); } catch { /* best effort */ }
-          try { predecessor.unsubscribe(); } catch { /* best effort */ }
-          this.sessionContexts.delete(sessionPath);
-          void this.disposeRuntimeBounded(predecessor.runtime, predecessor.sessionPath);
-        }
-        throw error;
-      }
-    })();
-    this.pendingSessionContexts.set(sessionPath, owned);
-    try {
-      return await owned;
-    } finally {
-      if (this.pendingSessionContexts.get(sessionPath) === owned) {
-        this.pendingSessionContexts.delete(sessionPath);
-      }
-    }
-  }
-
-  private getPinnedStreamingMessageId(context: SessionContext): string | undefined {
-    return context.activeRequest?.currentMessageId ?? context.activeRequest?.lastAssistantMessageId;
-  }
-
-  /** Resolve an already-owned runtime without promoting a cold browse. Pending
-   * promotion/replacement always wins, and every awaited owner is rechecked for
-   * a successor before it can be used. */
-  private async resolveBrowseContext(sessionPath: string): Promise<SessionContext | undefined> {
-    while (true) {
-      if (this.disposed || this.isSessionForgotten(sessionPath)) {
-        throw new BackendError('SESSION_NOT_FOUND', `The session is no longer available: ${sessionPath}`);
-      }
-      const coldMutation = this.pendingColdSessionMutations.get(this.coldManagerKey(sessionPath));
-      if (coldMutation) {
-        await coldMutation;
-        continue;
-      }
-      const pending = this.getPendingSessionContext(sessionPath);
-      if (pending) {
-        try {
-          await pending;
-        } catch (error) {
-          // The owner removes itself in its finally block. If it was replaced
-          // or cleared while rejecting, re-evaluate cold/hot authority rather
-          // than making a tokened browse refresh inherit the failed promotion.
-          if (this.pendingSessionContexts.get(sessionPath) !== pending) continue;
-          throw error;
-        }
-        continue;
-      }
-      const context = this.getSessionContext(sessionPath);
-      if (!context) return undefined;
-      if (context.recoveryPromise) {
-        await context.recoveryPromise;
-        continue;
-      }
-      if (context.retired) {
-        throw new BackendError('SESSION_RUNTIME_RECOVERY_FAILED', `The session runtime is no longer authoritative: ${sessionPath}`);
-      }
-      return context;
-    }
-  }
 
   private readColdBrowseFileFingerprintSync(sessionPath: string): string {
     const stat = fsSync.statSync(sessionPath, { bigint: true });
@@ -1781,43 +1013,19 @@ export class BackendServer {
     loadedEnd?: number,
   ): Promise<TranscriptPagePayload> {
     for (let attempt = 0; attempt < 3; attempt += 1) {
-      const context = await this.resolveBrowseContext(sessionPath);
-      if (!context) {
-        try {
-          const result = await this.initializeColdSessionStore().loadPage(
-            sessionPath,
-            direction,
-            loadedStart,
-            loadedEnd,
-          );
-          if (await this.resolveBrowseContext(sessionPath)) continue;
-          this.registerColdResult(result);
-          return result;
-        } catch (error) {
-          if (error instanceof StaleColdSessionLeaseError) continue;
-          throw error;
-        }
+      try {
+        const result = await this.initializeColdSessionStore().loadPage(
+          sessionPath,
+          direction,
+          loadedStart,
+          loadedEnd,
+        );
+        this.registerColdResult(result);
+        return result;
+      } catch (error) {
+        if (error instanceof StaleColdSessionLeaseError) continue;
+        throw error;
       }
-      if (this.runtimeIsolationMode === 'isolated') this.assertColdCoordinatorOwner(sessionPath);
-      if (this.disposed || this.isSessionForgotten(sessionPath)
-        || this.getPendingSessionContext(sessionPath)
-        || this.getSessionContext(sessionPath) !== context) continue;
-      const page = buildPagedTranscriptWindow(ensureDisplayTranscriptCache(context), {
-        direction,
-        loadedStart,
-        loadedEnd,
-        pinnedMessageId: this.getPinnedStreamingMessageId(context),
-      });
-      const busy = context.session.isStreaming || !!context.activeRequest || context.session.isCompacting === true;
-      const result: TranscriptPagePayload = {
-        sessionPath,
-        transcript: (busy ? page.transcript : normalizeDanglingTranscript(page.transcript))
-          .map(deduplicateToolCallResultsForTransport),
-        transcriptWindow: page.transcriptWindow,
-        busy,
-      };
-      this.browseResponseOwners.set(result, { sessionPath, owner: context });
-      return result;
     }
     throw new BackendError('SESSION_CHANGED_DURING_READ', `The session changed repeatedly while it was being paged: ${sessionPath}`);
   }
@@ -1827,35 +1035,14 @@ export class BackendServer {
       return { sessionPath, key: ref.key, status: 'unavailable', message: 'Live detail is owned by the extension host.' };
     }
     for (let attempt = 0; attempt < 3; attempt += 1) {
-      const context = await this.resolveBrowseContext(sessionPath);
-      if (!context) {
-        try {
-          const result = await this.initializeColdSessionStore().loadDetail(sessionPath, ref);
-          if (await this.resolveBrowseContext(sessionPath)) continue;
-          this.registerColdResult(result);
-          return result;
-        } catch (error) {
-          if (error instanceof StaleColdSessionLeaseError) continue;
-          throw error;
-        }
+      try {
+        const result = await this.initializeColdSessionStore().loadDetail(sessionPath, ref);
+        this.registerColdResult(result);
+        return result;
+      } catch (error) {
+        if (error instanceof StaleColdSessionLeaseError) continue;
+        throw error;
       }
-      if (this.runtimeIsolationMode === 'isolated') this.assertColdCoordinatorOwner(sessionPath);
-      if (this.disposed || this.isSessionForgotten(sessionPath)
-        || this.getPendingSessionContext(sessionPath)
-        || this.getSessionContext(sessionPath) !== context) continue;
-      const found = findDurableDetail(ensureDisplayTranscriptCache(context).transcript, ref);
-      let result: DetailResult;
-      if (found.status === 'unavailable') {
-        result = { sessionPath, key: ref.key, status: 'unavailable', message: 'The durable detail is no longer available.' };
-      } else if (found.sizeBytes > LIVE_PIPELINE_LIMITS.previewBytes) {
-        result = { sessionPath, key: ref.key, status: 'unavailable', message: 'The detail exceeds the supported retrieval size.' };
-      } else if (found.sizeBytes !== ref.sizeBytes) {
-        result = { sessionPath, key: ref.key, status: 'stale', message: 'The durable detail changed; refresh the session and retry.' };
-      } else {
-        result = { sessionPath, key: ref.key, status: 'loaded', value: found.value, sizeBytes: found.sizeBytes };
-      }
-      this.browseResponseOwners.set(result, { sessionPath, owner: context });
-      return result;
     }
     throw new BackendError('SESSION_CHANGED_DURING_READ', `The session changed repeatedly while detail was being read: ${sessionPath}`);
   }
@@ -1953,197 +1140,12 @@ export class BackendServer {
     return { backendGeneration: this.backendGeneration, coordinatorGeneration: this.backendGeneration };
   }
 
-  private resolveCurrentContextWindow(context: SessionContext): number | undefined {
-    const sessionContextWindow = context.session.model?.contextWindow;
-    if (
-      typeof sessionContextWindow === 'number'
-      && Number.isFinite(sessionContextWindow)
-      && sessionContextWindow > 0
-    ) {
-      return Math.trunc(sessionContextWindow);
-    }
 
-    const currentModelId = context.session.model?.id;
-    if (!currentModelId) {
-      return undefined;
-    }
 
-    try {
-      const models = context.runtime.services?.modelRegistry?.getAvailable() ?? [];
-      const model = models.find((candidate) => candidate.id === currentModelId);
-      if (
-        typeof model?.contextWindow === 'number'
-        && Number.isFinite(model.contextWindow)
-        && model.contextWindow > 0
-      ) {
-        return Math.trunc(model.contextWindow);
-      }
-    } catch (error) {
-      // Ignore model registry issues and fall back to undefined.
-      backendTrace('modelRegistry', 'contextWindowLookup.failed', { level: 'warn', error: toErrorMessage(error) });
-    }
 
-    return undefined;
-  }
 
-  private getContextUsage(context: SessionContext): ContextWindowUsage | undefined {
-    // Derive `tokens` from the most recent assistant usage's prompt footprint
-    // (input + cacheRead + cacheWrite) — the tokens that actually counted
-    // against the context window on the last API call.
-    //
-    // We deliberately do NOT use the SDK's `getContextUsage().tokens`: that
-    // value is `calculateContextTokens(lastUsage)` (= `totalTokens` = prompt
-    // footprint + output) plus a chars/4 estimate of trailing in-progress
-    // messages. Including output overstates window fill, and the trailing
-    // estimate disagrees with the real usage that lands on completion, so the
-    // indicator jumps ("doubling" / changing mid-turn and on completion).
-    //
-    // The prompt footprint is stable during a turn — it only steps forward
-    // when a new assistant usage arrives — so the indicator reflects actual
-    // window use consistently. `contextWindow` follows the active model.
-    const contextWindow = this.resolveCurrentContextWindow(context);
-    if (!contextWindow) {
-      return undefined;
-    }
-    const measuredUsage = deriveContextUsageFromBranch(
-      context.session.sessionManager.getBranch(),
-      contextWindow,
-    );
-    if (measuredUsage) {
-      context.postCompactionEstimatedTokens = undefined;
-      return measuredUsage;
-    }
 
-    const estimatedTokens = context.postCompactionEstimatedTokens;
-    if (estimatedTokens === undefined) {
-      return undefined;
-    }
-    return {
-      tokens: estimatedTokens,
-      contextWindow,
-      percent: Math.min(100, Math.max(0, (estimatedTokens / contextWindow) * 100)),
-    };
-  }
 
-  private emitContextUsageChanged(context: SessionContext, postCompactionEstimatedTokens?: number): void {
-    if (postCompactionEstimatedTokens !== undefined) {
-      context.postCompactionEstimatedTokens = postCompactionEstimatedTokens;
-    }
-    const nextUsage = this.getContextUsage(context) ?? null;
-    const previousUsage = context.lastContextUsage;
-    const changed = previousUsage === undefined
-      || (previousUsage === null
-        ? nextUsage !== null
-        : nextUsage === null
-          || previousUsage.tokens !== nextUsage.tokens
-          || previousUsage.contextWindow !== nextUsage.contextWindow
-          || previousUsage.percent !== nextUsage.percent);
-
-    if (!changed) {
-      return;
-    }
-
-    context.lastContextUsage = nextUsage;
-    this.emit('contextUsage.changed', {
-      sessionPath: context.sessionPath,
-      contextUsage: nextUsage,
-    } satisfies ContextUsageChangedPayload);
-  }
-
-  private async getSystemPromptModule(): Promise<SdkSystemPromptModule> {
-    if (this.systemPromptModulePromise) return await this.systemPromptModulePromise;
-    const startedAt = performance.now();
-    recordBackendLivePipelineTrace({
-      stage: 'backend.runtime',
-      kind: 'start',
-      phase: 'sdk_import',
-      processRole: 'coordinator',
-      pid: process.pid,
-    });
-    this.systemPromptModulePromise = loadSdkInternalModule<SdkSystemPromptModule>(
-      this.sdkPath,
-      path.join('core', 'system-prompt.js'),
-    );
-    try {
-      const module = await this.systemPromptModulePromise;
-      recordBackendLivePipelineTrace({
-        stage: 'backend.runtime',
-        kind: 'success',
-        phase: 'sdk_import',
-        durationMs: Math.max(0, performance.now() - startedAt),
-        processRole: 'coordinator',
-        pid: process.pid,
-      });
-      return module;
-    } catch (error) {
-      recordBackendLivePipelineTrace({
-        stage: 'backend.runtime',
-        kind: 'failure',
-        phase: 'sdk_import',
-        durationMs: Math.max(0, performance.now() - startedAt),
-        reasonCode: 'unknown_unattributable',
-        processRole: 'coordinator',
-        pid: process.pid,
-      });
-      throw error;
-    }
-  }
-
-  private getSessionPromptState(context: SessionContext): SessionPromptState {
-    return context.session as SdkSession & SessionPromptState;
-  }
-
-  private async readHarnessSystemPrompt(context: SessionContext): Promise<string | undefined> {
-    const promptState = this.getSessionPromptState(context);
-    const options = promptState._baseSystemPromptOptions;
-    if (!options) {
-      const basePrompt = normalizePromptText(promptState._baseSystemPrompt);
-      return basePrompt ? rewritePieHarnessPrompt(basePrompt, this.agentDir) : undefined;
-    }
-
-    try {
-      const { buildSystemPrompt } = await this.getSystemPromptModule();
-      const basePrompt = normalizePromptText(buildSystemPrompt({
-        cwd: options.cwd,
-        selectedTools: options.selectedTools,
-        toolSnippets: options.toolSnippets,
-        promptGuidelines: options.promptGuidelines,
-      }));
-      return basePrompt ? rewritePieHarnessPrompt(basePrompt, this.agentDir) : undefined;
-    } catch (error) {
-      backendTrace('systemPrompt', 'harnessRead.failed', { level: 'debug', error: toErrorMessage(error) });
-      const basePrompt = normalizePromptText(promptState._baseSystemPrompt);
-      return basePrompt ? rewritePieHarnessPrompt(basePrompt, this.agentDir) : undefined;
-    }
-  }
-
-  private async buildSystemPrompts(
-    context: SessionContext,
-    harnessPromptOverride?: string,
-  ): Promise<SystemPromptEntry[]> {
-    const promptState = this.getSessionPromptState(context);
-    // Refresh the unfiltered-options snapshot from the SDK's live options
-    // whenever they're at least as complete as what we cached (e.g. the SDK
-    // rebuilt them after a tool/resource change). The display entry list is
-    // then built from the snapshot so disabled option-driven entries (context
-    // files, skills, append) stay present and re-toggleable instead of
-    // vanishing once the live options are filtered for the model prompt.
-    captureOriginalSystemPromptOptions(promptState);
-    const promptOptions = promptState._originalSystemPromptOptions ?? promptState._baseSystemPromptOptions;
-    const harnessPrompt = harnessPromptOverride ?? await this.readHarnessSystemPrompt(context);
-    const tools = typeof context.session.getAllTools === 'function'
-      ? context.session.getAllTools()
-      : [];
-
-    return buildSessionSystemPrompts({
-      harnessPrompt,
-      promptOptions,
-      formatSkillsForPrompt: (this.sdk as Partial<SdkModule>).formatSkillsForPrompt,
-      tools,
-      activeProvider: resolveActiveModel(context),
-      disabledEntries: context.systemPromptDisabledEntries,
-    });
-  }
 
   private async readModelSettings(): Promise<ModelSettings> {
     const defaults: ModelSettings = { defaultModel: '', defaultThinkingLevel: 'medium' };
@@ -2176,153 +1178,6 @@ export class BackendServer {
    *  re-enabling an entry a true inverse of disabling it (the prior behavior
    *  rebuilt from filtered options, so a toggled-off context file never came
    *  back) and lets rapid toggles compose instead of accumulating drift. */
-  private async applySystemPromptTogglesToBasePrompt(
-    context: SessionContext,
-    disabledEntries: readonly string[],
-  ): Promise<void> {
-    const promptState = this.getSessionPromptState(context);
-    // Capture the unfiltered snapshot from the live options before we touch
-    // them. On the first toggle the live options are still the SDK's unfiltered
-    // set, so this is the moment the full entry set is recorded. On later
-    // toggles the live options are already filtered; `capture...` only refreshes
-    // the snapshot when the live set is a superset of the cached one, so a
-    // filtered set never clobbers it.
-    captureOriginalSystemPromptOptions(promptState);
-    const source = promptState._originalSystemPromptOptions ?? promptState._baseSystemPromptOptions;
-    if (!source) return;
-
-    try {
-      const { buildSystemPrompt } = await this.getSystemPromptModule();
-      const toggled = buildToggledSystemPrompt(source, disabledEntries, buildSystemPrompt);
-      // Empty is intentional and valid when every entry is disabled. Do not
-      // use a truthiness check here or the prior full prompt survives.
-      promptState._baseSystemPrompt = toggled.prompt;
-      // Keep the structured options in sync so downstream extensions (e.g. the
-      // skill-pruner `before_agent_start` hook) see the filtered skill/context
-      // sets instead of re-adding stripped sections from the original options.
-      promptState._baseSystemPromptOptions = toggled.options;
-    } catch (error) {
-      // Leave the existing base prompt untouched if the SDK builder is not
-      // available; sending the previous known prompt is safer than a partial
-      // regex-only rewrite.
-      backendTrace('systemPrompt', 'harnessRebuild.failed', { level: 'debug', error: toErrorMessage(error) });
-    }
-  }
-
-  /** Apply autonomous-mode tool visibility to one live SDK session. */
-  private applyAutonomousModeToContext(context: SessionContext, enabled: boolean): void {
-    const active = context.session.getActiveToolNames?.()
-      ?? context.session.getAllTools?.().map((tool) => tool.name)
-      ?? [];
-
-    if (enabled) {
-      // Tools-off stores its prior provider schema outside the live active set.
-      // Preserve that latent ask_user ownership too: Tools may be switched back
-      // on while autonomous mode is still filtering the restoration call.
-      const askUserWasCapturedByToolsToggle = (
-        context.systemPromptDisabledEntries?.includes(TOOLS_ENTRY_ID) === true
-        && context.systemPromptToolsBeforeDisable?.includes(ASK_USER_TOOL_NAME) === true
-      );
-      context.autonomousModeAskUserWasActive = (
-        active.includes(ASK_USER_TOOL_NAME) || askUserWasCapturedByToolsToggle
-      );
-      if (active.includes(ASK_USER_TOOL_NAME)) {
-        context.session.setActiveToolsByName?.(
-          active.filter((name) => name !== ASK_USER_TOOL_NAME),
-        );
-      }
-      return;
-    }
-
-    if (!context.autonomousModeAskUserWasActive) {
-      context.autonomousModeAskUserWasActive = undefined;
-      return;
-    }
-
-    // If the whole Tools entry is off, preserve the restoration intent in its
-    // captured set. The Tools guard intentionally reduces every live update to
-    // [], so restoring directly here would otherwise be forgotten.
-    if (context.systemPromptDisabledEntries?.includes(TOOLS_ENTRY_ID)) {
-      context.systemPromptToolsBeforeDisable = [
-        ...new Set([...(context.systemPromptToolsBeforeDisable ?? []), ASK_USER_TOOL_NAME]),
-      ];
-      context.autonomousModeAskUserWasActive = undefined;
-      return;
-    }
-
-    const configured = context.session.getAllTools?.().map((tool) => tool.name) ?? [];
-    if (configured.includes(ASK_USER_TOOL_NAME) && !active.includes(ASK_USER_TOOL_NAME)) {
-      context.session.setActiveToolsByName?.([...active, ASK_USER_TOOL_NAME]);
-    }
-    context.autonomousModeAskUserWasActive = undefined;
-  }
-
-  /** Update every live session immediately; newly created contexts read the
-   * process-wide field while installing their tool guard. */
-  private setAutonomousMode(enabled: boolean): void {
-    if (this.autonomousMode === enabled) return;
-    this.autonomousMode = enabled;
-    if (this.runtimeIsolationMode === 'isolated') return;
-    for (const context of this.sessionContexts.values()) {
-      this.applyAutonomousModeToContext(context, enabled);
-    }
-  }
-
-  /** Apply a new disabled-entry set for a session: update the SessionContext,
-   *  persist to the sidecar, rewrite the base prompt. (Re-emitting
-   *  `session.opened` is the caller's responsibility — the RPC handler does it
-   *  after this resolves.) The `disabledEntries` array is the complete set. */
-  async applySystemPromptToggles(
-    sessionPath: string,
-    disabledEntries: readonly string[],
-  ): Promise<void> {
-    const previous = this.pendingSystemPromptToggleApplications.get(sessionPath) ?? Promise.resolve();
-    const application = previous.catch(() => undefined).then(() => (
-      this.applySystemPromptTogglesNow(sessionPath, disabledEntries)
-    ));
-    this.pendingSystemPromptToggleApplications.set(sessionPath, application);
-    try {
-      await application;
-    } finally {
-      if (this.pendingSystemPromptToggleApplications.get(sessionPath) === application) {
-        this.pendingSystemPromptToggleApplications.delete(sessionPath);
-      }
-    }
-  }
-
-  private async applySystemPromptTogglesNow(
-    sessionPath: string,
-    disabledEntries: readonly string[],
-  ): Promise<void> {
-    const context = this.sessionContexts.get(sessionPath);
-    if (!context) return;
-    const next = [...new Set(disabledEntries)];
-    const toolsWereDisabled = context.systemPromptDisabledEntries?.includes(TOOLS_ENTRY_ID) ?? false;
-    const toolsWillBeDisabled = next.includes(TOOLS_ENTRY_ID);
-
-    if (!toolsWereDisabled && toolsWillBeDisabled) {
-      context.systemPromptToolsBeforeDisable = context.session.getActiveToolNames?.()
-        ?? context.session.getAllTools?.().map((tool) => tool.name)
-        ?? [];
-    }
-
-    // Update the live set before invoking setActiveToolsByName: the installed
-    // guard consults it synchronously and prevents extensions from re-exposing
-    // schemas while Tools is off.
-    context.systemPromptDisabledEntries = next;
-    if (!toolsWereDisabled && toolsWillBeDisabled) {
-      context.session.setActiveToolsByName?.([]);
-    } else if (toolsWereDisabled && !toolsWillBeDisabled) {
-      const restore = context.systemPromptToolsBeforeDisable
-        ?? context.session.getAllTools?.().map((tool) => tool.name)
-        ?? [];
-      context.session.setActiveToolsByName?.(restore);
-      context.systemPromptToolsBeforeDisable = undefined;
-    }
-
-    await writeSystemPromptTogglesForSession(sessionPath, next);
-    await this.applySystemPromptTogglesToBasePrompt(context, next);
-  }
 
   private async writeModelSettings(updates: Partial<ModelSettings>): Promise<ModelSettings> {
     const settingsPath = path.join(this.agentDir, 'settings.json');
@@ -2333,67 +1188,8 @@ export class BackendServer {
     return await this.readModelSettings();
   }
 
-  private async emitSessionOpened(sessionPath: string, selectionToken?: string, operationId?: string): Promise<void> {
-    if (this.disposed || !this.sessionContexts.has(sessionPath)) {
-      return;
-    }
-    // Rejection-safe: most callers fire-and-forget this (`void …`). A thrown
-    // payload build (transcript scan, context usage, system prompts) must log
-    // and swallow instead of becoming an unhandled rejection that leaves the
-    // host waiting on a `session.opened` that never arrives.
-    try {
-      const payload = await this.buildSessionOpenedPayload(sessionPath, selectionToken, undefined, undefined, operationId);
-      this.emit('session.opened', payload);
-    } catch (error) {
-      backendWarn('backend-session', 'emitSessionOpened.failed', {
-        sessionPath,
-        error: toErrorMessage(error),
-      });
-    }
-  }
 
-  private async buildHotSessionOpenedPayload(
-    sessionPath: string,
-    selectionToken?: string,
-    transcript?: import('../shared/protocol').TranscriptMode,
-    transport?: import('../shared/transcript-window').SessionSnapshotTransport,
-    operationId?: string,
-    operationAttempt?: number,
-  ): Promise<SessionOpenedPayload> {
-    return await buildSessionOpenedPayloadHelper(sessionPath, {
-      getContextUsage: (context) => this.getContextUsage(context),
-      readHarnessSystemPrompt: (context) => this.readHarnessSystemPrompt(context),
-      buildSystemPrompts: (context, override) => this.buildSystemPrompts(context, override),
-      readModelSettings: () => this.readModelSettings(),
-      getPinnedStreamingMessageId: (context) => this.getPinnedStreamingMessageId(context),
-      getSessionContext: (path) => this.getSessionContext(path),
-      agentDir: this.agentDir,
-      startupCwd: this.startupCwd,
-    }, selectionToken, transcript, transport, operationId, operationAttempt);
-  }
 
-  private async buildAuthoritativeHotSessionOpenedPayload(
-    sessionPath: string,
-    selectionToken?: string,
-    transcript?: import('../shared/protocol').TranscriptMode,
-    transport?: import('../shared/transcript-window').SessionSnapshotTransport,
-    operationId?: string,
-    operationAttempt?: number,
-  ): Promise<SessionOpenedPayload> {
-    while (true) {
-      const owner = await this.resolveBrowseContext(sessionPath);
-      if (!owner) throw new BackendError('SESSION_NOT_FOUND', `Unknown session: ${sessionPath}`);
-      const payload = await this.buildHotSessionOpenedPayload(sessionPath, selectionToken, transcript, transport, operationId, operationAttempt);
-      if (this.disposed || this.isSessionForgotten(sessionPath)) {
-        throw new BackendError('SESSION_NOT_FOUND', `The session is no longer available: ${sessionPath}`);
-      }
-      if (this.getPendingSessionContext(sessionPath)
-        || this.getSessionContext(sessionPath) !== owner) continue;
-      this.sessionOpenedPayloadOwners.set(payload, owner);
-      this.browseResponseOwners.set(payload, { sessionPath, owner });
-      return payload;
-    }
-  }
 
   private async buildSessionOpenedPayload(
     sessionPath: string,
@@ -2404,24 +1200,9 @@ export class BackendServer {
     operationAttempt?: number,
   ): Promise<SessionOpenedPayload> {
     return await timed('buildSessionOpenedPayload', async () => {
-      const initialOwner = await this.resolveBrowseContext(sessionPath);
-      if (initialOwner) {
-        if (this.runtimeIsolationMode === 'isolated') this.assertColdCoordinatorOwner(sessionPath);
-        return await this.buildAuthoritativeHotSessionOpenedPayload(sessionPath, selectionToken, transcript, transport, operationId, operationAttempt);
-      }
       const catalog = await loadConfiguredModels(this.agentDir);
       const availableModels = catalog.models;
-      const afterCatalog = await this.resolveBrowseContext(sessionPath);
-      if (afterCatalog) {
-        if (this.runtimeIsolationMode === 'isolated') this.assertColdCoordinatorOwner(sessionPath);
-        return await this.buildAuthoritativeHotSessionOpenedPayload(sessionPath, selectionToken, transcript, transport, operationId, operationAttempt);
-      }
       const modelSettings = await this.readModelSettings();
-      const afterSettings = await this.resolveBrowseContext(sessionPath);
-      if (afterSettings) {
-        if (this.runtimeIsolationMode === 'isolated') this.assertColdCoordinatorOwner(sessionPath);
-        return await this.buildAuthoritativeHotSessionOpenedPayload(sessionPath, selectionToken, transcript, transport, operationId, operationAttempt);
-      }
       const store = this.initializeColdSessionStore();
       const retained = this.coldSessionManagerHandles.get(this.coldManagerKey(sessionPath));
       try {
@@ -2437,10 +1218,6 @@ export class BackendServer {
         const payload = retained
           ? await store.openHandleSnapshot(retained.handle, options)
           : await store.openSnapshot(sessionPath, options);
-        if (this.getPendingSessionContext(sessionPath) || this.getSessionContext(sessionPath)) {
-          return await this.buildSessionOpenedPayload(sessionPath, selectionToken, transcript, transport, operationId, operationAttempt);
-        }
-        this.sessionOpenedPayloadOwners.set(payload, undefined);
         this.registerColdResult(payload);
         return payload;
       } catch (error) {
@@ -2451,9 +1228,6 @@ export class BackendServer {
             // Evict it once; the retry reopens current durable authority rather
             // than selecting the same stale handle forever.
             this.coldSessionManagerHandles.delete(this.coldManagerKey(sessionPath));
-            return await this.buildSessionOpenedPayload(sessionPath, selectionToken, transcript, transport, operationId, operationAttempt);
-          }
-          if (this.getPendingSessionContext(sessionPath) || this.getSessionContext(sessionPath)) {
             return await this.buildSessionOpenedPayload(sessionPath, selectionToken, transcript, transport, operationId, operationAttempt);
           }
           throw new BackendError(
@@ -2487,17 +1261,7 @@ export class BackendServer {
   }
 
   private async listSessionSummaries(): Promise<SessionSummary[]> {
-    if (this.runtimeIsolationMode === 'isolated' && (this.sessionContexts.size > 0 || this.pendingSessionContexts.size > 0)) {
-      throw new BackendError(
-        'ISOLATED_RUNTIME_ROUTING_UNAVAILABLE',
-        'Hot session listing requires Phase 4 isolated-runtime routing.',
-      );
-    }
-    const liveSummaries = [...this.sessionContexts.values()]
-      .filter((context) => !context.retired)
-      .map((context) => buildCurrentSummary(context, this.startupCwd));
-    const result = await this.initializeColdSessionStore().list(liveSummaries);
-    return result;
+    return await this.initializeColdSessionStore().list([]);
   }
 
   /** Start durable closure reconciliation. The watcher is a low-latency hint;
@@ -2565,7 +1329,7 @@ export class BackendServer {
       // retires unacknowledging workers) and a moved models.json re-broadcasts
       // the configured catalog authority. Both are best-effort poll extensions;
       // the next poll retries a failed broadcast.
-      if (this.runtimeIsolationMode === 'isolated' && this.workerRuntimeRouter) {
+      if (this.workerRuntimeRouter) {
         try {
           const authPath = this.authPath || path.join(this.agentDir, 'auth.json');
           const authFingerprint = await fs.stat(authPath)
@@ -2601,16 +1365,6 @@ export class BackendServer {
     } finally {
       this.sessionCatalogPollInFlight = false;
     }
-  }
-
-  private emitBusyChanged(context: SessionContext, busy: boolean): void {
-    context.busySeq += 1;
-    const payload: BusyChangedPayload = {
-      sessionPath: context.sessionPath,
-      busy,
-      seq: context.busySeq,
-    };
-    this.emit('busy.changed', payload);
   }
 
   private emit(event: string, payload?: unknown): void {
@@ -2660,44 +1414,6 @@ export class BackendServer {
         // the winning generation while preserving selection ownership instead
         // of silently dropping the tokened open event.
         if (this.isSessionForgotten(sessionPath)) return;
-        if (this.sessionOpenedPayloadOwners.has(payload as object)) {
-          const payloadOwner = this.sessionOpenedPayloadOwners.get(payload as object);
-          const currentOwner = this.getSessionContext(sessionPath);
-          if (this.getPendingSessionContext(sessionPath) || currentOwner !== payloadOwner) {
-            void this.buildSessionOpenedPayload(
-              sessionPath,
-              opened.selectionToken,
-              opened.transcriptSkipped ? 'skip' : 'tail',
-              undefined,
-              opened.operationId,
-              opened.operationAttempt,
-            ).then((authoritative) => this.emit('session.opened', authoritative)).catch((error) => {
-              backendWarn('backend-session', 'sessionOpened.publicationRefreshFailed', {
-                sessionPath,
-                error: toErrorMessage(error),
-              });
-            });
-            return;
-          }
-        }
-        if (opened.runtimeReady === false
-          && (this.getPendingSessionContext(sessionPath) || this.getSessionContext(sessionPath))) return;
-      }
-    }
-    if (event === 'extension_ui.request' && payload && typeof payload === 'object') {
-      const request = payload as { sessionPath?: unknown; id?: unknown };
-      if (typeof request.sessionPath === 'string' && typeof request.id === 'string') {
-        const context = this.sessionContexts.get(request.sessionPath);
-        const accumulator = context?.activeRequest?.liveTurnAccumulator;
-        if (accumulator) {
-          if (context?.activeRequest?.semanticLeaseTimer) {
-            clearTimeout(context.activeRequest.semanticLeaseTimer);
-            context.activeRequest.semanticLeaseTimer = undefined;
-          }
-          this.emit('live.semantic', accumulator.observe({
-            kind: 'turn.extensionUi', uiRequestId: request.id, action: 'opened',
-          }, Date.now()));
-        }
       }
     }
     if (isBackendLivePipelineTraceEnabled()) {
@@ -2733,11 +1449,8 @@ export class BackendServer {
     }
     const stamp = this.browseResponseOwners.get(result as object);
     if (!stamp) return true;
-    if (this.disposed || this.isSessionForgotten(stamp.sessionPath)
-      || this.getPendingSessionContext(stamp.sessionPath)) return false;
-    const current = this.getSessionContext(stamp.sessionPath);
-    if (stamp.owner) return current === stamp.owner;
-    if (current || !stamp.fingerprint) return false;
+    if (this.disposed || this.isSessionForgotten(stamp.sessionPath)) return false;
+    if (!stamp.fingerprint) return false;
     try {
       return this.readColdBrowseFileFingerprintSync(stamp.sessionPath) === stamp.fingerprint;
     } catch {
@@ -2856,60 +1569,19 @@ export class BackendServer {
    *  artifact. Called only after the host has chosen privacy mode; ordinary
    *  tab closes intentionally keep sessions reopenable. */
   private async forgetSession(sessionPath: string): Promise<void> {
-    const hasHotOwner = !!this.getSessionContext(sessionPath) || !!this.getPendingSessionContext(sessionPath);
-    if (this.runtimeIsolationMode === 'isolated' && hasHotOwner) {
-      this.assertColdCoordinatorOwner(sessionPath);
-    }
-    if (!hasHotOwner) {
-      this.forgottenSessionPaths.add(sessionPath);
-      this.browsePreviousSessionFiles.delete(sessionPath);
-      const store = this.initializeColdSessionStore();
-      try {
-        await this.runColdSessionMutation(sessionPath, async () => {
-          store.leases.invalidate(sessionPath);
-          this.coldSessionManagerHandles.delete(this.coldManagerKey(sessionPath));
-          await store.forget(sessionPath);
-        });
-        if (this.viewedSessionPath === sessionPath) this.setViewedSessionPath(undefined);
-      } catch (error) {
-        this.forgottenSessionPaths.delete(sessionPath);
-        throw error;
-      }
-      return;
-    }
-
-    this.initializeColdSessionStore().leases.invalidate(sessionPath);
-    this.coldSessionManagerHandles.delete(this.coldManagerKey(sessionPath));
     this.forgottenSessionPaths.add(sessionPath);
     this.browsePreviousSessionFiles.delete(sessionPath);
-    const pending = this.getPendingSessionContext(sessionPath);
-    if (pending) await pending.catch(() => undefined);
-    const context = this.getSessionContext(sessionPath);
-    if (context) {
-      context.retired = true;
-      context.sessionManagerFence?.invalidate();
-      context.willRetryWatchdogClear?.();
-      context.willRetryWatchdogClear = undefined;
-      const active = context.activeRequest;
-      if (active) {
-        active.aborted = true;
-        if (active.promptSafetyTimer) clearTimeout(active.promptSafetyTimer);
-        if (active.semanticLeaseTimer) clearTimeout(active.semanticLeaseTimer);
-        if (active.quotaSettlementTimer) clearTimeout(active.quotaSettlementTimer);
-        active.pendingDurableToolTerminals?.clear();
-        context.activeRequest = undefined;
-        await Promise.race([
-          Promise.resolve().then(() => context.session.abort()).catch(() => undefined),
-          new Promise<void>((resolve) => setTimeout(resolve, 5_000)),
-        ]);
-      }
-      try { context.uiBridge?.dispose(); } catch { /* best effort */ }
-      try { context.unsubscribe(); } catch { /* best effort */ }
-      try {
-        await this.disposeRuntimeBounded(context.runtime, context.sessionPath);
-      } finally {
-        this.sessionContexts.delete(sessionPath);
-      }
+    const store = this.initializeColdSessionStore();
+    try {
+      await this.runColdSessionMutation(sessionPath, async () => {
+        store.leases.invalidate(sessionPath);
+        this.coldSessionManagerHandles.delete(this.coldManagerKey(sessionPath));
+        await store.forget(sessionPath);
+      });
+      if (this.viewedSessionPath === sessionPath) this.setViewedSessionPath(undefined);
+    } catch (error) {
+      this.forgottenSessionPaths.delete(sessionPath);
+      throw error;
     }
 
     let transcriptDeleted = false;
@@ -2936,9 +1608,8 @@ export class BackendServer {
     onRequestValidated?: () => void,
     livePipelineTraceToggleGeneration?: number,
   ): Promise<unknown> {
-    if (this.runtimeIsolationMode === 'isolated') {
-      const router = this.workerRuntimeRouter;
-      if (router) {
+    const router = this.workerRuntimeRouter;
+    if (router) {
         const sessionPath = requestSessionPath(request.params);
         const routeState = sessionPath ? router.getRoute(sessionPath) : undefined;
         if (routeState?.state === 'transitioning' && request.method !== 'session.truncateAfter') {
@@ -3018,12 +1689,12 @@ export class BackendServer {
             || request.method === 'settings.set';
           if (shouldPromote) return await router.route(request);
           if (router.hasHotOwner(sessionPath)) return await router.routeExisting(request);
-          if (!isPhase3IsolatedCoordinatorOperationAllowed(request.method, request.params)) {
+          if (!isCoordinatorOperationAllowed(request.method, request.params)) {
             throw new BackendError('SESSION_NOT_FOUND', `No hot worker owns ${sessionPath}.`);
           }
         }
       }
-      if (!isPhase3IsolatedCoordinatorOperationAllowed(request.method, request.params)) {
+      if (!isCoordinatorOperationAllowed(request.method, request.params)) {
         throw new BackendError(
           'ISOLATED_RUNTIME_ROUTING_UNAVAILABLE',
           router
@@ -3031,7 +1702,6 @@ export class BackendServer {
             : `Operation ${request.method} requires Phase 4 isolated-runtime routing; Phase 4 isolated-runtime routing is unavailable.`,
         );
       }
-    }
     const sessionDir = this.getSessionDir();
     const result = await handleBackendRequest({
       sdkPath: this.sdkPath,
@@ -3039,33 +1709,24 @@ export class BackendServer {
       startupCwd: this.startupCwd,
       sessionDir,
       sdk: this.sdk,
-      getSessionContext: (sessionPath) => {
-        const context = this.getSessionContext(sessionPath);
-        if (this.runtimeIsolationMode === 'isolated'
-          && (context || (sessionPath && this.getPendingSessionContext(sessionPath)))) {
-          this.assertColdCoordinatorOwner(sessionPath!);
-        }
-        return context;
+      getSessionContext: () => undefined,
+      createSessionContext: () => {
+        throw new BackendError('ISOLATED_RUNTIME_ROUTING_UNAVAILABLE', 'The coordinator does not create in-process session runtimes.');
       },
-      createSessionContext: (sessionManager, reason) => this.createSessionContext(sessionManager, reason),
-      ensureSessionContext: (sessionPath) => this.ensureSessionContext(sessionPath),
+      ensureSessionContext: () => {
+        throw new BackendError('ISOLATED_RUNTIME_ROUTING_UNAVAILABLE', 'The coordinator does not own in-process session runtimes.');
+      },
       createColdSession: (cwd) => {
         const handle = this.initializeColdSessionStore().create({ cwd });
         this.retainColdSessionManager(handle, 'new');
         return { sessionPath: handle.sessionPath };
       },
       duplicateColdSession: (sessionPath) => {
-        if (this.runtimeIsolationMode === 'isolated') this.assertColdCoordinatorOwner(sessionPath);
         const handle = this.initializeColdSessionStore().duplicate(sessionPath);
         this.retainColdSessionManager(handle, 'new');
         return { sessionPath: handle.sessionPath };
       },
       truncateColdSessionAfter: async (sessionPath, entryId) => {
-        const hasOwner = !!this.getSessionContext(sessionPath) || !!this.getPendingSessionContext(sessionPath);
-        if (hasOwner) {
-          if (this.runtimeIsolationMode === 'isolated') this.assertColdCoordinatorOwner(sessionPath);
-          throw new BackendError('REQUEST_IN_PROGRESS', `Cannot cold-truncate an owned session: ${sessionPath}`);
-        }
         const store = this.initializeColdSessionStore();
         const handle = await this.runColdSessionMutation(sessionPath, async () => {
           store.leases.invalidate(sessionPath);
@@ -3078,8 +1739,10 @@ export class BackendServer {
         });
         return { sessionPath: handle.sessionPath };
       },
-      isSessionTransitionPending: (sessionPath) => !!this.getPendingSessionContext(sessionPath),
-      transitionSessionContext: (sessionPath, transition) => this.transitionSessionContext(sessionPath, transition),
+      isSessionTransitionPending: () => false,
+      transitionSessionContext: () => {
+        throw new BackendError('ISOLATED_RUNTIME_ROUTING_UNAVAILABLE', 'The coordinator does not transition in-process session runtimes.');
+      },
       prepareViewedSessionPath: (sessionPath) => this.prepareViewedSessionPath(sessionPath),
       discardPreparedViewedSessionPath: (sessionPath, token) => this.discardPreparedViewedSessionPath(
         sessionPath,
@@ -3101,13 +1764,13 @@ export class BackendServer {
         this.buildSessionOpenedPayload(sessionPath, selectionToken, transcript, transport, operationId, operationAttempt)
       ),
       createOperationLedger: this.createOperationLedger,
-      buildTransitionSessionOpenedPayload: (sessionPath) => (
-        this.buildHotSessionOpenedPayload(sessionPath)
-      ),
-      applySystemPromptToggles: (sessionPath, disabledEntries) => (
-        this.applySystemPromptToggles(sessionPath, disabledEntries)
-      ),
-      setAutonomousMode: (enabled) => this.setAutonomousMode(enabled),
+      buildTransitionSessionOpenedPayload: () => {
+        throw new BackendError('ISOLATED_RUNTIME_ROUTING_UNAVAILABLE', 'The coordinator does not build in-process transition snapshots.');
+      },
+      applySystemPromptToggles: () => {
+        throw new BackendError('ISOLATED_RUNTIME_ROUTING_UNAVAILABLE', 'System prompt toggles require a hot worker owner.');
+      },
+      setAutonomousMode: () => undefined,
       forgetSession: (sessionPath) => this.forgetSession(sessionPath),
       loadTranscriptPage: (sessionPath, direction, loadedStart, loadedEnd) => (
         this.loadTranscriptPage(sessionPath, direction, loadedStart, loadedEnd)
@@ -3119,8 +1782,8 @@ export class BackendServer {
         this.coldSessionStore?.transferOwnershipStamp(source, target);
       },
       emit: (event, payload) => this.emit(event, payload),
-      emitBusyChanged: (context, busy) => this.emitBusyChanged(context, busy),
-      emitContextUsageChanged: (sessionContext) => this.emitContextUsageChanged(sessionContext),
+      emitBusyChanged: () => undefined,
+      emitContextUsageChanged: () => undefined,
       emitSessionListChanged: () => this.emitSessionListChanged(),
       listSessions: () => this.listSessionSummaries(),
       listAvailableModels: async (context) => {
@@ -3145,7 +1808,7 @@ export class BackendServer {
         else this.stopEventLoopMonitor();
       },
     }, request);
-    if (this.runtimeIsolationMode === 'isolated' && request.method === 'runtimePrefs.set'
+    if (request.method === 'runtimePrefs.set'
       && result && typeof result === 'object' && !Array.isArray(result)) {
       this.runtimePrefs = JSON.parse(JSON.stringify(result)) as WorkerJsonObject;
       await this.workerRuntimeRouter?.syncRuntimePrefs(this.runtimePrefs);
@@ -3156,7 +1819,7 @@ export class BackendServer {
           : {},
       );
     }
-    if (this.runtimeIsolationMode === 'isolated' && request.method === 'settings.set'
+    if (request.method === 'settings.set'
       && (!request.params || typeof request.params !== 'object' || !('sessionPath' in request.params))
       && result && typeof result === 'object' && !Array.isArray(result)) {
       // A global settings write bypasses worker routing (session-scoped writes
@@ -3168,153 +1831,12 @@ export class BackendServer {
     return result;
   }
 
-  private handleSessionEvent(context: SessionContext, event: SdkSessionEvent): void {
-    if (context.retired) return;
-    handleSdkSessionEvent({
-      emit: (name, payload) => this.emit(name, payload),
-      emitBusyChanged: (sessionContext, busy) => this.emitBusyChanged(sessionContext, busy),
-      emitContextUsageChanged: (sessionContext, postCompactionEstimatedTokens) => (
-        this.emitContextUsageChanged(sessionContext, postCompactionEstimatedTokens)
-      ),
-      emitSessionOpened: (sessionPath, selectionToken) => this.emitSessionOpened(sessionPath, selectionToken),
-      emitSessionListChanged: () => this.emitSessionListChanged(),
-      recoverStuckSession: (sessionContext, reason) => {
-        void this.recoverStuckSession(sessionContext, reason);
-      },
-    }, context, event);
-  }
 
   /**
    * Locally terminalize a stuck runtime immediately, then replace it without
    * waiting for provider teardown. The old runtime is fenced before any async
    * work so late SDK events cannot revive or terminalize the request twice.
    */
-  private recoverStuckSession(context: SessionContext, reason: string): void {
-    if (context.retired || context.recoveryPromise) return;
-    const active = context.activeRequest;
-    if (!active) {
-      return;
-    }
-
-    const requestId = active.id;
-    const messageId = active.lastAssistantMessageId ?? active.currentMessageId;
-    context.retired = true;
-    const bestEffort = (operation: string, action: () => void): void => {
-      try {
-        action();
-      } catch (error) {
-        backendWarn('backend-session', `stuck runtime ${operation} failed`, {
-          sessionPath: context.sessionPath,
-          requestId,
-          error: toErrorMessage(error),
-        });
-      }
-    };
-    bestEffort('session manager fence', () => context.sessionManagerFence?.invalidate());
-    bestEffort('watchdog cleanup', () => context.willRetryWatchdogClear?.());
-    context.willRetryWatchdogClear = undefined;
-    if (active.promptSafetyTimer) clearTimeout(active.promptSafetyTimer);
-    if (active.semanticLeaseTimer) clearTimeout(active.semanticLeaseTimer);
-    if (active.quotaSettlementTimer) clearTimeout(active.quotaSettlementTimer);
-    active.promptSafetyTimer = undefined;
-    active.semanticLeaseTimer = undefined;
-    active.quotaSettlementTimer = undefined;
-    active.pendingDurableToolTerminals?.clear();
-    active.aborted = true;
-    if (active.liveTurnAccumulator) {
-      context.terminalLiveTurn = {
-        accumulator: active.liveTurnAccumulator,
-        expiresAt: Date.now() + 10_000,
-      };
-    }
-    context.activeRequest = undefined;
-    bestEffort('UI disposal', () => context.uiBridge?.dispose());
-    bestEffort('queue cleanup', () => { context.session.clearQueue(); });
-    context.queuedLocalIds = [];
-    bestEffort('retry abort', () => context.session.abortRetry?.());
-    bestEffort('compaction abort', () => context.session.abortCompaction?.());
-    bestEffort('branch-summary abort', () => context.session.abortBranchSummary?.());
-    bestEffort('bash abort', () => context.session.abortBash?.());
-
-    this.emit('message.aborted', {
-      requestId,
-      sessionPath: context.sessionPath,
-      messageId,
-      userInitiated: false,
-      reason,
-    } satisfies MessageAbortedPayload);
-
-    let abortGraceTimer: ReturnType<typeof setTimeout> | undefined;
-    const abort = Promise.resolve()
-      .then(() => context.session.abort())
-      .then(
-        () => 'settled' as const,
-        (error) => {
-          backendWarn('backend-session', 'stuck runtime abort failed', {
-            sessionPath: context.sessionPath,
-            requestId,
-            error: toErrorMessage(error),
-          });
-          return 'failed' as const;
-        },
-      );
-    const abortGrace = new Promise<'timeout'>((resolve) => {
-      abortGraceTimer = setTimeout(() => resolve('timeout'), 5_000);
-      abortGraceTimer.unref?.();
-    });
-    void Promise.race([abort, abortGrace]).then((outcome) => {
-      if (abortGraceTimer) clearTimeout(abortGraceTimer);
-      if (outcome === 'timeout') {
-        backendWarn('backend-session', 'stuck runtime abort did not settle within grace', {
-          sessionPath: context.sessionPath,
-          requestId,
-        });
-      }
-    });
-
-    const replacementPromise = this.transitionSessionContext(
-      context.sessionPath,
-      async () => {
-        const replacement = await this.createSessionContext(
-          this.sdk.SessionManager.open(context.sessionPath),
-          'resume',
-        );
-        this.emitBusyChanged(replacement, false);
-        await Promise.allSettled([
-          (async () => {
-            // This callback is itself the pendingSessionContexts owner for the
-            // path. The public build/emit path resolves that owner first, so
-            // calling it here would await this transition's own promise.
-            try {
-              if (this.disposed || this.forgottenSessionPaths.has(replacement.sessionPath)
-                || this.sessionContexts.get(replacement.sessionPath) !== replacement) return;
-              const payload = await this.buildHotSessionOpenedPayload(replacement.sessionPath);
-              if (this.disposed || this.forgottenSessionPaths.has(replacement.sessionPath)
-                || this.sessionContexts.get(replacement.sessionPath) !== replacement) return;
-              this.emit('session.opened', payload);
-            } catch (error) {
-              backendWarn('backend-session', 'emitSessionOpened.failed', {
-                sessionPath: replacement.sessionPath,
-                error: toErrorMessage(error),
-              });
-            }
-          })(),
-          this.emitSessionListChanged(),
-        ]);
-        return replacement;
-      },
-    );
-    context.recoveryPromise = replacementPromise;
-    void replacementPromise.catch((error) => {
-      this.emit('operational-error', {
-        incidentId: `session-recovery:${requestId}`,
-        code: 'SESSION_RUNTIME_RECOVERY_FAILED',
-        message: `Failed to replace the stuck session runtime: ${toErrorMessage(error)}`,
-        sessionPath: context.sessionPath,
-        requestId,
-      });
-    });
-  }
 
   async dispose(): Promise<void> {
     if (!this.disposePromise) this.disposePromise = this.disposeOnce();
@@ -3324,7 +1846,7 @@ export class BackendServer {
   private async disposeOnce(): Promise<void> {
     // Idempotent ownership is provided by disposePromise. The flag suppresses
     // stale events from in-flight async paths via the `disposed` guard on
-    // `emit`/`emitSessionOpened`/`emitSessionListChanged`.
+    // `emit`/`emitSessionListChanged`.
     recordBackendLivePipelineTrace({
       stage: 'process.lifecycle',
       kind: 'success',
@@ -3358,15 +1880,6 @@ export class BackendServer {
         log(`worker supervisor disposal failed closed: ${toErrorMessage(error)}`);
       }
     }
-    // Reject queued session service creations: a queued open must not hang
-    // behind an admitted creation while the host is tearing the backend down.
-    // An admitted in-flight creation is allowed to settle; the late runtime it
-    // produces is refused installation by the ownership check above.
-    this.serviceLoadingGate.dispose();
-
-    const contexts = [...this.sessionContexts.values()];
-    this.sessionContexts.clear();
-
     // Reject provider waiters and clear referenced queue/afterburn timers even
     // when an SDK runtime ignores abort during shutdown. The global fetch
     // wrapper is process-owned, so server disposal is its production teardown.
@@ -3377,100 +1890,8 @@ export class BackendServer {
     this.sessionCatalogPollTimer = undefined;
     this.stopReviewWatcher?.();
     this.stopReviewWatcher = undefined;
-    this.stopProviderProgressObserver?.();
-    this.stopProviderProgressObserver = undefined;
-    this.stopProviderIncidentObserver?.();
-    this.stopProviderIncidentObserver = undefined;
-    this.providerAttemptOwners.clear();
     this.browsePreviousSessionFiles.clear();
 
-    // Teardown is best-effort per context: one cleanup that throws or rejects
-    // must not strand this context's remaining cleanup or any later context.
-    const runCleanup = (label: string, action: () => void): void => {
-      try {
-        action();
-      } catch (err) {
-        log(`${label} failed: ${String(err)}`);
-      }
-    };
-
-    // Clear every active-request/watchdog timer a context may still hold. These
-    // are `unref`'d so they do not keep the process alive, but a late fire
-    // would touch retired/freed state (prompt-safety abort, semantic-lease
-    // recovery, quota settlement, retry-stuck watchdog). The watchdog clear fn
-    // is the primary path; the direct handle clear is belt-and-suspenders for a
-    // missing or already-invoked clear fn.
-    const clearContextTimers = (context: SessionContext): void => {
-      runCleanup('session retry-watchdog cleanup', () => context.willRetryWatchdogClear?.());
-      context.willRetryWatchdogClear = undefined;
-      if (context.willRetryWatchdogTimer) {
-        clearTimeout(context.willRetryWatchdogTimer);
-        context.willRetryWatchdogTimer = undefined;
-      }
-      const active = context.activeRequest;
-      if (active) {
-        if (active.promptSafetyTimer) {
-          clearTimeout(active.promptSafetyTimer);
-          active.promptSafetyTimer = undefined;
-        }
-        if (active.semanticLeaseTimer) {
-          clearTimeout(active.semanticLeaseTimer);
-          active.semanticLeaseTimer = undefined;
-        }
-        if (active.quotaSettlementTimer) {
-          clearTimeout(active.quotaSettlementTimer);
-          active.quotaSettlementTimer = undefined;
-        }
-        active.pendingDurableToolTerminals?.clear();
-      }
-    };
-
-    const teardownContext = async (context: SessionContext): Promise<void> => {
-      clearContextTimers(context);
-      runCleanup('session UI bridge dispose', () => context.uiBridge?.dispose());
-      runCleanup('session event unsubscribe', () => context.unsubscribe());
-      runCleanup('session manager fence invalidation', () => context.sessionManagerFence?.invalidate());
-      await this.disposeRuntimeBounded(context.runtime, context.sessionPath);
-    };
-
-    for (const context of contexts) {
-      await teardownContext(context);
-    }
-
-    // Handle in-flight recovery replacement contexts. A retired context may
-    // have a replacement runtime being constructed asynchronously by
-    // `recoverStuckSession` (or the abort-replacement path in request-handler);
-    // the snapshot above predates that replacement (the map was cleared), so
-    // its freshly created runtime would otherwise leak and its post-replacement
-    // emissions would fire post-shutdown. Await each in-flight recovery
-    // (bounded) and tear down the replacement runtime too. The `disposed` guard
-    // on `emit`/`emitSessionOpened`/`emitSessionListChanged` makes the
-    // recovery's post-replacement emissions no-ops.
-    const inFlightRecoveries = contexts
-      .map((context) => context.recoveryPromise)
-      .filter((recovery): recovery is Promise<SessionContext> => Boolean(recovery));
-    if (inFlightRecoveries.length > 0) {
-      await Promise.allSettled(inFlightRecoveries.map(async (recovery) => {
-        let waitTimer: ReturnType<typeof setTimeout> | undefined;
-        const waitGrace = new Promise<SessionContext | null>((resolve) => {
-          waitTimer = setTimeout(() => resolve(null), resolveRuntimeDisposeGraceMs());
-          waitTimer.unref?.();
-        });
-        let replacement: SessionContext | null;
-        try {
-          replacement = await Promise.race([recovery, waitGrace]);
-        } catch {
-          // Recovery failed; its own .catch already surfaced the error (now
-          // suppressed by the `disposed` guard). Nothing left to tear down.
-          replacement = null;
-        } finally {
-          if (waitTimer) clearTimeout(waitTimer);
-        }
-        if (replacement) {
-          await teardownContext(replacement);
-        }
-      }));
-    }
     await flushBackendLivePipelineTrace();
     if (workerSupervisorDisposeError) throw workerSupervisorDisposeError;
   }

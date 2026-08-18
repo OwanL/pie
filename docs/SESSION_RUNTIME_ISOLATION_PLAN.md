@@ -758,7 +758,7 @@ Split this into multiple PRs if needed: model hydration, error ownership, create
 
 **Exit:** extension stdout/stderr cannot enter IPC, stale/malformed/oversize frames and writer backpressure are deterministic, patch writes cannot race, missed heartbeat/soft interrupt/kill/restart clean the process tree, and the packaged-artifact spawn test passes.
 
-Select one backend mode for an entire coordinator generation via an internal rollout flag such as `PIE_SESSION_RUNTIME_ISOLATION=0|1`. Do not mix legacy and worker write ownership for different sessions in the same generation during early rollout.
+Select one backend mode for an entire coordinator generation via an internal rollout flag such as `PIE_SESSION_RUNTIME_ISOLATION=0|1`. Do not mix legacy and worker write ownership for different sessions in the same generation during early rollout. (This flag was removed in Phase 7; isolated mode is now the sole path.)
 
 ### Phase 3 — Lightweight coordinator and cold operations
 
@@ -797,7 +797,7 @@ Provider admission may need to move into Phase 4 if no safe temporary way exists
 
 ### Phase 7 — Rollout, defaults, and legacy removal
 
-**Status:** In progress (2026-08-15). Isolated mode is default for new backend generations after all deterministic, spawned crash/liveness, build, and package gates passed. `PIE_SESSION_RUNTIME_ISOLATION=0` remains the documented one-restart legacy rollback during the bounded observation window; monolithic hot ownership must not be deleted until that window and telemetry comparison complete without a critical fallback.
+**Status:** Complete (2026-08-18). Isolated mode is the sole runtime path. The `PIE_SESSION_RUNTIME_ISOLATION` flag, runtime-mode resolution, and the monolithic in-process hot-runtime ownership were removed after the observation window and telemetry comparison completed without a critical fallback. Git history is the rollback mechanism.
 **Dependencies:** all correctness gates.  
 **Deliverables:** opt-in dogfood, telemetry comparison, staged default-on, documented rollback, then deletion of monolithic hot-runtime ownership after the rollback window.  
 **Exit:** completion criteria below hold for the default path and no critical regression requires fallback.
@@ -895,14 +895,11 @@ Decision points:
 
 ## 14. Rollout and rollback
 
-Use a backend-generation feature flag, initially internal/environment-controlled:
+Isolated mode is the sole runtime path; the legacy in-process hot runtime and its
+`PIE_SESSION_RUNTIME_ISOLATION` flag were removed (2026-08-18). Rollback is via
+Git history/reverts rather than a retained legacy code path.
 
-```text
-PIE_SESSION_RUNTIME_ISOLATION=0  # legacy hot runtime, rollback
-PIE_SESSION_RUNTIME_ISOLATION=1  # coordinator + per-root workers
-```
-
-Rollout stages:
+Rollout stages (historical):
 
 1. tests/CI only;
 2. developer opt-in with comparative traces;

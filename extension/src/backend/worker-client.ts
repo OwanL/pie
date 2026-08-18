@@ -388,7 +388,12 @@ export class WorkerClient {
   private enqueue(draft: WorkerIpcFrameDraft): boolean {
     const result = this.writer?.enqueue(draft, {
       onSettled: (settlement) => {
-        if (settlement.status === 'failed' || settlement.status === 'rejected') this.fail(new Error('Worker IPC frame could not be sent.'), true);
+        if (settlement.status === 'failed' || settlement.status === 'rejected') {
+          const reason = settlement.status === 'rejected'
+            ? `${settlement.reason}: ${settlement.detail}`
+            : settlement.error?.message ?? 'unknown write error';
+          this.fail(new Error(`Worker IPC frame could not be sent (${reason}).`), true);
+        }
       },
     });
     return result?.accepted === true;
