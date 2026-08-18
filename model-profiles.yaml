@@ -213,6 +213,14 @@ profiles:
       - max
     disabled_reason: null
   - provider: ollama
+    id: deepseek-v4-pro:0813-cloud
+    eligible: true
+    thinking:
+      - off
+      - high
+      - max
+    disabled_reason: null
+  - provider: ollama
     id: deepseek-v4-pro:cloud
     eligible: true
     thinking:

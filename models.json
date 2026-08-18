@@ -142,6 +142,27 @@
           }
         },
         {
+          "id": "deepseek-v4-pro:0813-cloud",
+          "name": "Ollama Cloud: DeepSeek V4 Pro 0813",
+          "compat": {
+            "supportsReasoningEffort": true
+          },
+          "reasoning": true,
+          "contextWindow": 1048576,
+          "maxTokens": 65536,
+          "thinkingLevelMap": {
+            "off": "none",
+            "high": "high",
+            "max": "max"
+          },
+          "cost": {
+            "input": 1.32,
+            "output": 3.96,
+            "cacheRead": 0.044,
+            "cacheWrite": 0
+          }
+        },
+        {
           "id": "deepseek-v4-pro:cloud",
           "name": "Ollama Cloud: DeepSeek V4 Pro",
           "reasoning": true,
