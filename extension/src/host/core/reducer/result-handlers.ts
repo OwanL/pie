@@ -580,6 +580,14 @@ export function handleEffectResult(state: ArchState, event: Exclude<EffectResult
       return event.ok ? { state, effects: [] } : {
         state: {
           ...state,
+          sessions: {
+            ...state.sessions,
+            // Clear the optimistic "Compacting…" marker set by `handleCompact`
+            // so a failed RPC (e.g. REQUEST_IN_PROGRESS or a promotion error)
+            // cannot leave the button permanently spinning. A compaction that
+            // actually started clears the marker via `CompactionEnded` instead.
+            compactingSessionPaths: removeFromArray(state.sessions.compactingSessionPaths, event.sessionPath),
+          },
           settings: {
             ...state.settings,
             notice: 'Could not compact this conversation.',

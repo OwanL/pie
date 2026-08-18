@@ -4,6 +4,7 @@ import type {
   LazyDetailRef,
   ToolCall,
 } from './protocol/messages.js';
+import { deduplicateToolCallResultsForTransport } from './chat-message-parts.js';
 
 /** Details larger than this never ride ordinary full-state snapshots. */
 export const LAZY_DETAIL_THRESHOLD_BYTES = 16 * 1024;
@@ -235,12 +236,14 @@ export function compactToolCallDetail(
     source: 'durable' | 'live';
     sizeBytes?: number;
     sourceRevision?: number;
+    /** Override the shared 16 KiB retention threshold for a byte-capped transport. */
+    thresholdBytes?: number;
   },
 ): ToolCall {
   if (tool.result === undefined || tool.detailRef) return tool;
   const sizeBytes = options.sizeBytes ?? jsonBytes(tool.result);
   const isSubagent = tool.name.trim().toLowerCase() === 'subagent';
-  if (!isSubagent && sizeBytes <= LAZY_DETAIL_THRESHOLD_BYTES) return tool;
+  if (!isSubagent && sizeBytes <= (options.thresholdBytes ?? LAZY_DETAIL_THRESHOLD_BYTES)) return tool;
   const preview = isSubagent ? compactSubagentResultPreview(tool.result) : undefined;
   return {
     ...tool,
@@ -300,12 +303,18 @@ export function compactLiveReasoningPart(
 /**
  * Build the transport projection of one durable row. The source message is
  * untouched and remains in the backend display cache for bounded retrieval.
+ * `thresholdBytes` overrides the shared 16 KiB per-item threshold for
+ * byte-capped transports.
  */
-export function compactDurableMessageDetails(message: ChatMessage, sessionPath: string): ChatMessage {
+export function compactDurableMessageDetails(
+  message: ChatMessage,
+  sessionPath: string,
+  thresholdBytes: number = LAZY_DETAIL_THRESHOLD_BYTES,
+): ChatMessage {
   let changed = false;
   const compactedPartTools = new Map<string, ToolCall>();
   const parts = message.parts?.map((part, partIndex): ChatMessagePart => {
-    if (part.kind === 'reasoning' && utf8Bytes(part.text) > LAZY_DETAIL_THRESHOLD_BYTES) {
+    if (part.kind === 'reasoning' && utf8Bytes(part.text) > thresholdBytes) {
       changed = true;
       const detailRef = reasoningRef(sessionPath, message, partIndex, part.text);
       return { kind: 'reasoning', text: detailRef.summary, detailRef };
@@ -315,6 +324,7 @@ export function compactDurableMessageDetails(message: ChatMessage, sessionPath: 
         sessionPath,
         messageId: message.id,
         source: 'durable',
+        thresholdBytes,
       });
       if (compacted !== part.toolCall) changed = true;
       compactedPartTools.set(part.toolCall.id, compacted);
@@ -331,6 +341,7 @@ export function compactDurableMessageDetails(message: ChatMessage, sessionPath: 
           sessionPath,
           messageId: message.id,
           source: 'durable',
+          thresholdBytes,
         });
     if (compacted !== tool) changed = true;
     return compacted;
@@ -338,7 +349,7 @@ export function compactDurableMessageDetails(message: ChatMessage, sessionPath: 
 
   let thinking = message.thinking;
   let thinkingDetailRef = message.thinkingDetailRef;
-  if (thinking && utf8Bytes(thinking) > LAZY_DETAIL_THRESHOLD_BYTES) {
+  if (thinking && utf8Bytes(thinking) > thresholdBytes) {
     changed = true;
     thinkingDetailRef = reasoningRef(sessionPath, message, -1, thinking);
     thinking = thinkingDetailRef.summary;
@@ -371,4 +382,83 @@ export function findDurableDetail(
   return tool?.result !== undefined
     ? { status: 'loaded', value: tool.result, sizeBytes: jsonBytes(tool.result) }
     : { status: 'unavailable' };
+}
+
+/** Retention thresholds stepped down until a durable message fits its transport budget. */
+const TRANSPORT_RESULT_THRESHOLDS = [8 * 1024, 4 * 1024, 2 * 1024, 1024, 512] as const;
+/** Per-part text/reasoning tail budget for the final pathological fallback. */
+const TRANSPORT_TEXT_PART_BUDGET = 8 * 1024;
+
+/**
+ * Budgeted transport projection of one durable assistant message for a
+ * byte-capped live event (the worker IPC ordinary-frame ceiling). The shared
+ * per-item compaction runs first; then the redundant legacy mirrors are
+ * removed (`parts` is authoritative for rendering), then per-result retention
+ * is tightened until the whole projection fits `maxBytes`, and finally
+ * text/reasoning tails are bounded. The durable session remains lossless and
+ * authoritative; this projection only rides the live terminal event, and big
+ * bodies stay retrievable through their detailRefs.
+ */
+export function compactDurableMessageForTransport(
+  message: ChatMessage,
+  sessionPath: string,
+  maxBytes: number,
+): ChatMessage {
+  // Common case: the shared per-item compaction already fits the budget, and
+  // the projection is byte-identical to the ordinary durable projection.
+  let projected = compactDurableMessageDetails(message, sessionPath);
+  if (jsonBytes(projected) <= maxBytes) return projected;
+
+  // Over budget: remove the redundant legacy mirrors (`parts` is
+  // authoritative for rendering; the host restores the toolCalls mirror on
+  // receipt), then tighten per-result retention until the projection fits.
+  const dropLegacyMirrors = (candidate: ChatMessage): ChatMessage => {
+    const withoutMirror = deduplicateToolCallResultsForTransport(candidate);
+    return withoutMirror.parts && withoutMirror.parts.length > 0
+      ? { ...withoutMirror, markdown: '', thinking: undefined }
+      : withoutMirror;
+  };
+  projected = dropLegacyMirrors(projected);
+  for (const threshold of TRANSPORT_RESULT_THRESHOLDS) {
+    projected = dropLegacyMirrors(compactDurableMessageDetails(projected, sessionPath, threshold));
+    if (jsonBytes(projected) <= maxBytes) return projected;
+  }
+  return boundMessageTextTails(projected, maxBytes);
+}
+
+/** Bound text/reasoning part tails (and legacy flat mirrors) to fit the budget. */
+function boundMessageTextTails(message: ChatMessage, maxBytes: number): ChatMessage {
+  if (message.parts && message.parts.length > 0) {
+    const boundedParts = message.parts.map((part): ChatMessagePart => {
+      if ((part.kind === 'text' || part.kind === 'reasoning') && utf8Bytes(part.text) > TRANSPORT_TEXT_PART_BUDGET) {
+        return { ...part, text: part.text.slice(-TRANSPORT_TEXT_PART_BUDGET) };
+      }
+      return part;
+    });
+    const projected = { ...message, parts: boundedParts };
+    if (jsonBytes(projected) <= maxBytes) return projected;
+  }
+
+  // Pathological: keep only identity and a bounded text tail. The durable
+  // session remains the complete authority for any omitted content. The tail
+  // lives once, in `parts` (the authoritative rendering representation).
+  const tail = (message.parts ?? [])
+    .filter((part): part is Extract<ChatMessagePart, { kind: 'text' }> => part.kind === 'text')
+    .map((part) => part.text)
+    .join('\n')
+    || (typeof message.markdown === 'string' ? message.markdown : '');
+  const boundedTail = tail.slice(-Math.max(1024, Math.min(maxBytes - 1024, TRANSPORT_TEXT_PART_BUDGET)));
+  return {
+    id: message.id,
+    role: 'assistant',
+    createdAt: message.createdAt,
+    status: message.status,
+    ...(message.modelId ? { modelId: message.modelId } : {}),
+    ...(message.provider ? { provider: message.provider } : {}),
+    ...(message.durationMs !== undefined ? { durationMs: message.durationMs } : {}),
+    ...(message.errorDetail !== undefined ? { errorDetail: message.errorDetail } : {}),
+    ...(message.durableEntryId ? { durableEntryId: message.durableEntryId } : {}),
+    markdown: '',
+    parts: [{ kind: 'text', text: boundedTail }],
+  };
 }

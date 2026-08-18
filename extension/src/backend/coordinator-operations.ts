@@ -26,13 +26,13 @@ const COORDINATOR_METHODS: ReadonlySet<string> = new Set([
 
 /**
  * True when the coordinator may handle `method` without a hot worker owner.
- * Global settings writes are cold; a session-scoped settings write still
- * requires a hot owner and is therefore unavailable here.
+ * A session-scoped `settings.set` is allowed here: for a cold session there is
+ * no live runtime to mutate, so the coordinator persists the model/thinking
+ * level directly (and re-broadcasts to hot workers) instead of paying a full
+ * worker promotion. A hot session is still routed to its owning worker first.
  */
 export function isCoordinatorOperationAllowed(method: string, params: unknown): boolean {
   if (COORDINATOR_METHODS.has(method)) return true;
-  if (method === 'settings.set') {
-    return !params || typeof params !== 'object' || !('sessionPath' in params) || !(params as { sessionPath?: unknown }).sessionPath;
-  }
+  if (method === 'settings.set') return true;
   return false;
 }

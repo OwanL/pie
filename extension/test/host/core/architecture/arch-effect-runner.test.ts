@@ -1,9 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { EffectRunner, type EffectRunnerDeps, type TimerSink, type TimerHandle } from '../../../../src/host/core/effect-runner';
+import { EffectRunner, decideModelStartTimerAction, type EffectRunnerDeps, type TimerSink, type TimerHandle } from '../../../../src/host/core/effect-runner';
 import type { Effect } from '../../../../src/host/core/effects';
 import type { EffectResultEvent, CommandEvent, Event } from '../../../../src/host/core/events';
+import type { ProviderGateStats } from '../../../../src/shared/protocol';
 import { makeEffectRunnerDeps } from '../../../helpers/effect-runner-deps';
 
 /** Deterministic timer sink: records scheduled timers and fires them on
@@ -851,6 +852,71 @@ test('EffectRunner re-arms a successful prepass as model-start and reports the c
   if (pf?.kind === 'PreflightFailed') {
     assert.equal(pf.error, 'Timed out waiting for the model to start streaming (120s)');
   }
+  runner.dispose();
+});
+
+test('decideModelStartTimerAction defers only for a saturated provider under the ceiling', () => {
+  const metric = (over: { queuedRequests?: number; paused?: boolean } = {}): ProviderGateStats => ({
+    enabled: true,
+    providers: [{
+      provider: 'openai',
+      activeRequests: 1,
+      queuedRequests: 0,
+      maxConcurrentRequests: 1,
+      afterburnSeconds: 0,
+      paused: false,
+      pausedUntilMs: 0,
+      strikeCount: 0,
+      ...over,
+    }],
+  });
+  // Saturated (queued) + under ceiling → defer.
+  assert.deepEqual(decideModelStartTimerAction({ elapsed: 1000, ceiling: 240_000, provider: 'openai', metrics: metric({ queuedRequests: 2 }) }), { action: 'defer' });
+  // Paused (circuit breaker) counts as saturated.
+  assert.deepEqual(decideModelStartTimerAction({ elapsed: 1000, ceiling: 240_000, provider: 'openai', metrics: metric({ paused: true }) }), { action: 'defer' });
+  // Saturated + at/over ceiling → fire (hard backstop).
+  assert.deepEqual(decideModelStartTimerAction({ elapsed: 240_000, ceiling: 240_000, provider: 'openai', metrics: metric({ queuedRequests: 2 }) }), { action: 'fire' });
+  // Not saturated → fire.
+  assert.deepEqual(decideModelStartTimerAction({ elapsed: 1000, ceiling: 240_000, provider: 'openai', metrics: metric() }), { action: 'fire' });
+  // Fail-open: absent gate / unresolvable provider / missing metric → fire.
+  assert.deepEqual(decideModelStartTimerAction({ elapsed: 1000, ceiling: 240_000, provider: 'openai', metrics: undefined }), { action: 'fire' });
+  assert.deepEqual(decideModelStartTimerAction({ elapsed: 1000, ceiling: 240_000, provider: undefined, metrics: metric({ queuedRequests: 2 }) }), { action: 'fire' });
+  assert.deepEqual(decideModelStartTimerAction({ elapsed: 1000, ceiling: 240_000, provider: 'anthropic', metrics: metric({ queuedRequests: 2 }) }), { action: 'fire' });
+});
+
+test('EffectRunner model-start timer re-arms (defers) when the provider is saturated instead of firing PreflightFailed', async () => {
+  const timers = new FakeTimerSink();
+  const dispatchedEvents: Event[] = [];
+  const { deps } = makeEffectRunnerDeps({
+    requestImpl: () => Promise.resolve({ requestId: 'req-rearm' }),
+    sendTimerTimeoutMs: 50,
+    timer: timers,
+    dispatchEvent: (e) => dispatchedEvents.push(e),
+    getProviderGateMetrics: () => ({
+      enabled: true,
+      providers: [{
+        provider: 'openai',
+        activeRequests: 1,
+        queuedRequests: 2,
+        maxConcurrentRequests: 1,
+        afterburnSeconds: 0,
+        paused: false,
+        pausedUntilMs: 0,
+        strikeCount: 0,
+      }],
+    }),
+    resolveSessionProvider: () => 'openai',
+  });
+  const runner = new EffectRunner(deps);
+
+  runner.run({ kind: 'SendRpc', corrId: 'c-rearm', sessionPath: '/a', text: 'hi', inputs: [], composedText: 'hi', localId: 'loc-rearm' });
+  await settle();
+  runner.run({ kind: 'MarkPrepassSucceeded', corrId: 'c-rearm' });
+  assert.equal(timers.size, 1, 'prepass timer replaced by the model-start timer');
+
+  timers.runAll(); // model-start timer fires → saturated → re-arm (defer)
+  assert.equal(dispatchedEvents.length, 0, 'no PreflightFailed while the provider is saturated');
+  assert.equal(timers.size, 1, 'timer re-armed for another window');
   runner.dispose();
 });
 

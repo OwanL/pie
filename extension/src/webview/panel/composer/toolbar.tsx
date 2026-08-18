@@ -6,6 +6,7 @@ import { THINKING_LEVEL_LABELS, THINKING_LEVEL_OPTIONS } from '../../../shared/t
 import { isPendingTabPath } from '../../../shared/tab-behavior.js';
 
 import { useMemo } from 'preact/hooks';
+import { memo } from 'preact/compat';
 
 import { ToolbarChip, ToolbarIndicatorChip, ToolbarRunStatusChip } from '../components/panel-chip';
 import { ChoicePicker } from '../components/choice-picker';
@@ -91,7 +92,7 @@ interface ComposerToolbarProps {
   onCompact: () => void;
 }
 
-export function ComposerToolbar({
+export const ComposerToolbar = memo(function ComposerToolbar({
   sessionPath,
   busy,
   prefs,
@@ -315,4 +316,4 @@ export function ComposerToolbar({
       </div>
     </>
   );
-}
+});

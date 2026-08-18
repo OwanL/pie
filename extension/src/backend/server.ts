@@ -385,8 +385,8 @@ export class BackendServer {
           });
         });
       },
-      onDiagnostic: (rootSessionPath, stream, tail) => {
-        backendError('backend-worker', `worker ${stream}`, { rootSessionPath, tail });
+      onDiagnostic: (rootSessionPath, stream, chunk) => {
+        backendError('backend-worker', `worker ${stream}`, { rootSessionPath, chunk });
       },
     });
     await this.workerSupervisor.initialize();
@@ -1685,8 +1685,7 @@ export class BackendServer {
             // worker just to reject it, and never invoke any worker callback.
             throw new BackendError('UI_REQUEST_NOT_PENDING', 'The extension UI request is no longer pending.');
           }
-          const shouldPromote = ISOLATED_PROMOTION_METHODS.has(request.method)
-            || request.method === 'settings.set';
+          const shouldPromote = ISOLATED_PROMOTION_METHODS.has(request.method);
           if (shouldPromote) return await router.route(request);
           if (router.hasHotOwner(sessionPath)) return await router.routeExisting(request);
           if (!isCoordinatorOperationAllowed(request.method, request.params)) {
@@ -1820,12 +1819,12 @@ export class BackendServer {
       );
     }
     if (request.method === 'settings.set'
-      && (!request.params || typeof request.params !== 'object' || !('sessionPath' in request.params))
       && result && typeof result === 'object' && !Array.isArray(result)) {
-      // A global settings write bypasses worker routing (session-scoped writes
-      // are routed to the owning worker, which persists and broadcasts). Hot
-      // workers must not serve the pre-write snapshot, so re-broadcast the
-      // coordinator-authoritative values after the write settles.
+      // A settings write that the coordinator handled (a global write, or a
+      // session-scoped write for a cold session with no live runtime) must be
+      // re-broadcast so hot workers never serve the pre-write snapshot.
+      // Session-scoped writes for hot sessions are routed to the owning worker
+      // above and never reach this block.
       await this.workerRuntimeRouter?.syncSettings();
     }
     return result;

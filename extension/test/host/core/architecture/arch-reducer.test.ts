@@ -117,7 +117,10 @@ test('reducer: Compact command returns a session-scoped CompactRpc effect', () =
     cmd: { kind: 'Compact', corrId: 'compact-1', sessionPath: '/session/a' },
   });
 
-  assert.equal(result.state, initialArchState);
+  // Optimistic feedback: the session is marked compacting immediately so the
+  // UI shows the spinner before the backend (possibly a cold worker promotion)
+  // acknowledges the RPC.
+  assert.deepEqual(result.state.sessions.compactingSessionPaths, ['/session/a']);
   assert.deepEqual(result.effects, [{
     kind: 'CompactRpc', corrId: 'compact-1', sessionPath: '/session/a',
   }]);

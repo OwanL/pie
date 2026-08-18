@@ -42,3 +42,59 @@ test('host consumes the synced catalog as fallback for models.list', () => {
   assert.deepEqual(probe.availableModels(), []);
   assert.equal(sent.filter((frame) => frame.kind === 'runtime.report').length, 0);
 });
+
+test('host bounds turn.terminal durable messages onto the worker IPC frame budget', () => {
+  const { host, sent } = makeHost();
+  const emitter = host as unknown as { emit(event: string, payload?: unknown): void };
+  const results = Array.from({ length: 60 }, (_, index) => ({
+    kind: 'toolCall',
+    toolCall: {
+      id: `tool-${index}`, name: 'read', input: { path: `/f/${index}` },
+      result: 'r'.repeat(6_000), status: 'completed', durableEntryId: `tool-${index}-entry`,
+    },
+  }));
+  const mirror = results.map((part) => part.toolCall);
+  const envelope = {
+    protocolVersion: 1, sessionPath: '/sessions/session.jsonl', requestId: 'request',
+    turnId: 'turn', attemptId: 'attempt', seq: 42, occurredAt: 130, checkpointBytes: 1,
+    kind: 'turn.terminal', terminalKind: 'completed', durableEntryId: 'assistant-entry',
+    durableMessage: {
+      id: 'message', role: 'assistant', createdAt: new Date(130).toISOString(),
+      markdown: 'done', status: 'completed', durableEntryId: 'assistant-entry',
+      parts: results, toolCalls: mirror,
+    },
+  };
+  emitter.emit('live.semantic', envelope);
+  assert.equal(sent.length, 1);
+  const frame = sent[0] as { payload: { durableMessage: { id?: string; durableEntryId?: string; parts?: Array<{ kind?: string; toolCall?: { detailRef?: unknown } }> } } };
+  const durable = frame.payload.durableMessage;
+  const bytes = Buffer.byteLength(JSON.stringify(durable), 'utf8');
+  // 238 KiB projection budget leaves headroom for the envelope and frame
+  // identity fields under the 256 KiB ordinary-frame ceiling.
+  assert.ok(bytes <= 238 * 1024, `terminal projection ${bytes} exceeds the wire budget`);
+  assert.equal(durable.id, 'message');
+  assert.equal(durable.durableEntryId, 'assistant-entry');
+  const toolParts = (durable.parts ?? []).filter((part) => (part as { kind?: string }).kind === 'toolCall');
+  assert.equal(toolParts.length, 60);
+  assert.ok(toolParts.every((part) => part.toolCall?.detailRef));
+  assert.equal(JSON.stringify(durable).includes('r'.repeat(1_000)), false);
+});
+
+test('host drops a single text delta that cannot ride the worker wire', () => {
+  const { host, sent } = makeHost();
+  const emitter = host as unknown as { emit(event: string, payload?: unknown): void };
+  emitter.emit('live.semantic', {
+    protocolVersion: 1, sessionPath: '/sessions/session.jsonl', requestId: 'request',
+    turnId: 'turn', attemptId: 'attempt', seq: 10, occurredAt: 130, checkpointBytes: 1,
+    kind: 'turn.text', delta: 'x'.repeat(300 * 1024),
+  });
+  assert.equal(sent.length, 0, 'oversized delta must not be sent; the host recovers via seq-gap rebase');
+  emitter.emit('live.semantic', {
+    protocolVersion: 1, sessionPath: '/sessions/session.jsonl', requestId: 'request',
+    turnId: 'turn', attemptId: 'attempt', seq: 11, occurredAt: 131, checkpointBytes: 1,
+    kind: 'turn.text', delta: 'ok',
+  });
+  assert.equal(sent.length, 1);
+  const frame = sent[0] as { payload: { delta?: unknown } };
+  assert.equal(frame.payload.delta, 'ok');
+});

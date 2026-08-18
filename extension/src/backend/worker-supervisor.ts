@@ -52,7 +52,7 @@ export interface WorkerSupervisorOptions {
     frame: WorkerToCoordinatorFrame,
     identity: { workerId: string; workerGeneration: number },
   ) => void;
-  onDiagnostic?: (sessionPath: string, stream: 'stdout' | 'stderr', tail: string) => void;
+  onDiagnostic?: (sessionPath: string, stream: 'stdout' | 'stderr', chunk: string) => void;
 }
 
 export interface SupervisedWorker {
@@ -138,7 +138,7 @@ export class WorkerSupervisor {
         frame,
         { workerId, workerGeneration },
       ),
-      onDiagnostic: (stream, tail) => this.options.onDiagnostic?.(sessionPath, stream, tail),
+      onDiagnostic: (stream, chunk) => this.options.onDiagnostic?.(sessionPath, stream, chunk),
     };
     const client = (this.options.clientFactory ?? ((value) => new WorkerClient(value)))(clientOptions);
     const routePath = assignment?.leasePath ?? sessionPath;

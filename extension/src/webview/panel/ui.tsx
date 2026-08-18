@@ -252,7 +252,14 @@ function ComposerView({
       : null,
     [contextIndicator],
   );
-  const runControls = getComposerRunControls(activeRunSummary ?? null);
+  // Memoize the run-controls object so `memo(ComposerToolbar)` holds across
+  // keystrokes: `getComposerRunControls` returns a fresh `{status}` object when
+  // a run summary is present, which would otherwise defeat the toolbar memo on
+  // every composer re-render.
+  const runControls = useMemo(
+    () => getComposerRunControls(activeRunSummary ?? null),
+    [activeRunSummary],
+  );
   // Steering (FollowUp): any optimistic 'queued' user messages (sent while a
   // turn was running) show a "Clear queued" affordance in the composer actions.
   const hasQueuedMessages = useMemo(

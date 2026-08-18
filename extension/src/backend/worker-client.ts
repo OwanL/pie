@@ -64,7 +64,12 @@ export interface WorkerClientOptions {
   spawn?: typeof cp.spawn;
   terminateTree?: typeof terminateProcessTree;
   onStateChange?: (snapshot: WorkerClientSnapshot) => void;
-  onDiagnostic?: (stream: 'stdout' | 'stderr', boundedTail: string) => void;
+  /** Receives only the newly-arrived chunk, not the accumulated tail. The
+   *  bounded tail remains available via `getSnapshot()` for crash diagnostics;
+   *  re-emitting the full tail on every chunk made the coordinator's log grow
+   *  quadratically and did synchronous `Buffer.concat` + `JSON.stringify` work
+   *  on its event loop for every worker stderr write. */
+  onDiagnostic?: (stream: 'stdout' | 'stderr', chunk: string) => void;
   /** Receives valid, current-generation frames not consumed by request correlation or liveness handling. */
   onFrame?: (frame: WorkerToCoordinatorFrame) => void;
 }
@@ -485,7 +490,8 @@ export class WorkerClient {
     stream.on('data', (chunk: Buffer | string) => {
       const tail = name === 'stdout' ? this.stdoutTail : this.stderrTail;
       tail.append(chunk);
-      try { this.options.onDiagnostic?.(name, tail.toString()); } catch { /* observer only */ }
+      const value = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : chunk;
+      try { this.options.onDiagnostic?.(name, value); } catch { /* observer only */ }
     });
     stream.resume();
   }

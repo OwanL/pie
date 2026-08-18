@@ -142,3 +142,54 @@ test('session close evicts compacting and chip state', () => {
   assert.deepEqual(next.sessions.compactingSessionPaths, []);
   assert.equal('/s' in next.sessions.lastCompactionBySession, false);
 });
+
+test('Compact command optimistically marks the session compacting and emits CompactRpc', () => {
+  const initial = createInitialArchState();
+  const { state, effects } = apply(initial, {
+    kind: 'Command',
+    cmd: { kind: 'Compact', corrId: 'c1', sessionPath: '/s' },
+  });
+
+  assert.deepEqual(state.sessions.compactingSessionPaths, ['/s']);
+  assert.deepEqual(effects, [{ kind: 'CompactRpc', corrId: 'c1', sessionPath: '/s' }]);
+});
+
+test('CompactResult failure clears the optimistic compacting marker and surfaces a notice', () => {
+  let state = createInitialArchState();
+  state = apply(state, {
+    kind: 'Command',
+    cmd: { kind: 'Compact', corrId: 'c1', sessionPath: '/s' },
+  }).state;
+
+  const { state: next, effects } = apply(state, {
+    kind: 'CompactResult',
+    corrId: 'c1',
+    sessionPath: '/s',
+    ok: false,
+    error: 'REQUEST_IN_PROGRESS: Cannot compact while this session is running.',
+  });
+
+  assert.deepEqual(next.sessions.compactingSessionPaths, []);
+  assert.equal(next.settings.notice, 'Could not compact this conversation.');
+  assert.equal(next.settings.noticeKind, 'operational-error');
+  assert.deepEqual(effects, []);
+});
+
+test('CompactResult success leaves the compacting marker for CompactionEnded to clear', () => {
+  let state = createInitialArchState();
+  state = apply(state, {
+    kind: 'Command',
+    cmd: { kind: 'Compact', corrId: 'c1', sessionPath: '/s' },
+  }).state;
+
+  const { state: next } = apply(state, {
+    kind: 'CompactResult',
+    corrId: 'c1',
+    sessionPath: '/s',
+    ok: true,
+  });
+
+  // The RPC ack does not mean compaction finished; the marker stays until the
+  // backend's CompactionEnded event (success/failure/abort) clears it.
+  assert.deepEqual(next.sessions.compactingSessionPaths, ['/s']);
+});

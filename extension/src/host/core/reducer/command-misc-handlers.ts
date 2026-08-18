@@ -48,8 +48,20 @@ export function handleInterrupt(state: ArchState, cmd: Extract<Command, { kind: 
 }
 
 export function handleCompact(state: ArchState, cmd: Extract<Command, { kind: 'Compact' }>): ReducerResult {
+  // Optimistically mark the session as compacting so the UI shows the
+  // "Compacting…" spinner immediately, even when the backend must first
+  // promote a cold worker (which can take several seconds). The marker is
+  // cleared by the backend's `CompactionEnded` event on success/failure/abort,
+  // and by `CompactResult{ok:false}` when the RPC itself fails before
+  // compaction starts (e.g. REQUEST_IN_PROGRESS or a promotion error).
   return {
-    state,
+    state: {
+      ...state,
+      sessions: {
+        ...state.sessions,
+        compactingSessionPaths: addToArray(state.sessions.compactingSessionPaths, cmd.sessionPath),
+      },
+    },
     effects: [{ kind: 'CompactRpc', corrId: cmd.corrId, sessionPath: cmd.sessionPath }],
   };
 }

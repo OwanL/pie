@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   compactDurableMessageDetails,
+  compactDurableMessageForTransport,
   compactSubagentResultPreview,
   compactToolCallDetail,
   findDurableDetail,
@@ -126,4 +127,99 @@ test('full durable details are resolved only through their compact retrieval ide
   assert.equal(tool.status, 'loaded');
   assert.equal(typeof (reasoning.status === 'loaded' ? reasoning.value : null), 'string');
   assert.equal((tool.status === 'loaded' ? tool.value as { details?: { results?: unknown[] } } : null)?.details?.results?.length, 1);
+});
+
+test('transport projection fits its byte budget by dropping mirrors and tightening result retention', () => {
+  const subagentResult = {
+    details: {
+      results: [{
+        agent: 'worker',
+        task: 'Inspect the long session',
+        exitCode: 0,
+        messages: [{ role: 'assistant', content: 'x'.repeat(200_000) }],
+      }],
+    },
+  };
+  const message: ChatMessage = {
+    id: 'assistant-big',
+    durableEntryId: 'assistant-big-entry',
+    role: 'assistant',
+    createdAt: '2026-01-01T00:00:00.000Z',
+    markdown: 'final summary',
+    status: 'completed',
+    parts: [
+      { kind: 'text', text: 'summary text' },
+      // Subagent results are always replaced by compact previews + detailRef.
+      { kind: 'toolCall', toolCall: { id: 'sub-1', name: 'subagent', input: {}, result: subagentResult, status: 'completed', durableEntryId: 'sub-1-entry' } },
+      // 40 medium results: each below the shared 16 KiB threshold individually,
+      // but together they blow any reasonable live-event transport budget.
+      ...Array.from({ length: 40 }, (_, index) => ({
+        kind: 'toolCall' as const,
+        toolCall: {
+          id: `tool-${index}`, name: 'read', input: { path: `/f/${index}` },
+          result: 'r'.repeat(6_000), status: 'completed' as const, durableEntryId: `tool-${index}-entry`,
+        },
+      })),
+    ],
+    toolCalls: [
+      { id: 'sub-1', name: 'subagent', input: {}, result: subagentResult, status: 'completed', durableEntryId: 'sub-1-entry' },
+      ...Array.from({ length: 40 }, (_, index) => ({
+        id: `tool-${index}`, name: 'read', input: { path: `/f/${index}` },
+        result: 'r'.repeat(6_000), status: 'completed' as const, durableEntryId: `tool-${index}-entry`,
+      })),
+    ],
+  };
+
+  const budget = 64 * 1024;
+  const projected = compactDurableMessageForTransport(message, sessionPath, budget);
+  const bytes = Buffer.byteLength(JSON.stringify(projected), 'utf8');
+  assert.ok(bytes <= budget, `projection ${bytes} must fit budget ${budget}`);
+
+  // Identity, status, and tool structure survive.
+  assert.equal(projected.id, 'assistant-big');
+  assert.equal(projected.durableEntryId, 'assistant-big-entry');
+  assert.equal(projected.status, 'completed');
+  assert.equal(projected.parts?.filter((part) => part.kind === 'toolCall').length, 41);
+  // Every tool call keeps a retrieval identity; bodies become refs.
+  for (const part of projected.parts ?? []) {
+    if (part.kind !== 'toolCall') continue;
+    assert.ok(part.toolCall.detailRef, `tool ${part.toolCall.id} keeps a detailRef`);
+    assert.equal(JSON.stringify(part.toolCall).includes('r'.repeat(1_000)), false);
+    assert.equal(JSON.stringify(part.toolCall).includes('x'.repeat(1_000)), false);
+  }
+  // Legacy mirror entries keep their identity but drop results: `parts` is
+  // authoritative, and the host restores the mirror after receipt.
+  assert.equal(projected.toolCalls?.length, 41);
+  assert.ok(projected.toolCalls?.every((tool) => tool.result === undefined));
+  assert.equal(projected.markdown, '');
+  assert.equal(projected.thinking, undefined);
+});
+
+test('transport projection is byte-identical to the durable projection when already under budget', () => {
+  const full = durableMessage();
+  const durable = compactDurableMessageDetails(full, sessionPath);
+  const projected = compactDurableMessageForTransport(full, sessionPath, 1024 * 1024);
+  assert.deepEqual(projected, durable);
+  assert.equal(projected.markdown, durable.markdown);
+});
+
+test('transport projection pathological fallback keeps identity and a bounded text tail', () => {
+  const message: ChatMessage = {
+    id: 'assistant-pathological',
+    durableEntryId: 'assistant-pathological-entry',
+    role: 'assistant',
+    createdAt: '2026-01-01T00:00:00.000Z',
+    markdown: 'tail-'.repeat(100_000),
+    status: 'completed',
+    parts: [{ kind: 'text', text: 'tail-'.repeat(100_000) }],
+  };
+  const budget = 8 * 1024;
+  const projected = compactDurableMessageForTransport(message, sessionPath, budget);
+  const bytes = Buffer.byteLength(JSON.stringify(projected), 'utf8');
+  assert.ok(bytes <= budget, `projection ${bytes} must fit budget ${budget}`);
+  assert.equal(projected.id, 'assistant-pathological');
+  assert.equal(projected.durableEntryId, 'assistant-pathological-entry');
+  assert.equal(projected.parts?.[0]?.kind, 'text');
+  assert.ok(projected.parts?.[0]?.kind === 'text' && projected.parts[0].text.endsWith('tail-'), 'keeps the tail');
+  assert.equal(JSON.stringify(projected).includes('tail-'.repeat(10_000)), false, 'large body is bounded');
 });

@@ -205,6 +205,31 @@ const defaultTimerSink: TimerSink = {
   cancel: (handle) => clearTimeout(handle as NodeJS.Timeout),
 };
 
+/**
+ * FP-C2a decision: should a model-start send-timer fire defer (re-arm) instead
+ * of dispatching a false-positive `PreflightFailed`? True only when the
+ * request's provider is saturated (queued or paused) AND the cumulative
+ * model-start wait is still under the hard ceiling. Fail-open: absent gate /
+ * unresolvable provider / missing metric yields `fire` (never hang). Mirrors
+ * the backend's `decidePromptSafetyTimerAction` (FP-C2b) for the host-side
+ * model-start phase.
+ */
+export function decideModelStartTimerAction(opts: {
+  elapsed: number;
+  ceiling: number;
+  provider?: string;
+  metrics?: ProviderGateStats;
+}): { action: 'defer' | 'fire' } {
+  const { elapsed, ceiling, provider, metrics } = opts;
+  const providerMetric = provider && metrics?.enabled
+    ? metrics.providers.find((m) => m.provider === provider)
+    : undefined;
+  const saturated = !!providerMetric
+    && (providerMetric.queuedRequests > 0 || providerMetric.paused);
+  if (saturated && elapsed < ceiling) return { action: 'defer' };
+  return { action: 'fire' };
+}
+
 export interface EffectRunnerDeps {
   backend: BackendLike;
   queues: QueueRouter;
@@ -294,6 +319,9 @@ interface InFlightSend {
   /** Distinguishes a genuine prepass timeout from a post-prepass model-start
    * timeout so the recovery notice never falsely blames pruning. */
   phase: 'prepass' | 'model-start';
+  /** Wall-clock anchor for the model-start phase (set on `MarkPrepassSucceeded`).
+   *  Bounds the FP-C2a re-arm so a saturated provider never defers forever. */
+  firstArmedAt: number;
   /** Caller-owned cancel controller passed to `backend.request` as the signal. */
   abort: AbortController;
   /** Backend-assigned request id, stamped after early-ack so the fire callback
@@ -350,6 +378,11 @@ export class EffectRunner {
    *  latency (post-Brief-A early-ack). On fire, dispatches `PreflightFailed`
    *  so the reducer reverts via `pending.promoted[corrId]`. */
   private static readonly SEND_TIMER_TIMEOUT_MS = 120_000;
+
+  /** Hard ceiling for the model-start re-arm (FP-C2a): a genuinely-stuck
+   *  backstop so a saturated provider never defers forever. 2× the single
+   *  window, mirroring the backend's PROMPT_TIMEOUT_HARD_CEILING_MS. */
+  private static readonly MODEL_START_HARD_CEILING_MS = 2 * EffectRunner.SEND_TIMER_TIMEOUT_MS;
 
   private readonly sendTimerTimeoutMs: number;
 
@@ -967,6 +1000,7 @@ export class EffectRunner {
       timer: null,
       budgetMs,
       phase: 'prepass',
+      firstArmedAt: 0,
       abort,
       disposed: false,
       fired: false,
@@ -990,6 +1024,16 @@ export class EffectRunner {
    *  timer via the catch — log so the degenerate case is debuggable. */
   private onSendTimerFire(send: InFlightSend): void {
     if (send.disposed) return;
+    // FP-C2a: metric-gated re-arm for the model-start phase. When the in-flight
+    // request's provider is legitimately QUEUED (or PAUSED by the circuit
+    // breaker), the model-start timer (whose clock starts at issue, before the
+    // slot is acquired) would otherwise fire a false-positive PreflightFailed.
+    // Re-arm (defer) instead, bounded by MODEL_START_HARD_CEILING_MS. Fail-open:
+    // absent gate / unresolvable provider / missing metric falls through to fire.
+    if (send.phase === 'model-start' && this.shouldReArmModelStartTimer(send)) {
+      send.timer = this.timer.schedule(() => this.onSendTimerFire(send), send.budgetMs);
+      return;
+    }
     send.disposed = true;
     send.fired = true;
     // Do NOT delete the entry from the in-flight maps yet. A late commit
@@ -1029,7 +1073,24 @@ export class EffectRunner {
     if (send.timer) this.timer.cancel(send.timer);
     send.phase = 'model-start';
     send.budgetMs = EffectRunner.SEND_TIMER_TIMEOUT_MS;
+    send.firstArmedAt = Date.now();
     send.timer = this.timer.schedule(() => this.onSendTimerFire(send), send.budgetMs);
+  }
+
+  /** FP-C2a: decide whether a model-start timer fire is a false positive that
+   *  should defer (re-arm) rather than dispatch PreflightFailed. True only when
+   *  the request's provider is saturated (queued or paused) AND the cumulative
+   *  model-start wait is still under the hard ceiling. Fail-open: absent gate /
+   *  unresolvable provider / missing metric yields fire. */
+  private shouldReArmModelStartTimer(send: InFlightSend): boolean {
+    const provider = this.deps.resolveSessionProvider?.(send.sessionPath);
+    const metrics = this.deps.getProviderGateMetrics?.();
+    return decideModelStartTimerAction({
+      elapsed: Date.now() - send.firstArmedAt,
+      ceiling: EffectRunner.MODEL_START_HARD_CEILING_MS,
+      provider,
+      metrics,
+    }).action === 'defer';
   }
 
   /** Clear the send-timer + abort context for a corrId. Called on pre-ack

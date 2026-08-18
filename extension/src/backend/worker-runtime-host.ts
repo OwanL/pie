@@ -15,6 +15,7 @@ import {
   NESTED_ALLOWED_BUCKETS_ENV,
   type DetailResult,
   type LazyDetailRef,
+  type ChatMessage,
   type ModelInfo,
   type ModelSettings,
   type RequestEnvelope,
@@ -23,7 +24,7 @@ import {
   TranscriptPagePayload,
 } from '../shared/protocol';
 import { deduplicateToolCallResultsForTransport } from '../shared/chat-message-parts';
-import { findDurableDetail } from '../shared/lazy-details';
+import { compactDurableMessageForTransport, findDurableDetail } from '../shared/lazy-details';
 import { LIVE_PIPELINE_LIMITS } from '../shared/live-pipeline-protocol';
 import { deriveContextUsageFromBranch } from './context-usage';
 import { resolveActiveModel } from './session-metadata';
@@ -68,6 +69,7 @@ import {
 } from './system-prompts';
 import type { DetailCursor, DetailPageRef, LiveSubagentDetailAddress } from '../shared/protocol/subagent-detail.js';
 import type { WorkerRuntimeOperation, WorkerJsonObject, WorkerJsonValue } from './worker-protocol';
+import { WORKER_IPC_MAX_ORDINARY_FRAME_BYTES } from './worker-protocol';
 import { WorkerServer } from './worker-server';
 import { installWorkerProviderNetworkLease } from './worker-provider-network-lease';
 import { WorkerLiveDetailStore } from './worker-live-detail-store';
@@ -89,6 +91,18 @@ export interface WorkerRuntimeHostOptions {
   owner: SdkWorkerOwnershipIdentity;
   patchIdentity: SdkPatchIdentity;
 }
+
+/**
+ * Wire headroom reserved for the frame identity fields that surround the
+ * terminal message projection (frame base, event wrapper, live-pipeline
+ * envelope). The projection budget is the ordinary-frame ceiling minus this
+ * margin, so a bounded `turn.terminal` can never be rejected by the writer.
+ */
+const WORKER_IPC_TERMINAL_MESSAGE_MARGIN = 24 * 1024;
+const WORKER_IPC_TERMINAL_MESSAGE_BUDGET =
+  WORKER_IPC_MAX_ORDINARY_FRAME_BYTES - WORKER_IPC_TERMINAL_MESSAGE_MARGIN;
+/** Same ceiling headroom for a single text/reasoning delta envelope. */
+const WORKER_IPC_DELTA_BUDGET = WORKER_IPC_TERMINAL_MESSAGE_BUDGET;
 
 /**
  * Focused per-root execution owner. It deliberately does not embed or start a
@@ -602,6 +616,16 @@ export class WorkerRuntimeHost {
   }
 
   private emit(event: string, payload?: unknown): void {
+    // The accumulator allows terminal messages up to its 30 MiB checkpoint
+    // ceiling (the legacy monolithic JSONL record budget). The worker's
+    // ordinary IPC frames are capped at 256 KiB, so outbound live semantics
+    // are projected onto the wire budget here; the durable session remains
+    // lossless and detailRefs keep every large body retrievable.
+    if (event === 'live.semantic') {
+      const bounded = boundLiveSemanticPayload(payload);
+      if (bounded === undefined) return; // dropped delta: host recovers via checkpoint rebase
+      payload = bounded;
+    }
     this.options.server.sendFrame({
       kind: 'runtime.event',
       event: event as never,
@@ -952,6 +976,41 @@ export class WorkerRuntimeHost {
     if (!payload.writeLease || typeof payload.writeLease !== 'object' || Array.isArray(payload.writeLease)) throw new Error('Invalid runtime promotion writeLease.');
     if (!payload.openedPayload || typeof payload.openedPayload !== 'object' || Array.isArray(payload.openedPayload)) throw new Error('Invalid runtime promotion openedPayload.');
   }
+}
+
+/**
+ * Project one live.semantic payload onto the worker IPC ordinary-frame
+ * ceiling. Returns `undefined` when the envelope must not be sent at all
+ * (the host detects the resulting seq gap and recovers the full content
+ * through the checkpoint rebase path).
+ */
+function boundLiveSemanticPayload(payload: unknown): unknown {
+  if (!payload || typeof payload !== 'object') return payload;
+  const envelope = payload as { kind?: unknown; delta?: unknown; sessionPath?: unknown; durableMessage?: unknown };
+  if (envelope.kind === 'turn.terminal') {
+    const durableMessage = envelope.durableMessage as ChatMessage;
+    const sessionPath = typeof envelope.sessionPath === 'string' ? envelope.sessionPath : '';
+    return {
+      ...envelope,
+      durableMessage: compactDurableMessageForTransport(
+        durableMessage,
+        sessionPath,
+        WORKER_IPC_TERMINAL_MESSAGE_BUDGET,
+      ),
+    };
+  }
+  if (envelope.kind === 'turn.text' || envelope.kind === 'turn.reasoning') {
+    // A single delta must fit the ordinary-frame ceiling with the envelope
+    // overhead. The accumulator's turn caps allow a part up to 512 KiB (its
+    // legacy JSONL-record budget); a provider emitting one giant update
+    // cannot ride the worker wire, so the envelope is dropped and the host
+    // recovers through the seq-gap checkpoint rebase path.
+    if (typeof envelope.delta === 'string'
+      && Buffer.byteLength(envelope.delta, 'utf8') > WORKER_IPC_DELTA_BUDGET) {
+      return undefined;
+    }
+  }
+  return payload;
 }
 
 function sameSessionPath(left: string, right: string): boolean {

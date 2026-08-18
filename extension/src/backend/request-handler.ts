@@ -1540,7 +1540,14 @@ async function handleSettingsSet(
   markRequestValidated(deps);
   const { sessionPath, ...rawUpdates } = params;
   const previousSettings = await deps.readModelSettings();
-  const targetContext = sessionPath ? await deps.ensureSessionContext(sessionPath) : undefined;
+  // A cold session has no live runtime: `getSessionContext` returns undefined
+  // and the handler persists the model/thinking level without a live switch.
+  // A hot session resolves its existing context and applies the live change.
+  // NOTE: a cold session's transcript is not rewritten here (there is no live
+  // runtime to append a per-session model/thinking-level change). The global
+  // default is updated and the session adopts it on promotion unless it already
+  // carries an explicit per-session model change in its transcript.
+  const targetContext = sessionPath ? deps.getSessionContext(sessionPath) : undefined;
   // The picker sends `defaultModel` (bare id) + `defaultProvider` as separate
   // fields so models that exist under multiple providers (e.g. gpt-5.5 under
   // both github-copilot and openai-codex) can be routed unambiguously, and so

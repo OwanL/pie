@@ -1,7 +1,7 @@
 {
-  "defaultModel": "gpt-5.6-luna",
-  "defaultThinkingLevel": "high",
-  "defaultProvider": "github-copilot",
+  "defaultModel": "deepseek-v4-flash:0731-cloud",
+  "defaultThinkingLevel": "max",
+  "defaultProvider": "ollama",
   "retry": {
     "enabled": true,
     "maxRetries": 8,
@@ -54,7 +54,7 @@
     "enabled": true,
     "profile": "default"
   },
-  "lastChangelogVersion": "0.80.2",
+  "lastChangelogVersion": "0.80.6",
   "subagent": {
     "confirmProjectAgents": false
   },

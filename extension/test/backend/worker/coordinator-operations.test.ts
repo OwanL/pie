@@ -17,7 +17,7 @@ test('coordinator operation catalog includes runtime-free durable mutations only
     assert.equal(isCoordinatorOperationAllowed(method, {}), true, method);
   }
   assert.equal(isCoordinatorOperationAllowed('settings.set', { defaultModel: 'x' }), true);
-  assert.equal(isCoordinatorOperationAllowed('settings.set', { sessionPath: '/hot', defaultModel: 'x' }), false);
+  assert.equal(isCoordinatorOperationAllowed('settings.set', { sessionPath: '/hot', defaultModel: 'x' }), true);
   for (const method of ['message.send', 'message.compact', 'message.interrupt', 'extension_ui.response', 'systemPromptToggles.set', 'liveTurn.checkpoint']) {
     assert.equal(isCoordinatorOperationAllowed(method, {}), false, method);
   }

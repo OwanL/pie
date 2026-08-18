@@ -597,11 +597,20 @@ export class WorkerRuntimeRouter {
     this.roots.set(routeKey(route.currentLeasePath), cold);
     this.notify(cold);
     this.reconcileInterruptedCheckpoint(route, snapshot);
+    // Preserve the crash cause behind the notice's More control. The worker's
+    // stderr tail is the only place an unhandled rejection/exception stack is
+    // visible; without it a SESSION_WORKER_EXITED notice is undiagnosable.
+    const stderrTail = snapshot.stderrTail?.trim();
+    const detail = [
+      snapshot.failure,
+      stderrTail ? `Worker stderr: ${stderrTail.slice(-2000)}` : undefined,
+    ].filter((part): part is string => typeof part === 'string' && part.length > 0).join('\n') || undefined;
     this.options.emit('operational-error', {
       incidentId: `worker-exit:${route.owner.workerId}:${route.owner.workerGeneration}`,
       code: 'SESSION_WORKER_EXITED',
       message: 'The session worker exited. Live work was interrupted and was not replayed.',
       sessionPath: route.currentLeasePath,
+      detail,
       checkpoint: crashCheckpoint,
     });
   }
