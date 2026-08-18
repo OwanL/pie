@@ -31,7 +31,7 @@ const COORDINATOR_METHODS: ReadonlySet<string> = new Set([
  * level directly (and re-broadcasts to hot workers) instead of paying a full
  * worker promotion. A hot session is still routed to its owning worker first.
  */
-export function isCoordinatorOperationAllowed(method: string, params: unknown): boolean {
+export function isCoordinatorOperationAllowed(method: string, _params: unknown): boolean {
   if (COORDINATOR_METHODS.has(method)) return true;
   if (method === 'settings.set') return true;
   return false;
