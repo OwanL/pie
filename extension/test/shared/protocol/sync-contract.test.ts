@@ -541,11 +541,16 @@ test('HostToWebviewMessage detail stream variants carry the full HostDetailRoute
   // The six stream variants are the ONLY stream content: every message
   // carries the full route so a stale or cross-key message can never be
   // applied to the wrong expanded subtree. Pages/deltas never enter
-  // `ViewState`; they cross only as these imperatives.
+  // `ViewState`; they cross only as these imperatives. v6: the route also
+  // carries the trusted renderer identity (`rendererId`/`rendererGeneration`),
+  // the complete ownership key is `{hostInstanceId, viewGeneration,
+  // rendererId, rendererGeneration, detailKey}`.
   const route = {
     hostInstanceId: 'host-instance-1',
     hostGeneration: 0,
     viewGeneration: 7,
+    rendererId: 'renderer-1',
+    rendererGeneration: 2,
     backendGeneration: 3,
     coordinatorGeneration: 1,
     workerId: 'worker-1',
@@ -664,7 +669,7 @@ test('webview behavior contract: collapsed cards never subscribe; expansion subs
   } = require('../../../src/webview/panel/transcript/detail-subscription-store') as typeof import('../../../src/webview/panel/transcript/detail-subscription-store');
   clearDetailSubscriptionStore();
   const posts: WebviewToHostMessage[] = [];
-  setDetailStoreContext({ hostInstanceId: 'h1', viewGeneration: 9, postMessage: (message) => posts.push(message) });
+  setDetailStoreContext({ hostInstanceId: 'h1', viewGeneration: 9, rendererId: 'renderer-1', rendererGeneration: 1, postMessage: (message) => posts.push(message) });
 
   const address: LiveSubagentDetailAddress = {
     sessionPath: '/workspace/session.jsonl',

@@ -57,6 +57,7 @@ export function handleRevertFile(state: ArchState, cmd: Extract<Command, { kind:
         corrId: cmd.corrId,
         sessionPath: cmd.sessionPath,
         filePath: cmd.filePath,
+        ...(cmd.source !== undefined ? { source: cmd.source } : {}),
       },
     ],
   };

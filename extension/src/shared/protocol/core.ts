@@ -20,8 +20,17 @@ export const SESSION_SNAPSHOT_TOO_LARGE_CODE = 'SESSION_SNAPSHOT_TOO_LARGE' as c
  * `rendererVisibilityChanged`, `rendererFocusChanged`), command
  * acknowledgement (`clientCommandId`, `commandAck`, `commandStatus`,
  * `commandStatusRequest`), and targeted `rendererNotice` feedback.
+ *
+ * v6 (browser server M2): `rendererHello` carries the live `viewGeneration`
+ * (the browser has no HTML-stamped generation; it must learn the fence from
+ * the hello), `HostDetailRoute` gains the trusted `rendererId`/
+ * `rendererGeneration` (the complete ownership key is
+ * `{hostInstanceId, viewGeneration, rendererId, rendererGeneration,
+ * detailKey}`), and the source-aware inline confirmation seam
+ * (`inlineConfirm`/`inlineConfirmResponse`) lands for browser-initiated
+ * model switches and destructive reverts.
  */
-export const WEBVIEW_PROTOCOL_VERSION = 5;
+export const WEBVIEW_PROTOCOL_VERSION = 6;
 
 export function assertProtocolVersion(peerLabel: string, protocolVersion: unknown): void {
   if (!Number.isInteger(protocolVersion)) {

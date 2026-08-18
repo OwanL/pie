@@ -1,0 +1,276 @@
+/**
+ * Client transport tests (browser server plan §4.3): the browser transport's
+ * rendererHello identity replacement, ready/refreshState handshake, reconnect
+ * backoff, outbound bounds, and lifecycle sends; the VS Code transport's
+ * HTML-stamped metadata and window-message channel.
+ */
+
+import assert from 'node:assert/strict';
+import test from 'node:test';
+
+import type { HostToWebviewMessage, WebviewToHostMessage } from '../../../src/shared/protocol';
+import { BrowserClientTransport, VsCodeClientTransport } from '../../../src/webview/transport/client-transport';
+
+// ─── Fake browser environment (installed before the transports run) ─────────
+
+const windowMessageListeners: Array<(event: { data: unknown }) => void> = [];
+const metaTags = new Map<string, string>();
+const vscodePosted: WebviewToHostMessage[] = [];
+
+(globalThis as Record<string, unknown>).window = {
+  location: { protocol: 'http:', host: '127.0.0.1:1997' },
+  addEventListener: (type: string, listener: (event: { data: unknown }) => void) => {
+    if (type === 'message') windowMessageListeners.push(listener);
+  },
+  removeEventListener: (type: string, listener: (event: { data: unknown }) => void) => {
+    if (type === 'message') {
+      const index = windowMessageListeners.indexOf(listener);
+      if (index >= 0) windowMessageListeners.splice(index, 1);
+    }
+  },
+};
+(globalThis as Record<string, unknown>).document = {
+  querySelector: (selector: string) => {
+    const name = /name="([^"]+)"/.exec(selector)?.[1];
+    const content = name === undefined ? undefined : metaTags.get(name);
+    return content === undefined
+      ? null
+      : { getAttribute: (attr: string) => (attr === 'content' ? content : null) };
+  },
+};
+(globalThis as Record<string, unknown>).acquireVsCodeApi = () => ({
+  postMessage: (message: WebviewToHostMessage) => vscodePosted.push(message),
+  getState: () => null,
+  setState: () => undefined,
+});
+
+let socketInstances: FakeWebSocket[] = [];
+class FakeWebSocket {
+  static OPEN = 1;
+  static CLOSED = 3;
+  readyState = FakeWebSocket.OPEN;
+  sent: string[] = [];
+  closed: Array<{ code: number; reason: string }> = [];
+  onopen: (() => void) | null = null;
+  onmessage: ((event: { data: unknown }) => void) | null = null;
+  onclose: (() => void) | null = null;
+  onerror: (() => void) | null = null;
+
+  constructor(public readonly url: string) {
+    socketInstances.push(this);
+  }
+
+  send(frame: string): void {
+    this.sent.push(frame);
+  }
+
+  close(code: number, reason: string): void {
+    this.closed.push({ code, reason });
+    this.readyState = FakeWebSocket.CLOSED;
+    this.onclose?.();
+  }
+}
+(globalThis as Record<string, unknown>).WebSocket = FakeWebSocket;
+
+interface Harness {
+  transport: BrowserClientTransport;
+  timers: Array<{ callback: () => void; delayMs: number }>;
+  handshakes: Array<{ rendererId: string; viewGeneration: number }>;
+  states: string[];
+}
+
+function createBrowserHarness(): Harness {
+  socketInstances = [];
+  const timers: Array<{ callback: () => void; delayMs: number }> = [];
+  const handshakes: Array<{ rendererId: string; viewGeneration: number }> = [];
+  const states: string[] = [];
+  const transport = new BrowserClientTransport({
+    wsRoute: '/ws',
+    onHandshake: (identity) => handshakes.push({ rendererId: identity.rendererId, viewGeneration: identity.viewGeneration }),
+    now: () => 0,
+    setTimeout: (callback, delayMs) => {
+      timers.push({ callback, delayMs });
+      return timers.length;
+    },
+    clearTimeout: () => undefined,
+  });
+  transport.onConnectionStateChange((state) => states.push(state));
+  return { transport, timers, handshakes, states };
+}
+
+function sendHello(socket: FakeWebSocket, viewGeneration = 5): void {
+  socket.onmessage?.({ data: JSON.stringify({
+    type: 'rendererHello',
+    protocolVersion: 6,
+    hostInstanceId: 'host-1',
+    rendererId: 'renderer-9',
+    rendererGeneration: 2,
+    viewGeneration,
+    assetVersion: 'asset-1',
+  }) });
+}
+
+test('connect(): opens the same-origin ws route and reports connecting → connected', () => {
+  const { transport, states } = createBrowserHarness();
+  assert.equal(transport.getConnectionState(), 'connecting', 'the initial state is connecting');
+  transport.connect();
+  assert.equal(socketInstances.length, 1);
+  assert.equal(socketInstances[0]?.url, 'ws://127.0.0.1:1997/ws');
+  assert.deepEqual(states, [], 'no transition event for the initial connecting state');
+  socketInstances[0]?.onopen?.();
+  assert.deepEqual(states, ['connected']);
+});
+
+test('rendererHello replaces the identity and sends ready + refreshState with the LIVE view generation', () => {
+  const { transport, handshakes } = createBrowserHarness();
+  transport.connect();
+  const socket = socketInstances[0]!;
+  socket.onopen?.();
+  sendHello(socket, 5);
+
+  assert.deepEqual(handshakes, [{ rendererId: 'renderer-9', viewGeneration: 5 }]);
+  const frames = socket.sent.map((frame) => JSON.parse(frame) as Record<string, unknown>);
+  assert.equal(frames.length, 2);
+  assert.deepEqual(frames[0], { type: 'ready', viewGeneration: 5 });
+  assert.deepEqual(frames[1], { type: 'refreshState', viewGeneration: 5 });
+});
+
+test('postMessage(): dropped while disconnected or before the hello; stamped after', () => {
+  const { transport } = createBrowserHarness();
+  transport.connect();
+  const socket = socketInstances[0]!;
+
+  assert.equal(transport.postMessage({ type: 'refreshState' }), false, 'no socket identity yet');
+  socket.onopen?.();
+  assert.equal(transport.postMessage({ type: 'refreshState' }), false, 'hello not yet received');
+  sendHello(socket, 5);
+
+  assert.equal(transport.postMessage({ type: 'refreshState' }), true);
+  const frame = JSON.parse(socket.sent[socket.sent.length - 1] ?? '{}') as Record<string, unknown>;
+  assert.equal(frame.viewGeneration, 5, 'outbound messages carry the live view generation');
+
+  socket.readyState = FakeWebSocket.CLOSED;
+  assert.equal(transport.postMessage({ type: 'refreshState' }), false, 'a closed socket never posts');
+});
+
+test('application commands are minted a clientCommandId and tracked', () => {
+  const { transport } = createBrowserHarness();
+  transport.connect();
+  const socket = socketInstances[0]!;
+  socket.onopen?.();
+  sendHello(socket, 5);
+
+  assert.equal(transport.postMessage({ type: 'newSession' }), true);
+  const frame = JSON.parse(socket.sent[socket.sent.length - 1] ?? '{}') as Record<string, unknown>;
+  assert.match(String(frame.clientCommandId), /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  assert.equal(frame.viewGeneration, 5);
+});
+
+test('an oversize outbound frame is dropped before send (32 MiB bound)', () => {
+  const { transport } = createBrowserHarness();
+  transport.connect();
+  const socket = socketInstances[0]!;
+  socket.onopen?.();
+  sendHello(socket, 5);
+
+  const huge = 'x'.repeat(33 * 1024 * 1024);
+  assert.equal(transport.postMessage({ type: 'send', sessionPath: '/session/a', text: huge, localId: 'l' }), false);
+  assert.equal(socket.sent.length, 2, 'only the handshake frames were sent');
+});
+
+test('onclose: disconnected state + exponential reconnect backoff (1s → 2s → 4s, capped at 30s)', () => {
+  const originalRandom = Math.random;
+  Math.random = () => 0.5; // deterministic jitter
+  try {
+    const { transport, timers, states } = createBrowserHarness();
+    transport.connect();
+    socketInstances[0]?.onopen?.();
+    socketInstances[0]?.onclose?.();
+
+    assert.deepEqual(states, ['connected', 'disconnected']);
+    assert.equal(timers.length, 1);
+    assert.equal(timers[0]?.delayMs, 1000);
+
+    timers[0]?.callback();
+    assert.equal(socketInstances.length, 2, 'reconnect opens a fresh socket');
+    socketInstances[1]?.onclose?.();
+    assert.equal(timers[1]?.delayMs, 2000);
+
+    timers[1]?.callback();
+    socketInstances[2]?.onclose?.();
+    assert.equal(timers[2]?.delayMs, 4000);
+
+    // Cap: drive the attempt counter to the max and assert the 30s ceiling.
+    for (let index = 3; index < 8; index += 1) {
+      timers[index - 1]?.callback();
+      socketInstances[index]?.onclose?.();
+    }
+    assert.equal(timers[7]?.delayMs, 30_000, 'backoff is capped at 30s');
+  } finally {
+    Math.random = originalRandom;
+  }
+});
+
+test('dispose(): cancels the reconnect timer and closes the socket permanently', () => {
+  const { transport, timers } = createBrowserHarness();
+  transport.connect();
+  const socket = socketInstances[0]!;
+
+  // Dispose while connected: the socket is closed with the dispose reason.
+  transport.dispose();
+  assert.equal(socket.closed[0]?.reason, 'client-dispose');
+  assert.equal(timers.length, 0, 'no reconnect is scheduled after dispose');
+
+  // Dispose after a peer close: the reconnect timer is cancelled.
+  const second = createBrowserHarness();
+  second.transport.connect();
+  socketInstances[0]?.onclose?.();
+  assert.equal(second.timers.length, 1);
+  second.transport.dispose();
+  second.timers[0]?.callback();
+  assert.equal(socketInstances.length, 1, 'no reconnect after dispose');
+});
+
+test('sendLifecycle(): visibility/focus carry the live view generation', () => {
+  const { transport } = createBrowserHarness();
+  transport.connect();
+  const socket = socketInstances[0]!;
+  socket.onopen?.();
+  sendHello(socket, 5);
+
+  transport.sendLifecycle('rendererVisibilityChanged', false);
+  transport.sendLifecycle('rendererFocusChanged', true);
+  const frames = socket.sent.slice(2).map((frame) => JSON.parse(frame) as Record<string, unknown>);
+  assert.deepEqual(frames, [
+    { type: 'rendererVisibilityChanged', visible: false, viewGeneration: 5 },
+    { type: 'rendererFocusChanged', focused: true, viewGeneration: 5 },
+  ]);
+});
+
+test('VsCodeClientTransport: HTML-stamped metadata on handshake messages, window-message dispatch', () => {
+  metaTags.set('pie-asset-version', 'asset-9');
+  metaTags.set('pie-view-generation', '3');
+  vscodePosted.length = 0;
+
+  const transport = new VsCodeClientTransport();
+  assert.equal(transport.getConnectionState(), 'connected');
+
+  const received: HostToWebviewMessage[] = [];
+  transport.subscribe((message) => received.push(message));
+
+  transport.postMessage({ type: 'ready' });
+  assert.deepEqual(vscodePosted[0], { type: 'ready', assetVersion: 'asset-9', viewGeneration: 3 });
+
+  transport.postMessage({ type: 'send', sessionPath: '/session/a', text: 'hi', localId: 'l' });
+  assert.equal((vscodePosted[1] as { viewGeneration?: number }).viewGeneration, 3, 'commands carry the stamped generation');
+
+  // Host messages arrive through the window channel; malformed frames are dropped.
+  windowMessageListeners.forEach((listener) => listener({ data: { type: 'state', revision: 1 } }));
+  windowMessageListeners.forEach((listener) => listener({ data: { notTyped: true } }));
+  assert.equal(received.length, 1);
+  assert.equal((received[0] as { type?: string }).type, 'state');
+
+  transport.dispose();
+  windowMessageListeners.forEach((listener) => listener({ data: { type: 'state', revision: 2 } }));
+  assert.equal(received.length, 1, 'disposed transports stop dispatching');
+});

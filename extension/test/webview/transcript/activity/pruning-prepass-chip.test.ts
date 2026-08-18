@@ -23,10 +23,21 @@ import type { AppAdapter } from '../../../../src/webview/panel/app';
 import type { ViewState, ChatMessage } from '../../../../src/shared/protocol';
 import { EMPTY_TRANSCRIPT_WINDOW } from '../../../../src/shared/protocol';
 import { PruningHeaderChip } from '../../../../src/webview/panel/transcript/pruning-header';
+import type { ClientTransport } from '../../../../src/webview/transport/client-transport';
+
+function makeFakeTransport(): ClientTransport {
+  return {
+    postMessage: () => true,
+    subscribe: () => () => undefined,
+    getConnectionState: () => 'connected',
+    onConnectionStateChange: () => () => undefined,
+    dispose: () => undefined,
+  };
+}
 
 function makeAdapter(): AppAdapter & { messages: any[] } {
   const messages: any[] = [];
-  return { messages, postMessage: (msg: any) => messages.push(msg) };
+  return { messages, transport: makeFakeTransport(), postMessage: (msg: any) => messages.push(msg) };
 }
 
 function sessionViewState(overrides: Partial<ViewState> = {}): ViewState {

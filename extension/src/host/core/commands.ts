@@ -10,7 +10,7 @@
  * these types yet.
  */
 
-import type { ComposerInput, ComposerInputDraft, SessionSummary, UserContentPart, ExtensionUIResponsePayload, PruningMode } from '../../shared/protocol';
+import type { ComposerInput, ComposerInputDraft, SessionSummary, UserContentPart, ExtensionUIResponsePayload, PruningMode, RendererCommandContext } from '../../shared/protocol';
 import type { LiveSubagentDetailAddress, DetailCursor, DetailPageRef } from '../../shared/protocol/subagent-detail';
 
 import type { ModelSettings, ChatPrefs } from '../../shared/protocol';
@@ -305,6 +305,11 @@ export interface DetailSubscribeCommand extends CommandBase {
   detailKey: string;
   address: LiveSubagentDetailAddress;
   cursor?: DetailCursor;
+  /** Trusted renderer identity (browser server plan §5.4): the complete
+   *  ownership key is `{hostInstanceId, viewGeneration, rendererId,
+   *  rendererGeneration, detailKey}`. Never client-supplied. */
+  rendererId?: string;
+  rendererGeneration?: number;
 }
 
 export interface DetailUnsubscribeCommand extends CommandBase {
@@ -312,6 +317,8 @@ export interface DetailUnsubscribeCommand extends CommandBase {
   viewGeneration: number;
   detailKey: string;
   reason: 'collapse' | 'unmount' | 'session-change';
+  rendererId?: string;
+  rendererGeneration?: number;
 }
 
 export interface DetailFetchPagesCommand extends CommandBase {
@@ -319,6 +326,8 @@ export interface DetailFetchPagesCommand extends CommandBase {
   viewGeneration: number;
   detailKey: string;
   ref: DetailPageRef;
+  rendererId?: string;
+  rendererGeneration?: number;
 }
 
 export type Command =
@@ -374,6 +383,11 @@ export interface SetModelCommand extends CommandBase {
   kind: 'SetModel';
   sessionPath: string;
   modelSettings: ModelSettings;
+  /** Trusted initiating renderer (browser server plan §9): the M2
+   *  source-aware confirmation seam routes browser-initiated switches through
+   *  an inline confirm in the initiating renderer instead of an invisible
+   *  desktop modal. Never client-supplied. */
+  source?: RendererCommandContext;
 }
 
 /** Hydrate a session's model state from the backend (read-only refresh). */
@@ -418,6 +432,10 @@ export interface RevertFileCommand extends CommandBase {
   kind: 'RevertFile';
   sessionPath: string;
   filePath: string;
+  /** Trusted initiating renderer (browser server plan §9): destructive
+   *   reverts from a browser source confirm inline in that renderer first.
+   *   Never client-supplied. */
+  source?: RendererCommandContext;
 }
 
 export interface CloseSessionCommand extends CommandBase {

@@ -54,6 +54,9 @@ export interface RendererTransport {
 /** Per-renderer delivery debug state (subset of the delivery controller's). */
 export interface RendererSessionDebugState {
   visible: boolean;
+  /** Browser focus belief (`rendererFocusChanged`); M3 attention arbitration
+   *  consumes it. Recorded here so the belief is observable/testable. */
+  focused: boolean;
   webviewReady: boolean;
   globalDirty: boolean;
   globalRevision: number;
@@ -87,6 +90,8 @@ export interface RendererRegistration {
   handleReloadStart(reason: string): void;
   /** Visibility transition with retained-dirty resume logic. */
   setVisible(visible: boolean): void;
+  /** Focus belief transition (`rendererFocusChanged`). */
+  setFocused(focused: boolean): void;
   /** Arm the readiness probe when stuck (adapter calls after attaching). */
   armReadinessProbeIfStuck(): void;
   /** Delivery controller access (readiness-probe path used by adapters/tests). */

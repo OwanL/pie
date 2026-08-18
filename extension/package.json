@@ -78,6 +78,18 @@
       {
         "command": "pie.dumpDebugState",
         "title": "pie: Dump Debug State"
+      },
+      {
+        "command": "pie.openInBrowser",
+        "title": "pie: Open in Browser"
+      },
+      {
+        "command": "pie.copyBrowserUrl",
+        "title": "pie: Copy Browser URL"
+      },
+      {
+        "command": "pie.restartBrowserServer",
+        "title": "pie: Restart Browser Server"
       }
     ],
     "menus": {
@@ -138,6 +150,23 @@
             "maxTotalSizeMb": { "type": "number", "default": 500, "minimum": 0, "description": "After age-based deletion, evict the oldest temp logs until the combined size of survivors is under this cap (MB). 0 disables the size cap." }
           },
           "description": "Retention for orphaned pi tool-output temp logs the SDK writes on truncation but never cleans up. Reaped best-effort on extension activation."
+        },
+        "pie.browserServer.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Start the loopback browser server (http://127.0.0.1:1997) automatically when pie activates. The listener binds 127.0.0.1 only and is unreachable on LAN interfaces."
+        },
+        "pie.browserServer.port": {
+          "type": "number",
+          "default": 1997,
+          "minimum": 1,
+          "maximum": 65535,
+          "description": "Preferred loopback port for the browser server. When occupied, an OS-assigned fallback port is used instead (unless `requirePreferredPort` is set)."
+        },
+        "pie.browserServer.requirePreferredPort": {
+          "type": "boolean",
+          "default": false,
+          "description": "When true, fail instead of falling back to an OS-assigned port if the preferred port is occupied."
         }
       }
     }
@@ -173,6 +202,7 @@
     "@types/jsdom": "^21.1.7",
     "@types/node": "^20.0.0",
     "@types/vscode": "^1.80.0",
+    "@types/ws": "^8.18.1",
     "@vscode/vsce": "^3.0.0",
     "ajv": "^8.20.0",
     "dompurify": "^3.2.6",
@@ -195,6 +225,7 @@
     "gpt-tokenizer": "^3.4.0",
     "highlight.js": "^11.11.1",
     "immer": "^11.1.8",
+    "ws": "^8.21.0",
     "yaml": "^2.9.0"
   },
   "overrides": {

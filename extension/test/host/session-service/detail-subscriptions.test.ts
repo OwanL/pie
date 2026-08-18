@@ -599,6 +599,90 @@ test('the durable terminal handoff identity is replayed on re-expansion', async 
   }
 });
 
+test('browser ownership: the complete key {viewGeneration, rendererId, rendererGeneration, detailKey} isolates renderers', async () => {
+  const { service, requests, posted } = createHarness();
+  // Two browser renderers subscribe to the SAME viewGeneration + detailKey.
+  // The complete ownership key keeps them separate: no idempotent dedupe, no
+  // cross-renderer stream routing, no cross-renderer tombstone.
+  service.subscribe('subscription-a', 3, KEY, address(), undefined, 'renderer-a', 1);
+  service.subscribe('subscription-b', 3, KEY, address(), undefined, 'renderer-b', 1);
+  await tick();
+  assert.equal(requests.length, 2, 'each renderer gets its own backend subscription');
+
+  service.handleStream(startMessage('subscription-a'));
+  service.handleStream(startMessage('subscription-b'));
+  const starts = posted.filter((message) => message.type === 'detail.start');
+  assert.equal(starts.length, 2);
+  const startA = starts.find((message) => message.subscriptionId === 'subscription-a');
+  const startB = starts.find((message) => message.subscriptionId === 'subscription-b');
+  assert.equal(startA?.type, 'detail.start');
+  assert.equal(startB?.type, 'detail.start');
+  if (startA?.type === 'detail.start' && startB?.type === 'detail.start') {
+    assert.equal(startA.rendererId, 'renderer-a');
+    assert.equal(startA.rendererGeneration, 1);
+    assert.equal(startB.rendererId, 'renderer-b');
+    assert.equal(startB.rendererGeneration, 1);
+  }
+
+  // Stream content for A routes ONLY to A (the route carries A's identity).
+  service.handleStream(pageMessage('subscription-a', 0, 1, '{"a":1}', fence()));
+  const pageA = posted.find((message) => message.type === 'detail.page' && message.subscriptionId === 'subscription-a');
+  assert.equal(pageA?.type, 'detail.page');
+  if (pageA?.type === 'detail.page') {
+    assert.equal(pageA.rendererId, 'renderer-a');
+  }
+
+  // A's unsubscribe must not touch B's owner (complete-key tombstones).
+  service.unsubscribe(3, KEY, 'collapse', 'renderer-a', 1);
+  service.handleStream(pageMessage('subscription-b', 0, 1, '{"b":1}', fence()));
+  const pageB = posted.find((message) => message.type === 'detail.page' && message.subscriptionId === 'subscription-b');
+  assert.equal(pageB?.type, 'detail.page', 'B streams after A unsubscribes');
+  if (pageB?.type === 'detail.page') {
+    assert.equal(pageB.rendererId, 'renderer-b');
+  }
+
+  // A's tombstone absorbs A's late traffic; B's stream is untouched.
+  service.handleStream(pageMessage('subscription-a', 0, 1, '{"a-late":1}', fence()));
+  const lateA = posted.filter((message) => message.type === 'detail.page' && message.subscriptionId === 'subscription-a');
+  assert.equal(lateA.length, 1, 'late A traffic is absorbed by the tombstone');
+});
+
+test('browser ownership: a renderer generation bump fences the old owner', async () => {
+  const { service, requests, posted } = createHarness();
+  // A reconnect registers the same rendererId with a NEW generation; the old
+  // owner (generation 1) must not be settled or streamed to the new one.
+  service.subscribe('subscription-old', 3, KEY, address(), undefined, 'renderer-a', 1);
+  await tick();
+  service.handleStream(startMessage('subscription-old'));
+  const oldStart = posted.find((message) => message.type === 'detail.start' && message.subscriptionId === 'subscription-old');
+  assert.equal(oldStart?.type, 'detail.start');
+  if (oldStart?.type === 'detail.start') {
+    assert.equal(oldStart.rendererId, 'renderer-a');
+    assert.equal(oldStart.rendererGeneration, 1);
+  }
+
+  // The old owner's terminal handoff is keyed to generation 1: re-expanding
+  // the key from the NEW generation must NOT be answered by the old durable
+  // record (the complete ownership key includes rendererGeneration).
+  service.handleStream({
+    kind: 'detail.terminal', subscriptionId: 'subscription-old', revision: 1,
+    durableRef: DURABLE_REF, fence: fence(),
+  });
+  service.subscribe('subscription-new', 3, KEY, address(), undefined, 'renderer-a', 2);
+  await tick();
+  const subscribeRequests = requests.filter((request) => request.method === 'detail.subscribe');
+  assert.equal(subscribeRequests.length, 2, 'generation-2 re-expansion is NOT answered by the generation-1 durable record');
+  assert.equal((subscribeRequests[1]?.params as { subscriptionId?: string } | undefined)?.subscriptionId, 'subscription-new');
+
+  // The generation-2 stream routes with the NEW generation.
+  service.handleStream(startMessage('subscription-new'));
+  const newStart = posted.find((message) => message.type === 'detail.start' && message.subscriptionId === 'subscription-new');
+  assert.equal(newStart?.type, 'detail.start');
+  if (newStart?.type === 'detail.start') {
+    assert.equal(newStart.rendererGeneration, 2);
+  }
+});
+
 // Segmentation mechanics (UTF-8-safe boundaries, checksums, stable ids, and
 // reassembly) are covered by the shared suite in
 // test/shared/detail-segmentation.test.ts, used by the worker's live store

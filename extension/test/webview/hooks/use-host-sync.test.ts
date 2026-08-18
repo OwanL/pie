@@ -47,6 +47,7 @@ test('a queued background draft survives a same-host session switch', () => {
     },
     setViewState: () => undefined,
     setCommitTarget: () => undefined,
+    setInlineConfirm: () => undefined,
     postMessage: () => undefined,
   };
 

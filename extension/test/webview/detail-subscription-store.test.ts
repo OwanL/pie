@@ -34,6 +34,8 @@ function route(subscriptionId: string, detailKey = KEY): HostDetailRoute {
     hostInstanceId: 'h1',
     hostGeneration: 0,
     viewGeneration: 1,
+    rendererId: 'renderer-1',
+    rendererGeneration: 1,
     backendGeneration: 1,
     coordinatorGeneration: 1,
     workerId: 'w1',
@@ -165,6 +167,8 @@ function install(posts: WebviewToHostMessage[] = []): WebviewToHostMessage[] {
   setDetailStoreContext({
     hostInstanceId: 'h1',
     viewGeneration: 1,
+    rendererId: 'renderer-1',
+    rendererGeneration: 1,
     postMessage: (message) => posts.push(message),
   });
   return posts;

@@ -26,6 +26,13 @@ export interface SidebarViewProviderOptions {
   retryDelayMs?: number;
   maxRetryAttempts?: number;
   acceptedLedgerCapacity?: number;
+  /** Renderer-scoped snapshot routing for renderers NOT owned by this hub
+   *  (browser sockets registered in the browser server's hub). Wired by
+   *  `PieExtension`; absent, foreign ids are a no-op. */
+  onForeignRequestState?(rendererId: string): void;
+  /** Renderer-scoped imperative routing for foreign renderers (browser
+   *  server plan §4.4: lazy-detail responses answer the initiating renderer). */
+  onForeignPostImperative?(rendererId: string, message: HostToWebviewMessage): void;
 }
 
 /**
@@ -186,6 +193,32 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
   /** Request one immediate authoritative full snapshot. */
   postState(): void {
     this.hub.requestState(this.session.rendererId);
+  }
+
+  /**
+   * Renderer-scoped immediate snapshot (browser server plan §4.1): handshake
+   * messages answer THEIR OWN renderer. The sidebar's own renderer is served
+   * by this hub; a foreign renderer id (a browser socket registered in the
+   * browser server's hub) is routed through the foreign handler wired by
+   * `PieExtension`.
+   */
+  requestState(rendererId?: string): void {
+    if (rendererId === undefined || rendererId === this.session.rendererId) {
+      this.hub.requestState(this.session.rendererId);
+      return;
+    }
+    this.providerOptions.onForeignRequestState?.(rendererId);
+  }
+
+  /** Renderer-scoped imperative (browser server plan §4.4): lazy-detail
+   *  responses and other targeted imperatives answer THEIR OWN renderer.
+   *  Foreign renderer ids route through the browser server's hub. */
+  postImperativeToRenderer(rendererId: string, message: HostToWebviewMessage): void {
+    if (rendererId === this.session.rendererId) {
+      this.hub.postImperative(message, rendererId);
+      return;
+    }
+    this.providerOptions.onForeignPostImperative?.(rendererId, message);
   }
 
   /**

@@ -2,7 +2,7 @@ import * as crypto from 'node:crypto';
 
 import * as vscode from 'vscode';
 
-import type { WebviewToHostMessage, SessionSummary, ChatPrefs, DetailResult, LazyDetailRef, PruningSettings, ToolResultPruningSettings, PruningMode } from '../../shared/protocol';
+import type { WebviewToHostMessage, SessionSummary, ChatPrefs, DetailResult, LazyDetailRef, PruningSettings, ToolResultPruningSettings, PruningMode, RendererCommandContext } from '../../shared/protocol';
 import type { Event } from './events';
 import type { ArchState } from './reducer';
 import { bootLog } from '../util/audit';
@@ -16,6 +16,12 @@ export interface SidebarProviderLike {
   postState(): void;
   postSelectionState?(): void;
   postImperative(msg: any): void;
+  /** Renderer-scoped immediate snapshot (browser server plan §4.1): handshake
+   *  messages answer their OWN renderer, not the sidebar. */
+  requestState?(rendererId?: string): void;
+  /** Renderer-scoped imperative (browser server plan §4.4): lazy-detail
+   *  responses answer the INITIATING renderer, not the sidebar. */
+  postImperativeToRenderer?(rendererId: string, msg: any): void;
 }
 
 /** Minimal session-service surface the router needs. */
@@ -77,9 +83,9 @@ export class MessageRouter {
   ) {
   }
 
-  async handle(msg: WebviewToHostMessage): Promise<void> {
+  async handle(msg: WebviewToHostMessage, context?: RendererCommandContext): Promise<void> {
     try {
-      await this.routeMessage(msg);
+      await this.routeMessage(msg, context);
     } catch (err) {
       appendPieError('message-router', 'handle failed', err, { messageType: msg?.type });
       // User-initiated send/edit: surface a notice so the failure isn't silent.
@@ -96,7 +102,7 @@ export class MessageRouter {
     }
   }
 
-  private async routeMessage(msg: WebviewToHostMessage): Promise<void> {
+  private async routeMessage(msg: WebviewToHostMessage, context?: RendererCommandContext): Promise<void> {
     if (msg.type === 'ready' || msg.type === 'refreshState' || msg.type === 'requestSnapshot') {
       // Read ArchState fields directly instead of running a full O(transcript)
       // `selectViewState` projection purely to log five fields. These inbound
@@ -119,26 +125,26 @@ export class MessageRouter {
 
     switch (msg.type) {
       case 'ready':
-        return this.onReady();
+        return this.onReady(context);
 
       case 'refreshState':
-        return await this.onRefreshState();
+        return await this.onRefreshState(context);
 
       case 'requestSnapshot':
-        return this.onRequestSnapshot();
+        return this.onRequestSnapshot(context);
 
       case 'send':
-        return await this.onSend(msg as Extract<WebviewToHostMessage, { type: 'send' }>);
+        return await this.onSend(msg as Extract<WebviewToHostMessage, { type: 'send' }>, undefined, context);
 
       case 'editMessage':
-        return await this.onEditMessage(msg as Extract<WebviewToHostMessage, { type: 'editMessage' }>);
+        return await this.onEditMessage(msg as Extract<WebviewToHostMessage, { type: 'editMessage' }>, context);
 
       case 'interrupt':
-        return this.onInterrupt(msg as Extract<WebviewToHostMessage, { type: 'interrupt' }>);
+        return this.onInterrupt(msg as Extract<WebviewToHostMessage, { type: 'interrupt' }>, context);
       case 'compact':
         return this.onCompact(msg as Extract<WebviewToHostMessage, { type: 'compact' }>);
       case 'clearQueue':
-        return this.onClearQueue(msg as Extract<WebviewToHostMessage, { type: 'clearQueue' }>);
+        return this.onClearQueue(msg as Extract<WebviewToHostMessage, { type: 'clearQueue' }>, context);
 
       case 'openFilePicker':
         return await this.onOpenFilePicker();
@@ -153,7 +159,7 @@ export class MessageRouter {
         return this.onRemoveComposerInput(msg as Extract<WebviewToHostMessage, { type: 'removeComposerInput' }>);
 
       case 'openFile':
-        return await this.onOpenFile(msg as Extract<WebviewToHostMessage, { type: 'openFile' }>);
+        return await this.onOpenFile(msg as Extract<WebviewToHostMessage, { type: 'openFile' }>, context);
 
       case 'newSession':
         return this.onNewSession();
@@ -165,19 +171,19 @@ export class MessageRouter {
         return await this.onCloseSession(msg as Extract<WebviewToHostMessage, { type: 'closeSession' }>);
 
       case 'requestDetail':
-        return await this.onRequestDetail(msg as Extract<WebviewToHostMessage, { type: 'requestDetail' }>);
+        return await this.onRequestDetail(msg as Extract<WebviewToHostMessage, { type: 'requestDetail' }>, context);
 
       case 'detail.subscribe':
-        return this.onDetailSubscribe(msg as Extract<WebviewToHostMessage, { type: 'detail.subscribe' }>);
+        return this.onDetailSubscribe(msg as Extract<WebviewToHostMessage, { type: 'detail.subscribe' }>, context);
 
       case 'detail.unsubscribe':
-        return this.onDetailUnsubscribe(msg as Extract<WebviewToHostMessage, { type: 'detail.unsubscribe' }>);
+        return this.onDetailUnsubscribe(msg as Extract<WebviewToHostMessage, { type: 'detail.unsubscribe' }>, context);
 
       case 'detail.fetchPages':
-        return this.onDetailFetchPages(msg as Extract<WebviewToHostMessage, { type: 'detail.fetchPages' }>);
+        return this.onDetailFetchPages(msg as Extract<WebviewToHostMessage, { type: 'detail.fetchPages' }>, context);
 
       case 'duplicateSession':
-        return await this.onDuplicateSession(msg as Extract<WebviewToHostMessage, { type: 'duplicateSession' }>);
+        return await this.onDuplicateSession(msg as Extract<WebviewToHostMessage, { type: 'duplicateSession' }>, context);
 
       case 'retryCreateOperation':
         this.service.retryCreateOperation(msg.operationId);
@@ -189,22 +195,22 @@ export class MessageRouter {
       case 'togglePinTab':
         return this.onTogglePinTab(msg as Extract<WebviewToHostMessage, { type: 'togglePinTab' }>);
       case 'groupPinnedTab':
-        return this.onGroupPinnedTab(msg as Extract<WebviewToHostMessage, { type: 'groupPinnedTab' }>);
+        return this.onGroupPinnedTab(msg as Extract<WebviewToHostMessage, { type: 'groupPinnedTab' }>, context);
       case 'mergePinnedGroups':
-        return this.onMergePinnedGroups(msg as Extract<WebviewToHostMessage, { type: 'mergePinnedGroups' }>);
+        return this.onMergePinnedGroups(msg as Extract<WebviewToHostMessage, { type: 'mergePinnedGroups' }>, context);
       case 'ungroupPinnedTab':
-        return this.onUngroupPinnedTab(msg as Extract<WebviewToHostMessage, { type: 'ungroupPinnedTab' }>);
+        return this.onUngroupPinnedTab(msg as Extract<WebviewToHostMessage, { type: 'ungroupPinnedTab' }>, context);
       case 'movePinnedItem':
-        return this.onMovePinnedItem(msg as Extract<WebviewToHostMessage, { type: 'movePinnedItem' }>);
+        return this.onMovePinnedItem(msg as Extract<WebviewToHostMessage, { type: 'movePinnedItem' }>, context);
 
       case 'loadOlderTranscript':
-        return await this.onLoadOlderTranscript(msg as Extract<WebviewToHostMessage, { type: 'loadOlderTranscript' }>);
+        return await this.onLoadOlderTranscript(msg as Extract<WebviewToHostMessage, { type: 'loadOlderTranscript' }>, context);
 
       case 'loadNewerTranscript':
-        return await this.onLoadNewerTranscript(msg as Extract<WebviewToHostMessage, { type: 'loadNewerTranscript' }>);
+        return await this.onLoadNewerTranscript(msg as Extract<WebviewToHostMessage, { type: 'loadNewerTranscript' }>, context);
 
       case 'jumpToLatestTranscript':
-        return await this.onJumpToLatestTranscript(msg as Extract<WebviewToHostMessage, { type: 'jumpToLatestTranscript' }>);
+        return await this.onJumpToLatestTranscript(msg as Extract<WebviewToHostMessage, { type: 'jumpToLatestTranscript' }>, context);
 
       case 'startNewTask':
         return this.onStartNewTask(msg as Extract<WebviewToHostMessage, { type: 'startNewTask' }>);
@@ -213,7 +219,7 @@ export class MessageRouter {
         return this.onContinueTask(msg as Extract<WebviewToHostMessage, { type: 'continueTask' }>);
 
       case 'setModel':
-        return this.onSetModel(msg as Extract<WebviewToHostMessage, { type: 'setModel' }>);
+        return this.onSetModel(msg as Extract<WebviewToHostMessage, { type: 'setModel' }>, context);
 
       case 'openFileDiff':
         return await this.onOpenFileDiff(msg as Extract<WebviewToHostMessage, { type: 'openFileDiff' }>);
@@ -222,7 +228,7 @@ export class MessageRouter {
         return await this.onOpenFileInEditor(msg as Extract<WebviewToHostMessage, { type: 'openFileInEditor' }>);
 
       case 'revertFile':
-        return await this.onRevertFile(msg as Extract<WebviewToHostMessage, { type: 'revertFile' }>);
+        return await this.onRevertFile(msg as Extract<WebviewToHostMessage, { type: 'revertFile' }>, context);
 
       case 'setFileRead':
         return this.onSetFileRead(msg as Extract<WebviewToHostMessage, { type: 'setFileRead' }>);
@@ -234,7 +240,7 @@ export class MessageRouter {
         return this.onSetPrefs(msg as Extract<WebviewToHostMessage, { type: 'setPrefs' }>);
 
       case 'setPrivacyMode':
-        return this.onSetPrivacyMode(msg as Extract<WebviewToHostMessage, { type: 'setPrivacyMode' }>);
+        return this.onSetPrivacyMode(msg as Extract<WebviewToHostMessage, { type: 'setPrivacyMode' }>, context);
 
       case 'setPruningSettings':
         return await this.onSetPruningSettings(msg as Extract<WebviewToHostMessage, { type: 'setPruningSettings' }>);
@@ -263,7 +269,7 @@ export class MessageRouter {
         return;
 
       case 'extensionUiResponse':
-        return await this.onExtensionUiResponse(msg as Extract<WebviewToHostMessage, { type: 'extensionUiResponse' }>);
+        return await this.onExtensionUiResponse(msg as Extract<WebviewToHostMessage, { type: 'extensionUiResponse' }>, context);
 
       case 'setFileChangesExpanded':
         return this.onSetFileChangesExpanded(msg as Extract<WebviewToHostMessage, { type: 'setFileChangesExpanded' }>);
@@ -280,7 +286,7 @@ export class MessageRouter {
         return this.onRestartBackend();
 
       case 'retrySend':
-        return await this.onRetrySend(msg as Extract<WebviewToHostMessage, { type: 'retrySend' }>);
+        return await this.onRetrySend(msg as Extract<WebviewToHostMessage, { type: 'retrySend' }>, context);
 
       case 'log':
         return this.onLog(msg as Extract<WebviewToHostMessage, { type: 'log' }>);
@@ -294,7 +300,22 @@ export class MessageRouter {
   // Individual message handlers
   // ---------------------------------------------------------------------------
 
-  private onReady(): void {
+  /** Command-level rejection reporting for browser sources (browser server
+   *  plan §5.2): the browser command gate records exactly one `rejected`
+   *  decision + ack. The trusted sidebar has no hook and is unaffected. */
+  private rejectBrowser(msg: { type: string }, context: RendererCommandContext | undefined, reason: string): void {
+    context?.onBrowserCommandRejected?.(msg.type, reason);
+  }
+
+  private postStateFor(context: RendererCommandContext | undefined): void {
+    if (this.sidebarProvider.requestState && context?.rendererId) {
+      this.sidebarProvider.requestState(context.rendererId);
+      return;
+    }
+    this.sidebarProvider.postState();
+  }
+
+  private onReady(context?: RendererCommandContext): void {
     // A running tab may have been absent from the persisted open-tab list
     // during renderer reload. Host-owned live state never left ArchState, so
     // repairing an unmarked omission is a cheap tab projection repair, not a
@@ -318,10 +339,12 @@ export class MessageRouter {
         cmd: { kind: 'SelectSession', corrId: crypto.randomUUID(), sessionPath: hiddenRunning[0] },
       });
     }
-    this.sidebarProvider.postState();
+    // Handshake answers are renderer-scoped (browser server plan §4.1): the
+    // readying renderer gets the snapshot, not the sidebar.
+    this.postStateFor(context);
   }
 
-  private async onRefreshState(): Promise<void> {
+  private async onRefreshState(context?: RendererCommandContext): Promise<void> {
     const activeSessionPath = this.getArchState().sessions.activeSessionPath;
     if (activeSessionPath && !this.isPendingTabPathFn(activeSessionPath)) {
       // Phase 2: route through the CQRS reducer + effect runner instead of
@@ -333,11 +356,11 @@ export class MessageRouter {
         cmd: { kind: 'HydrateModel', corrId: crypto.randomUUID(), sessionPath: activeSessionPath },
       });
     }
-    this.sidebarProvider.postState();
+    this.postStateFor(context);
   }
 
-  private onRequestSnapshot(): void {
-    this.sidebarProvider.postState();
+  private onRequestSnapshot(context?: RendererCommandContext): void {
+    this.postStateFor(context);
   }
 
   private onCompact(msg: Extract<WebviewToHostMessage, { type: 'compact' }>): void {
@@ -347,11 +370,12 @@ export class MessageRouter {
     });
   }
 
-  private async onSend(msg: Extract<WebviewToHostMessage, { type: 'send' }>, opts?: { priorPruningMode?: PruningMode }): Promise<void> {
+  private async onSend(msg: Extract<WebviewToHostMessage, { type: 'send' }>, opts?: { priorPruningMode?: PruningMode }, context?: RendererCommandContext): Promise<void> {
     const sessionPath = typeof msg.sessionPath === 'string' ? msg.sessionPath : null;
     const text = typeof msg.text === 'string' ? msg.text : '';
     const webviewLocalId = msg.localId;
     if (!sessionPath) {
+      this.rejectBrowser(msg, context, 'missing-session-path');
       this.dispatchEvent({ kind: 'NoticeShown', notice: 'Protocol defect: send arrived without a sessionPath.' });
       return;
     }
@@ -364,6 +388,7 @@ export class MessageRouter {
     // clear + session-name derivation happen uniformly in the reducer / onSend.
 
     if (!this.getArchState().sessions.openTabPaths.includes(sessionPath)) {
+      this.rejectBrowser(msg, context, 'session-not-open');
       this.dispatchEvent({ kind: 'NoticeShown', notice: 'Cannot send: the selected session is no longer open.' });
       return;
     }
@@ -371,7 +396,10 @@ export class MessageRouter {
     const inputs = [
       ...(this.getArchState().composer.pendingComposerInputsBySession[sessionPath] ?? []),
     ];
-    if (!text.trim() && inputs.length === 0) return;
+    if (!text.trim() && inputs.length === 0) {
+      this.rejectBrowser(msg, context, 'empty-send');
+      return;
+    }
 
     // Pre-compute values the reducer needs.
     const composedText = buildPromptText(text, inputs);
@@ -398,23 +426,29 @@ export class MessageRouter {
     });
   }
 
-  private async onEditMessage(msg: Extract<WebviewToHostMessage, { type: 'editMessage' }>): Promise<void> {
+  private async onEditMessage(msg: Extract<WebviewToHostMessage, { type: 'editMessage' }>, context?: RendererCommandContext): Promise<void> {
     const sessionPath = typeof msg.sessionPath === 'string' ? msg.sessionPath : null;
     const text = typeof msg.text === 'string' ? msg.text : '';
     const messageId = typeof msg.messageId === 'string' ? msg.messageId : '';
     if (!sessionPath) {
+      this.rejectBrowser(msg, context, 'missing-session-path');
       this.dispatchEvent({ kind: 'NoticeShown', notice: 'Protocol defect: editMessage arrived without a sessionPath.' });
       return;
     }
     const inputs = Array.isArray(msg.inputs) ? msg.inputs : [];
-    if ((!text.trim() && inputs.length === 0) || !messageId) return;
+    if ((!text.trim() && inputs.length === 0) || !messageId) {
+      this.rejectBrowser(msg, context, 'empty-edit');
+      return;
+    }
 
     // Pre-flight validation.
     if (this.isPendingTabPathFn(sessionPath)) {
+      this.rejectBrowser(msg, context, 'session-still-opening');
       this.dispatchEvent({ kind: 'NoticeShown', notice: 'Cannot edit: the session is still opening.' });
       return;
     }
     if (!this.getArchState().sessions.openTabPaths.includes(sessionPath)) {
+      this.rejectBrowser(msg, context, 'session-not-open');
       this.dispatchEvent({ kind: 'NoticeShown', notice: 'Cannot edit: the selected session is no longer open.' });
       return;
     }
@@ -426,6 +460,7 @@ export class MessageRouter {
 
     if (msg.queued || (target?.role === 'user' && target.status === 'queued')) {
       if (target?.role !== 'user' || target.status !== 'queued') {
+        this.rejectBrowser(msg, context, 'queued-message-already-delivered');
         this.dispatchEvent({
           kind: 'Command',
           cmd: { kind: 'SetEditingMessage', corrId, sessionPath, messageId: null },
@@ -450,9 +485,10 @@ export class MessageRouter {
     });
   }
 
-  private onInterrupt(msg: Extract<WebviewToHostMessage, { type: 'interrupt' }>): void {
+  private onInterrupt(msg: Extract<WebviewToHostMessage, { type: 'interrupt' }>, context?: RendererCommandContext): void {
     const sessionPath = typeof msg.sessionPath === 'string' ? msg.sessionPath : null;
     if (!sessionPath) {
+      this.rejectBrowser(msg, context, 'missing-session-path');
       this.dispatchEvent({ kind: 'NoticeShown', notice: 'Protocol defect: interrupt arrived without a sessionPath.' });
       return;
     }
@@ -466,9 +502,10 @@ export class MessageRouter {
     // InterruptRpc path (the side-effect executor), not as a router side-call.
   }
 
-  private onClearQueue(msg: Extract<WebviewToHostMessage, { type: 'clearQueue' }>): void {
+  private onClearQueue(msg: Extract<WebviewToHostMessage, { type: 'clearQueue' }>, context?: RendererCommandContext): void {
     const sessionPath = typeof msg.sessionPath === 'string' ? msg.sessionPath : null;
     if (!sessionPath) {
+      this.rejectBrowser(msg, context, 'missing-session-path');
       this.dispatchEvent({ kind: 'NoticeShown', notice: 'Protocol defect: clearQueue arrived without a sessionPath.' });
       return;
     }
@@ -523,8 +560,11 @@ export class MessageRouter {
     });
   }
 
-  private async onOpenFile(msg: Extract<WebviewToHostMessage, { type: 'openFile' }>): Promise<void> {
-    if (typeof msg.path !== 'string' || !msg.path.trim()) return;
+  private async onOpenFile(msg: Extract<WebviewToHostMessage, { type: 'openFile' }>, context?: RendererCommandContext): Promise<void> {
+    if (typeof msg.path !== 'string' || !msg.path.trim()) {
+      this.rejectBrowser(msg, context, 'missing-path');
+      return;
+    }
     const corrId = crypto.randomUUID();
     this.dispatchEvent({
       kind: 'Command',
@@ -558,9 +598,10 @@ export class MessageRouter {
     else this.sidebarProvider.postState();
   }
 
-  private onDuplicateSession(msg: Extract<WebviewToHostMessage, { type: 'duplicateSession' }>): void {
+  private onDuplicateSession(msg: Extract<WebviewToHostMessage, { type: 'duplicateSession' }>, context?: RendererCommandContext): void {
     const sessionPath = typeof msg.sessionPath === 'string' ? msg.sessionPath : null;
     if (!sessionPath) {
+      this.rejectBrowser(msg, context, 'missing-session-path');
       this.dispatchEvent({ kind: 'NoticeShown', notice: 'Protocol defect: duplicateSession arrived without a sessionPath.' });
       return;
     }
@@ -592,10 +633,21 @@ export class MessageRouter {
     this.sidebarProvider.postState();
   }
 
-  private async onRequestDetail(msg: Extract<WebviewToHostMessage, { type: 'requestDetail' }>): Promise<void> {
+  private async onRequestDetail(
+    msg: Extract<WebviewToHostMessage, { type: 'requestDetail' }>,
+    context?: RendererCommandContext,
+  ): Promise<void> {
     const result = this.service.loadDetail
       ? await this.service.loadDetail(msg.sessionPath, msg.ref)
       : { sessionPath: msg.sessionPath, key: msg.ref.key, status: 'unavailable' as const, message: 'Detail retrieval is unavailable.' };
+    // Lazy-detail responses are renderer-scoped (browser server plan §4.4):
+    // the INITIATING renderer gets the result, never a broadcast to the
+    // sidebar. A browser expanding a tool detail must not hang waiting for a
+    // response that was posted to the sidebar hub.
+    if (context?.rendererId && this.sidebarProvider.postImperativeToRenderer) {
+      this.sidebarProvider.postImperativeToRenderer(context.rendererId, { type: 'detailResult', result });
+      return;
+    }
     this.sidebarProvider.postImperative({ type: 'detailResult', result });
   }
 
@@ -632,11 +684,12 @@ export class MessageRouter {
     return typeof value === 'number' && Number.isFinite(value) && Number.isInteger(value) && value >= 0;
   }
 
-  private onGroupPinnedTab(msg: Extract<WebviewToHostMessage, { type: 'groupPinnedTab' }>): void {
+  private onGroupPinnedTab(msg: Extract<WebviewToHostMessage, { type: 'groupPinnedTab' }>, context?: RendererCommandContext): void {
     // Pure state mutation — the reducer joins the source pinned tab to the
     // target's group (creating one if the target is standalone) and emits a
     // PersistTabs effect. No backend RPC.
     if (!this.isNonEmptyString(msg.sourcePath) || !this.isNonEmptyString(msg.targetPath)) {
+      this.rejectBrowser(msg, context, 'invalid-paths');
       this.dispatchEvent({ kind: 'NoticeShown', notice: 'Protocol defect: groupPinnedTab arrived without a sourcePath or targetPath.' });
       return;
     }
@@ -648,11 +701,12 @@ export class MessageRouter {
     this.sidebarProvider.postState();
   }
 
-  private onMergePinnedGroups(msg: Extract<WebviewToHostMessage, { type: 'mergePinnedGroups' }>): void {
+  private onMergePinnedGroups(msg: Extract<WebviewToHostMessage, { type: 'mergePinnedGroups' }>, context?: RendererCommandContext): void {
     // Pure state mutation — the reducer merges the source group into the
     // target group (target members then source members) and emits a
     // PersistTabs effect. No backend RPC.
     if (!this.isNonEmptyString(msg.sourcePath) || !this.isNonEmptyString(msg.targetPath)) {
+      this.rejectBrowser(msg, context, 'invalid-paths');
       this.dispatchEvent({ kind: 'NoticeShown', notice: 'Protocol defect: mergePinnedGroups arrived without a sourcePath or targetPath.' });
       return;
     }
@@ -664,11 +718,12 @@ export class MessageRouter {
     this.sidebarProvider.postState();
   }
 
-  private onUngroupPinnedTab(msg: Extract<WebviewToHostMessage, { type: 'ungroupPinnedTab' }>): void {
+  private onUngroupPinnedTab(msg: Extract<WebviewToHostMessage, { type: 'ungroupPinnedTab' }>, context?: RendererCommandContext): void {
     // Pure state mutation — the reducer removes the source from its group
     // (dissolving it below 2) and repositions it as a standalone pinned tab.
     // No backend RPC.
     if (!this.isNonEmptyString(msg.sourcePath) || !this.isNonNegativeInteger(msg.toItemIndex)) {
+      this.rejectBrowser(msg, context, 'invalid-source-or-index');
       this.dispatchEvent({ kind: 'NoticeShown', notice: 'Protocol defect: ungroupPinnedTab arrived with an invalid sourcePath or toItemIndex.' });
       return;
     }
@@ -680,10 +735,11 @@ export class MessageRouter {
     this.sidebarProvider.postState();
   }
 
-  private onMovePinnedItem(msg: Extract<WebviewToHostMessage, { type: 'movePinnedItem' }>): void {
+  private onMovePinnedItem(msg: Extract<WebviewToHostMessage, { type: 'movePinnedItem' }>, context?: RendererCommandContext): void {
     // Pure state mutation — the reducer reorders a pinned item (standalone
     // chip or group block) within the pinned strip. No backend RPC.
     if (!this.isNonEmptyString(msg.sourcePath) || !this.isNonNegativeInteger(msg.toItemIndex)) {
+      this.rejectBrowser(msg, context, 'invalid-source-or-index');
       this.dispatchEvent({ kind: 'NoticeShown', notice: 'Protocol defect: movePinnedItem arrived with an invalid sourcePath or toItemIndex.' });
       return;
     }
@@ -695,9 +751,10 @@ export class MessageRouter {
     this.sidebarProvider.postState();
   }
 
-  private async onLoadOlderTranscript(msg: Extract<WebviewToHostMessage, { type: 'loadOlderTranscript' }>): Promise<void> {
+  private async onLoadOlderTranscript(msg: Extract<WebviewToHostMessage, { type: 'loadOlderTranscript' }>, context?: RendererCommandContext): Promise<void> {
     const sessionPath = typeof msg.sessionPath === 'string' ? msg.sessionPath : null;
     if (!sessionPath) {
+      this.rejectBrowser(msg, context, 'missing-session-path');
       this.dispatchEvent({ kind: 'NoticeShown', notice: 'Protocol defect: loadOlderTranscript arrived without a sessionPath.' });
       return;
     }
@@ -708,9 +765,10 @@ export class MessageRouter {
     });
   }
 
-  private async onLoadNewerTranscript(msg: Extract<WebviewToHostMessage, { type: 'loadNewerTranscript' }>): Promise<void> {
+  private async onLoadNewerTranscript(msg: Extract<WebviewToHostMessage, { type: 'loadNewerTranscript' }>, context?: RendererCommandContext): Promise<void> {
     const sessionPath = typeof msg.sessionPath === 'string' ? msg.sessionPath : null;
     if (!sessionPath) {
+      this.rejectBrowser(msg, context, 'missing-session-path');
       this.dispatchEvent({ kind: 'NoticeShown', notice: 'Protocol defect: loadNewerTranscript arrived without a sessionPath.' });
       return;
     }
@@ -721,9 +779,10 @@ export class MessageRouter {
     });
   }
 
-  private async onJumpToLatestTranscript(msg: Extract<WebviewToHostMessage, { type: 'jumpToLatestTranscript' }>): Promise<void> {
+  private async onJumpToLatestTranscript(msg: Extract<WebviewToHostMessage, { type: 'jumpToLatestTranscript' }>, context?: RendererCommandContext): Promise<void> {
     const sessionPath = typeof msg.sessionPath === 'string' ? msg.sessionPath : null;
     if (!sessionPath) {
+      this.rejectBrowser(msg, context, 'missing-session-path');
       this.dispatchEvent({ kind: 'NoticeShown', notice: 'Protocol defect: jumpToLatestTranscript arrived without a sessionPath.' });
       return;
     }
@@ -750,7 +809,7 @@ export class MessageRouter {
     });
   }
 
-  private onSetModel(msg: Extract<WebviewToHostMessage, { type: 'setModel' }>): void {
+  private onSetModel(msg: Extract<WebviewToHostMessage, { type: 'setModel' }>, context?: RendererCommandContext): void {
     this.dispatchEvent({
       kind: 'Command',
       cmd: {
@@ -762,6 +821,10 @@ export class MessageRouter {
           defaultProvider: msg.defaultProvider,
           defaultThinkingLevel: msg.defaultThinkingLevel,
         },
+        // Trusted source for the M2 inline-confirmation seam: the effect
+        // runner asks the INITIATING renderer (browser) instead of showing an
+        // invisible desktop modal. Never client-supplied.
+        ...(context ? { source: { rendererId: context.rendererId, kind: context.kind, rendererGeneration: context.rendererGeneration } } : {}),
       },
     });
   }
@@ -810,7 +873,7 @@ export class MessageRouter {
   // subscription lifecycle to the session service. Stream content returns as
   // detail imperatives carrying the full `HostDetailRoute`.
 
-  private onDetailSubscribe(msg: Extract<WebviewToHostMessage, { type: 'detail.subscribe' }>): void {
+  private onDetailSubscribe(msg: Extract<WebviewToHostMessage, { type: 'detail.subscribe' }>, context?: RendererCommandContext): void {
     this.dispatchEvent({
       kind: 'Command',
       cmd: {
@@ -820,11 +883,15 @@ export class MessageRouter {
         detailKey: msg.detailKey,
         address: msg.address,
         ...(msg.cursor !== undefined ? { cursor: msg.cursor } : {}),
+        // Trusted renderer identity (browser server plan §5.4): the complete
+        // ownership key is {hostInstanceId, viewGeneration, rendererId,
+        // rendererGeneration, detailKey}. Never client-supplied.
+        ...(context ? { rendererId: context.rendererId, rendererGeneration: context.rendererGeneration } : {}),
       },
     });
   }
 
-  private onDetailUnsubscribe(msg: Extract<WebviewToHostMessage, { type: 'detail.unsubscribe' }>): void {
+  private onDetailUnsubscribe(msg: Extract<WebviewToHostMessage, { type: 'detail.unsubscribe' }>, context?: RendererCommandContext): void {
     this.dispatchEvent({
       kind: 'Command',
       cmd: {
@@ -833,11 +900,12 @@ export class MessageRouter {
         viewGeneration: msg.viewGeneration,
         detailKey: msg.detailKey,
         reason: msg.reason,
+        ...(context ? { rendererId: context.rendererId, rendererGeneration: context.rendererGeneration } : {}),
       },
     });
   }
 
-  private onDetailFetchPages(msg: Extract<WebviewToHostMessage, { type: 'detail.fetchPages' }>): void {
+  private onDetailFetchPages(msg: Extract<WebviewToHostMessage, { type: 'detail.fetchPages' }>, context?: RendererCommandContext): void {
     this.dispatchEvent({
       kind: 'Command',
       cmd: {
@@ -846,6 +914,7 @@ export class MessageRouter {
         viewGeneration: msg.viewGeneration,
         detailKey: msg.detailKey,
         ref: msg.ref,
+        ...(context ? { rendererId: context.rendererId, rendererGeneration: context.rendererGeneration } : {}),
       },
     });
   }
@@ -863,11 +932,20 @@ export class MessageRouter {
     this.scheduleRender();
   }
 
-  private onRevertFile(msg: Extract<WebviewToHostMessage, { type: 'revertFile' }>): void {
+  private onRevertFile(msg: Extract<WebviewToHostMessage, { type: 'revertFile' }>, context?: RendererCommandContext): void {
     const corrId = crypto.randomUUID();
     this.dispatchEvent({
       kind: 'Command',
-      cmd: { kind: 'RevertFile', corrId, sessionPath: msg.sessionPath, filePath: msg.filePath },
+      cmd: {
+        kind: 'RevertFile',
+        corrId,
+        sessionPath: msg.sessionPath,
+        filePath: msg.filePath,
+        // Source-aware confirmation (browser server plan §9): a browser
+        // source must confirm inline in ITS renderer before the destructive
+        // revert runs; never an invisible desktop modal.
+        ...(context ? { source: { rendererId: context.rendererId, kind: context.kind, rendererGeneration: context.rendererGeneration } } : {}),
+      },
     });
     this.dispatchEvent({ kind: 'FileChangeRemoved', sessionPath: msg.sessionPath, filePath: msg.filePath });
     this.scheduleRender();
@@ -880,8 +958,11 @@ export class MessageRouter {
     });
   }
 
-  private onSetPrivacyMode(msg: Extract<WebviewToHostMessage, { type: 'setPrivacyMode' }>): void {
-    if (!msg.sessionPath || !this.getArchState().sessions.openTabPaths.includes(msg.sessionPath)) return;
+  private onSetPrivacyMode(msg: Extract<WebviewToHostMessage, { type: 'setPrivacyMode' }>, context?: RendererCommandContext): void {
+    if (!msg.sessionPath || !this.getArchState().sessions.openTabPaths.includes(msg.sessionPath)) {
+      this.rejectBrowser(msg, context, 'session-not-open');
+      return;
+    }
     this.dispatchEvent({
       kind: 'Command',
       cmd: {
@@ -944,12 +1025,13 @@ export class MessageRouter {
     });
   }
 
-  private async onExtensionUiResponse(msg: Extract<WebviewToHostMessage, { type: 'extensionUiResponse' }>): Promise<void> {
+  private async onExtensionUiResponse(msg: Extract<WebviewToHostMessage, { type: 'extensionUiResponse' }>, context?: RendererCommandContext): Promise<void> {
     // STATE_CONTRACT: webview must address its response to a specific session.
     // Falling back to the active session would let a prompt opened in tab A be
     // resolved against tab B if the user switched tabs before clicking.
     const sessionPath = typeof msg.sessionPath === 'string' ? msg.sessionPath : null;
     if (!sessionPath) {
+      this.rejectBrowser(msg, context, 'missing-session-path');
       this.dispatchEvent({ kind: 'NoticeShown', notice: 'Protocol defect: extensionUiResponse arrived without a sessionPath.' });
       return;
     }
@@ -1010,7 +1092,7 @@ export class MessageRouter {
    *  atomically, on the host, to avoid a race where the send's prepass reads
    *  stale settings. Delegates to {@link onSend} so the optimistic message,
    *  session-name derivation, and input pickup are identical to a fresh send. */
-  private async onRetrySend(msg: Extract<WebviewToHostMessage, { type: 'retrySend' }>): Promise<void> {
+  private async onRetrySend(msg: Extract<WebviewToHostMessage, { type: 'retrySend' }>, context?: RendererCommandContext): Promise<void> {
     let priorPruningMode: PruningMode | undefined;
     if (msg.disablePruning) {
       // Brief H: capture the user's prior pruning mode BEFORE disabling, so the
@@ -1042,6 +1124,7 @@ export class MessageRouter {
         localId: msg.localId,
       },
       priorPruningMode !== undefined ? { priorPruningMode } : undefined,
+      context,
     );
   }
 

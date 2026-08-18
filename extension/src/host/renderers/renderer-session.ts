@@ -72,9 +72,10 @@ const RECOVERABLE_IMPERATIVE_TYPES: ReadonlySet<string> = new Set([
   'detail.rebase',
   'detail.terminal',
   'detail.error',
+  'inlineConfirm',
 ]);
 
-type RecoverableImperative = Extract<HostToWebviewMessage, { type: 'sendRejected' | 'detailResult' | 'detail.start' | 'detail.page' | 'detail.delta' | 'detail.rebase' | 'detail.terminal' | 'detail.error' }>;
+type RecoverableImperative = Extract<HostToWebviewMessage, { type: 'sendRejected' | 'detailResult' | 'detail.start' | 'detail.page' | 'detail.delta' | 'detail.rebase' | 'detail.terminal' | 'detail.error' | 'inlineConfirm' }>;
 
 function isRecoverableImperative(message: HostToWebviewMessage): message is RecoverableImperative {
   return RECOVERABLE_IMPERATIVE_TYPES.has(message.type);
@@ -108,6 +109,7 @@ export class RendererSession implements RendererRegistration, DisposableLike {
   private syncState: SidebarSyncState;
   private webviewReady = false;
   private visible = true;
+  private focused = false;
   private rendererGeneration = 1;
   private lastTranscriptCommitBlockedReason?: string;
   private pendingImperatives: Array<Exclude<HostToWebviewMessage, { type: 'state' }>> = [];
@@ -261,6 +263,7 @@ export class RendererSession implements RendererRegistration, DisposableLike {
     const delivery = this.delivery.getDebugState();
     return {
       visible: this.visible,
+      focused: this.focused,
       webviewReady: this.webviewReady,
       globalDirty: delivery.dirty,
       globalRevision: this.syncState.globalRevision,
@@ -466,6 +469,14 @@ export class RendererSession implements RendererRegistration, DisposableLike {
       this.delivery.notifyEligibilityChanged();
       this.armReadinessProbeIfStuck();
     }
+  }
+
+  /** Focus belief transition (`rendererFocusChanged`). Recorded for the M3
+   *  attention-arbitration milestone; clearing on disconnect is implicit
+   *  (the session is disposed). */
+  setFocused(focused: boolean): void {
+    if (this.disposed || this.focused === focused) return;
+    this.focused = focused;
   }
 
   armReadinessProbeIfStuck(): void {

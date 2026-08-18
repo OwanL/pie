@@ -139,21 +139,25 @@ test('host stamps WEBVIEW_PROTOCOL_VERSION onto state envelopes', () => {
   }
 });
 
-test('browser-server v5 messages carry renderer identity and command acknowledgement', () => {
+test('browser-server v6 messages carry renderer identity and command acknowledgement', () => {
   // rendererHello: the first message on an accepted browser socket; the
   // browser replaces its in-memory identity from it before sending `ready`.
+  // v6: the hello carries the LIVE viewGeneration (the browser has no
+  // HTML-stamped generation — the page is stable across socket reconnects).
   const hello: HostToWebviewMessage = {
     type: 'rendererHello',
     protocolVersion: WEBVIEW_PROTOCOL_VERSION,
     hostInstanceId: 'host-1',
     rendererId: 'renderer-1',
     rendererGeneration: 3,
+    viewGeneration: 2,
     assetVersion: 'v1',
   };
   assert.equal(hello.type, 'rendererHello');
   if (hello.type === 'rendererHello') {
     assert.equal(hello.rendererId, 'renderer-1');
     assert.equal(hello.rendererGeneration, 3);
+    assert.equal(hello.viewGeneration, 2);
   }
 
   // commandAck: exactly one host decision per schema-valid browser command.

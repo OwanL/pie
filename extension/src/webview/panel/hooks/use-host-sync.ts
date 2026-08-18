@@ -31,6 +31,8 @@ import type {
   ViewState,
   WebviewToHostMessage,
 } from '../../../shared/protocol';
+import type { ClientTransport, ClientConnectionState } from '../../transport/client-transport';
+import { pendingCommandStore } from '../../transport/pending-command-store';
 import { DEFAULT_CHAT_PREFS, DEFAULT_PRUNING_SETTINGS, DEFAULT_TOOL_RESULT_PRUNING_SETTINGS, EMPTY_TRANSCRIPT_WINDOW, WEBVIEW_PROTOCOL_VERSION } from '../../../shared/protocol';
 import { EMPTY_AGGREGATE_STATS } from '../../../shared/protocol';
 import { pickStable } from '../utils/view-state-stabilize';
@@ -114,6 +116,13 @@ export interface HostSyncState {
   setDraftRestore: (v: { text: string; nonce: number } | null) => void;
   /** Add an optimistic user message to be shown instantly. */
   addOptimisticMessage: (msg: OptimisticUserMessage) => void;
+  /** Transport connection state (browser banner; VS Code is always
+   *  `connected` while mounted). */
+  connectionState: ClientConnectionState;
+  /** Pending source-aware inline confirmation (browser server plan §9), or
+   *  null. Rendered by the app; answered with `respondToInlineConfirm`. */
+  inlineConfirm: Extract<HostToWebviewMessage, { type: 'inlineConfirm' }> | null;
+  respondToInlineConfirm: (confirmId: string, confirmed: boolean) => void;
 }
 
 /* ------------------------------------------------------------------ */
@@ -313,6 +322,7 @@ interface HostMessageContext {
   inputsOps: InputsRestoreOps;
   setViewState: (v: ViewState) => void;
   setCommitTarget: (v: TranscriptCommitTarget | null) => void;
+  setInlineConfirm: (v: Extract<HostToWebviewMessage, { type: 'inlineConfirm' }> | null) => void;
   postMessage: (msg: WebviewToHostMessage) => void;
 }
 
@@ -448,13 +458,23 @@ function handleStateMessage(msg: HostToWebviewMessage, ctx: HostMessageContext) 
 
   ctx.setViewState(hydratedState);
   ctx.setCommitTarget(commitTarget);
+  // M2 (§5.2): an authoritative snapshot can confirm an `addComposerInput`
+  // early by matching the staged input's metadata/identity in the host-owned
+  // pending inputs. Absence alone never proves rejection — the host decision
+  // ledger (queried via `commandStatusRequest` after reconnect) is
+  // authoritative for that.
+  pendingCommandStore.confirmAcceptedBySnapshot(m.state.pendingComposerInputs);
   // Phase 5 detail subscriptions are key-scoped webview state: refresh the
   // store context (current host instance, view generation, and the control
   // post function) after every snapshot so expansions always subscribe with
-  // the exact generation the host expects.
+  // the exact generation the host expects. The renderer identity is part of
+  // the ownership key (browser server plan §5.4): stream routes must carry
+  // THIS renderer's id/generation or they are dropped.
   setDetailStoreContext({
     hostInstanceId: m.hostInstanceId,
     viewGeneration: m.viewGeneration,
+    rendererId: m.rendererId,
+    rendererGeneration: m.rendererGeneration,
     postMessage: ctx.postMessage,
   });
 }
@@ -497,6 +517,22 @@ const HOST_MESSAGE_HANDLERS: Record<string, HostMessageHandler | undefined> = {
   state: handleStateMessage,
   playCompletionSound: (msg, _ctx) => handlePlayCompletionSound(msg),
   sendRejected: handleSendRejectedMessage,
+  // M2 (§5.2): exactly-one host decision/ack. The pending-command store
+  // resolves the entry; the optimistic overlay is merged/removed by the next
+  // authoritative snapshot (status reconciliation, never replay).
+  commandAck: (msg) => {
+    const m = msg as Extract<HostToWebviewMessage, { type: 'commandAck' }>;
+    pendingCommandStore.onAck(m.clientCommandId, m.decision, m.reason);
+  },
+  commandStatus: (msg) => {
+    const m = msg as Extract<HostToWebviewMessage, { type: 'commandStatus' }>;
+    pendingCommandStore.onStatus(m.clientCommandId, m.decision);
+  },
+  // M2 (§9): source-aware inline confirmation rendered by the app; the
+  // response is a validated `inlineConfirmResponse` (never command routing).
+  inlineConfirm: (msg, ctx) => {
+    ctx.setInlineConfirm(msg as Extract<HostToWebviewMessage, { type: 'inlineConfirm' }>);
+  },
 };
 
 export function dispatchHostMessage(msg: HostToWebviewMessage, ctx: HostMessageContext) {
@@ -513,9 +549,14 @@ export function dispatchHostMessage(msg: HostToWebviewMessage, ctx: HostMessageC
 /**
  * Encapsulates protocol-sync and transport bookkeeping between the webview and
  * host. This state is webview-local per the STATE_CONTRACT allowlist.
+ *
+ * M2 (§4.3): inbound messages are subscribed through the `ClientTransport`
+ * (VS Code channel or browser WebSocket) instead of a direct `window`
+ * listener; the browser transport replaces its identity from the host's
+ * `rendererHello` before `ready` is sent.
  */
 export function useHostSync(
-  postMessage: (msg: WebviewToHostMessage) => void,
+  transport: ClientTransport,
   initialState?: ViewState,
 ): HostSyncState {
   const [viewState, setViewState] = useState<ViewState>(initialState ?? EMPTY_VIEW_STATE);
@@ -523,6 +564,17 @@ export function useHostSync(
   const [inputsRestore, setInputsRestore] = useState<{ inputs: ComposerInput[]; nonce: number } | null>(null);
   const [optimisticMessages, setOptimisticMessages] = useState<OptimisticUserMessage[]>([]);
   const [commitTarget, setCommitTarget] = useState<TranscriptCommitTarget | null>(null);
+  const [connectionState, setConnectionState] = useState<ClientConnectionState>(transport.getConnectionState());
+  const [inlineConfirm, setInlineConfirm] = useState<Extract<HostToWebviewMessage, { type: 'inlineConfirm' }> | null>(null);
+
+  const postMessage = useCallback((msg: WebviewToHostMessage): void => {
+    transport.postMessage(msg);
+  }, [transport]);
+
+  const respondToInlineConfirm = useCallback((confirmId: string, confirmed: boolean): void => {
+    setInlineConfirm(null);
+    transport.postMessage({ type: 'inlineConfirmResponse', confirmId, confirmed });
+  }, [transport]);
 
   const hostInstanceIdRef = useRef('');
   // Brief D: last applied snapshot revision. Revisions are 1-based on the
@@ -624,24 +676,23 @@ export function useHostSync(
 
   useEffect(() => {
     setLazyDetailPostMessage(postMessage);
-    const handleMessage = (event: MessageEvent) => {
-      // Guard against malformed messages from non-host sources (browser
-      // extensions, devtools, etc.). The dispatchHostMessage handler
-      // further validates the `type` field against known handlers.
-      if (!event.data || typeof event.data.type !== 'string') return;
-      if (event.data.type === 'detailResult' && event.data.result) {
-        receiveLazyDetailResult(event.data.result);
+    const handleMessage = (message: HostToWebviewMessage) => {
+      // Legacy lazy-detail correlation (superseded for NEW subscriptions by
+      // Phase 5's detail.subscribe protocol, but still served for existing
+      // lazy refs).
+      if (message.type === 'detailResult' && message.result) {
+        receiveLazyDetailResult(message.result);
         return;
       }
       // Phase 5 detail stream imperatives (detail.start/page/delta/rebase/
       // terminal/error) are routed to the key-scoped subscription store. They
       // carry the full HostDetailRoute; the store drops stale/cross-key
       // traffic and never lets it touch ViewState.
-      if (event.data.type.startsWith('detail.') && typeof event.data.detailKey === 'string' && event.data.subscriptionId) {
-        receiveDetailImperative(event.data as DetailStreamMessage);
+      if (message.type.startsWith('detail.') && typeof (message as DetailStreamMessage).detailKey === 'string' && (message as DetailStreamMessage).subscriptionId) {
+        receiveDetailImperative(message as DetailStreamMessage);
         return;
       }
-      dispatchHostMessage(event.data as HostToWebviewMessage, {
+      dispatchHostMessage(message, {
         hydrateViewState,
         resetPerSessionState,
         hostInstanceIdRef,
@@ -655,15 +706,23 @@ export function useHostSync(
         inputsOps: inputsOpsRef.current,
         setViewState,
         setCommitTarget,
+        setInlineConfirm,
         postMessage,
       });
     };
 
-    window.addEventListener('message', handleMessage);
+    const unsubscribe = transport.subscribe(handleMessage);
+    const unsubscribeState = transport.onConnectionStateChange(setConnectionState);
+    // The VS Code transport forwards `ready`/`refreshState` immediately; the
+    // browser transport drops them while connecting and sends its own after
+    // the `rendererHello` replaces its identity.
     postMessage({ type: 'ready' });
     postMessage({ type: 'refreshState' });
-    return () => window.removeEventListener('message', handleMessage);
-  }, [clearTransientUi, postMessage, resetPerSessionState, hydrateViewState]);
+    return () => {
+      unsubscribe();
+      unsubscribeState();
+    };
+  }, [clearTransientUi, postMessage, resetPerSessionState, hydrateViewState, transport]);
 
   useFocusRefresh(postMessage);
 
@@ -672,5 +731,16 @@ export function useHostSync(
     [viewState, inputsRestore],
   );
 
-  return { viewState: effectiveViewState, mergedTranscript, commitTarget, draftRestore, activeSessionPathRef, setDraftRestore, addOptimisticMessage };
+  return {
+    viewState: effectiveViewState,
+    mergedTranscript,
+    commitTarget,
+    draftRestore,
+    activeSessionPathRef,
+    setDraftRestore,
+    addOptimisticMessage,
+    connectionState,
+    inlineConfirm,
+    respondToInlineConfirm,
+  };
 }

@@ -64,8 +64,8 @@ export const BROWSER_INGRESS_LIMITS = {
 const CLIENT_COMMAND_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
 
 /** Message types that are NOT application commands: handshake, render
- *  evidence, log forwarding, and browser lifecycle. They carry no
- *  `clientCommandId`. */
+ *  evidence, log forwarding, browser lifecycle, and confirm responses. They
+ *  carry no `clientCommandId`. */
 const NON_COMMAND_TYPES: ReadonlySet<string> = new Set([
   'ready',
   'refreshState',
@@ -80,6 +80,7 @@ const NON_COMMAND_TYPES: ReadonlySet<string> = new Set([
   'rendererVisibilityChanged',
   'rendererFocusChanged',
   'commandStatusRequest',
+  'inlineConfirmResponse',
 ]);
 
 /** Exact top-level key allowlist per message type. The optional wrapper
@@ -148,6 +149,7 @@ const MESSAGE_KEYS: Readonly<Record<string, readonly string[]>> = {
   rendererVisibilityChanged: ['type', 'visible'],
   rendererFocusChanged: ['type', 'focused'],
   commandStatusRequest: ['type', 'clientCommandId'],
+  inlineConfirmResponse: ['type', 'confirmId', 'confirmed'],
 };
 
 /** Exact key allowlist for a `ComposerInputDraft`/`ComposerInput` image
@@ -277,6 +279,14 @@ function isClientCommandId(value: unknown): value is string {
 
 function isApplicationCommand(type: string): boolean {
   return !NON_COMMAND_TYPES.has(type);
+}
+
+/** Whether a message type is an application command under the browser
+ *  fail-closed policy (carries a browser-minted `clientCommandId`, gets
+ *  exactly one host decision + one `commandAck` emission). Exported for the
+ *  host-side command-decision gate. */
+export function isBrowserApplicationCommand(type: string): boolean {
+  return isApplicationCommand(type);
 }
 
 function boundedString(value: unknown, maxBytes: number): value is string {
@@ -463,6 +473,21 @@ function validateSystemPromptToggles(value: Record<string, unknown>): Validation
   return { ok: true, value: value as unknown as WebviewToHostMessage };
 }
 
+function validateCommandStatusRequest(value: Record<string, unknown>): ValidationResult<WebviewToHostMessage> {
+  if (!isClientCommandId(value.clientCommandId)) return fail('commandStatusRequest: invalid clientCommandId');
+  return { ok: true, value: value as unknown as WebviewToHostMessage };
+}
+
+function validateInlineConfirmResponse(value: Record<string, unknown>): ValidationResult<WebviewToHostMessage> {
+  if (!boundedString(value.confirmId, 64) || value.confirmId.length === 0) {
+    return fail('inlineConfirmResponse: invalid confirmId');
+  }
+  if (typeof value.confirmed !== 'boolean') {
+    return fail('inlineConfirmResponse: `confirmed` must be a boolean');
+  }
+  return { ok: true, value: value as unknown as WebviewToHostMessage };
+}
+
 /**
  * Fail-closed validation of one browser→host message. `frameBytes` is the
  * complete raw WebSocket frame size measured by the transport (including
@@ -528,6 +553,10 @@ export function validateBrowserToHostMessage(
       return validateLogData(value);
     case 'setSystemPromptToggles':
       return validateSystemPromptToggles(value);
+    case 'commandStatusRequest':
+      return validateCommandStatusRequest(value);
+    case 'inlineConfirmResponse':
+      return validateInlineConfirmResponse(value);
     default:
       return { ok: true, value: value as unknown as WebviewToHostMessage };
   }

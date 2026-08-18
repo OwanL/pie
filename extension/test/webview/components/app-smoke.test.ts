@@ -19,11 +19,52 @@ import { App, EMPTY_VIEW_STATE } from '../../../src/webview/panel/app';
 import type { AppAdapter } from '../../../src/webview/panel/app';
 import type { ViewState, ChatMessage, HostToWebviewMessage, ExtensionUIRequestPayload } from '../../../src/shared/protocol';
 import { DEFAULT_CHAT_PREFS, EMPTY_TRANSCRIPT_WINDOW, WEBVIEW_PROTOCOL_VERSION } from '../../../src/shared/protocol';
+import type { ClientTransport } from '../../../src/webview/transport/client-transport';
+
+/** Minimal in-memory transport: records outbound, forwards inbound. Mirrors
+ *  the real VS Code transport's `window` message channel so tests can keep
+ *  dispatching `MessageEvent`s. */
+function makeFakeTransport(): ClientTransport & { deliver: (msg: HostToWebviewMessage) => void } {
+  const handlers = new Set<(message: HostToWebviewMessage) => void>();
+  const stateHandlers = new Set<(state: 'connecting' | 'connected' | 'disconnected') => void>();
+  const onWindowMessage = (event: MessageEvent): void => {
+    if (!event.data || typeof event.data.type !== 'string') return;
+    for (const handler of handlers) handler(event.data as HostToWebviewMessage);
+  };
+  window.addEventListener('message', onWindowMessage);
+  return {
+    postMessage: () => true,
+    subscribe: (handler) => {
+      handlers.add(handler);
+      return () => handlers.delete(handler);
+    },
+    getConnectionState: () => 'connected',
+    onConnectionStateChange: (handler) => {
+      stateHandlers.add(handler);
+      return () => stateHandlers.delete(handler);
+    },
+    dispose: () => {
+      window.removeEventListener('message', onWindowMessage);
+      handlers.clear();
+      stateHandlers.clear();
+    },
+    deliver: (msg) => {
+      for (const handler of handlers) handler(msg);
+    },
+  };
+}
 
 function makeAdapter(): AppAdapter & { messages: any[] } {
   const messages: any[] = [];
+  const transport = makeFakeTransport();
+  const originalPost = transport.postMessage.bind(transport);
+  transport.postMessage = (msg: any) => {
+    messages.push(msg);
+    return originalPost(msg);
+  };
   return {
     messages,
+    transport,
     postMessage: (msg: any) => messages.push(msg),
   };
 }

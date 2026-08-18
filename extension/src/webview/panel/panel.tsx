@@ -10,52 +10,64 @@ import type { WebviewToHostMessage } from '../../shared/protocol';
 import { App } from './app';
 import { isSuspenseThenable, sanitizedRenderFailure, sanitizedRenderLog } from './render-error';
 import { setWebviewLogSink } from './utils/log';
+import {
+  BrowserClientTransport,
+  VsCodeClientTransport,
+  getAssetVersion,
+  getViewGeneration,
+  withHandshakeMetadata,
+  withViewGeneration,
+  type ClientTransport,
+} from '../transport/client-transport';
+import { pendingCommandStore } from '../transport/pending-command-store';
 
-// ─── VS Code API ─────────────────────────────────────────────────────────────
+// Re-exported for the handshake contract tests (the VS Code transport owns
+// the HTML-stamped metadata now; panel.tsx remains the module under test).
+export { getAssetVersion, getViewGeneration, withHandshakeMetadata, withViewGeneration };
 
-declare function acquireVsCodeApi(): {
-  postMessage(msg: WebviewToHostMessage): void;
-  getState(): unknown;
-  setState(state: unknown): void;
-};
+// ─── Transport bootstrap (browser server plan §4.3) ─────────────────────────
+// Browser mode is selected by server-injected bootstrap metadata, not by a
+// separate bundle. The HTTP HTML stamps only stable page data: asset version,
+// transport kind, and the WebSocket route. VS Code HTML continues to stamp its
+// existing generation metadata.
 
-const vscodeApi = acquireVsCodeApi();
-
-function getAssetVersion(): string | undefined {
-  return document.querySelector('meta[name="pie-asset-version"]')?.getAttribute('content') ?? undefined;
-}
-
-/** Read the host-stamped generation; malformed/missing markup never guesses. */
-export function getViewGeneration(): number | undefined {
-  const raw = document.querySelector('meta[name="pie-view-generation"]')?.getAttribute('content');
-  const value = raw === null || raw === undefined || raw.trim() === '' ? Number.NaN : Number(raw);
-  return Number.isSafeInteger(value) && value >= 0 ? value : undefined;
-}
-
-export function withHandshakeMetadata(
-  msg: Extract<WebviewToHostMessage, { type: 'ready' | 'refreshState' | 'requestSnapshot' }>,
-): WebviewToHostMessage {
-  const viewGeneration = getViewGeneration();
-  return {
-    ...msg,
-    assetVersion: getAssetVersion(),
-    ...(viewGeneration === undefined ? {} : { viewGeneration }),
-  };
-}
-
-export function withViewGeneration(msg: WebviewToHostMessage): WebviewToHostMessage {
-  const viewGeneration = getViewGeneration();
-  return viewGeneration === undefined ? msg : { ...msg, viewGeneration };
-}
-
-function postMessage(msg: WebviewToHostMessage): void {
-  if (msg.type === 'ready' || msg.type === 'refreshState' || msg.type === 'requestSnapshot') {
-    vscodeApi.postMessage(withHandshakeMetadata(msg));
-    return;
+function readTransportMeta(): { kind: 'browser'; wsRoute: string } | { kind: 'vscode' } {
+  const transport = document.querySelector('meta[name="pie-transport"]')?.getAttribute('content');
+  if (transport === 'browser') {
+    const wsRoute = document.querySelector('meta[name="pie-ws-route"]')?.getAttribute('content') ?? '/ws';
+    return { kind: 'browser', wsRoute };
   }
-
-  vscodeApi.postMessage(withViewGeneration(msg));
+  return { kind: 'vscode' };
 }
+
+function createTransport(): ClientTransport {
+  const meta = readTransportMeta();
+  if (meta.kind === 'browser') {
+    const transport = new BrowserClientTransport({
+      wsRoute: meta.wsRoute,
+      onHandshake: () => {
+        // Reconnect reconciliation (§5.2): every unknown/pending command is
+        // answered by a bounded read-only `commandStatusRequest` against the
+        // host decision ledger — never replayed.
+        for (const entry of pendingCommandStore.unknownEntries()) {
+          transport.postMessage({ type: 'commandStatusRequest', clientCommandId: entry.clientCommandId });
+        }
+      },
+    });
+    // Browser lifecycle messages are sent before timers are throttled where
+    // possible; a hidden renderer never triggers reload escalation.
+    const sendVisibility = (): void => transport.sendLifecycle('rendererVisibilityChanged', !document.hidden);
+    const sendFocus = (): void => transport.sendLifecycle('rendererFocusChanged', document.hasFocus());
+    document.addEventListener('visibilitychange', sendVisibility);
+    window.addEventListener('focus', sendFocus);
+    window.addEventListener('blur', sendFocus);
+    transport.connect();
+    return transport;
+  }
+  return new VsCodeClientTransport();
+}
+
+const transport = createTransport();
 
 // ─── Error handling ──────────────────────────────────────────────────────────
 
@@ -128,11 +140,15 @@ window.addEventListener('unhandledrejection', () => {
 
 // ─── Mount ───────────────────────────────────────────────────────────────────
 
-const adapter = { postMessage };
+const postMessage = (msg: WebviewToHostMessage): void => {
+  transport.postMessage(msg);
+};
+
+const adapter = { postMessage, transport };
 
 // H4: forward webview logs to the host (pie OutputChannel / pie.log) so they
 // are durable + visible without opening devtools. `postMessage` is owned here
-// (the sole `acquireVsCodeApi`), so the sink is injected rather than re-acquired.
+// (the sole transport), so the sink is injected rather than re-acquired.
 setWebviewLogSink(postMessage);
 
 const container = document.getElementById('app');

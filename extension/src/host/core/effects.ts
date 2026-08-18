@@ -17,7 +17,7 @@
  * so the reducer can reconcile optimistic state (Phase 4).
  */
 
-import type { ComposerInput, ModelSettings, ChatPrefs, HostToWebviewMessage, PruningMode, UserContentPart } from '../../shared/protocol';
+import type { ComposerInput, ModelSettings, ChatPrefs, HostToWebviewMessage, PruningMode, UserContentPart, RendererCommandContext } from '../../shared/protocol';
 import type { LiveSubagentDetailAddress, DetailCursor, DetailPageRef } from '../../shared/protocol/subagent-detail';
 import type { PendingSendQueueEntry } from './arch-state';
 import type { BackendReadyQueueEntry } from './arch-state';
@@ -172,6 +172,10 @@ export interface ShowModelSwitchConfirmEffect extends EffectBase {
   modelSettings: ModelSettings;
   message: string;
   confirmChoice: string;
+  /** Trusted initiating renderer (browser server plan §9): a browser source
+   *  confirms inline in ITS renderer; the VS Code modal is never shown to a
+   *  browser source. Never client-supplied. */
+  source?: RendererCommandContext;
 }
 
 export interface SetPrefsRpcEffect extends EffectBase {
@@ -211,6 +215,8 @@ export interface DetailSubscribeRpcEffect extends EffectBase {
   detailKey: string;
   address: LiveSubagentDetailAddress;
   cursor?: DetailCursor;
+  rendererId?: string;
+  rendererGeneration?: number;
 }
 
 export interface DetailUnsubscribeRpcEffect extends EffectBase {
@@ -218,6 +224,8 @@ export interface DetailUnsubscribeRpcEffect extends EffectBase {
   viewGeneration: number;
   detailKey: string;
   reason: 'collapse' | 'unmount' | 'session-change';
+  rendererId?: string;
+  rendererGeneration?: number;
 }
 
 export interface DetailFetchPagesRpcEffect extends EffectBase {
@@ -225,6 +233,8 @@ export interface DetailFetchPagesRpcEffect extends EffectBase {
   viewGeneration: number;
   detailKey: string;
   ref: DetailPageRef;
+  rendererId?: string;
+  rendererGeneration?: number;
 }
 
 /** Hydrate a session's model state from the backend (fire-and-forget; the
@@ -269,6 +279,8 @@ export interface FileRevertEffect extends EffectBase {
   kind: 'FileRevert';
   sessionPath: string;
   filePath: string;
+  /** Trusted initiating renderer (browser server plan §9). */
+  source?: RendererCommandContext;
 }
 
 export interface ExtensionUiResponseRpcEffect extends EffectBase {

@@ -22,18 +22,32 @@ import { useNoticeAction } from './use-notice-action';
 import { useChatPrefsCss } from './use-chat-prefs-css';
 import { useWarmupAudio } from './use-warmup-audio';
 import { TranscriptCommitProvider } from './transcript/commit-registry';
+import { InlineConfirmDialog } from './components/inline-confirm-dialog';
+import { ConnectionBanner } from './components/connection-banner';
+import type { ClientTransport } from '../transport/client-transport';
 
 export interface AppBodyProps {
   adapter: {
     postMessage: (msg: WebviewToHostMessage) => void;
+    transport: ClientTransport;
     initialState?: ViewState;
   };
 }
 
 export function AppBody({ adapter }: AppBodyProps) {
-  const { postMessage } = adapter;
-  const { viewState, mergedTranscript, commitTarget, draftRestore, activeSessionPathRef, setDraftRestore, addOptimisticMessage } =
-    useHostSync(postMessage, adapter.initialState);
+  const { postMessage, transport } = adapter;
+  const {
+    viewState,
+    mergedTranscript,
+    commitTarget,
+    draftRestore,
+    activeSessionPathRef,
+    setDraftRestore,
+    addOptimisticMessage,
+    connectionState,
+    inlineConfirm,
+    respondToInlineConfirm,
+  } = useHostSync(transport, adapter.initialState);
 
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const closeContextMenu = useCallback(() => setContextMenu(null), []);
@@ -140,6 +154,15 @@ export function AppBody({ adapter }: AppBodyProps) {
     <TranscriptCommitProvider target={commitTarget} postMessage={postMessage} appSurface={appCommitSurface}>
     <AskUserContext.Provider value={derived.askUserContextValue}>
     <div id="app">
+      {connectionState !== 'connected' && (
+        <ConnectionBanner state={connectionState} />
+      )}
+      {inlineConfirm && (
+        <InlineConfirmDialog
+          confirm={inlineConfirm}
+          onRespond={(confirmed) => respondToInlineConfirm(inlineConfirm.confirmId, confirmed)}
+        />
+      )}
       {contextMenu && (
         <ContextMenu
           menu={contextMenu}

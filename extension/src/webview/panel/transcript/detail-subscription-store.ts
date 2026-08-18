@@ -69,18 +69,35 @@ export function resetDetailStoreBudgets(): void {
 interface DetailStoreContext {
   hostInstanceId: string;
   viewGeneration: number;
+  /** Trusted renderer identity learned from the latest state envelope
+   *  (browser server plan §5.4): the bound route of every subscription must
+   *  carry THIS renderer, so a browser renderer's stream can never settle or
+   *  reach another renderer. */
+  rendererId: string;
+  rendererGeneration: number;
   postMessage?: (message: WebviewToHostMessage) => void;
 }
 
-const EMPTY_CONTEXT: DetailStoreContext = { hostInstanceId: '', viewGeneration: 0 };
+const EMPTY_CONTEXT: DetailStoreContext = { hostInstanceId: '', viewGeneration: 0, rendererId: '', rendererGeneration: 0 };
 let context: DetailStoreContext = { ...EMPTY_CONTEXT };
 
-export function getDetailStoreContext(): { hostInstanceId: string; viewGeneration: number } {
-  return { hostInstanceId: context.hostInstanceId, viewGeneration: context.viewGeneration };
+export function getDetailStoreContext(): { hostInstanceId: string; viewGeneration: number; rendererId: string; rendererGeneration: number } {
+  return {
+    hostInstanceId: context.hostInstanceId,
+    viewGeneration: context.viewGeneration,
+    rendererId: context.rendererId,
+    rendererGeneration: context.rendererGeneration,
+  };
 }
 
 export function setDetailStoreContext(
-  next: { hostInstanceId: string; viewGeneration: number; postMessage: (message: WebviewToHostMessage) => void },
+  next: {
+    hostInstanceId: string;
+    viewGeneration: number;
+    rendererId: string;
+    rendererGeneration: number;
+    postMessage: (message: WebviewToHostMessage) => void;
+  },
 ): void {
   const viewChanged = next.viewGeneration !== context.viewGeneration;
   context = { ...next };
@@ -357,6 +374,8 @@ export function receiveDetailImperative(message: DetailStreamMessage): void {
         hostInstanceId: message.hostInstanceId,
         hostGeneration: message.hostGeneration,
         viewGeneration: message.viewGeneration,
+        rendererId: message.rendererId,
+        rendererGeneration: message.rendererGeneration,
         backendGeneration: message.backendGeneration,
         coordinatorGeneration: message.coordinatorGeneration,
         ...(message.workerId !== undefined && message.workerGeneration !== undefined
@@ -472,6 +491,8 @@ export function receiveDetailImperative(message: DetailStreamMessage): void {
 function routeMatches(route: HostDetailRoute, message: HostDetailRoute): boolean {
   return route.subscriptionId === message.subscriptionId
     && route.hostGeneration === message.hostGeneration
+    && route.rendererId === message.rendererId
+    && route.rendererGeneration === message.rendererGeneration
     && route.backendGeneration === message.backendGeneration
     && route.coordinatorGeneration === message.coordinatorGeneration
     && route.workerId === message.workerId

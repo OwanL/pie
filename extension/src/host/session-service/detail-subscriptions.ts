@@ -46,6 +46,9 @@ interface SubscriptionOwner {
   subscriptionId: string;
   detailKey: string;
   viewGeneration: number;
+  /** Trusted renderer identity (browser server plan §5.4). */
+  rendererId: string;
+  rendererGeneration: number;
   address: LiveSubagentDetailAddress;
   state: 'subscribing' | 'active' | 'rebasing' | 'terminal';
   fence?: BackendDetailFence;
@@ -59,6 +62,8 @@ interface SubscriptionTombstone {
   subscriptionId: string;
   detailKey: string;
   viewGeneration: number;
+  rendererId: string;
+  rendererGeneration: number;
   expiresAt: number;
 }
 
@@ -69,14 +74,25 @@ interface SubscriptionTombstone {
 interface TerminalDetailRecord {
   detailKey: string;
   viewGeneration: number;
+  rendererId: string;
+  rendererGeneration: number;
   address: LiveSubagentDetailAddress;
   durableRef: LazyDetailRef;
   revision: number;
   recordedAt: number;
 }
 
-function ownerKey(viewGeneration: number, detailKey: string): string {
-  return `${viewGeneration}\u0000${detailKey}`;
+function cloneAddress(address: LiveSubagentDetailAddress): LiveSubagentDetailAddress {
+  return { ...address, lineage: address.lineage.map((identity) => ({ ...identity })) };
+}
+
+/** The complete browser-server ownership key (browser server plan §5.4):
+ *  `{hostInstanceId, viewGeneration, rendererId, rendererGeneration,
+ *  detailKey}`. `hostInstanceId` is fixed per service instance; the rest is
+ *  encoded here so a browser renderer's subscription can never be settled or
+ *  streamed to another renderer, even with matching numeric revisions. */
+function ownerKey(viewGeneration: number, rendererId: string, rendererGeneration: number, detailKey: string): string {
+  return `${viewGeneration}\u0000${rendererId}\u0000${rendererGeneration}\u0000${detailKey}`;
 }
 
 function sameAddress(left: LiveSubagentDetailAddress, right: LiveSubagentDetailAddress): boolean {
@@ -92,10 +108,6 @@ function sameAddress(left: LiveSubagentDetailAddress, right: LiveSubagentDetailA
         && identity.spawningToolCallId === expected.spawningToolCallId
         && identity.attemptId === expected.attemptId;
     });
-}
-
-function cloneAddress(address: LiveSubagentDetailAddress): LiveSubagentDetailAddress {
-  return { ...address, lineage: address.lineage.map((identity) => ({ ...identity })) };
 }
 
 /**
@@ -158,17 +170,21 @@ export class DetailSubscriptionService {
     detailKey: string,
     address: LiveSubagentDetailAddress,
     cursor?: DetailCursor,
+    rendererId?: string,
+    rendererGeneration?: number,
   ): void {
+    const ownerRendererId = rendererId ?? '';
+    const ownerRendererGeneration = rendererGeneration ?? 0;
     if (!isLiveSubagentDetailAddress(address)) {
-      this.postError(subscriptionId, viewGeneration, detailKey, 'INVALID_ADDRESS', 'The detail address is invalid.', false);
+      this.postError(subscriptionId, viewGeneration, ownerRendererId, ownerRendererGeneration, detailKey, 'INVALID_ADDRESS', 'The detail address is invalid.', false);
       return;
     }
-    const key = ownerKey(viewGeneration, detailKey);
+    const key = ownerKey(viewGeneration, ownerRendererId, ownerRendererGeneration, detailKey);
     const terminal = this.terminalRecords.get(key);
     if (terminal) {
       if (this.durableAnswersInFlight.has(key)) return;
       if (!sameAddress(terminal.address, address)) {
-        this.postError(subscriptionId, viewGeneration, detailKey, 'INVALID_ADDRESS', 'The address changed after the detail became durable.', false);
+        this.postError(subscriptionId, viewGeneration, ownerRendererId, ownerRendererGeneration, detailKey, 'INVALID_ADDRESS', 'The address changed after the detail became durable.', false);
         return;
       }
       this.subscribeDurably(subscriptionId, terminal);
@@ -189,13 +205,15 @@ export class DetailSubscriptionService {
       this.notifyBackendUnsubscribe(existing, 'rebase');
     }
     if (this.subscriptions.size >= DETAIL_SUBSCRIPTION_MAX_ACTIVE) {
-      this.postError(subscriptionId, viewGeneration, detailKey, 'UNAVAILABLE', 'The host detail subscription budget is full.', true);
+      this.postError(subscriptionId, viewGeneration, ownerRendererId, ownerRendererGeneration, detailKey, 'UNAVAILABLE', 'The host detail subscription budget is full.', true);
       return;
     }
     const owner: SubscriptionOwner = {
       subscriptionId,
       detailKey,
       viewGeneration,
+      rendererId: ownerRendererId,
+      rendererGeneration: ownerRendererGeneration,
       address: cloneAddress(address),
       state: 'subscribing',
       revision: 0,
@@ -215,6 +233,8 @@ export class DetailSubscriptionService {
       this.postError(
         subscriptionId,
         viewGeneration,
+        ownerRendererId,
+        ownerRendererGeneration,
         detailKey,
         this.mapRpcErrorToCode(error),
         error instanceof Error ? error.message : String(error),
@@ -226,8 +246,8 @@ export class DetailSubscriptionService {
   /** Collapse/unmount/session-change: immediately discard the owner (the
    *  webview already discarded its heavy key store), leave a bounded tombstone
    *  until acknowledgement/expiry, and notify the backend best-effort. */
-  unsubscribe(viewGeneration: number, detailKey: string, reason: 'collapse' | 'unmount' | 'session-change'): void {
-    const key = ownerKey(viewGeneration, detailKey);
+  unsubscribe(viewGeneration: number, detailKey: string, reason: 'collapse' | 'unmount' | 'session-change', rendererId?: string, rendererGeneration?: number): void {
+    const key = ownerKey(viewGeneration, rendererId ?? '', rendererGeneration ?? 0, detailKey);
     const owner = this.subscriptions.get(key);
     if (!owner) return;
     this.dropOwner(owner, true);
@@ -250,8 +270,8 @@ export class DetailSubscriptionService {
   /** Refetch an evicted/offscreen page of an active baseline. The owner's
    *  exact address/subscription are used; a stale or mismatched manifest is a
    *  dropped request (the coordinator rebases first). */
-  fetchPages(viewGeneration: number, detailKey: string, ref: DetailPageRef): void {
-    const key = ownerKey(viewGeneration, detailKey);
+  fetchPages(viewGeneration: number, detailKey: string, ref: DetailPageRef, rendererId?: string, rendererGeneration?: number): void {
+    const key = ownerKey(viewGeneration, rendererId ?? '', rendererGeneration ?? 0, detailKey);
     const owner = this.subscriptions.get(key);
     if (!owner || owner.state !== 'active' || owner.fence === undefined) return;
     if (ref.baselineRevision !== owner.baselineRevision || ref.pageCount !== owner.pageCount || ref.pageIndex >= owner.pageCount) return;
@@ -266,6 +286,8 @@ export class DetailSubscriptionService {
       this.postError(
         owner.subscriptionId,
         owner.viewGeneration,
+        owner.rendererId,
+        owner.rendererGeneration,
         owner.detailKey,
         this.mapRpcErrorToCode(error),
         error instanceof Error ? error.message : String(error),
@@ -349,12 +371,14 @@ export class DetailSubscriptionService {
         const record: TerminalDetailRecord = {
           detailKey: owner.detailKey,
           viewGeneration: owner.viewGeneration,
+          rendererId: owner.rendererId,
+          rendererGeneration: owner.rendererGeneration,
           address: cloneAddress(owner.address),
           durableRef: message.durableRef,
           revision: message.revision,
           recordedAt: this.now(),
         };
-        this.terminalRecords.set(ownerKey(owner.viewGeneration, owner.detailKey), record);
+        this.terminalRecords.set(ownerKey(owner.viewGeneration, owner.rendererId, owner.rendererGeneration, owner.detailKey), record);
         this.postImperative({ type: 'detail.terminal', ...this.route(owner), ...message });
         this.dropOwner(owner, false);
         this.pruneTerminalRecords();
@@ -378,7 +402,7 @@ export class DetailSubscriptionService {
    *  No single response ever exceeds the transport budget, and the owner's
    *  stream is routed through the same fence/state machine as a live stream. */
   private subscribeDurably(subscriptionId: string, terminal: TerminalDetailRecord): void {
-    const key = ownerKey(terminal.viewGeneration, terminal.detailKey);
+    const key = ownerKey(terminal.viewGeneration, terminal.rendererId, terminal.rendererGeneration, terminal.detailKey);
     const existing = this.subscriptions.get(key);
     if (existing && (existing.state === 'subscribing' || existing.state === 'active')
       && sameAddress(existing.address, terminal.address)) {
@@ -390,6 +414,8 @@ export class DetailSubscriptionService {
       subscriptionId,
       detailKey: terminal.detailKey,
       viewGeneration: terminal.viewGeneration,
+      rendererId: terminal.rendererId,
+      rendererGeneration: terminal.rendererGeneration,
       address: cloneAddress(terminal.address),
       state: 'subscribing',
       revision: 0,
@@ -408,6 +434,8 @@ export class DetailSubscriptionService {
       this.postError(
         subscriptionId,
         terminal.viewGeneration,
+        terminal.rendererId,
+        terminal.rendererGeneration,
         terminal.detailKey,
         this.mapRpcErrorToCode(error),
         error instanceof Error ? error.message : String(error),
@@ -438,13 +466,13 @@ export class DetailSubscriptionService {
    *  guard here lets a later re-expand re-subscribe through the durable
    *  authority once the previous stream is fully closed. */
   private dropOwner(owner: SubscriptionOwner, tombstone: boolean): void {
-    const key = ownerKey(owner.viewGeneration, owner.detailKey);
+    const key = ownerKey(owner.viewGeneration, owner.rendererId, owner.rendererGeneration, owner.detailKey);
     if (this.subscriptions.get(key) === owner) this.subscriptions.delete(key);
     this.durableAnswersInFlight.delete(key);
-    if (tombstone) this.addTombstone(owner.subscriptionId, owner.viewGeneration, owner.detailKey);
+    if (tombstone) this.addTombstone(owner.subscriptionId, owner.viewGeneration, owner.rendererId, owner.rendererGeneration, owner.detailKey);
   }
 
-  private addTombstone(subscriptionId: string, viewGeneration: number, detailKey: string): void {
+  private addTombstone(subscriptionId: string, viewGeneration: number, rendererId: string, rendererGeneration: number, detailKey: string): void {
     const now = this.now();
     for (const [existingKey, existing] of this.tombstones) {
       if (existing.expiresAt <= now) this.tombstones.delete(existingKey);
@@ -452,6 +480,8 @@ export class DetailSubscriptionService {
     this.tombstones.set(subscriptionId, {
       subscriptionId,
       viewGeneration,
+      rendererId,
+      rendererGeneration,
       detailKey,
       expiresAt: now + DETAIL_TOMBSTONE_TTL_MS,
     });
@@ -475,6 +505,8 @@ export class DetailSubscriptionService {
       hostInstanceId: this.options.getHostInstanceId(),
       hostGeneration: this.hostGeneration,
       viewGeneration: owner.viewGeneration,
+      rendererId: owner.rendererId,
+      rendererGeneration: owner.rendererGeneration,
       backendGeneration: fence?.backendGeneration ?? this.options.getBackendGeneration(),
       coordinatorGeneration: fence?.coordinatorGeneration ?? this.options.getBackendGeneration(),
       ...(fence?.workerId !== undefined && fence.workerGeneration !== undefined
@@ -492,6 +524,8 @@ export class DetailSubscriptionService {
   private postError(
     subscriptionId: string,
     viewGeneration: number,
+    rendererId: string,
+    rendererGeneration: number,
     detailKey: string,
     code: 'INVALID_ADDRESS' | 'NOT_LIVE_ADDRESSABLE' | 'NOT_FOUND' | 'STALE_CURSOR' | 'CHECKSUM_MISMATCH' | 'SUBSCRIPTION_CONFLICT' | 'UNAVAILABLE' | 'INTERNAL_ERROR',
     message: string,
@@ -501,6 +535,8 @@ export class DetailSubscriptionService {
       hostInstanceId: this.options.getHostInstanceId(),
       hostGeneration: this.hostGeneration,
       viewGeneration,
+      rendererId,
+      rendererGeneration,
       backendGeneration: this.options.getBackendGeneration(),
       coordinatorGeneration: this.options.getBackendGeneration(),
       detailKey,

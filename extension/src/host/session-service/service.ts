@@ -228,6 +228,8 @@ export class SessionService implements vscode.Disposable {
     detailKey: string;
     address: LiveSubagentDetailAddress;
     cursor?: DetailCursor;
+    rendererId?: string;
+    rendererGeneration?: number;
   }): void {
     this.detailSubscriptions.subscribe(
       options.subscriptionId,
@@ -235,6 +237,8 @@ export class SessionService implements vscode.Disposable {
       options.detailKey,
       options.address,
       options.cursor,
+      options.rendererId,
+      options.rendererGeneration,
     );
   }
 
@@ -244,8 +248,10 @@ export class SessionService implements vscode.Disposable {
     viewGeneration: number;
     detailKey: string;
     reason: 'collapse' | 'unmount' | 'session-change';
+    rendererId?: string;
+    rendererGeneration?: number;
   }): void {
-    this.detailSubscriptions.unsubscribe(options.viewGeneration, options.detailKey, options.reason);
+    this.detailSubscriptions.unsubscribe(options.viewGeneration, options.detailKey, options.reason, options.rendererId, options.rendererGeneration);
   }
 
   /** Refetch a page of the active baseline for a subscribed key. */
@@ -253,8 +259,10 @@ export class SessionService implements vscode.Disposable {
     viewGeneration: number;
     detailKey: string;
     ref: DetailPageRef;
+    rendererId?: string;
+    rendererGeneration?: number;
   }): void {
-    this.detailSubscriptions.fetchPages(options.viewGeneration, options.detailKey, options.ref);
+    this.detailSubscriptions.fetchPages(options.viewGeneration, options.detailKey, options.ref, options.rendererId, options.rendererGeneration);
   }
 
   captureSelectionRequestStart(selectionToken: string, operationAttempt?: number): void {

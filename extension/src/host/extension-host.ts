@@ -20,6 +20,9 @@ import {
 } from './sidebar/completion-notification';
 import { type RunAnalyticsExportPayload } from './run-analytics/query';
 import { SidebarViewProvider } from './sidebar/provider';
+import { BrowserServer } from './browser-server/browser-server';
+import { readBrowserServerSettings } from './browser-server/settings';
+import type { BrowserServerLifecycleEvent } from './browser-server/types';
 import { SessionService } from './session-service';
 import { TokenRateService } from './token-rate-service';
 import { AggregateStatsService } from './aggregate-stats-service';
@@ -121,6 +124,10 @@ export class PieExtension implements vscode.Disposable {
   private archState: ArchState = initialArchState;
   private readonly effectRunner: EffectRunner;
   private readonly fileDiffService: FileDiffService;
+  /** M2: loopback browser server (browser server plan §6/§7). Owned here;
+   *  started in `start()` after the host can build a valid initial
+   *  `ViewState`, stopped in `shutdown()` before the service/backend order. */
+  private readonly browserServer: BrowserServer;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -183,6 +190,14 @@ export class PieExtension implements vscode.Disposable {
         void this.handleWebviewMessage(message);
       },
       () => this.archState.sessions.runningSessionPaths.length,
+      {
+        // Renderer-scoped handshake snapshots for browser sockets: the
+        // router answers a browser `ready`/`refreshState` in THAT renderer.
+        onForeignRequestState: (rendererId) => this.browserServer.requestState(rendererId),
+        // Renderer-scoped imperatives (browser server plan §4.4): lazy-detail
+        // responses answer the INITIATING browser renderer.
+        onForeignPostImperative: (rendererId, message) => this.browserServer.postImperative(message, rendererId),
+      },
     );
 
     this.fileDiffService = new FileDiffService(() => this.archState);
@@ -196,6 +211,17 @@ export class PieExtension implements vscode.Disposable {
       deriveSessionNameFromText,
       isPendingTabPath,
     );
+
+    this.browserServer = new BrowserServer({
+      getSettings: () => readBrowserServerSettings(),
+      getViewState: () => this.buildViewState(),
+      getRunningSessionCount: () => this.archState.sessions.runningSessionPaths.length,
+      routeMessage: (msg, context) => this.messageRouter.handle(msg, context),
+      assetDir: path.join(context.extensionPath, 'out', 'webview', 'panel'),
+      iconPath: path.join(context.extensionPath, 'media', 'icon.svg'),
+      titleSuffix: vscode.workspace.name ?? undefined,
+      onLifecycle: (event) => this.handleBrowserServerLifecycle(event),
+    });
 
     this.effectRunner = new EffectRunner({
       backend: this.backend,
@@ -317,6 +343,17 @@ export class PieExtension implements vscode.Disposable {
         showWarningModal: (message, confirmChoice) =>
           vscode.window.showWarningMessage(message, { modal: true }, confirmChoice),
       },
+      // M2 source-aware confirmation seam (§9): a BROWSER source confirms
+      // inline in ITS OWN renderer through the browser server; the VS Code
+      // modal is never shown for a browser source, and disconnect cancels.
+      // The sidebar (VS Code) source path is unchanged (native modal).
+      inlineConfirm: (request) =>
+        this.browserServer.requestInlineConfirm(request.rendererId, {
+          kind: request.kind,
+          ...(request.sessionPath !== undefined ? { sessionPath: request.sessionPath } : {}),
+          message: request.message,
+          confirmChoice: request.confirmChoice,
+        }),
       fileDiffService: this.fileDiffService,
       service: this.service,
       statsService: this.statsService,
@@ -387,6 +424,10 @@ export class PieExtension implements vscode.Disposable {
     this.aggregateStatsService.start();
     await this.statsService.start();
     await this.service.start();
+    // M2 (§7.2): start the browser server only after the host can build a
+    // valid initial `ViewState`. Backend readiness is a field in that state;
+    // the HTTP shell does not wait for provider/backend startup.
+    await this.browserServer.start();
     // Push the restored open-tab summaries to the backend so the
     // `session_review` tool's listOpen works immediately after startup
     // (persistTabs only fires on tab changes, not on cold-start restore).
@@ -469,6 +510,9 @@ export class PieExtension implements vscode.Disposable {
       vscode.commands.registerCommand('pie.openChat', () => {
         this.sidebarProvider.reveal();
       }),
+      vscode.commands.registerCommand('pie.openInBrowser', () => this.openBrowserUrl()),
+      vscode.commands.registerCommand('pie.copyBrowserUrl', () => this.copyBrowserUrl()),
+      vscode.commands.registerCommand('pie.restartBrowserServer', () => this.restartBrowserServer()),
       vscode.commands.registerCommand('pie.dumpDebugState', async () => {
         const dumpPath = await this.dumpDebugState();
         const open = 'Open File';
@@ -743,6 +787,7 @@ export class PieExtension implements vscode.Disposable {
         : false,
     });
     this.sidebarProvider.scheduleState();
+    this.browserServer.scheduleState();
     if (this.statusBarUpdateScheduled) {
       return;
     }
@@ -821,6 +866,86 @@ export class PieExtension implements vscode.Disposable {
     this.statusBar.tooltip = tooltipLines.join('\n');
   }
 
+  // ─── Browser server commands (§12.3) ────────────────────────────────────
+
+  /** `pie: Open in Browser` — open the ACTUAL URL of this host's server. */
+  private async openBrowserUrl(): Promise<void> {
+    const state = this.browserServer.getState();
+    if (!state.running || state.url === null) {
+      void vscode.window.showWarningMessage('The pie browser server is not running. Enable `pie.browserServer.enabled` and restart the extension window.');
+      return;
+    }
+    await vscode.env.openExternal(vscode.Uri.parse(state.url));
+  }
+
+  /** `pie: Copy Browser URL` — copy the ACTUAL served URL. */
+  private async copyBrowserUrl(): Promise<void> {
+    const state = this.browserServer.getState();
+    if (!state.running || state.url === null) {
+      void vscode.window.showWarningMessage('The pie browser server is not running. Enable `pie.browserServer.enabled` and restart the extension window.');
+      return;
+    }
+    await vscode.env.clipboard.writeText(state.url);
+    void vscode.window.showInformationMessage(`pie browser URL copied: ${state.url}`);
+  }
+
+  /** `pie: Restart Browser Server` — stop + re-read settings + rebind. */
+  private async restartBrowserServer(): Promise<void> {
+    const before = this.browserServer.getState();
+    await this.browserServer.stop();
+    const outcome = await this.browserServer.start();
+    if (outcome.kind === 'started') {
+      void vscode.window.showInformationMessage(
+        `pie browser server restarted${before.url === outcome.url ? '' : ` — ${outcome.url}`}`,
+      );
+      return;
+    }
+    if (outcome.kind === 'disabled') {
+      void vscode.window.showWarningMessage('pie browser server is disabled (`pie.browserServer.enabled`).');
+      return;
+    }
+    void vscode.window.showErrorMessage(`pie browser server failed to start: ${outcome.reason}`);
+  }
+
+  /** Lifecycle sink (§6.2): successful fallback binds are info-log-only;
+   *  only a terminal bind/start failure produces a user notice. */
+  private handleBrowserServerLifecycle(event: BrowserServerLifecycleEvent): void {
+    switch (event.kind) {
+      case 'started':
+        appendPieLog('info', 'browser-server', 'started', { url: event.url, preferred: event.preferred });
+        break;
+      case 'fallback':
+        // Informational: the preferred port was busy; the ACTUAL url is
+        // recorded and reported by the commands. No user notice.
+        appendPieLog('info', 'browser-server', 'fallback-port', { url: event.url });
+        break;
+      case 'bind-failed':
+        appendPieLog('error', 'browser-server', 'bind-failed', {
+          port: event.port,
+          requirePreferredPort: event.requirePreferredPort,
+          error: event.error,
+        });
+        void vscode.window.showErrorMessage(`pie browser server failed to start on port ${event.port}: ${event.error}`);
+        break;
+      case 'restarted':
+        appendPieLog('info', 'browser-server', 'restarted', { url: event.url });
+        break;
+      case 'stopped':
+        appendPieLog('info', 'browser-server', 'stopped', { reason: event.reason });
+        break;
+      case 'client-connected':
+        appendPieLog('info', 'browser-server', 'client-connected', { rendererId: event.rendererId });
+        break;
+      case 'client-closed':
+        appendPieLog('info', 'browser-server', 'client-closed', {
+          rendererId: event.rendererId,
+          code: event.code,
+          reason: event.reason,
+        });
+        break;
+    }
+  }
+
   private handleSessionCompleted(_event: SessionCompletionEvent): void {
     const suppressNotifications = this.archState.settings.prefs.suppressCompletionNotifications;
     const windowFocused = vscode.window.state.focused;
@@ -864,6 +989,12 @@ export class PieExtension implements vscode.Disposable {
     }
 
     this.shutdownPromise = (async () => {
+      // M2 (§7.4): stop the browser server FIRST — stop accepting
+      // HTTP/upgrades, close tracked WebSocket clients, close/await the HTTP
+      // server, dispose browser renderer sessions/hub — then continue the
+      // existing service/backend shutdown order. Closing the port releases it
+      // for the next VS Code window immediately.
+      this.browserServer.dispose();
       // Clear any pending timers first so they cannot fire into a torn-down
       // store / sidebar provider after dispose.
       this.effectRunner.dispose();

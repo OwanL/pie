@@ -46,6 +46,7 @@ import type {
   DetailSubscribeRpcEffect,
   DetailUnsubscribeRpcEffect,
   DetailFetchPagesRpcEffect,
+  FileRevertEffect,
   HydrateModelEffect,
   LogEffect,
   PostImperativeEffect,
@@ -131,6 +132,8 @@ export interface SessionServiceLike {
     detailKey: string;
     address: LiveSubagentDetailAddress;
     cursor?: DetailCursor;
+    rendererId?: string;
+    rendererGeneration?: number;
   }): void;
   /** Phase 5: discard the owner for a detail key, tombstone its subscription,
    *  and notify the backend best-effort. */
@@ -138,12 +141,16 @@ export interface SessionServiceLike {
     viewGeneration: number;
     detailKey: string;
     reason: 'collapse' | 'unmount' | 'session-change';
+    rendererId?: string;
+    rendererGeneration?: number;
   }): void;
   /** Phase 5: refetch a page of the active baseline for a subscribed key. */
   fetchDetailPages(options: {
     viewGeneration: number;
     detailKey: string;
     ref: DetailPageRef;
+    rendererId?: string;
+    rendererGeneration?: number;
   }): void;
   bumpSessionDataEpoch(sessionPath: string): void;
   /** Current-generation runtime readiness. Cold sends receive only the service
@@ -237,6 +244,17 @@ export interface EffectRunnerDeps {
   log: LogSink;
   postImperative: PostImperativeSink;
   modal: ModalSink;
+  /** M2 source-aware inline confirmations (browser server plan §9): the
+   *  initiating BROWSER renderer confirms inline; the VS Code modal is never
+   *  shown to a browser source. Optional so the sidebar-only host and tests
+   *  without a browser server remain unchanged. */
+  inlineConfirm?: (request: {
+    rendererId: string;
+    kind: 'model-switch' | 'destructive-revert';
+    sessionPath?: string;
+    message: string;
+    confirmChoice: string;
+  }) => Promise<boolean>;
   fileDiffService: FileDiffService;
   service: SessionServiceLike;
   statsService: StatsServiceLike;
@@ -443,7 +461,9 @@ export class EffectRunner {
       HydrateModel: (e) => this.handleHydrateModel(e),
       // ── Template rows (pure 1:1 effect → *Result). ──
       FileDiff: this.templateRow({ resultKind: 'FileDiffResult', withSessionPath: true, call: (e, d) => d.fileDiffService.openFileDiff(e.sessionPath, e.filePath) }),
-      FileRevert: this.templateRow({ resultKind: 'FileRevertResult', withSessionPath: true, call: (e, d) => d.fileDiffService.revertFile(e.sessionPath, e.filePath) }),
+      // FileRevert is a named handler: a browser source must confirm inline in
+      // ITS renderer before the destructive revert runs (§9).
+      FileRevert: (e) => this.handleFileRevert(e),
       LoadOlderTranscript: this.templateRow({ resultKind: 'LoadOlderTranscriptResult', withSessionPath: true, call: (e, d) => d.service.loadOlderTranscript(e.sessionPath) }),
       LoadNewerTranscript: this.templateRow({ resultKind: 'LoadNewerTranscriptResult', withSessionPath: true, call: (e, d) => d.service.loadNewerTranscript(e.sessionPath) }),
       JumpToLatestTranscript: this.templateRow({ resultKind: 'JumpToLatestTranscriptResult', withSessionPath: true, call: (e, d) => d.service.jumpToLatestTranscript(e.sessionPath) }),
@@ -620,18 +640,30 @@ export class EffectRunner {
    *  lifecycle queue (a modal must not block session create/open). Dispatches
    *  `ModelSwitchConfirmResult{corrId, confirmed}` (no `ok`/`error`/
    *  `sessionPath`); on modal throw, logs + dispatches `{confirmed:false}`
-   *  (no error field). */
+   *  (no error field). For a BROWSER source (M2 source-aware seam, §9), the
+   *  confirmation renders inline in the INITIATING renderer; the VS Code
+   *  modal is never invoked for a browser source, and disconnect cancels. */
   private handleShowModelSwitchConfirm(effect: ShowModelSwitchConfirmEffect): void {
     // Intentionally NOT queued on the lifecycle queue: a modal is a user
     // interaction, and holding the lifecycle queue (shared with create/open)
     // behind an open modal would block session creation while the user stares
-    // at a dialog. The old service path awaited the modal *inside*
-    // enqueueLifecycle, which did exactly that. VS Code serializes modal
+    // at a dialog. VS Code serializes modal
     // dialogs itself, corrIds are independent, and the backend write
     // (SetModelRpc) still goes through the lifecycle queue — so ordering is
     // preserved where it matters. This is an improvement, not a regression.
     void (async () => {
       try {
+        if (effect.source?.kind === 'browser' && this.deps.inlineConfirm) {
+          const confirmed = await this.deps.inlineConfirm({
+            rendererId: effect.source.rendererId,
+            kind: 'model-switch',
+            sessionPath: effect.sessionPath,
+            message: effect.message,
+            confirmChoice: effect.confirmChoice,
+          });
+          this.deps.dispatch({ kind: 'ModelSwitchConfirmResult', corrId: effect.corrId, confirmed });
+          return;
+        }
         const choice = await this.deps.modal.showWarningModal(effect.message, effect.confirmChoice);
         this.deps.dispatch({ kind: 'ModelSwitchConfirmResult', corrId: effect.corrId, confirmed: choice === effect.confirmChoice });
       } catch (err) {
@@ -639,6 +671,43 @@ export class EffectRunner {
         // reducer drops the stashed intent on a non-confirm.
         this.deps.log.log('error', `ShowModelSwitchConfirm failed: ${toErrorMessage(err)}`);
         this.deps.dispatch({ kind: 'ModelSwitchConfirmResult', corrId: effect.corrId, confirmed: false });
+      }
+    })();
+  }
+
+  /** `FileRevert` — destructive `revertFile`. VS Code sources revert directly
+   *  (the sidebar UI owns its local confirmation). A BROWSER source (M2
+   *  source-aware seam, §9) first confirms inline in the INITIATING renderer;
+   *  the host proceeds only on explicit confirm, and disconnect cancels. A
+   *  cancelled confirm dispatches `FileRevertResult{ok:false}` (the reducer
+   *  treats it as a no-op) and never touches the file. */
+  private handleFileRevert(effect: FileRevertEffect): void {
+    void (async () => {
+      try {
+        if (effect.source?.kind === 'browser' && this.deps.inlineConfirm) {
+          const confirmed = await this.deps.inlineConfirm({
+            rendererId: effect.source.rendererId,
+            kind: 'destructive-revert',
+            sessionPath: effect.sessionPath,
+            message: `Revert ${effect.filePath}? This permanently discards the changes shown in the diff.`,
+            confirmChoice: 'Revert File',
+          });
+          if (!confirmed) {
+            this.deps.dispatch({ kind: 'FileRevertResult', corrId: effect.corrId, sessionPath: effect.sessionPath, ok: false, error: 'cancelled' });
+            return;
+          }
+        }
+        await this.deps.fileDiffService.revertFile(effect.sessionPath, effect.filePath);
+        this.deps.dispatch({ kind: 'FileRevertResult', corrId: effect.corrId, sessionPath: effect.sessionPath, ok: true });
+      } catch (err) {
+        this.deps.log.log('error', `FileRevert failed: ${toErrorMessage(err)}`);
+        this.deps.dispatch({
+          kind: 'FileRevertResult',
+          corrId: effect.corrId,
+          sessionPath: effect.sessionPath,
+          ok: false,
+          error: toErrorMessage(err),
+        });
       }
     })();
   }
@@ -768,6 +837,9 @@ export class EffectRunner {
       detailKey: effect.detailKey,
       address: effect.address,
       ...(effect.cursor !== undefined ? { cursor: effect.cursor } : {}),
+      ...(effect.rendererId !== undefined && effect.rendererGeneration !== undefined
+        ? { rendererId: effect.rendererId, rendererGeneration: effect.rendererGeneration }
+        : {}),
     });
   }
 
@@ -776,6 +848,9 @@ export class EffectRunner {
       viewGeneration: effect.viewGeneration,
       detailKey: effect.detailKey,
       reason: effect.reason,
+      ...(effect.rendererId !== undefined && effect.rendererGeneration !== undefined
+        ? { rendererId: effect.rendererId, rendererGeneration: effect.rendererGeneration }
+        : {}),
     });
   }
 
@@ -784,6 +859,9 @@ export class EffectRunner {
       viewGeneration: effect.viewGeneration,
       detailKey: effect.detailKey,
       ref: effect.ref,
+      ...(effect.rendererId !== undefined && effect.rendererGeneration !== undefined
+        ? { rendererId: effect.rendererId, rendererGeneration: effect.rendererGeneration }
+        : {}),
     });
   }
 

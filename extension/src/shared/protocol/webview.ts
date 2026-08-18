@@ -58,6 +58,12 @@ export interface RendererCommandContext {
   rendererId: string;
   kind: RendererKind;
   rendererGeneration: number;
+  /** Browser-only: command-level rejection reporting (browser server plan
+   *  §5.2). The router invokes this when a schema-valid command fails
+   *  command-level validation (e.g. the session is no longer open) so the
+   *  browser command gate records exactly one `rejected` decision + ack.
+   *  Set per routing call by the gate; absent for the trusted sidebar. */
+  onBrowserCommandRejected?(type: string, reason: string): void;
 }
 
 /** Base fields shared by all extension UI request variants. */
@@ -149,11 +155,21 @@ export interface RenderFailurePayload {
 /** Host-minted identity carried on every host→webview detail imperative. A
  *  generation change (host, view, backend, or worker) invalidates the stream;
  *  the webview drops any imperative whose route does not match the key-scoped
- *  subscription it opened. */
+ *  subscription it opened. Since browser-server M2 (protocol v6) the route
+ *  also carries the trusted renderer identity (`rendererId`/
+ *  `rendererGeneration`, never client-supplied): a browser renderer's
+ *  subscription can never be settled or streamed to another renderer, even
+ *  with matching numeric revisions. The complete ownership key is
+ *  `{hostInstanceId, viewGeneration, rendererId, rendererGeneration,
+ *  detailKey}`. */
 export interface HostDetailRoute {
   hostInstanceId: string;
   hostGeneration: number;
   viewGeneration: number;
+  /** Trusted renderer session (browser server plan §5.4). */
+  rendererId: string;
+  /** Trusted reload/reconnect fence for that renderer. */
+  rendererGeneration: number;
   backendGeneration: number;
   coordinatorGeneration: number;
   workerId?: string;
@@ -425,12 +441,17 @@ export type HostToWebviewMessage =
        *  its in-memory identity from this before sending `ready`; the host
        *  still treats the socket registration — not echoed JSON fields — as
        *  the trusted source. A reconnect therefore cannot retain a stale DOM
-       *  generation. */
+       *  generation. `viewGeneration` is the live fence (v6): the browser has
+       *  no HTML-stamped generation (the page is stable across socket
+       *  reconnects), so it must learn the current fence from the hello and
+       *  stamp it onto `ready`/`refreshState`/`requestSnapshot`.
+       */
       type: 'rendererHello';
       protocolVersion: number;
       hostInstanceId: string;
       rendererId: string;
       rendererGeneration: number;
+      viewGeneration: number;
       assetVersion: string;
     }
   | {
@@ -459,6 +480,22 @@ export type HostToWebviewMessage =
       type: 'rendererNotice';
       message: string;
       kind?: 'info' | 'warning' | 'error';
+    }
+  | {
+      /** Source-aware inline confirmation (browser server plan §2.2/§9,
+       *  protocol v6). Host-owned: the host posts this targeted imperative to
+       *  the initiating renderer and proceeds only on that renderer's explicit
+       *  `inlineConfirmResponse`. The VS Code sidebar never receives it (its
+       *  adapter keeps using native modals); a browser-initiated model switch
+       *  or destructive `revertFile` never falls back to an invisible desktop
+       *  modal. If the renderer disconnects, the pending confirmation
+       *  cancels/rejects host-side. */
+      type: 'inlineConfirm';
+      confirmId: string;
+      kind: 'model-switch' | 'destructive-revert';
+      sessionPath?: string;
+      message: string;
+      confirmChoice: string;
     };
 
 type WithViewGeneration<T> = T extends unknown ? T & { viewGeneration?: number; clientCommandId?: string } : never;
@@ -590,6 +627,15 @@ type WebviewToHostMessagePayload =
        *  command after reconnect/reload. Never re-executes the command. */
       type: 'commandStatusRequest';
       clientCommandId: string;
+    }
+  | {
+      /** Explicit response to a host-owned `inlineConfirm` imperative
+       *  (protocol v6). Browser-only: the host proceeds with the stashed
+       *  model-switch/revert intent only on `confirmed === true` from the
+       *  initiating renderer; disconnect cancels. */
+      type: 'inlineConfirmResponse';
+      confirmId: string;
+      confirmed: boolean;
     }
   | { type: 'extensionUiResponse'; sessionPath: string; response: ExtensionUIResponsePayload }
   | { type: 'setFileChangesExpanded'; sessionPath: string; expanded: boolean }

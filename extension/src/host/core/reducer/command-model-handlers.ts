@@ -129,6 +129,7 @@ export function handleSetModel(state: ArchState, cmd: Extract<Command, { kind: '
         message:
           'Switching to this model will remove pending pasted images because it does not support image inputs.',
         confirmChoice: 'Switch Model',
+        ...(cmd.source !== undefined ? { source: cmd.source } : {}),
       }],
     };
   }

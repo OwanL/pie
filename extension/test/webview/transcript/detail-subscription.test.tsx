@@ -42,6 +42,8 @@ function stalePage(subscriptionId: string, detailKey: string): DetailStreamMessa
     hostInstanceId: 'h1',
     hostGeneration: 0,
     viewGeneration: 1,
+    rendererId: 'renderer-1',
+    rendererGeneration: 1,
     backendGeneration: 1,
     coordinatorGeneration: 1,
     workerId: 'w1',
@@ -70,6 +72,8 @@ beforeEach(() => {
   setDetailStoreContext({
     hostInstanceId: 'h1',
     viewGeneration: 1,
+    rendererId: 'renderer-1',
+    rendererGeneration: 1,
     postMessage: (message) => posts.push(message),
   });
   container = document.createElement('div');
@@ -164,7 +168,8 @@ test('hook: error state surfaces retryability; terminal keeps the value renderab
   act(() => {
     receiveDetailImperative({
       type: 'detail.error',
-      hostInstanceId: 'h1', hostGeneration: 0, viewGeneration: 1, backendGeneration: 1,
+      hostInstanceId: 'h1', hostGeneration: 0, viewGeneration: 1, rendererId: 'renderer-1', rendererGeneration: 1,
+      backendGeneration: 1,
       coordinatorGeneration: 1, workerId: 'w1', workerGeneration: 1, detailKey: key, subscriptionId: 'sub-1',
       code: 'UNAVAILABLE', message: 'budget full', retryable: true,
     });
