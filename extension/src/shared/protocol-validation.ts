@@ -834,6 +834,20 @@ export function validateWebviewToHostMessage(
       if (!isString(value.message)) return fail('log: missing string `message`');
       return { ok: true, value: value as WebviewToHostMessage };
 
+    case 'rendererVisibilityChanged':
+      if (typeof value.visible !== 'boolean') return fail('rendererVisibilityChanged: missing boolean `visible`');
+      return { ok: true, value: value as WebviewToHostMessage };
+
+    case 'rendererFocusChanged':
+      if (typeof value.focused !== 'boolean') return fail('rendererFocusChanged: missing boolean `focused`');
+      return { ok: true, value: value as WebviewToHostMessage };
+
+    case 'commandStatusRequest':
+      if (!isString(value.clientCommandId) || value.clientCommandId.length === 0) {
+        return fail('commandStatusRequest: missing string `clientCommandId`');
+      }
+      return { ok: true, value: value as WebviewToHostMessage };
+
     default:
       return fail(`unknown message type: ${type}`);
   }

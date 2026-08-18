@@ -148,7 +148,9 @@ test('ChatMessage.userParts supports structured user image content', () => {
 
 // ---------------------------------------------------------------------------
 // Snapshot envelope contract: every state envelope carries hostInstanceId +
-// revision. The webview uses these to detect host-side counter resets.
+// per-renderer identity (rendererId/rendererGeneration) + revision. The
+// webview uses these to detect host-side counter resets; cross-renderer
+// revision comparison is never meaningful.
 // ---------------------------------------------------------------------------
 
 test('HostToWebviewMessage state envelope carries hostInstanceId and revision', () => {
@@ -156,6 +158,8 @@ test('HostToWebviewMessage state envelope carries hostInstanceId and revision', 
     type: 'state',
     protocolVersion: 2,
     hostInstanceId: 'abc',
+    rendererId: 'renderer-1',
+    rendererGeneration: 1,
     viewGeneration: 2,
     revision: 7,
     expectedTranscriptIdentity: 'identity-7',
@@ -244,6 +248,8 @@ test('HostToWebviewMessage state envelope carries hostInstanceId and revision', 
   assert.equal(msg.type, 'state');
   if (msg.type === 'state') {
     assert.equal(msg.hostInstanceId, 'abc');
+    assert.equal(msg.rendererId, 'renderer-1', 'per-renderer identity is host-assigned');
+    assert.equal(msg.rendererGeneration, 1, 'renderer reload/reconnect fence');
     assert.equal(msg.revision, 7);
     assert.deepEqual(msg.state.pendingComposerInputs, []);
     assert.equal(msg.state.activeRunSummary, null);

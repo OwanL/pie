@@ -13,6 +13,10 @@ export type SidebarSyncState = {
 export interface StateEnvelopeContext {
   revision: number;
   viewGeneration: number;
+  /** Host-assigned renderer session id (browser server plan §5.1). */
+  rendererId: string;
+  /** Reload/reconnect fence for this renderer (browser server plan §5.1). */
+  rendererGeneration: number;
 }
 
 export function createSidebarSyncState(hostInstanceId: string): SidebarSyncState {
@@ -54,7 +58,7 @@ export function buildStateEnvelope(
   // Boolean support is retained only for existing synthetic perf callers; the
   // provider always supplies controller-owned revision/generation context.
   const envelopeContext = typeof context === 'boolean'
-    ? { revision: syncState.globalRevision + 1, viewGeneration: 1 }
+    ? { revision: syncState.globalRevision + 1, viewGeneration: 1, rendererId: 'perf', rendererGeneration: 1 }
     : context;
   if (envelopeContext.revision <= syncState.globalRevision) {
     throw new Error('State envelope revisions must increase monotonically.');
@@ -65,6 +69,8 @@ export function buildStateEnvelope(
     type: 'state',
     protocolVersion: WEBVIEW_PROTOCOL_VERSION,
     hostInstanceId: syncState.hostInstanceId,
+    rendererId: envelopeContext.rendererId,
+    rendererGeneration: envelopeContext.rendererGeneration,
     viewGeneration: envelopeContext.viewGeneration,
     revision: envelopeContext.revision,
     expectedTranscriptIdentity,

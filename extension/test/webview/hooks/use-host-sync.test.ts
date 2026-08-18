@@ -84,6 +84,8 @@ test('a queued background draft survives a same-host session switch', () => {
     type: 'state',
     protocolVersion: WEBVIEW_PROTOCOL_VERSION,
     hostInstanceId: 'host-1',
+    rendererId: 'renderer-1',
+    rendererGeneration: 1,
     viewGeneration: 1,
     revision: 2,
     expectedTranscriptIdentity: 'empty-session-b',

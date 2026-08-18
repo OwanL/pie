@@ -28,14 +28,16 @@ const baseViewState: ViewState = {
   pendingExtensionUIRequestsBySession: {}, pendingExtensionUIRequest: null,
 };
 
-test('buildStateEnvelope emits protocol v4 generation and bounded expected transcript identity', () => {
+test('buildStateEnvelope emits protocol v5 generation and bounded expected transcript identity', () => {
   setStreamDiagEnabled(false);
   const sync = createSidebarSyncState('host-1');
-  const result = buildStateEnvelope(sync, baseViewState, { revision: 1, viewGeneration: 7 });
+  const result = buildStateEnvelope(sync, baseViewState, { revision: 1, viewGeneration: 7, rendererId: 'renderer-1', rendererGeneration: 3 });
 
   assert.equal(result.message.type, 'state');
   assert.equal(result.message.protocolVersion, WEBVIEW_PROTOCOL_VERSION);
   assert.equal(result.message.hostInstanceId, 'host-1');
+  assert.equal(result.message.rendererId, 'renderer-1');
+  assert.equal(result.message.rendererGeneration, 3);
   assert.equal(result.message.revision, 1);
   assert.equal(result.message.viewGeneration, 7);
   assert.equal(result.message.expectedTranscriptIdentity, transcriptRenderSignature(baseViewState));
@@ -47,7 +49,7 @@ test('buildStateEnvelope emits protocol v4 generation and bounded expected trans
 test('snapshot bytes are measured by the host only while diagnostics are enabled', () => {
   setStreamDiagEnabled(true);
   try {
-    const result = buildStateEnvelope(createSidebarSyncState('host-1'), baseViewState, { revision: 1, viewGeneration: 2 });
+    const result = buildStateEnvelope(createSidebarSyncState('host-1'), baseViewState, { revision: 1, viewGeneration: 2, rendererId: 'renderer-1', rendererGeneration: 3 });
     assert.equal(result.message.snapshotBytes, Buffer.byteLength(JSON.stringify(result.message), 'utf8'));
   } finally {
     setStreamDiagEnabled(false);
@@ -64,13 +66,13 @@ test('snapshot byte measurement reaches a true fixed point across a digit-width 
     // boundary (here 5 -> 6 digits). Compute the padding that puts it there
     // rather than guessing, then sweep the whole boundary window.
     const overhead = Buffer.byteLength(
-      JSON.stringify(buildStateEnvelope(createSidebarSyncState('host-1'), baseViewState, { revision: 1, viewGeneration: 2 }).message),
+      JSON.stringify(buildStateEnvelope(createSidebarSyncState('host-1'), baseViewState, { revision: 1, viewGeneration: 2, rendererId: 'renderer-1', rendererGeneration: 3 }).message),
       'utf8',
     );
     const basePad = 99_999 - overhead;
     for (let pad = basePad - 8; pad <= basePad + 4; pad += 1) {
       const viewState: ViewState = { ...baseViewState, draftText: 'x'.repeat(pad) };
-      const result = buildStateEnvelope(createSidebarSyncState('host-1'), viewState, { revision: 1, viewGeneration: 2 });
+      const result = buildStateEnvelope(createSidebarSyncState('host-1'), viewState, { revision: 1, viewGeneration: 2, rendererId: 'renderer-1', rendererGeneration: 3 });
       assert.equal(
         result.message.snapshotBytes,
         Buffer.byteLength(JSON.stringify(result.message), 'utf8'),
@@ -85,13 +87,13 @@ test('snapshot byte measurement reaches a true fixed point across a digit-width 
 test('full snapshots remain the sole envelope authority and revisions must be monotonic', () => {
   let sync = createSidebarSyncState('host-1');
   for (let revision = 1; revision <= 5; revision += 1) {
-    const result = buildStateEnvelope(sync, baseViewState, { revision, viewGeneration: 2 });
+    const result = buildStateEnvelope(sync, baseViewState, { revision, viewGeneration: 2, rendererId: 'renderer-1', rendererGeneration: 3 });
     assert.equal(result.message.state, baseViewState);
     assert.equal(result.message.revision, revision);
     sync = result.nextSyncState;
   }
   assert.throws(
-    () => buildStateEnvelope(sync, baseViewState, { revision: 5, viewGeneration: 2 }),
+    () => buildStateEnvelope(sync, baseViewState, { revision: 5, viewGeneration: 2, rendererId: 'renderer-1', rendererGeneration: 3 }),
     /increase monotonically/,
   );
 });

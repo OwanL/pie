@@ -7,6 +7,7 @@ import {
   isEventEnvelope,
   isResponseEnvelope,
   type HostToWebviewMessage,
+  type WebviewToHostMessage,
   type RequestEnvelope,
   type ResponseEnvelope,
   type EventEnvelope,
@@ -124,6 +125,8 @@ test('host stamps WEBVIEW_PROTOCOL_VERSION onto state envelopes', () => {
     type: 'state',
     protocolVersion: WEBVIEW_PROTOCOL_VERSION,
     hostInstanceId: 'host-1',
+    rendererId: 'renderer-1',
+    rendererGeneration: 1,
     viewGeneration: 1,
     revision: 1,
     expectedTranscriptIdentity: 'identity-1',
@@ -133,6 +136,82 @@ test('host stamps WEBVIEW_PROTOCOL_VERSION onto state envelopes', () => {
   assert.equal(msg.type, 'state');
   if (msg.type === 'state') {
     assert.equal(msg.protocolVersion, WEBVIEW_PROTOCOL_VERSION);
+  }
+});
+
+test('browser-server v5 messages carry renderer identity and command acknowledgement', () => {
+  // rendererHello: the first message on an accepted browser socket; the
+  // browser replaces its in-memory identity from it before sending `ready`.
+  const hello: HostToWebviewMessage = {
+    type: 'rendererHello',
+    protocolVersion: WEBVIEW_PROTOCOL_VERSION,
+    hostInstanceId: 'host-1',
+    rendererId: 'renderer-1',
+    rendererGeneration: 3,
+    assetVersion: 'v1',
+  };
+  assert.equal(hello.type, 'rendererHello');
+  if (hello.type === 'rendererHello') {
+    assert.equal(hello.rendererId, 'renderer-1');
+    assert.equal(hello.rendererGeneration, 3);
+  }
+
+  // commandAck: exactly one host decision per schema-valid browser command.
+  const ack: HostToWebviewMessage = {
+    type: 'commandAck',
+    clientCommandId: '01234567-89ab-4cde-f012-3456789abcde',
+    decision: 'accepted',
+  };
+  assert.equal(ack.type, 'commandAck');
+  if (ack.type === 'commandAck') {
+    assert.equal(ack.decision, 'accepted');
+  }
+  const rejected: HostToWebviewMessage = {
+    type: 'commandAck',
+    clientCommandId: '01234567-89ab-4cde-f012-3456789abcde',
+    decision: 'rejected',
+    reason: 'invalid-session',
+  };
+  assert.equal(rejected.type, 'commandAck');
+  if (rejected.type === 'commandAck') {
+    assert.equal(rejected.decision, 'rejected');
+    assert.equal(rejected.reason, 'invalid-session');
+  }
+
+  // commandStatus: bounded read-only reconciliation answer.
+  const status: HostToWebviewMessage = {
+    type: 'commandStatus',
+    clientCommandId: '01234567-89ab-4cde-f012-3456789abcde',
+    decision: 'unknown',
+  };
+  assert.equal(status.type, 'commandStatus');
+  if (status.type === 'commandStatus') {
+    assert.equal(status.decision, 'unknown');
+  }
+
+  // rendererNotice: transient targeted feedback, not the global notice triple.
+  const notice: HostToWebviewMessage = {
+    type: 'rendererNotice',
+    message: 'Opened in VS Code',
+    kind: 'info',
+  };
+  assert.equal(notice.type, 'rendererNotice');
+  if (notice.type === 'rendererNotice') {
+    assert.equal(notice.kind, 'info');
+  }
+
+  // Browser lifecycle inbound messages.
+  const visibility: WebviewToHostMessage = { type: 'rendererVisibilityChanged', visible: true };
+  assert.equal(visibility.type, 'rendererVisibilityChanged');
+  const focus: WebviewToHostMessage = { type: 'rendererFocusChanged', focused: false };
+  assert.equal(focus.type, 'rendererFocusChanged');
+  const statusRequest: WebviewToHostMessage = {
+    type: 'commandStatusRequest',
+    clientCommandId: '01234567-89ab-4cde-f012-3456789abcde',
+  };
+  assert.equal(statusRequest.type, 'commandStatusRequest');
+  if (statusRequest.type === 'commandStatusRequest') {
+    assert.equal(statusRequest.clientCommandId, '01234567-89ab-4cde-f012-3456789abcde');
   }
 });
 

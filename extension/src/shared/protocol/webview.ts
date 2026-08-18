@@ -41,6 +41,25 @@ export interface ReviewHumanVerificationMetadata {
   expectedObservation: string;
 }
 
+// ─── Multi-renderer identity (browser server) ───────────────────────────────
+//
+// The host may serve the same UI to several renderer surfaces (the VS Code
+// sidebar and, later, loopback-served browsers). `hostInstanceId` is the
+// SHARED extension-host incarnation; `rendererId`/`rendererGeneration` are
+// per-renderer delivery identity, never trusted from an unauthenticated
+// payload. Envelope revisions are scoped per renderer.
+
+/** Renderer surface kind. */
+export type RendererKind = 'vscode' | 'browser';
+
+/** Trusted source context supplied by the transport when routing a validated
+ *  message. Never taken from browser JSON. */
+export interface RendererCommandContext {
+  rendererId: string;
+  kind: RendererKind;
+  rendererGeneration: number;
+}
+
 /** Base fields shared by all extension UI request variants. */
 export interface ExtensionUIRequestBase {
   id: string;
@@ -311,7 +330,12 @@ export type HostToWebviewMessage =
   | {
       type: 'state';
       protocolVersion: number;
+      /** Shared extension-host incarnation (same value for every renderer). */
       hostInstanceId: string;
+      /** Host-assigned renderer session id (browser server plan §5.1). */
+      rendererId: string;
+      /** Reload/reconnect fence for this renderer (browser server plan §5.1). */
+      rendererGeneration: number;
       /** Invalidates settlements and evidence from a replaced/reloaded view. */
       viewGeneration: number;
       revision: number;
@@ -392,9 +416,52 @@ export type HostToWebviewMessage =
        *  the non-gesture postMessage context. */
       type: 'playCompletionSound';
       volume: number;
+    }
+  // ── Browser-server transport (Milestone 2). The four variants below are
+  //    browser-only host→renderer traffic; the VS Code sidebar never receives
+  //    them. ──
+  | {
+      /** First message on an accepted browser WebSocket. The browser replaces
+       *  its in-memory identity from this before sending `ready`; the host
+       *  still treats the socket registration — not echoed JSON fields — as
+       *  the trusted source. A reconnect therefore cannot retain a stale DOM
+       *  generation. */
+      type: 'rendererHello';
+      protocolVersion: number;
+      hostInstanceId: string;
+      rendererId: string;
+      rendererGeneration: number;
+      assetVersion: string;
+    }
+  | {
+      /** Exactly one host-side decision per schema-valid browser application
+       *  command that reached routing. `accepted` = entered the
+       *  reducer/effect path; `rejected` = command-level validation or
+       *  routing failed, with a typed reason. The exactly-once property is
+       *  about the host decision and emission, not network delivery. */
+      type: 'commandAck';
+      clientCommandId: string;
+      decision: 'accepted' | 'rejected';
+      reason?: string;
+    }
+  | {
+      /** Status answer for a browser `commandStatusRequest` after reconnect
+       *  or reload. The host consults its bounded command-decision ledger and
+       *  never executes the command as part of reconciliation. */
+      type: 'commandStatus';
+      clientCommandId: string;
+      decision: 'accepted' | 'rejected' | 'unknown';
+    }
+  | {
+      /** Transient targeted feedback for the initiating renderer (e.g.
+       *  “Opened in VS Code”). Not the global notice triple in `ArchState`;
+       *  it is renderer feedback only and disappears on the next snapshot. */
+      type: 'rendererNotice';
+      message: string;
+      kind?: 'info' | 'warning' | 'error';
     };
 
-type WithViewGeneration<T> = T extends unknown ? T & { viewGeneration?: number } : never;
+type WithViewGeneration<T> = T extends unknown ? T & { viewGeneration?: number; clientCommandId?: string } : never;
 
 /** Messages the webview can send back to the host. Every renderer-originated
  * message may carry the host-stamped generation so current controls remain
@@ -513,6 +580,17 @@ type WebviewToHostMessagePayload =
   | { type: 'transcriptCommitBlocked'; payload: TranscriptCommitBlockedPayload }
   | { type: 'paintObserved'; payload: PaintObservedPayload }
   | { type: 'renderFailure'; payload: RenderFailurePayload }
+  // ── Browser-server lifecycle (Milestone 2). Validated like all other
+  //    inbound messages; `rendererFocusChanged` is mandatory because
+  //    completion-attention arbitration depends on it. ──
+  | { type: 'rendererVisibilityChanged'; visible: boolean }
+  | { type: 'rendererFocusChanged'; focused: boolean }
+  | {
+      /** Bounded read-only status query for a sent-but-unacknowledged
+       *  command after reconnect/reload. Never re-executes the command. */
+      type: 'commandStatusRequest';
+      clientCommandId: string;
+    }
   | { type: 'extensionUiResponse'; sessionPath: string; response: ExtensionUIResponsePayload }
   | { type: 'setFileChangesExpanded'; sessionPath: string; expanded: boolean }
   // ── Brief H: recovery actions surfaced from an error notice. The host owns

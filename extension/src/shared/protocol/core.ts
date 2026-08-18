@@ -15,8 +15,13 @@ export const SESSION_SNAPSHOT_TOO_LARGE_CODE = 'SESSION_SNAPSHOT_TOO_LARGE' as c
  * value posted by the host does not match its compiled-in expectation; it does
  * not refuse to load (the webview is shipped together with the host so the
  * mismatch generally indicates a stale hot-reload).
+ *
+ * v5 (browser server): multi-renderer identity (`rendererHello`,
+ * `rendererVisibilityChanged`, `rendererFocusChanged`), command
+ * acknowledgement (`clientCommandId`, `commandAck`, `commandStatus`,
+ * `commandStatusRequest`), and targeted `rendererNotice` feedback.
  */
-export const WEBVIEW_PROTOCOL_VERSION = 4;
+export const WEBVIEW_PROTOCOL_VERSION = 5;
 
 export function assertProtocolVersion(peerLabel: string, protocolVersion: unknown): void {
   if (!Number.isInteger(protocolVersion)) {

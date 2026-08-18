@@ -38,6 +38,8 @@ function stateEnvelope(
     type: 'state',
     protocolVersion: WEBVIEW_PROTOCOL_VERSION,
     hostInstanceId,
+    rendererId: 'renderer-1',
+    rendererGeneration: 1,
     viewGeneration,
     revision,
     expectedTranscriptIdentity: `identity-${hostInstanceId}-${viewGeneration}-${revision}`,
