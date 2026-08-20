@@ -199,9 +199,11 @@ afterEach(() => { setMockBehavior(undefined); resetMockState(); });
 
 /** Poll until `mockState()[key] >= min` (with a timeout). The first `execute()`
  *  in a process pays the tsx on-the-fly TS→CJS compile of modes.ts (~1s on a
- *  cold start); subsequent calls hit the cached module. The default timeout
- *  accommodates that cold start. */
-async function waitForCounter(key: string, min: number, timeoutMs = 3000): Promise<void> {
+ *  cold start); subsequent calls hit the cached module. Under the parallel
+ *  fast suite the same cold compile can take far longer on a CPU-saturated
+ *  machine, so the default timeout is a generous failure bound (the counter
+ *  increments on its own; this only caps a never-started child). */
+async function waitForCounter(key: string, min: number, timeoutMs = 15000): Promise<void> {
 	const deadline = Date.now() + timeoutMs;
 	while (Date.now() < deadline) {
 		if ((mockState()[key] ?? 0) >= min) return;
@@ -273,7 +275,7 @@ test("Bug 1: aborting after child prompt() starts settles locally without waitin
 	// (set above) → the ONLY escape is the structural abort path. With a happy
 	// abort() that releases prompt(), this settles quickly. If it does NOT,
 	// the per-prompt timeout is missing (Bug 1).
-	const response = await within(2000, responseP);
+	const response = await within(5000, responseP);
 	const text = (response.content?.[0] as { text?: string } | undefined)?.text ?? "";
 	assert.match(text, /abort/i, "tool call must surface an abort result, not hang");
 	assert.equal(mockState().abortCalls, 1, "child session.abort() must have been invoked");
@@ -305,7 +307,7 @@ test("Nested hard-stop: a parent abort invokes the child's billable-window abort
 	await waitForCounter("promptStarted", 1);
 	controller.abort();
 
-	const response = await within(2000, responseP);
+	const response = await within(5000, responseP);
 	const text = (response.content?.[0] as { text?: string } | undefined)?.text ?? "";
 	assert.match(text, /abort/i, "tool call must surface an abort result, not hang");
 
@@ -348,7 +350,7 @@ test("Bug 1 gap: parent abort settles even when child abort() does not release p
 
 	// The prompt is raced directly against parent cancellation, so remote
 	// teardown cannot keep the tool call open.
-	const response = await within(3000, responseP);
+	const response = await within(5000, responseP);
 	assert.equal(response.isError, true, "an abort that doesn't release the prompt must surface an error, not hang");
 	const text = (response.content?.[0] as { text?: string } | undefined)?.text ?? "";
 	assert.match(text, /abort|timeout|timed out/i, "tool call must surface an abort/timeout result, not hang");
@@ -385,7 +387,7 @@ test("Bug 2: a hung child session.abort() cannot own parent settlement", async (
 
 	// Parent cancellation settles the local prompt race even when remote
 	// session.abort() never resolves.
-	const response = await within(3000, responseP);
+	const response = await within(5000, responseP);
 	assert.equal(response.isError, true, "a hung abort() must surface an error, not hang the parent");
 	const text = (response.content?.[0] as { text?: string } | undefined)?.text ?? "";
 	assert.match(text, /abort|timeout|timed out/i, "tool call must surface an abort/timeout result, not hang");

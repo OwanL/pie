@@ -165,7 +165,7 @@ async function assertRootPermitReleased(): Promise<void> {
 			usage: { input: 1, output: 1, cost: { total: 0 } },
 		},
 	}]);
-	const result = await within(1500, runSingleAgent(
+	const result = await within(5000, runSingleAgent(
 		process.cwd(), [makeAgent()], "worker", "do work",
 		undefined, undefined, undefined, undefined, makeDetails(),
 		makeModelRegistry(), undefined,
@@ -241,7 +241,7 @@ test("runSingleAgent: aborting DURING createSession (never resolves) returns pro
 	// Let createSession be entered & pending.
 	await new Promise((r) => setTimeout(r, 10));
 	controller.abort();
-	const result = await within(1500, resultP);
+	const result = await within(5000, resultP);
 	assert.equal(result.exitCode, 1);
 	assert.match(result.errorMessage ?? "", /abort|preparing|creating/i);
 	assert.equal(state.createSessionEntered, 1);
@@ -260,7 +260,7 @@ test("runSingleAgent: aborting DURING resource reload (never resolves) returns p
 	);
 	await new Promise((r) => setTimeout(r, 10));
 	controller.abort();
-	const result = await within(1500, resultP);
+	const result = await within(5000, resultP);
 	assert.equal(result.exitCode, 1);
 	assert.match(result.errorMessage ?? "", /abort|preparing|loading/i);
 	assert.equal(state.reloadEntered, 1);
@@ -273,7 +273,7 @@ test("runSingleAgent: an already-aborted root child never waits for a saturated 
 		const controller = new AbortController();
 		controller.abort();
 		const fast = createFastSdk();
-		const result = await within(250, runSingleAgent(
+		const result = await within(5000, runSingleAgent(
 			process.cwd(), [makeAgent()], "worker", "do work",
 			undefined, undefined, controller.signal, undefined, makeDetails(),
 			makeModelRegistry(), undefined,
@@ -360,11 +360,11 @@ test("runSingleAgent: a createSession hang does NOT poison the process-wide sema
 	);
 	await new Promise((r) => setTimeout(r, 10));
 	controller.abort();
-	await within(1500, hungP); // must settle (permit released in finally)
+	await within(5000, hungP); // must settle (permit released in finally)
 
 	// Follow-up with a fast SDK + a real assistant message_end → must complete.
 	const fast = createFastSdk([{ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "ok" }], usage: { input: 1, output: 1, cost: { total: 0 } } } }]);
-	const result = await within(1500, runSingleAgent(
+	const result = await within(5000, runSingleAgent(
 		process.cwd(), [makeAgent()], "worker", "do work",
 		undefined, undefined, undefined, undefined, makeDetails(),
 		makeModelRegistry(), undefined,

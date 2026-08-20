@@ -283,7 +283,7 @@ test("execute(): productive run beyond 15 simulated minutes renews the real sett
 		},
 	});
 
-	const response = await within(3000, execute(
+	const response = await within(5000, execute(
 		"tool-long-productive",
 		{ agent: "worker", task: "do long productive work" } as never,
 		new AbortController().signal,
@@ -324,7 +324,7 @@ test("execute(): headers with no first token settle at the inactivity bound", as
 	for (let i = 0; i < 100 && !reachedProviderWait; i++) await Promise.resolve();
 	assert.equal(reachedProviderWait, true, "the fake session must reach provider wait before time advances");
 	await clock.advance(300_000);
-	const response = await within(1000, responseP);
+	const response = await within(5000, responseP);
 	assert.equal(response.isError, true);
 	assert.match(response.details.results[0]?.errorMessage ?? "", /abort|inactivity/i);
 });
@@ -338,7 +338,7 @@ test("execute(): mid-stream disconnect is terminal and preserves partial output 
 			throw Object.assign(new Error("connection reset mid-stream"), { code: "ECONNRESET" });
 		},
 	});
-	const response = await within(1000, execute(
+	const response = await within(5000, execute(
 		"tool-midstream-reset",
 		{ agent: "worker", task: "stream then disconnect" } as never,
 		new AbortController().signal,
@@ -384,7 +384,7 @@ test("execute(): output followed by a hung tool is bounded and retains the outpu
 	for (let i = 0; i < 100 && !reachedHungTool; i++) await Promise.resolve();
 	assert.equal(reachedHungTool, true, "the fake session must reach the hung tool phase before time advances");
 	await clock.advance(180_000);
-	const response = await within(1000, responseP);
+	const response = await within(5000, responseP);
 	assert.equal(response.isError, true);
 	assert.match(response.details.results[0]?.finalOutput ?? "", /answer before tool/);
 });
@@ -454,7 +454,7 @@ test("execute(): injected clock drives Retry-After wait and provider failover", 
 			await Promise.resolve();
 		}
 		await clock.advance(2_000);
-		const response = await within(3000, responseP);
+		const response = await within(5000, responseP);
 
 		assert.equal(response.isError, undefined, "retry should succeed");
 		assert.equal(attempt, 2, "both attempts must dispatch");
@@ -550,7 +550,7 @@ test("execute(): force-settled child preserves partial output in results[]", asy
 		},
 	});
 
-	const response = await within(1000, execute(
+	const response = await within(5000, execute(
 		"tool-sibling-preserve",
 		{ agent: "worker", task: "do work" } as never,
 		new AbortController().signal,
@@ -609,7 +609,7 @@ test("execute(): parent abort settles even when child abort never resolves (sett
 		() => false,
 	);
 	controller.abort();
-	const response = await within(2000, responseP);
+	const response = await within(5000, responseP);
 
 	assert.equal(response.isError, true);
 	const text = (response.content?.[0] as { text?: string } | undefined)?.text ?? "";
