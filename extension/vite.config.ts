@@ -33,7 +33,13 @@ export default defineConfig(({ mode }) => {
             assetFileNames: 'assets/[name]-[hash][extname]',
             format: 'cjs',
           },
-          external: (id) => id === 'vscode' || id.startsWith('node:'),
+          // `ws`'s optional native deps are NOT installed. Vite stubs
+          // unresolvable optional peer deps with empty objects, which defeats
+          // ws's `try { require('bufferutil') } catch {}` fallback and crashes
+          // on masked frames >= 32 bytes (`bufferUtil$1.unmask is not a
+          // function`). Keep them as runtime requires so the require throws
+          // and ws falls back to its pure-JS implementation.
+          external: (id) => id === 'vscode' || id.startsWith('node:') || id === 'bufferutil' || id === 'utf-8-validate',
         },
       },
       ssr: {

@@ -62,6 +62,7 @@ export const EMPTY_VIEW_STATE: ViewState = {
   runSummariesBySession: {},
   tokenRateBySession: {},
   aggregateStats: EMPTY_AGGREGATE_STATS,
+  deferredTriggers: [],
   busy: false,
   retryStatus: null,
   liveTurnPhase: null,
@@ -383,6 +384,7 @@ function handleStateMessage(msg: HostToWebviewMessage, ctx: HostMessageContext) 
   // Hydration validates the complete ViewState. Receipt evidence is emitted
   // only after this succeeds, and before scheduling any renderer state update.
   const hydratedState = ctx.hydrateViewState(m.state);
+
   ctx.lastRevisionRef.current = m.revision;
   ctx.viewGenerationRef.current = m.viewGeneration;
   const commitTarget: TranscriptCommitTarget = {

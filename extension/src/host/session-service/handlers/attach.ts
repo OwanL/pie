@@ -12,6 +12,7 @@ import { bootLog, auditLog } from '../../util/audit';
 import { shouldFlashFinishedTab } from '../../sidebar/completion-notification';
 import { backendExitEvents, type InterruptedSessionActivity } from '../backend-exit-events.js';
 import { appendPieLog } from '../../util/pie-log.js';
+import type { DeferredTriggerRegistry } from '../../deferred-triggers/registry';
 
 interface ApplySessionOpenedDeps {
   getArchState: () => ArchState;
@@ -330,6 +331,7 @@ export function handleBusyChangedPayload(
     context: vscode.ExtensionContext;
     state: SessionServiceState;
     onSessionCompleted?: OnSessionCompleted;
+    triggers: DeferredTriggerRegistry;
   },
 ): void {
   auditLog('session-service', 'busy.changed', {
@@ -385,6 +387,15 @@ export function handleBusyChangedPayload(
 
   deps.state.evictInactiveTranscriptWindows();
   deps.scheduleRender();
+
+  // A session finishing streaming fires any `session_finished` deferred
+  // triggers watching it. `busy=false` covers both normal completion AND
+  // interrupts (Stop) — an interrupted session is no longer running, so it
+  // counts as "finished". The registry excludes the watcher's own session
+  // so a deferring turn's completion never self-wakes.
+  if (!payload.busy) {
+    deps.triggers.onSessionFinished(sessionPath);
+  }
 }
 
 interface AttachDeps {

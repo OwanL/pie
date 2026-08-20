@@ -1,0 +1,23 @@
+{
+  // Typecheck gate for the deferred-triggers extension. Mirrors
+  // session-reviewer's tsconfig; the `@earendil-works/pi-coding-agent` peer
+  // package is declared as an opaque ambient module in `types-global.d.ts`
+  // (imports resolve to `any`) so this gate covers deferred-triggers' INTERNAL
+  // types — schema/store — without flagging drift against the evolving pi API
+  // surface.
+  "compilerOptions": {
+    "module": "preserve",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": false,
+    "target": "ES2021",
+    "lib": ["ES2021", "DOM"],
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": ["index.ts", "src/**/*.ts", "test/**/*.ts", "types-global.d.ts"],
+  "exclude": ["node_modules"]
+}

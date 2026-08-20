@@ -11,16 +11,16 @@ import {
   mapFilesToPackages,
 } from '../lib/test-packages.mjs';
 
-test('PACKAGE_DIRECTIVES covers the 16 run-tests.mjs package ids', () => {
+test('PACKAGE_DIRECTIVES covers the 17 run-tests.mjs package ids', () => {
   const expected = [
     'extension', 'analysis', 'scripts',
     'cwd-skills', 'safeguard', 'skill-pruner', 'subagent', 'ask-user',
     'warm-bash', 'copilot-model-discovery', 'web-access-compat', 'tool-result-pruner',
-    'session-reviewer', 'session-changes', 'computer-use',
+    'session-reviewer', 'deferred-triggers', 'session-changes', 'computer-use',
     'image-context-guard',
   ];
   assert.deepEqual(ALL_PACKAGE_IDS, expected);
-  assert.equal(PACKAGE_DIRECTIVES.length, 16);
+  assert.equal(PACKAGE_DIRECTIVES.length, 17);
 });
 
 test('classifyFileToPackage maps a file under each package directory to its id', () => {
@@ -34,6 +34,7 @@ test('classifyFileToPackage maps a file under each package directory to its id',
   assert.equal(classifyFileToPackage('extensions/cwd-skills/index.ts'), 'cwd-skills');
   assert.equal(classifyFileToPackage('extensions/copilot-model-discovery/test/copilot-models.test.ts'), 'copilot-model-discovery');
   assert.equal(classifyFileToPackage('extensions/session-changes/test/render.test.ts'), 'session-changes');
+  assert.equal(classifyFileToPackage('extensions/deferred-triggers/test/store.test.ts'), 'deferred-triggers');
   assert.equal(classifyFileToPackage('extensions/computer-use/test/schema.test.ts'), 'computer-use');
   assert.equal(classifyFileToPackage('extensions/image-context-guard/test/projection.test.ts'), 'image-context-guard');
 });

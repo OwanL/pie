@@ -26,6 +26,7 @@ import process from 'node:process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { PACKAGE_DIRECTIVES } from './lib/test-packages.mjs';
 import { withoutGitRepositoryEnv } from './lib/git-environment.mjs';
+import { withoutPiHarnessEnv } from './lib/pi-harness-env.mjs';
 import {
   abortOnProcessSignals,
   resolveChildProcessTimeoutMs,
@@ -239,7 +240,7 @@ function runGroup(group, args, signal) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [group.tsxBin, ...args], withProcessTreeIsolation({
       cwd: group.cwd,
-      env: withoutGitRepositoryEnv(process.env),
+      env: withoutPiHarnessEnv(withoutGitRepositoryEnv(process.env)),
       stdio: 'inherit',
       windowsHide: true,
     }));

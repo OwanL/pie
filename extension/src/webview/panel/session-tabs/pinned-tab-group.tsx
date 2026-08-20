@@ -19,6 +19,7 @@ export interface PinnedTabGroupProps {
   runningPathSet: Set<string>;
   startingModelPathSet: Set<string>;
   unreadFinishedPathSet: Set<string>;
+  deferredTimerPathSet: Set<string>;
   /** Effective active session path (host or optimistic). */
   activePath: string | null;
   /** Whether this chip is the current group/merge drop target (highlight). */
@@ -55,6 +56,7 @@ function PinnedTabGroupView({
   runningPathSet,
   startingModelPathSet,
   unreadFinishedPathSet,
+  deferredTimerPathSet,
   activePath,
   isDropTarget,
   open,
@@ -170,8 +172,9 @@ function PinnedTabGroupView({
             const isActive = activePath === memberPath;
             const isRunning = runningPathSet.has(memberPath);
             const isStartingModel = isRunning && startingModelPathSet.has(memberPath);
-            const isUnreadFinished = unreadFinishedPathSet.has(memberPath);
+            const isUnreadFinished = unreadFinishedPathSet.has(memberPath) && !deferredTimerPathSet.has(memberPath);
             const isPreparing = isPendingTabPath(memberPath);
+            const isDeferredTimer = deferredTimerPathSet.has(memberPath);
             const rowClassBits = ['pinned-tab-group-member'];
             if (isActive) rowClassBits.push('active');
             if (isRunning) rowClassBits.push('running');
@@ -194,9 +197,11 @@ function PinnedTabGroupView({
                 <span class="pinned-tab-group-member-label">{label}</span>
                 {isRunning || isPreparing
                   ? <span class={isStartingModel ? 'session-tab-running starting-model' : 'session-tab-running'} aria-hidden="true" />
-                  : isUnreadFinished
-                    ? <span class="session-tab-finished" aria-hidden="true" />
-                    : null}
+                  : isDeferredTimer
+                    ? <span class="session-tab-deferred-timer" aria-hidden="true">⌛</span>
+                    : isUnreadFinished
+                      ? <span class="session-tab-finished" aria-hidden="true" />
+                      : null}
               </button>
             );
           })}

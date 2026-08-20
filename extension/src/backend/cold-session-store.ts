@@ -157,6 +157,25 @@ export class ColdSessionLeaseAuthority {
     return stamp;
   }
 
+  /** Like {@link capture} but returns `undefined` instead of throwing when the
+   *  path is currently reserved (a session mid-creation). Used by read-only
+   *  catalog scans (`list`) where a reserved path is a not-yet-committed
+   *  session that should simply be omitted from the result rather than failing
+   *  the whole scan. */
+  tryCapture(sessionPath: string): ColdSessionOwnershipStamp | undefined {
+    const sessionPathKey = coldCanonicalPathKey(sessionPath);
+    if (this.pathReservations.has(sessionPathKey)) {
+      return undefined;
+    }
+    return {
+      coordinatorGeneration: this.currentCoordinatorGeneration,
+      sessionPath,
+      sessionPathKey,
+      ownershipRevision: this.ownershipRevisions.get(sessionPathKey) ?? 0,
+      fingerprint: this.fingerprint(sessionPath),
+    };
+  }
+
   /** Atomically reserve canonical paths in sorted key order. Validation happens
    * before mutation, and rollback/release uses the same deterministic order. */
   reserveCanonicalPaths(
@@ -384,7 +403,18 @@ export class ColdSessionStore {
         this.catalog.refresh();
         continue;
       }
-      const stamps = sessions.map((session) => this.leases.capture(session.path));
+      const stamps: ColdSessionOwnershipStamp[] = [];
+      const visibleSessions: SessionSummary[] = [];
+      for (const session of sessions) {
+        // A reserved path is a session mid-creation (not yet committed). Skip
+        // it from the read-only list rather than failing the whole scan, so a
+        // concurrent `session.create` no longer makes `emitSessionListChanged`
+        // throw `path-reserved` every ~10s and stall the session-list refresh.
+        const stamp = this.leases.tryCapture(session.path);
+        if (!stamp) continue;
+        stamps.push(stamp);
+        visibleSessions.push(session);
+      }
       if (generation !== this.leases.coordinatorGeneration
         || authorityRevision !== this.leases.authorityRevision
         || mutationRevision !== this.catalogMutationRevision) {
@@ -392,8 +422,8 @@ export class ColdSessionStore {
         continue;
       }
       for (const stamp of stamps) this.leases.assertCurrent(stamp);
-      this.stampResult(sessions, stamps);
-      return sessions;
+      this.stampResult(visibleSessions, stamps);
+      return visibleSessions;
     }
     throw new Error('The session catalog changed repeatedly while it was being read.');
   }

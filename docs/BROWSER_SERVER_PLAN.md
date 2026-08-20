@@ -325,7 +325,7 @@ Static serving requirements:
 - no-cache HTML and manifest; immutable caching for hashed assets;
 - strict method and path allowlists;
 - bounded headers and no directory listing;
-- a browser CSP permitting only same-origin scripts/styles/assets and same-origin `ws:`/`wss:` connections;
+- a browser CSP permitting only same-origin scripts/styles/assets and same-origin `ws:`/`wss:` connections; `style-src` also allows inline styles (DOMPurify-sanitized content and the self-contained render-crash overlay), while `script-src` stays nonce-only;
 - `frame-ancestors 'none'`, no remote scripts, and no inline script except a nonce if bootstrap data requires it.
 
 Extract generic manifest loading, entry discovery, asset hashing, and HTML metadata from `host/webview/assets.ts`. Keep separate renderers for VS Code URIs/CSP and ordinary HTTP URLs/CSP.

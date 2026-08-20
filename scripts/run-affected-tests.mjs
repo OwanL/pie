@@ -6,6 +6,7 @@ import process from 'node:process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { withoutGitRepositoryEnv } from './lib/git-environment.mjs';
+import { withoutPiHarnessEnv } from './lib/pi-harness-env.mjs';
 import { planAffectedTests } from './lib/test-impact.mjs';
 import { getChangedFiles } from './lib/git-changed-files.mjs';
 import {
@@ -21,7 +22,7 @@ function runNodeScript(script, args, signal) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [script, ...args], withProcessTreeIsolation({
       cwd: repoRoot,
-      env: withoutGitRepositoryEnv(process.env),
+      env: withoutPiHarnessEnv(withoutGitRepositoryEnv(process.env)),
       stdio: 'inherit',
       windowsHide: true,
     }));

@@ -4,6 +4,7 @@ import type { SessionSummary, TranscriptWindow, SystemPromptEntry, FileChangeEnt
 import type { ExtensionInfo, PruningResult, PruningSettings, ToolResultPruningSettings, PruningCatalog, ChatPrefs, ActiveRunSummary } from './settings.js';
 import type { AggregateStats } from './aggregate-stats.js';
 import type { LiveTurnPhase } from '../live-pipeline-protocol.js';
+import type { DeferredTriggerView } from './deferred-triggers.js';
 import type { TokenRateIndicatorState } from '../token-rate.js';
 import type { NoticeKind } from '../error-mapping.js';
 import type {
@@ -332,6 +333,12 @@ export interface ViewState {
   pendingExtensionUIRequestsBySession: Record<string, Record<string, ExtensionUIRequestPayload>>;
   /** First pending extension UI request for the active session, or null (for bottom-bar prompt). */
   pendingExtensionUIRequest: ExtensionUIRequestPayload | null;
+  /** Currently-active (registered, not yet fired/cancelled) deferred triggers
+   *  across ALL sessions, projected host-side from the `DeferredTriggerRegistry`.
+   *  The webview renders a waiting-trigger segment in the bottom status strip
+   *  (with a cancel affordance) and greys out the mark-done / close-tab actions
+   *  for sessions that own a pending trigger. Empty array when none are active. */
+  deferredTriggers: DeferredTriggerView[];
 }
 
 // ─── Host ↔ webview envelopes ────────────────────────────────────────────────
@@ -660,6 +667,16 @@ type WebviewToHostMessagePayload =
       text: string;
       localId: string;
       disablePruning?: boolean;
+    }
+  | {
+      /** Cancel a deferred trigger registered for `sessionPath`. When
+       *  `triggerId` is omitted, cancels ALL active triggers for that session
+       *  (mirrors the `defer_trigger` tool's `cancel` action with no
+       *  `triggerId`). The host appends a `cancel` op to the sidecar and
+       *  updates its in-memory set; the next snapshot reflects the removal. */
+      type: 'cancelDeferredTrigger';
+      sessionPath: string;
+      triggerId?: string;
     }
 
   // ── H4: webview → host log routing. The webview cannot import host

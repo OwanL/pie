@@ -756,6 +756,10 @@ export class PieExtension implements vscode.Disposable {
       ...projected,
       tokenRateBySession: this.tokenRateService.getRates(),
       aggregateStats: this.aggregateStatsService.getAggregateStats(),
+      // Active deferred triggers are owned by the `DeferredTriggerRegistry`
+      // (host-side, not in ArchState) — merged here like `aggregateStats` /
+      // `tokenRateBySession` so the pure projection stays service-free.
+      deferredTriggers: this.service.getDeferredTriggers(),
     };
     if (isLivePipelineTraceEnabled()) {
       recordLivePipelineTrace({

@@ -10,6 +10,7 @@ import { ContextMenu, type ContextMenuState } from './components/context-menu';
 import { NoticeBanner } from './components/notice-banner';
 import { SessionTabs } from './ui';
 import { AggregateStatsStrip } from './ui';
+import { DeferredTriggersMenu } from './aggregate-stats-strip/deferred-triggers-menu';
 import { NoticeContext } from './hooks/notice-context';
 import { AskUserContext, selectFixedPromptRequest } from './hooks/ask-user-context';
 import { useHostSync } from './hooks/use-host-sync';
@@ -85,6 +86,12 @@ export function AppBody({ adapter }: AppBodyProps) {
   // local protocol-sync bookkeeping (in-flight UI gating).
   const [interrupting, setInterrupting] = useState(false);
 
+  // Deferred-triggers cancel popup: webview-local ephemeral UI (the moral
+  // equivalent of `contextMenu` — STATE_CONTRACT § Webview-Local State). Open
+  // position is captured from the strip segment click; dismissed on
+  // click-outside / Escape (handled inside the menu). `null` = closed.
+  const [deferredMenu, setDeferredMenu] = useState<{ x: number; y: number } | null>(null);
+
   // Brief H: bridge from the AppBody-level NoticeBanner's Retry button to the
   //  composer-level live draft. The composer registers its `sendAsRetry` here;
   //  `handleNoticeAction` invokes it on a Retry click. A ref (not state) so a
@@ -131,6 +138,15 @@ export function AppBody({ adapter }: AppBodyProps) {
   useEffect(() => {
     setInterrupting(false);
   }, [derived.activeSessionPath]);
+  // Clear the deferred-triggers popup when no triggers remain. The menu's own
+  // `onClose` (click-outside/Escape/resize) sets state to null, but the render
+  // guard `deferredTriggers.length > 0` can unmount it without calling onClose
+  // (e.g. the last trigger is cancelled via ×, or all triggers fire) — without
+  // this, a stale `{x,y}` would linger and re-open the menu at the old position
+  // when a new trigger is later registered, without a click.
+  useEffect(() => {
+    if (viewState.deferredTriggers.length === 0) setDeferredMenu(null);
+  }, [viewState.deferredTriggers.length]);
   // While an interrupt is in-flight, suppress the transcript's busy-driven
   // typing indicator within one frame (the host clears `busy` only after the
   // abort completes). The transcript components are unchanged — only the
@@ -143,6 +159,12 @@ export function AppBody({ adapter }: AppBodyProps) {
 
   useChatPrefsCss(viewState.prefs);
 
+  // Session lookup for the deferred-triggers menu (resolves watcher session
+  // paths to display names). Memoized on the sessions array ref.
+  const sessionByPath = useMemo(
+    () => new Map(viewState.sessions.map((s) => [s.path, s] as const)),
+    [viewState.sessions],
+  );
   const appCommitSurface = derived.panelSurface === 'loading' || derived.needsSessionRecovery
     ? 'loading'
     : !derived.hasActiveTabs
@@ -208,6 +230,8 @@ export function AppBody({ adapter }: AppBodyProps) {
           onUngroupPinnedTab={handlers.handleUngroupPinnedTab}
           onMovePinnedItem={handlers.handleMovePinnedItem}
           onRunAction={handlers.handleTabRunAction}
+          deferredSessionPaths={derived.deferredSessionPaths}
+          deferredTimerSessionPaths={derived.deferredTimerSessionPaths}
         />
       )}
 
@@ -283,6 +307,18 @@ export function AppBody({ adapter }: AppBodyProps) {
       {derived.showSessionChrome && !viewState.prefs.hideStatusStrip && (
         <AggregateStatsStrip
           stats={viewState.aggregateStats}
+          deferredTriggers={viewState.deferredTriggers}
+          onOpenDeferredMenu={(x, y) => setDeferredMenu({ x, y })}
+        />
+      )}
+      {deferredMenu && viewState.deferredTriggers.length > 0 && (
+        <DeferredTriggersMenu
+          triggers={viewState.deferredTriggers}
+          sessionByPath={sessionByPath}
+          x={deferredMenu.x}
+          y={deferredMenu.y}
+          onCancel={handlers.handleCancelDeferredTrigger}
+          onClose={() => setDeferredMenu(null)}
         />
       )}
     </div>

@@ -32,6 +32,18 @@ export function InlineEditor({ initialText, initialInputs, capturedHeight, onCon
   const [inputs, setInputs] = useState<ComposerInput[]>(initialInputs);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  // Enter and Save are two independent paths into `onConfirm`, and the host
+  // mints a fresh `localId` per submission — so a double-fire issues two edits
+  // that both truncate and send. The editor unmounts on the host's next
+  // snapshot, not synchronously, so guard locally.
+  const submittedRef = useRef(false);
+
+  const submit = useCallback((nextText: string, nextInputs: ComposerInput[]) => {
+    if (submittedRef.current) return;
+    if (!nextText.trim() && nextInputs.length === 0) return;
+    submittedRef.current = true;
+    onConfirm(nextText.trim(), nextInputs);
+  }, [onConfirm]);
 
   const autoSize = useCallback((el: HTMLTextAreaElement) => {
     // Fallback for browsers without field-sizing: content
@@ -59,11 +71,11 @@ export function InlineEditor({ initialText, initialInputs, capturedHeight, onCon
     if (e.isComposing || e.keyCode === 229) return;
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      if (text.trim() || inputs.length > 0) onConfirm(text.trim(), inputs);
+      submit(text, inputs);
     } else if (e.key === 'Escape') {
       onCancel();
     }
-  }, [text, inputs, onConfirm, onCancel]);
+  }, [text, inputs, submit, onCancel]);
 
   // Mirrors the composer's `applyComposerTransfer` but appends to LOCAL state
   // (no host RPC). Accepts the same input kinds the composer accepts
@@ -136,7 +148,7 @@ export function InlineEditor({ initialText, initialInputs, capturedHeight, onCon
             class="action-btn primary"
             type="button"
             disabled={!text.trim() && inputs.length === 0}
-            onClick={() => { if (text.trim() || inputs.length > 0) onConfirm(text.trim(), inputs); }}
+            onClick={() => submit(text, inputs)}
           >Save</button>
         </div>
       </div>

@@ -17,6 +17,8 @@ function renderRate(runningSessionCount: number, rollingRate = runningSessionCou
       liveTokensPerSecond: rollingRate,
       runningSessionCount,
     },
+    deferredTriggers: [],
+    onOpenDeferredMenu: () => {},
   }));
 }
 

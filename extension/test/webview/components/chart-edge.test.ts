@@ -100,6 +100,8 @@ test('StackedAreaChart rate mode renders a single bar without crashing', () => {
 test('AggregateStatsStrip renders a placeholder while not ready and a dash rate when idle', () => {
   const html = renderToString(h(AggregateStatsStrip, {
     stats: EMPTY_AGGREGATE_STATS,
+    deferredTriggers: [],
+    onOpenDeferredMenu: () => {},
   }));
   assert.match(html, /aggregate-strip--placeholder/);
   assert.match(html, /aggregate-strip-rate[^>]*>—</, 'no live rate while not ready → dash');
@@ -108,6 +110,8 @@ test('AggregateStatsStrip renders a placeholder while not ready and a dash rate 
 test('AggregateStatsStrip with ready zero stats shows a dash rate and no last-run segment', () => {
   const html = renderToString(h(AggregateStatsStrip, {
     stats: { ...EMPTY_AGGREGATE_STATS, ready: true },
+    deferredTriggers: [],
+    onOpenDeferredMenu: () => {},
   }));
   assert.doesNotMatch(html, /aggregate-strip--placeholder/, 'ready state drops the placeholder class');
   assert.match(html, /aggregate-strip-rate[^>]*>—</, 'idle (0 tok/s) shows a dash, not 0 or NaN');

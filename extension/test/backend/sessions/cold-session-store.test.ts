@@ -639,6 +639,43 @@ test('representative in-process cold operations keep a causal coordinator ping r
   }
 });
 
+test('list skips reserved (mid-creation) paths instead of failing the whole scan', async () => {
+  const h = await makeHarness();
+  try {
+    const committedPath = path.join(h.sessionDir, 'committed.jsonl');
+    await writeJsonl(committedPath, [header(h.root, 3, 'committed'), userEntry('root', null, 'hello')]);
+
+    // Reserve a path as if a `session.create` is in flight.
+    const reservedPath = path.join(h.sessionDir, 'reserved.jsonl');
+    const [token] = h.leases.reserveCanonicalPaths([reservedPath], 'test-reservation');
+
+    // `capture` on a reserved path throws (unchanged contract for writers).
+    assert.throws(
+      () => h.leases.capture(reservedPath),
+      (error) => error instanceof StaleColdSessionLeaseError && error.reason === 'path-reserved',
+    );
+
+    // `tryCapture` returns undefined for a reserved path and a stamp otherwise.
+    assert.equal(h.leases.tryCapture(reservedPath), undefined);
+    assert.ok(h.leases.tryCapture(committedPath));
+
+    // `list` omits the reserved path rather than throwing `path-reserved`.
+    const listing = await h.store.list();
+    const paths = listing.map((summary) => summary.path);
+    assert.ok(paths.includes(committedPath), 'committed session is listed');
+    assert.ok(!paths.includes(reservedPath), 'reserved (mid-creation) session is omitted');
+
+    // Releasing the reservation makes the path visible again (the file now
+    // exists on disk, so the catalog scan finds it).
+    await writeJsonl(reservedPath, [header(h.root, 3, 'reserved'), userEntry('root', null, 'hello')]);
+    h.leases.releaseCanonicalPaths([token]);
+    const afterRelease = (await h.store.list()).map((summary) => summary.path);
+    assert.ok(afterRelease.includes(reservedPath), 'released path becomes visible');
+  } finally {
+    await fs.rm(h.root, { recursive: true, force: true });
+  }
+});
+
 test('ColdSessionStore has no runtime/provider/tool/subagent dependency imports', async () => {
   const source = await fs.readFile(path.join(process.cwd(), 'src', 'backend', 'cold-session-store.ts'), 'utf8');
   for (const forbidden of [

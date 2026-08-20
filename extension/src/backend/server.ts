@@ -62,7 +62,7 @@ import {
 import {
   type SessionContextCreationReason,
 } from './server-types';
-import { backendTrace, backendError, backendInfo, backendWarn } from './log';
+import { backendTrace, backendError, backendInfo, backendWarn, backendLog, classifyWorkerStderrChunk } from './log';
 import { isCoordinatorOperationAllowed } from './coordinator-operations';
 import { ColdSessionStore, StaleColdSessionLeaseError, type ColdSessionManagerHandle } from './cold-session-store';
 import { DurableDetailStore, type ResolvedDurableDetail } from './durable-detail-store';
@@ -386,7 +386,13 @@ export class BackendServer {
         });
       },
       onDiagnostic: (rootSessionPath, stream, chunk) => {
-        backendError('backend-worker', `worker ${stream}`, { rootSessionPath, chunk });
+        // Worker stderr carries structured `[pie:backend] {json}` lines with an
+        // explicit `level`. Classify the chunk so debug/info/warn chatter is not
+        // mis-reported as `error` (which flooded the pie log with false errors).
+        // Non-JSON / level-less chunks (e.g. a worker crash stack) surface at
+        // `error` so genuine failures stay visible.
+        const level = classifyWorkerStderrChunk(chunk);
+        backendLog(level, 'backend-worker', `worker ${stream}`, { rootSessionPath, chunk });
       },
     });
     await this.workerSupervisor.initialize();

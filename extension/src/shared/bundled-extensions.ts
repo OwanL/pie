@@ -15,6 +15,7 @@ export const KNOWN_EXTENSIONS: ExtensionInfo[] = [
   { id: 'tool-result-pruner', label: 'Tool-result Pruner', description: 'Prune tool output bytes before they enter the model context' },
   { id: 'ask-user', label: 'Ask User', description: 'Ask the user a clarifying question with preset answers' },
   { id: 'session-reviewer', label: 'Session Reviewer', description: 'List, read, and review the currently-open session transcripts' },
+  { id: 'deferred-triggers', label: 'Deferred Triggers', description: 'Resume a session when a timer or other session event fires' },
   { id: 'session-changes', label: 'Session Changes', description: 'Inspect the files a session changed (manifest + diffs)' },
   { id: 'warm-bash', label: 'Warm Bash', description: 'Speed up the bash tool with a pre-warmed shell pool' },
   { id: 'copilot-model-discovery', label: 'Copilot Model Discovery', description: 'Keep the GitHub Copilot model catalog up to date' },

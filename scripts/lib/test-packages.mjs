@@ -29,6 +29,7 @@ export const PACKAGE_DIRECTIVES = [
   { id: 'web-access-compat', dir: 'extensions/web-access-compat' },
   { id: 'tool-result-pruner', dir: 'extensions/tool-result-pruner' },
   { id: 'session-reviewer', dir: 'extensions/session-reviewer' },
+  { id: 'deferred-triggers', dir: 'extensions/deferred-triggers' },
   { id: 'session-changes', dir: 'extensions/session-changes' },
   { id: 'computer-use', dir: 'extensions/computer-use' },
   { id: 'image-context-guard', dir: 'extensions/image-context-guard' },

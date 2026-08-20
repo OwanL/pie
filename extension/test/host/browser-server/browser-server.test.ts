@@ -42,6 +42,7 @@ async function createHarness(overrides: Partial<BrowserServerOptions> = {}): Pro
   await fs.mkdir(path.join(assetDir, 'assets'), { recursive: true });
   await fs.writeFile(path.join(assetDir, 'assets', 'panel-abc123.js'), 'console.log("pie");\n');
   await fs.writeFile(path.join(assetDir, 'assets', 'panel-abc123.css'), 'body {}\n');
+  await fs.writeFile(path.join(assetDir, 'assets', 'transcript-host-xyz789.js'), 'export {};\n');
   await fs.writeFile(
     path.join(assetDir, '.vite', 'manifest.json'),
     JSON.stringify({
@@ -49,6 +50,13 @@ async function createHarness(overrides: Partial<BrowserServerOptions> = {}): Pro
         file: 'assets/panel-abc123.js',
         isEntry: true,
         css: ['assets/panel-abc123.css'],
+        // Mirrors the real panel: the transcript host is lazy-loaded.
+        dynamicImports: ['transcript-host.tsx'],
+      },
+      'transcript-host.tsx': {
+        file: 'assets/transcript-host-xyz789.js',
+        isDynamicEntry: true,
+        imports: ['index.html'],
       },
     }),
   );
@@ -175,10 +183,16 @@ test('start binds loopback and serves the HTML shell, health, and allowlisted as
   assert.equal(health.status, 200);
   assert.deepEqual(JSON.parse(health.body), { ok: true });
 
-  const asset = await httpGet(port, '/assets/assets/panel-abc123.js');
+  const asset = await httpGet(port, '/assets/panel-abc123.js');
   assert.equal(asset.status, 200);
   assert.match(asset.headers['content-type'] ?? '', /javascript/);
   assert.match(asset.headers['cache-control'] ?? '', /immutable/);
+
+  // Lazy-loaded chunks (dynamic entries) are served too: the browser's
+  // relative dynamic import must resolve (regression: transcript-host 404).
+  const dynamicChunk = await httpGet(port, '/assets/transcript-host-xyz789.js');
+  assert.equal(dynamicChunk.status, 200);
+  assert.match(dynamicChunk.headers['content-type'] ?? '', /javascript/);
 
   const missing = await httpGet(port, '/assets/not-in-manifest.js');
   assert.equal(missing.status, 404);

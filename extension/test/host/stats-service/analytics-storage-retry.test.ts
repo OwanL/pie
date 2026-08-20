@@ -7,6 +7,7 @@ import test from 'node:test';
 import { RunAnalyticsStorage } from '../../../src/host/stats-service/storage';
 import { RUN_ANALYTICS_SCHEMA_VERSION, type RunSnapshot } from '../../../src/host/run-analytics';
 import { serializeJsonLine } from '../../../src/shared/jsonl';
+import { workspaceHash } from '../../../src/host/stats-service/helpers';
 
 const FIXED_DATE = new Date('2026-01-01T00:00:00.000Z');
 
@@ -165,5 +166,44 @@ test('pruneJsonlFile retries a transient EBUSY on the retention read then prunes
     const kept = raw.split(/\r?\n/).filter((line) => line.trim().length > 0);
     assert.equal(kept.length, 1, 'prune kept only the newest record after the retried read');
     assert.equal(JSON.parse(kept[0]!).run.runId, 'r2');
+  });
+});
+
+test('start continues when legacy migration cannot atomically replace snapshots', async () => {
+  await withTempDir(async (tempDir) => {
+    const outcomesRoot = path.join(tempDir, 'data', 'outcomes');
+    const legacyRoot = path.join(tempDir, 'legacy');
+    const workspaceId = 'migration-replace-workspace';
+    const hash = workspaceHash(workspaceId);
+    const storageDir = path.join(outcomesRoot, hash);
+    const legacyStorageDir = path.join(legacyRoot, 'runs', hash);
+    await fs.mkdir(storageDir, { recursive: true });
+    await fs.mkdir(legacyStorageDir, { recursive: true });
+    await fs.writeFile(path.join(storageDir, 'run-snapshots.jsonl'), '{"source":"current"}\n', 'utf8');
+    await fs.writeFile(path.join(legacyStorageDir, 'run-snapshots.jsonl'), '{"source":"legacy"}\n', 'utf8');
+
+    let atomicWriteAttempts = 0;
+    const storage = new RunAnalyticsStorage({
+      dataOutcomesRootPath: outcomesRoot,
+      legacyUsageDataRootPath: legacyRoot,
+      workspaceId,
+      now: () => FIXED_DATE,
+      serializeSessions: () => ({}),
+      atomicWriteText: async () => {
+        atomicWriteAttempts += 1;
+        throw errno('EPERM');
+      },
+      autoExportSetTimeout: () => noTimer(),
+    });
+
+    await assert.doesNotReject(storage.start());
+
+    assert.equal(atomicWriteAttempts, 1, 'legacy migration attempted the atomic replacement');
+    assert.ok(storage.getPersistError()?.message.includes('EPERM'), 'the migration failure is recorded');
+    assert.equal(
+      await fs.readFile(path.join(storageDir, 'run-snapshots.jsonl'), 'utf8'),
+      '{"source":"current"}\n',
+      'the canonical file remains intact after the failed migration',
+    );
   });
 });

@@ -8,6 +8,8 @@ import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
+import { withoutPiHarnessEnv } from './lib/pi-harness-env.mjs';
+
 const REPORT_PREFIX = '__PI_TEST_SUMMARY__';
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const extensionRoot = path.join(repoRoot, 'extension');
@@ -86,7 +88,7 @@ function run(command, args, cwd, onSpawn = undefined, extraEnv = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd,
-      env: { ...process.env, FORCE_COLOR: '0', ...extraEnv },
+      env: withoutPiHarnessEnv({ ...process.env, FORCE_COLOR: '0', ...extraEnv }),
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
     });

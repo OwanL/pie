@@ -16,6 +16,11 @@ test('node build and package allowlist declare the stable worker entry artifact'
   assert.match(vite, /['"]worker-entry['"]:\s*path\.join\(srcDir, ['"]backend['"], ['"]worker-entry\.ts['"]\)/);
   assert.match(vite, /['"]phase4-worker-command-extension['"]:\s*path\.join\(rootDir, ['"]test['"], ['"]fixtures['"], ['"]phase4-worker-command-extension\.ts['"]\)/);
   assert.match(vite, /entryFileNames:\s*['"]\[name\]\.js['"]/);
+  // ws's optional native deps must stay runtime requires: Vite stubs
+  // unresolvable optional peer deps with empty objects, which defeats ws's
+  // try/catch fallback and crashes on masked frames >= 32 bytes.
+  assert.match(vite, /id\s*===\s*['"]bufferutil['"]/);
+  assert.match(vite, /id\s*===\s*['"]utf-8-validate['"]/);
   assert.match(vscodeIgnore, /!out\/\*\.js/);
 });
 

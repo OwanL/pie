@@ -1415,12 +1415,23 @@ export class EffectRunner {
   }
 
   /**
-   * EditRpc is a composite operation: truncate-then-send in a single session
-   * operation. If truncate fails, the send is skipped and the whole operation
-   * fails atomically (matching the legacy behavior).
+   * EditRpc is a composite operation: interrupt-then-truncate-then-send in a
+   * single session operation (STATE_CONTRACT § Execution Ordering: "Editing has
+   * restart semantics"). The interrupt is required — `session.truncateAfter`
+   * rejects with `STREAMING_BUSY` while the session has an `activeRequest` or is
+   * streaming, so editing during a live turn would otherwise always fail and
+   * roll the optimistic truncate back (stale transcript + flicker). If any step
+   * fails, the rest are skipped and the whole operation fails atomically.
    */
   private runEditRpc(effect: Extract<Effect, { kind: 'EditRpc' }>): void {
     const { queues, backend, dispatch, service, statsService } = this.deps;
+    // Interrupting the turn being replaced must not surface a "run finished"
+    // notification. Set outside the queue, in the same tick as the effect, so
+    // the busy-completed handler sees it. Only when a turn is actually live —
+    // an unconditional call would swallow the edit's OWN completion.
+    if (effect.interruptFirst) {
+      service.suppressNextCompletionNotificationFor(effect.sessionPath);
+    }
     void queues.enqueueSessionOperation(effect.sessionPath, async () => {
         // edit follows the same phase-scoped shape as send (STATE_CONTRACT §
         // Optimistic Reconciliation "Timer ownership"): one send-timer owns the
@@ -1432,6 +1443,12 @@ export class EffectRunner {
           statsService.onTruncatedAfter(effect.sessionPath, effect.messageId);
           statsService.onMessageEdited(effect.sessionPath, effect.messageId);
           statsService.prepareForSend(effect.sessionPath, [], effect.composedText ?? effect.text);
+          if (effect.interruptFirst) {
+            // Idempotent: interrupting an already-idle session is a no-op.
+            await backend.request('message.interrupt', {
+              sessionPath: effect.sessionPath,
+            }, { signal: send.abort.signal });
+          }
           await backend.request('session.truncateAfter', {
             sessionPath: effect.sessionPath,
             entryId: effect.messageId,

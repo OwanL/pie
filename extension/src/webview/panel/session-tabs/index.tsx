@@ -39,6 +39,12 @@ interface SessionTabsProps {
   onMergePinnedGroups: (sourcePath: string, targetPath: string) => void;
   onUngroupPinnedTab: (sourcePath: string, toItemIndex: number) => void;
   onRunAction: (action: SessionTabRunAction, tabPath: string) => void;
+  /** Session paths that own a pending deferred trigger. Tabs in this set have
+   *  their close × greyed out with an explanatory tooltip (the trigger must be
+   *  cancelled first, from the status strip). */
+  deferredSessionPaths: string[];
+  /** Session paths whose pending deferred trigger includes a timer. */
+  deferredTimerSessionPaths: string[];
 }
 
 function hasPendingRequest(
@@ -109,6 +115,8 @@ function areSessionTabsPropsEqual(
     && stringArraysEqual(previous.runningSessionPaths, next.runningSessionPaths)
     && stringArraysEqual(previous.startingModelSessionPaths, next.startingModelSessionPaths)
     && stringArraysEqual(previous.unreadFinishedSessionPaths, next.unreadFinishedSessionPaths)
+    && stringArraysEqual(previous.deferredSessionPaths, next.deferredSessionPaths)
+    && stringArraysEqual(previous.deferredTimerSessionPaths, next.deferredTimerSessionPaths)
     && openSessionNamesEqual(previous, next)
     && pendingRequestsEqual(previous, next)
     && runSummariesEqual(previous, next)
@@ -140,6 +148,8 @@ function SessionTabsView({
   onMergePinnedGroups,
   onUngroupPinnedTab,
   onRunAction,
+  deferredSessionPaths,
+  deferredTimerSessionPaths,
 }: SessionTabsProps) {
   const stripRef = useRef<HTMLDivElement>(null);
   const [openGroupPath, setOpenGroupPath] = useState<string | null>(null);
@@ -242,6 +252,11 @@ function SessionTabsView({
   const startingModelPathSet = useMemo(() => new Set(startingModelSessionPaths), [startingModelSessionPaths]);
   const unreadFinishedPathSet = useMemo(() => new Set(unreadFinishedSessionPaths), [unreadFinishedSessionPaths]);
   const pinnedPathSet = useMemo(() => new Set(pinnedTabPaths), [pinnedTabPaths]);
+  const deferredPathSet = useMemo(() => new Set(deferredSessionPaths), [deferredSessionPaths]);
+  const deferredTimerPathSet = useMemo(
+    () => new Set(deferredTimerSessionPaths),
+    [deferredTimerSessionPaths],
+  );
 
   // Re-resolve the dragged source each render so a tab closing or being
   // inserted elsewhere mid-drag doesn't float the wrong tab. Pinned sources
@@ -360,6 +375,10 @@ function SessionTabsView({
 
     if (event.key === 'Delete') {
       event.preventDefault();
+      // A tab with a pending deferred trigger cannot be closed (greyed-out ×).
+      // Mirror that guard on the keyboard shortcut so Delete can't bypass it
+      // and orphan the trigger.
+      if (deferredPathSet.has(tabPath)) return;
       const fallbackIndex = currentIndex < tabs.length - 1 ? currentIndex + 1 : currentIndex - 1;
       const fallbackPath = fallbackIndex >= 0 ? tabs[fallbackIndex]?.getAttribute('data-tab-path') : null;
       onClose(tabPath);
@@ -393,7 +412,7 @@ function SessionTabsView({
       selectTab(targetPath);
     }
     targetTab?.querySelector<HTMLElement>('[role="tab"]')?.focus();
-  }, [dragState, onClose, selectTab]);
+  }, [dragState, onClose, selectTab, deferredPathSet]);
 
   // Pinned-group dropdown management. Only one group dropdown is open at a
   // time; `openGroupPath` stores its first-member identifier. Selecting a
@@ -476,6 +495,7 @@ function SessionTabsView({
               runningPathSet={runningPathSet}
               startingModelPathSet={startingModelPathSet}
               unreadFinishedPathSet={unreadFinishedPathSet}
+              deferredTimerPathSet={deferredTimerPathSet}
               activePath={effectiveActivePath}
               isDropTarget={dropOnPath !== null && item.members.includes(dropOnPath)}
               open={openGroupPath !== null && item.members.includes(openGroupPath)}
@@ -499,6 +519,8 @@ function SessionTabsView({
               hasPendingExtensionUIRequest={hasPendingRequest(pendingExtensionUIRequestsBySession, item.path)}
               isPinned
               isDropTarget={dropOnPath !== null && item.path === dropOnPath}
+              hasDeferredTriggers={deferredPathSet.has(item.path)}
+              hasDeferredTimer={deferredTimerPathSet.has(item.path)}
               onContextMenu={onContextMenu}
               onPointerDown={onPointerDown}
               onClick={onClick}
@@ -523,6 +545,8 @@ function SessionTabsView({
             hasPendingExtensionUIRequest={hasPendingRequest(pendingExtensionUIRequestsBySession, tabPath)}
             isPinned={false}
             isDropTarget={false}
+            hasDeferredTriggers={deferredPathSet.has(tabPath)}
+            hasDeferredTimer={deferredTimerPathSet.has(tabPath)}
             onContextMenu={onContextMenu}
             onPointerDown={onPointerDown}
             onClick={onClick}
@@ -568,6 +592,7 @@ function SessionTabsView({
           sessionByPath={sessionByPath}
           runSummary={runSummariesBySession[tabContextMenu.tabPath] ?? null}
           isPinned={pinnedPathSet.has(tabContextMenu.tabPath)}
+          hasDeferredTriggers={deferredPathSet.has(tabContextMenu.tabPath)}
           onContextAction={onContextAction}
         />
       )}

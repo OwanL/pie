@@ -14,6 +14,7 @@ import {
   withProcessTreeIsolation,
 } from './lib/process-watchdog.mjs';
 import { withoutGitRepositoryEnv } from './lib/git-environment.mjs';
+import { withoutPiHarnessEnv } from './lib/pi-harness-env.mjs';
 import { resolveLocalTsx } from './run-test-files.mjs';
 
 const REPORT_PREFIX = '__PI_TEST_SUMMARY__';
@@ -146,6 +147,16 @@ const PACKAGE_CONFIGS = [
     // transcript.ts (the JSONL parser) is the unit-testable core; index.ts is
     // env-glue (registers the `session_review` tool) and store.ts is fs I/O,
     // neither of which is unit-testable without the pi runtime / a real disk.
+    // types-global.d.ts is ambient only.
+    thresholds: { lines: 80, branches: 70 },
+  },
+  {
+    id: 'deferred-triggers',
+    cwd: repoRoot,
+    testGlobs: ['extensions/deferred-triggers/test/**/*.test.ts'],
+    coverageIncludes: ['extensions/deferred-triggers/index.ts', 'extensions/deferred-triggers/src/**/*.ts'],
+    // store.ts (the op-log replay) is the unit-testable core; index.ts is
+    // env-glue (registers the `defer_trigger` tool) and types.ts is the schema.
     // types-global.d.ts is ambient only.
     thresholds: { lines: 80, branches: 70 },
   },
@@ -549,7 +560,7 @@ function runChildProcess(command, args, cwd, signal, envOverrides = {}, verifyCl
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, withProcessTreeIsolation({
       cwd,
-      env: { ...withoutGitRepositoryEnv(process.env), FORCE_COLOR: '0', ...envOverrides },
+      env: { ...withoutPiHarnessEnv(withoutGitRepositoryEnv(process.env)), FORCE_COLOR: '0', ...envOverrides },
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
     }));

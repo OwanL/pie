@@ -8,6 +8,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { reducer, initialArchState, type ArchState } from '../../../../src/host/core/reducer';
+import { restoreRemovedTail } from '../../../../src/host/core/reducer/helpers';
 import { selectViewState } from '../../../../src/host/core/projection';
 import type { Event } from '../../../../src/host/core/events';
 import type { ChatMessage, SessionSummary, TranscriptWindow } from '../../../../src/shared/protocol';
@@ -117,6 +118,165 @@ test('reducer: Edit command optimistically truncates the original message + repl
   // EditRpc effect emitted.
   assert.equal(result.effects.length, 1);
   assert.equal(result.effects[0]?.kind, 'EditRpc');
+  if (result.effects[0]?.kind === 'EditRpc') {
+    assert.equal(result.effects[0].interruptFirst, false);
+  }
+});
+
+test('reducer: Edit command sets interruptFirst when the session is already running', () => {
+  const result = reducer({
+    ...initialArchState,
+    sessions: {
+      ...initialArchState.sessions,
+      runningSessionPaths: ['/s'],
+    },
+  }, {
+    kind: 'Command',
+    cmd: {
+      kind: 'Edit',
+      corrId: 'c-running-edit',
+      sessionPath: '/s',
+      messageId: 'user-1',
+      text: 'edited question',
+      inputs: [],
+      composedText: 'edited question',
+      userParts: undefined,
+      localId: 'local:edit:running',
+      timestamp: 1,
+    },
+  });
+
+  assert.equal(result.effects.length, 1);
+  assert.equal(result.effects[0]?.kind, 'EditRpc');
+  if (result.effects[0]?.kind === 'EditRpc') {
+    assert.equal(result.effects[0].interruptFirst, true);
+  }
+});
+
+test('restoreRemovedTail appends only missing message ids and keeps the transcript window in sync', () => {
+  const state: ArchState = {
+    ...initialArchState,
+    transcript: {
+      ...initialArchState.transcript,
+      bySession: {
+        '/s': [
+          userMessage('older-user', 'older'),
+          userMessage('user-1', 'already restored'),
+        ],
+      },
+      windowBySession: {
+        '/s': {
+          ...fullWindow,
+          totalCount: 2,
+          loadedEnd: 2,
+        },
+      },
+    },
+  };
+
+  restoreRemovedTail(state, '/s', [
+    userMessage('user-1', 'already restored'),
+    assistantMessage('assistant-1', 'restored answer'),
+  ]);
+
+  const transcript = state.transcript.bySession['/s'];
+  const window = state.transcript.windowBySession['/s'];
+  assert.ok(transcript);
+  assert.ok(window);
+  assert.deepEqual(transcript.map((message) => message.id), ['older-user', 'user-1', 'assistant-1']);
+  assert.equal(new Set(transcript.map((message) => message.id)).size, transcript.length);
+  assert.equal(transcript.length, window.totalCount);
+});
+
+test('reducer: edit snapshot reinstatement followed by rollback does not duplicate restored rows', () => {
+  const initialState: ArchState = {
+    ...initialArchState,
+    sessions: {
+      ...initialArchState.sessions,
+      sessions: [sessionSummary],
+      openTabPaths: ['/s'],
+      activeSessionPath: '/s',
+    },
+    transcript: {
+      ...initialArchState.transcript,
+      bySession: {
+        '/s': [
+          userMessage('older-user', 'older'),
+          assistantMessage('older-assistant', 'older answer'),
+          userMessage('user-1', 'original question'),
+          assistantMessage('assistant-1', 'original answer'),
+        ],
+      },
+      windowBySession: { '/s': { ...fullWindow } },
+    },
+  };
+
+  const edited = reducer(initialState, {
+    kind: 'Command',
+    cmd: {
+      kind: 'Edit',
+      corrId: 'c-snapshot-rollback',
+      sessionPath: '/s',
+      messageId: 'user-1',
+      text: 'edited question',
+      inputs: [],
+      composedText: 'edited question',
+      userParts: undefined,
+      localId: 'local:edit:snapshot',
+      timestamp: 1,
+    },
+  });
+
+  const snapshot = reducer(edited.state, {
+    kind: 'SessionOpened',
+    backendGeneration: 0,
+    modelWriteFence: 0,
+    modelHydrationRevision: 0,
+    catalogHydrationRevision: 0,
+    sessionPath: '/s',
+    payload: {
+      session: sessionSummary,
+      transcript: [
+        userMessage('older-user', 'older'),
+        assistantMessage('older-assistant', 'older answer'),
+        userMessage('user-1', 'original question'),
+        assistantMessage('assistant-1', 'original answer'),
+      ],
+      transcriptWindow: { ...fullWindow },
+      busy: false,
+    },
+  });
+
+  const reinstated = snapshot.state.transcript.bySession['/s'];
+  assert.ok(reinstated);
+  assert.deepEqual(reinstated.map((message) => message.id), [
+    'older-user',
+    'older-assistant',
+    'user-1',
+    'assistant-1',
+    'local:edit:snapshot',
+  ]);
+
+  const rolledBack = reducer(snapshot.state, {
+    kind: 'EditResult',
+    corrId: 'c-snapshot-rollback',
+    sessionPath: '/s',
+    ok: false,
+    error: 'denied',
+  });
+
+  const transcript = rolledBack.state.transcript.bySession['/s'];
+  const window = rolledBack.state.transcript.windowBySession['/s'];
+  assert.ok(transcript);
+  assert.ok(window);
+  assert.deepEqual(transcript.map((message) => message.id), [
+    'older-user',
+    'older-assistant',
+    'user-1',
+    'assistant-1',
+  ]);
+  assert.equal(new Set(transcript.map((message) => message.id)).size, transcript.length);
+  assert.equal(transcript.length, window.totalCount);
 });
 
 test('reducer: EditResult{ok:false} restores the truncated original message + reply', () => {

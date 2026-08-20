@@ -50,6 +50,8 @@ function props(): SessionTabsProps {
     onMergePinnedGroups: noop,
     onUngroupPinnedTab: noop,
     onRunAction: noop,
+    deferredSessionPaths: [],
+    deferredTimerSessionPaths: [],
   };
 }
 

@@ -70,6 +70,7 @@ import {
 import type { DetailCursor, DetailPageRef, LiveSubagentDetailAddress } from '../shared/protocol/subagent-detail.js';
 import type { WorkerRuntimeOperation, WorkerJsonObject, WorkerJsonValue } from './worker-protocol';
 import { WORKER_IPC_MAX_ORDINARY_FRAME_BYTES } from './worker-protocol';
+import { WORKER_IPC_DEFAULT_LIFECYCLE_QUEUE_BYTES } from './worker-frame-io';
 import { WorkerServer } from './worker-server';
 import { installWorkerProviderNetworkLease } from './worker-provider-network-lease';
 import { WorkerLiveDetailStore } from './worker-live-detail-store';
@@ -103,6 +104,17 @@ const WORKER_IPC_TERMINAL_MESSAGE_BUDGET =
   WORKER_IPC_MAX_ORDINARY_FRAME_BYTES - WORKER_IPC_TERMINAL_MESSAGE_MARGIN;
 /** Same ceiling headroom for a single text/reasoning delta envelope. */
 const WORKER_IPC_DELTA_BUDGET = WORKER_IPC_TERMINAL_MESSAGE_BUDGET;
+/**
+ * Budget for a `message.finished` terminal message projected onto the worker
+ * IPC lifecycle lane. The lane reserves 2 MiB; a single frame may exceed the
+ * lane's reserved capacity only when the lane is otherwise empty, but a
+ * pathological message (e.g. a huge subagent tool result) can still be
+ * rejected and kill the worker. Reserve headroom for the frame identity +
+ * event wrapper so the bounded message always fits.
+ */
+const WORKER_IPC_LIFECYCLE_MESSAGE_MARGIN = 24 * 1024;
+const WORKER_IPC_LIFECYCLE_MESSAGE_BUDGET =
+  WORKER_IPC_DEFAULT_LIFECYCLE_QUEUE_BYTES - WORKER_IPC_LIFECYCLE_MESSAGE_MARGIN;
 
 /**
  * Focused per-root execution owner. It deliberately does not embed or start a
@@ -581,7 +593,7 @@ export class WorkerRuntimeHost {
       emit: (name, payload) => this.emit(name, payload),
       emitBusyChanged: (owner, busy) => this.emitBusyChanged(owner, busy),
       emitContextUsageChanged: (owner, estimated) => this.emitContextUsageChanged(owner, estimated),
-      emitSessionOpened: async () => this.emit('session.opened', { ...this.openedPayload, runtimeReady: true }),
+      emitSessionOpened: async (sessionPath) => this.emitRefreshedSessionOpened(sessionPath),
       emitSessionListChanged: async () => undefined,
       observeSubagentDetail: (root, details) => this.detailStore.observe({ ...root, details }),
       terminalizeSubagentDetail: (root, durableEntryId) => this.detailStore.terminal(root, durableEntryId),
@@ -591,6 +603,36 @@ export class WorkerRuntimeHost {
         }));
       },
     }, context, event);
+  }
+
+  /**
+   * Publish an authoritative `session.opened` refresh. The promotion payload is
+   * a point-in-time snapshot — replaying it (at `agent_end`, interrupt, or
+   * post-compaction) republishes the transcript as it looked when the runtime
+   * was promoted, which for a freshly created session is EMPTY. The host is
+   * idle by then (`busy` and `runningSessionPaths` both cleared), so it applies
+   * that stale snapshot as authoritative and the transcript disappears.
+   * Rebuild instead, and refresh the cache so later replays are current.
+   */
+  private async emitRefreshedSessionOpened(sessionPath: string): Promise<void> {
+    const previous = this.openedPayload;
+    try {
+      // Same envelope as the cached payload (selection/operation identifiers,
+      // replacement source) — only the transcript and metadata are refreshed.
+      const rebuilt = await this.buildOpenedPayload(
+        sessionPath,
+        previous?.selectionToken,
+        previous?.operationId,
+        previous?.operationAttempt,
+      );
+      this.openedPayload = previous?.replacesSessionPath
+        ? { ...rebuilt, replacesSessionPath: previous.replacesSessionPath }
+        : rebuilt;
+    } catch {
+      // Cross-session rejection (a rebind raced this refresh): fall back to the
+      // cached payload rather than dropping the refresh entirely.
+    }
+    this.emit('session.opened', { ...this.openedPayload, runtimeReady: true });
   }
 
   private emitBusyChanged(context: SessionContext, busy: boolean): void {
@@ -625,6 +667,26 @@ export class WorkerRuntimeHost {
       const bounded = boundLiveSemanticPayload(payload);
       if (bounded === undefined) return; // dropped delta: host recovers via checkpoint rebase
       payload = bounded;
+    }
+    // `message.finished` rides the lifecycle lane (2 MiB reserved capacity)
+    // and carries the full terminal `ChatMessage`. A pathological message
+    // (e.g. a huge subagent tool result) can exceed that lane and be rejected,
+    // killing the worker. Project the message onto the lifecycle budget so the
+    // frame always fits; the durable session remains the complete authority.
+    if (event === 'message.finished') {
+      const envelope = payload as { requestId?: unknown; sessionPath?: unknown; message?: unknown };
+      if (envelope && typeof envelope === 'object' && envelope.message
+        && typeof envelope.message === 'object' && !Array.isArray(envelope.message)) {
+        const sessionPath = typeof envelope.sessionPath === 'string' ? envelope.sessionPath : '';
+        payload = {
+          ...envelope,
+          message: compactDurableMessageForTransport(
+            envelope.message as ChatMessage,
+            sessionPath,
+            WORKER_IPC_LIFECYCLE_MESSAGE_BUDGET,
+          ),
+        };
+      }
     }
     this.options.server.sendFrame({
       kind: 'runtime.event',

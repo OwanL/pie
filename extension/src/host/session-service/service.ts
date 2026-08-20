@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 
 import { BackendClient } from '../backend/client';
 import { resolveChatPrefs, buildRuntimePrefsPayload } from '../../shared/protocol';
-import type { ChatPrefs, DetailResult, LazyDetailRef, PruningSettings, ToolResultPruningSettings, ThinkingLevel, TranscriptMode } from '../../shared/protocol';
+import type { ChatPrefs, DetailResult, LazyDetailRef, PruningSettings, ToolResultPruningSettings, ThinkingLevel, TranscriptMode, DeferredTriggerView } from '../../shared/protocol';
 import {
   loadPersistedPruningSettings,
   savePruningSettings,
@@ -17,6 +17,7 @@ import { NOOP_RUN_OBSERVER, type RunObserver } from '../stats-service';
 import { SessionServiceEvents } from './events';
 import { SessionMessageActions } from './message-actions';
 import { SessionServiceState } from './state';
+import { DeferredTriggerRegistry } from '../deferred-triggers/registry';
 import { startSessionBackend } from './startup';
 import { setRuntimeAuditLogEnabled } from '../util/audit';
 import { SessionTabActions } from './tab-actions';
@@ -55,6 +56,10 @@ const DETAIL_CACHE_MAX_BYTES = 64 * 1024 * 1024;
 export class SessionService implements vscode.Disposable {
   private readonly state: SessionServiceState;
   private readonly events: SessionServiceEvents;
+  /** Deferred-trigger registry: resumes a session when a registered condition
+   *  (session finished / timer / user input) fires. Backend-independent —
+   *  survives `restart()` so pending triggers persist across backend restarts. */
+  private readonly triggers: DeferredTriggerRegistry;
   private readonly tabs: SessionTabActions;
   private readonly messages: SessionMessageActions;
   private readonly getArchState: () => ArchState;
@@ -82,6 +87,7 @@ export class SessionService implements vscode.Disposable {
     this.dispatchArch = dispatchArch;
 
     this.state = new SessionServiceState(context, backend, scheduleRender, getArchState, dispatchArch);
+    this.triggers = new DeferredTriggerRegistry({ getArchState, dispatchArch, scheduleRender });
     this.detailSubscriptions = new DetailSubscriptionService({
       backend,
       postImperative,
@@ -106,6 +112,7 @@ export class SessionService implements vscode.Disposable {
       state: this.state,
       dispatchArch,
       getArchState,
+      triggers: this.triggers,
       onDetailStream: (message) => this.detailSubscriptions.handleStream(message),
     });
     this.tabs = new SessionTabActions({
@@ -136,6 +143,11 @@ export class SessionService implements vscode.Disposable {
   }
 
   async start(): Promise<void> {
+    // Start the deferred-trigger registry (sidecar watcher). Idempotent — safe
+    // across `restart()`. Done here (not the constructor) so constructing a
+    // SessionService in unit tests without `start()` doesn't arm an fs.watch
+    // that would keep the test process alive.
+    this.triggers.start();
     await startSessionBackend({
       context: this.context,
       backend: this.backend,
@@ -147,6 +159,25 @@ export class SessionService implements vscode.Disposable {
       getArchState: this.getArchState,
       dispatchArch: this.dispatchArch,
     });
+  }
+
+  /** Notify deferred triggers that the user sent a message in `sessionPath`
+   *  (webview Send path). Fires any `user_input` trigger registered for it. */
+  notifyUserInput(sessionPath: string): void {
+    this.triggers.onUserInput(sessionPath);
+  }
+
+  /** Snapshot of all currently-active deferred triggers (across every
+   *  session), projected into `ViewState.deferredTriggers` by
+   *  `PieExtension.buildViewState`. */
+  getDeferredTriggers(): DeferredTriggerView[] {
+    return this.triggers.getActiveTriggers();
+  }
+
+  /** Cancel a deferred trigger (or all for `sessionPath` when `triggerId` is
+   *  omitted). Invoked by the webview's status-strip cancel affordance. */
+  cancelDeferredTrigger(sessionPath: string, triggerId?: string): void {
+    this.triggers.cancel(sessionPath, triggerId);
   }
 
   /** Expose queue routing for the Phase 3 EffectRunner. */
@@ -210,6 +241,7 @@ export class SessionService implements vscode.Disposable {
     this.detailCache.clear();
     this.detailCacheBytes = 0;
     this.events.detach();
+    this.triggers.dispose();
     this.correlatedFailureSubscription.dispose();
   }
 

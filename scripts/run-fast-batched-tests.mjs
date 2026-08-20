@@ -7,6 +7,8 @@ import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
+import { withoutPiHarnessEnv } from './lib/pi-harness-env.mjs';
+
 const REPORT_PREFIX = '__PI_TEST_SUMMARY__';
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const reporter = pathToFileURL(path.join(repoRoot, 'scripts', 'test-reporter.mjs')).href;
@@ -21,6 +23,7 @@ const rootBatchDirs = [
   'extensions/web-access-compat/test',
   'extensions/tool-result-pruner/test',
   'extensions/session-reviewer/test',
+  'extensions/deferred-triggers/test',
   'extensions/session-changes/test',
 ];
 
@@ -44,7 +47,7 @@ function run(command, args, cwd) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd,
-      env: { ...process.env, FORCE_COLOR: '0' },
+      env: withoutPiHarnessEnv({ ...process.env, FORCE_COLOR: '0' }),
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
     });

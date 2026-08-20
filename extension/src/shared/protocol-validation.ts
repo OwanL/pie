@@ -645,6 +645,11 @@ export function validateWebviewToHostMessage(
       if (!isString(value.sessionPath)) return fail('compact: missing `sessionPath`');
       return { ok: true, value: value as WebviewToHostMessage };
 
+    case 'cancelDeferredTrigger':
+      if (!isString(value.sessionPath)) return fail('cancelDeferredTrigger: missing `sessionPath`');
+      if (value.triggerId !== undefined && !isString(value.triggerId)) return fail('cancelDeferredTrigger: bad `triggerId`');
+      return { ok: true, value: value as WebviewToHostMessage };
+
     case 'clearQueue':
       if (!isString(value.sessionPath)) return fail('clearQueue: missing string `sessionPath`');
       return { ok: true, value: value as WebviewToHostMessage };

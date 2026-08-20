@@ -156,7 +156,14 @@ export class RunAnalyticsStorage {
   }
 
   async start(): Promise<RunCheckpoint | null> {
-    await this.migrateLegacyStorage();
+    // Legacy migration is recoverable. A concurrent Pie/VS Code process or a
+    // Windows scanner can briefly hold the destination during the atomic
+    // replacement; that must not prevent the rest of Pie from starting.
+    try {
+      await this.migrateLegacyStorage();
+    } catch (error) {
+      this.recordPersistError(error);
+    }
     await fs.mkdir(this.storageDir, { recursive: true });
     await this.sweepStaleTempFiles();
     const checkpoint = await this.readCheckpoint();

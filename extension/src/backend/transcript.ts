@@ -222,6 +222,12 @@ type MapResult =
   | { kind: 'push'; message: ChatMessage; resetAssistant: boolean }
   | { kind: 'skip' };
 
+/** Prefix that marks a deferred-trigger wake-up user message (see
+ *  `DeferredTriggerRegistry.dispatchWakeUp`). The SDK persists the wake-up as
+ *  a plain user message without custom metadata, so on reload we re-derive the
+ *  `deferred-trigger` tag from this stable prefix. */
+const DEFERRED_TRIGGER_PREFIX = '[deferred trigger fired: ';
+
 /** Append a user-role message and return a `push` directive. */
 function mapUserMessage(entry: SessionEntryLike, message: MessageLike): MapResult {
   const userParts = userPartsFromContent(message.content);
@@ -230,6 +236,19 @@ function mapUserMessage(entry: SessionEntryLike, message: MessageLike): MapResul
     typeof message.content === 'string'
       ? message.content
       : textFromParts(message.content);
+  // Re-derive the deferred-trigger tag from the wake-up text prefix so the
+  // webview differentiation survives transcript reload (the SDK writes user
+  // messages without customType). Parse the reason up to the closing bracket.
+  let customType: string | undefined;
+  let customDetails: unknown;
+  if (markdown.startsWith(DEFERRED_TRIGGER_PREFIX)) {
+    const end = markdown.indexOf(']', DEFERRED_TRIGGER_PREFIX.length);
+    const reason = end === -1
+      ? markdown.slice(DEFERRED_TRIGGER_PREFIX.length).trim()
+      : markdown.slice(DEFERRED_TRIGGER_PREFIX.length, end).trim();
+    customType = 'deferred-trigger';
+    customDetails = { reason };
+  }
   return {
     kind: 'push',
     resetAssistant: true,
@@ -240,6 +259,8 @@ function mapUserMessage(entry: SessionEntryLike, message: MessageLike): MapResul
       markdown,
       userParts: hasImageParts ? userParts : undefined,
       status: 'completed',
+      ...(customType !== undefined ? { customType } : {}),
+      ...(customDetails !== undefined ? { customDetails } : {}),
     },
   };
 }

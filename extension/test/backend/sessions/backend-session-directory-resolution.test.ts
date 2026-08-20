@@ -33,6 +33,7 @@ test('relative session and sidecar directories share the same agent-dir authorit
   assert.equal(sessionDir, path.join(agentDir, 'data/outcomes/sessions'));
   assert.deepEqual(resolveSessionSidecarDirs(sessionDir), {
     reviewsDir: path.join(agentDir, 'data/outcomes/session-reviews'),
+    triggersDir: path.join(agentDir, 'data/outcomes/deferred-triggers'),
   });
 });
 
@@ -48,6 +49,7 @@ test('host storage authority bases an explicit relative session path on the SDK 
       agentDir,
       sessionDir,
       reviewsDir: path.join(agentDir, 'custom', 'session-reviews'),
+      triggersDir: path.join(agentDir, 'custom', 'deferred-triggers'),
     },
   );
 });
@@ -64,6 +66,7 @@ test('host storage authority resolves a relative agent once before applying the 
       agentDir,
       sessionDir,
       reviewsDir: path.join(agentDir, 'data', 'outcomes', 'session-reviews'),
+      triggersDir: path.join(agentDir, 'data', 'outcomes', 'deferred-triggers'),
     },
   );
 });

@@ -15,6 +15,7 @@ import type {
   ChatMessage,
   ComposerInput,
   ContextWindowUsage,
+  DeferredTriggerView,
   FileChangeEntry,
   ModelInfo,
   PruningCatalog,
@@ -50,6 +51,7 @@ const EMPTY_COMPOSER_INPUTS: ComposerInput[] = [];
 const EMPTY_FILE_CHANGES: FileChangeEntry[] = [];
 const EMPTY_READ_PATHS: string[] = [];
 const EMPTY_PRUNING_CATALOG: PruningCatalog = { skills: [], tools: [] };
+const EMPTY_DEFERRED_TRIGGERS: readonly DeferredTriggerView[] = [];
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -432,6 +434,11 @@ function projectViewState(state: ArchState): ViewState {
     // projection must not read services or disk (STATE_CONTRACT § Reducer
     // Purity).
     aggregateStats: EMPTY_AGGREGATE_STATS,
+    // Placeholder: active deferred triggers are read host-side from the
+    // `DeferredTriggerRegistry` (owned by `SessionService`) and merged in by
+    // `PieExtension.buildViewState`. The pure projection must not read services
+    // (STATE_CONTRACT § Reducer Purity).
+    deferredTriggers: EMPTY_DEFERRED_TRIGGERS as DeferredTriggerView[],
     draftText: activeDraftText,
     busy,
     retryStatus,

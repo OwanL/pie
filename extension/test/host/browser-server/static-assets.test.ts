@@ -25,6 +25,7 @@ async function createAssetDir(): Promise<string> {
   await fs.writeFile(path.join(dir, 'assets', 'panel-abc123.js'), 'console.log("pie");\n');
   await fs.writeFile(path.join(dir, 'assets', 'panel-abc123.css'), 'body {}\n');
   await fs.writeFile(path.join(dir, 'assets', 'chunk-xyz789.js'), 'export {};\n');
+  await fs.writeFile(path.join(dir, 'assets', 'transcript-host-xyz789.js'), 'export {};\n');
   await fs.writeFile(path.join(dir, 'assets', 'logo-1a2b3c.svg'), '<svg/>\n');
   await fs.writeFile(path.join(dir, 'secret.txt'), 'not servable\n');
   await fs.writeFile(
@@ -35,8 +36,15 @@ async function createAssetDir(): Promise<string> {
         isEntry: true,
         css: ['assets/panel-abc123.css'],
         imports: ['chunk-xyz789.js'],
+        // Mirrors the real panel: the transcript host is lazy-loaded.
+        dynamicImports: ['transcript-host.tsx'],
       },
       'chunk-xyz789.js': { file: 'assets/chunk-xyz789.js', assets: ['assets/logo-1a2b3c.svg'] },
+      'transcript-host.tsx': {
+        file: 'assets/transcript-host-xyz789.js',
+        isDynamicEntry: true,
+        imports: ['index.html'],
+      },
     }),
   );
   return dir;
@@ -49,10 +57,15 @@ test('load(): resolves the entry, css, and transitively imported chunks into the
 
   assert.equal(assets.getAssetVersion(), assetVersionFromManifest(await loadViteManifest(dir)));
   assert.match(assets.getAssetVersion(), /^[0-9a-f]{16}$/);
-  assert.equal(assets.resolveRequest('/assets/assets/panel-abc123.js')?.contentType, 'text/javascript; charset=utf-8');
-  assert.equal(assets.resolveRequest('/assets/assets/panel-abc123.css')?.contentType, 'text/css; charset=utf-8');
-  assert.equal(assets.resolveRequest('/assets/assets/chunk-xyz789.js')?.contentType, 'text/javascript; charset=utf-8');
-  assert.equal(assets.resolveRequest('/assets/assets/logo-1a2b3c.svg')?.contentType, 'image/svg+xml');
+  // URLs are `/assets/<hashed-file>` (plan §6.1) — the manifest `file` paths
+  // already carry the `assets/` output prefix and must not be doubled.
+  assert.equal(assets.resolveRequest('/assets/panel-abc123.js')?.contentType, 'text/javascript; charset=utf-8');
+  assert.equal(assets.resolveRequest('/assets/panel-abc123.css')?.contentType, 'text/css; charset=utf-8');
+  assert.equal(assets.resolveRequest('/assets/chunk-xyz789.js')?.contentType, 'text/javascript; charset=utf-8');
+  assert.equal(assets.resolveRequest('/assets/logo-1a2b3c.svg')?.contentType, 'image/svg+xml');
+  // Dynamic entries (lazy-loaded chunks) are allowlisted too — without this
+  // the browser render crashes on the transcript-host 404.
+  assert.equal(assets.resolveRequest('/assets/transcript-host-xyz789.js')?.contentType, 'text/javascript; charset=utf-8');
   await fs.rm(dir, { recursive: true, force: true });
 });
 
@@ -63,6 +76,8 @@ test('resolveRequest(): only allowlisted files under the asset dir are served', 
 
   // Non-allowlisted files exist on disk but are never served.
   assert.equal(assets.resolveRequest('/assets/secret.txt'), null);
+  // The doubled `/assets/assets/...` form is gone: URLs are single-prefix.
+  assert.equal(assets.resolveRequest('/assets/assets/panel-abc123.js'), null);
   // Traversal, backslashes, absolute escapes, and null bytes are rejected.
   assert.equal(assets.resolveRequest('/assets/..%2f..%2fpackage.json'), null);
   assert.equal(assets.resolveRequest('/assets/../package.json'), null);
@@ -87,13 +102,16 @@ test('renderHtml(): nonce CSP, stable page metadata, and manifest URLs', async (
   assert.match(html, /pie-transport" content="browser"/);
   assert.match(html, /pie-ws-route" content="\/ws"/);
   assert.match(html, /pie-asset-version" content="[0-9a-f]{16}"/);
-  assert.match(html, /assets\/assets\/panel-abc123\.js/);
-  assert.match(html, /assets\/assets\/panel-abc123\.css/);
+  assert.match(html, /assets\/panel-abc123\.js/);
+  assert.match(html, /assets\/panel-abc123\.css/);
   assert.match(html, /<title>pie — Browser<\/title>/);
   assert.match(csp, /default-src 'none'/);
   assert.match(csp, /script-src 'nonce-[0-9a-f]{32}'/);
+  assert.match(csp, /style-src 'self' 'unsafe-inline'/);
   assert.match(csp, /connect-src 'self' ws:\/\/127\.0\.0\.1:1997/);
   assert.match(csp, /frame-ancestors 'none'/);
+  // frame-ancestors is header-only: browsers ignore it in a <meta> element.
+  assert.doesNotMatch(html, /frame-ancestors/);
   assert.match(csp, /base-uri 'none'/);
   assert.match(csp, /form-action 'none'/);
   // The nonce in the CSP matches the script tag nonce.
@@ -124,5 +142,5 @@ test('helpers: entry discovery, MIME mapping, and asset URLs', () => {
   assert.equal(contentTypeFor('panel.js'), 'text/javascript; charset=utf-8');
   assert.equal(contentTypeFor('panel.WOFF2'), 'font/woff2');
   assert.equal(contentTypeFor('panel.unknown'), null);
-  assert.equal(toAssetUrl('C:/webview/assets/panel.js', 'C:/webview'), '/assets/assets/panel.js');
+  assert.equal(toAssetUrl('C:/webview/assets/panel.js', 'C:/webview'), '/assets/panel.js');
 });

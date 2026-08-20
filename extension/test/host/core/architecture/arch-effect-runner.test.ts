@@ -961,7 +961,7 @@ test('EffectRunner EditRpc send-timer dispatches PreflightFailed on timeout (edi
   });
   const runner = new EffectRunner(deps);
 
-  runner.run({ kind: 'EditRpc', corrId: 'c-pf-edit', sessionPath: '/a', messageId: 'msg-1', text: 'edited', inputs: [], localId: 'loc-e1' });
+  runner.run({ kind: 'EditRpc', corrId: 'c-pf-edit', sessionPath: '/a', messageId: 'msg-1', text: 'edited', inputs: [], localId: 'loc-e1', interruptFirst: false });
   await settle();
   // Early-ack happened (EditResult{ok:true}); the send-timer is armed.
   assert.equal(events.length, 1);
@@ -978,6 +978,84 @@ test('EffectRunner EditRpc send-timer dispatches PreflightFailed on timeout (edi
   if (pf?.kind === 'PreflightFailed') {
     assert.equal(pf.corrId, 'c-pf-edit');
     assert.equal(pf.requestId, 'req-9');
+  }
+  runner.dispose();
+});
+
+test('EffectRunner EditRpc interrupts before truncating and sending when interruptFirst is true', async () => {
+  let suppressionCount = 0;
+  const { deps, calls, events } = makeEffectRunnerDeps({
+    requestImpl: async () => ({ requestId: 'req-edit-running' }),
+    serviceOverrides: {
+      suppressNextCompletionNotificationFor: () => { suppressionCount += 1; },
+    },
+  });
+  const runner = new EffectRunner(deps);
+
+  runner.run({ kind: 'EditRpc', corrId: 'c-edit-running', sessionPath: '/a', messageId: 'msg-1', text: 'edited', inputs: [], localId: 'loc-e1', interruptFirst: true });
+  await settle();
+
+  assert.deepEqual(
+    calls.filter((call) => call.kind === 'request').map((call) => call.method),
+    ['message.interrupt', 'session.truncateAfter', 'message.send'],
+  );
+  assert.equal(suppressionCount, 1);
+  assert.equal(events.length, 1);
+  assert.equal(events[0]?.kind, 'EditResult');
+  assert.equal(events[0]?.ok, true);
+  runner.dispose();
+});
+
+test('EffectRunner EditRpc truncates then sends without interrupting an idle session', async () => {
+  let suppressionCount = 0;
+  const { deps, calls, events } = makeEffectRunnerDeps({
+    requestImpl: async () => ({ requestId: 'req-edit-idle' }),
+    serviceOverrides: {
+      suppressNextCompletionNotificationFor: () => { suppressionCount += 1; },
+    },
+  });
+  const runner = new EffectRunner(deps);
+
+  runner.run({ kind: 'EditRpc', corrId: 'c-edit-idle', sessionPath: '/a', messageId: 'msg-1', text: 'edited', inputs: [], localId: 'loc-e2', interruptFirst: false });
+  await settle();
+
+  assert.deepEqual(
+    calls.filter((call) => call.kind === 'request').map((call) => call.method),
+    ['session.truncateAfter', 'message.send'],
+  );
+  assert.equal(suppressionCount, 0);
+  assert.equal(events.length, 1);
+  assert.equal(events[0]?.kind, 'EditResult');
+  assert.equal(events[0]?.ok, true);
+  runner.dispose();
+});
+
+test('EffectRunner EditRpc stops after an interrupt failure and dispatches EditResult{ok:false}', async () => {
+  let suppressionCount = 0;
+  const { deps, calls, events } = makeEffectRunnerDeps({
+    requestImpl: async (method) => {
+      if (method === 'message.interrupt') throw new Error('interrupt failed');
+      return { requestId: 'req-edit-failed' };
+    },
+    serviceOverrides: {
+      suppressNextCompletionNotificationFor: () => { suppressionCount += 1; },
+    },
+  });
+  const runner = new EffectRunner(deps);
+
+  runner.run({ kind: 'EditRpc', corrId: 'c-edit-interrupt-fail', sessionPath: '/a', messageId: 'msg-1', text: 'edited', inputs: [], localId: 'loc-e3', interruptFirst: true });
+  await settle();
+
+  assert.deepEqual(
+    calls.filter((call) => call.kind === 'request').map((call) => call.method),
+    ['message.interrupt'],
+  );
+  assert.equal(suppressionCount, 1);
+  assert.equal(events.length, 1);
+  assert.equal(events[0]?.kind, 'EditResult');
+  assert.equal(events[0]?.ok, false);
+  if (events[0]?.kind === 'EditResult' && !events[0].ok) {
+    assert.equal(events[0].error, 'interrupt failed');
   }
   runner.dispose();
 });

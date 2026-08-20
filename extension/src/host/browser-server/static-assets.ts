@@ -22,6 +22,8 @@ interface ViteManifestChunk {
   src?: string;
   isEntry?: boolean;
   imports?: string[];
+  /** Lazy-loaded chunks (`import('./...')`), keyed by their src path. */
+  dynamicImports?: string[];
   css?: string[];
   assets?: string[];
 }
@@ -81,7 +83,7 @@ export interface ResolvedBrowserAssets {
 /** Absolute path → `/assets/<file>` URL. */
 export function toAssetUrl(absolutePath: string, assetDir: string): string {
   const relative = path.relative(path.resolve(assetDir), absolutePath).split(path.sep).join('/');
-  return `/assets/${relative}`;
+  return `/assets/${urlKeyFor(relative)}`;
 }
 
 /** Minimal attribute escaping for meta content (defense in depth). */
@@ -90,9 +92,25 @@ function escapeHtmlAttribute(value: string): string {
 }
 
 /**
- * Collect every file the manifest references (entry + css + transitively
- * imported chunks + chunk assets). This is the serving allowlist: nothing
- * outside it is ever resolved, and no directory listing exists.
+ * URL key for a manifest-relative file. Vite's output config places every
+ * artifact under `assets/`, so manifest `file` paths already carry that
+ * prefix; the documented HTTP surface is `/assets/<hashed-file>` (plan §6.1),
+ * so the prefix is stripped here. A doubled `/assets/assets/...` URL would
+ * break the browser's relative dynamic-import resolution: the entry chunk
+ * imports `./transcript-host-<hash>.js` relative to its own URL, so the
+ * entry must live at `/assets/panel-<hash>.js` for the chunk to resolve to
+ * `/assets/transcript-host-<hash>.js`.
+ */
+function urlKeyFor(manifestRelativeFile: string): string {
+  return manifestRelativeFile.startsWith('assets/')
+    ? manifestRelativeFile.slice('assets/'.length)
+    : manifestRelativeFile;
+}
+
+/**
+ * Collect every file the manifest references (entry + css + statically and
+ * dynamically imported chunks + chunk assets). This is the serving allowlist:
+ * nothing outside it is ever resolved, and no directory listing exists.
  */
 function collectManifestFiles(manifest: ViteManifest, entry: ViteManifestChunk, baseDir: string): Map<string, string> {
   const files = new Map<string, string>();
@@ -104,7 +122,7 @@ function collectManifestFiles(manifest: ViteManifest, entry: ViteManifestChunk, 
     // Manifest entries are relative to the webview dir; nothing outside may
     // be referenced. (path.resolve normalizes any `..`.)
     if (!absolute.startsWith(base)) return;
-    files.set(file, absolute);
+    files.set(urlKeyFor(file), absolute);
   };
   const visit = (chunk: ViteManifestChunk): void => {
     const file = chunk.file;
@@ -113,7 +131,11 @@ function collectManifestFiles(manifest: ViteManifest, entry: ViteManifestChunk, 
     addFile(file);
     for (const css of chunk.css ?? []) addFile(css);
     for (const asset of chunk.assets ?? []) addFile(asset);
-    for (const importedName of chunk.imports ?? []) {
+    // Static imports AND dynamic entries: the panel lazy-loads the transcript
+    // host via `import('./transcript/transcript-host')`, which Vite records
+    // under `dynamicImports` — without it the chunk 404s and the browser
+    // render crashes.
+    for (const importedName of [...(chunk.imports ?? []), ...(chunk.dynamicImports ?? [])]) {
       const imported = manifest[importedName];
       if (imported) visit(imported);
     }
@@ -137,14 +159,14 @@ export class BrowserStaticAssets {
       throw new Error(`No Vite entry chunk found in manifest at ${path.join(this.assetDir, '.vite', 'manifest.json')}`);
     }
     const files = collectManifestFiles(manifest, entry, this.assetDir);
-    const entryPath = files.get(entry.file);
+    const entryPath = files.get(urlKeyFor(entry.file));
     if (!entryPath) throw new Error(`Entry chunk ${entry.file} is not under the webview asset dir.`);
     this.resolved = {
       assetVersion: assetVersionFromManifest(manifest),
       files,
       entryPath,
       cssPaths: (entry.css ?? [])
-        .map((css) => files.get(css))
+        .map((css) => files.get(urlKeyFor(css)))
         .filter((p): p is string => !!p),
     };
   }
@@ -199,17 +221,27 @@ export class BrowserStaticAssets {
     const styleTags = this.resolved.cssPaths
       .map((p) => `  <link href="${toAssetUrl(p, this.assetDir)}" rel="stylesheet" nonce="${nonce}" />`)
       .join('\n');
-    const csp = [
+    const cspParts = [
       "default-src 'none'",
       `script-src 'nonce-${nonce}'`,
-      `style-src 'self' 'nonce-${nonce}'`,
+      // Inline styles are allowed: the render-crash overlay is deliberately
+      // self-contained (it must work even when the app stylesheet failed to
+      // load), and markdown content is DOMPurify-sanitized before injection.
+      // Per CSP3 a nonce in style-src would disable 'unsafe-inline', so the
+      // nonce is omitted here (same-origin stylesheets are covered by 'self').
+      "style-src 'self' 'unsafe-inline'",
       "img-src 'self' data:",
       "font-src 'self'",
       `connect-src 'self' ws://127.0.0.1:${options.port}`,
       "frame-ancestors 'none'",
       "base-uri 'none'",
       "form-action 'none'",
-    ].join('; ');
+    ];
+    const csp = cspParts.join('; ');
+    // `frame-ancestors` is ignored in a <meta> element (browsers warn); the
+    // response header carries it, so the meta omits it to keep the console
+    // clean.
+    const metaCsp = cspParts.filter((part) => !part.startsWith('frame-ancestors')).join('; ');
     const suffix = options.titleSuffix ? ` — ${options.titleSuffix}` : '';
     return {
       csp,
@@ -217,7 +249,7 @@ export class BrowserStaticAssets {
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta http-equiv="Content-Security-Policy" content="${csp}" />
+  <meta http-equiv="Content-Security-Policy" content="${metaCsp}" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="pie-asset-version" content="${this.resolved.assetVersion}" />
   <meta name="pie-transport" content="browser" />

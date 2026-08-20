@@ -54,6 +54,8 @@ function renderTab(overrides: Partial<SessionTabProps> = {}): HTMLElement {
     hasPendingExtensionUIRequest: false,
     isPinned: false,
     isDropTarget: false,
+    hasDeferredTriggers: false,
+    hasDeferredTimer: false,
     onContextMenu: noop,
     onPointerDown: noop,
     onClick: noop,

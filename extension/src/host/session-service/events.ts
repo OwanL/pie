@@ -13,6 +13,7 @@ import type { Event } from '../core/events';
 import type { ArchState } from '../core/arch-state';
 import type { CoordinatorToHostDetailMessage } from '../../shared/protocol/subagent-detail';
 import { SessionServiceState } from './state';
+import type { DeferredTriggerRegistry } from '../deferred-triggers/registry';
 import { onMessageDelta, onMessageThinking, onMessageToolCallDelta, onMessageStarted, onMessageFinished, onMessageAborted, onPreflightFailed, onQueuedDelivered, onRetryStarted, onRetryEnded, onRetryMeasured, onRetryStuck, onCompaction, onCompactionStarted, onAuxiliaryLlmUsage } from './handlers/streaming.js';
 import { onToolStarted, onToolFinished, onToolProgress } from './handlers/tools.js';
 import { onSessionListChanged, onCustomMessage, onExtensionUIRequest, onError, onOperationalError, onContextUsageChanged } from './handlers/session.js';
@@ -28,6 +29,7 @@ interface SessionServiceEventsOptions {
   state: SessionServiceState;
   dispatchArch: (event: Event) => void;
   getArchState: () => ArchState;
+  triggers: DeferredTriggerRegistry;
   /** Phase 5: routes one of the six coordinator→host detail stream variants
    *  to the host's detail subscription service. */
   onDetailStream?: (message: CoordinatorToHostDetailMessage) => void;
@@ -43,6 +45,7 @@ export class SessionServiceEvents {
   private exitDisposable?: vscode.Disposable;
   private readonly dispatchArch: (event: Event) => void;
   private readonly getArchState: () => ArchState;
+  private readonly triggers: DeferredTriggerRegistry;
   private readonly onDetailStream?: (message: CoordinatorToHostDetailMessage) => void;
 
   constructor(options: SessionServiceEventsOptions) {
@@ -53,6 +56,7 @@ export class SessionServiceEvents {
     this.dispatchArch = options.dispatchArch;
     this.state = options.state;
     this.getArchState = options.getArchState;
+    this.triggers = options.triggers;
     this.onDetailStream = options.onDetailStream;
   }
 
@@ -206,6 +210,7 @@ export class SessionServiceEvents {
         context: this.context,
         onSessionCompleted: this.onSessionCompleted,
         state: this.state,
+        triggers: this.triggers,
       },
     );
   }

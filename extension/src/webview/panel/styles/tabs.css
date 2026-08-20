@@ -464,6 +464,14 @@ body.session-tab-dragging {
     0 0 0 2px color-mix(in srgb, var(--panel-warning) 72%, transparent);
 }
 
+/* A pending deferred timer means the agent is waiting rather than finished.
+   On compact pinned tabs, a warning ring is the hourglass equivalent. */
+.session-tab.pinned.deferred-timer:not(.running) .session-tab-avatar {
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, #000 18%, transparent),
+    0 0 0 2px color-mix(in srgb, var(--panel-warning) 72%, transparent);
+}
+
 /* Running / parked / finished status indicators */
 .session-tab-running,
 .session-tab-parked,
@@ -506,6 +514,15 @@ body.session-tab-dragging {
 .session-tab-finished {
   background: var(--panel-success);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--panel-success) 12%, transparent);
+}
+
+.session-tab-deferred-timer {
+  width: 10px;
+  flex-shrink: 0;
+  color: var(--panel-warning);
+  font-size: 10px;
+  line-height: 1;
+  text-align: center;
 }
 
 /* ── Close / delayed-create retry buttons ───────────────────────────────── */
@@ -563,6 +580,17 @@ body.session-tab-dragging {
   border-color: var(--session-tab-outline);
   color: var(--panel-foreground);
   outline: none;
+}
+
+/* ── Deferred-trigger disabled states ─────────────────────────────────────── */
+/* A tab whose session owns a pending deferred trigger cannot be closed until
+   the trigger is cancelled. Surface the close button as disabled so the reason
+   remains discoverable in its tooltip. */
+
+.session-tab-close:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+  pointer-events: none;
 }
 
 /* ── Drop indicators ─────────────────────────────────────────────────────── */

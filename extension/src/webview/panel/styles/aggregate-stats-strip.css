@@ -163,6 +163,38 @@
   color: var(--panel-danger);
 }
 
+/* Waiting deferred-trigger segment. A button (not a span) so it can open the
+   cancel popup; inherits the strip's help-cursor feel via pointer. */
+.aggregate-strip-deferred {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  color: var(--panel-accent);
+  font: inherit;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  border-radius: var(--panel-radius-sm);
+  transition: background var(--panel-transition-fast), color var(--panel-transition-fast);
+}
+
+.aggregate-strip-deferred:hover {
+  background: color-mix(in srgb, var(--panel-accent) 12%, transparent);
+}
+
+.aggregate-strip-deferred-icon {
+  font-size: 11px;
+  line-height: 1;
+}
+
+.aggregate-strip-deferred-count {
+  font-size: inherit;
+}
+
 .aggregate-strip-sep {
   color: color-mix(in srgb, var(--panel-muted) 50%, transparent);
   flex-shrink: 0;

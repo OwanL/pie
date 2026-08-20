@@ -4,7 +4,7 @@
 import { memo } from 'preact/compat';
 import type { JSX } from 'preact';
 
-import type { AggregateStats, AggregateLastRun, ProviderGateStats, AggregateSeriesPoint } from '../../../shared/protocol';
+import type { AggregateStats, AggregateLastRun, DeferredTriggerView, ProviderGateStats, AggregateSeriesPoint } from '../../../shared/protocol';
 import { formatCompactTokens } from '../utils/format-tokens';
 import { cx } from '../utils/cx';
 import { Tooltip } from '../components/tooltip';
@@ -34,9 +34,11 @@ import { Num } from './num';
 
 interface AggregateStatsStripProps {
   stats: AggregateStats;
+  deferredTriggers: DeferredTriggerView[];
+  onOpenDeferredMenu: (x: number, y: number) => void;
 }
 
-function AggregateStatsStripView({ stats }: AggregateStatsStripProps) {
+function AggregateStatsStripView({ stats, deferredTriggers, onOpenDeferredMenu }: AggregateStatsStripProps) {
   const {
     ready,
     todayCost,
@@ -123,6 +125,23 @@ function AggregateStatsStripView({ stats }: AggregateStatsStripProps) {
           </Tooltip>
         </>
       )}
+      {deferredTriggers.length > 0 && (
+        <>
+          <Sep />
+          <Tooltip contentNode={deferredTooltipNode(deferredTriggers)} placement="top" freezeWhileVisible>
+            <button
+              type="button"
+              class="aggregate-strip-seg aggregate-strip-deferred"
+              title={`Pending deferred trigger${deferredTriggers.length === 1 ? '' : 's'} — click to cancel`}
+              aria-label={`${deferredTriggers.length} pending deferred trigger${deferredTriggers.length === 1 ? '' : 's'}. Click to open cancel menu.`}
+              onClick={(e) => onOpenDeferredMenu(e.clientX, e.clientY)}
+            >
+              <span class="aggregate-strip-deferred-icon" aria-hidden="true">⏳</span>
+              <span class="aggregate-strip-deferred-count">{deferredTriggers.length} deferred</span>
+            </button>
+          </Tooltip>
+        </>
+      )}
       <Sep />
       <Tooltip contentNode={sessionsTooltipNode(stats)} placement="top" freezeWhileVisible triggerClassName="aggregate-strip-counts-trigger">
         <span class="aggregate-strip-seg aggregate-strip-counts">
@@ -156,7 +175,15 @@ function arePropsEqual(
   prev: AggregateStatsStripProps,
   next: AggregateStatsStripProps,
 ): boolean {
-  return (prev.stats === next.stats || statsSignature(prev.stats) === statsSignature(next.stats));
+  return (prev.stats === next.stats || statsSignature(prev.stats) === statsSignature(next.stats))
+    && deferredSignature(prev.deferredTriggers) === deferredSignature(next.deferredTriggers);
+}
+
+/** Compact membership signature of the active deferred-trigger set, so the
+ *  strip skips re-render when the set is unchanged across a fresh host-serialised
+ *  `deferredTriggers` array reference (the host re-serialises every snapshot). */
+function deferredSignature(t: DeferredTriggerView[]): string {
+  return t.map((x) => `${x.id}:${x.sessionPath}`).sort().join(',');
 }
 
 function seriesSignature(s: AggregateSeriesPoint[]): string {
@@ -418,6 +445,24 @@ function sessionsTooltipNode(s: AggregateStats): JSX.Element {
       </div>
       <StackedAreaChart points={runPoints} mode="rate" formatY={(n) => String(Math.round(n))} formatX={formatDateShort} unit="runs" />
       <div class="rich-tooltip-sub">{`${s.sessionCount} session${s.sessionCount === 1 ? '' : 's'} (all-time) · ${s.runCount} runs\nAll-time ↓${formatCompactTokens(s.totalInputTokens)} in  ↑${formatCompactTokens(s.totalOutputTokens)} out`}</div>
+    </div>
+  );
+}
+
+/** Tooltip for the waiting-trigger segment: one line per active trigger
+ *  (session + condition + note), so the user can preview before opening the
+ *  cancel popup. */
+function deferredTooltipNode(triggers: DeferredTriggerView[]): JSX.Element {
+  const lines: string[] = [`${triggers.length} pending — click to cancel`, ''];
+  for (const t of triggers) {
+    const note = t.note.trim() || '(no note)';
+    const head = `${t.sessionPath.split(/[\\/]/).pop() ?? t.sessionPath}: ${note}`;
+    lines.push(head.length > 80 ? `${head.slice(0, 77)}…` : head);
+  }
+  return (
+    <div class="rich-tooltip">
+      <div class="rich-tooltip-head"><span>Deferred triggers</span><span class="rich-tooltip-head-value">{triggers.length}</span></div>
+      <div class="rich-tooltip-sub">{lines.join('\n')}</div>
     </div>
   );
 }

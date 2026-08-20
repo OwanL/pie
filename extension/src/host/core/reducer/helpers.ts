@@ -543,17 +543,25 @@ export function restoreRemovedTail(
   if (removedTail.length === 0) return;
 
   const list = draft.transcript.bySession[sessionPath] ?? [];
-  for (const message of removedTail) {
+  // Rollback can race an authoritative `session.opened` snapshot that already
+  // reinstated some of these rows. Re-appending them would duplicate transcript
+  // entries and desynchronize `transcriptLength` from the window's `totalCount`
+  // (observed as permanently hidden/stale rows in the renderer).
+  const present = new Set(list.map((m: ChatMessage) => m.id));
+  const restored = removedTail.filter((message) => !present.has(message.id));
+  if (restored.length === 0) return;
+
+  for (const message of restored) {
     list.push(message);
   }
   draft.transcript.bySession[sessionPath] = list;
 
   let nextWindow = draft.transcript.windowBySession[sessionPath];
-  for (const _ of removedTail) {
+  for (const _ of restored) {
     nextWindow = withIncrementedWindowCounts(nextWindow);
   }
   if (nextWindow) {
-    if (removedTail.some((m: ChatMessage) => m.role === 'user')) {
+    if (restored.some((m: ChatMessage) => m.role === 'user')) {
       nextWindow.hasUserMessages = true;
     }
     draft.transcript.windowBySession[sessionPath] = nextWindow;

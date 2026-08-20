@@ -74,6 +74,51 @@ export function backendError(scope: string, event: string, data?: Record<string,
   backendLog('error', scope, event, data);
 }
 
+/** Classify a worker stderr chunk into a backend log level by reading the
+ *  structured `level` field from the `[pie:backend] {json}` line when present.
+ *  Falls back to `'error'` for non-JSON / level-less chunks so genuine worker
+ *  crashes (e.g. `[pie-worker] <stack>`) stay visible, while structured
+ *  `debug`/`info`/`warn` chatter is no longer mis-reported as `error`.
+ *
+ *  A single chunk may contain multiple newline-delimited lines; the most
+ *  severe level among them wins so a mixed batch is never under-reported. */
+export function classifyWorkerStderrChunk(chunk: string): BackendLogLevel {
+  let worst: BackendLogLevel | undefined;
+  for (const rawLine of chunk.split('\n')) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    const jsonText = line.startsWith(BACKEND_LINE_PREFIX)
+      ? line.slice(BACKEND_LINE_PREFIX.length)
+      : line;
+    let level: BackendLogLevel | undefined;
+    try {
+      const record = JSON.parse(jsonText) as { level?: unknown };
+      if (record.level === 'debug' || record.level === 'info' || record.level === 'warn' || record.level === 'error') {
+        level = record.level;
+      }
+    } catch {
+      // Not structured JSON — treat as a raw diagnostic line.
+    }
+    if (!level) {
+      // Non-JSON / level-less line (e.g. a worker crash stack). Surface at
+      // error so it is never hidden.
+      level = 'error';
+    }
+    if (worst === undefined || LEVEL_RANK[level] > LEVEL_RANK[worst]) {
+      worst = level;
+    }
+  }
+  // No non-empty lines → neutral `info` (matches the single-line classifier).
+  return worst ?? 'info';
+}
+
+const LEVEL_RANK: Record<BackendLogLevel, number> = {
+  debug: 10,
+  info: 20,
+  warn: 30,
+  error: 40,
+};
+
 /** Backward-compatible trace wrapper for the pre-structured call sites that pass
  *  `scope` WITHOUT the `backend-` prefix and carry `level` inside `payload`.
  *  This normalizes them to the structured `backendLog` shape: `level` is lifted

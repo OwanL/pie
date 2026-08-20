@@ -57,6 +57,7 @@ function emptyViewState(): ViewState {
     runSummariesBySession: {},
     tokenRateBySession: {},
     aggregateStats: EMPTY_AGGREGATE_STATS,
+    deferredTriggers: [],
     draftText: '',
     busy: false,
     retryStatus: null,

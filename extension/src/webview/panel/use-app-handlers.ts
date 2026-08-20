@@ -32,6 +32,7 @@ export interface AppHandlers {
   handleMergePinnedGroups: (sourcePath: string, targetPath: string) => void;
   handleUngroupPinnedTab: (sourcePath: string, toItemIndex: number) => void;
   handleMovePinnedItem: (sourcePath: string, toItemIndex: number) => void;
+  handleCancelDeferredTrigger: (sessionPath: string, triggerId?: string) => void;
   handleCancelEdit: () => void;
   handleSetPrefs: (partial: Partial<ChatPrefs>) => void;
   handleSetPrivacyMode: (enabled: boolean) => void;
@@ -119,6 +120,13 @@ export function useAppHandlers(
   const handleMergePinnedGroups = useCallback((sourcePath: string, targetPath: string) => postMessage({ type: 'mergePinnedGroups', sourcePath, targetPath }), [postMessage]);
   const handleUngroupPinnedTab = useCallback((sourcePath: string, toItemIndex: number) => postMessage({ type: 'ungroupPinnedTab', sourcePath, toItemIndex }), [postMessage]);
   const handleMovePinnedItem = useCallback((sourcePath: string, toItemIndex: number) => postMessage({ type: 'movePinnedItem', sourcePath, toItemIndex }), [postMessage]);
+  // Cancel a deferred trigger. `sessionPath` is the trigger's watcher session
+  // (carried on the trigger itself), not necessarily the active session, so it
+  // is passed explicitly rather than read from the ref. Omit `triggerId` to
+  // cancel every active trigger for that session.
+  const handleCancelDeferredTrigger = useCallback((sessionPath: string, triggerId?: string) => {
+    postMessage({ type: 'cancelDeferredTrigger', sessionPath, triggerId });
+  }, [postMessage]);
   const handleCancelEdit = useCallback(() => {
     const sessionPath = activeSessionPathRef.current;
     if (!sessionPath) return;
@@ -261,6 +269,7 @@ export function useAppHandlers(
       handleMergePinnedGroups,
       handleUngroupPinnedTab,
       handleMovePinnedItem,
+      handleCancelDeferredTrigger,
       handleCancelEdit,
       handleSetPrefs,
       handleSetPrivacyMode,
@@ -296,6 +305,7 @@ export function useAppHandlers(
       handleMergePinnedGroups,
       handleUngroupPinnedTab,
       handleMovePinnedItem,
+      handleCancelDeferredTrigger,
       handleCancelEdit,
       handleSetPrefs,
       handleSetPrivacyMode,

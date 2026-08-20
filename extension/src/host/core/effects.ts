@@ -61,6 +61,11 @@ export interface EditRpcEffect extends EffectBase {
   composedText?: string;
   /** User content parts for rich rendering of the optimistic replacement message. */
   userParts?: UserContentPart[];
+  /** The session was already running when the edit was issued, so the composite
+   *  operation must interrupt the live turn before truncating (STATE_CONTRACT §
+   *  Execution Ordering: edit = interrupt → truncate → send). Captured in the
+   *  reducer because `handleEdit` optimistically marks the session running. */
+  interruptFirst: boolean;
 }
 
 export interface QueuedMessageRpcPayload {

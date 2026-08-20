@@ -334,6 +334,9 @@ export function handleEditQueued(state: ArchState, cmd: Extract<Command, { kind:
 export function handleEdit(state: ArchState, cmd: Extract<Command, { kind: 'Edit' }>): ReducerResult {
   // Insert optimistic edit message + mark session busy immediately so the
   // webview shows an activity indicator right away.
+  // Read BEFORE the optimistic running mark below, otherwise every edit would
+  // look like it needs an interrupt.
+  const wasRunning = state.sessions.runningSessionPaths.includes(cmd.sessionPath);
   const nextRunningPaths = addToArray(state.sessions.runningSessionPaths, cmd.sessionPath);
   const nextState = produce(state, (draft) => {
     draft.transcript.editingMessageIdBySession[cmd.sessionPath] = null;
@@ -382,6 +385,7 @@ export function handleEdit(state: ArchState, cmd: Extract<Command, { kind: 'Edit
         composedText: cmd.composedText,
         inputs: cmd.inputs,
         userParts: cmd.userParts,
+        interruptFirst: wasRunning,
       },
     ],
   };
