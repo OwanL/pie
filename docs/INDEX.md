@@ -10,14 +10,13 @@ This folder contains active design contracts, implementation plans, and operatio
 
 ## Active plans (in progress)
 
-- [BROWSER_SERVER_PLAN.md](BROWSER_SERVER_PLAN.md) — staged plan to serve the existing Pie Preact UI from the VS Code extension host over a loopback HTTP/WebSocket server, with isolated per-renderer delivery and a later authenticated-internet ingress gate.
-- [SESSION_RUNTIME_ISOLATION_PLAN.md](SESSION_RUNTIME_ISOLATION_PLAN.md) — P0 implementation handoff for a lightweight coordinator plus one process-isolated worker per hot root session, preserving cold browse/control liveness and complete demand-driven subagent detail.
+- [BROWSER_SERVER_PLAN.md](BROWSER_SERVER_PLAN.md) — staged plan to serve the existing Pie Preact UI from the VS Code extension host over a loopback HTTP/WebSocket server, with isolated per-renderer delivery and a later authenticated-internet ingress gate. Milestones 0–2 (loopback server, multi-renderer hub, fail-closed ingress, source-aware confirmations) are implemented; milestones 3–5 (resilience pass, browser-native file/diff/export, authenticated ingress) remain.
 - [HANDOFF_SUBAGENT_PROVIDER_RESILIENCE.md](HANDOFF_SUBAGENT_PROVIDER_RESILIENCE.md) — P0 implementation handoff replacing total-duration subagent timeouts with progress-aware phase leases, bounded local settlement, provider circuit breaking, orphan cleanup, and queued-message liveness.
 
 ## Implemented design references
 
+- [DEFERRED-TRIGGERS.md](DEFERRED-TRIGGERS.md) — design and behavioral contract for the `defer_trigger` tool and its host-side registry: a session registers an asynchronous condition (timer / user input / another session finishing), ends its turn, and is resumed by a synthetic wake-up when it fires. Runtime code lives in `extensions/deferred-triggers/` (tool), `extension/src/host/deferred-triggers/` (registry + sidecar store), and the status-strip webview menu.
 - [TOOL-RESULT-PRUNING.md](TOOL-RESULT-PRUNING.md) — design and contract for the deterministic `tool_result` middleware (strip ANSI, minify JSON, prune permission columns, collapse blank lines) before results enter context. One of three context-lean layers (history compaction / skill pruning / tool-result pruning — see `AGENTS.md`). Runtime code lives in `extensions/tool-result-pruner/`; the document remains the behavioral reference and records future lossy/recall considerations.
-- [SESSION-CHANGES-TOOL.md](SESSION-CHANGES-TOOL.md) — design rationale for the implemented `session_changes` tool, which exposes a session-scoped change manifest (`list` / `diff`) for feeding a `reviewer` subagent. Runtime code lives in `extensions/session-changes/`; shared derivation and git-baseline helpers live under `extension/src/shared/`.
 
 ## Operational references
 

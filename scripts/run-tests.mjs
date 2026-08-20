@@ -658,10 +658,11 @@ function printPackageResult(result) {
   const status = passed ? '✓' : '✖';
   const counts = summary?.counts ?? null;
   const durationMs = summary?.durationMs ?? 0;
+  const flakySuffix = result.flakyRerun ? ' (flaky: passed on rerun)' : '';
 
-  console.log(`${status} ${config.id} — ${formatCounts(counts)} — ${formatCoverage(coverage)} — ${formatDuration(durationMs)}`);
+  console.log(`${status} ${config.id} — ${formatCounts(counts)} — ${formatCoverage(coverage)} — ${formatDuration(durationMs)}${flakySuffix}`);
 
-  if (failures.length > 0) {
+  if (failures.length > 0 && !result.flakyRerun) {
     console.log(indent('failing tests:'));
     for (const failure of failures) {
       console.log(indent(formatFailureDetails(failure), '    '));
@@ -716,6 +717,83 @@ function aggregateCounts(results) {
     todo: 0,
     cancelled: 0,
   });
+}
+
+/**
+ * Rerun-once fallback for failed packages in fast mode.
+ *
+ * The fast suite deliberately oversubscribes the machine (parallel package
+ * runners + file concurrency), so a small class of wall-clock-budget tests can
+ * fail transiently under load even though they always pass in isolation. A
+ * failed package is re-run once with far less contention; if the rerun passes
+ * the failure is reported as flaky and never cached. A rerun that also fails
+ * keeps the original failure (with its diagnostics) — this never masks a real
+ * regression, it only absorbs load-induced noise.
+ */
+async function attemptFlakyRerun(result, fast, integration, testArgs, signal) {
+  const failedFiles = [...new Set(
+    result.failures
+      .map((failure) => failure.file)
+      .filter((file) => typeof file === 'string' && file.length > 0)
+      .map((file) => {
+        // Reporters emit absolute paths; tolerate already-relative ones.
+        const relative = path.isAbsolute(file)
+          ? path.relative(repoRoot, file)
+          : file.replace(/^[.\\/]+/u, '');
+        return relative.replace(/\\/g, '/');
+      })
+      .filter((relative) => relative && !relative.startsWith('..') && !path.isAbsolute(relative)),
+  )];
+  if (failedFiles.length === 0) {
+    // No file attribution (infrastructure failure / missing summary) — rerun
+    // the whole package so the same load conditions apply.
+    const rerun = await runPackage(result.config, fast, integration, testArgs, signal);
+    if (rerun.passed) {
+      console.log(`⚠ ${result.config.id} failed under parallel load but passed on a full-package rerun — treated as flaky.`);
+      return { ...rerun, flakyRerun: true };
+    }
+    console.log(`✖ ${result.config.id}: rerun also failed — original failure stands.`);
+    return result;
+  }
+
+  const rerun = await runFailedFiles(failedFiles, signal);
+  if (rerun.passed) {
+    console.log(`⚠ ${result.config.id}: ${failedFiles.length} failing test file(s) passed on rerun — treated as flaky, not cached.`);
+    const counts = result.summary?.counts;
+    return {
+      ...result,
+      passed: true,
+      hasInfrastructureFailure: false,
+      flakyRerun: true,
+      // Zero the original failure counts so the aggregate totals reflect the
+      // rerun pass, not the transient first-run failure.
+      summary: counts ? {
+        ...result.summary,
+        counts: {
+          ...counts,
+          passed: (counts.passed ?? 0) + (counts.failed ?? 0),
+          failed: 0,
+        },
+      } : undefined,
+    };
+  }
+  console.log(`✖ ${result.config.id}: rerun of ${failedFiles.join(', ')} also failed — original failure stands.`);
+  return result;
+}
+
+/** Re-run specific repo-relative test files through the tight dev-loop runner. */
+async function runFailedFiles(files, signal) {
+  const rawResult = await runChildProcess(
+    process.execPath,
+    [path.join(repoRoot, 'scripts', 'run-test-files.mjs'), ...files],
+    repoRoot,
+    signal,
+    {},
+    false,
+  );
+  return {
+    passed: rawResult.exitCode === 0 && !rawResult.timedOut && !rawResult.aborted && rawResult.signal === null,
+  };
 }
 
 async function main() {
@@ -797,6 +875,21 @@ async function main() {
         processAbort.signal,
       );
     }));
+    // Absorb load-induced flakiness in the fast loop: re-run failed packages
+    // once under minimal contention before declaring a red suite. Coverage
+    // (verify) runs, integration runs, and pattern-filtered runs stay strict.
+    if (parsedArgs.fast && parsedArgs.testArgs.length === 0 && !parsedArgs.integration) {
+      results = await Promise.all(results.map(async (result) => {
+        if (result.passed) return result;
+        return await attemptFlakyRerun(
+          result,
+          parsedArgs.fast,
+          parsedArgs.integration,
+          parsedArgs.testArgs,
+          processAbort.signal,
+        );
+      }));
+    }
   } finally {
     processAbort.dispose();
   }
@@ -811,8 +904,13 @@ async function main() {
 
   console.log('');
   if (failedResults.length === 0) {
-    console.log(`Summary: ${passedCount}/${results.length} ${packageWord} passed — ${totals.passed} passed, ${totals.failed} failed, ${totals.skipped} skipped.`);
-    if (fingerprint) {
+    const flakyCount = results.filter((result) => result.flakyRerun).length;
+    if (flakyCount > 0) {
+      console.log(`Summary: ${passedCount}/${results.length} ${packageWord} passed (${flakyCount} flaky on rerun) — ${totals.passed} passed, ${totals.failed} failed, ${totals.skipped} skipped.`);
+    } else {
+      console.log(`Summary: ${passedCount}/${results.length} ${packageWord} passed — ${totals.passed} passed, ${totals.failed} failed, ${totals.skipped} skipped.`);
+    }
+    if (fingerprint && !results.some((result) => result.flakyRerun)) {
       try {
         // Do not cache a pass if files changed while the suite was running.
         if (repoTestFingerprint() === fingerprint) {

@@ -1,6 +1,6 @@
 # Pie Browser Server Implementation Plan
 
-**Status:** proposed; not started
+**Status:** in progress — Milestones 0–2 implemented (loopback server, multi-renderer hub, fail-closed browser ingress, shared client transport, source-aware confirmations); Milestones 3–5 remain (resilience/mobile pass, browser-native file/diff/export, authenticated internet ingress). Milestone 6 is explicitly optional.
 **Initial deployment:** the existing VS Code extension host on the user's PC
 **Initial network boundary:** loopback only (`127.0.0.1`)
 **Later deployment:** authenticated HTTPS ingress to the same loopback service
