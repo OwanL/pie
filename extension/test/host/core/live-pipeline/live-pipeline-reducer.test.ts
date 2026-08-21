@@ -290,6 +290,45 @@ test('a delayed checkpoint cannot revive an attempt after its terminal tombstone
   assert.equal(late.state.transcript.bySession[base.sessionPath], transcript);
 });
 
+test('checkpoint recovery commits the matching optimistic send and clears its watchdog', () => {
+  const seeded = dispatch(createInitialArchState(), {
+    ...base, kind: 'turn.started', seq: 1, canonicalMessageId: 'message', startedAt: 90,
+  }).state.livePipeline.turnsBySession[base.sessionPath]!;
+  const initial = createInitialArchState();
+  initial.pending.promoted['send-corr'] = {
+    kind: 'send', sessionPath: base.sessionPath, localId: 'local:user', previousSummary: null,
+    text: 'Do the work', inputs: [], requestId: base.requestId, startedAt: 80,
+  };
+  initial.pending.requestIdToLocalId[base.requestId] = {
+    sessionPath: base.sessionPath, localId: 'local:user',
+  };
+  initial.pending.prepassBySession[base.sessionPath] = { phase: 'succeeded', latencyMs: 10 };
+  const ownerPending = dispatch(initial, {
+    ...base, kind: 'turn.text', seq: 2, occurredAt: 110, delta: 'after start',
+  });
+
+  const result = reducer(ownerPending.state, {
+    kind: 'LiveTurnCheckpointResult', corrId: 'checkpoint-owner', sessionPath: base.sessionPath,
+    turnId: base.turnId, attemptId: base.attemptId, ok: true, occurredAt: 120,
+    status: 'active', watermark: null,
+    checkpoint: {
+      protocolVersion: 6, sessionPath: base.sessionPath, turnId: base.turnId,
+      attemptId: base.attemptId, checkpointSeq: 1, phase: seeded.phase,
+      checkpointBytes: seeded.checkpointBytes,
+      turn: { ...seeded, checkpointSeq: 1 }, tools: [],
+      pendingExtensionUiRequestIds: [],
+    },
+  });
+
+  assert.deepEqual(result.effects, [{ kind: 'ClearSendTimer', corrId: 'send-corr' }]);
+  assert.equal(result.state.pending.promoted['send-corr'], undefined);
+  assert.equal(result.state.pending.prepassBySession[base.sessionPath], undefined);
+  assert.equal(result.state.pending.requestIdToLocalId[base.requestId], undefined);
+  assert.deepEqual(result.state.pending.currentTurnBySession[base.sessionPath], {
+    requestId: base.requestId, firstMessageId: 'message',
+  });
+});
+
 test('sequence gaps request a checkpoint and a terminal checkpoint repairs missed terminal delivery', () => {
   let state = createInitialArchState();
   state = dispatch(state, {

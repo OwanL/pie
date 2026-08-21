@@ -8,7 +8,7 @@
     "tsBuildInfoFile": "./node_modules/.cache/typecheck/extension.tsbuildinfo",
     "verbatimModuleSyntax": false,
     "target": "ES2021",
-    "lib": ["ES2021", "DOM"],
+    "lib": ["ES2021", "ES2022.Error", "ES2022.Object", "DOM"],
     "outDir": "./out",
     "strict": true,
     "esModuleInterop": true,
@@ -16,7 +16,12 @@
     "sourceMap": true,
     "types": ["node", "vscode", "vite/client"],
     "jsx": "react-jsx",
-    "jsxImportSource": "preact"
+    "jsxImportSource": "preact",
+    "baseUrl": ".",
+    "paths": {
+      "@earendil-works/pi-ai": ["./node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai"],
+      "@earendil-works/pi-coding-agent": ["./node_modules/@earendil-works/pi-coding-agent"]
+    }
   },
   "include": ["src/**/*", "test/**/*", "vite.config.ts", "scripts/**/*.mjs"],
   "exclude": ["node_modules", "out"]

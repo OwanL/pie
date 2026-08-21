@@ -1744,12 +1744,12 @@ test('reducer: failed live preference application is visible instead of silently
     kind: 'SetPrefsResult',
     corrId: 'prefs-failed',
     ok: false,
-    error: 'runtimePrefs.set timed out',
+    error: 'Timed out waiting for response to req-540',
   });
 
   assert.match(result.state.settings.notice ?? '', /could not be fully applied/i);
   assert.equal(result.state.settings.noticeKind, 'operational-error');
-  assert.equal(result.state.settings.noticeRaw, 'runtimePrefs.set timed out');
+  assert.equal(result.state.settings.noticeRaw, 'Timed out waiting for response to request');
 });
 
 test('reducer: SetPrefs normalizes a partial subagentBuckets patch into a complete object', () => {
@@ -1926,10 +1926,12 @@ test('reducer: post-ack PreflightFailed rolls back via promoted, restores inputs
   assert.equal(result.state.pending.requestIdToLocalId['req-9'], undefined);
   // Composer inputs RESTORED from the promoted snapshot (no data loss).
   assert.deepEqual(result.state.composer.pendingComposerInputsBySession['/s'], [imgInput]);
+  assert.equal(result.state.composer.draftTextBySession['/s'], 'hey');
   // Plain-language error surfaced (Brief H refines the copy).
   assert.match(result.state.settings.notice!, /turn setup failed/i);
   assert.match(result.state.settings.notice!, /prepass blew up/);
   assert.doesNotMatch(result.state.settings.notice!, /pruning/i);
+  assert.equal(result.state.settings.noticeSessionPath, '/s');
   // Fires a sendRejected imperative so the webview drops its overlay + restores draft.
   // Brief C: the imperative carries `inputs` so the webview can restore the
   // composer attachments immediately (the host-side restore above is the
@@ -2031,6 +2033,7 @@ test('reducer: PreflightSuperseded retracts a false-positive prepass-timeout (re
       notice: 'Timed out waiting for the turn to start streaming (120s)',
       noticeKind: 'prepass-timeout',
       noticeRaw: 'Timed out waiting for the turn to start streaming (120s)',
+      noticeSessionPath: '/s',
     },
   };
 
@@ -2089,6 +2092,7 @@ test('reducer: PreflightSuperseded also retracts a false-positive model-start-ti
       notice: 'The model took too long to start this turn (it exceeded the 600s budget) — it may be waiting for an available concurrency slot or rate limit. You can retry, or show the logs for details.',
       noticeKind: 'model-start-timeout',
       noticeRaw: 'Timed out waiting for the model to start streaming (600s)',
+      noticeSessionPath: '/s',
     },
   };
 
@@ -2110,6 +2114,32 @@ test('reducer: PreflightSuperseded also retracts a false-positive model-start-ti
   // the prepass-timeout case).
   assert.equal((result.state.transcript.bySession['/s'] ?? []).length, 1);
   assert.ok(result.state.sessions.runningSessionPaths.includes('/s'));
+});
+
+test('reducer: a late commit cannot clear another session\'s timeout notice', () => {
+  const state: ArchState = {
+    ...initialArchState,
+    settings: {
+      ...initialArchState.settings,
+      notice: 'Session A timed out.',
+      noticeKind: 'model-start-timeout',
+      noticeRaw: 'Timed out waiting for session A',
+      noticeSessionPath: '/a',
+    },
+  };
+
+  const result = reducer(state, {
+    kind: 'PreflightSuperseded',
+    corrId: 'c-b',
+    requestId: 'req-b',
+    sessionPath: '/b',
+    localId: 'loc-b',
+    composedText: 'background prompt',
+    timestamp: 1000,
+  });
+
+  assert.equal(result.state.settings.notice, 'Session A timed out.');
+  assert.equal(result.state.settings.noticeSessionPath, '/a');
 });
 
 test('reducer: post-ack PreflightFailed rolls back an EDIT via promoted (no sendRejected; kind-aware notice)', () => {
@@ -2624,6 +2654,7 @@ test('reducer: post-ack PreflightFailed (send) restores composer inputs host-sid
 
   // Composer inputs RESTORED from the promoted snapshot (no data loss).
   assert.deepEqual(result.state.composer.pendingComposerInputsBySession['/s'], [imgInput]);
+  assert.equal(result.state.composer.draftTextBySession['/s'], 'hey');
   // sendRejected carries the inputs.
   const postImperative = result.effects.find((e) => e.kind === 'PostImperative');
   assert.ok(postImperative && postImperative.kind === 'PostImperative');

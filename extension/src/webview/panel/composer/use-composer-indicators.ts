@@ -1,4 +1,4 @@
-import { useMemo } from 'preact/hooks';
+import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 
 import type {
   ChatMessage,
@@ -13,7 +13,11 @@ import type {
 } from '../../../shared/protocol';
 import type { TokenRateIndicatorState } from '../../../shared/token-rate';
 import { stripProviderPrefix } from '../../../shared/model-id';
-import { buildContextWindowBreakdown } from '../context-window/breakdown';
+import type {
+  ContextWindowBreakdown,
+  ContextWindowBreakdownEntry,
+  ContextWindowSummary,
+} from '../context-window/breakdown';
 import { buildContextWindowIndicatorState } from '../context-window/indicator';
 import {
   buildCompletedCostSummaryFromSnapshot,
@@ -39,6 +43,45 @@ import {
 } from './indicator-signature';
 import { resolveComposerModelState } from './model-state';
 import { useTokenRateIndicator } from './use-token-rate';
+import contextBreakdownWorkerUrl from '../context-window/breakdown-worker?worker&url';
+import { documentAllowsContextBreakdownWorker } from '../context-window/worker-policy';
+
+function formatDeferredTokens(tokens: number | null): string {
+  return tokens === null ? 'unknown' : tokens.toLocaleString('en-US');
+}
+
+/** Cheap first-paint context state. Contributor BPE tokenization is completed
+ * off the main thread; exact provider totals remain visible immediately. */
+function buildDeferredContextBreakdown(
+  contextUsage: ContextWindowUsage | null,
+  effectiveContextWindow: number,
+): ContextWindowBreakdown {
+  const usedTokens = contextUsage?.tokens ?? null;
+  const totalWindow = contextUsage?.contextWindow ?? effectiveContextWindow;
+  const remainingTokens = usedTokens === null || totalWindow <= 0
+    ? null
+    : Math.max(totalWindow - usedTokens, 0);
+  const summary: ContextWindowSummary = {
+    usedTokens,
+    usedKind: usedTokens === null ? 'unknown' : 'exact',
+    remainingTokens,
+    remainingKind: remainingTokens === null ? 'unknown' : 'exact',
+    totalWindow,
+  };
+  const footerEntries: ContextWindowBreakdownEntry[] = [
+    { key: 'window.used', label: 'Used', value: formatDeferredTokens(usedTokens), kind: summary.usedKind, tokens: usedTokens },
+    { key: 'window.remaining', label: 'Remaining', value: formatDeferredTokens(remainingTokens), kind: summary.remainingKind, tokens: remainingTokens },
+    { key: 'window.total', label: 'Total', value: totalWindow > 0 ? formatDeferredTokens(totalWindow) : 'unknown', kind: totalWindow > 0 ? 'exact' : 'unknown', tokens: totalWindow > 0 ? totalWindow : null },
+  ];
+  const notes = ['Contributor breakdown is being calculated in the background.'];
+  return {
+    entries: [],
+    footerEntries,
+    summary,
+    notes,
+    title: `Context window usage\nUsed: ${formatDeferredTokens(usedTokens)}\nRemaining: ${formatDeferredTokens(remainingTokens)}\nTotal: ${formatDeferredTokens(totalWindow > 0 ? totalWindow : null)}\n\nNote: ${notes[0]}`,
+  };
+}
 
 export function useComposerIndicators({
   activeModelId,
@@ -150,25 +193,96 @@ export function useComposerIndicators({
   const subagentSig = useMemo(() => subagentCostSignature(transcript), [subagentRev]);
   const liveStreamSig = useMemo(() => streamingContentSignature(transcript), [transcript]);
 
-  const contextBreakdown = useMemo(
+  const breakdownKey = `${sessionPath ?? ''}\0${contextUsage?.tokens ?? ''}\0${contextUsage?.contextWindow ?? ''}\0${effectiveContextWindow}\0${sysPromptsSig}\0${breakdownStreamSig}\0${subagentSig}\0${transcriptWindow.isPartial ? 1 : 0}`;
+  const deferredBreakdown = useMemo(
     () => effectiveContextWindow <= 0
       ? null
-      : buildContextWindowBreakdown({
-          contextUsage,
-          effectiveContextWindow,
-          systemPrompts,
-          transcript,
-          isPartial: transcriptWindow.isPartial,
-        }),
-    // Primitive/signature deps — NOT the raw object refs, which are fresh every
-    // structured-cloned snapshot. Stable while the breakdown's content is
-    // stable (e.g. contextUsage.tokens reported + only the streaming prose grew).
-    // `subagentSig` (length + last-message tool-call transitions) captures
-    // appends/removes and a read_file/skill tool call completing on the
-    // streaming message even when contextUsage.tokens is reported, so the
-    // breakdown's contributor rows don't go stale.
-    [sessionPath, contextUsage?.tokens, contextUsage?.contextWindow, effectiveContextWindow, sysPromptsSig, breakdownStreamSig, subagentSig, transcriptWindow.isPartial],
+      : buildDeferredContextBreakdown(contextUsage, effectiveContextWindow),
+    // This is only the cheap, immediately renderable provider-total shell. The
+    // full contributor signatures above gate the background worker separately.
+    [contextUsage?.tokens, contextUsage?.contextWindow, effectiveContextWindow],
   );
+  const [computedBreakdown, setComputedBreakdown] = useState<{
+    key: string;
+    value: ContextWindowBreakdown;
+  } | null>(null);
+  const breakdownWorkerRef = useRef<Worker | null>(null);
+  const breakdownRequestIdRef = useRef(0);
+
+  // `breakdownKey` is the deliberate primitive/signature dependency: host
+  // snapshots are structured-cloned, so their object identities change even
+  // when the breakdown inputs do not.
+  useEffect(() => {
+    if (effectiveContextWindow <= 0) return;
+    const requestId = ++breakdownRequestIdRef.current;
+    let cancelled = false;
+    const options = {
+      contextUsage,
+      effectiveContextWindow,
+      systemPrompts,
+      transcript,
+      isPartial: transcriptWindow.isPartial,
+    };
+    const complete = (value: ContextWindowBreakdown) => {
+      if (!cancelled && requestId === breakdownRequestIdRef.current) {
+        setComputedBreakdown({ key: breakdownKey, value });
+      }
+    };
+    const computeOnMainThreadFallback = () => {
+      void import('../context-window/breakdown').then(({ buildContextWindowBreakdown }) => {
+        complete(buildContextWindowBreakdown(options));
+      });
+    };
+
+    if (typeof Worker === 'undefined' || !documentAllowsContextBreakdownWorker()) {
+      computeOnMainThreadFallback();
+      return () => { cancelled = true; };
+    }
+
+    let worker = breakdownWorkerRef.current;
+    try {
+      const relativeWorkerUrl = contextBreakdownWorkerUrl.replace(/^\/assets\//, './');
+      worker ??= new Worker(new URL(relativeWorkerUrl, import.meta.url), {
+        type: 'module',
+        name: 'pie-context-breakdown',
+      });
+      breakdownWorkerRef.current = worker;
+    } catch {
+      computeOnMainThreadFallback();
+      return () => { cancelled = true; };
+    }
+
+    const onMessage = (event: MessageEvent<{ id: number; breakdown?: ContextWindowBreakdown }>) => {
+      if (event.data.id !== requestId) return;
+      if (event.data.breakdown) complete(event.data.breakdown);
+      else computeOnMainThreadFallback();
+    };
+    const onError = () => {
+      if (cancelled || requestId !== breakdownRequestIdRef.current) return;
+      worker?.terminate();
+      if (breakdownWorkerRef.current === worker) breakdownWorkerRef.current = null;
+      computeOnMainThreadFallback();
+    };
+    worker.addEventListener('message', onMessage);
+    worker.addEventListener('error', onError, { once: true });
+    worker.postMessage({ id: requestId, options });
+    return () => {
+      cancelled = true;
+      worker?.removeEventListener('message', onMessage);
+      worker?.removeEventListener('error', onError);
+    };
+  }, [breakdownKey]);
+
+  useEffect(() => () => {
+    breakdownWorkerRef.current?.terminate();
+    breakdownWorkerRef.current = null;
+  }, []);
+
+  const contextBreakdown = effectiveContextWindow <= 0
+    ? null
+    : computedBreakdown?.key === breakdownKey
+      ? computedBreakdown.value
+      : deferredBreakdown;
   const contextIndicator = useMemo(() => (
     contextBreakdown
       ? buildContextWindowIndicatorState(contextBreakdown.summary)

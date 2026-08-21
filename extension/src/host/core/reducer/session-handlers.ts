@@ -4,8 +4,19 @@ import type { ArchState } from '../arch-state.js';
 import type { Event } from '../events.js';
 import type { Effect } from '../effects.js';
 import type { ReducerResult } from './helpers.js';
-import { addToArray, removeFromArray, removeMessage, restoreRemovedTail, upsertSessionSummary, evictSession, resolveAlias } from './helpers.js';
-import type { ChatMessage, SessionSummary } from '../../../shared/protocol.js';
+import {
+  addToArray,
+  commitPromotedSend,
+  evictSession,
+  mergeRejectedComposerInputs,
+  mergeRejectedDraftText,
+  removeFromArray,
+  removeMessage,
+  resolveAlias,
+  restoreRemovedTail,
+  upsertSessionSummary,
+} from './helpers.js';
+import type { ChatMessage, ComposerInput, SessionSummary } from '../../../shared/protocol.js';
 import { LIVE_PIPELINE_LIMITS } from '../../../shared/live-pipeline-protocol.js';
 import { reorderOpenTabsPinnedFirst, replacePathInPinnedTabGroups, reconcilePinnedGroups } from '../../../shared/tab-behavior.js';
 import { resolveSessionOpenedTranscript } from '../session-opened-transcript.js';
@@ -311,6 +322,21 @@ export function handleSessionOpened(state: ArchState, event: Extract<Event, { ki
   const effects: Effect[] = [];
   if (payload.liveTurnCheckpoint) {
     next = applyAuthoritativeOpenedCheckpoint(next, sessionPath, payload.liveTurnCheckpoint);
+    const recoveredTurn = next.livePipeline.turnsBySession[sessionPath];
+    if (recoveredTurn?.turnId === payload.liveTurnCheckpoint.turnId
+      && recoveredTurn.attemptId === payload.liveTurnCheckpoint.attemptId) {
+      // A cold-open checkpoint may precede (and cause the later duplicate
+      // classification of) turn.started. It is therefore a commit point in its
+      // own right: clear the matching optimistic send and its watchdog now.
+      const committedSend = commitPromotedSend(
+        next,
+        sessionPath,
+        payload.liveTurnCheckpoint.turn.requestId,
+        payload.liveTurnCheckpoint.turn.canonicalMessageId,
+      );
+      next = committedSend.state;
+      effects.push(...committedSend.effects);
+    }
   } else if (payload.busy) {
     // The backend kept the durable assistant tail visible because it could not
     // provide an atomic checkpoint. Prefer the bounded recovery identity from
@@ -643,15 +669,32 @@ export function handleSessionsInterrupted(state: ArchState, event: Extract<Event
     ...Object.entries(state.pending.ops),
     ...Object.entries(state.pending.promoted),
   ].filter(([, op]) => affectedPaths.has(op.sessionPath));
+  const restoredComposerBySession = new Map<string, { text: string; inputs: ComposerInput[] }>();
+  for (const sessionPath of sessionPaths) {
+    const sends = rollbackOps
+      .map(([, op]) => op)
+      .filter((op) => op.kind === 'send' && op.sessionPath === sessionPath)
+      .sort((left, right) => left.startedAt - right.startedAt);
+    if (sends.length === 0) continue;
+    let text = state.composer.draftTextBySession[sessionPath] ?? '';
+    let inputs = [...(state.composer.pendingComposerInputsBySession[sessionPath] ?? [])];
+    // Prepend newest-to-oldest so the final composer preserves send order,
+    // followed by any draft/attachments created while those sends were live.
+    for (const send of [...sends].reverse()) {
+      text = mergeRejectedDraftText(send.text ?? '', text);
+      inputs = mergeRejectedComposerInputs(send.inputs, inputs);
+    }
+    restoredComposerBySession.set(sessionPath, { text, inputs });
+  }
   const rollbackEffects: Effect[] = rollbackOps.flatMap(([corrId, op]) => op.kind === 'send' ? [{
     kind: 'PostImperative' as const,
     corrId,
     imperativeMessage: {
       type: 'sendRejected' as const,
       sessionPath: op.sessionPath,
-      text: op.text ?? '',
+      text: restoredComposerBySession.get(op.sessionPath)?.text ?? op.text ?? '',
       localId: op.localId,
-      inputs: op.inputs ?? [],
+      inputs: restoredComposerBySession.get(op.sessionPath)?.inputs ?? op.inputs ?? [],
     },
   }] : []);
   const nextState = produce(state, (draft) => {
@@ -720,14 +763,17 @@ export function handleSessionsInterrupted(state: ArchState, event: Extract<Event
             inputs: [...op.editDraft.inputs],
           };
         }
-        if (op.kind === 'send') {
-          draft.composer.draftTextBySession[sessionPath] = op.text ?? '';
-          if (op.inputs?.length) draft.composer.pendingComposerInputsBySession[sessionPath] = [...op.inputs];
-        }
         if (op.previousSummary) {
           const index = draft.sessions.sessions.findIndex((summary) => summary.path === op.previousSummary!.path);
           if (index >= 0) draft.sessions.sessions[index] = op.previousSummary;
           else draft.sessions.sessions.push(op.previousSummary);
+        }
+      }
+      const restoredComposer = restoredComposerBySession.get(sessionPath);
+      if (restoredComposer) {
+        draft.composer.draftTextBySession[sessionPath] = restoredComposer.text;
+        if (restoredComposer.inputs.length > 0) {
+          draft.composer.pendingComposerInputsBySession[sessionPath] = restoredComposer.inputs;
         }
       }
       for (const [corrId, op] of Object.entries(draft.pending.ops)) {
@@ -888,6 +934,7 @@ export function handleCreateOperationDelayed(state: ArchState, event: Extract<Ev
       draft.settings.notice = event.notice;
       draft.settings.noticeKind = null;
       draft.settings.noticeRaw = null;
+      draft.settings.noticeSessionPath = event.pendingPath;
     }
   });
   return { state: next, effects: [] };

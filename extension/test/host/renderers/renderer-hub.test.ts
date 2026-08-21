@@ -16,7 +16,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { RendererHub } from '../../../src/host/renderers/renderer-hub';
+import { RendererHub, streamingScheduleDebounceMs } from '../../../src/host/renderers/renderer-hub';
 import { FakeRendererTransport } from '../../helpers/fake-renderer-transport';
 import type { StateDeliveryClock } from '../../../src/host/sidebar/state-delivery-controller';
 import type { ViewState, WebviewToHostMessage } from '../../../src/shared/protocol';
@@ -66,6 +66,79 @@ function state(): ViewState {
     transcript: [],
   } as unknown as ViewState;
 }
+
+test('streaming cadence backs off for tool-heavy full snapshots', () => {
+  const withParts = (count: number): ViewState => ({
+    ...state(),
+    transcript: [{
+      id: 'assistant-1',
+      role: 'assistant',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      markdown: '',
+      status: 'streaming',
+      parts: Array.from({ length: count }, (_, index) => ({ kind: 'text' as const, text: String(index) })),
+    }],
+  });
+
+  assert.equal(streamingScheduleDebounceMs(withParts(8)), 150);
+  assert.equal(streamingScheduleDebounceMs(withParts(128)), 400);
+  assert.equal(streamingScheduleDebounceMs(withParts(256)), 750);
+  assert.equal(streamingScheduleDebounceMs({
+    ...state(),
+    transcript: [{
+      id: 'assistant-large-text',
+      role: 'assistant',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      markdown: 'x'.repeat(1024 * 1024),
+      status: 'streaming',
+    }],
+  }), 750);
+});
+
+test('renderer hub applies the heavy cadence after projecting a tool-heavy running session', async () => {
+  const clock = new FakeClock();
+  const heavyState: ViewState = {
+    ...state(),
+    transcript: [{
+      id: 'assistant-heavy',
+      role: 'assistant',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      markdown: '',
+      status: 'streaming',
+      parts: Array.from({ length: 256 }, (_, index) => ({ kind: 'text' as const, text: String(index) })),
+    }],
+  };
+  const hub = new RendererHub({
+    clock,
+    getViewState: () => heavyState,
+    onMessage: () => {},
+    getRunningSessionCount: () => 1,
+    settlementTimeoutMs: 1000,
+    commitTimeoutMs: 1000,
+    retryDelayMs: 5,
+    maxRetryAttempts: 2,
+    acceptedLedgerCapacity: 8,
+  });
+  const transport = new FakeRendererTransport('browser');
+  const registration = hub.registerRenderer(transport);
+  await ready(transport, registration);
+
+  hub.scheduleState();
+  clock.advance(150);
+  await settle();
+  assert.equal(transport.stateMessages().length, 1, 'first projection uses the default live cadence');
+  commit(transport, transport.stateMessages()[0]!);
+  await settle();
+
+  hub.scheduleState();
+  clock.advance(749);
+  await settle();
+  assert.equal(transport.stateMessages().length, 1, 'heavy snapshot is still coalescing');
+  clock.advance(1);
+  await settle();
+  assert.equal(transport.stateMessages().length, 2, 'heavy cadence posts the latest full snapshot at 750ms');
+  hub.dispose();
+});
 
 type StateMessage = Extract<import('../../../src/shared/protocol').HostToWebviewMessage, { type: 'state' }>;
 

@@ -71,6 +71,8 @@ function emptyViewState(): ViewState {
   availableModelsStatus: 'authoritative',
     contextUsage: null,
     prefs: DEFAULT_CHAT_PREFS,
+    mcpServers: [],
+    mcpPendingApply: false,
     availableExtensions: [],
     fileChanges: [],
     fileChangesExpanded: false,

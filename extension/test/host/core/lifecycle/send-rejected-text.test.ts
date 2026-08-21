@@ -62,6 +62,65 @@ test('SendResult{ok:false} emits sendRejected with the original sent text for dr
     assert.equal(postImperative.imperativeMessage.sessionPath, '/w/s.jsonl');
     assert.equal(postImperative.imperativeMessage.localId, 'local:c1');
   }
+  assert.equal(
+    failResult.state.composer.draftTextBySession['/w/s.jsonl'],
+    'hello world',
+    'the authoritative snapshot should restore the draft if the imperative is lost during reload',
+  );
+});
+
+test('SendResult{ok:false} preserves a newer draft and attachments while restoring the rejected send', () => {
+  let state = createInitialArchState();
+  state = {
+    ...state,
+    settings: { ...state.settings, backendReady: true },
+    sessions: {
+      ...state.sessions,
+      sessions: [{ path: '/w/s.jsonl', name: 'S', cwd: '/w', modifiedAt: '2024-01-01T00:00:00.000Z', messageCount: 0 }],
+      openTabPaths: ['/w/s.jsonl'],
+      activeSessionPath: '/w/s.jsonl',
+    },
+  };
+  const rejectedInput = {
+    id: 'rejected', kind: 'filesystemPathRef' as const, path: '/old', name: 'old', source: 'picker' as const,
+  };
+  const newerInput = {
+    id: 'newer', kind: 'filesystemPathRef' as const, path: '/new', name: 'new', source: 'picker' as const,
+  };
+  state = {
+    ...state,
+    composer: {
+      ...state.composer,
+      pendingComposerInputsBySession: { '/w/s.jsonl': [rejectedInput] },
+    },
+  };
+  state = dispatch(state, {
+    kind: 'Command',
+    cmd: {
+      kind: 'Send', corrId: 'c1', sessionPath: '/w/s.jsonl', text: 'rejected prompt',
+      inputs: [rejectedInput], composedText: 'rejected prompt', localId: 'local:c1',
+      previousSummary: null, timestamp: Date.now(),
+    },
+  }).state;
+  state = {
+    ...state,
+    composer: {
+      ...state.composer,
+      draftTextBySession: { '/w/s.jsonl': 'newer draft' },
+      pendingComposerInputsBySession: { '/w/s.jsonl': [newerInput] },
+    },
+  };
+
+  const failed = dispatch(state, {
+    kind: 'SendResult', corrId: 'c1', ok: false, error: 'backend down', sessionPath: '/w/s.jsonl',
+  });
+
+  assert.equal(failed.state.composer.draftTextBySession['/w/s.jsonl'], 'rejected prompt\n\nnewer draft');
+  assert.deepEqual(failed.state.composer.pendingComposerInputsBySession['/w/s.jsonl'], [rejectedInput, newerInput]);
+  const imperative = failed.effects.find((effect) => effect.kind === 'PostImperative');
+  assert.ok(imperative && imperative.kind === 'PostImperative');
+  assert.equal(imperative.imperativeMessage.text, 'rejected prompt\n\nnewer draft');
+  assert.deepEqual(imperative.imperativeMessage.inputs, [rejectedInput, newerInput]);
 });
 
 test('EditResult{ok:false} reopens the host-projected inline editor without sendRejected', () => {

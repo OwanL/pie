@@ -49,8 +49,7 @@ test.before(async () => {
 
 function ToolCommitLeaf({ tool, onRender }: { tool: ToolCall; onRender?: () => void }) {
   onRender?.();
-  commitRegistryModule.useCommittedToolLeaf(tool);
-  return null;
+  return h(commitRegistryModule.CommittedToolLeaf, { toolCall: tool });
 }
 
 const MemoizedToolLeafList = memo(function MemoizedToolLeafList({
@@ -61,8 +60,11 @@ const MemoizedToolLeafList = memo(function MemoizedToolLeafList({
   onToolLeafRender?: () => void;
 }) {
   return h(commitRegistryModule.MessageCommitContext.Provider, {
-    value: { messageId: message.id, toolStateRevision: message.toolStateRevision ?? 0 },
-    children: message.toolCalls?.map((tool) => h(ToolCommitLeaf, { key: tool.id, tool, onRender: onToolLeafRender })),
+    value: { messageId: message.id },
+    children: h(commitRegistryModule.MessageToolRevisionContext.Provider, {
+      value: message.toolStateRevision ?? 0,
+      children: message.toolCalls?.map((tool) => h(ToolCommitLeaf, { key: tool.id, tool, onRender: onToolLeafRender })),
+    }),
   });
 });
 
@@ -160,8 +162,11 @@ test('commit registry preserves mounted leaf evidence across revision-only targe
       maps.push(registry.leaves);
     }, [registry.target, registry.leaves]);
     return h(commitRegistryModule.MessageCommitContext.Provider, {
-      value: { messageId: message.id, toolStateRevision: 0 },
-      children: h(ToolCommitLeaf, { tool }),
+      value: { messageId: message.id },
+      children: h(commitRegistryModule.MessageToolRevisionContext.Provider, {
+        value: 0,
+        children: h(ToolCommitLeaf, { tool }),
+      }),
     });
   }
   const target = (revision: number) => ({
@@ -385,8 +390,10 @@ test('switching session props preserves the transcript host and surface while co
   await new Promise((resolve) => setImmediate(resolve));
   const firstHost = root.querySelector('.transcript-host');
   const firstSurface = root.querySelector('.transcript-surface');
+  const firstView = root.querySelector('.transcript-virtual-wrap');
   assert.ok(firstHost);
   assert.ok(firstSurface);
+  assert.ok(firstView);
   assert.match(root.textContent ?? '', /Session A content/);
   assert.ok(messages.some((message) => message.type === 'transcriptCommitted' && message.payload.revision === 1));
 
@@ -398,9 +405,11 @@ test('switching session props preserves the transcript host and surface while co
   await new Promise((resolve) => setImmediate(resolve));
   const secondHost = root.querySelector('.transcript-host');
   const secondSurface = root.querySelector('.transcript-surface');
+  const secondView = root.querySelector('.transcript-virtual-wrap');
 
   assert.equal(secondHost, firstHost, 'the transcript host must stay mounted across session switches');
   assert.equal(secondSurface, firstSurface, 'the transcript surface must stay mounted across session switches');
+  assert.notEqual(secondView, firstView, 'the session-owned transcript view must reset its virtualizer at the new tab bottom');
   assert.equal(secondSurface?.getAttribute('data-session-path'), '/session/b');
   assert.match(root.textContent ?? '', /Session B content/);
   assert.doesNotMatch(root.textContent ?? '', /Session A content/);

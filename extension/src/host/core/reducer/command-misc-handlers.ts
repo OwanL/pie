@@ -409,6 +409,7 @@ export function handleDismissNotice(state: ArchState, _cmd: Extract<Command, { k
       draft.settings.notice = null;
       draft.settings.noticeKind = null;
       draft.settings.noticeRaw = null;
+      draft.settings.noticeSessionPath = null;
     }),
     effects: [],
   };
@@ -540,6 +541,26 @@ export function handleSetPrefs(state: ArchState, cmd: Extract<Command, { kind: '
       },
     },
     effects: [{ kind: 'SetPrefsRpc', corrId: cmd.corrId, prefs: cmd.prefs }],
+  };
+}
+
+export function handleMcpListRequested(state: ArchState, cmd: Extract<Command, { kind: 'McpListRequested' }>): ReducerResult {
+  return {
+    state: {
+      ...state,
+      settings: { ...state.settings, mcpServersStatus: 'loading' },
+    },
+    effects: [{ kind: 'McpListRpc', corrId: cmd.corrId }],
+  };
+}
+
+export function handleMcpSetServerEnabled(state: ArchState, cmd: Extract<Command, { kind: 'McpSetServerEnabled' }>): ReducerResult {
+  return {
+    state: {
+      ...state,
+      settings: { ...state.settings, mcpServersStatus: 'loading' },
+    },
+    effects: [{ kind: 'McpSetServerRpc', corrId: cmd.corrId, name: cmd.name, enabled: cmd.enabled }],
   };
 }
 

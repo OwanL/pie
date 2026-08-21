@@ -296,6 +296,34 @@ export function installAutonomousModeToolGuard(
   };
 }
 
+/** Tool names owned by the pi-mcp-adapter package. The backend strips these
+ *  from every active tool set while the MCP pref is off, so servers stay
+ *  configured in their mcp.json files but the model never sees the tools. */
+export const MCP_TOOL_NAMES = ['mcp', 'mcpScript'] as const;
+
+/** Keep the MCP pref authoritative over every extension-driven tool update.
+ *  The adapter re-adds its tools via setActiveTools on config changes, so
+ *  filtering only once when the preference changes is insufficient: every
+ *  later setActiveTools call must continue to exclude the MCP tools while the
+ *  pref is off. (registerTool auto-activation is handled separately by
+ *  re-enforcement at turn start — see worker-runtime-host.) */
+export function installMcpToolGuard(
+  session: ToolToggleSession,
+  getMcpEnabled: () => boolean,
+): void {
+  const setActiveTools = session.setActiveToolsByName;
+  if (typeof setActiveTools !== 'function') return;
+
+  session.setActiveToolsByName = function guardedSetActiveTools(toolNames: string[]): void {
+    setActiveTools.call(
+      this,
+      getMcpEnabled()
+        ? toolNames
+        : toolNames.filter((name) => !(MCP_TOOL_NAMES as readonly string[]).includes(name)),
+    );
+  };
+}
+
 /** Maintain `_originalSystemPromptOptions`: an unfiltered snapshot of the
  *  SDK's `_baseSystemPromptOptions`, used to rebuild the display entry list
  *  (picker + transcript) with disabled entries still present even after

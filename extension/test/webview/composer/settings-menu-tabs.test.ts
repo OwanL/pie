@@ -40,6 +40,10 @@ function mount(extensions: ExtensionInfo[] = [], models: ModelInfo[] = []) {
         availableModels: models,
         providerGateStats: EMPTY_PROVIDER_GATE_STATS,
         onSetPrefs: () => undefined,
+        mcpServers: [],
+        mcpPendingApply: false,
+        onMcpListRequested: () => undefined,
+        onMcpSetServerEnabled: () => undefined,
         onSetPruningSettings: () => undefined,
         onSetToolResultPruningSettings: () => undefined,
       }),
@@ -65,9 +69,9 @@ test('the menu is tabbed and defaults to Chat; switching tabs swaps content', ()
 
   const tabs = menu.querySelectorAll('.toolbar-settings-tab');
   // Tab strip present with the always-on categories (Extensions/Providers are
-  // hidden because no extensions/models were passed).
+  // hidden because no extensions/models were passed; MCP is unconditional).
   const tabIds = Array.from(menu.querySelectorAll('.toolbar-settings-tab')).map((t) => t.getAttribute('data-tab'));
-  assert.deepEqual(tabIds, ['chat', 'history', 'appearance']);
+  assert.deepEqual(tabIds, ['chat', 'history', 'appearance', 'mcp']);
 
   // Chat is active by default. Transcript behavior, completion notifications,
   // and diagnostics stay here; status/usage visibility moved to Appearance.
@@ -107,7 +111,7 @@ test('Extensions and Providers tabs appear only when their content exists', () =
   const menu = openMenu();
 
   const tabIds = Array.from(menu.querySelectorAll('.toolbar-settings-tab')).map((t) => t.getAttribute('data-tab'));
-  assert.deepEqual(tabIds, ['chat', 'history', 'appearance', 'extensions', 'providers']);
+  assert.deepEqual(tabIds, ['chat', 'history', 'appearance', 'extensions', 'providers', 'mcp']);
 
   act(() => { click(menu.querySelector('.toolbar-settings-tab[data-tab="extensions"]')); });
   assert.equal(
@@ -121,6 +125,82 @@ test('Extensions and Providers tabs appear only when their content exists', () =
     false,
     'the active Providers tab should not repeat its own label in the body',
   );
+});
+
+// The MCP tab is unconditional and carries the global on/off toggle; toggling
+// it emits the mcpEnabled pref patch.
+test('MCP tab renders the global toggle and emits mcpEnabled patches', () => {
+  const setPrefsCalls: Partial<import('../../../src/shared/protocol').ChatPrefs>[] = [];
+  act(() => {
+    render(
+      h(ComposerSettingsMenu, {
+        prefs: DEFAULT_CHAT_PREFS,
+        pruningSettings: DEFAULT_PRUNING_SETTINGS,
+        pruningCatalog: { skills: [], tools: [] },
+        pruningResult: null,
+        toolResultPruningSettings: DEFAULT_TOOL_RESULT_PRUNING_SETTINGS,
+        availableExtensions: [],
+        availableModels: [],
+        providerGateStats: EMPTY_PROVIDER_GATE_STATS,
+        onSetPrefs: (p) => setPrefsCalls.push(p),
+        mcpServers: [],
+        mcpPendingApply: false,
+        onMcpListRequested: () => undefined,
+        onMcpSetServerEnabled: () => undefined,
+        onSetPruningSettings: () => undefined,
+        onSetToolResultPruningSettings: () => undefined,
+      }),
+      container,
+    );
+  });
+  const menu = openMenu();
+
+  act(() => { click(menu.querySelector('.toolbar-settings-tab[data-tab="mcp"]')); });
+  const body = menu.querySelector('.toolbar-settings-menu-body')!;
+  assert.match(body.textContent!, /MCP enabled/);
+  assert.match(body.textContent!, /mcp\.json/);
+
+  const toggle = body.querySelector('.toolbar-settings-item[role="checkbox"]') as HTMLElement;
+  assert.ok(toggle, 'MCP toggle should render');
+  assert.equal(toggle.getAttribute('aria-checked'), 'true');
+  act(() => { click(toggle); });
+  assert.deepEqual(setPrefsCalls, [{ mcpEnabled: false }]);
+});
+
+// Search surfaces the MCP toggle from any tab.
+test('search surfaces the MCP enabled toggle', () => {
+  mount();
+  const menu = openMenu();
+  const input = menu.querySelector('.toolbar-settings-search-input') as HTMLInputElement;
+
+  act(() => {
+    input.value = 'mcp';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+
+  const body = menu.querySelector('.toolbar-settings-menu-body')!;
+  assert.match(body.textContent!, /MCP enabled/);
+  assert.ok(body.querySelector('.toolbar-settings-search-result[role="checkbox"]'));
+});
+
+test('two rapid Escape presses clear search then close settings', () => {
+  mount();
+  const menu = openMenu();
+  const input = menu.querySelector('.toolbar-settings-search-input') as HTMLInputElement;
+
+  act(() => {
+    input.value = 'provider';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  assert.equal(input.value, 'provider');
+
+  act(() => {
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  });
+
+  assert.equal(container.querySelector('.toolbar-settings-menu'), null);
+  assert.equal(document.activeElement, container.querySelector('.toolbar-settings-trigger'));
 });
 
 // Bash settings now live under the Warm Bash extension in the Extensions tab
@@ -160,6 +240,10 @@ test('ask-user settings render inline with an "Include for subagents" toggle', (
         availableModels: [],
         providerGateStats: EMPTY_PROVIDER_GATE_STATS,
         onSetPrefs: (p) => setPrefsCalls.push(p),
+        mcpServers: [],
+        mcpPendingApply: false,
+        onMcpListRequested: () => undefined,
+        onMcpSetServerEnabled: () => undefined,
         onSetPruningSettings: () => undefined,
         onSetToolResultPruningSettings: () => undefined,
       }),

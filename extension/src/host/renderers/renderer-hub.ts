@@ -33,6 +33,35 @@ const SCHEDULE_DEBOUNCE_MS = 50;
 // remains fluid through the webview's buffered reveal while controls retain
 // main-thread time.
 const STREAMING_SCHEDULE_DEBOUNCE_MS = 150;
+const MEDIUM_TRANSCRIPT_SCHEDULE_DEBOUNCE_MS = 400;
+const HEAVY_TRANSCRIPT_SCHEDULE_DEBOUNCE_MS = 750;
+const MEDIUM_TRANSCRIPT_PARTS = 128;
+const HEAVY_TRANSCRIPT_PARTS = 256;
+const MEDIUM_TRANSCRIPT_TEXT_CHARS = 256 * 1024;
+const HEAVY_TRANSCRIPT_TEXT_CHARS = 1024 * 1024;
+
+/** Keep multi-megabyte, tool-heavy full snapshots from monopolising the
+ * renderer main thread. Ordered-part count is a cheap, deterministic proxy for
+ * snapshot complexity and is evaluated once per shared projection, not on
+ * every incoming stream event. */
+export function streamingScheduleDebounceMs(viewState: ViewState): number {
+  let partCount = 0;
+  let textChars = 0;
+  for (const message of viewState.transcript) {
+    partCount += message.parts?.length ?? message.toolCalls?.length ?? 1;
+    textChars += message.markdown.length + (message.thinking?.length ?? 0);
+    for (const part of message.parts ?? []) {
+      if (part.kind === 'text' || part.kind === 'reasoning') textChars += part.text.length;
+      else textChars += part.toolCall.argumentsText?.length ?? 0;
+    }
+    if (partCount >= HEAVY_TRANSCRIPT_PARTS || textChars >= HEAVY_TRANSCRIPT_TEXT_CHARS) {
+      return HEAVY_TRANSCRIPT_SCHEDULE_DEBOUNCE_MS;
+    }
+  }
+  return partCount >= MEDIUM_TRANSCRIPT_PARTS || textChars >= MEDIUM_TRANSCRIPT_TEXT_CHARS
+    ? MEDIUM_TRANSCRIPT_SCHEDULE_DEBOUNCE_MS
+    : STREAMING_SCHEDULE_DEBOUNCE_MS;
+}
 
 const SYSTEM_CLOCK: StateDeliveryClock = {
   now: () => Date.now(),
@@ -67,6 +96,7 @@ export class RendererHub implements DisposableLike {
    *  render. */
   private sharedViewState: ViewState | null = null;
   private sharedStateDirty = true;
+  private streamingDebounceMs = STREAMING_SCHEDULE_DEBOUNCE_MS;
   private disposed = false;
 
   constructor(private readonly options: RendererHubOptions) {
@@ -89,7 +119,7 @@ export class RendererHub implements DisposableLike {
     }
     if (!needsDebounce || this.scheduleTimer !== undefined) return;
     const debounceMs = this.options.getRunningSessionCount() > 0
-      ? STREAMING_SCHEDULE_DEBOUNCE_MS
+      ? this.streamingDebounceMs
       : SCHEDULE_DEBOUNCE_MS;
     this.scheduleTimer = this.clock.setTimeout(() => {
       this.scheduleTimer = undefined;
@@ -181,6 +211,7 @@ export class RendererHub implements DisposableLike {
   getSharedViewState(): ViewState {
     if (this.sharedStateDirty) {
       this.sharedViewState = this.options.getViewState();
+      this.streamingDebounceMs = streamingScheduleDebounceMs(this.sharedViewState);
       this.sharedStateDirty = false;
     }
     return this.sharedViewState as ViewState;

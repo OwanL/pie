@@ -72,6 +72,18 @@ test('onStatus(): unknown answers keep the entry for read-only reconciliation', 
   assert.ok(pendingCommandStore.unknownEntries().some((entry) => entry.clientCommandId === id));
 });
 
+test('discardUnsent(): removes a never-transmitted decision and releases staging', () => {
+  const tracked = pendingCommandStore.track(imageInput());
+  assert.ok(tracked);
+  const id = (tracked.message as { clientCommandId: string }).clientCommandId;
+
+  pendingCommandStore.discardUnsent(id);
+
+  assert.equal(pendingCommandStore.lookup(id), undefined);
+  assert.equal(pendingCommandStore.takeStagedInput(id), null);
+  assert.ok(!pendingCommandStore.unknownEntries().some((entry) => entry.clientCommandId === id));
+});
+
 test('confirmAcceptedBySnapshot(): matching input metadata confirms early; absence never rejects', () => {
   const tracked = pendingCommandStore.track(imageInput());
   const id = (tracked?.message as { clientCommandId: string }).clientCommandId;

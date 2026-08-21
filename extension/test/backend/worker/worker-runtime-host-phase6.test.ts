@@ -3,10 +3,13 @@ import test from 'node:test';
 
 import type { SdkSessionEvent } from '../../../src/backend/sdk';
 import type { SessionContext } from '../../../src/backend/server-types';
+import type { ProviderIncident } from '../../../src/backend/provider-incident';
+import type { ProviderTransportObservation } from '../../../src/backend/provider-progress-bus';
 import { WorkerRuntimeHost } from '../../../src/backend/worker-runtime-host';
 import type { SessionOpenedPayload } from '../../../src/shared/protocol';
 
 interface WorkerRuntimeHostInternals {
+  context?: SessionContext;
   openedPayload?: SessionOpenedPayload;
   buildOpenedPayload: (
     sessionPath: string,
@@ -16,6 +19,8 @@ interface WorkerRuntimeHostInternals {
   ) => Promise<SessionOpenedPayload>;
   emitRefreshedSessionOpened: (sessionPath: string) => Promise<void>;
   handleSessionEvent: (context: SessionContext, event: SdkSessionEvent) => void;
+  handleProviderIncident: (incident: ProviderIncident) => void;
+  handleProviderProgress: (observation: ProviderTransportObservation) => void;
 }
 
 function makeHost(): {
@@ -148,6 +153,79 @@ test('host applies monotonic sync domains and rejects stale catalog revisions', 
   assert.throws(() => host.applySync('catalog', 1, { models: [] }), /Stale worker sync revision/);
   assert.throws(() => host.applySync('catalog', 0, { models: [] }), /Stale worker sync revision/);
   host.applySync('catalog', 2, { models: [{ id: 'configured-d' }] });
+});
+
+test('worker-owned provider incidents surface a specific, deduplicated UI error', () => {
+  const { host, sent } = makeHost();
+  const internals = getInternals(host);
+  const context = makeSessionEventContext('/sessions/provider.jsonl');
+  context.session = {
+    sessionManager: { getSessionId: () => 'sdk-session-1' },
+  } as SessionContext['session'];
+  internals.context = context;
+  const incident: ProviderIncident = {
+    sessionId: 'sdk-session-1',
+    requestId: 'provider-request-1',
+    providerHost: 'api.openai.com',
+    kind: 'rate_limited',
+    occurredAt: 1,
+    status: 429,
+    retryAfterMs: 5_000,
+    retryAt: 5_001,
+    userMessage: 'OpenAI rate-limited this request (HTTP 429).',
+    detail: 'provider=api.openai.com; status=429; retryAfterMs=5000',
+  };
+
+  internals.handleProviderIncident(incident);
+  internals.handleProviderIncident(incident);
+  internals.handleProviderIncident({ ...incident, sessionId: 'another-session' });
+
+  assert.equal(context.activeRequest?.latestProviderIncident, incident);
+  assert.equal(context.activeRequest?.lastProviderErrorForDiagnostics, incident.userMessage);
+  const errors = sent.filter((frame) => frame.kind === 'runtime.event' && frame.event === 'operational-error');
+  assert.equal(errors.length, 1, 'SDK retries of the same incident do not flood the UI');
+  assert.deepEqual(errors[0]?.payload, {
+    incidentId: 'provider:request-1:rate_limited:api.openai.com:429:5001',
+    code: 'PROVIDER_RATE_LIMITED',
+    message: incident.userMessage,
+    detail: incident.detail,
+    sessionPath: '/sessions/provider.jsonl',
+    requestId: 'request-1',
+  });
+});
+
+test('worker-owned provider progress restores queue phase and latency ownership', () => {
+  const { host, sent } = makeHost();
+  const internals = getInternals(host);
+  const context = makeSessionEventContext('/sessions/provider.jsonl');
+  context.session = {
+    sessionManager: { getSessionId: () => 'sdk-session-1' },
+  } as SessionContext['session'];
+  const semantic: Array<{ kind: string; phase?: string }> = [];
+  context.activeRequest = {
+    id: 'request-1', messageIndex: 0, aborted: false, providerTurnSequence: 4,
+    liveTurnAccumulator: {
+      currentSeq: 2,
+      observe: (event: { kind: string; phase?: string }) => {
+        semantic.push(event);
+        return { ...event, protocolVersion: 1, sessionPath: context.sessionPath, requestId: 'request-1', turnId: 'turn', attemptId: 'attempt', seq: semantic.length + 2, occurredAt: 1, checkpointBytes: 1 };
+      },
+    } as never,
+  };
+  internals.context = context;
+  const base = {
+    sessionId: 'sdk-session-1', provider: 'provider', attemptId: 'network-attempt', occurredAt: 10,
+  };
+
+  internals.handleProviderProgress({ ...base, kind: 'gate_queue' });
+  internals.handleProviderProgress({ ...base, kind: 'gate_acquired', occurredAt: 35, queueDurationMs: 25 });
+  internals.handleProviderProgress({ ...base, kind: 'headers_wait', occurredAt: 36 });
+
+  assert.deepEqual(context.activeRequest.providerQueueByTurn?.get(4), { durationMs: 25, attemptCount: 1 });
+  assert.deepEqual(semantic.map((event) => event.phase), ['queued', 'waiting_provider']);
+  assert.equal(sent.filter((frame) => frame.kind === 'runtime.event' && frame.event === 'live.semantic').length, 2);
+  internals.handleProviderProgress({ ...base, sessionId: 'other-session', kind: 'gate_acquired', queueDurationMs: 99 });
+  assert.deepEqual(context.activeRequest.providerQueueByTurn?.get(4), { durationMs: 25, attemptCount: 1 });
 });
 
 test('host consumes the synced catalog as fallback for models.list', () => {

@@ -31,6 +31,7 @@ import type {
   RetryStatus,
   ChatPrefs,
   ExtensionInfo,
+  McpServerInfo,
   ExtensionUIRequestPayload,
   FileChangeEntry,
   ComposerInput,
@@ -196,8 +197,26 @@ export interface SettingsState {
    *  alongside `notice`/`noticeKind` whenever a notice is dismissed or
    *  replaced by a non-error notice. */
   noticeRaw: string | null;
+  /** Session that owns the current notice, or null for a truly global notice.
+   * Session-owned notices are projected only while their session is active so
+   * a background failure cannot offer recovery actions against another chat. */
+  noticeSessionPath: string | null;
   /** Chat display preferences. */
   prefs: ChatPrefs;
+  /** Configured MCP servers with their effective disabled state, fetched from
+   *  the backend (`mcp.list`) on demand and after every toggle. Empty while
+   *  not yet fetched or when no servers are configured. */
+  mcpServers: McpServerInfo[];
+  /** Discovery state of `mcpServers`: 'loading' while a fetch is in flight
+   *  (or before the first fetch), 'error' after a failed fetch (cached rows
+   *  stay visible), 'ok' after a successful fetch. */
+  mcpServersStatus: 'loading' | 'error' | 'ok';
+  /** True after a per-server toggle wrote a `.pi/mcp.json` override that the
+   *  adapter has not re-read yet (applies on the next session reload /
+   *  backend restart). Preserved by list reads and no-op toggles; cleared
+   *  when the backend restarts (the adapter re-reads config on the next
+   *  session start). */
+  mcpPendingApply: boolean;
   /** Extensions that provide tool integrations. */
   availableExtensions: ExtensionInfo[];
   /** Per-session pending extension UI requests, keyed by request ID (ask-user inline choices). */
@@ -547,7 +566,11 @@ export function createInitialArchState(): ArchState {
       notice: null,
       noticeKind: null,
       noticeRaw: null,
+      noticeSessionPath: null,
       prefs: { ...DEFAULT_CHAT_PREFS },
+      mcpServers: [],
+      mcpServersStatus: 'loading',
+      mcpPendingApply: false,
       availableExtensions: deriveBundledExtensions(),
       pendingExtensionUIRequestsBySession: {},
     },

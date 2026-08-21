@@ -157,9 +157,12 @@ export function onMessageFinished(
   // Stamp errorDetail on error messages so the webview can display the reason.
   const message = payload.message;
   if (message.status === 'error' && !message.errorDetail) {
-    const notice = deps.getArchState().settings.notice;
-    if (notice) {
-      message.errorDetail = notice;
+    const settings = deps.getArchState().settings;
+    if (
+      settings.notice
+      && (settings.noticeSessionPath === null || settings.noticeSessionPath === sessionPath)
+    ) {
+      message.errorDetail = settings.notice;
     }
   }
 
@@ -234,12 +237,19 @@ export function onMessageAborted(
     // both the prior context and the new interruption.
     const settings = deps.getArchState().settings;
     const existing = settings.notice;
-    if (existing === reason) {
+    const existingOwner = settings.noticeSessionPath;
+    if (existing === reason && (existingOwner === null || existingOwner === sessionPath)) {
       // Already showing this exact reason — no-op.
-    } else if (existing && !existing.includes(reason) && !reason.includes(existing)) {
+    } else if (
+      existing
+      && (existingOwner === null || existingOwner === sessionPath)
+      && !existing.includes(reason)
+      && !reason.includes(existing)
+    ) {
       deps.dispatchArch({
         kind: 'NoticeShown',
         notice: `${existing} — ${reason}`,
+        sessionPath: existingOwner,
         noticeKind: 'operational-error',
         noticeRaw: `${existing} — ${reason}`,
       });
@@ -249,6 +259,7 @@ export function onMessageAborted(
         notice: reason,
         noticeKind: 'operational-error',
         noticeRaw: reason,
+        sessionPath,
       });
     }
   }

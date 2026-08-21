@@ -636,8 +636,18 @@ export class SessionServiceState {
     if (this.getArchState().sessions.runningSessionPaths.length > 0) {
       this.fenceActivePreload();
     }
+    const operationGeneration = this.lifecycleGeneration;
     const previous = this.sessionOperationQueues.get(sessionPath) ?? Promise.resolve();
-    const result = previous.catch(() => undefined).then(task);
+    const result = previous.catch(() => undefined).then(() => {
+      // Clearing the queue map on restart does not cancel promise
+      // continuations that were already chained. Fence them explicitly so an
+      // old-generation model/send/edit mutation cannot run against the fresh
+      // backend alongside a replacement-generation queue.
+      if (operationGeneration !== this.lifecycleGeneration) {
+        throw new LifecycleTaskStaleGenerationError();
+      }
+      return task();
+    });
     const barrier = result.then(() => undefined, () => undefined);
 
     this.sessionOperationQueues.set(sessionPath, barrier);

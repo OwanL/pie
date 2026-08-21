@@ -499,6 +499,51 @@ test('generation reset (host restart) discards records, pages, tombstones, and c
   assert.deepEqual(getDetailStoreDebugState(), { records: 0, pages: 0, pageBytes: 0, valueBytes: 0, tombstones: 0, cursors: 0 });
 });
 
+test('renderer reconnect invalidates an owner even when the view generation is unchanged', () => {
+  const posts = install();
+  openDetailSubscription({ detailKey: KEY, address: ADDRESS });
+  delivered('sub-1');
+  assert.equal(demandDetailValue(KEY).status, 'ready');
+
+  setDetailStoreContext({
+    hostInstanceId: 'h1',
+    viewGeneration: 1,
+    rendererId: 'renderer-2',
+    rendererGeneration: 2,
+    postMessage: (message) => { posts.push(message); },
+  });
+
+  assert.equal(demandDetailValue(KEY).status, 'pending');
+  assert.deepEqual(getDetailStoreDebugState(), {
+    records: 0,
+    pages: 0,
+    pageBytes: 0,
+    valueBytes: 0,
+    tombstones: 0,
+    cursors: 1,
+  });
+
+  openDetailSubscription({ detailKey: KEY, address: ADDRESS });
+  const replacement = subscribePosts(posts).at(-1)!;
+  assert.equal(replacement.viewGeneration, 1);
+  assert.deepEqual(replacement.cursor, { revision: 1 });
+});
+
+test('a subscription rejected by the client transport does not leave a stuck owner', () => {
+  setDetailStoreContext({
+    hostInstanceId: 'h1',
+    viewGeneration: 1,
+    rendererId: 'renderer-1',
+    rendererGeneration: 1,
+    postMessage: () => false,
+  });
+
+  openDetailSubscription({ detailKey: KEY, address: ADDRESS });
+
+  assert.equal(demandDetailValue(KEY).status, 'pending');
+  assert.equal(getDetailStoreDebugState().records, 0);
+});
+
 test('receiveDetailImperative for an unknown or never-opened key is a no-op', () => {
   const posts = install();
   receiveDetailImperative(streamStart(makeStream(KEY, 'sub-1')));

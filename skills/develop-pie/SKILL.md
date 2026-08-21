@@ -88,7 +88,6 @@ Choose focused tests while iterating, then run checks proportionate to the chang
 - [`docs/STATE_CONTRACT.md`](../../docs/STATE_CONTRACT.md) — authoritative host↔webview state contract
 - [`docs/internal/ARCH-OVERVIEW.md`](../../docs/internal/ARCH-OVERVIEW.md) — concise spine-file map and glossary
 - [`extension/README.md`](../../extension/README.md) — UI design philosophy and local GUI workflow
-- [`docs/UX_RELIABILITY_SMOKE_TEST.md`](../../docs/UX_RELIABILITY_SMOKE_TEST.md) — manual checks for RPC, prepass, snapshot, and error-surfacing changes
 
 ### Pi runtime documentation (locked local version)
 

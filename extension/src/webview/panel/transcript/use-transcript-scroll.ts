@@ -187,6 +187,7 @@ export function useTranscriptScroll({
 
   const jumpToLatestRaw = useJumpToLatest(
     scrollRef,
+    autoFollowRef,
     setAutoFollow,
     transcriptWindow.hasNewer,
     onJumpToLatest,

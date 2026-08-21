@@ -26,6 +26,9 @@ auth.json.*
 .copilot-catalog-sync.json
 .copilot-catalog-sync.json.*.tmp
 
+# pi-mcp-adapter metadata cache (written to the project/agent dir root)
+mcp-cache.json
+
 # Package manager artifacts
 node_modules/
 .pnpm-store/

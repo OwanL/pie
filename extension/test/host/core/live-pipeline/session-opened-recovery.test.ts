@@ -95,6 +95,42 @@ test('busy session.opened atomically replaces a stale/tombstoned live turn from 
   assert.equal(result.effects.length, 0);
 });
 
+test('busy session.opened checkpoint commits the matching optimistic send and clears its watchdog', () => {
+  const checkpoint = liveCheckpoint('Recovered work');
+  const before: ArchState = {
+    ...initialArchState,
+    pending: {
+      ...initialArchState.pending,
+      promoted: {
+        'send-corr': {
+          kind: 'send', sessionPath, localId: 'local:user', previousSummary: null,
+          text: 'Do the work', inputs: [], requestId: 'request-1', startedAt: 900,
+        },
+      },
+      requestIdToLocalId: {
+        'request-1': { sessionPath, localId: 'local:user' },
+      },
+      prepassBySession: {
+        [sessionPath]: { phase: 'succeeded', latencyMs: 25 },
+      },
+    },
+  };
+
+  const result = reducer(before, {
+    kind: 'SessionOpened', backendGeneration: 0, modelWriteFence: 0,
+    modelHydrationRevision: 0, catalogHydrationRevision: 0, sessionPath,
+    payload: payload(checkpoint),
+  });
+
+  assert.deepEqual(result.effects, [{ kind: 'ClearSendTimer', corrId: 'send-corr' }]);
+  assert.equal(result.state.pending.promoted['send-corr'], undefined);
+  assert.equal(result.state.pending.prepassBySession[sessionPath], undefined);
+  assert.equal(result.state.pending.requestIdToLocalId['request-1'], undefined);
+  assert.deepEqual(result.state.pending.currentTurnBySession[sessionPath], {
+    requestId: 'request-1', firstMessageId: 'request-1:1',
+  });
+});
+
 test('busy open without a checkpoint uses bounded recovery identity when the host has no prior live turn', () => {
   const opened = payload();
   delete opened.liveTurnCheckpoint;

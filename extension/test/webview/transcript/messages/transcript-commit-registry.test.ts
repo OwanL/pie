@@ -71,6 +71,37 @@ test('optimistic overlay structure cannot acknowledge authoritative host identit
   assert.equal(decideTranscriptCommit(target, leaves('new text'), model([message, optimistic])).matches, false);
 });
 
+test('an actively edited row proves structure without signing its local keystroke buffer', () => {
+  const user: ChatMessage = {
+    id: 'user-1',
+    role: 'user',
+    createdAt: '2026-01-01T00:00:00.000Z',
+    markdown: 'authoritative text',
+    parts: [{ kind: 'text', text: 'authoritative text' }],
+    status: 'completed',
+  };
+  const editTarget: TranscriptCommitTarget = {
+    ...target,
+    state: {
+      ...target.state,
+      transcript: [user],
+      editingMessageId: user.id,
+    },
+  };
+  const rowOnly = new Map<string, CommitLeaf>([
+    ['message:user-1', { kind: 'message', messageId: 'user-1', role: 'user', status: 'completed' }],
+  ]);
+
+  assert.deepEqual(decideTranscriptCommit(editTarget, rowOnly, model([user])), {
+    matches: true,
+    evidence: 'displayed',
+  });
+  assert.equal(decideTranscriptCommit({
+    ...editTarget,
+    state: { ...editTarget.state, editingMessageId: null },
+  }, rowOnly, model([user])).matches, false, 'ordinary rows still require the authoritative text leaf');
+});
+
 test('offscreen is accepted only when the current virtual range excludes the active row', () => {
   const noLeaves = new Map<string, CommitLeaf>();
   const excluded = {
@@ -105,6 +136,33 @@ test('tool lifecycle metadata must match the committed card', () => {
     executionId: 'tool-1', attempt: 0, seq: 9, phase: 'running', revision: 9,
   });
   assert.equal(decideTranscriptCommit(toolTarget, toolLeaves, model([toolMessage])).matches, true);
+});
+
+test('producer-sequenced tool evidence does not inherit unrelated message revisions', () => {
+  const toolMessage: ChatMessage = {
+    ...message,
+    parts: [{
+      kind: 'toolCall',
+      toolCall: { id: 'tool-1', name: 'read', input: {}, status: 'completed', seq: 4 },
+    }],
+    markdown: '',
+    toolStateRevision: 99,
+  };
+  const toolTarget = { ...target, state: { ...target.state, transcript: [toolMessage] } };
+  const toolLeaves = new Map<string, CommitLeaf>([
+    ['message:assistant-1', { kind: 'message', messageId: 'assistant-1', role: 'assistant', status: 'streaming' }],
+    ['tool:assistant-1:tool-1', {
+      kind: 'tool', messageId: 'assistant-1', toolCallId: 'tool-1', status: 'completed',
+      executionId: 'tool-1', attempt: 0, seq: 4, phase: 'completed', revision: 4,
+    }],
+  ]);
+
+  assert.equal(decideTranscriptCommit(toolTarget, toolLeaves, model([toolMessage])).matches, true);
+  toolLeaves.set('tool:assistant-1:tool-1', {
+    kind: 'tool', messageId: 'assistant-1', toolCallId: 'tool-1', status: 'completed',
+    executionId: 'tool-1', attempt: 0, seq: 3, phase: 'completed', revision: 3,
+  });
+  assert.equal(decideTranscriptCommit(toolTarget, toolLeaves, model([toolMessage])).matches, false);
 });
 
 function assistantTextMessage(id: string, text: string): ChatMessage {

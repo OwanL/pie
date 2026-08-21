@@ -831,6 +831,12 @@ export function validateRuntimePrefsSet(params: unknown): RuntimePrefsSetParams 
     : typeof rawAutonomousMode === 'boolean'
       ? rawAutonomousMode
       : fail('runtimePrefs.set', 'autonomousMode must be a boolean when provided');
+  const rawMcpEnabled = (params as Record<string, unknown>)['mcpEnabled'];
+  const mcpEnabled = rawMcpEnabled === undefined
+    ? undefined
+    : typeof rawMcpEnabled === 'boolean'
+      ? rawMcpEnabled
+      : fail('runtimePrefs.set', 'mcpEnabled must be a boolean when provided');
   const rawAlwaysParent = (params as Record<string, unknown>)['subagentAlwaysParentModel'];
   const subagentAlwaysParentModel =
     rawAlwaysParent === undefined ? undefined : typeof rawAlwaysParent === 'boolean' ? rawAlwaysParent : fail('runtimePrefs.set', 'subagentAlwaysParentModel must be a boolean when provided');
@@ -856,7 +862,7 @@ export function validateRuntimePrefsSet(params: unknown): RuntimePrefsSetParams 
   const bashDefaultTimeout = validateOptionalInt('runtimePrefs.set', 'bashDefaultTimeout', (params as Record<string, unknown>)['bashDefaultTimeout'], 1, 600);
   const providerConcurrency = validateOptionalProviderConcurrency('runtimePrefs.set', (params as Record<string, unknown>)['providerConcurrency']);
   const historyCompaction = validateOptionalHistoryCompaction((params as Record<string, unknown>)['historyCompaction']);
-  return { providerToggles, ...(subagentProviderDefaults !== undefined ? { subagentProviderDefaults } : {}), ...(subagentProviderTogglesBySession !== undefined ? { subagentProviderTogglesBySession } : {}), extensionToggles, autonomousMode, subagentAlwaysParentModel, subagentRouteAroundSaturatedProviders, subagentFallbackOnProviderFailure, subagentMaxDepth, subagentMaxTreeSessions, subagentMaxInflight, bashWarmPoolSize, bashFastPath, bashShellPath, bashWarmupTimeoutMs, bashDefaultTimeout, subagentBuckets, subagentNestedAllowedBuckets, subagentDropTools, providerConcurrency, ...(historyCompaction !== undefined ? { historyCompaction } : {}) };
+  return { providerToggles, ...(subagentProviderDefaults !== undefined ? { subagentProviderDefaults } : {}), ...(subagentProviderTogglesBySession !== undefined ? { subagentProviderTogglesBySession } : {}), extensionToggles, autonomousMode, mcpEnabled, subagentAlwaysParentModel, subagentRouteAroundSaturatedProviders, subagentFallbackOnProviderFailure, subagentMaxDepth, subagentMaxTreeSessions, subagentMaxInflight, bashWarmPoolSize, bashFastPath, bashShellPath, bashWarmupTimeoutMs, bashDefaultTimeout, subagentBuckets, subagentNestedAllowedBuckets, subagentDropTools, providerConcurrency, ...(historyCompaction !== undefined ? { historyCompaction } : {}) };
 }
 
 export interface OpenTabsSetParams {
@@ -864,6 +870,25 @@ export interface OpenTabsSetParams {
    *  currently-open sessions without host state access. Stored verbatim into
    *  `process.env.PIE_OPEN_TABS` (JSON) for the tool to read. */
   tabs: unknown[];
+}
+
+export interface McpSetServerEnabledParams {
+  name: string;
+  enabled: boolean;
+}
+
+/** Validate `mcp.setServerEnabled` (host → backend). The name identifies a
+ *  configured server in the effective MCP config; the writer itself re-checks
+ *  existence semantics on the merged config. */
+export function validateMcpSetServerEnabled(params: unknown): McpSetServerEnabledParams {
+  if (!isObj(params)) fail('mcp.setServerEnabled', 'expected an object');
+  const rawName = (params as Record<string, unknown>)['name'];
+  const name = typeof rawName === 'string' ? rawName.trim() : '';
+  if (name.length === 0) fail('mcp.setServerEnabled', 'name must be a non-empty string');
+  if (name.length > 256) fail('mcp.setServerEnabled', 'name must be at most 256 characters');
+  const enabled = (params as Record<string, unknown>)['enabled'];
+  if (typeof enabled !== 'boolean') fail('mcp.setServerEnabled', 'enabled must be a boolean');
+  return { name, enabled };
 }
 
 /** Validate `openTabs.set` (host → backend). The tabs are open-tab summaries;

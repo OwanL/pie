@@ -47,6 +47,10 @@ export function transcriptRenderSignature(state: Pick<
 }
 
 function messageRenderIdentity(message: ViewState['transcript'][number]) {
+  const orderedToolCallCount = message.parts?.reduce(
+    (count, part) => count + (part.kind === 'toolCall' ? 1 : 0),
+    0,
+  ) ?? 0;
   return {
     id: message.id,
     status: message.status,
@@ -59,7 +63,7 @@ function messageRenderIdentity(message: ViewState['transcript'][number]) {
           sampledTextIdentity(message.draftingToolCall.argumentsText),
         ]
       : null,
-    toolCallCount: message.toolCalls?.length ?? 0,
+    toolCallCount: orderedToolCallCount || message.toolCalls?.length || 0,
     toolStateRevision: message.toolStateRevision ?? 0,
   };
 }

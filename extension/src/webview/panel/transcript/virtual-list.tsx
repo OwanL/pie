@@ -22,7 +22,11 @@ import { TranscriptVirtualRow } from './virtual-list-row';
 import { extractRangeWithPinnedIndexes } from './virtual-range';
 import { buildTranscriptRows, estimateTranscriptRowSize, scopeTranscriptRowsToSession, type TranscriptRow } from './virtual-list-rows';
 
-
+// Count-based overscan must stay small because a single transcript row can be
+// a multi-minute assistant turn containing dozens of collapsed tool cards.
+// One row covers the adjacent user/assistant boundary during ordinary wheel
+// movement without eagerly mounting an entire short-but-very-heavy transcript.
+const TRANSCRIPT_OVERSCAN_ROWS = 1;
 
 function fallbackTranscriptRow(rows: readonly TranscriptRow[]): TranscriptRow {
   return rows[rows.length - 1] ?? { kind: 'bottomGap', key: 'fallback-gap' };
@@ -101,9 +105,27 @@ function useTranscriptVirtualizer(
     ? []
     : rows.flatMap((row, index) => row.kind === 'message' && row.message.id === editingId ? [index] : []), [editingId, rows]);
   const rangeExtractor = useCallback(
-    (range: { startIndex: number; endIndex: number; overscan: number; count: number }) =>
-      extractRangeWithPinnedIndexes(range, pinnedIndexes),
-    [pinnedIndexes],
+    (range: { startIndex: number; endIndex: number; overscan: number; count: number }) => {
+      // A click can expand a tall tool card and move its row outside a narrow
+      // virtual window during the same measurement frame. Keep the focused row
+      // mounted so the control and its newly opened content cannot disappear
+      // underneath the user's pointer. Once focus leaves, normal virtualization
+      // resumes; inline editing remains pinned independently above.
+      const activeElement = scrollRef.current?.ownerDocument.activeElement;
+      const focusedRow = activeElement?.closest<HTMLElement>('[data-index]') ?? null;
+      const focusedIndex = Number(focusedRow?.dataset.index);
+      const focusPinned = Number.isSafeInteger(focusedIndex) && focusedIndex >= 0
+        ? [focusedIndex]
+        : [];
+      const expandedPinned = [...(scrollRef.current?.querySelectorAll<HTMLElement>('[data-index]') ?? [])]
+        .filter((row) => row.querySelector('.tool-call-header[aria-expanded="true"]'))
+        .flatMap((row) => {
+          const index = Number(row.dataset.index);
+          return Number.isSafeInteger(index) && index >= 0 ? [index] : [];
+        });
+      return extractRangeWithPinnedIndexes(range, [...pinnedIndexes, ...focusPinned, ...expandedPinned]);
+    },
+    [pinnedIndexes, scrollRef],
   );
 
   const scheduleVirtualRender = useCallback(() => {
@@ -129,10 +151,7 @@ function useTranscriptVirtualizer(
       observeElementOffset,
       initialOffset: () => Number.MAX_SAFE_INTEGER,
       rangeExtractor,
-      // Five rows on either side is enough to hide normal wheel/trackpad
-      // movement while halving expensive offscreen markdown/tool-card work on
-      // transcript mounts and tab switches.
-      overscan: 5,
+      overscan: TRANSCRIPT_OVERSCAN_ROWS,
       // Batch ResizeObserver-driven re-measurements with the next animation
       // frame. Without this, content that grows after initial measurement
       // (streaming markdown, late-loading tables/images) can leave a one-paint
@@ -155,7 +174,7 @@ function useTranscriptVirtualizer(
       estimateSize: (index) => estimateTranscriptRowSize(rows[index] ?? fallbackTranscriptRow(rows)),
       getItemKey: (index) => rows[index]?.key ?? index,
       rangeExtractor,
-      overscan: 5,
+      overscan: TRANSCRIPT_OVERSCAN_ROWS,
       useAnimationFrameWithResizeObserver: true,
       onChange: scheduleVirtualRender,
     });

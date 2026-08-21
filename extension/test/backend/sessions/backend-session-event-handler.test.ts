@@ -577,6 +577,82 @@ test('message_start and message_update emit assistant events and update request 
   assert.equal(getContextUsageChangedCount(), 1);
 });
 
+test('repeated raw DSML tool protocol aborts once before the response can overwhelm the UI', () => {
+  const { deps, emitted } = createDeps();
+  let abortCount = 0;
+  const context = createContext({
+    session: {
+      abort: async () => {
+        abortCount += 1;
+      },
+    } as unknown as SessionContext['session'],
+    activeRequest: {
+      id: 'req-protocol-leak',
+      messageIndex: 0,
+      modelId: 'deepseek-v4-flash:0731-cloud',
+      provider: 'ollama',
+      aborted: false,
+    },
+  });
+
+  handleSdkSessionEvent(deps, context, { type: 'message_start', message: { role: 'assistant' } });
+  for (let index = 0; index < 4; index += 1) {
+    handleSdkSessionEvent(deps, context, {
+      type: 'message_update',
+      message: { role: 'assistant' },
+      assistantMessageEvent: {
+        type: 'text_delta',
+        delta: `curr<tool_calls>\n<｜DSML｜invoke name="computer">${index}`,
+      },
+    });
+  }
+  handleSdkSessionEvent(deps, context, {
+    type: 'message_update',
+    message: { role: 'assistant' },
+    assistantMessageEvent: { type: 'text_delta', delta: 'late text after abort' },
+  });
+
+  assert.equal(abortCount, 1);
+  const operationalErrors = emitted.filter((entry) => entry.event === 'operational-error');
+  assert.equal(operationalErrors.length, 1);
+  assert.equal(
+    (operationalErrors[0]?.payload as { code?: string }).code,
+    'PROVIDER_TOOL_PROTOCOL_LEAK',
+  );
+  assert.equal(
+    emitted.filter((entry) => entry.event === 'message.delta').length,
+    3,
+    'the triggering and subsequent deltas are not sent to the UI',
+  );
+});
+
+test('tool protocol guard ignores ordinary text and isolated protocol examples', () => {
+  const { deps, emitted } = createDeps();
+  let abortCount = 0;
+  const context = createContext({
+    session: { abort: async () => { abortCount += 1; } } as unknown as SessionContext['session'],
+    activeRequest: { id: 'req-protocol-example', messageIndex: 0, aborted: false },
+  });
+
+  handleSdkSessionEvent(deps, context, { type: 'message_start', message: { role: 'assistant' } });
+  for (const delta of [
+    'The API calls this field <tool_calls>.',
+    '<tool_calls> is an example without DSML.',
+    '<tool_calls>\n<｜DSML｜invoke name="example"> appears once in documentation.',
+    'The response continues normally.',
+  ]) {
+    handleSdkSessionEvent(deps, context, {
+      type: 'message_update',
+      message: { role: 'assistant' },
+      assistantMessageEvent: { type: 'text_delta', delta },
+    });
+  }
+
+  assert.equal(abortCount, 0);
+  assert.equal(emitted.some((entry) => entry.event === 'operational-error'), false);
+  assert.equal(emitted.filter((entry) => entry.event === 'message.delta').length, 4);
+});
+
 test('toolcall_start and toolcall_delta expose the live tool draft', () => {
   const { deps, emitted } = createDeps();
   const context = createContext({

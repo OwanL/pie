@@ -560,9 +560,10 @@ function SessionTabsView({
         <button
           class="session-tabs-new"
           type="button"
-          title="New session"
+          title={backendReady ? 'New session' : 'New session is available when the backend is ready'}
           onClick={onNew}
           aria-label="New session"
+          disabled={!backendReady}
         >
           +
         </button>

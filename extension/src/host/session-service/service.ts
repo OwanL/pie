@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 
 import { BackendClient } from '../backend/client';
 import { resolveChatPrefs, buildRuntimePrefsPayload } from '../../shared/protocol';
-import type { ChatPrefs, DetailResult, LazyDetailRef, PruningSettings, ToolResultPruningSettings, ThinkingLevel, TranscriptMode, DeferredTriggerView } from '../../shared/protocol';
+import type { ChatPrefs, DetailResult, LazyDetailRef, PruningSettings, ToolResultPruningSettings, ThinkingLevel, TranscriptMode, DeferredTriggerView, McpServerInfo } from '../../shared/protocol';
 import {
   loadPersistedPruningSettings,
   savePruningSettings,
@@ -224,14 +224,18 @@ export class SessionService implements vscode.Disposable {
     this.detailCacheBytes = 0;
     this.events.detach();
     this.state.failPendingCreateOperations('PI backend generation ended while the session was being created.');
-    await this.backend.stop();
-    // startSessionBackend owns the single generation reset for the replacement
-    // process. Resetting here as well would drift host failure identities one
-    // generation ahead of BackendClient after every restart.
+    // Publish unready before the first await. Otherwise a queued preference or
+    // model action can observe the old ready=true snapshot after stop() has
+    // already detached the transport and fail against a backend that is no
+    // longer running.
     this.dispatchArch({ kind: 'RunningSessionsChanged', sessionPaths: [] });
     this.dispatchArch({ kind: 'BackendReadyChanged', ready: false });
     this.dispatchArch({ kind: 'NoticeShown', notice: null });
     this.scheduleRender();
+    await this.backend.stop();
+    // startSessionBackend owns the single generation reset for the replacement
+    // process. Resetting here as well would drift host failure identities one
+    // generation ahead of BackendClient after every restart.
     await this.start();
   }
 
@@ -529,6 +533,24 @@ export class SessionService implements vscode.Disposable {
     if (this.getArchState().settings.backendReady) {
       await this.backend.request('runtimePrefs.set', buildRuntimePrefsPayload(merged));
     }
+  }
+
+  /** Re-read the backend's effective MCP server config. Pure query — the
+   *  response list is what the webview renders via `McpServersUpdated`. */
+  async mcpList(): Promise<{ servers: McpServerInfo[] }> {
+    const result = await this.backend.request<{ servers: McpServerInfo[] }>('mcp.list', {});
+    return { servers: result.servers };
+  }
+
+  /** Persist a per-server `disabled` override into `.pi/mcp.json` (the
+   *  adapter's own writer). `changed` is false when the effective state
+   *  already matches, true when an override was written (applies on the next
+   *  session reload / backend restart). */
+  async mcpSetServerEnabled(name: string, enabled: boolean): Promise<{ servers: McpServerInfo[]; changed: boolean }> {
+    return await this.backend.request<{ servers: McpServerInfo[]; changed: boolean }>('mcp.setServerEnabled', {
+      name,
+      enabled,
+    });
   }
 
   /** Push the complete disabled-entry set for a session's system prompts to the

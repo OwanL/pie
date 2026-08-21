@@ -318,10 +318,15 @@ export class BrowserServer {
         return;
       }
       if (pathname === '/') {
+        // UI builds use content-hashed filenames. Re-read the manifest for
+        // every no-store HTML request so a running browser server never emits
+        // a stale entry URL after the installer/hot-reloader replaces assets.
+        await this.staticAssets.load();
         const rendered = this.staticAssets.renderHtml({
           wsRoute: WS_ROUTE,
           port: this.state.port ?? 0,
           titleSuffix: this.options.titleSuffix,
+          faviconRoute: this.options.iconPath ? FAVICON_ROUTE : undefined,
         });
         res.writeHead(200, securityHeaders({
           'Content-Type': 'text/html; charset=utf-8',

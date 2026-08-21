@@ -188,6 +188,21 @@ export interface SetPrefsRpcEffect extends EffectBase {
   prefs: Partial<ChatPrefs>;
 }
 
+/** Re-read the backend's effective MCP server config into
+ *  `state.settings.mcpServers` (backend answers with `McpServersUpdated`). */
+export interface McpListRpcEffect extends EffectBase {
+  kind: 'McpListRpc';
+}
+
+/** Persist a per-server `disabled` override via the backend's
+ *  `mcp.setServerEnabled` RPC. The response carries the fresh list and the
+ *  pending-apply flag (override applies on next session reload / restart). */
+export interface McpSetServerRpcEffect extends EffectBase {
+  kind: 'McpSetServerRpc';
+  name: string;
+  enabled: boolean;
+}
+
 /** Apply privacy bookkeeping outside the pure reducer. The mode itself lives
  *  only in ArchState; the effect discards any already-open analytics state and
  *  scrubs analytics records when privacy is enabled. */
@@ -386,6 +401,8 @@ export type Effect =
   | LogEffect
   | SetModelRpcEffect
   | SetPrefsRpcEffect
+  | McpListRpcEffect
+  | McpSetServerRpcEffect
   | SetPrivacyModeEffect
   | SetSystemPromptTogglesRpcEffect
   | DetailSubscribeRpcEffect

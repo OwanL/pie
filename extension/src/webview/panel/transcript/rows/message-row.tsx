@@ -21,11 +21,20 @@ function renderMessage({
   renderToolCall,
   sessionKey,
   onCancelPrepass,
+  transcript,
+  transcriptIndex,
 }: RowRendererProps) {
   if (row.kind !== 'message') return null;
 
   const isStreaming = busy && row.message.role === 'assistant' && row.message.status === 'streaming';
   const isLastAssistantMessage = busy && row.message.role === 'assistant' && isLastRow;
+  // Transcript commit evidence signs the live/queued owners and the final
+  // three messages. Older completed tools are immutable structure and can be
+  // materialized only when they approach the viewport.
+  const deferHistoricalToolCalls = row.message.status === 'completed'
+    && transcriptIndex !== undefined
+    && transcript !== undefined
+    && transcriptIndex < Math.max(0, transcript.length - 3);
 
   return (
     <MessageItem
@@ -44,6 +53,7 @@ function renderMessage({
       onContextMenu={onContextMenu}
       renderToolCall={renderToolCall}
       isLastAssistantMessage={isLastAssistantMessage}
+      deferHistoricalToolCalls={deferHistoricalToolCalls}
       requestCreatedAt={row.requestCreatedAt}
       pruningHeaderState={row.pruningHeaderState}
       activityState={row.activityState}

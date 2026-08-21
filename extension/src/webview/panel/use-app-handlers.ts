@@ -14,15 +14,15 @@ import type { ContextMenuState } from './components/context-menu';
 import type { SessionTabRunAction } from './session-tabs/run-state';
 
 export interface AppHandlers {
-  handleSend: (text: string) => void;
+  handleSend: (text: string) => boolean;
   /** Brief H: re-send the (restored) composer draft as a `retrySend` — mirrors
    *  `handleSend` (optimistic message + draft-restore clear) but posts
    *  `retrySend` so the host can disable pruning atomically before re-sending
    *  (`disablePruning: true` → "retry without pruning"). The host's `onRetrySend`
    *  delegates to `onSend`, so the optimistic message, session-name derivation,
    *  and input pickup are identical to a fresh send. */
-  handleRetrySend: (text: string, disablePruning?: boolean) => void;
-  handleInterrupt: () => void;
+  handleRetrySend: (text: string, disablePruning?: boolean) => boolean;
+  handleInterrupt: () => boolean;
   handleOpenFile: (path: string) => void;
   handleNewSession: () => void;
   handleCloseTab: (path: string) => void;
@@ -35,6 +35,11 @@ export interface AppHandlers {
   handleCancelDeferredTrigger: (sessionPath: string, triggerId?: string) => void;
   handleCancelEdit: () => void;
   handleSetPrefs: (partial: Partial<ChatPrefs>) => void;
+  /** Re-read the effective MCP server config into `ViewState.mcpServers`. */
+  handleMcpListRequested: () => void;
+  /** Persist a per-server `disabled` override (`.pi/mcp.json`); takes effect
+   *  on the next session reload / backend restart. */
+  handleMcpSetServerEnabled: (name: string, enabled: boolean) => void;
   handleSetPrivacyMode: (enabled: boolean) => void;
   handleSetSystemPromptToggles: (disabledEntries: string[]) => void;
   handleSetPruningSettings: (partial: Partial<PruningSettings>) => void;
@@ -56,7 +61,7 @@ export interface AppHandlers {
 }
 
 export function useAppHandlers(
-  postMessage: (msg: WebviewToHostMessage) => void,
+  transportPostMessage: (msg: WebviewToHostMessage) => boolean,
   activeSessionPathRef: { current: string | null },
   setDraftRestore: (value: null) => void,
   addOptimisticMessage: (msg: { localId: string; text: string; sessionPath: string; queued: boolean }) => void,
@@ -68,17 +73,29 @@ export function useAppHandlers(
    *  or the active session changes. Allowlisted webview-local protocol-sync
    *  bookkeeping (in-flight UI gating). */
   setInterrupting: (value: boolean) => void,
+  /** Browser commands are unavailable until rendererHello completes. */
+  commandsAvailable = true,
 ): AppHandlers {
+  // Every handler in this hook is an application command. Keep one guard at
+  // the transport boundary so secondary controls (tabs, model/settings,
+  // attachments, file actions) cannot mutate local refs or appear accepted
+  // while a browser renderer is between registrations.
+  const postMessage = useCallback((message: WebviewToHostMessage): boolean => (
+    commandsAvailable && transportPostMessage(message)
+  ), [commandsAvailable, transportPostMessage]);
+
   const handleSend = useCallback((text: string) => {
+    if (!commandsAvailable) return false;
     const sessionPath = activeSessionPathRef.current;
-    if (!sessionPath) return;
-    setDraftRestore(null);
+    if (!sessionPath) return false;
 
     const localId = createLocalMessageId();
-    addOptimisticMessage({ localId, text, sessionPath, queued: isBusy });
+    if (!postMessage({ type: 'send', sessionPath, text, localId })) return false;
 
-    postMessage({ type: 'send', sessionPath, text, localId });
-  }, [postMessage, activeSessionPathRef, setDraftRestore, addOptimisticMessage, isBusy]);
+    setDraftRestore(null);
+    addOptimisticMessage({ localId, text, sessionPath, queued: isBusy });
+    return true;
+  }, [postMessage, activeSessionPathRef, setDraftRestore, addOptimisticMessage, isBusy, commandsAvailable]);
 
   // Brief H: retry re-sends the restored draft. Mirrors `handleSend` (optimistic
   // message + draft-restore clear) but posts `retrySend` so the host can disable
@@ -87,27 +104,31 @@ export function useAppHandlers(
   // into `sendRetryDraftRef` in AppBody) so an edit between rejection and retry
   // is honored — `draftRestore.text` would be stale once the user types.
   const handleRetrySend = useCallback((text: string, disablePruning?: boolean) => {
+    if (!commandsAvailable) return false;
     const sessionPath = activeSessionPathRef.current;
-    if (!sessionPath) return;
-    setDraftRestore(null);
+    if (!sessionPath) return false;
 
     const localId = createLocalMessageId();
-    addOptimisticMessage({ localId, text, sessionPath, queued: isBusy });
+    if (!postMessage({ type: 'retrySend', sessionPath, text, localId, disablePruning })) return false;
 
-    postMessage({ type: 'retrySend', sessionPath, text, localId, disablePruning });
-  }, [postMessage, activeSessionPathRef, setDraftRestore, addOptimisticMessage, isBusy]);
+    setDraftRestore(null);
+    addOptimisticMessage({ localId, text, sessionPath, queued: isBusy });
+    return true;
+  }, [postMessage, activeSessionPathRef, setDraftRestore, addOptimisticMessage, isBusy, commandsAvailable]);
 
   const handleInterrupt = useCallback(() => {
+    if (!commandsAvailable) return false;
     const sessionPath = activeSessionPathRef.current;
-    if (!sessionPath) return;
+    if (!sessionPath) return false;
+    if (!postMessage({ type: 'interrupt', sessionPath })) return false;
     // Optimistic one-frame "stopping…" feedback: the host clears `busy` only
     // once the abort completes (a round-trip), so without this local flag the
     // Stop button + typing indicator would keep animating until then. The host
     // ALSO calls `abortInFlightSend` for a pre-ack send (Brief E) — this flag
     // is the visual mirror of that. `AppBody` clears it when `busy` flips false.
     setInterrupting(true);
-    postMessage({ type: 'interrupt', sessionPath });
-  }, [postMessage, activeSessionPathRef, setInterrupting]);
+    return true;
+  }, [postMessage, activeSessionPathRef, setInterrupting, commandsAvailable]);
 
   const handleOpenFile = useCallback((path: string) => postMessage({ type: 'openFile', path }), [postMessage]);
   const handleNewSession = useCallback(() => postMessage({ type: 'newSession' }), [postMessage]);
@@ -133,6 +154,11 @@ export function useAppHandlers(
     postMessage({ type: 'cancelEdit', sessionPath });
   }, [postMessage, activeSessionPathRef]);
   const handleSetPrefs = useCallback((partial: Partial<ChatPrefs>) => postMessage({ type: 'setPrefs', prefs: partial }), [postMessage]);
+  const handleMcpListRequested = useCallback(() => postMessage({ type: 'mcpListRequested' }), [postMessage]);
+  const handleMcpSetServerEnabled = useCallback(
+    (name: string, enabled: boolean) => postMessage({ type: 'mcpSetServerEnabled', name, enabled }),
+    [postMessage],
+  );
   const handleSetPrivacyMode = useCallback((enabled: boolean) => {
     const sessionPath = activeSessionPathRef.current;
     if (!sessionPath) return;
@@ -164,8 +190,8 @@ export function useAppHandlers(
   }, [postMessage, activeSessionPathRef]);
 
   const handleSelectTab = useCallback((path: string) => {
+    if (!postMessage({ type: 'openSession', sessionPath: path })) return;
     activeSessionPathRef.current = path;
-    postMessage({ type: 'openSession', sessionPath: path });
   }, [postMessage, activeSessionPathRef]);
 
   const handleMoveTab = useCallback((sessionPath: string | undefined, fromIndex: number, toIndex: number) => {
@@ -175,8 +201,8 @@ export function useAppHandlers(
   // Tab context-menu task actions. Selecting the tab first ensures the action
   // targets the session the user right-clicked.
   const handleTabRunAction = useCallback((action: SessionTabRunAction, tabPath: string) => {
+    if (!postMessage({ type: 'openSession', sessionPath: tabPath })) return;
     activeSessionPathRef.current = tabPath;
-    postMessage({ type: 'openSession', sessionPath: tabPath });
     if (action === 'startNewTask') {
       postMessage({ type: 'startNewTask', sessionPath: tabPath });
     } else if (action === 'continueTask') {
@@ -272,6 +298,8 @@ export function useAppHandlers(
       handleCancelDeferredTrigger,
       handleCancelEdit,
       handleSetPrefs,
+      handleMcpListRequested,
+      handleMcpSetServerEnabled,
       handleSetPrivacyMode,
       handleSetSystemPromptToggles,
       handleSetPruningSettings,
@@ -308,6 +336,8 @@ export function useAppHandlers(
       handleCancelDeferredTrigger,
       handleCancelEdit,
       handleSetPrefs,
+      handleMcpListRequested,
+      handleMcpSetServerEnabled,
       handleSetPrivacyMode,
       handleSetSystemPromptToggles,
       handleSetPruningSettings,

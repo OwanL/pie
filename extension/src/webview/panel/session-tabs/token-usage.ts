@@ -369,10 +369,10 @@ function numberValue(value: unknown): number {
 }
 
 function toolCallsFromMessage(message: ChatMessage): ToolCall[] {
-  if (message.toolCalls?.length) return message.toolCalls;
-  return message.parts
+  const ordered = message.parts
     ?.filter((part) => part.kind === 'toolCall')
     .map((part) => part.toolCall) ?? [];
+  return ordered.length > 0 ? ordered : (message.toolCalls ?? []);
 }
 
 export interface SubagentCostSummary {

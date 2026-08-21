@@ -1,6 +1,8 @@
 /** @jsxRuntime automatic */
 /** @jsxImportSource preact */
 
+import { useEffect, useRef } from 'preact/hooks';
+
 import type { ActiveRunSummary, SessionSummary } from '../../../shared/protocol';
 import { isPendingTabPath } from '../../../shared/tab-behavior';
 import { getSessionTabRunMenuItems } from './run-state';
@@ -26,6 +28,7 @@ export function SessionTabContextMenu({
   hasDeferredTriggers,
   onContextAction,
 }: SessionTabContextMenuProps) {
+  const menuRef = useRef<HTMLDivElement>(null);
   const ctxSession = sessionByPath.get(tabContextMenu.tabPath);
   const ctxLabel = ctxSession?.name ?? 'New Session';
   const isPending = isPendingTabPath(tabContextMenu.tabPath);
@@ -33,15 +36,43 @@ export function SessionTabContextMenu({
   const menuLeft = Math.min(tabContextMenu.x, window.innerWidth - 210);
   const runItems = getSessionTabRunMenuItems(runSummary);
 
+  useEffect(() => {
+    menuRef.current?.querySelector<HTMLButtonElement>('button.context-menu-item:not(:disabled)')?.focus();
+    return () => {
+      const owningTab = Array.from(document.querySelectorAll<HTMLElement>('.session-tab[data-tab-path]'))
+        .find((element) => element.getAttribute('data-tab-path') === tabContextMenu.tabPath);
+      owningTab?.querySelector<HTMLElement>('[role="tab"]')?.focus();
+    };
+  }, [tabContextMenu.tabPath]);
+
+  const onKeyDown = (event: KeyboardEvent) => {
+    const items = Array.from(menuRef.current?.querySelectorAll<HTMLButtonElement>('button.context-menu-item:not(:disabled)') ?? []);
+    if (items.length === 0) return;
+    const currentIndex = items.findIndex((item) => item === document.activeElement);
+    let nextIndex: number | null = null;
+    if (event.key === 'ArrowDown') nextIndex = currentIndex === -1 ? 0 : (currentIndex + 1) % items.length;
+    else if (event.key === 'ArrowUp') nextIndex = currentIndex <= 0 ? items.length - 1 : currentIndex - 1;
+    else if (event.key === 'Home') nextIndex = 0;
+    else if (event.key === 'End') nextIndex = items.length - 1;
+    if (nextIndex === null) return;
+    event.preventDefault();
+    items[nextIndex]?.focus();
+  };
+
   return (
     <div
+      ref={menuRef}
       class="block-context-menu session-tab-context-menu"
+      role="menu"
+      aria-label={`${ctxLabel} tab actions`}
       style={`position:fixed;top:${menuTop}px;left:${menuLeft}px`}
       onMouseDown={(e) => e.stopPropagation()}
+      onKeyDown={(event) => onKeyDown(event as KeyboardEvent)}
     >
       <div class="session-tab-context-title" title={ctxLabel}>{ctxLabel}</div>
       <button
         class="context-menu-item"
+        role="menuitem"
         type="button"
         onClick={() => onContextAction(isPinned ? 'unpin' : 'pin', tabContextMenu.tabPath)}
       >
@@ -53,6 +84,7 @@ export function SessionTabContextMenu({
         <button
           key={item.action}
           class="context-menu-item"
+          role="menuitem"
           type="button"
           onClick={() => onContextAction(item.action, tabContextMenu.tabPath)}
         >
@@ -63,6 +95,7 @@ export function SessionTabContextMenu({
       {runItems.length > 0 && <div class="context-menu-separator" />}
       <button
         class="context-menu-item"
+        role="menuitem"
         type="button"
         disabled={isPending}
         onClick={() => onContextAction('duplicate', tabContextMenu.tabPath)}
@@ -72,6 +105,7 @@ export function SessionTabContextMenu({
       </button>
       <button
         class="context-menu-item"
+        role="menuitem"
         type="button"
         disabled={hasDeferredTriggers}
         title={hasDeferredTriggers ? 'Pending deferred trigger(s) — cancel from the status bar first.' : undefined}

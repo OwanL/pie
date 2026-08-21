@@ -122,6 +122,8 @@ const MESSAGE_KEYS: Readonly<Record<string, readonly string[]>> = {
   continueTask: ['type', 'sessionPath'],
   setModel: ['type', 'sessionPath', 'defaultModel', 'defaultProvider', 'defaultThinkingLevel'],
   setPrefs: ['type', 'prefs'],
+  mcpListRequested: ['type'],
+  mcpSetServerEnabled: ['type', 'name', 'enabled'],
   setPrivacyMode: ['type', 'sessionPath', 'enabled'],
   setPruningSettings: ['type', 'settings'],
   setToolResultPruningSettings: ['type', 'settings'],

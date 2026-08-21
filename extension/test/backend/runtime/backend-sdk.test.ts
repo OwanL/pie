@@ -322,6 +322,11 @@ test('cold coordinator mode imports only runtime-free exports and leaves AgentSe
     'dist/core/auth-storage.js': `
       export const AuthStorage = { create: (filePath) => ({ filePath }) };
     `,
+    'dist/core/model-registry.js': `
+      export const ModelRegistry = {
+        create: (authStorage, modelsJsonPath) => ({ authStorage, modelsJsonPath, getAvailable: () => [] }),
+      };
+    `,
     'dist/index.js': `
       globalThis.__pieFullSdkEntryLoaded = true;
       export class AgentSession {}
@@ -343,6 +348,10 @@ test('cold coordinator mode imports only runtime-free exports and leaves AgentSe
 
     assert.equal(sdk.VERSION, 'cold-test-sdk');
     assert.equal(sdk.getAgentDir(), '/cold-agent');
+    assert.deepEqual(
+      sdk.ModelRegistry.create(sdk.AuthStorage.create('/auth.json'), '/models.json').getAvailable(),
+      [],
+    );
     assert.deepEqual(await sdk.SessionManager.listAll(), []);
     assert.equal(globals.__pieFullSdkEntryLoaded, undefined);
     assert.equal(globals.__pieInternalCompactionModuleLoaded, undefined);

@@ -52,6 +52,10 @@
 
 .composer-controls {
   flex: 1 1 auto;
+  margin: 0;
+  min-inline-size: 0;
+  border: 0;
+  padding: 0;
 }
 
 .composer-controls > * {
@@ -922,6 +926,12 @@
   color: var(--panel-muted);
 }
 
+/* Inline file paths inside settings hints (e.g. MCP config locations). */
+.toolbar-settings-mono {
+  font-family: var(--panel-font-mono);
+  font-size: 9.5px;
+}
+
 .toolbar-settings-bucket-warning {
   display: flex;
   align-items: center;
@@ -1417,7 +1427,10 @@
 .privacy-mode-trigger.active,
 /* Autonomous mode is a durable behavior switch, so its pressed state remains
    visible without requiring the tooltip. */
-.autonomous-mode-trigger.active {
+.autonomous-mode-trigger.active,
+/* MCP is a durable capability switch; accent it while enabled so the state is
+   visible at a glance. */
+.mcp-toggle-trigger.active {
   border-color: color-mix(in srgb, var(--panel-accent) 48%, transparent);
   background: var(--panel-accent-surface);
   color: var(--panel-accent-strong);
@@ -1426,7 +1439,9 @@
 .privacy-mode-trigger.active:hover,
 .privacy-mode-trigger.active:focus-visible,
 .autonomous-mode-trigger.active:hover,
-.autonomous-mode-trigger.active:focus-visible {
+.autonomous-mode-trigger.active:focus-visible,
+.mcp-toggle-trigger.active:hover,
+.mcp-toggle-trigger.active:focus-visible {
   border-color: color-mix(in srgb, var(--panel-accent) 68%, transparent);
   background: var(--panel-accent-surface);
   color: var(--panel-accent-strong);
@@ -1611,6 +1626,64 @@
 /* Stack the title + summary vertically inside the label cell. */
 .toolbar-settings-item .system-prompt-toggle-entry-summary {
   margin-top: 1px;
+}
+
+/* ── MCP server list (toolbar dropdown + settings MCP tab) ───────────── */
+/* Per-server rows: separated from the global toggle by a hairline and given
+   a slightly inset grid so the list reads as one group. */
+.mcp-server-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  border-top: 1px solid var(--panel-border);
+  margin-top: 3px;
+  padding-top: 3px;
+}
+
+/* Inline refresh row inside the non-empty toolbar list. */
+.mcp-server-list-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 4px 2px;
+}
+
+/* Copy shown while the global MCP switch is off: the rows below stay
+   manageable but are hidden from the model. */
+.mcp-global-off-hint {
+  padding: 3px 4px;
+  white-space: normal;
+  line-height: 1.35;
+}
+
+.system-prompt-toggle-dropdown .mcp-server-list .toolbar-settings-item {
+  padding-left: 10px;
+}
+
+/* Refresh action + pending-apply hint inside the server list. */
+.mcp-server-refresh {
+  border: none;
+  background: none;
+  padding: 0;
+  margin: 0 0 0 6px;
+  font-size: 9.5px;
+  color: var(--panel-accent);
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.mcp-server-refresh:hover {
+  color: var(--panel-accent-strong);
+}
+
+.mcp-pending-apply {
+  padding: 3px 4px;
+  white-space: normal;
+  line-height: 1.35;
+}
+
+.toolbar-settings-ui-control .mcp-server-list .toolbar-settings-item {
+  padding-left: 10px;
 }
 
 @media (forced-colors: active) {

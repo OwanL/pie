@@ -3,7 +3,7 @@
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 
-import { resolveHistoryCompactionSettings, type ChatPrefs, type ExtensionInfo, type ModelInfo, type PruningCatalog, type PruningResult, type PruningSettings, type ProviderGateStats, type ToolResultPruningSettings } from '../../../shared/protocol';
+import { resolveHistoryCompactionSettings, type ChatPrefs, type ExtensionInfo, type McpServerInfo, type ModelInfo, type PruningCatalog, type PruningResult, type PruningSettings, type ProviderGateStats, type ToolResultPruningSettings } from '../../../shared/protocol';
 import { filterEnabledProviders, orderModelsForPicker, type ModelPickerEntry } from './model-list';
 import { Tooltip } from '../components/tooltip';
 import { HistoryCompactionSection } from './settings-menu-history-compaction';
@@ -17,6 +17,7 @@ import {
   AppearanceSection,
   ChatPrefSections,
   ExtensionsSection,
+  McpSection,
   ProvidersSection,
   SoundSection,
 } from './settings-menu-subcomponents';
@@ -43,6 +44,9 @@ export {
 
 export interface ComposerSettingsMenuProps {
   prefs: ChatPrefs;
+  mcpServers: McpServerInfo[];
+  mcpServersStatus?: 'loading' | 'error' | 'ok';
+  mcpPendingApply: boolean;
   pruningSettings: PruningSettings;
   pruningCatalog: PruningCatalog;
   pruningResult: PruningResult | null;
@@ -53,13 +57,15 @@ export interface ComposerSettingsMenuProps {
   activeContextWindow?: number;
   activeModel?: { provider?: string; id: string };
   onSetPrefs: (prefs: Partial<ChatPrefs>) => void;
+  onMcpListRequested: () => void;
+  onMcpSetServerEnabled: (name: string, enabled: boolean) => void;
   onSetPruningSettings: (settings: Partial<PruningSettings>) => void;
   onSetToolResultPruningSettings: (settings: Partial<ToolResultPruningSettings>) => void;
 }
 
 /** Settings categories, in tab-strip order. Each renders one at a time
  *  inside the menu body; search can jump to any of them. */
-type SettingsTab = 'chat' | 'history' | 'appearance' | 'extensions' | 'providers';
+type SettingsTab = 'chat' | 'history' | 'appearance' | 'extensions' | 'providers' | 'mcp';
 
 const TAB_DEFS: { id: SettingsTab; label: string }[] = [
   { id: 'chat', label: 'Chat' },
@@ -67,6 +73,7 @@ const TAB_DEFS: { id: SettingsTab; label: string }[] = [
   { id: 'appearance', label: 'Appearance' },
   { id: 'extensions', label: 'Extensions' },
   { id: 'providers', label: 'Providers' },
+  { id: 'mcp', label: 'MCP' },
 ];
 
 const TAB_LABEL: Record<SettingsTab, string> = {
@@ -75,6 +82,7 @@ const TAB_LABEL: Record<SettingsTab, string> = {
   appearance: 'Appearance',
   extensions: 'Extensions',
   providers: 'Providers',
+  mcp: 'MCP',
 };
 
 /** Fixed height for the settings menu, capped to the available vertical space
@@ -139,6 +147,14 @@ function TabIcon({ id }: { id: SettingsTab }) {
           <circle cx="5" cy="11" r="0.6" fill="currentColor" stroke="none" />
         </svg>
       );
+    case 'mcp':
+      return (
+        <svg {...common}>
+          <path d="M6.5 2v3M9.5 2v3" />
+          <path d="M4.5 5h7v2.2a3.5 3.5 0 0 1-7 0V5Z" />
+          <path d="M8 10.7V14" />
+        </svg>
+      );
   }
 }
 
@@ -188,6 +204,7 @@ const TOOL_RESULT_PRUNER_SETTING_LABELS = [
   'Tool-result pruning tools', 'Prune ANSI escapes',
   'Prune trailing whitespace', 'Prune blank-line runs', 'Prune JSON',
 ];
+const MCP_SETTING_LABELS = ['MCP enabled', 'Server config'];
 
 interface SearchJumpEntry {
   type: 'jump';
@@ -254,6 +271,7 @@ function buildSettingsSearchIndex(
   pushSettings(HISTORY_COMPACTION_SETTING_LABELS, 'history');
   if (visibleTabs.some((t) => t.id === 'appearance')) pushSettings(APPEARANCE_SETTING_LABELS, 'appearance');
   if (visibleTabs.some((t) => t.id === 'providers')) pushSettings(PROVIDER_CONCURRENCY_LABELS, 'providers');
+  if (visibleTabs.some((t) => t.id === 'mcp')) pushSettings(MCP_SETTING_LABELS, 'mcp');
   if (hasWarmBash) pushSettings(BASH_SETTING_LABELS, 'extensions', 'warm-bash');
   if (hasSkillPruner) pushSettings(SKILL_PRUNER_SETTING_LABELS, 'extensions', 'skill-pruner');
   if (hasSubagent) pushSettings(SUBAGENT_SETTING_LABELS, 'extensions', 'subagent');
@@ -365,6 +383,16 @@ function buildSettingsSearchIndex(
     }
   }
 
+  // MCP global toggle (always present — the tab is unconditional).
+  entries.push({
+    type: 'toggle',
+    id: 'mcp:enabled',
+    label: 'MCP enabled',
+    haystack: 'mcp model context protocol servers tools enabled'.toLowerCase(),
+    checked: prefs.mcpEnabled,
+    apply: () => onSetPrefs({ mcpEnabled: !prefs.mcpEnabled }),
+  });
+
   // Provider enable toggles.
   for (const provider of providers) {
     const checked = prefs.providerToggles[provider] !== false;
@@ -472,6 +500,11 @@ interface SettingsTabBodyProps {
   setExpandedExt: (id: string | null) => void;
   prefs: ChatPrefs;
   onSetPrefs: (p: Partial<ChatPrefs>) => void;
+  mcpServers: McpServerInfo[];
+  mcpServersStatus?: 'loading' | 'error' | 'ok';
+  mcpPendingApply: boolean;
+  onMcpListRequested: () => void;
+  onMcpSetServerEnabled: (name: string, enabled: boolean) => void;
   pruningSettings: PruningSettings;
   onSetPruningSettings: (s: Partial<PruningSettings>) => void;
   toolResultPruningSettings: ToolResultPruningSettings;
@@ -495,6 +528,11 @@ function SettingsTabBody(props: SettingsTabBodyProps) {
     setExpandedExt,
     prefs,
     onSetPrefs,
+    mcpServers,
+    mcpServersStatus,
+    mcpPendingApply,
+    onMcpListRequested,
+    onMcpSetServerEnabled,
     pruningSettings,
     onSetPruningSettings,
     toolResultPruningSettings,
@@ -544,11 +582,14 @@ function SettingsTabBody(props: SettingsTabBodyProps) {
       {effectiveTab === 'providers' && (
         <ProvidersSection providers={providers} prefs={prefs} onSetPrefs={onSetPrefs} providerGateStats={providerGateStats} />
       )}
+      {effectiveTab === 'mcp' && (
+        <McpSection prefs={prefs} mcpServers={mcpServers} mcpServersStatus={mcpServersStatus} mcpPendingApply={mcpPendingApply} onSetPrefs={onSetPrefs} onMcpListRequested={onMcpListRequested} onMcpSetServerEnabled={onMcpSetServerEnabled} />
+      )}
     </>
   );
 }
 
-export function ComposerSettingsMenu({ prefs, pruningSettings, pruningCatalog, pruningResult, toolResultPruningSettings, availableExtensions, availableModels, providerGateStats, activeContextWindow, activeModel, onSetPrefs, onSetPruningSettings, onSetToolResultPruningSettings }: ComposerSettingsMenuProps) {
+export function ComposerSettingsMenu({ prefs, mcpServers, mcpServersStatus, mcpPendingApply, pruningSettings, pruningCatalog, pruningResult, toolResultPruningSettings, availableExtensions, availableModels, providerGateStats, activeContextWindow, activeModel, onSetPrefs, onMcpListRequested, onMcpSetServerEnabled, onSetPruningSettings, onSetToolResultPruningSettings }: ComposerSettingsMenuProps) {
   const skillCatalog = useMemo(
     () => computeKeepCatalog(
       pruningCatalog.skills,
@@ -585,6 +626,8 @@ export function ComposerSettingsMenu({ prefs, pruningSettings, pruningCatalog, p
   const settingsMenuRef = useRef<HTMLDivElement>(null);
   const tablistRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const queryRef = useRef(query);
+  queryRef.current = query;
 
   // Close the menu and refocus the trigger button.
   const closeMenu = useCallback((refocus?: boolean) => {
@@ -709,7 +752,11 @@ export function ComposerSettingsMenu({ prefs, pruningSettings, pruningCatalog, p
       }
       // If the user is typing in the search box, Escape clears the query before
       // dismissing the menu — a one-step-back interaction model.
-      if (query) {
+      if (queryRef.current) {
+        // Update the ref synchronously so a second rapid Escape closes the
+        // menu even before Preact has committed the cleared search state and
+        // refreshed this document listener's closure.
+        queryRef.current = '';
         setQuery('');
         return;
       }
@@ -722,7 +769,7 @@ export function ComposerSettingsMenu({ prefs, pruningSettings, pruningCatalog, p
       document.removeEventListener('mousedown', handlePointerDown);
       document.removeEventListener('keydown', handleKeyDown);
     };
-  }, [open, query, closeMenu]);
+  }, [open, closeMenu]);
 
   // WAI-ARIA tabs pattern: arrow keys move selection between visible tabs and
   // focus follows, so the tab strip is keyboard-navigable without Tab cycling.
@@ -842,6 +889,11 @@ export function ComposerSettingsMenu({ prefs, pruningSettings, pruningCatalog, p
                 setExpandedExt={setExpandedExt}
                 prefs={prefs}
                 onSetPrefs={onSetPrefs}
+                mcpServers={mcpServers}
+                mcpServersStatus={mcpServersStatus}
+                mcpPendingApply={mcpPendingApply}
+                onMcpListRequested={onMcpListRequested}
+                onMcpSetServerEnabled={onMcpSetServerEnabled}
                 pruningSettings={pruningSettings}
                 onSetPruningSettings={onSetPruningSettings}
                 toolResultPruningSettings={toolResultPruningSettings}

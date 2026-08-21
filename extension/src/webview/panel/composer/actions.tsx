@@ -8,6 +8,8 @@ export interface ComposerActionsProps {
    *  button so the click reflects within one frame (the host clears `busy`
    *  only after the abort round-trip completes). */
   interrupting?: boolean;
+  /** False while the browser renderer has no completed host handshake. */
+  commandsAvailable?: boolean;
   /** Steering (FollowUp): true when the transcript has pending 'queued' user
    *  messages (sent while a turn was running). Shows a "Clear queued"
    *  affordance to cancel them without stopping the current turn. */
@@ -49,6 +51,7 @@ function SubmitIcon({ queued }: { queued: boolean }) {
 export function ComposerActions({
   busy,
   interrupting,
+  commandsAvailable = true,
   hasQueuedMessages,
   onInterrupt,
   onClearQueue,
@@ -70,6 +73,7 @@ export function ComposerActions({
           type="button"
           title="Clear queued messages (does not stop the current turn)"
           onClick={onClearQueue}
+          disabled={!commandsAvailable}
           aria-label="Clear queued messages"
           data-action="clear-queue"
         >
@@ -81,8 +85,8 @@ export function ComposerActions({
           class={`action-btn danger composer-action-icon composer-action-stop${interrupting ? ' is-stopping' : ''}`}
           type="button"
           title={interrupting ? 'Stopping response…' : 'Interrupt response'}
-          onClick={interrupting ? undefined : onInterrupt}
-          disabled={interrupting}
+          onClick={interrupting || !commandsAvailable ? undefined : onInterrupt}
+          disabled={interrupting || !commandsAvailable}
           aria-label={interrupting ? 'Stopping response' : 'Interrupt response'}
           aria-busy={interrupting || undefined}
           data-action="stop"
@@ -95,7 +99,7 @@ export function ComposerActions({
         type="button"
         title={submitTitle}
         onClick={sendCurrentText}
-        disabled={!canSend || interrupting}
+        disabled={!canSend || interrupting || !commandsAvailable}
         aria-label={submitLabel}
         data-action={busy ? 'queue' : 'send'}
       >

@@ -91,6 +91,48 @@ test('assistantPartsFromContent builds ordered assistant parts and returns undef
   assert.equal(assistantPartsFromContent([{ type: 'image', data: 'abc' }]), undefined);
 });
 
+test('assistant mapping suppresses raw provider tool protocol on terminal and restored transcripts', () => {
+  const leakedText = 'Ready:curr<tool_calls>\n<｜DSML｜invoke name="computer">\n<｜DSML｜parameter name="operation">observe</｜DSML｜parameter>';
+  const content: ContentPart[] = [
+    { type: 'text', text: leakedText },
+    { type: 'toolCall', id: 'computer-1', name: 'computer', arguments: { operation: 'observe' } },
+  ];
+
+  const terminal = mapAssistantMessage('assistant-leak', {
+    role: 'assistant',
+    content,
+  });
+  const [restored] = mapTranscript([{
+    id: 'assistant-leak',
+    timestamp: '2026-01-01T00:00:00.000Z',
+    type: 'message',
+    message: { role: 'assistant', content },
+  }]);
+  const [splitRestored] = mapTranscript([
+    {
+      id: 'assistant-leak-text',
+      timestamp: '2026-01-01T00:00:00.000Z',
+      type: 'message',
+      message: { role: 'assistant', content: [{ type: 'text', text: leakedText }] },
+    },
+    {
+      id: 'assistant-leak-tool',
+      timestamp: '2026-01-01T00:00:01.000Z',
+      type: 'message',
+      message: {
+        role: 'assistant',
+        content: [{ type: 'toolCall', id: 'computer-1', name: 'computer', arguments: { operation: 'observe' } }],
+      },
+    },
+  ]);
+
+  for (const message of [terminal, restored, splitRestored]) {
+    assert.equal(message?.markdown, 'Ready:');
+    assert.equal(message?.toolCalls?.length, 1);
+    assert.doesNotMatch(JSON.stringify(message), /DSML|<tool_calls>|curr/iu);
+  }
+});
+
 test('appendAssistantParts preserves boundaries when requested and tool results update in place', () => {
   const target = assistantTarget([{ kind: 'text', text: 'existing' }]);
 

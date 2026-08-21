@@ -18,6 +18,8 @@ import {
   handleDismissNotice,
   handleRespondExtensionUI,
   handleSetPrefs,
+  handleMcpListRequested,
+  handleMcpSetServerEnabled,
   handleSetPrivacyMode,
   handleStartNewTask,
   handleContinueTask,
@@ -120,6 +122,14 @@ export function handleCommand(state: ArchState, cmd: Command): ReducerResult {
 
     case 'SetPrefs': {
       return handleSetPrefs(state, cmd);
+    }
+
+    case 'McpListRequested': {
+      return handleMcpListRequested(state, cmd);
+    }
+
+    case 'McpSetServerEnabled': {
+      return handleMcpSetServerEnabled(state, cmd);
     }
 
     case 'SetPrivacyMode': {

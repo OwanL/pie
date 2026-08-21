@@ -190,6 +190,21 @@ class PendingCommandStore {
     writeMirror(this.entries);
   }
 
+  /** Forget a command that never crossed the browser transport boundary.
+   *
+   * Tracking happens before serialization so the minted `clientCommandId` is
+   * part of the exact frame measured against the transport bound. A socket
+   * close/send exception or an oversized encoded frame means the host could
+   * not have observed that command, so retaining it as pending would create a
+   * false uncertain mutation on reconnect. */
+  discardUnsent(clientCommandId: string): void {
+    const index = this.entries.findIndex((entry) => entry.clientCommandId === clientCommandId);
+    if (index < 0) return;
+    this.entries.splice(index, 1);
+    this.releaseStaging(clientCommandId);
+    writeMirror(this.entries);
+  }
+
   /** Snapshot confirmation for `addComposerInput`: presence of the matching
    *  input metadata/identity in the host-owned pending inputs confirms
    *  acceptance early (absence alone never proves rejection). */

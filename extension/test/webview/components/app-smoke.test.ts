@@ -312,6 +312,35 @@ test('App posts send message when composer submits', () => {
   assert.equal(sendMsg!.sessionPath, '/session/a');
 });
 
+test('a click-to-send transport race preserves the draft and creates no optimistic message', () => {
+  const adapter = makeAdapter();
+  adapter.initialState = sessionViewState();
+  adapter.transport.postMessage = () => false;
+
+  act(() => {
+    render(h(App, { adapter }), container);
+  });
+  act(() => {
+    window.dispatchEvent(new MessageEvent('message', { data: stateEnvelope(1, sessionViewState()) }));
+  });
+
+  const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+  assert.ok(textarea);
+  act(() => {
+    textarea.value = 'keep this draft';
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  });
+
+  assert.equal(textarea.value, 'keep this draft', 'failed handoff must not erase user input');
+  assert.equal(adapter.messages.some((message) => message.type === 'send'), false);
+  assert.equal(
+    container.querySelector('.transcript-host')?.textContent?.includes('keep this draft'),
+    false,
+    'a never-sent message is not appended optimistically to the transcript',
+  );
+});
+
 test('App renders loading state when backend not ready', () => {
   const adapter = makeAdapter();
   adapter.initialState = { ...EMPTY_VIEW_STATE };
@@ -363,6 +392,11 @@ test('App suppresses the session-tab connecting wheel while the transcript surfa
   assert.ok(html.includes('loading-ellipsis'), 'a status indicator should accompany the wheel');
   // The session-tab connecting wheel is suppressed to avoid two wheels at once.
   assert.ok(!html.includes('session-tabs-connecting'), 'tabs should not show a competing connecting wheel while the main area is loading');
+  assert.equal(
+    (container.querySelector('.session-tabs-new') as HTMLButtonElement | null)?.disabled,
+    true,
+    'new-session control should stay disabled until the backend is ready',
+  );
 });
 
 test('App renders empty state when no tabs open', () => {

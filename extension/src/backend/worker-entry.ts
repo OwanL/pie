@@ -1,10 +1,16 @@
 import type { SdkPatchIdentity } from './sdk-patch-barrier';
 import { validateSdkPatchBarrier } from './sdk-patch-barrier';
+import { installProviderTrafficObserver } from './provider-traffic-observer';
 import type { WorkerJsonObject, WorkerRuntimePromoteFrame } from './worker-protocol';
 import { WorkerRuntimeHost, type WorkerRuntimePromotionPayload } from './worker-runtime-host';
 import { openWorkerServerTransport, parseWorkerServerArgs, WorkerServer } from './worker-server';
 
 function main(): void {
+  // Provider traffic originates in the isolated worker, not the coordinator.
+  // Install the observer in this process before promotion can load the SDK or
+  // issue a provider fetch; otherwise HTTP/transport incidents never reach the
+  // session that owns the request and the UI falls back to opaque SDK errors.
+  installProviderTrafficObserver();
   const identity = parseWorkerServerArgs(process.argv.slice(2));
   let patchIdentity: SdkPatchIdentity | undefined;
   let host: WorkerRuntimeHost | undefined;

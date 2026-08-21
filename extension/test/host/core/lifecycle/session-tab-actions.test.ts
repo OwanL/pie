@@ -420,3 +420,35 @@ test('openSession serializes backend session.open requests through the lifecycle
   resolvers.shift()?.();
   await flushMicrotasks(2);
 });
+
+test('session operation queues fence continuations from an ended backend generation', async () => {
+  const backend = {} as any;
+  const context = createExtensionContext();
+  const archState = createInitialArchState();
+  const state = new SessionServiceState(
+    context,
+    backend,
+    () => undefined,
+    () => archState,
+    () => undefined,
+    0,
+  );
+
+  let releaseFirst!: () => void;
+  const first = state.enqueueSessionOperation('/workspace/session.jsonl', () => new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  }));
+  await flushMicrotasks(2);
+
+  let staleTaskRan = false;
+  const stale = state.enqueueSessionOperation('/workspace/session.jsonl', async () => {
+    staleTaskRan = true;
+  });
+
+  state.resetRuntimeState();
+  releaseFirst();
+  await first;
+
+  await assert.rejects(stale, (error: Error) => error.name === 'LifecycleTaskStaleGenerationError');
+  assert.equal(staleTaskRan, false, 'an operation queued before restart must not mutate the replacement backend');
+});

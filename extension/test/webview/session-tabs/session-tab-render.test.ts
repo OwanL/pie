@@ -3,7 +3,11 @@ import assert from 'node:assert/strict';
 import { h } from 'preact';
 import renderToString from 'preact-render-to-string';
 
+import { installDom } from '../../_helpers/dom';
+installDom();
+
 import { SessionTab } from '../../../src/webview/panel/session-tabs/session-tab';
+import { SessionTabContextMenu } from '../../../src/webview/panel/session-tabs/session-tab-context-menu';
 import { PENDING_SESSION_PREFIX } from '../../../src/shared/tab-behavior';
 import type { SessionSummary } from '../../../src/shared/protocol';
 
@@ -40,6 +44,29 @@ test('pending new-session tab shows background preparation without disabling int
   assert.match(html, /preparing in background/);
   assert.match(html, /session-tab-running/);
   assert.doesNotMatch(html, /session-tab-main[^>]*disabled/);
+});
+
+test('tab context menu exposes menu semantics for every action', () => {
+  const tabPath = '/sessions/context-menu';
+  const summary: SessionSummary = {
+    path: tabPath,
+    name: 'Context Menu Session',
+    cwd: '/workspace',
+    modifiedAt: '2026-01-01T00:00:00.000Z',
+    messageCount: 1,
+  };
+  const html = renderToString(h(SessionTabContextMenu, {
+    tabContextMenu: { x: 20, y: 30, tabPath },
+    sessionByPath: new Map([[tabPath, summary]]),
+    runSummary: null,
+    isPinned: false,
+    hasDeferredTriggers: false,
+    onContextAction: () => undefined,
+  }));
+
+  assert.match(html, /role="menu"/);
+  assert.match(html, /aria-label="Context Menu Session tab actions"/);
+  assert.equal((html.match(/role="menuitem"/g) ?? []).length, 3);
 });
 
 test('delayed create exposes an explicit retry affordance', () => {

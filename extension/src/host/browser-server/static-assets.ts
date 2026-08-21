@@ -5,7 +5,8 @@
  * The compiled webview bundle (`out/webview/panel`) is served over HTTP using
  * the same Vite manifest the sidebar uses. Manifest/allowlist resolution, not
  * arbitrary path joining: only files referenced by the manifest (entry, CSS,
- * and transitively imported chunks) are ever served, plus an optional favicon.
+ * transitively imported chunks, and trusted entry-referenced worker chunks)
+ * are ever served, plus an optional favicon.
  *
  * Generic manifest loading, entry discovery, asset hashing, and HTML metadata
  * are extracted here so the VS Code renderer (`host/webview/assets.ts`) and
@@ -144,7 +145,7 @@ function collectManifestFiles(manifest: ViteManifest, entry: ViteManifestChunk, 
   return files;
 }
 
-/** Browser-mode static assets, loaded once at server start. */
+/** Browser-mode static assets, refreshed from the manifest at each HTML load. */
 export class BrowserStaticAssets {
   private resolved: ResolvedBrowserAssets | null = null;
 
@@ -161,6 +162,25 @@ export class BrowserStaticAssets {
     const files = collectManifestFiles(manifest, entry, this.assetDir);
     const entryPath = files.get(urlKeyFor(entry.file));
     if (!entryPath) throw new Error(`Entry chunk ${entry.file} is not under the webview asset dir.`);
+    // Vite 6 emits `?worker&url` chunks beside the entry but does not record
+    // them in manifest.json. Recover only hashed worker filenames referenced
+    // literally by the trusted built entry; the strict basename pattern and
+    // resolved-under-asset-dir check keep arbitrary files out of the serving
+    // allowlist while making browser and VS Code worker URLs symmetric.
+    const entrySource = await fs.readFile(entryPath, 'utf8');
+    const workerPattern = /["']\/assets\/([A-Za-z0-9_-]+-worker-[A-Za-z0-9_-]+\.js)["']/g;
+    for (const match of entrySource.matchAll(workerPattern)) {
+      const fileName = match[1];
+      if (!fileName) continue;
+      const absolute = path.resolve(this.assetDir, 'assets', fileName);
+      const assetBase = path.resolve(this.assetDir) + path.sep;
+      if (absolute.startsWith(assetBase)) files.set(fileName, absolute);
+    }
+    // Publish the new allowlist only after every referenced artifact exists.
+    // Build/install sync may replace the manifest and hashed files in separate
+    // filesystem operations; retaining the last complete snapshot prevents a
+    // concurrent request from observing a half-published bundle.
+    await Promise.all([...files.values()].map((file) => fs.access(file)));
     this.resolved = {
       assetVersion: assetVersionFromManifest(manifest),
       files,
@@ -214,7 +234,7 @@ export class BrowserStaticAssets {
    * `rendererHello` on every accepted socket carries the live identity).
    * Returns the HTML plus the exact CSP header for the response.
    */
-  renderHtml(options: { wsRoute: string; port: number; titleSuffix?: string }): { html: string; csp: string } {
+  renderHtml(options: { wsRoute: string; port: number; titleSuffix?: string; faviconRoute?: string }): { html: string; csp: string } {
     if (!this.resolved) throw new Error('BrowserStaticAssets.load() is required before renderHtml().');
     const nonce = crypto.randomBytes(16).toString('hex');
     const entryUrl = toAssetUrl(this.resolved.entryPath, this.assetDir);
@@ -224,6 +244,7 @@ export class BrowserStaticAssets {
     const cspParts = [
       "default-src 'none'",
       `script-src 'nonce-${nonce}'`,
+      "worker-src 'self'",
       // Inline styles are allowed: the render-crash overlay is deliberately
       // self-contained (it must work even when the app stylesheet failed to
       // load), and markdown content is DOMPurify-sanitized before injection.
@@ -243,6 +264,9 @@ export class BrowserStaticAssets {
     // clean.
     const metaCsp = cspParts.filter((part) => !part.startsWith('frame-ancestors')).join('; ');
     const suffix = options.titleSuffix ? ` — ${options.titleSuffix}` : '';
+    const faviconTag = options.faviconRoute
+      ? `  <link rel="icon" type="image/svg+xml" href="${escapeHtmlAttribute(options.faviconRoute)}" />\n`
+      : '';
     return {
       csp,
       html: `<!DOCTYPE html>
@@ -254,7 +278,7 @@ export class BrowserStaticAssets {
   <meta name="pie-asset-version" content="${this.resolved.assetVersion}" />
   <meta name="pie-transport" content="browser" />
   <meta name="pie-ws-route" content="${escapeHtmlAttribute(options.wsRoute)}" />
-${styleTags}
+${faviconTag}${styleTags}
   <title>pie${suffix}</title>
 </head>
 <body>

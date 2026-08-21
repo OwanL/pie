@@ -63,6 +63,10 @@ test('composer controls render in the agreed bottom-bar order', () => {
     toolResultPruningSettings: DEFAULT_TOOL_RESULT_PRUNING_SETTINGS,
     providerGateStats: EMPTY_PROVIDER_GATE_STATS,
     onSetPrefs: () => {},
+    mcpServers: [],
+    mcpPendingApply: false,
+    onMcpListRequested: () => {},
+    onMcpSetServerEnabled: () => {},
     onSetSystemPromptToggles: () => {},
     onSetPruningSettings: () => {},
     onSetToolResultPruningSettings: () => {},
@@ -135,6 +139,10 @@ test('composer uses the configured initial textarea rows and defaults to one', (
     onRemoveInput: () => {},
     onModelChange: () => {},
     onSetPrefs: () => {},
+    mcpServers: [],
+    mcpPendingApply: false,
+    onMcpListRequested: () => {},
+    onMcpSetServerEnabled: () => {},
     onSetSystemPromptToggles: () => {},
     onSetPruningSettings: () => {},
     onSetToolResultPruningSettings: () => {},
@@ -189,6 +197,23 @@ test('composer submit icon exposes send and waiting states accessibly', () => {
   }));
   assert.match(waitingHtml, /aria-label="Stopping response"[^>]*aria-busy="true"/);
   assert.match(waitingHtml, /disabled aria-label="Waiting for stop"/);
+});
+
+test('disconnected browser state disables queued, stop, and submit mutations', () => {
+  const html = renderToString(h(ComposerActions, {
+    busy: true,
+    commandsAvailable: false,
+    hasQueuedMessages: true,
+    onInterrupt: () => {},
+    onClearQueue: () => {},
+    sendCurrentText: () => {},
+    canSend: true,
+  }));
+
+  assert.equal((html.match(/disabled/g) ?? []).length, 3);
+  assert.match(html, /data-action="clear-queue"/);
+  assert.match(html, /data-action="stop"/);
+  assert.match(html, /data-action="queue"/);
 });
 
 test('composer bottom-bar CSS keeps compact hitboxes distinct and wraps at narrow widths', async () => {

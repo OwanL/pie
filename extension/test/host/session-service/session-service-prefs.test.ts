@@ -202,6 +202,7 @@ test('setPrefs notifies the backend of toggle changes', async () => {
     providerToggles: { 'github-copilot': false },
     extensionToggles: { 'some-extension': true },
     autonomousMode: true,
+    mcpEnabled: false,
   });
 
   const runtimePrefsSet = requests.find((r) => r.method === 'runtimePrefs.set');
@@ -209,6 +210,7 @@ test('setPrefs notifies the backend of toggle changes', async () => {
   assert.deepEqual((runtimePrefsSet.params as any).providerToggles, { 'github-copilot': false });
   assert.deepEqual((runtimePrefsSet.params as any).extensionToggles, { 'some-extension': true });
   assert.equal((runtimePrefsSet.params as any).autonomousMode, true);
+  assert.equal((runtimePrefsSet.params as any).mcpEnabled, false);
   assert.deepEqual((runtimePrefsSet.params as any).historyCompaction, getArchState().settings.prefs.historyCompaction);
 });
 

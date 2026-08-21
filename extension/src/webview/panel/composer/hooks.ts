@@ -51,12 +51,12 @@ export function useComposerInput({
   busy: boolean;
   /** Prevent both button and keyboard submission while a Stop is settling. */
   sendBlocked?: boolean;
-  onSend: (text: string) => void;
+  onSend: (text: string) => boolean | void;
   /** Brief H: retry re-send. Mirrors `onSend` but the host disables pruning
    *  atomically before re-sending when `disablePruning` is set ("retry without
    *  pruning"). Invoked by `sendAsRetry` (registered into `sendRetryDraftRef`
    *  in AppBody so the NoticeBanner's Retry button can re-send the live draft). */
-  onRetrySend: (text: string, disablePruning?: boolean) => void;
+  onRetrySend: (text: string, disablePruning?: boolean) => boolean | void;
   pendingComposerInputsLength: number;
   /** Empty-composer row count; changing it re-fits any existing inline height. */
   initialRows: number;
@@ -150,15 +150,25 @@ export function useComposerInput({
     const prevSessionPath = prevSessionPathRef.current;
     prevSessionPathRef.current = sessionPath;
 
-    if (
+    const isPendingResolution = (
       prevSessionPath !== null &&
       isPendingTabPath(prevSessionPath) &&
       sessionPath !== null &&
       !isPendingTabPath(sessionPath)
-    ) {
+    );
+
+    if (isPendingResolution) {
       // Pending → resolved: same session, only the path string changed.
       // Preserve the live composer state (text + undo history).
       return;
+    }
+
+    // A genuine tab switch can happen inside the 300 ms draft debounce. Its
+    // cleanup cancels the pending timer before it posts, so explicitly commit
+    // the outgoing session's live value at the ownership boundary. Without
+    // this flush the original draft is lost when the seed below commits.
+    if (prevSessionPath !== null && sessionPath !== prevSessionPath) {
+      postMessage({ type: 'setComposerDraft', sessionPath: prevSessionPath, text });
     }
 
     clearCheckpointTimer();
@@ -246,7 +256,10 @@ export function useComposerInput({
     if (submitting.current || sendBlocked) return;
     if (trimmed.length === 0 && pendingComposerInputsLength === 0) return;
     submitting.current = true;
-    onSend(trimmed);
+    if (onSend(trimmed) === false) {
+      submitting.current = false;
+      return;
+    }
     // Steering: when sending while already busy (a queued steering
     // injection), `busy` is already true so the [busy] effect that normally
     // clears the submit latch won't fire — clear it now so the user can queue
@@ -273,15 +286,18 @@ export function useComposerInput({
   // would be stale once the user types).
   const sendAsRetry = useCallback((disablePruning?: boolean) => {
     const trimmed = text.trim();
-    if (submitting.current) return;
+    if (submitting.current || sendBlocked) return;
     if ((trimmed.length === 0 && pendingComposerInputsLength === 0) || busy) return;
     submitting.current = true;
-    onRetrySend(trimmed, disablePruning);
+    if (onRetrySend(trimmed, disablePruning) === false) {
+      submitting.current = false;
+      return;
+    }
     clearCheckpointTimer();
     setHistory(trimmed);
     setHistory('', true);
     resetComposer();
-  }, [busy, onRetrySend, pendingComposerInputsLength, resetComposer, setHistory, clearCheckpointTimer, text]);
+  }, [busy, sendBlocked, onRetrySend, pendingComposerInputsLength, resetComposer, setHistory, clearCheckpointTimer, text]);
 
   const undoComposer = useCallback(() => {
     if (!canUndo) return;

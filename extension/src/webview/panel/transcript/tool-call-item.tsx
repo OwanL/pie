@@ -41,7 +41,7 @@ import { useStickToBottom } from './use-stick-to-bottom';
 import { SubagentCallContext } from './subagent-call-context';
 import { ACTIVITY_TAIL_MAX_LINES } from './activity-tail';
 import { TurnActivityTailBody, isIdle, subagentPreviewTail } from './activity-tail-preview';
-import { useCommittedToolLeaf } from './commit-registry';
+import { CommittedToolLeaf } from './commit-registry';
 
 interface ToolCallItemProps {
   toolCall: ToolCall;
@@ -1057,11 +1057,7 @@ function ToolCallItemBody({
 
 const MemoizedToolCallItemBody = memo(ToolCallItemBody, areToolCallItemPropsEqual);
 
-export function ToolCallItem(props: ToolCallItemProps) {
-  // Keep commit evidence outside the memoized heavy body: every parent/context
-  // revision reaches the canonical leaf even when an equivalent structured
-  // clone can reuse historical markdown/tool/subagent rendering.
-  useCommittedToolLeaf(props.toolCall);
+function ToolCallItemView(props: ToolCallItemProps) {
   const lifecycleKey = toolDisclosureKey(props.toolCall.id);
   return (
     // Renderer content may promote from generic draft to a specialized card;
@@ -1073,10 +1069,16 @@ export function ToolCallItem(props: ToolCallItemProps) {
       data-tool-call-id={props.toolCall.id}
       data-tool-lifecycle-key={lifecycleKey}
     >
+      <CommittedToolLeaf toolCall={props.toolCall} />
       <MemoizedToolCallItemBody {...props} />
     </div>
   );
 }
+
+// The active assistant row reconstructs ToolCallItem VNodes on each streamed
+// snapshot. Bail at the lifecycle boundary so completed sequenced siblings do
+// not rerun hooks/wrappers when only the newest tool advanced.
+export const ToolCallItem = memo(ToolCallItemView, areToolCallItemPropsEqual);
 
 /** Subagent renderer exposed for registry registration. */
 export function SubagentToolRenderer({

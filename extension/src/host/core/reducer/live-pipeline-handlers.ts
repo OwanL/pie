@@ -5,7 +5,7 @@ import type { ChatMessage } from '../../../shared/protocol/messages.js';
 import { LIVE_PIPELINE_LIMITS, type LivePipelineState } from '../../../shared/live-pipeline-protocol.js';
 import type { Event } from '../events.js';
 import type { Effect } from '../effects.js';
-import { findPendingTurnOwner, type ReducerResult } from './helpers.js';
+import { commitPromotedSend, type ReducerResult } from './helpers.js';
 import { applyLiveTurnCheckpoint } from '../live-pipeline/checkpoint.js';
 import { interruptLivePipelineForRestart } from '../live-pipeline/cleanup.js';
 import { applyLiveSemanticEnvelope } from '../live-pipeline/transitions.js';
@@ -94,6 +94,19 @@ export function handleLiveTurnCheckpointResult(
     return markCheckpointFailure(state, event.sessionPath, event.turnId, event.attemptId, event.occurredAt);
   }
   let next = { ...state, livePipeline: applied.state };
+  // A checkpoint can be the first authoritative proof that a turn crossed its
+  // commit point. This happens when turn.started was missed, arrived behind a
+  // cold session.opened checkpoint, or was classified for repair. Reconcile
+  // the optimistic send exactly as the direct turn.started path does so its
+  // rollback snapshot and watchdog cannot survive a healthy running turn.
+  const committedSend = commitPromotedSend(
+    next,
+    event.checkpoint.sessionPath,
+    event.checkpoint.turn.requestId,
+    event.checkpoint.turn.canonicalMessageId,
+  );
+  next = committedSend.state;
+  const commitEffects = committedSend.effects;
   if (event.checkpoint.terminal) {
     const turns = { ...next.livePipeline.turnsBySession };
     delete turns[event.sessionPath];
@@ -133,11 +146,13 @@ export function handleLiveTurnCheckpointResult(
     next = appendDurableTerminal(next, event.sessionPath, terminal);
     next = clearPendingExtensionUiRequests(next, event.sessionPath);
   } else if (event.status === 'terminal_grace') {
-    return interruptOne(next, event.sessionPath, event.occurredAt);
+    const interrupted = interruptOne(next, event.sessionPath, event.occurredAt);
+    return { state: interrupted.state, effects: [...commitEffects, ...interrupted.effects] };
   } else {
-    return replayPendingAfterCheckpoint(next, event.turnId, event.attemptId);
+    const replayed = replayPendingAfterCheckpoint(next, event.turnId, event.attemptId);
+    return { state: replayed.state, effects: [...commitEffects, ...replayed.effects] };
   }
-  return { state: next, effects: [] };
+  return { state: next, effects: commitEffects };
 }
 
 function replayPendingAfterCheckpoint(
@@ -206,25 +221,6 @@ function checkpointEffect(sessionPath: string, turnId: string, attemptId: string
     turnId,
     attemptId,
   };
-}
-
-function commitPromotedSend(
-  state: ArchState,
-  sessionPath: string,
-  requestId: string,
-  canonicalMessageId: string,
-): ReducerResult {
-  const effects: Effect[] = [];
-  const turnOwner = findPendingTurnOwner(state, sessionPath, requestId);
-  if (turnOwner) effects.push({ kind: 'ClearSendTimer', corrId: turnOwner.corrId });
-  const next = produce(state, (draft) => {
-    draft.pending.currentTurnBySession[sessionPath] = { requestId, firstMessageId: canonicalMessageId };
-    delete draft.pending.requestIdToLocalId[requestId];
-    if (turnOwner?.source === 'promoted') delete draft.pending.promoted[turnOwner.corrId];
-    else if (turnOwner) delete draft.pending.ops[turnOwner.corrId];
-    delete draft.pending.prepassBySession[sessionPath];
-  });
-  return { state: next, effects };
 }
 
 function appendDurableTerminal(state: ArchState, sessionPath: string, terminal: ChatMessage): ArchState {

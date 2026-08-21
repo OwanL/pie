@@ -348,6 +348,33 @@ test('multiple interleaved drafts project as ordered provisional ToolCall rows a
   assert.equal(duplicateBoundary.state.turnsBySession[base.sessionPath]?.toolDraftsByCallId['tool-a'], undefined);
 });
 
+test('live projection suppresses raw DSML duplicated beside a structured tool draft', () => {
+  let state = apply(createEmptyLivePipelineState(), start()).state;
+  state = apply(state, {
+    ...base,
+    kind: 'turn.text',
+    seq: 2,
+    delta: 'Checking now:curr<tool_calls>\n<｜DSML｜invoke name="computer">\n<｜DSML｜parameter name="operation">observe</｜DSML｜parameter>',
+  }).state;
+  state = apply(state, {
+    ...base,
+    kind: 'turn.toolDraft',
+    seq: 3,
+    draft: {
+      toolCallId: 'computer-1',
+      name: 'computer',
+      argumentsJson: '{"operation":',
+      phase: 'drafting',
+    },
+  }).state;
+
+  const projected = projectTranscriptView([], state, base.sessionPath).activeTurn!;
+
+  assert.equal(projected.markdown, 'Checking now:');
+  assert.equal(projected.toolCalls?.[0]?.name, 'computer');
+  assert.doesNotMatch(JSON.stringify(projected), /DSML|<tool_calls>|curr/iu);
+});
+
 test('host draft state handles prototype-like tool-call IDs safely', () => {
   let state = apply(createEmptyLivePipelineState(), start()).state;
   const drafted = apply(state, {

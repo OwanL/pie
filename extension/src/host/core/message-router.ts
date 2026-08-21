@@ -244,6 +244,12 @@ export class MessageRouter {
       case 'setPrefs':
         return this.onSetPrefs(msg as Extract<WebviewToHostMessage, { type: 'setPrefs' }>);
 
+      case 'mcpListRequested':
+        return this.onMcpListRequested(msg as Extract<WebviewToHostMessage, { type: 'mcpListRequested' }>);
+
+      case 'mcpSetServerEnabled':
+        return this.onMcpSetServerEnabled(msg as Extract<WebviewToHostMessage, { type: 'mcpSetServerEnabled' }>);
+
       case 'setPrivacyMode':
         return this.onSetPrivacyMode(msg as Extract<WebviewToHostMessage, { type: 'setPrivacyMode' }>, context);
 
@@ -969,6 +975,25 @@ export class MessageRouter {
     this.dispatchEvent({
       kind: 'Command',
       cmd: { kind: 'SetPrefs', corrId: crypto.randomUUID(), prefs: msg.prefs },
+    });
+  }
+
+  private onMcpListRequested(_msg: Extract<WebviewToHostMessage, { type: 'mcpListRequested' }>): void {
+    this.dispatchEvent({
+      kind: 'Command',
+      cmd: { kind: 'McpListRequested', corrId: crypto.randomUUID() },
+    });
+  }
+
+  private onMcpSetServerEnabled(msg: Extract<WebviewToHostMessage, { type: 'mcpSetServerEnabled' }>): void {
+    this.dispatchEvent({
+      kind: 'Command',
+      cmd: {
+        kind: 'McpSetServerEnabled',
+        corrId: crypto.randomUUID(),
+        name: msg.name,
+        enabled: msg.enabled,
+      },
     });
   }
 

@@ -61,6 +61,47 @@ async function removeStaleLock(lockPath: string, staleMs: number): Promise<void>
   }
 }
 
+function parseLockOwnerPid(owner: string): number | undefined {
+  const match = /^(\d+):/.exec(owner.trim());
+  if (!match) return undefined;
+  const pid = Number(match[1]);
+  return Number.isSafeInteger(pid) && pid > 0 ? pid : undefined;
+}
+
+/** Recover immediately when a backend was terminated while holding the lock.
+ * Age-only recovery leaves every replacement backend unusable for the entire
+ * stale window (30s by default), which is longer than the acquisition timeout.
+ * Unknown/legacy owners remain age-gated; only a positively dead PID is
+ * eligible for immediate removal. */
+async function removeAbandonedProcessLock(lockPath: string): Promise<void> {
+  let observedOwner: string;
+  try {
+    observedOwner = await fs.readFile(lockPath, 'utf8');
+  } catch (error) {
+    if (isErrno(error, 'ENOENT')) return;
+    throw error;
+  }
+  const ownerPid = parseLockOwnerPid(observedOwner);
+  if (ownerPid === undefined) return;
+  try {
+    process.kill(ownerPid, 0);
+    return;
+  } catch (error) {
+    // EPERM means the process may still exist but cannot be inspected. Only
+    // ESRCH proves the recorded owner has gone away.
+    if (!isErrno(error, 'ESRCH')) return;
+  }
+
+  // Re-read immediately before unlinking so a contender that already
+  // replaced the dead owner's file is never mistaken for that owner.
+  try {
+    const currentOwner = await fs.readFile(lockPath, 'utf8');
+    if (currentOwner === observedOwner) await fs.unlink(lockPath);
+  } catch (error) {
+    if (!isErrno(error, 'ENOENT')) throw error;
+  }
+}
+
 /**
  * Run an action while holding an advisory lock shared by the extension host
  * and backend processes. The lock covers the complete read-modify-write cycle.
@@ -99,6 +140,7 @@ export async function withFileUpdateLock<T>(
         continue;
       }
       retriedUnconfirmedContention = false;
+      await removeAbandonedProcessLock(lockPath);
       await removeStaleLock(lockPath, staleMs);
       if (Date.now() - startedAt >= timeoutMs) {
         throw new Error(`Timed out waiting for settings update lock ${lockPath} after ${timeoutMs}ms.`);

@@ -1,6 +1,6 @@
 {
-  "defaultModel": "deepseek-v4-flash:0731-cloud",
-  "defaultThinkingLevel": "max",
+  "defaultModel": "deepseek-v4-pro:0813-cloud",
+  "defaultThinkingLevel": "high",
   "defaultProvider": "ollama",
   "retry": {
     "enabled": true,
@@ -14,7 +14,8 @@
   "httpIdleTimeoutMs": 0,
   "bashDefaultTimeout": 60,
   "packages": [
-    "npm:pi-web-access@0.13.0"
+    "npm:pi-web-access@0.13.0",
+    "npm:pi-mcp-adapter@2.20.1"
   ],
   "pruning": {
     "model": "deepseek-v4-flash:0731-cloud",
@@ -45,7 +46,8 @@
         "read",
         "write",
         "subagent",
-        "ask_user"
+        "ask_user",
+        "mcp"
       ]
     },
     "autoSkipBelowTokens": null

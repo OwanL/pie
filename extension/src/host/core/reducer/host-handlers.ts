@@ -37,7 +37,15 @@ export function handleBackendReadyChanged(
   const hasEntries = allEntries.length > 0;
   const nextState = {
     ...state,
-    settings: { ...state.settings, backendReady: true },
+    settings: {
+      ...state.settings,
+      backendReady: true,
+      // A backend restart is the point where per-server MCP toggles apply
+      // (the adapter re-reads config on the next session start), so the
+      // pending-apply hint is no longer needed. Ignore duplicate ready events
+      // from the same backend generation so they cannot clear a newer toggle.
+      mcpPendingApply: state.settings.backendReady ? state.settings.mcpPendingApply : false,
+    },
     pending: {
       ...state.pending,
       backendReadyQueueBySession: {},
@@ -76,6 +84,8 @@ export function handleBackendReadyWatchdogFired(
     draft.pending.backendReadyQueueBySession = {};
     draft.settings.notice = `Backend did not become ready within ${timeoutSec}s. ${allEntries.length} queued message${allEntries.length === 1 ? '' : 's'} dropped — please retry.`;
     draft.settings.noticeKind = null;
+    draft.settings.noticeRaw = null;
+    draft.settings.noticeSessionPath = null;
   });
 
   // Brief H: restore pruning for any dropped "retry without pruning" sends. The

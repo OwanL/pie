@@ -16,6 +16,7 @@ import {
   captureOriginalSystemPromptOptions,
   contextFileEntryId,
   installAutonomousModeToolGuard,
+  installMcpToolGuard,
   installSystemPromptToggleRebuildGuard,
   installSystemPromptToolToggleGuard,
   isSupersetSystemPromptOptions,
@@ -467,6 +468,22 @@ test('Autonomous mode guard prevents extensions from re-enabling ask_user', () =
   autonomousMode = false;
   session.setActiveToolsByName(['read', 'ask_user', 'bash']);
   assert.deepEqual(applied.at(-1), ['read', 'ask_user', 'bash']);
+});
+
+test('MCP guard strips adapter tools while the MCP pref is off', () => {
+  let mcpEnabled = false;
+  const applied: string[][] = [];
+  const session = {
+    setActiveToolsByName(names: string[]) { applied.push(names); },
+  };
+
+  installMcpToolGuard(session, () => mcpEnabled);
+  session.setActiveToolsByName(['read', 'mcp', 'mcpScript', 'bash']);
+  assert.deepEqual(applied, [['read', 'bash']]);
+
+  mcpEnabled = true;
+  session.setActiveToolsByName(['read', 'mcp', 'bash']);
+  assert.deepEqual(applied.at(-1), ['read', 'mcp', 'bash']);
 });
 
 test('Skills row remains toggleable while all tools are manually disabled', () => {

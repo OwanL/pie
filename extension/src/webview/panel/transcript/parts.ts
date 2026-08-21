@@ -5,6 +5,7 @@ export {
   assistantPartsFromMessage,
   mergeAssistantParts,
   reasoningFromMessageParts,
+  sanitizeProviderToolProtocolParts,
   textFromMessageParts,
   toolCallsFromMessageParts,
   upsertAssistantToolPart,

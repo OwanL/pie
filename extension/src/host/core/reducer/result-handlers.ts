@@ -3,10 +3,18 @@ import { produce } from 'immer';
 import type { ArchState } from '../arch-state.js';
 import type { Effect } from '../effects.js';
 import type { ReducerResult } from './helpers.js';
-import { addToArray, appendLocalUserMessage, removeFromArray, removeMessage, restoreRemovedTail } from './helpers.js';
+import {
+  addToArray,
+  appendLocalUserMessage,
+  mergeRejectedComposerInputs,
+  mergeRejectedDraftText,
+  removeFromArray,
+  removeMessage,
+  restoreRemovedTail,
+} from './helpers.js';
 import type { Event, EffectResultEvent } from '../events.js';
 import { applySetModelOptimistic, dropSetModelPending, revertSetModel } from './set-model-handlers.js';
-import { mapSendOrEditError, mapPreflightError } from '../../../shared/error-mapping.js';
+import { mapSendOrEditError, mapPreflightError, stripReqIds } from '../../../shared/error-mapping.js';
 
 export function handleInterruptResult(state: ArchState, event: Extract<Event, { kind: 'InterruptResult' }>): ReducerResult {
   let nextState = state;
@@ -70,10 +78,12 @@ export function handleReplaceQueueResult(state: ArchState, event: Extract<Event,
           draft.settings.notice = 'The queued messages could not be restored and were cleared. Re-send them if they are still needed.';
           draft.settings.noticeKind = 'operational-error';
           draft.settings.noticeRaw = event.error;
+          draft.settings.noticeSessionPath = event.sessionPath;
         } else if (mapped) {
           draft.settings.notice = mapped.message;
           draft.settings.noticeKind = mapped.kind;
           draft.settings.noticeRaw = event.error ?? null;
+          draft.settings.noticeSessionPath = event.sessionPath;
         }
       }),
       effects: [{
@@ -198,6 +208,14 @@ export function handleSendResult(state: ArchState, event: Extract<Event, { kind:
 
   // Failure: rollback optimistic message, notify user, restore session name
   // Also clear the busy state we set optimistically in the Send command handler.
+  const restoredDraftText = mergeRejectedDraftText(
+    pending.text ?? '',
+    state.composer.draftTextBySession[pending.sessionPath],
+  );
+  const restoredInputs = mergeRejectedComposerInputs(
+    pending.inputs,
+    state.composer.pendingComposerInputsBySession[pending.sessionPath],
+  );
   const effects: Effect[] = [
     {
       kind: 'PostImperative',
@@ -205,9 +223,9 @@ export function handleSendResult(state: ArchState, event: Extract<Event, { kind:
       imperativeMessage: {
         type: 'sendRejected',
         sessionPath: pending.sessionPath,
-        text: pending.text ?? '',
+        text: restoredDraftText,
         localId: pending.localId,
-        inputs: pending.inputs ?? [],
+        inputs: restoredInputs,
       },
     },
   ];
@@ -254,13 +272,15 @@ export function handleSendResult(state: ArchState, event: Extract<Event, { kind:
       // Retain the full host-side error (including req-NN ids) behind the short
       // summary. Projection redacts credentials before the webview boundary.
       draft.settings.noticeRaw = event.error ?? null;
+      draft.settings.noticeSessionPath = pending.sessionPath;
     }
     // Restore composer inputs from the send-time snapshot so a retry can
     // re-send them (no data loss). Inputs were cleared at send time (handleSend);
     // the pre-ack failure must hand them back. Mirrors the post-ack
     // `handlePreflightFailed` restore from `pending.promoted[corrId].inputs`.
-    if (pending.inputs && pending.inputs.length > 0) {
-      draft.composer.pendingComposerInputsBySession[pending.sessionPath] = [...pending.inputs];
+    draft.composer.draftTextBySession[pending.sessionPath] = restoredDraftText;
+    if (restoredInputs.length > 0) {
+      draft.composer.pendingComposerInputsBySession[pending.sessionPath] = restoredInputs;
     }
     // Brief F: the send was rejected before the prepass ran — clear any
     // prepass chip (idle).
@@ -328,6 +348,18 @@ export function handlePreflightFailed(state: ArchState, event: Extract<Event, { 
   // timer even when they beat the RPC ack. A timer-originated failure already
   // carries corrId and is deliberately left in the runner so a genuinely late
   // commit can emit PreflightSuperseded.
+  const restoredDraftText = snapshot.kind === 'send'
+    ? mergeRejectedDraftText(
+      snapshot.text ?? '',
+      state.composer.draftTextBySession[snapshot.sessionPath],
+    )
+    : '';
+  const restoredInputs = snapshot.kind === 'send'
+    ? mergeRejectedComposerInputs(
+      snapshot.inputs,
+      state.composer.pendingComposerInputsBySession[snapshot.sessionPath],
+    )
+    : [];
   const effects: Effect[] = event.corrId ? [] : [{ kind: 'ClearSendTimer', corrId }];
   if (snapshot.kind === 'send') {
     effects.push({
@@ -336,9 +368,9 @@ export function handlePreflightFailed(state: ArchState, event: Extract<Event, { 
       imperativeMessage: {
         type: 'sendRejected',
         sessionPath: snapshot.sessionPath,
-        text: snapshot.text ?? '',
+        text: restoredDraftText,
         localId: snapshot.localId,
-        inputs: snapshot.inputs ?? [],
+        inputs: restoredInputs,
       },
     });
   }
@@ -384,8 +416,11 @@ export function handlePreflightFailed(state: ArchState, event: Extract<Event, { 
     }
     // Restore composer inputs from the promoted snapshot so a retry can re-send
     // them (no data loss). Brief C wires the webview-side restore.
-    if (snapshot.inputs && snapshot.inputs.length > 0) {
-      draft.composer.pendingComposerInputsBySession[snapshot.sessionPath] = [...snapshot.inputs];
+    if (snapshot.kind === 'send') {
+      draft.composer.draftTextBySession[snapshot.sessionPath] = restoredDraftText;
+    }
+    if (restoredInputs.length > 0) {
+      draft.composer.pendingComposerInputsBySession[snapshot.sessionPath] = restoredInputs;
     }
     // Brief F: the prepass failed post-ack. Surface a 'failed' status chip
     // (Brief H refines the message copy); the notice below carries the
@@ -400,6 +435,7 @@ export function handlePreflightFailed(state: ArchState, event: Extract<Event, { 
     draft.settings.notice = preflightMapped.message;
     draft.settings.noticeKind = preflightMapped.kind;
     draft.settings.noticeRaw = event.error ?? null;
+    draft.settings.noticeSessionPath = snapshot.sessionPath;
     // Restore session summary if the optimistic send had renamed it
     if (snapshot.previousSummary) {
       const idx = draft.sessions.sessions.findIndex((s) => s.path === snapshot.previousSummary!.path);
@@ -440,10 +476,14 @@ export function handlePreflightSuperseded(state: ArchState, event: Extract<Event
 
     draft.sessions.runningSessionPaths = addToArray(draft.sessions.runningSessionPaths, sessionPath);
 
-    if (draft.settings.noticeKind === 'prepass-timeout' || draft.settings.noticeKind === 'model-start-timeout') {
+    if (
+      draft.settings.noticeSessionPath === sessionPath
+      && (draft.settings.noticeKind === 'prepass-timeout' || draft.settings.noticeKind === 'model-start-timeout')
+    ) {
       draft.settings.notice = null;
       draft.settings.noticeKind = null;
       draft.settings.noticeRaw = null;
+      draft.settings.noticeSessionPath = null;
     }
   });
 
@@ -511,6 +551,7 @@ export function handleEditResult(state: ArchState, event: Extract<Event, { kind:
       draft.settings.notice = editMapped.message;
       draft.settings.noticeKind = editMapped.kind;
       draft.settings.noticeRaw = event.error ?? null;
+      draft.settings.noticeSessionPath = pending.sessionPath;
     }
     // Brief F: edit rejected pre-ack — clear any prepass chip (idle).
     delete draft.pending.prepassBySession[pending.sessionPath];
@@ -565,7 +606,42 @@ export function handleSetPrefsResult(state: ArchState, event: Extract<Event, { k
         ...state.settings,
         notice: `The setting could not be fully applied. Retry it, or restart the backend if the problem continues.`,
         noticeKind: 'operational-error',
-        noticeRaw: event.error ?? 'runtimePrefs.set failed',
+        // This field is projected to renderers and can be copied from the
+        // notice details. Internal request correlation ids stay in host logs.
+        noticeRaw: stripReqIds(event.error ?? 'runtimePrefs.set failed'),
+        noticeSessionPath: null,
+      },
+    },
+    effects: [],
+  };
+}
+
+/** Backend answered `mcp.list` / `mcp.setServerEnabled`. The response is
+ *  authoritative: on success replace the server list and record whether a
+ *  toggle still awaits a session reload / backend restart to apply. A plain
+ *  list read (or a no-op toggle) does not reload the adapter, so the
+ *  pending-apply flag is preserved unless the response carries a new value.
+ *  A failed fetch/toggle keeps the cached list and flag and surfaces the
+ *  error state so the UI offers a Refresh instead of pretending there are
+ *  no servers. */
+export function handleMcpServersUpdated(state: ArchState, event: Extract<Event, { kind: 'McpServersUpdated' }>): ReducerResult {
+  if (event.ok === false) {
+    return {
+      state: {
+        ...state,
+        settings: { ...state.settings, mcpServersStatus: 'error' },
+      },
+      effects: [],
+    };
+  }
+  return {
+    state: {
+      ...state,
+      settings: {
+        ...state.settings,
+        mcpServers: event.servers ?? state.settings.mcpServers,
+        mcpServersStatus: 'ok',
+        mcpPendingApply: event.pendingApply ?? state.settings.mcpPendingApply,
       },
     },
     effects: [],
@@ -593,6 +669,7 @@ export function handleEffectResult(state: ArchState, event: Exclude<EffectResult
             notice: 'Could not compact this conversation.',
             noticeKind: 'operational-error',
             noticeRaw: event.error ?? 'message.compact failed',
+            noticeSessionPath: event.sessionPath,
           },
         },
         effects: [],

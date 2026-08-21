@@ -155,6 +155,12 @@ export function makeEffectRunnerDeps(opts: MakeEffectRunnerDepsOpts = {}): MakeE
   const service: SessionServiceLike = {
     async hydrateModelState() {},
     async setPrefs() {},
+    async mcpList() {
+      return { servers: [] };
+    },
+    async mcpSetServerEnabled() {
+      return { servers: [], changed: false };
+    },
     async setSystemPromptToggles() {},
     subscribeDetail(options: {
       subscriptionId: string;

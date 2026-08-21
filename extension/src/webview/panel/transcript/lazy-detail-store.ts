@@ -28,7 +28,7 @@ const activeRequests = new Set<string>();
 const pendingRequests: Array<{ sessionPath: string; ref: LazyDetailRef }> = [];
 const subscribersByKey = new Map<string, Set<() => void>>();
 let cacheGeneration = 0;
-let post: ((message: WebviewToHostMessage) => void) | undefined;
+let post: ((message: WebviewToHostMessage) => unknown) | undefined;
 
 function notifyKey(key: string): void {
   for (const subscriber of subscribersByKey.get(key) ?? []) subscriber();
@@ -71,11 +71,20 @@ function pumpRequests(): void {
     if (!next) return;
     if (!inFlight.has(next.ref.key)) continue;
     activeRequests.add(next.ref.key);
-    post({ type: 'requestDetail', sessionPath: next.sessionPath, ref: next.ref });
+    const accepted = post({ type: 'requestDetail', sessionPath: next.sessionPath, ref: next.ref });
+    if (accepted === false) {
+      // The browser can lose its renderer route between expansion and send.
+      // Keep the explicit request queued, but do not occupy the single active
+      // slot forever. `setLazyDetailPostMessage` pumps it again when the
+      // transport connection changes.
+      activeRequests.delete(next.ref.key);
+      pendingRequests.unshift(next);
+      return;
+    }
   }
 }
 
-export function setLazyDetailPostMessage(value: (message: WebviewToHostMessage) => void): void {
+export function setLazyDetailPostMessage(value: (message: WebviewToHostMessage) => unknown): void {
   post = value;
   pumpRequests();
 }

@@ -42,6 +42,8 @@ import type {
   ShowModelSwitchConfirmEffect,
   SetModelRpcEffect,
   SetPrefsRpcEffect,
+  McpListRpcEffect,
+  McpSetServerRpcEffect,
   SetSystemPromptTogglesRpcEffect,
   DetailSubscribeRpcEffect,
   DetailUnsubscribeRpcEffect,
@@ -61,7 +63,7 @@ import type {
 import { toErrorMessage } from '../util/error-message';
 import type { EffectResultEvent, CommandEvent } from './events';
 import type { FileDiffService } from './file-diff-service';
-import type { ChatPrefs, ComposerInput, ProviderGateStats, PruningMode, PruningSettings, ToolResultPruningSettings, ThinkingLevel, UserContentPart } from '../../shared/protocol';
+import type { ChatPrefs, ComposerInput, McpServerInfo, ProviderGateStats, PruningMode, PruningSettings, ToolResultPruningSettings, ThinkingLevel, UserContentPart } from '../../shared/protocol';
 import type { LiveSubagentDetailAddress, DetailCursor, DetailPageRef } from '../../shared/protocol/subagent-detail';
 import { RequestTimeoutError, type RequestOptions } from '../../shared/request-tracker';
 import type { LiveLifecycleWatermark, LiveTurnCheckpoint } from '../../shared/live-pipeline-protocol';
@@ -118,6 +120,11 @@ export interface SessionServiceLike {
     modelWriteFence?: number;
   }): Promise<void>;
   setPrefs(prefs: Partial<ChatPrefs>): Promise<void>;
+  /** Re-read the effective MCP server config from the backend. */
+  mcpList(): Promise<{ servers: McpServerInfo[] }>;
+  /** Persist a per-server `disabled` override; resolves with the fresh list
+   *  and whether the override actually changed. */
+  mcpSetServerEnabled(name: string, enabled: boolean): Promise<{ servers: McpServerInfo[]; changed: boolean }>;
   /** Push the complete disabled-entry set for a session's system prompts to the
    *  backend (`systemPromptToggles.set`). Fire-and-forget: the backend re-emits
    *  `session.opened` to update host state, so no *Result event is expected. */
@@ -342,6 +349,11 @@ interface InFlightSend {
   firstArmedAt: number;
   /** Caller-owned cancel controller passed to `backend.request` as the signal. */
   abort: AbortController;
+  /** Whether a local interrupt may still reject the RPC waiter. Edits become
+   * non-abortable immediately before their destructive truncate request is
+   * issued: JSON-RPC cancellation is local, so rolling the optimistic edit
+   * back after that boundary can diverge from a truncate that still commits. */
+  locallyAbortable: boolean;
   /** Backend-assigned request id, stamped after early-ack so the fire callback
    *  can dispatch `PreflightFailed` with it. */
   requestId?: string;
@@ -388,6 +400,10 @@ export class EffectRunner {
    * provider toggles cannot complete out of order and restore stale settings.
    * This queue is deliberately independent of session lifecycle work. */
   private prefsQueue: Promise<void> = Promise.resolve();
+  /** Model/reasoning and preference writes that must settle before a manual
+   * backend restart. The UI is fenced first, so draining this set is bounded
+   * to work the user already initiated. */
+  private readonly configurationOperations = new Set<Promise<void>>();
 
   /** Injectable timer sink (real timers in production, fake in tests). */
   private readonly timer: TimerSink;
@@ -438,6 +454,8 @@ export class EffectRunner {
       ShowModelSwitchConfirm: (e) => this.handleShowModelSwitchConfirm(e),
       SetModelRpc: (e) => this.handleSetModelRpc(e),
       SetPrefsRpc: (e) => this.handleSetPrefsRpc(e),
+      McpListRpc: (e) => this.handleMcpListRpc(e),
+      McpSetServerRpc: (e) => this.handleMcpSetServerRpc(e),
       SetPrivacyMode: (e) => this.handleSetPrivacyMode(e),
       SetSystemPromptTogglesRpc: (e) => this.handleSetSystemPromptTogglesRpc(e),
       DetailSubscribeRpc: (e) => this.handleDetailSubscribeRpc(e),
@@ -518,6 +536,12 @@ export class EffectRunner {
         break;
       case 'SetPrefsRpc':
         payload.prefKeys = Object.keys(effect.prefs);
+        break;
+      case 'McpListRpc':
+        break;
+      case 'McpSetServerRpc':
+        payload.mcpServer = effect.name;
+        payload.mcpEnabled = effect.enabled;
         break;
       case 'SetPruningSettings':
       case 'SetToolResultPruningSettings':
@@ -724,7 +748,7 @@ export class EffectRunner {
     // through the target session queue. A model change must stay ordered with
     // sends for that session, but must not block create/open for another tab.
     const { backend, queues, dispatch, service } = this.deps;
-    void queues.enqueueSessionOperation(effect.sessionPath, async () => {
+    const operation = queues.enqueueSessionOperation(effect.sessionPath, async () => {
       try {
         const setParams: Record<string, unknown> = {
           sessionPath: effect.sessionPath,
@@ -749,9 +773,14 @@ export class EffectRunner {
         );
         dispatch({ kind: 'SetModelResult', corrId: effect.corrId, sessionPath: effect.sessionPath, ok: true });
       } catch (err) {
+        this.deps.log.log('warn', 'SetModelRpc failed', {
+          sessionPath: effect.sessionPath,
+          error: toErrorMessage(err),
+        });
         dispatch({ kind: 'SetModelResult', corrId: effect.corrId, sessionPath: effect.sessionPath, ok: false, error: toErrorMessage(err) });
       }
     });
+    this.trackConfigurationOperation(operation);
   }
 
   /** `SetPrefsRpc` — IIFE (not queued), `service.setPrefs(prefs)`. Result
@@ -762,10 +791,87 @@ export class EffectRunner {
         await this.deps.service.setPrefs(effect.prefs);
         this.deps.dispatch({ kind: 'SetPrefsResult', corrId: effect.corrId, ok: true });
       } catch (err) {
+        this.deps.log.log('warn', 'SetPrefsRpc failed', { error: toErrorMessage(err) });
         this.deps.dispatch({ kind: 'SetPrefsResult', corrId: effect.corrId, ok: false, error: toErrorMessage(err) });
       }
     });
     this.prefsQueue = operation.then(() => undefined, () => undefined);
+    this.trackConfigurationOperation(this.prefsQueue);
+  }
+
+  /** `McpListRpc` — refresh the effective MCP server list from the backend.
+   *  Queued behind `prefsQueue` so a toggle followed by a list never races.
+   *  A config list read does not reload the adapter, so the response carries
+   *  no `pendingApply` — the reducer preserves the current flag. A failure
+   *  dispatches `ok: false` so the UI can surface an error state (cached
+   *  rows stay visible) instead of rendering an empty list. */
+  private handleMcpListRpc(effect: McpListRpcEffect): void {
+    const operation = this.prefsQueue.catch(() => undefined).then(async () => {
+      try {
+        const result = await this.deps.service.mcpList();
+        this.deps.dispatchEvent({
+          kind: 'McpServersUpdated',
+          corrId: effect.corrId,
+          ok: true,
+          servers: result.servers,
+        });
+      } catch (err) {
+        this.deps.log.log('warn', 'McpListRpc failed', { error: toErrorMessage(err) });
+        this.deps.dispatchEvent({
+          kind: 'McpServersUpdated',
+          corrId: effect.corrId,
+          ok: false,
+          error: toErrorMessage(err),
+        });
+      }
+    });
+    this.prefsQueue = operation.then(() => undefined, () => undefined);
+    this.trackConfigurationOperation(this.prefsQueue);
+  }
+
+  /** `McpSetServerRpc` — persist a per-server `disabled` override. The
+   *  response carries the fresh list; a toggle that actually wrote an
+   *  override sets the pending-apply flag (the adapter re-reads config on
+   *  the next session reload / restart). A no-op toggle preserves the
+   *  current flag. */
+  private handleMcpSetServerRpc(effect: McpSetServerRpcEffect): void {
+    const operation = this.prefsQueue.catch(() => undefined).then(async () => {
+      try {
+        const result = await this.deps.service.mcpSetServerEnabled(effect.name, effect.enabled);
+        this.deps.dispatchEvent({
+          kind: 'McpServersUpdated',
+          corrId: effect.corrId,
+          ok: true,
+          servers: result.servers,
+          ...(result.changed === true ? { pendingApply: true } : {}),
+        });
+      } catch (err) {
+        this.deps.log.log('warn', 'McpSetServerRpc failed', { error: toErrorMessage(err) });
+        this.deps.dispatchEvent({
+          kind: 'McpServersUpdated',
+          corrId: effect.corrId,
+          ok: false,
+          error: toErrorMessage(err),
+        });
+      }
+    });
+    this.prefsQueue = operation.then(() => undefined, () => undefined);
+    this.trackConfigurationOperation(this.prefsQueue);
+  }
+
+  private trackConfigurationOperation(operation: Promise<unknown>): void {
+    const settled = operation.then(() => undefined, () => undefined);
+    this.configurationOperations.add(settled);
+    void settled.finally(() => this.configurationOperations.delete(settled));
+  }
+
+  /** Called after backendReady=false has been projected and before transport
+   * shutdown. Loop because one settled preference write may release the next
+   * already-queued write in the same microtask turn. */
+  async drainConfigurationOperations(): Promise<void> {
+    while (this.configurationOperations.size > 0) {
+      await Promise.all([...this.configurationOperations]);
+    }
   }
 
   /** Privacy is host-local. The reducer has already updated the mode before
@@ -1080,6 +1186,7 @@ export class EffectRunner {
       phase: 'prepass',
       firstArmedAt: 0,
       abort,
+      locallyAbortable: true,
       disposed: false,
       fired: false,
       priorPruningMode,
@@ -1237,18 +1344,16 @@ export class EffectRunner {
     });
   }
 
-  /** Abort the in-flight `message.send` for a session (Brief E: interrupt
-   *  cancels a slow prepass-gated send). Aborts the `AbortController` passed
-   *  to `backend.request`: pre-ack, the `RequestTracker` rejects → the catch
-   *  dispatches `SendResult{ok:false}`/`EditResult{ok:false}` (pre-ack
-   *  rollback) and clears the send-timer. Returns true if an in-flight send
-   *  was aborted. Post-ack (RPC already resolved), the abort is a no-op on
-   *  the RPC; Brief E handles the post-ack interrupt via `message.interrupt`. */
+  /** Abort an in-flight request only while local cancellation is transactionally
+   * safe. A normal send stays abortable until acknowledgement. An edit stops
+   * being abortable before `session.truncateAfter` crosses the transport
+   * boundary, because RequestTracker cancellation does not cancel backend
+   * execution; the queued public interrupt then runs after edit completion. */
   abortInFlightSend(sessionPath: string): boolean {
     const corrId = this.inFlightSendBySession.get(sessionPath);
     if (!corrId) return false;
     const send = this.inFlightSends.get(corrId);
-    if (!send) return false;
+    if (!send || !send.locallyAbortable) return false;
     if (!send.abort.signal.aborted) send.abort.abort();
     return true;
   }
@@ -1436,7 +1541,9 @@ export class EffectRunner {
         // edit follows the same phase-scoped shape as send (STATE_CONTRACT §
         // Optimistic Reconciliation "Timer ownership"): one send-timer owns the
         // post-ack, pre-commit phase; the abort controller covers the whole
-        // truncate-then-send operation (Brief E cancels it on interrupt).
+        // operation. Cancellation is safe through the optional initial
+        // interrupt, but is fenced before truncate crosses the transport
+        // boundary because JSON-RPC cancellation only rejects the local waiter.
         const send = this.startInFlightSend(effect.corrId, effect.sessionPath, 'edit', effect.localId, effect.composedText ?? effect.text, effect.userParts);
         try {
           service.bumpSessionDataEpoch(effect.sessionPath);
@@ -1449,6 +1556,11 @@ export class EffectRunner {
               sessionPath: effect.sessionPath,
             }, { signal: send.abort.signal });
           }
+          // Destructive-commit boundary: from this point the per-session queue
+          // must retain ownership until truncate + send acknowledge. A user
+          // interrupt is queued behind this edit and stops the resulting turn,
+          // preserving one coherent durable/optimistic transcript.
+          send.locallyAbortable = false;
           await backend.request('session.truncateAfter', {
             sessionPath: effect.sessionPath,
             entryId: effect.messageId,

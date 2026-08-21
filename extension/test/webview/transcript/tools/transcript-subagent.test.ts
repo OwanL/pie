@@ -123,6 +123,28 @@ test('rawMessagesToChatMessages merges adjacent assistant chunks and keeps reaso
   assert.deepEqual(messages[0]?.toolCalls?.[0]?.result, { lines: 42 });
 });
 
+test('rawMessagesToChatMessages suppresses duplicated DSML in nested assistant output', () => {
+  const messages = rawMessagesToChatMessages([{
+    role: 'assistant',
+    content: [
+      {
+        type: 'text',
+        text: 'Inspecting:curr<tool_calls>\n<｜DSML｜invoke name="computer">\n<｜DSML｜parameter name="operation">observe</｜DSML｜parameter>',
+      },
+      {
+        type: 'toolCall',
+        id: 'computer-1',
+        name: 'computer',
+        arguments: { operation: 'observe' },
+      },
+    ],
+  }] as any, 'subagent');
+
+  assert.equal(messages[0]?.markdown, 'Inspecting:');
+  assert.equal(messages[0]?.toolCalls?.[0]?.name, 'computer');
+  assert.doesNotMatch(JSON.stringify(messages), /DSML|<tool_calls>|curr/iu);
+});
+
 test('rawMessagesToChatMessages joins multi-part user text with paragraph breaks', () => {
   const messages = rawMessagesToChatMessages([
     {

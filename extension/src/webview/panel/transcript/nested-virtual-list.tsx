@@ -24,7 +24,11 @@ export function estimateNestedMessageHeight(message: ChatMessage): number {
   const base = 44;
   const chars = (message.markdown?.length ?? 0) + (message.thinking?.length ?? 0);
   const textLines = Math.min(24, Math.ceil(chars / 96));
-  const toolRows = (message.toolCalls?.length ?? 0) * 26;
+  const orderedToolCount = message.parts?.reduce(
+    (count, part) => count + (part.kind === 'toolCall' ? 1 : 0),
+    0,
+  ) ?? 0;
+  const toolRows = (orderedToolCount || message.toolCalls?.length || 0) * 26;
   const imageRows = (message.userParts?.length ?? 0) > 0 ? 48 : 0;
   return base + textLines * 18 + toolRows + imageRows;
 }

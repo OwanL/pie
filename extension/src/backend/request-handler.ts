@@ -23,8 +23,10 @@ import {
   validateTruncateAfter,
   validateExtensionUiResponse,
   validateOpenTabsSet,
+  validateMcpSetServerEnabled,
 } from './rpc';
 import { ProviderGate, type ProviderGateMetrics } from './provider-gate';
+import { listMcpServers, setMcpServerEnabled } from './mcp-config';
 import { CreateOperationLedger } from './create-operation-ledger';
 import { resolveActiveModel } from './session-metadata';
 import type { SdkModule, SdkSessionManager } from './sdk';
@@ -306,6 +308,27 @@ async function handleAppPing(
   };
 }
 
+async function handleMcpList(
+  deps: BackendRequestHandlerDeps,
+  _request: RequestEnvelope,
+): Promise<unknown> {
+  markRequestValidated(deps);
+  return listMcpServers(deps.startupCwd);
+}
+
+/** Persist a per-server `disabled` override into `.pi/mcp.json` via the
+ *  adapter's own writer, then return the fresh effective list. The override
+ *  applies on the next session reload / backend restart (the adapter re-reads
+ *  config on every session start). */
+async function handleMcpSetServerEnabled(
+  deps: BackendRequestHandlerDeps,
+  request: RequestEnvelope,
+): Promise<unknown> {
+  const params = validateMcpSetServerEnabled(request.params);
+  markRequestValidated(deps);
+  return setMcpServerEnabled(deps.startupCwd, params.name, params.enabled);
+}
+
 async function handleRuntimePrefsSet(
   deps: BackendRequestHandlerDeps,
   request: RequestEnvelope,
@@ -323,6 +346,9 @@ async function handleRuntimePrefsSet(
   if (params.autonomousMode !== undefined) {
     process.env[AUTONOMOUS_MODE_ENV] = params.autonomousMode ? '1' : '0';
     deps.setAutonomousMode(params.autonomousMode);
+  }
+  if (params.mcpEnabled !== undefined) {
+    process.env['PIE_MCP_ENABLED'] = params.mcpEnabled ? '1' : '0';
   }
   if (params.historyCompaction !== undefined) {
     process.env[HISTORY_COMPACTION_ENV] = JSON.stringify(params.historyCompaction);
@@ -928,8 +954,11 @@ async function handleMessageSend(
   }
   // Steering: if a turn is already running, inject this message into the
   // current turn via the SDK's `steer()` (delivered after in-flight tool calls
-  // finish, before the next LLM call). Falls back to `followUp()` (queue for the
-  // next fresh turn) on an older SDK that doesn't expose `steer`. No
+  // finish, before the next LLM call). During the preflight window an
+  // `activeRequest` exists but PI is not streaming yet; steering then would be
+  // drained before the *first* LLM call, collapsing two user prompts into one
+  // assistant turn. Queue those early arrivals with `followUp()` so the first
+  // request receives its own answer before the follow-up starts. No
   // `activeRequest` is created here (this call starts no turn) and no
   // pre-commit safety-net timer is armed (steering has no pruning prepass). We
   // `await` the call so a queuing failure (e.g. the text is an extension
@@ -952,7 +981,9 @@ async function handleMessageSend(
     const queuedLocalIds = context.queuedLocalIds ??= [];
     queuedLocalIds.push(deliveryLocalId);
     try {
-      if (context.session.steer) {
+      if (context.activeRequest && !context.session.isStreaming) {
+        await context.session.followUp(queuedPromptText, queuedImagePayload);
+      } else if (context.session.steer) {
         await context.session.steer(queuedPromptText, queuedImagePayload);
       } else {
         await context.session.followUp(queuedPromptText, queuedImagePayload);
@@ -1749,6 +1780,8 @@ async function handleProviderGateMetrics(
 
 const handlers: Record<string, RequestHandler> = {
   'app.ping': handleAppPing,
+  'mcp.list': handleMcpList,
+  'mcp.setServerEnabled': handleMcpSetServerEnabled,
   'runtimePrefs.set': handleRuntimePrefsSet,
   'session.list': handleSessionList,
   'session.create': handleSessionCreate,

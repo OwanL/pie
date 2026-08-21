@@ -116,6 +116,7 @@ interface MessageItemInnerProps {
   html: string;
   getMessageRaw: () => string;
   combinedParts: ReturnType<typeof assistantPartsFromMessage> | undefined;
+  deferHistoricalToolCalls?: boolean;
   renderableUserParts: ReturnType<typeof getRenderableUserParts> | undefined;
   prefs: ChatPrefs;
   workingDirectory: string | null;
@@ -150,6 +151,7 @@ export function MessageItemInner({
   html,
   getMessageRaw,
   combinedParts,
+  deferHistoricalToolCalls,
   renderableUserParts,
   prefs,
   workingDirectory,
@@ -218,6 +220,7 @@ export function MessageItemInner({
             messageId={message.id}
             role={message.role}
             combinedParts={combinedParts}
+            deferHistoricalToolCalls={deferHistoricalToolCalls}
             renderableUserParts={renderableUserParts}
             html={html}
             isCurrentlyStreaming={isCurrentlyStreaming}

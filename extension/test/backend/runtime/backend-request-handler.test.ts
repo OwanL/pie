@@ -1838,6 +1838,28 @@ test('message.send while busy queues as a steering injection and acks { queued: 
   assert.equal(harness.context.activeRequest, undefined);
 });
 
+test('message.send during preflight queues a follow-up instead of collapsing it into the first model turn', async () => {
+  const steerCalls: string[] = [];
+  const followUpCalls: string[] = [];
+  const harness = createHarness({
+    context: { activeRequest: { id: 'request-preflight', messageIndex: 0, aborted: false } },
+    sessionOverrides: {
+      isStreaming: false,
+      steer: async (text: string) => { steerCalls.push(text); },
+      followUp: async (text: string) => { followUpCalls.push(text); },
+    },
+  });
+  const result = await handleBackendRequest(harness.deps, {
+    id: 'preflight-follow-up',
+    method: 'message.send',
+    params: { sessionPath: '/repo/session.jsonl', text: 'After the first answer', inputs: [] },
+  });
+  assert.equal((result as { queued?: boolean }).queued, true);
+  assert.deepEqual(followUpCalls, ['After the first answer']);
+  assert.deepEqual(steerCalls, []);
+  assert.equal(harness.context.activeRequest?.id, 'request-preflight');
+});
+
 test('session.truncateAfter re-applies the user\'s model when the truncate dropped its model_change entry', async () => {
   await withTempDir(async (dir) => {
     const sessionPath = path.join(dir, 'session.jsonl');

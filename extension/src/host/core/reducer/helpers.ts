@@ -1,5 +1,5 @@
 import type { ArchState, PendingOp, SetModelPending } from '../arch-state.js';
-import type { ChatMessage, SessionSummary, UserContentPart } from '../../../shared/protocol.js';
+import type { ChatMessage, ComposerInput, SessionSummary, UserContentPart } from '../../../shared/protocol.js';
 import { markdownFromUserParts } from '../transcript-helpers.js';
 import {
   buildFullTranscriptWindow,
@@ -40,6 +40,48 @@ export function resolveAlias(state: ArchState, id: string): string {
 export interface PendingTurnOwner {
   corrId: string;
   source: 'ops' | 'promoted';
+}
+
+/** Commit an optimistic send from any authoritative turn boundary.
+ *
+ * Direct semantic events and recovered checkpoints are equally authoritative:
+ * both must drop rollback ownership and cancel the send watchdog. Keeping the
+ * transition here prevents recovery paths from restoring a live turn while
+ * leaving its optimistic send armed. */
+export function commitPromotedSend(
+  state: ArchState,
+  sessionPath: string,
+  requestId: string,
+  canonicalMessageId: string,
+): ReducerResult {
+  const turnOwner = findPendingTurnOwner(state, sessionPath, requestId);
+  const currentTurnBySession = {
+    ...state.pending.currentTurnBySession,
+    [sessionPath]: { requestId, firstMessageId: canonicalMessageId },
+  };
+  const requestIdToLocalId = { ...state.pending.requestIdToLocalId };
+  delete requestIdToLocalId[requestId];
+  const promoted = { ...state.pending.promoted };
+  const ops = { ...state.pending.ops };
+  if (turnOwner?.source === 'promoted') delete promoted[turnOwner.corrId];
+  else if (turnOwner) delete ops[turnOwner.corrId];
+  const prepassBySession = { ...state.pending.prepassBySession };
+  delete prepassBySession[sessionPath];
+
+  return {
+    state: {
+      ...state,
+      pending: {
+        ...state.pending,
+        currentTurnBySession,
+        requestIdToLocalId,
+        promoted,
+        ops,
+        prepassBySession,
+      },
+    },
+    effects: turnOwner ? [{ kind: 'ClearSendTimer', corrId: turnOwner.corrId }] : [],
+  };
 }
 
 /**
@@ -103,6 +145,34 @@ export function removeFromArray(arr: readonly string[], value: string): string[]
 /** Add to an array if not already present. */
 export function addToArray(arr: readonly string[], value: string): string[] {
   return arr.includes(value) ? [...arr] : [...arr, value];
+}
+
+/**
+ * Reconcile a rejected prompt with any newer draft the user typed while the
+ * request was in flight. The rejected prompt comes first so the cursor remains
+ * at the end of the newer draft after the composer is restored. Keeping both
+ * is preferable to silently replacing either user-authored value.
+ */
+export function mergeRejectedDraftText(rejectedText: string, currentDraft: string | undefined): string {
+  if (!rejectedText) return currentDraft ?? '';
+  if (!currentDraft || currentDraft === rejectedText) return rejectedText;
+  return `${rejectedText}\n\n${currentDraft}`;
+}
+
+/** Restore captured inputs without replacing attachments added since send. */
+export function mergeRejectedComposerInputs(
+  rejectedInputs: readonly ComposerInput[] | undefined,
+  currentInputs: readonly ComposerInput[] | undefined,
+): ComposerInput[] {
+  const merged = [...(rejectedInputs ?? [])];
+  const seen = new Set(merged.map((input) => input.id));
+  for (const input of currentInputs ?? []) {
+    if (!seen.has(input.id)) {
+      seen.add(input.id);
+      merged.push(input);
+    }
+  }
+  return merged;
 }
 
 /** Options controlling how much of a session's state {@link evictSession} removes. */

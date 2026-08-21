@@ -154,6 +154,10 @@ export interface SessionContext {
    * disabling autonomous mode an exact restoration rather than enabling a tool
    * that another owner had already hidden. */
   autonomousModeAskUserWasActive?: boolean;
+  /** Active MCP tool names captured when the MCP pref was turned off, so
+   * re-enabling it restores exactly what was removed (including tools the
+   * adapter re-registered while the pref was off). */
+  mcpToolsWereActive?: string[];
   /** Bug 6 watchdog: armed on `agent_end willRetry:true`, re-armed on
    *  `auto_retry_start` (delayMs + grace), cleared on `auto_retry_end` /
    *  `agent_end willRetry:false`. If it elapses, emits `operational-error` +

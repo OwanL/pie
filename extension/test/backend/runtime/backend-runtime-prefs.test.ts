@@ -92,7 +92,7 @@ test('runtimePrefs.set mirrors provider and extension toggles into backend envir
     params: { providerToggles, extensionToggles },
   });
 
-  assert.deepEqual(result, { providerToggles, extensionToggles, autonomousMode: undefined, subagentAlwaysParentModel: undefined, subagentRouteAroundSaturatedProviders: undefined, subagentFallbackOnProviderFailure: undefined, subagentMaxDepth: undefined, subagentMaxTreeSessions: undefined, subagentMaxInflight: undefined, bashWarmPoolSize: undefined, bashFastPath: undefined, bashShellPath: undefined, bashWarmupTimeoutMs: undefined, bashDefaultTimeout: undefined, subagentBuckets: undefined, subagentNestedAllowedBuckets: undefined, subagentDropTools: undefined, providerConcurrency: undefined });
+  assert.deepEqual(result, { providerToggles, extensionToggles, autonomousMode: undefined, mcpEnabled: undefined, subagentAlwaysParentModel: undefined, subagentRouteAroundSaturatedProviders: undefined, subagentFallbackOnProviderFailure: undefined, subagentMaxDepth: undefined, subagentMaxTreeSessions: undefined, subagentMaxInflight: undefined, bashWarmPoolSize: undefined, bashFastPath: undefined, bashShellPath: undefined, bashWarmupTimeoutMs: undefined, bashDefaultTimeout: undefined, subagentBuckets: undefined, subagentNestedAllowedBuckets: undefined, subagentDropTools: undefined, providerConcurrency: undefined });
   assert.equal(process.env[PROVIDER_TOGGLES_ENV], JSON.stringify(providerToggles));
   assert.equal(process.env[EXTENSION_TOGGLES_ENV], JSON.stringify(extensionToggles));
   // When the field is omitted, the env var must not be touched.
@@ -122,6 +122,27 @@ test('runtimePrefs.set applies autonomous mode to live sessions and mirrors its 
   assert.throws(
     () => validateRuntimePrefsSet({ autonomousMode: 'yes' }),
     /autonomousMode must be a boolean/,
+  );
+});
+
+test('runtimePrefs.set mirrors the MCP toggle into the backend environment', async (t) => {
+  const previous = process.env['PIE_MCP_ENABLED'];
+  t.after(() => {
+    if (previous === undefined) delete process.env['PIE_MCP_ENABLED'];
+    else process.env['PIE_MCP_ENABLED'] = previous;
+  });
+
+  const result = await handleBackendRequest({} as any, {
+    id: 'test-runtime-prefs-mcp',
+    method: 'runtimePrefs.set',
+    params: { providerToggles: {}, extensionToggles: {}, mcpEnabled: false },
+  }) as { mcpEnabled?: boolean };
+
+  assert.equal(result.mcpEnabled, false);
+  assert.equal(process.env['PIE_MCP_ENABLED'], '0');
+  assert.throws(
+    () => validateRuntimePrefsSet({ mcpEnabled: 'off' }),
+    /mcpEnabled must be a boolean/,
   );
 });
 
@@ -160,7 +181,7 @@ test('runtimePrefs.set writes the subagent always-parent-model env var when prov
     params: { providerToggles: {}, extensionToggles: {}, subagentAlwaysParentModel: true },
   });
 
-  assert.deepEqual(result, { providerToggles: {}, extensionToggles: {}, autonomousMode: undefined, subagentAlwaysParentModel: true, subagentRouteAroundSaturatedProviders: undefined, subagentFallbackOnProviderFailure: undefined, subagentMaxDepth: undefined, subagentMaxTreeSessions: undefined, subagentMaxInflight: undefined, bashWarmPoolSize: undefined, bashFastPath: undefined, bashShellPath: undefined, bashWarmupTimeoutMs: undefined, bashDefaultTimeout: undefined, subagentBuckets: undefined, subagentNestedAllowedBuckets: undefined, subagentDropTools: undefined, providerConcurrency: undefined });
+  assert.deepEqual(result, { providerToggles: {}, extensionToggles: {}, autonomousMode: undefined, mcpEnabled: undefined, subagentAlwaysParentModel: true, subagentRouteAroundSaturatedProviders: undefined, subagentFallbackOnProviderFailure: undefined, subagentMaxDepth: undefined, subagentMaxTreeSessions: undefined, subagentMaxInflight: undefined, bashWarmPoolSize: undefined, bashFastPath: undefined, bashShellPath: undefined, bashWarmupTimeoutMs: undefined, bashDefaultTimeout: undefined, subagentBuckets: undefined, subagentNestedAllowedBuckets: undefined, subagentDropTools: undefined, providerConcurrency: undefined });
   assert.equal(process.env[SUBAGENT_ALWAYS_PARENT_MODEL_ENV], '1');
 });
 

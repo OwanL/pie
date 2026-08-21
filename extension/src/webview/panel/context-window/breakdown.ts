@@ -324,7 +324,10 @@ function buildContributors(
         reasoningCount += 1;
       }
 
-      for (const toolCall of message.toolCalls ?? []) {
+      const orderedToolCalls = message.parts
+        ?.filter((part) => part.kind === 'toolCall')
+        .map((part) => part.toolCall) ?? [];
+      for (const toolCall of orderedToolCalls.length > 0 ? orderedToolCalls : (message.toolCalls ?? [])) {
         const toolName = typeof toolCall.name === 'string' ? toolCall.name.toLowerCase().trim() : '';
         if (toolName === 'read_file' || toolName === 'read') {
           const path = extractToolCallFilePath(toolCall.input);

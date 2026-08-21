@@ -300,9 +300,25 @@
    Points right when closed; rotates 90° to point down when open. */
 
 .collapsible-chevron {
+  display: inline-block;
   flex-shrink: 0;
   color: var(--panel-muted);
+  position: relative;
   transition: transform var(--panel-transition-fast);
+}
+
+.collapsible-chevron::before {
+  content: '';
+  position: absolute;
+  left: 20%;
+  top: 20%;
+  width: 52%;
+  height: 52%;
+  border-top: 1.8px solid currentColor;
+  border-right: 1.8px solid currentColor;
+  border-radius: 1px;
+  transform: rotate(45deg);
+  transform-origin: center;
 }
 
 .collapsible-chevron-open {
@@ -513,4 +529,3 @@
 }
 
 /* ── Components ─────────────────────────────────────────────────────────── */
-

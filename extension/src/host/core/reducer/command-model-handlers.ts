@@ -81,7 +81,16 @@ export function handleSetModel(state: ArchState, cmd: Extract<Command, { kind: '
         : null;
   if (guardNotice) {
     return {
-      state: { ...state, settings: { ...state.settings, notice: guardNotice } },
+      state: {
+        ...state,
+        settings: {
+          ...state.settings,
+          notice: guardNotice,
+          noticeKind: null,
+          noticeRaw: null,
+          noticeSessionPath: sessionPath || null,
+        },
+      },
       effects: [],
     };
   }

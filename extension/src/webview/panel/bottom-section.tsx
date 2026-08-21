@@ -23,6 +23,8 @@ export interface BottomSectionProps {
   /** Brief E: optimistic in-flight interrupt flag (webview-local). Drives the
    *  "Stopping…" affordance so the click reflects within one frame. */
   interrupting: boolean;
+  /** False while the browser renderer has no completed host handshake. */
+  commandsAvailable?: boolean;
   activeSession: ViewState['activeSession'];
   privacyMode?: boolean;
   modelSettings: ViewState['modelSettings'];
@@ -31,6 +33,9 @@ export interface BottomSectionProps {
   availableExtensions: ViewState['availableExtensions'];
   contextUsage: ViewState['contextUsage'];
   prefs: ViewState['prefs'];
+  mcpServers: ViewState['mcpServers'];
+  mcpServersStatus?: ViewState['mcpServersStatus'];
+  mcpPendingApply: ViewState['mcpPendingApply'];
   pruningSettings: ViewState['pruningSettings'];
   pruningCatalog: ViewState['pruningCatalog'];
   pruningResult: ViewState['pruningResult'];
@@ -52,7 +57,7 @@ export interface BottomSectionProps {
   compacting: boolean;
   /** Most recent completed compaction for the active session (transient chip). */
   lastCompaction: ViewState['lastCompactionBySession'][string];
-  handlers: Pick<AppHandlers, 'handleSend' | 'handleRetrySend' | 'handleInterrupt' | 'handleAddComposerInput' | 'handleRemoveComposerInput' | 'handleModelChange' | 'handleSetPrefs' | 'handleSetPrivacyMode' | 'handleSetSystemPromptToggles' | 'handleSetPruningSettings' | 'handleSetToolResultPruningSettings'>;
+  handlers: Pick<AppHandlers, 'handleSend' | 'handleRetrySend' | 'handleInterrupt' | 'handleAddComposerInput' | 'handleRemoveComposerInput' | 'handleModelChange' | 'handleSetPrefs' | 'handleMcpListRequested' | 'handleMcpSetServerEnabled' | 'handleSetPrivacyMode' | 'handleSetSystemPromptToggles' | 'handleSetPruningSettings' | 'handleSetToolResultPruningSettings'>;
 }
 
 export const BottomSection = memo(function BottomSection({
@@ -64,6 +69,7 @@ export const BottomSection = memo(function BottomSection({
   busy,
   retryStatus,
   interrupting,
+  commandsAvailable = true,
   activeSession,
   privacyMode = false,
   modelSettings,
@@ -72,6 +78,9 @@ export const BottomSection = memo(function BottomSection({
   availableExtensions,
   contextUsage,
   prefs,
+  mcpServers,
+  mcpServersStatus,
+  mcpPendingApply,
   pruningSettings,
   pruningCatalog,
   pruningResult,
@@ -110,6 +119,7 @@ export const BottomSection = memo(function BottomSection({
         busy={busy}
         retryStatus={retryStatus}
         interrupting={interrupting}
+        commandsAvailable={commandsAvailable}
         activeModelId={activeSession?.modelId}
         activeProvider={activeSession?.provider}
         activeThinkingLevel={activeSession?.thinkingLevel}
@@ -144,6 +154,11 @@ export const BottomSection = memo(function BottomSection({
         onRemoveInput={handlers.handleRemoveComposerInput}
         onModelChange={handlers.handleModelChange}
         onSetPrefs={handlers.handleSetPrefs}
+        mcpServers={mcpServers}
+        mcpServersStatus={mcpServersStatus}
+        mcpPendingApply={mcpPendingApply}
+        onMcpListRequested={handlers.handleMcpListRequested}
+        onMcpSetServerEnabled={handlers.handleMcpSetServerEnabled}
         onSetPrivacyMode={handlers.handleSetPrivacyMode}
         onSetSystemPromptToggles={handlers.handleSetSystemPromptToggles}
         onSetPruningSettings={handlers.handleSetPruningSettings}

@@ -56,6 +56,35 @@ class NeverReadyChildProcess extends FakeChildProcess {
   override readonly stdout = new PassThrough();
 }
 
+class DrainingChildProcess extends FakeChildProcess {
+  readonly requestSeen: Promise<void>;
+  private resolveRequestSeen!: () => void;
+  private releaseAcceptedRequest!: () => void;
+  private readonly acceptedRequestReleased: Promise<void>;
+  private requestId = 'req-1';
+
+  constructor() {
+    super();
+    this.requestSeen = new Promise<void>((resolve) => { this.resolveRequestSeen = resolve; });
+    this.acceptedRequestReleased = new Promise<void>((resolve) => { this.releaseAcceptedRequest = resolve; });
+    this.stdin.on('data', (chunk) => {
+      const line = String(chunk);
+      this.requestId = JSON.parse(line.trim()).id;
+      this.resolveRequestSeen();
+    });
+    this.stdin.once('finish', () => {
+      void this.acceptedRequestReleased.then(() => {
+        this.stdout.write(`${JSON.stringify({ id: this.requestId, ok: true, result: {} })}\n`);
+        setImmediate(() => this.emit('exit', 0));
+      });
+    });
+  }
+
+  releaseRequest(): void {
+    this.releaseAcceptedRequest();
+  }
+}
+
 test('BackendClient.start resolves when backend.ready arrives immediately as stdout listener attaches', async () => {
   // client.start spreads process.env into the spawn env, so a stale
   // PIE_TRUSTED_SDK_ROOT inherited from the parent environment would leak
@@ -156,6 +185,26 @@ test('BackendClient.start resolves when backend.ready arrives immediately as std
       sessionPath: '/mock/failure.jsonl',
     }]);
     failureSubscription.dispose();
+
+    const drainingProc = new DrainingChildProcess();
+    nextProc = drainingProc as unknown as cp.ChildProcess;
+    const drainingClient = new BackendClient();
+    await drainingClient.start({
+      nodePath: '/mock/node',
+      backendPath: '/mock/backend.js',
+      sdkPath: '/mock/sdk',
+      cwd: '/mock/cwd',
+    });
+    const acceptedWrite = drainingClient.request('settings.set', { defaultThinkingLevel: 'high' });
+    await drainingProc.requestSeen;
+    let stopSettled = false;
+    const gracefulStop = drainingClient.stop().then(() => { stopSettled = true; });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(stopSettled, false, 'stop waits while an accepted settings write is draining');
+    drainingProc.releaseRequest();
+    await Promise.all([acceptedWrite, gracefulStop]);
+    assert.equal(stopSettled, true);
+    assert.equal(drainingProc.killCount, 0, 'a responsive backend exits through stdin EOF without forced termination');
 
     Object.defineProperty(fakeProc.stdin, 'write', {
       configurable: true,

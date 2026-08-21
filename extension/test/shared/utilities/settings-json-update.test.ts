@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -156,6 +157,28 @@ test('stale settings locks are recovered', async () => {
       staleMs: 10,
       timeoutMs: 1000,
     });
+    assert.equal(ran, true);
+    await assert.rejects(fs.access(lockPath), { code: 'ENOENT' });
+  });
+});
+
+test('a lock owned by an exited process is recovered without waiting for the stale-age window', async () => {
+  await withTempSettings(async (file) => {
+    const exitedPid = await new Promise<number>((resolve, reject) => {
+      const child = spawn(process.execPath, ['-e', 'process.exit(0)'], { stdio: 'ignore' });
+      child.once('error', reject);
+      child.once('exit', () => resolve(child.pid!));
+    });
+    const lockPath = `${file}.pie-lock`;
+    await fs.writeFile(lockPath, `${exitedPid}:orphaned-token\n`, 'utf8');
+
+    let ran = false;
+    await withFileUpdateLock(file, async () => { ran = true; }, {
+      retryMs: 1,
+      staleMs: 60_000,
+      timeoutMs: 1_000,
+    });
+
     assert.equal(ran, true);
     await assert.rejects(fs.access(lockPath), { code: 'ENOENT' });
   });

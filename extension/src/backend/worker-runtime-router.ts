@@ -181,6 +181,12 @@ export class WorkerRuntimeRouter {
   private disposed = false;
   private readonly detailSubscriptions = new Map<string, DetailSubscriptionOwner>();
   private readonly extensionUiOwners = new ExtensionUiOwnerRegistry();
+  /** Public busy sequencing belongs to the coordinator generation, not an
+   *  individual worker. A cold->hot re-promotion creates a new process whose
+   *  SDK-local counter starts at zero; forwarding that raw counter makes the
+   *  host reject the new worker's terminal busy=false as stale. Keep one
+   *  monotonic sequence per durable path for this coordinator lifetime. */
+  private readonly publicBusySeqByPath = new Map<string, number>();
   /** Bounded per-worker runtime discovery reports; never replaces the configured catalog authority. */
   private readonly reportedRuntimeCatalogs = new Map<string, { reportedAt: number; models: unknown[] }>();
   private authPath?: string;
@@ -645,8 +651,9 @@ export class WorkerRuntimeRouter {
         // host, and a later response for it must never invoke the worker.
         if (!this.recordExtensionUiOwner(route, frame.payload)) return;
       }
-      if (!isSupersededTerminal) this.observeCheckpoint(route, frame.event, frame.payload);
-      this.options.emit(frame.event, frame.payload);
+      const publicPayload = this.normalizeRuntimeEventPayload(route, frame.event, frame.payload);
+      if (!isSupersededTerminal) this.observeCheckpoint(route, frame.event, publicPayload);
+      this.options.emit(frame.event, publicPayload);
       return;
     }
     if (frame.kind === 'runtime.report') {
@@ -1201,11 +1208,28 @@ export class WorkerRuntimeRouter {
         });
       }
     }
-    this.options.emit('busy.changed', {
+    const busyPayload = this.normalizeRuntimeEventPayload(route, 'busy.changed', {
       sessionPath: route.currentLeasePath,
       busy: false,
       seq: route.checkpoint.busySeq + 1,
     });
+    this.observeCheckpoint(route, 'busy.changed', busyPayload);
+    this.options.emit('busy.changed', busyPayload);
+  }
+
+  private normalizeRuntimeEventPayload(
+    route: HotWorkerRoute,
+    event: string,
+    payload: WorkerJsonObject,
+  ): WorkerJsonObject {
+    if (event !== 'busy.changed') return payload;
+    const sessionPath = typeof payload.sessionPath === 'string'
+      ? payload.sessionPath
+      : route.currentLeasePath;
+    const key = routeKey(sessionPath);
+    const seq = (this.publicBusySeqByPath.get(key) ?? 0) + 1;
+    this.publicBusySeqByPath.set(key, seq);
+    return { ...payload, sessionPath, seq };
   }
 
   /** Bounded last-known checkpoint projection for diagnostics. Usage is a

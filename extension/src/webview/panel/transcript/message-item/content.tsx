@@ -3,7 +3,7 @@
 
 import type { RefObject } from 'preact';
 import { memo } from 'preact/compat';
-import { useMemo } from 'preact/hooks';
+import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 
 import type { ChatMessage, ChatMessagePart, ChatPrefs } from '../../../../shared/protocol';
 import { renderMarkdown } from '../../markdown';
@@ -29,6 +29,49 @@ interface AssistantPartsProps {
   renderToolCall: RenderToolCall;
   onContextMenu: TranscriptContextMenuHandler;
   getMessageRaw: () => string;
+  deferHistoricalToolCalls?: boolean;
+}
+
+const DEFERRED_TOOL_PLACEHOLDER_HEIGHT_PX = 32;
+const DEFERRED_TOOL_ROOT_MARGIN_PX = 800;
+
+function DeferredHistoricalToolCall({
+  part,
+  renderToolCall,
+  onContextMenu,
+}: {
+  part: Extract<ChatMessagePart, { kind: 'toolCall' }>;
+  renderToolCall: RenderToolCall;
+  onContextMenu: TranscriptContextMenuHandler;
+}) {
+  const placeholderRef = useRef<HTMLDivElement>(null);
+  const canObserve = typeof IntersectionObserver !== 'undefined';
+  const [materialized, setMaterialized] = useState(!canObserve);
+
+  useEffect(() => {
+    if (materialized || !canObserve) return;
+    const placeholder = placeholderRef.current;
+    if (!placeholder) return;
+    const root = placeholder.closest<HTMLElement>('.transcript');
+    const observer = new IntersectionObserver((entries) => {
+      if (!entries.some((entry) => entry.isIntersecting)) return;
+      setMaterialized(true);
+      observer.disconnect();
+    }, { root, rootMargin: `${DEFERRED_TOOL_ROOT_MARGIN_PX}px 0px` });
+    observer.observe(placeholder);
+    return () => observer.disconnect();
+  }, [canObserve, materialized, part.toolCall.id]);
+
+  if (materialized) return <>{renderToolCall(part.toolCall, onContextMenu)}</>;
+  return (
+    <div
+      ref={placeholderRef}
+      class="tool-call-deferred-placeholder"
+      style={{ minHeight: `${DEFERRED_TOOL_PLACEHOLDER_HEIGHT_PX}px` }}
+      aria-hidden="true"
+      data-tool-call-id={part.toolCall.id}
+    />
+  );
 }
 
 function AssistantParts({
@@ -41,6 +84,7 @@ function AssistantParts({
   renderToolCall,
   onContextMenu,
   getMessageRaw,
+  deferHistoricalToolCalls = false,
 }: AssistantPartsProps) {
   // Keep every consecutive tool-call run under one parent from its first
   // provisional card onward. Verified parallel batches are child annotations,
@@ -132,7 +176,13 @@ function AssistantParts({
                     data-parallel-group-id={annotation?.groupId}
                     key={`tool-${part.toolCall.id}`}
                   >
-                    {renderToolCall(part.toolCall, onContextMenu)}
+                    {deferHistoricalToolCalls ? (
+                      <DeferredHistoricalToolCall
+                        part={part}
+                        renderToolCall={renderToolCall}
+                        onContextMenu={onContextMenu}
+                      />
+                    ) : renderToolCall(part.toolCall, onContextMenu)}
                   </div>
                 );
               })}
@@ -294,6 +344,7 @@ interface MessageContentProps {
   renderToolCall: RenderToolCall;
   onContextMenu: TranscriptContextMenuHandler;
   getMessageRaw: () => string;
+  deferHistoricalToolCalls?: boolean;
 }
 
 export function MessageContent({
@@ -310,6 +361,7 @@ export function MessageContent({
   renderToolCall,
   onContextMenu,
   getMessageRaw,
+  deferHistoricalToolCalls,
 }: MessageContentProps) {
   if (role === 'assistant' && combinedParts) {
     return (
@@ -323,6 +375,7 @@ export function MessageContent({
         renderToolCall={renderToolCall}
         onContextMenu={onContextMenu}
         getMessageRaw={getMessageRaw}
+        deferHistoricalToolCalls={deferHistoricalToolCalls}
       />
     );
   }

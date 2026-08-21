@@ -13,6 +13,7 @@ import type {
   ContextWindowUsage,
   ExtensionInfo,
   LastCompactionSummary,
+  McpServerInfo,
   ModelInfo,
   ModelSettings,
   PruningCatalog,
@@ -49,6 +50,8 @@ interface ComposerProps {
   /** Brief E: optimistic one-frame "stopping…" mirror of an in-flight
    *  interrupt (the host clears `busy` only after the abort round-trip). */
   interrupting?: boolean;
+  /** False while the browser transport is connecting/reconnecting. */
+  commandsAvailable?: boolean;
   /** Live auto-retry status for the active session, or null when no retry is
    *  in flight. Surfaced as a "Retrying N of M…" chip with a Cancel button
    *  (Cancel reuses `onInterrupt` — `session.abort()` aborts the retry sleep
@@ -85,16 +88,21 @@ interface ComposerProps {
   lastCompaction: LastCompactionSummary | null;
   focusTrigger?: string;
   postMessage: (msg: WebviewToHostMessage) => void;
-  onSend: (text: string) => void;
+  onSend: (text: string) => boolean | void;
   /** Brief H: re-send the draft as a `retrySend` (the host disables pruning
    *  atomically first when `disablePruning` is set — "retry without pruning").
    *  Invoked by the NoticeBanner's Retry button via `sendRetryDraftRef`. */
-  onRetrySend: (text: string, disablePruning?: boolean) => void;
+  onRetrySend: (text: string, disablePruning?: boolean) => boolean | void;
   onInterrupt: () => void;
   onAddInput: (input: ComposerInputDraft) => void;
   onRemoveInput: (inputId: string) => void;
   onModelChange: (model: string, provider: string | undefined, thinkingLevel: ThinkingLevel) => void;
   onSetPrefs: (prefs: Partial<ChatPrefs>) => void;
+  mcpServers: McpServerInfo[];
+  mcpServersStatus?: 'loading' | 'error' | 'ok';
+  mcpPendingApply: boolean;
+  onMcpListRequested: () => void;
+  onMcpSetServerEnabled: (name: string, enabled: boolean) => void;
   onSetPrivacyMode?: (enabled: boolean) => void;
   /** Apply the complete disabled-entry set for the active session's system
    *  prompts. The backend re-emits `session.opened` to update the displayed
@@ -113,6 +121,7 @@ interface ComposerProps {
 function ComposerView({
   busy,
   interrupting,
+  commandsAvailable = true,
   retryStatus,
   sessionPath,
   draftText,
@@ -150,6 +159,11 @@ function ComposerView({
   onRemoveInput,
   onModelChange,
   onSetPrefs,
+  mcpServers,
+  mcpServersStatus,
+  mcpPendingApply,
+  onMcpListRequested,
+  onMcpSetServerEnabled,
   onSetPrivacyMode,
   onSetSystemPromptToggles,
   onSetPruningSettings,
@@ -199,7 +213,7 @@ function ComposerView({
     submitting,
   } = useComposerInput({
     busy,
-    sendBlocked: interrupting,
+    sendBlocked: interrupting || !commandsAvailable,
     onSend,
     onRetrySend,
     pendingComposerInputsLength: pendingComposerInputs.length,
@@ -277,7 +291,9 @@ function ComposerView({
     }
   }, [sessionPath, busy, postMessage]);
 
-  const canSend = (text.trim().length > 0 || pendingComposerInputs.length > 0) && !submitting.current;
+  const canSend = commandsAvailable
+    && (text.trim().length > 0 || pendingComposerInputs.length > 0)
+    && !submitting.current;
   const attachmentSummary = useMemo(
     () => describeComposerInputSummary(pendingComposerInputs),
     [pendingComposerInputs],
@@ -314,7 +330,7 @@ function ComposerView({
               class="action-btn"
               type="button"
               onClick={onInterrupt}
-              disabled={interrupting}
+              disabled={interrupting || !commandsAvailable}
               title={interrupting ? 'Cancelling…' : 'Cancel the retry and stop the request'}
               aria-label="Cancel retry"
             >
@@ -344,6 +360,7 @@ function ComposerView({
           <ComposerToolbar
             sessionPath={sessionPath}
             busy={busy}
+            commandsAvailable={commandsAvailable}
             prefs={prefs}
             pruningSettings={pruningSettings}
             pruningCatalog={pruningCatalog}
@@ -351,6 +368,11 @@ function ComposerView({
             toolResultPruningSettings={toolResultPruningSettings}
             providerGateStats={providerGateStats}
             onSetPrefs={onSetPrefs}
+            mcpServers={mcpServers}
+            mcpServersStatus={mcpServersStatus}
+            mcpPendingApply={mcpPendingApply}
+            onMcpListRequested={onMcpListRequested}
+            onMcpSetServerEnabled={onMcpSetServerEnabled}
             privacyMode={privacyMode}
             onSetPrivacyMode={onSetPrivacyMode}
             onSetSystemPromptToggles={onSetSystemPromptToggles}
@@ -377,6 +399,7 @@ function ComposerView({
           <ComposerActions
             busy={busy}
             interrupting={interrupting}
+            commandsAvailable={commandsAvailable}
             hasQueuedMessages={hasQueuedMessages}
             onInterrupt={onInterrupt}
             onClearQueue={onClearQueue}

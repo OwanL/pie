@@ -9,7 +9,7 @@ import type {
   ThinkingLevel,
 } from '../shared/protocol';
 import { normalizeThinkingLevel, resolveModelInputKinds } from './message-inputs';
-import type { SdkModule, SdkSessionInfo } from './sdk';
+import type { SdkCatalogModel, SdkModelRegistry, SdkModule, SdkSessionInfo } from './sdk';
 import type { SessionContext } from './server-types';
 import { findSubagentProfile, loadSubagentProfiles } from './subagent-profiles';
 import { summarizeSession, type SessionEntryLike } from './transcript';
@@ -242,10 +242,44 @@ export type ModelCatalogLoadResult =
   | { ok: true; models: ModelInfo[] }
   | { ok: false; models: []; error: string };
 
+function projectRegistryModels(
+  models: SdkCatalogModel[],
+  agentDir?: string,
+): ModelInfo[] {
+  const profiles = agentDir ? loadSubagentProfiles(agentDir) : new Map();
+  return models.map((model) => {
+    const info: ModelInfo = {
+      id: model.id,
+      name: model.name,
+      provider: model.provider,
+      reasoning: model.reasoning,
+      thinkingLevels: resolveModelThinkingLevels(model as unknown as Record<string, unknown>),
+      inputKinds: resolveModelInputKinds(model as unknown as Record<string, unknown>),
+      contextWindow: model.contextWindow,
+      maxTokens: model.maxTokens,
+    };
+    const profile = findSubagentProfile(profiles, model.provider, model.id);
+    if (profile) info.subagent = profile;
+    return info;
+  });
+}
+
 /** Load configured models without conflating a valid empty catalog with an I/O
- * or parse failure. Callers that publish catalog authority must inspect `ok`. */
-export async function loadConfiguredModels(agentDir: string): Promise<ModelCatalogLoadResult> {
+ * or parse failure. When the runtime-free coordinator registry is supplied it
+ * resolves built-in models plus `modelOverrides`, matching hot worker catalog
+ * semantics without creating an AgentSession. Callers that publish catalog
+ * authority must inspect `ok`. */
+export async function loadConfiguredModels(
+  agentDir: string,
+  modelRegistry?: SdkModelRegistry,
+): Promise<ModelCatalogLoadResult> {
   try {
+    if (modelRegistry) {
+      modelRegistry.refresh?.();
+      const registryError = modelRegistry.getError?.();
+      if (registryError) return { ok: false, models: [], error: registryError };
+      return { ok: true, models: projectRegistryModels(modelRegistry.getAvailable(), agentDir) };
+    }
     const raw = await fs.readFile(path.join(agentDir, 'models.json'), 'utf8');
     const parsed = parseJsonOrThrow<{ providers?: Record<string, { models?: Array<Record<string, unknown>> }> }>(raw, 'models.json');
     const profiles = loadSubagentProfiles(agentDir);
@@ -287,28 +321,9 @@ export function loadAvailableModels(context?: SessionContext, agentDir?: string)
     return { ok: true, models: [] };
   }
 
-  const profiles = agentDir ? loadSubagentProfiles(agentDir) : new Map();
-
   try {
     const models = context.runtime.services?.modelRegistry?.getAvailable() ?? [];
-    return {
-      ok: true,
-      models: models.map((model) => {
-        const info: ModelInfo = {
-          id: model.id,
-          name: model.name,
-          provider: model.provider,
-          reasoning: model.reasoning,
-          thinkingLevels: resolveModelThinkingLevels(model as unknown as Record<string, unknown>),
-          inputKinds: resolveModelInputKinds(model as unknown as Record<string, unknown>),
-          contextWindow: model.contextWindow,
-          maxTokens: model.maxTokens,
-        };
-        const profile = findSubagentProfile(profiles, model.provider, model.id);
-        if (profile) info.subagent = profile;
-        return info;
-      }),
-    };
+    return { ok: true, models: projectRegistryModels(models, agentDir) };
   } catch (error) {
     const message = toErrorMessage(error);
     backendTrace('sessionMetadata', 'listAvailableModels.failed', { level: 'debug', error: message });

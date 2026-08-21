@@ -7,6 +7,8 @@
 const COORDINATOR_METHODS: ReadonlySet<string> = new Set([
   'app.ping',
   'diagnostics.livePipeline.setEnabled',
+  'mcp.list',
+  'mcp.setServerEnabled',
   'provider_gate.metrics',
   'runtimePrefs.set',
   'session.list',

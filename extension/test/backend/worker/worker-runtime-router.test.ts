@@ -302,8 +302,70 @@ test('confirmed worker crash reconciles only checkpointed live identities and cl
   await router.handleWorkerStateChange(sessionPath, client.getSnapshot(), { workerId: route.owner.workerId, workerGeneration: 1 });
   assert.deepEqual(emitted.map(([event]) => event), ['tool.finished', 'message.aborted', 'busy.changed', 'operational-error']);
   assert.equal(emitted.find(([event]) => event === 'message.aborted')?.[1].messageId, 'message-1');
-  assert.equal(emitted.find(([event]) => event === 'busy.changed')?.[1].seq, 8);
+  assert.equal(emitted.find(([event]) => event === 'busy.changed')?.[1].seq, 2);
   assert.equal(router.getRoute(sessionPath).state, 'cold');
+});
+
+test('busy sequence remains monotonic when a durable session is re-promoted to a new worker', async () => {
+  const sessionPath = `${process.cwd()}/busy-repromotion.jsonl`;
+  const emitted: Array<[string, any]> = [];
+  let starts = 0;
+  const workers = new Map<string, any>();
+  const router = new WorkerRuntimeRouter({
+    supervisor: {
+      startWorker: async (root: string, prepare: any) => {
+        starts += 1;
+        const workerId = `busy-worker-${starts}`;
+        await prepare({ workerId, workerGeneration: starts, sessionPath: root });
+        const client = {
+          getSnapshot: () => ({ status: 'ready' as const, stdoutTail: '', stderrTail: '' }),
+          requestFrame: async (body: any) => body.kind === 'sync'
+            ? { kind: 'sync.ack', domain: body.domain, revision: body.revision }
+            : { kind: 'runtime.ready', runtimeMetadata: { mode: 'phase4', startedAt: 1 } },
+          sendFrame: () => true,
+        };
+        const worker = { workerId, workerGeneration: starts, sessionPath: root, client };
+        workers.set(root, worker);
+        return worker;
+      },
+      stopWorker: async (root: string) => { workers.delete(root); },
+    } as any,
+    coldStore: {
+      serializePromotionGrant: (target: string) => ({ grantId: `grant-${starts}`, coordinatorGeneration: 1, sessionPath: target, sessionPathKey: target, fingerprint: 'f', creationReason: 'resume' }),
+      consumePromotionGrant: (grant: any) => grant,
+      abortPromotionGrant: () => undefined,
+    } as any,
+    ownership: {
+      registerHot: async (target: string, owner: any) => ({ ...owner, canonicalSessionPath: target, ownershipRevision: starts, nonce: `lease-${starts}` }),
+      reconcileCrash: async () => undefined,
+    } as any,
+    emit: (event, payload) => emitted.push([event, payload]),
+    buildPromotionSnapshot: async () => ({
+      sdkPath: '/sdk', agentDir: '/agent', startupCwd: '/', sessionDir: '/sessions',
+      openedPayload: opened(sessionPath) as any,
+      modelSettings: { defaultModel: 'm', defaultThinkingLevel: 'off' },
+    }),
+  });
+
+  const emitBusy = async (route: Awaited<ReturnType<typeof router.promote>>, busy: boolean) => {
+    await router.handleWorkerFrame(sessionPath, {
+      ipcVersion: 1, coordinatorGeneration: 1, workerId: route.owner.workerId,
+      workerGeneration: route.owner.workerGeneration, workerPid: 1, rootSessionPath: sessionPath,
+      leasePath: sessionPath, leaseRevision: route.currentLeaseRevision, sessionPath, seq: 1,
+      kind: 'runtime.event', event: 'busy.changed', payload: { sessionPath, busy, seq: 1 },
+    });
+  };
+
+  const first = await router.promote(sessionPath);
+  await emitBusy(first, true);
+  await router.retire(sessionPath, 'test cold boundary');
+  const second = await router.promote(sessionPath);
+  await emitBusy(second, false);
+
+  assert.deepEqual(
+    emitted.filter(([event]) => event === 'busy.changed').map(([, payload]) => payload.seq),
+    [1, 2],
+  );
 });
 
 test('worker router drops stale and cross-session events', async () => {

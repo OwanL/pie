@@ -153,6 +153,37 @@ test('useComposerInput posts setComposerDraft after debounced typing', async () 
   }
 });
 
+test('useComposerInput flushes the outgoing live draft before a session switch', () => {
+  const posted: WebviewToHostMessage[] = [];
+  const post = (msg: WebviewToHostMessage) => { posted.push(msg); };
+  installFakeTimers();
+
+  try {
+    act(() => {
+      render(h(TestHarness, { sessionPath: '/first', draftText: '', postMessage: post }), container);
+    });
+    const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+    assert.ok(textarea);
+
+    act(() => {
+      textarea.value = 'not old enough for the debounce';
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+
+    act(() => {
+      render(h(TestHarness, { sessionPath: '/second', draftText: 'second draft', postMessage: post }), container);
+    });
+
+    assert.deepEqual(
+      posted.filter((msg) => msg.type === 'setComposerDraft'),
+      [{ type: 'setComposerDraft', sessionPath: '/first', text: 'not old enough for the debounce' }],
+    );
+    assert.equal(textarea.value, 'second draft');
+  } finally {
+    restoreTimers();
+  }
+});
+
 test('useComposerInput does not post setComposerDraft when sessionPath is null', async () => {
   const posted: WebviewToHostMessage[] = [];
   installFakeTimers();

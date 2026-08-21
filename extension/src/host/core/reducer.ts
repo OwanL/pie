@@ -33,7 +33,7 @@ export { initialArchState };
 
 // Handler modules
 import { handleCommand } from './reducer/command-handlers.js';
-import { handleEffectResult, handleModelSwitchConfirmResult, handlePreflightFailed, handlePreflightSuperseded, handleClearQueueResult, handleReplaceQueueResult } from './reducer/result-handlers.js';
+import { handleEffectResult, handleModelSwitchConfirmResult, handlePreflightFailed, handlePreflightSuperseded, handleClearQueueResult, handleReplaceQueueResult, handleMcpServersUpdated } from './reducer/result-handlers.js';
 import { handleStreamingEvent, handleQueuedDelivered, handleAssistantMessageErrorStamped } from './reducer/streaming-handlers.js';
 import {
   handleSessionClosed,
@@ -357,6 +357,10 @@ export function reducer(state: ArchState, event: Event): ReducerResult {
 
     case 'NoticeShown': {
       return handleNoticeShown(state, event);
+    }
+
+    case 'McpServersUpdated': {
+      return handleMcpServersUpdated(state, event);
     }
 
     // ─── Optimistic UI events ──────────────────────────────────────────────

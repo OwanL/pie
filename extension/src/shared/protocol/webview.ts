@@ -187,6 +187,15 @@ export interface InlineEditDraft {
   inputs: ComposerInput[];
 }
 
+/** One configured MCP server as surfaced to the webview. `disabled` is the
+ *  EFFECTIVE state after merging all config scopes (a server can be disabled
+ *  by a lower-precedence file, which the host's enable action must override
+ *  with an explicit `false`). */
+export interface McpServerInfo {
+  name: string;
+  disabled: boolean;
+}
+
 export interface ViewState {
   sessions: SessionSummary[];
   openTabPaths: string[];
@@ -287,6 +296,23 @@ export interface ViewState {
   availableModelsStatus: 'provisional' | 'loading' | 'authoritative';
   contextUsage: ContextWindowUsage | null;
   prefs: ChatPrefs;
+  /** Configured MCP servers with their effective disabled state, discovered
+   *  host-side from the adapter's config files (`~/.config/mcp/mcp.json`,
+   *  `<agent dir>/mcp.json`, `.mcp.json`, `.pi/mcp.json`, …). The host fetches
+   *  this on demand (menu/tab open) and after every toggle; the webview is
+   *  passive. Empty array while unknown (no servers configured or not yet
+   *  fetched). */
+  mcpServers: McpServerInfo[];
+  /** Discovery state of `mcpServers`: 'loading' while a fetch is in flight
+   *  (or before the first fetch), 'error' after a failed fetch (cached rows
+   *  stay visible), 'ok' after a successful fetch. Absent on legacy hosts —
+   *  treat as 'ok'. */
+  mcpServersStatus?: 'loading' | 'error' | 'ok';
+  /** True after a per-server toggle wrote a config override that the adapter
+   *  has not re-read yet (applies on the next session reload / backend
+   *  restart). Preserved by list reads and no-op toggles; cleared when the
+   *  backend restarts. */
+  mcpPendingApply: boolean;
   /** Extensions discovered from the backend (tools + hooks). */
   availableExtensions: ExtensionInfo[];
   /** File changes tracked from tool calls in the active session. */
@@ -596,6 +622,18 @@ type WebviewToHostMessagePayload =
       defaultThinkingLevel: ThinkingLevel;
     }
   | { type: 'setPrefs'; prefs: Partial<ChatPrefs> }
+  /** Ask the host to re-read the effective MCP server config and refresh
+   *  `ViewState.mcpServers`. Sent when an MCP surface opens so the list is
+   *  fresh; the host surfaces the in-flight/error state via
+   *  `ViewState.mcpServersStatus` and responses arrive through the normal
+   *  snapshot flow. */
+  | { type: 'mcpListRequested' }
+  /** Persist a per-server `disabled` override into `.pi/mcp.json` (the
+   *  adapter's own mechanism — never touches server credentials). Takes
+   *  effect on the next session reload / backend restart; the host surfaces
+   *  that via `ViewState.mcpPendingApply` until the adapter re-reads the
+   *  config. */
+  | { type: 'mcpSetServerEnabled'; name: string; enabled: boolean }
   /** Toggle the active session's ephemeral/privacy mode. The setting is host
    *  state only and is deliberately not persisted. */
   | { type: 'setPrivacyMode'; sessionPath: string; enabled: boolean }

@@ -61,9 +61,11 @@ import {
   buildToggledSystemPrompt,
   captureOriginalSystemPromptOptions,
   installAutonomousModeToolGuard,
+  installMcpToolGuard,
   installSystemPromptToggleRebuildGuard,
   installSystemPromptToolToggleGuard,
   markDisabledEntries,
+  MCP_TOOL_NAMES,
   normalizePromptText,
   TOOLS_ENTRY_ID,
 } from './system-prompts';
@@ -74,6 +76,12 @@ import { WORKER_IPC_DEFAULT_LIFECYCLE_QUEUE_BYTES } from './worker-frame-io';
 import { WorkerServer } from './worker-server';
 import { installWorkerProviderNetworkLease } from './worker-provider-network-lease';
 import { WorkerLiveDetailStore } from './worker-live-detail-store';
+import {
+  observeProviderIncidents,
+  providerIncidentCode,
+  type ProviderIncident,
+} from './provider-incident';
+import { observeProviderTransport, type ProviderTransportObservation } from './provider-progress-bus';
 
 export interface WorkerRuntimePromotionPayload extends WorkerJsonObject {
   sdkPath: string;
@@ -133,6 +141,13 @@ export class WorkerRuntimeHost {
   private startupCwd = '';
   private sessionDir = '';
   private uninstallNetworkLease?: () => void;
+  private stopProviderIncidentObserver?: () => void;
+  private stopProviderProgressObserver?: () => void;
+  private readonly providerAttemptOwners = new Map<string, {
+    requestId: string;
+    turnSequence: number;
+    retryId?: string;
+  }>();
   private currentLease?: SdkSessionWriteLease;
   private readonly syncRevisions = new Map<string, number>();
   private readonly syncPayloads = new Map<string, WorkerJsonObject>();
@@ -144,6 +159,7 @@ export class WorkerRuntimeHost {
   private readonly gate = new ServiceLoadingGate();
   private systemPromptModule?: Promise<SdkSystemPromptModule>;
   private autonomousMode = false;
+  private mcpEnabled = true;
   private readonly detailStore: WorkerLiveDetailStore;
 
   constructor(private readonly options: WorkerRuntimeHostOptions) {
@@ -280,6 +296,11 @@ export class WorkerRuntimeHost {
       await context.runtime.dispose();
     }
     this.detailStore.dispose();
+    this.stopProviderProgressObserver?.();
+    this.stopProviderProgressObserver = undefined;
+    this.providerAttemptOwners.clear();
+    this.stopProviderIncidentObserver?.();
+    this.stopProviderIncidentObserver = undefined;
     ProviderGate.uninstall();
     this.uninstallNetworkLease?.();
     this.uninstallNetworkLease = undefined;
@@ -319,10 +340,10 @@ export class WorkerRuntimeHost {
         await this.options.server.requestFrame({ kind: 'provider.release', leaseId, outcome }, 'provider.released');
       },
     }, () => ({
+      sessionId: this.context?.session.sessionManager.getSessionId?.(),
       provider: this.context?.activeRequest?.provider ?? this.context?.session.model?.provider,
       model: this.context?.activeRequest?.modelId ?? this.context?.session.model?.id,
       turnId: this.context?.activeRequest?.id,
-      attemptId: this.context?.activeRequest?.id,
     }));
 
     this.sdk = await loadSdk(payload.sdkPath, { mode: 'worker', patchIdentity: this.options.patchIdentity });
@@ -377,6 +398,8 @@ export class WorkerRuntimeHost {
       busySeq: 0,
     };
     this.context = context;
+    this.installProviderProgressBridge();
+    this.installProviderIncidentBridge();
     runtime.setRebindSession?.(async (replacement) => {
       await this.bindSession(context, replacement);
       this.emit('session.opened', { ...this.openedPayload, runtimeReady: true });
@@ -459,6 +482,7 @@ export class WorkerRuntimeHost {
     }
     installSystemPromptToolToggleGuard(session, () => context.systemPromptDisabledEntries ?? []);
     installAutonomousModeToolGuard(session, () => this.autonomousMode);
+    installMcpToolGuard(session, () => this.mcpEnabled);
     if (persistedPromptToggles.length > 0) {
       await this.applySystemPromptToggles(context, persistedPromptToggles);
     }
@@ -506,6 +530,10 @@ export class WorkerRuntimeHost {
     });
     installAuxiliaryLlmMeter(session, sessionPath, (event, eventPayload) => this.emit(event, eventPayload));
     context.unsubscribe = session.subscribe((event: SdkSessionEvent) => this.handleSessionEvent(context, event));
+    // The adapter's registerTool auto-activates its tools (bypassing the
+    // setActiveTools guard), so re-apply the disabled state after extension
+    // bind and again at every turn start.
+    if (!this.mcpEnabled) this.enforceMcpToolsDisabled(context);
     if (this.openedPayload) {
       const previous = this.openedPayload;
       const replacementSource = previousSessionPath && !sameSessionPath(previousSessionPath, sessionPath)
@@ -589,6 +617,10 @@ export class WorkerRuntimeHost {
 
   private handleSessionEvent(context: SessionContext, event: SdkSessionEvent): void {
     if (context.retired) return;
+    // The adapter can re-register its tools between turns (config changes via
+    // /mcp commands); registerTool auto-activates them, so re-apply the MCP
+    // disabled state at the start of every turn.
+    if (event.type === 'turn_start') this.enforceMcpToolsDisabled(context);
     handleSdkSessionEvent({
       emit: (name, payload) => this.emit(name, payload),
       emitBusyChanged: (owner, busy) => this.emitBusyChanged(owner, busy),
@@ -603,6 +635,134 @@ export class WorkerRuntimeHost {
         }));
       },
     }, context, event);
+  }
+
+  /** Bridge fetch-layer incidents into the active isolated runtime. This used
+   * to live in BackendServer when sessions executed in the coordinator. Once
+   * provider I/O moved to workers, leaving the observer there made the
+   * structured incident path inert and reduced UI errors back to generic
+   * "Connection error" / retry symptoms. */
+  private installProviderIncidentBridge(): void {
+    if (this.stopProviderIncidentObserver) return;
+    this.stopProviderIncidentObserver = observeProviderIncidents((incident) => {
+      this.handleProviderIncident(incident);
+    });
+  }
+
+  /** Restore the provider-progress ownership bridge that moved out of the
+   * coordinator with the SDK runtime. Queue observations drive the truthful
+   * live phase and durable per-turn latency fields used by the UI/analytics. */
+  private installProviderProgressBridge(): void {
+    if (this.stopProviderProgressObserver) return;
+    this.stopProviderProgressObserver = observeProviderTransport((observation) => {
+      this.handleProviderProgress(observation);
+    });
+  }
+
+  private handleProviderProgress(observation: ProviderTransportObservation): void {
+    const context = this.context;
+    const active = context?.activeRequest;
+    if (!context || !active) return;
+    if (context.session.sessionManager.getSessionId?.() !== observation.sessionId) return;
+
+    let owner = this.providerAttemptOwners.get(observation.attemptId);
+    if (!owner && (observation.kind === 'gate_queue' || observation.kind === 'gate_acquired')
+      && active.providerTurnSequence !== undefined) {
+      owner = {
+        requestId: active.id,
+        turnSequence: active.providerTurnSequence,
+        retryId: active.retryTiming?.retryId,
+      };
+      this.providerAttemptOwners.set(observation.attemptId, owner);
+    }
+    const ownsCurrentRequest = owner?.requestId === active.id;
+    if (owner && ownsCurrentRequest) {
+      if (owner.retryId !== undefined
+        && active.retryTiming?.retryId === owner.retryId
+        && active.retryTiming.providerAttemptStartedAt === undefined
+        && (observation.kind === 'gate_queue' || observation.kind === 'gate_acquired')) {
+        active.retryTiming.providerAttemptStartedAt = observation.occurredAt;
+      }
+      if (observation.kind === 'gate_acquired'
+        && typeof observation.queueDurationMs === 'number'
+        && Number.isFinite(observation.queueDurationMs)) {
+        const queueByTurn = active.providerQueueByTurn ?? new Map();
+        const previous = queueByTurn.get(owner.turnSequence) ?? { durationMs: 0, attemptCount: 0 };
+        queueByTurn.set(owner.turnSequence, {
+          durationMs: previous.durationMs + Math.max(0, Math.trunc(observation.queueDurationMs)),
+          attemptCount: previous.attemptCount + 1,
+        });
+        active.providerQueueByTurn = queueByTurn;
+      }
+    }
+
+    if (observation.kind === 'gate_rejected' || observation.kind === 'headers_received'
+      || observation.kind === 'transport_terminal' || observation.kind === 'transport_error') {
+      this.providerAttemptOwners.delete(observation.attemptId);
+    }
+
+    const accumulator = ownsCurrentRequest ? active.liveTurnAccumulator : undefined;
+    if (!accumulator || accumulator.currentSeq <= 0) return;
+    if (observation.kind === 'gate_queue') {
+      this.emit('live.semantic', accumulator.observe(
+        { kind: 'turn.phase', phase: 'queued', inactivityBudgetMs: 120_000 },
+        observation.occurredAt,
+      ));
+    } else if (observation.kind === 'headers_wait' || observation.kind === 'headers_received') {
+      this.emit('live.semantic', accumulator.observe(
+        { kind: 'turn.phase', phase: 'waiting_provider', inactivityBudgetMs: 120_000 },
+        observation.occurredAt,
+      ));
+    }
+  }
+
+  private handleProviderIncident(incident: ProviderIncident): void {
+    const context = this.context;
+    const active = context?.activeRequest;
+    if (!context || !active) return;
+    const sessionId = context.session.sessionManager.getSessionId?.();
+    if (!sessionId || sessionId !== incident.sessionId) return;
+
+    active.latestProviderIncident = incident;
+    active.lastProviderErrorForDiagnostics = incident.userMessage;
+    const noticeKey = [
+      incident.kind,
+      incident.providerHost,
+      incident.status ?? '',
+      incident.retryAt ?? '',
+    ].join(':');
+    const emitted = active.providerIncidentNoticeKeys ?? new Set<string>();
+    active.providerIncidentNoticeKeys = emitted;
+    if (!emitted.has(noticeKey)) {
+      emitted.add(noticeKey);
+      this.emit('operational-error', {
+        incidentId: `provider:${active.id}:${noticeKey}`,
+        code: providerIncidentCode(incident.kind),
+        message: incident.userMessage,
+        detail: incident.detail,
+        sessionPath: context.sessionPath,
+        requestId: active.id,
+      });
+    }
+
+    // Quota exhaustion cannot recover by retrying the same provider. Give the
+    // SDK a short opportunity to publish its normal terminal event, then stop
+    // a still-owned request so the UI cannot remain indefinitely "running".
+    if (incident.kind === 'quota_exhausted' && !active.quotaSettlementTimer) {
+      const requestId = active.id;
+      active.quotaSettlementTimer = setTimeout(() => {
+        const current = context.activeRequest;
+        if (current?.id !== requestId || current.latestProviderIncident?.kind !== 'quota_exhausted') return;
+        void this.interrupt().catch(() => this.emit('operational-error', {
+          incidentId: `provider-recovery:${requestId}`,
+          code: 'SESSION_RUNTIME_RECOVERY_FAILED',
+          message: current.latestProviderIncident!.userMessage,
+          sessionPath: context.sessionPath,
+          requestId,
+        }));
+      }, 15_000);
+      active.quotaSettlementTimer.unref?.();
+    }
   }
 
   /**
@@ -810,6 +970,8 @@ export class WorkerRuntimeHost {
       busySeq: 0,
     };
     this.context = context;
+    this.installProviderProgressBridge();
+    this.installProviderIncidentBridge();
     runtime.setRebindSession?.(async (replacement) => {
       await this.bindSession(context, replacement);
       this.emit('session.opened', { ...this.openedPayload, runtimeReady: true });
@@ -920,6 +1082,10 @@ export class WorkerRuntimeHost {
       process.env[AUTONOMOUS_MODE_ENV] = values.autonomousMode ? '1' : '0';
       this.setAutonomousMode(values.autonomousMode);
     }
+    if (typeof values.mcpEnabled === 'boolean') {
+      process.env['PIE_MCP_ENABLED'] = values.mcpEnabled ? '1' : '0';
+      this.setMcpEnabled(values.mcpEnabled);
+    }
     if (values.providerConcurrency && typeof values.providerConcurrency === 'object'
       && !Array.isArray(values.providerConcurrency)) {
       ProviderGate.getInstance()?.applyUserOverrides(values.providerConcurrency as never);
@@ -948,6 +1114,44 @@ export class WorkerRuntimeHost {
       context.session.setActiveToolsByName?.([...active, ASK_USER_TOOL_NAME]);
     }
     context.autonomousModeAskUserWasActive = undefined;
+  }
+
+  private setMcpEnabled(enabled: boolean): void {
+    if (this.mcpEnabled === enabled) return;
+    this.mcpEnabled = enabled;
+    if (this.context) this.applyMcpEnabledToContext(this.context, enabled);
+  }
+
+  private applyMcpEnabledToContext(context: SessionContext, enabled: boolean): void {
+    const active = context.session.getActiveToolNames?.()
+      ?? context.session.getAllTools?.().map((tool) => tool.name)
+      ?? [];
+    if (!enabled) {
+      if (context.mcpToolsWereActive !== undefined) return;
+      context.mcpToolsWereActive = active.filter((name) => (MCP_TOOL_NAMES as readonly string[]).includes(name));
+      if (context.mcpToolsWereActive.length > 0) {
+        context.session.setActiveToolsByName?.(active.filter((name) => !(MCP_TOOL_NAMES as readonly string[]).includes(name)));
+      }
+      return;
+    }
+    if (context.mcpToolsWereActive && context.mcpToolsWereActive.length > 0) {
+      context.session.setActiveToolsByName?.([...active, ...context.mcpToolsWereActive]);
+    }
+    context.mcpToolsWereActive = undefined;
+  }
+
+  /** Re-apply the disabled state after the adapter re-registers its tools
+   *  (registerTool auto-activates new tools, bypassing the setActiveTools
+   *  guard). Called after extension bind and at every turn start. */
+  private enforceMcpToolsDisabled(context: SessionContext): void {
+    if (this.mcpEnabled) return;
+    const active = context.session.getActiveToolNames?.()
+      ?? context.session.getAllTools?.().map((tool) => tool.name)
+      ?? [];
+    const mcpActive = active.filter((name) => (MCP_TOOL_NAMES as readonly string[]).includes(name));
+    if (mcpActive.length === 0) return;
+    context.mcpToolsWereActive = [...new Set([...(context.mcpToolsWereActive ?? []), ...mcpActive])];
+    context.session.setActiveToolsByName?.(active.filter((name) => !(MCP_TOOL_NAMES as readonly string[]).includes(name)));
   }
 
   private async applySystemPromptToggles(context: SessionContext, disabledEntries: readonly string[]): Promise<void> {

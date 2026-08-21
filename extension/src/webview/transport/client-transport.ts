@@ -125,6 +125,10 @@ export class VsCodeClientTransport implements ClientTransport {
 
   onConnectionStateChange(handler: (state: ClientConnectionState) => void): () => void {
     this.stateHandlers.add(handler);
+    // Subscriptions expose a current value, not only future transitions. This
+    // keeps consumers correct if their initial read and subscription are
+    // separated by a render/effect boundary.
+    handler(this.getConnectionState());
     return () => this.stateHandlers.delete(handler);
   }
 
@@ -219,9 +223,10 @@ export class BrowserClientTransport implements ClientTransport {
     this.setState('connecting');
     socket.onopen = () => {
       // The host sends `rendererHello` immediately after accept; `ready` is
-      // sent only after the hello replaces this transport's identity.
-      this.reconnectAttempt = 0;
-      this.setState('connected');
+      // sent only after the hello replaces this transport's identity. An open
+      // WebSocket alone is not an application connection: keeping the UI in
+      // `connecting` prevents commands from appearing accepted in the brief
+      // open-before-hello race.
     };
     socket.onmessage = (event) => {
       let message: unknown;
@@ -241,12 +246,23 @@ export class BrowserClientTransport implements ClientTransport {
           viewGeneration: hello.viewGeneration,
           assetVersion: hello.assetVersion,
         };
+        // Only a complete host handshake establishes an application
+        // connection and resets reconnect backoff. A socket that repeatedly
+        // opens then dies before hello must continue backing off.
+        this.reconnectAttempt = 0;
+        this.setState('connected');
         this.options.onHandshake?.(this.identity);
         // The first handshake of every socket: announce readiness and ask for
         // a full snapshot (the page is stable across socket reconnects; the
         // session's view generation is the LIVE one from the hello).
         this.sendRaw({ type: 'ready', viewGeneration: this.identity.viewGeneration });
         this.sendRaw({ type: 'refreshState', viewGeneration: this.identity.viewGeneration });
+        // Every renderer registration starts with fresh host-side visibility
+        // and focus beliefs. Reassert the page's current lifecycle state on
+        // every hello (including reconnect while already hidden), rather than
+        // waiting for a transition that may never occur.
+        this.sendLifecycle('rendererVisibilityChanged', !document.hidden);
+        this.sendLifecycle('rendererFocusChanged', document.hasFocus());
         return;
       }
       for (const handler of this.handlers) handler(typed);
@@ -282,18 +298,24 @@ export class BrowserClientTransport implements ClientTransport {
     if (this.socket === null || this.socket.readyState !== WebSocket.OPEN) {
       return false; // never send while disconnected; never replay automatically
     }
+    if (this.identity === null) return false;
     let stamped: WebviewToHostMessage;
+    let trackedCommandId: string | undefined;
     if (isBrowserApplicationCommand(message.type)) {
       // The ingress requires a browser-minted clientCommandId on every
       // application command; track it in the bounded pending store.
       const tracked = pendingCommandStore.track(message);
       if (!tracked) return false; // bounded store full: drop (defensive)
-      stamped = { ...tracked.message, viewGeneration: this.identity?.viewGeneration ?? 0 };
+      stamped = { ...tracked.message, viewGeneration: this.identity.viewGeneration };
+      trackedCommandId = (stamped as { clientCommandId?: string }).clientCommandId;
     } else {
-      stamped = { ...message, viewGeneration: this.identity?.viewGeneration ?? 0 };
+      stamped = { ...message, viewGeneration: this.identity.viewGeneration };
     }
-    if (this.identity === null) return false;
-    return this.sendRaw(stamped);
+    const sent = this.sendRaw(stamped);
+    if (!sent && trackedCommandId !== undefined) {
+      pendingCommandStore.discardUnsent(trackedCommandId);
+    }
+    return sent;
   }
 
   private sendRaw(message: WebviewToHostMessage): boolean {
@@ -305,8 +327,15 @@ export class BrowserClientTransport implements ClientTransport {
       return false;
     }
     if (utf8ByteLength(frame) > OUTBOUND_FRAME_MAX_BYTES) return false;
-    this.socket.send(frame);
-    return true;
+    try {
+      this.socket.send(frame);
+      return true;
+    } catch {
+      // A close can race the readyState check. Treat it exactly like any
+      // transport drop; callers own local rollback and commands are never
+      // replayed automatically.
+      return false;
+    }
   }
 
   subscribe(handler: (message: HostToWebviewMessage) => void): () => void {
@@ -320,6 +349,11 @@ export class BrowserClientTransport implements ClientTransport {
 
   onConnectionStateChange(handler: (state: ClientConnectionState) => void): () => void {
     this.stateHandlers.add(handler);
+    // React reads the transport state during render and subscribes in an
+    // effect. A fast rendererHello can land in between those two steps. Push
+    // the current value at subscription time so that race cannot strand the
+    // UI in "Connecting…" while the socket is already usable.
+    handler(this.connectionState);
     return () => this.stateHandlers.delete(handler);
   }
 

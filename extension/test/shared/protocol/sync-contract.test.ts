@@ -68,6 +68,12 @@ test('resolveChatPrefs defaults and validates autonomous mode', () => {
   assert.equal(resolveChatPrefs({ autonomousMode: 'yes' as never }).autonomousMode, false);
 });
 
+test('resolveChatPrefs defaults and validates the MCP toggle', () => {
+  assert.equal(resolveChatPrefs().mcpEnabled, true);
+  assert.equal(resolveChatPrefs({ mcpEnabled: false }).mcpEnabled, false);
+  assert.equal(resolveChatPrefs({ mcpEnabled: 'off' as never }).mcpEnabled, true);
+});
+
 test('resolveChatPrefs preserves valid composer rows and defaults malformed stored values to one', () => {
   assert.equal(resolveChatPrefs({ composerInitialRows: 6 }).composerInitialRows, 6);
   for (const invalid of [0, 7, 1.5, Number.NaN, '3']) {
@@ -219,6 +225,8 @@ test('HostToWebviewMessage state envelope carries hostInstanceId and revision', 
   availableModelsStatus: 'authoritative',
       contextUsage: null,
       prefs: DEFAULT_CHAT_PREFS,
+      mcpServers: [],
+      mcpPendingApply: false,
       availableExtensions: [],
       fileChanges: [],
       fileChangesExpanded: false,

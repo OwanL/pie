@@ -33,6 +33,7 @@ import type {
   TranscriptWindow,
   ModelSettings,
   UserContentPart,
+  McpServerInfo,
 } from '../../shared/protocol';
 
 /** Wraps a `Command` so it can flow through the same event channel. */
@@ -174,6 +175,22 @@ export interface SetPrefsResultEvent {
   kind: 'SetPrefsResult';
   corrId: string;
   ok: boolean;
+  error?: string;
+}
+
+/** Backend answered `mcp.list` / `mcp.setServerEnabled`. On success
+ *  (`ok: true`) `servers` replaces the effective list; `pendingApply` is set
+ *  only by a toggle that actually wrote an override — a plain list read (or
+ *  a no-op toggle) does not reload the adapter, so the reducer preserves the
+ *  current flag when it is omitted. On failure (`ok: false`) the cached list
+ *  and pending-apply flag stay untouched and the UI surfaces an error state
+ *  with a Refresh action. */
+export interface McpServersUpdatedEvent {
+  kind: 'McpServersUpdated';
+  corrId: string;
+  ok: boolean;
+  servers?: McpServerInfo[];
+  pendingApply?: boolean;
   error?: string;
 }
 
@@ -453,6 +470,9 @@ export interface NoticeShownEvent {
   notice: string | null;
   noticeKind?: NoticeKind | null;
   noticeRaw?: string | null;
+  /** Omit for application-wide notices. Session-owned notices are only
+   * projected while this path is the active chat. */
+  sessionPath?: string | null;
 }
 
 /** Emitted when the backend reports an error. */
@@ -882,6 +902,7 @@ export interface SessionSummaryUpsertedEvent {
 
 export type HostEvent =
   | NoticeShownEvent
+  | McpServersUpdatedEvent
   | SessionNameDerivedEvent
   | OptimisticMessageInsertedEvent
   | OptimisticMessageRemovedEvent

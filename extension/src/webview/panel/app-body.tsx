@@ -49,12 +49,16 @@ export function AppBody({ adapter }: AppBodyProps) {
     inlineConfirm,
     respondToInlineConfirm,
   } = useHostSync(transport, adapter.initialState);
+  const postApplicationCommand = useCallback(
+    (message: WebviewToHostMessage) => connectionState === 'connected' && transport.postMessage(message),
+    [connectionState, transport],
+  );
 
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const closeContextMenu = useCallback(() => setContextMenu(null), []);
   const retryCreateOperation = useCallback((operationId: string) => {
-    postMessage({ type: 'retryCreateOperation', operationId });
-  }, [postMessage]);
+    postApplicationCommand({ type: 'retryCreateOperation', operationId });
+  }, [postApplicationCommand]);
 
   // Tracks which request IDs have an interactive inline prompt actually
   // mounted in the transcript. This is ephemeral DOM-presence bookkeeping,
@@ -99,13 +103,14 @@ export function AppBody({ adapter }: AppBodyProps) {
   const sendRetryDraftRef = useRef<((disablePruning?: boolean) => void) | null>(null);
 
   const handlers = useAppHandlers(
-    postMessage,
+    postApplicationCommand,
     activeSessionPathRef,
     setDraftRestore,
     addOptimisticMessage,
     viewState.busy,
     setContextMenu,
     setInterrupting,
+    connectionState === 'connected',
   );
 
   useWarmupAudio();
@@ -214,7 +219,7 @@ export function AppBody({ adapter }: AppBodyProps) {
           startingModelSessionPaths={viewState.startingModelSessionPaths}
           unreadFinishedSessionPaths={viewState.unreadFinishedSessionPaths}
           activeSession={viewState.activeSession}
-          backendReady={viewState.backendReady}
+          backendReady={connectionState === 'connected' && viewState.backendReady}
           hideConnectingWheel={derived.transcriptHydrating || derived.needsSessionRecovery}
           pendingExtensionUIRequestsBySession={viewState.pendingExtensionUIRequestsBySession}
           runSummariesBySession={viewState.runSummariesBySession}
@@ -276,6 +281,7 @@ export function AppBody({ adapter }: AppBodyProps) {
         busy={viewState.busy}
         retryStatus={viewState.retryStatus}
         interrupting={interrupting}
+        commandsAvailable={connectionState === 'connected' && viewState.backendReady}
         activeSession={viewState.activeSession}
         privacyMode={viewState.privacyMode}
         modelSettings={viewState.modelSettings}
@@ -284,6 +290,9 @@ export function AppBody({ adapter }: AppBodyProps) {
         availableExtensions={viewState.availableExtensions}
         contextUsage={viewState.contextUsage}
         prefs={viewState.prefs}
+        mcpServers={viewState.mcpServers}
+        mcpServersStatus={viewState.mcpServersStatus}
+        mcpPendingApply={viewState.mcpPendingApply}
         pruningSettings={viewState.pruningSettings}
         pruningCatalog={viewState.pruningCatalog}
         pruningResult={viewState.pruningResult}

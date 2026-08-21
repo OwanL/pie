@@ -10,6 +10,7 @@ import test from 'node:test';
 
 import type { HostToWebviewMessage, WebviewToHostMessage } from '../../../src/shared/protocol';
 import { BrowserClientTransport, VsCodeClientTransport } from '../../../src/webview/transport/client-transport';
+import { pendingCommandStore } from '../../../src/webview/transport/pending-command-store';
 
 // ─── Fake browser environment (installed before the transports run) ─────────
 
@@ -30,6 +31,8 @@ const vscodePosted: WebviewToHostMessage[] = [];
   },
 };
 (globalThis as Record<string, unknown>).document = {
+  hidden: false,
+  hasFocus: () => true,
   querySelector: (selector: string) => {
     const name = /name="([^"]+)"/.exec(selector)?.[1];
     const content = name === undefined ? undefined : metaTags.get(name);
@@ -50,6 +53,7 @@ class FakeWebSocket {
   static CLOSED = 3;
   readyState = FakeWebSocket.OPEN;
   sent: string[] = [];
+  throwOnSend = false;
   closed: Array<{ code: number; reason: string }> = [];
   onopen: (() => void) | null = null;
   onmessage: ((event: { data: unknown }) => void) | null = null;
@@ -61,6 +65,7 @@ class FakeWebSocket {
   }
 
   send(frame: string): void {
+    if (this.throwOnSend) throw new Error('socket closed during send');
     this.sent.push(frame);
   }
 
@@ -110,15 +115,30 @@ function sendHello(socket: FakeWebSocket, viewGeneration = 5): void {
   }) });
 }
 
-test('connect(): opens the same-origin ws route and reports connecting → connected', () => {
+test('connect(): stays connecting until rendererHello completes the application handshake', () => {
   const { transport, states } = createBrowserHarness();
   assert.equal(transport.getConnectionState(), 'connecting', 'the initial state is connecting');
   transport.connect();
   assert.equal(socketInstances.length, 1);
   assert.equal(socketInstances[0]?.url, 'ws://127.0.0.1:1997/ws');
-  assert.deepEqual(states, [], 'no transition event for the initial connecting state');
+  assert.deepEqual(states, ['connecting'], 'subscription receives the current state');
   socketInstances[0]?.onopen?.();
+  assert.deepEqual(states, ['connecting'], 'an open socket is not connected before rendererHello');
+  sendHello(socketInstances[0]!);
+  assert.deepEqual(states, ['connecting', 'connected']);
+});
+
+test('a subscriber attached after rendererHello immediately observes connected', () => {
+  socketInstances = [];
+  const transport = new BrowserClientTransport({ wsRoute: '/ws' });
+  transport.connect();
+  sendHello(socketInstances[0]!);
+
+  const states: string[] = [];
+  transport.onConnectionStateChange((state) => states.push(state));
+
   assert.deepEqual(states, ['connected']);
+  transport.dispose();
 });
 
 test('rendererHello replaces the identity and sends ready + refreshState with the LIVE view generation', () => {
@@ -130,9 +150,11 @@ test('rendererHello replaces the identity and sends ready + refreshState with th
 
   assert.deepEqual(handshakes, [{ rendererId: 'renderer-9', viewGeneration: 5 }]);
   const frames = socket.sent.map((frame) => JSON.parse(frame) as Record<string, unknown>);
-  assert.equal(frames.length, 2);
+  assert.equal(frames.length, 4);
   assert.deepEqual(frames[0], { type: 'ready', viewGeneration: 5 });
   assert.deepEqual(frames[1], { type: 'refreshState', viewGeneration: 5 });
+  assert.deepEqual(frames[2], { type: 'rendererVisibilityChanged', visible: true, viewGeneration: 5 });
+  assert.deepEqual(frames[3], { type: 'rendererFocusChanged', focused: true, viewGeneration: 5 });
 });
 
 test('postMessage(): dropped while disconnected or before the hello; stamped after', () => {
@@ -175,7 +197,25 @@ test('an oversize outbound frame is dropped before send (32 MiB bound)', () => {
 
   const huge = 'x'.repeat(33 * 1024 * 1024);
   assert.equal(transport.postMessage({ type: 'send', sessionPath: '/session/a', text: huge, localId: 'l' }), false);
-  assert.equal(socket.sent.length, 2, 'only the handshake frames were sent');
+  assert.equal(socket.sent.length, 4, 'only the handshake/lifecycle frames were sent');
+});
+
+test('a socket-close send race drops the command without retaining an uncertain decision', () => {
+  const { transport } = createBrowserHarness();
+  transport.connect();
+  const socket = socketInstances[0]!;
+  socket.onopen?.();
+  sendHello(socket, 5);
+
+  const pendingBefore = pendingCommandStore.size();
+  socket.throwOnSend = true;
+
+  assert.equal(transport.postMessage({ type: 'newSession' }), false);
+  assert.equal(
+    pendingCommandStore.size(),
+    pendingBefore,
+    'a command the socket never accepted is not left pending for reconciliation',
+  );
 });
 
 test('onclose: disconnected state + exponential reconnect backoff (1s → 2s → 4s, capped at 30s)', () => {
@@ -185,9 +225,10 @@ test('onclose: disconnected state + exponential reconnect backoff (1s → 2s →
     const { transport, timers, states } = createBrowserHarness();
     transport.connect();
     socketInstances[0]?.onopen?.();
+    sendHello(socketInstances[0]!);
     socketInstances[0]?.onclose?.();
 
-    assert.deepEqual(states, ['connected', 'disconnected']);
+    assert.deepEqual(states, ['connecting', 'connected', 'disconnected']);
     assert.equal(timers.length, 1);
     assert.equal(timers[0]?.delayMs, 1000);
 
@@ -240,7 +281,7 @@ test('sendLifecycle(): visibility/focus carry the live view generation', () => {
 
   transport.sendLifecycle('rendererVisibilityChanged', false);
   transport.sendLifecycle('rendererFocusChanged', true);
-  const frames = socket.sent.slice(2).map((frame) => JSON.parse(frame) as Record<string, unknown>);
+  const frames = socket.sent.slice(4).map((frame) => JSON.parse(frame) as Record<string, unknown>);
   assert.deepEqual(frames, [
     { type: 'rendererVisibilityChanged', visible: false, viewGeneration: 5 },
     { type: 'rendererFocusChanged', focused: true, viewGeneration: 5 },

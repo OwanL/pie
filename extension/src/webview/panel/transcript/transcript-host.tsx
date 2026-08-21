@@ -3,9 +3,9 @@
 
 /**
  * TranscriptHost renders a single TranscriptSurface for the active session
- * path only. Switching tabs updates that surface in place; sessionKey resets
- * session-scoped virtualizer, scroll, and render state without remounting the
- * host or surface.
+ * path only. Switching tabs preserves the host and surface, while the keyed
+ * session-owned TranscriptView remounts so its virtualizer can start at the
+ * bottom immediately instead of first mounting the previous tab's range.
  */
 
 import type {
@@ -78,6 +78,7 @@ const TranscriptSurface = memo(function TranscriptSurface({
       data-session-path={sessionPath}
     >
       <TranscriptView
+        key={sessionKey ?? sessionPath}
         sessionKey={sessionKey}
         transcript={transcript}
         transcriptWindow={transcriptWindow}

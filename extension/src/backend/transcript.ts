@@ -7,6 +7,11 @@ import type {
 import { COMPACTION_METRICS_CUSTOM_TYPE } from '../shared/protocol';
 import { NEW_SESSION_NAME } from '../shared/session-name';
 import { formatToolResult } from '../shared/tool-result-format';
+import {
+  reasoningFromMessageParts,
+  sanitizeProviderToolProtocolParts,
+  textFromMessageParts,
+} from '../shared/chat-message-parts';
 
 import {
   addAssistantUsage,
@@ -18,12 +23,11 @@ import {
   normalizeThinkingLevel,
   systemMessage,
   textFromParts,
-  thinkingFromParts,
   toolCallsFromMessageParts,
   usageFromMessage,
   userPartsFromContent,
 } from './transcript/content';
-import type { AssistantMessageDiagnosticLike, ContentPart, MessageLike } from './transcript/types';
+import type { AssistantMessageDiagnosticLike, MessageLike } from './transcript/types';
 
 const PROVIDER_TRANSPORT_FAILURE_DIAGNOSTIC = 'provider_transport_failure';
 
@@ -143,9 +147,9 @@ export function mapAssistantMessage(
     id: messageId,
     role: 'assistant',
     createdAt: new Date(message.timestamp ?? Date.now()).toISOString(),
-    markdown: textFromParts(parts),
+    markdown: textFromMessageParts(messageParts),
     parts: messageParts,
-    thinking: thinkingFromParts(parts),
+    thinking: reasoningFromMessageParts(messageParts),
     modelId: message.model ?? metadata?.modelId,
     provider: message.provider ?? metadata?.provider,
     thinkingLevel: metadata?.thinkingLevel,
@@ -319,7 +323,7 @@ function mapAssistantTurn(
 
   const currentAssistant = state.currentAssistant;
   if (currentAssistant) {
-    mergeAssistantTurn(currentAssistant, parts, messageParts, {
+    mergeAssistantTurn(currentAssistant, messageParts, {
       modelId: assistantModelId,
       provider: assistantProvider,
       thinkingLevel: assistantThinkingLevel,
@@ -336,9 +340,9 @@ function mapAssistantTurn(
     id: entry.id,
     role: 'assistant',
     createdAt: isoDate(entry.timestamp, message.timestamp),
-    markdown: parts ? textFromParts(parts) : '',
+    markdown: textFromMessageParts(messageParts),
     parts: messageParts,
-    thinking: parts ? thinkingFromParts(parts) : undefined,
+    thinking: reasoningFromMessageParts(messageParts),
     modelId: assistantModelId,
     provider: assistantProvider,
     thinkingLevel: assistantThinkingLevel,
@@ -355,7 +359,6 @@ function mapAssistantTurn(
 
 function mergeAssistantTurn(
   current: ChatMessage,
-  parts: ContentPart[] | undefined,
   messageParts: ChatMessage['parts'],
   update: {
     modelId: string | undefined;
@@ -368,9 +371,8 @@ function mergeAssistantTurn(
     durableEntryId: string;
   },
 ): void {
-  const newText = parts ? textFromParts(parts) : '';
-  const newThinking = parts ? thinkingFromParts(parts) : undefined;
-
+  const newText = textFromMessageParts(messageParts);
+  const newThinking = reasoningFromMessageParts(messageParts);
   if (newThinking) {
     current.thinking = current.thinking
       ? `${current.thinking}\n\n${newThinking}`
@@ -382,6 +384,15 @@ function mergeAssistantTurn(
       : newText;
   }
   appendAssistantParts(current, messageParts, true);
+  const unsanitizedParts = current.parts;
+  current.parts = sanitizeProviderToolProtocolParts(unsanitizedParts);
+  if (current.parts !== unsanitizedParts) {
+    // Ordered parts preserve content ordering but intentionally omit the
+    // paragraph breaks inserted between separate SDK assistant messages.
+    // Only rebuild markdown on the exceptional protocol-leak path; ordinary
+    // merged turns keep their existing paragraph boundaries.
+    current.markdown = textFromMessageParts(current.parts);
+  }
   current.toolCalls = toolCallsFromMessageParts(current.parts);
   current.status = update.status;
   current.durableEntryId = update.durableEntryId;

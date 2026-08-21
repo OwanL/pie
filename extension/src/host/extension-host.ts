@@ -21,6 +21,7 @@ import {
 import { type RunAnalyticsExportPayload } from './run-analytics/query';
 import { SidebarViewProvider } from './sidebar/provider';
 import { BrowserServer } from './browser-server/browser-server';
+import { compactRendererViewState } from './renderers/renderer-view-state';
 import { readBrowserServerSettings } from './browser-server/settings';
 import type { BrowserServerLifecycleEvent } from './browser-server/types';
 import { SessionService } from './session-service';
@@ -116,6 +117,9 @@ export class PieExtension implements vscode.Disposable {
   private readonly statsService: StatsService;
   private readonly service: SessionService;
   private shutdownPromise: Promise<void> | null = null;
+  /** Coalesce command-palette, notice-action, and browser requests that can
+   * arrive before the first restart projection disables renderer controls. */
+  private restartPromise: Promise<void> | null = null;
   private statusBarUpdateScheduled = false;
 
   private readonly messageRouter: MessageRouter;
@@ -435,9 +439,23 @@ export class PieExtension implements vscode.Disposable {
   }
 
   async restart(): Promise<void> {
-    this.updateStatusBar('Starting');
-    await this.service.restart();
-    this.pushOpenTabsRegistry();
+    if (!this.restartPromise) {
+      const operation = (async () => {
+        this.updateStatusBar('Starting');
+        // Fence renderer mutations before awaiting already-accepted config work.
+        // A model/reasoning write is optimistic in the UI; killing its RPC here
+        // would roll it back after restart and make the picker appear broken.
+        this.dispatchArchEvent({ kind: 'BackendReadyChanged', ready: false });
+        await this.effectRunner.drainConfigurationOperations();
+        await this.service.restart();
+        this.pushOpenTabsRegistry();
+      })();
+      const tracked = operation.finally(() => {
+        if (this.restartPromise === tracked) this.restartPromise = null;
+      });
+      this.restartPromise = tracked;
+    }
+    await this.restartPromise;
   }
 
   /** Push the currently-open tab summaries to the backend (`openTabs.set`) so
@@ -771,7 +789,7 @@ export class PieExtension implements vscode.Disposable {
         transcriptCount: viewState.transcript.length,
       });
     }
-    return viewState;
+    return compactRendererViewState(viewState);
   }
 
   private scheduleRender(): void {

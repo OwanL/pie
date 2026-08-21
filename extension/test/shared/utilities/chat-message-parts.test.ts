@@ -9,8 +9,10 @@ import {
   deduplicateToolCallResultsForTransport,
   legacyAssistantParts,
   mergeAssistantParts,
+  omitRedundantToolCallMirrorForTransport,
   reasoningFromMessageParts,
   restoreToolCallResultsFromParts,
+  sanitizeProviderToolProtocolParts,
   textFromMessageParts,
   toolCallsFromMessageParts,
   upsertAssistantToolPart,
@@ -194,6 +196,38 @@ test('message-part extractors return text, reasoning, and cloned tool calls', ()
   assert.equal(toolCallsFromMessageParts(undefined), undefined);
 });
 
+test('provider tool protocol sanitizer removes duplicated DSML while preserving structured calls', () => {
+  const toolCall = makeToolCall({ id: 'computer-1', name: 'computer' });
+  const parts: ChatMessagePart[] = [
+    { kind: 'text', text: 'I will inspect the page:curr<tool_calls>\n<｜DSML｜invoke name="computer">\n<｜DSML｜parameter name="operation">observe</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>' },
+    { kind: 'toolCall', toolCall },
+    { kind: 'text', text: 'curr' },
+  ];
+
+  const sanitized = sanitizeProviderToolProtocolParts(parts);
+
+  assert.deepEqual(sanitized, [
+    { kind: 'text', text: 'I will inspect the page:' },
+    { kind: 'toolCall', toolCall },
+  ]);
+  assert.equal(textFromMessageParts(sanitized), 'I will inspect the page:');
+  assert.doesNotMatch(JSON.stringify(sanitized), /DSML|<tool_calls>|curr/iu);
+});
+
+test('provider tool protocol sanitizer is narrow and preserves ordinary assistant text', () => {
+  const noStructuredCall: ChatMessagePart[] = [
+    { kind: 'text', text: 'Example: <tool_calls><｜DSML｜invoke name="computer">' },
+  ];
+  const ordinaryWithTool: ChatMessagePart[] = [
+    { kind: 'text', text: 'The DSML documentation describes tool calls.' },
+    { kind: 'toolCall', toolCall: makeToolCall() },
+  ];
+
+  assert.strictEqual(sanitizeProviderToolProtocolParts(noStructuredCall), noStructuredCall);
+  assert.strictEqual(sanitizeProviderToolProtocolParts(ordinaryWithTool), ordinaryWithTool);
+  assert.equal(sanitizeProviderToolProtocolParts(undefined), undefined);
+});
+
 test('transport deduplication keeps complete tool detail once and restores the compatibility mirror', () => {
   const nestedResult = {
     content: [{ type: 'text', text: 'full child output' }],
@@ -234,4 +268,19 @@ test('transport deduplication preserves legacy-only tool results', () => {
   assert.deepEqual(deduplicateToolCallResultsForTransport(legacy).toolCalls?.[0]?.result, {
     output: 'legacy detail',
   });
+});
+
+test('renderer transport omits the complete legacy tool mirror only when ordered parts are authoritative', () => {
+  const canonical = makeToolCall({ status: 'completed', result: { output: 'once' } });
+  const ordered = makeAssistantMessage({
+    parts: [{ kind: 'toolCall', toolCall: canonical }],
+    toolCalls: [cloneToolCall(canonical)],
+  });
+  const transported = omitRedundantToolCallMirrorForTransport(ordered);
+
+  assert.equal(transported.toolCalls, undefined);
+  assert.strictEqual(transported.parts?.[0], ordered.parts?.[0]);
+  assert.equal((JSON.stringify(transported).match(/once/g) ?? []).length, 1);
+  const legacy = makeAssistantMessage({ toolCalls: [canonical] });
+  assert.strictEqual(omitRedundantToolCallMirrorForTransport(legacy), legacy);
 });

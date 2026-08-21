@@ -21,14 +21,10 @@ interface CollapsibleChevronProps {
  */
 export function CollapsibleChevron({ open, size = 10, class: className }: CollapsibleChevronProps) {
   return (
-    <svg
+    <span
       class={cx('collapsible-chevron', open && 'collapsible-chevron-open', className)}
-      width={size}
-      height={size}
-      viewBox="0 0 10 10"
+      style={{ width: `${size}px`, height: `${size}px` }}
       aria-hidden="true"
-    >
-      <polyline points="3,2 7,5 3,8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
-    </svg>
+    />
   );
 }

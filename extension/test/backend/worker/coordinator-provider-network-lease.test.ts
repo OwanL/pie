@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import { CoordinatorProviderNetworkLeaseAuthority } from '../../../src/backend/coordinator-provider-network-lease';
 import { installWorkerProviderNetworkLease } from '../../../src/backend/worker-provider-network-lease';
+import { observeProviderTransport } from '../../../src/backend/provider-progress-bus';
 
 const owner = (workerId: string, workerGeneration = 1) => ({ coordinatorGeneration: 1, workerId, workerGeneration });
 
@@ -203,6 +204,37 @@ test('worker provider lease is acquired at fetch and held through body EOF, erro
     assert.deepEqual(calls, ['acquire', 'observe:success', 'release:completed']);
   } finally {
     uninstall();
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('worker provider lease republishes queue and transport phases from the isolated network boundary', async () => {
+  const originalFetch = globalThis.fetch;
+  const observations: Array<{ kind: string; queueDurationMs?: number; attemptId: string }> = [];
+  const stop = observeProviderTransport((observation) => observations.push(observation));
+  globalThis.fetch = (async () => new Response(new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode('ok'));
+      controller.close();
+    },
+  }))) as typeof fetch;
+  const uninstall = installWorkerProviderNetworkLease({
+    acquire: async () => ({ leaseId: 'lease-progress' }),
+    cancel: async () => undefined,
+    observe: () => undefined,
+    release: async () => undefined,
+  }, () => ({ sessionId: 'session-progress', provider: 'provider-progress', model: 'model-progress' }));
+  try {
+    const response = await globalThis.fetch('https://provider.example/v1/chat');
+    assert.equal(await response.text(), 'ok');
+    assert.deepEqual(observations.map((observation) => observation.kind), [
+      'gate_queue', 'gate_acquired', 'headers_wait', 'headers_received', 'raw_chunk', 'transport_terminal',
+    ]);
+    assert.ok((observations[1]?.queueDurationMs ?? -1) >= 0);
+    assert.ok(observations.every((observation) => observation.attemptId === observations[0]?.attemptId));
+  } finally {
+    uninstall();
+    stop();
     globalThis.fetch = originalFetch;
   }
 });

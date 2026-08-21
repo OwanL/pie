@@ -158,6 +158,47 @@ test('SessionsInterrupted rolls back a pre-ack optimistic send and late rejectio
   assert.deepEqual(late.effects, []);
 });
 
+test('SessionsInterrupted restores every pending send without replacing a newer composer draft', () => {
+  const oldInput = { id: 'old', kind: 'filesystemPathRef' as const, path: '/old', name: 'old', source: 'picker' as const };
+  const queuedInput = { id: 'queued', kind: 'filesystemPathRef' as const, path: '/queued', name: 'queued', source: 'picker' as const };
+  const newerInput = { id: 'newer', kind: 'filesystemPathRef' as const, path: '/newer', name: 'newer', source: 'picker' as const };
+  const initial = produce(createInitialArchState(), (draft) => {
+    draft.transcript.bySession['/send'] = [
+      { id: 'local-old', role: 'user', createdAt: 'old', markdown: 'old prompt', status: 'completed' },
+      { id: 'local-queued', role: 'user', createdAt: 'new', markdown: 'queued prompt', status: 'queued' },
+    ];
+    draft.pending.promoted['old-corr'] = {
+      kind: 'send', sessionPath: '/send', localId: 'local-old', previousSummary: null,
+      text: 'old prompt', inputs: [oldInput], startedAt: 1, requestId: 'request-old',
+    };
+    draft.pending.ops['queued-corr'] = {
+      kind: 'send', sessionPath: '/send', localId: 'local-queued', previousSummary: null,
+      text: 'queued prompt', inputs: [queuedInput], startedAt: 2, queued: true,
+    };
+    draft.composer.draftTextBySession['/send'] = 'newer draft';
+    draft.composer.pendingComposerInputsBySession['/send'] = [newerInput];
+  });
+
+  const result = reducer(initial, {
+    kind: 'SessionsInterrupted', sessionPaths: ['/send'], reason: 'backend exited',
+  });
+
+  assert.equal(
+    result.state.composer.draftTextBySession['/send'],
+    'old prompt\n\nqueued prompt\n\nnewer draft',
+  );
+  assert.deepEqual(
+    result.state.composer.pendingComposerInputsBySession['/send'],
+    [oldInput, queuedInput, newerInput],
+  );
+  const rejected = result.effects.filter((effect) => effect.kind === 'PostImperative');
+  assert.equal(rejected.length, 2);
+  for (const effect of rejected) {
+    assert.equal(effect.imperativeMessage.text, 'old prompt\n\nqueued prompt\n\nnewer draft');
+    assert.deepEqual(effect.imperativeMessage.inputs, [oldInput, queuedInput, newerInput]);
+  }
+});
+
 test('SessionsInterrupted restores the removed tail for a promoted optimistic edit', () => {
   const oldUser: ChatMessage = { id: 'old-user', role: 'user', createdAt: 'old', markdown: 'old', status: 'completed' };
   const oldReply: ChatMessage = { id: 'old-reply', role: 'assistant', createdAt: 'old', markdown: 'reply', status: 'completed' };

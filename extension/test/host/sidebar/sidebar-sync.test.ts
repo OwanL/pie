@@ -20,7 +20,7 @@ const baseViewState: ViewState = {
   aggregateStats: EMPTY_AGGREGATE_STATS, deferredTriggers: [], draftText: '', busy: false, retryStatus: null, liveTurnPhase: null, notice: null,
   backendReady: true, workspaceCwd: '/workspace', systemPrompts: [], modelSettings: null, availableModels: [],
   availableModelsStatus: 'authoritative', contextUsage: null,
-  prefs: DEFAULT_CHAT_PREFS, availableExtensions: [], fileChanges: [], fileChangesExpanded: false, readFilePaths: [], pruningResult: null,
+  prefs: DEFAULT_CHAT_PREFS, mcpServers: [], mcpPendingApply: false, availableExtensions: [], fileChanges: [], fileChangesExpanded: false, readFilePaths: [], pruningResult: null,
   prepassPhase: 'idle', prepassStartedAt: null,
   pruningSettings: { mode: 'auto', skillCeiling: 8, toolCeiling: 10, skillAlwaysKeep: [], toolAlwaysKeep: [], model: 'gpt-5.4-mini', provider: 'github-copilot', thinkingLevel: 'minimal' },
   toolResultPruningSettings: { ...DEFAULT_TOOL_RESULT_PRUNING_SETTINGS, rules: { ...DEFAULT_TOOL_RESULT_PRUNING_SETTINGS.rules } },
@@ -96,4 +96,35 @@ test('full snapshots remain the sole envelope authority and revisions must be mo
     () => buildStateEnvelope(sync, baseViewState, { revision: 5, viewGeneration: 2, rendererId: 'renderer-1', rendererGeneration: 3 }),
     /increase monotonically/,
   );
+});
+
+test('renderer snapshots keep ordered tool parts and omit their redundant legacy mirror', () => {
+  const toolCall = {
+    id: 'tool-1',
+    name: 'subagent',
+    input: { task: 'large prompt' },
+    status: 'completed' as const,
+    result: { output: 'large result' },
+  };
+  const sourceMessage = {
+    id: 'assistant-1',
+    role: 'assistant' as const,
+    createdAt: '2026-01-01T00:00:00.000Z',
+    markdown: '',
+    status: 'completed' as const,
+    parts: [{ kind: 'toolCall' as const, toolCall }],
+    toolCalls: [{ ...toolCall }],
+  };
+  const viewState: ViewState = { ...baseViewState, transcript: [sourceMessage] };
+  const result = buildStateEnvelope(
+    createSidebarSyncState('host-1'),
+    viewState,
+    { revision: 1, viewGeneration: 2, rendererId: 'renderer-1', rendererGeneration: 3 },
+  );
+
+  assert.equal(result.message.state.transcript[0]?.toolCalls, undefined);
+  assert.deepEqual(result.message.state.transcript[0]?.parts, sourceMessage.parts);
+  assert.equal(sourceMessage.toolCalls.length, 1, 'source ViewState is not mutated');
+  assert.equal(result.expectedTranscriptIdentity, transcriptRenderSignature(result.message.state));
+  assert.equal(result.expectedTranscriptIdentity, transcriptRenderSignature(viewState), 'mirror omission preserves render identity');
 });

@@ -11,5 +11,6 @@ export { SoundSection } from './settings-menu-sound';
 export { BashSection } from './settings-menu-bash';
 export { SubagentSection } from './settings-menu-subagent';
 export { ExtensionsSection } from './settings-menu-extensions';
+export { McpSection } from './settings-menu-mcp';
 export { ProvidersSection } from './settings-menu-providers';
 export { AppearanceSection, UiGroupLabel } from './ui-appearance-settings';

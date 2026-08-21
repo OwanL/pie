@@ -347,6 +347,8 @@ export type Command =
   | SetModelCommand
   | HydrateModelCommand
   | SetPrefsCommand
+  | McpListRequestedCommand
+  | McpSetServerEnabledCommand
   | SetPrivacyModeCommand
   | SelectSessionCommand
   | CloseTabCommand
@@ -399,6 +401,21 @@ export interface HydrateModelCommand extends CommandBase {
 export interface SetPrefsCommand extends CommandBase {
   kind: 'SetPrefs';
   prefs: Partial<ChatPrefs>;
+}
+
+/** Refresh `state.settings.mcpServers` from the backend's effective MCP
+ *  config (re-reads the adapter config files). */
+export interface McpListRequestedCommand extends CommandBase {
+  kind: 'McpListRequested';
+}
+
+/** Persist a per-server `disabled` override into `.pi/mcp.json` via the
+ *  backend (adapter's own writer). Applies on the next session reload /
+ *  backend restart; the response event sets `mcpPendingApply`. */
+export interface McpSetServerEnabledCommand extends CommandBase {
+  kind: 'McpSetServerEnabled';
+  name: string;
+  enabled: boolean;
 }
 
 /** Toggle host-only privacy mode for one session. */

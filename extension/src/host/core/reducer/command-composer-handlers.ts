@@ -22,6 +22,9 @@ export function handleAddComposerInput(state: ArchState, cmd: Extract<Command, {
         settings: {
           ...state.settings,
           notice: `Cannot attach image: aggregate image size exceeds the ${MAX_AGGREGATE_IMAGE_INPUT_BYTES} byte limit.`,
+          noticeKind: null,
+          noticeRaw: null,
+          noticeSessionPath: cmd.sessionPath,
         },
       },
       effects: [],

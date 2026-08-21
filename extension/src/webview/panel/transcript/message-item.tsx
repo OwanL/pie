@@ -12,7 +12,7 @@ import { chatMessageEqual } from './message-equal';
 import { useCaptureHeight, useMessageEntrance, useMessageItemDerived, useMessageParts } from './message-item/hooks';
 import { MessageItemInner, MessageItemShell } from './message-item/inner';
 import { userImagePartsToInputs } from './parts';
-import { MessageCommitContext, useCommittedMessageLeaf } from './commit-registry';
+import { MessageCommitContext, MessageToolRevisionContext, useCommittedMessageLeaf } from './commit-registry';
 import { messageRenderIdentity } from './render-identity';
 
 export { ReasoningBlock } from './message-item/reasoning-block';
@@ -32,6 +32,9 @@ export interface MessageItemProps {
   onContextMenu: TranscriptContextMenuHandler;
   renderToolCall: RenderToolCall;
   isLastAssistantMessage?: boolean;
+  /** Completed messages outside the signed commit tail may defer historical
+   * tool-card bodies until they approach the viewport. */
+  deferHistoricalToolCalls?: boolean;
   /** Timestamp of the user request that owns this assistant reply. */
   requestCreatedAt?: string;
   /** Pruning diagnostics folded into this assistant turn's header, when present. */
@@ -60,6 +63,7 @@ export function MessageItemView({
   onContextMenu,
   renderToolCall,
   isLastAssistantMessage,
+  deferHistoricalToolCalls,
   requestCreatedAt,
   pruningHeaderState,
   activityState,
@@ -88,8 +92,7 @@ export function MessageItemView({
   const initialInputs = useMemo(() => userImagePartsToInputs(message), [message]);
   const commitOwner = useMemo(() => ({
     messageId: message.id,
-    toolStateRevision: message.toolStateRevision ?? 0,
-  }), [message.id, message.toolStateRevision]);
+  }), [message.id]);
   useCommittedMessageLeaf(message);
 
   const derived = useMessageItemDerived({
@@ -120,6 +123,7 @@ export function MessageItemView({
       handleMessageClick={derived.handleMessageClick}
     >
       <MessageCommitContext.Provider value={commitOwner}>
+      <MessageToolRevisionContext.Provider value={message.toolStateRevision ?? 0}>
       <MessageItemInner
         message={message}
         isEditing={derived.isEditing}
@@ -140,6 +144,7 @@ export function MessageItemView({
         html={derived.html}
         getMessageRaw={derived.getMessageRaw}
         combinedParts={combinedParts}
+        deferHistoricalToolCalls={deferHistoricalToolCalls}
         renderableUserParts={renderableUserParts}
         prefs={prefs}
         workingDirectory={workingDirectory}
@@ -153,6 +158,7 @@ export function MessageItemView({
         onEditCancel={onEditCancel}
         onCancelPrepass={onCancelPrepass}
       />
+      </MessageToolRevisionContext.Provider>
       </MessageCommitContext.Provider>
     </MessageItemShell>
   );
@@ -194,6 +200,7 @@ export function areMessageItemPropsEqual(prev: MessageItemProps, next: MessageIt
     prev.editingId === next.editingId &&
     prev.editingDraft === next.editingDraft &&
     prev.isLastAssistantMessage === next.isLastAssistantMessage &&
+    prev.deferHistoricalToolCalls === next.deferHistoricalToolCalls &&
     prev.requestCreatedAt === next.requestCreatedAt &&
     prev.sessionKey === next.sessionKey &&
     prev.onEditRequest === next.onEditRequest &&

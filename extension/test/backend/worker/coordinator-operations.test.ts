@@ -13,7 +13,7 @@ test('backend construction fails closed without a bundled worker artifact path',
 });
 
 test('coordinator operation catalog includes runtime-free durable mutations only', () => {
-  for (const method of ['app.ping', 'diagnostics.livePipeline.setEnabled', 'provider_gate.metrics', 'session.list', 'session.create', 'session.open', 'session.duplicate', 'session.preload', 'session.loadTranscriptPage', 'session.loadDetail', 'session.truncateAfter', 'models.list', 'settings.get']) {
+  for (const method of ['app.ping', 'diagnostics.livePipeline.setEnabled', 'mcp.list', 'mcp.setServerEnabled', 'provider_gate.metrics', 'session.list', 'session.create', 'session.open', 'session.duplicate', 'session.preload', 'session.loadTranscriptPage', 'session.loadDetail', 'session.truncateAfter', 'models.list', 'settings.get']) {
     assert.equal(isCoordinatorOperationAllowed(method, {}), true, method);
   }
   assert.equal(isCoordinatorOperationAllowed('settings.set', { defaultModel: 'x' }), true);

@@ -7,6 +7,7 @@ import type {
 } from '../../shared/protocol';
 import {
   appendAssistantTextPart,
+  sanitizeProviderToolProtocolParts,
   toolCallsFromMessageParts,
   upsertAssistantToolPart,
 } from '../../shared/chat-message-parts';
@@ -108,7 +109,7 @@ export function assistantPartsFromContent(
     }
   }
 
-  return orderedParts.length > 0 ? orderedParts : undefined;
+  return sanitizeProviderToolProtocolParts(orderedParts.length > 0 ? orderedParts : undefined);
 }
 
 export function appendAssistantParts(

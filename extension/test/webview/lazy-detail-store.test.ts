@@ -66,3 +66,21 @@ test('detail cache is bounded and failed requests can be retried', () => {
   requestLazyDetail(first.sessionPath, first, true);
   assert.equal(posts.length, 3, 'retry starts a new request after failure');
 });
+
+test('a disconnected transport keeps the request queued without occupying the active slot', () => {
+  clearLazyDetailCache();
+  const posts: WebviewToHostMessage[] = [];
+  setLazyDetailPostMessage(() => false);
+  const detail = ref('detail-reconnect');
+
+  requestLazyDetail(detail.sessionPath, detail);
+  assert.equal(posts.length, 0);
+
+  setLazyDetailPostMessage((message) => {
+    posts.push(message);
+    return true;
+  });
+
+  assert.equal(posts.length, 1, 'reconnect re-pumps the explicit request once');
+  assert.equal(posts[0]?.type, 'requestDetail');
+});

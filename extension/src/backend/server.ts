@@ -48,6 +48,8 @@ import {
   ensureSdkPatchBarrier,
   loadSdk,
   type ColdCoordinatorSdkModule,
+  type SdkAuthStorage,
+  type SdkModelRegistry,
 } from './sdk';
 import { ProviderGate } from './provider-gate.js';
 import { CreateOperationLedger } from './create-operation-ledger';
@@ -180,7 +182,11 @@ export class BackendServer {
   private sessionDir?: string;
   private sessionDirResolved = false;
   private agentDir = '';
-  private authStorage: unknown;
+  private authStorage?: SdkAuthStorage;
+  /** Runtime-free coordinator registry used for cold-session catalog
+   * hydration. This preserves built-in providers represented by
+   * `modelOverrides` without creating an AgentSession in the coordinator. */
+  private modelRegistry?: SdkModelRegistry;
   private viewedSessionPath?: string;
   /** Monotonic fence preventing a slow session.open from overwriting a newer
    * host-local visual transition after its durable read completes. */
@@ -234,6 +240,10 @@ export class BackendServer {
    *  polling, late SDK events) so a dying backend cannot push post-shutdown
    *  state to a host that is already tearing it down. */
   private disposed = false;
+  /** Accepted stdin requests that have not yet completed. EOF-driven restart
+   * drains these before disposal so a settings writer cannot be killed while
+   * holding the shared settings lock. */
+  private readonly inFlightInputRequests = new Set<Promise<void>>();
   /** All shutdown callers join one teardown. A second EOF/watchdog signal must
    * not observe `disposed` and exit while the first caller still owns workers. */
   private disposePromise?: Promise<void>;
@@ -492,6 +502,10 @@ export class BackendServer {
 
       this.authPath = authPath;
       this.authStorage = this.sdk.AuthStorage.create(authPath);
+      this.modelRegistry = this.sdk.ModelRegistry.create(
+        this.authStorage,
+        path.join(this.agentDir, 'models.json'),
+      );
     });
 
     const coldStore = this.initializeColdSessionStore();
@@ -565,7 +579,13 @@ export class BackendServer {
     // request the client sends immediately after receiving ready is captured,
     // rather than racing with reader attachment.
     const detachReader = attachJsonlLineReader(process.stdin, (line) => {
-      void this.handleLine(line);
+      const request = this.handleLine(line);
+      this.inFlightInputRequests.add(request);
+      void request.catch((error) => {
+        log(`backend request drain failed: ${toErrorMessage(error)}`);
+      }).finally(() => {
+        this.inFlightInputRequests.delete(request);
+      });
     }, {
       maxLineBytes: JSONL_MAX_LINE_BYTES,
       onOverflow: ({ maxLineBytes, preview }) => {
@@ -589,7 +609,10 @@ export class BackendServer {
 
     process.stdin.on('end', () => {
       detachReader();
-      void this.dispose().then(
+      void (async () => {
+        await Promise.allSettled([...this.inFlightInputRequests]);
+        await this.dispose();
+      })().then(
         () => process.exit(0),
         (error) => { log(`backend disposal failed closed: ${toErrorMessage(error)}`); process.exitCode = 1; },
       );
@@ -1206,7 +1229,7 @@ export class BackendServer {
     operationAttempt?: number,
   ): Promise<SessionOpenedPayload> {
     return await timed('buildSessionOpenedPayload', async () => {
-      const catalog = await loadConfiguredModels(this.agentDir);
+      const catalog = await loadConfiguredModels(this.agentDir, this.modelRegistry);
       const availableModels = catalog.models;
       const modelSettings = await this.readModelSettings();
       const store = this.initializeColdSessionStore();
@@ -1343,6 +1366,7 @@ export class BackendServer {
             .catch(() => 'missing');
           if (authFingerprint !== this.authFingerprint) {
             this.authFingerprint = authFingerprint;
+            this.authStorage?.reload?.();
             await this.workerRuntimeRouter.refreshAuth(authFingerprint, authPath);
           }
         } catch (error) {
@@ -1357,7 +1381,7 @@ export class BackendServer {
             .catch(() => 'missing');
           if (modelsFingerprint !== this.modelsJsonFingerprint) {
             this.modelsJsonFingerprint = modelsFingerprint;
-            const catalog = await loadConfiguredModels(this.agentDir);
+            const catalog = await loadConfiguredModels(this.agentDir, this.modelRegistry);
             if (catalog.ok) {
               await this.workerRuntimeRouter.syncCatalog(catalog.models as unknown as WorkerJsonValue[]);
             }
@@ -1618,11 +1642,30 @@ export class BackendServer {
     if (router) {
         const sessionPath = requestSessionPath(request.params);
         const routeState = sessionPath ? router.getRoute(sessionPath) : undefined;
-        if (routeState?.state === 'transitioning' && request.method !== 'session.truncateAfter') {
+        if (routeState?.state === 'transitioning'
+            && request.method !== 'session.truncateAfter'
+            && request.method !== 'session.viewed'
+            && request.method !== 'message.interrupt') {
           throw new BackendError(
             'SESSION_TRANSITION_IN_PROGRESS',
             `Session transition is already in progress for ${sessionPath}.`,
           );
+        }
+        if (routeState?.state === 'transitioning' && request.method === 'message.interrupt' && sessionPath) {
+          // The transition has already fenced the old worker and its first step
+          // is an interrupt. Serialize this later public interrupt behind the
+          // transition instead of rejecting a legitimate user action. If the
+          // transition restores or promotes a hot owner, interrupt that current
+          // owner; if it settles cold/fenced, there is no live turn left.
+          onRequestValidated?.();
+          await routeState.completion.catch(() => undefined);
+          if (router.hasHotOwner(sessionPath)) {
+            const result = await router.interrupt(sessionPath, `public request ${request.id} after session transition`);
+            return result.soft
+              ? { interrupted: true, settled: true }
+              : { interrupted: true, settled: false, teardownTimedOut: true };
+          }
+          return { interrupted: true, settled: true };
         }
         if (request.method === 'message.interrupt' && sessionPath && router.hasHotOwner(sessionPath)) {
           onRequestValidated?.();
@@ -1794,7 +1837,7 @@ export class BackendServer {
       listAvailableModels: async (context) => {
         const catalog = context
           ? loadAvailableModels(context, this.agentDir)
-          : await loadConfiguredModels(this.agentDir);
+          : await loadConfiguredModels(this.agentDir, this.modelRegistry);
         if (!catalog.ok) {
           throw new BackendError('MODEL_CATALOG_UNAVAILABLE', `Unable to load the model catalog: ${catalog.error}`);
         }
@@ -1861,7 +1904,13 @@ export class BackendServer {
       pid: process.pid,
     });
     this.disposed = true;
-    if (this.coldSessionStore) this.coldSessionStore.leases.advanceCoordinatorGeneration(2);
+    if (this.coldSessionStore) {
+      // Backend generations are host-authoritative and increase across every
+      // restart. Advancing to a hard-coded generation only works for the
+      // first process; generation 2+ then throws during ordinary shutdown and
+      // forces the host to kill an otherwise healthy coordinator.
+      this.coldSessionStore.leases.advanceCoordinatorGeneration(this.backendGeneration + 1);
+    }
     this.coldSessionManagerHandles.clear();
     this.pendingLivePipelineTraceDisables.clear();
     this.stopHostWatchdog();

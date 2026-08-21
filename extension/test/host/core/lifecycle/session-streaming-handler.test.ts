@@ -24,8 +24,9 @@ function createDeps(initialState?: ArchState) {
             settings: {
               ...archState.settings,
               notice: event.notice,
-                noticeKind: event.noticeKind ?? null,
-                noticeRaw: event.noticeRaw ?? null,
+              noticeKind: event.noticeKind ?? null,
+              noticeRaw: event.noticeRaw ?? null,
+              noticeSessionPath: event.notice ? (event.sessionPath ?? null) : null,
             },
           };
         }
@@ -67,6 +68,7 @@ test('onMessageAborted shows a notice for unexpected interruptions and sanitizes
       notice: 'Backend dropped request before completion.',
       noticeKind: 'operational-error',
       noticeRaw: 'Backend dropped request before completion.',
+      sessionPath: '/s',
     },
   ]);
   assert.deepEqual(touched, ['/s']);
@@ -125,6 +127,7 @@ test('onMessageAborted appends to an active unrelated error notice instead of su
       notice: 'Backend exited unexpectedly. — The session stopped unexpectedly before the assistant finished responding.',
       noticeKind: 'operational-error',
       noticeRaw: 'Backend exited unexpectedly. — The session stopped unexpectedly before the assistant finished responding.',
+      sessionPath: null,
     },
   ]);
 });

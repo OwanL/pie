@@ -14,7 +14,8 @@
   "httpIdleTimeoutMs": 0,
   "bashDefaultTimeout": 60,
   "packages": [
-    "npm:pi-web-access@0.13.0"
+    "npm:pi-web-access@0.13.0",
+    "npm:pi-mcp-adapter@2.20.1"
   ],
   "pruning": {
     "model": "gpt-5-mini",
@@ -34,7 +35,8 @@
         "bash",
         "edit",
         "read",
-        "write"
+        "write",
+        "mcp"
       ]
     },
     "autoSkipBelowTokens": null

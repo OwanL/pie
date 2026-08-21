@@ -143,7 +143,11 @@ const READY_TIMEOUT_MS = BACKEND_READY_TIMEOUT_MS;
  * ownership". A per-call override can be passed via `request`'s `options`.
  */
 const RPC_TIMEOUTS_MS: Record<string, number> = {
-  'runtimePrefs.set': 5_000,
+  // The coordinator applies this locally and synchronizes both runtime prefs
+  // and provider policy across every hot worker before acknowledging. A 5s
+  // host deadline could report failure even though that authoritative sync
+  // was still completing, especially during restart or heavy tool progress.
+  'runtimePrefs.set': 60_000,
   'session.list': 60_000,
   'session.create': 60_000,
   'session.open': 60_000,
@@ -184,6 +188,7 @@ export class BackendClient implements vscode.Disposable {
   private detachReader?: () => void;
   private killEscalationTimer?: ReturnType<typeof setTimeout>;
   private killEscalationProcess?: cp.ChildProcess;
+  private stopPromise?: Promise<void>;
   private generation = 0;
   private readonly intentionalStops = new WeakSet<cp.ChildProcess>();
 
@@ -397,7 +402,7 @@ export class BackendClient implements vscode.Disposable {
           finishResolve(payload);
         } catch (error) {
           finishReject(error instanceof Error ? error : new Error(String(error)));
-          void this.stop().catch(() => undefined);
+          this.forceStopProcess();
         }
       });
 
@@ -440,7 +445,7 @@ export class BackendClient implements vscode.Disposable {
         // generation so a retry is possible instead of leaving start() failed
         // while `proc` remains permanently "already running".
         if (generation === this.generation && this.proc === proc) {
-          void this.stop().catch(() => undefined);
+          this.forceStopProcess();
         }
       }, this.options.readyTimeoutMs ?? READY_TIMEOUT_MS);
 
@@ -527,32 +532,57 @@ export class BackendClient implements vscode.Disposable {
    * `start()` again afterwards to bring up a fresh process.
    */
   async stop(): Promise<void> {
-    this.detachReader?.();
-    this.detachReader = undefined;
-    this.stopProcess();
+    if (!this.stopPromise) {
+      const operation = this.stopProcessGracefully();
+      const tracked = operation.finally(() => {
+        if (this.stopPromise === tracked) this.stopPromise = undefined;
+      });
+      this.stopPromise = tracked;
+    }
+    await this.stopPromise;
+    // Keep stdout attached during graceful drain: accepted RPCs (especially
+    // settings.set) must be allowed to resolve before shutdown. The exit
+    // handler detaches the reader; reject only requests the backend could not
+    // settle before its confirmed exit.
     this.requests.rejectAll(new Error('Backend stopped.'));
   }
 
-  private stopProcess(): void {
-    if (!this.proc) {
-      return;
-    }
+  /** Close stdin first so the backend can drain an accepted settings write and
+   * release its cross-process lock before the replacement generation starts.
+   * A bounded force-kill still guarantees restart cannot hang indefinitely. */
+  private async stopProcessGracefully(): Promise<void> {
+    if (!this.proc) return;
     const proc = this.proc;
     this.intentionalStops.add(proc);
     this.proc = undefined;
-    // Arm escalation before SIGTERM: test doubles and some wrappers can emit
-    // exit synchronously from kill(), and the exit handler must be able to
-    // clear the timer rather than leaving a needless five-second handle.
+    const exited = new Promise<void>((resolve) => proc.once('exit', () => resolve()));
+
     this.killEscalationProcess = proc;
     this.killEscalationTimer = setTimeout(() => {
       if (this.killEscalationProcess === proc) {
         this.killEscalationTimer = undefined;
         this.killEscalationProcess = undefined;
       }
-      appendPieLog('warn', 'backend', 'backend did not exit on SIGTERM, escalating to SIGKILL');
+      appendPieLog('warn', 'backend', 'backend did not exit after stdin close, escalating to forced termination');
       terminateProcessTree(proc, 'SIGKILL');
     }, STOP_KILL_TIMEOUT_MS);
-    terminateProcessTree(proc);
+
+    try {
+      if (!proc.stdin || proc.stdin.destroyed) terminateProcessTree(proc);
+      else proc.stdin.end();
+    } catch {
+      terminateProcessTree(proc);
+    }
+    await exited;
+  }
+
+  /** Startup/protocol failures have no accepted work worth draining. */
+  private forceStopProcess(): void {
+    if (!this.proc) return;
+    const proc = this.proc;
+    this.intentionalStops.add(proc);
+    this.proc = undefined;
+    terminateProcessTree(proc, 'SIGKILL');
   }
 
   private handleLine(line: string): void {
@@ -711,7 +741,7 @@ export class BackendClient implements vscode.Disposable {
   dispose(): void {
     this.detachReader?.();
     this.detachReader = undefined;
-    this.stopProcess();
+    if (!this.stopPromise) void this.stopProcessGracefully();
     this.requests.rejectAll(new Error('Backend client disposed.'));
     this.events.dispose();
     this.exits.dispose();

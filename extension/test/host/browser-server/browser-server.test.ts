@@ -206,6 +206,40 @@ test('start binds loopback and serves the HTML shell, health, and allowlisted as
   await stop();
 });
 
+test('HTML requests refresh a replaced asset manifest without restarting the server', async () => {
+  const { server, assetDir, stop } = await createHarness();
+  const outcome = await server.start();
+  assert.equal(outcome.kind, 'started');
+  if (outcome.kind !== 'started') return;
+  const port = getPort(server);
+
+  const before = await httpGet(port, '/');
+  assert.match(before.body, /panel-abc123\.js/);
+
+  await fs.writeFile(path.join(assetDir, 'assets', 'panel-new456.js'), 'console.log("new pie");\n');
+  await fs.writeFile(path.join(assetDir, 'assets', 'panel-new456.css'), 'body { color: red; }\n');
+  await fs.writeFile(
+    path.join(assetDir, '.vite', 'manifest.json'),
+    JSON.stringify({
+      'index.html': {
+        file: 'assets/panel-new456.js',
+        isEntry: true,
+        css: ['assets/panel-new456.css'],
+      },
+    }),
+  );
+
+  const after = await httpGet(port, '/');
+  assert.equal(after.status, 200);
+  assert.match(after.body, /panel-new456\.js/);
+  assert.match(after.body, /panel-new456\.css/);
+  assert.doesNotMatch(after.body, /panel-abc123\.js/);
+  assert.equal((await httpGet(port, '/assets/panel-new456.js')).status, 200);
+  assert.equal((await httpGet(port, '/assets/panel-abc123.js')).status, 404);
+
+  await stop();
+});
+
 test('an occupied preferred port falls back to an OS-assigned port (info-only)', async () => {
   const blocker = http.createServer();
   await new Promise<void>((resolve) => blocker.listen(0, '127.0.0.1', resolve));

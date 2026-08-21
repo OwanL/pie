@@ -233,6 +233,52 @@ test('catalog loaders distinguish valid empty catalogs from retrieval failures',
   assert.deepEqual(failedRuntimeCatalog.models, []);
 });
 
+test('configured catalog uses the runtime-free registry so built-in model overrides remain visible', async () => {
+  await withTempDir(async (dir) => {
+    await fs.writeFile(path.join(dir, 'models.json'), JSON.stringify({
+      providers: {
+        'openai-codex': {
+          modelOverrides: {
+            'gpt-5.6-sol': { name: 'GPT-5.6 Sol' },
+          },
+        },
+      },
+    }), 'utf8');
+
+    let refreshes = 0;
+    const registry = {
+      refresh: () => { refreshes += 1; },
+      getError: () => undefined,
+      getAvailable: () => [{
+        id: 'gpt-5.6-sol',
+        name: 'GPT-5.6 Sol',
+        provider: 'openai-codex',
+        reasoning: true,
+        thinkingLevelMap: { xhigh: 'xhigh', max: 'max' },
+        input: ['text', 'image'] as Array<'text' | 'image'>,
+        contextWindow: 272000,
+        maxTokens: 128000,
+      }],
+      find: () => undefined,
+    };
+
+    assert.deepEqual(await loadConfiguredModels(dir, registry), {
+      ok: true,
+      models: [{
+        id: 'gpt-5.6-sol',
+        name: 'GPT-5.6 Sol',
+        provider: 'openai-codex',
+        reasoning: true,
+        thinkingLevels: ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+        inputKinds: ['text', 'image'],
+        contextWindow: 272000,
+        maxTokens: 128000,
+      }],
+    });
+    assert.equal(refreshes, 1);
+  });
+});
+
 test('resolveActiveModel names the active provider/model from the registry and tolerates failures', () => {
   // No model selected yet → empty info (callers render a neutral state).
   const noModel = makeContext({ session: { model: undefined } as unknown as SessionContext['session'] });

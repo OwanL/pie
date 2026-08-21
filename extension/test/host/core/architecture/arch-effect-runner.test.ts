@@ -616,6 +616,36 @@ test('EffectRunner SetModelRpc dispatches SetModelResult{ok:false} when settings
   assert.equal(events[0]?.error, 'backend down');
 });
 
+test('EffectRunner restart drain waits for an accepted model/reasoning write to settle', async () => {
+  let releaseWrite!: () => void;
+  const writeBlocked = new Promise<void>((resolve) => { releaseWrite = resolve; });
+  const { deps, events } = makeEffectRunnerDeps({
+    requestImpl: async (method) => {
+      if (method === 'settings.set') await writeBlocked;
+      return undefined;
+    },
+  });
+  const runner = new EffectRunner(deps);
+
+  runner.run({
+    kind: 'SetModelRpc',
+    corrId: 'sm-drain',
+    sessionPath: '/s',
+    modelSettings: { defaultModel: 'gpt-5.6-sol', defaultProvider: 'openai-codex', defaultThinkingLevel: 'high' },
+  });
+  await settle();
+
+  let drained = false;
+  const drain = runner.drainConfigurationOperations().then(() => { drained = true; });
+  await settle();
+  assert.equal(drained, false, 'restart must remain fenced while settings.set is accepted but incomplete');
+
+  releaseWrite();
+  await drain;
+  assert.equal(drained, true);
+  assert.equal(events.some((event) => event.kind === 'SetModelResult' && event.ok), true);
+});
+
 // ─── DrainPendingSendQueue ────────────────────────────────────────────────────
 
 test('EffectRunner DrainPendingSendQueue re-dispatches Send Commands with the resolved session path', async () => {

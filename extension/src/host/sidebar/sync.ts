@@ -1,5 +1,6 @@
 import type { HostToWebviewMessage, ViewState } from '../../shared/protocol';
 import { WEBVIEW_PROTOCOL_VERSION } from '../../shared/protocol';
+import { omitRedundantToolCallMirrorForTransport } from '../../shared/chat-message-parts';
 import { transcriptRenderSignature } from '../../shared/transcript-render-signature';
 import { isStreamDiagEnabled } from '../util/stream-telemetry';
 
@@ -64,7 +65,11 @@ export function buildStateEnvelope(
     throw new Error('State envelope revisions must increase monotonically.');
   }
 
-  const expectedTranscriptIdentity = transcriptRenderSignature(viewState);
+  const transportTranscript = viewState.transcript.map(omitRedundantToolCallMirrorForTransport);
+  const transportViewState = transportTranscript.some((message, index) => message !== viewState.transcript[index])
+    ? { ...viewState, transcript: transportTranscript }
+    : viewState;
+  const expectedTranscriptIdentity = transcriptRenderSignature(transportViewState);
   const message: Extract<HostToWebviewMessage, { type: 'state' }> = {
     type: 'state',
     protocolVersion: WEBVIEW_PROTOCOL_VERSION,
@@ -75,7 +80,7 @@ export function buildStateEnvelope(
     revision: envelopeContext.revision,
     expectedTranscriptIdentity,
     snapshotBytes: 0,
-    state: viewState,
+    state: transportViewState,
   };
   if (isStreamDiagEnabled()) {
     // This intentionally stays host-side: serializing a live snapshot in the

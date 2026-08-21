@@ -112,6 +112,7 @@ export function handleError(state: ArchState, event: Extract<Event, { kind: 'Err
         // non-null only when `notice` is an error notice.
         noticeKind: event.error ? 'operational-error' : null,
         noticeRaw: event.error ? (event.detail ?? event.error) : null,
+        noticeSessionPath: event.error ? event.sessionPath : null,
       },
     },
     effects: [],
@@ -124,6 +125,7 @@ export function handleNoticeShown(state: ArchState, event: Extract<Event, { kind
       draft.settings.notice = event.notice;
       draft.settings.noticeKind = event.noticeKind ?? null;
       draft.settings.noticeRaw = event.noticeRaw ?? null;
+      draft.settings.noticeSessionPath = event.notice ? (event.sessionPath ?? null) : null;
     }),
     effects: [],
   };

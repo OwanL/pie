@@ -6,6 +6,12 @@ import type {
   TranscriptView,
 } from '../../../shared/live-pipeline-protocol.js';
 import { compactLiveReasoningPart, compactToolCallDetail } from '../../../shared/lazy-details.js';
+import {
+  reasoningFromMessageParts,
+  sanitizeProviderToolProtocolParts,
+  textFromMessageParts,
+  toolCallsFromMessageParts,
+} from '../../../shared/chat-message-parts.js';
 import { toolsForTurn } from './model.js';
 
 export function projectTranscriptView(
@@ -43,11 +49,8 @@ export function projectLiveTurn(
     toolByCallId[tool.transcriptToolCallId] = tool;
   }
   const parts: ChatMessagePart[] = [];
-  let markdown = '';
-  let thinking = '';
   for (const [partIndex, part] of turn.parts.entries()) {
     if (part.kind === 'text') {
-      markdown += part.text;
       parts.push({ kind: 'text', text: part.text });
     } else if (part.kind === 'reasoning') {
       const projected = compactLiveReasoningPart(part.text, {
@@ -57,7 +60,6 @@ export function projectLiveTurn(
         sourceRevision: turn.reasoningBytes,
         sizeBytes: turn.reasoningBytes,
       });
-      thinking += projected.text;
       parts.push(projected);
     } else {
       const tool = toolByCallId[part.toolCallId];
@@ -84,9 +86,8 @@ export function projectLiveTurn(
       });
     }
   }
-  const toolCalls = parts
-    .filter((part): part is Extract<ChatMessagePart, { kind: 'toolCall' }> => part.kind === 'toolCall')
-    .map((part) => part.toolCall);
+  const sanitizedParts = sanitizeProviderToolProtocolParts(parts) ?? [];
+  const toolCalls = toolCallsFromMessageParts(sanitizedParts) ?? [];
   return {
     id: turn.canonicalMessageId,
     // Render-only continuity survives a terminal handoff even when the durable
@@ -97,9 +98,9 @@ export function projectLiveTurn(
     createdAt: new Date(turn.startedAt).toISOString(),
     modelId: turn.modelId,
     thinkingLevel: turn.thinkingLevel,
-    markdown,
-    thinking: thinking || undefined,
-    parts,
+    markdown: textFromMessageParts(sanitizedParts),
+    thinking: reasoningFromMessageParts(sanitizedParts),
+    parts: sanitizedParts,
     toolCalls,
     toolStateRevision: turn.seq,
     status,

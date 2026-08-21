@@ -103,8 +103,9 @@ export function systemPromptsSignature(systemPrompts: readonly SystemPromptEntry
  * tool's monotonic revision gates this fingerprint, and the usage fields below
  * make it change only when accounting changes rather than whenever live prose
  * grows. Mirrors
- * `toolCallsFromMessage` (prefers `toolCalls` when non-empty, else the `parts`
- * tool-call entries) so the fingerprint tracks exactly the calls the walk sees.
+ * `toolCallsFromMessage` (prefers authoritative ordered `parts`, with the
+ * legacy `toolCalls` mirror as fallback) so the fingerprint tracks exactly the
+ * calls the walk sees even when renderer transport omits that mirror.
  */
 function subagentResultCostFingerprint(rawResult: unknown, depth = 0): string {
   if (depth >= 6 || !isRecord(rawResult)) return '';
@@ -161,11 +162,10 @@ function lastNonQueuedMessage(transcript: readonly ChatMessage[]): ChatMessage |
 export function subagentToolCallRevision(transcript: readonly ChatMessage[]): string {
   const last = lastNonQueuedMessage(transcript);
   if (!last) return `${transcript.length}|`;
-  const tcs = last.toolCalls ?? [];
   const partTcs = last.parts
     ?.filter((p) => p.kind === 'toolCall')
     .map((p) => p.toolCall) ?? [];
-  const calls = tcs.length ? tcs : partTcs;
+  const calls = partTcs.length ? partTcs : (last.toolCalls ?? []);
   const rev = calls
     .map((tc) => `${tc.id}:${tc.status}:${tc.name ?? ''}:${tc.seq ?? 0}:${tc.result !== undefined ? 1 : 0}`)
     .join(',');
@@ -175,11 +175,10 @@ export function subagentToolCallRevision(transcript: readonly ChatMessage[]): st
 export function subagentCostSignature(transcript: readonly ChatMessage[]): string {
   const last = lastNonQueuedMessage(transcript);
   if (!last) return `${transcript.length}|`;
-  const tcs = last.toolCalls ?? [];
   const partTcs = last.parts
     ?.filter((p) => p.kind === 'toolCall')
     .map((p) => p.toolCall) ?? [];
-  const calls = tcs.length ? tcs : partTcs;
+  const calls = partTcs.length ? partTcs : (last.toolCalls ?? []);
   const fp = calls
     .map((tc) => `${tc.id}:${tc.status}:${tc.name ?? ''}:${tc.result !== undefined ? 1 : 0}:${subagentResultCostFingerprint(tc.result)}`)
     .join(',');

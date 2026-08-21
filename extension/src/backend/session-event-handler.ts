@@ -36,7 +36,7 @@ import {
   providerTransportFailureDiagnostic,
   type SessionEntryLike,
 } from './transcript';
-import type { SessionContext } from './server-types';
+import type { ActiveRequest, SessionContext } from './server-types';
 import { backendLog, type BackendLogLevel } from './log';
 import { isBackendLivePipelineTraceEnabled, recordBackendLivePipelineTrace } from './live-pipeline-trace-runtime';
 
@@ -54,6 +54,93 @@ export const TOOL_TERMINAL_PAYLOAD_MAX_BYTES = Math.min(
   LIVE_PIPELINE_LIMITS.checkpointBytes,
   TOOL_PROGRESS_MAX_BYTES,
 );
+
+const PROVIDER_TOOL_PROTOCOL_LEAK_BLOCK_LIMIT = 4;
+const PROVIDER_TOOL_PROTOCOL_LEAK_TAIL_CHARS = 64;
+
+interface ProviderToolProtocolLeakState {
+  tail: string;
+  rawToolCallContainers: number;
+  dsmlInvocations: number;
+  interrupted: boolean;
+}
+
+/** Per-request state stays outside the protocol contract and is reclaimed with
+ * the ActiveRequest. It only retains enough text to recognize a marker split
+ * across adjacent provider deltas. */
+const providerToolProtocolLeakByRequest = new WeakMap<ActiveRequest, ProviderToolProtocolLeakState>();
+
+function countNewPatternMatches(text: string, previousTailLength: number, pattern: RegExp): number {
+  let count = 0;
+  pattern.lastIndex = 0;
+  for (let match = pattern.exec(text); match; match = pattern.exec(text)) {
+    if (match.index + match[0].length > previousTailLength) count += 1;
+  }
+  return count;
+}
+
+/** Observe raw provider text without retaining response content. Four paired
+ * DSML tool wrappers in one request is not useful assistant prose and closely
+ * precedes the runaway behavior seen from affected OpenAI-compatible models. */
+function observeProviderToolProtocolText(active: ActiveRequest, delta: string): boolean {
+  let state = providerToolProtocolLeakByRequest.get(active);
+  if (!state) {
+    state = { tail: '', rawToolCallContainers: 0, dsmlInvocations: 0, interrupted: false };
+    providerToolProtocolLeakByRequest.set(active, state);
+  }
+  if (state.interrupted) return true;
+
+  const previousTailLength = state.tail.length;
+  const combined = state.tail + delta;
+  state.rawToolCallContainers += countNewPatternMatches(combined, previousTailLength, /<tool_calls>/giu);
+  state.dsmlInvocations += countNewPatternMatches(
+    combined,
+    previousTailLength,
+    /<[|｜]DSML[|｜]invoke(?:\s|>)/giu,
+  );
+  state.tail = combined.slice(-PROVIDER_TOOL_PROTOCOL_LEAK_TAIL_CHARS);
+
+  return state.rawToolCallContainers >= PROVIDER_TOOL_PROTOCOL_LEAK_BLOCK_LIMIT
+    && state.dsmlInvocations >= PROVIDER_TOOL_PROTOCOL_LEAK_BLOCK_LIMIT;
+}
+
+function interruptProviderToolProtocolLeak(
+  deps: BackendSessionEventHandlerDeps,
+  context: SessionContext,
+): boolean {
+  const active = context.activeRequest;
+  if (!active) return false;
+  const state = providerToolProtocolLeakByRequest.get(active);
+  if (!state) return false;
+  if (!state.interrupted
+    && state.rawToolCallContainers >= PROVIDER_TOOL_PROTOCOL_LEAK_BLOCK_LIMIT
+    && state.dsmlInvocations >= PROVIDER_TOOL_PROTOCOL_LEAK_BLOCK_LIMIT) {
+    state.interrupted = true;
+    const message = 'The provider repeated internal tool-call markup, so the response was stopped before it could overwhelm the UI.';
+    logBackendDiagnostic('warn', 'provider.toolProtocolLeak', {
+      requestId: active.id,
+      sessionPath: context.sessionPath,
+      provider: active.provider ?? 'unknown',
+      modelId: active.modelId ?? 'unknown',
+      rawToolCallContainers: state.rawToolCallContainers,
+      dsmlInvocations: state.dsmlInvocations,
+    });
+    deps.emit('operational-error', {
+      incidentId: `provider-tool-protocol-leak:${active.id}`,
+      code: 'PROVIDER_TOOL_PROTOCOL_LEAK',
+      message,
+      detail: [
+        `Provider: ${active.provider ?? 'unknown'}`,
+        `Model: ${active.modelId ?? 'unknown'}`,
+        `Observed: ${state.rawToolCallContainers} raw tool-call containers and ${state.dsmlInvocations} DSML invocations.`,
+      ].join('\n'),
+      sessionPath: context.sessionPath,
+      requestId: active.id,
+    });
+    void context.session.abort().catch(() => undefined);
+  }
+  return state.interrupted;
+}
 
 /** Produce a transport-safe clone only when native JSON serialization fails.
  * Live tool partials can contain BigInts or cycles from nested/custom tools;
@@ -1162,17 +1249,22 @@ export function handleSdkSessionEvent(
       }
 
       if (event.assistantMessageEvent?.type === 'text_delta') {
+        const delta = event.assistantMessageEvent.delta ?? '';
+        if (observeProviderToolProtocolText(context.activeRequest, delta)) {
+          interruptProviderToolProtocolLeak(deps, context);
+          return;
+        }
         context.activeRequest.lastProviderErrorForDiagnostics = undefined;
         clearSettledProviderIncident(context);
         renewSemanticLease(deps, context);
         emitSemanticCandidate(deps, context, {
-          kind: 'turn.text', delta: event.assistantMessageEvent.delta ?? '',
+          kind: 'turn.text', delta,
         });
         if (!context.activeRequest.liveTurnAccumulator) deps.emit('message.delta', {
           requestId: context.activeRequest.id,
           sessionPath: context.sessionPath,
           messageId: context.activeRequest.currentMessageId,
-          delta: event.assistantMessageEvent.delta ?? '',
+          delta,
         } satisfies MessageDeltaPayload);
       }
 

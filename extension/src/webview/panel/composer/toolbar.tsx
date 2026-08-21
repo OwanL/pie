@@ -1,7 +1,7 @@
 /** @jsxRuntime automatic */
 /** @jsxImportSource preact */
 
-import type { ChatPrefs, ExtensionInfo, LastCompactionSummary, ModelInfo, PruningCatalog, PruningResult, PruningSettings, ProviderGateStats, SystemPromptEntry, ThinkingLevel, ToolResultPruningSettings } from '../../../shared/protocol';
+import type { ChatPrefs, ExtensionInfo, LastCompactionSummary, McpServerInfo, ModelInfo, PruningCatalog, PruningResult, PruningSettings, ProviderGateStats, SystemPromptEntry, ThinkingLevel, ToolResultPruningSettings } from '../../../shared/protocol';
 import { THINKING_LEVEL_LABELS, THINKING_LEVEL_OPTIONS } from '../../../shared/thinking-level.js';
 import { isPendingTabPath } from '../../../shared/tab-behavior.js';
 
@@ -12,6 +12,7 @@ import { ToolbarChip, ToolbarIndicatorChip, ToolbarRunStatusChip } from '../comp
 import { ChoicePicker } from '../components/choice-picker';
 import { ModelPicker } from '../components/model-picker';
 import { SystemPromptToggleMenu } from './system-prompt-toggle-menu';
+import { McpToggleMenu } from './mcp-toggle-menu';
 import { formatModelSpec, getModelThinkingLevels, orderModelsForPicker, parseModelSpec } from './model-list';
 import { ContextWindowBreakdownChart } from '../context-window/breakdown-chart';
 import type { ContextWindowBreakdown } from '../context-window/breakdown';
@@ -59,6 +60,8 @@ interface ComposerToolbarStatus {
 interface ComposerToolbarProps {
   sessionPath: string | null;
   busy: boolean;
+  /** False while transport/backend lifecycle work makes mutations unsafe. */
+  commandsAvailable?: boolean;
   prefs: ChatPrefs;
   pruningSettings: PruningSettings;
   pruningCatalog: PruningCatalog;
@@ -67,6 +70,11 @@ interface ComposerToolbarProps {
   providerGateStats: ProviderGateStats;
   privacyMode?: boolean;
   onSetPrefs: (prefs: Partial<ChatPrefs>) => void;
+  mcpServers: McpServerInfo[];
+  mcpServersStatus?: 'loading' | 'error' | 'ok';
+  mcpPendingApply: boolean;
+  onMcpListRequested: () => void;
+  onMcpSetServerEnabled: (name: string, enabled: boolean) => void;
   onSetPrivacyMode?: (enabled: boolean) => void;
   onSetSystemPromptToggles: (disabledEntries: string[]) => void;
   onSetPruningSettings: (settings: Partial<PruningSettings>) => void;
@@ -95,6 +103,7 @@ interface ComposerToolbarProps {
 export const ComposerToolbar = memo(function ComposerToolbar({
   sessionPath,
   busy,
+  commandsAvailable = true,
   prefs,
   pruningSettings,
   pruningCatalog,
@@ -103,6 +112,11 @@ export const ComposerToolbar = memo(function ComposerToolbar({
   providerGateStats,
   privacyMode = false,
   onSetPrefs,
+  mcpServers,
+  mcpServersStatus,
+  mcpPendingApply,
+  onMcpListRequested,
+  onMcpSetServerEnabled,
   onSetPrivacyMode,
   onSetSystemPromptToggles,
   onSetPruningSettings,
@@ -150,8 +164,8 @@ export const ComposerToolbar = memo(function ComposerToolbar({
     : 'Enable autonomous mode — run without the ask_user tool';
   return (
     <>
-      <div class="composer-controls">
-        <ComposerSettingsMenu prefs={prefs} pruningSettings={pruningSettings} pruningCatalog={pruningCatalog} pruningResult={pruningResult} toolResultPruningSettings={toolResultPruningSettings} availableExtensions={availableExtensions} availableModels={availableModels} providerGateStats={providerGateStats} activeContextWindow={selectedModelEntry?.model.contextWindow} activeModel={{ provider: selectedProvider, id: selectedModel }} onSetPrefs={onSetPrefs} onSetPruningSettings={onSetPruningSettings} onSetToolResultPruningSettings={onSetToolResultPruningSettings} />
+      <fieldset class="composer-controls" disabled={!commandsAvailable} aria-disabled={!commandsAvailable}>
+        <ComposerSettingsMenu prefs={prefs} mcpServers={mcpServers} mcpServersStatus={mcpServersStatus} mcpPendingApply={mcpPendingApply} pruningSettings={pruningSettings} pruningCatalog={pruningCatalog} pruningResult={pruningResult} toolResultPruningSettings={toolResultPruningSettings} availableExtensions={availableExtensions} availableModels={availableModels} providerGateStats={providerGateStats} activeContextWindow={selectedModelEntry?.model.contextWindow} activeModel={{ provider: selectedProvider, id: selectedModel }} onSetPrefs={onSetPrefs} onMcpListRequested={onMcpListRequested} onMcpSetServerEnabled={onMcpSetServerEnabled} onSetPruningSettings={onSetPruningSettings} onSetToolResultPruningSettings={onSetToolResultPruningSettings} />
 
         {availableModelsStatus !== 'authoritative' && (
           <ToolbarChip
@@ -205,6 +219,8 @@ export const ComposerToolbar = memo(function ComposerToolbar({
 
         <SystemPromptToggleMenu prompts={systemPrompts} onSetToggles={onSetSystemPromptToggles} />
 
+        <McpToggleMenu prefs={prefs} mcpServers={mcpServers} mcpServersStatus={mcpServersStatus} mcpPendingApply={mcpPendingApply} onSetPrefs={onSetPrefs} onMcpListRequested={onMcpListRequested} onMcpSetServerEnabled={onMcpSetServerEnabled} />
+
         <CompactionButton
           availability={!sessionPath ? 'no-session' : compacting ? 'compacting' : busy ? 'busy' : 'available'}
           onCompact={onCompact}
@@ -242,7 +258,7 @@ export const ComposerToolbar = memo(function ComposerToolbar({
             {privacyMode ? <path d="m5.2 8 1.8 1.8 3.8-4" /> : <path d="M5.5 8h5" />}
           </svg>
         </button>
-      </div>
+      </fieldset>
 
       <div class="composer-indicators">
         {/* Cumulative cost, then live stats; context window pinned rightmost. */}

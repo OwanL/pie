@@ -172,6 +172,69 @@ export function mergeAssistantParts(
   return merged.length > 0 ? merged : undefined;
 }
 
+/**
+ * Remove provider-internal tool protocol that was duplicated into assistant
+ * text alongside an authoritative structured tool call. Some OpenAI-compatible
+ * providers can emit both native `tool_calls` deltas and their model's raw DSML
+ * wrapper. Rendering that wrapper is redundant and, when the provider loops,
+ * can grow one transcript row enough to make the entire UI unresponsive.
+ *
+ * This is deliberately narrow: the strong suppression path requires both the
+ * raw `<tool_calls><|DSML|invoke ...>` shape and either a structured tool call
+ * or repetition of that raw shape. A bare `curr` token is suppressed only next
+ * to a structured call because it is the leaked prefix produced by the same
+ * provider protocol.
+ */
+export function sanitizeProviderToolProtocolParts(
+  parts: ChatMessagePart[] | undefined,
+): ChatMessagePart[] | undefined {
+  if (!parts) {
+    return parts;
+  }
+
+  const rawProtocolStart = /<tool_calls>\s*<[|｜]DSML[|｜]invoke(?:\s|>)/iu;
+  const hasStructuredCall = parts.some((part) => part.kind === 'toolCall');
+  const rawProtocolStartCount = parts.reduce((count, part) => {
+    if (part.kind !== 'text') return count;
+    return count + (part.text.match(/<tool_calls>\s*<[|｜]DSML[|｜]invoke(?:\s|>)/giu)?.length ?? 0);
+  }, 0);
+  if (!hasStructuredCall && rawProtocolStartCount < 2) {
+    return parts;
+  }
+
+  let changed = false;
+  const sanitized: ChatMessagePart[] = [];
+
+  for (const part of parts) {
+    if (part.kind !== 'text') {
+      sanitized.push(part);
+      continue;
+    }
+
+    const protocolIndex = part.text.search(rawProtocolStart);
+    const isBareProtocolPrefix = hasStructuredCall && part.text.trim().toLowerCase() === 'curr';
+    if (protocolIndex === -1 && !isBareProtocolPrefix) {
+      sanitized.push(part);
+      continue;
+    }
+
+    changed = true;
+    if (protocolIndex === -1) {
+      continue;
+    }
+
+    const prefix = part.text.slice(0, protocolIndex).replace(/\bcurr\s*$/iu, '');
+    if (prefix) {
+      appendAssistantTextPart(sanitized, 'text', prefix);
+    }
+  }
+
+  if (!changed) {
+    return parts;
+  }
+  return sanitized.length > 0 ? sanitized : undefined;
+}
+
 export function textFromMessageParts(parts: ChatMessagePart[] | undefined): string {
   if (!parts) {
     return '';
@@ -245,6 +308,28 @@ export function deduplicateToolCallResultsForTransport(message: ChatMessage): Ch
   });
 
   return changed ? { ...message, toolCalls } : message;
+}
+
+/**
+ * Remove the complete legacy tool-call mirror when ordered `parts` already
+ * carries the authoritative tool calls.
+ *
+ * Renderer state snapshots are full snapshots, so retaining both collections
+ * makes every tool input and compact result cross the host→webview boundary
+ * twice. The webview renders assistant tools from `parts`; legacy messages
+ * without ordered parts retain `toolCalls` unchanged.
+ */
+export function omitRedundantToolCallMirrorForTransport(message: ChatMessage): ChatMessage {
+  if (
+    message.role !== 'assistant'
+    || !message.toolCalls
+    || !message.parts?.some((part) => part.kind === 'toolCall')
+  ) {
+    return message;
+  }
+
+  const { toolCalls: _redundantToolCalls, ...transportMessage } = message;
+  return transportMessage;
 }
 
 /**

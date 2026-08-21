@@ -118,6 +118,8 @@ test('validateMessageSend rejects malformed attachment payloads and invalid arra
 test('runtime prefs and settings validators reject invalid object shapes', () => {
   assert.throws(() => validateRuntimePrefsSet('invalid'), /expected an object/);
   assert.throws(() => validateRuntimePrefsSet({ providerToggles: [] }), /providerToggles must be an object/);
+  assert.throws(() => validateRuntimePrefsSet({ mcpEnabled: 'yes' }), /mcpEnabled must be a boolean/);
+  assert.equal(validateRuntimePrefsSet({ mcpEnabled: false }).mcpEnabled, false);
   assert.throws(() => validateSettingsSet({ sessionPath: '' }), /sessionPath must be a non-empty string/);
   assert.throws(() => validateSettingsSet({ sessionPath: 'C:\\repo\\__pending__:1-abc' }), /resolved session/);
   assert.throws(

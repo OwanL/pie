@@ -5,6 +5,7 @@ import {
   assistantPartsFromMessage,
   mergeAssistantParts,
   reasoningFromMessageParts,
+  sanitizeProviderToolProtocolParts,
   textFromMessageParts,
   toolCallsFromMessageParts,
   upsertAssistantToolPart,
@@ -151,11 +152,13 @@ function buildAssistantParts(
     appendRawContentPart(part, orderedParts, toolResultMap);
   }
 
-  return orderedParts;
+  return sanitizeProviderToolProtocolParts(orderedParts) ?? [];
 }
 
 function mergeIntoAssistant(currentAssistant: ChatMessage, orderedParts: ChatMessagePart[]): void {
-  const mergedParts = mergeAssistantParts(assistantPartsFromMessage(currentAssistant), orderedParts);
+  const mergedParts = sanitizeProviderToolProtocolParts(
+    mergeAssistantParts(assistantPartsFromMessage(currentAssistant), orderedParts),
+  );
   currentAssistant.parts = mergedParts;
   currentAssistant.markdown = textFromMessageParts(mergedParts);
   currentAssistant.thinking = reasoningFromMessageParts(mergedParts);
@@ -294,13 +297,14 @@ export function subagentSingleResultToChatMessages(result: SubagentSingleResult,
       const parts: ChatMessagePart[] = [];
       if (streamReasoning) appendAssistantTextPart(parts, 'reasoning', streamReasoning);
       if (streamText) appendAssistantTextPart(parts, 'text', streamText);
+      const sanitizedParts = sanitizeProviderToolProtocolParts(parts) ?? [];
       chatMessages.push({
         id: `${idPrefix}-streaming`,
         role: 'assistant',
         createdAt: '',
-        markdown: streamText ?? '',
-        thinking: streamReasoning,
-        parts,
+        markdown: textFromMessageParts(sanitizedParts),
+        thinking: reasoningFromMessageParts(sanitizedParts),
+        parts: sanitizedParts,
         status: 'streaming',
       });
     }

@@ -314,7 +314,9 @@ test('phase6 checkpoint: usage, durable watermark, and detail manifest are bound
   const incident = emitted.find(([event]) => event === 'operational-error')?.[1];
   assert.ok(incident);
   assert.equal(incident.code, 'SESSION_WORKER_EXITED');
-  assert.equal(incident.checkpoint.busySeq, 3);
+  // Checkpoints expose the coordinator-owned public sequence, not the
+  // worker-local counter (which restarts after every cold re-promotion).
+  assert.equal(incident.checkpoint.busySeq, 1);
   assert.equal(incident.checkpoint.requestId, 'request-1');
   assert.deepEqual(incident.checkpoint.tools, [{ requestId: 'request-1', messageId: 'message-1', toolCallId: 'tool-2', name: 'read' }]);
   assert.deepEqual(incident.checkpoint.usage, { tokens: 1200, contextWindow: 8192, percent: 15 });

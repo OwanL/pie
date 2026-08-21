@@ -99,14 +99,19 @@ export function setDetailStoreContext(
     postMessage: (message: WebviewToHostMessage) => void;
   },
 ): void {
-  const viewChanged = next.viewGeneration !== context.viewGeneration;
+  const routeChanged = next.hostInstanceId !== context.hostInstanceId
+    || next.viewGeneration !== context.viewGeneration
+    || next.rendererId !== context.rendererId
+    || next.rendererGeneration !== context.rendererGeneration;
   context = { ...next };
-  if (viewChanged && records.size > 0) {
-    // A view generation change invalidates renderer ownership of every open
-    // subscription (normally only happens across a webview reload, which also
-    // resets this module — this is defensive).
+  if (routeChanged && records.size > 0) {
+    // Every field in the renderer route participates in ownership. Browser
+    // reconnect may replace renderer identity without changing viewGeneration;
+    // the old owner must be discarded so the expanded hook can resubscribe.
     for (const record of [...records.values()]) discardRecord(record, false);
     records.clear();
+    fetchInFlight.clear();
+    notifyAll();
   }
 }
 
@@ -267,13 +272,17 @@ export function openDetailSubscription(options: {
   };
   records.set(detailKey, record);
   const cursor = options.cursor ?? cursorByKey.get(detailKey);
-  context.postMessage({
+  const accepted = (context.postMessage as (message: WebviewToHostMessage) => boolean | void)({
     type: 'detail.subscribe',
     viewGeneration: record.viewGeneration,
     detailKey,
     address: cloneAddress(address),
     ...(cursor !== undefined ? { cursor } : {}),
   });
+  if (accepted === false) {
+    records.delete(detailKey);
+    discardRecord(record, false);
+  }
   notifyKey(detailKey);
 }
 
@@ -808,6 +817,7 @@ export function useDetailSubscription(options: {
 }): DetailSubscriptionHandle {
   const [, setVersion] = useState(0);
   const contextViewGeneration = context.viewGeneration;
+  const contextRouteKey = `${context.hostInstanceId}\u0000${context.viewGeneration}\u0000${context.rendererId}\u0000${context.rendererGeneration}`;
   const addressKey = options.address ? JSON.stringify(options.address) : undefined;
   const detailKey = options.detailKey;
 
@@ -817,7 +827,7 @@ export function useDetailSubscription(options: {
     } else if (!options.expanded) {
       closeDetailSubscription(detailKey, 'collapse');
     }
-  }, [options.expanded, detailKey, addressKey, contextViewGeneration]);
+  }, [options.expanded, detailKey, addressKey, contextViewGeneration, contextRouteKey]);
 
   useEffect(() => {
     setDetailVisible(detailKey, options.expanded && !!options.address);

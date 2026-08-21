@@ -76,6 +76,9 @@ export const EMPTY_VIEW_STATE: ViewState = {
   availableModelsStatus: 'authoritative',
   contextUsage: null,
   prefs: { ...DEFAULT_CHAT_PREFS },
+  mcpServers: [],
+  mcpServersStatus: 'loading',
+  mcpPendingApply: false,
   availableExtensions: [],
   fileChanges: [],
   fileChangesExpanded: false,
@@ -397,6 +400,7 @@ function handleStateMessage(msg: HostToWebviewMessage, ctx: HostMessageContext) 
       transcriptWindow: m.state.transcriptWindow,
       activeSessionPath: m.state.activeSession?.path ?? null,
       openTabPaths: m.state.openTabPaths,
+      editingMessageId: m.state.editingMessageId,
     },
   };
   recordRenderEvidenceTarget(commitTarget, 'app');
@@ -569,13 +573,14 @@ export function useHostSync(
   const [connectionState, setConnectionState] = useState<ClientConnectionState>(transport.getConnectionState());
   const [inlineConfirm, setInlineConfirm] = useState<Extract<HostToWebviewMessage, { type: 'inlineConfirm' }> | null>(null);
 
-  const postMessage = useCallback((msg: WebviewToHostMessage): void => {
-    transport.postMessage(msg);
+  const postMessage = useCallback((msg: WebviewToHostMessage): boolean => {
+    return transport.postMessage(msg);
   }, [transport]);
 
   const respondToInlineConfirm = useCallback((confirmId: string, confirmed: boolean): void => {
-    setInlineConfirm(null);
-    transport.postMessage({ type: 'inlineConfirmResponse', confirmId, confirmed });
+    if (transport.postMessage({ type: 'inlineConfirmResponse', confirmId, confirmed })) {
+      setInlineConfirm(null);
+    }
   }, [transport]);
 
   const hostInstanceIdRef = useRef('');
@@ -725,6 +730,18 @@ export function useHostSync(
       unsubscribeState();
     };
   }, [clearTransientUi, postMessage, resetPerSessionState, hydrateViewState, transport]);
+
+  useEffect(() => {
+    // Re-pump explicit lazy-detail requests after a browser reconnect. A
+    // request rejected while disconnected remains queued rather than getting
+    // stuck in the single active slot.
+    setLazyDetailPostMessage(postMessage);
+    if (connectionState !== 'connected') {
+      // Browser confirmations are canceled host-side when their renderer
+      // disconnects; never leave the old imperative dialog actionable.
+      setInlineConfirm(null);
+    }
+  }, [connectionState, postMessage]);
 
   useFocusRefresh(postMessage);
 

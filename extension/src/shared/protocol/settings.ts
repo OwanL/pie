@@ -383,6 +383,11 @@ export interface ChatPrefs {
   /** Hands-off operation: ask_user is removed from the pruning prepass and from
    * every provider-visible main-agent tool set. */
   autonomousMode: boolean;
+  /** When true, the pi-mcp-adapter's tools (`mcp` proxy + `mcpScript`) are
+   * exposed to the model. When false, a backend guard strips them from every
+   * active tool set, so MCP servers stay configured in their mcp.json files
+   * but the model never sees the tools. Mirrored via PIE_MCP_ENABLED. */
+  mcpEnabled: boolean;
   /** When true, sub-agents always use the parent's active model (skip bucket selection). */
   subagentAlwaysParentModel: boolean;
   /** When true, bucket selection softly routes around enabled providers whose
@@ -608,6 +613,7 @@ export const DEFAULT_CHAT_PREFS: ChatPrefs = {
   suppressCompletionNotifications: false,
   showPruningMessages: true,
   autonomousMode: false,
+  mcpEnabled: true,
   subagentAlwaysParentModel: false,
   subagentRouteAroundSaturatedProviders: false,
   subagentFallbackOnProviderFailure: true,
@@ -873,6 +879,9 @@ export function resolveChatPrefs(prefs?: Partial<ChatPrefs> | null): ChatPrefs {
     autonomousMode: typeof prefs?.autonomousMode === 'boolean'
       ? prefs.autonomousMode
       : DEFAULT_CHAT_PREFS.autonomousMode,
+    mcpEnabled: typeof prefs?.mcpEnabled === 'boolean'
+      ? prefs.mcpEnabled
+      : DEFAULT_CHAT_PREFS.mcpEnabled,
     composerInitialRows: normalizeComposerInitialRows(prefs?.composerInitialRows),
     uiPathParentDepth: normalizeUiPathParentDepth(prefs?.uiPathParentDepth),
     extensionToggles: {
@@ -928,6 +937,7 @@ export function normalizeNestedBooleanMap(value: unknown): Record<string, Record
 export function buildRuntimePrefsPayload(prefs: ChatPrefs): {
   providerToggles: Record<string, boolean>;
   autonomousMode?: boolean;
+  mcpEnabled?: boolean;
   subagentProviderDefaults?: Record<string, boolean>;
   subagentProviderTogglesBySession?: Record<string, Record<string, boolean>>;
   extensionToggles: Record<string, boolean>;
@@ -952,6 +962,7 @@ export function buildRuntimePrefsPayload(prefs: ChatPrefs): {
   return {
     providerToggles: prefs.providerToggles,
     autonomousMode: prefs.autonomousMode,
+    mcpEnabled: prefs.mcpEnabled,
     subagentProviderDefaults: prefs.subagentProviderDefaults,
     subagentProviderTogglesBySession: prefs.subagentProviderTogglesBySession,
     extensionToggles: prefs.extensionToggles,

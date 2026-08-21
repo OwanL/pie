@@ -809,17 +809,17 @@
             "minimal": "low"
           },
           "cost": {
-            "input": 5,
-            "output": 30,
-            "cacheRead": 0.5,
-            "cacheWrite": 6.25,
+            "input": 2.5,
+            "output": 15,
+            "cacheRead": 0.25,
+            "cacheWrite": 3.12,
             "tiers": [
               {
                 "inputTokensAbove": 272000,
-                "input": 10,
-                "output": 45,
-                "cacheRead": 1,
-                "cacheWrite": 12.5
+                "input": 5,
+                "output": 22.5,
+                "cacheRead": 0.5,
+                "cacheWrite": 6.25
               }
             ]
           }

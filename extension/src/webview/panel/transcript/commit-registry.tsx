@@ -22,6 +22,9 @@ export interface TranscriptCommitTarget {
     transcriptWindow: TranscriptWindow;
     activeSessionPath: string | null;
     openTabPaths: string[];
+    /** Host-owned edit identity. The edited row's per-keystroke text is an
+     * allowlisted local buffer and intentionally differs until Save/Cancel. */
+    editingMessageId?: string | null;
   };
 }
 
@@ -167,10 +170,10 @@ export function useCommittedAppSurface(surface: AppCommitSurface): void {
 
 export interface MessageCommitOwner {
   messageId: string;
-  toolStateRevision: number;
 }
 
 export const MessageCommitContext = createContext<MessageCommitOwner | null>(null);
+export const MessageToolRevisionContext = createContext(0);
 
 export function useCommittedMessageLeaf(message: ChatMessage): void {
   const reportLeaf = useContext(CommitReporterContext);
@@ -204,10 +207,10 @@ export function useCommittedReasoningLeaf(
   }, [reportLeaf, messageId, partIndex, text, policy]);
 }
 
-export function useCommittedToolLeaf(toolCall: ToolCall): void {
+function useCommittedToolLeaf(toolCall: ToolCall, fallbackRevision: number): void {
   const reportLeaf = useContext(CommitReporterContext);
   const owner = useContext(MessageCommitContext);
-  const lifecycle = toolLifecycle(toolCall, owner?.toolStateRevision ?? 0);
+  const lifecycle = toolLifecycle(toolCall, fallbackRevision);
   useLayoutEffect(() => {
     if (!owner) return;
     const key = `tool:${owner.messageId}:${toolCall.id}`;
@@ -220,6 +223,29 @@ export function useCommittedToolLeaf(toolCall: ToolCall): void {
     });
     return () => reportLeaf(key, null);
   }, [reportLeaf, owner?.messageId, toolCall.id, toolCall.status, lifecycle.executionId, lifecycle.attempt, lifecycle.seq, lifecycle.phase, lifecycle.revision]);
+}
+
+function ProducerSequencedToolLeaf({ toolCall }: { toolCall: ToolCall }) {
+  useCommittedToolLeaf(toolCall, 0);
+  return null;
+}
+
+function LegacyToolLeaf({ toolCall }: { toolCall: ToolCall }) {
+  const fallbackRevision = useContext(MessageToolRevisionContext);
+  useCommittedToolLeaf(toolCall, fallbackRevision);
+  return null;
+}
+
+/**
+ * Commit evidence for one tool lifecycle. Modern producer-sequenced tools do
+ * not subscribe to the message-wide revision: an update to the active tail
+ * must not wake hundreds of already-terminal sibling cards. Legacy tools that
+ * lack a producer sequence retain the conservative message-revision fallback.
+ */
+export function CommittedToolLeaf({ toolCall }: { toolCall: ToolCall }) {
+  return hasProducerRevision(toolCall)
+    ? <ProducerSequencedToolLeaf toolCall={toolCall} />
+    : <LegacyToolLeaf toolCall={toolCall} />;
 }
 
 export interface TranscriptModelEvidence {
@@ -278,7 +304,8 @@ export function decideTranscriptCommit(
     if (row.kind !== 'message' || row.role !== message.role || row.status !== message.status) {
       return { matches: false, evidence: 'displayed', reason: 'leaf_mismatch' };
     }
-    if (!messageContentMatches(message, leaves) || !messageToolsMatch(message, leaves)) {
+    const editingLocally = target.state.editingMessageId === message.id;
+    if ((!editingLocally && !messageContentMatches(message, leaves)) || !messageToolsMatch(message, leaves)) {
       return { matches: false, evidence: 'displayed', reason: 'leaf_mismatch' };
     }
   }
@@ -379,10 +406,18 @@ function sameTranscriptStructure(left: readonly ChatMessage[], right: readonly C
     const b = right[index]!;
     if (a.id !== b.id || a.role !== b.role || a.status !== b.status
       || (a.parts?.length ?? 0) !== (b.parts?.length ?? 0)
-      || (a.toolCalls?.length ?? 0) !== (b.toolCalls?.length ?? 0)
+      || messageToolCallCount(a) !== messageToolCallCount(b)
       || !!a.thinking !== !!b.thinking || !!a.draftingToolCall !== !!b.draftingToolCall) return false;
   }
   return true;
+}
+
+function messageToolCallCount(message: ChatMessage): number {
+  const orderedCount = message.parts?.reduce(
+    (count, part) => count + (part.kind === 'toolCall' ? 1 : 0),
+    0,
+  ) ?? 0;
+  return orderedCount || message.toolCalls?.length || 0;
 }
 
 function equalWindow(left: TranscriptWindow, right: TranscriptWindow): boolean {
@@ -398,13 +433,26 @@ function sameText(left: string, right: string): boolean {
 
 function toolLifecycle(toolCall: ToolCall, revision: number) {
   const value = toolCall as ToolCall & { executionId?: unknown; attempt?: unknown; seq?: unknown; lifecycleSeq?: unknown; phase?: unknown };
+  const producerRevision = value.seq ?? value.lifecycleSeq;
+  const resolvedRevision = isSafeRevision(producerRevision)
+    ? Number(producerRevision)
+    : safeInteger(revision);
   return {
     executionId: typeof value.executionId === 'string' ? value.executionId : toolCall.id,
     attempt: safeInteger(value.attempt),
-    seq: safeInteger(value.seq ?? value.lifecycleSeq ?? revision),
+    seq: resolvedRevision,
     phase: typeof value.phase === 'string' ? value.phase : toolCall.status,
-    revision: safeInteger(revision),
+    revision: resolvedRevision,
   };
+}
+
+function hasProducerRevision(toolCall: ToolCall): boolean {
+  const value = toolCall as ToolCall & { seq?: unknown; lifecycleSeq?: unknown };
+  return isSafeRevision(value.seq ?? value.lifecycleSeq);
+}
+
+function isSafeRevision(value: unknown): boolean {
+  return Number.isSafeInteger(value) && Number(value) >= 0;
 }
 
 function safeInteger(value: unknown): number {

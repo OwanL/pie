@@ -363,25 +363,7 @@ export interface SdkRuntime {
   /** Present only on the Phase 4 patched pinned SDK runtime. */
   ownershipAdapter?: SdkSessionOwnershipAdapter;
   services: {
-    modelRegistry: {
-      getAvailable: () => Array<{
-        id: string;
-        name: string;
-        provider: string;
-        reasoning: boolean;
-        input: Array<'text' | 'image'>;
-        contextWindow?: number;
-        maxTokens?: number;
-        baseUrl?: string;
-      }>;
-      /** Includes unavailable built-in models when supported by the pinned SDK. */
-      getAll?: () => Array<{
-        id: string;
-        provider: string;
-        baseUrl?: string;
-      }>;
-      find: (provider: string, modelId: string) => unknown;
-    };
+    modelRegistry: SdkModelRegistry;
     resourceLoader?: unknown;
     diagnostics?: unknown[];
   };
@@ -391,6 +373,35 @@ export interface SdkRuntime {
   fork?: (entryId: string, options?: SdkForkOptions) => Promise<{ cancelled: boolean; text?: string }>;
   switchSession?: (sessionPath: string, options?: SdkSessionReplacementOptions) => Promise<{ cancelled: boolean }>;
   dispose: () => Promise<void>;
+}
+
+export interface SdkCatalogModel {
+  id: string;
+  name: string;
+  provider: string;
+  reasoning: boolean;
+  input: Array<'text' | 'image'>;
+  thinkingLevelMap?: Record<string, string | null | undefined>;
+  contextWindow?: number;
+  maxTokens?: number;
+  baseUrl?: string;
+}
+
+export interface SdkModelRegistry {
+  refresh?: () => void;
+  getError?: () => string | undefined;
+  getAvailable: () => SdkCatalogModel[];
+  /** Includes unavailable built-in models when supported by the pinned SDK. */
+  getAll?: () => Array<{
+    id: string;
+    provider: string;
+    baseUrl?: string;
+  }>;
+  find: (provider: string, modelId: string) => unknown;
+}
+
+export interface SdkAuthStorage {
+  reload?: () => void;
 }
 
 export interface SdkSessionInfo {
@@ -421,7 +432,10 @@ export interface SdkModule {
   getAgentDir: () => string;
   formatSkillsForPrompt?: (skills: SdkSkill[]) => string;
   AuthStorage: {
-    create: (filePath?: string) => unknown;
+    create: (filePath?: string) => SdkAuthStorage;
+  };
+  ModelRegistry?: {
+    create: (authStorage: SdkAuthStorage, modelsJsonPath?: string) => SdkModelRegistry;
   };
   SessionManager: {
     continueRecent: (cwd: string) => SdkSessionManager;
@@ -472,7 +486,7 @@ export interface SdkModule {
 export type ColdCoordinatorSdkModule = Pick<
   SdkModule,
   'VERSION' | 'getAgentDir' | 'AuthStorage' | 'SessionManager'
->;
+> & { ModelRegistry: NonNullable<SdkModule['ModelRegistry']> };
 
 // ─── Loader ──────────────────────────────────────────────────────────────────
 
@@ -932,20 +946,23 @@ export async function loadSdk(
   const verifiedSdkPath = patchIdentity.sdkPath;
 
   if (mode.mode === 'cold-coordinator') {
-    const [config, auth, sessions] = await Promise.all([
+    const [config, auth, models, sessions] = await Promise.all([
       dynamicImport(pathToFileURL(path.join(verifiedSdkPath, 'dist', 'config.js')).href),
       dynamicImport(pathToFileURL(path.join(verifiedSdkPath, 'dist', 'core', 'auth-storage.js')).href),
+      dynamicImport(pathToFileURL(path.join(verifiedSdkPath, 'dist', 'core', 'model-registry.js')).href),
       dynamicImport(pathToFileURL(path.join(verifiedSdkPath, 'dist', 'core', 'session-manager.js')).href),
-    ]) as [Partial<SdkModule>, Partial<SdkModule>, Partial<SdkModule>];
+    ]) as [Partial<SdkModule>, Partial<SdkModule>, Partial<SdkModule>, Partial<SdkModule>];
     const cold = {
       VERSION: config.VERSION,
       getAgentDir: config.getAgentDir,
       AuthStorage: auth.AuthStorage,
+      ModelRegistry: models.ModelRegistry,
       SessionManager: sessions.SessionManager,
     } as Partial<ColdCoordinatorSdkModule>;
     if (typeof cold.VERSION !== 'string'
         || typeof cold.getAgentDir !== 'function'
         || typeof cold.AuthStorage?.create !== 'function'
+        || typeof cold.ModelRegistry?.create !== 'function'
         || typeof cold.SessionManager?.create !== 'function'
         || typeof cold.SessionManager?.open !== 'function'
         || typeof cold.SessionManager?.forkFrom !== 'function'

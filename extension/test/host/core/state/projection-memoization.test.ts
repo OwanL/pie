@@ -157,3 +157,40 @@ test('projection memoization: toggling pruning visibility busts the cache (setti
 
   assert.notEqual(second, first, 'a settings change must bust the cache');
 });
+
+test('projection: a background session notice is hidden until its owning tab is active', () => {
+  const stateA = produce(stateWithActiveSession(SESSION_A), (draft) => {
+    draft.sessions.sessions.push(sessionSummary(SESSION_B));
+    draft.sessions.openTabPaths.push(SESSION_B);
+    draft.settings.notice = 'The background turn timed out.';
+    draft.settings.noticeKind = 'model-start-timeout';
+    draft.settings.noticeRaw = 'Timed out waiting for the model to start streaming (120s)';
+    draft.settings.noticeSessionPath = SESSION_B;
+  });
+
+  const activeA = selectViewState(stateA);
+  assert.equal(activeA.notice, null);
+  assert.equal(activeA.noticeKind, null);
+  assert.equal(activeA.noticeRaw, null);
+
+  const stateB = produce(stateA, (draft) => {
+    draft.sessions.activeSessionPath = SESSION_B;
+  });
+  const activeB = selectViewState(stateB);
+  assert.equal(activeB.notice, 'The background turn timed out.');
+  assert.equal(activeB.noticeKind, 'model-start-timeout');
+  assert.match(activeB.noticeRaw ?? '', /120s/);
+});
+
+test('projection: application-wide notices remain visible on every tab', () => {
+  const state = produce(stateWithActiveSession(SESSION_A), (draft) => {
+    draft.settings.notice = 'PI backend stopped.';
+    draft.settings.noticeKind = 'backend-exit';
+    draft.settings.noticeRaw = 'worker exited';
+    draft.settings.noticeSessionPath = null;
+  });
+
+  const view = selectViewState(state);
+  assert.equal(view.notice, 'PI backend stopped.');
+  assert.equal(view.noticeKind, 'backend-exit');
+});

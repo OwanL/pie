@@ -22,10 +22,11 @@ async function createAssetDir(): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-static-assets-'));
   await fs.mkdir(path.join(dir, '.vite'), { recursive: true });
   await fs.mkdir(path.join(dir, 'assets'), { recursive: true });
-  await fs.writeFile(path.join(dir, 'assets', 'panel-abc123.js'), 'console.log("pie");\n');
+  await fs.writeFile(path.join(dir, 'assets', 'panel-abc123.js'), 'new Worker("/assets/breakdown-worker-worker123.js");\n');
   await fs.writeFile(path.join(dir, 'assets', 'panel-abc123.css'), 'body {}\n');
   await fs.writeFile(path.join(dir, 'assets', 'chunk-xyz789.js'), 'export {};\n');
   await fs.writeFile(path.join(dir, 'assets', 'transcript-host-xyz789.js'), 'export {};\n');
+  await fs.writeFile(path.join(dir, 'assets', 'breakdown-worker-worker123.js'), 'self.onmessage = () => {};\n');
   await fs.writeFile(path.join(dir, 'assets', 'logo-1a2b3c.svg'), '<svg/>\n');
   await fs.writeFile(path.join(dir, 'secret.txt'), 'not servable\n');
   await fs.writeFile(
@@ -66,6 +67,9 @@ test('load(): resolves the entry, css, and transitively imported chunks into the
   // Dynamic entries (lazy-loaded chunks) are allowlisted too — without this
   // the browser render crashes on the transcript-host 404.
   assert.equal(assets.resolveRequest('/assets/transcript-host-xyz789.js')?.contentType, 'text/javascript; charset=utf-8');
+  // Vite's ?worker&url output is referenced by the trusted entry but omitted
+  // from manifest.json; it remains explicitly allowlisted from that reference.
+  assert.equal(assets.resolveRequest('/assets/breakdown-worker-worker123.js')?.contentType, 'text/javascript; charset=utf-8');
   await fs.rm(dir, { recursive: true, force: true });
 });
 
@@ -97,7 +101,12 @@ test('renderHtml(): nonce CSP, stable page metadata, and manifest URLs', async (
   const dir = await createAssetDir();
   const assets = new BrowserStaticAssets(dir);
   await assets.load();
-  const { html, csp } = assets.renderHtml({ wsRoute: '/ws', port: 1997, titleSuffix: 'Browser' });
+  const { html, csp } = assets.renderHtml({
+    wsRoute: '/ws',
+    port: 1997,
+    titleSuffix: 'Browser',
+    faviconRoute: '/favicon.svg',
+  });
 
   assert.match(html, /pie-transport" content="browser"/);
   assert.match(html, /pie-ws-route" content="\/ws"/);
@@ -105,8 +114,10 @@ test('renderHtml(): nonce CSP, stable page metadata, and manifest URLs', async (
   assert.match(html, /assets\/panel-abc123\.js/);
   assert.match(html, /assets\/panel-abc123\.css/);
   assert.match(html, /<title>pie — Browser<\/title>/);
+  assert.match(html, /<link rel="icon" type="image\/svg\+xml" href="\/favicon\.svg" \/>/);
   assert.match(csp, /default-src 'none'/);
   assert.match(csp, /script-src 'nonce-[0-9a-f]{32}'/);
+  assert.match(csp, /worker-src 'self'/);
   assert.match(csp, /style-src 'self' 'unsafe-inline'/);
   assert.match(csp, /connect-src 'self' ws:\/\/127\.0\.0\.1:1997/);
   assert.match(csp, /frame-ancestors 'none'/);
