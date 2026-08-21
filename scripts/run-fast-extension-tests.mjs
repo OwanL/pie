@@ -16,6 +16,15 @@ const extensionRoot = path.join(repoRoot, 'extension');
 const reporterSpecifier = pathToFileURL(path.join(repoRoot, 'scripts', 'test-reporter.mjs')).href;
 const extensionRequire = createRequire(path.join(extensionRoot, 'package.json'));
 
+// pi packages (settings.json#packages) are installed into the gitignored
+// `npm/` workspace, not extension/node_modules. The extension imports them via
+// relative paths (e.g. `npm/node_modules/pi-mcp-adapter/config.ts`), and their
+// own bare dependencies (smol-toml, strip-json-comments, zod, ...) exist only
+// under npm/node_modules. `packages: 'external'` below would leave those bare
+// imports as runtime requires that resolve from the extension/node_modules
+// symlink and fail. Bundle them instead; see `bundlePiPackageDeps`.
+const npmNodeModules = path.join(repoRoot, 'npm', 'node_modules');
+
 // Child-process entry points and __dirname-dependent modules retain tsx
 // isolation. import.meta.url is rewritten to its source URL below, while
 // computed imports are bundled but kept out of shared batch wrappers.
@@ -203,6 +212,27 @@ async function main() {
         });
       },
     };
+    const bundlePiPackageDeps = {
+      name: 'bundle-pi-package-deps',
+      setup(esbuild) {
+        esbuild.onResolve({ filter: /^[^./]/ }, (args) => {
+          // Leave node: builtins and imports from outside the pi-package
+          // workspace to esbuild's default (`packages: 'external'`) handling.
+          if (args.path.startsWith('node:')) return null;
+          if (!args.resolveDir || !args.resolveDir.startsWith(npmNodeModules)) return null;
+          try {
+            // Resolve exactly as Node would from the importing file so nested
+            // (non-hoisted) pi-package deps are found too.
+            const importerRequire = createRequire(path.join(args.resolveDir, '.pi-anchor.cjs'));
+            const resolved = importerRequire.resolve(args.path);
+            if (resolved.startsWith(npmNodeModules)) return { path: resolved, external: false };
+          } catch {
+            // Not resolvable from npm/node_modules; fall through to default.
+          }
+          return null;
+        });
+      },
+    };
     await build({
       entryPoints: safe.map((file) => path.join(extensionRoot, file)),
       outdir: tempDir,
@@ -212,7 +242,7 @@ async function main() {
       format: 'cjs',
       platform: 'node',
       packages: 'external',
-      plugins: [preserveSourceUrls],
+      plugins: [preserveSourceUrls, bundlePiPackageDeps],
       // A bundled test is the process entry point. Disable application entry
       // guards so imported backend modules do not start the real server.
       define: { 'require.main': 'undefined' },
