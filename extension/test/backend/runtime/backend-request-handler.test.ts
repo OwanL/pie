@@ -662,6 +662,46 @@ test('message.send ignores stale preflight settlement after session replacement'
   assert.equal(originalPath, '/repo/session.jsonl');
 });
 
+test('message.interrupt during preflight prevents the later agent prompt from starting', async () => {
+  let releasePreflight: (() => void) | undefined;
+  const preflightGate = new Promise<void>((resolve) => { releasePreflight = resolve; });
+  let agentPromptStarts = 0;
+  let abortCalls = 0;
+  const harness = createHarness({
+    sessionOverrides: {
+      prompt: async (_text: string, options?: { preflightResult?: (success: boolean) => void }) => {
+        await preflightGate;
+        options?.preflightResult?.(true);
+        agentPromptStarts += 1;
+      },
+      abort: async () => { abortCalls += 1; },
+    },
+  });
+
+  const sent = await handleBackendRequest(harness.deps, {
+    id: 'send-interrupted-during-preflight',
+    method: 'message.send',
+    params: { sessionPath: harness.context.sessionPath, text: 'do not start', inputs: [] },
+  });
+  assert.equal(typeof (sent as { requestId: string }).requestId, 'string');
+  assert.ok(harness.context.activeRequest, 'send owns the preflight window before interrupt');
+
+  assert.deepEqual(await handleBackendRequest(harness.deps, {
+    id: 'interrupt-during-preflight',
+    method: 'message.interrupt',
+    params: { sessionPath: harness.context.sessionPath },
+  }), { interrupted: true, settled: true });
+  assert.equal(abortCalls, 1);
+  assert.equal(harness.context.activeRequest, undefined);
+
+  releasePreflight?.();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.equal(agentPromptStarts, 0, 'a cancelled preflight must not cross into a billable agent prompt');
+  assert.equal(harness.emitted.some((entry) => entry.event === 'preflight.failed'), false);
+  assert.deepEqual(harness.busyEvents, [false]);
+});
+
 test('message.send terminalizes an ordinary no-agent extension command', async () => {
   const harness = createHarness({
     sessionOverrides: {

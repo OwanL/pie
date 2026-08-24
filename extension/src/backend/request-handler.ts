@@ -922,6 +922,13 @@ function emitPreflightFailed(
   deps.emitBusyChanged(context, false);
 }
 
+class PromptCancelledBeforeStartError extends Error {
+  constructor() {
+    super('Prompt cancelled before the agent run started.');
+    this.name = 'PromptCancelledBeforeStartError';
+  }
+}
+
 async function handleMessageSend(
   deps: BackendRequestHandlerDeps,
   request: RequestEnvelope,
@@ -1143,6 +1150,17 @@ async function handleMessageSend(
         source: 'rpc',
         images: imagePayload,
         preflightResult: (success) => {
+          // `session.abort()` can settle while before_agent_start extensions
+          // (notably the pruning prepass) are still running. The pinned SDK
+          // invokes this callback synchronously immediately before entering
+          // `_runAgentPrompt`; returning normally would therefore resurrect a
+          // request that Stop already terminalized and start a billable model
+          // call. Throwing here rejects `session.prompt()` before that boundary.
+          // The private sentinel is swallowed by the promise handler below so
+          // this user-requested cancellation cannot surface as a prompt error.
+          if (success && ownedRequest.aborted) {
+            throw new PromptCancelledBeforeStartError();
+          }
           if (!ownsRequest()) return;
           if (preflightFailed) return;
           if (success) {
@@ -1180,6 +1198,7 @@ async function handleMessageSend(
         },
       })
       .catch((error: Error) => {
+        if (error instanceof PromptCancelledBeforeStartError) return;
         // `session.prompt()` rejected. With early ack the RPC has already
         // resolved, so this is a post-ack failure. If streaming already started
         // (commit point reached) it is an in-turn error → legacy `error` emit

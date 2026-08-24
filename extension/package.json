@@ -189,6 +189,9 @@
     "typecheck:computer-use": "tsc --noEmit -p ../extensions/computer-use/tsconfig.json",
     "typecheck:image-context-guard": "tsc --noEmit -p ../extensions/image-context-guard/tsconfig.json",
     "test": "node ../scripts/run-tests.mjs --fast --package extension",
+    "test:browser": "playwright test",
+    "test:browser:configure-provider-gate": "playwright test provider-gate.pw.ts",
+    "test:browser:live-model": "playwright test live-races.pw.ts",
     "test:large-detail": "tsx --test test/large-detail.e2e.ts",
     "perf": "tsx ./test/perf/streaming-pipeline.perf.ts",
     "perf:analytics": "tsx ./test/perf/analytics.perf.ts",
@@ -197,6 +200,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.27.0",
+    "@playwright/test": "1.62.1",
     "@tailwindcss/postcss": "^4.3.0",
     "@tanstack/virtual-core": "^3.14.0",
     "@types/jsdom": "^21.1.7",

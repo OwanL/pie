@@ -892,7 +892,7 @@ providers:
         pricing:
           input: 1.75
           output: 14
-          cacheRead: 0.175
+          cacheRead: 0.17
           cacheWrite: 0
         eligible: true
         thinking:
@@ -957,16 +957,16 @@ providers:
           max: max
           minimal: low
         pricing:
-          input: 5
-          output: 30
-          cacheRead: 0.5
-          cacheWrite: 6.25
+          input: 2
+          output: 10
+          cacheRead: 0.2
+          cacheWrite: 2.5
           tiers:
             - inputTokensAbove: 272000
-              input: 10
-              output: 45
-              cacheRead: 1
-              cacheWrite: 12.5
+              input: 4
+              output: 15
+              cacheRead: 0.4
+              cacheWrite: 5
         eligible: false
         thinking:
           - minimal
@@ -1032,7 +1032,7 @@ providers:
         pricing:
           input: 0.25
           output: 2
-          cacheRead: 0.025
+          cacheRead: 0.02
           cacheWrite: 0
         eligible: false
         thinking:
