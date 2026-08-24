@@ -281,7 +281,10 @@ export function AppBody({ adapter }: AppBodyProps) {
         busy={viewState.busy}
         retryStatus={viewState.retryStatus}
         interrupting={interrupting}
-        commandsAvailable={connectionState === 'connected' && viewState.backendReady}
+        // Keep the composer and configuration controls interactive while the
+        // backend starts/restarts. Sends and model choices have host-owned
+        // deferred queues; renderer disconnection remains the hard boundary.
+        commandsAvailable={connectionState === 'connected'}
         activeSession={viewState.activeSession}
         privacyMode={viewState.privacyMode}
         modelSettings={viewState.modelSettings}

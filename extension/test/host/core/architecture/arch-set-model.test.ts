@@ -18,6 +18,7 @@ import assert from 'node:assert/strict';
 
 import { reducer, initialArchState, type ArchState } from '../../../../src/host/core/reducer';
 import type { Event } from '../../../../src/host/core/events';
+import type { Effect } from '../../../../src/host/core/effects';
 import type { ModelInfo, ComposerInput, ContextWindowUsage, ThinkingLevel } from '../../../../src/shared/protocol';
 
 const SESSION = '/s';
@@ -54,6 +55,7 @@ function buildState(opts: BuildOpts = {}): ArchState {
     ...initialArchState,
     settings: {
       ...initialArchState.settings,
+      backendReady: true,
       modelSettings: {
         defaultModel: opts.defaultModel ?? 'old-model',
         defaultThinkingLevel: opts.defaultThinkingLevel ?? 'medium',
@@ -258,13 +260,240 @@ test('SetModel for a closed session sets a notice and does NOT optimistically fl
   assert.deepEqual(out.state.pending.setModelByCorrId, {});
 });
 
-test('SetModel for a still-opening (pending) session sets a notice and changes nothing', () => {
-  const state = buildState({ openTabs: ['__pending__:1-a'] });
-  const out = reducer(state, cmd('c1', 'text-only', '__pending__:1-a'));
+test('SetModel for a still-opening session updates its visible badge and defers persistence', () => {
+  const pendingPath = '__pending__:1-a';
+  const base = buildState({ openTabs: [pendingPath] });
+  const state: ArchState = {
+    ...base,
+    sessions: {
+      ...base.sessions,
+      sessions: [{ ...base.sessions.sessions[0]!, path: pendingPath }],
+      activeSessionPath: pendingPath,
+    },
+  };
+  const out = reducer(state, cmd('c1', 'text-only', pendingPath));
 
-  assert.equal(out.state.settings.notice, 'Cannot set model: the session is still opening.');
+  assert.equal(out.state.settings.notice, null);
   assert.deepEqual(out.effects, []);
-  assert.equal(out.state.settings.modelSettings?.defaultModel, 'old-model');
+  assert.equal(out.state.settings.modelSettings?.defaultModel, 'old-model', 'disk-backed global default waits for the durable path');
+  assert.equal(out.state.sessions.sessions[0]?.modelId, 'text-only');
+  assert.equal(out.state.sessions.sessions[0]?.thinkingLevel, 'high');
+  assert.equal(out.state.pending.deferredSetModelBySession[pendingPath]?.modelSettings.defaultModel, 'text-only');
+});
+
+test('SetModel stays configurable while the backend is unavailable and coalesces to the latest choice', () => {
+  const state = buildState();
+  state.settings.backendReady = false;
+  const first = reducer(state, cmd('c1', 'text-only'));
+  const second = reducer(first.state, cmd('c2', 'image-model', SESSION, 'low'));
+
+  assert.deepEqual(first.effects, []);
+  assert.deepEqual(second.effects, []);
+  assert.equal(second.state.sessions.sessions[0]?.modelId, 'image-model');
+  assert.equal(second.state.sessions.sessions[0]?.thinkingLevel, 'low');
+  assert.equal(second.state.pending.deferredSetModelBySession[SESSION]?.corrId, 'c2');
+  assert.equal(second.state.pending.deferredSetModelBySession[SESSION]?.previousModelId, 'old-model');
+});
+
+test('deferred replay persists a return to the configured default even when the baseline badge was absent', () => {
+  const base = buildState();
+  base.settings.backendReady = false;
+  delete base.sessions.sessions[0]?.modelId;
+  delete base.sessions.sessions[0]?.provider;
+  delete base.sessions.sessions[0]?.thinkingLevel;
+
+  const changed = reducer(base, cmd('c1', 'text-only')).state;
+  const returned = reducer(changed, cmd('c2', 'old-model')).state;
+  const ready = reducer(returned, { kind: 'BackendReadyChanged', ready: true });
+  const drain = ready.effects[0] as Extract<Effect, { kind: 'DrainDeferredSetModelQueue' }>;
+  const replayed = reducer(ready.state, {
+    kind: 'Command',
+    cmd: {
+      kind: 'SetModel', corrId: 'c2', sessionPath: SESSION,
+      modelSettings: { defaultModel: 'old-model', defaultProvider: 'old-provider', defaultThinkingLevel: 'high' },
+      deferredReplay: true,
+    },
+  });
+
+  assert.equal(drain.entries[0]?.corrId, 'c2');
+  assert.equal(replayed.effects[0]?.kind, 'SetModelRpc');
+  assert.equal(replayed.state.sessions.sessions[0]?.modelId, 'old-model');
+});
+
+test('a newer choice queued behind a failed deferred write inherits the rolled-back baseline', () => {
+  const base = buildState();
+  base.settings.backendReady = false;
+  const queuedFirst = reducer(base, cmd('first', 'text-only')).state;
+  const ready = reducer(queuedFirst, { kind: 'BackendReadyChanged', ready: true });
+  const replayingFirst = reducer(ready.state, {
+    kind: 'Command',
+    cmd: {
+      kind: 'SetModel', corrId: 'first', sessionPath: SESSION,
+      modelSettings: { defaultModel: 'text-only', defaultProvider: 'provider-a', defaultThinkingLevel: 'high' },
+      deferredReplay: true,
+    },
+  }).state;
+  const queuedSecond = reducer(replayingFirst, cmd('second', 'image-model', SESSION, 'low')).state;
+  assert.equal(queuedSecond.pending.deferredSetModelBySession[SESSION]?.previousModelId, 'text-only');
+
+  const failedFirst = reducer(queuedSecond, {
+    kind: 'SetModelResult', corrId: 'first', sessionPath: SESSION, ok: false, error: 'rejected',
+  });
+  const nextDrain = failedFirst.effects[0] as Extract<Effect, { kind: 'DrainDeferredSetModelQueue' }>;
+  assert.equal(failedFirst.state.sessions.sessions[0]?.modelId, 'old-model');
+  assert.equal(nextDrain.entries[0]?.corrId, 'second');
+  assert.equal(nextDrain.entries[0]?.previousModelId, 'old-model');
+});
+
+test('an older deferred replay does not delete a newer image-removal confirmation', () => {
+  const base = buildState({ pendingImages: true });
+  base.settings.backendReady = false;
+  const deferredOld = reducer(base, cmd('old-deferred', 'image-model')).state;
+  const newerModal = reducer(deferredOld, cmd('new-modal', 'text-only'));
+  assert.equal(newerModal.effects[0]?.kind, 'ShowModelSwitchConfirm');
+
+  const ready = reducer(newerModal.state, { kind: 'BackendReadyChanged', ready: true });
+  const replayedOld = reducer(ready.state, {
+    kind: 'Command',
+    cmd: {
+      kind: 'SetModel', corrId: 'old-deferred', sessionPath: SESSION,
+      modelSettings: { defaultModel: 'image-model', defaultProvider: 'provider-b', defaultThinkingLevel: 'high' },
+      deferredReplay: true,
+    },
+  });
+  assert.notEqual(replayedOld.state.pending.setModelByCorrId['new-modal'], undefined);
+});
+
+test('cancelling an image-removal modal discovered during replay releases the model gate and held sends', () => {
+  const base = buildState();
+  base.settings.backendReady = false;
+  const queued = reducer(base, cmd('replay-modal', 'text-only')).state;
+  const withLateImageAndSend: ArchState = {
+    ...queued,
+    composer: {
+      ...queued.composer,
+      pendingComposerInputsBySession: {
+        [SESSION]: [{ ...IMAGE_INPUT, id: 'late-image' }],
+      },
+    },
+    pending: {
+      ...queued.pending,
+      backendReadyQueueBySession: {
+        [SESSION]: [{
+          sessionPath: SESSION, corrId: 'held-send', text: 'prompt', inputs: [],
+          composedText: 'prompt', localId: 'local:held', previousSummary: null, timestamp: 1,
+        }],
+      },
+    },
+  };
+  const ready = reducer(withLateImageAndSend, { kind: 'BackendReadyChanged', ready: true });
+  const replay = reducer(ready.state, {
+    kind: 'Command',
+    cmd: {
+      kind: 'SetModel', corrId: 'replay-modal', sessionPath: SESSION,
+      modelSettings: { defaultModel: 'text-only', defaultProvider: 'provider-a', defaultThinkingLevel: 'high' },
+      deferredReplay: true,
+    },
+  });
+  assert.equal(replay.effects[0]?.kind, 'ShowModelSwitchConfirm');
+  assert.equal(replay.state.pending.deferredSetModelInFlightCorrId, 'replay-modal');
+
+  const cancelled = reducer(replay.state, {
+    kind: 'ModelSwitchConfirmResult', corrId: 'replay-modal', confirmed: false,
+  });
+  assert.equal(cancelled.state.pending.deferredSetModelInFlightCorrId, null);
+  assert.equal(cancelled.state.pending.backendReadyQueueBySession[SESSION], undefined);
+  assert.equal(cancelled.effects[0]?.kind, 'DrainBackendReadyQueue');
+});
+
+test('confirming an image-removal modal discovered during replay proceeds without requeueing itself', () => {
+  const base = buildState();
+  base.settings.backendReady = false;
+  const queued = reducer(base, cmd('replay-confirm', 'text-only')).state;
+  const withLateImage: ArchState = {
+    ...queued,
+    composer: {
+      ...queued.composer,
+      pendingComposerInputsBySession: {
+        [SESSION]: [{ ...IMAGE_INPUT, id: 'late-image' }],
+      },
+    },
+  };
+  const ready = reducer(withLateImage, { kind: 'BackendReadyChanged', ready: true });
+  const replay = reducer(ready.state, {
+    kind: 'Command',
+    cmd: {
+      kind: 'SetModel', corrId: 'replay-confirm', sessionPath: SESSION,
+      modelSettings: { defaultModel: 'text-only', defaultProvider: 'provider-a', defaultThinkingLevel: 'high' },
+      deferredReplay: true,
+    },
+  });
+  const confirmed = reducer(replay.state, {
+    kind: 'ModelSwitchConfirmResult', corrId: 'replay-confirm', confirmed: true,
+  });
+
+  assert.equal(confirmed.effects[0]?.kind, 'SetModelRpc');
+  assert.notEqual(confirmed.state.pending.setModelByCorrId['replay-confirm']?.snapshot, null);
+  assert.equal(confirmed.state.pending.deferredSetModelBySession[SESSION], undefined);
+
+  const backendLost = reducer(confirmed.state, { kind: 'BackendReadyChanged', ready: false });
+  assert.equal(backendLost.state.pending.setModelByCorrId['replay-confirm'], undefined);
+  assert.equal(backendLost.state.pending.deferredSetModelInFlightCorrId, null);
+  assert.equal(backendLost.state.pending.deferredSetModelBySession[SESSION]?.corrId, 'replay-confirm');
+  assert.equal(backendLost.state.pending.deferredSetModelBySession[SESSION]?.clearImages, true);
+});
+
+test('confirmation after backend loss requeues a deferred replay and releases its old slot', () => {
+  const base = buildState();
+  base.settings.backendReady = false;
+  const queued = reducer(base, cmd('replay-drop', 'text-only')).state;
+  const withLateImage: ArchState = {
+    ...queued,
+    composer: {
+      ...queued.composer,
+      pendingComposerInputsBySession: { [SESSION]: [{ ...IMAGE_INPUT, id: 'late-drop' }] },
+    },
+  };
+  const ready = reducer(withLateImage, { kind: 'BackendReadyChanged', ready: true });
+  const modal = reducer(ready.state, {
+    kind: 'Command',
+    cmd: {
+      kind: 'SetModel', corrId: 'replay-drop', sessionPath: SESSION,
+      modelSettings: { defaultModel: 'text-only', defaultProvider: 'provider-a', defaultThinkingLevel: 'high' },
+      deferredReplay: true,
+    },
+  });
+  const backendLost: ArchState = {
+    ...modal.state,
+    settings: { ...modal.state.settings, backendReady: false },
+  };
+  const confirmed = reducer(backendLost, {
+    kind: 'ModelSwitchConfirmResult', corrId: 'replay-drop', confirmed: true,
+  });
+
+  assert.equal(confirmed.state.pending.deferredSetModelInFlightCorrId, null);
+  assert.equal(confirmed.state.pending.deferredSetModelBySession[SESSION]?.corrId, 'replay-drop');
+  assert.deepEqual(confirmed.effects, []);
+  const recovered = reducer(confirmed.state, { kind: 'BackendReadyChanged', ready: true });
+  assert.equal(recovered.state.pending.deferredSetModelInFlightCorrId, 'replay-drop');
+  assert.equal(recovered.effects[0]?.kind, 'DrainDeferredSetModelQueue');
+});
+
+test('a newer deferred choice supersedes an older image-removal confirmation', () => {
+  const first = reducer(buildState({ pendingImages: true }), cmd('old-modal', 'text-only'));
+  const unavailable: ArchState = {
+    ...first.state,
+    settings: { ...first.state.settings, backendReady: false },
+  };
+  const newer = reducer(unavailable, cmd('new-choice', 'image-model', SESSION, 'low'));
+  const staleConfirm = reducer(newer.state, {
+    kind: 'ModelSwitchConfirmResult', corrId: 'old-modal', confirmed: true,
+  });
+
+  assert.equal(newer.state.pending.setModelByCorrId['old-modal'], undefined);
+  assert.equal(staleConfirm.state.sessions.sessions[0]?.modelId, 'image-model');
+  assert.equal(staleConfirm.state.pending.deferredSetModelBySession[SESSION]?.corrId, 'new-choice');
+  assert.deepEqual(staleConfirm.effects, []);
 });
 
 // ─── No-modal path: optimistic apply + SetModelRpc ──────────────────────────
@@ -513,20 +742,27 @@ test('SetModel apply with no per-session summary flips only the global default; 
   assert.deepEqual(out.state.sessions.sessions, []); // no fabricated summary
 });
 
-test('concurrent setModels with distinct corrIds reconcile independently (entries do not cross-contaminate)', () => {
-  const state = buildState();
-  const a = reducer(state, cmd('a', 'image-model'));
+test('rapid setModels serialize so an older failure cannot overwrite a newer success', () => {
+  const a = reducer(buildState(), cmd('a', 'image-model'));
   const b = reducer(a.state, cmd('b', 'text-only'));
-  // Both in-flight, distinct corrIds.
   assert.notEqual(b.state.pending.setModelByCorrId['a'], undefined);
-  assert.notEqual(b.state.pending.setModelByCorrId['b'], undefined);
+  assert.equal(b.state.pending.setModelByCorrId['b'], undefined);
+  assert.equal(b.state.pending.deferredSetModelBySession[SESSION]?.corrId, 'b');
 
-  // A fails: A's entry is dropped, B's entry is untouched.
   const aFail = reducer(b.state, result('a', false, 'boom'));
+  const drain = aFail.effects[0] as Extract<Effect, { kind: 'DrainDeferredSetModelQueue' }>;
   assert.equal(aFail.state.pending.setModelByCorrId['a'], undefined);
-  assert.notEqual(aFail.state.pending.setModelByCorrId['b'], undefined);
+  assert.equal(drain.entries[0]?.corrId, 'b');
 
-  // B succeeds: B's entry is dropped.
-  const bOk = reducer(aFail.state, result('b', true));
+  const replayedB = reducer(aFail.state, {
+    kind: 'Command',
+    cmd: {
+      kind: 'SetModel', corrId: 'b', sessionPath: SESSION,
+      modelSettings: { defaultModel: 'text-only', defaultProvider: 'provider-a', defaultThinkingLevel: 'high' },
+      deferredReplay: true,
+    },
+  });
+  const bOk = reducer(replayedB.state, result('b', true));
   assert.deepEqual(bOk.state.pending.setModelByCorrId, {});
+  assert.equal(bOk.state.settings.modelSettings?.defaultModel, 'text-only');
 });

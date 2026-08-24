@@ -7,7 +7,7 @@ import { LIVE_PIPELINE_LIMITS } from '../../../src/shared/live-pipeline-protocol
 
 function accumulator(observeProgressMeasurement?: (measurement: ToolProgressMeasurement) => void) {
   return new BackendLiveTurnAccumulator({
-    protocolVersion: 6,
+    protocolVersion: 7,
     sessionPath: '/session.jsonl',
     requestId: 'request',
     turnId: 'turn',
@@ -258,6 +258,49 @@ test('backend accumulator emits one full subagent preview then incremental patch
   assert.equal(patch.progressRevision, 2);
   assert.ok(Buffer.byteLength(JSON.stringify(patch), 'utf8') < Buffer.byteLength(JSON.stringify(nextPreview), 'utf8'));
   assert.deepEqual(value.checkpoint().tools[0]?.preview, nextPreview, 'checkpoint retains the fully assembled preview');
+});
+
+test('backend accumulator checkpoints transient execution end and upgrades only to a matching durable terminal', () => {
+  const value = accumulator();
+  value.observe({ kind: 'turn.started' }, 100);
+  value.observe({
+    kind: 'tool.started', executionId: 'execution', parentExecutionId: null, rootExecutionId: 'execution',
+    toolCallId: 'tool', name: 'read', input: {}, startedAt: 110,
+  }, 110);
+  value.observe({
+    kind: 'tool.progress', executionId: 'execution', preview: { kind: 'generic', summary: 'preview' },
+  }, 115);
+  const checkpointBytesBeforeEnd = value.checkpoint().checkpointBytes;
+
+  const ended = value.observe({
+    kind: 'tool.executionEnded', executionId: 'execution', status: 'completed', durationMs: 25,
+  }, 120);
+  assert.equal(ended.kind, 'tool.executionEnded');
+  assert.ok(
+    value.checkpoint().checkpointBytes <= checkpointBytesBeforeEnd,
+    'active checkpoint accounting reserves the execution-end boundary before accepting progress',
+  );
+  assert.deepEqual(value.checkpoint().tools[0]?.executionEnd, { status: 'completed', durationMs: 25 });
+  assert.equal(value.checkpoint().tools[0]?.terminal, undefined, 'execution end is not durability evidence');
+  assert.deepEqual(value.checkpoint().tools[0]?.preview, { kind: 'generic', summary: 'preview' });
+
+  const lateProgress = value.observe({
+    kind: 'tool.progress', executionId: 'execution', preview: { kind: 'generic', summary: 'late' },
+  }, 121);
+  assert.equal(lateProgress?.kind, 'observation.rejected');
+  const mismatched = value.observe({
+    kind: 'tool.terminal', executionId: 'execution', status: 'failed', result: 'wrong',
+    durationMs: 25, durableEntryId: 'wrong-entry',
+  }, 122);
+  assert.equal(mismatched.kind, 'observation.rejected');
+
+  const terminal = value.observe({
+    kind: 'tool.terminal', executionId: 'execution', status: 'completed', result: 'done',
+    durationMs: 25, durableEntryId: 'tool-entry',
+  }, 123);
+  assert.equal(terminal.kind, 'tool.terminal');
+  assert.equal(value.checkpoint().tools[0]?.terminal?.durableEntryId, 'tool-entry');
+  assert.deepEqual(value.checkpoint().tools[0]?.executionEnd, { status: 'completed', durationMs: 25 });
 });
 
 test('backend accumulator ignores duplicate durability-confirmed tool completion', () => {
@@ -664,7 +707,7 @@ test('compact trace reuses exact preview/envelope counters without a second recu
     counters?: { childCount: number; messageCount: number; maxRecursiveDepth: number };
   } | undefined;
   const value = new BackendLiveTurnAccumulator({
-    protocolVersion: 6, sessionPath: '/session.jsonl', requestId: 'request', turnId: 'turn',
+    protocolVersion: 7, sessionPath: '/session.jsonl', requestId: 'request', turnId: 'turn',
     attemptId: 'attempt', canonicalMessageId: 'message', startedAt: 100,
   }, (candidate) => { measurement = candidate; });
   value.observe({ kind: 'turn.started' }, 100);

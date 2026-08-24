@@ -1,5 +1,6 @@
 import type { ArchState } from '../arch-state.js';
 import type { Command } from '../commands.js';
+import type { ModelInfo, SessionSummary } from '../../../shared/protocol.js';
 import type { ReducerResult } from './helpers.js';
 import { evictSession, removeFromArray, addToArray } from './helpers.js';
 import { getNextVisibleTabPathOnClose, moveOpenTabPath, insertTabRespectingPinnedPrefix, cleanPinnedTabGroups, isPendingTabPath } from '../../../shared/tab-behavior.js';
@@ -10,11 +11,11 @@ import { getNextVisibleTabPathOnClose, moveOpenTabPath, insertTabRespectingPinne
  * provider-qualified metadata is merged back in when the chosen catalog is
  * stale or filtered, so reasoning controls do not flash to a non-reasoning
  * fallback while the durable target is unresolved. */
-function provisionalCatalogForPendingSession(
+function provisionalCatalogForSession(
   state: ArchState,
-  placeholderSummary: Extract<Command, { kind: 'CreateSession' | 'DuplicateSession' }>['placeholderSummary'],
+  placeholderSummary: SessionSummary,
   predecessorPath?: string,
-): import('../../../shared/protocol.js').ModelInfo[] {
+): ModelInfo[] {
   const catalogs = Object.entries(state.settings.availableModelsBySession)
     .filter(([path, models]) => !isPendingTabPath(path) && models.length > 0);
   const activePath = state.sessions.activeSessionPath;
@@ -23,7 +24,7 @@ function provisionalCatalogForPendingSession(
   );
   const preferred = preferredPaths
     .map((path) => state.settings.availableModelsBySession[path])
-    .find((models): models is import('../../../shared/protocol.js').ModelInfo[] => !!models && models.length > 0);
+    .find((models): models is ModelInfo[] => !!models && models.length > 0);
   const base = preferred ?? catalogs[0]?.[1] ?? [];
   const predecessor = preferredPaths
     .map((path) => state.sessions.sessions.find((session) => session.path === path))
@@ -46,17 +47,22 @@ function provisionalCatalogForPendingSession(
   return [...base, selectedKnown];
 }
 
-function seedPendingModelCatalog(
+function seedProvisionalModelCatalog(
   state: ArchState,
   sessionPath: string,
-  placeholderSummary: Extract<Command, { kind: 'CreateSession' | 'DuplicateSession' }>['placeholderSummary'],
+  placeholderSummary: SessionSummary,
   predecessorPath?: string,
 ): ArchState['settings'] {
+  const existingModels = state.settings.availableModelsBySession[sessionPath];
+  const existingStatus = state.settings.availableModelsStatusBySession[sessionPath];
+  if ((existingModels?.length ?? 0) > 0 || existingStatus === 'authoritative') {
+    return state.settings;
+  }
   return {
     ...state.settings,
     availableModelsBySession: {
       ...state.settings.availableModelsBySession,
-      [sessionPath]: provisionalCatalogForPendingSession(state, placeholderSummary, predecessorPath),
+      [sessionPath]: provisionalCatalogForSession(state, placeholderSummary, predecessorPath),
     },
     availableModelsStatusBySession: {
       ...state.settings.availableModelsStatusBySession,
@@ -86,6 +92,8 @@ export function handleOpenSession(state: ArchState, cmd: Extract<Command, { kind
     state.sessions.pinnedTabPaths,
     sessionPath,
   );
+  const catalogSummary = placeholderSummary
+    ?? state.sessions.sessions.find((summary) => summary.path === sessionPath);
   const nextState = {
     ...state,
     sessions: {
@@ -96,6 +104,9 @@ export function handleOpenSession(state: ArchState, cmd: Extract<Command, { kind
       unreadFinishedSessionPaths: state.sessions.unreadFinishedSessionPaths.filter((p) => p !== sessionPath),
       intentionallyHiddenRunningPaths: removeFromArray(state.sessions.intentionallyHiddenRunningPaths, sessionPath),
     },
+    settings: catalogSummary
+      ? seedProvisionalModelCatalog(state, sessionPath, catalogSummary, state.sessions.activeSessionPath ?? undefined)
+      : state.settings,
   };
   return {
     state: nextState,
@@ -170,7 +181,7 @@ export function handleCreateSession(state: ArchState, cmd: Extract<Command, { ki
       unreadFinishedSessionPaths: state.sessions.unreadFinishedSessionPaths.filter((p) => p !== sessionPath),
       intentionallyHiddenRunningPaths: removeFromArray(state.sessions.intentionallyHiddenRunningPaths, sessionPath),
     },
-    settings: seedPendingModelCatalog(state, sessionPath, placeholderSummary),
+    settings: seedProvisionalModelCatalog(state, sessionPath, placeholderSummary),
     pending: {
       ...state.pending,
       createOperations: operationId
@@ -527,7 +538,7 @@ export function handleDuplicateSession(state: ArchState, cmd: Extract<Command, {
       unreadFinishedSessionPaths: state.sessions.unreadFinishedSessionPaths.filter((p) => p !== sessionPath),
       intentionallyHiddenRunningPaths: removeFromArray(state.sessions.intentionallyHiddenRunningPaths, sessionPath),
     },
-    settings: seedPendingModelCatalog(state, sessionPath, placeholderSummary, sourceSessionPath),
+    settings: seedProvisionalModelCatalog(state, sessionPath, placeholderSummary, sourceSessionPath),
     pending: {
       ...state.pending,
       createOperations: operationId

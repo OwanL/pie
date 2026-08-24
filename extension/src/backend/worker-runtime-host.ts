@@ -27,7 +27,7 @@ import { deduplicateToolCallResultsForTransport } from '../shared/chat-message-p
 import { compactDurableMessageForTransport, findDurableDetail } from '../shared/lazy-details';
 import { LIVE_PIPELINE_LIMITS } from '../shared/live-pipeline-protocol';
 import { deriveContextUsageFromBranch } from './context-usage';
-import { resolveActiveModel } from './session-metadata';
+import { projectRegistryModels, resolveActiveModel } from './session-metadata';
 import { ExtensionUIBridge } from './extension-ui-bridge';
 import { installAuxiliaryLlmMeter } from './auxiliary-llm-meter';
 import { handleBackendRequest } from './request-handler';
@@ -135,7 +135,7 @@ export class WorkerRuntimeHost {
   private promotion?: Promise<void>;
   private disposed = false;
   private commandTail = Promise.resolve();
-  private settings: ModelSettings = { defaultModel: '', defaultThinkingLevel: 'medium' };
+  private settings: ModelSettings = { defaultModel: '', defaultThinkingLevel: 'high' };
   private openedPayload?: SessionOpenedPayload;
   private agentDir = '';
   private startupCwd = '';
@@ -1200,22 +1200,25 @@ export class WorkerRuntimeHost {
 
   private availableModels(): ModelInfo[] {
     let models: ModelInfo[] = [];
+    let registryWasRead = false;
     try {
-      models = (this.context?.runtime.services.modelRegistry.getAvailable() ?? []).map((model) => ({
-        id: model.id,
-        name: model.name,
-        provider: model.provider,
-        reasoning: model.reasoning,
-        inputKinds: model.input,
-        contextWindow: model.contextWindow,
-        maxTokens: model.maxTokens,
-      }));
+      const registry = this.context?.runtime.services.modelRegistry;
+      if (registry) {
+        registryWasRead = true;
+        // Use the same projection as the coordinator. The previous worker-local
+        // mapper dropped thinkingLevels and subagent.pricing, which made every
+        // promoted session lose exact reasoning options, picker prices, and the
+        // pricing resolver used by session cost tracking.
+        models = projectRegistryModels(registry.getAvailable(), this.agentDir);
+      }
     } catch {
+      registryWasRead = false;
       models = [];
     }
-    // The configured catalog authority snapshot consumed from coordinator sync
-    // keeps the picker non-empty when the runtime registry is unavailable.
-    if (models.length === 0 && this.syncedCatalogModels !== undefined) return this.syncedCatalogModels;
+    // Use the coordinator snapshot only when no runtime registry could be read.
+    // A successfully read empty registry is authoritative (for example, no
+    // configured credentials) and must not expose unavailable fallback models.
+    if (!registryWasRead && this.syncedCatalogModels !== undefined) return this.syncedCatalogModels;
     return models;
   }
 

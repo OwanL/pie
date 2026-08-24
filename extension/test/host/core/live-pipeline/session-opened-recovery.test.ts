@@ -131,6 +131,79 @@ test('busy session.opened checkpoint commits the matching optimistic send and cl
   });
 });
 
+test('authoritative idle session.opened removes an orphaned live row beside its durable terminal', () => {
+  const stale = liveCheckpoint('Duplicated stale response');
+  const staleKey = `${stale.turnId}\u0000${stale.attemptId}`;
+  const before: ArchState = {
+    ...initialArchState,
+    sessions: {
+      ...initialArchState.sessions,
+      runningSessionPaths: [sessionPath],
+    },
+    livePipeline: {
+      ...initialArchState.livePipeline,
+      turnsBySession: { [sessionPath]: stale.turn },
+      terminalAttempts: {
+        [staleKey]: {
+          sessionPath,
+          turnId: stale.turnId,
+          attemptId: stale.attemptId,
+          finalSeq: stale.checkpointSeq,
+          terminalKind: 'completed',
+          expiresAt: 99_999,
+        },
+      },
+    },
+    pending: {
+      ...initialArchState.pending,
+      currentTurnBySession: {
+        [sessionPath]: { requestId: stale.turn.requestId, firstMessageId: stale.turn.canonicalMessageId },
+      },
+    },
+  };
+  const opened = payload();
+  opened.busy = false;
+  delete opened.liveTurnCheckpoint;
+  opened.transcript = [
+    opened.transcript[0]!,
+    {
+      id: 'assistant-durable',
+      role: 'assistant',
+      createdAt: '2026-07-28T00:01:00.000Z',
+      markdown: 'Duplicated stale response',
+      status: 'completed',
+    },
+  ];
+  opened.transcriptWindow = {
+    totalCount: 2,
+    loadedStart: 0,
+    loadedEnd: 2,
+    hasOlder: false,
+    hasNewer: false,
+    isPartial: false,
+    hasUserMessages: true,
+  };
+
+  const result = reducer(before, {
+    kind: 'SessionOpened', backendGeneration: 0, modelWriteFence: 0,
+    modelHydrationRevision: 0, catalogHydrationRevision: 0, sessionPath, payload: opened,
+  });
+
+  assert.equal(result.state.livePipeline.turnsBySession[sessionPath], undefined);
+  assert.equal(result.state.livePipeline.terminalAttempts[staleKey], undefined);
+  assert.equal(result.state.pending.currentTurnBySession[sessionPath], undefined);
+  assert.equal(result.state.sessions.runningSessionPaths.includes(sessionPath), false);
+  const view = projectTranscriptView(
+    result.state.transcript.bySession[sessionPath] ?? [],
+    result.state.livePipeline,
+    sessionPath,
+  );
+  assert.deepEqual(view.messages.map((message) => message.markdown), [
+    'Do the work',
+    'Duplicated stale response',
+  ]);
+});
+
 test('busy open without a checkpoint uses bounded recovery identity when the host has no prior live turn', () => {
   const opened = payload();
   delete opened.liveTurnCheckpoint;

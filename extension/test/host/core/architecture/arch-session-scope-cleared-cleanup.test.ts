@@ -230,6 +230,81 @@ test('SessionScopeCleared preserves requestIdToLocalId entries for OTHER session
 
 // ─── edit ops ───────────────────────────────────────────────────────────────
 
+test('closing a deferred pending-path head releases the next durable model choice', () => {
+  const pendingPath = '__pending__:blocked';
+  const later = {
+    corrId: 'later-model', sessionPath: '/b',
+    modelSettings: { defaultModel: 'later', defaultThinkingLevel: 'high' as const },
+    clearImages: false, sequence: 2, previousModelId: 'old-b',
+  };
+  const state: ArchState = {
+    ...readyState,
+    sessions: {
+      ...readyState.sessions,
+      sessions: [summary(pendingPath), { ...summary('/b'), modelId: 'later' }],
+      openTabPaths: [pendingPath, '/b'],
+      activeSessionPath: pendingPath,
+    },
+    pending: {
+      ...readyState.pending,
+      deferredSetModelSequence: 2,
+      deferredSetModelBySession: {
+        [pendingPath]: {
+          corrId: 'blocked-model', sessionPath: pendingPath,
+          modelSettings: { defaultModel: 'blocked', defaultThinkingLevel: 'high' },
+          clearImages: false, sequence: 1, previousModelId: 'old-pending',
+        },
+        '/b': later,
+      },
+    },
+  };
+
+  const out = reducer(state, scopeCleared(pendingPath, true));
+  assert.equal(out.state.pending.deferredSetModelBySession[pendingPath], undefined);
+  assert.equal(out.state.pending.deferredSetModelInFlightCorrId, 'later-model');
+  assert.deepEqual(out.effects, [{
+    kind: 'DrainDeferredSetModelQueue', corrId: 'drain-model:later-model', entries: [later],
+  }]);
+});
+
+test('closing the owner of a deferred replay modal clears its slot and advances the queue', () => {
+  const later = {
+    corrId: 'later-after-modal', sessionPath: '/b',
+    modelSettings: { defaultModel: 'later', defaultThinkingLevel: 'high' as const },
+    clearImages: false, sequence: 2, previousModelId: 'old-b',
+  };
+  const state: ArchState = {
+    ...readyState,
+    sessions: {
+      ...readyState.sessions,
+      sessions: [summary('/a'), { ...summary('/b'), modelId: 'later' }],
+      openTabPaths: ['/a', '/b'],
+      activeSessionPath: '/a',
+    },
+    pending: {
+      ...readyState.pending,
+      deferredSetModelSequence: 2,
+      deferredSetModelInFlightCorrId: 'modal-owner',
+      deferredSetModelInFlightSessionPath: '/a',
+      setModelByCorrId: {
+        'modal-owner': {
+          sessionPath: '/a',
+          modelSettings: { defaultModel: 'blocked', defaultThinkingLevel: 'high' },
+          snapshot: null,
+        },
+      },
+      deferredSetModelBySession: { '/b': later },
+    },
+  };
+
+  const out = reducer(state, scopeCleared('/a', true));
+  assert.equal(out.state.pending.setModelByCorrId['modal-owner'], undefined);
+  assert.equal(out.state.pending.deferredSetModelInFlightCorrId, 'later-after-modal');
+  assert.deepEqual(out.effects, [{
+    kind: 'DrainDeferredSetModelQueue', corrId: 'drain-model:later-after-modal', entries: [later],
+  }]);
+});
+
 test('SessionScopeCleared also cleans pending.ops for edit ops', () => {
   const state: ArchState = {
     ...readyState,

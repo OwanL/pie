@@ -133,8 +133,20 @@ export function buildBrowseSessionOpenedPayload(options: {
     : buildTailTranscriptWindow(options.browse.cache);
   const transcript = normalizeDanglingTranscript(slice.transcript)
     .map(deduplicateToolCallResultsForTransport);
+  const hasExplicitThinkingLevel = (options.browse.manager.getBranch?.() ?? [])
+    .some((entry) => (entry as SessionEntryLike).type === 'thinking_level_change');
+  const session = hasExplicitThinkingLevel
+    ? options.browse.summary
+    : {
+        ...options.browse.summary,
+        // Pi's empty branch context reports `off` when no durable change entry
+        // exists. That is an implementation fallback, not the user's new-chat
+        // preference; inherit the configured default until the branch records
+        // an explicit reasoning choice.
+        thinkingLevel: options.modelSettings.defaultThinkingLevel,
+      };
   const payload: SessionOpenedPayload = {
-    session: options.browse.summary,
+    session,
     transcript,
     transcriptWindow: slice.transcriptWindow,
     busy: false,

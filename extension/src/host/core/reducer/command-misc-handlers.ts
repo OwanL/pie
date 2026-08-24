@@ -7,6 +7,7 @@ import type { Command } from '../commands.js';
 import type { ReducerResult } from './helpers.js';
 import { addToArray, appendLocalUserMessage, truncateLocalTranscriptAfter } from './helpers.js';
 import { BACKEND_READY_TIMEOUT_MS } from '../../../shared/backend-ready-timeout.js';
+import { sessionHasDeferredModelWrite } from './set-model-handlers.js';
 
 export function handleInterrupt(state: ArchState, cmd: Extract<Command, { kind: 'Interrupt' }>): ReducerResult {
   // Stop takes effect INSTANTLY in the reducer while remaining truthful about
@@ -131,15 +132,12 @@ export function handleSend(state: ArchState, cmd: Extract<Command, { kind: 'Send
     return { state: nextState, effects: [] };
   }
 
-  // If the backend is not yet ready, queue the send into ArchState instead
-  // of emitting `SendRpc`. The optimistic user message is inserted
-  // immediately, the draft is cleared, and a `StartBackendReadyWatchdog`
-  // effect is emitted (the runner starts a timer; if the backend
-  // doesn't become ready in time, the watchdog fires and the reducer drops
-  // the queued messages). When `BackendReadyChanged{ready:true}` fires, the
-  // reducer emits a `DrainBackendReadyQueue` effect; the runner re-dispatches
-  // each entry as a `Send` Command, which goes through the normal path below.
-  if (!state.settings.backendReady) {
+  // Queue while the backend is unavailable or while this session still has a
+  // deferred model choice to persist. In the latter case no watchdog is needed:
+  // SetModelResult releases these sends, guaranteeing the prompt cannot overtake
+  // the user's picker choice and run on the old model.
+  const blockedByDeferredModel = sessionHasDeferredModelWrite(state, cmd.sessionPath);
+  if (!state.settings.backendReady || blockedByDeferredModel) {
     const nextState = produce(state, (draft) => {
       appendLocalUserMessage(draft, cmd.sessionPath, cmd.localId, cmd.composedText, cmd.userParts, new Date(cmd.timestamp).toISOString(), 'completed', cmd.customType, cmd.customDetails);
       draft.pending.backendReadyQueueBySession[cmd.sessionPath] = [
@@ -164,7 +162,9 @@ export function handleSend(state: ArchState, cmd: Extract<Command, { kind: 'Send
     });
     return {
       state: nextState,
-      effects: [{ kind: 'StartBackendReadyWatchdog', corrId: 'watchdog', timeoutMs: BACKEND_READY_TIMEOUT_MS }],
+      effects: state.settings.backendReady
+        ? []
+        : [{ kind: 'StartBackendReadyWatchdog', corrId: 'watchdog', timeoutMs: BACKEND_READY_TIMEOUT_MS }],
     };
   }
 

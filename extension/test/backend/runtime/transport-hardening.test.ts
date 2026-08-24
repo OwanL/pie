@@ -294,7 +294,7 @@ test('ordered stdout writer never coalesces or supersedes sequenced semantic pro
   assert.deepEqual(written.map((line) => JSON.parse(line)).slice(1).map((entry) => entry.payload.seq), [2, 3, 4, 5]);
 });
 
-test('stalled stdout coalesces contiguous v6 subagent patches without duplicating recursive snapshots', async () => {
+test('stalled stdout coalesces contiguous v7 subagent patches without duplicating recursive snapshots', async () => {
   const written: string[] = [];
   const callbacks: Array<() => void> = [];
   const fatal: Error[] = [];
@@ -312,7 +312,7 @@ test('stalled stdout coalesces contiguous v6 subagent patches without duplicatin
 
   const recursiveText = 'x'.repeat(512 * 1024);
   const basePayload = {
-    protocolVersion: 6, sessionPath: '/s', requestId: 'request', turnId: 'turn',
+    protocolVersion: 7, sessionPath: '/s', requestId: 'request', turnId: 'turn',
     attemptId: 'attempt', executionId: 'execution', kind: 'tool.progress', occurredAt: 1,
     checkpointBytes: 30 * 1024 * 1024,
   };
@@ -388,7 +388,7 @@ test('writer trace: semantic composition drops the replaced queued identity and 
   const writer = new OrderedJsonlWriter(stream, { maxQueuedBytes: 1024 * 1024 });
   const frameBytes = (frame: unknown) => Buffer.byteLength(serializeJsonLine(frame));
   const basePayload = {
-    protocolVersion: 6, sessionPath: '/s', turnId: 'turn', attemptId: 'attempt',
+    protocolVersion: 7, sessionPath: '/s', turnId: 'turn', attemptId: 'attempt',
     executionId: 'execution', kind: 'tool.progress', occurredAt: 1, checkpointBytes: 1024,
   };
   const snapshot = {
@@ -486,7 +486,7 @@ test('writer trace: latest-patch replacement drops the replaced queued identity 
   const writer = new OrderedJsonlWriter(stream, { maxQueuedBytes: 2048, onFatal: (error) => fatal.push(error) });
   const frameBytes = (frame: unknown) => Buffer.byteLength(serializeJsonLine(frame));
   const basePayload = {
-    protocolVersion: 6, sessionPath: '/s', turnId: 'turn', attemptId: 'attempt',
+    protocolVersion: 7, sessionPath: '/s', turnId: 'turn', attemptId: 'attempt',
     executionId: 'execution', kind: 'tool.progress', occurredAt: 1, checkpointBytes: 1024,
   };
   const snapshot = {

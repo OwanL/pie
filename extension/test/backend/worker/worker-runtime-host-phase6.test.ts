@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import test from 'node:test';
 
 import type { SdkSessionEvent } from '../../../src/backend/sdk';
@@ -10,6 +13,8 @@ import type { SessionOpenedPayload } from '../../../src/shared/protocol';
 
 interface WorkerRuntimeHostInternals {
   context?: SessionContext;
+  agentDir: string;
+  availableModels: () => unknown;
   openedPayload?: SessionOpenedPayload;
   buildOpenedPayload: (
     sessionPath: string,
@@ -226,6 +231,73 @@ test('worker-owned provider progress restores queue phase and latency ownership'
   assert.equal(sent.filter((frame) => frame.kind === 'runtime.event' && frame.event === 'live.semantic').length, 2);
   internals.handleProviderProgress({ ...base, sessionId: 'other-session', kind: 'gate_acquired', queueDurationMs: 99 });
   assert.deepEqual(context.activeRequest.providerQueueByTurn?.get(4), { durationMs: 25, attemptCount: 1 });
+});
+
+test('hot worker model discovery preserves pricing and exact reasoning metadata', () => {
+  const { host } = makeHost();
+  const internals = getInternals(host);
+  const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pie-hot-model-pricing-'));
+  try {
+    fs.writeFileSync(path.join(agentDir, 'model-profiles.json'), JSON.stringify({
+      profiles: [{ provider: 'mock', id: 'priced-model', eligible: true }],
+    }));
+    fs.writeFileSync(path.join(agentDir, 'models.json'), JSON.stringify({
+      providers: {
+        mock: {
+          models: [{
+            id: 'priced-model', name: 'Priced model', reasoning: true,
+            cost: { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 },
+          }],
+        },
+      },
+    }));
+    internals.agentDir = agentDir;
+    const context = makeSessionEventContext('/sessions/priced.jsonl');
+    context.runtime = {
+      services: {
+        modelRegistry: {
+          getAvailable: () => [{
+            id: 'priced-model', name: 'Priced model', provider: 'mock', reasoning: true,
+            thinkingLevelMap: { xhigh: 'xhigh', max: null },
+            input: ['text'], contextWindow: 200_000, maxTokens: 32_000,
+          }],
+        },
+      },
+    } as unknown as SessionContext['runtime'];
+    internals.context = context;
+
+    assert.deepEqual(internals.availableModels(), [{
+      id: 'priced-model',
+      name: 'Priced model',
+      provider: 'mock',
+      reasoning: true,
+      thinkingLevels: ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'],
+      inputKinds: ['text'],
+      contextWindow: 200_000,
+      maxTokens: 32_000,
+      subagent: {
+        eligible: true,
+        pricing: { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 },
+      },
+    }]);
+  } finally {
+    fs.rmSync(agentDir, { recursive: true, force: true });
+  }
+});
+
+test('a successfully read empty hot registry remains authoritative over configured fallback models', () => {
+  const { host } = makeHost();
+  const internals = getInternals(host);
+  host.applySync('catalog', 1, {
+    models: [{ id: 'configured-fallback', name: 'Fallback', provider: 'phase-0', reasoning: false }],
+  });
+  const context = makeSessionEventContext('/sessions/empty-registry.jsonl');
+  context.runtime = {
+    services: { modelRegistry: { getAvailable: () => [] } },
+  } as unknown as SessionContext['runtime'];
+  internals.context = context;
+
+  assert.deepEqual(internals.availableModels(), []);
 });
 
 test('host consumes the synced catalog as fallback for models.list', () => {

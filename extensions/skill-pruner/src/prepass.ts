@@ -385,11 +385,39 @@ export function prepassTimeoutMs(thinkingLevel: string, attemptIndex: number = 0
 	return base * (attemptIndex + 1);
 }
 
-export function buildPrepassThinkingAttempts(thinkingLevel: string): string[] {
-	if (thinkingLevel === "off" || thinkingLevel === "minimal") {
+type PrepassThinkingModel = {
+	reasoning?: unknown;
+	thinkingLevelMap?: Record<string, string | null | undefined>;
+};
+
+function providerThinkingValue(model: unknown, thinkingLevel: string): string | null {
+	const metadata = model as PrepassThinkingModel | null;
+	if (metadata?.reasoning === false) return "off";
+	const mapped = metadata?.thinkingLevelMap?.[thinkingLevel];
+	return mapped === undefined ? thinkingLevel : mapped;
+}
+
+export function buildPrepassThinkingAttempts(thinkingLevel: string, model?: unknown): string[] {
+	if (thinkingLevel === "off") return [thinkingLevel];
+
+	const initialProviderValue = providerThinkingValue(model, thinkingLevel);
+	// Plain pi `minimal` is already the lowest reasoning attempt. A model-level
+	// alias (for example minimal -> low) is different: it can still recover by
+	// turning reasoning off when that provider capability is explicit.
+	if (thinkingLevel === "minimal" && initialProviderValue === "minimal") {
 		return [thinkingLevel];
 	}
-	return [...new Set([thinkingLevel, "minimal"])];
+	for (const fallback of ["minimal", "off"] as const) {
+		const fallbackProviderValue = providerThinkingValue(model, fallback);
+		// A provider alias such as minimal -> low is not a downgrade when the
+		// configured attempt is already low. Replaying the same effort cannot
+		// recover an output-budget exhaustion, so disable reasoning when the
+		// model supports it instead. Explicit null means the level is unsupported.
+		if (fallbackProviderValue !== null && fallbackProviderValue !== initialProviderValue) {
+			return [thinkingLevel, fallback];
+		}
+	}
+	return [thinkingLevel];
 }
 
 export function hasUsablePrepassResponse(result: Awaited<ReturnType<typeof runLlmPruning>>): boolean {
@@ -589,7 +617,10 @@ export async function runPruningPrepass(
 	// the native local Ollama path, where its support is known and controlled.
 	const temperature = isLocalOllamaModel(model) ? activeConfig.prepass?.temperature : undefined;
 	const buildAttemptOptions = (thinkingLevel: string, timeoutMs: number): Record<string, unknown> => ({
-		reasoning: thinkingLevel,
+		// Provider adapters use an omitted/falsy value to disable reasoning.
+		// Passing the literal "off" is unsafe: Anthropic treats any non-empty
+		// value as enabled thinking and would turn a recovery attempt back on.
+		...(thinkingLevel === "off" ? {} : { reasoning: thinkingLevel }),
 		// Disable pi-ai retries so only the classified manual loop below
 		// controls retry count and backoff (avoids nested amplification).
 		maxRetries: 0,
@@ -599,7 +630,7 @@ export async function runPruningPrepass(
 		...auth,
 	});
 
-	const attempts = buildPrepassThinkingAttempts(activeConfig.thinkingLevel);
+	const attempts = buildPrepassThinkingAttempts(activeConfig.thinkingLevel, model);
 	let latestResult = emptyResult(activeConfig.thinkingLevel, null);
 	let cumulativeUsage: PrepassUsage | undefined;
 	let cumulativeLatencyMs = 0;
@@ -704,7 +735,7 @@ export async function runPruningPrepass(
 			}
 
 			if (index < attempts.length - 1) {
-				console.warn(`[skill-pruner] ${latestResult.error}; retrying with minimal reasoning`);
+				console.warn(`[skill-pruner] ${latestResult.error}; retrying with ${attempts[index + 1]} reasoning`);
 			}
 		} catch (error) {
 			const errorMessage = isTransportErrorMessage(toErrorMessage(error))
@@ -761,7 +792,7 @@ export async function runPruningPrepass(
 				}
 				if (recovered) return latestResult;
 				if (index < attempts.length - 1) {
-					console.warn(`[skill-pruner] ${latestResult.error}; retrying with minimal reasoning`);
+					console.warn(`[skill-pruner] ${latestResult.error}; retrying with ${attempts[index + 1]} reasoning`);
 					continue;
 				}
 				console.warn(`[skill-pruner] ${latestResult.error}`);
@@ -782,7 +813,7 @@ export async function runPruningPrepass(
 					error: errorMessage,
 					thinkingLevel,
 				};
-				console.warn(`[skill-pruner] ${errorMessage}; retrying with minimal reasoning`);
+				console.warn(`[skill-pruner] ${errorMessage}; retrying with ${attempts[index + 1]} reasoning`);
 				continue;
 			}
 			console.warn(`[skill-pruner] ${errorMessage}`);

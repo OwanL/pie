@@ -31,7 +31,7 @@ export function resolveComposerModelState({
   const hasActiveModel = Boolean(activeModelId?.trim());
   const selectedModel = activeModelId?.trim() || modelSettings?.defaultModel || '';
   const selectedProvider = hasActiveModel ? activeProvider : modelSettings?.defaultProvider;
-  const selectedLevel = activeThinkingLevel ?? modelSettings?.defaultThinkingLevel ?? 'medium';
+  const selectedLevel = activeThinkingLevel ?? modelSettings?.defaultThinkingLevel ?? 'high';
   const matchingModels = availableModels.filter((model) => model.id === selectedModel);
   // Never guess from registry order when multiple providers expose the same id.
   // An absent provider is only safe to resolve when the id itself is unique.

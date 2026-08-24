@@ -14,14 +14,35 @@ import {
   initPieLogger,
   setBootTraceEnabled,
   setRuntimeAuditLogEnabled,
+  setPieLogChannelsForTesting,
   setLogLevel,
   getLogLevel,
+  flushPieLogger,
   showPieLogs,
   redactSensitive,
 } from '../../../src/host/util/pie-logger';
 
 const PIE_LOG_PATH = path.join(os.tmpdir(), 'pie-logs', 'pie.log');
 const BOOT_TRACE_PATH = path.join(os.tmpdir(), 'pie-boot-trace.jsonl');
+
+interface FakeLogChannel {
+  logLevel: number;
+  calls: Array<{ level: string; line: string }>;
+}
+
+function fakeLogChannel(logLevel = 3): FakeLogChannel & Record<string, unknown> {
+  const calls: FakeLogChannel['calls'] = [];
+  return {
+    name: 'test',
+    logLevel,
+    calls,
+    trace: (line: string) => calls.push({ level: 'trace', line }),
+    debug: (line: string) => calls.push({ level: 'debug', line }),
+    info: (line: string) => calls.push({ level: 'info', line }),
+    warn: (line: string) => calls.push({ level: 'warn', line }),
+    error: (line: string) => calls.push({ level: 'error', line }),
+  };
+}
 
 function resetState(): void {
   initPieLogger({ devMode: false });
@@ -30,7 +51,8 @@ function resetState(): void {
   setBootTraceEnabled(false);
 }
 
-function clearLogFiles(): void {
+async function clearLogFiles(): Promise<void> {
+  await flushPieLogger();
   try {
     fs.rmSync(PIE_LOG_PATH, { force: true });
     fs.rmSync(`${PIE_LOG_PATH}.1`, { force: true });
@@ -39,9 +61,9 @@ function clearLogFiles(): void {
   }
 }
 
-test('appendPieLog writes to console and persistent log', () => {
+test('appendPieLog writes to console and persistent log', async () => {
   resetState();
-  clearLogFiles();
+  await clearLogFiles();
 
   const originalInfo = console.info;
   const captured: unknown[][] = [];
@@ -58,14 +80,15 @@ test('appendPieLog writes to console and persistent log', () => {
     'console prefix should be [pie:scope]',
   );
 
+  await flushPieLogger();
   const logContent = fs.readFileSync(PIE_LOG_PATH, 'utf8');
   assert.ok(logContent.includes('[info] [test-scope] hello world'), 'log file should contain the message');
   assert.ok(logContent.includes('"key":"value"'), 'log file should contain the data payload');
 });
 
-test('appendPieError includes error detail', () => {
+test('appendPieError includes error detail', async () => {
   resetState();
-  clearLogFiles();
+  await clearLogFiles();
 
   const originalError = console.error;
   const captured: unknown[][] = [];
@@ -90,15 +113,16 @@ test('appendPieError includes error detail', () => {
   const detail = captured[0][1] as Record<string, unknown>;
   assert.equal(detail.errorName, 'Error');
   assert.match(String(detail.stack), /disk full/);
+  await flushPieLogger();
   const logContent = fs.readFileSync(PIE_LOG_PATH, 'utf8');
   assert.match(logContent, /"stack":"Error: disk full/);
   assert.doesNotMatch(logContent, /super-secret/);
   assert.match(logContent, /api_key=\[redacted\]/);
 });
 
-test('log level filtering blocks low-priority messages', () => {
+test('log level filtering blocks low-priority messages before inspecting payloads', async () => {
   resetState();
-  clearLogFiles();
+  await clearLogFiles();
   setLogLevel('warn');
   const filteredMarker = 'filtered-info-message-should-not-appear';
 
@@ -106,6 +130,11 @@ test('log level filtering blocks low-priority messages', () => {
   console.info = () => { /* swallow */ };
   try {
     appendPieLog('info', 'filtered-scope', filteredMarker);
+    const expensivePayload = Object.defineProperty({}, 'value', {
+      enumerable: true,
+      get(): never { throw new Error('filtered payload was inspected'); },
+    });
+    assert.doesNotThrow(() => appendPieLog('debug', 'filtered-scope', 'filtered-payload', expensivePayload));
   } finally {
     console.info = originalInfo;
   }
@@ -126,9 +155,71 @@ test('log level filtering blocks low-priority messages', () => {
   );
 });
 
-test('auditLog is gated by devMode and runtimeAuditLogEnabled', () => {
+test('Output channels filter before serialization, bound bursts, and isolate backend logs', () => {
   resetState();
-  clearLogFiles();
+  setLogLevel('error');
+  const main = fakeLogChannel();
+  const backend = fakeLogChannel(2);
+  setPieLogChannelsForTesting(
+    main as unknown as import('vscode').LogOutputChannel,
+    backend as unknown as import('vscode').LogOutputChannel,
+  );
+
+  try {
+    let payloadReads = 0;
+    const payload = Object.defineProperty({}, 'value', {
+      enumerable: true,
+      get() { payloadReads += 1; return 'diagnostic'; },
+    });
+    assert.doesNotThrow(() => appendPieLog('debug', 'channel-test', 'filtered', payload));
+    assert.equal(payloadReads, 0, 'native Info should filter Debug before serialization');
+
+    main.logLevel = 2;
+    for (let index = 0; index < 100; index += 1) {
+      appendPieLog('debug', 'channel-test', `entry-${index}`, payload);
+    }
+    assert.equal(main.calls.filter((call) => call.level === 'debug').length, 40);
+    assert.equal(payloadReads, 40, 'rate-limited channel-only entries must not be serialized');
+
+    appendPieLog('debug', 'backend-stderr', 'backend diagnostic');
+    assert.equal(backend.calls.filter((call) => call.level === 'debug').length, 1);
+    assert.equal(main.calls.some((call) => call.line.includes('backend diagnostic')), false);
+
+    for (let index = 0; index < 3; index += 1) {
+      appendPieLog('warn', 'channel-test', `warning-${index}`);
+    }
+    assert.equal(main.calls.filter((call) => call.level === 'warn').length, 3, 'warnings must bypass burst protection');
+  } finally {
+    setPieLogChannelsForTesting();
+  }
+});
+
+test('persistent logging bounds a stalled burst and retains its newest diagnostic tail', async () => {
+  resetState();
+  await clearLogFiles();
+
+  const originalInfo = console.info;
+  console.info = () => { /* swallow the synthetic burst */ };
+  try {
+    const payload = 'x'.repeat(1_024);
+    for (let index = 0; index < 700; index += 1) {
+      appendPieLog('info', 'burst-test', `entry-${index}`, { payload });
+    }
+  } finally {
+    console.info = originalInfo;
+  }
+
+  await flushPieLogger();
+  const written = fs.readFileSync(PIE_LOG_PATH, 'utf8');
+  assert.match(written, /\[pie-logger\] dropped \d+ queued log line/);
+  assert.doesNotMatch(written, /\[burst-test\] entry-0\b/);
+  assert.match(written, /\[burst-test\] entry-699\b/);
+  assert.ok(Buffer.byteLength(written, 'utf8') < 600 * 1_024, 'bounded batch should stay close to its 512 KiB budget');
+});
+
+test('auditLog is gated by devMode and runtimeAuditLogEnabled', async () => {
+  resetState();
+  await clearLogFiles();
 
   const originalInfo = console.info;
   const captured: unknown[][] = [];
@@ -148,9 +239,9 @@ test('auditLog is gated by devMode and runtimeAuditLogEnabled', () => {
   );
 });
 
-test('bootLog writes to boot-trace jsonl and main log when enabled', () => {
+test('bootLog writes to boot-trace jsonl and main log when enabled', async () => {
   resetState();
-  clearLogFiles();
+  await clearLogFiles();
   try {
     fs.rmSync(BOOT_TRACE_PATH, { force: true });
   } catch {
@@ -175,9 +266,9 @@ test('bootLog writes to boot-trace jsonl and main log when enabled', () => {
   assert.equal(last.started, true);
 });
 
-test('bootTraceSync writes only to boot-trace jsonl', () => {
+test('bootTraceSync writes only to boot-trace jsonl', async () => {
   resetState();
-  clearLogFiles();
+  await clearLogFiles();
   try {
     fs.rmSync(BOOT_TRACE_PATH, { force: true });
   } catch {
@@ -296,15 +387,16 @@ test('redactSensitive prunes circular references', () => {
   assert.equal(out.self, '[circular]');
 });
 
-test('appendPieLog redacts sensitive keys, messages, and nested string values before writing', () => {
+test('appendPieLog redacts sensitive keys, messages, and nested string values before writing', async () => {
   resetState();
-  clearLogFiles();
+  await clearLogFiles();
   initPieLogger({ devMode: false });
   setLogLevel('debug');
   appendPieLog('warn', 'test-redact', 'authorization=message-secret', {
     apiKey: 'key-secret',
     safe: 'Bearer nested-secret',
   });
+  await flushPieLogger();
   const written = fs.readFileSync(PIE_LOG_PATH, 'utf8');
   assert.ok(!written.includes('message-secret'), 'message credentials must not reach the log file');
   assert.ok(!written.includes('key-secret'), 'sensitive keyed values must not reach the log file');

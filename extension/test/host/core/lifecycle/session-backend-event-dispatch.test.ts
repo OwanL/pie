@@ -45,7 +45,7 @@ function createHandlers() {
 test('dispatchSessionBackendEvent validates sequenced live envelopes', () => {
   const { handlers, calls } = createHandlers();
   const payload = {
-    protocolVersion: 6, sessionPath: '/workspace/session.jsonl', requestId: 'request',
+    protocolVersion: 7, sessionPath: '/workspace/session.jsonl', requestId: 'request',
     turnId: 'turn', attemptId: 'attempt', seq: 1, occurredAt: 100,
     checkpointBytes: 30 * 1024 * 1024,
     kind: 'turn.started', canonicalMessageId: 'message', startedAt: 90,

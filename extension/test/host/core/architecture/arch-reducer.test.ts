@@ -1138,9 +1138,13 @@ test('reducer: HydrateModel command produces a loading HydrateModel effect', () 
     cmd: { kind: 'HydrateModel', corrId: 'c-hydrate', sessionPath: '/s' },
   };
 
-  const result = reducer(initialArchState, event);
+  const state: ArchState = {
+    ...initialArchState,
+    sessions: { ...initialArchState.sessions, openTabPaths: ['/s'] },
+  };
+  const result = reducer(state, event);
 
-  assert.notDeepEqual(result.state, initialArchState);
+  assert.notDeepEqual(result.state, state);
   assert.equal(result.state.settings.availableModelsStatusBySession['/s'], 'loading');
   assert.equal(result.state.settings.modelHydrationRevision, 1);
   assert.equal(result.effects.length, 1);

@@ -1177,7 +1177,7 @@ export class BackendServer {
 
 
   private async readModelSettings(): Promise<ModelSettings> {
-    const defaults: ModelSettings = { defaultModel: '', defaultThinkingLevel: 'medium' };
+    const defaults: ModelSettings = { defaultModel: '', defaultThinkingLevel: 'high' };
     try {
       const raw = await fs.readFile(path.join(this.agentDir, 'settings.json'), 'utf8');
       const parsed = parseJsonOrThrow<Partial<ModelSettings>>(raw, 'settings.json');

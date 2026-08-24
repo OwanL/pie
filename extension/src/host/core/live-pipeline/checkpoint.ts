@@ -199,10 +199,15 @@ function isCheckpointShape(value: unknown): value is LiveTurnCheckpoint {
     && isNonNegativeSafeInteger(tool.previewBytes)
     && (tool.preview === undefined || isToolPreview(tool.preview))
     && isLiveToolPhase(tool.phase)
+    && (tool.executionEnd === undefined
+      || (isRecord(tool.executionEnd)
+        && (tool.executionEnd.status === 'completed' || tool.executionEnd.status === 'failed')
+        && optionalFiniteNumber(tool.executionEnd.durationMs)))
     && (tool.terminal === undefined
       || (isRecord(tool.terminal)
         && typeof tool.terminal.durableEntryId === 'string'
         && isNonNegativeSafeInteger(tool.terminal.resultBytes)
+        && optionalFiniteNumber(tool.terminal.durationMs)
         && (tool.terminal.status === 'completed' || tool.terminal.status === 'failed'))))) return false;
   if (value.terminal !== undefined
     && (!isRecord(value.terminal)
@@ -239,6 +244,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isNonNegativeSafeInteger(value: unknown): value is number {
   return Number.isSafeInteger(value) && (value as number) >= 0;
+}
+
+function optionalFiniteNumber(value: unknown): boolean {
+  return value === undefined || (typeof value === 'number' && Number.isFinite(value));
 }
 
 function validateCheckpointPayload(checkpoint: LiveTurnCheckpoint): 'valid' | 'oversize' | 'malformed' {
@@ -285,6 +294,9 @@ function validateCheckpointPayload(checkpoint: LiveTurnCheckpoint): 'valid' | 'o
       || toolPreviewBytes > LIVE_PIPELINE_LIMITS.previewBytes
       || terminalBytes > LIVE_PIPELINE_LIMITS.previewBytes) return 'oversize';
     if (tool.terminal && !tool.terminal.durableEntryId) return 'malformed';
+    if (tool.executionEnd && tool.terminal
+      && (tool.executionEnd.status !== tool.terminal.status
+        || tool.executionEnd.durationMs !== tool.terminal.durationMs)) return 'malformed';
   }
   if (checkpoint.turn.toolExecutionIds.length !== executionIds.size) return 'malformed';
   if (previewBytes > LIVE_PIPELINE_LIMITS.toolPreviewAggregateBytes) return 'oversize';

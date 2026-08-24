@@ -518,16 +518,16 @@ test('prepareSourceAnalytics prices canonical subagent usage by child model with
   fixture.completedRuns.push(crossModel, unknownPricing, unreported, free, remainder);
   const byId = new Map(prepareSourceAnalytics(fixture).runs.map((run) => [run.runId, run]));
 
-  assert.equal(byId.get(crossModel.runId)!.subagentEstimatedCostUsd, 1.12, 'child usage uses the child model rate, not the free parent rate');
-  assert.equal(byId.get(crossModel.runId)!.totalEstimatedCostUsd, 1.12);
+  assert.equal(byId.get(crossModel.runId)!.subagentEstimatedCostUsd, 0.966, 'child usage uses the child model rate, not the free parent rate');
+  assert.equal(byId.get(crossModel.runId)!.totalEstimatedCostUsd, 0.966);
   assert.equal(byId.get(unknownPricing.runId)!.subagentEstimatedCostUsd, null);
   assert.equal(byId.get(unknownPricing.runId)!.totalEstimatedCostUsd, null, 'unknown child pricing makes the complete total unknown');
   assert.equal(byId.get(unreported.runId)!.subagentEstimatedCostUsd, null, 'calls without canonical token usage are unknown');
   assert.equal(byId.get(unreported.runId)!.totalEstimatedCostUsd, null);
   assert.equal(byId.get(free.runId)!.subagentEstimatedCostUsd, 0, 'reported usage on a known free child remains a priced $0');
   assert.equal(byId.get(free.runId)!.totalEstimatedCostUsd, 0);
-  assert.equal(byId.get(remainder.runId)!.subagentEstimatedCostUsd, 1.12, 'duplicate attribution is counted once and the positive remainder uses the parent rate');
-  assert.equal(byId.get(remainder.runId)!.totalEstimatedCostUsd, 1.12);
+  assert.equal(byId.get(remainder.runId)!.subagentEstimatedCostUsd, 0.966, 'duplicate attribution is counted once and the positive remainder uses the parent rate');
+  assert.equal(byId.get(remainder.runId)!.totalEstimatedCostUsd, 0.966);
 });
 
 test('prepareSourceAnalytics flattens functional settings into fs* columns', async () => {

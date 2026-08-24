@@ -9,7 +9,7 @@ import {
 } from './json-structural-patch.js';
 
 /** Transient live-pipeline protocol. Nothing in this file is a durable event log. */
-export const LIVE_PIPELINE_PROTOCOL_VERSION = 6;
+export const LIVE_PIPELINE_PROTOCOL_VERSION = 7;
 
 export const LIVE_PIPELINE_LIMITS = {
   textPartBytes: 512 * 1024,
@@ -201,6 +201,12 @@ export interface LiveToolRecord {
   previewBytes: number;
   /** Monotonic revision of the assembled preview, independent of turn seq. */
   progressRevision?: number;
+  /** Transient SDK execution boundary. This changes render lifecycle only; it
+   * is not durability evidence and must not enter settled/restart state. */
+  executionEnd?: {
+    status: 'completed' | 'failed';
+    durationMs?: number;
+  };
   /** Present only after the SDK durable toolResult append is confirmed. */
   terminal?: {
     status: 'completed' | 'failed';
@@ -280,6 +286,12 @@ export type TurnSemanticEnvelope =
       update:
         | { kind: 'snapshot'; preview: ToolPreview; operations?: JsonStructuralPatchOperation[] }
         | { kind: 'patch'; operations: JsonStructuralPatchOperation[] };
+    })
+  | (SemanticEnvelopeBase & {
+      kind: 'tool.executionEnded';
+      executionId: string;
+      status: 'completed' | 'failed';
+      durationMs?: number;
     })
   | (SemanticEnvelopeBase & {
       kind: 'tool.terminal';
@@ -375,6 +387,9 @@ export function isTurnSemanticEnvelope(value: unknown): value is TurnSemanticEnv
       && (value.seq as number) - (value.baseSeq as number)
         === (value.progressRevision as number) - (value.baseProgressRevision as number)
       && isToolProgressUpdate(value.update);
+    case 'tool.executionEnded': return typeof value.executionId === 'string'
+      && (value.status === 'completed' || value.status === 'failed')
+      && optionalFiniteNumber(value.durationMs);
     case 'tool.terminal': return typeof value.executionId === 'string'
       && (value.status === 'completed' || value.status === 'failed')
       && typeof value.durableEntryId === 'string' && value.durableEntryId.length > 0

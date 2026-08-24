@@ -209,6 +209,9 @@ profiles:
     eligible: true
     thinking:
       - off
+      - minimal
+      - low
+      - medium
       - high
       - max
     disabled_reason: null

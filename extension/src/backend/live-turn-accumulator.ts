@@ -57,6 +57,7 @@ export type BackendSemanticCandidate =
   | { kind: 'turn.extensionUi'; uiRequestId: string; action: 'opened' | 'closed' }
   | { kind: 'tool.started'; executionId: string; parentExecutionId: string | null; rootExecutionId: string; toolCallId: string; name: string; input: unknown; startedAt: number; parallelGroupId?: string }
   | { kind: 'tool.progress'; executionId: string; preview: ToolPreview; recursiveCounters?: ToolProgressRecursiveCounters }
+  | { kind: 'tool.executionEnded'; executionId: string; status: 'completed' | 'failed'; durationMs?: number }
   | { kind: 'tool.terminal'; executionId: string; status: 'completed' | 'failed'; result: unknown; durationMs?: number; durableEntryId: string }
   | { kind: 'turn.terminal'; terminalKind: 'completed' | 'interrupted' | 'error'; userInitiated?: boolean; reason?: string; durableMessage: ChatMessage; durableEntryId: string };
 
@@ -72,6 +73,10 @@ const CHECKPOINT_BYTE_METADATA_PLACEHOLDER = 99_999_999;
  * their maximum JSON width up front so even a rejected next observation
  * (9→10, 99→100, …) cannot push the retained checkpoint over its ceiling. */
 const CHECKPOINT_SEQUENCE_PLACEHOLDER = Number.MAX_SAFE_INTEGER;
+const EXECUTION_END_CHECKPOINT_PLACEHOLDER = {
+  status: 'completed' as const,
+  durationMs: Number.MAX_VALUE,
+};
 const JSON_NULL_BYTES = 4;
 const JSON_ARRAY_EMPTY_BYTES = 2;
 let serializationSample = 0;
@@ -154,6 +159,19 @@ export class BackendLiveTurnAccumulator {
       // Provider boundary replay after execution promotion is idempotent. It
       // must not recreate a transient draft or consume a semantic sequence.
       return undefined;
+    }
+    if (candidate.kind === 'tool.executionEnded') {
+      const tool = this.tools[candidate.executionId];
+      if (tool?.terminal) {
+        const seq = ++this.seq;
+        return this.replaceWithRejected(seq, occurredAt, 'malformed_observation');
+      }
+      if (tool?.executionEnd) {
+        if (tool.executionEnd.status === candidate.status
+          && tool.executionEnd.durationMs === candidate.durationMs) return undefined;
+        const seq = ++this.seq;
+        return this.replaceWithRejected(seq, occurredAt, 'malformed_observation');
+      }
     }
     if (candidate.kind === 'tool.terminal') {
       const previousTerminal = this.tools[candidate.executionId]?.terminal;
@@ -363,11 +381,40 @@ export class BackendLiveTurnAccumulator {
         };
         break;
       }
+      case 'tool.executionEnded': {
+        const tool = this.tools[candidate.executionId];
+        if (!tool) return this.replaceWithRejected(seq, occurredAt, 'owner_missing');
+        if (tool.executionEnd || tool.terminal) {
+          return this.replaceWithRejected(seq, occurredAt, 'malformed_observation');
+        }
+        envelope = { ...base, ...candidate };
+        this.setTool({
+          ...tool,
+          seq,
+          lastProgressAt: occurredAt,
+          executionEnd: {
+            status: candidate.status,
+            durationMs: candidate.durationMs,
+          },
+        });
+        this.turn = {
+          ...this.turn,
+          seq,
+          checkpointSeq: seq,
+          lastSemanticProgressAt: occurredAt,
+        };
+        break;
+      }
       case 'tool.terminal': {
         const tool = this.tools[candidate.executionId];
         if (!tool) return this.replaceWithRejected(seq, occurredAt, 'owner_missing');
         if (!candidate.durableEntryId) return this.replaceWithRejected(seq, occurredAt, 'malformed_payload');
         if (tool.terminal) return this.replaceWithRejected(seq, occurredAt, 'malformed_observation');
+        if (tool.executionEnd
+          && (tool.executionEnd.status !== candidate.status
+            || tool.executionEnd.durationMs !== candidate.durationMs)) {
+          return this.replaceWithRejected(seq, occurredAt, 'malformed_payload');
+        }
         const boundedResult = normalizeLiveToolTerminalResult(tool.name, candidate.result);
         const resultBytes = jsonByteLength(boundedResult);
         if (resultBytes > LIVE_PIPELINE_LIMITS.previewBytes) {
@@ -594,7 +641,7 @@ export class BackendLiveTurnAccumulator {
       const seq = ++this.seq;
       return this.replaceWithRejected(seq, occurredAt, 'owner_missing');
     }
-    if (tool.terminal) {
+    if (tool.executionEnd || tool.terminal) {
       const seq = ++this.seq;
       return this.replaceWithRejected(seq, occurredAt, 'malformed_observation');
     }
@@ -897,8 +944,14 @@ export class BackendLiveTurnAccumulator {
 function estimateToolCheckpointBytes(tool: LiveToolRecord): number {
   const skeleton = {
     ...tool,
+    // An active tool will advance at least once more at execution end. Reserve
+    // both sequence-width growth and the largest ordinary execution-end shape
+    // so an already-accepted near-limit preview can still stop cleanly.
+    seq: tool.terminal ? tool.seq : CHECKPOINT_SEQUENCE_PLACEHOLDER,
     immutableInput: null,
     preview: tool.preview === undefined ? undefined : null,
+    executionEnd: tool.executionEnd
+      ?? (tool.terminal ? undefined : EXECUTION_END_CHECKPOINT_PLACEHOLDER),
     terminal: tool.terminal
       ? { ...tool.terminal, result: null }
       : undefined,

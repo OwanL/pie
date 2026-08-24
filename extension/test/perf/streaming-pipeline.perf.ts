@@ -619,7 +619,7 @@ function gitSha(): string {
 
 function benchLargePreviewProgress(sizeMiB: number): LargePreviewResult {
   const base = {
-    protocolVersion: 6,
+    protocolVersion: 7,
     sessionPath: '/perf-large.jsonl',
     requestId: 'request-large',
     turnId: 'turn-large',

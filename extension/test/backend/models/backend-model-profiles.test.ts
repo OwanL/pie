@@ -16,6 +16,7 @@ const MODELS = [
     input: ['text'],
     contextWindow: 1000,
     maxTokens: 100,
+    cost: { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 },
   },
   {
     id: 'unprofiled-model',
@@ -35,7 +36,10 @@ const EXPECTED_MODELS = [
     inputKinds: ['text'],
     contextWindow: 1000,
     maxTokens: 100,
-    subagent: { eligible: true },
+    subagent: {
+      eligible: true,
+      pricing: { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 },
+    },
   },
   {
     id: 'unprofiled-model',
@@ -52,6 +56,7 @@ function makeAgentDir(): string {
   fs.writeFileSync(path.join(agentDir, 'model-profiles.json'), JSON.stringify({
     profiles: [
       {
+        provider: 'mock',
         id: 'profiled-model',
         eligible: true,
       },

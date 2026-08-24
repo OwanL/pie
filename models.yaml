@@ -225,6 +225,9 @@ providers:
         maxTokens: 65536
         thinkingLevelMap:
           off: none
+          minimal: low
+          low: low
+          medium: medium
           high: high
           max: max
         pricing:
@@ -235,6 +238,9 @@ providers:
         eligible: true
         thinking:
           - off
+          - minimal
+          - low
+          - medium
           - high
           - max
         disabledReason: null

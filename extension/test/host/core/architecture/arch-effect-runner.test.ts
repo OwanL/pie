@@ -5,6 +5,8 @@ import { EffectRunner, decideModelStartTimerAction, type EffectRunnerDeps, type 
 import type { Effect } from '../../../../src/host/core/effects';
 import type { EffectResultEvent, CommandEvent, Event } from '../../../../src/host/core/events';
 import type { ProviderGateStats } from '../../../../src/shared/protocol';
+import { BACKEND_READY_TIMEOUT_MS } from '../../../../src/shared/backend-ready-timeout';
+import { RequestTimeoutError } from '../../../../src/shared/request-tracker';
 import { makeEffectRunnerDeps } from '../../../helpers/effect-runner-deps';
 
 /** Deterministic timer sink: records scheduled timers and fires them on
@@ -43,6 +45,22 @@ async function settle(): Promise<void> {
   }
 }
 
+test('EffectRunner logs effect.dispatch at debug for normal effect execution', () => {
+  const { deps, calls } = makeEffectRunnerDeps();
+  const runner = new EffectRunner(deps);
+
+  runner.run({
+    kind: 'PersistTabs',
+    corrId: 'debug-1',
+    openTabPaths: ['/a'],
+    activeSessionPath: '/a',
+    pinnedTabPaths: [],
+    pinnedTabGroups: [],
+  });
+
+  assert.deepEqual(calls[0], { kind: 'log', level: 'debug', message: 'effect.dispatch' });
+});
+
 test('EffectRunner routes InterruptRpc only through the target session queue', async () => {
   const { deps, calls, events } = makeEffectRunnerDeps();
   const runner = new EffectRunner(deps);
@@ -52,7 +70,7 @@ test('EffectRunner routes InterruptRpc only through the target session queue', a
   await settle();
 
   const callsSansEffectDispatch = calls.filter(
-    (c) => !(c.kind === 'log' && c.level === 'info' && c.message === 'effect.dispatch'),
+    (c) => !(c.kind === 'log' && c.level === 'debug' && c.message === 'effect.dispatch'),
   );
 
   assert.deepEqual(callsSansEffectDispatch[0], { kind: 'session', sessionPath: '/a' });
@@ -152,7 +170,11 @@ test('EffectRunner rolls privacy mode back and notifies when analytics cleanup f
     && call.message === 'privacy analytics cleanup failed'));
 });
 
-test('EffectRunner grants only cold promotion a longer pre-ack send budget', async () => {
+test('EffectRunner grants only cold promotion the measured SDK startup budget', async () => {
+  assert.ok(
+    BACKEND_READY_TIMEOUT_MS > 68_000,
+    'cold promotion must outlive the observed healthy 68s worker startup',
+  );
   const observed: Array<{ sessionPath: string; timeoutMs?: number }> = [];
   let runtimeReady = false;
   const backend: EffectRunnerDeps['backend'] = {
@@ -177,7 +199,7 @@ test('EffectRunner grants only cold promotion a longer pre-ack send budget', asy
   await settle();
 
   assert.deepEqual(observed, [
-    { sessionPath: '/cold', timeoutMs: 60_000 },
+    { sessionPath: '/cold', timeoutMs: BACKEND_READY_TIMEOUT_MS },
     { sessionPath: '/hot' },
   ]);
   runner.dispose();
@@ -191,7 +213,7 @@ test('EffectRunner routes CompactRpc through the target session queue', async ()
   await settle();
 
   const relevantCalls = calls.filter(
-    (call) => !(call.kind === 'log' && call.level === 'info' && call.message === 'effect.dispatch'),
+    (call) => !(call.kind === 'log' && call.level === 'debug' && call.message === 'effect.dispatch'),
   );
   assert.deepEqual(relevantCalls[0], { kind: 'session', sessionPath: '/a' });
   assert.deepEqual(relevantCalls[1], {
@@ -285,7 +307,7 @@ test('live checkpoint repair bypasses mutation queues so active-session work can
   await settle();
 
   const meaningfulCalls = calls.filter(
-    (call) => !(call.kind === 'log' && call.level === 'info' && call.message === 'effect.dispatch'),
+    (call) => !(call.kind === 'log' && call.level === 'debug' && call.message === 'effect.dispatch'),
   );
   assert.equal(
     meaningfulCalls.some((call) => call.kind === 'lifecycle'),
@@ -299,6 +321,44 @@ test('live checkpoint repair bypasses mutation queues so active-session work can
   });
   assert.equal(events[0]?.kind, 'LiveTurnCheckpointResult');
   assert.equal(events[0]?.ok, true);
+});
+
+test('live checkpoint failure releases dedupe ownership before dispatching its retry result', async () => {
+  let requestCount = 0;
+  const checkpointResults: EffectResultEvent[] = [];
+  const { deps } = makeEffectRunnerDeps({
+    requestImpl: async (method) => {
+      if (method !== 'liveTurn.checkpoint') return {};
+      requestCount += 1;
+      throw new Error('No hot worker owns /active');
+    },
+    dispatch: (event) => {
+      checkpointResults.push(event);
+      if (event.kind === 'LiveTurnCheckpointResult' && !event.ok && checkpointResults.length < 3) {
+        runner.run({
+          kind: 'RequestLiveTurnCheckpoint',
+          corrId: `checkpoint-retry-${checkpointResults.length}`,
+          sessionPath: '/active',
+          turnId: 'turn-1',
+          attemptId: 'attempt-1',
+        });
+      }
+    },
+  });
+  const runner = new EffectRunner(deps);
+
+  runner.run({
+    kind: 'RequestLiveTurnCheckpoint',
+    corrId: 'checkpoint-initial',
+    sessionPath: '/active',
+    turnId: 'turn-1',
+    attemptId: 'attempt-1',
+  });
+  await settle();
+
+  assert.equal(requestCount, 3, 'each reducer-requested retry reaches the backend');
+  assert.equal(checkpointResults.length, 3);
+  assert.ok(checkpointResults.every((event) => event.kind === 'LiveTurnCheckpointResult' && !event.ok));
 });
 
 test('rapid preference writes are serialized latest-last without occupying lifecycle queue', async () => {
@@ -495,7 +555,7 @@ test('EffectRunner runs PersistTabs synchronously without queueing', async () =>
   await settle();
 
   const callsSansEffectDispatch = calls.filter(
-    (c) => !(c.kind === 'log' && c.level === 'info' && c.message === 'effect.dispatch'),
+    (c) => !(c.kind === 'log' && c.level === 'debug' && c.message === 'effect.dispatch'),
   );
 
   assert.equal(callsSansEffectDispatch.some((c) => c.kind === 'lifecycle'), false);
@@ -519,7 +579,7 @@ test('EffectRunner runs Log directly via the log sink (no dispatch event)', asyn
   await settle();
 
   assert.deepEqual(calls, [
-    { kind: 'log', level: 'info', message: 'effect.dispatch' },
+    { kind: 'log', level: 'debug', message: 'effect.dispatch' },
     { kind: 'log', level: 'warn', message: 'hello' },
   ]);
   assert.equal(events.length, 0);
@@ -540,7 +600,7 @@ test('EffectRunner ShowModelSwitchConfirm dispatches ModelSwitchConfirmResult ma
   await settle();
 
   const callsSansEffectDispatch = calls.filter(
-    (c) => !(c.kind === 'log' && c.level === 'info' && c.message === 'effect.dispatch'),
+    (c) => !(c.kind === 'log' && c.level === 'debug' && c.message === 'effect.dispatch'),
   );
   assert.deepEqual(callsSansEffectDispatch, [{ kind: 'showWarningModal', message: 'remove images?', confirmChoice: 'Switch Model' }]);
   assert.equal(events.length, 1);
@@ -568,7 +628,7 @@ test('EffectRunner ShowModelSwitchConfirm maps a dismissal (undefined choice) to
 });
 
 test('EffectRunner SetModelRpc writes settings.set, bumps the epoch, notifies the observer, and dispatches SetModelResult{ok:true}', async () => {
-  const { deps, calls, events } = makeEffectRunnerDeps();
+  const { deps, calls, commands, events } = makeEffectRunnerDeps();
   const runner = new EffectRunner(deps);
 
   runner.run({
@@ -580,7 +640,7 @@ test('EffectRunner SetModelRpc writes settings.set, bumps the epoch, notifies th
   await settle();
 
   const callsSansEffectDispatch = calls.filter(
-    (c) => !(c.kind === 'log' && c.level === 'info' && c.message === 'effect.dispatch'),
+    (c) => !(c.kind === 'log' && c.level === 'debug' && c.message === 'effect.dispatch'),
   );
 
   // Serialized with sends for this session without blocking other tabs.
@@ -595,6 +655,10 @@ test('EffectRunner SetModelRpc writes settings.set, bumps the epoch, notifies th
   assert.equal(events[0]?.kind, 'SetModelResult');
   assert.equal(events[0]?.corrId, 'sm1');
   assert.equal(events[0]?.ok, true);
+  assert.deepEqual(commands, [{
+    kind: 'Command',
+    cmd: { kind: 'HydrateModel', corrId: 'hydrate:model:sm1', sessionPath: '/s' },
+  }]);
 });
 
 test('EffectRunner SetModelRpc dispatches SetModelResult{ok:false} when settings.set rejects (no epoch/observer call)', async () => {
@@ -644,6 +708,38 @@ test('EffectRunner restart drain waits for an accepted model/reasoning write to 
   await drain;
   assert.equal(drained, true);
   assert.equal(events.some((event) => event.kind === 'SetModelResult' && event.ok), true);
+});
+
+test('EffectRunner DrainDeferredSetModelQueue re-dispatches confirmed choices against durable paths', async () => {
+  const { deps, commands } = makeEffectRunnerDeps();
+  const runner = new EffectRunner(deps);
+
+  runner.run({
+    kind: 'DrainDeferredSetModelQueue',
+    corrId: 'drain-model',
+    entries: [{
+      corrId: 'model-1',
+      sessionPath: '/workspace/real.jsonl',
+      modelSettings: { defaultModel: 'text-only', defaultProvider: 'p', defaultThinkingLevel: 'high' },
+      clearImages: true,
+      sequence: 1,
+      previousModelId: 'old-model',
+    }],
+  });
+  assert.equal(commands.length, 0, 'replay yields so SessionOpened can land after PendingPathReplaced');
+  await settle();
+
+  assert.deepEqual(commands, [{
+    kind: 'Command',
+    cmd: {
+      kind: 'SetModel',
+      corrId: 'model-1',
+      sessionPath: '/workspace/real.jsonl',
+      modelSettings: { defaultModel: 'text-only', defaultProvider: 'p', defaultThinkingLevel: 'high' },
+      deferredReplay: true,
+      clearImagesConfirmed: true,
+    },
+  }]);
 });
 
 // ─── DrainPendingSendQueue ────────────────────────────────────────────────────
@@ -799,6 +895,38 @@ test('EffectRunner SendRpc keeps the send-timer armed after early-ack (cleared a
   assert.equal(timers.size, 0);
   timers.runAll(); // no spurious PreflightFailed dispatch
   assert.equal(events.length, 1);
+  runner.dispose();
+});
+
+test('EffectRunner keeps a send pending when only its local acknowledgement deadline expires', async () => {
+  const timers = new FakeTimerSink();
+  const { deps, events, calls } = makeEffectRunnerDeps({
+    requestImpl: async (method) => {
+      assert.equal(method, 'message.send');
+      throw new RequestTimeoutError('req-delayed-ack');
+    },
+    timer: timers,
+  });
+  const runner = new EffectRunner(deps);
+
+  runner.run({
+    kind: 'SendRpc', corrId: 'c-delayed-ack', sessionPath: '/a',
+    text: 'hi', inputs: [], composedText: 'hi', localId: 'loc-delayed-ack',
+  });
+  await settle();
+
+  assert.equal(
+    events.some((event) => event.kind === 'SendResult'),
+    false,
+    'a local timeout is not authoritative rejection evidence',
+  );
+  assert.equal(timers.size, 1, 'the semantic commit watchdog remains owned by the send');
+  assert.ok(calls.some((call) => call.kind === 'log'
+    && call.level === 'warn'
+    && call.message === 'message.send acknowledgement delayed'));
+
+  runner.run({ kind: 'ClearSendTimer', corrId: 'c-delayed-ack' });
+  assert.equal(timers.size, 0, 'a later semantic commit can still settle the delayed send');
   runner.dispose();
 });
 
@@ -1057,6 +1185,31 @@ test('EffectRunner EditRpc truncates then sends without interrupting an idle ses
   assert.equal(events.length, 1);
   assert.equal(events[0]?.kind, 'EditResult');
   assert.equal(events[0]?.ok, true);
+  runner.dispose();
+});
+
+test('EffectRunner keeps an edit pending when only message.send acknowledgement times out', async () => {
+  const timers = new FakeTimerSink();
+  const { deps, events } = makeEffectRunnerDeps({
+    requestImpl: async (method) => {
+      if (method === 'message.send') throw new RequestTimeoutError('req-edit-delayed-ack');
+      return {};
+    },
+    timer: timers,
+  });
+  const runner = new EffectRunner(deps);
+
+  runner.run({
+    kind: 'EditRpc', corrId: 'c-edit-delayed-ack', sessionPath: '/a',
+    messageId: 'msg-1', text: 'edited', inputs: [], localId: 'loc-edit-delayed-ack',
+    interruptFirst: false,
+  });
+  await settle();
+
+  assert.equal(events.some((event) => event.kind === 'EditResult'), false);
+  assert.equal(timers.size, 1);
+  runner.run({ kind: 'ClearSendTimer', corrId: 'c-edit-delayed-ack' });
+  assert.equal(timers.size, 0);
   runner.dispose();
 });
 

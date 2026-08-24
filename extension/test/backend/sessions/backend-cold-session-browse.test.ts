@@ -18,7 +18,7 @@ function entry(id: string, role: 'user' | 'assistant', text: string) {
   };
 }
 
-async function makeColdServer(options: { sessionCatalog?: any } = {}) {
+async function makeColdServer(options: { sessionCatalog?: any; contextThinkingLevel?: string } = {}) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-cold-browse-'));
   const sessionPath = path.join(dir, 'session.jsonl');
   await fs.writeFile(sessionPath, [
@@ -64,7 +64,7 @@ async function makeColdServer(options: { sessionCatalog?: any } = {}) {
           getEntries: () => snapshot,
           buildSessionContext: () => ({
             messages: snapshot.filter((row) => row.type === 'message'),
-            thinkingLevel: 'medium',
+            thinkingLevel: options.contextThinkingLevel ?? 'medium',
             model: { provider: 'mock', modelId: 'model-a' },
           }),
         };
@@ -115,6 +115,26 @@ test('cold open/preload/page/detail projections remain runtime-free and pages re
     });
     assert.equal(detail.status, 'unavailable');
     assert.deepEqual(h.counts(), { managerOpens: 4 });
+  } finally {
+    await fs.rm(h.dir, { recursive: true, force: true });
+  }
+});
+
+test('cold sessions inherit configured reasoning until the branch records an explicit choice', async () => {
+  const h = await makeColdServer({ contextThinkingLevel: 'off' });
+  try {
+    await fs.writeFile(path.join(h.dir, 'settings.json'), JSON.stringify({
+      defaultModel: 'model-a', defaultThinkingLevel: 'high',
+    }));
+    const inherited = await h.server.buildSessionOpenedPayload(h.sessionPath);
+    assert.equal(inherited.session.thinkingLevel, 'high');
+
+    h.append({
+      type: 'thinking_level_change', id: 'thinking-off', parentId: 'user-1',
+      timestamp: '2026-08-13T00:00:01.000Z', thinkingLevel: 'off',
+    });
+    const explicit = await h.server.buildSessionOpenedPayload(h.sessionPath);
+    assert.equal(explicit.session.thinkingLevel, 'off');
   } finally {
     await fs.rm(h.dir, { recursive: true, force: true });
   }

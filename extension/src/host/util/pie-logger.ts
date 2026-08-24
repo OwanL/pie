@@ -24,15 +24,44 @@ const PIE_LOG_PATH = path.join(PIE_LOG_DIR, 'pie.log');
  *  `pie.log.1`. Keeping the limit small avoids unbounded growth in long-lived
  *  sessions. */
 const MAX_LOG_BYTES = 5 * 1024 * 1024;
+/** Keep diagnostic writes bounded even if the filesystem stalls. The newest
+ * entries are retained because they are normally the most useful during a
+ * failure; the durable stream records how many older entries were dropped. */
+const MAX_PENDING_LOG_BYTES = 512 * 1024;
+const PERSISTENT_FLUSH_DELAY_MS = 100;
+/** VS Code renders a selected OutputChannel on the shared workbench thread.
+ * Bound low-severity bursts so verbose diagnostics cannot make the whole
+ * workbench janky. Warnings and errors are never rate-limited. */
+const CHANNEL_WINDOW_MS = 1_000;
+const MAX_CHANNEL_LINES_PER_WINDOW = 40;
+
+interface PendingLogLine {
+  line: string;
+  bytes: number;
+}
+
+interface ChannelRateState {
+  windowStartedAt: number;
+  emitted: number;
+  suppressed: number;
+  summaryTimer?: ReturnType<typeof setTimeout>;
+}
 
 let pieLogChannel: vscode.LogOutputChannel | undefined;
 let pieBackendChannel: vscode.LogOutputChannel | undefined;
+let logChannelsInitialized = false;
 let minLevel: LogLevel = 'info';
 let devMode = false;
 /** User-facing log level options, ordered from most to least verbose. */
 export const LOG_LEVELS: readonly LogLevel[] = ['trace', 'debug', 'info', 'warn', 'error'] as const;
 let runtimeAuditLogEnabled = false;
 let bootTraceEnabled = process.env.PI_BOOT_LOG === '1';
+let pendingLogLines: PendingLogLine[] = [];
+let pendingLogBytes = 0;
+let droppedPendingLogLines = 0;
+let persistentFlushTimer: ReturnType<typeof setTimeout> | undefined;
+let persistentFlushPromise: Promise<void> | undefined;
+let channelRateStates = new WeakMap<object, ChannelRateState>();
 
 /** Initialise the logger once during extension activation. This captures the
  *  VS Code extension mode so dev-mode gating works without threading an
@@ -41,8 +70,8 @@ export function initPieLogger(options: { devMode: boolean }): void {
   devMode = options.devMode;
 }
 
-/** Override the minimum level emitted to the OutputChannel and the persistent
- *  log file. Defaults to `'info'`. */
+/** Override the minimum level written to the persistent file and extension-host
+ * console. Output channels additionally use their native level dropdown. */
 export function setLogLevel(level: LogLevel): void {
   minLevel = level;
 }
@@ -97,9 +126,8 @@ function isAuditEnabled(): boolean {
  *  backend stderr stream out of the main `pie` channel so the main log stays
  *  readable. */
 function ensureLogChannels(): void {
-  if (pieLogChannel) {
-    return;
-  }
+  if (logChannelsInitialized) return;
+  logChannelsInitialized = true;
   try {
     // `vscode` is only available inside the extension host. Import it lazily
     // so the logger module loads safely in tests and other non-VS Code runtimes.
@@ -125,20 +153,84 @@ function getPieBackendChannel(): vscode.LogOutputChannel | undefined {
   return pieBackendChannel;
 }
 
-/** Map a {@link LogLevel} to the corresponding `LogOutputChannel` severity
- *  method and emit. The channel's own `logLevel` (set via the native Output
- *  panel level dropdown) gates emission — this is intentionally decoupled from
- *  the global `minLevel` (which gates only the persistent file + console), so
- *  the user can widen a single channel's view (e.g. show Debug on `pie
- *  (backend)` only) without changing `pie.logLevel` or restarting. */
-function emitToChannel(level: LogLevel, scope: string, line: string): void {
-  // Backend stderr lives in its own channel so the main `pie` stream stays
-  // readable; pass the raw line without a redundant scope prefix (the channel
-  // name already signals the source).
-  const channel = scope === 'backend-stderr' ? getPieBackendChannel() : getPieLogChannel();
-  if (!channel) {
-    return;
+/** @internal Test seam for deterministic OutputChannel behavior without the
+ * VS Code runtime. Production initializes channels lazily via
+ * `ensureLogChannels`. */
+export function setPieLogChannelsForTesting(
+  main?: vscode.LogOutputChannel,
+  backend?: vscode.LogOutputChannel,
+): void {
+  pieLogChannel = main;
+  pieBackendChannel = backend;
+  logChannelsInitialized = true;
+  channelRateStates = new WeakMap<object, ChannelRateState>();
+}
+
+/** Whether the channel's native level dropdown accepts this entry. Checking
+ * before redaction/serialization avoids paying for diagnostics VS Code will
+ * discard. VS Code LogLevel values are Off=0, Trace=1 … Error=5. */
+function channelAccepts(channel: vscode.LogOutputChannel, level: LogLevel): boolean {
+  const configured = Number(channel.logLevel);
+  if (configured === 0) return false;
+  if (configured === 1) return true;
+  if (configured >= 2 && configured <= 5) {
+    return LEVEL_RANK[level] >= configured * 10;
   }
+  // Preserve output if a future VS Code version adds an unknown level.
+  return true;
+}
+
+function channelForScope(scope: string): vscode.LogOutputChannel | undefined {
+  return scope === 'backend-stderr' ? getPieBackendChannel() : getPieLogChannel();
+}
+
+function emitSuppressedChannelSummary(channel: vscode.LogOutputChannel, state: ChannelRateState): void {
+  if (state.suppressed === 0) return;
+  channel.warn(`[pie-logger] suppressed ${state.suppressed} low-severity Output entries to keep VS Code responsive`);
+  state.suppressed = 0;
+}
+
+function scheduleChannelSummary(channel: vscode.LogOutputChannel, state: ChannelRateState): void {
+  if (state.summaryTimer !== undefined) return;
+  const remaining = Math.max(0, CHANNEL_WINDOW_MS - (Date.now() - state.windowStartedAt));
+  state.summaryTimer = setTimeout(() => {
+    state.summaryTimer = undefined;
+    emitSuppressedChannelSummary(channel, state);
+    state.windowStartedAt = Date.now();
+    state.emitted = 0;
+  }, remaining);
+  state.summaryTimer.unref?.();
+}
+
+/** Protect the workbench renderer from low-severity bursts while keeping every
+ * accepted entry eligible for the persistent diagnostic file. */
+function channelRateLimitAllows(channel: vscode.LogOutputChannel, level: LogLevel): boolean {
+  if (LEVEL_RANK[level] >= LEVEL_RANK.warn) return true;
+  const now = Date.now();
+  let state = channelRateStates.get(channel);
+  if (!state) {
+    state = { windowStartedAt: now, emitted: 0, suppressed: 0 };
+    channelRateStates.set(channel, state);
+  } else if (now - state.windowStartedAt >= CHANNEL_WINDOW_MS) {
+    if (state.summaryTimer !== undefined) clearTimeout(state.summaryTimer);
+    state.summaryTimer = undefined;
+    emitSuppressedChannelSummary(channel, state);
+    state.windowStartedAt = now;
+    state.emitted = 0;
+  }
+  if (state.emitted >= MAX_CHANNEL_LINES_PER_WINDOW) {
+    state.suppressed += 1;
+    scheduleChannelSummary(channel, state);
+    return false;
+  }
+  state.emitted += 1;
+  return true;
+}
+
+/** Map a {@link LogLevel} to the corresponding `LogOutputChannel` severity
+ * method and emit. The channel's own `logLevel` is intentionally independent
+ * from `pie.logLevel`, while burst protection keeps a selected channel cheap. */
+function emitToChannel(channel: vscode.LogOutputChannel, level: LogLevel, line: string): void {
   switch (level) {
     case 'trace': channel.trace(line); break;
     case 'debug': channel.debug(line); break;
@@ -191,33 +283,90 @@ export function redactSensitive(data: unknown, seen: WeakSet<object> = new WeakS
   return out;
 }
 
-function rotateLogIfNeeded(): void {
+async function rotateLogIfNeeded(): Promise<void> {
   try {
-    if (!fsSync.existsSync(PIE_LOG_PATH)) {
-      return;
-    }
-    const stat = fsSync.statSync(PIE_LOG_PATH);
-    if (stat.size <= MAX_LOG_BYTES) {
-      return;
-    }
+    const stat = await fsSync.promises.stat(PIE_LOG_PATH);
+    if (stat.size <= MAX_LOG_BYTES) return;
     const backup = `${PIE_LOG_PATH}.1`;
-    if (fsSync.existsSync(backup)) {
-      fsSync.unlinkSync(backup);
+    await fsSync.promises.rm(backup, { force: true });
+    await fsSync.promises.rename(PIE_LOG_PATH, backup);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      // Rotation failures are non-fatal; keep appending to the active file.
     }
-    fsSync.renameSync(PIE_LOG_PATH, backup);
-  } catch {
-    // Rotation failures are non-fatal; keep appending to the existing file.
   }
 }
 
-function appendToPersistentLog(line: string): void {
+async function appendPersistentBatch(lines: string[], dropped: number): Promise<void> {
   try {
-    fsSync.mkdirSync(PIE_LOG_DIR, { recursive: true });
-    rotateLogIfNeeded();
-    fsSync.appendFileSync(PIE_LOG_PATH, `${line}\n`, 'utf8');
+    await fsSync.promises.mkdir(PIE_LOG_DIR, { recursive: true });
+    await rotateLogIfNeeded();
+    const records = dropped > 0
+      ? [`[${new Date().toISOString()}] [warn] [pie-logger] dropped ${dropped} queued log line(s) because persistent logging fell behind`, ...lines]
+      : lines;
+    if (records.length > 0) {
+      await fsSync.promises.appendFile(PIE_LOG_PATH, `${records.join('\n')}\n`, 'utf8');
+    }
   } catch {
     // Persistent logging must never affect extension behaviour.
   }
+}
+
+async function drainPersistentLogQueue(): Promise<void> {
+  while (pendingLogLines.length > 0 || droppedPendingLogLines > 0) {
+    const batch = pendingLogLines;
+    const dropped = droppedPendingLogLines;
+    pendingLogLines = [];
+    pendingLogBytes = 0;
+    droppedPendingLogLines = 0;
+    await appendPersistentBatch(batch.map((entry) => entry.line), dropped);
+  }
+}
+
+function startPersistentFlush(): Promise<void> {
+  if (persistentFlushTimer !== undefined) {
+    clearTimeout(persistentFlushTimer);
+    persistentFlushTimer = undefined;
+  }
+  if (!persistentFlushPromise) {
+    persistentFlushPromise = drainPersistentLogQueue().finally(() => {
+      persistentFlushPromise = undefined;
+      if (pendingLogLines.length > 0 || droppedPendingLogLines > 0) schedulePersistentFlush();
+    });
+  }
+  return persistentFlushPromise;
+}
+
+function schedulePersistentFlush(): void {
+  if (persistentFlushTimer !== undefined || persistentFlushPromise !== undefined) return;
+  persistentFlushTimer = setTimeout(() => {
+    persistentFlushTimer = undefined;
+    void startPersistentFlush();
+  }, PERSISTENT_FLUSH_DELAY_MS);
+  persistentFlushTimer.unref?.();
+}
+
+function appendToPersistentLog(line: string): void {
+  const bytes = Buffer.byteLength(line, 'utf8') + 1;
+  if (bytes > MAX_PENDING_LOG_BYTES) {
+    droppedPendingLogLines += 1;
+    schedulePersistentFlush();
+    return;
+  }
+  while (pendingLogLines.length > 0 && pendingLogBytes + bytes > MAX_PENDING_LOG_BYTES) {
+    const dropped = pendingLogLines.shift()!;
+    pendingLogBytes -= dropped.bytes;
+    droppedPendingLogLines += 1;
+  }
+  pendingLogLines.push({ line, bytes });
+  pendingLogBytes += bytes;
+  schedulePersistentFlush();
+}
+
+/** Flush all persistent entries accepted before this call. Used during orderly
+ * extension shutdown and by tests; normal logging remains fire-and-forget. */
+export async function flushPieLogger(): Promise<void> {
+  await startPersistentFlush();
 }
 
 function appendToConsole(level: LogLevel, scope: string, message: string, data?: Record<string, unknown>): void {
@@ -248,6 +397,15 @@ export function pieLog(
   message: string,
   data?: Record<string, unknown>,
 ): void {
+  const persistentEligible = LEVEL_RANK[level] >= LEVEL_RANK[minLevel];
+  const channel = channelForScope(scope);
+  const channelConfigured = channel !== undefined && channelAccepts(channel, level);
+  // Apply burst protection before redacting or serializing channel-only data.
+  // Persistent-eligible entries still pay formatting cost because the durable
+  // file deliberately retains the complete accepted stream.
+  const channelEligible = channelConfigured && channelRateLimitAllows(channel, level);
+  if (!persistentEligible && !channelEligible) return;
+
   const ts = new Date().toISOString();
   const safeMessage = redactSensitiveText(message);
   const suffix = stringifyLogData(data);
@@ -263,14 +421,12 @@ export function pieLog(
   const channelLine = scope === 'backend-stderr'
     ? safeMessage
     : (suffix ? `[${scope}] ${safeMessage} ${suffix}` : `[${scope}] ${safeMessage}`);
-  emitToChannel(level, scope, channelLine);
+  if (channelEligible) emitToChannel(channel, level, channelLine);
 
   // Persistent file + dev console are gated by the global `pie.logLevel`
   // setting (`minLevel`). The channel above may show more (when the user
   // widens its dropdown), but the durable record respects configured verbosity.
-  if (LEVEL_RANK[level] < LEVEL_RANK[minLevel]) {
-    return;
-  }
+  if (!persistentEligible) return;
 
   appendToPersistentLog(fullLine);
   appendToConsole(level, scope, safeMessage, data === undefined ? undefined : (redactSensitive(data) as Record<string, unknown>));

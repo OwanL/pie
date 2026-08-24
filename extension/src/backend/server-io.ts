@@ -418,7 +418,8 @@ function writerLane(event: string, payload: Record<string, unknown>): WriterTrac
   if (event.startsWith('detail.')) return 'detail';
   if (event === 'live.semantic') {
     const kind = payload.kind;
-    if (kind === 'tool.started' || kind === 'tool.terminal' || kind === 'turn.started' || kind === 'turn.terminal') return 'lifecycle';
+    if (kind === 'tool.started' || kind === 'tool.executionEnded' || kind === 'tool.terminal'
+      || kind === 'turn.started' || kind === 'turn.terminal') return 'lifecycle';
     if (kind === 'turn.text' || kind === 'turn.reasoning' || kind === 'turn.toolDraft' || kind === 'tool.progress') return 'progress';
   }
   if (event === 'session.opened' || event === 'message.started' || event === 'message.finished' || event === 'message.aborted'
@@ -434,7 +435,7 @@ function writerSemanticEventKind(kind: unknown): WriterTraceMetadata['eventKind'
   if (kind === 'turn.toolDraft') return 'tool_draft';
   if (kind === 'tool.started') return 'tool_start';
   if (kind === 'tool.progress') return 'tool_progress';
-  if (kind === 'tool.terminal') return 'tool_terminal';
+  if (kind === 'tool.executionEnded' || kind === 'tool.terminal') return 'tool_terminal';
   if (kind === 'turn.started') return 'turn_start';
   if (kind === 'turn.terminal') return 'turn_terminal';
   return 'control';
@@ -570,7 +571,9 @@ function progressKey(value: unknown): string | undefined {
 }
 
 function terminalToolKey(value: unknown): string | undefined {
-  return semanticToolKey(value, 'tool.terminal') ?? toolKey(value, 'tool.finished');
+  return semanticToolKey(value, 'tool.executionEnded')
+    ?? semanticToolKey(value, 'tool.terminal')
+    ?? toolKey(value, 'tool.finished');
 }
 
 const stdoutWriter = new OrderedJsonlWriter(process.stdout);

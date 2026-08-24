@@ -12,3 +12,4 @@
 - Prefer full file paths when reporting to the user, the user is able to click on these to view them, but not partial paths.
 - When communicating with the user, prefer human like responces. Avoid common AI writing tells, for example, em dashes, its not x its y.
 - Avoid overloading technical jargon, when reporting to the user, you should focus on gaining their understanding more than absolute technical correctness.
+- Unless it is clearly in scope (the original user request asks for it) ask before using computer use tooling. The use may be using the computer which will interfere with the tools use.

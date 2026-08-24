@@ -1482,16 +1482,30 @@ export function handleSdkSessionEvent(
         return;
       }
 
-      // Advance the turn-latency window origin to this tool's finish time. The
-      // most recent `tool_execution_end` wins, so parallel/sequential batches
-      // anchor on the last tool to finish.
-      context.activeRequest.turnBoundaryAt = Date.now();
-
       const toolCallId = event.toolCallId?.trim() ?? '';
       if (!toolCallId) {
         emitRejectedObservation(deps, context, 'malformed_observation');
         return;
       }
+      const executionStatus = event.isError ? 'failed' as const : 'completed' as const;
+      const pending = context.activeRequest.pendingDurableToolTerminals
+        ?? new Map<string, ToolFinishedPayload>();
+      const existingPending = pending.get(toolCallId);
+      if (existingPending) {
+        // SDK adapters may replay the execution boundary before the durable
+        // toolResult append arrives. Preserve the first observed result/timing
+        // so the later terminal upgrade still matches `tool.executionEnded`.
+        if (existingPending.status !== executionStatus) {
+          emitRejectedObservation(deps, context, 'malformed_observation');
+        }
+        return;
+      }
+
+      // Advance the turn-latency window origin to this tool's finish time. The
+      // most recent distinct `tool_execution_end` wins, so parallel/sequential
+      // batches anchor on the last tool to finish.
+      context.activeRequest.turnBoundaryAt = Date.now();
+
       const startMetadata = context.activeRequest.toolStartMetadata?.get(toolCallId);
       context.activeRequest.toolStartMetadata?.delete(toolCallId);
       const toolName = event.toolName?.trim() || startMetadata?.name || '';
@@ -1529,18 +1543,23 @@ export function handleSdkSessionEvent(
         name: toolName,
         input: event.args !== undefined ? event.args : startMetadata?.input,
         result: event.result,
-        status: event.isError ? 'failed' : 'completed',
+        status: executionStatus,
         startedAt: timing?.startedAt,
         durationMs: timing?.durationMs,
       };
-      const pending = context.activeRequest.pendingDurableToolTerminals
-        ?? new Map<string, ToolFinishedPayload>();
       pending.set(toolCallId, terminal);
       context.activeRequest.pendingDurableToolTerminals = pending;
-      // The observed end consumes a semantic sequence immediately while its
-      // terminal remains durability-gated. Parallel siblings still executing
-      // keep the turn in running_tool; only the last execution enters the
-      // inter-turn preparation phase.
+      // Execution completion is a transient semantic boundary: it immediately
+      // settles the rendered spinner, but does not claim result durability.
+      // The later persisted toolResult boundary upgrades this same lifecycle.
+      emitSemanticCandidate(deps, context, {
+        kind: 'tool.executionEnded',
+        executionId: liveExecutionId(context, toolCallId),
+        status: terminal.status,
+        durationMs: terminal.durationMs,
+      });
+      // Parallel siblings still executing keep the turn in running_tool; only
+      // the last execution enters the inter-turn preparation phase.
       emitSemanticCandidate(deps, context, {
         kind: 'turn.phase',
         phase: runningTools > 0 ? 'running_tool' : 'preparing',
@@ -2166,7 +2185,7 @@ function canonicalTraceEventKind(candidate: BackendSemanticCandidate['kind']) {
   if (candidate === 'turn.toolDraft') return 'tool_draft' as const;
   if (candidate === 'tool.started') return 'tool_start' as const;
   if (candidate === 'tool.progress') return 'tool_progress' as const;
-  if (candidate === 'tool.terminal') return 'tool_terminal' as const;
+  if (candidate === 'tool.executionEnded' || candidate === 'tool.terminal') return 'tool_terminal' as const;
   if (candidate === 'turn.started') return 'turn_start' as const;
   if (candidate === 'turn.terminal') return 'turn_terminal' as const;
   return 'control' as const;

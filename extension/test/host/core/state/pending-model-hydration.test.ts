@@ -43,6 +43,7 @@ function createState(): ReturnType<typeof createInitialArchState> {
     ...state,
     settings: {
       ...state.settings,
+      backendReady: true,
       modelSettings: {
         defaultModel: SOURCE_MODEL.id,
         defaultProvider: SOURCE_MODEL.provider,
@@ -109,8 +110,127 @@ test('PendingPathReplaced transfers provisional catalog and status to the durabl
   assert.equal(PENDING in next.state.settings.availableModelsStatusBySession, false);
 });
 
+test('PendingPathReplaced replays a deferred picker choice only after it has a durable path', () => {
+  const base = createState();
+  base.settings.backendReady = true;
+  const created = reducer(base, createCommand('CreateSession')).state;
+  const selected = reducer(created, {
+    kind: 'Command',
+    cmd: {
+      kind: 'SetModel',
+      corrId: 'set-pending',
+      sessionPath: PENDING,
+      modelSettings: {
+        defaultModel: OTHER_MODEL.id,
+        defaultProvider: OTHER_MODEL.provider,
+        defaultThinkingLevel: 'off',
+      },
+    },
+  }).state;
+  assert.equal(selected.sessions.sessions.find((summary) => summary.path === PENDING)?.modelId, OTHER_MODEL.id);
+
+  const replaced = reducer(selected, {
+    kind: 'PendingPathReplaced',
+    oldPendingPath: PENDING,
+    newSessionPath: TARGET,
+  });
+  assert.equal(replaced.state.pending.deferredSetModelBySession[PENDING], undefined);
+  assert.equal(replaced.state.sessions.sessions.find((summary) => summary.path === TARGET)?.modelId, SOURCE_MODEL.id);
+  assert.deepEqual(replaced.effects, [{
+    kind: 'DrainDeferredSetModelQueue',
+    corrId: 'drain-model:set-pending',
+    entries: [{
+      corrId: 'set-pending',
+      sessionPath: TARGET,
+      modelSettings: {
+        defaultModel: OTHER_MODEL.id,
+        defaultProvider: OTHER_MODEL.provider,
+        defaultThinkingLevel: 'off',
+      },
+      clearImages: false,
+      sequence: 1,
+      previousModelId: SOURCE_MODEL.id,
+      previousProvider: SOURCE_MODEL.provider,
+      previousThinkingLevel: 'high',
+    }],
+  }]);
+});
+
+test('a refresh keeps a usable authoritative catalog renderable instead of relabeling it loading', () => {
+  const base = createState();
+  base.settings.availableModelsStatusBySession[SOURCE] = 'authoritative';
+  const refreshed = reducer(base, {
+    kind: 'Command',
+    cmd: { kind: 'HydrateModel', corrId: 'refresh', sessionPath: SOURCE },
+  });
+
+  assert.equal(refreshed.state.settings.availableModelsStatusBySession[SOURCE], 'authoritative');
+  assert.deepEqual(refreshed.state.settings.availableModelsBySession[SOURCE], [SOURCE_MODEL, OTHER_MODEL]);
+});
+
+test('post-write hydration cannot resurrect catalog state for a closed session', () => {
+  const base = createState();
+  base.sessions.openTabPaths = base.sessions.openTabPaths.filter((path) => path !== SOURCE);
+  delete base.settings.availableModelsBySession[SOURCE];
+  delete base.settings.availableModelsStatusBySession[SOURCE];
+  const refreshed = reducer(base, {
+    kind: 'Command',
+    cmd: { kind: 'HydrateModel', corrId: 'late-closed-refresh', sessionPath: SOURCE },
+  });
+
+  assert.equal(refreshed.state, base);
+  assert.deepEqual(refreshed.effects, []);
+  assert.equal(refreshed.state.settings.availableModelsStatusBySession[SOURCE], undefined);
+});
+
+test('a hydration response that arrives after close cannot recreate catalog state', () => {
+  const started = reducer(createState(), {
+    kind: 'Command',
+    cmd: { kind: 'HydrateModel', corrId: 'start-then-close', sessionPath: SOURCE },
+  });
+  const closed = reducer(started.state, {
+    kind: 'SessionScopeCleared', sessionPath: SOURCE, removeSessionSummary: true,
+  });
+  const lateCatalog = reducer(closed.state, {
+    kind: 'AvailableModelsChanged',
+    sessionPath: SOURCE,
+    models: [OTHER_MODEL],
+    backendGeneration: 0,
+    hydrationRevision: started.state.settings.modelHydrationRevision,
+    modelWriteFence: started.state.settings.modelWriteFence,
+  });
+  const lateSettings = reducer(lateCatalog.state, {
+    kind: 'ModelSettingsHydrated',
+    sessionPath: SOURCE,
+    modelSettings: { defaultModel: OTHER_MODEL.id, defaultThinkingLevel: 'off' },
+    backendGeneration: 0,
+    hydrationRevision: started.state.settings.modelHydrationRevision,
+    modelWriteFence: started.state.settings.modelWriteFence,
+  });
+
+  assert.equal(lateSettings.state.settings.availableModelsBySession[SOURCE], undefined);
+  assert.equal(lateSettings.state.settings.availableModelsStatusBySession[SOURCE], undefined);
+  assert.equal(lateSettings.state.settings.modelSettings?.defaultModel, SOURCE_MODEL.id);
+});
+
+test('refresh preserves a successful authoritative empty catalog state', () => {
+  const base = createState();
+  base.settings.availableModelsBySession[SOURCE] = [];
+  base.settings.availableModelsStatusBySession[SOURCE] = 'authoritative';
+  const refreshed = reducer(base, {
+    kind: 'Command',
+    cmd: { kind: 'HydrateModel', corrId: 'refresh-empty', sessionPath: SOURCE },
+  });
+
+  assert.equal(refreshed.state.settings.availableModelsStatusBySession[SOURCE], 'authoritative');
+  assert.deepEqual(refreshed.state.settings.availableModelsBySession[SOURCE], []);
+});
+
 test('global settings hydration rejects an older revision from a different session while catalogs stay path-scoped', () => {
-  const first = reducer(createState(), {
+  const base = createState();
+  base.sessions.sessions.push(summary(TARGET, OTHER_MODEL.id));
+  base.sessions.openTabPaths.push(TARGET);
+  const first = reducer(base, {
     kind: 'Command',
     cmd: { kind: 'HydrateModel', corrId: 'hydrate-source', sessionPath: SOURCE },
   });

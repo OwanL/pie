@@ -118,6 +118,9 @@
           "maxTokens": 65536,
           "thinkingLevelMap": {
             "off": "none",
+            "minimal": "low",
+            "low": "low",
+            "medium": "medium",
             "high": "high",
             "max": "max"
           },

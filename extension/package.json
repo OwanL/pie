@@ -140,7 +140,7 @@
             "Warnings and errors only.",
             "Errors only."
           ],
-          "description": "Minimum verbosity for pie's host-side logger (the `pie` OutputChannel, the persistent log file in the OS temp dir, and the extension-host console). Raising this surfaces existing debug/trace instrumentation (e.g. stream-telemetry snapshots) without restarting. Can also be changed live via the `pie: Set Log Level` command."
+          "description": "Minimum verbosity for pie's persistent log file and extension-host console. The `pie` and `pie (backend)` Output channels also respect their native Output-panel level dropdowns and rate-limit low-severity bursts to keep VS Code responsive. Raise this setting to capture debug/trace instrumentation durably without restarting; it can also be changed via `pie: Set Log Level`."
         },
         "pie.tempLogRetention": {
           "type": "object",

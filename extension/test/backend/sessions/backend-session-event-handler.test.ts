@@ -855,7 +855,7 @@ test('tool execution events emit progress only when an active assistant message 
 test('live semantic tool starts bound oversized input before worker transport', () => {
   const { deps, emitted } = createDeps({ captureLive: true });
   const accumulator = new BackendLiveTurnAccumulator({
-    protocolVersion: 6,
+    protocolVersion: 7,
     sessionPath: '/workspace/session.jsonl',
     requestId: 'req-large-tool-start',
     turnId: 'turn-large-tool-start',
@@ -965,7 +965,7 @@ test('nested subagent terminal result stays within the backend JSONL transport l
 
   const live = createDeps({ captureLive: true });
   const accumulator = new BackendLiveTurnAccumulator({
-    protocolVersion: 6,
+    protocolVersion: 7,
     sessionPath: '/workspace/session.jsonl',
     requestId: 'req-large-subagent-live',
     turnId: 'turn-large-subagent-live',
@@ -1056,7 +1056,7 @@ test('terminal transport bounding preserves small payload identity and explicitl
   assert.equal((unserializable.result as { $toolResult?: string }).$toolResult, 'detail-available');
 
   const accumulator = new BackendLiveTurnAccumulator({
-    protocolVersion: 6,
+    protocolVersion: 7,
     sessionPath: small.sessionPath,
     requestId: small.requestId,
     turnId: 'turn-unserializable-result',
@@ -1698,7 +1698,7 @@ test('tool execution and message end events cover completed payloads and fallbac
 test('sequenced production path emits only typed live envelopes with a durable terminal', () => {
   const { deps, emitted } = createDeps({ captureLive: true });
   const accumulator = new BackendLiveTurnAccumulator({
-    protocolVersion: 6,
+    protocolVersion: 7,
     sessionPath: '/workspace/session.jsonl',
     requestId: 'req-live',
     turnId: 'turn-live',
@@ -1748,7 +1748,7 @@ test('sequenced production path emits only typed live envelopes with a durable t
 test('queued delivery terminalizes the current reply and starts a separate assistant segment', () => {
   const { deps, emitted } = createDeps({ captureLive: true });
   const accumulator = new BackendLiveTurnAccumulator({
-    protocolVersion: 6,
+    protocolVersion: 7,
     sessionPath: '/workspace/session.jsonl',
     requestId: 'req-queued-boundary',
     turnId: 'turn-before-queue',
@@ -1843,7 +1843,7 @@ test('queued delivery terminalizes the current reply and starts a separate assis
 test('toolcall_start/delta/end preserve raw JSON and finalize only the matching semantic draft', () => {
   const { deps, emitted } = createDeps({ captureLive: true });
   const accumulator = new BackendLiveTurnAccumulator({
-    protocolVersion: 6, sessionPath: '/workspace/session.jsonl', requestId: 'req-drafts',
+    protocolVersion: 7, sessionPath: '/workspace/session.jsonl', requestId: 'req-drafts',
     turnId: 'turn-drafts', attemptId: 'attempt-drafts', canonicalMessageId: 'req-drafts:1', startedAt: 100,
   });
   const context = createContext({
@@ -1890,7 +1890,7 @@ test('toolcall_start/delta/end preserve raw JSON and finalize only the matching 
 test('malformed toolcall events consume a rejected semantic observation', () => {
   const { deps, emitted } = createDeps({ captureLive: true });
   const accumulator = new BackendLiveTurnAccumulator({
-    protocolVersion: 6, sessionPath: '/workspace/session.jsonl', requestId: 'req-malformed-draft',
+    protocolVersion: 7, sessionPath: '/workspace/session.jsonl', requestId: 'req-malformed-draft',
     turnId: 'turn-malformed-draft', attemptId: 'attempt-malformed-draft',
     canonicalMessageId: 'req-malformed-draft:1', startedAt: 100,
   });
@@ -1910,7 +1910,7 @@ test('malformed toolcall events consume a rejected semantic observation', () => 
 test('concurrent semantic tool starts carry one stable parallel group into live records', () => {
   const { deps, emitted } = createDeps({ captureLive: true });
   const accumulator = new BackendLiveTurnAccumulator({
-    protocolVersion: 6, sessionPath: '/workspace/session.jsonl', requestId: 'req-parallel',
+    protocolVersion: 7, sessionPath: '/workspace/session.jsonl', requestId: 'req-parallel',
     turnId: 'turn-parallel', attemptId: 'attempt-parallel', canonicalMessageId: 'req-parallel:1', startedAt: 100,
   });
   const context = createContext({
@@ -1934,6 +1934,58 @@ test('concurrent semantic tool starts carry one stable parallel group into live 
   assert.equal(starts[1]?.parallelGroupId, starts[0]?.parallelGroupId);
   assert.equal(accumulator.checkpoint().tools[0]?.parallelGroupId, starts[0]?.parallelGroupId);
   assert.equal(accumulator.checkpoint().tools[1]?.parallelGroupId, starts[0]?.parallelGroupId);
+});
+
+test('tool_execution_end emits transient execution end before phase and durable toolResult upgrades it', () => {
+  const { deps, emitted } = createDeps({ captureLive: true });
+  const accumulator = new BackendLiveTurnAccumulator({
+    protocolVersion: 7, sessionPath: '/workspace/session.jsonl', requestId: 'req-execution-end',
+    turnId: 'turn-execution-end', attemptId: 'attempt-execution-end',
+    canonicalMessageId: 'req-execution-end:1', startedAt: 100,
+  });
+  const context = createContext({
+    activeRequest: {
+      id: 'req-execution-end', messageIndex: 1, lastAssistantMessageId: 'req-execution-end:1',
+      aborted: false, liveTurnAccumulator: accumulator,
+    },
+  });
+  handleSdkSessionEvent(deps, context, {
+    type: 'tool_execution_start', toolCallId: 'tool-a', toolName: 'read', args: { path: 'README.md' },
+  });
+  handleSdkSessionEvent(deps, context, {
+    type: 'tool_execution_start', toolCallId: 'tool-b', toolName: 'bash', args: { command: 'npm test' },
+  });
+  handleSdkSessionEventImpl(deps, context, {
+    type: 'tool_execution_end', toolCallId: 'tool-a', toolName: 'read', result: 'contents', isError: false,
+  });
+
+  const semantic = emitted.filter((entry) => entry.event === 'live.semantic').map((entry) => entry.payload as any);
+  const executionEndIndex = semantic.findIndex((entry) => entry.kind === 'tool.executionEnded');
+  const followingPhaseIndex = semantic.findIndex((entry, index) => index > executionEndIndex && entry.kind === 'turn.phase');
+  assert.ok(executionEndIndex >= 0);
+  assert.ok(followingPhaseIndex > executionEndIndex, 'execution end is published before the turn phase update');
+  assert.equal(semantic[executionEndIndex]?.status, 'completed');
+  assert.equal(semantic[followingPhaseIndex]?.phase, 'running_tool', 'the sibling remains active');
+  assert.deepEqual(accumulator.checkpoint().tools.find((tool) => tool.transcriptToolCallId === 'tool-a')?.executionEnd?.status, 'completed');
+  assert.equal(accumulator.checkpoint().tools.find((tool) => tool.transcriptToolCallId === 'tool-a')?.terminal, undefined);
+
+  handleSdkSessionEventImpl(deps, context, {
+    type: 'tool_execution_end', toolCallId: 'tool-a', toolName: 'read', result: 'contents', isError: false,
+  });
+  const afterReplay = emitted.filter((entry) => entry.event === 'live.semantic').map((entry) => entry.payload as any);
+  assert.equal(afterReplay.filter((entry) => entry.kind === 'tool.executionEnded').length, 1,
+    'a replayed SDK execution end is idempotent while durability is pending');
+  assert.equal(afterReplay.some((entry) => entry.kind === 'observation.rejected'), false);
+
+  handleSdkSessionEvent(deps, context, {
+    type: 'message_end', sessionEntryId: 'tool-a-entry',
+    message: { role: 'toolResult', toolCallId: 'tool-a' },
+  });
+  const durable = emitted.find((entry) => entry.event === 'live.semantic'
+    && (entry.payload as any).kind === 'tool.terminal')?.payload as any;
+  assert.equal(durable?.status, 'completed');
+  assert.equal(durable?.durableEntryId, 'tool-a-entry');
+  assert.equal(accumulator.checkpoint().tools.find((tool) => tool.transcriptToolCallId === 'tool-a')?.terminal?.durableEntryId, 'tool-a-entry');
 });
 
 test('semantic inactivity budget gives slow Umans responses more time without weakening other providers', () => {
@@ -2020,7 +2072,7 @@ test('pre-first-semantic inactivity retires and replaces a runtime even when abo
         provider: 'umans', modelId: 'umans-test',
         lastProviderErrorForDiagnostics: 'upstream header phase stalled for 30000ms',
         liveTurnAccumulator: new BackendLiveTurnAccumulator({
-          protocolVersion: 6, sessionPath: '/workspace/session.jsonl', requestId: 'req-semantic-timeout',
+          protocolVersion: 7, sessionPath: '/workspace/session.jsonl', requestId: 'req-semantic-timeout',
           turnId: 'turn-timeout', attemptId: 'attempt-timeout', canonicalMessageId: 'req-semantic-timeout:1', startedAt: Date.now(),
         }),
       },

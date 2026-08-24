@@ -294,8 +294,8 @@ export function applyLiveSemanticEnvelope(
     if (!tool || tool.turnId !== owner.turnId || tool.attemptId !== owner.attemptId) {
       return queueOwnerPending(current, event);
     }
-    if (tool.terminal) {
-      return { classification: 'invalid', state: current, reason: 'progress after terminal tool' };
+    if (tool.executionEnd || tool.terminal) {
+      return { classification: 'invalid', state: current, reason: 'progress after ended tool execution' };
     }
     if ((tool.progressRevision ?? 0) !== event.baseProgressRevision) {
       return enterGap(current, owner, event);
@@ -318,7 +318,7 @@ export function applyLiveSemanticEnvelope(
       }
       preview = patched.value;
     }
-    // Protocol v6 requires backend-measured canonical counters. Trust that
+    // Protocol v7 requires backend-measured canonical counters. Trust that
     // same-process metadata so a tiny structural append never stringifies the
     // reconstructed multi-MiB value merely to enforce capacity.
     const previewBytes = event.previewBytes;
@@ -350,12 +350,51 @@ export function applyLiveSemanticEnvelope(
     return { classification: 'applied', state };
   }
 
+  if (event.kind === 'tool.executionEnded') {
+    const tool = current.toolsByExecutionId[event.executionId];
+    if (!tool || tool.turnId !== owner.turnId || tool.attemptId !== owner.attemptId) {
+      return queueOwnerPending(current, event);
+    }
+    if (tool.terminal) {
+      return { classification: 'invalid', state: current, reason: 'execution end after terminal tool' };
+    }
+    if (tool.executionEnd) {
+      return { classification: 'invalid', state: current, reason: 'duplicate or conflicting tool execution end' };
+    }
+    const state = withTurn({
+      ...current,
+      toolsByExecutionId: {
+        ...current.toolsByExecutionId,
+        [event.executionId]: {
+          ...tool,
+          seq: event.seq,
+          lastProgressAt: event.occurredAt,
+          executionEnd: {
+            status: event.status,
+            durationMs: event.durationMs,
+          },
+        },
+      },
+    }, event.sessionPath, {
+      ...owner,
+      seq: event.seq,
+      lastSemanticProgressAt: event.occurredAt,
+    });
+    return { classification: 'applied', state };
+  }
+
   if (event.kind === 'tool.terminal') {
     const tool = current.toolsByExecutionId[event.executionId];
     if (!tool || tool.turnId !== owner.turnId || tool.attemptId !== owner.attemptId) {
       return queueOwnerPending(current, event);
     }
     if (!event.durableEntryId) return { classification: 'invalid', state: current, reason: 'terminal tool lacks durable evidence' };
+    if (tool.terminal) return { classification: 'invalid', state: current, reason: 'duplicate terminal tool' };
+    if (tool.executionEnd
+      && (tool.executionEnd.status !== event.status
+        || tool.executionEnd.durationMs !== event.durationMs)) {
+      return { classification: 'invalid', state: current, reason: 'durable terminal does not match execution end' };
+    }
     const resultBytes = event.resultBytes ?? jsonByteLength(event.result);
     if (resultBytes > LIVE_PIPELINE_LIMITS.previewBytes) {
       return { classification: 'invalid', state: current, reason: 'terminal tool result exceeds live byte limit' };

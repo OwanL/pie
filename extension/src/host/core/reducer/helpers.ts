@@ -13,6 +13,7 @@ export { withIncrementedWindowCounts };
 import { TRANSCRIPT_WINDOW_BUDGETS } from '../../../shared/transcript-window.js';
 import type { Effect } from '../effects.js';
 import { cleanPinnedTabGroups } from '../../../shared/tab-behavior.js';
+import { startNextDeferredSetModel } from './set-model-handlers.js';
 
 // Re-export from arch-state for downstream consumers
 export type { ArchState, PendingOp, CurrentTurn } from '../arch-state.js';
@@ -199,7 +200,8 @@ export interface EvictSessionOptions {
  * (stale drawer-expanded state survived a close → reopen cycle). Also always
  * filters the corrId / requestId / messageId-keyed pending collections
  * (`ops`, `setModelByCorrId`, `requestIdToLocalId`, `messageIdAlias`,
- * `currentTurnBySession`, `sendQueueBySession`, `backendReadyQueueBySession`)
+ * `currentTurnBySession`, `sendQueueBySession`, `backendReadyQueueBySession`,
+ * `deferredSetModelBySession`)
  * by `sessionPath !== sp` so a late *Result for the evicted session no-ops
  * instead of mutating — or reverting into — a closed session.
  *
@@ -255,6 +257,7 @@ export function evictSession(
   const { [sp]: _rfr, ...remainingReadFilePaths } = state.fileChanges.readFilePathsBySession;
   const { [sp]: _psq, ...remainingPendingSendQueue } = state.pending.sendQueueBySession;
   const { [sp]: _brq, ...remainingBackendReadyQueue } = state.pending.backendReadyQueueBySession;
+  const { [sp]: _dsm, ...remainingDeferredSetModel } = state.pending.deferredSetModelBySession;
   const { [sp]: _pp, ...remainingPrepass } = state.pending.prepassBySession;
   const { [sp]: _liveTurn, ...remainingLiveTurns } = state.livePipeline.turnsBySession;
   const { [sp]: _liveRevision, ...remainingLiveRevisions } = state.livePipeline.revisionBySession;
@@ -344,13 +347,13 @@ export function evictSession(
   // is safe to emit from any eviction path.
   const hadBackendReadyEntries = !!state.pending.backendReadyQueueBySession[sp]?.length;
   const backendReadyQueueNowEmpty = Object.keys(remainingBackendReadyQueue).length === 0;
+  const evictsDeferredReplay = state.pending.deferredSetModelInFlightSessionPath === sp;
   const effects: Effect[] =
     hadBackendReadyEntries && backendReadyQueueNowEmpty
       ? [{ kind: 'CancelBackendReadyWatchdog', corrId: 'watchdog' }]
       : [];
 
-  return {
-    state: {
+  const evictedState: ArchState = {
       ...state,
       transcript: {
         ...state.transcript,
@@ -416,13 +419,23 @@ export function evictSession(
         messageIdAlias: remainingMessageIdAlias,
         requestIdToLocalId: remainingRequestIdToLocalId,
         setModelByCorrId: remainingSetModel,
+        deferredSetModelBySession: remainingDeferredSetModel,
+        deferredSetModelInFlightCorrId: evictsDeferredReplay
+          ? null
+          : state.pending.deferredSetModelInFlightCorrId,
+        deferredSetModelInFlightSessionPath: evictsDeferredReplay
+          ? null
+          : state.pending.deferredSetModelInFlightSessionPath,
         extensionUiResponseByCorrId: remainingExtensionUiResponses,
         sendQueueBySession: remainingPendingSendQueue,
         backendReadyQueueBySession: remainingBackendReadyQueue,
         prepassBySession: remainingPrepass,
       },
-    },
-    effects,
+    };
+  const modelDrain = startNextDeferredSetModel(evictedState);
+  return {
+    state: modelDrain.state,
+    effects: [...effects, ...modelDrain.effects],
   };
 }
 

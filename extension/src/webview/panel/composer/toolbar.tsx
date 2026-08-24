@@ -123,7 +123,6 @@ export const ComposerToolbar = memo(function ComposerToolbar({
   onSetToolResultPruningSettings,
   availableExtensions,
   availableModels,
-  availableModelsStatus = 'authoritative',
   systemPrompts,
   selectedModel,
   selectedProvider,
@@ -166,16 +165,6 @@ export const ComposerToolbar = memo(function ComposerToolbar({
     <>
       <fieldset class="composer-controls" disabled={!commandsAvailable} aria-disabled={!commandsAvailable}>
         <ComposerSettingsMenu prefs={prefs} mcpServers={mcpServers} mcpServersStatus={mcpServersStatus} mcpPendingApply={mcpPendingApply} pruningSettings={pruningSettings} pruningCatalog={pruningCatalog} pruningResult={pruningResult} toolResultPruningSettings={toolResultPruningSettings} availableExtensions={availableExtensions} availableModels={availableModels} providerGateStats={providerGateStats} activeContextWindow={selectedModelEntry?.model.contextWindow} activeModel={{ provider: selectedProvider, id: selectedModel }} onSetPrefs={onSetPrefs} onMcpListRequested={onMcpListRequested} onMcpSetServerEnabled={onMcpSetServerEnabled} onSetPruningSettings={onSetPruningSettings} onSetToolResultPruningSettings={onSetToolResultPruningSettings} />
-
-        {availableModelsStatus !== 'authoritative' && (
-          <ToolbarChip
-            tone="accent"
-            role="status"
-            ariaLive="polite"
-            label={availableModelsStatus === 'provisional' ? 'Models updating…' : 'Models loading…'}
-            tooltip="The visible model list is temporary while Pie loads the authoritative catalog for this session."
-          />
-        )}
 
         {filteredModels.length > 0 ? (
           <ModelPicker

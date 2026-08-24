@@ -49,6 +49,24 @@ function renderToolbar(overrides: Partial<Parameters<typeof ComposerToolbar>[0]>
   }));
 }
 
+test('toolbar keeps a provisional model picker usable without additive loading copy', () => {
+  const html = renderToolbar({
+    availableModelsStatus: 'loading',
+    availableModels: [{
+      id: 'model-a', name: 'Model A', provider: 'p', reasoning: true,
+      thinkingLevels: ['off', 'high'], inputKinds: ['text'],
+    }],
+    selectedModel: 'model-a',
+    selectedProvider: 'p',
+    selectedLevel: 'high',
+    supportsReasoning: true,
+  });
+
+  assert.match(html, /aria-label="Model"/);
+  assert.match(html, /aria-label="Reasoning level"/);
+  assert.doesNotMatch(html, /Models (?:loading|updating)…/);
+});
+
 test('toolbar shows a live Compacting chip while compaction runs', () => {
   const html = renderToolbar({ compacting: true });
   assert.match(html, /Compacting…/);

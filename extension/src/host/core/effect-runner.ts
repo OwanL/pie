@@ -55,6 +55,7 @@ import type {
   OpenFileEffect,
   DrainPendingSendQueueEffect,
   DrainBackendReadyQueueEffect,
+  DrainDeferredSetModelQueueEffect,
   StartBackendReadyWatchdogEffect,
   CancelBackendReadyWatchdogEffect,
   ClearLastCompactionEffect,
@@ -67,6 +68,7 @@ import type { ChatPrefs, ComposerInput, McpServerInfo, ProviderGateStats, Prunin
 import type { LiveSubagentDetailAddress, DetailCursor, DetailPageRef } from '../../shared/protocol/subagent-detail';
 import { RequestTimeoutError, type RequestOptions } from '../../shared/request-tracker';
 import type { LiveLifecycleWatermark, LiveTurnCheckpoint } from '../../shared/live-pipeline-protocol';
+import { BACKEND_READY_TIMEOUT_MS } from '../../shared/backend-ready-timeout';
 import { isLivePipelineTraceEnabled, recordLivePipelineTrace } from '../util/live-pipeline-trace-runtime.js';
 
 /** Minimal backend surface the runner needs. Matches `BackendClient.request`. */
@@ -466,6 +468,7 @@ export class EffectRunner {
       OpenFile: (e) => this.handleOpenFile(e),
       DrainPendingSendQueue: (e) => this.handleDrainPendingSendQueue(e),
       DrainBackendReadyQueue: (e) => this.handleDrainBackendReadyQueue(e),
+      DrainDeferredSetModelQueue: (e) => this.handleDrainDeferredSetModelQueue(e),
       StartBackendReadyWatchdog: (e) => this.handleStartBackendReadyWatchdog(e),
       CancelBackendReadyWatchdog: (e) => this.handleCancelBackendReadyWatchdog(e),
       MarkPrepassSucceeded: (e) => this.markPrepassSucceeded(e.corrId),
@@ -549,7 +552,7 @@ export class EffectRunner {
         break;
     }
 
-    this.deps.log.log('info', 'effect.dispatch', payload);
+    this.deps.log.log('debug', 'effect.dispatch', payload);
   }
 
   private handleRequestLiveTurnCheckpoint(effect: RequestLiveTurnCheckpointEffect): void {
@@ -567,6 +570,13 @@ export class EffectRunner {
     // The backend event loop captures the accumulator synchronously, so queue
     // serialization adds head-of-line blocking without improving consistency.
     void (async () => {
+      const dispatchResult = (result: Extract<EffectResultEvent, { kind: 'LiveTurnCheckpointResult' }>): void => {
+        // Reducer dispatch is synchronous and a failed result can immediately
+        // request the next bounded retry. Release this attempt before dispatch
+        // so the retry is not mistaken for a duplicate of the completed call.
+        this.liveCheckpointAttempts.delete(attemptKey);
+        this.deps.dispatch(result);
+      };
       try {
           const response = await this.deps.backend.request<{
             status: 'active' | 'terminal_grace' | 'inactive' | 'backend_restarted' | 'oversize';
@@ -590,7 +600,7 @@ export class EffectRunner {
                 ? 'backend_exit'
                 : response.status === 'oversize' ? 'checkpoint_oversize' : 'owner_missing',
           });
-          this.deps.dispatch({
+          dispatchResult({
             kind: 'LiveTurnCheckpointResult',
             corrId: effect.corrId,
             sessionPath: effect.sessionPath,
@@ -606,7 +616,7 @@ export class EffectRunner {
             identifiers: { session: effect.sessionPath, turn: effect.turnId, attempt: effect.attemptId },
             eventKind: 'checkpoint', reasonCode: 'checkpoint_timeout',
           });
-          this.deps.dispatch({
+          dispatchResult({
             kind: 'LiveTurnCheckpointResult',
             corrId: effect.corrId,
             sessionPath: effect.sessionPath,
@@ -617,7 +627,7 @@ export class EffectRunner {
             error: toErrorMessage(error),
           });
       } finally {
-      this.liveCheckpointAttempts.delete(attemptKey);
+        this.liveCheckpointAttempts.delete(attemptKey);
       }
     })();
   }
@@ -772,6 +782,19 @@ export class EffectRunner {
           effect.modelSettings.defaultProvider,
         );
         dispatch({ kind: 'SetModelResult', corrId: effect.corrId, sessionPath: effect.sessionPath, ok: true });
+        // A create acknowledgement can resolve its pending path before the
+        // trailing session.opened publication arrives. Deferred SetModel then
+        // advances the model-write fence, so that older snapshot may correctly
+        // lose the race. Always request a fresh post-write catalog to replace
+        // any borrowed provisional list (including pricing metadata).
+        this.deps.dispatchCommand({
+          kind: 'Command',
+          cmd: {
+            kind: 'HydrateModel',
+            corrId: `hydrate:model:${effect.corrId}`,
+            sessionPath: effect.sessionPath,
+          },
+        });
       } catch (err) {
         this.deps.log.log('warn', 'SetModelRpc failed', {
           sessionPath: effect.sessionPath,
@@ -1093,6 +1116,36 @@ export class EffectRunner {
     })();
   }
 
+  /** Replay deferred picker choices through the ordinary SetModel command so
+   * all capability checks, optimistic rollback, settings persistence, and
+   * model-write fences stay centralized in the reducer. */
+  private handleDrainDeferredSetModelQueue(effect: DrainDeferredSetModelQueueEffect): void {
+    void (async () => {
+      try {
+        // PendingPathReplaced is published immediately before SessionOpened.
+        // Yield once so the authoritative opened snapshot is reduced before
+        // SetModel advances the model-write fence; otherwise that catalog would
+        // be rejected as stale and the borrowed provisional list would linger.
+        await Promise.resolve();
+        for (const entry of effect.entries) {
+          this.deps.dispatchCommand({
+            kind: 'Command',
+            cmd: {
+              kind: 'SetModel',
+              corrId: entry.corrId,
+              sessionPath: entry.sessionPath,
+              modelSettings: entry.modelSettings,
+              deferredReplay: true,
+              ...(entry.clearImages ? { clearImagesConfirmed: true } : {}),
+            },
+          });
+        }
+      } catch (err) {
+        this.deps.log.log('error', `DrainDeferredSetModelQueue failed: ${toErrorMessage(err)}`);
+      }
+    })();
+  }
+
   /** `StartBackendReadyWatchdog` — `timer.schedule(cb, timeoutMs)`; cb nulls
    *  `this.backendReadyWatchdog` then dispatches `BackendReadyWatchdogFired`.
    *  No try/catch; synchronous scheduling. Mutates instance state. */
@@ -1201,12 +1254,12 @@ export class EffectRunner {
     return send;
   }
 
-  /** Send-timer fire: the post-ack, pre-commit phase elapsed with no commit
+  /** Send-timer fire: the acknowledgement/commit phase elapsed with no commit
    *  point. Dispatch `PreflightFailed` (the reducer rolls back via
    *  `pending.promoted[corrId]`, explicit-corrId short-circuiting its scan).
-   *  If `requestId` is unknown (early-ack never happened), the pre-ack
-   *  `RequestTracker` timeout should have rejected first and cleared this
-   *  timer via the catch — log so the degenerate case is debuggable. */
+   *  If `requestId` is unknown, the local acknowledgement deadline elapsed
+   *  without proving backend rejection. Keep the context for a later semantic
+   *  commit or terminal recovery boundary and log the ambiguity. */
   private onSendTimerFire(send: InFlightSend): void {
     if (send.disposed) return;
     // FP-C2a: metric-gated re-arm for the model-start phase. When the in-flight
@@ -1453,7 +1506,11 @@ export class EffectRunner {
             localId: effect.localId,
           }, {
             signal: send.abort.signal,
-            ...(coldPromotion ? { timeoutMs: 60_000 } : {}),
+            // Promotion loads the same SDK/services as a cold backend start.
+            // Share its measured startup budget: a healthy cold worker can
+            // take more than 60s on Windows, and timing out its acknowledgement
+            // rolls back a prompt that the worker will still execute.
+            ...(coldPromotion ? { timeoutMs: BACKEND_READY_TIMEOUT_MS } : {}),
           });
           // Early-ack succeeded: stamp requestId so the send-timer's fire
           // callback can dispatch PreflightFailed (post-ack) if the turn
@@ -1479,9 +1536,20 @@ export class EffectRunner {
             queued: response.queued === true ? true : undefined,
           });
         } catch (err) {
-          // Pre-ack failure (RequestTracker timeout/rejection, or abort): no
-          // commit will come — clear the send-timer and dispatch the pre-ack
-          // failure (rollback via pending.ops[corrId]).
+          if (isLocalRequestTimeout(err)) {
+            // RequestTracker cancellation is local: the backend may already
+            // have accepted the send and can still publish its semantic start.
+            // Keep optimistic ownership + the watchdog until that start (or a
+            // later terminal recovery boundary) proves the outcome.
+            this.deps.log.log('warn', 'message.send acknowledgement delayed', {
+              corrId: effect.corrId,
+              sessionPath: effect.sessionPath,
+              error: toErrorMessage(err),
+            });
+            return;
+          }
+          // A definitive pre-ack rejection or explicit abort cannot commit.
+          // Clear the send-timer and roll back via pending.ops[corrId].
           this.clearInFlightSend(effect.corrId);
           dispatch({
             kind: 'SendResult',
@@ -1545,6 +1613,7 @@ export class EffectRunner {
         // interrupt, but is fenced before truncate crosses the transport
         // boundary because JSON-RPC cancellation only rejects the local waiter.
         const send = this.startInFlightSend(effect.corrId, effect.sessionPath, 'edit', effect.localId, effect.composedText ?? effect.text, effect.userParts);
+        let awaitingSendAcknowledgement = false;
         try {
           service.bumpSessionDataEpoch(effect.sessionPath);
           statsService.onTruncatedAfter(effect.sessionPath, effect.messageId);
@@ -1569,6 +1638,7 @@ export class EffectRunner {
           // failure (`PreflightFailed`) and the commit-point `MessageStarted`
           // can resolve the edit's corrId via `pending.promoted` (mirrors
           // runSendRpc). See STATE_CONTRACT § Optimistic Reconciliation.
+          awaitingSendAcknowledgement = true;
           const response = await backend.request<{ requestId?: string }>('message.send', {
             sessionPath: effect.sessionPath,
             text: effect.text,
@@ -1578,6 +1648,15 @@ export class EffectRunner {
           send.requestId = response.requestId;
           dispatch({ kind: 'EditResult', corrId: effect.corrId, sessionPath: effect.sessionPath, ok: true, requestId: response.requestId });
         } catch (err) {
+          if (awaitingSendAcknowledgement && isLocalRequestTimeout(err)) {
+            this.deps.log.log('warn', 'message.send acknowledgement delayed', {
+              corrId: effect.corrId,
+              sessionPath: effect.sessionPath,
+              operation: 'edit',
+              error: toErrorMessage(err),
+            });
+            return;
+          }
           this.clearInFlightSend(effect.corrId);
           dispatch({ kind: 'EditResult', corrId: effect.corrId, sessionPath: effect.sessionPath, ok: false, error: toErrorMessage(err) });
         }

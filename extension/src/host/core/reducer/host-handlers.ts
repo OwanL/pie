@@ -16,14 +16,68 @@ import type { ReducerResult } from './helpers.js';
 import type { Effect } from '../effects.js';
 import { removeMessage } from './helpers.js';
 import type { PruningMode } from '../../../shared/protocol.js';
+import {
+  queueDeferredSetModel,
+  revertSetModel,
+  sessionHasDeferredModelWrite,
+  startNextDeferredSetModel,
+} from './set-model-handlers.js';
 
 export function handleBackendReadyChanged(
   state: ArchState,
   event: BackendReadyChangedEvent,
 ): ReducerResult {
   if (!event.ready) {
+    let nextState = state;
+    for (const [corrId, pending] of Object.entries(state.pending.setModelByCorrId)) {
+      if (!pending.snapshot) continue;
+      const clearImages = (pending.snapshot.previousPendingInputs ?? [])
+        .some((input) => input.kind === 'imageBlob')
+        && !(nextState.composer.pendingComposerInputsBySession[pending.sessionPath] ?? [])
+          .some((input) => input.kind === 'imageBlob');
+      const priorNotice = {
+        notice: nextState.settings.notice,
+        noticeKind: nextState.settings.noticeKind,
+        noticeRaw: nextState.settings.noticeRaw,
+        noticeSessionPath: nextState.settings.noticeSessionPath,
+      };
+      nextState = revertSetModel(nextState, corrId, 'backend unavailable');
+      nextState = produce(nextState, (draft) => {
+        Object.assign(draft.settings, priorNotice);
+      });
+
+      // A newer coalesced choice for this same session makes retrying the
+      // interrupted intermediate write unnecessary. Otherwise place the retry
+      // before every later deferred click so the global default preserves user
+      // order across sessions.
+      if (!nextState.pending.deferredSetModelBySession[pending.sessionPath]) {
+        const oldestSequence = Math.min(
+          ...Object.values(nextState.pending.deferredSetModelBySession).map((entry) => entry.sequence),
+          nextState.pending.deferredSetModelSequence + 1,
+        );
+        nextState = queueDeferredSetModel(
+          nextState,
+          corrId,
+          pending.sessionPath,
+          pending.modelSettings,
+          clearImages,
+        );
+        nextState = produce(nextState, (draft) => {
+          const retry = draft.pending.deferredSetModelBySession[pending.sessionPath];
+          if (retry) retry.sequence = oldestSequence - 1;
+        });
+      }
+      if (nextState.pending.deferredSetModelInFlightCorrId === corrId) {
+        nextState = produce(nextState, (draft) => {
+          draft.pending.deferredSetModelInFlightCorrId = null;
+          draft.pending.deferredSetModelInFlightSessionPath = null;
+        });
+      }
+    }
     return {
-      state: { ...state, settings: { ...state.settings, backendReady: false } },
+      state: produce(nextState, (draft) => {
+        draft.settings.backendReady = false;
+      }),
       effects: [],
     };
   }
@@ -35,26 +89,37 @@ export function handleBackendReadyChanged(
   // is true) and clears the watchdog timer.
   const allEntries = Object.values(state.pending.backendReadyQueueBySession).flat();
   const hasEntries = allEntries.length > 0;
-  const nextState = {
-    ...state,
-    settings: {
-      ...state.settings,
-      backendReady: true,
-      // A backend restart is the point where per-server MCP toggles apply
-      // (the adapter re-reads config on the next session start), so the
-      // pending-apply hint is no longer needed. Ignore duplicate ready events
-      // from the same backend generation so they cannot clear a newer toggle.
-      mcpPendingApply: state.settings.backendReady ? state.settings.mcpPendingApply : false,
-    },
-    pending: {
-      ...state.pending,
-      backendReadyQueueBySession: {},
-    },
-  };
+  const readyState = produce(state, (draft) => {
+    draft.settings.backendReady = true;
+    // A backend restart is the point where per-server MCP toggles apply
+    // (the adapter re-reads config on the next session start), so the
+    // pending-apply hint is no longer needed. Ignore duplicate ready events
+    // from the same backend generation so they cannot clear a newer toggle.
+    draft.settings.mcpPendingApply = state.settings.backendReady
+      ? state.settings.mcpPendingApply
+      : false;
+  });
+  const modelDrain = startNextDeferredSetModel(readyState);
+  const releasedEntries = allEntries.filter(
+    (entry) => !sessionHasDeferredModelWrite(modelDrain.state, entry.sessionPath),
+  );
+  const heldEntries = allEntries.filter(
+    (entry) => sessionHasDeferredModelWrite(modelDrain.state, entry.sessionPath),
+  );
+  const nextState = produce(modelDrain.state, (draft) => {
+    draft.pending.backendReadyQueueBySession = {};
+    for (const entry of heldEntries) {
+      (draft.pending.backendReadyQueueBySession[entry.sessionPath] ??= []).push(entry);
+    }
+  });
 
-  const effects: Effect[] = [];
+  const effects: Effect[] = [...modelDrain.effects];
+  if (releasedEntries.length > 0) {
+    effects.push({ kind: 'DrainBackendReadyQueue', corrId: 'drain:backendReady', entries: releasedEntries });
+  }
   if (hasEntries) {
-    effects.push({ kind: 'DrainBackendReadyQueue', corrId: 'drain:backendReady', entries: allEntries });
+    // Backend readiness, not model replay, owns this watchdog. Deferred model
+    // completion releases held sends explicitly below.
     effects.push({ kind: 'CancelBackendReadyWatchdog', corrId: 'watchdog' });
   }
 

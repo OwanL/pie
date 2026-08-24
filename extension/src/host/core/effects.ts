@@ -19,8 +19,7 @@
 
 import type { ComposerInput, ModelSettings, ChatPrefs, HostToWebviewMessage, PruningMode, UserContentPart, RendererCommandContext } from '../../shared/protocol';
 import type { LiveSubagentDetailAddress, DetailCursor, DetailPageRef } from '../../shared/protocol/subagent-detail';
-import type { PendingSendQueueEntry } from './arch-state';
-import type { BackendReadyQueueEntry } from './arch-state';
+import type { BackendReadyQueueEntry, DeferredSetModelEntry, PendingSendQueueEntry } from './arch-state';
 
 export interface EffectBase {
   corrId: string;
@@ -433,6 +432,7 @@ export type Effect =
   | DuplicateSessionEffect
   | DrainPendingSendQueueEffect
   | DrainBackendReadyQueueEffect
+  | DrainDeferredSetModelQueueEffect
   | StartBackendReadyWatchdogEffect
   | CancelBackendReadyWatchdogEffect
   | MarkPrepassSucceededEffect
@@ -461,6 +461,14 @@ export interface DrainPendingSendQueueEffect extends EffectBase {
 export interface DrainBackendReadyQueueEffect extends EffectBase {
   kind: 'DrainBackendReadyQueue';
   entries: BackendReadyQueueEntry[];
+}
+
+/** Replay model/reasoning choices after a pending path resolves or the backend
+ * becomes ready. Entries have already been removed from ArchState; the runner
+ * re-dispatches ordinary SetModel commands against durable paths. */
+export interface DrainDeferredSetModelQueueEffect extends EffectBase {
+  kind: 'DrainDeferredSetModelQueue';
+  entries: DeferredSetModelEntry[];
 }
 
 /** Expire a session's transient "Compacted" chip after a bounded TTL. The

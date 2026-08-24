@@ -24,6 +24,7 @@ import { materializeInterruptedLiveTurn } from '../live-pipeline/projection.js';
 import { pendingOwnerKey, pruneExpiredTerminalAttempts, terminalAttemptKey } from '../live-pipeline/model.js';
 import { applyLiveTurnCheckpoint } from '../live-pipeline/checkpoint.js';
 import type { LiveTurnCheckpoint } from '../../../shared/live-pipeline-protocol.js';
+import { sessionHasDeferredModelWrite, startNextDeferredSetModel } from './set-model-handlers.js';
 
 const BACKEND_EXIT_TOMBSTONE_GRACE_MS = 15_000;
 
@@ -134,13 +135,16 @@ export function handleSessionOpened(state: ArchState, event: Extract<Event, { ki
   // snapshot (emitted right after `session.truncateAfter` rewrites the file,
   // before `message.send` starts the new turn), but the host still holds a
   // pending optimistic edit message newer than that snapshot. Treat the host's
-  // own running signal as an additional preserve trigger so the optimistic /
+  // pending operation as an additional preserve trigger so the optimistic /
   // streaming state is not wiped (which previously cleared the transcript and
-  // made the agent reply to nothing). See STATE_CONTRACT "Snapshot Recovery" /
-  // "Optimistic Reconciliation". The authoritative agent_end snapshot lands
-  // after BusyChanged(false), so hostRunning is false there and the final
-  // transcript still replaces cleanly.
-  const hostRunning = state.sessions.runningSessionPaths.includes(sessionPath);
+  // made the agent reply to nothing). A bare running marker is insufficient:
+  // it may itself be the orphan an idle authoritative reopen must repair. See
+  // STATE_CONTRACT "Snapshot Recovery" / "Optimistic Reconciliation".
+  const hostOwnsOptimisticTurn = Object.values(state.pending.ops).some(
+    (operation) => operation.sessionPath === sessionPath && !operation.queued,
+  ) || Object.values(state.pending.promoted).some(
+    (operation) => operation.sessionPath === sessionPath && !operation.queued,
+  );
   const deferredInlineEditResolution = preserveInlineEdit
     ? resolveSessionOpenedTranscript({
         busy: false,
@@ -164,7 +168,7 @@ export function handleSessionOpened(state: ArchState, event: Extract<Event, { ki
         aliases: [] as Array<{ aliasId: string; canonicalId: string }>,
       }
     : resolveSessionOpenedTranscript({
-        busy: payload.busy || hostRunning,
+        busy: payload.busy || hostOwnsOptimisticTurn,
         incomingTranscript: payload.transcript,
         incomingTranscriptWindow: payload.transcriptWindow,
         localTranscript,
@@ -173,7 +177,9 @@ export function handleSessionOpened(state: ArchState, event: Extract<Event, { ki
   // Sessions: running state, backend ready, upsert summary
   const nextRunningSessionPaths = payload.busy
     ? addToArray(state.sessions.runningSessionPaths, sessionPath)
-    : state.sessions.runningSessionPaths;
+    : hostOwnsOptimisticTurn
+      ? state.sessions.runningSessionPaths
+      : removeFromArray(state.sessions.runningSessionPaths, sessionPath);
   // A session opened mid-compaction carries `isCompacting` (the backend's
   // `isStreaming`/`activeRequest` are both false while compaction runs, so
   // `busy` alone cannot restore the "Compacting…" indicator).
@@ -353,9 +359,84 @@ export function handleSessionOpened(state: ArchState, event: Extract<Event, { ki
         attemptId: recoveryIdentity.attemptId,
       });
     }
+  } else if (!hostOwnsOptimisticTurn) {
+    // A full idle snapshot is authoritative for live ownership. If the host
+    // has no optimistic send/edit in flight, any surviving active row belongs
+    // to an earlier missed terminal boundary and would otherwise be projected
+    // beside the durable assistant tail as a duplicate.
+    next = clearAuthoritativeIdleLiveState(next, sessionPath);
   }
 
   return { state: next, effects };
+}
+
+/** Clear session-scoped live ownership after an authoritative idle reopen.
+ * Composer drafts and optimistic operations are deliberately untouched: this
+ * path only runs when the host does not own an in-flight send/edit. */
+function clearAuthoritativeIdleLiveState(state: ArchState, sessionPath: string): ArchState {
+  const liveTurn = state.livePipeline.turnsBySession[sessionPath];
+  const staleTurnIds = new Set<string>();
+  if (liveTurn) staleTurnIds.add(liveTurn.turnId);
+  for (const events of Object.values(state.livePipeline.pendingOwnerEvents)) {
+    for (const pendingEvent of events) {
+      if (pendingEvent.sessionPath === sessionPath) staleTurnIds.add(pendingEvent.turnId);
+    }
+  }
+  for (const attempt of Object.values(state.livePipeline.terminalAttempts)) {
+    if (attempt.sessionPath === sessionPath) staleTurnIds.add(attempt.turnId);
+  }
+
+  const turnsBySession = { ...state.livePipeline.turnsBySession };
+  delete turnsBySession[sessionPath];
+  const toolsByExecutionId = Object.fromEntries(
+    Object.entries(state.livePipeline.toolsByExecutionId)
+      .filter(([, tool]) => !staleTurnIds.has(tool.turnId)),
+  );
+  const pendingOwnerEvents = Object.fromEntries(
+    Object.entries(state.livePipeline.pendingOwnerEvents)
+      .filter(([, events]) => !events.some((pendingEvent) => pendingEvent.sessionPath === sessionPath)),
+  );
+  const terminalAttempts = Object.fromEntries(
+    Object.entries(state.livePipeline.terminalAttempts)
+      .filter(([, attempt]) => attempt.sessionPath !== sessionPath),
+  );
+  const liveChanged = liveTurn !== undefined
+    || Object.keys(toolsByExecutionId).length !== Object.keys(state.livePipeline.toolsByExecutionId).length
+    || Object.keys(pendingOwnerEvents).length !== Object.keys(state.livePipeline.pendingOwnerEvents).length
+    || Object.keys(terminalAttempts).length !== Object.keys(state.livePipeline.terminalAttempts).length;
+  const hadCurrentTurn = state.pending.currentTurnBySession[sessionPath] !== undefined;
+  const hadExtensionUi = state.settings.pendingExtensionUIRequestsBySession[sessionPath] !== undefined;
+  if (!liveChanged && !hadCurrentTurn && !hadExtensionUi) return state;
+
+  const currentTurnBySession = { ...state.pending.currentTurnBySession };
+  delete currentTurnBySession[sessionPath];
+  const pendingExtensionUIRequestsBySession = { ...state.settings.pendingExtensionUIRequestsBySession };
+  delete pendingExtensionUIRequestsBySession[sessionPath];
+
+  return {
+    ...state,
+    livePipeline: {
+      ...state.livePipeline,
+      turnsBySession,
+      toolsByExecutionId,
+      pendingOwnerEvents,
+      terminalAttempts,
+      revisionBySession: liveChanged
+        ? {
+            ...state.livePipeline.revisionBySession,
+            [sessionPath]: (state.livePipeline.revisionBySession[sessionPath] ?? 0) + 1,
+          }
+        : state.livePipeline.revisionBySession,
+    },
+    pending: {
+      ...state.pending,
+      currentTurnBySession,
+    },
+    settings: {
+      ...state.settings,
+      pendingExtensionUIRequestsBySession,
+    },
+  };
 }
 
 /** `session.opened` and its checkpoint are one authoritative backend snapshot.
@@ -709,6 +790,9 @@ export function handleSessionsInterrupted(state: ArchState, event: Extract<Event
       delete draft.pending.currentTurnBySession[sessionPath];
       delete draft.pending.sendQueueBySession[sessionPath];
       delete draft.pending.backendReadyQueueBySession[sessionPath];
+      // Deferred model choices are host-owned recovery intent, not dead
+      // backend work. BackendReadyChanged(false) requeues any accepted write;
+      // untouched choices must survive until the replacement backend is ready.
       delete draft.pending.prepassBySession[sessionPath];
 
       const liveTurn = draft.livePipeline.turnsBySession[sessionPath];
@@ -990,9 +1074,10 @@ export function handleCreateOperationFailed(state: ArchState, event: Extract<Eve
 
 export function handlePendingPathReplaced(state: ArchState, event: Extract<Event, { kind: 'PendingPathReplaced' }>): ReducerResult {
   const { oldPendingPath, newSessionPath } = event;
-  // Read the queued sends BEFORE the produce draft (we need them for the
-  // effect; the draft will clear the key).
+  // Read queued sends BEFORE the produce draft (the draft clears their
+  // host-only pseudo-path key; replay happens after the path is durable).
   const queuedSends = state.pending.sendQueueBySession[oldPendingPath] ?? [];
+  const deferredSetModel = state.pending.deferredSetModelBySession[oldPendingPath];
 
   const nextState = produce(state, (draft) => {
     // Normally SessionOpened has already inserted the durable summary. When a
@@ -1006,6 +1091,23 @@ export function handlePendingPathReplaced(state: ArchState, event: Extract<Event
       const { creationState: _creationState, createOperationId: _createOperationId, ...rest } = summary;
       return [{ ...rest, path: newSessionPath }];
     });
+
+    // Retarget the deferred choice without replaying it yet. The ordered drain
+    // below restores its baseline and starts it only when no earlier global
+    // model-settings write is still waiting.
+    if (deferredSetModel) {
+      delete draft.pending.deferredSetModelBySession[oldPendingPath];
+      draft.pending.deferredSetModelBySession[newSessionPath] = {
+        ...deferredSetModel,
+        sessionPath: newSessionPath,
+      };
+    }
+    // A model-switch confirmation can remain open while create/duplicate
+    // resolves. Retarget its host-owned intent; never let Confirm address the
+    // retired pseudo-path.
+    for (const pending of Object.values(draft.pending.setModelByCorrId)) {
+      if (pending.sessionPath === oldPendingPath) pending.sessionPath = newSessionPath;
+    }
 
     // Replace in openTabPaths
     draft.sessions.openTabPaths = draft.sessions.openTabPaths.map(
@@ -1125,11 +1227,27 @@ export function handlePendingPathReplaced(state: ArchState, event: Extract<Event
   // + SessionOpened + SelectSession events that follow PendingPathReplaced in
   // the handlePendingPathReplacement flow — preserving the clear-then-reinsert
   // ordering of the old drainPendingSendQueue callback.
-  const effects = queuedSends.length > 0
-    ? [{ kind: 'DrainPendingSendQueue' as const, corrId: `drain:${oldPendingPath}`, resolvedSessionPath: newSessionPath, entries: queuedSends }]
-    : [];
+  const modelDrain = startNextDeferredSetModel(nextState);
+  const holdSendsForModel = queuedSends.length > 0
+    && modelDrain.state.settings.backendReady
+    && sessionHasDeferredModelWrite(modelDrain.state, newSessionPath);
+  const finalState = holdSendsForModel
+    ? produce(modelDrain.state, (draft) => {
+        const queue = draft.pending.backendReadyQueueBySession[newSessionPath] ??= [];
+        for (const entry of queuedSends) queue.push({ ...entry, sessionPath: newSessionPath });
+      })
+    : modelDrain.state;
+  const effects: Effect[] = [...modelDrain.effects];
+  if (queuedSends.length > 0 && !holdSendsForModel) {
+    effects.push({
+      kind: 'DrainPendingSendQueue',
+      corrId: `drain:${oldPendingPath}`,
+      resolvedSessionPath: newSessionPath,
+      entries: queuedSends,
+    });
+  }
 
-  return { state: nextState, effects };
+  return { state: finalState, effects };
 }
 
 export function handleTabOpened(state: ArchState, event: Extract<Event, { kind: 'TabOpened' }>): ReducerResult {

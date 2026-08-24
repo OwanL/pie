@@ -827,6 +827,44 @@ test("off prepass thinking does not fall through to a slower reasoning attempt",
 	assert.deepEqual(buildPrepassThinkingAttempts("minimal"), ["minimal"]);
 });
 
+test("prepass recovery omits reasoning when minimal aliases the configured provider effort", async () => {
+	const cfg = config({
+		provider: "ollama",
+		model: "deepseek-v4-flash:0731-cloud",
+		thinkingLevel: "low",
+		prepass: { maxTransportRetries: 0, transportBackoffBaseMs: 0 },
+	});
+	const reasoningLevels: unknown[] = [];
+	const model = {
+		id: cfg.model,
+		provider: cfg.provider,
+		baseUrl: "http://localhost:11434/v1",
+		reasoning: true,
+		thinkingLevelMap: { off: "none", minimal: "low", high: "high", max: "max" },
+	};
+	assert.deepEqual(buildPrepassThinkingAttempts("minimal", model), ["minimal", "off"]);
+
+	const completeFn = async (_model: unknown, _context: unknown, options: { reasoning?: string }) => {
+		reasoningLevels.push(options.reasoning);
+		if (reasoningLevels.length === 1) {
+			return { text: "", stopReason: "length" };
+		}
+		return { text: '{"pruneSkills":["alpha"],"pruneTools":[]}', stopReason: "stop" };
+	};
+
+	const result = await runPruningPrepass(
+		{ modelRegistry: modelRegistryStub(model) },
+		{ userPrompt: "do something", skills: visibleSkills, tools: allTools, config: cfg },
+		cfg,
+		completeFn as any,
+	);
+
+	assert.deepEqual(reasoningLevels, ["low", undefined]);
+	assert.deepEqual(result.prunedSkills, ["alpha"]);
+	assert.equal(result.thinkingLevel, "off");
+	assert.equal(result.error, null);
+});
+
 test("runPruningPrepass: forwards output controls but omits temperature for non-local models", async () => {
 	const cfg = config({ prepass: { maxTransportRetries: 7, maxOutputTokens: 333, temperature: 0.2 } });
 	const seenOptions: Array<{ maxRetries?: number; maxTokens?: number; temperature?: number }> = [];

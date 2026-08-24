@@ -24,7 +24,7 @@ import assert from 'node:assert/strict';
 
 import { reducer, initialArchState, type ArchState } from '../../../../src/host/core/reducer';
 import type { Event } from '../../../../src/host/core/events';
-import type { SessionSummary, ActiveRunSummary } from '../../../../src/shared/protocol';
+import type { SessionSummary, ActiveRunSummary, ModelInfo } from '../../../../src/shared/protocol';
 
 const OLD = '/old';
 const NEW = '/new';
@@ -92,6 +92,28 @@ test('OpenSession inserts the placeholder summary, opens + selects the tab, leav
     { kind: 'PersistTabs', corrId: 'c1', openTabPaths: [OLD, NEW], activeSessionPath: NEW, pinnedTabPaths: [], pinnedTabGroups: [] },
     { kind: 'OpenSession', corrId: 'c1', sessionPath: NEW, selectionToken: 'tok' },
   ]);
+});
+
+test('OpenSession immediately seeds a cold target with the last usable model catalog', () => {
+  const model: ModelInfo = {
+    id: 'reasoning-model', name: 'Reasoning model', provider: 'p', reasoning: true,
+    thinkingLevels: ['off', 'high'], inputKinds: ['text'],
+    subagent: { eligible: true, pricing: { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 0 } },
+  };
+  const target = { ...PLACEHOLDER, modelId: model.id, provider: model.provider, thinkingLevel: 'high' as const };
+  const base = buildState();
+  const state: ArchState = {
+    ...base,
+    settings: {
+      ...base.settings,
+      availableModelsBySession: { [OLD]: [model] },
+      availableModelsStatusBySession: { [OLD]: 'authoritative' },
+    },
+  };
+  const out = reducer(state, openCmd('catalog', NEW, target));
+
+  assert.deepEqual(out.state.settings.availableModelsBySession[NEW], [model]);
+  assert.equal(out.state.settings.availableModelsStatusBySession[NEW], 'provisional');
 });
 
 test('OpenSession does not duplicate the summary or tab if the path is already summarized + already open', () => {

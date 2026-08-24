@@ -1,6 +1,6 @@
 {
-  "defaultModel": "deepseek-v4-pro:0813-cloud",
-  "defaultThinkingLevel": "high",
+  "defaultModel": "deepseek-v4-flash:0731-cloud",
+  "defaultThinkingLevel": "max",
   "defaultProvider": "ollama",
   "retry": {
     "enabled": true,
@@ -20,7 +20,7 @@
   "pruning": {
     "model": "deepseek-v4-flash:0731-cloud",
     "provider": "ollama",
-    "thinkingLevel": "off",
+    "thinkingLevel": "low",
     "prepass": {
       "temperature": 0.2,
       "maxOutputTokens": 1024,

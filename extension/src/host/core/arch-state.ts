@@ -39,6 +39,7 @@ import type {
   UserContentPart,
   InlineEditDraft,
   LastCompactionSummary,
+  ThinkingLevel,
 } from '../../shared/protocol';
 import type { NoticeKind } from '../../shared/error-mapping.js';
 import type { LivePipelineState, LiveTurnPhase } from '../../shared/live-pipeline-protocol.js';
@@ -384,6 +385,24 @@ export interface SetModelPending {
   snapshot: SetModelSnapshot | null;
 }
 
+/** Latest model/reasoning choice made while its durable target is not yet
+ * writable (a pending create/duplicate path, or a temporarily unavailable
+ * backend). The host updates the visible session badge immediately, then
+ * restores this baseline and replays the choice through the normal optimistic
+ * SetModel lifecycle once the target becomes writable. */
+export interface DeferredSetModelEntry {
+  corrId: string;
+  sessionPath: string;
+  modelSettings: ModelSettings;
+  clearImages: boolean;
+  /** Monotonic click order across sessions, used to replay global settings
+   * writes deterministically after backend recovery. */
+  sequence: number;
+  previousModelId?: string;
+  previousProvider?: string;
+  previousThinkingLevel?: ThinkingLevel;
+}
+
 /** Tracks the first message of the active streaming turn per session. */
 export interface CurrentTurn {
   requestId: string;
@@ -473,6 +492,14 @@ export interface PendingState {
   promoted: Record<string, PendingOp>;
   /** In-flight `SetModel` lifecycles keyed by `corrId` (modal-confirm + RPC). */
   setModelByCorrId: Record<string, SetModelPending>;
+  /** Latest deferred model/reasoning choice per temporarily unwritable session. */
+  deferredSetModelBySession: Record<string, DeferredSetModelEntry>;
+  /** Monotonic sequence assigned to deferred model picker choices. */
+  deferredSetModelSequence: number;
+  /** corrId currently replaying; later choices wait so global rollback remains ordered. */
+  deferredSetModelInFlightCorrId: string | null;
+  /** Durable session whose deferred choice is currently replaying. */
+  deferredSetModelInFlightSessionPath: string | null;
   /** Optimistically answered extension UI requests, restored if RPC fails. */
   extensionUiResponseByCorrId: Record<string, {
     sessionPath: string;
@@ -595,6 +622,10 @@ export function createInitialArchState(): ArchState {
       ops: {},
       promoted: {},
       setModelByCorrId: {},
+      deferredSetModelBySession: {},
+      deferredSetModelSequence: 0,
+      deferredSetModelInFlightCorrId: null,
+      deferredSetModelInFlightSessionPath: null,
       extensionUiResponseByCorrId: {},
       messageIdAlias: {},
       currentTurnBySession: {},

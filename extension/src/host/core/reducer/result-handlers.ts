@@ -13,8 +13,16 @@ import {
   restoreRemovedTail,
 } from './helpers.js';
 import type { Event, EffectResultEvent } from '../events.js';
-import { applySetModelOptimistic, dropSetModelPending, revertSetModel } from './set-model-handlers.js';
+import {
+  applySetModelOptimistic,
+  dropSetModelPending,
+  finishDeferredSetModelReplay,
+  queueDeferredSetModel,
+  revertSetModel,
+  sessionHasDeferredModelWrite,
+} from './set-model-handlers.js';
 import { mapSendOrEditError, mapPreflightError, stripReqIds } from '../../../shared/error-mapping.js';
+import { isPendingTabPath } from '../../../shared/tab-behavior.js';
 
 export function handleInterruptResult(state: ArchState, event: Extract<Event, { kind: 'InterruptResult' }>): ReducerResult {
   let nextState = state;
@@ -560,18 +568,62 @@ export function handleEditResult(state: ArchState, event: Extract<Event, { kind:
   return { state: nextState, effects };
 }
 
+function releaseModelBlockedSends(
+  result: ReducerResult,
+  sessionPath: string | null,
+  corrId: string,
+): ReducerResult {
+  if (!sessionPath || sessionHasDeferredModelWrite(result.state, sessionPath)) return result;
+  const heldSends = result.state.pending.backendReadyQueueBySession[sessionPath] ?? [];
+  if (heldSends.length === 0) return result;
+  const releasedState = produce(result.state, (draft) => {
+    delete draft.pending.backendReadyQueueBySession[sessionPath];
+  });
+  return {
+    state: releasedState,
+    effects: [
+      ...result.effects,
+      {
+        kind: 'DrainBackendReadyQueue',
+        corrId: `drain:model-ready:${corrId}`,
+        entries: heldSends,
+      },
+    ],
+  };
+}
+
 export function handleSetModelResult(state: ArchState, event: Extract<Event, { kind: 'SetModelResult' }>): ReducerResult {
   const pending = state.pending.setModelByCorrId[event.corrId];
-  if (!pending) {
-    // Stale result for an unknown/aborted setModel — nothing to reconcile.
-    return { state, effects: [] };
+  let reconciled = !pending
+    ? state
+    : event.ok
+      ? dropSetModelPending(state, event.corrId)
+      : revertSetModel(state, event.corrId, event.error);
+
+  // A user may make a newer choice for the same session while this deferred
+  // write is in flight. If the older write fails, its optimistic badge has
+  // just rolled back, so the queued choice must use that restored truth as its
+  // own baseline rather than the failed optimistic value.
+  if (pending && !event.ok && reconciled.pending.deferredSetModelBySession[pending.sessionPath]) {
+    reconciled = produce(reconciled, (draft) => {
+      const queued = draft.pending.deferredSetModelBySession[pending.sessionPath];
+      if (!queued) return;
+      const summary = draft.sessions.sessions.find((item) => item.path === pending.sessionPath);
+      queued.previousModelId = summary?.modelId;
+      queued.previousProvider = summary?.provider;
+      queued.previousThinkingLevel = summary?.thinkingLevel;
+    });
   }
-  if (event.ok) {
-    // Success: the backend persisted the switch; drop the rollback snapshot.
-    return { state: dropSetModelPending(state, event.corrId), effects: [] };
-  }
-  // Failure: revert the optimistic apply field-for-field + surface a notice.
-  return { state: revertSetModel(state, event.corrId, event.error), effects: [] };
+
+  // Deferred writes run one at a time across sessions because settings.set
+  // also owns the global default. A stale result remains a no-op unless it is
+  // the completion signal for that ordered replay slot.
+  const completedSessionPath = pending?.sessionPath
+    ?? (state.pending.deferredSetModelInFlightCorrId === event.corrId
+      ? state.pending.deferredSetModelInFlightSessionPath
+      : null);
+  const finished = finishDeferredSetModelReplay(reconciled, event.corrId);
+  return releaseModelBlockedSends(finished, completedSessionPath, event.corrId);
 }
 
 export function handleModelSwitchConfirmResult(
@@ -584,10 +636,45 @@ export function handleModelSwitchConfirmResult(
     return { state, effects: [] };
   }
   if (!event.confirmed) {
-    // User declined (or dismissed): drop the stashed intent, leave all state
-    // untouched. No notice — the user explicitly cancelled.
-    return { state: dropSetModelPending(state, event.corrId), effects: [] };
+    // User declined (or dismissed). A normal modal only drops its intent. A
+    // modal discovered during deferred replay also owns the ordered replay
+    // slot, so cancellation must release that slot and any model-blocked sends.
+    const dropped = dropSetModelPending(state, event.corrId);
+    if (state.pending.deferredSetModelInFlightCorrId !== event.corrId) {
+      return { state: dropped, effects: [] };
+    }
+    const finished = finishDeferredSetModelReplay(dropped, event.corrId);
+    return releaseModelBlockedSends(finished, pending.sessionPath, event.corrId);
   }
+  // The target may still be a host-only placeholder, or the backend may have
+  // become unavailable while the confirmation was open. Keep the confirmed
+  // choice visible and replay it later without asking a second time.
+  const anotherModelWriteIsInFlight = Object.entries(state.pending.setModelByCorrId)
+    .some(([corrId, entry]) => corrId !== event.corrId && entry.snapshot !== null);
+  if (isPendingTabPath(pending.sessionPath)
+    || !state.settings.backendReady
+    || anotherModelWriteIsInFlight
+    || (state.pending.deferredSetModelInFlightCorrId !== null
+      && state.pending.deferredSetModelInFlightCorrId !== event.corrId)) {
+    let queued = queueDeferredSetModel(
+      state,
+      event.corrId,
+      pending.sessionPath,
+      pending.modelSettings,
+      true,
+    );
+    // If backend/path availability changed while a deferred replay modal was
+    // open, this intent has returned to the ordered queue. Release its old
+    // replay slot so readiness/path resolution can start it again.
+    if (state.pending.deferredSetModelInFlightCorrId === event.corrId) {
+      queued = produce(queued, (draft) => {
+        draft.pending.deferredSetModelInFlightCorrId = null;
+        draft.pending.deferredSetModelInFlightSessionPath = null;
+      });
+    }
+    return { state: queued, effects: [] };
+  }
+
   // Confirmed: apply optimistically, clearing the pending images that prompted
   // the modal (the modal only appears when the new model lacks image support),
   // then emit the backend write.

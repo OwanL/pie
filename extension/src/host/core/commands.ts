@@ -390,6 +390,12 @@ export interface SetModelCommand extends CommandBase {
    *  an inline confirm in the initiating renderer instead of an invisible
    *  desktop modal. Never client-supplied. */
   source?: RendererCommandContext;
+  /** Host-only replay marker for a deferred choice whose image-removal modal
+   * was already confirmed before the backend/session target became writable. */
+  clearImagesConfirmed?: boolean;
+  /** Host-only replay marker. Bypasses the ordinary no-op shortcut because a
+   * deferred per-session choice still requires a durable settings.set write. */
+  deferredReplay?: boolean;
 }
 
 /** Hydrate a session's model state from the backend (read-only refresh). */

@@ -226,7 +226,7 @@ test('SessionsInterrupted restores the removed tail for a promoted optimistic ed
 
 test('SessionsInterrupted tombstones the active attempt and clears every pending event for the crashed session', () => {
   const base = {
-    protocolVersion: 6, sessionPath: '/live', requestId: 'request',
+    protocolVersion: 7, sessionPath: '/live', requestId: 'request',
     turnId: 'turn-active', attemptId: 'attempt-active', occurredAt: 100,
     checkpointBytes: 30 * 1024 * 1024,
   } as const;

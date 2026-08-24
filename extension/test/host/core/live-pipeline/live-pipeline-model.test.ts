@@ -15,7 +15,7 @@ import { diffJsonValues, type JsonSafeValue } from '../../../../src/shared/json-
 import { transcriptRenderSignature } from '../../../../src/shared/transcript-render-signature';
 
 const base = {
-  protocolVersion: 6,
+  protocolVersion: 7,
   sessionPath: '/session.jsonl',
   requestId: 'request-1',
   turnId: 'turn-1',
@@ -61,7 +61,7 @@ test('checkpoint replacement is atomic and retains only newer pending envelopes'
   const withGap = apply(started, { ...base, kind: 'turn.text', seq: 3, delta: 'gap' }).state;
   const owner = withGap.turnsBySession[base.sessionPath]!;
   const checkpoint: LiveTurnCheckpoint = {
-    protocolVersion: 6,
+    protocolVersion: 7,
     sessionPath: base.sessionPath,
     turnId: base.turnId,
     attemptId: base.attemptId,
@@ -99,7 +99,7 @@ test('checkpoint replacement is atomic and retains only newer pending envelopes'
   const wrongVersion = applyLiveTurnCheckpoint(repaired.state, { ...checkpoint, protocolVersion: 5 });
   assert.equal(wrongVersion.classification, 'malformed');
   const structurallyMalformed = applyLiveTurnCheckpoint(repaired.state, {
-    protocolVersion: 6, sessionPath: base.sessionPath,
+    protocolVersion: 7, sessionPath: base.sessionPath,
   } as never);
   assert.equal(structurallyMalformed.classification, 'malformed');
   const invalidPhase = applyLiveTurnCheckpoint(repaired.state, {
@@ -112,7 +112,7 @@ test('checkpoint older than the applied semantic sequence is stale and cannot re
   const started = apply(createEmptyLivePipelineState(), start()).state;
   const initialOwner = started.turnsBySession[base.sessionPath]!;
   const baseCheckpoint: LiveTurnCheckpoint = {
-    protocolVersion: 6,
+    protocolVersion: 7,
     sessionPath: base.sessionPath,
     turnId: base.turnId,
     attemptId: base.attemptId,
@@ -168,7 +168,7 @@ test('terminal repair checkpoints may use one-shot transport headroom for large 
     markdown: 'x'.repeat(3 * 1024 * 1024), status: 'completed' as const, durableEntryId: 'terminal-entry',
   };
   const checkpoint: LiveTurnCheckpoint = {
-    protocolVersion: 6,
+    protocolVersion: 7,
     sessionPath: base.sessionPath,
     turnId: base.turnId,
     attemptId: base.attemptId,
@@ -203,7 +203,7 @@ test('active recovery checkpoints preserve a complete multi-megabyte recursive s
   }).state;
   const turn = state.turnsBySession[base.sessionPath]!;
   const checkpoint: LiveTurnCheckpoint = {
-    protocolVersion: 6, sessionPath: base.sessionPath, turnId: base.turnId, attemptId: base.attemptId,
+    protocolVersion: 7, sessionPath: base.sessionPath, turnId: base.turnId, attemptId: base.attemptId,
     checkpointSeq: 3, phase: turn.phase, checkpointBytes: turn.checkpointBytes,
     turn: { ...turn, checkpointSeq: 3 },
     tools: [state.toolsByExecutionId['execution-1']!], pendingExtensionUiRequestIds: [],
@@ -232,7 +232,7 @@ test('checkpoint repair preserves richer settled-tool details already received b
   const owner = state.turnsBySession[base.sessionPath]!;
   const existingTool = state.toolsByExecutionId['execution-1']!;
   const repaired = applyLiveTurnCheckpoint(state, {
-    protocolVersion: 6,
+    protocolVersion: 7,
     sessionPath: base.sessionPath,
     turnId: base.turnId,
     attemptId: base.attemptId,
@@ -402,7 +402,7 @@ test('multi-draft checkpoints roundtrip and validate cached aggregate bytes', ()
   }).state;
   const turn = state.turnsBySession[base.sessionPath]!;
   const checkpoint: LiveTurnCheckpoint = {
-    protocolVersion: 6, sessionPath: base.sessionPath, turnId: base.turnId, attemptId: base.attemptId,
+    protocolVersion: 7, sessionPath: base.sessionPath, turnId: base.turnId, attemptId: base.attemptId,
     checkpointSeq: 4, phase: turn.phase, checkpointBytes: turn.checkpointBytes,
     turn: { ...turn, checkpointSeq: 4 },
     tools: [], pendingExtensionUiRequestIds: [],
@@ -594,6 +594,62 @@ test('frequent patches against 3, 15, and 30 MiB recursive previews use backend 
   }
 });
 
+test('execution-ended sibling projects completed while another runs, upgrades durably, and is not restart-preserved early', () => {
+  let state = apply(createEmptyLivePipelineState(), start()).state;
+  state = apply(state, {
+    ...base, kind: 'tool.started', seq: 2, executionId: 'execution-a', parentExecutionId: null,
+    rootExecutionId: 'execution-a', toolCallId: 'tool-a', name: 'read', input: { path: 'a' },
+    startedAt: 1_100, parallelGroupId: 'batch-1',
+  }).state;
+  state = apply(state, {
+    ...base, kind: 'tool.started', seq: 3, executionId: 'execution-b', parentExecutionId: null,
+    rootExecutionId: 'execution-b', toolCallId: 'tool-b', name: 'read', input: { path: 'b' },
+    startedAt: 1_101, parallelGroupId: 'batch-1',
+  }).state;
+  state = apply(state, {
+    ...base, kind: 'tool.progress', seq: 4, baseSeq: 3, executionId: 'execution-a',
+    baseProgressRevision: 0, progressRevision: 1, previewBytes: 38, aggregatePreviewBytes: 38,
+    update: { kind: 'snapshot', preview: { kind: 'generic', summary: 'preview' } },
+  }).state;
+  state = apply(state, {
+    ...base, kind: 'tool.executionEnded', seq: 5, executionId: 'execution-a',
+    status: 'completed', durationMs: 25,
+  }).state;
+
+  const transient = projectTranscriptView([], state, base.sessionPath).liveTools;
+  assert.deepEqual(transient.map((tool) => [tool.id, tool.status]), [
+    ['tool-a', 'completed'], ['tool-b', 'running'],
+  ]);
+  assert.equal(transient[0]?.durationMs, 25);
+  assert.deepEqual(transient[0]?.result, { kind: 'generic', summary: 'preview' });
+  assert.equal(transient[0]?.durableEntryId, undefined);
+
+  const restartedEarly = interruptLivePipelineForRestart(state, 2_000, 20_000);
+  assert.deepEqual(
+    restartedEarly.interruptedBySession[base.sessionPath]?.toolCalls,
+    [],
+    'an execution-ended call without durable toolResult evidence is dropped on restart',
+  );
+
+  state = apply(state, {
+    ...base, kind: 'tool.terminal', seq: 6, executionId: 'execution-a', status: 'completed',
+    result: 'durable result', durationMs: 25, durableEntryId: 'tool-a-entry',
+  }).state;
+  const durable = projectTranscriptView([], state, base.sessionPath).liveTools;
+  assert.deepEqual(durable.map((tool) => [tool.id, tool.status]), [
+    ['tool-a', 'completed'], ['tool-b', 'running'],
+  ]);
+  assert.equal(durable[0]?.durationMs, 25);
+  assert.equal(durable[0]?.result, 'durable result');
+  assert.equal(durable[0]?.durableEntryId, 'tool-a-entry');
+
+  const mismatch = apply(state, {
+    ...base, kind: 'tool.executionEnded', seq: 7, executionId: 'execution-a',
+    status: 'failed', durationMs: 25,
+  });
+  assert.equal(mismatch.classification, 'invalid', 'terminal lifecycle cannot regress to execution-ended');
+});
+
 test('multiple sibling previews enforce the aggregate limit incrementally and release bytes on terminal settlement', () => {
   let state = apply(createEmptyLivePipelineState(), start()).state;
   const bytesByExecution: Record<string, number> = {};
@@ -754,7 +810,7 @@ test('turn terminal reconciliation preserves live batch identity without replaci
   assert.deepEqual(terminal.terminal.toolCalls?.[0], partCall);
 });
 
-test('protocol v6 rejects progress without canonical preview byte counters', () => {
+test('protocol v7 rejects progress without canonical preview byte counters', () => {
   assert.equal(isTurnSemanticEnvelope({
     ...base, kind: 'tool.progress', seq: 2, baseSeq: 1, executionId: 'execution-1',
     baseProgressRevision: 0, progressRevision: 1,

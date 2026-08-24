@@ -12,8 +12,9 @@ import { h, render } from 'preact';
 import { act } from 'preact/test-utils';
 
 import { ToolCallCard, TOOL_CALL_CLOSE_GRACE_MS, TOOL_CALL_CLOSE_TRANSITION_MS, TOOL_CALL_EXPAND_MS } from '../../../../src/webview/panel/transcript/tool-call-card.tsx';
+import { MessageContent } from '../../../../src/webview/panel/transcript/message-item/content';
 import { clearCollapsibleCache } from '../../../../src/webview/panel/transcript/use-collapsible-open';
-import type { ToolCall } from '../../../../src/shared/protocol';
+import { DEFAULT_CHAT_PREFS, type ToolCall } from '../../../../src/shared/protocol';
 
 let container: HTMLElement;
 
@@ -172,6 +173,47 @@ test('one stable ToolCallCard owns drafting, ready, and running shell lifecycle'
   assert.equal(runningRoot?.getAttribute('data-status'), 'running');
   assert.equal(runningRoot?.getAttribute('data-provisional'), null);
   assert.ok(runningRoot?.querySelector(BODY_WRAP), 'shell terminal appears only once running');
+});
+
+test('completed parallel sibling has no spinner while another sibling remains running', () => {
+  const completed = { ...readTool('completed', 'read-completed'), parallelGroupId: 'batch' };
+  const running = { ...readTool('running', 'read-running'), parallelGroupId: 'batch' };
+  const renderToolCall = (toolCall: ToolCall) => h(ToolCallCard, {
+    toolCall,
+    autoExpand: false,
+    workingDirectory: '/repo',
+    onOpenFile: noop,
+    onContextMenu: noopContextMenu,
+  });
+
+  act(() => {
+    render(h(MessageContent, {
+      messageId: 'parallel-message',
+      role: 'assistant',
+      combinedParts: [
+        { kind: 'toolCall', toolCall: completed },
+        { kind: 'toolCall', toolCall: running },
+      ],
+      renderableUserParts: undefined,
+      html: '',
+      isCurrentlyStreaming: true,
+      messageBodyRef: { current: null },
+      workingDirectory: '/repo',
+      onOpenFile: noop,
+      prefs: DEFAULT_CHAT_PREFS,
+      renderToolCall,
+      onContextMenu: () => undefined,
+      getMessageRaw: () => '',
+    }), container);
+  });
+
+  const siblings = [...container.querySelectorAll('[data-parallel-group-id="batch"] .tool-call-card')];
+  assert.equal(siblings.length, 2);
+  assert.equal(siblings[0]?.getAttribute('data-status'), 'completed');
+  assert.equal(siblings[1]?.getAttribute('data-status'), 'running');
+  assert.equal(siblings[0]?.querySelector('.tool-call-status-spinner'), null);
+  assert.ok(siblings[1]?.querySelector('.tool-call-status-spinner'));
+  assert.ok(siblings[0]?.closest('.tool-call-parallel-item-done'));
 });
 
 test('shell auto-shown body lingers after completion, then animates closed via the fallback timer', () => {

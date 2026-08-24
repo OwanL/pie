@@ -8,7 +8,7 @@ import type { SessionOpenedPayload } from '../../../../src/shared/protocol';
 import { buildTranscriptRows } from '../../../../src/webview/panel/transcript/virtual-list-rows';
 
 const base = {
-  protocolVersion: 6,
+  protocolVersion: 7,
   sessionPath: '/session.jsonl',
   requestId: 'request',
   turnId: 'turn',
@@ -97,6 +97,49 @@ test('sequenced live events project without mutating durable transcript and term
     'a committed terminal cannot leave an actionable extension UI request behind',
   );
   assert.equal(selectViewState(committed.state).liveTurnPhase, null);
+});
+
+test('reducer projection settles one execution-ended sibling without ending the running block', () => {
+  let state = createInitialArchState();
+  state.sessions.activeSessionPath = base.sessionPath;
+  state.sessions.sessions = [{ path: base.sessionPath, name: 's', cwd: '/', modifiedAt: '', messageCount: 0 }];
+  state.transcript.bySession[base.sessionPath] = [];
+  state = dispatch(state, {
+    ...base, kind: 'turn.started', seq: 1, canonicalMessageId: 'message', startedAt: 90,
+  }).state;
+  state = dispatch(state, {
+    ...base, kind: 'tool.started', seq: 2, executionId: 'execution-a', parentExecutionId: null,
+    rootExecutionId: 'execution-a', toolCallId: 'tool-a', name: 'read', input: { path: 'a' },
+    startedAt: 95, parallelGroupId: 'batch',
+  }).state;
+  state = dispatch(state, {
+    ...base, kind: 'tool.started', seq: 3, executionId: 'execution-b', parentExecutionId: null,
+    rootExecutionId: 'execution-b', toolCallId: 'tool-b', name: 'read', input: { path: 'b' },
+    startedAt: 96, parallelGroupId: 'batch',
+  }).state;
+  state = dispatch(state, {
+    ...base, kind: 'tool.executionEnded', seq: 4, executionId: 'execution-a',
+    status: 'completed', durationMs: 12,
+  }).state;
+
+  let tools = selectViewState(state).transcript.at(-1)?.toolCalls;
+  assert.deepEqual(tools?.map((tool) => [tool.id, tool.status]), [
+    ['tool-a', 'completed'], ['tool-b', 'running'],
+  ]);
+  assert.equal(tools?.[0]?.durationMs, 12);
+  assert.equal(tools?.[0]?.durableEntryId, undefined);
+
+  state = dispatch(state, {
+    ...base, kind: 'tool.terminal', seq: 5, executionId: 'execution-a', status: 'completed',
+    result: 'durable', durationMs: 12, durableEntryId: 'tool-a-entry',
+  }).state;
+  tools = selectViewState(state).transcript.at(-1)?.toolCalls;
+  assert.deepEqual(tools?.map((tool) => [tool.id, tool.status]), [
+    ['tool-a', 'completed'], ['tool-b', 'running'],
+  ]);
+  assert.equal(tools?.[0]?.result, 'durable');
+  assert.equal(tools?.[0]?.durableEntryId, 'tool-a-entry');
+  assert.equal(state.transcript.bySession[base.sessionPath]?.length, 0, 'tool terminal remains live until turn durability');
 });
 
 test('terminal commit preserves parallel metadata in ordered parts and the toolCalls mirror', () => {
@@ -256,7 +299,7 @@ test('a delayed checkpoint cannot revive an attempt after its terminal tombstone
   }).state;
   const active = state.livePipeline.turnsBySession[base.sessionPath]!;
   const delayedCheckpoint = {
-    protocolVersion: 6 as const,
+    protocolVersion: 7 as const,
     sessionPath: base.sessionPath,
     turnId: base.turnId,
     attemptId: base.attemptId,
@@ -312,7 +355,7 @@ test('checkpoint recovery commits the matching optimistic send and clears its wa
     turnId: base.turnId, attemptId: base.attemptId, ok: true, occurredAt: 120,
     status: 'active', watermark: null,
     checkpoint: {
-      protocolVersion: 6, sessionPath: base.sessionPath, turnId: base.turnId,
+      protocolVersion: 7, sessionPath: base.sessionPath, turnId: base.turnId,
       attemptId: base.attemptId, checkpointSeq: 1, phase: seeded.phase,
       checkpointBytes: seeded.checkpointBytes,
       turn: { ...seeded, checkpointSeq: 1 }, tools: [],
@@ -355,7 +398,7 @@ test('sequence gaps request a checkpoint and a terminal checkpoint repairs misse
     status: 'terminal_grace',
     watermark: { ...base, finalSeq: 4, terminalKind: 'completed' },
     checkpoint: {
-      protocolVersion: 6,
+      protocolVersion: 7,
       sessionPath: base.sessionPath,
       turnId: base.turnId,
       attemptId: base.attemptId,
@@ -445,7 +488,7 @@ test('exhausted checkpoint repair clears the owned attempt and its pending gap s
   assert.equal(state.transcript.bySession[base.sessionPath]?.at(-1)?.status, 'interrupted');
 });
 
-test('checkpoint repair replays a coalesced v6 progress range from the checkpoint base', () => {
+test('checkpoint repair replays a coalesced v7 progress range from the checkpoint base', () => {
   let state = createInitialArchState();
   state = dispatch(state, {
     ...base, kind: 'turn.started', seq: 1, canonicalMessageId: 'message', startedAt: 90,
@@ -469,7 +512,7 @@ test('checkpoint repair replays a coalesced v6 progress range from the checkpoin
     turnId: base.turnId, attemptId: base.attemptId, ok: true, occurredAt: 140,
     status: 'active', watermark: null,
     checkpoint: {
-      protocolVersion: 6, sessionPath: base.sessionPath, turnId: base.turnId,
+      protocolVersion: 7, sessionPath: base.sessionPath, turnId: base.turnId,
       attemptId: base.attemptId, checkpointSeq: 4, phase: 'running_tool',
       checkpointBytes: owner.checkpointBytes,
       turn: {
@@ -565,7 +608,7 @@ test('checkpoint repair replays a newer envelope that arrived after checkpoint c
     turnId: base.turnId, attemptId: base.attemptId, ok: true, occurredAt: 140,
     status: 'active', watermark: null,
     checkpoint: {
-      protocolVersion: 6, sessionPath: base.sessionPath, turnId: base.turnId,
+      protocolVersion: 7, sessionPath: base.sessionPath, turnId: base.turnId,
       attemptId: base.attemptId, checkpointSeq: 2, phase: 'streaming',
       checkpointBytes: turn.checkpointBytes,
       turn: {

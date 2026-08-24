@@ -3,6 +3,15 @@ import assert from 'node:assert/strict';
 
 import { resolveComposerModelState } from '../../../src/webview/panel/composer/model-state';
 
+test('resolveComposerModelState uses high as the defensive new-session reasoning default', () => {
+  const state = resolveComposerModelState({
+    availableModels: [],
+    modelSettings: null,
+  });
+
+  assert.equal(state.selectedLevel, 'high');
+});
+
 test('resolveComposerModelState prefers the active session model over the global default', () => {
   const state = resolveComposerModelState({
     activeModelId: 'gemini-2.5-pro',

@@ -2,9 +2,11 @@ import { produce } from 'immer';
 
 import type { ArchState } from '../arch-state.js';
 import type { Event } from '../events.js';
+import type { Effect } from '../effects.js';
 import type { ReducerResult } from './helpers.js';
 import { stripReqIds } from '../../../shared/error-mapping.js';
 import { modelSettingsMatchForHydration } from '../../../shared/protocol.js';
+import { isPendingTabPath } from '../../../shared/tab-behavior.js';
 import type {
   ComposerInput,
   ContextWindowUsage,
@@ -103,6 +105,105 @@ export function applySetModelOptimistic(
       },
     };
   });
+}
+
+/** Retain the latest choice while the target is temporarily unwritable. The
+ * active session badge changes immediately so the controlled picker reflects
+ * the click, but the global persisted default is left untouched until replay.
+ * Repeated choices coalesce while preserving the original baseline for a
+ * truthful rollback once the normal SetModel lifecycle runs. */
+export function queueDeferredSetModel(
+  state: ArchState,
+  corrId: string,
+  sessionPath: string,
+  modelSettings: ModelSettings,
+  clearImages: boolean,
+): ArchState {
+  const existing = state.pending.deferredSetModelBySession[sessionPath];
+  const currentSummary = state.sessions.sessions.find((summary) => summary.path === sessionPath);
+  return produce(state, (draft) => {
+    const index = draft.sessions.sessions.findIndex((summary) => summary.path === sessionPath);
+    if (index >= 0) {
+      const summary = draft.sessions.sessions[index]!;
+      summary.modelId = modelSettings.defaultModel;
+      if (modelSettings.defaultProvider !== undefined) summary.provider = modelSettings.defaultProvider;
+      summary.thinkingLevel = modelSettings.defaultThinkingLevel;
+    }
+    const sequence = draft.pending.deferredSetModelSequence + 1;
+    draft.pending.deferredSetModelSequence = sequence;
+    draft.pending.deferredSetModelBySession[sessionPath] = {
+      corrId,
+      sessionPath,
+      modelSettings,
+      clearImages,
+      sequence,
+      previousModelId: existing ? existing.previousModelId : currentSummary?.modelId,
+      previousProvider: existing ? existing.previousProvider : currentSummary?.provider,
+      previousThinkingLevel: existing ? existing.previousThinkingLevel : currentSummary?.thinkingLevel,
+    };
+    // A confirmed image-removal modal used setModelByCorrId only to retain its
+    // intent. Once deferred, this dedicated queue owns the lifecycle.
+    delete draft.pending.setModelByCorrId[corrId];
+  });
+}
+
+export function sessionHasDeferredModelWrite(state: ArchState, sessionPath: string): boolean {
+  return state.pending.deferredSetModelInFlightSessionPath === sessionPath
+    || state.pending.deferredSetModelBySession[sessionPath] !== undefined;
+}
+
+/** Start exactly one deferred write, in original click order. Head-of-line
+ * blocking on a pending path is intentional: settings.set also persists the
+ * global default, so replaying a later click first would let an older pending
+ * session overwrite that default when it eventually resolves. */
+export function startNextDeferredSetModel(state: ArchState): ReducerResult {
+  if (!state.settings.backendReady || state.pending.deferredSetModelInFlightCorrId) {
+    return { state, effects: [] };
+  }
+  const next = Object.values(state.pending.deferredSetModelBySession)
+    .sort((a, b) => a.sequence - b.sequence)[0];
+  if (!next || isPendingTabPath(next.sessionPath)) {
+    return { state, effects: [] };
+  }
+
+  const nextState = produce(state, (draft) => {
+    const summary = draft.sessions.sessions.find((item) => item.path === next.sessionPath);
+    if (summary) {
+      if (next.previousModelId === undefined) delete summary.modelId;
+      else summary.modelId = next.previousModelId;
+      if (next.previousProvider === undefined) delete summary.provider;
+      else summary.provider = next.previousProvider;
+      if (next.previousThinkingLevel === undefined) delete summary.thinkingLevel;
+      else summary.thinkingLevel = next.previousThinkingLevel;
+    }
+    delete draft.pending.deferredSetModelBySession[next.sessionPath];
+    draft.pending.deferredSetModelInFlightCorrId = next.corrId;
+    draft.pending.deferredSetModelInFlightSessionPath = next.sessionPath;
+  });
+  const effect: Effect = {
+    kind: 'DrainDeferredSetModelQueue',
+    corrId: `drain-model:${next.corrId}`,
+    entries: [next],
+  };
+  return { state: nextState, effects: [effect] };
+}
+
+/** Mark one replay complete and start the next ordered choice, if writable. */
+export function finishDeferredSetModelReplay(state: ArchState, corrId: string): ReducerResult {
+  const inFlightCorrId = state.pending.deferredSetModelInFlightCorrId;
+  if (inFlightCorrId !== null && inFlightCorrId !== corrId) {
+    return { state, effects: [] };
+  }
+  const cleared = inFlightCorrId === corrId
+    ? produce(state, (draft) => {
+        draft.pending.deferredSetModelInFlightCorrId = null;
+        draft.pending.deferredSetModelInFlightSessionPath = null;
+      })
+    : state;
+  // A normal (non-deferred) SetModel may have caused later clicks to enter the
+  // same ordered queue. Its result has no deferred marker, but still releases
+  // the head once its own optimistic snapshot has reconciled.
+  return startNextDeferredSetModel(cleared);
 }
 
 /** Drop the in-flight `SetModel` entry for `corrId` (RPC success or modal abort). */
@@ -230,7 +331,8 @@ export function handleAvailableModelsChanged(
   state: ArchState,
   event: Extract<Event, { kind: 'AvailableModelsChanged' }>,
 ): ReducerResult {
-  if (isStaleHydrationResult(state, event, 'session-catalog')) {
+  if (!state.sessions.openTabPaths.includes(event.sessionPath)
+    || isStaleHydrationResult(state, event, 'session-catalog')) {
     return { state, effects: [] };
   }
   const settings = nextModelHydrationSettings(state, event);
@@ -263,7 +365,8 @@ export function handleModelSettingsHydrated(
   state: ArchState,
   event: Extract<Event, { kind: 'ModelSettingsHydrated' }>,
 ): ReducerResult {
-  if (isStaleHydrationResult(state, event, 'global-settings')) {
+  if (!state.sessions.openTabPaths.includes(event.sessionPath)
+    || isStaleHydrationResult(state, event, 'global-settings')) {
     return { state, effects: [] };
   }
   const current = state.settings.modelSettings;

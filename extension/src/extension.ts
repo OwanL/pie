@@ -4,7 +4,7 @@ import { BackendClient } from './host/backend/client';
 import { PieExtension } from './host/extension-host';
 import { bootTraceSync } from './host/util/audit';
 import { toErrorMessage } from './host/util/error-message';
-import { appendPieError, initPieLogger, parseLogLevel, pieLog, setLogLevel } from './host/util/pie-logger';
+import { appendPieError, flushPieLogger, initPieLogger, parseLogLevel, pieLog, setLogLevel } from './host/util/pie-logger';
 import { reapTempLogs } from './host/util/temp-log-reaper';
 
 let extensionInstance: PieExtension | null = null;
@@ -79,9 +79,11 @@ export function activate(context: vscode.ExtensionContext): void {
     const piePath = normalizePath(context.extensionPath);
     process.on('unhandledRejection', (reason) => {
       appendPieError('process', 'unhandledRejection', reason);
+      void flushPieLogger();
     });
     process.on('uncaughtException', (err) => {
       appendPieError('process', 'uncaughtException', err);
+      void flushPieLogger();
       if (originatesFromPie(err, piePath)) {
         void vscode.window.showErrorMessage('pie: uncaught exception: ' + toErrorMessage(err));
       }
@@ -98,5 +100,9 @@ export async function deactivate(): Promise<void> {
   bootTraceSync('extension', 'deactivate.enter');
   const extension = extensionInstance;
   extensionInstance = null;
-  await extension?.shutdown();
+  try {
+    await extension?.shutdown();
+  } finally {
+    await flushPieLogger();
+  }
 }

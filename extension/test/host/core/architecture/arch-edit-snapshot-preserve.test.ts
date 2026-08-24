@@ -11,8 +11,8 @@
  * message + reply), so the transcript cleared and the assistant streamed a reply
  * with no visible user message ("replies to nothing").
  *
- * Fix: treat the host's own running signal (`runningSessionPaths`, set
- * optimistically by `handleEdit`) as an additional preserve trigger, so the
+ * Fix: treat the host's pending optimistic operation as an additional preserve
+ * trigger, so the
  * optimistic edit message survives the intermediate truncate snapshot. The
  * authoritative `agent_end` snapshot arrives after `BusyChanged(false)` clears
  * `runningSessionPaths`, so it still replaces cleanly with the final transcript.
@@ -96,6 +96,20 @@ function midEditState(): ArchState {
         },
       },
     },
+    pending: {
+      ...initialArchState.pending,
+      ops: {
+        'edit-corr': {
+          kind: 'edit',
+          sessionPath: '/s',
+          localId: 'local:edit:abc',
+          previousSummary: null,
+          startedAt: 1,
+          removedTail: [],
+          editDraft: { messageId: 'user-1', text: 'edited question', inputs: [] },
+        },
+      },
+    },
   };
 }
 
@@ -142,6 +156,10 @@ test('after the turn ends, the authoritative agent_end snapshot still replaces w
     sessions: {
       ...midEditState().sessions,
       runningSessionPaths: [],
+    },
+    pending: {
+      ...midEditState().pending,
+      ops: {},
     },
   };
 

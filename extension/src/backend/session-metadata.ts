@@ -242,7 +242,7 @@ export type ModelCatalogLoadResult =
   | { ok: true; models: ModelInfo[] }
   | { ok: false; models: []; error: string };
 
-function projectRegistryModels(
+export function projectRegistryModels(
   models: SdkCatalogModel[],
   agentDir?: string,
 ): ModelInfo[] {

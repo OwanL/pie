@@ -8,7 +8,7 @@ import type { LazyDetailRef } from '../../../src/shared/protocol';
 import type { TurnSemanticEnvelope } from '../../../src/shared/live-pipeline-protocol';
 
 const base = {
-  protocolVersion: 6,
+  protocolVersion: 7,
   sessionPath: '/session.jsonl',
   requestId: 'request',
   turnId: 'turn',

@@ -109,18 +109,20 @@ export function projectLiveTurn(
 
 export function projectLiveTool(tool: LiveToolRecord, sessionPath: string, messageId: string): ToolCall {
   const terminal = tool.terminal;
+  const executionEnd = tool.executionEnd;
+  const lifecycle = terminal ?? executionEnd;
   const projected: ToolCall = {
     id: tool.transcriptToolCallId,
     name: tool.name,
     input: tool.immutableInput,
     result: terminal?.result ?? tool.preview,
-    status: terminal?.status ?? 'running',
+    status: lifecycle?.status ?? 'running',
     startedAt: tool.startedAt,
-    durationMs: terminal?.durationMs,
+    durationMs: lifecycle?.durationMs,
     parallelGroupId: tool.parallelGroupId,
     executionId: tool.executionId,
     seq: tool.seq,
-    phase: terminal ? terminal.status : tool.phase,
+    phase: lifecycle?.status ?? tool.phase,
     durableEntryId: terminal?.durableEntryId,
   };
   return compactToolCallDetail(projected, {

@@ -5,6 +5,8 @@
  *    with "Timed out waiting for the pie backend to become ready."
  *  - the reducer's `StartBackendReadyWatchdog` effect — drops queued sends
  *    and shows "Backend did not become ready within Ns."
+ *  - a first `message.send` to a cold session — allows the isolated worker to
+ *    load the same SDK/services before acknowledging the queued prompt.
  *
  * Sized to absorb a cold SDK load. The backend's `start.loadSdk` step
  * dynamically imports the upstream `@earendil-works/pi-coding-agent` bundle,
@@ -17,6 +19,9 @@
  * `listAndOpenFirstSession()` was never reached. 120s gives comfortable
  * headroom while still surfacing genuinely hung backends.
  *
- * Keep this single source of truth; do not redeclare the timeout elsewhere.
+ * Cold session promotion has the same failure mode: a 60s host deadline can
+ * roll back a prompt even though the worker becomes ready and executes it a
+ * few seconds later. Keep this single source of truth; do not redeclare the
+ * timeout elsewhere.
  */
 export const BACKEND_READY_TIMEOUT_MS = 120_000;

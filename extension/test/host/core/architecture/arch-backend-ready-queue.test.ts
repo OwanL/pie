@@ -125,6 +125,30 @@ test('Send when !backendReady: multiple sends queue in order, each emits StartWa
   assert.equal(queue?.[1]?.text, 'hello');
 });
 
+test('Send waits without a backend watchdog when its model choice is deferred', () => {
+  const base = notReadyState();
+  const state: ArchState = {
+    ...base,
+    settings: { ...base.settings, backendReady: true },
+    pending: {
+      ...base.pending,
+      deferredSetModelSequence: 1,
+      deferredSetModelBySession: {
+        [SESSION]: {
+          corrId: 'model-gate', sessionPath: SESSION,
+          modelSettings: { defaultModel: 'new-model', defaultThinkingLevel: 'high' },
+          clearImages: false, sequence: 1, previousModelId: 'old-model',
+        },
+      },
+    },
+  };
+  const out = reducer(state, sendCmd('send-gated', SESSION));
+
+  assert.deepEqual(out.effects, []);
+  assert.equal(out.state.pending.backendReadyQueueBySession[SESSION]?.[0]?.corrId, 'send-gated');
+  assert.equal(out.state.pending.ops['send-gated'], undefined);
+});
+
 test('Send when backendReady: normal path (no queue, SendRpc emitted)', () => {
   const state: ArchState = {
     ...notReadyState(),
@@ -179,6 +203,140 @@ test('BackendReadyChanged{ready:true} with empty queue: no effects', () => {
 
   assert.equal(out.state.settings.backendReady, true);
   assert.deepEqual(out.effects, []);
+});
+
+test('BackendReadyChanged replays deferred model configuration through the durable SetModel path', () => {
+  const state = notReadyState({
+    sessions: {
+      ...initialArchState.sessions,
+      sessions: [{ ...summary(SESSION), modelId: 'new-model', provider: 'p', thinkingLevel: 'high' }],
+      openTabPaths: [SESSION],
+      activeSessionPath: SESSION,
+    },
+    pending: {
+      ...initialArchState.pending,
+      deferredSetModelSequence: 1,
+      deferredSetModelBySession: {
+        [SESSION]: {
+          corrId: 'model-1',
+          sessionPath: SESSION,
+          modelSettings: { defaultModel: 'new-model', defaultProvider: 'p', defaultThinkingLevel: 'high' },
+          clearImages: false,
+          sequence: 1,
+          previousModelId: 'old-model',
+          previousProvider: 'old-provider',
+          previousThinkingLevel: 'low',
+        },
+      },
+    },
+  });
+  const out = reducer(state, backendReadyChanged(true));
+
+  assert.equal(out.state.pending.deferredSetModelBySession[SESSION], undefined);
+  assert.equal(out.state.pending.deferredSetModelInFlightCorrId, 'model-1');
+  assert.equal(out.state.sessions.sessions[0]?.modelId, 'old-model');
+  assert.equal(out.state.sessions.sessions[0]?.provider, 'old-provider');
+  assert.equal(out.state.sessions.sessions[0]?.thinkingLevel, 'low');
+  assert.deepEqual(out.effects, [{
+    kind: 'DrainDeferredSetModelQueue',
+    corrId: 'drain-model:model-1',
+    entries: [state.pending.deferredSetModelBySession[SESSION]],
+  }]);
+});
+
+test('backend-ready sends wait for the deferred model write for their session', () => {
+  const modelEntry = {
+    corrId: 'model-before-send', sessionPath: SESSION,
+    modelSettings: { defaultModel: 'new-model', defaultProvider: 'p', defaultThinkingLevel: 'high' as const },
+    clearImages: false, sequence: 1, previousModelId: 'old-model', previousThinkingLevel: 'low' as const,
+  };
+  const sendEntry = {
+    sessionPath: SESSION, corrId: 'send-1', text: 'use the new model', inputs: [],
+    composedText: 'use the new model', localId: 'local:send-1', previousSummary: null, timestamp: 1,
+  };
+  const state = notReadyState({
+    pending: {
+      ...initialArchState.pending,
+      deferredSetModelSequence: 1,
+      deferredSetModelBySession: { [SESSION]: modelEntry },
+      backendReadyQueueBySession: { [SESSION]: [sendEntry] },
+    },
+  });
+  const ready = reducer(state, backendReadyChanged(true));
+
+  assert.deepEqual(ready.effects, [
+    { kind: 'DrainDeferredSetModelQueue', corrId: 'drain-model:model-before-send', entries: [modelEntry] },
+    { kind: 'CancelBackendReadyWatchdog', corrId: 'watchdog' },
+  ]);
+  assert.deepEqual(ready.state.pending.backendReadyQueueBySession[SESSION], [sendEntry]);
+
+  const replaying = reducer(ready.state, {
+    kind: 'Command',
+    cmd: {
+      kind: 'SetModel', corrId: modelEntry.corrId, sessionPath: SESSION,
+      modelSettings: modelEntry.modelSettings, deferredReplay: true,
+    },
+  });
+  const completed = reducer(replaying.state, {
+    kind: 'SetModelResult', corrId: modelEntry.corrId, sessionPath: SESSION, ok: true,
+  });
+  assert.equal(completed.state.pending.backendReadyQueueBySession[SESSION], undefined);
+  assert.deepEqual(completed.effects, [{
+    kind: 'DrainBackendReadyQueue',
+    corrId: 'drain:model-ready:model-before-send',
+    entries: [sendEntry],
+  }]);
+});
+
+test('deferred model writes replay one at a time in click order across sessions', () => {
+  const first = {
+    corrId: 'model-1', sessionPath: SESSION,
+    modelSettings: { defaultModel: 'first', defaultProvider: 'p', defaultThinkingLevel: 'high' as const },
+    clearImages: false, sequence: 1, previousModelId: 'old-a', previousThinkingLevel: 'low' as const,
+  };
+  const second = {
+    corrId: 'model-2', sessionPath: SESSION_B,
+    modelSettings: { defaultModel: 'second', defaultProvider: 'p', defaultThinkingLevel: 'xhigh' as const },
+    clearImages: false, sequence: 2, previousModelId: 'old-b', previousThinkingLevel: 'medium' as const,
+  };
+  const state = notReadyState({
+    sessions: {
+      ...initialArchState.sessions,
+      sessions: [
+        { ...summary(SESSION), modelId: 'first', thinkingLevel: 'high' },
+        { ...summary(SESSION_B), modelId: 'second', thinkingLevel: 'xhigh' },
+      ],
+      openTabPaths: [SESSION, SESSION_B],
+    },
+    pending: {
+      ...initialArchState.pending,
+      deferredSetModelSequence: 2,
+      deferredSetModelBySession: { [SESSION]: first, [SESSION_B]: second },
+    },
+  });
+
+  const ready = reducer(state, backendReadyChanged(true));
+  assert.equal(ready.state.pending.deferredSetModelInFlightCorrId, 'model-1');
+  assert.equal(ready.state.pending.deferredSetModelBySession[SESSION_B]?.corrId, 'model-2');
+  assert.deepEqual(ready.effects, [{
+    kind: 'DrainDeferredSetModelQueue', corrId: 'drain-model:model-1', entries: [first],
+  }]);
+
+  const replayedFirst = reducer(ready.state, {
+    kind: 'Command',
+    cmd: {
+      kind: 'SetModel', corrId: 'model-1', sessionPath: SESSION,
+      modelSettings: first.modelSettings, deferredReplay: true,
+    },
+  });
+  const completedFirst = reducer(replayedFirst.state, {
+    kind: 'SetModelResult', corrId: 'model-1', sessionPath: SESSION, ok: true,
+  });
+  assert.equal(completedFirst.state.pending.deferredSetModelInFlightCorrId, 'model-2');
+  assert.equal(completedFirst.state.sessions.sessions.find((item) => item.path === SESSION_B)?.modelId, 'old-b');
+  assert.deepEqual(completedFirst.effects, [{
+    kind: 'DrainDeferredSetModelQueue', corrId: 'drain-model:model-2', entries: [second],
+  }]);
 });
 
 test('BackendReadyChanged{ready:true} with entries across multiple sessions: drains all', () => {
