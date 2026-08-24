@@ -3,7 +3,7 @@
 **Purpose:** Authoritative traceability record for every price written to `models.json`.
 Every non-zero cost field in `models.json` MUST have a corresponding row in this document.
 
-**Retrieval date:** 2026-08-01 (Ollama Cloud catalog/capabilities refreshed from Ollama; token rates refreshed from Ollama and OpenRouter; GitHub Copilot catalog refreshed 2026-07-27; OpenAI Codex pricing refreshed 2026-07-16)
+**Retrieval date:** 2026-08-24 (OpenAI and GitHub Copilot rates refreshed from official pricing pages; Ollama comparison rates refreshed from Ollama and OpenRouter)
 **Format:** All prices in USD per 1M tokens unless otherwise noted.
 
 ---
@@ -12,11 +12,13 @@ Every non-zero cost field in `models.json` MUST have a corresponding row in this
 
 For each model in `model-profiles.yaml`:
 - **GitHub Copilot models**: Token pricing sourced from official GitHub Copilot billing documentation. 1 AI credit = $0.01 USD.
-- **OpenAI Codex models**: Opportunity-cost rates sourced from the official [OpenAI API pricing](https://developers.openai.com/api/docs/pricing) table. Codex is subscription-billed here, but these rates make its token use comparable with the other providers. Long-context tiers and the 272K threshold match OpenAI's catalog metadata bundled with pi-ai.
+- **OpenAI Codex models**: Opportunity-cost rates sourced from the official [OpenAI model pricing](https://developers.openai.com/api/docs/models) pages. Codex is subscription-billed here, but these rates make its token use comparable with the other providers. Long-context tiers use OpenAI's published 272K threshold and request-wide multipliers; cache writes use the published 1.25x uncached-input rate.
 - **Ollama Cloud models**: Availability, IDs, modalities, and served context windows come from Ollama's live cloud catalog and local `/api/show` manifests. Kimi K3 pricing is published directly by Ollama; other opportunity-cost rates come from the live [OpenRouter](https://openrouter.ai/api/v1/models) model API (`pricing.prompt` / `pricing.completion` / `pricing.input_cache_read`), converted from USD per token to USD per 1M tokens. These are comparison rates; Ollama bills individual plans through included usage and optional extra usage rather than charging every request at these rates.
 - **Umans models**: No longer active. Umans ended its coding subscriptions; the last configured metadata remains only in `historicalModels` for past-session attribution.
 - **Ollama Local models**: Free/local (no API cost).
 - **Grok models**: No official token pricing found; marked as unknown.
+
+Pi computes `usage.cost` client-side from the model catalog at turn completion; providers do not return an invoice amount in that field. Pie persists that value as `reportedCostUsd`, but reprices token-bearing usage from the current provider-qualified catalog so catalog corrections repair existing sessions as well as new ones. The stored value remains a fallback for unpriced models or cost-only records. Long-context tiers are applied to individual turn/request samples; multi-turn subagent aggregates use base rates because their per-request threshold crossings cannot be reconstructed. The UI therefore describes every dollar figure as an API-equivalent catalog estimate, not independently reconciled provider billing.
 
 ### Confidence levels
 
@@ -42,11 +44,13 @@ Conversion: 1 AI credit = $0.01 USD
 | claude-haiku-4.5 | $1.00 | $0.10 | $1.25 | $5.00 | USD/1M tokens | official | Copilot docs table |
 | claude-sonnet-4.5 | $3.00 | $0.30 | $3.75 | $15.00 | USD/1M tokens | official | Copilot docs table |
 | claude-sonnet-4.6 | $3.00 | $0.30 | $3.75 | $15.00 | USD/1M tokens | official | Same tier as sonnet-4.5 per Copilot docs |
+| claude-sonnet-5 | $2.00 | $0.20 | $2.50 | $10.00 | USD/1M tokens | official | Promotional Copilot pricing through 2026-08-31 |
 | claude-opus-4.6 | $5.00 | $0.50 | $6.25 | $25.00 | USD/1M tokens | official | Copilot docs table |
 | claude-opus-4.7 | $5.00 | $0.50 | $6.25 | $25.00 | USD/1M tokens | official | Same tier as opus-4.6 per Copilot docs |
 | claude-opus-4.8 | $5.00 | $0.50 | $6.25 | $25.00 | USD/1M tokens | official | Copilot docs table |
-| claude-opus-4.8-fast | $10.00 | $1.00 | $12.50 | $50.00 | USD/1M tokens | official | Account-scoped Copilot `/models` token prices, retrieved 2026-07-27 |
-| claude-opus-5 | $5.00 | $0.50 | $6.25 | $25.00 | USD/1M tokens | official | Account-scoped Copilot `/models` token prices, retrieved 2026-07-27 |
+| claude-opus-4.8-fast | $10.00 | $1.00 | $12.50 | $50.00 | USD/1M tokens | official | Copilot docs table |
+| claude-opus-5 | $5.00 | $0.50 | $6.25 | $25.00 | USD/1M tokens | official | Copilot docs table |
+| claude-fable-5 | $10.00 | $1.00 | $12.50 | $50.00 | USD/1M tokens | official | Copilot docs table |
 
 **Disabled/ineligible Copilot Anthropic models** (historical pricing):
 
@@ -57,17 +61,16 @@ Conversion: 1 AI credit = $0.01 USD
 
 ### OpenAI (via Copilot)
 
-| Model ID | Input | Cached Input | Output | Source Units | Confidence | Notes |
-|---|---|---|---|---|---|---|
-| gpt-4o | $2.50 | $0.25 | $10.00 | USD/1M tokens | official | Copilot docs table |
-| gpt-4.1 | $2.00 | $0.50 | $8.00 | USD/1M tokens | official | Copilot docs table |
-| gpt-5-mini | $0.25 | $0.025 | $2.00 | USD/1M tokens | official | Copilot docs table; free-tier included |
-| gpt-5.4-mini | $0.75 | $0.075 | $4.50 | USD/1M tokens | official | Copilot docs table |
-| gpt-5.2 | $1.75 | $0.175 | $14.00 | USD/1M tokens | official | Copilot docs table |
-| gpt-5.2-codex | $1.75 | $0.175 | $14.00 | USD/1M tokens | official | Same as gpt-5.2 per docs |
-| gpt-5.3-codex | $1.75 | $0.175 | $14.00 | USD/1M tokens | official | Copilot docs table |
-| gpt-5.4 | $2.50 | $0.25 | $15.00 | USD/1M tokens | official | Copilot docs table |
-| gpt-5.5 | $5.00 | $0.50 | $30.00 | USD/1M tokens | official | Copilot docs table |
+| Model ID | Input | Cached Input | Cache Write | Output | Long-context Input | Long-context Cached | Long-context Cache Write | Long-context Output | Threshold | Confidence |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| gpt-5-mini | $0.25 | $0.025 | $0 | $2.00 | — | — | — | — | — | official |
+| gpt-5.3-codex | $1.75 | $0.175 | $0 | $14.00 | — | — | — | — | — | official |
+| gpt-5.4 | $2.50 | $0.25 | $0 | $15.00 | $5.00 | $0.50 | $0 | $22.50 | >272K | official |
+| gpt-5.4-mini | $0.75 | $0.075 | $0 | $4.50 | — | — | — | — | — | official |
+| gpt-5.5 | $5.00 | $0.50 | $0 | $30.00 | $10.00 | $1.00 | $0 | $45.00 | >272K | official |
+| gpt-5.6-luna | $0.20 | $0.02 | $0.25 | $1.20 | $0.40 | $0.04 | $0.50 | $1.80 | >200K | official |
+| gpt-5.6-sol | $5.00 | $0.50 | $6.25 | $30.00 | $10.00 | $1.00 | $12.50 | $45.00 | >272K | official |
+| gpt-5.6-terra | $2.00 | $0.20 | $2.50 | $12.00 | $4.00 | $0.40 | $5.00 | $18.00 | >272K | official |
 
 **Disabled/ineligible Copilot OpenAI models** (historical pricing):
 
@@ -79,7 +82,7 @@ Conversion: 1 AI credit = $0.01 USD
 | gpt-5.1-codex-mini | $0.75 | $0.075 | $4.50 | official | Superseded |
 | gpt-5 | $1.75 | $0.175 | $14.00 | official | Superseded |
 
-Cache write pricing is NOT published for OpenAI Copilot models. Models default cacheWrite to 0 unless explicitly stated.
+GPT-5.6 Copilot models have published cache-write rates. Earlier Copilot OpenAI models retain `cacheWrite: 0` because GitHub lists cache write as not applicable.
 
 ### Google (via Copilot)
 
@@ -108,29 +111,29 @@ Cache write pricing is NOT published for Google Copilot models.
 ## OpenAI Codex Models
 
 **Source:** [OpenAI API pricing](https://developers.openai.com/api/docs/pricing)
-**Retrieval date:** 2026-07-16
+**Retrieval date:** 2026-08-24
 **Units:** USD per 1M tokens.
 
 The configured `openai-codex` provider uses a ChatGPT subscription, so these are opportunity-cost estimates rather than incremental charges to the subscription. All six built-in GPT models previously missing pie-side overrides are now represented; this lets the picker and session indicator resolve their pricing instead of reporting them as unpriced.
 
 | Model ID | Input | Cached Input | Cache Write | Output | Long-context Input | Long-context Cached | Long-context Cache Write | Long-context Output | Confidence |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| gpt-5.6-sol | $5.00 | $0.50 | $6.25 | $30.00 | $10.00 | $1.00 | $12.50 | $45.00 | official |
-| gpt-5.6-terra | $2.50 | $0.25 | $3.125 | $15.00 | $5.00 | $0.50 | $6.25 | $22.50 | official |
-| gpt-5.6-luna | $1.00 | $0.10 | $1.25 | $6.00 | $2.00 | $0.20 | $2.50 | $9.00 | official |
+| gpt-5.6-sol | $4.00 | $0.40 | $5.00 | $20.00 | $8.00 | $0.80 | $10.00 | $30.00 | official |
+| gpt-5.6-terra | $2.00 | $0.20 | $2.50 | $12.00 | $4.00 | $0.40 | $5.00 | $18.00 | official |
+| gpt-5.6-luna | $0.20 | $0.02 | $0.25 | $1.20 | $0.40 | $0.04 | $0.50 | $1.80 | official |
 | gpt-5.5 | $5.00 | $0.50 | $0 | $30.00 | $10.00 | $1.00 | $0 | $45.00 | official |
 | gpt-5.4 | $2.50 | $0.25 | $0 | $15.00 | $5.00 | $0.50 | $0 | $22.50 | official |
 | gpt-5.4-mini | $0.75 | $0.075 | $0 | $4.50 | — | — | — | — | official |
 | gpt-5.3-codex-spark | $1.75 | $0.175 | $0 | $14.00 | — | — | — | — | official-inferred |
 
-`gpt-5.3-codex-spark` inherits the published `gpt-5.3-codex` rates from OpenAI's Codex pricing row, matching pi-ai's built-in model metadata. Long-context tiers apply above 272K input tokens.
+`gpt-5.3-codex-spark` has no published dollar rate (OpenAI labels it “Research preview”), so its row is a planning estimate inherited from `gpt-5.3-codex`, matching pi-ai's built-in model metadata. Long-context tiers apply above 272K input tokens for the GPT-5.4–5.6 models shown with tiers.
 
 ---
 
 ## Ollama Cloud Models
 
 **Source:** [OpenRouter `/api/v1/models`](https://openrouter.ai/api/v1/models) — live aggregator of upstream provider per-token rates.
-**Retrieval date:** 2026-08-01
+**Retrieval date:** 2026-08-24
 **Confidence:** `official` for Kimi K3; `openrouter` for the remaining comparison rates
 **Units:** USD per 1M tokens.
 
@@ -139,26 +142,28 @@ The configured `openai-codex` provider uses a ChatGPT subscription, so these are
 | Model ID | Pricing source/model | Input | Output | Cache Read | Confidence | Ollama-served metadata |
 |---|---|---:|---:|---:|---|---|
 | kimi-k3:cloud | Ollama Kimi K3 page | $3.00 | $15.00 | $0.30 | official | 1M context; vision/tools/thinking; Pro/Max + extra usage |
-| deepseek-v4-flash:0731-cloud | deepseek/deepseek-v4-flash-0731 | $0.140 | $0.280 | $0.0028 | openrouter | 1M served context; tools; none/high/max thinking |
-| deepseek-v4-pro:cloud | deepseek/deepseek-v4-pro | $0.435 | $0.870 | $0.003625 | openrouter | 1M catalog context; tools/thinking |
-| deepseek-v4-flash:cloud | deepseek/deepseek-v4-flash | $0.140 | $0.280 | $0.028 | openrouter | 1M served context; tools/thinking |
+| deepseek-v4-flash:0731-cloud | deepseek/deepseek-v4-flash-0731 | $0.140 | $0.280 | $0.028 | openrouter | 1M served context; tools; none/high/max thinking |
+| deepseek-v4-pro:0813-cloud | deepseek/deepseek-v4-pro-0813 | $1.122 | $3.366 | $0.0374 | openrouter | 1M served context; tools; none/high/max thinking |
+| deepseek-v4-pro:cloud | deepseek/deepseek-v4-pro | $0.526176 | $1.052352 | $0.043848 | openrouter | 1M catalog context; tools/thinking |
+| deepseek-v4-flash:cloud | deepseek/deepseek-v4-flash | $0.0574 | $0.1148 | $0.01148 | openrouter | 1M served context; tools/thinking |
+| gemini-3-flash-preview:cloud | google/gemini-3-flash-preview | $0.500 | $3.000 | $0.050 | openrouter | Cache write $0.083333/1M; 1M served context; vision/tools/thinking |
 | gemma4:31b-cloud | google/gemma-4-31b-it | $0.100 | $0.340 | $0.100 | openrouter | 256K context; vision/tools/thinking |
 | glm-5.1:cloud | z-ai/glm-5.1 | $0.966 | $3.036 | $0.1794 | openrouter | 198K context; tools/thinking |
-| glm-5.2:cloud | z-ai/glm-5.2 | $1.120 | $3.520 | $0.208 | openrouter | 1M context; tools/thinking |
+| glm-5.2:cloud | z-ai/glm-5.2 | $0.966 | $3.036 | $0.1932 | openrouter | 1M context; tools/thinking |
 | gpt-oss:120b-cloud | openai/gpt-oss-120b | $0.037 | $0.170 | — | openrouter | 128K context; tools/thinking |
-| gpt-oss:20b-cloud | openai/gpt-oss-20b | $0.030 | $0.140 | — | openrouter | 128K context; tools/thinking; picker-ineligible |
-| kimi-k2.6:cloud | moonshotai/kimi-k2.6 | $0.600 | $3.410 | $0.200 | openrouter | 256K context; vision/tools/thinking |
-| kimi-k2.7-code:cloud | moonshotai/kimi-k2.7-code | $0.730 | $3.500 | $0.150 | openrouter | 256K context; vision/tools/thinking |
-| minimax-m2.7:cloud | minimax/minimax-m2.7 | $0.250 | $1.000 | $0.050 | openrouter | 192K served context; tools/thinking |
+| gpt-oss:20b-cloud | openai/gpt-oss-20b | $0.030 | $0.130 | $0.030 | openrouter | 128K context; tools/thinking; picker-ineligible |
+| kimi-k2.6:cloud | moonshotai/kimi-k2.6 | $0.950 | $4.000 | $0.160 | openrouter | 256K context; vision/tools/thinking |
+| kimi-k2.7-code:cloud | moonshotai/kimi-k2.7-code | $0.670 | $3.400 | $0.170 | openrouter | 256K context; vision/tools/thinking |
+| minimax-m2.7:cloud | minimax/minimax-m2.7 | $0.240 | $0.960 | $0.048 | openrouter | 192K served context; tools/thinking |
 | minimax-m3:cloud | minimax/minimax-m3 | $0.300 | $1.200 | $0.060 | openrouter | 512K served context; vision/tools/thinking |
 | mistral-large-3:675b-cloud | mistralai/mistral-large-2512 | $0.500 | $1.500 | $0.050 | openrouter | 256K context; vision/tools; no thinking |
 | nemotron-3-nano:30b-cloud | nvidia/nemotron-3-nano-30b-a3b | $0.050 | $0.200 | $0.030 | openrouter | 1M catalog context; tools/thinking |
 | nemotron-3-super:cloud | nvidia/nemotron-3-super-120b-a12b | $0.085 | $0.400 | — | openrouter | 256K served context; tools/thinking |
 | nemotron-3-ultra:cloud | nvidia/nemotron-3-ultra-550b-a55b | $0.600 | $3.600 | $0.200 | openrouter | 256K served context; tools/thinking |
-| qwen3.5:397b-cloud | qwen/qwen3.5-397b-a17b | $0.390 | $2.340 | — | openrouter | 256K context; vision/tools/thinking |
+| qwen3.5:397b-cloud | qwen/qwen3.5-397b-a17b | $0.500 | $3.600 | $0.300 | openrouter | 256K context; vision/tools/thinking |
 | qwen3.5:cloud | qwen/qwen3.5-plus-02-15 | $0.260 | $1.560 | — | openrouter | 256K context; vision/tools/thinking |
 
-Cache write: `$0` for all active Ollama rows.
+Cache write is `$0` for active Ollama rows except `gemini-3-flash-preview:cloud`, whose OpenRouter source publishes `$0.0833333333333` per 1M tokens.
 
 ---
 
@@ -170,7 +175,6 @@ Models previously available on Ollama Cloud but no longer listed. Pricing retain
 
 | Model ID | Input (est.) | Output (est.) | Active Params | Confidence | Notes |
 |---|---|---|---|---|---|
-| gemini-3-flash-preview:cloud | $0.50 | $3.00 | closed | openrouter | Retired 2026-07-15 |
 | glm-4.7:cloud | $0.40 | $1.75 | 32B | openrouter | Retired 2026-07-15; use GLM 5.2 |
 | glm-5:cloud | $0.60 | $1.92 | 32B | openrouter | Retired 2026-07-15; use GLM 5.2 |
 | kimi-k2.5:cloud | $0.375 | $2.025 | 32B | openrouter | Retired 2026-07-31; use Kimi K2.6 |
@@ -224,7 +228,7 @@ Models in `model-profiles.yaml` without pricing in this evidence document:
 |---|---|
 | grok-code-fast-1 | No official token pricing published by GitHub Copilot; cost remains unavailable until a real token rate is published. |
 
-No active Ollama Cloud model remains unpriced as of 2026-08-01. Kimi K3 uses Ollama's official rate; the remaining Ollama entries use current OpenRouter comparison rates.
+No active Ollama Cloud model remains unpriced as of 2026-08-24. Kimi K3 uses Ollama's official rate; the remaining Ollama entries use current OpenRouter comparison rates.
 
 ---
 
@@ -238,6 +242,10 @@ No active Ollama Cloud model remains unpriced as of 2026-08-01. Kimi K3 uses Oll
 6. **Ollama cloud/auth documentation**: https://docs.ollama.com/cloud and https://docs.ollama.com/api/authentication
 7. **Retired Umans service** (historical only): https://umans.ai
 8. Internal historical: `docs/internal/ollama-pro-cloud-models-ranked.md` (compute estimate methodology; superseded for live pricing by OpenRouter)
+9. **OpenAI GPT-5.6 Sol**: https://developers.openai.com/api/docs/models/gpt-5.6-sol
+10. **OpenAI GPT-5.6 Terra**: https://developers.openai.com/api/docs/models/gpt-5.6-terra
+11. **OpenAI GPT-5.6 Luna**: https://developers.openai.com/api/docs/models/gpt-5.6-luna
+12. **OpenAI ChatGPT/Codex rate card**: https://help.openai.com/en/articles/20001415-chatgpt-rate-card-enterprise-token-based-pricing
 
 ---
 
@@ -252,3 +260,4 @@ No active Ollama Cloud model remains unpriced as of 2026-08-01. Kimi K3 uses Oll
 | 2026-07-16 | Added official OpenAI opportunity-cost pricing and long-context tiers for all built-in `openai-codex` GPT-5.4–5.6 models, eliminating unpriced Codex sessions. Corrected GPT-5.6 Terra cache-write precision from $3.12 to the published $3.125. |
 | 2026-07-27 | Added Claude Opus 5 and Claude Opus 4.8 Fast using token prices and long-context metadata returned by GitHub Copilot's official account-scoped `/models` endpoint. |
 | 2026-08-01 | Removed the canceled Umans provider; synchronized Ollama's active cloud catalog and retirements; added Kimi K3, Nemotron 3 Nano 30B, Mistral Large 3, and DeepSeek V4 Flash 0731; refreshed live comparison rates and served capabilities/context limits; documented signed-in local-daemon auth. |
+| 2026-08-24 | Refreshed official OpenAI and GitHub Copilot pricing. Applied the July 30 Terra/Luna reductions and August 21 Sol promotion to direct Codex comparison rates; corrected Copilot Sol, GPT-5 mini, and GPT-5.3-Codex rates; refreshed OpenRouter comparison prices for every active Ollama model and added missing DeepSeek V4 Pro 0813 evidence. Documented that persisted `usage.cost` is a catalog calculation, not an invoice amount, and changed Pie to reprice token-bearing records from the corrected catalog while retaining stored cost as the unpriced/cost-only fallback. |

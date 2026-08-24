@@ -65,7 +65,7 @@ function AggregateStatsStripView({ stats, deferredTriggers, onOpenDeferredMenu }
     >
       <Tooltip contentNode={todayCostTooltipNode(stats)} placement="top" freezeWhileVisible>
         <span class="aggregate-strip-seg aggregate-strip-seg--primary">
-          24h <Num value={todayCost} format={formatCostAdaptive} width={8} class="aggregate-strip-cost" />
+          today <Num value={todayCost} format={formatCostAdaptive} width={8} class="aggregate-strip-cost" />
         </span>
       </Tooltip>
       <Sep />
@@ -295,7 +295,7 @@ function Legend({ items }: { items: { key: string; value: string }[] }): JSX.Ele
 
 function ariaLabel(s: AggregateStats): string {
   if (!s.ready) return 'Usage stats: computing.';
-  return `All runs today ${formatCostAdaptive(s.todayCost)}. This week ${formatCostAdaptive(s.weekCost)}. `
+  return `Estimated API-equivalent token cost across all runs today ${formatCostAdaptive(s.todayCost)}. This week ${formatCostAdaptive(s.weekCost)}. `
     + `${s.openTabCount} open tabs, ${s.runningSessionCount} running.`;
 }
 
@@ -313,9 +313,10 @@ function todayCostTooltipNode(s: AggregateStats): JSX.Element {
   return (
     <div class="rich-tooltip">
       <div class="rich-tooltip-head">
-        <span>All runs today</span>
+        <span>Estimated token cost today</span>
         <span class="rich-tooltip-head-value">{formatCostAdaptive(s.todayCost)}</span>
       </div>
+      <div class="rich-tooltip-sub">API-equivalent catalog estimate · subscriptions, plan allowances, and invoices are not reconciled</div>
       <div class="rich-tooltip-sub">{sub.join('  ·  ')}</div>
       <StackedAreaChart points={s.todayCostSeries} mode="cumulative" formatY={formatCostAdaptive} formatX={formatTimeOfDay}
         colorKeys={s.todayCostByProvider.map((p) => p.provider)} />
@@ -337,9 +338,10 @@ function weekCostTooltipNode(s: AggregateStats): string | JSX.Element {
   return (
     <div class="rich-tooltip">
       <div class="rich-tooltip-head">
-        <span>This week (7d)</span>
+        <span>Estimated token cost (7d)</span>
         <span class="rich-tooltip-head-value">{formatCostAdaptive(s.weekCost)}</span>
       </div>
+      <div class="rich-tooltip-sub">API-equivalent catalog estimate · subscriptions, plan allowances, and invoices are not reconciled</div>
       <div class="rich-tooltip-sub">{s.weekRunCount} run{s.weekRunCount === 1 ? '' : 's'}</div>
       <StackedAreaChart points={weekPoints} mode="rate" formatY={formatCostAdaptive} formatX={formatDateShort}
         colorKeys={s.weekCostByProvider.map((p) => p.provider)} />

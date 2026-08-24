@@ -272,7 +272,10 @@ function formatProviderModelCosts(models: Map<string, ModelCostBreakdown>): Form
 
   if (entries.length === 0) return { lines: [], displayedKnownCostUnits: 0 };
 
-  const lines = ['Session cost by provider / model (whole branch):'];
+  const lines = [
+    'Estimated API-equivalent token cost by provider / model (whole branch):',
+    '  Catalog rates only; subscriptions, plan allowances, and invoices are not reconciled.',
+  ];
   let displayedKnownCostUnits = 0;
   for (const entry of entries) {
     const separator = entry.modelId.indexOf('/');
@@ -304,8 +307,8 @@ function effectivePricing(usage: CostUsage, pricing: TokenPricing): TokenPricing
   return effective;
 }
 
-function costFromUsage(usage: CostUsage, pricing: TokenPricing): number {
-  const effective = effectivePricing(usage, pricing);
+function costFromUsage(usage: CostUsage, pricing: TokenPricing, applyLongContextTier = true): number {
+  const effective = applyLongContextTier ? effectivePricing(usage, pricing) : pricing;
   return ((usage.inputTokens / 1_000_000) * effective.input)
     + ((usage.outputTokens / 1_000_000) * effective.output)
     + ((usage.cacheReadTokens / 1_000_000) * effective.cacheRead)
@@ -566,7 +569,9 @@ function buildPruningPrepassSummary(
     ? details.prepassReportedCostUsd
     : undefined;
   const hasKnownCost = reportedCost !== undefined || (hasUsage && prepassPricing !== undefined);
-  const cost = reportedCost ?? (prepassPricing && hasUsage ? costFromUsage(usage, prepassPricing) : 0);
+  const cost = prepassPricing && hasUsage
+    ? costFromUsage(usage, prepassPricing)
+    : reportedCost ?? 0;
 
   return { cost, usage, modelId: billingModelId, hasUsage, hasKnownCost };
 }
@@ -617,13 +622,15 @@ function addCompletedUsageCost(
   const reportedCost = usage.reportedCostUsd;
   const hasKnownCost = pricing !== undefined || reportedCost !== undefined;
   const costs = pricing ? costBreakdownFromUsage(usage, pricing) : null;
-  const totalCost = reportedCost ?? costs?.total ?? 0;
+  // Persisted usage cost is a catalog calculation, not an invoice. Prefer the
+  // current catalog when token channels are present so price corrections also
+  // repair existing sessions; retain reported cost as the unpriced fallback.
+  const totalCost = costs?.total ?? reportedCost ?? 0;
   if (costs) {
-    const scale = reportedCost !== undefined && costs.total > 0 ? reportedCost / costs.total : 1;
-    summary.inputCost += costs.input * scale;
-    summary.outputCost += costs.output * scale;
-    summary.cacheReadCost += costs.cacheRead * scale;
-    summary.cacheWriteCost += costs.cacheWrite * scale;
+    summary.inputCost += costs.input;
+    summary.outputCost += costs.output;
+    summary.cacheReadCost += costs.cacheRead;
+    summary.cacheWriteCost += costs.cacheWrite;
   }
   if (hasKnownCost) {
     summary.totalCost += totalCost;
@@ -666,12 +673,37 @@ export function extractSubagentCostSummaryFromSnapshot(
   pricingForModel?: TokenPricingResolver,
 ): SubagentCostSummary {
   const summary = emptySubagentCostSummary();
-  for (const sample of snapshot.samples) {
-    if (sample.kind !== 'subagent') continue;
+  const samples = snapshot.samples.filter((sample) => sample.kind === 'subagent');
+  const grouped = new Map<string, typeof samples>();
+  for (const sample of samples) {
+    const groupId = sample.groupId ?? sample.sourceId;
+    const group = grouped.get(groupId);
+    if (group) group.push(sample);
+    else grouped.set(groupId, [sample]);
+  }
+  const catalogPricedGroups = new Set<string>();
+  for (const [groupId, group] of grouped) {
+    const tokenBearing = group.filter((sample) => sample.totalTokens > 0);
+    if (tokenBearing.length > 0 && tokenBearing.every((sample) => (
+      !!sample.modelId && pricingForModel?.(sample.modelId, sample.provider) !== undefined
+    ))) {
+      catalogPricedGroups.add(groupId);
+    }
+  }
+
+  for (const sample of samples) {
     const pricing = sample.modelId ? pricingForModel?.(sample.modelId, sample.provider) : undefined;
     const usage = assistantUsageFromSample(sample);
-    const cost = sample.reportedCostUsd ?? (pricing ? costFromUsage(usage, pricing) : 0);
-    const hasKnownCost = sample.reportedCostUsd !== undefined || pricing !== undefined;
+    const useCatalog = catalogPricedGroups.has(sample.groupId ?? sample.sourceId);
+    // A result-level exact cost may be represented as a tokenless residual
+    // beside token-bearing attempts. In catalog mode those attempts replace
+    // the whole stale aggregate, so the residual must not be added again.
+    const cost = useCatalog
+      ? pricing && usage.totalTokens > 0 ? costFromUsage(usage, pricing, false) : 0
+      : sample.reportedCostUsd ?? (pricing ? costFromUsage(usage, pricing) : 0);
+    const hasKnownCost = useCatalog
+      ? usage.totalTokens > 0 && pricing !== undefined
+      : sample.reportedCostUsd !== undefined || pricing !== undefined;
     summary.totalCost += cost;
     summary.directCost += cost;
     summary.directResultCount += 1;
@@ -748,7 +780,9 @@ export function buildSessionCostIndicator(
       if (sample.kind !== 'skill_pruning_prepass') continue;
       const samplePricing = sample.modelId ? pricingForModel?.(sample.modelId, sample.provider) : undefined;
       const usage = assistantUsageFromSample(sample);
-      const cost = sample.reportedCostUsd ?? (samplePricing ? costFromUsage(usage, samplePricing) : 0);
+      const cost = samplePricing && usage.totalTokens > 0
+        ? costFromUsage(usage, samplePricing)
+        : sample.reportedCostUsd ?? 0;
       const hasKnownCost = sample.reportedCostUsd !== undefined || samplePricing !== undefined;
       const modelId = normalizeModelId(
         qualifyBillingModelId(sample.modelId, sample.provider),

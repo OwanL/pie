@@ -22,9 +22,9 @@ function renderRate(runningSessionCount: number, rollingRate = runningSessionCou
   }));
 }
 
-test('aggregate stats strip labels today cost as 24h accounting', () => {
+test('aggregate stats strip labels calendar-day cost as today', () => {
   const html = renderRate(0);
-  assert.match(html, /24h/);
+  assert.match(html, /today/);
 });
 
 test('aggregate stats strip does not present historical throughput as live while idle', () => {

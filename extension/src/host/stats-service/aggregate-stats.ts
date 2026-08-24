@@ -356,9 +356,12 @@ function costFromTokens(
   cacheReadTokens: number,
   cacheWriteTokens: number,
   pricing: ModelTokenPricing | null,
+  applyLongContextTier = true,
 ): number {
   if (!pricing) return 0;
-  const effective = pricingForPromptTokens(pricing, inputTokens, cacheReadTokens, cacheWriteTokens);
+  const effective = applyLongContextTier
+    ? pricingForPromptTokens(pricing, inputTokens, cacheReadTokens, cacheWriteTokens)
+    : pricing;
   return (
     (inputTokens / 1_000_000) * effective.input
     + (outputTokens / 1_000_000) * effective.output
@@ -407,6 +410,7 @@ function usageForModel(
   pricingMap: Map<string, ModelPricingRecord[]>,
   preferredProvider?: string,
   reportedCostUsd?: number,
+  aggregateAcrossRequests = false,
 ): AttributedUsage {
   // Unknown/stale model IDs are folded into one stable bucket. This keeps every
   // model/provider breakdown bounded by the current pricing catalog plus one,
@@ -415,20 +419,28 @@ function usageForModel(
   // authoritative even when the id cannot be resolved (see providerForModel).
   const attributedModel = canonicalModel(model, pricingMap);
   const pricing = pricingForModel(attributedModel, pricingMap, preferredProvider);
+  const calculatedCost = costFromTokens(
+    counts.inputTokens,
+    counts.outputTokens,
+    counts.cacheReadTokens,
+    counts.cacheWriteTokens,
+    pricing,
+    !aggregateAcrossRequests,
+  );
+  const validReportedCost = typeof reportedCostUsd === 'number'
+    && Number.isFinite(reportedCostUsd) && reportedCostUsd >= 0
+    ? reportedCostUsd
+    : undefined;
   return {
     ...counts,
     model: attributedModel,
     provider: providerForModel(attributedModel, pricingMap, preferredProvider),
     occurredAtMs,
-    cost: typeof reportedCostUsd === 'number' && Number.isFinite(reportedCostUsd) && reportedCostUsd >= 0
-      ? reportedCostUsd
-      : costFromTokens(
-          counts.inputTokens,
-          counts.outputTokens,
-          counts.cacheReadTokens,
-          counts.cacheWriteTokens,
-          pricing,
-        ),
+    // Pi's persisted `usage.cost` is itself calculated from the model catalog;
+    // it is not a provider invoice. Recalculate known, token-bearing usage so
+    // a corrected catalog immediately repairs stale stored estimates. Preserve
+    // the stored value only when the model is unpriced or tokens are absent.
+    cost: pricing && usageTotal(counts) > 0 ? calculatedCost : validReportedCost ?? calculatedCost,
   };
 }
 
@@ -451,11 +463,17 @@ function attributedRunUsage(
     cacheReadTokens: run.cacheReadTokens,
     cacheWriteTokens: run.cacheWriteTokens,
   };
+  const auxiliary = run.auxiliaryLlmUsage ?? [];
+  const forwardedSubagentKeys = new Set(auxiliary
+    .filter((sample) => sample.kind === 'subagent')
+    .map((sample) => `${Date.parse(sample.occurredAt)}\u0000${stripProviderPrefix(sample.modelId ?? runModel)}\u0000${sample.provider ?? ''}`));
   // Per-turn samples carry the provider/model that actually served that turn.
   // Reconcile them against canonical run totals so mixed-model runs remain
   // discrete without allowing duplicate/malformed samples to inflate usage.
   for (const sample of run.turnThroughputSamples) {
     if (usageTotal(parentRemaining) === 0) break;
+    const sampleKey = `${Date.parse(sample.endedAt)}\u0000${stripProviderPrefix(sample.modelId ?? runModel)}\u0000${sample.provider ?? ''}`;
+    if (forwardedSubagentKeys.has(sampleKey)) continue;
     const counts: TokenCounts = {
       inputTokens: Math.min(parentRemaining.inputTokens, sample.inputTokens ?? 0),
       outputTokens: Math.min(parentRemaining.outputTokens, sample.outputTokens),
@@ -475,9 +493,8 @@ function attributedRunUsage(
     parentRemaining = subtractUsage(parentRemaining, counts);
   }
   if (usageTotal(parentRemaining) > 0) {
-    usage.push(usageForModel(runModel, fallbackMs, parentRemaining, pricingMap, run.provider));
+    usage.push(usageForModel(runModel, fallbackMs, parentRemaining, pricingMap, run.provider, undefined, true));
   }
-  const auxiliary = run.auxiliaryLlmUsage ?? [];
   const seen = new Set<string>();
 
   for (const sample of auxiliary) {
@@ -500,6 +517,7 @@ function attributedRunUsage(
       pricingMap,
       providerForSample(sample.modelId, sample.provider, run.modelId, run.provider),
       sample.reportedCostUsd,
+      false,
     ));
   }
 
@@ -535,6 +553,7 @@ function attributedRunUsage(
       pricingMap,
       providerForSample(sample.modelId, sample.provider, run.modelId, run.provider),
       equalUsage(counts, sampleCounts) ? sample.reportedCostUsd : undefined,
+      true,
     ));
     remaining = subtractUsage(remaining, counts);
   }
@@ -555,6 +574,8 @@ function attributedRunUsage(
       remaining,
       pricingMap,
       providerForSample(fallbackModel, undefined, run.modelId, run.provider),
+      undefined,
+      true,
     ));
   }
 
@@ -748,6 +769,24 @@ export function accumulateAggregateStats(
     return acc;
   };
 
+  const dayAccumulator = (date: string): DayAccumulator => {
+    let day = byDay.get(date);
+    if (!day) {
+      day = {
+        date,
+        byProvider: new Map(),
+        byModel: new Map(),
+        runCount: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        toolCallCount: 0,
+        touchedFileCount: 0,
+      };
+      byDay.set(date, day);
+    }
+    return day;
+  };
+
   for (const run of runs) {
     instrumentation?.onRunAccumulated?.(run);
     if (run.sessionPath) sessionPaths.add(run.sessionPath);
@@ -797,48 +836,51 @@ export function accumulateAggregateStats(
       }
     }
 
-    // Daily cost/token buckets retain the existing run-end calendar semantics,
-    // while each usage slice keeps its own provider/model attribution.
+    // Cost and tokens belong to the day the provider usage occurred. Bucketing
+    // an entire long-lived run on its finalization date can move days or weeks
+    // of spend into "today" when a session is finally closed. Run/tool/file
+    // counts remain completion-day activity because they have no per-event
+    // timestamp in the aggregate snapshot.
+    for (const item of usage) {
+      const itemMs = Number.isFinite(item.occurredAtMs) ? item.occurredAtMs : dayMs;
+      if (Number.isNaN(itemMs)) continue;
+      const day = dayAccumulator(localDateString(itemMs));
+      let dayAcc = day.byProvider.get(item.provider);
+      if (!dayAcc) {
+        dayAcc = createProviderAccumulator(item.provider);
+        day.byProvider.set(item.provider, dayAcc);
+      }
+      dayAcc.cost += item.cost;
+      dayAcc.inputTokens += item.inputTokens;
+      dayAcc.outputTokens += item.outputTokens;
+      dayAcc.cacheReadTokens += item.cacheReadTokens;
+      dayAcc.cacheWriteTokens += item.cacheWriteTokens;
+      day.byModel.set(item.model, (day.byModel.get(item.model) ?? 0) + item.cost);
+      day.inputTokens += item.inputTokens;
+      day.outputTokens += item.outputTokens;
+    }
+
     if (!Number.isNaN(dayMs)) {
       const date = localDateString(dayMs);
-      let day = byDay.get(date);
-      if (!day) {
-        day = {
-          date,
-          byProvider: new Map(),
-          byModel: new Map(),
-          runCount: 0,
-          inputTokens: 0,
-          outputTokens: 0,
-          toolCallCount: 0,
-          touchedFileCount: 0,
-        };
-        byDay.set(date, day);
-      }
-      for (const item of usage) {
-        let dayAcc = day.byProvider.get(item.provider);
-        if (!dayAcc) {
-          dayAcc = createProviderAccumulator(item.provider);
-          day.byProvider.set(item.provider, dayAcc);
-        }
-        dayAcc.cost += item.cost;
-        dayAcc.inputTokens += item.inputTokens;
-        dayAcc.outputTokens += item.outputTokens;
-        dayAcc.cacheReadTokens += item.cacheReadTokens;
-        dayAcc.cacheWriteTokens += item.cacheWriteTokens;
-        day.byModel.set(item.model, (day.byModel.get(item.model) ?? 0) + item.cost);
-      }
+      const day = dayAccumulator(date);
       day.runCount += 1;
-      day.inputTokens += runInputTokens;
-      day.outputTokens += runOutputTokens;
       day.toolCallCount += run.toolUsage?.totalCount ?? 0;
       day.touchedFileCount += run.fileMutation?.touchedFileCount ?? 0;
+    }
 
-      // Preserve the existing run-end date semantics for intraday cost/token
-      // samples, but retain every date so "today" is chosen only at finalize.
+    const usageByDate = new Map<string, AttributedUsage[]>();
+    for (const item of usage) {
+      const itemMs = Number.isFinite(item.occurredAtMs) ? item.occurredAtMs : dayMs;
+      if (Number.isNaN(itemMs)) continue;
+      const date = localDateString(itemMs);
+      const dated = usageByDate.get(date);
+      if (dated) dated.push(item);
+      else usageByDate.set(date, [item]);
+    }
+    for (const [date, datedUsage] of usageByDate) {
       const series = distributeUsageForSeries(
         run,
-        usage,
+        datedUsage,
         dayMs,
         (ms) => localDateString(ms) === date,
         pricingMap,

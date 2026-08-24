@@ -260,7 +260,7 @@ test('buildSessionCostIndicator computes cost across all channels', () => {
   assert.ok(result);
   // 3 + 15 + 0.3 + 3.75 = 22.05
   assert.equal(result.label, '$22.05');
-  assert.match(result.tooltip, /Session cost by provider \/ model/);
+  assert.match(result.tooltip, /Estimated API-equivalent token cost by provider \/ model/);
   assert.match(result.tooltip, /Unknown provider \/ Selected model:\s+\$22\.0500/);
   assert.doesNotMatch(result.tooltip, /Input:|Output:|Cache read:|Cache write:/);
   assert.match(result.tooltip, /Total: \$22\.0500/);
@@ -509,7 +509,7 @@ test('subagent retry costs remain provider-scoped when model ids collide', () =>
   assert.equal(snapshotSummary.modelCosts.get('github-copilot/shared-model')?.cost, 0.02);
 });
 
-test('whole-session subagent accounting preserves top-level cost when attempt records omit exact cost', () => {
+test('whole-session subagent accounting reprices attempts without adding the stale aggregate residual', () => {
   const transcript = [{
     id: 'parent',
     role: 'assistant' as const,
@@ -542,8 +542,8 @@ test('whole-session subagent accounting preserves top-level cost when attempt re
   );
 
   assert.equal(accounting.samples.find((sample) => sample.sourceId.includes(':attempt:'))?.reportedCostUsd, 0);
-  assert.equal(summary.totalCost, 0.07);
-  assert.equal(summary.modelCosts.get('openai/worker-model')?.cost, 0.07);
+  assert.equal(summary.totalCost, 1.1);
+  assert.equal(summary.modelCosts.get('openai/worker-model')?.cost, 1.1);
 });
 
 test('buildSessionCostIndicator merges the live estimate into the selected model\'s by-model row', () => {

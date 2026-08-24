@@ -162,6 +162,24 @@ test('a recorded provider survives an unpriced model id instead of degrading to 
   assert.equal(providers.get('openai-codex')?.cost, 0.25);
 });
 
+test('known token usage is repriced from the catalog instead of preserving a stale stored estimate', () => {
+  const map = new Map([['gpt-5.6-sol', [price('openai-codex', 4)]]]);
+  const snapshot = run({
+    modelId: 'gpt-5.6-sol', provider: 'openai-codex', inputTokens: 1_000_000,
+    turnThroughputSamples: [{
+      endedAt: new Date(NOW - 500).toISOString(), inputTokens: 1_000_000, outputTokens: 0,
+      cacheReadTokens: 0, cacheWriteTokens: 0, generationDurationMs: 1,
+      concurrentBusySessions: 1, status: 'completed', modelId: 'gpt-5.6-sol',
+      provider: 'openai-codex', reportedCostUsd: 5,
+      turnLatencyMs: null, overheadMs: null, providerLatencyMs: null,
+    }],
+  });
+
+  const stats = computeAggregateStats([snapshot], map, NOW, [], {}, 0);
+  assert.equal(stats.todayCost, 4);
+  assert.equal(stats.totalCost, 4);
+});
+
 test('mixed same-id parent turns and auxiliary summaries remain provider-discrete', () => {
   const map = new Map([['gpt-5.6-sol', [price('github-copilot', 2), price('openai-codex', 5)]]]);
   const snapshot = run({
@@ -187,5 +205,5 @@ test('mixed same-id parent turns and auxiliary summaries remain provider-discret
   const providers = new Map(stats.todayCostByProvider.map((entry) => [entry.provider, entry]));
   assert.equal(providers.get('github-copilot')?.inputTokens, 10);
   assert.equal(providers.get('openai-codex')?.inputTokens, 23);
-  assert.equal(providers.get('openai-codex')?.cost, 0.4201);
+  assert.equal(providers.get('openai-codex')?.cost, 0.000115);
 });

@@ -230,7 +230,7 @@ providers:
         pricing:
           input: 0.14
           output: 0.28
-          cacheRead: 0.0028
+          cacheRead: 0.028
           cacheWrite: 0
         eligible: true
         thinking:
@@ -244,9 +244,9 @@ providers:
         contextWindow: 1048576
         maxTokens: 65536
         pricing:
-          input: 0.14
-          output: 0.28
-          cacheRead: 0.028
+          input: 0.0574
+          output: 0.1148
+          cacheRead: 0.01148
           cacheWrite: 0
         eligible: true
         thinking:
@@ -266,9 +266,9 @@ providers:
           high: high
           max: max
         pricing:
-          input: 1.32
-          output: 3.96
-          cacheRead: 0.044
+          input: 1.122
+          output: 3.366
+          cacheRead: 0.0374
           cacheWrite: 0
         eligible: true
         thinking:
@@ -282,9 +282,9 @@ providers:
         contextWindow: 1048576
         maxTokens: 65536
         pricing:
-          input: 0.435
-          output: 0.87
-          cacheRead: 0.003625
+          input: 0.526176
+          output: 1.052352
+          cacheRead: 0.043848
           cacheWrite: 0
         eligible: true
         thinking:
@@ -306,7 +306,7 @@ providers:
           input: 0.5
           output: 3
           cacheRead: 0.05
-          cacheWrite: 0
+          cacheWrite: 0.0833333333333
         eligible: true
         thinking:
           - minimal
@@ -361,9 +361,9 @@ providers:
         contextWindow: 1000000
         maxTokens: 65536
         pricing:
-          input: 1.12
-          output: 3.52
-          cacheRead: 0.208
+          input: 0.966
+          output: 3.036
+          cacheRead: 0.1932
           cacheWrite: 0
         eligible: true
         thinking:
@@ -395,8 +395,8 @@ providers:
         maxTokens: 32768
         pricing:
           input: 0.03
-          output: 0.14
-          cacheRead: 0
+          output: 0.13
+          cacheRead: 0.03
           cacheWrite: 0
         eligible: false
         thinking:
@@ -415,9 +415,9 @@ providers:
         contextWindow: 262144
         maxTokens: 65536
         pricing:
-          input: 0.6
-          output: 3.41
-          cacheRead: 0.2
+          input: 0.95
+          output: 4
+          cacheRead: 0.16
           cacheWrite: 0
         eligible: true
         thinking:
@@ -436,9 +436,9 @@ providers:
         contextWindow: 262144
         maxTokens: 65536
         pricing:
-          input: 0.73
-          output: 3.5
-          cacheRead: 0.15
+          input: 0.67
+          output: 3.4
+          cacheRead: 0.17
           cacheWrite: 0
         eligible: true
         thinking:
@@ -452,9 +452,9 @@ providers:
         contextWindow: 196608
         maxTokens: 32768
         pricing:
-          input: 0.25
-          output: 1
-          cacheRead: 0.05
+          input: 0.24
+          output: 0.96
+          cacheRead: 0.048
           cacheWrite: 0
         eligible: true
         thinking:
@@ -560,9 +560,9 @@ providers:
         contextWindow: 262144
         maxTokens: 65536
         pricing:
-          input: 0.39
-          output: 2.34
-          cacheRead: 0
+          input: 0.5
+          output: 3.6
+          cacheRead: 0.3
           cacheWrite: 0
         eligible: true
         thinking:
@@ -886,7 +886,7 @@ providers:
         pricing:
           input: 1.75
           output: 14
-          cacheRead: 0.17
+          cacheRead: 0.175
           cacheWrite: 0
         eligible: true
         thinking:
@@ -951,16 +951,16 @@ providers:
           max: max
           minimal: low
         pricing:
-          input: 2.5
-          output: 15
-          cacheRead: 0.25
-          cacheWrite: 3.12
+          input: 5
+          output: 30
+          cacheRead: 0.5
+          cacheWrite: 6.25
           tiers:
             - inputTokensAbove: 272000
-              input: 5
-              output: 22.5
-              cacheRead: 0.5
-              cacheWrite: 6.25
+              input: 10
+              output: 45
+              cacheRead: 1
+              cacheWrite: 12.5
         eligible: false
         thinking:
           - minimal
@@ -1026,7 +1026,7 @@ providers:
         pricing:
           input: 0.25
           output: 2
-          cacheRead: 0.02
+          cacheRead: 0.025
           cacheWrite: 0
         eligible: false
         thinking:
@@ -1102,16 +1102,16 @@ providers:
           - image
         maxImagesPerRequest: 1
         pricing:
-          input: 5
-          output: 30
-          cacheRead: 0.5
-          cacheWrite: 6.25
+          input: 4
+          output: 20
+          cacheRead: 0.4
+          cacheWrite: 5
           tiers:
             - inputTokensAbove: 272000
-              input: 10
-              output: 45
-              cacheRead: 1
-              cacheWrite: 12.5
+              input: 8
+              output: 30
+              cacheRead: 0.8
+              cacheWrite: 10
         eligible: true
         thinking:
           - minimal
@@ -1129,16 +1129,16 @@ providers:
           - image
         maxImagesPerRequest: 1
         pricing:
-          input: 2.5
-          output: 15
-          cacheRead: 0.25
-          cacheWrite: 3.125
+          input: 2
+          output: 12
+          cacheRead: 0.2
+          cacheWrite: 2.5
           tiers:
             - inputTokensAbove: 272000
-              input: 5
-              output: 22.5
-              cacheRead: 0.5
-              cacheWrite: 6.25
+              input: 4
+              output: 18
+              cacheRead: 0.4
+              cacheWrite: 5
         eligible: true
         thinking:
           - minimal
@@ -1156,16 +1156,16 @@ providers:
           - image
         maxImagesPerRequest: 1
         pricing:
-          input: 1
-          output: 6
-          cacheRead: 0.1
-          cacheWrite: 1.25
+          input: 0.2
+          output: 1.2
+          cacheRead: 0.02
+          cacheWrite: 0.25
           tiers:
             - inputTokensAbove: 272000
-              input: 2
-              output: 9
-              cacheRead: 0.2
-              cacheWrite: 2.5
+              input: 0.4
+              output: 1.8
+              cacheRead: 0.04
+              cacheWrite: 0.5
         eligible: true
         thinking:
           - minimal

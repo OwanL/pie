@@ -235,6 +235,50 @@ test('computeAggregateStats: today bucketing excludes other-day runs', () => {
   assert.equal(stats.dailyCost[1]!.date, '2026-07-04');
 });
 
+test('computeAggregateStats: daily spend follows usage occurrence, not long-lived run finalization', () => {
+  const pricingMap = new Map<string, ModelPricingRecord[]>([['m', [pricing('openai', 1, 1)]]]);
+  const yesterday = isoLocal(2026, 7, 3, 23, 30);
+  const today = isoLocal(2026, 7, 4, 10);
+  const run = makeRun({
+    runId: 'long-lived',
+    modelId: 'm',
+    inputTokens: 1_000_000,
+    outputTokens: 100_000,
+    tokenReportedTurnCount: 1,
+    startedAt: yesterday,
+    updatedAt: today,
+    finalizedAt: today,
+    turnThroughputSamples: [{
+      endedAt: yesterday,
+      inputTokens: 1_000_000,
+      outputTokens: 100_000,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      reportedCostUsd: 1.1,
+      generationDurationMs: 1_000,
+      concurrentBusySessions: 1,
+      status: 'completed',
+      modelId: 'm',
+      provider: 'openai',
+      turnLatencyMs: null,
+      overheadMs: null,
+      providerLatencyMs: null,
+    }],
+  });
+
+  const stats = computeAggregateStats([run], pricingMap, NOW, [], {}, 0);
+  assert.equal(stats.todayCost, 0, 'yesterday usage must not be charged on today finalization');
+  assert.equal(stats.todayInputTokens, 0);
+  assert.equal(stats.todayOutputTokens, 0);
+  assert.equal(stats.todayCostSeries.length, 0);
+  assert.equal(stats.todayTokenSeries.length, 0);
+  assert.equal(stats.todayRunCount, 1, 'run completion activity still belongs to today');
+  assert.equal(stats.weekRunCount, 1);
+  assert.equal(stats.weekCost, 1.1);
+  assert.equal(stats.dailyCost.find((day) => day.date === '2026-07-03')?.totalCost, 1.1);
+  assert.equal(stats.dailyCost.find((day) => day.date === '2026-07-04')?.totalCost, 0);
+});
+
 test('computeAggregateStats: today activity (tokens/tool-calls/files) sums today runs', () => {
   const pricingMap = new Map<string, ModelPricingRecord[]>([['m', [pricing('openai', 0, 0)]]]);
   const today = isoLocal(2026, 7, 4, 10);
@@ -626,6 +670,94 @@ test('computeAggregateStats: parent, subagent, and pruning usage reconcile acros
   assert.equal(stats.lastRun?.inputTokens, 1_300_000);
   assert.equal(stats.lastRun?.outputTokens, 650_000);
   assert.equal(stats.lastRun?.turnSeries.reduce((sum, entry) => sum + entry.outputTokens, 0), 650_000);
+});
+
+test('computeAggregateStats: forwarded child throughput never consumes parent billable usage', () => {
+  const pricingMap = new Map<string, ModelPricingRecord[]>([
+    ['parent', [pricing('parent-provider', 2, 6)]],
+    ['child', [pricing('child-provider', 3, 15)]],
+  ]);
+  const childEndedAt = isoLocal(2026, 7, 4, 10, 0);
+  const parentEndedAt = isoLocal(2026, 7, 4, 10, 30);
+  const run = makeRun({
+    modelId: 'parent', provider: 'parent-provider',
+    startedAt: isoLocal(2026, 7, 4, 9, 0), updatedAt: parentEndedAt, finalizedAt: parentEndedAt,
+    inputTokens: 1_000_000, outputTokens: 100_000,
+    toolUsage: {
+      ...makeRun({}).toolUsage,
+      subagentInputTokens: 200_000,
+      subagentOutputTokens: 50_000,
+      subagentCacheReadTokens: 0,
+      subagentCacheWriteTokens: 0,
+    },
+    auxiliaryLlmUsage: [{
+      kind: 'subagent', sourceId: 'child-1', occurredAt: childEndedAt,
+      modelId: 'child', provider: 'child-provider',
+      inputTokens: 200_000, outputTokens: 50_000, cacheReadTokens: 0, cacheWriteTokens: 0,
+    }],
+    turnThroughputSamples: [
+      { endedAt: childEndedAt, modelId: 'child', provider: 'child-provider', inputTokens: 0,
+        outputTokens: 50_000, cacheReadTokens: 0, cacheWriteTokens: 0,
+        generationDurationMs: 1_000, concurrentBusySessions: 1, status: 'completed',
+        turnLatencyMs: null, overheadMs: null, providerLatencyMs: null },
+      { endedAt: parentEndedAt, modelId: 'parent', provider: 'parent-provider', inputTokens: 1_000_000,
+        outputTokens: 100_000, cacheReadTokens: 0, cacheWriteTokens: 0,
+        generationDurationMs: 1_000, concurrentBusySessions: 1, status: 'completed',
+        turnLatencyMs: null, overheadMs: null, providerLatencyMs: null },
+    ],
+  });
+
+  const stats = computeAggregateStats([run], pricingMap, NOW, [], {}, 0);
+  const providers = new Map(stats.costByProvider.map((entry) => [entry.provider, entry]));
+  assert.equal(providers.get('parent-provider')?.inputTokens, 1_000_000);
+  assert.equal(providers.get('parent-provider')?.outputTokens, 100_000);
+  assertClose(providers.get('parent-provider')?.cost, 2.6);
+  assert.equal(providers.get('child-provider')?.inputTokens, 200_000);
+  assert.equal(providers.get('child-provider')?.outputTokens, 50_000);
+  assertClose(providers.get('child-provider')?.cost, 1.35);
+  assertClose(stats.totalCost, 3.95);
+});
+
+test('computeAggregateStats: long-context tiers apply per request, not to multi-turn child aggregates', () => {
+  const tieredPricing: ModelPricingRecord = {
+    id: 'tiered', provider: 'provider',
+    pricing: {
+      input: 1, output: 1, cacheRead: 0, cacheWrite: 0,
+      tiers: [{ inputTokensAbove: 100_000, input: 10, output: 10, cacheRead: 0, cacheWrite: 0 }],
+    },
+  };
+  const pricingMap = new Map<string, ModelPricingRecord[]>([['tiered', [tieredPricing]]]);
+  const endedAt = isoLocal(2026, 7, 4, 10, 0);
+  const childAggregate = makeRun({
+    modelId: 'tiered', provider: 'provider', inputTokens: 0, outputTokens: 0,
+    startedAt: endedAt, updatedAt: endedAt, finalizedAt: endedAt,
+    toolUsage: {
+      ...makeRun({}).toolUsage,
+      subagentInputTokens: 200_000,
+      subagentOutputTokens: 100_000,
+      subagentCacheReadTokens: 0,
+      subagentCacheWriteTokens: 0,
+    },
+    auxiliaryLlmUsage: [{
+      kind: 'subagent', sourceId: 'multi-turn', occurredAt: endedAt,
+      modelId: 'tiered', provider: 'provider',
+      inputTokens: 200_000, outputTokens: 100_000, cacheReadTokens: 0, cacheWriteTokens: 0,
+    }],
+  });
+  const singleRequest = makeRun({
+    runId: 'single-request', sessionPath: '/s/single',
+    modelId: 'tiered', provider: 'provider', inputTokens: 200_000, outputTokens: 100_000,
+    startedAt: endedAt, updatedAt: endedAt, finalizedAt: endedAt,
+    turnThroughputSamples: [{
+      endedAt, modelId: 'tiered', provider: 'provider', inputTokens: 200_000,
+      outputTokens: 100_000, cacheReadTokens: 0, cacheWriteTokens: 0,
+      generationDurationMs: 1_000, concurrentBusySessions: 1, status: 'completed',
+      turnLatencyMs: null, overheadMs: null, providerLatencyMs: null,
+    }],
+  });
+
+  assertClose(computeAggregateStats([childAggregate], pricingMap, NOW, [], {}, 0).totalCost, 0.3);
+  assertClose(computeAggregateStats([singleRequest], pricingMap, NOW, [], {}, 0).totalCost, 3);
 });
 
 test('computeAggregateStats: historical subagent totals use the unique child throughput model as attribution', () => {
