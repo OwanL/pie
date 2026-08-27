@@ -25,11 +25,13 @@ import { normalizeDanglingTranscript } from './session-opened';
 import type { SessionEntryLike } from './transcript';
 
 export interface SessionBrowseSnapshot {
-  manager: SdkSessionManager;
-  sessionPath: string;
-  cache: ReturnType<typeof buildDisplayTranscriptCache>;
-  summary: SessionSummary;
-  contextUsage?: ContextWindowUsage;
+  readonly sessionPath: string;
+  readonly cache: Readonly<ReturnType<typeof buildDisplayTranscriptCache>>;
+  /** Durable summary before review-sidecar decoration. */
+  readonly summary: Readonly<SessionSummary>;
+  readonly activeModel: Readonly<{ provider: string; modelId: string }> | null;
+  readonly contextTokens?: number;
+  readonly hasExplicitThinkingLevel: boolean;
 }
 
 function messageText(content: unknown): string {
@@ -57,20 +59,17 @@ export async function openSessionBrowseSnapshot(options: {
   manager: SdkSessionManager;
   sessionPath: string;
   startupCwd: string;
-  availableModels: readonly ModelInfo[];
 }): Promise<SessionBrowseSnapshot> {
-  const { manager, sessionPath, startupCwd, availableModels } = options;
+  const { manager, sessionPath, startupCwd } = options;
   const branch = (manager.getBranch?.() ?? []) as SessionEntryLike[];
   const cache = buildDisplayTranscriptCache(branch, sessionPath);
   const durableContext = manager.buildSessionContext?.();
-  const activeModel = durableContext?.model ?? null;
-  const modelInfo = activeModel
-    ? availableModels.find((model) => model.id === activeModel.modelId && model.provider === activeModel.provider)
-      ?? availableModels.find((model) => model.id === activeModel.modelId)
-    : undefined;
-  const contextUsage = modelInfo?.contextWindow
-    ? deriveContextUsageFromBranch(branch, modelInfo.contextWindow)
-    : undefined;
+  const activeModel = durableContext?.model ? { ...durableContext.model } : null;
+  // Cache the model-independent prompt footprint. Configured catalogs are
+  // coordinator metadata and may change while the durable JSONL does not, so
+  // the context-window denominator is applied afresh when an open is built.
+  const derivedContextTokens = deriveContextUsageFromBranch(branch, Number.MAX_SAFE_INTEGER)?.tokens;
+  const contextTokens = typeof derivedContextTokens === 'number' ? derivedContextTokens : undefined;
   const { name, isPlaceholder } = deriveName(manager, branch);
   let modifiedAt = new Date(0).toISOString();
   try {
@@ -90,12 +89,40 @@ export async function openSessionBrowseSnapshot(options: {
     ...(durableContext?.thinkingLevel ? { thinkingLevel: normalizeThinkingLevel(durableContext.thinkingLevel) } : {}),
     ...(manager.getSessionId?.() ? { sessionId: manager.getSessionId?.() } : {}),
   };
-  return {
-    manager,
+  // The projection exposes no SessionManager and is immutable by ownership:
+  // downstream browse builders only read it. Freeze the small containers to
+  // catch accidental replacement without recursively walking a potentially
+  // 65 MiB transcript on the cache-fill path.
+  Object.freeze(cache);
+  Object.freeze(summary);
+  if (activeModel) Object.freeze(activeModel);
+  return Object.freeze({
     sessionPath,
     cache,
-    summary: mergeReviewIntoSummary(summary, readReviews()),
-    contextUsage,
+    summary,
+    activeModel,
+    contextTokens,
+    hasExplicitThinkingLevel: branch.some((entry) => entry.type === 'thinking_level_change'),
+  });
+}
+
+function deriveContextUsage(
+  browse: SessionBrowseSnapshot,
+  availableModels: readonly ModelInfo[],
+): ContextWindowUsage | undefined {
+  if (browse.contextTokens === undefined || !browse.activeModel) return undefined;
+  const modelInfo = availableModels.find((model) => (
+    model.id === browse.activeModel!.modelId && model.provider === browse.activeModel!.provider
+  )) ?? availableModels.find((model) => model.id === browse.activeModel!.modelId);
+  const rawContextWindow = modelInfo?.contextWindow;
+  if (typeof rawContextWindow !== 'number' || !Number.isFinite(rawContextWindow) || rawContextWindow <= 0) {
+    return undefined;
+  }
+  const contextWindow = Math.trunc(rawContextWindow);
+  return {
+    tokens: browse.contextTokens,
+    contextWindow,
+    percent: Math.min(100, Math.max(0, (browse.contextTokens / contextWindow) * 100)),
   };
 }
 
@@ -126,6 +153,7 @@ export function buildBrowseSessionOpenedPayload(options: {
   operationAttempt?: number;
   transcript?: TranscriptMode;
   transport?: SessionSnapshotTransport;
+  systemPromptDisabledEntries?: readonly string[];
 }): SessionOpenedPayload {
   const mode = options.transcript ?? 'tail';
   const slice = mode === 'skip'
@@ -133,12 +161,11 @@ export function buildBrowseSessionOpenedPayload(options: {
     : buildTailTranscriptWindow(options.browse.cache);
   const transcript = normalizeDanglingTranscript(slice.transcript)
     .map(deduplicateToolCallResultsForTransport);
-  const hasExplicitThinkingLevel = (options.browse.manager.getBranch?.() ?? [])
-    .some((entry) => (entry as SessionEntryLike).type === 'thinking_level_change');
-  const session = hasExplicitThinkingLevel
-    ? options.browse.summary
+  const reviewedSummary = mergeReviewIntoSummary(options.browse.summary, readReviews());
+  const session = options.browse.hasExplicitThinkingLevel
+    ? reviewedSummary
     : {
-        ...options.browse.summary,
+        ...reviewedSummary,
         // Pi's empty branch context reports `off` when no durable change entry
         // exists. That is an implementation fallback, not the user's new-chat
         // preference; inherit the configured default until the branch records
@@ -157,8 +184,11 @@ export function buildBrowseSessionOpenedPayload(options: {
     ...(mode === 'skip' ? { transcriptSkipped: true } : {}),
     modelSettings: options.modelSettings,
     ...(options.availableModels !== undefined ? { availableModels: options.availableModels } : {}),
-    contextUsage: options.browse.contextUsage,
+    contextUsage: deriveContextUsage(options.browse, options.availableModels ?? []),
     sessionUsage: options.browse.cache.sessionUsage,
+    ...(options.systemPromptDisabledEntries !== undefined
+      ? { systemPromptDisabledEntries: [...options.systemPromptDisabledEntries] }
+      : {}),
   };
   const unavailableWindow = {
     ...slice.transcriptWindow,

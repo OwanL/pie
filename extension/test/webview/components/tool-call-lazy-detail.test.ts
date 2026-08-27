@@ -16,6 +16,7 @@ import { ToolCallItem } from '../../../src/webview/panel/transcript/tool-call-it
 import '../../../src/webview/panel/transcript/tools/subagent-tool';
 import { clearCollapsibleCache } from '../../../src/webview/panel/transcript/use-collapsible-open';
 import {
+  LAZY_DETAIL_REQUEST_TIMEOUT_MS,
   clearLazyDetailCache,
   receiveLazyDetailResult,
   requestLazyDetail,
@@ -200,4 +201,70 @@ test('tool detail is absent initially, requested on expansion, and rendered afte
     sessionPath: '/session', key: detailRef.key, status: 'loaded', value: 'COMPLETE_DETAIL', sizeBytes: 15,
   }));
   assert.match(container.textContent ?? '', /COMPLETE_DETAIL/);
+});
+
+test('a lost tool-detail request surfaces a retry action instead of loading forever', async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalClearTimeout = globalThis.clearTimeout;
+  const fakeHandle = { unref: () => undefined } as unknown as ReturnType<typeof setTimeout>;
+  let timeoutCallback: (() => void) | undefined;
+  globalThis.setTimeout = ((callback: (...args: unknown[]) => void, delay?: number, ...args: unknown[]) => {
+    if (delay === LAZY_DETAIL_REQUEST_TIMEOUT_MS) {
+      timeoutCallback = () => callback(...args);
+      return fakeHandle;
+    }
+    return (originalSetTimeout as unknown as (callback: () => void, delay?: number) => ReturnType<typeof setTimeout>)(
+      () => callback(...args),
+      delay,
+    );
+  }) as typeof setTimeout;
+  globalThis.clearTimeout = ((timer?: ReturnType<typeof setTimeout>) => {
+    if (timer === fakeHandle) {
+      timeoutCallback = undefined;
+      return;
+    }
+    originalClearTimeout(timer);
+  }) as typeof clearTimeout;
+
+  try {
+    const messages: WebviewToHostMessage[] = [];
+    setLazyDetailPostMessage((message) => messages.push(message));
+    const detailRef: LazyDetailRef = {
+      key: 'durable:tool:/session:entry:lost:0',
+      kind: 'tool-result',
+      source: 'durable',
+      sessionPath: '/session',
+      messageId: 'message',
+      toolCallId: 'lost-tool',
+      sizeBytes: 100_000,
+      summary: 'lost detail',
+      available: true,
+    };
+
+    act(() => {
+      render(h(ToolCallCard, {
+        toolCall: { id: 'lost-tool', name: 'read', input: { path: '/tmp/lost' }, status: 'completed', detailRef },
+        autoExpand: true,
+        workingDirectory: '/tmp',
+        onOpenFile: () => undefined,
+        onContextMenu: () => undefined,
+      }), container);
+    });
+    assert.equal(messages.filter((message) => message.type === 'requestDetail').length, 1);
+    assert.ok(timeoutCallback, 'accepted detail request arms bounded recovery');
+
+    act(() => timeoutCallback?.());
+    assert.match(container.textContent ?? '', /Detail loading timed out/);
+    const retry = [...container.querySelectorAll('button')]
+      .find((button) => button.textContent?.trim() === 'Retry') as HTMLButtonElement | undefined;
+    assert.ok(retry, 'timeout failure is explicitly retryable');
+
+    await act(async () => retry.click());
+    assert.equal(messages.filter((message) => message.type === 'requestDetail').length, 2);
+    assert.match(container.textContent ?? '', /Loading details/);
+  } finally {
+    clearLazyDetailCache();
+    globalThis.setTimeout = originalSetTimeout;
+    globalThis.clearTimeout = originalClearTimeout;
+  }
 });

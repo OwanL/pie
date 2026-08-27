@@ -447,6 +447,7 @@ export interface WorkerDetailStartFrame extends WorkerFrameBase {
   baselineRevision: number;
   pageCount: number;
   totalBytes: number;
+  totalCodePoints: number;
 }
 
 export interface WorkerDetailPageFrame extends WorkerFrameBase {
@@ -1287,12 +1288,13 @@ function validateDetailFetch(value: Record<string, unknown>, requireSeq: boolean
 }
 
 function validateDetailStart(value: Record<string, unknown>, requireSeq: boolean): string | undefined {
-  const extra = exactKeys(value, [...baseKeys(requireSeq), 'requestId', 'subscriptionId', 'address', 'source', 'baselineRevision', 'pageCount', 'totalBytes']);
+  const extra = exactKeys(value, [...baseKeys(requireSeq), 'requestId', 'subscriptionId', 'address', 'source', 'baselineRevision', 'pageCount', 'totalBytes', 'totalCodePoints']);
   if (extra) return extra;
   return boundedString(value.requestId, MAX_ID_BYTES) && boundedString(value.subscriptionId, MAX_ID_BYTES)
     && isLiveSubagentDetailAddress(value.address) && (value.source === 'live' || value.source === 'durable')
     && isSafeNonNegativeInteger(value.baselineRevision) && isSafePositiveInteger(value.pageCount)
-    && isSafeNonNegativeInteger(value.totalBytes) ? undefined : 'detail.start fields are invalid.';
+    && isSafeNonNegativeInteger(value.totalBytes) && isSafeNonNegativeInteger(value.totalCodePoints)
+    ? undefined : 'detail.start fields are invalid.';
 }
 
 function validateDetailPage(value: Record<string, unknown>, requireSeq: boolean): string | undefined {

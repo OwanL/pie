@@ -1,6 +1,11 @@
 import type { ToolCall } from './protocol';
 import type { LiveSubagentDetailAddress, SubagentChildIdentity } from './protocol/subagent-detail';
 import { isLiveSubagentDetailAddress } from './protocol/subagent-detail';
+import type {
+  SubagentBillingAttempt,
+  SubagentBillingEntry,
+  SubagentBillingUsage,
+} from './live-pipeline-protocol';
 import type { LifecycleValueSource, SubagentAttemptPhase, SubagentAttemptSample } from '../../../shared/run-analytics-contracts.js';
 import { isRecord } from './type-guards';
 
@@ -383,6 +388,121 @@ export function getSubagentResultEntries(rawResult: unknown): Record<string, unk
         ? rawResult.children
         : [];
   return direct.filter((entry): entry is Record<string, unknown> => isRecord(entry));
+}
+
+const MAX_SUBAGENT_BILLING_ENTRIES = 512;
+const MAX_SUBAGENT_BILLING_ATTEMPTS = 8;
+
+function billingUsage(value: unknown): SubagentBillingUsage | undefined {
+  if (!isRecord(value)) return undefined;
+  const input = finiteNonNegative(value.input);
+  const output = finiteNonNegative(value.output);
+  const cacheRead = finiteNonNegative(value.cacheRead);
+  const cacheWrite = finiteNonNegative(value.cacheWrite);
+  if (input === null || output === null || cacheRead === null || cacheWrite === null) return undefined;
+  const cost = typeof value.cost === 'number' && Number.isFinite(value.cost) && value.cost >= 0
+    ? value.cost
+    : undefined;
+  return { input, output, cacheRead, cacheWrite, ...(cost === undefined ? {} : { cost }) };
+}
+
+function billingAttempt(value: unknown, index: number): SubagentBillingAttempt | undefined {
+  if (!isRecord(value)) return undefined;
+  const usage = billingUsage(value.usage);
+  if (!usage) return undefined;
+  const attemptId = typeof value.attemptId === 'string' && value.attemptId.trim()
+    ? value.attemptId.trim()
+    : String(index);
+  return {
+    attemptId,
+    ...(typeof value.model === 'string' && value.model ? { model: value.model } : {}),
+    ...(typeof value.provider === 'string' && value.provider ? { provider: value.provider } : {}),
+    usage,
+  };
+}
+
+function billingOccurredAt(result: Record<string, unknown>): number | undefined {
+  const ended = Array.isArray(result.turnThroughputSamples)
+    ? result.turnThroughputSamples.flatMap((sample): number[] => {
+        if (!isRecord(sample) || typeof sample.endedAt !== 'string') return [];
+        const parsed = Date.parse(sample.endedAt);
+        return Number.isNaN(parsed) ? [] : [parsed];
+      })
+    : [];
+  if (ended.length > 0) return Math.max(...ended);
+  return typeof result.completedAt === 'number' && Number.isFinite(result.completedAt) && result.completedAt >= 0
+    ? result.completedAt
+    : undefined;
+}
+
+function coerceBillingEntry(value: unknown): SubagentBillingEntry | undefined {
+  if (!isRecord(value) || typeof value.path !== 'string') return undefined;
+  const usage = billingUsage(value.usage);
+  if (!usage) return undefined;
+  const attempts = Array.isArray(value.attempts)
+    ? value.attempts.slice(0, MAX_SUBAGENT_BILLING_ATTEMPTS)
+      .map(billingAttempt)
+      .filter((attempt): attempt is SubagentBillingAttempt => !!attempt)
+    : [];
+  return {
+    path: value.path,
+    ...(typeof value.model === 'string' && value.model ? { model: value.model } : {}),
+    ...(typeof value.selectedModel === 'string' && value.selectedModel ? { selectedModel: value.selectedModel } : {}),
+    ...(typeof value.provider === 'string' && value.provider ? { provider: value.provider } : {}),
+    ...(typeof value.occurredAt === 'number' && Number.isFinite(value.occurredAt) && value.occurredAt >= 0
+      ? { occurredAt: value.occurredAt }
+      : {}),
+    usage,
+    ...(attempts.length > 0 ? { attempts } : {}),
+  };
+}
+
+/** Flatten recursive subagent billing into a compact terminal-only sideband.
+ * The ordinary live preview remains bounded to recent child UI state; this
+ * preserves only token/model/cost evidence needed for exact aggregation. */
+export function getSubagentBillingEntries(rawResult: unknown): SubagentBillingEntry[] {
+  if (!isRecord(rawResult)) return [];
+  if (Array.isArray(rawResult.billing)) {
+    return rawResult.billing.slice(0, MAX_SUBAGENT_BILLING_ENTRIES)
+      .map(coerceBillingEntry)
+      .filter((entry): entry is SubagentBillingEntry => !!entry);
+  }
+
+  const entries: SubagentBillingEntry[] = [];
+  const seen = new Set<object>();
+  const visit = (results: unknown[], prefix: string, depth: number): void => {
+    if (depth > 8 || entries.length >= MAX_SUBAGENT_BILLING_ENTRIES) return;
+    for (const [index, value] of results.entries()) {
+      if (!isRecord(value) || seen.has(value)) continue;
+      seen.add(value);
+      const path = `${prefix}${index}`;
+      const usage = billingUsage(value.usage);
+      if (usage) {
+        const attempts = Array.isArray(value.attemptRecords)
+          ? value.attemptRecords.slice(0, MAX_SUBAGENT_BILLING_ATTEMPTS)
+            .map(billingAttempt)
+            .filter((attempt): attempt is SubagentBillingAttempt => !!attempt)
+          : [];
+        entries.push({
+          path,
+          ...(typeof value.model === 'string' && value.model ? { model: value.model } : {}),
+          ...(typeof value.selectedModel === 'string' && value.selectedModel ? { selectedModel: value.selectedModel } : {}),
+          ...(typeof value.provider === 'string' && value.provider ? { provider: value.provider } : {}),
+          ...(billingOccurredAt(value) !== undefined ? { occurredAt: billingOccurredAt(value) } : {}),
+          usage,
+          ...(attempts.length > 0 ? { attempts } : {}),
+        });
+      }
+      if (!Array.isArray(value.messages)) continue;
+      for (const message of value.messages) {
+        if (!isRecord(message) || message.role !== 'toolResult' || message.toolName !== 'subagent') continue;
+        const nested = getSubagentResultEntries(message.details);
+        if (nested.length > 0) visit(nested, `${path}.`, depth + 1);
+      }
+    }
+  };
+  visit(getSubagentResultEntries(rawResult), '', 0);
+  return entries;
 }
 
 export function getRenderableSubagentResult(rawResult: unknown): SubagentResult | undefined {

@@ -8,6 +8,7 @@ import {
   DEFAULT_CHAT_PREFS,
   DEFAULT_TOOL_RESULT_PRUNING_SETTINGS,
   EMPTY_AGGREGATE_STATS,
+  PIE_BUILD_ID,
   WEBVIEW_PROTOCOL_VERSION,
   type ViewState,
 } from '../../../src/shared/protocol';
@@ -28,13 +29,14 @@ const baseViewState: ViewState = {
   pendingExtensionUIRequestsBySession: {}, pendingExtensionUIRequest: null,
 };
 
-test('buildStateEnvelope emits protocol v5 generation and bounded expected transcript identity', () => {
+test('buildStateEnvelope emits protocol/build identity and bounded transcript identity', () => {
   setStreamDiagEnabled(false);
   const sync = createSidebarSyncState('host-1');
   const result = buildStateEnvelope(sync, baseViewState, { revision: 1, viewGeneration: 7, rendererId: 'renderer-1', rendererGeneration: 3 });
 
   assert.equal(result.message.type, 'state');
   assert.equal(result.message.protocolVersion, WEBVIEW_PROTOCOL_VERSION);
+  assert.equal(result.message.buildId, PIE_BUILD_ID);
   assert.equal(result.message.hostInstanceId, 'host-1');
   assert.equal(result.message.rendererId, 'renderer-1');
   assert.equal(result.message.rendererGeneration, 3);

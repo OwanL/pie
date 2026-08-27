@@ -17,8 +17,14 @@ import {
   transformSdkSessionRuntimeOwnership,
   type SdkSessionOwnershipTransformResult,
 } from './sdk-session-ownership-patch';
+import {
+  hasSdkSessionOpenSingleReadMarkers,
+  reverseSdkSessionOpenSingleRead,
+  transformSdkSessionOpenSingleRead,
+  type SdkSessionOpenTransformResult,
+} from './sdk-session-open-patch';
 
-export const SDK_PATCH_IDENTITY_VERSION = 3 as const;
+export const SDK_PATCH_IDENTITY_VERSION = 5 as const;
 const TERMINAL_DURABILITY_PATCH_VERSION = 1 as const;
 const RETRY_CLASSIFIER_PATCH_VERSION = 1 as const;
 const COLD_CREATE_DURABILITY_PATCH_VERSION = 2 as const;
@@ -82,6 +88,10 @@ const DURABILITY_MARKERS = [
 const COLD_CREATE_IMPORT_NEEDLE = `import { appendFileSync, closeSync, createReadStream, existsSync, mkdirSync, openSync, readdirSync, readSync, statSync, writeFileSync, } from "fs";`;
 const COLD_CREATE_IMPORT_REPLACEMENT_V1 = `import { appendFileSync, closeSync, createReadStream, existsSync, fsyncSync, mkdirSync, openSync, readdirSync, readSync, renameSync, rmSync, statSync, writeFileSync, } from "fs";`;
 const COLD_CREATE_IMPORT_REPLACEMENT = `import { appendFileSync, closeSync, createReadStream, existsSync, fsyncSync, linkSync, mkdirSync, openSync, readdirSync, readSync, rmSync, statSync, writeFileSync, } from "fs";`;
+// The ownership adapter's v3 upgrade adds renameSync to the same import for
+// its batch settings commit. Keep cold-create's marker tolerant of that
+// compositional import so the two reversible transforms can be layered.
+const COLD_CREATE_IMPORT_REPLACEMENT_WITH_RENAME = `import { appendFileSync, closeSync, createReadStream, existsSync, fsyncSync, linkSync, mkdirSync, openSync, readdirSync, readSync, renameSync, rmSync, statSync, writeFileSync, } from "fs";`;
 const COLD_CREATE_HELPER_NEEDLE = `export const CURRENT_SESSION_VERSION = 3;`;
 const COLD_CREATE_HELPER_REPLACEMENT_V1 = `export const CURRENT_SESSION_VERSION = 3;
 // Pie cold-create durability patch v1. SessionManager remains the format
@@ -270,6 +280,7 @@ interface PatchPlan {
   retryResult: SdkRetryHotPatchResult;
   coldCreateResult: SdkColdCreateDurabilityPatchResult;
   sessionOwnershipResult: SdkSessionOwnershipTransformResult | 'missing-target';
+  sessionOpenResult: SdkSessionOpenTransformResult | 'missing-target';
   sessionReplacementResult: SdkSessionOwnershipTransformResult | 'missing-target';
   retryCandidate?: RetryPatchCandidate;
 }
@@ -364,6 +375,37 @@ function reverseColdCreate(source: string): string | undefined {
   return reversed;
 }
 
+/** Reverse the session-manager transforms in the opposite order to planning.
+ * Test fixtures may deliberately fingerprint the previously patched manager,
+ * so accept the exact pre-single-read source before continuing toward the
+ * production pristine source. */
+function reverseSessionManagerPatchStack(
+  source: string,
+  pristineFingerprints: Readonly<Record<string, string>>,
+): string | undefined {
+  const pristine = pristineFingerprints[SDK_SESSION_MANAGER_RELATIVE_PATH];
+  if (!pristine) return undefined;
+  let current = source;
+  if (hasSdkSessionOpenSingleReadMarkers(current)) {
+    const withoutSingleRead = reverseSdkSessionOpenSingleRead(current);
+    if (withoutSingleRead === undefined) return undefined;
+    current = withoutSingleRead;
+    if (sha256(current) === pristine) return current;
+  }
+  // Ownership upgrades are themselves reversible layers. For example, v3
+  // reverses first to the supported v2 shape, and v2 then reverses to the
+  // cold-create-only manager. Peel every supported layer while preserving the
+  // exact transitional fingerprint escape hatch used by isolated fixtures.
+  for (let layer = 0; layer < SDK_SESSION_OWNERSHIP_MANAGER_PATCH_VERSION; layer += 1) {
+    const withoutOwnership = reverseSdkSessionManagerOwnership(current);
+    if (withoutOwnership === undefined) break;
+    if (withoutOwnership === current) return undefined;
+    current = withoutOwnership;
+    if (sha256(current) === pristine) return current;
+  }
+  return reverseColdCreate(current);
+}
+
 function reverseRetry(source: string, candidate: RetryPatchCandidate): string | undefined {
   const replacement = buildRetryReplacement(candidate, RETRY_INSERTS);
   return replaceExactlyOnce(source, replacement, candidate.needle);
@@ -452,7 +494,10 @@ function hasRetryMarkers(source: string, candidate: RetryPatchCandidate): boolea
 }
 
 function hasColdCreateMarkers(source: string): boolean {
-  return COLD_CREATE_MARKERS.every((marker) => source.includes(marker));
+  return source.includes(COLD_CREATE_HELPER_REPLACEMENT)
+    && source.includes(COLD_CREATE_SEAM_REPLACEMENT)
+    && (source.includes(COLD_CREATE_IMPORT_REPLACEMENT)
+      || source.includes(COLD_CREATE_IMPORT_REPLACEMENT_WITH_RENAME));
 }
 
 function transformDurability(source: string): { result: SdkTerminalDurabilityPatchResult; source: string } {
@@ -550,6 +595,7 @@ async function createPatchPlan(
       retryResult: 'missing-target',
       coldCreateResult: 'missing-target',
       sessionOwnershipResult: 'missing-target',
+      sessionOpenResult: 'missing-target',
       sessionReplacementResult: 'missing-target',
     };
   }
@@ -568,10 +614,7 @@ async function createPatchPlan(
       COLD_CREATE_DURABILITY_RELATIVE_PATH,
       coldCreateSource,
       pristineFingerprints,
-      (source) => {
-        const withoutOwnership = reverseSdkSessionManagerOwnership(source);
-        return withoutOwnership === undefined ? undefined : reverseColdCreate(withoutOwnership);
-      },
+      (source) => reverseSessionManagerPatchStack(source, pristineFingerprints),
     );
   }
   const coldCreate = coldCreateSource === undefined
@@ -580,8 +623,11 @@ async function createPatchPlan(
   const sessionOwnership = coldCreateSource === undefined
     ? { result: 'missing-target' as const, source: '' }
     : transformSdkSessionManagerOwnership(coldCreate.source);
+  const sessionOpen = coldCreateSource === undefined
+    ? { result: 'missing-target' as const, source: '' }
+    : transformSdkSessionOpenSingleRead(sessionOwnership.source);
   if (coldCreateSource !== undefined) {
-    files.set(COLD_CREATE_DURABILITY_RELATIVE_PATH, sessionOwnership.source);
+    files.set(COLD_CREATE_DURABILITY_RELATIVE_PATH, sessionOpen.source);
   }
 
   const sessionRuntimeSource = await readOptional(path.join(canonicalPath, SDK_SESSION_RUNTIME_RELATIVE_PATH));
@@ -642,6 +688,7 @@ async function createPatchPlan(
       retryResult,
       coldCreateResult: coldCreate.result,
       sessionOwnershipResult: sessionOwnership.result,
+      sessionOpenResult: sessionOpen.result,
       sessionReplacementResult: sessionReplacement.result,
     };
   }
@@ -652,6 +699,7 @@ async function createPatchPlan(
     retryResult,
     coldCreateResult: coldCreate.result,
     sessionOwnershipResult: sessionOwnership.result,
+    sessionOpenResult: sessionOpen.result,
     sessionReplacementResult: sessionReplacement.result,
     retryCandidate,
   };
@@ -700,6 +748,9 @@ async function commitPatchPlan(canonicalPath: string, plan: PatchPlan): Promise<
   }
   if (plan.sessionOwnershipResult === 'missing-target' || plan.sessionOwnershipResult === 'unsupported-shape') {
     throw new Error(`SDK session ownership adapter patch failed: ${plan.sessionOwnershipResult}.`);
+  }
+  if (plan.sessionOpenResult === 'missing-target' || plan.sessionOpenResult === 'unsupported-shape') {
+    throw new Error(`SDK session open single-read patch failed: ${plan.sessionOpenResult}.`);
   }
   if (plan.sessionReplacementResult === 'missing-target' || plan.sessionReplacementResult === 'unsupported-shape') {
     throw new Error(`SDK session replacement adapter patch failed: ${plan.sessionReplacementResult}.`);
@@ -877,7 +928,11 @@ async function acquirePatchLock(
         ownsTakeover = true;
       } catch (error) {
         const code = (error as NodeJS.ErrnoException).code;
-        if (code !== 'EEXIST' && code !== 'ENOENT') throw error;
+        // Windows may report EPERM while another contender is publishing or
+        // removing this exact takeover directory. Treat it like the adjacent
+        // rename contention path; the outer deadline still fails closed for a
+        // persistent permission problem.
+        if (code !== 'EEXIST' && code !== 'ENOENT' && code !== 'EPERM') throw error;
       }
 
       let existing: LockOwner | undefined;
@@ -965,10 +1020,7 @@ async function buildIdentity(
     COLD_CREATE_DURABILITY_RELATIVE_PATH,
     coldCreateSource,
     plan.pristineFingerprints,
-    (source) => {
-      const withoutOwnership = reverseSdkSessionManagerOwnership(source);
-      return withoutOwnership === undefined ? undefined : reverseColdCreate(withoutOwnership);
-    },
+    (source) => reverseSessionManagerPatchStack(source, plan.pristineFingerprints),
   );
   assertSemanticFingerprint(
     SDK_SESSION_RUNTIME_RELATIVE_PATH,
@@ -980,6 +1032,7 @@ async function buildIdentity(
       || !hasRetryMarkers(retrySource, retryCandidate)
       || !hasColdCreateMarkers(coldCreateSource)
       || !hasSdkSessionManagerOwnershipMarkers(coldCreateSource)
+      || !hasSdkSessionOpenSingleReadMarkers(coldCreateSource)
       || !hasSdkSessionRuntimeOwnershipMarkers(sessionRuntimeSource)) {
     throw new Error('SDK patch barrier verification failed after patch commit.');
   }
@@ -1185,10 +1238,7 @@ export async function validateSdkPatchBarrier(
     COLD_CREATE_DURABILITY_RELATIVE_PATH,
     coldCreateSource,
     pristineFingerprints,
-    (source) => {
-      const withoutOwnership = reverseSdkSessionManagerOwnership(source);
-      return withoutOwnership === undefined ? undefined : reverseColdCreate(withoutOwnership);
-    },
+    (source) => reverseSessionManagerPatchStack(source, pristineFingerprints),
   );
   assertSemanticFingerprint(
     SDK_SESSION_RUNTIME_RELATIVE_PATH,
@@ -1200,6 +1250,7 @@ export async function validateSdkPatchBarrier(
       || !hasRetryMarkers(retrySource, retryCandidate)
       || !hasColdCreateMarkers(coldCreateSource)
       || !hasSdkSessionManagerOwnershipMarkers(coldCreateSource)
+      || !hasSdkSessionOpenSingleReadMarkers(coldCreateSource)
       || !hasSdkSessionRuntimeOwnershipMarkers(sessionRuntimeSource)) {
     throw new Error('SDK patch identity marker verification failed.');
   }

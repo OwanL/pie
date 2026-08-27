@@ -3,11 +3,49 @@ import test from 'node:test';
 
 import type { LazyDetailRef, WebviewToHostMessage } from '../../src/shared/protocol';
 import {
+  LAZY_DETAIL_REQUEST_TIMEOUT_MS,
   clearLazyDetailCache,
   receiveLazyDetailResult,
   requestLazyDetail,
   setLazyDetailPostMessage,
 } from '../../src/webview/panel/transcript/lazy-detail-store';
+
+function installFakeTimers(): {
+  scheduled: Map<number, { callback: () => void; delay: number }>;
+  cleared: Set<number>;
+  fireByDelay(delay: number): void;
+  restore(): void;
+} {
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalClearTimeout = globalThis.clearTimeout;
+  const scheduled = new Map<number, { callback: () => void; delay: number }>();
+  const cleared = new Set<number>();
+  let nextId = 0;
+  globalThis.setTimeout = ((callback: (...args: unknown[]) => void, delay?: number, ...args: unknown[]) => {
+    const id = ++nextId;
+    scheduled.set(id, { callback: () => callback(...args), delay: delay ?? 0 });
+    return id as unknown as ReturnType<typeof setTimeout>;
+  }) as typeof setTimeout;
+  globalThis.clearTimeout = ((timer?: ReturnType<typeof setTimeout>) => {
+    const id = Number(timer);
+    cleared.add(id);
+    scheduled.delete(id);
+  }) as typeof clearTimeout;
+  return {
+    scheduled,
+    cleared,
+    fireByDelay(delay: number): void {
+      const match = [...scheduled].find(([, timer]) => timer.delay === delay);
+      assert.ok(match, `expected a ${delay}ms timer`);
+      scheduled.delete(match[0]);
+      match[1].callback();
+    },
+    restore(): void {
+      globalThis.setTimeout = originalSetTimeout;
+      globalThis.clearTimeout = originalClearTimeout;
+    },
+  };
+}
 
 function ref(key: string): LazyDetailRef {
   return {
@@ -83,4 +121,71 @@ test('a disconnected transport keeps the request queued without occupying the ac
 
   assert.equal(posts.length, 1, 'reconnect re-pumps the explicit request once');
   assert.equal(posts[0]?.type, 'requestDetail');
+});
+
+test('a lost request times out, releases the serialized lane, and can be retried', () => {
+  clearLazyDetailCache();
+  const timers = installFakeTimers();
+  try {
+    const posts: WebviewToHostMessage[] = [];
+    setLazyDetailPostMessage((message) => posts.push(message));
+    const first = ref('detail-lost');
+    const second = ref('detail-next');
+
+    requestLazyDetail(first.sessionPath, first);
+    requestLazyDetail(second.sessionPath, second);
+    assert.deepEqual(
+      posts.filter((message) => message.type === 'requestDetail').map((message) => message.ref.key),
+      [first.key],
+      'the lost request initially owns the sole active lane',
+    );
+
+    timers.fireByDelay(LAZY_DETAIL_REQUEST_TIMEOUT_MS);
+    assert.deepEqual(
+      posts.filter((message) => message.type === 'requestDetail').map((message) => message.ref.key),
+      [first.key, second.key],
+      'timing out the lost request immediately pumps the next expansion',
+    );
+
+    requestLazyDetail(first.sessionPath, first);
+    receiveLazyDetailResult({
+      sessionPath: second.sessionPath, key: second.key, status: 'loaded', value: 'next', sizeBytes: 1,
+    });
+    assert.deepEqual(
+      posts.filter((message) => message.type === 'requestDetail').map((message) => message.ref.key),
+      [first.key, second.key, first.key],
+      'the timeout is a retryable failure rather than a permanent tombstone',
+    );
+  } finally {
+    clearLazyDetailCache();
+    timers.restore();
+  }
+});
+
+test('detail results and cache resets clear request recovery timers', () => {
+  clearLazyDetailCache();
+  const timers = installFakeTimers();
+  try {
+    setLazyDetailPostMessage(() => true);
+    const settled = ref('detail-settled');
+    requestLazyDetail(settled.sessionPath, settled);
+    const settledTimerId = [...timers.scheduled.keys()][0];
+    assert.ok(settledTimerId);
+
+    receiveLazyDetailResult({
+      sessionPath: settled.sessionPath, key: settled.key, status: 'loaded', value: 'done', sizeBytes: 1,
+    });
+    assert.equal(timers.cleared.has(settledTimerId), true, 'a result cancels its recovery timer');
+
+    const reset = ref('detail-reset');
+    requestLazyDetail(reset.sessionPath, reset);
+    const resetTimerId = [...timers.scheduled.keys()][0];
+    assert.ok(resetTimerId);
+    clearLazyDetailCache();
+    assert.equal(timers.cleared.has(resetTimerId), true, 'cache reset cancels every active recovery timer');
+    assert.equal(timers.scheduled.size, 0);
+  } finally {
+    clearLazyDetailCache();
+    timers.restore();
+  }
 });

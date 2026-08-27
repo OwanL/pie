@@ -408,6 +408,7 @@ function projectViewState(state: ArchState): ViewState {
 
   return {
     sessions: sessions.sessions,
+    sessionCatalogProgress: sessions.sessionCatalogProgress,
     openTabPaths: sessions.openTabPaths,
     pinnedTabPaths: sessions.pinnedTabPaths,
     pinnedTabGroups: sessions.pinnedTabGroups,
@@ -445,6 +446,9 @@ function projectViewState(state: ArchState): ViewState {
     retryStatus,
     liveTurnPhase: activePath ? state.livePipeline.turnsBySession[activePath]?.phase ?? null : null,
     notice: settings.noticeSessionPath === null || settings.noticeSessionPath === activePath ? settings.notice : null,
+    noticeSessionPath: settings.noticeSessionPath === null || settings.noticeSessionPath === activePath
+      ? settings.noticeSessionPath
+      : null,
     noticeKind: settings.noticeSessionPath === null || settings.noticeSessionPath === activePath ? settings.noticeKind : null,
     noticeRaw: settings.noticeSessionPath === null || settings.noticeSessionPath === activePath
       ? (settings.noticeRaw === null ? null : redactSensitiveText(settings.noticeRaw))

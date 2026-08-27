@@ -114,6 +114,26 @@ test('subagent preview preserves every top-level card while bounding recursive h
   assert.equal(Buffer.byteLength(JSON.stringify(preview), 'utf8') <= SUBAGENT_PREVIEW_MAX_BYTES, true);
 });
 
+test('subagent preview preserves recursive billing while omitting recursive messages', () => {
+  const preview = compactSubagentResultPreview({
+    details: { mode: 'single', results: [{
+      agent: 'outer', task: 'delegate', exitCode: 0, model: 'outer-model', provider: 'github-copilot',
+      usage: { input: 100, output: 10, cacheRead: 5, cacheWrite: 1 },
+      messages: [{ role: 'toolResult', toolName: 'subagent', details: { mode: 'single', results: [{
+        agent: 'inner', task: 'work', exitCode: 0, model: 'inner-model', provider: 'ollama',
+        usage: { input: 200, output: 20, cacheRead: 6, cacheWrite: 2 },
+        messages: [{ role: 'assistant', content: 'nested-secret-body' }],
+      }] } }],
+    }] },
+  }) as { billing?: Array<{ path: string; provider?: string; usage: { input: number } }>; details?: unknown };
+
+  assert.deepEqual(preview.billing?.map((entry) => [entry.path, entry.provider, entry.usage.input]), [
+    ['0', 'github-copilot', 100],
+    ['0.0', 'ollama', 200],
+  ]);
+  assert.equal(JSON.stringify(preview).includes('nested-secret-body'), false);
+});
+
 test('full durable details are resolved only through their compact retrieval identity', () => {
   const full = durableMessage();
   const compact = compactDurableMessageDetails(full, sessionPath);

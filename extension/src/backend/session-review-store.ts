@@ -240,7 +240,15 @@ function normalizeClosureAction(value: unknown): ClosureAction | undefined {
 
 /** Merge canonical V2 review status and outbox actions into a session summary. */
 export function mergeReviewIntoSummary(summary: SessionSummary, reviews: SessionReviewSidecar): SessionSummary {
-  const identity = resolveSessionIdentity(summary.path);
+  // Indexed and manager-backed summaries already carry the stable identity
+  // read from the durable header. Reopening every transcript here turns an
+  // otherwise SQLite-only warm catalog projection into an O(session count)
+  // synchronous filesystem pass on the coordinator event loop. Preserve the
+  // header resolver only for legacy/fallback summaries that lack that identity.
+  const stableSessionId = summary.sessionId?.trim();
+  const identity = stableSessionId
+    ? { sessionId: stableSessionId, identityFallback: summary.identityFallback === true }
+    : resolveSessionIdentity(summary.path);
   const review = reviews.productionBySessionId.get(identity.sessionId);
   const closureActions = reviews.closureActionsBySessionId.get(identity.sessionId);
 

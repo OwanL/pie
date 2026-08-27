@@ -20,7 +20,8 @@ import type { ModelInfo } from '../../../shared/protocol';
  * build a structural signature per model and compare signatures, mirroring the
  * `indicator-signature.ts` pattern. The signature covers every field that
  * downstream reads (id/name/provider/reasoning/inputKinds/contextWindow/
- * maxTokens + the full `subagent` shape including `pricing`), so a
+ * maxTokens + explicit thinking levels + the full `subagent` shape including
+ * `pricing`), so a
  * byte-identical snapshot reuses the cached reference and a genuinely
  * different model list (new model, toggled eligibility, updated pricing) is
  * adopted. The caller owns the cached reference (module-level `let` in
@@ -36,8 +37,9 @@ import type { ModelInfo } from '../../../shared/protocol';
  * Build a structural signature for a single {@link ModelInfo}. Covers every
  * field downstream code reads. `inputKinds` is joined in order (the array is
  * short and order is semantically meaningful for capability checks). The
- * optional `subagent` block is serialised field-by-field including its nested
- * `pricing` quadruple so that any pricing/eligibility/cost update is detected.
+ * optional `thinkingLevels` list and `subagent` block are serialised
+ * field-by-field including its nested `pricing` quadruple so that any
+ * reasoning-capability, pricing/eligibility/cost update is detected.
  */
 function modelSignature(m: ModelInfo): string {
   const sub = m.subagent;
@@ -53,6 +55,7 @@ function modelSignature(m: ModelInfo): string {
     m.provider,
     m.reasoning ? 1 : 0,
     m.inputKinds.join(','),
+    m.thinkingLevels?.join(',') ?? '',
     m.contextWindow ?? '',
     m.maxTokens ?? '',
     subSig,

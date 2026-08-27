@@ -7,9 +7,14 @@ import type { JSX } from 'preact';
 import type { SystemPromptEntry } from '../../../shared/protocol';
 import { useAnchoredOverlay } from '../components/anchored-overlay';
 import { Tooltip } from '../components/tooltip';
+import { useNoticeContext } from '../hooks/notice-context';
 import { cx } from '../utils/cx';
 
 interface SystemPromptToggleMenuProps {
+  /** Session identity owning this prompt list. Pending intents are never
+   *  allowed to cross this boundary when the toolbar is reused for a tab
+   *  switch. */
+  sessionPath?: string | null;
   /** Full system-prompt entry list for the active session (each carries an
    *  `id` and a `disabled` flag). The backend is the source of truth — the
    *  webview renders this list and sends toggle changes back via
@@ -18,11 +23,44 @@ interface SystemPromptToggleMenuProps {
   prompts: SystemPromptEntry[];
   /** Apply the complete disabled-entry set (entry ids toggled OFF). An empty
    *  array re-enables everything. */
-  onSetToggles: (disabledEntries: string[]) => void;
+  /** Apply the complete disabled-entry set. A boolean/Promise result is
+   *  optional for transports that can report command failure; the regular
+   *  VS Code bridge remains fire-and-forget and reports backend failures via
+   *  the authoritative notice channel. */
+  onSetToggles: (disabledEntries: string[]) => void | boolean | Promise<void | boolean>;
 }
 
 /** A toggleable entry narrowed so its `id` is a required string. */
 type ToggleableEntry = SystemPromptEntry & { id: string };
+
+const SYSTEM_PROMPT_FAILURE_NOTICE = 'Failed to save the system-prompt setting.';
+const EMPTY_PENDING: Record<string, boolean> = {};
+
+export interface PendingOverlayState {
+  sessionPath: string | null;
+  /** Render-generation fence prevents A's state from reappearing on A→B→A
+   *  before the passive session-change effect has run. */
+  sessionGeneration: number;
+  intents: Record<string, boolean>;
+}
+
+/** Return only the intents owned by the currently-rendered session/generation.
+ * Keeping this as a pure helper makes the pre-effect isolation contract easy
+ * to test: an old A state is empty for B, and remains empty if the renderer
+ * returns to A under a newer generation. */
+export function scopePendingOverlay(
+  state: PendingOverlayState,
+  sessionPath: string | null,
+  sessionGeneration: number,
+): Record<string, boolean> {
+  return state.sessionPath === sessionPath && state.sessionGeneration === sessionGeneration
+    ? state.intents
+    : EMPTY_PENDING;
+}
+
+function noticeTargetsSession(noticeSessionPath: string | null | undefined, sessionPath: string | null): boolean {
+  return noticeSessionPath === undefined || noticeSessionPath === null || noticeSessionPath === sessionPath;
+}
 
 /** A toolbar menu for toggling individual system-prompt entries on/off.
  *
@@ -44,13 +82,59 @@ type ToggleableEntry = SystemPromptEntry & { id: string };
  *    - a reconcile effect acks pending intents the backend has confirmed (or
  *      prunes ones whose entry vanished), so the overlay never masks later
  *      backend-driven changes or grows without bound. */
-export function SystemPromptToggleMenu({ prompts, onSetToggles }: SystemPromptToggleMenuProps) {
+export function SystemPromptToggleMenu({ prompts, sessionPath = null, onSetToggles }: SystemPromptToggleMenuProps) {
   const [open, setOpen] = useState(false);
   /** Local per-entry intent overlay, keyed by entry id: `true` = disabled,
    *  `false` = enabled. Cleared as the backend confirms each intent. */
-  const [pending, setPending] = useState<Record<string, boolean>>({});
+  const [pendingState, setPendingState] = useState<PendingOverlayState>(() => ({
+    sessionPath,
+    sessionGeneration: 0,
+    intents: {},
+  }));
+  const currentSessionPathRef = useRef<string | null>(sessionPath);
+  const sessionGenerationRef = useRef(0);
+  const pendingOperationRef = useRef(0);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const { notice, sessionPath: noticeSessionPath } = useNoticeContext();
+
+  // Scope the overlay synchronously as soon as the identity changes. The
+  // effect below clears the state after commit, but using the scoped view here
+  // prevents even a single render of session A's checkbox/badge in session B.
+  if (currentSessionPathRef.current !== sessionPath) {
+    currentSessionPathRef.current = sessionPath;
+    sessionGenerationRef.current += 1;
+    pendingOperationRef.current += 1;
+  }
+  const sessionGeneration = sessionGenerationRef.current;
+  const sessionPending = scopePendingOverlay(pendingState, sessionPath, sessionGeneration);
+
+  useEffect(() => {
+    setPendingState((previous) => (
+      previous.sessionPath === sessionPath
+        && previous.sessionGeneration === sessionGeneration
+        && Object.keys(previous.intents).length === 0
+        ? previous
+        : { sessionPath, sessionGeneration, intents: {} }
+    ));
+    setOpen(false);
+  }, [sessionGeneration, sessionPath]);
+
+  // The EffectRunner reports persistence failures through the host-owned
+  // NoticeShown projection. Treat that authoritative failure as a rollback,
+  // so the local optimistic overlay cannot remain indefinitely misleading.
+  // This is deliberately notice-driven rather than timer-driven: an ordinary
+  // stale state snapshot must not erase a rapid, valid click sequence.
+  useEffect(() => {
+    if (!notice?.startsWith(SYSTEM_PROMPT_FAILURE_NOTICE)
+      || !noticeTargetsSession(noticeSessionPath, sessionPath)) return;
+    setPendingState((previous) => {
+      if (previous.sessionPath !== sessionPath || previous.sessionGeneration !== sessionGeneration) return previous;
+      return Object.keys(previous.intents).length === 0
+        ? previous
+        : { ...previous, intents: {} };
+    });
+  }, [notice, noticeSessionPath, sessionGeneration, sessionPath]);
 
   useAnchoredOverlay({
     open,
@@ -85,12 +169,12 @@ export function SystemPromptToggleMenu({ prompts, onSetToggles }: SystemPromptTo
   // of a stale remote prop — which previously caused lost updates.
   const disabledIds = useMemo(() => {
     const set = new Set<string>(remoteDisabledIds);
-    for (const [id, intent] of Object.entries(pending)) {
+    for (const [id, intent] of Object.entries(sessionPending)) {
       if (intent) set.add(id);
       else set.delete(id);
     }
     return set;
-  }, [remoteDisabledIds, pending]);
+  }, [remoteDisabledIds, sessionPending]);
 
   // Reconcile pending intents against incoming remote state: ack entries the
   // backend has confirmed (remote state matches intent) and prune entries that
@@ -102,12 +186,15 @@ export function SystemPromptToggleMenu({ prompts, onSetToggles }: SystemPromptTo
   // fresh state and the `prev`-guard avoids re-render loops when nothing
   // reconciles.
   useEffect(() => {
-    if (Object.keys(pending).length === 0) return;
-    setPending((prev) => {
+    if (notice?.startsWith(SYSTEM_PROMPT_FAILURE_NOTICE)
+      && noticeTargetsSession(noticeSessionPath, sessionPath)) return;
+    if (Object.keys(sessionPending).length === 0) return;
+    setPendingState((prev) => {
+      if (prev.sessionPath !== sessionPath || prev.sessionGeneration !== sessionGeneration) return prev;
       const present = new Set(entries.map((e) => e.id));
       let changed = false;
       const next: Record<string, boolean> = {};
-      for (const [id, intent] of Object.entries(prev)) {
+      for (const [id, intent] of Object.entries(prev.intents)) {
         // Drop entries whose id has vanished, or whose intent the backend now
         // confirms — both free the overlay to track fresh remote state.
         if (!present.has(id) || remoteDisabledIds.has(id) === intent) {
@@ -116,9 +203,9 @@ export function SystemPromptToggleMenu({ prompts, onSetToggles }: SystemPromptTo
         }
         next[id] = intent;
       }
-      return changed ? next : prev;
+      return changed ? { ...prev, intents: next } : prev;
     });
-  }, [entries, remoteDisabledIds]);
+  }, [entries, notice, noticeSessionPath, remoteDisabledIds, sessionGeneration, sessionPath, sessionPending]);
 
   // Outside-click + Escape handling, wired only while the dropdown is open.
   useEffect(() => {
@@ -157,20 +244,70 @@ export function SystemPromptToggleMenu({ prompts, onSetToggles }: SystemPromptTo
     const next = new Set(disabledIds);
     if (willDisable) next.add(entry.id);
     else next.delete(entry.id);
-    setPending((prev) => ({ ...prev, [entry.id]: willDisable }));
-    onSetToggles([...next]);
+    const previous = sessionPending;
+    const operation = ++pendingOperationRef.current;
+    setPendingState((prev) => {
+      if (prev.sessionPath !== sessionPath || prev.sessionGeneration !== sessionGeneration) return prev;
+      return { ...prev, intents: { ...prev.intents, [entry.id]: willDisable } };
+    });
+    const rollback = () => {
+      if (pendingOperationRef.current !== operation
+        || currentSessionPathRef.current !== sessionPath
+        || sessionGenerationRef.current !== sessionGeneration) return;
+      setPendingState((prev) => (
+        prev.sessionPath === sessionPath && prev.sessionGeneration === sessionGeneration
+          ? { ...prev, intents: previous }
+          : prev
+      ));
+    };
+    try {
+      const result = onSetToggles([...next]);
+      if (result === false) {
+        rollback();
+      } else if (result && typeof result !== 'boolean' && typeof result.then === 'function') {
+        void result.then((accepted) => {
+          if (accepted === false) rollback();
+        }, rollback);
+      }
+    } catch {
+      rollback();
+    }
   };
 
   const resetAll = () => {
     if (disabledCount === 0) return;
     // Mark every currently-effective disabled entry as pending-enabled so the
     // UI clears instantly; the backend's empty-set re-emit later confirms it.
-    setPending((prev) => {
-      const next = { ...prev };
+    const previous = sessionPending;
+    const operation = ++pendingOperationRef.current;
+    setPendingState((prev) => {
+      if (prev.sessionPath !== sessionPath || prev.sessionGeneration !== sessionGeneration) return prev;
+      const next = { ...prev.intents };
       for (const id of disabledIds) next[id] = false;
-      return next;
+      return { ...prev, intents: next };
     });
-    onSetToggles([]);
+    const rollback = () => {
+      if (pendingOperationRef.current !== operation
+        || currentSessionPathRef.current !== sessionPath
+        || sessionGenerationRef.current !== sessionGeneration) return;
+      setPendingState((prev) => (
+        prev.sessionPath === sessionPath && prev.sessionGeneration === sessionGeneration
+          ? { ...prev, intents: previous }
+          : prev
+      ));
+    };
+    try {
+      const result = onSetToggles([]);
+      if (result === false) {
+        rollback();
+      } else if (result && typeof result !== 'boolean' && typeof result.then === 'function') {
+        void result.then((accepted) => {
+          if (accepted === false) rollback();
+        }, rollback);
+      }
+    } catch {
+      rollback();
+    }
   };
 
   const onTriggerKeyDown = (event: JSX.TargetedKeyboardEvent<HTMLButtonElement>) => {

@@ -7,10 +7,9 @@ import type { TextContent } from "@mariozechner/pi-ai";
 import type { ToolContext } from "./tool-context.js";
 import { textContent } from "./text-content.js";
 import { realRetryClock, type RetryClock, type RetryTimer } from "./retry.js";
-import { existsSync, readFileSync } from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { parseJsonOrThrow, toErrorMessage } from "../../../shared/error-message.js";
+import { toErrorMessage } from "../../../shared/error-message.js";
 import { readKeptSkills } from "../../../shared/pruned-skills.js";
 import { type AgentConfig, type AgentScope, discoverAgents } from "../agents.js";
 import {
@@ -84,34 +83,6 @@ export function readAlwaysParentModel(): boolean {
 	return readAlwaysParentModelFromEnv();
 }
 
-/**
- * Reads the `subagent.confirmProjectAgents` value from a settings.json file.
- * Returns undefined when the file or key is absent, so callers ultimately
- * fall back to true. An explicit per-call `confirmProjectAgents` value always
- * takes precedence over this setting.
- *
- * Exported separately from `readSubagentConfirmDefault` so the parsing logic
- * can be unit-tested against an arbitrary path.
- */
-export function readConfirmDefaultFromSettings(settingsPath: string): boolean | undefined {
-	if (!existsSync(settingsPath)) return undefined;
-	try {
-		const parsed = parseJsonOrThrow<Record<string, unknown>>(readFileSync(settingsPath, "utf-8"), settingsPath);
-		const subagent = parsed.subagent as Record<string, unknown> | undefined;
-		if (subagent && typeof subagent.confirmProjectAgents === "boolean") {
-			return subagent.confirmProjectAgents;
-		}
-	} catch {
-		/* ignore malformed settings.json */
-	}
-	return undefined;
-}
-
-/** Reads the `subagent.confirmProjectAgents` default from settings.json at the config root. */
-export function readSubagentConfirmDefault(): boolean | undefined {
-	return readConfirmDefaultFromSettings(path.join(CONFIG_ROOT, "settings.json"));
-}
-
 // SelectionContext moved to ./selection.ts (see import above).
 
 /** Validate the sole supported invocation shape and agent name. */
@@ -145,7 +116,6 @@ export function validateSubagentParams(
 export { resolveModel, attachSelectionMetadata, isModelFailure, checkTrailLoop, type SelectionContext };
 
 /** Standard error response shape used by early returns. */
-export type Mode = "single";
 type ErrorResponse = { content: TextContent[]; details: SubagentDetails; isError: true };
 
 /** Environment key for the last-resort settlement inactivity budget
@@ -475,53 +445,6 @@ function collectRequestedAgentNames(params: SingleSubagentParams): Set<string> {
 	return new Set([params.agent]);
 }
 
-/** Confirms project-local agent usage with the user; returns undefined on approval, response on cancel. */
-export async function maybeApproveProjectAgents(
-	params: SingleSubagentParams,
-	agents: AgentConfig[],
-	discovery: ReturnType<typeof discoverAgents>,
-	mode: Mode,
-	ctx: ToolContext,
-): Promise<ErrorResponse | undefined> {
-	if (!(params.confirmProjectAgents ?? readSubagentConfirmDefault() ?? true)) {
-		return undefined;
-	}
-
-	// No project agents dir was discovered, so there is nothing repo-controlled to
-	// confirm. This also keeps unit tests that inject project-sourced agents
-	// without a real discovery dir from spuriously failing closed.
-	if (!discovery.projectAgentsDir) {
-		return undefined;
-	}
-
-	const projectAgentsRequested = Array.from(collectRequestedAgentNames(params))
-		.map((name) => agents.find((a) => a.name === name))
-		.filter((a): a is AgentConfig => a?.source === "project");
-
-	if (projectAgentsRequested.length === 0) return undefined;
-
-	const names = projectAgentsRequested.map((a) => a.name).join(", ");
-	const dir = discovery.projectAgentsDir ?? "(unknown)";
-	if (!ctx.hasUI) {
-		return {
-			content: [textContent(`Cannot confirm project-local agents (${names}) in a non-interactive mode. Re-run with UI, or explicitly set confirmProjectAgents: false only for a trusted repository.`)],
-			details: makeDetails(mode, [], DEFAULT_AGENT_SCOPE, discovery.projectAgentsDir),
-			isError: true,
-		};
-	}
-	const ok = await ctx.ui.confirm(
-		"Run project-local agents?",
-		`Agents: ${names}\nSource: ${dir}\n\nProject agents are repo-controlled. Only continue for trusted repositories.`,
-	);
-	if (ok) return undefined;
-
-	return {
-		content: [textContent("Canceled: project-local agents not approved.")],
-		details: makeDetails(mode, [], DEFAULT_AGENT_SCOPE, discovery.projectAgentsDir),
-		isError: true,
-	};
-}
-
 /** Resolve and snapshot the effective subagent-only provider policy for a tree.
  * Nested AgentSessions use in-memory session managers whose paths do not identify
  * the main chat, so descendants must consume the root snapshot rather than
@@ -711,9 +634,8 @@ export async function execute(
 		throwInvalidAgents(invalidResults);
 	}
 
-	const approvalError = await maybeApproveProjectAgents(params, agents, discovery, mode, ctx);
-	if (approvalError) return approvalError;
-
+	// Starting an agent is a routine orchestration action and must not prompt.
+	// Resulting tool calls remain subject to the normal action-level safeguards.
 	// Enforce the caller's canSpawn allowlist. The root caller (main agent) has
 	// no canSpawn → unrestricted. An agent with a canSpawn list may only spawn the
 	// named agents, preserving invariants such as read-only-only delegation.
@@ -785,10 +707,13 @@ export async function execute(
 		cloneDurationMs: number;
 		attemptId?: string;
 	};
+	type CapturedDetails = {
+		metadata: DetailTraceMetadata;
+		settlementMs: number;
+	};
 	let latestDetails: SubagentDetails | undefined;
 	let latestTraceMetadata: DetailTraceMetadata | undefined;
-	let activeSettlementMs = resolveSettlementMs();
-	const captureDetails = (details: SubagentDetails | undefined): DetailTraceMetadata | undefined => {
+	const captureDetails = (details: SubagentDetails | undefined): CapturedDetails | undefined => {
 		if (!details?.results) return undefined;
 		const previous = latestDetails?.results ?? [];
 		let messageCount = 0;
@@ -815,12 +740,17 @@ export async function execute(
 			attemptId,
 		};
 		latestTraceMetadata = metadata;
-		// This is timeout selection, not measurement of the payload. Keep the
-		// settlement budget out of the payload trace phases.
-		activeSettlementMs = resolvePhaseInactivityMs(latestDetails);
-		return metadata;
+		return {
+			metadata,
+			// This is timeout selection, not measurement of the payload. Keep the
+			// settlement budget out of the payload trace phases. The caller applies
+			// this selection only when the same snapshot is credible progress; stale
+			// or duplicate callbacks may preserve details but must never mutate the
+			// lease that is already armed.
+			settlementMs: resolvePhaseInactivityMs(latestDetails),
+		};
 	};
-	let renewSettlementDeadline: (() => void) | undefined;
+	let renewSettlementDeadline: ((settlementMs: number) => void) | undefined;
 	const observeProgress = createProgressObserver({ tool: _toolCallId });
 	let acceptDispatchUpdates = true;
 	const deliverUpdate = (partial: Parameters<OnUpdateCallback>[0]): void => {
@@ -830,8 +760,9 @@ export async function execute(
 	};
 	const preservingOnUpdate: OnUpdateCallback = (partial) => {
 		if (!acceptDispatchUpdates) return;
-		const metadata = captureDetails(partial.details);
-		if (metadata) {
+		const captured = captureDetails(partial.details);
+		if (captured) {
+			const { metadata } = captured;
 			// captureDetails performs the existing shallow snapshot/merge. It does
 			// not clone or walk nested message bodies, so this is a clone boundary,
 			// not a recursive projection.
@@ -850,7 +781,9 @@ export async function execute(
 		// Never treat callback frequency as progress. Runner-owned results advance
 		// progressGeneration for lifecycle/model/tool/terminal activity (including
 		// propagated nested children); old snapshots fall back to semantic changes.
-		if (observeProgress(partial.details)) renewSettlementDeadline?.();
+		if (observeProgress(partial.details) && captured) {
+			renewSettlementDeadline?.(captured.settlementMs);
+		}
 		deliverUpdate(partial);
 	};
 	const fallbackResults = (cause: string): SingleResult[] => [{
@@ -981,28 +914,54 @@ export async function execute(
 		: { signal: settlementController.signal, cleanup: () => {} };
 	const runSignal = combinedRunSignal.signal;
 
-	let settlementTimer: RetryTimer | undefined;
+	type SettlementLeaseSnapshot = {
+		budgetMs: number;
+		armedAt: number;
+		lastProgressAt: number;
+		deadlineAt: number;
+	};
+	type ArmedSettlementLease = SettlementLeaseSnapshot & { timer: RetryTimer };
+	let settlementLease: ArmedSettlementLease | undefined;
+	let expiredSettlementLease: SettlementLeaseSnapshot | undefined;
 	let settlementDeadlineActive = true;
-	let lastSettlementProgressAt = settlementClock.now();
 	let resolveSettlementDeadline!: (value: typeof FORCE_SETTLE) => void;
 	const settlementTimerPromise = new Promise<typeof FORCE_SETTLE>((resolve) => {
 		resolveSettlementDeadline = resolve;
 	});
-	const armSettlementDeadline = (): void => {
+	const expireSettlementDeadline = (
+		lease: SettlementLeaseSnapshot,
+		expectedTimer?: RetryTimer,
+	): void => {
 		if (!settlementDeadlineActive) return;
-		settlementTimer?.cancel();
-		lastSettlementProgressAt = settlementClock.now();
-		const timer = settlementClock.setTimer(activeSettlementMs);
-		settlementTimer = timer;
+		if (expectedTimer && settlementLease?.timer !== expectedTimer) return;
+		settlementLease = undefined;
+		expiredSettlementLease = lease;
+		settlementDeadlineActive = false;
+		resolveSettlementDeadline(FORCE_SETTLE);
+	};
+	const armSettlementDeadline = (budgetMs: number): void => {
+		if (!settlementDeadlineActive) return;
+		settlementLease?.timer.cancel();
+		const armedAt = settlementClock.now();
+		const snapshot: SettlementLeaseSnapshot = {
+			budgetMs,
+			armedAt,
+			lastProgressAt: armedAt,
+			deadlineAt: armedAt + budgetMs,
+		};
+		if (budgetMs <= 0) {
+			expireSettlementDeadline(snapshot);
+			return;
+		}
+		const timer = settlementClock.setTimer(budgetMs);
+		const lease: ArmedSettlementLease = { ...snapshot, timer };
+		settlementLease = lease;
 		void timer.promise.then(() => {
-			if (settlementTimer !== timer || !settlementDeadlineActive) return;
-			settlementTimer = undefined;
-			settlementDeadlineActive = false;
-			resolveSettlementDeadline(FORCE_SETTLE);
+			expireSettlementDeadline(snapshot, timer);
 		});
 	};
 	renewSettlementDeadline = armSettlementDeadline;
-	armSettlementDeadline();
+	armSettlementDeadline(settlementMs);
 
 	const dispatchPromise = dispatchSingle(
 		params,
@@ -1074,9 +1033,13 @@ export async function execute(
 		// Abort the run so runner.ts can return a proper abort result, then give
 		// the dispatch a short grace to surface that result (prefer the real
 		// abort result over a synthesized one). Loud-log + user-visible message.
-		const idleMs = Math.max(0, settlementClock.now() - lastSettlementProgressAt);
-		const expiredSettlementMs = activeSettlementMs;
-		const cause = `subagent settlement inactivity deadline exceeded (${expiredSettlementMs / 1000}s without progress)`;
+		const expiredLease = expiredSettlementLease;
+		if (!expiredLease) throw new Error('Settlement deadline resolved without an owned lease snapshot.');
+		const expiredAt = settlementClock.now();
+		const idleMs = Math.max(0, expiredAt - expiredLease.lastProgressAt);
+		const overdueMs = Math.max(0, expiredAt - expiredLease.deadlineAt);
+		const expiredSettlementMs = expiredLease.budgetMs;
+		const cause = `subagent settlement inactivity deadline exceeded after ${idleMs / 1000}s without progress (${expiredSettlementMs / 1000}s lease)`;
 		forceSettlementTriggered = true;
 		settlementController.abort(new Error(cause));
 		logLoud("subagent force-settled", {
@@ -1085,10 +1048,14 @@ export async function execute(
 			stage: "settlement-inactivity-deadline",
 			settlementMs: expiredSettlementMs,
 			idleMs,
+			armedAt: expiredLease.armedAt,
+			deadlineAt: expiredLease.deadlineAt,
+			expiredAt,
+			overdueMs,
 			cause,
 		});
 		deliverUpdate({
-			content: [textContent(`⚠ Subagent force-settled after ${expiredSettlementMs / 1000}s without progress. This is a bug — please report. See logs for [pie:subagent].`)],
+			content: [textContent(`⚠ Subagent force-settled after ${idleMs / 1000}s without progress (${expiredSettlementMs / 1000}s inactivity lease). This is a bug — please report. See logs for [pie:subagent].`)],
 			details: terminalDetails(cause),
 		});
 
@@ -1116,7 +1083,7 @@ export async function execute(
 		// terminal error toolResult so the SDK writes a result and the parent
 		// transcript records the failure rather than dangling forever.
 		return {
-			content: [textContent(`Subagent made no progress for ${expiredSettlementMs / 1000}s and was force-settled. This is a bug — please report.`)],
+			content: [textContent(`Subagent made no progress for ${idleMs / 1000}s (${expiredSettlementMs / 1000}s inactivity lease) and was force-settled. This is a bug — please report.`)],
 			details: terminalDetails(cause),
 			isError: true,
 		};
@@ -1124,7 +1091,7 @@ export async function execute(
 		acceptDispatchUpdates = false;
 		renewSettlementDeadline = undefined;
 		settlementDeadlineActive = false;
-		settlementTimer?.cancel();
+		settlementLease?.timer.cancel();
 		combinedRunSignal.cleanup();
 	}
 }

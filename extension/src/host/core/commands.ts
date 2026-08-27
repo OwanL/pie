@@ -303,6 +303,7 @@ export interface DetailSubscribeCommand extends CommandBase {
   kind: 'DetailSubscribe';
   viewGeneration: number;
   detailKey: string;
+  detailAttempt: number;
   address: LiveSubagentDetailAddress;
   cursor?: DetailCursor;
   /** Trusted renderer identity (browser server plan §5.4): the complete
@@ -316,6 +317,7 @@ export interface DetailUnsubscribeCommand extends CommandBase {
   kind: 'DetailUnsubscribe';
   viewGeneration: number;
   detailKey: string;
+  detailAttempt: number;
   reason: 'collapse' | 'unmount' | 'session-change';
   rendererId?: string;
   rendererGeneration?: number;
@@ -325,6 +327,7 @@ export interface DetailFetchPagesCommand extends CommandBase {
   kind: 'DetailFetchPages';
   viewGeneration: number;
   detailKey: string;
+  detailAttempt: number;
   ref: DetailPageRef;
   rendererId?: string;
   rendererGeneration?: number;

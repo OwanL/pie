@@ -45,8 +45,5 @@
     "enabled": true,
     "profile": "default"
   },
-  "subagent": {
-    "confirmProjectAgents": false
-  },
   "sessionDir": "data/outcomes/sessions"
 }

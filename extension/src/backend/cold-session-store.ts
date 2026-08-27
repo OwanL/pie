@@ -2,6 +2,8 @@ import * as crypto from 'node:crypto';
 import * as fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import { StringDecoder } from 'node:string_decoder';
+import { isDeepStrictEqual } from 'node:util';
 
 import { deduplicateToolCallResultsForTransport } from '../shared/chat-message-parts';
 import { findDurableDetail } from '../shared/lazy-details';
@@ -13,12 +15,25 @@ import type {
   ModelSettings,
   SessionOpenedPayload,
   SessionSummary,
+  ThinkingLevel,
   TranscriptMode,
   TranscriptPageDirection,
   TranscriptPagePayload,
 } from '../shared/protocol';
 import type { LiveSubagentDetailAddress } from '../shared/protocol/subagent-detail';
-import type { SessionSnapshotTransport } from '../shared/transcript-window';
+import { SessionSnapshotTooLargeError, type SessionSnapshotTransport } from '../shared/transcript-window';
+import {
+  ColdBrowseProjectionCache,
+  type ColdBrowseProjectionCacheStats,
+} from './cold-browse-projection-cache';
+import {
+  ColdBrowseHelperRequestError,
+  type ColdBrowseHelper,
+} from './cold-browse-helper-client';
+import {
+  readColdBrowseFingerprintSync,
+  type ColdBrowseHelperPageOptions,
+} from './cold-browse-helper-protocol';
 import { forgetPrivateSessionArtifacts, type ForgetPrivateSessionArtifactsDeps } from './private-session-artifacts';
 import {
   DurableDetailNotAddressableError,
@@ -39,10 +54,10 @@ import { normalizeDanglingTranscript } from './session-opened';
 import { buildPagedTranscriptWindow } from './transcript-window';
 import type { SessionEntryLike } from './transcript';
 
-/** Cold session operations stay in the coordinator until measurements show a
- * helper process is necessary. This value is intentionally explicit so the
- * selected Phase 3 placement is testable and cannot silently drift. */
-export const COLD_SESSION_STORE_PLACEMENT = 'coordinator-in-process' as const;
+/** The coordinator remains the sole ownership authority. Exact-v3 browse
+ * misses may project in an explicitly configured read-only helper; every
+ * mutation and all legacy/malformed semantics remain coordinator-local. */
+export const COLD_SESSION_STORE_PLACEMENT = 'coordinator-with-optional-helper' as const;
 
 const MISSING_FINGERPRINT = 'missing';
 const DEFAULT_READ_ATTEMPTS = 3;
@@ -64,8 +79,14 @@ interface ColdSdkSessionManager extends SdkSessionManager {
   buildSessionContext: () => ColdSessionContext;
   getTree: () => ColdSessionTreeNode[];
   buildContextEntries?: () => SessionEntryLike[];
-  appendModelChange?: (provider: string, modelId: string) => string;
-  appendThinkingLevelChange?: (thinkingLevel: string) => string;
+  appendPieModelSettingsChange?: (
+    provider: string | undefined,
+    modelId: string | undefined,
+    thinkingLevel: string | undefined,
+  ) => {
+    modelChangeId?: string;
+    thinkingLevelChangeId?: string;
+  };
 }
 
 export interface ColdSessionOwnershipStamp {
@@ -97,6 +118,8 @@ export class StaleColdSessionLeaseError extends Error {
 
 export interface ColdSessionLeaseAuthorityOptions {
   fingerprint?: (sessionPath: string) => string;
+  /** Test seam for proving catalog reservation checks stay filesystem-free. */
+  canonicalPathKey?: (sessionPath: string) => string;
 }
 
 export interface ColdSessionPathReservationToken {
@@ -110,6 +133,13 @@ interface ColdSessionPathReservationState {
   reservationId: string;
   canonicalPath: string;
   nonce: string;
+  hideFromCatalog: boolean;
+}
+
+export interface ColdSessionPathReservationOptions {
+  /** Destination/create transitions are hidden until durable commit. Long-lived
+   * hot ownership fences remain catalog-visible while still rejecting cold IO. */
+  hideFromCatalog?: boolean;
 }
 
 /** Coordinator-local lease authority. Capturing a stamp is cheap and does not
@@ -120,16 +150,21 @@ interface ColdSessionPathReservationState {
 export class ColdSessionLeaseAuthority {
   private readonly ownershipRevisions = new Map<string, number>();
   private readonly pathReservations = new Map<string, ColdSessionPathReservationState>();
+  /** Most catalog rows can be rejected lexically. Only a basename that could
+   * alias a catalog-hidden canonical path needs the synchronous realpath fallback. */
+  private readonly hiddenReservationBasenameCounts = new Map<string, number>();
   private currentCoordinatorGeneration: number;
   private currentAuthorityRevision = 0;
   private readonly fingerprint: (sessionPath: string) => string;
+  private readonly canonicalPathKey: (sessionPath: string) => string;
 
   constructor(coordinatorGeneration: number, options: ColdSessionLeaseAuthorityOptions = {}) {
     if (!Number.isSafeInteger(coordinatorGeneration) || coordinatorGeneration < 0) {
       throw new Error('coordinatorGeneration must be a non-negative safe integer.');
     }
     this.currentCoordinatorGeneration = coordinatorGeneration;
-    this.fingerprint = options.fingerprint ?? readColdSessionFingerprintSync;
+    this.fingerprint = options.fingerprint ?? readColdBrowseFingerprintSync;
+    this.canonicalPathKey = options.canonicalPathKey ?? coldCanonicalPathKey;
   }
 
   get coordinatorGeneration(): number {
@@ -143,7 +178,7 @@ export class ColdSessionLeaseAuthority {
   }
 
   capture(sessionPath: string): ColdSessionOwnershipStamp {
-    const sessionPathKey = coldCanonicalPathKey(sessionPath);
+    const sessionPathKey = this.canonicalPathKey(sessionPath);
     const stamp = {
       coordinatorGeneration: this.currentCoordinatorGeneration,
       sessionPath,
@@ -163,7 +198,7 @@ export class ColdSessionLeaseAuthority {
    *  session that should simply be omitted from the result rather than failing
    *  the whole scan. */
   tryCapture(sessionPath: string): ColdSessionOwnershipStamp | undefined {
-    const sessionPathKey = coldCanonicalPathKey(sessionPath);
+    const sessionPathKey = this.canonicalPathKey(sessionPath);
     if (this.pathReservations.has(sessionPathKey)) {
       return undefined;
     }
@@ -176,15 +211,30 @@ export class ColdSessionLeaseAuthority {
     };
   }
 
+  /** Catalog projection only needs to omit a path while a replacement/create
+   * reservation is active; it must not synchronously realpath/stat every
+   * indexed row. The common non-candidate path is O(1) and filesystem-free,
+   * including while long-lived catalog-visible hot fences exist. For a hidden
+   * basename candidate, retain symlink-safe canonical matching. */
+  isPathReserved(sessionPath: string): boolean {
+    if (this.pathReservations.size === 0) return false;
+    const lexicalKey = backendSessionPathKey(sessionPath);
+    const lexicalReservation = this.pathReservations.get(lexicalKey);
+    if (lexicalReservation?.hideFromCatalog) return true;
+    if (!this.hiddenReservationBasenameCounts.has(coldReservationBasenameKey(sessionPath))) return false;
+    return this.pathReservations.get(this.canonicalPathKey(sessionPath))?.hideFromCatalog === true;
+  }
+
   /** Atomically reserve canonical paths in sorted key order. Validation happens
    * before mutation, and rollback/release uses the same deterministic order. */
   reserveCanonicalPaths(
     canonicalPaths: readonly string[],
     reservationId: string,
+    options: ColdSessionPathReservationOptions = {},
   ): readonly ColdSessionPathReservationToken[] {
     if (!reservationId) throw new Error('Cold path reservation requires an identity.');
     const ordered = [...new Map(canonicalPaths.map((canonicalPath) => [
-      coldCanonicalPathKey(canonicalPath),
+      this.canonicalPathKey(canonicalPath),
       canonicalPath,
     ])).entries()].sort(([left], [right]) => left.localeCompare(right));
     for (const [sessionPathKey, canonicalPath] of ordered) {
@@ -199,16 +249,37 @@ export class ColdSessionLeaseAuthority {
         });
       }
     }
-    const tokens = ordered.map(([sessionPathKey, canonicalPath]) => {
-      const nonce = crypto.randomUUID();
-      this.pathReservations.set(sessionPathKey, { reservationId, canonicalPath, nonce });
+    // Construct every token before mutating either reservation index. If token
+    // creation ever fails, the operation leaves both indexes untouched.
+    const tokens = ordered.map(([sessionPathKey, canonicalPath]) => ({
+      reservationId,
+      canonicalPath,
+      sessionPathKey,
+      nonce: crypto.randomUUID(),
+    }));
+    for (const token of tokens) {
+      const { canonicalPath, sessionPathKey, nonce } = token;
+      const hideFromCatalog = options.hideFromCatalog ?? true;
+      this.pathReservations.set(sessionPathKey, {
+        reservationId,
+        canonicalPath,
+        nonce,
+        hideFromCatalog,
+      });
+      if (hideFromCatalog) this.incrementHiddenReservationBasename(canonicalPath);
       this.bumpOwnershipRevision(sessionPathKey);
-      return { reservationId, canonicalPath, sessionPathKey, nonce };
-    });
+    }
     return tokens;
   }
 
   releaseCanonicalPaths(tokens: readonly ColdSessionPathReservationToken[]): void {
+    const seen = new Set<string>();
+    for (const token of tokens) {
+      if (seen.has(token.sessionPathKey)) {
+        throw new Error(`Duplicate cold path reservation release: ${token.canonicalPath}`);
+      }
+      seen.add(token.sessionPathKey);
+    }
     const ordered = [...tokens].sort((left, right) => left.sessionPathKey.localeCompare(right.sessionPathKey));
     for (const token of ordered) {
       const current = this.pathReservations.get(token.sessionPathKey);
@@ -217,7 +288,9 @@ export class ColdSessionLeaseAuthority {
       }
     }
     for (const token of ordered) {
+      const current = this.pathReservations.get(token.sessionPathKey)!;
       this.pathReservations.delete(token.sessionPathKey);
+      if (current.hideFromCatalog) this.decrementHiddenReservationBasename(current.canonicalPath);
       this.bumpOwnershipRevision(token.sessionPathKey);
     }
   }
@@ -249,7 +322,7 @@ export class ColdSessionLeaseAuthority {
   }
 
   invalidate(sessionPath: string): number {
-    return this.bumpOwnershipRevision(coldCanonicalPathKey(sessionPath));
+    return this.bumpOwnershipRevision(this.canonicalPathKey(sessionPath));
   }
 
   /** Retire every stamp from an old coordinator generation. */
@@ -260,6 +333,7 @@ export class ColdSessionLeaseAuthority {
     this.currentCoordinatorGeneration = nextGeneration;
     this.ownershipRevisions.clear();
     this.pathReservations.clear();
+    this.hiddenReservationBasenameCounts.clear();
     this.currentAuthorityRevision += 1;
   }
 
@@ -274,7 +348,7 @@ export class ColdSessionLeaseAuthority {
     if (stamp.coordinatorGeneration !== this.currentCoordinatorGeneration) {
       throw new StaleColdSessionLeaseError('coordinator-generation', stamp);
     }
-    if (coldCanonicalPathKey(stamp.sessionPath) !== stamp.sessionPathKey) {
+    if (this.canonicalPathKey(stamp.sessionPath) !== stamp.sessionPathKey) {
       throw new StaleColdSessionLeaseError('session-path', stamp);
     }
     if ((this.ownershipRevisions.get(stamp.sessionPathKey) ?? 0) !== stamp.ownershipRevision) {
@@ -283,6 +357,21 @@ export class ColdSessionLeaseAuthority {
     if (this.pathReservations.has(stamp.sessionPathKey)) {
       throw new StaleColdSessionLeaseError('path-reserved', stamp);
     }
+  }
+
+  private incrementHiddenReservationBasename(sessionPath: string): void {
+    const basename = coldReservationBasenameKey(sessionPath);
+    this.hiddenReservationBasenameCounts.set(
+      basename,
+      (this.hiddenReservationBasenameCounts.get(basename) ?? 0) + 1,
+    );
+  }
+
+  private decrementHiddenReservationBasename(sessionPath: string): void {
+    const basename = coldReservationBasenameKey(sessionPath);
+    const next = (this.hiddenReservationBasenameCounts.get(basename) ?? 0) - 1;
+    if (next <= 0) this.hiddenReservationBasenameCounts.delete(basename);
+    else this.hiddenReservationBasenameCounts.set(basename, next);
   }
 }
 
@@ -310,7 +399,27 @@ export interface ColdSessionOpenOptions {
   operationAttempt?: number;
   transcript?: TranscriptMode;
   transport?: SessionSnapshotTransport;
+  systemPromptDisabledEntries?: readonly string[];
 }
+
+/** Canonical per-session configuration written while no execution runtime owns
+ * the session. These values become ordinary Pi transcript entries, so cold
+ * browsing, later worker promotion, and a fresh backend process all observe
+ * the same source of truth. */
+export interface ColdSessionModelSettingsUpdate {
+  model?: {
+    provider: string;
+    modelId: string;
+  };
+  thinkingLevel?: ThinkingLevel;
+}
+
+export interface ColdSessionModelSettingsResult {
+  modelChanged: boolean;
+  thinkingLevelChanged: boolean;
+}
+
+export type ColdSessionPageOptions = ColdBrowseHelperPageOptions;
 
 export interface ColdSessionTruncateResult extends ColdSessionManagerHandle {
   restoredModel: boolean;
@@ -335,6 +444,9 @@ export interface ColdSessionStoreOptions {
   fileSystem?: Partial<ColdSessionStoreFileSystem>;
   forgetArtifactsDeps?: Omit<ForgetPrivateSessionArtifactsDeps, 'deleteTranscript'>;
   readAttempts?: number;
+  browseCacheMaxSourceBytes?: number;
+  browseCacheMaxEntries?: number;
+  browseHelper?: ColdBrowseHelper;
 }
 
 const defaultFileSystem: ColdSessionStoreFileSystem = {
@@ -347,6 +459,17 @@ const defaultFileSystem: ColdSessionStoreFileSystem = {
 interface HandleState {
   status: 'available' | 'installed';
   stamp: ColdSessionOwnershipStamp;
+}
+
+interface LoadedBrowseProjection {
+  readonly browse: SessionBrowseSnapshot;
+  readonly stamp: ColdSessionOwnershipStamp;
+}
+
+interface ColdSessionCatalogPublicationStamp {
+  readonly coordinatorGeneration: number;
+  readonly authorityRevision: number;
+  readonly mutationRevision: number;
 }
 
 /** Narrow, runtime-free adapter over the SDK SessionManager and Pie's existing
@@ -364,10 +487,15 @@ export class ColdSessionStore {
   private readonly fileSystem: ColdSessionStoreFileSystem;
   private readonly forgetArtifactsDeps: Omit<ForgetPrivateSessionArtifactsDeps, 'deleteTranscript'>;
   private readonly readAttempts: number;
+  private readonly browseHelper?: ColdBrowseHelper;
   private catalogMutationRevision = 0;
   private readonly resultStamps = new WeakMap<object, readonly ColdSessionOwnershipStamp[]>();
+  private readonly catalogPublicationStamps = new WeakMap<object, ColdSessionCatalogPublicationStamp>();
   private readonly handleStates = new WeakMap<ColdSessionManagerHandle, HandleState>();
   private readonly promotionGrants = new Map<string, { grant: SerializedColdSessionPromotionGrant; consumed: boolean }>();
+  private readonly browseCache: ColdBrowseProjectionCache<SessionBrowseSnapshot>;
+  private readonly browseLoads = new Map<string, Promise<LoadedBrowseProjection>>();
+  private browseCacheGeneration: number;
 
   constructor(options: ColdSessionStoreOptions) {
     this.sdk = options.sdk;
@@ -383,6 +511,18 @@ export class ColdSessionStore {
     this.fileSystem = { ...defaultFileSystem, ...options.fileSystem };
     this.forgetArtifactsDeps = options.forgetArtifactsDeps ?? {};
     this.readAttempts = options.readAttempts ?? DEFAULT_READ_ATTEMPTS;
+    this.browseHelper = options.browseHelper;
+    this.browseCache = new ColdBrowseProjectionCache(
+      options.browseCacheMaxSourceBytes,
+      options.browseCacheMaxEntries,
+    );
+    this.browseCacheGeneration = this.leases.coordinatorGeneration;
+  }
+
+  /** Process-local cache counters for tests and perf attribution. They are not
+   * part of the backend RPC contract. */
+  getBrowseCacheStats(): ColdBrowseProjectionCacheStats {
+    return this.browseCache.snapshotStats(this.browseLoads.size);
   }
 
   async list(liveSummaries: readonly SessionSummary[] = []): Promise<SessionSummary[]> {
@@ -390,7 +530,9 @@ export class ColdSessionStore {
       const generation = this.leases.coordinatorGeneration;
       const authorityRevision = this.leases.authorityRevision;
       const mutationRevision = this.catalogMutationRevision;
-      await this.catalog.invalidateIfInventoryChanged(this.agentDir, this.sessionDir);
+      // SessionCatalog.list owns persistent-index snapshot publication and
+      // background inventory reconciliation. An eager inventory walk here
+      // would defeat its immediate nonempty-index startup path.
       const sessions = await this.catalog.list(
         this.sdk as SdkModule,
         this.sessionDir,
@@ -403,16 +545,13 @@ export class ColdSessionStore {
         this.catalog.refresh();
         continue;
       }
-      const stamps: ColdSessionOwnershipStamp[] = [];
       const visibleSessions: SessionSummary[] = [];
       for (const session of sessions) {
         // A reserved path is a session mid-creation (not yet committed). Skip
         // it from the read-only list rather than failing the whole scan, so a
         // concurrent `session.create` no longer makes `emitSessionListChanged`
         // throw `path-reserved` every ~10s and stall the session-list refresh.
-        const stamp = this.leases.tryCapture(session.path);
-        if (!stamp) continue;
-        stamps.push(stamp);
+        if (this.leases.isPathReserved(session.path)) continue;
         visibleSessions.push(session);
       }
       if (generation !== this.leases.coordinatorGeneration
@@ -421,15 +560,32 @@ export class ColdSessionStore {
         this.catalog.refresh();
         continue;
       }
-      for (const stamp of stamps) this.leases.assertCurrent(stamp);
-      this.stampResult(visibleSessions, stamps);
+      // Catalog rows are a revisioned metadata snapshot, not browse payloads.
+      // Per-file browse stamps would realpath/stat every row three times across
+      // list, return, and writer publication. One O(1) authority/mutation stamp
+      // preserves the same forget/create/replacement publication fence without
+      // turning a warm SQLite projection back into a filesystem scan.
+      this.resultStamps.set(visibleSessions, []);
+      this.catalogPublicationStamps.set(visibleSessions, {
+        coordinatorGeneration: generation,
+        authorityRevision,
+        mutationRevision,
+      });
       return visibleSessions;
     }
     throw new Error('The session catalog changed repeatedly while it was being read.');
   }
 
   async openSnapshot(sessionPath: string, options: ColdSessionOpenOptions): Promise<SessionOpenedPayload> {
-    return await this.withStableBrowse(sessionPath, options.availableModels ?? [], async (browse, stamp) => {
+    const assisted = await this.tryHelperBrowse(sessionPath, async (helper, stamp) => (
+      await helper.openSnapshot(stamp, options)
+    ));
+    if (assisted) {
+      this.leases.assertCurrent(assisted.stamp);
+      this.stampResult(assisted.result, [assisted.stamp]);
+      return assisted.result;
+    }
+    return await this.withStableBrowse(sessionPath, async (browse, stamp) => {
       const payload = this.buildOpenedPayload(browse, stamp, options);
       this.leases.assertCurrent(stamp);
       return payload;
@@ -441,8 +597,19 @@ export class ColdSessionStore {
     direction: TranscriptPageDirection,
     loadedStart?: number,
     loadedEnd?: number,
+    options: ColdSessionPageOptions = {
+      transport: { kind: 'response', requestId: 'cold-session-store' },
+    },
   ): Promise<TranscriptPagePayload> {
-    return await this.withStableBrowse(sessionPath, [], async (browse, stamp) => {
+    const assisted = await this.tryHelperBrowse(sessionPath, async (helper, stamp) => (
+      await helper.loadPage(stamp, direction, loadedStart, loadedEnd, options)
+    ));
+    if (assisted) {
+      this.leases.assertCurrent(assisted.stamp);
+      this.stampResult(assisted.result, [assisted.stamp]);
+      return assisted.result;
+    }
+    return await this.withStableBrowse(sessionPath, async (browse, stamp) => {
       const page = buildPagedTranscriptWindow(browse.cache, { direction, loadedStart, loadedEnd });
       const result: TranscriptPagePayload = {
         sessionPath,
@@ -468,7 +635,7 @@ export class ColdSessionStore {
     address: LiveSubagentDetailAddress,
     durableRef?: LazyDetailRef,
   ): Promise<ResolvedDurableDetail> {
-    return await this.withStableBrowse(sessionPath, [], async (browse, stamp) => {
+    return await this.withStableBrowse(sessionPath, async (browse, stamp) => {
       const resolution = resolveDurableDetailFromTranscript(browse.cache.transcript, sessionPath, address, durableRef);
       if (resolution.status === 'not-found') {
         throw new DurableDetailNotFoundError(resolution.message);
@@ -496,7 +663,15 @@ export class ColdSessionStore {
         message: 'Live detail is owned by the execution runtime.',
       };
     }
-    return await this.withStableBrowse(sessionPath, [], async (browse, stamp) => {
+    const assisted = await this.tryHelperBrowse(sessionPath, async (helper, stamp) => (
+      await helper.loadDetail(stamp, ref)
+    ));
+    if (assisted) {
+      this.leases.assertCurrent(assisted.stamp);
+      this.stampResult(assisted.result, [assisted.stamp]);
+      return assisted.result;
+    }
+    return await this.withStableBrowse(sessionPath, async (browse, stamp) => {
       const found = findDurableDetail(browse.cache.transcript, ref);
       let result: DetailResult;
       if (found.status === 'unavailable') {
@@ -537,17 +712,55 @@ export class ColdSessionStore {
     if (!state || state.status !== 'available' || state.stamp.sessionPathKey !== handle.stamp.sessionPathKey) {
       throw new Error(`Cold session manager handle is no longer available: ${handle.sessionPath}`);
     }
-    this.leases.assertCurrent(state.stamp);
+    // Capture one immutable read fence. A concurrent retained-handle settings
+    // append restamps `state`, but must not let browse data projected from the
+    // pre-append manager state pass validation under that newer stamp.
+    const snapshotStamp = state.stamp;
+    this.leases.assertCurrent(snapshotStamp);
     const browse = await openSessionBrowseSnapshot({
       manager: handle.manager,
       sessionPath: handle.sessionPath,
       startupCwd: this.startupCwd,
-      availableModels: options.availableModels ?? [],
     });
-    this.leases.assertCurrent(state.stamp);
-    const payload = this.buildOpenedPayload(browse, state.stamp, options);
-    this.leases.assertCurrent(state.stamp);
+    this.leases.assertCurrent(snapshotStamp);
+    const payload = this.buildOpenedPayload(browse, snapshotStamp, options);
+    this.leases.assertCurrent(snapshotStamp);
     return payload;
+  }
+
+  /** Persist model/reasoning choices for an ordinary cold session without
+   * materializing an AgentSession. The SDK append methods preserve Pi's branch
+   * parentage and format; the coordinator lease makes each synchronous append
+   * share the same single-writer boundary as truncate/promotion. */
+  setModelSettings(
+    sessionPath: string,
+    updates: ColdSessionModelSettingsUpdate,
+  ): ColdSessionModelSettingsResult {
+    const opened = this.openManagerWithMigrationLease(sessionPath);
+    return this.applyModelSettings(opened.manager, opened.stamp, updates).result;
+  }
+
+  /** Apply the same durable mutation to a newly-created/forked/truncated
+   * manager retained for one-use promotion. Updating its private handle stamp
+   * keeps that exact manager usable; reopening the path here would make the
+   * retained manager stale and accidentally change a new session into a
+   * resume on promotion. */
+  setHandleModelSettings(
+    handle: ColdSessionManagerHandle,
+    updates: ColdSessionModelSettingsUpdate,
+  ): ColdSessionModelSettingsResult {
+    const state = this.handleStates.get(handle);
+    if (!state || state.status !== 'available' || state.stamp.sessionPathKey !== handle.stamp.sessionPathKey) {
+      throw new Error(`Cold session manager handle is no longer available: ${handle.sessionPath}`);
+    }
+    const applied = this.applyModelSettings(
+      handle.manager,
+      state.stamp,
+      updates,
+      (stamp) => { state.stamp = stamp; },
+    );
+    state.stamp = applied.stamp;
+    return applied.result;
   }
 
   /** Opening the source first is required: SessionManager.open performs the
@@ -602,6 +815,7 @@ export class ColdSessionStore {
     state.consumed = true;
     this.promotionGrants.delete(grant.grantId);
     this.leases.invalidate(grant.sessionPath);
+    this.invalidateBrowsePath(grant.sessionPath);
     return { ...state.grant };
   }
 
@@ -648,6 +862,7 @@ export class ColdSessionStore {
       if (installStarted) {
         this.refreshCatalog();
         this.leases.invalidate(handle.sessionPath);
+        this.invalidateBrowsePath(handle.sessionPath);
       }
     }
   }
@@ -692,6 +907,7 @@ export class ColdSessionStore {
         this.fileSystem.renameSync(temporaryPath, sessionPath);
       });
       committed = true;
+      this.invalidateBrowsePath(sessionPath);
       this.refreshCatalog();
     } finally {
       if (!committed) await this.fileSystem.removeFile(temporaryPath).catch(() => undefined);
@@ -703,39 +919,31 @@ export class ColdSessionStore {
     const coldManager = replacement as ColdSdkSessionManager;
     const afterContext = coldManager.buildSessionContext();
 
-    let restoredModel = false;
     const previousModel = beforeContext.model;
-    if (previousModel
+    const shouldRestoreModel = previousModel !== null
       && (afterContext.model?.provider !== previousModel.provider
-        || afterContext.model?.modelId !== previousModel.modelId)
-      && typeof coldManager.appendModelChange === 'function') {
-      try {
-        this.leases.commitSync(stamp, () => coldManager.appendModelChange?.(
-          previousModel.provider,
-          previousModel.modelId,
-        ));
-        stamp = this.leases.restamp(stamp);
-        restoredModel = true;
-      } catch (error) {
-        if (error instanceof StaleColdSessionLeaseError) throw error;
-        // The durable truncate already committed. Preserve the prior best-effort
-        // restoration contract rather than reporting the rewrite as failed.
-      }
-    }
-
+        || afterContext.model?.modelId !== previousModel.modelId);
+    const shouldRestoreThinkingLevel = !!beforeContext.thinkingLevel
+      && afterContext.thinkingLevel !== beforeContext.thinkingLevel;
+    let restoredModel = false;
     let restoredThinkingLevel = false;
-    if (beforeContext.thinkingLevel
-      && afterContext.thinkingLevel !== beforeContext.thinkingLevel
-      && typeof coldManager.appendThinkingLevelChange === 'function') {
+    if ((shouldRestoreModel || shouldRestoreThinkingLevel)
+      && typeof coldManager.appendPieModelSettingsChange === 'function') {
       try {
-        this.leases.commitSync(stamp, () => coldManager.appendThinkingLevelChange?.(
-          beforeContext.thinkingLevel,
+        this.leases.commitSync(stamp, () => coldManager.appendPieModelSettingsChange?.(
+          shouldRestoreModel ? previousModel.provider : undefined,
+          shouldRestoreModel ? previousModel.modelId : undefined,
+          shouldRestoreThinkingLevel ? beforeContext.thinkingLevel : undefined,
         ));
         stamp = this.leases.restamp(stamp);
-        restoredThinkingLevel = true;
+        restoredModel = shouldRestoreModel;
+        restoredThinkingLevel = shouldRestoreThinkingLevel;
       } catch (error) {
         if (error instanceof StaleColdSessionLeaseError) throw error;
-        // See model restoration above.
+        // The durable truncate already committed. Preserve the prior
+        // best-effort restoration contract rather than reporting the rewrite
+        // as failed, but never expose a partially restored model/reasoning
+        // pair: the SDK seam publishes both or neither.
       }
     }
 
@@ -753,6 +961,17 @@ export class ColdSessionStore {
     this.catalog.remove(sessionPath);
     this.catalogMutationRevision += 1;
     this.leases.invalidate(sessionPath);
+    // Privacy-sensitive forget eagerly drops any durable projection rather
+    // than relying only on the now-unreachable fingerprint/revision key.
+    // Preserve the exact pre-delete canonical identity. Re-canonicalizing a
+    // removed symlink/path can produce a different key and strand private cache
+    // bytes under the old durable identity.
+    const sessionPathKey = stamp.sessionPathKey;
+    this.browseCache.invalidatePath(sessionPathKey);
+    // The local privacy/ownership fences above already make every helper entry
+    // unreachable. Reclaim helper memory opportunistically without queuing this
+    // user action behind an in-flight multi-second projection.
+    void this.browseHelper?.invalidatePath(sessionPathKey).catch(() => undefined);
   }
 
   tree(sessionPath: string): ColdSessionTreeNode[] {
@@ -775,6 +994,8 @@ export class ColdSessionStore {
    * boundary without wrapping or changing its existing public shape. */
   publishSync<T>(result: T, publish: () => void): T {
     if (result && typeof result === 'object') {
+      const catalogStamp = this.catalogPublicationStamps.get(result as object);
+      if (catalogStamp) this.assertCatalogPublicationCurrent(catalogStamp);
       for (const stamp of this.resultStamps.get(result as object) ?? []) {
         this.leases.assertCurrent(stamp);
       }
@@ -790,6 +1011,28 @@ export class ColdSessionStore {
   transferOwnershipStamp(source: object, target: object): void {
     const stamps = this.resultStamps.get(source);
     if (stamps) this.resultStamps.set(target, stamps);
+    const catalogStamp = this.catalogPublicationStamps.get(source);
+    if (catalogStamp) this.catalogPublicationStamps.set(target, catalogStamp);
+  }
+
+  private assertCatalogPublicationCurrent(stamp: ColdSessionCatalogPublicationStamp): void {
+    const generationChanged = stamp.coordinatorGeneration !== this.leases.coordinatorGeneration;
+    const authorityChanged = stamp.authorityRevision !== this.leases.authorityRevision;
+    const mutationChanged = stamp.mutationRevision !== this.catalogMutationRevision;
+    if (!generationChanged && !authorityChanged && !mutationChanged) return;
+    // Reuse the established stale-publication error contract so event and RPC
+    // writers rebuild the catalog through their existing retry paths. The
+    // synthetic path is diagnostic only; catalog validity is process-wide.
+    throw new StaleColdSessionLeaseError(
+      generationChanged ? 'coordinator-generation' : 'ownership-revision',
+      {
+        coordinatorGeneration: stamp.coordinatorGeneration,
+        sessionPath: '<session-catalog>',
+        sessionPathKey: '<session-catalog>',
+        ownershipRevision: stamp.authorityRevision,
+        fingerprint: String(stamp.mutationRevision),
+      },
+    );
   }
 
   private buildOpenedPayload(
@@ -806,28 +1049,84 @@ export class ColdSessionStore {
       operationAttempt: options.operationAttempt,
       transcript: options.transcript,
       transport: options.transport,
+      systemPromptDisabledEntries: options.systemPromptDisabledEntries,
     });
     this.stampResult(payload, [stamp]);
     return payload;
   }
 
+  /** Offload only a header-verified current v3 read. The coordinator owns both
+   * sides of the asynchronous lease: it ties the cheap header to fingerprint A
+   * before dispatch and rechecks generation, ownership revision, canonical
+   * path, and fingerprint immediately after the bounded result returns. */
+  private async tryHelperBrowse<T extends object>(
+    sessionPath: string,
+    operation: (helper: ColdBrowseHelper, stamp: ColdSessionOwnershipStamp) => Promise<T>,
+  ): Promise<{ result: T; stamp: ColdSessionOwnershipStamp } | undefined> {
+    if (!this.browseHelper) return undefined;
+    for (let attempt = 0; attempt < this.readAttempts; attempt += 1) {
+      const stamp = this.leases.capture(sessionPath);
+      if (stamp.fingerprint === MISSING_FINGERPRINT) throw missingSessionError(sessionPath);
+      const header = readColdSessionHeaderSync(sessionPath);
+      this.leases.assertCurrent(stamp);
+      // SessionManager.open owns v1/v2 migration and the empty/malformed-file
+      // behavior. Those semantics may write or synthesize state, so the
+      // read-only helper must never observe them.
+      if (!isCurrentColdSessionHeader(header)) return undefined;
+      try {
+        const result = await operation(this.browseHelper, stamp);
+        this.leases.assertCurrent(stamp);
+        return { result, stamp };
+      } catch (error) {
+        if (error instanceof SessionSnapshotTooLargeError) {
+          // The client accepted this typed producer error only after matching
+          // the helper response to this exact fingerprint. Recheck the Pie
+          // ownership lease at the coordinator boundary, then preserve its
+          // stable code/data instead of synchronously reopening the file.
+          this.leases.assertCurrent(stamp);
+          throw error;
+        }
+        if (error instanceof ColdBrowseHelperRequestError
+          && error.code === 'FINGERPRINT_CHANGED'
+          && error.fingerprint === stamp.fingerprint) {
+          // The client accepts this signal only when the helper correlated it
+          // to this exact request fence. Preserve ownership/generation errors,
+          // but treat either a changed durable image or a changed-then-restored
+          // image as a helper retry instead of paying the synchronous SDK-open
+          // fallback cost on the coordinator event loop.
+          try {
+            this.leases.assertCurrent(stamp);
+          } catch (leaseError) {
+            if (!(leaseError instanceof StaleColdSessionLeaseError)
+              || leaseError.reason !== 'fingerprint') {
+              throw leaseError;
+            }
+          }
+          continue;
+        }
+        if (error instanceof StaleColdSessionLeaseError) {
+          if (error.reason === 'fingerprint') continue;
+          throw error;
+        }
+        // Helper startup, validation, protocol, crash, and projection errors
+        // all preserve UX correctness through the existing synchronous SDK
+        // path. The persistent client may restart lazily on a later miss.
+        return undefined;
+      }
+    }
+    return undefined;
+  }
+
   private async withStableBrowse<T>(
     sessionPath: string,
-    availableModels: readonly ModelInfo[],
     project: (browse: SessionBrowseSnapshot, stamp: ColdSessionOwnershipStamp) => Promise<T> | T,
   ): Promise<T> {
     let lastFingerprintError: StaleColdSessionLeaseError | undefined;
     for (let attempt = 0; attempt < this.readAttempts; attempt += 1) {
-      const opened = this.openManagerWithMigrationLease(sessionPath);
       try {
-        const browse = await openSessionBrowseSnapshot({
-          manager: opened.manager,
-          sessionPath,
-          startupCwd: this.startupCwd,
-          availableModels,
-        });
-        this.leases.assertCurrent(opened.stamp);
-        return await project(browse, opened.stamp);
+        const loaded = await this.getBrowseProjection(sessionPath);
+        this.leases.assertCurrent(loaded.stamp);
+        return await project(loaded.browse, loaded.stamp);
       } catch (error) {
         if (error instanceof StaleColdSessionLeaseError && error.reason === 'fingerprint') {
           lastFingerprintError = error;
@@ -840,14 +1139,109 @@ export class ColdSessionStore {
       ?? new Error(`The session changed repeatedly while it was being read: ${sessionPath}`);
   }
 
+  private async getBrowseProjection(sessionPath: string): Promise<LoadedBrowseProjection> {
+    this.resetBrowseCacheForGeneration();
+    const initialStamp = this.leases.capture(sessionPath);
+    if (initialStamp.fingerprint === MISSING_FINGERPRINT) throw missingSessionError(sessionPath);
+    const cacheKey = coldBrowseCacheKey(initialStamp);
+    // A new fingerprint or ownership revision makes every older projection for
+    // the canonical path unreachable. Reclaim it eagerly before lookup.
+    this.browseCache.invalidatePath(initialStamp.sessionPathKey, cacheKey);
+    const cached = this.browseCache.get(cacheKey);
+    if (cached) {
+      // Final synchronous fence immediately before the hit is exposed.
+      this.leases.assertCurrent(initialStamp);
+      return { browse: cached, stamp: initialStamp };
+    }
+
+    const flightKey = coldBrowseSingleflightKey(initialStamp);
+    const existing = this.browseLoads.get(flightKey);
+    if (existing) {
+      this.browseCache.recordInflightJoin();
+      const joined = await existing;
+      // Every waiter rechecks the exact resulting fingerprint/revision rather
+      // than trusting the first caller's insertion fence.
+      this.leases.assertCurrent(joined.stamp);
+      return joined;
+    }
+
+    this.browseCache.recordMiss();
+    // Register the flight before SDK open/transcript mapping begins. Besides
+    // ordinary concurrent RPCs, this also closes a synchronous re-entrancy
+    // window through test/SDK seams.
+    const loading = Promise.resolve().then(async () => await this.loadBrowseProjection(sessionPath));
+    this.browseLoads.set(flightKey, loading);
+    try {
+      const loaded = await loading;
+      this.leases.assertCurrent(loaded.stamp);
+      return loaded;
+    } finally {
+      if (this.browseLoads.get(flightKey) === loading) this.browseLoads.delete(flightKey);
+    }
+  }
+
+  private async loadBrowseProjection(sessionPath: string): Promise<LoadedBrowseProjection> {
+    const opened = this.openManagerWithMigrationLease(sessionPath);
+    const browse = await openSessionBrowseSnapshot({
+      manager: opened.manager,
+      sessionPath,
+      startupCwd: this.startupCwd,
+    });
+    const cacheKey = coldBrowseCacheKey(opened.stamp);
+    const sourceBytes = coldSourceBytes(opened.stamp.fingerprint, browse);
+    // No await or callback may separate this final exact durable fence from
+    // miss insertion.
+    this.browseCache.invalidatePath(opened.stamp.sessionPathKey, cacheKey);
+    this.leases.assertCurrent(opened.stamp);
+    this.browseCache.set({
+      key: cacheKey,
+      sessionPathKey: opened.stamp.sessionPathKey,
+      value: browse,
+      sourceBytes,
+    });
+    return { browse, stamp: opened.stamp };
+  }
+
+  private resetBrowseCacheForGeneration(): void {
+    const generation = this.leases.coordinatorGeneration;
+    if (generation === this.browseCacheGeneration) return;
+    this.browseCache.clear();
+    this.browseCacheGeneration = generation;
+  }
+
+  private invalidateBrowsePath(sessionPath: string): void {
+    const sessionPathKey = coldCanonicalPathKey(sessionPath);
+    this.browseCache.invalidatePath(sessionPathKey);
+    // Ownership/fingerprint fencing already makes the entry unreachable. This
+    // notification is prompt memory reclamation in the helper and cannot be a
+    // synchronous precondition for coordinator ownership transitions.
+    void this.browseHelper?.invalidatePath(sessionPathKey).catch(() => undefined);
+  }
+
   private openManagerWithMigrationLease(sessionPath: string): ColdSessionManagerHandle {
     const before = this.leases.capture(sessionPath);
     if (before.fingerprint === MISSING_FINGERPRINT) throw missingSessionError(sessionPath);
+    const originalHeader = readColdSessionHeaderSync(sessionPath);
+    // Tie the cheap header observation to fingerprint A before the SDK seam.
+    this.leases.assertCurrent(before);
     const manager = this.leases.commitSync(before, () => this.sdk.SessionManager.open(sessionPath));
-    // open() may have synchronously migrated v1/v2 and atomically changed the
-    // fingerprint. Restamp without crossing an ownership revision.
-    const stamp = this.leases.restamp(before);
-    return { sessionPath, manager, stamp };
+    try {
+      // Current v3 opens are read-only and must retain exact fingerprint A.
+      this.leases.assertCurrent(before);
+      return { sessionPath, manager, stamp: before };
+    } catch (error) {
+      if (!(error instanceof StaleColdSessionLeaseError) || error.reason !== 'fingerprint') throw error;
+      if (!isLegacyColdSessionHeader(originalHeader)) throw error;
+
+      // A supported one-time v1/v2→v3 migration is the only accepted
+      // fingerprint movement across SessionManager.open. Capture fingerprint B,
+      // prove the manager exactly represents B's current parsed JSONL, then
+      // require B to remain current at C before accepting it.
+      const migratedStamp = this.leases.restamp(before);
+      if (!managerMatchesCurrentDurableSession(manager, sessionPath)) throw error;
+      this.leases.assertCurrent(migratedStamp);
+      return { sessionPath, manager, stamp: migratedStamp };
+    }
   }
 
   private createHandle(
@@ -877,6 +1271,60 @@ export class ColdSessionStore {
   private refreshCatalog(): void {
     this.catalogMutationRevision += 1;
     this.catalog.refresh();
+  }
+
+  private applyModelSettings(
+    manager: SdkSessionManager,
+    initialStamp: ColdSessionOwnershipStamp,
+    updates: ColdSessionModelSettingsUpdate,
+    onRestamp?: (stamp: ColdSessionOwnershipStamp) => void,
+  ): {
+    result: ColdSessionModelSettingsResult;
+    stamp: ColdSessionOwnershipStamp;
+  } {
+    const coldManager = manager as ColdSdkSessionManager;
+    const before = coldManager.buildSessionContext();
+    let stamp = initialStamp;
+    const modelChanged = updates.model !== undefined
+      && (before.model?.provider !== updates.model.provider
+        || before.model?.modelId !== updates.model.modelId);
+    const thinkingLevelChanged = updates.thinkingLevel !== undefined
+      && before.thinkingLevel !== updates.thinkingLevel;
+    let committed = false;
+
+    try {
+      if (modelChanged || thinkingLevelChanged) {
+        if (typeof coldManager.appendPieModelSettingsChange !== 'function') {
+          throw new Error('This Pi session manager does not support atomic durable model settings.');
+        }
+        // Model + reasoning is one user intent. Publish both canonical Pi
+        // entries through the SDK's crash-safe batch seam under one ownership
+        // fence, then advance the durable fingerprint exactly once. This also
+        // keeps a retained create/fork handle promotable without reopening it.
+        this.leases.commitSync(stamp, () => coldManager.appendPieModelSettingsChange!(
+          modelChanged ? updates.model!.provider : undefined,
+          modelChanged ? updates.model!.modelId : undefined,
+          thinkingLevelChanged ? updates.thinkingLevel : undefined,
+        ));
+        committed = true;
+        stamp = this.leases.restamp(stamp);
+        onRestamp?.(stamp);
+      }
+
+      this.leases.assertCurrent(stamp);
+      return {
+        result: { modelChanged, thinkingLevelChanged },
+        stamp,
+      };
+    } finally {
+      if (committed) {
+        // A cached browse projection represents the pre-append fingerprint.
+        // Retire it eagerly so the host's post-write hydration cannot publish
+        // the old model over its optimistic selection.
+        this.invalidateBrowsePath(initialStamp.sessionPath);
+        this.refreshCatalog();
+      }
+    }
   }
 
   private stampResult(result: object, stamps: readonly ColdSessionOwnershipStamp[]): void {
@@ -918,12 +1366,108 @@ function coldCanonicalPathKey(sessionPath: string): string {
   return backendSessionPathKey(canonicalPath);
 }
 
-function readColdSessionFingerprintSync(sessionPath: string): string {
+function coldReservationBasenameKey(sessionPath: string): string {
+  const basename = path.basename(path.resolve(sessionPath));
+  return process.platform === 'win32' ? basename.toLowerCase() : basename;
+}
+
+function coldBrowseCacheKey(stamp: ColdSessionOwnershipStamp): string {
+  return JSON.stringify([
+    stamp.sessionPathKey,
+    stamp.coordinatorGeneration,
+    stamp.ownershipRevision,
+    stamp.fingerprint,
+  ]);
+}
+
+/** Single-flight follows canonical ownership. Fingerprint changes during a
+ * supported SDK migration still share the same physical projection build; all
+ * waiters fence the resulting exact fingerprint before using it. */
+function coldBrowseSingleflightKey(stamp: ColdSessionOwnershipStamp): string {
+  return JSON.stringify([
+    stamp.sessionPathKey,
+    stamp.coordinatorGeneration,
+    stamp.ownershipRevision,
+  ]);
+}
+
+function coldSourceBytes(fingerprint: string, browse: SessionBrowseSnapshot): number {
+  // The production fingerprint is dev:ino:size:mtimeNs:ctimeNs. Read the size
+  // from that exact stat observation so cache weighting cannot race a second
+  // file stat after the final durable fence.
+  const fields = fingerprint.split(':');
+  const rawSize = fields.at(-3);
+  if (rawSize && /^\d+$/.test(rawSize)) {
+    const sourceBytes = Number(rawSize);
+    if (Number.isSafeInteger(sourceBytes) && sourceBytes >= 0) return sourceBytes;
+  }
+  // Custom test fingerprint authorities may not encode source size. Their
+  // projections are small; serialize only in that non-production fallback.
+  return Buffer.byteLength(JSON.stringify(browse), 'utf8');
+}
+
+interface ColdSessionHeaderEvidence {
+  readonly type?: unknown;
+  readonly version?: unknown;
+}
+
+function readColdSessionHeaderSync(sessionPath: string): ColdSessionHeaderEvidence | undefined {
+  const descriptor = fsSync.openSync(sessionPath, 'r');
+  const chunk = Buffer.allocUnsafe(4096);
+  const decoder = new StringDecoder('utf8');
+  let buffered = '';
+  let totalBytes = 0;
   try {
-    const stat = fsSync.statSync(sessionPath, { bigint: true });
-    return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return MISSING_FINGERPRINT;
-    throw error;
+    while (totalBytes < 1024 * 1024) {
+      const bytesRead = fsSync.readSync(descriptor, chunk, 0, chunk.length, null);
+      if (bytesRead === 0) {
+        buffered += decoder.end();
+        break;
+      }
+      totalBytes += bytesRead;
+      buffered += decoder.write(chunk.subarray(0, bytesRead));
+      const newline = buffered.indexOf('\n');
+      if (newline >= 0) buffered = buffered.slice(0, newline);
+      if (newline >= 0) break;
+    }
+  } finally {
+    fsSync.closeSync(descriptor);
+  }
+  const line = buffered.trim();
+  if (!line) return undefined;
+  try {
+    return JSON.parse(line) as ColdSessionHeaderEvidence;
+  } catch {
+    return undefined;
+  }
+}
+
+function isLegacyColdSessionHeader(header: ColdSessionHeaderEvidence | undefined): boolean {
+  return header?.type === 'session'
+    && (header.version === undefined || header.version === 1 || header.version === 2);
+}
+
+function isCurrentColdSessionHeader(header: ColdSessionHeaderEvidence | undefined): boolean {
+  return header?.type === 'session' && header.version === 3;
+}
+
+function managerMatchesCurrentDurableSession(manager: SdkSessionManager, sessionPath: string): boolean {
+  if (typeof manager.getHeader !== 'function' || typeof manager.getEntries !== 'function') return false;
+  try {
+    const durableRows = fsSync.readFileSync(sessionPath, 'utf8')
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+    const durableHeader = durableRows[0];
+    if (!durableHeader || durableHeader.type !== 'session' || durableHeader.version !== 3) return false;
+    // Normalize SDK-owned objects through their durable JSON representation so
+    // absent properties and object prototypes cannot create false mismatches.
+    const managerHeader = JSON.parse(JSON.stringify(manager.getHeader()));
+    const managerEntries = JSON.parse(JSON.stringify(manager.getEntries()));
+    return isDeepStrictEqual(managerHeader, durableHeader)
+      && isDeepStrictEqual(managerEntries, durableRows.slice(1));
+  } catch {
+    return false;
   }
 }

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import type {
+  AuxiliaryLlmUsagePayload,
   CompactionSummaryDetails,
   CustomMessagePayload,
   MessageAbortedPayload,
@@ -1793,6 +1794,29 @@ export function handleSdkSessionEvent(
       });
 
       message.durableEntryId = event.sessionEntryId;
+      // Meter every durability-confirmed provider response, including the
+      // tool-use intermediates deliberately folded into a later UI terminal.
+      // This keeps active and interrupted long-running turns current without
+      // publishing their heavy transcript state. Aggregate accounting
+      // reconciles these samples against the eventual terminal run totals.
+      if (message.usage) {
+        deps.emit('auxiliary-llm.usage', {
+          sessionPath: context.sessionPath,
+          kind: 'assistant_message',
+          sourceId: event.sessionEntryId,
+          occurredAt: message.createdAt,
+          ...(message.modelId ? { modelId: message.modelId } : {}),
+          ...(message.provider ? { provider: message.provider } : {}),
+          inputTokens: message.usage.inputTokens,
+          outputTokens: message.usage.outputTokens,
+          cacheReadTokens: message.usage.cacheReadTokens,
+          cacheWriteTokens: message.usage.cacheWriteTokens,
+          ...(message.usage.reportedCostUsd !== undefined
+            ? { reportedCostUsd: message.usage.reportedCostUsd }
+            : {}),
+          ...(durationMs !== undefined ? { durationMs } : {}),
+        } satisfies AuxiliaryLlmUsagePayload);
+      }
       if (isBackendLivePipelineTraceEnabled()) {
         recordBackendLivePipelineTrace({
           stage: 'backend.persistence.confirmed',

@@ -36,6 +36,13 @@ function getTogglesFilePath(): string | undefined {
   return dir ? path.join(dir, TOGGLES_FILE) : undefined;
 }
 
+/** Whether this process has a durable sidecar location. Cold configuration
+ * writes require it; live runtimes may still use their in-memory state when it
+ * is absent, and privacy cleanup has nothing durable to remove in that case. */
+export function isSystemPromptTogglePersistenceAvailable(): boolean {
+  return getTogglesFilePath() !== undefined;
+}
+
 function normalizeMap(value: unknown): Record<string, string[]> {
   if (!value || typeof value !== 'object') return {};
   const v = value as Record<string, unknown>;

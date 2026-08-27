@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import type { HostToWebviewMessage, WebviewToHostMessage } from '../../../src/shared/protocol';
+import { PIE_BUILD_ID, WEBVIEW_PROTOCOL_VERSION } from '../../../src/shared/protocol';
 import { BrowserClientTransport, VsCodeClientTransport } from '../../../src/webview/transport/client-transport';
 import { pendingCommandStore } from '../../../src/webview/transport/pending-command-store';
 
@@ -106,7 +107,8 @@ function createBrowserHarness(): Harness {
 function sendHello(socket: FakeWebSocket, viewGeneration = 5): void {
   socket.onmessage?.({ data: JSON.stringify({
     type: 'rendererHello',
-    protocolVersion: 6,
+    protocolVersion: WEBVIEW_PROTOCOL_VERSION,
+    buildId: PIE_BUILD_ID,
     hostInstanceId: 'host-1',
     rendererId: 'renderer-9',
     rendererGeneration: 2,
@@ -126,6 +128,48 @@ test('connect(): stays connecting until rendererHello completes the application 
   assert.deepEqual(states, ['connecting'], 'an open socket is not connected before rendererHello');
   sendHello(socketInstances[0]!);
   assert.deepEqual(states, ['connecting', 'connected']);
+});
+
+test('an incompatible rendererHello fails closed and never reconnects the stale page', () => {
+  const { transport, states, timers, handshakes } = createBrowserHarness();
+  transport.connect();
+  const socket = socketInstances[0]!;
+  socket.onmessage?.({ data: JSON.stringify({
+    type: 'rendererHello',
+    protocolVersion: WEBVIEW_PROTOCOL_VERSION,
+    buildId: 'stale-build',
+    hostInstanceId: 'host-1',
+    rendererId: 'renderer-9',
+    rendererGeneration: 2,
+    viewGeneration: 5,
+    assetVersion: 'asset-1',
+  }) });
+
+  assert.equal(transport.getConnectionState(), 'reload-required');
+  assert.deepEqual(states, ['connecting', 'reload-required']);
+  assert.deepEqual(handshakes, []);
+  assert.deepEqual(socket.sent, [], 'no frame crosses an incompatible boundary');
+  assert.equal(socket.closed[0]?.reason, 'renderer-build-mismatch');
+  assert.equal(timers.length, 0, 'the stale page does not enter a reconnect storm');
+});
+
+test('a malformed or duplicate rendererHello never replaces live identity', () => {
+  const malformed = createBrowserHarness();
+  malformed.transport.connect();
+  const malformedSocket = socketInstances[0]!;
+  malformedSocket.onmessage?.({ data: JSON.stringify({
+    type: 'rendererHello', protocolVersion: WEBVIEW_PROTOCOL_VERSION, buildId: PIE_BUILD_ID,
+  }) });
+  assert.equal(malformed.transport.getConnectionState(), 'reload-required');
+  assert.equal(malformedSocket.closed[0]?.reason, 'invalid-renderer-hello');
+
+  const duplicate = createBrowserHarness();
+  duplicate.transport.connect();
+  const duplicateSocket = socketInstances[0]!;
+  sendHello(duplicateSocket);
+  sendHello(duplicateSocket, 6);
+  assert.equal(duplicate.transport.getConnectionState(), 'reload-required');
+  assert.equal(duplicateSocket.closed[0]?.reason, 'invalid-renderer-hello');
 });
 
 test('a subscriber attached after rendererHello immediately observes connected', () => {
@@ -151,8 +195,8 @@ test('rendererHello replaces the identity and sends ready + refreshState with th
   assert.deepEqual(handshakes, [{ rendererId: 'renderer-9', viewGeneration: 5 }]);
   const frames = socket.sent.map((frame) => JSON.parse(frame) as Record<string, unknown>);
   assert.equal(frames.length, 4);
-  assert.deepEqual(frames[0], { type: 'ready', viewGeneration: 5 });
-  assert.deepEqual(frames[1], { type: 'refreshState', viewGeneration: 5 });
+  assert.deepEqual(frames[0], { type: 'ready', buildId: PIE_BUILD_ID, viewGeneration: 5 });
+  assert.deepEqual(frames[1], { type: 'refreshState', buildId: PIE_BUILD_ID, viewGeneration: 5 });
   assert.deepEqual(frames[2], { type: 'rendererVisibilityChanged', visible: true, viewGeneration: 5 });
   assert.deepEqual(frames[3], { type: 'rendererFocusChanged', focused: true, viewGeneration: 5 });
 });
@@ -300,7 +344,9 @@ test('VsCodeClientTransport: HTML-stamped metadata on handshake messages, window
   transport.subscribe((message) => received.push(message));
 
   transport.postMessage({ type: 'ready' });
-  assert.deepEqual(vscodePosted[0], { type: 'ready', assetVersion: 'asset-9', viewGeneration: 3 });
+  assert.deepEqual(vscodePosted[0], {
+    type: 'ready', assetVersion: 'asset-9', buildId: PIE_BUILD_ID, viewGeneration: 3,
+  });
 
   transport.postMessage({ type: 'send', sessionPath: '/session/a', text: 'hi', localId: 'l' });
   assert.equal((vscodePosted[1] as { viewGeneration?: number }).viewGeneration, 3, 'commands carry the stamped generation');

@@ -35,6 +35,7 @@ import { DetailSubscriptionService } from './detail-subscriptions';
 export interface DetailHostInfo {
   getHostInstanceId(): string;
   getViewGeneration(): number;
+  isRendererOwnerCurrent?(rendererId: string, viewGeneration: number, rendererGeneration: number): boolean;
 }
 
 const DEFAULT_DETAIL_HOST_INFO: DetailHostInfo = {
@@ -94,6 +95,7 @@ export class SessionService implements vscode.Disposable {
       getHostInstanceId: () => this.detailHostInfo.getHostInstanceId(),
       getViewGeneration: () => this.detailHostInfo.getViewGeneration(),
       getBackendGeneration: () => this.state.getBackendGeneration(),
+      isRendererOwnerCurrent: this.detailHostInfo.isRendererOwnerCurrent,
     });
     this.correlatedFailureSubscription = typeof backend.onDidCorrelatedRequestFail === 'function'
       ? backend.onDidCorrelatedRequestFail((failure) => {
@@ -262,6 +264,7 @@ export class SessionService implements vscode.Disposable {
     subscriptionId: string;
     viewGeneration: number;
     detailKey: string;
+    detailAttempt: number;
     address: LiveSubagentDetailAddress;
     cursor?: DetailCursor;
     rendererId?: string;
@@ -275,6 +278,7 @@ export class SessionService implements vscode.Disposable {
       options.cursor,
       options.rendererId,
       options.rendererGeneration,
+      options.detailAttempt,
     );
   }
 
@@ -283,22 +287,43 @@ export class SessionService implements vscode.Disposable {
   unsubscribeDetail(options: {
     viewGeneration: number;
     detailKey: string;
+    detailAttempt: number;
     reason: 'collapse' | 'unmount' | 'session-change';
     rendererId?: string;
     rendererGeneration?: number;
   }): void {
-    this.detailSubscriptions.unsubscribe(options.viewGeneration, options.detailKey, options.reason, options.rendererId, options.rendererGeneration);
+    this.detailSubscriptions.unsubscribe(
+      options.viewGeneration,
+      options.detailKey,
+      options.reason,
+      options.rendererId,
+      options.rendererGeneration,
+      options.detailAttempt,
+    );
+  }
+
+  /** Release every detail owner held by an invalidated renderer document. */
+  unsubscribeRendererDetails(rendererId: string, rendererGeneration: number): void {
+    this.detailSubscriptions.unsubscribeRenderer(rendererId, rendererGeneration);
   }
 
   /** Refetch a page of the active baseline for a subscribed key. */
   fetchDetailPages(options: {
     viewGeneration: number;
     detailKey: string;
+    detailAttempt: number;
     ref: DetailPageRef;
     rendererId?: string;
     rendererGeneration?: number;
   }): void {
-    this.detailSubscriptions.fetchPages(options.viewGeneration, options.detailKey, options.ref, options.rendererId, options.rendererGeneration);
+    this.detailSubscriptions.fetchPages(
+      options.viewGeneration,
+      options.detailKey,
+      options.ref,
+      options.rendererId,
+      options.rendererGeneration,
+      options.detailAttempt,
+    );
   }
 
   captureSelectionRequestStart(selectionToken: string, operationAttempt?: number): void {

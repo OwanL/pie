@@ -91,9 +91,11 @@ export class BrowserServer {
     this.staticAssets = new BrowserStaticAssets(options.assetDir);
     this.hub = new RendererHub({
       clock: this.clock,
+      hostInstanceId: options.hostInstanceId,
       getViewState: options.getViewState,
       getRunningSessionCount: options.getRunningSessionCount,
       onMessage: (msg, context) => void this.gate.route(msg, context),
+      onRendererInvalidated: options.onRendererInvalidated,
     });
     this.confirmations = new InlineConfirmationService({
       postToRenderer: (rendererId, message) => this.hub.postImperative(message, rendererId),
@@ -126,6 +128,10 @@ export class BrowserServer {
 
   requestState(rendererId: string): void {
     this.hub.requestState(rendererId);
+  }
+
+  isRendererOwnerCurrent(rendererId: string, viewGeneration: number, rendererGeneration: number): boolean {
+    return this.hub.isRendererOwnerCurrent(rendererId, viewGeneration, rendererGeneration);
   }
 
   /** Renderer-scoped imperative (browser server plan §4.4): lazy-detail

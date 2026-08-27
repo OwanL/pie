@@ -157,7 +157,13 @@ export class PieExtension implements vscode.Disposable {
       context,
       backend,
       () => this.scheduleRender(),
-      (message) => this.sidebarProvider.postImperative(message),
+      (message) => {
+        if (message.type.startsWith('detail.') && 'rendererId' in message) {
+          this.sidebarProvider.postImperativeToRenderer(message.rendererId, message);
+          return;
+        }
+        this.sidebarProvider.postImperative(message);
+      },
       (event) => this.dispatchArchEvent(event),
       () => this.archState,
       (event) => {
@@ -167,6 +173,9 @@ export class PieExtension implements vscode.Disposable {
       {
         getHostInstanceId: () => this.sidebarProvider.getHostInstanceId(),
         getViewGeneration: () => this.sidebarProvider.getViewGeneration(),
+        isRendererOwnerCurrent: (rendererId, viewGeneration, rendererGeneration) =>
+          this.sidebarProvider.isRendererOwnerCurrent(rendererId, viewGeneration, rendererGeneration)
+          || this.browserServer.isRendererOwnerCurrent(rendererId, viewGeneration, rendererGeneration),
       },
     );
 
@@ -201,6 +210,8 @@ export class PieExtension implements vscode.Disposable {
         // Renderer-scoped imperatives (browser server plan §4.4): lazy-detail
         // responses answer the INITIATING browser renderer.
         onForeignPostImperative: (rendererId, message) => this.browserServer.postImperative(message, rendererId),
+        onRendererInvalidated: (rendererId, rendererGeneration) =>
+          this.service.unsubscribeRendererDetails(rendererId, rendererGeneration),
       },
     );
 
@@ -217,10 +228,13 @@ export class PieExtension implements vscode.Disposable {
     );
 
     this.browserServer = new BrowserServer({
+      hostInstanceId: this.sidebarProvider.getHostInstanceId(),
       getSettings: () => readBrowserServerSettings(),
       getViewState: () => this.buildViewState(),
       getRunningSessionCount: () => this.archState.sessions.runningSessionPaths.length,
       routeMessage: (msg, context) => this.messageRouter.handle(msg, context),
+      onRendererInvalidated: (rendererId, rendererGeneration) =>
+        this.service.unsubscribeRendererDetails(rendererId, rendererGeneration),
       assetDir: path.join(context.extensionPath, 'out', 'webview', 'panel'),
       iconPath: path.join(context.extensionPath, 'media', 'icon.svg'),
       titleSuffix: vscode.workspace.name ?? undefined,

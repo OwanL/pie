@@ -23,6 +23,7 @@ export interface DetailBackendLike {
 export const DETAIL_SUBSCRIPTION_MAX_ACTIVE = 32;
 export const DETAIL_TOMBSTONE_MAX = 64;
 export const DETAIL_TOMBSTONE_TTL_MS = 60_000;
+const DETAIL_ATTEMPT_WATERMARK_MAX = DETAIL_TOMBSTONE_MAX * 2;
 export const DEFAULT_DETAIL_PAGE_BYTES = 128 * 1024;
 
 export interface DetailSubscriptionServiceOptions {
@@ -36,6 +37,9 @@ export interface DetailSubscriptionServiceOptions {
   getViewGeneration: () => number;
   /** Current backend generation used to fence `BackendDetailFence`. */
   getBackendGeneration: () => number;
+  /** Multi-renderer authority. When supplied, replaces the legacy sidebar-only
+   * view-generation check with the exact renderer ownership tuple. */
+  isRendererOwnerCurrent?: (rendererId: string, viewGeneration: number, rendererGeneration: number) => boolean;
   /** Injectable clock for tombstone/terminal-record expiry (tests). */
   now?: () => number;
   /** Page budget offered to the coordinator on subscribe; clamped there. */
@@ -49,6 +53,7 @@ interface SubscriptionOwner {
   /** Trusted renderer identity (browser server plan §5.4). */
   rendererId: string;
   rendererGeneration: number;
+  detailAttempt: number;
   address: LiveSubagentDetailAddress;
   state: 'subscribing' | 'active' | 'rebasing' | 'terminal';
   fence?: BackendDetailFence;
@@ -64,6 +69,11 @@ interface SubscriptionTombstone {
   viewGeneration: number;
   rendererId: string;
   rendererGeneration: number;
+  expiresAt: number;
+}
+
+interface DetailAttemptWatermark {
+  detailAttempt: number;
   expiresAt: number;
 }
 
@@ -88,9 +98,9 @@ function cloneAddress(address: LiveSubagentDetailAddress): LiveSubagentDetailAdd
 
 /** The complete browser-server ownership key (browser server plan §5.4):
  *  `{hostInstanceId, viewGeneration, rendererId, rendererGeneration,
- *  detailKey}`. `hostInstanceId` is fixed per service instance; the rest is
- *  encoded here so a browser renderer's subscription can never be settled or
- *  streamed to another renderer, even with matching numeric revisions. */
+ *  detailKey, detailAttempt}`. `hostInstanceId` is fixed per service instance;
+ *  the stable-key fields are encoded here and the current attempt is stored on
+ *  the owner so stale pre-start traffic cannot settle its replacement. */
 function ownerKey(viewGeneration: number, rendererId: string, rendererGeneration: number, detailKey: string): string {
   return `${viewGeneration}\u0000${rendererId}\u0000${rendererGeneration}\u0000${detailKey}`;
 }
@@ -115,7 +125,8 @@ function sameAddress(left: LiveSubagentDetailAddress, right: LiveSubagentDetailA
  *
  * - exactly one active subscription record per `{viewGeneration, detailKey}`
  *   (the host instance is fixed per `hostInstanceId`, which every imperative
- *   carries) with the exact address/backend/worker fence owner recorded before
+ *   carries), with `detailAttempt` plus the exact address/backend/worker fence
+ *   owner recorded before
  *   any stream content is forwarded;
  * - bounded tombstones that absorb late start/page/delta/terminal/error
  *   traffic after unsubscribe/terminal/error so it can never recreate UI;
@@ -129,6 +140,10 @@ export class DetailSubscriptionService {
   private readonly subscriptions = new Map<string, SubscriptionOwner>();
   private readonly tombstones = new Map<string, SubscriptionTombstone>();
   private readonly terminalRecords = new Map<string, TerminalDetailRecord>();
+  /** Latest renderer-minted attempt accepted for each stable owner key. This
+   *  survives owner teardown, closing the pre-start window where a delayed
+   *  subscribe could otherwise recreate the owner it belonged to. */
+  private readonly attemptWatermarks = new Map<string, DetailAttemptWatermark>();
   private readonly durableAnswersInFlight = new Set<string>();
   private readonly now: () => number;
   private readonly maxPageBytes: number;
@@ -147,7 +162,23 @@ export class DetailSubscriptionService {
     this.subscriptions.clear();
     this.tombstones.clear();
     this.terminalRecords.clear();
+    this.attemptWatermarks.clear();
     this.durableAnswersInFlight.clear();
+  }
+
+  /** Renderer reload/disconnect teardown: release every backend slot owned by
+   * the invalidated document generation, including compact durable handoffs. */
+  unsubscribeRenderer(rendererId: string, rendererGeneration: number): void {
+    for (const owner of [...this.subscriptions.values()]) {
+      if (owner.rendererId !== rendererId || owner.rendererGeneration !== rendererGeneration) continue;
+      this.dropOwner(owner, true);
+      void this.notifyBackendUnsubscribe(owner, 'host-dispose');
+    }
+    for (const [key, record] of this.terminalRecords) {
+      if (record.rendererId === rendererId && record.rendererGeneration === rendererGeneration) {
+        this.terminalRecords.delete(key);
+      }
+    }
   }
 
   getDebugState(): { subscriptions: number; tombstones: number; terminalRecords: number; hostGeneration: number } {
@@ -172,40 +203,45 @@ export class DetailSubscriptionService {
     cursor?: DetailCursor,
     rendererId?: string,
     rendererGeneration?: number,
+    detailAttempt = 1,
   ): void {
     const ownerRendererId = rendererId ?? '';
     const ownerRendererGeneration = rendererGeneration ?? 0;
-    if (!isLiveSubagentDetailAddress(address)) {
-      this.postError(subscriptionId, viewGeneration, ownerRendererId, ownerRendererGeneration, detailKey, 'INVALID_ADDRESS', 'The detail address is invalid.', false);
+    if (!Number.isSafeInteger(detailAttempt) || detailAttempt <= 0) return;
+    const key = ownerKey(viewGeneration, ownerRendererId, ownerRendererGeneration, detailKey);
+    const existing = this.subscriptions.get(key);
+    // The live owner itself is an unexpiring watermark. The bounded retired
+    // ledger may expire, but that must never let an older delayed command
+    // replace a long-running current stream.
+    if (existing && detailAttempt <= existing.detailAttempt) return;
+    const attemptDisposition = this.observeDetailAttempt(key, detailAttempt);
+    if (attemptDisposition !== 'fresh') {
+      // One renderer attempt denotes one owner even if command re-delivery
+      // caused the host to mint a second subscription id. Once that attempt
+      // has retired, it must never recreate itself before receiving start.
       return;
     }
-    const key = ownerKey(viewGeneration, ownerRendererId, ownerRendererGeneration, detailKey);
+    let predecessorClosed: Promise<void> | undefined;
+    if (existing) {
+      this.dropOwner(existing, true);
+      predecessorClosed = this.notifyBackendUnsubscribe(existing, 'rebase');
+    }
+    if (!isLiveSubagentDetailAddress(address)) {
+      this.postError(subscriptionId, viewGeneration, ownerRendererId, ownerRendererGeneration, detailKey, 'INVALID_ADDRESS', 'The detail address is invalid.', false, detailAttempt);
+      return;
+    }
+    this.pruneTerminalRecords();
     const terminal = this.terminalRecords.get(key);
     if (terminal) {
-      if (this.durableAnswersInFlight.has(key)) return;
       if (!sameAddress(terminal.address, address)) {
-        this.postError(subscriptionId, viewGeneration, ownerRendererId, ownerRendererGeneration, detailKey, 'INVALID_ADDRESS', 'The address changed after the detail became durable.', false);
+        this.postError(subscriptionId, viewGeneration, ownerRendererId, ownerRendererGeneration, detailKey, 'INVALID_ADDRESS', 'The address changed after the detail became durable.', false, detailAttempt);
         return;
       }
-      this.subscribeDurably(subscriptionId, terminal);
+      this.subscribeDurably(subscriptionId, terminal, detailAttempt, predecessorClosed);
       return;
     }
-    const existing = this.subscriptions.get(key);
-    if (existing) {
-      if ((existing.state === 'subscribing' || existing.state === 'active')
-        && sameAddress(existing.address, address)) {
-        // Idempotent re-subscribe for the same owner; the existing stream
-        // already covers this key.
-        return;
-      }
-      // Rebase/address replacement creates a fresh owner, but the old worker
-      // subscription must also be closed. A tombstone alone protects the host;
-      // it does not release the worker's bounded subscription slot.
-      this.dropOwner(existing, true);
-      this.notifyBackendUnsubscribe(existing, 'rebase');
-    }
     if (this.subscriptions.size >= DETAIL_SUBSCRIPTION_MAX_ACTIVE) {
-      this.postError(subscriptionId, viewGeneration, ownerRendererId, ownerRendererGeneration, detailKey, 'UNAVAILABLE', 'The host detail subscription budget is full.', true);
+      this.postError(subscriptionId, viewGeneration, ownerRendererId, ownerRendererGeneration, detailKey, 'UNAVAILABLE', 'The host detail subscription budget is full.', true, detailAttempt);
       return;
     }
     const owner: SubscriptionOwner = {
@@ -214,6 +250,7 @@ export class DetailSubscriptionService {
       viewGeneration,
       rendererId: ownerRendererId,
       rendererGeneration: ownerRendererGeneration,
+      detailAttempt,
       address: cloneAddress(address),
       state: 'subscribing',
       revision: 0,
@@ -222,12 +259,16 @@ export class DetailSubscriptionService {
       createdAt: this.now(),
     };
     this.subscriptions.set(key, owner);
-    void this.options.backend.request('detail.subscribe', {
-      subscriptionId,
-      address,
-      ...(cursor !== undefined ? { cursor } : {}),
-      maxPageBytes: this.maxPageBytes,
-    }, { timeoutMs: 30_000 }).catch((error) => {
+    void (async () => {
+      await predecessorClosed;
+      if (this.subscriptions.get(key) !== owner) return;
+      await this.options.backend.request('detail.subscribe', {
+        subscriptionId,
+        address,
+        ...(cursor !== undefined ? { cursor } : {}),
+        maxPageBytes: this.maxPageBytes,
+      }, { timeoutMs: 30_000 });
+    })().catch((error) => {
       if (this.subscriptions.get(key) !== owner) return;
       this.dropOwner(owner, false);
       this.postError(
@@ -239,6 +280,7 @@ export class DetailSubscriptionService {
         this.mapRpcErrorToCode(error),
         error instanceof Error ? error.message : String(error),
         true,
+        owner.detailAttempt,
       );
     });
   }
@@ -246,10 +288,20 @@ export class DetailSubscriptionService {
   /** Collapse/unmount/session-change: immediately discard the owner (the
    *  webview already discarded its heavy key store), leave a bounded tombstone
    *  until acknowledgement/expiry, and notify the backend best-effort. */
-  unsubscribe(viewGeneration: number, detailKey: string, reason: 'collapse' | 'unmount' | 'session-change', rendererId?: string, rendererGeneration?: number): void {
+  unsubscribe(
+    viewGeneration: number,
+    detailKey: string,
+    reason: 'collapse' | 'unmount' | 'session-change',
+    rendererId?: string,
+    rendererGeneration?: number,
+    detailAttempt?: number,
+  ): void {
     const key = ownerKey(viewGeneration, rendererId ?? '', rendererGeneration ?? 0, detailKey);
     const owner = this.subscriptions.get(key);
-    if (!owner) return;
+    const requestedAttempt = detailAttempt ?? owner?.detailAttempt;
+    if (requestedAttempt === undefined || (owner && requestedAttempt < owner.detailAttempt)) return;
+    const attemptDisposition = this.observeDetailAttempt(key, requestedAttempt);
+    if (attemptDisposition === 'stale' || !owner || owner.detailAttempt > requestedAttempt) return;
     this.dropOwner(owner, true);
     this.notifyBackendUnsubscribe(
       owner,
@@ -260,20 +312,28 @@ export class DetailSubscriptionService {
   private notifyBackendUnsubscribe(
     owner: SubscriptionOwner,
     reason: 'collapse' | 'rebase' | 'session-change' | 'host-dispose',
-  ): void {
-    void this.options.backend.request('detail.unsubscribe', {
+  ): Promise<void> {
+    return this.options.backend.request('detail.unsubscribe', {
       subscriptionId: owner.subscriptionId,
       reason,
-    }, { timeoutMs: 15_000 }).catch(() => undefined);
+    }, { timeoutMs: 15_000 }).then(() => undefined, () => undefined);
   }
 
   /** Refetch an evicted/offscreen page of an active baseline. The owner's
    *  exact address/subscription are used; a stale or mismatched manifest is a
    *  dropped request (the coordinator rebases first). */
-  fetchPages(viewGeneration: number, detailKey: string, ref: DetailPageRef, rendererId?: string, rendererGeneration?: number): void {
+  fetchPages(
+    viewGeneration: number,
+    detailKey: string,
+    ref: DetailPageRef,
+    rendererId?: string,
+    rendererGeneration?: number,
+    detailAttempt?: number,
+  ): void {
     const key = ownerKey(viewGeneration, rendererId ?? '', rendererGeneration ?? 0, detailKey);
     const owner = this.subscriptions.get(key);
-    if (!owner || owner.state !== 'active' || owner.fence === undefined) return;
+    if (!owner || (detailAttempt !== undefined && owner.detailAttempt !== detailAttempt)
+      || owner.state !== 'active' || owner.fence === undefined) return;
     if (ref.baselineRevision !== owner.baselineRevision || ref.pageCount !== owner.pageCount || ref.pageIndex >= owner.pageCount) return;
     void this.options.backend.request('detail.fetch', {
       subscriptionId: owner.subscriptionId,
@@ -292,6 +352,7 @@ export class DetailSubscriptionService {
         this.mapRpcErrorToCode(error),
         error instanceof Error ? error.message : String(error),
         true,
+        owner.detailAttempt,
       );
     });
   }
@@ -303,8 +364,12 @@ export class DetailSubscriptionService {
     if (!isCoordinatorToHostDetailMessage(message)) return;
     const owner = this.findOwner(message.subscriptionId);
     if (!owner) return; // unknown, or tombstoned (already closed) traffic
-    if (owner.viewGeneration !== this.options.getViewGeneration()) {
-      this.dropOwner(owner, false);
+    const rendererOwnerCurrent = this.options.isRendererOwnerCurrent
+      ? this.options.isRendererOwnerCurrent(owner.rendererId, owner.viewGeneration, owner.rendererGeneration)
+      : owner.viewGeneration === this.options.getViewGeneration();
+    if (!rendererOwnerCurrent) {
+      this.dropOwner(owner, true);
+      void this.notifyBackendUnsubscribe(owner, 'host-dispose');
       return;
     }
     if (message.fence.backendGeneration !== this.options.getBackendGeneration()) {
@@ -385,7 +450,16 @@ export class DetailSubscriptionService {
         return;
       }
       case 'detail.error': {
-        if (!this.matchesFence(owner, fence)) return;
+        if (owner.fence === undefined) {
+          // Live lookup may fall back to the durable authority and fail before
+          // either source emits detail.start. The subscription id plus current
+          // backend generation already identifies the pending owner; bind the
+          // error's fence so the only terminal signal reaches the renderer.
+          if (owner.state !== 'subscribing') return;
+          owner.fence = { ...fence };
+        } else if (!this.matchesFence(owner, fence)) {
+          return;
+        }
         this.postImperative({ type: 'detail.error', ...this.route(owner), ...message });
         this.dropOwner(owner, false);
         return;
@@ -401,14 +475,42 @@ export class DetailSubscriptionService {
    *  exact pages directly from the durable JSONL ending with a terminal handoff.
    *  No single response ever exceeds the transport budget, and the owner's
    *  stream is routed through the same fence/state machine as a live stream. */
-  private subscribeDurably(subscriptionId: string, terminal: TerminalDetailRecord): void {
+  private subscribeDurably(
+    subscriptionId: string,
+    terminal: TerminalDetailRecord,
+    detailAttempt: number,
+    predecessorClosed?: Promise<void>,
+  ): void {
     const key = ownerKey(terminal.viewGeneration, terminal.rendererId, terminal.rendererGeneration, terminal.detailKey);
     const existing = this.subscriptions.get(key);
-    if (existing && (existing.state === 'subscribing' || existing.state === 'active')
-      && sameAddress(existing.address, terminal.address)) {
-      return; // the durable stream already covers this key
+    if (existing) {
+      if (existing.subscriptionId === subscriptionId
+        && (existing.state === 'subscribing' || existing.state === 'active')
+        && sameAddress(existing.address, terminal.address)) {
+        return; // re-delivery of the exact durable owner is idempotent
+      }
+      // A fresh renderer attempt supersedes the stream it retired locally.
+      // Release the old durable/worker slot before binding the new id.
+      this.dropOwner(existing, true);
+      const existingClosed = this.notifyBackendUnsubscribe(existing, 'rebase');
+      predecessorClosed = predecessorClosed
+        ? Promise.all([predecessorClosed, existingClosed]).then(() => undefined)
+        : existingClosed;
     }
-    if (this.durableAnswersInFlight.has(key)) return;
+    if (this.subscriptions.size >= DETAIL_SUBSCRIPTION_MAX_ACTIVE) {
+      this.postError(
+        subscriptionId,
+        terminal.viewGeneration,
+        terminal.rendererId,
+        terminal.rendererGeneration,
+        terminal.detailKey,
+        'UNAVAILABLE',
+        'The host detail subscription budget is full.',
+        true,
+        detailAttempt,
+      );
+      return;
+    }
     this.durableAnswersInFlight.add(key);
     const owner: SubscriptionOwner = {
       subscriptionId,
@@ -416,6 +518,7 @@ export class DetailSubscriptionService {
       viewGeneration: terminal.viewGeneration,
       rendererId: terminal.rendererId,
       rendererGeneration: terminal.rendererGeneration,
+      detailAttempt,
       address: cloneAddress(terminal.address),
       state: 'subscribing',
       revision: 0,
@@ -424,11 +527,15 @@ export class DetailSubscriptionService {
       createdAt: this.now(),
     };
     this.subscriptions.set(key, owner);
-    void this.options.backend.request('detail.subscribe', {
-      subscriptionId,
-      address: terminal.address,
-      maxPageBytes: this.maxPageBytes,
-    }, { timeoutMs: 30_000 }).catch((error) => {
+    void (async () => {
+      await predecessorClosed;
+      if (this.subscriptions.get(key) !== owner) return;
+      await this.options.backend.request('detail.subscribe', {
+        subscriptionId,
+        address: terminal.address,
+        maxPageBytes: this.maxPageBytes,
+      }, { timeoutMs: 30_000 });
+    })().catch((error) => {
       if (this.subscriptions.get(key) !== owner) return;
       this.dropOwner(owner, false);
       this.postError(
@@ -440,6 +547,7 @@ export class DetailSubscriptionService {
         this.mapRpcErrorToCode(error),
         error instanceof Error ? error.message : String(error),
         true,
+        owner.detailAttempt,
       );
     });
   }
@@ -497,6 +605,35 @@ export class DetailSubscriptionService {
     for (const [key, record] of this.terminalRecords) {
       if (record.recordedAt + DETAIL_TOMBSTONE_TTL_MS <= now) this.terminalRecords.delete(key);
     }
+    while (this.terminalRecords.size > DETAIL_TOMBSTONE_MAX) {
+      const oldestKey = this.terminalRecords.keys().next().value as string | undefined;
+      if (oldestKey === undefined) break;
+      this.terminalRecords.delete(oldestKey);
+    }
+  }
+
+  private observeDetailAttempt(key: string, detailAttempt: number): 'fresh' | 'same' | 'stale' {
+    const now = this.now();
+    for (const [recordedKey, watermark] of this.attemptWatermarks) {
+      if (watermark.expiresAt <= now) this.attemptWatermarks.delete(recordedKey);
+    }
+    const current = this.attemptWatermarks.get(key);
+    if (current) {
+      if (detailAttempt < current.detailAttempt) return 'stale';
+      if (detailAttempt === current.detailAttempt) return 'same';
+    }
+    this.attemptWatermarks.delete(key);
+    this.attemptWatermarks.set(key, {
+      detailAttempt,
+      expiresAt: now + DETAIL_TOMBSTONE_TTL_MS,
+    });
+    while (this.attemptWatermarks.size > DETAIL_ATTEMPT_WATERMARK_MAX) {
+      const inactiveKey = [...this.attemptWatermarks.keys()].find((candidate) => !this.subscriptions.has(candidate));
+      const oldestKey = inactiveKey ?? this.attemptWatermarks.keys().next().value as string | undefined;
+      if (oldestKey === undefined) break;
+      this.attemptWatermarks.delete(oldestKey);
+    }
+    return 'fresh';
   }
 
   private route(owner: SubscriptionOwner): HostDetailRoute {
@@ -513,6 +650,7 @@ export class DetailSubscriptionService {
         ? { workerId: fence.workerId, workerGeneration: fence.workerGeneration }
         : {}),
       detailKey: owner.detailKey,
+      detailAttempt: owner.detailAttempt,
       subscriptionId: owner.subscriptionId,
     };
   }
@@ -530,6 +668,7 @@ export class DetailSubscriptionService {
     code: 'INVALID_ADDRESS' | 'NOT_LIVE_ADDRESSABLE' | 'NOT_FOUND' | 'STALE_CURSOR' | 'CHECKSUM_MISMATCH' | 'SUBSCRIPTION_CONFLICT' | 'UNAVAILABLE' | 'INTERNAL_ERROR',
     message: string,
     retryable: boolean,
+    detailAttempt = 1,
   ): void {
     const route: HostDetailRoute = {
       hostInstanceId: this.options.getHostInstanceId(),
@@ -540,6 +679,7 @@ export class DetailSubscriptionService {
       backendGeneration: this.options.getBackendGeneration(),
       coordinatorGeneration: this.options.getBackendGeneration(),
       detailKey,
+      detailAttempt,
       subscriptionId,
     };
     this.options.postImperative({ type: 'detail.error', ...route, code, message, retryable });

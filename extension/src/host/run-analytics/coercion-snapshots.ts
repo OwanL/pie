@@ -53,6 +53,7 @@ function coerceAssistantUsage(value: unknown): AssistantUsage | null {
 
 const THROUGHPUT_STATUSES = new Set<TurnThroughputStatus>(['completed', 'error', 'interrupted']);
 const AUXILIARY_LLM_USAGE_KINDS = new Set([
+  'assistant_message',
   'skill_pruning_prepass',
   'subagent',
   'history_compaction',

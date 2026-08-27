@@ -111,6 +111,11 @@ export interface PromptSafetyTimerDecision {
   reason: string;
 }
 
+export interface TranscriptPageLoadOptions {
+  transport: SessionSnapshotTransport;
+  requiredMessageId?: string;
+}
+
 export function decidePromptSafetyTimerAction(opts: {
   elapsed: number;
   ceiling: number;
@@ -206,6 +211,7 @@ export interface BackendRequestHandlerDeps {
     transport?: SessionSnapshotTransport,
     operationId?: string,
     operationAttempt?: number,
+    systemPromptDisabledEntries?: readonly string[],
   ): Promise<SessionOpenedPayload>;
   /** Build from the replacement installed by the transition currently owning
    * this path; bypasses joining that transition's own promise. */
@@ -223,6 +229,21 @@ export interface BackendRequestHandlerDeps {
     sessionPath: string,
     disabledEntries: readonly string[],
   ): Promise<void>;
+  /** Persist canonical Pi model/reasoning change entries while the session is
+   * cold. Production wires this to the coordinator-owned ColdSessionStore;
+   * hot sessions continue through their owning runtime above. */
+  applyColdSessionModelSettings?(
+    sessionPath: string,
+    updates: {
+      model?: { provider: string; modelId: string };
+      thinkingLevel?: ModelSettings['defaultThinkingLevel'];
+    },
+  ): Promise<void>;
+  /** Persist system-prompt toggles for a session with no execution runtime. */
+  applyColdSystemPromptToggles?(
+    sessionPath: string,
+    disabledEntries: readonly string[],
+  ): Promise<void>;
   /** Apply autonomous-mode tool exclusion to all live session runtimes. */
   setAutonomousMode(enabled: boolean): void;
   /** Retire a session runtime and delete its transcript/sidecars. */
@@ -232,6 +253,7 @@ export interface BackendRequestHandlerDeps {
     direction: TranscriptPageDirection,
     loadedStart?: number,
     loadedEnd?: number,
+    options?: TranscriptPageLoadOptions,
   ): Promise<TranscriptPagePayload>;
   loadDetail?(sessionPath: string, ref: LazyDetailRef): Promise<DetailResult>;
   /** Preserve the backend's non-serialized browse generation stamp when a
@@ -653,17 +675,22 @@ async function handleSessionLoadTranscriptPage(
 ): Promise<unknown> {
   const params = validateLoadTranscriptPage(request.params);
   markRequestValidated(deps);
+  const active = deps.getSessionContext(params.sessionPath)?.activeRequest;
+  const pageOptions: TranscriptPageLoadOptions = {
+    transport: { kind: 'response', requestId: request.id },
+    requiredMessageId: active?.currentMessageId ?? active?.lastAssistantMessageId,
+  };
   const page = await deps.loadTranscriptPage(
     params.sessionPath,
     params.direction,
     params.loadedStart,
     params.loadedEnd,
+    pageOptions,
   );
-  const active = deps.getSessionContext(params.sessionPath)?.activeRequest;
   const bounded = boundTranscriptSnapshot(page, {
-    transport: { kind: 'response', requestId: request.id },
+    transport: pageOptions.transport,
     requestedEdge: params.direction === 'older' ? 'older' : 'newer',
-    requiredMessageId: active?.currentMessageId ?? active?.lastAssistantMessageId,
+    requiredMessageId: pageOptions.requiredMessageId,
   });
   deps.transferBrowseResponseOwnership?.(page, bounded);
   return bounded;
@@ -1536,9 +1563,28 @@ async function handleSystemPromptTogglesSet(
 ): Promise<unknown> {
   const params = validateSystemPromptTogglesSet(request.params);
   markRequestValidated(deps);
-  await deps.ensureSessionContext(params.sessionPath);
-  await deps.applySystemPromptToggles(params.sessionPath, params.disabledEntries);
-  const payload = await deps.buildSessionOpenedPayload(params.sessionPath);
+  const context = deps.getSessionContext(params.sessionPath);
+  const cold = !context;
+  if (context) {
+    await deps.ensureSessionContext(params.sessionPath);
+    await deps.applySystemPromptToggles(params.sessionPath, params.disabledEntries);
+  } else if (deps.applyColdSystemPromptToggles) {
+    await deps.applyColdSystemPromptToggles(params.sessionPath, params.disabledEntries);
+  } else {
+    throw new BackendError(
+      'COLD_SESSION_SETTINGS_UNAVAILABLE',
+      `Cold-session system-prompt persistence is unavailable for: ${params.sessionPath}`,
+    );
+  }
+  const payload = await deps.buildSessionOpenedPayload(
+    params.sessionPath,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    cold ? [...new Set(params.disabledEntries)] : undefined,
+  );
   deps.emit('session.opened', payload);
   return { ok: true };
 }
@@ -1590,13 +1636,11 @@ async function handleSettingsSet(
   markRequestValidated(deps);
   const { sessionPath, ...rawUpdates } = params;
   const previousSettings = await deps.readModelSettings();
-  // A cold session has no live runtime: `getSessionContext` returns undefined
-  // and the handler persists the model/thinking level without a live switch.
-  // A hot session resolves its existing context and applies the live change.
-  // NOTE: a cold session's transcript is not rewritten here (there is no live
-  // runtime to append a per-session model/thinking-level change). The global
-  // default is updated and the session adopts it on promotion unless it already
-  // carries an explicit per-session model change in its transcript.
+  // A hot session resolves its existing runtime and uses the SDK's live
+  // setters. A cold session has no runtime, but still receives the exact same
+  // durable Pi model/thinking entries through the coordinator-owned cold store.
+  // This keeps the optimistic picker selection authoritative after hydration,
+  // tab switches, worker promotion, and backend/VS Code restarts.
   const targetContext = sessionPath ? deps.getSessionContext(sessionPath) : undefined;
   // The picker sends `defaultModel` (bare id) + `defaultProvider` as separate
   // fields so models that exist under multiple providers (e.g. gpt-5.5 under
@@ -1617,18 +1661,44 @@ async function handleSettingsSet(
   const isChangingModel = requestedId !== currentId || requestedProvider !== currentProvider;
   const isChangingThinkingLevel = params.defaultThinkingLevel !== undefined
     && requestedThinkingLevel !== currentThinkingLevel;
-  const hasPersistedChanges = (params.defaultModel !== undefined
-      && (requestedId !== previousSettings.defaultModel
-        || (params.defaultProvider !== undefined && requestedProvider !== previousSettings.defaultProvider)))
+  let hasPersistedChanges = (params.defaultModel !== undefined
+      && requestedId !== previousSettings.defaultModel)
+    || (params.defaultProvider !== undefined
+      && requestedProvider !== previousSettings.defaultProvider)
     || (params.defaultThinkingLevel !== undefined && requestedThinkingLevel !== previousSettings.defaultThinkingLevel);
+
+  let coldModel: { provider: string; modelId: string } | undefined;
+  const hasRequestedModelIdentity = params.defaultModel !== undefined
+    || params.defaultProvider !== undefined;
+  if (sessionPath && !targetContext && hasRequestedModelIdentity) {
+    const available = await deps.listAvailableModels();
+    const info = requestedProvider
+      ? available.find((model) => model.provider === requestedProvider && model.id === requestedId)
+      : available.find((model) => model.id === requestedId);
+    if (!info) {
+      throw new BackendError(
+        'MODEL_UNAVAILABLE',
+        `Model not available for this session: ${params.defaultModel ?? requestedId}`,
+      );
+    }
+    coldModel = { provider: info.provider, modelId: info.id };
+    // Older settings files may carry only the bare model id. Once the cold
+    // catalog resolves an unambiguous provider, persist that identity too so a
+    // future process never guesses among duplicate ids.
+    if (params.defaultModel !== undefined
+      && previousSettings.defaultProvider !== coldModel.provider) {
+      hasPersistedChanges = true;
+    }
+  }
 
   // Persist the bare id + explicit provider (never a `provider/id` compound)
   // so the SDK's restore path resolves correctly on new sessions.
   const settingsUpdates: Partial<ModelSettings> = { ...rawUpdates };
   if (params.defaultModel !== undefined) {
     settingsUpdates.defaultModel = requestedId;
-    if (requestedProvider) {
-      settingsUpdates.defaultProvider = requestedProvider;
+    const persistedProvider = coldModel?.provider ?? requestedProvider;
+    if (persistedProvider) {
+      settingsUpdates.defaultProvider = persistedProvider;
     } else {
       delete settingsUpdates.defaultProvider;
     }
@@ -1643,7 +1713,9 @@ async function handleSettingsSet(
     : previousSettings;
 
   try {
-    if (targetContext && (params.defaultModel || params.defaultThinkingLevel)) {
+    if (targetContext && (params.defaultModel !== undefined
+      || params.defaultProvider !== undefined
+      || params.defaultThinkingLevel !== undefined)) {
       if (isChangingModel) {
         const available = targetContext.runtime.services?.modelRegistry?.getAvailable() ?? [];
         const info = available.find((model) => model.provider === requestedProvider && model.id === requestedId)
@@ -1667,7 +1739,7 @@ async function handleSettingsSet(
         }
       }
 
-      if (params.defaultThinkingLevel && isChangingThinkingLevel) {
+      if (params.defaultThinkingLevel !== undefined && isChangingThinkingLevel) {
         targetContext.session.setThinkingLevel?.(params.defaultThinkingLevel);
       }
 
@@ -1681,6 +1753,19 @@ async function handleSettingsSet(
       if (isChangingModel || isChangingThinkingLevel) {
         deps.emitContextUsageChanged(targetContext);
       }
+    } else if (sessionPath && (hasRequestedModelIdentity || params.defaultThinkingLevel !== undefined)) {
+      if (!deps.applyColdSessionModelSettings) {
+        throw new BackendError(
+          'COLD_SESSION_SETTINGS_UNAVAILABLE',
+          `Cold-session settings persistence is unavailable for: ${sessionPath}`,
+        );
+      }
+      await deps.applyColdSessionModelSettings(sessionPath, {
+        ...(coldModel ? { model: coldModel } : {}),
+        ...(params.defaultThinkingLevel !== undefined
+          ? { thinkingLevel: params.defaultThinkingLevel }
+          : {}),
+      });
     }
 
     return result;
@@ -1696,7 +1781,7 @@ async function handleSettingsSet(
     // Explicitly set defaultProvider (even to undefined) so the merge-only
     // writer drops a provider we just added when the previous state had none.
     rollback.defaultProvider = previousSettings.defaultProvider;
-    await deps.writeModelSettings(rollback);
+    if (hasPersistedChanges) await deps.writeModelSettings(rollback);
     throw error;
   }
 }

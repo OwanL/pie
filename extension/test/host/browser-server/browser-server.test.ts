@@ -64,6 +64,7 @@ async function createHarness(overrides: Partial<BrowserServerOptions> = {}): Pro
   const events: BrowserServerLifecycleEvent[] = [];
   const routed: Array<{ msg: WebviewToHostMessage; context: RendererCommandContext }> = [];
   const server = new BrowserServer({
+    hostInstanceId: 'shared-host-test',
     getSettings: () => ({ enabled: true, port: 0, requirePreferredPort: false }),
     getViewState: () => EMPTY_VIEW_STATE,
     getRunningSessionCount: () => 0,
@@ -311,13 +312,13 @@ test('a browser socket receives rendererHello and a full snapshot after ready', 
   const hello = await next();
   assert.equal(hello.type, 'rendererHello');
   assert.equal(hello.protocolVersion, WEBVIEW_PROTOCOL_VERSION);
-  assert.equal(typeof hello.hostInstanceId, 'string');
+  assert.equal(hello.hostInstanceId, 'shared-host-test');
   assert.equal(typeof hello.rendererId, 'string');
   assert.equal(typeof hello.rendererGeneration, 'number');
   assert.equal(typeof hello.viewGeneration, 'number');
   assert.equal(typeof hello.assetVersion, 'string');
 
-  ws.send(JSON.stringify({ type: 'ready', viewGeneration: hello.viewGeneration }));
+  ws.send(JSON.stringify({ type: 'ready', buildId: hello.buildId, viewGeneration: hello.viewGeneration }));
   const snapshot = await next();
   assert.equal(snapshot.type, 'state');
   assert.equal(snapshot.hostInstanceId, hello.hostInstanceId);
@@ -337,7 +338,7 @@ test('a validated browser command routes with the trusted renderer context and g
 
   const { ws, next, waitForClose, close } = await connectWs(port, { origin: `http://127.0.0.1:${port}` });
   const hello = await next();
-  ws.send(JSON.stringify({ type: 'ready', viewGeneration: hello.viewGeneration }));
+  ws.send(JSON.stringify({ type: 'ready', buildId: hello.buildId, viewGeneration: hello.viewGeneration }));
   await next(); // snapshot
 
   const clientCommandId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
@@ -373,7 +374,7 @@ test('fail-closed ingress: malformed frames are never routed; the rate bound clo
 
   const { ws, next, waitForClose, close } = await connectWs(port, { origin: `http://127.0.0.1:${port}` });
   const hello = await next();
-  ws.send(JSON.stringify({ type: 'ready', viewGeneration: hello.viewGeneration }));
+  ws.send(JSON.stringify({ type: 'ready', buildId: hello.buildId, viewGeneration: hello.viewGeneration }));
   await next();
 
   // Unknown fields are rejected (fail-closed, not ignored).
@@ -486,7 +487,7 @@ test('a browser disconnect deregisters the renderer and cancels pending confirma
 
   const { ws, next, waitForClose, close } = await connectWs(port, { origin: `http://127.0.0.1:${port}` });
   const hello = await next();
-  ws.send(JSON.stringify({ type: 'ready', viewGeneration: hello.viewGeneration }));
+  ws.send(JSON.stringify({ type: 'ready', buildId: hello.buildId, viewGeneration: hello.viewGeneration }));
   await next();
 
   const confirmPromise = server.requestInlineConfirm(hello.rendererId as string, {

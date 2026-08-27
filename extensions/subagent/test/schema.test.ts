@@ -14,7 +14,7 @@ test("SubagentParams exposes one required task shape without a reasoning overrid
 	assert.deepEqual(SubagentParams.required, ["agent", "task"]);
 	const props = SubagentParams.properties as Record<string, unknown>;
 	assert.deepEqual(Object.keys(props), [
-		"agent", "task", "workflowRef", "userContext", "confirmProjectAgents", "cwd", "bucket", "modelRequirements",
+		"agent", "task", "workflowRef", "userContext", "cwd", "bucket", "modelRequirements",
 	]);
 	assert.equal("thinkingLevel" in props, false);
 	assert.equal("tasks" in props, false);
@@ -29,11 +29,6 @@ test("SubagentParams enum and default metadata remain intact", () => {
 	assert.equal(props.thinkingLevel, undefined);
 	assert.deepEqual(props.userContext.enum, ["latest", "all"]);
 	assert.equal(props.userContext.default, undefined);
-	assert.equal(
-		props.confirmProjectAgents.default,
-		undefined,
-		"the optional per-call override must remain absent so settings.json can control the default",
-	);
 });
 
 test("userContext guidance binds each mode to its condition within its prompt budget", () => {
@@ -53,17 +48,21 @@ test("SubagentParams accepts a valid single task", () => {
 		agent: "worker",
 		task: "do work",
 		userContext: "latest",
-		confirmProjectAgents: true,
 		cwd: "/repo",
 		bucket: "medium",
 	}), true);
 });
 
 test("prepareSubagentArguments migrates only one-item legacy batches", () => {
-	assert.deepEqual(prepareSubagentArguments({ tasks: [{ agent: "worker", task: "a", bucket: "small" }], userContext: "all" }), {
+	assert.deepEqual(prepareSubagentArguments({
+		tasks: [{ agent: "worker", task: "a", bucket: "small", confirmProjectAgents: true }],
+		userContext: "all",
+	}), {
 		agent: "worker", task: "a", bucket: "small", userContext: "all",
 	});
-	assert.deepEqual(prepareSubagentArguments({ chain: [{ agent: "worker", task: "a" }] }), {
+	assert.deepEqual(prepareSubagentArguments({ chain: [{
+		agent: "worker", task: "a", confirmProjectAgents: false,
+	}] }), {
 		agent: "worker", task: "a",
 	});
 	assert.throws(
@@ -72,8 +71,13 @@ test("prepareSubagentArguments migrates only one-item legacy batches", () => {
 	);
 });
 
-test("prepareSubagentArguments strips legacy reasoning overrides", () => {
-	assert.deepEqual(prepareSubagentArguments({ agent: "worker", task: "a", thinkingLevel: "xhigh" }), {
+test("prepareSubagentArguments strips legacy overrides", () => {
+	assert.deepEqual(prepareSubagentArguments({
+		agent: "worker",
+		task: "a",
+		thinkingLevel: "xhigh",
+		confirmProjectAgents: true,
+	}), {
 		agent: "worker", task: "a",
 	});
 	assert.deepEqual(prepareSubagentArguments({ chain: [{ agent: "worker", task: "a", thinkingLevel: "max" }] }), {
@@ -90,6 +94,7 @@ test("SubagentParams rejects removed routes and malformed values", () => {
 	assert.equal(Value.Check(SubagentParams, { agent: "worker", task: "a", thinkingLevel: "high" }), false);
 	assert.equal(Value.Check(SubagentParams, { agent: "worker", task: "a", thinkingLevel: "xhigh" }), false);
 	assert.equal(Value.Check(SubagentParams, { agent: "worker", task: "a", thinkingLevel: "max" }), false);
+	assert.equal(Value.Check(SubagentParams, { agent: "worker", task: "a", confirmProjectAgents: true }), false);
 	assert.equal(Value.Check(SubagentParams, { agent: "worker" }), false);
 	assert.equal(Value.Check(SubagentParams, { task: "a" }), false);
 });

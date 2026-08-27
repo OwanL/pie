@@ -32,6 +32,7 @@ async function main(): Promise<void> {
     server = new BackendServer({
       ...args,
       workerEntryPath: path.join(__dirname, 'worker-entry.js'),
+      coldBrowseHelperEntryPath: path.join(__dirname, 'cold-browse-helper-entry.js'),
     });
     await server.start();
     if (process.env.PIE_PHASE2_PACKAGE_SMOKE === '1') {

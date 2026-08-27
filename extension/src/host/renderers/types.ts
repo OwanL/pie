@@ -107,6 +107,8 @@ export interface RendererHub {
   scheduleSelectionState(): void;
   /** One immediate authoritative snapshot for a specific renderer. */
   requestState(target: RendererTarget): void;
+  /** Whether an ownership tuple still names the live renderer document. */
+  isRendererOwnerCurrent(rendererId: string, viewGeneration: number, rendererGeneration: number): boolean;
   /** Targeted or broadcast imperative. */
   postImperative(message: HostToWebviewMessage, target?: RendererTarget): void;
   registerRenderer(transport: RendererTransport): RendererRegistration;

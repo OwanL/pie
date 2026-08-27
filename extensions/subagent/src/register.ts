@@ -51,7 +51,7 @@ function buildDescription(disabled = false): string {
 	const lines = [
 		"Delegate one concrete task to a specialized agent with isolated context.",
 		"For independent work, issue multiple sibling subagent calls in the same response; for dependent work, call subagent sequentially after reading the prior result.",
-		"Agents are discovered automatically from both user and project directories; project-local agents require user confirmation before they run.",
+		"Agents are discovered automatically from both user and project directories.",
 		BUCKET_GUIDANCE,
 	];
 

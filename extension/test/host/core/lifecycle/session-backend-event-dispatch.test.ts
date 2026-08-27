@@ -61,6 +61,30 @@ test('dispatchSessionBackendEvent validates sequenced live envelopes', () => {
   assert.deepEqual(calls, [{ name: 'live.semantic', payload }]);
 });
 
+test('dispatchSessionBackendEvent validates progressive session-catalog status', () => {
+  const { handlers, calls } = createHandlers();
+  const payload = {
+    sessions: [],
+    sessionCatalogProgress: { complete: false, processed: 24, total: 1_158 },
+  };
+  const inventoryPending = {
+    sessions: [],
+    sessionCatalogProgress: { complete: false, processed: 24 },
+  };
+
+  dispatchSessionBackendEvent({ event: 'session.list.changed', payload: inventoryPending }, handlers);
+  dispatchSessionBackendEvent({ event: 'session.list.changed', payload }, handlers);
+  dispatchSessionBackendEvent({
+    event: 'session.list.changed',
+    payload: { ...payload, sessionCatalogProgress: { complete: false, processed: 25, total: 24 } },
+  }, handlers);
+
+  assert.deepEqual(calls, [
+    { name: 'session.list.changed', payload: inventoryPending },
+    { name: 'session.list.changed', payload },
+  ]);
+});
+
 test('dispatchSessionBackendEvent routes message.custom payloads', () => {
   const { handlers, calls } = createHandlers();
   const payload = {

@@ -77,6 +77,10 @@ export function handleBackendReadyChanged(
     return {
       state: produce(nextState, (draft) => {
         draft.settings.backendReady = false;
+        // Catalog progress is generation-scoped. A replacement backend will
+        // publish its own incomplete/complete status; do not carry a stale
+        // indexing indicator across the restart boundary.
+        draft.sessions.sessionCatalogProgress = { complete: true, processed: 0, total: 0 };
       }),
       effects: [],
     };

@@ -49,6 +49,7 @@ function stalePage(subscriptionId: string, detailKey: string): DetailStreamMessa
     workerId: 'w1',
     workerGeneration: 1,
     detailKey,
+    detailAttempt: 1,
     subscriptionId,
     ref: { baselineRevision: 1, pageIndex: 0, pageCount: 1 },
     payload: {
@@ -115,6 +116,7 @@ test('hook: collapsed never subscribes; expansion subscribes once; collapse unsu
   assert.ok(subscribe && subscribe.type === 'detail.subscribe');
   assert.equal(subscribe.viewGeneration, 1);
   assert.equal(subscribe.detailKey, key);
+  assert.equal(subscribe.detailAttempt, 1);
   assert.deepEqual(subscribe.address, ADDRESS);
 
   // Re-render with the same expansion does not re-subscribe.
@@ -127,6 +129,7 @@ test('hook: collapsed never subscribes; expansion subscribes once; collapse unsu
   assert.equal(unsubscribeCount(), 1);
   const unsubscribe = posts.find((post) => post.type === 'detail.unsubscribe');
   assert.ok(unsubscribe && unsubscribe.type === 'detail.unsubscribe');
+  assert.equal(unsubscribe.detailAttempt, 1);
   assert.equal(unsubscribe.reason, 'collapse');
 
   // Unmount (animation end) does not double-post.
@@ -151,6 +154,8 @@ test('hook: re-expansion before unsubscribe acknowledgement creates a fresh owne
   // …then re-expansion before any acknowledgement: a fresh owner is minted.
   act(() => { render(<Probe detailKey={key} address={ADDRESS} expanded={true} />, container); });
   assert.equal(subscribeCount(), 2);
+  const subscribes = posts.filter((post) => post.type === 'detail.subscribe');
+  assert.deepEqual(subscribes.map((post) => post.detailAttempt), [1, 2]);
 
   // A stale frame bound to the first owner must be ignored entirely.
   act(() => { receiveDetailImperative(stalePage('sub-1', key)); });
@@ -170,7 +175,7 @@ test('hook: error state surfaces retryability; terminal keeps the value renderab
       type: 'detail.error',
       hostInstanceId: 'h1', hostGeneration: 0, viewGeneration: 1, rendererId: 'renderer-1', rendererGeneration: 1,
       backendGeneration: 1,
-      coordinatorGeneration: 1, workerId: 'w1', workerGeneration: 1, detailKey: key, subscriptionId: 'sub-1',
+      coordinatorGeneration: 1, workerId: 'w1', workerGeneration: 1, detailKey: key, detailAttempt: 1, subscriptionId: 'sub-1',
       code: 'UNAVAILABLE', message: 'budget full', retryable: true,
     });
   });

@@ -240,6 +240,7 @@ export class SessionOwnershipAuthority {
       const [hotFence] = this.coldLeaseAuthority?.reserveCanonicalPaths(
         [canonical.canonicalPath],
         `hot:${lease.nonce}`,
+        { hideFromCatalog: false },
       ) ?? [];
       if (hotFence) this.hotFences.set(canonical.key, { owner: { ...owner }, token: hotFence });
       this.states.set(canonical.key, {

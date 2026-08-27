@@ -142,7 +142,11 @@ test('renderer hub applies the heavy cadence after projecting a tool-heavy runni
 
 type StateMessage = Extract<import('../../../src/shared/protocol').HostToWebviewMessage, { type: 'state' }>;
 
-function createHub(clock: FakeClock, routed: WebviewToHostMessage[]) {
+function createHub(
+  clock: FakeClock,
+  routed: WebviewToHostMessage[],
+  onRendererInvalidated?: (rendererId: string, rendererGeneration: number) => void,
+) {
   let projections = 0;
   const hub = new RendererHub({
     clock,
@@ -151,6 +155,7 @@ function createHub(clock: FakeClock, routed: WebviewToHostMessage[]) {
       return state();
     },
     onMessage: (msg) => routed.push(msg),
+    onRendererInvalidated,
     getRunningSessionCount: () => 0,
     settlementTimeoutMs: 1000,
     commitTimeoutMs: 1000,
@@ -165,6 +170,20 @@ async function ready(transport: FakeRendererTransport, registration: { getViewGe
   transport.send({ type: 'ready', viewGeneration: registration.getViewGeneration() });
   await settle();
 }
+
+test('schema-invalid renderer messages fail closed before command routing', () => {
+  const clock = new FakeClock();
+  const routed: WebviewToHostMessage[] = [];
+  const { hub } = createHub(clock, routed);
+  const transport = new FakeRendererTransport('vscode');
+  hub.registerRenderer(transport);
+
+  transport.send({ type: 'setPrefs', prefs: 'invalid' } as unknown as WebviewToHostMessage);
+  transport.send({ type: 'unknownIncidentCommand' } as unknown as WebviewToHostMessage);
+
+  assert.deepEqual(routed, []);
+  hub.dispose();
+});
 
 function commit(transport: FakeRendererTransport, message: StateMessage): void {
   transport.send({
@@ -513,6 +532,27 @@ test('hidden renderer retains dirty intent and resnapshots on reveal', async () 
   a.setVisible(true);
   await settle();
   assert.equal(a.stateMessages().length, baselineCount + 1, 'reveal resnapshots from a full snapshot');
+  hub.dispose();
+});
+
+test('renderer generation invalidation releases generation-owned resources', () => {
+  const clock = new FakeClock();
+  const invalidated: Array<{ rendererId: string; rendererGeneration: number }> = [];
+  const { hub } = createHub(clock, [], (rendererId, rendererGeneration) => {
+    invalidated.push({ rendererId, rendererGeneration });
+  });
+  const transport = new FakeRendererTransport('browser');
+  const registration = hub.registerRenderer(transport);
+  const initialGeneration = registration.getRendererGeneration();
+
+  registration.handleReloadStart('test');
+  assert.deepEqual(invalidated, [{ rendererId: registration.rendererId, rendererGeneration: initialGeneration }]);
+  assert.equal(hub.isRendererOwnerCurrent(
+    registration.rendererId,
+    registration.getViewGeneration(),
+    registration.getRendererGeneration(),
+  ), true);
+  assert.equal(hub.isRendererOwnerCurrent(registration.rendererId, registration.getViewGeneration(), initialGeneration), false);
   hub.dispose();
 });
 

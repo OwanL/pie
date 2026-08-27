@@ -24,14 +24,16 @@ const COORDINATOR_METHODS: ReadonlySet<string> = new Set([
   'openTabs.set',
   'models.list',
   'settings.get',
+  'systemPromptToggles.set',
 ]);
 
 /**
  * True when the coordinator may handle `method` without a hot worker owner.
  * A session-scoped `settings.set` is allowed here: for a cold session there is
- * no live runtime to mutate, so the coordinator persists the model/thinking
- * level directly (and re-broadcasts to hot workers) instead of paying a full
- * worker promotion. A hot session is still routed to its owning worker first.
+ * no live runtime to mutate, so the coordinator appends canonical per-session
+ * model/thinking records through ColdSessionStore (and re-broadcasts the
+ * global default to hot workers) instead of paying a full worker promotion.
+ * A hot session is still routed to its owning worker first.
  */
 export function isCoordinatorOperationAllowed(method: string, _params: unknown): boolean {
   if (COORDINATOR_METHODS.has(method)) return true;

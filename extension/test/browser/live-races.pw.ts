@@ -424,7 +424,7 @@ test.describe('pie browser UI capped live race tests', () => {
     const prompt = [
       '[pie-stability:ask-sibling-children] Read-only UI test; do not change files or access the network.',
       'First call ask_user exactly once with question "Choose safe test path", options ["Continue"], and allowCustom false.',
-      'After the answer, issue exactly two subagent calls as siblings in one assistant response, both with bucket small and confirmProjectAgents false:',
+      'After the answer, issue exactly two subagent calls as siblings in one assistant response, both with bucket small:',
       '(1) scout task: "Do not use tools or inspect files. Compute 11*13 internally and include CHILD_A_143 in the shortest possible reply."',
       '(2) reviewer task: "Do not use tools or inspect files. Compute 17+19 internally and include CHILD_B_36 in the shortest possible reply."',
       'Do not launch nested children. After both settle, reply exactly: FINAL_CHILDREN_OK',

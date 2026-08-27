@@ -10,7 +10,12 @@ import type { ClientConnectionState } from '../../transport/client-transport';
  * while mounted, so this banner never renders there.
  */
 export function ConnectionBanner({ state }: { state: ClientConnectionState }) {
-  const label = state === 'connecting' ? 'Connecting…' : 'Reconnecting…';
+  const reloadRequired = state === 'reload-required';
+  const label = state === 'connecting'
+    ? 'Connecting…'
+    : reloadRequired
+      ? 'Pie was updated. Reload the VS Code window or browser page to continue.'
+      : 'Reconnecting…';
   return (
     <div
       data-connection-banner
@@ -27,7 +32,7 @@ export function ConnectionBanner({ state }: { state: ClientConnectionState }) {
         textAlign: 'center',
       }}
     >
-      {label} — commands are not sent until the connection is restored.
+      {label} {!reloadRequired && '— commands are not sent until the connection is restored.'}
     </div>
   );
 }

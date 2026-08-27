@@ -126,7 +126,37 @@ function stableBucketIndex(file, bucketCount) {
   return (hash >>> 0) % bucketCount;
 }
 
-function mergeReports(results, durationMs) {
+function comparablePath(value) {
+  if (typeof value !== 'string' || value.length === 0) return null;
+  const resolved = path.resolve(value).replace(/\\/gu, '/');
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
+/**
+ * Recover source paths from failures reported by esbuild's temporary outputs.
+ *
+ * The repo-wide runner uses failure.file to rerun a red test in isolation.
+ * Bundled extension tests otherwise report a generated
+ * `%TEMP%/pie-extension-fast-<id>/test/<name>.js` path,
+ * which disappears before that rerun and cannot be classified as a repo test.
+ * Suite-wrapper failures report the temporary test path as their name instead,
+ * so both fields participate in recovery.
+ */
+export function recoverBundledFailureSourceFiles(failures, tempDir, sourceFiles) {
+  const sourcesByOutput = new Map(sourceFiles.map((sourceFile) => {
+    const normalizedSource = sourceFile.replace(/\\/gu, '/');
+    const outputFile = path.join(tempDir, normalizedSource.replace(/\.tsx?$/u, '.js'));
+    return [comparablePath(outputFile), path.join(extensionRoot, normalizedSource)];
+  }));
+
+  return failures.map((failure) => {
+    const sourceFile = sourcesByOutput.get(comparablePath(failure.file))
+      ?? sourcesByOutput.get(comparablePath(failure.name));
+    return sourceFile ? { ...failure, file: sourceFile } : failure;
+  });
+}
+
+function mergeReports(results, durationMs, tempDir, bundledSourceFiles) {
   const counts = emptyCounts();
   const failures = [];
   let success = true;
@@ -134,7 +164,11 @@ function mergeReports(results, durationMs) {
     const report = parseReport(`${result.stdout}\n${result.stderr}`);
     if (!report || result.code !== 0 || result.signal !== null) success = false;
     for (const key of Object.keys(counts)) counts[key] += report?.summary?.counts?.[key] ?? 0;
-    failures.push(...(report?.failures ?? []));
+    failures.push(...recoverBundledFailureSourceFiles(
+      report?.failures ?? [],
+      tempDir,
+      bundledSourceFiles,
+    ));
     if (!report) {
       failures.push({
         name: 'fast extension test subprocess failed without a summary',
@@ -282,7 +316,7 @@ async function main() {
       run(process.execPath, [...bundledArgs, ...bundledFiles], extensionRoot, undefined, { PIE_LIVE_PIPELINE_TRACE_DIR: traceDirs[0] }),
       unsafeRun,
     ]);
-    const report = mergeReports(results, performance.now() - startedAt);
+    const report = mergeReports(results, performance.now() - startedAt, tempDir, safe);
     process.stdout.write(`${REPORT_PREFIX}${JSON.stringify(report)}\n`);
     if (!report.summary.success) process.exitCode = 1;
   } finally {

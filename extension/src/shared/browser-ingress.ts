@@ -87,9 +87,9 @@ const NON_COMMAND_TYPES: ReadonlySet<string> = new Set([
  *  fields `viewGeneration` (all types) and `clientCommandId` (application
  *  commands only) are appended programmatically. */
 const MESSAGE_KEYS: Readonly<Record<string, readonly string[]>> = {
-  ready: ['type', 'assetVersion'],
-  refreshState: ['type', 'assetVersion'],
-  requestSnapshot: ['type', 'assetVersion', 'sessionPath'],
+  ready: ['type', 'assetVersion', 'buildId'],
+  refreshState: ['type', 'assetVersion', 'buildId'],
+  requestSnapshot: ['type', 'assetVersion', 'buildId', 'sessionPath'],
   openFilePicker: ['type'],
   openFile: ['type', 'path'],
   addComposerInput: ['type', 'sessionPath', 'input'],
@@ -104,9 +104,9 @@ const MESSAGE_KEYS: Readonly<Record<string, readonly string[]>> = {
   openSession: ['type', 'sessionPath'],
   closeSession: ['type', 'sessionPath', 'interactionId'],
   requestDetail: ['type', 'sessionPath', 'ref'],
-  'detail.subscribe': ['type', 'viewGeneration', 'detailKey', 'address', 'cursor'],
-  'detail.unsubscribe': ['type', 'viewGeneration', 'detailKey', 'reason'],
-  'detail.fetchPages': ['type', 'viewGeneration', 'detailKey', 'ref'],
+  'detail.subscribe': ['type', 'viewGeneration', 'detailKey', 'detailAttempt', 'address', 'cursor'],
+  'detail.unsubscribe': ['type', 'viewGeneration', 'detailKey', 'detailAttempt', 'reason'],
+  'detail.fetchPages': ['type', 'viewGeneration', 'detailKey', 'detailAttempt', 'ref'],
   duplicateSession: ['type', 'sessionPath'],
   retryCreateOperation: ['type', 'operationId'],
   moveSessionTab: ['type', 'sessionPath', 'fromIndex', 'toIndex'],
@@ -173,6 +173,7 @@ function isBoundedDimension(value: unknown): boolean {
 const DETAIL_REF_KEYS: readonly string[] = [
   'key', 'kind', 'source', 'sessionPath', 'messageId', 'summary', 'available',
   'sizeBytes', 'toolCallId', 'executionId', 'partIndex', 'sourceRevision',
+  'childCount', 'lineCount',
 ];
 
 /** Closed schema for `extensionUiResponse.response`. */
@@ -440,6 +441,14 @@ function validateRequestDetailRef(value: Record<string, unknown>): ValidationRes
   }
   if (ref.executionId !== undefined && !boundedString(ref.executionId, 256)) {
     return fail('requestDetail: invalid `ref.executionId`');
+  }
+  if (ref.childCount !== undefined
+    && (!Number.isSafeInteger(ref.childCount) || (ref.childCount as number) < 0)) {
+    return fail('requestDetail: invalid `ref.childCount`');
+  }
+  if (ref.lineCount !== undefined
+    && (!Number.isSafeInteger(ref.lineCount) || (ref.lineCount as number) < 0)) {
+    return fail('requestDetail: invalid `ref.lineCount`');
   }
   return { ok: true, value: value as unknown as WebviewToHostMessage };
 }

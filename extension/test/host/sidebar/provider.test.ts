@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Module } from 'node:module';
 
-import type { ViewState, WebviewToHostMessage } from '../../../src/shared/protocol';
+import { PIE_BUILD_ID, type ViewState, type WebviewToHostMessage } from '../../../src/shared/protocol';
 import type { StateDeliveryClock } from '../../../src/host/sidebar/state-delivery-controller';
 
 const NodeModule = Module as unknown as { _load(request: string, ...rest: unknown[]): unknown };
@@ -131,6 +131,7 @@ function createProvider(
   clock: FakeClock,
   routed: WebviewToHostMessage[],
   assetResolutions?: Array<string | Promise<string>>,
+  onBuildMismatch?: (details: { actualBuildId: string | null; expectedBuildId: string }) => void,
 ) {
   let assetCount = 0;
   const provider = new SidebarViewProvider(
@@ -152,6 +153,7 @@ function createProvider(
       retryDelayMs: 5,
       maxRetryAttempts: 2,
       acceptedLedgerCapacity: 8,
+      onBuildMismatch,
     },
   );
   return { provider, getAssetCount: () => assetCount };
@@ -162,6 +164,7 @@ async function resolveReady(provider: InstanceType<typeof SidebarViewProvider>, 
   view.send({
     type: 'ready',
     assetVersion: 'v1',
+    buildId: PIE_BUILD_ID,
     viewGeneration: provider.getDebugState().viewGeneration,
   });
   await settle();
@@ -170,6 +173,39 @@ async function resolveReady(provider: InstanceType<typeof SidebarViewProvider>, 
 function stateMessages(view: FakeView): StateMessage[] {
   return view.posted.filter((message): message is StateMessage => message.type === 'state');
 }
+
+test('a matching-asset renderer from another build is terminally fenced until window reload', async () => {
+  const clock = new FakeClock();
+  const routed: WebviewToHostMessage[] = [];
+  const mismatches: Array<{ actualBuildId: string | null; expectedBuildId: string }> = [];
+  const { provider, getAssetCount } = createProvider(
+    clock,
+    routed,
+    undefined,
+    (details) => mismatches.push(details),
+  );
+  const view = new FakeView();
+  await provider.resolveWebviewView(view as never, {} as never, {} as never);
+  const generationBefore = provider.getDebugState().viewGeneration;
+
+  view.send({ type: 'ready', assetVersion: 'v1', buildId: 'stale-build', viewGeneration: generationBefore });
+  await settle();
+
+  assert.deepEqual(mismatches, [{ actualBuildId: 'stale-build', expectedBuildId: PIE_BUILD_ID }]);
+  assert.equal(provider.getDebugState().hasView, false, 'the incompatible transport is detached');
+  assert.equal(provider.getDebugState().webviewReady, false);
+  assert.ok(provider.getDebugState().viewGeneration > generationBefore, 'renderer ownership is invalidated');
+  assert.match(view.webview.html, /Reload required/);
+
+  view.send({ type: 'newSession', viewGeneration: provider.getDebugState().viewGeneration });
+  provider.scheduleState();
+  clock.advance(60_000);
+  await settle();
+  assert.deepEqual(routed, [], 'no later command crosses the terminal boundary');
+  assert.equal(getAssetCount(), 1, 'ordinary readiness recovery is not re-armed');
+  assert.equal(mismatches.length, 1, 'the reload prompt is deduplicated');
+  provider.dispose();
+});
 
 test('provider delegates state posts to one serialized lazy controller operation', async () => {
   const clock = new FakeClock();
@@ -287,7 +323,7 @@ test('throttled commit-timeout reload still rotates delivery generation for boun
       await settle();
     }
     view.send({
-      type: 'ready', assetVersion: 'v1',
+      type: 'ready', assetVersion: 'v1', buildId: PIE_BUILD_ID,
       viewGeneration: provider.getDebugState().viewGeneration,
     });
     await settle();
@@ -368,8 +404,8 @@ test('a delayed replacement ignores stale or missing readiness generations until
   assert.ok(replacementGeneration > oldMessage.viewGeneration);
   assert.equal(provider.getDebugState().webviewReady, false);
 
-  view.send({ type: 'refreshState', assetVersion: 'v1', viewGeneration: oldMessage.viewGeneration });
-  view.send({ type: 'ready', assetVersion: 'v1' });
+  view.send({ type: 'refreshState', assetVersion: 'v1', buildId: PIE_BUILD_ID, viewGeneration: oldMessage.viewGeneration });
+  view.send({ type: 'ready', assetVersion: 'v1', buildId: PIE_BUILD_ID });
   await settle();
   assert.equal(provider.getDebugState().webviewReady, false, 'old/missing handshakes cannot adopt a replacement');
 
@@ -383,7 +419,7 @@ test('a delayed replacement ignores stale or missing readiness generations until
   view.send({ type: 'newSession', viewGeneration: replacementGeneration });
   assert.equal(routed.filter((message) => message.type === 'newSession').length, 1, 'the replacement renderer remains interactive before its ready handshake');
 
-  view.send({ type: 'ready', assetVersion: 'v1', viewGeneration: replacementGeneration });
+  view.send({ type: 'ready', assetVersion: 'v1', buildId: PIE_BUILD_ID, viewGeneration: replacementGeneration });
   await settle();
   assert.equal(provider.getDebugState().webviewReady, true);
   provider.dispose();

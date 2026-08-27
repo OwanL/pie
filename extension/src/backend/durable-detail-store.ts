@@ -283,7 +283,8 @@ export class DurableDetailStore {
     subscription.pageCount = pages.length;
     if (!this.options.emit({
       kind: 'detail.start', subscriptionId, address: cloneAddress(address), source: 'durable',
-      baselineRevision: revision, pageCount: pages.length, totalBytes: bytes, fence,
+      baselineRevision: revision, pageCount: pages.length, totalBytes: bytes,
+      totalCodePoints: pages[0]?.payload.totalCodePoints ?? 0, fence,
     })) {
       this.drop(subscriptionId);
       return;

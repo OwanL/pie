@@ -6,6 +6,7 @@ import test from 'node:test';
 
 import { REVIEWS_DIR_ENV } from '../../../src/backend/session-review-store';
 import {
+  isSystemPromptTogglePersistenceAvailable,
   readSystemPromptToggles,
   readSystemPromptTogglesForSession,
   writeSystemPromptTogglesForSession,
@@ -77,4 +78,15 @@ test('system-prompt toggle store treats missing and malformed sidecars as empty'
     await fs.writeFile(path.join(dir, 'system-prompt-toggles.json'), '{ malformed', 'utf8');
     assert.deepEqual(await readSystemPromptTogglesForSession('/sessions/one.jsonl'), []);
   });
+});
+
+test('system-prompt toggle store exposes when no durable sidecar directory is configured', async () => {
+  const previous = process.env[REVIEWS_DIR_ENV];
+  delete process.env[REVIEWS_DIR_ENV];
+  try {
+    assert.equal(isSystemPromptTogglePersistenceAvailable(), false);
+    await writeSystemPromptTogglesForSession('/sessions/one.jsonl', ['harness'], true);
+  } finally {
+    if (previous !== undefined) process.env[REVIEWS_DIR_ENV] = previous;
+  }
 });

@@ -212,6 +212,7 @@ export function AppBody({ adapter }: AppBodyProps) {
       {derived.showSessionChrome && (
         <SessionTabs
           sessions={viewState.sessions}
+          sessionCatalogProgress={viewState.sessionCatalogProgress}
           openTabPaths={viewState.openTabPaths}
           pinnedTabPaths={viewState.pinnedTabPaths}
           pinnedTabGroups={viewState.pinnedTabGroups}

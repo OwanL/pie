@@ -7,10 +7,14 @@ installDom();
 import { h, render } from 'preact';
 import { act } from 'preact/test-utils';
 
-import { SystemPromptToggleMenu } from '../../../src/webview/panel/composer/system-prompt-toggle-menu';
+import { scopePendingOverlay, SystemPromptToggleMenu } from '../../../src/webview/panel/composer/system-prompt-toggle-menu';
 import type { SystemPromptEntry } from '../../../src/shared/protocol';
+import { NoticeContext } from '../../../src/webview/panel/hooks/notice-context';
 
 let container: HTMLElement;
+
+type TestOnSetToggles = (ids: string[]) => unknown;
+type ToggleApplyResult = void | boolean | Promise<void | boolean>;
 
 beforeEach(() => {
   container = document.createElement('div');
@@ -46,15 +50,35 @@ function entry(id: string, title: string, disabled = false): SystemPromptEntry {
   };
 }
 
-function mount(prompts: SystemPromptEntry[], onSetToggles: (ids: string[]) => void): void {
+function mount(
+  prompts: SystemPromptEntry[],
+  onSetToggles: TestOnSetToggles,
+  sessionPath: string | null = null,
+  notice: string | null = null,
+  noticeSessionPath: string | null = null,
+): void {
   act(() => {
-    render(h(SystemPromptToggleMenu, { prompts, onSetToggles }), container);
+    render(
+      h(NoticeContext.Provider, { value: { notice, sessionPath: noticeSessionPath, dismiss: null } },
+        h(SystemPromptToggleMenu, { prompts, sessionPath, onSetToggles: onSetToggles as (ids: string[]) => ToggleApplyResult })),
+      container,
+    );
   });
 }
 
-function rerender(prompts: SystemPromptEntry[], onSetToggles: (ids: string[]) => void): void {
+function rerender(
+  prompts: SystemPromptEntry[],
+  onSetToggles: TestOnSetToggles,
+  sessionPath: string | null = null,
+  notice: string | null = null,
+  noticeSessionPath: string | null = null,
+): void {
   act(() => {
-    render(h(SystemPromptToggleMenu, { prompts, onSetToggles }), container);
+    render(
+      h(NoticeContext.Provider, { value: { notice, sessionPath: noticeSessionPath, dismiss: null } },
+        h(SystemPromptToggleMenu, { prompts, sessionPath, onSetToggles: onSetToggles as (ids: string[]) => ToggleApplyResult })),
+      container,
+    );
   });
 }
 
@@ -371,4 +395,114 @@ test('Reset clears pending overlays, not just remote-disabled entries', () => {
   assert.equal(isChecked(findItem('Harness')), true);
   assert.equal(isChecked(findItem('Tools')), true);
   assert.equal(badgeText(), null);
+});
+
+test('session changes clear pending prompt intents before rendering the next tab', () => {
+  const calls: string[][] = [];
+  const onSet = (ids: string[]) => calls.push(ids);
+  mount([providerEntry(), entry('harness', 'Harness')], onSet, '/sessions/a');
+  openMenu();
+  clickItem('Harness');
+  assert.equal(isChecked(findItem('Harness')), false);
+
+  rerender([providerEntry(), entry('harness', 'Harness')], onSet, '/sessions/b');
+
+  assert.ok(!container.querySelector('.system-prompt-toggle-dropdown'), 'session switch closes the old menu');
+  openMenu();
+  assert.equal(isChecked(findItem('Harness')), true, 'session B must not inherit session A pending state');
+  assert.equal(badgeText(), null);
+});
+
+test('pending overlay derivation rejects an old session state before effects run', () => {
+  const state = {
+    sessionPath: '/sessions/a',
+    sessionGeneration: 0,
+    intents: { harness: true },
+  };
+
+  assert.deepEqual(
+    scopePendingOverlay(state, '/sessions/b', 1),
+    {},
+    'session B must render without A intents even before the reset effect runs',
+  );
+  assert.deepEqual(
+    scopePendingOverlay(state, '/sessions/a', 2),
+    {},
+    'returning to A under a newer generation must not resurrect stale intents',
+  );
+});
+
+test('async rollback is fenced across A -> B -> A', async () => {
+  const rejectors: Array<(reason?: unknown) => void> = [];
+  const onSet = (_ids: string[]) => new Promise<void>((_resolve, reject) => {
+    rejectors.push(reject);
+  });
+  mount([providerEntry(), entry('harness', 'Harness')], onSet, '/sessions/a');
+  openMenu();
+  clickItem('Harness');
+
+  rerender([providerEntry(), entry('harness', 'Harness')], onSet, '/sessions/b');
+  rerender([providerEntry(), entry('harness', 'Harness')], onSet, '/sessions/a');
+  openMenu();
+  clickItem('Harness');
+
+  rejectors[0]?.(new Error('late A request failed'));
+  await Promise.resolve();
+  await Promise.resolve();
+
+  assert.equal(isChecked(findItem('Harness')), false, 'old A rejection must not roll back the new A intent');
+});
+
+test('a synchronous failed prompt-toggle write rolls back the optimistic overlay', () => {
+  const onSet = (_ids: string[]) => false;
+  mount([providerEntry(), entry('harness', 'Harness')], onSet, '/sessions/a');
+  openMenu();
+
+  clickItem('Harness');
+
+  assert.equal(isChecked(findItem('Harness')), true, 'failed transport writes do not remain optimistic');
+  assert.equal(badgeText(), null);
+});
+
+test('the authoritative prompt-toggle failure notice rolls back pending state', () => {
+  const calls: string[][] = [];
+  const onSet = (ids: string[]) => calls.push(ids);
+  mount([providerEntry(), entry('harness', 'Harness')], onSet, '/sessions/a');
+  openMenu();
+  clickItem('Harness');
+  assert.equal(isChecked(findItem('Harness')), false);
+
+  rerender(
+    [providerEntry(), entry('harness', 'Harness')],
+    onSet,
+    '/sessions/a',
+    'Failed to save the system-prompt setting. See the pie log for details.',
+  );
+
+  assert.equal(isChecked(findItem('Harness')), true, 'failed persistence must return to remote truth');
+  assert.equal(badgeText(), null);
+});
+
+test('a late failure notice for session A does not clear session B pending state', () => {
+  const calls: string[][] = [];
+  const onSet = (ids: string[]) => calls.push(ids);
+  mount([providerEntry(), entry('harness', 'Harness')], onSet, '/sessions/a');
+  openMenu();
+  clickItem('Harness');
+
+  rerender([providerEntry(), entry('harness', 'Harness')], onSet, '/sessions/b');
+  openMenu();
+  clickItem('Harness');
+  assert.equal(isChecked(findItem('Harness')), false);
+
+  rerender(
+    [providerEntry(), entry('harness', 'Harness')],
+    onSet,
+    '/sessions/b',
+    'Failed to save the system-prompt setting. See the pie log for details.',
+    '/sessions/a',
+  );
+
+  assert.equal(isChecked(findItem('Harness')), false, 'session A failure must not erase B optimistic state');
+  assert.equal(badgeText(), '1');
 });

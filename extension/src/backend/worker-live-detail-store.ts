@@ -171,6 +171,7 @@ export class WorkerLiveDetailStore {
     if (!this.options.emit({
       kind: 'detail.start', requestId, subscriptionId, address: cloneAddress(address), source: 'live',
       baselineRevision: source.revision, pageCount: pages.length, totalBytes: canonical.bytes,
+      totalCodePoints: pages[0]?.payload.totalCodePoints ?? 0,
     })) {
       this.dropSubscription(subscriptionId);
       return;

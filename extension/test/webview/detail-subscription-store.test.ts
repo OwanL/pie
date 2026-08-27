@@ -29,7 +29,7 @@ const ADDRESS: LiveSubagentDetailAddress = {
   lineage: [{ childId: 'c1', spawningToolCallId: 'rt1', attemptId: 'a1' }],
 };
 
-function route(subscriptionId: string, detailKey = KEY): HostDetailRoute {
+function route(subscriptionId: string, detailKey = KEY, detailAttempt = 1): HostDetailRoute {
   return {
     hostInstanceId: 'h1',
     hostGeneration: 0,
@@ -41,6 +41,7 @@ function route(subscriptionId: string, detailKey = KEY): HostDetailRoute {
     workerId: 'w1',
     workerGeneration: 1,
     detailKey,
+    detailAttempt,
     subscriptionId,
   };
 }
@@ -108,6 +109,7 @@ interface Stream {
   detailKey: string;
   subscriptionId: string;
   baselineRevision: number;
+  detailAttempt: number;
   value: unknown;
   pages: PageFixture[];
 }
@@ -118,11 +120,13 @@ function makeStream(
   value: unknown = childValue(),
   pageCount = 2,
   baselineRevision = 1,
+  detailAttempt = 1,
 ): Stream {
   return {
     detailKey,
     subscriptionId,
     baselineRevision,
+    detailAttempt,
     value,
     pages: encodePages(value, pageCount),
   };
@@ -131,7 +135,7 @@ function makeStream(
 function streamStart(stream: Stream, overrides?: { totalCodePoints?: number; totalBytes?: number }): DetailStreamMessage {
   return {
     type: 'detail.start',
-    ...route(stream.subscriptionId, stream.detailKey),
+    ...route(stream.subscriptionId, stream.detailKey, stream.detailAttempt),
     address: ADDRESS,
     source: 'live',
     baselineRevision: stream.baselineRevision,
@@ -145,7 +149,7 @@ function streamPage(stream: Stream, index: number, overrides?: { payload?: Detai
   const page = stream.pages[index]!;
   return {
     type: 'detail.page',
-    ...route(stream.subscriptionId, stream.detailKey),
+    ...route(stream.subscriptionId, stream.detailKey, stream.detailAttempt),
     ref: { baselineRevision: stream.baselineRevision, pageIndex: index, pageCount: stream.pages.length },
     payload: overrides?.payload ?? page.payload,
     payloadBytes: overrides?.payloadBytes ?? page.payloadBytes,
@@ -156,7 +160,7 @@ function streamPage(stream: Stream, index: number, overrides?: { payload?: Detai
 function streamDelta(stream: Stream, baseRevision: number, revision: number, operations: JsonStructuralPatchOperation[]): DetailStreamMessage {
   return {
     type: 'detail.delta',
-    ...route(stream.subscriptionId, stream.detailKey),
+    ...route(stream.subscriptionId, stream.detailKey, stream.detailAttempt),
     baseRevision,
     revision,
     operations,
@@ -174,8 +178,8 @@ function install(posts: WebviewToHostMessage[] = []): WebviewToHostMessage[] {
   return posts;
 }
 
-function delivered(subscriptionId: string, detailKey = KEY): Stream {
-  const stream = makeStream(detailKey, subscriptionId);
+function delivered(subscriptionId: string, detailKey = KEY, detailAttempt = 1): Stream {
+  const stream = makeStream(detailKey, subscriptionId, childValue(), 2, 1, detailAttempt);
   receiveDetailImperative(streamStart(stream));
   for (let index = 0; index < stream.pages.length; index += 1) {
     receiveDetailImperative(streamPage(stream, index));
@@ -251,6 +255,49 @@ test('start → pages → delta lifecycle assembles and applies the canonical ch
   assert.equal(posts.filter((post) => post.type === 'detail.subscribe').length, 1, 'no re-subscribe on the happy path');
 });
 
+test('a delta immediately following the complete baseline assembles before patching', () => {
+  const posts = install();
+  setDetailStoreBudgets({ maxGlobalPages: 10, maxGlobalBytes: 10_000_000, maxPagesPerSubscription: 1 });
+  openDetailSubscription({ detailKey: KEY, address: ADDRESS });
+  const stream = makeStream(KEY, 'sub-1');
+  receiveDetailImperative(streamStart(stream));
+  receiveDetailImperative(streamPage(stream, 0));
+  receiveDetailImperative(streamPage(stream, 1));
+
+  // No render-time demand occurs between the final page and the delta. The
+  // FIFO baseline is complete, so the store must assemble it synchronously
+  // instead of treating the still-null derived cache as a transport gap.
+  receiveDetailImperative(streamDelta(stream, 1, 2, [{ op: 'set', path: ['exitCode'], value: 0 }]));
+
+  assert.equal(subscribePosts(posts).length, 1, 'a complete baseline does not spuriously re-subscribe');
+  assert.equal(getDetailStoreDebugState().pages <= 1, true, 'synchronous assembly restores the page-cache bound');
+  const ready = demandDetailValue(KEY);
+  assert.equal(ready.status, 'ready');
+  if (ready.status === 'ready') {
+    assert.equal((ready.value as Record<string, unknown>).exitCode, 0);
+  }
+});
+
+test('a delayed pre-start frame cannot bind a re-expanded owner attempt', () => {
+  const posts = install();
+  openDetailSubscription({ detailKey: KEY, address: ADDRESS });
+  const retired = makeStream(KEY, 'sub-old', childValue(), 2, 1, 1);
+
+  closeDetailSubscription(KEY, 'collapse');
+  openDetailSubscription({ detailKey: KEY, address: ADDRESS });
+  assert.equal(subscribePosts(posts).at(-1)?.detailAttempt, 2);
+
+  receiveDetailImperative(streamStart(retired));
+  const replacement = makeStream(KEY, 'sub-new', childValue({ exitCode: 0 }), 2, 1, 2);
+  receiveDetailImperative(streamStart(replacement));
+  receiveDetailImperative(streamPage(replacement, 0));
+  receiveDetailImperative(streamPage(replacement, 1));
+
+  const ready = demandDetailValue(KEY);
+  assert.equal(ready.status, 'ready');
+  if (ready.status === 'ready') assert.equal((ready.value as Record<string, unknown>).exitCode, 0);
+});
+
 test('stale frames from a retired owner are ignored after collapse/re-expansion', () => {
   const posts = install();
   openDetailSubscription({ detailKey: KEY, address: ADDRESS });
@@ -265,7 +312,7 @@ test('stale frames from a retired owner are ignored after collapse/re-expansion'
   receiveDetailImperative(streamPage(first, 0));
   assert.equal(demandDetailValue(KEY).status, 'pending', 'stale frame did not assemble into the new owner');
 
-  const second = makeStream(KEY, 'sub-2');
+  const second = makeStream(KEY, 'sub-2', childValue(), 2, 1, 2);
   receiveDetailImperative(streamStart(second));
   receiveDetailImperative(streamPage(second, 0));
   receiveDetailImperative(streamPage(second, 1));
@@ -291,7 +338,7 @@ test('gap or out-of-order deltas rebase: new owner, tombstoned subscription id, 
   receiveDetailImperative(streamStart(staleStart));
   assert.equal(demandDetailValue(KEY).status, 'pending', 'tombstoned id did not bind');
 
-  const rebased = makeStream(KEY, 'sub-2', childValue({ exitCode: 0 }), 2, 5);
+  const rebased = makeStream(KEY, 'sub-2', childValue({ exitCode: 0 }), 2, 5, 2);
   receiveDetailImperative(streamStart(rebased));
   receiveDetailImperative(streamPage(rebased, 0));
   receiveDetailImperative(streamPage(rebased, 1));
@@ -331,6 +378,28 @@ test('terminal keeps the durable value and ref; terminal without a value re-subs
   assert.equal(subscribePosts(posts2).length, 2, 'terminal without value re-subscribes');
 });
 
+test('terminal synchronous assembly restores transport cache bounds', () => {
+  const posts = install();
+  setDetailStoreBudgets({ maxGlobalPages: 1, maxGlobalBytes: 10_000_000, maxPagesPerSubscription: 10 });
+  openDetailSubscription({ detailKey: KEY, address: ADDRESS });
+  const stream = makeStream(KEY, 'sub-1', childValue(), 2, 1, 1);
+  receiveDetailImperative(streamStart(stream));
+  receiveDetailImperative(streamPage(stream, 0));
+  receiveDetailImperative(streamPage(stream, 1));
+  assert.equal(getDetailStoreDebugState().pages, 2, 'assembling visible baseline stays pinned');
+
+  receiveDetailImperative({
+    type: 'detail.terminal',
+    ...route('sub-1', KEY, 1),
+    revision: 1,
+    durableRef: { sessionPath: '/s.jsonl', messageId: 'msg-1', key: 'durable:subagent:msg-1:tool-1', kind: 'tool-result', source: 'durable', sizeBytes: 10, summary: 'done', available: true },
+  });
+
+  assert.equal(demandDetailValue(KEY).status, 'ready');
+  assert.equal(getDetailStoreDebugState().pages <= 1, true, 'terminal assembly re-applies the global page bound');
+  assert.equal(subscribePosts(posts).length, 1);
+});
+
 test('error is explicit, and retry mints a fresh owner with a new attempt', () => {
   const posts = install();
   openDetailSubscription({ detailKey: KEY, address: ADDRESS });
@@ -347,7 +416,7 @@ test('error is explicit, and retry mints a fresh owner with a new attempt', () =
   // Retry: same address, new owner.
   openDetailSubscription({ detailKey: KEY, address: ADDRESS });
   assert.equal(subscribePosts(posts).length, 2);
-  const stream = delivered('sub-2');
+  const stream = delivered('sub-2', KEY, 2);
   assert.equal(demandDetailValue(KEY).status, 'ready');
   void stream;
 });
@@ -356,6 +425,9 @@ test('route and generation mismatches are dropped before they touch a record', (
   const posts = install();
   openDetailSubscription({ detailKey: KEY, address: ADDRESS });
   const stream = makeStream(KEY, 'sub-1');
+
+  // A pre-start frame for another renderer must not bind this pending owner.
+  receiveDetailImperative({ ...streamStart(stream), rendererId: 'other-renderer', rendererGeneration: 99 });
   receiveDetailImperative(streamStart(stream));
   receiveDetailImperative(streamPage(stream, 0));
   receiveDetailImperative(streamPage(stream, 1));
@@ -366,6 +438,8 @@ test('route and generation mismatches are dropped before they touch a record', (
   receiveDetailImperative({ ...streamDelta(stream, 1, 2, [{ op: 'set', path: ['exitCode'], value: 0 }]), hostInstanceId: 'other-host' });
   // Wrong subscription id.
   receiveDetailImperative({ ...streamDelta(stream, 1, 2, [{ op: 'set', path: ['exitCode'], value: 0 }]), subscriptionId: 'sub-other' });
+  // Wrong webview owner attempt.
+  receiveDetailImperative({ ...streamDelta(stream, 1, 2, [{ op: 'set', path: ['exitCode'], value: 0 }]), detailAttempt: 99 });
   // Wrong detail key.
   receiveDetailImperative({ ...streamDelta(stream, 1, 2, [{ op: 'set', path: ['exitCode'], value: 0 }]), detailKey: 'subagent:other' });
 
@@ -390,12 +464,42 @@ test('corrupt pages (checksum, byte range, code-point totals) are rejected and f
   assert.equal(subscribePosts(posts).length, 2, 'unassemblable baseline rebases');
 
   // Start with a lying totalCodePoints — every page is then unassemblable.
-  const lying = makeStream(KEY, 'sub-2');
+  const lying = makeStream(KEY, 'sub-2', childValue(), 2, 1, 2);
   receiveDetailImperative(streamStart(lying, { totalCodePoints: 999 }));
   receiveDetailImperative(streamPage(lying, 0));
   receiveDetailImperative(streamPage(lying, 1));
   assert.equal(demandDetailValue(KEY).status, 'pending');
   assert.equal(subscribePosts(posts).length, 3, 'lying start totals also rebase');
+});
+
+test('a baseline larger than the per-subscription page cache cap stays pinned until assembly', () => {
+  const posts = install();
+  setDetailStoreBudgets({ maxGlobalPages: 10, maxGlobalBytes: 10_000_000, maxPagesPerSubscription: 1 });
+  openDetailSubscription({ detailKey: KEY, address: ADDRESS });
+  const stream = makeStream(KEY, 'sub-1', childValue(), 2, 1);
+  receiveDetailImperative(streamStart(stream));
+  receiveDetailImperative(streamPage(stream, 0));
+  receiveDetailImperative(streamPage(stream, 1));
+
+  const ready = demandDetailValue(KEY);
+  assert.equal(ready.status, 'ready', 'the manifest can assemble once even when it exceeds the transport cache cap');
+  assert.equal(fetchPagesPosts(posts).length, 0, 'assembly does not enter an impossible evict/refetch loop');
+  assert.equal(subscribePosts(posts).length, 1, 'assembly does not trigger a rebase');
+});
+
+test('a baseline larger than the global page cache stays pinned until assembly', () => {
+  const posts = install();
+  setDetailStoreBudgets({ maxGlobalPages: 1, maxGlobalBytes: 10_000_000, maxPagesPerSubscription: 10 });
+  openDetailSubscription({ detailKey: KEY, address: ADDRESS });
+  const stream = makeStream(KEY, 'sub-1', childValue(), 2, 1);
+  receiveDetailImperative(streamStart(stream));
+  receiveDetailImperative(streamPage(stream, 0));
+  receiveDetailImperative(streamPage(stream, 1));
+
+  const ready = demandDetailValue(KEY);
+  assert.equal(ready.status, 'ready', 'page-count pressure cannot make a single manifest impossible to assemble');
+  assert.equal(fetchPagesPosts(posts).length, 0);
+  assert.equal(getDetailStoreDebugState().pages <= 1, true, 'pages return to the global cap after assembly');
 });
 
 test('tiny budgets evict; visible assembling records refetch evicted pages via fetchPages', () => {
@@ -409,8 +513,8 @@ test('tiny budgets evict; visible assembling records refetch evicted pages via f
   const keyB = 'subagent:msg-1:tool-b';
   openDetailSubscription({ detailKey: keyA, address: ADDRESS });
   openDetailSubscription({ detailKey: keyB, address: ADDRESS });
-  const streamA = makeStream(keyA, 'sub-a', childValue(), 2, 1);
-  const streamB = makeStream(keyB, 'sub-b', childValue(), 2, 1);
+  const streamA = makeStream(keyA, 'sub-a', childValue(), 2, 1, 1);
+  const streamB = makeStream(keyB, 'sub-b', childValue(), 2, 1, 2);
   receiveDetailImperative(streamStart(streamA));
   receiveDetailImperative(streamPage(streamA, 0));
   receiveDetailImperative(streamPage(streamA, 1));
@@ -456,7 +560,7 @@ test('visible pinning: assembled records lose their transport pages first, assem
   receiveDetailImperative(streamPage(streamA, 1));
   assert.equal(demandDetailValue(keyA).status, 'ready', 'A assembled');
 
-  const streamB = makeStream(keyB, 'sub-b', childValue(), 2, 1);
+  const streamB = makeStream(keyB, 'sub-b', childValue(), 2, 1, 2);
   receiveDetailImperative(streamStart(streamB));
   receiveDetailImperative(streamPage(streamB, 0));
   receiveDetailImperative(streamPage(streamB, 1));
@@ -579,9 +683,10 @@ test('address change replaces the owner instead of reusing it', () => {
 
 test('delta against an evicted (unassembled) value rebases instead of replaying', () => {
   const posts = install();
-  setDetailStoreBudgets({ maxGlobalPages: 1, maxGlobalBytes: 10_000_000, maxPagesPerSubscription: 1 });
   openDetailSubscription({ detailKey: KEY, address: ADDRESS });
   const stream = makeStream(KEY, 'sub-1', childValue(), 2, 1);
+  const onePageByteBudget = Math.max(...stream.pages.map((page) => page.payloadBytes));
+  setDetailStoreBudgets({ maxGlobalPages: 1, maxGlobalBytes: onePageByteBudget, maxPagesPerSubscription: 1 });
   receiveDetailImperative(streamStart(stream));
   receiveDetailImperative(streamPage(stream, 0));
   // page 1 evicts page 0; the value never assembled.

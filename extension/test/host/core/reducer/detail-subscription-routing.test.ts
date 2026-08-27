@@ -99,16 +99,18 @@ test('detail.subscribe dispatches a DetailSubscribe command with the exact rende
     type: 'detail.subscribe',
     viewGeneration: 7,
     detailKey: 'subagent:msg-1:tool-1',
+    detailAttempt: 4,
     address: ADDRESS,
     cursor: { revision: 3 },
   } as WebviewToHostMessage);
 
   assert.equal(dispatched.length, 1);
   assert.equal(dispatched[0]?.kind, 'Command');
-  const cmd = dispatched[0]?.cmd as { kind: string; viewGeneration: number; detailKey: string; address: unknown; cursor: unknown };
+  const cmd = dispatched[0]?.cmd as { kind: string; viewGeneration: number; detailKey: string; detailAttempt: number; address: unknown; cursor: unknown };
   assert.equal(cmd.kind, 'DetailSubscribe');
   assert.equal(cmd.viewGeneration, 7);
   assert.equal(cmd.detailKey, 'subagent:msg-1:tool-1');
+  assert.equal(cmd.detailAttempt, 4);
   assert.deepEqual(cmd.address, ADDRESS);
   assert.deepEqual(cmd.cursor, { revision: 3 });
   assert.equal(typeof (cmd as { corrId?: string }).corrId, 'string');
@@ -122,6 +124,7 @@ test('detail.subscribe without a cursor still dispatches (cursor is optional)', 
     type: 'detail.subscribe',
     viewGeneration: 7,
     detailKey: 'subagent:msg-1:tool-1',
+    detailAttempt: 5,
     address: ADDRESS,
   } as WebviewToHostMessage);
 
@@ -138,13 +141,15 @@ test('detail.unsubscribe dispatches a DetailUnsubscribe command with the close r
     type: 'detail.unsubscribe',
     viewGeneration: 7,
     detailKey: 'subagent:msg-1:tool-1',
+    detailAttempt: 6,
     reason: 'collapse',
   } as WebviewToHostMessage);
 
-  const cmd = dispatched[0]?.cmd as { kind: string; viewGeneration: number; detailKey: string; reason: string };
+  const cmd = dispatched[0]?.cmd as { kind: string; viewGeneration: number; detailKey: string; detailAttempt: number; reason: string };
   assert.equal(cmd.kind, 'DetailUnsubscribe');
   assert.equal(cmd.viewGeneration, 7);
   assert.equal(cmd.detailKey, 'subagent:msg-1:tool-1');
+  assert.equal(cmd.detailAttempt, 6);
   assert.equal(cmd.reason, 'collapse');
 });
 
@@ -156,13 +161,15 @@ test('detail.fetchPages dispatches a DetailFetchPages command with the exact ref
     type: 'detail.fetchPages',
     viewGeneration: 7,
     detailKey: 'subagent:msg-1:tool-1',
+    detailAttempt: 7,
     ref: { baselineRevision: 5, pageIndex: 3, pageCount: 8 },
   } as WebviewToHostMessage);
 
-  const cmd = dispatched[0]?.cmd as { kind: string; viewGeneration: number; detailKey: string; ref: unknown };
+  const cmd = dispatched[0]?.cmd as { kind: string; viewGeneration: number; detailKey: string; detailAttempt: number; ref: unknown };
   assert.equal(cmd.kind, 'DetailFetchPages');
   assert.equal(cmd.viewGeneration, 7);
   assert.equal(cmd.detailKey, 'subagent:msg-1:tool-1');
+  assert.equal(cmd.detailAttempt, 7);
   assert.deepEqual(cmd.ref, { baselineRevision: 5, pageIndex: 3, pageCount: 8 });
   assert.equal(isPendingTabPath('__pending__:1-abc'), true, 'sanity: tab-behavior helper loads');
 });

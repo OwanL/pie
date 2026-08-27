@@ -16,6 +16,7 @@ import {
   type JsonSafeValue,
 } from '../shared/json-structural-patch.js';
 import { compactDurableMessageDetails } from '../shared/lazy-details.js';
+import { getSubagentBillingEntries } from '../shared/subagent-result.js';
 import { normalizeToolProgress, type ToolProgressRecursiveCounters } from './tool-progress-normalizer.js';
 import {
   isBackendLivePipelineTraceEnabled,
@@ -1083,7 +1084,10 @@ function normalizeLiveToolTerminalResult(toolName: string, value: unknown): unkn
   // must also survive normalization; turning one into a plausible empty
   // subagent preview would hide that the complete value lives only durably.
   if (toolName.trim().toLowerCase() !== 'ask_user' && !transportBounded) {
-    return normalizeToolProgress(toolName, value);
+    const normalized = normalizeToolProgress(toolName, value);
+    if (normalized.kind !== 'subagent') return normalized;
+    const billing = getSubagentBillingEntries(value);
+    return billing.length > 0 ? { ...normalized, billing } : normalized;
   }
   const fallback = transportBounded ? '[Unserializable bounded tool result]' : '[Unserializable ask_user result]';
   const serialized = stringifyLiveJsonSafe(value, fallback);

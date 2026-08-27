@@ -232,6 +232,7 @@ export interface DetailSubscribeRpcEffect extends EffectBase {
   kind: 'DetailSubscribeRpc';
   viewGeneration: number;
   detailKey: string;
+  detailAttempt: number;
   address: LiveSubagentDetailAddress;
   cursor?: DetailCursor;
   rendererId?: string;
@@ -242,6 +243,7 @@ export interface DetailUnsubscribeRpcEffect extends EffectBase {
   kind: 'DetailUnsubscribeRpc';
   viewGeneration: number;
   detailKey: string;
+  detailAttempt: number;
   reason: 'collapse' | 'unmount' | 'session-change';
   rendererId?: string;
   rendererGeneration?: number;
@@ -251,6 +253,7 @@ export interface DetailFetchPagesRpcEffect extends EffectBase {
   kind: 'DetailFetchPagesRpc';
   viewGeneration: number;
   detailKey: string;
+  detailAttempt: number;
   ref: DetailPageRef;
   rendererId?: string;
   rendererGeneration?: number;

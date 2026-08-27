@@ -1,5 +1,9 @@
 import type { LiveToolRecord, LiveTurnRecord } from '../../../shared/live-pipeline-protocol.js';
 import type { ChatMessage, ToolCall } from '../../../shared/protocol/messages.js';
+import {
+  reconstructSubagentDetailAddresses,
+  retainSubagentDetailAddresses,
+} from './subagent-detail-addresses.js';
 
 const SAFE_TOOL_RENDER_FIELDS = [
   'parallelGroupId',
@@ -33,7 +37,12 @@ export function reconcileDurableMessageRenderMetadata(
         Object.assign(metadata, { [field]: prior[field] });
       }
     }
-    return Object.keys(metadata).length > 0 ? { ...call, ...metadata } : call;
+    const result = call.name.trim().toLowerCase() === 'subagent'
+      ? retainSubagentDetailAddresses(call.result, prior.result)
+      : call.result;
+    return Object.keys(metadata).length > 0 || result !== call.result
+      ? { ...call, ...metadata, ...(result !== call.result ? { result } : {}) }
+      : call;
   };
 
   const parts = durable.parts?.map((part) => part.kind === 'toolCall'
@@ -79,6 +88,14 @@ export function reconcileDurableTerminalToolMetadata(
     const matchesDraft = Object.prototype.hasOwnProperty.call(draftIds, call.id);
     if (!live && !matchesDraft) return call;
     if (!live) return call;
+    const result = call.name.trim().toLowerCase() === 'subagent'
+      ? reconstructSubagentDetailAddresses(call.result, {
+          sessionPath: turn.sessionPath,
+          turnId: live.turnId,
+          rootToolCallId: live.transcriptToolCallId,
+          rootAttemptId: live.attemptId,
+        })
+      : call.result;
     return {
       ...call,
       ...(call.parallelGroupId === undefined && live.parallelGroupId !== undefined
@@ -90,6 +107,7 @@ export function reconcileDurableTerminalToolMetadata(
         : {}),
       ...(call.executionId === undefined ? { executionId: live.executionId } : {}),
       ...(call.seq === undefined ? { seq: live.seq } : {}),
+      ...(result !== call.result ? { result } : {}),
     };
   };
 

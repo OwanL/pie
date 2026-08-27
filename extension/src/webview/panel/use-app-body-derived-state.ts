@@ -22,6 +22,7 @@ export function useAppBodyDerivedState(
     openTabPaths,
     backendReady,
     notice,
+    noticeSessionPath,
     activeSession,
     modelSettings,
     availableModels,
@@ -46,15 +47,15 @@ export function useAppBodyDerivedState(
     needsSessionRecovery,
   });
 
-  // Extract primitive values for memo deps to avoid re-computing on every host update
-  // when objects like availableModels[] and modelSettings{} get new references.
+  // Extract primitive settings values while retaining the reference-stabilized
+  // model catalog as a dependency. Keying only on its length made a same-size
+  // catalog replacement leave model capabilities/reasoning choices stale.
   const activeModelId = activeSession?.modelId;
   const activeProvider = activeSession?.provider;
   const activeThinkingLevel = activeSession?.thinkingLevel;
   const settingsDefaultModel = modelSettings?.defaultModel;
   const settingsDefaultProvider = modelSettings?.defaultProvider;
   const settingsDefaultThinkingLevel = modelSettings?.defaultThinkingLevel;
-  const modelCount = availableModels.length;
 
   const {
     selectedModel: pendingAssistantModelId,
@@ -65,7 +66,7 @@ export function useAppBodyDerivedState(
     activeThinkingLevel,
     modelSettings,
     availableModels,
-  }), [activeModelId, activeProvider, activeThinkingLevel, settingsDefaultModel, settingsDefaultProvider, settingsDefaultThinkingLevel, modelCount]);
+  }), [activeModelId, activeProvider, activeThinkingLevel, settingsDefaultModel, settingsDefaultProvider, settingsDefaultThinkingLevel, availableModels]);
 
   const askUserContextValue = useMemo(() => ({
     sessionPath: activeSessionPath,
@@ -116,7 +117,7 @@ export function useAppBodyDerivedState(
   // so consumers only re-render when `notice` actually changes, mirroring the
   // memoized `askUserContextValue` above.
   const dismiss = useCallback(() => postMessage({ type: 'dismissNotice' }), []);
-  const noticeValue = useMemo(() => ({ notice, dismiss }), [notice, dismiss]);
+  const noticeValue = useMemo(() => ({ notice, sessionPath: noticeSessionPath ?? null, dismiss }), [notice, noticeSessionPath, dismiss]);
 
   return {
     panelSurface,

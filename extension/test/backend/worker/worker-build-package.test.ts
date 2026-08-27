@@ -14,6 +14,7 @@ test('node build and package allowlist declare the stable worker entry artifact'
   const vite = await fs.readFile(path.join(extensionRoot, 'vite.config.ts'), 'utf8');
   const vscodeIgnore = await fs.readFile(path.join(extensionRoot, '.vscodeignore'), 'utf8');
   assert.match(vite, /['"]worker-entry['"]:\s*path\.join\(srcDir, ['"]backend['"], ['"]worker-entry\.ts['"]\)/);
+  assert.match(vite, /['"]cold-browse-helper-entry['"]:\s*path\.join\(srcDir, ['"]backend['"], ['"]cold-browse-helper-entry\.ts['"]\)/);
   assert.match(vite, /['"]phase4-worker-command-extension['"]:\s*path\.join\(rootDir, ['"]test['"], ['"]fixtures['"], ['"]phase4-worker-command-extension\.ts['"]\)/);
   assert.match(vite, /entryFileNames:\s*['"]\[name\]\.js['"]/);
   // ws's optional native deps must stay runtime requires: Vite stubs
@@ -56,9 +57,11 @@ test('packaged isolated backend drives public message.send extension commands th
     const packagedExtension = path.join(unpacked, 'extension');
     const backendEntry = path.join(packagedExtension, 'out', 'backend.js');
     const workerEntry = path.join(packagedExtension, 'out', 'worker-entry.js');
+    const coldBrowseHelperEntry = path.join(packagedExtension, 'out', 'cold-browse-helper-entry.js');
     const commandExtension = path.join(packagedExtension, 'out', 'phase4-worker-command-extension.js');
     assert.equal((await fs.stat(backendEntry)).isFile(), true);
     assert.equal((await fs.stat(workerEntry)).isFile(), true);
+    assert.equal((await fs.stat(coldBrowseHelperEntry)).isFile(), true);
     assert.equal((await fs.stat(commandExtension)).isFile(), true);
 
     const sdkPath = path.join(extensionRoot, 'node_modules', '@earendil-works', 'pi-coding-agent');

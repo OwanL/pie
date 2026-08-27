@@ -81,6 +81,20 @@ function isOptionalFiniteNumber(value: unknown): value is number | undefined {
   return value === undefined || (typeof value === 'number' && Number.isFinite(value));
 }
 
+function isOptionalSessionCatalogProgress(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!isObject(value)
+    || !isBoolean(value.complete)
+    || !Number.isInteger(value.processed)
+    || (value.total !== undefined && !Number.isInteger(value.total))) {
+    return false;
+  }
+  const processed = value.processed as number;
+  const total = value.total as number | undefined;
+  return processed >= 0
+    && (total === undefined || (total >= 0 && processed <= total));
+}
+
 function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((v) => typeof v === 'string');
 }
@@ -164,6 +178,9 @@ export function isSessionOpenedPayload(value: unknown): value is SessionOpenedPa
     && isTranscriptWindow(value.transcriptWindow)
     && isBoolean(value.busy)
     && (value.runtimeReady === undefined || isBoolean(value.runtimeReady))
+    && (value.systemPromptDisabledEntries === undefined
+      || (Array.isArray(value.systemPromptDisabledEntries)
+        && value.systemPromptDisabledEntries.every(isString)))
     && isOptionalLiveTurnRecoveryIdentity(value.liveTurnRecoveryIdentity)
     && isOptionalSnapshotUnavailable(value.snapshotUnavailable)
     && isOptionalString(value.operationId)
@@ -178,6 +195,7 @@ export function isSessionListChangedPayload(value: unknown): value is SessionLis
     && Array.isArray(value.sessions)
     && value.sessions.every(isSessionSummary)
     && isOptionalString(value.activeSessionPath)
+    && isOptionalSessionCatalogProgress(value.sessionCatalogProgress)
   );
 }
 
@@ -439,7 +457,7 @@ export function isAuxiliaryLlmUsagePayload(value: unknown): value is AuxiliaryLl
   return (
     isObject(value)
     && isString(value.sessionPath)
-    && (value.kind === 'history_compaction' || value.kind === 'branch_summary')
+    && (value.kind === 'assistant_message' || value.kind === 'history_compaction' || value.kind === 'branch_summary')
     && isString(value.sourceId)
     && isString(value.occurredAt)
     && isOptionalString(value.modelId)
@@ -474,4 +492,3 @@ export function isRetryStuckPayload(value: unknown): value is RetryStuckPayload 
     && isOptionalString(value.requestId)
   );
 }
-

@@ -207,3 +207,49 @@ test('mixed same-id parent turns and auxiliary summaries remain provider-discret
   assert.equal(providers.get('openai-codex')?.inputTokens, 23);
   assert.equal(providers.get('openai-codex')?.cost, 0.000115);
 });
+
+test('durable assistant-message samples account for an active tool loop before its terminal reply', () => {
+  const map = new Map([['gpt-5.6-sol', [price('github-copilot', 2)]]]);
+  const first = {
+    kind: 'assistant_message' as const,
+    sourceId: 'assistant-1',
+    occurredAt: new Date(NOW - 500).toISOString(),
+    modelId: 'gpt-5.6-sol',
+    provider: 'github-copilot',
+    inputTokens: 100_000,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+  };
+  const stats = computeAggregateStats([run({
+    modelId: 'gpt-5.6-sol', provider: 'github-copilot',
+    auxiliaryLlmUsage: [first, first, {
+      ...first, sourceId: 'assistant-2', inputTokens: 200_000,
+      occurredAt: new Date(NOW - 250).toISOString(),
+    }],
+  })], map, NOW, [], {}, 0);
+
+  assert.equal(stats.todayInputTokens, 300_000);
+  assert.equal(stats.todayCost, 0.6);
+});
+
+test('terminal parent totals reconcile with assistant-message samples without double counting', () => {
+  const map = new Map([['gpt-5.6-sol', [price('github-copilot', 2)]]]);
+  const stats = computeAggregateStats([run({
+    modelId: 'gpt-5.6-sol', provider: 'github-copilot', inputTokens: 300_000,
+    auxiliaryLlmUsage: [{
+      kind: 'assistant_message', sourceId: 'assistant-1', occurredAt: new Date(NOW - 500).toISOString(),
+      modelId: 'gpt-5.6-sol', provider: 'github-copilot', inputTokens: 300_000,
+      outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0,
+    }],
+    turnThroughputSamples: [{
+      endedAt: new Date(NOW - 400).toISOString(), inputTokens: 300_000, outputTokens: 0,
+      cacheReadTokens: 0, cacheWriteTokens: 0, generationDurationMs: 1,
+      concurrentBusySessions: 1, status: 'completed', modelId: 'gpt-5.6-sol',
+      provider: 'github-copilot', turnLatencyMs: null, overheadMs: null, providerLatencyMs: null,
+    }],
+  })], map, NOW, [], {}, 0);
+
+  assert.equal(stats.todayInputTokens, 300_000);
+  assert.equal(stats.todayCost, 0.6);
+});

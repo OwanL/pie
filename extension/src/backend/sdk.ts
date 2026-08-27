@@ -193,6 +193,15 @@ export interface SdkSessionManager {
     model: { provider: string; modelId: string } | null;
   };
   getHeader?: () => unknown;
+  /** Atomically append cold model/thinking settings as one durable commit. */
+  appendPieModelSettingsChange?: (
+    provider: string | undefined,
+    modelId: string | undefined,
+    thinkingLevel: string | undefined,
+  ) => {
+    modelChangeId?: string;
+    thinkingLevelChangeId?: string;
+  };
   attachPieWriteLease?: (adapter: SdkSessionOwnershipAdapter, lease: SdkSessionWriteLease) => void;
   revokePieWriteLease?: () => void;
   activatePiePrepared?: (authorization: SdkSessionTransferAuthorization) => SdkSessionWriteLease;
@@ -919,15 +928,16 @@ export function applySdkHistoryCompactionRuntimePatch(
 export type SdkLoadMode =
   | { mode: 'coordinator' }
   | { mode: 'cold-coordinator' }
+  | { mode: 'cold-worker'; patchIdentity: unknown }
   | { mode: 'worker'; patchIdentity: unknown };
 
 export async function loadSdk(
   sdkPath: string,
-  mode: { mode: 'cold-coordinator' },
+  mode: { mode: 'cold-coordinator' } | { mode: 'cold-worker'; patchIdentity: unknown },
 ): Promise<ColdCoordinatorSdkModule>;
 export async function loadSdk(
   sdkPath: string,
-  mode?: Exclude<SdkLoadMode, { mode: 'cold-coordinator' }>,
+  mode?: { mode: 'coordinator' } | { mode: 'worker'; patchIdentity: unknown },
 ): Promise<SdkModule>;
 export async function loadSdk(
   sdkPath: string,
@@ -940,12 +950,12 @@ export async function loadSdk(
   // This is the mandatory pre-import boundary. Coordinators may patch while
   // holding the shared lock; workers receive the resulting closed identity and
   // are read-only validators. Keep every dynamic SDK import below this await.
-  const patchIdentity: SdkPatchIdentity = mode.mode === 'worker'
+  const patchIdentity: SdkPatchIdentity = mode.mode === 'worker' || mode.mode === 'cold-worker'
     ? await validateSdkPatchBarrier(sdkPath, mode.patchIdentity)
     : await ensureSdkPatchBarrier(sdkPath);
   const verifiedSdkPath = patchIdentity.sdkPath;
 
-  if (mode.mode === 'cold-coordinator') {
+  if (mode.mode === 'cold-coordinator' || mode.mode === 'cold-worker') {
     const [config, auth, models, sessions] = await Promise.all([
       dynamicImport(pathToFileURL(path.join(verifiedSdkPath, 'dist', 'config.js')).href),
       dynamicImport(pathToFileURL(path.join(verifiedSdkPath, 'dist', 'core', 'auth-storage.js')).href),

@@ -76,6 +76,7 @@ profileOrder:
   - deepseek-v4-pro:cloud
   - deepseek-v4-flash:cloud
   - gemini-3-flash-preview:cloud
+  - glm-5.3-flash:cloud
   - glm-5.2:cloud
   - glm-5.1:cloud
   - kimi-k2.7-code:cloud
@@ -377,6 +378,37 @@ providers:
           - medium
           - high
           - xhigh
+        disabledReason: null
+      - id: glm-5.3-flash:cloud
+        name: "Ollama Cloud: GLM 5.3 Flash"
+        compat:
+          supportsReasoningEffort: true
+        reasoning: true
+        family: glm-5.3-flash
+        input:
+          - text
+          - image
+        maxImagesPerRequest: 1
+        contextWindow: 1048576
+        maxTokens: 131072
+        thinkingLevelMap:
+          off: null
+          minimal: null
+          low: low
+          medium: null
+          high: high
+          xhigh: null
+          max: max
+        pricing:
+          input: 0.075
+          output: 0.25
+          cacheRead: 0.015
+          cacheWrite: 0
+        eligible: true
+        thinking:
+          - low
+          - high
+          - max
         disabledReason: null
       - id: gpt-oss:120b-cloud
         name: "Ollama Cloud: GPT OSS 120B"

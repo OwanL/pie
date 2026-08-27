@@ -120,7 +120,7 @@ test('SessionCatalog invalidates only when the visible JSONL inventory changes',
         },
       },
     } as Pick<SdkModule, 'SessionManager'> as SdkModule;
-    const catalog = new SessionCatalog();
+    const catalog = new SessionCatalog({ usePersistentIndex: false });
 
     assert.deepEqual(
       (await catalog.list(sdk, configuredDir, [], agentDir)).map((item) => item.name),

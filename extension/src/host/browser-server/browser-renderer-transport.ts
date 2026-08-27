@@ -27,8 +27,8 @@
 import { WebSocket } from 'ws';
 
 import type { HostToWebviewMessage, RendererKind } from '../../shared/protocol';
-import { WEBVIEW_PROTOCOL_VERSION } from '../../shared/protocol';
-import { validateBrowserToHostMessage } from '../../shared/browser-ingress';
+import { PIE_BUILD_ID, WEBVIEW_PROTOCOL_VERSION } from '../../shared/protocol';
+import { BROWSER_INGRESS_LIMITS, validateBrowserToHostMessage } from '../../shared/browser-ingress';
 import { appendPieLog } from '../util/pie-log';
 import type { RendererRegistration, RendererTransport } from '../renderers/types';
 import { BROWSER_SERVER_POLICY, evaluateSendGate, ViolationRateTracker } from './policy';
@@ -37,8 +37,10 @@ import type { DisposableLike } from '../renderers/types';
 /** Typed close reasons used by the browser transport/server. */
 export const BROWSER_CLOSE_REASONS = {
   handshakeTimeout: 'handshake-timeout',
+  handshakeOrder: 'ready-required',
   malformedRate: 'too-many-malformed-messages',
   protocolViolation: 'protocol-violation',
+  buildMismatch: 'renderer-build-mismatch',
   serverShutdown: 'server-shutdown',
   recovery: 'recovery',
   clientLimit: 'client-limit',
@@ -74,6 +76,7 @@ export class BrowserRendererTransport implements RendererTransport {
     this.options.now ?? Date.now,
   );
   private handshakeTimer: unknown = undefined;
+  private handshakeComplete = false;
   private disposed = false;
   /** The hello is the first frame on the socket; every other post is gated
    *  until it is sent so a view-resolve snapshot can never race ahead of the
@@ -113,6 +116,7 @@ export class BrowserRendererTransport implements RendererTransport {
     const hello: Extract<HostToWebviewMessage, { type: 'rendererHello' }> = {
       type: 'rendererHello',
       protocolVersion: WEBVIEW_PROTOCOL_VERSION,
+      buildId: PIE_BUILD_ID,
       hostInstanceId: this.session.getHostInstanceId(),
       rendererId: this.session.rendererId,
       rendererGeneration: this.session.getRendererGeneration(),
@@ -242,13 +246,37 @@ export class BrowserRendererTransport implements RendererTransport {
     }
     const validation = validateBrowserToHostMessage(parsed, frameBytes);
     if (!validation.ok) {
+      // A detail expansion is an explicit UI request. If its closed-schema
+      // validation fails, return a key-scoped terminal result before recording
+      // the protocol violation. Otherwise the webview has no acknowledgement
+      // to release its bounded request lane and can remain on "Loading…"
+      // forever. Only reflect already-bounded routing fields to this same
+      // socket; malformed or oversized identifiers still receive no reply.
+      const rejectedDetail = detailRejectionForMalformedRequest(parsed);
+      if (rejectedDetail) this.post(rejectedDetail);
       this.recordViolation(validation.reason);
       return;
     }
-    // Any valid inbound message proves the browser is alive: the handshake
-    // bound is satisfied. (The browser's first message is `ready`.)
-    this.clearHandshakeTimer();
     const message = validation.value;
+    if (!this.handshakeComplete) {
+      if (message.type !== 'ready') {
+        this.closeSocket(BROWSER_CLOSE_REASONS.handshakeOrder);
+        return;
+      }
+      if (message.buildId !== PIE_BUILD_ID) {
+        this.closeSocket(BROWSER_CLOSE_REASONS.buildMismatch);
+        return;
+      }
+      this.handshakeComplete = true;
+      this.clearHandshakeTimer();
+    }
+    if (
+      (message.type === 'ready' || message.type === 'refreshState' || message.type === 'requestSnapshot')
+      && message.buildId !== PIE_BUILD_ID
+    ) {
+      this.closeSocket(BROWSER_CLOSE_REASONS.buildMismatch);
+      return;
+    }
     if (message.type === 'rendererVisibilityChanged') {
       this.visibilityHandler?.(message.visible);
       this.session?.setVisible(message.visible);
@@ -297,4 +325,28 @@ export class BrowserRendererTransport implements RendererTransport {
       this.handshakeTimer = undefined;
     }
   }
+}
+
+function detailRejectionForMalformedRequest(value: unknown): Extract<HostToWebviewMessage, { type: 'detailResult' }> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const message = value as Record<string, unknown>;
+  if (message.type !== 'requestDetail'
+    || typeof message.clientCommandId !== 'string'
+    || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(message.clientCommandId)
+    || typeof message.sessionPath !== 'string'
+    || Buffer.byteLength(message.sessionPath, 'utf8') > BROWSER_INGRESS_LIMITS.maxPathUtf8Bytes
+    || !message.ref
+    || typeof message.ref !== 'object'
+    || Array.isArray(message.ref)) return undefined;
+  const key = (message.ref as Record<string, unknown>).key;
+  if (typeof key !== 'string' || key.length === 0 || Buffer.byteLength(key, 'utf8') > 512) return undefined;
+  return {
+    type: 'detailResult',
+    result: {
+      sessionPath: message.sessionPath,
+      key,
+      status: 'failure',
+      message: 'Pie could not validate this detail request. Reload Pie and try again.',
+    },
+  };
 }

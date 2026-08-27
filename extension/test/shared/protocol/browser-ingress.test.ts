@@ -15,6 +15,7 @@ import {
   BROWSER_INGRESS_LIMITS,
   validateBrowserToHostMessage,
 } from '../../../src/shared/browser-ingress';
+import { compactDurableMessageDetails } from '../../../src/shared/lazy-details';
 import type { WebviewToHostMessage } from '../../../src/shared/protocol';
 
 const UUID = '01234567-89ab-4cde-f012-3456789abcde';
@@ -64,11 +65,63 @@ test('valid application commands pass with a clientCommandId', () => {
   expectOk({ type: 'extensionUiResponse', sessionPath: '/sessions/a', response: { id: 'req-1', confirmed: true }, clientCommandId: UUID });
   expectOk({ type: 'extensionUiResponse', sessionPath: '/sessions/a', response: { id: 'req-1', value: 'text', cancelled: false }, clientCommandId: UUID });
   expectOk({ type: 'setPrefs', prefs: { uiDensity: 'compact' }, clientCommandId: UUID });
-  expectOk({ type: 'detail.subscribe', viewGeneration: 3, detailKey: 'card-1', address: {
+  expectOk({ type: 'detail.subscribe', viewGeneration: 3, detailKey: 'card-1', detailAttempt: 1, address: {
     sessionPath: '/sessions/a', turnId: 'turn-1', rootToolCallId: 'tool-1', rootAttemptId: 'attempt-1',
     lineage: [{ childId: 'child-1', spawningToolCallId: 'tool-1', attemptId: 'attempt-1' }],
   }, clientCommandId: UUID });
   expectOk({ type: 'retrySend', sessionPath: '/sessions/a', text: 'draft', localId: 'local-1', disablePruning: true, clientCommandId: UUID });
+});
+
+test('producer-generated reasoning and subagent detail refs pass browser ingress', () => {
+  const sessionPath = '/sessions/a';
+  const reasoningMessage = compactDurableMessageDetails({
+    id: 'reasoning-message',
+    role: 'assistant',
+    createdAt: '2026-08-27T00:00:00.000Z',
+    status: 'completed',
+    markdown: '',
+    parts: [{ kind: 'reasoning', text: 'reasoning line\n'.repeat(2_000) }],
+  }, sessionPath);
+  const reasoningPart = reasoningMessage.parts?.[0];
+  assert.ok(reasoningPart?.kind === 'reasoning' && reasoningPart.detailRef);
+  assert.equal(typeof reasoningPart.detailRef.lineCount, 'number', 'fixture exercises producer lineCount metadata');
+
+  const subagentMessage = compactDurableMessageDetails({
+    id: 'subagent-message',
+    role: 'assistant',
+    createdAt: '2026-08-27T00:00:01.000Z',
+    status: 'completed',
+    markdown: '',
+    parts: [{
+      kind: 'toolCall',
+      toolCall: {
+        id: 'subagent-tool',
+        name: 'subagent',
+        input: {},
+        status: 'completed',
+        result: {
+          details: {
+            results: [{
+              agent: 'worker',
+              task: 'inspect',
+              exitCode: 0,
+              messages: [{ role: 'assistant', content: [{ type: 'text', text: 'detail'.repeat(4_000) }] }],
+            }],
+          },
+        },
+      },
+    }],
+  }, sessionPath);
+  const subagentPart = subagentMessage.parts?.[0];
+  assert.ok(subagentPart?.kind === 'toolCall' && subagentPart.toolCall.detailRef);
+  assert.equal(typeof subagentPart.toolCall.detailRef.childCount, 'number', 'fixture exercises producer childCount metadata');
+
+  for (const ref of [reasoningPart.detailRef, subagentPart.toolCall.detailRef]) {
+    // Match the browser WebSocket boundary: JSON serialization removes
+    // undefined optional fields before the fail-closed host validator runs.
+    const encoded = JSON.stringify({ type: 'requestDetail', sessionPath, ref, clientCommandId: UUID });
+    expectOk(JSON.parse(encoded), Buffer.byteLength(encoded, 'utf8'));
+  }
 });
 
 test('handshake, evidence, lifecycle, and log messages pass without a clientCommandId', () => {
@@ -134,6 +187,18 @@ test('wrong types are rejected', () => {
   expectRejected({ type: 'extensionUiResponse', sessionPath: '/sessions/a', response: { id: 'req-1', confirmed: 'yes' }, clientCommandId: UUID });
   expectRejected({ type: 'log', level: 'info', scope: 's', message: 'm' });
   expectRejected({ type: 'send', sessionPath: '/sessions/a', text: 'x', clientCommandId: UUID, viewGeneration: -1 });
+});
+
+test('detail ref counts must be non-negative safe integers', () => {
+  const ref = {
+    key: 'durable:tool:key', kind: 'tool-result', source: 'durable', sessionPath: '/sessions/a',
+    messageId: 'message', toolCallId: 'tool', sizeBytes: 100, summary: 'summary', available: true,
+  };
+  expectOk({ type: 'requestDetail', sessionPath: '/sessions/a', ref: { ...ref, childCount: 0, lineCount: 1 }, clientCommandId: UUID });
+  for (const invalid of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1, '1']) {
+    expectRejected({ type: 'requestDetail', sessionPath: '/sessions/a', ref: { ...ref, childCount: invalid }, clientCommandId: UUID });
+    expectRejected({ type: 'requestDetail', sessionPath: '/sessions/a', ref: { ...ref, lineCount: invalid }, clientCommandId: UUID });
+  }
 });
 
 // ─── Oversized strings and arrays ───────────────────────────────────────────

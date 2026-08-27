@@ -21,6 +21,7 @@ import type {
   SystemPromptEntry,
   TranscriptWindow,
   SessionSummary,
+  SessionCatalogProgress,
   ModelSettings,
   ModelInfo,
   PruningSettings,
@@ -98,6 +99,8 @@ export interface TranscriptState {
 export interface SessionsState {
   /** Known session summaries. */
   sessions: SessionSummary[];
+  /** Completeness of the durable catalog that supplied `sessions`. */
+  sessionCatalogProgress: SessionCatalogProgress;
   /** Open tab paths (preserves order; pinned tabs form the leading prefix). */
   openTabPaths: string[];
   /** Pinned tab paths (browser-style: clustered at the far left, icon-only). */
@@ -563,6 +566,7 @@ export function createInitialArchState(): ArchState {
     },
     sessions: {
       sessions: [],
+      sessionCatalogProgress: { complete: true, processed: 0, total: 0 },
       openTabPaths: [],
       pinnedTabPaths: [],
       pinnedTabGroups: [],

@@ -57,6 +57,8 @@ export type BrowserServerLifecycleEvent =
 
 export interface BrowserServerOptions {
   clock?: StateDeliveryClock;
+  /** Shared extension-host incarnation used by every renderer hub. */
+  hostInstanceId?: string;
   /** Read current local settings (the server re-reads on every start). */
   getSettings(): BrowserServerSettings;
   /** Shared projected `ViewState`; the server's renderer hub projects it at
@@ -67,6 +69,8 @@ export interface BrowserServerOptions {
   /** Browser command routing: the exactly-once gate calls this with the
    *  renderer context; `PieExtension` wires the `MessageRouter` here. */
   routeMessage(msg: WebviewToHostMessage, context: RendererCommandContext): Promise<void>;
+  /** Release resources owned by a disconnected/reloaded browser document. */
+  onRendererInvalidated?(rendererId: string, rendererGeneration: number): void;
   /** Compiled webview asset directory (`out/webview/panel`). */
   assetDir: string;
   /** Optional pie icon path served at `/favicon.svg` (extension media). */

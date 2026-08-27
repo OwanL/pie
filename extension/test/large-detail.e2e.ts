@@ -122,6 +122,7 @@ test('a >64 MiB durable detail streams in bounded pages and reassembles exactly'
 
   const pages = emitted.filter((message) => message.kind === 'detail.page').map(asPage);
   assert.equal(pages.length, start.kind === 'detail.start' ? start.pageCount : 0);
+  assert.equal(start.totalCodePoints, pages[0]?.payload.totalCodePoints, 'start carries the exact assembly manifest');
   let maxPayloadBytes = 0;
   for (const page of pages) {
     assert.ok(page!.payloadBytes > 0 && page!.payloadBytes <= PAGE_BUDGET, 'every page fits the budget');

@@ -1,10 +1,13 @@
 import assert from 'node:assert/strict';
+import * as fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import test from 'node:test';
 
 import { BackendServer } from '../../../src/backend';
+import { REVIEWS_DIR_ENV } from '../../../src/backend/session-review-store';
+import { readSystemPromptTogglesForSession } from '../../../src/backend/system-prompt-toggle-store';
 import { SESSION_SNAPSHOT_MAX_LINE_BYTES, sessionSnapshotLineBytes } from '../../../src/shared/transcript-window';
 
 function entry(id: string, role: 'user' | 'assistant', text: string) {
@@ -27,12 +30,16 @@ async function makeColdServer(options: { sessionCatalog?: any; contextThinkingLe
   ].join('\n') + '\n');
   await fs.writeFile(path.join(dir, 'settings.json'), JSON.stringify({ defaultModel: 'model-a', defaultThinkingLevel: 'medium' }));
   await fs.writeFile(path.join(dir, 'models.json'), JSON.stringify({
-    providers: { mock: { models: [{ id: 'model-a', name: 'Model A', reasoning: true, contextWindow: 1000 }] } },
+    providers: { mock: { models: [
+      { id: 'model-a', name: 'Model A', reasoning: true, contextWindow: 1000 },
+      { id: 'model-b', name: 'Model B', reasoning: true, contextWindow: 2000 },
+    ] } },
   }));
 
   let durableBranch: any[] = [entry('user-1', 'user', 'hello')];
   let sessionName: string | undefined;
   let managerOpens = 0;
+  let nextEntryId = 0;
   const server = new BackendServer({ workerEntryPath: '/worker-entry.js',
     sdkPath: '/unused',
     cwd: dir,
@@ -55,6 +62,24 @@ async function makeColdServer(options: { sessionCatalog?: any; contextThinkingLe
       open(openedPath: string) {
         managerOpens += 1;
         const snapshot = [...durableBranch];
+        const appendRows = (rows: ReadonlyArray<Record<string, unknown>>): string[] => {
+          let parentId = (snapshot.at(-1) as { id?: string } | undefined)?.id ?? null;
+          const entries = rows.map((row) => {
+            const id = `cold-setting-${++nextEntryId}`;
+            const entry = { ...row, id, parentId, timestamp: new Date().toISOString() };
+            parentId = id;
+            return entry;
+          });
+          fsSync.appendFileSync(
+            openedPath,
+            entries.map((entry) => `${JSON.stringify(entry)}\n`).join(''),
+            'utf8',
+          );
+          snapshot.push(...entries);
+          if (openedPath === sessionPath) durableBranch = [...snapshot];
+          return entries.map((entry) => entry.id);
+        };
+        const append = (row: Record<string, unknown>): string => appendRows([row])[0]!;
         return {
           getCwd: () => dir,
           getSessionId: () => 'stable-session-id',
@@ -62,11 +87,50 @@ async function makeColdServer(options: { sessionCatalog?: any; contextThinkingLe
           getSessionName: () => sessionName,
           getBranch: () => snapshot,
           getEntries: () => snapshot,
-          buildSessionContext: () => ({
-            messages: snapshot.filter((row) => row.type === 'message'),
-            thinkingLevel: options.contextThinkingLevel ?? 'medium',
-            model: { provider: 'mock', modelId: 'model-a' },
+          buildSessionContext: () => {
+            const model = snapshot.filter((row) => row.type === 'model_change').at(-1) as {
+              provider?: string;
+              modelId?: string;
+            } | undefined;
+            const thinking = snapshot.filter((row) => row.type === 'thinking_level_change').at(-1) as {
+              thinkingLevel?: string;
+            } | undefined;
+            return {
+              messages: snapshot.filter((row) => row.type === 'message'),
+              thinkingLevel: thinking?.thinkingLevel ?? options.contextThinkingLevel ?? 'medium',
+              model: {
+                provider: model?.provider ?? 'mock',
+                modelId: model?.modelId ?? 'model-a',
+              },
+            };
+          },
+          appendModelChange: (provider: string, modelId: string) => append({
+            type: 'model_change', provider, modelId,
           }),
+          appendThinkingLevelChange: (thinkingLevel: string) => append({
+            type: 'thinking_level_change', thinkingLevel,
+          }),
+          appendPieModelSettingsChange: (
+            provider: string | undefined,
+            modelId: string | undefined,
+            thinkingLevel: string | undefined,
+          ) => {
+            if ((provider === undefined) !== (modelId === undefined)) {
+              throw new Error('appendPieModelSettingsChange requires both provider and modelId.');
+            }
+            const rows: Array<Record<string, unknown>> = [];
+            if (provider !== undefined && modelId !== undefined) {
+              rows.push({ type: 'model_change', provider, modelId });
+            }
+            if (thinkingLevel !== undefined) {
+              rows.push({ type: 'thinking_level_change', thinkingLevel });
+            }
+            const ids = appendRows(rows);
+            return {
+              modelChangeId: provider === undefined ? undefined : ids.shift(),
+              thinkingLevelChangeId: thinkingLevel === undefined ? undefined : ids.shift(),
+            };
+          },
         };
       },
     },
@@ -75,7 +139,10 @@ async function makeColdServer(options: { sessionCatalog?: any; contextThinkingLe
     dir,
     server,
     sessionPath,
-    append(row: any) { durableBranch = [...durableBranch, row]; },
+    async append(row: any, targetPath = sessionPath) {
+      durableBranch = [...durableBranch, row];
+      await fs.appendFile(targetPath, `${JSON.stringify(row)}\n`);
+    },
     replaceBranch(rows: any[]) { durableBranch = [...rows]; },
     setSessionName(name: string | undefined) { sessionName = name; },
     counts: () => ({ managerOpens }),
@@ -98,7 +165,7 @@ test('cold open/preload/page/detail projections remain runtime-free and pages re
     assert.equal(opened.session.sessionId, 'stable-session-id');
     assert.equal(opened.sessionUsage.samples.length, 0);
 
-    h.append(entry('assistant-1', 'assistant', 'fresh append'));
+    await h.append(entry('assistant-1', 'assistant', 'fresh append'));
     const page = await h.server.loadTranscriptPage(h.sessionPath, 'latest');
     assert.deepEqual(page.transcript.map((message: { id: string }) => message.id), ['user-1', 'assistant-1']);
     assert.equal(page.busy, false);
@@ -114,7 +181,19 @@ test('cold open/preload/page/detail projections remain runtime-free and pages re
       sizeBytes: 1,
     });
     assert.equal(detail.status, 'unavailable');
-    assert.deepEqual(h.counts(), { managerOpens: 4 });
+    assert.deepEqual(h.counts(), { managerOpens: 2 });
+    assert.deepEqual(h.server.coldSessionStore.getBrowseCacheStats(), {
+      hits: 2,
+      misses: 2,
+      inflightJoins: 0,
+      evictions: 0,
+      invalidations: 1,
+      entries: 1,
+      inflight: 0,
+      currentSourceBytes: (await fs.stat(h.sessionPath)).size,
+      maxSourceBytes: 128 * 1024 * 1024,
+      maxEntries: 4,
+    });
   } finally {
     await fs.rm(h.dir, { recursive: true, force: true });
   }
@@ -129,7 +208,7 @@ test('cold sessions inherit configured reasoning until the branch records an exp
     const inherited = await h.server.buildSessionOpenedPayload(h.sessionPath);
     assert.equal(inherited.session.thinkingLevel, 'high');
 
-    h.append({
+    await h.append({
       type: 'thinking_level_change', id: 'thinking-off', parentId: 'user-1',
       timestamp: '2026-08-13T00:00:01.000Z', thinkingLevel: 'off',
     });
@@ -150,9 +229,88 @@ test('cold list and models.list use coordinator metadata without promotion', asy
     const models = await h.server.handleRequest({
       id: 'models-cold', method: 'models.list', params: { sessionPath: h.sessionPath },
     });
-    assert.deepEqual(models.map((model: { id: string }) => model.id), ['model-a']);
+    assert.deepEqual(models.map((model: { id: string }) => model.id), ['model-a', 'model-b']);
     assert.deepEqual(h.counts(), { managerOpens: 0 });
   } finally {
+    await fs.rm(h.dir, { recursive: true, force: true });
+  }
+});
+
+test('coordinator-routed cold settings survive snapshot rebuild and backend-generation replacement without promotion', async () => {
+  const h = await makeColdServer();
+  try {
+    const updated = await h.server.handleRequest({
+      id: 'settings-cold-durable',
+      method: 'settings.set',
+      params: {
+        sessionPath: h.sessionPath,
+        defaultModel: 'model-b',
+        defaultProvider: 'mock',
+        defaultThinkingLevel: 'high',
+      },
+    });
+    assert.deepEqual(updated, {
+      defaultModel: 'model-b',
+      defaultProvider: 'mock',
+      defaultThinkingLevel: 'high',
+    });
+    assert.equal(h.server.workerRuntimeRouter, undefined, 'configuration must not promote an execution runtime');
+
+    const hydrated = await h.server.buildSessionOpenedPayload(h.sessionPath);
+    assert.equal(hydrated.session.modelId, 'model-b');
+    assert.equal(hydrated.session.provider, 'mock');
+    assert.equal(hydrated.session.thinkingLevel, 'high');
+
+    // A new ColdSessionStore has no process-local manager or browse cache. It
+    // reconstructs only from the durable transcript, matching a backend/VS
+    // Code restart rather than accidentally proving an in-memory overlay.
+    h.server.coldSessionStore = undefined;
+    const afterRestart = await h.server.buildSessionOpenedPayload(h.sessionPath);
+    assert.equal(afterRestart.session.modelId, 'model-b');
+    assert.equal(afterRestart.session.provider, 'mock');
+    assert.equal(afterRestart.session.thinkingLevel, 'high');
+
+    const rows = (await fs.readFile(h.sessionPath, 'utf8'))
+      .trim().split('\n').map((line) => JSON.parse(line));
+    assert.deepEqual(rows.slice(-2).map((row) => row.type), [
+      'model_change',
+      'thinking_level_change',
+    ]);
+  } finally {
+    await fs.rm(h.dir, { recursive: true, force: true });
+  }
+});
+
+test('coordinator-routed cold system-prompt toggles persist and confirm without promotion', async () => {
+  const h = await makeColdServer();
+  const previousReviewsDir = process.env[REVIEWS_DIR_ENV];
+  process.env[REVIEWS_DIR_ENV] = h.dir;
+  try {
+    const emitted: Array<{ event: string; payload: any }> = [];
+    h.server.emit = (event: string, payload: any) => { emitted.push({ event, payload }); };
+
+    const result = await h.server.handleRequest({
+      id: 'system-prompts-cold-durable',
+      method: 'systemPromptToggles.set',
+      params: {
+        sessionPath: h.sessionPath,
+        disabledEntries: ['skills', 'tools'],
+      },
+    });
+
+    assert.deepEqual(result, { ok: true });
+    assert.equal(h.server.workerRuntimeRouter, undefined, 'a config-only write must not promote a runtime');
+    assert.deepEqual(await readSystemPromptTogglesForSession(h.sessionPath), ['skills', 'tools']);
+    assert.deepEqual(emitted.at(-1), {
+      event: 'session.opened',
+      payload: {
+        ...emitted.at(-1)!.payload,
+        systemPromptDisabledEntries: ['skills', 'tools'],
+      },
+    });
+  } finally {
+    if (previousReviewsDir === undefined) delete process.env[REVIEWS_DIR_ENV];
+    else process.env[REVIEWS_DIR_ENV] = previousReviewsDir;
     await fs.rm(h.dir, { recursive: true, force: true });
   }
 });
@@ -167,7 +325,15 @@ test('cold session.opened has a metadata-independent bounded fallback for huge n
       providers: { mock: { models: [{ id: 'model-a', name: huge, reasoning: true }] } },
     }));
 
-    const payload = await h.server.buildSessionOpenedPayload(h.sessionPath, 'selection-huge');
+    const payload = await h.server.buildSessionOpenedPayload(
+      h.sessionPath,
+      'selection-huge',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      ['skills'],
+    );
 
     assert.equal(payload.snapshotUnavailable?.code, 'SESSION_SNAPSHOT_TOO_LARGE');
     assert.equal(payload.session.path, h.sessionPath);
@@ -177,6 +343,7 @@ test('cold session.opened has a metadata-independent bounded fallback for huge n
     assert.equal(payload.runtimeReady, false);
     assert.equal(payload.availableModels, undefined);
     assert.equal(payload.modelSettings, undefined);
+    assert.deepEqual(payload.systemPromptDisabledEntries, ['skills']);
     assert.ok(sessionSnapshotLineBytes(payload, { kind: 'event', event: 'session.opened' }) <= SESSION_SNAPSHOT_MAX_LINE_BYTES);
   } finally {
     await fs.rm(h.dir, { recursive: true, force: true });
@@ -214,8 +381,8 @@ test('an externally rewritten retained session evicts its stale manager and reop
     await h.server.handleRequest({ id: 'create-rewritten', method: 'session.create', params: { cwd: h.dir } });
     const opensBeforeRewrite = h.counts().managerOpens;
 
-    h.append(entry('assistant-after-rewrite', 'assistant', 'external'));
-    await fs.appendFile(createdPath, `${JSON.stringify(entry('assistant-after-rewrite', 'assistant', 'external'))}\n`);
+    const externalEntry = entry('assistant-after-rewrite', 'assistant', 'external');
+    await h.append(externalEntry, createdPath);
     const payload = await h.server.buildSessionOpenedPayload(createdPath);
 
     assert.equal(payload.runtimeReady, false);

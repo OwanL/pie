@@ -30,6 +30,8 @@ const SLIM_PATH_BYTES = 64 * 1024;
 const SLIM_IDENTITY_BYTES = 4 * 1024;
 const SLIM_SELECTION_BYTES = 4 * 1024;
 const SLIM_RECOVERY_ID_BYTES = 1024;
+const SLIM_SETTING_ID_BYTES = 4 * 1024;
+const SLIM_PROMPT_ENTRY_COUNT = 256;
 const SNAPSHOT_UNAVAILABLE_MESSAGE = 'The lossless session snapshot exceeded the transport limit. Existing transcript state was preserved where available.';
 
 function boundedUtf8(value: string, maxBytes: number): string {
@@ -43,13 +45,29 @@ function boundedCount(value: number): number {
   return Math.min(Number.MAX_SAFE_INTEGER, Math.max(0, Math.trunc(value)));
 }
 
+function boundedUniquePromptEntries(values: readonly string[] | undefined): string[] | undefined {
+  if (values === undefined) return undefined;
+  const result: string[] = [];
+  const seen = new Set<string>();
+  for (const value of values) {
+    const bounded = boundedUtf8(value, SLIM_SETTING_ID_BYTES);
+    if (seen.has(bounded)) continue;
+    seen.add(bounded);
+    result.push(bounded);
+    if (result.length >= SLIM_PROMPT_ENTRY_COUNT) break;
+  }
+  return result;
+}
+
 /**
  * Build the final, metadata-independent `session.opened` fallback. Every
- * retained string has a fixed UTF-8 cap and all user/configuration-owned bulk
- * fields (name, catalog, settings, prompts, reviews and usage) are omitted or
- * replaced. With the fixed event name/envelope this remains far below the
- * producer budget even when the original snapshot contains multi-megabyte
- * metadata.
+ * retained string has a fixed UTF-8 cap and user/configuration-owned bulk
+ * fields (name, catalog, reviews and usage) are omitted or replaced. The small
+ * per-session model identity and prompt-toggle confirmation are retained with
+ * hard count/byte bounds so an oversized transcript cannot silently undo a
+ * just-committed setting. With the fixed event name/envelope this remains far
+ * below the producer budget even when the original snapshot contains
+ * multi-megabyte metadata.
  */
 export function buildSlimSessionOpenedUnavailableFallback(
   payload: SessionOpenedPayload,
@@ -69,8 +87,16 @@ export function buildSlimSessionOpenedUnavailableFallback(
       ? { sessionId: boundedUtf8(original.sessionId, SLIM_IDENTITY_BYTES) }
       : {}),
     ...(original.identityFallback !== undefined ? { identityFallback: original.identityFallback } : {}),
+    ...(original.modelId !== undefined
+      ? { modelId: boundedUtf8(original.modelId, SLIM_SETTING_ID_BYTES) }
+      : {}),
+    ...(original.provider !== undefined
+      ? { provider: boundedUtf8(original.provider, SLIM_SETTING_ID_BYTES) }
+      : {}),
+    ...(original.thinkingLevel !== undefined ? { thinkingLevel: original.thinkingLevel } : {}),
   };
   const recovery = payload.liveTurnRecoveryIdentity;
+  const systemPromptDisabledEntries = boundedUniquePromptEntries(payload.systemPromptDisabledEntries);
   return {
     session,
     transcript: [],
@@ -98,6 +124,10 @@ export function buildSlimSessionOpenedUnavailableFallback(
     ...(payload.operationId
       ? { operationId: boundedUtf8(payload.operationId, SLIM_SELECTION_BYTES) }
       : {}),
+    ...(payload.operationAttempt !== undefined
+      ? { operationAttempt: boundedCount(payload.operationAttempt) }
+      : {}),
+    ...(systemPromptDisabledEntries !== undefined ? { systemPromptDisabledEntries } : {}),
     snapshotUnavailable: {
       code: SESSION_SNAPSHOT_TOO_LARGE_CODE,
       message: SNAPSHOT_UNAVAILABLE_MESSAGE,

@@ -21,6 +21,7 @@ import type {
   ToolCall,
   ContextWindowUsage,
   SessionSummary,
+  SessionCatalogProgress,
   ExtensionUIRequestPayload,
   SessionOpenedPayload,
   PruningSettings,
@@ -448,6 +449,7 @@ export interface ContextUsageChangedEvent {
 export interface SessionListChangedEvent {
   kind: 'SessionListChanged';
   sessionSummaries: SessionSummary[];
+  sessionCatalogProgress?: SessionCatalogProgress;
 }
 
 /** Emitted when the backend sends a custom message (e.g., pruning result). */
@@ -473,6 +475,18 @@ export interface NoticeShownEvent {
   /** Omit for application-wide notices. Session-owned notices are only
    * projected while this path is the active chat. */
   sessionPath?: string | null;
+}
+
+/** Host-owned status for an edit whose destructive truncate crossed stdio but
+ * whose application waiter timed out before the exact correlated response.
+ * This is deliberately not an EditResult: neither `recovering` nor
+ * `unresolved` may roll optimistic transcript state back. */
+export interface EditTruncateRecoveryChangedEvent {
+  kind: 'EditTruncateRecoveryChanged';
+  corrId: string;
+  sessionPath: string;
+  phase: 'recovering' | 'recovered' | 'unresolved';
+  error?: string;
 }
 
 /** Emitted when the backend reports an error. */
@@ -733,6 +747,7 @@ export interface UnreadFinishedSessionsChangedEvent {
 export interface SessionSummariesReplacedEvent {
   kind: 'SessionSummariesReplaced';
   summaries: SessionSummary[];
+  sessionCatalogProgress?: SessionCatalogProgress;
 }
 
 /** Emitted when session scope is cleared. */
@@ -902,6 +917,7 @@ export interface SessionSummaryUpsertedEvent {
 
 export type HostEvent =
   | NoticeShownEvent
+  | EditTruncateRecoveryChangedEvent
   | McpServersUpdatedEvent
   | SessionNameDerivedEvent
   | OptimisticMessageInsertedEvent

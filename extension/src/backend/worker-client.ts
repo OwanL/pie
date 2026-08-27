@@ -58,6 +58,8 @@ export interface WorkerClientOptions {
   heartbeatIntervalMs?: number;
   missedHeartbeatMs?: number;
   startupTimeoutMs?: number;
+  /** Default deadline for one correlated coordinator -> worker request. */
+  requestTimeoutMs?: number;
   diagnosticByteLimit?: number;
   env?: NodeJS.ProcessEnv;
   scheduler?: WorkerClientScheduler;
@@ -90,7 +92,28 @@ interface PendingResponse {
   expectedResultKind?: WorkerResponseResult['kind'];
   resolve: (frame: WorkerToCoordinatorFrame) => void;
   reject: (error: Error) => void;
+  timer?: ReturnType<typeof setTimeout>;
 }
+
+export interface WorkerRequestOptions {
+  timeoutMs?: number;
+}
+
+export class WorkerRequestTimeoutError extends Error {
+  readonly code = 'WORKER_REQUEST_TIMEOUT';
+
+  constructor(
+    readonly requestId: string,
+    readonly requestKind: CoordinatorToWorkerRequestBody['kind'],
+    readonly timeoutMs: number,
+  ) {
+    super(`Worker ${requestKind} request ${requestId} did not respond within ${timeoutMs} ms.`);
+    this.name = 'WorkerRequestTimeoutError';
+  }
+}
+
+const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
+const MAX_EXPIRED_REQUEST_IDS = 256;
 
 class DiagnosticTail {
   private chunks: Buffer[] = [];
@@ -150,6 +173,7 @@ export class WorkerClient {
   private readonly heartbeatIntervalMs: number;
   private readonly missedHeartbeatMs: number;
   private readonly startupTimeoutMs: number;
+  private readonly requestTimeoutMs: number;
   private readonly stdoutTail: DiagnosticTail;
   private readonly stderrTail: DiagnosticTail;
   private readonly terminateTree: typeof terminateProcessTree;
@@ -160,6 +184,9 @@ export class WorkerClient {
   private readonly rootSessionPath: string;
   private expectedInboundSeq = 1;
   private readonly pending = new Map<string, PendingResponse>();
+  /** A bounded tombstone set prevents a response that lost a deadline race
+   *  from being treated as hostile, uncorrelated protocol traffic. */
+  private readonly expiredRequestIds = new Set<string>();
   private readonly ready = deferred<WorkerReadyFrame['runtimeMetadata']>();
   private readonly exited = deferred<{ code: number | null; signal: NodeJS.Signals | null }>();
   private startupTimer?: ReturnType<typeof setTimeout>;
@@ -181,6 +208,10 @@ export class WorkerClient {
     this.heartbeatIntervalMs = options.heartbeatIntervalMs ?? 1_000;
     this.missedHeartbeatMs = options.missedHeartbeatMs ?? Math.max(3_000, this.heartbeatIntervalMs * 3);
     this.startupTimeoutMs = options.startupTimeoutMs ?? 15_000;
+    this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+    if (!Number.isSafeInteger(this.requestTimeoutMs) || this.requestTimeoutMs <= 0) {
+      throw new Error('requestTimeoutMs must be a positive safe integer.');
+    }
     const diagnosticByteLimit = options.diagnosticByteLimit ?? 64 * 1024;
     if (!Number.isSafeInteger(diagnosticByteLimit) || diagnosticByteLimit <= 0) throw new Error('diagnosticByteLimit must be positive.');
     this.stdoutTail = new DiagnosticTail(diagnosticByteLimit);
@@ -285,18 +316,34 @@ export class WorkerClient {
   requestFrame<K extends WorkerToCoordinatorResponseFrame['kind']>(
     body: CoordinatorToWorkerRequestBody,
     expectedKind: K,
+    options: WorkerRequestOptions = {},
   ): Promise<Extract<WorkerToCoordinatorResponseFrame, { kind: K }>> {
     if (!this.frameBase || !this.writer || this.exitSeen || this.status === 'failed') return Promise.reject(new Error('Worker is unavailable.'));
+    const timeoutMs = options.timeoutMs ?? this.requestTimeoutMs;
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
+      return Promise.reject(new Error('Worker request timeout must be a positive safe integer.'));
+    }
     const requestId = randomUUID();
     return new Promise((resolve, reject) => {
-      this.pending.set(requestId, {
+      const pending: PendingResponse = {
         expectedFrameKind: expectedKind,
         resolve: (frame) => resolve(frame as Extract<WorkerToCoordinatorResponseFrame, { kind: K }>),
         reject,
-      });
+      };
+      this.pending.set(requestId, pending);
+      pending.timer = this.scheduler.setTimeout(() => {
+        const expired = this.takePending(requestId);
+        if (!expired) return;
+        this.rememberExpiredRequest(requestId);
+        if (this.status === 'ready') {
+          this.status = 'unresponsive';
+          this.notify();
+        }
+        expired.reject(new WorkerRequestTimeoutError(requestId, body.kind, timeoutMs));
+      }, timeoutMs);
+      pending.timer.unref?.();
       if (!this.sendFrame({ ...body, requestId } as CoordinatorToWorkerFrameBody)) {
-        this.pending.delete(requestId);
-        reject(new Error('Worker IPC request was rejected.'));
+        this.takePending(requestId)?.reject(new Error('Worker IPC request was rejected.'));
       }
     });
   }
@@ -373,7 +420,7 @@ export class WorkerClient {
         ? 'interrupted'
         : 'shutting-down';
     return new Promise<WorkerResponseResult>((resolve, reject) => {
-      this.pending.set(requestId, {
+      const pending: PendingResponse = {
         expectedFrameKind: 'response',
         expectedResultKind,
         resolve: (frame) => {
@@ -382,10 +429,21 @@ export class WorkerClient {
           else reject(new Error(`${frame.error.code}: ${frame.error.message}`));
         },
         reject,
-      });
+      };
+      this.pending.set(requestId, pending);
+      pending.timer = this.scheduler.setTimeout(() => {
+        const expired = this.takePending(requestId);
+        if (!expired) return;
+        this.rememberExpiredRequest(requestId);
+        if (this.status === 'ready') {
+          this.status = 'unresponsive';
+          this.notify();
+        }
+        expired.reject(new WorkerRequestTimeoutError(requestId, draft.kind, this.requestTimeoutMs));
+      }, this.requestTimeoutMs);
+      pending.timer.unref?.();
       if (!this.sendFrame({ ...draft, requestId } as CoordinatorToWorkerFrameBody)) {
-        this.pending.delete(requestId);
-        reject(new Error('Worker IPC request was rejected.'));
+        this.takePending(requestId)?.reject(new Error('Worker IPC request was rejected.'));
       }
     });
   }
@@ -436,9 +494,9 @@ export class WorkerClient {
       return;
     }
     const requestId = 'requestId' in frame ? frame.requestId : undefined;
-    const pending = requestId ? this.pending.get(requestId) : undefined;
+    if (requestId && this.expiredRequestIds.delete(requestId)) return;
+    const pending = requestId ? this.takePending(requestId) : undefined;
     if (pending) {
-      this.pending.delete(requestId!);
       if (frame.kind === 'detail.error') {
         pending.reject(new Error(`${frame.code}: ${frame.message}`));
         try { this.options.onFrame?.(frame); } catch { /* router owns stream errors */ }
@@ -504,8 +562,8 @@ export class WorkerClient {
     if (this.heartbeatTimer) this.scheduler.clearTimeout(this.heartbeatTimer);
     this.startupTimer = undefined;
     this.heartbeatTimer = undefined;
-    for (const pending of this.pending.values()) pending.reject(this.failure);
-    this.pending.clear();
+    for (const requestId of [...this.pending.keys()]) this.takePending(requestId)?.reject(this.failure);
+    this.expiredRequestIds.clear();
     this.notify();
     if (kill && this.child?.pid && !this.exitSeen) void this.forceKill().catch(() => undefined);
   }
@@ -521,8 +579,10 @@ export class WorkerClient {
     this.heartbeatTimer = undefined;
     if (!this.failure && this.status !== 'stopping') this.failure = new Error(`Worker exited unexpectedly (${code ?? signal ?? 'unknown'}).`);
     if (!this.readySeen) this.ready.reject(this.failure ?? new Error('Worker exited before ready.'));
-    for (const pending of this.pending.values()) pending.reject(this.failure ?? new Error('Worker exited.'));
-    this.pending.clear();
+    for (const requestId of [...this.pending.keys()]) {
+      this.takePending(requestId)?.reject(this.failure ?? new Error('Worker exited.'));
+    }
+    this.expiredRequestIds.clear();
     try {
       if (this.processTreeGuardian) {
         await this.processTreeGuardian.terminate();
@@ -542,5 +602,23 @@ export class WorkerClient {
 
   private notify(): void {
     try { this.options.onStateChange?.(this.getSnapshot()); } catch { /* observer only */ }
+  }
+
+  private takePending(requestId: string): PendingResponse | undefined {
+    const pending = this.pending.get(requestId);
+    if (!pending) return undefined;
+    this.pending.delete(requestId);
+    if (pending.timer) this.scheduler.clearTimeout(pending.timer);
+    pending.timer = undefined;
+    return pending;
+  }
+
+  private rememberExpiredRequest(requestId: string): void {
+    this.expiredRequestIds.add(requestId);
+    while (this.expiredRequestIds.size > MAX_EXPIRED_REQUEST_IDS) {
+      const oldest = this.expiredRequestIds.values().next().value as string | undefined;
+      if (!oldest) break;
+      this.expiredRequestIds.delete(oldest);
+    }
   }
 }

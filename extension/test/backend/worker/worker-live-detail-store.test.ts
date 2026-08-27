@@ -70,6 +70,8 @@ test('baseline pages reassemble huge non-ASCII strings exactly under a tiny inje
   assert.ok(start && start.kind === 'detail.start');
   assert.ok(pages.length > 10);
   assert.equal(start.pageCount, pages.length);
+  assert.equal(start.totalBytes, pages[0]?.payload.totalBytes);
+  assert.equal(start.totalCodePoints, pages[0]?.payload.totalCodePoints);
   assert.ok(Buffer.byteLength(JSON.stringify(start), 'utf8') < 2_048, 'baseline manifest is bounded independently of total detail bytes');
   const rebuilt = reassembleDetailPages(pages) as any;
   assert.equal(rebuilt.messages[0].content[0].text, text);

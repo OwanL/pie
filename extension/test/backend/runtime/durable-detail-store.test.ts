@@ -145,6 +145,7 @@ test('subscribe streams exact durable pages and a terminal handoff, never one ov
     assert.equal(start.address.sessionPath, SESSION_PATH);
     assert.ok(start.pageCount > 1, 'the value spans multiple pages');
     assert.equal(start.totalBytes, Buffer.byteLength(JSON.stringify(value), 'utf8'));
+    assert.equal(start.totalCodePoints, [...JSON.stringify(value)].length);
   }
   const pages = pagesOf(emitted, 'subscription-1');
   assert.equal(pages.length, start?.kind === 'detail.start' ? start.pageCount : 0);

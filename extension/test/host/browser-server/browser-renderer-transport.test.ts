@@ -12,7 +12,7 @@ import { WebSocket } from 'ws';
 import { BrowserRendererTransport, BROWSER_CLOSE_REASONS } from '../../../src/host/browser-server/browser-renderer-transport';
 import type { RendererRegistration } from '../../../src/host/renderers/types';
 import type { HostToWebviewMessage, WebviewToHostMessage } from '../../../src/shared/protocol';
-import { WEBVIEW_PROTOCOL_VERSION } from '../../../src/shared/protocol';
+import { PIE_BUILD_ID, WEBVIEW_PROTOCOL_VERSION } from '../../../src/shared/protocol';
 
 class FakeSocket {
   readyState: number = WebSocket.OPEN;
@@ -120,6 +120,7 @@ test('start(): the hello is the first frame and carries the POST-resolution gene
   const hello = JSON.parse(socket.sent[0] ?? '{}') as Record<string, unknown>;
   assert.equal(hello.type, 'rendererHello');
   assert.equal(hello.protocolVersion, WEBVIEW_PROTOCOL_VERSION);
+  assert.equal(hello.buildId, PIE_BUILD_ID);
   assert.equal(hello.hostInstanceId, 'host-1');
   assert.equal(hello.rendererId, 'renderer-1');
   assert.equal(hello.rendererGeneration, 3);
@@ -132,6 +133,7 @@ test('post(): gated until the hello is sent; dropped when the socket is not open
   const message: HostToWebviewMessage = {
     type: 'state',
     protocolVersion: WEBVIEW_PROTOCOL_VERSION,
+    buildId: PIE_BUILD_ID,
     hostInstanceId: 'host-1',
     rendererId: 'r',
     rendererGeneration: 1,
@@ -160,7 +162,7 @@ test('ingress: valid messages route; lifecycle messages update the session direc
   const { socket, transport, registration, routed } = createHarness();
   transport.start(registration.registration);
 
-  socket.emit('message', JSON.stringify({ type: 'ready', viewGeneration: 7 }), false);
+  socket.emit('message', JSON.stringify({ type: 'ready', buildId: PIE_BUILD_ID, viewGeneration: 7 }), false);
   assert.equal(routed.length, 1);
   assert.equal(routed[0]?.type, 'ready');
 
@@ -173,6 +175,27 @@ test('ingress: valid messages route; lifecycle messages update the session direc
   assert.deepEqual(registration.focused, [true]);
 });
 
+test('ingress: readiness from another compiled build closes before routing', () => {
+  const { socket, transport, registration, routed } = createHarness();
+  transport.start(registration.registration);
+
+  socket.emit('message', JSON.stringify({ type: 'ready', buildId: 'stale-build', viewGeneration: 7 }), false);
+
+  assert.deepEqual(routed, []);
+  assert.equal(socket.closed[0]?.code, 1008);
+  assert.equal(socket.closed[0]?.reason, BROWSER_CLOSE_REASONS.buildMismatch);
+});
+
+test('ingress: lifecycle traffic cannot clear the ready-first handshake bound', () => {
+  const { socket, transport, registration, routed } = createHarness();
+  transport.start(registration.registration);
+
+  socket.emit('message', JSON.stringify({ type: 'rendererVisibilityChanged', visible: true }), false);
+
+  assert.deepEqual(routed, []);
+  assert.equal(socket.closed[0]?.reason, BROWSER_CLOSE_REASONS.handshakeOrder);
+});
+
 test('ingress: binary frames, unparseable JSON, and unknown fields are never routed', () => {
   const { socket, transport, registration, routed } = createHarness();
   transport.start(registration.registration);
@@ -183,6 +206,36 @@ test('ingress: binary frames, unparseable JSON, and unknown fields are never rou
   socket.emit('message', JSON.stringify({ type: 'newSession' }), false);
 
   assert.equal(routed.length, 0, 'nothing invalid is ever routed');
+});
+
+test('ingress: a malformed identifiable detail request receives a scoped terminal failure', () => {
+  const { socket, transport, registration, routed } = createHarness();
+  transport.start(registration.registration);
+
+  socket.emit('message', JSON.stringify({
+    type: 'requestDetail',
+    sessionPath: '/sessions/a',
+    clientCommandId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    ref: {
+      key: 'durable:reasoning:/sessions/a:m:0',
+      kind: 'reasoning',
+      source: 'durable',
+      sessionPath: '/sessions/a',
+      messageId: 'm',
+      sizeBytes: 10,
+      summary: 'summary',
+      available: true,
+      unexpected: true,
+    },
+  }), false);
+
+  assert.equal(routed.length, 0, 'the invalid request never reaches host routing');
+  assert.equal(socket.sent.length, 2, 'hello plus one terminal rejection');
+  const response = JSON.parse(socket.sent[1] ?? '{}') as Extract<HostToWebviewMessage, { type: 'detailResult' }>;
+  assert.equal(response.type, 'detailResult');
+  assert.equal(response.result.sessionPath, '/sessions/a');
+  assert.equal(response.result.key, 'durable:reasoning:/sessions/a:m:0');
+  assert.equal(response.result.status, 'failure');
 });
 
 test('ingress: the violation rate bound closes the socket with a typed reason', () => {
@@ -211,7 +264,7 @@ test('handshake bound: a socket that never sends a valid message is closed by th
   // A valid inbound message clears the bound.
   const second = createHarness();
   second.transport.start(second.registration.registration);
-  second.socket.emit('message', JSON.stringify({ type: 'ready', viewGeneration: 7 }), false);
+  second.socket.emit('message', JSON.stringify({ type: 'ready', buildId: PIE_BUILD_ID, viewGeneration: 7 }), false);
   for (const timer of second.timers.splice(0)) timer();
   assert.equal(second.closed.length, 0, 'a live socket is never handshake-closed');
 });

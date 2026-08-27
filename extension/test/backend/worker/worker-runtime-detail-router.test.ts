@@ -29,7 +29,7 @@ test('router fences detail generation/path/address/subscription ownership and fo
       if (body.kind === 'sync') return { kind: 'sync.ack', domain: body.domain, revision: body.revision };
       if (body.kind === 'runtime.promote') return { kind: 'runtime.ready', runtimeMetadata: { mode: 'phase4', startedAt: 1 } };
       if (body.kind === 'detail.subscribe') return {
-        kind: 'detail.start', subscriptionId: body.subscriptionId, address, source: 'live', baselineRevision: 1, pageCount: 1, totalBytes: 4,
+        kind: 'detail.start', subscriptionId: body.subscriptionId, address, source: 'live', baselineRevision: 1, pageCount: 1, totalBytes: 4, totalCodePoints: 4,
       };
       if (body.kind === 'detail.unsubscribe') return { kind: 'detail.unsubscribed', subscriptionId: body.subscriptionId };
       throw new Error(`unexpected ${body.kind}`);

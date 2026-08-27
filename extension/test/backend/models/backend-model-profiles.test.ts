@@ -144,7 +144,7 @@ test('session.opened carries whole-session usage even when its transcript payloa
     .reduce((total: number, sample: { reportedCostUsd?: number }) => total + (sample.reportedCostUsd ?? 0), 0);
   assert.ok(Math.abs(reportedCost - 0.61) < 1e-9);
 
-  branch.push({
+  const appendedRows = [{
     type: 'message',
     id: 'user-new',
     timestamp: '2026-01-01T01:59:00.000Z',
@@ -160,7 +160,9 @@ test('session.opened carries whole-session usage even when its transcript payloa
       provider: 'mock',
       usage: { input: 2_000, output: 200, totalTokens: 2_200, cost: { total: 0.02 } },
     },
-  });
+  }];
+  branch.push(...appendedRows);
+  fs.appendFileSync(sessionPath, appendedRows.map((row) => `${JSON.stringify(row)}\n`).join(''));
   const changedPayload = await server.buildSessionOpenedPayload(sessionPath);
   assert.notStrictEqual(changedPayload.sessionUsage, payload.sessionUsage);
   assert.equal(changedPayload.sessionUsage.samples.filter((sample: { kind: string }) => sample.kind === 'assistant').length, 62);

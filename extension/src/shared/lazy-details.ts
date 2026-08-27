@@ -5,6 +5,7 @@ import type {
   ToolCall,
 } from './protocol/messages.js';
 import { deduplicateToolCallResultsForTransport } from './chat-message-parts.js';
+import { getSubagentBillingEntries } from './subagent-result.js';
 
 /** Details larger than this never ride ordinary full-state snapshots. */
 export const LAZY_DETAIL_THRESHOLD_BYTES = 16 * 1024;
@@ -131,6 +132,7 @@ export function compactSubagentResultPreview(value: unknown): unknown {
   const nestedResults = Array.isArray(nestedDetails?.results) ? nestedDetails.results : undefined;
   const source = typedChildren ?? directResults ?? nestedResults;
   if (!source) return undefined;
+  const billing = getSubagentBillingEntries(value);
 
   const children = source
     .map(compactSubagentChild)
@@ -138,10 +140,10 @@ export function compactSubagentResultPreview(value: unknown): unknown {
   if (children.length === 0) return undefined;
 
   const compact = typedChildren
-    ? { kind: 'subagent', mode: value.mode, children }
+    ? { kind: 'subagent', mode: value.mode, children, ...(billing.length > 0 ? { billing } : {}) }
     : directResults
-      ? { mode: value.mode, results: children }
-      : { details: { mode: nestedDetails?.mode, results: children } };
+      ? { mode: value.mode, results: children, ...(billing.length > 0 ? { billing } : {}) }
+      : { details: { mode: nestedDetails?.mode, results: children }, ...(billing.length > 0 ? { billing } : {}) };
   if (jsonBytes(compact) <= SUBAGENT_PREVIEW_MAX_BYTES) return compact;
 
   // Many parallel children can exceed the rich-preview budget even after
@@ -149,6 +151,12 @@ export function compactSubagentResultPreview(value: unknown): unknown {
   // a proportionally-sized task/live tail rather than dropping siblings.
   const perChildChars = Math.max(160, Math.floor(24 * 1024 / children.length));
   const minimalChildren = children.map((child) => ({
+    id: child.id,
+    childId: child.childId,
+    attemptId: child.attemptId,
+    lineage: child.lineage,
+    liveAddressable: child.liveAddressable,
+    detailAddress: child.detailAddress,
     agent: boundedStart(child.agent, 128),
     task: boundedStart(child.task, perChildChars),
     exitCode: child.exitCode,
@@ -166,10 +174,10 @@ export function compactSubagentResultPreview(value: unknown): unknown {
     messages: [],
   }));
   return typedChildren
-    ? { kind: 'subagent', mode: value.mode, children: minimalChildren }
+    ? { kind: 'subagent', mode: value.mode, children: minimalChildren, ...(billing.length > 0 ? { billing } : {}) }
     : directResults
-      ? { mode: value.mode, results: minimalChildren }
-      : { details: { mode: nestedDetails?.mode, results: minimalChildren } };
+      ? { mode: value.mode, results: minimalChildren, ...(billing.length > 0 ? { billing } : {}) }
+      : { details: { mode: nestedDetails?.mode, results: minimalChildren }, ...(billing.length > 0 ? { billing } : {}) };
 }
 
 function shortSummary(value: unknown): string {

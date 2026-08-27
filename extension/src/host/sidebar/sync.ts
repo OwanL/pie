@@ -1,5 +1,5 @@
 import type { HostToWebviewMessage, ViewState } from '../../shared/protocol';
-import { WEBVIEW_PROTOCOL_VERSION } from '../../shared/protocol';
+import { PIE_BUILD_ID, WEBVIEW_PROTOCOL_VERSION } from '../../shared/protocol';
 import { omitRedundantToolCallMirrorForTransport } from '../../shared/chat-message-parts';
 import { transcriptRenderSignature } from '../../shared/transcript-render-signature';
 import { isStreamDiagEnabled } from '../util/stream-telemetry';
@@ -73,6 +73,7 @@ export function buildStateEnvelope(
   const message: Extract<HostToWebviewMessage, { type: 'state' }> = {
     type: 'state',
     protocolVersion: WEBVIEW_PROTOCOL_VERSION,
+    buildId: PIE_BUILD_ID,
     hostInstanceId: syncState.hostInstanceId,
     rendererId: envelopeContext.rendererId,
     rendererGeneration: envelopeContext.rendererGeneration,

@@ -9,7 +9,10 @@ import type {
   LiveSubagentDetailAddress,
 } from '../shared/protocol/subagent-detail.js';
 import type { ColdSessionStore, SerializedColdSessionPromotionGrant } from './cold-session-store';
-import { CoordinatorProviderNetworkLeaseAuthority } from './coordinator-provider-network-lease';
+import {
+  CoordinatorProviderNetworkLeaseAuthority,
+  type CoordinatorProviderNetworkLease,
+} from './coordinator-provider-network-lease';
 import { ExtensionUiOwnerRegistry } from './extension-ui-owner-registry';
 import {
   SessionOwnershipAuthority,
@@ -18,7 +21,8 @@ import {
 } from './session-ownership-authority';
 import type { SdkSessionWriteLease, SdkWorkerOwnershipIdentity } from './sdk';
 import type { SupervisedWorker, WorkerSupervisor } from './worker-supervisor';
-import type { WorkerClientSnapshot } from './worker-client';
+import type { WorkerClientScheduler, WorkerClientSnapshot } from './worker-client';
+import { backendDebug, backendWarn } from './log';
 import { BackendError } from './server-io';
 import type {
   WorkerJsonObject,
@@ -134,6 +138,11 @@ export interface WorkerRuntimeRouterOptions {
   writeModelSettings?(updates: Partial<ModelSettings>): Promise<ModelSettings>;
   readModelSettings?(): Promise<ModelSettings>;
   readRuntimePrefs?(): WorkerJsonObject;
+  /** A sync acknowledgement is a small, priority-path control response. Keep
+   *  it independently bounded from the much larger runtime promotion budget. */
+  syncAckTimeoutMs?: number;
+  runtimeReadyTimeoutMs?: number;
+  scheduler?: WorkerClientScheduler;
   emit(event: string, payload?: unknown): void;
   /** Closed imperative stream; detail pages never enter ViewState. */
   emitDetail?(message: CoordinatorToHostDetailMessage): void;
@@ -147,6 +156,34 @@ class UnconfirmedWorkerExitError extends Error {
     this.name = 'UnconfirmedWorkerExitError';
   }
 }
+
+type SyncDomain = 'settings' | 'catalog' | 'auth' | 'runtimePrefs' | 'providerPolicy';
+
+interface WorkerSyncState {
+  revision: number;
+  /** Exact latest operation, retaining rejection for joiners. */
+  completion: Promise<void>;
+  /** Rejection-neutral sequencing tail so a failed revision cannot poison all
+   *  later authoritative updates for this worker/domain. */
+  tail: Promise<void>;
+}
+
+interface WorkerSyncSettlement {
+  worker: SupervisedWorker;
+  domain: SyncDomain;
+  revision: number;
+  completion: Promise<void>;
+}
+
+const DEFAULT_SYNC_ACK_TIMEOUT_MS = 5_000;
+const DEFAULT_RUNTIME_READY_TIMEOUT_MS = 120_000;
+const SYNC_SLOW_ACK_DIAGNOSTIC_MS = 250;
+
+const defaultRouterScheduler: WorkerClientScheduler = {
+  now: () => Date.now(),
+  setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
+  clearTimeout: (timer) => clearTimeout(timer),
+};
 
 const HOT_OPERATIONS: ReadonlySet<string> = new Set<WorkerRuntimeOperation>([
   'session.open',
@@ -172,11 +209,16 @@ export class WorkerRuntimeRouter {
   private readonly currentPaths = new Map<string, HotWorkerRoute>();
   private readonly workersById = new Map<string, HotWorkerRoute>();
   private readonly providerLeases: CoordinatorProviderNetworkLeaseAuthority;
-  private readonly syncRevisions: Record<'settings' | 'catalog' | 'auth' | 'runtimePrefs' | 'providerPolicy', number> = {
+  private readonly syncRevisions: Record<SyncDomain, number> = {
     settings: 1, catalog: 1, auth: 1, runtimePrefs: 1, providerPolicy: 1,
   };
-  private readonly workerSyncRevisions = new WeakMap<SupervisedWorker, Partial<Record<'settings' | 'catalog' | 'auth' | 'runtimePrefs' | 'providerPolicy', number>>>();
+  private readonly syncPayloads: Partial<Record<SyncDomain, WorkerJsonObject>> = {};
+  private readonly workerSyncRevisions = new WeakMap<SupervisedWorker, Partial<Record<SyncDomain, number>>>();
+  private readonly workerSyncStates = new WeakMap<SupervisedWorker, Partial<Record<SyncDomain, WorkerSyncState>>>();
   private syncTail = Promise.resolve();
+  private readonly scheduler: WorkerClientScheduler;
+  private readonly syncAckTimeoutMs: number;
+  private readonly runtimeReadyTimeoutMs: number;
   private providerPolicy: WorkerJsonObject = {};
   private disposed = false;
   private readonly detailSubscriptions = new Map<string, DetailSubscriptionOwner>();
@@ -189,11 +231,21 @@ export class WorkerRuntimeRouter {
   private readonly publicBusySeqByPath = new Map<string, number>();
   /** Bounded per-worker runtime discovery reports; never replaces the configured catalog authority. */
   private readonly reportedRuntimeCatalogs = new Map<string, { reportedAt: number; models: unknown[] }>();
+  private readonly pendingProviderAcquires = new Map<string, HotWorkerRoute>();
   private authPath?: string;
   private authFingerprint?: string;
 
   constructor(private readonly options: WorkerRuntimeRouterOptions) {
     this.providerLeases = options.providerLeases ?? new CoordinatorProviderNetworkLeaseAuthority();
+    this.scheduler = options.scheduler ?? defaultRouterScheduler;
+    this.syncAckTimeoutMs = options.syncAckTimeoutMs ?? DEFAULT_SYNC_ACK_TIMEOUT_MS;
+    this.runtimeReadyTimeoutMs = options.runtimeReadyTimeoutMs ?? DEFAULT_RUNTIME_READY_TIMEOUT_MS;
+    if (!Number.isSafeInteger(this.syncAckTimeoutMs) || this.syncAckTimeoutMs <= 0) {
+      throw new Error('syncAckTimeoutMs must be a positive safe integer.');
+    }
+    if (!Number.isSafeInteger(this.runtimeReadyTimeoutMs) || this.runtimeReadyTimeoutMs <= 0) {
+      throw new Error('runtimeReadyTimeoutMs must be a positive safe integer.');
+    }
   }
 
   static isHotOperation(method: string): method is WorkerRuntimeOperation {
@@ -244,7 +296,7 @@ export class WorkerRuntimeRouter {
       this.forwardDetail(route, {
         kind: 'detail.start', subscriptionId: message.subscriptionId, address: cloneDetailAddress(start.address),
         source: start.source, baselineRevision: start.baselineRevision, pageCount: start.pageCount,
-        totalBytes: start.totalBytes, fence: this.detailFence(route),
+        totalBytes: start.totalBytes, totalCodePoints: start.totalCodePoints, fence: this.detailFence(route),
       });
     } catch (error) {
       this.detailSubscriptions.delete(message.subscriptionId);
@@ -426,6 +478,7 @@ export class WorkerRuntimeRouter {
         transition.retireStarted = true;
         await this.options.supervisor.stopWorker(route.currentLeasePath, reason);
         this.extensionUiOwners.clearWorker(route.owner.workerId, route.owner.workerGeneration);
+        this.clearPendingProviderAcquires(route);
         this.providerLeases.releaseOwner(route.owner, reason);
         await this.options.ownership.reconcileCrash({ owner: route.owner, processDeathConfirmed: true });
         this.currentPaths.delete(routeKey(route.currentLeasePath));
@@ -490,6 +543,7 @@ export class WorkerRuntimeRouter {
       // Keep an active response body fenced until process-tree death is
       // confirmed. Releasing before stop could overlap it with the next worker.
       this.extensionUiOwners.clearWorker(route.owner.workerId, route.owner.workerGeneration);
+      this.clearPendingProviderAcquires(route);
       this.providerLeases.releaseOwner(route.owner, reason);
       await this.options.ownership.reconcileCrash({ owner: route.owner, processDeathConfirmed: true });
       this.currentPaths.delete(routeKey(route.currentLeasePath));
@@ -541,30 +595,7 @@ export class WorkerRuntimeRouter {
     if (!this.authPath) return { bumped: false, retiredWorkers: 0 };
     if (fingerprint === this.authFingerprint) return { bumped: false, retiredWorkers: 0 };
     this.authFingerprint = fingerprint;
-    let retiredWorkers = 0;
-    await this.withSyncLock(async () => {
-      const revision = this.syncRevisions.auth + 1;
-      this.syncRevisions.auth = revision;
-      const payload = { authPath: this.authPath!, fingerprint };
-      const workers = this.options.supervisor.listWorkers();
-      await Promise.all(workers.map(async (worker) => {
-        const known = this.workerSyncRevisions.get(worker)?.auth ?? 0;
-        if (known >= revision) return;
-        try {
-          const response = await worker.client.requestFrame!({ kind: 'sync', domain: 'auth', revision, payload } as never, 'sync.ack');
-          if (response.domain !== 'auth' || response.revision !== revision) {
-            throw new Error(`Worker sync acknowledgement mismatch for auth.`);
-          }
-          const revisions = this.workerSyncRevisions.get(worker) ?? {};
-          revisions.auth = revision;
-          this.workerSyncRevisions.set(worker, revisions);
-        } catch (error) {
-          retiredWorkers += 1;
-          void this.retire(worker.sessionPath, `auth refresh could not be acknowledged: ${error instanceof Error ? error.message : String(error)}`)
-            .catch(() => undefined);
-        }
-      }));
-    });
+    const retiredWorkers = await this.broadcastSync('auth', { authPath: this.authPath, fingerprint });
     return { bumped: true, retiredWorkers };
   }
 
@@ -592,6 +623,7 @@ export class WorkerRuntimeRouter {
     const crashCheckpoint = this.checkpointManifest(route);
     this.invalidateDetailSubscriptions(route, 'generation-change');
     this.extensionUiOwners.clearWorker(route.owner.workerId, route.owner.workerGeneration);
+    this.clearPendingProviderAcquires(route);
     this.providerLeases.releaseOwner(route.owner, 'Worker crashed.');
     await this.options.supervisor.stopWorker(route.currentLeasePath, 'confirmed worker exit').catch(() => undefined);
     await this.options.ownership.reconcileCrash({ owner: route.owner, processDeathConfirmed: true });
@@ -759,27 +791,37 @@ export class WorkerRuntimeRouter {
       return;
     }
     if (frame.kind === 'provider.acquire') {
+      const acquireKey = this.providerAcquireKey(route, frame.requestId);
+      if (this.pendingProviderAcquires.has(acquireKey)) {
+        const reason = 'Duplicate provider admission request.';
+        // Cancel the original authority waiter as well as settling its worker
+        // correlation. Otherwise the original queued acquire could later win
+        // capacity and deliver a second terminal frame for the same requestId.
+        this.providerLeases.cancel(route.owner, frame.requestId, reason);
+        this.settleProviderAcquire(route, frame.requestId, {
+          reason,
+        });
+        return;
+      }
+      this.pendingProviderAcquires.set(acquireKey, route);
       try {
         const lease = await this.providerLeases.acquire(route.owner, frame.requestId, frame.request);
         if (!this.isCurrentOrPromoting(route) || !this.providerLeases.isActive(route.owner, frame.requestId, lease.leaseId)) {
           this.providerLeases.release(route.owner, lease.leaseId, 'cancelled');
+          this.settleProviderAcquire(route, frame.requestId, {
+            reason: 'Provider admission owner changed before the grant was delivered.',
+          });
           return;
         }
-        const sent = route.worker.client.sendFrame?.({ kind: 'provider.granted', requestId: frame.requestId, lease }) === true;
+        const sent = this.settleProviderAcquire(route, frame.requestId, { lease });
         if (!sent || !this.providerLeases.markDelivered(route.owner, frame.requestId, lease.leaseId)) {
           this.providerLeases.release(route.owner, lease.leaseId, 'cancelled');
         }
       } catch (error) {
-        // Admission rejection must settle the exact acquire (notably an open
-        // global circuit). A correlated cancellation (AbortError) is already
-        // settled by the provider.cancel handler's own provider.cancelled
-        // frame when the acquire was queued, or is unnecessary because the
-        // owner is being retired; re-sending here would fatal the worker on
-        // an unknown requestId.
-        if (error instanceof Error && error.name === 'AbortError') return;
-        route.worker.client.sendFrame?.({
-          kind: 'provider.cancelled',
-          requestId: frame.requestId,
+        // `settleProviderAcquire` is an exact-once guard shared with the
+        // provider.cancel handler. AbortError may have been settled there; an
+        // owner-release AbortError still needs this correlated cancellation.
+        this.settleProviderAcquire(route, frame.requestId, {
           reason: error instanceof Error ? error.message : String(error),
         });
       }
@@ -788,11 +830,7 @@ export class WorkerRuntimeRouter {
     if (frame.kind === 'provider.cancel') {
       const cancellation = this.providerLeases.cancel(route.owner, frame.targetRequestId, frame.reason);
       if (cancellation.notifyAcquire) {
-        route.worker.client.sendFrame?.({
-          kind: 'provider.cancelled',
-          requestId: frame.targetRequestId,
-          reason: frame.reason,
-        });
+        this.settleProviderAcquire(route, frame.targetRequestId, { reason: frame.reason });
       }
       route.worker.client.sendFrame?.({
         kind: 'provider.cancelAck',
@@ -815,22 +853,25 @@ export class WorkerRuntimeRouter {
     if (frame.kind === 'settings.mutate') {
       try {
         if (!this.options.writeModelSettings) throw new Error('Coordinator settings authority is unavailable.');
-        // The whole persist+revision+broadcast sequence is one sync-locked
-        // unit so two concurrent mutations can never produce the same
-        // revision for different persisted values (which would let the second
-        // broadcast skip workers that already acked the first).
-        await this.withSyncLock(async () => {
+        // Persist + revision allocation + enqueue stay one short sync-locked
+        // unit, but acknowledgements run outside it on per-worker/domain tails.
+        // That preserves monotonic writes without letting one wedged worker
+        // block unrelated startup synchronization.
+        const settlements = await this.withSyncLock(async () => {
           const values = await this.options.writeModelSettings!(frame.updates as unknown as Partial<ModelSettings>);
           const revision = this.syncRevisions.settings + 1;
           this.syncRevisions.settings = revision;
+          const payload = { values: asWorkerJsonObject(values) };
+          this.syncPayloads.settings = payload;
           route.worker.client.sendFrame?.({
             kind: 'settings.authoritative',
             requestId: frame.requestId,
             revision,
             values: asWorkerJsonObject(values),
           });
-          await this.broadcastSyncLocked('settings', { values: asWorkerJsonObject(values) }, revision);
+          return this.scheduleBroadcastLocked('settings', payload, revision, 'broadcast');
         });
+        await this.settleBroadcastSync(settlements);
       } catch (error) {
         await this.failWorkerRoute(route, error);
       }
@@ -969,21 +1010,25 @@ export class WorkerRuntimeRouter {
       // the process before runtime.ready.
       this.currentPaths.set(routeKey(route.currentLeasePath), route);
       this.workersById.set(route.owner.workerId, route);
-      await worker.client.requestFrame!({
-        kind: 'runtime.promote',
-        operationId: grant.grantId,
-        payload: asWorkerJsonObject({
-          sdkPath: snapshot.sdkPath,
-          agentDir: snapshot.agentDir,
-          startupCwd: snapshot.startupCwd,
-          sessionDir: snapshot.sessionDir,
-          sessionPath: exactSessionPath,
-          creationReason: grant.creationReason,
-          writeLease: lease,
-          openedPayload: snapshot.openedPayload,
-          modelSettings: snapshot.modelSettings,
-        }),
-      }, 'runtime.ready');
+      await this.withDeadline(
+        worker.client.requestFrame!({
+          kind: 'runtime.promote',
+          operationId: grant.grantId,
+          payload: asWorkerJsonObject({
+            sdkPath: snapshot.sdkPath,
+            agentDir: snapshot.agentDir,
+            startupCwd: snapshot.startupCwd,
+            sessionDir: snapshot.sessionDir,
+            sessionPath: exactSessionPath,
+            creationReason: grant.creationReason,
+            writeLease: lease,
+            openedPayload: snapshot.openedPayload,
+            modelSettings: snapshot.modelSettings,
+          }),
+        }, 'runtime.ready'),
+        this.runtimeReadyTimeoutMs,
+        `Worker ${worker.workerId} did not become runtime-ready`,
+      );
       this.options.coldStore.consumePromotionGrant(grant);
       snapshot.commitPromotion?.();
       this.roots.set(routeKey(route.rootSessionPath), route);
@@ -1006,6 +1051,7 @@ export class WorkerRuntimeRouter {
       }
       const failedRoute = owner ? this.workersById.get(owner.workerId) : undefined;
       if (failedRoute) {
+        this.clearPendingProviderAcquires(failedRoute);
         this.roots.delete(routeKey(failedRoute.rootSessionPath));
         this.currentPaths.delete(routeKey(failedRoute.currentLeasePath));
         this.workersById.delete(failedRoute.owner.workerId);
@@ -1016,67 +1062,216 @@ export class WorkerRuntimeRouter {
   }
 
   private async broadcastSync(
-    domain: 'settings' | 'catalog' | 'auth' | 'runtimePrefs' | 'providerPolicy',
+    domain: SyncDomain,
     payload: WorkerJsonObject,
-    fixedRevision?: number,
-  ): Promise<void> {
-    await this.withSyncLock(() => this.broadcastSyncLocked(domain, payload, fixedRevision));
+  ): Promise<number> {
+    const settlements = await this.withSyncLock(async () => {
+      const revision = this.syncRevisions[domain] + 1;
+      this.syncRevisions[domain] = revision;
+      this.syncPayloads[domain] = payload;
+      return this.scheduleBroadcastLocked(domain, payload, revision, 'broadcast');
+    });
+    return await this.settleBroadcastSync(settlements);
   }
 
-  private async broadcastSyncLocked(
-    domain: 'settings' | 'catalog' | 'auth' | 'runtimePrefs' | 'providerPolicy',
+  /** Called only while revision allocation is locked. Queueing is synchronous:
+   *  each worker/domain tail captures revision order before the lock is
+   *  released, while the actual acknowledgement waits independently. */
+  private scheduleBroadcastLocked(
+    domain: SyncDomain,
     payload: WorkerJsonObject,
-    fixedRevision?: number,
-  ): Promise<void> {
-    const revision = fixedRevision ?? this.syncRevisions[domain] + 1;
-    this.syncRevisions[domain] = revision;
-    const workers = this.options.supervisor.listWorkers();
-    await Promise.all(workers.map(async (worker) => {
-      const known = this.workerSyncRevisions.get(worker)?.[domain] ?? 0;
-      if (known >= revision) return;
-      const response = await worker.client.requestFrame!(
-        { kind: 'sync', domain, revision, payload } as never,
-        'sync.ack',
-      );
-      if (response.domain !== domain || response.revision !== revision) {
-        throw new Error(`Worker sync acknowledgement mismatch for ${domain}.`);
-      }
-      const revisions = this.workerSyncRevisions.get(worker) ?? {};
-      revisions[domain] = revision;
-      this.workerSyncRevisions.set(worker, revisions);
+    revision: number,
+    phase: 'broadcast' | 'startup',
+  ): WorkerSyncSettlement[] {
+    return this.options.supervisor.listWorkers().map((worker) => ({
+      worker,
+      domain,
+      revision,
+      completion: this.queueWorkerSync(worker, domain, revision, payload, phase),
     }));
   }
 
   private async syncStartup(worker: SupervisedWorker, snapshot: WorkerRuntimePromotionSnapshot): Promise<void> {
-    await this.withSyncLock(async () => {
-      const currentSettings = this.options.readModelSettings
-        ? await this.options.readModelSettings()
-        : snapshot.modelSettings;
-      const currentRuntimePrefs = this.options.readRuntimePrefs?.() ?? snapshot.runtimePrefs ?? {};
-      this.authPath ??= snapshot.authPath ?? path.join(snapshot.agentDir, 'auth.json');
-      this.authFingerprint ??= snapshot.authFingerprint ?? 'startup-unavailable';
-      const syncs = [
-        { domain: 'settings' as const, revision: this.syncRevisions.settings, payload: { values: asWorkerJsonObject(currentSettings) } },
-        { domain: 'catalog' as const, revision: this.syncRevisions.catalog, payload: { models: (snapshot.openedPayload.availableModels ?? []) as unknown as WorkerJsonValue[] } },
-        { domain: 'auth' as const, revision: this.syncRevisions.auth, payload: {
+    // Reads that may touch disk happen outside the revision lock. Once inside,
+    // initialize only missing payloads and enqueue the current revisions on
+    // this worker's private sync chains. A concurrent later broadcast queues
+    // behind the matching per-domain chain, never behind another worker.
+    const currentSettings = this.options.readModelSettings
+      ? await this.options.readModelSettings()
+      : snapshot.modelSettings;
+    const currentRuntimePrefs = this.options.readRuntimePrefs?.() ?? snapshot.runtimePrefs ?? {};
+
+    while (true) {
+      const settlements = await this.withSyncLock(async () => {
+        this.authPath ??= snapshot.authPath ?? path.join(snapshot.agentDir, 'auth.json');
+        this.authFingerprint ??= snapshot.authFingerprint ?? 'startup-unavailable';
+        this.syncPayloads.settings ??= { values: asWorkerJsonObject(currentSettings) };
+        this.syncPayloads.catalog ??= {
+          models: (snapshot.openedPayload.availableModels ?? []) as unknown as WorkerJsonValue[],
+        };
+        this.syncPayloads.auth ??= {
           authPath: this.authPath ?? snapshot.authPath ?? path.join(snapshot.agentDir, 'auth.json'),
           fingerprint: snapshot.authFingerprint ?? this.authFingerprint ?? 'startup-unavailable',
-        } },
-        { domain: 'runtimePrefs' as const, revision: this.syncRevisions.runtimePrefs, payload: { values: currentRuntimePrefs } },
-        { domain: 'providerPolicy' as const, revision: this.syncRevisions.providerPolicy, payload: {
+        };
+        this.syncPayloads.runtimePrefs ??= { values: currentRuntimePrefs };
+        this.syncPayloads.providerPolicy ??= {
           providers: Object.keys(this.providerPolicy).length > 0 ? this.providerPolicy : snapshot.providerPolicy ?? {},
-        } },
-      ];
-      const revisions = this.workerSyncRevisions.get(worker) ?? {};
-      for (const sync of syncs) {
-        if ((revisions[sync.domain] ?? 0) >= sync.revision) continue;
-        const response = await worker.client.requestFrame!({ kind: 'sync', ...sync }, 'sync.ack');
-        if (response.domain !== sync.domain || response.revision !== sync.revision) {
-          throw new Error(`Worker sync acknowledgement mismatch for ${sync.domain}.`);
-        }
-        revisions[sync.domain] = sync.revision;
+        };
+
+        return (Object.keys(this.syncRevisions) as SyncDomain[]).map((domain) => {
+          const revision = this.syncRevisions[domain];
+          const payload = this.syncPayloads[domain]!;
+          return {
+            worker,
+            domain,
+            revision,
+            completion: this.queueWorkerSync(worker, domain, revision, payload, 'startup'),
+          };
+        });
+      });
+
+      const results = await Promise.allSettled(settlements.map((settlement) => settlement.completion));
+      const failedIndex = results.findIndex((result) => result.status === 'rejected');
+      if (failedIndex >= 0) {
+        const failed = settlements[failedIndex]!;
+        const result = results[failedIndex] as PromiseRejectedResult;
+        throw new Error(
+          `Worker startup sync ${failed.domain}@${failed.revision} failed for ${failed.worker.workerId}: ${toErrorMessage(result.reason)}`,
+        );
       }
-      this.workerSyncRevisions.set(worker, revisions);
+
+      const caughtUp = await this.withSyncLock(async () => {
+        const revisions = this.workerSyncRevisions.get(worker) ?? {};
+        return (Object.keys(this.syncRevisions) as SyncDomain[])
+          .every((domain) => (revisions[domain] ?? 0) >= this.syncRevisions[domain]);
+      });
+      if (caughtUp) return;
+    }
+  }
+
+  private queueWorkerSync(
+    worker: SupervisedWorker,
+    domain: SyncDomain,
+    revision: number,
+    payload: WorkerJsonObject,
+    phase: 'broadcast' | 'startup',
+  ): Promise<void> {
+    const revisions = this.workerSyncRevisions.get(worker) ?? {};
+    if ((revisions[domain] ?? 0) >= revision) return Promise.resolve();
+
+    const states = this.workerSyncStates.get(worker) ?? {};
+    const scheduled = states[domain];
+    if (scheduled && scheduled.revision >= revision) return scheduled.completion;
+
+    const previous = scheduled?.tail ?? Promise.resolve();
+    const completion = previous.then(async () => {
+      const latest = this.workerSyncRevisions.get(worker) ?? {};
+      if ((latest[domain] ?? 0) >= revision) return;
+      const startedAt = this.scheduler.now();
+      try {
+        const response = await this.withDeadline(
+          worker.client.requestFrame!({ kind: 'sync', domain, revision, payload } as never, 'sync.ack'),
+          this.syncAckTimeoutMs,
+          `Worker ${worker.workerId} did not acknowledge ${domain}@${revision}`,
+        );
+        if (response.domain !== domain || response.revision !== revision) {
+          throw new Error(`Worker sync acknowledgement mismatch for ${domain}.`);
+        }
+        const acknowledged = this.workerSyncRevisions.get(worker) ?? {};
+        acknowledged[domain] = Math.max(acknowledged[domain] ?? 0, revision);
+        this.workerSyncRevisions.set(worker, acknowledged);
+        const durationMs = Math.max(0, this.scheduler.now() - startedAt);
+        if (durationMs >= SYNC_SLOW_ACK_DIAGNOSTIC_MS) {
+          backendDebug('backend-worker-sync', 'sync.slow-ack', {
+            phase, domain, revision,
+            workerId: worker.workerId,
+            workerGeneration: worker.workerGeneration,
+            sessionPath: worker.sessionPath,
+            durationMs,
+          });
+        }
+      } catch (error) {
+        backendWarn('backend-worker-sync', 'sync.failed', {
+          phase, domain, revision,
+          workerId: worker.workerId,
+          workerGeneration: worker.workerGeneration,
+          sessionPath: worker.sessionPath,
+          durationMs: Math.max(0, this.scheduler.now() - startedAt),
+          error: toErrorMessage(error),
+        });
+        throw error;
+      }
+    });
+    const state: WorkerSyncState = {
+      revision,
+      completion,
+      tail: completion.then(() => undefined, () => undefined),
+    };
+    states[domain] = state;
+    this.workerSyncStates.set(worker, states);
+    return completion;
+  }
+
+  private async settleBroadcastSync(settlements: WorkerSyncSettlement[]): Promise<number> {
+    const results = await Promise.allSettled(settlements.map((settlement) => settlement.completion));
+    const failures = settlements.filter((_settlement, index) => results[index]?.status === 'rejected');
+    await Promise.all(failures.map(async (failure) => {
+      const index = settlements.indexOf(failure);
+      const result = results[index] as PromiseRejectedResult;
+      await this.quarantineSyncFailure(failure, result.reason);
+    }));
+    return failures.length;
+  }
+
+  private async quarantineSyncFailure(settlement: WorkerSyncSettlement, error: unknown): Promise<void> {
+    const { worker, domain, revision } = settlement;
+    const reason = `Worker ${domain}@${revision} sync failed: ${toErrorMessage(error)}`;
+    const route = this.workersById.get(worker.workerId);
+    this.options.emit('operational-error', {
+      incidentId: `worker-sync:${worker.workerId}:${worker.workerGeneration}:${domain}:${revision}`,
+      code: 'SESSION_WORKER_SYNC_FAILED',
+      message: 'A session worker stopped acknowledging coordinator state and was retired.',
+      sessionPath: route?.currentLeasePath ?? worker.sessionPath,
+      detail: reason,
+      domain,
+      revision,
+      workerId: worker.workerId,
+      workerGeneration: worker.workerGeneration,
+    });
+    if (route && this.isCurrent(route)) {
+      await this.retire(route.currentLeasePath, reason);
+      return;
+    }
+    // A not-yet-public promotion (including a replacement beneath a
+    // transitioning root) is owned by promoteOnce's catch/finalization. Stop
+    // its exact process here; that promotion then aborts its grant and
+    // reconciles ownership without publishing the failed generation.
+    await this.options.supervisor.stopWorker(worker.sessionPath, reason);
+  }
+
+  private async withDeadline<T>(operation: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+    return await new Promise<T>((resolve, reject) => {
+      let settled = false;
+      const timer = this.scheduler.setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        reject(new Error(`${message} within ${timeoutMs} ms.`));
+      }, timeoutMs);
+      timer.unref?.();
+      void operation.then(
+        (value) => {
+          if (settled) return;
+          settled = true;
+          this.scheduler.clearTimeout(timer);
+          resolve(value);
+        },
+        (error) => {
+          if (settled) return;
+          settled = true;
+          this.scheduler.clearTimeout(timer);
+          reject(error);
+        },
+      );
     });
   }
 
@@ -1121,8 +1316,59 @@ export class WorkerRuntimeRouter {
     if (this.workersById.get(route.owner.workerId) !== route) return false;
     const root = this.roots.get(routeKey(route.rootSessionPath));
     if (root === route) return true;
-    return root?.state === 'promoting'
+    if (root?.state === 'promoting') {
+      return routeKey(root.rootSessionPath) === routeKey(route.rootSessionPath);
+    }
+    // A hot truncate keeps the public root in `transitioning` while its old
+    // generation is retired and `promoteOnce` installs the replacement only in
+    // currentPaths/workersById. That replacement is the legitimate sole owner
+    // once retirement is confirmed; provider work issued by runtime startup
+    // must receive a correlated answer just as it does under a normal
+    // `promoting` placeholder.
+    return root?.state === 'transitioning'
+      && root.retired
+      && root.source !== route
       && routeKey(root.rootSessionPath) === routeKey(route.rootSessionPath);
+  }
+
+  private providerAcquireKey(route: HotWorkerRoute, requestId: string): string {
+    return `${route.owner.coordinatorGeneration}:${route.owner.workerId}:${route.owner.workerGeneration}:${requestId}`;
+  }
+
+  /** Settle one worker-originated provider.acquire exactly once. Cancellation
+   *  and admission completion race on separate frame handlers; sharing this
+   *  coordinator-owned pending map prevents both a dropped response and a
+   *  duplicate response that would fatal the worker's correlation table. */
+  private settleProviderAcquire(
+    route: HotWorkerRoute,
+    requestId: string,
+    result: { lease: CoordinatorProviderNetworkLease } | { reason: string },
+  ): boolean {
+    const key = this.providerAcquireKey(route, requestId);
+    if (this.pendingProviderAcquires.get(key) !== route) return false;
+    this.pendingProviderAcquires.delete(key);
+    try {
+      return route.worker.client.sendFrame?.('lease' in result
+        ? { kind: 'provider.granted', requestId, lease: result.lease }
+        : { kind: 'provider.cancelled', requestId, reason: result.reason }) === true;
+    } catch (error) {
+      backendWarn('backend-worker-provider', 'provider.settlement-send-failed', {
+        requestId,
+        workerId: route.owner.workerId,
+        workerGeneration: route.owner.workerGeneration,
+        sessionPath: route.currentLeasePath,
+        settlement: 'lease' in result ? 'granted' : 'cancelled',
+        error: toErrorMessage(error),
+      });
+      return false;
+    }
+  }
+
+  private clearPendingProviderAcquires(route: HotWorkerRoute): void {
+    const prefix = `${route.owner.coordinatorGeneration}:${route.owner.workerId}:${route.owner.workerGeneration}:`;
+    for (const key of [...this.pendingProviderAcquires.keys()]) {
+      if (key.startsWith(prefix)) this.pendingProviderAcquires.delete(key);
+    }
   }
 
   private observeCheckpoint(route: HotWorkerRoute, event: string, payload: WorkerJsonObject): void {
@@ -1426,6 +1672,10 @@ function asWorkerJsonObject(value: unknown): WorkerJsonObject {
   const normalized = JSON.parse(JSON.stringify(value)) as WorkerJsonValue;
   if (!normalized || typeof normalized !== 'object' || Array.isArray(normalized)) throw new Error('Worker command payload must be a JSON object.');
   return normalized as WorkerJsonObject;
+}
+
+function toErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 export function assertPromotionGrantConsumedOnce(

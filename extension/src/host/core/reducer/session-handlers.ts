@@ -104,6 +104,7 @@ export function handleSessionListChanged(state: ArchState, event: Extract<Event,
       sessions: {
         ...state.sessions,
         sessions: [...mergedByPath.values()],
+        sessionCatalogProgress: event.sessionCatalogProgress ?? state.sessions.sessionCatalogProgress,
       },
     },
     effects: [],
@@ -253,6 +254,20 @@ export function handleSessionOpened(state: ArchState, event: Extract<Event, { ki
     delete nextDeferredWindowReplacements[sessionPath];
   }
 
+  const coldPromptDisabledIds = payload.systemPromptDisabledEntries !== undefined
+    ? new Set(payload.systemPromptDisabledEntries)
+    : undefined;
+  const reconciledSystemPrompts = payload.systemPrompts ?? (
+    coldPromptDisabledIds
+      ? (next.transcript.systemPromptsBySession[sessionPath] ?? []).map((entry) => ({
+          ...entry,
+          disabled: entry.toggleable !== false
+            && entry.id !== undefined
+            && coldPromptDisabledIds.has(entry.id),
+        }))
+      : undefined
+  );
+
   next = {
     ...next,
     sessions: {
@@ -312,10 +327,10 @@ export function handleSessionOpened(state: ArchState, event: Extract<Event, { ki
           [sessionPath]: payload.sessionUsage,
         },
       }),
-      ...(payload.systemPrompts && {
+      ...(reconciledSystemPrompts !== undefined && {
         systemPromptsBySession: {
           ...next.transcript.systemPromptsBySession,
-          [sessionPath]: payload.systemPrompts,
+          [sessionPath]: reconciledSystemPrompts,
         },
       }),
     },
@@ -976,6 +991,9 @@ export function handleSessionSummariesReplaced(state: ArchState, event: Extract<
         ? draft.sessions.sessions.find((session) => session.path === draft.sessions.activeSessionPath)
         : undefined;
       draft.sessions.sessions = [...mergedByPath.values()];
+      if (event.sessionCatalogProgress) {
+        draft.sessions.sessionCatalogProgress = event.sessionCatalogProgress;
+      }
       if (activeSession && !mergedByPath.has(activeSession.path) && draft.sessions.openTabPaths.includes(activeSession.path)) {
         draft.sessions.sessions.push(activeSession);
       }

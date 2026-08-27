@@ -33,7 +33,7 @@ test('public detail protocol accepts subscribe/unsubscribe/fetch and exactly six
     { kind: 'detail.fetch', requestId: 'request-3', subscriptionId: 'subscription-1', address, ref: { baselineRevision: 1, pageIndex: 0, pageCount: 1 }, maxPageBytes: 4096 },
   ];
   const outbound = [
-    { kind: 'detail.start', subscriptionId: 'subscription-1', address, source: 'live', baselineRevision: 1, pageCount: 1, totalBytes: 4, fence },
+    { kind: 'detail.start', subscriptionId: 'subscription-1', address, source: 'live', baselineRevision: 1, pageCount: 1, totalBytes: 4, totalCodePoints: 4, fence },
     { kind: 'detail.page', subscriptionId: 'subscription-1', ref: { baselineRevision: 1, pageIndex: 0, pageCount: 1 }, payload, payloadBytes: Buffer.byteLength(JSON.stringify(payload)), checksum, fence },
     { kind: 'detail.delta', subscriptionId: 'subscription-1', baseRevision: 1, revision: 2, operations: [{ op: 'appendString', path: ['text'], value: 'x' }], fence },
     { kind: 'detail.rebase', subscriptionId: 'subscription-1', currentRevision: 3, reason: 'gap', fence },

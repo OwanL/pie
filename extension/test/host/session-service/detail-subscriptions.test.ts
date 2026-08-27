@@ -5,6 +5,7 @@ import test from 'node:test';
 import {
   DetailSubscriptionService,
   DETAIL_SUBSCRIPTION_MAX_ACTIVE,
+  DETAIL_TOMBSTONE_MAX,
   DETAIL_TOMBSTONE_TTL_MS,
 } from '../../../src/host/session-service/detail-subscriptions';
 import type {
@@ -66,7 +67,7 @@ function pageMessage(subscriptionId: string, pageIndex: number, pageCount: numbe
 function startMessage(subscriptionId: string, overrides: Partial<Extract<CoordinatorToHostDetailMessage, { kind: 'detail.start' }>> = {}): CoordinatorToHostDetailMessage {
   return {
     kind: 'detail.start', subscriptionId, address: address(), source: 'live',
-    baselineRevision: 1, pageCount: 1, totalBytes: 4, fence: fence(),
+    baselineRevision: 1, pageCount: 1, totalBytes: 4, totalCodePoints: 4, fence: fence(),
     ...overrides,
   };
 }
@@ -86,6 +87,7 @@ interface Harness {
 
 function createHarness(overrides: {
   subscribeFailure?: Error;
+  requestImpl?: (method: string, params?: unknown) => Promise<unknown>;
 } = {}): Harness {
   let now = 0;
   let viewGeneration = 3;
@@ -96,6 +98,7 @@ function createHarness(overrides: {
     request: async (method: string, params?: unknown) => {
       requests.push({ method, params });
       if (method === 'detail.subscribe' && overrides.subscribeFailure) throw overrides.subscribeFailure;
+      if (overrides.requestImpl) return overrides.requestImpl(method, params);
       return { accepted: true };
     },
   };
@@ -180,30 +183,100 @@ test('subscribe records the exact owner and forwards a fence-matched live stream
   assert.equal(posted.length, 4);
 });
 
-test('subscribe is idempotent for the same owner and replaces a stale owner', async () => {
-  const { service, requests } = createHarness();
-  service.subscribe('subscription-1', 3, KEY, address());
+test('subscribe is idempotent for the exact owner and replaces a fresh owner attempt', async () => {
+  const { service, requests, posted } = createHarness();
+  service.subscribe('subscription-1', 3, KEY, address(), undefined, undefined, undefined, 1);
   await tick();
-  service.subscribe('subscription-2', 3, KEY, address());
+  service.subscribe('subscription-1', 3, KEY, address(), undefined, undefined, undefined, 1);
   await tick();
   assert.deepEqual(requests.map((request) => request.method), ['detail.subscribe']);
-  assert.equal(requests.length, 1, 'a duplicate subscribe for the same owner is a no-op');
+  assert.equal(requests.length, 1, 're-delivery of the exact subscription owner is a no-op');
 
   service.handleStream(startMessage('subscription-1'));
-  // A different address for the same key replaces the owner and actively
-  // releases the old worker slot before opening the new one.
-  service.subscribe('subscription-2', 3, KEY, address({ rootAttemptId: 'new-attempt' }));
+  // A larger renderer-minted attempt replaces the owner even when the key and
+  // address are unchanged (for example after a client-side gap rebase).
+  service.subscribe('subscription-2', 3, KEY, address(), undefined, undefined, undefined, 2);
   await tick();
-  assert.equal(requests.length, 3);
   assert.deepEqual(requests.slice(1).map((request) => request.method), [
     'detail.unsubscribe',
     'detail.subscribe',
   ]);
   assert.deepEqual(requests[1]?.params, { subscriptionId: 'subscription-1', reason: 'rebase' });
   assert.equal((requests[2]?.params as { subscriptionId: string }).subscriptionId, 'subscription-2');
-  // The old owner's stream is dead.
+
+  // The old stream is dead and the replacement can bind normally.
+  const before = posted.length;
   service.handleStream(startMessage('subscription-1'));
-  assert.equal((requests[0]?.params as { subscriptionId: string }).subscriptionId, 'subscription-1');
+  assert.equal(posted.length, before);
+  service.handleStream(startMessage('subscription-2'));
+  assert.equal(posted.at(-1)?.type, 'detail.start');
+  assert.equal((posted.at(-1) as { subscriptionId?: string }).subscriptionId, 'subscription-2');
+});
+
+test('replacement waits for backend unsubscribe before claiming the released slot', async () => {
+  let releaseUnsubscribe!: () => void;
+  const unsubscribeBarrier = new Promise<void>((resolve) => { releaseUnsubscribe = resolve; });
+  const { service, requests } = createHarness({
+    requestImpl: async (method) => {
+      if (method === 'detail.unsubscribe') await unsubscribeBarrier;
+      return { accepted: true };
+    },
+  });
+  service.subscribe('subscription-old', 3, KEY, address(), undefined, undefined, undefined, 1);
+  await tick();
+  service.subscribe('subscription-new', 3, KEY, address(), undefined, undefined, undefined, 2);
+  await tick();
+  assert.deepEqual(requests.map((request) => request.method), [
+    'detail.subscribe',
+    'detail.unsubscribe',
+  ], 'the replacement subscribe cannot race the old slot release');
+
+  releaseUnsubscribe();
+  await tick();
+  assert.deepEqual(requests.map((request) => request.method), [
+    'detail.subscribe',
+    'detail.unsubscribe',
+    'detail.subscribe',
+  ]);
+  assert.equal((requests.at(-1)?.params as { subscriptionId?: string }).subscriptionId, 'subscription-new');
+});
+
+test('renderer attempt watermarks reject delayed pre-start subscribe delivery', async () => {
+  const { service, requests, posted } = createHarness();
+  service.subscribe('subscription-old', 3, KEY, address(), undefined, undefined, undefined, 1);
+  await tick();
+  service.unsubscribe(3, KEY, 'collapse', undefined, undefined, 1);
+  await tick();
+  service.subscribe('subscription-new', 3, KEY, address(), undefined, undefined, undefined, 2);
+  await tick();
+
+  // Command delivery can lag owner teardown. A lower attempt, or a replay of
+  // the current attempt under another host-minted id, cannot replace/recreate
+  // the owner even though neither delivery has received detail.start.
+  service.subscribe('subscription-old-replayed', 3, KEY, address(), undefined, undefined, undefined, 1);
+  service.subscribe('subscription-new-replayed', 3, KEY, address(), undefined, undefined, undefined, 2);
+  await tick();
+  assert.deepEqual(requests.map((request) => request.method), [
+    'detail.subscribe',
+    'detail.unsubscribe',
+    'detail.subscribe',
+  ]);
+
+  service.handleStream({
+    kind: 'detail.error', subscriptionId: 'subscription-old', code: 'NOT_FOUND',
+    message: 'late old attempt', retryable: true, fence: fence(),
+  });
+  assert.equal(posted.length, 0, 'late pre-start traffic for the retired owner is dropped');
+  service.handleStream({
+    kind: 'detail.error', subscriptionId: 'subscription-new', code: 'NOT_FOUND',
+    message: 'current attempt', retryable: true, fence: fence(),
+  });
+  const currentError = posted.at(-1);
+  assert.equal(currentError?.type, 'detail.error');
+  if (currentError?.type === 'detail.error') {
+    assert.equal(currentError.detailAttempt, 2);
+    assert.equal(currentError.subscriptionId, 'subscription-new');
+  }
 });
 
 test('unsubscribe discards the owner, tombstones its id, and notifies the backend', async () => {
@@ -228,7 +301,7 @@ test('unsubscribe discards the owner, tombstones its id, and notifies the backen
 
   // A fresh subscribe for the same key mints a NEW subscription id and routes
   // a fresh stream.
-  service.subscribe('subscription-2', 3, KEY, address());
+  service.subscribe('subscription-2', 3, KEY, address(), undefined, undefined, undefined, 2);
   await tick();
   assert.equal((requests[2]?.params as { subscriptionId: string }).subscriptionId, 'subscription-2');
   service.handleStream(startMessage('subscription-2'));
@@ -284,7 +357,7 @@ test('start validation: wrong state, mismatched address, or malformed page is dr
   // closed so a later mismatched start can never bind either.
   service.handleStream(startMessage('subscription-1', { address: address({ rootAttemptId: 'other' }) }));
   assert.equal(posted.length, 0);
-  service.subscribe('subscription-1', 3, KEY, address());
+  service.subscribe('subscription-1', 3, KEY, address(), undefined, undefined, undefined, 2);
   await tick();
   service.handleStream(startMessage('subscription-1'));
   assert.equal(posted.length, 1);
@@ -386,6 +459,33 @@ test('subscribe RPC failure surfaces a retryable detail.error and closes the own
   assert.equal(posted.length, 1);
 });
 
+test('a pre-start stream error reaches the subscribing owner', async () => {
+  const { service, posted } = createHarness();
+  service.subscribe('subscription-1', 3, KEY, address());
+  await tick();
+
+  // Live lookup can fall back to durable lookup before either authority emits
+  // detail.start. A durable miss is the only terminal signal for that attempt.
+  const durableFence = fence({ workerId: undefined, workerGeneration: undefined });
+  service.handleStream({
+    kind: 'detail.error', subscriptionId: 'subscription-1', code: 'NOT_FOUND',
+    message: 'No durable detail owns this address.', retryable: true, fence: durableFence,
+  });
+
+  const error = posted.find((message) => message.type === 'detail.error');
+  assert.equal(error?.type, 'detail.error');
+  if (error?.type === 'detail.error') {
+    assert.equal(error.subscriptionId, 'subscription-1');
+    assert.equal(error.code, 'NOT_FOUND');
+    assert.equal(error.coordinatorGeneration, durableFence.coordinatorGeneration);
+    assert.equal(error.workerId, undefined);
+  }
+  assert.equal(service.getDebugState().subscriptions, 0, 'the failed attempt is closed');
+
+  service.handleStream(startMessage('subscription-1'));
+  assert.equal(posted.length, 1, 'late traffic cannot revive the failed attempt');
+});
+
 test('terminal handoff answers a re-expanded key durably without a worker round-trip', async () => {
   const { service, requests, posted } = createHarness();
   service.subscribe('subscription-1', 3, KEY, address());
@@ -399,7 +499,7 @@ test('terminal handoff answers a re-expanded key durably without a worker round-
 
   // Re-expand after collapse: the host subscribes through the paged durable
   // authority instead of loading the whole value with session.loadDetail.
-  service.subscribe('subscription-2', 3, KEY, address());
+  service.subscribe('subscription-2', 3, KEY, address(), undefined, undefined, undefined, 2);
   await tick();
   const subscribeCall = requests.find((request) => request.method === 'detail.subscribe'
     && (request.params as { subscriptionId?: string })?.subscriptionId === 'subscription-2');
@@ -417,7 +517,7 @@ test('terminal handoff answers a re-expanded key durably without a worker round-
   const durableFence = fence({ workerId: undefined, workerGeneration: undefined });
   service.handleStream({
     kind: 'detail.start', subscriptionId: 'subscription-2', address: address(), source: 'durable',
-    baselineRevision: 4, pageCount: 1, totalBytes: 16, fence: durableFence,
+    baselineRevision: 4, pageCount: 1, totalBytes: 16, totalCodePoints: 14, fence: durableFence,
   });
   service.handleStream(pageMessage('subscription-2', 0, 1, '{"exitCode":0}', durableFence, 4));
   service.handleStream({
@@ -441,6 +541,46 @@ test('terminal handoff answers a re-expanded key durably without a worker round-
   assert.equal(posted.some((message) => message.type === 'detail.terminal' && message.subscriptionId === 'subscription-2'), true, 'durable answer ends with a terminal handoff');
 });
 
+test('a fresh owner attempt replaces an in-flight durable stream', async () => {
+  const { service, requests, posted } = createHarness();
+  service.subscribe('subscription-live', 3, KEY, address());
+  await tick();
+  service.handleStream(startMessage('subscription-live'));
+  service.handleStream({
+    kind: 'detail.terminal', subscriptionId: 'subscription-live', revision: 1,
+    durableRef: DURABLE_REF, fence: fence(),
+  });
+
+  service.subscribe('subscription-durable-1', 3, KEY, address(), undefined, undefined, undefined, 2);
+  await tick();
+  const durableFence = fence({ workerId: undefined, workerGeneration: undefined });
+  service.handleStream({
+    kind: 'detail.start', subscriptionId: 'subscription-durable-1', address: address(), source: 'durable',
+    baselineRevision: 1, pageCount: 1, totalBytes: 16, totalCodePoints: 14, fence: durableFence,
+  });
+
+  // The renderer can reject/corrupt a baseline and mint a new attempt while
+  // the first durable stream is still active. It must not be absorbed as an
+  // idempotent subscribe for the retired owner.
+  service.subscribe('subscription-durable-2', 3, KEY, address(), undefined, undefined, undefined, 3);
+  await tick();
+  assert.deepEqual(requests.slice(-2).map((request) => request.method), [
+    'detail.unsubscribe',
+    'detail.subscribe',
+  ]);
+  assert.deepEqual(requests.at(-2)?.params, { subscriptionId: 'subscription-durable-1', reason: 'rebase' });
+  assert.equal((requests.at(-1)?.params as { subscriptionId?: string }).subscriptionId, 'subscription-durable-2');
+
+  const before = posted.length;
+  service.handleStream(pageMessage('subscription-durable-1', 0, 1, '{}', durableFence));
+  assert.equal(posted.length, before, 'retired durable traffic is ignored');
+  service.handleStream({
+    kind: 'detail.start', subscriptionId: 'subscription-durable-2', address: address(), source: 'durable',
+    baselineRevision: 1, pageCount: 1, totalBytes: 16, totalCodePoints: 14, fence: durableFence,
+  });
+  assert.equal((posted.at(-1) as { subscriptionId?: string }).subscriptionId, 'subscription-durable-2');
+});
+
 test('durable fallback surfaces subscribe failures and stream errors', async () => {
   const failing = createHarness({
     subscribeFailure: Object.assign(new Error('the live source is gone'), { code: 'NOT_FOUND' }),
@@ -452,7 +592,7 @@ test('durable fallback surfaces subscribe failures and stream errors', async () 
     kind: 'detail.terminal', subscriptionId: 'subscription-1', revision: 1,
     durableRef: DURABLE_REF, fence: fence(),
   });
-  failing.service.subscribe('subscription-2', 3, KEY, address());
+  failing.service.subscribe('subscription-2', 3, KEY, address(), undefined, undefined, undefined, 2);
   await tick();
   await tick();
   const error = failing.posted.find((message) => message.type === 'detail.error' && message.subscriptionId === 'subscription-2');
@@ -471,12 +611,12 @@ test('durable fallback surfaces subscribe failures and stream errors', async () 
     kind: 'detail.terminal', subscriptionId: 'subscription-3', revision: 1,
     durableRef: DURABLE_REF, fence: fence(),
   });
-  service.subscribe('subscription-4', 3, KEY, address());
+  service.subscribe('subscription-4', 3, KEY, address(), undefined, undefined, undefined, 2);
   await tick();
   const durableFence = fence({ workerId: undefined, workerGeneration: undefined });
   service.handleStream({
     kind: 'detail.start', subscriptionId: 'subscription-4', address: address(), source: 'durable',
-    baselineRevision: 1, pageCount: 1, totalBytes: 16, fence: durableFence,
+    baselineRevision: 1, pageCount: 1, totalBytes: 16, totalCodePoints: 14, fence: durableFence,
   });
   service.handleStream({
     kind: 'detail.error', subscriptionId: 'subscription-4', code: 'NOT_FOUND',
@@ -532,6 +672,21 @@ test('bounded tombstones and terminal records expire and evict by capacity', asy
   service.handleStream(startMessage('subscription-v', { address: address({ rootAttemptId: 'attempt-t' }) }));
   assert.equal(posted.at(-1)?.type, 'detail.start');
   assert.equal((posted.at(-1) as { subscriptionId?: string }).subscriptionId, 'subscription-v');
+
+  // Sequential terminal owners do not consume active slots, but their compact
+  // durable handoffs still have a hard capacity bound.
+  for (let index = 0; index <= DETAIL_TOMBSTONE_MAX; index += 1) {
+    const detailKey = `${KEY}:terminal-cap:${index}`;
+    const detailAddress = address({ rootAttemptId: `terminal-cap-${index}` });
+    const subscriptionId = `subscription-terminal-cap-${index}`;
+    service.subscribe(subscriptionId, 3, detailKey, detailAddress);
+    await tick();
+    service.handleStream(startMessage(subscriptionId, { address: detailAddress }));
+    service.handleStream({
+      kind: 'detail.terminal', subscriptionId, revision: 1, durableRef: DURABLE_REF, fence: fence(),
+    });
+  }
+  assert.equal(service.getDebugState().terminalRecords, DETAIL_TOMBSTONE_MAX);
 });
 
 test('the active subscription budget is bounded', async () => {
@@ -547,6 +702,39 @@ test('the active subscription budget is bounded', async () => {
     assert.equal(error?.retryable, true);
     assert.equal(error?.subscriptionId, 'subscription-over');
   }
+});
+
+test('durable subscriptions share the active host-owner budget', async () => {
+  const { service, requests, posted } = createHarness();
+  service.subscribe('subscription-live', 3, KEY, address());
+  await tick();
+  service.handleStream(startMessage('subscription-live'));
+  service.handleStream({
+    kind: 'detail.terminal', subscriptionId: 'subscription-live', revision: 1,
+    durableRef: DURABLE_REF, fence: fence(),
+  });
+
+  for (let index = 0; index < DETAIL_SUBSCRIPTION_MAX_ACTIVE; index += 1) {
+    service.subscribe(
+      `subscription-active-${index}`,
+      3,
+      `${KEY}:active:${index}`,
+      address({ rootAttemptId: `attempt-${index}` }),
+    );
+  }
+  await tick();
+  service.subscribe('subscription-durable-over', 3, KEY, address(), undefined, undefined, undefined, 2);
+  await tick();
+
+  const error = posted.find((message) => message.type === 'detail.error'
+    && message.subscriptionId === 'subscription-durable-over');
+  assert.equal(error?.type, 'detail.error');
+  if (error?.type === 'detail.error') {
+    assert.equal(error.code, 'UNAVAILABLE');
+    assert.equal(error.retryable, true);
+  }
+  assert.equal(requests.some((request) => request.method === 'detail.subscribe'
+    && (request.params as { subscriptionId?: string })?.subscriptionId === 'subscription-durable-over'), false);
 });
 
 test('reset clears owners, tombstones, terminal records, and bumps the host generation', async () => {
@@ -580,13 +768,13 @@ test('the durable terminal handoff identity is replayed on re-expansion', async 
     kind: 'detail.terminal', subscriptionId: 'subscription-1', revision: 1,
     durableRef: DURABLE_REF, fence: fence(),
   });
-  service.subscribe('subscription-2', 3, KEY, address());
+  service.subscribe('subscription-2', 3, KEY, address(), undefined, undefined, undefined, 2);
   await tick();
   // The durable terminal handoff arrives through the backend stream with the
   // same durable identity the original terminal carried.
   service.handleStream({
     kind: 'detail.start', subscriptionId: 'subscription-2', address: address(), source: 'durable',
-    baselineRevision: 1, pageCount: 1, totalBytes: 16, fence: fence(),
+    baselineRevision: 1, pageCount: 1, totalBytes: 16, totalCodePoints: 14, fence: fence(),
   });
   service.handleStream(pageMessage('subscription-2', 0, 1, '{"exitCode":0}', fence()));
   service.handleStream({
@@ -645,6 +833,36 @@ test('browser ownership: the complete key {viewGeneration, rendererId, rendererG
   service.handleStream(pageMessage('subscription-a', 0, 1, '{"a-late":1}', fence()));
   const lateA = posted.filter((message) => message.type === 'detail.page' && message.subscriptionId === 'subscription-a');
   assert.equal(lateA.length, 1, 'late A traffic is absorbed by the tombstone');
+});
+
+test('renderer invalidation releases active and durable detail ownership', async () => {
+  const { service, requests, posted } = createHarness();
+  service.subscribe('subscription-a', 3, KEY, address(), undefined, 'renderer-a', 1, 1);
+  service.subscribe('subscription-a-terminal', 3, `${KEY}:terminal`, address(), undefined, 'renderer-a', 1, 2);
+  service.subscribe('subscription-b', 3, `${KEY}:b`, address(), undefined, 'renderer-b', 1, 3);
+  await tick();
+  service.handleStream(startMessage('subscription-a'));
+  service.handleStream(startMessage('subscription-a-terminal'));
+  service.handleStream({
+    kind: 'detail.terminal', subscriptionId: 'subscription-a-terminal', revision: 1,
+    durableRef: DURABLE_REF, fence: fence(),
+  });
+  assert.equal(service.getDebugState().terminalRecords, 1);
+
+  service.unsubscribeRenderer('renderer-a', 1);
+  await tick();
+  assert.equal(service.getDebugState().terminalRecords, 0, 'renderer-owned durable handoff is released');
+  assert.equal(service.getDebugState().subscriptions, 1, 'another renderer remains owned');
+  assert.equal(requests.some((request) => request.method === 'detail.unsubscribe'
+    && (request.params as { subscriptionId?: string }).subscriptionId === 'subscription-a'), true,
+  'active renderer owner releases its backend slot');
+
+  const before = posted.length;
+  service.handleStream(startMessage('subscription-a'));
+  assert.equal(posted.length, before, 'invalidated renderer traffic cannot revive an owner');
+  service.handleStream(startMessage('subscription-b'));
+  assert.equal(posted.at(-1)?.type, 'detail.start');
+  assert.equal(requests.filter((request) => request.method === 'detail.subscribe').length, 3);
 });
 
 test('browser ownership: a renderer generation bump fences the old owner', async () => {

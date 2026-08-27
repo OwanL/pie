@@ -206,7 +206,7 @@ export const ComposerToolbar = memo(function ComposerToolbar({
           onSetPrefs={onSetPrefs}
         />
 
-        <SystemPromptToggleMenu prompts={systemPrompts} onSetToggles={onSetSystemPromptToggles} />
+        <SystemPromptToggleMenu sessionPath={sessionPath} prompts={systemPrompts} onSetToggles={onSetSystemPromptToggles} />
 
         <McpToggleMenu prefs={prefs} mcpServers={mcpServers} mcpServersStatus={mcpServersStatus} mcpPendingApply={mcpPendingApply} onSetPrefs={onSetPrefs} onMcpListRequested={onMcpListRequested} onMcpSetServerEnabled={onMcpSetServerEnabled} />
 

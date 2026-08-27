@@ -13,6 +13,7 @@ import {
   toolCallsFromMessageParts,
 } from '../../../shared/chat-message-parts.js';
 import { toolsForTurn } from './model.js';
+import { reconstructSubagentDetailAddresses } from './subagent-detail-addresses.js';
 
 export function projectTranscriptView(
   durableMessages: readonly ChatMessage[],
@@ -111,11 +112,19 @@ export function projectLiveTool(tool: LiveToolRecord, sessionPath: string, messa
   const terminal = tool.terminal;
   const executionEnd = tool.executionEnd;
   const lifecycle = terminal ?? executionEnd;
+  const terminalResult = terminal && tool.name.trim().toLowerCase() === 'subagent'
+    ? reconstructSubagentDetailAddresses(terminal.result, {
+        sessionPath,
+        turnId: tool.turnId,
+        rootToolCallId: tool.transcriptToolCallId,
+        rootAttemptId: tool.attemptId,
+      })
+    : terminal?.result;
   const projected: ToolCall = {
     id: tool.transcriptToolCallId,
     name: tool.name,
     input: tool.immutableInput,
-    result: terminal?.result ?? tool.preview,
+    result: terminalResult ?? tool.preview,
     status: lifecycle?.status ?? 'running',
     startedAt: tool.startedAt,
     durationMs: lifecycle?.durationMs,

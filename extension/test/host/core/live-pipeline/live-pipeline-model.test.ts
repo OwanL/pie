@@ -218,6 +218,85 @@ test('active recovery checkpoints preserve a complete multi-megabyte recursive s
   );
 });
 
+test('terminal subagent projection retains its producer detail address through the durable handoff', () => {
+  let state = apply(createEmptyLivePipelineState(), start()).state;
+  state = apply(state, {
+    ...base, kind: 'tool.started', seq: 2, executionId: 'execution-1', parentExecutionId: null,
+    rootExecutionId: 'execution-1', toolCallId: 'tool-1', name: 'subagent', input: {}, startedAt: 1_100,
+  }).state;
+  const lineage = [{
+    childId: 'child-1',
+    spawningToolCallId: 'tool-1',
+    attemptId: 'child-attempt-1',
+  }];
+  const detailAddress = {
+    sessionPath: base.sessionPath,
+    turnId: base.turnId,
+    rootToolCallId: 'tool-1',
+    rootAttemptId: base.attemptId,
+    lineage,
+  };
+  const preview = {
+    kind: 'subagent' as const,
+    mode: 'single' as const,
+    omittedChildren: 0,
+    children: [{
+      id: 'child-1', childId: 'child-1', attemptId: 'child-attempt-1', lineage,
+      liveAddressable: true, detailAddress, phase: 'running' as const,
+      agent: 'worker', task: 'inspect',
+    }],
+  };
+  const previewBytes = Buffer.byteLength(JSON.stringify(preview), 'utf8');
+  state = apply(state, {
+    ...base, kind: 'tool.progress', seq: 3, baseSeq: 2, executionId: 'execution-1',
+    baseProgressRevision: 0, progressRevision: 1, previewBytes, aggregatePreviewBytes: previewBytes,
+    update: { kind: 'snapshot', preview },
+  }).state;
+  const durableResult = {
+    details: {
+      mode: 'single',
+      results: [{
+        agent: 'worker', task: 'inspect', exitCode: 0, messages: [],
+        childId: 'child-1', attemptId: 'child-attempt-1', lineage, liveAddressable: true,
+      }],
+    },
+  };
+  state = apply(state, {
+    ...base, kind: 'tool.terminal', seq: 4, executionId: 'execution-1', status: 'completed',
+    result: durableResult, durableEntryId: 'tool-entry-1',
+  }).state;
+
+  const projectedCall = projectTranscriptView([], state, base.sessionPath).activeTurn?.toolCalls?.[0];
+  const projectedChild = (projectedCall?.result as {
+    details?: { results?: Array<{ detailAddress?: unknown }> };
+  } | undefined)?.details?.results?.[0];
+  assert.deepEqual(projectedChild?.detailAddress, detailAddress);
+  assert.equal(projectedCall?.detailRef?.source, 'live');
+
+  const durableCall = {
+    id: 'tool-1', name: 'subagent', input: {}, result: durableResult,
+    status: 'completed' as const, durableEntryId: 'tool-entry-1',
+  };
+  const committed = apply(state, {
+    ...base, kind: 'turn.terminal', seq: 5, terminalKind: 'completed', durableEntryId: 'assistant-entry-1',
+    durableMessage: {
+      id: 'assistant-1', role: 'assistant', createdAt: new Date(1_200).toISOString(), markdown: '',
+      status: 'completed', durableEntryId: 'assistant-entry-1',
+      parts: [{ kind: 'toolCall', toolCall: durableCall }], toolCalls: [durableCall],
+    },
+  });
+  assert.equal(committed.classification, 'committed');
+  const terminalPart = committed.classification === 'committed'
+    ? committed.terminal.parts?.find((part) => part.kind === 'toolCall')
+    : undefined;
+  const terminalChild = terminalPart?.kind === 'toolCall'
+    ? (terminalPart.toolCall.result as {
+        details?: { results?: Array<{ detailAddress?: unknown }> };
+      } | undefined)?.details?.results?.[0]
+    : undefined;
+  assert.deepEqual(terminalChild?.detailAddress, detailAddress);
+});
+
 test('checkpoint repair preserves richer settled-tool details already received by the host', () => {
   let state = apply(createEmptyLivePipelineState(), start()).state;
   state = apply(state, {

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { EffectRunner, decideModelStartTimerAction, type EffectRunnerDeps, type TimerSink, type TimerHandle } from '../../../../src/host/core/effect-runner';
+import { EffectRunner, decideModelStartTimerAction, type BackendLike, type CommitAwareRequestOptions, type EffectRunnerDeps, type TimerSink, type TimerHandle } from '../../../../src/host/core/effect-runner';
 import type { Effect } from '../../../../src/host/core/effects';
 import type { EffectResultEvent, CommandEvent, Event } from '../../../../src/host/core/events';
 import type { ProviderGateStats } from '../../../../src/shared/protocol';
@@ -141,6 +141,7 @@ test('a failed system-prompt toggle persist surfaces a notice instead of failing
   const notices = dispatched.filter((event) => event.kind === 'NoticeShown');
   assert.equal(notices.length, 1, 'the user must be told their toggle did not persist');
   assert.match((notices[0] as { notice: string }).notice, /Failed to save the system-prompt setting/);
+  assert.equal((notices[0] as { sessionPath?: string }).sessionPath, '/a');
 });
 
 test('EffectRunner rolls privacy mode back and notifies when analytics cleanup fails', async () => {
@@ -1213,6 +1214,94 @@ test('EffectRunner keeps an edit pending when only message.send acknowledgement 
   runner.dispose();
 });
 
+test('EffectRunner retains edit ownership across a truncate waiter timeout, then sends only after the exact late acknowledgement', async () => {
+  const requestCalls: Array<{ method: string; params: unknown }> = [];
+  let acknowledgeTruncate!: () => void;
+  const backend: BackendLike = {
+    request<T>(method: string, params?: unknown, options?: CommitAwareRequestOptions<T>): Promise<T> {
+      requestCalls.push({ method, params });
+      if (method === 'session.truncateAfter') {
+        acknowledgeTruncate = () => options?.onCorrelatedResponse?.({ ok: true, result: {} as T });
+        return Promise.reject(new RequestTimeoutError('req-truncate-delayed'));
+      }
+      if (method === 'message.send') {
+        return Promise.resolve({ requestId: 'replacement-turn' } as T);
+      }
+      return Promise.resolve({} as T);
+    },
+  };
+  let sessionTail = Promise.resolve();
+  const queues: EffectRunnerDeps['queues'] = {
+    async enqueueLifecycle<T>(task: () => Promise<T>): Promise<T> {
+      return await task();
+    },
+    async enqueueSessionOperation<T>(_sessionPath: string, task: () => Promise<T>): Promise<T> {
+      const operation = sessionTail.then(task, task);
+      sessionTail = operation.then(() => undefined, () => undefined);
+      return await operation;
+    },
+  };
+  const hostEvents: Event[] = [];
+  const { deps, events } = makeEffectRunnerDeps({
+    backend,
+    queues,
+    dispatchEvent: (event) => hostEvents.push(event),
+  });
+  const runner = new EffectRunner(deps);
+
+  runner.run({
+    kind: 'EditRpc', corrId: 'c-edit-truncate-delayed', sessionPath: '/a',
+    messageId: 'old-user', text: 'replacement', inputs: [],
+    composedText: 'replacement', localId: 'replacement-local', interruptFirst: false,
+  });
+  await settle();
+
+  assert.deepEqual(requestCalls.map((call) => call.method), ['session.truncateAfter']);
+  assert.equal(
+    events.some((event) => event.kind === 'EditResult'),
+    false,
+    'the local timeout must not emit the rollback-owning EditResult failure',
+  );
+  assert.deepEqual(
+    hostEvents.filter((event) => event.kind === 'EditTruncateRecoveryChanged')
+      .map((event) => event.phase),
+    ['recovering'],
+  );
+
+  // A user interrupt is admitted immediately but must remain behind the edit's
+  // queue ownership while the destructive acknowledgement is ambiguous.
+  runner.run({ kind: 'InterruptRpc', corrId: 'c-interrupt-after-edit', sessionPath: '/a' });
+  await settle();
+  assert.deepEqual(requestCalls.map((call) => call.method), ['session.truncateAfter']);
+
+  acknowledgeTruncate();
+  await settle();
+
+  assert.deepEqual(
+    requestCalls.map((call) => call.method),
+    ['session.truncateAfter', 'message.send', 'message.interrupt'],
+  );
+  assert.deepEqual(requestCalls[1], {
+    method: 'message.send',
+    params: {
+      sessionPath: '/a',
+      text: 'replacement',
+      inputs: [],
+      localId: 'replacement-local',
+    },
+  });
+  const editResults = events.filter((event) => event.kind === 'EditResult');
+  assert.equal(editResults.length, 1, 'the replacement receives one acknowledgement and is never rolled back');
+  assert.equal(editResults[0]?.ok, true);
+  assert.equal(editResults[0]?.requestId, 'replacement-turn');
+  assert.deepEqual(
+    hostEvents.filter((event) => event.kind === 'EditTruncateRecoveryChanged')
+      .map((event) => event.phase),
+    ['recovering', 'recovered'],
+  );
+  runner.dispose();
+});
+
 test('EffectRunner EditRpc stops after an interrupt failure and dispatches EditResult{ok:false}', async () => {
   let suppressionCount = 0;
   const { deps, calls, events } = makeEffectRunnerDeps({
@@ -1530,14 +1619,14 @@ test('EffectRunner mints the subscription ID and routes Phase 5 detail effects t
   };
 
   runner.run({
-    kind: 'DetailSubscribeRpc', corrId: 'c-sub', viewGeneration: 3, detailKey: 'subagent:msg:tool',
+    kind: 'DetailSubscribeRpc', corrId: 'c-sub', viewGeneration: 3, detailKey: 'subagent:msg:tool', detailAttempt: 7,
     address, cursor: { revision: 1 },
   });
   runner.run({
-    kind: 'DetailUnsubscribeRpc', corrId: 'c-unsub', viewGeneration: 3, detailKey: 'subagent:msg:tool', reason: 'collapse',
+    kind: 'DetailUnsubscribeRpc', corrId: 'c-unsub', viewGeneration: 3, detailKey: 'subagent:msg:tool', detailAttempt: 7, reason: 'collapse',
   });
   runner.run({
-    kind: 'DetailFetchPagesRpc', corrId: 'c-fetch', viewGeneration: 3, detailKey: 'subagent:msg:tool',
+    kind: 'DetailFetchPagesRpc', corrId: 'c-fetch', viewGeneration: 3, detailKey: 'subagent:msg:tool', detailAttempt: 7,
     ref: { baselineRevision: 1, pageIndex: 0, pageCount: 2 },
   });
   await settle();
@@ -1551,12 +1640,13 @@ test('EffectRunner mints the subscription ID and routes Phase 5 detail effects t
     assert.ok(subscribe.subscriptionId.length > 0, 'the runner mints the subscription ID');
     assert.equal(subscribe.viewGeneration, 3);
     assert.equal(subscribe.detailKey, 'subagent:msg:tool');
+    assert.equal(subscribe.detailAttempt, 7);
     assert.deepEqual(subscribe.address, address);
     assert.deepEqual(subscribe.cursor, { revision: 1 });
   }
-  assert.deepEqual(detailCalls[1], { kind: 'unsubscribeDetail', viewGeneration: 3, detailKey: 'subagent:msg:tool', reason: 'collapse' });
+  assert.deepEqual(detailCalls[1], { kind: 'unsubscribeDetail', viewGeneration: 3, detailKey: 'subagent:msg:tool', detailAttempt: 7, reason: 'collapse' });
   assert.deepEqual(detailCalls[2], {
-    kind: 'fetchDetailPages', viewGeneration: 3, detailKey: 'subagent:msg:tool',
+    kind: 'fetchDetailPages', viewGeneration: 3, detailKey: 'subagent:msg:tool', detailAttempt: 7,
     ref: { baselineRevision: 1, pageIndex: 0, pageCount: 2 },
   });
   runner.dispose();

@@ -207,6 +207,11 @@ export interface SessionOpenedPayload {
    *  in response to a `session.open` whose `transcript` param was `'skip'`. */
   transcriptSkipped?: boolean;
   systemPrompts?: SystemPromptEntry[];
+  /** Cold-session confirmation for a system-prompt toggle write. A cold
+   * coordinator has no runtime prompt catalog to rebuild, so it returns the
+   * authoritative disabled-id set and the host applies it to the prompt entries
+   * it already owns. A later hot snapshot replaces those entries normally. */
+  systemPromptDisabledEntries?: string[];
   analyticsFactors?: SessionAnalyticsFactors;
   modelSettings?: ModelSettings;
   availableModels?: ModelInfo[];
@@ -222,9 +227,23 @@ export interface SessionOpenedPayload {
  *    backend sets `transcriptSkipped: true` on the `session.opened` payload. */
 export type TranscriptMode = 'tail' | 'skip';
 
+/** Progress of the coordinator's derived session-history catalog. `processed`
+ * counts transcript files whose current fingerprint has reached a durable
+ * conclusion (including invalid files that intentionally produce no row). */
+export interface SessionCatalogProgress {
+  complete: boolean;
+  processed: number;
+  /** Known canonical transcript count. Omitted while the fast durable snapshot
+   * is shown ahead of the first background inventory walk. */
+  total?: number;
+}
+
 export interface SessionListChangedPayload {
   sessions: SessionSummary[];
   activeSessionPath?: string;
+  /** Optional for compatibility with older backends. When absent, the
+   * received list is treated as complete. */
+  sessionCatalogProgress?: SessionCatalogProgress;
 }
 
 export interface MessageStartedPayload {
@@ -464,10 +483,10 @@ export interface CompactionPayload {
   estimatedTokensAfter?: number;
 }
 
-/** Exact usage from an SDK LLM request that bypasses assistant message events. */
+/** Exact usage from one observable SDK LLM response. */
 export interface AuxiliaryLlmUsagePayload {
   sessionPath: string;
-  kind: 'history_compaction' | 'branch_summary';
+  kind: 'assistant_message' | 'history_compaction' | 'branch_summary';
   sourceId: string;
   occurredAt: string;
   modelId?: string;

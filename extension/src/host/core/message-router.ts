@@ -657,9 +657,27 @@ export class MessageRouter {
     msg: Extract<WebviewToHostMessage, { type: 'requestDetail' }>,
     context?: RendererCommandContext,
   ): Promise<void> {
-    const result = this.service.loadDetail
-      ? await this.service.loadDetail(msg.sessionPath, msg.ref)
-      : { sessionPath: msg.sessionPath, key: msg.ref.key, status: 'unavailable' as const, message: 'Detail retrieval is unavailable.' };
+    let result: DetailResult;
+    try {
+      result = this.service.loadDetail
+        ? await this.service.loadDetail(msg.sessionPath, msg.ref)
+        : { sessionPath: msg.sessionPath, key: msg.ref.key, status: 'unavailable', message: 'Detail retrieval is unavailable.' };
+    } catch (error) {
+      // Always settle the initiating card, even if an unexpected service
+      // exception escapes its ordinary error normalization. The outer router
+      // catch can show a notice, but it cannot release the webview's serialized
+      // lazy-detail lane without this key-scoped terminal result.
+      appendPieError('message-router', 'detail request failed', error, {
+        sessionPath: msg.sessionPath,
+        detailKey: msg.ref.key,
+      });
+      result = {
+        sessionPath: msg.sessionPath,
+        key: msg.ref.key,
+        status: 'failure',
+        message: 'Could not load details. Retry to try again.',
+      };
+    }
     // Lazy-detail responses are renderer-scoped (browser server plan §4.4):
     // the INITIATING renderer gets the result, never a broadcast to the
     // sidebar. A browser expanding a tool detail must not hang waiting for a
@@ -901,6 +919,7 @@ export class MessageRouter {
         corrId: crypto.randomUUID(),
         viewGeneration: msg.viewGeneration,
         detailKey: msg.detailKey,
+        detailAttempt: msg.detailAttempt,
         address: msg.address,
         ...(msg.cursor !== undefined ? { cursor: msg.cursor } : {}),
         // Trusted renderer identity (browser server plan §5.4): the complete
@@ -919,6 +938,7 @@ export class MessageRouter {
         corrId: crypto.randomUUID(),
         viewGeneration: msg.viewGeneration,
         detailKey: msg.detailKey,
+        detailAttempt: msg.detailAttempt,
         reason: msg.reason,
         ...(context ? { rendererId: context.rendererId, rendererGeneration: context.rendererGeneration } : {}),
       },
@@ -933,6 +953,7 @@ export class MessageRouter {
         corrId: crypto.randomUUID(),
         viewGeneration: msg.viewGeneration,
         detailKey: msg.detailKey,
+        detailAttempt: msg.detailAttempt,
         ref: msg.ref,
         ...(context ? { rendererId: context.rendererId, rendererGeneration: context.rendererGeneration } : {}),
       },

@@ -101,6 +101,7 @@ test('BackendClient.start resolves when backend.ready arrives immediately as std
   const moduleWithLoad = Module as typeof Module & { _load: (...args: any[]) => unknown };
   const originalLoad = moduleWithLoad._load;
   const fakeProc = new FakeChildProcess();
+  const noOrphans = async () => ({ candidates: [], reaped: [], failures: [] });
   let nextProc = fakeProc as unknown as cp.ChildProcess;
   let spawnOptions: cp.SpawnOptions | undefined;
   let spawnArgs: readonly string[] | undefined;
@@ -142,7 +143,7 @@ test('BackendClient.start resolves when backend.ready arrives immediately as std
   };
 
   const { BackendClient } = await import('../../../src/host/backend/client');
-  const client = new BackendClient();
+  const client = new BackendClient({ orphanReaper: noOrphans });
   try {
     const payload = await client.start({
       nodePath: '/mock/node',
@@ -153,10 +154,12 @@ test('BackendClient.start resolves when backend.ready arrives immediately as std
 
     assert.equal(payload.protocolVersion, PROTOCOL_VERSION);
     assert.equal(payload.sdkPath, '/mock/sdk');
-    assert.deepEqual(spawnArgs?.slice(-4), [
+    assert.deepEqual(spawnArgs?.slice(-6), [
       '--hostPid', String(process.pid),
       '--backendGeneration', '1',
+      '--lifetimeFd', '3',
     ]);
+    assert.deepEqual(spawnOptions?.stdio, ['pipe', 'pipe', 'pipe', 'pipe']);
     assert.equal((spawnOptions?.env as NodeJS.ProcessEnv | undefined)?.PIE_EDITOR_VERSION, '1.102.3-test');
     assert.equal((spawnOptions?.env as NodeJS.ProcessEnv | undefined)?.PIE_TRUSTED_SDK_ROOT, undefined);
     const spawnedEnv = spawnOptions?.env as NodeJS.ProcessEnv | undefined;
@@ -186,9 +189,32 @@ test('BackendClient.start resolves when backend.ready arrives immediately as std
     }]);
     failureSubscription.dispose();
 
+    // A destructive RPC may outlive the application-level waiter. Preserve
+    // the exact req-N correlation after RequestTimeoutError so the host can
+    // distinguish a late commit acknowledgement from an unknown outcome.
+    const lateResponses: unknown[] = [];
+    const delayedTruncate = client.request<{ sessionPath: string }>(
+      'session.truncateAfter',
+      { sessionPath: '/mock/edit.jsonl', entryId: 'message-to-replace' },
+      {
+        timeoutMs: 5,
+        onCorrelatedResponse: (response) => lateResponses.push(response),
+      },
+    );
+    await assert.rejects(delayedTruncate, /Timed out waiting for response to req-2/);
+    assert.deepEqual(lateResponses, [], 'the local timeout is not fabricated as a backend response');
+    fakeProc.stdout.write(JSON.stringify({
+      id: 'req-2', ok: true, result: { sessionPath: '/mock/edit.jsonl' },
+    }) + '\n');
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(lateResponses, [{
+      ok: true,
+      result: { sessionPath: '/mock/edit.jsonl' },
+    }]);
+
     const drainingProc = new DrainingChildProcess();
     nextProc = drainingProc as unknown as cp.ChildProcess;
-    const drainingClient = new BackendClient();
+    const drainingClient = new BackendClient({ orphanReaper: noOrphans });
     await drainingClient.start({
       nodePath: '/mock/node',
       backendPath: '/mock/backend.js',
@@ -210,12 +236,12 @@ test('BackendClient.start resolves when backend.ready arrives immediately as std
       configurable: true,
       value: () => { throw new Error('EPIPE'); },
     });
-    await assert.rejects(client.request('app.ping'), /Failed to write backend request req-2: EPIPE/);
+    await assert.rejects(client.request('app.ping'), /Failed to write backend request req-3: EPIPE/);
 
     client.dispose();
     const stalledProc = new NeverReadyChildProcess();
     nextProc = stalledProc as unknown as cp.ChildProcess;
-    const stalledClient = new BackendClient({ readyTimeoutMs: 5 });
+    const stalledClient = new BackendClient({ readyTimeoutMs: 5, orphanReaper: noOrphans });
     try {
       await assert.rejects(
         stalledClient.start({

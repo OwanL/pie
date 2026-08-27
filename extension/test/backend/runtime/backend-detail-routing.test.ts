@@ -140,7 +140,7 @@ test('detail.stream events carry validated coordinator→host payloads (emitDeta
   // The emitDetail wiring is installed in `start()`; exercise the same seam by
   // verifying the router-facing callback type accepts every stream variant.
   const variants: CoordinatorToHostDetailMessage[] = [
-    { kind: 'detail.start', subscriptionId: 's', address: ADDRESS, source: 'live', baselineRevision: 1, pageCount: 1, totalBytes: 4, fence: { backendGeneration: 2, coordinatorGeneration: 1, workerId: 'w', workerGeneration: 1 } },
+    { kind: 'detail.start', subscriptionId: 's', address: ADDRESS, source: 'live', baselineRevision: 1, pageCount: 1, totalBytes: 4, totalCodePoints: 4, fence: { backendGeneration: 2, coordinatorGeneration: 1, workerId: 'w', workerGeneration: 1 } },
     { kind: 'detail.error', subscriptionId: 's', code: 'UNAVAILABLE', message: 'x', retryable: true, fence: { backendGeneration: 2, coordinatorGeneration: 1, workerId: 'w', workerGeneration: 1 } },
   ];
   assert.equal(variants.length, 2);

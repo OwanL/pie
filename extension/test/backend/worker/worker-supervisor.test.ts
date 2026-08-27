@@ -4,6 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import test from 'node:test';
 
+import { SDK_PATCH_IDENTITY_VERSION } from '../../../src/backend/sdk-patch-barrier';
 import type { WorkerClientOptions, WorkerClientScheduler, WorkerClientSnapshot } from '../../../src/backend/worker-client';
 import { WorkerSupervisor, type SupervisedWorkerClient } from '../../../src/backend/worker-supervisor';
 import type { WorkerResponseResult } from '../../../src/backend/worker-protocol';
@@ -53,7 +54,7 @@ class FakeClient implements SupervisedWorkerClient {
 }
 
 const sdkPatchIdentity = {
-  identityVersion: 3 as const,
+  identityVersion: SDK_PATCH_IDENTITY_VERSION,
   sdkPath: '/sdk',
   sdkVersion: 'fixture',
   terminalDurability: { patchVersion: 1, relativePath: 'agent.js', sha256: 'a'.repeat(64) },

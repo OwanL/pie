@@ -253,6 +253,77 @@ test("phase-specific inactivity leases distinguish provider, stream, and tool wa
 	assert.equal(resolvePhaseInactivityMs(details("running_tool")), 15 * 60_000);
 });
 
+test("execute(): a duplicate snapshot cannot relabel an already-armed settlement lease", async () => {
+	const previousSettlementMs = process.env.PIE_SUBAGENT_SETTLEMENT_MS;
+	const previousGraceMs = process.env.PIE_SUBAGENT_SETTLEMENT_GRACE_MS;
+	process.env.PIE_SUBAGENT_SETTLEMENT_MS = "690000";
+	process.env.PIE_SUBAGENT_SETTLEMENT_GRACE_MS = "0";
+	const clock = new FakeClock();
+	const capturedLogs: string[] = [];
+	const originalConsoleError = console.error;
+	let waitingProviderUpdates = 0;
+	let resolveDuplicate!: () => void;
+	const duplicateObserved = new Promise<void>((resolve) => { resolveDuplicate = resolve; });
+
+	setMockBehavior({ onPrompt: () => new Promise<void>(() => {}) });
+	console.error = (...args: unknown[]) => { capturedLogs.push(args.map(String).join(" ")); };
+	try {
+		const responseP = execute(
+			"tool-immutable-settlement-lease",
+			{ agent: "worker", task: "wait without progress" } as never,
+			new AbortController().signal,
+			(partial) => {
+				if (partial.details?.results?.[0]?.activityPhase !== "waiting_provider") return;
+				waitingProviderUpdates += 1;
+				if (waitingProviderUpdates === 1) {
+					// The first provider-wait transition credibly arms 690s. The runner
+					// publishes the same phase once more immediately before prompt(); that
+					// duplicate must not mutate the owned lease to this new selection.
+					process.env.PIE_SUBAGENT_SETTLEMENT_MS = "180000";
+				} else if (waitingProviderUpdates === 2) {
+					resolveDuplicate();
+				}
+			},
+			{ cwd: agentDir, hasUI: false, model: { id: "active-model", provider: "test" },
+				modelRegistry: { getAvailable: () => [], getAll: () => [], find: () => undefined } } as never,
+			{ getAllTools: () => [] } as never,
+			() => false,
+			{ clock },
+		);
+		await within(5000, duplicateObserved);
+
+		let settled = false;
+		void responseP.then(() => { settled = true; }, () => { settled = true; });
+		await clock.advance(689_999);
+		await flushAsync();
+		assert.equal(settled, false, "the duplicate's 180s selection must not replace the armed 690s lease");
+
+		await clock.advance(1);
+		const response = await within(5000, responseP);
+		assert.equal(response.isError, true);
+
+		const forceSettled = capturedLogs
+			.map((line) => {
+				try { return JSON.parse(line) as Record<string, unknown>; }
+				catch { return undefined; }
+			})
+			.find((event) => event?.event === "subagent force-settled");
+		assert.ok(forceSettled, "the expiration must emit its owned lease diagnostics");
+		assert.equal(forceSettled.settlementMs, 690_000);
+		assert.equal(forceSettled.idleMs, 690_000);
+		assert.equal(forceSettled.armedAt, 0);
+		assert.equal(forceSettled.deadlineAt, 690_000);
+		assert.equal(forceSettled.expiredAt, 690_000);
+		assert.equal(forceSettled.overdueMs, 0);
+	} finally {
+		console.error = originalConsoleError;
+		if (previousSettlementMs === undefined) delete process.env.PIE_SUBAGENT_SETTLEMENT_MS;
+		else process.env.PIE_SUBAGENT_SETTLEMENT_MS = previousSettlementMs;
+		if (previousGraceMs === undefined) delete process.env.PIE_SUBAGENT_SETTLEMENT_GRACE_MS;
+		else process.env.PIE_SUBAGENT_SETTLEMENT_GRACE_MS = previousGraceMs;
+	}
+});
+
 test("execute(): productive run beyond 15 simulated minutes renews the real settlement lease", async () => {
 	process.env.PIE_SUBAGENT_SETTLEMENT_MS = "120000";
 	process.env.PIE_SUBAGENT_SETTLEMENT_GRACE_MS = "0";

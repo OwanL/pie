@@ -71,10 +71,15 @@ const SYSTEM_CLOCK: StateDeliveryClock = {
 
 export interface RendererHubOptions {
   clock?: StateDeliveryClock;
+  /** Shared extension-host incarnation. Supply this when multiple hubs serve
+   *  different renderer transports from the same host process. */
+  hostInstanceId?: string;
   /** Shared projected `ViewState`; called at most once per logical render. */
   getViewState(): ViewState;
   /** Command routing for validated non-evidence messages. */
   onMessage(msg: WebviewToHostMessage, context: RendererCommandContext): void;
+  /** Release resources owned by the renderer generation being invalidated. */
+  onRendererInvalidated?(rendererId: string, rendererGeneration: number): void;
   getRunningSessionCount(): number;
   settlementTimeoutMs?: number;
   commitTimeoutMs?: number;
@@ -101,7 +106,7 @@ export class RendererHub implements DisposableLike {
 
   constructor(private readonly options: RendererHubOptions) {
     this.clock = options.clock ?? SYSTEM_CLOCK;
-    this.hostInstanceId = crypto.randomUUID();
+    this.hostInstanceId = options.hostInstanceId ?? crypto.randomUUID();
   }
 
   /** Debounced fan-out of one logical render to every renderer session. */
@@ -161,6 +166,13 @@ export class RendererHub implements DisposableLike {
     }
   }
 
+  isRendererOwnerCurrent(rendererId: string, viewGeneration: number, rendererGeneration: number): boolean {
+    const session = this.sessions[rendererId];
+    return session !== undefined
+      && session.getViewGeneration() === viewGeneration
+      && session.getRendererGeneration() === rendererGeneration;
+  }
+
   /** Targeted or broadcast imperative. */
   postImperative(message: HostToWebviewMessage, target?: RendererTarget): void {
     if (this.disposed) return;
@@ -181,6 +193,7 @@ export class RendererHub implements DisposableLike {
       clock: this.clock,
       getViewState: () => this.getSharedViewState(),
       onMessage: (msg, context) => this.options.onMessage(msg, context),
+      onRendererInvalidated: this.options.onRendererInvalidated,
       getRunningSessionCount: this.options.getRunningSessionCount,
       transport,
       settlementTimeoutMs: this.options.settlementTimeoutMs,

@@ -5,11 +5,16 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test, { describe } from 'node:test';
 
-import { WorkerClient, type WorkerClientScheduler } from '../../../src/backend/worker-client';
+import { SDK_PATCH_IDENTITY_VERSION } from '../../../src/backend/sdk-patch-barrier';
+import {
+  WorkerClient,
+  WorkerRequestTimeoutError,
+  type WorkerClientScheduler,
+} from '../../../src/backend/worker-client';
 
 const fixture = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../fixtures/phase2-worker-fixture.mjs');
 const sdkPatchIdentity = {
-  identityVersion: 3 as const,
+  identityVersion: SDK_PATCH_IDENTITY_VERSION,
   sdkPath: path.resolve('extension/node_modules/@earendil-works/pi-coding-agent'),
   sdkVersion: 'fixture',
   terminalDurability: { patchVersion: 1, relativePath: 'dist/core/agent-session.js', sha256: 'a'.repeat(64) },
@@ -30,6 +35,7 @@ class FakeClock implements WorkerClientScheduler {
     return id as unknown as ReturnType<typeof setTimeout>;
   }
   clearTimeout(timer: ReturnType<typeof setTimeout>): void { this.timers.delete(timer as unknown as number); }
+  timerCount(): number { return this.timers.size; }
   advance(milliseconds: number): void {
     this.current += milliseconds;
     for (const [id, timer] of [...this.timers]) {
@@ -100,6 +106,44 @@ test('missed heartbeat transitions to unresponsive without blocking correlated c
     assert.deepEqual(await client.ping(), { kind: 'pong' });
     assert.deepEqual(await client.shutdown('heartbeat test complete'), { kind: 'shutting-down' });
     await client.waitForConfirmedExit(5_000);
+  } finally {
+    await cleanup(client);
+  }
+});
+
+test('correlated requests have a deterministic deadline and clear their timers on every settlement path', async () => {
+  const clock = new FakeClock();
+  const client = createClient('noise', {
+    scheduler: clock,
+    missedHeartbeatMs: 5_000,
+    requestTimeoutMs: 50,
+  });
+  try {
+    await client.start();
+    assert.equal(clock.timerCount(), 1, 'only the heartbeat watchdog remains after startup');
+
+    assert.deepEqual(await client.ping(), { kind: 'pong' });
+    assert.equal(clock.timerCount(), 1, 'a successful response clears its request deadline');
+
+    const unanswered = client.requestFrame({
+      kind: 'detail.unsubscribe',
+      subscriptionId: 'fixture-never-responds',
+    }, 'detail.unsubscribed');
+    assert.equal(clock.timerCount(), 2, 'the unanswered request owns one deadline timer');
+    clock.advance(51);
+    await assert.rejects(
+      unanswered,
+      (error) => error instanceof WorkerRequestTimeoutError
+        && error.requestKind === 'detail.unsubscribe'
+        && error.timeoutMs === 50,
+    );
+    assert.equal(clock.timerCount(), 1, 'deadline rejection removes the request timer');
+    assert.equal(client.getSnapshot().status, 'unresponsive');
+
+    // Timing one request out must not poison correlation for later control
+    // traffic from the same still-live process.
+    assert.deepEqual(await client.ping(), { kind: 'pong' });
+    assert.equal(clock.timerCount(), 1);
   } finally {
     await cleanup(client);
   }
@@ -227,7 +271,11 @@ test('valid response JSON without LF is never settled at EOF and fails the worke
 
 for (const mode of ['malformed', 'gap', 'oversize', 'raw-fd-oversize', 'close'] as const) {
   test(`real inherited-FD transport fails the worker generation on ${mode} IPC`, async () => {
-    const client = createClient(mode);
+    // These fixtures must reach their deliberately invalid first frame before
+    // the readiness watchdog wins. Process startup can exceed the production
+    // 5 s budget when hundreds of test files spawn concurrently on Windows;
+    // the enlarged test-only budget preserves the protocol assertion.
+    const client = createClient(mode, { startupTimeoutMs: 15_000 });
     try {
       await assert.rejects(client.start(), /(Worker|worker) (protocol|IPC)|Malformed worker IPC|before process exit/);
       await client.waitForConfirmedExit(5_000);

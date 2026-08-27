@@ -629,6 +629,38 @@ test('subagent retry usage remains attributed to each attempt provider', () => {
   ]);
 });
 
+test('bounded subagent billing sideband includes recursive child usage without nested UI messages', () => {
+  const harness = createHarness();
+  harness.tracker.prepareForSend(harness.sessionPath, []);
+  const toolCall: ToolCall = {
+    id: 'subagent-recursive', name: 'subagent', input: { agent: 'outer', task: 'delegate' }, status: 'completed',
+    result: {
+      kind: 'subagent', mode: 'single', omittedChildren: 0,
+      children: [{
+        id: 'outer', agent: 'outer', task: 'delegate', phase: 'completed', exitCode: 0,
+        model: 'gpt-5.6-sol', provider: 'github-copilot',
+        usage: { input: 100, output: 10, cacheRead: 5, cacheWrite: 1 },
+      }],
+      billing: [
+        { path: '0', model: 'gpt-5.6-sol', provider: 'github-copilot', occurredAt: Date.UTC(2026, 0, 1),
+          usage: { input: 100, output: 10, cacheRead: 5, cacheWrite: 1 } },
+        { path: '0.0', model: 'glm-5.2:cloud', provider: 'ollama', occurredAt: Date.UTC(2026, 0, 1, 0, 1),
+          usage: { input: 200, output: 20, cacheRead: 6, cacheWrite: 2 } },
+      ],
+    },
+  };
+
+  harness.tracker.onToolStarted(harness.sessionPath, toolCall);
+  harness.tracker.onToolFinished(harness.sessionPath, toolCall);
+  const run = harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun;
+  assert.equal(run?.toolUsage.subagentInputTokens, 300);
+  assert.equal(run?.toolUsage.subagentOutputTokens, 30);
+  assert.deepEqual(run?.auxiliaryLlmUsage?.map((sample) => [sample.sourceId, sample.provider, sample.inputTokens]), [
+    ['subagent-recursive:0', 'github-copilot', 100],
+    ['subagent-recursive:0.0', 'ollama', 200],
+  ]);
+});
+
 test('skill-pruning usage records the actual model and ignores duplicate CustomMessage delivery', () => {
   const harness = createHarness();
   harness.tracker.prepareForSend(harness.sessionPath, []);

@@ -10,6 +10,12 @@ test('validateWebviewToHostMessage accepts the simple no-payload messages', () =
   }
 });
 
+test('validateWebviewToHostMessage validates optional readiness build identities', () => {
+  assert.equal(validateWebviewToHostMessage({ type: 'ready', buildId: 'build-1' }).ok, true);
+  assert.equal(validateWebviewToHostMessage({ type: 'ready', buildId: 1 }).ok, false);
+  assert.equal(validateWebviewToHostMessage({ type: 'requestSnapshot', buildId: false }).ok, false);
+});
+
 test('validateWebviewToHostMessage validates retrySend recovery payloads', () => {
   assert.equal(validateWebviewToHostMessage({
     type: 'retrySend', sessionPath: '/session.jsonl', text: 'try again', localId: 'local-1', disablePruning: true,
@@ -108,7 +114,18 @@ test('validateWebviewToHostMessage validates bounded detail retrieval requests',
     messageId: 'message', toolCallId: 'tool', sizeBytes: 100, summary: 'summary', available: true,
   };
   assert.equal(validateWebviewToHostMessage({ type: 'requestDetail', sessionPath: '/a', ref }).ok, true);
+  assert.equal(validateWebviewToHostMessage({
+    type: 'requestDetail', sessionPath: '/a', ref: { ...ref, childCount: 2, lineCount: 3 },
+  }).ok, true);
   assert.equal(validateWebviewToHostMessage({ type: 'requestDetail', sessionPath: '/a', ref: { ...ref, kind: 'bad' } }).ok, false);
+  for (const invalidCount of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1, '2']) {
+    assert.equal(validateWebviewToHostMessage({
+      type: 'requestDetail', sessionPath: '/a', ref: { ...ref, childCount: invalidCount },
+    }).ok, false, `invalid childCount ${String(invalidCount)} should fail`);
+    assert.equal(validateWebviewToHostMessage({
+      type: 'requestDetail', sessionPath: '/a', ref: { ...ref, lineCount: invalidCount },
+    }).ok, false, `invalid lineCount ${String(invalidCount)} should fail`);
+  }
   assert.equal(validateWebviewToHostMessage({ type: 'requestDetail', ref }).ok, false);
 });
 
@@ -117,7 +134,7 @@ test('validateWebviewToHostMessage validates Phase 5 detail subscription message
     sessionPath: '/a/session.jsonl', turnId: 'turn-1', rootToolCallId: 'tool-1', rootAttemptId: 'attempt-1',
     lineage: [{ childId: 'child-1', spawningToolCallId: 'tool-1', attemptId: 'attempt-1' }],
   };
-  const valid = { type: 'detail.subscribe', viewGeneration: 3, detailKey: 'subagent:msg:tool', address };
+  const valid = { type: 'detail.subscribe', viewGeneration: 3, detailKey: 'subagent:msg:tool', detailAttempt: 1, address };
   assert.equal(validateWebviewToHostMessage(valid).ok, true);
   assert.equal(
     validateWebviewToHostMessage({ ...valid, cursor: { revision: 1, pageIndex: 0 } }).ok,
@@ -133,6 +150,11 @@ test('validateWebviewToHostMessage validates Phase 5 detail subscription message
     validateWebviewToHostMessage({ ...valid, viewGeneration: undefined }).ok,
     false,
     'subscribe requires viewGeneration (not the optional wrapper field)',
+  );
+  assert.equal(
+    validateWebviewToHostMessage({ ...valid, detailAttempt: 0 }).ok,
+    false,
+    'subscribe requires a positive detailAttempt',
   );
   assert.equal(
     validateWebviewToHostMessage({ ...valid, detailKey: '' }).ok,
@@ -156,33 +178,33 @@ test('validateWebviewToHostMessage validates Phase 5 detail subscription message
   );
 
   assert.equal(
-    validateWebviewToHostMessage({ type: 'detail.unsubscribe', viewGeneration: 3, detailKey: 'k', reason: 'collapse' }).ok,
+    validateWebviewToHostMessage({ type: 'detail.unsubscribe', viewGeneration: 3, detailKey: 'k', detailAttempt: 1, reason: 'collapse' }).ok,
     true,
   );
   assert.equal(
-    validateWebviewToHostMessage({ type: 'detail.unsubscribe', viewGeneration: 3, detailKey: 'k', reason: 'evict' }).ok,
+    validateWebviewToHostMessage({ type: 'detail.unsubscribe', viewGeneration: 3, detailKey: 'k', detailAttempt: 1, reason: 'evict' }).ok,
     false,
     'unsubscribe rejects unknown reasons',
   );
   assert.equal(
-    validateWebviewToHostMessage({ type: 'detail.unsubscribe', detailKey: 'k', reason: 'collapse' }).ok,
+    validateWebviewToHostMessage({ type: 'detail.unsubscribe', detailKey: 'k', detailAttempt: 1, reason: 'collapse' }).ok,
     false,
     'unsubscribe requires viewGeneration',
   );
 
   assert.equal(
     validateWebviewToHostMessage({
-      type: 'detail.fetchPages', viewGeneration: 3, detailKey: 'k', ref: { baselineRevision: 1, pageIndex: 0, pageCount: 2 },
+      type: 'detail.fetchPages', viewGeneration: 3, detailKey: 'k', detailAttempt: 1, ref: { baselineRevision: 1, pageIndex: 0, pageCount: 2 },
     }).ok,
     true,
   );
   assert.equal(
-    validateWebviewToHostMessage({ type: 'detail.fetchPages', viewGeneration: 3, detailKey: 'k', ref: { pageIndex: 0 } }).ok,
+    validateWebviewToHostMessage({ type: 'detail.fetchPages', viewGeneration: 3, detailKey: 'k', detailAttempt: 1, ref: { pageIndex: 0 } }).ok,
     false,
     'fetchPages rejects an incomplete ref',
   );
   assert.equal(
-    validateWebviewToHostMessage({ type: 'detail.fetchPages', viewGeneration: 3, detailKey: 'k' }).ok,
+    validateWebviewToHostMessage({ type: 'detail.fetchPages', viewGeneration: 3, detailKey: 'k', detailAttempt: 1 }).ok,
     false,
     'fetchPages requires a ref',
   );
@@ -190,7 +212,8 @@ test('validateWebviewToHostMessage validates Phase 5 detail subscription message
 
 test('validateHostToWebviewDetailMessage validates every stream variant and route field', () => {
   const route = {
-    hostInstanceId: 'host-1', hostGeneration: 0, viewGeneration: 3, backendGeneration: 2,
+    hostInstanceId: 'host-1', hostGeneration: 0, viewGeneration: 3,
+    rendererId: 'renderer-1', rendererGeneration: 1, detailAttempt: 1, backendGeneration: 2,
     coordinatorGeneration: 1, workerId: 'worker-1', workerGeneration: 1,
     detailKey: 'subagent:msg:tool', subscriptionId: 'subscription-1',
   };
@@ -203,10 +226,11 @@ test('validateHostToWebviewDetailMessage validates every stream variant and rout
     startByte: 0, endByte: 4, totalBytes: 4, startCodePoint: 0, endCodePoint: 4, totalCodePoints: 4, text: 'null',
   };
 
-  assert.equal(validateHostToWebviewDetailMessage({ type: 'detail.start', ...route, address, source: 'live', baselineRevision: 1, pageCount: 1, totalBytes: 4 }), true);
-  assert.equal(validateHostToWebviewDetailMessage({ type: 'detail.start', ...route, address, source: 'durable', baselineRevision: 1, pageCount: 1, totalBytes: 4 }), true);
-  assert.equal(validateHostToWebviewDetailMessage({ type: 'detail.start', ...route, address, source: 'other', baselineRevision: 1, pageCount: 1, totalBytes: 4 }), false);
-  assert.equal(validateHostToWebviewDetailMessage({ type: 'detail.start', ...route, address: { ...address, lineage: [] }, source: 'live', baselineRevision: 1, pageCount: 1, totalBytes: 4 }), false);
+  assert.equal(validateHostToWebviewDetailMessage({ type: 'detail.start', ...route, address, source: 'live', baselineRevision: 1, pageCount: 1, totalBytes: 4, totalCodePoints: 4 }), true);
+  assert.equal(validateHostToWebviewDetailMessage({ type: 'detail.start', ...route, address, source: 'durable', baselineRevision: 1, pageCount: 1, totalBytes: 4, totalCodePoints: 4 }), true);
+  assert.equal(validateHostToWebviewDetailMessage({ type: 'detail.start', ...route, address, source: 'live', baselineRevision: 1, pageCount: 1, totalBytes: 4 }), false, 'start requires the code-point manifest total');
+  assert.equal(validateHostToWebviewDetailMessage({ type: 'detail.start', ...route, address, source: 'other', baselineRevision: 1, pageCount: 1, totalBytes: 4, totalCodePoints: 4 }), false);
+  assert.equal(validateHostToWebviewDetailMessage({ type: 'detail.start', ...route, address: { ...address, lineage: [] }, source: 'live', baselineRevision: 1, pageCount: 1, totalBytes: 4, totalCodePoints: 4 }), false);
 
   assert.equal(validateHostToWebviewDetailMessage({ type: 'detail.page', ...route, ref: { baselineRevision: 1, pageIndex: 0, pageCount: 1 }, payload, payloadBytes: 4, checksum: 'a'.repeat(64) }), true);
   assert.equal(validateHostToWebviewDetailMessage({ type: 'detail.page', ...route, ref: { baselineRevision: 1, pageIndex: 0, pageCount: 1 }, payload, payloadBytes: 4, checksum: 'zz' }), false, 'bad checksum shape');
@@ -227,12 +251,13 @@ test('validateHostToWebviewDetailMessage validates every stream variant and rout
 
   // Route defects are rejected for every variant.
   for (const variant of [
-    { type: 'detail.start', address, source: 'live', baselineRevision: 1, pageCount: 1, totalBytes: 4 },
+    { type: 'detail.start', address, source: 'live', baselineRevision: 1, pageCount: 1, totalBytes: 4, totalCodePoints: 4 },
     { type: 'detail.error', code: 'UNAVAILABLE', message: 'x', retryable: true },
   ]) {
     assert.equal(validateHostToWebviewDetailMessage({ ...variant, ...route, hostGeneration: -1 }), false, 'negative hostGeneration');
     assert.equal(validateHostToWebviewDetailMessage({ ...variant, ...route, workerId: 'worker-1', workerGeneration: undefined }), false, 'workerId without workerGeneration');
     assert.equal(validateHostToWebviewDetailMessage({ ...variant, ...route, subscriptionId: '' }), false, 'empty subscriptionId');
+    assert.equal(validateHostToWebviewDetailMessage({ ...variant, ...route, detailAttempt: 0 }), false, 'invalid detailAttempt');
     assert.equal(validateHostToWebviewDetailMessage({ ...variant, ...route, detailKey: '' }), false, 'empty detailKey');
   }
 });

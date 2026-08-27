@@ -39,9 +39,25 @@ test('backend RPCs use the configured directory while explicit legacy opens keep
   process.env.PI_CODING_AGENT_SESSION_DIR = configuredDir;
 
   try {
-    const listedDirs: Array<string | undefined> = [];
+    const catalogListDirs: Array<string | undefined> = [];
+    const sdkListDirs: Array<string | undefined> = [];
     const openCalls: unknown[][] = [];
-    const server = new BackendServer({ workerEntryPath: '/worker-entry.js', sdkPath: '/unused', cwd: '/workspace' }) as any;
+    const sessionCatalog = {
+      list: async (_sdk: unknown, sessionDir?: string) => {
+        catalogListDirs.push(sessionDir);
+        return [];
+      },
+      refresh: () => undefined,
+      remove: () => undefined,
+      getProgress: () => ({ complete: true, processed: 0, total: 0 }),
+      invalidateIfInventoryChanged: async () => false,
+    };
+    const server = new BackendServer({
+      workerEntryPath: '/worker-entry.js',
+      sdkPath: '/unused',
+      cwd: '/workspace',
+      sessionCatalog: sessionCatalog as any,
+    }) as any;
     server.agentDir = path.resolve('/agent');
     server.sdk = {
       VERSION: 'test',
@@ -57,7 +73,7 @@ test('backend RPCs use the configured directory while explicit legacy opens keep
           };
         },
         listAll: async (sessionDir?: string) => {
-          listedDirs.push(sessionDir);
+          sdkListDirs.push(sessionDir);
           return [];
         },
         open: (...args: unknown[]) => {
@@ -79,9 +95,11 @@ test('backend RPCs use the configured directory while explicit legacy opens keep
     assert.equal(result.sessionPath, path.join(configuredDir, 'created.jsonl'));
 
     assert.deepEqual(await server.handleRequest({ id: 'list-configured', method: 'session.list' }), []);
-    assert.deepEqual(listedDirs, [configuredDir]);
+    assert.deepEqual(catalogListDirs, [configuredDir]);
+    assert.deepEqual(sdkListDirs, [], 'indexed listing must not rescan through the SDK');
     assert.deepEqual(await server.handleRequest({ id: 'list-cached', method: 'session.list' }), []);
-    assert.deepEqual(listedDirs, [configuredDir], 'unchanged catalog must not rescan session files');
+    assert.deepEqual(catalogListDirs, [configuredDir, configuredDir]);
+    assert.deepEqual(sdkListDirs, [], 'an unchanged indexed catalog must not rescan session files');
 
     const legacyPath = path.join(sdkFallbackDir, 'legacy.jsonl');
     const opened = await server.handleRequest({

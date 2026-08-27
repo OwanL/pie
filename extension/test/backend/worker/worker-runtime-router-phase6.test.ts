@@ -3,6 +3,34 @@ import test from 'node:test';
 
 import { WorkerRuntimeRouter } from '../../../src/backend/worker-runtime-router';
 import { CoordinatorProviderNetworkLeaseAuthority } from '../../../src/backend/coordinator-provider-network-lease';
+import type { WorkerClientScheduler } from '../../../src/backend/worker-client';
+
+class FakeRouterClock implements WorkerClientScheduler {
+  private current = 0;
+  private nextId = 1;
+  private readonly timers = new Map<number, { at: number; callback: () => void }>();
+
+  now(): number { return this.current; }
+
+  setTimeout(callback: () => void, delayMs: number): ReturnType<typeof setTimeout> {
+    const id = this.nextId++;
+    this.timers.set(id, { at: this.current + delayMs, callback });
+    return id as unknown as ReturnType<typeof setTimeout>;
+  }
+
+  clearTimeout(timer: ReturnType<typeof setTimeout>): void {
+    this.timers.delete(timer as unknown as number);
+  }
+
+  advance(milliseconds: number): void {
+    this.current += milliseconds;
+    for (const [id, timer] of [...this.timers]) {
+      if (timer.at > this.current) continue;
+      this.timers.delete(id);
+      timer.callback();
+    }
+  }
+}
 
 function opened(sessionPath: string) {
   return {
@@ -139,6 +167,45 @@ test('phase6 provider: a queued admission cancelled via provider.cancel settles 
   assert.equal(granted.length, 1);
   assert.equal(granted[0]!.requestId, 'admission-1');
   assert.equal(leases.inspect().providers?.['p']?.active, 1);
+});
+
+test('phase6 provider: a duplicate queued acquire cannot later deliver a second terminal frame', async () => {
+  const sent: Array<Record<string, any>> = [];
+  const leases = new CoordinatorProviderNetworkLeaseAuthority();
+  const { router, sessionPath } = makeRouter(makeClient({
+    sendFrame: (frame: any) => { sent.push(frame); return true; },
+  }), { options: { providerLeases: leases } });
+  const route = await router.promote(sessionPath);
+  await router.handleWorkerFrame(sessionPath, providerFrame(route, sessionPath, 'provider.acquire', {
+    requestId: 'admission-active',
+    request: { provider: 'p', model: 'm', turnId: 't', attemptId: 'active' },
+  }));
+  const duplicate = providerFrame(route, sessionPath, 'provider.acquire', {
+    requestId: 'admission-duplicate',
+    request: { provider: 'p', model: 'm', turnId: 't', attemptId: 'queued' },
+  });
+  const queuedAcquire = router.handleWorkerFrame(sessionPath, duplicate);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(leases.inspect().queued, 1);
+
+  await router.handleWorkerFrame(sessionPath, { ...duplicate, seq: 2 });
+  await queuedAcquire;
+  assert.deepEqual(
+    sent.filter((frame) => frame.kind === 'provider.cancelled' && frame.requestId === 'admission-duplicate')
+      .map((frame) => frame.reason),
+    ['Duplicate provider admission request.'],
+  );
+  assert.equal(leases.inspect().queued, 0);
+
+  const active = sent.find((frame) => frame.kind === 'provider.granted' && frame.requestId === 'admission-active');
+  assert.ok(active?.lease?.leaseId);
+  leases.release(route.owner, active.lease.leaseId, 'completed');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(
+    sent.filter((frame) => frame.kind === 'provider.granted' && frame.requestId === 'admission-duplicate').length,
+    0,
+    'cancelled duplicate authority work must not regain capacity and grant later',
+  );
 });
 
 test('phase6 provider: an acquire during promotion is granted (not dropped) so the worker does not hang', async () => {
@@ -282,7 +349,7 @@ test('phase6 checkpoint: usage, durable watermark, and detail manifest are bound
   const baseRequest = detailClient.requestFrame.bind(detailClient);
   (detailClient as any).requestFrame = async (body: any) => {
     if (body.kind === 'detail.subscribe') {
-      return { kind: 'detail.start', requestId: 'x', subscriptionId: body.subscriptionId, address: body.address, source: 'live', baselineRevision: 5, pageCount: 1, totalBytes: 64 };
+      return { kind: 'detail.start', requestId: 'x', subscriptionId: body.subscriptionId, address: body.address, source: 'live', baselineRevision: 5, pageCount: 1, totalBytes: 64, totalCodePoints: 64 };
     }
     return await baseRequest(body);
   };
@@ -394,6 +461,132 @@ test('phase6 settings/catalog sync broadcasts the configured authority to every 
   assert.ok(catalogSync);
   assert.equal(catalogSync.revision, 2);
   assert.deepEqual(catalogSync.payload.models, [{ id: 'configured-b', name: 'Configured B', provider: 'phase-0', reasoning: false }]);
+});
+
+test('phase6 sync: a never-resolving worker ACK is quarantined without blocking another session promotion', async () => {
+  const clock = new FakeRouterClock();
+  const sessionA = `${process.cwd()}/phase6-stalled-a.jsonl`;
+  const sessionB = `${process.cwd()}/phase6-healthy-b.jsonl`;
+  const workers = new Map<string, any>();
+  const calls = new Map<string, any[]>();
+  const stopped: string[] = [];
+  const emitted: Array<[string, any]> = [];
+  let generation = 0;
+
+  const supervisor = {
+    startWorker: async (root: string, prepare: any) => {
+      generation += 1;
+      const workerId = `isolation-worker-${generation}`;
+      const assignment = await prepare({ workerId, workerGeneration: generation, sessionPath: root });
+      const workerCalls: any[] = [];
+      calls.set(root, workerCalls);
+      const client = {
+        requestFrame: (body: any) => {
+          workerCalls.push(body);
+          if (body.kind === 'sync') {
+            if (root === sessionA && body.domain === 'runtimePrefs' && body.revision === 2) {
+              return new Promise(() => undefined);
+            }
+            return Promise.resolve({ kind: 'sync.ack', domain: body.domain, revision: body.revision });
+          }
+          if (body.kind === 'runtime.promote') {
+            return Promise.resolve({ kind: 'runtime.ready', runtimeMetadata: { mode: 'phase4', startedAt: 1 } });
+          }
+          throw new Error(`unexpected frame ${body.kind}`);
+        },
+        getSnapshot: () => ({ status: 'ready' as const, stdoutTail: '', stderrTail: '' }),
+        sendFrame: () => true,
+      };
+      const worker = {
+        workerId,
+        workerGeneration: generation,
+        sessionPath: assignment.leasePath,
+        client,
+      };
+      workers.set(root, worker);
+      return worker;
+    },
+    stopWorker: async (root: string) => {
+      stopped.push(root);
+      workers.delete(root);
+    },
+    listWorkers: () => [...workers.values()],
+  };
+  const router = new WorkerRuntimeRouter({
+    supervisor: supervisor as any,
+    coldStore: {
+      serializePromotionGrant: (target: string) => ({
+        grantId: `grant-${target}`,
+        coordinatorGeneration: 1,
+        sessionPath: target,
+        sessionPathKey: target,
+        fingerprint: 'f',
+        creationReason: 'resume',
+      }),
+      consumePromotionGrant: (grant: any) => grant,
+      abortPromotionGrant: () => undefined,
+    } as any,
+    ownership: {
+      registerHot: async (target: string, owner: any) => ({
+        ...owner,
+        canonicalSessionPath: target,
+        ownershipRevision: owner.workerGeneration,
+        nonce: `lease-${owner.workerGeneration}`,
+      }),
+      reconcileCrash: async () => undefined,
+    } as any,
+    emit: (event, payload) => emitted.push([event, payload]),
+    scheduler: clock,
+    syncAckTimeoutMs: 50,
+    buildPromotionSnapshot: async (target) => ({
+      sdkPath: '/sdk',
+      agentDir: '/agent',
+      startupCwd: '/',
+      sessionDir: '/sessions',
+      openedPayload: opened(target) as any,
+      modelSettings: { defaultModel: 'm', defaultThinkingLevel: 'off' },
+    }),
+  });
+
+  await router.promote(sessionA);
+  const stalledBroadcast = router.syncRuntimePrefs({ compact: true });
+  for (let turn = 0; turn < 4 && !calls.get(sessionA)?.some((body) =>
+    body.kind === 'sync' && body.domain === 'runtimePrefs' && body.revision === 2); turn += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.ok(calls.get(sessionA)?.some((body) =>
+    body.kind === 'sync' && body.domain === 'runtimePrefs' && body.revision === 2));
+
+  let secondPromotionSettled = false;
+  const secondPromotion = router.promote(sessionB).then((route) => {
+    secondPromotionSettled = true;
+    return route;
+  });
+  for (let turn = 0; turn < 6 && !secondPromotionSettled; turn += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(secondPromotionSettled, true, 'session B startup must not join session A\'s missing ACK');
+  const healthyRoute = await secondPromotion;
+  assert.equal(healthyRoute.state, 'hot');
+  assert.ok(calls.get(sessionB)?.some((body) =>
+    body.kind === 'sync' && body.domain === 'runtimePrefs' && body.revision === 2),
+  'the replacement startup observes the latest monotonic revision');
+
+  clock.advance(51);
+  await stalledBroadcast;
+  assert.ok(stopped.includes(sessionA), 'the non-acking worker is retired after its deadline');
+  assert.equal(router.getRoute(sessionA).state, 'cold');
+  assert.equal(router.getRoute(sessionB).state, 'hot');
+  assert.ok(emitted.some(([event, payload]) => event === 'operational-error'
+    && payload.code === 'SESSION_WORKER_SYNC_FAILED'
+    && payload.domain === 'runtimePrefs'
+    && payload.workerId === 'isolation-worker-1'));
+
+  // The failed completion is rejection-neutral in both the global revision
+  // lock and worker-local tails; unrelated authoritative updates keep flowing.
+  await router.syncCatalog([{ id: 'after-timeout' }]);
+  assert.ok(calls.get(sessionB)?.some((body) =>
+    body.kind === 'sync' && body.domain === 'catalog' && body.revision === 2));
 });
 
 test('phase6 concurrent settings mutations serialize revisions so no worker skips a newer value', async () => {

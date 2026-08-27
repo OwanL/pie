@@ -180,7 +180,7 @@ test('settings.json merge preserves user-selected chat and pruning models while 
       tools: { alwaysKeep: ['read', 'bash'] },
     },
     lastChangelogVersion: '9.9.9',
-    subagent: { confirmProjectAgents: true },
+    customFeature: { enabled: true },
     sessionDir: 'data/outcomes/sessions',
   };
   const merged = mod.generate(source, base).settingsJson as Record<string, unknown>;
@@ -199,7 +199,7 @@ test('settings.json merge preserves user-selected chat and pruning models while 
   assert.equal(merged.httpIdleTimeoutMs, 999);
   assert.deepEqual(merged.packages, ['npm:foo@1.0.0']);
   assert.equal(merged.lastChangelogVersion, '9.9.9');
-  assert.deepEqual(merged.subagent, { confirmProjectAgents: true });
+  assert.deepEqual(merged.customFeature, { enabled: true });
   assert.equal(merged.sessionDir, 'data/outcomes/sessions');
   assert.deepEqual(pruning.tools, { alwaysKeep: ['read', 'bash'] });
   // The legacy `proxy` block (if present in an old settings.json) is stripped.

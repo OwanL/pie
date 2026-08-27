@@ -30,7 +30,11 @@ interface HandlerDeps {
 let reviewAutoCloseCorrIdCounter = 0;
 
 export function onSessionListChanged(payload: SessionListChangedPayload, deps: HandlerDeps): void {
-  deps.dispatchArch({ kind: 'SessionListChanged', sessionSummaries: payload.sessions });
+  deps.dispatchArch({
+    kind: 'SessionListChanged',
+    sessionSummaries: payload.sessions,
+    sessionCatalogProgress: payload.sessionCatalogProgress,
+  });
 
   // Review persistence is not a lifecycle command. Drain only explicit V2
   // closeReviewed/closeSelf outbox actions through the normal CQRS close path.

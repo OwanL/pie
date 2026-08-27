@@ -82,6 +82,7 @@ import {
   handleExtensionUIRequest,
   handleError,
   handleNoticeShown,
+  handleEditTruncateRecoveryChanged,
   handlePendingExtensionUIRequestsCleared,
 } from './reducer/ui-handlers.js';
 import {
@@ -357,6 +358,10 @@ export function reducer(state: ArchState, event: Event): ReducerResult {
 
     case 'NoticeShown': {
       return handleNoticeShown(state, event);
+    }
+
+    case 'EditTruncateRecoveryChanged': {
+      return handleEditTruncateRecoveryChanged(state, event);
     }
 
     case 'McpServersUpdated': {

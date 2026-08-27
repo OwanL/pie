@@ -33,7 +33,7 @@ import type {
 } from '../../../shared/protocol';
 import type { ClientTransport, ClientConnectionState } from '../../transport/client-transport';
 import { pendingCommandStore } from '../../transport/pending-command-store';
-import { DEFAULT_CHAT_PREFS, DEFAULT_PRUNING_SETTINGS, DEFAULT_TOOL_RESULT_PRUNING_SETTINGS, EMPTY_TRANSCRIPT_WINDOW, WEBVIEW_PROTOCOL_VERSION } from '../../../shared/protocol';
+import { DEFAULT_CHAT_PREFS, DEFAULT_PRUNING_SETTINGS, DEFAULT_TOOL_RESULT_PRUNING_SETTINGS, EMPTY_TRANSCRIPT_WINDOW, PIE_BUILD_ID, WEBVIEW_PROTOCOL_VERSION } from '../../../shared/protocol';
 import { EMPTY_AGGREGATE_STATS } from '../../../shared/protocol';
 import { pickStable } from '../utils/view-state-stabilize';
 import { pickStableModelList } from '../utils/model-list-stabilize';
@@ -43,6 +43,7 @@ import { recordRenderEvidenceTarget } from '../render-error';
 
 export const EMPTY_VIEW_STATE: ViewState = {
   sessions: [],
+  sessionCatalogProgress: { complete: true, processed: 0, total: 0 },
   openTabPaths: [],
   pinnedTabPaths: [],
   pinnedTabGroups: [],
@@ -67,6 +68,7 @@ export const EMPTY_VIEW_STATE: ViewState = {
   retryStatus: null,
   liveTurnPhase: null,
   notice: null,
+  noticeSessionPath: null,
   noticeKind: null,
   backendReady: false,
   workspaceCwd: null,
@@ -320,6 +322,9 @@ interface HostMessageContext {
   lastRevisionRef: { current: number };
   activeSessionPathRef: { current: string | null };
   committedSessionPathRef: { current: string | null };
+  /** Terminal fence for a host/webview generation mismatch. */
+  compatibilityFailedRef: { current: boolean };
+  onCompatibilityMismatch: () => void;
   clearTransientUi: () => void;
   optimisticOps: OptimisticMessageOps;
   draftOps: DraftRestoreOps;
@@ -333,32 +338,44 @@ interface HostMessageContext {
 /** Tracks whether the webview has already warned about a host/webview
  * protocol mismatch, so the warning fires once rather than on every state
  * message. */
-let warnedProtocolMismatch = false;
+let warnedCompatibilityMismatch = false;
 
 /**
- * Warn (once) when the host posts a webview-channel protocol version that does
- * not match this build's compiled-in expectation. The webview does not refuse
- * to load — it ships together with the host, so a mismatch generally indicates
- * a stale hot-reload rather than a genuine incompatibility.
+ * Reject state from a different protocol or source build. A stale renderer may
+ * observe a new host (or vice versa) during an in-place rebuild; applying even
+ * one incompatible snapshot would let the two generations exchange commands.
  */
-function warnOnProtocolMismatch(hostProtocolVersion: number): void {
-  if (warnedProtocolMismatch) {
-    return;
-  }
-  if (hostProtocolVersion !== WEBVIEW_PROTOCOL_VERSION) {
-    warnedProtocolMismatch = true;
+function rejectCompatibilityMismatch(
+  message: Extract<HostToWebviewMessage, { type: 'state' }>,
+  ctx: HostMessageContext,
+): boolean {
+  if (message.protocolVersion === WEBVIEW_PROTOCOL_VERSION && message.buildId === PIE_BUILD_ID) return false;
+  ctx.compatibilityFailedRef.current = true;
+  if (!warnedCompatibilityMismatch) {
+    warnedCompatibilityMismatch = true;
     webviewLog(
-      'warn',
+      'error',
       'host-sync',
-      `webview protocol mismatch: host posted version ${hostProtocolVersion} but this webview build expects ${WEBVIEW_PROTOCOL_VERSION}`,
-      { note: 'This usually means a stale hot-reload — rebuild and reload both sides together.' },
+      'host/webview compatibility mismatch; state was rejected',
+      {
+        actualBuildId: message.buildId ?? null,
+        actualProtocolVersion: message.protocolVersion,
+        expectedBuildId: PIE_BUILD_ID,
+        expectedProtocolVersion: WEBVIEW_PROTOCOL_VERSION,
+      },
     );
   }
+  ctx.setCommitTarget(null);
+  ctx.setInlineConfirm(null);
+  clearLazyDetailCache();
+  clearDetailSubscriptionStore();
+  ctx.onCompatibilityMismatch();
+  return true;
 }
 
 function handleStateMessage(msg: HostToWebviewMessage, ctx: HostMessageContext) {
   const m = msg as Extract<HostToWebviewMessage, { type: 'state' }>;
-  warnOnProtocolMismatch(m.protocolVersion);
+  if (rejectCompatibilityMismatch(m, ctx)) return;
 
   // ── Brief D: revision guard (total) ──────────────────────────────────
   // Discard out-of-order / duplicate envelopes TOTALLY, before any state
@@ -542,6 +559,7 @@ const HOST_MESSAGE_HANDLERS: Record<string, HostMessageHandler | undefined> = {
 };
 
 export function dispatchHostMessage(msg: HostToWebviewMessage, ctx: HostMessageContext) {
+  if (ctx.compatibilityFailedRef.current) return;
   const handler = HOST_MESSAGE_HANDLERS[msg.type];
   if (handler) {
     handler(msg, ctx);
@@ -571,17 +589,20 @@ export function useHostSync(
   const [optimisticMessages, setOptimisticMessages] = useState<OptimisticUserMessage[]>([]);
   const [commitTarget, setCommitTarget] = useState<TranscriptCommitTarget | null>(null);
   const [connectionState, setConnectionState] = useState<ClientConnectionState>(transport.getConnectionState());
+  const [compatibilityFailed, setCompatibilityFailed] = useState(false);
   const [inlineConfirm, setInlineConfirm] = useState<Extract<HostToWebviewMessage, { type: 'inlineConfirm' }> | null>(null);
+  const compatibilityFailedRef = useRef(false);
 
   const postMessage = useCallback((msg: WebviewToHostMessage): boolean => {
+    if (compatibilityFailedRef.current) return false;
     return transport.postMessage(msg);
   }, [transport]);
 
   const respondToInlineConfirm = useCallback((confirmId: string, confirmed: boolean): void => {
-    if (transport.postMessage({ type: 'inlineConfirmResponse', confirmId, confirmed })) {
+    if (postMessage({ type: 'inlineConfirmResponse', confirmId, confirmed })) {
       setInlineConfirm(null);
     }
-  }, [transport]);
+  }, [postMessage]);
 
   const hostInstanceIdRef = useRef('');
   // Brief D: last applied snapshot revision. Revisions are 1-based on the
@@ -684,6 +705,7 @@ export function useHostSync(
   useEffect(() => {
     setLazyDetailPostMessage(postMessage);
     const handleMessage = (message: HostToWebviewMessage) => {
+      if (compatibilityFailedRef.current) return;
       // Legacy lazy-detail correlation (superseded for NEW subscriptions by
       // Phase 5's detail.subscribe protocol, but still served for existing
       // lazy refs).
@@ -707,6 +729,8 @@ export function useHostSync(
         lastRevisionRef,
         activeSessionPathRef,
         committedSessionPathRef,
+        compatibilityFailedRef,
+        onCompatibilityMismatch: () => setCompatibilityFailed(true),
         clearTransientUi,
         optimisticOps: optimisticOpsRef.current,
         draftOps: draftOpsRef.current,
@@ -731,17 +755,19 @@ export function useHostSync(
     };
   }, [clearTransientUi, postMessage, resetPerSessionState, hydrateViewState, transport]);
 
+  const effectiveConnectionState: ClientConnectionState = compatibilityFailed ? 'reload-required' : connectionState;
+
   useEffect(() => {
     // Re-pump explicit lazy-detail requests after a browser reconnect. A
     // request rejected while disconnected remains queued rather than getting
     // stuck in the single active slot.
     setLazyDetailPostMessage(postMessage);
-    if (connectionState !== 'connected') {
+    if (effectiveConnectionState !== 'connected') {
       // Browser confirmations are canceled host-side when their renderer
       // disconnects; never leave the old imperative dialog actionable.
       setInlineConfirm(null);
     }
-  }, [connectionState, postMessage]);
+  }, [effectiveConnectionState, postMessage]);
 
   useFocusRefresh(postMessage);
 
@@ -758,7 +784,7 @@ export function useHostSync(
     activeSessionPathRef,
     setDraftRestore,
     addOptimisticMessage,
-    connectionState,
+    connectionState: effectiveConnectionState,
     inlineConfirm,
     respondToInlineConfirm,
   };

@@ -22,6 +22,7 @@ export function handleDetailSubscribe(
         corrId: cmd.corrId,
         viewGeneration: cmd.viewGeneration,
         detailKey: cmd.detailKey,
+        detailAttempt: cmd.detailAttempt,
         address: cmd.address,
         ...(cmd.cursor !== undefined ? { cursor: cmd.cursor } : {}),
         ...(cmd.rendererId !== undefined && cmd.rendererGeneration !== undefined
@@ -44,6 +45,7 @@ export function handleDetailUnsubscribe(
         corrId: cmd.corrId,
         viewGeneration: cmd.viewGeneration,
         detailKey: cmd.detailKey,
+        detailAttempt: cmd.detailAttempt,
         reason: cmd.reason,
         ...(cmd.rendererId !== undefined && cmd.rendererGeneration !== undefined
           ? { rendererId: cmd.rendererId, rendererGeneration: cmd.rendererGeneration }
@@ -65,6 +67,7 @@ export function handleDetailFetchPages(
         corrId: cmd.corrId,
         viewGeneration: cmd.viewGeneration,
         detailKey: cmd.detailKey,
+        detailAttempt: cmd.detailAttempt,
         ref: cmd.ref,
         ...(cmd.rendererId !== undefined && cmd.rendererGeneration !== undefined
           ? { rendererId: cmd.rendererId, rendererGeneration: cmd.rendererGeneration }

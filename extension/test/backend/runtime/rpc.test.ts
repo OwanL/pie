@@ -18,13 +18,17 @@ import { THINKING_LEVELS } from '../../../src/shared/thinking-level';
 
 test('parseArgs carries the host-authoritative backend generation and validates it', () => {
   assert.deepEqual(
-    parseArgs(['--sdkPath', '/sdk', '--cwd', '/work', '--backendGeneration', '7', '--hostPid', '123']),
-    { sdkPath: '/sdk', cwd: '/work', backendGeneration: 7, hostPid: 123 },
+    parseArgs(['--sdkPath', '/sdk', '--cwd', '/work', '--backendGeneration', '7', '--hostPid', '123', '--lifetimeFd', '3']),
+    { sdkPath: '/sdk', cwd: '/work', backendGeneration: 7, hostPid: 123, lifetimeFd: 3 },
   );
   assert.equal(parseArgs(['--sdkPath', '/sdk']).backendGeneration, 1);
   assert.throws(
     () => parseArgs(['--sdkPath', '/sdk', '--backendGeneration', '0']),
     /Invalid --backendGeneration/,
+  );
+  assert.throws(
+    () => parseArgs(['--sdkPath', '/sdk', '--lifetimeFd', '2']),
+    /Invalid --lifetimeFd/,
   );
 });
 

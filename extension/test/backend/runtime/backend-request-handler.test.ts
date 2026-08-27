@@ -136,7 +136,7 @@ function createHarness(overrides: {
       viewedSessionPath = sessionPath;
       return true;
     },
-    async buildSessionOpenedPayload(sessionPath, selectionToken, _transcript, _transport, operationId, operationAttempt) {
+    async buildSessionOpenedPayload(sessionPath, selectionToken, _transcript, _transport, operationId, operationAttempt, systemPromptDisabledEntries) {
       return {
         session: { path: sessionPath, cwd: '/repo', name: 'Session', modifiedAt: '2026-01-01T00:00:00.000Z', messageCount: 0 },
         transcript: [],
@@ -146,6 +146,9 @@ function createHarness(overrides: {
         selectionToken,
         operationId,
         operationAttempt,
+        ...(systemPromptDisabledEntries !== undefined
+          ? { systemPromptDisabledEntries: [...systemPromptDisabledEntries] }
+          : {}),
       };
     },
     async applySystemPromptToggles(sessionPath, disabledEntries) {
@@ -399,18 +402,26 @@ test('session page transport culls oversized images with headroom and types a re
   const requiredTail = {
     id: 'required-tail', role: 'assistant' as const, createdAt: '2026-01-01T00:00:01.000Z', markdown: 'keep', status: 'completed' as const,
   };
-  harness.deps.loadTranscriptPage = async (sessionPath) => ({
+  let receivedPageOptions: unknown;
+  harness.deps.loadTranscriptPage = async (sessionPath, _direction, _start, _end, options) => {
+    receivedPageOptions = options;
+    return {
     sessionPath,
     transcript: [oversizedImage, requiredTail],
     transcriptWindow: { totalCount: 2, loadedStart: 0, loadedEnd: 2, hasOlder: false, hasNewer: false, isPartial: false, hasUserMessages: true },
     busy: false,
-  });
+    };
+  };
 
   const bounded = await handleBackendRequest(harness.deps, {
     id: 'bounded-page', method: 'session.loadTranscriptPage',
     params: { sessionPath: '/repo/session.jsonl', direction: 'latest' },
   }) as import('../../../src/shared/protocol').TranscriptPagePayload;
   assert.deepEqual(bounded.transcript.map((message) => message.id), ['required-tail']);
+  assert.deepEqual(receivedPageOptions, {
+    transport: { kind: 'response', requestId: 'bounded-page' },
+    requiredMessageId: undefined,
+  });
   assert.ok(sessionSnapshotLineBytes(bounded, { kind: 'response', requestId: 'bounded-page' }) <= SESSION_SNAPSHOT_MAX_LINE_BYTES);
   assert.ok(SESSION_SNAPSHOT_MAX_LINE_BYTES < JSONL_MAX_LINE_BYTES, 'snapshot producer reserves explicit envelope headroom');
 
@@ -1329,6 +1340,144 @@ test('settings.set applies live model changes and rolls back persisted settings 
     // merge-persisted settings.json.
     { defaultModel: 'model-a', defaultThinkingLevel: 'medium', defaultProvider: undefined },
   ]);
+});
+
+test('settings.set persists an explicit provider-only default update', async () => {
+  const harness = createHarness({
+    modelSettings: {
+      defaultModel: 'model-a',
+      defaultProvider: 'provider-a',
+      defaultThinkingLevel: 'medium',
+    },
+  });
+
+  const updated = await handleBackendRequest(harness.deps, {
+    id: 'settings-provider-only',
+    method: 'settings.set',
+    params: { defaultProvider: 'provider-b' },
+  });
+
+  assert.deepEqual(harness.writtenSettings, [{ defaultProvider: 'provider-b' }]);
+  assert.deepEqual(updated, {
+    defaultModel: 'model-a',
+    defaultProvider: 'provider-b',
+    defaultThinkingLevel: 'medium',
+  });
+});
+
+test('settings.set persists cold per-session model and reasoning choices instead of changing only the global default', async () => {
+  const harness = createHarness();
+  harness.deps.getSessionContext = () => undefined;
+  harness.deps.listAvailableModels = () => [{
+    id: 'model-b',
+    name: 'Model B',
+    provider: 'mock',
+    reasoning: true,
+    inputKinds: ['text'],
+  }];
+  const coldWrites: Array<{
+    sessionPath: string;
+    updates: {
+      model?: { provider: string; modelId: string };
+      thinkingLevel?: ModelSettings['defaultThinkingLevel'];
+    };
+  }> = [];
+  harness.deps.applyColdSessionModelSettings = async (sessionPath, updates) => {
+    coldWrites.push({ sessionPath, updates });
+  };
+
+  const updated = await handleBackendRequest(harness.deps, {
+    id: 'settings-set-cold',
+    method: 'settings.set',
+    params: {
+      sessionPath: '/repo/session.jsonl',
+      defaultModel: 'model-b',
+      defaultProvider: 'mock',
+      defaultThinkingLevel: 'high',
+    },
+  });
+
+  assert.deepEqual(updated, {
+    defaultModel: 'model-b',
+    defaultProvider: 'mock',
+    defaultThinkingLevel: 'high',
+  });
+  assert.deepEqual(harness.writtenSettings, [{
+    defaultModel: 'model-b',
+    defaultProvider: 'mock',
+    defaultThinkingLevel: 'high',
+  }]);
+  assert.deepEqual(coldWrites, [{
+    sessionPath: '/repo/session.jsonl',
+    updates: {
+      model: { provider: 'mock', modelId: 'model-b' },
+      thinkingLevel: 'high',
+    },
+  }]);
+});
+
+test('settings.set rolls back the global default when a cold per-session append fails', async () => {
+  const harness = createHarness();
+  harness.deps.getSessionContext = () => undefined;
+  harness.deps.listAvailableModels = () => [{
+    id: 'model-b',
+    name: 'Model B',
+    provider: 'mock',
+    reasoning: true,
+    inputKinds: ['text'],
+  }];
+  harness.deps.applyColdSessionModelSettings = async () => {
+    throw new Error('cold append failed');
+  };
+
+  await assert.rejects(handleBackendRequest(harness.deps, {
+    id: 'settings-set-cold-failure',
+    method: 'settings.set',
+    params: {
+      sessionPath: '/repo/session.jsonl',
+      defaultModel: 'model-b',
+      defaultProvider: 'mock',
+      defaultThinkingLevel: 'high',
+    },
+  }), /cold append failed/);
+
+  assert.deepEqual(harness.writtenSettings, [
+    { defaultModel: 'model-b', defaultProvider: 'mock', defaultThinkingLevel: 'high' },
+    { defaultModel: 'model-a', defaultThinkingLevel: 'medium', defaultProvider: undefined },
+  ]);
+});
+
+test('systemPromptToggles.set persists and confirms a cold session without creating a runtime', async () => {
+  const harness = createHarness();
+  harness.deps.getSessionContext = () => undefined;
+  harness.deps.ensureSessionContext = async () => {
+    assert.fail('a cold prompt toggle must not promote or ensure a runtime');
+  };
+  const writes: Array<{ sessionPath: string; disabledEntries: string[] }> = [];
+  harness.deps.applyColdSystemPromptToggles = async (sessionPath, disabledEntries) => {
+    writes.push({ sessionPath, disabledEntries: [...disabledEntries] });
+  };
+
+  const result = await handleBackendRequest(harness.deps, {
+    id: 'system-prompt-toggle-cold',
+    method: 'systemPromptToggles.set',
+    params: {
+      sessionPath: '/repo/session.jsonl',
+      disabledEntries: ['skills', 'skills', 'tools'],
+    },
+  });
+
+  assert.deepEqual(result, { ok: true });
+  assert.deepEqual(writes, [{
+    sessionPath: '/repo/session.jsonl',
+    disabledEntries: ['skills', 'skills', 'tools'],
+  }]);
+  const opened = harness.emitted.at(-1);
+  assert.equal(opened?.event, 'session.opened');
+  assert.deepEqual(
+    (opened?.payload as { systemPromptDisabledEntries?: string[] }).systemPromptDisabledEntries,
+    ['skills', 'tools'],
+  );
 });
 
 test('settings.set rejects live model switch while a session is busy', async () => {

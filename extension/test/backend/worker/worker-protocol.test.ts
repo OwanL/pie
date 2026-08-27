@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { SDK_PATCH_IDENTITY_VERSION } from '../../../src/backend/sdk-patch-barrier';
 import {
   WORKER_IPC_MAX_FRAME_BYTES,
   WORKER_IPC_MAX_ORDINARY_FRAME_BYTES,
@@ -25,7 +26,7 @@ const base: WorkerFrameBase = {
 };
 
 const sdkPatchIdentity = {
-  identityVersion: 3 as const,
+  identityVersion: SDK_PATCH_IDENTITY_VERSION,
   sdkPath: 'C:/sdk',
   sdkVersion: '0.80.6',
   terminalDurability: { patchVersion: 1, relativePath: 'dist/core/agent-session.js', sha256: 'a'.repeat(64) },
@@ -200,7 +201,7 @@ test('Phase 5 private protocol accepts subscribe/unsubscribe/fetch and six close
     { ...base, kind: 'detail.fetch', requestId: 'fetch', subscriptionId: 'subscription-1', address, ref: { baselineRevision: 1, pageIndex: 0, pageCount: 1 }, maxPageBytes: 4096 },
   ];
   const workerFrames = [
-    { ...base, kind: 'detail.start', requestId: 'subscribe', subscriptionId: 'subscription-1', address, source: 'live', baselineRevision: 1, pageCount: 1, totalBytes: 4 },
+    { ...base, kind: 'detail.start', requestId: 'subscribe', subscriptionId: 'subscription-1', address, source: 'live', baselineRevision: 1, pageCount: 1, totalBytes: 4, totalCodePoints: 4 },
     { ...base, kind: 'detail.page', subscriptionId: 'subscription-1', ref: { baselineRevision: 1, pageIndex: 0, pageCount: 1 }, payload, payloadBytes: Buffer.byteLength(JSON.stringify(payload)), checksum: 'a'.repeat(64) },
     { ...base, kind: 'detail.delta', subscriptionId: 'subscription-1', baseRevision: 1, revision: 2, operations: [{ op: 'appendString', path: ['text'], value: 'x' }] },
     { ...base, kind: 'detail.rebase', subscriptionId: 'subscription-1', currentRevision: 2, reason: 'gap' },

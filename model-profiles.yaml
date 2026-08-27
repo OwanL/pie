@@ -250,6 +250,14 @@ profiles:
       - xhigh
     disabled_reason: null
   - provider: ollama
+    id: glm-5.3-flash:cloud
+    eligible: true
+    thinking:
+      - low
+      - high
+      - max
+    disabled_reason: null
+  - provider: ollama
     id: glm-5.2:cloud
     eligible: true
     thinking:

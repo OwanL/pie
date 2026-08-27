@@ -18,7 +18,7 @@ import { act } from 'preact/test-utils';
 import { App, EMPTY_VIEW_STATE } from '../../../src/webview/panel/app';
 import type { AppAdapter } from '../../../src/webview/panel/app';
 import type { ViewState, ChatMessage, HostToWebviewMessage, ExtensionUIRequestPayload } from '../../../src/shared/protocol';
-import { DEFAULT_CHAT_PREFS, EMPTY_TRANSCRIPT_WINDOW, WEBVIEW_PROTOCOL_VERSION } from '../../../src/shared/protocol';
+import { DEFAULT_CHAT_PREFS, EMPTY_TRANSCRIPT_WINDOW, PIE_BUILD_ID, WEBVIEW_PROTOCOL_VERSION } from '../../../src/shared/protocol';
 import type { ClientTransport } from '../../../src/webview/transport/client-transport';
 
 /** Minimal in-memory transport: records outbound, forwards inbound. Mirrors
@@ -78,6 +78,7 @@ function stateEnvelope(
   return {
     type: 'state',
     protocolVersion: WEBVIEW_PROTOCOL_VERSION,
+    buildId: PIE_BUILD_ID,
     hostInstanceId,
     rendererId: 'renderer-1',
     rendererGeneration: 1,

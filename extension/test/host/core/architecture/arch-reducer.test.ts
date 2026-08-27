@@ -19,6 +19,65 @@ test('reducer: initial state has empty pending ops and sessions records', () => 
   assert.deepEqual(initialArchState.sessions.interruptInFlightBySession, {});
 });
 
+test('reducer: truncate-timeout recovery notice preserves its optimistic edit and clears only its own notice', () => {
+  const state: ArchState = {
+    ...readyState,
+    pending: {
+      ...readyState.pending,
+      ops: {
+        'edit-recovery': {
+          kind: 'edit',
+          sessionPath: '/a',
+          localId: 'replacement-local',
+          previousSummary: null,
+          startedAt: 1,
+          removedTail: [],
+          editDraft: { messageId: 'old-user', text: 'replacement', inputs: [] },
+        },
+      },
+    },
+  };
+
+  const recovering = reducer(state, {
+    kind: 'EditTruncateRecoveryChanged',
+    corrId: 'edit-recovery',
+    sessionPath: '/a',
+    phase: 'recovering',
+  });
+  assert.equal(recovering.state.settings.notice, 'Saving your edit and restarting this session…');
+  assert.equal(recovering.state.settings.noticeSessionPath, '/a');
+  assert.deepEqual(recovering.state.pending.ops['edit-recovery'], state.pending.ops['edit-recovery']);
+
+  const unrelated = reducer(recovering.state, {
+    kind: 'NoticeShown',
+    notice: 'A newer warning',
+    sessionPath: '/a',
+  });
+  const lateRecovered = reducer(unrelated.state, {
+    kind: 'EditTruncateRecoveryChanged',
+    corrId: 'edit-recovery',
+    sessionPath: '/a',
+    phase: 'recovered',
+  });
+  assert.equal(lateRecovered.state.settings.notice, 'A newer warning');
+  assert.ok(lateRecovered.state.pending.ops['edit-recovery'], 'recovery status never consumes rollback ownership');
+
+  const restartedNotice = reducer(lateRecovered.state, {
+    kind: 'EditTruncateRecoveryChanged',
+    corrId: 'edit-recovery',
+    sessionPath: '/a',
+    phase: 'recovering',
+  });
+  const acknowledged = reducer(restartedNotice.state, {
+    kind: 'EditTruncateRecoveryChanged',
+    corrId: 'edit-recovery',
+    sessionPath: '/a',
+    phase: 'recovered',
+  });
+  assert.equal(acknowledged.state.settings.notice, null);
+  assert.ok(acknowledged.state.pending.ops['edit-recovery']);
+});
+
 test('reducer: SendResult for unknown corrId is a no-op (state unchanged, no effects)', () => {
   const event: Event = {
     kind: 'SendResult',
@@ -63,6 +122,45 @@ test('reducer: SessionListChanged preserves summaries for open active tabs missi
   assert.equal(result.state.sessions.sessions.length, 1);
   assert.equal(result.state.sessions.sessions[0]?.path, '/session/a');
   assert.equal(result.state.sessions.activeSessionPath, '/session/a');
+});
+
+test('reducer: session catalog progress projects immediately and clears on completion', () => {
+  const partial = reducer(initialArchState, {
+    kind: 'SessionListChanged',
+    sessionSummaries: [],
+    sessionCatalogProgress: { complete: false, processed: 24, total: 1_158 },
+  }).state;
+
+  assert.deepEqual(partial.sessions.sessionCatalogProgress, {
+    complete: false,
+    processed: 24,
+    total: 1_158,
+  });
+  assert.deepEqual(selectViewState(partial).sessionCatalogProgress, partial.sessions.sessionCatalogProgress);
+
+  const legacyRefresh = reducer(partial, {
+    kind: 'SessionListChanged',
+    sessionSummaries: [],
+  }).state;
+  assert.deepEqual(
+    legacyRefresh.sessions.sessionCatalogProgress,
+    partial.sessions.sessionCatalogProgress,
+    'a legacy event cannot silently claim the progressive catalog is complete',
+  );
+
+  const complete = reducer(legacyRefresh, {
+    kind: 'SessionListChanged',
+    sessionSummaries: [],
+    sessionCatalogProgress: { complete: true, processed: 1_158, total: 1_158 },
+  }).state;
+  assert.equal(complete.sessions.sessionCatalogProgress.complete, true);
+
+  const restarted = reducer(partial, { kind: 'BackendReadyChanged', ready: false }).state;
+  assert.deepEqual(restarted.sessions.sessionCatalogProgress, {
+    complete: true,
+    processed: 0,
+    total: 0,
+  });
 });
 
 test('reducer: stable session identity clears a stale path-fallback marker', () => {

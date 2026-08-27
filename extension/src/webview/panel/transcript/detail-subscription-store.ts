@@ -5,7 +5,7 @@
  *
  * - collapsed cards never subscribe (bounded compact preview only);
  * - explicit/auto expansion sends exactly one `detail.subscribe` carrying the
- *   current viewGeneration/detailKey/address;
+ *   current viewGeneration/detailKey/detailAttempt/address;
  * - collapse immediately discards heavy pages/value/measurements and sends
  *   `detail.unsubscribe` (even while the close animation is still running);
  * - re-expansion before the first acknowledgement mints a new owner attempt;
@@ -110,6 +110,7 @@ export function setDetailStoreContext(
     // the old owner must be discarded so the expanded hook can resubscribe.
     for (const record of [...records.values()]) discardRecord(record, false);
     records.clear();
+    detailAttemptCounter = 0;
     fetchInFlight.clear();
     notifyAll();
   }
@@ -189,6 +190,10 @@ const tombstonedSubscriptionIds = new Set<string>();
 /** Cheap per-key cursor metadata that survives collapse (re-expansion sends it
  *  back with the next subscribe). Never holds pages or values. */
 const cursorByKey = new Map<string, DetailCursor>();
+/** Renderer-local monotonic owner sequence. A route/generation reset starts a
+ * new namespace; within one namespace every expansion gets a larger attempt,
+ * so no per-card attempt ledger can grow with transcript length. */
+let detailAttemptCounter = 0;
 const subscribersByKey = new Map<string, Set<() => void>>();
 /** In-flight page refetch keys (`detail.fetchPages` already sent). */
 const fetchInFlight = new Set<string>();
@@ -253,7 +258,7 @@ export function openDetailSubscription(options: {
     detailKey,
     viewGeneration: context.viewGeneration,
     address: cloneAddress(address),
-    attempt: (existing?.attempt ?? 0) + 1,
+    attempt: mintDetailAttempt(),
     phase: 'subscribing',
     route: null,
     baselineRevision: 0,
@@ -276,6 +281,7 @@ export function openDetailSubscription(options: {
     type: 'detail.subscribe',
     viewGeneration: record.viewGeneration,
     detailKey,
+    detailAttempt: record.attempt,
     address: cloneAddress(address),
     ...(cursor !== undefined ? { cursor } : {}),
   });
@@ -301,6 +307,7 @@ export function closeDetailSubscription(detailKey: string, reason: 'collapse' | 
       type: 'detail.unsubscribe',
       viewGeneration: record?.viewGeneration ?? context.viewGeneration,
       detailKey,
+      detailAttempt: record?.attempt ?? 1,
       reason,
     });
   }
@@ -322,6 +329,7 @@ export function clearDetailSubscriptionStore(): void {
   pages.clear();
   tombstonedSubscriptionIds.clear();
   cursorByKey.clear();
+  detailAttemptCounter = 0;
   fetchInFlight.clear();
   notifyAll();
 }
@@ -364,6 +372,9 @@ export function receiveDetailImperative(message: DetailStreamMessage): void {
   if (!record) return; // unknown or already-collapsed key
   if (record.viewGeneration !== message.viewGeneration) return;
   if (context.hostInstanceId && message.hostInstanceId !== context.hostInstanceId) return;
+  if (message.rendererId !== context.rendererId
+    || message.rendererGeneration !== context.rendererGeneration) return;
+  if (message.detailAttempt !== record.attempt) return;
   // A `detail.start` binds the owner; stream content (page/delta/rebase/
   // terminal) must match the bound route exactly. `detail.error` may arrive
   // before the start (subscribe rejection): its case checks the tombstone
@@ -391,6 +402,7 @@ export function receiveDetailImperative(message: DetailStreamMessage): void {
           ? { workerId: message.workerId, workerGeneration: message.workerGeneration }
           : {}),
         detailKey: message.detailKey,
+        detailAttempt: message.detailAttempt,
         subscriptionId: message.subscriptionId,
       };
       record.baselineRevision = message.baselineRevision;
@@ -441,10 +453,12 @@ export function receiveDetailImperative(message: DetailStreamMessage): void {
         startRebase(record, 'gap', true);
         return;
       }
-      if (!record.value) {
-        // Deltas arrive strictly after the baseline pages (FIFO transport).
-        // If the value was never assembled (eviction), a fresh baseline is
-        // cheaper than replaying the delta against reassembled pages.
+      const assembledForDelta = record.value === null;
+      if (assembledForDelta && !ensureRecordValue(record)) {
+        // FIFO guarantees that a delta follows its baseline pages, but Preact
+        // is not guaranteed to render (and lazily assemble them) between two
+        // imperative frames. Assemble a complete cached baseline here before
+        // concluding that eviction/corruption requires a fresh baseline.
         startRebase(record, 'gap', true);
         return;
       }
@@ -456,6 +470,7 @@ export function receiveDetailImperative(message: DetailStreamMessage): void {
       record.value = applied.value;
       record.revision = message.revision;
       touchRecord(record);
+      if (assembledForDelta) enforceBounds();
       notifyKey(record.detailKey);
       return;
     }
@@ -480,6 +495,7 @@ export function receiveDetailImperative(message: DetailStreamMessage): void {
         openDetailSubscription({ detailKey: record.detailKey, address: record.address });
         return;
       }
+      enforceBounds();
       notifyKey(record.detailKey);
       return;
     }
@@ -499,6 +515,7 @@ export function receiveDetailImperative(message: DetailStreamMessage): void {
 
 function routeMatches(route: HostDetailRoute, message: HostDetailRoute): boolean {
   return route.subscriptionId === message.subscriptionId
+    && route.detailAttempt === message.detailAttempt
     && route.hostGeneration === message.hostGeneration
     && route.rendererId === message.rendererId
     && route.rendererGeneration === message.rendererGeneration
@@ -563,6 +580,14 @@ function tombstoneSubscriptionId(subscriptionId: string): void {
   }
 }
 
+function mintDetailAttempt(): number {
+  if (detailAttemptCounter >= Number.MAX_SAFE_INTEGER) {
+    throw new Error('Detail subscription attempt sequence exhausted.');
+  }
+  detailAttemptCounter += 1;
+  return detailAttemptCounter;
+}
+
 function recordCursor(record: DetailSubscriptionRecord, revision: number): void {
   cursorByKey.set(record.detailKey, { revision });
   if (cursorByKey.size > DETAIL_CURSOR_MAX_KEYS) {
@@ -592,8 +617,12 @@ function enforceBounds(): void {
   let evicted = true;
   while (evicted) {
     evicted = false;
-    if (pages.size > budgets.maxGlobalPages || totalPageBytes() > budgets.maxGlobalBytes) {
-      const victimKey = findEvictionVictim(null);
+    const globalBytesExceeded = totalPageBytes() > budgets.maxGlobalBytes;
+    if (pages.size > budgets.maxGlobalPages || globalBytesExceeded) {
+      // A single visible manifest larger than the page-count cache must remain
+      // complete long enough to assemble. Only the byte budget is hard during
+      // that short window; ordinary/assembled records are still evicted first.
+      const victimKey = findEvictionVictim(null, !globalBytesExceeded);
       if (victimKey !== undefined) {
         evictPage(victimKey);
         evicted = true;
@@ -602,6 +631,12 @@ function enforceBounds(): void {
     }
     for (const record of records.values()) {
       if (record.pageIndexes.size <= budgets.maxPagesPerSubscription) continue;
+      // A manifest larger than the transport-cache cap must be allowed to
+      // assemble once; evicting one of its pages on every arrival creates an
+      // impossible refetch loop. Once the derived value exists, its transport
+      // pages become ordinary LRU victims again. The global byte cap remains
+      // the hard memory-pressure boundary throughout assembly.
+      if (record.visible && record.value === null) continue;
       const victimKey = findEvictionVictim(record.detailKey);
       if (victimKey !== undefined) {
         evictPage(victimKey);
@@ -619,9 +654,14 @@ function enforceBounds(): void {
   }
 }
 
-function findEvictionVictim(onlyDetailKey: string | null): string | undefined {
+function findEvictionVictim(
+  onlyDetailKey: string | null,
+  protectOversizedAssembly = false,
+): string | undefined {
   // Classes 1–2 win on the first (oldest) match; class 3 (visible, still
-  // assembling) is the fallback under hard pressure.
+  // assembling) is the fallback under hard pressure. A manifest that cannot
+  // fit the global page-count cache is temporarily pinned unless bytes are the
+  // pressure source; otherwise evict/refetch can never make progress.
   let assemblingFallback: string | undefined;
   for (const key of pages.keys()) {
     if (onlyDetailKey !== null && !key.startsWith(`${onlyDetailKey}\u0000`)) continue;
@@ -629,6 +669,7 @@ function findEvictionVictim(onlyDetailKey: string | null): string | undefined {
     if (!record) return key;
     if (!record.visible) return key;
     if (record.value !== null) return key;
+    if (protectOversizedAssembly && record.pageCount > budgets.maxGlobalPages) continue;
     if (assemblingFallback === undefined) assemblingFallback = key;
   }
   return assemblingFallback;
@@ -803,6 +844,7 @@ function dispatchMissingPageFetches(record: DetailSubscriptionRecord): void {
       type: 'detail.fetchPages',
       viewGeneration: record.viewGeneration,
       detailKey: record.detailKey,
+      detailAttempt: record.attempt,
       ref: { baselineRevision: record.baselineRevision, pageIndex, pageCount: record.pageCount },
     });
   }

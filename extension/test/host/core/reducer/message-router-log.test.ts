@@ -247,15 +247,16 @@ test('replayed close interaction IDs are deduplicated before command dispatch', 
   assert.equal(events.filter((event) => (event as { cmd?: { kind?: string } }).cmd?.kind === 'CloseSession').length, 1);
 });
 
-test('an unexpected route failure on a non-send message surfaces a notice', async () => {
+test('an unexpected detail-service failure settles the initiating card immediately', async () => {
   const events: unknown[] = [];
+  const imperatives: unknown[] = [];
   const router = new MessageRouterCtor(
     (event) => events.push(event),
     () => ({ sessions: { activeSessionPath: '/s', openTabPaths: ['/s'], runningSessionPaths: [] } } as never),
     {
       loadDetail: async () => { throw new Error('detail backend exploded'); },
     } as never,
-    { reveal: () => undefined, postState: () => undefined, postImperative: () => undefined },
+    { reveal: () => undefined, postState: () => undefined, postImperative: (message: unknown) => imperatives.push(message) },
     () => undefined,
     (text: string) => ({ name: text, isPlaceholder: false }),
     () => false,
@@ -270,12 +271,16 @@ test('an unexpected route failure on a non-send message surfaces a notice', asyn
   }
 
   const notices = events.filter((event) => (event as { kind?: string }).kind === 'NoticeShown');
-  assert.equal(notices.length, 1, 'a failed requestDetail must not fail silently');
-  assert.match(
-    (notices[0] as { notice: string }).notice,
-    /could not be completed/,
-    'the generic route-failure notice is surfaced',
-  );
+  assert.equal(notices.length, 0, 'the inline failure avoids a redundant global notice');
+  assert.deepEqual(imperatives, [{
+    type: 'detailResult',
+    result: {
+      sessionPath: '/s',
+      key: 'k',
+      status: 'failure',
+      message: 'Could not load details. Retry to try again.',
+    },
+  }], 'the exact key receives a terminal result that releases the serialized lane');
 });
 
 test('edit rejects an SDK-normalized pending pseudo-path before optimistic truncation', async () => {

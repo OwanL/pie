@@ -24,12 +24,15 @@ export interface BackendArgs {
   backendGeneration: number;
   /** Extension-host PID used to reap the backend after a host crash. */
   hostPid?: number;
+  /** Dedicated inherited descriptor whose EOF proves the host disappeared. */
+  lifetimeFd?: number;
 }
 
 export function parseArgs(argv: string[]): BackendArgs {
   let sdkPath = '';
   let cwd = process.cwd();
   let hostPid: number | undefined;
+  let lifetimeFd: number | undefined;
   let backendGeneration = 1;
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -60,6 +63,15 @@ export function parseArgs(argv: string[]): BackendArgs {
       }
       backendGeneration = parsed;
       index += 1;
+      continue;
+    }
+    if (arg === '--lifetimeFd' && value) {
+      const parsed = Number(value);
+      if (!Number.isSafeInteger(parsed) || parsed < 3) {
+        throw new Error('Invalid --lifetimeFd argument.');
+      }
+      lifetimeFd = parsed;
+      index += 1;
     }
   }
 
@@ -67,7 +79,13 @@ export function parseArgs(argv: string[]): BackendArgs {
     throw new Error('Missing required --sdkPath argument.');
   }
 
-  return { sdkPath, cwd, backendGeneration, ...(hostPid === undefined ? {} : { hostPid }) };
+  return {
+    sdkPath,
+    cwd,
+    backendGeneration,
+    ...(hostPid === undefined ? {} : { hostPid }),
+    ...(lifetimeFd === undefined ? {} : { lifetimeFd }),
+  };
 }
 
 // ─── RPC parameter validation ────────────────────────────────────────────────

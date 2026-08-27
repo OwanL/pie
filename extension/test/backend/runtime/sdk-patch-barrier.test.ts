@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
+import { createRequire, syncBuiltinESMExports } from 'node:module';
 import * as path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import test from 'node:test';
@@ -15,6 +16,15 @@ import {
   type SdkPatchFixtureFingerprints,
   type SdkPatchIdentity,
 } from '../../../src/backend/sdk-patch-barrier';
+import {
+  SDK_SESSION_OPEN_SINGLE_READ_PATCH_VERSION,
+  hasSdkSessionOpenSingleReadMarkers,
+  reverseSdkSessionOpenSingleRead,
+} from '../../../src/backend/sdk-session-open-patch';
+import {
+  SDK_SESSION_OWNERSHIP_MANAGER_PATCH_VERSION,
+  reverseSdkSessionManagerOwnership,
+} from '../../../src/backend/sdk-session-ownership-patch';
 
 const DURABILITY_SOURCE = `
         // Notify all listeners
@@ -104,6 +114,30 @@ async function createSdkFixture(
   );
   await fs.writeFile(path.join(sdkPath, 'dist', 'core', 'agent-session.js'), durabilitySource, 'utf8');
   await fs.writeFile(path.join(sdkPath, RETRY_RELATIVE_PATH), retrySource, 'utf8');
+  const managerPath = path.join(sdkPath, 'dist', 'core', 'session-manager.js');
+  const copiedManager = await fs.readFile(managerPath, 'utf8');
+  let fixtureManager = copiedManager;
+  if (hasSdkSessionOpenSingleReadMarkers(fixtureManager)) {
+    const priorManager = reverseSdkSessionOpenSingleRead(fixtureManager);
+    assert.ok(priorManager, 'the shared manager single-read patch must reverse exactly');
+    fixtureManager = priorManager;
+  }
+  for (
+    let layer = 0;
+    createHash('sha256').update(fixtureManager).digest('hex') !== FIXTURE_MANAGER_SHA256
+      && layer < SDK_SESSION_OWNERSHIP_MANAGER_PATCH_VERSION;
+    layer += 1
+  ) {
+    const priorManager = reverseSdkSessionManagerOwnership(fixtureManager);
+    assert.ok(priorManager, 'the shared manager ownership patch must reverse exactly');
+    fixtureManager = priorManager;
+  }
+  assert.equal(
+    createHash('sha256').update(fixtureManager).digest('hex'),
+    FIXTURE_MANAGER_SHA256,
+    'the shared manager must normalize to the exact supported fixture baseline',
+  );
+  if (fixtureManager !== copiedManager) await fs.writeFile(managerPath, fixtureManager, 'utf8');
   const patchTargets = [
     'dist/core/agent-session.js',
     RETRY_RELATIVE_PATH,
@@ -203,6 +237,52 @@ async function exitedProcessId(): Promise<number> {
   });
 }
 
+async function withSessionReadCount<T>(
+  sessionPath: string,
+  run: () => Promise<T> | T,
+): Promise<{ value: T; reads: number }> {
+  const mutableFs = createRequire(import.meta.url)('node:fs') as typeof import('node:fs');
+  const originalOpenSync = mutableFs.openSync;
+  const expectedPath = path.resolve(sessionPath);
+  let reads = 0;
+  mutableFs.openSync = ((...args: unknown[]) => {
+    const [file, flags] = args;
+    if (flags === 'r' && path.resolve(String(file)) === expectedPath) reads += 1;
+    return Reflect.apply(originalOpenSync, mutableFs, args);
+  }) as typeof mutableFs.openSync;
+  syncBuiltinESMExports();
+  try {
+    return { value: await run(), reads };
+  } finally {
+    mutableFs.openSync = originalOpenSync;
+    syncBuiltinESMExports();
+  }
+}
+
+function sessionManagerSnapshot(manager: {
+  getSessionFile(): string | undefined;
+  getSessionDir(): string;
+  getSessionId(): string;
+  getCwd(): string;
+  getHeader(): unknown;
+  getEntries(): unknown[];
+  getBranch(): unknown[];
+  getTree(): unknown[];
+  buildSessionContext(): unknown;
+}): unknown {
+  return JSON.parse(JSON.stringify({
+    sessionFile: manager.getSessionFile(),
+    sessionDir: manager.getSessionDir(),
+    sessionId: manager.getSessionId(),
+    cwd: manager.getCwd(),
+    header: manager.getHeader(),
+    entries: manager.getEntries(),
+    branch: manager.getBranch(),
+    tree: manager.getTree(),
+    context: manager.buildSessionContext(),
+  }));
+}
+
 test('coordinator barrier patches both files and returns a closed, versioned identity', async () => {
   await withFixture(async ({ sdkPath, lockRoot }) => {
     const identity = await ensureSdkPatchBarrier(sdkPath, { lockRoot });
@@ -214,7 +294,7 @@ test('coordinator barrier patches both files and returns a closed, versioned ide
     assert.equal(identity.retryClassifier.patchVersion, 1);
     assert.equal(identity.coldCreateDurability.patchVersion, 2);
     assert.equal(identity.coldCreateDurability.relativePath, 'dist/core/session-manager.js');
-    assert.equal(identity.sessionOwnershipAdapter.patchVersion, 2);
+    assert.equal(identity.sessionOwnershipAdapter.patchVersion, 3);
     assert.equal(identity.sessionOwnershipAdapter.relativePath, 'dist/core/session-manager.js');
     assert.equal(identity.sessionReplacementAdapter.patchVersion, 10);
     assert.equal(identity.sessionReplacementAdapter.relativePath, 'dist/core/agent-session-runtime.js');
@@ -224,6 +304,12 @@ test('coordinator barrier patches both files and returns a closed, versioned ide
     assert.match(identity.sessionOwnershipAdapter.sha256, /^[a-f0-9]{64}$/u);
     assert.match(identity.sessionReplacementAdapter.sha256, /^[a-f0-9]{64}$/u);
     assert.equal(Object.isFrozen(identity), true);
+    assert.equal(SDK_SESSION_OPEN_SINGLE_READ_PATCH_VERSION, 1);
+    const managerSource = await fs.readFile(
+      path.join(sdkPath, 'dist', 'core', 'session-manager.js'),
+      'utf8',
+    );
+    assert.equal(hasSdkSessionOpenSingleReadMarkers(managerSource), true);
     const runtimeSource = await fs.readFile(
       path.join(sdkPath, 'dist', 'core', 'agent-session-runtime.js'),
       'utf8',
@@ -233,6 +319,119 @@ test('coordinator barrier patches both files and returns a closed, versioned ide
 
     const validated = await validateSdkPatchBarrier(sdkPath, JSON.parse(JSON.stringify(identity)));
     assert.deepEqual(validated, identity);
+  });
+});
+
+test('patched SessionManager.open reuses its first parse with identical v3 tree and context semantics', async () => {
+  await withFixture(async ({ sdkPath, lockRoot }) => {
+    const managerModulePath = path.join(sdkPath, 'dist', 'core', 'session-manager.js');
+    const beforeSource = await fs.readFile(managerModulePath, 'utf8');
+    assert.equal(
+      hasSdkSessionOpenSingleReadMarkers(beforeSource),
+      false,
+      'the fixture is the supported pre-single-read transitional manager',
+    );
+
+    const storedCwd = path.join(sdkPath, 'stored-cwd');
+    const explicitSessionDir = path.join(sdkPath, 'future-sessions');
+    const sessionPath = path.join(sdkPath, 'single-read-v3.jsonl');
+    await fs.mkdir(storedCwd);
+    await fs.mkdir(explicitSessionDir);
+    await fs.writeFile(sessionPath, [
+      JSON.stringify({
+        type: 'session', version: 3, id: 'single-read-session',
+        timestamp: '2026-08-25T00:00:00.000Z', cwd: storedCwd,
+      }),
+      JSON.stringify({
+        type: 'message', id: 'user-1', parentId: null,
+        timestamp: '2026-08-25T00:00:01.000Z',
+        message: { role: 'user', content: 'hello', timestamp: 1 },
+      }),
+      JSON.stringify({
+        type: 'message', id: 'assistant-1', parentId: 'user-1',
+        timestamp: '2026-08-25T00:00:02.000Z',
+        message: {
+          role: 'assistant', content: [{ type: 'text', text: 'hi' }],
+          api: 'test', provider: 'test', model: 'model-a',
+          usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: {} },
+          stopReason: 'stop', timestamp: 2,
+        },
+      }),
+    ].join('\n') + '\n', 'utf8');
+
+    const baselineModule = await import(
+      `${pathToFileURL(managerModulePath).href}?single-read-baseline=${Date.now()}`
+    );
+    const baseline = await withSessionReadCount(sessionPath, () => (
+      baselineModule.SessionManager.open(sessionPath, explicitSessionDir)
+    ));
+    assert.equal(baseline.reads, 2, 'pinned 0.80.6 reads the same JSONL in open() and setSessionFile()');
+
+    await ensureSdkPatchBarrier(sdkPath, { lockRoot });
+    const patchedModule = await import(
+      `${pathToFileURL(managerModulePath).href}?single-read-patched=${Date.now()}`
+    );
+    const patched = await withSessionReadCount(sessionPath, () => (
+      patchedModule.SessionManager.open(sessionPath, explicitSessionDir)
+    ));
+
+    assert.equal(patched.reads, 1);
+    assert.deepEqual(sessionManagerSnapshot(patched.value), sessionManagerSnapshot(baseline.value));
+    assert.equal(patched.value.getCwd(), path.resolve(storedCwd));
+    assert.equal(patched.value.getSessionDir(), path.resolve(explicitSessionDir));
+  });
+});
+
+test('single-read open preserves migration, invalid-file, empty-file, and cwd-override behavior', async () => {
+  await withFixture(async ({ sdkPath, lockRoot }) => {
+    await ensureSdkPatchBarrier(sdkPath, { lockRoot });
+    const managerModulePath = path.join(sdkPath, 'dist', 'core', 'session-manager.js');
+    const module = await import(`${pathToFileURL(managerModulePath).href}?single-read-semantics=${Date.now()}`);
+
+    const v2Path = path.join(sdkPath, 'migrate-v2.jsonl');
+    await fs.writeFile(v2Path, [
+      JSON.stringify({
+        type: 'session', version: 2, id: 'migrate-v2',
+        timestamp: '2026-08-25T00:00:00.000Z', cwd: sdkPath,
+      }),
+      JSON.stringify({
+        type: 'message', id: 'hook-1', parentId: null,
+        timestamp: '2026-08-25T00:00:01.000Z',
+        message: { role: 'hookMessage', content: 'legacy', timestamp: 1 },
+      }),
+    ].join('\n') + '\n', 'utf8');
+    const migrated = await withSessionReadCount(v2Path, () => module.SessionManager.open(v2Path));
+    assert.equal(migrated.reads, 1);
+    assert.equal(migrated.value.getHeader().version, 3);
+    assert.equal(migrated.value.getEntries()[0].message.role, 'custom');
+    const migratedRows = (await fs.readFile(v2Path, 'utf8'))
+      .trim().split('\n').map((line) => JSON.parse(line));
+    assert.equal(migratedRows[0].version, 3);
+    assert.equal(migratedRows[1].message.role, 'custom');
+
+    const invalidPath = path.join(sdkPath, 'invalid.jsonl');
+    await fs.writeFile(invalidPath, 'not-json-but-not-empty\n', 'utf8');
+    const invalid = await withSessionReadCount(invalidPath, () => {
+      assert.throws(
+        () => module.SessionManager.open(invalidPath),
+        /Session file is not a valid pi session/,
+      );
+    });
+    assert.equal(invalid.reads, 1);
+    assert.equal(await fs.readFile(invalidPath, 'utf8'), 'not-json-but-not-empty\n');
+
+    const emptyPath = path.join(sdkPath, 'empty.jsonl');
+    const overrideCwd = path.join(sdkPath, 'override-cwd');
+    await fs.mkdir(overrideCwd);
+    await fs.writeFile(emptyPath, '', 'utf8');
+    const empty = await withSessionReadCount(emptyPath, () => (
+      module.SessionManager.open(emptyPath, undefined, overrideCwd)
+    ));
+    assert.equal(empty.reads, 1);
+    assert.equal(empty.value.getSessionFile(), path.resolve(emptyPath));
+    assert.equal(empty.value.getCwd(), path.resolve(overrideCwd));
+    assert.equal(empty.value.getHeader().version, 3);
+    assert.equal((await fs.readFile(emptyPath, 'utf8')).trim().length > 0, true);
   });
 });
 
@@ -256,6 +455,115 @@ test('patched create seam returns the same manager after atomically publishing i
       'the returned manager owns the persisted header values',
     );
     assert.deepEqual((await fs.readdir(sessionDir)).filter((name) => name.includes('.pie-create-')), []);
+  });
+});
+
+test('patched manager atomically publishes model and thinking changes and commits state after rename', async () => {
+  await withFixture(async ({ sdkPath, lockRoot }) => {
+    await ensureSdkPatchBarrier(sdkPath, { lockRoot });
+    const sessionManagerPath = path.join(sdkPath, 'dist', 'core', 'session-manager.js');
+    const module = await import(`${pathToFileURL(sessionManagerPath).href}?model-settings=${Date.now()}`);
+    const sessionDir = path.join(sdkPath, 'model-settings-sessions');
+    await fs.mkdir(sessionDir);
+    const manager = module.SessionManager.create(sdkPath, sessionDir);
+    const sessionPath = manager.getSessionFile();
+    assert.equal(typeof sessionPath, 'string');
+    // Exercise the separator decision against the copied temp image rather
+    // than relying on the usual trailing newline from SessionManager.create.
+    await fs.writeFile(sessionPath, (await fs.readFile(sessionPath, 'utf8')).trimEnd(), 'utf8');
+
+    assert.throws(
+      () => manager.appendPieModelSettingsChange(undefined, 'model-without-provider', 'high'),
+      /requires both provider and modelId/,
+    );
+    const beforeFailure = await fs.readFile(sessionPath, 'utf8');
+    const beforeEntries = JSON.stringify(manager.getEntries());
+
+    const mutableFs = createRequire(import.meta.url)('node:fs') as typeof import('node:fs');
+    const originalRenameSync = mutableFs.renameSync;
+    mutableFs.renameSync = ((..._args: Parameters<typeof mutableFs.renameSync>) => {
+      throw Object.assign(new Error('injected model-settings rename failure'), { code: 'EIO' });
+    }) as typeof mutableFs.renameSync;
+    syncBuiltinESMExports();
+    try {
+      assert.throws(
+        () => manager.appendPieModelSettingsChange('test-provider', 'model-b', 'high'),
+        /injected model-settings rename failure/,
+      );
+    } finally {
+      mutableFs.renameSync = originalRenameSync;
+      syncBuiltinESMExports();
+    }
+
+    assert.equal(await fs.readFile(sessionPath, 'utf8'), beforeFailure);
+    assert.equal(JSON.stringify(manager.getEntries()), beforeEntries);
+    assert.deepEqual(
+      (await fs.readdir(sessionDir)).filter((name) => name.includes('.pie-model-settings-')),
+      [],
+    );
+
+    const originalWriteFileSync = mutableFs.writeFileSync;
+    let writes = 0;
+    mutableFs.writeFileSync = ((...args: unknown[]) => {
+      writes += 1;
+      if (writes === 2) {
+        throw Object.assign(new Error('injected model-settings staging write failure'), { code: 'EIO' });
+      }
+      return Reflect.apply(originalWriteFileSync, mutableFs, args as Parameters<typeof mutableFs.writeFileSync>);
+    }) as typeof mutableFs.writeFileSync;
+    syncBuiltinESMExports();
+    try {
+      assert.throws(
+        () => manager.appendPieModelSettingsChange('test-provider', 'model-b', 'high'),
+        /injected model-settings staging write failure/,
+      );
+    } finally {
+      mutableFs.writeFileSync = originalWriteFileSync;
+      syncBuiltinESMExports();
+    }
+    assert.equal(await fs.readFile(sessionPath, 'utf8'), beforeFailure);
+    assert.equal(JSON.stringify(manager.getEntries()), beforeEntries);
+    assert.deepEqual(
+      (await fs.readdir(sessionDir)).filter((name) => name.includes('.pie-model-settings-')),
+      [],
+    );
+
+    const originalFsyncSync = mutableFs.fsyncSync;
+    mutableFs.fsyncSync = ((..._args: Parameters<typeof mutableFs.fsyncSync>) => {
+      throw Object.assign(new Error('injected model-settings staging fsync failure'), { code: 'EIO' });
+    }) as typeof mutableFs.fsyncSync;
+    syncBuiltinESMExports();
+    try {
+      assert.throws(
+        () => manager.appendPieModelSettingsChange('test-provider', 'model-b', 'high'),
+        /injected model-settings staging fsync failure/,
+      );
+    } finally {
+      mutableFs.fsyncSync = originalFsyncSync;
+      syncBuiltinESMExports();
+    }
+    assert.equal(await fs.readFile(sessionPath, 'utf8'), beforeFailure);
+    assert.equal(JSON.stringify(manager.getEntries()), beforeEntries);
+    assert.deepEqual(
+      (await fs.readdir(sessionDir)).filter((name) => name.includes('.pie-model-settings-')),
+      [],
+    );
+
+    const result = manager.appendPieModelSettingsChange('test-provider', 'model-b', 'high');
+    assert.match(result.modelChangeId, /^[a-z0-9-]+$/u);
+    assert.match(result.thinkingLevelChangeId, /^[a-z0-9-]+$/u);
+    const rows = (await fs.readFile(sessionPath, 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
+    assert.equal(rows.at(-2)?.type, 'model_change');
+    assert.equal(rows.at(-2)?.provider, 'test-provider');
+    assert.equal(rows.at(-2)?.modelId, 'model-b');
+    assert.equal(rows.at(-1)?.type, 'thinking_level_change');
+    assert.equal(rows.at(-1)?.thinkingLevel, 'high');
+    assert.equal(rows.at(-1)?.parentId, rows.at(-2)?.id);
+    assert.equal(manager.getEntries().length, rows.length - 1, 'getEntries excludes the session header');
+    assert.deepEqual(
+      (await fs.readdir(sessionDir)).filter((name) => name.includes('.pie-model-settings-')),
+      [],
+    );
   });
 });
 
@@ -537,6 +845,31 @@ test('coordinator rejects marker-preserving weakened ownership code by exact sem
   });
 });
 
+test('worker rejects marker-preserving weakened single-read code by exact semantic fingerprint', async () => {
+  await withFixture(async ({ sdkPath, lockRoot }) => {
+    const identity = await ensureSdkPatchBarrier(sdkPath, { lockRoot });
+    const managerPath = path.join(sdkPath, 'dist', 'core', 'session-manager.js');
+    const optimizedReturn =
+      '        return new SessionManager(cwd, dir, resolvedPath, true, undefined, entries);';
+    const changed = (await fs.readFile(managerPath, 'utf8')).replace(
+      optimizedReturn,
+      `        if (false) {\n${optimizedReturn}\n        }\n        return new SessionManager(cwd, dir, resolvedPath, true);`,
+    );
+    assert.equal(
+      hasSdkSessionOpenSingleReadMarkers(changed),
+      true,
+      'all shallow single-read markers remain present',
+    );
+    await fs.writeFile(managerPath, changed, 'utf8');
+
+    await assert.rejects(
+      validateSdkPatchBarrier(sdkPath, identity),
+      /SDK semantic fingerprint is unsupported for dist\/core\/session-manager\.js/,
+    );
+    assert.equal(await fs.readFile(managerPath, 'utf8'), changed, 'worker validation must never repair');
+  });
+});
+
 test('coordinator rejects an already-patched runtime missing any quiescence abort seam', async () => {
   await withFixture(async ({ sdkPath, lockRoot }) => {
     const runtimePath = path.join(sdkPath, 'dist', 'core', 'agent-session-runtime.js');
@@ -586,6 +919,7 @@ test('worker validation rejects wrong identity version, SDK path/version, and ex
     const identity = await ensureSdkPatchBarrier(sdkPath, { lockRoot });
     for (const changed of [
       { ...identity, identityVersion: 1 },
+      { ...identity, identityVersion: 3 },
       { ...identity, sdkPath: `${identity.sdkPath}-other` },
       { ...identity, sdkVersion: '0.80.7' },
       { ...identity, unexpected: true },

@@ -247,6 +247,37 @@
           }
         },
         {
+          "id": "glm-5.3-flash:cloud",
+          "name": "Ollama Cloud: GLM 5.3 Flash",
+          "compat": {
+            "supportsReasoningEffort": true
+          },
+          "reasoning": true,
+          "family": "glm-5.3-flash",
+          "input": [
+            "text",
+            "image"
+          ],
+          "maxImagesPerRequest": 1,
+          "contextWindow": 1048576,
+          "maxTokens": 131072,
+          "thinkingLevelMap": {
+            "off": null,
+            "minimal": null,
+            "low": "low",
+            "medium": null,
+            "high": "high",
+            "xhigh": null,
+            "max": "max"
+          },
+          "cost": {
+            "input": 0.075,
+            "output": 0.25,
+            "cacheRead": 0.015,
+            "cacheWrite": 0
+          }
+        },
+        {
           "id": "gpt-oss:120b-cloud",
           "name": "Ollama Cloud: GPT OSS 120B",
           "reasoning": true,

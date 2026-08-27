@@ -3,7 +3,7 @@
 **Purpose:** Authoritative traceability record for every price written to `models.json`.
 Every non-zero cost field in `models.json` MUST have a corresponding row in this document.
 
-**Retrieval date:** 2026-08-24 (OpenAI and GitHub Copilot rates refreshed from official pricing pages; Ollama comparison rates refreshed from Ollama and OpenRouter)
+**Retrieval date:** 2026-08-27 (GLM 5.3 Flash availability, metadata, and comparison rate); broader OpenAI, GitHub Copilot, and Ollama refresh completed 2026-08-24
 **Format:** All prices in USD per 1M tokens unless otherwise noted.
 
 ---
@@ -133,7 +133,7 @@ The configured `openai-codex` provider uses a ChatGPT subscription, so these are
 ## Ollama Cloud Models
 
 **Source:** [OpenRouter `/api/v1/models`](https://openrouter.ai/api/v1/models) — live aggregator of upstream provider per-token rates.
-**Retrieval date:** 2026-08-24
+**Retrieval date:** 2026-08-24 for the broader catalog; 2026-08-27 for GLM 5.3 Flash
 **Confidence:** `official` for Kimi K3; `openrouter` for the remaining comparison rates
 **Units:** USD per 1M tokens.
 
@@ -148,8 +148,9 @@ The configured `openai-codex` provider uses a ChatGPT subscription, so these are
 | deepseek-v4-flash:cloud | deepseek/deepseek-v4-flash | $0.0574 | $0.1148 | $0.01148 | openrouter | 1M served context; tools/thinking |
 | gemini-3-flash-preview:cloud | google/gemini-3-flash-preview | $0.500 | $3.000 | $0.050 | openrouter | Cache write $0.083333/1M; 1M served context; vision/tools/thinking |
 | gemma4:31b-cloud | google/gemma-4-31b-it | $0.100 | $0.340 | $0.100 | openrouter | 256K context; vision/tools/thinking |
-| glm-5.1:cloud | z-ai/glm-5.1 | $0.966 | $3.036 | $0.1794 | openrouter | 198K context; tools/thinking |
+| glm-5.3-flash:cloud | z-ai/glm-5.3-flash | $0.075 | $0.250 | $0.015 | openrouter | 1M served context; 128K max output; vision/tools; low/high/max thinking |
 | glm-5.2:cloud | z-ai/glm-5.2 | $0.966 | $3.036 | $0.1932 | openrouter | 1M context; tools/thinking |
+| glm-5.1:cloud | z-ai/glm-5.1 | $0.966 | $3.036 | $0.1794 | openrouter | 198K context; tools/thinking |
 | gpt-oss:120b-cloud | openai/gpt-oss-120b | $0.037 | $0.170 | — | openrouter | 128K context; tools/thinking |
 | gpt-oss:20b-cloud | openai/gpt-oss-20b | $0.030 | $0.130 | $0.030 | openrouter | 128K context; tools/thinking; picker-ineligible |
 | kimi-k2.6:cloud | moonshotai/kimi-k2.6 | $0.950 | $4.000 | $0.160 | openrouter | 256K context; vision/tools/thinking |
@@ -228,7 +229,7 @@ Models in `model-profiles.yaml` without pricing in this evidence document:
 |---|---|
 | grok-code-fast-1 | No official token pricing published by GitHub Copilot; cost remains unavailable until a real token rate is published. |
 
-No active Ollama Cloud model remains unpriced as of 2026-08-24. Kimi K3 uses Ollama's official rate; the remaining Ollama entries use current OpenRouter comparison rates.
+No active Ollama Cloud model remains unpriced as of 2026-08-27. Kimi K3 uses Ollama's official rate; the remaining Ollama entries use current OpenRouter comparison rates.
 
 ---
 
@@ -261,3 +262,4 @@ No active Ollama Cloud model remains unpriced as of 2026-08-24. Kimi K3 uses Oll
 | 2026-07-27 | Added Claude Opus 5 and Claude Opus 4.8 Fast using token prices and long-context metadata returned by GitHub Copilot's official account-scoped `/models` endpoint. |
 | 2026-08-01 | Removed the canceled Umans provider; synchronized Ollama's active cloud catalog and retirements; added Kimi K3, Nemotron 3 Nano 30B, Mistral Large 3, and DeepSeek V4 Flash 0731; refreshed live comparison rates and served capabilities/context limits; documented signed-in local-daemon auth. |
 | 2026-08-24 | Refreshed official OpenAI and GitHub Copilot pricing. Applied the July 30 Terra/Luna reductions and August 21 Sol promotion to direct Codex comparison rates; corrected Copilot Sol, GPT-5 mini, and GPT-5.3-Codex rates; refreshed OpenRouter comparison prices for every active Ollama model and added missing DeepSeek V4 Pro 0813 evidence. Documented that persisted `usage.cost` is a catalog calculation, not an invoice amount, and changed Pie to reprice token-bearing records from the corrected catalog while retaining stored cost as the unpriced/cost-only fallback. |
+| 2026-08-27 | Added Ollama Cloud GLM 5.3 Flash availability and served metadata from Ollama's catalog plus local `/api/show`; added current `z-ai/glm-5.3-flash` OpenRouter comparison rates. |

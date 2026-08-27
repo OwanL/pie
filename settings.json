@@ -1,7 +1,7 @@
 {
-  "defaultModel": "deepseek-v4-flash:0731-cloud",
-  "defaultThinkingLevel": "max",
-  "defaultProvider": "ollama",
+  "defaultModel": "gpt-5.6-sol",
+  "defaultThinkingLevel": "medium",
+  "defaultProvider": "github-copilot",
   "retry": {
     "enabled": true,
     "maxRetries": 8,
@@ -57,8 +57,5 @@
     "profile": "default"
   },
   "lastChangelogVersion": "0.80.6",
-  "subagent": {
-    "confirmProjectAgents": false
-  },
   "sessionDir": "data/outcomes/sessions"
 }

@@ -41,9 +41,9 @@ export type Call =
   | { kind: 'onModelConfigChanged'; sessionPath: string; modelId: string; thinkingLevel: string; provider?: string }
   | { kind: 'handleSelectionFailure'; token: string; notice: string }
   | { kind: 'applySessionOpened'; payload: unknown }
-  | { kind: 'subscribeDetail'; subscriptionId: string; viewGeneration: number; detailKey: string; address: LiveSubagentDetailAddress; cursor?: DetailCursor }
-  | { kind: 'unsubscribeDetail'; viewGeneration: number; detailKey: string; reason: 'collapse' | 'unmount' | 'session-change' }
-  | { kind: 'fetchDetailPages'; viewGeneration: number; detailKey: string; ref: DetailPageRef };
+  | { kind: 'subscribeDetail'; subscriptionId: string; viewGeneration: number; detailKey: string; detailAttempt: number; address: LiveSubagentDetailAddress; cursor?: DetailCursor }
+  | { kind: 'unsubscribeDetail'; viewGeneration: number; detailKey: string; detailAttempt: number; reason: 'collapse' | 'unmount' | 'session-change' }
+  | { kind: 'fetchDetailPages'; viewGeneration: number; detailKey: string; detailAttempt: number; ref: DetailPageRef };
 
 export interface MakeEffectRunnerDepsOpts {
   /** Custom request implementation. Ignored when `backend` is supplied. */
@@ -166,15 +166,16 @@ export function makeEffectRunnerDeps(opts: MakeEffectRunnerDepsOpts = {}): MakeE
       subscriptionId: string;
       viewGeneration: number;
       detailKey: string;
+      detailAttempt: number;
       address: LiveSubagentDetailAddress;
       cursor?: DetailCursor;
     }) {
       calls.push({ kind: 'subscribeDetail', ...options });
     },
-    unsubscribeDetail(options: { viewGeneration: number; detailKey: string; reason: 'collapse' | 'unmount' | 'session-change' }) {
+    unsubscribeDetail(options: { viewGeneration: number; detailKey: string; detailAttempt: number; reason: 'collapse' | 'unmount' | 'session-change' }) {
       calls.push({ kind: 'unsubscribeDetail', ...options });
     },
-    fetchDetailPages(options: { viewGeneration: number; detailKey: string; ref: DetailPageRef }) {
+    fetchDetailPages(options: { viewGeneration: number; detailKey: string; detailAttempt: number; ref: DetailPageRef }) {
       calls.push({ kind: 'fetchDetailPages', ...options });
     },
     bumpSessionDataEpoch(sessionPath: string) {

@@ -92,6 +92,9 @@ export interface RendererSessionOptions {
   getViewState(): ViewState;
   /** Command routing: validated non-evidence messages reach the host here. */
   onMessage(msg: WebviewToHostMessage, context: RendererCommandContext): void;
+  /** Release renderer-owned external resources before this generation is
+   * invalidated by reload, replacement, disconnect, or disposal. */
+  onRendererInvalidated?(rendererId: string, rendererGeneration: number): void;
   getRunningSessionCount(): number;
   transport: RendererTransport;
   settlementTimeoutMs?: number;
@@ -236,6 +239,7 @@ export class RendererSession implements RendererRegistration, DisposableLike {
 
   dispose(): void {
     if (this.disposed) return;
+    this.options.onRendererInvalidated?.(this.rendererId, this.rendererGeneration);
     this.disposed = true;
     this.webviewReady = false;
     this.pendingImperatives = [];
@@ -335,7 +339,7 @@ export class RendererSession implements RendererRegistration, DisposableLike {
           reason: validation.reason,
           type: (msg as { type?: unknown })?.type ?? null,
         });
-        if (isRenderEvidenceType((msg as { type?: unknown })?.type)) return;
+        return;
       }
 
       if (isRenderEvidenceMessage(msg)) {
@@ -410,6 +414,7 @@ export class RendererSession implements RendererRegistration, DisposableLike {
   /** View resolution/replacement: fresh generation, no retained-dirty logic. */
   handleViewResolved(visible: boolean): void {
     this.webviewReady = false;
+    this.options.onRendererInvalidated?.(this.rendererId, this.rendererGeneration);
     this.rendererGeneration += 1;
     this.readinessProbe.clear();
     this.watchdog.resetRecoveryEpisode();
@@ -422,6 +427,7 @@ export class RendererSession implements RendererRegistration, DisposableLike {
   /** View disposed / socket closed. */
   handleViewDisposed(): void {
     this.webviewReady = false;
+    this.options.onRendererInvalidated?.(this.rendererId, this.rendererGeneration);
     this.rendererGeneration += 1;
     this.readinessProbe.clear();
     this.delivery.invalidateView();
@@ -430,6 +436,7 @@ export class RendererSession implements RendererRegistration, DisposableLike {
   /** Reload/reconnect started by the transport. */
   handleReloadStart(reason: string): void {
     this.webviewReady = false;
+    this.options.onRendererInvalidated?.(this.rendererId, this.rendererGeneration);
     this.rendererGeneration += 1;
     if (isLivePipelineTraceEnabled()) {
       recordLivePipelineTrace({

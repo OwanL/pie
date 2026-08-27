@@ -72,11 +72,23 @@ import { BACKEND_READY_TIMEOUT_MS } from '../../shared/backend-ready-timeout';
 import { isLivePipelineTraceEnabled, recordLivePipelineTrace } from '../util/live-pipeline-trace-runtime.js';
 
 /** Minimal backend surface the runner needs. Matches `BackendClient.request`. */
+export type CorrelatedBackendResponse<TResult> =
+  | { ok: true; result: TResult }
+  | { ok: false; error: Error };
+
+/** Options used when a destructive request must outlive the application-level
+ * timeout. `onCorrelatedResponse` observes the exact eventual backend response
+ * even after the ordinary request promise has rejected with
+ * `RequestTimeoutError`; it is not a second request or an extended timeout. */
+export interface CommitAwareRequestOptions<TResult> extends RequestOptions {
+  onCorrelatedResponse?: (response: CorrelatedBackendResponse<TResult>) => void;
+}
+
 export interface BackendLike {
   /** Issue a JSON-RPC request. `options.timeoutMs` overrides the method
    *  default; `options.signal` aborts an in-flight request (Brief E cancels
    *  an in-flight `message.send` on interrupt). */
-  request<T = unknown>(method: string, params?: unknown, options?: RequestOptions): Promise<T>;
+  request<T = unknown>(method: string, params?: unknown, options?: CommitAwareRequestOptions<T>): Promise<T>;
 }
 
 /**
@@ -139,6 +151,7 @@ export interface SessionServiceLike {
     subscriptionId: string;
     viewGeneration: number;
     detailKey: string;
+    detailAttempt: number;
     address: LiveSubagentDetailAddress;
     cursor?: DetailCursor;
     rendererId?: string;
@@ -149,6 +162,7 @@ export interface SessionServiceLike {
   unsubscribeDetail(options: {
     viewGeneration: number;
     detailKey: string;
+    detailAttempt: number;
     reason: 'collapse' | 'unmount' | 'session-change';
     rendererId?: string;
     rendererGeneration?: number;
@@ -157,6 +171,7 @@ export interface SessionServiceLike {
   fetchDetailPages(options: {
     viewGeneration: number;
     detailKey: string;
+    detailAttempt: number;
     ref: DetailPageRef;
     rendererId?: string;
     rendererGeneration?: number;
@@ -949,7 +964,11 @@ export class EffectRunner {
         // ENOSPC in the toggle store's writeFileSync); without a notice the
         // optimistic UI keeps the new value while the setting silently
         // reverts on the next backend read.
-        this.deps.dispatchEvent({ kind: 'NoticeShown', notice: 'Failed to save the system-prompt setting. See the pie log for details.' });
+        this.deps.dispatchEvent({
+          kind: 'NoticeShown',
+          notice: 'Failed to save the system-prompt setting. See the pie log for details.',
+          sessionPath: effect.sessionPath,
+        });
       }
     });
   }
@@ -964,6 +983,7 @@ export class EffectRunner {
       subscriptionId: crypto.randomUUID(),
       viewGeneration: effect.viewGeneration,
       detailKey: effect.detailKey,
+      detailAttempt: effect.detailAttempt,
       address: effect.address,
       ...(effect.cursor !== undefined ? { cursor: effect.cursor } : {}),
       ...(effect.rendererId !== undefined && effect.rendererGeneration !== undefined
@@ -976,6 +996,7 @@ export class EffectRunner {
     this.deps.service.unsubscribeDetail({
       viewGeneration: effect.viewGeneration,
       detailKey: effect.detailKey,
+      detailAttempt: effect.detailAttempt,
       reason: effect.reason,
       ...(effect.rendererId !== undefined && effect.rendererGeneration !== undefined
         ? { rendererId: effect.rendererId, rendererGeneration: effect.rendererGeneration }
@@ -987,6 +1008,7 @@ export class EffectRunner {
     this.deps.service.fetchDetailPages({
       viewGeneration: effect.viewGeneration,
       detailKey: effect.detailKey,
+      detailAttempt: effect.detailAttempt,
       ref: effect.ref,
       ...(effect.rendererId !== undefined && effect.rendererGeneration !== undefined
         ? { rendererId: effect.rendererId, rendererGeneration: effect.rendererGeneration }
@@ -1630,10 +1652,71 @@ export class EffectRunner {
           // interrupt is queued behind this edit and stops the resulting turn,
           // preserving one coherent durable/optimistic transcript.
           send.locallyAbortable = false;
-          await backend.request('session.truncateAfter', {
-            sessionPath: effect.sessionPath,
-            entryId: effect.messageId,
-          }, { signal: send.abort.signal });
+          let settleTruncateResponse!: (response: CorrelatedBackendResponse<unknown>) => void;
+          const correlatedTruncateResponse = new Promise<CorrelatedBackendResponse<unknown>>((resolve) => {
+            settleTruncateResponse = resolve;
+          });
+          try {
+            await backend.request('session.truncateAfter', {
+              sessionPath: effect.sessionPath,
+              entryId: effect.messageId,
+            }, {
+              signal: send.abort.signal,
+              // BackendClient retains this exact request's correlation
+              // tombstone after the application timeout. The late response is
+              // the commit acknowledgement; do not issue message.send before
+              // it arrives.
+              onCorrelatedResponse: settleTruncateResponse,
+            });
+          } catch (err) {
+            if (!isLocalRequestTimeout(err)) throw err;
+
+            this.deps.log.log('warn', 'session.truncateAfter acknowledgement delayed', {
+              corrId: effect.corrId,
+              sessionPath: effect.sessionPath,
+              messageId: effect.messageId,
+              error: toErrorMessage(err),
+            });
+            this.deps.dispatchEvent({
+              kind: 'EditTruncateRecoveryChanged',
+              corrId: effect.corrId,
+              sessionPath: effect.sessionPath,
+              phase: 'recovering',
+            });
+
+            // The JSON-RPC timeout rejected only the local waiter. Keep the
+            // serialized session operation (and therefore any later
+            // interrupt) behind the destructive request until its exact
+            // correlated response proves whether the commit completed.
+            const lateResponse = await correlatedTruncateResponse;
+            if (!lateResponse.ok) {
+              this.clearInFlightSend(effect.corrId);
+              this.deps.log.log('error', 'session.truncateAfter outcome remained unresolved', {
+                corrId: effect.corrId,
+                sessionPath: effect.sessionPath,
+                messageId: effect.messageId,
+                error: toErrorMessage(lateResponse.error),
+              });
+              this.deps.dispatchEvent({
+                kind: 'EditTruncateRecoveryChanged',
+                corrId: effect.corrId,
+                sessionPath: effect.sessionPath,
+                phase: 'unresolved',
+                error: toErrorMessage(lateResponse.error),
+              });
+              // Never emit EditResult{ok:false} after an ambiguous destructive
+              // boundary: that would restore the old tail over a truncate that
+              // may already be durable. The optimistic replacement remains
+              // host-owned for authoritative reopen/restart reconciliation.
+              return;
+            }
+            this.deps.dispatchEvent({
+              kind: 'EditTruncateRecoveryChanged',
+              corrId: effect.corrId,
+              sessionPath: effect.sessionPath,
+              phase: 'recovered',
+            });
+          }
           // Capture the backend-assigned requestId so a post-ack prepass
           // failure (`PreflightFailed`) and the commit-point `MessageStarted`
           // can resolve the edit's corrId via `pending.promoted` (mirrors

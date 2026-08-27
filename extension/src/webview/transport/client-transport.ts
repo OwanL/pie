@@ -28,10 +28,11 @@
  */
 
 import type { HostToWebviewMessage, WebviewToHostMessage } from '../../shared/protocol';
+import { PIE_BUILD_ID, WEBVIEW_PROTOCOL_VERSION } from '../../shared/protocol';
 import { isBrowserApplicationCommand } from '../../shared/browser-ingress';
 import { pendingCommandStore } from './pending-command-store';
 
-export type ClientConnectionState = 'connecting' | 'connected' | 'disconnected';
+export type ClientConnectionState = 'connecting' | 'connected' | 'disconnected' | 'reload-required';
 
 export interface ClientTransport {
   /** Post one outbound message. Returns false when the transport dropped it
@@ -66,6 +67,7 @@ export function withHandshakeMetadata(
   return {
     ...msg,
     assetVersion: getAssetVersion(),
+    buildId: PIE_BUILD_ID,
     ...(viewGeneration === undefined ? {} : { viewGeneration }),
   };
 }
@@ -154,6 +156,21 @@ const OUTBOUND_FRAME_MAX_BYTES = 32 * 1024 * 1024;
 const RECONNECT_BASE_DELAY_MS = 1000;
 const RECONNECT_MAX_DELAY_MS = 30_000;
 
+function isRendererHello(value: unknown): value is Extract<HostToWebviewMessage, { type: 'rendererHello' }> {
+  if (!value || typeof value !== 'object') return false;
+  const hello = value as Record<string, unknown>;
+  const nonEmptyString = (field: unknown): field is string => typeof field === 'string' && field.length > 0;
+  const generation = (field: unknown): field is number => Number.isSafeInteger(field) && Number(field) >= 0;
+  return hello.type === 'rendererHello'
+    && Number.isInteger(hello.protocolVersion)
+    && nonEmptyString(hello.buildId)
+    && nonEmptyString(hello.hostInstanceId)
+    && nonEmptyString(hello.rendererId)
+    && generation(hello.rendererGeneration)
+    && generation(hello.viewGeneration)
+    && nonEmptyString(hello.assetVersion);
+}
+
 export interface BrowserClientTransportOptions {
   /** WebSocket route stamped by the server (`pie-ws-route` meta). */
   wsRoute: string;
@@ -164,6 +181,7 @@ export interface BrowserClientTransportOptions {
     rendererGeneration: number;
     viewGeneration: number;
     assetVersion: string;
+    buildId: string;
   }): void;
   /** Injectable clock for deterministic tests. */
   now?: () => number;
@@ -179,6 +197,7 @@ interface RendererIdentity {
   rendererGeneration: number;
   viewGeneration: number;
   assetVersion: string;
+  buildId: string;
 }
 
 /**
@@ -194,6 +213,7 @@ export class BrowserClientTransport implements ClientTransport {
   private identity: RendererIdentity | null = null;
   private reconnectTimer: unknown = undefined;
   private reconnectAttempt = 0;
+  private compatibilityBlocked = false;
   private disposed = false;
   private readonly handlers = new Set<(message: HostToWebviewMessage) => void>();
   private readonly stateHandlers = new Set<(state: ClientConnectionState) => void>();
@@ -209,7 +229,7 @@ export class BrowserClientTransport implements ClientTransport {
 
   /** Open the socket (called once at bootstrap; reconnects automatically). */
   connect(): void {
-    if (this.disposed || this.socket !== null) return;
+    if (this.disposed || this.compatibilityBlocked || this.socket !== null) return;
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const url = `${protocol}//${window.location.host}${this.options.wsRoute}`;
     let socket: WebSocket;
@@ -236,15 +256,35 @@ export class BrowserClientTransport implements ClientTransport {
         return; // malformed host frames are dropped (host sends valid JSON)
       }
       if (!message || typeof message !== 'object' || typeof (message as { type?: unknown }).type !== 'string') return;
-      const typed = message as HostToWebviewMessage;
-      if (typed.type === 'rendererHello') {
-        const hello = typed as Extract<HostToWebviewMessage, { type: 'rendererHello' }>;
+      const type = (message as { type: string }).type;
+      if (type === 'rendererHello') {
+        if (this.identity !== null || !isRendererHello(message)) {
+          this.compatibilityBlocked = true;
+          this.identity = null;
+          this.setState('reload-required');
+          socket.close(1008, 'invalid-renderer-hello');
+          return;
+        }
+        const hello = message;
+        const pageAssetVersion = getAssetVersion();
+        if (
+          hello.protocolVersion !== WEBVIEW_PROTOCOL_VERSION
+          || hello.buildId !== PIE_BUILD_ID
+          || (pageAssetVersion !== undefined && hello.assetVersion !== pageAssetVersion)
+        ) {
+          this.compatibilityBlocked = true;
+          this.identity = null;
+          this.setState('reload-required');
+          socket.close(1008, 'renderer-build-mismatch');
+          return;
+        }
         this.identity = {
           hostInstanceId: hello.hostInstanceId,
           rendererId: hello.rendererId,
           rendererGeneration: hello.rendererGeneration,
           viewGeneration: hello.viewGeneration,
           assetVersion: hello.assetVersion,
+          buildId: hello.buildId,
         };
         // Only a complete host handshake establishes an application
         // connection and resets reconnect backoff. A socket that repeatedly
@@ -255,8 +295,8 @@ export class BrowserClientTransport implements ClientTransport {
         // The first handshake of every socket: announce readiness and ask for
         // a full snapshot (the page is stable across socket reconnects; the
         // session's view generation is the LIVE one from the hello).
-        this.sendRaw({ type: 'ready', viewGeneration: this.identity.viewGeneration });
-        this.sendRaw({ type: 'refreshState', viewGeneration: this.identity.viewGeneration });
+        this.sendRaw({ type: 'ready', buildId: PIE_BUILD_ID, viewGeneration: this.identity.viewGeneration });
+        this.sendRaw({ type: 'refreshState', buildId: PIE_BUILD_ID, viewGeneration: this.identity.viewGeneration });
         // Every renderer registration starts with fresh host-side visibility
         // and focus beliefs. Reassert the page's current lifecycle state on
         // every hello (including reconnect while already hidden), rather than
@@ -265,12 +305,16 @@ export class BrowserClientTransport implements ClientTransport {
         this.sendLifecycle('rendererFocusChanged', document.hasFocus());
         return;
       }
+      // The hello is the only legal first host frame. State or imperatives
+      // observed before identity cannot be attributed to this registration.
+      if (this.identity === null) return;
+      const typed = message as HostToWebviewMessage;
       for (const handler of this.handlers) handler(typed);
     };
     socket.onclose = () => {
       if (this.socket === socket) this.socket = null;
       this.identity = null;
-      if (!this.disposed) {
+      if (!this.disposed && !this.compatibilityBlocked) {
         this.setState('disconnected');
         this.scheduleReconnect();
       }

@@ -163,6 +163,7 @@ test('HostToWebviewMessage state envelope carries hostInstanceId and revision', 
   const msg: HostToWebviewMessage = {
     type: 'state',
     protocolVersion: 2,
+    buildId: 'test-build',
     hostInstanceId: 'abc',
     rendererId: 'renderer-1',
     rendererGeneration: 1,
@@ -498,14 +499,15 @@ test('HostToWebviewMessage.sendRejected carries the text draft payload and optio
 });
 
 test('detail.subscribe/unsubscribe/fetchPages carry the required renderer owner identity', () => {
-  // `viewGeneration` and `detailKey` are REQUIRED (not the optional wrapper
-  // field): the host records the exact renderer owner before forwarding any
-  // stream content. The webview mints nothing — the host returns the
-  // subscription ID inside `detail.start`.
+  // `viewGeneration`, `detailKey`, and `detailAttempt` are REQUIRED (not
+  // optional wrapper fields): the host records the exact renderer owner before
+  // forwarding stream content. The webview mints the attempt; the host returns
+  // its subscription ID inside `detail.start`.
   const subscribe: WebviewToHostMessage = {
     type: 'detail.subscribe',
     viewGeneration: 7,
     detailKey: 'subagent:msg-1:tool-1',
+    detailAttempt: 4,
     address: {
       sessionPath: '/workspace/session.jsonl',
       turnId: 'turn-1',
@@ -519,6 +521,7 @@ test('detail.subscribe/unsubscribe/fetchPages carry the required renderer owner 
   if (subscribe.type === 'detail.subscribe') {
     assert.equal(subscribe.viewGeneration, 7);
     assert.equal(subscribe.detailKey, 'subagent:msg-1:tool-1');
+    assert.equal(subscribe.detailAttempt, 4);
     assert.equal(subscribe.address.rootToolCallId, 'tool-1');
     assert.deepEqual(subscribe.cursor, { revision: 3, pageIndex: 0 });
   }
@@ -527,10 +530,12 @@ test('detail.subscribe/unsubscribe/fetchPages carry the required renderer owner 
     type: 'detail.unsubscribe',
     viewGeneration: 7,
     detailKey: 'subagent:msg-1:tool-1',
+    detailAttempt: 4,
     reason: 'collapse',
   };
   assert.equal(unsubscribe.type, 'detail.unsubscribe');
   if (unsubscribe.type === 'detail.unsubscribe') {
+    assert.equal(unsubscribe.detailAttempt, 4);
     assert.equal(unsubscribe.reason, 'collapse');
   }
 
@@ -538,10 +543,12 @@ test('detail.subscribe/unsubscribe/fetchPages carry the required renderer owner 
     type: 'detail.fetchPages',
     viewGeneration: 7,
     detailKey: 'subagent:msg-1:tool-1',
+    detailAttempt: 4,
     ref: { baselineRevision: 5, pageIndex: 3, pageCount: 8 },
   };
   assert.equal(fetchPages.type, 'detail.fetchPages');
   if (fetchPages.type === 'detail.fetchPages') {
+    assert.equal(fetchPages.detailAttempt, 4);
     assert.deepEqual(fetchPages.ref, { baselineRevision: 5, pageIndex: 3, pageCount: 8 });
   }
 });
@@ -550,10 +557,10 @@ test('HostToWebviewMessage detail stream variants carry the full HostDetailRoute
   // The six stream variants are the ONLY stream content: every message
   // carries the full route so a stale or cross-key message can never be
   // applied to the wrong expanded subtree. Pages/deltas never enter
-  // `ViewState`; they cross only as these imperatives. v6: the route also
-  // carries the trusted renderer identity (`rendererId`/`rendererGeneration`),
-  // the complete ownership key is `{hostInstanceId, viewGeneration,
-  // rendererId, rendererGeneration, detailKey}`.
+  // `ViewState`; they cross only as these imperatives. v7: the route carries
+  // trusted renderer identity plus the webview owner attempt; the complete
+  // ownership key is `{hostInstanceId, viewGeneration, rendererId,
+  // rendererGeneration, detailKey, detailAttempt}`.
   const route = {
     hostInstanceId: 'host-instance-1',
     hostGeneration: 0,
@@ -565,6 +572,7 @@ test('HostToWebviewMessage detail stream variants carry the full HostDetailRoute
     workerId: 'worker-1',
     workerGeneration: 1,
     detailKey: 'subagent:msg-1:tool-1',
+    detailAttempt: 4,
     subscriptionId: 'subscription-1',
   };
 
@@ -582,11 +590,13 @@ test('HostToWebviewMessage detail stream variants carry the full HostDetailRoute
     baselineRevision: 1,
     pageCount: 1,
     totalBytes: 4,
+    totalCodePoints: 4,
   };
   assert.equal(start.type, 'detail.start');
   if (start.type === 'detail.start') {
     assert.equal(start.source, 'live');
     assert.equal(start.subscriptionId, 'subscription-1');
+    assert.equal(start.totalCodePoints, 4);
     assert.equal(start.backendGeneration, 3);
   }
 
@@ -666,7 +676,7 @@ test('webview behavior contract: collapsed cards never subscribe; expansion subs
   // STATE_CONTRACT § Ordinary state transport: a collapsed subagent card
   // renders only its bounded compact preview and sends NO detail.subscribe;
   // expansion sends exactly one subscribe carrying the current
-  // viewGeneration/detailKey/address; collapse — including during the close
+  // viewGeneration/detailKey/detailAttempt/address; collapse — including during the close
   // animation — immediately unsubscribes. This is the webview-side half of
   // the Phase 5 contract (the host half is covered by the detail stream
   // route tests above).
@@ -700,6 +710,7 @@ test('webview behavior contract: collapsed cards never subscribe; expansion subs
   if (subscribe.type === 'detail.subscribe') {
     assert.equal(subscribe.viewGeneration, 9);
     assert.equal(subscribe.detailKey, 'subagent:msg-1:tool-1');
+    assert.equal(subscribe.detailAttempt, 1);
     assert.equal(subscribe.address.rootToolCallId, 'tool-1');
   }
 
@@ -710,6 +721,7 @@ test('webview behavior contract: collapsed cards never subscribe; expansion subs
   assert.equal(unsubscribe.type, 'detail.unsubscribe');
   if (unsubscribe.type === 'detail.unsubscribe') {
     assert.equal(unsubscribe.viewGeneration, 9);
+    assert.equal(unsubscribe.detailAttempt, 1);
     assert.equal(unsubscribe.reason, 'collapse');
   }
   closeDetailSubscription('subagent:msg-1:tool-1', 'unmount');

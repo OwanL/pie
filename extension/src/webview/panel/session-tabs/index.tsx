@@ -4,7 +4,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { memo } from 'preact/compat';
 
-import type { ActiveRunSummary, ExtensionUIRequestPayload, SessionSummary } from '../../../shared/protocol';
+import type { ActiveRunSummary, ExtensionUIRequestPayload, SessionCatalogProgress, SessionSummary } from '../../../shared/protocol';
 import { derivePinnedItems, findPinnedGroupIndex } from '../../../shared/tab-behavior';
 import { DropGap } from './drop-gap';
 import { FloatingSessionTab } from './floating-session-tab';
@@ -16,6 +16,7 @@ import { useTabDragAndDrop } from './use-drag-and-drop.js';
 
 interface SessionTabsProps {
   sessions: SessionSummary[];
+  sessionCatalogProgress?: SessionCatalogProgress;
   openTabPaths: string[];
   pinnedTabPaths: string[];
   pinnedTabGroups: string[][];
@@ -95,6 +96,9 @@ function areSessionTabsPropsEqual(
 ): boolean {
   return previous === next || (
     previous.activeSession?.path === next.activeSession?.path
+    && previous.sessionCatalogProgress?.complete === next.sessionCatalogProgress?.complete
+    && previous.sessionCatalogProgress?.processed === next.sessionCatalogProgress?.processed
+    && previous.sessionCatalogProgress?.total === next.sessionCatalogProgress?.total
     && previous.backendReady === next.backendReady
     && previous.hideConnectingWheel === next.hideConnectingWheel
     && previous.onSelect === next.onSelect
@@ -125,6 +129,7 @@ function areSessionTabsPropsEqual(
 
 function SessionTabsView({
   sessions,
+  sessionCatalogProgress,
   openTabPaths,
   pinnedTabPaths,
   pinnedTabGroups,
@@ -210,6 +215,9 @@ function SessionTabsView({
   });
 
   const effectiveActivePath = optimisticActivePath ?? activeSession?.path ?? null;
+  const catalogProgressLabel = sessionCatalogProgress?.total === undefined
+    ? 'Indexing session history'
+    : `Indexing session history: ${sessionCatalogProgress.processed} of ${sessionCatalogProgress.total} files processed`;
 
   // Clear the override once the host confirms the active session matches.
   useEffect(() => {
@@ -557,6 +565,17 @@ function SessionTabsView({
         <DropGap index={renderedUnpinnedPaths.length} dropIndex={activeUnpinnedGap} tabHeight={dropTabHeight} dragGapWidth={dragGapWidth} />
       </div>
       <div class="session-tabs-actions">
+        {backendReady && sessionCatalogProgress?.complete === false && (
+          <span
+            class="session-tabs-indexing"
+            role="status"
+            aria-label={catalogProgressLabel}
+            title={catalogProgressLabel}
+          >
+            <span class="loading-wheel loading-wheel-sm" aria-hidden="true" />
+            <span aria-hidden="true">Indexing…</span>
+          </span>
+        )}
         <button
           class="session-tabs-new"
           type="button"

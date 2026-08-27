@@ -1,9 +1,45 @@
-export const SDK_SESSION_OWNERSHIP_MANAGER_PATCH_VERSION = 2 as const;
+export const SDK_SESSION_OWNERSHIP_MANAGER_PATCH_VERSION = 3 as const;
 export const SDK_SESSION_REPLACEMENT_RUNTIME_PATCH_VERSION = 10 as const;
 export const SDK_SESSION_MANAGER_RELATIVE_PATH = 'dist/core/session-manager.js';
 export const SDK_SESSION_RUNTIME_RELATIVE_PATH = 'dist/core/agent-session-runtime.js';
 
 const MANAGER_HELPER_ANCHOR = `export class SessionManager {\n    sessionId = "";`;
+const PIE_COPY_SESSION_FILE_HELPER = `function copyPieSessionFile(sourcePath, destinationPath) {
+    let sourceFd;
+    let destinationFd;
+    const buffer = Buffer.allocUnsafe(64 * 1024);
+    try {
+        sourceFd = openSync(sourcePath, "r");
+        destinationFd = openSync(destinationPath, "wx", 0o600);
+        while (true) {
+            const bytesRead = readSync(sourceFd, buffer, 0, buffer.length, null);
+            if (bytesRead === 0)
+                break;
+            writeFileSync(destinationFd, buffer.subarray(0, bytesRead));
+        }
+    }
+    finally {
+        if (destinationFd !== undefined)
+            closeSync(destinationFd);
+        if (sourceFd !== undefined)
+            closeSync(sourceFd);
+    }
+}
+function pieSessionNeedsLineSeparator(sessionPath) {
+    const size = statSync(sessionPath).size;
+    if (size === 0)
+        return false;
+    const fd = openSync(sessionPath, "r");
+    const lastByte = Buffer.allocUnsafe(1);
+    try {
+        readSync(fd, lastByte, 0, 1, size - 1);
+        return lastByte[0] !== 10;
+    }
+    finally {
+        closeSync(fd);
+    }
+}
+`;
 const MANAGER_HELPER_REPLACEMENT = `export class StaleSessionWriteLeaseError extends Error {
     code = "STALE_SESSION_WRITE_LEASE";
     constructor(message) {
@@ -23,7 +59,7 @@ function assertPieLeaseShape(lease, canonicalPath, seam) {
         throw new StaleSessionWriteLeaseError(\`Invalid or wrong-path session write lease at \${seam}.\`);
     }
 }
-export class SessionManager {
+${PIE_COPY_SESSION_FILE_HELPER}export class SessionManager {
     sessionId = "";
     pieOwnershipAdapter;
     pieWriteLease;
@@ -31,10 +67,12 @@ export class SessionManager {
     piePreparedNeedsWrite = false;
     piePreparedWriteMode = "w";`;
 
+const MANAGER_HELPER_REPLACEMENT_V2 = MANAGER_HELPER_REPLACEMENT.replace(PIE_COPY_SESSION_FILE_HELPER, '');
+
 /** Previous manager patch accepted Windows drive-letter casing drift in no
  * places. Keep its exact semantic shape as a one-way upgrade candidate so an
  * installed SDK patched by the prior extension can be safely strengthened. */
-const MANAGER_HELPER_REPLACEMENT_V1 = MANAGER_HELPER_REPLACEMENT
+const MANAGER_HELPER_REPLACEMENT_V1 = MANAGER_HELPER_REPLACEMENT_V2
   .replace(`function pieResolvedPathKey(value) {
     const resolved = resolvePath(value);
     return process.platform === "win32" ? resolved.toLowerCase() : resolved;
@@ -45,7 +83,113 @@ const MANAGER_HELPER_REPLACEMENT_V1 = MANAGER_HELPER_REPLACEMENT
 const MANAGER_METHODS_ANCHOR = `    /**
      * Create a new session.
      * @param cwd Working directory (stored in session header)`;
-const MANAGER_METHODS_REPLACEMENT = `    attachPieWriteLease(adapter, lease) {
+const PIE_MODEL_SETTINGS_METHOD = `    appendPieModelSettingsChange(provider, modelId, thinkingLevel) {
+        this._assertPieWriteLease("appendPieModelSettingsChange");
+        if ((provider === undefined) !== (modelId === undefined)) {
+            throw new Error("appendPieModelSettingsChange requires both provider and modelId.");
+        }
+        const stagedIds = new Set(this.byId.keys());
+        const stagedEntries = [];
+        const modelChange = provider === undefined
+            ? undefined
+            : {
+                type: "model_change",
+                id: generateId(stagedIds),
+                parentId: this.leafId,
+                timestamp: new Date().toISOString(),
+                provider,
+                modelId,
+            };
+        if (modelChange) {
+            stagedEntries.push(modelChange);
+            stagedIds.add(modelChange.id);
+        }
+        const thinkingChange = thinkingLevel === undefined
+            ? undefined
+            : {
+                type: "thinking_level_change",
+                id: generateId(stagedIds),
+                parentId: modelChange?.id ?? this.leafId,
+                timestamp: new Date().toISOString(),
+                thinkingLevel,
+            };
+        if (thinkingChange)
+            stagedEntries.push(thinkingChange);
+        if (stagedEntries.length === 0) {
+            return {};
+        }
+
+        const sessionFile = this.sessionFile;
+        if (this.persist && sessionFile) {
+            const temporaryPath = sessionFile + ".pie-model-settings-" + process.pid + "-" + randomUUID() + ".tmp";
+            let published = false;
+            try {
+                copyPieSessionFile(sessionFile, temporaryPath);
+                const fileDescriptor = openSync(temporaryPath, "a");
+                try {
+                    // Inspect the completed temp image. The source may be
+                    // replaced by another writer after the copy begins, but
+                    // the suffix must be framed against the bytes we publish.
+                    const separator = pieSessionNeedsLineSeparator(temporaryPath) ? "\\n" : "";
+                    const suffix = separator + stagedEntries.map((entry) => JSON.stringify(entry)).join("\\n") + "\\n";
+                    writeFileSync(fileDescriptor, suffix, "utf8");
+                    fsyncSync(fileDescriptor);
+                }
+                finally {
+                    closeSync(fileDescriptor);
+                }
+                renameSync(temporaryPath, sessionFile);
+                published = true;
+                // The file fsync above makes the JSONL image durable. On
+                // POSIX, also flush the containing directory after the atomic
+                // rename so the new name survives a crash. A directory fsync
+                // is a post-publication durability hint: it cannot be rolled
+                // back safely if it fails, so the rename remains the commit
+                // point and manager state is updated below.
+                let directoryDescriptor;
+                try {
+                    directoryDescriptor = openSync(resolve(sessionFile, ".."), "r");
+                    fsyncSync(directoryDescriptor);
+                }
+                catch {
+                    // Windows does not consistently permit opening directories;
+                    // POSIX filesystems may likewise reject this optional hint.
+                }
+                finally {
+                    if (directoryDescriptor !== undefined) {
+                        try {
+                            closeSync(directoryDescriptor);
+                        }
+                        catch {
+                            // The rename already published the complete image;
+                            // directory-handle cleanup is best effort here.
+                        }
+                    }
+                }
+            }
+            finally {
+                // A successful rename removes the temporary directory entry;
+                // force cleanup is still safe and handles every failed stage.
+                if (!published)
+                    rmSync(temporaryPath, { force: true });
+            }
+        }
+
+        // Publication is the commit point. Do not mutate the manager before
+        // the temp file is fully written and atomically installed.
+        this.fileEntries.push(...stagedEntries);
+        for (const entry of stagedEntries) {
+            this.byId.set(entry.id, entry);
+            this.leafId = entry.id;
+        }
+        this.flushed = true;
+        return {
+            modelChangeId: modelChange?.id,
+            thinkingLevelChangeId: thinkingChange?.id,
+        };
+    }
+`;
+const MANAGER_METHODS_REPLACEMENT = `${PIE_MODEL_SETTINGS_METHOD}    attachPieWriteLease(adapter, lease) {
         if (!adapter || typeof adapter.assertWriteLease !== "function") {
             throw new StaleSessionWriteLeaseError("Worker session ownership adapter is missing.");
         }
@@ -216,9 +360,11 @@ const MANAGER_METHODS_REPLACEMENT = `    attachPieWriteLease(adapter, lease) {
      * Create a new session.
      * @param cwd Working directory (stored in session header)`;
 
-const MANAGER_REPLACEMENTS: ReadonlyArray<readonly [string, string]> = [
-  [MANAGER_HELPER_ANCHOR, MANAGER_HELPER_REPLACEMENT],
-  [MANAGER_METHODS_ANCHOR, MANAGER_METHODS_REPLACEMENT],
+const MANAGER_IMPORT_V2 = `import { appendFileSync, closeSync, createReadStream, existsSync, fsyncSync, linkSync, mkdirSync, openSync, readdirSync, readSync, rmSync, statSync, writeFileSync, } from "fs";`;
+const MANAGER_IMPORT_REPLACEMENT = `import { appendFileSync, closeSync, createReadStream, existsSync, fsyncSync, linkSync, mkdirSync, openSync, readdirSync, readSync, renameSync, rmSync, statSync, writeFileSync, } from "fs";`;
+const MANAGER_METHODS_REPLACEMENT_V2 = MANAGER_METHODS_REPLACEMENT.replace(PIE_MODEL_SETTINGS_METHOD, '');
+
+const MANAGER_SEAM_REPLACEMENTS: ReadonlyArray<readonly [string, string]> = [
   [`    setSessionFile(sessionFile) {\n        this.sessionFile = resolvePath(sessionFile);`, `    setSessionFile(sessionFile) {
         if (this.pieOwnershipAdapter)
             throw new StaleSessionWriteLeaseError("Worker session manager cannot change paths without a replacement transfer.");
@@ -254,7 +400,26 @@ const MANAGER_REPLACEMENTS: ReadonlyArray<readonly [string, string]> = [
         const previousSessionFile = this.sessionFile;`],
 ];
 
-export const SDK_SESSION_MANAGER_OWNERSHIP_MARKERS = [
+const MANAGER_REPLACEMENTS_V2: ReadonlyArray<readonly [string, string]> = [
+  [MANAGER_HELPER_ANCHOR, MANAGER_HELPER_REPLACEMENT_V2],
+  [MANAGER_METHODS_ANCHOR, MANAGER_METHODS_REPLACEMENT_V2],
+  ...MANAGER_SEAM_REPLACEMENTS,
+];
+
+const MANAGER_REPLACEMENTS: ReadonlyArray<readonly [string, string]> = [
+  [MANAGER_IMPORT_V2, MANAGER_IMPORT_REPLACEMENT],
+  [MANAGER_HELPER_ANCHOR, MANAGER_HELPER_REPLACEMENT],
+  [MANAGER_METHODS_ANCHOR, MANAGER_METHODS_REPLACEMENT],
+  ...MANAGER_SEAM_REPLACEMENTS,
+];
+
+const MANAGER_V2_TO_V3_REPLACEMENTS: ReadonlyArray<readonly [string, string]> = [
+  [MANAGER_IMPORT_V2, MANAGER_IMPORT_REPLACEMENT],
+  [MANAGER_HELPER_REPLACEMENT_V2, MANAGER_HELPER_REPLACEMENT],
+  [MANAGER_METHODS_REPLACEMENT_V2, MANAGER_METHODS_REPLACEMENT],
+];
+
+const SDK_SESSION_MANAGER_OWNERSHIP_V2_MARKERS = [
   'export class StaleSessionWriteLeaseError extends Error',
   'assertPieLeaseShape(this.pieWriteLease, sessionFile, seam)',
   'attachPieWriteLease(adapter, lease)',
@@ -276,7 +441,14 @@ export const SDK_SESSION_MANAGER_OWNERSHIP_MARKERS = [
   'Worker branch destinations require preparePieBranched',
 ] as const;
 
-const SDK_SESSION_MANAGER_OWNERSHIP_V1_MARKERS = SDK_SESSION_MANAGER_OWNERSHIP_MARKERS.map((marker) => (
+export const SDK_SESSION_MANAGER_OWNERSHIP_MARKERS = [
+  ...SDK_SESSION_MANAGER_OWNERSHIP_V2_MARKERS,
+  'appendPieModelSettingsChange(provider, modelId, thinkingLevel)',
+  'copyPieSessionFile(sourcePath, destinationPath)',
+  'renameSync(temporaryPath, sessionFile)',
+] as const;
+
+const SDK_SESSION_MANAGER_OWNERSHIP_V1_MARKERS = SDK_SESSION_MANAGER_OWNERSHIP_V2_MARKERS.map((marker) => (
   marker === 'async activatePiePrepared(authorization)'
     ? 'activatePiePrepared(authorization)'
     : marker === 'await this.pieOwnershipAdapter.consumeTransferAuthorization(authorization, resolvePath(sessionFile))'
@@ -796,13 +968,16 @@ function reverseReplacements(
  * reversed to the pinned pristine 0.80.6 file. */
 export function reverseSdkSessionManagerOwnership(source: string): string | undefined {
   let current = source;
+  if (hasAll(current, SDK_SESSION_MANAGER_OWNERSHIP_MARKERS)) {
+    return reverseReplacements(current, MANAGER_V2_TO_V3_REPLACEMENTS);
+  }
   if (current.includes(MANAGER_HELPER_REPLACEMENT_V1)) {
-    const upgraded = replaceExactlyOnce(current, MANAGER_HELPER_REPLACEMENT_V1, MANAGER_HELPER_REPLACEMENT);
+    const upgraded = replaceExactlyOnce(current, MANAGER_HELPER_REPLACEMENT_V1, MANAGER_HELPER_REPLACEMENT_V2);
     if (!upgraded) return undefined;
     current = upgraded;
   }
   if (hasAll(current, SDK_SESSION_MANAGER_OWNERSHIP_V1_MARKERS)
-      && !hasAll(current, SDK_SESSION_MANAGER_OWNERSHIP_MARKERS)) {
+      && !hasAll(current, SDK_SESSION_MANAGER_OWNERSHIP_V2_MARKERS)) {
     const asyncMethod = replaceExactlyOnce(
       current,
       '    activatePiePrepared(authorization) {',
@@ -816,7 +991,8 @@ export function reverseSdkSessionManagerOwnership(source: string): string | unde
     if (!awaited) return undefined;
     current = awaited;
   }
-  return reverseReplacements(current, MANAGER_REPLACEMENTS);
+  if (!hasAll(current, SDK_SESSION_MANAGER_OWNERSHIP_V2_MARKERS)) return undefined;
+  return reverseReplacements(current, MANAGER_REPLACEMENTS_V2);
 }
 
 export function reverseSdkSessionRuntimeOwnership(source: string): string | undefined {
@@ -854,9 +1030,22 @@ export function transformSdkSessionManagerOwnership(source: string): {
   source: string;
 } {
   if (hasAll(source, SDK_SESSION_MANAGER_OWNERSHIP_MARKERS)) {
-    const upgradedPathFence = replaceExactlyOnce(source, MANAGER_HELPER_REPLACEMENT_V1, MANAGER_HELPER_REPLACEMENT);
-    if (upgradedPathFence !== undefined) return { result: 'patched', source: upgradedPathFence };
     return { result: 'already-present', source };
+  }
+  if (hasAll(source, SDK_SESSION_MANAGER_OWNERSHIP_V2_MARKERS)) {
+    let upgraded = source;
+    for (const [needle, replacement] of [
+      [MANAGER_IMPORT_V2, MANAGER_IMPORT_REPLACEMENT],
+      [MANAGER_HELPER_REPLACEMENT_V2, MANAGER_HELPER_REPLACEMENT],
+      [MANAGER_METHODS_REPLACEMENT_V2, MANAGER_METHODS_REPLACEMENT],
+    ] as ReadonlyArray<readonly [string, string]>) {
+      const next = replaceExactlyOnce(upgraded, needle, replacement);
+      if (next === undefined) return { result: 'unsupported-shape', source };
+      upgraded = next;
+    }
+    return hasAll(upgraded, SDK_SESSION_MANAGER_OWNERSHIP_MARKERS)
+      ? { result: 'patched', source: upgraded }
+      : { result: 'unsupported-shape', source };
   }
   if (hasAll(source, SDK_SESSION_MANAGER_OWNERSHIP_V1_MARKERS)) {
     const asyncMethod = replaceExactlyOnce(
@@ -869,11 +1058,10 @@ export function transformSdkSessionManagerOwnership(source: string): {
       '        const lease = this.pieOwnershipAdapter.consumeTransferAuthorization(authorization, resolvePath(sessionFile));',
       '        const lease = await this.pieOwnershipAdapter.consumeTransferAuthorization(authorization, resolvePath(sessionFile));',
     );
-    return awaited && hasAll(awaited, SDK_SESSION_MANAGER_OWNERSHIP_MARKERS)
-      ? { result: 'patched', source: awaited }
-      : { result: 'unsupported-shape', source };
+    if (!awaited) return { result: 'unsupported-shape', source };
+    return transformSdkSessionManagerOwnership(awaited);
   }
-  if (SDK_SESSION_MANAGER_OWNERSHIP_MARKERS.some((marker) => source.includes(marker))) {
+  if (SDK_SESSION_MANAGER_OWNERSHIP_V2_MARKERS.some((marker) => source.includes(marker))) {
     return { result: 'unsupported-shape', source };
   }
   let transformed = source;

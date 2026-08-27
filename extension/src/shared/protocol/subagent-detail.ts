@@ -75,7 +75,7 @@ export type HostToCoordinatorDetailMessage =
   | { kind: 'detail.fetch'; requestId: string; subscriptionId: string; address: LiveSubagentDetailAddress; ref: DetailPageRef; maxPageBytes: number };
 
 export type CoordinatorToHostDetailMessage =
-  | { kind: 'detail.start'; subscriptionId: string; address: LiveSubagentDetailAddress; source: 'live' | 'durable'; baselineRevision: number; pageCount: number; totalBytes: number; fence: BackendDetailFence }
+  | { kind: 'detail.start'; subscriptionId: string; address: LiveSubagentDetailAddress; source: 'live' | 'durable'; baselineRevision: number; pageCount: number; totalBytes: number; totalCodePoints: number; fence: BackendDetailFence }
   | { kind: 'detail.page'; subscriptionId: string; ref: DetailPageRef; payload: DetailPagePayload; payloadBytes: number; checksum: DetailChecksum; fence: BackendDetailFence }
   | { kind: 'detail.delta'; subscriptionId: string; baseRevision: number; revision: number; operations: JsonStructuralPatchOperation[]; fence: BackendDetailFence }
   | { kind: 'detail.rebase'; subscriptionId: string; currentRevision: number; reason: DetailRebaseReason; fence: BackendDetailFence }
@@ -190,9 +190,10 @@ export function isCoordinatorToHostDetailMessage(value: unknown): value is Coord
   if (!common) return false;
   switch (value.kind) {
     case 'detail.start':
-      return recordWithKeys(value, ['kind', 'subscriptionId', 'address', 'source', 'baselineRevision', 'pageCount', 'totalBytes', 'fence'])
+      return recordWithKeys(value, ['kind', 'subscriptionId', 'address', 'source', 'baselineRevision', 'pageCount', 'totalBytes', 'totalCodePoints', 'fence'])
         && isLiveSubagentDetailAddress(value.address) && (value.source === 'live' || value.source === 'durable')
-        && nonNegativeInteger(value.baselineRevision) && positiveInteger(value.pageCount) && nonNegativeInteger(value.totalBytes);
+        && nonNegativeInteger(value.baselineRevision) && positiveInteger(value.pageCount)
+        && nonNegativeInteger(value.totalBytes) && nonNegativeInteger(value.totalCodePoints);
     case 'detail.page':
       return recordWithKeys(value, ['kind', 'subscriptionId', 'ref', 'payload', 'payloadBytes', 'checksum', 'fence'])
         && isDetailPageRef(value.ref) && isDetailPagePayload(value.payload)

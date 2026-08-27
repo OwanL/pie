@@ -56,15 +56,6 @@ export const SubagentParams = Type.Object(
 			description: "Optional opaque workflow correlation issued by another tool. It is persisted on the parent tool call but is not added to the child's prompt.",
 		})),
 		userContext: UserContextSchema,
-		// Do not put a JSON Schema `default` on this optional override. Some tool
-		// consumers materialize schema defaults into the call, which would turn an
-		// omitted value into an explicit `true` and bypass the settings.json default.
-		confirmProjectAgents: Type.Optional(
-			Type.Boolean({
-				description:
-					"Prompt before running project-local agents. Omit to use `subagent.confirmProjectAgents` from settings.json (or true when unset); an explicit call value takes precedence.",
-			}),
-		),
 		cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
 		bucket: BucketSchema,
 		modelRequirements: ModelRequirementsSchema,
@@ -79,7 +70,14 @@ export function prepareSubagentArguments(raw: unknown): Static<typeof SubagentPa
 	if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
 		return raw as Static<typeof SubagentParams>;
 	}
-	const { agentScope: _ignored, thinkingLevel: _legacyThinkingLevel, tasks, chain, ...rest } = raw as Record<string, unknown>;
+	const {
+		agentScope: _ignored,
+		thinkingLevel: _legacyThinkingLevel,
+		confirmProjectAgents: _legacyConfirmation,
+		tasks,
+		chain,
+		...rest
+	} = raw as Record<string, unknown>;
 	if (typeof rest.agent === "string" && typeof rest.task === "string") {
 		return rest as Static<typeof SubagentParams>;
 	}
@@ -90,7 +88,11 @@ export function prepareSubagentArguments(raw: unknown): Static<typeof SubagentPa
 			: undefined;
 	const item = legacyItems?.[0];
 	if (item && typeof item === "object" && !Array.isArray(item)) {
-		const { thinkingLevel: _legacyItemThinkingLevel, ...legacyItem } = item as Record<string, unknown>;
+		const {
+			thinkingLevel: _legacyItemThinkingLevel,
+			confirmProjectAgents: _legacyItemConfirmation,
+			...legacyItem
+		} = item as Record<string, unknown>;
 		return { ...rest, ...legacyItem } as Static<typeof SubagentParams>;
 	}
 	if ((Array.isArray(tasks) && tasks.length > 0) || (Array.isArray(chain) && chain.length > 0)) {

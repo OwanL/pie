@@ -22,9 +22,15 @@ const MAX_BYTES = 64 * 1024 * 1024;
 // the backend process: dispatch the next request only after the prior result
 // has crossed the host/webview boundary.
 const MAX_CONCURRENT_REQUESTS = 1;
+/** Keep this just beyond the host's ordinary 30 s RPC deadline. A request the
+ * host accepted should normally settle first; a frame rejected after the
+ * browser transport accepted it still releases the sole detail lane instead
+ * of leaving every later expansion queued forever. */
+export const LAZY_DETAIL_REQUEST_TIMEOUT_MS = 35_000;
 const entries = new Map<string, { state: LazyDetailState; bytes: number }>();
 const inFlight = new Set<string>();
 const activeRequests = new Set<string>();
+const requestTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
 const pendingRequests: Array<{ sessionPath: string; ref: LazyDetailRef }> = [];
 const subscribersByKey = new Map<string, Set<() => void>>();
 let cacheGeneration = 0;
@@ -64,6 +70,47 @@ function enforceBounds(): string[] {
   return evictedKeys;
 }
 
+function clearRequestTimeout(key: string): void {
+  const timer = requestTimeouts.get(key);
+  if (timer === undefined) return;
+  clearTimeout(timer);
+  requestTimeouts.delete(key);
+}
+
+function clearRequestTimeouts(): void {
+  for (const timer of requestTimeouts.values()) clearTimeout(timer);
+  requestTimeouts.clear();
+}
+
+function armRequestTimeout(key: string): void {
+  clearRequestTimeout(key);
+  const timer = setTimeout(() => {
+    requestTimeouts.delete(key);
+    if (!activeRequests.delete(key)) return;
+    inFlight.delete(key);
+    const entry = entries.get(key);
+    if (entry?.state.status === 'loading') {
+      entries.delete(key);
+      entries.set(key, {
+        state: {
+          status: 'failure',
+          message: 'Detail loading timed out. Retry to try again.',
+        },
+        bytes: 0,
+      });
+      notifyKey(key);
+    }
+    // The timed-out request no longer owns the serialized lane. Dispatch the
+    // next explicit expansion immediately instead of waiting for another UI
+    // action to wake the queue.
+    pumpRequests();
+  }, LAZY_DETAIL_REQUEST_TIMEOUT_MS);
+  // Node-based component tests should not be kept alive solely by a webview
+  // recovery timer. Browser timer handles are numbers and simply skip this.
+  (timer as ReturnType<typeof setTimeout> & { unref?: () => void }).unref?.();
+  requestTimeouts.set(key, timer);
+}
+
 function pumpRequests(): void {
   if (!post) return;
   while (activeRequests.size < MAX_CONCURRENT_REQUESTS) {
@@ -71,7 +118,14 @@ function pumpRequests(): void {
     if (!next) return;
     if (!inFlight.has(next.ref.key)) continue;
     activeRequests.add(next.ref.key);
-    const accepted = post({ type: 'requestDetail', sessionPath: next.sessionPath, ref: next.ref });
+    let accepted: unknown = false;
+    try {
+      accepted = post({ type: 'requestDetail', sessionPath: next.sessionPath, ref: next.ref });
+    } catch {
+      // Treat a synchronous transport failure like an explicit rejection: the
+      // request stays queued and does not consume the active lane.
+      accepted = false;
+    }
     if (accepted === false) {
       // The browser can lose its renderer route between expansion and send.
       // Keep the explicit request queued, but do not occupy the single active
@@ -81,6 +135,10 @@ function pumpRequests(): void {
       pendingRequests.unshift(next);
       return;
     }
+    // A test seam or local transport may settle synchronously from inside
+    // post(). Do not arm a stale timer after receiveLazyDetailResult removed
+    // this key from the active set.
+    if (activeRequests.has(next.ref.key)) armRequestTimeout(next.ref.key);
   }
 }
 
@@ -90,6 +148,7 @@ export function setLazyDetailPostMessage(value: (message: WebviewToHostMessage) 
 }
 
 export function clearLazyDetailCache(): void {
+  clearRequestTimeouts();
   entries.clear();
   inFlight.clear();
   activeRequests.clear();
@@ -99,6 +158,7 @@ export function clearLazyDetailCache(): void {
 }
 
 export function receiveLazyDetailResult(result: DetailResult): void {
+  clearRequestTimeout(result.key);
   inFlight.delete(result.key);
   activeRequests.delete(result.key);
   entries.delete(result.key);

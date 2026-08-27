@@ -53,7 +53,7 @@ Agents are discovered automatically from both locations:
 - **User agents** (`~/.pi/agent/agents/`)
 - **Project agents** (`agents/`, project root)
 
-Project agents require confirmation before running (security measure for untrusted repos). When confirmation is enabled but no UI is available, execution fails closed; explicitly set `confirmProjectAgents: false` only for a trusted repository.
+Starting an agent does not require confirmation. Agent invocation is routine orchestration; any tool calls the child makes remain subject to the same action-level safeguards as the parent, so dangerous operations can still be blocked or confirmed at the point of risk.
 
 ## Model Buckets
 
@@ -216,13 +216,12 @@ parent model", which takes precedence (and skips bucket selection) when enabled.
 
 ## Removed parameters and routes
 
-The public schema is `{ agent, task, userContext?, cwd?, bucket?, confirmProjectAgents?, modelRequirements? }`.
+The public schema is `{ agent, task, userContext?, cwd?, bucket?, modelRequirements? }`.
 
 - `thinkingLevel` was removed from calls and agent frontmatter. `prepareArguments` strips it from resumed legacy calls.
 - `agentScope` was removed; discovery always covers user and project agent directories. `prepareArguments` strips this legacy field.
+- `confirmProjectAgents` was removed; starting an agent is not a risky action. `prepareArguments` strips this legacy field, while normal action-level safeguards still govern child tool calls.
 - `tasks` and `chain` batch routes were removed. Old one-item batches are migrated by `prepareArguments`; multi-item batches fail schema validation with guidance to use sibling calls or later turns.
-
-Project-local agents still require confirmation before running (see **Agent Discovery** above).
 
 ## Validation errors
 

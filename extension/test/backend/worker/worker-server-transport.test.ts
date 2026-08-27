@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { PassThrough } from 'node:stream';
 import test from 'node:test';
 
+import { SDK_PATCH_IDENTITY_VERSION } from '../../../src/backend/sdk-patch-barrier';
 import {
   WORKER_IPC_VERSION,
   type WorkerIpcFrame,
@@ -33,7 +34,7 @@ const frameBase = {
 };
 
 const sdkPatchIdentity = {
-  identityVersion: 3 as const,
+  identityVersion: SDK_PATCH_IDENTITY_VERSION,
   sdkPath: '/sdk',
   sdkVersion: 'fixture',
   terminalDurability: { patchVersion: 1, relativePath: 'agent-session.js', sha256: 'a'.repeat(64) },

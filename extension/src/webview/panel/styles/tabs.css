@@ -661,6 +661,16 @@ body.session-tab-dragging {
   flex-shrink: 0;
 }
 
+.session-tabs-indexing {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 4px;
+  color: var(--panel-muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
 .session-tabs-new {
   width: 24px;
   height: 24px;

@@ -1,6 +1,6 @@
 import type { ThinkingLevel, ModelSettings, ModelInfo, ContextWindowUsage } from './models.js';
 import type { ComposerInput, ComposerInputDraft, ChatMessage, DetailResult, LazyDetailRef } from './messages.js';
-import type { SessionSummary, TranscriptWindow, SystemPromptEntry, FileChangeEntry, RetryStatus } from './sessions.js';
+import type { SessionCatalogProgress, SessionSummary, TranscriptWindow, SystemPromptEntry, FileChangeEntry, RetryStatus } from './sessions.js';
 import type { ExtensionInfo, PruningResult, PruningSettings, ToolResultPruningSettings, PruningCatalog, ChatPrefs, ActiveRunSummary } from './settings.js';
 import type { AggregateStats } from './aggregate-stats.js';
 import type { LiveTurnPhase } from '../live-pipeline-protocol.js';
@@ -149,7 +149,8 @@ export interface RenderFailurePayload {
 // closed key-scoped subscription. The webview owns `detailKey` (opaque,
 // identifies the expanded card); the host owns the subscription lifecycle:
 // exactly one active subscription per `{viewGeneration, detailKey}`, minted
-// subscription IDs, exact generation/address owners, and bounded tombstones.
+// subscription IDs, webview-minted owner attempts, exact generation/address
+// owners, and bounded tombstones.
 // Detail pages/deltas never enter `ViewState`; they cross only as the six
 // imperative stream variants below.
 
@@ -162,7 +163,7 @@ export interface RenderFailurePayload {
  *  subscription can never be settled or streamed to another renderer, even
  *  with matching numeric revisions. The complete ownership key is
  *  `{hostInstanceId, viewGeneration, rendererId, rendererGeneration,
- *  detailKey}`. */
+ *  detailKey, detailAttempt}`. */
 export interface HostDetailRoute {
   hostInstanceId: string;
   hostGeneration: number;
@@ -176,6 +177,9 @@ export interface HostDetailRoute {
   workerId?: string;
   workerGeneration?: number;
   detailKey: string;
+  /** Webview-minted monotonic owner attempt. This closes the pre-start window
+   *  where the host-minted subscriptionId is not known to the renderer yet. */
+  detailAttempt: number;
   subscriptionId: string;
 }
 
@@ -198,6 +202,9 @@ export interface McpServerInfo {
 
 export interface ViewState {
   sessions: SessionSummary[];
+  /** Omitted by legacy hosts. A present incomplete value means the visible
+   * summaries are immediately usable while older history is still indexing. */
+  sessionCatalogProgress?: SessionCatalogProgress;
   openTabPaths: string[];
   /** Pinned tab paths (browser-style: pinned tabs cluster at the left). */
   pinnedTabPaths: string[];
@@ -273,6 +280,9 @@ export interface ViewState {
   /** Host-owned producer/tool phase for the active turn. */
   liveTurnPhase: LiveTurnPhase | null;
   notice: string | null;
+  /** Session owning the current notice, or null for a truly global notice.
+   *  Optional for compatibility with older hosts. */
+  noticeSessionPath?: string | null;
   /** Failure category for the current notice, or null when the notice is a
    *  plain info/warning string (or there is no notice). Set ONLY at the Brief H
    *  error sites (send/edit/prepass failures) alongside a plain-language
@@ -379,6 +389,8 @@ export type HostToWebviewMessage =
   | {
       type: 'state';
       protocolVersion: number;
+      /** Exact source-build identity shared by host and renderer bundles. */
+      buildId: string;
       /** Shared extension-host incarnation (same value for every renderer). */
       hostInstanceId: string;
       /** Host-assigned renderer session id (browser server plan §5.1). */
@@ -427,6 +439,7 @@ export type HostToWebviewMessage =
       baselineRevision: number;
       pageCount: number;
       totalBytes: number;
+      totalCodePoints: number;
     })
   | (HostDetailRoute & {
       type: 'detail.page';
@@ -481,6 +494,7 @@ export type HostToWebviewMessage =
        */
       type: 'rendererHello';
       protocolVersion: number;
+      buildId: string;
       hostInstanceId: string;
       rendererId: string;
       rendererGeneration: number;
@@ -539,8 +553,8 @@ type WithViewGeneration<T> = T extends unknown ? T & { viewGeneration?: number; 
 export type WebviewToHostMessage = WithViewGeneration<WebviewToHostMessagePayload>;
 
 type WebviewToHostMessagePayload =
-  | { type: 'ready'; assetVersion?: string; viewGeneration?: number }
-  | { type: 'refreshState'; assetVersion?: string; viewGeneration?: number }
+  | { type: 'ready'; assetVersion?: string; buildId?: string; viewGeneration?: number }
+  | { type: 'refreshState'; assetVersion?: string; buildId?: string; viewGeneration?: number }
   | {
       /**
        * Request a state snapshot. When `sessionPath` is provided the host MAY
@@ -551,6 +565,7 @@ type WebviewToHostMessagePayload =
        */
       type: 'requestSnapshot';
       assetVersion?: string;
+      buildId?: string;
       viewGeneration?: number;
       sessionPath?: string;
     }
@@ -577,15 +592,16 @@ type WebviewToHostMessagePayload =
   | { type: 'openSession'; sessionPath: string }
   | { type: 'closeSession'; sessionPath: string; interactionId?: string }
   | { type: 'requestDetail'; sessionPath: string; ref: LazyDetailRef }
-  // ── Phase 5: demand-driven subagent detail. `viewGeneration` and `detailKey`
-  //    are required (not the optional wrapper field): the host records the
-  //    exact renderer owner before forwarding any stream content. The host
-  //    mints the `subscriptionId`; the webview learns it from `detail.start`.
+  // ── Phase 5: demand-driven subagent detail. `viewGeneration`, `detailKey`,
+  //    and `detailAttempt` are required (not optional wrapper fields): the host
+  //    records the exact renderer owner before forwarding any stream content.
+  //    The host mints `subscriptionId`; the webview learns it from `detail.start`.
   //    Generic one-shot tool/reasoning details keep using `requestDetail`. ──
   | {
       type: 'detail.subscribe';
       viewGeneration: number;
       detailKey: string;
+      detailAttempt: number;
       address: LiveSubagentDetailAddress;
       cursor?: DetailCursor;
     }
@@ -593,12 +609,14 @@ type WebviewToHostMessagePayload =
       type: 'detail.unsubscribe';
       viewGeneration: number;
       detailKey: string;
+      detailAttempt: number;
       reason: 'collapse' | 'unmount' | 'session-change';
     }
   | {
       type: 'detail.fetchPages';
       viewGeneration: number;
       detailKey: string;
+      detailAttempt: number;
       ref: DetailPageRef;
     }
   | { type: 'duplicateSession'; sessionPath: string }
@@ -724,4 +742,3 @@ type WebviewToHostMessagePayload =
   //    visible without opening devtools). `level` is restricted to warn/error
   //    (the webview logger's levels). ──
   | { type: 'log'; level: 'warn' | 'error'; scope: string; message: string; data?: unknown };
-

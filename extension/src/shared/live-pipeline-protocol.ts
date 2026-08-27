@@ -57,7 +57,15 @@ export type LiveToolPhase =
 export type ToolPreview =
   | { kind: 'text'; tail: string; omittedChars: number }
   | { kind: 'command'; commandSummary: string; outputTail?: string; omittedChars: number }
-  | { kind: 'subagent'; mode: 'single' | 'parallel' | 'chain'; children: SubagentChildPreview[]; omittedChildren: number }
+  | {
+      kind: 'subagent';
+      mode: 'single' | 'parallel' | 'chain';
+      children: SubagentChildPreview[];
+      omittedChildren: number;
+      /** Compact terminal-only accounting sideband. Nested transcripts stay
+       * out of the live/UI payload while every recursive child remains billed. */
+      billing?: SubagentBillingEntry[];
+    }
   | { kind: 'question'; promptSummary: string; optionCount: number }
   | { kind: 'generic'; summary: string };
 
@@ -117,6 +125,33 @@ export interface SubagentChildPreview {
   stopReason?: string;
   errorMessage?: string;
   stderr?: string;
+}
+
+export interface SubagentBillingUsage {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  cost?: number;
+}
+
+export interface SubagentBillingAttempt {
+  attemptId: string;
+  model?: string;
+  provider?: string;
+  usage: SubagentBillingUsage;
+}
+
+export interface SubagentBillingEntry {
+  /** Stable recursive position within the terminal subagent result. */
+  path: string;
+  model?: string;
+  selectedModel?: string;
+  provider?: string;
+  /** Epoch milliseconds of the latest observed child provider response. */
+  occurredAt?: number;
+  usage: SubagentBillingUsage;
+  attempts?: SubagentBillingAttempt[];
 }
 
 export type LiveAssistantPart =
@@ -442,11 +477,37 @@ export function isToolPreview(value: unknown): value is ToolPreview {
   switch (value.kind) {
     case 'text': return typeof value.tail === 'string' && isFiniteNumber(value.omittedChars);
     case 'command': return typeof value.commandSummary === 'string' && (value.outputTail === undefined || typeof value.outputTail === 'string') && isFiniteNumber(value.omittedChars);
-    case 'subagent': return Array.isArray(value.children) && isFiniteNumber(value.omittedChildren);
+    case 'subagent': return Array.isArray(value.children)
+      && isFiniteNumber(value.omittedChildren)
+      && (value.billing === undefined || (Array.isArray(value.billing) && value.billing.every(isSubagentBillingEntry)));
     case 'question': return typeof value.promptSummary === 'string' && isFiniteNumber(value.optionCount);
     case 'generic': return typeof value.summary === 'string';
     default: return false;
   }
+}
+
+function isSubagentBillingUsage(value: unknown): boolean {
+  return isRecord(value)
+    && isFiniteNumber(value.input)
+    && isFiniteNumber(value.output)
+    && isFiniteNumber(value.cacheRead)
+    && isFiniteNumber(value.cacheWrite)
+    && (value.cost === undefined || isFiniteNumber(value.cost));
+}
+
+function isSubagentBillingEntry(value: unknown): boolean {
+  if (!isRecord(value) || typeof value.path !== 'string' || !isSubagentBillingUsage(value.usage)) return false;
+  if (value.model !== undefined && typeof value.model !== 'string') return false;
+  if (value.selectedModel !== undefined && typeof value.selectedModel !== 'string') return false;
+  if (value.provider !== undefined && typeof value.provider !== 'string') return false;
+  if (value.occurredAt !== undefined && !isFiniteNumber(value.occurredAt)) return false;
+  return value.attempts === undefined || (Array.isArray(value.attempts) && value.attempts.every((attempt) => (
+    isRecord(attempt)
+    && typeof attempt.attemptId === 'string'
+    && (attempt.model === undefined || typeof attempt.model === 'string')
+    && (attempt.provider === undefined || typeof attempt.provider === 'string')
+    && isSubagentBillingUsage(attempt.usage)
+  )));
 }
 
 function isLiveTurnPhase(value: unknown): value is LiveTurnPhase {

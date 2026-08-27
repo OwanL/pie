@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   PROTOCOL_VERSION,
+  PIE_BUILD_ID,
   WEBVIEW_PROTOCOL_VERSION,
   isEventEnvelope,
   isResponseEnvelope,
@@ -127,6 +128,7 @@ test('host stamps WEBVIEW_PROTOCOL_VERSION onto state envelopes', () => {
   const msg: HostToWebviewMessage = {
     type: 'state',
     protocolVersion: WEBVIEW_PROTOCOL_VERSION,
+    buildId: PIE_BUILD_ID,
     hostInstanceId: 'host-1',
     rendererId: 'renderer-1',
     rendererGeneration: 1,
@@ -150,6 +152,7 @@ test('browser-server v6 messages carry renderer identity and command acknowledge
   const hello: HostToWebviewMessage = {
     type: 'rendererHello',
     protocolVersion: WEBVIEW_PROTOCOL_VERSION,
+    buildId: PIE_BUILD_ID,
     hostInstanceId: 'host-1',
     rendererId: 'renderer-1',
     rendererGeneration: 3,

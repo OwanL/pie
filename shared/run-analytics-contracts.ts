@@ -227,14 +227,17 @@ export interface TurnThroughputSample {
 }
 
 export type AuxiliaryLlmUsageKind =
+  | 'assistant_message'
   | 'skill_pruning_prepass'
   | 'subagent'
   | 'history_compaction'
   | 'branch_summary';
 
 /**
- * Timestamped usage from an LLM call that is not one of the parent session's
- * assistant turns. Subagent samples duplicate the canonical totals in
+ * Timestamped usage from an individually observable LLM response. Parent
+ * assistant-message and subagent samples duplicate later canonical totals and
+ * are reconciled rather than added independently. Subagent samples duplicate
+ * the canonical totals in
  * `ToolUsageRollup.subagent*Tokens`; they preserve model/time attribution and
  * must not be added independently without reconciling against those totals.
  */

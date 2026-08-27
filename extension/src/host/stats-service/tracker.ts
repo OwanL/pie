@@ -15,6 +15,7 @@ import type {
 } from '../../shared/protocol';
 import { appendUnique, summarizeInputs } from './helpers';
 import {
+  getSubagentBillingEntries,
   getRenderableSubagentResult,
   getTerminalSubagentAttemptSamplesFromToolCall,
 } from '../../shared/subagent-result';
@@ -452,19 +453,83 @@ export class SessionRunTracker {
       run.toolUsage.subagentAgentNames,
       analysis.subagentAgentNames,
     );
-    // These are the canonical subagent totals. Aggregate accounting adds them
-    // to parent-turn usage; auxiliary samples below only preserve the actual
-    // child model and timestamp and must not be counted a second time.
-    run.toolUsage.subagentInputTokens += analysis.subagentInputTokens;
-    run.toolUsage.subagentOutputTokens += analysis.subagentOutputTokens;
-    run.toolUsage.subagentCacheReadTokens += analysis.subagentCacheReadTokens;
-    run.toolUsage.subagentCacheWriteTokens += analysis.subagentCacheWriteTokens;
+    const billing = getSubagentBillingEntries(toolCall.result);
+    const billingTotals = billing.reduce((totals, entry) => ({
+      input: totals.input + entry.usage.input,
+      output: totals.output + entry.usage.output,
+      cacheRead: totals.cacheRead + entry.usage.cacheRead,
+      cacheWrite: totals.cacheWrite + entry.usage.cacheWrite,
+    }), { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+    // These are the canonical subagent totals. Prefer the terminal accounting
+    // sideband because the UI-safe preview intentionally omits recursive child
+    // transcripts; fall back to legacy analysis when no sideband is present.
+    // Aggregate accounting adds these to parent-turn usage; auxiliary samples
+    // below only preserve actual child model/time attribution.
+    run.toolUsage.subagentInputTokens += billing.length > 0 ? billingTotals.input : analysis.subagentInputTokens;
+    run.toolUsage.subagentOutputTokens += billing.length > 0 ? billingTotals.output : analysis.subagentOutputTokens;
+    run.toolUsage.subagentCacheReadTokens += billing.length > 0 ? billingTotals.cacheRead : analysis.subagentCacheReadTokens;
+    run.toolUsage.subagentCacheWriteTokens += billing.length > 0 ? billingTotals.cacheWrite : analysis.subagentCacheWriteTokens;
+
+    const samples = run.auxiliaryLlmUsage ?? [];
+    if (billing.length > 0) {
+      const additions: AuxiliaryLlmUsageSample[] = [];
+      for (const entry of billing) {
+        const sourceId = `${toolCall.id}:${entry.path}`;
+        const occurredAt = entry.occurredAt === undefined
+          ? this.runState.isoNow()
+          : new Date(entry.occurredAt).toISOString();
+        const remaining = {
+          inputTokens: toNonNegativeInt(entry.usage.input),
+          outputTokens: toNonNegativeInt(entry.usage.output),
+          cacheReadTokens: toNonNegativeInt(entry.usage.cacheRead),
+          cacheWriteTokens: toNonNegativeInt(entry.usage.cacheWrite),
+        };
+        for (const [attemptIndex, attempt] of (entry.attempts ?? []).entries()) {
+          const counts = {
+            inputTokens: Math.min(remaining.inputTokens, toNonNegativeInt(attempt.usage.input)),
+            outputTokens: Math.min(remaining.outputTokens, toNonNegativeInt(attempt.usage.output)),
+            cacheReadTokens: Math.min(remaining.cacheReadTokens, toNonNegativeInt(attempt.usage.cacheRead)),
+            cacheWriteTokens: Math.min(remaining.cacheWriteTokens, toNonNegativeInt(attempt.usage.cacheWrite)),
+          };
+          if (counts.inputTokens + counts.outputTokens + counts.cacheReadTokens + counts.cacheWriteTokens === 0) continue;
+          additions.push({
+            kind: 'subagent',
+            sourceId: `${sourceId}:attempt:${attempt.attemptId || attemptIndex}`,
+            occurredAt,
+            modelId: attempt.model ?? entry.model ?? entry.selectedModel,
+            ...(attempt.provider ? { provider: attempt.provider } : entry.provider ? { provider: entry.provider } : {}),
+            ...counts,
+            ...(typeof attempt.usage.cost === 'number' && attempt.usage.cost > 0
+              ? { reportedCostUsd: attempt.usage.cost }
+              : {}),
+          });
+          remaining.inputTokens -= counts.inputTokens;
+          remaining.outputTokens -= counts.outputTokens;
+          remaining.cacheReadTokens -= counts.cacheReadTokens;
+          remaining.cacheWriteTokens -= counts.cacheWriteTokens;
+        }
+        if (remaining.inputTokens + remaining.outputTokens + remaining.cacheReadTokens + remaining.cacheWriteTokens > 0) {
+          additions.push({
+            kind: 'subagent',
+            sourceId,
+            occurredAt,
+            modelId: entry.model ?? entry.selectedModel,
+            ...(entry.provider ? { provider: entry.provider } : {}),
+            ...remaining,
+            ...(entry.attempts?.length ? {} : typeof entry.usage.cost === 'number' && entry.usage.cost > 0
+              ? { reportedCostUsd: entry.usage.cost }
+              : {}),
+          });
+        }
+      }
+      run.auxiliaryLlmUsage = [...samples, ...additions];
+      return;
+    }
 
     const renderable = getRenderableSubagentResult(toolCall.result);
     if (!renderable) {
       return;
     }
-    const samples = run.auxiliaryLlmUsage ?? [];
     const additions: AuxiliaryLlmUsageSample[] = [];
     const seenResults = new Set<object>();
     const visitResults = (results: typeof renderable.results, path: string, depth: number): void => {
@@ -653,12 +718,12 @@ export class SessionRunTracker {
     this.runState.persist();
   }
 
-  /** Persist usage from a background summarization request that bypasses the
-   * parent assistant message stream (history compaction or branch summary). */
+  /** Persist exact response usage at the earliest durable boundary. Parent
+   * assistant samples are reconciled with terminal run totals by aggregation. */
   onAuxiliaryLlmUsage(
     sessionPath: string,
     sample: {
-      kind: 'history_compaction' | 'branch_summary';
+      kind: 'assistant_message' | 'history_compaction' | 'branch_summary';
       sourceId: string;
       occurredAt: string;
       modelId?: string;

@@ -478,6 +478,9 @@ function validateHostDetailRoute(value: Record<string, unknown>): value is HostD
   return isString(value.hostInstanceId) && value.hostInstanceId.length > 0
     && isNonNegativeSafeInteger(value.hostGeneration)
     && isNonNegativeSafeInteger(value.viewGeneration)
+    && isString(value.rendererId)
+    && isNonNegativeSafeInteger(value.rendererGeneration)
+    && Number.isSafeInteger(value.detailAttempt) && (value.detailAttempt as number) > 0
     && Number.isSafeInteger(value.backendGeneration) && (value.backendGeneration as number) > 0
     && Number.isSafeInteger(value.coordinatorGeneration) && (value.coordinatorGeneration as number) > 0
     && isDetailKey(value.detailKey)
@@ -530,7 +533,8 @@ export function validateHostToWebviewDetailMessage(
         && (value.source === 'live' || value.source === 'durable')
         && isNonNegativeSafeInteger(value.baselineRevision)
         && Number.isSafeInteger(value.pageCount) && (value.pageCount as number) > 0
-        && isNonNegativeSafeInteger(value.totalBytes);
+        && isNonNegativeSafeInteger(value.totalBytes)
+        && isNonNegativeSafeInteger(value.totalCodePoints);
     case 'detail.page':
       return isDetailPageRef(value.ref)
         && validateDetailPagePayload(value.payload)
@@ -581,11 +585,13 @@ export function validateWebviewToHostMessage(
     case 'ready':
     case 'refreshState':
       if (!isOptionalString(value.assetVersion)) return fail(`${type}: invalid \`assetVersion\``);
+      if (!isOptionalString(value.buildId)) return fail(`${type}: invalid \`buildId\``);
       if (!isOptionalNonNegativeSafeInteger(value.viewGeneration)) return fail(`${type}: invalid \`viewGeneration\``);
       return { ok: true, value: value as WebviewToHostMessage };
 
     case 'requestSnapshot':
       if (!isOptionalString(value.assetVersion)) return fail('requestSnapshot: invalid `assetVersion`');
+      if (!isOptionalString(value.buildId)) return fail('requestSnapshot: invalid `buildId`');
       if (!isOptionalNonNegativeSafeInteger(value.viewGeneration)) return fail('requestSnapshot: invalid `viewGeneration`');
       return { ok: true, value: value as WebviewToHostMessage };
 
@@ -668,7 +674,11 @@ export function validateWebviewToHostMessage(
         || !isOptionalString(value.ref.executionId)
         || (value.ref.partIndex !== undefined && !Number.isSafeInteger(value.ref.partIndex))
         || (value.ref.sourceRevision !== undefined
-          && (!Number.isSafeInteger(value.ref.sourceRevision) || (value.ref.sourceRevision as number) < 0))) {
+          && (!Number.isSafeInteger(value.ref.sourceRevision) || (value.ref.sourceRevision as number) < 0))
+        || (value.ref.childCount !== undefined
+          && (!Number.isSafeInteger(value.ref.childCount) || (value.ref.childCount as number) < 0))
+        || (value.ref.lineCount !== undefined
+          && (!Number.isSafeInteger(value.ref.lineCount) || (value.ref.lineCount as number) < 0))) {
         return fail('requestDetail: invalid `ref`');
       }
       return { ok: true, value: value as WebviewToHostMessage };
@@ -676,6 +686,7 @@ export function validateWebviewToHostMessage(
     case 'detail.subscribe':
       if (!isNonNegativeSafeInteger(value.viewGeneration)) return fail('detail.subscribe: invalid `viewGeneration`');
       if (!isDetailKey(value.detailKey)) return fail('detail.subscribe: invalid `detailKey`');
+      if (!Number.isSafeInteger(value.detailAttempt) || (value.detailAttempt as number) <= 0) return fail('detail.subscribe: invalid `detailAttempt`');
       if (!isLiveSubagentDetailAddress(value.address)) return fail('detail.subscribe: invalid `address`');
       if (value.cursor !== undefined && !isDetailCursor(value.cursor)) return fail('detail.subscribe: invalid `cursor`');
       return { ok: true, value: value as WebviewToHostMessage };
@@ -683,12 +694,14 @@ export function validateWebviewToHostMessage(
     case 'detail.unsubscribe':
       if (!isNonNegativeSafeInteger(value.viewGeneration)) return fail('detail.unsubscribe: invalid `viewGeneration`');
       if (!isDetailKey(value.detailKey)) return fail('detail.unsubscribe: invalid `detailKey`');
+      if (!Number.isSafeInteger(value.detailAttempt) || (value.detailAttempt as number) <= 0) return fail('detail.unsubscribe: invalid `detailAttempt`');
       if (!isString(value.reason) || !DETAIL_REASON_SET.has(value.reason)) return fail('detail.unsubscribe: invalid `reason`');
       return { ok: true, value: value as WebviewToHostMessage };
 
     case 'detail.fetchPages':
       if (!isNonNegativeSafeInteger(value.viewGeneration)) return fail('detail.fetchPages: invalid `viewGeneration`');
       if (!isDetailKey(value.detailKey)) return fail('detail.fetchPages: invalid `detailKey`');
+      if (!Number.isSafeInteger(value.detailAttempt) || (value.detailAttempt as number) <= 0) return fail('detail.fetchPages: invalid `detailAttempt`');
       if (!isDetailPageRef(value.ref)) return fail('detail.fetchPages: invalid `ref`');
       return { ok: true, value: value as WebviewToHostMessage };
 

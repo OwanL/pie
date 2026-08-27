@@ -6,6 +6,8 @@ import type { ReducerResult } from './helpers.js';
 import { upsertTranscriptMessage } from './helpers.js';
 import { stripReqIds } from '../../../shared/error-mapping.js';
 
+export const EDIT_TRUNCATE_RECOVERY_NOTICE = 'Saving your edit and restarting this session…';
+
 export function handleCustomMessage(state: ArchState, event: Extract<Event, { kind: 'CustomMessage' }>): ReducerResult {
   const existing = state.transcript.bySession[event.sessionPath] ?? [];
   // Brief F: a pruning-result custom message arrives when the prepass
@@ -126,6 +128,49 @@ export function handleNoticeShown(state: ArchState, event: Extract<Event, { kind
       draft.settings.noticeKind = event.noticeKind ?? null;
       draft.settings.noticeRaw = event.noticeRaw ?? null;
       draft.settings.noticeSessionPath = event.notice ? (event.sessionPath ?? null) : null;
+    }),
+    effects: [],
+  };
+}
+
+export function handleEditTruncateRecoveryChanged(
+  state: ArchState,
+  event: Extract<Event, { kind: 'EditTruncateRecoveryChanged' }>,
+): ReducerResult {
+  const pending = state.pending.ops[event.corrId];
+  if (!pending || pending.kind !== 'edit' || pending.sessionPath !== event.sessionPath) {
+    return { state, effects: [] };
+  }
+
+  return {
+    state: produce(state, (draft) => {
+      if (event.phase === 'recovering') {
+        draft.settings.notice = EDIT_TRUNCATE_RECOVERY_NOTICE;
+        draft.settings.noticeKind = null;
+        draft.settings.noticeRaw = null;
+        draft.settings.noticeSessionPath = event.sessionPath;
+        return;
+      }
+
+      if (event.phase === 'unresolved') {
+        draft.settings.notice = 'Pie could not confirm the edited session restart. Your replacement is still held locally; restart the backend before continuing.';
+        draft.settings.noticeKind = 'operational-error';
+        draft.settings.noticeRaw = event.error ?? 'session.truncateAfter ended without a correlated response';
+        draft.settings.noticeSessionPath = event.sessionPath;
+        return;
+      }
+
+      // Clear only the notice this corrId could have installed. A newer or
+      // unrelated warning must survive a late recovery acknowledgement.
+      if (
+        draft.settings.noticeSessionPath === event.sessionPath
+        && draft.settings.notice === EDIT_TRUNCATE_RECOVERY_NOTICE
+      ) {
+        draft.settings.notice = null;
+        draft.settings.noticeKind = null;
+        draft.settings.noticeRaw = null;
+        draft.settings.noticeSessionPath = null;
+      }
     }),
     effects: [],
   };

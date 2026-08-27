@@ -904,7 +904,11 @@ test('nested subagent terminal result stays within the backend JSONL transport l
   const repeatedTranscript = 'x'.repeat(17 * 1024 * 1024);
   const nestedResult = {
     content: [{ type: 'text', text: repeatedTranscript }],
-    details: { mode: 'single', results: [] },
+    details: { mode: 'single', results: [{
+      agent: 'scout', task: 'inspect', exitCode: 0, model: 'inner-model', provider: 'ollama',
+      usage: { input: 200, output: 20, cacheRead: 6, cacheWrite: 2 },
+      messages: [{ role: 'assistant', content: repeatedTranscript }],
+    }] },
   };
   const result = {
     content: [{ type: 'text', text: 'nested worker finished' }],
@@ -914,6 +918,9 @@ test('nested subagent terminal result stays within the backend JSONL transport l
         agent: 'worker',
         task: 'exercise nested result transport',
         exitCode: 0,
+        model: 'outer-model',
+        provider: 'github-copilot',
+        usage: { input: 100, output: 10, cacheRead: 5, cacheWrite: 1 },
         messages: [
           {
             role: 'assistant',
@@ -947,12 +954,15 @@ test('nested subagent terminal result stays within the backend JSONL transport l
   });
 
   const payload = emitted.find((entry) => entry.event === 'tool.finished')?.payload as {
-    result?: { $toolResult?: string; originalBytes?: number };
+    result?: { $toolResult?: string; originalBytes?: number; billing?: Array<{ path: string; provider?: string }> };
   } | undefined;
   assert.ok(payload, 'durability-confirmed terminal event is emitted');
   assert.equal(payload.result?.$toolResult, undefined);
   assert.ok(Buffer.byteLength(JSON.stringify(payload.result), 'utf8') < 64 * 1024);
   assert.equal(JSON.stringify(payload.result).includes(repeatedTranscript), false, 'recursive terminal body stays off the ordinary lane');
+  assert.deepEqual(payload.result?.billing?.map((entry) => [entry.path, entry.provider]), [
+    ['0', 'github-copilot'], ['0.0', 'ollama'],
+  ]);
   let fatal: Error | undefined;
   const writer = new OrderedJsonlWriter(new Writable({
     write(_chunk, _encoding, callback) { callback(); },
@@ -999,9 +1009,14 @@ test('nested subagent terminal result stays within the backend JSONL transport l
   const liveTerminal = live.emitted.find((entry) =>
     entry.event === 'live.semantic' && (entry.payload as { kind?: string }).kind === 'tool.terminal');
   assert.ok(liveTerminal, 'sequenced live path emits the durability-confirmed tool terminal');
-  const liveResult = (liveTerminal.payload as { result?: { $toolResult?: string } }).result;
+  const liveResult = (liveTerminal.payload as {
+    result?: { $toolResult?: string; billing?: Array<{ path: string; provider?: string }> };
+  }).result;
   assert.equal(liveResult?.$toolResult, undefined);
   assert.equal(JSON.stringify(liveResult).includes(repeatedTranscript), false);
+  assert.deepEqual(liveResult?.billing?.map((entry) => [entry.path, entry.provider]), [
+    ['0', 'github-copilot'], ['0.0', 'ollama'],
+  ]);
   assert.doesNotThrow(() => writer.write(liveTerminal));
   assert.equal(fatal, undefined);
 });
@@ -1153,16 +1168,30 @@ test('message_end emits finished and aborted payloads and clears the current mes
     assert.equal(context.activeRequest?.currentMessageId, undefined);
     assert.equal(context.activeRequest?.lastAssistantMessageId, 'req-3:1');
     assert.equal(context.activeRequest?.currentMessageStartedAt, undefined);
-    assert.deepEqual(emitted.map((entry) => entry.event), ['message.finished', 'message.aborted']);
+    assert.deepEqual(emitted.map((entry) => entry.event), [
+      'auxiliary-llm.usage', 'message.finished', 'message.aborted',
+    ]);
 
-    const finished = emitted[0]?.payload as { message: { id: string; markdown: string; status: string; durationMs?: number; usage?: { totalTokens: number } } };
+    assert.deepEqual(emitted[0]?.payload, {
+      sessionPath: '/workspace/session.jsonl',
+      kind: 'assistant_message',
+      sourceId: (emitted[0]?.payload as { sourceId: string }).sourceId,
+      occurredAt: '2026-01-01T00:00:05.000Z',
+      modelId: 'claude-test',
+      inputTokens: 2,
+      outputTokens: 3,
+      cacheReadTokens: 1,
+      cacheWriteTokens: 0,
+      durationMs: 3000,
+    });
+    const finished = emitted[1]?.payload as { message: { id: string; markdown: string; status: string; durationMs?: number; usage?: { totalTokens: number } } };
     assert.equal(finished.message.id, 'req-3:1');
     assert.equal(finished.message.markdown, 'Done');
     assert.equal(finished.message.status, 'interrupted');
     assert.equal(finished.message.durationMs, 3000);
     assert.equal(finished.message.usage?.totalTokens, 6);
 
-    assert.deepEqual(emitted[1]?.payload, {
+    assert.deepEqual(emitted[2]?.payload, {
       requestId: 'req-3',
       sessionPath: '/workspace/session.jsonl',
       messageId: 'req-3:1',

@@ -3,7 +3,7 @@ import * as vscode from 'vscode';
 
 import { attachJsonlLineReader, JSONL_MAX_LINE_BYTES, serializeJsonLine } from '../../shared/jsonl';
 import { resolveHostSessionStoragePaths } from '../../shared/session-storage-paths';
-import { RequestTracker, type RequestOptions } from '../../shared/request-tracker';
+import { RequestTracker } from '../../shared/request-tracker';
 import { BACKEND_READY_TIMEOUT_MS } from '../../shared/backend-ready-timeout';
 import { redactSensitiveText } from '../../shared/sensitive-redaction';
 import { bootTraceSync } from '../util/audit';
@@ -16,7 +16,9 @@ import {
   recordLivePipelineTrace,
 } from '../util/live-pipeline-trace-runtime';
 import { classifyBackendStderrLine } from './stderr-classifier';
+import { reapOrphanedBackends, type OrphanReapResult } from './orphan-reaper';
 import { deriveTrustedSdkRoot } from './trusted-sdk-root';
+import type { CommitAwareRequestOptions } from '../core/effect-runner';
 import {
   assertProtocolVersion,
   type BackendReadyPayload,
@@ -36,6 +38,8 @@ export interface BackendStartOptions {
 export interface BackendClientOptions {
   /** Test/diagnostic override; production uses BACKEND_READY_TIMEOUT_MS. */
   readyTimeoutMs?: number;
+  /** Test seam that prevents unit clients from enumerating machine processes. */
+  orphanReaper?: () => Promise<OrphanReapResult>;
 }
 
 export interface CorrelatedBackendFailure {
@@ -180,6 +184,12 @@ export class BackendClient implements vscode.Disposable {
   private readonly events = new vscode.EventEmitter<EventEnvelope>();
   private readonly exits = new vscode.EventEmitter<{ code: number | null; stderr: string }>();
   private readonly requests = new RequestTracker<ResponseEnvelope>();
+  /** Exact correlated response observers for requests whose application-level
+   * waiter may time out before the backend's destructive operation settles. */
+  private readonly correlatedResponseObservers = new Map<
+    string,
+    (settlement: ResponseEnvelope | Error) => void
+  >();
 
   private proc?: cp.ChildProcess;
   private requestCounter = 0;
@@ -215,14 +225,26 @@ export class BackendClient implements vscode.Disposable {
     // fresh one. This is the startup-time safety net for the recurring
     // "multiple backends" problem (a stale backend pegging a CPU core and
     // competing for session files). Best-effort and non-blocking.
-    try {
-      const reaped = await reapOrphanedBackends();
-      if (reaped.length > 0) {
-        appendPieLog('warn', 'backend', 'reaped orphaned backend process(es) before start', { pids: reaped });
+    // Process enumeration is a legacy recovery net and can take seconds on
+    // Windows. Run it alongside backend startup so self-healing never delays a
+    // responsive UI; the lifetime pipe prevents newly launched generations
+    // from becoming orphans in the first place.
+    void (this.options.orphanReaper ?? reapOrphanedBackends)().then((reap) => {
+      if (reap.reaped.length > 0) {
+        appendPieLog('warn', 'backend', 'reaped orphaned backend process(es) during start', {
+          candidates: reap.candidates,
+          pids: reap.reaped,
+        });
       }
-    } catch (error) {
+      if (reap.failures.length > 0) {
+        appendPieLog('warn', 'backend', 'orphan backend reap was incomplete', {
+          candidates: reap.candidates,
+          failures: reap.failures,
+        });
+      }
+    }).catch((error) => {
       appendPieLog('warn', 'backend', 'orphan backend reap failed (non-fatal)', { error: toErrorMessage(error) });
-    }
+    });
 
     this.stderrBuffer = '';
     this.stderrLineBuffer = '';
@@ -278,11 +300,15 @@ export class BackendClient implements vscode.Disposable {
         '--cwd', options.cwd,
         '--hostPid', String(process.pid),
         '--backendGeneration', String(generation),
+        '--lifetimeFd', '3',
       ],
       {
         cwd: options.cwd,
         env: backendEnv,
-        stdio: ['pipe', 'pipe', 'pipe'],
+        // fd 3 is a dedicated ownership lease. Unlike stdin it is never passed
+        // through the JSONL transport and cannot be kept alive by pending RPC
+        // drainage. The backend exits when the host side disappears.
+        stdio: ['pipe', 'pipe', 'pipe', 'pipe'],
         shell: false,
       },
     );
@@ -477,7 +503,7 @@ export class BackendClient implements vscode.Disposable {
   async request<TResult = unknown>(
     method: string,
     params?: unknown,
-    options?: RequestOptions,
+    options?: CommitAwareRequestOptions<TResult>,
   ): Promise<TResult> {
     if (!this.proc?.stdin) {
       options?.onTransportSettled?.();
@@ -486,11 +512,40 @@ export class BackendClient implements vscode.Disposable {
 
     const id = `req-${++this.requestCounter}`;
     const timeoutMs = options?.timeoutMs ?? RPC_TIMEOUTS_MS[method] ?? DEFAULT_RPC_TIMEOUT_MS;
+    if (options?.onCorrelatedResponse) {
+      const observer = options.onCorrelatedResponse;
+      this.correlatedResponseObservers.set(id, (settlement) => {
+        if (settlement instanceof Error) {
+          observer({ ok: false, error: settlement });
+        } else if (settlement.ok) {
+          observer({ ok: true, result: settlement.result as TResult });
+        } else {
+          observer({
+            ok: false,
+            error: new BackendRpcError(id, method, settlement.error.code, settlement.error.message),
+          });
+        }
+      });
+    }
+    const retainCorrelation = options?.onCorrelatedResponse !== undefined;
     const responsePromise = this.requests.create(
       id,
       timeoutMs,
       options?.signal,
-      options?.onTransportSettled,
+      retainCorrelation || options?.onTransportSettled
+        ? () => {
+            // A normal/late response removes and notifies the observer in
+            // handleLine before RequestTracker runs this callback. Reaching
+            // here with an observer still installed means the physical
+            // request ended without a usable correlated response (write
+            // failure, malformed response, backend shutdown, or disposal).
+            this.settleCorrelatedResponseObserver(
+              id,
+              new Error(`Backend transport settled without a correlated response for ${id}.`),
+            );
+            options?.onTransportSettled?.();
+          }
+        : undefined,
     );
 
     bootTraceSync('backend-client', 'request.sent', { id, method, timeoutMs });
@@ -599,6 +654,12 @@ export class BackendClient implements vscode.Disposable {
     if (parseError === undefined) {
       if (isResponseEnvelope(value)) {
         this.traceLineReceipt(value, traceStartedAt, line, 'success');
+        // Deliver before RequestTracker.resolve: its transport-settlement hook
+        // intentionally treats a still-installed observer as a no-response
+        // failure. This ordering also lets a late response resolve the
+        // commit-aware waiter while the ordinary application promise remains
+        // timed out.
+        this.settleCorrelatedResponseObserver(value.id, value);
         this.requests.resolve(value.id, value);
         return;
       }
@@ -635,6 +696,20 @@ export class BackendClient implements vscode.Disposable {
     const preview = line.length > 200 ? `${line.slice(0, 200)}…` : line;
     const reason = parseError ? toErrorMessage(parseError) : 'unrecognized envelope';
     appendPieLog('warn', 'backend-client', 'dropped unparseable backend line', { reason, preview });
+  }
+
+  private settleCorrelatedResponseObserver(id: string, settlement: ResponseEnvelope | Error): void {
+    const observer = this.correlatedResponseObservers.get(id);
+    if (!observer) return;
+    this.correlatedResponseObservers.delete(id);
+    try {
+      observer(settlement);
+    } catch (error) {
+      appendPieLog('error', 'backend-client', 'correlated response observer failed', {
+        id,
+        error: toErrorMessage(error),
+      });
+    }
   }
 
   private traceLineReceipt(
@@ -766,100 +841,4 @@ export function extractRequestId(line: string, value: unknown): string | undefin
   // the client mints (`req-${++requestCounter}`).
   const match = /"id"\s*:\s*"(req-\d+)"/.exec(line);
   return match?.[1];
-}
-
-/**
- * Reap orphaned pie backend processes before spawning a fresh one. A backend
- * whose extension host died (window closed, host crash, or a build that
- * predates the in-process host watchdog) can otherwise linger indefinitely,
- * pegging a CPU core and competing for the same session files — the recurring
- * "multiple backends" problem. We enumerate node processes, find any running
- * `backend.js` whose `--hostPid` is no longer alive, and terminate that tree.
- *
- * Only processes whose command line contains `backend.js` AND a `--hostPid`
- * argument are considered, so unrelated node processes are never touched. The
- * host PID is validated as a positive integer before the liveness probe. This
- * is best-effort: a failed reap must never block backend startup.
- */
-async function reapOrphanedBackends(): Promise<number[]> {
-  if (process.platform !== 'win32') return [];
-  const reaped: number[] = [];
-  const { execFile } = await import('node:child_process');
-  const { promisify } = await import('node:util');
-  const execFileAsync = promisify(execFile);
-  let stdout: string;
-  try {
-    const result = await execFileAsync('wmic.exe', [
-      'process',
-      'where',
-      "name='node.exe'",
-      'get',
-      'ProcessId,CommandLine',
-      '/format:csv',
-    ], { windowsHide: true, timeout: 10_000, maxBuffer: 4 * 1024 * 1024 });
-    stdout = result.stdout;
-  } catch {
-    // wmic is deprecated on newer Windows; fall back to PowerShell CIM.
-    try {
-      const result = await execFileAsync('powershell.exe', [
-        '-NoProfile', '-NonInteractive', '-Command',
-        "Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" | Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress",
-      ], { windowsHide: true, timeout: 10_000, maxBuffer: 4 * 1024 * 1024 });
-      stdout = result.stdout;
-    } catch {
-      return [];
-    }
-  }
-
-  const hostPidOf = (commandLine: string): number | undefined => {
-    const match = /--hostPid\s+(\d+)/u.exec(commandLine);
-    if (!match) return undefined;
-    const pid = Number(match[1]);
-    return Number.isSafeInteger(pid) && pid > 0 ? pid : undefined;
-  };
-
-  const isBackendCoordinator = (commandLine: string): boolean =>
-    /backend\.js/u.test(commandLine) && hostPidOf(commandLine) !== undefined;
-
-  const isAlive = (pid: number): boolean => {
-    try {
-      process.kill(pid, 0);
-      return true;
-    } catch (error) {
-      return (error as NodeJS.ErrnoException).code !== 'ESRCH';
-    }
-  };
-
-  const candidates: Array<{ pid: number; hostPid: number }> = [];
-  // wmic CSV: header line then `Node,ProcessId,CommandLine` rows.
-  for (const line of stdout.split(/\r?\n/u)) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('Node')) continue;
-    const parts = trimmed.split(',');
-    if (parts.length < 3) continue;
-    const pid = Number(parts[parts.length - 2]);
-    const commandLine = parts.slice(parts.length - 1).join(',');
-    if (!Number.isSafeInteger(pid) || pid <= 0 || pid === process.pid) continue;
-    if (!isBackendCoordinator(commandLine)) continue;
-    const hostPid = hostPidOf(commandLine);
-    if (hostPid === undefined) continue;
-    candidates.push({ pid, hostPid });
-  }
-
-  for (const { pid, hostPid } of candidates) {
-    if (isAlive(hostPid)) continue;
-    try {
-      // Terminate the whole tree (the backend may be wrapped by a proto shim
-      // whose child is the real node process). taskkill /T /F is the Windows
-      // tree-kill; a failed reap must not block backend startup.
-      await execFileAsync('taskkill.exe', ['/PID', String(pid), '/T', '/F'], {
-        windowsHide: true,
-        timeout: 5_000,
-      });
-      reaped.push(pid);
-    } catch {
-      // Best-effort: a failed reap must not block backend startup.
-    }
-  }
-  return reaped;
 }

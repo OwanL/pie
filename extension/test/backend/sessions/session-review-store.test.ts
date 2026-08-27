@@ -74,6 +74,21 @@ test('V2 production status is keyed by sessionId across a path move', () => {
   assert.equal(merged.reviewedAt, '2026-07-24T00:00:00.000Z');
 });
 
+test('a summary with indexed identity does not reopen a missing transcript during review merge', () => {
+  writeLines(REVIEWS_FILE, [v2Review()]);
+  fs.rmSync(sessionPath);
+
+  const merged = mergeReviewIntoSummary({
+    ...baseSummary(),
+    sessionId: SESSION_ID,
+  }, readReviews());
+
+  assert.equal(merged.sessionId, SESSION_ID);
+  assert.equal(merged.identityFallback, undefined);
+  assert.equal(merged.reviewed, true);
+  assert.equal(merged.reviewId, 'review-1');
+});
+
 test('the first V2 production review is canonical and calibration is non-canonical', () => {
   writeLines(REVIEWS_FILE, [
     v2Review({ kind: 'calibration', reviewId: 'calibration-1' }),

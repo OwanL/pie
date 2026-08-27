@@ -21,7 +21,11 @@ import {
   type TranscriptPagePayload,
 } from '../shared/protocol';
 import { getDefaultAuthDir, ensureDir, isInsideGitWorkTree, migrateAuthFile } from './auth.js';
-import { handleBackendRequest, parseLivePipelineToggleParams } from './request-handler';
+import {
+  handleBackendRequest,
+  parseLivePipelineToggleParams,
+  type TranscriptPageLoadOptions,
+} from './request-handler';
 import {
   validateDetailFetch,
   validateDetailSubscribe,
@@ -45,6 +49,10 @@ import {
 } from './session-review-store';
 import { forgetPrivateSessionArtifacts } from './private-session-artifacts';
 import {
+  isSystemPromptTogglePersistenceAvailable,
+  writeSystemPromptTogglesForSession,
+} from './system-prompt-toggle-store';
+import {
   ensureSdkPatchBarrier,
   loadSdk,
   type ColdCoordinatorSdkModule,
@@ -67,6 +75,7 @@ import {
 import { backendTrace, backendError, backendInfo, backendWarn, backendLog, classifyWorkerStderrChunk } from './log';
 import { isCoordinatorOperationAllowed } from './coordinator-operations';
 import { ColdSessionStore, StaleColdSessionLeaseError, type ColdSessionManagerHandle } from './cold-session-store';
+import { ColdBrowseHelperClient } from './cold-browse-helper-client';
 import { DurableDetailStore, type ResolvedDurableDetail } from './durable-detail-store';
 import type { BackendDetailFence, LiveSubagentDetailAddress } from '../shared/protocol/subagent-detail';
 import { WorkerSupervisor } from './worker-supervisor';
@@ -77,7 +86,6 @@ import type { WorkerJsonObject, WorkerJsonValue } from './worker-protocol';
 const ISOLATED_PROMOTION_METHODS = new Set([
   'message.send',
   'message.compact',
-  'systemPromptToggles.set',
 ]);
 
 /** Live worker detail errors that mean the worker no longer retains the
@@ -254,6 +262,8 @@ export class BackendServer {
    *  death) naturally drops the ledger with the process. */
   private readonly createOperationLedger = new CreateOperationLedger();
   private readonly workerEntryPath?: string;
+  private readonly coldBrowseHelperEntryPath?: string;
+  private coldBrowseHelper?: ColdBrowseHelperClient;
   private workerSupervisor?: WorkerSupervisor;
   private sessionOwnershipAuthority?: SessionOwnershipAuthority;
   private workerRuntimeRouter?: WorkerRuntimeRouter;
@@ -261,6 +271,9 @@ export class BackendServer {
   private authPath = '';
   private hostWatchdogTimer?: ReturnType<typeof setInterval>;
   private readonly hostPid?: number;
+  private readonly lifetimeFd?: number;
+  private hostLifetimeStream?: fsSync.ReadStream;
+  private hostLossHandled = false;
   private eventLoopDelayMonitor?: ReturnType<typeof monitorEventLoopDelay>;
   private eventLoopHistogram?: BoundedEventLoopHistogram;
   private eventLoopDelayTimer?: ReturnType<typeof setInterval>;
@@ -284,7 +297,11 @@ export class BackendServer {
     cwd: string;
     backendGeneration?: number;
     hostPid?: number;
+    lifetimeFd?: number;
     workerEntryPath?: string;
+    /** Production explicitly supplies the bundled helper. Direct test
+     * constructions remain coordinator-only unless they opt in. */
+    coldBrowseHelperEntryPath?: string;
     /** Test seam for causally blocking a cold catalog operation at the public
      * JSONL/writer boundary. Production always constructs the default. */
     sessionCatalog?: SessionCatalog;
@@ -296,8 +313,14 @@ export class BackendServer {
       throw new Error('backendGeneration must be a positive safe integer.');
     }
     this.hostPid = options.hostPid;
+    this.lifetimeFd = options.lifetimeFd;
     this.workerEntryPath = options.workerEntryPath;
-    this.sessionCatalog = options.sessionCatalog ?? new SessionCatalog();
+    this.coldBrowseHelperEntryPath = options.coldBrowseHelperEntryPath;
+    this.sessionCatalog = options.sessionCatalog ?? new SessionCatalog({
+      onCatalogChanged: () => {
+        void this.emitSessionListChanged();
+      },
+    });
     if (!this.workerEntryPath) {
       throw new Error('The session runtime requires a bundled worker entry path.');
     }
@@ -322,6 +345,7 @@ export class BackendServer {
       agentDir: this.agentDir,
       sessionDir: this.getSessionDir(),
       sessionCatalog: this.sessionCatalog,
+      browseHelper: this.coldBrowseHelper,
     });
     return this.coldSessionStore;
   }
@@ -375,6 +399,23 @@ export class BackendServer {
     // artifact. The coordinator owns the patching barrier and workers only
     // validate it.
     const sdkPatchIdentity = await ensureSdkPatchBarrier(this.sdkPath);
+    if (this.coldBrowseHelperEntryPath) {
+      this.coldBrowseHelper = new ColdBrowseHelperClient({
+        entryPath: this.coldBrowseHelperEntryPath,
+        sdkPath: this.sdkPath,
+        sdkPatchIdentity,
+        startupCwd: this.startupCwd,
+        parentPid: process.pid,
+        onDiagnostic: (chunk) => backendWarn('backend-cold-browse-helper', 'helper diagnostic', { chunk }),
+      });
+      // Eagerly validate/import the helper SDK while coordinator startup does
+      // independent work. Failure is deliberately non-fatal: the first exact
+      // v3 miss retries lazily, then ColdSessionStore preserves semantics with
+      // its synchronous fallback if the helper is still unavailable.
+      void this.coldBrowseHelper.warm().catch((error) => {
+        backendWarn('backend-cold-browse-helper', 'eager warm failed', { error: toErrorMessage(error) });
+      });
+    }
     this.workerSupervisor = new WorkerSupervisor({
       workerEntryPath: this.workerEntryPath!,
       coordinatorGeneration: this.backendGeneration,
@@ -618,6 +659,7 @@ export class BackendServer {
       );
     });
 
+    this.startHostLifetimeWatch();
     this.startHostWatchdog();
     // The event-loop monitor is diagnostics-only: it must not run (native
     // histogram + interval sampling) while the live-pipeline trace is
@@ -937,22 +979,75 @@ export class BackendServer {
       } catch (error) {
         const code = (error as NodeJS.ErrnoException).code;
         if (code !== 'ESRCH') return;
-        this.stopHostWatchdog();
-        backendWarn('backend', 'extension host disappeared; stopping backend', { hostPid });
-        void this.dispose().then(
-          () => process.exit(0),
-          (error) => { log(`backend disposal failed closed: ${toErrorMessage(error)}`); process.exitCode = 1; },
-        );
+        this.handleHostLoss('pid-watchdog', { hostPid });
       }
     };
 
     this.hostWatchdogTimer = setInterval(checkHost, 2_000);
     this.hostWatchdogTimer.unref?.();
+    checkHost();
   }
 
   private stopHostWatchdog(): void {
     if (this.hostWatchdogTimer) clearInterval(this.hostWatchdogTimer);
     this.hostWatchdogTimer = undefined;
+  }
+
+  /** The host owns the write side of fd 3. OS-level EOF is a stronger lifetime
+   * signal than stdio or PID polling: it is immediate, has no PID-reuse race,
+   * and remains independent of accepted RPC drainage. */
+  private startHostLifetimeWatch(): void {
+    const lifetimeFd = this.lifetimeFd;
+    if (lifetimeFd === undefined) return;
+    try {
+      const stream = fsSync.createReadStream('', { fd: lifetimeFd, autoClose: true });
+      this.hostLifetimeStream = stream;
+      stream.once('end', () => this.handleHostLoss('lifetime-pipe-eof', { lifetimeFd }));
+      stream.once('error', (error) => {
+        if (this.disposed) return;
+        backendWarn('backend', 'host lifetime pipe failed; PID watchdog remains active', {
+          lifetimeFd,
+          error: toErrorMessage(error),
+        });
+      });
+      stream.resume();
+    } catch (error) {
+      backendWarn('backend', 'could not open host lifetime pipe; PID watchdog remains active', {
+        lifetimeFd,
+        error: toErrorMessage(error),
+      });
+    }
+  }
+
+  private stopHostLifetimeWatch(): void {
+    const stream = this.hostLifetimeStream;
+    this.hostLifetimeStream = undefined;
+    stream?.destroy();
+  }
+
+  private handleHostLoss(source: string, details: Record<string, unknown>): void {
+    if (this.hostLossHandled || this.disposed) return;
+    this.hostLossHandled = true;
+    this.stopHostWatchdog();
+    this.stopHostLifetimeWatch();
+    backendWarn('backend', 'extension host disappeared; stopping backend', { source, ...details });
+
+    const forcedExit = setTimeout(() => {
+      log('backend host-loss disposal exceeded 3 seconds; forcing process exit');
+      process.exit(1);
+    }, 3_000);
+    forcedExit.unref?.();
+    void this.dispose().then(
+      () => {
+        clearTimeout(forcedExit);
+        process.exit(0);
+      },
+      (error) => {
+        clearTimeout(forcedExit);
+        log(`backend disposal failed closed: ${toErrorMessage(error)}`);
+        process.exit(1);
+      },
+    );
   }
 
 
@@ -1040,6 +1135,7 @@ export class BackendServer {
     direction: TranscriptPageDirection,
     loadedStart?: number,
     loadedEnd?: number,
+    options?: TranscriptPageLoadOptions,
   ): Promise<TranscriptPagePayload> {
     for (let attempt = 0; attempt < 3; attempt += 1) {
       try {
@@ -1048,6 +1144,7 @@ export class BackendServer {
           direction,
           loadedStart,
           loadedEnd,
+          options,
         );
         this.registerColdResult(result);
         return result;
@@ -1227,6 +1324,7 @@ export class BackendServer {
     transport?: import('../shared/transcript-window').SessionSnapshotTransport,
     operationId?: string,
     operationAttempt?: number,
+    systemPromptDisabledEntries?: readonly string[],
   ): Promise<SessionOpenedPayload> {
     return await timed('buildSessionOpenedPayload', async () => {
       const catalog = await loadConfiguredModels(this.agentDir, this.modelRegistry);
@@ -1243,6 +1341,7 @@ export class BackendServer {
           transport,
           operationId,
           operationAttempt,
+          systemPromptDisabledEntries,
         };
         const payload = retained
           ? await store.openHandleSnapshot(retained.handle, options)
@@ -1257,7 +1356,15 @@ export class BackendServer {
             // Evict it once; the retry reopens current durable authority rather
             // than selecting the same stale handle forever.
             this.coldSessionManagerHandles.delete(this.coldManagerKey(sessionPath));
-            return await this.buildSessionOpenedPayload(sessionPath, selectionToken, transcript, transport, operationId, operationAttempt);
+            return await this.buildSessionOpenedPayload(
+              sessionPath,
+              selectionToken,
+              transcript,
+              transport,
+              operationId,
+              operationAttempt,
+              systemPromptDisabledEntries,
+            );
           }
           throw new BackendError(
             'SESSION_CHANGED_DURING_READ',
@@ -1279,6 +1386,7 @@ export class BackendServer {
       const payload: SessionListChangedPayload = {
         sessions,
         activeSessionPath: this.viewedSessionPath,
+        sessionCatalogProgress: this.sessionCatalog.getProgress(),
       };
       this.coldSessionStore?.transferOwnershipStamp(sessions, payload);
       this.emit('session.list.changed', payload);
@@ -1787,6 +1895,31 @@ export class BackendServer {
         });
         return { sessionPath: handle.sessionPath };
       },
+      applyColdSessionModelSettings: async (sessionPath, updates) => {
+        const store = this.initializeColdSessionStore();
+        await this.runColdSessionMutation(sessionPath, async () => {
+          const retained = this.coldSessionManagerHandles.get(this.coldManagerKey(sessionPath));
+          if (retained) store.setHandleModelSettings(retained.handle, updates);
+          else store.setModelSettings(sessionPath, updates);
+        });
+      },
+      applyColdSystemPromptToggles: async (sessionPath, disabledEntries) => {
+        await this.runColdSessionMutation(sessionPath, async () => {
+          if (this.forgottenSessionPaths.has(sessionPath) || !fsSync.existsSync(sessionPath)) {
+            throw new BackendError('SESSION_NOT_FOUND', `Unknown session: ${sessionPath}`);
+          }
+          if (!isSystemPromptTogglePersistenceAvailable()) {
+            throw new BackendError(
+              'COLD_SESSION_SETTINGS_UNAVAILABLE',
+              'System-prompt toggle persistence directory is unavailable.',
+            );
+          }
+          // A cold coordinator has no in-memory prompt state to fall back to,
+          // so this write is strict: success means the choice will survive a
+          // backend restart and be consumed when the worker is promoted.
+          await writeSystemPromptTogglesForSession(sessionPath, disabledEntries, true);
+        });
+      },
       isSessionTransitionPending: () => false,
       transitionSessionContext: () => {
         throw new BackendError('ISOLATED_RUNTIME_ROUTING_UNAVAILABLE', 'The coordinator does not transition in-process session runtimes.');
@@ -1808,8 +1941,16 @@ export class BackendServer {
         this.setViewedSessionPathIfCurrent(sessionPath, revision)
       ),
       setViewedSessionPath: (sessionPath) => this.setViewedSessionPath(sessionPath),
-      buildSessionOpenedPayload: (sessionPath, selectionToken, transcript, transport, operationId, operationAttempt) => (
-        this.buildSessionOpenedPayload(sessionPath, selectionToken, transcript, transport, operationId, operationAttempt)
+      buildSessionOpenedPayload: (sessionPath, selectionToken, transcript, transport, operationId, operationAttempt, systemPromptDisabledEntries) => (
+        this.buildSessionOpenedPayload(
+          sessionPath,
+          selectionToken,
+          transcript,
+          transport,
+          operationId,
+          operationAttempt,
+          systemPromptDisabledEntries,
+        )
       ),
       createOperationLedger: this.createOperationLedger,
       buildTransitionSessionOpenedPayload: () => {
@@ -1820,8 +1961,8 @@ export class BackendServer {
       },
       setAutonomousMode: () => undefined,
       forgetSession: (sessionPath) => this.forgetSession(sessionPath),
-      loadTranscriptPage: (sessionPath, direction, loadedStart, loadedEnd) => (
-        this.loadTranscriptPage(sessionPath, direction, loadedStart, loadedEnd)
+      loadTranscriptPage: (sessionPath, direction, loadedStart, loadedEnd, options) => (
+        this.loadTranscriptPage(sessionPath, direction, loadedStart, loadedEnd, options)
       ),
       loadDetail: (sessionPath, ref) => this.loadDetail(sessionPath, ref),
       transferBrowseResponseOwnership: (source, target) => {
@@ -1914,14 +2055,24 @@ export class BackendServer {
     this.coldSessionManagerHandles.clear();
     this.pendingLivePipelineTraceDisables.clear();
     this.stopHostWatchdog();
+    this.stopHostLifetimeWatch();
     this.stopEventLoopMonitor();
     let workerSupervisorDisposeError: unknown;
+    if (this.coldBrowseHelper) {
+      try {
+        await this.coldBrowseHelper.dispose();
+        this.coldBrowseHelper = undefined;
+      } catch (error) {
+        workerSupervisorDisposeError ??= error;
+        log(`cold browse helper disposal failed closed: ${toErrorMessage(error)}`);
+      }
+    }
     if (this.workerRuntimeRouter) {
       try {
         await this.workerRuntimeRouter.dispose();
         this.workerRuntimeRouter = undefined;
       } catch (error) {
-        workerSupervisorDisposeError = error;
+        workerSupervisorDisposeError ??= error;
         log(`worker runtime router disposal failed closed: ${toErrorMessage(error)}`);
       }
     }
@@ -1930,7 +2081,7 @@ export class BackendServer {
         await this.workerSupervisor.dispose();
         this.workerSupervisor = undefined;
       } catch (error) {
-        workerSupervisorDisposeError = error;
+        workerSupervisorDisposeError ??= error;
         log(`worker supervisor disposal failed closed: ${toErrorMessage(error)}`);
       }
     }

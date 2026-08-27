@@ -390,6 +390,15 @@ function subtractUsage(left: TokenCounts, right: TokenCounts): TokenCounts {
   };
 }
 
+function maxUsage(left: TokenCounts, right: TokenCounts): TokenCounts {
+  return {
+    inputTokens: Math.max(left.inputTokens, right.inputTokens),
+    outputTokens: Math.max(left.outputTokens, right.outputTokens),
+    cacheReadTokens: Math.max(left.cacheReadTokens, right.cacheReadTokens),
+    cacheWriteTokens: Math.max(left.cacheWriteTokens, right.cacheWriteTokens),
+  };
+}
+
 function providerForSample(
   sampleModelId: string | undefined,
   sampleProvider: string | undefined,
@@ -445,10 +454,12 @@ function usageForModel(
 }
 
 /**
- * Build canonical billable usage for a run. Parent-turn and pruning-prepass
- * usage are direct. Subagent totals come from the existing ToolUsageRollup;
- * auxiliary samples only split those totals by actual child model/time, so
- * they cannot double-count usage or the forwarded throughput samples.
+ * Build canonical billable usage for a run. Durable assistant-message samples
+ * make active/interrupted tool loops visible immediately; terminal run totals
+ * remain the historical fallback. Their channel-wise maximum is canonical and
+ * the samples partition it, so completion cannot double-count the same calls.
+ * Subagent totals come from the existing ToolUsageRollup; auxiliary samples
+ * only split those totals by actual child model/time.
  */
 function attributedRunUsage(
   run: RunSnapshot,
@@ -457,13 +468,57 @@ function attributedRunUsage(
 ): AttributedUsage[] {
   const runModel = run.modelId ?? 'unknown';
   const usage: AttributedUsage[] = [];
-  let parentRemaining: TokenCounts = {
+  const terminalParent: TokenCounts = {
     inputTokens: run.inputTokens,
     outputTokens: run.outputTokens,
     cacheReadTokens: run.cacheReadTokens,
     cacheWriteTokens: run.cacheWriteTokens,
   };
   const auxiliary = run.auxiliaryLlmUsage ?? [];
+  const assistantMessageSamples = [] as typeof auxiliary;
+  const assistantMessageSeen = new Set<string>();
+  const observedParent: TokenCounts = {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+  };
+  for (const sample of auxiliary) {
+    if (sample.kind !== 'assistant_message' || assistantMessageSeen.has(sample.sourceId)) continue;
+    assistantMessageSeen.add(sample.sourceId);
+    assistantMessageSamples.push(sample);
+    observedParent.inputTokens += sample.inputTokens;
+    observedParent.outputTokens += sample.outputTokens;
+    observedParent.cacheReadTokens += sample.cacheReadTokens;
+    observedParent.cacheWriteTokens += sample.cacheWriteTokens;
+  }
+  let parentRemaining = maxUsage(terminalParent, observedParent);
+  for (const sample of assistantMessageSamples) {
+    if (usageTotal(parentRemaining) === 0) break;
+    const counts: TokenCounts = {
+      inputTokens: Math.min(parentRemaining.inputTokens, sample.inputTokens),
+      outputTokens: Math.min(parentRemaining.outputTokens, sample.outputTokens),
+      cacheReadTokens: Math.min(parentRemaining.cacheReadTokens, sample.cacheReadTokens),
+      cacheWriteTokens: Math.min(parentRemaining.cacheWriteTokens, sample.cacheWriteTokens),
+    };
+    if (usageTotal(counts) === 0 && sample.reportedCostUsd === undefined) continue;
+    const occurredAtMs = Date.parse(sample.occurredAt);
+    const sampleCounts: TokenCounts = {
+      inputTokens: sample.inputTokens,
+      outputTokens: sample.outputTokens,
+      cacheReadTokens: sample.cacheReadTokens,
+      cacheWriteTokens: sample.cacheWriteTokens,
+    };
+    usage.push(usageForModel(
+      sample.modelId ?? runModel,
+      Number.isNaN(occurredAtMs) ? fallbackMs : occurredAtMs,
+      counts,
+      pricingMap,
+      providerForSample(sample.modelId, sample.provider, run.modelId, run.provider),
+      equalUsage(counts, sampleCounts) ? sample.reportedCostUsd : undefined,
+    ));
+    parentRemaining = subtractUsage(parentRemaining, counts);
+  }
   const forwardedSubagentKeys = new Set(auxiliary
     .filter((sample) => sample.kind === 'subagent')
     .map((sample) => `${Date.parse(sample.occurredAt)}\u0000${stripProviderPrefix(sample.modelId ?? runModel)}\u0000${sample.provider ?? ''}`));
@@ -498,7 +553,7 @@ function attributedRunUsage(
   const seen = new Set<string>();
 
   for (const sample of auxiliary) {
-    if (sample.kind === 'subagent') continue;
+    if (sample.kind === 'subagent' || sample.kind === 'assistant_message') continue;
     const dedupKey = `${sample.kind}:${sample.sourceId}`;
     if (seen.has(dedupKey)) continue;
     seen.add(dedupKey);

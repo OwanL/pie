@@ -13,6 +13,8 @@ const skipTypecheck = process.argv.includes('--skip-typecheck');
 const noSync = process.argv.includes('--no-sync');
 const webviewViewName = 'panel';
 const webviewRelativeDir = path.join('webview', webviewViewName);
+const buildIdentityFile = 'pie-build-id.txt';
+const buildIdentityPattern = /^[0-9a-f]{20}$/u;
 
 let syncTimer;
 let syncQueue = Promise.resolve();
@@ -89,6 +91,20 @@ async function writeSdkLocalManifest() {
     // SDK not installed in the source node_modules yet; skip — resolution
     // falls back to extensionPath/node_modules (dev-host) then npm root -g.
   }
+}
+
+async function verifyCoordinatedBuildIdentity() {
+  const [hostBuildId, webviewBuildId] = await Promise.all([
+    readFile(path.join(outDir, buildIdentityFile), 'utf8'),
+    readFile(path.join(outDir, webviewRelativeDir, buildIdentityFile), 'utf8'),
+  ]).then((values) => values.map((value) => value.trim()));
+  if (!buildIdentityPattern.test(hostBuildId) || !buildIdentityPattern.test(webviewBuildId)) {
+    throw new Error('Vite emitted an invalid Pie build identity.');
+  }
+  if (hostBuildId !== webviewBuildId) {
+    throw new Error(`Host/webview build identity mismatch (${hostBuildId} != ${webviewBuildId}).`);
+  }
+  console.log(`[build] Coordinated host/webview identity ${hostBuildId}`);
 }
 
 async function syncToInstalledExtension() {
@@ -206,6 +222,7 @@ async function buildOnce() {
     runViteBuild(['--mode', 'node', '--emptyOutDir=false']),
     runViteBuild(),
   ]);
+  await verifyCoordinatedBuildIdentity();
   await writeSdkLocalManifest();
   await syncToInstalledExtension();
 }
