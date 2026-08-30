@@ -262,6 +262,11 @@ export interface SetToolResultPruningSettingsCommand extends CommandBase {
   settings: Partial<import('../../shared/protocol').ToolResultPruningSettings>;
 }
 
+export interface SetSessionTitlesSettingsCommand extends CommandBase {
+  kind: 'SetSessionTitlesSettings';
+  settings: Partial<import('../../shared/protocol').SessionTitlesSettings>;
+}
+
 export interface SetFileChangesExpandedCommand extends CommandBase {
   kind: 'SetFileChangesExpanded';
   sessionPath: string;
@@ -352,6 +357,7 @@ export type Command =
   | SetPrefsCommand
   | McpListRequestedCommand
   | McpSetServerEnabledCommand
+  | McpSetServerEnabledForSessionCommand
   | SetPrivacyModeCommand
   | SelectSessionCommand
   | CloseTabCommand
@@ -371,13 +377,17 @@ export type Command =
   | OpenFileCommand
   | SetPruningSettingsCommand
   | SetToolResultPruningSettingsCommand
+  | SetSessionTitlesSettingsCommand
   | DuplicateSessionCommand
   | MoveSessionTabCommand
   | MovePinnedItemCommand
   | TogglePinTabCommand
+  | PinAndMergePinnedTabCommand
   | GroupPinnedTabCommand
   | MergePinnedGroupsCommand
   | UngroupPinnedTabCommand
+  | DissolvePinnedGroupCommand
+  | UnpinPinnedGroupCommand
   | SetFileChangesExpandedCommand
   | SetFileReadCommand
   | SetSystemPromptTogglesCommand
@@ -423,6 +433,18 @@ export interface McpListRequestedCommand extends CommandBase {
  *  backend restart; the response event sets `mcpPendingApply`. */
 export interface McpSetServerEnabledCommand extends CommandBase {
   kind: 'McpSetServerEnabled';
+  name: string;
+  enabled: boolean;
+}
+
+/** Toggle one MCP server for exactly one session (host-side state + a
+ *  session-scoped config artifact; the backend recycles that session's
+ *  worker when idle so the adapter applies it on the next session start).
+ *  The global `.pi/mcp.json` layer is never touched — global server
+ *  controls live in Settings → MCP. */
+export interface McpSetServerEnabledForSessionCommand extends CommandBase {
+  kind: 'McpSetServerEnabledForSession';
+  sessionPath: string;
   name: string;
   enabled: boolean;
 }
@@ -521,6 +543,15 @@ export interface TogglePinTabCommand extends CommandBase {
   sessionPath: string;
 }
 
+/** Pin an unpinned tab and merge it into the leftmost pinned-strip item (the
+ *  leftmost standalone pinned tab starts a group with it; the leftmost group
+ *  absorbs it). Pure state mutation + `PersistTabs` effect; no backend RPC.
+ *  A no-op when the tab is pending, not open, or already pinned. */
+export interface PinAndMergePinnedTabCommand extends CommandBase {
+  kind: 'PinAndMergePinnedTab';
+  sessionPath: string;
+}
+
 /** Group a pinned tab with a target (Discord-style "drag onto"). `sourcePath`
  *  is the dragged pinned tab; `targetPath` is any member of the target group
  *  (or a standalone pinned tab to start a new group with). The source leaves
@@ -562,4 +593,18 @@ export interface MovePinnedItemCommand extends CommandBase {
   kind: 'MovePinnedItem';
   sourcePath: string;
   toItemIndex: number;
+}
+
+/** Dissolve one pinned group while preserving all member pinned status and
+ * flat order. Pure state mutation + `PersistTabs`; no backend RPC. */
+export interface DissolvePinnedGroupCommand extends CommandBase {
+  kind: 'DissolvePinnedGroup';
+  sourcePath: string;
+}
+
+/** Unpin all members of one pinned group while leaving their sessions open.
+ * Pure state mutation + `PersistTabs`; no backend RPC. */
+export interface UnpinPinnedGroupCommand extends CommandBase {
+  kind: 'UnpinPinnedGroup';
+  sourcePath: string;
 }

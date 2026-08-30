@@ -20,11 +20,13 @@ import {
   handleSetPrefs,
   handleMcpListRequested,
   handleMcpSetServerEnabled,
+  handleMcpSetServerEnabledForSession,
   handleSetPrivacyMode,
   handleStartNewTask,
   handleContinueTask,
   handleSetPruningSettings,
   handleSetToolResultPruningSettings,
+  handleSetSessionTitlesSettings,
 } from './command-misc-handlers.js';
 import {
   handleOpenSession,
@@ -38,9 +40,12 @@ import {
   handleCloseTab,
   handlePersistTabs,
   handleTogglePinTab,
+  handlePinAndMergePinnedTab,
   handleGroupPinnedTab,
   handleMergePinnedGroups,
   handleUngroupPinnedTab,
+  handleDissolvePinnedGroup,
+  handleUnpinPinnedGroup,
   handleMovePinnedItem,
 } from './command-tab-handlers.js';
 import {
@@ -130,6 +135,10 @@ export function handleCommand(state: ArchState, cmd: Command): ReducerResult {
 
     case 'McpSetServerEnabled': {
       return handleMcpSetServerEnabled(state, cmd);
+    }
+
+    case 'McpSetServerEnabledForSession': {
+      return handleMcpSetServerEnabledForSession(state, cmd);
     }
 
     case 'SetPrivacyMode': {
@@ -248,6 +257,10 @@ export function handleCommand(state: ArchState, cmd: Command): ReducerResult {
       return handleSetToolResultPruningSettings(state, cmd);
     }
 
+    case 'SetSessionTitlesSettings': {
+      return handleSetSessionTitlesSettings(state, cmd);
+    }
+
     case 'DuplicateSession': {
       return handleDuplicateSession(state, cmd);
     }
@@ -260,6 +273,10 @@ export function handleCommand(state: ArchState, cmd: Command): ReducerResult {
       return handleTogglePinTab(state, cmd);
     }
 
+    case 'PinAndMergePinnedTab': {
+      return handlePinAndMergePinnedTab(state, cmd);
+    }
+
     case 'GroupPinnedTab': {
       return handleGroupPinnedTab(state, cmd);
     }
@@ -270,6 +287,14 @@ export function handleCommand(state: ArchState, cmd: Command): ReducerResult {
 
     case 'UngroupPinnedTab': {
       return handleUngroupPinnedTab(state, cmd);
+    }
+
+    case 'DissolvePinnedGroup': {
+      return handleDissolvePinnedGroup(state, cmd);
+    }
+
+    case 'UnpinPinnedGroup': {
+      return handleUnpinPinnedGroup(state, cmd);
     }
 
     case 'MovePinnedItem': {

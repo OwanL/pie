@@ -25,6 +25,7 @@ Example:
 """
 
 import fnmatch
+import os
 import sys
 from collections import defaultdict
 from pathlib import Path, PurePosixPath
@@ -106,7 +107,7 @@ CODE_EXTENSIONS: frozenset[str] = frozenset({
 # Directories that are never worth scanning
 SKIP_DIRS: frozenset[str] = frozenset({
     ".git", ".hg", ".svn",
-    "__pycache__", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".hypothesis",
+    "__pycache__", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".hypothesis", ".cache",
     "node_modules",
     "venv", ".venv", "env", ".env",
     "target",           # Rust / Maven build output
@@ -261,14 +262,18 @@ def count_lines(path: Path) -> int:
         return 0
 
 
+def is_skip_dir_name(name: str) -> bool:
+    """Return True when a directory name matches a native skip pattern."""
+    return any(fnmatch.fnmatch(name, pattern) for pattern in SKIP_DIRS)
+
+
 def is_skipped(file: Path, base: Path) -> bool:
-    """Return True if any path component between *base* and *file* is in SKIP_DIRS."""
+    """Return True if a directory component matches ``SKIP_DIRS``."""
     try:
         rel_parts = file.relative_to(base).parts
     except ValueError:
         return False
-    # Check every directory component (all parts except the filename itself)
-    return any(part in SKIP_DIRS for part in rel_parts[:-1])
+    return any(is_skip_dir_name(part) for part in rel_parts[:-1])
 
 
 def find_large_files(
@@ -290,32 +295,35 @@ def find_large_files(
         context_patterns or [],
     )
 
-    for file in directory.rglob("*"):
-        if not file.is_file():
-            continue
-        if file.suffix.lower() not in CODE_EXTENSIONS:
-            continue
-        if is_skipped(file, directory):
-            continue
+    for current, dir_names, file_names in os.walk(directory):
+        current_path = Path(current)
+        # Prune ignored/native-noise directories before descending into them.
+        kept_dirs: list[str] = []
+        for name in dir_names:
+            child = current_path / name
+            rel_dir = child.relative_to(directory).as_posix()
+            if is_skip_dir_name(name):
+                continue
+            if matches_ignore_patterns(f"{rel_dir}/_", active_patterns):
+                continue
+            kept_dirs.append(name)
+        dir_names[:] = kept_dirs
 
-        # Check canonical ignore-file patterns.
-        try:
-            rel_path = str(PurePosixPath(file.relative_to(directory)))
-        except ValueError:
-            continue
-        if matches_ignore_patterns(rel_path, active_patterns):
-            continue
+        for name in file_names:
+            file = current_path / name
+            if file.suffix.lower() not in CODE_EXTENSIONS:
+                continue
+            rel_path = file.relative_to(directory).as_posix()
+            if matches_ignore_patterns(rel_path, active_patterns):
+                continue
 
-        loc = count_lines(file)
-        if loc > max_lines:
-            # Build a display path that includes the input directory's own name,
-            # e.g. "myproject/src/utils" rather than just "src/utils".
-            # Use forward slashes for cross-platform consistency.
-            rel_dir = (
-                PurePosixPath(directory.name)
-                / PurePosixPath(file.parent.relative_to(directory).as_posix())
-            ).as_posix()
-            results[rel_dir].append((file.name, loc))
+            loc = count_lines(file)
+            if loc > max_lines:
+                rel_dir = (
+                    PurePosixPath(directory.name)
+                    / PurePosixPath(file.parent.relative_to(directory).as_posix())
+                ).as_posix()
+                results[rel_dir].append((file.name, loc))
 
     return {
         d: sorted(files, key=lambda x: x[1], reverse=True)

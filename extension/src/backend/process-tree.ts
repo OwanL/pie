@@ -197,22 +197,39 @@ export async function establishWindowsProcessTreeGuardian(
   return {
     terminate(): Promise<void> {
       if (termination) return termination;
-      termination = new Promise<void>((resolve, reject) => {
+      const attempt = new Promise<void>((resolve, reject) => {
+        let settled = false;
+        const finish = (error?: Error): void => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          guardian.off('error', onError);
+          guardian.off('exit', onExit);
+          if (error) reject(error); else resolve();
+        };
+        const onError = (error: Error): void => finish(error);
+        const onExit = (): void => finish();
         const timer = setTimeout(() => {
-          reject(new Error('Windows worker Job guardian did not close within 5000 ms.'));
+          // A timed-out kill may still leave the guardian alive. Destroy its
+          // coordinator-owned stdin and issue one final hard process kill before
+          // reporting failure; callers retain tracking and may retry terminate.
+          guardian.stdin.destroy();
+          guardian.kill('SIGKILL');
+          finish(new Error('Windows worker Job guardian did not close within 5000 ms.'));
         }, 5_000);
         timer.unref?.();
-        guardian.once('error', (error) => { clearTimeout(timer); reject(error); });
-        guardian.once('exit', () => {
-          clearTimeout(timer);
-          resolve();
-        });
+        guardian.once('error', onError);
+        guardian.once('exit', onExit);
         // Terminating the sole Job-handle owner closes the handle immediately;
         // KILL_ON_JOB_CLOSE then targets the complete worker tree in-kernel.
         // stdin EOF remains the coordinator-crash path.
         if (!guardian.kill()) guardian.stdin.end();
       });
-      return termination;
+      termination = attempt;
+      void attempt.catch(() => {
+        if (termination === attempt) termination = undefined;
+      });
+      return attempt;
     },
   };
 }

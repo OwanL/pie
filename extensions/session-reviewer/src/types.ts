@@ -21,8 +21,8 @@ export interface OpenTabSummary {
   messageCount?: number;
   modelId?: string;
   thinkingLevel?: string;
-  pinned?: boolean;
-  isRunning?: boolean;
+  pinned: boolean;
+  isRunning: boolean;
 }
 
 export type CriterionOrigin = 'explicit' | 'necessary_implied';
@@ -330,7 +330,7 @@ export const sessionReviewSchema = {
     action: {
       type: 'string',
       enum: ['listOpen', 'listSelected', 'getEvidence', 'getReviewStatus', 'recordRecoveredReview', 'recordReview', 'recordReviews', 'closeReviewed', 'closeReviewedBatch', 'closeSelf'],
-      description: 'Session review action. getReviewStatus recovers tagged reviewer roles after history compaction; recordRecoveredReview compiles them from the durable orchestrator JSONL. Evidence and recording are single-target workflow steps. Recording and closure remain separate; closeSelf requires explicit confirmSelf:true.'
+      description: 'Session review action. getReviewStatus recovers tagged reviewer roles after history compaction; recordRecoveredReview compiles them from the durable orchestrator JSONL. Evidence and recording are single-target workflow steps. Recording and closure remain separate; closeSelf requires explicit confirmSelf:true after listSelected and only hides a running evaluator tab.'
     },
     sessionPath: { type: 'string', description: 'Absolute session JSONL path returned by listOpen/listSelected.' },
     sessionId: { type: 'string', description: 'Stable session-header ID (required for review status/recovery and closeReviewed; checked against sessionPath when supplied).' },
@@ -351,7 +351,7 @@ export const sessionReviewSchema = {
     },
     reviewsPath: { type: 'string', description: 'Absolute, non-symlink path inside the OS temporary directory to one UTF-8 JSON array of review drafts or canonical review objects (max 8 MiB).' },
     reason: { type: 'string', description: 'Optional closure reason retained for compatibility; persistence does not interpret it.' },
-    confirmSelf: { type: 'boolean', description: 'Required for closeSelf. Set true only when the user explicitly asked to close this evaluator session; target-session closure never requires it.' },
+    confirmSelf: { type: 'boolean', description: 'Required for closeSelf. Set true only when the user explicitly asked to hide/close this evaluator session, after listSelected confirms it is currently pinned; this does not interrupt a running evaluator.' },
     closures: {
       type: 'array',
       maxItems: 100,

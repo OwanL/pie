@@ -65,11 +65,20 @@ test('valid application commands pass with a clientCommandId', () => {
   expectOk({ type: 'extensionUiResponse', sessionPath: '/sessions/a', response: { id: 'req-1', confirmed: true }, clientCommandId: UUID });
   expectOk({ type: 'extensionUiResponse', sessionPath: '/sessions/a', response: { id: 'req-1', value: 'text', cancelled: false }, clientCommandId: UUID });
   expectOk({ type: 'setPrefs', prefs: { uiDensity: 'compact' }, clientCommandId: UUID });
+  expectOk({ type: 'setPrefs', prefs: { mcpEnabled: false }, clientCommandId: UUID });
   expectOk({ type: 'detail.subscribe', viewGeneration: 3, detailKey: 'card-1', detailAttempt: 1, address: {
     sessionPath: '/sessions/a', turnId: 'turn-1', rootToolCallId: 'tool-1', rootAttemptId: 'attempt-1',
     lineage: [{ childId: 'child-1', spawningToolCallId: 'tool-1', attemptId: 'attempt-1' }],
   }, clientCommandId: UUID });
   expectOk({ type: 'retrySend', sessionPath: '/sessions/a', text: 'draft', localId: 'local-1', disablePruning: true, clientCommandId: UUID });
+  expectOk({ type: 'mcpListRequested', clientCommandId: UUID });
+  expectOk({ type: 'mcpSetServerEnabled', name: 'jira', enabled: false, clientCommandId: UUID });
+  expectOk({ type: 'truncateAfter', sessionPath: '/sessions/a', messageId: 'durable-1', clientCommandId: UUID });
+  expectOk({
+    type: 'mcpSetServerEnabledForSession', sessionPath: '/sessions/a', name: 'jira', enabled: true, clientCommandId: UUID,
+  });
+  expectOk({ type: 'dissolvePinnedGroup', sourcePath: '/sessions/a', clientCommandId: UUID });
+  expectOk({ type: 'unpinPinnedGroup', sourcePath: '/sessions/a', clientCommandId: UUID });
 });
 
 test('producer-generated reasoning and subagent detail refs pass browser ingress', () => {
@@ -160,6 +169,10 @@ test('unknown top-level fields are rejected', () => {
   expectRejected({ ...validSend(), extra: 'x' });
   expectRejected({ ...validSend(), dataBase64: base64OfBytes(64) });
   expectRejected({ type: 'ready', assetVersion: 'v1', viewGeneration: 1, clientCommandId: UUID });
+  // The new transcript truncate command keeps the exact-key allowlist too.
+  expectRejected({ type: 'truncateAfter', sessionPath: '/sessions/a', messageId: 'm1', filePath: '/x', clientCommandId: UUID });
+  expectRejected({ type: 'dissolvePinnedGroup', sourcePath: '/sessions/a', extra: true, clientCommandId: UUID });
+  expectRejected({ type: 'unpinPinnedGroup', sourcePath: '/sessions/a', extra: true, clientCommandId: UUID });
 });
 
 test('unknown nested fields are rejected', () => {

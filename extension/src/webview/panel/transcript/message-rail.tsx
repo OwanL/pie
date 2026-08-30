@@ -1,11 +1,12 @@
 /** @jsxRuntime automatic */
 /** @jsxImportSource preact */
 
-import { useCallback, useMemo } from 'preact/hooks';
+import { useCallback, useEffect, useMemo, useRef } from 'preact/hooks';
 import type { VirtualItem, Virtualizer } from '@tanstack/virtual-core';
 
 import type { ChatMessage, UserContentPart } from '../../../shared/protocol';
 import { getRenderableUserParts } from './parts';
+import { createMessageRailJumpController, type MessageRailJumpController } from './message-rail-jump';
 import type { TranscriptRow } from './virtual-list-rows';
 
 /** Default hit-area height per marker (px) when no pref is supplied. The
@@ -91,10 +92,15 @@ interface MessageRailProps {
   virtualizer: Virtualizer<HTMLDivElement, HTMLDivElement>;
   scrollRef: { current: HTMLDivElement | null };
   setAutoFollow: (v: boolean) => void;
+  navigationActiveRef: { current: boolean };
+  programmaticScrollTargetRef: { current: number | null };
   /** Hit-area height (px) per marker — the user-configurable
    *  `uiMessageRailSize` pref. The visible dot scales with it via the
    *  `--message-rail-marker-size` CSS var. */
   markerSize: number;
+  /** Shared bounded jump owner supplied by the transcript surface. Keeping
+   *  this shared with the context bar prevents competing settle loops. */
+  onJumpToRow?: (rowIndex: number) => void;
   /** Suppress rendering during the virtualizer's initial positioning phase
    *  (when `.transcript` is opacity:0) so markers don't flash in first. */
   hidden?: boolean;
@@ -113,7 +119,17 @@ interface MessageRailProps {
  * those already measured. The parent re-renders on every virtualizer change
  * (content growth, scroll, viewport resize) which keeps the rail live.
  */
-export function MessageRail({ rows, virtualizer, scrollRef, setAutoFollow, markerSize, hidden }: MessageRailProps) {
+export function MessageRail({
+  rows,
+  virtualizer,
+  scrollRef,
+  setAutoFollow,
+  navigationActiveRef,
+  programmaticScrollTargetRef,
+  markerSize,
+  onJumpToRow,
+  hidden,
+}: MessageRailProps) {
   const railHeight = scrollRef.current?.clientHeight ?? 0;
   const totalSize = virtualizer.getTotalSize();
   const measurements = virtualizer.measurementsCache;
@@ -124,27 +140,35 @@ export function MessageRail({ rows, virtualizer, scrollRef, setAutoFollow, marke
     [rows, measurements, railHeight, totalSize, markerHitHeight],
   );
 
+  const jumpControllerRef = useRef<MessageRailJumpController | null>(null);
+  useEffect(() => {
+    // The transcript surface supplies one controller shared with the context
+    // bar. Keep the local controller only for standalone rail use so two
+    // settle loops never own the same scroll element.
+    if (onJumpToRow) return;
+    const element = scrollRef.current;
+    if (!element) return;
+    const controller = createMessageRailJumpController({
+      element,
+      getRowStart: (rowIndex) => virtualizer.measurementsCache[rowIndex]?.start ?? null,
+      navigationActiveRef,
+      programmaticScrollTargetRef,
+      setAutoFollow,
+    });
+    jumpControllerRef.current = controller;
+    return () => {
+      controller.dispose();
+      if (jumpControllerRef.current === controller) jumpControllerRef.current = null;
+    };
+  }, [navigationActiveRef, onJumpToRow, programmaticScrollTargetRef, scrollRef, setAutoFollow, virtualizer]);
+
   const handleJump = useCallback((rowIndex: number) => {
-    const el = scrollRef.current;
-    if (!el) return;
-    // Disengage auto-follow so exact pinning does not immediately return to the
-    // bottom and fight the jump. A scroll event from the
-    // programmatic scroll disengages it for upward jumps anyway, but a forward
-    // jump to a mid-content message leaves autoFollow true (no upward motion
-    // detected by resolveAutoFollowState), so this explicit toggle is required.
-    setAutoFollow(false);
-    // Instant jump: override the container's `scroll-behavior: smooth` for the
-    // call. tanstack's scrollState reconciliation then corrects any estimate
-    // drift (rows whose real measured height differs from their estimate) as
-    // the target row renders into view.
-    const prior = el.style.scrollBehavior;
-    try {
-      el.style.scrollBehavior = 'auto';
-      virtualizer.scrollToIndex(rowIndex, { align: 'start' });
-    } finally {
-      el.style.scrollBehavior = prior;
+    if (onJumpToRow) {
+      onJumpToRow(rowIndex);
+      return;
     }
-  }, [scrollRef, setAutoFollow, virtualizer]);
+    jumpControllerRef.current?.jumpTo(rowIndex);
+  }, [onJumpToRow]);
 
   if (hidden || markers.length === 0) return null;
 

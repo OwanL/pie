@@ -36,8 +36,24 @@ interface ParsedWebSearchInput {
   includeContent?: boolean;
   recencyFilter?: string;
   domainFilter?: string[];
-  provider?: string;
+  providers?: string[];
   workflow?: string;
+  usesProxy?: boolean;
+}
+
+/** Mirror pi-web-access 0.27's recovery for models that serialize a query array
+ * into the singular `query` field. Ordinary strings remain one query. */
+function expandQueryInput(query: string): string[] {
+  const trimmed = query.trim();
+  if (!trimmed.startsWith('[') || !trimmed.endsWith(']')) return [query];
+  try {
+    const parsed: unknown = JSON.parse(trimmed);
+    return Array.isArray(parsed) && parsed.every((entry): entry is string => typeof entry === 'string')
+      ? parsed
+      : [query];
+  } catch {
+    return [query];
+  }
 }
 
 function parseWebSearchInput(input: unknown): ParsedWebSearchInput | null {
@@ -47,7 +63,7 @@ function parseWebSearchInput(input: unknown): ParsedWebSearchInput | null {
   const rawQueries = Array.isArray(obj.queries)
     ? obj.queries
     : typeof obj.query === 'string'
-      ? [obj.query]
+      ? expandQueryInput(obj.query)
       : null;
   if (!rawQueries) return null;
 
@@ -60,6 +76,10 @@ function parseWebSearchInput(input: unknown): ParsedWebSearchInput | null {
   const domainFilter = Array.isArray(obj.domainFilter)
     ? obj.domainFilter.filter((d): d is string => typeof d === 'string')
     : undefined;
+  const providers = (Array.isArray(obj.provider) ? obj.provider : [obj.provider])
+    .filter((provider): provider is string => typeof provider === 'string')
+    .map((provider) => provider.trim())
+    .filter((provider) => provider.length > 0);
 
   return {
     queries,
@@ -67,8 +87,9 @@ function parseWebSearchInput(input: unknown): ParsedWebSearchInput | null {
     ...(obj.includeContent === true ? { includeContent: true } : {}),
     ...(typeof obj.recencyFilter === 'string' ? { recencyFilter: obj.recencyFilter } : {}),
     ...(domainFilter && domainFilter.length > 0 ? { domainFilter } : {}),
-    ...(typeof obj.provider === 'string' ? { provider: obj.provider } : {}),
+    ...(providers.length > 0 ? { providers } : {}),
     ...(typeof obj.workflow === 'string' ? { workflow: obj.workflow } : {}),
+    ...(typeof obj.proxy === 'string' && obj.proxy.trim().length > 0 ? { usesProxy: true } : {}),
   };
 }
 
@@ -103,10 +124,13 @@ function buildHeaderSummary(parsed: ParsedWebSearchInput): string {
 function buildOptionChips(parsed: ParsedWebSearchInput): string[] {
   const chips: string[] = [];
   if (parsed.numResults != null) chips.push(`${parsed.numResults} results`);
-  if (parsed.provider && parsed.provider !== 'auto') chips.push(`provider: ${parsed.provider}`);
+  if (parsed.providers && !(parsed.providers.length === 1 && parsed.providers[0] === 'auto')) {
+    chips.push(`${parsed.providers.length === 1 ? 'provider' : 'providers'}: ${parsed.providers.join(', ')}`);
+  }
   if (parsed.recencyFilter) chips.push(`recency: ${parsed.recencyFilter}`);
   if (parsed.workflow && parsed.workflow !== 'none') chips.push(`workflow: ${parsed.workflow}`);
   if (parsed.includeContent) chips.push('fetch content');
+  if (parsed.usesProxy) chips.push('proxy');
   if (parsed.domainFilter && parsed.domainFilter.length > 0) {
     chips.push(`domains: ${parsed.domainFilter.join(' ')}`);
   }

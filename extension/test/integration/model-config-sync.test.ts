@@ -114,6 +114,30 @@ test('long-context pricing tiers flow from models.yaml pricing to models.json co
   assert.deepEqual(generatedModel?.cost.tiers, sourceModel.pricing.tiers);
 });
 
+test('Copilot models with an extended tier use the smaller default context limit', async () => {
+  const mod = await loadSyncModule();
+  const source = mod.loadSource(repoRoot) as {
+    providers: Record<string, {
+      models: Array<{
+        id: string;
+        contextWindow: number;
+        pricing: { tiers?: Array<{ inputTokensAbove: number }> };
+      }>;
+    }>;
+  };
+  const tieredModels = source.providers['github-copilot'].models
+    .filter((model) => model.pricing.tiers?.length);
+
+  assert.ok(tieredModels.length > 0, 'catalog should include Copilot models with an extended context tier');
+  for (const model of tieredModels) {
+    assert.equal(
+      model.contextWindow,
+      model.pricing.tiers![0].inputTokensAbove,
+      `${model.id} should stay on Copilot's default context tier`,
+    );
+  }
+});
+
 test('provider-qualified profileOrder entries support duplicate model ids across providers', async () => {
   const mod = await loadSyncModule();
   const source = structuredClone(mod.loadSource(repoRoot)) as {
@@ -162,9 +186,12 @@ test('every built-in OpenAI Codex GPT model has pie-side token pricing', async (
   }
 });
 
-test('settings.json merge preserves user-selected chat and pruning models while overwriting retry', async () => {
+test('settings.json merge preserves user-selected chat, pruning, and title models while overwriting retry', async () => {
   const mod = await loadSyncModule();
-  const source = mod.loadSource(repoRoot);
+  const source = mod.loadSource(repoRoot) as {
+    retry: unknown;
+    sessionTitles: { thinkingLevel: string; timeoutSec: number };
+  };
   // Synthesize a settings base with extra fields that must survive the merge.
   const base = {
     defaultModel: 'OLD',
@@ -179,12 +206,14 @@ test('settings.json merge preserves user-selected chat and pruning models while 
       thinkingLevel: 'OLD',
       tools: { alwaysKeep: ['read', 'bash'] },
     },
+    sessionTitles: { enabled: false, model: 'OLD-TITLE', provider: 'OLD-PROVIDER' },
     lastChangelogVersion: '9.9.9',
     customFeature: { enabled: true },
     sessionDir: 'data/outcomes/sessions',
   };
   const merged = mod.generate(source, base).settingsJson as Record<string, unknown>;
   const pruning = merged.pruning as Record<string, unknown>;
+  const sessionTitles = merged.sessionTitles as Record<string, unknown>;
   // User-owned model keys are PRESERVED (the backend owns them; sync only seeds
   // from models.yaml when absent). They must NOT be overwritten by the merge.
   assert.equal(merged.defaultModel, 'OLD');
@@ -195,6 +224,11 @@ test('settings.json merge preserves user-selected chat and pruning models while 
   assert.equal(pruning.model, 'OLD');
   assert.equal(pruning.provider, 'OLD');
   assert.equal(pruning.thinkingLevel, 'OLD');
+  assert.equal(sessionTitles.enabled, false);
+  assert.equal(sessionTitles.model, 'OLD-TITLE');
+  assert.equal(sessionTitles.provider, 'OLD-PROVIDER');
+  assert.equal(sessionTitles.thinkingLevel, source.sessionTitles.thinkingLevel);
+  assert.equal(sessionTitles.timeoutSec, source.sessionTitles.timeoutSec);
   // Non-model fields preserved.
   assert.equal(merged.httpIdleTimeoutMs, 999);
   assert.deepEqual(merged.packages, ['npm:foo@1.0.0']);
@@ -206,11 +240,12 @@ test('settings.json merge preserves user-selected chat and pruning models while 
   assert.equal(merged.proxy, undefined);
 });
 
-test('settings.json merge seeds user-owned chat and pruning selections only when absent', async () => {
+test('settings.json merge seeds user-owned chat, pruning, and title selections only when absent', async () => {
   const mod = await loadSyncModule();
   const source = mod.loadSource(repoRoot) as {
     defaults: { model: string; provider: string; thinkingLevel: string };
     pruning: { model: string; provider: string; thinkingLevel: string };
+    sessionTitles: { enabled: boolean; model: string; provider: string; thinkingLevel: string; timeoutSec: number };
   };
   const base = {
     retry: { enabled: false, maxRetries: 0, baseDelayMs: 0, provider: { maxRetries: 0, maxRetryDelayMs: 0 } },
@@ -218,12 +253,18 @@ test('settings.json merge seeds user-owned chat and pruning selections only when
   };
   const merged = mod.generate(source, base).settingsJson as Record<string, unknown>;
   const pruning = merged.pruning as Record<string, unknown>;
+  const sessionTitles = merged.sessionTitles as Record<string, unknown>;
   assert.equal(merged.defaultModel, source.defaults.model);
   assert.equal(merged.defaultProvider, source.defaults.provider);
   assert.equal(merged.defaultThinkingLevel, source.defaults.thinkingLevel);
   assert.equal(pruning.model, source.pruning.model);
   assert.equal(pruning.provider, source.pruning.provider);
   assert.equal(pruning.thinkingLevel, source.pruning.thinkingLevel);
+  assert.equal(sessionTitles.enabled, source.sessionTitles.enabled);
+  assert.equal(sessionTitles.model, source.sessionTitles.model);
+  assert.equal(sessionTitles.provider, source.sessionTitles.provider);
+  assert.equal(sessionTitles.thinkingLevel, source.sessionTitles.thinkingLevel);
+  assert.equal(sessionTitles.timeoutSec, source.sessionTitles.timeoutSec);
   assert.deepEqual(pruning.tools, { ceiling: 7 });
 });
 
@@ -236,6 +277,7 @@ function catalogFixture(models: Record<string, Array<Record<string, unknown>>>):
     defaults: { model: 'm', provider: 'p', thinkingLevel: 'medium' },
     retry: { enabled: true, maxRetries: 1, baseDelayMs: 1, provider: { maxRetries: 1, maxRetryDelayMs: 1 } },
     pruning: { model: 'm', provider: 'p', thinkingLevel: 'medium' },
+    sessionTitles: { enabled: true, model: 'm', provider: 'p', thinkingLevel: 'off', timeoutSec: 15 },
     profileOrder: [],
     providers: Object.fromEntries(
       Object.entries(models).map(([provider, list]) => [provider, { apiKey: 'k', models: list }]),

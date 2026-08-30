@@ -7,7 +7,7 @@ description: "Disciplined evidence-first diagnosis for hard, unclear, intermitte
 
 A discipline for hard bugs. Skip phases only when explicitly justified.
 
-When exploring the codebase, read the project's existing design docs (`docs/ARCHITECTURE.md`, `docs/STATE_CONTRACT.md`, `AGENTS.md`) and any relevant docs in `docs/` to get a clear mental model of the relevant modules. Use the vocabulary and patterns established there.
+When exploring a codebase, first read its applicable repository instructions (`AGENTS.md` and, when present, `CONTEXT.md`), then follow that repository's documented entry point and relevant docs and structure to build a mental model of the affected modules. Use the vocabulary and patterns established there. When working in pie, start from its curated `docs/INDEX.md` instead of scanning `docs/` directly, read the INDEX-listed docs relevant to the bug, and use the `develop-pie` skill for Pie-specific workflow and references. For other repositories, follow their `AGENTS.md`/`CONTEXT.md`/docs conventions and relevant structure instead; do not assume Pie's docs, filenames, or workflow.
 
 ## Phase 1 — Build a feedback loop
 
@@ -20,13 +20,15 @@ Spend disproportionate effort here. **Be aggressive. Be creative. Refuse to give
 1. **Failing test** at whatever seam reaches the bug — unit, integration, e2e.
 2. **Curl / HTTP script** against a running dev server.
 3. **CLI invocation** with a fixture input, diffing stdout against a known-good snapshot.
-4. **Headless browser script** (Playwright / Puppeteer) — drives the UI, asserts on DOM/console/network.
-5. **Replay a captured trace.** Save a real network request / payload / event log to disk; replay it through the code path in isolation.
+4. **Headless browser script** (Playwright / Puppeteer) — drives the UI, asserts on DOM/console/network. In pie, the checked-in commands are `cd extension && npm run test:browser` (Playwright), with `test:browser:configure-provider-gate` and `test:browser:live-model` for focused flows; pie's loopback browser server serves the real Preact UI from the VS Code extension host over `127.0.0.1` HTTP/WebSocket (see pie's `docs/BROWSER_SERVER_PLAN.md`). In another repository, use its configured browser/e2e command and documentation.
+5. **Replay a captured trace.** Save a real network request / payload / event log to disk; replay it through the code path in isolation. Sanitize before replaying: redact credentials, tokens, and identifiable session paths, stub live endpoints where possible, and run in a disposable environment. If replay could produce side effects (writes, network mutation, session changes), get explicit user confirmation first.
 6. **Throwaway harness.** Spin up a minimal subset of the system (one service, mocked deps) that exercises the bug code path with a single function call.
 7. **Property / fuzz loop.** If the bug is "sometimes wrong output", run 1000 random inputs and look for the failure mode.
 8. **Bisection harness.** If the bug appeared between two known states (commit, dataset, version), automate "boot at state X, check, repeat" so you can `git bisect run` it.
 9. **Differential loop.** Run the same input through old-version vs new-version (or two configs) and diff outputs.
 10. **HITL bash script.** Last resort. If a human must click, drive _them_ with a small shell script that prompts, captures the result, and feeds it back to you so the loop is still structured.
+
+For visible desktop UI bugs, use the repository's supported UI-driving path and observe before acting; confirm with the user before any side-effectful or destructive input. In pie, route the loop through its `computer` tool (see pie's `docs/COMPUTER-USE.md`) and use screenshot-relative coordinates.
 
 Build the right feedback loop, and the bug is 90% fixed.
 
@@ -85,6 +87,10 @@ Tool preference:
 3. Never "log everything and grep".
 
 **Tag every debug log** with a unique prefix, e.g. `[DEBUG-a4f2]`. Cleanup at the end becomes a single grep. Untagged logs survive; tagged logs die.
+
+**Instrument the owning process.** Do not add ad-hoc logging in another layer first. In pie, the distinct roles are the VS Code extension host (application state), embedded Pi backend and worker child processes, passive webview renderer, and separated computer-use sidecar; choose the role that owns the behavior.
+
+**Protect protocol stdout.** In pie, never write instrumentation to the backend's stdout: the host parses it as UTF-8 JSONL protocol records, so a stray `console.log` can corrupt the envelope or terminate the transport. Send backend logs to stderr in the structured `[pie:backend] {json}` envelope with an explicit `level` field (`debug`/`info`/`warn`/`error`; see `extension/src/host/backend/stderr-classifier.ts`) or to pie's credential-redacted log at `%TEMP%\pie-logs\pie.log`.
 
 **Perf branch.** For performance regressions, logs are usually wrong. Instead: establish a baseline measurement (timing harness, `performance.now()`, profiler, query plan), then bisect. Measure first, fix second.
 

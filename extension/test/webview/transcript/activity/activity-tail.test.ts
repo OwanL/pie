@@ -9,6 +9,7 @@ import {
   deriveStreamingTail,
   deriveSubagentTail,
   deriveToolTail,
+  subagentDetailLines,
   estimateActivityTailHeight,
 } from '../../../../src/webview/panel/transcript/activity-tail';
 import { deriveTurnActivityState } from '../../../../src/webview/panel/transcript/activity';
@@ -274,6 +275,16 @@ test('deriveSubagentTail fills idle preview rows with lifecycle and model diagno
   assert.ok(tail);
   assert.match(tail.tail.lines[0]!, /Waiting for provider · first token · \d+s in state · \d+s since progress · 2m 0s stall limit/);
   assert.equal(tail.tail.lines[1], 'openai/gpt-5.2 · thinking high · context 50k / 200k (25%) · tokens 1.3k in / 42 out · 1.0k cached · last 10.0 tok/s · 1 retry · 2 model candidates');
+});
+
+test('subagent detail omits zero-output terminal throughput samples', () => {
+  const result = subagentResult() as any;
+  Object.assign(result.details.results[0], {
+    usage: { input: 10, output: 0, cacheRead: 0, cacheWrite: 0, contextTokens: 10 },
+    turnThroughputSamples: [{ endedAt: '2026-01-01T00:00:00.000Z', outputTokens: 0, generationDurationMs: 10_000, status: 'error' }],
+  });
+  const lines = subagentDetailLines(result.details.results[0]);
+  assert.doesNotMatch(lines.join(' · '), /last .*0\.0 tok\/s/);
 });
 
 test('deriveSubagentTail falls back to the tail of streaming text when no tool is running', () => {

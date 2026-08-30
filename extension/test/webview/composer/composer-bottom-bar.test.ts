@@ -8,6 +8,7 @@ import renderToString from 'preact-render-to-string';
 import {
   DEFAULT_CHAT_PREFS,
   DEFAULT_PRUNING_SETTINGS,
+  DEFAULT_SESSION_TITLES_SETTINGS,
   DEFAULT_TOOL_RESULT_PRUNING_SETTINGS,
   EMPTY_PROVIDER_GATE_STATS,
   EMPTY_TRANSCRIPT_WINDOW,
@@ -61,15 +62,20 @@ test('composer controls render in the agreed bottom-bar order', () => {
     pruningCatalog: { skills: [], tools: [] },
     pruningResult: null,
     toolResultPruningSettings: DEFAULT_TOOL_RESULT_PRUNING_SETTINGS,
+    sessionTitlesSettings: DEFAULT_SESSION_TITLES_SETTINGS,
     providerGateStats: EMPTY_PROVIDER_GATE_STATS,
     onSetPrefs: () => {},
     mcpServers: [],
     mcpPendingApply: false,
     onMcpListRequested: () => {},
     onMcpSetServerEnabled: () => {},
+    mcpSessionServers: [],
+    mcpSessionPendingApply: false,
+    onMcpSetServerEnabledForSession: () => {},
     onSetSystemPromptToggles: () => {},
     onSetPruningSettings: () => {},
     onSetToolResultPruningSettings: () => {},
+    onSetSessionTitlesSettings: () => {},
     availableExtensions: [],
     availableModels: [model],
     systemPrompts: [prompt],
@@ -118,11 +124,13 @@ test('composer uses the configured initial textarea rows and defaults to one', (
     availableModels: [],
     availableExtensions: [],
     contextUsage: null,
+    initialContextEstimate: null,
     prefs: { ...DEFAULT_CHAT_PREFS, composerInitialRows },
     pruningSettings: DEFAULT_PRUNING_SETTINGS,
     pruningCatalog: { skills: [], tools: [] },
     pruningResult: null,
     toolResultPruningSettings: DEFAULT_TOOL_RESULT_PRUNING_SETTINGS,
+    sessionTitlesSettings: DEFAULT_SESSION_TITLES_SETTINGS,
     providerGateStats: EMPTY_PROVIDER_GATE_STATS,
     systemPrompts: [],
     transcript: [],
@@ -143,9 +151,13 @@ test('composer uses the configured initial textarea rows and defaults to one', (
     mcpPendingApply: false,
     onMcpListRequested: () => {},
     onMcpSetServerEnabled: () => {},
+    mcpSessionServers: [],
+    mcpSessionPendingApply: false,
+    onMcpSetServerEnabledForSession: () => {},
     onSetSystemPromptToggles: () => {},
     onSetPruningSettings: () => {},
     onSetToolResultPruningSettings: () => {},
+    onSetSessionTitlesSettings: () => {},
   }));
 
   assert.match(renderComposer(1), /<textarea[^>]*rows="1"/);
@@ -227,6 +239,9 @@ test('composer bottom-bar CSS keeps compact hitboxes distinct and wraps at narro
   assert.match(css, /\.composer-bottom-bar \.panel-chip-toolbar:hover,[\s\S]*?background: var\(--panel-control-hover\);/);
   assert.match(css, /overlapping[\s\S]*?inset: -1px;/);
   assert.match(css, /@container composer-shell \(max-width: 380px\)[\s\S]*?flex-wrap: wrap;/);
+  assert.match(css, /@container composer-shell \(max-width: 380px\)[\s\S]*?\.composer-controls \{[\s\S]*?flex: 1 1 100%;[\s\S]*?flex-wrap: wrap;/);
   assert.match(css, /@container composer-shell \(max-width: 240px\)[\s\S]*?flex-wrap: wrap;/);
   assert.match(css, /\.subagent-provider-trigger\.has-disabled \{[\s\S]*?color: var\(--panel-muted\);/);
+  assert.match(css, /\.toolbar-settings-menu \{[\s\S]*?box-sizing: border-box;/);
+  assert.match(css, /@media \(max-width: 520px\)[\s\S]*?\.toolbar-settings-tabs \{[\s\S]*?overflow-x: auto;[\s\S]*?scrollbar-width: thin;/);
 });

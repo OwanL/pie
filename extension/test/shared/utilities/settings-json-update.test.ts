@@ -29,7 +29,9 @@ test('concurrent settings updates are serialized without losing unrelated fields
       updateSettingsJsonObject(file, (current) => ({ ...current, toolResultPruning: { enabled: false } })),
     ]);
 
-    const written = JSON.parse(await fs.readFile(file, 'utf8'));
+    const raw = await fs.readFile(file, 'utf8');
+    assert.ok(raw.endsWith('\n'), 'settings updates preserve the canonical terminating newline');
+    const written = JSON.parse(raw);
     assert.deepEqual(written, {
       existing: { kept: true },
       pruning: { mode: 'off' },

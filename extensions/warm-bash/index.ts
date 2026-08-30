@@ -35,6 +35,7 @@ import { effectiveTimeout, parseDefaultTimeout } from "./src/timeout.js";
 import type { BashOperations } from "./src/types.js";
 import { getSharedWarmBashState, installWarmBashProcessCleanup, type SharedPoolConfig } from "./src/shared-state.js";
 import { prependManagedBinDir, sanitizeProtoEnv } from "./src/managed-env.js";
+import { optimizeAutoDetectedShell } from "./src/shell-path.js";
 
 function idleTarget(): number {
   const raw = Number.parseInt(process.env.PIE_BASH_WARM_POOL ?? "", 10);
@@ -55,11 +56,21 @@ function autoPruneEnabled(): boolean {
   return v !== "0" && v !== "false" && v !== "off";
 }
 
-function shellPath(): string {
+function shellSelection(env: NodeJS.ProcessEnv): { shellPath: string; env: NodeJS.ProcessEnv } {
   const explicit = process.env.PIE_SHELL?.trim();
-  if (explicit) return explicit;
-  // Resolve via pi's shell config (Git Bash on Windows, bash/sh on Unix).
-  return getShellConfig().shell;
+  if (explicit) return { shellPath: explicit, env };
+  // Resolve via pi's shell config (Git Bash on Windows, bash/sh on Unix). Skip
+  // Git for Windows' launcher when the real Bash executable is available, and
+  // reproduce the launcher's PATH/MSYSTEM bootstrap in the child environment.
+  return optimizeAutoDetectedShell(getShellConfig().shell, env);
+}
+
+function shellPath(): string {
+  return shellSelection(process.env).shellPath;
+}
+
+function shellEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return shellSelection(env).env;
 }
 
 function warmupTimeoutMs(): number {
@@ -170,7 +181,7 @@ export default function (pi: ExtensionAPI) {
     // promote PROTO_HOME/shims+bin right after the managed bin so proto shims
     // re-resolve node/npm/python/… per .prototools instead of a frozen version.
     const managedBin = join(getAgentDir(), "bin");
-    const managedEnv = sanitizeProtoEnv(prependManagedBinDir(process.env, managedBin), managedBin);
+    const managedEnv = shellEnv(sanitizeProtoEnv(prependManagedBinDir(process.env, managedBin), managedBin));
 
     if (cfg.target <= 0) {
       if (shared.pool) {
@@ -214,6 +225,18 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
+  // Start warming as soon as the extension instance activates, rather than
+  // making the first bash call create the pool and immediately miss it. Keep
+  // activation non-gating: an invalid/unavailable shell is retried through the
+  // normal first-use path, where the existing fallback/error handling applies.
+  if (!isDisabledByToggle()) {
+    try {
+      reconcilePool(currentPoolCfg());
+    } catch {
+      /* first use will retry */
+    }
+  }
+
   function invalidateAllTools(): void {
     tools.clear();
     toolOpsCfg.clear();
@@ -252,9 +275,15 @@ export default function (pi: ExtensionAPI) {
       const pool = shared.pool;
       // Fallback = today's exact path. Pass the same explicit shell so the
       // fallback and warm pool use one bash binary.
-      const fallbackOps = createLocalBashOperations({
+      const rawFallbackOps = createLocalBashOperations({
         shellPath: poolCfgNow.shell || undefined,
       }) as BashOperations;
+      const fallbackOps: BashOperations = {
+        exec: (command, commandCwd, options) => rawFallbackOps.exec(command, commandCwd, {
+          ...options,
+          env: shellEnv(options.env ?? process.env),
+        }),
+      };
       const m = createWarmBashMetrics();
       shared.metrics.set(sessionId, m);
       const operations = createWarmBashOperations({
@@ -263,9 +292,12 @@ export default function (pi: ExtensionAPI) {
         autoPruneEnabled: opsCfgNow.autoPrune,
         gnuGrepProbe,
         log: (payload) => {
-          // Live debug line for the pi OutputChannel (pi-logs) + persisted
+          // Live debug line for the Pie OutputChannel + persisted
           // side-channel record for analytics ingestion.
-          console.error(JSON.stringify(payload));
+          // stderr is the worker's diagnostic transport, not an indication of
+          // severity. Include an explicit level so routine command rewrites do
+          // not appear as backend errors in the host log.
+          console.error(JSON.stringify({ level: "debug", ...payload }));
           logAutoPruneRewrite(sessionId, payload.before as string, payload.after as string);
         },
         fallbackOps,

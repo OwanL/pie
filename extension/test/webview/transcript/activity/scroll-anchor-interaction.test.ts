@@ -1,7 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { shouldApplyScrollAnchorDelta } from '../../../../src/webview/panel/transcript/use-transcript-scroll-anchor';
+import {
+  didScrollAnchorGeometryChange,
+  shouldApplyScrollAnchorDelta,
+} from '../../../../src/webview/panel/transcript/use-transcript-scroll-anchor';
 
 test('scroll anchor yields throughout manual interaction in either direction', () => {
   assert.equal(
@@ -14,6 +17,12 @@ test('scroll anchor yields throughout manual interaction in either direction', (
     false,
     'all anchoring should pause until the manual interaction settles',
   );
+});
+
+test('scroll anchor notices equal-height transcript identity changes', () => {
+  assert.equal(didScrollAnchorGeometryChange(800, 800, ['a', 'b'], ['a', 'c']), true);
+  assert.equal(didScrollAnchorGeometryChange(800, 800, ['a', 'b'], ['a', 'b']), false);
+  assert.equal(didScrollAnchorGeometryChange(800, 820, ['a', 'b'], ['a', 'b']), true);
 });
 
 test('scroll anchor still preserves an idle scrolled-up viewport', () => {

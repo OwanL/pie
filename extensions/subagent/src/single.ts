@@ -80,7 +80,7 @@ interface RunWithModelRetryArgs {
 	activeModelId: string;
 	selectionCtx: SelectionContext;
 	childDepth: number;
-	buildRuntime: (identity: SubagentChildIdentity) => SubagentRuntimeContext;
+	buildRuntime: (identity: SubagentChildIdentity, effectiveBucket?: string) => SubagentRuntimeContext;
 	childId: string;
 	signal: AbortSignal | undefined;
 	toolCallId: string;
@@ -210,7 +210,14 @@ async function runWithModelRetry(args: RunWithModelRetryArgs): Promise<SingleRes
 			spawningToolCallId: args.toolCallId,
 			attemptId,
 		};
-		const runtimeCtx = args.buildRuntime(identity);
+		// A configured selection has a real effective bucket. Active-parent
+		// fallbacks do not: inherit the caller's bucket in buildRuntime (or remain
+		// undefined for a root-chat child) rather than misclassifying the child by
+		// its merely requested bucket.
+		const effectiveBucket = resolved.selection?.fallback
+			? undefined
+			: resolved.selection?.bucket ?? resolved.bucket;
+		const runtimeCtx = args.buildRuntime(identity, effectiveBucket);
 		const lineage = [...(runtimeCtx.lineage ?? [])];
 		const stampIdentity = (current: SingleResult): SingleResult => ({
 			...current,
@@ -379,9 +386,10 @@ export async function executeSingleTask(args: {
 		makeDetails: makeDetailsWithProvenance,
 		onUpdate,
 		childId,
-		buildRuntime: (identity) => ({
+		buildRuntime: (identity, effectiveBucket) => ({
 			depth: runtimeCtx.depth + 1,
 			trail: [...runtimeCtx.trail, params.agent],
+			bucket: effectiveBucket ?? runtimeCtx.bucket,
 			canSpawn: agent.canSpawn,
 			budget: runtimeCtx.budget,
 			rootSessionPath: runtimeCtx.rootSessionPath ?? ctx.sessionManager?.getSessionFile?.() ?? undefined,

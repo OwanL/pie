@@ -224,6 +224,9 @@ export interface ProcessPermitScope {
 export interface SubagentRuntimeContext {
 	depth: number;
 	trail: string[];
+	/** Effective bucket serving the current subagent session. Undefined for the
+	 * root chat, which is never restricted by per-bucket delegation policy. */
+	bucket?: string;
 	canSpawn?: string[];
 	budget?: TreeBudget;
 	/** Main chat session whose per-session provider policy applies to this tree. */

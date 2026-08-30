@@ -1,37 +1,20 @@
-import type { ChatMessage, SystemPromptEntry } from '../../../shared/protocol';
+import type { ChatMessage, SystemPromptEntry, ToolCall } from '../../../shared/protocol';
 import { getSubagentResultEntries } from '../../../shared/subagent-result';
 import { isRecord } from '../../../shared/type-guards';
 
 /**
- * Cheap fingerprints that gate the O(transcript) indicator walks in
- * {@link useComposerIndicators}, so they bail when only the streaming message
- * grew instead of re-walking the whole transcript every snapshot.
+ * Bounded fingerprints that gate the O(transcript) indicator walks in
+ * {@link useComposerIndicators}. The host posts a structured-cloned `ViewState`
+ * ~7×/sec while streaming, so the transcript array (and every nested object)
+ * gets a fresh reference even when byte-identical. Usage/cost fingerprints use
+ * lifecycle fields and revisions; the context-breakdown fingerprint also hashes
+ * legacy body-only records, retaining only fixed-size signatures in memo keys.
  *
- * Background: the host posts a structured-cloned `ViewState` ~7×/sec while
- * streaming (`postMessage`'s clone gives every nested object a fresh reference
- * even when byte-identical), so keying a memo on the `transcript` array ref
- * recomputes the walk on every snapshot. These signatures are O(1)/O(small)
- * surrogates that are STABLE while the guarded result is stable and CHANGE
- * whenever the result could change, so the memos skip the walk in the common
- * "only the streaming message grew" case.
- *
- * Correctness contract — why a length + last-non-queued-message fingerprint suffices:
- * The guarded walks read only
- *   - `message.usage` / `message.modelId` — set once at `MessageFinished` on
- *     the active assistant message and immutable afterwards;
- *   - `message.toolCalls` / `message.parts` tool calls — results land
- *     atomically on that active message and are immutable once completed;
- *   - `message.markdown` / `message.thinking` — only the active streaming
- *     message grows.
- * None of these mutate a non-streaming message after it completes, and the
- * only content transition during a turn happens on the active message. Queued
- * follow-ups may project after it, so the signatures skip those trailing rows.
- * Appends/removes still change `transcript.length`.
- *
- * This deliberately does NOT stabilize the whole transcript (the decision
- * documented in `view-state-stabilize.ts`): the signatures are O(1)/O(small),
- * and the walks themselves only run (over the real transcript) when a
- * signature actually changes.
+ * The guarded data is append-only or immutable under the host protocol: usage
+ * lands at `MessageFinished`, tool previews advance their seq, and completed
+ * durable records do not mutate. Streaming message text is represented by its
+ * append-only length. Legacy tool records without those revisions use content
+ * hashes so same-length result replacements still invalidate correctly.
  */
 
 /**
@@ -73,24 +56,149 @@ export function streamingContentSignature(transcript: readonly ChatMessage[]): s
 }
 
 /**
- * O(total prompt text) — prompts are few and small. Guards the context-window
- * breakdown's system-prompt contributor, whose value is
+ * O(total prompt text) — prompts are few and usually small. Guards the
+ * context-window breakdown's system-prompt contributor, whose value is
  * `estimateTextTokens(prompt.text)` (a real cl100k_base BPE count, which is
  * CONTENT-dependent, not length-dependent). A `text.length` proxy would be
  * unsound: two same-length prompts can tokenize to different token counts, so
  * a same-length system-prompt edit would change the breakdown but not the
- * signature → a stale tooltip. Including each prompt's availability + full text
- * is unambiguously faithful (any content change is detected) and cheaper than
- * re-running BPE in the signature. It is intentionally over-faithful — a
- * same-token-count text edit needlessly recomputes the breakdown — because
- * system-prompt edits are rare (config edits, not mid-stream) and the cost of
- * including the text is far below the O(transcript) BPE walk this signature
- * gates.
+ * signature → a stale tooltip. The fixed-size text hash detects any edit while
+ * avoiding a copy of the prompt body in every key; availability and disabled
+ * state are included because both determine whether the prompt contributes.
  */
+const FINGERPRINT_OFFSET = 2166136261;
+const FINGERPRINT_PRIME = 16777619;
+const SECOND_FINGERPRINT_OFFSET = 0x9e3779b9;
+
+/**
+ * Fixed-size content fingerprint. The signature callers use as a memo key must
+ * not retain prompt/tool bodies: a long-lived session can contain megabytes of
+ * tool output. Include the source length alongside two small hashes so equal
+ * length edits do not look unchanged while keeping the resulting key bounded.
+ */
+function boundedStringSignature(value: string): string {
+  let first = FINGERPRINT_OFFSET;
+  let second = SECOND_FINGERPRINT_OFFSET;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    first = Math.imul(first ^ code, FINGERPRINT_PRIME);
+    second = Math.imul(second ^ (code + index), 2246822519);
+  }
+  return `${value.length}:${(first >>> 0).toString(16)}:${(second >>> 0).toString(16)}`;
+}
+
+/** Match the value-to-text path used by context-window token estimation, but
+ * retain only a bounded length/hash pair in the invalidation signature. */
+function boundedValueSignature(value: unknown): string {
+  if (value === undefined) return 'undefined';
+  if (value === null) return 'null';
+  if (typeof value === 'string') return `string:${boundedStringSignature(value)}`;
+  try {
+    const serialized = JSON.stringify(value);
+    return serialized === undefined
+      ? 'undefined'
+      : `json:${boundedStringSignature(serialized)}`;
+  } catch {
+    return `string:${boundedStringSignature(String(value))}`;
+  }
+}
+
+/**
+ * Signature of the fields from a tool call that affect
+ * `buildContextWindowBreakdown`. Live calls use the host-owned monotonic seq
+ * as their bounded preview revision; durability-confirmed terminal calls use
+ * their stable entry identity, and legacy calls without either revision use a
+ * content hash so a same-length result edit still invalidates. This mirrors
+ * the breakdown token cache's immutable/revisioned contract without copying
+ * result bodies into a memo key.
+ */
+export function toolCallContextSignature(toolCall: ToolCall): string {
+  const hasLiveRevision = typeof toolCall.seq === 'number'
+    && Number.isFinite(toolCall.seq) && toolCall.seq > 0;
+  const hasDurableRevision = Boolean(toolCall.durableEntryId);
+  const revision = hasDurableRevision
+    ? `durable:${boundedStringSignature(toolCall.durableEntryId!)}`
+    : hasLiveRevision
+      ? `seq:${toolCall.seq}`
+      : `result:${boundedValueSignature(toolCall.result)}`;
+  // A live seq advances for every assembled tool state change and a durable
+  // entry is immutable, so avoid re-hashing a potentially large input on every
+  // structured-cloned snapshot. Legacy records without either revision need
+  // the content hash because their input/result can change under one id.
+  const input = hasDurableRevision || hasLiveRevision
+    ? 'revisioned'
+    : boundedValueSignature(toolCall.input);
+  return [
+    `id:${boundedStringSignature(toolCall.id)}`,
+    `name:${boundedStringSignature(toolCall.name)}`,
+    `status:${toolCall.status}`,
+    revision,
+    `input:${input}`,
+  ].join(';');
+}
+
+/**
+ * Signature of every transcript field read by `buildContextWindowBreakdown`.
+ * Stable message rows use their ids and live rows use bounded lengths; tool
+ * payloads use fixed-size hashes when no lifecycle revision is available and
+ * otherwise use that revision. Message/tool counts and identities remain in the
+ * digest so supported replacements cannot leave a stale breakdown behind.
+ */
+export function contextBreakdownTranscriptSignature(transcript: readonly ChatMessage[]): string {
+  let first = FINGERPRINT_OFFSET;
+  let second = SECOND_FINGERPRINT_OFFSET;
+  const append = (value: string) => {
+    for (let index = 0; index < value.length; index += 1) {
+      const code = value.charCodeAt(index);
+      first = Math.imul(first ^ code, FINGERPRINT_PRIME);
+      second = Math.imul(second ^ (code + index), 2246822519);
+    }
+    first = Math.imul(first ^ 0, FINGERPRINT_PRIME);
+    second = Math.imul(second ^ 0, 2246822519);
+  };
+
+  for (const message of transcript) {
+    append(message.id);
+    append(message.role);
+    append(message.status);
+    append(message.customType ?? '');
+    // Completed transcript rows are immutable by the host protocol; their
+    // stable entry/id is therefore the bounded revision. Streaming prose is
+    // append-only, so its length captures each estimation change. Queued user
+    // rows remain editable before send, so hash their bounded body instead.
+    const stableRevision = `stable:${boundedStringSignature(message.durableEntryId ?? message.id)}`;
+    const markdownSignature = message.status === 'streaming' && typeof message.markdown === 'string'
+      ? `streaming:${message.markdown.length}`
+      : message.status === 'queued'
+        ? `queued:${boundedValueSignature(message.markdown)}`
+        : stableRevision;
+    const thinkingSignature = message.status === 'streaming' && typeof message.thinking === 'string'
+      ? `streaming:${message.thinking.length}`
+      : message.status === 'queued'
+        ? `queued:${boundedValueSignature(message.thinking)}`
+        : stableRevision;
+    append(`markdown:${markdownSignature}`);
+    append(`thinking:${thinkingSignature}`);
+
+    if (message.role !== 'assistant') continue;
+    const partToolCalls = message.parts
+      ?.filter((part) => part.kind === 'toolCall')
+      .map((part) => part.toolCall) ?? [];
+    const toolCalls = partToolCalls.length > 0 ? partToolCalls : (message.toolCalls ?? []);
+    append(`tools:${toolCalls.length}`);
+    for (const toolCall of toolCalls) append(toolCallContextSignature(toolCall));
+  }
+
+  return `${transcript.length}:${(first >>> 0).toString(16)}:${(second >>> 0).toString(16)}`;
+}
+
 export function systemPromptsSignature(systemPrompts: readonly SystemPromptEntry[]): string {
   let acc = `${systemPrompts.length}`;
   for (const p of systemPrompts) {
-    acc += `|${p.availability}:${p.text}`;
+    // `disabled` affects whether the prompt is sent and therefore its token
+    // contribution. Hash the text instead of embedding a potentially large
+    // prompt body in every ViewState-derived key.
+    acc += `|${p.availability}:${p.disabled === true ? 1 : 0}:${boundedStringSignature(p.text)}`;
   }
   return acc;
 }

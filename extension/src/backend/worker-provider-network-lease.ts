@@ -5,6 +5,33 @@ import { publishProviderTransportObservation } from './provider-progress-bus';
 
 export interface WorkerProviderNetworkLease {
   leaseId: string;
+  headerWaitMs: number;
+  streamIdleTimeoutMs: number;
+}
+
+export interface WorkerProviderNetworkLeaseOptions {
+  /** Classify the actual destination URL before falling back to the root
+   * session provider. This keeps local pruning and provider failover in their
+   * own coordinator pools. */
+  resolveProvider?(url: string, fallbackProvider?: string): string | undefined;
+}
+
+export class WorkerProviderHeaderTimeoutError extends Error {
+  readonly isRetryable = true;
+  readonly httpStatus = 504;
+  constructor(provider: string, waitMs: number) {
+    super(`Provider "${provider}" did not return response headers within ${waitMs}ms.`);
+    this.name = 'WorkerProviderHeaderTimeoutError';
+  }
+}
+
+export class WorkerProviderStreamIdleTimeoutError extends Error {
+  readonly isRetryable = true;
+  readonly httpStatus = 504;
+  constructor(provider: string, waitMs: number) {
+    super(`Provider "${provider}" response stream produced no data for ${waitMs}ms.`);
+    this.name = 'WorkerProviderStreamIdleTimeoutError';
+  }
 }
 
 export interface WorkerProviderNetworkLeaseClient {
@@ -36,6 +63,7 @@ function abortError(signal: AbortSignal): Error {
 export function installWorkerProviderNetworkLease(
   client: WorkerProviderNetworkLeaseClient,
   resolveIdentity?: () => { sessionId?: string; provider?: string; model?: string; turnId?: string; attemptId?: string },
+  options: WorkerProviderNetworkLeaseOptions = {},
 ): () => void {
   const underlyingFetch = globalThis.fetch;
   let attempt = 0;
@@ -45,7 +73,9 @@ export function installWorkerProviderNetworkLease(
     const fallbackAttemptId = `network:${process.pid}:${++attempt}`;
     const identity = resolveIdentity?.() ?? {};
     const attemptId = identity.attemptId ?? fallbackAttemptId;
-    const provider = identity.provider ?? (parsed.host || 'unknown-provider');
+    const provider = options.resolveProvider?.(url, identity.provider)
+      ?? identity.provider
+      ?? (parsed.host || 'unknown-provider');
     const publishProgress = (
       kind: Parameters<typeof publishProviderTransportObservation>[0]['kind'],
       extra: { occurredAt?: number; queueDurationMs?: number } = {},
@@ -103,44 +133,114 @@ export function installWorkerProviderNetworkLease(
     }
 
     let released = false;
-    let observed = false;
+    let observation: { classification: 'success' | 'http-error' | 'transport-error' | 'cancelled'; status?: number; retryable: boolean } | undefined;
     let progressTerminal = false;
     let rawChunkObserved = false;
+    let removeTransportAbortListener = (): void => undefined;
     const settleProgress = (kind: 'transport_terminal' | 'transport_error'): void => {
       if (progressTerminal) return;
       progressTerminal = true;
       publishProgress(kind);
     };
-    const observe = (observation: { classification: 'success' | 'http-error' | 'transport-error' | 'cancelled'; status?: number; retryable: boolean }): void => {
-      if (observed) return;
-      observed = true;
-      client.observe(lease.leaseId, observation);
+    const observe = (next: { classification: 'success' | 'http-error' | 'transport-error' | 'cancelled'; status?: number; retryable: boolean }): void => {
+      if (observation) {
+        // Headers can prove a non-retryable HTTP response while the body later
+        // proves the transport unhealthy. Let that stronger terminal evidence
+        // replace the provisional header classification before release; all
+        // other duplicate observations remain exact-once.
+        const supersedesHttpHeaders = observation.classification === 'http-error'
+          && next.classification === 'transport-error';
+        if (!supersedesHttpHeaders) return;
+      }
+      observation = next;
+      client.observe(lease.leaseId, next);
     };
     const release = (outcome: WorkerProviderReleaseOutcome): void => {
       if (released) return;
       released = true;
+      removeTransportAbortListener();
       void client.release(lease.leaseId, outcome).catch(() => undefined);
     };
     try {
       publishProgress('headers_wait');
-      const response = await underlyingFetch(input, init);
-      publishProgress('headers_received');
-      observe({
-        classification: response.ok ? 'success' : 'http-error',
-        status: response.status,
-        retryable: response.status === 408 || response.status === 409 || response.status === 429 || response.status >= 500,
+      const transportController = new AbortController();
+      const activeReader: { current?: ReadableStreamDefaultReader<Uint8Array> } = {};
+      const onTransportAbort = (): void => {
+        const reason = signal ? abortError(signal) : new Error('Provider transport aborted.');
+        if (!transportController.signal.aborted) transportController.abort(reason);
+        if (activeReader.current) void activeReader.current.cancel(reason).catch(() => undefined);
+        settleProgress('transport_error');
+        observe({ classification: 'cancelled', retryable: false });
+        release('cancelled');
+      };
+      if (signal) {
+        signal.addEventListener('abort', onTransportAbort, { once: true });
+        removeTransportAbortListener = () => signal.removeEventListener('abort', onTransportAbort);
+        if (signal.aborted) onTransportAbort();
+      }
+      const headerError = new WorkerProviderHeaderTimeoutError(provider, lease.headerWaitMs);
+      let headerTimer: ReturnType<typeof setTimeout> | undefined;
+      let headerTimedOut = false;
+      const upstream = underlyingFetch(input, { ...(init ?? {}), signal: transportController.signal }).then((response) => {
+        if (!headerTimedOut) return response;
+        void response.body?.cancel(headerError).catch(() => undefined);
+        throw headerError;
       });
+      const headerDeadline = new Promise<never>((_resolve, reject) => {
+        headerTimer = setTimeout(() => {
+          headerTimedOut = true;
+          if (!transportController.signal.aborted) transportController.abort(headerError);
+          reject(headerError);
+        }, lease.headerWaitMs);
+        headerTimer.unref?.();
+      });
+      let response: Response;
+      try {
+        response = await Promise.race([upstream, headerDeadline]);
+      } finally {
+        if (headerTimer) clearTimeout(headerTimer);
+      }
+      publishProgress('headers_received');
+      // A 2xx header is not yet transport success: a truncated or stalled
+      // response body must still contribute retryable circuit evidence. HTTP
+      // failures are final at headers and retain their status classification.
+      if (!response.ok) {
+        observe({
+          classification: 'http-error',
+          status: response.status,
+          retryable: response.status === 408 || response.status === 409 || response.status === 429 || response.status >= 500,
+        });
+      }
       if (!response.body) {
+        if (response.ok) observe({ classification: 'success', status: response.status, retryable: false });
         settleProgress('transport_terminal');
         release(response.ok ? 'completed' : 'failed');
         return response;
       }
       const reader = response.body.getReader();
+      activeReader.current = reader;
       const body = new ReadableStream<Uint8Array>({
         async pull(controller) {
+          let idleTimer: ReturnType<typeof setTimeout> | undefined;
           try {
-            const result = await reader.read();
+            const idleError = new WorkerProviderStreamIdleTimeoutError(provider, lease.streamIdleTimeoutMs);
+            const result = await Promise.race([
+              reader.read(),
+              new Promise<never>((_resolve, reject) => {
+                idleTimer = setTimeout(() => {
+                  // Settle the deadline before cancelling the upstream reader.
+                  // Some ReadableStream implementations resolve a pending read
+                  // with `{ done: true }` synchronously from cancel(), which
+                  // would otherwise make a timed-out stream look like clean EOF.
+                  reject(idleError);
+                  if (!transportController.signal.aborted) transportController.abort(idleError);
+                  void reader.cancel(idleError).catch(() => undefined);
+                }, lease.streamIdleTimeoutMs);
+                idleTimer.unref?.();
+              }),
+            ]);
             if (result.done) {
+              if (response.ok) observe({ classification: 'success', status: response.status, retryable: false });
               settleProgress('transport_terminal');
               release(response.ok ? 'completed' : 'failed');
               controller.close();
@@ -156,6 +256,8 @@ export function installWorkerProviderNetworkLease(
             observe({ classification: signal?.aborted ? 'cancelled' : 'transport-error', retryable: !signal?.aborted });
             release(signal?.aborted ? 'cancelled' : 'failed');
             controller.error(error);
+          } finally {
+            if (idleTimer) clearTimeout(idleTimer);
           }
         },
         async cancel(reason) {

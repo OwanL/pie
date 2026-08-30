@@ -16,7 +16,7 @@ import {
   withIncrementedWindowCounts,
 } from '../transcript-window.js';
 import type { ReducerResult } from './helpers.js';
-import { findPendingTurnOwner, resolveAlias, enforceLoadedWindowBudget } from './helpers.js';
+import { findPendingTurnOwner, resolveAlias, enforceLoadedWindowBudget, startSessionTitleGeneration } from './helpers.js';
 import type { Event, BackendEvent } from '../events.js';
 import type { Effect } from '../effects.js';
 
@@ -46,7 +46,12 @@ export function handleMessageStarted(state: ArchState, event: Extract<Event, { k
     : undefined;
   if (turnOwner) effects.push({ kind: 'ClearSendTimer', corrId: turnOwner.corrId });
 
-  const nextState = produce(state, (draft) => {
+  const titleStart = !isAlias
+    ? startSessionTitleGeneration(state, sessionPath, turnOwner?.corrId ?? requestId ?? messageId)
+    : { state, effects: [] };
+  effects.push(...titleStart.effects);
+
+  const nextState = produce(titleStart.state, (draft) => {
     // Update alias map or currentTurnBySession
     if (isAlias) {
       draft.pending.messageIdAlias[messageId] = { canonicalId: currentTurn!.firstMessageId, sessionPath: event.sessionPath };
@@ -385,6 +390,11 @@ export function handleQueuedDelivered(state: ArchState, event: Extract<Event, { 
     const [delivered] = transcript.splice(idx, 1);
     delivered.status = 'completed';
     transcript.push(delivered);
+    if (draft.transcript.editingMessageIdBySession[event.sessionPath] === localId) {
+      draft.transcript.editingMessageIdBySession[event.sessionPath] = null;
+      delete draft.transcript.editingDraftBySession[event.sessionPath];
+      delete draft.transcript.deferredWindowReplacementBySession[event.sessionPath];
+    }
     for (const [corrId, op] of Object.entries(draft.pending.promoted)) {
       if (op.queued && op.localId === localId) delete draft.pending.promoted[corrId];
     }

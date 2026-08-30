@@ -61,6 +61,11 @@ const allowedReasons: Record<CriterionStatus, Set<CriterionReason>> = {
   not_assessable: values('human_evidence_missing', 'insufficient_artifact_evidence', 'unknown'),
   superseded: values('none'),
 };
+export function validateCriterionStatusReason(statusValue: unknown, reasonValue: unknown, path = 'criterion'): void {
+  const status = member(statusValue, statuses, `${path}.status`);
+  const reason = member(reasonValue, reasons, `${path}.reason`);
+  if (!allowedReasons[status].has(reason)) fail(`${path} has invalid status/reason pair ${status}/${reason}`);
+}
 function definition(value: unknown, path: string, frozen = false): CriterionDefinition {
   const v = object(value, path);
   const criterionId = string(v.criterionId, `${path}.criterionId`);
@@ -78,9 +83,7 @@ function classified(value: unknown, path: string): ClassifiedCriterion {
   const v = object(value, path);
   rejectObsolete(v, path, ['findingRefs']);
   const result = definition(v, path) as ClassifiedCriterion;
-  const status = member(v.status, statuses, `${path}.status`);
-  const reason = member(v.reason, reasons, `${path}.reason`);
-  if (!allowedReasons[status].has(reason)) fail(`${path} has invalid status/reason pair ${status}/${reason}`);
+  validateCriterionStatusReason(v.status, v.reason, path);
   stringArray(v.evidenceRefs, `${path}.evidenceRefs`);
   return result;
 }

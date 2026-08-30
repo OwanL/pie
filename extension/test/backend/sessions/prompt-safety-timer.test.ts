@@ -28,6 +28,7 @@ test('decidePromptSafetyTimerAction DEFERS when the provider is saturated (queue
     promptTimeoutMs: PROMPT_TIMEOUT_MS,
     provider: 'openai',
     metrics: [metric({ queuedRequests: 1 })],
+    requestProviderPending: true,
   });
   assert.equal(decision.action, 'defer');
   assert.equal(decision.reason, '');
@@ -45,6 +46,32 @@ test('decidePromptSafetyTimerAction DEFERS when the provider is paused (circuit 
   assert.equal(decision.reason, '');
 });
 
+test('decidePromptSafetyTimerAction DEFERS while an admitted request is inside its bounded network phase', () => {
+  const decision = decidePromptSafetyTimerAction({
+    elapsed: 5_000,
+    ceiling: CEILING,
+    promptTimeoutMs: PROMPT_TIMEOUT_MS,
+    provider: 'openai',
+    metrics: [metric({ activeRequests: 1 })],
+    requestProviderPending: true,
+  });
+  assert.equal(decision.action, 'defer');
+  assert.equal(decision.reason, '');
+});
+
+test('decidePromptSafetyTimerAction uses exact worker correlation when coordinator metrics are unavailable', () => {
+  const decision = decidePromptSafetyTimerAction({
+    elapsed: 5_000,
+    ceiling: CEILING,
+    promptTimeoutMs: PROMPT_TIMEOUT_MS,
+    provider: 'openai',
+    metrics: undefined,
+    requestProviderPending: true,
+  });
+  assert.equal(decision.action, 'defer');
+  assert.equal(decision.reason, '');
+});
+
 test('decidePromptSafetyTimerAction FIRES when the provider has a free slot (not queued, not paused) — genuinely stuck', () => {
   const decision = decidePromptSafetyTimerAction({
     elapsed: 5_000,
@@ -56,6 +83,19 @@ test('decidePromptSafetyTimerAction FIRES when the provider has a free slot (not
   assert.equal(decision.action, 'fire');
   // Not saturated → the generic (non-ceiling) reason.
   assert.match(decision.reason, /Prompt timed out after \d+ms without reaching a commit point/);
+  assert.ok(!/hard ceiling/.test(decision.reason));
+});
+
+test('decidePromptSafetyTimerAction does not let sibling provider activity mask this request', () => {
+  const decision = decidePromptSafetyTimerAction({
+    elapsed: 5_000,
+    ceiling: CEILING,
+    promptTimeoutMs: PROMPT_TIMEOUT_MS,
+    provider: 'openai',
+    metrics: [metric({ activeRequests: 2, queuedRequests: 3 })],
+    requestProviderPending: false,
+  });
+  assert.equal(decision.action, 'fire');
   assert.ok(!/hard ceiling/.test(decision.reason));
 });
 
@@ -100,12 +140,13 @@ test('decidePromptSafetyTimerAction FIRES past the hard ceiling even when the pr
     promptTimeoutMs: PROMPT_TIMEOUT_MS,
     provider: 'openai',
     metrics: [metric({ queuedRequests: 1 })],
+    requestProviderPending: true,
   });
   assert.equal(decision.action, 'fire');
-  // Saturated but past ceiling → the hard-ceiling reason blaming the provider.
+  // Queued but past ceiling → the hard-ceiling reason naming the provider state.
   assert.match(decision.reason, /hard ceiling/);
   assert.match(decision.reason, /openai/);
-  assert.match(decision.reason, /saturated/);
+  assert.match(decision.reason, /network-pending/);
 });
 
 test('decidePromptSafetyTimerAction FIRES past the hard ceiling with the paused reason when the provider is paused', () => {

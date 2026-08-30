@@ -117,8 +117,12 @@ test('Phase 4 protocol accepts every closed runtime, ownership, provider, and sy
     { ...base, kind: 'ownership.aborted', requestId: 'abort', reservationId: reservation.reservationId },
     { ...base, kind: 'ownership.rejected', requestId: 'rejected', phase: 'reserve', code: 'OWNERSHIP_CONFLICT', message: 'busy', retryable: true },
     { ...base, kind: 'ownership.runtimeReadyAck', requestId: 'runtime-ready', canonicalPath: base.leasePath, ownershipRevision: base.leaseRevision },
-    { ...base, kind: 'provider.granted', requestId: 'provider', lease: { leaseId: 'lease-1', provider: 'openai', model: 'gpt', grantedAt: 100 } },
+    { ...base, kind: 'provider.granted', requestId: 'provider', lease: { leaseId: 'lease-1', provider: 'openai', model: 'gpt', grantedAt: 100, headerWaitMs: 120_000, streamIdleTimeoutMs: 120_000 } },
     { ...base, kind: 'provider.cancelled', requestId: 'provider', reason: 'aborted' },
+    {
+      ...base, kind: 'provider.rejected', requestId: 'provider',
+      error: { name: 'ProviderGateSaturatedError', message: 'retry later', retryable: true, httpStatus: 429 },
+    },
     { ...base, kind: 'provider.cancelAck', requestId: 'cancel', targetRequestId: 'provider', status: 'granted', leaseId: 'lease-1' },
     { ...base, kind: 'provider.released', requestId: 'release', leaseId: 'lease-1' },
     { ...base, kind: 'settings.authoritative', requestId: 'settings-write', revision: 2, values: { defaultModel: 'gpt' } },
@@ -127,6 +131,10 @@ test('Phase 4 protocol accepts every closed runtime, ownership, provider, and sy
     { ...base, kind: 'sync', requestId: 'auth', domain: 'auth', revision: 2, payload: { authPath: 'C:/auth', fingerprint: 'fingerprint' } },
     { ...base, kind: 'sync', requestId: 'prefs', domain: 'runtimePrefs', revision: 3, payload: { values: { autonomousMode: true } } },
     { ...base, kind: 'sync', requestId: 'policy', domain: 'providerPolicy', revision: 4, payload: { providers: { openai: { maxConcurrent: 1 } } } },
+    {
+      ...base, kind: 'sync', requestId: 'registry', domain: 'sessionRegistry', revision: 5,
+      payload: { tabs: [{ path: 'C:/sessions/root.jsonl', pinned: true, isRunning: false }] },
+    },
   ];
   const workerFrames = [
     { ...base, kind: 'runtime.ready', requestId: 'promote', runtimeMetadata: { mode: 'phase4', startedAt: 100 } },
@@ -150,6 +158,11 @@ test('Phase 4 protocol accepts every closed runtime, ownership, provider, and sy
   ];
   for (const frame of coordinatorFrames) assert.equal(parseCoordinatorToWorkerFrame(frame, expected).status, 'accepted', frame.kind);
   for (const frame of workerFrames) assert.equal(parseWorkerToCoordinatorFrame(frame, expected).status, 'accepted', frame.kind);
+
+  assert.equal(parseCoordinatorToWorkerFrame({
+    ...base, kind: 'sync', requestId: 'bad-registry', domain: 'sessionRegistry', revision: 5,
+    payload: { tabs: 'not-an-array' },
+  }, expected).status, 'invalid');
 
   // runtime.report is closed to the catalog domain and its models payload.
   for (const frame of [
@@ -255,6 +268,14 @@ test('protocol rejects exact extra fields, malformed correlated unions, and unsa
   assert.equal(parseCoordinatorToWorkerFrame({
     ...base, kind: 'bootstrap', heartbeatIntervalMs: 1_000,
     sdkPatchIdentity: missingColdCreateIdentity,
+  }, expected).status, 'invalid');
+  assert.equal(parseCoordinatorToWorkerFrame({
+    ...base, kind: 'provider.rejected', requestId: 'provider',
+    error: { name: 'ProviderGateSaturatedError', message: 'retry later', retryable: true, httpStatus: 700 },
+  }, expected).status, 'invalid');
+  assert.equal(parseCoordinatorToWorkerFrame({
+    ...base, kind: 'provider.rejected', requestId: 'provider',
+    error: { name: 'ProviderGateSaturatedError', message: 'retry later', retryable: true, surprise: true },
   }, expected).status, 'invalid');
 });
 

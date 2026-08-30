@@ -19,6 +19,20 @@ test('session.opened accepts an additive create operation identity for late reco
   assert.equal(isSessionOpenedPayload({ ...payload, operationAttempt: 0 }), false);
 });
 
+test('session.opened validates the additive cold initial-context estimate independently of live usage', () => {
+  const payload = {
+    session: { path: '/workspace/session.jsonl', name: 'Session', cwd: '/workspace', modifiedAt: '2026-01-01T00:00:00.000Z', messageCount: 0 },
+    transcript: [],
+    transcriptWindow: { totalCount: 0, loadedStart: 0, loadedEnd: 0, hasOlder: false, hasNewer: false, isPartial: false, hasUserMessages: false },
+    busy: false,
+    runtimeReady: false,
+    initialContextEstimate: { tokens: 12_345, contextWindow: 200_000 },
+  };
+  assert.equal(isSessionOpenedPayload(payload), true);
+  assert.equal(isSessionOpenedPayload({ ...payload, initialContextEstimate: { tokens: -1, contextWindow: 200_000 } }), false);
+  assert.equal(isSessionOpenedPayload({ ...payload, initialContextEstimate: { tokens: 1, contextWindow: 0 } }), false);
+});
+
 test('busy session snapshots omit the persisted active assistant bubble owned by LivePipelineState', () => {
   const rows = [
     { id: 'user', role: 'user' as const, createdAt: '2026-01-01T00:00:00.000Z', markdown: 'go', status: 'completed' as const },

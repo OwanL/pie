@@ -21,7 +21,9 @@ every reference found in each document:
 
 - **External URLs** — ``http://`` and ``https://`` links are fetched with a
   HEAD request (falling back to GET).  Any non-2xx/3xx response counts as
-  broken.  ``localhost`` / ``127.0.0.1`` URLs are always skipped.
+  broken.  Private/local targets (``localhost``, loopback, RFC1918,
+  link-local, ...) are never fetched, including as redirect destinations:
+  redirects are followed manually and each hop is re-verified first.
 
 Output is sorted by the file's last-modified timestamp (oldest first) so
 that the most stale documents surface at the top.
@@ -32,8 +34,9 @@ details).
 Arguments:
     directory              Root directory to scan (required)
     --timeout SECONDS      HTTP request timeout per URL (default: 10)
-    --max-urls N           Maximum external URLs to check (default: 200;
-                          0 = unlimited).  When the limit is hit, remaining
+    --max-urls N           Maximum external URLs to check across the whole
+                          scan (default: 200; 0 = unlimited; negative values
+                          are rejected).  When the limit is hit, remaining
                           URLs are reported as ``skipped``.
     --skip-external        Skip all external URL checks (only check internal
                           references).
@@ -65,12 +68,18 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import ipaddress
+import os
 import re
+import socket
+import string
 import sys
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path, PurePosixPath
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -80,7 +89,7 @@ MARKDOWN_EXTENSIONS: frozenset[str] = frozenset({".md", ".mdx"})
 
 SKIP_DIRS: frozenset[str] = frozenset({
     ".git", ".hg", ".svn",
-    "__pycache__", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".hypothesis",
+    "__pycache__", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".hypothesis", ".cache",
     "node_modules",
     "venv", ".venv", "env", ".env",
     "target",           # Rust / Maven build output
@@ -93,25 +102,10 @@ SKIP_DIRS: frozenset[str] = frozenset({
 
 IGNORE_FILE_NAMES: tuple[str, ...] = (".ignore", ".codebase-ignore")
 
-# Regex that matches markdown link/image destinations.
-# Handles: [text](url), ![alt](url), [text](<url with spaces>)
-# Captures group 1 = link text, group 2 = <url>, group 3 = bare url.
-_MD_LINK_RE = re.compile(
-    r"""
-    !?                                  # optional image marker
-    \[([^\]]*)\]                        # link text
-    \(\s*                               # opening paren
-      (?:                               #   start URL alternation
-        <([^>]*)>                       #     <url-with-spaces>
-      |                                 #     —or—
-        ([^)\s]+)                       #     bare url (no spaces, no <>)
-      )                                 #   end URL alternation
-    \s*(?:                              # closing paren + optional title
-      "([^"]*)"                         #   optional title string
-    )?\s*\)
-    """,
-    re.VERBOSE,
-)
+# Finds the label and opening parenthesis of an inline link/image. Destination
+# parsing is stateful below so balanced parentheses are handled correctly.
+_INLINE_LINK_OPEN_RE = re.compile(r"(?<!\\)!?\[(?:\\.|[^\]\\\n])*\]\(")
+_ESCAPABLE_PUNCTUATION: frozenset[str] = frozenset(string.punctuation)
 
 # Matches the ``#anchor`` fragment at the end of a path.
 _ANCHOR_RE = re.compile(r"#(.+)$")
@@ -119,6 +113,28 @@ _ANCHOR_RE = re.compile(r"#(.+)$")
 # Matches markdown ATX headings and converts them to plausible anchor IDs
 # (GitHub-style: lowercase, spaces→hyphens, strip punctuation).
 _HEADING_RE = re.compile(r"^\s{0,3}(#{1,6})\s+(.+?)(?:\s+#+\s*)?$", re.MULTILINE)
+
+# Matches Setext heading underlines (a line of ``=`` or ``-`` following a
+# paragraph line).  Matched against the stripped line.
+_SETEXT_UNDERLINE_RE = re.compile(r"^(=+|-+)$")
+
+# Matches the start of a link reference definition (``[label]: ...``), used to
+# keep such lines from being mistaken for Setext heading paragraphs.
+_LINK_DEF_START_RE = re.compile(r"^\s{0,3}\[[^\]]*\]:")
+
+# Matches reference-style link usages: full ``[text][label]``, collapsed
+# ``[label][]``, and shortcut ``[label]``.  The negative lookahead keeps
+# inline links (``[text](url)``) from matching the first bracket as a
+# shortcut reference.
+_REF_USAGE_RE = re.compile(
+    r"""
+    (?<!\\)                             # not escaped
+    \[([^\]\[]*)\]                      # first bracket: link text / shortcut label
+    (?:\[([^\]\[]*)\])?                 # optional second bracket: reference label
+    (?![ \t]*\()                        # not an inline link's opening paren
+    """,
+    re.VERBOSE,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -241,7 +257,11 @@ def is_skipped(file: Path, base: Path) -> bool:
         rel_parts = file.relative_to(base).parts
     except ValueError:
         return False
-    return any(part in SKIP_DIRS for part in rel_parts[:-1])
+    return any(
+        fnmatch.fnmatch(part, pattern)
+        for part in rel_parts[:-1]
+        for pattern in SKIP_DIRS
+    )
 
 
 def strip_code_blocks(content: str) -> str:
@@ -257,7 +277,8 @@ def strip_code_blocks(content: str) -> str:
     in_fence = False
     fence_marker = ""
     result_lines: list[str] = []
-    for line in lines:
+    for raw_line in lines:
+        line = raw_line.rstrip("\r")  # tolerate CRLF line endings
         stripped = line.lstrip()
         if not in_fence:
             # Check for opening fence (3+ backticks or tildes, optional info string)
@@ -283,6 +304,146 @@ def strip_code_blocks(content: str) -> str:
     return result
 
 
+# ---------------------------------------------------------------------------
+# Reference extraction
+# ---------------------------------------------------------------------------
+
+
+def normalize_reference(ref: str) -> str:
+    """Normalize *ref*: protocol-relative ``//host/...`` becomes ``https://``."""
+    if ref.startswith("//"):
+        return f"https:{ref}"
+    return ref
+
+
+def _normalize_link_label(label: str) -> str:
+    """Normalize a link label per CommonMark: whitespace-collapsed, case-folded."""
+    return " ".join(label.split()).casefold()
+
+
+def _finish_inline_link(content: str, index: int) -> int | None:
+    """Return the index after an inline link's closing ``)``, if valid."""
+    if index < len(content) and content[index] == ")":
+        return index + 1
+    if index >= len(content) or not content[index].isspace():
+        return None
+    while index < len(content) and content[index].isspace():
+        index += 1
+    if index < len(content) and content[index] == ")":
+        return index + 1
+    if index >= len(content) or content[index] not in "\"'(":
+        return None
+
+    opener = content[index]
+    closer = {"\"": "\"", "'": "'", "(": ")"}[opener]
+    index += 1
+    while index < len(content):
+        char = content[index]
+        if (
+            char == "\\"
+            and index + 1 < len(content)
+            and content[index + 1] in _ESCAPABLE_PUNCTUATION
+        ):
+            index += 2
+            continue
+        if char == closer:
+            index += 1
+            break
+        index += 1
+    else:
+        return None
+
+    while index < len(content) and content[index].isspace():
+        index += 1
+    return index + 1 if index < len(content) and content[index] == ")" else None
+
+
+def _parse_inline_destination(content: str, index: int) -> tuple[str, int] | None:
+    """Parse one CommonMark inline-link destination starting at *index*.
+
+    Bare destinations may contain escaped characters and balanced parentheses;
+    angle-bracket destinations may contain whitespace.  The returned end index
+    is immediately after the link's closing parenthesis.
+    """
+    while index < len(content) and content[index].isspace():
+        index += 1
+    if index >= len(content):
+        return None
+    if content[index] == ")":
+        return "", index + 1
+
+    destination: list[str] = []
+    if content[index] == "<":
+        index += 1
+        while index < len(content):
+            char = content[index]
+            if (
+                char == "\\"
+                and index + 1 < len(content)
+                and content[index + 1] in _ESCAPABLE_PUNCTUATION
+            ):
+                destination.append(content[index + 1])
+                index += 2
+                continue
+            if char == ">":
+                end = _finish_inline_link(content, index + 1)
+                return ("".join(destination), end) if end is not None else None
+            if char in "<\r\n":
+                return None
+            destination.append(char)
+            index += 1
+        return None
+
+    depth = 0
+    while index < len(content):
+        char = content[index]
+        if (
+            char == "\\"
+            and index + 1 < len(content)
+            and content[index + 1] in _ESCAPABLE_PUNCTUATION
+        ):
+            destination.append(content[index + 1])
+            index += 2
+            continue
+        if char == "(":
+            depth += 1
+            destination.append(char)
+            index += 1
+            continue
+        if char == ")":
+            if depth == 0:
+                return "".join(destination), index + 1
+            depth -= 1
+            destination.append(char)
+            index += 1
+            continue
+        if char.isspace():
+            if depth != 0:
+                return None
+            end = _finish_inline_link(content, index)
+            return ("".join(destination), end) if end is not None else None
+        if ord(char) < 0x20 or ord(char) == 0x7F:
+            return None
+        destination.append(char)
+        index += 1
+    return None
+
+
+def _extract_inline_destinations(content: str) -> list[str]:
+    """Extract valid inline link/image destinations in source order."""
+    destinations: list[str] = []
+    position = 0
+    while match := _INLINE_LINK_OPEN_RE.search(content, position):
+        parsed = _parse_inline_destination(content, match.end())
+        if parsed is None:
+            position = match.end()
+            continue
+        destination, position = parsed
+        if destination:
+            destinations.append(destination)
+    return destinations
+
+
 def _extract_reference_definitions(content: str) -> dict[str, str]:
     """Extract reference-style link definitions from markdown content.
 
@@ -296,33 +457,52 @@ def _extract_reference_definitions(content: str) -> dict[str, str]:
         re.MULTILINE,
     )
     for m in _REF_DEF_RE.finditer(content):
-        label = m.group(1).lower().strip()
+        label = _normalize_link_label(m.group(1))
         url = (m.group(2) or m.group(3) or "").strip()
         if label and url:
-            definitions[label] = url
+            # CommonMark specifies that the first matching definition wins.
+            definitions.setdefault(label, url)
     return definitions
 
 
 def extract_references(content: str) -> list[str]:
-    """Extract all link/image destinations from markdown *content*."""
+    """Extract all link/image destinations from markdown *content*.
+
+    Covers inline links/images (with ``<...>``, bare, double- and single-
+    quoted titles), reference-style links (full ``[text][label]``, collapsed
+    ``[label][]``, shortcut ``[label]``), link reference definitions, and
+    autolinks.  Protocol-relative URLs are normalized to ``https://`` and
+    the result is de-duplicated preserving first-seen order.
+    """
     cleaned = strip_code_blocks(content)
-    refs: list[str] = []
-    for match in _MD_LINK_RE.finditer(cleaned):
-        # Group 2 = <url>, group 3 = bare url
-        url = match.group(2) or match.group(3) or ""
-        url = url.strip()
+    definitions = _extract_reference_definitions(cleaned)
+    refs = _extract_inline_destinations(cleaned)
+    # Reference-style usages resolved through their definitions
+    for match in _REF_USAGE_RE.finditer(cleaned):
+        first, second = match.group(1), match.group(2)
+        label = second if second else first
+        if not label:
+            continue
+        url = definitions.get(_normalize_link_label(label))
         if url:
             refs.append(url)
-    # Also extract URLs from reference-style link definitions
-    for _label, url in _extract_reference_definitions(cleaned).items():
-        refs.append(url)
+    # All defined URLs are checked even when unreferenced (drift detection)
+    refs.extend(definitions.values())
     # Extract autolinks: <https://example.com> (CommonMark §6.6)
     _AUTOLINK_RE = re.compile(r"<(https?://[^>]+)>")
     for m in _AUTOLINK_RE.finditer(cleaned):
         url = m.group(1).strip()
         if url:
             refs.append(url)
-    return refs
+    refs = [normalize_reference(r) for r in refs]
+    # De-duplicate, preserving first-seen order (repeated links share one check)
+    seen: set[str] = set()
+    unique: list[str] = []
+    for ref in refs:
+        if ref not in seen:
+            seen.add(ref)
+            unique.append(ref)
+    return unique
 
 
 def classify_reference(ref: str, *, check_anchors: bool = False) -> str:
@@ -335,8 +515,8 @@ def classify_reference(ref: str, *, check_anchors: bool = False) -> str:
     lower = ref.lower()
     # Scheme-based classification
     if lower.startswith(("http://", "https://")):
-        parsed = parsed_hostname(ref)
-        if parsed in ("localhost", "127.0.0.1", "::1"):
+        # Never fetch private/local targets (loopback, RFC1918, link-local, ...)
+        if is_private_or_local_target(ref):
             return "skip"
         return "external"
     # Pure anchors within the same document
@@ -358,6 +538,174 @@ def parsed_hostname(url: str) -> str:
         return ""
 
 
+# ---------------------------------------------------------------------------
+# Private / local target protection
+# ---------------------------------------------------------------------------
+
+# Hostnames that always resolve to the local machine.
+_LOCAL_HOSTNAMES: frozenset[str] = frozenset({
+    "localhost", "broadcasthost", "ip6-localhost", "ip6-loopback",
+})
+
+# Top-level domains reserved for local / private name resolution.
+_LOCAL_TLDS: frozenset[str] = frozenset({"localhost", "local", "internal"})
+
+
+def _ip_is_private(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    if isinstance(ip, ipaddress.IPv6Address):
+        mapped = ip.ipv4_mapped
+        if mapped is not None:
+            ip = mapped  # ::ffff:127.0.0.1 etc. must be judged as IPv4
+    return bool(
+        not ip.is_global
+        or ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_unspecified
+        or ip.is_reserved
+        or ip.is_multicast
+    )
+
+
+def is_private_or_local_target(url: str) -> bool:
+    """Return True for syntactically private/local targets without DNS.
+
+    Covers loopback/private/link-local/unspecified/reserved/multicast literal
+    IPs (including IPv4-mapped IPv6), local hostnames, and ``.localhost`` /
+    ``.local`` / ``.internal`` domains.  DNS hostnames are resolved by
+    :func:`_request_target_rejection` immediately before every request.
+    """
+    try:
+        parsed = urlparse(url)
+        hostname = (parsed.hostname or "").lower().rstrip(".")
+    except Exception:
+        return True
+    if parsed.scheme.lower() not in ("http", "https"):
+        return False
+    if not hostname:
+        return True  # no verifiable host — do not fetch
+    if hostname in _LOCAL_HOSTNAMES:
+        return True
+    if hostname.split(".")[-1] in _LOCAL_TLDS:
+        return True
+    try:
+        ip = ipaddress.ip_address(hostname)
+    except ValueError:
+        return False  # public DNS name — allowed (checked again per redirect)
+    return _ip_is_private(ip)
+
+
+HostnameResolver = Callable[[str], Iterable[str]]
+
+
+def _resolve_hostname(hostname: str) -> tuple[str, ...]:
+    """Resolve all stream addresses for *hostname* using the system resolver."""
+    return tuple({
+        result[4][0]
+        for result in socket.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)
+    })
+
+
+def _validated_target_addresses(
+    url: str,
+    resolver: HostnameResolver,
+) -> tuple[str, tuple[str, ...], str | None]:
+    """Return ``(hostname, public_addresses, rejection)`` for one HTTP hop."""
+    if is_private_or_local_target(url):
+        return "", (), "private or local address"
+    try:
+        hostname = (urlparse(url).hostname or "").lower().rstrip(".")
+    except Exception as exc:
+        return "", (), f"invalid target ({exc})"
+    try:
+        literal = ipaddress.ip_address(hostname)
+        return hostname, (str(literal),), None
+    except ValueError:
+        pass
+
+    try:
+        resolved = resolver(hostname)
+        raw_addresses = [resolved] if isinstance(resolved, str) else list(resolved)
+    except Exception as exc:
+        return hostname, (), f"hostname resolution failed ({exc})"
+    if not raw_addresses:
+        return hostname, (), "hostname resolution returned no addresses"
+
+    addresses: list[str] = []
+    for address in raw_addresses:
+        try:
+            ip = ipaddress.ip_address(address)
+        except ValueError:
+            return hostname, (), f"hostname resolution returned an invalid address ({address})"
+        if _ip_is_private(ip):
+            return hostname, (), f"hostname resolves to private or local address ({address})"
+        normalized = str(ip)
+        if normalized not in addresses:
+            addresses.append(normalized)
+    return hostname, tuple(addresses), None
+
+
+def _request_target_rejection(
+    url: str,
+    resolver: HostnameResolver,
+) -> str | None:
+    """Return a reason not to fetch *url*, resolving DNS names fail-closed."""
+    return _validated_target_addresses(url, resolver)[2]
+
+
+def _hostname_key(hostname: str | bytes) -> str:
+    """Canonicalize resolver host arguments for exact pin matching."""
+    if isinstance(hostname, bytes):
+        hostname = hostname.decode("ascii")
+    return hostname.rstrip(".").encode("idna").decode("ascii").lower()
+
+
+@contextmanager
+def _pin_getaddrinfo(
+    hostname: str,
+    addresses: tuple[str, ...],
+) -> Iterator[None]:
+    """Temporarily make *hostname* resolve only to prevalidated addresses.
+
+    The URL remains hostname-based, so HTTP Host and TLS SNI/certificate
+    verification retain their normal semantics.  Only the socket connection's
+    address selection is pinned.  This checker is deliberately single-threaded;
+    the process-global resolver hook is restored even when the request fails.
+    """
+    original_getaddrinfo = socket.getaddrinfo
+    target_key = _hostname_key(hostname)
+    address_keys = {_hostname_key(address) for address in addresses}
+
+    def pinned_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+        try:
+            host_key = _hostname_key(host)
+        except (UnicodeError, AttributeError):
+            raise socket.gaierror(socket.EAI_NONAME, "unexpected resolver target") from None
+        if host_key in address_keys:
+            # Some clients may already substitute the numeric target.
+            return original_getaddrinfo(host, port, family, type, proto, flags)
+        if host_key != target_key:
+            # With environment proxies disabled, no other DNS name is expected.
+            # Fail closed rather than permit an unvalidated lookup.
+            raise socket.gaierror(socket.EAI_NONAME, "unvalidated resolver target")
+
+        pinned_results = []
+        for address in addresses:
+            pinned_results.extend(
+                original_getaddrinfo(
+                    address, port, family, type, proto,
+                    flags | getattr(socket, "AI_NUMERICHOST", 0),
+                )
+            )
+        return pinned_results
+
+    socket.getaddrinfo = pinned_getaddrinfo
+    try:
+        yield
+    finally:
+        socket.getaddrinfo = original_getaddrinfo
+
+
 def github_style_anchor(heading_text: str) -> str:
     """Convert heading text to a GitHub-style anchor ID.
 
@@ -371,11 +719,48 @@ def github_style_anchor(heading_text: str) -> str:
 
 
 def extract_anchors(content: str) -> set[str]:
-    """Extract all heading anchors from markdown *content*."""
+    """Extract all heading anchors from markdown *content*.
+
+    Handles ATX headings and Setext headings (``Title`` / ``===`` or
+    ``---``), ignores headings inside fenced code, and applies GitHub-style
+    ``-1``/``-2`` suffixes to duplicate headings.  Generated IDs are stripped
+    of leading/trailing hyphens (matching the lookup side in
+    ``check_internal_ref``).
+    """
+    cleaned = strip_code_blocks(content)
+    lines = cleaned.split("\n")
+    heading_texts: list[str] = []
+    for index, line in enumerate(lines):
+        atx = _HEADING_RE.match(line)
+        if atx:
+            heading_texts.append(atx.group(2).strip())
+            continue
+        # Setext underline: a line of only ``=`` or ``-`` directly after a
+        # paragraph (non-blank, non-heading, non-definition) line.
+        if index == 0 or not _SETEXT_UNDERLINE_RE.match(line.strip()):
+            continue
+        prev = lines[index - 1]
+        prev_text = prev.strip()
+        if (
+            not prev_text
+            or prev.startswith(("    ", "\t"))  # indented code block
+            or _HEADING_RE.match(prev)
+            or _SETEXT_UNDERLINE_RE.match(prev_text)
+            or _LINK_DEF_START_RE.match(prev)
+        ):
+            continue
+        heading_texts.append(prev_text)
     anchors: set[str] = set()
-    for match in _HEADING_RE.finditer(content):
-        heading_text = match.group(2).strip()
-        anchors.add(github_style_anchor(heading_text))
+    for text in heading_texts:
+        base = github_style_anchor(text).strip("-")
+        if not base:
+            continue
+        candidate = base
+        suffix = 1
+        while candidate in anchors:
+            candidate = f"{base}-{suffix}"
+            suffix += 1
+        anchors.add(candidate)
     return anchors
 
 
@@ -460,51 +845,117 @@ def check_internal_ref(
     return None
 
 
+_MAX_REDIRECTS = 10
+_USER_AGENT = "Mozilla/5.0 (compatible; markdown-drift-checker/1.0)"
+
+
+def _classify_http_status(ref: str, status: int) -> BrokenRef:
+    """Classify a final failure status code (preserves prior diagnostics)."""
+    if status in (401, 403):
+        return BrokenRef(ref, "uncertain", f"HTTP {status} (access denied; may be bot-blocking)")
+    if status == 429:
+        return BrokenRef(ref, "uncertain", "HTTP 429 (rate limited; likely transient)")
+    if status >= 500:
+        return BrokenRef(ref, "uncertain", f"HTTP {status} (server error; likely transient)")
+    return BrokenRef(ref, "external", f"HTTP {status}")
+
+
+def _close_response(response: object | None) -> None:
+    """Close a streamed response without masking the scan result."""
+    if response is None:
+        return
+    close = getattr(response, "close", None)
+    if close is None:
+        return
+    try:
+        close()
+    except Exception:
+        # Closing is cleanup; preserve the result or exception being handled.
+        pass
+
+
 def check_external_ref(
     ref: str,
     timeout: float,
     verbose: bool,
+    *,
+    resolver: HostnameResolver | None = None,
 ) -> BrokenRef | None:
     """Return a ``BrokenRef`` if *ref* is broken or uncertain, else ``None``.
+
+    Redirects are followed manually.  Immediately before every HEAD/GET,
+    including retries and redirect hops, the hostname is freshly resolved and
+    every returned address is rejected if it is non-public.  The request is
+    then pinned to exactly those validated addresses while retaining the URL's
+    hostname for Host, TLS SNI, and certificate verification.  Resolution is
+    injectable so tests remain network- and DNS-independent.
 
     Status code classification:
     - 404, 410: definitively broken (kind ``'external'``)
     - 403, 401: access denied — may be bot-blocking (kind ``'uncertain'``)
     - 5xx, 429: server/rate-limit error — likely transient (kind ``'uncertain'``)
     - other 4xx: treat as broken (kind ``'external'``)
+    - redirect to private/local address: not fetched (kind ``'uncertain'``)
     """
     import requests
 
+    resolve = resolver or _resolve_hostname
+    current = normalize_reference(ref)
+    method = "head"
+    redirects = 0
+    response = None
+    session = requests.Session()
+    session.trust_env = False  # a proxy would resolve/connect outside the pin
     try:
-        resp = requests.head(ref, timeout=timeout, allow_redirects=True, headers={
-            "User-Agent": "Mozilla/5.0 (compatible; markdown-drift-checker/1.0)",
-        })
-        if resp.status_code >= 400:
-            # Some servers reject HEAD — retry with GET
-            resp = requests.get(ref, timeout=timeout, allow_redirects=True, headers={
-                "User-Agent": "Mozilla/5.0 (compatible; markdown-drift-checker/1.0)",
-            }, stream=True)
-        if resp.status_code >= 400:
-            # Classify the status code
-            if resp.status_code in (403, 401):
-                return BrokenRef(ref, "uncertain", f"HTTP {resp.status_code} (access denied; may be bot-blocking)")
-            if resp.status_code == 429:
-                return BrokenRef(ref, "uncertain", f"HTTP 429 (rate limited; likely transient)")
-            if resp.status_code >= 500:
-                return BrokenRef(ref, "uncertain", f"HTTP {resp.status_code} (server error; likely transient)")
-            return BrokenRef(ref, "external", f"HTTP {resp.status_code}")
+        while True:
+            hostname, addresses, rejection = _validated_target_addresses(current, resolve)
+            if rejection is not None:
+                if redirects:
+                    reason = f"redirects to {rejection} ({current}); not fetched"
+                else:
+                    reason = f"unsafe target: {rejection}; not fetched"
+                return BrokenRef(ref, "uncertain", reason)
+
+            with _pin_getaddrinfo(hostname, addresses):
+                response = session.request(
+                    method, current, timeout=timeout, allow_redirects=False,
+                    stream=True, headers={"User-Agent": _USER_AGENT},
+                )
+            if 300 <= response.status_code < 400:
+                location = response.headers.get("Location")
+                if location:
+                    if redirects >= _MAX_REDIRECTS:
+                        return BrokenRef(ref, "external", "too many redirects")
+                    _close_response(response)
+                    response = None
+                    current = urljoin(current, location)
+                    if urlparse(current).scheme.lower() not in ("http", "https"):
+                        return BrokenRef(
+                            ref, "uncertain",
+                            f"redirects to unsupported scheme ({current}); not fetched",
+                        )
+                    redirects += 1
+                    continue
+            if response.status_code >= 400 and method == "head":
+                _close_response(response)
+                response = None
+                method = "get"  # some servers reject HEAD — retry once with GET
+                continue
+            status = response.status_code
+            if status >= 400:
+                return _classify_http_status(ref, status)
+            if verbose:
+                print(f"  [ok] {ref} (HTTP {status})", file=sys.stderr)
+            return None
     except requests.ConnectionError:
         return BrokenRef(ref, "uncertain", "connection failed")
     except requests.Timeout:
         return BrokenRef(ref, "uncertain", "timeout")
-    except requests.TooManyRedirects:
-        return BrokenRef(ref, "external", "too many redirects")
     except Exception as exc:
         return BrokenRef(ref, "uncertain", f"error: {exc}")
-
-    if verbose:
-        print(f"  [ok] {ref} (HTTP {resp.status_code})", file=sys.stderr)
-    return None
+    finally:
+        _close_response(response)
+        session.close()
 
 
 # ---------------------------------------------------------------------------
@@ -521,24 +972,51 @@ def find_markdown_files(
     active_patterns = collect_active_ignore_patterns(directory, global_patterns, context_patterns)
     results: list[tuple[Path, str, float]] = []
 
-    for file in directory.rglob("*"):
-        if not file.is_file():
-            continue
-        if file.suffix.lower() not in MARKDOWN_EXTENSIONS:
-            continue
-        if is_skipped(file, directory):
-            continue
-        try:
-            rel_path = str(PurePosixPath(file.relative_to(directory)))
-        except ValueError:
-            continue
-        if matches_ignore_patterns(rel_path, active_patterns):
-            continue
+    for current, dir_names, file_names in os.walk(directory):
+        current_path = Path(current)
+        kept_dirs: list[str] = []
+        for name in dir_names:
+            child = current_path / name
+            rel_dir = child.relative_to(directory).as_posix()
+            if any(fnmatch.fnmatch(name, pattern) for pattern in SKIP_DIRS):
+                continue
+            if matches_ignore_patterns(f"{rel_dir}/_", active_patterns):
+                continue
+            kept_dirs.append(name)
+        dir_names[:] = kept_dirs
 
-        mtime = file.stat().st_mtime
-        results.append((file, rel_path, mtime))
+        for name in file_names:
+            file = current_path / name
+            if file.suffix.lower() not in MARKDOWN_EXTENSIONS:
+                continue
+            rel_path = file.relative_to(directory).as_posix()
+            if matches_ignore_patterns(rel_path, active_patterns):
+                continue
+
+            mtime = file.stat().st_mtime
+            results.append((file, rel_path, mtime))
 
     return results
+
+
+@dataclass
+class UrlBudget:
+    """Scan-wide budget for external URL checks.
+
+    ``max_urls`` limits the number of external URLs checked across every
+    document in the scan (not per document); ``0`` disables the limit.
+    ``used`` accumulates the number of URLs actually checked.
+    """
+
+    max_urls: int
+    used: int = 0
+
+    def try_consume(self) -> bool:
+        """Reserve one URL check; return False when the budget is exhausted."""
+        if self.max_urls <= 0 or self.used < self.max_urls:
+            self.used += 1
+            return True
+        return False
 
 
 def check_document(
@@ -549,12 +1027,14 @@ def check_document(
     check_anchors: bool,
     skip_external: bool,
     timeout: float,
-    max_urls: int,
+    url_budget: UrlBudget,
     verbose: bool,
 ) -> tuple[MarkdownReport, int]:
     """Check a single markdown document for broken references.
 
-    Returns ``(report, external_urls_checked)``.
+    The external-URL budget *url_budget* is shared across the whole scan:
+    documents processed after it is exhausted report their remaining URLs as
+    ``skipped``.  Returns ``(report, external_urls_checked)``.
     """
     report = MarkdownReport(rel_path=rel_path, mtime=mtime)
 
@@ -584,7 +1064,7 @@ def check_document(
         elif kind == "external":
             if skip_external:
                 continue
-            if max_urls > 0 and external_checked >= max_urls:
+            if not url_budget.try_consume():
                 report.broken_refs.append(BrokenRef(ref, "skipped", "not checked (max-urls limit reached)"))
                 continue
 
@@ -601,7 +1081,7 @@ def check_document(
 # ---------------------------------------------------------------------------
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Find markdown files and check for document drift (stale references).",
     )
@@ -611,8 +1091,9 @@ def parse_args() -> argparse.Namespace:
         help="HTTP request timeout per URL in seconds (default: 10)",
     )
     parser.add_argument(
-        "--max-urls", type=int, default=200,
-        help="Maximum external URLs to check; 0 = unlimited (default: 200)",
+        "--max-urls", type=_non_negative_int, default=200,
+        help="Maximum external URLs to check across the whole scan; "
+             "0 = unlimited (default: 200)",
     )
     parser.add_argument(
         "--skip-external", action="store_true",
@@ -626,7 +1107,18 @@ def parse_args() -> argparse.Namespace:
         "-v", "--verbose", action="store_true",
         help="Print each reference as it is checked",
     )
-    return parser.parse_args()
+    return parser.parse_args(argv)
+
+
+def _non_negative_int(value: str) -> int:
+    """argparse type: reject negative values (used for ``--max-urls``)."""
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid integer value: {value!r}") from None
+    if number < 0:
+        raise argparse.ArgumentTypeError("--max-urls must be nonnegative (0 = unlimited)")
+    return number
 
 
 def main() -> None:
@@ -661,6 +1153,7 @@ def main() -> None:
 
     reports: list[MarkdownReport] = []
     total_external_checked = 0
+    url_budget = UrlBudget(max_urls=args.max_urls)  # shared across the scan
 
     for file, rel_path, mtime in md_files:
         report, ext_checked = check_document(
@@ -668,7 +1161,7 @@ def main() -> None:
             check_anchors=args.check_anchors,
             skip_external=args.skip_external,
             timeout=args.timeout,
-            max_urls=args.max_urls,
+            url_budget=url_budget,
             verbose=args.verbose,
         )
         reports.append(report)

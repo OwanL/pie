@@ -22,7 +22,7 @@ export const TYPECHECK_PROJECTS = [
   { id: 'cwd-skills', config: 'extensions/cwd-skills/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
   { id: 'safeguard', config: 'extensions/safeguard/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
   { id: 'skill-pruner', config: 'extensions/skill-pruner/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
-  { id: 'web-access-compat', config: 'extensions/web-access-compat/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
+  { id: 'web-access-guard', config: 'extensions/web-access-guard/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
   { id: 'warm-bash', config: 'extensions/warm-bash/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
   { id: 'copilot-model-discovery', config: 'extensions/copilot-model-discovery/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
   { id: 'tool-result-pruner', config: 'extensions/tool-result-pruner/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },

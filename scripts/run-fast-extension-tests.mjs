@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn } from 'node:child_process';
+import { writeFileSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
@@ -13,8 +14,24 @@ import { withoutPiHarnessEnv } from './lib/pi-harness-env.mjs';
 const REPORT_PREFIX = '__PI_TEST_SUMMARY__';
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const extensionRoot = path.join(repoRoot, 'extension');
-const reporterSpecifier = pathToFileURL(path.join(repoRoot, 'scripts', 'test-reporter.mjs')).href;
+// Timing overrides (used by scripts/update-extension-test-costs.mjs and by
+// one-off perf probes): swap the summarizing reporter for the timing one.
+const reporterSpecifier = process.env.PIE_TIMING_REPORTER
+  ? pathToFileURL(process.env.PIE_TIMING_REPORTER).href
+  : pathToFileURL(path.join(repoRoot, 'scripts', 'test-reporter.mjs')).href;
 const extensionRequire = createRequire(path.join(extensionRoot, 'package.json'));
+
+// Measured per-file serial test costs (scripts/update-extension-test-costs.mjs)
+// drive load-balanced batch bucketing. Without the table, bucketing falls back
+// to the stable FNV hash so fresh checkouts still shard deterministically.
+const costTablePath = path.join(repoRoot, 'scripts', 'extension-test-costs.json');
+function loadCostTable() {
+  try {
+    return JSON.parse(readFileSync(costTablePath, 'utf8'));
+  } catch {
+    return null;
+  }
+}
 
 // pi packages (settings.json#packages) are installed into the gitignored
 // `npm/` workspace, not extension/node_modules. The extension imports them via
@@ -126,6 +143,39 @@ function stableBucketIndex(file, bucketCount) {
   return (hash >>> 0) % bucketCount;
 }
 
+/**
+ * Longest-processing-time bucket assignment using measured serial costs so no
+ * `node --test` child becomes the wave's critical path. Bucket count grows
+ * until every bucket's estimated cost fits the target child budget; batches
+ * wrapper each bucket in one serial child process.
+ */
+function sourceOfBundle(bundledPath) {
+  return path.relative(tempDir, bundledPath).replace(/\\/gu, '/').replace(/\.js$/u, '.ts');
+}
+function balancedBuckets(files, costTable) {
+  const BUDGET_MS = 6_000;
+  const costs = (file) => costTable?.[file.replace(/\\/gu, '/')] ?? 500;
+  const totalCost = files.reduce((sum, file) => sum + costs(file), 0);
+  const bucketCount = Math.max(1, Math.min(40, Math.ceil(totalCost / BUDGET_MS)));
+  const buckets = Array.from({ length: bucketCount }, () => []);
+  const bucketCosts = Array.from({ length: bucketCount }, () => 0);
+  if (costTable) {
+    const ordered = [...files].sort((a, b) => costs(b) - costs(a));
+    for (const file of ordered) {
+      const index = bucketCosts.indexOf(Math.min(...bucketCosts));
+      buckets[index].push(file);
+      bucketCosts[index] += costs(file);
+    }
+  } else {
+    for (const file of files) {
+      const index = stableBucketIndex(file, bucketCount);
+      buckets[index].push(file);
+      bucketCosts[index] += costs(file);
+    }
+  }
+  return buckets;
+}
+
 function comparablePath(value) {
   if (typeof value !== 'string' || value.length === 0) return null;
   const resolved = path.resolve(value).replace(/\\/gu, '/');
@@ -203,6 +253,9 @@ async function main() {
   }
 
   const tempDir = await mkdtemp(path.join(os.tmpdir(), 'pie-extension-fast-'));
+  const costTable = loadCostTable();
+  const bundleSourcePath = (bundledFilePath) =>
+    path.relative(tempDir, bundledFilePath).replace(/\\/gu, '/').replace(/\.js$/u, '.ts');
   // Fresh per-wave trace directories: every spawned test process inherits the
   // wave's PIE_LIVE_PIPELINE_TRACE_DIR, so trace-writing tests (writer-trace,
   // diagnostics-trace, request-handler, service-loading-gate) no longer append
@@ -218,8 +271,8 @@ async function main() {
   try {
     const tsxCli = path.join(extensionRoot, 'node_modules', 'tsx', 'dist', 'cli.mjs');
     const reporterArg = `--test-reporter=${reporterSpecifier}`;
-    const bundledArgs = ['--test', '--test-force-exit', '--test-concurrency=32', reporterArg];
-    const isolatedArgs = ['--test', '--test-force-exit', '--test-concurrency=16', reporterArg];
+    const bundledArgs = ['--test', '--test-force-exit', '--test-concurrency=16', reporterArg];
+    const isolatedArgs = ['--test', '--test-force-exit', '--test-concurrency=10', reporterArg];
     // The small isolated tsx subset can run while esbuild prepares the bundled
     // wave, hiding both compiler and tsx startup latency.
     const unsafeRun = run(
@@ -287,31 +340,23 @@ async function main() {
     const standaloneBundles = safe
       .filter((file) => !batchable.has(file) && !scopedBatchable.has(file))
       .map((file) => path.join(tempDir, file.replace(/\.tsx?$/u, '.js')));
-    const batchBuckets = Array.from({ length: 10 }, () => []);
-    for (const file of batchable) {
-      batchBuckets[stableBucketIndex(file, batchBuckets.length)]
-        .push(path.join(tempDir, file.replace(/\.tsx?$/u, '.js')));
-    }
-    const batchFiles = await Promise.all(batchBuckets.map(async (files, index) => {
-      const batchPath = path.join(tempDir, `bundle-batch-${index}.mjs`);
-      const suites = files.map((file) =>
+    const compiledBatchFiles = (files) =>
+      files.map((file) => path.join(tempDir, file.replace(/\.tsx?$/u, '.js')));
+    const bucketToBatch = (buckets, prefix) => Promise.all(buckets.map(async (files, index) => {
+      const batchPath = path.join(tempDir, `${prefix}-${index}.mjs`);
+      const suites = compiledBatchFiles(files).map((file) =>
         `describe(${JSON.stringify(file)}, { concurrency: false }, async () => { await import(${JSON.stringify(pathToFileURL(file).href)}); });`);
       await writeFile(batchPath, `import { describe } from 'node:test';\n${suites.join('\n')}`, 'utf8');
       return batchPath;
     }));
-    const scopedBuckets = Array.from({ length: 10 }, () => []);
-    for (const file of scopedBatchable) {
-      scopedBuckets[stableBucketIndex(file, scopedBuckets.length)]
-        .push(path.join(tempDir, file.replace(/\.tsx?$/u, '.js')));
-    }
-    const scopedBatchFiles = await Promise.all(scopedBuckets.map(async (files, index) => {
-      const batchPath = path.join(tempDir, `scoped-bundle-batch-${index}.mjs`);
-      const suites = files.map((file) =>
-        `describe(${JSON.stringify(file)}, { concurrency: false }, async () => { await import(${JSON.stringify(pathToFileURL(file).href)}); });`);
-      await writeFile(batchPath, `import { describe } from 'node:test';\n${suites.join('\n')}`, 'utf8');
-      return batchPath;
-    }));
+    const batchFiles = await bucketToBatch(balancedBuckets([...batchable], costTable), 'bundle-batch');
+    const scopedBatchFiles = await bucketToBatch(balancedBuckets([...scopedBatchable], costTable), 'scoped-bundle-batch');
     const bundledFiles = [...standaloneBundles, ...batchFiles, ...scopedBatchFiles];
+
+    if (costTable) {
+      const weight = (file) => costTable[file.replace(/\\/gu, '/')] ?? 0;
+      bundledFiles.sort((a, b) => weight(bundleSourcePath(b)) - weight(bundleSourcePath(a)));
+    }
     const results = await Promise.all([
       run(process.execPath, [...bundledArgs, ...bundledFiles], extensionRoot, undefined, { PIE_LIVE_PIPELINE_TRACE_DIR: traceDirs[0] }),
       unsafeRun,

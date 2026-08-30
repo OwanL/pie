@@ -18,11 +18,13 @@ import {
   setLogLevel,
   getLogLevel,
   flushPieLogger,
+  getPieLogPath,
   showPieLogs,
   redactSensitive,
 } from '../../../src/host/util/pie-logger';
 
-const PIE_LOG_PATH = path.join(os.tmpdir(), 'pie-logs', 'pie.log');
+const LIVE_PIE_LOG_PATH = path.join(os.tmpdir(), 'pie-logs', 'pie.log');
+const PIE_LOG_PATH = getPieLogPath();
 const BOOT_TRACE_PATH = path.join(os.tmpdir(), 'pie-boot-trace.jsonl');
 
 interface FakeLogChannel {
@@ -60,6 +62,11 @@ async function clearLogFiles(): Promise<void> {
     // ignore
   }
 }
+
+test('node:test logger output is isolated from the live Pie runtime log', () => {
+  assert.notEqual(PIE_LOG_PATH, LIVE_PIE_LOG_PATH);
+  assert.match(PIE_LOG_PATH, /pie-test-logs[\\/]process-\d+[\\/]pie\.log$/u);
+});
 
 test('appendPieLog writes to console and persistent log', async () => {
   resetState();

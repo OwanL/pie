@@ -137,7 +137,11 @@ test('client fails the helper generation on a fingerprint-change signal for the 
 });
 
 test('serialized requests receive queue-position-adjusted timeout budgets', async () => {
-  const helper = client('delayed', { requestTimeoutMs: 150 });
+  // The fixture delays each response 100ms. The original 150ms budget had no
+  // headroom: under full-suite load the delayed child's IPC + startup latency
+  // alone could exceed it and expire the first request's timer. The queue
+  // scaling under test is unchanged (budget = timeout × queue position).
+  const helper = client('delayed', { requestTimeoutMs: 500 });
   try {
     await helper.warm();
     const [first, second] = await Promise.all([
@@ -181,7 +185,10 @@ test('client performs a correlated request and clean shutdown', async () => {
 });
 
 test('client kills a child that acknowledges shutdown but retains a live handle', async () => {
-  const helper = client('sticky-shutdown', { shutdownTimeoutMs: 100 });
+  // The fixture keeps a live handle after its shutdown ack. 100ms forced-kill
+  // confirmation had no headroom under full-suite Windows load; 500ms still
+  // exercises the ack-then-kill path while tolerating scheduler latency.
+  const helper = client('sticky-shutdown', { shutdownTimeoutMs: 500 });
   await helper.warm();
   const result = await helper.openSnapshot(fence, openOptions);
   const childPid = (result as any).fixturePid as number;

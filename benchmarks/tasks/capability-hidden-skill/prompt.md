@@ -1,1 +1,0 @@
-Inspect records.txt, apply the repository's specialized Quartz record normalization protocol, and write the required compact answer.json. Do not modify any other file.

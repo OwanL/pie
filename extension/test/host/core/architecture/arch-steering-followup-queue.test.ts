@@ -212,6 +212,33 @@ test('ReplaceQueueResult updates an already-delivered row and catastrophic resto
   assert.match(out.state.settings.notice ?? '', /were cleared/);
 });
 
+test('a queued-edit delivery race closes the stale editor without duplicating or rewriting the original', () => {
+  let out = reducer(busyState(), sendCmd('c1', SESSION, 'first'));
+  out = reducer(out.state, sendResult('c1', true, true));
+  const editingState: ArchState = {
+    ...out.state,
+    transcript: {
+      ...out.state.transcript,
+      editingMessageIdBySession: { ...out.state.transcript.editingMessageIdBySession, [SESSION]: 'local:c1' },
+    },
+  };
+
+  out = reducer(editingState, {
+    kind: 'ReplaceQueueResult', corrId: 'eq-race', sessionPath: SESSION,
+    messageId: 'local:c1', ok: false, text: 'edited first', inputs: [],
+    composedText: 'edited first', error: 'QUEUE_CHANGED: already started',
+  });
+  assert.equal(out.state.transcript.editingMessageIdBySession[SESSION], null);
+  assert.equal(out.state.transcript.bySession[SESSION]?.[0]?.markdown, 'first');
+  assert.match(out.state.settings.notice ?? '', /already started/);
+
+  out = reducer(out.state, queuedDelivered('first', 'local:c1'));
+  const rows = out.state.transcript.bySession[SESSION] ?? [];
+  assert.equal(rows.filter((message) => message.id === 'local:c1').length, 1);
+  assert.equal(rows.find((message) => message.id === 'local:c1')?.markdown, 'first');
+  assert.equal(rows.find((message) => message.id === 'local:c1')?.status, 'completed');
+});
+
 // ─── ClearQueue command: remove queued messages + ClearQueueRpc ──────────────
 
 test('ClearQueue command: removes queued transcript messages, drops pending snapshots, emits ClearQueueRpc', () => {

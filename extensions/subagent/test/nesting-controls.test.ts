@@ -9,12 +9,19 @@ import assert from "node:assert/strict";
 import { subagentRuntime, getMaxDepth, getMaxTreeSessions, consumeTreeSlot, DEFAULT_MAX_DEPTH, DEFAULT_MAX_TREE_SESSIONS } from "../runner.js";
 import { disallowedByCanSpawn, execute, resolveTreeSubagentProviderToggles } from "../src/execute.js";
 import { MAX_DEPTH } from "../src/helpers.js";
+import {
+	ALL_SUBAGENT_BUCKETS_CAN_SPAWN,
+	SUBAGENT_BUCKET_CAN_SPAWN_ENV,
+	canSpawnFromSubagentBucket,
+	parseSubagentBucketCanSpawn,
+} from "../src/bucket-config.js";
 
 const ENV_KEYS = [
 	"PIE_SUBAGENT_MAX_DEPTH",
 	"PIE_SUBAGENT_MAX_TREE_SESSIONS",
 	"PIE_SUBAGENT_PROVIDER_DEFAULTS_JSON",
 	"PIE_SUBAGENT_PROVIDER_TOGGLES_BY_SESSION_JSON",
+	SUBAGENT_BUCKET_CAN_SPAWN_ENV,
 ] as const;
 const snapshot: Record<string, string | undefined> = {};
 
@@ -167,10 +174,61 @@ test("nested calls inherit the root chat's effective subagent provider policy", 
 });
 
 // ============================================================
-// execute() integration — canSpawn blocks a disallowed spawn
+// Per-bucket delegation policy
 // ============================================================
 
+test("bucket delegation parsing defaults fail-open and preserves explicit leaves", () => {
+	assert.deepEqual(parseSubagentBucketCanSpawn(undefined), ALL_SUBAGENT_BUCKETS_CAN_SPAWN);
+	assert.deepEqual(parseSubagentBucketCanSpawn("not-json"), ALL_SUBAGENT_BUCKETS_CAN_SPAWN);
+	assert.deepEqual(
+		parseSubagentBucketCanSpawn('{"small":false,"medium":false,"frontier":true}'),
+		{ small: false, medium: false, frontier: true },
+	);
+	assert.deepEqual(
+		parseSubagentBucketCanSpawn('{"small":false,"medium":"invalid"}'),
+		{ small: false, medium: true, frontier: true },
+	);
+});
+
+// ============================================================
+// execute() integration — dispatch guards
+// ============================================================
+
+test("execute: a caller in a disabled bucket cannot dispatch another subagent", async () => {
+	delete process.env.PIE_SUBAGENT_MAX_DEPTH;
+	process.env[SUBAGENT_BUCKET_CAN_SPAWN_ENV] = JSON.stringify({
+		small: false,
+		medium: false,
+		frontier: true,
+	});
+	const res: any = await subagentRuntime.run(
+		{ depth: 1, trail: ["worker"], bucket: "medium", budget: { sessions: 0 } },
+		() => execute(
+			"tc-bucket-leaf",
+			{ agent: "worker", task: "delegate again" } as any,
+			noSignal(),
+			noOpUpdate,
+			{ cwd: process.cwd() } as any,
+			{} as any,
+			() => false,
+		),
+	);
+	assert.equal(res.isError, true);
+	assert.match(res.content[0].text, /"medium" bucket are not allowed to create further subagents/);
+	assert.equal(res.details.results.length, 0);
+});
+
+test("root callers remain unrestricted by per-bucket delegation policy", () => {
+	process.env[SUBAGENT_BUCKET_CAN_SPAWN_ENV] = JSON.stringify({
+		small: false,
+		medium: false,
+		frontier: false,
+	});
+	assert.equal(canSpawnFromSubagentBucket(undefined), true);
+});
+
 test("execute: caller canSpawn allowlist blocks a disallowed agent before dispatch", async () => {
+	delete process.env[SUBAGENT_BUCKET_CAN_SPAWN_ENV];
 	// Simulate running inside a `scout` session whose canSpawn only permits `scout`.
 	// Requesting `worker` (which exists in the repo agents dir) must be blocked.
 	delete process.env.PIE_SUBAGENT_MAX_DEPTH;

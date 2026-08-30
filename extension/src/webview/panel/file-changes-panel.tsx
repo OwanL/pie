@@ -6,7 +6,9 @@ import { DEFAULT_CHAT_PREFS, type FileChangeEntry, type ChatPrefs } from '../../
 import { cx } from './utils/cx';
 import { ResizeHandle } from './components/resize-handle';
 import { useResizableWidth } from './components/use-resizable-width';
+import { handleContextMenuKeyRequest } from './components/context-menu-key';
 import { LineStats, FileName } from './file-changes-row';
+import { getContextMenuTrigger } from './components/useMenuTriggerAria';
 import { FileChangeContextMenu } from './file-changes-context-menu';
 import type { FileChangeContextMenuState } from './file-changes-context-menu';
 import { computeDiffTotals, computeKindStats, KIND_ORDER, KIND_LABEL } from './file-changes-stats';
@@ -97,18 +99,23 @@ export function FileChangesPanel({
       path: change.path,
       kind: change.kind,
       read: readSet.has(change.path),
+      triggerEl: getContextMenuTrigger(e),
     });
   }, [readSet]);
   const closeCtxMenu = useCallback(() => setCtxMenu(null), []);
 
   // Row renderer shared by the unread + read groups. `isRead` drives the
   // darkened `is-read` treatment; the context menu captures read state at open.
+  // Rows are keyboard-focusable so the ContextMenu key / Shift+F10 opens the
+  // same row menu as a right-click (components/context-menu-key.ts).
   const renderRow = (change: FileChangeEntry, isRead: boolean) => (
     <div
       key={change.path}
       class={cx('file-change-item', `kind-${change.kind}`, isRead && 'is-read')}
       role="listitem"
+      tabIndex={0}
       onContextMenu={(e) => openCtxMenu(e, change)}
+      onKeyDown={(e) => handleContextMenuKeyRequest(e as KeyboardEvent)}
     >
       <div class="file-change-main">
         <FileName
@@ -369,6 +376,8 @@ export function FileChangesPanel({
         <FileChangeContextMenu
           menu={ctxMenu}
           parentDepth={prefs.uiPathParentDepth}
+          onOpenDiff={onOpenDiff}
+          onOpenInEditor={onOpenInEditor}
           onRevert={onRevertFile}
           onSetFileRead={onSetFileRead}
           onClose={closeCtxMenu}

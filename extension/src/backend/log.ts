@@ -91,13 +91,19 @@ export function classifyWorkerStderrChunk(chunk: string): BackendLogLevel {
       ? line.slice(BACKEND_LINE_PREFIX.length)
       : line;
     let level: BackendLogLevel | undefined;
+    let record: { level?: unknown; source?: unknown; event?: unknown } | undefined;
     try {
-      const record = JSON.parse(jsonText) as { level?: unknown };
+      record = JSON.parse(jsonText) as { level?: unknown; source?: unknown; event?: unknown };
       if (record.level === 'debug' || record.level === 'info' || record.level === 'warn' || record.level === 'error') {
         level = record.level;
       }
     } catch {
       // Not structured JSON — treat as a raw diagnostic line.
+    }
+    if (!level && record?.source === 'pie:warm-bash:auto-prune' && record.event === 'rewrite') {
+      // Compatibility with warm-bash versions that emitted structured,
+      // expected rewrite telemetry before they added an explicit debug level.
+      level = 'debug';
     }
     if (!level) {
       // Non-JSON / level-less line (e.g. a worker crash stack). Surface at

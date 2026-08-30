@@ -6,6 +6,7 @@ import { setStreamDiagEnabled } from '../../../src/host/util/stream-telemetry';
 import { transcriptRenderSignature } from '../../../src/shared/transcript-render-signature';
 import {
   DEFAULT_CHAT_PREFS,
+  DEFAULT_SESSION_TITLES_SETTINGS,
   DEFAULT_TOOL_RESULT_PRUNING_SETTINGS,
   EMPTY_AGGREGATE_STATS,
   PIE_BUILD_ID,
@@ -14,17 +15,18 @@ import {
 } from '../../../src/shared/protocol';
 
 const baseViewState: ViewState = {
-  sessions: [], openTabPaths: [], pinnedTabPaths: [], pinnedTabGroups: [], runningSessionPaths: [], startingModelSessionPaths: [], compactingSessionPaths: [], lastCompactionBySession: {}, unreadFinishedSessionPaths: [],
+  sessions: [], openTabPaths: [], pinnedTabPaths: [], pinnedTabGroups: [], runningSessionPaths: [], generatingTitleSessionPaths: [], startingModelSessionPaths: [], compactingSessionPaths: [], lastCompactionBySession: {}, unreadFinishedSessionPaths: [],
   activeSession: null, transcript: [],
   transcriptWindow: { totalCount: 0, loadedStart: 0, loadedEnd: 0, hasOlder: false, hasNewer: false, isPartial: false, hasUserMessages: false },
   transcriptLoaded: false, pendingComposerInputs: [], activeRunSummary: null, runSummariesBySession: {}, tokenRateBySession: {},
   aggregateStats: EMPTY_AGGREGATE_STATS, deferredTriggers: [], draftText: '', busy: false, retryStatus: null, liveTurnPhase: null, notice: null,
   backendReady: true, workspaceCwd: '/workspace', systemPrompts: [], modelSettings: null, availableModels: [],
-  availableModelsStatus: 'authoritative', contextUsage: null,
-  prefs: DEFAULT_CHAT_PREFS, mcpServers: [], mcpPendingApply: false, availableExtensions: [], fileChanges: [], fileChangesExpanded: false, readFilePaths: [], pruningResult: null,
+  availableModelsStatus: 'authoritative', contextUsage: null, initialContextEstimate: null,
+  prefs: DEFAULT_CHAT_PREFS, mcpServers: [], mcpPendingApply: false, mcpSessionServers: [], mcpSessionPendingApply: false, availableExtensions: [], fileChanges: [], fileChangesExpanded: false, readFilePaths: [], pruningResult: null,
   prepassPhase: 'idle', prepassStartedAt: null,
   pruningSettings: { mode: 'auto', skillCeiling: 8, toolCeiling: 10, skillAlwaysKeep: [], toolAlwaysKeep: [], model: 'gpt-5.4-mini', provider: 'github-copilot', thinkingLevel: 'minimal' },
   toolResultPruningSettings: { ...DEFAULT_TOOL_RESULT_PRUNING_SETTINGS, rules: { ...DEFAULT_TOOL_RESULT_PRUNING_SETTINGS.rules } },
+  sessionTitlesSettings: { ...DEFAULT_SESSION_TITLES_SETTINGS },
   pruningCatalog: { skills: [], tools: [] }, editingMessageId: null,
   pendingExtensionUIRequestsBySession: {}, pendingExtensionUIRequest: null,
 };

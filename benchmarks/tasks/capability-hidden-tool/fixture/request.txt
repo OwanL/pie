@@ -1,2 +1,0 @@
-Artifact ID: A-17
-Required output: {"artifactId":"A-17","checksum":"<authoritative checksum>"}

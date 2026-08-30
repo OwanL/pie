@@ -388,6 +388,7 @@ test('Phase 3: start auto-export failures are retried and do not block startup',
       autoExportIntervalMs: 20,
       autoExportRetryBaseMs: 10,
       autoExportRetryMaxMs: 100,
+      autoExportNoticeAfterFailures: 1,
     });
 
     const originalWrite = (storage as unknown as { writeAutoExport(): Promise<void> }).writeAutoExport.bind(storage);
@@ -517,6 +518,89 @@ test('aggregate refresh reads completed history once while active ticks use live
     assert.equal(persistedQueries, 1, 'unchanged active tick must not flush/re-read full history');
     assert.equal(openRunReads, 3, 'open runs remain live on every active recompute');
     assert.equal(service.getAggregateStats().liveTokensPerSecond, 3.5);
+  });
+});
+
+test('AggregateStatsService rolling rate counts a between-ticks burst and reconciles it at settlement', async () => {
+  await withTempDir(async (storageDir) => {
+    let nowMs = Date.parse('2026-07-29T12:00:00.000Z');
+    const burst = {
+      ...validSnapshot('burst', new Date(nowMs).toISOString()),
+      sessionPath: '/burst',
+      outputTokens: 0,
+    } as RunSnapshot;
+    const overshoot = {
+      ...validSnapshot('overshoot', new Date(nowMs).toISOString()),
+      sessionPath: '/burst',
+      outputTokens: 0,
+    } as RunSnapshot;
+    let openRuns: RunSnapshot[] = [{ ...burst, status: 'open' as const }];
+    let pendingRuns: RunSnapshot[] = [];
+    let rateStates: Record<string, unknown> = {};
+    const service = new AggregateStatsService({
+      getArchState: () => ({
+        sessions: { runningSessionPaths: openRuns.length > 0 ? ['/burst'] : [], openTabPaths: ['/burst'] },
+      }) as never,
+      statsService: {
+        getStorageDir: () => storageDir,
+        queryPersistedRunAnalytics: async () => ({ completedRuns: [], openRuns: [] }),
+        getOpenRuns: () => openRuns,
+        getPendingCompletedRuns: () => pendingRuns,
+      } as never,
+      tokenRateService: { getRates: () => rateStates } as never,
+      getAgentDir: () => null,
+      fetchProviderGateStats: async () => EMPTY_PROVIDER_GATE_STATS,
+      onChanged: () => undefined,
+      now: () => new Date(nowMs),
+    });
+
+    await recomputeAggregate(service);
+    assert.equal(service.getAggregateStats().liveTokensPerSecond, 0, 'first observation establishes the rolling baseline');
+
+    // A short burst completes between sampler ticks with NO provider-reported
+    // usage: the run settles with outputTokens 0, and only the conservative
+    // visible-output terminal estimate can contribute its tokens.
+    openRuns = [];
+    pendingRuns = [{ ...burst, status: 'closed' as const, finalizedAt: new Date(nowMs).toISOString() }];
+    rateStates = { '/burst': { state: 'paused', paused: true, terminalOutputTokensEstimate: 120 } };
+    nowMs += 1_000;
+    await recomputeAggregate(service);
+    assert.equal(
+      service.getAggregateStats().liveTokensPerSecond,
+      120,
+      'the between-ticks burst contributes its terminal estimate to the 30s rolling rate',
+    );
+
+    // Re-observing the settled run is idempotent: no double-count.
+    nowMs += 1_000;
+    await recomputeAggregate(service);
+    assert.equal(service.getAggregateStats().liveTokensPerSecond, 60);
+
+    // A later open run's live estimate overshoots (100 counted), then its
+    // terminal usage settles lower (60): the one-time settlement correction
+    // retracts the overshoot instead of leaving the rate overstated.
+    openRuns = [{ ...overshoot, status: 'open' as const }];
+    rateStates = { '/burst': { state: 'generating', paused: false, liveOutputTokens: 100 } };
+    nowMs += 1_000;
+    await recomputeAggregate(service);
+    assert.equal(service.getAggregateStats().liveTokensPerSecond, 73, 'live output accumulates on top');
+
+    pendingRuns = [
+      ...pendingRuns,
+      { ...overshoot, status: 'closed' as const, outputTokens: 60, finalizedAt: new Date(nowMs).toISOString() },
+    ];
+    rateStates = {};
+    nowMs += 1_000;
+    await recomputeAggregate(service);
+    assert.equal(
+      service.getAggregateStats().liveTokensPerSecond,
+      45,
+      'the settlement correction reconciles the overshoot down to the authoritative total',
+    );
+
+    nowMs += 1_000;
+    await recomputeAggregate(service);
+    assert.equal(service.getAggregateStats().liveTokensPerSecond, 36, 'the corrected rate holds without re-correcting');
   });
 });
 

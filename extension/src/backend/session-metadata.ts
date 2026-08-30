@@ -38,7 +38,8 @@ function textFromSessionMessageContent(content: unknown): string {
   return '';
 }
 
-const SESSION_METADATA_CHECKPOINT_VERSION = 1;
+// v2 replaces heuristic names with replaceable first-prompt snippets.
+const SESSION_METADATA_CHECKPOINT_VERSION = 2;
 const SESSION_METADATA_READ_CHUNK_BYTES = 256 * 1024;
 const SESSION_METADATA_WITNESS_BYTES = 4 * 1024;
 const SESSION_METADATA_YIELD_LINES = 256;
@@ -63,7 +64,7 @@ interface SessionMetadataAccumulator {
  * prefix: a same-inode interior rewrite followed by an append falls back to a
  * full scan only when one of those sampled boundaries changes. */
 export interface SessionMetadataCheckpoint {
-  version: 1;
+  version: 2;
   parsedBytes: number;
   endedWithNewline: boolean;
   firstWitnessHash: string;
@@ -345,7 +346,7 @@ export async function deriveNameFromFile(filePath: string): Promise<string> {
           const derived = deriveSessionNameFromText(
             textFromSessionMessageContent(entry.message.content),
           );
-          if (!derived.isPlaceholder) {
+          if (derived.name !== NEW_SESSION_NAME) {
             return derived.name;
           }
         }
@@ -408,7 +409,7 @@ export async function discoverSessionSummaries(
         const derived = await deriveSessionInfoName(session);
         if (derived !== NEW_SESSION_NAME) {
           summary.name = derived;
-          summary.isPlaceholder = false;
+          summary.isPlaceholder = true;
         } else {
           summary.isPlaceholder = true;
         }
@@ -442,7 +443,7 @@ export function deriveSessionName(context: SessionContext): { name: string; isPl
       const derived = deriveSessionNameFromText(
         textFromSessionMessageContent(entry.message.content),
       );
-      if (!derived.isPlaceholder) {
+      if (derived.name !== NEW_SESSION_NAME) {
         return derived;
       }
     }

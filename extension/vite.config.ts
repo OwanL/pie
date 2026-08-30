@@ -90,6 +90,7 @@ export default defineConfig(({ mode }) => {
             backend: path.join(srcDir, 'backend', 'index.ts'),
             'worker-entry': path.join(srcDir, 'backend', 'worker-entry.ts'),
             'cold-browse-helper-entry': path.join(srcDir, 'backend', 'cold-browse-helper-entry.ts'),
+            'initial-context-estimate-worker': path.join(srcDir, 'backend', 'initial-context-estimate-worker.ts'),
             'phase4-worker-command-extension': path.join(rootDir, 'test', 'fixtures', 'phase4-worker-command-extension.ts'),
           },
           output: {

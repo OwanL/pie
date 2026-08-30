@@ -1,6 +1,0 @@
-{
-  "schemaVersion": 1,
-  "id": "bespoke-optimization-v1",
-  "tasks": ["inference-batch-scheduler", "vector-shard-rebalancer", "feature-cache-planner", "sensor-anomaly-pipeline"],
-  "promotion": {"requireNoMeanScoreRegression": true, "requireNoValidityRegression": true, "requireBothModels": true, "requireNoPolicyViolations": true}
-}

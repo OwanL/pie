@@ -322,7 +322,7 @@ export function generateModelProfilesYaml(source) {
 
 /** Read-modify-write merge of settings.json.
  *
- *  Chat-model and pruning-model selections are USER-OWNED: the settings UI
+ *  Chat, pruning, and session-title model selections are USER-OWNED: the settings UI
  *  persists them to settings.json. Sync only SEEDS missing selections from
  *  models.yaml; it never clobbers an existing user choice. `retry` remains
  *  centrally derived. The legacy `proxy` block (if still present from a
@@ -341,6 +341,14 @@ export function generateSettings(source, existingSettings) {
   if (!isNonEmptyString(pruning.provider)) pruning.provider = source.pruning.provider;
   if (!isNonEmptyString(pruning.thinkingLevel)) pruning.thinkingLevel = source.pruning.thinkingLevel;
   s.pruning = pruning;
+
+  const sessionTitles = s.sessionTitles && typeof s.sessionTitles === 'object' ? s.sessionTitles : {};
+  if (typeof sessionTitles.enabled !== 'boolean') sessionTitles.enabled = source.sessionTitles.enabled;
+  if (!isNonEmptyString(sessionTitles.model)) sessionTitles.model = source.sessionTitles.model;
+  if (!isNonEmptyString(sessionTitles.provider)) sessionTitles.provider = source.sessionTitles.provider;
+  if (!isNonEmptyString(sessionTitles.thinkingLevel)) sessionTitles.thinkingLevel = source.sessionTitles.thinkingLevel;
+  if (!Number.isInteger(sessionTitles.timeoutSec)) sessionTitles.timeoutSec = source.sessionTitles.timeoutSec;
+  s.sessionTitles = sessionTitles;
 
   // Strip legacy proxy block — replaced by host-side provider gate.
   delete s.proxy;

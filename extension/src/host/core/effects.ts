@@ -17,7 +17,7 @@
  * so the reducer can reconcile optimistic state (Phase 4).
  */
 
-import type { ComposerInput, ModelSettings, ChatPrefs, HostToWebviewMessage, PruningMode, UserContentPart, RendererCommandContext } from '../../shared/protocol';
+import type { ComposerInput, ModelSettings, ChatPrefs, HostToWebviewMessage, PruningMode, ThinkingLevel, UserContentPart, RendererCommandContext } from '../../shared/protocol';
 import type { LiveSubagentDetailAddress, DetailCursor, DetailPageRef } from '../../shared/protocol/subagent-detail';
 import type { BackendReadyQueueEntry, DeferredSetModelEntry, PendingSendQueueEntry } from './arch-state';
 
@@ -43,6 +43,16 @@ export interface SendRpcEffect extends EffectBase {
    *  resolves (threads `SendCommand.priorPruningMode` → the EffectRunner's
    *  in-flight send, which restores it at commit/fire/pre-ack-failure). */
   priorPruningMode?: PruningMode;
+}
+
+export interface GenerateSessionTitleEffect extends EffectBase {
+  kind: 'GenerateSessionTitle';
+  sessionPath: string;
+  prompt: string;
+  provider: string;
+  model: string;
+  thinkingLevel: ThinkingLevel;
+  timeoutSec: number;
 }
 
 export interface EditRpcEffect extends EffectBase {
@@ -187,12 +197,6 @@ export interface SetPrefsRpcEffect extends EffectBase {
   prefs: Partial<ChatPrefs>;
 }
 
-/** Re-read the backend's effective MCP server config into
- *  `state.settings.mcpServers` (backend answers with `McpServersUpdated`). */
-export interface McpListRpcEffect extends EffectBase {
-  kind: 'McpListRpc';
-}
-
 /** Persist a per-server `disabled` override via the backend's
  *  `mcp.setServerEnabled` RPC. The response carries the fresh list and the
  *  pending-apply flag (override applies on next session reload / restart). */
@@ -200,6 +204,25 @@ export interface McpSetServerRpcEffect extends EffectBase {
   kind: 'McpSetServerRpc';
   name: string;
   enabled: boolean;
+}
+
+/** Read the effective global MCP list, then hydrate one session's persisted
+ *  per-server overrides (`mcpSessionOverrides`) on its session FIFO. */
+export interface McpListRpcEffect extends EffectBase {
+  kind: 'McpListRpc';
+  sessionPath?: string;
+}
+
+/** Write a session's full per-server override set via the backend's
+ *  `mcp.setSessionServerEnabled` RPC. `recycle` asks the backend to retire
+ *  that session's worker so the adapter applies the overrides at the next
+ *  session start (idle-cycle retries send the same set with `recycle: true`).
+ *  The response reports whether the recycle happened. */
+export interface McpSetSessionServerRpcEffect extends EffectBase {
+  kind: 'McpSetSessionServerRpc';
+  sessionPath: string;
+  overrides: Record<string, boolean>;
+  recycle: boolean;
 }
 
 /** Apply privacy bookkeeping outside the pure reducer. The mode itself lives
@@ -357,6 +380,11 @@ export interface SetToolResultPruningSettingsEffect extends EffectBase {
   settings: Partial<import('../../shared/protocol').ToolResultPruningSettings>;
 }
 
+export interface SetSessionTitlesSettingsEffect extends EffectBase {
+  kind: 'SetSessionTitlesSettings';
+  settings: Partial<import('../../shared/protocol').SessionTitlesSettings>;
+}
+
 export interface CloseSessionEffect extends EffectBase {
   kind: 'CloseSession';
   sessionPath: string;
@@ -389,6 +417,7 @@ export interface DuplicateSessionEffect extends EffectBase {
 
 export type Effect =
   | SendRpcEffect
+  | GenerateSessionTitleEffect
   | EditRpcEffect
   | ReplaceQueueRpcEffect
   | InterruptRpcEffect
@@ -405,6 +434,7 @@ export type Effect =
   | SetPrefsRpcEffect
   | McpListRpcEffect
   | McpSetServerRpcEffect
+  | McpSetSessionServerRpcEffect
   | SetPrivacyModeEffect
   | SetSystemPromptTogglesRpcEffect
   | DetailSubscribeRpcEffect
@@ -431,6 +461,7 @@ export type Effect =
   | OpenFileEffect
   | SetPruningSettingsEffect
   | SetToolResultPruningSettingsEffect
+  | SetSessionTitlesSettingsEffect
   | CloseSessionEffect
   | DuplicateSessionEffect
   | DrainPendingSendQueueEffect

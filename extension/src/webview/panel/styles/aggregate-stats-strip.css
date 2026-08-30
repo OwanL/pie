@@ -23,8 +23,29 @@
   letter-spacing: 0.01em;
   color: color-mix(in srgb, var(--panel-foreground) 58%, var(--panel-muted));
   white-space: nowrap;
-  overflow: hidden;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--vscode-scrollbarSlider-background) transparent;
   user-select: none;
+}
+
+.aggregate-strip::-webkit-scrollbar { height: 3px; }
+.aggregate-strip::-webkit-scrollbar-track { background: transparent; }
+.aggregate-strip::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: var(--vscode-scrollbarSlider-background);
+}
+
+@media (max-width: 520px) {
+  .aggregate-strip {
+    height: 24px;
+    padding-bottom: 3px;
+    scrollbar-gutter: stable;
+  }
+
+  .aggregate-strip::-webkit-scrollbar { height: 5px; }
 }
 
 .aggregate-strip--placeholder {

@@ -88,12 +88,6 @@ function main(): void {
         const payload = frame.payload as WorkerJsonObject;
         if (host) host.applySync(frame.domain, frame.revision, payload);
         else pendingSync.set(frame.domain, { revision: frame.revision, payload });
-        currentServer.sendFrame({
-          kind: 'sync.ack',
-          requestId: frame.requestId,
-          domain: frame.domain,
-          revision: frame.revision,
-        });
         return;
       }
       throw new Error(`Unsupported Phase 4 worker frame ${frame.kind}.`);

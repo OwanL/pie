@@ -165,7 +165,7 @@ test('tool call running pauses the clock: rate holds its last value and is marke
   assert.match(blockedState.label!, /⏸/);
   assert.match(blockedState.tooltip, /tool running/);
   // Generation clock frozen during the tool call.
-  assert.equal(acc.genMs, 2000);
+  assert.equal(acc.genMs, 1000);
 
   // Rate held at the pre-pause value (~200 tok/s), not diluted by the 5s tool call.
   const heldRate = Number.parseFloat(blockedState.label!.replace(/[^\d.]/g, ''));
@@ -184,7 +184,7 @@ test('between turns pauses the clock until the next streaming message produces o
   const betweenState = tickTokenRate(acc, [], BASE_NOW + 2000);
   assert.equal(betweenState.state, 'paused');
   assert.match(betweenState.tooltip, /between turns/);
-  assert.equal(acc.genMs, 1000); // clock frozen during the gap
+  assert.equal(acc.genMs, 0); // first output established the generation baseline
 
   // Next turn begins streaming; until it produces output it stays paused...
   const m2 = streamingMessage({ id: 'm2' });
@@ -249,8 +249,8 @@ test('per-turn time-to-first-token is excluded: an empty new turn pauses the clo
   const m1 = streamingMessage({ id: 'm1' });
   const acc = createTokenRateAccumulator(BASE_NOW);
   tickTokenRate(acc, [setContent(m1, 0)], BASE_NOW);            // empty -> paused
-  tickTokenRate(acc, [setContent(m1, 400)], BASE_NOW + 1000);  // 100 tokens -> generating, genMs=1000
-  assert.equal(acc.genMs, 1000);
+  tickTokenRate(acc, [setContent(m1, 400)], BASE_NOW + 1000);  // 100 tokens -> generating, establishes gen baseline
+  assert.equal(acc.genMs, 0);
 
   // A second turn begins streaming (no tool call between turns). The clock
   // must NOT advance during m2's time-to-first-token — the new empty message
@@ -258,7 +258,7 @@ test('per-turn time-to-first-token is excluded: an empty new turn pauses the clo
   const m2 = streamingMessage({ id: 'm2' });
   const waiting = tickTokenRate(acc, [setContent(m2, 0)], BASE_NOW + 1100);
   assert.equal(waiting.state, 'paused');
-  assert.equal(acc.genMs, 1000); // frozen during m2's TTFT
+  assert.equal(acc.genMs, 0); // frozen during m2's TTFT
 
   // Once m2 produces output, generation resumes.
   const resumed = tickTokenRate(acc, [setContent(m2, 400)], BASE_NOW + 2100);

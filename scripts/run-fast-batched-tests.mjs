@@ -20,7 +20,7 @@ const rootBatchDirs = [
   'extensions/ask-user/test',
   'extensions/warm-bash/test',
   'extensions/copilot-model-discovery/test',
-  'extensions/web-access-compat/test',
+  'extensions/web-access-guard/test',
   'extensions/tool-result-pruner/test',
   'extensions/session-reviewer/test',
   'extensions/deferred-triggers/test',

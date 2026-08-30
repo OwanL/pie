@@ -271,7 +271,9 @@
   }
 
   .composer-controls {
-    flex: 1 1 230px;
+    flex: 1 1 100%;
+    flex-wrap: wrap;
+    row-gap: 2px;
   }
 
   .composer-bottom-bar .model-picker-trigger {
@@ -362,6 +364,7 @@
   flex-direction: column;
   /* Stable on a wide panel, fluid inside a narrow VS Code sidebar. */
   width: min(620px, calc(100vw - 16px));
+  box-sizing: border-box;
   min-width: 0;
   max-width: calc(100vw - 16px);
   /* Height is pinned at runtime so tab changes never shift the menu. */
@@ -974,16 +977,28 @@
   .toolbar-settings-tabs {
     flex-direction: row;
     width: 100%;
-    padding: 0 0 7px;
+    padding: 0 0 5px;
     border-right: 0;
     border-bottom: 1px solid var(--panel-border-subtle);
     overflow-x: auto;
     overscroll-behavior-x: contain;
+    scrollbar-width: thin;
+    scrollbar-color: var(--panel-border-strong) transparent;
+    scrollbar-gutter: stable;
+    scroll-snap-type: x proximity;
   }
 
   .toolbar-settings-tab {
     width: auto;
     flex: 0 0 auto;
+    scroll-snap-align: start;
+  }
+
+  .toolbar-settings-tabs::-webkit-scrollbar { height: 4px; }
+  .toolbar-settings-tabs::-webkit-scrollbar-track { background: transparent; }
+  .toolbar-settings-tabs::-webkit-scrollbar-thumb {
+    border-radius: 999px;
+    background: var(--panel-border-strong);
   }
 
   .toolbar-settings-tab-icon { display: none; }
@@ -1312,6 +1327,13 @@
 
 .session-tab-context-menu {
   min-width: 190px;
+  /* Dynamic Group with…/Merge actions make this menu arbitrarily tall. Cap it
+     to the viewport (aligned with the 4px clamp margin on each side in
+     useMenuViewportClamp) and scroll the overflow inside, so every item —
+     including the last Group with… entry — stays reachable. */
+  max-height: calc(100vh - 8px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .session-tab-context-title {

@@ -231,11 +231,14 @@ export function SystemPromptToggleMenu({ prompts, sessionPath = null, onSetToggl
   }, [open]);
 
   const disabledCount = disabledIds.size;
+  const promptsAvailable = entries.length > 0;
 
-  // Hide the trigger entirely when there is nothing to toggle (e.g. a
-  // not-yet-resolved session with only the provider card). Declared after every
-  // hook so the hook count is stable across the 0 ⇄ N transition.
-  if (entries.length === 0) return null;
+  // Keep the indicator stable in the toolbar even while a session's prompt
+  // metadata is unresolved. It becomes available as soon as toggleable entries
+  // arrive rather than shifting the surrounding controls in and out.
+  useEffect(() => {
+    if (!promptsAvailable && open) setOpen(false);
+  }, [open, promptsAvailable]);
 
   const toggle = (entry: ToggleableEntry) => {
     const willDisable = !disabledIds.has(entry.id);
@@ -319,14 +322,15 @@ export function SystemPromptToggleMenu({ prompts, sessionPath = null, onSetToggl
 
   return (
     <div class="system-prompt-toggle-menu">
-      <Tooltip content={open ? null : 'Toggle system prompts on/off'} placement="top">
+      <Tooltip content={open ? null : promptsAvailable ? 'Toggle system prompts on/off' : 'System prompts unavailable'} placement="top">
         <button
           ref={triggerRef}
           type="button"
-          class={cx('system-prompt-toggle-trigger', open && 'open', disabledCount > 0 && 'has-disabled')}
+          class={cx('system-prompt-toggle-trigger', open && promptsAvailable && 'open', disabledCount > 0 && 'has-disabled')}
           aria-haspopup="dialog"
-          aria-expanded={open}
+          aria-expanded={open && promptsAvailable}
           aria-label="Toggle system prompts"
+          disabled={!promptsAvailable}
           onClick={() => setOpen((o) => !o)}
           onKeyDown={onTriggerKeyDown}
         >
@@ -342,7 +346,7 @@ export function SystemPromptToggleMenu({ prompts, sessionPath = null, onSetToggl
         </button>
       </Tooltip>
 
-      {open && (
+      {open && promptsAvailable && (
         <div ref={menuRef} class="system-prompt-toggle-dropdown" role="dialog" aria-label="System prompt toggles">
           <div class="system-prompt-toggle-header">
             <span class="system-prompt-toggle-title">System prompts</span>

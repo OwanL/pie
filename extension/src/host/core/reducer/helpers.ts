@@ -113,6 +113,38 @@ export function findPendingTurnOwner(
   return undefined;
 }
 
+/** Start best-effort title generation exactly once at any authoritative turn commit point. */
+export function startSessionTitleGeneration(
+  state: ArchState,
+  sessionPath: string,
+  corrId: string,
+): { state: ArchState; effects: Effect[] } {
+  const generation = state.sessions.titleGenerationBySession[sessionPath];
+  if (generation?.status !== 'armed') return { state, effects: [] };
+  return {
+    state: {
+      ...state,
+      sessions: {
+        ...state.sessions,
+        titleGenerationBySession: {
+          ...state.sessions.titleGenerationBySession,
+          [sessionPath]: { ...generation, status: 'pending', corrId },
+        },
+      },
+    },
+    effects: [{
+      kind: 'GenerateSessionTitle',
+      corrId,
+      sessionPath,
+      prompt: generation.prompt,
+      provider: state.settings.sessionTitlesSettings.provider,
+      model: state.settings.sessionTitlesSettings.model,
+      thinkingLevel: state.settings.sessionTitlesSettings.thinkingLevel,
+      timeoutSec: state.settings.sessionTitlesSettings.timeoutSec,
+    }],
+  };
+}
+
 /** Upsert a ChatMessage in a session's transcript array. */
 export function upsertTranscriptMessage(messages: readonly ChatMessage[], message: ChatMessage): ChatMessage[] {
   const idx = messages.findIndex((m) => m.id === message.id);
@@ -240,6 +272,7 @@ export function evictSession(
   const { [sp]: _deferred, ...remainingDeferredWindowReplacements } = state.transcript.deferredWindowReplacementBySession;
   const { [sp]: _pf, ...remainingPagingInFlight } = state.transcript.pagingInFlightBySession;
   const { [sp]: _i, ...remainingInterrupts } = state.sessions.interruptInFlightBySession;
+  const { [sp]: _title, ...remainingTitleGeneration } = state.sessions.titleGenerationBySession;
   const { [sp]: _rtry, ...remainingRetryStatus } = state.sessions.retryStatusBySession;
   const { [sp]: _a, ...remainingAnalytics } = state.sessions.analyticsFactorsBySession;
   const { [sp]: _privacy, ...remainingPrivacyModes } = state.sessions.privacyModeBySession;
@@ -248,6 +281,7 @@ export function evictSession(
   const { [sp]: _ms, ...remainingModelStatuses } = state.settings.availableModelsStatusBySession;
   const { [sp]: _mr, ...remainingModelRevisions } = state.settings.modelHydrationRevisionBySession;
   const { [sp]: _cu, ...remainingContext } = state.settings.contextUsageBySession;
+  const { [sp]: _ice, ...remainingInitialContextEstimates } = state.settings.initialContextEstimateBySession;
   const { [sp]: _eui, ...remainingExtUI } = state.settings.pendingExtensionUIRequestsBySession;
   const { [sp]: _ci, ...remainingComposer } = state.composer.pendingComposerInputsBySession;
   const { [sp]: _rs, ...remainingRunSummaries } = state.composer.activeRunSummaryBySession;
@@ -321,6 +355,10 @@ export function evictSession(
   const nextIntentionallyHiddenRunningPaths = removeSummary
     ? removeFromArray(state.sessions.intentionallyHiddenRunningPaths, sp)
     : state.sessions.intentionallyHiddenRunningPaths;
+  const nextInterruptSettledSessionPaths = removeFromArray(
+    state.sessions.interruptSettledSessionPaths,
+    sp,
+  );
   const { [sp]: _lastCompaction, ...remainingLastCompaction } = state.sessions.lastCompactionBySession;
 
   // ── Tab arrays (removeTabs: close the tab) ──
@@ -376,11 +414,13 @@ export function evictSession(
         compactingSessionPaths: nextCompactingPaths,
         lastCompactionBySession: remainingLastCompaction,
         intentionallyHiddenRunningPaths: nextIntentionallyHiddenRunningPaths,
+        interruptSettledSessionPaths: nextInterruptSettledSessionPaths,
         unreadFinishedSessionPaths: nextUnreadPaths,
         activeSessionPath: nextActivePath,
         analyticsFactorsBySession: remainingAnalytics,
         privacyModeBySession: remainingPrivacyModes,
         interruptInFlightBySession: remainingInterrupts,
+        titleGenerationBySession: remainingTitleGeneration,
         retryStatusBySession: remainingRetryStatus,
       },
       settings: {
@@ -389,6 +429,7 @@ export function evictSession(
         availableModelsStatusBySession: remainingModelStatuses,
         modelHydrationRevisionBySession: remainingModelRevisions,
         contextUsageBySession: remainingContext,
+        initialContextEstimateBySession: remainingInitialContextEstimates,
         pendingExtensionUIRequestsBySession: remainingExtUI,
       },
       composer: {

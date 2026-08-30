@@ -8,22 +8,24 @@ import { useAnchoredOverlay } from '../components/anchored-overlay';
 import { Tooltip } from '../components/tooltip';
 import { cx } from '../utils/cx';
 import { McpServerList } from './mcp-server-list';
-import type { OnSetPrefs } from './settings-menu-types';
 
-/** Toolbar dropdown for MCP control: the global on/off switch plus per-server
- *  toggles. The backend guard enforces the global pref on every tool-set
- *  update (immediate); per-server toggles persist `disabled` overrides into
- *  `.pi/mcp.json` (the adapter's own mechanism) and apply on the next session
- *  reload / backend restart. The server list refreshes whenever the menu
- *  opens. */
-export function McpToggleMenu({ prefs, mcpServers, mcpServersStatus, mcpPendingApply, onSetPrefs, onMcpListRequested, onMcpSetServerEnabled }: {
+/** Toolbar dropdown for MCP control: per-server toggles scoped to the CURRENT
+ *  session only. The global on/off switch and the file-backed (`disabled`
+ *  override in `.pi/mcp.json`) per-server controls live in Settings → MCP.
+ *  A toggle here writes a session-scoped override and recycles this session's
+ *  worker immediately when it is idle; when a run is active the host keeps a
+ *  pending hint until the next idle recycle / session reload. The server list
+ *  refreshes whenever the menu opens. */
+export function McpToggleMenu({ prefs, mcpServers, mcpServersStatus, mcpPendingApply, onMcpListRequested, onMcpSetServerEnabledForSession }: {
   prefs: ChatPrefs;
+  /** Effective per-session list: global state with the active session's own
+   *  overrides already merged (a row can only be hidden further or un-hidden
+   *  for this session). */
   mcpServers: McpServerInfo[];
   mcpServersStatus?: 'loading' | 'error' | 'ok';
   mcpPendingApply: boolean;
-  onSetPrefs: OnSetPrefs;
   onMcpListRequested: () => void;
-  onMcpSetServerEnabled: (name: string, enabled: boolean) => void;
+  onMcpSetServerEnabledForSession: (name: string, enabled: boolean) => void;
 }) {
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -72,7 +74,7 @@ export function McpToggleMenu({ prefs, mcpServers, mcpServersStatus, mcpPendingA
 
   return (
     <div class="system-prompt-toggle-menu">
-      <Tooltip content={open ? null : (prefs.mcpEnabled ? 'MCP on — click to toggle' : 'MCP off — click to toggle')} placement="top">
+      <Tooltip content={open ? null : (prefs.mcpEnabled ? 'MCP on — server toggles apply to this session' : 'MCP off (global) — change in Settings → MCP')} placement="top">
         <button
           ref={triggerRef}
           type="button"
@@ -92,44 +94,34 @@ export function McpToggleMenu({ prefs, mcpServers, mcpServersStatus, mcpPendingA
       </Tooltip>
 
       {open && (
-        <div ref={menuRef} class="system-prompt-toggle-dropdown" role="dialog" aria-label="MCP">
+        <div ref={menuRef} class="system-prompt-toggle-dropdown" role="dialog" aria-label="MCP servers">
           <div class="system-prompt-toggle-header">
-            <span class="system-prompt-toggle-title">MCP</span>
+            <span class="system-prompt-toggle-title">MCP servers</span>
+            <span class="system-prompt-toggle-entry-summary">This session only</span>
           </div>
           <div class="system-prompt-toggle-body">
-            <button
-              type="button"
-              class={cx('toolbar-settings-item', prefs.mcpEnabled && 'checked')}
-              role="checkbox"
-              aria-checked={prefs.mcpEnabled}
-              onClick={() => onSetPrefs({ mcpEnabled: !prefs.mcpEnabled })}
-            >
-              <span class="toolbar-settings-item-check" aria-hidden="true">
-                <svg width="14" height="14" viewBox="0 0 13 13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style={prefs.mcpEnabled ? '' : 'opacity:0'}>
-                  <polyline points="2.5,6.5 5,9 10.5,3.5" />
-                </svg>
-              </span>
-              <span class="toolbar-settings-item-label">
-                <span class="system-prompt-toggle-entry-title">MCP enabled</span>
-                <span class="system-prompt-toggle-entry-summary">
-                  {prefs.mcpEnabled ? 'MCP servers exposed to the model' : 'MCP tools hidden — servers stay configured'}
-                </span>
-              </span>
-            </button>
-            {!prefs.mcpEnabled && (
+            {prefs.mcpEnabled ? (
+              <>
+                <McpServerList
+                  servers={mcpServers}
+                  loading={mcpServersStatus === 'loading'}
+                  error={mcpServersStatus === 'error'}
+                  pendingApply={mcpPendingApply}
+                  showRefresh
+                  onToggle={onMcpSetServerEnabledForSession}
+                  onRefresh={onMcpListRequested}
+                />
+                {mcpPendingApply && (
+                  <div class="system-prompt-toggle-entry-summary mcp-global-off-hint">
+                    A change is waiting — it applies after this session reloads (or when the current run ends).
+                  </div>
+                )}
+              </>
+            ) : (
               <div class="system-prompt-toggle-entry-summary mcp-global-off-hint">
-                MCP is off — the servers below are hidden from the model until you re-enable it.
+                MCP is turned off globally. Enable it (and manage the global server list) in Settings → MCP.
               </div>
             )}
-            <McpServerList
-              servers={mcpServers}
-              loading={mcpServersStatus === 'loading'}
-              error={mcpServersStatus === 'error'}
-              pendingApply={mcpPendingApply}
-              showRefresh
-              onToggle={onMcpSetServerEnabled}
-              onRefresh={onMcpListRequested}
-            />
           </div>
         </div>
       )}

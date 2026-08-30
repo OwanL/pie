@@ -201,7 +201,7 @@ function isCheckpoint(value: unknown): value is SessionMetadataCheckpoint {
     state[field] === undefined || typeof state[field] === 'string';
   const validOptionalNumber = (field: string): boolean =>
     state[field] === undefined || (typeof state[field] === 'number' && Number.isFinite(state[field]));
-  return checkpoint.version === 1
+  return checkpoint.version === 2
     && typeof checkpoint.parsedBytes === 'number'
     && typeof checkpoint.endedWithNewline === 'boolean'
     && typeof checkpoint.firstWitnessHash === 'string'

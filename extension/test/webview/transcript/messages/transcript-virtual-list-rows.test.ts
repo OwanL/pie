@@ -497,7 +497,7 @@ test('estimateTranscriptRowSize uses stable size buckets by row kind', () => {
   assert.equal(estimateTranscriptRowSize({ kind: 'bottomGap', key: 'gap:newer' }), 56);
   assert.equal(
     estimateTranscriptRowSize({ kind: 'message', key: 'message:user-1', message: makeMessage('user-1', 'user') }),
-    120,
+    50,
   );
   assert.equal(
     estimateTranscriptRowSize({ kind: 'message', key: 'message:assistant-1', message: makeMessage('assistant-1', 'assistant') }),
@@ -512,4 +512,43 @@ test('estimateTranscriptRowSize uses stable size buckets by row kind', () => {
     }),
     220,
   );
+});
+
+test('estimateTranscriptRowSize reserves realistic geometry for a heavy completed turn', () => {
+  const tools = Array.from({ length: 60 }, (_, index) => ({
+    id: `tool-${index}`,
+    name: index < 4 ? 'subagent' : index < 14 ? 'ask_user' : 'bash',
+    input: {},
+    status: 'completed' as const,
+  }));
+  const parts = [
+    ...Array.from({ length: 19 }, (_, index) => ({ kind: 'reasoning' as const, text: `Reasoning ${index}` })),
+    ...tools.map((toolCall) => ({ kind: 'toolCall' as const, toolCall })),
+    { kind: 'text' as const, text: Array.from({ length: 129 }, (_, index) => `line ${index}`).join('\n') },
+  ];
+  const message: ChatMessage = {
+    ...makeMessage('assistant-heavy', 'assistant'),
+    markdown: Array.from({ length: 129 }, (_, index) => `line ${index}`).join('\n'),
+    parts,
+    toolCalls: tools,
+  };
+  const estimate = estimateTranscriptRowSize({ kind: 'message', key: 'message:assistant-heavy', message });
+
+  assert.ok(estimate >= 4_500, `heavy turn estimate should reserve several thousand pixels, got ${estimate}`);
+  assert.ok(estimate <= 7_000, `heavy turn estimate should remain bounded, got ${estimate}`);
+});
+
+test('estimateTranscriptRowSize follows long prompt and compact summary geometry', () => {
+  const longPrompt: ChatMessage = {
+    ...makeMessage('user-long', 'user'),
+    markdown: Array.from({ length: 26 }, (_, index) => `prompt line ${index}`).join('\n'),
+  };
+  const compactSummary: ChatMessage = {
+    ...makeMessage('summary', 'system'),
+    customType: 'compaction-summary',
+    markdown: Array.from({ length: 100 }, (_, index) => `hidden summary line ${index}`).join('\n'),
+  };
+
+  assert.ok(estimateTranscriptRowSize({ kind: 'message', key: 'message:user-long', message: longPrompt }) >= 500);
+  assert.ok(estimateTranscriptRowSize({ kind: 'message', key: 'message:summary', message: compactSummary }) <= 90);
 });

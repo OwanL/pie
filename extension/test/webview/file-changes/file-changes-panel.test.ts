@@ -2,7 +2,11 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
-import { h } from 'preact';
+import { installDom } from '../../_helpers/dom';
+installDom();
+
+import { h, render } from 'preact';
+import { act } from 'preact/test-utils';
 import renderToString from 'preact-render-to-string';
 
 import { FileChangesPanel, FileChangeContextMenu, computeDiffTotals } from '../../../src/webview/panel/file-changes-panel';
@@ -340,6 +344,8 @@ test('FileChangeContextMenu: labels the mark-read action by captured read state'
   const readHtml = renderToString(
     h(FileChangeContextMenu, {
       menu: { ...baseMenu, read: true },
+      onOpenDiff: noop,
+      onOpenInEditor: noop,
       onRevert: noop,
       onSetFileRead: noop,
       onClose: noop,
@@ -348,6 +354,8 @@ test('FileChangeContextMenu: labels the mark-read action by captured read state'
   const unreadHtml = renderToString(
     h(FileChangeContextMenu, {
       menu: { ...baseMenu, read: false },
+      onOpenDiff: noop,
+      onOpenInEditor: noop,
       onRevert: noop,
       onSetFileRead: noop,
       onClose: noop,
@@ -420,4 +428,145 @@ test('drawer list keeps a stable scrollbar gutter and scrolls when packed', asyn
   // Stable gutter so rows don't reflow horizontally as files stream in mid-run
   // and the scrollbar appears/disappears across the scroll threshold.
   assert.match(listRule, /scrollbar-gutter:\s*stable;/);
+});
+
+// ---------------------------------------------------------------------------
+// FileChangeContextMenu — interactive actions (row-action parity + revert).
+// ---------------------------------------------------------------------------
+
+interface MenuHarness {
+  host: HTMLDivElement;
+  diffs: string[];
+  opens: string[];
+  reverts: string[];
+  closes: () => number;
+  labels: () => Array<string | undefined>;
+  click: (label: string) => HTMLButtonElement | undefined;
+  find: (label: string) => HTMLButtonElement | undefined;
+}
+
+function renderFileMenu(props: { path: string; kind: FileChangeEntry['kind']; read?: boolean }): MenuHarness {
+  const host = document.createElement('div');
+  document.body.appendChild(host);
+  const diffs: string[] = [];
+  const opens: string[] = [];
+  const reverts: string[] = [];
+  let closes = 0;
+  act(() => {
+    render(h(FileChangeContextMenu, {
+      menu: { x: 10, y: 10, path: props.path, kind: props.kind, read: props.read ?? false, triggerEl: null },
+      onOpenDiff: (path) => { diffs.push(path); },
+      onOpenInEditor: (path) => { opens.push(path); },
+      onRevert: (path) => { reverts.push(path); },
+      onSetFileRead: noop,
+      onClose: () => { closes += 1; },
+    }), host);
+  });
+  const find = (label: string) => Array.from(host.querySelectorAll('button'))
+    .find((el) => el.textContent?.trim().includes(label)) as HTMLButtonElement | undefined;
+  const click = (label: string) => {
+    const button = find(label);
+    assert.ok(button, `expected a ${label} button`);
+    act(() => { button.click(); });
+    return button;
+  };
+  return {
+    host,
+    diffs,
+    opens,
+    reverts,
+    closes: () => closes,
+    labels: () => Array.from(host.querySelectorAll('button')).map((el) => el.textContent?.trim()),
+    click,
+    find,
+  };
+}
+
+function unmountMenu(harness: MenuHarness): void {
+  act(() => { render(null, harness.host); });
+  harness.host.remove();
+}
+
+test('FileChangeContextMenu offers row-action parity (Open in editor, View diff, Copy path, read toggle, Revert)', () => {
+  const menu = renderFileMenu({ path: 'src/a.ts', kind: 'modified' });
+  assert.deepEqual(menu.labels(), [
+    'Open in editor',
+    'View diff',
+    'Copy path',
+    'Mark as read',
+    'Revert changes',
+  ]);
+  menu.click('Open in editor');
+  menu.click('View diff');
+  assert.deepEqual(menu.opens, ['src/a.ts']);
+  assert.deepEqual(menu.diffs, ['src/a.ts']);
+  // Non-destructive actions close the menu; revert stays open for its confirm.
+  assert.equal(menu.closes(), 2);
+  unmountMenu(menu);
+});
+
+test('FileChangeContextMenu disables Open in editor for deleted files but keeps View diff', () => {
+  const menu = renderFileMenu({ path: 'src/gone.ts', kind: 'deleted' });
+  const open = menu.find('Open in editor');
+  assert.equal(open?.disabled, true, 'Open in editor is disabled for deleted files');
+  act(() => { open?.click(); });
+  assert.deepEqual(menu.opens, [], 'a disabled Open in editor must not fire');
+  menu.click('View diff');
+  assert.deepEqual(menu.diffs, ['src/gone.ts']);
+  unmountMenu(menu);
+});
+
+test('FileChangeContextMenu keeps the two-step revert confirm', () => {
+  const menu = renderFileMenu({ path: 'src/a.ts', kind: 'modified' });
+  const first = menu.click('Revert changes');
+  assert.match(first?.textContent ?? '', /Confirm revert\?/);
+  assert.deepEqual(menu.reverts, [], 'first click only arms the confirm');
+  assert.equal(menu.closes(), 0, 'menu stays open for confirmation');
+  menu.click('Confirm revert?');
+  assert.deepEqual(menu.reverts, ['src/a.ts']);
+  assert.equal(menu.closes(), 1);
+  unmountMenu(menu);
+});
+
+// ---------------------------------------------------------------------------
+// Keyboard invocation: Shift+F10 / ContextMenu key on a focused row opens the
+// same row menu as a right-click (components/context-menu-key.ts).
+// ---------------------------------------------------------------------------
+
+test('Shift+F10 on a keyboard-focused changed-file row opens its context menu', () => {
+  const host = document.createElement('div');
+  document.body.appendChild(host);
+  act(() => {
+    render(h(FileChangesPanel, {
+      fileChanges: [entry('src/a.ts', 20, 5), entry('src/b.ts', 10, 7)],
+      expanded: true,
+      onToggleExpanded: noop,
+      onOpenDiff: noop,
+      onOpenInEditor: noop,
+      onRevertFile: noop,
+      readFilePaths: [],
+      onSetFileRead: noop,
+    }), host);
+  });
+  try {
+    const row = host.querySelector<HTMLElement>('.file-change-item');
+    assert.ok(row, 'row renders in the pinned drawer');
+    assert.equal(row!.getAttribute('tabindex'), '0', 'row is keyboard-focusable');
+    // Ground the row's rect so the menu opens at the row (any real layout).
+    Object.defineProperty(row, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => ({ left: 30, top: 40, width: 100, height: 24, right: 130, bottom: 64, x: 30, y: 40, toJSON: () => null }),
+    });
+    act(() => { row!.focus(); });
+    act(() => {
+      row!.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'F10', shiftKey: true, bubbles: true, cancelable: true }));
+    });
+    const menu = host.querySelector('.file-change-context-menu');
+    assert.ok(menu, 'the keyboard request opens the changed-file row menu via its onContextMenu path');
+    const title = menu!.querySelector('.file-change-ctx-title');
+    assert.match(title?.textContent ?? '', /src\/a\.ts/, 'the menu targets the focused row\'s file');
+  } finally {
+    act(() => { render(null, host); });
+    host.remove();
+  }
 });

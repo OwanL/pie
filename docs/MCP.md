@@ -43,43 +43,39 @@ high-value toolsets; proxy mode is the default and the recommended default.
 - `mcp-cache.json` (tool-metadata cache) is written to the project/agent dir
   root and gitignored in this repo.
 
-### Turning MCP off (UI)
+### MCP controls (UI)
 
-MCP has a global on/off switch in the pie UI, enforced by a backend guard
-(not by the adapter), plus **per-server toggles** driven by the adapter's own
-`disabled` mechanism:
+MCP has two control scopes. The **global** controls (Settings → MCP tab) apply
+to every session; the **session-scoped** controls (toolbar plug dropdown) apply
+to one session only:
 
-- **Toolbar dropdown** — the plug button next to the system-prompt picker
-  (accented while on) opens a menu with the `MCP enabled` toggle and one row
-  per configured server. The server list refreshes every time the menu opens.
-- **Settings → MCP tab** — the same global toggle, per-server toggles with a
-  Refresh action, and a pointer to the config files.
-- **Search** — typing `mcp` in the settings search box surfaces the toggle
-  from any tab.
-
-Turning MCP off strips the adapter's tools (`mcp`, `mcpScript`) from every
-active tool set immediately — no reload. Servers stay configured in their
-mcp.json files and are re-exposed when re-enabled. Implementation: the
-`installMcpToolGuard` wrapper in `extension/src/backend/system-prompts.ts`
-filters every `setActiveToolsByName` call while the pref is off, and
-`worker-runtime-host.ts` re-applies the removal after extension bind and at
-every `turn_start` (the adapter's `registerTool` auto-activates new tools,
-bypassing the guard). The pref (`mcpEnabled`, default on) lives in
-`ChatPrefs` and is mirrored to the backend via `runtimePrefs.set` and
-`PIE_MCP_ENABLED`.
-
-**Per-server toggles** list the servers from the *effective* merged config and
-persist a `disabled` override into `<cwd>/.pi/mcp.json` — the exact mechanism
-the adapter's own `/mcp disable|enable <server>` command uses
-(`writeProjectServerDisabledOverride` in `pi-mcp-adapter/config.ts`; never
-copies a server definition or credentials into the file). The backend RPCs
-`mcp.list` / `mcp.setServerEnabled` (see `extension/src/backend/mcp-config.ts`)
-do the work; the host keeps the list in `ArchState.settings.mcpServers` and
-projects it as `ViewState.mcpServers`. Because the adapter re-reads config on
-every session start, an override **applies on the next session reload /
-backend restart** — the UI shows a pending-apply hint until then. Toggling a
-server off does NOT require editing files by hand; the override file stays in
-the gitignored `.pi/` layer.
+- **Settings → MCP tab (global)** — the `MCP enabled` master switch and
+  per-server toggles with a Refresh action plus a pointer to the config
+  files. The master switch is enforced by a backend guard (not by the
+  adapter): `installMcpToolGuard` in `extension/src/backend/system-prompts.ts`
+  filters every `setActiveToolsByName` call while the pref is off, and
+  `worker-runtime-host.ts` re-applies the removal after extension bind and at
+  every `turn_start` (the adapter's `registerTool` auto-activates new tools,
+  bypassing the guard). The pref (`mcpEnabled`, default on) lives in
+  `ChatPrefs` and is mirrored to the backend via `runtimePrefs.set` and
+  `PIE_MCP_ENABLED`. Turning MCP off strips the adapter's tools (`mcp`,
+  `mcpScript`) from every active tool set immediately — servers stay
+  configured in their mcp.json files and are re-exposed when re-enabled.
+  Per-server toggles here persist a `disabled` override into
+  `<cwd>/.pi/mcp.json` (the adapter's own mechanism; see below) and apply on
+  the next session reload / backend restart.
+- **Toolbar plug dropdown (this session only)** — per-server toggles that
+  affect exactly one session. Toggling writes a session-scoped override set
+  (host state + a `<session>.mcp-overrides.json` artifact passed to that
+  session's worker as `--mcp-config`, which replaces only the adapter's
+  highest-preference discovery layer) and recycles that session's worker when
+  it is idle so the adapter applies the change at the next session start —
+  no manual reload. When a turn is running, the recycle waits and the menu
+  shows a pending hint until the next idle transition. Never touches
+  `.pi/mcp.json` or the global pref; while the global switch is off the
+  dropdown shows a pointer to Settings instead of server rows.
+- **Search** — typing `mcp` in the settings search box surfaces the global
+  toggle from any tab.
 
 Note: the global guard covers the main session. In-process subagent sessions
 do not pass through the backend's `SessionContext` setup, so the adapter's
@@ -203,8 +199,10 @@ package resolution → extension load → config discovery → lazy spawn →
   `extensions/skill-pruner` (see `docs/TOOL-RESULT-PRUNING.md` for the
   adjacent deterministic layer).
 - **Subagent MCP gating.** Honor the `mcpEnabled` pref in subagent sessions
-  (see the note in “Turning MCP off (UI)”).
-- **Apply without restart.** Per-server toggles currently apply on the next
-  session reload / backend restart (the adapter re-reads config on every
-  `session_start`). A future enhancement could trigger a session reload
-  automatically when idle so the toggle applies immediately.
+  (see the note in “MCP controls (UI)”).
+- **Apply without restart (global scope).** The global `.pi/mcp.json`
+  per-server toggles still apply on the next session reload / backend restart
+  (the adapter re-reads config on every `session_start`). A future enhancement
+  could trigger a session reload automatically when idle so a global toggle
+  applies immediately. The session-scoped toolbar toggles already recycle
+  idle workers on apply.

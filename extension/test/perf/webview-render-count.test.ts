@@ -385,6 +385,7 @@ function stableInputs(overrides: Partial<IndicatorsInputs> = {}): IndicatorsInpu
     modelSettings: MODEL_SETTINGS,
     availableModels: AVAILABLE_MODELS,
     contextUsage: null,
+    initialContextEstimate: null,
     systemPrompts: [] as SystemPromptEntry[],
     transcript: [],
     transcriptWindow: TRANSCRIPT_WINDOW,

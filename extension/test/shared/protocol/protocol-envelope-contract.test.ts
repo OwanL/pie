@@ -15,6 +15,7 @@ import {
   type ViewState,
   EMPTY_AGGREGATE_STATS,
   DEFAULT_CHAT_PREFS,
+  DEFAULT_SESSION_TITLES_SETTINGS,
   DEFAULT_TOOL_RESULT_PRUNING_SETTINGS,
 } from '../../../src/shared/protocol';
 
@@ -38,6 +39,7 @@ function emptyViewState(): ViewState {
     pinnedTabPaths: [],
     pinnedTabGroups: [],
     runningSessionPaths: [],
+    generatingTitleSessionPaths: [],
     compactingSessionPaths: [],
     lastCompactionBySession: {},
     unreadFinishedSessionPaths: [],
@@ -71,9 +73,12 @@ function emptyViewState(): ViewState {
     availableModels: [],
   availableModelsStatus: 'authoritative',
     contextUsage: null,
+    initialContextEstimate: null,
     prefs: DEFAULT_CHAT_PREFS,
     mcpServers: [],
     mcpPendingApply: false,
+    mcpSessionServers: [],
+    mcpSessionPendingApply: false,
     availableExtensions: [],
     fileChanges: [],
     fileChangesExpanded: false,
@@ -95,6 +100,7 @@ function emptyViewState(): ViewState {
       ...DEFAULT_TOOL_RESULT_PRUNING_SETTINGS,
       rules: { ...DEFAULT_TOOL_RESULT_PRUNING_SETTINGS.rules },
     },
+    sessionTitlesSettings: { ...DEFAULT_SESSION_TITLES_SETTINGS },
     pruningCatalog: {
       skills: [],
       tools: [],

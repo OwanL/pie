@@ -115,7 +115,7 @@ All application state lives in `ArchState` — no separate Redux store.
 | `FileOperation` (Diff, Revert, OpenFileInEditor) | Direct execution, no queue |
 | `PostImperative` (sendRejected) | Direct execution, fire-and-forget |
 | `Log` | Direct execution, no queue |
-| `PersistTabs` | Direct execution, no queue |
+| `PersistTabs` | Dedicated ordered persistence queue (never lifecycle/session queues) |
 | `HydrateModel` | Direct execution, fire-and-forget |
 | `DrainPendingSendQueue` / `DrainBackendReadyQueue` | Async IIFE, re-dispatches `Send` Commands |
 | `StartBackendReadyWatchdog` / `CancelBackendReadyWatchdog` | Timer management, no queue |

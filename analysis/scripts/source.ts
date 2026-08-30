@@ -894,6 +894,9 @@ export function coerceRunSnapshot(value: unknown): RunSnapshot | null {
     ...(typeof value.initialUserMessageChars === 'number' && Number.isFinite(value.initialUserMessageChars)
       ? { initialUserMessageChars: toNonNegativeInteger(value.initialUserMessageChars) }
       : {}),
+    ...(typeof value.initialUserMessageTokens === 'number' && Number.isFinite(value.initialUserMessageTokens)
+      ? { initialUserMessageTokens: toNonNegativeInteger(value.initialUserMessageTokens) }
+      : {}),
     sendCount: toNonNegativeInteger(value.sendCount),
     assistantTurnCount: toNonNegativeInteger(value.assistantTurnCount),
     assistantTurnDurationMs: toNonNegativeInteger(value.assistantTurnDurationMs),
@@ -906,6 +909,13 @@ export function coerceRunSnapshot(value: unknown): RunSnapshot | null {
     autoRetryCount: toNonNegativeInteger(value.autoRetryCount),
     retryTimingSamples: coerceRetryTimingSamples(value.retryTimingSamples),
     backendErrorCodes: coerceStringArray(value.backendErrorCodes),
+    // ask_user outcome counters are optional: absence means untracked, not zero.
+    ...(typeof value.askUserAnsweredCount === 'number' && Number.isFinite(value.askUserAnsweredCount)
+      ? { askUserAnsweredCount: toNonNegativeInteger(value.askUserAnsweredCount) }
+      : {}),
+    ...(typeof value.askUserCancelledCount === 'number' && Number.isFinite(value.askUserCancelledCount)
+      ? { askUserCancelledCount: toNonNegativeInteger(value.askUserCancelledCount) }
+      : {}),
     contextTokens: typeof value.contextTokens === 'number' && Number.isFinite(value.contextTokens)
       ? Math.trunc(value.contextTokens)
       : null,

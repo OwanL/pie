@@ -32,6 +32,7 @@
 - Backend JSONL records share a 32 MiB byte limit. An overlong correlated stdout response is replaced before writing with a `RESPONSE_TOO_LARGE` error carrying the same request ID, so the stream remains synchronized and the backend stays available. An overlong stdout event remains a fatal transport fault. Overlong stdin records are discarded through LF; when the bounded preview contains a request ID, the backend returns a correlated `REQUEST_TOO_LARGE` response. Subsequent requests remain readable. Session snapshot producers use a stricter 30 MiB budget and measure the complete final serialized event/response envelope, including LF, before writer enqueue. If metadata plus one required durable row cannot fit losslessly, transcript-page RPCs fail with typed `SESSION_SNAPSHOT_TOO_LARGE` rather than relying on writer overflow replacement or fatal event handling. A `session.opened` producer instead emits a bounded snapshot marked `snapshotUnavailable`; it first retains all ordinary metadata and drops only transcript/checkpoint bytes, with a final metadata-independent identity/lifecycle fallback if metadata itself exceeds the bound. That final fallback never retains user session names, model catalogs, model settings, prompts, reviews, or usage; its required summary fields use fixed placeholders/caps, and path/session identity, lifecycle, selection, and live-recovery strings have fixed UTF-8 bounds, guaranteeing the complete event envelope remains below the producer budget. The durable row is not truncated, any loaded host window is preserved, and the committed create/duplicate/truncate acknowledgement remains successful.
 - Intentional stops do not produce public unexpected-exit events, but an intentional stop during startup still rejects that child’s readiness promise. Process generations prevent an old exit from clearing a replacement. Backend restart is manual; there is no automatic restart. Manual restart projects `backendReady:false` before its first await, drains already-accepted model/reasoning/preference writes, then closes backend stdin and waits for accepted requests to settle before starting the replacement generation. The settings file lock records its owner PID so a replacement also recovers immediately from a hard-killed owner rather than remaining unusable for the stale-lock window.
 - Provider header waits are bounded per provider. Two consecutive header stalls open a shared transport circuit, so sibling sessions fail locally instead of consuming every provider slot and timeout budget. After an exponentially backed-off cooldown, exactly one half-open probe may reach the provider; response headers close the circuit, while a failed probe reopens it. User cancellation never counts as provider failure. The circuit survives live concurrency-setting changes and is exposed through provider capacity/metrics.
+- Provider admission, response-header wait, and body-idle wait are finite, individually capped at five minutes, and correlated to the exact request. Queue value zero means the five-minute safety maximum. Typed provider rejections preserve retryability and HTTP status across worker IPC; transport success is not observed until no-body completion or clean body EOF. Host/backend model-start deferral requires that exact request to be provider-pending and never extends beyond the cumulative twenty-minute ceiling.
 - Affected session paths are deduplicated. Crash cleanup materializes each host-owned live turn as interrupted, preserves only durability-confirmed terminal tools, interrupts queued user messages, and clears pending extension-UI, retry, wait, interrupt, checkpoint, and queued transient state even when no transcript is loaded.
 - The short exit notice contains the interrupted-session count and reliable activity classification; credential-redacted stderr is exposed only as `noticeRaw` with `noticeKind: backend-exit`.
 
@@ -40,16 +41,21 @@
 - Closing an **idle** session or invalidating a session clears durable transcript cache, `LivePipelineState` turn/tool/pending-owner/tombstone state, alias state, current-turn correlation metadata, busy dedup state, pending composer inputs, and queued per-session operations.
 - Privacy mode is session-scoped and surfaced as `ViewState.privacyMode`; its marker is persisted only to survive a host restart, never as session content. While enabled, run analytics are suppressed and any existing analytics are scrubbed. Closing a private session retires the backend runtime, removes the transcript/system-prompt sidecar and review sidecars, clears analytics/export/checkpoint records, and only removes the privacy marker after deletion succeeds.
 - Closing a **running** session is a tab hide, not session cleanup. It removes and persists the tab selection only; live transcript/tool state, pending ownership, running markers, composer/file state, backend work, and current-run analytics remain recoverable. Repeated/stale close commands for an already-hidden tab are no-ops, and renderer close interactions carry a bounded interaction identity in addition to the existing view-generation fence.
+- Closed sessions remain discoverable through the session-history menu. Hidden running sessions sort before idle history, retain an explicit Running badge, and reopen through the ordinary authoritative `openSession` command rather than a webview-local shortcut.
 - A webview ready handshake restores a running session absent from the persisted open-tab list only when its absence has no host-owned intentional-hide intent. This repairs an accidental renderer-reload omission without pretending that a full extension-host restart can preserve an in-process backend. Both ordinary user closes and review-closure hides (closeReviewed/closeSelf) record intentional hide intent, so the handshake must not resurrect either; the marker (`intentionallyHiddenRunningPaths`) is host-owned, survives the webview reload boundary, and is pruned when the session is explicitly reopened or no longer running.
 - V2 review closure actions are durable outbox commands, not review writes. `closeReviewed` is allowed for an already-reviewed running session (a tab hide) while evidence and review recording remain forbidden for running targets; `closureEligible` reflects this (non-self with a persisted canonical production review). An idle target reaches `succeeded` only after correlated close cleanup and tab persistence both succeed; a running target remains live and reaches `succeeded` after its tab-hide persistence succeeds. Failures append retryable state, and a crash before the fsynced terminal append leaves the prior pending/retrying action authoritative. A still-failing action becomes terminal `failed` after a bounded number of attempts (`MAX_CLOSURE_ATTEMPTS`); the durable `failed` status prevents reclaim on later refreshes, while a crash before the terminal append leaves the prior retrying record authoritative so crash reclaim/retry semantics are preserved. Drain reconciliation runs unconditionally on every backend startup/restart and uses both `fs.watch` as a low-latency hint and a bounded sidecar-fingerprint poll as the missed-event recovery path. Reusing an active pending/retrying action appends the same action ID as a durable wake record; catalog-absent active targets with a captured path are exposed as synthetic summaries so they enter the normal idempotent close/persist lifecycle instead of remaining silently pending.
 - Pending composer inputs are session-scoped host state: close/invalidate clears them for that session; extension restart/shutdown clears all remaining pending inputs.
 - Pending-session placeholders are cleaned up one session at a time; overlapping creates must not share teardown.
 - Pending session identifiers must be collision-safe under rapid repeated creation.
 
+- The open-tab registry consumed by worker extensions is the host's complete current snapshot, not inherited process environment. Open/close/pin changes and accepted `BusyChanged` transitions publish immediately through a monotonic coordinator→worker sync domain; newly promoted workers receive and acknowledge the retained snapshot before runtime readiness. Live broadcasts target only ready workers. A missed live acknowledgement does not retire an executing worker: publication returns without waiting and the newest registry revision retries with bounded backoff. `PIE_OPEN_TABS` remains the compatible JSON array and `PIE_OPEN_TABS_REVISION` is its worker-sync revision fence. Retries reuse the host source revision, older publications cannot roll back newer membership or flags, and unchanged snapshots are force-resubmitted only across backend startup/replacement.
+
 ## Snapshot Recovery
 
+- Worker-sync retries at an equal revision are accepted only when the bounded payload fingerprint is identical; they join the original apply or replay its acknowledgement. A changed equal-revision payload is a fatal protocol fault. Reloadable control-plane broadcasts receive a 30-second acknowledgement grace; the auxiliary open-tab registry remains nonfatal and retries the newest revision with bounded backoff.
 - Full snapshots are the authoritative base.
 - A full snapshot contains the currently loaded transcript window (`transcript`) plus explicit window metadata (`transcriptWindow`), not necessarily the entire historical transcript. Session token/cost accounting is carried separately as a whole-branch usage snapshot (`sessionUsage`) built from the backend's complete durable projection; loading, culling, or switching transcript windows must never reduce the displayed cumulative metrics.
+- `initialContextEstimate` is additive state separate from provider `contextUsage`. Before any user message or provider usage, an empty `runtimeReady:false` session may carry a fresh estimate of every successfully discovered/registered prompt, tool, and skill before Pie runtime filters. Here “all configured” excludes missing/uninstalled packages and resources excluded by Pi resource settings because those resources were not discovered as runnable registrations. A one-shot isolated worker obtains the catalog from normal unfiltered hot semantics (`_originalSystemPromptOptions`, all `getAllTools()` names with their real prompt snippets/guidelines, and extension `resources_discover` contributions). It builds the complete system prompt once from those all-tool inputs and loaded custom/append/context/skill metadata, then adds every registered tool description/schema once; provider-hidden instructions, prompt-template bodies, and full skill bodies remain excluded. The worker uses an in-memory session, starts with Pi/npm/yarn package and startup networking forced offline, installs an outbound-fetch and turn-producing-method deny boundary before extension `session_start`, and invalidates the inventory after even a caught network attempt so a partial provider-discovery catalog is never published. Provider-catalog refresh hooks skip this inventory mode. The child is disposed and process-tree-cleaned, with process-tree fallback if Windows guardian termination fails, and is neither used during internal promotion nor promoted/cached. Failure/timeout omits the estimate. Its token numerator is model-independent; while cold, the currently selected model’s context window is always the denominator and the worker-reported window is only a fallback. Any hot snapshot, user message, or provider usage supersedes it; the compact indicator has no approximation prefix.
 - State-envelope revisions are **per renderer** and advance on each full snapshot for that renderer; they continue to detect host-instance counter resets in combination with `hostInstanceId`. Cross-renderer revision comparison is never meaningful: full snapshots make it unnecessary, and `hostInstanceId` still detects host replacement.
 - Every envelope carries `protocolVersion` matching `WEBVIEW_PROTOCOL_VERSION` and the deterministic compile-time `PIE_BUILD_ID`. Readiness messages carry the renderer's compiled build id rather than echoing host data. A protocol/build mismatch is a terminal renderer boundary: the host detaches that renderer (without arming ordinary readiness recovery), and the webview preserves its last compatible display while latching all later inbound/outbound traffic off and showing persistent reload-required guidance. No receipt/commit evidence acknowledges incompatible state. Vite recomputes the build id on every watch emission before chunk hashing, and a one-shot build fails if the host/webview identities differ.
 - Delivery evidence is split: `stateReceived` proves receipt, `appCommitted` proves the app tree committed, `transcriptCommitted` proves the signed displayed transcript leaves match the host expectation, and `paintObserved` records the next visible paint. Only a valid accepted-ledger `transcriptCommitted` identity advances transcript correctness.
@@ -74,13 +80,20 @@
 - Lifecycle requests (`create`, `open`) are serialized through a host lifecycle queue.
 - Session mutations (`send`, `edit`, `truncateAfter`, `interrupt`) are serialized per session path.
 - `message.interrupt` is a bounded abort-completion barrier. While pending, `runningSessionPaths` and `interruptInFlightBySession` keep the composer in `Stopping…`; submission is blocked so stop→send cannot enter the dying turn. If remote teardown does not settle, the backend terminalizes locally, reports the classified timeout, replaces the session runtime, and gates the next send on that replacement rather than waiting forever. Interrupting an already-idle session is idempotent.
+- A successful interrupt completion installs a host-owned per-session settled fence. A late `busy=true` or `session.opened{busy:true}` publication from the retired turn cannot re-arm `runningSessionPaths`; the next genuine Send/Edit/Compact command clears the fence before optimistically starting work.
 - Editing has restart semantics. `EditRpc` performs idempotent interrupt → truncate → send inside one serialized session operation, so editing a prior message cannot race a live assistant turn.
 - Optimistic UI writes must be reversible when the authoritative operation fails. A first send to a cold session receives the service-initialization pre-ack budget; hot sends retain the short early-ack timeout. Promotion failure is still pre-ack and follows ordinary optimistic rollback. The longer budget is conditional and does not weaken hot-send timeout detection.
 - The EffectRunner routes session-scoped mutation RPC effects through `enqueueSessionOperation(sessionPath, ...)` to guarantee per-session FIFO ordering without holding the global lifecycle queue. Read-only `liveTurn.checkpoint` snapshots bypass mutation queues so recovery cannot wait behind the active work it is repairing. Checkpoint requests address the exact `sessionPath` + `turnId` + `attemptId`; while a queued-message handoff has both a terminal predecessor and a new active segment, repair must return the requested accumulator rather than whichever segment is newest. A slow prepass or interrupt for one session cannot block opening, creating, or interacting with another session.
 - Lifecycle effects (`OpenSession`, `CreateSession`) use `enqueueLifecycle(...)` directly (no inner session queue). Model/catalog ownership fences are captured when the queued RPC actually starts, not when optimistic selection is created; create retries carry an attempt number so late publications use the exact attempt's fences.
 - Pending create/duplicate tabs never issue backend reads or writes against pseudo-paths. Their model picker is seeded from the exact provider-qualified predecessor/default catalog and remains interactive while authoritative hydration catches up; opening a cold durable tab likewise borrows the last usable catalog until its own arrives. Model/reasoning choices made against a pending path, behind another model write, or while the backend is unavailable update the visible session badge immediately, coalesce per session, and remain host-owned until the target is writable. The reducer replays choices one at a time in original click order because `settings.set` also owns the global default; model-blocked sends wait for that session's write to settle, and backend loss rolls an accepted optimistic write back into this retry queue. Replay preserves capability checks, one-time image-removal confirmation, optimistic rollback, and model-write fences. A successful write requests fresh post-write hydration so a response-first create cannot strand a borrowed catalog. Catalog refresh never relabels an already-usable catalog as loading, late responses cannot recreate closed-session state, and the composer renders no additive loading chip beside the active model. Failed catalog discovery remains distinct from a successful authoritative empty catalog. Global settings and per-session catalog hydration use separate monotonic revision fences plus backend generation/model-write ownership, including `session.opened` snapshots.
+- New unnamed sessions use the normalized, 40-character first-prompt snippet as their immediate replaceable name. When session-title generation is enabled, `ArchState.sessions.titleGenerationBySession` owns its `armed`/`pending`/`failed` lifecycle and `ViewState.generatingTitleSessionPaths` is projection-only spinner state. Pending-path replacement rekeys this ownership before backend work can start. The low-priority title RPC begins only at the first assistant-start commit point and runs outside the per-session mutation queue, so it never blocks chat. A result may replace the snippet only when its path/correlation fence still owns the pending attempt; explicit SDK/manual names are checked before inference and again before durable write and always win. Timeout, invalid output, rollback, close, or backend failure leaves/restores the snippet and clears the spinner without a blocking notice. See `docs/SESSION-TITLES.md`.
 - Create/duplicate operations carry one host-generated `operationId` across local transport timeout and explicit retry. A typed transport deadline means “delayed awaiting outcome”, not failure; backend dedupe joins/reuses that operation, and only backend-generation death or a proven pre-commit error rolls it back. A delayed tab exposes explicit retry while remaining closable; a hidden late success never steals focus or reopens, including after its queued send starts and the renderer reloads.
-- Non-session effects (`PersistTabs`, `Log`) execute directly without queueing.
+- `Log` executes directly without queueing. `PersistTabs` never enters the
+  lifecycle/session queues, but complete tab snapshots are serialized on a
+  dedicated persistence queue in reducer-dispatch order. An earlier failed
+  snapshot reports its own failure without poisoning the queue, so a newer
+  close/reorder snapshot can still become durable and an older concurrent
+  write can never finish last and resurrect tabs.
 - Backend stdout has separate ordered control and event lanes. Correlated RPC
   responses drain ahead of queued stream events (FIFO within each lane), while
   event/event order and the active OS write are never preempted. This prevents
@@ -130,6 +143,7 @@
 - While the current assistant turn is live, transcript projection places queued follow-ups after that turn, at the boundary where the backend will deliver them, rather than before the in-progress output.
 - Delivery reconciliation is FIFO, matching the SDK's steering/follow-up queue order. Interrupt and queue-clear operations remove queued optimistic messages and their pending rollback snapshots.
 - Queued follow-ups remain editable without interrupting or truncating the active turn. Because the SDK exposes only whole-queue clearing, an edit atomically replaces the ordered backend queue and preserves every message's local delivery correlation.
+- Queue replacement compares the host's complete ordered local-id snapshot with the backend's authoritative undelivered correlation queue before clearing anything. If delivery already consumed an item, replacement fails without re-enqueueing an edited duplicate; the delivery event closes any stale editor and promotes the original row.
 - Queued user rows do not own the current turn's pruning or activity state. Pending assistant/activity UI stays attached before the queued boundary until delivery.
 
 ## Reducer Purity
@@ -198,18 +212,29 @@ The webview must not hold logic state in local `useState`/`useReducer`. Only the
 
 All other state (editing, draft content, session selection, model settings, prefs) lives in the host store and reaches the webview via ViewState snapshots.
 
+- Subagent nesting controls are host-owned preferences. In particular,
+  `subagentBucketCanSpawn` is a complete `{ small, medium, frontier }` boolean
+  map that defaults missing or malformed tiers to `true`, is mirrored to every
+  worker through `runtimePrefs.set`, and applies to the caller's effective
+  subagent bucket. Active-parent fallback children inherit a subagent parent's
+  bucket; root chats and their unclassified fallback children remain unrestricted.
+
 ## MCP Server State
 
 - `ViewState.mcpServers` (host-owned `ArchState.settings.mcpServers`) is the
   effective MCP server list with merged `disabled` state, fetched from the
   backend (`mcp.list`, which reads the adapter's config files). The webview
   is passive: it renders the snapshot and requests refreshes via
-  `mcpListRequested` (sent when an MCP surface opens).
+  `mcpListRequested` (sent when an MCP surface opens). Global discovery runs
+  independently of session worker recycling, so opening an MCP surface can
+  render server rows without waiting for a prior session-scoped toggle to
+  retire its worker.
 - `ViewState.mcpServersStatus` (`'loading' | 'error' | 'ok'`, optional for
   legacy hosts — treat as `'ok'`) is the discovery state of that list:
   `'loading'` while a fetch is in flight (or before the first fetch),
   `'error'` after a failed fetch/toggle (the cached rows stay visible and a
-  Refresh action is offered), `'ok'` after a successful fetch. The webview
+  Refresh action is offered), `'ok'` after a successful global fetch. A later
+  session-hydration success does not mask a failed global fetch. The webview
   must not render `No MCP servers configured` while the list is merely
   unknown/loading/failed.
 - `ViewState.mcpPendingApply` is true after a per-server toggle wrote a
@@ -224,6 +249,41 @@ All other state (editing, draft content, session selection, model settings, pref
   response (`McpServersUpdated`) is the single authority. A failed
   fetch/toggle keeps the cached list and flag and sets `mcpServersStatus` to
   `'error'`.
+
+### Session-scoped MCP server toggles
+
+The toolbar MCP dropdown is session-scoped; Settings → MCP stays the global
+surface. The two scopes never share a write path:
+
+- `ViewState.mcpSessionServers` (host-owned
+  `ArchState.settings.mcpSessionOverridesBySession` merged into the global
+  list by the projection) is the active session's effective server list:
+  globally/project-disabled servers stay disabled, and a session override can
+  hide an otherwise-enabled server. The session map is a plain
+  `Record<sessionPath, Record<serverName, boolean>>` host field; it is
+  rehydrated from the artifact after host restart, and the backend artifact is
+  removed when the session is forgotten. A menu refresh publishes the global
+  list first, then queues persisted-session hydration after already-pending
+  writes on that session's FIFO; later toggles stay ordered behind that read
+  and remain authoritative when their writes settle.
+- Toggling (`mcpSetServerEnabledForSession`, addressed to the toggled
+  session) optimistically seeds the session map, then emits an
+  `McpSetSessionServerRpc` effect carrying the FULL desired override set plus
+  `recycle: !running` (the backend may only retire an idle session's worker).
+  The backend response `McpSessionServersUpdated` replaces the session map
+  authoritatively and sets per-session pending state.
+- `ViewState.mcpSessionPendingApply` is true when the toggle's worker recycle
+  was refused (session busy, cold, or transitioned away) or the backend write
+  failed — the override applies at the next session reload / idle recycle.
+  The host retries once per idle transition (`BusyChanged` running=false);
+  the hint clears on a successful recycle (`recycled: true`) and on backend
+  restart.
+- Per-session toggle writes never touch `.pi/mcp.json` (global scope). The
+  backend translates the override set into a session-scoped config artifact
+  (`<sessionPath>.mcp-overrides.json`), passed to that session's worker as
+  `--mcp-config` so the adapter substitutes only its highest-precedence
+  discovery layer for that session. The artifact carries flags (and a copy of
+  the Pi agent-dir layer it replaces) — never server credentials.
 
 ## Multi-Renderer Ownership
 

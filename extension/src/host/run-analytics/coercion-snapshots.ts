@@ -378,6 +378,9 @@ function buildRunSnapshot(candidate: Partial<RunSnapshot>): RunSnapshot {
     ...(candidate.initialUserMessageChars === undefined
       ? {}
       : { initialUserMessageChars: toNonNegativeInteger(candidate.initialUserMessageChars) }),
+    ...(candidate.initialUserMessageTokens === undefined
+      ? {}
+      : { initialUserMessageTokens: toNonNegativeInteger(candidate.initialUserMessageTokens) }),
     sendCount: Math.trunc(c.sendCount),
     assistantTurnCount: Math.trunc(c.assistantTurnCount),
     assistantTurnDurationMs: Math.trunc(c.assistantTurnDurationMs),
@@ -392,6 +395,14 @@ function buildRunSnapshot(candidate: Partial<RunSnapshot>): RunSnapshot {
     ...(subagentAttemptSamples === undefined ? {} : { subagentAttemptSamples }),
     ...(unknownSubagentAttemptRecordSourceIds === undefined ? {} : { unknownSubagentAttemptRecordSourceIds }),
     backendErrorCodes: [...c.backendErrorCodes],
+    // ask_user outcome counters are optional on the wire: absence means the run
+    // predates ask_user tracking and must stay untracked, never inferred as zero.
+    ...(candidate.askUserAnsweredCount === undefined
+      ? {}
+      : { askUserAnsweredCount: toNonNegativeInteger(candidate.askUserAnsweredCount) }),
+    ...(candidate.askUserCancelledCount === undefined
+      ? {}
+      : { askUserCancelledCount: toNonNegativeInteger(candidate.askUserCancelledCount) }),
     contextTokens: candidate.contextTokens ?? null,
     contextLimit: candidate.contextLimit ?? null,
     inputTokens: toNonNegativeInteger(candidate.inputTokens),

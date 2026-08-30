@@ -42,6 +42,18 @@ test('validateWebviewToHostMessage rejects unknown message types', () => {
   if (!result.ok) assert.match(result.reason, /unknown/);
 });
 
+test('validateWebviewToHostMessage validates MCP control messages', () => {
+  assert.equal(validateWebviewToHostMessage({ type: 'mcpListRequested' }).ok, true);
+  assert.equal(validateWebviewToHostMessage({ type: 'mcpSetServerEnabled', name: 'jira', enabled: false }).ok, true);
+  assert.equal(validateWebviewToHostMessage({
+    type: 'mcpSetServerEnabledForSession', sessionPath: '/sessions/a.jsonl', name: 'jira', enabled: true,
+  }).ok, true);
+
+  assert.equal(validateWebviewToHostMessage({ type: 'mcpSetServerEnabled', name: '', enabled: true }).ok, false);
+  assert.equal(validateWebviewToHostMessage({ type: 'mcpSetServerEnabled', name: 'jira', enabled: 'yes' }).ok, false);
+  assert.equal(validateWebviewToHostMessage({ type: 'mcpSetServerEnabledForSession', name: 'jira', enabled: true }).ok, false);
+});
+
 test('validateWebviewToHostMessage validates compact payloads', () => {
   assert.equal(validateWebviewToHostMessage({ type: 'compact', sessionPath: '/a' }).ok, true);
   assert.equal(validateWebviewToHostMessage({ type: 'compact' }).ok, false);
@@ -87,6 +99,13 @@ test('validateWebviewToHostMessage validates openFileDiff, openFileInEditor, and
   }
 });
 
+test('validateWebviewToHostMessage validates truncateAfter payloads', () => {
+  assert.equal(validateWebviewToHostMessage({ type: 'truncateAfter', sessionPath: '/a', messageId: 'm1' }).ok, true);
+  assert.equal(validateWebviewToHostMessage({ type: 'truncateAfter', messageId: 'm1' }).ok, false);
+  assert.equal(validateWebviewToHostMessage({ type: 'truncateAfter', sessionPath: '/a' }).ok, false);
+  assert.equal(validateWebviewToHostMessage({ type: 'truncateAfter', sessionPath: '/a', messageId: 42 }).ok, false);
+});
+
 test('validateWebviewToHostMessage validates file-change expansion payloads', () => {
   assert.equal(validateWebviewToHostMessage({ type: 'setFileChangesExpanded', sessionPath: '/a', expanded: true }).ok, true);
   assert.equal(validateWebviewToHostMessage({ type: 'setFileChangesExpanded', sessionPath: '/a', expanded: 'yes' }).ok, false);
@@ -94,7 +113,7 @@ test('validateWebviewToHostMessage validates file-change expansion payloads', ()
 });
 
 test('validateWebviewToHostMessage validates session-scoped messages with required sessionPath', () => {
-  for (const type of ['openSession', 'closeSession', 'interrupt', 'startNewTask', 'continueTask', 'togglePinTab']) {
+  for (const type of ['openSession', 'closeSession', 'interrupt', 'startNewTask', 'continueTask', 'togglePinTab', 'pinAndMergePinnedTab']) {
     assert.equal(
       validateWebviewToHostMessage({ type, sessionPath: '/a' }).ok,
       true,
@@ -317,6 +336,12 @@ test('validateWebviewToHostMessage validates pinned-group messages', () => {
     assert.equal(validateWebviewToHostMessage({ type, sourcePath: '/a', toItemIndex: 1.5 }).ok, false);
     assert.equal(validateWebviewToHostMessage({ type, sourcePath: '', toItemIndex: 0 }).ok, false);
   }
+  for (const type of ['dissolvePinnedGroup', 'unpinPinnedGroup']) {
+    assert.equal(validateWebviewToHostMessage({ type, sourcePath: '/a' }).ok, true);
+    assert.equal(validateWebviewToHostMessage({ type, sourcePath: '' }).ok, false);
+    assert.equal(validateWebviewToHostMessage({ type, sourcePath: '/a', extra: true }).ok, true,
+      'shared validation leaves browser-only exact-key closure to the browser validator');
+  }
 });
 
 test('validateWebviewToHostMessage validates paging messages with optional sessionPath', () => {
@@ -443,6 +468,11 @@ test('validateWebviewToHostMessage validates setPrefs patches and rejects unknow
   assert.equal(
     validateWebviewToHostMessage({ type: 'setPrefs', prefs: { autonomousMode: true } }).ok,
     true,
+  );
+  assert.equal(
+    validateWebviewToHostMessage({ type: 'setPrefs', prefs: { mcpEnabled: false } }).ok,
+    true,
+    'the MCP global switch must cross the renderer validation boundary',
   );
   assert.equal(
     validateWebviewToHostMessage({ type: 'setPrefs', prefs: { autonomousMode: 'yes' } }).ok,

@@ -5,6 +5,8 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
+import { cloneTreeByHardlink } from '../../helpers/clone-tree-by-hardlink';
+
 import {
   applySdkRetryHotPatch,
   applySdkTerminalDurabilityPatch,
@@ -46,6 +48,8 @@ export class SessionManager {
 `;
 
 const DURABILITY_PATCH_SOURCE = `
+        // Emit to extensions first
+        await this._emitExtensionEvent(event);
         // Notify all listeners
         this._emit(event.type === "agent_end" ? { ...event, willRetry: this._willRetryAfterAgentEnd(event) } : event);
         // Handle session persistence
@@ -60,6 +64,31 @@ const DURABILITY_PATCH_SOURCE = `
         }
 `;
 
+let pinnedDistTemplatePromise: Promise<string> | undefined;
+let pinnedDistTemplateRoot: string | undefined;
+
+async function pinnedSdkDistTemplate(extensionRoot: string): Promise<string> {
+  // The 657-file dist copy costs ~1s; build it once and hardlink-clone per
+  // fixture. The template lives under extension/ so links share the volume.
+  if (!pinnedDistTemplatePromise) {
+    pinnedDistTemplatePromise = fs.mkdtemp(
+      path.join(extensionRoot, '.pie-sdk-contract-template-'),
+    ).then(async (templateRoot) => {
+      await fs.cp(
+        path.join(extensionRoot, 'node_modules', '@earendil-works', 'pi-coding-agent', 'dist'),
+        path.join(templateRoot, 'dist'),
+        { recursive: true },
+      );
+      pinnedDistTemplateRoot = templateRoot;
+      return templateRoot;
+    });
+  }
+  return pinnedDistTemplatePromise;
+}
+test.after(async () => {
+  if (pinnedDistTemplateRoot) await fs.rm(pinnedDistTemplateRoot, { recursive: true, force: true });
+});
+
 async function withSdkDir(files: Record<string, string>, run: (sdkDir: string) => Promise<void>): Promise<void> {
   const extensionRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
   const sdkDir = await fs.mkdtemp(path.join(extensionRoot, '.pie-sdk-contract-test-'));
@@ -69,11 +98,18 @@ async function withSdkDir(files: Record<string, string>, run: (sdkDir: string) =
   try {
     const requiresBarrier = !!files['dist/index.js'] || !!files['dist/config.js'];
     if (requiresBarrier) {
-      const pinnedSdkPath = path.join(extensionRoot, 'node_modules', '@earendil-works', 'pi-coding-agent');
-      await fs.cp(path.join(pinnedSdkPath, 'dist'), path.join(sdkDir, 'dist'), { recursive: true });
+      await cloneTreeByHardlink(await pinnedSdkDistTemplate(extensionRoot), sdkDir, [
+        ...Object.keys(files),
+        // The barrier may rewrite any patch target; keep the shared template
+        // pristine by private-copying everything a test or patch touches.
+        'dist/core/agent-session.js',
+        'dist/core/session-manager.js',
+        'dist/core/agent-session-runtime.js',
+        'node_modules/@earendil-works/pi-ai/dist/utils/retry.js',
+      ]);
       await fs.mkdir(path.join(sdkDir, 'node_modules', '@earendil-works'), { recursive: true });
       await fs.symlink(
-        path.join(pinnedSdkPath, 'node_modules', '@earendil-works', 'pi-agent-core'),
+        path.join(extensionRoot, 'node_modules', '@earendil-works', 'pi-coding-agent', 'node_modules', '@earendil-works', 'pi-agent-core'),
         path.join(sdkDir, 'node_modules', '@earendil-works', 'pi-agent-core'),
         process.platform === 'win32' ? 'junction' : 'dir',
       );
@@ -278,6 +314,7 @@ test('loadSdk imports allowed ESM SDK modules that satisfy the contract', async 
         listAll: async () => [],
         continueRecent: (cwd) => ({ cwd, getCwd: () => cwd, getSessionFile: () => undefined, getSessionName: () => undefined, getBranch: () => [], getEntries: () => [] }),
         create: (cwd) => ({ cwd, getCwd: () => cwd, getSessionFile: () => undefined, getSessionName: () => undefined, getBranch: () => [], getEntries: () => [] }),
+        inMemory: (cwd) => ({ cwd, getCwd: () => cwd, getSessionFile: () => undefined, getSessionName: () => undefined, getBranch: () => [], getEntries: () => [] }),
         open: (sessionPath) => ({ getCwd: () => '/repo', getSessionFile: () => sessionPath, getSessionName: () => undefined, getBranch: () => [], getEntries: () => [] }),
       };
       export const createAgentSessionServices = async () => ({ services: true });

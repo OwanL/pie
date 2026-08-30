@@ -67,6 +67,17 @@ export function useMessageParts(message: ChatMessage) {
   };
 }
 
+/** Whether a transcript message may anchor a destructive "Delete from here"
+ *  (truncateAfter). Only durable, settled messages qualify: streaming rows and
+ *  queued follow-ups have no finished content to keep, and webview-local /
+ *  optimistic messages (`local:` ids, host-side synthetic sends) have no
+ *  durable entry to truncate the session file at. The host router re-validates
+ *  existence before dispatching. */
+export function isTruncateEligibleMessage(message: ChatMessage): boolean {
+  if (message.status === 'streaming' || message.status === 'queued') return false;
+  return !message.id.startsWith('local:');
+}
+
 export function useCaptureHeight(messageRole: ChatMessage['role']) {
   const messageBodyRef = useRef<HTMLDivElement>(null);
   const [capturedHeight, setCapturedHeight] = useState<number | null>(null);

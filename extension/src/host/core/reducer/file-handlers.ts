@@ -60,3 +60,39 @@ export function handleFileChangesUpdated(
     effects: [],
   };
 }
+
+/** `FileRevertResult` — settle a destructive changed-file revert. The row is
+ *  removed from the reducer only after the effect confirms success (`ok:true`
+ *  carries `filePath`); a failed/cancelled revert leaves the row present so
+ *  the user does not lose the entry (or its read state) for a file whose
+ *  changes are still there. A cancelled inline confirm (`error: 'cancelled'`)
+ *  stays quiet; a real failure surfaces an operational notice consistent with
+ *  the compact/interrupt failure pattern. */
+export function handleFileRevertResult(
+  state: ArchState,
+  event: Extract<Event, { kind: 'FileRevertResult' }>,
+): ReducerResult {
+  if (!event.ok) {
+    if (event.error === 'cancelled') return { state, effects: [] };
+    return {
+      state: {
+        ...state,
+        settings: {
+          ...state.settings,
+          notice: 'Could not revert that file.',
+          noticeKind: 'operational-error',
+          noticeRaw: event.error ?? 'revertFile failed',
+          noticeSessionPath: event.sessionPath,
+        },
+      },
+      effects: [],
+    };
+  }
+  const nextState = produce(state, (draft) => {
+    const changes = draft.fileChanges.bySession[event.sessionPath];
+    if (changes) {
+      draft.fileChanges.bySession[event.sessionPath] = changes.filter((c) => c.path !== event.filePath);
+    }
+  });
+  return { state: nextState, effects: [] };
+}

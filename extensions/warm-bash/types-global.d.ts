@@ -4,7 +4,7 @@
 // NOT in this repo's node_modules, so tsc cannot resolve it. Declared opaque
 // (every export `any`) so this tsconfig's typecheck gate covers warm-bash's
 // INTERNAL types — its real purpose — without flagging drift against the
-// evolving pi API surface. Mirrors skill-pruner / web-access-compat.
+// evolving pi API surface. Mirrors skill-pruner / web-access-guard.
 declare module "@earendil-works/pi-coding-agent" {
   export type ExtensionAPI = any;
   export type BashOperations = any;

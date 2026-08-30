@@ -2,7 +2,7 @@ import { produce } from 'immer';
 
 import type { ArchState } from '../arch-state.js';
 import { isPendingTabPath } from '../../../shared/tab-behavior.js';
-import { mergePruningSettings, mergeToolResultPruningSettings, normalizeComposerInitialRows, normalizeNestedAllowedBuckets, normalizeSubagentBuckets, normalizeUiPathParentDepth, type ChatPrefs, type ComposerInput } from '../../../shared/protocol.js';
+import { mergePruningSettings, mergeSessionTitlesSettings, mergeToolResultPruningSettings, normalizeComposerInitialRows, normalizeNestedAllowedBuckets, normalizeSubagentBucketCanSpawn, normalizeSubagentBuckets, normalizeUiPathParentDepth, type ChatPrefs, type ComposerInput } from '../../../shared/protocol.js';
 import type { Command } from '../commands.js';
 import type { ReducerResult } from './helpers.js';
 import { addToArray, appendLocalUserMessage, truncateLocalTranscriptAfter } from './helpers.js';
@@ -60,6 +60,9 @@ export function handleCompact(state: ArchState, cmd: Extract<Command, { kind: 'C
       ...state,
       sessions: {
         ...state.sessions,
+        interruptSettledSessionPaths: state.sessions.interruptSettledSessionPaths.filter(
+          (path) => path !== cmd.sessionPath,
+        ),
         compactingSessionPaths: addToArray(state.sessions.compactingSessionPaths, cmd.sessionPath),
       },
     },
@@ -248,6 +251,9 @@ export function handleSend(state: ArchState, cmd: Extract<Command, { kind: 'Send
       startedAt: cmd.timestamp,
     };
     draft.sessions.runningSessionPaths = nextRunningPaths;
+    draft.sessions.interruptSettledSessionPaths = draft.sessions.interruptSettledSessionPaths.filter(
+      (path) => path !== cmd.sessionPath,
+    );
     delete draft.composer.draftTextBySession[cmd.sessionPath];
     // Retry clears a stale prepass 'failed' chip from a previous turn
     // (Brief F); the phase returns to 'running' on the early-ack promote.
@@ -339,6 +345,9 @@ export function handleEdit(state: ArchState, cmd: Extract<Command, { kind: 'Edit
   const wasRunning = state.sessions.runningSessionPaths.includes(cmd.sessionPath);
   const nextRunningPaths = addToArray(state.sessions.runningSessionPaths, cmd.sessionPath);
   const nextState = produce(state, (draft) => {
+    draft.sessions.interruptSettledSessionPaths = draft.sessions.interruptSettledSessionPaths.filter(
+      (path) => path !== cmd.sessionPath,
+    );
     draft.transcript.editingMessageIdBySession[cmd.sessionPath] = null;
     delete draft.transcript.editingDraftBySession[cmd.sessionPath];
     // The edit operation establishes a newer authority than any page/tail
@@ -519,6 +528,12 @@ export function handleSetPrefs(state: ArchState, cmd: Extract<Command, { kind: '
     ...(cmd.prefs.subagentNestedAllowedBuckets !== undefined && {
       subagentNestedAllowedBuckets: normalizeNestedAllowedBuckets(cmd.prefs.subagentNestedAllowedBuckets),
     }),
+    // The per-bucket delegation policy is also a complete fail-open map so
+    // partial preference patches cannot accidentally turn unspecified tiers
+    // into leaves.
+    ...(cmd.prefs.subagentBucketCanSpawn !== undefined && {
+      subagentBucketCanSpawn: normalizeSubagentBucketCanSpawn(cmd.prefs.subagentBucketCanSpawn),
+    }),
   };
   // Phase 2 cutover: the unread-finished-sessions clear moved here from
   // service.setPrefs (the SetPrefsRpc effect handler). When the merged
@@ -550,7 +565,13 @@ export function handleMcpListRequested(state: ArchState, cmd: Extract<Command, {
       ...state,
       settings: { ...state.settings, mcpServersStatus: 'loading' },
     },
-    effects: [{ kind: 'McpListRpc', corrId: cmd.corrId }],
+    effects: [{
+      kind: 'McpListRpc',
+      corrId: cmd.corrId,
+      // Hydrate the active session's persisted per-server override set after
+      // publishing the independently fetched global rows.
+      ...(state.sessions.activeSessionPath !== null ? { sessionPath: state.sessions.activeSessionPath } : {}),
+    }],
   };
 }
 
@@ -561,6 +582,43 @@ export function handleMcpSetServerEnabled(state: ArchState, cmd: Extract<Command
       settings: { ...state.settings, mcpServersStatus: 'loading' },
     },
     effects: [{ kind: 'McpSetServerRpc', corrId: cmd.corrId, name: cmd.name, enabled: cmd.enabled }],
+  };
+}
+
+/** Session-scoped server toggle: merge the desired flag into the session's
+ *  host-owned override set, then ask the backend to write the artifact and
+ *  (when the session is idle) recycle its worker so the adapter applies the
+ *  set at the next session start. A busy session keeps state-only here and
+ *  gains the pending hint; the same effect retries on the next idle
+ *  transition. */
+export function handleMcpSetServerEnabledForSession(state: ArchState, cmd: Extract<Command, { kind: 'McpSetServerEnabledForSession' }>): ReducerResult {
+  const previous = state.settings.mcpSessionOverridesBySession[cmd.sessionPath] ?? {};
+  const overrides: Record<string, boolean> = { ...previous, [cmd.name]: !cmd.enabled };
+  const recycle = !state.sessions.runningSessionPaths.includes(cmd.sessionPath);
+  return {
+    state: {
+      ...state,
+      settings: {
+        ...state.settings,
+        // Authoritative once the backend answers, but a sync of the same map
+        // keeps the UI immediately responsive.
+        mcpSessionOverridesBySession: {
+          ...state.settings.mcpSessionOverridesBySession,
+          [cmd.sessionPath]: overrides,
+        },
+        mcpPendingApplyBySession: {
+          ...state.settings.mcpPendingApplyBySession,
+          [cmd.sessionPath]: false,
+        },
+      },
+    },
+    effects: [{
+      kind: 'McpSetSessionServerRpc',
+      corrId: cmd.corrId,
+      sessionPath: cmd.sessionPath,
+      overrides,
+      recycle,
+    }],
   };
 }
 
@@ -631,6 +689,30 @@ export function handleSetToolResultPruningSettings(state: ArchState, cmd: Extrac
     effects: [
       {
         kind: 'SetToolResultPruningSettings',
+        corrId: cmd.corrId,
+        settings: cmd.settings,
+      },
+    ],
+  };
+}
+
+export function handleSetSessionTitlesSettings(state: ArchState, cmd: Extract<Command, { kind: 'SetSessionTitlesSettings' }>): ReducerResult {
+  // Option B: apply optimistically for instant UI. The service keeps its
+  // catch+mirror+notice (graceful degradation when PI_CODING_AGENT_DIR is
+  // absent), so SetSessionTitlesSettingsResult is always {ok:true} and no
+  // snapshot/revert is needed. mergeSessionTitlesSettings matches the
+  // disk-write merge so optimistic state == persisted state.
+  return {
+    state: {
+      ...state,
+      settings: {
+        ...state.settings,
+        sessionTitlesSettings: mergeSessionTitlesSettings(state.settings.sessionTitlesSettings, cmd.settings),
+      },
+    },
+    effects: [
+      {
+        kind: 'SetSessionTitlesSettings',
         corrId: cmd.corrId,
         settings: cmd.settings,
       },

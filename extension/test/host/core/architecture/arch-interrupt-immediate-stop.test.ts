@@ -113,8 +113,68 @@ test('Interrupt instantly marks the streaming message interrupted, keeps running
     !r3.state.sessions.runningSessionPaths.includes(SESSION),
     'running stays clear after ok result',
   );
+  assert.deepEqual(r3.state.sessions.interruptSettledSessionPaths, [SESSION]);
   // The message remains interrupted (the turn was aborted, not completed).
   assert.equal(assistant(r3.state).status, 'interrupted');
+});
+
+test('late busy/opened events cannot resurrect an interrupted turn, while the next send clears the fence', () => {
+  const interrupted = reducer(withStreamingAssistant(createInitialArchState()), {
+    kind: 'Command',
+    cmd: { kind: 'Interrupt', corrId: 'c-int', sessionPath: SESSION },
+  } as Event).state;
+  const settled = reducer(interrupted, {
+    kind: 'InterruptResult', corrId: 'c-int', sessionPath: SESSION, ok: true,
+  } as Event).state;
+
+  const afterLateBusy = reducer(settled, {
+    kind: 'BusyChanged', sessionPath: SESSION, running: true,
+  } as Event);
+  assert.equal(afterLateBusy.state, settled, 'late busy=true is ignored by reference');
+  assert.ok(!afterLateBusy.state.sessions.runningSessionPaths.includes(SESSION));
+
+  const summary = {
+    path: SESSION,
+    cwd: '/workspace',
+    name: 'Interrupted session',
+    createdAt: '2026-07-08T10:00:00.000Z',
+    modifiedAt: '2026-07-08T10:00:02.000Z',
+    messageCount: 2,
+  };
+  const afterLateOpened = reducer(afterLateBusy.state, {
+    kind: 'SessionOpened',
+    sessionPath: SESSION,
+    payload: {
+      session: summary,
+      transcript: afterLateBusy.state.transcript.bySession[SESSION] ?? [],
+      transcriptWindow: {
+        totalCount: 2,
+        loadedStart: 0,
+        loadedEnd: 2,
+        hasOlder: false,
+        hasNewer: false,
+        isPartial: false,
+        hasUserMessages: true,
+      },
+      busy: true,
+    },
+    backendGeneration: 0,
+    modelWriteFence: 0,
+    modelHydrationRevision: 0,
+    catalogHydrationRevision: 0,
+  } as Event);
+  assert.ok(!afterLateOpened.state.sessions.runningSessionPaths.includes(SESSION));
+
+  const sent = reducer(afterLateOpened.state, {
+    kind: 'Command',
+    cmd: {
+      kind: 'Send', corrId: 'c-next', sessionPath: SESSION,
+      text: 'new work', inputs: [], composedText: 'new work',
+      localId: 'local:next', previousSummary: null, timestamp: 2,
+    },
+  } as Event);
+  assert.deepEqual(sent.state.sessions.interruptSettledSessionPaths, []);
+  assert.ok(sent.state.sessions.runningSessionPaths.includes(SESSION));
 });
 
 test('MessageThinking is also dropped during the in-flight abort window', () => {

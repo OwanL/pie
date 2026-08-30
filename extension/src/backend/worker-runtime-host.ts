@@ -13,6 +13,7 @@ import {
   SUBAGENT_FALLBACK_ON_PROVIDER_FAILURE_ENV,
   SUBAGENT_BUCKETS_ENV,
   NESTED_ALLOWED_BUCKETS_ENV,
+  SUBAGENT_BUCKET_CAN_SPAWN_ENV,
   type DetailResult,
   type LazyDetailRef,
   type ChatMessage,
@@ -99,6 +100,10 @@ export interface WorkerRuntimeHostOptions {
   server: WorkerServer;
   owner: SdkWorkerOwnershipIdentity;
   patchIdentity: SdkPatchIdentity;
+  /** Test seam for the worker-local automatic-recovery abort bound. */
+  automaticRecoveryAbortGraceMs?: number;
+  /** Test seam for the quota incident's normal-settlement grace window. */
+  quotaSettlementGraceMs?: number;
 }
 
 /**
@@ -123,6 +128,11 @@ const WORKER_IPC_DELTA_BUDGET = WORKER_IPC_TERMINAL_MESSAGE_BUDGET;
 const WORKER_IPC_LIFECYCLE_MESSAGE_MARGIN = 24 * 1024;
 const WORKER_IPC_LIFECYCLE_MESSAGE_BUDGET =
   WORKER_IPC_DEFAULT_LIFECYCLE_QUEUE_BYTES - WORKER_IPC_LIFECYCLE_MESSAGE_MARGIN;
+/** Match the coordinator supervisor's soft-interrupt grace. A watchdog-owned
+ * recovery must not wait forever for an SDK adapter whose abort promise never
+ * settles; after this window the worker fails closed and the coordinator
+ * reconciles the live checkpoint from confirmed process loss. */
+const DEFAULT_AUTOMATIC_RECOVERY_ABORT_GRACE_MS = 2_000;
 
 /**
  * Focused per-root execution owner. It deliberately does not embed or start a
@@ -161,6 +171,10 @@ export class WorkerRuntimeHost {
   private autonomousMode = false;
   private mcpEnabled = true;
   private readonly detailStore: WorkerLiveDetailStore;
+  /** One watchdog recovery owns a runtime generation at a time. A terminal
+   * record is retained until process exit so overlapping watchdogs cannot emit
+   * duplicate fatal/reconciliation signals for the same stuck context. */
+  private automaticRecovery?: { context: SessionContext; terminal: boolean };
 
   constructor(private readonly options: WorkerRuntimeHostOptions) {
     this.detailStore = new WorkerLiveDetailStore({
@@ -201,6 +215,13 @@ export class WorkerRuntimeHost {
       this.applyRuntimePrefs(payload.values as WorkerJsonObject);
     } else if (domain === 'providerPolicy' && payload.providers && typeof payload.providers === 'object' && !Array.isArray(payload.providers)) {
       ProviderGate.getInstance()?.applyUserOverrides(payload.providers as never);
+    } else if (domain === 'sessionRegistry' && Array.isArray(payload.tabs)) {
+      // Extensions execute inside this long-lived worker process. Keep the
+      // compatibility environment read live instead of leaving it frozen at
+      // the process-spawn snapshot. The paired revision lets tools fence a
+      // multi-step workflow against a newer host tab/pin/busy snapshot.
+      process.env['PIE_OPEN_TABS'] = JSON.stringify(payload.tabs);
+      process.env['PIE_OPEN_TABS_REVISION'] = String(revision);
     }
   }
 
@@ -325,7 +346,11 @@ export class WorkerRuntimeHost {
           'provider.granted',
           requestId,
         );
-        return { leaseId: response.lease.leaseId };
+        return {
+          leaseId: response.lease.leaseId,
+          headerWaitMs: response.lease.headerWaitMs,
+          streamIdleTimeoutMs: response.lease.streamIdleTimeoutMs,
+        };
       },
       cancel: async (targetRequestId, reason) => {
         await this.options.server.requestFrame(
@@ -344,7 +369,9 @@ export class WorkerRuntimeHost {
       provider: this.context?.activeRequest?.provider ?? this.context?.session.model?.provider,
       model: this.context?.activeRequest?.modelId ?? this.context?.session.model?.id,
       turnId: this.context?.activeRequest?.id,
-    }));
+    }), {
+      resolveProvider: (url, fallbackProvider) => this.resolveNetworkProvider(url, fallbackProvider),
+    });
 
     this.sdk = await loadSdk(payload.sdkPath, { mode: 'worker', patchIdentity: this.options.patchIdentity });
     // Isolated workers perform provider I/O but never install an independent
@@ -629,12 +656,98 @@ export class WorkerRuntimeHost {
       emitSessionListChanged: async () => undefined,
       observeSubagentDetail: (root, details) => this.detailStore.observe({ ...root, details }),
       terminalizeSubagentDetail: (root, durableEntryId) => this.detailStore.terminal(root, durableEntryId),
-      recoverStuckSession: (owner, reason) => {
-        void this.interrupt().catch(() => this.emit('operational-error', {
-          code: 'SESSION_RUNTIME_RECOVERY_FAILED', message: reason, sessionPath: owner.sessionPath,
-        }));
-      },
+      recoverStuckSession: (owner, reason) => this.recoverStuckSession(owner, reason),
     }, context, event);
+  }
+
+  /** Bound watchdog-owned teardown independently of the public interrupt
+   * command. The coordinator already bounds public interrupts and force-kills
+   * the worker after the same grace; this closes the equivalent worker-local
+   * path where awaiting `session.abort()` used to hang forever. */
+  private recoverStuckSession(context: SessionContext, reason: string): void {
+    if (this.disposed || this.context !== context) return;
+    if (this.automaticRecovery?.context === context) return;
+
+    const configuredGrace = this.options.automaticRecoveryAbortGraceMs;
+    const graceMs = typeof configuredGrace === 'number'
+      && Number.isFinite(configuredGrace)
+      && configuredGrace > 0
+      ? configuredGrace
+      : DEFAULT_AUTOMATIC_RECOVERY_ABORT_GRACE_MS;
+    const recovery = { context, terminal: false };
+    this.automaticRecovery = recovery;
+    const ownedRequest = context.activeRequest;
+    const deadlineAt = Date.now() + graceMs;
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<'timeout'>((resolve) => {
+      timer = setTimeout(() => resolve('timeout'), graceMs);
+      timer.unref?.();
+    });
+    const abort = this.interrupt().then(async () => {
+      // Some adapters resolve session.abort() before publishing agent_end. Give
+      // that lifecycle event the remainder of the same bounded grace, but do
+      // not equate an abort promise resolution with semantic recovery.
+      while (!this.disposed && this.context === context
+        && (ownedRequest ? context.activeRequest === ownedRequest : !!context.activeRequest)) {
+        const remaining = deadlineAt - Date.now();
+        if (remaining <= 0) return 'unsettled' as const;
+        await new Promise<void>((resolve) => {
+          const settlementTimer = setTimeout(resolve, Math.min(10, remaining));
+          settlementTimer.unref?.();
+        });
+      }
+      return 'settled' as const;
+    });
+
+    void Promise.race([abort, timeout]).then((outcome) => {
+      if (outcome === 'settled') {
+        if (this.automaticRecovery === recovery) this.automaticRecovery = undefined;
+        return;
+      }
+      this.failAutomaticRecovery(
+        recovery,
+        reason,
+        graceMs,
+        outcome === 'unsettled'
+          ? new Error('session.abort() resolved but the owned request did not terminalize')
+          : undefined,
+      );
+    }, (error) => {
+      this.failAutomaticRecovery(recovery, reason, graceMs, error);
+    }).finally(() => {
+      if (timer) clearTimeout(timer);
+    });
+  }
+
+  private failAutomaticRecovery(
+    recovery: { context: SessionContext; terminal: boolean },
+    reason: string,
+    graceMs: number,
+    cause?: unknown,
+  ): void {
+    if (recovery.terminal || this.automaticRecovery !== recovery) return;
+    recovery.terminal = true;
+    const context = recovery.context;
+    if (this.disposed || this.context !== context) return;
+    const requestId = context.activeRequest?.id;
+    const causeMessage = cause instanceof Error ? cause.message : cause === undefined ? undefined : String(cause);
+    const detail = causeMessage
+      ? `Automatic session recovery failed: ${causeMessage}`
+      : `Automatic session recovery abort or terminalization did not settle within ${graceMs}ms.`;
+    const terminal = new Error(`${detail} ${reason}`);
+    this.emit('operational-error', {
+      incidentId: `runtime-recovery:${requestId ?? context.sessionPath}`,
+      code: 'SESSION_RUNTIME_RECOVERY_FAILED',
+      message: reason,
+      detail,
+      sessionPath: context.sessionPath,
+      requestId,
+    });
+    // failRuntime closes the worker transport (and stops heartbeats) exactly
+    // once. The coordinator then confirms process loss and owns transcript,
+    // busy-state, and tool-terminal reconciliation.
+    this.options.server.failRuntime(terminal);
   }
 
   /** Bridge fetch-layer incidents into the active isolated runtime. This used
@@ -677,6 +790,16 @@ export class WorkerRuntimeHost {
     }
     const ownsCurrentRequest = owner?.requestId === active.id;
     if (owner && ownsCurrentRequest) {
+      if (observation.kind === 'gate_queue' || observation.kind === 'gate_acquired'
+        || observation.kind === 'headers_wait' || observation.kind === 'headers_received') {
+        active.providerNetworkPendingAttemptId = observation.attemptId;
+        active.providerNetworkPending = true;
+      } else if ((observation.kind === 'raw_chunk' || observation.kind === 'gate_rejected'
+        || observation.kind === 'transport_terminal' || observation.kind === 'transport_error')
+        && active.providerNetworkPendingAttemptId === observation.attemptId) {
+        active.providerNetworkPending = false;
+        active.providerNetworkPendingAttemptId = undefined;
+      }
       if (owner.retryId !== undefined
         && active.retryTiming?.retryId === owner.retryId
         && active.retryTiming.providerAttemptStartedAt === undefined
@@ -696,7 +819,7 @@ export class WorkerRuntimeHost {
       }
     }
 
-    if (observation.kind === 'gate_rejected' || observation.kind === 'headers_received'
+    if (observation.kind === 'gate_rejected'
       || observation.kind === 'transport_terminal' || observation.kind === 'transport_error') {
       this.providerAttemptOwners.delete(observation.attemptId);
     }
@@ -753,14 +876,8 @@ export class WorkerRuntimeHost {
       active.quotaSettlementTimer = setTimeout(() => {
         const current = context.activeRequest;
         if (current?.id !== requestId || current.latestProviderIncident?.kind !== 'quota_exhausted') return;
-        void this.interrupt().catch(() => this.emit('operational-error', {
-          incidentId: `provider-recovery:${requestId}`,
-          code: 'SESSION_RUNTIME_RECOVERY_FAILED',
-          message: current.latestProviderIncident!.userMessage,
-          sessionPath: context.sessionPath,
-          requestId,
-        }));
-      }, 15_000);
+        this.recoverStuckSession(context, current.latestProviderIncident.userMessage);
+      }, this.options.quotaSettlementGraceMs ?? 15_000);
       active.quotaSettlementTimer.unref?.();
     }
   }
@@ -1052,6 +1169,7 @@ export class WorkerRuntimeHost {
       ['historyCompaction', HISTORY_COMPACTION_ENV],
       ['subagentBuckets', SUBAGENT_BUCKETS_ENV],
       ['subagentNestedAllowedBuckets', NESTED_ALLOWED_BUCKETS_ENV],
+      ['subagentBucketCanSpawn', SUBAGENT_BUCKET_CAN_SPAWN_ENV],
       ['subagentDropTools', 'PIE_SUBAGENT_DROP_TOOLS_JSON'],
     ];
     for (const [key, env] of jsonEnv) {
@@ -1220,6 +1338,61 @@ export class WorkerRuntimeHost {
     // configured credentials) and must not expose unavailable fallback models.
     if (!registryWasRead && this.syncedCatalogModels !== undefined) return this.syncedCatalogModels;
     return models;
+  }
+
+  private resolveNetworkProvider(url: string, fallbackProvider?: string): string | undefined {
+    const providers = this.syncPayloads.get('providerPolicy')?.providers;
+    if (!providers || typeof providers !== 'object' || Array.isArray(providers)) return fallbackProvider;
+    let target: URL;
+    try { target = new URL(url); } catch { return fallbackProvider; }
+    let best: { provider: string; length: number } | undefined;
+    const consider = (provider: string, prefix: unknown): void => {
+      if (typeof prefix !== 'string') return;
+      let base: URL;
+      try { base = new URL(prefix); } catch { return; }
+      if (target.origin !== base.origin) return;
+      const basePath = base.pathname.replace(/\/+$/, '') || '/';
+      const targetPath = target.pathname;
+      const pathMatches = basePath === '/'
+        || targetPath === basePath
+        || targetPath.startsWith(`${basePath}/`);
+      if (!pathMatches || basePath.length <= (best?.length ?? -1)) return;
+      best = { provider, length: basePath.length };
+    };
+    for (const [provider, rawPolicy] of Object.entries(providers)) {
+      if (!rawPolicy || typeof rawPolicy !== 'object' || Array.isArray(rawPolicy)) continue;
+      const policy = rawPolicy as WorkerJsonObject;
+      const prefixes = [
+        ...(typeof policy.baseUrl === 'string' ? [policy.baseUrl] : []),
+        ...(Array.isArray(policy.baseUrls)
+          ? policy.baseUrls.filter((value): value is string => typeof value === 'string')
+          : []),
+      ];
+      for (const prefix of prefixes) {
+        consider(provider, prefix);
+      }
+    }
+    // Built-in/OAuth providers (notably GitHub Copilot enterprise) receive
+    // their effective URL from the live SDK registry rather than models.json.
+    // Consult that worker-local authority too, but only for providers present
+    // in the coordinator policy so an unrelated model URL cannot create an
+    // accidental default-capacity pool.
+    try {
+      const registry = this.context?.runtime.services.modelRegistry;
+      const configuredProviders = new Set(Object.keys(providers));
+      const models = [
+        ...(registry?.getAll?.() ?? []),
+        ...(registry?.getAvailable() ?? []),
+      ];
+      for (const model of models) {
+        if (!configuredProviders.has(model.provider)) continue;
+        consider(model.provider, model.baseUrl);
+      }
+    } catch {
+      // Policy prefixes and root-session identity remain safe fallbacks when
+      // the runtime registry is unavailable during startup or refresh.
+    }
+    return best?.provider ?? fallbackProvider;
   }
 
   /** Report runtime-discovered models to the coordinator without replacing its

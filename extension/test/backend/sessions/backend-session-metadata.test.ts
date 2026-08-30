@@ -13,7 +13,6 @@ import {
   loadConfiguredModels,
   resolveActiveModel,
 } from '../../../src/backend/session-metadata';
-import { NEW_SESSION_NAME } from '../../../src/shared/session-name';
 import type { SessionContext } from '../../../src/backend/server-types';
 import type { SdkModule } from '../../../src/backend/sdk';
 
@@ -89,8 +88,8 @@ test('deriveSessionName prefers explicit sdk names and falls back to user conten
       },
     },
   }));
-  assert.equal(derivedFromUser.name, 'Fix Broken Extension Tests');
-  assert.equal(derivedFromUser.isPlaceholder, false);
+  assert.equal(derivedFromUser.name, 'Fix the broken extension tests before r…');
+  assert.equal(derivedFromUser.isPlaceholder, true);
 
   const placeholder = deriveSessionName(makeContext({
     session: {
@@ -106,7 +105,7 @@ test('deriveSessionName prefers explicit sdk names and falls back to user conten
       },
     },
   }));
-  assert.deepEqual(placeholder, { name: NEW_SESSION_NAME, isPlaceholder: true });
+  assert.deepEqual(placeholder, { name: 'help', isPlaceholder: true });
 });
 
 test('buildCurrentSummary falls back to startup cwd and normalizes thinking level', () => {
@@ -128,8 +127,8 @@ test('buildCurrentSummary falls back to startup cwd and normalizes thinking leve
   }), '/startup');
 
   assert.equal(summary.cwd, '/startup');
-  assert.equal(summary.name, 'Add Coverage-focused Tests');
-  assert.equal(summary.isPlaceholder, false);
+  assert.equal(summary.name, 'Add coverage-focused tests now');
+  assert.equal(summary.isPlaceholder, true);
   assert.equal(summary.messageCount, 2);
   assert.equal(summary.modelId, 'claude-test');
   assert.equal(summary.provider, undefined);
@@ -394,8 +393,8 @@ test('listSessions derives placeholder names from the session file and sorts by 
     assert.equal(sessions.length, 2);
     assert.equal(sessions[0]?.name, 'Named Session');
     assert.equal(sessions[0]?.isPlaceholder, false);
-    assert.equal(sessions[1]?.name, 'Refactor Analytics Pipeline');
-    assert.equal(sessions[1]?.isPlaceholder, false);
+    assert.equal(sessions[1]?.name, 'Refactor the analytics pipeline now');
+    assert.equal(sessions[1]?.isPlaceholder, true);
   });
 });
 
@@ -415,8 +414,8 @@ test('listSessions derives names from SDK metadata without rereading the transcr
 
   const sessions = await listSessions(sdk);
 
-  assert.equal(sessions[0]?.name, 'Make Session Switching Fast');
-  assert.equal(sessions[0]?.isPlaceholder, false);
+  assert.equal(sessions[0]?.name, 'Make session switching fast and transpa…');
+  assert.equal(sessions[0]?.isPlaceholder, true);
 });
 
 test('listSessions lists only the configured canonical root and does not scan the SDK legacy default', async () => {

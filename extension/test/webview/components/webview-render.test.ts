@@ -1303,22 +1303,25 @@ test('SystemPromptToggleMenu hides display-only entries like the provider card',
     summary: 'Harness instructions',
   };
 
-  // With only the non-toggleable provider card, there is nothing to toggle,
-  // so the menu renders nothing (no trigger button).
-  const emptyHtml = renderToString(h(SystemPromptToggleMenu, {
+  // With only the non-toggleable provider card, the stable toolbar indicator
+  // remains visible but disabled. The provider itself is not offered as a row.
+  const unavailableHtml = renderToString(h(SystemPromptToggleMenu, {
     prompts: [providerEntry],
     onSetToggles: () => undefined,
   }));
-  assert.equal(emptyHtml, '');
+  assert.match(unavailableHtml, /system-prompt-toggle-trigger/);
+  assert.match(unavailableHtml, /disabled/);
 
-  // Once a toggleable entry exists the trigger renders. The dropdown only mounts
-  // when open (SSR defaults to closed); the backend test covers the invariant
-  // that the provider entry carries `toggleable: false` and is never disabled.
+  // Once a toggleable entry exists the trigger becomes interactive. The
+  // dropdown only mounts when open (SSR defaults to closed); the backend test
+  // covers the invariant that the provider entry carries `toggleable: false`
+  // and is never disabled.
   const triggerHtml = renderToString(h(SystemPromptToggleMenu, {
     prompts: [providerEntry, harnessEntry],
     onSetToggles: () => undefined,
   }));
   assert.match(triggerHtml, /system-prompt-toggle-trigger/);
+  assert.doesNotMatch(triggerHtml, /disabled/);
 });
 
 test('rendered SystemPromptMessage and TranscriptVirtualRow cover prompt and gap rows', async () => {

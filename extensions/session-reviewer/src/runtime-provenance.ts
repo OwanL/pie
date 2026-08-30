@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 
 import { readSessionIdentityFromBytes } from './evidence.js';
 import type { ReviewerRuntime, SessionReviewV2 } from './types.js';
+import { expectedAgentForWorkflowRef, LEGACY_REVIEWER_AGENT, SESSION_EVALUATOR_AGENT } from './workflow.js';
 
 interface ToolCall { id: string; name: string; arguments: unknown }
 interface ToolResult { toolCallId: string; toolName: string; details?: unknown; timestamp?: unknown }
@@ -52,7 +53,11 @@ function assertRuntime(record: ReviewerRuntime, index: TranscriptIndex): void {
   const result = index.results.get(record.toolCallId);
   if (!call || call.name !== 'subagent' || !result || result.toolName !== 'subagent') throw new Error(`reviewer ${record.reviewerId} is not bound to a completed prior subagent call`);
   const input = call.arguments as Record<string, unknown> | undefined;
-  if (input?.agent !== 'reviewer') throw new Error(`reviewer ${record.reviewerId} is not bound to the reviewer agent`);
+  const expectedAgent = expectedAgentForWorkflowRef(input?.workflowRef) ?? SESSION_EVALUATOR_AGENT;
+  if (input?.agent !== expectedAgent) {
+    const legacyHint = expectedAgent === LEGACY_REVIEWER_AGENT ? 'legacy reviewer' : 'tool-free session-evaluator';
+    throw new Error(`reviewer ${record.reviewerId} is not bound to the required ${legacyHint} agent`);
+  }
   if (input.bucket !== record.requestedBucket) throw new Error(`reviewer ${record.reviewerId} requested bucket does not match its subagent call`);
   const actual = runtimeResult(result, record.toolCallId);
   const expected: Record<string, unknown> = {

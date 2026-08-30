@@ -23,6 +23,7 @@ import {
 } from './set-model-handlers.js';
 import { mapSendOrEditError, mapPreflightError, stripReqIds } from '../../../shared/error-mapping.js';
 import { isPendingTabPath } from '../../../shared/tab-behavior.js';
+import { handleFileRevertResult } from './file-handlers.js';
 
 export function handleInterruptResult(state: ArchState, event: Extract<Event, { kind: 'InterruptResult' }>): ReducerResult {
   let nextState = state;
@@ -42,6 +43,10 @@ export function handleInterruptResult(state: ArchState, event: Extract<Event, { 
   nextState = produce(nextState, (draft) => {
     draft.sessions.interruptInFlightBySession[event.sessionPath] = false;
     if (event.ok) {
+      draft.sessions.interruptSettledSessionPaths = addToArray(
+        draft.sessions.interruptSettledSessionPaths,
+        event.sessionPath,
+      );
       draft.sessions.runningSessionPaths = draft.sessions.runningSessionPaths.filter(
         (p: string) => p !== event.sessionPath,
       );
@@ -57,6 +62,11 @@ export function handleInterruptResult(state: ArchState, event: Extract<Event, { 
       for (const [corrId, op] of Object.entries(draft.pending.promoted)) {
         if (op.queued && op.sessionPath === event.sessionPath) delete draft.pending.promoted[corrId];
       }
+    } else {
+      draft.sessions.interruptSettledSessionPaths = removeFromArray(
+        draft.sessions.interruptSettledSessionPaths,
+        event.sessionPath,
+      );
     }
   });
 
@@ -85,6 +95,16 @@ export function handleReplaceQueueResult(state: ArchState, event: Extract<Event,
           delete draft.transcript.deferredWindowReplacementBySession[event.sessionPath];
           draft.settings.notice = 'The queued messages could not be restored and were cleared. Re-send them if they are still needed.';
           draft.settings.noticeKind = 'operational-error';
+          draft.settings.noticeRaw = event.error;
+          draft.settings.noticeSessionPath = event.sessionPath;
+        } else if (event.error?.includes('QUEUE_CHANGED')) {
+          // queuedDelivered will authoritatively promote/move the row when its
+          // event lane drains. Close the stale editor now and explain that the
+          // original message already crossed the delivery boundary.
+          draft.transcript.editingMessageIdBySession[event.sessionPath] = null;
+          delete draft.transcript.deferredWindowReplacementBySession[event.sessionPath];
+          draft.settings.notice = 'That queued message already started, so its edit was not applied.';
+          draft.settings.noticeKind = 'edit-failed';
           draft.settings.noticeRaw = event.error;
           draft.settings.noticeSessionPath = event.sessionPath;
         } else if (mapped) {
@@ -293,8 +313,9 @@ export function handleSendResult(state: ArchState, event: Extract<Event, { kind:
     // Brief F: the send was rejected before the prepass ran — clear any
     // prepass chip (idle).
     delete draft.pending.prepassBySession[pending.sessionPath];
-    // Restore session summary if we had one
+    // Restore session summary if we had one.
     if (pending.previousSummary) {
+      delete draft.sessions.titleGenerationBySession[pending.sessionPath];
       const idx = draft.sessions.sessions.findIndex((s) => s.path === pending.previousSummary!.path);
       if (idx >= 0) {
         draft.sessions.sessions[idx] = pending.previousSummary;
@@ -446,6 +467,7 @@ export function handlePreflightFailed(state: ArchState, event: Extract<Event, { 
     draft.settings.noticeSessionPath = snapshot.sessionPath;
     // Restore session summary if the optimistic send had renamed it
     if (snapshot.previousSummary) {
+      delete draft.sessions.titleGenerationBySession[snapshot.sessionPath];
       const idx = draft.sessions.sessions.findIndex((s) => s.path === snapshot.previousSummary!.path);
       if (idx >= 0) {
         draft.sessions.sessions[idx] = snapshot.previousSummary;
@@ -727,8 +749,61 @@ export function handleMcpServersUpdated(state: ArchState, event: Extract<Event, 
       settings: {
         ...state.settings,
         mcpServers: event.servers ?? state.settings.mcpServers,
-        mcpServersStatus: 'ok',
+        // Session hydration is a second, session-queued read. It must not mask
+        // a failed or still-loading global discovery request.
+        mcpServersStatus: event.servers !== undefined ? 'ok' : state.settings.mcpServersStatus,
         mcpPendingApply: event.pendingApply ?? state.settings.mcpPendingApply,
+        // Opportunistic hydration from a session-scoped list read (only when
+        // the initiating RPC included a sessionPath).
+        ...(event.sessionPath !== undefined && event.sessionOverrides !== undefined
+          ? {
+              mcpSessionOverridesBySession: {
+                ...state.settings.mcpSessionOverridesBySession,
+                [event.sessionPath]: event.sessionOverrides,
+              },
+            }
+          : {}),
+      },
+    },
+    effects: [],
+  };
+}
+
+/** Session-scoped toggle answered. On success replace the session's
+ *  authoritative override set; `recycled: false` means the adapter has not
+ *  seen the artifact yet (busy/cold), so the session keeps its pending hint
+ *  until the next idle recycle or session reload. A failure leaves both maps
+ *  untouched (the command's optimistic state keeps the UI responsive — the
+ *  backend write failing is surfaced by the same pending hint). */
+export function handleMcpSessionServersUpdated(state: ArchState, event: Extract<Event, { kind: 'McpSessionServersUpdated' }>): ReducerResult {
+  if (event.ok === false) {
+    return {
+      state: {
+        ...state,
+        settings: {
+          ...state.settings,
+          mcpPendingApplyBySession: {
+            ...state.settings.mcpPendingApplyBySession,
+            [event.sessionPath]: true,
+          },
+        },
+      },
+      effects: [],
+    };
+  }
+  return {
+    state: {
+      ...state,
+      settings: {
+        ...state.settings,
+        mcpSessionOverridesBySession: {
+          ...state.settings.mcpSessionOverridesBySession,
+          [event.sessionPath]: event.overrides ?? {},
+        },
+        mcpPendingApplyBySession: {
+          ...state.settings.mcpPendingApplyBySession,
+          [event.sessionPath]: event.recycled === true ? false : true,
+        },
       },
     },
     effects: [],
@@ -768,7 +843,7 @@ export function handleEffectResult(state: ArchState, event: Exclude<EffectResult
     case 'FileDiffResult':
       return { state, effects: [] };
     case 'FileRevertResult':
-      return { state, effects: [] };
+      return handleFileRevertResult(state, event);
     case 'SetModelResult':
       return handleSetModelResult(state, event);
     case 'SetPrefsResult':
@@ -834,12 +909,45 @@ export function handleEffectResult(state: ArchState, event: Exclude<EffectResult
         }],
       };
     }
+    case 'SessionTitleResult': {
+      const generation = state.sessions.titleGenerationBySession[event.sessionPath];
+      if (!generation || generation.status !== 'pending' || generation.corrId !== event.corrId) {
+        return { state, effects: [] };
+      }
+      const next = produce(state, (draft) => {
+        if (event.ok && event.generated && event.name) {
+          const summary = draft.sessions.sessions.find((session) => session.path === event.sessionPath);
+          if (summary?.isPlaceholder === true) {
+            summary.name = event.name;
+            summary.isPlaceholder = false;
+          }
+          delete draft.sessions.titleGenerationBySession[event.sessionPath];
+        } else {
+          draft.sessions.titleGenerationBySession[event.sessionPath] = {
+            status: 'failed',
+            prompt: generation.prompt,
+          };
+        }
+      });
+      const failed = !event.ok || !event.generated;
+      return {
+        state: next,
+        effects: failed ? [{
+          kind: 'Log',
+          corrId: event.corrId,
+          level: 'warn',
+          message: 'Session title generation fell back to the prompt snippet',
+          data: { reason: event.reason, error: event.error },
+        }] : [],
+      };
+    }
     case 'StartNewTaskResult':
     case 'ContinueTaskResult':
     case 'OpenFileInEditorResult':
     case 'OpenFileResult':
     case 'SetPruningSettingsResult':
-    case 'SetToolResultPruningSettingsResult': {
+    case 'SetToolResultPruningSettingsResult':
+    case 'SetSessionTitlesSettingsResult': {
       if (!event.ok) {
         return {
           state,

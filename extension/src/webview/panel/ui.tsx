@@ -11,12 +11,13 @@ import type {
   ComposerInput,
   ComposerInputDraft,
   ContextWindowUsage,
+  InitialContextEstimate,
   ExtensionInfo,
   LastCompactionSummary,
   McpServerInfo,
   ModelInfo,
   ModelSettings,
-  PruningCatalog,
+  PruningCatalog, SessionTitlesSettings,
   PruningResult,
   PruningSettings,
   ProviderGateStats,
@@ -69,11 +70,13 @@ interface ComposerProps {
   availableModelsStatus?: 'provisional' | 'loading' | 'authoritative';
   availableExtensions: ExtensionInfo[];
   contextUsage: ContextWindowUsage | null;
+  initialContextEstimate: InitialContextEstimate | null;
   prefs: ChatPrefs;
   pruningSettings: PruningSettings;
   pruningCatalog: PruningCatalog;
   pruningResult: PruningResult | null;
   toolResultPruningSettings: ToolResultPruningSettings;
+  sessionTitlesSettings: SessionTitlesSettings;
   providerGateStats: ProviderGateStats;
   systemPrompts: SystemPromptEntry[];
   transcript: ChatMessage[];
@@ -101,8 +104,11 @@ interface ComposerProps {
   mcpServers: McpServerInfo[];
   mcpServersStatus?: 'loading' | 'error' | 'ok';
   mcpPendingApply: boolean;
+  mcpSessionServers: McpServerInfo[];
+  mcpSessionPendingApply: boolean;
   onMcpListRequested: () => void;
   onMcpSetServerEnabled: (name: string, enabled: boolean) => void;
+  onMcpSetServerEnabledForSession: (name: string, enabled: boolean) => void;
   onSetPrivacyMode?: (enabled: boolean) => void;
   /** Apply the complete disabled-entry set for the active session's system
    *  prompts. The backend re-emits `session.opened` to update the displayed
@@ -110,6 +116,7 @@ interface ComposerProps {
   onSetSystemPromptToggles: (disabledEntries: string[]) => void;
   onSetPruningSettings: (settings: Partial<PruningSettings>) => void;
   onSetToolResultPruningSettings: (settings: Partial<ToolResultPruningSettings>) => void;
+  onSetSessionTitlesSettings: (settings: Partial<SessionTitlesSettings>) => void;
   /** Brief H: AppBody registers the composer's `sendAsRetry` here so the
    *  NoticeBanner's Retry button (rendered at the AppBody level, outside the
    *  composer) can re-send the LIVE composer draft. A ref (not state) — no
@@ -135,11 +142,13 @@ function ComposerView({
   availableModelsStatus = 'authoritative',
   availableExtensions,
   contextUsage,
+  initialContextEstimate,
   prefs,
   pruningSettings,
   pruningCatalog,
   pruningResult,
   toolResultPruningSettings,
+  sessionTitlesSettings,
   providerGateStats,
   systemPrompts,
   transcript,
@@ -162,12 +171,16 @@ function ComposerView({
   mcpServers,
   mcpServersStatus,
   mcpPendingApply,
+  mcpSessionServers,
+  mcpSessionPendingApply,
   onMcpListRequested,
   onMcpSetServerEnabled,
+  onMcpSetServerEnabledForSession,
   onSetPrivacyMode,
   onSetSystemPromptToggles,
   onSetPruningSettings,
   onSetToolResultPruningSettings,
+  onSetSessionTitlesSettings,
   sendRetryDraftRef,
 }: ComposerProps) {
   const composerAreaRef = useRef<HTMLDivElement>(null);
@@ -189,6 +202,7 @@ function ComposerView({
     modelSettings,
     availableModels,
     contextUsage,
+    initialContextEstimate,
     systemPrompts,
     transcript,
     transcriptWindow,
@@ -366,19 +380,24 @@ function ComposerView({
             pruningCatalog={pruningCatalog}
             pruningResult={pruningResult}
             toolResultPruningSettings={toolResultPruningSettings}
+            sessionTitlesSettings={sessionTitlesSettings}
             providerGateStats={providerGateStats}
             onSetPrefs={onSetPrefs}
             mcpServers={mcpServers}
             mcpServersStatus={mcpServersStatus}
             mcpPendingApply={mcpPendingApply}
+            mcpSessionServers={mcpSessionServers}
+            mcpSessionPendingApply={mcpSessionPendingApply}
             onMcpListRequested={onMcpListRequested}
             onMcpSetServerEnabled={onMcpSetServerEnabled}
+            onMcpSetServerEnabledForSession={onMcpSetServerEnabledForSession}
             privacyMode={privacyMode}
             onSetPrivacyMode={onSetPrivacyMode}
             onSetSystemPromptToggles={onSetSystemPromptToggles}
             systemPrompts={systemPrompts}
             onSetPruningSettings={onSetPruningSettings}
             onSetToolResultPruningSettings={onSetToolResultPruningSettings}
+            onSetSessionTitlesSettings={onSetSessionTitlesSettings}
             availableExtensions={availableExtensions}
             availableModels={availableModels}
             availableModelsStatus={availableModelsStatus}

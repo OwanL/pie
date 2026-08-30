@@ -111,11 +111,13 @@ test('expanded bash headers suppress the command summary while the terminal body
   assert.doesNotMatch(html, />rm</);
 });
 
-test('transcript scrollbar keeps a broad hit area with a quiet visible thumb', async () => {
+test('transcript scrollbar freezes a broad custom hit area with a quiet visible thumb', async () => {
   const css = await readTranscriptCss();
 
-  assert.match(css, /\.transcript::-webkit-scrollbar\s*\{[^}]*width:\s*10px/);
-  assert.match(css, /\.transcript::-webkit-scrollbar-thumb\s*\{[^}]*background-clip:\s*padding-box[^}]*border:\s*3px solid transparent/);
+  assert.match(css, /\.transcript::-webkit-scrollbar\s*\{[^}]*width:\s*0/);
+  assert.match(css, /\.transcript-scrollbar\s*\{[^}]*width:\s*10px[^}]*touch-action:\s*none/);
+  assert.match(css, /\.transcript-scrollbar-thumb::before\s*\{[^}]*inset:\s*0 3px/);
+  assert.match(css, /\.transcript-scrollbar-thumb\s*\{[^}]*min-height:\s*24px/);
   assert.match(css, /\.transcript-message-rail\s*\{[^}]*right:\s*10px/);
 });
 

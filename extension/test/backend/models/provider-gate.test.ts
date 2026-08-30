@@ -193,7 +193,7 @@ describe('ProviderGate — concurrency limiting', () => {
 		const config: ProviderConcurrencyConfig = {
 			...BASE_CONFIG,
 			maxConcurrentRequests: 1,
-			queueWaitSeconds: 0, // unbounded queue — should NOT fail
+			queueWaitSeconds: 0, // five-minute safety maximum — should not fail here
 		};
 
 		let inFlight = 0;
@@ -282,7 +282,7 @@ describe('ProviderGate — concurrency limiting', () => {
 		const config: ProviderConcurrencyConfig = {
 			...BASE_CONFIG,
 			maxConcurrentRequests: 1,
-			queueWaitSeconds: 0, // unbounded — only abort can free it
+			queueWaitSeconds: 0, // five-minute safety maximum — abort frees it immediately
 		};
 
 		let resolveFirst: () => void;
@@ -406,7 +406,7 @@ describe('ProviderGate — request-class queue priority', () => {
 		const config: ProviderConcurrencyConfig = {
 			...BASE_CONFIG,
 			maxConcurrentRequests: 1,
-			queueWaitSeconds: 0, // unbounded — ordering is what matters
+			queueWaitSeconds: 0, // five-minute safety maximum — ordering is what matters
 		};
 
 		// Tracks the order in which requests actually reach the fetch impl
@@ -1420,6 +1420,7 @@ describe('ProviderGate — metrics', () => {
 		assert.equal(metrics[0].queuedRequests, 0);
 		assert.equal(metrics[0].maxConcurrentRequests, 2);
 		assert.equal(metrics[0].afterburnSeconds, 15);
+		assert.equal(metrics[0].queueWaitSeconds, 1);
 		assert.equal(metrics[0].paused, false);
 		assert.equal(metrics[0].pausedUntilMs, 0);
 		assert.equal(metrics[0].strikeCount, 0);

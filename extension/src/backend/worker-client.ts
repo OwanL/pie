@@ -55,6 +55,10 @@ export interface WorkerClientOptions {
   leasePath?: string;
   leaseRevision?: number;
   sdkPatchIdentity: SdkPatchIdentity;
+  /** Session-scoped MCP override artifact forwarded as `--mcp-config` so the
+   *  adapter's config discovery substitutes its highest-precedence layer for
+   *  this session only. Optional — absent means default discovery. */
+  mcpConfigPath?: string;
   heartbeatIntervalMs?: number;
   missedHeartbeatMs?: number;
   startupTimeoutMs?: number;
@@ -97,6 +101,11 @@ interface PendingResponse {
 
 export interface WorkerRequestOptions {
   timeoutMs?: number;
+  /** Auxiliary latest-wins requests may treat a bounded local enqueue
+   * rejection as a retryable publication failure instead of killing an
+   * otherwise healthy worker generation. Descriptor/write failures remain
+   * fatal regardless. */
+  fatalOnEnqueueRejection?: boolean;
 }
 
 export class WorkerRequestTimeoutError extends Error {
@@ -234,6 +243,7 @@ export class WorkerClient {
       '--lease-revision', String(this.options.leaseRevision ?? 1),
       '--ipc-read-fd', String(WORKER_IPC_COORDINATOR_TO_WORKER_FD),
       '--ipc-write-fd', String(WORKER_IPC_WORKER_TO_COORDINATOR_FD),
+      ...(this.options.mcpConfigPath ? ['--mcp-config', this.options.mcpConfigPath] : []),
     ];
     let child: cp.ChildProcess;
     try {
@@ -342,7 +352,14 @@ export class WorkerClient {
         expired.reject(new WorkerRequestTimeoutError(requestId, body.kind, timeoutMs));
       }, timeoutMs);
       pending.timer.unref?.();
-      if (!this.sendFrame({ ...body, requestId } as CoordinatorToWorkerFrameBody)) {
+      const accepted = this.enqueue(
+        { ...this.frameBase!, ...body, requestId } as WorkerIpcFrameDraft,
+        {
+          fatalOnRejection: options.fatalOnEnqueueRejection !== false,
+          onRejected: (error) => this.takePending(requestId)?.reject(error),
+        },
+      );
+      if (!accepted) {
         this.takePending(requestId)?.reject(new Error('Worker IPC request was rejected.'));
       }
     });
@@ -448,15 +465,23 @@ export class WorkerClient {
     });
   }
 
-  private enqueue(draft: WorkerIpcFrameDraft): boolean {
+  private enqueue(
+    draft: WorkerIpcFrameDraft,
+    options: { fatalOnRejection?: boolean; onRejected?: (error: Error) => void } = {},
+  ): boolean {
     const result = this.writer?.enqueue(draft, {
       onSettled: (settlement) => {
-        if (settlement.status === 'failed' || settlement.status === 'rejected') {
-          const reason = settlement.status === 'rejected'
-            ? `${settlement.reason}: ${settlement.detail}`
-            : settlement.error?.message ?? 'unknown write error';
+        if (settlement.status === 'failed') {
+          const reason = settlement.error?.message ?? 'unknown write error';
           this.fail(new Error(`Worker IPC frame could not be sent (${reason}).`), true);
+          return;
         }
+        if (settlement.status !== 'rejected') return;
+        const error = new Error(
+          `Worker IPC frame could not be enqueued (${settlement.reason}: ${settlement.detail}).`,
+        );
+        if (options.fatalOnRejection === false) options.onRejected?.(error);
+        else this.fail(error, true);
       },
     });
     return result?.accepted === true;
@@ -556,7 +581,7 @@ export class WorkerClient {
 
   private fail(error: Error, kill: boolean): void {
     if (!this.failure) this.failure = error;
-    if (!this.readySeen) this.ready.reject(this.failure);
+    if (!this.readySeen) this.rejectReadySeamlessly();
     if (!this.exitSeen) this.status = 'failed';
     if (this.startupTimer) this.scheduler.clearTimeout(this.startupTimer);
     if (this.heartbeatTimer) this.scheduler.clearTimeout(this.heartbeatTimer);
@@ -566,6 +591,17 @@ export class WorkerClient {
     this.expiredRequestIds.clear();
     this.notify();
     if (kill && this.child?.pid && !this.exitSeen) void this.forceKill().catch(() => undefined);
+  }
+
+  /**
+   * Reject the ready deferred while marking it handled. If no caller is
+   * awaiting (e.g. a synchronous spawn throw before start() awaits the
+   * deferred), the bare rejection would surface as an unhandledRejection and
+   * crash whoever spawned the client; awaiting callers still receive it.
+   */
+  private rejectReadySeamlessly(): void {
+    this.ready.reject(this.failure ?? new Error('Worker never became ready.'));
+    void this.ready.promise.catch(() => undefined);
   }
 
   private async handleExit(code: number | null, signal: NodeJS.Signals | null): Promise<void> {
@@ -578,7 +614,7 @@ export class WorkerClient {
     this.startupTimer = undefined;
     this.heartbeatTimer = undefined;
     if (!this.failure && this.status !== 'stopping') this.failure = new Error(`Worker exited unexpectedly (${code ?? signal ?? 'unknown'}).`);
-    if (!this.readySeen) this.ready.reject(this.failure ?? new Error('Worker exited before ready.'));
+    if (!this.readySeen) this.rejectReadySeamlessly();
     for (const requestId of [...this.pending.keys()]) {
       this.takePending(requestId)?.reject(this.failure ?? new Error('Worker exited.'));
     }

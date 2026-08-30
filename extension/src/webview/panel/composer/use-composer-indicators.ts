@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import type {
   ChatMessage,
   ContextWindowUsage,
+  InitialContextEstimate,
   ModelInfo,
   ModelSettings,
   PruningDetails,
@@ -19,6 +20,7 @@ import type {
   ContextWindowSummary,
 } from '../context-window/breakdown';
 import { buildContextWindowIndicatorState } from '../context-window/indicator';
+import { buildInitialContextBreakdown } from '../context-window/initial-breakdown';
 import {
   buildCompletedCostSummaryFromSnapshot,
   extractSubagentCostSummaryFromSnapshot,
@@ -35,6 +37,7 @@ import {
   type SessionUsageSnapshot,
 } from '../../../shared/session-usage';
 import {
+  contextBreakdownTranscriptSignature,
   streamingContentSignature,
   subagentCostSignature,
   subagentToolCallRevision,
@@ -90,6 +93,7 @@ export function useComposerIndicators({
   modelSettings,
   availableModels,
   contextUsage,
+  initialContextEstimate,
   systemPrompts,
   transcript,
   transcriptWindow,
@@ -105,6 +109,7 @@ export function useComposerIndicators({
   modelSettings: ModelSettings | null;
   availableModels: ModelInfo[];
   contextUsage: ContextWindowUsage | null;
+  initialContextEstimate: InitialContextEstimate | null;
   systemPrompts: SystemPromptEntry[];
   transcript: ChatMessage[];
   transcriptWindow: TranscriptWindow;
@@ -147,21 +152,22 @@ export function useComposerIndicators({
 
   const supportsImageInputs = selectedModelInfo?.inputKinds.includes('image') ?? false;
 
-  const effectiveContextWindow = contextUsage?.contextWindow ?? selectedModelInfo?.contextWindow ?? 0;
+  const effectiveContextWindow = contextUsage?.contextWindow
+    ?? selectedModelInfo?.contextWindow
+    ?? initialContextEstimate?.contextWindow
+    ?? 0;
   const fallbackPricing = selectedModelInfo?.subagent?.pricing;
 
-  // ── Cheap fingerprints (recomputed each snapshot, but O(1)/O(small)) that
-  //    gate the O(transcript) walks below so they bail when only the streaming
-  //    message grew. The host posts a structured-cloned ViewState ~7×/sec
-  //    while streaming, so the transcript array (and every nested object) is a
-  //    fresh reference on every snapshot even when byte-identical — keying a
-  //    memo on the transcript ref would re-walk the whole transcript every
-  //    tick. These signatures change iff the walk's result could change. See
-  //    `indicator-signature.ts` for the correctness contract.
+  // ── Bounded fingerprints that gate the O(transcript) walks below. The host
+  //    posts a structured-cloned ViewState ~7×/sec while streaming, so the
+  //    transcript array (and every nested object) is a fresh reference on each
+  //    snapshot even when byte-identical. These signatures keep key material
+  //    bounded and change whenever a guarded result could change. Live/durable
+  //    records use lengths or revisions; legacy body-only records use hashes.
   //
-  //    NOTE: `transcript` is intentionally NOT reference-stabilised upstream
-  //    (its shape changes every snapshot while streaming, and a faithful
-  //    content compare would be O(n) per tick) — hence the signatures here.
+  //    NOTE: `transcript` is intentionally NOT reference-stabilised upstream;
+  //    the signatures here provide the correctness boundary without retaining
+  //    large prompt/tool bodies in React memo keys.
   //    `availableModels` IS now reference-stabilised upstream
   //    (`pickStableModelList` in `use-host-sync`), so the model-state and
   //    pricing-by-model-id memos above correctly key on the `availableModels`
@@ -170,15 +176,12 @@ export function useComposerIndicators({
   //    didn't change, so those memos now skip their work as intended.
   const usageSig = useMemo(() => transcriptUsageSignature(transcript), [transcript]);
   const sysPromptsSig = useMemo(() => systemPromptsSignature(systemPrompts), [systemPrompts]);
-  // When a live context-usage token count is reported, the breakdown's
-  // used/remaining values come from the snapshot (not the growing transcript
-  // estimate), so the streaming fingerprint is intentionally excluded → the
-  // breakdown stays stable while only the streaming prose grows. When no token
-  // count is reported, the fingerprint tracks the growing estimate so the
-  // breakdown legitimately recomputes.
-  const breakdownStreamSig = useMemo(
-    () => (contextUsage?.tokens == null ? streamingContentSignature(transcript) : ''),
-    [transcript, contextUsage?.tokens],
+  // This digest covers every transcript field read by the breakdown builder,
+  // including generic tool inputs/results and their live seq revisions. It is
+  // deliberately fixed-size even when a transcript contains large previews.
+  const breakdownTranscriptSig = useMemo(
+    () => contextBreakdownTranscriptSignature(transcript),
+    [transcript],
   );
   // Cheap O(toolCalls) revision that gates the O(result-tree)
   // `subagentCostSignature` walk. The host posts a structured-cloned transcript
@@ -193,7 +196,7 @@ export function useComposerIndicators({
   const subagentSig = useMemo(() => subagentCostSignature(transcript), [subagentRev]);
   const liveStreamSig = useMemo(() => streamingContentSignature(transcript), [transcript]);
 
-  const breakdownKey = `${sessionPath ?? ''}\0${contextUsage?.tokens ?? ''}\0${contextUsage?.contextWindow ?? ''}\0${effectiveContextWindow}\0${sysPromptsSig}\0${breakdownStreamSig}\0${subagentSig}\0${transcriptWindow.isPartial ? 1 : 0}`;
+  const breakdownKey = `${sessionPath ?? ''}\0${contextUsage?.tokens ?? ''}\0${contextUsage?.contextWindow ?? ''}\0${initialContextEstimate?.tokens ?? ''}\0${initialContextEstimate?.contextWindow ?? ''}\0${effectiveContextWindow}\0${sysPromptsSig}\0${breakdownTranscriptSig}\0${transcriptWindow.isPartial ? 1 : 0}`;
   const deferredBreakdown = useMemo(
     () => effectiveContextWindow <= 0
       ? null
@@ -213,7 +216,7 @@ export function useComposerIndicators({
   // snapshots are structured-cloned, so their object identities change even
   // when the breakdown inputs do not.
   useEffect(() => {
-    if (effectiveContextWindow <= 0) return;
+    if (effectiveContextWindow <= 0 || initialContextEstimate) return;
     const requestId = ++breakdownRequestIdRef.current;
     let cancelled = false;
     const options = {
@@ -278,11 +281,18 @@ export function useComposerIndicators({
     breakdownWorkerRef.current = null;
   }, []);
 
+  const initialBreakdown = useMemo(
+    () => initialContextEstimate
+      ? buildInitialContextBreakdown(initialContextEstimate, effectiveContextWindow)
+      : null,
+    [initialContextEstimate?.tokens, initialContextEstimate?.contextWindow, effectiveContextWindow],
+  );
   const contextBreakdown = effectiveContextWindow <= 0
     ? null
-    : computedBreakdown?.key === breakdownKey
-      ? computedBreakdown.value
-      : deferredBreakdown;
+    : initialBreakdown
+      ?? (computedBreakdown?.key === breakdownKey
+        ? computedBreakdown.value
+        : deferredBreakdown);
   const contextIndicator = useMemo(() => (
     contextBreakdown
       ? buildContextWindowIndicatorState(contextBreakdown.summary)
@@ -294,7 +304,7 @@ export function useComposerIndicators({
   const durableUsageSig = useMemo(() => sessionUsageSignature(sessionUsage), [sessionUsage]);
   const effectiveSessionUsage = useMemo(
     () => mergeSessionUsageSnapshots(sessionUsage, buildSessionUsageSnapshot(transcript)),
-    [sessionPath, durableUsageSig, usageSig, subagentSig, pruningResult],
+    [sessionPath, durableUsageSig, usageSig, subagentSig],
   );
   const sessionTokenUsage = useMemo(
     () => buildSessionTokenUsageFromSnapshot(effectiveSessionUsage),

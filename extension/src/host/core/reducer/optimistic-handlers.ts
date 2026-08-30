@@ -20,13 +20,3 @@ export function handleOptimisticMessageRemoved(state: ArchState, event: Extract<
   });
   return { state: nextState, effects: [] };
 }
-
-export function handleFileChangeRemoved(state: ArchState, event: Extract<Event, { kind: 'FileChangeRemoved' }>): ReducerResult {
-  const nextState = produce(state, (draft) => {
-    const changes = draft.fileChanges.bySession[event.sessionPath];
-    if (changes) {
-      draft.fileChanges.bySession[event.sessionPath] = changes.filter(c => c.path !== event.filePath);
-    }
-  });
-  return { state: nextState, effects: [] };
-}

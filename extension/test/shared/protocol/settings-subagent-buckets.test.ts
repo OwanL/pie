@@ -4,10 +4,12 @@ import assert from 'node:assert/strict';
 import type { ChatPrefs } from '../../../src/shared/protocol';
 import {
   ALL_NESTED_BUCKETS_ALLOWED,
+  ALL_SUBAGENT_BUCKETS_CAN_SPAWN,
   DEFAULT_CHAT_PREFS,
   EMPTY_SUBAGENT_BUCKETS,
   normalizeBooleanMap,
   normalizeNestedAllowedBuckets,
+  normalizeSubagentBucketCanSpawn,
   normalizeSubagentBuckets,
   resolveChatPrefs,
 } from '../../../src/shared/protocol';
@@ -179,4 +181,18 @@ test('resolveChatPrefs preserves a valid stored subagentNestedAllowedBuckets', (
     subagentNestedAllowedBuckets: { small: true, medium: true, frontier: false },
   });
   assert.deepEqual(resolved.subagentNestedAllowedBuckets, { small: true, medium: true, frontier: false });
+});
+
+test('subagent bucket delegation defaults to allowed and normalizes fail-open', () => {
+  assert.deepEqual(DEFAULT_CHAT_PREFS.subagentBucketCanSpawn, { small: true, medium: true, frontier: true });
+  assert.notEqual(DEFAULT_CHAT_PREFS.subagentBucketCanSpawn, ALL_SUBAGENT_BUCKETS_CAN_SPAWN);
+  assert.deepEqual(normalizeSubagentBucketCanSpawn(undefined), { small: true, medium: true, frontier: true });
+  assert.deepEqual(
+    normalizeSubagentBucketCanSpawn({ small: false, medium: 'invalid', frontier: true }),
+    { small: false, medium: true, frontier: true },
+  );
+  assert.deepEqual(
+    resolveChatPrefs({ subagentBucketCanSpawn: { small: false, medium: false, frontier: true } }).subagentBucketCanSpawn,
+    { small: false, medium: false, frontier: true },
+  );
 });

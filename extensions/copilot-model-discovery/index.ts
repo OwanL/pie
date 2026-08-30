@@ -138,6 +138,10 @@ const coordinator = new CopilotCatalogRefreshCoordinator<ExtensionContext['model
 
 export default function registerCopilotModelDiscovery(pi: ExtensionAPI): void {
   pi.on('session_start', async (_event, ctx) => {
+    // The one-shot context inventory already resolved its selected model and
+    // must never refresh provider catalogs or credentials while discovering
+    // prompt/tool/skill resources.
+    if (process.env.PIE_INITIAL_CONTEXT_INVENTORY === '1') return;
     try {
       // Skip the network/catalog work entirely when a recent refresh already
       // verified the catalog. Each session's ModelRegistry loads the current

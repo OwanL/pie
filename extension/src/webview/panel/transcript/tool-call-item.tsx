@@ -290,7 +290,7 @@ function RuntimeTelemetry({ result }: { result: SubagentSingleResult }) {
   const hasContext = typeof contextTokens === 'number' && contextTokens > 0
     && typeof contextWindow === 'number' && contextWindow > 0;
   const latestThroughput = result.turnThroughputSamples
-    ?.filter((sample) => sample.generationDurationMs > 0 && sample.outputTokens >= 0)
+    ?.filter((sample) => sample.generationDurationMs > 0 && sample.outputTokens > 0)
     .at(-1);
   const tokensPerSecond = latestThroughput
     ? latestThroughput.outputTokens / (latestThroughput.generationDurationMs / 1000)

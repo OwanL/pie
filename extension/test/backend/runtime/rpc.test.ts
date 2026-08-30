@@ -8,6 +8,7 @@ import {
   validateDetailUnsubscribe,
   validateLoadTranscriptPage,
   validateMessageSend,
+  validateOpenTabsSet,
   validateRuntimePrefsSet,
   validateSessionCreate,
   validateSessionDuplicate,
@@ -36,6 +37,27 @@ test('validateMessageSend requires an explicit sessionPath', () => {
   assert.throws(
     () => validateMessageSend({ text: 'hello' }),
     /sessionPath/,
+  );
+});
+
+test('validateOpenTabsSet preserves compatibility and accepts only positive source revisions', () => {
+  const tabs = [{ path: '/workspace/session.jsonl', pinned: true, isRunning: false }];
+  assert.deepEqual(validateOpenTabsSet({ tabs }), { tabs });
+  assert.deepEqual(validateOpenTabsSet({ tabs, revision: 7 }), { tabs, revision: 7 });
+  assert.throws(() => validateOpenTabsSet({ tabs, revision: 0 }), /positive safe integer/);
+  assert.throws(() => validateOpenTabsSet({ tabs, revision: 1.5 }), /positive safe integer/);
+  assert.deepEqual(
+    validateOpenTabsSet({ tabs: [{ ...tabs[0], closureActions: [{ detail: 'x'.repeat(1_000) }] }] }).tabs,
+    tabs,
+    'the worker registry projects only bounded review-tool fields',
+  );
+  assert.throws(
+    () => validateOpenTabsSet({ tabs: Array.from({ length: 513 }, (_, index) => ({ path: `/s/${index}` })) }),
+    /at most 512/,
+  );
+  assert.throws(
+    () => validateOpenTabsSet({ tabs: [{ path: '/s', name: 'x'.repeat(4 * 1024 + 1) }] }),
+    /name.*at most/,
   );
 });
 
@@ -291,6 +313,7 @@ test('validateRuntimePrefsSet accepts provider and extension toggles', () => {
       bashDefaultTimeout: undefined,
       subagentBuckets: undefined,
       subagentNestedAllowedBuckets: undefined,
+      subagentBucketCanSpawn: undefined,
       subagentDropTools: undefined,
       providerConcurrency: undefined,
     },
@@ -298,7 +321,26 @@ test('validateRuntimePrefsSet accepts provider and extension toggles', () => {
 });
 
 test('validateRuntimePrefsSet defaults missing toggle maps to empty', () => {
-  assert.deepEqual(validateRuntimePrefsSet({}), { providerToggles: {}, extensionToggles: {}, autonomousMode: undefined, mcpEnabled: undefined, subagentAlwaysParentModel: undefined, subagentRouteAroundSaturatedProviders: undefined, subagentFallbackOnProviderFailure: undefined, subagentMaxDepth: undefined, subagentMaxTreeSessions: undefined, subagentMaxInflight: undefined, bashWarmPoolSize: undefined, bashFastPath: undefined, bashShellPath: undefined, bashWarmupTimeoutMs: undefined, bashDefaultTimeout: undefined, subagentBuckets: undefined, subagentNestedAllowedBuckets: undefined, subagentDropTools: undefined, providerConcurrency: undefined });
+  assert.deepEqual(validateRuntimePrefsSet({}), { providerToggles: {}, extensionToggles: {}, autonomousMode: undefined, mcpEnabled: undefined, subagentAlwaysParentModel: undefined, subagentRouteAroundSaturatedProviders: undefined, subagentFallbackOnProviderFailure: undefined, subagentMaxDepth: undefined, subagentMaxTreeSessions: undefined, subagentMaxInflight: undefined, bashWarmPoolSize: undefined, bashFastPath: undefined, bashShellPath: undefined, bashWarmupTimeoutMs: undefined, bashDefaultTimeout: undefined, subagentBuckets: undefined, subagentNestedAllowedBuckets: undefined, subagentBucketCanSpawn: undefined, subagentDropTools: undefined, providerConcurrency: undefined });
+});
+
+test('validateRuntimePrefsSet bounds provider network deadline overrides', () => {
+  const accepted = validateRuntimePrefsSet({
+    providerConcurrency: {
+      openai: { queueWaitSeconds: 0, headerWaitSeconds: 300 },
+    },
+  });
+  assert.deepEqual(accepted.providerConcurrency, {
+    openai: { queueWaitSeconds: 0, headerWaitSeconds: 300 },
+  });
+  assert.throws(
+    () => validateRuntimePrefsSet({ providerConcurrency: { openai: { queueWaitSeconds: 0.5 } } }),
+    /queueWaitSeconds must be an integer from 0 to 300/,
+  );
+  assert.throws(
+    () => validateRuntimePrefsSet({ providerConcurrency: { openai: { headerWaitSeconds: 301 } } }),
+    /headerWaitSeconds must be an integer from 0 to 300/,
+  );
 });
 
 test('validateRuntimePrefsSet accepts all seven exact subagent thinking levels', () => {
@@ -336,6 +378,7 @@ test('validateRuntimePrefsSet allows partial subagentBuckets and drops missing k
         frontier: [],
       },
       subagentNestedAllowedBuckets: undefined,
+      subagentBucketCanSpawn: undefined,
       subagentDropTools: undefined,
       providerConcurrency: undefined,
     },
@@ -379,6 +422,7 @@ test('validateRuntimePrefsSet accepts a subagentNestedAllowedBuckets patch', () 
       bashDefaultTimeout: undefined,
       subagentBuckets: undefined,
       subagentNestedAllowedBuckets: { small: true, medium: false, frontier: false },
+      subagentBucketCanSpawn: undefined,
       subagentDropTools: undefined,
       providerConcurrency: undefined,
     },
@@ -406,6 +450,7 @@ test('validateRuntimePrefsSet allows partial subagentNestedAllowedBuckets and de
       bashDefaultTimeout: undefined,
       subagentBuckets: undefined,
       subagentNestedAllowedBuckets: { small: true, medium: true, frontier: false },
+      subagentBucketCanSpawn: undefined,
       subagentDropTools: undefined,
       providerConcurrency: undefined,
     },
@@ -423,6 +468,21 @@ test('validateRuntimePrefsSet rejects non-object subagentNestedAllowedBuckets', 
   assert.throws(
     () => validateRuntimePrefsSet({ subagentNestedAllowedBuckets: 'nope' }),
     /subagentNestedAllowedBuckets must be an object/,
+  );
+});
+
+test('validateRuntimePrefsSet accepts and normalizes per-bucket delegation policy', () => {
+  const result = validateRuntimePrefsSet({
+    subagentBucketCanSpawn: { small: false, frontier: true },
+  });
+  assert.deepEqual(result.subagentBucketCanSpawn, {
+    small: false,
+    medium: true,
+    frontier: true,
+  });
+  assert.throws(
+    () => validateRuntimePrefsSet({ subagentBucketCanSpawn: { medium: 'no' } }),
+    /subagentBucketCanSpawn\.medium must be a boolean/,
   );
 });
 
@@ -447,6 +507,7 @@ test('validateRuntimePrefsSet accepts a subagentDropTools string array', () => {
       bashDefaultTimeout: undefined,
       subagentBuckets: undefined,
       subagentNestedAllowedBuckets: undefined,
+      subagentBucketCanSpawn: undefined,
       subagentDropTools: ['ask_user', 'web_search'],
       providerConcurrency: undefined,
     },

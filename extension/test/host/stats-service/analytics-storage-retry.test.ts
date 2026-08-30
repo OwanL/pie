@@ -207,3 +207,37 @@ test('start continues when legacy migration cannot atomically replace snapshots'
     );
   });
 });
+
+test('derived auto-export contention retries quietly before surfacing a persistent failure', async () => {
+  await withTempDir(async (tempDir) => {
+    const surfaced: Array<{ message: string; at: string }> = [];
+    const storage = new RunAnalyticsStorage({
+      dataOutcomesRootPath: path.join(tempDir, 'data', 'outcomes'),
+      workspaceId: 'quiet-auto-export-retry-workspace',
+      now: () => FIXED_DATE,
+      serializeSessions: () => ({}),
+      onPersistError: (error) => surfaced.push(error),
+      autoExportNoticeAfterFailures: 3,
+      autoExportSetTimeout: () => noTimer(),
+    });
+
+    await storage.start();
+    (storage as unknown as { writeAutoExport(): Promise<void> }).writeAutoExport = async () => {
+      throw errno('EPERM');
+    };
+    const internals = storage as unknown as {
+      autoExportDirtyVersion: number;
+      queueAutoExport(force: boolean, failOnError?: boolean): Promise<void>;
+    };
+    internals.autoExportDirtyVersion = 1;
+
+    await internals.queueAutoExport(false);
+    await internals.queueAutoExport(false);
+    assert.equal(storage.getPersistError(), null, 'brief derived-export contention stays recoverable and quiet');
+    assert.equal(surfaced.length, 0, 'no user warning is emitted during the quiet retry window');
+
+    await internals.queueAutoExport(false);
+    assert.match(storage.getPersistError()?.message ?? '', /EPERM/u);
+    assert.equal(surfaced.length, 1, 'persistent contention eventually surfaces exactly once');
+  });
+});

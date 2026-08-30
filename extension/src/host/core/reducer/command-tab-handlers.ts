@@ -9,8 +9,12 @@ import {
   groupPinnedTab,
   mergePinnedGroups,
   ungroupPinnedTab,
+  dissolvePinnedGroup,
+  unpinPinnedGroup,
   movePinnedItem,
   findPinnedGroupIndex,
+  isPendingTabPath,
+  pinAndMergeToFirstPinned,
 } from '../../../shared/tab-behavior.js';
 
 /** Build a `PersistTabs` effect carrying the full sessions tab slice
@@ -79,10 +83,12 @@ export function handlePersistTabs(state: ArchState, cmd: Extract<Command, { kind
 export function handleTogglePinTab(state: ArchState, cmd: Extract<Command, { kind: 'TogglePinTab' }>): ReducerResult {
   const { sessionPath } = cmd;
   const { openTabPaths, pinnedTabPaths, pinnedTabGroups } = state.sessions;
-  // Only open, real tabs can be pinned. A pending placeholder or a tab that
-  // is no longer open is a no-op (defensive — the webview only offers the
-  // action on open tabs).
-  if (!openTabPaths.includes(sessionPath)) {
+  // Only open, real, non-pending tabs can be pinned. A pending placeholder (a
+  // backend `session.create` still in flight, registered in `openTabPaths`)
+  // has no durable session to pin — it is a no-op (the webview disables the
+  // menu item for pending tabs; this guard mirrors `handleSend`'s own guard).
+  // A tab that is no longer open is likewise a no-op.
+  if (isPendingTabPath(sessionPath) || !openTabPaths.includes(sessionPath)) {
     return { state, effects: [] };
   }
   const isPinned = pinnedTabPaths.includes(sessionPath);
@@ -101,6 +107,32 @@ export function handleTogglePinTab(state: ArchState, cmd: Extract<Command, { kin
       openTabPaths: next.openTabPaths,
       pinnedTabPaths: next.pinnedTabPaths,
       pinnedTabGroups: nextPinnedTabGroups,
+    },
+  };
+  return {
+    state: nextState,
+    effects: [persistTabsEffect(cmd.corrId, nextState)],
+  };
+}
+
+/** Pin an unpinned tab and merge it into the leftmost pinned-strip item
+ *  ("Pin and Merge" context-menu item): the leftmost standalone pinned tab
+ *  starts a group with it; the leftmost group absorbs it. Pure state mutation
+ *  + PersistTabs effect. No-op if the tab is pending, not open, or already
+ *  pinned. */
+export function handlePinAndMergePinnedTab(state: ArchState, cmd: Extract<Command, { kind: 'PinAndMergePinnedTab' }>): ReducerResult {
+  const { openTabPaths, pinnedTabPaths, pinnedTabGroups } = state.sessions;
+  if (isPendingTabPath(cmd.sessionPath) || !openTabPaths.includes(cmd.sessionPath) || pinnedTabPaths.includes(cmd.sessionPath)) {
+    return { state, effects: [] };
+  }
+  const result = pinAndMergeToFirstPinned(openTabPaths, pinnedTabPaths, pinnedTabGroups, cmd.sessionPath);
+  const nextState = {
+    ...state,
+    sessions: {
+      ...state.sessions,
+      openTabPaths: reorderPinnedPrefix(openTabPaths, result.pinnedTabPaths),
+      pinnedTabPaths: result.pinnedTabPaths,
+      pinnedTabGroups: result.pinnedTabGroups,
     },
   };
   return {
@@ -192,6 +224,45 @@ export function handleUngroupPinnedTab(state: ArchState, cmd: Extract<Command, {
     state: nextState,
     effects: [persistTabsEffect(cmd.corrId, nextState)],
   };
+}
+
+/** Dissolve exactly one pinned group while preserving its members' pinned state
+ * and flat order. Pure state mutation + PersistTabs effect. */
+export function handleDissolvePinnedGroup(state: ArchState, cmd: Extract<Command, { kind: 'DissolvePinnedGroup' }>): ReducerResult {
+  const { pinnedTabPaths, pinnedTabGroups } = state.sessions;
+  if (!pinnedTabPaths.includes(cmd.sourcePath) || findPinnedGroupIndex(pinnedTabGroups, cmd.sourcePath) === -1) {
+    return { state, effects: [] };
+  }
+  const result = dissolvePinnedGroup(pinnedTabPaths, pinnedTabGroups, cmd.sourcePath);
+  const nextState = {
+    ...state,
+    sessions: {
+      ...state.sessions,
+      pinnedTabPaths: result.pinnedTabPaths,
+      pinnedTabGroups: result.pinnedTabGroups,
+    },
+  };
+  return { state: nextState, effects: [persistTabsEffect(cmd.corrId, nextState)] };
+}
+
+/** Unpin exactly one whole pinned group while leaving every member session
+ * open. Pure state mutation + PersistTabs effect. */
+export function handleUnpinPinnedGroup(state: ArchState, cmd: Extract<Command, { kind: 'UnpinPinnedGroup' }>): ReducerResult {
+  const { openTabPaths, pinnedTabPaths, pinnedTabGroups } = state.sessions;
+  if (!pinnedTabPaths.includes(cmd.sourcePath) || findPinnedGroupIndex(pinnedTabGroups, cmd.sourcePath) === -1) {
+    return { state, effects: [] };
+  }
+  const result = unpinPinnedGroup(pinnedTabPaths, pinnedTabGroups, cmd.sourcePath);
+  const nextState = {
+    ...state,
+    sessions: {
+      ...state.sessions,
+      openTabPaths: reorderPinnedPrefix(openTabPaths, result.pinnedTabPaths),
+      pinnedTabPaths: result.pinnedTabPaths,
+      pinnedTabGroups: result.pinnedTabGroups,
+    },
+  };
+  return { state: nextState, effects: [persistTabsEffect(cmd.corrId, nextState)] };
 }
 
 /** Reorder a pinned item (standalone chip or group block) horizontally. Pure

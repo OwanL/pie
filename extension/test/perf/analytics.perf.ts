@@ -52,7 +52,7 @@ const TODAY_RUN_FRACTION = 0.8;
 const ACTIVE_TICKS = 4;
 const MAX_RUN_HISTORY_ENTRIES = 2_000;
 const MAX_RUN_HISTORY_BYTES = 8_000_000;
-const AGGREGATE_PAYLOAD_CEILING_BYTES = 150_000;
+const AGGREGATE_PAYLOAD_CEILING_BYTES = 400_000;
 
 const MODELS = [
   { id: 'openai/gpt-4o-mini', provider: 'openai', cost: { input: 0.15, output: 0.6, cacheRead: 0.075, cacheWrite: 0 } },

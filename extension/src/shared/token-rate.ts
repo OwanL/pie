@@ -51,8 +51,10 @@ import {
 export const TICK_MS = 200;
 /** Rolling window length, measured in generation-time (excludes pauses). */
 export const WINDOW_MS = 60_000;
-/** Minimum generation-time span before a rate is shown (avoids a noisy first reading). */
+/** Minimum generation-time span before a stable rate is shown. */
 const MIN_RATE_SPAN_MS = 300;
+/** Wall-clock retention for a final/held indicator after a burst ends. */
+export const RATE_HOLD_MS = 30_000;
 /** Cap on retained samples to bound memory (~72s at 200ms ticks). */
 const MAX_SAMPLES = 360;
 
@@ -65,14 +67,20 @@ export interface TokenRateIndicatorState {
   state: 'idle' | 'generating' | 'paused';
   /** True while the generation clock is frozen (tool running / between turns / before the first token). */
   paused: boolean;
-  /**
-   * Numeric output tokens/sec (the generation-time-windowed rate), or
-   * `undefined` when not measurable (idle, or measuring before
-   * {@link MIN_RATE_SPAN_MS} of generation has elapsed). Consumed host-side by
-   * per-session UI and diagnostics. The bottom-strip aggregate instead tracks
-   * high-water output totals per analytics run over its own wall-clock window.
-   */
+  /** Numeric active-generation tokens/sec, or `undefined` when no generation
+   * timing is available. This is the primary per-session/composer rate. A
+   * provisional value may be exposed during the first sampling interval; it is
+   * replaced by the generation-time window once it spans 300ms. */
   rate?: number;
+  /** Provider-reported output tokens divided by the full assistant duration for
+   * the latest completed/error turn. This is separate from {@link rate}: it
+   * includes the initial wait and is the end-to-end/experienced throughput.
+   * It is also available as a fallback for a burst that completed before the
+   * live sampler observed two ticks. */
+  endToEndRate?: number;
+  /** True when {@link endToEndRate} uses visible-token estimation because the
+   * provider did not report output usage. */
+  endToEndRateEstimated?: boolean;
   /**
    * Estimated output tokens in the currently-unreported main turn and running
    * subagents. This is transient: provider-reported usage replaces it when the
@@ -80,6 +88,17 @@ export interface TokenRateIndicatorState {
    * and charts moving while output streams.
    */
   liveOutputTokens?: number;
+  /**
+   * Conservative visible-output token estimate for the newest terminal
+   * assistant turn, exposed only when the provider did not report usage for it
+   * (privacy-safe numeric size — never the text). A burst that completes
+   * between sampler ticks never appears in {@link liveOutputTokens}, so the
+   * aggregate 30s wall-clock throughput uses this estimate to still count it.
+   * `undefined` when the newest terminal turn reported usage (its provider
+   * count is authoritative and must never be estimated on top — that would
+   * double-count it) or when it produced no visible output.
+   */
+  terminalOutputTokensEstimate?: number;
 }
 
 export const IDLE_STATE: TokenRateIndicatorState = {
@@ -105,6 +124,11 @@ export interface Accumulator {
   samples: Sample[];
   /** Wall-time of the last tick, for computing per-tick elapsed. */
   lastWall: number;
+  /** Last measured/provisional active-generation rate. `0` is retained because
+   * a mid-stream stall is a measured zero; absence means no timing exists yet. */
+  heldRate?: number;
+  /** Wall-clock when heldRate was last refreshed, for bounded post-burst decay. */
+  heldRateAt?: number;
   /**
    * Last estimated output tokens per streaming assistant message id. Per-id (not a
    * single value) so a continuation — the same canonical message id re-streaming
@@ -223,47 +247,97 @@ export function estimateLiveAssistantOutputTokens(message: ChatMessage | null): 
 function measureDraftingToolCall(
   acc: Accumulator,
   message: ChatMessage | null,
-): { tokens: number; delta: number } {
+): { tokens: number; delta: number; hadPriorOutput: boolean } {
   const drafts = provisionalToolCallTokens(message);
   const currentIds = new Set(drafts.map((draft) => draft.id));
   let tokens = 0;
   let delta = 0;
+  let hadPriorOutput = false;
   for (const draft of drafts) {
+    const previous = acc.draftingTokensById.get(draft.id) ?? 0;
+    if (draft.tokens > 0 && previous > 0) hadPriorOutput = true;
     tokens += draft.tokens;
-    delta += Math.max(0, draft.tokens - (acc.draftingTokensById.get(draft.id) ?? 0));
+    delta += Math.max(0, draft.tokens - previous);
     acc.draftingTokensById.set(draft.id, draft.tokens);
   }
   for (const id of acc.draftingTokensById.keys()) {
     if (!currentIds.has(id)) acc.draftingTokensById.delete(id);
   }
-  return { tokens, delta };
+  return { tokens, delta, hadPriorOutput };
+}
+
+interface EndToEndRate {
+  rate: number;
+  estimated: boolean;
 }
 
 /**
- * Latest completed turn's effective provider-reported throughput. This is the
- * only reliable post-hoc rate for models whose reasoning is not streamed: the
- * provider's output count includes hidden reasoning, while `durationMs` spans
- * the full assistant response (including the initial wait). During streaming
- * that breakdown is unknowable, so the live rate remains a surfaced-text
- * estimate instead.
+ * Find the latest usable end-to-end throughput. Provider-reported output is
+ * preferred because it includes hidden reasoning; when usage is absent, the
+ * visible text is a conservative estimate. A zero-output terminal is not a
+ * zero-rate sample — it is unavailable and must not erase a held rate.
  */
-function latestReportedTurnRate(transcript: ChatMessage[]): number | null {
+function latestEndToEndRate(transcript: ChatMessage[]): EndToEndRate | null {
   for (let i = transcript.length - 1; i >= 0; i -= 1) {
     const message = transcript[i];
-    if (message.role !== 'assistant' || message.status === 'streaming') continue;
-    const outputTokens = message.usage?.outputTokens;
+    if (message.role !== 'assistant'
+      || (message.status !== 'completed' && message.status !== 'error' && message.status !== 'interrupted')) continue;
     const durationMs = message.durationMs;
-    if (
-      typeof outputTokens === 'number'
-      && outputTokens >= 0
-      && typeof durationMs === 'number'
-      && Number.isFinite(durationMs)
-      && durationMs > 0
-    ) {
-      return outputTokens / (durationMs / 1000);
+    if (typeof durationMs !== 'number' || !Number.isFinite(durationMs) || durationMs <= 0) continue;
+
+    let outputTokens: number;
+    let estimated = false;
+    if (message.usage !== undefined) {
+      const reported = message.usage.outputTokens;
+      if (typeof reported !== 'number' || !Number.isFinite(reported) || reported <= 0) continue;
+      outputTokens = reported;
+    } else {
+      outputTokens = estimatedOutputTokens(message);
+      estimated = true;
+      if (outputTokens <= 0) continue;
     }
+    return { rate: outputTokens / (durationMs / 1000), estimated };
   }
   return null;
+}
+
+/**
+ * Estimated visible output of the newest terminal assistant turn, exposed only
+ * when the provider did not report usage for it. A usage-bearing terminal is
+ * authoritative: estimating on top of its reported output could double-count it
+ * in the aggregate. This is a deliberately bounded fallback — only the NEWEST
+ * terminal turn is estimated, so a mixed run (some turns reported, some not)
+ * reconciles conservatively at settlement: authoritative reported totals win
+ * and older unreported turns are never invented.
+ */
+function latestTerminalOutputEstimate(transcript: ChatMessage[]): number | null {
+  for (let i = transcript.length - 1; i >= 0; i -= 1) {
+    const message = transcript[i];
+    if (message.role !== 'assistant'
+      || (message.status !== 'completed' && message.status !== 'error' && message.status !== 'interrupted')) continue;
+    if (message.usage !== undefined) return null;
+    const estimated = estimatedOutputTokens(message);
+    return estimated > 0 ? estimated : null;
+  }
+  return null;
+}
+
+/** Whether the newest terminal assistant turn explicitly produced no output.
+ * A zero-rate terminal is unavailable; it must not turn a previous held rate
+ * into a fabricated `0 tok/s` sample. */
+function latestTerminalHasNoOutput(transcript: ChatMessage[]): boolean {
+  for (let i = transcript.length - 1; i >= 0; i -= 1) {
+    const message = transcript[i];
+    if (message.role !== 'assistant'
+      || (message.status !== 'completed' && message.status !== 'error' && message.status !== 'interrupted')) continue;
+    if (message.usage !== undefined) {
+      return !(typeof message.usage.outputTokens === 'number'
+        && Number.isFinite(message.usage.outputTokens)
+        && message.usage.outputTokens > 0);
+    }
+    return estimatedOutputTokens(message) <= 0;
+  }
+  return false;
 }
 
 function estimatedSubagentOutputTokens(result: SubagentSingleResult): number {
@@ -535,96 +609,129 @@ function buildState(
   streaming: ChatMessage | null,
   toolBlocked: boolean,
   stats: TurnLatencyStats,
-  reportedTurnRate: number | null,
+  provisionalRate: number | null,
+  endToEnd: EndToEndRate | null,
+  zeroOutputTerminal: boolean,
 ): TokenRateIndicatorState {
-  const rate = computeRate(acc.samples);
+  const stableRate = computeRate(acc.samples);
+  // A measured rate is preferred. During the first short sampling interval use
+  // the output observed in that interval, and while a paused state has not yet
+  // accumulated two samples retain the last useful value. `heldRate` may be 0
+  // for a genuine mid-stream stall, but never exists for a zero-output turn.
+  const candidateRate = acc.cumTokens > 0
+    ? (stableRate ?? provisionalRate ?? acc.heldRate)
+    : undefined;
+  const rate = !generating && zeroOutputTerminal && candidateRate === 0
+    ? undefined
+    : candidateRate;
   const genSec = Math.round(acc.genMs / 1000);
   const windowSpanMs = acc.samples.length >= 2
     ? acc.samples[acc.samples.length - 1].genMs - acc.samples[0].genMs
     : 0;
   const windowSec = Math.round(Math.min(windowSpanMs, WINDOW_MS) / 1000);
+  const e2eFields = endToEnd === null
+    ? {}
+    : { endToEndRate: endToEnd.rate, endToEndRateEstimated: endToEnd.estimated };
+  const e2eLine = endToEnd === null
+    ? null
+    : `End-to-end throughput: ${formatRate(endToEnd.rate)} tok/s (${endToEnd.estimated ? 'estimated visible output' : 'provider-reported output'} ÷ full assistant duration).`;
+  const e2eAria = endToEnd === null
+    ? ''
+    : ` End-to-end throughput ${formatRate(endToEnd.rate)} tokens per second, based on ${endToEnd.estimated ? 'estimated visible output' : 'provider-reported output'} divided by full assistant duration.`;
 
   // The average turn latency is surfaced INLINE on the speed chip (always
   // visible, not just on hover) as ` · 1.5s` appended to the rate label. The
   // overhead / time-to-first-token breakdown is appended to the tooltip for
-  // context. No measured turns yet -> turnLatency is null and latencyLines is
-  // empty -> the label and tooltip stay concise. The same adapters shape the
-  // idle state (see computeIdleDisplayState) so the inline segment and tooltip
-  // lines are consistent across every state.
+  // context. The two throughput metrics remain separate: active generation
+  // speed is primary, while end-to-end throughput includes the initial wait.
   const latency = latencyDisplay(stats);
 
   if (generating) {
-    if (rate === null) {
+    if (rate === undefined) {
       return {
         label: latency.withTurnLatency('—'),
-        ariaLabel: latency.withTurnLatencyAria('Generation rate: measuring.'),
-        tooltip: latency.withLatencyLines(['Measuring generation rate…']),
+        ariaLabel: latency.withTurnLatencyAria(`Generation rate: measuring.${e2eAria}`),
+        tooltip: latency.withLatencyLines([
+          'Measuring active-generation speed…',
+          'A provisional rate appears as soon as output and a sampling interval are available.',
+          ...(e2eLine ? [e2eLine] : []),
+        ]),
         state: 'generating',
         paused: false,
+        ...e2eFields,
       };
     }
     const num = formatRate(rate);
+    const provisional = stableRate === null && provisionalRate !== null;
     return {
       label: latency.withTurnLatency(`${num} tok/s`),
-      ariaLabel: latency.withTurnLatencyAria(`Generation rate: ${num} tokens per second.`),
+      ariaLabel: latency.withTurnLatencyAria(`Generation rate: ${num} tokens per second (active generation).${e2eAria}`),
       tooltip: latency.withLatencyLines([
-        `Generation rate: ${num} tok/s`,
+        `Generation rate: ${num} tok/s (active-generation speed)`,
+        ...(provisional ? ['Provisional estimate; the stable window appears after 300ms of generation.'] : []),
         `Average over the last ${windowSec}s of generation.`,
         `${acc.cumTokens} output tokens in ${genSec}s of generation time.`,
         'Includes reply text, reasoning, tool-call arguments, and running subagent output.',
         'Clock pauses during tool execution, between turns, and before the first token.',
+        ...(e2eLine ? [e2eLine] : []),
       ]),
       state: 'generating',
       paused: false,
       rate,
+      ...e2eFields,
     };
   }
 
   const reason = describePauseReason(streaming, toolBlocked);
-  // Between turns, prefer the completed provider-reported rate. Unlike the live
-  // estimate, its numerator includes hidden reasoning when the provider counts
-  // it in output. Never replace the held live rate while the current message is
-  // merely blocked on a tool call, or while a subagent is still active.
-  if (reportedTurnRate !== null) {
-    const num = formatRate(reportedTurnRate);
+  if (rate !== undefined) {
+    const num = formatRate(rate);
     return {
       label: latency.withTurnLatency(`⏸ ${num} tok/s`),
-      ariaLabel: latency.withTurnLatencyAria(`Generation paused (${reason}). Last rate ${num} tokens per second.`),
+      ariaLabel: latency.withTurnLatencyAria(`Generation paused (${reason}). Last active-generation rate ${num} tokens per second.${e2eAria}`),
       tooltip: latency.withLatencyLines([
         `Generation paused (${reason}).`,
-        `Last rate: ${num} tok/s`,
+        `Last rate: ${num} tok/s (active-generation speed)`,
+        `${acc.cumTokens} output tokens in ${genSec}s of generation time.`,
+        'Includes output from running subagents.',
+        'Clock resumes when the model produces output again.',
+        ...(e2eLine ? [e2eLine] : []),
       ]),
       state: 'paused',
       paused: true,
-      rate: reportedTurnRate,
+      rate,
+      ...e2eFields,
     };
   }
-  if (rate === null) {
+
+  // A burst can finish before the live window reaches 300ms. Its provider
+  // usage (or a visible-token estimate when usage is absent) is still useful,
+  // but is explicitly labelled end-to-end rather than presented as generation
+  // speed. Zero-output terminals never reach this branch with a rate.
+  if (endToEnd !== null) {
+    const num = formatRate(endToEnd.rate);
     return {
-      label: latency.withTurnLatency('—'),
-      ariaLabel: latency.withTurnLatencyAria(`Generation paused (${reason}).`),
+      label: latency.withTurnLatency(`⏸ ${num} tok/s`),
+      ariaLabel: latency.withTurnLatencyAria(`Generation paused (${reason}). Active-generation rate unavailable. End-to-end throughput ${num} tokens per second.${e2eAria}`),
       tooltip: latency.withLatencyLines([
         `Generation paused (${reason}).`,
-        'Waiting for the model to produce output.',
+        'Active-generation speed unavailable: the burst ended before enough generation-time samples were collected.',
+        e2eLine!,
       ]),
       state: 'paused',
       paused: true,
+      ...e2eFields,
     };
   }
-  const num = formatRate(rate);
+
   return {
-    label: latency.withTurnLatency(`⏸ ${num} tok/s`),
-    ariaLabel: latency.withTurnLatencyAria(`Generation paused (${reason}). Last rate ${num} tokens per second.`),
+    label: latency.withTurnLatency('—'),
+    ariaLabel: latency.withTurnLatencyAria(`Generation paused (${reason}).`),
     tooltip: latency.withLatencyLines([
       `Generation paused (${reason}).`,
-      `Last rate: ${num} tok/s`,
-      `${acc.cumTokens} output tokens in ${genSec}s of generation time.`,
-      'Includes output from running subagents.',
-      'Clock resumes when the model produces output again.',
+      'Waiting for the model to produce output.',
     ]),
     state: 'paused',
     paused: true,
-    rate,
   };
 }
 
@@ -642,9 +749,11 @@ export function tickTokenRate(
   const streaming = findStreamingMessage(transcript);
   const toolBlocked = hasRunningToolCall(streaming);
   const currentTokens = estimatedOutputTokens(streaming);
-  const drafting = measureDraftingToolCall(acc, streaming);
   const streamingId = streaming?.id ?? null;
-
+  const previousMainTokens = streamingId === null
+    ? 0
+    : acc.lastContentTokensById.get(streamingId) ?? 0;
+  const drafting = measureDraftingToolCall(acc, streaming);
   let mainDelta = 0;
   if (streamingId !== null) {
     // Per-id delta: a continuation (the same canonical message id re-streaming
@@ -653,13 +762,23 @@ export function tickTokenRate(
     // untouched while no message is streaming (between turns / during a tool),
     // so a continuation resumes from its last-known count instead of re-counting
     // its full content.
-    const previous = acc.lastContentTokensById.get(streamingId) ?? 0;
-    mainDelta = Math.max(0, currentTokens - previous);
+    mainDelta = Math.max(0, currentTokens - previousMainTokens);
     acc.lastContentTokensById.set(streamingId, currentTokens);
     pruneContentTokenMap(acc, streamingId);
   }
+  const mainHadPriorOutput = currentTokens > 0 && previousMainTokens > 0;
+  // Text growth that arrives while a tool is marked running is still provider
+  // output and must advance the clock. Merely retained text while a subagent
+  // produces does not establish generation, however.
+  const mainEstablishedThisTick = mainHadPriorOutput
+    && (!toolBlocked || mainDelta > 0);
 
   const subagentProjection = projectRunningSubagents(transcript, acc);
+  const subagentHadPriorOutput = subagentProjection.counted.some(
+    ({ key, tokens, streaming: isStreaming }) => isStreaming
+      && tokens > 0
+      && (acc.subagentTokens.get(key) ?? 0) > 0,
+  );
   const subagentDelta = computeSubagentDelta(acc, subagentProjection.counted);
   const liveOutputTokens = currentTokens + drafting.tokens + subagentProjection.totalTokens;
 
@@ -702,18 +821,53 @@ export function tickTokenRate(
     || (subagentActive && subagentProducedOutput);
 
   const elapsed = Math.max(0, now - acc.lastWall);
+  // The first observed output has no precise event timestamp. Do not charge the
+  // whole preceding wait to generation time: establish the sample at the
+  // current generation-clock value, then use the sampling interval as a
+  // provisional lower-bound rate until a 300ms generation span exists.
+  const firstOutputOnly = totalDelta > 0
+    && !mainEstablishedThisTick
+    && !drafting.hadPriorOutput
+    && !subagentHadPriorOutput;
+  const generationElapsed = firstOutputOnly ? 0 : elapsed;
   if (generating) {
-    acc.genMs += elapsed;
+    acc.genMs += generationElapsed;
     acc.samples.push({ genMs: acc.genMs, tokens: acc.cumTokens });
     trimWindow(acc);
   }
   acc.lastWall = now;
 
-  const latencyStats = computeTurnLatencyStats(transcript);
-  const reportedTurnRate = !generating && streaming === null && subagentProjection.runningCount === 0
-    ? latestReportedTurnRate(transcript)
+  const stableRate = computeRate(acc.samples);
+  const provisionalRate = stableRate === null && totalDelta > 0 && elapsed > 0
+    ? totalDelta / (elapsed / 1000)
     : null;
-  const state = buildState(acc, generating, streaming, toolBlocked, latencyStats, reportedTurnRate);
+  if (generating && stableRate !== null) {
+    acc.heldRate = stableRate;
+    acc.heldRateAt = now;
+  } else if (generating && provisionalRate !== null) {
+    acc.heldRate = provisionalRate;
+    acc.heldRateAt = now;
+  }
+  if (!generating && acc.heldRateAt !== undefined && now - acc.heldRateAt > RATE_HOLD_MS) {
+    // Keep token baselines for continuation accounting, but discard the old
+    // timing window so a later turn cannot resurrect a stale held speed.
+    acc.heldRate = undefined;
+    acc.heldRateAt = undefined;
+    acc.samples = [];
+  }
+
+  const latencyStats = computeTurnLatencyStats(transcript);
+  const endToEnd = latestEndToEndRate(transcript);
+  const zeroOutputTerminal = !generating && streaming === null && latestTerminalHasNoOutput(transcript);
+  let state = buildState(acc, generating, streaming, toolBlocked, latencyStats, provisionalRate, endToEnd, zeroOutputTerminal);
+  // The newest terminal turn's no-usage estimate is exposed whenever present —
+  // including while a later turn generates — so the aggregate can keep counting
+  // that burst until authoritative usage (or a settlement reconciliation)
+  // replaces it. It is numeric only; the text is never exposed.
+  const terminalEstimate = latestTerminalOutputEstimate(transcript);
+  if (terminalEstimate !== null) {
+    state = { ...state, terminalOutputTokensEstimate: terminalEstimate };
+  }
   return liveOutputTokens > 0 ? { ...state, liveOutputTokens } : state;
 }
 
@@ -743,15 +897,43 @@ export function shouldResetForRun(existingRunId: string | null | undefined, runI
  * only the rate prefix differs (here just `—`, since there is no rate). The
  * state is `idle` (not `paused`): nothing is held or about to resume.
  */
-export function computeIdleDisplayState(transcript: ChatMessage[]): TokenRateIndicatorState {
+export function computeIdleDisplayState(
+  transcript: ChatMessage[],
+  includeEndToEnd = true,
+): TokenRateIndicatorState {
   const stats = computeTurnLatencyStats(transcript);
-  if (stats.count === 0) return IDLE_STATE;
+  const endToEnd = includeEndToEnd ? latestEndToEndRate(transcript) : null;
+  if (stats.count === 0 && endToEnd === null) {
+    const terminalEstimate = latestTerminalOutputEstimate(transcript);
+    if (terminalEstimate === null) return IDLE_STATE;
+    return { ...IDLE_STATE, terminalOutputTokensEstimate: terminalEstimate };
+  }
   const latency = latencyDisplay(stats);
+  const terminalEstimate = latestTerminalOutputEstimate(transcript);
+  if (endToEnd === null) {
+    const base: TokenRateIndicatorState = {
+      label: latency.withTurnLatency('—'),
+      ariaLabel: latency.withTurnLatencyAria('Generation rate: idle.'),
+      tooltip: latency.withLatencyLines(['No active generation.']),
+      state: 'idle',
+      paused: false,
+    };
+    return terminalEstimate === null ? base : { ...base, terminalOutputTokensEstimate: terminalEstimate };
+  }
+  const num = formatRate(endToEnd.rate);
+  const source = endToEnd.estimated ? 'estimated visible output' : 'provider-reported output';
   return {
-    label: latency.withTurnLatency('—'),
-    ariaLabel: latency.withTurnLatencyAria('Generation rate: idle.'),
-    tooltip: latency.withLatencyLines(['No active generation.']),
+    label: latency.withTurnLatency(`⏸ ${num} tok/s`),
+    ariaLabel: latency.withTurnLatencyAria(`Generation rate: idle. Active-generation rate unavailable. End-to-end throughput ${num} tokens per second, based on ${source} divided by full assistant duration.`),
+    tooltip: latency.withLatencyLines([
+      'No active generation.',
+      'Active-generation speed unavailable; showing the latest completed end-to-end throughput.',
+      `End-to-end throughput: ${num} tok/s (${source} ÷ full assistant duration).`,
+    ]),
     state: 'idle',
     paused: false,
+    endToEndRate: endToEnd.rate,
+    endToEndRateEstimated: endToEnd.estimated,
+    ...(terminalEstimate === null ? {} : { terminalOutputTokensEstimate: terminalEstimate }),
   };
 }

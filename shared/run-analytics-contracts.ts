@@ -484,6 +484,10 @@ export interface RunSnapshot {
   harnessFingerprint?: string;
   /** Privacy-safe size of the user-authored message that started this run, in Unicode code points. Optional for historical snapshots; content is never stored here. */
   initialUserMessageChars?: number;
+  /** Privacy-safe estimated size of the same user-authored message in tokens
+   * (cl100k_base BPE estimate; the exact model tokenizer is not known at send
+   * time). Optional for historical snapshots; the text itself is never stored. */
+  initialUserMessageTokens?: number;
   sendCount: number;
   assistantTurnCount: number;
   assistantTurnDurationMs: number;
@@ -516,6 +520,17 @@ export interface RunSnapshot {
    * distinguishes new tracked runs from legacy snapshots, while persisted IDs
    * keep terminal replay after checkpoint restore idempotent. */
   unknownSubagentAttemptRecordSourceIds?: string[];
+  /**
+   * ask_user questions the user answered (terminal results not reported as
+   * cancelled). Optional on the wire: absent means the run predates ask_user
+   * outcome tracking and is untracked — never inferred as zero.
+   */
+  askUserAnsweredCount?: number;
+  /**
+   * ask_user questions cancelled by the user (terminal results reporting
+   * `details.cancelled`). Optional on the wire; absent = untracked.
+   */
+  askUserCancelledCount?: number;
   backendErrorCodes: string[];
   contextTokens: number | null;
   contextLimit: number | null;

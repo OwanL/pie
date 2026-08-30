@@ -1,6 +1,10 @@
 import { useEffect, useRef } from 'preact/hooks';
 
 import { isNearBottom, resolveAutoFollowState } from '../auto-scroll';
+import {
+  TRANSCRIPT_SCROLLBAR_INTERACTION_END_EVENT,
+  TRANSCRIPT_SCROLLBAR_INTERACTION_START_EVENT,
+} from './transcript-scrollbar-events';
 
 export function useScrollEventsEffect(
   scrollRef: { current: HTMLDivElement | null },
@@ -14,6 +18,7 @@ export function useScrollEventsEffect(
   hasOlder: boolean,
   requestOlderPage: () => void,
   sessionKey: string | null,
+  navigationActiveRef: { current: boolean },
 ) {
   // The paging callback is recreated by the transcript host on ordinary state
   // renders. Keep the bound scroll listener stable for the whole session while
@@ -49,6 +54,7 @@ export function useScrollEventsEffect(
       manualScrollIdleTimer = window.setTimeout(finishManualInteraction, 220);
     };
     const beginManualInteraction = () => {
+      navigationActiveRef.current = false;
       setManualScrollActive(true);
       clearManualIdleTimer();
     };
@@ -58,6 +64,15 @@ export function useScrollEventsEffect(
       beginManualInteraction();
     };
     const onPointerEnd = () => {
+      if (!pointerGestureActive) return;
+      pointerGestureActive = false;
+      scheduleManualIdleReset();
+    };
+    const onScrollbarInteractionStart = () => {
+      pointerGestureActive = true;
+      beginManualInteraction();
+    };
+    const onScrollbarInteractionEnd = () => {
       if (!pointerGestureActive) return;
       pointerGestureActive = false;
       scheduleManualIdleReset();
@@ -102,18 +117,20 @@ export function useScrollEventsEffect(
         scheduleManualIdleReset();
       }
       const metrics = { scrollHeight: el.scrollHeight, scrollTop: next, clientHeight: el.clientHeight };
-      const follow = resolveAutoFollowState({
-        previousAutoFollow: autoFollowRef.current,
-        previousScrollTop: lastScrollTopRef.current,
-        nextScrollTop: next,
-        metrics,
-      });
+      const follow = navigationActiveRef.current
+        ? false
+        : resolveAutoFollowState({
+            previousAutoFollow: autoFollowRef.current,
+            previousScrollTop: lastScrollTopRef.current,
+            nextScrollTop: next,
+            metrics,
+          });
       setAutoFollow(follow);
       lastScrollTopRef.current = next;
       // Keep the visual bottom state metric-based rather than equating it with
       // follow ownership; the user can be detached while still near the edge.
       setIsAtBottom(isNearBottom(metrics));
-      if (!manualScrollActiveRef.current && el.scrollTop <= 120 && hasOlderRef.current) {
+      if (!navigationActiveRef.current && !manualScrollActiveRef.current && el.scrollTop <= 120 && hasOlderRef.current) {
         requestOlderPageRef.current();
       }
     };
@@ -125,6 +142,8 @@ export function useScrollEventsEffect(
     el.addEventListener('touchend', onTouchEnd, { passive: true });
     el.addEventListener('touchcancel', onTouchEnd, { passive: true });
     el.addEventListener('keydown', onKeyDown);
+    el.addEventListener(TRANSCRIPT_SCROLLBAR_INTERACTION_START_EVENT, onScrollbarInteractionStart);
+    el.addEventListener(TRANSCRIPT_SCROLLBAR_INTERACTION_END_EVENT, onScrollbarInteractionEnd);
     window.addEventListener('pointerup', onPointerEnd, { passive: true });
     window.addEventListener('pointercancel', onPointerEnd, { passive: true });
 
@@ -136,11 +155,14 @@ export function useScrollEventsEffect(
       el.removeEventListener('touchend', onTouchEnd);
       el.removeEventListener('touchcancel', onTouchEnd);
       el.removeEventListener('keydown', onKeyDown);
+      el.removeEventListener(TRANSCRIPT_SCROLLBAR_INTERACTION_START_EVENT, onScrollbarInteractionStart);
+      el.removeEventListener(TRANSCRIPT_SCROLLBAR_INTERACTION_END_EVENT, onScrollbarInteractionEnd);
       window.removeEventListener('pointerup', onPointerEnd);
       window.removeEventListener('pointercancel', onPointerEnd);
       clearManualIdleTimer();
       setManualScrollActive(false);
       programmaticScrollTargetRef.current = null;
+      navigationActiveRef.current = false;
     };
-  }, [scrollRef, sessionKey, autoFollowRef, lastScrollTopRef, manualScrollActiveRef, setManualScrollActive, programmaticScrollTargetRef, setIsAtBottom, setAutoFollow]);
+  }, [scrollRef, sessionKey, autoFollowRef, lastScrollTopRef, manualScrollActiveRef, setManualScrollActive, programmaticScrollTargetRef, setIsAtBottom, setAutoFollow, navigationActiveRef]);
 }

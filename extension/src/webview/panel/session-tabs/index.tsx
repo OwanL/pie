@@ -12,7 +12,9 @@ import { SessionTab } from './session-tab';
 import { PinnedTabGroup } from './pinned-tab-group';
 import { SessionTabContextMenu } from './session-tab-context-menu';
 import type { SessionTabRunAction } from './run-state';
+import type { SessionTabContextTarget } from './types';
 import { useTabDragAndDrop } from './use-drag-and-drop.js';
+import { PinnedGroupContextMenu } from './pinned-group-context-menu';
 
 interface SessionTabsProps {
   sessions: SessionSummary[];
@@ -21,6 +23,7 @@ interface SessionTabsProps {
   pinnedTabPaths: string[];
   pinnedTabGroups: string[][];
   runningSessionPaths: string[];
+  generatingTitleSessionPaths?: string[];
   startingModelSessionPaths: string[];
   unreadFinishedSessionPaths: string[];
   activeSession: SessionSummary | null;
@@ -36,9 +39,12 @@ interface SessionTabsProps {
   onDuplicate: (path: string) => void;
   onRetryCreate?: (operationId: string) => void;
   onTogglePin: (path: string) => void;
+  onPinAndMergePinnedTab?: (path: string) => void;
   onGroupPinnedTab: (sourcePath: string, targetPath: string) => void;
   onMergePinnedGroups: (sourcePath: string, targetPath: string) => void;
   onUngroupPinnedTab: (sourcePath: string, toItemIndex: number) => void;
+  onDissolvePinnedGroup?: (sourcePath: string) => void;
+  onUnpinPinnedGroup?: (sourcePath: string) => void;
   onRunAction: (action: SessionTabRunAction, tabPath: string) => void;
   /** Session paths that own a pending deferred trigger. Tabs in this set have
    *  their close × greyed out with an explanatory tooltip (the trigger must be
@@ -109,14 +115,18 @@ function areSessionTabsPropsEqual(
     && previous.onDuplicate === next.onDuplicate
     && previous.onRetryCreate === next.onRetryCreate
     && previous.onTogglePin === next.onTogglePin
+    && (previous.onPinAndMergePinnedTab ?? null) === (next.onPinAndMergePinnedTab ?? null)
     && previous.onGroupPinnedTab === next.onGroupPinnedTab
     && previous.onMergePinnedGroups === next.onMergePinnedGroups
     && previous.onUngroupPinnedTab === next.onUngroupPinnedTab
+    && previous.onDissolvePinnedGroup === next.onDissolvePinnedGroup
+    && previous.onUnpinPinnedGroup === next.onUnpinPinnedGroup
     && previous.onRunAction === next.onRunAction
     && stringArraysEqual(previous.openTabPaths, next.openTabPaths)
     && stringArraysEqual(previous.pinnedTabPaths, next.pinnedTabPaths)
     && pinnedTabGroupsEqual(previous.pinnedTabGroups, next.pinnedTabGroups)
     && stringArraysEqual(previous.runningSessionPaths, next.runningSessionPaths)
+    && stringArraysEqual(previous.generatingTitleSessionPaths ?? [], next.generatingTitleSessionPaths ?? [])
     && stringArraysEqual(previous.startingModelSessionPaths, next.startingModelSessionPaths)
     && stringArraysEqual(previous.unreadFinishedSessionPaths, next.unreadFinishedSessionPaths)
     && stringArraysEqual(previous.deferredSessionPaths, next.deferredSessionPaths)
@@ -134,6 +144,7 @@ function SessionTabsView({
   pinnedTabPaths,
   pinnedTabGroups,
   runningSessionPaths,
+  generatingTitleSessionPaths = [],
   startingModelSessionPaths,
   unreadFinishedSessionPaths,
   activeSession,
@@ -149,9 +160,12 @@ function SessionTabsView({
   onDuplicate,
   onRetryCreate,
   onTogglePin,
+  onPinAndMergePinnedTab = () => undefined,
   onGroupPinnedTab,
   onMergePinnedGroups,
   onUngroupPinnedTab,
+  onDissolvePinnedGroup = () => undefined,
+  onUnpinPinnedGroup = () => undefined,
   onRunAction,
   deferredSessionPaths,
   deferredTimerSessionPaths,
@@ -191,6 +205,7 @@ function SessionTabsView({
   const {
     dragState,
     tabContextMenu,
+    closeContextMenu,
     onPointerDown,
     onPinnedItemPointerDown,
     onClick,
@@ -207,6 +222,7 @@ function SessionTabsView({
     onClose,
     onDuplicate,
     onTogglePin,
+    onPinAndMerge: onPinAndMergePinnedTab,
     onGroupPinnedTab,
     onMergePinnedGroups,
     onUngroupPinnedTab,
@@ -257,6 +273,7 @@ function SessionTabsView({
   const sessionByPath = useMemo(() => new Map(sessions.map((session) => [session.path, session])), [sessions]);
   const openIndexByPath = useMemo(() => new Map(openTabPaths.map((path, index) => [path, index])), [openTabPaths]);
   const runningPathSet = useMemo(() => new Set(runningSessionPaths), [runningSessionPaths]);
+  const generatingTitlePathSet = useMemo(() => new Set(generatingTitleSessionPaths), [generatingTitleSessionPaths]);
   const startingModelPathSet = useMemo(() => new Set(startingModelSessionPaths), [startingModelSessionPaths]);
   const unreadFinishedPathSet = useMemo(() => new Set(unreadFinishedSessionPaths), [unreadFinishedSessionPaths]);
   const pinnedPathSet = useMemo(() => new Set(pinnedTabPaths), [pinnedTabPaths]);
@@ -440,6 +457,17 @@ function SessionTabsView({
   const onMemberPointerDown = useCallback((event: PointerEvent, sourcePath: string) => {
     onPinnedItemPointerDown(event, sourcePath, false, true, 0);
   }, [onPinnedItemPointerDown]);
+  const onGroupContextMenu = useCallback((
+    event: MouseEvent,
+    tabPath: string,
+    target: SessionTabContextTarget,
+    triggerEl?: HTMLElement | null,
+  ) => {
+    // A context menu is a sibling overlay to the dropdown. Close the dropdown
+    // before mounting either menu so Escape always dismisses one layer at a time.
+    onCloseGroup();
+    onContextMenu(event, tabPath, target, triggerEl);
+  }, [onCloseGroup, onContextMenu]);
 
   // Keep the open dropdown valid across pinned-group mutations. While the open
   // group's identifier is still a member of a group, refresh the member
@@ -501,6 +529,7 @@ function SessionTabsView({
               itemIndex={itemIndex}
               sessionByPath={sessionByPath}
               runningPathSet={runningPathSet}
+              generatingTitlePathSet={generatingTitlePathSet}
               startingModelPathSet={startingModelPathSet}
               unreadFinishedPathSet={unreadFinishedPathSet}
               deferredTimerPathSet={deferredTimerPathSet}
@@ -512,6 +541,7 @@ function SessionTabsView({
               onSelectMember={onSelectGroupMember}
               onChipPointerDown={onChipPointerDown}
               onMemberPointerDown={onMemberPointerDown}
+              onContextMenu={onGroupContextMenu}
             />
           ) : (
             <SessionTab
@@ -521,6 +551,7 @@ function SessionTabsView({
               sessionByPath={sessionByPath}
               openIndexByPath={openIndexByPath}
               runningPathSet={runningPathSet}
+              generatingTitlePathSet={generatingTitlePathSet}
               startingModelPathSet={startingModelPathSet}
               unreadFinishedPathSet={unreadFinishedPathSet}
               activePath={effectiveActivePath}
@@ -547,6 +578,7 @@ function SessionTabsView({
             sessionByPath={sessionByPath}
             openIndexByPath={openIndexByPath}
             runningPathSet={runningPathSet}
+            generatingTitlePathSet={generatingTitlePathSet}
             startingModelPathSet={startingModelPathSet}
             unreadFinishedPathSet={unreadFinishedPathSet}
             activePath={effectiveActivePath}
@@ -606,16 +638,32 @@ function SessionTabsView({
           ghostRef={ghostElementRef}
         />
       )}
-      {tabContextMenu && (
+      {tabContextMenu && tabContextMenu.target?.kind === 'group' ? (
+        <PinnedGroupContextMenu
+          menu={tabContextMenu}
+          sessionByPath={sessionByPath}
+          pinnedItems={pinnedItems}
+          onOpenGroup={onToggleGroupOpen}
+          onMergePinnedGroups={onMergePinnedGroups}
+          onDissolvePinnedGroup={onDissolvePinnedGroup}
+          onUnpinPinnedGroup={onUnpinPinnedGroup}
+          onClose={closeContextMenu}
+        />
+      ) : tabContextMenu ? (
         <SessionTabContextMenu
           tabContextMenu={tabContextMenu}
           sessionByPath={sessionByPath}
           runSummary={runSummariesBySession[tabContextMenu.tabPath] ?? null}
           isPinned={pinnedPathSet.has(tabContextMenu.tabPath)}
+          pinnedItems={pinnedItems}
           hasDeferredTriggers={deferredPathSet.has(tabContextMenu.tabPath)}
+          onNew={onNew}
           onContextAction={onContextAction}
+          onGroupPinnedTab={onGroupPinnedTab}
+          onUngroupPinnedTab={onUngroupPinnedTab}
+          onClose={closeContextMenu}
         />
-      )}
+      ) : null}
     </div>
   );
 }

@@ -355,6 +355,25 @@ export interface NestedAllowedBuckets {
 /** All buckets allowed for nested subagents — the default before the user restricts any tier. */
 export const ALL_NESTED_BUCKETS_ALLOWED: NestedAllowedBuckets = { small: true, medium: true, frontier: true };
 
+/**
+ * Per-effective-bucket delegation policy for subagents. A `false` value makes
+ * subagents running in that bucket leaves: their `subagent` tool calls are
+ * rejected before another child is dispatched. The root chat has no subagent
+ * bucket and is never restricted. Mirrored via {@link SUBAGENT_BUCKET_CAN_SPAWN_ENV}.
+ */
+export interface SubagentBucketCanSpawn {
+  small: boolean;
+  medium: boolean;
+  frontier: boolean;
+}
+
+/** Every subagent bucket may delegate by default, preserving existing behaviour. */
+export const ALL_SUBAGENT_BUCKETS_CAN_SPAWN: SubagentBucketCanSpawn = {
+  small: true,
+  medium: true,
+  frontier: true,
+};
+
 /** Per-provider concurrency overrides, user-configurable in the Providers tab.
  *  Each field is optional — `undefined` means "use the models.json default".
  *  When the user changes any field, the host reconfigures the live
@@ -364,7 +383,7 @@ export interface ProviderConcurrencyOverrides {
   maxConcurrentRequests?: number;
   /** Per-session sticky-slot window in seconds (0 = disabled). */
   afterburnSeconds?: number;
-  /** Max seconds a queued request waits for a slot before failing. 0 = unbounded. */
+  /** Max seconds a queued request waits for a slot before failing. 0 = 300s safety maximum. */
   queueWaitSeconds?: number;
   /** Max seconds to wait for upstream response headers before aborting. 0 = gate default. */
   headerWaitSeconds?: number;
@@ -446,6 +465,11 @@ export interface ChatPrefs {
    *  highest allowed tier at or below it. Mirrored to the in-process subagent
    *  extension via PIE_SUBAGENT_NESTED_ALLOWED_BUCKETS_JSON. Default: all true. */
   subagentNestedAllowedBuckets: NestedAllowedBuckets;
+  /** Per-effective-bucket policy controlling whether a subagent may create
+   *  further subagents. False makes that bucket a leaf while leaving root-chat
+   *  delegation unrestricted. Mirrored via
+   *  PIE_SUBAGENT_BUCKET_CAN_SPAWN_JSON. Default: all true. */
+  subagentBucketCanSpawn: SubagentBucketCanSpawn;
   /** User-configured list of tool names to always drop from subagent sessions
    *  (e.g. ["ask_user"]). Subtracted from every subagent's effective tool set,
    *  regardless of the agent's `tools:` frontmatter. Empty (default) → no tools
@@ -597,6 +621,10 @@ export const SUBAGENT_BUCKETS_ENV = 'PIE_SUBAGENT_BUCKETS_JSON';
  *  `NestedAllowedBuckets`. */
 export const NESTED_ALLOWED_BUCKETS_ENV = 'PIE_SUBAGENT_NESTED_ALLOWED_BUCKETS_JSON';
 
+/** Environment key used to mirror whether subagents in each effective bucket
+ *  may create further subagents. Value is JSON `SubagentBucketCanSpawn`. */
+export const SUBAGENT_BUCKET_CAN_SPAWN_ENV = 'PIE_SUBAGENT_BUCKET_CAN_SPAWN_JSON';
+
 export type ActiveRunStatus = 'open' | 'closed';
 
 export interface ActiveRunSummary {
@@ -629,6 +657,7 @@ export const DEFAULT_CHAT_PREFS: ChatPrefs = {
   bashDefaultTimeout: 60,
   subagentBuckets: { ...EMPTY_SUBAGENT_BUCKETS },
   subagentNestedAllowedBuckets: { ...ALL_NESTED_BUCKETS_ALLOWED },
+  subagentBucketCanSpawn: { ...ALL_SUBAGENT_BUCKETS_CAN_SPAWN },
   subagentDropTools: [],
   completionSoundVolume: 50,
   uiBaseFontSize: 13,
@@ -794,6 +823,54 @@ export function mergePruningSettings(
 }
 
 
+/** Optional LLM session-title generation policy (settings.json `sessionTitles
+ *  block`). Host-owned settings persisted by `SessionService`; the webview only
+ *  renders and edits the store copy. When `enabled` is false, session tabs
+ *  keep the default prompt-snippet name and no title model is called. */
+export interface SessionTitlesSettings {
+  /** Master switch for LLM title generation. */
+  enabled: boolean;
+  /** Provider of the title model. */
+  provider: string;
+  /** Model id used to generate session titles. */
+  model: string;
+  /** Reasoning budget used by the auxiliary title request. */
+  thinkingLevel: ThinkingLevel;
+  /** End-to-end auxiliary request timeout in seconds. */
+  timeoutSec: number;
+}
+
+/** Benchmarked default: `ollama/deepseek-v4-flash:0731-cloud` had the best
+ *  warm latency (median ~692ms) and strongest title quality in the 12-case
+ *  comparison, versus glm-5.3-flash instruction-following failures and local
+ *  Qwen cold starts of 17–24s. */
+export const DEFAULT_SESSION_TITLES_SETTINGS: SessionTitlesSettings = {
+  enabled: true,
+  provider: 'ollama',
+  model: 'deepseek-v4-flash:0731-cloud',
+  thinkingLevel: 'off',
+  timeoutSec: 15,
+};
+
+/**
+ * Pure merge of a partial session-titles settings update into the current
+ * settings. Scalars are replaced when present in `updates`. This must produce
+ * the same shape as the disk-write merge in `writeSessionTitlesSettings` so
+ * the reducer's optimistic state matches the persisted state.
+ */
+export function mergeSessionTitlesSettings(
+  current: SessionTitlesSettings,
+  updates: Partial<SessionTitlesSettings>,
+): SessionTitlesSettings {
+  return {
+    enabled: updates.enabled !== undefined ? updates.enabled : current.enabled,
+    provider: updates.provider !== undefined ? updates.provider : current.provider,
+    model: updates.model !== undefined ? updates.model : current.model,
+    thinkingLevel: updates.thinkingLevel !== undefined ? updates.thinkingLevel : current.thinkingLevel,
+    timeoutSec: updates.timeoutSec !== undefined ? updates.timeoutSec : current.timeoutSec,
+  };
+}
+
 export const EMPTY_TRANSCRIPT_WINDOW: TranscriptWindow = {
   totalCount: 0,
   loadedStart: 0,
@@ -854,6 +931,21 @@ export function normalizeNestedAllowedBuckets(value: unknown): NestedAllowedBuck
   };
 }
 
+/** Coerce persisted per-bucket delegation policy, failing open for older,
+ *  partial, or malformed values so upgrades never unexpectedly remove tools. */
+export function normalizeSubagentBucketCanSpawn(value: unknown): SubagentBucketCanSpawn {
+  const coerce = (v: unknown): boolean => (typeof v === 'boolean' ? v : true);
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return { ...ALL_SUBAGENT_BUCKETS_CAN_SPAWN };
+  }
+  const v = value as Record<string, unknown>;
+  return {
+    small: coerce(v.small),
+    medium: coerce(v.medium),
+    frontier: coerce(v.frontier),
+  };
+}
+
 export function normalizeComposerInitialRows(value: unknown): number {
   return typeof value === 'number'
     && Number.isInteger(value)
@@ -898,6 +990,7 @@ export function resolveChatPrefs(prefs?: Partial<ChatPrefs> | null): ChatPrefs {
     historyCompaction: resolveHistoryCompactionSettings(prefs?.historyCompaction),
     subagentBuckets: normalizeSubagentBuckets(prefs?.subagentBuckets),
     subagentNestedAllowedBuckets: normalizeNestedAllowedBuckets(prefs?.subagentNestedAllowedBuckets),
+    subagentBucketCanSpawn: normalizeSubagentBucketCanSpawn(prefs?.subagentBucketCanSpawn),
     subagentDropTools: normalizeStringArray(prefs?.subagentDropTools),
     autoExpandSubagentCalls:
       prefs?.autoExpandSubagentCalls
@@ -955,6 +1048,7 @@ export function buildRuntimePrefsPayload(prefs: ChatPrefs): {
   bashDefaultTimeout?: number;
   subagentBuckets?: SubagentBuckets;
   subagentNestedAllowedBuckets?: NestedAllowedBuckets;
+  subagentBucketCanSpawn?: SubagentBucketCanSpawn;
   subagentDropTools?: string[];
   providerConcurrency?: ProviderConcurrencyMap;
   historyCompaction?: HistoryCompactionSettings;
@@ -980,6 +1074,7 @@ export function buildRuntimePrefsPayload(prefs: ChatPrefs): {
     bashDefaultTimeout: prefs.bashDefaultTimeout,
     subagentBuckets: prefs.subagentBuckets,
     subagentNestedAllowedBuckets: prefs.subagentNestedAllowedBuckets,
+    subagentBucketCanSpawn: prefs.subagentBucketCanSpawn,
     subagentDropTools: prefs.subagentDropTools,
     providerConcurrency: prefs.providerConcurrency,
     historyCompaction: prefs.historyCompaction,
@@ -998,10 +1093,30 @@ export function normalizeProviderConcurrency(value: unknown): ProviderConcurrenc
     const o = overrides as Record<string, unknown>;
     const cleaned: ProviderConcurrencyOverrides = {};
     let hasAny = false;
-    for (const key of ['maxConcurrentRequests', 'afterburnSeconds', 'queueWaitSeconds', 'headerWaitSeconds'] as const) {
-      const v = o[key];
-      if (typeof v === 'number' && Number.isFinite(v) && v >= 0) {
-        cleaned[key] = v;
+    const maxConcurrentRequests = o.maxConcurrentRequests;
+    if (typeof maxConcurrentRequests === 'number'
+      && Number.isFinite(maxConcurrentRequests)
+      && Number.isInteger(maxConcurrentRequests)
+      && maxConcurrentRequests >= 1) {
+      cleaned.maxConcurrentRequests = maxConcurrentRequests;
+      hasAny = true;
+    }
+    const afterburnSeconds = o.afterburnSeconds;
+    if (typeof afterburnSeconds === 'number' && Number.isFinite(afterburnSeconds) && afterburnSeconds >= 0) {
+      cleaned.afterburnSeconds = afterburnSeconds;
+      hasAny = true;
+    }
+    // Keep persisted preference normalization aligned with the backend RPC
+    // boundary. A hand-edited or older fractional/out-of-range timeout must be
+    // dropped here rather than poisoning the complete runtimePrefs.set update.
+    for (const key of ['queueWaitSeconds', 'headerWaitSeconds'] as const) {
+      const timeoutSeconds = o[key];
+      if (typeof timeoutSeconds === 'number'
+        && Number.isFinite(timeoutSeconds)
+        && Number.isInteger(timeoutSeconds)
+        && timeoutSeconds >= 0
+        && timeoutSeconds <= 300) {
+        cleaned[key] = timeoutSeconds;
         hasAny = true;
       }
     }

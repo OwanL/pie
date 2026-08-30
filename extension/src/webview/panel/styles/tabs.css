@@ -221,6 +221,14 @@ body.session-tab-dragging {
   mask-image: linear-gradient(to right, transparent 0, black 14px, black calc(100% - 14px), transparent 100%);
 }
 
+@media (max-width: 520px) {
+  .session-tabs-strip {
+    --session-tabs-scrollbar-height: 5px;
+    --session-tabs-scrollbar-hover-height: 7px;
+    scrollbar-gutter: stable;
+  }
+}
+
 /* ── Session tab ─────────────────────────────────────────────────────────── */
 
 .session-tab {

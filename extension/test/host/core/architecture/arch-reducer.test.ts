@@ -1876,6 +1876,24 @@ test('reducer: SetPrefs normalizes a partial subagentBuckets patch into a comple
   });
 });
 
+test('reducer: SetPrefs normalizes a partial bucket delegation policy fail-open', () => {
+  const event: Event = {
+    kind: 'Command',
+    cmd: {
+      kind: 'SetPrefs',
+      corrId: 'c-prefs-bucket-delegation',
+      prefs: { subagentBucketCanSpawn: { medium: false } as any },
+    },
+  };
+
+  const result = reducer(initialArchState, event);
+  assert.deepEqual(result.state.settings.prefs.subagentBucketCanSpawn, {
+    small: true,
+    medium: false,
+    frontier: true,
+  });
+});
+
 // ─── Phase 2: SetPruningSettings (Option B — reducer owns the optimistic apply) ──
 
 test('reducer: SetPruningSettings applies optimistically and emits the SetPruningSettings effect', () => {

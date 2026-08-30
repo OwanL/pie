@@ -131,6 +131,116 @@ test('prepareForSend carries queued unsupported inputs and startNewTask closes t
   assert.ok(harness.renderCount >= 3);
 });
 
+test('terminal ask_user results count answered and cancelled outcomes idempotently', () => {
+  const harness = createHarness();
+  harness.tracker.prepareForSend(harness.sessionPath, []);
+
+  const answered: ToolCall = {
+    id: 'ask-1', name: 'ask_user', input: { question: 'Scope?', options: ['A', 'B'] }, status: 'running',
+  };
+  harness.tracker.onToolStarted(harness.sessionPath, answered);
+  harness.tracker.onToolFinished(harness.sessionPath, {
+    ...answered,
+    status: 'completed',
+    result: {
+      content: [{ type: 'text', text: 'A' }],
+      details: { answer: 'A', source: 'option', cancelled: false },
+    },
+  });
+  // Duplicate terminal delivery must stay idempotent through the finished-tool dedupe.
+  harness.tracker.onToolFinished(harness.sessionPath, {
+    ...answered,
+    status: 'completed',
+    result: {
+      content: [{ type: 'text', text: 'A' }],
+      details: { answer: 'A', source: 'option', cancelled: false },
+    },
+  });
+
+  const cancelled: ToolCall = {
+    id: 'ask-2', name: 'ask_user', input: { question: 'Proceed?', options: ['yes', 'no'] }, status: 'running',
+  };
+  harness.tracker.onToolStarted(harness.sessionPath, cancelled);
+  harness.tracker.onToolFinished(harness.sessionPath, {
+    ...cancelled,
+    status: 'completed',
+    result: { content: [{ type: 'text', text: 'no' }], details: { source: 'cancelled', cancelled: true } },
+  });
+
+  const run = harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun;
+  assert.equal(run?.askUserAnsweredCount, 1, 'answered ask_user counted exactly once per call');
+  assert.equal(run?.askUserCancelledCount, 1, 'cancelled ask_user counted exactly once per call');
+});
+
+test('ask_user outcomes read the legacy top-level result shape and ignore malformed results', () => {
+  const harness = createHarness();
+  harness.tracker.prepareForSend(harness.sessionPath, []);
+
+  const legacy: ToolCall = { id: 'ask-3', name: 'ask_user', input: {}, status: 'running' };
+  harness.tracker.onToolStarted(harness.sessionPath, legacy);
+  harness.tracker.onToolFinished(harness.sessionPath, {
+    ...legacy, status: 'completed', result: { answer: 'yes', source: 'custom', cancelled: false },
+  });
+
+  // A terminal ask_user result without structured outcome data is never counted.
+  const malformed: ToolCall = { id: 'ask-4', name: 'ask_user', input: {}, status: 'running' };
+  harness.tracker.onToolStarted(harness.sessionPath, malformed);
+  harness.tracker.onToolFinished(harness.sessionPath, {
+    ...malformed, status: 'failed', result: 'Ask failed: no prompt registered',
+  });
+
+  // Non-ask_user tools never touch the counters.
+  const other: ToolCall = { id: 'bash-1', name: 'bash', input: {}, status: 'running' };
+  harness.tracker.onToolStarted(harness.sessionPath, other);
+  harness.tracker.onToolFinished(harness.sessionPath, {
+    ...other, status: 'completed', result: { details: { cancelled: true } },
+  });
+
+  const run = harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun;
+  assert.equal(run?.askUserAnsweredCount, 1);
+  assert.equal(run?.askUserCancelledCount, 0, 'malformed and non-ask_user results are not counted as cancelled');
+});
+
+test('ask_user counters increment on checkpoint-restored runs that predate the fields', () => {
+  const harness = createHarness();
+  harness.tracker.prepareForSend(harness.sessionPath, []);
+  // Simulate a checkpoint-restore whose snapshot predates ask_user tracking.
+  const sessions = harness.tracker.serializeSessions();
+  const restored = sessions[harness.sessionPath]?.currentRun;
+  assert.ok(restored);
+  delete (restored as { askUserAnsweredCount?: number }).askUserAnsweredCount;
+  delete (restored as { askUserCancelledCount?: number }).askUserCancelledCount;
+  harness.tracker.restore(JSON.parse(JSON.stringify(sessions)));
+
+  const ask: ToolCall = { id: 'ask-5', name: 'ask_user', input: {}, status: 'running' };
+  harness.tracker.onToolStarted(harness.sessionPath, ask);
+  harness.tracker.onToolFinished(harness.sessionPath, {
+    ...ask, status: 'completed',
+    result: { content: [{ type: 'text', text: 'ok' }], details: { answer: 'ok', source: 'option', cancelled: false } },
+  });
+
+  const run = harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun;
+  assert.equal(run?.askUserAnsweredCount, 1, 'increment creates the counter instead of assuming an untracked zero');
+  assert.equal(run?.askUserCancelledCount, undefined, 'an unincremented counter stays absent on a legacy run');
+});
+
+test('prepareForSend estimates user prompt tokens with the shared BPE tokenizer', () => {
+  const harness = createHarness();
+
+  harness.tracker.prepareForSend(harness.sessionPath, [], ' A🙂 ');
+  const firstRun = harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun;
+  assert.ok(firstRun);
+  assert.equal(firstRun?.initialUserMessageChars, 2, 'same trimmed Unicode source as initialUserMessageChars');
+  assert.ok(
+    typeof firstRun?.initialUserMessageTokens === 'number' && firstRun.initialUserMessageTokens > 0,
+    'token estimate is present for new runs',
+  );
+
+  harness.tracker.prepareForSend(harness.sessionPath, [], '');
+  const emptyRun = harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun;
+  assert.equal(emptyRun?.initialUserMessageTokens, 0, 'empty prompt estimates zero tokens');
+});
+
 test('prepareForSend captures functional settings from ArchState.settings at run start', () => {
   const harness = createHarness();
   harness.mutateSettings((settings) => {

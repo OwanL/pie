@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useState } from 'preact/hooks';
 
 import type { ChatMessage } from '../../../shared/protocol';
+import { isNearBottom } from '../auto-scroll';
 
 /**
  * Keeps the auto-follow target (the true bottom = `scrollHeight - clientHeight`,
@@ -40,6 +41,7 @@ export function useRefreshFollowTarget(
   transcript: readonly ChatMessage[],
   sessionKey: string | null,
   cachedTargetRef: { current: number },
+  setIsAtBottom: (value: boolean) => void,
 ): number {
   // totalSize/transcript changes already render the owner and are passed on as
   // wake dependencies. Only a container ResizeObserver notification needs its
@@ -50,11 +52,19 @@ export function useRefreshFollowTarget(
   const refresh = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return false;
-    const target = Math.max(0, el.scrollHeight - el.clientHeight);
+    const scrollHeight = el.scrollHeight;
+    const scrollTop = el.scrollTop;
+    const clientHeight = el.clientHeight;
+    setIsAtBottom(isNearBottom({
+      scrollHeight,
+      scrollTop,
+      clientHeight,
+    }));
+    const target = Math.max(0, scrollHeight - clientHeight);
     if (target === cachedTargetRef.current) return false;
     cachedTargetRef.current = target;
     return true;
-  }, [scrollRef, cachedTargetRef]);
+  }, [scrollRef, cachedTargetRef, setIsAtBottom]);
 
   // Keyed on BOTH totalSize and transcript identity. totalSize catches every
   // height-relevant mutation (row ResizeObserver -> measureElement), but it
@@ -113,10 +123,11 @@ export function useAutoFollow(
   transcript: readonly ChatMessage[],
   sessionKey: string | null,
   programmaticScrollTargetRef: { current: number | null },
+  navigationActiveRef: { current: boolean },
 ) {
   useLayoutEffect(() => {
     const el = scrollRef.current;
-    if (!el || !autoFollowRef.current || hasNewer) return;
+    if (!el || !autoFollowRef.current || hasNewer || navigationActiveRef.current) return;
 
     const target = cachedTargetRef.current;
     if (el.scrollTop !== target) {
@@ -146,5 +157,6 @@ export function useAutoFollow(
     transcript,
     sessionKey,
     programmaticScrollTargetRef,
+    navigationActiveRef,
   ]);
 }

@@ -1,1 +1,0 @@
-Improve the sensor anomaly model; it has lost recall since the normalization changes. Preserve the existing API and keep it fast. Only modify `src/model.mjs`, and use the existing tests and evaluation to verify the change.

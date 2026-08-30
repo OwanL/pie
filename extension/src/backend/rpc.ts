@@ -1,5 +1,6 @@
-import type { ComposerInput, ExtensionUIResponsePayload, FilesystemPathComposerInput, ImageBlobComposerInput, ModelSettings, NestedAllowedBuckets, SubagentBuckets, ThinkingLevel, TranscriptMode, TranscriptPageDirection, buildRuntimePrefsPayload } from '../shared/protocol';
-import { ALL_NESTED_BUCKETS_ALLOWED, DEFAULT_HISTORY_COMPACTION_SETTINGS } from '../shared/protocol';
+import type { ComposerInput, ExtensionUIResponsePayload, FilesystemPathComposerInput, ImageBlobComposerInput, ModelSettings, NestedAllowedBuckets, SubagentBucketCanSpawn, SubagentBuckets, ThinkingLevel, TranscriptMode, TranscriptPageDirection, buildRuntimePrefsPayload } from '../shared/protocol';
+import { isThinkingLevel } from '../shared/thinking-level';
+import { ALL_NESTED_BUCKETS_ALLOWED, ALL_SUBAGENT_BUCKETS_CAN_SPAWN, DEFAULT_HISTORY_COMPACTION_SETTINGS } from '../shared/protocol';
 import { ALLOWED_IMAGE_MIME_TYPES, decodedBase64ByteLength, MAX_AGGREGATE_IMAGE_INPUT_BYTES, MAX_IMAGE_INPUT_BYTES } from '../shared/image-constraints';
 import { THINKING_LEVELS } from '../shared/thinking-level.js';
 import { isPendingTabPath } from '../shared/tab-behavior.js';
@@ -14,6 +15,9 @@ import {
 import { BackendError } from './server-io';
 
 export { MAX_IMAGE_INPUT_BYTES } from '../shared/image-constraints';
+
+/** Mirrors the isolated coordinator authority's finite per-phase safety cap. */
+const PROVIDER_NETWORK_PHASE_MAX_WAIT_SECONDS = 5 * 60;
 
 // ─── Argument parsing ────────────────────────────────────────────────────────
 
@@ -97,6 +101,15 @@ export interface SessionPathParams {
 export interface LiveTurnCheckpointParams extends SessionPathParams {
   turnId?: string;
   attemptId?: string;
+}
+
+export interface SessionTitleGenerateParams {
+  sessionPath: string;
+  prompt: string;
+  provider: string;
+  model: string;
+  thinkingLevel: ThinkingLevel;
+  timeoutSec: number;
 }
 
 export interface MessageSendParams {
@@ -482,6 +495,27 @@ function validateComposerInput(input: unknown, index: number): ComposerInput {
   fail(method, `inputs[${index}].kind is not supported: ${String(kind)}`);
 }
 
+export function validateSessionTitleGenerate(params: unknown): SessionTitleGenerateParams {
+  const method = 'session.title.generate';
+  if (!isObj(params)) fail(method, 'expected an object');
+  const value = params as Record<string, unknown>;
+  const sessionPath = value.sessionPath;
+  const prompt = value.prompt;
+  const provider = value.provider;
+  const model = value.model;
+  const thinkingLevel = value.thinkingLevel;
+  const timeoutSec = value.timeoutSec;
+  if (typeof sessionPath !== 'string' || !sessionPath) fail(method, 'requires a string sessionPath');
+  rejectPendingSessionPath(method, sessionPath);
+  if (typeof prompt !== 'string' || !prompt.trim()) fail(method, 'requires a non-empty prompt');
+  if (prompt.length > 100_000) fail(method, 'prompt exceeds the 100000 character limit');
+  if (typeof provider !== 'string' || !provider.trim()) fail(method, 'requires a non-empty provider');
+  if (typeof model !== 'string' || !model.trim()) fail(method, 'requires a non-empty model');
+  if (!isThinkingLevel(thinkingLevel)) fail(method, 'requires a valid thinkingLevel');
+  if (!Number.isInteger(timeoutSec) || (timeoutSec as number) < 1 || (timeoutSec as number) > 60) fail(method, 'requires timeoutSec from 1 to 60');
+  return { sessionPath, prompt, provider, model, thinkingLevel, timeoutSec: timeoutSec as number };
+}
+
 export function validateMessageSend(params: unknown): MessageSendParams {
   if (!isObj(params)) fail('message.send', 'expected an object');
   const text = (params as Record<string, unknown>)['text'];
@@ -596,21 +630,23 @@ function validateOptionalSubagentBuckets(
  * {@link NestedAllowedBuckets}, or `undefined` when omitted so the host can skip
  * the env update.
  */
-function validateOptionalNestedAllowedBuckets(
+function validateOptionalBucketBooleanPolicy<T extends NestedAllowedBuckets | SubagentBucketCanSpawn>(
   method: string,
+  fieldName: string,
   raw: unknown,
-): NestedAllowedBuckets | undefined {
+  defaults: T,
+): T | undefined {
   if (raw === undefined) return undefined;
   if (!isObj(raw) || Array.isArray(raw)) {
-    fail(method, 'subagentNestedAllowedBuckets must be an object when provided');
+    fail(method, `${fieldName} must be an object when provided`);
   }
   const src = raw as Record<string, unknown>;
-  const out: NestedAllowedBuckets = { ...ALL_NESTED_BUCKETS_ALLOWED };
+  const out: T = { ...defaults };
   for (const key of BUCKET_FIELD_KEYS) {
     const v = src[key];
     if (v === undefined) continue;
     if (typeof v !== 'boolean') {
-      fail(method, `subagentNestedAllowedBuckets.${key} must be a boolean when provided`);
+      fail(method, `${fieldName}.${key} must be a boolean when provided`);
     }
     out[key] = v;
   }
@@ -694,15 +730,17 @@ function validateOptionalProviderConcurrency(
     }
     const queueWait = o['queueWaitSeconds'];
     if (queueWait !== undefined) {
-      if (typeof queueWait !== 'number' || !Number.isFinite(queueWait) || queueWait < 0) {
-        fail(method, `providerConcurrency.${provider}.queueWaitSeconds must be a non-negative number when provided`);
+      if (typeof queueWait !== 'number' || !Number.isInteger(queueWait)
+        || queueWait < 0 || queueWait > PROVIDER_NETWORK_PHASE_MAX_WAIT_SECONDS) {
+        fail(method, `providerConcurrency.${provider}.queueWaitSeconds must be an integer from 0 to ${PROVIDER_NETWORK_PHASE_MAX_WAIT_SECONDS} when provided`);
       }
       cleaned.queueWaitSeconds = queueWait;
     }
     const headerWait = o['headerWaitSeconds'];
     if (headerWait !== undefined) {
-      if (typeof headerWait !== 'number' || !Number.isFinite(headerWait) || headerWait < 0) {
-        fail(method, `providerConcurrency.${provider}.headerWaitSeconds must be a non-negative number when provided`);
+      if (typeof headerWait !== 'number' || !Number.isInteger(headerWait)
+        || headerWait < 0 || headerWait > PROVIDER_NETWORK_PHASE_MAX_WAIT_SECONDS) {
+        fail(method, `providerConcurrency.${provider}.headerWaitSeconds must be an integer from 0 to ${PROVIDER_NETWORK_PHASE_MAX_WAIT_SECONDS} when provided`);
       }
       cleaned.headerWaitSeconds = headerWait;
     }
@@ -867,7 +905,18 @@ export function validateRuntimePrefsSet(params: unknown): RuntimePrefsSetParams 
   const subagentMaxDepth = validateOptionalInt('runtimePrefs.set', 'subagentMaxDepth', (params as Record<string, unknown>)['subagentMaxDepth'], 0, 8);
   const subagentMaxTreeSessions = validateOptionalInt('runtimePrefs.set', 'subagentMaxTreeSessions', (params as Record<string, unknown>)['subagentMaxTreeSessions'], 5, 200);
   const subagentBuckets = validateOptionalSubagentBuckets('runtimePrefs.set', (params as Record<string, unknown>)['subagentBuckets']);
-  const subagentNestedAllowedBuckets = validateOptionalNestedAllowedBuckets('runtimePrefs.set', (params as Record<string, unknown>)['subagentNestedAllowedBuckets']);
+  const subagentNestedAllowedBuckets = validateOptionalBucketBooleanPolicy(
+    'runtimePrefs.set',
+    'subagentNestedAllowedBuckets',
+    (params as Record<string, unknown>)['subagentNestedAllowedBuckets'],
+    ALL_NESTED_BUCKETS_ALLOWED,
+  );
+  const subagentBucketCanSpawn = validateOptionalBucketBooleanPolicy(
+    'runtimePrefs.set',
+    'subagentBucketCanSpawn',
+    (params as Record<string, unknown>)['subagentBucketCanSpawn'],
+    ALL_SUBAGENT_BUCKETS_CAN_SPAWN,
+  );
   const rawSubagentDropTools = (params as Record<string, unknown>)['subagentDropTools'];
   const subagentDropTools = rawSubagentDropTools === undefined ? undefined : Array.isArray(rawSubagentDropTools) && rawSubagentDropTools.every((entry) => typeof entry === 'string') ? [...(rawSubagentDropTools as string[])] : fail('runtimePrefs.set', 'subagentDropTools must be an array of strings when provided');
   const subagentMaxInflight = validateOptionalInt('runtimePrefs.set', 'subagentMaxInflight', (params as Record<string, unknown>)['subagentMaxInflight'], 1, 16);
@@ -880,15 +929,30 @@ export function validateRuntimePrefsSet(params: unknown): RuntimePrefsSetParams 
   const bashDefaultTimeout = validateOptionalInt('runtimePrefs.set', 'bashDefaultTimeout', (params as Record<string, unknown>)['bashDefaultTimeout'], 1, 600);
   const providerConcurrency = validateOptionalProviderConcurrency('runtimePrefs.set', (params as Record<string, unknown>)['providerConcurrency']);
   const historyCompaction = validateOptionalHistoryCompaction((params as Record<string, unknown>)['historyCompaction']);
-  return { providerToggles, ...(subagentProviderDefaults !== undefined ? { subagentProviderDefaults } : {}), ...(subagentProviderTogglesBySession !== undefined ? { subagentProviderTogglesBySession } : {}), extensionToggles, autonomousMode, mcpEnabled, subagentAlwaysParentModel, subagentRouteAroundSaturatedProviders, subagentFallbackOnProviderFailure, subagentMaxDepth, subagentMaxTreeSessions, subagentMaxInflight, bashWarmPoolSize, bashFastPath, bashShellPath, bashWarmupTimeoutMs, bashDefaultTimeout, subagentBuckets, subagentNestedAllowedBuckets, subagentDropTools, providerConcurrency, ...(historyCompaction !== undefined ? { historyCompaction } : {}) };
+  return { providerToggles, ...(subagentProviderDefaults !== undefined ? { subagentProviderDefaults } : {}), ...(subagentProviderTogglesBySession !== undefined ? { subagentProviderTogglesBySession } : {}), extensionToggles, autonomousMode, mcpEnabled, subagentAlwaysParentModel, subagentRouteAroundSaturatedProviders, subagentFallbackOnProviderFailure, subagentMaxDepth, subagentMaxTreeSessions, subagentMaxInflight, bashWarmPoolSize, bashFastPath, bashShellPath, bashWarmupTimeoutMs, bashDefaultTimeout, subagentBuckets, subagentNestedAllowedBuckets, subagentBucketCanSpawn, subagentDropTools, providerConcurrency, ...(historyCompaction !== undefined ? { historyCompaction } : {}) };
 }
 
 export interface OpenTabsSetParams {
   /** Open-tab summaries the host pushes so the `session_review` tool can list
-   *  currently-open sessions without host state access. Stored verbatim into
-   *  `process.env.PIE_OPEN_TABS` (JSON) for the tool to read. */
+   *  currently-open sessions without host state access. Published through the
+   *  coordinator's revisioned worker-sync domain and mirrored into
+   *  `process.env.PIE_OPEN_TABS` (JSON) for compatibility. */
   tabs: unknown[];
+  /** Monotonic host-authority revision. Optional for legacy callers. */
+  revision?: number;
 }
+
+const MAX_OPEN_TABS = 512;
+const MAX_OPEN_TABS_PAYLOAD_BYTES = 192 * 1024;
+const OPEN_TAB_STRING_LIMITS = {
+  path: 16 * 1024,
+  name: 4 * 1024,
+  cwd: 16 * 1024,
+  modifiedAt: 256,
+  modelId: 512,
+  provider: 256,
+  thinkingLevel: 64,
+} as const;
 
 export interface McpSetServerEnabledParams {
   name: string;
@@ -909,6 +973,40 @@ export function validateMcpSetServerEnabled(params: unknown): McpSetServerEnable
   return { name, enabled };
 }
 
+export interface McpSetSessionServerEnabledParams {
+  sessionPath: string;
+  /** Full desired per-session override set; the backend writes/removes the
+   *  session artifact from it (host state is the source of truth, the file is
+   *  the carrier). */
+  overrides: Record<string, boolean>;
+  /** True when the host considers the session idle and wants the session's
+   *  worker recycled so the adapter re-reads config at the next session
+   *  start. The backend still refuses to retire a busy worker. */
+  recycle: boolean;
+}
+
+/** Validate `mcp.setSessionServerEnabled` (host → backend). Per-session
+ *  server overrides — a Pi-agent-dir-layer config artifact plus optional
+ *  worker recycle; never the project `.pi/mcp.json` file. */
+export function validateMcpSetSessionServerEnabled(params: unknown): McpSetSessionServerEnabledParams {
+  if (!isObj(params)) fail('mcp.setSessionServerEnabled', 'expected an object');
+  const source = params as Record<string, unknown>;
+  const rawSessionPath = source['sessionPath'];
+  const sessionPath = typeof rawSessionPath === 'string' ? rawSessionPath.trim() : '';
+  if (sessionPath.length === 0) fail('mcp.setSessionServerEnabled', 'sessionPath must be a non-empty string');
+  const rawOverrides = source['overrides'];
+  if (!isObj(rawOverrides)) fail('mcp.setSessionServerEnabled', 'overrides must be an object');
+  const overrides: Record<string, boolean> = {};
+  for (const [key, value] of Object.entries(rawOverrides as Record<string, unknown>)) {
+    if (typeof value !== 'boolean') fail('mcp.setSessionServerEnabled', `overrides[${key}] must be a boolean`);
+    overrides[key] = value;
+  }
+  if (Object.keys(overrides).length > 256) fail('mcp.setSessionServerEnabled', 'overrides must contain at most 256 entries');
+  const recycle = source['recycle'];
+  if (recycle !== undefined && typeof recycle !== 'boolean') fail('mcp.setSessionServerEnabled', 'recycle must be a boolean when provided');
+  return { sessionPath, overrides, recycle: recycle === true };
+}
+
 /** Validate `openTabs.set` (host → backend). The tabs are open-tab summaries;
  *  we only require each be an object with a non-empty string `path` (the rest
  *  is passed through opaquely and stringified to env for the tool to parse). */
@@ -916,15 +1014,49 @@ export function validateOpenTabsSet(params: unknown): OpenTabsSetParams {
   if (!isObj(params)) fail('openTabs.set', 'expected an object');
   const rawTabs = (params as Record<string, unknown>)['tabs'];
   if (!Array.isArray(rawTabs)) fail('openTabs.set', 'tabs must be an array');
+  if (rawTabs.length > MAX_OPEN_TABS) fail('openTabs.set', `tabs must contain at most ${MAX_OPEN_TABS} entries`);
   const tabs: unknown[] = [];
   for (let i = 0; i < rawTabs.length; i += 1) {
     const entry = rawTabs[i];
     if (!isObj(entry)) fail('openTabs.set', `tabs[${i}] must be an object`);
-    const p = (entry as Record<string, unknown>)['path'];
+    const source = entry as Record<string, unknown>;
+    const p = source['path'];
     if (typeof p !== 'string' || !p) fail('openTabs.set', `tabs[${i}].path must be a non-empty string`);
-    tabs.push(entry);
+    const normalized: Record<string, unknown> = {};
+    for (const [key, limit] of Object.entries(OPEN_TAB_STRING_LIMITS)) {
+      const value = source[key];
+      if (value === undefined) continue;
+      if (typeof value !== 'string' || value.length === 0 || value.length > limit) {
+        fail('openTabs.set', `tabs[${i}].${key} must be a non-empty string of at most ${limit} characters`);
+      }
+      normalized[key] = value;
+    }
+    const messageCount = source['messageCount'];
+    if (messageCount !== undefined) {
+      if (!Number.isSafeInteger(messageCount) || (messageCount as number) < 0) {
+        fail('openTabs.set', `tabs[${i}].messageCount must be a non-negative safe integer`);
+      }
+      normalized['messageCount'] = messageCount;
+    }
+    for (const key of ['pinned', 'isRunning'] as const) {
+      const value = source[key];
+      if (value !== undefined && typeof value !== 'boolean') {
+        fail('openTabs.set', `tabs[${i}].${key} must be a boolean when provided`);
+      }
+      if (value !== undefined) normalized[key] = value;
+    }
+    tabs.push(normalized);
   }
-  return { tabs };
+  if (Buffer.byteLength(JSON.stringify(tabs), 'utf8') > MAX_OPEN_TABS_PAYLOAD_BYTES) {
+    fail('openTabs.set', `tabs payload must be at most ${MAX_OPEN_TABS_PAYLOAD_BYTES} UTF-8 bytes`);
+  }
+  const rawRevision = (params as Record<string, unknown>)['revision'];
+  const revision = rawRevision === undefined
+    ? undefined
+    : Number.isSafeInteger(rawRevision) && (rawRevision as number) > 0
+      ? rawRevision as number
+      : fail('openTabs.set', 'revision must be a positive safe integer when provided');
+  return { tabs, ...(revision === undefined ? {} : { revision }) };
 }
 
 export function validateSettingsSet(params: unknown): SettingsSetParams {

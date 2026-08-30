@@ -150,6 +150,25 @@ test("runSingleAgent leaves the tool set unchanged when the drop list is empty",
 	}
 });
 
+test("runSingleAgent preserves an explicit zero-tool agent allowlist", async () => {
+	const previous = process.env[DROP_ENV];
+	delete process.env[DROP_ENV];
+	try {
+		const { sdk, state } = createCapturingSdk();
+		await runSingleAgent(
+			process.cwd(), [makeAgent({ tools: [] })], "worker", "return structured output",
+			undefined, undefined, undefined, undefined,
+			details, makeModelRegistry(), undefined, selection,
+			undefined, undefined, undefined, undefined, ["read", "write", "bash"],
+			{ sdk, timeoutMs: 0 },
+		);
+		assert.deepEqual(state.createSessionArgs[0].tools, []);
+	} finally {
+		if (previous === undefined) delete process.env[DROP_ENV];
+		else process.env[DROP_ENV] = previous;
+	}
+});
+
 test("runSingleAgent passes a skillsOverride that filters to the parent's kept-skill set", async () => {
 	const sessionId = "test-parent-session-for-skills-inherit";
 	recordKeptSkills(sessionId, ["librarian", "tdd"]);

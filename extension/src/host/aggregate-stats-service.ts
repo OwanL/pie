@@ -519,19 +519,34 @@ export class AggregateStatsService {
       runId: string;
       reportedOutputTokens: number;
       liveOutputTokens?: number;
+      terminalOutputTokensEstimate?: number;
+      terminal?: boolean;
     }>();
     for (const run of openRuns) {
+      const rateState = ratesBySession[run.sessionPath];
       byRun.set(run.runId, {
         runId: run.runId,
         reportedOutputTokens: run.outputTokens,
-        liveOutputTokens: ratesBySession[run.sessionPath]?.liveOutputTokens,
+        liveOutputTokens: rateState?.liveOutputTokens,
+        terminalOutputTokensEstimate: rateState?.terminalOutputTokensEstimate,
       });
     }
-    // A terminal snapshot is authoritative: it replaces a possibly-larger live
-    // estimate, while RollingAggregateRate's per-run high-water mark prevents
-    // that replacement from double-counting or making the cumulative rate fall.
+    // A terminal snapshot is authoritative: the first terminal observation
+    // applies RollingAggregateRate's one-time signed settlement correction, so
+    // replacing a possibly-larger live estimate can neither double-count nor
+    // leave the cumulative rate overstated. The session's terminal estimate
+    // rides along so a no-usage burst that completed between sampler ticks is
+    // still reconciled into the run's terminal total (the estimate is exposed
+    // only for a turn without provider usage, so it cannot double-count the
+    // reported output it is added to).
     for (const run of pendingCompletedRuns) {
-      byRun.set(run.runId, { runId: run.runId, reportedOutputTokens: run.outputTokens });
+      const rateState = ratesBySession[run.sessionPath];
+      byRun.set(run.runId, {
+        runId: run.runId,
+        reportedOutputTokens: run.outputTokens,
+        terminalOutputTokensEstimate: rateState?.terminalOutputTokensEstimate,
+        terminal: true,
+      });
     }
     return this.rollingRate.observe(nowMs, [...byRun.values()]);
   }

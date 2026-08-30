@@ -83,6 +83,44 @@ test('web_search renders queries as a wrapped list with a count and option chips
   assert.match(html, /<a href="https:\/\/example\.com"/);
 });
 
+test('web_search renders 0.27 provider arrays and proxy use without exposing proxy credentials', () => {
+  const html = render(webSearchTool({
+    id: 'web-search-provider-array',
+    input: {
+      query: 'compare provider coverage',
+      provider: ['openai', 'exa'],
+      proxy: 'https://user:secret@proxy.example.com:8443',
+    },
+  }));
+
+  assert.match(html, /web-search-option">providers: openai, exa/);
+  assert.match(html, /web-search-option">proxy/);
+  assert.doesNotMatch(html, /user:secret|proxy\.example\.com/);
+});
+
+test('web_search expands a JSON-array string supplied through the singular query field', () => {
+  const html = render(webSearchTool({
+    id: 'web-search-json-query-array',
+    input: { query: '["first research angle", "second research angle"]' },
+  }));
+
+  assert.match(html, /Queries · 2/);
+  assert.match(html, /web-search-query-text">first research angle/);
+  assert.match(html, /web-search-query-text">second research angle/);
+  assert.doesNotMatch(html, /\[&quot;first research angle/);
+});
+
+test('web_search keeps a mixed JSON array in query as one literal query, matching 0.27', () => {
+  const html = render(webSearchTool({
+    id: 'web-search-mixed-json-query-array',
+    input: { query: '["first research angle", 42]' },
+  }));
+
+  assert.match(html, /tool-call-section-label">Query/);
+  assert.doesNotMatch(html, /Queries · 2/);
+  assert.match(html, /\[&quot;first research angle&quot;, 42\]/);
+});
+
 test('web_search collapses the header to a tight query preview with a count suffix', () => {
   const toolCall = webSearchTool({
     id: 'web-search-collapsed',

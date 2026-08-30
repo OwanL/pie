@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { createRequire, syncBuiltinESMExports } from 'node:module';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -26,6 +27,37 @@ test('missing or malformed first line falls back to normalized path hash', () =>
   assert.deepEqual(readSessionIdentity(file), { sessionId: normalizedPathHash(file), identityFallback: true });
   assert.equal(normalizedPathHash('C:\\Users\\ME\\x.jsonl'), normalizedPathHash('c:/Users/ME//x.jsonl'));
   assert.equal(normalizedPathHash('\\\\SERVER\\Share\\X'), normalizedPathHash('//server/share/x'));
+});
+
+test('identity lookup reads only a bounded prefix and preserves blank-line and EOF headers', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'session-review-identity-prefix-'));
+  const large = path.join(dir, 'large.jsonl');
+  const noNewline = path.join(dir, 'no-newline.jsonl');
+  fs.writeFileSync(large, `\n\r\n${JSON.stringify({ type: 'session', id: 'bounded-id' })}\n${'x'.repeat(2 * 1024 * 1024)}`);
+  fs.writeFileSync(noNewline, JSON.stringify({ type: 'session', id: 'eof-id' }));
+
+  // A regression to readFileSync would either consume the multi-megabyte tail
+  // or hit this guard and incorrectly fall back to the path hash.
+  const mutableFs = createRequire(import.meta.url)('node:fs') as typeof fs;
+  const originalReadFile = mutableFs.readFileSync;
+  mutableFs.readFileSync = (() => { throw new Error('full-file identity read forbidden'); }) as typeof fs.readFileSync;
+  syncBuiltinESMExports();
+  try {
+    assert.deepEqual(readSessionIdentity(large), { sessionId: 'bounded-id', identityFallback: false });
+    assert.deepEqual(readSessionIdentity(noNewline), { sessionId: 'eof-id', identityFallback: false });
+  } finally {
+    mutableFs.readFileSync = originalReadFile;
+    syncBuiltinESMExports();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('oversized leading identity data fails closed instead of searching for a later header', () => {
+  const file = tempSession([
+    JSON.stringify({ type: 'session', id: 'oversized-id', padding: 'x'.repeat(70 * 1024) }),
+    JSON.stringify({ type: 'session', id: 'too-late' }),
+  ]);
+  assert.deepEqual(readSessionIdentity(file), { sessionId: normalizedPathHash(file), identityFallback: true });
 });
 
 test('evidence hashes raw bytes, hashes the exact excerpt, and blinds model identity', () => {

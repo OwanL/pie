@@ -6,7 +6,9 @@ import { memo } from 'preact/compat';
 
 import type { SessionSummary } from '../../../shared/protocol';
 import { isPendingTabPath } from '../../../shared/tab-behavior';
+import { handleContextMenuKeyRequest } from '../components/context-menu-key';
 import { getTabAvatarColor, getTabAvatarLabel } from './tab-avatar';
+import type { SessionTabContextTarget } from './types';
 
 export interface PinnedTabGroupProps {
   /** Member paths in insertion order. Any member identifies the group; the
@@ -17,6 +19,7 @@ export interface PinnedTabGroupProps {
   itemIndex: number;
   sessionByPath: Map<string, SessionSummary>;
   runningPathSet: Set<string>;
+  generatingTitlePathSet?: Set<string>;
   startingModelPathSet: Set<string>;
   unreadFinishedPathSet: Set<string>;
   deferredTimerPathSet: Set<string>;
@@ -33,6 +36,9 @@ export interface PinnedTabGroupProps {
   onChipPointerDown: (event: PointerEvent, sourcePath: string, itemIndex: number) => void;
   /** Start a drag of a dropdown member (ungroup on gap-drop). */
   onMemberPointerDown: (event: PointerEvent, sourcePath: string) => void;
+  /** Open a group-chip or group-member context menu. The parent closes the
+   * dropdown first so menu Escape layering remains unambiguous. */
+  onContextMenu: (event: MouseEvent, tabPath: string, target: SessionTabContextTarget, triggerEl?: HTMLElement | null) => void;
 }
 
 /** Tiles shown in the 2×2 avatar grid: up to 4 members, or the first 3 plus a
@@ -54,6 +60,7 @@ function PinnedTabGroupView({
   itemIndex,
   sessionByPath,
   runningPathSet,
+  generatingTitlePathSet = new Set<string>(),
   startingModelPathSet,
   unreadFinishedPathSet,
   deferredTimerPathSet,
@@ -65,6 +72,7 @@ function PinnedTabGroupView({
   onSelectMember,
   onChipPointerDown,
   onMemberPointerDown,
+  onContextMenu,
 }: PinnedTabGroupProps) {
   const chipRef = useRef<HTMLDivElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
@@ -136,7 +144,9 @@ function PinnedTabGroupView({
           aria-label={`Pinned group of ${members.length} sessions`}
           aria-expanded={open}
           onClick={onChipClick}
+          onContextMenu={(event) => onContextMenu(event as MouseEvent, firstMember, { kind: 'group', members })}
           onPointerDown={(event) => onChipPointerDown(event as PointerEvent, firstMember, itemIndex)}
+          onKeyDown={(event) => handleContextMenuKeyRequest(event as KeyboardEvent)}
         >
           <span class="pinned-tab-group-grid" aria-hidden="true">
             {tiles.map((tile, index) =>
@@ -151,7 +161,9 @@ function PinnedTabGroupView({
                   style={{ background: getTabAvatarColor(tile.path) }}
                   aria-hidden="true"
                 >
-                  {getTabAvatarLabel(sessionByPath.get(tile.path)?.name ?? '?')}
+                  {generatingTitlePathSet.has(tile.path)
+                    ? <span class="loading-wheel loading-wheel-sm" />
+                    : getTabAvatarLabel(sessionByPath.get(tile.path)?.name ?? '?')}
                 </span>
               ),
             )}
@@ -171,6 +183,7 @@ function PinnedTabGroupView({
             const label = session?.name ?? 'New Session';
             const isActive = activePath === memberPath;
             const isRunning = runningPathSet.has(memberPath);
+            const isGeneratingTitle = generatingTitlePathSet.has(memberPath);
             const isStartingModel = isRunning && startingModelPathSet.has(memberPath);
             const isUnreadFinished = unreadFinishedPathSet.has(memberPath) && !deferredTimerPathSet.has(memberPath);
             const isPreparing = isPendingTabPath(memberPath);
@@ -185,14 +198,23 @@ function PinnedTabGroupView({
                 type="button"
                 title={label}
                 onClick={() => onSelectMember(memberPath)}
+                onContextMenu={(event) => onContextMenu(
+                  event as MouseEvent,
+                  memberPath,
+                  { kind: 'group-member', groupItemIndex: itemIndex },
+                  chipRef.current?.querySelector<HTMLButtonElement>('.pinned-tab-group-main') ?? null,
+                )}
                 onPointerDown={(event) => onMemberPointerDown(event as PointerEvent, memberPath)}
+                onKeyDown={(event) => handleContextMenuKeyRequest(event as KeyboardEvent)}
               >
                 <span
                   class="pinned-tab-group-member-avatar"
                   style={{ background: getTabAvatarColor(memberPath) }}
                   aria-hidden="true"
                 >
-                  {getTabAvatarLabel(label)}
+                  {isGeneratingTitle
+                    ? <span class="loading-wheel loading-wheel-sm" />
+                    : getTabAvatarLabel(label)}
                 </span>
                 <span class="pinned-tab-group-member-label">{label}</span>
                 {isRunning || isPreparing

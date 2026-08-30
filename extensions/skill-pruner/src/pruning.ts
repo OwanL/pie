@@ -165,6 +165,7 @@ export function applyToolSelection(
 	allTools: ToolInfo[],
 	prunedTools: string[] | null,
 	activeConfig: PruningConfig,
+	additionalProtectedTools: Iterable<string> = [],
 ): { includedToolNames: string[]; excludedToolNames: string[]; safeguardReason?: string } {
 	// No tools config (tool pruning disabled) or no tools present → keep everything.
 	if (!activeConfig.tools || allTools.length === 0) {
@@ -186,7 +187,11 @@ export function applyToolSelection(
 	// Explicit always-keep tools and the recovery path itself are never pruned.
 	// A tool recovered during the preceding request is deliberately reconsidered
 	// by this new pruning decision rather than accumulating for the whole session.
-	const protectedBase = new Set<string>([...alwaysKeepTools, RECOVERY_TOOL_NAME]);
+	const protectedBase = new Set<string>([
+		...alwaysKeepTools,
+		RECOVERY_TOOL_NAME,
+		...additionalProtectedTools,
+	]);
 	const allNames = new Set(allTools.map((t) => t.name));
 	const pruneSet = new Set(
 		prunedTools.filter((name) => allNames.has(name) && !protectedBase.has(name)),

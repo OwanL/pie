@@ -121,3 +121,48 @@ test('restart waits for confirmed old exit and advances the worker generation', 
     await fs.rm(harness.temp, { recursive: true, force: true });
   }
 });
+
+test('mcpConfigPathFor resolves the per-session MCP override path at spawn time', async () => {
+  const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-supervisor-mcp-'));
+  let supervisor: WorkerSupervisor | undefined;
+  try {
+    const artifact = path.join(temp, 'worker-entry.js');
+    await fs.writeFile(artifact, '// fixture');
+    const clock = new FakeClock();
+    const clients: FakeClient[] = [];
+    const overridePaths: Record<string, string> = {
+      '/session-with-override.jsonl': path.join(temp, 'with.mcp-overrides.json'),
+    };
+    supervisor = new WorkerSupervisor({
+      workerEntryPath: artifact,
+      coordinatorGeneration: 1,
+      sdkPatchIdentity,
+      scheduler: clock,
+      softInterruptGraceMs: 100,
+      shutdownGraceMs: 100,
+      exitConfirmationMs: 100,
+      mcpConfigPathFor: (sessionPath) => overridePaths[sessionPath],
+      clientFactory: (options) => {
+        const client = new FakeClient(options);
+        clients.push(client);
+        return client;
+      },
+    });
+    await supervisor.initialize();
+
+    await supervisor.startWorker('/session-with-override.jsonl');
+    assert.equal((clients[0]?.options as WorkerClientOptions).mcpConfigPath, overridePaths['/session-with-override.jsonl'],
+      'a session with an override artifact spawns with --mcp-config material');
+
+    await supervisor.startWorker('/session-plain.jsonl');
+    for (const client of clients) {
+      client.exitResult.resolve({ code: 0, signal: null });
+    }
+    assert.equal((clients[1]?.options as WorkerClientOptions).mcpConfigPath, undefined,
+      'a session without overrides falls back to default config discovery');
+    assert.ok(clients[1]?.options);
+  } finally {
+    await supervisor?.dispose().catch(() => undefined);
+    await fs.rm(temp, { recursive: true, force: true });
+  }
+});

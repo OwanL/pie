@@ -1,9 +1,0 @@
-{
-  "schemaVersion": 1,
-  "id": "capability-disclosure-screen-v1",
-  "tasks": [
-    "capability-no-recovery",
-    "capability-hidden-tool",
-    "capability-hidden-skill"
-  ]
-}

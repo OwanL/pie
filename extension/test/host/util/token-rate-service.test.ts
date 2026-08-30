@@ -4,6 +4,7 @@ import test from 'node:test';
 import type { ActiveRunSummary, ChatMessage } from '../../../src/shared/protocol';
 import type { ArchState } from '../../../src/host/core/arch-state';
 import { TokenRateService } from '../../../src/host/token-rate-service';
+import { RATE_HOLD_MS } from '../../../src/shared/token-rate';
 import { encode as bpeEncode, decode as bpeDecode } from 'gpt-tokenizer/encoding/cl100k_base';
 
 const BASE_NOW = 1_700_000_0000;
@@ -311,6 +312,128 @@ test('a loaded (non-running) session surfaces its average turn latency even with
   service.tick(BASE_NOW + 1000);
   assert.equal(service.getRate('/a').label, '— · 1.5s');
   assert.equal(changeCount, 1);
+});
+
+test('a short run completed between sampler ticks still surfaces terminal throughput', () => {
+  const arch = makeArchState({
+    openTabs: ['/a'],
+    running: [],
+    active: '/a',
+    transcripts: {
+      '/a': [{
+        ...streamingMessage('s1', 40),
+        status: 'completed',
+        durationMs: 1_000,
+        usage: { inputTokens: 10, outputTokens: 100, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 110 },
+      }],
+    },
+  });
+  const service = new TokenRateService({ getArchState: () => arch, onActiveRateChanged: () => {} });
+  service.tick(BASE_NOW);
+  const state = service.getRate('/a');
+  assert.equal(state.endToEndRate, 100);
+  assert.match(state.label, /100 tok\/s/);
+  assert.match(state.tooltip, /end-to-end throughput/i);
+
+  service.tick(BASE_NOW + RATE_HOLD_MS + 1);
+  assert.equal(service.getRate('/a').endToEndRate, undefined);
+});
+
+test('a short no-usage burst completed between sampler ticks exposes its terminal output estimate', () => {
+  // Without provider usage the run's settled outputTokens miss the burst
+  // entirely; the privacy-safe numeric terminal estimate is the only signal the
+  // aggregate 30s wall-clock throughput can use to still count it.
+  const arch = makeArchState({
+    openTabs: ['/a'],
+    running: [],
+    active: '/a',
+    transcripts: {
+      '/a': [{
+        ...streamingMessage('s1', 40),
+        status: 'completed',
+        durationMs: 1_000,
+      }],
+    },
+  });
+  const service = new TokenRateService({ getArchState: () => arch, onActiveRateChanged: () => {} });
+  service.tick(BASE_NOW);
+  const state = service.getRate('/a');
+  assert.ok((state.terminalOutputTokensEstimate ?? 0) > 0, 'terminal estimate exposed for aggregates');
+  assert.equal(state.endToEndRateEstimated, true);
+  assert.match(state.tooltip, /estimated visible output/);
+
+  service.tick(BASE_NOW + RATE_HOLD_MS + 1);
+  assert.equal(service.getRate('/a').endToEndRate, undefined);
+});
+
+test('a between-ticks no-usage terminal updates the aggregate exactly once and refreshes the selected renderer', () => {
+  // A short run can begin and finish between two 200ms samples on an open tab
+  // that is no longer (or never again) in runningSessionPaths. The resulting
+  // terminal no-usage estimate is aggregate-relevant (the 30s rolling rate
+  // counts it), so the tick that observes it must fire onRatesTick exactly
+  // once and refresh the selected tab's renderer — then stay quiet.
+  const arch = makeArchState({
+    openTabs: ['/a'],
+    running: [],
+    active: '/a',
+    transcripts: { '/a': [] },
+  });
+  let aggregateTicks = 0;
+  let activeChanges = 0;
+  const service = new TokenRateService({
+    getArchState: () => arch,
+    onActiveRateChanged: () => { activeChanges += 1; },
+    onRatesTick: () => { aggregateTicks += 1; },
+  });
+
+  service.tick(BASE_NOW);
+  const ticksBefore = aggregateTicks;
+  const changesBefore = activeChanges;
+  assert.equal(service.getRate('/a').terminalOutputTokensEstimate, undefined);
+
+  // First no-usage terminal (10 visible tokens over 1s).
+  arch.transcript.bySession['/a'] = [{
+    ...streamingMessage('s1', 40),
+    status: 'completed',
+    durationMs: 1_000,
+  }];
+  service.tick(BASE_NOW + 200);
+  assert.ok((service.getRate('/a').terminalOutputTokensEstimate ?? 0) > 0);
+  assert.equal(aggregateTicks, ticksBefore + 1, 'the between-ticks terminal requests exactly one aggregate refresh');
+  assert.equal(activeChanges, changesBefore + 1, 'the selected tab refreshes its renderer');
+
+  // A second no-usage terminal with the SAME end-to-end rate (20 tokens over
+  // 2s = 10 tok/s): label, tooltip, and endToEndRate are unchanged, so only
+  // the terminal estimate differs — the selected renderer must still refresh.
+  arch.transcript.bySession['/a'] = [{
+    ...streamingMessage('s2', 80),
+    status: 'completed',
+    durationMs: 2_000,
+  }];
+  service.tick(BASE_NOW + 400);
+  assert.equal(service.getRate('/a').terminalOutputTokensEstimate, 20);
+  assert.equal(service.getRate('/a').endToEndRate, 10, 'end-to-end rate is unchanged by the new terminal');
+  assert.equal(activeChanges, changesBefore + 2, 'an estimate-only change still refreshes the selected renderer');
+  assert.equal(aggregateTicks, ticksBefore + 2, 'the estimate change requests exactly one more aggregate refresh');
+
+  // Settled: further idle ticks must not churn the aggregate (the estimate is
+  // a deterministic function of the transcript and only changes with it).
+  service.tick(BASE_NOW + 600);
+  service.tick(BASE_NOW + 800);
+  assert.equal(aggregateTicks, ticksBefore + 2, 'no idle churn after the terminal settled');
+  assert.equal(activeChanges, changesBefore + 2);
+
+  // The bounded rate hold (restarted by the newest terminal) expires without
+  // producing further aggregate ticks: the expired state keeps the (unchanged)
+  // terminal estimate for the aggregate, and only the held rate label reverts.
+  service.tick(BASE_NOW + 400 + RATE_HOLD_MS + 1);
+  assert.equal(aggregateTicks, ticksBefore + 2, 'hold expiry does not re-fire the aggregate');
+  assert.equal(activeChanges, changesBefore + 3, 'only the held-rate label reverts to idle');
+  assert.equal(service.getRate('/a').endToEndRate, undefined);
+  assert.ok((service.getRate('/a').terminalOutputTokensEstimate ?? 0) > 0,
+    'the terminal estimate survives hold expiry for the aggregate');
+  service.tick(BASE_NOW + 402 + RATE_HOLD_MS + 1);
+  assert.equal(aggregateTicks, ticksBefore + 2, 'post-expiry idle ticks stay quiet');
 });
 
 test('a loaded session with no measured turns stays at the bare idle placeholder', () => {

@@ -75,13 +75,17 @@ const VALID_BUCKETS = new Set(["small", "medium", "frontier"]);
  * (`[read, write]`), stripping surrounding brackets and per-item quotes.
  */
 function parseToolsList(rawTools: string | undefined): string[] | undefined {
-	if (!rawTools) return undefined;
+	if (rawTools === undefined) return undefined;
 	const inner = rawTools.trim().replace(/^\[|\]$/g, "");
 	const tools = inner
 		.split(",")
 		.map((t) => t.trim().replace(/^['"]|['"]$/g, "").trim())
 		.filter(Boolean);
-	return tools.length > 0 ? tools : undefined;
+	// Presence is an authority boundary: omitted means the SDK may expose its
+	// normal tool set, while `tools: []` (or an intentionally empty value)
+	// means the child must receive no tools. Do not widen explicit emptiness to
+	// `undefined`, which the SDK interprets as unrestricted.
+	return tools;
 }
 
 export function parseBucket(rawBucket: string | undefined): string | undefined {
@@ -135,7 +139,7 @@ function loadAgentsFromDir(dir: string, source: "user" | "project"): AgentConfig
 		agents.push({
 			name: frontmatter.name,
 			description: frontmatter.description,
-			tools: tools && tools.length > 0 ? tools : undefined,
+			tools,
 			model: frontmatter.model,
 			bucket,
 			canSpawn,

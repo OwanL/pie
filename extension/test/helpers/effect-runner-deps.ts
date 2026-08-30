@@ -60,6 +60,8 @@ export interface MakeEffectRunnerDepsOpts {
   getProviderGateMetrics?: () => ProviderGateStats;
   /** Resolve the provider serving the session's current request (FP-C2a). */
   resolveSessionProvider?: (sessionPath: string) => string | undefined;
+  /** Correlated provider-wait phase for the exact session (FP-C2a). */
+  isSessionProviderPending?: (sessionPath: string) => boolean;
   /** Injectable timer sink (tests pass a fake to drive timers deterministically). */
   timer?: TimerSink;
   /** Inject a custom `BackendLike` (e.g. one shared with `SessionServiceState`). */
@@ -161,6 +163,9 @@ export function makeEffectRunnerDeps(opts: MakeEffectRunnerDepsOpts = {}): MakeE
     async mcpSetServerEnabled() {
       return { servers: [], changed: false };
     },
+    async mcpSetSessionServerEnabled() {
+      return { recycled: false, overrides: {} };
+    },
     async setSystemPromptToggles() {},
     subscribeDetail(options: {
       subscriptionId: string;
@@ -191,6 +196,7 @@ export function makeEffectRunnerDeps(opts: MakeEffectRunnerDepsOpts = {}): MakeE
     async closeSession() {},
     async setPruningSettings() {},
     async setToolResultPruningSettings() {},
+    async setSessionTitlesSettings() {},
     handleSelectionFailure(token: string, notice: string) {
       calls.push({ kind: 'handleSelectionFailure', token, notice });
     },
@@ -241,6 +247,7 @@ export function makeEffectRunnerDeps(opts: MakeEffectRunnerDepsOpts = {}): MakeE
     getSendTimerTimeoutMs: opts.getSendTimerTimeoutMs,
     getProviderGateMetrics: opts.getProviderGateMetrics,
     resolveSessionProvider: opts.resolveSessionProvider,
+    isSessionProviderPending: opts.isSessionProviderPending,
     timer: opts.timer,
   };
 

@@ -4,7 +4,7 @@
 // NOT in this repo's node_modules, so tsc cannot resolve them. Declared here
 // so this tsconfig's typecheck gate covers tool-result-pruner's INTERNAL types
 // — its real purpose — without flagging drift against the evolving pi API
-// surface. Mirrors skill-pruner / warm-bash / web-access-compat.
+// surface. Mirrors skill-pruner / warm-bash / web-access-guard.
 //
 // The event/result/content shapes below are precise (not `any`) because they
 // are the contract the pipeline depends on, and they are stable (verified

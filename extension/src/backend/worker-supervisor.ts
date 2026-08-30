@@ -3,7 +3,13 @@ import * as fsSync from 'node:fs';
 import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
 
-import { WorkerClient, type WorkerClientOptions, type WorkerClientSnapshot, type WorkerClientScheduler } from './worker-client';
+import {
+  WorkerClient,
+  type WorkerClientOptions,
+  type WorkerClientSnapshot,
+  type WorkerClientScheduler,
+  type WorkerRequestOptions,
+} from './worker-client';
 import type {
   CoordinatorToWorkerFrameBody,
   CoordinatorToWorkerRequestBody,
@@ -25,6 +31,7 @@ export interface SupervisedWorkerClient {
   requestFrame?<K extends WorkerToCoordinatorResponseFrame['kind']>(
     body: CoordinatorToWorkerRequestBody,
     expectedKind: K,
+    options?: WorkerRequestOptions,
   ): Promise<Extract<WorkerToCoordinatorResponseFrame, { kind: K }>>;
   updateLeaseIdentity?(leasePath: string, leaseRevision: number): void;
 }
@@ -42,6 +49,10 @@ export interface WorkerSupervisorOptions {
   diagnosticByteLimit?: number;
   scheduler?: WorkerClientScheduler;
   clientFactory?: (options: WorkerClientOptions) => SupervisedWorkerClient;
+  /** Per-session MCP override artifact passed to the worker adapter via
+   *  `--mcp-config` (session-scoped server toggles). Undone/absent files fall
+   *  back to plain config discovery — resolve truthiness at spawn. */
+  mcpConfigPathFor?: (sessionPath: string) => string | undefined;
   onWorkerStateChange?: (
     sessionPath: string,
     snapshot: WorkerClientSnapshot,
@@ -120,6 +131,7 @@ export class WorkerSupervisor {
       workerGeneration,
       sessionPath,
       rootSessionPath: sessionPath,
+      mcpConfigPath: this.options.mcpConfigPathFor?.(sessionPath),
       leasePath: assignment?.leasePath ?? sessionPath,
       leaseRevision: assignment?.leaseRevision ?? 1,
       sdkPatchIdentity: this.options.sdkPatchIdentity,

@@ -18,6 +18,7 @@ import {
 } from './helpers.js';
 import type { ChatMessage, ComposerInput, SessionSummary } from '../../../shared/protocol.js';
 import { LIVE_PIPELINE_LIMITS } from '../../../shared/live-pipeline-protocol.js';
+import { NEW_SESSION_NAME } from '../../../shared/session-name.js';
 import { reorderOpenTabsPinnedFirst, replacePathInPinnedTabGroups, reconcilePinnedGroups } from '../../../shared/tab-behavior.js';
 import { resolveSessionOpenedTranscript } from '../session-opened-transcript.js';
 import { materializeInterruptedLiveTurn } from '../live-pipeline/projection.js';
@@ -27,6 +28,15 @@ import type { LiveTurnCheckpoint } from '../../../shared/live-pipeline-protocol.
 import { sessionHasDeferredModelWrite, startNextDeferredSetModel } from './set-model-handlers.js';
 
 const BACKEND_EXIT_TOMBSTONE_GRACE_MS = 15_000;
+
+/** Deterministic corrId suffix for a session's pending MCP recycle retry —
+ *  pure function of the override set, unique per effective change. */
+function mrssKey(overrides: Record<string, boolean> | undefined): string {
+  return Object.entries(overrides ?? {})
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([name, disabled]) => `${name}=${disabled ? 1 : 0}`)
+    .join(',');
+}
 
 /** How long the transient "Compacted · freed N tokens" chip stays visible
  *  after a compaction finishes (host-owned TTL; the webview never times it). */
@@ -40,11 +50,13 @@ function mergeSessionSummaryPreservingLocalName(
     return incoming;
   }
 
-  const keepExistingName = !existing.isPlaceholder && incoming.isPlaceholder === true;
+  const keepExistingName = incoming.isPlaceholder === true
+    && (!existing.isPlaceholder
+      || (existing.name !== NEW_SESSION_NAME && incoming.name === NEW_SESSION_NAME));
   return {
     ...incoming,
     name: keepExistingName ? existing.name : incoming.name,
-    isPlaceholder: keepExistingName ? false : incoming.isPlaceholder,
+    isPlaceholder: keepExistingName ? existing.isPlaceholder : incoming.isPlaceholder,
     modelId: incoming.modelId ?? existing.modelId,
     provider: incoming.provider ?? existing.provider,
     thinkingLevel: incoming.thinkingLevel ?? existing.thinkingLevel,
@@ -176,7 +188,8 @@ export function handleSessionOpened(state: ArchState, event: Extract<Event, { ki
       });
 
   // Sessions: running state, backend ready, upsert summary
-  const nextRunningSessionPaths = payload.busy
+  const interruptSettled = state.sessions.interruptSettledSessionPaths.includes(sessionPath);
+  const nextRunningSessionPaths = payload.busy && !interruptSettled
     ? addToArray(state.sessions.runningSessionPaths, sessionPath)
     : hostOwnsOptimisticTurn
       ? state.sessions.runningSessionPaths
@@ -309,6 +322,13 @@ export function handleSessionOpened(state: ArchState, event: Extract<Event, { ki
           [sessionPath]: payload.contextUsage,
         },
       }),
+      initialContextEstimateBySession: {
+        ...next.settings.initialContextEstimateBySession,
+        [sessionPath]: payload.runtimeReady === false
+          && (payload.sessionUsage?.samples.length ?? 0) === 0
+          ? payload.initialContextEstimate ?? null
+          : null,
+      },
     },
     transcript: {
       ...next.transcript,
@@ -492,7 +512,14 @@ export function handleSessionNameDerived(state: ArchState, event: Extract<Event,
     const s = draft.sessions.sessions.find(x => x.path === event.sessionPath);
     if (s) {
       s.name = event.name;
-      s.isPlaceholder = false;
+      s.isPlaceholder = event.isPlaceholder;
+    }
+    if (draft.settings.sessionTitlesSettings.enabled
+      && !draft.sessions.titleGenerationBySession[event.sessionPath]) {
+      draft.sessions.titleGenerationBySession[event.sessionPath] = {
+        status: 'armed',
+        prompt: event.sourcePrompt,
+      };
     }
   });
   return { state: nextState, effects: [] };
@@ -500,6 +527,13 @@ export function handleSessionNameDerived(state: ArchState, event: Extract<Event,
 
 export function handleBusyChanged(state: ArchState, event: Extract<Event, { kind: 'BusyChanged' }>): ReducerResult {
   if (event.running) {
+    // A successful interrupt is a completion barrier. Provider/SDK lifecycle
+    // events already queued before that acknowledgement may still arrive, but
+    // they describe the retired turn and must not resurrect it. A real next
+    // Send/Edit/Compact command clears this fence before starting work.
+    if (state.sessions.interruptSettledSessionPaths.includes(event.sessionPath)) {
+      return { state, effects: [] };
+    }
     return {
       state: {
         ...state,
@@ -525,6 +559,19 @@ export function handleBusyChanged(state: ArchState, event: Extract<Event, { kind
     turnId: liveTurn.turnId,
     attemptId: liveTurn.attemptId,
   }] : [];
+  // A session-scoped MCP toggle that could not recycle its worker while the
+  // session was busy retried here — the first idle transition after the
+  // refused recycle is the moment the backend may safely retire and re-promote.
+  const pendingMcpRecycle = state.settings.mcpPendingApplyBySession[event.sessionPath]
+    && state.settings.mcpSessionOverridesBySession[event.sessionPath] !== undefined;
+
+  const mcpRecycleEffects: Effect[] = !pendingMcpRecycle ? [] : [{
+    kind: 'McpSetSessionServerRpc',
+    corrId: `mcp-session-recycle:${event.sessionPath}:${mrssKey(state.settings.mcpSessionOverridesBySession[event.sessionPath])}`,
+    sessionPath: event.sessionPath,
+    overrides: { ...state.settings.mcpSessionOverridesBySession[event.sessionPath] },
+    recycle: true,
+  }];
 
   if (!wasRunning) {
     return {
@@ -536,7 +583,7 @@ export function handleBusyChanged(state: ArchState, event: Extract<Event, { kind
           intentionallyHiddenRunningPaths: removeFromArray(state.sessions.intentionallyHiddenRunningPaths, event.sessionPath),
         },
       },
-      effects: terminalRepairEffects,
+      effects: [...terminalRepairEffects, ...mcpRecycleEffects],
     };
   }
 
@@ -559,7 +606,7 @@ export function handleBusyChanged(state: ArchState, event: Extract<Event, { kind
             }),
       },
     },
-    effects: terminalRepairEffects,
+    effects: [...terminalRepairEffects, ...mcpRecycleEffects],
   };
 }
 
@@ -643,6 +690,10 @@ export function handleContextUsageChanged(state: ArchState, event: Extract<Event
           ...state.settings.contextUsageBySession,
           [event.sessionPath]: event.contextUsage,
         },
+        initialContextEstimateBySession: {
+          ...state.settings.initialContextEstimateBySession,
+          [event.sessionPath]: null,
+        },
       },
     },
     effects: [],
@@ -672,13 +723,16 @@ export function handleSessionMetadataChanged(state: ArchState, event: Extract<Ev
 }
 
 export function handleRunningSessionsChanged(state: ArchState, event: Extract<Event, { kind: 'RunningSessionsChanged' }>): ReducerResult {
-  const running = new Set(event.sessionPaths);
+  const sessionPaths = event.sessionPaths.filter(
+    (path) => !state.sessions.interruptSettledSessionPaths.includes(path),
+  );
+  const running = new Set(sessionPaths);
   return {
     state: {
       ...state,
       sessions: {
         ...state.sessions,
-        runningSessionPaths: event.sessionPaths,
+        runningSessionPaths: sessionPaths,
         // Compaction re-arms busy, so compacting paths are always a subset of
         // running paths; a backend exit (empty list) must clear them too.
         compactingSessionPaths: state.sessions.compactingSessionPaths.filter((p) => running.has(p)),
@@ -1218,6 +1272,12 @@ export function handlePendingPathReplaced(state: ArchState, event: Extract<Event
     if (draft.sessions.privacyModeBySession[oldPendingPath] === true) {
       draft.sessions.privacyModeBySession[newSessionPath] = true;
       delete draft.sessions.privacyModeBySession[oldPendingPath];
+    }
+
+    if (Object.prototype.hasOwnProperty.call(draft.sessions.titleGenerationBySession, oldPendingPath)) {
+      draft.sessions.titleGenerationBySession[newSessionPath] =
+        draft.sessions.titleGenerationBySession[oldPendingPath];
+      delete draft.sessions.titleGenerationBySession[oldPendingPath];
     }
 
     // A hidden create with queued work is about to become a hidden running

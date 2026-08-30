@@ -7,23 +7,45 @@ import type { ClosureAction, OpenTabSummary, SessionReviewV2 } from './types.js'
 import { validateSessionReviewV2 } from './validation.js';
 
 const OPEN_TABS_ENV = 'PIE_OPEN_TABS';
+const OPEN_TABS_REVISION_ENV = 'PIE_OPEN_TABS_REVISION';
 const REVIEWS_DIR_ENV = 'PIE_REVIEWS_DIR';
 const REVIEWS_FILE = 'reviews.jsonl';
 const CLOSURE_FILE = 'closure-actions.jsonl';
 const writeLocks = new Map<string, Promise<void>>();
 
-export function readOpenTabs(): OpenTabSummary[] {
+export interface OpenTabRegistry {
+  tabs: OpenTabSummary[];
+  /** Monotonic coordinator revision. Older hosts omit it, so consumers must
+   * continue to validate the current array even when no revision is present. */
+  revision?: number;
+}
+
+export function readOpenTabRegistry(): OpenTabRegistry {
   const raw = process.env[OPEN_TABS_ENV]?.trim();
-  if (!raw) return [];
+  const revisionRaw = process.env[OPEN_TABS_REVISION_ENV]?.trim();
+  const revisionValue = revisionRaw === undefined ? undefined : Number(revisionRaw);
+  const revision = revisionValue !== undefined && Number.isSafeInteger(revisionValue) && revisionValue > 0
+    ? revisionValue
+    : undefined;
+  if (!raw) return { tabs: [], ...(revision !== undefined ? { revision } : {}) };
   try {
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed.filter(isOpenTabSummary) : [];
+    const tabs = Array.isArray(parsed) ? parsed.filter(isOpenTabSummary) : [];
+    return { tabs, ...(revision !== undefined ? { revision } : {}) };
   } catch {
-    return [];
+    return { tabs: [], ...(revision !== undefined ? { revision } : {}) };
   }
 }
+export function readOpenTabs(): OpenTabSummary[] { return readOpenTabRegistry().tabs; }
 function isOpenTabSummary(value: unknown): value is OpenTabSummary {
-  return !!value && typeof value === 'object' && typeof (value as { path?: unknown }).path === 'string';
+  if (!value || typeof value !== 'object') return false;
+  const candidate = value as { path?: unknown; pinned?: unknown; isRunning?: unknown };
+  // These two booleans are action authority, not optional display metadata.
+  // Missing `isRunning` must never be interpreted as an idle target.
+  return typeof candidate.path === 'string'
+    && candidate.path.trim().length > 0
+    && typeof candidate.pinned === 'boolean'
+    && typeof candidate.isRunning === 'boolean';
 }
 
 function configuredFile(name: string): string | undefined {
@@ -134,38 +156,65 @@ export function readClosureActions(): ClosureAction[] {
   return [...latest.values()];
 }
 
-export async function enqueueClosure(input: {
+export interface EnqueueClosureInput {
   kind: 'closeReviewed' | 'closeSelf'; targetSessionId: string; targetSessionPath?: string; reviewId?: string;
-}): Promise<{ action: ClosureAction; existing: boolean; file: string }> {
+}
+
+export interface EnqueueClosureResult { action: ClosureAction; existing: boolean; file: string }
+export type EnqueueClosureBatchResult = EnqueueClosureResult | { error: string };
+
+function enqueueClosureFromSnapshot(
+  file: string,
+  actions: ClosureAction[],
+  input: EnqueueClosureInput,
+): EnqueueClosureResult {
+  // Only an in-flight action is reusable. A succeeded action proves that the
+  // tab was absent at settlement time; if a caller has revalidated that the
+  // tab is open again, that is a new close generation and needs a new action
+  // ID so host reconciliation will execute it again.
+  const existing = actions.find((action) => action.kind === input.kind && action.targetSessionId === input.targetSessionId && (action.status === 'pending' || action.status === 'retrying'));
+  if (existing) {
+    // Reusing an active action remains idempotent by actionId. Wake host
+    // reconciliation with a state-neutral record: another process may append
+    // a terminal action after our read, so re-appending this stale active
+    // snapshot could otherwise make it authoritative again.
+    appendLineDurable(file, {
+      recordType: 'wake',
+      actionId: existing.actionId,
+      wokenAt: new Date().toISOString(),
+    });
+    return { action: existing, existing: true, file };
+  }
+  const action: ClosureAction = {
+    actionId: randomUUID(),
+    kind: input.kind,
+    targetSessionId: input.targetSessionId,
+    ...(input.targetSessionPath ? { targetSessionPath: input.targetSessionPath } : {}),
+    ...(input.reviewId ? { reviewId: input.reviewId } : {}),
+    status: 'pending',
+    attempts: 0,
+    requestedAt: new Date().toISOString(),
+  };
+  appendLineDurable(file, action);
+  actions.push(action);
+  return { action, existing: false, file };
+}
+
+export async function enqueueClosure(input: EnqueueClosureInput): Promise<EnqueueClosureResult> {
+  const file = requireConfiguredFile(getClosureOutboxPath(), 'PIE_REVIEWS_DIR is not set — the host has not configured the closure-action outbox.');
+  return withFileLock(file, () => enqueueClosureFromSnapshot(file, readClosureActions(), input));
+}
+
+/** Enqueue a validated command batch under one lock and one outbox snapshot.
+ * Per-item results are retained so one durable append failure cannot erase the
+ * success/error disposition of its siblings. */
+export async function enqueueClosureBatch(inputs: EnqueueClosureInput[]): Promise<EnqueueClosureBatchResult[]> {
   const file = requireConfiguredFile(getClosureOutboxPath(), 'PIE_REVIEWS_DIR is not set — the host has not configured the closure-action outbox.');
   return withFileLock(file, () => {
     const actions = readClosureActions();
-    const existing = actions.find((action) => action.kind === input.kind && action.targetSessionId === input.targetSessionId && (action.status === 'succeeded' || action.status === 'pending' || action.status === 'retrying'));
-    if (existing) {
-      // Reusing an active action remains idempotent by actionId. Wake host
-      // reconciliation with a state-neutral record: another process may append
-      // a terminal action after our read, so re-appending this stale active
-      // snapshot could otherwise make it authoritative again.
-      if (existing.status === 'pending' || existing.status === 'retrying') {
-        appendLineDurable(file, {
-          recordType: 'wake',
-          actionId: existing.actionId,
-          wokenAt: new Date().toISOString(),
-        });
-      }
-      return { action: existing, existing: true, file };
-    }
-    const action: ClosureAction = {
-      actionId: randomUUID(),
-      kind: input.kind,
-      targetSessionId: input.targetSessionId,
-      ...(input.targetSessionPath ? { targetSessionPath: input.targetSessionPath } : {}),
-      ...(input.reviewId ? { reviewId: input.reviewId } : {}),
-      status: 'pending',
-      attempts: 0,
-      requestedAt: new Date().toISOString(),
-    };
-    appendLineDurable(file, action);
-    return { action, existing: false, file };
+    return inputs.map((input) => {
+      try { return enqueueClosureFromSnapshot(file, actions, input); }
+      catch (error) { return { error: (error as Error).message }; }
+    });
   });
 }

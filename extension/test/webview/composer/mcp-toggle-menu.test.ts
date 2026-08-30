@@ -242,16 +242,15 @@ test('McpSection shows the loading state before the first fetch lands', () => {
   assert.doesNotMatch(container.innerHTML, /No MCP servers configured/);
 });
 
-test('McpToggleMenu renders per-server rows and requests a fresh list on open', () => {
+test('McpToggleMenu renders per-session server rows and requests a fresh list on open', () => {
   const refreshCalls: string[] = [];
   act(() => {
     render(h(McpToggleMenu, {
       prefs: DEFAULT_CHAT_PREFS,
       mcpServers: SERVERS,
       mcpPendingApply: false,
-      onSetPrefs: () => undefined,
       onMcpListRequested: () => refreshCalls.push('refresh'),
-      onMcpSetServerEnabled: () => undefined,
+      onMcpSetServerEnabledForSession: () => undefined,
     }), container);
   });
   // Closed: trigger only, no rows, no refresh yet.
@@ -265,34 +264,67 @@ test('McpToggleMenu renders per-server rows and requests a fresh list on open', 
   assert.equal(refreshCalls.length, 1, 'opening the menu requests a fresh list');
   assert.match(container.innerHTML, /jira/);
   assert.match(container.innerHTML, /echo/);
+  assert.match(container.innerHTML, /This session only/, 'the dropdown is explicitly session-scoped');
   assert.ok(container.querySelector('.mcp-server-list-head .mcp-server-refresh'),
     'the toolbar list offers Refresh even when non-empty');
 });
 
-test('McpToggleMenu keeps server rows visible and manageable while the global switch is off', () => {
+test('McpToggleMenu toggles are session-scoped and the dropdown has no global switch', () => {
+  const toggles: Array<{ name: string; enabled: boolean }> = [];
+  act(() => {
+    render(h(McpToggleMenu, {
+      prefs: DEFAULT_CHAT_PREFS,
+      mcpServers: SERVERS,
+      mcpPendingApply: false,
+      onMcpListRequested: () => undefined,
+      onMcpSetServerEnabledForSession: (name: string, enabled: boolean) => toggles.push({ name, enabled }),
+    }), container);
+  });
+  act(() => {
+    click(container.querySelector('.mcp-toggle-trigger') as Element);
+  });
+  assert.doesNotMatch(container.innerHTML, /entry-title">MCP enabled</,
+    'the global on/off switch lives in Settings → MCP, not in the toolbar dropdown');
+  const rows = container.querySelectorAll('.system-prompt-toggle-dropdown [role="checkbox"]');
+  assert.equal(rows.length, 2, 'two per-server rows, no global switch row');
+  click(rows[1] as Element);
+  assert.deepEqual(toggles, [{ name: 'echo', enabled: true }]);
+});
+
+test('McpToggleMenu shows the session pending-apply hint after a refused recycle', () => {
+  act(() => {
+    render(h(McpToggleMenu, {
+      prefs: DEFAULT_CHAT_PREFS,
+      mcpServers: SERVERS,
+      mcpPendingApply: true,
+      onMcpListRequested: () => undefined,
+      onMcpSetServerEnabledForSession: () => undefined,
+    }), container);
+  });
+  act(() => {
+    click(container.querySelector('.mcp-toggle-trigger') as Element);
+  });
+  assert.match(container.innerHTML, /waiting/);
+  assert.match(container.innerHTML, /session reloads/);
+});
+
+test('McpToggleMenu defers to the global switch while MCP is globally off', () => {
   const toggles: Array<{ name: string; enabled: boolean }> = [];
   act(() => {
     render(h(McpToggleMenu, {
       prefs: { ...DEFAULT_CHAT_PREFS, mcpEnabled: false },
       mcpServers: SERVERS,
       mcpPendingApply: false,
-      onSetPrefs: () => undefined,
       onMcpListRequested: () => undefined,
-      onMcpSetServerEnabled: (name, enabled) => toggles.push({ name, enabled }),
+      onMcpSetServerEnabledForSession: (name: string, enabled: boolean) => toggles.push({ name, enabled }),
     }), container);
   });
   act(() => {
     click(container.querySelector('.mcp-toggle-trigger') as Element);
   });
-  // Rows stay visible and toggleable even though the global switch is off,
-  // with copy explaining the global switch hides them from the model.
-  assert.match(container.innerHTML, /jira/);
-  assert.match(container.innerHTML, /echo/);
-  assert.match(container.innerHTML, /hidden from the model until you re-enable it/);
-  const rows = container.querySelectorAll('.system-prompt-toggle-dropdown [role="checkbox"]');
-  assert.equal(rows.length, 3, 'global switch + two per-server rows');
-  click(rows[2] as Element);
-  assert.deepEqual(toggles, [{ name: 'echo', enabled: true }]);
+  assert.match(container.innerHTML, /MCP is turned off globally/);
+  assert.doesNotMatch(container.innerHTML, /jira/, 'no server rows while MCP is globally off');
+  assert.equal(container.querySelectorAll('.system-prompt-toggle-dropdown [role="checkbox"]').length, 0);
 });
 
 test('McpToggleMenu shows the loading state instead of the empty state while discovery is in flight', () => {
@@ -302,9 +334,8 @@ test('McpToggleMenu shows the loading state instead of the empty state while dis
       mcpServers: [],
       mcpServersStatus: 'loading',
       mcpPendingApply: false,
-      onSetPrefs: () => undefined,
       onMcpListRequested: () => undefined,
-      onMcpSetServerEnabled: () => undefined,
+      onMcpSetServerEnabledForSession: () => undefined,
     }), container);
   });
   act(() => {
@@ -322,9 +353,8 @@ test('McpToggleMenu shows the error state with Refresh when discovery failed', (
       mcpServers: [],
       mcpServersStatus: 'error',
       mcpPendingApply: false,
-      onSetPrefs: () => undefined,
       onMcpListRequested: () => refreshes.push('refresh'),
-      onMcpSetServerEnabled: () => undefined,
+      onMcpSetServerEnabledForSession: () => undefined,
     }), container);
   });
   act(() => {

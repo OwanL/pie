@@ -2,9 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { handleBackendRequest } from '../../../src/backend/request-handler';
-import { EXTENSION_TOGGLES_ENV, HISTORY_COMPACTION_ENV, NESTED_ALLOWED_BUCKETS_ENV, PROVIDER_TOGGLES_ENV, SUBAGENT_BUCKETS_ENV, SUBAGENT_PROVIDER_DEFAULTS_ENV, SUBAGENT_ROUTE_AROUND_SATURATED_PROVIDERS_ENV, SUBAGENT_FALLBACK_ON_PROVIDER_FAILURE_ENV } from '../../../src/shared/protocol';
+import { EXTENSION_TOGGLES_ENV, HISTORY_COMPACTION_ENV, NESTED_ALLOWED_BUCKETS_ENV, PROVIDER_TOGGLES_ENV, SUBAGENT_BUCKET_CAN_SPAWN_ENV, SUBAGENT_BUCKETS_ENV, SUBAGENT_PROVIDER_DEFAULTS_ENV, SUBAGENT_ROUTE_AROUND_SATURATED_PROVIDERS_ENV, SUBAGENT_FALLBACK_ON_PROVIDER_FAILURE_ENV } from '../../../src/shared/protocol';
 import { validateRuntimePrefsSet } from '../../../src/backend/rpc';
 import { ProviderGate } from '../../../src/backend/provider-gate';
+import { normalizeProviderConcurrency } from '../../../src/shared/protocol/settings';
 import { AUTONOMOUS_MODE_ENV } from '../../../../shared/autonomous-mode.js';
 
 const SUBAGENT_ALWAYS_PARENT_MODEL_ENV = 'PIE_SUBAGENT_ALWAYS_PARENT_MODEL';
@@ -92,7 +93,7 @@ test('runtimePrefs.set mirrors provider and extension toggles into backend envir
     params: { providerToggles, extensionToggles },
   });
 
-  assert.deepEqual(result, { providerToggles, extensionToggles, autonomousMode: undefined, mcpEnabled: undefined, subagentAlwaysParentModel: undefined, subagentRouteAroundSaturatedProviders: undefined, subagentFallbackOnProviderFailure: undefined, subagentMaxDepth: undefined, subagentMaxTreeSessions: undefined, subagentMaxInflight: undefined, bashWarmPoolSize: undefined, bashFastPath: undefined, bashShellPath: undefined, bashWarmupTimeoutMs: undefined, bashDefaultTimeout: undefined, subagentBuckets: undefined, subagentNestedAllowedBuckets: undefined, subagentDropTools: undefined, providerConcurrency: undefined });
+  assert.deepEqual(result, { providerToggles, extensionToggles, autonomousMode: undefined, mcpEnabled: undefined, subagentAlwaysParentModel: undefined, subagentRouteAroundSaturatedProviders: undefined, subagentFallbackOnProviderFailure: undefined, subagentMaxDepth: undefined, subagentMaxTreeSessions: undefined, subagentMaxInflight: undefined, bashWarmPoolSize: undefined, bashFastPath: undefined, bashShellPath: undefined, bashWarmupTimeoutMs: undefined, bashDefaultTimeout: undefined, subagentBuckets: undefined, subagentNestedAllowedBuckets: undefined, subagentBucketCanSpawn: undefined, subagentDropTools: undefined, providerConcurrency: undefined });
   assert.equal(process.env[PROVIDER_TOGGLES_ENV], JSON.stringify(providerToggles));
   assert.equal(process.env[EXTENSION_TOGGLES_ENV], JSON.stringify(extensionToggles));
   // When the field is omitted, the env var must not be touched.
@@ -181,7 +182,7 @@ test('runtimePrefs.set writes the subagent always-parent-model env var when prov
     params: { providerToggles: {}, extensionToggles: {}, subagentAlwaysParentModel: true },
   });
 
-  assert.deepEqual(result, { providerToggles: {}, extensionToggles: {}, autonomousMode: undefined, mcpEnabled: undefined, subagentAlwaysParentModel: true, subagentRouteAroundSaturatedProviders: undefined, subagentFallbackOnProviderFailure: undefined, subagentMaxDepth: undefined, subagentMaxTreeSessions: undefined, subagentMaxInflight: undefined, bashWarmPoolSize: undefined, bashFastPath: undefined, bashShellPath: undefined, bashWarmupTimeoutMs: undefined, bashDefaultTimeout: undefined, subagentBuckets: undefined, subagentNestedAllowedBuckets: undefined, subagentDropTools: undefined, providerConcurrency: undefined });
+  assert.deepEqual(result, { providerToggles: {}, extensionToggles: {}, autonomousMode: undefined, mcpEnabled: undefined, subagentAlwaysParentModel: true, subagentRouteAroundSaturatedProviders: undefined, subagentFallbackOnProviderFailure: undefined, subagentMaxDepth: undefined, subagentMaxTreeSessions: undefined, subagentMaxInflight: undefined, bashWarmPoolSize: undefined, bashFastPath: undefined, bashShellPath: undefined, bashWarmupTimeoutMs: undefined, bashDefaultTimeout: undefined, subagentBuckets: undefined, subagentNestedAllowedBuckets: undefined, subagentBucketCanSpawn: undefined, subagentDropTools: undefined, providerConcurrency: undefined });
   assert.equal(process.env[SUBAGENT_ALWAYS_PARENT_MODEL_ENV], '1');
 });
 
@@ -324,7 +325,7 @@ test('runtimePrefs.set validates providerConcurrency override bounds', () => {
       openai: {
         maxConcurrentRequests: 2,
         afterburnSeconds: 0,
-        queueWaitSeconds: 1.5,
+        queueWaitSeconds: 2,
         headerWaitSeconds: 120,
       },
       omitted: undefined,
@@ -336,7 +337,7 @@ test('runtimePrefs.set validates providerConcurrency override bounds', () => {
     openai: {
       maxConcurrentRequests: 2,
       afterburnSeconds: 0,
-      queueWaitSeconds: 1.5,
+      queueWaitSeconds: 2,
       headerWaitSeconds: 120,
     },
   });
@@ -349,13 +350,50 @@ test('runtimePrefs.set validates providerConcurrency override bounds', () => {
     { params: { providerConcurrency: { openai: { maxConcurrentRequests: 1.5 } } }, message: /maxConcurrentRequests must be a positive integer/ },
     { params: { providerConcurrency: { openai: { maxConcurrentRequests: '3' } } }, message: /maxConcurrentRequests must be a positive integer/ },
     { params: { providerConcurrency: { openai: { afterburnSeconds: -1 } } }, message: /afterburnSeconds must be a non-negative number/ },
-    { params: { providerConcurrency: { openai: { queueWaitSeconds: -1 } } }, message: /queueWaitSeconds must be a non-negative number/ },
-    { params: { providerConcurrency: { openai: { headerWaitSeconds: -1 } } }, message: /headerWaitSeconds must be a non-negative number/ },
+    { params: { providerConcurrency: { openai: { queueWaitSeconds: -1 } } }, message: /queueWaitSeconds must be an integer from 0 to 300/ },
+    { params: { providerConcurrency: { openai: { queueWaitSeconds: 1.5 } } }, message: /queueWaitSeconds must be an integer from 0 to 300/ },
+    { params: { providerConcurrency: { openai: { queueWaitSeconds: 301 } } }, message: /queueWaitSeconds must be an integer from 0 to 300/ },
+    { params: { providerConcurrency: { openai: { headerWaitSeconds: -1 } } }, message: /headerWaitSeconds must be an integer from 0 to 300/ },
+    { params: { providerConcurrency: { openai: { headerWaitSeconds: 1.5 } } }, message: /headerWaitSeconds must be an integer from 0 to 300/ },
+    { params: { providerConcurrency: { openai: { headerWaitSeconds: 301 } } }, message: /headerWaitSeconds must be an integer from 0 to 300/ },
   ];
 
   for (const { params, message } of invalidCases) {
     assert.throws(() => validateRuntimePrefsSet(params), message);
   }
+});
+
+test('persisted providerConcurrency normalization drops values rejected by runtimePrefs.set', () => {
+  const normalized = normalizeProviderConcurrency({
+    openai: {
+      maxConcurrentRequests: 4,
+      afterburnSeconds: 12.5,
+      queueWaitSeconds: 30,
+      headerWaitSeconds: 0,
+    },
+    partiallyInvalid: {
+      maxConcurrentRequests: 1.5,
+      afterburnSeconds: 7,
+      queueWaitSeconds: 30.5,
+      headerWaitSeconds: 301,
+    },
+    entirelyInvalid: {
+      maxConcurrentRequests: 0,
+      queueWaitSeconds: -1,
+      headerWaitSeconds: Number.POSITIVE_INFINITY,
+    },
+  });
+
+  assert.deepEqual(normalized, {
+    openai: {
+      maxConcurrentRequests: 4,
+      afterburnSeconds: 12.5,
+      queueWaitSeconds: 30,
+      headerWaitSeconds: 0,
+    },
+    partiallyInvalid: { afterburnSeconds: 7 },
+  });
+  assert.doesNotThrow(() => validateRuntimePrefsSet({ providerConcurrency: normalized }));
 });
 
 test('runtimePrefs.set applies providerConcurrency overrides to the live ProviderGate', async (t) => {
@@ -391,6 +429,7 @@ test('runtimePrefs.set applies providerConcurrency overrides to the live Provide
     queuedRequests: 0,
     maxConcurrentRequests: 3,
     afterburnSeconds: 7,
+    queueWaitSeconds: 9,
     paused: false,
     pausedUntilMs: 0,
     strikeCount: 0,
@@ -463,6 +502,24 @@ test('runtimePrefs.set mirrors subagentNestedAllowedBuckets into the backend env
 
   assert.deepEqual(result.subagentNestedAllowedBuckets, allowlist);
   assert.equal(process.env[NESTED_ALLOWED_BUCKETS_ENV], JSON.stringify(allowlist));
+});
+
+test('runtimePrefs.set mirrors per-bucket subagent delegation into the backend environment', async (t) => {
+  const previous = process.env[SUBAGENT_BUCKET_CAN_SPAWN_ENV];
+  t.after(() => {
+    if (previous === undefined) delete process.env[SUBAGENT_BUCKET_CAN_SPAWN_ENV];
+    else process.env[SUBAGENT_BUCKET_CAN_SPAWN_ENV] = previous;
+  });
+
+  const policy = { small: false, medium: false, frontier: true };
+  const result = await handleBackendRequest({} as any, {
+    id: 'test-runtime-prefs-bucket-delegation',
+    method: 'runtimePrefs.set',
+    params: { providerToggles: {}, extensionToggles: {}, subagentBucketCanSpawn: policy },
+  }) as { subagentBucketCanSpawn?: typeof policy };
+
+  assert.deepEqual(result.subagentBucketCanSpawn, policy);
+  assert.equal(process.env[SUBAGENT_BUCKET_CAN_SPAWN_ENV], JSON.stringify(policy));
 });
 
 test('runtimePrefs.set leaves the nested-allowlist env var untouched when omitted', async (t) => {

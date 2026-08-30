@@ -276,6 +276,95 @@ test('scroll dismisses a tooltip whose trigger moved with the content', async ()
   }
 });
 
+test('keyboard focus opens a rich tooltip and blur or Escape closes it', async () => {
+  installFakeTimers();
+  try {
+    act(() => {
+      render(
+        h(Tooltip, {
+          contentNode: h('div', { class: 'rich-body' }, 'details'),
+          delayShow: 0,
+          delayHide: 0,
+        }, h('span', { class: 'trigger', tabIndex: 0, 'aria-label': 'Usage details' }, 'usage')),
+        container,
+      );
+    });
+    const host = () => document.querySelector('.pie-tooltip-host') as HTMLElement;
+    const trigger = () => container.querySelector('.trigger') as HTMLElement;
+
+    await act(async () => {
+      trigger().dispatchEvent(new Event('focus'));
+      flushTimers();
+    });
+    assert.equal(host().style.display, 'block', 'focus should open the tooltip');
+
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    });
+    assert.equal(host().style.display, 'none', 'Escape should close the tooltip immediately');
+
+    await act(async () => {
+      trigger().dispatchEvent(new Event('focus'));
+      flushTimers();
+      trigger().dispatchEvent(new Event('blur'));
+    });
+    assert.equal(host().style.display, 'none', 'blur should close the tooltip');
+  } finally {
+    restoreTimers();
+  }
+});
+
+test('Escape cancels a delayed keyboard tooltip before it opens', async () => {
+  installFakeTimers();
+  try {
+    act(() => {
+      render(h(Tooltip, {
+        content: 'details',
+        delayShow: 100,
+      }, h('span', { tabIndex: 0, 'aria-label': 'Delayed details' }, 'details')), container);
+    });
+    const trigger = container.querySelector('[aria-label="Delayed details"]') as HTMLElement;
+    await act(async () => {
+      trigger.dispatchEvent(new Event('focus'));
+      trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', cancelable: true }));
+      flushTimers();
+    });
+    assert.equal((document.querySelector('.pie-tooltip-host') as HTMLElement).style.display, 'none');
+  } finally {
+    restoreTimers();
+  }
+});
+
+test('richRole region keeps interactive rich content out of tooltip semantics', async () => {
+  installFakeTimers();
+  try {
+    act(() => {
+      render(h(Tooltip, {
+        contentNode: h('div', null, h('button', { type: 'button' }, 'model detail')),
+        richRole: 'region',
+        delayShow: 0,
+        delayHide: 0,
+      }, h('span', { tabIndex: 0, 'aria-label': 'Cost details' }, 'cost')), container);
+    });
+    const host = () => document.querySelector('.pie-tooltip-host') as HTMLElement;
+    const trigger = () => container.querySelector('[aria-label="Cost details"]') as HTMLElement;
+    await act(async () => {
+      trigger().dispatchEvent(new Event('focus'));
+      flushTimers();
+    });
+    assert.equal(host().getAttribute('role'), 'region');
+    assert.equal(host().getAttribute('aria-label'), 'Cost details');
+    const inner = host().querySelector('button') as HTMLButtonElement;
+    assert.ok(inner, 'interactive rich content remains reachable');
+    await act(async () => {
+      trigger().dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', cancelable: true }));
+    });
+    assert.equal(document.activeElement, inner, 'Tab from the trigger enters the rich surface');
+  } finally {
+    restoreTimers();
+  }
+});
+
 test('contentNode renders a rich JSX tooltip (hoverable, not textContent)', async () => {
   // A rich tooltip renders its JSX subtree into the host via an imperative
   // Preact root (not textContent), gets the --rich class + pointer events so
@@ -295,6 +384,7 @@ test('contentNode renders a rich JSX tooltip (hoverable, not textContent)', asyn
     });
     assert.ok(host().classList.contains('pie-tooltip-host--rich'), 'host should get the rich class');
     assert.equal(host().style.pointerEvents, 'auto', 'rich tooltip should be hoverable');
+    assert.equal(host().getAttribute('role'), 'tooltip', 'ordinary rich tooltips keep tooltip semantics');
     const body = host().querySelector('.rich-body');
     assert.ok(body, 'rich JSX subtree should be mounted in the host');
     assert.equal(body?.textContent, 'graph here');

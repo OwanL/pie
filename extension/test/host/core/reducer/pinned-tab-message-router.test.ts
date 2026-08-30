@@ -220,3 +220,41 @@ test('movePinnedItem rejects an empty sourcePath as a protocol defect', async ()
   assert.equal(notices.length, 1);
   assert.equal(commands.length, 0);
 });
+
+// ─── whole-group commands ──────────────────────────────────────────────────
+
+test('dissolvePinnedGroup dispatches the atomic host command', async () => {
+  const { router, capture } = newRouter();
+  await send(router, { type: 'dissolvePinnedGroup', sourcePath: '/a' });
+  const { notices, commands } = capture();
+  assert.deepEqual(notices, []);
+  assert.equal(commands[0]?.cmdKind, 'DissolvePinnedGroup');
+  assert.equal(commands[0]?.cmd.sourcePath, '/a');
+});
+
+test('dissolvePinnedGroup rejects an empty sourcePath', async () => {
+  const { router, capture } = newRouter();
+  await send(router, { type: 'dissolvePinnedGroup', sourcePath: '' } as never);
+  const { notices, commands } = capture();
+  assert.equal(notices.length, 1);
+  assert.match(notices[0].notice, /Protocol defect: dissolvePinnedGroup/);
+  assert.equal(commands.length, 0);
+});
+
+test('unpinPinnedGroup dispatches the atomic host command', async () => {
+  const { router, capture } = newRouter();
+  await send(router, { type: 'unpinPinnedGroup', sourcePath: '/a' });
+  const { notices, commands } = capture();
+  assert.deepEqual(notices, []);
+  assert.equal(commands[0]?.cmdKind, 'UnpinPinnedGroup');
+  assert.equal(commands[0]?.cmd.sourcePath, '/a');
+});
+
+test('unpinPinnedGroup rejects an empty sourcePath', async () => {
+  const { router, capture } = newRouter();
+  await send(router, { type: 'unpinPinnedGroup', sourcePath: '' } as never);
+  const { notices, commands } = capture();
+  assert.equal(notices.length, 1);
+  assert.match(notices[0].notice, /Protocol defect: unpinPinnedGroup/);
+  assert.equal(commands.length, 0);
+});

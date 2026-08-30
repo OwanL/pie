@@ -55,6 +55,8 @@ interface RunAnalyticsStorageOptions {
   autoExportRetryBaseMs?: number;
   /** Maximum delay for automatic export retry backoff. */
   autoExportRetryMaxMs?: number;
+  /** Consecutive derived-export failures tolerated before notifying the user. */
+  autoExportNoticeAfterFailures?: number;
   /** Test seam for verifying auto-export timer delays. */
   autoExportSetTimeout?: (callback: () => void, ms: number) => ReturnType<typeof setTimeout>;
   /** Test seam for atomic rewrites during pruning. */
@@ -83,6 +85,7 @@ export class RunAnalyticsStorage {
   private readonly historyMetadata = new Map<string, { bytes: number; validEntries: number }>();
   private readonly autoExportRetryBaseMs: number;
   private readonly autoExportRetryMaxMs: number;
+  private readonly autoExportNoticeAfterFailures: number;
   private readonly autoExportSetTimeout: (callback: () => void, ms: number) => ReturnType<typeof setTimeout>;
   private disposed = false;
   private autoExportFailureCount = 0;
@@ -151,6 +154,7 @@ export class RunAnalyticsStorage {
     this.retryDelay = options.retryDelay ?? defaultFsRetryDelay;
     this.autoExportRetryBaseMs = options.autoExportRetryBaseMs ?? 1000;
     this.autoExportRetryMaxMs = options.autoExportRetryMaxMs ?? 60_000;
+    this.autoExportNoticeAfterFailures = Math.max(1, options.autoExportNoticeAfterFailures ?? 6);
     this.autoExportSetTimeout = options.autoExportSetTimeout ?? setTimeout;
     this.lastAutoExportAtMs = this.now().getTime();
   }
@@ -909,7 +913,7 @@ export class RunAnalyticsStorage {
         if (this.disposed && !force) return;
         if (!force && this.autoExportDirtyVersion === 0) return;
         const version = this.autoExportDirtyVersion;
-        const succeeded = await this.writeAutoExportSafely();
+        const succeeded = await this.writeAutoExportSafely(force && failOnError);
         if (succeeded) {
           this.lastAutoExportAtMs = this.now().getTime();
           this.lastPersistError = null;
@@ -932,12 +936,23 @@ export class RunAnalyticsStorage {
     await exportRunAnalyticsStore(this.storageDir, this.autoExportPath, this.now);
   }
 
-  private async writeAutoExportSafely(): Promise<boolean> {
+  private async writeAutoExportSafely(surfaceImmediately = false): Promise<boolean> {
     try {
       await this.writeAutoExport();
       return true;
     } catch (error) {
-      this.recordPersistError(error);
+      const nextFailureCount = this.autoExportFailureCount + 1;
+      if (surfaceImmediately || nextFailureCount >= this.autoExportNoticeAfterFailures) {
+        this.recordPersistError(error);
+      } else {
+        appendPieLog('warn', 'run-analytics', 'derived auto-export temporarily blocked; retry scheduled', {
+          attempt: nextFailureCount,
+          noticeAfterFailures: this.autoExportNoticeAfterFailures,
+          storageDir: this.storageDir,
+          error: toErrorMessage(error),
+          errorCode: (error as NodeJS.ErrnoException).code,
+        });
+      }
       return false;
     }
   }

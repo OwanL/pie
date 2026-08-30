@@ -21,11 +21,13 @@ export function useSessionResetEffect(
   loadingNewerRef: { current: boolean },
   previousLoadedStartRef: { current: number },
   previousLoadedEndRef: { current: number },
+  navigationActiveRef: { current: boolean },
 ) {
   useLayoutEffect(() => {
     setAutoFollow(true);
     lastScrollTopRef.current = 0;
     pendingJumpToLatestSnapRef.current = false;
+    navigationActiveRef.current = false;
     pendingOlderAnchorRef.current = null;
     loadingOlderRef.current = false;
     loadingNewerRef.current = false;

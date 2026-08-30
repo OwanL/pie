@@ -9,6 +9,7 @@ const COORDINATOR_METHODS: ReadonlySet<string> = new Set([
   'diagnostics.livePipeline.setEnabled',
   'mcp.list',
   'mcp.setServerEnabled',
+  'mcp.setSessionServerEnabled',
   'provider_gate.metrics',
   'runtimePrefs.set',
   'session.list',

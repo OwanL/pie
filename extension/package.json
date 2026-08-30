@@ -181,7 +181,7 @@
     "typecheck:cwd-skills": "tsc --noEmit -p ../extensions/cwd-skills/tsconfig.json",
     "typecheck:safeguard": "tsc --noEmit -p ../extensions/safeguard/tsconfig.json",
     "typecheck:skill-pruner": "tsc --noEmit -p ../extensions/skill-pruner/tsconfig.json",
-    "typecheck:web-access-compat": "tsc --noEmit -p ../extensions/web-access-compat/tsconfig.json",
+    "typecheck:web-access-guard": "tsc --noEmit -p ../extensions/web-access-guard/tsconfig.json",
     "typecheck:warm-bash": "tsc --noEmit -p ../extensions/warm-bash/tsconfig.json",
     "typecheck:tool-result-pruner": "tsc --noEmit -p ../extensions/tool-result-pruner/tsconfig.json",
     "typecheck:session-reviewer": "tsc --noEmit -p ../extensions/session-reviewer/tsconfig.json",

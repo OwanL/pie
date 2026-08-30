@@ -3,10 +3,11 @@
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 
-import { resolveHistoryCompactionSettings, type ChatPrefs, type ExtensionInfo, type McpServerInfo, type ModelInfo, type PruningCatalog, type PruningResult, type PruningSettings, type ProviderGateStats, type ToolResultPruningSettings } from '../../../shared/protocol';
+import { DEFAULT_SESSION_TITLES_SETTINGS, resolveHistoryCompactionSettings, type ChatPrefs, type ExtensionInfo, type McpServerInfo, type ModelInfo, type PruningCatalog, type PruningResult, type PruningSettings, type ProviderGateStats, type SessionTitlesSettings, type ToolResultPruningSettings } from '../../../shared/protocol';
 import { filterEnabledProviders, orderModelsForPicker, type ModelPickerEntry } from './model-list';
 import { Tooltip } from '../components/tooltip';
 import { HistoryCompactionSection } from './settings-menu-history-compaction';
+import { SessionTitlesSection } from './settings-menu-session-titles';
 
 import {
   computeKeepCatalog,
@@ -26,6 +27,7 @@ import {
   CHAT_PREF_MENU_SECTIONS,
   setExtensionEnabled,
   setNestedAllowedBucket,
+  setSubagentBucketCanSpawn,
   setProviderEnabled,
   toggleChatPref,
   type BooleanPrefKey,
@@ -51,6 +53,7 @@ export interface ComposerSettingsMenuProps {
   pruningCatalog: PruningCatalog;
   pruningResult: PruningResult | null;
   toolResultPruningSettings: ToolResultPruningSettings;
+  sessionTitlesSettings?: SessionTitlesSettings;
   availableExtensions: ExtensionInfo[];
   availableModels: ModelInfo[];
   providerGateStats: ProviderGateStats;
@@ -61,6 +64,7 @@ export interface ComposerSettingsMenuProps {
   onMcpSetServerEnabled: (name: string, enabled: boolean) => void;
   onSetPruningSettings: (settings: Partial<PruningSettings>) => void;
   onSetToolResultPruningSettings: (settings: Partial<ToolResultPruningSettings>) => void;
+  onSetSessionTitlesSettings?: (settings: Partial<SessionTitlesSettings>) => void;
 }
 
 /** Settings categories, in tab-strip order. Each renders one at a time
@@ -162,9 +166,9 @@ function TabIcon({ id }: { id: SettingsTab }) {
  *  search index can surface those toggles by their tier name. Highest tier
  *  first to match the in-tab order. */
 const NESTED_LABELS: { key: 'small' | 'medium' | 'frontier'; label: string }[] = [
-  { key: 'frontier', label: 'Frontier (Opus)' },
-  { key: 'medium', label: 'Medium (Sonnet)' },
-  { key: 'small', label: 'Small (Haiku)' },
+  { key: 'frontier', label: 'Frontier' },
+  { key: 'medium', label: 'Medium' },
+  { key: 'small', label: 'Small' },
 ];
 
 /** Continuous (non-boolean) controls surfaced as search jump entries. Clicking
@@ -195,7 +199,7 @@ const SKILL_PRUNER_SETTING_LABELS = [
 ];
 const SUBAGENT_SETTING_LABELS = [
   'Subagent default providers', 'Subagent dropped tools', 'Subagent model buckets', 'Subagent nested bucket allowlist',
-  'Subagent nesting levels',
+  'Subagent delegation by bucket', 'Subagent nesting levels',
   'Subagent tree session budget', 'Subagent max active trees',
   'Subagent max concurrency', 'Subagent max parallel tasks',
 ];
@@ -380,6 +384,15 @@ function buildSettingsSearchIndex(
         checked: enabled,
         apply: () => onSetPrefs(setNestedAllowedBucket(prefs, def.key, !enabled)),
       });
+      const canSpawn = prefs.subagentBucketCanSpawn[def.key] ?? true;
+      entries.push({
+        type: 'toggle',
+        id: `subagent:delegate:${def.key}`,
+        label: `Allow ${def.label} subagents to delegate`,
+        haystack: `subagent delegation bucket spawn nested leaf ${def.label}`.toLowerCase(),
+        checked: canSpawn,
+        apply: () => onSetPrefs(setSubagentBucketCanSpawn(prefs, def.key, !canSpawn)),
+      });
     }
   }
 
@@ -509,6 +522,8 @@ interface SettingsTabBodyProps {
   onSetPruningSettings: (s: Partial<PruningSettings>) => void;
   toolResultPruningSettings: ToolResultPruningSettings;
   onSetToolResultPruningSettings: (s: Partial<ToolResultPruningSettings>) => void;
+  sessionTitlesSettings: SessionTitlesSettings;
+  onSetSessionTitlesSettings: (s: Partial<SessionTitlesSettings>) => void;
   providers: string[];
   providerGateStats: ProviderGateStats;
   modelEntries: ModelPickerEntry[];
@@ -537,6 +552,8 @@ function SettingsTabBody(props: SettingsTabBodyProps) {
     onSetPruningSettings,
     toolResultPruningSettings,
     onSetToolResultPruningSettings,
+    sessionTitlesSettings,
+    onSetSessionTitlesSettings,
     modelEntries,
     availableModels,
     availableExtensions,
@@ -551,6 +568,7 @@ function SettingsTabBody(props: SettingsTabBodyProps) {
     <>
       {effectiveTab === 'chat' && (
         <>
+          <SessionTitlesSection settings={sessionTitlesSettings} modelEntries={modelEntries} availableModels={availableModels} onSetSessionTitlesSettings={onSetSessionTitlesSettings} />
           <ChatPrefSections prefs={prefs} onSetPrefs={onSetPrefs} sectionIds={['transcript']} />
           <SoundSection prefs={prefs} onSetPrefs={onSetPrefs} />
           <ChatPrefSections prefs={prefs} onSetPrefs={onSetPrefs} sectionIds={['diagnostics']} />
@@ -589,7 +607,7 @@ function SettingsTabBody(props: SettingsTabBodyProps) {
   );
 }
 
-export function ComposerSettingsMenu({ prefs, mcpServers, mcpServersStatus, mcpPendingApply, pruningSettings, pruningCatalog, pruningResult, toolResultPruningSettings, availableExtensions, availableModels, providerGateStats, activeContextWindow, activeModel, onSetPrefs, onMcpListRequested, onMcpSetServerEnabled, onSetPruningSettings, onSetToolResultPruningSettings }: ComposerSettingsMenuProps) {
+export function ComposerSettingsMenu({ prefs, mcpServers, mcpServersStatus, mcpPendingApply, pruningSettings, pruningCatalog, pruningResult, toolResultPruningSettings, sessionTitlesSettings = DEFAULT_SESSION_TITLES_SETTINGS, availableExtensions, availableModels, providerGateStats, activeContextWindow, activeModel, onSetPrefs, onMcpListRequested, onMcpSetServerEnabled, onSetPruningSettings, onSetToolResultPruningSettings, onSetSessionTitlesSettings = () => undefined }: ComposerSettingsMenuProps) {
   const skillCatalog = useMemo(
     () => computeKeepCatalog(
       pruningCatalog.skills,
@@ -898,6 +916,8 @@ export function ComposerSettingsMenu({ prefs, mcpServers, mcpServersStatus, mcpP
                 onSetPruningSettings={onSetPruningSettings}
                 toolResultPruningSettings={toolResultPruningSettings}
                 onSetToolResultPruningSettings={onSetToolResultPruningSettings}
+                sessionTitlesSettings={sessionTitlesSettings}
+                onSetSessionTitlesSettings={onSetSessionTitlesSettings}
                 modelEntries={modelEntries}
                 availableModels={availableModels}
                 availableExtensions={availableExtensions}

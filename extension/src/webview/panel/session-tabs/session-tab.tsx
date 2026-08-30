@@ -5,6 +5,7 @@ import { memo } from 'preact/compat';
 
 import type { SessionSummary } from '../../../shared/protocol';
 import { isPendingTabPath } from '../../../shared/tab-behavior';
+import { handleContextMenuKeyRequest } from '../components/context-menu-key';
 import { getTabAvatarColor, getTabAvatarLabel } from './tab-avatar';
 
 export interface SessionTabProps {
@@ -13,6 +14,7 @@ export interface SessionTabProps {
   sessionByPath: Map<string, SessionSummary>;
   openIndexByPath: Map<string, number>;
   runningPathSet: Set<string>;
+  generatingTitlePathSet?: Set<string>;
   startingModelPathSet: Set<string>;
   unreadFinishedPathSet: Set<string>;
   /** Effective active path (host `activeSession.path`, or an optimistic
@@ -48,6 +50,7 @@ export const SessionTab = memo(function SessionTab({
   sessionByPath,
   openIndexByPath,
   runningPathSet,
+  generatingTitlePathSet = new Set<string>(),
   startingModelPathSet,
   unreadFinishedPathSet,
   activePath,
@@ -67,6 +70,7 @@ export const SessionTab = memo(function SessionTab({
   const isActive = activePath === tabPath;
   const isAttention = !!hasPendingExtensionUIRequest;
   const isRunning = runningPathSet.has(tabPath);
+  const isGeneratingTitle = generatingTitlePathSet.has(tabPath);
   const isPreparing = isPendingTabPath(tabPath);
   const isCreationDelayed = session?.creationState === 'delayed';
   const isStartingModel = isRunning && startingModelPathSet.has(tabPath);
@@ -120,17 +124,21 @@ export const SessionTab = memo(function SessionTab({
         title={title}
         onPointerDown={(event) => onPointerDown(event as PointerEvent, originalIndex, tabPath)}
         onClick={() => onClick(tabPath)}
+        onKeyDown={(event) => handleContextMenuKeyRequest(event as KeyboardEvent)}
       >
         {isPinned ? (
-          <span
-            class="session-tab-avatar"
-            style={{ background: getTabAvatarColor(tabPath) }}
-            aria-hidden="true"
-          >
-            {getTabAvatarLabel(label)}
-          </span>
+          isGeneratingTitle
+            ? <span class="loading-wheel loading-wheel-sm" aria-hidden="true" />
+            : <span
+                class="session-tab-avatar"
+                style={{ background: getTabAvatarColor(tabPath) }}
+                aria-hidden="true"
+              >
+                {getTabAvatarLabel(label)}
+              </span>
         ) : (
           <>
+            {isGeneratingTitle && <span class="loading-wheel loading-wheel-sm" aria-hidden="true" />}
             {isRunning || isPreparing
               ? <span class={isStartingModel ? 'session-tab-running starting-model' : 'session-tab-running'} aria-hidden="true" />
               : hasDeferredTimer

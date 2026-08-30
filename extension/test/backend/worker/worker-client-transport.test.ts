@@ -45,12 +45,17 @@ class FakeClock implements WorkerClientScheduler {
 }
 
 function createClient(mode: string, extra: Partial<ConstructorParameters<typeof WorkerClient>[0]> = {}): WorkerClient {
+  // Session paths are worker-argv metadata in these fixtures, but unique per
+  // client so concurrently-running tests never share a file identity. The
+  // workerId stays deterministic: some frames assert lease ownership against
+  // the canonical fixture-* identity.
+  const uniqueMode = `${mode}-${process.pid}-${(uniqueClientCounter += 1)}`;
   return new WorkerClient({
     workerEntryPath: fixture,
     coordinatorGeneration: 1,
     workerId: `fixture-${mode}`,
     workerGeneration: 1,
-    sessionPath: path.resolve(`session-${mode}.jsonl`),
+    sessionPath: path.resolve(`session-${uniqueMode}.jsonl`),
     sdkPatchIdentity,
     heartbeatIntervalMs: 1_000,
     startupTimeoutMs: 5_000,
@@ -59,6 +64,7 @@ function createClient(mode: string, extra: Partial<ConstructorParameters<typeof 
     ...extra,
   });
 }
+let uniqueClientCounter = 0;
 
 async function cleanup(client: WorkerClient): Promise<void> {
   if (client.getSnapshot().status === 'exited') return;
@@ -78,7 +84,7 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 5_000): Promise<v
   }
 }
 
-describe('worker client inherited-FD integration', { concurrency: false }, () => {
+describe('worker client inherited-FD integration', { concurrency: 4 }, () => {
 test('real inherited-FD transport keeps JSON-looking, partial, and bounded-large stdout/stderr diagnostic-only', async () => {
   const client = createClient('noise');
   try {
@@ -160,7 +166,7 @@ test('generic Phase 4 callbacks and dedicated response correlation share the bou
         assert.equal(client.sendFrame({
           kind: 'provider.granted',
           requestId: frame.requestId,
-          lease: { leaseId: 'coordinator-lease-1', provider: frame.request.provider, model: frame.request.model, grantedAt: 1 },
+          lease: { leaseId: 'coordinator-lease-1', provider: frame.request.provider, model: frame.request.model, grantedAt: 1, headerWaitMs: 120_000, streamIdleTimeoutMs: 120_000 },
         }), true);
       }
     },
@@ -299,7 +305,14 @@ for (const scenario of ['graceful', 'crash'] as const) {
       // Windows process spawn + marker write need generous headroom under
       // full-suite load; the causal ordering is what the test proves.
       await waitUntil(() => {
-        try { descendantPid = Number(require('node:fs').readFileSync(marker, 'utf8')); return Number.isSafeInteger(descendantPid); } catch { return false; }
+        try {
+          // The fixture creates the marker file before writing the PID, so an
+          // early read under load can observe an empty file — Number('') is 0.
+          const parsed = Number(require('node:fs').readFileSync(marker, 'utf8'));
+          if (!Number.isSafeInteger(parsed) || parsed <= 0) return false;
+          descendantPid = parsed;
+          return true;
+        } catch { return false; }
       }, 15_000);
       assert.ok(descendantPid, 'the post-ready runtime descendant PID was recorded before the crash');
       if (scenario === 'graceful') {
@@ -324,7 +337,12 @@ test('forced worker termination removes a real descendant process tree', async (
     await client.start();
     await assert.rejects(fs.stat(marker), { code: 'ENOENT' }, 'the runtime must spawn its descendant after readiness');
     await waitUntil(() => {
-      try { descendantPid = Number(require('node:fs').readFileSync(marker, 'utf8')); return Number.isSafeInteger(descendantPid); } catch { return false; }
+      try {
+        const parsed = Number(require('node:fs').readFileSync(marker, 'utf8'));
+        if (!Number.isSafeInteger(parsed) || parsed <= 0) return false;
+        descendantPid = parsed;
+        return true;
+      } catch { return false; }
     }, 15_000);
     assert.ok(descendantPid && isAlive(descendantPid));
     await client.forceKill();

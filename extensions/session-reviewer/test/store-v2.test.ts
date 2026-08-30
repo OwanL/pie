@@ -5,7 +5,7 @@ import * as path from 'node:path';
 import { createRequire, syncBuiltinESMExports } from 'node:module';
 import test, { afterEach, beforeEach } from 'node:test';
 
-import { enqueueClosure, readClosureActions, readReviewStore, recordReviewOnce } from '../src/store.js';
+import { enqueueClosure, enqueueClosureBatch, readClosureActions, readOpenTabRegistry, readReviewStore, recordReviewOnce } from '../src/store.js';
 import { validReview } from './fixtures.js';
 
 let dir: string;
@@ -49,6 +49,31 @@ test('malformed lines are isolated and V2 records stay readable', async () => {
   assert.equal(snapshot.v2.length, 1);
 });
 
+test('open-tab authority rejects entries without explicit pin and running state', () => {
+  const previousTabs = process.env.PIE_OPEN_TABS;
+  const previousRevision = process.env.PIE_OPEN_TABS_REVISION;
+  try {
+    process.env.PIE_OPEN_TABS = JSON.stringify([
+      { path: '/valid.jsonl', pinned: true, isRunning: false },
+      { path: '/path-only.jsonl' },
+      { path: '/unknown-running.jsonl', pinned: true },
+      { path: '/unknown-pinning.jsonl', isRunning: false },
+      { path: '   ', pinned: false, isRunning: false },
+    ]);
+    process.env.PIE_OPEN_TABS_REVISION = '0';
+    const registry = readOpenTabRegistry();
+    assert.deepEqual(registry.tabs, [
+      { path: '/valid.jsonl', pinned: true, isRunning: false },
+    ]);
+    assert.equal(registry.revision, undefined, 'zero is not a valid live registry revision');
+  } finally {
+    if (previousTabs === undefined) delete process.env.PIE_OPEN_TABS;
+    else process.env.PIE_OPEN_TABS = previousTabs;
+    if (previousRevision === undefined) delete process.env.PIE_OPEN_TABS_REVISION;
+    else process.env.PIE_OPEN_TABS_REVISION = previousRevision;
+  }
+});
+
 test('shallow malformed V2 envelopes are ignored and do not block a valid production write', async () => {
   fs.appendFileSync(path.join(dir, 'reviews.jsonl'), `${JSON.stringify({
     schemaVersion: 2, kind: 'production', reviewId: 'shallow-review', sessionId: 'session-1',
@@ -77,6 +102,50 @@ test('closure actions are separate, idempotent while active, and never append a 
   assert.equal(wakeRecords[1]?.actionId, first.action.actionId, 'reuse never creates a new action ID');
   assert.equal(fs.readFileSync(reviewFile, 'utf8'), before);
   assert.ok(fs.existsSync(path.join(dir, 'closure-actions.jsonl')));
+});
+
+test('closure batches take one outbox snapshot while preserving per-item results', async () => {
+  const outbox = path.join(dir, 'closure-actions.jsonl');
+  const mutableFs = createRequire(import.meta.url)('node:fs') as typeof fs;
+  const original = mutableFs.readFileSync;
+  let outboxReads = 0;
+  mutableFs.readFileSync = ((file: fs.PathOrFileDescriptor, ...args: unknown[]) => {
+    if (typeof file !== 'number' && path.resolve(String(file)) === path.resolve(outbox)) outboxReads += 1;
+    return (original as (...values: unknown[]) => unknown)(file, ...args);
+  }) as typeof fs.readFileSync;
+  syncBuiltinESMExports();
+  let results;
+  try {
+    results = await enqueueClosureBatch([
+      { kind: 'closeReviewed', targetSessionId: 'batch-1', reviewId: 'review-1' },
+      { kind: 'closeReviewed', targetSessionId: 'batch-2', reviewId: 'review-2' },
+    ]);
+  } finally {
+    mutableFs.readFileSync = original;
+    syncBuiltinESMExports();
+  }
+  assert.equal(outboxReads, 1);
+  assert.equal(results.length, 2);
+  assert.equal(results.every((result) => !('error' in result) && result.existing === false), true);
+  assert.equal(readClosureActions().length, 2);
+});
+
+test('a reopened tab gets a new closure action after the prior action succeeded', async () => {
+  const first = await enqueueClosure({ kind: 'closeReviewed', targetSessionId: 'reopened', reviewId: 'review-1' });
+  fs.appendFileSync(path.join(dir, 'closure-actions.jsonl'), `${JSON.stringify({
+    ...first.action,
+    status: 'succeeded',
+    attempts: 1,
+    settledAt: '2026-07-24T10:21:00.000Z',
+  })}\n`);
+
+  // The caller only invokes enqueue after confirming that the tab is currently
+  // open. A terminal success therefore belongs to an older tab generation.
+  const reopened = await enqueueClosure({ kind: 'closeReviewed', targetSessionId: 'reopened', reviewId: 'review-1' });
+  assert.equal(reopened.existing, false);
+  assert.notEqual(reopened.action.actionId, first.action.actionId);
+  assert.equal(reopened.action.status, 'pending');
+  assert.equal(readClosureActions().length, 2);
 });
 
 test('a concurrent host terminal append cannot be reactivated by an active-action wake', async () => {

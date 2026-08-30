@@ -71,6 +71,8 @@ export interface AggregateDailyCost {
 
 /** Per-model cost within a single day (local). */
 export interface AggregateDailyModelCost {
+  /** Serving provider; model ids are not globally unique across providers. */
+  provider: string;
   model: string;
   cost: number;
 }
@@ -82,11 +84,91 @@ export interface AggregateDailyRunCount {
   runCount: number;
 }
 
+/** Productivity rollup for a window (today / 7-day / a single day of the work
+ *  trend). Counters are exact sums over the window's runs; sample-based fields
+ *  also expose their coverage so runs recorded before a metric existed stay
+ *  untracked instead of silently reading as zeros. */
+export interface AggregateProductivityStats {
+  /** User prompts (sends) in the window. */
+  sendCount: number;
+  /** Runs in the window that recorded `initialUserMessageChars`. 0 means no
+   *  tracked samples in the window (average unknown), not a zero average. */
+  promptCharSamples: number;
+  /** Total user prompt length in Unicode characters across tracked samples. */
+  promptChars: number;
+  /** Mean tracked user prompt length in characters; null when no run in the
+   *  window recorded its prompt length. */
+  averagePromptChars: number | null;
+  /** Runs in the window that recorded estimated prompt tokens (new runs only). */
+  promptTokenSamples: number;
+  /** Total estimated user prompt tokens across tracked runs (privacy-safe BPE
+   *  estimate captured at send time; the prompt text is never stored). */
+  promptTokens: number;
+  /** Provider model-input tokens across the window's recorded usage. */
+  inputTokens: number;
+  /** Filesystem path references (file/dir mentions) in the window. Tracked for
+   *  every run; 0 means none were recorded, not that tracking is missing. */
+  filesystemPathRefCount: number;
+  /** Image attachments in the window. */
+  imageInputCount: number;
+  /** Image attachment bytes in the window (never mixed with non-image input). */
+  imageInputBytes: number;
+  /** ask_user questions answered in the window's tracked runs. */
+  askUserAnsweredCount: number;
+  /** ask_user questions cancelled in the window's tracked runs. Missing legacy
+   *  counters are untracked (see {@link askUserTrackedRuns}), never zero. */
+  askUserCancelledCount: number;
+  /** Runs in the window that track ask_user outcomes. 0 = coverage unknown
+   *  (all runs predate ask_user tracking), not "no questions asked". */
+  askUserTrackedRuns: number;
+}
+
+/** Empty productivity rollup. Stable reference for the ViewState default and
+ *  zero-activity work-trend days. */
+export const EMPTY_PRODUCTIVITY_STATS: AggregateProductivityStats = {
+  sendCount: 0,
+  promptCharSamples: 0,
+  promptChars: 0,
+  averagePromptChars: null,
+  promptTokenSamples: 0,
+  promptTokens: 0,
+  inputTokens: 0,
+  filesystemPathRefCount: 0,
+  imageInputCount: 0,
+  imageInputBytes: 0,
+  askUserAnsweredCount: 0,
+  askUserCancelledCount: 0,
+  askUserTrackedRuns: 0,
+};
+
+/** One day's work-trend point (local `YYYY-MM-DD`) for the Work tooltip.
+ *  Historical facts only: distinct sessions that were used and the peak number
+ *  of concurrently working sessions. Open-tab history is never claimed. */
+export interface AggregateDailyWorkTrend {
+  /** Local calendar date (`YYYY-MM-DD`). */
+  date: string;
+  /** Distinct sessions with a run landing on this day. */
+  sessionsUsed: number;
+  /** Peak concurrently working sessions observed this day: the best available
+   *  `TurnThroughputSample.concurrentBusySessions`, else a conservative 1 when
+   *  a busy run was observed without samples. 0 = no busy evidence that day. */
+  peakWorkingSessions: number;
+  /** Per-day productivity rollup (see {@link AggregateProductivityStats}). */
+  productivity: AggregateProductivityStats;
+}
+
 /** A single segment (provider or model) of a series point's breakdown. */
 export interface AggregateSeriesSegment {
-  /** Provider or model id. */
+  /** Provider id. */
   key: string;
   value: number;
+}
+
+/** A provider-qualified model segment. The tuple is the identity: the same
+ * model id served by two providers remains two distinct chart entries. */
+export interface AggregateModelSeriesSegment extends AggregateSeriesSegment {
+  provider: string;
+  model: string;
 }
 
 /** One point in an intraday timeseries (e.g. today's cumulative cost). The
@@ -95,7 +177,8 @@ export interface AggregateSeriesSegment {
  *  composition at that point.
  *
  *  - **Cumulative series** (cost, tokens): `byProvider`/`byModel` are cumulative
- *    up to and including this point; the chart steps up at each point.
+ *    up to and including this point; the chart uses non-overshooting monotone
+ *    curves between the exact samples.
  *  - **Rate series** (throughput): `byProvider`/`byModel` are the bucket's
  *    per-provider/per-model rate (tok/s); the chart draws per-bucket bands. */
 export interface AggregateSeriesPoint {
@@ -103,8 +186,8 @@ export interface AggregateSeriesPoint {
   ms: number;
   /** Per-provider breakdown at this point, sorted descending by value. */
   byProvider: AggregateSeriesSegment[];
-  /** Per-model breakdown at this point (hover detail), sorted descending. */
-  byModel: AggregateSeriesSegment[];
+  /** Provider-qualified per-model breakdown at this point, sorted descending. */
+  byModel: AggregateModelSeriesSegment[];
 }
 
 /** One turn of the most-recent run, for the last-run sparkline. */
@@ -250,12 +333,17 @@ export interface AggregateStats {
   /** Intraday cumulative cost series for today (local), one point per turn,
    *  pruned to [first spend, now]. Stacked by provider; per-model on hover. */
   todayCostSeries: AggregateSeriesPoint[];
+  /** Intraday cumulative input-token series for today (local), using recorded
+   * usage timestamps. Stacked by provider; provider-qualified models on hover. */
+  todayInputTokenSeries: AggregateSeriesPoint[];
   /** Intraday cumulative output-token series for today (local), one point per
-   *  turn. Stacked by provider; per-model on hover. */
+   * turn. Stacked by provider; provider-qualified models on hover. */
   todayTokenSeries: AggregateSeriesPoint[];
   /** Intraday per-hour throughput series for today (local), one point per hour
    *  with data. Stacked by provider (tok/s); per-model on hover. */
   todayThroughputSeries: AggregateSeriesPoint[];
+  /** Today's productivity summary (see {@link AggregateProductivityStats}). */
+  todayProductivity: AggregateProductivityStats;
 
   // ── Recent: this week (last 7 days, inclusive of today) ──
   /** Total spend over the last 7 local days (inclusive of today). */
@@ -264,15 +352,30 @@ export interface AggregateStats {
   weekCostByProvider: AggregateProviderCost[];
   /** Number of runs in the last 7 days. */
   weekRunCount: number;
+  /** 7-day productivity summary (see {@link AggregateProductivityStats}). */
+  weekProductivity: AggregateProductivityStats;
+  /** Granular cumulative cost over the rolling seven-local-day window, built
+   * from timestamped usage samples and stacked by provider. */
+  weekCostSeries: AggregateSeriesPoint[];
   /** Per-day cost for the last 14 days (ascending date) — tooltip context. */
   dailyCost: AggregateDailyCost[];
   /** Per-day run count for the last 14 days (ascending date) — sessions tooltip. */
   dailyRunCount: AggregateDailyRunCount[];
+  /** Per-day work trend for the last 14 days (ascending date, leading idle
+   *  days pruned): distinct sessions used and peak concurrently working
+   *  sessions — historical run evidence, never open-tab history. */
+  dailyWorkTrend: AggregateDailyWorkTrend[];
 
   // ── Current: live / open ──
+  /** Sum of the primary per-session active-generation speeds. This uses each
+   * running session's generation-time window and excludes TTFT, tools, and
+   * between-turn waits. */
+  activeGenerationTokensPerSecond: number;
   /**
    * Aggregate output rate over the trailing 30 seconds of wall time. Includes
    * every session and decays through tool calls, idle gaps, and run completion.
+   * This is the end-to-end/experienced metric, retained separately from the
+   * active-generation speed above.
    */
   liveTokensPerSecond: number;
   /** Number of currently-running sessions. */
@@ -324,13 +427,19 @@ export const EMPTY_AGGREGATE_STATS: AggregateStats = {
   todayToolCallCount: 0,
   todayTouchedFileCount: 0,
   todayCostSeries: [],
+  todayInputTokenSeries: [],
   todayTokenSeries: [],
   todayThroughputSeries: [],
+  todayProductivity: EMPTY_PRODUCTIVITY_STATS,
   weekCost: 0,
   weekCostByProvider: [],
   weekRunCount: 0,
+  weekProductivity: EMPTY_PRODUCTIVITY_STATS,
+  weekCostSeries: [],
   dailyCost: [],
   dailyRunCount: [],
+  dailyWorkTrend: [],
+  activeGenerationTokensPerSecond: 0,
   liveTokensPerSecond: 0,
   runningSessionCount: 0,
   openTabCount: 0,

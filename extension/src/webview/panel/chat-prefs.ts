@@ -284,6 +284,21 @@ export function setNestedAllowedBucket(
   };
 }
 
+/** Toggle whether subagents running in one effective bucket may create
+ *  further subagents, preserving the other bucket policies. */
+export function setSubagentBucketCanSpawn(
+  prefs: ChatPrefs,
+  bucket: 'small' | 'medium' | 'frontier',
+  enabled: boolean,
+): Partial<ChatPrefs> {
+  return {
+    subagentBucketCanSpawn: {
+      ...prefs.subagentBucketCanSpawn,
+      [bucket]: enabled,
+    },
+  };
+}
+
 /** Replace the user-configured list of tool names always dropped from
  *  subagent sessions (e.g. ['ask_user']). */
 export function setSubagentDropTools(prefs: ChatPrefs, tools: string[]): Partial<ChatPrefs> {

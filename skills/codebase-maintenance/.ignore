@@ -19,14 +19,14 @@ out/
 .vscode-test/
 coverage/
 .git/
+.cache/
 data/
 analysis/data/
+analysis/site/dist/
 skills/codebase-maintenance/
-scripts/
-analysis/site/app.ts
-extension/src/webview/panel/panel.tsx
 extension/test/_helpers/
 extension/test/fixtures/
+*.egg-info/
 *.min.js
 *.bundle.*
 *.chunk.*

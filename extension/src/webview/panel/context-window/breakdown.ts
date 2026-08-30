@@ -5,6 +5,7 @@ import type {
   ToolCall,
 } from '../../../shared/protocol';
 import { estimateTextTokens } from '../system-prompt-tokens';
+import { toolCallContextSignature } from '../composer/indicator-signature';
 import { formatTokens } from '../utils/format-tokens';
 import { LruCache } from '../utils/lru-cache';
 
@@ -164,7 +165,7 @@ function estimateToolCallTokens(toolCall: ToolCall): number {
       : undefined;
   const cacheKey = revision === undefined
     ? undefined
-    : `${toolCall.id}:${toolCall.status}:${revision}`;
+    : `${toolCall.id}:${toolCall.status}:${revision}:${toolCallContextSignature(toolCall)}`;
   if (cacheKey) {
     const cached = toolCallTokenCache.get(cacheKey);
     if (cached !== undefined) return cached;

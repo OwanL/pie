@@ -12,7 +12,8 @@
  *  - Lifecycle effects (`OpenSession`, `CreateSession`) use `enqueueLifecycle`
  *    only (the session may not exist yet, so the inner per-session queue
  *    cannot be addressed).
- *  - `PersistTabs` and `Log` execute directly without queueing.
+ *  - `Log` executes directly. `PersistTabs` uses its own ordered persistence
+ *    queue so complete snapshots cannot commit out of order.
  *  - `PostImperative` sends an imperative message to the webview via the
  *    `postImperative` callback.
  *
@@ -22,9 +23,9 @@
  *
  * Dispatch is a `Record<Effect['kind'], EffectHandler>` table — the key type
  * gives compile-time exhaustiveness for free (every kind MUST have an entry or
- * the object literal won't type-check). The 12 pure 1:1 `*Result` kinds are
- * built by {@link EffectRunner.templateRow}; the 19 kinds with non-template
- * control flow are named handler methods (or delegate to `runRpc` /
+ * the object literal won't type-check). Pure 1:1 `*Result` kinds are built by
+ * {@link EffectRunner.templateRow}; kinds with ordering or non-template
+ * control flow use named handler methods (or delegate to `runRpc` /
  * `runLifecycle`).
  */
 
@@ -44,6 +45,7 @@ import type {
   SetPrefsRpcEffect,
   McpListRpcEffect,
   McpSetServerRpcEffect,
+  McpSetSessionServerRpcEffect,
   SetSystemPromptTogglesRpcEffect,
   DetailSubscribeRpcEffect,
   DetailUnsubscribeRpcEffect,
@@ -59,12 +61,13 @@ import type {
   StartBackendReadyWatchdogEffect,
   CancelBackendReadyWatchdogEffect,
   ClearLastCompactionEffect,
+  PersistTabsEffect,
   PostImperativeMessage,
 } from './effects';
 import { toErrorMessage } from '../util/error-message';
 import type { EffectResultEvent, CommandEvent } from './events';
 import type { FileDiffService } from './file-diff-service';
-import type { ChatPrefs, ComposerInput, McpServerInfo, ProviderGateStats, PruningMode, PruningSettings, ToolResultPruningSettings, ThinkingLevel, UserContentPart } from '../../shared/protocol';
+import type { ChatPrefs, ComposerInput, McpServerInfo, ProviderGateStats, PruningMode, PruningSettings, SessionTitlesSettings, ToolResultPruningSettings, ThinkingLevel, UserContentPart } from '../../shared/protocol';
 import type { LiveSubagentDetailAddress, DetailCursor, DetailPageRef } from '../../shared/protocol/subagent-detail';
 import { RequestTimeoutError, type RequestOptions } from '../../shared/request-tracker';
 import type { LiveLifecycleWatermark, LiveTurnCheckpoint } from '../../shared/live-pipeline-protocol';
@@ -135,10 +138,13 @@ export interface SessionServiceLike {
   }): Promise<void>;
   setPrefs(prefs: Partial<ChatPrefs>): Promise<void>;
   /** Re-read the effective MCP server config from the backend. */
-  mcpList(): Promise<{ servers: McpServerInfo[] }>;
+  mcpList(sessionPath?: string): Promise<{ servers: McpServerInfo[]; sessionOverrides?: Record<string, boolean> }>;
   /** Persist a per-server `disabled` override; resolves with the fresh list
    *  and whether the override actually changed. */
   mcpSetServerEnabled(name: string, enabled: boolean): Promise<{ servers: McpServerInfo[]; changed: boolean }>;
+  /** Write a session's full per-server override set and optionally recycle
+   *  that session's worker. resolves with whether the recycle happened. */
+  mcpSetSessionServerEnabled(sessionPath: string, overrides: Record<string, boolean>, recycle: boolean): Promise<{ recycled: boolean; overrides: Record<string, boolean> }>;
   /** Push the complete disabled-entry set for a session's system prompts to the
    *  backend (`systemPromptToggles.set`). Fire-and-forget: the backend re-emits
    *  `session.opened` to update host state, so no *Result event is expected. */
@@ -190,6 +196,7 @@ export interface SessionServiceLike {
   closeSession(sessionPath: string, nextPath: string | null, privacyMode?: boolean, selectionChanged?: boolean): Promise<void>;
   setPruningSettings(updates: Partial<PruningSettings>): Promise<void>;
   setToolResultPruningSettings(updates: Partial<ToolResultPruningSettings>): Promise<void>;
+  setSessionTitlesSettings(updates: Partial<SessionTitlesSettings>): Promise<void>;
   /** Recover from a failed/timed-out selection: finish the request and
    *  dispatch the reducer transitions that undo the optimistic tab setup
    *  (CloseTab / SelectSession-fallback / SessionScopeCleared / NoticeShown). */
@@ -239,7 +246,7 @@ const defaultTimerSink: TimerSink = {
 /**
  * FP-C2a decision: should a model-start send-timer fire defer (re-arm) instead
  * of dispatching a false-positive `PreflightFailed`? True only when the
- * request's provider is saturated (queued or paused) AND the cumulative
+ * request's provider has admitted/queued work (or is paused) AND the cumulative
  * model-start wait is still under the hard ceiling. Fail-open: absent gate /
  * unresolvable provider / missing metric yields `fire` (never hang). Mirrors
  * the backend's `decidePromptSafetyTimerAction` (FP-C2b) for the host-side
@@ -250,14 +257,18 @@ export function decideModelStartTimerAction(opts: {
   ceiling: number;
   provider?: string;
   metrics?: ProviderGateStats;
+  /** Correlated live phase for this exact session, not aggregate provider work. */
+  requestProviderPending?: boolean;
 }): { action: 'defer' | 'fire' } {
-  const { elapsed, ceiling, provider, metrics } = opts;
+  const { elapsed, ceiling, provider, metrics, requestProviderPending } = opts;
   const providerMetric = provider && metrics?.enabled
     ? metrics.providers.find((m) => m.provider === provider)
     : undefined;
-  const saturated = !!providerMetric
-    && (providerMetric.queuedRequests > 0 || providerMetric.paused);
-  if (saturated && elapsed < ceiling) return { action: 'defer' };
+  const providerInProgress = !!providerMetric
+    && (providerMetric.paused
+      || (requestProviderPending === true
+        && (providerMetric.activeRequests > 0 || providerMetric.queuedRequests > 0)));
+  if (providerInProgress && elapsed < ceiling) return { action: 'defer' };
   return { action: 'fire' };
 }
 
@@ -322,6 +333,8 @@ export interface EffectRunnerDeps {
   getProviderGateMetrics?: () => ProviderGateStats;
   /** Resolve the provider serving the session's current request. */
   resolveSessionProvider?: (sessionPath: string) => string | undefined;
+  /** True only while this exact session's live turn is queued/waiting_provider. */
+  isSessionProviderPending?: (sessionPath: string) => boolean;
   /**
    * Timer sink used for the backend-ready watchdog + send-timer.
    * Defaults to real `setTimeout`/`clearTimeout`. Tests inject a fake to
@@ -417,6 +430,20 @@ export class EffectRunner {
    * provider toggles cannot complete out of order and restore stale settings.
    * This queue is deliberately independent of session lifecycle work. */
   private prefsQueue: Promise<void> = Promise.resolve();
+
+  /** Global MCP config mutations and list reads need FIFO ordering with each
+   * other, but must not sit behind unrelated preference or session-runtime
+   * work. Session-scoped writes use the ordinary per-session operation queue:
+   * recycling a worker can take seconds and must never head-of-line block the
+   * global discovery read that makes the MCP menu usable. */
+  private mcpQueue: Promise<void> = Promise.resolve();
+
+  /** Tab snapshots are complete replacements, so they must reach VS Code
+   * globalState in reducer order. Concurrent Memento updates can otherwise
+   * finish in reverse order and durably resurrect a tab that a later close
+   * removed. This queue is independent of session/lifecycle work, preserving
+   * snappy host-local tab updates while serializing only the persistence I/O. */
+  private tabPersistenceQueue: Promise<void> = Promise.resolve();
   /** Model/reasoning and preference writes that must settle before a manual
    * backend restart. The UI is fenced first, so draining this set is bounded
    * to work the user already initiated. */
@@ -430,10 +457,11 @@ export class EffectRunner {
    *  so the reducer reverts via `pending.promoted[corrId]`. */
   private static readonly SEND_TIMER_TIMEOUT_MS = 120_000;
 
-  /** Hard ceiling for the model-start re-arm (FP-C2a): a genuinely-stuck
-   *  backstop so a saturated provider never defers forever. 2× the single
-   *  window, mirroring the backend's PROMPT_TIMEOUT_HARD_CEILING_MS. */
-  private static readonly MODEL_START_HARD_CEILING_MS = 2 * EffectRunner.SEND_TIMER_TIMEOUT_MS;
+  /** Hard ceiling for the model-start re-arm (FP-C2a). Provider authority
+   *  permits at most 5 minutes each for queue, headers, and first body chunk;
+   *  20 minutes bounds that complete path with recovery headroom and mirrors
+   *  the backend's semantic hard ceiling. */
+  private static readonly MODEL_START_HARD_CEILING_MS = 20 * 60 * 1000;
 
   private readonly sendTimerTimeoutMs: number;
 
@@ -452,6 +480,7 @@ export class EffectRunner {
       //    ExtensionUiResponse take the generic rpcMethodFor/rpcParamsFor/
       //    rpcResultFor path. ──
       SendRpc: (e) => this.runRpc(e),
+      GenerateSessionTitle: (e) => this.handleGenerateSessionTitle(e),
       EditRpc: (e) => this.runRpc(e),
       ReplaceQueueRpc: (e) => this.runReplaceQueueRpc(e),
       InterruptRpc: (e) => this.runRpc(e),
@@ -473,6 +502,7 @@ export class EffectRunner {
       SetPrefsRpc: (e) => this.handleSetPrefsRpc(e),
       McpListRpc: (e) => this.handleMcpListRpc(e),
       McpSetServerRpc: (e) => this.handleMcpSetServerRpc(e),
+      McpSetSessionServerRpc: (e) => this.handleMcpSetSessionServerRpc(e),
       SetPrivacyMode: (e) => this.handleSetPrivacyMode(e),
       SetSystemPromptTogglesRpc: (e) => this.handleSetSystemPromptTogglesRpc(e),
       DetailSubscribeRpc: (e) => this.handleDetailSubscribeRpc(e),
@@ -508,8 +538,9 @@ export class EffectRunner {
       OpenFileInEditor: this.templateRow({ resultKind: 'OpenFileInEditorResult', withSessionPath: false, call: (e, d) => d.fileDiffService.openFileInEditor(e.sessionPath, e.filePath) }),
       SetPruningSettings: this.templateRow({ resultKind: 'SetPruningSettingsResult', withSessionPath: false, call: (e, d) => d.service.setPruningSettings(e.settings) }),
       SetToolResultPruningSettings: this.templateRow({ resultKind: 'SetToolResultPruningSettingsResult', withSessionPath: false, call: (e, d) => d.service.setToolResultPruningSettings(e.settings) }),
+      SetSessionTitlesSettings: this.templateRow({ resultKind: 'SetSessionTitlesSettingsResult', withSessionPath: false, call: (e, d) => d.service.setSessionTitlesSettings(e.settings) }),
       CloseSession: this.templateRow({ resultKind: 'CloseSessionResult', withSessionPath: true, call: (e, d) => d.service.closeSession(e.sessionPath, e.nextPath, e.privacyMode === true, e.selectionChanged === true) }),
-      PersistTabs: this.templateRow({ resultKind: 'PersistTabsResult', withSessionPath: false, call: (e, d) => d.tabs.persistTabs(e.openTabPaths, e.activeSessionPath, e.pinnedTabPaths, e.pinnedTabGroups, e.privateSessionPaths) }),
+      PersistTabs: (e) => this.handlePersistTabs(e),
     };
   }
 
@@ -561,13 +592,55 @@ export class EffectRunner {
         payload.mcpServer = effect.name;
         payload.mcpEnabled = effect.enabled;
         break;
+      case 'McpSetSessionServerRpc':
+        payload.mcpSessionPath = effect.sessionPath;
+        break;
       case 'SetPruningSettings':
       case 'SetToolResultPruningSettings':
+      case 'SetSessionTitlesSettings':
         payload.settingKeys = Object.keys(effect.settings);
         break;
     }
 
     this.deps.log.log('debug', 'effect.dispatch', payload);
+  }
+
+  private handleGenerateSessionTitle(effect: Extract<Effect, { kind: 'GenerateSessionTitle' }>): void {
+    // Cosmetic title work is intentionally outside the per-session mutation
+    // queue. It must never delay interrupt, follow-up, or transcript work.
+    void (async () => {
+      try {
+        const response = await this.deps.backend.request<{
+          generated: boolean;
+          name?: string;
+          reason?: string;
+        }>('session.title.generate', {
+          sessionPath: effect.sessionPath,
+          prompt: effect.prompt,
+          provider: effect.provider,
+          model: effect.model,
+          thinkingLevel: effect.thinkingLevel,
+          timeoutSec: effect.timeoutSec,
+        }, { timeoutMs: effect.timeoutSec * 1_000 + 5_000 });
+        this.deps.dispatch({
+          kind: 'SessionTitleResult',
+          corrId: effect.corrId,
+          sessionPath: effect.sessionPath,
+          ok: true,
+          generated: response.generated,
+          name: response.name,
+          reason: response.reason,
+        });
+      } catch (error) {
+        this.deps.dispatch({
+          kind: 'SessionTitleResult',
+          corrId: effect.corrId,
+          sessionPath: effect.sessionPath,
+          ok: false,
+          error: toErrorMessage(error),
+        });
+      }
+    })();
   }
 
   private handleRequestLiveTurnCheckpoint(effect: RequestLiveTurnCheckpointEffect): void {
@@ -685,6 +758,37 @@ export class EffectRunner {
 
   // ─── Special-kind handlers (non-template control flow) ────────────────────
 
+  /** Persist complete tab snapshots strictly in reducer dispatch order.
+   * Failure of one snapshot is reported against its own correlation ID but
+   * does not poison the queue: the next, newer snapshot still gets a chance
+   * to become durable. */
+  private handlePersistTabs(effect: PersistTabsEffect): void {
+    const operation = this.tabPersistenceQueue.then(() =>
+      this.deps.tabs.persistTabs(
+        effect.openTabPaths,
+        effect.activeSessionPath,
+        effect.pinnedTabPaths,
+        effect.pinnedTabGroups,
+        effect.privateSessionPaths,
+      ),
+    );
+
+    this.tabPersistenceQueue = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+
+    void operation.then(
+      () => this.deps.dispatch({ kind: 'PersistTabsResult', corrId: effect.corrId, ok: true }),
+      (err) => this.deps.dispatch({
+        kind: 'PersistTabsResult',
+        corrId: effect.corrId,
+        ok: false,
+        error: toErrorMessage(err),
+      }),
+    );
+  }
+
   /** `ShowModelSwitchConfirm` — modal confirmation. NOT queued on the
    *  lifecycle queue (a modal must not block session create/open). Dispatches
    *  `ModelSwitchConfirmResult{corrId, confirmed}` (no `ok`/`error`/
@@ -742,18 +846,19 @@ export class EffectRunner {
             confirmChoice: 'Revert File',
           });
           if (!confirmed) {
-            this.deps.dispatch({ kind: 'FileRevertResult', corrId: effect.corrId, sessionPath: effect.sessionPath, ok: false, error: 'cancelled' });
+            this.deps.dispatch({ kind: 'FileRevertResult', corrId: effect.corrId, sessionPath: effect.sessionPath, filePath: effect.filePath, ok: false, error: 'cancelled' });
             return;
           }
         }
         await this.deps.fileDiffService.revertFile(effect.sessionPath, effect.filePath);
-        this.deps.dispatch({ kind: 'FileRevertResult', corrId: effect.corrId, sessionPath: effect.sessionPath, ok: true });
+        this.deps.dispatch({ kind: 'FileRevertResult', corrId: effect.corrId, sessionPath: effect.sessionPath, filePath: effect.filePath, ok: true });
       } catch (err) {
         this.deps.log.log('error', `FileRevert failed: ${toErrorMessage(err)}`);
         this.deps.dispatch({
           kind: 'FileRevertResult',
           corrId: effect.corrId,
           sessionPath: effect.sessionPath,
+          filePath: effect.filePath,
           ok: false,
           error: toErrorMessage(err),
         });
@@ -837,14 +942,21 @@ export class EffectRunner {
     this.trackConfigurationOperation(this.prefsQueue);
   }
 
-  /** `McpListRpc` — refresh the effective MCP server list from the backend.
-   *  Queued behind `prefsQueue` so a toggle followed by a list never races.
+  /** `McpListRpc` — refresh the effective global MCP server list immediately,
+   *  then hydrate the active session's override set on that session's queue.
+   *  The split is deliberate: an idle session toggle may spend seconds
+   *  recycling its worker, but opening either MCP surface must still discover
+   *  and render the global server rows. Serializing only the hydration behind
+   *  session writes prevents an older artifact read from overwriting a newer
+   *  optimistic/session-write result.
+   *
    *  A config list read does not reload the adapter, so the response carries
-   *  no `pendingApply` — the reducer preserves the current flag. A failure
-   *  dispatches `ok: false` so the UI can surface an error state (cached
-   *  rows stay visible) instead of rendering an empty list. */
+   *  no `pendingApply` — the reducer preserves the current flag. A global-list
+   *  failure dispatches `ok: false` so the UI can offer Refresh while keeping
+   *  cached rows visible. Session hydration failure is logged independently;
+   *  it must not turn an already-successful global list into an error. */
   private handleMcpListRpc(effect: McpListRpcEffect): void {
-    const operation = this.prefsQueue.catch(() => undefined).then(async () => {
+    const operation = this.mcpQueue.catch(() => undefined).then(async () => {
       try {
         const result = await this.deps.service.mcpList();
         this.deps.dispatchEvent({
@@ -863,8 +975,28 @@ export class EffectRunner {
         });
       }
     });
-    this.prefsQueue = operation.then(() => undefined, () => undefined);
-    this.trackConfigurationOperation(this.prefsQueue);
+    this.mcpQueue = operation.then(() => undefined, () => undefined);
+    this.trackConfigurationOperation(this.mcpQueue);
+
+    if (effect.sessionPath === undefined) return;
+    const hydration = this.deps.queues.enqueueSessionOperation(effect.sessionPath, async () => {
+      try {
+        const result = await this.deps.service.mcpList(effect.sessionPath);
+        this.deps.dispatchEvent({
+          kind: 'McpServersUpdated',
+          corrId: effect.corrId,
+          ok: true,
+          sessionPath: effect.sessionPath,
+          sessionOverrides: result.sessionOverrides ?? {},
+        });
+      } catch (err) {
+        this.deps.log.log('warn', 'McpListRpc session hydration failed', {
+          sessionPath: effect.sessionPath,
+          error: toErrorMessage(err),
+        });
+      }
+    });
+    this.trackConfigurationOperation(hydration);
   }
 
   /** `McpSetServerRpc` — persist a per-server `disabled` override. The
@@ -873,7 +1005,7 @@ export class EffectRunner {
    *  the next session reload / restart). A no-op toggle preserves the
    *  current flag. */
   private handleMcpSetServerRpc(effect: McpSetServerRpcEffect): void {
-    const operation = this.prefsQueue.catch(() => undefined).then(async () => {
+    const operation = this.mcpQueue.catch(() => undefined).then(async () => {
       try {
         const result = await this.deps.service.mcpSetServerEnabled(effect.name, effect.enabled);
         this.deps.dispatchEvent({
@@ -893,8 +1025,42 @@ export class EffectRunner {
         });
       }
     });
-    this.prefsQueue = operation.then(() => undefined, () => undefined);
-    this.trackConfigurationOperation(this.prefsQueue);
+    this.mcpQueue = operation.then(() => undefined, () => undefined);
+    this.trackConfigurationOperation(this.mcpQueue);
+  }
+
+  /** `McpSetSessionServerRpc` — write a session's per-server override set and
+   *  (best effort) recycle that session's worker so the adapter applies the
+   *  overrides at the next session start. Session writes use the ordinary
+   *  per-session FIFO, preserving rapid-toggle order and ensuring a later
+   *  hydration reads the committed artifact. They intentionally do not use
+   *  the global MCP queue because worker retirement is a slow runtime action.
+   *  `recycled: false` keeps the host's pending hint until the next idle
+   *  recycle (retried on `BusyChanged`). */
+  private handleMcpSetSessionServerRpc(effect: McpSetSessionServerRpcEffect): void {
+    const operation = this.deps.queues.enqueueSessionOperation(effect.sessionPath, async () => {
+      try {
+        const result = await this.deps.service.mcpSetSessionServerEnabled(effect.sessionPath, effect.overrides, effect.recycle);
+        this.deps.dispatchEvent({
+          kind: 'McpSessionServersUpdated',
+          corrId: effect.corrId,
+          sessionPath: effect.sessionPath,
+          ok: true,
+          overrides: result.overrides,
+          recycled: result.recycled,
+        });
+      } catch (err) {
+        this.deps.log.log('warn', 'McpSetSessionServerRpc failed', { error: toErrorMessage(err) });
+        this.deps.dispatchEvent({
+          kind: 'McpSessionServersUpdated',
+          corrId: effect.corrId,
+          sessionPath: effect.sessionPath,
+          ok: false,
+          error: toErrorMessage(err),
+        });
+      }
+    });
+    this.trackConfigurationOperation(operation);
   }
 
   private trackConfigurationOperation(operation: Promise<unknown>): void {
@@ -1285,13 +1451,15 @@ export class EffectRunner {
   private onSendTimerFire(send: InFlightSend): void {
     if (send.disposed) return;
     // FP-C2a: metric-gated re-arm for the model-start phase. When the in-flight
-    // request's provider is legitimately QUEUED (or PAUSED by the circuit
-    // breaker), the model-start timer (whose clock starts at issue, before the
-    // slot is acquired) would otherwise fire a false-positive PreflightFailed.
+    // request's provider has admitted/queued work (or is PAUSED by the circuit
+    // breaker), the model-start timer would otherwise fire during a bounded,
+    // still-healthy provider-network phase.
     // Re-arm (defer) instead, bounded by MODEL_START_HARD_CEILING_MS. Fail-open:
     // absent gate / unresolvable provider / missing metric falls through to fire.
     if (send.phase === 'model-start' && this.shouldReArmModelStartTimer(send)) {
-      send.timer = this.timer.schedule(() => this.onSendTimerFire(send), send.budgetMs);
+      const remaining = Math.max(1, EffectRunner.MODEL_START_HARD_CEILING_MS
+        - (Date.now() - send.firstArmedAt));
+      send.timer = this.timer.schedule(() => this.onSendTimerFire(send), Math.min(send.budgetMs, remaining));
       return;
     }
     send.disposed = true;
@@ -1339,7 +1507,7 @@ export class EffectRunner {
 
   /** FP-C2a: decide whether a model-start timer fire is a false positive that
    *  should defer (re-arm) rather than dispatch PreflightFailed. True only when
-   *  the request's provider is saturated (queued or paused) AND the cumulative
+   *  the request's provider is admitted, queued, or paused AND the cumulative
    *  model-start wait is still under the hard ceiling. Fail-open: absent gate /
    *  unresolvable provider / missing metric yields fire. */
   private shouldReArmModelStartTimer(send: InFlightSend): boolean {
@@ -1350,6 +1518,7 @@ export class EffectRunner {
       ceiling: EffectRunner.MODEL_START_HARD_CEILING_MS,
       provider,
       metrics,
+      requestProviderPending: this.deps.isSessionProviderPending?.(send.sessionPath),
     }).action === 'defer';
   }
 

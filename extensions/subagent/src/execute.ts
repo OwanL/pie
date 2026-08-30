@@ -42,6 +42,7 @@ import {
 	resolveSubagentProviderToggles,
 	readBucketAssignments,
 	readNestedAllowedBuckets,
+	canSpawnFromSubagentBucket,
 	getRuntimeThinkingSupport,
 	qualifiedModelSpec,
 	downgradeBucketForNested,
@@ -415,6 +416,15 @@ function depthLimitResponse(maxDepth: number): ErrorResponse {
 	};
 }
 
+/** Returns the standard response when the caller's effective bucket is a leaf. */
+function bucketDelegationBlockedResponse(bucket: string): ErrorResponse {
+	return {
+		content: [textContent(`Subagents in the "${bucket}" bucket are not allowed to create further subagents. Complete the task directly or return control to the parent agent.`)],
+		details: { mode: "single", agentScope: DEFAULT_AGENT_SCOPE, projectAgentsDir: null, results: [] },
+		isError: true,
+	};
+}
+
 /**
  * Returns the requested agent names the caller is not permitted to spawn.
  * `canSpawn` undefined (root caller, or agent without the field) → unrestricted
@@ -606,6 +616,9 @@ export async function execute(
 	const runtimeCtx = readRuntimeContext();
 	const maxDepth = getMaxDepth();
 	if (maxDepth === 0) return subagentsDisabledResponse(maxDepth);
+	if (!canSpawnFromSubagentBucket(runtimeCtx.bucket)) {
+		return bucketDelegationBlockedResponse(runtimeCtx.bucket!);
+	}
 	if (runtimeCtx.depth >= maxDepth) return depthLimitResponse(maxDepth);
 
 	// Seed the shared tree-wide session budget at the outermost call. Nested

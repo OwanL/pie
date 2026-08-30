@@ -255,20 +255,24 @@ test('Reset clears every disabled entry optimistically', () => {
   assert.deepEqual(calls, [[]], 'posts an empty set');
 });
 
-test('survives the 0 -> N entries transition without throwing (hook-count stability)', () => {
+test('keeps the trigger visible across the 0 -> N entries transition', () => {
   const calls: string[][] = [];
   const onSet = (ids: string[]) => calls.push(ids);
-  // Only the non-toggleable provider card: nothing to toggle -> renders null.
+  // Only the non-toggleable provider card: keep the indicator visible but
+  // disable interaction until prompt metadata resolves.
   mount([providerEntry()], onSet);
-  assert.ok(!container.querySelector('.system-prompt-toggle-trigger'), 'no trigger when nothing is toggleable');
+  const unresolvedTrigger = container.querySelector('.system-prompt-toggle-trigger') as HTMLButtonElement | null;
+  assert.ok(unresolvedTrigger, 'trigger remains visible when nothing is toggleable');
+  assert.equal(unresolvedTrigger.disabled, true, 'unresolved trigger is disabled');
 
-  // Session resolves and toggleable entries appear. Hook count must stay
-  // stable across this transition (the early return used to sit before a
-  // useEffect, changing the hook count between renders).
+  // Session resolves and toggleable entries appear without changing the
+  // toolbar layout.
   assert.doesNotThrow(() => {
     rerender([providerEntry(), entry('harness', 'Harness'), entry('tools', 'Tools')], onSet);
   });
-  assert.ok(container.querySelector('.system-prompt-toggle-trigger'), 'trigger appears once entries exist');
+  const resolvedTrigger = container.querySelector('.system-prompt-toggle-trigger') as HTMLButtonElement | null;
+  assert.ok(resolvedTrigger, 'trigger remains visible once entries exist');
+  assert.equal(resolvedTrigger.disabled, false, 'resolved trigger becomes interactive');
 
   // And it still works after the transition.
   openMenu();
@@ -290,7 +294,7 @@ test('Escape closes the dropdown and returns focus to the trigger', () => {
   assert.equal(document.activeElement, trigger, 'focus returns to the trigger');
 });
 
-test('survives the N -> 0 entries transition without throwing (hook-count stability, downward)', () => {
+test('keeps the trigger visible across the N -> 0 entries transition', () => {
   const calls: string[][] = [];
   const onSet = (ids: string[]) => calls.push(ids);
   mount([providerEntry(), entry('harness', 'Harness'), entry('tools', 'Tools')], onSet);
@@ -298,14 +302,18 @@ test('survives the N -> 0 entries transition without throwing (hook-count stabil
   clickItem('Harness'); // leaves a pending intent
 
   // All toggleable entries vanish (e.g. session de-resolved to provider card
-  // only). Hook count must stay stable; the pending overlay is retained, not
-  // crashed on.
+  // only). Keep the stable indicator, close its menu, and disable interaction.
   assert.doesNotThrow(() => rerender([providerEntry()], onSet));
-  assert.ok(!container.querySelector('.system-prompt-toggle-trigger'), 'trigger hides when nothing is toggleable');
+  const unresolvedTrigger = container.querySelector('.system-prompt-toggle-trigger') as HTMLButtonElement | null;
+  assert.ok(unresolvedTrigger, 'trigger remains visible when nothing is toggleable');
+  assert.equal(unresolvedTrigger.disabled, true, 'unresolved trigger is disabled');
+  assert.ok(!container.querySelector('.system-prompt-toggle-dropdown'), 'dropdown closes when entries vanish');
 
-  // And it recovers when entries come back.
+  // And it becomes interactive again when entries come back.
   assert.doesNotThrow(() => rerender([providerEntry(), entry('harness', 'Harness')], onSet));
-  assert.ok(container.querySelector('.system-prompt-toggle-trigger'), 'trigger reappears');
+  const resolvedTrigger = container.querySelector('.system-prompt-toggle-trigger') as HTMLButtonElement | null;
+  assert.ok(resolvedTrigger, 'trigger remains visible when entries return');
+  assert.equal(resolvedTrigger.disabled, false, 'trigger is re-enabled');
 });
 
 test('partial backend ack: confirming one pending entry keeps the other pending', () => {

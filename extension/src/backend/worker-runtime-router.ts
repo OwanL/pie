@@ -28,6 +28,7 @@ import type {
   WorkerJsonObject,
   WorkerJsonValue,
   WorkerRuntimeOperation,
+  WorkerSyncDomain,
   WorkerToCoordinatorFrame,
 } from './worker-protocol';
 
@@ -141,6 +142,9 @@ export interface WorkerRuntimeRouterOptions {
   /** A sync acknowledgement is a small, priority-path control response. Keep
    *  it independently bounded from the much larger runtime promotion budget. */
   syncAckTimeoutMs?: number;
+  /** Reloadable live broadcasts get more headroom than startup fences so
+   * a transiently CPU-bound active turn is not retired by the 5s detector. */
+  broadcastSyncAckTimeoutMs?: number;
   runtimeReadyTimeoutMs?: number;
   scheduler?: WorkerClientScheduler;
   emit(event: string, payload?: unknown): void;
@@ -157,7 +161,7 @@ class UnconfirmedWorkerExitError extends Error {
   }
 }
 
-type SyncDomain = 'settings' | 'catalog' | 'auth' | 'runtimePrefs' | 'providerPolicy';
+type SyncDomain = WorkerSyncDomain;
 
 interface WorkerSyncState {
   revision: number;
@@ -176,8 +180,11 @@ interface WorkerSyncSettlement {
 }
 
 const DEFAULT_SYNC_ACK_TIMEOUT_MS = 5_000;
+const DEFAULT_BROADCAST_SYNC_ACK_TIMEOUT_MS = 30_000;
 const DEFAULT_RUNTIME_READY_TIMEOUT_MS = 120_000;
 const SYNC_SLOW_ACK_DIAGNOSTIC_MS = 250;
+const MAX_REPORTED_UNEXPECTED_WORKERS = 1_024;
+const SESSION_REGISTRY_RETRY_DELAYS_MS = [1_000, 5_000, 15_000, 30_000] as const;
 
 const defaultRouterScheduler: WorkerClientScheduler = {
   now: () => Date.now(),
@@ -191,6 +198,7 @@ const HOT_OPERATIONS: ReadonlySet<string> = new Set<WorkerRuntimeOperation>([
   'session.loadTranscriptPage',
   'session.loadDetail',
   'session.truncateAfter',
+  'session.title.generate',
   'models.list',
   'liveTurn.checkpoint',
   'message.send',
@@ -210,19 +218,42 @@ export class WorkerRuntimeRouter {
   private readonly workersById = new Map<string, HotWorkerRoute>();
   private readonly providerLeases: CoordinatorProviderNetworkLeaseAuthority;
   private readonly syncRevisions: Record<SyncDomain, number> = {
-    settings: 1, catalog: 1, auth: 1, runtimePrefs: 1, providerPolicy: 1,
+    settings: 1,
+    catalog: 1,
+    auth: 1,
+    runtimePrefs: 1,
+    providerPolicy: 1,
+    sessionRegistry: 1,
   };
   private readonly syncPayloads: Partial<Record<SyncDomain, WorkerJsonObject>> = {};
   private readonly workerSyncRevisions = new WeakMap<SupervisedWorker, Partial<Record<SyncDomain, number>>>();
   private readonly workerSyncStates = new WeakMap<SupervisedWorker, Partial<Record<SyncDomain, WorkerSyncState>>>();
+  /** Registry publication is auxiliary to an active turn. A missed ACK must
+   * never retire useful work, so retain one bounded latest-wins retry timer per
+   * ready worker instead of feeding this domain through fail-closed quarantine. */
+  private readonly sessionRegistryRetryTimers = new Map<SupervisedWorker, ReturnType<WorkerClientScheduler['setTimeout']>>();
+  private readonly sessionRegistryRetryAttempts = new WeakMap<SupervisedWorker, number>();
   private syncTail = Promise.resolve();
   private readonly scheduler: WorkerClientScheduler;
   private readonly syncAckTimeoutMs: number;
+  private readonly broadcastSyncAckTimeoutMs: number;
   private readonly runtimeReadyTimeoutMs: number;
   private providerPolicy: WorkerJsonObject = {};
+  /** Latest host-authoritative open/pinned/running summaries. The separate
+   * source revision fences overlapping/retried public openTabs.set requests;
+   * the private sync revision remains coordinator-owned. */
+  private sessionRegistry: WorkerJsonValue[] = [];
+  private sessionRegistrySourceRevision = 0;
   private disposed = false;
   private readonly detailSubscriptions = new Map<string, DetailSubscriptionOwner>();
   private readonly extensionUiOwners = new ExtensionUiOwnerRegistry();
+  /** Unexpected worker loss can be observed first by a failed coordinator
+   * sync and again by the supervisor's eventual exited callback. Terminalize
+   * the bounded live checkpoint only once for that exact route generation. */
+  private readonly reconciledInterruptedRoutes = new WeakSet<HotWorkerRoute>();
+  /** A sync rejection and the resulting process exit describe one worker-loss
+   * incident. Whichever path publishes it first suppresses later duplicates. */
+  private readonly reportedUnexpectedWorkerKeys = new Set<string>();
   /** Public busy sequencing belongs to the coordinator generation, not an
    *  individual worker. A cold->hot re-promotion creates a new process whose
    *  SDK-local counter starts at zero; forwarding that raw counter makes the
@@ -239,9 +270,16 @@ export class WorkerRuntimeRouter {
     this.providerLeases = options.providerLeases ?? new CoordinatorProviderNetworkLeaseAuthority();
     this.scheduler = options.scheduler ?? defaultRouterScheduler;
     this.syncAckTimeoutMs = options.syncAckTimeoutMs ?? DEFAULT_SYNC_ACK_TIMEOUT_MS;
+    this.broadcastSyncAckTimeoutMs = options.broadcastSyncAckTimeoutMs
+      ?? (options.syncAckTimeoutMs === undefined
+        ? DEFAULT_BROADCAST_SYNC_ACK_TIMEOUT_MS
+        : this.syncAckTimeoutMs);
     this.runtimeReadyTimeoutMs = options.runtimeReadyTimeoutMs ?? DEFAULT_RUNTIME_READY_TIMEOUT_MS;
     if (!Number.isSafeInteger(this.syncAckTimeoutMs) || this.syncAckTimeoutMs <= 0) {
       throw new Error('syncAckTimeoutMs must be a positive safe integer.');
+    }
+    if (!Number.isSafeInteger(this.broadcastSyncAckTimeoutMs) || this.broadcastSyncAckTimeoutMs <= 0) {
+      throw new Error('broadcastSyncAckTimeoutMs must be a positive safe integer.');
     }
     if (!Number.isSafeInteger(this.runtimeReadyTimeoutMs) || this.runtimeReadyTimeoutMs <= 0) {
       throw new Error('runtimeReadyTimeoutMs must be a positive safe integer.');
@@ -539,6 +577,7 @@ export class WorkerRuntimeRouter {
     const route = this.requireHot(sessionPath);
     const rootKey = routeKey(route.rootSessionPath);
     const retirement = (async () => {
+      this.clearSessionRegistryRetry(route.worker);
       await this.options.supervisor.stopWorker(route.currentLeasePath, reason);
       // Keep an active response body fenced until process-tree death is
       // confirmed. Releasing before stop could overlap it with the next worker.
@@ -569,6 +608,52 @@ export class WorkerRuntimeRouter {
     this.providerPolicy = { ...providers };
     this.providerLeases.updatePolicies(this.providerPolicy);
     await this.broadcastSync('providerPolicy', { providers: this.providerPolicy });
+  }
+
+  /** Publish the host's complete open-tab registry to every existing worker
+   * and retain it for workers promoted later. Host revisions are latest-wins;
+   * a duplicate retry is acknowledged without reapplying an older snapshot. */
+  async syncSessionRegistry(
+    tabs: WorkerJsonValue[],
+    sourceRevision?: number,
+  ): Promise<{ applied: boolean; revision: number; retiredWorkers: number }> {
+    if (sourceRevision !== undefined
+      && (!Number.isSafeInteger(sourceRevision) || sourceRevision <= 0)) {
+      throw new Error('Session registry source revision must be a positive safe integer.');
+    }
+    const normalized = JSON.parse(JSON.stringify(tabs)) as WorkerJsonValue[];
+    if (!Array.isArray(normalized)) throw new Error('Session registry must be a JSON array.');
+
+    const scheduled = await this.withSyncLock(async () => {
+      const incomingSourceRevision = sourceRevision ?? this.sessionRegistrySourceRevision + 1;
+      if (incomingSourceRevision <= this.sessionRegistrySourceRevision) {
+        return {
+          applied: false as const,
+          revision: this.syncRevisions.sessionRegistry,
+          settlements: [] as WorkerSyncSettlement[],
+        };
+      }
+      this.sessionRegistrySourceRevision = incomingSourceRevision;
+      this.sessionRegistry = normalized;
+      const revision = this.syncRevisions.sessionRegistry + 1;
+      this.syncRevisions.sessionRegistry = revision;
+      const payload: WorkerJsonObject = { tabs: normalized };
+      this.syncPayloads.sessionRegistry = payload;
+      return {
+        applied: true as const,
+        revision,
+        settlements: this.scheduleBroadcastLocked('sessionRegistry', payload, revision, 'broadcast'),
+      };
+    });
+    if (!scheduled.applied) {
+      return { applied: false, revision: scheduled.revision, retiredWorkers: 0 };
+    }
+    // Open-tab state supports session-review tooling, but is not credential,
+    // settings, or ownership authority. Do not hold the host publication RPC
+    // open (or kill a busy review) while a worker is synchronously occupied.
+    // Each failed acknowledgement is retried with the newest revision below.
+    this.observeSessionRegistryBroadcast(scheduled.settlements);
+    return { applied: true, revision: scheduled.revision, retiredWorkers: 0 };
   }
 
   /** Broadcast the coordinator-authoritative settings snapshot after a cold
@@ -602,6 +687,8 @@ export class WorkerRuntimeRouter {
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
+    for (const timer of this.sessionRegistryRetryTimers.values()) this.scheduler.clearTimeout(timer);
+    this.sessionRegistryRetryTimers.clear();
     const hot = [...this.roots.values()].filter((route): route is HotWorkerRoute => route.state === 'hot');
     for (const route of hot) this.extensionUiOwners.clearWorker(route.owner.workerId, route.owner.workerGeneration);
     await Promise.allSettled(hot.map((route) => this.retire(route.currentLeasePath, 'coordinator shutdown')));
@@ -617,6 +704,7 @@ export class WorkerRuntimeRouter {
       ? this.workersById.get(identity.workerId)
       : [...this.workersById.values()].find((candidate) => routeKey(candidate.workerRootSessionPath) === routeKey(rootSessionPath));
     if (!route || route.state !== 'hot') return;
+    this.clearSessionRegistryRetry(route.worker);
     // Snapshot the bounded checkpoint (including the detail subscription
     // manifest) BEFORE invalidating live subscriptions so crash diagnostics
     // still describe what was in flight.
@@ -634,7 +722,7 @@ export class WorkerRuntimeRouter {
     this.roots.delete(routeKey(route.rootSessionPath));
     this.roots.set(routeKey(route.currentLeasePath), cold);
     this.notify(cold);
-    this.reconcileInterruptedCheckpoint(route, snapshot);
+    this.reconcileInterruptedCheckpoint(route);
     // Preserve the crash cause behind the notice's More control. The worker's
     // stderr tail is the only place an unhandled rejection/exception stack is
     // visible; without it a SESSION_WORKER_EXITED notice is undiagnosable.
@@ -643,14 +731,16 @@ export class WorkerRuntimeRouter {
       snapshot.failure,
       stderrTail ? `Worker stderr: ${stderrTail.slice(-2000)}` : undefined,
     ].filter((part): part is string => typeof part === 'string' && part.length > 0).join('\n') || undefined;
-    this.options.emit('operational-error', {
-      incidentId: `worker-exit:${route.owner.workerId}:${route.owner.workerGeneration}`,
-      code: 'SESSION_WORKER_EXITED',
-      message: 'The session worker exited. Live work was interrupted and was not replayed.',
-      sessionPath: route.currentLeasePath,
-      detail,
-      checkpoint: crashCheckpoint,
-    });
+    if (this.claimUnexpectedWorkerIncident(route.worker)) {
+      this.options.emit('operational-error', {
+        incidentId: `worker-exit:${route.owner.workerId}:${route.owner.workerGeneration}`,
+        code: 'SESSION_WORKER_EXITED',
+        message: 'The session worker exited. Live work was interrupted and was not replayed.',
+        sessionPath: route.currentLeasePath,
+        detail,
+        checkpoint: crashCheckpoint,
+      });
+    }
   }
 
   async handleWorkerFrame(rootSessionPath: string, frame: WorkerToCoordinatorFrame): Promise<void> {
@@ -821,9 +911,9 @@ export class WorkerRuntimeRouter {
         // `settleProviderAcquire` is an exact-once guard shared with the
         // provider.cancel handler. AbortError may have been settled there; an
         // owner-release AbortError still needs this correlated cancellation.
-        this.settleProviderAcquire(route, frame.requestId, {
-          reason: error instanceof Error ? error.message : String(error),
-        });
+        this.settleProviderAcquire(route, frame.requestId, error instanceof Error && error.name === 'AbortError'
+          ? { reason: error.message }
+          : { error: normalizeProviderRejection(error) });
       }
       return;
     }
@@ -1083,12 +1173,18 @@ export class WorkerRuntimeRouter {
     revision: number,
     phase: 'broadcast' | 'startup',
   ): WorkerSyncSettlement[] {
-    return this.options.supervisor.listWorkers().map((worker) => ({
+    // WorkerSupervisor publishes a generation before `client.start()` has
+    // completed so it can own/kill a failed spawn. Broadcasts must not mistake
+    // that lifecycle ownership for a usable IPC route; startup sync catches up
+    // the latest revisions once the client reaches ready.
+    return this.options.supervisor.listWorkers()
+      .filter((worker) => this.isWorkerTransportUsable(worker))
+      .map((worker) => ({
       worker,
       domain,
       revision,
       completion: this.queueWorkerSync(worker, domain, revision, payload, phase),
-    }));
+      }));
   }
 
   private async syncStartup(worker: SupervisedWorker, snapshot: WorkerRuntimePromotionSnapshot): Promise<void> {
@@ -1117,6 +1213,7 @@ export class WorkerRuntimeRouter {
         this.syncPayloads.providerPolicy ??= {
           providers: Object.keys(this.providerPolicy).length > 0 ? this.providerPolicy : snapshot.providerPolicy ?? {},
         };
+        this.syncPayloads.sessionRegistry ??= { tabs: this.sessionRegistry };
 
         return (Object.keys(this.syncRevisions) as SyncDomain[]).map((domain) => {
           const revision = this.syncRevisions[domain];
@@ -1169,9 +1266,16 @@ export class WorkerRuntimeRouter {
       if ((latest[domain] ?? 0) >= revision) return;
       const startedAt = this.scheduler.now();
       try {
+        const ackTimeoutMs = phase === 'startup' || domain === 'sessionRegistry'
+          ? this.syncAckTimeoutMs
+          : this.broadcastSyncAckTimeoutMs;
         const response = await this.withDeadline(
-          worker.client.requestFrame!({ kind: 'sync', domain, revision, payload } as never, 'sync.ack'),
-          this.syncAckTimeoutMs,
+          worker.client.requestFrame!(
+            { kind: 'sync', domain, revision, payload } as never,
+            'sync.ack',
+            { fatalOnEnqueueRejection: domain !== 'sessionRegistry' },
+          ),
+          ackTimeoutMs,
           `Worker ${worker.workerId} did not acknowledge ${domain}@${revision}`,
         );
         if (response.domain !== domain || response.revision !== revision) {
@@ -1209,7 +1313,86 @@ export class WorkerRuntimeRouter {
     };
     states[domain] = state;
     this.workerSyncStates.set(worker, states);
+    if (domain === 'sessionRegistry') {
+      // A rejected latest state must be retryable. Keep an older state's
+      // cleanup from deleting a newer queued revision that already replaced it.
+      void completion.then(
+        () => undefined,
+        () => {
+          const current = this.workerSyncStates.get(worker);
+          if (current?.sessionRegistry?.completion === completion) {
+            delete current.sessionRegistry;
+          }
+        },
+      );
+    }
     return completion;
+  }
+
+  private observeSessionRegistryBroadcast(settlements: WorkerSyncSettlement[]): void {
+    for (const settlement of settlements) {
+      void settlement.completion.then(
+        () => this.clearSessionRegistryRetry(settlement.worker),
+        (error) => this.scheduleSessionRegistryRetry(settlement.worker, settlement.revision, error),
+      );
+    }
+  }
+
+  private scheduleSessionRegistryRetry(
+    worker: SupervisedWorker,
+    failedRevision: number,
+    error: unknown,
+  ): void {
+    if (this.disposed || !this.isWorkerTransportUsable(worker)
+      || this.sessionRegistryRetryTimers.has(worker)) return;
+    const attempt = (this.sessionRegistryRetryAttempts.get(worker) ?? 0) + 1;
+    this.sessionRegistryRetryAttempts.set(worker, attempt);
+    const delayMs = SESSION_REGISTRY_RETRY_DELAYS_MS[
+      Math.min(attempt - 1, SESSION_REGISTRY_RETRY_DELAYS_MS.length - 1)
+    ]!;
+    backendWarn('backend-worker-sync', 'session-registry.retry-scheduled', {
+      workerId: worker.workerId,
+      workerGeneration: worker.workerGeneration,
+      sessionPath: worker.sessionPath,
+      failedRevision,
+      delayMs,
+      error: toErrorMessage(error),
+    });
+    const timer = this.scheduler.setTimeout(() => {
+      this.sessionRegistryRetryTimers.delete(worker);
+      if (this.disposed || !this.isWorkerTransportUsable(worker)) return;
+      void this.withSyncLock(async () => {
+        const revision = this.syncRevisions.sessionRegistry;
+        const payload = this.syncPayloads.sessionRegistry ?? { tabs: this.sessionRegistry };
+        return {
+          worker,
+          domain: 'sessionRegistry' as const,
+          revision,
+          completion: this.queueWorkerSync(worker, 'sessionRegistry', revision, payload, 'broadcast'),
+        };
+      }).then(
+        (settlement) => this.observeSessionRegistryBroadcast([settlement]),
+        (retryError) => this.scheduleSessionRegistryRetry(worker, failedRevision, retryError),
+      );
+    }, delayMs);
+    timer.unref?.();
+    this.sessionRegistryRetryTimers.set(worker, timer);
+  }
+
+  private clearSessionRegistryRetry(worker: SupervisedWorker): void {
+    const timer = this.sessionRegistryRetryTimers.get(worker);
+    if (timer) this.scheduler.clearTimeout(timer);
+    this.sessionRegistryRetryTimers.delete(worker);
+    this.sessionRegistryRetryAttempts.delete(worker);
+  }
+
+  private isWorkerTransportUsable(worker: SupervisedWorker): boolean {
+    const status = worker.client.getSnapshot().status;
+    // `unresponsive` means heartbeat liveness is suspect, not that the IPC
+    // descriptor is closed. WorkerClient still accepts control requests in
+    // this state and a later heartbeat can restore `ready`; skipping it would
+    // silently lose critical authority updates with no catch-up transition.
+    return status === 'ready' || status === 'unresponsive';
   }
 
   private async settleBroadcastSync(settlements: WorkerSyncSettlement[]): Promise<number> {
@@ -1226,19 +1409,50 @@ export class WorkerRuntimeRouter {
   private async quarantineSyncFailure(settlement: WorkerSyncSettlement, error: unknown): Promise<void> {
     const { worker, domain, revision } = settlement;
     const reason = `Worker ${domain}@${revision} sync failed: ${toErrorMessage(error)}`;
-    const route = this.workersById.get(worker.workerId);
-    this.options.emit('operational-error', {
-      incidentId: `worker-sync:${worker.workerId}:${worker.workerGeneration}:${domain}:${revision}`,
-      code: 'SESSION_WORKER_SYNC_FAILED',
-      message: 'A session worker stopped acknowledging coordinator state and was retired.',
-      sessionPath: route?.currentLeasePath ?? worker.sessionPath,
-      detail: reason,
-      domain,
-      revision,
-      workerId: worker.workerId,
-      workerGeneration: worker.workerGeneration,
-    });
+    const candidateRoute = this.workersById.get(worker.workerId);
+    const route = candidateRoute?.owner.workerGeneration === worker.workerGeneration
+      ? candidateRoute
+      : undefined;
+    // A request can settle after its old route has retired. Supervisor stop is
+    // path-addressed, so never let that stale settlement target a replacement
+    // generation which now owns the same durable path.
+    const exactWorkerStillSupervised = this.options.supervisor.listWorkers().some((candidate) =>
+      candidate.workerId === worker.workerId
+      && candidate.workerGeneration === worker.workerGeneration,
+    );
+    if (!route && !exactWorkerStillSupervised) return;
+    const firstIncident = this.claimUnexpectedWorkerIncident(worker);
+    if (firstIncident) {
+      this.options.emit('operational-error', {
+        incidentId: `worker-sync:${worker.workerId}:${worker.workerGeneration}:${domain}:${revision}`,
+        code: 'SESSION_WORKER_SYNC_FAILED',
+        message: 'A session worker stopped acknowledging coordinator state and was retired.',
+        sessionPath: route?.currentLeasePath ?? worker.sessionPath,
+        detail: reason,
+        domain,
+        revision,
+        workerId: worker.workerId,
+        workerGeneration: worker.workerGeneration,
+      });
+    }
+    const root = route ? this.roots.get(routeKey(route.rootSessionPath)) : undefined;
+    if (!firstIncident) {
+      if (root?.state === 'retiring'
+        && root.owner.workerId === worker.workerId
+        && root.owner.workerGeneration === worker.workerGeneration) {
+        // Concurrent domain/revision failures can settle after the first one
+        // has already fenced this exact route. Join that retirement instead
+        // of issuing a second stop against the same process generation.
+        await root.retirement;
+      }
+      return;
+    }
     if (route && this.isCurrent(route)) {
+      // A failed authoritative sync is an unexpected runtime loss just like a
+      // confirmed process crash. Reconcile while the exact hot generation is
+      // still addressable; retire() intentionally does not do this because it
+      // also owns coordinator shutdown and deliberate lifecycle transitions.
+      this.reconcileInterruptedCheckpoint(route);
       await this.retire(route.currentLeasePath, reason);
       return;
     }
@@ -1246,6 +1460,10 @@ export class WorkerRuntimeRouter {
     // transitioning root) is owned by promoteOnce's catch/finalization. Stop
     // its exact process here; that promotion then aborts its grant and
     // reconciles ownership without publishing the failed generation.
+    if (!this.options.supervisor.listWorkers().some((candidate) =>
+      candidate.workerId === worker.workerId
+      && candidate.workerGeneration === worker.workerGeneration,
+    )) return;
     await this.options.supervisor.stopWorker(worker.sessionPath, reason);
   }
 
@@ -1273,6 +1491,17 @@ export class WorkerRuntimeRouter {
         },
       );
     });
+  }
+
+  private claimUnexpectedWorkerIncident(worker: SupervisedWorker): boolean {
+    const key = `${worker.workerId}:${worker.workerGeneration}`;
+    if (this.reportedUnexpectedWorkerKeys.has(key)) return false;
+    this.reportedUnexpectedWorkerKeys.add(key);
+    if (this.reportedUnexpectedWorkerKeys.size > MAX_REPORTED_UNEXPECTED_WORKERS) {
+      const oldest = this.reportedUnexpectedWorkerKeys.values().next().value as string | undefined;
+      if (oldest) this.reportedUnexpectedWorkerKeys.delete(oldest);
+    }
+    return true;
   }
 
   private async withSyncLock<T>(operation: () => Promise<T>): Promise<T> {
@@ -1342,22 +1571,27 @@ export class WorkerRuntimeRouter {
   private settleProviderAcquire(
     route: HotWorkerRoute,
     requestId: string,
-    result: { lease: CoordinatorProviderNetworkLease } | { reason: string },
+    result: { lease: CoordinatorProviderNetworkLease }
+      | { reason: string }
+      | { error: { name: string; message: string; retryable: boolean; httpStatus?: number } },
   ): boolean {
     const key = this.providerAcquireKey(route, requestId);
     if (this.pendingProviderAcquires.get(key) !== route) return false;
     this.pendingProviderAcquires.delete(key);
     try {
-      return route.worker.client.sendFrame?.('lease' in result
-        ? { kind: 'provider.granted', requestId, lease: result.lease }
-        : { kind: 'provider.cancelled', requestId, reason: result.reason }) === true;
+      const settlement = 'lease' in result
+        ? { kind: 'provider.granted' as const, requestId, lease: result.lease }
+        : 'reason' in result
+          ? { kind: 'provider.cancelled' as const, requestId, reason: result.reason }
+          : { kind: 'provider.rejected' as const, requestId, error: result.error };
+      return route.worker.client.sendFrame?.(settlement) === true;
     } catch (error) {
       backendWarn('backend-worker-provider', 'provider.settlement-send-failed', {
         requestId,
         workerId: route.owner.workerId,
         workerGeneration: route.owner.workerGeneration,
         sessionPath: route.currentLeasePath,
-        settlement: 'lease' in result ? 'granted' : 'cancelled',
+        settlement: 'lease' in result ? 'granted' : 'reason' in result ? 'cancelled' : 'rejected',
         error: toErrorMessage(error),
       });
       return false;
@@ -1424,7 +1658,11 @@ export class WorkerRuntimeRouter {
     }
   }
 
-  private reconcileInterruptedCheckpoint(route: HotWorkerRoute, _snapshot: WorkerClientSnapshot): void {
+  private reconcileInterruptedCheckpoint(route: HotWorkerRoute): void {
+    if (this.reconciledInterruptedRoutes.has(route)) return;
+    // Mark first so a re-entrant/closely-following exited callback cannot
+    // duplicate tool terminals, request terminalization, or busy=false.
+    this.reconciledInterruptedRoutes.add(route);
     const reason = 'The session worker exited before live work settled.';
     for (const tool of route.checkpoint.tools) {
       this.options.emit('tool.finished', {
@@ -1573,6 +1811,13 @@ export class WorkerRuntimeRouter {
     }));
   }
 
+  /** Cross-worker provider truth used by the public metrics strip and its
+   * saturation-aware model-start watchdog. The legacy coordinator-local gate
+   * does not observe isolated worker fetches. */
+  getProviderGateMetrics(): ReturnType<CoordinatorProviderNetworkLeaseAuthority['getMetrics']> {
+    return this.providerLeases.getMetrics();
+  }
+
   /** Bounded pending extension-UI owner snapshot for diagnostics/tests. */
   inspectExtensionUiOwners(): ReturnType<ExtensionUiOwnerRegistry['inspect']> {
     return this.extensionUiOwners.inspect();
@@ -1676,6 +1921,44 @@ function asWorkerJsonObject(value: unknown): WorkerJsonObject {
 
 function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function normalizeProviderRejection(
+  error: unknown,
+): { name: string; message: string; retryable: boolean; httpStatus?: number } {
+  const record = error && typeof error === 'object' ? error as Record<string, unknown> : undefined;
+  const rawStatus = record?.httpStatus ?? record?.status;
+  const httpStatus = Number.isSafeInteger(rawStatus) && Number(rawStatus) >= 100 && Number(rawStatus) <= 599
+    ? Number(rawStatus)
+    : undefined;
+  return {
+    name: truncateUtf8Field(
+      error instanceof Error ? error.name : record?.name,
+      'ProviderAdmissionError',
+      512,
+    ),
+    message: truncateUtf8Field(
+      error instanceof Error ? error.message : error,
+      'Provider admission was rejected.',
+      64 * 1024,
+    ),
+    retryable: record?.isRetryable === true || record?.retryable === true,
+    ...(httpStatus === undefined ? {} : { httpStatus }),
+  };
+}
+
+function truncateUtf8Field(value: unknown, fallback: string, maxBytes: number): string {
+  const text = typeof value === 'string' && value.length > 0 ? value : fallback;
+  if (Buffer.byteLength(text, 'utf8') <= maxBytes) return text;
+  const parts: string[] = [];
+  let bytes = 0;
+  for (const part of text) {
+    const partBytes = Buffer.byteLength(part, 'utf8');
+    if (bytes + partBytes > maxBytes) break;
+    parts.push(part);
+    bytes += partBytes;
+  }
+  return parts.join('') || fallback;
 }
 
 export function assertPromotionGrantConsumedOnce(

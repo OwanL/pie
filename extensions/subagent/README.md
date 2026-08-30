@@ -214,6 +214,24 @@ A downgrade is recorded on the result as `bucketDowngradeReason`. All-true
 (the default) leaves behaviour unchanged. This is independent of "Always use
 parent model", which takes precedence (and skips bucket selection) when enabled.
 
+## Delegation by Bucket
+
+You can independently control whether subagents running in each effective
+bucket may create further subagents. The policy is persisted in
+`ChatPrefs.subagentBucketCanSpawn` (`{ small, medium, frontier }` booleans, all
+`true` by default) and mirrored via
+`PIE_SUBAGENT_BUCKET_CAN_SPAWN_JSON`.
+
+The policy applies to the caller's effective bucket after model selection and
+nested-bucket downgrade. A child using the active-parent fallback inherits its
+subagent parent's bucket; a root chat and its active-parent fallback child have
+no effective subagent bucket and are not restricted by this policy. When a
+disabled bucket calls the `subagent` tool, the call returns
+an error before agent discovery, tree-budget charging, or child dispatch. This
+is independent of the agent frontmatter `canSpawn` allowlist: the bucket policy
+can make an entire tier a leaf, while `canSpawn` restricts which named agents an
+otherwise-allowed caller may launch.
+
 ## Removed parameters and routes
 
 The public schema is `{ agent, task, userContext?, cwd?, bucket?, modelRequirements? }`.

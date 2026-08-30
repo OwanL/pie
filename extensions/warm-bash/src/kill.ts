@@ -1,4 +1,4 @@
-import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 
 /**
  * Kill an entire process tree (the shell plus all descendant commands).
@@ -46,12 +46,11 @@ export function killShellOnly(child: ChildProcess): void {
   const pid = child.pid;
   if (!pid) return;
   try {
-    if (process.platform === "win32") {
-      // No /T → do not recurse into descendants.
-      spawnSync("taskkill", ["/F", "/PID", String(pid)], { windowsHide: true });
-    } else {
-      process.kill(pid, "SIGKILL");
-    }
+    // ChildProcess.kill terminates exactly this process on Windows and sends the
+    // signal to exactly this PID on POSIX. Do not shell out to taskkill here:
+    // normal warm-command completion is the hot path, and spawnSync(taskkill)
+    // blocks the extension host for hundreds of milliseconds per call.
+    child.kill("SIGKILL");
   } catch {
     /* already dead */
   }

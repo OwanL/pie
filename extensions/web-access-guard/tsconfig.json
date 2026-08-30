@@ -1,0 +1,26 @@
+{
+  // Typecheck gate for the web-access-guard extension (mirrors skill-pruner).
+  //
+  // `module: preserve` + `moduleResolution: bundler` allow `import.meta` and
+  // `.js`-extension imports without a package.json "type": "module".
+  //
+  // The `@mariozechner/pi-*` peer packages are provided by the pi runtime
+  // (globally installed) and are NOT in this repo's node_modules, so tsc
+  // cannot resolve them. They are declared as opaque ambient modules in
+  // `types-global.d.ts` (imports resolve to `any`) so this gate covers
+  // web-access-guard's INTERNAL types — its real purpose.
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "preserve",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": false,
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": ["./**/*.ts"],
+  "exclude": ["node_modules"]
+}

@@ -28,6 +28,10 @@ import { useRef } from 'preact/hooks';
 import { act } from 'preact/test-utils';
 
 import { EMPTY_TRANSCRIPT_WINDOW, type ChatMessage } from '../../../../src/shared/protocol';
+import {
+  TRANSCRIPT_SCROLLBAR_INTERACTION_END_EVENT,
+  TRANSCRIPT_SCROLLBAR_INTERACTION_START_EVENT,
+} from '../../../../src/webview/panel/transcript/transcript-scrollbar-events';
 import { useTranscriptScroll } from '../../../../src/webview/panel/transcript/use-transcript-scroll';
 
 type ScrollResult = ReturnType<typeof useTranscriptScroll>;
@@ -474,6 +478,41 @@ test('isAtBottom remains true when followed content grows', () => {
   assert.equal(capture.r!.isAtBottom, true, 'the Bottom control must not flash while exact follow is active');
 });
 
+test('detached geometry growth reveals the Bottom control without requiring a scroll event', () => {
+  mountProbe(false);
+  settle();
+  assert.equal(capture.r!.isAtBottom, true, 'sanity: settled at the current bottom');
+
+  act(() => capture.r!.setAutoFollow(false));
+  const readingPosition = scrollTopValue;
+  scrollHeightValue += 400;
+  rerender(false, 0);
+
+  assert.equal(scrollTopValue, readingPosition, 'detached geometry must preserve the reading position');
+  assert.equal(capture.r!.autoFollowRef.current, false, 'geometry alone must not reacquire follow ownership');
+  assert.equal(capture.r!.isAtBottom, false, 'the Bottom control must reflect the new measured range immediately');
+});
+
+test('targeted navigation cannot reacquire auto-follow when an estimated target clamps to bottom', () => {
+  mountProbe(false);
+  settle();
+
+  act(() => {
+    capture.r!.setAutoFollow(false);
+    capture.r!.navigationActiveRef.current = true;
+  });
+  scrollTopValue = bottom();
+  capture.r!.programmaticScrollTargetRef.current = scrollTopValue;
+  el.dispatchEvent(new Event('scroll'));
+  assert.equal(capture.r!.autoFollowRef.current, false, 'navigation suppression survives a temporary exact-bottom clamp');
+
+  const clampedPosition = scrollTopValue;
+  scrollHeightValue += 400;
+  rerender(false, 0);
+  assert.equal(scrollTopValue, clampedPosition, 'geometry growth must not turn a message jump into a bottom jump');
+  assert.equal(capture.r!.autoFollowRef.current, false);
+});
+
 test('manual scrolling in either direction is exposed so the anchor can yield', () => {
   mountProbe(false);
   settle();
@@ -614,6 +653,34 @@ test('anchor yield survives a pause during a scrollbar or middle-button drag', (
     const runIdleReset = idleReset as TimerHandler | undefined;
     if (typeof runIdleReset === 'function') runIdleReset();
     assert.equal(capture.r!.manualScrollActiveRef.current, false, 'anchoring resumes after the idle reset');
+  } finally {
+    window.setTimeout = originalSetTimeout;
+  }
+});
+
+test('custom thumb keeps anchor ownership yielded until its explicit release', () => {
+  mountProbe(false);
+  settle();
+
+  let idleReset: TimerHandler | undefined;
+  const originalSetTimeout = window.setTimeout;
+  window.setTimeout = ((callback: TimerHandler) => {
+    idleReset = callback;
+    return 1;
+  }) as typeof window.setTimeout;
+  try {
+    el.dispatchEvent(new Event(TRANSCRIPT_SCROLLBAR_INTERACTION_START_EVENT));
+    scrollTopValue -= 120;
+    el.dispatchEvent(new Event('scroll'));
+
+    assert.equal(capture.r!.manualScrollActiveRef.current, true);
+    assert.equal(idleReset, undefined, 'a paused custom drag must not arm the idle reset');
+
+    el.dispatchEvent(new Event(TRANSCRIPT_SCROLLBAR_INTERACTION_END_EVENT));
+    assert.equal(typeof idleReset, 'function', 'explicit thumb release starts the settle window');
+    const runIdleReset = idleReset as TimerHandler | undefined;
+    if (typeof runIdleReset === 'function') runIdleReset();
+    assert.equal(capture.r!.manualScrollActiveRef.current, false);
   } finally {
     window.setTimeout = originalSetTimeout;
   }

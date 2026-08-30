@@ -95,21 +95,21 @@ function ProviderConcurrencyControls({
           <div class="toolbar-settings-ui-control-head">
             <span class="toolbar-settings-ui-control-label">Queue wait</span>
             <span class="toolbar-settings-ui-control-value">
-              {queueWait === 0 ? '∞' : `${queueWait}s`}
+              {queueWait === 0 ? '300s max' : `${queueWait}s`}
             </span>
           </div>
           <input
             type="range"
             class="toolbar-settings-slider toolbar-settings-ui-slider"
             min="0"
-            max="120"
+            max="300"
             step="5"
             value={queueWait}
             onInput={(e) => setOverride('queueWaitSeconds', Number((e.target as HTMLInputElement).value))}
             aria-label={`Queue wait timeout for ${provider}`}
           />
           <div class="toolbar-settings-item-hint">
-            How long a queued request waits before failing with 429. 0 = unbounded.
+            How long a queued request waits before failing with 429. 0 uses the 300s safety maximum.
           </div>
         </div>
 

@@ -298,6 +298,43 @@ function mapToolResultMessage(entry: SessionEntryLike, message: MessageLike, sta
   return { kind: 'skip' };
 }
 
+function toolResultText(result: unknown): string {
+  if (typeof result === 'string') return result;
+  if (!result || typeof result !== 'object' || Array.isArray(result)) return '';
+  const content = (result as { content?: unknown }).content;
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content
+    .filter((part): part is { type: string; text: string } => (
+      !!part
+      && typeof part === 'object'
+      && (part as { type?: unknown }).type === 'text'
+      && typeof (part as { text?: unknown }).text === 'string'
+    ))
+    .map((part) => part.text)
+    .join('');
+}
+
+/** Legacy deferred waits (persisted before the extension replaced its own
+ * intentional abort at `message_end`) end with an empty aborted assistant
+ * message. Recognize the exact successful tool sequence so reload repairs the
+ * presentation without weakening genuine abort classification. */
+function isLegacyDeferredWaitAbort(message: MessageLike, current: ChatMessage | undefined): boolean {
+  if (message.stopReason !== 'aborted') return false;
+  const parts = Array.isArray(message.content) ? message.content : [];
+  if (parts.some((part) => (
+    part.type === 'toolCall'
+    || (part.type === 'text' && typeof part.text === 'string' && part.text.trim().length > 0)
+    || (part.type === 'thinking' && typeof part.thinking === 'string' && part.thinking.trim().length > 0)
+  ))) return false;
+
+  const lastTool = current?.toolCalls?.at(-1);
+  if (lastTool?.name !== 'defer_trigger' || lastTool.status !== 'completed') return false;
+  const result = toolResultText(lastTool.result);
+  return result.startsWith('Registered deferred trigger ')
+    && result.includes('Your turn will end now; you will be resumed automatically when the trigger fires.');
+}
+
 /** Merge a new assistant turn into the current bubble, or push a new one. */
 function mapAssistantTurn(
   entry: SessionEntryLike,
@@ -322,6 +359,9 @@ function mapAssistantTurn(
   if (message.provider) state.currentProvider = message.provider;
 
   const currentAssistant = state.currentAssistant;
+  const deferredWaitAbort = isLegacyDeferredWaitAbort(message, currentAssistant);
+  const terminalStatus = deferredWaitAbort ? 'completed' : assistantStatus(message);
+  const terminalErrorDetail = deferredWaitAbort ? undefined : assistantErrorDetail(message);
   if (currentAssistant) {
     mergeAssistantTurn(currentAssistant, messageParts, {
       modelId: assistantModelId,
@@ -329,8 +369,8 @@ function mapAssistantTurn(
       thinkingLevel: assistantThinkingLevel,
       durationMs,
       turnUsage,
-      errorDetail: assistantErrorDetail(message),
-      status: assistantStatus(message),
+      errorDetail: terminalErrorDetail,
+      status: terminalStatus,
       durableEntryId: entry.id,
     });
     return { kind: 'skip' };
@@ -346,8 +386,8 @@ function mapAssistantTurn(
     modelId: assistantModelId,
     provider: assistantProvider,
     thinkingLevel: assistantThinkingLevel,
-    status: assistantStatus(message),
-    errorDetail: assistantErrorDetail(message),
+    status: terminalStatus,
+    errorDetail: terminalErrorDetail,
     toolCalls: toolCallsFromMessageParts(messageParts),
     durationMs,
     usage: turnUsage,

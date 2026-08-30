@@ -1,7 +1,11 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
-const DEFAULT_RENAME_RETRY_DELAYS_MS = [10, 25, 50, 100, 250] as const;
+// Windows scanners, editors, and shell readers can hold a destination handle
+// beyond the sub-second window used by ordinary filesystem retries. Keep the
+// replacement atomic, but allow nearly eight seconds for a transient reader to
+// release the file before surfacing the failure to the caller.
+const DEFAULT_RENAME_RETRY_DELAYS_MS = [10, 25, 50, 100, 250, 500, 1000, 2000, 4000] as const;
 const TRANSIENT_RENAME_CODES = new Set(['EACCES', 'EBUSY', 'EPERM']);
 
 export interface RenameRetryOptions {

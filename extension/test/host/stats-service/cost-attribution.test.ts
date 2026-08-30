@@ -142,6 +142,40 @@ test('provider-qualified single-provider ids resolve via the catalog without a r
   assert.equal(providers.get('ollama')?.inputTokens, 100_000);
 });
 
+test('provider-qualified ids unknown to the catalog keep their prefix as the provider', () => {
+  // No catalog entry matches this id at all (neither the full id nor its bare
+  // suffix). The runtime prefix is the only provider evidence and must survive:
+  // catalog pricing may be zero/absent, but the usage stays attributed to the
+  // provider that actually served it instead of folding into 'unknown'.
+  const map = new Map<string, ModelPricingRecord[]>([
+    ['gpt-5.6-sol', [price('github-copilot', 2), price('openai-codex', 5)]],
+  ]);
+  assert.equal(providerForModel('ollama/brand-new-model', map), 'ollama');
+  assert.equal(providerForModel('ollama/brand-new-model', map, 'openai-codex'), 'openai-codex',
+    'a recorded provider stays authoritative over the prefix');
+  assert.equal(providerForModel('bare-unregistered-model', map), 'unknown',
+    'a bare unregistered id has no provider evidence and stays unknown');
+
+  const snapshot = run({
+    modelId: 'gpt-5.6-sol', provider: 'openai-codex',
+    toolUsage: {
+      ...run({}).toolUsage,
+      subagentInputTokens: 1_000_000,
+    },
+    auxiliaryLlmUsage: [{
+      kind: 'subagent', sourceId: 'child-1', occurredAt: new Date(NOW - 100).toISOString(),
+      modelId: 'ollama/brand-new-model',
+      inputTokens: 1_000_000, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0,
+      reportedCostUsd: 0.75,
+    }],
+  });
+  const stats = computeAggregateStats([snapshot], map, NOW, [], {}, 0);
+  const providers = new Map(stats.todayCostByProvider.map((entry) => [entry.provider, entry]));
+  assert.equal(providers.get('unknown'), undefined, 'unpriced qualified usage never folds into unknown');
+  assert.equal(providers.get('ollama')?.inputTokens, 1_000_000);
+  assert.equal(providers.get('ollama')?.cost, 0.75, 'reported cost stays with the qualified provider');
+});
+
 test('a recorded provider survives an unpriced model id instead of degrading to unknown', () => {
   const map = new Map([['gpt-5.6-sol', [price('github-copilot', 2), price('openai-codex', 5)]]]);
   // Model id not in the catalog at all, but the run recorded its provider and
@@ -252,4 +286,72 @@ test('terminal parent totals reconcile with assistant-message samples without do
 
   assert.equal(stats.todayInputTokens, 300_000);
   assert.equal(stats.todayCost, 0.6);
+});
+
+test('provider-qualified ids keep one bare model separate per provider across today/week series', () => {
+  // The same bare model id served by two providers: each run records only the
+  // provider-qualified model id (no provider field, like child/subagent
+  // sessions). The prefix must survive canonicalization so the two runs stay
+  // separate — and correctly priced — through every today/week rollup.
+  const map = new Map([['gpt-5.6-sol', [price('github-copilot', 2), price('openai-codex', 5)]]]);
+  const sampleFor = (modelId: string, inputTokens: number) => ({
+    endedAt: new Date(NOW - 500).toISOString(),
+    inputTokens,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    generationDurationMs: 1,
+    concurrentBusySessions: 1,
+    status: 'completed' as const,
+    modelId,
+    turnLatencyMs: null,
+    overheadMs: null,
+    providerLatencyMs: null,
+  });
+  const copilot = run({
+    modelId: 'github-copilot/gpt-5.6-sol', inputTokens: 100_000,
+    finalizedAt: new Date(NOW - 500).toISOString(),
+    turnThroughputSamples: [sampleFor('github-copilot/gpt-5.6-sol', 100_000)],
+  });
+  const codex = run({
+    sessionPath: '/s2', runId: 'r2', modelId: 'openai-codex/gpt-5.6-sol', inputTokens: 200_000,
+    turnThroughputSamples: [sampleFor('openai-codex/gpt-5.6-sol', 200_000)],
+  });
+
+  const stats = computeAggregateStats([copilot, codex], map, NOW, [], {}, 0);
+  const todayProviders = new Map(stats.todayCostByProvider.map((entry) => [entry.provider, entry]));
+  assert.equal(todayProviders.size, 2, 'both providers stay distinct today');
+  assert.equal(todayProviders.get('unknown'), undefined);
+  assert.equal(todayProviders.get('github-copilot')?.inputTokens, 100_000);
+  assert.equal(todayProviders.get('github-copilot')?.cost, 0.2, 'priced at the github-copilot rate');
+  assert.equal(todayProviders.get('openai-codex')?.inputTokens, 200_000);
+  assert.equal(todayProviders.get('openai-codex')?.cost, 1, 'priced at the openai-codex rate');
+  assert.equal(stats.totalCost, 1.2);
+  assert.equal(stats.weekCost, 1.2, 'week cost keeps both providers');
+  assert.deepEqual(
+    stats.weekCostByProvider.map((entry) => [entry.provider, entry.cost] as [string, number]).sort(),
+    [['github-copilot', 0.2], ['openai-codex', 1]],
+  );
+
+  // Series breakdowns stay provider-qualified at every point.
+  const todayFinal = stats.todayCostSeries.at(-1)!;
+  assert.deepEqual(
+    todayFinal.byProvider.map((entry) => [entry.key, entry.value] as [string, number]).sort((a, b) => a[0].localeCompare(b[0])),
+    [['github-copilot', 0.2], ['openai-codex', 1]],
+  );
+  assert.deepEqual(
+    todayFinal.byModel.map((entry) => [entry.provider, entry.model, entry.value] as [string, string, number]).sort((a, b) => a[0].localeCompare(b[0])),
+    [['github-copilot', 'gpt-5.6-sol', 0.2], ['openai-codex', 'gpt-5.6-sol', 1]],
+  );
+  const weekFinal = stats.weekCostSeries.at(-1)!;
+  assert.deepEqual(
+    weekFinal.byProvider.map((entry) => [entry.key, entry.value] as [string, number]).sort((a, b) => a[0].localeCompare(b[0])),
+    [['github-copilot', 0.2], ['openai-codex', 1]],
+  );
+  assert.deepEqual(
+    weekFinal.byModel.map((entry) => [entry.provider, entry.model, entry.value] as [string, string, number]).sort((a, b) => a[0].localeCompare(b[0])),
+    [['github-copilot', 'gpt-5.6-sol', 0.2], ['openai-codex', 'gpt-5.6-sol', 1]],
+    'the week chart keeps two entries for the same bare model id',
+  );
+  assert.equal(stats.lastRun!.provider, 'openai-codex', 'the latest run resolves its provider from the qualified id');
 });

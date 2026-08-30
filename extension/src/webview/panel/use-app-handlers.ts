@@ -4,6 +4,7 @@ import type {
   ComposerInput,
   ComposerInputDraft,
   PruningSettings,
+  SessionTitlesSettings,
   ThinkingLevel,
   ToolResultPruningSettings,
   WebviewToHostMessage,
@@ -11,6 +12,8 @@ import type {
 import { createLocalMessageId } from '../../shared/local-message-id';
 import type { TranscriptContextMenuType } from './chat-prefs';
 import type { ContextMenuState } from './components/context-menu';
+import { getContextMenuTrigger } from './components/useMenuTriggerAria';
+import type { TranscriptMessageMenuInfo } from './transcript/types';
 import type { SessionTabRunAction } from './session-tabs/run-state';
 
 export interface AppHandlers {
@@ -28,9 +31,12 @@ export interface AppHandlers {
   handleCloseTab: (path: string) => void;
   handleDuplicateTab: (path: string) => void;
   handleTogglePinTab: (path: string) => void;
+  handlePinAndMergePinnedTab: (path: string) => void;
   handleGroupPinnedTab: (sourcePath: string, targetPath: string) => void;
   handleMergePinnedGroups: (sourcePath: string, targetPath: string) => void;
   handleUngroupPinnedTab: (sourcePath: string, toItemIndex: number) => void;
+  handleDissolvePinnedGroup: (sourcePath: string) => void;
+  handleUnpinPinnedGroup: (sourcePath: string) => void;
   handleMovePinnedItem: (sourcePath: string, toItemIndex: number) => void;
   handleCancelDeferredTrigger: (sessionPath: string, triggerId?: string) => void;
   handleCancelEdit: () => void;
@@ -40,10 +46,12 @@ export interface AppHandlers {
   /** Persist a per-server `disabled` override (`.pi/mcp.json`); takes effect
    *  on the next session reload / backend restart. */
   handleMcpSetServerEnabled: (name: string, enabled: boolean) => void;
+  handleMcpSetServerEnabledForSession: (name: string, enabled: boolean) => void;
   handleSetPrivacyMode: (enabled: boolean) => void;
   handleSetSystemPromptToggles: (disabledEntries: string[]) => void;
   handleSetPruningSettings: (partial: Partial<PruningSettings>) => void;
   handleSetToolResultPruningSettings: (partial: Partial<ToolResultPruningSettings>) => void;
+  handleSetSessionTitlesSettings: (partial: Partial<SessionTitlesSettings>) => void;
   handleEditRequest: (messageId: string) => void;
   handleAddComposerInput: (input: ComposerInputDraft) => void;
   handleRemoveComposerInput: (inputId: string) => void;
@@ -57,7 +65,12 @@ export interface AppHandlers {
   handleRevertFile: (filePath: string) => void;
   handleSetFileChangesExpanded: (expanded: boolean) => void;
   handleSetFileRead: (filePath: string, read: boolean) => void;
-  handleOpenContextMenu: (type: TranscriptContextMenuType, rawData: string, e: MouseEvent) => void;
+  handleOpenContextMenu: (
+    type: TranscriptContextMenuType,
+    rawData: string,
+    e: MouseEvent,
+    message?: Partial<TranscriptMessageMenuInfo>,
+  ) => void;
 }
 
 export function useAppHandlers(
@@ -137,10 +150,13 @@ export function useAppHandlers(
   }), [postMessage]);
   const handleDuplicateTab = useCallback((path: string) => postMessage({ type: 'duplicateSession', sessionPath: path }), [postMessage]);
   const handleTogglePinTab = useCallback((path: string) => postMessage({ type: 'togglePinTab', sessionPath: path }), [postMessage]);
+  const handlePinAndMergePinnedTab = useCallback((path: string) => postMessage({ type: 'pinAndMergePinnedTab', sessionPath: path }), [postMessage]);
   const handleGroupPinnedTab = useCallback((sourcePath: string, targetPath: string) => postMessage({ type: 'groupPinnedTab', sourcePath, targetPath }), [postMessage]);
   const handleMergePinnedGroups = useCallback((sourcePath: string, targetPath: string) => postMessage({ type: 'mergePinnedGroups', sourcePath, targetPath }), [postMessage]);
   const handleUngroupPinnedTab = useCallback((sourcePath: string, toItemIndex: number) => postMessage({ type: 'ungroupPinnedTab', sourcePath, toItemIndex }), [postMessage]);
   const handleMovePinnedItem = useCallback((sourcePath: string, toItemIndex: number) => postMessage({ type: 'movePinnedItem', sourcePath, toItemIndex }), [postMessage]);
+  const handleDissolvePinnedGroup = useCallback((sourcePath: string) => postMessage({ type: 'dissolvePinnedGroup', sourcePath }), [postMessage]);
+  const handleUnpinPinnedGroup = useCallback((sourcePath: string) => postMessage({ type: 'unpinPinnedGroup', sourcePath }), [postMessage]);
   // Cancel a deferred trigger. `sessionPath` is the trigger's watcher session
   // (carried on the trigger itself), not necessarily the active session, so it
   // is passed explicitly rather than read from the ref. Omit `triggerId` to
@@ -159,6 +175,14 @@ export function useAppHandlers(
     (name: string, enabled: boolean) => postMessage({ type: 'mcpSetServerEnabled', name, enabled }),
     [postMessage],
   );
+  const handleMcpSetServerEnabledForSession = useCallback(
+    (name: string, enabled: boolean) => {
+      const sessionPath = activeSessionPathRef.current;
+      if (!sessionPath) return;
+      postMessage({ type: 'mcpSetServerEnabledForSession', sessionPath, name, enabled });
+    },
+    [postMessage, activeSessionPathRef],
+  );
   const handleSetPrivacyMode = useCallback((enabled: boolean) => {
     const sessionPath = activeSessionPathRef.current;
     if (!sessionPath) return;
@@ -171,6 +195,7 @@ export function useAppHandlers(
   }, [postMessage, activeSessionPathRef]);
   const handleSetPruningSettings = useCallback((partial: Partial<PruningSettings>) => postMessage({ type: 'setPruningSettings', settings: partial }), [postMessage]);
   const handleSetToolResultPruningSettings = useCallback((partial: Partial<ToolResultPruningSettings>) => postMessage({ type: 'setToolResultPruningSettings', settings: partial }), [postMessage]);
+  const handleSetSessionTitlesSettings = useCallback((partial: Partial<SessionTitlesSettings>) => postMessage({ type: 'setSessionTitlesSettings', settings: partial }), [postMessage]);
   const handleEditRequest = useCallback((messageId: string) => {
     const sessionPath = activeSessionPathRef.current;
     if (!sessionPath) return;
@@ -257,12 +282,12 @@ export function useAppHandlers(
     postMessage({ type: 'setFileRead', sessionPath, filePath, read });
   }, [postMessage, activeSessionPathRef]);
 
-  const handleOpenContextMenu = useCallback((type: TranscriptContextMenuType, rawData: string, e: MouseEvent) => {
+  const handleOpenContextMenu = useCallback(
+    (type: TranscriptContextMenuType, rawData: string, e: MouseEvent, message?: Partial<TranscriptMessageMenuInfo>) => {
     // Capture the trigger element (the onContextMenu target) so the menu can
     // mirror its open state back onto the trigger via aria-haspopup/
-    // aria-expanded (see components/context-menu.tsx). e.currentTarget is the
-    // element the handler is bound to; read synchronously here, before the
-    // event finishes dispatching.
+    // aria-expanded (see components/context-menu.tsx). Resolve it
+    // synchronously, before the event finishes dispatching.
     //
     // Also capture the live text selection *now*: a right-click (contextmenu)
     // does not clear the selection, so this is the user's highlighted text.
@@ -274,12 +299,16 @@ export function useAppHandlers(
     setContextMenu({
       type,
       rawData,
+      sessionPath: message?.sessionPath ?? activeSessionPathRef.current,
+      message: message ?? null,
       selectionText,
       x: e.clientX,
       y: e.clientY,
-      triggerEl: e.currentTarget as HTMLElement | null,
+      triggerEl: getContextMenuTrigger(e),
     });
-  }, [setContextMenu]);
+    },
+    [setContextMenu, activeSessionPathRef],
+  );
 
   return useMemo(
     () => ({
@@ -291,19 +320,24 @@ export function useAppHandlers(
       handleCloseTab,
       handleDuplicateTab,
       handleTogglePinTab,
+      handlePinAndMergePinnedTab,
       handleGroupPinnedTab,
       handleMergePinnedGroups,
       handleUngroupPinnedTab,
+      handleDissolvePinnedGroup,
+      handleUnpinPinnedGroup,
       handleMovePinnedItem,
       handleCancelDeferredTrigger,
       handleCancelEdit,
       handleSetPrefs,
       handleMcpListRequested,
       handleMcpSetServerEnabled,
+      handleMcpSetServerEnabledForSession,
       handleSetPrivacyMode,
       handleSetSystemPromptToggles,
       handleSetPruningSettings,
       handleSetToolResultPruningSettings,
+      handleSetSessionTitlesSettings,
       handleEditRequest,
       handleAddComposerInput,
       handleRemoveComposerInput,
@@ -329,19 +363,24 @@ export function useAppHandlers(
       handleCloseTab,
       handleDuplicateTab,
       handleTogglePinTab,
+      handlePinAndMergePinnedTab,
       handleGroupPinnedTab,
       handleMergePinnedGroups,
       handleUngroupPinnedTab,
+      handleDissolvePinnedGroup,
+      handleUnpinPinnedGroup,
       handleMovePinnedItem,
       handleCancelDeferredTrigger,
       handleCancelEdit,
       handleSetPrefs,
       handleMcpListRequested,
       handleMcpSetServerEnabled,
+      handleMcpSetServerEnabledForSession,
       handleSetPrivacyMode,
       handleSetSystemPromptToggles,
       handleSetPruningSettings,
       handleSetToolResultPruningSettings,
+      handleSetSessionTitlesSettings,
       handleEditRequest,
       handleAddComposerInput,
       handleRemoveComposerInput,

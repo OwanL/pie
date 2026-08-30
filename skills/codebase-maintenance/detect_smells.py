@@ -84,8 +84,47 @@ SEVERITY_ORDER: dict[str, int] = {
 # Core logic
 # ---------------------------------------------------------------------------
 
-def run_semgrep(directory: Path, rules: str) -> dict:
-    """Run ``semgrep scan`` and return the parsed JSON payload."""
+def _exclude_patterns_for_semgrep(active_patterns: list[str]) -> list[str]:
+    """Translate shared ignores to Semgrep's Windows-safe exclusions.
+
+    Semgrep's current ``--exclude`` syntax already treats a slash-free pattern
+    as an any-depth basename and a pattern containing a slash as scan-root
+    relative.  Passing explicit ``**/`` or ``/**`` forms is unnecessary and
+    crashes some Windows Semgrep releases in ``Glob__Lexer``.  Standard outer
+    globstars are reduced to the equivalent native form; patterns with an
+    interior globstar have no safe equivalent and are left to the mandatory
+    result post-filter rather than passed to Semgrep.
+    """
+    excludes: list[str] = []
+    for pattern in active_patterns:
+        normalized = pattern.strip().replace("\\", "/")
+        if normalized.startswith("./"):
+            normalized = normalized[2:]
+        normalized = normalized.rstrip("/")
+        had_leading_globstar = False
+        while normalized.startswith("**/"):
+            had_leading_globstar = True
+            normalized = normalized[3:]
+        if normalized.endswith("/**"):
+            candidate = normalized[:-3].rstrip("/")
+            # ``src/**`` is root-only, but ``src`` is any-depth in Semgrep.
+            # Omit that unsafe translation and let result filtering handle it.
+            if "/" not in candidate and not had_leading_globstar:
+                continue
+            normalized = candidate
+        if "**" in normalized:
+            continue
+        if normalized and normalized not in excludes:
+            excludes.append(normalized)
+    return excludes
+
+
+def run_semgrep(
+    directory: Path,
+    rules: str,
+    active_patterns: list[str] | None = None,
+) -> dict:
+    """Run ``semgrep scan`` and return JSON, retaining any failure status."""
     semgrep_bin = shutil.which("semgrep")
     if semgrep_bin is None:
         print(
@@ -103,8 +142,10 @@ def run_semgrep(directory: Path, rules: str) -> dict:
         "--json",
         "--metrics", "off",
         "--config", rules,
-        str(directory),
     ]
+    for pattern in _exclude_patterns_for_semgrep(active_patterns or []):
+        cmd += ["--exclude", pattern]
+    cmd.append(str(directory))
 
     try:
         result = subprocess.run(
@@ -123,26 +164,28 @@ def run_semgrep(directory: Path, rules: str) -> dict:
         sys.exit(2)
 
     # semgrep exit 0 = no findings, exit 1 = findings (not an error).
-    if result.returncode >= 2:
-        # Try to salvage partial JSON — some findings may still be present.
-        try:
-            data = json.loads(result.stdout)
-            if data.get("results"):
-                return data
-        except json.JSONDecodeError:
-            pass
+    execution_error = result.returncode >= 2
+    if execution_error:
         print(
             f"semgrep error (exit {result.returncode}): "
             f"{result.stderr.strip()[:500]}",
             file=sys.stderr,
         )
-        sys.exit(result.returncode)
 
     if not result.stdout.strip():
+        if execution_error:
+            sys.exit(result.returncode)
         return {"results": [], "errors": []}
 
     try:
-        return json.loads(result.stdout)
+        data = json.loads(result.stdout)
+        if not isinstance(data, dict):
+            raise json.JSONDecodeError("expected a JSON object", result.stdout, 0)
+        if execution_error:
+            # Let main print partial findings and structured diagnostics before
+            # propagating the tool's nonzero status.
+            data["_execution_exit_code"] = result.returncode
+        return data
     except json.JSONDecodeError:
         print("Error: semgrep produced invalid JSON output", file=sys.stderr)
         sys.exit(2)
@@ -280,6 +323,10 @@ def parse_args() -> tuple[Path, int, str, set[str]]:
             print(f"unknown argument: {sys.argv[i]}", file=sys.stderr)
             sys.exit(2)
 
+    if max_findings < 0:
+        print("error: --max-findings must be >= 0", file=sys.stderr)
+        sys.exit(2)
+
     return directory, max_findings, rules, exclude_categories
 
 
@@ -293,7 +340,7 @@ def main() -> None:
         directory, global_patterns, context_patterns,
     )
 
-    data = run_semgrep(directory, rules)
+    data = run_semgrep(directory, rules, active_patterns)
 
     # Guard against semgrep returning null instead of []  (see: JSON null)
     results: list[dict] = data.get("results") or []
@@ -316,6 +363,14 @@ def main() -> None:
             print(f"semgrep: {epath}: {emsg}", file=sys.stderr)
         if len(errors) > 5:
             print(f"... {len(errors) - 5} more error(s)", file=sys.stderr)
+
+    execution_exit = data.get("_execution_exit_code")
+    if execution_exit is not None:
+        sys.exit(int(execution_exit))
+    if errors:
+        # Structured Semgrep errors mean the scan was incomplete even when the
+        # process happened to exit zero.
+        sys.exit(2)
 
 
 if __name__ == "__main__":

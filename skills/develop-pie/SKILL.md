@@ -1,11 +1,17 @@
 ---
 name: develop-pie
-description: "Work effectively in the pie repository: its VS Code extension, custom Pi extensions, agents, skills, model catalog, settings, analytics, architecture, build commands, tests, and documentation. Use when implementing, debugging, reviewing, or documenting pie itself or its Pi-based configuration; do not load for unrelated repositories merely because pie is the active agent harness."
+description: "Work effectively in the pie repository: its VS Code extension, custom Pi extensions, agents, skills, model catalog, settings, analytics, architecture, build commands, tests, and documentation. Use when implementing, debugging, reviewing, or documenting pie itself or its Pi-based configuration; do not load for unrelated repositories merely because pie is the active agent harness. Route model-catalog work to `add-provider`, hard or unclear bug diagnosis to `diagnose`, and plan stress-testing to `grill-with-docs`."
 ---
 
 # Develop pie
 
 Use this skill only for work on the `pie` repository. **pie** is the VS Code sidebar and personal configuration stack built around the **Pi** coding-agent runtime; keep those names distinct.
+
+Route to a specialized skill when the request matches one; this skill remains the general workflow reference:
+
+- **`add-provider`** — adding or updating providers/models in the centralized catalog
+- **`diagnose`** — hard, unclear, intermittent, or performance bugs
+- **`grill-with-docs`** — challenging a plan against the repo's language and documented decisions
 
 ## Repository map
 
@@ -18,7 +24,7 @@ Use this skill only for work on the `pie` repository. **pie** is the VS Code sid
 | `models.yaml` | Source of truth for providers, models, pricing, eligibility, concurrency, retry policy, and seed selections |
 | `docs/` | Architecture contracts, active plans, operational references, and internal notes |
 | `analysis/` | Local DuckDB and static-site run analytics workspace |
-| `scripts/` | Repository build, test, model-sync, install, and experiment orchestration |
+| `scripts/` | Repository build, test, model-sync, and install orchestration |
 | `settings.defaults.json` | Tracked portable defaults; model-owned fields are generated from `models.yaml` |
 | `settings.json` | Tracked, committed Pi runtime settings; model-owned fields are generated from `models.yaml`, chat and pruning selections are user-owned |
 | `APPEND_SYSTEM.md` | Personal additions to Pi's system prompt |
@@ -53,13 +59,15 @@ Run from the repository root unless noted:
 
 ```bash
 npm ci                                      # install all locked dependency trees
-npm run test                                # canonical fast unit suite
+npm run test                                # changed-file affected development testing
 npm run test:file -- extension/test/path/to/test.ts
-npm run test -- --fast --package extension --test-name-pattern="pattern"
+npm run test:all                             # full fast suite
+npm run test:all -- --package extension --test-name-pattern="pattern"
 npm run test:changed                        # fast suites affected by working-tree changes
 npm run typecheck                           # all TypeScript projects
 npm run check                               # model drift + typecheck + lint + changed tests
-npm run verify                              # full local release gate
+npm run verify                              # pre-push gate: drift + typecheck + lint + all fast suites + build
+npm run verify:release                      # release gate: replaces the fast suites with coverage-gated runs
 npm run sync-models                         # regenerate centralized model configuration
 npm run sync-models -- --check              # fail on generated-config drift
 npm run extension:build                     # build extension from the root

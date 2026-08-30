@@ -5,6 +5,7 @@ import type {
   BackendReadyChangedEvent,
   BackendReadyWatchdogFiredEvent,
   PruningSettingsChangedEvent,
+  SessionTitlesSettingsChangedEvent,
   ToolResultPruningSettingsChangedEvent,
   WorkspaceCwdChangedEvent,
   TranscriptPageLoadedEvent,
@@ -102,6 +103,9 @@ export function handleBackendReadyChanged(
     draft.settings.mcpPendingApply = state.settings.backendReady
       ? state.settings.mcpPendingApply
       : false;
+    // Same logic per session: a backend restart re-reads config per new
+    // worker, so session-scoped pending hints cannot survive it.
+    if (!state.settings.backendReady) draft.settings.mcpPendingApplyBySession = {};
   });
   const modelDrain = startNextDeferredSetModel(readyState);
   const releasedEntries = allEntries.filter(
@@ -203,6 +207,22 @@ export function handleToolResultPruningSettingsChanged(
       settings: {
         ...state.settings,
         toolResultPruningSettings: event.toolResultPruningSettings,
+      },
+    },
+    effects: [],
+  };
+}
+
+export function handleSessionTitlesSettingsChanged(
+  state: ArchState,
+  event: SessionTitlesSettingsChangedEvent,
+): ReducerResult {
+  return {
+    state: {
+      ...state,
+      settings: {
+        ...state.settings,
+        sessionTitlesSettings: event.sessionTitlesSettings,
       },
     },
     effects: [],

@@ -1,7 +1,7 @@
 /** @jsxRuntime automatic */
 /** @jsxImportSource preact */
 
-import type { ChatPrefs, ExtensionInfo, LastCompactionSummary, McpServerInfo, ModelInfo, PruningCatalog, PruningResult, PruningSettings, ProviderGateStats, SystemPromptEntry, ThinkingLevel, ToolResultPruningSettings } from '../../../shared/protocol';
+import type { ChatPrefs, ExtensionInfo, LastCompactionSummary, McpServerInfo, ModelInfo, PruningCatalog, PruningResult, PruningSettings, ProviderGateStats, SessionTitlesSettings, SystemPromptEntry, ThinkingLevel, ToolResultPruningSettings } from '../../../shared/protocol';
 import { THINKING_LEVEL_LABELS, THINKING_LEVEL_OPTIONS } from '../../../shared/thinking-level.js';
 import { isPendingTabPath } from '../../../shared/tab-behavior.js';
 
@@ -67,18 +67,23 @@ interface ComposerToolbarProps {
   pruningCatalog: PruningCatalog;
   pruningResult: PruningResult | null;
   toolResultPruningSettings: ToolResultPruningSettings;
+  sessionTitlesSettings: SessionTitlesSettings;
   providerGateStats: ProviderGateStats;
   privacyMode?: boolean;
   onSetPrefs: (prefs: Partial<ChatPrefs>) => void;
   mcpServers: McpServerInfo[];
   mcpServersStatus?: 'loading' | 'error' | 'ok';
   mcpPendingApply: boolean;
+  mcpSessionServers: McpServerInfo[];
+  mcpSessionPendingApply: boolean;
   onMcpListRequested: () => void;
   onMcpSetServerEnabled: (name: string, enabled: boolean) => void;
+  onMcpSetServerEnabledForSession: (name: string, enabled: boolean) => void;
   onSetPrivacyMode?: (enabled: boolean) => void;
   onSetSystemPromptToggles: (disabledEntries: string[]) => void;
   onSetPruningSettings: (settings: Partial<PruningSettings>) => void;
   onSetToolResultPruningSettings: (settings: Partial<ToolResultPruningSettings>) => void;
+  onSetSessionTitlesSettings: (settings: Partial<SessionTitlesSettings>) => void;
   availableExtensions: ExtensionInfo[];
   availableModels: ModelInfo[];
   availableModelsStatus?: 'provisional' | 'loading' | 'authoritative';
@@ -109,18 +114,23 @@ export const ComposerToolbar = memo(function ComposerToolbar({
   pruningCatalog,
   pruningResult,
   toolResultPruningSettings,
+  sessionTitlesSettings,
   providerGateStats,
   privacyMode = false,
   onSetPrefs,
   mcpServers,
   mcpServersStatus,
   mcpPendingApply,
+  mcpSessionServers,
+  mcpSessionPendingApply,
   onMcpListRequested,
   onMcpSetServerEnabled,
+  onMcpSetServerEnabledForSession,
   onSetPrivacyMode,
   onSetSystemPromptToggles,
   onSetPruningSettings,
   onSetToolResultPruningSettings,
+  onSetSessionTitlesSettings,
   availableExtensions,
   availableModels,
   systemPrompts,
@@ -154,7 +164,14 @@ export const ComposerToolbar = memo(function ComposerToolbar({
       && (!selectedProvider || entry.model.provider === selectedProvider),
   ) ?? null;
   const fallbackModelLabel = modelEntries[0]?.selectedLabel ?? '';
-  const selectedModelLabel = selectedModelEntry?.selectedLabel ?? (selectedModel || fallbackModelLabel);
+  const selectedModelProvider = selectedProvider ?? selectedModelEntry?.model.provider;
+  const selectedProviderDisabled = selectedModelProvider
+    ? prefs.providerToggles[selectedModelProvider] === false
+    : false;
+  const selectedModelBaseLabel = selectedModelEntry?.selectedLabel ?? (selectedModel || fallbackModelLabel);
+  const selectedModelLabel = selectedProviderDisabled
+    ? `${selectedModelBaseLabel} (disabled)`
+    : selectedModelBaseLabel;
   const selectedThinkingLevels = getModelThinkingLevels(selectedModelEntry?.model);
   const selectedThinkingOptions = THINKING_LEVEL_OPTIONS.filter((option) =>
     selectedThinkingLevels.includes(option.value));
@@ -164,14 +181,14 @@ export const ComposerToolbar = memo(function ComposerToolbar({
   return (
     <>
       <fieldset class="composer-controls" disabled={!commandsAvailable} aria-disabled={!commandsAvailable}>
-        <ComposerSettingsMenu prefs={prefs} mcpServers={mcpServers} mcpServersStatus={mcpServersStatus} mcpPendingApply={mcpPendingApply} pruningSettings={pruningSettings} pruningCatalog={pruningCatalog} pruningResult={pruningResult} toolResultPruningSettings={toolResultPruningSettings} availableExtensions={availableExtensions} availableModels={availableModels} providerGateStats={providerGateStats} activeContextWindow={selectedModelEntry?.model.contextWindow} activeModel={{ provider: selectedProvider, id: selectedModel }} onSetPrefs={onSetPrefs} onMcpListRequested={onMcpListRequested} onMcpSetServerEnabled={onMcpSetServerEnabled} onSetPruningSettings={onSetPruningSettings} onSetToolResultPruningSettings={onSetToolResultPruningSettings} />
+        <ComposerSettingsMenu prefs={prefs} mcpServers={mcpServers} mcpServersStatus={mcpServersStatus} mcpPendingApply={mcpPendingApply} pruningSettings={pruningSettings} pruningCatalog={pruningCatalog} pruningResult={pruningResult} toolResultPruningSettings={toolResultPruningSettings} sessionTitlesSettings={sessionTitlesSettings} availableExtensions={availableExtensions} availableModels={availableModels} providerGateStats={providerGateStats} activeContextWindow={selectedModelEntry?.model.contextWindow} activeModel={{ provider: selectedProvider, id: selectedModel }} onSetPrefs={onSetPrefs} onMcpListRequested={onMcpListRequested} onMcpSetServerEnabled={onMcpSetServerEnabled} onSetPruningSettings={onSetPruningSettings} onSetSessionTitlesSettings={onSetSessionTitlesSettings} onSetToolResultPruningSettings={onSetToolResultPruningSettings} />
 
         {filteredModels.length > 0 ? (
           <ModelPicker
             label={selectedModelLabel}
             value={selectedProvider ? formatModelSpec({ provider: selectedProvider, id: selectedModel }) : selectedModel}
             ariaLabel="Model"
-            title="Select model"
+            title={selectedProviderDisabled ? 'Selected provider is disabled — select another model' : 'Select model'}
             entries={modelEntries}
             onChange={(spec) => {
               // The picker emits the shared provider-qualified identity so the
@@ -208,7 +225,7 @@ export const ComposerToolbar = memo(function ComposerToolbar({
 
         <SystemPromptToggleMenu sessionPath={sessionPath} prompts={systemPrompts} onSetToggles={onSetSystemPromptToggles} />
 
-        <McpToggleMenu prefs={prefs} mcpServers={mcpServers} mcpServersStatus={mcpServersStatus} mcpPendingApply={mcpPendingApply} onSetPrefs={onSetPrefs} onMcpListRequested={onMcpListRequested} onMcpSetServerEnabled={onMcpSetServerEnabled} />
+        <McpToggleMenu prefs={prefs} mcpServers={mcpSessionServers} mcpServersStatus={mcpServersStatus} mcpPendingApply={mcpSessionPendingApply} onMcpListRequested={onMcpListRequested} onMcpSetServerEnabledForSession={onMcpSetServerEnabledForSession} />
 
         <CompactionButton
           availability={!sessionPath ? 'no-session' : compacting ? 'compacting' : busy ? 'busy' : 'available'}

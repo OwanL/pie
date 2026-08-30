@@ -95,7 +95,7 @@ export interface SdkSessionEvent {
   /** `auto_retry_end`: final error on a failed/exhausted/cancelled retry. */
   finalError?: string;
   /** Session lifecycle or history-compaction reason metadata. */
-  reason?: 'manual' | 'threshold' | 'overflow' | 'new' | 'resume' | 'fork';
+  reason?: 'manual' | 'threshold' | 'overflow' | 'new' | 'resume' | 'fork' | 'startup' | 'reload' | 'quit';
   previousSessionFile?: string;
   /** Stable SDK session-entry ID, attached by Pie's persistence-order patch. */
   sessionEntryId?: string;
@@ -224,8 +224,18 @@ export interface SdkPromptOptions {
 export interface SdkToolInfo {
   name: string;
   description: string;
+  /** One-line system-prompt catalog text for this registered tool. Older SDK
+   * getAllTools implementations omit it, so inventory callers may fall back to
+   * getToolDefinition(name). */
+  promptSnippet?: string;
+  promptGuidelines?: string[];
   parameters?: unknown;
   sourceInfo?: unknown;
+}
+
+export interface SdkToolPromptDefinition {
+  promptSnippet?: string;
+  promptGuidelines?: string[];
 }
 
 export interface SdkReplacedSessionContext {
@@ -330,6 +340,9 @@ export interface SdkSession {
   setThinkingLevel?: (level: string) => void;
   getContextUsage?: () => { tokens: number | null; contextWindow: number; percent: number | null } | undefined;
   getAllTools?: () => SdkToolInfo[];
+  /** Full registered definition metadata. Present in the pinned SDK even when
+   * getAllTools omits promptSnippet for compatibility. */
+  getToolDefinition?: (name: string) => SdkToolPromptDefinition | undefined;
   /** Names of tools currently exposed to the provider. */
   getActiveToolNames?: () => string[];
   /** Replace the provider-visible tool set; synchronously rebuilds the prompt. */
@@ -449,6 +462,8 @@ export interface SdkModule {
   SessionManager: {
     continueRecent: (cwd: string) => SdkSessionManager;
     create: (cwd: string, sessionDir?: string) => SdkSessionManager;
+    /** Ephemeral manager used by temporary inventory workers. */
+    inMemory: (cwd?: string) => SdkSessionManager;
     open: (sessionPath: string) => SdkSessionManager;
     forkFrom: (sourcePath: string, targetCwd: string, sessionDir?: string) => SdkSessionManager;
     preparePieCreate?: (
@@ -991,6 +1006,7 @@ export async function loadSdk(
     typeof mod.VERSION !== 'string' ||
     typeof mod.getAgentDir !== 'function' ||
     typeof mod.SessionManager?.listAll !== 'function' ||
+    typeof mod.SessionManager?.inMemory !== 'function' ||
     typeof mod.createAgentSessionRuntime !== 'function'
   ) {
     throw new Error(

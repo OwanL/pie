@@ -7,9 +7,9 @@ import { useMemo, useState } from 'preact/hooks';
 import type { ChatMessage, ChatPrefs, ComposerInput, InlineEditDraft } from '../../../shared/protocol';
 import type { PruningHeaderState } from './pruning';
 import type { TurnActivityState } from './activity';
-import type { RenderToolCall, TranscriptContextMenuHandler } from './types';
+import type { RenderToolCall, TranscriptContextMenuHandler, TranscriptMessageMenuInfo } from './types';
 import { chatMessageEqual } from './message-equal';
-import { useCaptureHeight, useMessageEntrance, useMessageItemDerived, useMessageParts } from './message-item/hooks';
+import { isTruncateEligibleMessage, useCaptureHeight, useMessageEntrance, useMessageItemDerived, useMessageParts } from './message-item/hooks';
 import { MessageItemInner, MessageItemShell } from './message-item/inner';
 import { userImagePartsToInputs } from './parts';
 import { MessageCommitContext, MessageToolRevisionContext, useCommittedMessageLeaf } from './commit-registry';
@@ -109,6 +109,53 @@ export function MessageItemView({
     onEditRequest,
   });
 
+  // Message-level menu metadata, bound ONCE per row: every nested region
+  // (assistant text, reasoning, tool cards, user bubble, system note,
+  // compaction-summary shell) reaches the same enriched menu through the
+  // wrapped handler below, so right-click actions like Copy text / Edit /
+  // Delete from here are available on the whole row, not just the plain-text
+  // body.
+  const messageMenu: TranscriptMessageMenuInfo = {
+    messageId: message.id,
+    role: message.role,
+    ...(sessionKey ? { sessionPath: sessionKey } : {}),
+    plainText: combinedMarkdown,
+    editable: derived.isClickableUserMsg,
+    // `readonly` is only set on nested subagent transcript rows (the main
+    // transcript never passes it). Their message ids are synthetic — not
+    // durable session entries — so they must not offer "Delete from here".
+    canTruncate: !readonly && isTruncateEligibleMessage(message),
+  };
+  const handleRowContextMenu: TranscriptContextMenuHandler = (type, rawData, e, info) => {
+    // Nested renderers may provide only target-specific metadata. Merge it
+    // with the row-owned eligibility/id fields, and derive the copy target
+    // from the region that was right-clicked rather than from rawData.
+    if (type === 'filePath') {
+      onContextMenu(type, rawData, e);
+      return;
+    }
+    const targetPlainText = type === 'message'
+      ? messageMenu.plainText
+      : type === 'reasoning'
+        ? rawData
+        : info?.plainText?.trim() ? info.plainText : undefined;
+    onContextMenu(type, rawData, e, {
+      ...messageMenu,
+      ...info,
+      plainText: targetPlainText,
+    });
+  };
+  // Row-level fallback for regions without a specific menu (user bubble text,
+  // system notes, compaction shells, empty header/footer areas). Nested
+  // specific menus (file path, tool card, reasoning, buffered text) open first
+  // and mark the event handled via preventDefault; this fallback must not
+  // overwrite them as the bubbling generic-message menu.
+  const handleFallbackContextMenu = (e: MouseEvent) => {
+    if (e.defaultPrevented) return;
+    e.preventDefault();
+    onContextMenu('message', derived.getMessageRaw(), e, messageMenu);
+  };
+
   return (
     <MessageItemShell
       messageId={message.id}
@@ -121,6 +168,7 @@ export function MessageItemView({
       isEditing={derived.isEditing}
       entered={entered}
       handleMessageClick={derived.handleMessageClick}
+      onRowContextMenu={handleFallbackContextMenu}
     >
       <MessageCommitContext.Provider value={commitOwner}>
       <MessageToolRevisionContext.Provider value={message.toolStateRevision ?? 0}>
@@ -150,7 +198,7 @@ export function MessageItemView({
         workingDirectory={workingDirectory}
         onOpenFile={onOpenFile}
         renderToolCall={renderToolCall}
-        onContextMenu={onContextMenu}
+        onContextMenu={handleRowContextMenu}
         messageBodyRef={messageBodyRef}
         hasActivityFooter={derived.hasActivityFooter}
         footerActivityState={derived.footerActivityState}

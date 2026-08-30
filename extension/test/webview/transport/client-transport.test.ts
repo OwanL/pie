@@ -58,7 +58,7 @@ class FakeWebSocket {
   closed: Array<{ code: number; reason: string }> = [];
   onopen: (() => void) | null = null;
   onmessage: ((event: { data: unknown }) => void) | null = null;
-  onclose: (() => void) | null = null;
+  onclose: ((event: { code: number; reason: string }) => void) | null = null;
   onerror: (() => void) | null = null;
 
   constructor(public readonly url: string) {
@@ -73,7 +73,12 @@ class FakeWebSocket {
   close(code: number, reason: string): void {
     this.closed.push({ code, reason });
     this.readyState = FakeWebSocket.CLOSED;
-    this.onclose?.();
+    this.onclose?.({ code, reason });
+  }
+
+  peerClose(code = 1006, reason = ''): void {
+    this.readyState = FakeWebSocket.CLOSED;
+    this.onclose?.({ code, reason });
   }
 }
 (globalThis as Record<string, unknown>).WebSocket = FakeWebSocket;
@@ -201,6 +206,44 @@ test('rendererHello replaces the identity and sends ready + refreshState with th
   assert.deepEqual(frames[3], { type: 'rendererFocusChanged', focused: true, viewGeneration: 5 });
 });
 
+test('rendererHello sends ready before an onHandshake reconciliation command', () => {
+  socketInstances = [];
+  let readyPrecededConnectedObserver = false;
+  const transport = new BrowserClientTransport({
+    wsRoute: '/ws',
+    onHandshake: () => {
+      assert.equal(transport.postMessage({
+        type: 'commandStatusRequest',
+        clientCommandId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      }), true);
+    },
+  });
+  transport.onConnectionStateChange((state) => {
+    if (state !== 'connected') return;
+    const firstFrame = socketInstances[0]?.sent[0];
+    readyPrecededConnectedObserver = firstFrame !== undefined
+      && (JSON.parse(firstFrame) as { type?: string }).type === 'ready';
+  });
+  transport.connect();
+  const socket = socketInstances[0]!;
+
+  sendHello(socket, 5);
+
+  const frames = socket.sent.map((frame) => JSON.parse(frame) as Record<string, unknown>);
+  assert.deepEqual(frames[0], {
+    type: 'ready',
+    buildId: PIE_BUILD_ID,
+    viewGeneration: 5,
+  }, 'ready remains the first client frame even when reconciliation posts synchronously');
+  assert.deepEqual(frames[1], {
+    type: 'commandStatusRequest',
+    clientCommandId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    viewGeneration: 5,
+  });
+  assert.equal(readyPrecededConnectedObserver, true, 'ready also precedes connected-state observers');
+  transport.dispose();
+});
+
 test('postMessage(): dropped while disconnected or before the hello; stamped after', () => {
   const { transport } = createBrowserHarness();
   transport.connect();
@@ -270,7 +313,7 @@ test('onclose: disconnected state + exponential reconnect backoff (1s → 2s →
     transport.connect();
     socketInstances[0]?.onopen?.();
     sendHello(socketInstances[0]!);
-    socketInstances[0]?.onclose?.();
+    socketInstances[0]?.peerClose();
 
     assert.deepEqual(states, ['connecting', 'connected', 'disconnected']);
     assert.equal(timers.length, 1);
@@ -278,21 +321,57 @@ test('onclose: disconnected state + exponential reconnect backoff (1s → 2s →
 
     timers[0]?.callback();
     assert.equal(socketInstances.length, 2, 'reconnect opens a fresh socket');
-    socketInstances[1]?.onclose?.();
+    socketInstances[1]?.peerClose();
     assert.equal(timers[1]?.delayMs, 2000);
 
     timers[1]?.callback();
-    socketInstances[2]?.onclose?.();
+    socketInstances[2]?.peerClose();
     assert.equal(timers[2]?.delayMs, 4000);
 
     // Cap: drive the attempt counter to the max and assert the 30s ceiling.
     for (let index = 3; index < 8; index += 1) {
       timers[index - 1]?.callback();
-      socketInstances[index]?.onclose?.();
+      socketInstances[index]?.peerClose();
     }
     assert.equal(timers[7]?.delayMs, 30_000, 'backoff is capped at 30s');
   } finally {
     Math.random = originalRandom;
+  }
+});
+
+test('a failed ready send does not reset reconnect backoff', () => {
+  const originalRandom = Math.random;
+  Math.random = () => 0.5;
+  try {
+    const { transport, timers } = createBrowserHarness();
+    transport.connect();
+    socketInstances[0]?.peerClose();
+    assert.equal(timers[0]?.delayMs, 1000);
+
+    timers[0]?.callback();
+    const retrySocket = socketInstances[1]!;
+    retrySocket.throwOnSend = true;
+    sendHello(retrySocket);
+
+    assert.equal(retrySocket.sent.length, 0, 'the ready frame never reached the socket');
+    assert.equal(retrySocket.closed[0]?.reason, 'ready-send-failed');
+    assert.equal(timers[1]?.delayMs, 2000, 'the failed application handshake retains exponential backoff');
+  } finally {
+    Math.random = originalRandom;
+  }
+});
+
+test('terminal policy closes latch reload-required and never reconnect', () => {
+  for (const reason of ['ready-required', 'renderer-build-mismatch', 'invalid-renderer-hello']) {
+    const { transport, timers, states } = createBrowserHarness();
+    transport.connect();
+    socketInstances[0]?.peerClose(1008, reason);
+
+    assert.equal(transport.getConnectionState(), 'reload-required', reason);
+    assert.deepEqual(states, ['connecting', 'reload-required'], reason);
+    assert.equal(timers.length, 0, `${reason} must not arm a reconnect`);
+    transport.connect();
+    assert.equal(socketInstances.length, 1, `${reason} must remain latched`);
   }
 });
 
@@ -309,7 +388,7 @@ test('dispose(): cancels the reconnect timer and closes the socket permanently',
   // Dispose after a peer close: the reconnect timer is cancelled.
   const second = createBrowserHarness();
   second.transport.connect();
-  socketInstances[0]?.onclose?.();
+  socketInstances[0]?.peerClose();
   assert.equal(second.timers.length, 1);
   second.transport.dispose();
   second.timers[0]?.callback();

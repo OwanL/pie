@@ -180,6 +180,67 @@ test('UngroupPinnedTab leaves a 3-group intact as a 2-group', () => {
   assert.deepEqual(result.state.sessions.pinnedTabPaths, ['/b', '/a', '/c', '/d']);
 });
 
+// ─── Whole-group context-menu commands ─────────────────────────────────────
+
+test('DissolvePinnedGroup removes the group but preserves pinned members and flat order', () => {
+  const state = stateWith({
+    openTabPaths: ['/a', '/b', '/x', '/c', '/d'],
+    pinnedTabPaths: ['/a', '/b', '/x', '/c', '/d'],
+    pinnedTabGroups: [['/a', '/b'], ['/c', '/d']],
+  });
+  const result = reducer(state, {
+    kind: 'Command',
+    cmd: { kind: 'DissolvePinnedGroup', corrId: 'dg1', sourcePath: '/b' },
+  });
+  assert.deepEqual(result.state.sessions.pinnedTabPaths, ['/a', '/b', '/x', '/c', '/d']);
+  assert.deepEqual(result.state.sessions.pinnedTabGroups, [['/c', '/d']]);
+  assert.deepEqual(persistEffect(result)?.pinnedTabPaths, ['/a', '/b', '/x', '/c', '/d']);
+});
+
+test('DissolvePinnedGroup is a no-op for a standalone source', () => {
+  const state = stateWith({
+    openTabPaths: ['/a', '/b'],
+    pinnedTabPaths: ['/a', '/b'],
+    pinnedTabGroups: [],
+  });
+  const result = reducer(state, {
+    kind: 'Command',
+    cmd: { kind: 'DissolvePinnedGroup', corrId: 'dg2', sourcePath: '/a' },
+  });
+  assert.equal(result.state, state);
+  assert.deepEqual(result.effects, []);
+});
+
+test('UnpinPinnedGroup removes all group members from pins while leaving sessions open', () => {
+  const state = stateWith({
+    openTabPaths: ['/a', '/b', '/x', '/c', '/d'],
+    pinnedTabPaths: ['/a', '/b', '/c', '/d'],
+    pinnedTabGroups: [['/a', '/b'], ['/c', '/d']],
+  });
+  const result = reducer(state, {
+    kind: 'Command',
+    cmd: { kind: 'UnpinPinnedGroup', corrId: 'ug1', sourcePath: '/a' },
+  });
+  assert.deepEqual(result.state.sessions.openTabPaths, ['/c', '/d', '/a', '/b', '/x']);
+  assert.deepEqual(result.state.sessions.pinnedTabPaths, ['/c', '/d']);
+  assert.deepEqual(result.state.sessions.pinnedTabGroups, [['/c', '/d']]);
+  assert.deepEqual(persistEffect(result)?.pinnedTabGroups, [['/c', '/d']]);
+});
+
+test('UnpinPinnedGroup is a no-op for a standalone source', () => {
+  const state = stateWith({
+    openTabPaths: ['/a', '/b'],
+    pinnedTabPaths: ['/a', '/b'],
+    pinnedTabGroups: [],
+  });
+  const result = reducer(state, {
+    kind: 'Command',
+    cmd: { kind: 'UnpinPinnedGroup', corrId: 'ug2', sourcePath: '/a' },
+  });
+  assert.equal(result.state, state);
+  assert.deepEqual(result.effects, []);
+});
+
 // ─── MovePinnedItem ────────────────────────────────────────────────────────
 
 test('MovePinnedItem reorders a standalone chip before a group without changing groups', () => {

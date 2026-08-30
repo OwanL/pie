@@ -7,7 +7,7 @@ import test from 'node:test';
 import { formatInterruptWatchdogDuration, handleBackendRequest, BACKEND_REQUEST_METHODS, type BackendRequestHandlerDeps } from '../../../src/backend/request-handler';
 import { handleSdkSessionEvent, type BackendSessionEventHandlerDeps } from '../../../src/backend/session-event-handler';
 import { BackendError, extractRequestError } from '../../../src/backend/server-io';
-import type { ModelSettings } from '../../../src/shared/protocol';
+import { PROVIDER_TOGGLES_ENV, type ModelSettings } from '../../../src/shared/protocol';
 import type { SessionContext } from '../../../src/backend/server-types';
 import type { SdkSessionEvent } from '../../../src/backend/sdk';
 import { ProviderGate } from '../../../src/backend/provider-gate';
@@ -636,6 +636,35 @@ test('message.send accepts requests, handles preflight rejection, and guards con
     'Prompt rejected before PI accepted the request.',
   );
   assert.equal(rejectedHarness.context.activeRequest, undefined);
+});
+
+test('message.send rejects retained models from explicitly disabled providers before enqueueing', async () => {
+  const previous = process.env[PROVIDER_TOGGLES_ENV];
+  process.env[PROVIDER_TOGGLES_ENV] = JSON.stringify({ 'openai-codex': false, ollama: true });
+  let promptCalls = 0;
+  const harness = createHarness({
+    sessionOverrides: {
+      model: { id: 'codex-model', provider: 'openai-codex' },
+      prompt: async () => { promptCalls += 1; },
+    },
+  });
+
+  try {
+    await assert.rejects(
+      handleBackendRequest(harness.deps, {
+        id: 'provider-disabled-send',
+        method: 'message.send',
+        params: { sessionPath: harness.context.sessionPath, text: 'Do not enqueue', inputs: [] },
+      }),
+      (error: unknown) => error instanceof BackendError && error.code === 'PROVIDER_DISABLED',
+    );
+    assert.equal(promptCalls, 0);
+    assert.equal(harness.context.activeRequest, undefined);
+    assert.deepEqual(harness.busyEvents, []);
+  } finally {
+    if (previous === undefined) delete process.env[PROVIDER_TOGGLES_ENV];
+    else process.env[PROVIDER_TOGGLES_ENV] = previous;
+  }
 });
 
 test('message.send ignores stale preflight settlement after session replacement', async () => {
@@ -1959,6 +1988,38 @@ test('message.replaceQueue clears and requeues edited messages in order with sta
   assert.deepEqual(harness.context.queuedLocalIds, ['local-1', 'local-2']);
 });
 
+test('message.replaceQueue refuses a stale host queue after delivery consumed an item', async () => {
+  let clearCalls = 0;
+  const steerCalls: string[] = [];
+  const harness = createHarness({
+    // local-1 has already crossed the SDK delivery boundary; the host has not
+    // received queuedDelivered yet and still submits both rows.
+    context: { queuedLocalIds: ['local-2'] },
+    sessionOverrides: {
+      isStreaming: true,
+      clearQueue: () => { clearCalls += 1; return { steering: [], followUp: [] }; },
+      steer: async (text: string) => { steerCalls.push(text); },
+    },
+  });
+
+  await assert.rejects(handleBackendRequest(harness.deps, {
+    id: 'replace-stale-queue', method: 'message.replaceQueue', params: {
+      sessionPath: harness.context.sessionPath,
+      messages: [
+        { localId: 'local-1', text: 'edited first', inputs: [] },
+        { localId: 'local-2', text: 'second', inputs: [] },
+      ],
+      fallbackMessages: [
+        { localId: 'local-1', text: 'first', inputs: [] },
+        { localId: 'local-2', text: 'second', inputs: [] },
+      ],
+    },
+  }), /QUEUE_CHANGED/);
+  assert.equal(clearCalls, 0, 'the authoritative remaining queue is untouched');
+  assert.deepEqual(steerCalls, []);
+  assert.deepEqual(harness.context.queuedLocalIds, ['local-2']);
+});
+
 test('message.replaceQueue restores the original queue when replacement fails', async () => {
   const steerCalls: string[] = [];
   let clearCalls = 0;
@@ -2344,6 +2405,7 @@ test('provider_gate.metrics returns live ProviderGate metrics when installed', a
       queuedRequests: 0,
       maxConcurrentRequests: 2,
       afterburnSeconds: 5,
+      queueWaitSeconds: 30,
       paused: false,
       pausedUntilMs: 0,
       strikeCount: 0,

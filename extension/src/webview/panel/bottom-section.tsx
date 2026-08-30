@@ -32,14 +32,18 @@ export interface BottomSectionProps {
   availableModelsStatus: ViewState['availableModelsStatus'];
   availableExtensions: ViewState['availableExtensions'];
   contextUsage: ViewState['contextUsage'];
+  initialContextEstimate: ViewState['initialContextEstimate'];
   prefs: ViewState['prefs'];
   mcpServers: ViewState['mcpServers'];
   mcpServersStatus?: ViewState['mcpServersStatus'];
   mcpPendingApply: ViewState['mcpPendingApply'];
+  mcpSessionServers: ViewState['mcpSessionServers'];
+  mcpSessionPendingApply: ViewState['mcpSessionPendingApply'];
   pruningSettings: ViewState['pruningSettings'];
   pruningCatalog: ViewState['pruningCatalog'];
   pruningResult: ViewState['pruningResult'];
   toolResultPruningSettings: ViewState['toolResultPruningSettings'];
+  sessionTitlesSettings: ViewState['sessionTitlesSettings'];
   providerGateStats: ProviderGateStats;
   systemPrompts: ViewState['systemPrompts'];
   transcript: ChatMessage[];
@@ -57,7 +61,7 @@ export interface BottomSectionProps {
   compacting: boolean;
   /** Most recent completed compaction for the active session (transient chip). */
   lastCompaction: ViewState['lastCompactionBySession'][string];
-  handlers: Pick<AppHandlers, 'handleSend' | 'handleRetrySend' | 'handleInterrupt' | 'handleAddComposerInput' | 'handleRemoveComposerInput' | 'handleModelChange' | 'handleSetPrefs' | 'handleMcpListRequested' | 'handleMcpSetServerEnabled' | 'handleSetPrivacyMode' | 'handleSetSystemPromptToggles' | 'handleSetPruningSettings' | 'handleSetToolResultPruningSettings'>;
+  handlers: Pick<AppHandlers, 'handleSend' | 'handleRetrySend' | 'handleInterrupt' | 'handleAddComposerInput' | 'handleRemoveComposerInput' | 'handleModelChange' | 'handleSetPrefs' | 'handleMcpListRequested' | 'handleMcpSetServerEnabled' | 'handleMcpSetServerEnabledForSession' | 'handleSetPrivacyMode' | 'handleSetSystemPromptToggles' | 'handleSetPruningSettings' | 'handleSetToolResultPruningSettings' | 'handleSetSessionTitlesSettings'>;
 }
 
 export const BottomSection = memo(function BottomSection({
@@ -77,14 +81,18 @@ export const BottomSection = memo(function BottomSection({
   availableModelsStatus,
   availableExtensions,
   contextUsage,
+  initialContextEstimate,
   prefs,
   mcpServers,
   mcpServersStatus,
   mcpPendingApply,
+  mcpSessionServers,
+  mcpSessionPendingApply,
   pruningSettings,
   pruningCatalog,
   pruningResult,
   toolResultPruningSettings,
+  sessionTitlesSettings,
   providerGateStats,
   systemPrompts,
   transcript,
@@ -129,11 +137,13 @@ export const BottomSection = memo(function BottomSection({
         availableModelsStatus={availableModelsStatus}
         availableExtensions={availableExtensions}
         contextUsage={contextUsage}
+        initialContextEstimate={initialContextEstimate}
         prefs={prefs}
         pruningSettings={pruningSettings}
         pruningCatalog={pruningCatalog}
         pruningResult={pruningResult}
         toolResultPruningSettings={toolResultPruningSettings}
+        sessionTitlesSettings={sessionTitlesSettings}
         providerGateStats={providerGateStats}
         systemPrompts={systemPrompts}
         transcript={transcript}
@@ -157,12 +167,16 @@ export const BottomSection = memo(function BottomSection({
         mcpServers={mcpServers}
         mcpServersStatus={mcpServersStatus}
         mcpPendingApply={mcpPendingApply}
+        mcpSessionServers={mcpSessionServers}
+        mcpSessionPendingApply={mcpSessionPendingApply}
         onMcpListRequested={handlers.handleMcpListRequested}
         onMcpSetServerEnabled={handlers.handleMcpSetServerEnabled}
+        onMcpSetServerEnabledForSession={handlers.handleMcpSetServerEnabledForSession}
         onSetPrivacyMode={handlers.handleSetPrivacyMode}
         onSetSystemPromptToggles={handlers.handleSetSystemPromptToggles}
         onSetPruningSettings={handlers.handleSetPruningSettings}
         onSetToolResultPruningSettings={handlers.handleSetToolResultPruningSettings}
+        onSetSessionTitlesSettings={handlers.handleSetSessionTitlesSettings}
       />
     </>
   );

@@ -33,7 +33,7 @@ export { initialArchState };
 
 // Handler modules
 import { handleCommand } from './reducer/command-handlers.js';
-import { handleEffectResult, handleModelSwitchConfirmResult, handlePreflightFailed, handlePreflightSuperseded, handleClearQueueResult, handleReplaceQueueResult, handleMcpServersUpdated } from './reducer/result-handlers.js';
+import { handleEffectResult, handleModelSwitchConfirmResult, handlePreflightFailed, handlePreflightSuperseded, handleClearQueueResult, handleReplaceQueueResult, handleMcpServersUpdated, handleMcpSessionServersUpdated } from './reducer/result-handlers.js';
 import { handleStreamingEvent, handleQueuedDelivered, handleAssistantMessageErrorStamped } from './reducer/streaming-handlers.js';
 import {
   handleSessionClosed,
@@ -66,6 +66,7 @@ import {
   handleBackendReadyChanged,
   handleBackendReadyWatchdogFired,
   handlePruningSettingsChanged,
+  handleSessionTitlesSettingsChanged,
   handleToolResultPruningSettingsChanged,
   handleWorkspaceCwdChanged,
   handleTranscriptPageLoaded,
@@ -75,7 +76,6 @@ import {
 import {
   handleOptimisticMessageInserted,
   handleOptimisticMessageRemoved,
-  handleFileChangeRemoved,
 } from './reducer/optimistic-handlers.js';
 import {
   handleCustomMessage,
@@ -133,6 +133,8 @@ export function reducer(state: ArchState, event: Event): ReducerResult {
     case 'OpenFileResult':
     case 'SetPruningSettingsResult':
     case 'SetToolResultPruningSettingsResult':
+    case 'SetSessionTitlesSettingsResult':
+    case 'SessionTitleResult':
     case 'ExtensionUiResponseResult': {
       return handleEffectResult(state, event);
     }
@@ -226,6 +228,10 @@ export function reducer(state: ArchState, event: Event): ReducerResult {
 
     case 'PruningSettingsChanged': {
       return handlePruningSettingsChanged(state, event);
+    }
+
+    case 'SessionTitlesSettingsChanged': {
+      return handleSessionTitlesSettingsChanged(state, event);
     }
 
     case 'ToolResultPruningSettingsChanged': {
@@ -368,6 +374,10 @@ export function reducer(state: ArchState, event: Event): ReducerResult {
       return handleMcpServersUpdated(state, event);
     }
 
+    case 'McpSessionServersUpdated': {
+      return handleMcpSessionServersUpdated(state, event);
+    }
+
     // ─── Optimistic UI events ──────────────────────────────────────────────
 
     case 'OptimisticMessageInserted': {
@@ -376,10 +386,6 @@ export function reducer(state: ArchState, event: Event): ReducerResult {
 
     case 'OptimisticMessageRemoved': {
       return handleOptimisticMessageRemoved(state, event);
-    }
-
-    case 'FileChangeRemoved': {
-      return handleFileChangeRemoved(state, event);
     }
 
     // ─── Result stubs ──────────────────────────────────────────────────────

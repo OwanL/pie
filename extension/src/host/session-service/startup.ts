@@ -67,6 +67,10 @@ async function loadToolResultPruningSettingsFromService(options: StartSessionBac
   await options.service.loadToolResultPruningSettings();
 }
 
+async function loadSessionTitlesSettingsFromService(options: StartSessionBackendOptions): Promise<void> {
+  await options.service.loadSessionTitlesSettings();
+}
+
 function computeRestorePlan(options: StartSessionBackendOptions) {
   const storedRawTabs = options.context.globalState.get<unknown[]>('openTabPaths') ?? [];
   // Skip fs.existsSync checks during restore — session files may be temporarily
@@ -501,12 +505,13 @@ export async function startSessionBackend(options: StartSessionBackendOptions): 
   dispatchArch({ kind: 'WorkspaceCwdChanged', workspaceCwd });
 
   applyStoredPrefs(options);
-  // Both settings families are independent and may each hit settings.json plus
+  // Settings families are independent and may each hit settings.json plus
   // VS Code globalState. Keep them on the same cold-start critical-path step
   // instead of paying their I/O latency serially before the backend can spawn.
   await Promise.all([
     loadPruningSettingsFromService(options),
     loadToolResultPruningSettingsFromService(options),
+    loadSessionTitlesSettingsFromService(options),
   ]);
 
   const {

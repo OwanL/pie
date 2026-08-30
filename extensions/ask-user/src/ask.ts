@@ -24,12 +24,7 @@ export async function runAsk(input: AskUserInput, port: AskPort): Promise<AskRes
     selectOptions.push(CUSTOM_SENTINEL);
   }
 
-  const picked = await port.ui.select(input.question, selectOptions, {
-    signal: port.signal,
-    allowCustom,
-    ...(port.toolCallId ? { toolCallId: port.toolCallId } : {}),
-    ...(input.reviewMeta ? { reviewMeta: input.reviewMeta } : {}),
-  });
+  const picked = await port.ui.select(input.question, selectOptions, buildPromptOptions(port, input, allowCustom));
   if (picked === undefined) {
     return cancelled(input.reviewMeta);
   }
@@ -41,16 +36,21 @@ export async function runAsk(input: AskUserInput, port: AskPort): Promise<AskRes
 
   // Metadata follows the custom-input fallback too, while the bridge still
   // routes both requests through the caller's reviewer session.
-  const custom = await port.ui.input('Your answer', undefined, {
-    signal: port.signal,
-    ...(port.toolCallId ? { toolCallId: port.toolCallId } : {}),
-    ...(input.reviewMeta ? { reviewMeta: input.reviewMeta } : {}),
-  });
+  const custom = await port.ui.input('Your answer', undefined, buildPromptOptions(port, input));
   if (!custom?.trim()) {
     return cancelled(input.reviewMeta);
   }
 
   return answered(custom.trim(), 'custom', input.reviewMeta);
+}
+
+function buildPromptOptions(port: AskPort, input: AskUserInput, allowCustom?: boolean) {
+  return {
+    signal: port.signal,
+    ...(allowCustom !== undefined ? { allowCustom } : {}),
+    ...(port.toolCallId ? { toolCallId: port.toolCallId } : {}),
+    ...(input.reviewMeta ? { reviewMeta: input.reviewMeta } : {}),
+  };
 }
 
 function answered(answer: string, source: 'option' | 'custom', reviewMeta?: ReviewHumanVerificationMetadata) {

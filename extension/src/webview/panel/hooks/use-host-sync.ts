@@ -26,6 +26,7 @@ import type {
   ModelInfo,
   PruningCatalog,
   PruningSettings,
+  SessionTitlesSettings,
   SessionUsageSnapshot,
   ToolResultPruningSettings,
   ViewState,
@@ -33,7 +34,7 @@ import type {
 } from '../../../shared/protocol';
 import type { ClientTransport, ClientConnectionState } from '../../transport/client-transport';
 import { pendingCommandStore } from '../../transport/pending-command-store';
-import { DEFAULT_CHAT_PREFS, DEFAULT_PRUNING_SETTINGS, DEFAULT_TOOL_RESULT_PRUNING_SETTINGS, EMPTY_TRANSCRIPT_WINDOW, PIE_BUILD_ID, WEBVIEW_PROTOCOL_VERSION } from '../../../shared/protocol';
+import { DEFAULT_CHAT_PREFS, DEFAULT_PRUNING_SETTINGS, DEFAULT_SESSION_TITLES_SETTINGS, DEFAULT_TOOL_RESULT_PRUNING_SETTINGS, EMPTY_TRANSCRIPT_WINDOW, PIE_BUILD_ID, WEBVIEW_PROTOCOL_VERSION } from '../../../shared/protocol';
 import { EMPTY_AGGREGATE_STATS } from '../../../shared/protocol';
 import { pickStable } from '../utils/view-state-stabilize';
 import { pickStableModelList } from '../utils/model-list-stabilize';
@@ -48,6 +49,7 @@ export const EMPTY_VIEW_STATE: ViewState = {
   pinnedTabPaths: [],
   pinnedTabGroups: [],
   runningSessionPaths: [],
+  generatingTitleSessionPaths: [],
   startingModelSessionPaths: [],
   compactingSessionPaths: [],
   lastCompactionBySession: {},
@@ -77,10 +79,13 @@ export const EMPTY_VIEW_STATE: ViewState = {
   availableModels: [],
   availableModelsStatus: 'authoritative',
   contextUsage: null,
+  initialContextEstimate: null,
   prefs: { ...DEFAULT_CHAT_PREFS },
   mcpServers: [],
   mcpServersStatus: 'loading',
   mcpPendingApply: false,
+  mcpSessionServers: [],
+  mcpSessionPendingApply: false,
   availableExtensions: [],
   fileChanges: [],
   fileChangesExpanded: false,
@@ -88,6 +93,7 @@ export const EMPTY_VIEW_STATE: ViewState = {
   pruningResult: null,
   pruningSettings: { ...DEFAULT_PRUNING_SETTINGS },
   toolResultPruningSettings: { ...DEFAULT_TOOL_RESULT_PRUNING_SETTINGS, rules: { ...DEFAULT_TOOL_RESULT_PRUNING_SETTINGS.rules } },
+  sessionTitlesSettings: { ...DEFAULT_SESSION_TITLES_SETTINGS },
   pruningCatalog: {
     skills: [],
     tools: [],
@@ -160,6 +166,7 @@ function useHydrateViewState() {
   const stablePrefsRef = useRef<ChatPrefs | null>(null);
   const stablePruningSettingsRef = useRef<PruningSettings | null>(null);
   const stableToolResultPruningSettingsRef = useRef<ToolResultPruningSettings | null>(null);
+  const stableSessionTitlesSettingsRef = useRef<SessionTitlesSettings | null>(null);
   const stablePruningCatalogRef = useRef<PruningCatalog | null>(null);
   const stableSessionUsageRef = useRef<SessionUsageSnapshot | null>(null);
   /** Reference-stabilised `availableModels` (see `model-list-stabilize.ts`);
@@ -183,6 +190,11 @@ function useHydrateViewState() {
       rules: { ...DEFAULT_TOOL_RESULT_PRUNING_SETTINGS.rules, ...(raw.toolResultPruningSettings?.rules ?? {}) },
     });
     stableToolResultPruningSettingsRef.current = toolResultPruningSettings;
+    const sessionTitlesSettings = pickStable(stableSessionTitlesSettingsRef.current, {
+      ...DEFAULT_SESSION_TITLES_SETTINGS,
+      ...raw.sessionTitlesSettings,
+    });
+    stableSessionTitlesSettingsRef.current = sessionTitlesSettings;
     const pruningCatalog = pickStable(stablePruningCatalogRef.current, {
       ...EMPTY_VIEW_STATE.pruningCatalog,
       ...raw.pruningCatalog,
@@ -208,6 +220,7 @@ function useHydrateViewState() {
       prefs,
       pruningSettings,
       toolResultPruningSettings,
+      sessionTitlesSettings,
       pruningCatalog,
       availableModels,
       sessionUsage,

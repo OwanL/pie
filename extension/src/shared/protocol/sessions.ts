@@ -1,4 +1,4 @@
-import type { ThinkingLevel, ModelSettings, ModelInfo, ContextWindowUsage } from './models.js';
+import type { ThinkingLevel, ModelSettings, ModelInfo, ContextWindowUsage, InitialContextEstimate } from './models.js';
 import type { ChatMessage, ToolCall } from './messages.js';
 import type { LiveTurnCheckpoint, ToolPreview } from '../live-pipeline-protocol.js';
 import type { SessionUsageSnapshot } from '../session-usage.js';
@@ -216,6 +216,9 @@ export interface SessionOpenedPayload {
   modelSettings?: ModelSettings;
   availableModels?: ModelInfo[];
   contextUsage?: ContextWindowUsage;
+  /** Fresh all-configured initial catalog estimate for an empty cold session.
+   * Omitted on helper failure/timeout and on every hot runtime snapshot. */
+  initialContextEstimate?: InitialContextEstimate;
   /** Complete durable billable usage for the branch, independent of the loaded transcript window. */
   sessionUsage?: SessionUsageSnapshot;
 }

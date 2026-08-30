@@ -6,6 +6,7 @@ import { createRequire, syncBuiltinESMExports } from 'node:module';
 import test from 'node:test';
 
 import { BackendServer } from '../../../src/backend';
+import { ProviderGate } from '../../../src/backend/provider-gate';
 import { getReviewSidecarFingerprint, readReviews } from '../../../src/backend/session-review-store';
 
 type PollingTestServer = {
@@ -20,6 +21,15 @@ type PollingTestServer = {
   startSessionCatalogPolling(intervalMs?: number): void;
   sessionCatalogPollTimer?: NodeJS.Timeout;
   reviewSidecarFingerprint: string;
+  authFingerprint: string;
+  modelsJsonFingerprint: string;
+  runtimePrefs: Record<string, unknown>;
+  workerRuntimeRouter?: {
+    refreshAuth(fingerprint: string, authPath: string): Promise<void>;
+    syncProviderPolicy(providers: Record<string, unknown>): Promise<void>;
+    syncCatalog(models: unknown[]): Promise<void>;
+    dispose(): Promise<void>;
+  };
   pollSessionCatalog(): Promise<void>;
   dispose(): Promise<void>;
 };
@@ -260,4 +270,62 @@ test('session inventory polling emits no list refresh when inventory inspection 
   await server.pollSessionCatalog();
   assert.equal(emissions, 0, 'a failed inventory read cannot publish a possibly truncated list');
   await server.dispose();
+});
+
+test('models polling retries the same fingerprint after a transient policy publication failure', async () => {
+  const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pie-model-policy-retry-'));
+  const server = createPollingTestServer();
+  server.agentDir = agentDir;
+  server.sessionCatalog.invalidateIfInventoryChanged = async () => false;
+  server.authFingerprint = 'missing';
+  server.modelsJsonFingerprint = 'stale-baseline';
+  server.runtimePrefs = {};
+  fs.writeFileSync(path.join(agentDir, 'models.json'), JSON.stringify({
+    providers: {
+      retryable: {
+        baseUrl: 'https://retryable.example/v1',
+        concurrency: { maxConcurrentRequests: 2, queueWaitSeconds: 30 },
+        models: [{ id: 'retry-model', name: 'Retry model' }],
+      },
+    },
+  }), 'utf8');
+
+  let policyCalls = 0;
+  let catalogCalls = 0;
+  server.workerRuntimeRouter = {
+    refreshAuth: async () => undefined,
+    syncProviderPolicy: async () => {
+      policyCalls += 1;
+      if (policyCalls === 1) throw new Error('transient policy publication failure');
+    },
+    syncCatalog: async (models) => {
+      catalogCalls += 1;
+      assert.deepEqual(models.map((model) => (model as { id?: string }).id), ['retry-model']);
+    },
+    dispose: async () => undefined,
+  };
+
+  ProviderGate.uninstall();
+  try {
+    server.startSessionCatalogPolling(60_000);
+    await server.pollSessionCatalog();
+    assert.equal(policyCalls, 1);
+    assert.equal(catalogCalls, 0);
+    assert.equal(server.modelsJsonFingerprint, 'stale-baseline',
+      'a failed publication must leave the changed fingerprint pending');
+
+    await server.pollSessionCatalog();
+    assert.equal(policyCalls, 2, 'the unchanged file fingerprint is retried');
+    assert.equal(catalogCalls, 1);
+    const committedFingerprint = server.modelsJsonFingerprint;
+    assert.notEqual(committedFingerprint, 'stale-baseline');
+
+    await server.pollSessionCatalog();
+    assert.equal(policyCalls, 2, 'a successfully committed fingerprint is not republished');
+    assert.equal(server.modelsJsonFingerprint, committedFingerprint);
+  } finally {
+    await server.dispose();
+    ProviderGate.uninstall();
+    fs.rmSync(agentDir, { recursive: true, force: true });
+  }
 });

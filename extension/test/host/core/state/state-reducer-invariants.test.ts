@@ -557,6 +557,42 @@ test('selectViewState: pruningResult is derived when showPruningMessages is enab
 test('selectViewState: contextUsage is null when no active session', () => {
   const vs = selectViewState(initialArchState);
   assert.equal(vs.contextUsage, null);
+  assert.equal(vs.initialContextEstimate, null);
+});
+
+test('selectViewState exposes a cold initial estimate only before user/provider usage', () => {
+  const sessionPath = '/cold';
+  const base = produce(initialArchState, (draft) => {
+    draft.sessions.activeSessionPath = sessionPath;
+    draft.sessions.sessions = [{ path: sessionPath, name: 'Cold', cwd: '/', modifiedAt: '', messageCount: 0 }];
+    draft.transcript.windowBySession[sessionPath] = {
+      totalCount: 0, loadedStart: 0, loadedEnd: 0,
+      hasOlder: false, hasNewer: false, isPartial: false, hasUserMessages: false,
+    };
+    draft.settings.initialContextEstimateBySession[sessionPath] = { tokens: 12_345, contextWindow: 200_000 };
+  });
+  assert.deepEqual(selectViewState(base).initialContextEstimate, { tokens: 12_345, contextWindow: 200_000 });
+
+  const withProviderUsage = produce(base, (draft) => {
+    draft.settings.contextUsageBySession[sessionPath] = { tokens: 10, contextWindow: 200_000, percent: 0.005 };
+  });
+  assert.equal(selectViewState(withProviderUsage).initialContextEstimate, null);
+
+  const withUserMessage = produce(base, (draft) => {
+    draft.transcript.bySession[sessionPath] = [{
+      id: 'user', role: 'user', createdAt: '', markdown: 'hello', status: 'completed',
+    }];
+  });
+  assert.equal(selectViewState(withUserMessage).initialContextEstimate, null);
+
+  const withDurableProviderUsage = produce(base, (draft) => {
+    draft.transcript.sessionUsageBySession ??= {};
+    draft.transcript.sessionUsageBySession[sessionPath] = { samples: [{
+      sourceId: 'assistant:provider-only', kind: 'assistant',
+      inputTokens: 10, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 11,
+    }] };
+  });
+  assert.equal(selectViewState(withDurableProviderUsage).initialContextEstimate, null);
 });
 
 test('selectViewState: multi-session isolation — transcript for one session does not leak to another', () => {
@@ -687,7 +723,7 @@ test('ViewState: all fields are present in initial state', () => {
     'sessions', 'openTabPaths', 'runningSessionPaths', 'unreadFinishedSessionPaths',
     'activeSession', 'transcript', 'transcriptWindow', 'transcriptLoaded', 'pendingComposerInputs',
     'activeRunSummary', 'runSummariesBySession', 'busy', 'notice', 'backendReady',
-    'workspaceCwd', 'systemPrompts', 'modelSettings', 'availableModels', 'contextUsage',
+    'workspaceCwd', 'systemPrompts', 'modelSettings', 'availableModels', 'contextUsage', 'initialContextEstimate',
     'prefs', 'fileChanges', 'readFilePaths', 'availableExtensions', 'pruningResult', 'pruningSettings',
     'pruningCatalog', 'editingMessageId', 'editingDraft', 'pendingExtensionUIRequest', 'pendingExtensionUIRequestsBySession',
     'compactingSessionPaths', 'lastCompactionBySession',
@@ -716,6 +752,7 @@ test('ViewState: all fields are present in initial state', () => {
   assert.equal(vs.modelSettings, null);
   assert.deepEqual(vs.pruningCatalog, { skills: [], tools: [] });
   assert.equal(vs.contextUsage, null);
+  assert.equal(vs.initialContextEstimate, null);
 });
 
 // ─── Chat prefs menu invariant ────────────────────────────────────────────────

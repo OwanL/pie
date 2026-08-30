@@ -1,1 +1,0 @@
-export function makeCatalog(seed,count=28){let s=seed>>>0;const rand=()=>((s=(s*1664525+1013904223)>>>0)/2**32);return Array.from({length:count},(_,i)=>({id:`feature_${seed}_${i}`,sizeKiB:12+Math.floor(rand()*170),computeMs:2+Math.floor(rand()*75),callsPerMinute:2+Math.floor(rand()*90),ttlSec:[15,30,60,120,300][Math.floor(rand()*5)],dependencyComputeMs:Math.floor(rand()*28)}));}

@@ -111,6 +111,9 @@ export function buildSlimSessionOpenedUnavailableFallback(
     },
     busy: payload.busy,
     ...(payload.runtimeReady !== undefined ? { runtimeReady: payload.runtimeReady } : {}),
+    ...(payload.initialContextEstimate !== undefined
+      ? { initialContextEstimate: payload.initialContextEstimate }
+      : {}),
     ...(payload.isCompacting !== undefined ? { isCompacting: payload.isCompacting } : {}),
     ...(recovery ? {
       liveTurnRecoveryIdentity: {

@@ -79,6 +79,9 @@ const { executeSingleMode } = __require(__modesPath) as typeof import("../src/mo
 const { resolvePhaseInactivityMs, PHASE_INACTIVITY_MS } = __require(
 	path.resolve("extensions/subagent/src/execute.ts"),
 ) as typeof import("../src/execute.js");
+const { subagentRuntime } = __require(
+	path.resolve("extensions/subagent/runner.ts"),
+) as typeof import("../runner.js");
 const execSingle = executeSingleMode as any;
 
 const agentDir = mkdtempSync(path.join(tmpdir(), "retry-agents-"));
@@ -298,6 +301,76 @@ test.after(() => {
 // ---------------------------------------------------------------------------
 // Retry-After / backoff / abort
 // ---------------------------------------------------------------------------
+
+test("the dispatched child runtime carries the effective selected bucket", async () => {
+	const models = [{ id: "model-small", provider: "provider-a", family: "family-a" }];
+	let observedBucket: string | undefined;
+	const response: any = await execSingle(
+		{ agent: "worker", task: "do work", bucket: "medium" },
+		makeCtx(models),
+		makeAgents(),
+		() => undefined,
+		{ depth: 0, trail: [] },
+		noOpDetails,
+		undefined,
+		noSignal(),
+		selCtx({
+			alwaysParentModel: false,
+			bucketAssignments: { small: assignedModels("model-small"), medium: [], frontier: [] },
+			registryModels: models,
+		}),
+		"t-effective-bucket-context",
+		undefined,
+		undefined,
+		undefined,
+		{
+			runAttempt: () => {
+				observedBucket = subagentRuntime.getStore()?.bucket;
+				return Promise.resolve(syntheticResult({ exitCode: 0, stopReason: "completed" }));
+			},
+		},
+	);
+
+	assert.equal(response.isError, undefined);
+	assert.equal(observedBucket, "small");
+});
+
+test("active-parent fallback inherits the caller bucket and leaves root children unclassified", async () => {
+	const models = [{ id: "parent-model", provider: "provider-a", family: "family-a" }];
+	const observed: Array<string | undefined> = [];
+	for (const runtimeCtx of [
+		{ depth: 1, trail: ["worker"], bucket: "medium" },
+		{ depth: 0, trail: [] },
+	]) {
+		await execSingle(
+			{ agent: "worker", task: "do work", bucket: "small" },
+			makeCtx(models),
+			makeAgents(),
+			() => undefined,
+			runtimeCtx,
+			noOpDetails,
+			undefined,
+			noSignal(),
+			selCtx({
+				alwaysParentModel: true,
+				bucketAssignments: { small: [], medium: [], frontier: [] },
+				registryModels: models,
+			}),
+			`t-parent-fallback-${observed.length}`,
+			undefined,
+			undefined,
+			undefined,
+			{
+				runAttempt: () => {
+					observed.push(subagentRuntime.getStore()?.bucket);
+					return Promise.resolve(syntheticResult({ exitCode: 0, stopReason: "completed" }));
+				},
+			},
+		);
+	}
+
+	assert.deepEqual(observed, ["medium", undefined]);
+});
 
 test("Retry-After hint is parsed, clamped, and recorded in attempt analytics", async () => {
 	const models = [

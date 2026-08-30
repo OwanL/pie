@@ -94,7 +94,11 @@ export function AppBody({ adapter }: AppBodyProps) {
   // equivalent of `contextMenu` — STATE_CONTRACT § Webview-Local State). Open
   // position is captured from the strip segment click; dismissed on
   // click-outside / Escape (handled inside the menu). `null` = closed.
-  const [deferredMenu, setDeferredMenu] = useState<{ x: number; y: number } | null>(null);
+  const [deferredMenu, setDeferredMenu] = useState<{
+    x: number;
+    y: number;
+    triggerEl: HTMLElement | null;
+  } | null>(null);
 
   // Brief H: bridge from the AppBody-level NoticeBanner's Retry button to the
   //  composer-level live draft. The composer registers its `sendAsRetry` here;
@@ -132,6 +136,12 @@ export function AppBody({ adapter }: AppBodyProps) {
     inlinePromptRequestCounts,
   ]);
 
+  // Context menus are renderer-local overlays owned by the session that
+  // opened them. Dismiss on selection changes so an old transcript menu never
+  // floats over the newly selected conversation; message actions also carry
+  // the captured session path as a routing backstop.
+  useEffect(() => setContextMenu(null), [derived.activeSessionPath]);
+
   // Brief E: clear the optimistic "stopping…" flag once the host confirms the
   // abort (`busy` flips false — the abort round-trip completed) or the active
   // session changes (transient UI clear per STATE_CONTRACT § Webview-Local
@@ -143,15 +153,15 @@ export function AppBody({ adapter }: AppBodyProps) {
   useEffect(() => {
     setInterrupting(false);
   }, [derived.activeSessionPath]);
-  // Clear the deferred-triggers popup when no triggers remain. The menu's own
-  // `onClose` (click-outside/Escape/resize) sets state to null, but the render
-  // guard `deferredTriggers.length > 0` can unmount it without calling onClose
-  // (e.g. the last trigger is cancelled via ×, or all triggers fire) — without
-  // this, a stale `{x,y}` would linger and re-open the menu at the old position
-  // when a new trigger is later registered, without a click.
+  // Clear the deferred-triggers popup when its source or data disappears. The
+  // menu's own `onClose` (click-outside/Escape/resize) sets state to null, but
+  // host state can remove the trigger or hide its status-strip source without
+  // calling onClose — without this, stale coordinates could re-open it later.
   useEffect(() => {
-    if (viewState.deferredTriggers.length === 0) setDeferredMenu(null);
-  }, [viewState.deferredTriggers.length]);
+    if (viewState.deferredTriggers.length === 0 || !derived.showSessionChrome || viewState.prefs.hideStatusStrip) {
+      setDeferredMenu(null);
+    }
+  }, [derived.showSessionChrome, viewState.deferredTriggers.length, viewState.prefs.hideStatusStrip]);
   // While an interrupt is in-flight, suppress the transcript's busy-driven
   // typing indicator within one frame (the host clears `busy` only after the
   // abort completes). The transcript components are unchanged — only the
@@ -196,6 +206,12 @@ export function AppBody({ adapter }: AppBodyProps) {
           prefs={viewState.prefs}
           onSetPrefs={handlers.handleSetPrefs}
           onOpenFile={handlers.handleOpenFile}
+          onEditMessage={(sessionPath, messageId) => {
+            postApplicationCommand({ type: 'startEdit', sessionPath, messageId });
+          }}
+          onTruncateAfter={(sessionPath, messageId) => {
+            postApplicationCommand({ type: 'truncateAfter', sessionPath, messageId });
+          }}
           onClose={closeContextMenu}
         />
       )}
@@ -217,6 +233,7 @@ export function AppBody({ adapter }: AppBodyProps) {
           pinnedTabPaths={viewState.pinnedTabPaths}
           pinnedTabGroups={viewState.pinnedTabGroups}
           runningSessionPaths={viewState.runningSessionPaths}
+          generatingTitleSessionPaths={viewState.generatingTitleSessionPaths}
           startingModelSessionPaths={viewState.startingModelSessionPaths}
           unreadFinishedSessionPaths={viewState.unreadFinishedSessionPaths}
           activeSession={viewState.activeSession}
@@ -231,9 +248,12 @@ export function AppBody({ adapter }: AppBodyProps) {
           onDuplicate={handlers.handleDuplicateTab}
           onRetryCreate={retryCreateOperation}
           onTogglePin={handlers.handleTogglePinTab}
+          onPinAndMergePinnedTab={handlers.handlePinAndMergePinnedTab}
           onGroupPinnedTab={handlers.handleGroupPinnedTab}
           onMergePinnedGroups={handlers.handleMergePinnedGroups}
           onUngroupPinnedTab={handlers.handleUngroupPinnedTab}
+          onDissolvePinnedGroup={handlers.handleDissolvePinnedGroup}
+          onUnpinPinnedGroup={handlers.handleUnpinPinnedGroup}
           onMovePinnedItem={handlers.handleMovePinnedItem}
           onRunAction={handlers.handleTabRunAction}
           deferredSessionPaths={derived.deferredSessionPaths}
@@ -293,14 +313,18 @@ export function AppBody({ adapter }: AppBodyProps) {
         availableModelsStatus={viewState.availableModelsStatus}
         availableExtensions={viewState.availableExtensions}
         contextUsage={viewState.contextUsage}
+        initialContextEstimate={viewState.initialContextEstimate}
         prefs={viewState.prefs}
         mcpServers={viewState.mcpServers}
         mcpServersStatus={viewState.mcpServersStatus}
         mcpPendingApply={viewState.mcpPendingApply}
+        mcpSessionServers={viewState.mcpSessionServers}
+        mcpSessionPendingApply={viewState.mcpSessionPendingApply}
         pruningSettings={viewState.pruningSettings}
         pruningCatalog={viewState.pruningCatalog}
         pruningResult={viewState.pruningResult}
         toolResultPruningSettings={viewState.toolResultPruningSettings}
+        sessionTitlesSettings={viewState.sessionTitlesSettings}
         providerGateStats={viewState.aggregateStats.providerGate}
         systemPrompts={viewState.systemPrompts}
         transcript={viewState.transcript}
@@ -321,7 +345,7 @@ export function AppBody({ adapter }: AppBodyProps) {
         <AggregateStatsStrip
           stats={viewState.aggregateStats}
           deferredTriggers={viewState.deferredTriggers}
-          onOpenDeferredMenu={(x, y) => setDeferredMenu({ x, y })}
+          onOpenDeferredMenu={(x, y, triggerEl) => setDeferredMenu({ x, y, triggerEl })}
         />
       )}
       {deferredMenu && viewState.deferredTriggers.length > 0 && (
@@ -330,6 +354,7 @@ export function AppBody({ adapter }: AppBodyProps) {
           sessionByPath={sessionByPath}
           x={deferredMenu.x}
           y={deferredMenu.y}
+          triggerEl={deferredMenu.triggerEl}
           onCancel={handlers.handleCancelDeferredTrigger}
           onClose={() => setDeferredMenu(null)}
         />

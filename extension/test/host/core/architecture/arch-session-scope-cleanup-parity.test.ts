@@ -128,6 +128,18 @@ test('handleSessionScopeCleared cleans interruptInFlightBySession', () => {
   assert.equal(result.state.sessions.interruptInFlightBySession['/a'], undefined);
 });
 
+test('handleSessionScopeCleared cleans interruptSettledSessionPaths', () => {
+  const state: ArchState = {
+    ...readyState,
+    sessions: {
+      ...readyState.sessions,
+      interruptSettledSessionPaths: ['/a', '/b'],
+    },
+  };
+  const result = reducer(state, sessionScopeCleared('/a', false));
+  assert.deepEqual(result.state.sessions.interruptSettledSessionPaths, ['/b']);
+});
+
 test('handleSessionScopeCleared cleans currentTurnBySession', () => {
   const state: ArchState = {
     ...readyState,
@@ -313,6 +325,7 @@ test('Both dispatch routes clean the same set of per-session keyed maps', () => 
       activeSessionPath: sp,
       analyticsFactorsBySession: { [sp]: null, [other]: null },
       interruptInFlightBySession: { [sp]: true, [other]: false },
+      interruptSettledSessionPaths: [sp, other],
     },
     settings: {
       ...readyState.settings,
@@ -351,6 +364,9 @@ test('Both dispatch routes clean the same set of per-session keyed maps', () => 
   const cleared = reducer(base, sessionScopeCleared(sp, true));
   // Route 2: evictSession directly (the full-eviction path).
   const evicted = evictSession(base, sp, { removeSummary: true, removeTabs: true });
+
+  assert.deepEqual(cleared.state.sessions.interruptSettledSessionPaths, [other]);
+  assert.deepEqual(evicted.state.sessions.interruptSettledSessionPaths, [other]);
 
   // Collect every per-session keyed map and check both results have no `/a`.
   const checks: Array<{ name: string; map: Record<string, unknown> }> = [

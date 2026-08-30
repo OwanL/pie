@@ -17,6 +17,11 @@ interface UseTranscriptScrollAnchorArgs {
   /** Browser scroll events expected from app-owned scrollTop writes. */
   programmaticScrollTargetRef: { current: number | null };
   totalSize: number;
+  /** Ordered row identities for detecting structure changes that happen to
+   * preserve the same aggregate virtual height. */
+  rowKeys: readonly string[];
+  /** Bounded message navigation owns scrollTop until its target settles. */
+  navigationActiveRef: { current: boolean };
   /** Pagination in flight — anchoring is suppressed to avoid fighting the
    *  dedicated load-older scroll-anchor restore. */
   isLoadingOlder: boolean;
@@ -32,6 +37,18 @@ export function shouldApplyScrollAnchorDelta(
   return !manualScrollActive
     && delta !== null
     && Math.abs(delta) >= RESTORE_EPSILON_PX;
+}
+
+export function didScrollAnchorGeometryChange(
+  previousTotalSize: number,
+  nextTotalSize: number,
+  previousRowKeys: readonly string[],
+  nextRowKeys: readonly string[],
+): boolean {
+  if (previousTotalSize !== nextTotalSize || previousRowKeys.length !== nextRowKeys.length) {
+    return true;
+  }
+  return previousRowKeys.some((key, index) => key !== nextRowKeys[index]);
 }
 
 function buildCandidates(items: ReadonlyArray<VirtualItem>): ScrollAnchorCandidate[] {
@@ -55,9 +72,10 @@ function buildCandidates(items: ReadonlyArray<VirtualItem>): ScrollAnchorCandida
  *
  * This hook pins the topmost visible virtual row: it continuously captures
  * that row's key + viewport-relative offset (on scroll and after each layout
- * commit), and whenever the total height changes while NOT auto-following (and
- * not paginating) it re-pins the row by adjusting `scrollTop` by the row's
- * shift. Bottom-following is left entirely to `useAutoFollow`; the two
+ * commit), and whenever total height or row identity changes while NOT
+ * auto-following (and not paginating) it re-pins the row by adjusting
+ * `scrollTop` by the row's shift. Bottom-following is left entirely to
+ * `useAutoFollow`; the two
  * regimes are mutually exclusive (autoFollow true → bottom-follow; false →
  * anchor).
  *
@@ -73,11 +91,14 @@ export function useTranscriptScrollAnchor({
   manualScrollActiveRef,
   programmaticScrollTargetRef,
   totalSize,
+  rowKeys,
+  navigationActiveRef,
   isLoadingOlder,
   isLoadingNewer,
 }: UseTranscriptScrollAnchorArgs) {
   const anchorRef = useRef<ScrollAnchorSnapshot | null>(null);
   const prevTotalSizeRef = useRef(totalSize);
+  const prevRowKeysRef = useRef<readonly string[]>(rowKeys);
 
   const captureAnchor = useCallback(() => {
     const el = scrollRef.current;
@@ -101,13 +122,20 @@ export function useTranscriptScrollAnchor({
   useLayoutEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
-    const heightChanged = totalSize !== prevTotalSizeRef.current;
+    const geometryChanged = didScrollAnchorGeometryChange(
+      prevTotalSizeRef.current,
+      totalSize,
+      prevRowKeysRef.current,
+      rowKeys,
+    );
     prevTotalSizeRef.current = totalSize;
+    prevRowKeysRef.current = rowKeys;
     const prev = anchorRef.current;
     if (
       prev
-      && heightChanged
+      && geometryChanged
       && !autoFollowRef.current
+      && !navigationActiveRef.current
       && !isLoadingOlder
       && !isLoadingNewer
     ) {
@@ -133,5 +161,5 @@ export function useTranscriptScrollAnchor({
       }
     }
     captureAnchor();
-  }, [totalSize, scrollRef, virtualizer, autoFollowRef, manualScrollActiveRef, programmaticScrollTargetRef, captureAnchor, isLoadingOlder, isLoadingNewer]);
+  }, [totalSize, rowKeys, scrollRef, virtualizer, autoFollowRef, manualScrollActiveRef, programmaticScrollTargetRef, navigationActiveRef, captureAnchor, isLoadingOlder, isLoadingNewer]);
 }

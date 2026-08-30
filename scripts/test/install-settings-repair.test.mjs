@@ -45,10 +45,10 @@ test('is idempotent across slash direction and case on Windows', () => {
 });
 
 test('leaves non-absolute and non-node_modules entries untouched', () => {
-  const settings = { extensions: ['npm:pi-web-access@0.13.0', 'relative/node_modules/x'] };
+  const settings = { extensions: ['npm:pi-web-access@0.27.0', 'relative/node_modules/x'] };
   const result = repairExtensionPaths(settings, { npmPrefix: '/p', platform: POSIX, existsSync: () => true });
   assert.equal(result.changed, false);
-  assert.deepEqual(result.settings.extensions, ['npm:pi-web-access@0.13.0', 'relative/node_modules/x']);
+  assert.deepEqual(result.settings.extensions, ['npm:pi-web-access@0.27.0', 'relative/node_modules/x']);
 });
 
 test('is a no-op when there are no extensions or no prefix', () => {

@@ -14,7 +14,7 @@ function appendRuntimeCalls(file: string, review: SessionReviewV2): void {
   const runtimes: ReviewerRuntime[] = [...review.proposals, review.consolidation, ...review.components, ...(review.adjudication ? [review.adjudication] : [])];
   for (const runtime of runtimes) {
     fs.appendFileSync(file, `${JSON.stringify({
-      type: 'message', message: { role: 'assistant', content: [{ type: 'toolCall', id: runtime.toolCallId, name: 'subagent', arguments: { agent: 'reviewer', bucket: runtime.requestedBucket, task: runtime.promptHash } }] },
+      type: 'message', message: { role: 'assistant', content: [{ type: 'toolCall', id: runtime.toolCallId, name: 'subagent', arguments: { agent: 'session-evaluator', bucket: runtime.requestedBucket, task: runtime.promptHash } }] },
     })}\n${JSON.stringify({
       type: 'message', message: { role: 'toolResult', toolCallId: runtime.toolCallId, toolName: 'subagent', details: { results: [{
         parentToolCallId: runtime.toolCallId, requestedBucket: runtime.requestedBucket, bucket: runtime.bucket, bucketDowngraded: runtime.bucketDowngraded,
@@ -42,10 +42,10 @@ test('list snapshots scope evidence and closure to eligible targets in the orche
   const savedTabs = process.env.PIE_OPEN_TABS;
   process.env.PIE_REVIEWS_DIR = dir;
   process.env.PIE_OPEN_TABS = JSON.stringify([
-    { path: files.target, name: 'target', pinned: true },
-    { path: files.outside, name: 'outside', pinned: false },
+    { path: files.target, name: 'target', pinned: true, isRunning: false },
+    { path: files.outside, name: 'outside', pinned: false, isRunning: false },
     { path: files.running, name: 'running', pinned: true, isRunning: true },
-    { path: files.self, name: 'self', pinned: true },
+    { path: files.self, name: 'self', pinned: true, isRunning: false },
   ]);
   let tool: any;
   registerSessionReviewer({ registerTool(value: unknown) { tool = value; } } as any);

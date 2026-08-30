@@ -13,6 +13,7 @@ import {
   setAskUserForSubagents,
   setBucketAssignments,
   setNestedAllowedBucket,
+  setSubagentBucketCanSpawn,
   setSubagentProviderDefaultEnabled,
   setSubagentProviderEnabled,
   toggleChatPref,
@@ -43,6 +44,7 @@ const prefs: ChatPrefs = {
   bashDefaultTimeout: 60,
   subagentBuckets: { small: [], medium: [], frontier: [] },
   subagentNestedAllowedBuckets: { small: true, medium: true, frontier: true },
+  subagentBucketCanSpawn: { small: true, medium: true, frontier: true },
   subagentDropTools: [],
   completionSoundVolume: 50,
   uiBaseFontSize: 13,
@@ -163,7 +165,8 @@ test('toggle helpers return partial pref patches without mutating source prefs',
     bashDefaultTimeout: 60,
     subagentBuckets: { small: [], medium: [], frontier: [] },
     subagentNestedAllowedBuckets: { small: true, medium: true, frontier: true },
-  subagentDropTools: [],
+    subagentBucketCanSpawn: { small: true, medium: true, frontier: true },
+    subagentDropTools: [],
     completionSoundVolume: 50,
     uiBaseFontSize: 13,
     uiComposerFontSize: 13,
@@ -350,6 +353,16 @@ test('setBucketAssignments preserves the other two buckets', () => {
     medium: [{ model: 'anthropic/sonnet', thinkingLevel: 'medium' }],
     frontier: [{ model: 'anthropic/opus', thinkingLevel: 'high' }],
   });
+});
+
+test('setSubagentBucketCanSpawn toggles one tier without mutating source prefs', () => {
+  const before = prefs.subagentBucketCanSpawn;
+  const patch = setSubagentBucketCanSpawn(prefs, 'medium', false);
+  assert.deepEqual(patch, {
+    subagentBucketCanSpawn: { small: true, medium: false, frontier: true },
+  });
+  assert.deepEqual(prefs.subagentBucketCanSpawn, { small: true, medium: true, frontier: true });
+  assert.equal(prefs.subagentBucketCanSpawn, before);
 });
 
 test('setNestedAllowedBucket toggles one tier without mutating source prefs', () => {

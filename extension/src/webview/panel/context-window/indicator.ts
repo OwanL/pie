@@ -7,6 +7,16 @@ export interface ContextWindowIndicatorState {
   severity: '' | 'warning' | 'critical';
 }
 
+/** Inclusive severity thresholds: ≥70% of the window is a warning, ≥85% is
+ *  critical. Inclusive so a window filled to exactly the threshold escalates. */
+const WARNING_RATIO = 0.7;
+const CRITICAL_RATIO = 0.85;
+
+function severityForRatio(usageRatio: number | null): ContextWindowIndicatorState['severity'] {
+  if (usageRatio === null) return '';
+  return usageRatio >= CRITICAL_RATIO ? 'critical' : usageRatio >= WARNING_RATIO ? 'warning' : '';
+}
+
 function formatReadableTokens(tokens: number): string {
   return formatTokens(tokens);
 }
@@ -22,12 +32,7 @@ export function buildContextWindowIndicatorState(summary: ContextWindowSummary):
   }
 
   const usageRatio = usedTokens !== null ? usedTokens / totalWindow : null;
-  const severity: ContextWindowIndicatorState['severity'] =
-    usageRatio !== null && usageRatio > 0.85
-      ? 'critical'
-      : usageRatio !== null && usageRatio > 0.7
-        ? 'warning'
-        : '';
+  const severity = severityForRatio(usageRatio);
 
   if (usedTokens === null) {
     return {
@@ -37,12 +42,18 @@ export function buildContextWindowIndicatorState(summary: ContextWindowSummary):
     };
   }
 
+  // Decision-useful compact chip: actual tokens used over the total window.
+  // Percentages are intentionally omitted — the raw token counts are what the
+  // user acts on. Exact used/remaining stay in the aria label and the rich
+  // tooltip. Estimated usage is identified in the accessible label and rich
+  // tooltip without adding a prefix to the compact chip.
   const compactUsed = formatCompactTokens(usedTokens);
+  const remaining = Math.max(totalWindow - usedTokens, 0);
   const ariaPrefix = usedKind === 'estimated' ? 'Estimated context window usage' : 'Context window usage';
 
   return {
     label: `${compactUsed} / ${formatCompactTokens(totalWindow)} tokens`,
-    ariaLabel: `${ariaPrefix}: ${formatReadableTokens(usedTokens)} of ${formatReadableTokens(totalWindow)} tokens used.`,
+    ariaLabel: `${ariaPrefix}: ${formatReadableTokens(usedTokens)} of ${formatReadableTokens(totalWindow)} tokens used; ${formatReadableTokens(remaining)} remaining.`,
     severity,
   };
 }

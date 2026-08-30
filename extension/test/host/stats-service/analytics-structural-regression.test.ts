@@ -17,7 +17,12 @@ import { EMPTY_PROVIDER_GATE_STATS } from '../../../src/shared/protocol/aggregat
 
 const RUN_COUNT = 2_000;
 const STORAGE_CEILING_BYTES = 8_000_000;
-const AGGREGATE_CEILING_BYTES = 150_000;
+// Covers the protocol's designed maximum: four bounded series (today cost /
+// input tokens / output tokens / week cost) at up to MAX_INTRADAY_CHART_POINTS
+// points each, with provider-qualified per-model segments, plus the base
+// rollups. Still far below the unbounded failure mode (one point per raw
+// sample instant).
+const AGGREGATE_CEILING_BYTES = 400_000;
 
 async function writeModelsJson(agentDir: string): Promise<void> {
   await fs.mkdir(agentDir, { recursive: true });
@@ -165,6 +170,8 @@ test('analytics fixed fixture stays structurally bounded in CI', async () => {
     assert.equal(aggregate.runCount, RUN_COUNT + 1);
     assert.ok(aggregate.todayTokenSeries.length <= MAX_INTRADAY_CHART_POINTS);
     assert.ok(aggregate.todayCostSeries.length <= MAX_INTRADAY_CHART_POINTS);
+    assert.ok(aggregate.todayInputTokenSeries.length <= MAX_INTRADAY_CHART_POINTS);
+    assert.ok(aggregate.weekCostSeries.length <= MAX_INTRADAY_CHART_POINTS);
     assert.equal(aggregate.costByProvider.length, 2, 'all-time cost breakdown covers both fixture providers');
     assert.equal(aggregate.todayCostByProvider.length, 2, 'today cost breakdown covers both fixture providers');
     assert.equal(

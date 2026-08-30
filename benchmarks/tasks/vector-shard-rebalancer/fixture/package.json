@@ -1,1 +1,0 @@
-{"name":"lyra-vector-rebalancer","private":true,"type":"module","scripts":{"test":"node --test test/*.test.mjs","evaluate":"node scripts/topology-evaluation.mjs"}}

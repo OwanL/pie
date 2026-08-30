@@ -48,6 +48,17 @@ test('classifies a non-JSON worker crash stack as error', () => {
   assert.equal(classifyWorkerStderrChunk(chunk), 'error');
 });
 
+test('classifies routine warm-bash rewrite telemetry as debug', () => {
+  const legacy = JSON.stringify({
+    source: 'pie:warm-bash:auto-prune',
+    event: 'rewrite',
+    before: 'grep -rn needle .',
+    after: 'grep --exclude-dir=node_modules -rn needle .',
+  });
+  assert.equal(classifyWorkerStderrChunk(legacy), 'debug');
+  assert.equal(classifyWorkerStderrChunk(JSON.stringify({ ...JSON.parse(legacy), level: 'debug' })), 'debug');
+});
+
 test('a multi-line chunk uses the most severe level', () => {
   const chunk = [
     structuredLine({ level: 'debug', scope: 'backend-session', event: 'tool_execution_start' }),

@@ -10,6 +10,7 @@ import {
   isSubagentProviderEnabled,
   setBucketAssignments,
   setNestedAllowedBucket,
+  setSubagentBucketCanSpawn,
   setSubagentDropTools,
   setSubagentProviderDefaultEnabled,
   toggleChatPref,
@@ -37,17 +38,17 @@ interface BucketDef {
 /** The three model buckets, in display order. Hints mirror the schema guidance
  *  the LLM sees for the `bucket` parameter. */
 const BUCKET_DEFS: readonly BucketDef[] = [
-  { key: 'small', label: 'Small', hint: 'Haiku-class busywork' },
-  { key: 'medium', label: 'Medium', hint: 'Sonnet-class main development' },
-  { key: 'frontier', label: 'Frontier', hint: 'Opus-class hardest problems' },
+  { key: 'small', label: 'Small', hint: 'Low-cost busywork' },
+  { key: 'medium', label: 'Medium', hint: 'Balanced main development' },
+  { key: 'frontier', label: 'Frontier', hint: 'Most capable for hardest problems' },
 ];
 
 /** Nested-bucket allowlist toggles, highest tier first (the one users most often
  *  want to disallow for nested sub-agents shown on top). */
 const NESTED_TOGGLE_DEFS: readonly { key: BucketKey; label: string }[] = [
-  { key: 'frontier', label: 'Frontier (Opus)' },
-  { key: 'medium', label: 'Medium (Sonnet)' },
-  { key: 'small', label: 'Small (Haiku)' },
+  { key: 'frontier', label: 'Frontier' },
+  { key: 'medium', label: 'Medium' },
+  { key: 'small', label: 'Small' },
 ];
 
 interface BucketModelsEditorProps {
@@ -474,7 +475,7 @@ export function SubagentSection({ prefs, onSetPrefs, availableModels, modelEntri
 
       <UiGroupLabel label="Nested bucket allowlist" />
       <div class="toolbar-settings-item-hint">
-        Which model tiers nested sub-agents (depth ≥ 1) may use. A requested tier that isn't allowed is downgraded to the highest allowed tier at or below it — e.g. disallow Frontier and an Opus request runs on Sonnet (or Haiku if only that's allowed). The root agent is never restricted.
+        Which model tiers nested sub-agents (depth ≥ 1) may use. A requested tier that isn't allowed is downgraded to the highest allowed tier at or below it — for example, a disallowed Frontier request runs on Medium (or Small if only that tier is allowed). The root agent is never restricted.
       </div>
       {NESTED_TOGGLE_DEFS.map((def) => {
         const enabled = prefs.subagentNestedAllowedBuckets[def.key] ?? true;
@@ -493,6 +494,31 @@ export function SubagentSection({ prefs, onSetPrefs, availableModels, modelEntri
               </svg>
             </span>
             <span class="toolbar-settings-item-label">Allow {def.label}</span>
+          </button>
+        );
+      })}
+
+      <UiGroupLabel label="Delegation by bucket" />
+      <div class="toolbar-settings-item-hint">
+        Choose which effective subagent tiers may create further subagents. Disabled tiers become leaves and receive an error if they call the subagent tool. The root agent is never restricted.
+      </div>
+      {NESTED_TOGGLE_DEFS.map((def) => {
+        const enabled = prefs.subagentBucketCanSpawn[def.key] ?? true;
+        return (
+          <button
+            key={def.key}
+            class={`toolbar-settings-item${enabled ? ' checked' : ''}`}
+            type="button"
+            role="checkbox"
+            aria-checked={enabled}
+            onClick={() => onSetPrefs(setSubagentBucketCanSpawn(prefs, def.key, !enabled))}
+          >
+            <span class="toolbar-settings-item-check" aria-hidden="true">
+              <svg width="14" height="14" viewBox="0 0 13 13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style={enabled ? '' : 'opacity:0'}>
+                <polyline points="2.5,6.5 5,9 10.5,3.5" />
+              </svg>
+            </span>
+            <span class="toolbar-settings-item-label">Allow {def.label} subagents to delegate</span>
           </button>
         );
       })}

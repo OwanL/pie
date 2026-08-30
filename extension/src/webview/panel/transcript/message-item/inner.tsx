@@ -9,6 +9,7 @@ import { InlineEditor } from '../inline-editor';
 import { CompactionSummary } from '../compaction-summary';
 import type { PruningHeaderState } from '../pruning';
 import { PruningHeaderPanel } from '../pruning-header';
+import { handleContextMenuKeyRequest } from '../../components/context-menu-key';
 import type { RenderToolCall, TranscriptContextMenuHandler } from '../types';
 import type { TurnActivityState } from '../activity';
 import { assistantPartsFromMessage, getRenderableUserParts } from '../parts';
@@ -38,6 +39,11 @@ interface MessageItemShellProps {
    *  gate the entrance animation so virtualized remounts don't replay it. */
   entered?: boolean;
   handleMessageClick: ((event: MouseEvent) => void) | undefined;
+  /** Row-level context-menu fallback (generic-message menu). Nested specific
+   *  menus run first via bubbling; this handler ignores already-handled
+   *  events (`defaultPrevented`) so it never overwrites a tool/file/reasoning
+   *  menu. */
+  onRowContextMenu?: (event: MouseEvent) => void;
   children: ComponentChildren;
 }
 
@@ -52,6 +58,7 @@ export function MessageItemShell({
   isEditing,
   entered,
   handleMessageClick,
+  onRowContextMenu,
   children,
 }: MessageItemShellProps) {
   const isSyntheticSend = role === 'user' && customType !== undefined;
@@ -86,7 +93,13 @@ export function MessageItemShell({
       data-entered={entered ? 'true' : undefined}
       data-editing={isEditing ? 'true' : undefined}
       data-streaming={isCurrentlyStreaming ? 'true' : undefined}
+      // Keyboard access to the row context menu: the shell is a tab stop so the
+      // ContextMenu key / Shift+F10 can open the generic message menu from the
+      // focused row (see components/context-menu-key.ts).
+      tabIndex={0}
       onClick={handleMessageClick}
+      onContextMenu={onRowContextMenu}
+      onKeyDown={(event) => handleContextMenuKeyRequest(event as KeyboardEvent)}
       title={status === 'queued'
         ? 'Queued for this turn — click to edit before delivery.'
         : isClickableUserMsg ? 'Click to edit' : undefined}

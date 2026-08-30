@@ -622,7 +622,7 @@ body
 	);
 });
 
-test("loadAgentsFromDir: empty tools string results in undefined tools", async (t) => {
+test("loadAgentsFromDir: explicit empty tools string remains a zero-tool allowlist", async (t) => {
 	const { discoverAgents } = await import("../agents.js");
 	const tmpDir = path.join(os.tmpdir(), `pi-agent-test-empty-tools-${Date.now()}`);
 	const agentsDir = path.join(tmpDir, "agents");
@@ -640,10 +640,10 @@ body
 	const result = discoverAgents(tmpDir, "project");
 	assert.equal(result.agents.length, 1);
 	assert.equal(result.agents[0].name, "no-tools");
-	assert.equal(result.agents[0].tools, undefined, "Empty tools string should result in undefined");
+	assert.deepEqual(result.agents[0].tools, [], "Explicit empty tools must not widen to unrestricted");
 });
 
-test("loadAgentsFromDir: whitespace-only tools results in undefined", async (t) => {
+test("loadAgentsFromDir: whitespace-only tools remains a zero-tool allowlist", async (t) => {
 	const { discoverAgents } = await import("../agents.js");
 	const tmpDir = path.join(os.tmpdir(), `pi-agent-test-ws-tools-${Date.now()}`);
 	const agentsDir = path.join(tmpDir, "agents");
@@ -660,7 +660,7 @@ body
 
 	const result = discoverAgents(tmpDir, "project");
 	assert.equal(result.agents.length, 1);
-	assert.equal(result.agents[0].tools, undefined, "Whitespace-only tools should result in undefined");
+	assert.deepEqual(result.agents[0].tools, [], "Explicit whitespace-only tools must not widen to unrestricted");
 });
 
 // ============================================================

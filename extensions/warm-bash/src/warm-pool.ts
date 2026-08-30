@@ -6,6 +6,9 @@ const READY_TOKEN = "__PI_READY__";
 /** Default warmup wait (ms) for a bash process to print the ready marker.
  *  Overridable via {@link WarmBashPool} opts (env: PIE_BASH_WARMUP_TIMEOUT_MS). */
 const DEFAULT_WARMUP_TIMEOUT_MS = 10_000;
+/** Let quick commands settle before starting replacement-process creation on
+ *  the extension-host thread. Longer commands still replenish in parallel. */
+const DEFAULT_SPECULATIVE_REFILL_DELAY_MS = 100;
 
 /** Live pool metrics surfaced to the host status strip via the stats registry. */
 export interface WarmBashPoolStats {
@@ -56,11 +59,13 @@ export class WarmBashPool {
   private inflight = 0;
   /** Children still warming — tracked so `dispose` can kill them promptly. */
   private warmingChildren = new Set<ChildProcess>();
+  private scheduledRefill: NodeJS.Immediate | undefined;
   private disabled = false;
   private size: number;
   private readonly shell: string;
   private readonly env: NodeJS.ProcessEnv;
   private readonly warmupTimeoutMs: number;
+  private readonly speculativeRefillDelayMs: number;
   private totalWarmupFailures = 0;
 
   constructor(opts: {
@@ -69,6 +74,9 @@ export class WarmBashPool {
     env?: NodeJS.ProcessEnv;
     /** Warmup wait (ms); 0 or omitted → {@link DEFAULT_WARMUP_TIMEOUT_MS}. */
     warmupTimeoutMs?: number;
+    /** Grace before refilling during an active command. Primarily injectable so
+     *  integration tests do not depend on host scheduling latency. */
+    speculativeRefillDelayMs?: number;
   }) {
     this.size = opts.size;
     this.env = opts.env ?? process.env;
@@ -76,6 +84,7 @@ export class WarmBashPool {
     this.warmupTimeoutMs = opts.warmupTimeoutMs && opts.warmupTimeoutMs > 0
       ? opts.warmupTimeoutMs
       : DEFAULT_WARMUP_TIMEOUT_MS;
+    this.speculativeRefillDelayMs = Math.max(0, opts.speculativeRefillDelayMs ?? DEFAULT_SPECULATIVE_REFILL_DELAY_MS);
     for (let i = 0; i < this.size; i++) this.refill();
   }
 
@@ -86,15 +95,22 @@ export class WarmBashPool {
     // calls and could strand them forever after a warmup failure.
     const worker = this.items.shift();
     if (!worker) {
-      this.refill();
+      this.scheduleRefill();
       throw new WarmExecError(this.disabled ? "pool-disposed" : "no-ready-worker");
     }
-    this.refill();
+
+    // Process creation has a synchronous CreateProcess + pipe-setup component
+    // on Windows. Give quick commands a chance to finish before paying it; for
+    // longer commands, replenish after a short grace so the pool refills while
+    // useful work is still running.
+    const speculativeRefill = setTimeout(() => this.refillToTarget(), this.speculativeRefillDelayMs);
+    speculativeRefill.unref();
     try {
       return await worker.run(opts);
     } finally {
+      clearTimeout(speculativeRefill);
       worker.kill();
-      this.refill();
+      this.scheduleRefill();
     }
   }
 
@@ -143,6 +159,24 @@ export class WarmBashPool {
       });
   }
 
+  private refillToTarget(): void {
+    while (!this.disabled && this.items.length + this.inflight < this.size) {
+      this.refill();
+    }
+  }
+
+  /** Refill in the next check phase, after the current warm exec promise and
+   *  its caller have settled. This keeps synchronous process creation off the
+   *  successful command's measured critical path. */
+  private scheduleRefill(): void {
+    if (this.disabled || this.scheduledRefill) return;
+    this.scheduledRefill = setImmediate(() => {
+      this.scheduledRefill = undefined;
+      this.refillToTarget();
+    });
+    this.scheduledRefill.unref();
+  }
+
   /** Live-tune the idle target. Kills excess idle workers immediately; any
    *  warming workers that were spawned under the old (higher) target are killed
    *  by {@link deliver} when they land. If the target rose, spawns up to the new
@@ -165,14 +199,18 @@ export class WarmBashPool {
 
   dispose(): void {
     this.disabled = true;
+    if (this.scheduledRefill) {
+      clearImmediate(this.scheduledRefill);
+      this.scheduledRefill = undefined;
+    }
     for (const w of this.items) w.kill();
     this.items = [];
     for (const child of this.warmingChildren) killShellOnly(child);
     this.warmingChildren.clear();
   }
 
-  /** Resolve once at least one warm worker is idle (or after timeout). Production
-   *  pre-warms at session start so the first call usually finds a ready worker. */
+  /** Resolve once at least one warm worker is idle (or after timeout). The
+   *  extension starts warming at activation so first use usually hits. */
   async ready(timeoutMs = 5_000): Promise<void> {
     if (this.items.length > 0) return;
     const deadline = Date.now() + timeoutMs;

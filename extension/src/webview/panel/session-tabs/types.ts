@@ -1,7 +1,25 @@
 import type { RefObject } from 'preact';
 import type { SessionTabRunAction } from './run-state';
 
-export type SessionTabContextAction = SessionTabRunAction | 'duplicate' | 'close' | 'pin' | 'unpin';
+export type SessionTabContextAction = SessionTabRunAction | 'duplicate' | 'close' | 'pin' | 'unpin' | 'pin-merge';
+
+/** The kind of tab-strip target that opened a context menu. Group members use
+ * the containing item's index so Remove from Group can preserve its former
+ * group-chip position. */
+export type SessionTabContextTarget =
+  | { kind: 'tab' }
+  | { kind: 'group-member'; groupItemIndex: number }
+  | { kind: 'group'; members: string[] };
+
+export interface SessionTabContextMenuState {
+  x: number;
+  y: number;
+  /** For ordinary tabs and group members this is the session path. For a
+   * group it is the first member, which is the host command identifier. */
+  tabPath: string;
+  target?: SessionTabContextTarget;
+  triggerEl?: HTMLElement | null;
+}
 
 export type TabDragCandidate = {
   pointerId: number;
@@ -61,6 +79,8 @@ export interface UseTabDragAndDropOptions {
   onClose: (path: string) => void;
   onDuplicate: (path: string) => void;
   onTogglePin: (tabPath: string) => void;
+  /** Pin an unpinned tab and merge it into the leftmost pinned item. */
+  onPinAndMerge: (tabPath: string) => void;
   /** Group a pinned tab with a target (Discord-style "drag onto"). */
   onGroupPinnedTab: (sourcePath: string, targetPath: string) => void;
   /** Merge two pinned groups (group chip onto group chip). */
@@ -73,12 +93,13 @@ export interface UseTabDragAndDropOptions {
 
 export interface UseTabDragAndDropResult {
   dragState: SessionTabDragState | null;
-  tabContextMenu: { x: number; y: number; tabPath: string } | null;
-  setTabContextMenu: (v: { x: number; y: number; tabPath: string } | null) => void;
+  tabContextMenu: SessionTabContextMenuState | null;
+  setTabContextMenu: (v: SessionTabContextMenuState | null) => void;
+  closeContextMenu: () => void;
   onPointerDown: (event: PointerEvent, sourceIndex: number, sourcePath: string) => void;
   onPinnedItemPointerDown: (event: PointerEvent, sourcePath: string, sourceIsGroupChip: boolean, sourceFromDropdown: boolean, itemIndex: number) => void;
   onClick: (tabPath: string) => void;
-  onContextMenu: (event: MouseEvent, tabPath: string) => void;
+  onContextMenu: (event: MouseEvent, tabPath: string, target?: SessionTabContextTarget, triggerEl?: HTMLElement | null) => void;
   onContextAction: (action: SessionTabContextAction, tabPath: string) => void;
   autoScrollTickRef: RefObject<() => void>;
   dragCandidateRef: RefObject<TabDragCandidate | null>;

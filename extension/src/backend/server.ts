@@ -1,5 +1,7 @@
 import * as fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
+
+import { sessionMcpOverridePath } from './mcp-session-config';
 import * as path from 'node:path';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
 
@@ -7,6 +9,7 @@ import { BoundedEventLoopHistogram } from '../shared/live-pipeline-trace';
 import { attachJsonlLineReader, JSONL_MAX_LINE_BYTES } from '../shared/jsonl';
 import { toErrorMessage, parseJsonOrThrow } from '../shared/error-message';
 import { updateSettingsJsonObject } from '../shared/settings-json-update';
+import { SESSION_SNAPSHOT_MAX_LINE_BYTES, sessionSnapshotLineBytes } from '../shared/transcript-window';
 import {
   PROTOCOL_VERSION,
   type DetailResult,
@@ -59,7 +62,7 @@ import {
   type SdkAuthStorage,
   type SdkModelRegistry,
 } from './sdk';
-import { ProviderGate } from './provider-gate.js';
+import { ProviderGate, type ProviderConcurrencyConfig } from './provider-gate.js';
 import { CreateOperationLedger } from './create-operation-ledger';
 import { BackendError, extractRequestError, log, responseError, responseOk, writeStdout } from './server-io';
 import {
@@ -76,6 +79,7 @@ import { backendTrace, backendError, backendInfo, backendWarn, backendLog, class
 import { isCoordinatorOperationAllowed } from './coordinator-operations';
 import { ColdSessionStore, StaleColdSessionLeaseError, type ColdSessionManagerHandle } from './cold-session-store';
 import { ColdBrowseHelperClient } from './cold-browse-helper-client';
+import { InitialContextEstimateClient } from './initial-context-estimate-client';
 import { DurableDetailStore, type ResolvedDurableDetail } from './durable-detail-store';
 import type { BackendDetailFence, LiveSubagentDetailAddress } from '../shared/protocol/subagent-detail';
 import { WorkerSupervisor } from './worker-supervisor';
@@ -134,6 +138,45 @@ function timed<T>(label: string, op: () => T | Promise<T>): T | Promise<T> {
     backendTrace('timing', 'op.failed', { level: 'warn', label, durationMs: Date.now() - start, error: toErrorMessage(error) });
     throw error;
   }
+}
+
+/** Convert models.json concurrency declarations into the JSON policy shared by
+ * the real cross-worker admission authority. URL prefixes stay in the payload
+ * so workers can classify internal pruning/failover fetches by their actual
+ * destination instead of blindly charging the root session's provider. */
+export function providerPoliciesFromConfigs(configs: readonly ProviderConcurrencyConfig[]): WorkerJsonObject {
+  return Object.fromEntries(configs.map((config) => [config.provider, {
+    maxConcurrentRequests: config.maxConcurrentRequests,
+    queueWaitSeconds: config.queueWaitSeconds ?? 30,
+    headerWaitSeconds: (config.headerWaitSeconds ?? 0) > 0 ? config.headerWaitSeconds! : 120,
+    streamIdleTimeoutSeconds: 120,
+    afterburnSeconds: config.afterburnSeconds ?? 0,
+    ...(config.baseUrl ? { baseUrl: config.baseUrl } : {}),
+    ...(config.baseUrls && config.baseUrls.length > 0 ? { baseUrls: [...config.baseUrls] } : {}),
+  }])) as WorkerJsonObject;
+}
+
+export function mergeProviderPolicies(base: WorkerJsonObject, overrides: unknown): WorkerJsonObject {
+  const overrideMap = overrides && typeof overrides === 'object' && !Array.isArray(overrides)
+    ? overrides as WorkerJsonObject
+    : {};
+  const providers = new Set([...Object.keys(base), ...Object.keys(overrideMap)]);
+  return Object.fromEntries([...providers].map((provider) => {
+    const basePolicy = base[provider];
+    const override = overrideMap[provider];
+    const baseRecord = basePolicy && typeof basePolicy === 'object' && !Array.isArray(basePolicy)
+      ? basePolicy as WorkerJsonObject
+      : {};
+    const overrideRecord = override && typeof override === 'object' && !Array.isArray(override)
+      ? override as WorkerJsonObject
+      : {};
+    const normalizedOverride = { ...overrideRecord };
+    // Public settings use zero to mean "restore the provider default" for the
+    // header phase. Resolve that against the current models.json base snapshot,
+    // not whichever older override happens to be installed in the authority.
+    if (normalizedOverride.headerWaitSeconds === 0) delete normalizedOverride.headerWaitSeconds;
+    return [provider, { ...baseRecord, ...normalizedOverride }];
+  })) as WorkerJsonObject;
 }
 
 /** Module-level guard: install the fatal handlers at most once even if
@@ -200,6 +243,9 @@ export class BackendServer {
    * host-local visual transition after its durable read completes. */
   private viewedSessionRevision = 0;
   private runtimePrefs: WorkerJsonObject = {};
+  /** models.json is the baseline provider policy. Runtime preferences are
+   * sparse overrides and must never erase these configured capacities. */
+  private providerBasePolicies: WorkerJsonObject = {};
   private readonly sessionCatalog: SessionCatalog;
   /** One runtime-free store is installed after SDK load and shares the
    * coordinator generation/catalog/settings authority. */
@@ -264,9 +310,15 @@ export class BackendServer {
   private readonly workerEntryPath?: string;
   private readonly coldBrowseHelperEntryPath?: string;
   private coldBrowseHelper?: ColdBrowseHelperClient;
+  private readonly initialContextEstimateEntryPath?: string;
+  private initialContextEstimateClient?: InitialContextEstimateClient;
   private workerSupervisor?: WorkerSupervisor;
   private sessionOwnershipAuthority?: SessionOwnershipAuthority;
   private workerRuntimeRouter?: WorkerRuntimeRouter;
+  /** Highest coordinator-owned registry revision published to the legacy
+   * process env mirror. Broadcast acknowledgements can settle out of order,
+   * so completion order must never be allowed to roll this mirror back. */
+  private mirroredSessionRegistryRevision = 0;
   private durableDetailStore?: DurableDetailStore;
   private authPath = '';
   private hostWatchdogTimer?: ReturnType<typeof setInterval>;
@@ -302,6 +354,8 @@ export class BackendServer {
     /** Production explicitly supplies the bundled helper. Direct test
      * constructions remain coordinator-only unless they opt in. */
     coldBrowseHelperEntryPath?: string;
+    /** Bundled one-shot full-runtime inventory worker. */
+    initialContextEstimateEntryPath?: string;
     /** Test seam for causally blocking a cold catalog operation at the public
      * JSONL/writer boundary. Production always constructs the default. */
     sessionCatalog?: SessionCatalog;
@@ -316,6 +370,7 @@ export class BackendServer {
     this.lifetimeFd = options.lifetimeFd;
     this.workerEntryPath = options.workerEntryPath;
     this.coldBrowseHelperEntryPath = options.coldBrowseHelperEntryPath;
+    this.initialContextEstimateEntryPath = options.initialContextEstimateEntryPath;
     this.sessionCatalog = options.sessionCatalog ?? new SessionCatalog({
       onCatalogChanged: () => {
         void this.emitSessionListChanged();
@@ -399,6 +454,14 @@ export class BackendServer {
     // artifact. The coordinator owns the patching barrier and workers only
     // validate it.
     const sdkPatchIdentity = await ensureSdkPatchBarrier(this.sdkPath);
+    if (this.initialContextEstimateEntryPath) {
+      this.initialContextEstimateClient = new InitialContextEstimateClient({
+        entryPath: this.initialContextEstimateEntryPath,
+        sdkPath: this.sdkPath,
+        sdkPatchIdentity,
+        onDiagnostic: (chunk) => backendWarn('backend-initial-context-inventory', 'worker diagnostic', { chunk }),
+      });
+    }
     if (this.coldBrowseHelperEntryPath) {
       this.coldBrowseHelper = new ColdBrowseHelperClient({
         entryPath: this.coldBrowseHelperEntryPath,
@@ -420,6 +483,14 @@ export class BackendServer {
       workerEntryPath: this.workerEntryPath!,
       coordinatorGeneration: this.backendGeneration,
       sdkPatchIdentity,
+      mcpConfigPathFor: (sessionPath) => {
+        const overridePath = sessionMcpOverridePath(sessionPath);
+        try {
+          return fsSync.existsSync(overridePath) ? overridePath : undefined;
+        } catch {
+          return undefined;
+        }
+      },
       onWorkerStateChange: (rootSessionPath, snapshot, identity) => {
         void this.workerRuntimeRouter?.handleWorkerStateChange(rootSessionPath, snapshot, identity).catch((error) => {
           backendError('backend-worker', 'runtime state reconciliation failed', {
@@ -498,6 +569,7 @@ export class BackendServer {
         const raw = await fs.readFile(modelsJsonPath, 'utf8');
         const modelsJson = JSON.parse(raw);
         const configs = ProviderGate.resolveConfigs(modelsJson);
+        this.providerBasePolicies = providerPoliciesFromConfigs(configs);
         // Install whenever at least one provider ships a concurrency block.
         // The gate matches outbound requests by each config's `baseUrl`, so
         // only providers in `configs` are gated; user overrides via
@@ -580,7 +652,16 @@ export class BackendServer {
           const retainedKey = this.coldManagerKey(sessionPath);
           const retained = this.coldSessionManagerHandles.get(retainedKey);
           const exactSessionPath = retained?.handle.sessionPath ?? sessionPath;
-          const openedPayload = await this.buildSessionOpenedPayload(exactSessionPath, undefined, 'tail');
+          const openedPayload = await this.buildSessionOpenedPayload(
+            exactSessionPath,
+            undefined,
+            'tail',
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            false,
+          );
           return {
             sdkPath: this.sdkPath,
             agentDir: this.agentDir,
@@ -609,6 +690,10 @@ export class BackendServer {
           };
         },
       });
+      await this.workerRuntimeRouter.syncProviderPolicy(mergeProviderPolicies(
+        this.providerBasePolicies,
+        this.runtimePrefs.providerConcurrency,
+      ));
       this.authFingerprint = await fs.stat(this.authPath || path.join(this.agentDir, 'auth.json'))
         .then((stat) => `${stat.size}:${stat.mtimeMs}`)
         .catch(() => 'missing');
@@ -1325,6 +1410,7 @@ export class BackendServer {
     operationId?: string,
     operationAttempt?: number,
     systemPromptDisabledEntries?: readonly string[],
+    includeInitialContextEstimate = true,
   ): Promise<SessionOpenedPayload> {
     return await timed('buildSessionOpenedPayload', async () => {
       const catalog = await loadConfiguredModels(this.agentDir, this.modelRegistry);
@@ -1346,6 +1432,34 @@ export class BackendServer {
         const payload = retained
           ? await store.openHandleSnapshot(retained.handle, options)
           : await store.openSnapshot(sessionPath, options);
+        if (includeInitialContextEstimate
+          && payload.runtimeReady === false
+          && payload.transcriptWindow.hasUserMessages === false
+          && payload.contextUsage === undefined
+          && (payload.sessionUsage?.samples.length ?? 0) === 0
+          && this.initialContextEstimateClient) {
+          const selectedModelId = payload.session.modelId ?? modelSettings.defaultModel;
+          const selectedProvider = payload.session.provider ?? modelSettings.defaultProvider
+            ?? availableModels.find((model) => model.id === selectedModelId)?.provider;
+          if (selectedModelId && selectedProvider) {
+            const estimate = await this.initialContextEstimateClient.estimate({
+              cwd: payload.session.cwd || this.startupCwd,
+              agentDir: this.agentDir,
+              model: { provider: selectedProvider, id: selectedModelId },
+            });
+            if (estimate) {
+              // Preserve the cold store's WeakMap ownership stamp by mutating
+              // the already-stamped object. The field is omitted instead of
+              // violating the producer envelope when the fitted snapshot has
+              // no remaining headroom.
+              const transportShape = transport ?? { kind: 'event' as const, event: 'session.opened' };
+              const candidate = { ...payload, initialContextEstimate: estimate };
+              if (sessionSnapshotLineBytes(candidate, transportShape) <= SESSION_SNAPSHOT_MAX_LINE_BYTES) {
+                payload.initialContextEstimate = estimate;
+              }
+            }
+          }
+        }
         this.registerColdResult(payload);
         return payload;
       } catch (error) {
@@ -1364,6 +1478,7 @@ export class BackendServer {
               operationId,
               operationAttempt,
               systemPromptDisabledEntries,
+              includeInitialContextEstimate,
             );
           }
           throw new BackendError(
@@ -1488,11 +1603,24 @@ export class BackendServer {
             .then((stat) => `${stat.size}:${stat.mtimeMs}`)
             .catch(() => 'missing');
           if (modelsFingerprint !== this.modelsJsonFingerprint) {
-            this.modelsJsonFingerprint = modelsFingerprint;
+            const rawModels = JSON.parse(await fs.readFile(modelsPath, 'utf8'));
+            const providerConfigs = ProviderGate.resolveConfigs(rawModels);
+            this.providerBasePolicies = providerPoliciesFromConfigs(providerConfigs);
+            if (providerConfigs.length > 0) ProviderGate.install(providerConfigs, 120);
+            else ProviderGate.uninstall();
+            await this.workerRuntimeRouter.syncProviderPolicy(mergeProviderPolicies(
+              this.providerBasePolicies,
+              this.runtimePrefs.providerConcurrency,
+            ));
             const catalog = await loadConfiguredModels(this.agentDir, this.modelRegistry);
-            if (catalog.ok) {
-              await this.workerRuntimeRouter.syncCatalog(catalog.models as unknown as WorkerJsonValue[]);
+            if (!catalog.ok) {
+              throw new Error(`Configured model catalog reload failed: ${catalog.error}`);
             }
+            await this.workerRuntimeRouter.syncCatalog(catalog.models as unknown as WorkerJsonValue[]);
+            // Commit only after every authority publication succeeds. A
+            // transient parse/sync failure must see the same fingerprint as
+            // pending on the next poll rather than suppressing its own retry.
+            this.modelsJsonFingerprint = modelsFingerprint;
           }
         } catch (error) {
           backendWarn('backend-session', 'modelsJsonPoll.failed', {
@@ -1709,6 +1837,8 @@ export class BackendServer {
   private async forgetSession(sessionPath: string): Promise<void> {
     this.forgottenSessionPaths.add(sessionPath);
     this.browsePreviousSessionFiles.delete(sessionPath);
+    // A session-scoped MCP override artifact must not outlive its session.
+    await fs.rm(sessionMcpOverridePath(sessionPath), { force: true }).catch(() => undefined);
     const store = this.initializeColdSessionStore();
     try {
       await this.runColdSessionMutation(sessionPath, async () => {
@@ -1835,6 +1965,9 @@ export class BackendServer {
         }
         if (request.method === 'session.forget' && sessionPath && router.hasHotOwner(sessionPath)) {
           await router.retire(sessionPath, 'session forgotten');
+          // The shared `.pi/mcp.json`-layer overrides cannot leak here, but a
+          // session-scoped artifact must die with its session.
+          await fs.rm(sessionMcpOverridePath(sessionPath), { force: true }).catch(() => undefined);
         } else if (sessionPath && WorkerRuntimeRouter.isHotOperation(request.method)) {
           if (request.method === 'extension_ui.response' && !router.hasHotOwner(sessionPath)) {
             // A response for a session whose worker is gone (crashed, retired,
@@ -1871,6 +2004,16 @@ export class BackendServer {
       },
       ensureSessionContext: () => {
         throw new BackendError('ISOLATED_RUNTIME_ROUTING_UNAVAILABLE', 'The coordinator does not own in-process session runtimes.');
+      },
+      recycleSessionRuntime: async (sessionPath, reason) => {
+        const runtimeRouter = this.workerRuntimeRouter;
+        if (!runtimeRouter || !runtimeRouter.hasHotOwner(sessionPath)) return false;
+        // Never retire a worker with a request in flight (owner of a turn whose
+        // tool calls / message stream still reference its process).
+        const route = runtimeRouter.getRoute(sessionPath);
+        if (route.state !== 'hot' || route.checkpoint.requestId !== undefined) return false;
+        await runtimeRouter.retire(sessionPath, reason);
+        return true;
       },
       createColdSession: (cwd) => {
         const handle = this.initializeColdSessionStore().create({ cwd });
@@ -1971,6 +2114,26 @@ export class BackendServer {
         this.coldSessionStore?.transferOwnershipStamp(source, target);
       },
       emit: (event, payload) => this.emit(event, payload),
+      syncOpenTabsRegistry: async (tabs, sourceRevision) => {
+        const router = this.workerRuntimeRouter;
+        if (!router) {
+          throw new BackendError(
+            'ISOLATED_RUNTIME_ROUTING_UNAVAILABLE',
+            'The coordinator cannot publish the session registry without worker routing.',
+          );
+        }
+        const normalized = JSON.parse(JSON.stringify(tabs)) as WorkerJsonValue[];
+        const outcome = await router.syncSessionRegistry(normalized, sourceRevision);
+        if (!outcome.applied || outcome.revision <= this.mirroredSessionRegistryRevision) return;
+        // Keep the coordinator mirror for diagnostics/legacy in-process
+        // consumers. Ready hot workers receive the same snapshot through the
+        // auxiliary latest-wins sync; a missed acknowledgement retries without
+        // making this host publication or an active turn wait. The synchronous
+        // revision claim fences an older publication behind a newer one.
+        this.mirroredSessionRegistryRevision = outcome.revision;
+        process.env['PIE_OPEN_TABS'] = JSON.stringify(normalized);
+        process.env['PIE_OPEN_TABS_REVISION'] = String(outcome.revision);
+      },
       emitBusyChanged: () => undefined,
       emitContextUsageChanged: () => undefined,
       emitSessionListChanged: () => this.emitSessionListChanged(),
@@ -1986,6 +2149,7 @@ export class BackendServer {
       },
       readModelSettings: () => this.readModelSettings(),
       writeModelSettings: (updates) => this.writeModelSettings(updates),
+      getProviderGateMetrics: () => this.workerRuntimeRouter?.getProviderGateMetrics(),
       onRequestValidated,
       suppressRequestTrace: true,
       livePipelineTraceToggleGeneration,
@@ -2001,11 +2165,8 @@ export class BackendServer {
       && result && typeof result === 'object' && !Array.isArray(result)) {
       this.runtimePrefs = JSON.parse(JSON.stringify(result)) as WorkerJsonObject;
       await this.workerRuntimeRouter?.syncRuntimePrefs(this.runtimePrefs);
-      const providerConcurrency = this.runtimePrefs.providerConcurrency;
       await this.workerRuntimeRouter?.syncProviderPolicy(
-        providerConcurrency && typeof providerConcurrency === 'object' && !Array.isArray(providerConcurrency)
-          ? providerConcurrency as WorkerJsonObject
-          : {},
+        mergeProviderPolicies(this.providerBasePolicies, this.runtimePrefs.providerConcurrency),
       );
     }
     if (request.method === 'settings.set'
@@ -2058,6 +2219,15 @@ export class BackendServer {
     this.stopHostLifetimeWatch();
     this.stopEventLoopMonitor();
     let workerSupervisorDisposeError: unknown;
+    if (this.initialContextEstimateClient) {
+      try {
+        await this.initialContextEstimateClient.dispose();
+        this.initialContextEstimateClient = undefined;
+      } catch (error) {
+        workerSupervisorDisposeError ??= error;
+        log(`initial context inventory disposal failed closed: ${toErrorMessage(error)}`);
+      }
+    }
     if (this.coldBrowseHelper) {
       try {
         await this.coldBrowseHelper.dispose();

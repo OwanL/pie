@@ -43,6 +43,7 @@ export function useTabDragAndDrop({
   onClose,
   onDuplicate,
   onTogglePin,
+  onPinAndMerge,
   onGroupPinnedTab,
   onMergePinnedGroups,
   onUngroupPinnedTab,
@@ -197,10 +198,11 @@ export function useTabDragAndDrop({
     syncGhostPosition,
   });
 
-  const { tabContextMenu, setTabContextMenu, onContextMenu, onContextAction } = useTabContextMenu({
+  const { tabContextMenu, setTabContextMenu, closeContextMenu, onContextMenu, onContextAction } = useTabContextMenu({
     onDuplicate,
     onClose,
     onTogglePin,
+    onPinAndMerge,
     onRunAction,
   });
 
@@ -231,6 +233,7 @@ export function useTabDragAndDrop({
     dragState,
     tabContextMenu,
     setTabContextMenu,
+    closeContextMenu,
     onPointerDown,
     onPinnedItemPointerDown,
     onClick,

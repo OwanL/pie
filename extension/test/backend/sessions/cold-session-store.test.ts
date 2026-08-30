@@ -1002,6 +1002,65 @@ test('a failed atomic cold model-settings commit preserves durable bytes and the
   }
 });
 
+test('a transient atomic-replace denial retries before publishing cold model settings', async () => {
+  const h = await makeHarness();
+  const SessionManager = await getRealSessionManager();
+  try {
+    const sessionPath = path.join(h.sessionDir, 'cold-settings-retry.jsonl');
+    await writeJsonl(sessionPath, [
+      header(h.root, 3, 'cold-settings-retry'),
+      userEntry('root', null, 'keep'),
+    ]);
+    let batchCalls = 0;
+    const store = new ColdSessionStore({
+      sdk: {
+        SessionManager: {
+          open(targetPath: string) {
+            const manager = SessionManager.open(targetPath);
+            const originalBatch = manager.appendPieModelSettingsChange.bind(manager);
+            manager.appendPieModelSettingsChange = (...args: unknown[]) => {
+              batchCalls += 1;
+              if (batchCalls === 1) {
+                const error = new Error('injected transient atomic replace denial') as NodeJS.ErrnoException;
+                error.code = 'EPERM';
+                error.syscall = 'rename';
+                throw error;
+              }
+              return originalBatch(...args);
+            };
+            return manager;
+          },
+        },
+      } as any,
+      coordinatorGeneration: 17,
+      startupCwd: h.root,
+      agentDir: h.root,
+      sessionDir: h.sessionDir,
+    });
+
+    assert.deepEqual(store.setModelSettings(sessionPath, {
+      model: { provider: 'mock', modelId: 'model-new' },
+      thinkingLevel: 'high',
+    }), { modelChanged: true, thinkingLevelChanged: true });
+    assert.equal(batchCalls, 2);
+
+    const restartedStore = new ColdSessionStore({
+      sdk: { SessionManager } as any,
+      coordinatorGeneration: 18,
+      startupCwd: h.root,
+      agentDir: h.root,
+      sessionDir: h.sessionDir,
+    });
+    assert.deepEqual(restartedStore.context(sessionPath), {
+      messages: [{ role: 'user', content: 'keep', timestamp: 1 }],
+      model: { provider: 'mock', modelId: 'model-new' },
+      thinkingLevel: 'high',
+    });
+  } finally {
+    await fs.rm(h.root, { recursive: true, force: true });
+  }
+});
+
 test('a stale cold settings lease is rejected before the SDK batch seam', async () => {
   const h = await makeHarness();
   const SessionManager = await getRealSessionManager();

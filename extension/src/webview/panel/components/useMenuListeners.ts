@@ -1,54 +1,126 @@
-import { useEffect } from 'preact/hooks';
+import { useEffect, useRef } from 'preact/hooks';
 
 interface MenuRef {
   current: HTMLDivElement | null;
 }
 
-interface UseMenuListenersOptions {
+export interface UseMenuListenersOptions {
   /** Called on mousedown outside the menu. Default: close. */
   onOutsideClick?: (e: MouseEvent) => void;
-  /** Called on keydown inside the document. Default: close on Escape. */
+  /** Optional key customization. Prevent the event to override navigation. */
   onKey?: (e: KeyboardEvent) => void;
   /** Called on window resize. Default: close. */
   onResize?: () => void;
+  /** Close on a capture-phase scroll event. Defaults to false. */
+  closeOnScroll?: boolean;
+  /** Optional customization for the scroll dismissal. */
+  onScroll?: () => void;
+}
+
+interface MenuListenerEntry {
+  ref: MenuRef;
+  latest: {
+    current: {
+      onClose: () => void;
+      options: UseMenuListenersOptions | undefined;
+    };
+  };
+}
+
+// The most recently mounted menu is the top overlay. Keeping this small stack
+// lets a document-level Escape listener close only that overlay, even though
+// every menu owns its own dismissal lifecycle.
+const menuStack: MenuListenerEntry[] = [];
+
+function enabledItems(ref: MenuRef): HTMLButtonElement[] {
+  return Array.from(ref.current?.querySelectorAll<HTMLButtonElement>('button.context-menu-item:not(:disabled)') ?? []);
+}
+
+function moveFocus(event: KeyboardEvent, ref: MenuRef): void {
+  const node = ref.current;
+  if (!node) return;
+  // Arrow navigation belongs to the menu while focus is in it. Escape is
+  // intentionally handled regardless of focus so an overlay can always close.
+  const target = event.target;
+  if (!(target instanceof Node && node.contains(target)) && !node.contains(document.activeElement)) return;
+
+  const items = enabledItems(ref);
+  if (items.length === 0) return;
+  const currentIndex = items.findIndex((item) => item === document.activeElement);
+  let nextIndex: number | null = null;
+  if (event.key === 'ArrowDown') nextIndex = currentIndex === -1 ? 0 : (currentIndex + 1) % items.length;
+  else if (event.key === 'ArrowUp') nextIndex = currentIndex <= 0 ? items.length - 1 : currentIndex - 1;
+  else if (event.key === 'Home') nextIndex = 0;
+  else if (event.key === 'End') nextIndex = items.length - 1;
+  if (nextIndex === null) return;
+  event.preventDefault();
+  items[nextIndex]?.focus();
 }
 
 /**
- * Hook that closes a menu on outside-click (mousedown), Escape key, or
- * window resize.  Mirrors the listener pattern used by every popup menu
- * component in the webview.
- *
- * Call from a component that has a `ref` pointing to the menu root element.
- * The default mousedown handler checks `ref.current && !ref.current.contains(e.target)`
- * so clicks inside the menu are ignored.
- *
- * Pass `onOutsideClick` / `onKey` / `onResize` to customise behaviour.
- * All listeners are removed on cleanup (unmount or dependency change).
+ * Shared dismissal and keyboard behavior for popup menus. Subscriptions are
+ * mounted once per menu; callback/options refs keep inline props from causing
+ * listener churn or stale closures.
  */
 export function useMenuListeners(
   ref: MenuRef,
   onClose: () => void,
   options?: UseMenuListenersOptions,
 ): void {
+  const latest = useRef({ onClose, options });
+  latest.current = { onClose, options };
+
   useEffect(() => {
-    const onOutside =
-      options?.onOutsideClick ??
-      ((e: MouseEvent) => {
-        if (ref.current && !ref.current.contains(e.target as Node)) onClose();
-      });
-    const onKey =
-      options?.onKey ??
-      ((e: KeyboardEvent) => {
-        if (e.key === 'Escape') onClose();
-      });
-    const onRes = options?.onResize ?? (() => onClose());
+    // Keep the entry's object stable while its callback data is refreshed on
+    // every render by the ref assigned above.
+    const entry: MenuListenerEntry = { ref, latest };
+    menuStack.push(entry);
+
+    const onOutside = (event: MouseEvent) => {
+      const current = entry.latest.current;
+      if (current.options?.onOutsideClick) {
+        current.options.onOutsideClick(event);
+      } else if (ref.current && !ref.current.contains(event.target as Node)) {
+        current.onClose();
+      }
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (menuStack[menuStack.length - 1] !== entry) return;
+      const current = entry.latest.current;
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation();
+        current.onClose();
+        return;
+      }
+      current.options?.onKey?.(event);
+      if (!event.defaultPrevented) moveFocus(event, ref);
+    };
+    const onResize = () => {
+      entry.latest.current.options?.onResize?.();
+      if (!entry.latest.current.options?.onResize) entry.latest.current.onClose();
+    };
+    const onScroll = () => {
+      const current = entry.latest.current;
+      if (!current.options?.closeOnScroll) return;
+      current.options.onScroll?.();
+      if (!current.options.onScroll) current.onClose();
+    };
+
     document.addEventListener('mousedown', onOutside);
     document.addEventListener('keydown', onKey);
-    window.addEventListener('resize', onRes);
+    window.addEventListener('resize', onResize);
+    // Always keep this subscription stable; the current options decide whether
+    // a given menu opts into scroll dismissal.
+    window.addEventListener('scroll', onScroll, true);
     return () => {
+      const index = menuStack.indexOf(entry);
+      if (index >= 0) menuStack.splice(index, 1);
       document.removeEventListener('mousedown', onOutside);
       document.removeEventListener('keydown', onKey);
-      window.removeEventListener('resize', onRes);
+      window.removeEventListener('resize', onResize);
+      window.removeEventListener('scroll', onScroll, true);
     };
-  }, [ref, onClose, options]);
+  }, [ref]);
 }

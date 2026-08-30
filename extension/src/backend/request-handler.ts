@@ -2,7 +2,7 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
-import { EXTENSION_TOGGLES_ENV, HISTORY_COMPACTION_ENV, NESTED_ALLOWED_BUCKETS_ENV, PROVIDER_TOGGLES_ENV, PROTOCOL_VERSION, SUBAGENT_BUCKETS_ENV, SUBAGENT_PROVIDER_DEFAULTS_ENV, SUBAGENT_PROVIDER_TOGGLES_ENV, SUBAGENT_ROUTE_AROUND_SATURATED_PROVIDERS_ENV, SUBAGENT_FALLBACK_ON_PROVIDER_FAILURE_ENV, type CustomMessagePayload, type DetailResult, type ErrorPayload, type LazyDetailRef, type MessageAbortedPayload, type ModelInfo, type ModelSettings, type PreflightFailedPayload, type RequestEnvelope, type SessionOpenedPayload, type SessionSummary, type TranscriptPageDirection, type TranscriptPagePayload } from '../shared/protocol';
+import { EXTENSION_TOGGLES_ENV, HISTORY_COMPACTION_ENV, NESTED_ALLOWED_BUCKETS_ENV, PROVIDER_TOGGLES_ENV, PROTOCOL_VERSION, SUBAGENT_BUCKET_CAN_SPAWN_ENV, SUBAGENT_BUCKETS_ENV, SUBAGENT_PROVIDER_DEFAULTS_ENV, SUBAGENT_PROVIDER_TOGGLES_ENV, SUBAGENT_ROUTE_AROUND_SATURATED_PROVIDERS_ENV, SUBAGENT_FALLBACK_ON_PROVIDER_FAILURE_ENV, type CustomMessagePayload, type DetailResult, type ErrorPayload, type LazyDetailRef, type MessageAbortedPayload, type ModelInfo, type ModelSettings, type PreflightFailedPayload, type RequestEnvelope, type SessionOpenedPayload, type SessionSummary, type TranscriptPageDirection, type TranscriptPagePayload } from '../shared/protocol';
 import { AUTONOMOUS_MODE_ENV } from '../../../shared/autonomous-mode.js';
 import { toErrorMessage } from '../shared/error-message';
 import { LIVE_PIPELINE_LIMITS, LIVE_PIPELINE_PROTOCOL_VERSION } from '../shared/live-pipeline-protocol';
@@ -18,15 +18,18 @@ import {
   validateSessionOpen,
   validateSessionPath,
   validateSessionViewed,
+  validateSessionTitleGenerate,
   validateSettingsSet,
   validateSystemPromptTogglesSet,
   validateTruncateAfter,
   validateExtensionUiResponse,
   validateOpenTabsSet,
   validateMcpSetServerEnabled,
+  validateMcpSetSessionServerEnabled,
 } from './rpc';
 import { ProviderGate, type ProviderGateMetrics } from './provider-gate';
 import { listMcpServers, setMcpServerEnabled } from './mcp-config';
+import { readSessionMcpOverrides, writeSessionMcpOverrides, type SessionMcpOverrides } from './mcp-session-config';
 import { CreateOperationLedger } from './create-operation-ledger';
 import { resolveActiveModel } from './session-metadata';
 import type { SdkModule, SdkSessionManager } from './sdk';
@@ -34,6 +37,7 @@ import { buildPromptText, lowerImageInputs, normalizeThinkingLevel } from './mes
 import type { ActiveRequest, SessionContext, SessionContextCreationReason } from './server-types';
 import { BackendLiveTurnAccumulator } from './live-turn-accumulator';
 import { BackendError } from './server-io';
+import { generateSessionTitle } from './session-title-generator';
 import {
   boundTranscriptSnapshot,
   type SessionSnapshotTransport,
@@ -92,18 +96,18 @@ const PROMPT_TIMEOUT_HARD_CEILING_MS = 2 * PROMPT_TIMEOUT_MS; // 20 minutes — 
  *  concerns. Extracted from `onPromptSafetyTimerFire` so the defer branch is
  *  testable without driving the raw `setTimeout` + `session.prompt()`.
  *
- *  - `defer`: the in-flight request's provider is legitimately QUEUED
- *    (`queuedRequests > 0`) or PAUSED (circuit breaker) AND the cumulative
- *    elapsed is under the hard ceiling — a fire now would be a FALSE POSITIVE
- *    (the turn is queued, not hung). Re-arm instead.
+ *  - `defer`: worker-local transport correlation proves this exact request is
+ *    inside a bounded provider-network phase, or its provider is PAUSED by the
+ *    shared circuit breaker, AND cumulative elapsed is under the hard ceiling.
+ *    Re-arm instead of treating legitimate network wait as a hung prompt.
  *  - `fire`: genuinely stuck, ceiling exceeded, or fail-open (absent
  *    metrics/provider, or a free slot — not a queue wait). Carries the
  *    plain-language `reason` for the `preflight.failed` emission.
  *
- *  FAIL-OPEN: `provider` undefined, `metrics` undefined, no matching provider
- *  metric, or a non-queued/non-paused provider all yield `fire` (never hang on
- *  a missing gate). Mirrors `EffectRunner.shouldReArmModelStartTimer` (FP-C2a)
- *  but for the backend's pre-commit safety net. */
+ *  The exact-request signal is safe without coordinator metrics because every
+ *  queue/header/body-idle phase is independently finite. Metrics remain the
+ *  provider-wide source for circuit pause. Without either signal the decision
+ *  fails open to `fire`. */
 export interface PromptSafetyTimerDecision {
   action: 'defer' | 'fire';
   /** Plain-language reason for the `preflight.failed` emission. Empty for a
@@ -122,23 +126,21 @@ export function decidePromptSafetyTimerAction(opts: {
   promptTimeoutMs: number;
   provider?: string;
   metrics?: readonly ProviderGateMetrics[];
+  /** Worker-local correlation for this exact active request's network phase. */
+  requestProviderPending?: boolean;
 }): PromptSafetyTimerDecision {
-  const { elapsed, ceiling, promptTimeoutMs, provider, metrics } = opts;
-  // Fail-open chain: `providerMetric` is undefined when the gate is absent,
-  // the provider can't be resolved, or the provider is ungated (no metric) —
-  // in every such case `saturated` is falsy and we fall through to fire.
+  const { elapsed, ceiling, promptTimeoutMs, provider, metrics, requestProviderPending } = opts;
   const providerMetric = provider
     ? metrics?.find((m) => m.provider === provider)
     : undefined;
-  const saturated = !!providerMetric
-    && (providerMetric.queuedRequests > 0 || providerMetric.paused);
+  const providerInProgress = requestProviderPending === true || providerMetric?.paused === true;
 
-  if (saturated && elapsed < ceiling) {
+  if (providerInProgress && elapsed < ceiling) {
     return { action: 'defer', reason: '' };
   }
 
-  const reason = saturated
-    ? `Prompt timed out after ${elapsed}ms (hard ceiling): provider "${provider ?? 'unknown'}" remained ${providerMetric?.paused ? 'paused' : 'saturated'} without reaching a commit point.`
+  const reason = providerInProgress
+    ? `Prompt timed out after ${elapsed}ms (hard ceiling): provider "${provider ?? 'unknown'}" remained ${providerMetric?.paused ? 'paused' : 'network-pending'} without reaching a commit point.`
     : `Prompt timed out after ${promptTimeoutMs}ms without reaching a commit point.`;
   return { action: 'fire', reason };
 }
@@ -175,6 +177,11 @@ export interface BackendRequestHandlerDeps {
     reason: SessionContextCreationReason,
   ): Promise<SessionContext>;
   ensureSessionContext(sessionPath: string): Promise<SessionContext>;
+  /** Recycle one session's worker runtime (adapter re-reads config at the
+   *  next session start). Resolves false when no hot worker exists, one is
+   *  busy/transitioning, or the coordinator has no runtime router — never
+   *  throws for the ordinary refusal cases. */
+  recycleSessionRuntime?(sessionPath: string, reason: string): Promise<boolean>;
   /** Runtime-free coordinator operations. Production wires these to the one
    * generation-scoped ColdSessionStore and retains its process-local manager
    * handle for the first legacy promotion (or later isolated worker transfer). */
@@ -260,6 +267,10 @@ export interface BackendRequestHandlerDeps {
    * transport fitter returns a replacement object. */
   transferBrowseResponseOwnership?(source: object, target: object): void;
   emit(event: string, payload?: unknown): void;
+  /** Publish host-authoritative open/pinned/running summaries into the
+   * coordinator's revisioned worker-sync domain. Optional for standalone
+   * request-handler tests and legacy embeddings. */
+  syncOpenTabsRegistry?(tabs: unknown[], sourceRevision?: number): Promise<void>;
   emitBusyChanged(context: SessionContext, busy: boolean): void;
   emitContextUsageChanged(context: SessionContext): void;
   emitSessionListChanged(): Promise<void>;
@@ -332,10 +343,18 @@ async function handleAppPing(
 
 async function handleMcpList(
   deps: BackendRequestHandlerDeps,
-  _request: RequestEnvelope,
+  request: RequestEnvelope,
 ): Promise<unknown> {
   markRequestValidated(deps);
-  return listMcpServers(deps.startupCwd);
+  const result: { servers: ReturnType<typeof listMcpServers>['servers']; overridePath: ReturnType<typeof listMcpServers>['overridePath']; sessionOverrides?: SessionMcpOverrides } = listMcpServers(deps.startupCwd);
+  // Optional `sessionPath` hydration: reply with the session's persisted
+  // override set so the webview can render a session-scoped effective list
+  // (the toolbar's per-session surface) without a separate round trip.
+  const rawSessionPath = (request.params as Record<string, unknown> | undefined)?.['sessionPath'];
+  if (typeof rawSessionPath === 'string' && rawSessionPath.trim().length > 0) {
+    result.sessionOverrides = await readSessionMcpOverrides(rawSessionPath.trim()) ?? {};
+  }
+  return result;
 }
 
 /** Persist a per-server `disabled` override into `.pi/mcp.json` via the
@@ -349,6 +368,35 @@ async function handleMcpSetServerEnabled(
   const params = validateMcpSetServerEnabled(request.params);
   markRequestValidated(deps);
   return setMcpServerEnabled(deps.startupCwd, params.name, params.enabled);
+}
+
+/** Write the session's per-server override artifact (host state is the
+ *  source of truth — the params carry the full desired set) and optionally
+ *  recycle the session's worker so the adapter re-reads config at the next
+ *  session start. A busy session is never retired; the response reports that
+ *  so the host can keep a pending hint until the next idle recycle. */
+async function handleMcpSetSessionServerEnabled(
+  deps: BackendRequestHandlerDeps,
+  request: RequestEnvelope,
+): Promise<unknown> {
+  const params = validateMcpSetSessionServerEnabled(request.params);
+  markRequestValidated(deps);
+  await writeSessionMcpOverrides({
+    sessionPath: params.sessionPath,
+    agentDir: deps.agentDir,
+    overrides: params.overrides,
+  });
+  let recycled = false;
+  if (params.recycle) {
+    try {
+      recycled = await deps.recycleSessionRuntime?.(params.sessionPath, 'mcp session server override changed') ?? false;
+    } catch {
+      // A refusal (busy/transitioning worker) leaves application to the next
+      // session reload / idle recycle; the host keeps its pending hint.
+      recycled = false;
+    }
+  }
+  return { recycled, overrides: params.overrides };
 }
 
 async function handleRuntimePrefsSet(
@@ -413,6 +461,9 @@ async function handleRuntimePrefsSet(
   }
   if (params.subagentNestedAllowedBuckets !== undefined) {
     process.env[NESTED_ALLOWED_BUCKETS_ENV] = JSON.stringify(params.subagentNestedAllowedBuckets);
+  }
+  if (params.subagentBucketCanSpawn !== undefined) {
+    process.env[SUBAGENT_BUCKET_CAN_SPAWN_ENV] = JSON.stringify(params.subagentBucketCanSpawn);
   }
   if (params.subagentDropTools !== undefined) {
     process.env['PIE_SUBAGENT_DROP_TOOLS_JSON'] = JSON.stringify(params.subagentDropTools);
@@ -956,6 +1007,46 @@ class PromptCancelledBeforeStartError extends Error {
   }
 }
 
+/** Provider preferences are an execution boundary, not only a picker filter.
+ * Existing sessions can retain a model after its provider is disabled, so the
+ * backend must reject both ordinary sends and queued steering attempts rather
+ * than silently spending against a provider the user turned off. Malformed or
+ * absent preference state fails open so startup cannot strand every session. */
+function isProviderExplicitlyDisabled(provider: string | undefined): boolean {
+  if (!provider) return false;
+  const serialized = process.env[PROVIDER_TOGGLES_ENV];
+  if (!serialized) return false;
+  try {
+    const parsed: unknown = JSON.parse(serialized);
+    return typeof parsed === 'object'
+      && parsed !== null
+      && !Array.isArray(parsed)
+      && (parsed as Record<string, unknown>)[provider] === false;
+  } catch {
+    return false;
+  }
+}
+
+async function handleSessionTitleGenerate(
+  deps: BackendRequestHandlerDeps,
+  request: RequestEnvelope,
+): Promise<unknown> {
+  const params = validateSessionTitleGenerate(request.params);
+  markRequestValidated(deps);
+  let context = await deps.ensureSessionContext(params.sessionPath);
+  while (deps.isSessionTransitionPending?.(params.sessionPath)) {
+    context = await deps.ensureSessionContext(params.sessionPath);
+  }
+  return await generateSessionTitle(context, {
+    sdkPath: deps.sdkPath,
+    prompt: params.prompt,
+    provider: params.provider,
+    model: params.model,
+    thinkingLevel: params.thinkingLevel,
+    timeoutSec: params.timeoutSec,
+  });
+}
+
 async function handleMessageSend(
   deps: BackendRequestHandlerDeps,
   request: RequestEnvelope,
@@ -984,6 +1075,12 @@ async function handleMessageSend(
     throw new BackendError(
       'SESSION_RUNTIME_RECOVERY_FAILED',
       'The previous session runtime was retired before a replacement became available.',
+    );
+  }
+  if (isProviderExplicitlyDisabled(context.session.model?.provider)) {
+    throw new BackendError(
+      'PROVIDER_DISABLED',
+      'PROVIDER_DISABLED: The selected model provider is disabled in Pie settings. Select a model from an enabled provider before sending.',
     );
   }
   // Steering: if a turn is already running, inject this message into the
@@ -1117,18 +1214,15 @@ async function handleMessageSend(
   // it at the commit point; clearing only on `.finally` would make this a
   // whole-run ceiling that aborts healthy multi-turn runs mid-stream.
   //
-  // METRIC-GATED DEFERRAL: on fire, BEFORE aborting, check whether this
-  // request's provider is saturated (`queuedRequests > 0`) or paused. If so
-  // the timer is a FALSE POSITIVE — the turn is legitimately QUEUED waiting
-  // for a ProviderGate slot — so re-arm (defer) instead of aborting, bounded
-  // by `PROMPT_TIMEOUT_HARD_CEILING_MS`. FAIL-OPEN: absent gate / unresolvable
-  // provider / missing metric falls through to abort (never hang). `firstArmedAt`
-  // is a closure local anchoring the cumulative ceiling (no other site reads it).
+  // EXACT-REQUEST DEFERRAL: worker transport observations mark only this
+  // active request while it is queued or waiting for bounded provider I/O.
+  // Coordinator metrics additionally expose a provider-wide circuit pause.
+  // Either can defer below the hard ceiling; unrelated provider activity
+  // cannot. `firstArmedAt` anchors the cumulative ceiling.
   const firstArmedAt = Date.now();
-  // FP-C2b: resolve the provider-gate accessor + provider resolver from deps,
-  // defaulting to the production singletons so behavior is unchanged when the
-  // deps are not injected (production wiring). Injectable so the defer branch
-  // is unit-testable (mirrors FP-C2a's EffectRunnerDeps accessors).
+  // Resolve optional provider-wide circuit metrics. Isolated workers normally
+  // rely on their exact local transport correlation; standalone/legacy paths
+  // can still supply the in-process ProviderGate metrics.
   const getProviderGateMetrics = deps.getProviderGateMetrics
     ?? (() => ProviderGate.getInstance()?.getMetrics());
   const resolveSessionProvider = deps.resolveSessionProvider
@@ -1146,6 +1240,7 @@ async function handleMessageSend(
       promptTimeoutMs: PROMPT_TIMEOUT_MS,
       provider,
       metrics,
+      requestProviderPending: ownedRequest.providerNetworkPending === true,
     });
 
     if (decision.action === 'defer') {
@@ -1156,7 +1251,8 @@ async function handleMessageSend(
       // armed handle replaces `promptSafetyTimer` so the commit-point clear in
       // `session-event-handler.ts` (and `clearActiveRequest`) clears the LIVE
       // handle, not the already-fired original.
-      ownedRequest.promptSafetyTimer = setTimeout(onPromptSafetyTimerFire, PROMPT_TIMEOUT_MS);
+      const remaining = Math.max(1, PROMPT_TIMEOUT_HARD_CEILING_MS - elapsed);
+      ownedRequest.promptSafetyTimer = setTimeout(onPromptSafetyTimerFire, Math.min(PROMPT_TIMEOUT_MS, remaining));
       return;
     }
 
@@ -1463,10 +1559,6 @@ async function handleMessageInterrupt(
   return { interrupted: true, settled: true };
 }
 
-/** Host → backend push of the currently-open tab summaries. Stored into
- *  `process.env.PIE_OPEN_TABS` (JSON) so the `session_review` tool (running in
- *  this backend process) can list currently-open sessions without host state
- *  access. Fire-and-forget from the host's tab-persistence site. */
 async function handleMessageReplaceQueue(
   deps: BackendRequestHandlerDeps,
   request: RequestEnvelope,
@@ -1479,6 +1571,21 @@ async function handleMessageReplaceQueue(
   }
   if (!context.activeRequest && !context.session.isStreaming) {
     throw new BackendError('QUEUE_NOT_RUNNING', 'The queued message is already being delivered and can no longer be edited.');
+  }
+
+  // Delivery removes its localId synchronously at the SDK user-message
+  // boundary, before the host necessarily receives queuedDelivered. Refuse a
+  // replacement based on a stale host snapshot: otherwise the already-started
+  // original stays in flight while this handler re-enqueues its edited copy,
+  // producing both messages and two answers.
+  const authoritativeLocalIds = context.queuedLocalIds ?? [];
+  const expectedLocalIds = params.fallbackMessages.map((message) => message.localId);
+  if (authoritativeLocalIds.length !== expectedLocalIds.length
+    || authoritativeLocalIds.some((localId, index) => localId !== expectedLocalIds[index])) {
+    throw new BackendError(
+      'QUEUE_CHANGED',
+      'QUEUE_CHANGED: A queued message has already started and the edit was not applied.',
+    );
   }
 
   const enqueueAll = async (messages: typeof params.messages): Promise<void> => {
@@ -1543,13 +1650,28 @@ async function handleMessageClearQueue(
   return { cleared };
 }
 
+/** Host → coordinator publication of the complete open/pinned/running tab
+ * registry. Production retains it in a monotonic worker-sync domain; the
+ * worker-local compatibility environment is refreshed before acknowledgement. */
 async function handleOpenTabsSet(
-  _deps: BackendRequestHandlerDeps,
+  deps: BackendRequestHandlerDeps,
   request: RequestEnvelope,
 ): Promise<unknown> {
   const params = validateOpenTabsSet(request.params);
-  markRequestValidated(_deps);
-  process.env['PIE_OPEN_TABS'] = JSON.stringify(params.tabs);
+  markRequestValidated(deps);
+  if (deps.syncOpenTabsRegistry) {
+    await deps.syncOpenTabsRegistry(params.tabs, params.revision);
+  } else {
+    // Compatibility path for standalone handler consumers. Production always
+    // wires the coordinator sync callback above.
+    const current = Number(process.env['PIE_OPEN_TABS_REVISION'] ?? 0);
+    const currentRevision = Number.isSafeInteger(current) && current >= 0 ? current : 0;
+    const nextRevision = params.revision ?? currentRevision + 1;
+    if (nextRevision > currentRevision) {
+      process.env['PIE_OPEN_TABS'] = JSON.stringify(params.tabs);
+      process.env['PIE_OPEN_TABS_REVISION'] = String(nextRevision);
+    }
+  }
   return { ok: true, count: params.tabs.length };
 }
 
@@ -1869,14 +1991,17 @@ async function handleLiveTurnCheckpoint(
 }
 
 async function handleProviderGateMetrics(
-  _deps: BackendRequestHandlerDeps,
+  deps: BackendRequestHandlerDeps,
   _request: RequestEnvelope,
 ): Promise<unknown> {
-  markRequestValidated(_deps);
-  // In-memory read of the host-side provider gate (wraps globalThis.fetch in
-  // the backend process). Returns {enabled:false, providers:[]} when the gate
-  // is not installed (no provider has a concurrency config) — the host strip
-  // hides the segment.
+  markRequestValidated(deps);
+  // Isolated session workers perform provider I/O, so production injects the
+  // coordinator lease authority's cross-worker metrics here. Standalone and
+  // legacy consumers retain the in-process ProviderGate fallback.
+  const authorityMetrics = deps.getProviderGateMetrics?.();
+  if (authorityMetrics) {
+    return { enabled: authorityMetrics.length > 0, providers: authorityMetrics };
+  }
   const gate = ProviderGate.getInstance();
   if (!gate) return { enabled: false, providers: [] };
   return { enabled: true, providers: gate.getMetrics() };
@@ -1886,6 +2011,7 @@ const handlers: Record<string, RequestHandler> = {
   'app.ping': handleAppPing,
   'mcp.list': handleMcpList,
   'mcp.setServerEnabled': handleMcpSetServerEnabled,
+  'mcp.setSessionServerEnabled': handleMcpSetSessionServerEnabled,
   'runtimePrefs.set': handleRuntimePrefsSet,
   'session.list': handleSessionList,
   'session.create': handleSessionCreate,
@@ -1897,6 +2023,7 @@ const handlers: Record<string, RequestHandler> = {
   'session.loadTranscriptPage': handleSessionLoadTranscriptPage,
   'session.loadDetail': handleSessionLoadDetail,
   'session.truncateAfter': handleSessionTruncateAfter,
+  'session.title.generate': handleSessionTitleGenerate,
   'message.send': handleMessageSend,
   'message.compact': handleMessageCompact,
   'message.interrupt': handleMessageInterrupt,

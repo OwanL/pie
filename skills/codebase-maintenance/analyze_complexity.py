@@ -5,9 +5,9 @@ Analyze code complexity and structural quality via Qualitas.
 Usage:
     python analyze_complexity.py <directory> [options]
 
-    Walks the target directory respecting the shared .ignore file, finds
-    source directories that Qualitas supports (TS/JS, Python, Rust, Go,
-    Java), and runs Qualitas on each one.  Results are merged and formatted
+    Walks the target directory respecting the shared .ignore file, stages a
+    filtered temporary tree containing only source files Qualitas supports
+    (TS/JS, Python, Rust, Go, Java), and scans that tree. Results are formatted
     for agent consumption.
 
 Arguments:
@@ -39,10 +39,13 @@ Prerequisites:
 
 import importlib.util
 import json
+import os
 import shutil
 import subprocess
 import sys
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 
 # ---------------------------------------------------------------------------
@@ -60,10 +63,7 @@ except (FileNotFoundError, AttributeError) as exc:
 load_ignore_patterns = _MOD.load_ignore_patterns
 collect_active_ignore_patterns = _MOD.collect_active_ignore_patterns
 matches_ignore_patterns = _MOD.matches_ignore_patterns
-
-# Also import CODE_EXTENSIONS and SKIP_DIRS so we can find source dirs.
-CODE_EXTENSIONS: frozenset[str] = _MOD.CODE_EXTENSIONS
-SKIP_DIRS: frozenset[str] = _MOD.SKIP_DIRS
+is_skip_dir_name = _MOD.is_skip_dir_name
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -95,95 +95,69 @@ QUALITAS_LANG_EXTENSIONS: frozenset[str] = frozenset({
 
 
 # ---------------------------------------------------------------------------
-# Source-directory discovery (respects .ignore and SKIP_DIRS)
+# Filtered scan-tree staging (Qualitas has no exclusion option)
 # ---------------------------------------------------------------------------
 
-def _find_scan_roots(
+@contextmanager
+def _stage_filtered_scan_tree(
     root: Path,
     active_patterns: list[str],
-) -> list[Path]:
-    """Find directories and individual source files to pass to Qualitas.
+) -> Iterator[tuple[Path, list[str]]]:
+    """Copy only eligible source files to an isolated temporary scan tree.
 
-    Walks *root* pruning directories that match SKIP_DIRS or .ignore patterns.
-    Returns a list of paths (directories or individual files) to scan such that:
-      - Every qualifying source file is reachable from exactly one scan target.
-      - No directory-level target contains a sub-directory that should be
-        skipped (node_modules, out, etc.).
-      - Shallow directory roots are preferred (``src/`` over ``src/module/``).
-      - When a directory has both source files and ignored children, its
-        source files are scanned individually (prevents Qualitas from
-        recursing into ignored sub-directories).
+    Qualitas recursively traverses every directory it receives and currently
+    exposes no reliable exclusion option.  Staging prevents ignored children
+    at any depth from ever becoming visible to the tool, while preserving paths
+    relative to *root* for report normalization.
     """
-    # BFS to find the shallowest directories that are "clean"
-    # (no ignored children) and contain Qualitas-supported source files.
-    from collections import deque
+    with tempfile.TemporaryDirectory(prefix="qualitas-scan-") as tmp:
+        stage_root = Path(tmp) / "scan"
+        stage_root.mkdir()
+        staged_files: list[str] = []
 
-    queue: deque[Path] = deque([root])
-    scan_roots: list[Path] = []
+        def raise_walk_error(error: OSError) -> None:
+            raise error
 
-    while queue:
-        current = queue.popleft()
-        try:
-            entries = list(current.iterdir())
-        except PermissionError:
-            continue
-
-        has_ignored_child = False
-        has_source_file = False
-        source_files: list[Path] = []
-        subdirs: list[Path] = []
-
-        for entry in entries:
-            if entry.is_dir():
-                # Prune directories matching SKIP_DIRS or .ignore.
-                if entry.name in SKIP_DIRS:
-                    has_ignored_child = True
+        for current, dir_names, file_names in os.walk(root, onerror=raise_walk_error):
+            current_path = Path(current)
+            kept_dirs: list[str] = []
+            for name in dir_names:
+                child = current_path / name
+                rel_dir = child.relative_to(root).as_posix()
+                if child.is_symlink() or is_skip_dir_name(name):
                     continue
-                try:
-                    rel = str(PurePosixPath(entry.relative_to(root)))
-                except ValueError:
-                    rel = entry.name
-                if matches_ignore_patterns(rel, active_patterns):
-                    has_ignored_child = True
+                if matches_ignore_patterns(f"{rel_dir}/_", active_patterns):
                     continue
-                subdirs.append(entry)
-            elif entry.is_file():
-                if entry.suffix.lower() in QUALITAS_LANG_EXTENSIONS:
-                    has_source_file = True
-                    source_files.append(entry)
+                kept_dirs.append(name)
+            dir_names[:] = kept_dirs
 
-        if not subdirs and not has_source_file:
-            # Empty leaf (no source files, no subdirs) — skip.
-            continue
+            for name in file_names:
+                source = current_path / name
+                if source.is_symlink() or not source.is_file():
+                    continue
+                if source.suffix.lower() not in QUALITAS_LANG_EXTENSIONS:
+                    continue
+                rel_path = source.relative_to(root).as_posix()
+                if matches_ignore_patterns(rel_path, active_patterns):
+                    continue
+                destination = stage_root / Path(rel_path)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, destination)
+                staged_files.append(rel_path)
 
-        if has_ignored_child:
-            # This directory has at least one child we want to skip.
-            # We can't pass this directory to Qualitas because it would scan
-            # the ignored children too.  Instead, scan source files
-            # individually and recurse into non-ignored sub-directories.
-            scan_roots.extend(source_files)
-            queue.extend(subdirs)
-        else:
-            # Clean directory — no ignored children.
-            if has_source_file:
-                # This is a valid scan root.  Qualitas will recursively
-                # scan its sub-directories too, so we don't need to visit
-                # them individually.
-                scan_roots.append(current)
-            else:
-                # No source files yet, but clean.  Recurse to find
-                # source roots deeper in the tree.
-                queue.extend(subdirs)
-
-    return sorted(set(scan_roots))
+        yield stage_root, staged_files
 
 
 # ---------------------------------------------------------------------------
 # Qualitas invocation
 # ---------------------------------------------------------------------------
 
-def _run_qualitas_on_dir(directory: Path, npx_bin: str) -> dict | None:
-    """Run Qualitas on a single directory.  Returns parsed JSON or None."""
+class QualitasExecutionError(RuntimeError):
+    """Raised when Qualitas did not produce a trustworthy report."""
+
+
+def _run_qualitas_on_dir(directory: Path, npx_bin: str) -> dict:
+    """Run Qualitas and return a valid JSON report, otherwise raise."""
     out_tmp = tempfile.NamedTemporaryFile(
         suffix=".json", prefix="qualitas-", delete=False,
     )
@@ -193,27 +167,51 @@ def _run_qualitas_on_dir(directory: Path, npx_bin: str) -> dict | None:
     cmd = [npx_bin, "qualitas", str(directory), "-f", "json", "-o", out_path]
 
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=60,
-        )
-    except (subprocess.TimeoutExpired, OSError):
-        Path(out_path).unlink(missing_ok=True)
-        return None
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=60,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise QualitasExecutionError(
+                f"Qualitas timed out after 60 s while scanning {directory}"
+            ) from exc
+        except OSError as exc:
+            raise QualitasExecutionError(
+                f"could not run Qualitas for {directory}: {exc}"
+            ) from exc
 
-    report = Path(out_path)
-    data = None
-    if report.exists() and report.stat().st_size > 0:
+        diagnostic = (result.stderr or result.stdout).strip()[:500]
+        if result.returncode != 0:
+            suffix = f": {diagnostic}" if diagnostic else ""
+            raise QualitasExecutionError(
+                f"Qualitas failed for {directory} (exit {result.returncode}){suffix}"
+            )
+
+        report = Path(out_path)
+        if not report.is_file() or report.stat().st_size == 0:
+            raise QualitasExecutionError(
+                f"Qualitas produced no report while scanning {directory}"
+            )
         try:
             data = json.loads(report.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            pass
-    report.unlink(missing_ok=True)
-    return data
+        except (OSError, json.JSONDecodeError) as exc:
+            raise QualitasExecutionError(
+                f"Qualitas produced an unreadable or invalid JSON report for {directory}: {exc}"
+            ) from exc
+        if not isinstance(data, dict) or not data or not (
+            isinstance(data.get("files"), list) or isinstance(data.get("filePath"), str)
+        ):
+            raise QualitasExecutionError(
+                f"Qualitas produced an invalid report shape for {directory}"
+            )
+        return data
+    finally:
+        Path(out_path).unlink(missing_ok=True)
 
 
 def run_qualitas(
@@ -238,8 +236,6 @@ def run_qualitas(
 
     for src_dir in source_dirs:
         data = _run_qualitas_on_dir(src_dir, npx_bin)
-        if data is None:
-            continue
 
         # Normalise single-file and directory output shapes.
         if "files" in data:
@@ -466,6 +462,10 @@ def parse_args() -> tuple[Path, int, str]:
             print(f"unknown argument: {sys.argv[i]}", file=sys.stderr)
             sys.exit(2)
 
+    if max_findings < 0:
+        print("error: --max-findings must be >= 0", file=sys.stderr)
+        sys.exit(2)
+
     return directory, max_findings, min_grade
 
 
@@ -479,12 +479,15 @@ def main() -> None:
         directory, global_patterns, context_patterns,
     )
 
-    # Find shallow scan roots — directories that Qualitas can scan
-    # without encountering ignored sub-trees (node_modules, out, etc.).
-    scan_roots = _find_scan_roots(directory, active_patterns)
-
-    # Run Qualitas on each scan root and merge results.
-    data = run_qualitas(directory, scan_roots)
+    # Qualitas has no exclusion option, so expose only a filtered copy.  The
+    # temporary tree is removed before formatting or returning.
+    try:
+        with _stage_filtered_scan_tree(directory, active_patterns) as (scan_root, staged_files):
+            scan_targets = [scan_root] if staged_files else []
+            data = run_qualitas(scan_root, scan_targets)
+    except (OSError, QualitasExecutionError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(2)
 
     # Extract, filter, and print flagged functions.
     flagged = extract_flagged_functions(data, directory, active_patterns, min_grade)

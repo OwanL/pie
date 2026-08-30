@@ -200,7 +200,9 @@ function AssistantParts({
               autoExpand={prefs.autoExpandReasoning}
               collapsibleKey={`reasoning:${messageId}:${index}`}
               streaming={isCurrentlyStreaming && index === parts.length - 1}
-              onContextMenu={(e) => onContextMenu('reasoning', part.text, e)}
+              // The block supplies the live display text (loaded lazy detail,
+              // or the summary/text otherwise) as the menu's raw/plain value.
+              onContextMenu={(e, displayText) => onContextMenu('reasoning', displayText, e)}
             />
           );
         }

@@ -8,13 +8,15 @@ import { validateRuntimeProvenance } from '../src/runtime-provenance.js';
 import type { ReviewerRuntime } from '../src/types.js';
 import { validReview } from './fixtures.js';
 
-function transcriptFor(review = validReview()) {
+function transcriptFor(review = validReview(), options: { agent?: string; workflowRef?: string } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'session-review-runtime-'));
   const file = path.join(dir, 'orchestrator.jsonl');
   fs.writeFileSync(file, `${JSON.stringify({ type: 'session', id: 'orchestrator-id' })}\n`);
   const runtimes: ReviewerRuntime[] = [...review.proposals, review.consolidation, ...review.components, ...(review.adjudication ? [review.adjudication] : [])];
   for (const runtime of runtimes) {
-    fs.appendFileSync(file, `${JSON.stringify({ type: 'message', message: { role: 'assistant', content: [{ type: 'toolCall', id: runtime.toolCallId, name: 'subagent', arguments: { agent: 'reviewer', bucket: runtime.requestedBucket } }] } })}\n`);
+    fs.appendFileSync(file, `${JSON.stringify({ type: 'message', message: { role: 'assistant', content: [{ type: 'toolCall', id: runtime.toolCallId, name: 'subagent', arguments: {
+      agent: options.agent ?? 'session-evaluator', bucket: runtime.requestedBucket, ...(options.workflowRef ? { workflowRef: options.workflowRef } : {}),
+    } }] } })}\n`);
     fs.appendFileSync(file, `${JSON.stringify({ type: 'message', message: { role: 'toolResult', toolCallId: runtime.toolCallId, toolName: 'subagent', details: { results: [{
       parentToolCallId: runtime.toolCallId, requestedBucket: runtime.requestedBucket, bucket: runtime.bucket, bucketDowngraded: runtime.bucketDowngraded,
       model: runtime.modelId, provider: runtime.provider, family: runtime.family, thinkingLevel: runtime.thinkingLevel, promptHash: runtime.promptHash,
@@ -31,6 +33,18 @@ test('runtime provenance is bound to prior subagent result metadata', () => {
     review.components[0].modelId = 'caller-forged-model';
     assert.throws(() => validateRuntimeProvenance(review, file), /runtime provenance does not match/);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('runtime provenance requires the tool-free evaluator while accepting tagged v1 work in flight', () => {
+  const current = transcriptFor(validReview(), { agent: 'reviewer' });
+  try {
+    assert.throws(() => validateRuntimeProvenance(current.review, current.file), /tool-free session-evaluator/);
+  } finally { fs.rmSync(current.dir, { recursive: true, force: true }); }
+
+  const legacy = transcriptFor(validReview(), { agent: 'reviewer', workflowRef: 'session-review-v1/legacy/evidence/role' });
+  try {
+    assert.doesNotThrow(() => validateRuntimeProvenance(legacy.review, legacy.file));
+  } finally { fs.rmSync(legacy.dir, { recursive: true, force: true }); }
 });
 
 test('humanCheck is bound to the exact prior ask_user call and result', () => {

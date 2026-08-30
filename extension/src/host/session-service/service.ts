@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 
 import { BackendClient } from '../backend/client';
 import { resolveChatPrefs, buildRuntimePrefsPayload } from '../../shared/protocol';
-import type { ChatPrefs, DetailResult, LazyDetailRef, PruningSettings, ToolResultPruningSettings, ThinkingLevel, TranscriptMode, DeferredTriggerView, McpServerInfo } from '../../shared/protocol';
+import type { ChatPrefs, DetailResult, LazyDetailRef, PruningSettings, SessionTitlesSettings, ToolResultPruningSettings, ThinkingLevel, TranscriptMode, DeferredTriggerView, McpServerInfo } from '../../shared/protocol';
 import {
   loadPersistedPruningSettings,
   savePruningSettings,
@@ -13,6 +13,11 @@ import {
   saveToolResultPruningSettings,
   type ToolResultPruningSettingsStorage,
 } from './tool-result-pruning-settings-persistence';
+import {
+  loadPersistedSessionTitlesSettings,
+  saveSessionTitlesSettings,
+  type SessionTitlesSettingsStorage,
+} from './session-titles-settings-persistence';
 import { NOOP_RUN_OBSERVER, type RunObserver } from '../stats-service';
 import { SessionServiceEvents } from './events';
 import { SessionMessageActions } from './message-actions';
@@ -46,6 +51,7 @@ const DEFAULT_DETAIL_HOST_INFO: DetailHostInfo = {
 const PREFS_STORAGE_KEY = 'chatPrefs';
 const PRUNING_STORAGE_KEY = 'pruningSettings';
 const TOOL_RESULT_PRUNING_STORAGE_KEY = 'toolResultPruningSettings';
+const SESSION_TITLES_STORAGE_KEY = 'sessionTitlesSettings';
 const DETAIL_CACHE_MAX_ENTRIES = 32;
 const DETAIL_CACHE_MAX_BYTES = 64 * 1024 * 1024;
 
@@ -561,10 +567,15 @@ export class SessionService implements vscode.Disposable {
   }
 
   /** Re-read the backend's effective MCP server config. Pure query — the
-   *  response list is what the webview renders via `McpServersUpdated`. */
-  async mcpList(): Promise<{ servers: McpServerInfo[] }> {
-    const result = await this.backend.request<{ servers: McpServerInfo[] }>('mcp.list', {});
-    return { servers: result.servers };
+   *  response list is what the webview renders via `McpServersUpdated`.
+   *  Passing `sessionPath` also hydrates that session's persisted per-server
+   *  override set (`mcpSessionOverrides`) so the session-scoped UI can merge
+   *  it with the global list without a second round trip. */
+  async mcpList(sessionPath?: string): Promise<{ servers: McpServerInfo[]; sessionOverrides?: Record<string, boolean> }> {
+    const result = await this.backend.request<{ servers: McpServerInfo[]; sessionOverrides?: Record<string, boolean> }>('mcp.list', {
+      ...(sessionPath !== undefined ? { sessionPath } : {}),
+    }, { timeoutMs: 5_000 });
+    return { servers: result.servers, ...(result.sessionOverrides !== undefined ? { sessionOverrides: result.sessionOverrides } : {}) };
   }
 
   /** Persist a per-server `disabled` override into `.pi/mcp.json` (the
@@ -575,6 +586,19 @@ export class SessionService implements vscode.Disposable {
     return await this.backend.request<{ servers: McpServerInfo[]; changed: boolean }>('mcp.setServerEnabled', {
       name,
       enabled,
+    });
+  }
+
+  /** Write a session's per-server override artifact (host-side session
+   *  toggles — never the project `.pi/mcp.json` layer) and optionally recycle
+   *  that session's worker so the adapter re-reads config at the next session
+   *  start. `recycled` is false when the session is cold, busy, or
+   *  transitioning (application then rides the next session reload). */
+  async mcpSetSessionServerEnabled(sessionPath: string, overrides: Record<string, boolean>, recycle: boolean): Promise<{ recycled: boolean; overrides: Record<string, boolean> }> {
+    return await this.backend.request<{ recycled: boolean; overrides: Record<string, boolean> }>('mcp.setSessionServerEnabled', {
+      sessionPath,
+      overrides,
+      recycle,
     });
   }
 
@@ -647,6 +671,36 @@ export class SessionService implements vscode.Disposable {
     return {
       get: () => this.context.globalState.get<ToolResultPruningSettings>(TOOL_RESULT_PRUNING_STORAGE_KEY),
       update: (value) => this.context.globalState.update(TOOL_RESULT_PRUNING_STORAGE_KEY, value),
+    };
+  }
+
+  async setSessionTitlesSettings(updates: Partial<SessionTitlesSettings>): Promise<void> {
+    const storage = this.createSessionTitlesSettingsStorage();
+    await saveSessionTitlesSettings(
+      storage,
+      // SET path: the reducer already applied the update optimistically, so do
+      // not re-dispatch SessionTitlesSettingsChanged (avoids a lost-update
+      // flicker under rapid sequential changes). Persistence still writes-or-
+      // mirrors and notifies on disk failure. The LOAD path keeps its own dispatch.
+      undefined,
+      () => this.getArchState().settings.sessionTitlesSettings,
+      updates,
+      (message) => this.dispatchArch({ kind: 'NoticeShown', notice: message }),
+    );
+  }
+
+  async loadSessionTitlesSettings(): Promise<void> {
+    const storage = this.createSessionTitlesSettingsStorage();
+    await loadPersistedSessionTitlesSettings(
+      storage,
+      (settings) => this.dispatchArch({ kind: 'SessionTitlesSettingsChanged', sessionTitlesSettings: settings }),
+    );
+  }
+
+  private createSessionTitlesSettingsStorage(): SessionTitlesSettingsStorage {
+    return {
+      get: () => this.context.globalState.get<SessionTitlesSettings>(SESSION_TITLES_STORAGE_KEY),
+      update: (value) => this.context.globalState.update(SESSION_TITLES_STORAGE_KEY, value),
     };
   }
 }

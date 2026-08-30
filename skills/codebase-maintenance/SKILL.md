@@ -37,8 +37,9 @@ uv run find_dead_code.py <directory> [options]
 ```
 
 Dead code is the easiest win — unused functions, classes, imports, and files can often be removed
-outright. Use `--verify-dead-code` to suppress false positives. For intentionally retained code
-(plugin re-exports, dynamic dispatch), add a `// skylos-ignore` annotation.
+outright. Use `--verify-dead-code` to suppress likely false positives; findings that cannot be
+cross-checked are retained in a separate unverified section rather than labeled dead. For intentionally
+retained code (plugin re-exports, dynamic dispatch), add a `// skylos-ignore` annotation.
 
 **Bundler caveat (esbuild/webpack/vite/rollup):** skylos traces static `import`/`require` edges
 only — it cannot see a bundler's entry-point graph, dynamic `import()`, or config-driven resolution.
@@ -70,7 +71,8 @@ uv run find_duplicates.py <directory> [options]
 
 Copy/paste duplicates across files (jscpd). Review each duplicate, some are
 justified (shared config, test fixtures). Genuine duplicates should be extracted into shared
-utilities. Use `--show-generated` to inspect lock-file / minified duplicates.
+utilities. Use `--show-generated` to inspect lock-file / minified duplicates, or
+`--exclude-test-directories` when test boilerplate dominates the report.
 
 ### 4. Complexity
 

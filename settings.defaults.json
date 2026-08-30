@@ -14,7 +14,7 @@
   "httpIdleTimeoutMs": 0,
   "bashDefaultTimeout": 60,
   "packages": [
-    "npm:pi-web-access@0.13.0",
+    "npm:pi-web-access@0.27.0",
     "npm:pi-mcp-adapter@2.20.1"
   ],
   "pruning": {
@@ -40,6 +40,13 @@
       ]
     },
     "autoSkipBelowTokens": null
+  },
+  "sessionTitles": {
+    "enabled": true,
+    "model": "deepseek-v4-flash:0731-cloud",
+    "provider": "ollama",
+    "thinkingLevel": "off",
+    "timeoutSec": 15
   },
   "toolResultPruning": {
     "enabled": true,

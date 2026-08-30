@@ -112,6 +112,140 @@ test('rate is null (label "—") before any output is produced', () => {
 
 // --- rate computation over time deltas (computeRate) ---
 
+test('first output exposes a provisional rate before the stable 300ms window', () => {
+  const acc = createAccumulator(BASE_NOW);
+  const m = streamingMessage();
+  const first = tickTokenRate(acc, [{ ...m, markdown: tokenText(100) }], BASE_NOW + 200);
+  assert.equal(first.state, 'generating');
+  assert.ok((first.rate ?? 0) > 0, 'first sampled output should not display zero or dash');
+  assert.match(first.tooltip, /Provisional/);
+
+  const second = tickTokenRate(acc, [{ ...m, markdown: tokenText(150) }], BASE_NOW + 400);
+  assert.ok((second.rate ?? 0) > 0, 'short second interval should retain a useful estimate');
+  assert.match(second.tooltip, /Provisional/);
+
+  const stable = tickTokenRate(acc, [{ ...m, markdown: tokenText(200) }], BASE_NOW + 600);
+  assert.ok((stable.rate ?? 0) > 0);
+  assert.doesNotMatch(stable.tooltip, /Provisional/);
+});
+
+test('a short completed burst uses terminal usage as end-to-end fallback', () => {
+  const acc = createAccumulator(BASE_NOW);
+  const completed: ChatMessage = {
+    ...streamingMessage(),
+    status: 'completed',
+    markdown: tokenText(40),
+    durationMs: 1_000,
+    usage: {
+      inputTokens: 10,
+      outputTokens: 100,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      totalTokens: 110,
+    },
+  };
+  const state = tickTokenRate(acc, [completed], BASE_NOW + 200);
+  assert.equal(state.rate, undefined, 'no active-generation timing was sampled');
+  assert.equal(state.endToEndRate, 100);
+  assert.match(state.label, /100 tok\/s/);
+  assert.match(state.tooltip, /end-to-end throughput/i);
+});
+
+test('zero-output terminal turns are unavailable, not zero tok/s', () => {
+  const acc = createAccumulator(BASE_NOW);
+  const terminal: ChatMessage = {
+    ...streamingMessage(),
+    status: 'error',
+    durationMs: 1_000,
+    usage: {
+      inputTokens: 10,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      totalTokens: 10,
+    },
+  };
+  const state = tickTokenRate(acc, [terminal], BASE_NOW + 200);
+  assert.equal(state.rate, undefined);
+  assert.equal(state.endToEndRate, undefined);
+  assert.doesNotMatch(state.label, /0 tok\/s/);
+});
+
+// --- terminal output estimate (privacy-safe numeric fallback for aggregates) ---
+
+test('a completed burst without provider usage exposes its conservative terminal output estimate', () => {
+  // A burst that completes between sampler ticks never appears in
+  // liveOutputTokens, so the aggregate 30s wall-clock throughput needs the
+  // numeric terminal estimate to still count it. Only the size is exposed —
+  // never the text.
+  const acc = createAccumulator(BASE_NOW);
+  const completed: ChatMessage = {
+    ...streamingMessage(),
+    status: 'completed',
+    markdown: tokenText(40),
+    durationMs: 1_000,
+  };
+  const state = tickTokenRate(acc, [completed], BASE_NOW + 200);
+  assert.equal(state.state, 'paused');
+  assert.equal(state.terminalOutputTokensEstimate, estimateTextTokens(tokenText(40)));
+  assert.equal(state.endToEndRateEstimated, true, 'no provider usage → the end-to-end rate is estimated');
+});
+
+test('a usage-bearing terminal turn never exposes a terminal estimate (no double count)', () => {
+  // The provider count is authoritative for that burst; estimating on top of it
+  // would double-count it in the aggregate.
+  const acc = createAccumulator(BASE_NOW);
+  const completed: ChatMessage = {
+    ...streamingMessage(),
+    status: 'completed',
+    markdown: tokenText(40),
+    durationMs: 1_000,
+    usage: {
+      inputTokens: 10,
+      outputTokens: 100,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      totalTokens: 110,
+    },
+  };
+  const state = tickTokenRate(acc, [completed], BASE_NOW + 200);
+  assert.equal(state.terminalOutputTokensEstimate, undefined);
+  assert.equal(state.endToEndRate, 100);
+  assert.equal(state.endToEndRateEstimated, false, 'provider-reported usage, not estimated');
+});
+
+test('a zero-output terminal exposes no terminal estimate', () => {
+  const acc = createAccumulator(BASE_NOW);
+  const terminal: ChatMessage = {
+    ...streamingMessage(),
+    status: 'error',
+    durationMs: 1_000,
+  };
+  const state = tickTokenRate(acc, [terminal], BASE_NOW + 200);
+  assert.equal(state.terminalOutputTokensEstimate, undefined);
+  assert.equal(state.endToEndRate, undefined);
+});
+
+test('an uncovered terminal estimate persists while a later turn streams (mixed-run fallback)', () => {
+  // Mixed-run rule: only the newest terminal turn carries an estimate, and it
+  // stays exposed (alongside the live turn's own estimate) until authoritative
+  // usage or a settlement reconciliation replaces it. The two are disjoint —
+  // the terminal turn is not streaming, so the aggregate never double-counts.
+  const acc = createAccumulator(BASE_NOW);
+  const earlierBurst: ChatMessage = {
+    ...streamingMessage(),
+    id: 'm0',
+    status: 'completed',
+    markdown: tokenText(100),
+    durationMs: 1_000,
+  };
+  const streaming = streamingMessage({ id: 'm1', markdown: tokenText(50) });
+  const state = tickTokenRate(acc, [earlierBurst, streaming], BASE_NOW + 1_000);
+  assert.equal(state.state, 'generating');
+  assert.equal(state.terminalOutputTokensEstimate, estimateTextTokens(tokenText(100)));
+  assert.ok((state.liveOutputTokens ?? 0) > 0, 'the live turn keeps its own estimate');
+});
+
 test('rate is output tokens divided by the generation-time span between samples', () => {
   const acc = createAccumulator(BASE_NOW);
   const t1 = estimateTextTokens(tokenText(100));
@@ -157,7 +291,7 @@ test('formatRate renders a zero rate as "0" when samples show no token growth', 
   assert.equal(state.label, '0 tok/s');
 });
 
-test('completed hidden reasoning replaces the stale visible estimate with reported effective throughput', () => {
+test('completed hidden reasoning keeps active speed primary and exposes reported end-to-end throughput', () => {
   const acc = createAccumulator(BASE_NOW);
   const streaming = streamingMessage({ markdown: tokenText(20) });
 
@@ -181,9 +315,11 @@ test('completed hidden reasoning replaces the stale visible estimate with report
   const state = tickTokenRate(acc, [completed], BASE_NOW + 10_000);
 
   assert.equal(state.state, 'paused');
-  assert.equal(state.rate, 100);
-  assert.match(state.label, /100 tok\/s/);
-  assert.match(state.tooltip, /Last rate: 100 tok\/s/);
+  assert.equal(state.rate, 20);
+  assert.equal(state.endToEndRate, 100);
+  assert.match(state.label, /20 tok\/s/);
+  assert.match(state.tooltip, /End-to-end throughput: 100 tok\/s/);
+  assert.match(state.tooltip, /Last rate: 20 tok\/s/);
 });
 
 // --- accumulator merge: cumTokens accumulates per-tick deltas across ticks ---
@@ -203,7 +339,9 @@ test('cumTokens accumulates the per-tick deltas and one sample is pushed per gen
   tickTokenRate(acc, [{ ...m, markdown: tokenText(30) }], BASE_NOW + 3000);
   assert.equal(acc.cumTokens, t3); // t2 + (t3 - t2)
   assert.equal(acc.samples.length, 3);
-  assert.equal(acc.genMs, 3000);
+  // The first output establishes the generation baseline; its preceding TTFT
+  // is excluded from the active-generation clock.
+  assert.equal(acc.genMs, 2000);
 });
 
 test('streaming tool-call arguments count as generated output', () => {
@@ -225,7 +363,7 @@ test('streaming tool-call arguments count as generated output', () => {
   assert.equal(second.state, 'generating');
   assert.equal(acc.cumTokens, secondTokens);
   assert.equal(second.liveOutputTokens, secondTokens);
-  assert.equal(acc.genMs, 2_000);
+  assert.equal(acc.genMs, 1_000);
   assert.equal(second.rate, secondTokens - firstTokens);
 });
 
@@ -570,7 +708,7 @@ test('a subagent mid-stream stall (streaming, no token growth) still advances th
   const state = tickTokenRate(acc, [{ ...m, toolCalls: [subagentToolCall('sub1', tokenText(100))] }], BASE_NOW + 2000);
   assert.equal(state.state, 'generating');
   assert.equal(state.label, '0 tok/s');
-  assert.ok(acc.genMs > 1000, 'clock advanced through the stall');
+  assert.ok(acc.genMs >= 1000, 'clock advanced through the stall after the first-output baseline');
 });
 
 test('a reasoning-only subagent stream (streaming flag, no streamingText) advances the clock', () => {

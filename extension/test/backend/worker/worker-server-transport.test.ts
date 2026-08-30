@@ -105,6 +105,62 @@ test('worker server admits soft interrupt on the priority path while a runtime c
   }
 });
 
+test('worker server joins an exact equal-revision sync retry and applies it once', async () => {
+  const inbound = new PassThrough();
+  const outbound = new PassThrough();
+  const frames: WorkerIpcFrame[] = [];
+  let buffered = '';
+  outbound.setEncoding('utf8');
+  outbound.on('data', (chunk: string) => {
+    buffered += chunk;
+    while (buffered.includes('\n')) {
+      const newline = buffered.indexOf('\n');
+      frames.push(JSON.parse(buffered.slice(0, newline)) as WorkerIpcFrame);
+      buffered = buffered.slice(newline + 1);
+    }
+  });
+  let releaseApply!: () => void;
+  const applyBlocked = new Promise<void>((resolve) => { releaseApply = resolve; });
+  let applyCount = 0;
+  const server = new WorkerServer(identity, {
+    pid: frameBase.workerPid,
+    exit: () => undefined as never,
+  }, { readable: inbound, writable: outbound }, {
+    validateBootstrap: () => undefined,
+    onFrame: async (frame) => {
+      if (frame.kind !== 'sync') return;
+      applyCount += 1;
+      await applyBlocked;
+    },
+  });
+  server.start();
+  const send = (seq: number, body: Record<string, unknown>): void => {
+    inbound.write(`${JSON.stringify({ ...frameBase, seq, ...body })}\n`);
+  };
+  try {
+    send(1, { kind: 'bootstrap', heartbeatIntervalMs: 60_000, sdkPatchIdentity });
+    await waitUntil(() => frames.some((frame) => frame.kind === 'ready'));
+    const sync = { domain: 'sessionRegistry', revision: 7, payload: { tabs: [{ path: '/review.jsonl' }] } };
+    send(2, { kind: 'sync', requestId: 'registry-original', ...sync });
+    await waitUntil(() => applyCount === 1);
+    send(3, { kind: 'sync', requestId: 'registry-retry', ...sync });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(frames.some((frame) => frame.kind === 'sync.ack'), false);
+
+    releaseApply();
+    await waitUntil(() => frames.filter((frame) => frame.kind === 'sync.ack').length === 2);
+    assert.equal(applyCount, 1);
+    assert.deepEqual(
+      frames.filter((frame) => frame.kind === 'sync.ack').map((frame) => frame.kind === 'sync.ack' && frame.requestId),
+      ['registry-original', 'registry-retry'],
+    );
+  } finally {
+    releaseApply();
+    inbound.destroy();
+    outbound.destroy();
+  }
+});
+
 test('worker server callback/request plumbing correlates Phase 4 frames and fences sync domains independently', async () => {
   const inbound = new PassThrough();
   const outbound = new PassThrough();
@@ -129,16 +185,7 @@ test('worker server callback/request plumbing correlates Phase 4 frames and fenc
     },
   }, { readable: inbound, writable: outbound }, {
     validateBootstrap: () => undefined,
-    onFrame: (frame, workerServer) => {
-      if (frame.kind === 'sync') {
-        workerServer.sendFrame({
-          kind: 'sync.ack',
-          requestId: frame.requestId,
-          domain: frame.domain,
-          revision: frame.revision,
-        });
-      }
-    },
+    onFrame: () => undefined,
   });
   server.start();
   const send = (seq: number, body: Record<string, unknown>): void => {
@@ -159,7 +206,7 @@ test('worker server callback/request plumbing correlates Phase 4 frames and fenc
     send(2, {
       kind: 'provider.granted',
       requestId: acquire.requestId,
-      lease: { leaseId: 'lease-1', provider: 'fixture', model: 'model', grantedAt: 1 },
+      lease: { leaseId: 'lease-1', provider: 'fixture', model: 'model', grantedAt: 1, headerWaitMs: 120_000, streamIdleTimeoutMs: 120_000 },
     });
     assert.equal((await grantedPromise).lease.leaseId, 'lease-1');
 
@@ -172,15 +219,33 @@ test('worker server callback/request plumbing correlates Phase 4 frames and fenc
     send(3, { kind: 'provider.cancelled', requestId: 'queued-admission', reason: 'interrupted while queued' });
     await assert.rejects(cancelledPromise, (error: Error) => error.name === 'AbortError');
 
-    send(4, { kind: 'sync', requestId: 'settings-5', domain: 'settings', revision: 5, payload: { values: {} } });
-    send(5, { kind: 'sync', requestId: 'catalog-1', domain: 'catalog', revision: 1, payload: { models: [] } });
+    const rejectedPromise = server.requestFrame({
+      kind: 'provider.acquire',
+      request: { provider: 'fixture', model: 'saturated', turnId: 'turn-3', attemptId: 'attempt-3' },
+    }, 'provider.granted', 'saturated-admission');
+    await waitUntil(() => frames.some((frame) => frame.kind === 'provider.acquire'
+      && frame.requestId === 'saturated-admission'));
+    send(4, {
+      kind: 'provider.rejected', requestId: 'saturated-admission',
+      error: { name: 'ProviderGateSaturatedError', message: 'retry later', retryable: true, httpStatus: 429 },
+    });
+    await assert.rejects(rejectedPromise, (error: Error & { isRetryable?: boolean; httpStatus?: number }) => {
+      assert.equal(error.name, 'ProviderGateSaturatedError');
+      assert.equal(error.message, 'retry later');
+      assert.equal(error.isRetryable, true);
+      assert.equal(error.httpStatus, 429);
+      return true;
+    });
+
+    send(5, { kind: 'sync', requestId: 'settings-5', domain: 'settings', revision: 5, payload: { values: {} } });
+    send(6, { kind: 'sync', requestId: 'catalog-1', domain: 'catalog', revision: 1, payload: { models: [] } });
     await waitUntil(() => frames.filter((frame) => frame.kind === 'sync.ack').length === 2);
     assert.deepEqual(
       frames.filter((frame) => frame.kind === 'sync.ack').map((frame) => frame.kind === 'sync.ack' && [frame.domain, frame.revision]),
       [['settings', 5], ['catalog', 1]],
     );
 
-    send(6, { kind: 'sync', requestId: 'settings-stale', domain: 'settings', revision: 4, payload: { values: {} } });
+    send(7, { kind: 'sync', requestId: 'settings-stale', domain: 'settings', revision: 4, payload: { values: {} } });
     await waitUntil(() => frames.some((frame) => frame.kind === 'fatal'));
     const fatal = frames.find((frame) => frame.kind === 'fatal');
     assert.ok(fatal?.kind === 'fatal');
@@ -233,6 +298,29 @@ test('worker server reports rejected runtime frames before exiting', async () =>
     const fatal = frames.find((frame) => frame.kind === 'fatal');
     assert.ok(fatal?.kind === 'fatal');
     assert.match(fatal.error.message, /rejected \(oversize\)/);
+    await waitUntil(() => exitCodes.length > 0);
+    assert.deepEqual(exitCodes, [1]);
+  } finally {
+    inbound.destroy();
+    outbound.destroy();
+  }
+});
+
+test('worker server exits when its fatal frame is itself rejected', async () => {
+  const inbound = new PassThrough();
+  const outbound = new PassThrough();
+  const exitCodes: number[] = [];
+  const server = new WorkerServer(identity, {
+    pid: frameBase.workerPid,
+    exit: (code = 0) => {
+      exitCodes.push(code);
+      return undefined as never;
+    },
+  }, { readable: inbound, writable: outbound }, { validateBootstrap: () => undefined });
+  server.start();
+
+  try {
+    server.failRuntime(new Error('x'.repeat(300 * 1024)));
     await waitUntil(() => exitCodes.length > 0);
     assert.deepEqual(exitCodes, [1]);
   } finally {

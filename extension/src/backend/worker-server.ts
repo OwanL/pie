@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { Socket } from 'node:net';
 import type { Readable, Writable } from 'node:stream';
 
@@ -19,6 +19,7 @@ import {
   type WorkerHeartbeatPhase,
   type WorkerIpcFrameDraft,
   type WorkerResponseResult,
+  type WorkerSyncDomain,
   type WorkerToCoordinatorFrameBody,
   type WorkerToCoordinatorRequestBody,
 } from './worker-protocol';
@@ -77,7 +78,7 @@ export function parseWorkerServerArgs(argv: readonly string[]): WorkerServerIden
   }
   const allowed = new Set([
     '--coordinator-generation', '--worker-id', '--worker-generation', '--session-path',
-    '--root-session-path', '--lease-path', '--lease-revision',
+    '--root-session-path', '--lease-path', '--lease-revision', '--mcp-config',
     '--ipc-read-fd', '--ipc-write-fd',
   ]);
   for (const key of values.keys()) if (!allowed.has(key)) throw new Error(`Unknown worker entry argument ${key}.`);
@@ -131,13 +132,16 @@ export class WorkerServer {
   private exitScheduled = false;
   private inbound = Promise.resolve();
   private readonly pending = new Map<string, PendingCoordinatorResponse>();
-  private readonly syncRevisions: Record<'settings' | 'catalog' | 'auth' | 'runtimePrefs' | 'providerPolicy', number> = {
+  private readonly syncRevisions: Record<WorkerSyncDomain, number> = {
     settings: 0,
     catalog: 0,
     auth: 0,
     runtimePrefs: 0,
     providerPolicy: 0,
+    sessionRegistry: 0,
   };
+  private readonly syncPayloadFingerprints: Partial<Record<WorkerSyncDomain, string>> = {};
+  private readonly syncApplications: Partial<Record<WorkerSyncDomain, Promise<void>>> = {};
 
   constructor(
     private readonly identity: WorkerServerIdentity,
@@ -281,6 +285,10 @@ export class WorkerServer {
         pending.reject(createAbortError(frame.reason));
         return;
       }
+      if (frame.kind === 'provider.rejected') {
+        pending.reject(createProviderRejectedError(frame.error));
+        return;
+      }
       if (frame.kind !== pending.expectedKind) {
         const error = new Error(`Coordinator response ${requestId} returned frame ${frame.kind}; expected ${pending.expectedKind}.`);
         pending.reject(error);
@@ -292,7 +300,8 @@ export class WorkerServer {
     }
     if (frame.kind === 'ownership.reserved' || frame.kind === 'ownership.committed' || frame.kind === 'ownership.consumed'
         || frame.kind === 'ownership.aborted' || frame.kind === 'ownership.rejected' || frame.kind === 'ownership.runtimeReadyAck'
-        || frame.kind === 'provider.granted' || frame.kind === 'provider.cancelled' || frame.kind === 'provider.cancelAck'
+        || frame.kind === 'provider.granted' || frame.kind === 'provider.cancelled' || frame.kind === 'provider.rejected'
+        || frame.kind === 'provider.cancelAck'
         || frame.kind === 'provider.released' || frame.kind === 'settings.authoritative') {
       this.failProtocol(`Coordinator ${frame.kind} has unknown requestId ${frame.requestId}.`, 'PROTOCOL_ERROR');
       return;
@@ -358,11 +367,43 @@ export class WorkerServer {
     }
     if (frame.kind === 'sync') {
       const current = this.syncRevisions[frame.domain];
-      if (frame.revision <= current) {
+      if (frame.revision < current) {
         this.failProtocol(`Sync revision for ${frame.domain} must advance beyond ${current}.`, 'PROTOCOL_ERROR');
         return;
       }
+      const fingerprint = createHash('sha256').update(JSON.stringify(frame.payload)).digest('hex');
+      if (frame.revision === current) {
+        if (this.syncPayloadFingerprints[frame.domain] !== fingerprint) {
+          this.failProtocol(`Sync retry for ${frame.domain}@${current} changed its payload.`, 'PROTOCOL_ERROR');
+          return;
+        }
+        // The coordinator may retry after its ACK deadline while the original
+        // frame is still waiting for a blocked JS turn. Join the exact apply
+        // before replaying the acknowledgement; never run host side effects
+        // twice and never make an idempotent retry protocol-fatal.
+        await this.syncApplications[frame.domain];
+        this.sendFrame({
+          kind: 'sync.ack', requestId: frame.requestId,
+          domain: frame.domain, revision: frame.revision,
+        });
+        return;
+      }
+      const previousApplication = this.syncApplications[frame.domain] ?? Promise.resolve();
       this.syncRevisions[frame.domain] = frame.revision;
+      this.syncPayloadFingerprints[frame.domain] = fingerprint;
+      const application = previousApplication.then(async () => {
+        if (!this.handlers.onFrame) {
+          throw new Error(`No Phase 4 handler is installed for ${frame.kind}.`);
+        }
+        await this.handlers.onFrame(frame, this);
+      });
+      this.syncApplications[frame.domain] = application;
+      await application;
+      this.sendFrame({
+        kind: 'sync.ack', requestId: frame.requestId,
+        domain: frame.domain, revision: frame.revision,
+      });
+      return;
     }
     if (!this.handlers.onFrame) {
       this.failProtocol(`No Phase 4 handler is installed for ${frame.kind}.`, 'PROTOCOL_ERROR');
@@ -410,11 +451,15 @@ export class WorkerServer {
     if (this.closing) return;
     this.closing = true;
     this.stopHeartbeat();
-    this.send({
+    const accepted = this.send({
       ...this.frameBase,
       kind: 'fatal',
       error: { code, phase, message: message || 'Worker protocol failed closed.' },
     }, () => this.close(1));
+    // A fatal frame can itself be rejected (for example when its diagnostic is
+    // oversized). Heartbeats have already stopped, so close immediately rather
+    // than leaving a coordinator-orphaned process alive forever.
+    if (!accepted) this.close(1);
   }
 
   private send(draft: WorkerIpcFrameDraft, onSettled?: () => void): boolean {
@@ -423,14 +468,17 @@ export class WorkerServer {
         if (settlement.status === 'sent') onSettled?.();
         else if (settlement.status === 'failed') this.close(1);
         else if (settlement.status === 'rejected') {
-          this.failProtocol(
-            `Worker IPC frame rejected (${settlement.reason}): ${settlement.detail}`,
-            'INTERNAL_ERROR',
-          );
+          if (this.closing) this.close(1);
+          else {
+            this.failProtocol(
+              `Worker IPC frame rejected (${settlement.reason}): ${settlement.detail}`,
+              'INTERNAL_ERROR',
+            );
+          }
         }
       },
     });
-    if (!result.accepted) {
+    if (!result.accepted && !this.closing) {
       this.failProtocol(
         `Worker IPC frame rejected (${result.reason}): ${result.detail}`,
         'INTERNAL_ERROR',
@@ -459,5 +507,15 @@ export class WorkerServer {
 function createAbortError(message: string): Error {
   const error = new Error(message);
   error.name = 'AbortError';
+  return error;
+}
+
+function createProviderRejectedError(
+  payload: { name: string; message: string; retryable: boolean; httpStatus?: number },
+): Error {
+  const error = new Error(payload.message) as Error & { isRetryable: boolean; httpStatus?: number };
+  error.name = payload.name;
+  error.isRetryable = payload.retryable;
+  if (payload.httpStatus !== undefined) error.httpStatus = payload.httpStatus;
   return error;
 }

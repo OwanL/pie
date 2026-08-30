@@ -2,7 +2,7 @@
 
 ## What it is
 
-pie is a VS Code sidebar extension that surfaces a running `pi` agent process as a chat UI. Its closest analogue is GitHub Copilot Chat, but it differs in two key ways:
+pie is a VS Code sidebar extension that surfaces a running `pi` agent process as a chat UI. The same UI can additionally be opened in a local browser via the loopback browser server (`pie: Open in Browser`), which registers as an extra renderer of the shared host state — the sidebar remains the primary and design-defining surface. Its closest analogue is GitHub Copilot Chat, but it differs in two key ways:
 
 - **More minimal** — every element earns its place; decoration is removed if it adds no information
 - **More transparent** — the user can see exactly what the agent is doing (tool calls, inputs, results) without having to ask
@@ -33,7 +33,6 @@ pie is a VS Code sidebar extension that surfaces a running `pi` agent process as
 ### Transparency
 - Tool calls are always visible in the message stream, collapsed by default but expandable. Input and result are shown verbatim — no paraphrasing.
 - The active model and reasoning level are always visible in the composer footer.
-- Session history is accessible without leaving the sidebar.
 
 ## What to avoid
 

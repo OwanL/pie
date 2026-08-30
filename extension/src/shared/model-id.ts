@@ -21,6 +21,15 @@ export function stripProviderPrefix(modelId: string): string {
   return slash > 0 && slash < modelId.length - 1 ? modelId.slice(slash + 1) : modelId;
 }
 
+/** Runtime provider namespace of a qualified id (`provider/id` → `provider`),
+ *  or `undefined` for bare ids. The prefix is only a provider namespace when a
+ *  non-empty suffix remains. */
+export function providerPrefixOf(modelId: string | undefined): string | undefined {
+  if (!modelId) return undefined;
+  const slash = modelId.lastIndexOf('/');
+  return slash > 0 && slash < modelId.length - 1 ? modelId.slice(0, slash) : undefined;
+}
+
 /** Qualify a bare model id without duplicating an existing provider prefix. */
 export function qualifyModelId(
   modelId: string | undefined,

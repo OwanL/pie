@@ -7,17 +7,13 @@ import type { ChatPrefs, McpServerInfo } from '../../../shared/protocol';
 import { McpServerList } from './mcp-server-list';
 import type { OnSetPrefs } from './settings-menu-types';
 
-/** Settings section for MCP (Model Context Protocol) servers.
- *
- *  The pi-mcp-adapter package (loaded via `packages`) exposes configured MCP
- *  servers to the model through the `mcp` proxy tool. The global toggle below
- *  is enforced by a backend guard that strips the adapter's tools from every
- *  active tool set, so servers stay configured in their mcp.json files but the
- *  model never sees the tools while MCP is off.
- *
- *  Per-server rows persist `disabled` overrides into `.pi/mcp.json` (the
- *  adapter's own mechanism — never touches credentials) and take effect on
- *  the next session reload / backend restart. */
+/** Settings section for MCP (Model Context Protocol) servers — the GLOBAL
+ *  controls. These apply to every session: the pi-mcp-adapter package's
+ *  tools exposed through the `mcp` proxy tool are guarded host-wide by the
+ *  `mcpEnabled` pref, and the per-server rows persist `disabled` overrides
+ *  into `.pi/mcp.json` (the adapter's own mechanism — never touches
+ *  credentials), applying on the next session reload / backend restart.
+ *  Session-scoped server toggles live in the toolbar's MCP dropdown. */
 export function McpSection({ prefs, mcpServers, mcpServersStatus, mcpPendingApply, onSetPrefs, onMcpListRequested, onMcpSetServerEnabled }: {
   prefs: ChatPrefs;
   mcpServers: McpServerInfo[];
@@ -37,6 +33,9 @@ export function McpSection({ prefs, mcpServers, mcpServersStatus, mcpPendingAppl
     <div class="toolbar-settings-ext-settings">
       <div class="toolbar-settings-list">
         {/* Global on/off */}
+        <div class="toolbar-settings-ui-control-head">
+          <span class="toolbar-settings-ui-control-label">Global — applies to every session</span>
+        </div>
         <button
           class={`toolbar-settings-item${prefs.mcpEnabled ? ' checked' : ''}`}
           type="button"

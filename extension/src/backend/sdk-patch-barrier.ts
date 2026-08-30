@@ -25,7 +25,7 @@ import {
 } from './sdk-session-open-patch';
 
 export const SDK_PATCH_IDENTITY_VERSION = 5 as const;
-const TERMINAL_DURABILITY_PATCH_VERSION = 1 as const;
+const TERMINAL_DURABILITY_PATCH_VERSION = 3 as const;
 const RETRY_CLASSIFIER_PATCH_VERSION = 1 as const;
 const COLD_CREATE_DURABILITY_PATCH_VERSION = 2 as const;
 const LOCK_OWNER_VERSION = 1 as const;
@@ -78,6 +78,47 @@ const DURABILITY_CUSTOM_NEEDLE = `                this.sessionManager.appendCust
 const DURABILITY_CUSTOM_REPLACEMENT = `                const sessionEntryId = this.sessionManager.appendCustomMessageEntry(event.message.customType, event.message.content, event.message.display, event.message.details);\n                this._emit({ ...emittedEvent, sessionEntryId });`;
 const DURABILITY_REGULAR_NEEDLE = `                this.sessionManager.appendMessage(event.message);\n            }\n            // Other message types`;
 const DURABILITY_REGULAR_REPLACEMENT = `                const sessionEntryId = this.sessionManager.appendMessage(event.message);\n                this._emit({ ...emittedEvent, sessionEntryId });\n            }\n            else {\n                this._emit(emittedEvent);\n            }\n            // Other message types`;
+
+const MALFORMED_TERMINAL_NEEDLE = `        // Emit to extensions first\n        await this._emitExtensionEvent(event);`;
+const MALFORMED_TERMINAL_REPLACEMENT_V1 = `        // Pie malformed-terminal guard v1. Some OpenAI-compatible providers can
+        // emit finish_reason=stop after sending only a truncated reasoning stream
+        // and no usage record. Convert that impossible success into the existing
+        // retryable protocol-error signature before extensions, persistence, and
+        // post-run retry classification observe it.
+        if (event.type === "message_end" && event.message.role === "assistant" && event.message.stopReason === "stop") {
+            const content = Array.isArray(event.message.content) ? event.message.content : [];
+            const hasReasoning = content.some((part) => part?.type === "thinking" && typeof part.thinking === "string" && part.thinking.trim().length > 0);
+            const hasVisibleResult = content.some((part) => (part?.type === "text" && typeof part.text === "string" && part.text.trim().length > 0) || part?.type === "toolCall");
+            const hasReportedUsage = event.message.usage && Object.values(event.message.usage).some((value) => typeof value === "number" && value > 0);
+            if (hasReasoning && !hasVisibleResult && !hasReportedUsage) {
+                this._replaceMessageInPlace(event.message, {
+                    ...event.message,
+                    stopReason: "error",
+                    errorMessage: "Provider returned an incomplete successful response: Stream ended before a terminal response event",
+                });
+            }
+        }
+        // Emit to extensions first
+        await this._emitExtensionEvent(event);`;
+const MALFORMED_TERMINAL_REPLACEMENT = `        // Pie malformed-terminal guard v2. A successful assistant turn must
+        // produce a visible answer or a tool call. Provider usage metadata is
+        // advisory and cannot make a reasoning-only terminal complete.
+        if (event.type === "message_end" && event.message.role === "assistant" && event.message.stopReason === "stop") {
+            const content = Array.isArray(event.message.content) ? event.message.content : [];
+            const hasReasoning = content.some((part) => part?.type === "thinking" && typeof part.thinking === "string" && part.thinking.trim().length > 0);
+            const hasVisibleResult = content.some((part) => (part?.type === "text" && typeof part.text === "string" && part.text.trim().length > 0) || part?.type === "toolCall");
+            if (hasReasoning && !hasVisibleResult) {
+                this._replaceMessageInPlace(event.message, {
+                    ...event.message,
+                    stopReason: "error",
+                    errorMessage: "Provider returned an incomplete successful response: Stream ended before a terminal response event",
+                });
+            }
+        }
+        // Emit to extensions first
+        await this._emitExtensionEvent(event);`;
+const MALFORMED_TERMINAL_MARKER = 'Pie malformed-terminal guard v2';
+const MALFORMED_TERMINAL_MARKER_V1 = 'Pie malformed-terminal guard v1';
 
 const DURABILITY_MARKERS = [
   DURABILITY_NOTIFY_REPLACEMENT,
@@ -347,6 +388,26 @@ function replaceExactlyOnce(source: string, needle: string, replacement: string)
 
 function reverseDurability(source: string): string | undefined {
   let reversed = source;
+  if (reversed.includes(MALFORMED_TERMINAL_REPLACEMENT)) {
+    const withoutMalformedGuard = replaceExactlyOnce(
+      reversed,
+      MALFORMED_TERMINAL_REPLACEMENT,
+      MALFORMED_TERMINAL_NEEDLE,
+    );
+    if (withoutMalformedGuard === undefined) return undefined;
+    reversed = withoutMalformedGuard;
+  } else if (reversed.includes(MALFORMED_TERMINAL_REPLACEMENT_V1)) {
+    const withoutMalformedGuard = replaceExactlyOnce(
+      reversed,
+      MALFORMED_TERMINAL_REPLACEMENT_V1,
+      MALFORMED_TERMINAL_NEEDLE,
+    );
+    if (withoutMalformedGuard === undefined) return undefined;
+    reversed = withoutMalformedGuard;
+  } else if (reversed.includes(MALFORMED_TERMINAL_MARKER)
+      || reversed.includes(MALFORMED_TERMINAL_MARKER_V1)) {
+    return undefined;
+  }
   const replacements: ReadonlyArray<readonly [string, string]> = [
     [DURABILITY_NOTIFY_NEEDLE, DURABILITY_NOTIFY_REPLACEMENT],
     [DURABILITY_CUSTOM_NEEDLE, DURABILITY_CUSTOM_REPLACEMENT],
@@ -483,7 +544,8 @@ function buildRetryReplacement(candidate: RetryPatchCandidate, inserts: readonly
 }
 
 function hasDurabilityMarkers(source: string): boolean {
-  return DURABILITY_MARKERS.every((marker) => source.includes(marker));
+  return source.includes(MALFORMED_TERMINAL_REPLACEMENT)
+    && DURABILITY_MARKERS.every((marker) => source.includes(marker));
 }
 
 function hasRetryMarkers(source: string, candidate: RetryPatchCandidate): boolean {
@@ -502,17 +564,37 @@ function hasColdCreateMarkers(source: string): boolean {
 
 function transformDurability(source: string): { result: SdkTerminalDurabilityPatchResult; source: string } {
   if (hasDurabilityMarkers(source)) return { result: 'already-present', source };
-  if (DURABILITY_MARKERS.some((marker) => source.includes(marker))) {
+
+  let transformed = source;
+  let changed = false;
+  if (transformed.includes(MALFORMED_TERMINAL_REPLACEMENT_V1)) {
+    transformed = transformed.replace(MALFORMED_TERMINAL_REPLACEMENT_V1, MALFORMED_TERMINAL_REPLACEMENT);
+    changed = true;
+  } else if (!transformed.includes(MALFORMED_TERMINAL_REPLACEMENT)) {
+    if (transformed.includes(MALFORMED_TERMINAL_MARKER)
+        || transformed.includes(MALFORMED_TERMINAL_MARKER_V1)
+        || !transformed.includes(MALFORMED_TERMINAL_NEEDLE)) {
+      return { result: 'unsupported-shape', source };
+    }
+    transformed = transformed.replace(MALFORMED_TERMINAL_NEEDLE, MALFORMED_TERMINAL_REPLACEMENT);
+    changed = true;
+  }
+
+  const hasAllLegacyMarkers = DURABILITY_MARKERS.every((marker) => transformed.includes(marker));
+  if (hasAllLegacyMarkers) {
+    return { result: changed ? 'patched' : 'already-present', source: transformed };
+  }
+  if (DURABILITY_MARKERS.some((marker) => transformed.includes(marker))) {
     return { result: 'unsupported-shape', source };
   }
-  if (!source.includes(DURABILITY_NOTIFY_NEEDLE)
-      || !source.includes(DURABILITY_CUSTOM_NEEDLE)
-      || !source.includes(DURABILITY_REGULAR_NEEDLE)) {
+  if (!transformed.includes(DURABILITY_NOTIFY_NEEDLE)
+      || !transformed.includes(DURABILITY_CUSTOM_NEEDLE)
+      || !transformed.includes(DURABILITY_REGULAR_NEEDLE)) {
     return { result: 'unsupported-shape', source };
   }
   return {
     result: 'patched',
-    source: source
+    source: transformed
       .replace(DURABILITY_NOTIFY_NEEDLE, DURABILITY_NOTIFY_REPLACEMENT)
       .replace(DURABILITY_CUSTOM_NEEDLE, DURABILITY_CUSTOM_REPLACEMENT)
       .replace(DURABILITY_REGULAR_NEEDLE, DURABILITY_REGULAR_REPLACEMENT),

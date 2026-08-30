@@ -18,7 +18,13 @@ const LEVEL_RANK: Record<LogLevel, number> = {
 };
 
 const BOOT_TRACE_PATH = path.join(os.tmpdir(), 'pie-boot-trace.jsonl');
-const PIE_LOG_DIR = path.join(os.tmpdir(), 'pie-logs');
+// Never let `node:test` children share the live extension's persistent log.
+// Several failure-path tests intentionally emit errors, and the logger tests
+// delete/rotate their target. A process-local test directory preserves those
+// assertions without erasing or contaminating runtime diagnostics.
+const PIE_LOG_DIR = process.env['NODE_TEST_CONTEXT']
+  ? path.join(os.tmpdir(), 'pie-test-logs', `process-${process.pid}`)
+  : path.join(os.tmpdir(), 'pie-logs');
 const PIE_LOG_PATH = path.join(PIE_LOG_DIR, 'pie.log');
 /** Simple 1-deep rotation: once the active log exceeds 5 MiB it is moved to
  *  `pie.log.1`. Keeping the limit small avoids unbounded growth in long-lived

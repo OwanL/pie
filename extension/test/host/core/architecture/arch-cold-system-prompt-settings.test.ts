@@ -59,6 +59,7 @@ test('a cold SessionOpened toggle confirmation updates existing prompt entries w
     },
     busy: false,
     runtimeReady: false,
+    initialContextEstimate: { tokens: 12_345, contextWindow: 200_000 },
     systemPromptDisabledEntries: ['skills'],
   };
 
@@ -72,6 +73,10 @@ test('a cold SessionOpened toggle confirmation updates existing prompt entries w
     payload,
   });
 
+  assert.deepEqual(out.state.settings.initialContextEstimateBySession[SESSION], {
+    tokens: 12_345,
+    contextWindow: 200_000,
+  });
   assert.deepEqual(
     out.state.transcript.systemPromptsBySession[SESSION]?.map((entry) => ({
       id: entry.id,

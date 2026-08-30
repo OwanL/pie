@@ -44,11 +44,13 @@ export { PROVIDER_GATE_REQUEST_CLASS_HEADER, type ProviderGateRequestClass };
 const REQUEST_CLASS_PRIORITY: Record<ProviderGateRequestClass, number> = {
 	'skill-pruner': 0,
 	'default': 1,
+	'session-title': 2,
 };
 
 /** Parse a request-class header value into a known class (unknown → default). */
 function parseRequestClass(value: string | undefined | null): ProviderGateRequestClass {
 	if (value === 'skill-pruner') return 'skill-pruner';
+	if (value === 'session-title') return 'session-title';
 	return 'default';
 }
 
@@ -70,7 +72,7 @@ export interface ProviderConcurrencyConfig {
 	 *  reuses the reserved slot instead of re-queueing. */
 	afterburnSeconds?: number;
 	/** Max seconds a queued request waits for a slot before failing with a
-	 *  retryable 429/503. 0 = unbounded. */
+	 *  retryable 429/503. 0 selects the five-minute safety maximum. */
 	queueWaitSeconds?: number;
 	/** Max seconds to wait for the upstream response HEADERS before aborting
 	 *  the request with a retryable error and releasing the slot. This bounds
@@ -80,7 +82,7 @@ export interface ProviderConcurrencyConfig {
 	headerWaitSeconds?: number;
 }
 
-/** Per-provider live metrics (for the status bar / aggregate stats). */
+	/** Per-provider live metrics (for the status bar / aggregate stats). */
 export interface ProviderGateMetrics {
 	provider: string;
 	activeRequests: number;
@@ -88,6 +90,8 @@ export interface ProviderGateMetrics {
 	maxConcurrentRequests: number;
 	/** Configured afterburn sticky-slot window (seconds; 0 = disabled). */
 	afterburnSeconds: number;
+	/** Configured maximum queue wait before saturation fails. */
+	queueWaitSeconds?: number;
 	/** True if the circuit breaker is currently armed (account paused). */
 	paused: boolean;
 	/** Epoch-ms until which the provider is paused (0 = not paused). */
@@ -167,6 +171,15 @@ interface QueuedWaiter {
 	sessionId: string | null;
 }
 
+const PROVIDER_QUEUE_WAIT_SAFETY_MAX_MS = 5 * 60 * 1000;
+
+function normalizeQueueWaitMs(queueWaitSeconds: number): number {
+	const requestedMs = Math.max(0, queueWaitSeconds) * 1000;
+	return requestedMs > 0
+		? Math.min(requestedMs, PROVIDER_QUEUE_WAIT_SAFETY_MAX_MS)
+		: PROVIDER_QUEUE_WAIT_SAFETY_MAX_MS;
+}
+
 class ProviderPool {
 	slots: ConcurrencySlot[];
 	private configuredMaxConcurrent: number;
@@ -183,7 +196,7 @@ class ProviderPool {
 	constructor(readonly provider: string, maxConcurrent: number, afterburnSeconds: number, queueWaitSeconds: number) {
 		this.configuredMaxConcurrent = Math.max(1, Math.floor(maxConcurrent));
 		this.configuredAfterburnMs = Math.max(0, afterburnSeconds) * 1000;
-		this.configuredQueueWaitMs = Math.max(0, queueWaitSeconds) * 1000;
+		this.configuredQueueWaitMs = normalizeQueueWaitMs(queueWaitSeconds);
 		this.slots = Array.from({ length: this.configuredMaxConcurrent }, (_, i) => ({
 			index: i,
 			inFlight: false,
@@ -233,7 +246,7 @@ class ProviderPool {
 
 		this.configuredMaxConcurrent = nextMax;
 		this.configuredAfterburnMs = nextAfterburnMs;
-		this.configuredQueueWaitMs = Math.max(0, queueWaitSeconds) * 1000;
+		this.configuredQueueWaitMs = normalizeQueueWaitMs(queueWaitSeconds);
 		this.wakeEligibleWaiters();
 	}
 
@@ -1428,6 +1441,7 @@ export class ProviderGate {
 				queuedRequests: entry.pool.queuedRequests,
 				maxConcurrentRequests: entry.pool.maxConcurrent,
 				afterburnSeconds: Math.round(entry.pool.afterburnMs / 1000),
+				queueWaitSeconds: entry.pool.queueWaitMs / 1000,
 				paused: entry.pool.isPaused() || transportPaused,
 				pausedUntilMs: Math.max(entry.pool.pausedUntilMs(), transportPaused ? (transport?.openUntil ?? 0) : 0),
 				strikeCount: entry.pool.strikeCount() + (transport?.consecutiveFailures ?? 0),

@@ -26,7 +26,7 @@ export const PACKAGE_DIRECTIVES = [
   { id: 'ask-user', dir: 'extensions/ask-user' },
   { id: 'warm-bash', dir: 'extensions/warm-bash' },
   { id: 'copilot-model-discovery', dir: 'extensions/copilot-model-discovery' },
-  { id: 'web-access-compat', dir: 'extensions/web-access-compat' },
+  { id: 'web-access-guard', dir: 'extensions/web-access-guard' },
   { id: 'tool-result-pruner', dir: 'extensions/tool-result-pruner' },
   { id: 'session-reviewer', dir: 'extensions/session-reviewer' },
   { id: 'deferred-triggers', dir: 'extensions/deferred-triggers' },

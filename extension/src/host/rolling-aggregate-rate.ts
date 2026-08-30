@@ -6,11 +6,29 @@ export interface RollingRunOutput {
   reportedOutputTokens: number;
   /** Tokenizer-estimated output still absent from reported usage. */
   liveOutputTokens?: number;
+  /** Conservative visible-output estimate for the newest terminal turn of the
+   * session when its provider usage is unavailable (numeric only, never text).
+   * A burst that completes between observations never appears in
+   * {@link liveOutputTokens}, so this is the only signal that captures it.
+   * Because only the newest terminal turn is estimated, a mixed run (some turns
+   * reported, some not) reconciles conservatively: the authoritative reported
+   * total wins at settlement and older unreported turns are never invented. */
+  terminalOutputTokensEstimate?: number;
+  /** True when this observation is the run's authoritative terminal snapshot
+   * (settlement). The FIRST terminal observation applies a one-time signed
+   * correction that reconciles the run's contribution to the terminal total —
+   * positive when provider output exceeds the estimates, negative when the live
+   * estimate overshot. Later observations of a settled run are monotonic and
+   * idempotent, so the correction can never repeat. Open/live transient drops
+   * never retract before this terminal authority. */
+  terminal?: boolean;
 }
 
 interface RunMark {
   highWaterTokens: number;
   lastSeenAt: number;
+  /** Set once the one-time terminal settlement correction has been applied. */
+  settled: boolean;
 }
 
 interface RateSample {
@@ -22,10 +40,15 @@ interface RateSample {
  * Wall-clock rolling output rate across every observed run.
  *
  * Each input combines provider-reported settled output with the transient live
- * estimate that is not yet represented in reported usage. When a terminal
- * usage report replaces that estimate, the per-run high-water mark prevents
- * double-counting; concurrent still-live output remains additive.
- * Keeping run identity here also captures turns that start and finish between
+ * estimate that is not yet represented in reported usage, plus the terminal
+ * estimate for a final turn whose usage is unavailable. While a run is open the
+ * mark is monotonic: output only ever accumulates, so concurrent still-live
+ * output stays additive and transient live drops never retract. When the
+ * authoritative terminal snapshot arrives, the run's contribution is reconciled
+ * once with a signed correction to that terminal total (down when the live
+ * estimate overshot it, up when provider output exceeded it); the displayed
+ * rate is clamped so this correction can never render a negative rate. Keeping
+ * run identity here also captures turns that start and finish between
  * token-rate UI ticks, because their persisted run total still increases.
  */
 export class RollingAggregateRate {
@@ -46,15 +69,32 @@ export class RollingAggregateRate {
       const live = Number.isFinite(run.liveOutputTokens)
         ? Math.max(0, run.liveOutputTokens ?? 0)
         : 0;
-      const total = reported + live;
+      const terminalEstimate = Number.isFinite(run.terminalOutputTokensEstimate)
+        ? Math.max(0, run.terminalOutputTokensEstimate ?? 0)
+        : 0;
+      const total = reported + live + terminalEstimate;
       const mark = this.runMarks.get(run.runId);
       if (mark) {
-        delta += Math.max(0, total - mark.highWaterTokens);
-        mark.highWaterTokens = Math.max(mark.highWaterTokens, total);
+        if (run.terminal === true && !mark.settled) {
+          // One-time settlement reconciliation to terminal authority. The
+          // signed correction replaces whatever estimate overshoot accumulated
+          // while the run was open; the high-water mark then restarts from the
+          // authoritative total so later growth is measured against reality.
+          delta += total - mark.highWaterTokens;
+          mark.highWaterTokens = total;
+          mark.settled = true;
+        } else {
+          delta += Math.max(0, total - mark.highWaterTokens);
+          mark.highWaterTokens = Math.max(mark.highWaterTokens, total);
+        }
         mark.lastSeenAt = now;
       } else {
         delta += total;
-        this.runMarks.set(run.runId, { highWaterTokens: total, lastSeenAt: now });
+        this.runMarks.set(run.runId, {
+          highWaterTokens: total,
+          lastSeenAt: now,
+          settled: run.terminal === true,
+        });
       }
     }
 
@@ -64,7 +104,10 @@ export class RollingAggregateRate {
       }
     }
 
-    if (delta > 0) this.cumulativeTokens += delta;
+    // Signed deltas apply settlement retractions as well as growth; the floor
+    // keeps the accumulator from going negative (per-run corrections are
+    // bounded by that run's contribution, so this is defensive only).
+    if (delta !== 0) this.cumulativeTokens = Math.max(0, this.cumulativeTokens + delta);
 
     if (this.samples.length === 0) {
       // Output present when the service starts has no known production interval

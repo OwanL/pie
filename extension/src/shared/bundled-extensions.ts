@@ -19,7 +19,7 @@ export const KNOWN_EXTENSIONS: ExtensionInfo[] = [
   { id: 'session-changes', label: 'Session Changes', description: 'Inspect the files a session changed (manifest + diffs)' },
   { id: 'warm-bash', label: 'Warm Bash', description: 'Speed up the bash tool with a pre-warmed shell pool' },
   { id: 'copilot-model-discovery', label: 'Copilot Model Discovery', description: 'Keep the GitHub Copilot model catalog up to date' },
-  { id: 'web-access-compat', label: 'Web Access Compat', description: 'Repair compatibility for the web-access package at startup' },
+  { id: 'web-access-guard', label: 'Web Access Guard', description: 'Enforce raw web results and repair damaged web-access installs' },
   { id: 'image-context-guard', label: 'Image Context Guard', description: 'Bound projected image parts to each model request limit' },
   { id: 'pi-web-access', label: 'Web Access', description: 'Search the web and fetch page or video content' },
 ];

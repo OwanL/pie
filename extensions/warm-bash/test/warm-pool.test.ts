@@ -22,9 +22,9 @@ type AnyOps = {
   exec: (command: string, cwd: string, o: { onData: (b: Buffer) => void; signal?: AbortSignal; timeout?: number; env?: NodeJS.ProcessEnv }) => Promise<{ exitCode: number | null }>;
 };
 
-async function loadPool(): Promise<new (opts: { size: number; shellPath: string; env?: NodeJS.ProcessEnv }) => AnyPool> {
+async function loadPool(): Promise<new (opts: { size: number; shellPath: string; env?: NodeJS.ProcessEnv; speculativeRefillDelayMs?: number }) => AnyPool> {
   const m = await import(poolUrl);
-  return m.WarmBashPool as unknown as new (opts: { size: number; shellPath: string; env?: NodeJS.ProcessEnv }) => AnyPool;
+  return m.WarmBashPool as unknown as new (opts: { size: number; shellPath: string; env?: NodeJS.ProcessEnv; speculativeRefillDelayMs?: number }) => AnyPool;
 }
 
 async function loadOps(): Promise<(o: { pool: AnyPool | null; fastPathEnabled: boolean; fallbackOps: AnyOps; metrics?: { totalFastPath: number; totalWarm: number; totalFallback: number } }) => AnyOps> {
@@ -394,21 +394,39 @@ describe('warm-bash pool (real bash round-trip)', {
     assert.equal(text().trim(), 'VIA-FALLBACK');
   });
 
-  test('pool reuses across sequential calls (size 2 keeps a spare warm)', async () => {
+  test('pool replenishes its size-2 spare workers after use', async () => {
     const pool = new Pool({ size: 2, shellPath: BASH, env: process.env });
     try {
       // `ready()` intentionally resolves after the first worker because
-      // production may start using the acceleration cache immediately. This
-      // test specifically asserts the size-2 spare behavior, so wait for both
-      // workers instead of racing the second warmup under suite-wide process
-      // contention.
-      await waitForReadyWorkers(pool, 2);
-      for (let i = 0; i < 5; i++) {
-        const { onData, text } = sink();
-        const res = await pool.exec({ command: `echo iter${i}`, cwd: tmp, env: process.env, onData });
-        assert.equal(res.exitCode, 0);
-        assert.equal(text().trim(), `iter${i}`);
+      // production may start using the acceleration cache immediately. Wait
+      // for both workers so each two-call burst exercises the configured spare
+      // capacity, then let the asynchronous refill restore that capacity.
+      for (let round = 0; round < 3; round++) {
+        await waitForReadyWorkers(pool, 2);
+        for (let slot = 0; slot < 2; slot++) {
+          const label = `${round}-${slot}`;
+          const { onData, text } = sink();
+          const res = await pool.exec({ command: `echo iter${label}`, cwd: tmp, env: process.env, onData });
+          assert.equal(res.exitCode, 0);
+          assert.equal(text().trim(), `iter${label}`);
+        }
       }
+    } finally {
+      pool.dispose();
+    }
+  });
+
+  test('quick warm hit settles before replacement spawn begins', async () => {
+    const pool = new Pool({ size: 1, shellPath: BASH, env: process.env, speculativeRefillDelayMs: 10_000 });
+    try {
+      await waitForReadyWorkers(pool, 1);
+      const { onData } = sink();
+      await pool.exec({ command: 'echo quick', cwd: tmp, env: process.env, onData });
+
+      const immediatelyAfter = pool.getStats();
+      assert.equal(immediatelyAfter.ready, 0);
+      assert.equal(immediatelyAfter.warming, 0);
+      await waitForReadyWorkers(pool, 1);
     } finally {
       pool.dispose();
     }
@@ -427,10 +445,13 @@ describe('warm-bash pool (real bash round-trip)', {
 
       const { onData } = sink();
       await pool.exec({ command: 'echo counted', cwd: tmp, env: process.env, onData });
+      // Refill is deliberately deferred until after a quick exec settles; wait
+      // for it before asserting the steady-state stats surface.
+      await waitForReadyWorkers(pool, 1);
       const after = pool.getStats();
       // warm-exec count is owned by the operations layer (metrics), not the pool;
       // the pool only reports pool size / ready / warming / warmup failures.
-      assert.ok(after.ready >= 1, `ready>=1 after exec, got ${after.ready}`);
+      assert.ok(after.ready >= 1, `ready>=1 after refill, got ${after.ready}`);
     } finally {
       pool.dispose();
     }

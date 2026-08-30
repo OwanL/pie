@@ -15,13 +15,13 @@ This folder contains active design contracts, implementation plans, and operatio
 
 ## Implemented design references
 
+- [SESSION-TITLES.md](SESSION-TITLES.md) — behavior, settings, worker contract, validation, and host-owned lifecycle for optional asynchronous LLM session titles.
 - [DEFERRED-TRIGGERS.md](DEFERRED-TRIGGERS.md) — design and behavioral contract for the `defer_trigger` tool and its host-side registry: a session registers an asynchronous condition (timer / user input / another session finishing), ends its turn, and is resumed by a synthetic wake-up when it fires. Runtime code lives in `extensions/deferred-triggers/` (tool), `extension/src/host/deferred-triggers/` (registry + sidecar store), and the status-strip webview menu.
 - [TOOL-RESULT-PRUNING.md](TOOL-RESULT-PRUNING.md) — design and contract for the deterministic `tool_result` middleware (strip ANSI, minify JSON, prune permission columns, collapse blank lines) before results enter context. One of three context-lean layers (history compaction / skill pruning / tool-result pruning — see `AGENTS.md`). Runtime code lives in `extensions/tool-result-pruner/`; the document remains the behavioral reference and records future lossy/recall considerations.
 - [MCP.md](MCP.md) — operational reference for MCP support (via the pinned `pi-mcp-adapter` pi package): the proxy-tool/lazy-server model, config scopes and precedence, how to add a server (Jira current setup), security notes, version pin vs the pi runtime, and the headless verification harness.
 
 ## Operational references
 
-- `skills/harness-experiments/SKILL.md` + `benchmarks/README.md` — operational reference for the `experiment:*` command suite and harness-experiments workflow: worktree/recipe/task/result contracts, headless execution, Umans-only model and credential isolation, scoring, and safety gates. The completed design record was retired once the skill and scripts became the living reference.
 - `skills/evaluate-sessions/SKILL.md` — operational reference for evidence-based, blinded agent-session evaluation: criterion-ledger reviews, independent proposals/classification, compact canonical records, batch persistence, and explicit close actions.
 - [COMPUTER-USE.md](COMPUTER-USE.md) — selected dependencies, isolated runtime architecture, tool/coordinate/lifecycle contracts, acceptance evidence, verification commands, and known limitations for the generic Windows `computer` tool and skill.
 
@@ -30,7 +30,6 @@ This folder contains active design contracts, implementation plans, and operatio
 - [internal/centralized-model-config.md](internal/centralized-model-config.md) — design rationale for centralizing model config into `models.yaml` + the `sync-models` codegen. **Implemented**; see `README.md` (Model Configuration) and `AGENTS.md` for authoritative usage. Kept as the "why" record.
 - [internal/ollama-pro-cloud-models-ranked.md](internal/ollama-pro-cloud-models-ranked.md) — model evaluation notes.
 - [internal/model-token-pricing-sources.md](internal/model-token-pricing-sources.md) — **authoritative evidence ledger** for all real token pricing in `models.json`. Every non-zero cost field traces back to a row here.
-- [internal/experiments/capability-disclosure-screen-2026-07-17.md](internal/experiments/capability-disclosure-screen-2026-07-17.md) — controlled forced-hidden screening of unified vs separate tool/skill recovery and immediate vs metadata skill loading; promotes unified immediate disclosure to end-to-end testing.
 - [IDEAS.md](IDEAS.md) — unstructured brain-dump. Not a roadmap. Items here are candidates for evaluation, not commitments.
 
 ## Conventions

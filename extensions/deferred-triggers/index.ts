@@ -29,6 +29,24 @@ interface ToolExecuteCtx {
   abort?: () => void;
 }
 
+interface AssistantTerminalLike {
+  role?: string;
+  stopReason?: string;
+  errorMessage?: string;
+  content?: unknown;
+}
+
+function hasAssistantOutput(content: unknown): boolean {
+  if (!Array.isArray(content)) return false;
+  return content.some((part) => {
+    if (!part || typeof part !== 'object') return false;
+    const candidate = part as Record<string, unknown>;
+    return candidate.type === 'toolCall'
+      || (candidate.type === 'text' && typeof candidate.text === 'string' && candidate.text.trim().length > 0)
+      || (candidate.type === 'thinking' && typeof candidate.thinking === 'string' && candidate.thinking.trim().length > 0);
+  });
+}
+
 function ok(text: string, details?: unknown) {
   return {
     content: [{ type: 'text' as const, text }],
@@ -97,6 +115,26 @@ function renderList(triggers: { id: string; triggers: TriggerSpec[]; note: strin
 }
 
 export default function (pi: ExtensionAPI) {
+  // `defer_trigger register` must stop the active agent loop so the model
+  // cannot continue issuing tools before wake-up. The SDK represents that
+  // control-flow stop as an aborted assistant terminal. Replace only the
+  // empty terminal caused by our immediately scheduled abort; genuine user,
+  // provider, and content-bearing aborts remain interrupted.
+  let intentionalDeferralPending = false;
+  pi.on('message_end', (event: { message: AssistantTerminalLike }) => {
+    if (!intentionalDeferralPending || event.message.role !== 'assistant') return;
+    intentionalDeferralPending = false;
+    const message = event.message as AssistantTerminalLike;
+    if (message.stopReason !== 'aborted' || hasAssistantOutput(message.content)) return;
+    return {
+      message: {
+        ...event.message,
+        stopReason: 'stop',
+        errorMessage: undefined,
+      },
+    };
+  });
+
   pi.registerTool({
     name: 'defer_trigger',
     label: 'Defer / resume',
@@ -164,6 +202,7 @@ export default function (pi: ExtensionAPI) {
       // Let the successful tool result reach Pi before aborting the active
       // operation. This ends the current turn after registration, preventing
       // the model from continuing with extra tools before the wake-up.
+      intentionalDeferralPending = true;
       setImmediate(() => ctx.abort?.());
       return ok(
         `Registered deferred trigger ${id}:\n  [${describeTrigger(specs)}]\n  note: ${note || '(none)'}\n\nYour turn will end now; you will be resumed automatically when the trigger fires. When resumed, re-evaluate the condition and either complete the task or call \`defer_trigger\` with action \`register\` again to keep waiting.`,

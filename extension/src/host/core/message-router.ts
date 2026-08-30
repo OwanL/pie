@@ -2,13 +2,14 @@ import * as crypto from 'node:crypto';
 
 import * as vscode from 'vscode';
 
-import type { WebviewToHostMessage, SessionSummary, ChatPrefs, DetailResult, LazyDetailRef, PruningSettings, ToolResultPruningSettings, PruningMode, RendererCommandContext } from '../../shared/protocol';
+import type { WebviewToHostMessage, SessionSummary, ChatPrefs, DetailResult, LazyDetailRef, PruningSettings, SessionTitlesSettings, ToolResultPruningSettings, PruningMode, RendererCommandContext } from '../../shared/protocol';
 import type { Event } from './events';
 import type { ArchState } from './reducer';
 import { bootLog } from '../util/audit';
 import { appendPieError, appendPieLog, showPieLogs } from '../util/pie-log';
 import { buildOptimisticUserParts, buildPromptText } from './composer';
 import { resolveSettingsPath } from '../util/settings-path';
+import { NEW_SESSION_NAME } from '../../shared/session-name';
 
 /** Minimal sidebar provider surface the router needs. */
 export interface SidebarProviderLike {
@@ -39,6 +40,7 @@ export interface SessionServiceLike {
   setPrefs(prefs: Partial<ChatPrefs>): void;
   setPruningSettings(updates: Partial<PruningSettings>): Promise<void>;
   setToolResultPruningSettings(updates: Partial<ToolResultPruningSettings>): Promise<void>;
+  setSessionTitlesSettings(updates: Partial<SessionTitlesSettings>): Promise<void>;
   /** Notify deferred triggers that the user sent a message in `sessionPath`. */
   notifyUserInput(sessionPath: string): void;
   /** Cancel a deferred trigger (or all for `sessionPath` when `triggerId` is
@@ -199,12 +201,18 @@ export class MessageRouter {
 
       case 'togglePinTab':
         return this.onTogglePinTab(msg as Extract<WebviewToHostMessage, { type: 'togglePinTab' }>);
+      case 'pinAndMergePinnedTab':
+        return this.onPinAndMergePinnedTab(msg as Extract<WebviewToHostMessage, { type: 'pinAndMergePinnedTab' }>);
       case 'groupPinnedTab':
         return this.onGroupPinnedTab(msg as Extract<WebviewToHostMessage, { type: 'groupPinnedTab' }>, context);
       case 'mergePinnedGroups':
         return this.onMergePinnedGroups(msg as Extract<WebviewToHostMessage, { type: 'mergePinnedGroups' }>, context);
       case 'ungroupPinnedTab':
         return this.onUngroupPinnedTab(msg as Extract<WebviewToHostMessage, { type: 'ungroupPinnedTab' }>, context);
+      case 'dissolvePinnedGroup':
+        return this.onDissolvePinnedGroup(msg as Extract<WebviewToHostMessage, { type: 'dissolvePinnedGroup' }>, context);
+      case 'unpinPinnedGroup':
+        return this.onUnpinPinnedGroup(msg as Extract<WebviewToHostMessage, { type: 'unpinPinnedGroup' }>, context);
       case 'movePinnedItem':
         return this.onMovePinnedItem(msg as Extract<WebviewToHostMessage, { type: 'movePinnedItem' }>, context);
 
@@ -235,6 +243,9 @@ export class MessageRouter {
       case 'revertFile':
         return await this.onRevertFile(msg as Extract<WebviewToHostMessage, { type: 'revertFile' }>, context);
 
+      case 'truncateAfter':
+        return this.onTruncateAfter(msg as Extract<WebviewToHostMessage, { type: 'truncateAfter' }>, context);
+
       case 'setFileRead':
         return this.onSetFileRead(msg as Extract<WebviewToHostMessage, { type: 'setFileRead' }>);
 
@@ -250,6 +261,9 @@ export class MessageRouter {
       case 'mcpSetServerEnabled':
         return this.onMcpSetServerEnabled(msg as Extract<WebviewToHostMessage, { type: 'mcpSetServerEnabled' }>);
 
+      case 'mcpSetServerEnabledForSession':
+        return this.onMcpSetServerEnabledForSession(msg as Extract<WebviewToHostMessage, { type: 'mcpSetServerEnabledForSession' }>, context);
+
       case 'setPrivacyMode':
         return this.onSetPrivacyMode(msg as Extract<WebviewToHostMessage, { type: 'setPrivacyMode' }>, context);
 
@@ -258,6 +272,9 @@ export class MessageRouter {
 
       case 'setToolResultPruningSettings':
         return await this.onSetToolResultPruningSettings(msg as Extract<WebviewToHostMessage, { type: 'setToolResultPruningSettings' }>);
+
+      case 'setSessionTitlesSettings':
+        return await this.onSetSessionTitlesSettings(msg as Extract<WebviewToHostMessage, { type: 'setSessionTitlesSettings' }>);
 
       case 'startEdit':
         return this.onStartEdit(msg as Extract<WebviewToHostMessage, { type: 'startEdit' }>);
@@ -420,14 +437,21 @@ export class MessageRouter {
     const userParts = buildOptimisticUserParts(text, inputs);
     const localId = webviewLocalId ?? `local:${crypto.randomUUID()}`;
 
-    // Optimistic session name.
+    // Show a literal first-prompt snippet immediately. It remains replaceable
+    // until the asynchronous title model writes a durable session name.
     let previousSummary = null as SessionSummary | null;
     const session = this.getSessionByPath(sessionPath);
-    if (session?.isPlaceholder) {
+    if (session?.isPlaceholder && session.name === NEW_SESSION_NAME) {
       const derived = this.deriveSessionNameFromTextFn(composedText);
-      if (!derived.isPlaceholder && derived.name !== session.name) {
+      if (derived.name !== session.name) {
         previousSummary = session;
-        this.dispatchEvent({ kind: 'SessionNameDerived', sessionPath, name: derived.name });
+        this.dispatchEvent({
+          kind: 'SessionNameDerived',
+          sessionPath,
+          name: derived.name,
+          isPlaceholder: derived.isPlaceholder,
+          sourcePrompt: composedText,
+        });
         this.scheduleRender();
       }
     }
@@ -710,6 +734,18 @@ export class MessageRouter {
     this.sidebarProvider.postState();
   }
 
+  private onPinAndMergePinnedTab(msg: Extract<WebviewToHostMessage, { type: 'pinAndMergePinnedTab' }>): void {
+    // Pure state mutation — no service / backend RPC. The reducer pins the tab
+    // and groups it with the leftmost pinned item, then emits a PersistTabs
+    // effect. Mirrors onTogglePinTab.
+    const corrId = crypto.randomUUID();
+    this.dispatchEvent({
+      kind: 'Command',
+      cmd: { kind: 'PinAndMergePinnedTab', corrId, sessionPath: msg.sessionPath },
+    });
+    this.sidebarProvider.postState();
+  }
+
   private isNonEmptyString(value: unknown): value is string {
     return typeof value === 'string' && value.length > 0;
   }
@@ -769,6 +805,34 @@ export class MessageRouter {
     this.dispatchEvent({
       kind: 'Command',
       cmd: { kind: 'UngroupPinnedTab', corrId, sourcePath: msg.sourcePath, toItemIndex: msg.toItemIndex },
+    });
+    this.sidebarProvider.postState();
+  }
+
+  private onDissolvePinnedGroup(msg: Extract<WebviewToHostMessage, { type: 'dissolvePinnedGroup' }>, context?: RendererCommandContext): void {
+    if (!this.isNonEmptyString(msg.sourcePath)) {
+      this.rejectBrowser(msg, context, 'invalid-source-path');
+      this.dispatchEvent({ kind: 'NoticeShown', notice: 'Protocol defect: dissolvePinnedGroup arrived without a sourcePath.' });
+      return;
+    }
+    const corrId = crypto.randomUUID();
+    this.dispatchEvent({
+      kind: 'Command',
+      cmd: { kind: 'DissolvePinnedGroup', corrId, sourcePath: msg.sourcePath },
+    });
+    this.sidebarProvider.postState();
+  }
+
+  private onUnpinPinnedGroup(msg: Extract<WebviewToHostMessage, { type: 'unpinPinnedGroup' }>, context?: RendererCommandContext): void {
+    if (!this.isNonEmptyString(msg.sourcePath)) {
+      this.rejectBrowser(msg, context, 'invalid-source-path');
+      this.dispatchEvent({ kind: 'NoticeShown', notice: 'Protocol defect: unpinPinnedGroup arrived without a sourcePath.' });
+      return;
+    }
+    const corrId = crypto.randomUUID();
+    this.dispatchEvent({
+      kind: 'Command',
+      cmd: { kind: 'UnpinPinnedGroup', corrId, sourcePath: msg.sourcePath },
     });
     this.sidebarProvider.postState();
   }
@@ -988,7 +1052,56 @@ export class MessageRouter {
         ...(context ? { source: { rendererId: context.rendererId, kind: context.kind, rendererGeneration: context.rendererGeneration } } : {}),
       },
     });
-    this.dispatchEvent({ kind: 'FileChangeRemoved', sessionPath: msg.sessionPath, filePath: msg.filePath });
+    // The changed-file row is only removed AFTER the revert succeeds — the
+    // `FileRevertResult` event carries `filePath` and the reducer drops the
+    // matching row on `ok:true`. Removing here (before confirmation/confirm
+    // success) made a declined inline confirm or a failed revert lose the
+    // row (and the user's read state) despite the file keeping its changes.
+    this.scheduleRender();
+  }
+
+  /** `truncateAfter` — destructive transcript "Delete from here". Explicitly
+   *  session-addressed: verify the session is open and the message still
+   *  exists in THAT session before dispatching the `TruncateAfter` command
+   *  (never an implicit fallback to the viewed/active session). Browser
+   *  rejections are explicit via the browser rejection seam. */
+  private onTruncateAfter(msg: Extract<WebviewToHostMessage, { type: 'truncateAfter' }>, context?: RendererCommandContext): void {
+    const sessionPath = typeof msg.sessionPath === 'string' ? msg.sessionPath : '';
+    const messageId = typeof msg.messageId === 'string' ? msg.messageId : '';
+    if (!sessionPath || !messageId) {
+      this.rejectBrowser(msg, context, 'missing-target');
+      this.dispatchEvent({ kind: 'NoticeShown', notice: 'Protocol defect: truncateAfter arrived without a sessionPath or messageId.' });
+      return;
+    }
+    if (this.isPendingTabPathFn(sessionPath)) {
+      this.rejectBrowser(msg, context, 'session-still-opening');
+      this.dispatchEvent({ kind: 'NoticeShown', notice: 'Cannot delete from here: the session is still opening.' });
+      return;
+    }
+    if (!this.getArchState().sessions.openTabPaths.includes(sessionPath)) {
+      this.rejectBrowser(msg, context, 'session-not-open');
+      this.dispatchEvent({ kind: 'NoticeShown', notice: 'Cannot delete from here: the selected session is no longer open.' });
+      return;
+    }
+    if (messageId.startsWith('local:')) {
+      this.rejectBrowser(msg, context, 'non-durable-message');
+      this.dispatchEvent({ kind: 'NoticeShown', notice: 'Protocol defect: truncateAfter arrived for a non-durable message.' });
+      return;
+    }
+    // The message must still exist in the addressed session's transcript — a
+    // stale renderer (another renderer truncated, or the row scrolled out of
+    // the loaded window then dropped) must reject rather than dispatch a
+    // command targeting a vanished entry.
+    const target = this.getArchState().transcript.bySession[sessionPath]?.find((message) => message.id === messageId);
+    if (!target) {
+      this.rejectBrowser(msg, context, 'message-not-found');
+      this.dispatchEvent({ kind: 'NoticeShown', notice: 'Cannot delete from here: that message is no longer in this session\'s transcript.' });
+      return;
+    }
+    this.dispatchEvent({
+      kind: 'Command',
+      cmd: { kind: 'TruncateAfter', corrId: crypto.randomUUID(), sessionPath, messageId },
+    });
     this.scheduleRender();
   }
 
@@ -1012,6 +1125,23 @@ export class MessageRouter {
       cmd: {
         kind: 'McpSetServerEnabled',
         corrId: crypto.randomUUID(),
+        name: msg.name,
+        enabled: msg.enabled,
+      },
+    });
+  }
+
+  private onMcpSetServerEnabledForSession(msg: Extract<WebviewToHostMessage, { type: 'mcpSetServerEnabledForSession' }>, context?: RendererCommandContext): void {
+    if (!msg.sessionPath || !this.getArchState().sessions.openTabPaths.includes(msg.sessionPath)) {
+      this.rejectBrowser(msg, context, 'session-not-open');
+      return;
+    }
+    this.dispatchEvent({
+      kind: 'Command',
+      cmd: {
+        kind: 'McpSetServerEnabledForSession',
+        corrId: crypto.randomUUID(),
+        sessionPath: msg.sessionPath,
         name: msg.name,
         enabled: msg.enabled,
       },
@@ -1049,6 +1179,15 @@ export class MessageRouter {
     this.dispatchEvent({
       kind: 'Command',
       cmd: { kind: 'SetToolResultPruningSettings', corrId, settings: msg.settings },
+    });
+    this.scheduleRender();
+  }
+
+  private async onSetSessionTitlesSettings(msg: Extract<WebviewToHostMessage, { type: 'setSessionTitlesSettings' }>): Promise<void> {
+    const corrId = crypto.randomUUID();
+    this.dispatchEvent({
+      kind: 'Command',
+      cmd: { kind: 'SetSessionTitlesSettings', corrId, settings: msg.settings },
     });
     this.scheduleRender();
   }

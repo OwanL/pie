@@ -5,7 +5,9 @@ import { PassThrough } from 'node:stream';
 import {
   attachBoundedWorkerIpcReader,
   BoundedWorkerIpcWriter,
+  WORKER_IPC_DEFAULT_RESPONSE_QUEUE_BYTES,
   WORKER_IPC_MAX_FRAME_BYTES,
+  WORKER_IPC_RESPONSE_QUEUE_HEADROOM_BYTES,
   type WorkerIpcWriteTarget,
   type WorkerIpcSettlement,
 } from '../../../src/backend/worker-frame-io';
@@ -73,6 +75,12 @@ test('writer has one active send, priority FIFO lanes, contiguous dispatch seque
   assert.deepEqual(replacement, { accepted: true, coalesced: true });
   writer.enqueue(response('response-1'));
   writer.enqueue(response('response-2'));
+  writer.enqueue({
+    ...frameBase,
+    kind: 'provider.rejected',
+    requestId: 'provider-rejected',
+    error: { name: 'ProviderGateSaturatedError', message: 'retry later', retryable: true, httpStatus: 429 },
+  });
   writer.enqueue(fatal());
   assert.equal(target.sent.length, 1, 'an active descriptor write is never preempted');
   assert.deepEqual(staleHeartbeat, [{ status: 'coalesced' }]);
@@ -85,12 +93,13 @@ test('writer has one active send, priority FIFO lanes, contiguous dispatch seque
       ['command', 1, undefined],
       ['response', 2, undefined],
       ['response', 3, undefined],
-      ['fatal', 4, undefined],
-      ['command', 5, undefined],
-      ['heartbeat', 6, 2],
+      ['provider.rejected', 4, undefined],
+      ['fatal', 5, undefined],
+      ['command', 6, undefined],
+      ['heartbeat', 7, 2],
     ],
   );
-  assert.deepEqual(latestHeartbeat, [{ status: 'sent', seq: 6 }]);
+  assert.deepEqual(latestHeartbeat, [{ status: 'sent', seq: 7 }]);
   assert.equal(writer.getDebugState().active, false);
 });
 
@@ -110,6 +119,30 @@ test('writer prioritizes lifecycle over progress and bounds detail independently
   while (target.callbacks.length > 0) target.callbacks.shift()!(null);
   assert.deepEqual(target.sent.map((frame) => frame.kind), [
     'command', 'response', 'runtime.event', 'command', 'detail.delta',
+  ]);
+});
+
+test('provider observation stays ordered before its correlated release under backpressure', () => {
+  const target = new FakeSendTarget();
+  const writer = new BoundedWorkerIpcWriter(target);
+  writer.enqueue(command('active'));
+  writer.enqueue({
+    ...frameBase,
+    kind: 'provider.observation',
+    leaseId: 'lease-1',
+    observation: { classification: 'http-error', status: 400, retryable: false },
+  });
+  writer.enqueue({
+    ...frameBase,
+    kind: 'provider.release',
+    requestId: 'release-1',
+    leaseId: 'lease-1',
+    outcome: 'failed',
+  });
+
+  while (target.callbacks.length > 0) target.callbacks.shift()!(null);
+  assert.deepEqual(target.sent.map((frame) => frame.kind), [
+    'command', 'provider.observation', 'provider.release',
   ]);
 });
 
@@ -206,6 +239,84 @@ test('writer admits a single large control frame that exceeds the lane capacity'
   assert.equal(result.accepted, true, 'a single large control frame is not rejected by the lane capacity');
   assert.equal(target.sent.length, 1);
   assert.equal(target.sent[0]?.kind, 'runtime.promote');
+});
+
+test('response lane admits a greater-than-1-MiB checkpoint response alongside its sync acknowledgement', () => {
+  const target = new FakeSendTarget();
+  const writer = new BoundedWorkerIpcWriter(target);
+  const checkpointBytes = 1024 * 1024 + 128 * 1024;
+  const checkpointResponse: WorkerIpcFrameDraft = {
+    ...frameBase,
+    kind: 'response',
+    requestId: 'checkpoint',
+    ok: true,
+    result: {
+      kind: 'runtime.command',
+      payload: { checkpoint: 'x'.repeat(checkpointBytes) },
+    },
+  };
+  const syncAck: WorkerIpcFrameDraft = {
+    ...frameBase,
+    kind: 'sync.ack',
+    requestId: 'session-registry-sync',
+    domain: 'sessionRegistry',
+    revision: 1,
+  };
+
+  writer.enqueue(command('active'));
+  assert.equal(writer.enqueue(checkpointResponse).accepted, true);
+  assert.equal(writer.enqueue(syncAck).accepted, true,
+    'a valid checkpoint response must not consume the acknowledgement reserve');
+  assert.equal(writer.getDebugState().queueDepth.response, 2);
+
+  while (target.callbacks.length > 0) target.callbacks.shift()!(null);
+  assert.deepEqual(target.sent.map((frame) => frame.kind), ['command', 'response', 'sync.ack']);
+});
+
+test('response reservation is bounded to one maximum frame plus fixed acknowledgement headroom', () => {
+  assert.equal(
+    WORKER_IPC_DEFAULT_RESPONSE_QUEUE_BYTES,
+    WORKER_IPC_MAX_FRAME_BYTES + WORKER_IPC_RESPONSE_QUEUE_HEADROOM_BYTES,
+  );
+
+  const target = new FakeSendTarget();
+  const writer = new BoundedWorkerIpcWriter(target, { maxQueuedResponseBytes: 900 });
+  const makeSizedResponse = (requestId: string): WorkerIpcFrameDraft => ({
+    ...frameBase,
+    kind: 'response',
+    requestId,
+    ok: true,
+    result: { kind: 'runtime.command', payload: { value: 'x'.repeat(100) } },
+  });
+
+  writer.enqueue(makeSizedResponse('active'));
+  assert.equal(writer.enqueue(makeSizedResponse('queued')).accepted, true);
+  const capacity = writer.enqueue(makeSizedResponse('rejected'));
+  assert.equal(capacity.accepted, false);
+  if (!capacity.accepted) assert.equal(capacity.reason, 'capacity');
+  assert.equal(target.sent.length, 1, 'the active response counts against the bounded reservation');
+});
+
+test('response reservation releases active-write bytes after overlapping responses drain', () => {
+  const target = new FakeSendTarget();
+  const writer = new BoundedWorkerIpcWriter(target, { maxQueuedResponseBytes: 900 });
+
+  assert.equal(writer.enqueue(response('active')).accepted, true);
+  assert.equal(writer.enqueue(response('queued')).accepted, true);
+  while (target.callbacks.length > 0) target.callbacks.shift()!(null);
+
+  assert.equal(writer.getDebugState().queueDepth.response, 0);
+  assert.equal(writer.getDebugState().queuedBytes.response, 0,
+    'the completed active response must not remain as phantom queued capacity');
+  const singleLargeResponse: WorkerIpcFrameDraft = {
+    ...frameBase,
+    kind: 'response',
+    requestId: 'large-after-drain',
+    ok: true,
+    result: { kind: 'runtime.command', payload: { value: 'x'.repeat(1_200) } },
+  };
+  assert.equal(writer.enqueue(singleLargeResponse).accepted, true,
+    'an empty response lane still admits one frame larger than its reservation');
 });
 
 test('false send return reports backpressure and waits for the callback before continuing', () => {

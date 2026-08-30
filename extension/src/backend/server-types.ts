@@ -20,6 +20,9 @@ export interface ActiveRequest {
   providerTurnSequence?: number;
   /** Correlated provider-gate queue rollups keyed by providerTurnSequence. */
   providerQueueByTurn?: Map<number, { durationMs: number; attemptCount: number }>;
+  /** Exact attempt currently between admission and its first body chunk. */
+  providerNetworkPendingAttemptId?: string;
+  providerNetworkPending?: boolean;
   /** Auto-retry attempt currently being measured. */
   retryTiming?: {
     retryId: string;

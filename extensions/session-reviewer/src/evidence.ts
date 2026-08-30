@@ -26,21 +26,66 @@ export function normalizedPathHash(sessionPath: string): string {
 }
 
 export interface SessionIdentity { sessionId: string; identityFallback: boolean }
+function fallbackSessionIdentity(sessionPath: string): SessionIdentity {
+  return { sessionId: normalizedPathHash(sessionPath), identityFallback: true };
+}
+function identityFromHeaderLine(sessionPath: string, line: string): SessionIdentity {
+  try {
+    const header = JSON.parse(line) as { type?: unknown; id?: unknown };
+    if (header.type === 'session' && typeof header.id === 'string' && header.id.trim()) {
+      return { sessionId: header.id.trim(), identityFallback: false };
+    }
+  } catch { /* path fallback */ }
+  return fallbackSessionIdentity(sessionPath);
+}
 export function readSessionIdentityFromBytes(sessionPath: string, raw: Buffer | string): SessionIdentity {
   const content = Buffer.isBuffer(raw) ? raw.toString('utf8') : raw;
   const first = content.split(/\r?\n/).find((line) => line.trim().length > 0);
-  if (first) {
-    try {
-      const header = JSON.parse(first) as { type?: unknown; id?: unknown };
-      if (header.type === 'session' && typeof header.id === 'string' && header.id.trim()) return { sessionId: header.id.trim(), identityFallback: false };
-    } catch { /* path fallback */ }
-  }
-  return { sessionId: normalizedPathHash(sessionPath), identityFallback: true };
+  return first ? identityFromHeaderLine(sessionPath, first) : fallbackSessionIdentity(sessionPath);
 }
-/** Reads only the first snapshot; later headers never repair a bad first line. */
+
+const SESSION_IDENTITY_PREFIX_LIMIT_BYTES = 64 * 1024;
+const SESSION_IDENTITY_READ_CHUNK_BYTES = 4 * 1024;
+
+/** Read only the bounded leading JSONL record needed for identity. Later
+ * headers never repair a malformed/oversized first non-empty line. This keeps
+ * list/close operations independent of transcript size (real sessions can be
+ * tens of megabytes) while preserving the stable path-hash fallback. */
 export function readSessionIdentity(sessionPath: string): SessionIdentity {
-  try { return readSessionIdentityFromBytes(sessionPath, fs.readFileSync(sessionPath)); }
-  catch { return { sessionId: normalizedPathHash(sessionPath), identityFallback: true }; }
+  let descriptor: number | undefined;
+  try {
+    descriptor = fs.openSync(sessionPath, 'r');
+    const prefix = Buffer.alloc(SESSION_IDENTITY_PREFIX_LIMIT_BYTES + 1);
+    let total = 0;
+    let lineStart = 0;
+    while (total < prefix.byteLength) {
+      const requested = Math.min(SESSION_IDENTITY_READ_CHUNK_BYTES, prefix.byteLength - total);
+      const bytesRead = fs.readSync(descriptor, prefix, total, requested, null);
+      if (bytesRead === 0) {
+        const finalLine = prefix.subarray(lineStart, total).toString('utf8');
+        return finalLine.trim()
+          ? identityFromHeaderLine(sessionPath, finalLine)
+          : fallbackSessionIdentity(sessionPath);
+      }
+      total += bytesRead;
+      while (lineStart < total) {
+        const newline = prefix.indexOf(0x0a, lineStart);
+        if (newline < 0 || newline >= total) break;
+        const line = prefix.subarray(lineStart, newline).toString('utf8');
+        lineStart = newline + 1;
+        if (line.trim()) return identityFromHeaderLine(sessionPath, line);
+      }
+    }
+    // No complete non-empty line was found inside the authority ceiling. Do
+    // not scan farther for a later header: that could turn arbitrary leading
+    // data into a different session identity.
+    return fallbackSessionIdentity(sessionPath);
+  } catch { return fallbackSessionIdentity(sessionPath); }
+  finally {
+    if (descriptor !== undefined) {
+      try { fs.closeSync(descriptor); } catch { /* identity already failed closed */ }
+    }
+  }
 }
 
 const AUTHOR_IDENTITY_KEYS = new Set(['model', 'modelId', 'provider', 'family', 'thinkingLevel']);

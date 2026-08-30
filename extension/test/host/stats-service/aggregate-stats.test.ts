@@ -11,6 +11,7 @@ import {
   providerForModel,
   pricingForModel,
   buildCumulativeSeries,
+  trailingLocalDates,
   MAX_INTRADAY_CHART_POINTS,
 } from '../../../src/host/stats-service/aggregate-stats';
 import type { RunSnapshot } from '../../../src/host/run-analytics';
@@ -271,6 +272,7 @@ test('computeAggregateStats: daily spend follows usage occurrence, not long-live
   assert.equal(stats.todayInputTokens, 0);
   assert.equal(stats.todayOutputTokens, 0);
   assert.equal(stats.todayCostSeries.length, 0);
+  assert.equal(stats.todayInputTokenSeries.length, 0);
   assert.equal(stats.todayTokenSeries.length, 0);
   assert.equal(stats.todayRunCount, 1, 'run completion activity still belongs to today');
   assert.equal(stats.weekRunCount, 1);
@@ -359,6 +361,7 @@ test('computeAggregateStats: live tok/s sums running sessions rates', () => {
     '/s/3': { label: '—', ariaLabel: '', tooltip: '', state: 'paused', paused: true }, // no rate → 0
   };
   const stats = computeAggregateStats([], pricingMap, NOW, ['/s/1', '/s/2', '/s/3'], rates, 3);
+  assert.equal(stats.activeGenerationTokensPerSecond, 45.5);
   assert.equal(stats.liveTokensPerSecond, 45.5);
   assert.equal(stats.runningSessionCount, 3);
   assert.equal(stats.openTabCount, 3);
@@ -568,11 +571,54 @@ test('computeAggregateStats: today cost series is cumulative, pruned, with per-p
   assert.equal(pNow.byProvider[1]!.value, 3);
 });
 
+test('computeAggregateStats: provider-qualified model identity survives daily and cumulative series', () => {
+  const pricingMap = new Map<string, ModelPricingRecord[]>([
+    ['shared-model', [pricing('provider-a', 1, 2), pricing('provider-b', 3, 4)]],
+  ]);
+  const runs = [
+    makeRun({
+      runId: 'provider-a-run', modelId: 'shared-model', provider: 'provider-a',
+      inputTokens: 100_000, outputTokens: 100_000,
+      startedAt: isoLocal(2026, 7, 4, 9), updatedAt: isoLocal(2026, 7, 4, 9, 10), finalizedAt: isoLocal(2026, 7, 4, 9, 10),
+      turnThroughputSamples: [{
+        endedAt: isoLocal(2026, 7, 4, 9, 10), provider: 'provider-a', modelId: 'shared-model',
+        outputTokens: 100_000, generationDurationMs: 1_000, concurrentBusySessions: 1,
+        status: 'completed', turnLatencyMs: null, overheadMs: null, providerLatencyMs: null,
+      }],
+    }),
+    makeRun({
+      runId: 'provider-b-run', sessionPath: '/s/2', modelId: 'shared-model', provider: 'provider-b',
+      inputTokens: 100_000, outputTokens: 100_000,
+      startedAt: isoLocal(2026, 7, 3, 10), updatedAt: isoLocal(2026, 7, 3, 10, 10), finalizedAt: isoLocal(2026, 7, 3, 10, 10),
+      turnThroughputSamples: [{
+        endedAt: isoLocal(2026, 7, 3, 10, 10), provider: 'provider-b', modelId: 'shared-model',
+        outputTokens: 100_000, generationDurationMs: 1_000, concurrentBusySessions: 1,
+        status: 'completed', turnLatencyMs: null, overheadMs: null, providerLatencyMs: null,
+      }],
+    }),
+  ];
+
+  const stats = computeAggregateStats(runs, pricingMap, NOW, [], {}, 0);
+  const dailyModels = stats.dailyCost.flatMap((day) => day.byModel);
+  assert.deepEqual(
+    dailyModels.map((entry) => [entry.provider, entry.model]).sort(),
+    [['provider-a', 'shared-model'], ['provider-b', 'shared-model']],
+  );
+  const weekModels = stats.weekCostSeries.at(-1)!.byModel;
+  assert.deepEqual(
+    weekModels.map((entry) => [entry.provider, entry.model]).sort(),
+    [['provider-a', 'shared-model'], ['provider-b', 'shared-model']],
+  );
+  assert.equal(stats.weekCostSeries.at(-1)!.byProvider.reduce((sum, entry) => sum + entry.value, 0), stats.weekCost);
+  assert.ok(stats.weekCostSeries.some((point) => point.ms === Date.parse(isoLocal(2026, 7, 3, 10, 10))),
+    'weekly area keeps underlying usage timestamps rather than daily midnight bars');
+});
+
 test('computeAggregateStats: today token + throughput series, daily run count, last-run turns', () => {
   const pricingMap = new Map<string, ModelPricingRecord[]>([['openai/gpt', [pricing('openai', 0, 0)]]]);
   const runs = [
     makeRun({
-      runId: 'r1', modelId: 'openai/gpt', outputTokens: 1_000_000,
+      runId: 'r1', modelId: 'openai/gpt', inputTokens: 250_000, outputTokens: 1_000_000,
       startedAt: isoLocal(2026, 7, 4, 9, 0), updatedAt: isoLocal(2026, 7, 4, 10, 0), finalizedAt: isoLocal(2026, 7, 4, 10, 0),
       turnThroughputSamples: [
         { endedAt: isoLocal(2026, 7, 4, 9, 30), outputTokens: 400_000, generationDurationMs: 10_000, concurrentBusySessions: 1, status: 'completed', turnLatencyMs: null, overheadMs: null, providerLatencyMs: null },
@@ -581,7 +627,10 @@ test('computeAggregateStats: today token + throughput series, daily run count, l
     }),
   ];
   const stats = computeAggregateStats(runs, pricingMap, NOW, [], {}, 0);
-  // Token series: 400k, 1M, +now(1M).
+  // Input uses its recorded run-usage timestamp; output retains per-turn samples.
+  assert.equal(stats.todayInputTokenSeries.at(-1)!.byProvider[0]!.value, 250_000);
+  assert.equal(stats.todayInputTokenSeries.at(-1)!.byModel[0]!.provider, 'openai');
+  // Output series: 400k, 1M, +now(1M).
   assert.equal(stats.todayTokenSeries.length, 3);
   assert.equal(stats.todayTokenSeries[0]!.byProvider[0]!.value, 400_000);
   assert.equal(stats.todayTokenSeries[2]!.byProvider[0]!.value, 1_000_000);
@@ -718,6 +767,73 @@ test('computeAggregateStats: forwarded child throughput never consumes parent bi
   assertClose(stats.totalCost, 3.95);
 });
 
+test('computeAggregateStats: multi-turn child turns never consume or steal parent usage', () => {
+  // A multi-turn child forwards one throughput sample per turn while its
+  // auxiliary sample records only the latest observed child response. Only the
+  // latest child sample must be excluded from the parent reconciliation — an
+  // earlier child turn that leaked into it stole parent output and attributed
+  // it to the child provider. Parent and child use different providers/models.
+  const pricingMap = new Map<string, ModelPricingRecord[]>([
+    ['parent', [pricing('parent-provider', 2, 6)]],
+    ['child', [pricing('child-provider', 3, 15)]],
+  ]);
+  const childTurn1EndedAt = isoLocal(2026, 7, 4, 10, 0);
+  const childTurn2EndedAt = isoLocal(2026, 7, 4, 10, 5);
+  const parentEndedAt = isoLocal(2026, 7, 4, 10, 30);
+  const childSample = (endedAt: string, outputTokens: number) => ({
+    endedAt, modelId: 'child', provider: 'child-provider', inputTokens: 0,
+    outputTokens, cacheReadTokens: 0, cacheWriteTokens: 0,
+    generationDurationMs: 1_000, concurrentBusySessions: 1, status: 'completed' as const,
+    turnLatencyMs: null, overheadMs: null, providerLatencyMs: null,
+  });
+  const run = makeRun({
+    modelId: 'parent', provider: 'parent-provider',
+    startedAt: isoLocal(2026, 7, 4, 9, 0), updatedAt: parentEndedAt, finalizedAt: parentEndedAt,
+    inputTokens: 1_000_000, outputTokens: 100_000,
+    toolUsage: {
+      ...makeRun({}).toolUsage,
+      subagentInputTokens: 200_000,
+      subagentOutputTokens: 80_000,
+      subagentCacheReadTokens: 0,
+      subagentCacheWriteTokens: 0,
+    },
+    // occurredAt = the latest observed child response (turn 2), so an exact
+    // timestamp match excludes only turn 2 and leaks turn 1 into the parent
+    // reconciliation.
+    auxiliaryLlmUsage: [{
+      kind: 'subagent', sourceId: 'child-1', occurredAt: childTurn2EndedAt,
+      modelId: 'child', provider: 'child-provider',
+      inputTokens: 200_000, outputTokens: 80_000, cacheReadTokens: 0, cacheWriteTokens: 0,
+    }],
+    turnThroughputSamples: [
+      childSample(childTurn1EndedAt, 30_000),
+      childSample(childTurn2EndedAt, 50_000),
+      { endedAt: parentEndedAt, modelId: 'parent', provider: 'parent-provider', inputTokens: 1_000_000,
+        outputTokens: 100_000, cacheReadTokens: 0, cacheWriteTokens: 0,
+        generationDurationMs: 1_000, concurrentBusySessions: 1, status: 'completed',
+        turnLatencyMs: null, overheadMs: null, providerLatencyMs: null },
+    ],
+  });
+
+  const stats = computeAggregateStats([run], pricingMap, NOW, [], {}, 0);
+  const providers = new Map(stats.costByProvider.map((entry) => [entry.provider, entry]));
+  assert.equal(providers.get('parent-provider')?.inputTokens, 1_000_000);
+  assert.equal(providers.get('parent-provider')?.outputTokens, 100_000,
+    'earlier child turns must not consume the parent usage remainder');
+  assertClose(providers.get('parent-provider')?.cost, 2.6);
+  assert.equal(providers.get('child-provider')?.inputTokens, 200_000);
+  assert.equal(providers.get('child-provider')?.outputTokens, 80_000,
+    'child attribution stays its reconciled canonical total, not stolen parent output');
+  assertClose(providers.get('child-provider')?.cost, 1.8);
+  assert.equal(stats.totalInputTokens, 1_200_000);
+  assert.equal(stats.totalOutputTokens, 180_000, 'canonical totals preserved without double counting');
+  assertClose(stats.totalCost, 4.4);
+  // Both child turns remain distinct throughput observations for their provider.
+  const throughput = new Map(stats.tokensPerSecondByProvider.map((entry) => [entry.provider, entry]));
+  assert.equal(throughput.get('child-provider')?.sampleCount, 2);
+  assert.equal(throughput.get('parent-provider')?.sampleCount, 1);
+});
+
 test('computeAggregateStats: long-context tiers apply per request, not to multi-turn child aggregates', () => {
   const tieredPricing: ModelPricingRecord = {
     id: 'tiered', provider: 'provider',
@@ -795,6 +911,7 @@ test('computeAggregateStats: empty series when no today runs', () => {
   const stats = computeAggregateStats(runs, pricingMap, NOW, [], {}, 0);
   assert.equal(stats.todayCost, 0);
   assert.equal(stats.todayCostSeries.length, 0);
+  assert.equal(stats.todayInputTokenSeries.length, 0);
   assert.equal(stats.todayTokenSeries.length, 0);
   assert.equal(stats.todayThroughputSeries.length, 0);
 });
@@ -1011,4 +1128,393 @@ test('aggregate lifecycle stats merge completed and open attempt evidence withou
   assert.deepEqual(stats.subagentLifecycle.phaseDurations.measuredCountByPhase, { preparing: 1, waiting_provider: 1 });
   assert.equal(stats.subagentLifecycle.phaseDurations.unknownAttemptCount, 1);
   assert.equal(stats.subagentLifecycle.unknownAttemptRecordCallCount, 2, 'one mixed-run malformed call plus one legacy unavailable call remain unknown');
+});
+
+function sample(endedAt: string, concurrentBusySessions: number): RunSnapshot['turnThroughputSamples'][number] {
+  return {
+    endedAt,
+    outputTokens: 100,
+    generationDurationMs: 1_000,
+    concurrentBusySessions,
+    status: 'completed',
+    turnLatencyMs: null,
+    overheadMs: null,
+    providerLatencyMs: null,
+  };
+}
+
+test('daily work trend: distinct sessions used and peak concurrently working sessions per day', () => {
+  const pricingMap = new Map<string, ModelPricingRecord[]>([['m', [pricing('openai', 0, 0)]]]);
+  const runs = [
+    // Two runs from the same session today: sessionsUsed counts the session once.
+    makeRun({
+      runId: 'r1', sessionPath: '/s/1', modelId: 'm', busyPeriodCount: 1,
+      startedAt: isoLocal(2026, 7, 4, 9), updatedAt: isoLocal(2026, 7, 4, 9, 30), finalizedAt: isoLocal(2026, 7, 4, 9, 30),
+      turnThroughputSamples: [sample(isoLocal(2026, 7, 4, 9, 30), 2)],
+    }),
+    makeRun({
+      runId: 'r2', sessionPath: '/s/1', modelId: 'm', busyPeriodCount: 1,
+      startedAt: isoLocal(2026, 7, 4, 10), updatedAt: isoLocal(2026, 7, 4, 10, 30), finalizedAt: isoLocal(2026, 7, 4, 10, 30),
+      turnThroughputSamples: [sample(isoLocal(2026, 7, 4, 10, 30), 1)],
+    }),
+    // A different session yesterday with a higher observed concurrency.
+    makeRun({
+      runId: 'r3', sessionPath: '/s/2', modelId: 'm', busyPeriodCount: 1,
+      startedAt: isoLocal(2026, 7, 3, 8), updatedAt: isoLocal(2026, 7, 3, 8, 30), finalizedAt: isoLocal(2026, 7, 3, 8, 30),
+      turnThroughputSamples: [sample(isoLocal(2026, 7, 3, 8, 30), 3)],
+    }),
+  ];
+  const stats = computeAggregateStats(runs, pricingMap, NOW, [], {}, 0);
+
+  assert.equal(stats.dailyWorkTrend.length, 2, 'leading idle day is pruned; window stays bounded');
+  const yesterday = stats.dailyWorkTrend[0]!;
+  const today = stats.dailyWorkTrend[1]!;
+  assert.equal(yesterday.date, '2026-07-03');
+  assert.equal(yesterday.sessionsUsed, 1);
+  assert.equal(yesterday.peakWorkingSessions, 3, 'best concurrentBusySessions sample wins');
+  assert.equal(today.date, '2026-07-04');
+  assert.equal(today.sessionsUsed, 1, 'same session twice on one day stays distinct-session counted');
+  assert.equal(today.peakWorkingSessions, 2);
+});
+
+test('daily work trend: conservative peak 1 for an observed busy run without samples', () => {
+  const pricingMap = new Map<string, ModelPricingRecord[]>([['m', [pricing('openai', 0, 0)]]]);
+  const busyRun = makeRun({
+    runId: 'busy', sessionPath: '/s/1', modelId: 'm', busyPeriodCount: 1, busyDurationMs: 5_000,
+    startedAt: isoLocal(2026, 7, 4, 9), updatedAt: isoLocal(2026, 7, 4, 9, 30), finalizedAt: isoLocal(2026, 7, 4, 9, 30),
+    turnThroughputSamples: [],
+  });
+  const idleRun = makeRun({
+    runId: 'idle', sessionPath: '/s/2', modelId: 'm', busyPeriodCount: 0, busyDurationMs: 0,
+    startedAt: isoLocal(2026, 7, 3, 9), updatedAt: isoLocal(2026, 7, 3, 9, 30), finalizedAt: isoLocal(2026, 7, 3, 9, 30),
+    turnThroughputSamples: [],
+  });
+  const stats = computeAggregateStats([busyRun, idleRun], pricingMap, NOW, [], {}, 0);
+
+  const byDate = new Map(stats.dailyWorkTrend.map((day) => [day.date, day]));
+  assert.equal(byDate.get('2026-07-04')!.peakWorkingSessions, 1, 'busy run without samples claims a conservative 1');
+  assert.equal(byDate.get('2026-07-03')!.peakWorkingSessions, 0, 'a run with no busy evidence never claims work');
+  assert.equal(byDate.get('2026-07-04')!.sessionsUsed, 1);
+  assert.equal(byDate.get('2026-07-03')!.sessionsUsed, 1);
+});
+
+test('daily work trend stays bounded to 14 points across a long history', () => {
+  const pricingMap = new Map<string, ModelPricingRecord[]>([['m', [pricing('openai', 0, 0)]]]);
+  const runs: RunSnapshot[] = [];
+  for (let back = 0; back < 20; back += 1) {
+    const at = isoLocal(2026, 7, 4 - back, 8);
+    runs.push(makeRun({
+      runId: `d${back}`, sessionPath: `/s/${back}`, modelId: 'm', busyPeriodCount: 1,
+      startedAt: at, updatedAt: at, finalizedAt: at,
+      turnThroughputSamples: [sample(at, 1)],
+    }));
+  }
+  const stats = computeAggregateStats(runs, pricingMap, NOW, [], {}, 0);
+  assert.ok(stats.dailyWorkTrend.length <= 14, `work trend length ${stats.dailyWorkTrend.length} exceeds 14`);
+  assert.equal(stats.dailyWorkTrend.at(-1)!.date, '2026-07-04');
+  assert.equal(stats.dailyWorkTrend[0]!.date, '2026-06-21');
+});
+
+test('productivity summaries: sends, prompt chars/tokens with coverage, attachments, and ask_user', () => {
+  const pricingMap = new Map<string, ModelPricingRecord[]>([['m', [pricing('openai', 1, 0)]]]);
+  const today = isoLocal(2026, 7, 4, 10);
+  const yesterday = isoLocal(2026, 7, 3, 10);
+  const runs = [
+    // Today: tracked prompt chars + tokens, one image attachment, answered ask_user.
+    makeRun({
+      runId: 'tracked', sessionPath: '/s/1', modelId: 'm',
+      sendCount: 2,
+      initialUserMessageChars: 100,
+      initialUserMessageTokens: 25,
+      imageInputCount: 2,
+      imageInputBytes: 2048,
+      askUserAnsweredCount: 3,
+      askUserCancelledCount: 1,
+      inputTokens: 1_000_000,
+      startedAt: today, updatedAt: today, finalizedAt: today,
+    }),
+    // Today: legacy run with no tracked prompt/ask_user fields — coverage only.
+    makeRun({
+      runId: 'legacy', sessionPath: '/s/2', modelId: 'm',
+      sendCount: 1,
+      inputTokens: 500_000,
+      startedAt: isoLocal(2026, 7, 4, 9), updatedAt: isoLocal(2026, 7, 4, 9, 30), finalizedAt: isoLocal(2026, 7, 4, 9, 30),
+    }),
+    // Yesterday: tracked chars only (no token estimate), cancelled ask_user only.
+    makeRun({
+      runId: 'y', sessionPath: '/s/3', modelId: 'm',
+      sendCount: 2,
+      initialUserMessageChars: 60,
+      askUserCancelledCount: 2,
+      startedAt: yesterday, updatedAt: yesterday, finalizedAt: yesterday,
+    }),
+  ];
+  const stats = computeAggregateStats(runs, pricingMap, NOW, [], {}, 0);
+
+  const todayP = stats.todayProductivity;
+  assert.equal(todayP.sendCount, 3, 'tracked 2 sends plus the legacy run send');
+  assert.equal(todayP.promptCharSamples, 1, 'legacy run without tracked chars stays untracked');
+  assert.equal(todayP.promptChars, 100);
+  assert.equal(todayP.averagePromptChars, 100);
+  assert.equal(todayP.promptTokenSamples, 1);
+  assert.equal(todayP.promptTokens, 25);
+  assert.equal(todayP.inputTokens, 1_500_000, 'provider model-input tokens follow the usage-day buckets');
+  assert.equal(todayP.imageInputCount, 2);
+  assert.equal(todayP.imageInputBytes, 2048);
+  assert.equal(todayP.askUserAnsweredCount, 3);
+  assert.equal(todayP.askUserCancelledCount, 1, 'cancelled outcomes are carried separately from answered');
+  assert.equal(todayP.askUserTrackedRuns, 1, 'only the run carrying ask_user counters counts as tracked');
+
+  const weekP = stats.weekProductivity;
+  assert.equal(weekP.sendCount, 5);
+  assert.equal(weekP.promptCharSamples, 2);
+  assert.equal(weekP.promptChars, 160);
+  assert.equal(weekP.averagePromptChars, 80, 'week average pools tracked samples');
+  assert.equal(weekP.promptTokenSamples, 1);
+  assert.equal(weekP.promptTokens, 25);
+  assert.equal(weekP.askUserAnsweredCount, 3);
+  assert.equal(weekP.askUserCancelledCount, 3, 'cancelled ask_user outcomes carry into the week window');
+  assert.equal(weekP.askUserTrackedRuns, 2);
+
+  const todayTrend = stats.dailyWorkTrend.find((day) => day.date === '2026-07-04')!;
+  assert.equal(todayTrend.productivity.sendCount, 3);
+  assert.equal(todayTrend.productivity.askUserAnsweredCount, 3);
+  assert.equal(todayTrend.productivity.askUserCancelledCount, 1);
+  const idleTrendDay = stats.dailyWorkTrend.find((day) => day.date === '2026-07-02');
+  assert.equal(idleTrendDay, undefined, 'leading idle days are pruned from the work trend');
+});
+
+test('productivity summaries: untracked windows stay explicit instead of reading as zeros', () => {
+  const pricingMap = new Map<string, ModelPricingRecord[]>([['m', [pricing('openai', 0, 0)]]]);
+  const today = isoLocal(2026, 7, 4, 10);
+  const legacyRun = makeRun({
+    runId: 'legacy', sessionPath: '/s/1', modelId: 'm', sendCount: 1,
+    startedAt: today, updatedAt: today, finalizedAt: today,
+  });
+  delete (legacyRun as Partial<RunSnapshot>).askUserAnsweredCount;
+  delete (legacyRun as Partial<RunSnapshot>).askUserCancelledCount;
+  const stats = computeAggregateStats([legacyRun], pricingMap, NOW, [], {}, 0);
+
+  assert.equal(stats.todayProductivity.promptCharSamples, 0);
+  assert.equal(stats.todayProductivity.averagePromptChars, null, 'no tracked samples means unknown average, not 0');
+  assert.equal(stats.todayProductivity.promptTokenSamples, 0);
+  assert.equal(stats.todayProductivity.askUserTrackedRuns, 0, 'legacy ask_user coverage is untracked, not zero');
+  assert.equal(stats.todayProductivity.askUserAnsweredCount, 0);
+  assert.equal(stats.todayProductivity.askUserCancelledCount, 0, 'missing legacy counters stay untracked rather than zero');
+  assert.equal(stats.todayProductivity.filesystemPathRefCount, 0, 'file refs are always tracked; 0 means none recorded');
+  assert.equal(stats.todayProductivity.sendCount, 1, 'send counts are always tracked');
+});
+
+test('layered completed/open accumulation matches one-pass productivity and work trend', () => {
+  const pricingMap = new Map<string, ModelPricingRecord[]>([['m', [pricing('openai', 1, 1)]]]);
+  const runs = [
+    makeRun({
+      runId: 'completed', sessionPath: '/s/1', modelId: 'm', sendCount: 2,
+      initialUserMessageChars: 40, initialUserMessageTokens: 10,
+      askUserAnsweredCount: 1, askUserCancelledCount: 0, busyPeriodCount: 1,
+      startedAt: isoLocal(2026, 7, 4, 9), updatedAt: isoLocal(2026, 7, 4, 9, 30), finalizedAt: isoLocal(2026, 7, 4, 9, 30),
+      turnThroughputSamples: [sample(isoLocal(2026, 7, 4, 9, 30), 2)],
+    }),
+    makeRun({
+      runId: 'open', sessionPath: '/s/2', modelId: 'm', sendCount: 1,
+      initialUserMessageChars: 80,
+      askUserAnsweredCount: 0, askUserCancelledCount: 1, busyPeriodCount: 1,
+      startedAt: isoLocal(2026, 7, 4, 10), updatedAt: isoLocal(2026, 7, 4, 10, 30), finalizedAt: isoLocal(2026, 7, 4, 10, 30),
+      turnThroughputSamples: [sample(isoLocal(2026, 7, 4, 10, 30), 1)],
+    }),
+  ];
+  const split = 1;
+  const completed = accumulateAggregateStats(runs.slice(0, split), pricingMap);
+  const open = accumulateAggregateStats(runs.slice(split), pricingMap);
+  const layered = finalizeAggregateStatsLayers(prepareAggregateStatsLayer(completed, NOW), open, NOW, [], {}, 0);
+  const direct = computeAggregateStats(runs, pricingMap, NOW, [], {}, 0);
+  assert.deepEqual(layered.todayProductivity, direct.todayProductivity, 'layered today productivity must match one-pass');
+  assert.deepEqual(layered.weekProductivity, direct.weekProductivity, 'layered week productivity must match one-pass');
+  assert.deepEqual(layered.dailyWorkTrend, direct.dailyWorkTrend, 'layered work trend must match one-pass');
+  const todayTrend = direct.dailyWorkTrend.at(-1)!;
+  assert.equal(todayTrend.sessionsUsed, 2);
+  assert.equal(todayTrend.peakWorkingSessions, 2, 'peak is the max across merged runs, never their sum');
+  assert.equal(todayTrend.productivity.promptChars, 120);
+});
+
+test('completed throughput samples without output are unavailable for historical rates', () => {
+  const pricingMap = new Map<string, ModelPricingRecord[]>([['m', [pricing('openai', 0, 0)]]]);
+  const run = makeRun({
+    runId: 'r1', modelId: 'm', inputTokens: 1_500, outputTokens: 1_000,
+    startedAt: isoLocal(2026, 7, 4, 10), updatedAt: isoLocal(2026, 7, 4, 10, 10), finalizedAt: isoLocal(2026, 7, 4, 10, 10),
+    turnThroughputSamples: [
+      // Real completed turn: contributes tokens + duration.
+      { endedAt: isoLocal(2026, 7, 4, 10, 0), inputTokens: 1_000, outputTokens: 1_000, generationDurationMs: 10_000, concurrentBusySessions: 1, status: 'completed', turnLatencyMs: null, overheadMs: null, providerLatencyMs: null },
+      // Completed but no output (e.g. a tool-only turn): unavailable, must not
+      // contribute duration/sample count/provider rate/chart values.
+      { endedAt: isoLocal(2026, 7, 4, 10, 5), inputTokens: 500, outputTokens: 0, generationDurationMs: 5_000, concurrentBusySessions: 1, status: 'completed', turnLatencyMs: null, overheadMs: null, providerLatencyMs: null },
+      // No output and no generation time either.
+      { endedAt: isoLocal(2026, 7, 4, 10, 6), inputTokens: 0, outputTokens: 0, generationDurationMs: 0, concurrentBusySessions: 1, status: 'completed', turnLatencyMs: null, overheadMs: null, providerLatencyMs: null },
+    ],
+  });
+  const stats = computeAggregateStats([run], pricingMap, NOW, [], {}, 0);
+  // Only the 1000-token / 10s sample feeds the rate.
+  assert.equal(stats.tokensPerSecond, 100);
+  assert.equal(stats.tokensPerSecondByProvider.length, 1);
+  assert.equal(stats.tokensPerSecondByProvider[0]!.outputTokens, 1_000);
+  assert.equal(stats.tokensPerSecondByProvider[0]!.generationDurationMs, 10_000);
+  assert.equal(stats.tokensPerSecondByProvider[0]!.sampleCount, 1);
+  assert.equal(stats.todayTokensPerSecond, 100);
+  assert.equal(stats.todayTokensPerSecondByProvider[0]!.sampleCount, 1);
+  // The throughput chart carries the one usable hour point at its true rate.
+  assert.equal(stats.todayThroughputSeries.length, 1);
+  assert.equal(stats.todayThroughputSeries[0]!.byProvider[0]!.value, 100);
+  // Usage attribution is unchanged: the zero-output sample still bills its input.
+  assert.equal(stats.totalInputTokens, 1_500);
+  assert.equal(stats.totalOutputTokens, 1_000);
+});
+
+test('repeated input usage makes distinct cumulative jumps with unchanged totals', () => {
+  const pricingMap = new Map<string, ModelPricingRecord[]>([['m', [pricing('openai', 1, 0)]]]);
+  const run = makeRun({
+    runId: 'r1', modelId: 'm', inputTokens: 300, outputTokens: 50,
+    startedAt: isoLocal(2026, 7, 4, 10), updatedAt: isoLocal(2026, 7, 4, 10, 10), finalizedAt: isoLocal(2026, 7, 4, 10, 10),
+    turnThroughputSamples: [
+      { endedAt: isoLocal(2026, 7, 4, 10, 0), inputTokens: 100, outputTokens: 0, generationDurationMs: 1_000, concurrentBusySessions: 1, status: 'completed', turnLatencyMs: null, overheadMs: null, providerLatencyMs: null },
+      { endedAt: isoLocal(2026, 7, 4, 10, 5), inputTokens: 200, outputTokens: 50, generationDurationMs: 1_000, concurrentBusySessions: 1, status: 'completed', turnLatencyMs: null, overheadMs: null, providerLatencyMs: null },
+    ],
+  });
+  const stats = computeAggregateStats([run], pricingMap, NOW, [], {}, 0);
+
+  assert.equal(stats.todayInputTokens, 300, 'totals are exact');
+  const series = stats.todayInputTokenSeries;
+  assert.ok(series.length >= 3, `expected a jump per input event plus the now point, got ${series.length}`);
+  assert.equal(series[0]!.ms, Date.parse(isoLocal(2026, 7, 4, 10, 0)));
+  assert.equal(series[0]!.byProvider[0]!.value, 100, 'the first input event jumps at its own timestamp');
+  assert.equal(series[1]!.ms, Date.parse(isoLocal(2026, 7, 4, 10, 5)));
+  assert.equal(series[1]!.byProvider[0]!.value, 300, 'the second event accumulates on top');
+  const final = series.at(-1)!;
+  assert.equal(final.byProvider.reduce((sum, entry) => sum + entry.value, 0), 300);
+  assert.equal(final.byModel.reduce((sum, entry) => sum + entry.value, 0), 300);
+  // Layered preparation produces the same series.
+  const completed = accumulateAggregateStats([run], pricingMap);
+  const layered = finalizeAggregateStatsLayers(prepareAggregateStatsLayer(completed, NOW), accumulateAggregateStats([], pricingMap), NOW, [], {}, 0);
+  assert.deepEqual(layered.todayInputTokenSeries, stats.todayInputTokenSeries);
+});
+
+test('trailing local calendar windows are DST-safe (no skipped or duplicated dates)', () => {
+  const previousTz = process.env.TZ;
+  process.env.TZ = 'America/New_York';
+  try {
+    // US spring forward: 2026-03-08 is a 23-hour day. A `now` just after local
+    // midnight on Mar 9 made fixed 86,400,000ms stepping skip 2026-03-08.
+    const springNow = new Date(2026, 2, 9, 0, 30).getTime();
+    const springDates = trailingLocalDates(springNow, 14);
+    assert.equal(springDates.length, 14);
+    assert.equal(new Set(springDates).size, 14, 'spring-forward must not duplicate a date');
+    assert.ok(springDates.includes('2026-03-08'), 'the 23-hour day is not skipped');
+    assert.equal(springDates[springDates.length - 1], '2026-03-09');
+    assert.equal(springDates[0], '2026-02-24');
+
+    // US fall back: 2026-11-01 is a 25-hour day; fixed stepping duplicated it.
+    const fallNow = new Date(2026, 10, 2, 0, 30).getTime();
+    const fallDates = trailingLocalDates(fallNow, 14);
+    assert.equal(fallDates.length, 14);
+    assert.equal(new Set(fallDates).size, 14, 'fall-back must not duplicate a date');
+    assert.ok(fallDates.includes('2026-11-01'));
+    assert.equal(fallDates[fallDates.length - 1], '2026-11-02');
+  } finally {
+    if (previousTz === undefined) delete process.env.TZ;
+    else process.env.TZ = previousTz;
+  }
+});
+
+test('rolling-week cost windows count the DST-shortened day exactly once', () => {
+  const previousTz = process.env.TZ;
+  process.env.TZ = 'America/New_York';
+  try {
+    const pricingMap = new Map<string, ModelPricingRecord[]>([['m', [pricing('openai', 1, 1)]]]);
+    const now = new Date(2026, 2, 9, 0, 30).getTime();
+    const runs = [];
+    for (let back = 0; back < 7; back += 1) {
+      const at = new Date(2026, 2, 9 - back, 12, 0, 0).toISOString();
+      runs.push(makeRun({
+        runId: `dst-${back}`, sessionPath: `/s/${back}`, modelId: 'm',
+        inputTokens: 1_000_000, outputTokens: 0,
+        startedAt: at, updatedAt: at, finalizedAt: at,
+      }));
+    }
+    const stats = computeAggregateStats(runs, pricingMap, now, [], {}, 0);
+    assert.equal(stats.weekRunCount, 7, 'all seven local week days fall inside the window');
+    assert.equal(stats.weekCost, 7, 'each local day is counted exactly once across the DST boundary');
+    assert.equal(stats.dailyCost.length, 7);
+    assert.equal(stats.dailyCost[0]!.date, '2026-03-03');
+    assert.equal(stats.dailyCost.at(-1)!.date, '2026-03-09');
+  } finally {
+    if (previousTz === undefined) delete process.env.TZ;
+    else process.env.TZ = previousTz;
+  }
+});
+
+test('prepared layers visit only the rolling-week dates for week cost samples', () => {
+  const now = localNoon(2026, 7, 13);
+  const pricingMap = new Map<string, ModelPricingRecord[]>([['m', [pricing('openai', 1, 1)]]]);
+  const runs: RunSnapshot[] = [];
+  // 40 days before `now`: well outside every window. Its samples must never be
+  // visited while preparing the rolling-week chart.
+  for (let i = 0; i < 50; i += 1) {
+    const at = isoLocal(2026, 6, 3, 8, i);
+    runs.push(makeRun({
+      runId: `old-${i}`, sessionPath: `/s/old/${i}`, modelId: 'm',
+      inputTokens: 1_000_000, outputTokens: 0,
+      startedAt: at, updatedAt: at, finalizedAt: at,
+      turnThroughputSamples: [sample(at, 1)],
+    }));
+  }
+  // Yesterday (inside the rolling week) and today.
+  for (const [id, day, hour] of [['y', 12, 9] as const, ['t', 13, 10] as const]) {
+    const at = isoLocal(2026, 7, day, hour);
+    runs.push(makeRun({
+      runId: `recent-${id}`, sessionPath: `/s/${id}`, modelId: 'm',
+      inputTokens: 1_000_000, outputTokens: 0,
+      startedAt: at, updatedAt: at, finalizedAt: at,
+      turnThroughputSamples: [sample(at, 1)],
+    }));
+  }
+
+  const completed = accumulateAggregateStats(runs, pricingMap);
+  const visited: string[] = [];
+  const prepared = prepareAggregateStatsLayer(completed, now, {
+    onCompletedSourceEntryVisited: (kind) => visited.push(kind),
+  });
+  // Each run's cost distributes over its single turn sample → one cost sample
+  // per run; only the two week-date runs are visited, never the 50 samples on
+  // the 40-day-old date (there is no lifetime week-sample list to scan).
+  const costVisits = visited.filter((kind) => kind === 'cost_sample').length;
+  assert.equal(costVisits, 2);
+
+  // Layered equality survives the per-date week-sample storage.
+  const open = accumulateAggregateStats([], pricingMap);
+  const layered = finalizeAggregateStatsLayers(prepared, open, now, [], {}, 0);
+  const direct = computeAggregateStats(runs, pricingMap, now, [], {}, 0);
+  assert.deepEqual(layered.weekCostSeries, direct.weekCostSeries);
+  assert.deepEqual(layered.todayCostSeries, direct.todayCostSeries);
+  assert.equal(direct.weekCost, 2);
+  assert.equal(direct.weekCostSeries.at(-1)!.byProvider.reduce((sum, entry) => sum + entry.value, 0), 2);
+});
+
+test('prepared layers never leak pre-window history into week samples', () => {
+  const now = localNoon(2026, 7, 13);
+  const pricingMap = new Map<string, ModelPricingRecord[]>([['m', [pricing('openai', 1, 1)]]]);
+  const at = isoLocal(2026, 6, 3, 8);
+  const completed = accumulateAggregateStats([makeRun({
+    runId: 'old', sessionPath: '/s/old', modelId: 'm',
+    inputTokens: 1_000_000, outputTokens: 0,
+    startedAt: at, updatedAt: at, finalizedAt: at,
+    turnThroughputSamples: [sample(at, 1)],
+  })], pricingMap);
+  const visited: string[] = [];
+  const prepared = prepareAggregateStatsLayer(completed, now, {
+    onCompletedSourceEntryVisited: (kind) => visited.push(kind),
+  });
+  assert.equal(visited.filter((kind) => kind === 'cost_sample').length, 0,
+    'cost samples outside the seven local week dates are not visited');
+  const layered = finalizeAggregateStatsLayers(prepared, accumulateAggregateStats([], pricingMap), now, [], {}, 0);
+  assert.equal(layered.weekCost, 0);
+  assert.equal(layered.weekCostSeries.length, 0, 'pre-window history never leaks into the rolling-week chart');
 });

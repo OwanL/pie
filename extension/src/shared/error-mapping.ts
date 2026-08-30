@@ -45,6 +45,7 @@ export type NoticeKind =
   | 'prepass-failed'
   | 'dropped-line'
   | 'backend-exit'
+  | 'provider-disabled'
   | 'operational-error'
   | 'send-failed'
   | 'edit-failed';
@@ -118,6 +119,10 @@ const MODEL_START_TIMEOUT_PATTERN = /^Timed out waiting for the model to start s
  *  notice blames concurrency saturation, not the pruning prepass. */
 const PROVIDER_SATURATED_PATTERN = /concurrency cap reached/;
 
+/** Backend execution guard for a session whose retained model belongs to a
+ * provider the user has since disabled. */
+const PROVIDER_DISABLED_PATTERN = /^PROVIDER_DISABLED:/;
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 /** Strip every `req-NN` id from `text` so no internal correlation id reaches
@@ -154,6 +159,15 @@ export function mapSendOrEditError(
   }
 
   const err = error ?? '';
+
+  if (PROVIDER_DISABLED_PATTERN.test(err)) {
+    return {
+      kind: opKind === 'edit' ? 'edit-failed' : 'provider-disabled',
+      message: opKind === 'edit'
+        ? "Couldn't edit the message because its model provider is disabled. Enable the provider or select another model, then try again."
+        : 'This model provider is disabled. Enable it in settings or select a model from an enabled provider.',
+    };
+  }
 
   if (REQUEST_TIMEOUT_PATTERN.test(err)) {
     if (opKind === 'edit') {
@@ -338,6 +352,8 @@ export function noticeActionsFor(kind: NoticeKind): NoticeAction[] {
       return ['retry', 'show-logs'];
     case 'backend-exit':
       return ['restart-backend', 'show-logs'];
+    case 'provider-disabled':
+      return ['open-settings'];
     case 'operational-error':
       return ['show-logs'];
     case 'send-failed':

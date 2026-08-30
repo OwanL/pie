@@ -88,4 +88,13 @@ export interface ContextWindowUsage {
   percent: number | null;
 }
 
+/** Fresh, pre-turn inventory of all configured prompt/tool/skill catalog text.
+ * This is deliberately separate from provider-reported ContextWindowUsage: it
+ * exists only for an empty cold session and is superseded by a hot runtime or
+ * provider usage. */
+export interface InitialContextEstimate {
+  tokens: number;
+  contextWindow: number;
+}
+
 

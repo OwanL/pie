@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   assertProtocolVersion,
   DEFAULT_CHAT_PREFS,
+  DEFAULT_SESSION_TITLES_SETTINGS,
   DEFAULT_TOOL_RESULT_PRUNING_SETTINGS,
   PROTOCOL_VERSION,
   resolveChatPrefs,
@@ -38,6 +39,11 @@ test('DEFAULT_CHAT_PREFS shape', () => {
   assert.equal(typeof DEFAULT_CHAT_PREFS.autoExpandSubagentCalls, 'boolean');
   assert.equal(typeof DEFAULT_CHAT_PREFS.suppressCompletionNotifications, 'boolean');
   assert.equal(typeof DEFAULT_CHAT_PREFS.subagentAlwaysParentModel, 'boolean');
+  assert.deepEqual(DEFAULT_CHAT_PREFS.subagentBucketCanSpawn, {
+    small: true,
+    medium: true,
+    frontier: true,
+  });
   assert.equal(typeof DEFAULT_CHAT_PREFS.uiMessageWidth, 'number');
   assert.equal(DEFAULT_CHAT_PREFS.uiMessageWidth, 88);
   assert.equal(typeof DEFAULT_CHAT_PREFS.uiBackground, 'string');
@@ -177,6 +183,7 @@ test('HostToWebviewMessage state envelope carries hostInstanceId and revision', 
       pinnedTabPaths: [],
       pinnedTabGroups: [],
       runningSessionPaths: [],
+      generatingTitleSessionPaths: [],
       startingModelSessionPaths: [],
       compactingSessionPaths: [],
       lastCompactionBySession: {},
@@ -225,9 +232,12 @@ test('HostToWebviewMessage state envelope carries hostInstanceId and revision', 
       availableModels: [],
   availableModelsStatus: 'authoritative',
       contextUsage: null,
+      initialContextEstimate: null,
       prefs: DEFAULT_CHAT_PREFS,
       mcpServers: [],
       mcpPendingApply: false,
+      mcpSessionServers: [],
+      mcpSessionPendingApply: false,
       availableExtensions: [],
       fileChanges: [],
       fileChangesExpanded: false,
@@ -246,6 +256,7 @@ test('HostToWebviewMessage state envelope carries hostInstanceId and revision', 
         thinkingLevel: 'minimal' as const,
       },
       toolResultPruningSettings: { ...DEFAULT_TOOL_RESULT_PRUNING_SETTINGS, rules: { ...DEFAULT_TOOL_RESULT_PRUNING_SETTINGS.rules } },
+      sessionTitlesSettings: { ...DEFAULT_SESSION_TITLES_SETTINGS },
       pruningCatalog: {
         skills: [],
         tools: [],
@@ -388,6 +399,7 @@ test('WebviewToHostMessage.setPrefs accepts partial pref updates', () => {
       autoExpandReasoning: true,
       autoExpandSubagentCalls: true,
       suppressCompletionNotifications: true,
+      subagentBucketCanSpawn: { small: false, medium: false, frontier: true },
     },
   };
   assert.equal(msg.type, 'setPrefs');
@@ -395,6 +407,7 @@ test('WebviewToHostMessage.setPrefs accepts partial pref updates', () => {
     assert.equal(msg.prefs.autoExpandReasoning, true);
     assert.equal(msg.prefs.autoExpandSubagentCalls, true);
     assert.equal(msg.prefs.suppressCompletionNotifications, true);
+    assert.deepEqual(msg.prefs.subagentBucketCanSpawn, { small: false, medium: false, frontier: true });
   }
 });
 
@@ -465,6 +478,24 @@ test('WebviewToHostMessage.send carries an explicit sessionPath', () => {
   if (msg.type === 'send') {
     assert.equal(msg.sessionPath, '/workspace/session.jsonl');
     assert.equal(msg.text, 'hello');
+  }
+});
+
+test('WebviewToHostMessage.truncateAfter is explicitly session-addressed (no active-session fallback)', () => {
+  const msg: WebviewToHostMessage = {
+    type: 'truncateAfter',
+    sessionPath: '/workspace/session.jsonl',
+    messageId: 'durable-entry-1',
+  };
+  assert.equal(msg.type, 'truncateAfter');
+  if (msg.type === 'truncateAfter') {
+    assert.equal(msg.sessionPath, '/workspace/session.jsonl');
+    assert.equal(msg.messageId, 'durable-entry-1');
+    // Destructive truncations must name their session; there is no implicit
+    // fallback to the viewed/active session (see STATE_CONTRACT session
+    // mutations bullet).
+    assert.ok('sessionPath' in msg);
+    assert.ok('messageId' in msg);
   }
 });
 

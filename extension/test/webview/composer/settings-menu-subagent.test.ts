@@ -49,9 +49,9 @@ test('SubagentSection renders the inline container, toggle, buckets, and nesting
 
   // Model buckets group + all three bucket labels + hints.
   assert.match(html, /Model buckets</);
-  assert.match(html, /Haiku-class busywork</);
-  assert.match(html, /Sonnet-class main development</);
-  assert.match(html, /Opus-class hardest problems</);
+  assert.match(html, /Low-cost busywork</);
+  assert.match(html, /Balanced main development</);
+  assert.match(html, /Most capable for hardest problems</);
 
   // Nesting + throughput controls.
   assert.match(html, /Nesting levels</);
@@ -75,9 +75,26 @@ test('SubagentSection renders the nested-bucket allowlist toggles reflecting pre
   assert.match(html, /Nested bucket allowlist</);
   assert.match(html, /downgraded to the highest allowed tier/);
   // All three tier toggles render, highest tier first.
-  assert.match(html, /Allow Frontier \(Opus\)/);
-  assert.match(html, /Allow Medium \(Sonnet\)/);
-  assert.match(html, /Allow Small \(Haiku\)/);
+  assert.match(html, /Allow Frontier/);
+  assert.match(html, /Allow Medium/);
+  assert.match(html, /Allow Small/);
+});
+
+test('SubagentSection renders per-bucket delegation toggles reflecting prefs', () => {
+  const html = renderToString(
+    h(SubagentSection, {
+      prefs: prefsWith({ subagentBucketCanSpawn: { small: false, medium: false, frontier: true } }),
+      onSetPrefs: () => undefined,
+      availableModels: AVAILABLE_MODELS,
+      modelEntries: orderModelsForPicker(AVAILABLE_MODELS),
+    }),
+  );
+
+  assert.match(html, /Delegation by bucket</);
+  assert.match(html, /effective subagent tiers may create further subagents/);
+  assert.match(html, /Allow Frontier subagents to delegate/);
+  assert.match(html, /Allow Medium subagents to delegate/);
+  assert.match(html, /Allow Small subagents to delegate/);
 });
 
 test('SubagentSection renders default toggles only for providers used by subagent buckets', () => {

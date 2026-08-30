@@ -43,12 +43,79 @@
 }
 
 .rich-tooltip-legend-item {
+  position: relative;
   display: inline-flex;
   align-items: center;
   gap: 3px;
 }
 
-.rich-tooltip-legend-val {
+.rich-tooltip-legend-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 2px;
+  border: 0;
+  border-radius: var(--panel-radius-sm);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: default;
+}
+
+.rich-tooltip-legend-trigger:hover,
+.rich-tooltip-legend-trigger:focus-visible {
+  color: var(--panel-foreground);
+  background: var(--panel-hover-surface);
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
+}
+
+.rich-tooltip-legend-detail {
+  position: absolute;
+  z-index: 4;
+  inset-inline-start: 0;
+  bottom: calc(100% + 4px);
+  display: none;
+  min-width: 170px;
+  max-width: 230px;
+  padding: 5px 6px;
+  border: 1px solid var(--panel-border-subtle);
+  border-radius: var(--panel-radius-sm);
+  background: var(--panel-overlay-surface);
+  box-shadow: var(--panel-shadow-overlay);
+  color: var(--panel-foreground);
+}
+
+.rich-tooltip-legend-item:hover .rich-tooltip-legend-detail,
+.rich-tooltip-legend-trigger:focus-visible + .rich-tooltip-legend-detail,
+.rich-tooltip-legend-detail:hover {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.rich-tooltip-legend-detail-head,
+.rich-tooltip-legend-detail-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.rich-tooltip-legend-detail-head {
+  padding-bottom: 2px;
+  border-bottom: 1px solid var(--panel-border-subtle);
+  font-weight: 600;
+}
+
+.rich-tooltip-legend-detail-model {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rich-tooltip-legend-val,
+.rich-tooltip-legend-detail-value {
   color: color-mix(in srgb, var(--panel-foreground) 70%, var(--panel-muted));
   font-variant-numeric: tabular-nums;
 }
@@ -156,6 +223,21 @@
   display: block;
 }
 
+/* Keep the complete hover data available to assistive technology without
+ * putting every chart sample in the tab order or changing the visual chart. */
+.chart-a11y-table {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
 .chart-wrap svg {
   display: block;
   overflow: visible;
@@ -204,8 +286,8 @@
 .chart-hover {
   position: absolute;
   top: 0;
-  min-width: 120px;
-  max-width: 150px;
+  min-width: 150px;
+  max-width: 184px;
   padding: 4px 6px;
   border-radius: var(--panel-radius-sm);
   background: color-mix(in srgb, var(--panel-overlay-surface) 92%, transparent);
@@ -234,29 +316,84 @@
   font-variant-numeric: tabular-nums;
 }
 
-.chart-hover-models {
+.chart-hover-providers,
+.chart-hover-provider {
   display: flex;
   flex-direction: column;
   gap: 1px;
 }
 
+.chart-hover-provider + .chart-hover-provider {
+  margin-top: 2px;
+  padding-top: 2px;
+  border-top: 1px solid var(--panel-border-subtle);
+}
+
+.chart-hover-provider-head,
 .chart-hover-model {
   display: flex;
+  align-items: center;
   justify-content: space-between;
-  gap: 6px;
+  gap: 5px;
+}
+
+.chart-hover-provider-name {
+  min-width: 0;
+  margin-right: auto;
+  overflow: hidden;
+  color: var(--panel-foreground);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chart-hover-model {
+  padding-inline-start: 11px;
 }
 
 .chart-hover-model-name {
-  color: var(--panel-muted);
+  max-width: 110px;
   overflow: hidden;
+  color: var(--panel-muted);
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 95px;
 }
 
 .chart-hover-model-val {
   color: color-mix(in srgb, var(--panel-foreground) 80%, var(--panel-muted));
   font-variant-numeric: tabular-nums;
+}
+
+.rich-tooltip-toggle {
+  align-self: flex-start;
+  display: inline-flex;
+  gap: 1px;
+  padding: 1px;
+  border: 1px solid var(--panel-border-subtle);
+  border-radius: var(--panel-radius-sm);
+}
+
+.rich-tooltip-toggle button {
+  padding: 1px 6px;
+  border: 0;
+  border-radius: calc(var(--panel-radius-sm) - 1px);
+  background: transparent;
+  color: var(--panel-muted);
+  font: inherit;
+  font-size: 9px;
+  cursor: pointer;
+}
+
+.rich-tooltip-toggle button:hover,
+.rich-tooltip-toggle button:focus-visible {
+  color: var(--panel-foreground);
+  background: var(--panel-hover-surface);
+  outline: 1px solid var(--vscode-focusBorder);
+}
+
+.rich-tooltip-toggle button[aria-pressed="true"] {
+  color: var(--panel-foreground);
+  background: var(--panel-control-hover);
 }
 
 /* ── Sparkline ────────────────────────────────────────────────────────────── */

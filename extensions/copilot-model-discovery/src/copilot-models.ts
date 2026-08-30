@@ -44,6 +44,11 @@ function finiteNumber(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 
+function positiveInteger(value: unknown): number | undefined {
+  const parsed = finiteNumber(value);
+  return parsed !== undefined && Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
+}
+
 function price(value: unknown): number {
   // Copilot reports integer US cents per one million tokens.
   return (finiteNumber(value) ?? 0) / 100;
@@ -54,7 +59,9 @@ function rates(value: unknown) {
   return {
     input: price(source?.input_price),
     output: price(source?.output_price),
-    cacheRead: price(source?.cache_price),
+    // API >= 2026-06-01 calls this cache_read_price. Keep the legacy alias for
+    // catalogs returned by older Copilot deployments.
+    cacheRead: price(source?.cache_read_price ?? source?.cache_price),
     cacheWrite: price(source?.cache_write_price),
   };
 }
@@ -103,12 +110,28 @@ export function toDiscoveredCopilotModel(value: unknown): DiscoveredCopilotModel
   const defaultPricing = record(record(item.billing)?.token_prices)?.default;
   const longPricing = record(record(item.billing)?.token_prices)?.long_context;
   const defaultRates = rates(defaultPricing);
-  const threshold = finiteNumber(record(defaultPricing)?.context_max);
+  // Copilot exposes the account's normal context tier through the default
+  // billing record. Pie deliberately stays on that smaller tier: it is ample
+  // for the runtime's compact history and avoids silently opting into the
+  // larger, more expensive context variant. API >= 2026-06-01 calls the limit
+  // max_prompt_tokens; context_max is retained for older deployments.
+  const publishedDefaultContextWindow = positiveInteger(record(defaultPricing)?.max_prompt_tokens)
+    ?? positiveInteger(record(defaultPricing)?.context_max);
+  const maximumContextWindow = positiveInteger(limits?.max_context_window_tokens);
+  if (longPricing && publishedDefaultContextWindow === undefined) {
+    // Without a valid default-tier boundary we cannot honor the smaller-tier
+    // policy or price requests reliably. Reject the refresh so its transaction
+    // keeps the last known-good source and generated catalogs intact.
+    throw new Error(`Copilot model '${id}' has an extended context tier without a valid default context limit`);
+  }
+  const defaultContextWindow = publishedDefaultContextWindow === undefined
+    ? (maximumContextWindow ?? 128_000)
+    : Math.min(publishedDefaultContextWindow, maximumContextWindow ?? publishedDefaultContextWindow);
   const longRates = rates(longPricing);
 
   const cost: DiscoveredCopilotModel['cost'] = { ...defaultRates };
-  if (longPricing && threshold !== undefined) {
-    cost.tiers = [{ inputTokensAbove: threshold, ...longRates }];
+  if (longPricing) {
+    cost.tiers = [{ inputTokensAbove: defaultContextWindow, ...longRates }];
   }
 
   let compat: UnknownRecord | undefined;
@@ -133,7 +156,7 @@ export function toDiscoveredCopilotModel(value: unknown): DiscoveredCopilotModel
     ...(effortMap ? { thinkingLevelMap: effortMap } : {}),
     input: supports?.vision === true ? ['text', 'image'] : ['text'],
     cost,
-    contextWindow: finiteNumber(limits?.max_context_window_tokens) ?? 128_000,
+    contextWindow: defaultContextWindow,
     maxTokens: finiteNumber(limits?.max_output_tokens) ?? 16_384,
     ...(compat ? { compat } : {}),
   };

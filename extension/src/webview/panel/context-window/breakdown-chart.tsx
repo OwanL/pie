@@ -165,6 +165,14 @@ function ContextWindowBreakdownChartBase({
   // freshly reopened compacted session may have neither a PI usage snapshot nor
   // enough boundary metadata to estimate used/remaining safely.
   const remaining = remainingTokensForChart(summary);
+  const remainingKnown = summary.remainingTokens !== null;
+  const percent = summary.usedTokens !== null ? Math.round((used / total) * 100) : null;
+
+  // Header shows the full decision set: fill percentage, exact used/total, and
+  // remaining. Unknown slots stay explicitly unknown rather than reading as 0.
+  const headValue = percent !== null
+    ? `${percent}% · ${formatCompactTokens(used)} / ${formatCompactTokens(total)}${remainingKnown ? ` · ${formatCompactTokens(remaining)} left` : ''}`
+    : `?% · ? / ${formatCompactTokens(total)}`;
 
   const usedSegments: Segment[] = entries
     .filter((e) => (e.tokens ?? 0) > 0)
@@ -216,11 +224,7 @@ function ContextWindowBreakdownChartBase({
     <div class="rich-tooltip rich-tooltip--ctx">
       <div class="rich-tooltip-head">
         <span>Context window</span>
-        <span class="rich-tooltip-head-value">
-          {summary.usedTokens !== null ? formatCompactTokens(summary.usedTokens) : '?'}
-          {' / '}
-          {formatCompactTokens(total)}
-        </span>
+        <span class="rich-tooltip-head-value">{headValue}</span>
       </div>
 
       <ContextBar

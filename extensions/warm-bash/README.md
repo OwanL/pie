@@ -65,12 +65,17 @@ No layer is worse than the built-in fresh-spawn path for managed binaries.
 | `PIE_BASH_WARMUP_TIMEOUT_MS` | `10000` | Time allowed for a newly spawned worker to print its ready marker. `0` uses the default. |
 | `PIE_BASH_DEFAULT_TIMEOUT` | `60` | Default command timeout in seconds when a call does not specify one (maximum `600`). |
 
+On Windows, an auto-detected Git Bash uses Git's real `usr/bin/bash.exe`
+directly instead of the extra `bin/bash.exe` launcher process. An explicit
+`PIE_SHELL` is always respected unchanged.
+
 The pool is a single **shared** pool (one process-wide, NOT per-session) — workers
 are single-use (used once then killed, re-cd'd per command) so sharing across
-sessions never reintroduces cross-call cwd/env leakage. It is created on first
-use, lives for the process lifetime (it is NOT disposed on `session_shutdown` —
-only per-session tool/metrics state is dropped), and is disposed only when the
-idle target is set to 0 or the process exits. Shell or warmup-timeout changes
+sessions never reintroduces cross-call cwd/env leakage. It starts warming at
+extension activation so the first bash call can hit the pool, then lives for the
+process lifetime (it is NOT disposed on `session_shutdown` — only per-session
+tool/metrics state is dropped), and is disposed only when the idle target is set
+to 0 or the process exits. Shell or warmup-timeout changes
 replace the shared pool and increment a process-wide generation; cached tools in
 all extension instances adopt the replacement lazily on their next call.
 

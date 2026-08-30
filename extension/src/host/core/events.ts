@@ -25,6 +25,7 @@ import type {
   ExtensionUIRequestPayload,
   SessionOpenedPayload,
   PruningSettings,
+  SessionTitlesSettings,
   ToolResultPruningSettings,
   FileChangeEntry,
   ActiveRunSummary,
@@ -193,6 +194,25 @@ export interface McpServersUpdatedEvent {
   servers?: McpServerInfo[];
   pendingApply?: boolean;
   error?: string;
+  /** Hydrated per-session override set — present only when the initiating
+   *  RPC included a `sessionPath` (session-scoped UI refresh). */
+  sessionPath?: string;
+  sessionOverrides?: Record<string, boolean>;
+}
+
+/** Backend answered the session-scoped `mcp.setSessionServerEnabled` toggle
+ *  (and idle-recycle retries). `recycled: false` on success means the
+ *  session's worker could not be recycled now (busy/cold) — the override
+ *  applies at the next session reload / idle recycle and the host keeps its
+ *  pending hint. Overrides carried on the event are the authoritative set. */
+export interface McpSessionServersUpdatedEvent {
+  kind: 'McpSessionServersUpdated';
+  corrId: string;
+  sessionPath: string;
+  ok: boolean;
+  overrides?: Record<string, boolean>;
+  recycled?: boolean;
+  error?: string;
 }
 
 export interface FileDiffResultEvent {
@@ -207,6 +227,10 @@ export interface FileRevertResultEvent {
   kind: 'FileRevertResult';
   corrId: string;
   sessionPath: string;
+  /** The reverted file path, so the reducer removes the matching changed-file
+   *  row only AFTER the revert confirms — a failed/cancelled revert keeps the
+   *  row (and its read state) instead of losing it to a premature removal. */
+  filePath: string;
   ok: boolean;
   error?: string;
 }
@@ -280,6 +304,24 @@ export interface SetToolResultPruningSettingsResultEvent {
   error?: string;
 }
 
+export interface SetSessionTitlesSettingsResultEvent {
+  kind: 'SetSessionTitlesSettingsResult';
+  corrId: string;
+  ok: boolean;
+  error?: string;
+}
+
+export interface SessionTitleResultEvent {
+  kind: 'SessionTitleResult';
+  corrId: string;
+  sessionPath: string;
+  ok: boolean;
+  generated?: boolean;
+  name?: string;
+  reason?: string;
+  error?: string;
+}
+
 export interface CloseSessionResultEvent {
   kind: 'CloseSessionResult';
   corrId: string;
@@ -341,6 +383,8 @@ export type EffectResultEvent =
   | OpenFileResultEvent
   | SetPruningSettingsResultEvent
   | SetToolResultPruningSettingsResultEvent
+  | SetSessionTitlesSettingsResultEvent
+  | SessionTitleResultEvent
   | CloseSessionResultEvent
   | DuplicateSessionResultEvent;
 
@@ -519,11 +563,13 @@ export interface SessionClosedEvent {
   sessionPath: string;
 }
 
-/** Emitted when the host derives an optimistic session name from the first message text. */
+/** Emitted when the host derives a replaceable prompt snippet from the first message. */
 export interface SessionNameDerivedEvent {
   kind: 'SessionNameDerived';
   sessionPath: string;
   name: string;
+  isPlaceholder: boolean;
+  sourcePrompt: string;
 }
 
 /** Emitted when an optimistic local user message is inserted into the transcript. */
@@ -540,13 +586,6 @@ export interface OptimisticMessageRemovedEvent {
   kind: 'OptimisticMessageRemoved';
   sessionPath: string;
   localId: string;
-}
-
-/** Emitted when a file change entry is removed (e.g. on revert). */
-export interface FileChangeRemovedEvent {
-  kind: 'FileChangeRemoved';
-  sessionPath: string;
-  filePath: string;
 }
 
 /** Emitted when the backend ready state changes. */
@@ -575,6 +614,12 @@ export interface PruningSettingsChangedEvent {
 export interface ToolResultPruningSettingsChangedEvent {
   kind: 'ToolResultPruningSettingsChanged';
   toolResultPruningSettings: ToolResultPruningSettings;
+}
+
+/** Emitted when session-title settings change. */
+export interface SessionTitlesSettingsChangedEvent {
+  kind: 'SessionTitlesSettingsChanged';
+  sessionTitlesSettings: SessionTitlesSettings;
 }
 
 /** Emitted when the workspace cwd changes. */
@@ -919,14 +964,15 @@ export type HostEvent =
   | NoticeShownEvent
   | EditTruncateRecoveryChangedEvent
   | McpServersUpdatedEvent
+  | McpSessionServersUpdatedEvent
   | SessionNameDerivedEvent
   | OptimisticMessageInsertedEvent
   | OptimisticMessageRemovedEvent
-  | FileChangeRemovedEvent
   | BackendReadyChangedEvent
   | BackendReadyWatchdogFiredEvent
   | PruningSettingsChangedEvent
   | ToolResultPruningSettingsChangedEvent
+  | SessionTitlesSettingsChangedEvent
   | WorkspaceCwdChangedEvent
   | TranscriptPageLoadedEvent
   | FileChangesUpdatedEvent

@@ -5,7 +5,7 @@ import type { ChatMessage } from '../../../shared/protocol/messages.js';
 import { LIVE_PIPELINE_LIMITS, type LivePipelineState } from '../../../shared/live-pipeline-protocol.js';
 import type { Event } from '../events.js';
 import type { Effect } from '../effects.js';
-import { commitPromotedSend, type ReducerResult } from './helpers.js';
+import { commitPromotedSend, startSessionTitleGeneration, type ReducerResult } from './helpers.js';
 import { applyLiveTurnCheckpoint } from '../live-pipeline/checkpoint.js';
 import { interruptLivePipelineForRestart } from '../live-pipeline/cleanup.js';
 import { applyLiveSemanticEnvelope } from '../live-pipeline/transitions.js';
@@ -43,6 +43,9 @@ export function handleTurnSemanticEvent(
     const commit = commitPromotedSend(nextState, envelope.sessionPath, envelope.requestId, envelope.canonicalMessageId);
     nextState = commit.state;
     effects.push(...commit.effects);
+    const titleStart = startSessionTitleGeneration(nextState, envelope.sessionPath, envelope.requestId);
+    nextState = titleStart.state;
+    effects.push(...titleStart.effects);
   }
 
   if (!repairAlreadyRequested && (transition.classification === 'gap'
@@ -106,7 +109,13 @@ export function handleLiveTurnCheckpointResult(
     event.checkpoint.turn.canonicalMessageId,
   );
   next = committedSend.state;
-  const commitEffects = committedSend.effects;
+  const titleStart = startSessionTitleGeneration(
+    next,
+    event.checkpoint.sessionPath,
+    event.checkpoint.turn.requestId,
+  );
+  next = titleStart.state;
+  const commitEffects = [...committedSend.effects, ...titleStart.effects];
   if (event.checkpoint.terminal) {
     const turns = { ...next.livePipeline.turnsBySession };
     delete turns[event.sessionPath];

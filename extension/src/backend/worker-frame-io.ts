@@ -13,7 +13,15 @@ import {
   type WorkerIpcFrameKind,
 } from './worker-protocol';
 
-export const WORKER_IPC_DEFAULT_RESPONSE_QUEUE_BYTES = 1024 * 1024;
+/**
+ * Extra response-lane space beyond one maximum legal frame. Checkpoint
+ * responses can legitimately approach the shared 32 MiB wire ceiling; this
+ * fixed reserve keeps their small correlated acknowledgements admissible
+ * without making the queue unbounded.
+ */
+export const WORKER_IPC_RESPONSE_QUEUE_HEADROOM_BYTES = 1024 * 1024;
+export const WORKER_IPC_DEFAULT_RESPONSE_QUEUE_BYTES =
+  WORKER_IPC_MAX_FRAME_BYTES + WORKER_IPC_RESPONSE_QUEUE_HEADROOM_BYTES;
 export const WORKER_IPC_DEFAULT_CONTROL_QUEUE_BYTES = 1024 * 1024;
 export const WORKER_IPC_DEFAULT_LIFECYCLE_QUEUE_BYTES = 2 * 1024 * 1024;
 export const WORKER_IPC_DEFAULT_ORDINARY_QUEUE_BYTES = 2 * 1024 * 1024;
@@ -224,16 +232,29 @@ export class BoundedWorkerIpcWriter {
       }
     }
 
-    const nextLaneBytes = this.queuedBytes[lane] + pending.bytes;
+    // Count an in-flight response against the response reservation. Without
+    // this, the descriptor could retain one maximum response as its active OS
+    // write and another full reservation in the queue. Other lanes retain the
+    // historical meaning of maxQueued*Bytes: queued backlog behind the one
+    // active descriptor write.
+    const activeLaneBytes = lane === 'response' && this.active?.pending.lane === lane
+      ? this.active.pending.bytes
+      : 0;
+    const retainedLaneBytes = activeLaneBytes + this.queuedBytes[lane];
+    const nextLaneBytes = retainedLaneBytes + pending.bytes;
     // A single frame may exceed the lane's reserved capacity (it is bounded by
     // the semantic frame limit above), but only when the lane is otherwise
     // empty. This lets a large promotion snapshot or session.opened pass while
     // still bounding the backlog of many queued frames under backpressure.
-    if (this.queuedBytes[lane] > 0 && nextLaneBytes > this.capacities[lane]) {
+    if (retainedLaneBytes > 0 && nextLaneBytes > this.capacities[lane]) {
       return this.reject(options.onSettled, 'capacity', capacityDetail(lane, nextLaneBytes, this.capacities[lane]));
     }
     this.lanes[lane].push(pending);
-    this.queuedBytes[lane] = nextLaneBytes;
+    // `queuedBytes` deliberately excludes the descriptor's active write. The
+    // active response participates in the admission calculation above, but it
+    // must not be persisted into the queued balance or it survives every
+    // later dequeue as phantom capacity.
+    this.queuedBytes[lane] += pending.bytes;
     this.pump();
     return { accepted: true, coalesced: false };
   }
@@ -358,15 +379,19 @@ function laneFor(frame: WorkerIpcFrame): WriterLane {
   const kind = frame.kind;
   if (kind === 'response' || kind === 'runtime.ready' || kind === 'sync.ack'
       || kind === 'ownership.reserved' || kind === 'ownership.committed'
-      || kind === 'ownership.aborted' || kind === 'ownership.runtimeReadyAck'
-      || kind === 'provider.granted' || kind === 'provider.released'
+      || kind === 'ownership.consumed' || kind === 'ownership.aborted'
+      || kind === 'ownership.rejected' || kind === 'ownership.runtimeReadyAck'
+      || kind === 'provider.granted' || kind === 'provider.cancelled' || kind === 'provider.rejected'
+      || kind === 'provider.cancelAck' || kind === 'provider.released'
+      || kind === 'settings.authoritative'
       || kind === 'detail.unsubscribed') return 'response';
   if (kind === 'bootstrap' || kind === 'interrupt' || kind === 'shutdown'
       || kind === 'ready' || kind === 'fatal' || kind === 'runtime.promote'
       || kind === 'runtime.command' || kind === 'sync'
       || kind === 'ownership.reserve' || kind === 'ownership.commit'
       || kind === 'ownership.abort' || kind === 'ownership.runtimeReady'
-      || kind === 'provider.acquire' || kind === 'provider.release'
+      || kind === 'provider.acquire' || kind === 'provider.cancel'
+      || kind === 'provider.observation' || kind === 'provider.release'
       || kind === 'detail.subscribe' || kind === 'detail.unsubscribe' || kind === 'detail.fetch'
       || kind === 'detail.rebase' || kind === 'detail.error') return 'control';
   if (kind === 'detail.start' || kind === 'detail.terminal') return 'lifecycle';

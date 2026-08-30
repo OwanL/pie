@@ -18,7 +18,11 @@ interface ReasoningBlockProps {
   detailRef?: LazyDetailRef;
   autoExpand: boolean;
   collapsibleKey: string;
-  onContextMenu: (e: MouseEvent) => void;
+  /** Context-menu request. The block supplies its CURRENT display text —
+   *  the lazily-loaded detail when one has been fetched, otherwise the
+   *  summary/complete `text` — so the menu's copy actions always target what
+   *  the block actually shows, not the compacted summary. */
+  onContextMenu: (e: MouseEvent, displayText: string) => void;
   /** True while the owning assistant message is still streaming AND this is the
    *  actively-growing part. Drives the expanded streaming cursor. */
   streaming?: boolean;
@@ -132,7 +136,7 @@ export function ReasoningBlock({ text, detailRef, autoExpand, collapsibleKey, on
       dataAttrs={streaming ? { 'data-streaming': 'true', 'data-provisional': 'true' } : undefined}
       headerClass="px-2 py-1"
       bodyClass="px-2 pb-2 leading-relaxed text-foreground"
-      onContextMenu={onContextMenu}
+      onContextMenu={(e) => onContextMenu(e, displayText)}
       header={
         <>
           <span class="transcript-header-label">Reasoning</span>

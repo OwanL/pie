@@ -15,6 +15,7 @@ import type {
   ChatMessage,
   ComposerInput,
   ContextWindowUsage,
+  InitialContextEstimate,
   DeferredTriggerView,
   FileChangeEntry,
   ModelInfo,
@@ -43,6 +44,20 @@ import type {
 } from './arch-state';
 
 // ─── Empty sentinels (stable references keep downstream shallow-equals cheap) ─
+
+/** Merge the global effective MCP list with one session's overrides. A
+ *  session override only affects servers present in the global list; an
+ *  override for an unknown name is ignored (stale rows die silently). */
+export function mergeSessionMcpServers(
+  globalServers: readonly { name: string; disabled: boolean }[],
+  overrides: Record<string, boolean> | undefined,
+): { name: string; disabled: boolean }[] {
+  if (!overrides || Object.keys(overrides).length === 0) return [...globalServers];
+  return globalServers.map((server) => {
+    const override = overrides[server.name];
+    return override === undefined ? server : { ...server, disabled: server.disabled || override };
+  });
+}
 
 const EMPTY_TRANSCRIPT: ChatMessage[] = [];
 const EMPTY_SYSTEM_PROMPTS: SystemPromptEntry[] = [];
@@ -368,6 +383,14 @@ function projectViewState(state: ArchState): ViewState {
 
   const activeContextUsage: ContextWindowUsage | null =
     activePath ? settings.contextUsageBySession[activePath] ?? null : null;
+  const activeSessionUsage = activePath ? transcript.sessionUsageBySession?.[activePath] ?? null : null;
+  const activeInitialContextEstimate: InitialContextEstimate | null = activePath
+    && activeContextUsage === null
+    && (activeSessionUsage?.samples.length ?? 0) === 0
+    && !activeTranscriptWindow.hasUserMessages
+    && !activeTranscript.some((message) => message.role === 'user')
+    ? settings.initialContextEstimateBySession[activePath] ?? null
+    : null;
 
   const activeFileChanges: FileChangeEntry[] =
     activePath ? fileChanges.bySession[activePath] ?? EMPTY_FILE_CHANGES : EMPTY_FILE_CHANGES;
@@ -413,6 +436,9 @@ function projectViewState(state: ArchState): ViewState {
     pinnedTabPaths: sessions.pinnedTabPaths,
     pinnedTabGroups: sessions.pinnedTabGroups,
     runningSessionPaths: sessions.runningSessionPaths,
+    generatingTitleSessionPaths: Object.entries(sessions.titleGenerationBySession)
+      .filter(([, generation]) => generation.status === 'armed' || generation.status === 'pending')
+      .map(([sessionPath]) => sessionPath),
     startingModelSessionPaths,
     compactingSessionPaths: sessions.compactingSessionPaths,
     lastCompactionBySession: sessions.lastCompactionBySession,
@@ -421,7 +447,7 @@ function projectViewState(state: ArchState): ViewState {
     activeSession,
     transcript: activeTranscript,
     transcriptWindow: activeTranscriptWindow,
-    sessionUsage: activePath ? transcript.sessionUsageBySession?.[activePath] ?? null : null,
+    sessionUsage: activeSessionUsage,
     transcriptLoaded: activeTranscriptLoaded,
     pendingComposerInputs: activePendingComposerInputs,
     activeRunSummary,
@@ -460,10 +486,21 @@ function projectViewState(state: ArchState): ViewState {
     availableModels: activeAvailableModels,
     availableModelsStatus: activeAvailableModelsStatus,
     contextUsage: activeContextUsage,
+    initialContextEstimate: activeInitialContextEstimate,
     prefs: settings.prefs,
     mcpServers: settings.mcpServers,
     mcpServersStatus: settings.mcpServersStatus,
     mcpPendingApply: settings.mcpPendingApply,
+    // Session-scoped effective list: the global list with the active
+    // session's own overrides merged on top (`disabled` ORs, since a session
+    // can only hide further or un-hide a project-disabled server for itself).
+    mcpSessionServers: mergeSessionMcpServers(
+      settings.mcpServers,
+      activePath ? settings.mcpSessionOverridesBySession[activePath] : undefined,
+    ),
+    mcpSessionPendingApply: activePath
+      ? settings.mcpPendingApplyBySession[activePath] === true
+      : false,
     fileChanges: activeFileChanges,
     fileChangesExpanded: activeFileChangesExpanded,
     readFilePaths: activeReadFilePaths,
@@ -471,6 +508,7 @@ function projectViewState(state: ArchState): ViewState {
     pruningResult,
     pruningSettings: settings.pruningSettings,
     toolResultPruningSettings: settings.toolResultPruningSettings,
+    sessionTitlesSettings: settings.sessionTitlesSettings,
     pruningCatalog,
     prepassPhase: prepass.phase,
     prepassStartedAt: prepass.startedAt,

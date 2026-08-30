@@ -443,6 +443,66 @@ export function reconcilePinnedGroups(
   return { pinnedTabPaths: nextPinned, pinnedTabGroups: cleaned };
 }
 
+/** Result of a pin-and-merge mutation: the pin's `openTabPaths` (canonical
+ *  strip order, pinned prefix kept) plus the group mutation's flat pinned
+ *  order and groups. */
+export interface PinAndMergeResult {
+  openTabPaths: string[];
+  pinnedTabPaths: string[];
+  pinnedTabGroups: string[][];
+}
+
+/** Pin an unpinned tab and then group it with the LEFTMOST pinned-strip item
+ *  (Discord-style): the leftmost standalone pinned tab starts a new group with
+ *  the source, and the leftmost group chip absorbs the source (appended to its
+ *  members). Used by the tab context menu's "Pin and Merge" item.
+ *
+ *  Since `pinTab` appends the source to the tail of the pinned prefix, the
+ *  leftmost item after the pin is the previously-leftmost pinned item. When
+ *  the tab was not open, is pending, or was already pinned, the input is
+ *  returned unchanged (the menu only offers this for unpinned tabs; the
+ *  helper tolerates misuse defensively). With no other pinned items the tab
+ *  is just pinned. */
+export function pinAndMergeToFirstPinned(
+  openTabPaths: readonly string[],
+  pinnedTabPaths: readonly string[],
+  pinnedTabGroups: readonly string[][],
+  sessionPath: string,
+): PinAndMergeResult {
+  if (
+    isPendingTabPath(sessionPath)
+    || !openTabPaths.includes(sessionPath)
+    || pinnedTabPaths.includes(sessionPath)
+  ) {
+    return {
+      openTabPaths: [...openTabPaths],
+      pinnedTabPaths: [...pinnedTabPaths],
+      pinnedTabGroups: pinnedTabGroups.map((group) => [...group]),
+    };
+  }
+  const pinned = pinTab(openTabPaths, pinnedTabPaths, sessionPath);
+  // `pinTab` placed the source at the pinned prefix's tail, so the first
+  // derived strip item is the previously-leftmost pinned item — a standalone
+  // chip or a group chip (identified by its first member).
+  const leftmost = derivePinnedItems(pinned.pinnedTabPaths, pinnedTabGroups)[0];
+  const targetPath = leftmost
+    ? (leftmost.kind === 'group' ? leftmost.members[0] : leftmost.path)
+    : undefined;
+  if (!targetPath || targetPath === sessionPath) {
+    return {
+      openTabPaths: pinned.openTabPaths,
+      pinnedTabPaths: pinned.pinnedTabPaths,
+      pinnedTabGroups: pinnedTabGroups.map((group) => [...group]),
+    };
+  }
+  const grouped = groupPinnedTab(pinned.pinnedTabPaths, pinnedTabGroups, sessionPath, targetPath);
+  return {
+    openTabPaths: pinned.openTabPaths,
+    pinnedTabPaths: grouped.pinnedTabPaths,
+    pinnedTabGroups: grouped.pinnedTabGroups,
+  };
+}
+
 /** Group a pinned tab with a target (Discord-style "drag onto"). `sourcePath`
  *  is the dragged pinned tab; `targetPath` is any member of the target group
  *  (or a standalone pinned tab to start a new group with). The source leaves
@@ -590,6 +650,47 @@ export function ungroupPinnedTab(
     }
   }
   return { pinnedTabPaths: nextPinned, pinnedTabGroups: nextGroups };
+}
+
+/** Remove exactly the group containing `sourcePath`, preserving every member's
+ * pinned status and the existing flat pinned order. A path that is not a group
+ * member is a no-op. */
+export function dissolvePinnedGroup(
+  pinnedTabPaths: readonly string[],
+  pinnedTabGroups: readonly string[][],
+  sourcePath: string,
+): PinnedTabGroupsResult {
+  const groupIndex = findPinnedGroupIndex(pinnedTabGroups, sourcePath);
+  if (groupIndex === -1) {
+    return { pinnedTabPaths: [...pinnedTabPaths], pinnedTabGroups: pinnedTabGroups.map((group) => [...group]) };
+  }
+  return {
+    pinnedTabPaths: [...pinnedTabPaths],
+    pinnedTabGroups: pinnedTabGroups.filter((_, index) => index !== groupIndex).map((group) => [...group]),
+  };
+}
+
+/** Remove exactly the group containing `sourcePath` from the pinned set while
+ * keeping all of its sessions open. The returned flat pinned order contains
+ * only the remaining pinned paths; the reducer restores the pinned prefix in
+ * the open-tab order. A path that is not a group member is a no-op. */
+export function unpinPinnedGroup(
+  pinnedTabPaths: readonly string[],
+  pinnedTabGroups: readonly string[][],
+  sourcePath: string,
+): PinnedTabGroupsResult {
+  const groupIndex = findPinnedGroupIndex(pinnedTabGroups, sourcePath);
+  if (groupIndex === -1) {
+    return { pinnedTabPaths: [...pinnedTabPaths], pinnedTabGroups: pinnedTabGroups.map((group) => [...group]) };
+  }
+  const members = new Set(pinnedTabGroups[groupIndex]);
+  return {
+    pinnedTabPaths: pinnedTabPaths.filter((path) => !members.has(path)),
+    pinnedTabGroups: pinnedTabGroups
+      .filter((_, index) => index !== groupIndex)
+      .map((group) => group.filter((member) => !members.has(member)))
+      .filter((group) => group.length >= 2),
+  };
 }
 
 /** Reorder a pinned item (standalone chip or group block) horizontally within

@@ -277,6 +277,7 @@ const mockToolInfo = [
 	{ name: "bash", description: "Execute a bash command", parameters: { type: "object", properties: {} } },
 	{ name: "subagent", description: "Delegate tasks to specialized subagents", parameters: { type: "object", properties: {} } },
 	{ name: "web_search", description: "Search the web for information", parameters: { type: "object", properties: {} } },
+	{ name: "defer_trigger", description: "Wait for an external condition and resume later", parameters: { type: "object", properties: {} } },
 ];
 
 // ---------------------------------------------------------------------------
@@ -410,6 +411,59 @@ test("alwaysKeep skills and tools protected even when the LLM prunes them", asyn
 		assert.ok(setActiveToolsCalls.length > 0);
 		assert.ok(setActiveToolsCalls[0].includes("web_search"), "alwaysKeep web_search protected from pruning");
 		assert.ok(!setActiveToolsCalls[0].includes("subagent"), "subagent was pruned");
+	} finally {
+		__setCompleteFn(null);
+		__setToolSeams({ getAllTools: null, getActiveTools: null, setActiveTools: null });
+	}
+});
+
+test("deferred-trigger wake turns keep defer_trigger available even when the prepass tries to prune it", async () => {
+	const setActiveToolsCalls: string[][] = [];
+	let prepassRequest = "";
+	__setCompleteFn(async (_model, context) => {
+		prepassRequest = JSON.stringify(context);
+		return { text: '{"pruneSkills":[],"pruneTools":["defer_trigger","web_search"]}' };
+	});
+	try {
+		const { handlers } = register(config({}, "auto", { ceiling: 10 }));
+		__setToolSeams({
+			getAllTools: () => mockToolInfo as any[],
+			getActiveTools: () => mockToolInfo.map((tool) => tool.name),
+			setActiveTools: (names: string[]) => { setActiveToolsCalls.push(names); },
+		});
+
+		const result = await runBeforeAgentStart(
+			handlers,
+			"[deferred trigger fired: session finished: abc]\n\nA deferred trigger you registered fired. Re-evaluate your pending task and either complete it now or call `defer_trigger` with action `register` again to keep waiting.",
+			realisticSkills,
+		);
+
+		assert.doesNotMatch(prepassRequest, /- defer_trigger:/, "protected wake capability is omitted from pruning candidates");
+		assert.ok(setActiveToolsCalls.at(-1)?.includes("defer_trigger"));
+		assert.ok(!setActiveToolsCalls.at(-1)?.includes("web_search"));
+		assert.ok(result?.message?.details.includedTools.includes("defer_trigger"));
+		assert.ok(!result?.message?.details.excludedTools.includes("defer_trigger"));
+	} finally {
+		__setCompleteFn(null);
+		__setToolSeams({ getAllTools: null, getActiveTools: null, setActiveTools: null });
+	}
+});
+
+test("ordinary turns may still prune defer_trigger", async () => {
+	const setActiveToolsCalls: string[][] = [];
+	__setCompleteFn(mockCompleteFn({ pruneTools: ["defer_trigger"] }));
+	try {
+		const { handlers } = register(config({}, "auto", { ceiling: 10 }));
+		__setToolSeams({
+			getAllTools: () => mockToolInfo as any[],
+			getActiveTools: () => mockToolInfo.map((tool) => tool.name),
+			setActiveTools: (names: string[]) => { setActiveToolsCalls.push(names); },
+		});
+
+		const result = await runBeforeAgentStart(handlers, "Refactor this code", realisticSkills);
+
+		assert.ok(!setActiveToolsCalls.at(-1)?.includes("defer_trigger"));
+		assert.ok(result?.message?.details.excludedTools.includes("defer_trigger"));
 	} finally {
 		__setCompleteFn(null);
 		__setToolSeams({ getAllTools: null, getActiveTools: null, setActiveTools: null });

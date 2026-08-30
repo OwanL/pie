@@ -117,6 +117,20 @@ export const ALL_NESTED_BUCKETS_ALLOWED: NestedAllowedBuckets = {
   frontier: true,
 };
 
+/** Per-effective-bucket policy controlling whether a subagent may delegate. */
+export interface SubagentBucketCanSpawn {
+  small: boolean;
+  medium: boolean;
+  frontier: boolean;
+}
+
+/** Preserve recursive delegation unless the user explicitly disables a tier. */
+export const ALL_SUBAGENT_BUCKETS_CAN_SPAWN: SubagentBucketCanSpawn = {
+  small: true,
+  medium: true,
+  frontier: true,
+};
+
 /** Result of applying the nested-bucket allowlist to a requested tier. */
 export interface NestedBucketResolution {
   /** The effective bucket to use, or `""` when no bucket is allowed at all
@@ -136,6 +150,10 @@ export const SUBAGENT_BUCKETS_ENV = "PIE_SUBAGENT_BUCKETS_JSON";
  *  (which tiers nested subagents may use) to the in-process subagent extension.
  *  Value is JSON {@link NestedAllowedBuckets}. */
 export const NESTED_ALLOWED_BUCKETS_ENV = "PIE_SUBAGENT_NESTED_ALLOWED_BUCKETS_JSON";
+
+/** Environment key used by the pie host to mirror whether subagents in each
+ *  effective bucket may create further subagents. */
+export const SUBAGENT_BUCKET_CAN_SPAWN_ENV = "PIE_SUBAGENT_BUCKET_CAN_SPAWN_JSON";
 
 // --- YAML loading ---
 
@@ -297,6 +315,38 @@ export function parseNestedAllowedBuckets(raw: string | undefined): NestedAllowe
 /** Read + parse the nested-allowed-buckets config from the process environment. */
 export function readNestedAllowedBuckets(): NestedAllowedBuckets {
   return parseNestedAllowedBuckets(process.env[NESTED_ALLOWED_BUCKETS_ENV]);
+}
+
+/** Parse the per-bucket delegation policy. Missing or malformed values fail
+ *  open so stock pi and older pie hosts preserve recursive delegation. */
+export function parseSubagentBucketCanSpawn(raw: string | undefined): SubagentBucketCanSpawn {
+  const out: SubagentBucketCanSpawn = { ...ALL_SUBAGENT_BUCKETS_CAN_SPAWN };
+  if (!raw) return out;
+  let parsed: unknown;
+  try {
+    parsed = parseJsonOrThrow<unknown>(raw, "subagent bucket delegation policy");
+  } catch {
+    return out;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return out;
+  const obj = parsed as Record<string, unknown>;
+  for (const key of BUCKET_KEYS) {
+    const value = obj[key];
+    if (typeof value === "boolean") out[key] = value;
+  }
+  return out;
+}
+
+/** Read the per-bucket delegation policy from the host environment mirror. */
+export function readSubagentBucketCanSpawn(): SubagentBucketCanSpawn {
+  return parseSubagentBucketCanSpawn(process.env[SUBAGENT_BUCKET_CAN_SPAWN_ENV]);
+}
+
+/** Whether the current subagent bucket may create another subagent. Root chats
+ *  and unknown/fallback bucket identities remain unrestricted. */
+export function canSpawnFromSubagentBucket(bucket: string | undefined): boolean {
+  if (!bucket || !(BUCKET_KEYS as readonly string[]).includes(bucket)) return true;
+  return readSubagentBucketCanSpawn()[bucket as BucketTier];
 }
 
 /**

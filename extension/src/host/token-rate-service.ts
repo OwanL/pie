@@ -7,6 +7,7 @@ import {
   computeIdleDisplayState,
   createAccumulator,
   IDLE_STATE,
+  RATE_HOLD_MS,
   shouldResetForRun,
   tickTokenRate,
   TICK_MS,
@@ -51,10 +52,28 @@ export interface TokenRateServiceDeps {
   onRatesTick?: () => void;
 }
 
+function terminalSignature(transcript: ReturnType<typeof projectTranscriptView>['messages']): string {
+  for (let i = transcript.length - 1; i >= 0; i -= 1) {
+    const message = transcript[i];
+    if (message.role !== 'assistant'
+      || (message.status !== 'completed' && message.status !== 'error' && message.status !== 'interrupted')) continue;
+    return `${message.id}:${message.status}:${message.createdAt}:${message.durationMs ?? ''}:${message.usage?.outputTokens ?? ''}:${message.markdown.length}:${message.thinking?.length ?? 0}`;
+  }
+  return '';
+}
+
 export class TokenRateService {
   private accumulators = new Map<string, Accumulator>();
   private runIdsBySession = new Map<string, string | null>();
   private statesBySession = new Map<string, TokenRateIndicatorState>();
+  /** When a completed burst stopped contributing live output. Retaining the
+   * state briefly makes the final average visible without keeping stale rates
+   * forever. */
+  private rateHoldSinceBySession = new Map<string, number>();
+  /** Terminal identity suppressed after the bounded hold expires. A changed
+   * identity re-enables short-burst detection even if no running tick was seen. */
+  private expiredRateTerminalBySession = new Map<string, string>();
+  private rateHoldTerminalBySession = new Map<string, string>();
   private lastAggregateSignature = '';
   private timer?: ReturnType<typeof setInterval>;
 
@@ -96,6 +115,7 @@ export class TokenRateService {
     const state = this.deps.getArchState();
     const openTabs = new Set(state.sessions.openTabPaths);
     const running = state.sessions.runningSessionPaths;
+    const runningSet = new Set(running);
     const activePath = state.sessions.activeSessionPath;
 
     // Sessions to measure this tick:
@@ -136,13 +156,54 @@ export class TokenRateService {
       const next = tickTokenRate(acc, transcript, now);
       const prev = this.statesBySession.get(sessionPath);
       this.statesBySession.set(sessionPath, next);
+      if (runningSet.has(sessionPath)) {
+        this.rateHoldSinceBySession.delete(sessionPath);
+        this.rateHoldTerminalBySession.delete(sessionPath);
+        this.expiredRateTerminalBySession.delete(sessionPath);
+      } else if (next.rate !== undefined || next.endToEndRate !== undefined) {
+        this.rateHoldSinceBySession.set(
+          sessionPath,
+          this.rateHoldSinceBySession.get(sessionPath) ?? now,
+        );
+        this.rateHoldTerminalBySession.set(sessionPath, terminalSignature(transcript));
+      }
 
       if (
         sessionPath === activePath
         && (prev?.label !== next.label
           || prev?.state !== next.state
-          || prev?.tooltip !== next.tooltip)
+          || prev?.tooltip !== next.tooltip
+          || prev?.terminalOutputTokensEstimate !== next.terminalOutputTokensEstimate)
       ) {
+        activeChanged = true;
+      }
+    }
+
+    // Retain a useful final/held rate through a short post-burst window. This
+    // is intentionally wall-clock bounded: tools keep a running session alive
+    // and must not decay its paused chip, while a completed burst eventually
+    // returns to the ordinary idle placeholder.
+    for (const path of openTabs) {
+      if (runningSet.has(path)) continue;
+      const current = this.statesBySession.get(path);
+      if (!current || (current.rate === undefined && current.endToEndRate === undefined)) continue;
+      const heldSince = this.rateHoldSinceBySession.get(path) ?? now;
+      this.rateHoldSinceBySession.set(path, heldSince);
+      if (now - heldSince <= RATE_HOLD_MS) continue;
+      const transcript = projectTranscriptView(
+        state.transcript.bySession[path] ?? [],
+        state.livePipeline ?? EMPTY_LIVE_PIPELINE_STATE,
+        path,
+      ).messages;
+      const expired = computeIdleDisplayState(transcript, false);
+      this.statesBySession.set(path, expired);
+      this.rateHoldSinceBySession.delete(path);
+      this.rateHoldTerminalBySession.delete(path);
+      this.expiredRateTerminalBySession.set(path, terminalSignature(transcript));
+      if (path === activePath
+        && (current.label !== expired.label
+          || current.tooltip !== expired.tooltip
+          || current.terminalOutputTokensEstimate !== expired.terminalOutputTokensEstimate)) {
         activeChanged = true;
       }
     }
@@ -155,29 +216,46 @@ export class TokenRateService {
         this.statesBySession.delete(path);
         this.accumulators.delete(path);
         this.runIdsBySession.delete(path);
+        this.rateHoldSinceBySession.delete(path);
+        this.rateHoldTerminalBySession.delete(path);
+        this.expiredRateTerminalBySession.delete(path);
       }
     }
 
-    // Seed a latency-bearing idle display state for open sessions that have
-    // never been measured this host session — a transcript loaded from disk, or
-    // one restored after a window reload. Such sessions have no live rate, but
-    // their finished turns still carry an average turn latency that should stay
-    // visible on the speed chip even with no active generation (otherwise the
-    // chip shows the bare '—' placeholder until the next run begins). Once a
-    // session runs it is measured above and `statesBySession` already holds it,
-    // so this is a no-op; the idle state is computed once (the transcript is
-    // static while idle) and retained until a run replaces it.
+    // Keep idle projections current as well as seeding them. A short run can
+    // begin and finish between two 200ms samples, leaving only its terminal
+    // assistant message for this service to observe. Re-projecting idle tabs is
+    // bounded by the number of open tabs and lets terminal usage/timestamps
+    // provide the final held rate without pretending it was live output.
     for (const path of openTabs) {
-      if (this.statesBySession.has(path)) continue;
+      if (runningSet.has(path)) continue;
+      const current = this.statesBySession.get(path);
+      const pausedWithoutRate = current?.state === 'paused'
+        && current.rate === undefined
+        && current.endToEndRate === undefined;
+      if (current && current.state !== 'idle' && !pausedWithoutRate) continue;
       const transcript = projectTranscriptView(
         state.transcript.bySession[path] ?? [],
         state.livePipeline ?? EMPTY_LIVE_PIPELINE_STATE,
         path,
       ).messages;
+      const terminalKey = terminalSignature(transcript);
+      if (this.expiredRateTerminalBySession.get(path) === terminalKey) continue;
+      this.expiredRateTerminalBySession.delete(path);
       const idleState = computeIdleDisplayState(transcript);
-      this.statesBySession.set(path, idleState);
-      if (path === activePath && idleState !== IDLE_STATE) {
-        activeChanged = true;
+      if (!current || current.label !== idleState.label || current.tooltip !== idleState.tooltip
+        || current.endToEndRate !== idleState.endToEndRate
+        || current.terminalOutputTokensEstimate !== idleState.terminalOutputTokensEstimate) {
+        this.statesBySession.set(path, idleState);
+        if (path === activePath && (current !== undefined || idleState !== IDLE_STATE)) activeChanged = true;
+      }
+      if (idleState.endToEndRate !== undefined) {
+        if (this.rateHoldTerminalBySession.get(path) !== terminalKey) {
+          this.rateHoldSinceBySession.set(path, now);
+          this.rateHoldTerminalBySession.set(path, terminalKey);
+        } else {
+          this.rateHoldSinceBySession.set(path, this.rateHoldSinceBySession.get(path) ?? now);
+        }
       }
     }
 
@@ -188,12 +266,25 @@ export class TokenRateService {
     // Aggregate analytics only need a fast refresh when a perceptible live
     // input changed. Avoid rebuilding chart series five times per second while
     // idle or while a running session is stalled at an unchanged tool state.
+    // A terminal no-usage estimate is aggregate-relevant on any open tab — not
+    // only running ones — because `RollingAggregateRate` counts it for open and
+    // just-finished runs alike (a burst that completed between ticks). It is a
+    // deterministic function of the transcript, so listing finished open tabs
+    // here cannot churn: the entry only changes when the terminal changes.
     const aggregateSignature = [
       `tabs=${[...openTabs].sort().join(',')}`,
       ...[...new Set(running)].sort().map((path) => {
         const measured = this.statesBySession.get(path);
-        return `${path}:${measured?.state ?? ''}:${measured?.rate ?? ''}:${measured?.liveOutputTokens ?? ''}`;
+        return `${path}:${measured?.state ?? ''}:${measured?.rate ?? ''}:${measured?.endToEndRate ?? ''}:${measured?.liveOutputTokens ?? ''}:${measured?.terminalOutputTokensEstimate ?? ''}`;
       }),
+      ...[...openTabs]
+        .filter((path) => !runningSet.has(path))
+        .sort()
+        .map((path) => {
+          const estimate = this.statesBySession.get(path)?.terminalOutputTokensEstimate;
+          return estimate !== undefined ? `${path}:terminal=${estimate}` : '';
+        })
+        .filter((entry) => entry !== ''),
     ].join('|');
     if (aggregateSignature !== this.lastAggregateSignature) {
       this.lastAggregateSignature = aggregateSignature;

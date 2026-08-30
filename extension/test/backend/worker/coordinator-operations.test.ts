@@ -13,13 +13,58 @@ test('backend construction fails closed without a bundled worker artifact path',
 });
 
 test('coordinator operation catalog includes runtime-free durable mutations only', () => {
-  for (const method of ['app.ping', 'diagnostics.livePipeline.setEnabled', 'mcp.list', 'mcp.setServerEnabled', 'provider_gate.metrics', 'session.list', 'session.create', 'session.open', 'session.duplicate', 'session.preload', 'session.loadTranscriptPage', 'session.loadDetail', 'session.truncateAfter', 'models.list', 'settings.get', 'systemPromptToggles.set']) {
+  for (const method of ['app.ping', 'diagnostics.livePipeline.setEnabled', 'mcp.list', 'mcp.setServerEnabled', 'openTabs.set', 'provider_gate.metrics', 'session.list', 'session.create', 'session.open', 'session.duplicate', 'session.preload', 'session.loadTranscriptPage', 'session.loadDetail', 'session.truncateAfter', 'models.list', 'settings.get', 'systemPromptToggles.set']) {
     assert.equal(isCoordinatorOperationAllowed(method, {}), true, method);
   }
   assert.equal(isCoordinatorOperationAllowed('settings.set', { defaultModel: 'x' }), true);
   assert.equal(isCoordinatorOperationAllowed('settings.set', { sessionPath: '/hot', defaultModel: 'x' }), true);
   for (const method of ['message.send', 'message.compact', 'message.interrupt', 'extension_ui.response', 'liveTurn.checkpoint']) {
     assert.equal(isCoordinatorOperationAllowed(method, {}), false, method);
+  }
+});
+
+test('coordinator open-tab mirror cannot regress when an older broadcast settles last', async () => {
+  const server = new BackendServer({ sdkPath: '/sdk', cwd: '/cwd', workerEntryPath: '/worker-entry.js' }) as any;
+  let settleOlder!: (value: { applied: true; revision: number; retiredWorkers: number }) => void;
+  let settleNewer!: (value: { applied: true; revision: number; retiredWorkers: number }) => void;
+  const older = new Promise<{ applied: true; revision: number; retiredWorkers: number }>((resolve) => {
+    settleOlder = resolve;
+  });
+  const newer = new Promise<{ applied: true; revision: number; retiredWorkers: number }>((resolve) => {
+    settleNewer = resolve;
+  });
+  server.workerRuntimeRouter = {
+    syncSessionRegistry: (_tabs: unknown[], sourceRevision: number) => sourceRevision === 1 ? older : newer,
+  };
+
+  const previousTabs = process.env['PIE_OPEN_TABS'];
+  const previousRevision = process.env['PIE_OPEN_TABS_REVISION'];
+  try {
+    const olderRequest = server.handleRequest({
+      v: 1,
+      id: 'registry-older',
+      method: 'openTabs.set',
+      params: { tabs: [{ path: '/older.jsonl' }], revision: 1 },
+    });
+    const newerRequest = server.handleRequest({
+      v: 1,
+      id: 'registry-newer',
+      method: 'openTabs.set',
+      params: { tabs: [{ path: '/newer.jsonl' }], revision: 2 },
+    });
+
+    settleNewer({ applied: true, revision: 3, retiredWorkers: 0 });
+    await newerRequest;
+    settleOlder({ applied: true, revision: 2, retiredWorkers: 0 });
+    await olderRequest;
+
+    assert.equal(process.env['PIE_OPEN_TABS_REVISION'], '3');
+    assert.deepEqual(JSON.parse(process.env['PIE_OPEN_TABS'] ?? 'null'), [{ path: '/newer.jsonl' }]);
+  } finally {
+    if (previousTabs === undefined) delete process.env['PIE_OPEN_TABS'];
+    else process.env['PIE_OPEN_TABS'] = previousTabs;
+    if (previousRevision === undefined) delete process.env['PIE_OPEN_TABS_REVISION'];
+    else process.env['PIE_OPEN_TABS_REVISION'] = previousRevision;
   }
 });
 

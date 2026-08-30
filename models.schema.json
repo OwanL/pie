@@ -4,7 +4,7 @@
   "title": "pie models.yaml source",
   "type": "object",
   "additionalProperties": false,
-  "required": ["defaults", "retry", "pruning", "profileOrder", "providers"],
+  "required": ["defaults", "retry", "pruning", "sessionTitles", "profileOrder", "providers"],
   "properties": {
     "defaults": {
       "type": "object",
@@ -43,6 +43,18 @@
         "model": { "type": "string" },
         "provider": { "type": "string" },
         "thinkingLevel": { "$ref": "#/definitions/thinkingLevel" }
+      }
+    },
+    "sessionTitles": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "model", "provider", "thinkingLevel", "timeoutSec"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "model": { "type": "string", "minLength": 1 },
+        "provider": { "type": "string", "minLength": 1 },
+        "thinkingLevel": { "$ref": "#/definitions/thinkingLevel" },
+        "timeoutSec": { "type": "integer", "minimum": 1, "maximum": 60 }
       }
     },
     "profileOrder": {

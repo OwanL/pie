@@ -84,6 +84,19 @@ test('TogglePinTab is a no-op for a tab that is not open', () => {
   assert.deepEqual(result.effects, []);
 });
 
+test('TogglePinTab is a no-op for a pending tab (pending tabs must not pin)', () => {
+  // Pending placeholders ARE registered in openTabPaths while a backend
+  // `session.create` is in flight, so the open-tab guard alone is not enough.
+  const state = stateWith({ openTabPaths: ['/a', '/__pending__:1-x'], pinnedTabPaths: [] });
+  const result = reducer(state, {
+    kind: 'Command',
+    cmd: { kind: 'TogglePinTab', corrId: 'p5', sessionPath: '/__pending__:1-x' },
+  });
+  assert.equal(result.state, state);
+  assert.deepEqual(result.effects, []);
+  assert.deepEqual(result.state.sessions.pinnedTabPaths, []);
+});
+
 test('TogglePinTab on an already-pinned tab toggles it off (unpins)', () => {
   const state = stateWith({ openTabPaths: ['/a', '/b'], pinnedTabPaths: ['/a'] });
   const result = reducer(state, {
@@ -230,4 +243,31 @@ test('TabOpened after a pinned tab places the new unpinned tab at the start of t
   // of the unpinned region (right after the pinned group).
   assert.deepEqual(result.state.sessions.openTabPaths, ['/p1', '/p2', '/new', '/a']);
   assert.deepEqual(result.state.sessions.pinnedTabPaths, ['/p1', '/p2']);
+});
+
+// ─── PinAndMergePinnedTab ─────────────────────────────────────────────────
+
+test('PinAndMergePinnedTab pins and merges into the leftmost pinned item', () => {
+  const state = stateWith({ openTabPaths: ['/a', '/b', '/c'], pinnedTabPaths: ['/a'] });
+  const result = reducer(state, {
+    kind: 'Command',
+    cmd: { kind: 'PinAndMergePinnedTab', corrId: 'pm1', sessionPath: '/c' },
+  });
+  // /c is pinned and grouped with the leftmost pinned item (/a).
+  assert.deepEqual(result.state.sessions.pinnedTabPaths, ['/a', '/c']);
+  assert.deepEqual(result.state.sessions.pinnedTabGroups, [['/a', '/c']]);
+  assert.deepEqual(result.state.sessions.openTabPaths, ['/a', '/c', '/b']);
+  const persist = (result.effects as any[]).find((e) => e.kind === 'PersistTabs');
+  assert.ok(persist, 'expected a PersistTabs effect');
+  assert.deepEqual(persist.pinnedTabGroups, [['/a', '/c']]);
+});
+
+test('PinAndMergePinnedTab is a no-op for an already-pinned tab', () => {
+  const state = stateWith({ openTabPaths: ['/a', '/b'], pinnedTabPaths: ['/a'] });
+  const result = reducer(state, {
+    kind: 'Command',
+    cmd: { kind: 'PinAndMergePinnedTab', corrId: 'pm2', sessionPath: '/a' },
+  });
+  assert.equal(result.state, state);
+  assert.deepEqual(result.effects, []);
 });

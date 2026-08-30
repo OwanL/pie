@@ -446,7 +446,7 @@ test('agent_start forwards the persisted pruning result once without rescanning 
             customType: 'pruning-result',
             content: 'Kept 2/7 skills',
             display: true,
-            details: { includedSkills: ['pi-logs'] },
+            details: { includedSkills: ['pie-logs'] },
           }];
         },
       },
@@ -474,7 +474,7 @@ test('agent_start forwards the persisted pruning result once without rescanning 
       markdown: 'Kept 2/7 skills',
       status: 'completed',
       customType: 'pruning-result',
-      customDetails: { includedSkills: ['pi-logs'] },
+      customDetails: { includedSkills: ['pie-logs'] },
     },
   });
 });

@@ -1,1 +1,0 @@
-Improve the vector shard rebalancer so it reduces hot nodes and unnecessary movement while preserving the existing constraints. Only modify `src/rebalance.mjs`, and use the existing tests and evaluation to verify the change.

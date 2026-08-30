@@ -15,7 +15,7 @@ test('PACKAGE_DIRECTIVES covers the 17 run-tests.mjs package ids', () => {
   const expected = [
     'extension', 'analysis', 'scripts',
     'cwd-skills', 'safeguard', 'skill-pruner', 'subagent', 'ask-user',
-    'warm-bash', 'copilot-model-discovery', 'web-access-compat', 'tool-result-pruner',
+    'warm-bash', 'copilot-model-discovery', 'web-access-guard', 'tool-result-pruner',
     'session-reviewer', 'deferred-triggers', 'session-changes', 'computer-use',
     'image-context-guard',
   ];

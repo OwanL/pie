@@ -1,7 +1,7 @@
-import type { ThinkingLevel, ModelSettings, ModelInfo, ContextWindowUsage } from './models.js';
+import type { ThinkingLevel, ModelSettings, ModelInfo, ContextWindowUsage, InitialContextEstimate } from './models.js';
 import type { ComposerInput, ComposerInputDraft, ChatMessage, DetailResult, LazyDetailRef } from './messages.js';
 import type { SessionCatalogProgress, SessionSummary, TranscriptWindow, SystemPromptEntry, FileChangeEntry, RetryStatus } from './sessions.js';
-import type { ExtensionInfo, PruningResult, PruningSettings, ToolResultPruningSettings, PruningCatalog, ChatPrefs, ActiveRunSummary } from './settings.js';
+import type { ExtensionInfo, PruningResult, PruningSettings, SessionTitlesSettings, ToolResultPruningSettings, PruningCatalog, ChatPrefs, ActiveRunSummary } from './settings.js';
 import type { AggregateStats } from './aggregate-stats.js';
 import type { LiveTurnPhase } from '../live-pipeline-protocol.js';
 import type { DeferredTriggerView } from './deferred-triggers.js';
@@ -213,6 +213,8 @@ export interface ViewState {
    *  identifies its group. Persisted across restarts. */
   pinnedTabGroups: string[][];
   runningSessionPaths: string[];
+  /** Sessions currently waiting for their asynchronous LLM title. */
+  generatingTitleSessionPaths: string[];
   /** Session paths whose running turn is in the 'starting model' phase —
    *  pruning already succeeded but the model has not yet started streaming
    *  (the post-pruning, pre-commit window, which includes concurrency-limit /
@@ -305,6 +307,9 @@ export interface ViewState {
   /** Freshness of the active session's picker catalog. */
   availableModelsStatus: 'provisional' | 'loading' | 'authoritative';
   contextUsage: ContextWindowUsage | null;
+  /** Cold empty-session inventory estimate. Provider usage and hot runtime
+   * catalog state supersede it; null means the fail-open estimate is absent. */
+  initialContextEstimate: InitialContextEstimate | null;
   prefs: ChatPrefs;
   /** Configured MCP servers with their effective disabled state, discovered
    *  host-side from the adapter's config files (`~/.config/mcp/mcp.json`,
@@ -321,8 +326,17 @@ export interface ViewState {
   /** True after a per-server toggle wrote a config override that the adapter
    *  has not re-read yet (applies on the next session reload / backend
    *  restart). Preserved by list reads and no-op toggles; cleared when the
-   *  backend restarts. */
+   *  backend restarts. Global-scope only (Settings → MCP). */
   mcpPendingApply: boolean;
+  /** Effective per-session MCP server list for the ACTIVE session: the global
+   *  list with the session's own per-server overrides applied (`disabled` =
+   *  globally/project disabled OR session-disabled). Distinct from
+   *  `mcpServers` (global effective state rendered by Settings → MCP). */
+  mcpSessionServers: McpServerInfo[];
+  /** True when a session-scoped server toggle for the active session could
+   *  not be applied by an immediate worker recycle (session busy) — the
+   *  override applies at the next session reload / idle recycle. */
+  mcpSessionPendingApply: boolean;
   /** Extensions discovered from the backend (tools + hooks). */
   availableExtensions: ExtensionInfo[];
   /** File changes tracked from tool calls in the active session. */
@@ -344,6 +358,8 @@ export interface ViewState {
   pruningSettings: PruningSettings;
   /** Current tool-result pruning configuration from settings.json. */
   toolResultPruningSettings: ToolResultPruningSettings;
+  /** Optional LLM session-title generation policy from settings.json. */
+  sessionTitlesSettings: SessionTitlesSettings;
   /** Active pruning choices surfaced to the composer/settings UI. */
   pruningCatalog: PruningCatalog;
   /** Pruning prepass phase for the active session (Brief F). Driven host-side
@@ -623,9 +639,12 @@ type WebviewToHostMessagePayload =
   | { type: 'retryCreateOperation'; operationId: string }
   | { type: 'moveSessionTab'; sessionPath?: string; fromIndex: number; toIndex: number }
   | { type: 'togglePinTab'; sessionPath: string }
+  | { type: 'pinAndMergePinnedTab'; sessionPath: string }
   | { type: 'groupPinnedTab'; sourcePath: string; targetPath: string }
   | { type: 'mergePinnedGroups'; sourcePath: string; targetPath: string }
   | { type: 'ungroupPinnedTab'; sourcePath: string; toItemIndex: number }
+  | { type: 'dissolvePinnedGroup'; sourcePath: string }
+  | { type: 'unpinPinnedGroup'; sourcePath: string }
   | { type: 'movePinnedItem'; sourcePath: string; toItemIndex: number }
   | { type: 'loadOlderTranscript'; sessionPath?: string }
   | { type: 'loadNewerTranscript'; sessionPath?: string }
@@ -652,17 +671,29 @@ type WebviewToHostMessagePayload =
    *  that via `ViewState.mcpPendingApply` until the adapter re-reads the
    *  config. */
   | { type: 'mcpSetServerEnabled'; name: string; enabled: boolean }
+  /** Toggle one server for ONE session (host-side state + session-scoped
+   *  config artifact; recycled worker applies it immediately when idle).
+   *  Never touches the global `.pi/mcp.json` layer — the global Controls
+   *  live in Settings → MCP. */
+  | { type: 'mcpSetServerEnabledForSession'; sessionPath: string; name: string; enabled: boolean }
   /** Toggle the active session's ephemeral/privacy mode. The setting is host
    *  state only and is deliberately not persisted. */
   | { type: 'setPrivacyMode'; sessionPath: string; enabled: boolean }
   | { type: 'setPruningSettings'; settings: Partial<PruningSettings> }
   | { type: 'setToolResultPruningSettings'; settings: Partial<ToolResultPruningSettings> }
+  | { type: 'setSessionTitlesSettings'; settings: Partial<SessionTitlesSettings> }
   | { type: 'startEdit'; sessionPath: string; messageId: string }
   | { type: 'cancelEdit'; sessionPath: string }
   | { type: 'dismissNotice' }
   | { type: 'openFileDiff'; sessionPath: string; filePath: string }
   | { type: 'openFileInEditor'; sessionPath: string; filePath: string }
   | { type: 'revertFile'; sessionPath: string; filePath: string }
+  /** Transcript right-click "Delete from here": truncate the durable session
+   *  file at (and after) the given message. The router re-validates that the
+   *  session is open and the message still exists before dispatching the
+   *  `TruncateAfter` command. Destructive and session-addressed, so it never
+   *  falls back to an implicit session. */
+  | { type: 'truncateAfter'; sessionPath: string; messageId: string }
   | { type: 'setFileRead'; sessionPath: string; filePath: string; read: boolean }
   | {
       /** Set the complete disabled-entry set for a session's system prompts.

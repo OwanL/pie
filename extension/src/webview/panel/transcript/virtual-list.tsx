@@ -1,13 +1,18 @@
 /** @jsxRuntime automatic */
 /** @jsxImportSource preact */
 
-import { VirtualItem, Virtualizer, elementScroll, observeElementOffset, observeElementRect } from '@tanstack/virtual-core';
+import { VirtualItem, Virtualizer, elementScroll, measureElement as measureVirtualElement, observeElementOffset, observeElementRect } from '@tanstack/virtual-core';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { memo } from 'preact/compat';
 
 import { type ChatMessage, type ChatPrefs, type ComposerInput, type PruningResult, type PruningSettings, type SystemPromptEntry, type ThinkingLevel, type ToolCall, type TranscriptWindow } from '../../../shared/protocol';
 import { deriveTurnActivityState } from './activity';
 import { MessageRail } from './message-rail';
+import { createMessageRailJumpController, type MessageRailJumpController } from './message-rail-jump';
+import { TranscriptScrollbar } from './transcript-scrollbar';
+import { UserPromptContextBar } from './user-prompt-context-bar';
+import { buildUserPromptEntries } from './user-prompt-context';
+import { isReusableTranscriptMeasurementElement, isReusableTranscriptMeasurementRow, transcriptMeasurementCache } from './transcript-measurement-cache';
 import { ToolCallItem } from './tool-call-item';
 import { useTranscriptScroll } from './use-transcript-scroll';
 import { useTranscriptScrollAnchor } from './use-transcript-scroll-anchor';
@@ -27,6 +32,31 @@ import { buildTranscriptRows, estimateTranscriptRowSize, scopeTranscriptRowsToSe
 // One row covers the adjacent user/assistant boundary during ordinary wheel
 // movement without eagerly mounting an entire short-but-very-heavy transcript.
 const TRANSCRIPT_OVERSCAN_ROWS = 1;
+
+function measureTranscriptElement(
+  rows: readonly TranscriptRow[],
+  element: HTMLDivElement,
+  entry: ResizeObserverEntry | undefined,
+  virtualizer: Virtualizer<HTMLDivElement, HTMLDivElement>,
+): number {
+  const size = measureVirtualElement(element, entry, virtualizer);
+  const index = virtualizer.indexFromElement(element);
+  const row = rows[index];
+  if (row) {
+    const observedWidth = entry?.borderBoxSize[0]?.inlineSize;
+    const width = typeof observedWidth === 'number'
+      ? observedWidth
+      : element.getBoundingClientRect().width;
+    transcriptMeasurementCache.observeWidth(width);
+    // Streaming rows remeasure on nearly every chunk. Reject them before the
+    // descendant query so cache bookkeeping never adds a live-turn DOM scan.
+    if (isReusableTranscriptMeasurementRow(row)
+      && isReusableTranscriptMeasurementElement(element)) {
+      transcriptMeasurementCache.remember(row, width, size);
+    }
+  }
+  return size;
+}
 
 function fallbackTranscriptRow(rows: readonly TranscriptRow[]): TranscriptRow {
   return rows[rows.length - 1] ?? { kind: 'bottomGap', key: 'fallback-gap' };
@@ -141,6 +171,7 @@ function useTranscriptVirtualizer(
 
   const virtualizerRef = useRef<Virtualizer<HTMLDivElement, HTMLDivElement> | null>(null);
   if (!virtualizerRef.current) {
+    const initialMeasurements = transcriptMeasurementCache.createInitialMeasurements(rows);
     virtualizerRef.current = new Virtualizer<HTMLDivElement, HTMLDivElement>({
       count: rows.length,
       getScrollElement: () => scrollRef.current,
@@ -150,6 +181,7 @@ function useTranscriptVirtualizer(
       observeElementRect,
       observeElementOffset,
       initialOffset: () => Number.MAX_SAFE_INTEGER,
+      initialMeasurementsCache: initialMeasurements.measurements,
       rangeExtractor,
       overscan: TRANSCRIPT_OVERSCAN_ROWS,
       // Batch ResizeObserver-driven re-measurements with the next animation
@@ -160,6 +192,7 @@ function useTranscriptVirtualizer(
       // (visible as a user-message bubble painted over an earlier assistant
       // message). The animation-frame batching closes that race.
       useAnimationFrameWithResizeObserver: true,
+      measureElement: (element, entry, instance) => measureTranscriptElement(rows, element, entry, instance),
       onChange: scheduleVirtualRender,
     });
   }
@@ -173,9 +206,13 @@ function useTranscriptVirtualizer(
       getScrollElement: () => scrollRef.current,
       estimateSize: (index) => estimateTranscriptRowSize(rows[index] ?? fallbackTranscriptRow(rows)),
       getItemKey: (index) => rows[index]?.key ?? index,
+      // The constructor-only cross-remount cache has already been consumed.
+      // Do not let a later temporary zero-row state resurrect stale entries.
+      initialMeasurementsCache: [],
       rangeExtractor,
       overscan: TRANSCRIPT_OVERSCAN_ROWS,
       useAnimationFrameWithResizeObserver: true,
+      measureElement: (element, entry, instance) => measureTranscriptElement(rows, element, entry, instance),
       onChange: scheduleVirtualRender,
     });
     virtualizer._willUpdate();
@@ -363,6 +400,12 @@ export function TranscriptVirtualList({
     pendingAssistantModelId,
     pendingAssistantThinkingLevel,
   });
+  // Prompt entries are rebuilt with the row model — a cheap index of source
+  // message references plus flags (no per-prompt text normalization). The
+  // context bar binary-searches this ordered index per render and derives the
+  // selected prompt's text lazily, re-checking on the element's own scroll
+  // events even inside an unchanged virtual range.
+  const userPromptEntries = useMemo(() => buildUserPromptEntries(rows), [rows]);
 
   // Owned here (not inside useTranscriptScroll) so the virtualizer can be
   // created from it BEFORE the scroll hook runs — letting the hook receive the
@@ -397,12 +440,14 @@ export function TranscriptVirtualList({
 
   const virtualRows = virtualizer.getVirtualItems();
   const totalSize = virtualizer.getTotalSize();
+  const rowKeys = useMemo(() => rows.map((row) => row.key), [rows]);
   const lastRow = rows[rows.length - 1];
 
   const {
     autoFollowRef,
     manualScrollActiveRef,
     programmaticScrollTargetRef,
+    navigationActiveRef,
     setAutoFollow,
     isAtBottom,
     isInitialPositioning,
@@ -445,18 +490,54 @@ export function TranscriptVirtualList({
     manualScrollActiveRef,
     programmaticScrollTargetRef,
     totalSize,
+    rowKeys,
+    navigationActiveRef,
     isLoadingOlder,
     isLoadingNewer,
   });
 
+  // Both the rail and the context bar use one bounded controller. Sharing the
+  // instance prevents two app-owned settle loops from competing if a user
+  // changes navigation target before the first jump has released ownership.
+  const jumpControllerRef = useRef<MessageRailJumpController | null>(null);
+  useEffect(() => {
+    const element = scrollRef.current;
+    if (!element) return;
+
+    const controller = createMessageRailJumpController({
+      element,
+      getRowStart: (rowIndex) => virtualizer.measurementsCache[rowIndex]?.start ?? null,
+      navigationActiveRef,
+      programmaticScrollTargetRef,
+      setAutoFollow,
+    });
+    jumpControllerRef.current = controller;
+    return () => {
+      controller.dispose();
+      if (jumpControllerRef.current === controller) jumpControllerRef.current = null;
+    };
+  }, [navigationActiveRef, programmaticScrollTargetRef, scrollRef, setAutoFollow, virtualizer]);
+  const jumpToRow = useCallback((rowIndex: number) => {
+    jumpControllerRef.current?.jumpTo(rowIndex);
+  }, []);
+
   return (
     <div class="transcript-virtual-wrap">
-      <div
-        class={`transcript transcript-virtual${isInitialPositioning ? ' transcript-positioning' : ''}`}
-        ref={scrollRef}
-        onClick={handleTranscriptClick}
-      >
-        <div class="transcript-virtual-inner" style={{ height: `${totalSize}px` }}>
+      <UserPromptContextBar
+        entries={userPromptEntries}
+        virtualizer={virtualizer}
+        scrollRef={scrollRef}
+        isAtBottom={isAtBottom}
+        hidden={isInitialPositioning}
+        onLocate={jumpToRow}
+      />
+      <div class="transcript-viewport">
+        <div
+          class={`transcript transcript-virtual${isInitialPositioning ? ' transcript-positioning' : ''}`}
+          ref={scrollRef}
+          onClick={handleTranscriptClick}
+        >
+          <div class="transcript-virtual-inner" style={{ height: `${totalSize}px` }}>
           {virtualRows.map((virtualRow) => (
             <VirtualRow
               key={virtualRow.key}
@@ -489,27 +570,36 @@ export function TranscriptVirtualList({
           ))}
         </div>
 
-        {(!isAtBottom || transcriptWindow.hasNewer) && (
-          <button
-            type="button"
-            class="transcript-jump-latest"
-            aria-label="Jump to bottom"
-            title="Jump to bottom"
-            onClick={jumpToLatest}
-          >
-            <span class="transcript-jump-latest-icon" aria-hidden="true">↓</span>
-            <span>Bottom</span>
-          </button>
-        )}
+          {(!isAtBottom || transcriptWindow.hasNewer) && (
+            <button
+              type="button"
+              class="transcript-jump-latest"
+              aria-label="Jump to bottom"
+              title="Jump to bottom"
+              onClick={jumpToLatest}
+            >
+              <span class="transcript-jump-latest-icon" aria-hidden="true">↓</span>
+              <span>Bottom</span>
+            </button>
+          )}
+        </div>
+        <MessageRail
+          rows={rows}
+          virtualizer={virtualizer}
+          scrollRef={scrollRef}
+          setAutoFollow={setAutoFollow}
+          navigationActiveRef={navigationActiveRef}
+          programmaticScrollTargetRef={programmaticScrollTargetRef}
+          markerSize={prefs.uiMessageRailSize}
+          onJumpToRow={jumpToRow}
+          hidden={isInitialPositioning}
+        />
+        <TranscriptScrollbar
+          scrollRef={scrollRef}
+          totalSize={totalSize}
+          hidden={isInitialPositioning}
+        />
       </div>
-      <MessageRail
-        rows={rows}
-        virtualizer={virtualizer}
-        scrollRef={scrollRef}
-        setAutoFollow={setAutoFollow}
-        markerSize={prefs.uiMessageRailSize}
-        hidden={isInitialPositioning}
-      />
     </div>
   );
 }

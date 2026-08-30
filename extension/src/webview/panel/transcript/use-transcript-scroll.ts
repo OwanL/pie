@@ -94,6 +94,9 @@ interface UseTranscriptScrollResult {
   manualScrollActiveRef: { current: boolean };
   /** Count of browser scroll events expected from app-owned scrollTop writes. */
   programmaticScrollTargetRef: { current: number | null };
+  /** True while a bounded message-rail jump owns scrollTop. Manual input and
+   * bottom navigation clear it synchronously. */
+  navigationActiveRef: { current: boolean };
   /** Reactive setter for auto-follow. Used by the user-message rail to
    *  disengage stick-to-bottom before jumping to a prompt so exact follow does
    *  not immediately re-pin to the bottom. */
@@ -127,6 +130,7 @@ export function useTranscriptScroll({
   const previousLoadedStartRef = useRef(transcriptWindow.loadedStart);
   const previousLoadedEndRef = useRef(transcriptWindow.loadedEnd);
   const pendingJumpToLatestSnapRef = useRef(false);
+  const navigationActiveRef = useRef(false);
   // App-owned scrollTop writes tag the browser scroll event they produce so
   // the pointerless native-thumb fallback does not misclassify them as manual.
   const programmaticScrollTargetRef = useRef<number | null>(null);
@@ -195,8 +199,9 @@ export function useTranscriptScroll({
     pendingJumpToLatestSnapRef,
   );
   const jumpToLatest = useCallback(() => {
+    navigationActiveRef.current = false;
     if (!pagingSuspended) jumpToLatestRaw();
-  }, [jumpToLatestRaw, pagingSuspended]);
+  }, [jumpToLatestRaw, navigationActiveRef, pagingSuspended]);
 
   useSessionResetEffect(
     sessionKey,
@@ -217,6 +222,7 @@ export function useTranscriptScroll({
     loadingNewerRef,
     previousLoadedStartRef,
     previousLoadedEndRef,
+    navigationActiveRef,
   );
 
   useScrollEventsEffect(
@@ -231,6 +237,7 @@ export function useTranscriptScroll({
     transcriptWindow.hasOlder,
     requestOlderPage,
     sessionKey,
+    navigationActiveRef,
   );
 
   useFollowOnPromptSendEffect(transcript, sessionKey, jumpToLatest);
@@ -256,7 +263,14 @@ export function useTranscriptScroll({
     programmaticScrollTargetRef,
   );
 
-  const followTargetRevision = useRefreshFollowTarget(scrollRef, totalSize, transcript, sessionKey, cachedTargetRef);
+  const followTargetRevision = useRefreshFollowTarget(
+    scrollRef,
+    totalSize,
+    transcript,
+    sessionKey,
+    cachedTargetRef,
+    setIsAtBottom,
+  );
 
   useAutoFollow(
     scrollRef,
@@ -271,12 +285,14 @@ export function useTranscriptScroll({
     transcript,
     sessionKey,
     programmaticScrollTargetRef,
+    navigationActiveRef,
   );
 
   return {
     autoFollowRef,
     manualScrollActiveRef,
     programmaticScrollTargetRef,
+    navigationActiveRef,
     setAutoFollow,
     isAtBottom,
     isInitialPositioning,

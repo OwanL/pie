@@ -3,6 +3,10 @@ import test from 'node:test';
 
 import type { ChatMessage, SystemPromptEntry } from '../../../src/shared/protocol';
 import {
+  contextBreakdownTranscriptSignature,
+  systemPromptsSignature,
+} from '../../../src/webview/panel/composer/indicator-signature';
+import {
   buildContextWindowBreakdown,
   clearToolCallTokenCache,
   getToolCallTokenCacheSize,
@@ -316,6 +320,64 @@ test('buildContextWindowBreakdown estimates footer values without a PI usage sna
   assert.equal(footer.get('window.used')?.value, '0');
   assert.equal(footer.get('window.remaining')?.value, '200,000');
   assert.equal(footer.get('window.total')?.value, '200,000');
+});
+
+test('buildContextWindowBreakdown omits a system prompt after its disabled state changes', () => {
+  const options = {
+    contextUsage: null,
+    effectiveContextWindow: 200000,
+    systemPrompts: [makePrompt({ text: 'system prompt content' })],
+    transcript: [],
+    isPartial: false,
+  };
+  const enabled = buildContextWindowBreakdown(options);
+  const disabled = buildContextWindowBreakdown({
+    ...options,
+    systemPrompts: [makePrompt({ text: 'system prompt content', disabled: true })],
+  });
+
+  assert.notEqual(systemPromptsSignature(options.systemPrompts), systemPromptsSignature([{ ...options.systemPrompts[0]!, disabled: true }]));
+  assert.ok(enabled.entries.some((entry) => entry.label === 'System prompt'));
+  assert.equal(disabled.entries.some((entry) => entry.label === 'System prompt'), false);
+});
+
+test('context breakdown key and estimate invalidate for generic tool result content and seq', () => {
+  const firstTool = {
+    id: 'generic-tool',
+    name: 'bash',
+    input: { command: 'pwd' },
+    result: 'a'.repeat(1000),
+    status: 'completed' as const,
+  };
+  const firstTranscript = [makeMessage({ role: 'assistant', toolCalls: [firstTool] })];
+  const changedTool = { ...firstTool, result: 'different-token '.repeat(1000) };
+  const changedTranscript = [makeMessage({ role: 'assistant', toolCalls: [changedTool] })];
+  assert.notEqual(
+    contextBreakdownTranscriptSignature(firstTranscript),
+    contextBreakdownTranscriptSignature(changedTranscript),
+  );
+  const firstTokens = buildContextWindowBreakdown({
+    contextUsage: null,
+    effectiveContextWindow: 200000,
+    systemPrompts: [],
+    transcript: firstTranscript,
+    isPartial: false,
+  }).entries.find((entry) => entry.label === 'Tool: bash')?.tokens;
+  const changedTokens = buildContextWindowBreakdown({
+    contextUsage: null,
+    effectiveContextWindow: 200000,
+    systemPrompts: [],
+    transcript: changedTranscript,
+    isPartial: false,
+  }).entries.find((entry) => entry.label === 'Tool: bash')?.tokens;
+  assert.notEqual(changedTokens, firstTokens, 'changed generic result must not reuse a stale terminal estimate');
+
+  const liveFirst = { ...firstTool, status: 'running' as const, seq: 1 };
+  const liveChanged = { ...liveFirst, result: 'different-token '.repeat(1000), seq: 2 };
+  assert.notEqual(
+    contextBreakdownTranscriptSignature([makeMessage({ role: 'assistant', toolCalls: [liveFirst] })]),
+    contextBreakdownTranscriptSignature([makeMessage({ role: 'assistant', toolCalls: [liveChanged] })]),
+  );
 });
 
 test('buildContextWindowBreakdown suppresses contributor rows when transcript is partial', () => {

@@ -18,9 +18,10 @@
  */
 
 /** Request class drives queue priority when a provider's concurrency pool is
- *  saturated. `skill-pruner` is unblocked ahead of `default` (main-session)
- *  calls. Unknown values map to `default`. */
-export type ProviderGateRequestClass = 'skill-pruner' | 'default';
+ *  saturated. The blocking skill-pruner runs ahead of normal turns, while
+ *  cosmetic asynchronous session titles yield to both. Unknown values map to
+ *  `default`. */
+export type ProviderGateRequestClass = 'skill-pruner' | 'default' | 'session-title';
 
 /** Header name carrying the request class. The provider gate reads this from
  *  the outbound request headers. */
@@ -28,3 +29,6 @@ export const PROVIDER_GATE_REQUEST_CLASS_HEADER = 'x-pi-request-class';
 
 /** Header value the skill-pruner prepass sets to claim priority. */
 export const PROVIDER_GATE_REQUEST_CLASS_SKILL_PRUNER: ProviderGateRequestClass = 'skill-pruner';
+
+/** Header value used by best-effort asynchronous session-title requests. */
+export const PROVIDER_GATE_REQUEST_CLASS_SESSION_TITLE: ProviderGateRequestClass = 'session-title';

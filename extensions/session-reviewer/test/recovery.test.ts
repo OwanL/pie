@@ -6,7 +6,9 @@ import test from 'node:test';
 
 import registerSessionReviewer from '../index.js';
 import { compileRecoveredReview, getReviewRecoveryStatus, reviewEvidenceKey, reviewWorkflowRef } from '../src/recovery.js';
+import { validateRuntimeProvenance } from '../src/runtime-provenance.js';
 import type { EvidenceManifest, ReviewWorkflowRole } from '../src/types.js';
+import { legacyReviewWorkflowRef } from '../src/workflow.js';
 import { evidenceVector, frozenCriterion, processVector } from './fixtures.js';
 
 function appendEntry(file: string, entry: unknown): void {
@@ -20,9 +22,18 @@ function appendRole(
   requestedBucket: 'small' | 'medium',
   payload: unknown,
   evidenceKey: string,
-  options: { agent?: string; callBucket?: 'small' | 'medium'; runtimeRequestedBucket?: 'small' | 'medium' } = {},
+  options: {
+    agent?: string;
+    callBucket?: 'small' | 'medium';
+    runtimeRequestedBucket?: 'small' | 'medium';
+    runtimeBucket?: 'small' | 'medium' | 'frontier';
+    runtimeBucketDowngraded?: boolean;
+    idSuffix?: string;
+    finalOutput?: string;
+    workflowRef?: string;
+  } = {},
 ): void {
-  const id = `call-${role}`;
+  const id = `call-${role}${options.idSuffix ? `-${options.idSuffix}` : ''}`;
   const promptHash = `hash-${role}`;
   appendEntry(file, {
     type: 'message', id: `assistant-${role}`,
@@ -30,7 +41,7 @@ function appendRole(
       role: 'assistant',
       content: [{
         type: 'toolCall', id, name: 'subagent',
-        arguments: { agent: options.agent ?? 'reviewer', task: `review ${role}`, bucket: options.callBucket ?? requestedBucket, workflowRef: reviewWorkflowRef(sessionId, role, evidenceKey) },
+        arguments: { agent: options.agent ?? 'session-evaluator', task: `review ${role}`, bucket: options.callBucket ?? requestedBucket, workflowRef: options.workflowRef ?? reviewWorkflowRef(sessionId, role, evidenceKey) },
       }],
     },
   });
@@ -38,14 +49,14 @@ function appendRole(
     type: 'message', id: `result-${role}`,
     message: {
       role: 'toolResult', toolCallId: id, toolName: 'subagent',
-      content: [{ type: 'text', text: JSON.stringify(payload) }],
+      content: [{ type: 'text', text: options.finalOutput ?? JSON.stringify(payload) }],
       details: { results: [{
         parentToolCallId: id,
         exitCode: 0,
-        finalOutput: JSON.stringify(payload),
+        finalOutput: options.finalOutput ?? JSON.stringify(payload),
         requestedBucket: options.runtimeRequestedBucket ?? requestedBucket,
-        bucket: options.runtimeRequestedBucket ?? requestedBucket,
-        bucketDowngraded: false,
+        bucket: options.runtimeBucket ?? options.runtimeRequestedBucket ?? requestedBucket,
+        bucketDowngraded: options.runtimeBucketDowngraded ?? false,
         model: `model-${role}`,
         provider: requestedBucket === 'small' ? 'provider-small' : 'provider-medium',
         family: requestedBucket === 'small' ? 'family-small' : 'family-medium',
@@ -130,6 +141,10 @@ test('tagged review pipeline survives history compaction and backend restart', a
     // gone. listSelected must rehydrate the issued manifest from JSONL.
     const restartedTool = registerTool();
     await restartedTool.execute('list-2', { action: 'listSelected' }, undefined, undefined, ctx);
+    appendEntry(selfPath, {
+      type: 'message', id: 'follow-up-user',
+      message: { role: 'user', content: 'keep closing reviewed sessions as you go' },
+    });
     const status = await restartedTool.execute('status', { action: 'getReviewStatus', sessionId: 'target-id' }, undefined, undefined, ctx);
     assert.equal(status.isError, false, status.content[0].text);
     assert.equal(status.details.next, 'ready-to-record');
@@ -139,6 +154,10 @@ test('tagged review pipeline survives history compaction and backend restart', a
     const recorded = await restartedTool.execute('record', { action: 'recordRecoveredReview', sessionId: 'target-id' }, undefined, undefined, ctx);
     assert.equal(recorded.isError, false, recorded.content[0].text);
     assert.match(recorded.content[0].text, /Recovered and recorded production review/);
+    const duplicateRecord = await restartedTool.execute('record-retry', { action: 'recordRecoveredReview', sessionId: 'target-id' }, undefined, undefined, ctx);
+    assert.equal(duplicateRecord.isError, false, duplicateRecord.content[0].text);
+    assert.match(duplicateRecord.content[0].text, /already has canonical production review/);
+
     const persisted = fs.readFileSync(path.join(dir, 'reviews.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line))[0];
     assert.equal(persisted.sessionId, 'target-id');
     assert.equal(persisted.proposals[0].toolCallId, 'call-proposal-small');
@@ -184,6 +203,286 @@ test('workflow refs are evidence-bound and stale roles are not reused for a chan
     assert.equal(status.next, 'proposal-small');
     assert.equal(status.completedRoles.includes('proposal-small'), false);
     assert.notEqual(status.workflowRefs['proposal-small'], reviewWorkflowRef('target-id', 'proposal-small', reviewEvidenceKey(first)));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('status emits a deterministic parallel launch checkpoint with a one-retry budget', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'session-review-checkpoint-'));
+  const selfPath = path.join(dir, 'self.jsonl');
+  const manifest: EvidenceManifest = {
+    rawJsonlSha256: '7'.repeat(64), rawJsonlBytes: 1, rawJsonlMtime: '2026-08-09T00:00:00.000Z', transcriptExcerptSha256: '8'.repeat(64), artifacts: [], limitations: [],
+    blinding: { stripped: [], redactedTurnFields: [], notes: [] },
+  };
+  const key = reviewEvidenceKey(manifest);
+  try {
+    appendEntry(selfPath, { type: 'session', id: 'self-id' });
+    const initial = getReviewRecoveryStatus(selfPath, 'target-id', manifest);
+    assert.equal(initial.checkpoint.state, 'run-roles');
+    assert.deepEqual(initial.checkpoint.nextRoles, ['proposal-small', 'proposal-medium']);
+    assert.deepEqual(initial.checkpoint.launch.map(({ role, agent, bucket, attempt }) => ({ role, agent, bucket, attempt })), [
+      { role: 'proposal-small', agent: 'session-evaluator', bucket: 'small', attempt: 1 },
+      { role: 'proposal-medium', agent: 'session-evaluator', bucket: 'medium', attempt: 1 },
+    ]);
+    assert.match(initial.checkpoint.launch[0]!.taskInstructions, /exactly one raw JSON object/i);
+    assert.match(initial.checkpoint.launch[0]!.taskInstructions, /surface values: ui, application_logic/);
+    assert.match(initial.checkpoint.launch[0]!.taskInstructions, /Never place an evidenceMode value such as human_observation in surface/);
+    assert.doesNotMatch(initial.checkpoint.launch[0]!.taskInstructions, /"surface":\["ui\|/);
+    assert.match(initial.checkpoint.launch[0]!.workflowRef, /^session-review-v2\//);
+
+    appendRole(selfPath, 'target-id', 'proposal-small', 'small', {}, key, { finalOutput: 'not json' });
+    const retry = getReviewRecoveryStatus(selfPath, 'target-id', manifest);
+    const smallRetry = retry.checkpoint.launch.find((item) => item.role === 'proposal-small');
+    assert.equal(retry.checkpoint.state, 'run-roles');
+    assert.equal(smallRetry?.attempt, 2);
+    assert.equal(smallRetry?.retriesRemainingAfterLaunch, 0);
+    assert.match(smallRetry!.taskInstructions, /prior attempt was rejected by schema validation/i);
+    assert.match(smallRetry!.taskInstructions, /not valid JSON/i);
+
+    appendRole(selfPath, 'target-id', 'proposal-small', 'small', {}, key, { finalOutput: 'still not json' });
+    const blocked = getReviewRecoveryStatus(selfPath, 'target-id', manifest);
+    assert.equal(blocked.checkpoint.state, 'blocked');
+    assert.equal(blocked.checkpoint.nextAction, 'report-blocker');
+    assert.equal(blocked.checkpoint.launch.length, 0);
+    assert.deepEqual(blocked.checkpoint.blockedRoles.map(({ role, attempts }) => ({ role, attempts })), [
+      { role: 'proposal-small', attempts: 2 },
+    ]);
+
+    appendRole(selfPath, 'target-id', 'proposal-small', 'small', { criteria: [frozenCriterion] }, key);
+    const overBudget = getReviewRecoveryStatus(selfPath, 'target-id', manifest);
+    assert.equal(overBudget.checkpoint.state, 'run-roles');
+    assert.equal(overBudget.next, 'proposal-medium');
+    assert.equal(overBudget.checkpoint.attemptsByRole['proposal-small'], 3);
+    assert.ok(overBudget.completedRoles.includes('proposal-small'));
+    assert.equal(overBudget.checkpoint.launch.some((item) => item.role === 'proposal-small'), false,
+      'a durable valid latest result is accepted, but the exhausted role is never launched again');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('recovery unwraps one intact JSON object from reviewer prose but rejects ambiguous objects', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'session-review-json-unwrapper-'));
+  const selfPath = path.join(dir, 'self.jsonl');
+  const manifest: EvidenceManifest = {
+    rawJsonlSha256: '9'.repeat(64), rawJsonlBytes: 1, rawJsonlMtime: '2026-08-09T00:00:00.000Z', transcriptExcerptSha256: '0'.repeat(64), artifacts: [], limitations: [],
+    blinding: { stripped: [], redactedTurnFields: [], notes: [] },
+  };
+  const key = reviewEvidenceKey(manifest);
+  const proposal = { criteria: [{ ...frozenCriterion, statement: 'Preserves braces such as {value} in strings' }] };
+  try {
+    appendEntry(selfPath, { type: 'session', id: 'self-id' });
+    appendRole(selfPath, 'target-id', 'proposal-small', 'small', proposal, key, {
+      finalOutput: `Analysis complete.\n\`\`\`json\n${JSON.stringify(proposal)}\n\`\`\`\nDone.`,
+    });
+    appendRole(selfPath, 'target-id', 'proposal-medium', 'medium', proposal, key);
+    const recovered = getReviewRecoveryStatus(selfPath, 'target-id', manifest);
+    assert.equal(recovered.next, 'consolidation');
+    assert.equal(recovered.invalidRoles.length, 0);
+
+    const ambiguousPath = path.join(dir, 'ambiguous.jsonl');
+    appendEntry(ambiguousPath, { type: 'session', id: 'self-id' });
+    appendRole(ambiguousPath, 'target-id', 'proposal-small', 'small', proposal, key, {
+      finalOutput: `${JSON.stringify(proposal)}\n${JSON.stringify({ criteria: [] })}`,
+    });
+    const ambiguous = getReviewRecoveryStatus(ambiguousPath, 'target-id', manifest);
+    assert.equal(ambiguous.next, 'proposal-small');
+    assert.match(ambiguous.invalidRoles[0]!.error, /multiple JSON objects/);
+
+    const duplicatePath = path.join(dir, 'duplicate.jsonl');
+    appendEntry(duplicatePath, { type: 'session', id: 'self-id' });
+    appendRole(duplicatePath, 'target-id', 'proposal-small', 'small', proposal, key, {
+      finalOutput: `${JSON.stringify(proposal)}\n${JSON.stringify(proposal)}`,
+    });
+    const duplicate = getReviewRecoveryStatus(duplicatePath, 'target-id', manifest);
+    assert.equal(duplicate.next, 'proposal-small');
+    assert.match(duplicate.invalidRoles[0]!.error, /multiple JSON objects/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('classification instructions encode dependent pairs and recovery hoists an unambiguously nested evidence vector', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'session-review-classification-shape-'));
+  const selfPath = path.join(dir, 'self.jsonl');
+  const manifest: EvidenceManifest = {
+    rawJsonlSha256: 'a'.repeat(64), rawJsonlBytes: 1, rawJsonlMtime: '2026-08-09T00:00:00.000Z', transcriptExcerptSha256: 'b'.repeat(64), artifacts: [], limitations: [],
+    blinding: { stripped: [], redactedTurnFields: [], notes: [] },
+  };
+  const key = reviewEvidenceKey(manifest);
+  const classification = {
+    criteria: [{ criterionId: frozenCriterion.criterionId, status: 'met', reason: 'none', evidenceRefs: ['transcript:1'] }],
+    process: processVector,
+    evidence: evidenceVector,
+    confidence: 'high',
+  };
+  try {
+    appendEntry(selfPath, { type: 'session', id: 'self-id' });
+    appendRole(selfPath, 'target-id', 'proposal-small', 'small', { criteria: [frozenCriterion] }, key);
+    appendRole(selfPath, 'target-id', 'proposal-medium', 'medium', { criteria: [frozenCriterion] }, key);
+    const consolidation = getReviewRecoveryStatus(selfPath, 'target-id', manifest);
+    assert.match(consolidation.checkpoint.launch[0]!.taskInstructions, /surface values: ui, application_logic/);
+    assert.doesNotMatch(consolidation.checkpoint.launch[0]!.taskInstructions, /surface.*valid enum/);
+
+    appendRole(selfPath, 'target-id', 'consolidation', 'medium', { frozenLedger: [frozenCriterion], dedupNotes: [] }, key);
+    const classifiers = getReviewRecoveryStatus(selfPath, 'target-id', manifest);
+    for (const launch of classifiers.checkpoint.launch) {
+      assert.match(launch.taskInstructions, /insufficient_artifact_evidence is never valid with partly_met/);
+      assert.match(launch.taskInstructions, /process and evidence must be separate top-level sibling objects/);
+    }
+
+    appendRole(selfPath, 'target-id', 'classification-small', 'small', classification, key);
+    appendRole(selfPath, 'target-id', 'classification-medium', 'medium', {}, key, {
+      finalOutput: JSON.stringify({
+        criteria: classification.criteria,
+        process: { ...processVector, evidence: evidenceVector },
+        confidence: 'high',
+      }),
+    });
+    const recovered = getReviewRecoveryStatus(selfPath, 'target-id', manifest);
+    assert.equal(recovered.next, 'ready-to-record');
+    assert.equal(recovered.invalidRoles.length, 0);
+
+    const conflictPath = path.join(dir, 'conflict.jsonl');
+    appendEntry(conflictPath, { type: 'session', id: 'self-id' });
+    appendRole(conflictPath, 'target-id', 'proposal-small', 'small', { criteria: [frozenCriterion] }, key);
+    appendRole(conflictPath, 'target-id', 'proposal-medium', 'medium', { criteria: [frozenCriterion] }, key);
+    appendRole(conflictPath, 'target-id', 'consolidation', 'medium', { frozenLedger: [frozenCriterion], dedupNotes: [] }, key);
+    appendRole(conflictPath, 'target-id', 'classification-small', 'small', classification, key);
+    appendRole(conflictPath, 'target-id', 'classification-medium', 'medium', {}, key, {
+      finalOutput: JSON.stringify({
+        ...classification,
+        process: { ...processVector, evidence: { ...evidenceVector, execution: 'none' } },
+      }),
+    });
+    const conflict = getReviewRecoveryStatus(conflictPath, 'target-id', manifest);
+    assert.equal(conflict.next, 'classification-medium');
+    assert.match(conflict.invalidRoles.find((item) => item.role === 'classification-medium')!.error, /evidence conflicts/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('recovery repairs only unambiguous criterion taxonomy namespace shapes', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'session-review-taxonomy-shape-'));
+  const selfPath = path.join(dir, 'self.jsonl');
+  const manifest: EvidenceManifest = {
+    rawJsonlSha256: 'c'.repeat(64), rawJsonlBytes: 1, rawJsonlMtime: '2026-08-09T00:00:00.000Z', transcriptExcerptSha256: 'd'.repeat(64), artifacts: [], limitations: [],
+    blinding: { stripped: [], redactedTurnFields: [], notes: [] },
+  };
+  const key = reviewEvidenceKey(manifest);
+  try {
+    appendEntry(selfPath, { type: 'session', id: 'self-id' });
+    appendRole(selfPath, 'target-id', 'proposal-small', 'small', {
+      criteria: [{
+        ...frozenCriterion,
+        taxonomy: {
+          activity: ['verify'],
+          surface: ['tests', 'human_observation'],
+          evidenceMode: ['automated_check', 'documentation'],
+        },
+      }],
+    }, key);
+    const status = getReviewRecoveryStatus(selfPath, 'target-id', manifest);
+    assert.equal(status.next, 'proposal-medium');
+    assert.equal(status.invalidRoles.length, 0);
+    assert.ok(status.completedRoles.includes('proposal-small'));
+    // Supply the sibling and inspect the validated proposal handoff.
+    appendRole(selfPath, 'target-id', 'proposal-medium', 'medium', { criteria: [frozenCriterion] }, key);
+    const paired = getReviewRecoveryStatus(selfPath, 'target-id', manifest);
+    const repaired = (paired.handoff as any).proposals[0].criteria[0];
+    assert.equal(repaired.taxonomy.activity, 'verify');
+    assert.deepEqual(repaired.taxonomy.surface, ['tests', 'documentation']);
+    assert.deepEqual(repaired.taxonomy.evidenceMode, ['automated_check', 'human_observation']);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('recovery canonicalizes bounded adjudication wire-shape mistakes before validation', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'session-review-adjudication-shape-'));
+  const manifest: EvidenceManifest = {
+    rawJsonlSha256: 'e'.repeat(64), rawJsonlBytes: 1, rawJsonlMtime: '2026-08-09T00:00:00.000Z', transcriptExcerptSha256: 'f'.repeat(64), artifacts: [], limitations: [],
+    blinding: { stripped: [], redactedTurnFields: [], notes: [] },
+  };
+  const key = reviewEvidenceKey(manifest);
+  const seedDisagreement = (file: string): void => {
+    appendEntry(file, { type: 'session', id: 'self-id' });
+    appendRole(file, 'target-id', 'proposal-small', 'small', { criteria: [frozenCriterion] }, key);
+    appendRole(file, 'target-id', 'proposal-medium', 'medium', { criteria: [frozenCriterion] }, key);
+    appendRole(file, 'target-id', 'consolidation', 'medium', { frozenLedger: [frozenCriterion], dedupNotes: [] }, key);
+    const common = { process: processVector, evidence: evidenceVector, confidence: 'high' };
+    appendRole(file, 'target-id', 'classification-small', 'small', {
+      ...common, criteria: [{ criterionId: 'c1', status: 'met', reason: 'none', evidenceRefs: ['small'] }],
+    }, key);
+    appendRole(file, 'target-id', 'classification-medium', 'medium', {
+      ...common, criteria: [{ criterionId: 'c1', status: 'unmet', reason: 'omitted', evidenceRefs: ['medium'] }],
+    }, key);
+  };
+  try {
+    const combinedPath = path.join(dir, 'combined.jsonl');
+    seedDisagreement(combinedPath);
+    appendRole(combinedPath, 'target-id', 'adjudication', 'medium', { resolvedFields: [{
+      field: 'criterion:c1.status', value: 'partly_met/omitted', rationale: 'mixed outcome', evidenceRefs: ['small', 'medium'],
+    }] }, key);
+    assert.equal(getReviewRecoveryStatus(combinedPath, 'target-id', manifest).next, 'ready-to-record');
+
+    const objectPath = path.join(dir, 'object.jsonl');
+    seedDisagreement(objectPath);
+    appendRole(objectPath, 'target-id', 'adjudication', 'medium', { resolvedFields: {
+      'criterion:c1.status': { adjudication: 'partly_met', rationale: 'mixed outcome', evidenceRefs: ['small', 'medium'] },
+      'criterion:c1.reason': { adjudication: 'omitted', rationale: 'delivery incomplete', evidenceRefs: ['medium'] },
+    } }, key);
+    assert.equal(getReviewRecoveryStatus(objectPath, 'target-id', manifest).next, 'ready-to-record');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('status validates consolidation runtime metadata before advancing', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'session-review-consolidation-runtime-'));
+  const selfPath = path.join(dir, 'self.jsonl');
+  const manifest: EvidenceManifest = {
+    rawJsonlSha256: 'c'.repeat(64), rawJsonlBytes: 1, rawJsonlMtime: '2026-08-09T00:00:00.000Z', transcriptExcerptSha256: 'd'.repeat(64), artifacts: [], limitations: [],
+    blinding: { stripped: [], redactedTurnFields: [], notes: [] },
+  };
+  const key = reviewEvidenceKey(manifest);
+  try {
+    appendEntry(selfPath, { type: 'session', id: 'self-id' });
+    appendRole(selfPath, 'target-id', 'proposal-small', 'small', { criteria: [frozenCriterion] }, key);
+    appendRole(selfPath, 'target-id', 'proposal-medium', 'medium', { criteria: [frozenCriterion] }, key);
+    appendRole(selfPath, 'target-id', 'consolidation', 'medium', { frozenLedger: [frozenCriterion], dedupNotes: [] }, key, {
+      runtimeBucket: 'frontier',
+      runtimeBucketDowngraded: true,
+    });
+    const status = getReviewRecoveryStatus(selfPath, 'target-id', manifest);
+    assert.equal(status.next, 'consolidation');
+    assert.match(status.invalidRoles.find((item) => item.role === 'consolidation')!.error, /effective bucket frontier is not a valid downgrade/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('current checkpoints reuse valid legacy reviewer roles while issuing v2 evaluator refs', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'session-review-legacy-agent-'));
+  const selfPath = path.join(dir, 'self.jsonl');
+  const manifest: EvidenceManifest = {
+    rawJsonlSha256: '1'.repeat(64), rawJsonlBytes: 1, rawJsonlMtime: '2026-08-09T00:00:00.000Z', transcriptExcerptSha256: '2'.repeat(64), artifacts: [], limitations: [],
+    blinding: { stripped: [], redactedTurnFields: [], notes: [] },
+  };
+  const key = reviewEvidenceKey(manifest);
+  try {
+    appendEntry(selfPath, { type: 'session', id: 'self-id' });
+    appendRole(selfPath, 'target-id', 'proposal-small', 'small', { criteria: [frozenCriterion] }, key, {
+      agent: 'reviewer',
+      workflowRef: legacyReviewWorkflowRef('target-id', 'proposal-small', key),
+    });
+    const status = getReviewRecoveryStatus(selfPath, 'target-id', manifest);
+    assert.ok(status.completedRoles.includes('proposal-small'));
+    assert.equal(status.invalidRoles.length, 0);
+    assert.match(status.workflowRefs['proposal-small'], /^session-review-v2\//);
+    assert.equal(status.checkpoint.launch.find((item) => item.role === 'proposal-medium')?.agent, 'session-evaluator');
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -290,7 +589,7 @@ test('recovery ignores tagged work from an abandoned session branch', () => {
   try {
     appendEntry(selfPath, { type: 'session', id: 'self-id' });
     for (const entry of roleEntry('abandoned', null, 'abandoned-call', 'worker', [])) appendEntry(selfPath, entry);
-    for (const entry of roleEntry('active', null, 'active-call', 'reviewer', [frozenCriterion])) appendEntry(selfPath, entry);
+    for (const entry of roleEntry('active', null, 'active-call', 'session-evaluator', [frozenCriterion])) appendEntry(selfPath, entry);
     const status = getReviewRecoveryStatus(selfPath, 'target-id', manifest);
     assert.equal(status.next, 'proposal-medium');
     assert.equal(status.invalidRoles.length, 0);
@@ -300,13 +599,13 @@ test('recovery ignores tagged work from an abandoned session branch', () => {
   }
 });
 
-test('recovery rejects non-reviewer agents and role-inappropriate requested buckets', () => {
+test('recovery rejects non-evaluator agents and role-inappropriate requested buckets', () => {
   const manifest: EvidenceManifest = {
     rawJsonlSha256: '1'.repeat(64), rawJsonlBytes: 1, rawJsonlMtime: '2026-08-09T00:00:00.000Z', transcriptExcerptSha256: '2'.repeat(64), artifacts: [], limitations: [],
     blinding: { stripped: [], redactedTurnFields: [], notes: [] },
   };
   for (const [label, options, expected] of [
-    ['agent', { agent: 'worker' }, /reviewer agent/],
+    ['agent', { agent: 'worker' }, /session-evaluator agent/],
     ['bucket', { callBucket: 'medium' as const }, /must request the small bucket/],
   ] as const) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), `session-review-${label}-`));
@@ -339,7 +638,7 @@ test('selected human verification is evidence-current and optional during recove
       type: 'message', id: `assistant-${id}`, message: {
         role: 'assistant', content: [{
           type: 'toolCall', id, name: 'ask_user', arguments: {
-            question, options: selected.options,
+            question, options: selected.options, allowCustom: true, context: 'Observe the running UI without changing state.',
             reviewMeta: { purpose: 'review_human_verification', targetSessionId: 'target-id', targetSessionPath: 'target.jsonl', criterionId: selected.criterionId, domain: selected.domain, expectedObservation: selected.expectedObservation },
           },
         }],
@@ -366,10 +665,15 @@ test('selected human verification is evidence-current and optional during recove
 
     appendAnswer('current-answer', selected.proposedQuestion);
     assert.equal(getReviewRecoveryStatus(selfPath, 'target-id', manifest).next, 'ready-to-record');
-    assert.equal(compileRecoveredReview({
+    const recovered = compileRecoveredReview({
       orchestratorPath: selfPath, orchestratorSessionId: 'self-id', sessionId: 'target-id',
       sessionPathAtReview: 'target.jsonl', evidenceManifest: manifest,
-    }).humanCheck?.toolCallId, 'current-answer');
+    });
+    assert.equal(recovered.humanCheck?.toolCallId, 'current-answer');
+    assert.equal(recovered.humanCheck?.input.allowCustom, true);
+    assert.equal(recovered.humanCheck?.input.context, 'Observe the running UI without changing state.');
+    assert.doesNotThrow(() => validateRuntimeProvenance(recovered, selfPath),
+      'recovered human input must remain byte-for-byte equivalent to the durable ask_user arguments');
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -402,6 +706,15 @@ test('recovery rejects field-incompatible adjudication values before ready-to-re
     const status = getReviewRecoveryStatus(selfPath, 'target-id', manifest);
     assert.equal(status.next, 'adjudication');
     assert.match(status.invalidRoles.find((item) => item.role === 'adjudication')!.error, /invalid for criterion:c1\.status/);
+    assert.match(status.checkpoint.launch[0]!.taskInstructions, /Valid status\/reason pairs only/);
+
+    appendRole(selfPath, 'target-id', 'adjudication', 'medium', { resolvedFields: [
+      { field: 'criterion:c1.status', value: 'met', rationale: 'valid enum', evidenceRefs: ['small'] },
+      { field: 'criterion:c1.reason', value: 'omitted', rationale: 'incompatible with met', evidenceRefs: ['medium'] },
+    ] }, key, { idSuffix: 'invalid-pair' });
+    const invalidPair = getReviewRecoveryStatus(selfPath, 'target-id', manifest);
+    assert.equal(invalidPair.checkpoint.state, 'blocked');
+    assert.match(invalidPair.invalidRoles.find((item) => item.role === 'adjudication')!.error, /invalid status\/reason pair met\/omitted/);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

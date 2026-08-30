@@ -121,12 +121,12 @@ const PACKAGE_CONFIGS = [
     thresholds: { lines: 90, branches: 80 },
   },
   {
-    id: 'web-access-compat',
+    id: 'web-access-guard',
     cwd: repoRoot,
-    testGlobs: ['extensions/web-access-compat/test/**/*.test.ts'],
-    coverageIncludes: ['extensions/web-access-compat/*.ts'],
-    // env-glue (resolvePackageRoot / the factory wrapper) is not unit-testable
-    // portably; the rewrite/patch/repair logic it delegates to is fully covered.
+    testGlobs: ['extensions/web-access-guard/test/**/*.test.ts'],
+    coverageIncludes: ['extensions/web-access-guard/*.ts'],
+    // Package-root lookup is injectable; only the production agent-dir glue
+    // remains untestable. Workflow patching and npm repair are fully covered.
     thresholds: { lines: 82, branches: 78 },
   },
   {

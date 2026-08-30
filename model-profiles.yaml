@@ -2,6 +2,15 @@
 # Source of truth: models.yaml (repo root). Edit there and re-run sync.
 profiles:
   - provider: github-copilot
+    id: gemini-3.7-flash
+    eligible: false
+    thinking:
+      - minimal
+      - low
+      - medium
+      - high
+    disabled_reason: Auto-discovered from GitHub Copilot; not yet vetted for subagents
+  - provider: github-copilot
     id: claude-opus-4.8-fast
     eligible: false
     thinking:
@@ -56,22 +65,6 @@ profiles:
       - high
       - xhigh
     disabled_reason: null
-  - provider: github-copilot
-    id: claude-sonnet-4.5
-    eligible: true
-    thinking:
-      - low
-      - medium
-      - high
-    disabled_reason: null
-  - provider: github-copilot
-    id: claude-opus-4.5
-    eligible: false
-    thinking:
-      - medium
-      - high
-      - xhigh
-    disabled_reason: Superseded by opus-4.6/4.7
   - provider: github-copilot
     id: gpt-5.6-sol
     eligible: false
@@ -180,21 +173,6 @@ profiles:
       - medium
       - high
     disabled_reason: null
-  - provider: github-copilot
-    id: gpt-5-mini
-    eligible: false
-    thinking:
-      - low
-      - medium
-    disabled_reason: repeated tool failures in subagent mode
-  - provider: github-copilot
-    id: gemini-3.1-pro-preview
-    eligible: true
-    thinking:
-      - medium
-      - high
-      - xhigh
-    disabled_reason: null
   - provider: ollama
     id: kimi-k3:cloud
     eligible: true
@@ -248,6 +226,14 @@ profiles:
       - medium
       - high
       - xhigh
+    disabled_reason: null
+  - provider: ollama
+    id: glm-5.3:cloud
+    eligible: true
+    thinking:
+      - low
+      - high
+      - max
     disabled_reason: null
   - provider: ollama
     id: glm-5.3-flash:cloud

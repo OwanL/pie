@@ -1,7 +1,7 @@
 {
   "defaultModel": "gpt-5.6-sol",
-  "defaultThinkingLevel": "medium",
-  "defaultProvider": "github-copilot",
+  "defaultThinkingLevel": "high",
+  "defaultProvider": "openai-codex",
   "retry": {
     "enabled": true,
     "maxRetries": 8,
@@ -14,7 +14,7 @@
   "httpIdleTimeoutMs": 0,
   "bashDefaultTimeout": 60,
   "packages": [
-    "npm:pi-web-access@0.13.0",
+    "npm:pi-web-access@0.27.0",
     "npm:pi-mcp-adapter@2.20.1"
   ],
   "pruning": {
@@ -57,5 +57,12 @@
     "profile": "default"
   },
   "lastChangelogVersion": "0.80.6",
-  "sessionDir": "data/outcomes/sessions"
+  "sessionDir": "data/outcomes/sessions",
+  "sessionTitles": {
+    "enabled": true,
+    "model": "deepseek-v4-flash:0731-cloud",
+    "provider": "ollama",
+    "thinkingLevel": "off",
+    "timeoutSec": 15
+  }
 }

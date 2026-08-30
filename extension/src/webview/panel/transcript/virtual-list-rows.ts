@@ -299,7 +299,61 @@ export function estimateTranscriptRowSize(row: TranscriptRow): number {
   if (row.kind === 'typingIndicator') {
     return 40 + estimateActivityTailHeight(row.activityState?.tail);
   }
-  if (row.message.role === 'user') return 120;
+  if (row.message.role === 'system') {
+    // Compaction summaries render as one compact disclosure row even though
+    // their hidden markdown may contain the complete multi-thousand-token
+    // summary. Estimating from that hidden body would be as disruptive as the
+    // old fixed estimate in the opposite direction.
+    if (row.message.customType === 'compaction-summary') return 72;
+    return Math.max(72, 30 + estimateVisualLineCount(row.message.markdown) * 20);
+  }
+  if (row.message.role === 'user') {
+    const imageCount = row.message.userParts?.filter((part) => part.kind === 'image').length ?? 0;
+    return Math.max(50, 30 + estimateVisualLineCount(row.message.markdown) * 20 + imageCount * 220);
+  }
+
+  const parts = row.message.parts ?? [];
+  const reasoningCount = parts.filter((part) => part.kind === 'reasoning').length
+    || (row.message.thinking ? 1 : 0);
+  const partToolCalls = parts.flatMap((part) => part.kind === 'toolCall' ? [part.toolCall] : []);
+  const toolCalls = row.message.toolCalls?.length ? row.message.toolCalls : partToolCalls;
+  let toolHeight = 0;
+  for (const toolCall of toolCalls) {
+    // ask_user keeps its answered prompt/options visible in historical turns;
+    // subagent cards carry additional identity/telemetry chrome. Ordinary
+    // collapsed tool rows share the compact 26-40px header treatment.
+    if (toolCall.name === 'ask_user') toolHeight += 140;
+    else if (toolCall.name === 'subagent') toolHeight += 60;
+    else toolHeight += 38;
+  }
+  if (row.message.draftingToolCall && !toolCalls.some((toolCall) => toolCall.id === row.message.draftingToolCall?.id)) {
+    toolHeight += 38;
+  }
+
   const tailHeight = estimateActivityTailHeight(row.activityState?.tail);
-  return (row.pruningHeaderState?.kind === 'result' ? 220 : 180) + tailHeight;
+  const minimum = row.pruningHeaderState ? 220 : 180;
+  const base = row.pruningHeaderState ? 78 : 58;
+  const contentHeight = base
+    + estimateVisualLineCount(row.message.markdown) * 16
+    + reasoningCount * 40
+    + toolHeight;
+  return Math.max(minimum, contentHeight) + tailHeight;
+}
+
+/** Approximate wrapped visual lines without allocating a split copy of a
+ * potentially multi-megabyte historical message. Explicit markdown lines are
+ * preserved and long lines receive a conservative full-width wrap estimate. */
+function estimateVisualLineCount(text: string, charactersPerLine = 140): number {
+  if (!text) return 0;
+  let lines = 0;
+  let lineLength = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    if (text.charCodeAt(index) === 10) {
+      lines += Math.max(1, Math.ceil(lineLength / charactersPerLine));
+      lineLength = 0;
+    } else if (text.charCodeAt(index) !== 13) {
+      lineLength += 1;
+    }
+  }
+  return lines + Math.max(1, Math.ceil(lineLength / charactersPerLine));
 }

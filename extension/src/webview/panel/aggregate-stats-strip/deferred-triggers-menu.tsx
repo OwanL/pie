@@ -1,9 +1,11 @@
 /** @jsxRuntime automatic */
 /** @jsxImportSource preact */
 
-import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
+import { useEffect, useState } from 'preact/hooks';
 
 import { useMenuListeners } from '../components/useMenuListeners';
+import { useMenuTriggerAria } from '../components/useMenuTriggerAria';
+import { useMenuViewportClamp } from '../components/useMenuViewportClamp';
 
 import type { DeferredTriggerView, SessionSummary, TriggerSpec } from '../../../shared/protocol';
 
@@ -30,6 +32,7 @@ export interface DeferredTriggersMenuProps {
   /** Click coordinates of the strip segment that opened the menu (viewport). */
   x: number;
   y: number;
+  triggerEl?: HTMLElement | null;
   onCancel: (sessionPath: string, triggerId: string) => void;
   onClose: () => void;
 }
@@ -39,36 +42,20 @@ export function DeferredTriggersMenu({
   sessionByPath,
   x,
   y,
+  triggerEl,
   onCancel,
   onClose,
 }: DeferredTriggersMenuProps) {
-  const ref = useRef<HTMLDivElement>(null);
-  const [pos, setPos] = useState<{ top: number; left: number }>({ top: y, left: x });
+  const { ref, pos } = useMenuViewportClamp({
+    x,
+    y,
+    triggerEl,
+    restoreFocusOnClose: true,
+    refocusKey: triggers.map((trigger) => trigger.id).join(','),
+  });
+  useMenuTriggerAria(triggerEl);
   // Tick once per second so the elapsed "waiting Nm" stays live while open.
   const [, setNow] = useState(() => Date.now());
-
-  useLayoutEffect(() => {
-    const node = ref.current;
-    if (!node) return;
-    const margin = 4;
-    const width = node.offsetWidth;
-    const height = node.offsetHeight;
-    let top = y;
-    let left = x;
-    // Flip up when the menu would overflow the bottom edge (it opens from the
-    // bottom strip, so this is the common case).
-    if (top + height > window.innerHeight - margin) {
-      const flipped = y - height;
-      top = flipped >= margin ? flipped : Math.max(margin, window.innerHeight - margin - height);
-    }
-    if (left + width > window.innerWidth - margin) {
-      const flipped = x - width;
-      left = flipped >= margin ? flipped : Math.max(margin, window.innerWidth - margin - width);
-    }
-    top = Math.max(margin, top);
-    left = Math.max(margin, left);
-    setPos({ top, left });
-  }, [x, y]);
 
   useEffect(() => {
     const id = window.setInterval(() => setNow(Date.now()), 1000);
@@ -106,7 +93,7 @@ export function DeferredTriggersMenu({
                 <div class="deferred-triggers-menu-item-wait">waiting {formatElapsed(t.registeredAt)}</div>
               </div>
               <button
-                class="deferred-triggers-menu-item-cancel"
+                class="context-menu-item deferred-triggers-menu-item-cancel"
                 type="button"
                 role="menuitem"
                 aria-label={`Cancel deferred trigger for ${name}`}

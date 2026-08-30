@@ -58,3 +58,22 @@ test('renameWithTransientRetry surfaces a persistent sharing violation after bou
   );
   assert.equal(attempts, 3);
 });
+
+test('renameWithTransientRetry gives Windows readers the full default contention window', async () => {
+  let attempts = 0;
+  const delays: number[] = [];
+  await assert.rejects(
+    renameWithTransientRetry('source.tmp', 'target.json', {
+      rename: async () => {
+        attempts += 1;
+        throw errno('EPERM');
+      },
+      delay: async (milliseconds) => {
+        delays.push(milliseconds);
+      },
+    }),
+    { code: 'EPERM' },
+  );
+  assert.equal(attempts, 10);
+  assert.deepEqual(delays, [10, 25, 50, 100, 250, 500, 1000, 2000, 4000]);
+});

@@ -44,6 +44,9 @@ import {
 	isAutonomousModeEnabled,
 } from "./pruning.js";
 
+const DEFERRED_TRIGGER_WAKE_PREFIX = "[deferred trigger fired: ";
+const DEFERRED_TRIGGER_TOOL_NAME = "defer_trigger";
+
 export default function register(pi: ExtensionAPI) {
 	// Asynchronously pre-warm the cached code version (git SHA) so the first
 	// `before_agent_start` doesn't pay the subprocess latency on the
@@ -201,7 +204,14 @@ export default function register(pi: ExtensionAPI) {
 			// The recovery tool itself is never a prune candidate. Tools recovered
 			// under the previous decision are not protected here: this new decision
 			// may hide them again when the task changes.
-			const forcedToolNames = new Set<string>([...(activeConfig.tools?.alwaysKeep ?? []), RECOVERY_TOOL_NAME]);
+			const turnProtectedToolNames = event.prompt.startsWith(DEFERRED_TRIGGER_WAKE_PREFIX)
+				? [DEFERRED_TRIGGER_TOOL_NAME]
+				: [];
+			const forcedToolNames = new Set<string>([
+				...(activeConfig.tools?.alwaysKeep ?? []),
+				RECOVERY_TOOL_NAME,
+				...turnProtectedToolNames,
+			]);
 
 			const llmInput = {
 				userPrompt: event.prompt,
@@ -281,7 +291,12 @@ export default function register(pi: ExtensionAPI) {
 				// whether any tools survive: a legitimate full skill-prune is allowed
 				// through whenever tools remain (zero skills leaves the agent
 				// functional, unlike zero tools).
-				const toolSelection = applyToolSelection(availableTools, prunedTools, activeConfig);
+				const toolSelection = applyToolSelection(
+					availableTools,
+					prunedTools,
+					activeConfig,
+					turnProtectedToolNames,
+				);
 				toolSafeguardReason = toolSelection.safeguardReason ?? toolSafeguardReason;
 
 				const toolsRemain = toolSelection.includedToolNames.length > 0;

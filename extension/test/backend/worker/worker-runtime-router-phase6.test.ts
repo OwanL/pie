@@ -271,10 +271,55 @@ test('phase6 provider: an open global circuit still settles the exact acquire', 
     requestId: 'admission-2',
     request: { provider: 'p', model: 'm', turnId: 't', attemptId: 'a2' },
   }));
-  const cancelled = sent.filter((frame) => frame.kind === 'provider.cancelled');
-  assert.equal(cancelled.length, 1);
-  assert.equal(cancelled[0]!.requestId, 'admission-2');
-  assert.match(String(cancelled[0]!.reason), /circuit is open/);
+  const rejected = sent.filter((frame) => frame.kind === 'provider.rejected');
+  assert.equal(rejected.length, 1);
+  assert.equal(rejected[0]!.requestId, 'admission-2');
+  assert.deepEqual((rejected[0] as any).error, {
+    name: 'ProviderCircuitOpenError',
+    message: (rejected[0] as any).error.message,
+    retryable: true,
+    httpStatus: 503,
+  });
+  assert.match(String((rejected[0] as any).error.message), /circuit is open/);
+});
+
+test('phase6 provider: a bounded queue rejection preserves retryability and HTTP status', async () => {
+  const clock = new FakeRouterClock();
+  const sent: Array<Record<string, any>> = [];
+  const leases = new CoordinatorProviderNetworkLeaseAuthority({
+    now: () => clock.now(),
+    setTimeout: (callback, delayMs) => clock.setTimeout(callback, delayMs),
+    clearTimeout: (timer) => clock.clearTimeout(timer as ReturnType<typeof setTimeout>),
+    defaultPolicy: { queueWaitMs: 50 },
+  });
+  const { router, sessionPath } = makeRouter(makeClient({
+    sendFrame: (frame: any) => { sent.push(frame); return true; },
+  }), { options: { providerLeases: leases } });
+  const route = await router.promote(sessionPath);
+  await router.handleWorkerFrame(sessionPath, providerFrame(route, sessionPath, 'provider.acquire', {
+    requestId: 'admission-active',
+    request: { provider: 'p', model: 'm', turnId: 't', attemptId: 'active' },
+  }));
+  const queuedAcquire = router.handleWorkerFrame(sessionPath, providerFrame(route, sessionPath, 'provider.acquire', {
+    requestId: 'admission-queued',
+    request: { provider: 'p', model: 'm', turnId: 't', attemptId: 'queued' },
+  }));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(leases.inspect().queued, 1);
+
+  clock.advance(51);
+  await queuedAcquire;
+
+  const rejected = sent.filter((frame) => frame.kind === 'provider.rejected'
+    && frame.requestId === 'admission-queued');
+  assert.deepEqual(rejected.map((frame) => frame.error), [{
+    name: 'ProviderGateSaturatedError',
+    message: 'Provider "p" concurrency cap reached: waited 50ms without a slot. Retry after a brief delay.',
+    retryable: true,
+    httpStatus: 429,
+  }]);
+  assert.equal(sent.some((frame) => frame.kind === 'provider.cancelled'
+    && frame.requestId === 'admission-queued'), false);
 });
 
 test('phase6 extension UI: exact owner routes once, settles, and duplicates are typed stale', async () => {
@@ -443,6 +488,50 @@ test('phase6 auth refresh bumps revision, broadcasts, and retires unacknowledgin
   assert.ok(failing.stopped.includes(sessionPath));
 });
 
+test('phase6 live auth refresh survives a transient delay beyond the startup ACK boundary', async () => {
+  const clock = new FakeRouterClock();
+  let releaseAuth!: () => void;
+  const authGate = new Promise<void>((resolve) => { releaseAuth = resolve; });
+  const client = makeClient({
+    requestFrame: async (body: any) => {
+      client.calls.push(body);
+      if (body.kind === 'sync') {
+        if (body.domain === 'auth' && body.revision === 2) await authGate;
+        return { kind: 'sync.ack', requestId: 'x', domain: body.domain, revision: body.revision };
+      }
+      if (body.kind === 'runtime.promote') {
+        return { kind: 'runtime.ready', requestId: 'x', runtimeMetadata: { mode: 'phase4', startedAt: 1 } };
+      }
+      throw new Error(`unexpected frame ${body.kind}`);
+    },
+  });
+  const { router, sessionPath, stopped, emitted } = makeRouter(client, {
+    options: {
+      scheduler: clock,
+      syncAckTimeoutMs: 50,
+      broadcastSyncAckTimeoutMs: 500,
+    },
+  });
+  await router.promote(sessionPath);
+
+  const refresh = router.refreshAuth('fp-2', '/agent/auth.json');
+  for (let turn = 0; turn < 4 && !client.calls.some((body: any) =>
+    body.kind === 'sync' && body.domain === 'auth' && body.revision === 2); turn += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+
+  clock.advance(51);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(router.getRoute(sessionPath).state, 'hot');
+  assert.deepEqual(stopped, []);
+  assert.equal(emitted.some(([event, payload]) => event === 'operational-error'
+    && payload.code === 'SESSION_WORKER_SYNC_FAILED'), false);
+
+  releaseAuth();
+  assert.deepEqual(await refresh, { bumped: true, retiredWorkers: 0 });
+  assert.equal(router.getRoute(sessionPath).state, 'hot');
+});
+
 test('phase6 settings/catalog sync broadcasts the configured authority to every worker', async () => {
   const { router, sessionPath } = makeRouter(makeClient(), {
     options: {
@@ -461,6 +550,406 @@ test('phase6 settings/catalog sync broadcasts the configured authority to every 
   assert.ok(catalogSync);
   assert.equal(catalogSync.revision, 2);
   assert.deepEqual(catalogSync.payload.models, [{ id: 'configured-b', name: 'Configured B', provider: 'phase-0', reasoning: false }]);
+});
+
+test('phase6 session registry sync is present at startup and host revisions are latest-wins', async () => {
+  const { router, sessionPath, client } = makeRouter(makeClient());
+  await router.promote(sessionPath);
+
+  const startup = client.calls.find((call: any) => call.kind === 'sync' && call.domain === 'sessionRegistry') as any;
+  assert.ok(startup, 'every promoted worker receives the retained registry domain before runtime startup');
+  assert.equal(startup.revision, 1);
+  assert.deepEqual(startup.payload, { tabs: [] });
+
+  const first = await router.syncSessionRegistry([
+    { path: '/sessions/a.jsonl', pinned: true, isRunning: false },
+  ], 7);
+  assert.deepEqual(first, { applied: true, revision: 2, retiredWorkers: 0 });
+
+  const duplicate = await router.syncSessionRegistry([
+    { path: '/sessions/a.jsonl', pinned: true, isRunning: false },
+  ], 7);
+  assert.deepEqual(duplicate, { applied: false, revision: 2, retiredWorkers: 0 });
+
+  const stale = await router.syncSessionRegistry([
+    { path: '/sessions/stale.jsonl', pinned: false, isRunning: false },
+  ], 6);
+  assert.deepEqual(stale, { applied: false, revision: 2, retiredWorkers: 0 });
+
+  const latest = await router.syncSessionRegistry([
+    { path: '/sessions/a.jsonl', pinned: false, isRunning: true },
+  ], 8);
+  assert.deepEqual(latest, { applied: true, revision: 3, retiredWorkers: 0 });
+
+  const registrySyncs = client.calls.filter((call: any) => call.kind === 'sync' && call.domain === 'sessionRegistry') as any[];
+  assert.deepEqual(registrySyncs.map((call) => [call.revision, call.payload.tabs]), [
+    [1, []],
+    [2, [{ path: '/sessions/a.jsonl', pinned: true, isRunning: false }]],
+    [3, [{ path: '/sessions/a.jsonl', pinned: false, isRunning: true }]],
+  ]);
+});
+
+test('phase6 session registry timeout keeps a busy worker hot and retries the latest revision', async () => {
+  const clock = new FakeRouterClock();
+  let registryAttempts = 0;
+  let transportStatus: 'ready' | 'unresponsive' = 'ready';
+  const client = makeClient({
+    getSnapshot: () => ({ status: transportStatus, stdoutTail: '', stderrTail: '' }),
+    requestFrame: async (body: any) => {
+      client.calls.push(body);
+      if (body.kind === 'sync') {
+        if (body.domain === 'sessionRegistry' && body.revision === 2) {
+          registryAttempts += 1;
+          if (registryAttempts === 1) return await new Promise(() => undefined);
+        }
+        return { kind: 'sync.ack', requestId: 'x', domain: body.domain, revision: body.revision };
+      }
+      if (body.kind === 'runtime.promote') {
+        return { kind: 'runtime.ready', requestId: 'x', runtimeMetadata: { mode: 'phase4', startedAt: 1 } };
+      }
+      throw new Error(`unexpected frame ${body.kind}`);
+    },
+  });
+  const { router, sessionPath, emitted, stopped } = makeRouter(client, {
+    options: { scheduler: clock, syncAckTimeoutMs: 50 },
+  });
+  const route = await router.promote(sessionPath);
+  await router.handleWorkerFrame(sessionPath, eventFrame(
+    route, sessionPath, 'busy.changed', { sessionPath, busy: true, seq: 1 }, 1,
+  ));
+  await router.handleWorkerFrame(sessionPath, eventFrame(
+    route, sessionPath, 'message.started',
+    { sessionPath, requestId: 'review-request', messageId: 'review-message' }, 2,
+  ));
+  emitted.length = 0;
+
+  const result = await router.syncSessionRegistry([
+    { path: sessionPath, pinned: true, isRunning: true },
+  ], 10);
+  assert.deepEqual(result, { applied: true, revision: 2, retiredWorkers: 0 });
+  assert.equal(router.getRoute(sessionPath).state, 'hot');
+
+  transportStatus = 'unresponsive';
+  clock.advance(51);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(stopped, [], 'auxiliary registry timeout must not retire active work');
+  assert.equal(emitted.some(([event]) => event === 'message.aborted' || event === 'preflight.failed'), false);
+
+  clock.advance(1_000);
+  await new Promise((resolve) => setImmediate(resolve));
+  transportStatus = 'ready';
+  assert.equal(registryAttempts, 2, 'the newest registry revision is retried after the worker responds again');
+  assert.equal(router.getRoute(sessionPath).state, 'hot');
+  assert.equal(emitted.some(([event, payload]) => event === 'operational-error'
+    && payload.code === 'SESSION_WORKER_SYNC_FAILED'), false);
+});
+
+test('phase6 simultaneous registry and settings delay does not kill a healthy review at the old 5s boundary', async () => {
+  const clock = new FakeRouterClock();
+  let releaseSettings!: () => void;
+  const settingsGate = new Promise<void>((resolve) => { releaseSettings = resolve; });
+  const client = makeClient({
+    requestFrame: async (body: any) => {
+      client.calls.push(body);
+      if (body.kind === 'sync') {
+        if (body.domain === 'sessionRegistry' && body.revision === 2) {
+          return await new Promise(() => undefined);
+        }
+        if (body.domain === 'settings' && body.revision === 2) await settingsGate;
+        return { kind: 'sync.ack', requestId: 'x', domain: body.domain, revision: body.revision };
+      }
+      if (body.kind === 'runtime.promote') {
+        return { kind: 'runtime.ready', requestId: 'x', runtimeMetadata: { mode: 'phase4', startedAt: 1 } };
+      }
+      throw new Error(`unexpected frame ${body.kind}`);
+    },
+  });
+  const { router, sessionPath, stopped, emitted } = makeRouter(client, {
+    options: {
+      scheduler: clock,
+      syncAckTimeoutMs: 50,
+      broadcastSyncAckTimeoutMs: 500,
+      readModelSettings: async () => ({ defaultModel: 'm', defaultThinkingLevel: 'off' }),
+    },
+  });
+  await router.promote(sessionPath);
+
+  await router.syncSessionRegistry([{ path: sessionPath, pinned: true, isRunning: true }], 1);
+  const settings = router.syncSettings();
+  for (let turn = 0; turn < 4 && !client.calls.some((body: any) =>
+    body.kind === 'sync' && body.domain === 'settings' && body.revision === 2); turn += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+
+  clock.advance(51);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(router.getRoute(sessionPath).state, 'hot');
+  assert.deepEqual(stopped, [], 'the auxiliary timeout and transient settings delay must not retire the review');
+  assert.equal(emitted.some(([event, payload]) => event === 'operational-error'
+    && payload.code === 'SESSION_WORKER_SYNC_FAILED'), false);
+
+  releaseSettings();
+  await settings;
+  assert.equal(router.getRoute(sessionPath).state, 'hot');
+  assert.deepEqual(stopped, []);
+});
+
+test('phase6 broadcasts skip supervisor-owned workers until their transport is ready', async () => {
+  const readyClient = makeClient();
+  const unavailableCalls: any[] = [];
+  const unresponsiveCalls: any[] = [];
+  const startingWorker = {
+    workerId: 'starting-worker',
+    workerGeneration: 2,
+    sessionPath: '/sessions/starting.jsonl',
+    client: {
+      getSnapshot: () => ({ status: 'starting' as const, stdoutTail: '', stderrTail: '' }),
+      requestFrame: async (body: any) => {
+        unavailableCalls.push(body);
+        throw new Error('Worker is unavailable');
+      },
+    },
+  };
+  const unresponsiveWorker = {
+    workerId: 'unresponsive-worker',
+    workerGeneration: 3,
+    sessionPath: '/sessions/unresponsive.jsonl',
+    client: {
+      getSnapshot: () => ({ status: 'unresponsive' as const, stdoutTail: '', stderrTail: '' }),
+      requestFrame: async (body: any) => {
+        unresponsiveCalls.push(body);
+        return { kind: 'sync.ack', requestId: 'x', domain: body.domain, revision: body.revision };
+      },
+    },
+  };
+  let liveWorker: any;
+  const { router, sessionPath, stopped } = makeRouter(readyClient, {
+    supervisor: {
+      startWorker: async (root: string, prepare: any) => {
+        await prepare({ workerId: 'ready-worker', workerGeneration: 1, sessionPath: root });
+        liveWorker = { workerId: 'ready-worker', workerGeneration: 1, sessionPath: root, client: readyClient };
+        return liveWorker;
+      },
+      listWorkers: () => [liveWorker, startingWorker, unresponsiveWorker].filter(Boolean),
+    },
+  });
+  await router.promote(sessionPath);
+
+  await router.syncSessionRegistry([{ path: sessionPath, pinned: true, isRunning: false }], 1);
+  await router.syncRuntimePrefs({ compact: true });
+
+  assert.equal(unavailableCalls.length, 0, 'startup ownership is not yet a usable broadcast route');
+  assert.deepEqual(stopped, []);
+  assert.ok(readyClient.calls.some((call: any) => call.kind === 'sync'
+    && call.domain === 'sessionRegistry' && call.revision === 2));
+  assert.ok(unresponsiveCalls.some((call: any) => call.kind === 'sync'
+    && call.domain === 'sessionRegistry' && call.revision === 2));
+  assert.ok(unresponsiveCalls.some((call: any) => call.kind === 'sync'
+    && call.domain === 'runtimePrefs' && call.revision === 2),
+  'critical broadcasts still reach a transiently unresponsive transport');
+});
+
+test('phase6 late old-generation sync failure cannot stop a replacement at the same path', async () => {
+  const sessionPath = `${process.cwd()}/phase6-session.jsonl`;
+  const replacementClient = makeClient();
+  const replacementWorker = {
+    workerId: 'replacement-worker',
+    workerGeneration: 2,
+    sessionPath,
+    client: replacementClient,
+  };
+  const stopped: string[] = [];
+  const { router, emitted } = makeRouter(replacementClient, {
+    supervisor: {
+      listWorkers: () => [replacementWorker],
+      stopWorker: async (target: string) => { stopped.push(target); },
+    },
+  });
+  const staleWorker = {
+    workerId: 'retired-worker',
+    workerGeneration: 1,
+    sessionPath,
+    client: makeClient(),
+  };
+
+  await (router as unknown as {
+    quarantineSyncFailure(
+      settlement: { worker: typeof staleWorker; domain: 'settings'; revision: number; completion: Promise<void> },
+      error: unknown,
+    ): Promise<void>;
+  }).quarantineSyncFailure({
+    worker: staleWorker,
+    domain: 'settings',
+    revision: 2,
+    completion: Promise.resolve(),
+  }, new Error('late old-generation settlement'));
+
+  assert.deepEqual(stopped, [], 'path reuse must not let a stale failure stop the replacement generation');
+  assert.equal(emitted.some(([event, payload]) => event === 'operational-error'
+    && payload.code === 'SESSION_WORKER_SYNC_FAILED'), false);
+});
+
+test('phase6 concurrent sync failures terminalize a busy checkpoint and retire its worker once', async () => {
+  const client = makeClient({
+    requestFrame: async (body: any) => {
+      if (body.kind === 'sync') {
+        if ((body.domain === 'runtimePrefs' || body.domain === 'catalog') && body.revision === 2) {
+          throw new Error('worker response lane exceeded reserved capacity');
+        }
+        return { kind: 'sync.ack', requestId: 'x', domain: body.domain, revision: body.revision };
+      }
+      if (body.kind === 'runtime.promote') {
+        return { kind: 'runtime.ready', requestId: 'x', runtimeMetadata: { mode: 'phase4', startedAt: 1 } };
+      }
+      throw new Error(`unexpected frame ${body.kind}`);
+    },
+  });
+  const { router, sessionPath, emitted, stopped } = makeRouter(client);
+  const route = await router.promote(sessionPath);
+  await router.handleWorkerFrame(sessionPath, eventFrame(
+    route, sessionPath, 'busy.changed', { sessionPath, busy: true, seq: 1 }, 1,
+  ));
+  await router.handleWorkerFrame(sessionPath, eventFrame(
+    route, sessionPath, 'message.started',
+    { sessionPath, requestId: 'request-sync-failure', messageId: 'message-sync-failure' }, 2,
+  ));
+  await router.handleWorkerFrame(sessionPath, eventFrame(
+    route, sessionPath, 'tool.started', {
+      sessionPath,
+      requestId: 'request-sync-failure',
+      messageId: 'message-sync-failure',
+      toolCallId: 'tool-sync-failure-1',
+      name: 'bash',
+    }, 3,
+  ));
+  await router.handleWorkerFrame(sessionPath, eventFrame(
+    route, sessionPath, 'tool.started', {
+      sessionPath,
+      requestId: 'request-sync-failure',
+      messageId: 'message-sync-failure',
+      toolCallId: 'tool-sync-failure-2',
+      name: 'read',
+    }, 4,
+  ));
+  emitted.length = 0;
+
+  await Promise.all([
+    router.syncRuntimePrefs({ compact: true }),
+    router.syncCatalog([{ id: 'catalog-update-during-worker-loss' }]),
+  ]);
+
+  const toolTerminals = emitted.filter(([event]) => event === 'tool.finished');
+  assert.equal(toolTerminals.length, 2);
+  assert.deepEqual(toolTerminals.map(([, payload]) => [payload.toolCallId, payload.status]), [
+    ['tool-sync-failure-1', 'failed'],
+    ['tool-sync-failure-2', 'failed'],
+  ]);
+  assert.ok(toolTerminals.every(([, payload]) => payload.result?.error
+    === 'The session worker exited before live work settled.'));
+  assert.deepEqual(
+    emitted.filter(([event]) => event === 'message.aborted').map(([, payload]) => payload),
+    [{
+      requestId: 'request-sync-failure',
+      sessionPath,
+      messageId: 'message-sync-failure',
+      reason: 'The session worker exited before live work settled.',
+    }],
+  );
+  assert.equal(emitted.filter(([event]) => event === 'preflight.failed').length, 0);
+  assert.deepEqual(
+    emitted.filter(([event, payload]) => event === 'busy.changed' && payload.busy === false)
+      .map(([, payload]) => payload.sessionPath),
+    [sessionPath],
+  );
+  assert.equal(emitted.filter(([event, payload]) => event === 'operational-error'
+    && payload.code === 'SESSION_WORKER_SYNC_FAILED').length, 1);
+  assert.equal(emitted.filter(([event, payload]) => event === 'operational-error'
+    && payload.code === 'SESSION_WORKER_EXITED').length, 0);
+  assert.deepEqual(stopped, [sessionPath], 'duplicate quarantines must join the first retirement');
+  assert.equal(router.getRoute(sessionPath).state, 'cold');
+
+  const emissionCount = emitted.length;
+  await router.handleWorkerStateChange(
+    sessionPath,
+    { status: 'exited', stdoutTail: '', stderrTail: '' },
+    { workerId: route.owner.workerId, workerGeneration: route.owner.workerGeneration },
+  );
+  assert.equal(emitted.length, emissionCount, 'the eventual exited callback must not terminalize or notify twice');
+});
+
+test('phase6 intentional retirement does not terminalize a live checkpoint', async () => {
+  const { router, sessionPath, emitted } = makeRouter(makeClient());
+  const route = await router.promote(sessionPath);
+  await router.handleWorkerFrame(sessionPath, eventFrame(
+    route, sessionPath, 'busy.changed', { sessionPath, busy: true, seq: 1 }, 1,
+  ));
+  await router.handleWorkerFrame(sessionPath, eventFrame(
+    route, sessionPath, 'message.started',
+    { sessionPath, requestId: 'request-intentional-retire', messageId: 'message-intentional-retire' }, 2,
+  ));
+  await router.handleWorkerFrame(sessionPath, eventFrame(
+    route, sessionPath, 'tool.started', {
+      sessionPath,
+      requestId: 'request-intentional-retire',
+      messageId: 'message-intentional-retire',
+      toolCallId: 'tool-intentional-retire',
+      name: 'bash',
+    }, 3,
+  ));
+  emitted.length = 0;
+
+  await router.retire(sessionPath, 'intentional test retirement');
+
+  assert.equal(router.getRoute(sessionPath).state, 'cold');
+  assert.deepEqual(emitted, [], 'intentional retirement must not synthesize interruption events');
+});
+
+test('phase6 sync failure terminalizes an early-acknowledged send as preflight failed', async () => {
+  const client = makeClient({
+    requestFrame: async (body: any) => {
+      if (body.kind === 'sync') {
+        if (body.domain === 'runtimePrefs' && body.revision === 2) throw new Error('worker sync failed');
+        return { kind: 'sync.ack', requestId: 'x', domain: body.domain, revision: body.revision };
+      }
+      if (body.kind === 'runtime.promote') {
+        return { kind: 'runtime.ready', requestId: 'x', runtimeMetadata: { mode: 'phase4', startedAt: 1 } };
+      }
+      if (body.kind === 'runtime.command' && body.operation === 'message.send') {
+        return {
+          kind: 'response',
+          requestId: 'x',
+          ok: true,
+          result: { kind: 'runtime.command', payload: { requestId: 'request-preflight-sync-failure' } },
+        };
+      }
+      throw new Error(`unexpected frame ${body.kind}`);
+    },
+  });
+  const { router, sessionPath, emitted } = makeRouter(client);
+  const route = await router.promote(sessionPath);
+  await router.route({
+    id: 'public-preflight-sync-failure',
+    method: 'message.send',
+    params: { sessionPath, text: 'hello', inputs: [] },
+  });
+  await router.handleWorkerFrame(sessionPath, eventFrame(
+    route, sessionPath, 'busy.changed', { sessionPath, busy: true, seq: 1 }, 1,
+  ));
+  emitted.length = 0;
+
+  await router.syncRuntimePrefs({ compact: true });
+
+  assert.deepEqual(
+    emitted.filter(([event]) => event === 'preflight.failed').map(([, payload]) => payload),
+    [{
+      requestId: 'request-preflight-sync-failure',
+      sessionPath,
+      error: 'The session worker exited before live work settled.',
+    }],
+  );
+  assert.equal(emitted.filter(([event]) => event === 'message.aborted').length, 0);
+  assert.equal(emitted.filter(([event, payload]) => event === 'busy.changed' && payload.busy === false).length, 1);
+  assert.equal(router.getRoute(sessionPath).state, 'cold');
 });
 
 test('phase6 sync: a never-resolving worker ACK is quarantined without blocking another session promotion', async () => {

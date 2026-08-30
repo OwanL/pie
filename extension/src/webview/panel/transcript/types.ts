@@ -1,24 +1,38 @@
 import type { ComponentChildren } from 'preact';
 
-import type {
-  ChatMessage,
-  ChatPrefs,
-  ComposerInput,
-  InlineEditDraft,
-  PruningResult,
-  PruningSettings,
-  SystemPromptEntry,
-  ThinkingLevel,
-  ToolCall,
-  TranscriptWindow,
-} from '../../../shared/protocol';
+import type { ChatMessage, ChatPrefs, ComposerInput, InlineEditDraft, PruningResult, PruningSettings, SystemPromptEntry, ThinkingLevel, ToolCall, TranscriptWindow } from '../../../shared/protocol';
 import type { LiveTurnPhase } from '../../../shared/live-pipeline-protocol';
 import type { TranscriptContextMenuType } from '../chat-prefs';
+
+/** Message-level metadata bound once per row in `MessageItemView`, so every
+ *  right-click inside the row (assistant text, reasoning, tool cards, user
+ *  messages, system messages, compaction-summary shells) can reach the same
+ *  enriched transcript menu. The webview computes the eligibility flags
+ *  optimistically; the host router re-validates before dispatching. */
+export interface TranscriptMessageMenuInfo {
+  messageId: string;
+  role: ChatMessage['role'];
+  /** Transcript surface that owns this row. Captured independently of the
+   * mutable active-tab ref so actions remain correctly session-addressed. */
+  sessionPath?: string;
+  /** Optional target-specific plain text. Row wrappers fill this from the
+   * message, reasoning block, or renderer when appropriate. Tool renderers
+   * omit it unless they have a meaningful plain-text representation. */
+  plainText?: string;
+  /** Whether the Edit action applies (eligible, non-editing user messages). */
+  editable: boolean;
+  /** Whether destructive "Delete from here" (truncateAfter) applies: durable,
+   *  non-streaming, non-queued transcript messages only. */
+  canTruncate: boolean;
+}
 
 export type TranscriptContextMenuHandler = (
   type: TranscriptContextMenuType,
   rawData: string,
   e: MouseEvent,
+  /** Message-level metadata for right-clicks that occurred inside a transcript
+   *  message row. Absent for menus opened outside a row. */
+  message?: Partial<TranscriptMessageMenuInfo>,
 ) => void;
 
 export type RenderToolCall = (

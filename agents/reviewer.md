@@ -15,6 +15,13 @@ Working rules:
 
 Output format:
 
+When the caller explicitly requires raw JSON or supplies an output schema,
+that task-specific contract overrides the default format below. Return exactly
+one JSON value with no Markdown fence, heading, preamble, or trailing prose.
+Do not replace requested structured output with a prose review.
+
+Otherwise use:
+
 ## Findings
 - Issue/risk
 

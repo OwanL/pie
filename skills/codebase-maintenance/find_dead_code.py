@@ -2,8 +2,8 @@
 # /// script
 # requires-python = ">=3.10"
 # dependencies = [
-#     # Pin to the last version that does not depend on tree-sitter-dart-orchard,
-#     # which only publishes an sdist and therefore requires MSVC on Windows.
+#     # Pin below 4.13.0, where tree-sitter-dart-orchard was first added;
+#     # it only publishes an sdist and therefore requires MSVC on Windows.
 #     "skylos==4.10.0",
 # ]
 # ///
@@ -14,8 +14,9 @@ Usage:
     uv run find_dead_code.py <directory> [options]
 
 Runs skylos (via ``skylos`` on PATH, or ``uv run --with skylos skylos`` as
-fallback) to find unused functions, classes, and imports across Python,
-TypeScript, JavaScript, Java, Go, PHP, Rust, and Dart.
+fallback) to find unused functions, classes, and imports. The pinned Skylos
+4.10.0 fallback predates Dart support; set ``SKYLOS_VERSION`` to 4.13.0 or
+newer when Dart analysis is required and its native dependency can be built.
 
 Respects the shared .ignore file (see find_large_files.py for format
 details).
@@ -51,10 +52,12 @@ Output:
     line numbers. Trivial findings (import, variable) are aggregated by
     file with counts. A category summary appears in the header.
 
-    With --verify-dead-code, only verified (likely dead) findings are printed
-    and likely false positives are suppressed:
+    With --verify-dead-code, likely dead, likely false-positive, and findings
+    that could not be verified are distinguished. Likely false positives are
+    suppressed while unverified findings remain visible in their own section:
 
         === Dead code — 103 verified of 167 (64 likely false positives suppressed) ===
+        === Unverified dead-code findings — 2 ===
           extension/src/webview/panel/file-path.tsx  L14 unused function, ...
           ...
 
@@ -288,9 +291,9 @@ def _patterns_for_skylos(active_patterns: list[str]) -> tuple[list[str], list[st
     for p in active_patterns:
         if not p:
             continue
-        if p.endswith("/"):
+        if p.endswith("/") and "/" not in p.rstrip("/"):
             folders.append(p.rstrip("/"))
-        elif any(ch in p for ch in "*?["):
+        elif any(ch in p for ch in "*?[") or "/" in p.rstrip("/"):
             # Glob pattern — skylos has no file-level exclude.
             dropped.append(p)
         else:
@@ -393,7 +396,7 @@ def _extract_symbol_from_line(line_text: str) -> str | None:
 
 def _rg_search_symbol(
     symbol: str, def_file: str, directory: Path, active_patterns: list[str],
-) -> bool:
+) -> bool | None:
     """Use ripgrep to search for *symbol* as a word-boundary match.
 
     Returns True if the symbol appears in any file other than *def_file*
@@ -407,10 +410,10 @@ def _rg_search_symbol(
             timeout=30,
         )
     except (subprocess.TimeoutExpired, OSError):
-        return False
+        return None
 
     if result.returncode not in (0, 1):  # 0 = matches, 1 = no matches
-        return False
+        return None
 
     for line in result.stdout.splitlines():
         if not line.strip():
@@ -429,13 +432,14 @@ def _rg_search_symbol(
 
 def _python_search_symbol(
     symbol: str, def_file: str, directory: Path, active_patterns: list[str],
-) -> bool:
+) -> bool | None:
     """Fall back to a pure-Python search for *symbol* as a word-boundary match.
 
     Returns True if the symbol appears in any file other than *def_file*
     (respecting .ignore patterns).
     """
     pattern = re.compile(r'\b' + re.escape(symbol) + r'\b')
+    had_read_error = False
     for path in directory.rglob("*"):
         if not path.is_file():
             continue
@@ -450,15 +454,16 @@ def _python_search_symbol(
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
         except (OSError, UnicodeDecodeError):
+            had_read_error = True
             continue
         if pattern.search(text):
             return True
-    return False
+    return None if had_read_error else False
 
 
 def _rg_search_import(
     basename: str, def_file: str, directory: Path, active_patterns: list[str],
-) -> bool:
+) -> bool | None:
     """Use ripgrep to check whether any other file imports *basename* as a
     module-path segment (e.g. ``from './<basename>'``, ``require('../<basename>')``,
     ``import('<basename>')``). Used to verify "unused file" findings that skylos
@@ -476,9 +481,9 @@ def _rg_search_import(
             capture_output=True, text=True, timeout=30,
         )
     except (subprocess.TimeoutExpired, OSError):
-        return False
+        return None
     if result.returncode not in (0, 1):  # 0 = matches, 1 = no matches
-        return False
+        return None
     for line in result.stdout.splitlines():
         if not line.strip():
             continue
@@ -496,11 +501,12 @@ def _rg_search_import(
 
 def _python_search_import(
     basename: str, def_file: str, directory: Path, active_patterns: list[str],
-) -> bool:
+) -> bool | None:
     """Pure-Python fallback for :func:`_rg_search_import`."""
     pattern = re.compile(
         rf'["\'](?:[^"\']*/)?{re.escape(basename)}(?:\.(?:js|ts|tsx|jsx|mjs|cjs))?["\']'
     )
+    had_read_error = False
     for path in directory.rglob("*"):
         if not path.is_file():
             continue
@@ -515,15 +521,16 @@ def _python_search_import(
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
         except (OSError, UnicodeDecodeError):
+            had_read_error = True
             continue
         if pattern.search(text):
             return True
-    return False
+    return None if had_read_error else False
 
 
 def _verify_dead_code(
     findings: list[str], directory: Path, active_patterns: list[str],
-) -> tuple[list[str], list[str]]:
+) -> tuple[list[str], list[str], list[str]]:
     """Verify skylos findings by cross-referencing usage.
 
     For function/class/variable findings, parses the path and line number,
@@ -537,10 +544,12 @@ def _verify_dead_code(
     for files (line 1 is usually an import with no declaration keyword), so we
     instead check whether any other file imports the module by its basename.
 
-    Returns (verified_dead, likely_false_positives).
+    Returns (verified_dead, likely_false_positives, unverified). Search or
+    parsing failures are never promoted to verified dead code.
     """
     verified: list[str] = []
     false_positives: list[str] = []
+    unverified: list[str] = []
 
     rg_available = shutil.which("rg") is not None
 
@@ -553,7 +562,7 @@ def _verify_dead_code(
         # Parse "path:line  reason"
         m = re.match(r"^(.+?):(\d+)\s{2}(.+)$", norm)
         if not m:
-            verified.append(finding)
+            unverified.append(finding)
             continue
 
         file_path_str, line_num_str, _reason = m.groups()
@@ -570,43 +579,52 @@ def _verify_dead_code(
             if basename:
                 if rg_available:
                     is_used = _rg_search_import(basename, file_path_str, directory, active_patterns)
+                    if is_used is None:
+                        is_used = _python_search_import(basename, file_path_str, directory, active_patterns)
                 else:
                     is_used = _python_search_import(basename, file_path_str, directory, active_patterns)
-                if is_used:
+                if is_used is True:
                     false_positives.append(finding)
-                    continue
-                verified.append(finding)
+                elif is_used is False:
+                    verified.append(finding)
+                else:
+                    unverified.append(finding)
                 continue
-            # No usable basename — fall through to the symbol heuristic.
+            unverified.append(finding)
+            continue
 
         try:
             lines = file_path.read_text(encoding="utf-8", errors="replace").splitlines()
         except (OSError, IOError):
-            verified.append(finding)
+            unverified.append(finding)
             continue
 
         if line_num < 1 or line_num > len(lines):
-            verified.append(finding)
+            unverified.append(finding)
             continue
 
         source_line = lines[line_num - 1]
         symbol = _extract_symbol_from_line(source_line)
         if symbol is None:
-            verified.append(finding)
+            unverified.append(finding)
             continue
 
         # Search for the symbol across the codebase.
         if rg_available:
             is_used = _rg_search_symbol(symbol, file_path_str, directory, active_patterns)
+            if is_used is None:
+                is_used = _python_search_symbol(symbol, file_path_str, directory, active_patterns)
         else:
             is_used = _python_search_symbol(symbol, file_path_str, directory, active_patterns)
 
-        if is_used:
+        if is_used is True:
             false_positives.append(finding)
-        else:
+        elif is_used is False:
             verified.append(finding)
+        else:
+            unverified.append(finding)
 
-    return verified, false_positives
+    return verified, false_positives, unverified
 
 
 def print_dead_code(
@@ -728,7 +746,7 @@ def _locate_skylos() -> list[str]:
     if uv is not None:
         # Pin skylos to a version whose dependency tree ships prebuilt wheels
         # on Windows, so ``uv run`` does not require MSVC build tools.
-        # skylos >=4.11 pulls in ``tree-sitter-dart-orchard``, which publishes
+        # skylos >=4.13.0 pulls in ``tree-sitter-dart-orchard``, which publishes
         # only an sdist (no wheels) and therefore must be compiled from source
         # — needing Microsoft Visual C++ 14.0+. skylos 4.10.0 still supports
         # TypeScript/JavaScript (the common case) but predates the Dart grammar
@@ -795,6 +813,9 @@ def parse_args() -> tuple[Path, int, int, set[str], bool]:
             print(f"unknown argument: {a}", file=sys.stderr)
             sys.exit(2)
 
+    if max_findings < 0:
+        print("error: --max-findings must be >= 0", file=sys.stderr)
+        sys.exit(2)
     if not 0 <= confidence <= 100:
         print("error: --confidence must be in 0..100", file=sys.stderr)
         sys.exit(2)
@@ -835,18 +856,26 @@ def main() -> None:
         findings = [l for l in findings if l.split("  ", 1)[-1].strip() not in exclude_reasons]
 
     if verify_dead_code:
-        verified, false_positives = _verify_dead_code(findings, directory, active_patterns)
-        total = len(verified) + len(false_positives)
+        verified, false_positives, unverified = _verify_dead_code(
+            findings, directory, active_patterns,
+        )
+        total = len(verified) + len(false_positives) + len(unverified)
         header = f"=== Dead code \u2014 {len(verified)} verified of {total}"
+        details: list[str] = []
         if false_positives:
-            header += f" ({len(false_positives)} likely false positives suppressed)"
+            details.append(f"{len(false_positives)} likely false positives suppressed")
+        if unverified:
+            details.append(f"{len(unverified)} unverified")
+        if details:
+            header += f" ({', '.join(details)})"
         print(header)
-        # Print verified findings using the grouped format.
-        if not verified:
-            print("  (no verified dead code; all findings were likely false positives)")
-        else:
-            # Reuse print_dead_code's grouped layout for the verified subset.
+        if verified:
             print_dead_code(verified, directory, max_findings, skip_header=True)
+        else:
+            print("  (no verified dead code)")
+        if unverified:
+            print(f"=== Unverified dead-code findings \u2014 {len(unverified)} ===")
+            print_dead_code(unverified, directory, max_findings, skip_header=True)
     else:
         print_dead_code(findings, directory, max_findings)
 

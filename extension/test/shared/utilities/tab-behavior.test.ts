@@ -21,7 +21,10 @@ import {
   groupPinnedTab,
   mergePinnedGroups,
   ungroupPinnedTab,
+  dissolvePinnedGroup,
+  unpinPinnedGroup,
   movePinnedItem,
+  pinAndMergeToFirstPinned,
 } from '../../../src/shared/tab-behavior';
 
 const sessions = [
@@ -466,4 +469,82 @@ test('movePinnedItem clamps the target item index', () => {
   const result = movePinnedItem(['/a', '/b', '/c'], [['/a', '/b']], '/c', 99);
   // /c moves to the end (after the group).
   assert.deepEqual(result.pinnedTabPaths, ['/a', '/b', '/c']);
+});
+
+test('dissolvePinnedGroup removes only the group and preserves pinned order', () => {
+  const result = dissolvePinnedGroup(
+    ['/a', '/b', '/x', '/c', '/d'],
+    [['/a', '/b'], ['/c', '/d']],
+    '/b',
+  );
+  assert.deepEqual(result.pinnedTabPaths, ['/a', '/b', '/x', '/c', '/d']);
+  assert.deepEqual(result.pinnedTabGroups, [['/c', '/d']]);
+});
+
+test('dissolvePinnedGroup is a no-op for a standalone source', () => {
+  const result = dissolvePinnedGroup(['/a', '/b'], [['/a', '/b']], '/x');
+  assert.deepEqual(result, { pinnedTabPaths: ['/a', '/b'], pinnedTabGroups: [['/a', '/b']] });
+});
+
+test('unpinPinnedGroup removes all members from pinned paths but keeps other groups', () => {
+  const result = unpinPinnedGroup(
+    ['/a', '/b', '/x', '/c', '/d'],
+    [['/a', '/b'], ['/c', '/d']],
+    '/a',
+  );
+  assert.deepEqual(result.pinnedTabPaths, ['/x', '/c', '/d']);
+  assert.deepEqual(result.pinnedTabGroups, [['/c', '/d']]);
+});
+
+test('unpinPinnedGroup is a no-op for a standalone source', () => {
+  const result = unpinPinnedGroup(['/a', '/b'], [['/a', '/b']], '/x');
+  assert.deepEqual(result, { pinnedTabPaths: ['/a', '/b'], pinnedTabGroups: [['/a', '/b']] });
+});
+
+test('pinAndMergeToFirstPinned groups the newly pinned tab with the leftmost standalone tab', () => {
+  const result = pinAndMergeToFirstPinned(
+    ['/a', '/b', '/x', '/c', '/d'],
+    ['/a', '/c'],
+    [],
+    '/x',
+  );
+  // /a (leftmost pinned) and /x form a new group; /x follows /a contiguously.
+  assert.deepEqual(result.pinnedTabPaths, ['/a', '/x', '/c']);
+  assert.deepEqual(result.pinnedTabGroups, [['/a', '/x']]);
+});
+
+test('pinAndMergeToFirstPinned absorbs the newly pinned tab into the leftmost group', () => {
+  const result = pinAndMergeToFirstPinned(
+    ['/a', '/b', '/x', '/c'],
+    ['/a', '/b', '/c'],
+    [['/a', '/b']],
+    '/x',
+  );
+  // The leftmost item is the [/a,/b] group — /x joins it (appended), and the
+  // group block stays contiguous.
+  assert.deepEqual(result.pinnedTabPaths, ['/a', '/b', '/x', '/c']);
+  assert.deepEqual(result.pinnedTabGroups, [['/a', '/b', '/x']]);
+});
+
+test('pinAndMergeToFirstPinned with no pinned items just pins the tab', () => {
+  const result = pinAndMergeToFirstPinned(['/a', '/x', '/b'], [], [], '/x');
+  assert.deepEqual(result.pinnedTabPaths, ['/x']);
+  assert.deepEqual(result.pinnedTabGroups, []);
+});
+
+test('pinAndMergeToFirstPinned is a no-op for an already-pinned tab', () => {
+  const result = pinAndMergeToFirstPinned(
+    ['/a', '/x'],
+    ['/a', '/x'],
+    [['/a', '/x']],
+    '/x',
+  );
+  assert.deepEqual(result, { openTabPaths: ['/a', '/x'], pinnedTabPaths: ['/a', '/x'], pinnedTabGroups: [['/a', '/x']] });
+});
+
+test('pinAndMergeToFirstPinned is a no-op for a pending or not-open path', () => {
+  const pending = pinAndMergeToFirstPinned(['/a', '__pending__:1'], [], [], '__pending__:1');
+  assert.deepEqual(pending, { openTabPaths: ['/a', '__pending__:1'], pinnedTabPaths: [], pinnedTabGroups: [] });
+  const notOpen = pinAndMergeToFirstPinned(['/a'], [], [], '/x');
+  assert.deepEqual(notOpen, { openTabPaths: ['/a'], pinnedTabPaths: [], pinnedTabGroups: [] });
 });

@@ -33,6 +33,7 @@ async function main(): Promise<void> {
       ...args,
       workerEntryPath: path.join(__dirname, 'worker-entry.js'),
       coldBrowseHelperEntryPath: path.join(__dirname, 'cold-browse-helper-entry.js'),
+      initialContextEstimateEntryPath: path.join(__dirname, 'initial-context-estimate-worker.js'),
     });
     await server.start();
     if (process.env.PIE_PHASE2_PACKAGE_SMOKE === '1') {

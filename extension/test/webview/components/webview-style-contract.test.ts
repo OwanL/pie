@@ -32,6 +32,13 @@ test('reduced motion preserves essential progress-wheel animation', async () => 
   }
 });
 
+test('virtual transcript spacer reserves the full estimated height inside the flex scroller', async () => {
+  const transcriptCss = await readStyleSource('transcript.css');
+  const spacerRule = transcriptCss.match(/\.transcript-virtual-inner\s*\{([^}]*)\}/)?.[1] ?? '';
+
+  assert.match(spacerRule, /flex:\s*0 0 auto|flex-shrink:\s*0/);
+});
+
 test('panel chip styling is centralized instead of embedded in feature components', async () => {
   const indexCss = await readStyleSource('index.css');
   const panelChipCss = await readStyleSource('panel-chip.css');
@@ -234,5 +241,19 @@ test('unified transcript refinement keeps operational rows quiet and user prompt
   assert.doesNotMatch(toolCallCss, /(?:linear|radial)-gradient|backdrop-filter|filter:\s*blur/);
 
   assert.match(aggregateCss, /\.aggregate-strip\s*\{[^}]*height:\s*20px;[^}]*font-size:\s*9\.5px/);
+  assert.match(aggregateCss, /\.aggregate-strip\s*\{[^}]*overflow-x:\s*auto;[^}]*scrollbar-width:\s*thin/);
+  assert.match(aggregateCss, /@media \(max-width: 520px\)[\s\S]*?\.aggregate-strip\s*\{[^}]*height:\s*24px;[^}]*scrollbar-gutter:\s*stable/);
+  assert.match(tabsCss, /@media \(max-width: 520px\)[\s\S]*?--session-tabs-scrollbar-height:\s*5px/);
   assert.doesNotMatch(tabsCss, /\.session-tab-shell::before/);
+});
+
+test('the session tab context menu is viewport-capped and scrolls tall dynamic group lists', async () => {
+  const composerCss = await readStyleSource('composer.css');
+  const rule = composerCss.match(/\.session-tab-context-menu\s*\{([^}]*)\}/)?.[1] ?? '';
+  // Dynamic "Group with…"/"Merge" actions make the menu arbitrarily tall; it
+  // must cap to the viewport (matching the 4px clamp margin on each side in
+  // useMenuViewportClamp) and scroll overflow instead of clipping items.
+  assert.ok(rule, 'expected a .session-tab-context-menu rule in composer.css');
+  assert.match(rule, /max-height:\s*calc\(100vh - 8px\)/);
+  assert.match(rule, /overflow-y:\s*auto/);
 });

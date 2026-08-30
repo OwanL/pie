@@ -2,8 +2,21 @@ import type { ArchState } from '../arch-state.js';
 import type { Event } from '../events.js';
 import type { ReducerResult } from './helpers.js';
 
-export function handleTruncateResult(state: ArchState, _event: Extract<Event, { kind: 'TruncateResult' }>): ReducerResult {
-  return { state, effects: [] };
+export function handleTruncateResult(state: ArchState, event: Extract<Event, { kind: 'TruncateResult' }>): ReducerResult {
+  if (event.ok) return { state, effects: [] };
+  return {
+    state: {
+      ...state,
+      settings: {
+        ...state.settings,
+        notice: 'Could not delete the transcript from this point. The session was not changed.',
+        noticeKind: 'operational-error',
+        noticeRaw: event.error ?? 'session.truncateAfter failed without an error message',
+        noticeSessionPath: event.sessionPath,
+      },
+    },
+    effects: [],
+  };
 }
 
 export function handleCreateSessionResult(state: ArchState, _event: Extract<Event, { kind: 'CreateSessionResult' }>): ReducerResult {

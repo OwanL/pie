@@ -3,10 +3,12 @@ import test from 'node:test';
 
 import type { ChatMessage, SystemPromptEntry, ToolCall } from '../../../src/shared/protocol';
 import {
+  contextBreakdownTranscriptSignature,
   streamingContentSignature,
   subagentCostSignature,
   subagentToolCallRevision,
   systemPromptsSignature,
+  toolCallContextSignature,
   transcriptUsageSignature,
 } from '../../../src/webview/panel/composer/indicator-signature';
 
@@ -104,27 +106,63 @@ test('systemPromptsSignature is stable for byte-identical content under a fresh 
   assert.equal(systemPromptsSignature(a), systemPromptsSignature(b));
 });
 
-test('systemPromptsSignature changes when availability or text content changes', () => {
+test('systemPromptsSignature changes when availability, disabled state, or text content changes', () => {
   const base = [prompt({ text: 'hello', availability: 'available' })];
   const sig = systemPromptsSignature(base);
   const hidden = structuredClone(base);
   hidden[0].availability = 'hidden';
   assert.notEqual(systemPromptsSignature(hidden), sig);
+  const disabled = structuredClone(base);
+  disabled[0].disabled = true;
+  assert.notEqual(systemPromptsSignature(disabled), sig);
   const edited = structuredClone(base);
   edited[0].text = 'hello world';
   assert.notEqual(systemPromptsSignature(edited), sig);
 });
 
-test('systemPromptsSignature detects a same-length content edit (a length proxy would miss this)', () => {
+test('systemPromptsSignature detects a same-length content edit without copying prompt bodies', () => {
   // Regression guard: the context-window breakdown values the system-prompt
   // contributor via estimateTextTokens (a content-dependent BPE count), so a
-  // same-length system-prompt text edit changes the breakdown. A text.length
-  // signature would not change here → a stale tooltip. Including the full text
-  // detects any edit regardless of length.
-  const a = [prompt({ text: 'aaaaaaaaaaaaaaaaaaaa' })];
-  const b = [prompt({ text: 'bbbbbbbbbbbbbbbbbbbb' })];
+  // same-length system-prompt edit must invalidate the key.
+  const a = [prompt({ text: 'a'.repeat(10_000) })];
+  const b = [prompt({ text: 'b'.repeat(10_000) })];
   assert.equal(a[0].text.length, b[0].text.length, 'sanity: same length');
   assert.notEqual(systemPromptsSignature(a), systemPromptsSignature(b));
+  assert.ok(systemPromptsSignature(a).length < a[0].text.length, 'signature remains bounded');
+});
+
+test('contextBreakdownTranscriptSignature invalidates generic tool result content and seq revisions', () => {
+  const base = [msg({
+    id: 'tool-message',
+    toolCalls: [{ id: 'generic-1', name: 'bash', input: { command: 'pwd' }, result: 'a'.repeat(500), status: 'completed' }],
+  })];
+  const before = contextBreakdownTranscriptSignature(base);
+  const resultChanged = structuredClone(base);
+  resultChanged[0].toolCalls![0].result = 'different-token '.repeat(500);
+  assert.notEqual(contextBreakdownTranscriptSignature(resultChanged), before);
+
+  const live = structuredClone(base);
+  live[0].toolCalls![0].status = 'running';
+  live[0].toolCalls![0].seq = 4;
+  const liveBefore = contextBreakdownTranscriptSignature(live);
+  const liveRevisionChanged = structuredClone(live);
+  liveRevisionChanged[0].toolCalls![0].seq = 5;
+  assert.notEqual(contextBreakdownTranscriptSignature(liveRevisionChanged), liveBefore);
+  assert.equal(toolCallContextSignature(live[0].toolCalls![0]).includes('result:'), false,
+    'revisioned previews use the bounded seq gate instead of copying their body');
+
+  const durable = structuredClone(live);
+  durable[0].toolCalls![0].status = 'completed';
+  durable[0].toolCalls![0].durableEntryId = 'durable-tool-result';
+  durable[0].toolCalls![0].result = 'authoritative durable result';
+  assert.notEqual(contextBreakdownTranscriptSignature(durable), liveBefore,
+    'durable reconciliation must invalidate a preserved live seq');
+
+  const queued = [msg({ id: 'queued', role: 'user', status: 'queued', markdown: 'draft one' })];
+  const queuedBefore = contextBreakdownTranscriptSignature(queued);
+  queued[0].markdown = 'draft two';
+  assert.notEqual(contextBreakdownTranscriptSignature(queued), queuedBefore,
+    'editable queued message content must invalidate its contributor estimate');
 });
 
 // ── subagentCostSignature ───────────────────────────────────────────────────

@@ -14,6 +14,7 @@ import type {
   ToolCall,
 } from '../../shared/protocol';
 import { appendUnique, summarizeInputs } from './helpers';
+import { estimateTextTokens } from '../../shared/tokenize';
 import {
   getSubagentBillingEntries,
   getRenderableSubagentResult,
@@ -117,7 +118,11 @@ export class SessionRunTracker {
     state.busyStartedAt = null;
 
     run.sendCount += 1;
-    run.initialUserMessageChars = Array.from(initialUserMessage.trim()).length;
+    const initialUserMessageTrimmed = initialUserMessage.trim();
+    run.initialUserMessageChars = Array.from(initialUserMessageTrimmed).length;
+    // Same privacy-safe source text as `initialUserMessageChars`: only the
+    // estimated token size is stored, never the message itself.
+    run.initialUserMessageTokens = estimateTextTokens(initialUserMessageTrimmed);
     run.updatedAt = this.runState.isoNow();
     summarizeInputs(run, inputs);
     if (state.queuedUnsupportedInputCount > 0) {
@@ -342,6 +347,10 @@ export class SessionRunTracker {
       this.recordSubagentLifecycle(run, toolCall);
     }
 
+    if (normalizedName === 'ask_user') {
+      this.recordAskUserOutcome(run, toolCall);
+    }
+
     if (analysis.verificationKinds.length > 0) {
       this.recordVerification(run, toolCall, analysis);
     }
@@ -352,6 +361,30 @@ export class SessionRunTracker {
 
     run.updatedAt = this.runState.isoNow();
     this.runState.persist();
+  }
+
+  /** Terminal ask_user results report the user's settlement structurally in
+   *  `details.cancelled` (or a legacy top-level `cancelled`). Returns null when
+   *  no structured outcome is present so malformed results are never counted. */
+  private askUserCancelledFromResult(result: unknown): boolean | null {
+    if (!isRecord(result)) return null;
+    const details = isRecord(result.details) ? result.details : null;
+    if (details && typeof details.cancelled === 'boolean') return details.cancelled;
+    if (typeof result.cancelled === 'boolean') return result.cancelled;
+    return null;
+  }
+
+  /** Count a terminal ask_user tool result exactly once (the finished-tool
+   *  dedupe above has already run). Only the settled outcome is recorded —
+   *  never the question or answer text. */
+  private recordAskUserOutcome(run: RunSnapshot, toolCall: ToolCall): void {
+    const cancelled = this.askUserCancelledFromResult(toolCall.result);
+    if (cancelled === null) return;
+    if (cancelled) {
+      run.askUserCancelledCount = (run.askUserCancelledCount ?? 0) + 1;
+    } else {
+      run.askUserAnsweredCount = (run.askUserAnsweredCount ?? 0) + 1;
+    }
   }
 
   /** Roll up a tool call's execution duration (when reported and finite). */

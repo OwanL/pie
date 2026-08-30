@@ -541,7 +541,7 @@ test('EffectRunner dispatches a failure result when an RPC rejects', async () =>
   }
 });
 
-test('EffectRunner runs PersistTabs synchronously without queueing', async () => {
+test('EffectRunner runs PersistTabs outside lifecycle and session queues', async () => {
   const { deps, calls, events } = makeEffectRunnerDeps();
   const runner = new EffectRunner(deps);
 
@@ -570,6 +570,84 @@ test('EffectRunner runs PersistTabs synchronously without queueing', async () =>
   assert.equal(events.length, 1);
   assert.equal(events[0]?.kind, 'PersistTabsResult');
   assert.equal(events[0]?.ok, true);
+});
+
+test('EffectRunner serializes complete PersistTabs snapshots in dispatch order', async () => {
+  const { deps, events } = makeEffectRunnerDeps();
+  const started: string[] = [];
+  const completed: string[] = [];
+  let releaseFirst!: () => void;
+  const firstBlocked = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  let activeWrites = 0;
+  let maxActiveWrites = 0;
+
+  deps.tabs.persistTabs = async (openTabPaths) => {
+    const label = openTabPaths.join(',');
+    started.push(label);
+    activeWrites += 1;
+    maxActiveWrites = Math.max(maxActiveWrites, activeWrites);
+    if (label === '/old,/closing') await firstBlocked;
+    completed.push(label);
+    activeWrites -= 1;
+  };
+
+  const runner = new EffectRunner(deps);
+  runner.run({
+    kind: 'PersistTabs', corrId: 'persist-old',
+    openTabPaths: ['/old', '/closing'], activeSessionPath: '/closing',
+    pinnedTabPaths: ['/closing'], pinnedTabGroups: [],
+  });
+  runner.run({
+    kind: 'PersistTabs', corrId: 'persist-new',
+    openTabPaths: ['/old'], activeSessionPath: '/old',
+    pinnedTabPaths: [], pinnedTabGroups: [],
+  });
+
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(started, ['/old,/closing']);
+  assert.equal(maxActiveWrites, 1);
+
+  releaseFirst();
+  await settle();
+
+  assert.deepEqual(started, ['/old,/closing', '/old']);
+  assert.deepEqual(completed, ['/old,/closing', '/old']);
+  assert.equal(maxActiveWrites, 1);
+  assert.deepEqual(events.map((event) => event.kind === 'PersistTabsResult'
+    ? [event.kind, event.corrId, event.ok]
+    : [event.kind, event.corrId, 'unexpected']), [
+    ['PersistTabsResult', 'persist-old', true],
+    ['PersistTabsResult', 'persist-new', true],
+  ]);
+});
+
+test('EffectRunner continues ordered tab persistence after an earlier snapshot fails', async () => {
+  const { deps, events } = makeEffectRunnerDeps();
+  const persisted: string[] = [];
+  deps.tabs.persistTabs = async (openTabPaths) => {
+    const label = openTabPaths.join(',');
+    persisted.push(label);
+    if (label === '/stale') throw new Error('storage unavailable');
+  };
+
+  const runner = new EffectRunner(deps);
+  runner.run({
+    kind: 'PersistTabs', corrId: 'persist-failed', openTabPaths: ['/stale'],
+    activeSessionPath: '/stale', pinnedTabPaths: [], pinnedTabGroups: [],
+  });
+  runner.run({
+    kind: 'PersistTabs', corrId: 'persist-recovered', openTabPaths: ['/current'],
+    activeSessionPath: '/current', pinnedTabPaths: [], pinnedTabGroups: [],
+  });
+  await settle();
+
+  assert.deepEqual(persisted, ['/stale', '/current']);
+  assert.deepEqual(events.map((event) => event.kind === 'PersistTabsResult'
+    ? [event.corrId, event.ok]
+    : [event.corrId, 'unexpected']), [
+    ['persist-failed', false],
+    ['persist-recovered', true],
+  ]);
 });
 
 test('EffectRunner runs Log directly via the log sink (no dispatch event)', async () => {
@@ -1014,8 +1092,8 @@ test('EffectRunner re-arms a successful prepass as model-start and reports the c
   runner.dispose();
 });
 
-test('decideModelStartTimerAction defers only for a saturated provider under the ceiling', () => {
-  const metric = (over: { queuedRequests?: number; paused?: boolean } = {}): ProviderGateStats => ({
+test('decideModelStartTimerAction defers for bounded active, queued, or paused provider work under the ceiling', () => {
+  const metric = (over: { activeRequests?: number; queuedRequests?: number; paused?: boolean } = {}): ProviderGateStats => ({
     enabled: true,
     providers: [{
       provider: 'openai',
@@ -1029,14 +1107,18 @@ test('decideModelStartTimerAction defers only for a saturated provider under the
       ...over,
     }],
   });
+  // An admitted request may still be inside its bounded headers/first-chunk phase.
+  assert.deepEqual(decideModelStartTimerAction({ elapsed: 1000, ceiling: 240_000, provider: 'openai', metrics: metric(), requestProviderPending: true }), { action: 'defer' });
   // Saturated (queued) + under ceiling → defer.
-  assert.deepEqual(decideModelStartTimerAction({ elapsed: 1000, ceiling: 240_000, provider: 'openai', metrics: metric({ queuedRequests: 2 }) }), { action: 'defer' });
+  assert.deepEqual(decideModelStartTimerAction({ elapsed: 1000, ceiling: 240_000, provider: 'openai', metrics: metric({ queuedRequests: 2 }), requestProviderPending: true }), { action: 'defer' });
   // Paused (circuit breaker) counts as saturated.
   assert.deepEqual(decideModelStartTimerAction({ elapsed: 1000, ceiling: 240_000, provider: 'openai', metrics: metric({ paused: true }) }), { action: 'defer' });
   // Saturated + at/over ceiling → fire (hard backstop).
-  assert.deepEqual(decideModelStartTimerAction({ elapsed: 240_000, ceiling: 240_000, provider: 'openai', metrics: metric({ queuedRequests: 2 }) }), { action: 'fire' });
-  // Not saturated → fire.
-  assert.deepEqual(decideModelStartTimerAction({ elapsed: 1000, ceiling: 240_000, provider: 'openai', metrics: metric() }), { action: 'fire' });
+  assert.deepEqual(decideModelStartTimerAction({ elapsed: 240_000, ceiling: 240_000, provider: 'openai', metrics: metric({ queuedRequests: 2 }), requestProviderPending: true }), { action: 'fire' });
+  // Aggregate activity from a sibling session cannot mask this request.
+  assert.deepEqual(decideModelStartTimerAction({ elapsed: 1000, ceiling: 240_000, provider: 'openai', metrics: metric({ queuedRequests: 2 }), requestProviderPending: false }), { action: 'fire' });
+  // No provider work → fire.
+  assert.deepEqual(decideModelStartTimerAction({ elapsed: 1000, ceiling: 240_000, provider: 'openai', metrics: metric({ activeRequests: 0 }) }), { action: 'fire' });
   // Fail-open: absent gate / unresolvable provider / missing metric → fire.
   assert.deepEqual(decideModelStartTimerAction({ elapsed: 1000, ceiling: 240_000, provider: 'openai', metrics: undefined }), { action: 'fire' });
   assert.deepEqual(decideModelStartTimerAction({ elapsed: 1000, ceiling: 240_000, provider: undefined, metrics: metric({ queuedRequests: 2 }) }), { action: 'fire' });
@@ -1065,6 +1147,7 @@ test('EffectRunner model-start timer re-arms (defers) when the provider is satur
       }],
     }),
     resolveSessionProvider: () => 'openai',
+    isSessionProviderPending: () => true,
   });
   const runner = new EffectRunner(deps);
 

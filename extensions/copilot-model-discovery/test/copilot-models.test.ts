@@ -28,14 +28,14 @@ const gpt56 = {
       default: {
         input_price: 250,
         output_price: 1500,
-        cache_price: 25,
+        cache_read_price: 25,
         cache_write_price: 312,
-        context_max: 272000,
+        max_prompt_tokens: 272000,
       },
       long_context: {
         input_price: 500,
         output_price: 2250,
-        cache_price: 50,
+        cache_read_price: 50,
         cache_write_price: 625,
       },
     },
@@ -53,7 +53,7 @@ const gpt56 = {
   },
 };
 
-test('maps newly discovered Responses models and long-context prices', () => {
+test('maps newly discovered Responses models to the default context tier and preserves long-context prices', () => {
   const model = toDiscoveredCopilotModel(gpt56);
 
   assert.deepEqual(model, {
@@ -84,9 +84,90 @@ test('maps newly discovered Responses models and long-context prices', () => {
         cacheWrite: 6.25,
       }],
     },
-    contextWindow: 1050000,
+    contextWindow: 272000,
     maxTokens: 128000,
   });
+});
+
+test('supports legacy Copilot default-limit and cache-price field names', () => {
+  const tokenPrices = structuredClone(gpt56.billing.token_prices) as {
+    default: Record<string, unknown>;
+    long_context: Record<string, unknown>;
+  };
+  tokenPrices.default.context_max = tokenPrices.default.max_prompt_tokens;
+  tokenPrices.default.cache_price = tokenPrices.default.cache_read_price;
+  tokenPrices.long_context.cache_price = tokenPrices.long_context.cache_read_price;
+  delete tokenPrices.default.max_prompt_tokens;
+  delete tokenPrices.default.cache_read_price;
+  delete tokenPrices.long_context.cache_read_price;
+
+  const model = toDiscoveredCopilotModel({ ...gpt56, billing: { token_prices: tokenPrices } });
+  assert.equal(model?.contextWindow, 272000);
+  assert.equal(model?.cost.cacheRead, 0.25);
+  assert.equal(model?.cost.tiers?.[0].cacheRead, 0.5);
+});
+
+test('rejects an extended tier without a valid default context limit', () => {
+  for (const contextMax of [undefined, 0, -1, Number.NaN, Number.POSITIVE_INFINITY, 272000.5, '272000']) {
+    const tokenPrices = structuredClone(gpt56.billing.token_prices) as {
+      default: Record<string, unknown>;
+    };
+    if (contextMax === undefined) delete tokenPrices.default.max_prompt_tokens;
+    else tokenPrices.default.max_prompt_tokens = contextMax;
+
+    assert.throws(
+      () => toDiscoveredCopilotModel({ ...gpt56, billing: { token_prices: tokenPrices } }),
+      /extended context tier without a valid default context limit/,
+    );
+  }
+});
+
+test('uses the full capability for a single-tier model with no published default limit', () => {
+  const model = toDiscoveredCopilotModel({
+    ...gpt56,
+    billing: { token_prices: { default: { input_price: 250, output_price: 1500 } } },
+  });
+
+  assert.equal(model?.contextWindow, 1050000);
+  assert.equal(model?.cost.tiers, undefined);
+});
+
+test('uses a conservative context fallback when a single-tier model publishes no valid limit', () => {
+  const model = toDiscoveredCopilotModel({
+    ...gpt56,
+    billing: { token_prices: { default: { input_price: 250, output_price: 1500 } } },
+    capabilities: {
+      ...gpt56.capabilities,
+      limits: { ...gpt56.capabilities.limits, max_context_window_tokens: -1 },
+    },
+  });
+
+  assert.equal(model?.contextWindow, 128000);
+});
+
+test('clamps a malformed default limit to the advertised capability maximum', () => {
+  const model = toDiscoveredCopilotModel({
+    ...gpt56,
+    billing: {
+      token_prices: {
+        ...gpt56.billing.token_prices,
+        default: { ...gpt56.billing.token_prices.default, max_prompt_tokens: 2000000 },
+      },
+    },
+  });
+
+  assert.equal(model?.contextWindow, 1050000);
+  assert.equal(model?.cost.tiers?.[0].inputTokensAbove, 1050000);
+});
+
+test('honors a published default limit even when no extended price tier exists', () => {
+  const model = toDiscoveredCopilotModel({
+    ...gpt56,
+    billing: { token_prices: { default: gpt56.billing.token_prices.default } },
+  });
+
+  assert.equal(model?.contextWindow, 272000);
+  assert.equal(model?.cost.tiers, undefined);
 });
 
 test('filters picker-disabled, policy-disabled, and tool-less models', () => {
@@ -132,6 +213,7 @@ test('maps endpoint metadata to a full catalog entry with conservative profile d
   assert.equal(entry.name, 'Copilot: GPT-5.6 Terra');
   assert.equal(entry.overrideOnly, undefined);
   assert.equal(entry.eligible, false);
+  assert.equal(entry.contextWindow, 272000);
   assert.match(String(entry.disabledReason), /not yet vetted/);
   assert.deepEqual((entry.pricing as { tiers: unknown[] }).tiers, discovered.cost.tiers);
 });

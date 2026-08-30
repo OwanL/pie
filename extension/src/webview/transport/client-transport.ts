@@ -155,6 +155,19 @@ const OUTBOUND_FRAME_MAX_BYTES = 32 * 1024 * 1024;
 /** Reconnect backoff: 1s, 2s, 4s, … capped at 30s, ±20% jitter. */
 const RECONNECT_BASE_DELAY_MS = 1000;
 const RECONNECT_MAX_DELAY_MS = 30_000;
+/** Close reasons that indicate this compiled page cannot safely continue.
+ *  Recovery, shutdown, capacity, and timeout closes remain reconnectable. */
+const RELOAD_REQUIRED_CLOSE_REASONS = new Set([
+  'invalid-renderer-hello',
+  'ready-required',
+  'renderer-build-mismatch',
+  'protocol-violation',
+  'too-many-malformed-messages',
+]);
+/** Browser WebSocket.close() only permits 1000 or application codes
+ *  (3000-4999); use a private application code for client-detected policy
+ *  failures while preserving the typed reason used by both peers. */
+const CLIENT_POLICY_CLOSE_CODE = 4008;
 
 function isRendererHello(value: unknown): value is Extract<HostToWebviewMessage, { type: 'rendererHello' }> {
   if (!value || typeof value !== 'object') return false;
@@ -259,10 +272,8 @@ export class BrowserClientTransport implements ClientTransport {
       const type = (message as { type: string }).type;
       if (type === 'rendererHello') {
         if (this.identity !== null || !isRendererHello(message)) {
-          this.compatibilityBlocked = true;
-          this.identity = null;
-          this.setState('reload-required');
-          socket.close(1008, 'invalid-renderer-hello');
+          this.latchReloadRequired();
+          socket.close(CLIENT_POLICY_CLOSE_CODE, 'invalid-renderer-hello');
           return;
         }
         const hello = message;
@@ -272,10 +283,8 @@ export class BrowserClientTransport implements ClientTransport {
           || hello.buildId !== PIE_BUILD_ID
           || (pageAssetVersion !== undefined && hello.assetVersion !== pageAssetVersion)
         ) {
-          this.compatibilityBlocked = true;
-          this.identity = null;
-          this.setState('reload-required');
-          socket.close(1008, 'renderer-build-mismatch');
+          this.latchReloadRequired();
+          socket.close(CLIENT_POLICY_CLOSE_CODE, 'renderer-build-mismatch');
           return;
         }
         this.identity = {
@@ -286,16 +295,32 @@ export class BrowserClientTransport implements ClientTransport {
           assetVersion: hello.assetVersion,
           buildId: hello.buildId,
         };
-        // Only a complete host handshake establishes an application
-        // connection and resets reconnect backoff. A socket that repeatedly
-        // opens then dies before hello must continue backing off.
+        // `ready` is the application-protocol barrier. It MUST be the first
+        // client frame: connection observers and onHandshake reconciliation
+        // are externally callable and may post immediately. Do not expose the
+        // identity or reset backoff until the ready frame has been accepted by
+        // the socket.
+        const readySent = this.sendRaw({
+          type: 'ready',
+          buildId: PIE_BUILD_ID,
+          viewGeneration: this.identity.viewGeneration,
+        });
+        if (!readySent) {
+          this.identity = null;
+          // A close can race the send. Closing an otherwise-open socket makes
+          // the failed handshake retryable instead of leaving it stuck in the
+          // connecting state; onclose owns the backoff.
+          if (socket.readyState === WebSocket.OPEN) socket.close(1000, 'ready-send-failed');
+          return;
+        }
+        // A complete client handshake is hello validation plus a successfully
+        // queued ready frame. Sockets that fail before this point retain their
+        // prior exponential-backoff attempt.
         this.reconnectAttempt = 0;
         this.setState('connected');
         this.options.onHandshake?.(this.identity);
-        // The first handshake of every socket: announce readiness and ask for
-        // a full snapshot (the page is stable across socket reconnects; the
-        // session's view generation is the LIVE one from the hello).
-        this.sendRaw({ type: 'ready', buildId: PIE_BUILD_ID, viewGeneration: this.identity.viewGeneration });
+        // Ask for a full snapshot after the ready barrier (the page is stable
+        // across reconnects; the session's view generation is from hello).
         this.sendRaw({ type: 'refreshState', buildId: PIE_BUILD_ID, viewGeneration: this.identity.viewGeneration });
         // Every renderer registration starts with fresh host-side visibility
         // and focus beliefs. Reassert the page's current lifecycle state on
@@ -311,9 +336,13 @@ export class BrowserClientTransport implements ClientTransport {
       const typed = message as HostToWebviewMessage;
       for (const handler of this.handlers) handler(typed);
     };
-    socket.onclose = () => {
+    socket.onclose = (event) => {
       if (this.socket === socket) this.socket = null;
       this.identity = null;
+      if (RELOAD_REQUIRED_CLOSE_REASONS.has(event.reason)) {
+        this.latchReloadRequired();
+        return;
+      }
       if (!this.disposed && !this.compatibilityBlocked) {
         this.setState('disconnected');
         this.scheduleReconnect();
@@ -416,6 +445,18 @@ export class BrowserClientTransport implements ClientTransport {
     if (this.connectionState === next) return;
     this.connectionState = next;
     for (const handler of this.stateHandlers) handler(next);
+  }
+
+  /** Terminal protocol/build failures require a page reload. They must also
+   *  cancel any already-armed retry so one bad page cannot reconnect-storm. */
+  private latchReloadRequired(): void {
+    this.compatibilityBlocked = true;
+    this.identity = null;
+    if (this.reconnectTimer !== undefined) {
+      this.clearTimer(this.reconnectTimer);
+      this.reconnectTimer = undefined;
+    }
+    this.setState('reload-required');
   }
 
   private scheduleReconnect(): void {

@@ -1,1 +1,0 @@
-Read request.txt and write the requested compact JSON object to answer.json. Do not modify any other file.

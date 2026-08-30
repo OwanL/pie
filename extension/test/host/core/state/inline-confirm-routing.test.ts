@@ -146,7 +146,7 @@ test('FileRevert from a browser source: confirm reverts; cancel never touches th
   await settle();
   assert.deepEqual(revertCalls, [{ sessionPath: '/session/a', filePath: '/tmp/file.ts' }]);
   assert.deepEqual(events.filter((event) => event.kind === 'FileRevertResult'), [
-    { kind: 'FileRevertResult', corrId: 'c4', sessionPath: '/session/a', ok: true },
+    { kind: 'FileRevertResult', corrId: 'c4', sessionPath: '/session/a', filePath: '/tmp/file.ts', ok: true },
   ]);
 
   const cancelled = createHarness();
@@ -162,6 +162,6 @@ test('FileRevert from a browser source: confirm reverts; cancel never touches th
   await settle();
   assert.equal(cancelled.revertCalls.length, 0, 'a cancelled confirm never reverts');
   assert.deepEqual(cancelled.events.filter((event) => event.kind === 'FileRevertResult'), [
-    { kind: 'FileRevertResult', corrId: 'c5', sessionPath: '/session/a', ok: false, error: 'cancelled' },
+    { kind: 'FileRevertResult', corrId: 'c5', sessionPath: '/session/a', filePath: '/tmp/file.ts', ok: false, error: 'cancelled' },
   ]);
 });

@@ -149,6 +149,16 @@ function isContextWindowUsage(value: unknown): value is ContextWindowUsage {
   );
 }
 
+function isOptionalInitialContextEstimate(value: unknown): boolean {
+  return value === undefined || (
+    isObject(value)
+    && Number.isSafeInteger(value.tokens)
+    && (value.tokens as number) >= 0
+    && Number.isSafeInteger(value.contextWindow)
+    && (value.contextWindow as number) > 0
+  );
+}
+
 function isOptionalLiveTurnRecoveryIdentity(value: unknown): boolean {
   return value === undefined || (
     isObject(value)
@@ -181,6 +191,7 @@ export function isSessionOpenedPayload(value: unknown): value is SessionOpenedPa
     && (value.systemPromptDisabledEntries === undefined
       || (Array.isArray(value.systemPromptDisabledEntries)
         && value.systemPromptDisabledEntries.every(isString)))
+    && isOptionalInitialContextEstimate(value.initialContextEstimate)
     && isOptionalLiveTurnRecoveryIdentity(value.liveTurnRecoveryIdentity)
     && isOptionalSnapshotUnavailable(value.snapshotUnavailable)
     && isOptionalString(value.operationId)

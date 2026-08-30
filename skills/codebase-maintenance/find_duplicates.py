@@ -17,9 +17,9 @@ details). Findings are grouped into three categories — cross-file,
 same-file, and generated-file — with generated findings summarised by
 default (use --show-generated to list them).
 
-jscpd's --ignore-pattern accepts comma-separated globs, so every active
-pattern is passed through (trailing ``/`` is stripped because jscpd
-globs match both files and directories).
+jscpd's file-level ``--ignore`` option accepts comma-separated globs, so
+active shared patterns are translated to scan-root-relative file globs before
+execution. ``--ignore-pattern`` excludes token content, not files.
 
 Arguments:
     directory              Root directory to scan (required)
@@ -58,7 +58,8 @@ Output:
     exceeds --max-findings, a one-line remainder summary is printed.
 
 Exit codes:
-    0  no findings, or findings only (tool exit 1 remapped to 0)
+    0  scan completed, with or without findings
+    nonzero  jscpd failed; a partial report does not make the scan successful
     2  tool itself errored, missing dependency, or bad arguments
 """
 
@@ -228,22 +229,27 @@ _GENERATED_FILE_RE = re.compile(
 # Path helpers
 # ---------------------------------------------------------------------------
 def to_rel_posix(raw: str, directory: Path) -> str:
-    """Return *raw* as a posix path relative to *directory* when possible.
-
-    Falls back to the file name when *raw* is not under *directory*. Mixed
-    `\\` / `/` separators are normalised. Returns an empty string if no
-    usable name can be extracted.
-    """
+    """Return a jscpd report path relative to the scan root when possible."""
     if not raw:
         return ""
     cleaned = raw.replace("\x00", "").strip().strip('"').strip("'")
     if not cleaned:
         return ""
-    p = Path(cleaned)
-    try:
-        return p.resolve().relative_to(directory.resolve()).as_posix()
-    except (ValueError, OSError):
-        return p.name or cleaned
+    p = Path(cleaned.replace("\\", "/"))
+    root = directory.resolve()
+    if p.is_absolute():
+        candidates = [p]
+    elif p.parts and p.parts[0] == directory.name:
+        candidates = [directory.parent / p, directory / Path(*p.parts[1:])]
+    else:
+        # Modern jscpd reports paths relative to the path being scanned.
+        candidates = [directory / p, Path.cwd() / p]
+    for candidate in candidates:
+        try:
+            return candidate.resolve().relative_to(root).as_posix()
+        except (ValueError, OSError):
+            continue
+    return p.as_posix()
 
 
 def _find_binary(name: str) -> str | None:
@@ -293,18 +299,25 @@ def _extract_filepath(formatted: str) -> str:
 # jscpd — duplicate detection
 # ---------------------------------------------------------------------------
 def _ignore_patterns_for_jscpd(active_patterns: list[str]) -> list[str]:
-    """Translate shared .ignore patterns to jscpd --ignore-pattern globs.
+    """Translate shared patterns to jscpd's file-level ``--ignore`` globs.
 
-    jscpd's --ignore-pattern accepts a comma-separated list of glob patterns
-    (passed as a single value). Patterns ending in `/` are stripped because
-    jscpd globs match both files and directories.
+    Shared patterns containing a slash are relative to the scan root, while
+    basename patterns match at any depth.  Preserve that distinction instead
+    of prefixing every pattern with ``**/``.
     """
     out: list[str] = []
-    for p in active_patterns:
-        if not p:
+    for pattern in active_patterns:
+        normalized = normalize_path_token(pattern, strip_trailing_slash=False)
+        if not normalized:
             continue
-        # Strip directory marker — jscpd matches both files and dirs.
-        out.append(p.rstrip("/"))
+        is_directory = normalized.endswith("/")
+        normalized = normalized.rstrip("/")
+        any_depth = "/" not in normalized
+        prefix = "**/" if any_depth else ""
+        suffix = "/**" if is_directory else ""
+        glob = f"{prefix}{normalized}{suffix}"
+        if glob not in out:
+            out.append(glob)
     return out
 
 
@@ -315,7 +328,7 @@ def run_jscpd(
     min_tokens: int,
     ignore_globs: list[str],
 ) -> list[dict]:
-    """Run jscpd and return its parsed ``duplicates`` array (possibly empty)."""
+    """Run jscpd and return its parsed duplicates, or exit on tool failure."""
     with tempfile.TemporaryDirectory(prefix="jscpd-") as tmp:
         report_dir = Path(tmp)
         cmd: list[str] = [
@@ -328,7 +341,7 @@ def run_jscpd(
             "--min-tokens", str(min_tokens),
         ]
         if ignore_globs:
-            cmd += ["--ignore-pattern", ",".join(ignore_globs)]
+            cmd += ["--ignore", ",".join(ignore_globs)]
         cmd.append(str(directory))
 
         try:
@@ -351,12 +364,13 @@ def run_jscpd(
         # ``with`` block tears it down as soon as we return.
         duplicates = _read_jscpd_report(report_dir) or []
 
-    if result.returncode >= 2:
+    if result.returncode != 0:
+        diagnostics = result.stderr.strip()[:500]
         if duplicates:
-            return duplicates
+            partial = f"partial report contains {len(duplicates)} duplicate(s)"
+            diagnostics = f"{diagnostics}; {partial}" if diagnostics else partial
         print(
-            f"jscpd error (exit {result.returncode}): "
-            f"{result.stderr.strip()[:500]}",
+            f"jscpd error (exit {result.returncode}): {diagnostics}",
             file=sys.stderr,
         )
         sys.exit(result.returncode)
@@ -560,7 +574,7 @@ def _locate_jscpd() -> list[str]:
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
-def parse_args() -> tuple[Path, int, int, int, bool]:
+def parse_args() -> tuple[Path, int, int, int, bool, bool]:
     if len(sys.argv) >= 2 and sys.argv[1] in ("-h", "--help"):
         print(__doc__)
         sys.exit(0)
@@ -568,7 +582,7 @@ def parse_args() -> tuple[Path, int, int, int, bool]:
         print(
             "usage: find_duplicates.py <directory> "
             "[--max-findings N] [--min-lines N] [--min-tokens N] "
-            "[--show-generated]",
+            "[--show-generated] [--exclude-test-directories]",
             file=sys.stderr,
         )
         sys.exit(2)
@@ -618,6 +632,9 @@ def parse_args() -> tuple[Path, int, int, int, bool]:
             print(f"unknown argument: {a}", file=sys.stderr)
             sys.exit(2)
 
+    if max_findings < 0:
+        print("error: --max-findings must be >= 0", file=sys.stderr)
+        sys.exit(2)
     if min_lines < 1 or min_tokens < 1:
         print("error: --min-lines and --min-tokens must be >= 1", file=sys.stderr)
         sys.exit(2)

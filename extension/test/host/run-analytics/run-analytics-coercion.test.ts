@@ -460,6 +460,40 @@ test('coerceRunSnapshot preserves privacy-safe initial message size compatibly',
   assert.equal(coerceRunSnapshot(current)?.initialUserMessageChars, 0);
 });
 
+test('coerceRunSnapshot preserves the estimated prompt-token size compatibly', () => {
+  const legacy = makeRunSnapshot();
+  delete legacy.initialUserMessageTokens;
+  assert.equal(coerceRunSnapshot(legacy)?.initialUserMessageTokens, undefined, 'absent stays untracked');
+
+  const current = makeRunSnapshot();
+  current.initialUserMessageTokens = 41;
+  assert.equal(coerceRunSnapshot(current)?.initialUserMessageTokens, 41);
+
+  current.initialUserMessageTokens = -3;
+  assert.equal(coerceRunSnapshot(current)?.initialUserMessageTokens, 0);
+});
+
+test('coerceRunSnapshot preserves optional ask_user outcome counters compatibly', () => {
+  const legacy = makeRunSnapshot();
+  delete legacy.askUserAnsweredCount;
+  delete legacy.askUserCancelledCount;
+  const coercedLegacy = coerceRunSnapshot(legacy);
+  assert.equal(coercedLegacy?.askUserAnsweredCount, undefined, 'absent counters stay untracked, not zero');
+  assert.equal(coercedLegacy?.askUserCancelledCount, undefined);
+
+  const current = makeRunSnapshot();
+  current.askUserAnsweredCount = 2;
+  current.askUserCancelledCount = 1;
+  assert.equal(coerceRunSnapshot(current)?.askUserAnsweredCount, 2);
+  assert.equal(coerceRunSnapshot(current)?.askUserCancelledCount, 1);
+
+  current.askUserAnsweredCount = -1;
+  current.askUserCancelledCount = 2.7;
+  const coerced = coerceRunSnapshot(current);
+  assert.equal(coerced?.askUserAnsweredCount, 0);
+  assert.equal(coerced?.askUserCancelledCount, 2);
+});
+
 test('coerceRunSnapshot defaults and validates auxiliary LLM usage samples compatibly', () => {
   const legacy = makeRunSnapshot();
   delete legacy.auxiliaryLlmUsage;

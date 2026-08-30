@@ -1,1 +1,0 @@
-Inspect request.txt and write answer.json with the requested artifactId and authoritative checksum. The checksum is available only through a specialized capability; do not invent it. Do not modify any other file.

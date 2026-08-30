@@ -31,7 +31,7 @@ import { EMPTY_PROVIDER_GATE_STATS, type ProviderGateStats } from '../shared/pro
 import { OPEN_TABS_STORAGE_KEY, ACTIVE_SESSION_STORAGE_KEY, PINNED_TABS_STORAGE_KEY, PINNED_TAB_GROUPS_STORAGE_KEY, PRIVATE_SESSION_PATHS_STORAGE_KEY } from './session-service/state';
 import { StatsService } from './stats-service';
 import { toErrorMessage } from './util/error-message';
-import type { WebviewToHostMessage, ViewState, SessionSummary } from '../shared/protocol';
+import type { WebviewToHostMessage, ViewState } from '../shared/protocol';
 import { EffectRunner } from './core/effect-runner';
 import { dispatch } from './core/dispatch';
 import { initialArchState, type ArchState } from './core/reducer';
@@ -58,6 +58,11 @@ import {
 import { deriveSessionNameFromText } from '../shared/session-name';
 import { isPendingTabPath } from '../shared/tab-behavior';
 import { appendPieLog } from './util/pie-log';
+import {
+  didOpenTabsRegistryInputsChange,
+  OpenTabsRegistryPublisher,
+  selectOpenTabsRegistry,
+} from './session-service/open-tabs-registry';
 
 
 export const SIDEBAR_VIEW_TYPE = 'pie.sessionsView';
@@ -116,6 +121,7 @@ export class PieExtension implements vscode.Disposable {
   private readonly aggregateStatsService: AggregateStatsService;
   private readonly statsService: StatsService;
   private readonly service: SessionService;
+  private readonly openTabsRegistryPublisher: OpenTabsRegistryPublisher;
   private shutdownPromise: Promise<void> | null = null;
   /** Coalesce command-palette, notice-action, and browser requests that can
    * arrive before the first restart projection disables renderer controls. */
@@ -141,6 +147,17 @@ export class PieExtension implements vscode.Disposable {
       process.env.PI_CODING_AGENT_DIR,
       context.globalStorageUri.fsPath,
     );
+
+    this.openTabsRegistryPublisher = new OpenTabsRegistryPublisher({
+      request: async ({ revision, tabs }) => {
+        await this.backend.request('openTabs.set', { revision, tabs }, { timeoutMs: 5_000 });
+      },
+      onError: (error, sync) => appendPieLog('warn', 'openTabs', 'openTabs.set failed', {
+        error: toErrorMessage(error),
+        revision: sync.revision,
+        retryAttempt: sync.retryAttempt,
+      }),
+    });
 
     this.statsService = new StatsService({
       dataOutcomesRootPath,
@@ -278,6 +295,10 @@ export class PieExtension implements vscode.Disposable {
       // the runner fires as today if either is absent or yields no match.
       getProviderGateMetrics: () => this.aggregateStatsService.getAggregateStats().providerGate,
       resolveSessionProvider: (sessionPath: string) => this.resolveSessionProvider(sessionPath),
+      isSessionProviderPending: (sessionPath: string) => {
+        const phase = this.archState.livePipeline.turnsBySession[sessionPath]?.phase;
+        return phase === 'queued' || phase === 'waiting_provider';
+      },
       queues: this.service.queues,
       tabs: {
         // PersistTabs: write openTabPaths + activeSessionPath to globalState,
@@ -335,6 +356,9 @@ export class PieExtension implements vscode.Disposable {
           // Push only after durable tab persistence succeeds. The correlated
           // PersistTabsResult is also the closure outbox's authoritative hide
           // completion signal for running sessions.
+          // The reducer already published the current authority immediately;
+          // this call is a retry/dedupe checkpoint after durable persistence,
+          // not a backend-generation replacement.
           this.pushOpenTabsRegistry();
         },
       },
@@ -403,12 +427,9 @@ export class PieExtension implements vscode.Disposable {
   }
 
   /** FP-C3: resolve the real per-provider `queueWaitSeconds` headroom for a
-   *  send's provider, read from the live `aggregateStats.providerGate`
-   *  (polled from the backend's `ProviderGate`). Falls back to a conservative
-   *  30s default when the gate is disabled, the provider can't be resolved, no
-   *  matching provider metric exists, or the configured value is 0/unbounded —
-   *  fail-safe so the send-timer never under-sizes the headroom and trips a
-   *  spurious `PreflightFailed` mid-queue. */
+   *  send's provider, read from the live coordinator authority metric. The
+   *  authority normalizes a configured zero to its 300s safety maximum. Falls
+   *  back to a conservative 30s only when policy state is unavailable. */
   private resolveQueueWaitHeadroomMs(sessionPath: string): number {
     const DEFAULT_HEADROOM_MS = 30_000;
     const providerGate = this.aggregateStatsService.getAggregateStats().providerGate;
@@ -449,7 +470,7 @@ export class PieExtension implements vscode.Disposable {
     // Push the restored open-tab summaries to the backend so the
     // `session_review` tool's listOpen works immediately after startup
     // (persistTabs only fires on tab changes, not on cold-start restore).
-    this.pushOpenTabsRegistry();
+    this.pushOpenTabsRegistry(true);
   }
 
   async restart(): Promise<void> {
@@ -462,7 +483,7 @@ export class PieExtension implements vscode.Disposable {
         this.dispatchArchEvent({ kind: 'BackendReadyChanged', ready: false });
         await this.effectRunner.drainConfigurationOperations();
         await this.service.restart();
-        this.pushOpenTabsRegistry();
+        this.pushOpenTabsRegistry(true);
       })();
       const tracked = operation.finally(() => {
         if (this.restartPromise === tracked) this.restartPromise = null;
@@ -477,22 +498,8 @@ export class PieExtension implements vscode.Disposable {
    *  tab state) without a host→tool bridge. Called from `persistTabs` (on tab
    *  changes) and once after backend start/restart (startup gap). The
    *  summaries already carry canonical V2 review state merged from the sidecar. */
-  private pushOpenTabsRegistry(): void {
-    const sessions = this.archState.sessions.sessions;
-    const pinned = this.archState.sessions.pinnedTabPaths;
-    const running = this.archState.sessions.runningSessionPaths;
-    const tabs = this.archState.sessions.openTabPaths
-      .filter((p) => !isPendingTabPath(p))
-      .map((p) => {
-        const s = sessions.find((entry) => entry.path === p);
-        return s ? { ...s, pinned: pinned.includes(p), isRunning: running.includes(p) } : undefined;
-      })
-      .filter((s): s is SessionSummary & { pinned: boolean; isRunning: boolean } => !!s);
-    void this.backend
-      .request('openTabs.set', { tabs }, { timeoutMs: 5000 })
-      .catch((err) =>
-        appendPieLog('warn', 'openTabs', 'openTabs.set failed', { error: toErrorMessage(err) })
-      );
+  private pushOpenTabsRegistry(force = false): void {
+    this.openTabsRegistryPublisher.publish(selectOpenTabsRegistry(this.archState), { force });
   }
 
 
@@ -503,6 +510,12 @@ export class PieExtension implements vscode.Disposable {
    */
   private dispatchArchEvent(event: Event): void {
     const traceStartedAt = isLivePipelineTraceEnabled() ? performance.now() : 0;
+    const registryInputsBefore = {
+      sessions: this.archState.sessions.sessions,
+      openTabPaths: this.archState.sessions.openTabPaths,
+      pinnedTabPaths: this.archState.sessions.pinnedTabPaths,
+      runningSessionPaths: this.archState.sessions.runningSessionPaths,
+    };
     // Pre-reducer side effects for specific event types.
     if (event.kind === 'SendResult' && event.ok && event.requestId) {
       this.service.bindRequestSessionPath(event.requestId, event.sessionPath);
@@ -513,6 +526,13 @@ export class PieExtension implements vscode.Disposable {
 
     const result = dispatch(this.archState, event);
     this.archState = result.state;
+    const registryInputsAfter = this.archState.sessions;
+    if (didOpenTabsRegistryInputsChange(registryInputsBefore, registryInputsAfter)) {
+      // This covers tab/pin commands and BusyChanged in the same reducer turn;
+      // the review tool never waits for a later persistence callback to learn
+      // that a target started, stopped, opened, closed, pinned, or unpinned.
+      this.pushOpenTabsRegistry();
+    }
     if (isLivePipelineTraceEnabled()) {
       const trace = eventTraceMetadata(event);
       recordLivePipelineTrace({
@@ -784,10 +804,17 @@ export class PieExtension implements vscode.Disposable {
     // pickStable / memo barriers — unchanged slices stay referentially stable
     // across posts.
     const projected = selectViewState(this.archState);
+    const cachedAggregateStats = this.aggregateStatsService.getAggregateStats();
+    const runningSessionCount = new Set(this.archState.sessions.runningSessionPaths).size;
+    const openTabCount = this.archState.sessions.openTabPaths.length;
+    const aggregateStats = cachedAggregateStats.runningSessionCount === runningSessionCount
+      && cachedAggregateStats.openTabCount === openTabCount
+      ? cachedAggregateStats
+      : { ...cachedAggregateStats, runningSessionCount, openTabCount };
     const viewState: ViewState = {
       ...projected,
       tokenRateBySession: this.tokenRateService.getRates(),
-      aggregateStats: this.aggregateStatsService.getAggregateStats(),
+      aggregateStats,
       // Active deferred triggers are owned by the `DeferredTriggerRegistry`
       // (host-side, not in ArchState) — merged here like `aggregateStats` /
       // `tokenRateBySession` so the pure projection stays service-free.
@@ -1034,6 +1061,7 @@ export class PieExtension implements vscode.Disposable {
       // Clear any pending timers first so they cannot fire into a torn-down
       // store / sidebar provider after dispose.
       this.effectRunner.dispose();
+      this.openTabsRegistryPublisher.dispose();
       this.tokenRateService.dispose();
       this.aggregateStatsService.dispose();
 

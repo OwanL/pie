@@ -1,13 +1,17 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { h } from 'preact';
+import renderToString from 'preact-render-to-string';
+
 import {
+  ContextWindowBreakdownChart,
   computeBarLayout,
   kindSuffixFor,
   remainingTokensForChart,
   segmentColor,
 } from '../../../src/webview/panel/context-window/breakdown-chart';
-import type { ContextWindowBreakdownEntry } from '../../../src/webview/panel/context-window/breakdown';
+import type { ContextWindowBreakdown, ContextWindowBreakdownEntry } from '../../../src/webview/panel/context-window/breakdown';
 
 // `computeBarLayout` accepts a structural `{ tokens }` shape, so tests pass
 // minimal objects rather than full render segments.
@@ -98,6 +102,36 @@ test('remainingTokensForChart does not present an unknown window as fully remain
 });
 
 // ─── computeBarLayout ────────────────────────────────────────────────────────
+
+function makeBreakdown(overrides: Partial<ContextWindowBreakdown['summary']> = {}): ContextWindowBreakdown {
+  return {
+    entries: [{ key: 'system', label: 'System prompt', value: '23,400', kind: 'exact', tokens: 23400 }],
+    footerEntries: [],
+    summary: {
+      usedTokens: 23400,
+      usedKind: 'exact',
+      remainingTokens: 376600,
+      remainingKind: 'exact',
+      totalWindow: 400000,
+      ...overrides,
+    },
+    notes: [],
+    title: 'Context window usage',
+  };
+}
+
+test('ContextWindowBreakdownChart header shows percentage, used/total, and remaining', () => {
+  const html = renderToString(h(ContextWindowBreakdownChart, { breakdown: makeBreakdown() }));
+  assert.match(html, /rich-tooltip-head-value[^>]*>6% · 23\.4k \/ 400k · 376\.6k left</);
+});
+
+test('ContextWindowBreakdownChart header keeps unknown usage explicit', () => {
+  const html = renderToString(h(ContextWindowBreakdownChart, {
+    breakdown: makeBreakdown({ usedTokens: null, usedKind: 'unknown', remainingTokens: null, remainingKind: 'unknown' }),
+  }));
+  assert.match(html, /rich-tooltip-head-value[^>]*>\?% · \? \/ 400k</);
+  assert.doesNotMatch(html, / left</);
+});
 
 test('computeBarLayout: non-positive total yields a zeroed layout', () => {
   assert.deepEqual(computeBarLayout([seg(50), seg(50)], null, 0), { widths: [0, 0], remainingPct: 0 });

@@ -1,60 +1,60 @@
-import { useState, useCallback, useEffect } from 'preact/hooks';
+import { useState, useCallback } from 'preact/hooks';
 import type { SessionTabRunAction } from '../run-state';
-import type { SessionTabContextAction } from '../types';
+import type { SessionTabContextAction, SessionTabContextMenuState, SessionTabContextTarget } from '../types';
+import { getContextMenuTrigger } from '../../components/useMenuTriggerAria';
 
 export function useTabContextMenu({
   onDuplicate,
   onClose,
   onTogglePin,
+  onPinAndMerge,
   onRunAction,
 }: {
   onDuplicate: (tabPath: string) => void;
   onClose: (tabPath: string) => void;
   onTogglePin: (tabPath: string) => void;
+  onPinAndMerge: (tabPath: string) => void;
   onRunAction: (action: SessionTabRunAction, tabPath: string) => void;
 }) {
-  const [tabContextMenu, setTabContextMenu] = useState<{ x: number; y: number; tabPath: string } | null>(null);
+  const [tabContextMenu, setTabContextMenu] = useState<SessionTabContextMenuState | null>(null);
 
-  const onContextMenu = useCallback((event: MouseEvent, tabPath: string) => {
+  const onContextMenu = useCallback((
+    event: MouseEvent,
+    tabPath: string,
+    target: SessionTabContextTarget = { kind: 'tab' },
+    triggerEl?: HTMLElement | null,
+  ) => {
     event.preventDefault();
-    setTabContextMenu({ x: event.clientX, y: event.clientY, tabPath });
+    setTabContextMenu({
+      x: event.clientX,
+      y: event.clientY,
+      tabPath,
+      target,
+      triggerEl: triggerEl === undefined ? getContextMenuTrigger(event) : triggerEl,
+    });
   }, []);
 
+  const closeContextMenu = useCallback(() => setTabContextMenu(null), []);
+
   const onContextAction = useCallback((action: SessionTabContextAction, tabPath: string) => {
-    setTabContextMenu(null);
+    closeContextMenu();
     if (action === 'duplicate') {
       onDuplicate(tabPath);
     } else if (action === 'close') {
       onClose(tabPath);
     } else if (action === 'pin' || action === 'unpin') {
       onTogglePin(tabPath);
+    } else if (action === 'pin-merge') {
+      onPinAndMerge(tabPath);
     } else {
       onRunAction(action, tabPath);
     }
-  }, [onDuplicate, onClose, onTogglePin, onRunAction]);
-
-  useEffect(() => {
-    if (!tabContextMenu) return;
-    const close = () => setTabContextMenu(null);
-    const onDown = (e: MouseEvent) => {
-      const menuEl = document.querySelector('.session-tab-context-menu');
-      if (menuEl && menuEl.contains(e.target as Node)) return;
-      close();
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') close();
-    };
-    document.addEventListener('mousedown', onDown);
-    document.addEventListener('keydown', onKey);
-    return () => {
-      document.removeEventListener('mousedown', onDown);
-      document.removeEventListener('keydown', onKey);
-    };
-  }, [tabContextMenu]);
+  }, [closeContextMenu, onDuplicate, onClose, onTogglePin, onPinAndMerge, onRunAction]);
 
   return {
     tabContextMenu,
     setTabContextMenu,
+    closeContextMenu,
     onContextMenu,
     onContextAction,
   };

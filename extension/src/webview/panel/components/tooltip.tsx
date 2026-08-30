@@ -54,6 +54,13 @@ export interface TooltipProps {
    * label keeps updating live, and re-hovering refreshes the snapshot.
    */
   freezeWhileVisible?: boolean;
+  /**
+   * ARIA role for rich content that contains interactive controls. Ordinary
+   * tooltips keep `role="tooltip"`; `region` is a non-modal rich surface so
+   * descendants such as provider legend buttons are not placed in a tooltip
+   * landmark. Ignored for plain text content.
+   */
+  richRole?: 'tooltip' | 'region';
 }
 
 /**
@@ -82,6 +89,7 @@ export function Tooltip({
   delayHide = 50,
   placement = 'bottom',
   freezeWhileVisible = false,
+  richRole = 'tooltip',
   triggerClassName,
 }: TooltipProps): JSX.Element {
   const [isVisible, setIsVisible] = useState(false);
@@ -135,6 +143,16 @@ export function Tooltip({
       setIsVisible(false);
     }, effectiveDelayHide);
   }, [effectiveDelayHide]);
+
+  /** Close immediately for keyboard dismissal. Pointer leave keeps its small
+   * bridge delay so the pointer can cross the trigger→host gap. */
+  const dismissTooltip = useCallback(() => {
+    clearTimer(timersRef.current.show);
+    clearTimer(timersRef.current.hide);
+    timersRef.current.show = undefined;
+    timersRef.current.hide = undefined;
+    setIsVisible(false);
+  }, []);
 
   // Refs so the imperatively-attached host bridge listeners always call the
   // latest callbacks without re-binding on every render.
@@ -194,12 +212,34 @@ export function Tooltip({
       host.addEventListener('mouseleave', () => {
         hideTooltipRef.current();
       });
+      // Keyboard focus can move from the trigger into the out-of-tree rich
+      // surface. Treat that as one focus boundary, just like the pointer
+      // trigger↔host bridge, so nested legend controls remain reachable.
+      const tooltipHost = host as HTMLDivElement;
+      tooltipHost.addEventListener('focusin', () => {
+        clearTimer(timersRef.current.hide);
+        timersRef.current.hide = undefined;
+      });
+      tooltipHost.addEventListener('focusout', (event) => {
+        const next = event.relatedTarget;
+        if (next instanceof Node && (tooltipHost === next || tooltipHost.contains(next) || triggerRef.current?.contains(next))) return;
+        dismissTooltip();
+      });
       document.body.appendChild(host);
       hostRef.current = host;
     }
 
     const trigger = triggerRef.current;
     const showRich = effectiveHasRich;
+    const hostRole = showRich ? richRole : 'tooltip';
+    host.setAttribute('role', hostRole);
+    const triggerLabel = trigger?.getAttribute('aria-label')
+      ?? trigger?.firstElementChild?.getAttribute('aria-label');
+    if (showRich && hostRole === 'region' && triggerLabel) {
+      host.setAttribute('aria-label', triggerLabel);
+    } else {
+      host.removeAttribute('aria-label');
+    }
 
     if (!isVisible || (!effectiveContent && !showRich) || !trigger) {
       host.style.display = 'none';
@@ -253,7 +293,7 @@ export function Tooltip({
 
     host.style.top = `${top}px`;
     host.style.left = `${left}px`;
-  }, [isVisible, effectiveContent, effectiveContentNode, effectiveHasRich, placement]);
+  }, [isVisible, effectiveContent, effectiveContentNode, effectiveHasRich, placement, richRole, dismissTooltip]);
 
   // Remove the host when the component unmounts, and tear down any pending timers.
   useEffect(() => {
@@ -284,7 +324,7 @@ export function Tooltip({
   useEffect(() => {
     if (!isVisible) return;
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setIsVisible(false);
+      if (e.key === 'Escape') dismissTooltip();
     };
     const handleResize = () => setIsVisible(false);
     const handleScroll = () => {
@@ -304,7 +344,7 @@ export function Tooltip({
       window.removeEventListener('resize', handleResize);
       window.removeEventListener('scroll', handleScroll, true);
     };
-  }, [isVisible]);
+  }, [isVisible, dismissTooltip]);
 
   const childArray = toChildArray(children);
   const singleChild = childArray.length === 1 ? childArray[0] : null;
@@ -330,9 +370,35 @@ export function Tooltip({
           (singleVNode.props as { onFocus?: (event: FocusEvent) => void }).onFocus?.(e);
           showTooltip();
         },
+        onKeyDown: (e: KeyboardEvent) => {
+          (singleVNode.props as { onKeyDown?: (event: KeyboardEvent) => void }).onKeyDown?.(e);
+          if (e.key === 'Escape') {
+            e.preventDefault();
+            dismissTooltip();
+            return;
+          }
+          // Rich aggregate surfaces live in an out-of-tree host. Move Tab
+          // into their first control explicitly; otherwise the browser visits
+          // the rest of the panel, blurs the trigger, and hides the host before
+          // its provider legend controls can be reached.
+          if (e.key !== 'Tab' || e.shiftKey || !isVisible || richRole !== 'region') return;
+          const host = hostRef.current;
+          const firstControl = host?.querySelector<HTMLElement>(
+            'button, a[href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+          );
+          if (!firstControl) return;
+          e.preventDefault();
+          firstControl.focus();
+        },
         onBlur: (e: FocusEvent) => {
           (singleVNode.props as { onBlur?: (event: FocusEvent) => void }).onBlur?.(e);
-          hideTooltip();
+          const relatedTarget = e.relatedTarget;
+          const host = hostRef.current;
+          // Moving into the out-of-tree rich surface is still inside the
+          // tooltip's keyboard interaction boundary. Any other blur closes
+          // immediately; pointer leave retains its existing delayed behavior.
+          if (host && relatedTarget instanceof Node && (host === relatedTarget || host.contains(relatedTarget))) return;
+          dismissTooltip();
         },
       })
     : children;

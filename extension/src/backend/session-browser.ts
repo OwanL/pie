@@ -49,7 +49,7 @@ function deriveName(manager: SdkSessionManager, branch: SessionEntryLike[]): { n
   for (const entry of branch) {
     if (entry.type === 'message' && entry.message?.role === 'user') {
       const derived = deriveSessionNameFromText(messageText(entry.message.content));
-      if (!derived.isPlaceholder) return derived;
+      if (derived.name !== NEW_SESSION_NAME) return derived;
     }
   }
   return { name: NEW_SESSION_NAME, isPlaceholder: true };

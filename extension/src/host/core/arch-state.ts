@@ -26,8 +26,10 @@ import type {
   ModelInfo,
   PruningSettings,
   PruningMode,
+  SessionTitlesSettings,
   ToolResultPruningSettings,
   ContextWindowUsage,
+  InitialContextEstimate,
   SessionAnalyticsFactors,
   RetryStatus,
   ChatPrefs,
@@ -47,6 +49,7 @@ import type { LivePipelineState, LiveTurnPhase } from '../../shared/live-pipelin
 import {
   DEFAULT_CHAT_PREFS,
   DEFAULT_PRUNING_SETTINGS,
+  DEFAULT_SESSION_TITLES_SETTINGS,
   DEFAULT_TOOL_RESULT_PRUNING_SETTINGS,
 } from '../../shared/protocol';
 import { deriveBundledExtensions } from '../../shared/bundled-extensions.js';
@@ -93,6 +96,14 @@ export interface TranscriptState {
 // Sessions sub-state
 // ---------------------------------------------------------------------------
 
+export interface SessionTitleGenerationState {
+  status: 'armed' | 'pending' | 'failed';
+  /** First user prompt sent to the dedicated title model. */
+  prompt: string;
+  /** Correlation of the send that started generation. */
+  corrId?: string;
+}
+
 /**
  * Session list, tab state, running/busy state, analytics per session.
  */
@@ -137,6 +148,13 @@ export interface SessionsState {
   privacyModeBySession: Record<string, boolean>;
   /** Per-session interrupt-in-flight flag (formerly SessionArchState). */
   interruptInFlightBySession: Record<string, boolean>;
+  /** Host-owned async title lifecycle. Only `pending` paths render a spinner. */
+  titleGenerationBySession: Record<string, SessionTitleGenerationState>;
+  /** Sessions whose most recent interrupt completion barrier settled
+   *  successfully. Late busy/opened events from the retired turn cannot
+   *  re-arm these paths; the next genuine execution command clears the
+   *  fence before optimistically starting new work. */
+  interruptSettledSessionPaths: string[];
   /** Per-session live auto-retry status (absent entry = no retry in flight).
    *  Driven by the SDK's `auto_retry_start` / `auto_retry_end` events; surfaced
    *  to the webview as a "Retrying N of M…" chip with a Cancel button.
@@ -167,6 +185,8 @@ export interface SettingsState {
   pruningSettings: PruningSettings;
   /** Tool-result pruning configuration (settings.json `toolResultPruning` block). */
   toolResultPruningSettings: ToolResultPruningSettings;
+  /** Optional LLM session-title generation policy (settings.json `sessionTitles` block). */
+  sessionTitlesSettings: SessionTitlesSettings;
   /** Available models per session. */
   availableModelsBySession: Record<string, ModelInfo[]>;
   /** Whether a per-session model catalog is provisional while a durable path is
@@ -184,6 +204,9 @@ export interface SettingsState {
   modelHydrationRevisionBySession: Record<string, number>;
   /** Context window usage per session. */
   contextUsageBySession: Record<string, ContextWindowUsage | null>;
+  /** Fresh cold empty-session inventory estimates. Hot runtime/provider state
+   * clears these rather than treating them as measured usage. */
+  initialContextEstimateBySession: Record<string, InitialContextEstimate | null>;
   /** Whether the PI backend is connected and ready. */
   backendReady: boolean;
   /** User-facing notice message (short summary), or null. */
@@ -221,6 +244,17 @@ export interface SettingsState {
    *  when the backend restarts (the adapter re-reads config on the next
    *  session start). */
   mcpPendingApply: boolean;
+  /** Per-session MCP server overrides (session path → server name →
+   *  disabled-for-this-session). Host memory; the backend mirrors the set
+   *  into the session's `--mcp-config` artifact on every write and recycles
+   *  the session's worker when idle so the adapter applies it at the next
+   *  session start. Never touches the global `.pi/mcp.json` layer. */
+  mcpSessionOverridesBySession: Record<string, Record<string, boolean>>;
+  /** Per-session pending-apply: a session-scoped toggle whose worker recycle
+   *  was refused (session busy / transitioning). Retried on the next
+   *  `BusyChanged(false)`; the override always applies at the next session
+   *  reload regardless. */
+  mcpPendingApplyBySession: Record<string, boolean>;
   /** Extensions that provide tool integrations. */
   availableExtensions: ExtensionInfo[];
   /** Per-session pending extension UI requests, keyed by request ID (ask-user inline choices). */
@@ -579,6 +613,8 @@ export function createInitialArchState(): ArchState {
       analyticsFactorsBySession: {},
       privacyModeBySession: {},
       interruptInFlightBySession: {},
+      titleGenerationBySession: {},
+      interruptSettledSessionPaths: [],
       retryStatusBySession: {},
       intentionallyHiddenRunningPaths: [],
     },
@@ -586,6 +622,7 @@ export function createInitialArchState(): ArchState {
       modelSettings: null,
       pruningSettings: { ...DEFAULT_PRUNING_SETTINGS },
       toolResultPruningSettings: { ...DEFAULT_TOOL_RESULT_PRUNING_SETTINGS, rules: { ...DEFAULT_TOOL_RESULT_PRUNING_SETTINGS.rules } },
+      sessionTitlesSettings: { ...DEFAULT_SESSION_TITLES_SETTINGS },
       availableModelsBySession: {},
       availableModelsStatusBySession: {},
       modelBackendGeneration: 0,
@@ -593,6 +630,7 @@ export function createInitialArchState(): ArchState {
       modelWriteFence: 0,
       modelHydrationRevisionBySession: {},
       contextUsageBySession: {},
+      initialContextEstimateBySession: {},
       backendReady: false,
       notice: null,
       noticeKind: null,
@@ -602,6 +640,8 @@ export function createInitialArchState(): ArchState {
       mcpServers: [],
       mcpServersStatus: 'loading',
       mcpPendingApply: false,
+      mcpSessionOverridesBySession: {},
+      mcpPendingApplyBySession: {},
       availableExtensions: deriveBundledExtensions(),
       pendingExtensionUIRequestsBySession: {},
     },

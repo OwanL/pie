@@ -8,7 +8,7 @@
 // Classification mirrors scripts/run-tests.mjs PACKAGE_CONFIGS:
 //  - extension/      -> cwd extension/,         tsx = extension/node_modules/tsx
 //  - analysis/        -> cwd analysis/,         tsx = analysis/node_modules/tsx
-//  - scripts/test/ and scripts/experiments/test/ -> cwd repoRoot, tsx = node_modules/tsx (root)
+//  - scripts/test/  -> cwd repoRoot, tsx = node_modules/tsx (root)
 //  - extensions/<id>/ -> cwd repoRoot,          tsx = node_modules/tsx (root)
 //
 // Only the `subagent` package needs a `--tsconfig` (its schema test resolves pi
@@ -97,18 +97,15 @@ export function normalizeRepoRelative(repoRoot, input) {
  *
  * @param {string} repoRoot
  * @param {string} input - absolute or repo-relative test file path
- * @returns {{ id: string, cwd: string, tsxConfig?: string, tsxBin: string, repoRel: string, abs: string, relativeFilePath: string, serial: boolean }}
+ * @returns {{ id: string, cwd: string, tsxConfig?: string, tsxBin: string, repoRel: string, abs: string, relativeFilePath: string }}
  * @throws if the file is not under extension/, analysis/, either scripts test directory, or extensions/<id>/
  */
 export function classifyTestFile(repoRoot, input) {
   const { repoRel, abs } = normalizeRepoRelative(repoRoot, input);
-  const isExperimentTest = repoRel.startsWith('scripts/experiments/test/');
-  const directive = isExperimentTest
-    ? { id: 'scripts', dir: 'scripts/experiments/test' }
-    : PACKAGE_DIRECTIVES.find(({ dir }) => repoRel === dir || repoRel.startsWith(`${dir}/`));
+  const directive = PACKAGE_DIRECTIVES.find(({ dir }) => repoRel === dir || repoRel.startsWith(`${dir}/`));
   if (!directive) {
     throw new Error(
-      `Cannot classify test file "${repoRel}": not under extension/, analysis/, scripts/test/, scripts/experiments/test/, or extensions/<id>/.`,
+      `Cannot classify test file "${repoRel}": not under extension/, analysis/, scripts/test/, or extensions/<id>/.`,
     );
   }
   const { id, dir } = directive;
@@ -121,7 +118,7 @@ export function classifyTestFile(repoRoot, input) {
   const tsxConfig = TSX_CONFIG_BY_PACKAGE[id];
   const tsxBin = resolveLocalTsx(cwd);
   const relativeFilePath = path.relative(cwd, abs).replace(/\\/g, '/');
-  return { id, cwd, tsxConfig, tsxBin, repoRel, abs, relativeFilePath, serial: isExperimentTest };
+  return { id, cwd, tsxConfig, tsxBin, repoRel, abs, relativeFilePath };
 }
 
 /**
@@ -156,14 +153,12 @@ export function groupFilesByPackage(repoRoot, inputs) {
         tsxConfig: descriptor.tsxConfig,
         tsxBin: descriptor.tsxBin,
         files: [],
-        serial: false,
       };
       groups.set(descriptor.id, group);
     }
     if (!group.files.includes(descriptor.relativeFilePath)) {
       group.files.push(descriptor.relativeFilePath);
     }
-    group.serial ||= descriptor.serial;
   }
   if (errors.length > 0) {
     throw new Error(errors.join('\n'));
@@ -173,12 +168,11 @@ export function groupFilesByPackage(repoRoot, inputs) {
 
 /**
  * Build the tsx CLI args for one package group (fast / no coverage).
- * @param {{ tsxConfig?: string, files: string[], serial?: boolean }} group
+ * @param {{ tsxConfig?: string, files: string[] }} group
  * @returns {string[]}
  */
 export function buildTsxArgs(group) {
   const args = ['--test', '--test-force-exit'];
-  if (group.serial) args.push('--test-concurrency=1');
   if (group.tsxConfig) {
     // Must precede the positional test files.
     args.push(`--tsconfig=${group.tsxConfig}`);
@@ -218,7 +212,7 @@ function printHelp() {
     `Usage: node scripts/run-test-files.mjs <test-file>... [options]\n\n` +
       `Run specific test files through the appropriate local tsx with node:test\n` +
       `(fast mode: parallel files, no coverage). Classifies each path into\n` +
-      `extension/, analysis/, scripts/test/, scripts/experiments/test/, or extensions/<id>/ and uses that package's local\n` +
+      `extension/, analysis/, scripts/test/, or extensions/<id>/ and uses that package's local\n` +
       `tsx; the subagent package additionally passes --tsconfig.\n\n` +
       `Options:\n` +
       `  --help, -h   Show this help.\n` +

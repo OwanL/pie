@@ -23,6 +23,7 @@ import type {
   ComposerInputDraft,
   PruningMode,
   PruningSettings,
+  SessionTitlesSettings,
   ToolResultPruningSettings,
   AppCommittedPayload,
   PaintObservedPayload,
@@ -308,6 +309,7 @@ function validateChatPrefsPatch(value: unknown): value is Partial<ChatPrefs> {
     'suppressCompletionNotifications',
     'showPruningMessages',
     'autonomousMode',
+    'mcpEnabled',
     'subagentAlwaysParentModel',
     'subagentRouteAroundSaturatedProviders',
     'subagentFallbackOnProviderFailure',
@@ -375,7 +377,7 @@ function validateChatPrefsPatch(value: unknown): value is Partial<ChatPrefs> {
       if (v !== undefined && (!isObject(v) || Object.values(v).some((entry) => !isStringBooleanRecord(entry)))) return false;
       continue;
     }
-    if (key === 'subagentNestedAllowedBuckets') {
+    if (key === 'subagentNestedAllowedBuckets' || key === 'subagentBucketCanSpawn') {
       if (v !== undefined && !isNestedAllowedBucketsPatch(v)) return false;
       continue;
     }
@@ -427,6 +429,27 @@ function validatePruningSettingsPatch(value: unknown): value is Partial<PruningS
 }
 
 const VALID_TOOL_RESULT_PRUNING_PROFILES = new Set<ToolResultPruningSettings['profile']>(['default', 'security']);
+
+/** Strict patch validation for the `sessionTitles` family: closed key set,
+ *  boolean `enabled`, non-empty provider/model strings. */
+function validateSessionTitlesSettingsPatch(value: unknown): value is Partial<SessionTitlesSettings> {
+  if (!isObject(value)) return false;
+  for (const key of Object.keys(value)) {
+    const v = (value as Record<string, unknown>)[key];
+    if (key === 'enabled') {
+      if (v !== undefined && typeof v !== 'boolean') return false;
+    } else if (key === 'provider' || key === 'model') {
+      if (v !== undefined && (typeof v !== 'string' || v.length === 0)) return false;
+    } else if (key === 'thinkingLevel') {
+      if (v !== undefined && !isThinkingLevel(v)) return false;
+    } else if (key === 'timeoutSec') {
+      if (v !== undefined && (!Number.isInteger(v) || (v as number) < 1 || (v as number) > 60)) return false;
+    } else {
+      return false;
+    }
+  }
+  return true;
+}
 
 function validateToolResultPruningSettingsPatch(value: unknown): value is Partial<ToolResultPruningSettings> {
   if (!isObject(value)) return false;
@@ -713,6 +736,7 @@ export function validateWebviewToHostMessage(
     case 'openSession':
     case 'duplicateSession':
     case 'togglePinTab':
+    case 'pinAndMergePinnedTab':
       if (!isString(value.sessionPath)) return fail(`${type}: missing string \`sessionPath\``);
       return { ok: true, value: value as WebviewToHostMessage };
 
@@ -730,6 +754,11 @@ export function validateWebviewToHostMessage(
     case 'mergePinnedGroups':
       if (!isString(value.sourcePath) || value.sourcePath.length === 0) return fail(`${type}: invalid \`sourcePath\``);
       if (!isString(value.targetPath) || value.targetPath.length === 0) return fail(`${type}: invalid \`targetPath\``);
+      return { ok: true, value: value as WebviewToHostMessage };
+
+    case 'dissolvePinnedGroup':
+    case 'unpinPinnedGroup':
+      if (!isString(value.sourcePath) || value.sourcePath.length === 0) return fail(`${type}: invalid \`sourcePath\``);
       return { ok: true, value: value as WebviewToHostMessage };
 
     case 'ungroupPinnedTab':
@@ -764,12 +793,30 @@ export function validateWebviewToHostMessage(
       if (typeof value.enabled !== 'boolean') return fail('setPrivacyMode: missing boolean `enabled`');
       return { ok: true, value: value as WebviewToHostMessage };
 
+    case 'mcpListRequested':
+      return { ok: true, value: value as WebviewToHostMessage };
+
+    case 'mcpSetServerEnabled':
+      if (!isString(value.name) || value.name.length === 0) return fail('mcpSetServerEnabled: missing string `name`');
+      if (typeof value.enabled !== 'boolean') return fail('mcpSetServerEnabled: missing boolean `enabled`');
+      return { ok: true, value: value as WebviewToHostMessage };
+
+    case 'mcpSetServerEnabledForSession':
+      if (!isString(value.sessionPath)) return fail('mcpSetServerEnabledForSession: missing string `sessionPath`');
+      if (!isString(value.name) || value.name.length === 0) return fail('mcpSetServerEnabledForSession: missing string `name`');
+      if (typeof value.enabled !== 'boolean') return fail('mcpSetServerEnabledForSession: missing boolean `enabled`');
+      return { ok: true, value: value as WebviewToHostMessage };
+
     case 'setPruningSettings':
       if (!validatePruningSettingsPatch(value.settings)) return fail('setPruningSettings: invalid `settings` patch');
       return { ok: true, value: value as WebviewToHostMessage };
 
     case 'setToolResultPruningSettings':
       if (!validateToolResultPruningSettingsPatch(value.settings)) return fail('setToolResultPruningSettings: invalid `settings` patch');
+      return { ok: true, value: value as WebviewToHostMessage };
+
+    case 'setSessionTitlesSettings':
+      if (!validateSessionTitlesSettingsPatch(value.settings)) return fail('setSessionTitlesSettings: invalid `settings` patch');
       return { ok: true, value: value as WebviewToHostMessage };
 
     case 'openFileDiff':
@@ -797,6 +844,11 @@ export function validateWebviewToHostMessage(
 
     case 'cancelEdit':
       if (!isString(value.sessionPath)) return fail('cancelEdit: missing string `sessionPath`');
+      return { ok: true, value: value as WebviewToHostMessage };
+
+    case 'truncateAfter':
+      if (!isString(value.sessionPath)) return fail('truncateAfter: missing string `sessionPath`');
+      if (!isString(value.messageId)) return fail('truncateAfter: missing string `messageId`');
       return { ok: true, value: value as WebviewToHostMessage };
 
     case 'dismissNotice':

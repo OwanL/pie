@@ -60,6 +60,7 @@ export type WorkerRuntimeOperation =
   | 'session.loadTranscriptPage'
   | 'session.loadDetail'
   | 'session.truncateAfter'
+  | 'session.title.generate'
   | 'models.list'
   | 'liveTurn.checkpoint'
   | 'message.send'
@@ -100,14 +101,21 @@ export type WorkerRuntimeEventName =
   | 'operational-error'
   | 'error';
 
-export type WorkerSyncDomain = 'settings' | 'catalog' | 'auth' | 'runtimePrefs' | 'providerPolicy';
+export type WorkerSyncDomain =
+  | 'settings'
+  | 'catalog'
+  | 'auth'
+  | 'runtimePrefs'
+  | 'providerPolicy'
+  | 'sessionRegistry';
 
 export type WorkerSyncPayload =
   | { domain: 'settings'; payload: { values: WorkerJsonObject } }
   | { domain: 'catalog'; payload: { models: WorkerJsonValue[] } }
   | { domain: 'auth'; payload: { authPath: string; fingerprint: string } }
   | { domain: 'runtimePrefs'; payload: { values: WorkerJsonObject } }
-  | { domain: 'providerPolicy'; payload: { providers: WorkerJsonObject } };
+  | { domain: 'providerPolicy'; payload: { providers: WorkerJsonObject } }
+  | { domain: 'sessionRegistry'; payload: { tabs: WorkerJsonValue[] } };
 
 export type WorkerProviderReleaseOutcome = 'completed' | 'failed' | 'cancelled';
 export type WorkerProviderObservationClassification = 'success' | 'http-error' | 'transport-error' | 'cancelled';
@@ -200,6 +208,8 @@ export interface WorkerProviderGrantedFrame extends WorkerFrameBase {
     provider: string;
     model: string;
     grantedAt: number;
+    headerWaitMs: number;
+    streamIdleTimeoutMs: number;
   };
 }
 
@@ -207,6 +217,17 @@ export interface WorkerProviderCancelledFrame extends WorkerFrameBase {
   kind: 'provider.cancelled';
   requestId: string;
   reason: string;
+}
+
+export interface WorkerProviderRejectedFrame extends WorkerFrameBase {
+  kind: 'provider.rejected';
+  requestId: string;
+  error: {
+    name: string;
+    message: string;
+    retryable: boolean;
+    httpStatus?: number;
+  };
 }
 
 export interface WorkerProviderCancelAckFrame extends WorkerFrameBase {
@@ -281,6 +302,7 @@ export type CoordinatorToWorkerFrame =
   | WorkerOwnershipRuntimeReadyAckFrame
   | WorkerProviderGrantedFrame
   | WorkerProviderCancelledFrame
+  | WorkerProviderRejectedFrame
   | WorkerProviderCancelAckFrame
   | WorkerProviderReleasedFrame
   | WorkerSettingsAuthoritativeFrame
@@ -564,7 +586,7 @@ export type WorkerToCoordinatorRequestFrame = Extract<WorkerToCoordinatorFrame, 
 }>;
 export type CoordinatorToWorkerResponseFrame = Extract<CoordinatorToWorkerFrame, {
   kind: 'ownership.reserved' | 'ownership.committed' | 'ownership.consumed' | 'ownership.aborted' | 'ownership.rejected'
-    | 'ownership.runtimeReadyAck' | 'provider.granted' | 'provider.cancelled' | 'provider.cancelAck'
+    | 'ownership.runtimeReadyAck' | 'provider.granted' | 'provider.cancelled' | 'provider.rejected' | 'provider.cancelAck'
     | 'provider.released' | 'settings.authoritative';
 }>;
 export type CoordinatorToWorkerRequestBody = RequestFrameBody<CoordinatorToWorkerRequestFrame>;
@@ -693,6 +715,7 @@ function parseWorkerIpcFrameShapeInternal(value: unknown, requireSeq: boolean): 
     case 'provider.granted': detail = validateProviderGranted(value, requireSeq); break;
     case 'provider.cancel': detail = validateProviderCancel(value, requireSeq); break;
     case 'provider.cancelled': detail = validateProviderCancelled(value, requireSeq); break;
+    case 'provider.rejected': detail = validateProviderRejected(value, requireSeq); break;
     case 'provider.cancelAck': detail = validateProviderCancelAck(value, requireSeq); break;
     case 'provider.observation': detail = validateProviderObservation(value, requireSeq); break;
     case 'provider.release': detail = validateProviderRelease(value, requireSeq); break;
@@ -749,7 +772,7 @@ function validateFrame<T extends WorkerIpcFrame>(
   const coordinatorKinds: ReadonlySet<WorkerIpcFrameKind> = new Set([
     'bootstrap', 'command', 'runtime.promote', 'runtime.command', 'sync',
     'ownership.reserved', 'ownership.committed', 'ownership.consumed', 'ownership.aborted', 'ownership.rejected', 'ownership.runtimeReadyAck',
-    'provider.granted', 'provider.cancelled', 'provider.cancelAck', 'provider.released', 'settings.authoritative', 'interrupt', 'shutdown',
+    'provider.granted', 'provider.cancelled', 'provider.rejected', 'provider.cancelAck', 'provider.released', 'settings.authoritative', 'interrupt', 'shutdown',
     'detail.subscribe', 'detail.unsubscribe', 'detail.fetch',
   ]);
   if ((direction === 'coordinator') !== coordinatorKinds.has(frame.kind)) {
@@ -873,7 +896,7 @@ function validateCommand(value: Record<string, unknown>, requireSeq: boolean): s
 
 const RUNTIME_OPERATIONS: ReadonlySet<WorkerRuntimeOperation> = new Set([
   'session.open', 'session.preload', 'session.loadTranscriptPage', 'session.loadDetail',
-  'session.truncateAfter', 'models.list', 'liveTurn.checkpoint', 'message.send', 'message.compact',
+  'session.truncateAfter', 'session.title.generate', 'models.list', 'liveTurn.checkpoint', 'message.send', 'message.compact',
   'message.clearQueue', 'message.replaceQueue', 'extension_ui.response',
   'settings.set', 'systemPromptToggles.set', 'test.extensionCommand',
 ]);
@@ -889,7 +912,7 @@ const RUNTIME_EVENT_NAMES: ReadonlySet<WorkerRuntimeEventName> = new Set([
 ]);
 
 const SYNC_DOMAINS: ReadonlySet<WorkerSyncDomain> = new Set([
-  'settings', 'catalog', 'auth', 'runtimePrefs', 'providerPolicy',
+  'settings', 'catalog', 'auth', 'runtimePrefs', 'providerPolicy', 'sessionRegistry',
 ]);
 
 function validateRuntimePromote(value: Record<string, unknown>, requireSeq: boolean): string | undefined {
@@ -1066,12 +1089,16 @@ function validateProviderGranted(value: Record<string, unknown>, requireSeq: boo
   if (extra) return extra;
   if (!boundedString(value.requestId, MAX_ID_BYTES)) return 'requestId must be a bounded non-empty string.';
   if (!isRecord(value.lease)) return 'provider.granted.lease must be an object.';
-  const nested = exactKeys(value.lease, ['leaseId', 'provider', 'model', 'grantedAt']);
+  const nested = exactKeys(value.lease, [
+    'leaseId', 'provider', 'model', 'grantedAt', 'headerWaitMs', 'streamIdleTimeoutMs',
+  ]);
   if (nested) return `provider.granted.lease ${nested}`;
   for (const key of ['leaseId', 'provider', 'model'] as const) {
     if (!boundedString(value.lease[key], MAX_ID_BYTES)) return `provider.granted.lease.${key} must be a bounded non-empty string.`;
   }
   if (!isSafeNonNegativeInteger(value.lease.grantedAt)) return 'provider.granted.lease.grantedAt must be a non-negative safe integer.';
+  if (!isSafePositiveInteger(value.lease.headerWaitMs)) return 'provider.granted.lease.headerWaitMs must be a positive safe integer.';
+  if (!isSafePositiveInteger(value.lease.streamIdleTimeoutMs)) return 'provider.granted.lease.streamIdleTimeoutMs must be a positive safe integer.';
   return undefined;
 }
 
@@ -1090,6 +1117,23 @@ function validateProviderCancelled(value: Record<string, unknown>, requireSeq: b
   if (extra) return extra;
   if (!boundedString(value.requestId, MAX_ID_BYTES) || !boundedString(value.reason, MAX_REASON_BYTES)) {
     return 'provider.cancelled fields must be bounded non-empty strings.';
+  }
+  return undefined;
+}
+
+function validateProviderRejected(value: Record<string, unknown>, requireSeq: boolean): string | undefined {
+  const extra = exactKeys(value, [...baseKeys(requireSeq), 'requestId', 'error']);
+  if (extra) return extra;
+  if (!boundedString(value.requestId, MAX_ID_BYTES)) return 'requestId must be a bounded non-empty string.';
+  if (!isRecord(value.error)) return 'provider.rejected.error must be an object.';
+  const nested = exactKeys(value.error, ['name', 'message', 'retryable'], ['httpStatus']);
+  if (nested) return `provider.rejected.error ${nested}`;
+  if (!boundedString(value.error.name, MAX_ID_BYTES)) return 'provider.rejected.error.name must be bounded.';
+  if (!boundedString(value.error.message, MAX_ERROR_MESSAGE_BYTES)) return 'provider.rejected.error.message must be bounded.';
+  if (typeof value.error.retryable !== 'boolean') return 'provider.rejected.error.retryable must be boolean.';
+  if (value.error.httpStatus !== undefined
+      && (!Number.isSafeInteger(value.error.httpStatus) || Number(value.error.httpStatus) < 100 || Number(value.error.httpStatus) > 599)) {
+    return 'provider.rejected.error.httpStatus must be an HTTP status from 100 through 599.';
   }
   return undefined;
 }
@@ -1185,6 +1229,12 @@ function validateSync(value: Record<string, unknown>, requireSeq: boolean): stri
     case 'providerPolicy': {
       const nested = exactKeys(value.payload, ['providers']);
       return nested ? `sync.payload ${nested}` : validateJsonObject(value.payload.providers, 'sync.payload.providers');
+    }
+    case 'sessionRegistry': {
+      const nested = exactKeys(value.payload, ['tabs']);
+      if (nested) return `sync.payload ${nested}`;
+      if (!Array.isArray(value.payload.tabs)) return 'sync.payload.tabs must be an array.';
+      return validateJsonValue(value.payload.tabs, 'sync.payload.tabs');
     }
   }
 }

@@ -74,6 +74,16 @@ test('mapSendOrEditError classifies backend-exit errors', () => {
   }
 });
 
+test('mapSendOrEditError gives disabled providers an actionable settings notice', () => {
+  const send = mapSendOrEditError(
+    'PROVIDER_DISABLED: The selected model provider is disabled in Pie settings.',
+    'send',
+  )!;
+  assert.equal(send.kind, 'provider-disabled');
+  assert.match(send.message, /Enable it in settings|enabled provider/);
+  assert.deepEqual(noticeActionsFor(send.kind), ['open-settings']);
+});
+
 test('mapSendOrEditError falls back to a generic message for unknown errors (no raw error leaked)', () => {
   const send = mapSendOrEditError('some unknown internal error req-99 with internals', 'send')!;
   assert.equal(send.kind, 'send-failed');
@@ -196,6 +206,7 @@ test('noticeActionsFor maps each kind to its recovery actions (single source of 
     'prepass-failed': ['retry', 'retry-without-pruning'],
     'dropped-line': ['retry', 'show-logs'],
     'backend-exit': ['restart-backend', 'show-logs'],
+    'provider-disabled': ['open-settings'],
     'operational-error': ['show-logs'],
     'send-failed': ['retry'],
     'edit-failed': [], // re-editing is a separate affordance Brief E owns
