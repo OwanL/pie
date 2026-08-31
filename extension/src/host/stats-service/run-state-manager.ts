@@ -152,6 +152,7 @@ export class SessionRunStateManager {
       functionalSettings,
       harnessRevision: CURRENT_HARNESS_REVISION,
       harnessFingerprint: deriveHarnessFingerprint(CURRENT_HARNESS_REVISION, analyticsFactors, functionalSettings),
+      userInputCharSamples: [],
       sendCount: 0,
       // Presence (zeros included) marks this run as ask_user-outcome-tracked;
       // legacy snapshots without the fields stay untracked rather than zero.

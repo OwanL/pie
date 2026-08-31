@@ -45,7 +45,7 @@ test('live reasoning retrieval ignores unrelated turn sequence changes but rejec
   assert.equal(resolveLiveDetail(state, base.sessionPath, ref).status, 'stale');
 });
 
-test('live tool detail retrieval is revision-bound', () => {
+test('live subagent detail retrieval accepts a newer revision from the same execution', () => {
   let state = createInitialArchState();
   state = apply(state, { ...base, kind: 'turn.started', seq: 1, canonicalMessageId: 'message', startedAt: 90 });
   state = apply(state, {
@@ -72,5 +72,21 @@ test('live tool detail retrieval is revision-bound', () => {
     aggregatePreviewBytes: previewBytes + 1,
     update: { kind: 'patch', operations: [{ op: 'appendString', path: ['summary'], value: '!' }] },
   });
-  assert.equal(resolveLiveDetail(state, base.sessionPath, ref).status, 'stale');
+  const advanced = resolveLiveDetail(state, base.sessionPath, ref);
+  assert.equal(advanced.status, 'loaded');
+  assert.deepEqual(advanced.status === 'loaded' ? advanced.value : undefined, { ...preview, summary: 'first!' });
+
+  const currentTool = state.livePipeline.toolsByExecutionId.execution!;
+  const genericState = {
+    ...state,
+    livePipeline: {
+      ...state.livePipeline,
+      toolsByExecutionId: {
+        ...state.livePipeline.toolsByExecutionId,
+        execution: { ...currentTool, name: 'read' },
+      },
+    },
+  };
+  assert.equal(resolveLiveDetail(genericState, base.sessionPath, ref).status, 'stale',
+    'ordinary tool detail remains bound to the requested producer revision');
 });

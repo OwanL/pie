@@ -1444,18 +1444,15 @@
   color: var(--panel-accent);
 }
 
-/* Privacy mode is host-owned and ephemeral, so its pressed state remains
-   visible without requiring the tooltip. */
+/* Toggle state is communicated with the same neutral hierarchy as the other
+   toolbar controls: active uses the standard foreground, inactive uses the
+   muted foreground from the base trigger rule. */
 .privacy-mode-trigger.active,
-/* Autonomous mode is a durable behavior switch, so its pressed state remains
-   visible without requiring the tooltip. */
 .autonomous-mode-trigger.active,
-/* MCP is a durable capability switch; accent it while enabled so the state is
-   visible at a glance. */
 .mcp-toggle-trigger.active {
-  border-color: color-mix(in srgb, var(--panel-accent) 48%, transparent);
-  background: var(--panel-accent-surface);
-  color: var(--panel-accent-strong);
+  border-color: transparent;
+  background: var(--panel-control-surface);
+  color: var(--panel-foreground);
 }
 
 .privacy-mode-trigger.active:hover,
@@ -1464,9 +1461,9 @@
 .autonomous-mode-trigger.active:focus-visible,
 .mcp-toggle-trigger.active:hover,
 .mcp-toggle-trigger.active:focus-visible {
-  border-color: color-mix(in srgb, var(--panel-accent) 68%, transparent);
-  background: var(--panel-accent-surface);
-  color: var(--panel-accent-strong);
+  border-color: var(--panel-border-subtle);
+  background: var(--panel-control-hover);
+  color: var(--panel-foreground);
 }
 
 /* History compaction in progress: the trigger swaps its icon for a spinner

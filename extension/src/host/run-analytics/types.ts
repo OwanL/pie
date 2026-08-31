@@ -18,6 +18,7 @@ import type {
   ToolUsageRollup,
   TurnThroughputSample,
   TurnThroughputStatus,
+  UserInputCharSample,
   VerificationRollup,
 } from '../../../../shared/run-analytics-contracts.js';
 
@@ -41,10 +42,15 @@ export type {
   ToolUsageRollup,
   TurnThroughputSample,
   TurnThroughputStatus,
+  UserInputCharSample,
   VerificationRollup,
 };
 
-export { RUN_ANALYTICS_SCHEMA_VERSION, CURRENT_HARNESS_REVISION } from '../../../../shared/run-analytics-contracts.js';
+export {
+  RUN_ANALYTICS_SCHEMA_VERSION,
+  CURRENT_HARNESS_REVISION,
+  MAX_USER_INPUT_SAMPLE_CHARS,
+} from '../../../../shared/run-analytics-contracts.js';
 
 export type { TreatmentChangeKind } from '../../shared/tool-call-analysis';
 

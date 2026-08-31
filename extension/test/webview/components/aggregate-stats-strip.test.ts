@@ -10,6 +10,7 @@ import {
   ProviderLegend,
   aggregateStatsSignature,
   throughputTooltipNode,
+  userInputTooltipNode,
   workTooltipNode,
 } from '../../../src/webview/panel/aggregate-stats-strip';
 
@@ -55,6 +56,29 @@ test('aggregate stats strip omits the working clause when nothing is running', (
   assert.match(html, /aria-label="[^"]*0 sessions working, 3 open\."/);
 });
 
+test('aggregate stats strip shows muted compact adjusted character volume separately from session counts', () => {
+  const html = renderToString(h(AggregateStatsStrip, {
+    stats: {
+      ...EMPTY_AGGREGATE_STATS,
+      ready: true,
+      todayRunCount: 2,
+      todayProductivity: {
+        ...EMPTY_AGGREGATE_STATS.todayProductivity,
+        adjustedUserInputChars: 1_450,
+        knownUserInputCharSampleCount: 3,
+        expectedUserInputCharSampleCount: 3,
+        cappedUserInputCharSampleCount: 1,
+        userInputCharCap: 800,
+      },
+      openTabCount: 4,
+    },
+    deferredTriggers: [],
+    onOpenDeferredMenu: () => {},
+  }));
+  assert.match(html, /aggregate-strip-user-input[^>]*><span[^>]*>1\.4k<\/span> chars<\/span>/);
+  assert.match(html, /aggregate-strip-counts">4 open<\/span>/);
+});
+
 test('aggregate informational rich-tooltip triggers are keyboard-focusable and labelled', () => {
   const html = renderToString(h(AggregateStatsStrip, {
     stats: {
@@ -94,7 +118,7 @@ test('aggregate informational rich-tooltip triggers are keyboard-focusable and l
 
   const segmentTags = [...html.matchAll(/<span[^>]*class="[^"]*aggregate-strip-seg[^"]*"[^>]*>/g)].map((match) => match[0]);
   const focusableSegments = segmentTags.filter((tag) => tag.includes('tabindex="0"') && tag.includes('aria-label="'));
-  assert.equal(focusableSegments.length, 7, 'today, week, tokens, throughput, last, provider gate, and work are focusable');
+  assert.equal(focusableSegments.length, 8, 'today, week, tokens, throughput, last, provider gate, user input, and work are focusable');
   for (const tag of focusableSegments) assert.ok(tag.length > 80, 'each segment has a meaningful label');
   assert.match(html, /Today's estimated token cost/);
   assert.match(html, /Estimated token cost this week/);
@@ -102,7 +126,8 @@ test('aggregate informational rich-tooltip triggers are keyboard-focusable and l
   assert.match(html, /Throughput:/);
   assert.match(html, /Latest completed run across all sessions/);
   assert.match(html, /Provider concurrency:/);
-  assert.match(html, /Focus for work trend and productivity details/);
+  assert.match(html, /Today's adjusted user input: 0 characters, fully tracked\. Focus for Today and 7-day character-volume details\./);
+  assert.match(html, /Focus for 14-day work trend/);
 });
 
 test('aggregate stats strip labels calendar-day cost as today', () => {
@@ -248,7 +273,12 @@ test('aggregate memo signature includes interior redistribution and new token/we
 
 test('aggregate memo signature includes the work trend and productivity summaries', () => {
   const productivity = (sendCount: number) => ({
+    ...EMPTY_AGGREGATE_STATS.todayProductivity,
     sendCount,
+    adjustedUserInputChars: sendCount * 100,
+    knownUserInputCharSampleCount: sendCount,
+    expectedUserInputCharSampleCount: sendCount,
+    userInputCharCap: 100,
     promptCharSamples: 1,
     promptChars: 100,
     averagePromptChars: 100,
@@ -308,9 +338,14 @@ test('aggregate memo signature includes the work trend and productivity summarie
   );
 });
 
-test('Work tooltip header shows working/open counts and labels the trend honestly', () => {
+test('Work tooltip contains only working/open state and the trend', () => {
   const productivity = (sendCount: number) => ({
+    ...EMPTY_AGGREGATE_STATS.todayProductivity,
     sendCount,
+    adjustedUserInputChars: sendCount * 120,
+    knownUserInputCharSampleCount: sendCount,
+    expectedUserInputCharSampleCount: sendCount,
+    userInputCharCap: 120,
     promptCharSamples: 1,
     promptChars: 120,
     averagePromptChars: 120,
@@ -346,13 +381,85 @@ test('Work tooltip header shows working/open counts and labels the trend honestl
   assert.match(html, /<div role="group" aria-label="14-day work trend: daily distinct sessions used and peak concurrently working sessions\. Open-tab history is not tracked\." class="rich-tooltip-chart-group">/);
   assert.match(html, /sessions used/);
   assert.match(html, /peak working/);
-  // Productivity lines carry coverage fractions when tracked samples lag runs.
-  assert.match(html, /Today: 2 sends · 120 chars prompt text · avg 120 · chars tracked 1\/2 · ≈30 prompt tok · ↓5k in · 3 file refs · 2 images \(2 KB\) · 5 attachments total · 1 question answered · 2 questions cancelled · ask tracked 1\/2/);
-  assert.match(html, /7-day: 3 sends · [\s\S]*chars tracked 2\/3/);
-  assert.match(html, /ask tracked 1\/3/);
+  assert.doesNotMatch(html, /Today|7-day|prompt|question|productivity|all-time|runs|tokens/i);
 });
 
-test('Work tooltip keeps filesystem references and images distinct from image bytes', () => {
+test('Work tooltip retains its trend legend when no historical points exist', () => {
+  const html = renderToString(workTooltipNode({
+    ...EMPTY_AGGREGATE_STATS,
+    ready: true,
+    openTabCount: 1,
+    dailyWorkTrend: [],
+  }));
+  assert.match(html, /sessions used/);
+  assert.match(html, /peak working/);
+});
+
+test('User-input tooltip uses one continuous adjusted-character line with Today and 7-day totals', () => {
+  const dailyWorkTrend = [
+    { date: '2026-06-26', sessionsUsed: 1, peakWorkingSessions: 1, productivity: { ...EMPTY_AGGREGATE_STATS.todayProductivity, adjustedUserInputChars: 900, userInputCharCap: 400 } },
+    ...['2026-06-27', '2026-06-28', '2026-06-29', '2026-06-30', '2026-07-01', '2026-07-02', '2026-07-03'].map((date, index) => ({
+      date,
+      sessionsUsed: 1,
+      peakWorkingSessions: 1,
+      productivity: { ...EMPTY_AGGREGATE_STATS.todayProductivity, adjustedUserInputChars: (index + 1) * 100, knownUserInputCharSampleCount: 1, expectedUserInputCharSampleCount: 1, userInputCharCap: 400 },
+    })),
+  ];
+  const stats = {
+    ...EMPTY_AGGREGATE_STATS,
+    ready: true,
+    todayRunCount: 2,
+    weekRunCount: 3,
+    todayProductivity: {
+      ...EMPTY_AGGREGATE_STATS.todayProductivity,
+      adjustedUserInputChars: 1_400,
+      knownUserInputCharSampleCount: 3,
+      expectedUserInputCharSampleCount: 4,
+      cappedUserInputCharSampleCount: 1,
+      userInputCharCap: 400,
+      filesystemPathRefCount: 3,
+      imageInputCount: 2,
+      imageInputBytes: 2048,
+      askUserAnsweredCount: 3,
+      askUserCancelledCount: 4,
+      askUserTrackedRuns: 1,
+      inputTokens: 5_432,
+    },
+    weekProductivity: {
+      ...EMPTY_AGGREGATE_STATS.weekProductivity,
+      adjustedUserInputChars: 3_200,
+      knownUserInputCharSampleCount: 8,
+      expectedUserInputCharSampleCount: 9,
+      cappedUserInputCharSampleCount: 2,
+      userInputCharCap: 400,
+      askUserCancelledCount: 1,
+    },
+    dailyWorkTrend,
+  };
+  const html = renderToString(userInputTooltipNode(stats));
+
+  assert.match(html, /<span>Today<\/span><span class="rich-tooltip-head-value">≥1\.4k chars<\/span>/);
+  assert.match(html, /3\/4 known · P95 cap 400 chars · 1 capped outlier · ≥ value is a lower bound/);
+  assert.match(html, /<span>7-day<\/span><span class="rich-tooltip-head-value">≥3\.2k chars<\/span>/);
+  assert.match(html, /8\/9 known · P95 cap 400 chars · 2 capped outliers · ≥ value is a lower bound/);
+  assert.match(html, /3 file refs · 2 images \(2 KB\) · 5 attachments total · 4 asks cancelled/);
+
+  assert.match(html, /aria-label="7-day daily adjusted user-input character volume\. One continuous line; values use the shared rolling P95 cap\."/);
+  assert.match(html, /<caption>line chart data/);
+  assert.equal((html.match(/<path\b/g) ?? []).length, 1, 'one continuous adjusted-character line is rendered');
+  assert.equal((html.match(/<circle\b/g) ?? []).length, 7, 'the rolling week retains seven exact daily points');
+  assert.doesNotMatch(html, /<rect\b/, 'the user-input trend is not discretized into bars');
+  assert.doesNotMatch(html, />900<\/td>/, 'the chart is scoped to the same seven-day window as its headline');
+
+  assert.match(html, /Composer prompts and successfully answered ask_user option or custom answers are flattened to Unicode-character samples/);
+  assert.match(html, /Values above the rolling 14-day P95 cap are capped/);
+  assert.match(html, /fewer than 5 samples the maximum is used/);
+  assert.match(html, /Cancelled or disabled asks add no sample/);
+  assert.doesNotMatch(html, /prompt text|prompt tok|prompts<|answered ask_user<|input tokens/i,
+    'count, raw-prompt, token-estimate, and provider-token prose are absent');
+});
+
+test('User-input tooltip keeps filesystem references and images distinct from image bytes', () => {
   const stats = {
     ...EMPTY_AGGREGATE_STATS,
     ready: true,
@@ -361,6 +468,7 @@ test('Work tooltip keeps filesystem references and images distinct from image by
     todayRunCount: 1,
     weekRunCount: 1,
     todayProductivity: {
+      ...EMPTY_AGGREGATE_STATS.todayProductivity,
       sendCount: 1,
       promptCharSamples: 0,
       promptChars: 0,
@@ -376,6 +484,7 @@ test('Work tooltip keeps filesystem references and images distinct from image by
       askUserTrackedRuns: 0,
     },
     weekProductivity: {
+      ...EMPTY_AGGREGATE_STATS.weekProductivity,
       sendCount: 1,
       promptCharSamples: 0,
       promptChars: 0,
@@ -392,13 +501,13 @@ test('Work tooltip keeps filesystem references and images distinct from image by
     },
     dailyWorkTrend: [],
   };
-  const html = renderToString(workTooltipNode(stats));
+  const html = renderToString(userInputTooltipNode(stats));
   assert.match(html, /2 file refs/);
   assert.doesNotMatch(html, /attachments/, 'a single attachment kind never claims a combined total');
   assert.doesNotMatch(html, /image/);
 });
 
-test('Work tooltip shows cancelled ask_user questions separately from answered', () => {
+test('User-input tooltip reports cancellations without reverting to answer counts', () => {
   const stats = {
     ...EMPTY_AGGREGATE_STATS,
     ready: true,
@@ -406,6 +515,10 @@ test('Work tooltip shows cancelled ask_user questions separately from answered',
     weekRunCount: 1,
     todayProductivity: {
       ...EMPTY_AGGREGATE_STATS.todayProductivity,
+      adjustedUserInputChars: 42,
+      knownUserInputCharSampleCount: 2,
+      expectedUserInputCharSampleCount: 2,
+      userInputCharCap: 30,
       askUserAnsweredCount: 2,
       askUserCancelledCount: 1,
       askUserTrackedRuns: 1,
@@ -418,12 +531,13 @@ test('Work tooltip shows cancelled ask_user questions separately from answered',
     },
     dailyWorkTrend: [],
   };
-  const html = renderToString(workTooltipNode(stats));
-  assert.match(html, /2 questions answered/);
-  assert.match(html, /1 question cancelled/);
+  const html = renderToString(userInputTooltipNode(stats));
+  assert.match(html, /1 ask cancelled/);
+  assert.match(html, /Cancelled or disabled asks add no sample/);
+  assert.doesNotMatch(html, /answered ask_user<|2 answers|answer count|rich-tooltip-legend-val/i);
 });
 
-test('Work tooltip productivity line stays silent about unknown averages', () => {
+test('User-input tooltip uses lower-bound character coverage without legacy prompt averages', () => {
   const stats = {
     ...EMPTY_AGGREGATE_STATS,
     ready: true,
@@ -432,7 +546,12 @@ test('Work tooltip productivity line stays silent about unknown averages', () =>
     todayRunCount: 1,
     weekRunCount: 1,
     todayProductivity: {
+      ...EMPTY_AGGREGATE_STATS.todayProductivity,
       sendCount: 1,
+      adjustedUserInputChars: 10,
+      knownUserInputCharSampleCount: 1,
+      expectedUserInputCharSampleCount: 2,
+      userInputCharCap: 10,
       promptCharSamples: 0,
       promptChars: 0,
       averagePromptChars: null,
@@ -447,7 +566,12 @@ test('Work tooltip productivity line stays silent about unknown averages', () =>
       askUserTrackedRuns: 0,
     },
     weekProductivity: {
+      ...EMPTY_AGGREGATE_STATS.weekProductivity,
       sendCount: 1,
+      adjustedUserInputChars: 10,
+      knownUserInputCharSampleCount: 1,
+      expectedUserInputCharSampleCount: 2,
+      userInputCharCap: 10,
       promptCharSamples: 0,
       promptChars: 0,
       averagePromptChars: null,
@@ -463,10 +587,8 @@ test('Work tooltip productivity line stays silent about unknown averages', () =>
     },
     dailyWorkTrend: [],
   };
-  const html = renderToString(workTooltipNode(stats));
-  assert.match(html, /Today: 1 send/);
-  assert.doesNotMatch(html, /avg /, 'an untracked average is never rendered as zero');
-  assert.doesNotMatch(html, /chars tracked/);
-  assert.doesNotMatch(html, /ask tracked/);
-  assert.match(html, /peak working/, 'the trend legend still renders with an empty window');
+  const html = renderToString(userInputTooltipNode(stats));
+  assert.match(html, /<span>Today<\/span><span class="rich-tooltip-head-value">≥10 chars<\/span>/);
+  assert.match(html, /1\/2 known · P95 cap 10 chars · 0 capped outliers · ≥ value is a lower bound/);
+  assert.doesNotMatch(html, /avg |prompt text|prompt tok/);
 });

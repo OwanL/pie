@@ -127,18 +127,16 @@ export const SessionTab = memo(function SessionTab({
         onKeyDown={(event) => handleContextMenuKeyRequest(event as KeyboardEvent)}
       >
         {isPinned ? (
-          isGeneratingTitle
-            ? <span class="loading-wheel loading-wheel-sm" aria-hidden="true" />
-            : <span
-                class="session-tab-avatar"
-                style={{ background: getTabAvatarColor(tabPath) }}
-                aria-hidden="true"
-              >
-                {getTabAvatarLabel(label)}
-              </span>
+          <span
+            class={isGeneratingTitle ? 'session-tab-avatar session-title-loading session-title-loading-avatar' : 'session-tab-avatar'}
+            data-label={isGeneratingTitle ? getTabAvatarLabel(label) : undefined}
+            style={{ background: getTabAvatarColor(tabPath) }}
+            aria-hidden="true"
+          >
+            {getTabAvatarLabel(label)}
+          </span>
         ) : (
           <>
-            {isGeneratingTitle && <span class="loading-wheel loading-wheel-sm" aria-hidden="true" />}
             {isRunning || isPreparing
               ? <span class={isStartingModel ? 'session-tab-running starting-model' : 'session-tab-running'} aria-hidden="true" />
               : hasDeferredTimer
@@ -146,7 +144,12 @@ export const SessionTab = memo(function SessionTab({
                 : isUnreadFinished
                   ? <span class="session-tab-finished" aria-hidden="true" />
                   : null}
-            <span class="session-tab-label">{label}</span>
+            <span
+              class={isGeneratingTitle ? 'session-tab-label session-title-loading' : 'session-tab-label'}
+              data-label={isGeneratingTitle ? label : undefined}
+            >
+              {label}
+            </span>
           </>
         )}
       </button>

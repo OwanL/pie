@@ -86,6 +86,17 @@ test('live recursive previews expose bounded child metadata without traversing c
   assert.equal(preview?.children?.length, 2);
   assert.equal(compacted.detailRef?.summary, '2 subagent children');
   assert.equal(compacted.detailRef?.childCount, 2);
+
+  const nextRevision = compactToolCallDetail({
+    id: 'tool', name: 'subagent', input: {}, result, status: 'running',
+  }, {
+    sessionPath: '/session.jsonl', messageId: 'message', source: 'live',
+    sourceRevision: 3, sizeBytes: 100_001,
+  });
+  assert.equal(nextRevision.detailRef?.key, compacted.detailRef?.key,
+    'one expanding subagent keeps one live request/cache owner while progress advances');
+  assert.equal(nextRevision.detailRef?.sourceRevision, 3,
+    'the stable owner still carries the latest producer revision');
 });
 
 test('subagent preview preserves every top-level card while bounding recursive history', () => {

@@ -152,6 +152,7 @@ function isCheckpointShape(value: unknown): value is LiveTurnCheckpoint {
     || typeof value.turn.requestId !== 'string'
     || typeof value.turn.canonicalMessageId !== 'string'
     || (value.turn.modelId !== undefined && typeof value.turn.modelId !== 'string')
+    || (value.turn.provider !== undefined && typeof value.turn.provider !== 'string')
     || (value.turn.thinkingLevel !== undefined && !isThinkingLevel(value.turn.thinkingLevel))
     || !Number.isSafeInteger(value.turn.seq)
     || !Number.isSafeInteger(value.turn.checkpointSeq)

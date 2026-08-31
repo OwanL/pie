@@ -341,9 +341,9 @@
 .transcript-prompt-context {
   flex: 0 0 auto;
   width: 100%;
-  min-height: 54px;
+  min-height: 34px;
   box-sizing: border-box;
-  padding: var(--panel-gap-sm) calc(var(--panel-gap-lg) + 10px) var(--panel-gap-sm) var(--panel-gap-lg);
+  padding: var(--panel-gap-xs) calc(var(--panel-gap-lg) + 10px) var(--panel-gap-xs) var(--panel-gap-lg);
   border-bottom: 1px solid var(--panel-border-subtle);
   background: var(--panel-card-surface);
   color: var(--panel-foreground);
@@ -354,25 +354,21 @@
   pointer-events: none;
 }
 
-.transcript-prompt-context-heading,
 .transcript-prompt-context-row {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   min-width: 0;
-  gap: var(--panel-gap-sm);
-}
-
-.transcript-prompt-context-heading {
-  min-height: 13px;
-  justify-content: space-between;
+  gap: var(--panel-gap-xs);
 }
 
 .transcript-prompt-context-meta {
   display: inline-flex;
+  flex: 0 1 auto;
   align-items: center;
-  justify-content: flex-end;
-  flex-wrap: wrap;
   min-width: 0;
+  max-width: 40%;
+  overflow: hidden;
   gap: var(--panel-gap-xs);
   color: var(--panel-muted);
   font-size: 10px;
@@ -380,68 +376,58 @@
 }
 
 .transcript-prompt-context-meta span {
-  white-space: nowrap;
-}
-
-.transcript-prompt-context-row {
-  align-items: flex-start;
-  margin-top: var(--panel-gap-xs);
-}
-
-.transcript-prompt-context-preview {
-  display: -webkit-box;
-  flex: 1 1 auto;
   min-width: 0;
-  max-width: 100%;
   overflow: hidden;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.transcript-prompt-context-action-description {
+  position: absolute;
+  width: 1px;
+  height: 1px;
   padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
   border: 0;
-  background: transparent;
-  color: var(--panel-foreground-soft);
+}
+
+/* Match the transcript's user-message bubble rather than labelling the prompt.
+   This context affordance stays one line: clicking it navigates to the full
+   message, so a taller duplicate preview adds no value. */
+.transcript-prompt-context-preview {
+  display: block;
+  flex: 0 1 auto;
+  min-width: 0;
+  width: fit-content;
+  max-width: min(var(--message-assistant-width), 100%);
+  overflow: hidden;
+  padding: 3px var(--panel-gap-sm);
+  border: 1px solid var(--panel-user-border);
+  border-radius: var(--panel-radius-lg);
+  background: var(--panel-user-surface);
+  color: var(--panel-user-foreground);
+  box-shadow: inset 0 1px 0 var(--panel-user-highlight);
   font: inherit;
   font-size: 11px;
   line-height: 1.35;
-  overflow-wrap: anywhere;
+  white-space: nowrap;
+  text-overflow: ellipsis;
   text-align: start;
   cursor: pointer;
 }
 
-.transcript-prompt-context-preview.is-expanded {
-  display: block;
-  max-height: min(180px, 30vh);
-  overflow-y: auto;
-  scrollbar-width: thin;
-}
-
 .transcript-prompt-context-preview:hover {
-  color: var(--panel-foreground);
+  border-color: color-mix(in srgb, var(--panel-black) 52%, transparent);
+  background: var(--panel-user-surface-hover);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--panel-foreground) 24%, transparent);
 }
 
-.transcript-prompt-context-preview:focus-visible,
-.transcript-prompt-context-locate:focus-visible {
+.transcript-prompt-context-preview:focus-visible {
   outline: 1px solid var(--panel-accent);
   outline-offset: 2px;
-  border-radius: var(--panel-radius-sm);
-}
-
-.transcript-prompt-context-locate {
-  flex: 0 0 auto;
-  min-height: 22px;
-  padding: 2px var(--panel-gap-sm);
-  border: 1px solid var(--panel-border-subtle);
-  border-radius: var(--panel-radius-sm);
-  background: var(--panel-control-surface);
-  color: var(--panel-foreground);
-  font: inherit;
-  font-size: 10px;
-  line-height: 1.2;
-  cursor: pointer;
-}
-
-.transcript-prompt-context-locate:hover {
-  background: var(--panel-control-hover);
 }
 
 @media (max-width: 720px) {
@@ -1369,10 +1355,51 @@
 .message-body ol {
   margin: 6px 0;
   padding-left: 20px;
+  list-style-position: outside;
+}
+
+.message-body ul {
+  list-style-type: disc;
+}
+
+.message-body ol {
+  list-style-type: decimal;
+}
+
+/* Keep deeper levels distinct instead of inheriting the top-level marker. */
+.message-body ul ul {
+  list-style-type: circle;
+}
+
+.message-body ul ul ul {
+  list-style-type: square;
+}
+
+.message-body ol ol {
+  list-style-type: lower-alpha;
+}
+
+.message-body ol ol ol {
+  list-style-type: lower-roman;
 }
 
 .message-body li {
   margin: 3px 0;
+}
+
+.message-body li > ul,
+.message-body li > ol {
+  margin: 3px 0;
+}
+
+/* marked emits task items as a direct checkbox child (tight lists) or as a
+   checkbox inside the item's paragraph (loose lists), without a marker-specific
+   class, so suppress only that item's bullet rather than all list markers. The
+   child combinators keep a parent item's marker intact when a nested list
+   contains checkboxes. */
+.message-body li:has(> input[type="checkbox"]),
+.message-body li:has(> p > input[type="checkbox"]) {
+  list-style-type: none;
 }
 
 .message-body blockquote {
@@ -1382,14 +1409,50 @@
   color: var(--panel-muted);
 }
 
+.message-body hr {
+  margin: 12px 0;
+  border: 0;
+  border-top: 1px solid var(--panel-border);
+}
+
 .message-body h1,
 .message-body h2,
 .message-body h3,
 .message-body h4,
 .message-body h5,
 .message-body h6 {
-  margin: 12px 0 6px;
+  line-height: 1.25;
   font-weight: 600;
+}
+
+.message-body h1 {
+  margin: 18px 0 8px;
+  font-size: 1.6em;
+}
+
+.message-body h2 {
+  margin: 16px 0 7px;
+  font-size: 1.35em;
+}
+
+.message-body h3 {
+  margin: 14px 0 6px;
+  font-size: 1.2em;
+}
+
+.message-body h4 {
+  margin: 12px 0 5px;
+  font-size: 1.1em;
+}
+
+.message-body h5 {
+  margin: 10px 0 4px;
+  font-size: 1em;
+}
+
+.message-body h6 {
+  margin: 9px 0 4px;
+  font-size: 0.95em;
 }
 
 .message-body table {
@@ -1456,6 +1519,12 @@
 
 .message-item-shell[data-role="user"]:not([data-synthetic="true"]) .message-body blockquote {
   border-left-color: var(--panel-user-border);
+}
+
+/* The base separator uses the dark-surface border; on the light user bubble it
+   must use the user border to stay visible. */
+.message-item-shell[data-role="user"]:not([data-synthetic="true"]) .message-body hr {
+  border-top-color: var(--panel-user-border);
 }
 
 .message-item-shell[data-role="user"]:not([data-synthetic="true"]) .message-body th,

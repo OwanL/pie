@@ -47,7 +47,7 @@ test('pending new-session tab shows background preparation without disabling int
   assert.doesNotMatch(html, /session-tab-main[^>]*disabled/);
 });
 
-test('tab shows a small loading wheel while its LLM title is pending', () => {
+test('tab shows a subtle title sheen while its LLM title is pending', () => {
   const tabPath = '/sessions/title-pending';
   const summary: SessionSummary = {
     path: tabPath,
@@ -57,7 +57,7 @@ test('tab shows a small loading wheel while its LLM title is pending', () => {
     messageCount: 1,
     isPlaceholder: true,
   };
-  const html = renderToString(h(SessionTab, {
+  const props = {
     tabPath,
     index: 0,
     sessionByPath: new Map([[tabPath, summary]]),
@@ -68,7 +68,6 @@ test('tab shows a small loading wheel while its LLM title is pending', () => {
     unreadFinishedPathSet: new Set<string>(),
     activePath: tabPath,
     hasPendingExtensionUIRequest: false,
-    isPinned: false,
     isDropTarget: false,
     hasDeferredTriggers: false,
     hasDeferredTimer: false,
@@ -76,9 +75,16 @@ test('tab shows a small loading wheel while its LLM title is pending', () => {
     onPointerDown: () => undefined,
     onClick: () => undefined,
     onClose: () => undefined,
-  }));
-  assert.match(html, /loading-wheel loading-wheel-sm/);
+  };
+  const html = renderToString(h(SessionTab, { ...props, isPinned: false }));
+  assert.match(html, /session-tab-label session-title-loading/);
+  assert.match(html, /data-label="Investigate why invited users cannot/);
+  assert.doesNotMatch(html, /loading-wheel/);
   assert.match(html, /Investigate why invited users cannot/);
+
+  const pinnedHtml = renderToString(h(SessionTab, { ...props, isPinned: true }));
+  assert.match(pinnedHtml, /session-tab-avatar session-title-loading session-title-loading-avatar/);
+  assert.doesNotMatch(pinnedHtml, /loading-wheel/);
 });
 
 test('tab context menu exposes menu semantics for every action', () => {

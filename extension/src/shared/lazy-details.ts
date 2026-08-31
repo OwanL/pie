@@ -220,8 +220,16 @@ function toolDetailRef(
   sourceRevision?: number,
 ): LazyDetailRef {
   const durableIdentity = tool.durableEntryId || messageId;
+  // Recursive subagent detail is a moving live stream. Keep one cache/request
+  // owner for that execution while producer revisions advance; the explicit
+  // sourceRevision still fences the initial read, and the durable terminal
+  // switches to a distinct durable key. Other tool details remain exact-
+  // revision snapshots.
+  const revisionKey = source === 'live' && tool.name.trim().toLowerCase() === 'subagent'
+    ? 'active'
+    : sourceRevision ?? 0;
   return {
-    key: `${source}:tool:${sessionPath}:${durableIdentity}:${tool.id}:${sourceRevision ?? 0}`,
+    key: `${source}:tool:${sessionPath}:${durableIdentity}:${tool.id}:${revisionKey}`,
     kind: 'tool-result',
     source,
     sessionPath,

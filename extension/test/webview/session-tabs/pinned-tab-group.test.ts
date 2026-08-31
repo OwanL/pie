@@ -122,14 +122,20 @@ test('clicking a group chip opens a dropdown listing each member', () => {
     openTabPaths: ['/a', '/b'],
     pinnedTabPaths: ['/a', '/b'],
     pinnedTabGroups: [['/a', '/b']],
+    generatingTitleSessionPaths: ['/a'],
   }));
   try {
+    const generatingTile = container.querySelector('.pinned-tab-group-tile.session-title-loading');
+    assert.ok(generatingTile, 'generating member avatar uses the quiet sheen instead of a wheel');
+    assert.doesNotMatch(container.innerHTML, /loading-wheel/);
+
     const chipButton = container.querySelector<HTMLButtonElement>('.pinned-tab-group-main');
     assert.ok(chipButton);
     act(() => { chipButton!.dispatchEvent(new window.Event('click', { bubbles: true })); });
     const dropdown = container.querySelector('.pinned-tab-group-dropdown') as HTMLElement | null;
     assert.ok(dropdown, 'dropdown opens on chip click');
     assert.equal(dropdown!.querySelectorAll('.pinned-tab-group-member').length, 2);
+    assert.ok(dropdown!.querySelector('.pinned-tab-group-member-label.session-title-loading'));
     assert.match(dropdown!.textContent ?? '', /Alpha/);
     assert.match(dropdown!.textContent ?? '', /Beta/);
   } finally {

@@ -98,6 +98,7 @@ export function projectLiveTurn(
     role: 'assistant',
     createdAt: new Date(turn.startedAt).toISOString(),
     modelId: turn.modelId,
+    provider: turn.provider,
     thinkingLevel: turn.thinkingLevel,
     markdown: textFromMessageParts(sanitizedParts),
     thinking: reasoningFromMessageParts(sanitizedParts),

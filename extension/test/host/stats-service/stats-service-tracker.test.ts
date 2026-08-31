@@ -123,8 +123,10 @@ test('prepareForSend carries queued unsupported inputs and startNewTask closes t
   assert.equal(lastRun?.finalizationReason, 'new_task');
   assert.equal(lastRun?.unsupportedInputCount, 1);
   assert.equal(lastRun?.initialUserMessageChars, 2, 'stores a privacy-safe Unicode code-point count, not message content');
+  assert.deepEqual(lastRun?.userInputCharSamples, [{ occurredAt: '2026-01-01T00:00:00.000Z', chars: 2 }], 'composer prompt is the first privacy-safe timestamped sample');
   assert.equal(currentRun?.runId, 'id-3');
   assert.equal(currentRun?.initialUserMessageChars, 4);
+  assert.deepEqual(currentRun?.userInputCharSamples, [{ occurredAt: '2026-01-01T00:00:00.000Z', chars: 4 }]);
   assert.equal(currentRun?.sendCount, 1);
   assert.equal(currentRun?.filesystemPathRefCount, 0);
   assert.equal(harness.archState.composer.activeRunSummaryBySession[harness.sessionPath]?.runId, 'id-3');
@@ -167,9 +169,46 @@ test('terminal ask_user results count answered and cancelled outcomes idempotent
     result: { content: [{ type: 'text', text: 'no' }], details: { source: 'cancelled', cancelled: true } },
   });
 
+  const disabled: ToolCall = { id: 'ask-disabled', name: 'ask_user', input: {}, status: 'running' };
+  harness.tracker.onToolStarted(harness.sessionPath, disabled);
+  harness.tracker.onToolFinished(harness.sessionPath, {
+    ...disabled,
+    status: 'completed',
+    result: { details: { source: 'disabled', cancelled: true } },
+  });
+
   const run = harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun;
   assert.equal(run?.askUserAnsweredCount, 1, 'answered ask_user counted exactly once per call');
-  assert.equal(run?.askUserCancelledCount, 1, 'cancelled ask_user counted exactly once per call');
+  assert.equal(run?.askUserCancelledCount, 2, 'cancelled/disabled ask_user outcomes are counted without samples');
+  assert.deepEqual(run?.userInputCharSamples?.map((sample) => sample.chars), [0, 1], 'cancelled asks add no character sample');
+});
+
+test('ask_user character samples flatten option/custom answers with Unicode trim and retain no text', () => {
+  const harness = createHarness();
+  harness.tracker.prepareForSend(harness.sessionPath, [], '  prompt🙂  ');
+
+  const finishAsk = (id: string, answer: string, source: 'option' | 'custom') => {
+    const ask: ToolCall = { id, name: 'ask_user', input: {}, status: 'running' };
+    harness.tracker.onToolStarted(harness.sessionPath, ask);
+    harness.tracker.onToolFinished(harness.sessionPath, {
+      ...ask,
+      status: 'completed',
+      result: { details: { answer, source, cancelled: false } },
+    });
+  };
+  harness.advance(60_000);
+  finishAsk('ask-option', '  🙂é  ', 'option');
+  harness.advance(60_000);
+  finishAsk('ask-custom', ' custom answer ', 'custom');
+
+  const run = harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun;
+  assert.deepEqual(run?.userInputCharSamples, [
+    { occurredAt: '2026-01-01T00:00:00.000Z', chars: 7 },
+    { occurredAt: '2026-01-01T00:01:00.000Z', chars: 2 },
+    { occurredAt: '2026-01-01T00:02:00.000Z', chars: 13 },
+  ]);
+  const persisted = JSON.stringify(run);
+  assert.doesNotMatch(persisted, /prompt🙂|🙂é|custom answer/, 'snapshot stores lengths only, never input text');
 });
 
 test('ask_user outcomes read the legacy top-level result shape and ignore malformed results', () => {
@@ -189,6 +228,14 @@ test('ask_user outcomes read the legacy top-level result shape and ignore malfor
     ...malformed, status: 'failed', result: 'Ask failed: no prompt registered',
   });
 
+  // A completed ask with no structural settlement is expected input with an
+  // unavailable length, but does not invent an answered/cancelled outcome.
+  const malformedCompleted: ToolCall = { id: 'ask-malformed', name: 'ask_user', input: {}, status: 'running' };
+  harness.tracker.onToolStarted(harness.sessionPath, malformedCompleted);
+  harness.tracker.onToolFinished(harness.sessionPath, {
+    ...malformedCompleted, status: 'completed', result: { content: [] },
+  });
+
   // Non-ask_user tools never touch the counters.
   const other: ToolCall = { id: 'bash-1', name: 'bash', input: {}, status: 'running' };
   harness.tracker.onToolStarted(harness.sessionPath, other);
@@ -196,9 +243,21 @@ test('ask_user outcomes read the legacy top-level result shape and ignore malfor
     ...other, status: 'completed', result: { details: { cancelled: true } },
   });
 
+  // A structurally answered result with no string answer preserves the outcome
+  // count but adds no invented zero-length sample, leaving coverage incomplete.
+  const missingAnswer: ToolCall = { id: 'ask-6', name: 'ask_user', input: {}, status: 'running' };
+  harness.tracker.onToolStarted(harness.sessionPath, missingAnswer);
+  harness.tracker.onToolFinished(harness.sessionPath, {
+    ...missingAnswer, status: 'completed', result: { details: { answer: 42, cancelled: false } },
+  });
+
   const run = harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun;
-  assert.equal(run?.askUserAnsweredCount, 1);
+  assert.equal(run?.askUserAnsweredCount, 2);
   assert.equal(run?.askUserCancelledCount, 0, 'malformed and non-ask_user results are not counted as cancelled');
+  assert.deepEqual(run?.userInputCharSamples?.map((sample) => sample.chars), [0, 3, null, null],
+    'legacy answer is known while malformed settlement and missing answer remain explicit null coverage');
+  assert.equal(run?.userInputCharSamples?.filter((sample) => sample.chars !== null).length, 2,
+    'known count remains below expected sample count');
 });
 
 test('ask_user counters increment on checkpoint-restored runs that predate the fields', () => {
@@ -210,6 +269,7 @@ test('ask_user counters increment on checkpoint-restored runs that predate the f
   assert.ok(restored);
   delete (restored as { askUserAnsweredCount?: number }).askUserAnsweredCount;
   delete (restored as { askUserCancelledCount?: number }).askUserCancelledCount;
+  delete (restored as { userInputCharSamples?: unknown[] }).userInputCharSamples;
   harness.tracker.restore(JSON.parse(JSON.stringify(sessions)));
 
   const ask: ToolCall = { id: 'ask-5', name: 'ask_user', input: {}, status: 'running' };
@@ -222,6 +282,8 @@ test('ask_user counters increment on checkpoint-restored runs that predate the f
   const run = harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun;
   assert.equal(run?.askUserAnsweredCount, 1, 'increment creates the counter instead of assuming an untracked zero');
   assert.equal(run?.askUserCancelledCount, undefined, 'an unincremented counter stays absent on a legacy run');
+  assert.deepEqual(run?.userInputCharSamples?.map((sample) => sample.chars), [0, null, 2],
+    'known initial prompt is restored and unknown prior ask coverage remains incomplete before the new answer');
 });
 
 test('prepareForSend estimates user prompt tokens with the shared BPE tokenizer', () => {

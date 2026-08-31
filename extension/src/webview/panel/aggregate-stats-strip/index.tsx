@@ -186,22 +186,34 @@ function AggregateStatsStripView({ stats, deferredTriggers, onOpenDeferredMenu }
         </>
       )}
       <Sep />
-      <Tooltip contentNode={workTooltipNode(stats)} placement="top" freezeWhileVisible richRole="region" triggerClassName="aggregate-strip-counts-trigger">
-        <span
-          class="aggregate-strip-seg aggregate-strip-counts"
-          tabIndex={0}
-          aria-label={`${runningSessionCount} session${runningSessionCount === 1 ? '' : 's'} working, ${openTabCount} open. Focus for work trend and productivity details.`}
-        >
-          {running && (
-            <span class="aggregate-strip-active">
-              <span class="aggregate-strip-active-dot" aria-hidden="true" />
-              {runningSessionCount} working
-            </span>
-          )}
-          {running && ' · '}
-          {openTabCount} open
-        </span>
-      </Tooltip>
+      <div class="aggregate-strip-status-cluster">
+        <Tooltip contentNode={userInputTooltipNode(stats)} placement="top" freezeWhileVisible richRole="region">
+          <span
+            class="aggregate-strip-seg aggregate-strip-user-input"
+            tabIndex={0}
+            aria-label={userInputSegmentAriaLabel(stats.todayProductivity)}
+          >
+            {userInputCharsNode(stats.todayProductivity)} chars
+          </span>
+        </Tooltip>
+        <Sep />
+        <Tooltip contentNode={workTooltipNode(stats)} placement="top" freezeWhileVisible richRole="region">
+          <span
+            class="aggregate-strip-seg aggregate-strip-counts"
+            tabIndex={0}
+            aria-label={`${runningSessionCount} session${runningSessionCount === 1 ? '' : 's'} working, ${openTabCount} open. Focus for 14-day work trend.`}
+          >
+            {running && (
+              <span class="aggregate-strip-active">
+                <span class="aggregate-strip-active-dot" aria-hidden="true" />
+                {runningSessionCount} working
+              </span>
+            )}
+            {running && ' · '}
+            {openTabCount} open
+          </span>
+        </Tooltip>
+      </div>
     </div>
   );
 }
@@ -245,9 +257,12 @@ function seriesSignature(series: AggregateSeriesPoint[]): string {
  *  pooled samples so only the exact inputs are signed. */
 function productivitySignature(p: AggregateProductivityStats): string {
   return [
-    p.sendCount, p.promptCharSamples, p.promptChars, p.promptTokenSamples,
-    p.promptTokens, p.inputTokens, p.filesystemPathRefCount, p.imageInputCount,
-    p.imageInputBytes, p.askUserAnsweredCount, p.askUserCancelledCount, p.askUserTrackedRuns,
+    p.sendCount, p.adjustedUserInputChars, p.knownUserInputCharSampleCount,
+    p.expectedUserInputCharSampleCount, p.cappedUserInputCharSampleCount,
+    p.userInputCharCap, p.promptCharSamples, p.promptChars,
+    p.promptTokenSamples, p.promptTokens, p.inputTokens,
+    p.filesystemPathRefCount, p.imageInputCount, p.imageInputBytes,
+    p.askUserAnsweredCount, p.askUserCancelledCount, p.askUserTrackedRuns,
   ].join(':');
 }
 
@@ -311,6 +326,29 @@ function formatRate(n: number): string {
   if (!Number.isFinite(n) || n <= 0) return '0';
   if (n >= 10) return String(Math.round(n));
   return n.toFixed(1);
+}
+
+/** Character volume is exact only when every expected event in the displayed
+ * input-time window has a known numeric length. */
+function userInputTrackingKnown(p: AggregateProductivityStats): boolean {
+  return p.knownUserInputCharSampleCount >= p.expectedUserInputCharSampleCount;
+}
+
+function userInputCharsLabel(p: AggregateProductivityStats): string {
+  const chars = formatCompactTokens(p.adjustedUserInputChars);
+  return userInputTrackingKnown(p) ? chars : `≥${chars}`;
+}
+
+function userInputCharsNode(p: AggregateProductivityStats): JSX.Element {
+  if (userInputTrackingKnown(p)) {
+    return <Num value={p.adjustedUserInputChars} format={formatCompactTokens} width={5} class="aggregate-strip-user-input-total" />;
+  }
+  return <span class="aggregate-strip-num aggregate-strip-user-input-total" style="min-width:5ch">≥{formatCompactTokens(p.adjustedUserInputChars)}</span>;
+}
+
+function userInputSegmentAriaLabel(p: AggregateProductivityStats): string {
+  const coverage = userInputTrackingKnown(p) ? 'fully tracked' : 'a lower bound because coverage is incomplete';
+  return `Today's adjusted user input: ${userInputCharsLabel(p)} characters, ${coverage}. Focus for Today and 7-day character-volume details.`;
 }
 
 /** Compact duration: `45s` / `1.2m` / `2.3h` (0 → `0s`). */
@@ -454,6 +492,7 @@ function ariaLabel(s: AggregateStats): string {
     : '30-second end-to-end throughput unavailable.';
   const throughput = `${active} ${rolling}`;
   return `Estimated API-equivalent token cost across all runs today ${formatCostAdaptive(s.todayCost)}. This week ${formatCostAdaptive(s.weekCost)}. `
+    + `Today's adjusted user input ${userInputCharsLabel(s.todayProductivity)} characters. `
     + `${throughput} ${s.runningSessionCount} session${s.runningSessionCount === 1 ? '' : 's'} working, ${s.openTabCount} open.`;
 }
 
@@ -629,6 +668,10 @@ function providerGateTooltipNode(g: ProviderGateStats): JSX.Element {
  *  shared with the legend so swatches and chart strokes always match. */
 const WORK_TREND_SERIES = ['sessions used', 'peak working'] as const;
 
+/** One additive character-volume series: prompts and ask_user answers are
+ * already flattened into the daily adjusted total by the host. */
+const USER_INPUT_SERIES = ['adjusted chars'] as const;
+
 /** Compact human-readable byte size for attachment summaries. */
 function formatAttachmentBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
@@ -637,22 +680,17 @@ function formatAttachmentBytes(bytes: number): string {
   return `${Math.round(bytes)} B`;
 }
 
-/** One window's productivity summary line, coverage-aware: tracked-sample
- *  fractions are surfaced when only part of the window's runs recorded a
- *  metric, and unknown averages are never rendered as a zero. */
-function productivityLine(label: string, p: AggregateProductivityStats, runCount: number): string {
-  const parts: string[] = [`${p.sendCount} send${p.sendCount === 1 ? '' : 's'}`];
-  if (p.promptCharSamples > 0) {
-    parts.push(`${formatCompactTokens(p.promptChars)} chars prompt text`
-      + (p.averagePromptChars !== null ? ` · avg ${Math.round(p.averagePromptChars)}` : ''));
-    if (runCount > 0 && p.promptCharSamples < runCount) {
-      parts.push(`chars tracked ${p.promptCharSamples}/${runCount}`);
-    }
-  }
-  if (p.promptTokenSamples > 0) parts.push(`≈${formatCompactTokens(p.promptTokens)} prompt tok`);
-  if (p.inputTokens > 0) parts.push(`↓${formatCompactTokens(p.inputTokens)} in`);
-  // Filesystem references and images are separate attachment kinds: image
-  // bytes describe images only, never generic attachment bytes.
+/** Supporting character-volume detail. Filesystem references and images stay
+ * distinct because image bytes do not describe generic attachments. */
+function userInputDetailsLine(p: AggregateProductivityStats): string {
+  const parts = [
+    `${p.knownUserInputCharSampleCount}/${p.expectedUserInputCharSampleCount} known`,
+    p.userInputCharCap === null
+      ? 'P95 cap unavailable'
+      : `P95 cap ${formatCompactTokens(p.userInputCharCap)} chars`,
+    `${p.cappedUserInputCharSampleCount} capped outlier${p.cappedUserInputCharSampleCount === 1 ? '' : 's'}`,
+  ];
+  if (!userInputTrackingKnown(p)) parts.push('≥ value is a lower bound');
   if (p.filesystemPathRefCount > 0) {
     parts.push(`${p.filesystemPathRefCount} file ref${p.filesystemPathRefCount === 1 ? '' : 's'}`);
   }
@@ -662,22 +700,66 @@ function productivityLine(label: string, p: AggregateProductivityStats, runCount
   if (p.filesystemPathRefCount > 0 && p.imageInputCount > 0) {
     parts.push(`${p.filesystemPathRefCount + p.imageInputCount} attachments total`);
   }
-  if (p.askUserAnsweredCount > 0) {
-    parts.push(`${p.askUserAnsweredCount} question${p.askUserAnsweredCount === 1 ? '' : 's'} answered`);
-  }
   if (p.askUserCancelledCount > 0) {
-    parts.push(`${p.askUserCancelledCount} question${p.askUserCancelledCount === 1 ? '' : 's'} cancelled`);
+    parts.push(`${p.askUserCancelledCount} ask${p.askUserCancelledCount === 1 ? '' : 's'} cancelled`);
   }
-  if (p.askUserTrackedRuns > 0 && runCount > 0 && p.askUserTrackedRuns < runCount) {
-    parts.push(`ask tracked ${p.askUserTrackedRuns}/${runCount}`);
-  }
-  return `${label}: ${parts.join(' · ') || 'no tracked activity'}`;
+  return parts.join(' · ');
+}
+
+function userInputSummaryNode(label: string, p: AggregateProductivityStats): JSX.Element {
+  return (
+    <div class="aggregate-strip-user-input-section">
+      <div class="rich-tooltip-head">
+        <span>{label}</span>
+        <span class="rich-tooltip-head-value">{userInputCharsLabel(p)} chars</span>
+      </div>
+      <div class="rich-tooltip-sub">{userInputDetailsLine(p)}</div>
+    </div>
+  );
+}
+
+function userInputTrendPoints(s: AggregateStats): AggregateSeriesPoint[] {
+  return s.dailyWorkTrend.slice(-7).map((day) => ({
+    ms: dateToMs(day.date),
+    byProvider: [{ key: USER_INPUT_SERIES[0], value: Math.max(0, day.productivity.adjustedUserInputChars) }],
+    byModel: [],
+  }));
+}
+
+/** User-input segment tooltip: one continuous daily adjusted-character line,
+ * compact Today/7-day totals, coverage, cap, attachment, and cancellation
+ * context. Prompt/answer counts and provider-token prose are intentionally
+ * omitted because character volume is the productivity heuristic. */
+export function userInputTooltipNode(s: AggregateStats): JSX.Element {
+  if (!s.ready) return <div class="rich-tooltip"><div class="rich-tooltip-sub">Computing usage stats…</div></div>;
+  return (
+    <div class="rich-tooltip">
+      <div class="rich-tooltip-head"><span>Adjusted user input</span></div>
+      {userInputSummaryNode('Today', s.todayProductivity)}
+      {userInputSummaryNode('7-day', s.weekProductivity)}
+      <div
+        class="aggregate-strip-user-input-trend rich-tooltip-chart-group"
+        role="group"
+        aria-label="7-day daily adjusted user-input character volume. One continuous line; values use the shared rolling P95 cap."
+      >
+        <StackedAreaChart
+          points={userInputTrendPoints(s)}
+          mode="line"
+          formatY={formatCompactTokens}
+          formatX={formatDateShort}
+          colorKeys={[...USER_INPUT_SERIES]}
+        />
+      </div>
+      <div class="rich-tooltip-sub aggregate-strip-user-input-note">
+        Composer prompts and successfully answered ask_user option or custom answers are flattened to Unicode-character samples. Values above the rolling 14-day P95 cap are capped; with fewer than 5 samples the maximum is used, so no value is adjusted. Cancelled or disabled asks add no sample. ≥ marks incomplete legacy or malformed-answer coverage.
+      </div>
+    </div>
+  );
 }
 
 /** Work segment tooltip: current state (working/open) in the header, the
  *  14-day dual-series work trend (sessions used vs peak concurrently working —
- *  historical run evidence, never open-tab history), and today/7-day
- *  productivity summaries with their tracked-sample coverage. */
+ *  historical run evidence, never open-tab history). */
 /** Exported for the focused Work-tooltip render test. */
 export function workTooltipNode(s: AggregateStats): JSX.Element {
   if (!s.ready) return <div class="rich-tooltip"><div class="rich-tooltip-sub">Computing usage stats…</div></div>;
@@ -714,10 +796,6 @@ export function workTooltipNode(s: AggregateStats): JSX.Element {
           </span>
         ))}
       </div>
-      <div class="rich-tooltip-sub">
-        {productivityLine('Today', s.todayProductivity, s.todayRunCount) + '\n' + productivityLine('7-day', s.weekProductivity, s.weekRunCount)}
-      </div>
-      <div class="rich-tooltip-sub">{`${s.sessionCount} session${s.sessionCount === 1 ? '' : 's'} (all-time) · ${s.runCount} runs\nAll-time ↓${formatCompactTokens(s.totalInputTokens)} in  ↑${formatCompactTokens(s.totalOutputTokens)} out`}</div>
     </div>
   );
 }

@@ -527,7 +527,6 @@ export function TranscriptVirtualList({
         entries={userPromptEntries}
         virtualizer={virtualizer}
         scrollRef={scrollRef}
-        isAtBottom={isAtBottom}
         hidden={isInitialPositioning}
         onLocate={jumpToRow}
       />

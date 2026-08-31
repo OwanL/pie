@@ -487,6 +487,7 @@ export class WorkerRuntimeHost {
     context.session = session;
     context.sessionPath = sessionPath;
     context.activeRequest = undefined;
+    context.overflowRecoveryCandidate = undefined;
     if (!sameSessionPath(previousSessionPath, sessionPath)) {
       context.busySeq = 0;
       context.lastContextUsage = undefined;

@@ -23,6 +23,7 @@ import {
 import { inspectSessionReviewV2 } from './review-analytics.ts';
 
 import {
+  MAX_USER_INPUT_SAMPLE_CHARS,
   RUN_ANALYTICS_SCHEMA_VERSION,
   type AssistantUsage,
   type AuxiliaryLlmUsageSample,
@@ -53,6 +54,7 @@ import {
   type TreatmentChangeKind,
   type TurnThroughputSample,
   type TurnThroughputStatus,
+  type UserInputCharSample,
   type VerificationCommandKind,
   type VerificationRollup,
 } from './contracts.ts';
@@ -141,6 +143,25 @@ function toNullableNonNegativeInteger(value: unknown): number | null {
     return null;
   }
   return Math.trunc(value);
+}
+
+function coerceUserInputCharSamples(value: unknown): UserInputCharSample[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const samples: UserInputCharSample[] = [];
+  for (const entry of value) {
+    if (!isRecord(entry) || typeof entry.occurredAt !== 'string'
+      || !Number.isFinite(Date.parse(entry.occurredAt))) continue;
+    if (typeof entry.chars === 'number' && Number.isFinite(entry.chars) && entry.chars >= 0) {
+      samples.push({
+        occurredAt: entry.occurredAt,
+        chars: Math.min(Math.trunc(entry.chars), MAX_USER_INPUT_SAMPLE_CHARS),
+      });
+    } else {
+      // Keep timestamp-valid malformed lengths as explicit incomplete coverage.
+      samples.push({ occurredAt: entry.occurredAt, chars: null });
+    }
+  }
+  return samples;
 }
 
 function coerceStringArray(value: unknown): string[] {
@@ -867,6 +888,7 @@ export function coerceRunSnapshot(value: unknown): RunSnapshot | null {
   const finalizationReason = typeof value.finalizationReason === 'string' && FINALIZATION_REASONS.has(value.finalizationReason as RunFinalizationReason)
     ? value.finalizationReason as RunFinalizationReason
     : undefined;
+  const userInputCharSamples = coerceUserInputCharSamples(value.userInputCharSamples);
 
   return {
     sessionPath: value.sessionPath,
@@ -894,6 +916,7 @@ export function coerceRunSnapshot(value: unknown): RunSnapshot | null {
     ...(typeof value.initialUserMessageChars === 'number' && Number.isFinite(value.initialUserMessageChars)
       ? { initialUserMessageChars: toNonNegativeInteger(value.initialUserMessageChars) }
       : {}),
+    ...(userInputCharSamples === undefined ? {} : { userInputCharSamples }),
     ...(typeof value.initialUserMessageTokens === 'number' && Number.isFinite(value.initialUserMessageTokens)
       ? { initialUserMessageTokens: toNonNegativeInteger(value.initialUserMessageTokens) }
       : {}),

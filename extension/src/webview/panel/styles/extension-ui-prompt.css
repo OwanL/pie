@@ -162,10 +162,130 @@
 .ask-prose ol {
   margin: 4px 0;
   padding-left: 18px;
+  list-style-position: outside;
+}
+
+.ask-prose ul {
+  list-style-type: disc;
+}
+
+.ask-prose ol {
+  list-style-type: decimal;
+}
+
+/* Give nested levels a readable progression rather than repeating one marker. */
+.ask-prose ul ul {
+  list-style-type: circle;
+}
+
+.ask-prose ul ul ul {
+  list-style-type: square;
+}
+
+.ask-prose ol ol {
+  list-style-type: lower-alpha;
+}
+
+.ask-prose ol ol ol {
+  list-style-type: lower-roman;
 }
 
 .ask-prose li {
   margin: 2px 0;
+}
+
+.ask-prose li > ul,
+.ask-prose li > ol {
+  margin: 2px 0;
+}
+
+/* marked emits task items as a direct checkbox child (tight lists) or as a
+   checkbox inside the item's paragraph (loose lists), without a marker-specific
+   class, so suppress only that item's bullet rather than all list markers. The
+   child combinators keep a parent item's marker intact when a nested list
+   contains checkboxes. */
+.ask-prose li:has(> input[type="checkbox"]),
+.ask-prose li:has(> p > input[type="checkbox"]) {
+  list-style-type: none;
+}
+
+.ask-prose blockquote {
+  margin: 4px 0;
+  padding: 2px 0 2px 8px;
+  border-left: 2px solid var(--panel-border);
+  color: var(--panel-muted);
+}
+
+.ask-prose hr {
+  margin: 6px 0;
+  border: 0;
+  border-top: 1px solid var(--panel-border);
+}
+
+.ask-prose h1,
+.ask-prose h2,
+.ask-prose h3,
+.ask-prose h4,
+.ask-prose h5,
+.ask-prose h6 {
+  line-height: 1.25;
+  font-weight: 600;
+}
+
+.ask-prose h1 {
+  margin: 8px 0 4px;
+  font-size: 1.35em;
+}
+
+.ask-prose h2 {
+  margin: 7px 0 4px;
+  font-size: 1.2em;
+}
+
+.ask-prose h3 {
+  margin: 6px 0 3px;
+  font-size: 1.1em;
+}
+
+.ask-prose h4 {
+  margin: 5px 0 3px;
+  font-size: 1em;
+}
+
+.ask-prose h5 {
+  margin: 4px 0 2px;
+  font-size: 0.95em;
+}
+
+.ask-prose h6 {
+  margin: 4px 0 2px;
+  font-size: 0.9em;
+}
+
+/* Tables are wrapped by renderMarkdown so compact prompts can scroll rather
+   than forcing their narrow column wider. */
+.ask-prose .md-table-wrap {
+  width: 100%;
+  overflow-x: auto;
+  margin: 4px 0;
+}
+
+.ask-prose .md-table-wrap > table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0;
+  font-size: 0.92em;
+}
+
+.ask-prose .md-table-wrap th,
+.ask-prose .md-table-wrap td {
+  border: 1px solid var(--panel-border);
+  padding: 3px 6px;
+  text-align: left;
+}
+
+.ask-prose .md-table-wrap th {
+  background: var(--panel-subtle-surface);
 }
 
 .ask-prose code {

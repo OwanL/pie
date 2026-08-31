@@ -83,6 +83,12 @@ export interface EditQueuedCommand extends CommandBase {
   userParts?: UserContentPart[];
 }
 
+/** Resume an interrupted assistant turn without adding a user message. */
+export interface ContinueCommand extends CommandBase {
+  kind: 'Continue';
+  sessionPath: string;
+}
+
 /** Interrupt the in-flight assistant turn for a session. */
 export interface InterruptCommand extends CommandBase {
   kind: 'Interrupt';
@@ -340,6 +346,7 @@ export interface DetailFetchPagesCommand extends CommandBase {
 
 export type Command =
   | SendCommand
+  | ContinueCommand
   | EditCommand
   | EditQueuedCommand
   | InterruptCommand

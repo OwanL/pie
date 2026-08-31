@@ -21,9 +21,11 @@ import {
   getTerminalSubagentAttemptSamplesFromToolCall,
 } from '../../shared/subagent-result';
 import {
+  MAX_USER_INPUT_SAMPLE_CHARS,
   normalizeExperimentAssignment,
   type AuxiliaryLlmUsageSample,
   type RunSnapshot,
+  type UserInputCharSample,
   type TreatmentChangeKind,
   type TurnLatencyMeasurement,
   type TurnThroughputSample,
@@ -120,10 +122,15 @@ export class SessionRunTracker {
     run.sendCount += 1;
     const initialUserMessageTrimmed = initialUserMessage.trim();
     run.initialUserMessageChars = Array.from(initialUserMessageTrimmed).length;
+    const userInputOccurredAt = this.runState.isoNow();
+    run.userInputCharSamples = [{
+      occurredAt: userInputOccurredAt,
+      chars: Math.min(run.initialUserMessageChars, MAX_USER_INPUT_SAMPLE_CHARS),
+    }];
     // Same privacy-safe source text as `initialUserMessageChars`: only the
     // estimated token size is stored, never the message itself.
     run.initialUserMessageTokens = estimateTextTokens(initialUserMessageTrimmed);
-    run.updatedAt = this.runState.isoNow();
+    run.updatedAt = userInputOccurredAt;
     summarizeInputs(run, inputs);
     if (state.queuedUnsupportedInputCount > 0) {
       run.unsupportedInputCount += state.queuedUnsupportedInputCount;
@@ -374,17 +381,93 @@ export class SessionRunTracker {
     return null;
   }
 
+  /** Read a flattened ask_user answer without retaining its text. Canonical
+   *  `details.answer` wins; the top-level field supports legacy results. */
+  private askUserAnswerFromResult(result: unknown): string | null {
+    if (!isRecord(result)) return null;
+    const details = isRecord(result.details) ? result.details : null;
+    if (details && typeof details.answer === 'string') return details.answer;
+    return typeof result.answer === 'string' ? result.answer : null;
+  }
+
+  private askUserSourceFromResult(result: unknown): string | null {
+    if (!isRecord(result)) return null;
+    const details = isRecord(result.details) ? result.details : null;
+    const source = details?.source ?? result.source;
+    return typeof source === 'string' ? source.trim().toLowerCase() : null;
+  }
+
+  /** Restore the known initial prompt before adding post-restore ask answers.
+   * Compatibility counters preserve missing historical input as explicit null
+   * coverage. Runs predating ask outcome counters receive one conservative
+   * unknown marker because prior answered asks cannot be ruled out. */
+  private seedLegacyUserInputSamples(run: RunSnapshot): UserInputCharSample[] {
+    if (Array.isArray(run.userInputCharSamples)) return [...run.userInputCharSamples];
+
+    const samples: UserInputCharSample[] = [];
+    if (typeof run.initialUserMessageChars === 'number' && Number.isFinite(run.initialUserMessageChars)) {
+      samples.push({
+        occurredAt: run.startedAt,
+        chars: Math.min(
+          Math.max(0, Math.trunc(run.initialUserMessageChars)),
+          MAX_USER_INPUT_SAMPLE_CHARS,
+        ),
+      });
+    }
+
+    const compatibilityExpected = Math.max(0, Math.trunc(run.sendCount))
+      + Math.max(0, Math.trunc(run.askUserAnsweredCount ?? 0));
+    const unknownAt = Number.isFinite(Date.parse(run.updatedAt)) ? run.updatedAt : run.startedAt;
+    for (let index = samples.length; index < compatibilityExpected; index += 1) {
+      samples.push({ occurredAt: unknownAt, chars: null });
+    }
+    if (run.askUserAnsweredCount === undefined || run.askUserCancelledCount === undefined) {
+      samples.push({ occurredAt: unknownAt, chars: null });
+    }
+    return samples;
+  }
+
+  private appendUserInputSample(run: RunSnapshot, chars: number | null, occurredAt: string): void {
+    const samples = this.seedLegacyUserInputSamples(run);
+    samples.push({
+      occurredAt,
+      chars: chars === null ? null : Math.min(Math.max(0, Math.trunc(chars)), MAX_USER_INPUT_SAMPLE_CHARS),
+    });
+    run.userInputCharSamples = samples;
+  }
+
   /** Count a terminal ask_user tool result exactly once (the finished-tool
-   *  dedupe above has already run). Only the settled outcome is recorded —
-   *  never the question or answer text. */
+   * dedupe above has already run). Only the settled outcome and privacy-safe
+   * timestamped answer length are recorded — never question or answer text. */
   private recordAskUserOutcome(run: RunSnapshot, toolCall: ToolCall): void {
     const cancelled = this.askUserCancelledFromResult(toolCall.result);
-    if (cancelled === null) return;
-    if (cancelled) {
+    if (cancelled === true) {
       run.askUserCancelledCount = (run.askUserCancelledCount ?? 0) + 1;
-    } else {
-      run.askUserAnsweredCount = (run.askUserAnsweredCount ?? 0) + 1;
+      return;
     }
+    if (toolCall.status === 'failed') return;
+
+    const source = this.askUserSourceFromResult(toolCall.result);
+    if (source === 'disabled' || source === 'autonomous') return;
+    const occurredAt = this.runState.isoNow();
+    if (cancelled === null) {
+      if (source === 'cancelled') return;
+      // A completed ask without a structural settlement is still an expected
+      // user-input event. Preserve its missing length as incomplete coverage.
+      this.appendUserInputSample(run, null, occurredAt);
+      return;
+    }
+
+    if (!Array.isArray(run.userInputCharSamples)) {
+      run.userInputCharSamples = this.seedLegacyUserInputSamples(run);
+    }
+    run.askUserAnsweredCount = (run.askUserAnsweredCount ?? 0) + 1;
+    const answer = this.askUserAnswerFromResult(toolCall.result);
+    this.appendUserInputSample(
+      run,
+      answer === null ? null : Array.from(answer.trim()).length,
+      occurredAt,
+    );
   }
 
   /** Roll up a tool call's execution duration (when reported and finite). */

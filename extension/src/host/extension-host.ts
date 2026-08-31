@@ -517,7 +517,8 @@ export class PieExtension implements vscode.Disposable {
       runningSessionPaths: this.archState.sessions.runningSessionPaths,
     };
     // Pre-reducer side effects for specific event types.
-    if (event.kind === 'SendResult' && event.ok && event.requestId) {
+    if ((event.kind === 'SendResult' || event.kind === 'ContinueResult')
+        && event.ok && event.requestId) {
       this.service.bindRequestSessionPath(event.requestId, event.sessionPath);
     }
     if (event.kind === 'CloseSessionResult' || event.kind === 'PersistTabsResult') {

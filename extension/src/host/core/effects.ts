@@ -95,6 +95,11 @@ export interface ReplaceQueueRpcEffect extends EffectBase {
   fallbackMessages: QueuedMessageRpcPayload[];
 }
 
+export interface ContinueRpcEffect extends EffectBase {
+  kind: 'ContinueRpc';
+  sessionPath: string;
+}
+
 export interface InterruptRpcEffect extends EffectBase {
   kind: 'InterruptRpc';
   sessionPath: string;
@@ -417,6 +422,7 @@ export interface DuplicateSessionEffect extends EffectBase {
 
 export type Effect =
   | SendRpcEffect
+  | ContinueRpcEffect
   | GenerateSessionTitleEffect
   | EditRpcEffect
   | ReplaceQueueRpcEffect

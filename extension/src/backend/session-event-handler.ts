@@ -698,6 +698,24 @@ function readTokenCount(value: unknown): number | undefined {
     : undefined;
 }
 
+/** Mirror the SDK overflow shapes that can only be confirmed after agent_end.
+ * Explicit provider errors are candidates; the SDK will later distinguish
+ * overflow from ordinary failures. Some providers instead return length with
+ * zero output at the configured context-window boundary. */
+function mayNeedOverflowRecovery(context: SessionContext, message: SdkSessionEvent['message']): boolean {
+  if (!message || message.role !== 'assistant') return false;
+  if (message.stopReason === 'error' || (message.errorMessage?.trim().length ?? 0) > 0) return true;
+  if (message.stopReason !== 'length') return false;
+
+  const contextWindow = context.session.model?.contextWindow;
+  if (typeof contextWindow !== 'number' || !Number.isFinite(contextWindow) || contextWindow <= 0) return false;
+  const usage = message.usage as { input?: unknown; output?: unknown; cacheRead?: unknown } | undefined;
+  const input = readTokenCount(usage?.input) ?? 0;
+  const cacheRead = readTokenCount(usage?.cacheRead) ?? 0;
+  const output = readTokenCount(usage?.output) ?? 0;
+  return output === 0 && input + cacheRead >= contextWindow * 0.99;
+}
+
 /** Minimal slice of the SDK SessionManager's sidecar append surface. The runtime
  *  manager is a fenced `MutableSdkSessionManager` (see `session-manager-fence.ts`)
  *  that proxies `appendCustomEntry`; this local type captures only what
@@ -839,24 +857,18 @@ function emitLatestPruningResult(
 }
 
 // Some providers keep extended reasoning private, so a healthy response may be
-// semantically silent until the reasoning phase completes. Umans is routinely
-// much slower than other providers and does not always expose reasoning deltas;
-// give it a provider-specific lease rather than weakening the stuck-session
-// guard for every provider. The environment override remains authoritative for
-// diagnostics and operators who need a different global policy.
-const PROVIDER_SEMANTIC_INACTIVITY_MS = 360_000;
-const UMANS_SEMANTIC_INACTIVITY_MS = 15 * 60_000;
+// semantically silent until the reasoning phase completes. Keep the default
+// long enough for those healthy responses while retaining an operator override
+// for diagnostics and environments that need a different global policy.
+const PROVIDER_SEMANTIC_INACTIVITY_MS = 18 * 60_000;
 const TOOL_INACTIVITY_MS = 30 * 60_000;
 function configuredLeaseMs(envName: string, fallback: number): number {
   const value = Number(process.env[envName]);
   return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
-export function resolveProviderSemanticInactivityMs(provider?: string): number {
-  const fallback = provider?.toLowerCase() === 'umans'
-    ? UMANS_SEMANTIC_INACTIVITY_MS
-    : PROVIDER_SEMANTIC_INACTIVITY_MS;
-  return configuredLeaseMs('PIE_PROVIDER_SEMANTIC_INACTIVITY_MS', fallback);
+export function resolveProviderSemanticInactivityMs(_provider?: string): number {
+  return configuredLeaseMs('PIE_PROVIDER_SEMANTIC_INACTIVITY_MS', PROVIDER_SEMANTIC_INACTIVITY_MS);
 }
 
 function clearSemanticLease(context: SessionContext): void {
@@ -1082,6 +1094,7 @@ function startQueuedFollowUpSegment(
     attemptId: randomUUID(),
     canonicalMessageId: `${active.id}:${active.messageIndex + 1}`,
     modelId: active.modelId,
+    provider: active.provider,
     thinkingLevel: active.thinkingLevel,
     startedAt: occurredAt,
   });
@@ -1100,6 +1113,49 @@ function startQueuedFollowUpSegment(
   active.currentMessageId = undefined;
   active.currentMessageStartedAt = undefined;
   active.providerFirstDeltaAt = undefined;
+}
+
+/** Restore the request correlation after successful provider-overflow
+ * compaction. Pi emits agent_end(willRetry=false) before it discovers the
+ * overflow, so the ordinary finalizer has already detached activeRequest by
+ * the time the SDK's internal agent.continue() starts. Allocate a fresh live
+ * owner while preserving the public request id; otherwise every continuation
+ * event is rejected as ownerless and the session appears to stop. */
+function rearmOverflowRecoveryRequest(context: SessionContext, occurredAt: number): void {
+  const active = context.overflowRecoveryCandidate;
+  if (!active || context.activeRequest) return;
+
+  active.liveTurnAccumulator = new BackendLiveTurnAccumulator({
+    protocolVersion: LIVE_PIPELINE_PROTOCOL_VERSION,
+    sessionPath: context.sessionPath,
+    requestId: active.id,
+    turnId: randomUUID(),
+    attemptId: randomUUID(),
+    canonicalMessageId: `${active.id}:${active.messageIndex + 1}`,
+    modelId: active.modelId,
+    provider: active.provider,
+    thinkingLevel: active.thinkingLevel,
+    startedAt: occurredAt,
+  });
+  active.pendingQueuedBoundaryTerminal = undefined;
+  active.pendingErrorTerminal = undefined;
+  active.mayNeedOverflowRecovery = false;
+  active.pendingDurableToolTerminals?.clear();
+  active.toolStartTimes?.clear();
+  active.toolStartMetadata?.clear();
+  active.toolParallelGroupByCallId?.clear();
+  active.providerQueueByTurn?.clear();
+  active.providerNetworkPendingAttemptId = undefined;
+  active.providerNetworkPending = false;
+  active.retryTiming = undefined;
+  active.currentMessageId = undefined;
+  active.currentMessageStartedAt = undefined;
+  active.providerFirstDeltaAt = undefined;
+  active.turnStartedAt = undefined;
+  active.turnBoundaryAt = occurredAt;
+  active.aborted = false;
+  context.activeRequest = active;
+  context.overflowRecoveryCandidate = undefined;
 }
 
 export function handleSdkSessionEvent(
@@ -1125,6 +1181,12 @@ export function handleSdkSessionEvent(
   }
   switch (event.type) {
     case 'agent_start': {
+      // A later ordinary request supersedes any finalized error that did not
+      // lead to overflow compaction. Successful overflow recovery clears the
+      // candidate while re-arming it before this event arrives.
+      if (context.activeRequest && context.overflowRecoveryCandidate !== context.activeRequest) {
+        context.overflowRecoveryCandidate = undefined;
+      }
       // before_agent_start extensions persist their injected custom message
       // before agent_start. Read it from the authoritative branch so pruning
       // summaries do not depend on the SDK also producing message_end/custom.
@@ -1580,6 +1642,10 @@ export function handleSdkSessionEvent(
         return;
       }
 
+      if (event.message.role === 'assistant') {
+        context.activeRequest.mayNeedOverflowRecovery = mayNeedOverflowRecovery(context, event.message);
+      }
+
       // SDK adapters can replay a durable assistant boundary after the first
       // message_end. The live accumulator owns the accepted terminal identity;
       // pending error/steering terminals cover the two durability-gated paths.
@@ -2005,6 +2071,16 @@ export function handleSdkSessionEvent(
         context.activeRequest.quotaSettlementTimer = undefined;
       }
 
+      // Retain an error-ended request until the SDK's post-agent compaction
+      // decision is known. Context-overflow recovery is unusual: this
+      // agent_end says willRetry=false, but a later compaction_end may say
+      // willRetry=true and continue inside the same session.prompt() call.
+      // Non-overflow candidates are discarded by the next compaction outcome
+      // or ordinary agent_start.
+      context.overflowRecoveryCandidate = context.activeRequest?.mayNeedOverflowRecovery
+        ? context.activeRequest
+        : undefined;
+
       // Clear activeRequest BEFORE emitting session.opened so the payload
       // sees the final idle state instead of a stale in-progress request.
       context.activeRequest = undefined;
@@ -2055,6 +2131,16 @@ export function handleSdkSessionEvent(
       return;
     }
     case 'compaction_end': {
+      // Native provider-overflow recovery reports agent_end(willRetry=false)
+      // before compaction, then resumes with agent.continue() after a successful
+      // compaction. Restore the finalized request before publishing the
+      // refreshed snapshot or receiving continuation events.
+      if (event.reason === 'overflow' && event.willRetry) {
+        rearmOverflowRecoveryRequest(context, Date.now());
+      } else {
+        context.overflowRecoveryCandidate = undefined;
+      }
+
       // `willRetry` also marks Pie's hard-threshold between-turn continuation:
       // the current agent loop resumes directly after this awaited compaction,
       // without another `agent_start`. Keep busy asserted in that case. Native

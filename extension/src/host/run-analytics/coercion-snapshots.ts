@@ -1,5 +1,11 @@
 import type { AssistantUsage, ThinkingLevel } from '../../shared/protocol';
-import type { LifecycleValueSource, SubagentAttemptPhase, SubagentAttemptSample } from '../../../../shared/run-analytics-contracts.js';
+import {
+  MAX_USER_INPUT_SAMPLE_CHARS,
+  type LifecycleValueSource,
+  type SubagentAttemptPhase,
+  type SubagentAttemptSample,
+  type UserInputCharSample,
+} from '../../../../shared/run-analytics-contracts.js';
 import type { AuxiliaryLlmUsageSample, RetryTimingSample, RunSnapshot, TurnThroughputSample, TurnThroughputStatus } from './types';
 import { coerceSessionAnalyticsFactors } from './coercion-factors';
 import { coerceFunctionalSettings } from './coercion-functional-settings';
@@ -210,6 +216,28 @@ function coerceSubagentAttemptSamples(value: unknown): SubagentAttemptSample[] |
   return samples;
 }
 
+function coerceUserInputCharSamples(value: unknown): UserInputCharSample[] | undefined {
+  // Absence (including a malformed collection) remains legacy/unavailable. An
+  // explicit empty array is preserved as tracking evidence with zero samples.
+  if (!Array.isArray(value)) return undefined;
+  const samples: UserInputCharSample[] = [];
+  for (const entry of value) {
+    if (!isObjectRecord(entry) || typeof entry.occurredAt !== 'string'
+      || !Number.isFinite(Date.parse(entry.occurredAt))) continue;
+    if (typeof entry.chars === 'number' && Number.isFinite(entry.chars) && entry.chars >= 0) {
+      samples.push({
+        occurredAt: entry.occurredAt,
+        chars: Math.min(Math.trunc(entry.chars), MAX_USER_INPUT_SAMPLE_CHARS),
+      });
+    } else {
+      // A valid event timestamp is expected-input evidence even when its length
+      // is malformed. Preserve the coverage gap instead of silently deleting it.
+      samples.push({ occurredAt: entry.occurredAt, chars: null });
+    }
+  }
+  return samples;
+}
+
 function coerceTurnThroughputSamples(value: unknown): TurnThroughputSample[] {
   if (!Array.isArray(value)) {
     return [];
@@ -341,6 +369,7 @@ function isValidRunSnapshotCandidate(candidate: Partial<RunSnapshot>): boolean {
 
 function buildRunSnapshot(candidate: Partial<RunSnapshot>): RunSnapshot {
   const c = candidate as RunSnapshot;
+  const userInputCharSamples = coerceUserInputCharSamples(candidate.userInputCharSamples);
   const subagentAttemptSamples = coerceSubagentAttemptSamples(candidate.subagentAttemptSamples);
   const unknownSubagentAttemptRecordSourceIds = Array.isArray(candidate.unknownSubagentAttemptRecordSourceIds)
     ? [...new Set(candidate.unknownSubagentAttemptRecordSourceIds.filter((id): id is string => typeof id === 'string' && id.length > 0))]
@@ -378,6 +407,7 @@ function buildRunSnapshot(candidate: Partial<RunSnapshot>): RunSnapshot {
     ...(candidate.initialUserMessageChars === undefined
       ? {}
       : { initialUserMessageChars: toNonNegativeInteger(candidate.initialUserMessageChars) }),
+    ...(userInputCharSamples === undefined ? {} : { userInputCharSamples }),
     ...(candidate.initialUserMessageTokens === undefined
       ? {}
       : { initialUserMessageTokens: toNonNegativeInteger(candidate.initialUserMessageTokens) }),

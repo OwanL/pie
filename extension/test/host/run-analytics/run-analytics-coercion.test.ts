@@ -24,7 +24,11 @@ import {
 } from '../../../src/host/stats-service/helpers';
 import { parseCheckpoint } from '../../../src/host/shared/checkpoint-io';
 import type { ComposerInput } from '../../../src/shared/protocol';
-import type { RunSnapshot, TurnThroughputSample } from '../../../src/host/run-analytics';
+import {
+  MAX_USER_INPUT_SAMPLE_CHARS,
+  type RunSnapshot,
+  type TurnThroughputSample,
+} from '../../../src/host/run-analytics';
 
 function makeRunSnapshot(): RunSnapshot {
   return {
@@ -458,6 +462,48 @@ test('coerceRunSnapshot preserves privacy-safe initial message size compatibly',
 
   current.initialUserMessageChars = -10;
   assert.equal(coerceRunSnapshot(current)?.initialUserMessageChars, 0);
+});
+
+test('coerceRunSnapshot preserves bounded timestamped user-input samples and legacy absence', () => {
+  const legacy = makeRunSnapshot();
+  delete legacy.userInputCharSamples;
+  assert.equal(coerceRunSnapshot(legacy)?.userInputCharSamples, undefined, 'legacy absence stays unavailable');
+
+  const at = '2026-01-01T00:00:00.000Z';
+  const current = makeRunSnapshot();
+  current.userInputCharSamples = [
+    { occurredAt: at, chars: 12 },
+    { occurredAt: at, chars: null },
+    { occurredAt: at, chars: 4.9 },
+    { occurredAt: at, chars: MAX_USER_INPUT_SAMPLE_CHARS + 500 },
+  ];
+  assert.deepEqual(coerceRunSnapshot(current)?.userInputCharSamples, [
+    { occurredAt: at, chars: 12 },
+    { occurredAt: at, chars: null },
+    { occurredAt: at, chars: 4 },
+    { occurredAt: at, chars: MAX_USER_INPUT_SAMPLE_CHARS },
+  ]);
+
+  current.userInputCharSamples = [
+    { occurredAt: at, chars: 8 },
+    { occurredAt: 'not-a-date', chars: 5 },
+    { occurredAt: at, chars: -1 },
+    { occurredAt: at, chars: Number.POSITIVE_INFINITY },
+    { occurredAt: at, chars: 'answer text' },
+    {},
+  ] as never;
+  assert.deepEqual(coerceRunSnapshot(current)?.userInputCharSamples, [
+    { occurredAt: at, chars: 8 },
+    { occurredAt: at, chars: null },
+    { occurredAt: at, chars: null },
+    { occurredAt: at, chars: null },
+  ], 'invalid timestamps are dropped, while timestamp-valid malformed lengths remain explicit coverage gaps');
+
+  current.userInputCharSamples = { malformed: true } as never;
+  assert.equal(coerceRunSnapshot(current)?.userInputCharSamples, undefined, 'malformed collection stays unavailable');
+
+  current.userInputCharSamples = [];
+  assert.deepEqual(coerceRunSnapshot(current)?.userInputCharSamples, [], 'explicit empty tracking evidence is preserved');
 });
 
 test('coerceRunSnapshot preserves the estimated prompt-token size compatibly', () => {

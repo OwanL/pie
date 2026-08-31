@@ -242,6 +242,8 @@ test('composer bottom-bar CSS keeps compact hitboxes distinct and wraps at narro
   assert.match(css, /@container composer-shell \(max-width: 380px\)[\s\S]*?\.composer-controls \{[\s\S]*?flex: 1 1 100%;[\s\S]*?flex-wrap: wrap;/);
   assert.match(css, /@container composer-shell \(max-width: 240px\)[\s\S]*?flex-wrap: wrap;/);
   assert.match(css, /\.subagent-provider-trigger\.has-disabled \{[\s\S]*?color: var\(--panel-muted\);/);
+  assert.match(css, /\.mcp-toggle-trigger\.active \{[\s\S]*?background: var\(--panel-control-surface\);[\s\S]*?color: var\(--panel-foreground\);/);
+  assert.match(css, /\.mcp-toggle-trigger\.active:focus-visible \{[\s\S]*?background: var\(--panel-control-hover\);[\s\S]*?color: var\(--panel-foreground\);/);
   assert.match(css, /\.toolbar-settings-menu \{[\s\S]*?box-sizing: border-box;/);
   assert.match(css, /@media \(max-width: 520px\)[\s\S]*?\.toolbar-settings-tabs \{[\s\S]*?overflow-x: auto;[\s\S]*?scrollbar-width: thin;/);
 });

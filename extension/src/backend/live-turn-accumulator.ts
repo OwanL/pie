@@ -43,6 +43,9 @@ export interface BackendLiveTurnIdentity {
   attemptId: string;
   canonicalMessageId: string;
   modelId?: string;
+  /** Provider serving this exact request; disambiguates model ids that are
+   * shared across providers. */
+  provider?: string;
   thinkingLevel?: ThinkingLevel;
   startedAt: number;
 }
@@ -114,6 +117,7 @@ export class BackendLiveTurnAccumulator {
       sessionPath: identity.sessionPath,
       canonicalMessageId: identity.canonicalMessageId,
       modelId: identity.modelId,
+      provider: identity.provider,
       thinkingLevel: identity.thinkingLevel,
       seq: 0,
       checkpointSeq: 0,
@@ -212,6 +216,7 @@ export class BackendLiveTurnAccumulator {
           kind: 'turn.started',
           canonicalMessageId: this.identity.canonicalMessageId,
           modelId: this.identity.modelId,
+          provider: this.identity.provider,
           thinkingLevel: this.identity.thinkingLevel,
           startedAt: this.identity.startedAt,
         };

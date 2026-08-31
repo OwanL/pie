@@ -20,8 +20,18 @@ export function resolveLiveDetail(
   const tool = ref.executionId ? arch.livePipeline.toolsByExecutionId[ref.executionId] : undefined;
   const sourceRevision = tool?.progressRevision ?? tool?.seq;
   const value = tool?.terminal?.result ?? tool?.preview;
-  if (!tool || sourceRevision !== ref.sourceRevision || value === undefined) {
+  const isMovingSubagentDetail = tool?.name.trim().toLowerCase() === 'subagent'
+    && typeof ref.sourceRevision === 'number'
+    && typeof sourceRevision === 'number'
+    && sourceRevision >= ref.sourceRevision;
+  if (!tool || (sourceRevision !== ref.sourceRevision && !isMovingSubagentDetail) || value === undefined) {
     return { sessionPath, key: ref.key, status: 'stale', message: 'The live tool result changed before it was loaded.' };
   }
-  return { sessionPath, key: ref.key, status: 'loaded', value, sizeBytes: ref.sizeBytes };
+  return {
+    sessionPath,
+    key: ref.key,
+    status: 'loaded',
+    value,
+    sizeBytes: tool.terminal?.resultBytes ?? tool.previewBytes,
+  };
 }

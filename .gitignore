@@ -111,3 +111,6 @@ NUL
 /settings.json.extensions.*.bak
 /settings.json.pie-lock
 .skylos/cache/grep_results.json
+
+# Temporary SDK patch-barrier test worktrees
+/extension/.pie-sdk-barrier-test-*/

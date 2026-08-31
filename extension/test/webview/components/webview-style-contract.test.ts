@@ -10,6 +10,16 @@ async function readWebviewSource(relativePath: string): Promise<string> {
   return readFile(new URL(`../../../src/webview/panel/${relativePath}`, import.meta.url), 'utf8');
 }
 
+test('user-input status segment stays muted like open-session counts', async () => {
+  const css = await readStyleSource('aggregate-stats-strip.css');
+  const userInputRule = css.match(/\.aggregate-strip-user-input\s*\{([^}]*)\}/)?.[1] ?? '';
+  const totalRule = css.match(/\.aggregate-strip-user-input-total\s*\{([^}]*)\}/)?.[1] ?? '';
+  assert.match(userInputRule, /color:\s*var\(--panel-muted\)/);
+  assert.match(userInputRule, /font-weight:\s*normal/);
+  assert.doesNotMatch(userInputRule + totalRule, /panel-accent/);
+  assert.match(totalRule, /color:\s*inherit/);
+});
+
 test('global focus fallback lives in Tailwind base so component outline utilities can override it', async () => {
   const indexCss = await readStyleSource('index.css');
   const baseLayerStart = indexCss.indexOf('@layer base');
@@ -165,6 +175,46 @@ test('per-place font sizes and link/muted color prefs are wired to CSS vars', as
   assert.match(prefsCss, /uiLinkColor,/);
 });
 
+test('markdown prose restores markers, hierarchy, rich blocks, and separators in both scopes', async () => {
+  const transcriptCss = await readStyleSource('transcript.css');
+  const promptCss = await readStyleSource('extension-ui-prompt.css');
+
+  for (const [scope, css] of [['message-body', transcriptCss], ['ask-prose', promptCss]] as const) {
+    assert.match(css, new RegExp(`\\.${scope} ul,\\s*\\.${scope} ol\\s*\\{[^}]*list-style-position:\\s*outside;`));
+    assert.match(css, new RegExp(`\\.${scope} ul\\s*\\{[^}]*list-style-type:\\s*disc;`));
+    assert.match(css, new RegExp(`\\.${scope} ol\\s*\\{[^}]*list-style-type:\\s*decimal;`));
+    assert.match(css, new RegExp(`\\.${scope} ul ul\\s*\\{[^}]*list-style-type:\\s*circle;`));
+    assert.match(css, new RegExp(`\\.${scope} ul ul ul\\s*\\{[^}]*list-style-type:\\s*square;`));
+    assert.match(css, new RegExp(`\\.${scope} ol ol\\s*\\{[^}]*list-style-type:\\s*lower-alpha;`));
+    assert.match(css, new RegExp(`\\.${scope} ol ol ol\\s*\\{[^}]*list-style-type:\\s*lower-roman;`));
+    assert.match(css, new RegExp(`\\.${scope} li:has\\(> input\\[type="checkbox"\\]\\),\\s*\\.${scope} li:has\\(> p > input\\[type="checkbox"\\]\\)\\s*\\{[^}]*list-style-type:\\s*none;`));
+  }
+
+  const transcriptHeadingSizes = [
+    ['h1', '1.6em'], ['h2', '1.35em'], ['h3', '1.2em'],
+    ['h4', '1.1em'], ['h5', '1em'], ['h6', '0.95em'],
+  ] as const;
+  for (const [heading, size] of transcriptHeadingSizes) {
+    assert.match(transcriptCss, new RegExp(`\\.message-body ${heading}\\s*\\{[^}]*margin:\\s*[^;]+;[^}]*font-size:\\s*${size.replace('.', '[.]')};`));
+  }
+
+  const promptHeadingSizes = [
+    ['h1', '1.35em'], ['h2', '1.2em'], ['h3', '1.1em'],
+    ['h4', '1em'], ['h5', '0.95em'], ['h6', '0.9em'],
+  ] as const;
+  for (const [heading, size] of promptHeadingSizes) {
+    assert.match(promptCss, new RegExp(`\\.ask-prose ${heading}\\s*\\{[^}]*margin:\\s*[^;]+;[^}]*font-size:\\s*${size.replace('.', '[.]')};`));
+  }
+
+  assert.match(transcriptCss, /\.message-body hr\s*\{[^}]*margin:\s*12px 0;[^}]*border:\s*0;[^}]*border-top:\s*1px solid var\(--panel-border\);/);
+  assert.match(transcriptCss, /\.message-item-shell\[data-role="user"\]:not\(\[data-synthetic="true"\]\) \.message-body hr\s*\{[^}]*border-top-color:\s*var\(--panel-user-border\);/);
+  assert.match(promptCss, /\.ask-prose blockquote\s*\{[^}]*margin:\s*4px 0;[^}]*padding:\s*2px 0 2px 8px;[^}]*border-left:\s*2px solid var\(--panel-border\);/);
+  assert.match(promptCss, /\.ask-prose hr\s*\{[^}]*margin:\s*6px 0;[^}]*border:\s*0;[^}]*border-top:\s*1px solid var\(--panel-border\);/);
+  assert.match(promptCss, /\.ask-prose \.md-table-wrap\s*\{[^}]*overflow-x:\s*auto;[^}]*margin:\s*4px 0;/);
+  assert.match(promptCss, /\.ask-prose \.md-table-wrap th,[\s\S]*?\.ask-prose \.md-table-wrap td\s*\{[^}]*padding:\s*3px 6px;/);
+
+});
+
 test('unified transcript refinement keeps operational rows quiet and user prompts distinct', async () => {
   const indexCss = await readStyleSource('index.css');
   const transcriptCss = await readStyleSource('transcript.css');
@@ -198,6 +248,21 @@ test('unified transcript refinement keeps operational rows quiet and user prompt
   assert.match(userRule, /border-color:\s*var\(--panel-user-border\)/);
   assert.match(userRule, /color:\s*var\(--panel-user-foreground\)/);
   assert.match(userRule, /box-shadow:\s*inset 0 1px 0 var\(--panel-user-highlight\)/);
+  const promptContextShellRule = transcriptCss.match(/\.transcript-prompt-context\s*\{([^}]*)\}/)?.[1] ?? '';
+  assert.match(promptContextShellRule, /min-height:\s*34px/);
+  assert.match(promptContextShellRule, /padding:\s*var\(--panel-gap-xs\)/);
+  const promptContextMetaRule = transcriptCss.match(/\.transcript-prompt-context-meta\s*\{([^}]*)\}/)?.[1] ?? '';
+  assert.match(promptContextMetaRule, /flex:\s*0 1 auto/);
+  assert.match(promptContextMetaRule, /max-width:\s*40%/);
+  assert.match(promptContextMetaRule, /overflow:\s*hidden/);
+  const promptContextRule = transcriptCss.match(/\.transcript-prompt-context-preview\s*\{([^}]*)\}/)?.[1] ?? '';
+  assert.match(promptContextRule, /padding:\s*3px var\(--panel-gap-sm\)/);
+  assert.match(promptContextRule, /white-space:\s*nowrap/);
+  assert.match(promptContextRule, /border:\s*1px solid var\(--panel-user-border\)/);
+  assert.match(promptContextRule, /border-radius:\s*var\(--panel-radius-lg\)/);
+  assert.match(promptContextRule, /background:\s*var\(--panel-user-surface\)/);
+  assert.match(promptContextRule, /color:\s*var\(--panel-user-foreground\)/);
+  assert.match(promptContextRule, /box-shadow:\s*inset 0 1px 0 var\(--panel-user-highlight\)/);
   assert.match(transcriptCss, /\[data-role="user"\]:not\(\[data-synthetic="true"\]\) \.message-body code\s*\{[^}]*color:\s*var\(--panel-user-foreground\)/);
   assert.match(transcriptCss, /\.message-user-image-caption\s*\{\s*color:\s*color-mix\(in srgb, var\(--panel-user-foreground\) 78%, var\(--panel-user-surface\)\)/);
   assert.match(inlineEditorCss, /\[data-role="user"\]\[data-editing="true"\] \.inline-editor-textarea\s*\{[^}]*color:\s*var\(--panel-user-foreground\)/);

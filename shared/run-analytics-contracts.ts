@@ -447,6 +447,17 @@ export interface FunctionalSettingsSnapshot {
   toolResultPruningProfile: 'default' | 'security' | null;
 }
 
+/** Hard ceiling for one privacy-safe user-input character sample. */
+export const MAX_USER_INPUT_SAMPLE_CHARS = 32 * 1024 * 1024;
+
+/** Timestamped, privacy-safe user-input evidence. `null` means an expected
+ * user-input event was observed but its character length was unavailable or
+ * malformed. User-authored text is never stored. */
+export interface UserInputCharSample {
+  occurredAt: string;
+  chars: number | null;
+}
+
 export interface RunSnapshot {
   sessionPath: string;
   /** Stable ID from the session JSONL header. Optional for historical runs. */
@@ -484,6 +495,13 @@ export interface RunSnapshot {
   harnessFingerprint?: string;
   /** Privacy-safe size of the user-authored message that started this run, in Unicode code points. Optional for historical snapshots; content is never stored here. */
   initialUserMessageChars?: number;
+  /**
+   * Timestamped privacy-safe Unicode code-point samples for composer prompts
+   * and expected ask_user input. `chars: null` preserves incomplete coverage
+   * without inventing a zero; prompt and answer text is never stored. Absence
+   * identifies historical snapshots recorded before this metric.
+   */
+  userInputCharSamples?: UserInputCharSample[];
   /** Privacy-safe estimated size of the same user-authored message in tokens
    * (cl100k_base BPE estimate; the exact model tokenizer is not known at send
    * time). Optional for historical snapshots; the text itself is never stored. */

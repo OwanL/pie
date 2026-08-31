@@ -121,6 +121,18 @@ export class WorkerRequestTimeoutError extends Error {
   }
 }
 
+export class WorkerRequestEnqueueError extends Error {
+  readonly code = 'WORKER_REQUEST_ENQUEUE_FAILED';
+
+  constructor(
+    readonly reason: 'invalid' | 'oversize' | 'capacity' | 'unavailable',
+    readonly detail: string,
+  ) {
+    super(`Worker IPC frame could not be enqueued (${reason}: ${detail}).`);
+    this.name = 'WorkerRequestEnqueueError';
+  }
+}
+
 const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
 const MAX_EXPIRED_REQUEST_IDS = 256;
 
@@ -477,9 +489,7 @@ export class WorkerClient {
           return;
         }
         if (settlement.status !== 'rejected') return;
-        const error = new Error(
-          `Worker IPC frame could not be enqueued (${settlement.reason}: ${settlement.detail}).`,
-        );
+        const error = new WorkerRequestEnqueueError(settlement.reason, settlement.detail);
         if (options.fatalOnRejection === false) options.onRejected?.(error);
         else this.fail(error, true);
       },

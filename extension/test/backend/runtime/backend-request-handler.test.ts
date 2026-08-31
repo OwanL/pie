@@ -638,6 +638,72 @@ test('message.send accepts requests, handles preflight rejection, and guards con
   assert.equal(rejectedHarness.context.activeRequest, undefined);
 });
 
+test('message.continue resumes without invoking the prompt preflight path', async () => {
+  let continueCalls = 0;
+  let promptCalls = 0;
+  const harness = createHarness({
+    sessionOverrides: {
+      messages: [
+        { role: 'user', content: 'work' },
+        { role: 'assistant', stopReason: 'aborted', content: 'partial' },
+      ],
+      prompt: async () => { promptCalls += 1; },
+      continueAfterInterruption: async () => { continueCalls += 1; },
+    },
+  });
+
+  const result = await handleBackendRequest(harness.deps, {
+    id: 'continue-interrupted',
+    method: 'message.continue',
+    params: { sessionPath: harness.context.sessionPath },
+  });
+
+  assert.equal(typeof (result as { requestId?: string }).requestId, 'string');
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(continueCalls, 1);
+  assert.equal(promptCalls, 0, 'continuation must not enter session.prompt or before_agent_start');
+  assert.ok(harness.context.activeRequest, 'continuation owns the ordinary live request lifecycle');
+  assert.equal(
+    harness.emitted.some((entry) => entry.event === 'message.custom'
+      && (entry.payload as { message?: { customType?: string } }).message?.customType === 'preflight-succeeded'),
+    false,
+    'continuation has no pruning preflight phase',
+  );
+});
+
+test('message.continue rejects a non-interrupted tail before acknowledging provider work', async () => {
+  let continueCalls = 0;
+  const harness = createHarness({
+    sessionOverrides: {
+      messages: [{ role: 'assistant', stopReason: 'stop', content: 'done' }],
+      continueAfterInterruption: async () => { continueCalls += 1; },
+    },
+  });
+  await assert.rejects(
+    handleBackendRequest(harness.deps, {
+      id: 'continue-not-available',
+      method: 'message.continue',
+      params: { sessionPath: harness.context.sessionPath },
+    }),
+    (error: unknown) => error instanceof BackendError && error.code === 'CONTINUATION_NOT_AVAILABLE',
+  );
+  assert.equal(continueCalls, 0);
+  assert.equal(harness.context.activeRequest, undefined);
+});
+
+test('message.continue rejects a runtime without the continuation seam', async () => {
+  const harness = createHarness();
+  await assert.rejects(
+    handleBackendRequest(harness.deps, {
+      id: 'continue-unsupported',
+      method: 'message.continue',
+      params: { sessionPath: harness.context.sessionPath },
+    }),
+    (error: unknown) => error instanceof BackendError && error.code === 'SDK_INCOMPATIBLE',
+  );
+  assert.equal(harness.context.activeRequest, undefined);
+});
+
 test('message.send rejects retained models from explicitly disabled providers before enqueueing', async () => {
   const previous = process.env[PROVIDER_TOGGLES_ENV];
   process.env[PROVIDER_TOGGLES_ENV] = JSON.stringify({ 'openai-codex': false, ollama: true });

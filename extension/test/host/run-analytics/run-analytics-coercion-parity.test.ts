@@ -20,6 +20,7 @@ import test from 'node:test';
  */
 
 import { coerceRunSnapshot as extensionCoerce } from '../../../src/host/run-analytics/coercion-snapshots';
+import { MAX_USER_INPUT_SAMPLE_CHARS } from '../../../src/host/run-analytics';
 import { coerceRunSnapshot as analysisCoerce } from '../../../../analysis/scripts/source.ts';
 
 type AnySnapshot = Record<string, unknown>;
@@ -108,6 +109,11 @@ const EDGE_CASES: Array<{ name: string; snapshot: AnySnapshot }> = [
       contextTokens: 12000,
       contextLimit: 200000,
       initialUserMessageChars: 142,
+      userInputCharSamples: [
+        { occurredAt: '2026-01-01T00:00:00.000Z', chars: 142 },
+        { occurredAt: '2026-01-01T00:02:00.000Z', chars: 3 },
+        { occurredAt: '2026-01-01T00:04:00.000Z', chars: 17 },
+      ],
       initialUserMessageTokens: 41,
       askUserAnsweredCount: 2,
       askUserCancelledCount: 1,
@@ -120,6 +126,25 @@ const EDGE_CASES: Array<{ name: string; snapshot: AnySnapshot }> = [
       busyPeriodCount: 1,
       compactionCount: 0,
       autoRetryCount: 1,
+      toolUsage: EMPTY_TOOL_USAGE,
+      fileMutation: EMPTY_FILE_MUTATION,
+      fileExtensions: EMPTY_FILE_EXTENSIONS,
+      verification: EMPTY_VERIFICATION,
+    },
+  },
+  {
+    name: 'user-input character samples drop malformed entries while preserving tracking presence',
+    snapshot: {
+      ...validBase(),
+      userInputCharSamples: [
+        { occurredAt: '2026-01-01T00:00:00.000Z', chars: 10 },
+        { occurredAt: 'invalid', chars: 8 },
+        { occurredAt: '2026-01-01T00:01:00.000Z', chars: -1 },
+        { occurredAt: '2026-01-01T00:02:00.000Z', chars: 2.9 },
+        { occurredAt: '2026-01-01T00:03:00.000Z', chars: null },
+        { occurredAt: '2026-01-01T00:04:00.000Z', chars: Number.POSITIVE_INFINITY },
+        { occurredAt: '2026-01-01T00:05:00.000Z', chars: MAX_USER_INPUT_SAMPLE_CHARS + 1 },
+      ],
       toolUsage: EMPTY_TOOL_USAGE,
       fileMutation: EMPTY_FILE_MUTATION,
       fileExtensions: EMPTY_FILE_EXTENSIONS,

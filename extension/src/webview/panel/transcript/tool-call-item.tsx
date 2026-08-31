@@ -822,7 +822,7 @@ function SubagentSingleBlock({
           onTransitionEnd={onBodyTransitionEnd}
         >
           <div class="collapsible-body-clip">
-            {detailPending ? (
+            {detailPending || detailFailed ? (
               <div id={bodyId} class="subagent-messages p-3" role="status">
                 {detailFailed ? (
                   <div>

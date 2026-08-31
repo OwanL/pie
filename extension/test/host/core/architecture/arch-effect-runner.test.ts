@@ -87,6 +87,26 @@ test('EffectRunner routes InterruptRpc only through the target session queue', a
   assert.equal(events[0]?.ok, true);
 });
 
+test('EffectRunner routes ContinueRpc through the session queue without a user prompt payload', async () => {
+  const { deps, calls, events } = makeEffectRunnerDeps({
+    requestImpl: async () => ({ requestId: 'continue-request' }),
+  });
+  const runner = new EffectRunner(deps);
+
+  runner.run({ kind: 'ContinueRpc', corrId: 'continue-1', sessionPath: '/a' });
+  await settle();
+
+  const request = calls.find((call) => call.kind === 'request');
+  assert.deepEqual(request, {
+    kind: 'request',
+    method: 'message.continue',
+    params: { sessionPath: '/a' },
+  });
+  assert.equal(events[0]?.kind, 'ContinueResult');
+  assert.equal(events[0]?.ok, true);
+  assert.equal(events[0]?.requestId, 'continue-request');
+});
+
 test('EffectRunner serializes rapid system-prompt toggle snapshots per session', async () => {
   const queueTails = new Map<string, Promise<void>>();
   const queues: EffectRunnerDeps['queues'] = {
@@ -176,11 +196,12 @@ test('EffectRunner grants only cold promotion the measured SDK startup budget', 
     BACKEND_READY_TIMEOUT_MS > 68_000,
     'cold promotion must outlive the observed healthy 68s worker startup',
   );
-  const observed: Array<{ sessionPath: string; timeoutMs?: number }> = [];
+  const observed: Array<{ method: string; sessionPath: string; timeoutMs?: number }> = [];
   let runtimeReady = false;
   const backend: EffectRunnerDeps['backend'] = {
-    async request<T>(_method: string, params?: unknown, options?: import('../../../../src/shared/request-tracker').RequestOptions): Promise<T> {
+    async request<T>(method: string, params?: unknown, options?: import('../../../../src/shared/request-tracker').RequestOptions): Promise<T> {
       observed.push({
+        method,
         sessionPath: (params as { sessionPath: string }).sessionPath,
         ...(options?.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
       });
@@ -198,10 +219,18 @@ test('EffectRunner grants only cold promotion the measured SDK startup budget', 
   runtimeReady = true;
   runner.run({ kind: 'SendRpc', corrId: 'hot-send', sessionPath: '/hot', text: 'hot', inputs: [], composedText: 'hot', localId: 'local-hot' });
   await settle();
+  runtimeReady = false;
+  runner.run({ kind: 'ContinueRpc', corrId: 'cold-continue', sessionPath: '/cold-continue' });
+  await settle();
+  runtimeReady = true;
+  runner.run({ kind: 'ContinueRpc', corrId: 'hot-continue', sessionPath: '/hot-continue' });
+  await settle();
 
   assert.deepEqual(observed, [
-    { sessionPath: '/cold', timeoutMs: BACKEND_READY_TIMEOUT_MS },
-    { sessionPath: '/hot' },
+    { method: 'message.send', sessionPath: '/cold', timeoutMs: BACKEND_READY_TIMEOUT_MS },
+    { method: 'message.send', sessionPath: '/hot' },
+    { method: 'message.continue', sessionPath: '/cold-continue', timeoutMs: BACKEND_READY_TIMEOUT_MS },
+    { method: 'message.continue', sessionPath: '/hot-continue' },
   ]);
   runner.dispose();
 });

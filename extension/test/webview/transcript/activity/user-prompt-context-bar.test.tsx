@@ -58,33 +58,32 @@ function makeScrollElement(metrics: ElementMetrics): HTMLDivElement {
 
 interface RenderBarOptions {
   rows: readonly TranscriptRow[];
-  /** Measurement-cache starts, indexed by virtual row index. */
-  starts: Array<{ start: number }>;
+  /** Measurement cache, indexed by virtual row index. */
+  measurements: Array<{ start: number; end: number }>;
   metrics: ElementMetrics | null;
   /** virtualizer.scrollOffset fallback used while metrics are unavailable. */
   scrollOffset?: number | null;
-  isAtBottom?: boolean;
   hidden?: boolean;
   scrollElement: HTMLDivElement | null;
+  onLocate?: (rowIndex: number) => void;
 }
 
-function fakeVirtualizer(starts: Array<{ start: number }>, scrollOffset: number | null) {
+function fakeVirtualizer(measurements: Array<{ start: number; end: number }>, scrollOffset: number | null) {
   return {
-    measurementsCache: starts,
+    measurementsCache: measurements,
     scrollOffset,
   } as unknown as Virtualizer<HTMLDivElement, HTMLDivElement>;
 }
 
 function renderBar(container: HTMLDivElement, options: RenderBarOptions): HTMLElement | null {
-  const virtualizer = fakeVirtualizer(options.starts, options.scrollOffset ?? null);
+  const virtualizer = fakeVirtualizer(options.measurements, options.scrollOffset ?? null);
   act(() => {
     render(h(UserPromptContextBar, {
       entries: buildUserPromptEntries(options.rows),
       virtualizer,
       scrollRef: { current: options.scrollElement },
-      isAtBottom: options.isAtBottom ?? false,
       hidden: options.hidden ?? false,
-      onLocate: () => {},
+      onLocate: options.onLocate ?? (() => {}),
     }), container);
   });
   return container.querySelector('.transcript-prompt-context');
@@ -96,76 +95,147 @@ function previewButton(container: HTMLElement): HTMLButtonElement {
   return button;
 }
 
-test('same-virtual-range scroll events switch the governing prompt', () => {
+test('same-range scrolling never duplicates a visible prompt and the preview locates it', () => {
   const container = document.createElement('div');
   document.body.appendChild(container);
-  const metrics: ElementMetrics = { scrollTop: 50, scrollHeight: 600, clientHeight: 200 };
+  const metrics: ElementMetrics = { scrollTop: 50, scrollHeight: 700, clientHeight: 200 };
   const element = makeScrollElement(metrics);
-  const starts = [{ start: 0 }, { start: 100 }, { start: 320 }];
+  const measurements = [
+    { start: 0, end: 40 },
+    { start: 100, end: 300 },
+    { start: 320, end: 350 },
+  ];
   const rows: TranscriptRow[] = [
     messageRow(userMessage('prompt-1', 'first prompt')),
     messageRow(userMessage('assistant-1', '', { role: 'assistant' })),
     messageRow(userMessage('prompt-2', 'second prompt')),
   ];
+  let locatedRow = -1;
 
-  renderBar(container, { rows, starts, metrics, scrollOffset: 50, scrollElement: element });
+  renderBar(container, {
+    rows,
+    measurements,
+    metrics,
+    scrollOffset: 50,
+    scrollElement: element,
+    onLocate: (rowIndex) => { locatedRow = rowIndex; },
+  });
   let button = previewButton(container);
   assert.match(button.textContent ?? '', /first prompt/);
-  assert.equal(button.getAttribute('aria-label'), 'Expand user prompt');
+  assert.equal(button.getAttribute('aria-label'), null, 'the visible prompt remains the accessible button name');
+  const actionDescription = document.getElementById(button.getAttribute('aria-describedby') ?? '');
+  assert.match(actionDescription?.textContent ?? '', /Locate this user prompt in the transcript/);
+  assert.equal(button.getAttribute('title'), 'Locate user prompt in transcript');
+  assert.equal(container.querySelector('.transcript-prompt-context-locate'), null);
 
-  // Cross the boundary while the virtual range stays identical: entries,
-  // measurement starts, virtualizer offset, and isAtBottom are all unchanged.
-  // Only the bar's own element-level scroll listener can see this.
+  // The second prompt is on screen, so keep showing its offscreen predecessor.
   act(() => {
     metrics.scrollTop = 330;
     element.dispatchEvent(new Event('scroll'));
   });
+  assert.match(previewButton(container).textContent ?? '', /first prompt/);
 
+  // Once the second prompt is fully above the viewport, it becomes the context.
+  act(() => {
+    metrics.scrollTop = 360;
+    element.dispatchEvent(new Event('scroll'));
+  });
   button = previewButton(container);
   assert.match(button.textContent ?? '', /second prompt/);
-  assert.doesNotMatch(button.textContent ?? '', /first prompt/);
 
-  // The toggle keeps the concise action label; no prompt text is embedded.
   act(() => {
     button.click();
   });
-  assert.equal(previewButton(container).getAttribute('aria-label'), 'Collapse user prompt');
-
-  // Further same-identity scrolls must not disturb the selection.
-  act(() => {
-    metrics.scrollTop = 340;
-    element.dispatchEvent(new Event('scroll'));
-  });
-  assert.match(previewButton(container).textContent ?? '', /second prompt/);
+  assert.equal(locatedRow, 2);
 
   render(null, container);
   container.remove();
 });
 
-test('near-bottom scroll events promote the latest prompt immediately from element metrics', () => {
+test('render-time selection changes stay synchronized with same-range scrolling', () => {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const metrics: ElementMetrics = { scrollTop: 50, scrollHeight: 600, clientHeight: 200 };
   const element = makeScrollElement(metrics);
-  // The latest prompt's start is far below the maximum reachable top-edge
-  // boundary (maxScroll 400 + threshold 10 = 410 < 580), so only the metric
-  // near-bottom check can promote it.
-  const starts = [{ start: 0 }, { start: 50 }, { start: 580 }];
-  const rows: TranscriptRow[] = [
-    messageRow(userMessage('prompt-1', 'earlier prompt')),
-    messageRow(userMessage('assistant-1', '', { role: 'assistant' })),
-    messageRow(userMessage('prompt-2', 'latest prompt')),
+  const rows = [
+    messageRow(userMessage('prompt-1', 'first prompt')),
+    messageRow(userMessage('prompt-2', 'second prompt')),
   ];
 
-  renderBar(container, { rows, starts, metrics, scrollOffset: 50, scrollElement: element });
-  assert.match(previewButton(container).textContent ?? '', /earlier prompt/);
+  renderBar(container, {
+    rows,
+    measurements: [{ start: 0, end: 40 }, { start: 60, end: 200 }],
+    metrics,
+    scrollElement: element,
+  });
+  assert.match(previewButton(container).textContent ?? '', /first prompt/);
 
+  // Prime the scroll listener's identity, then simulate a measurement update
+  // that changes the render-time owner without requiring a scroll event.
   act(() => {
-    metrics.scrollTop = 398;
     element.dispatchEvent(new Event('scroll'));
   });
+  metrics.scrollTop = 100;
+  renderBar(container, {
+    rows,
+    measurements: [{ start: 0, end: 40 }, { start: 60, end: 80 }],
+    metrics,
+    scrollElement: element,
+  });
+  assert.match(previewButton(container).textContent ?? '', /second prompt/);
 
-  assert.match(previewButton(container).textContent ?? '', /latest prompt/);
+  // Returning to the first prompt inside the same virtual range must rerender;
+  // a stale listener baseline would incorrectly leave the second prompt shown.
+  act(() => {
+    metrics.scrollTop = 50;
+    element.dispatchEvent(new Event('scroll'));
+  });
+  assert.match(previewButton(container).textContent ?? '', /first prompt/);
+
+  render(null, container);
+  container.remove();
+});
+
+test('the latest visible prompt does not replace its predecessor at the bottom boundary', () => {
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  const metrics: ElementMetrics = { scrollTop: 400, scrollHeight: 600, clientHeight: 200 };
+
+  renderBar(container, {
+    rows: [
+      messageRow(userMessage('prompt-1', 'preceding prompt')),
+      messageRow(userMessage('assistant-1', '', { role: 'assistant' })),
+      messageRow(userMessage('prompt-2', 'latest visible prompt')),
+    ],
+    measurements: [
+      { start: 0, end: 40 },
+      { start: 50, end: 370 },
+      { start: 380, end: 520 },
+    ],
+    metrics,
+    scrollElement: makeScrollElement(metrics),
+  });
+
+  const button = previewButton(container);
+  assert.match(button.textContent ?? '', /preceding prompt/);
+  assert.doesNotMatch(button.textContent ?? '', /latest visible prompt/);
+
+  render(null, container);
+  container.remove();
+});
+
+test('the section stays hidden while the first prompt is on screen', () => {
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  const metrics: ElementMetrics = { scrollTop: 20, scrollHeight: 600, clientHeight: 200 };
+
+  const section = renderBar(container, {
+    rows: [messageRow(userMessage('prompt-1', 'visible prompt'))],
+    measurements: [{ start: 0, end: 40 }],
+    metrics,
+    scrollElement: makeScrollElement(metrics),
+  });
+  assert.equal(section, null);
 
   render(null, container);
   container.remove();
@@ -178,10 +248,9 @@ test('empty sessions render no bar', () => {
 
   const section = renderBar(container, {
     rows: [],
-    starts: [],
+    measurements: [],
     metrics,
     scrollOffset: 0,
-    isAtBottom: true,
     scrollElement: makeScrollElement(metrics),
   });
   assert.equal(section, null, 'an empty session must not reserve the bar');
@@ -201,7 +270,7 @@ test('sessions with no preceding loaded prompt render no bar', () => {
 
   const idle = renderBar(container, {
     rows,
-    starts: [{ start: 0 }, { start: 200 }],
+    measurements: [{ start: 0, end: 180 }, { start: 200, end: 240 }],
     metrics,
     scrollOffset: 0,
     scrollElement: makeScrollElement(metrics),
@@ -210,10 +279,9 @@ test('sessions with no preceding loaded prompt render no bar', () => {
 
   const detached = renderBar(container, {
     rows,
-    starts: [{ start: 0 }, { start: 200 }],
+    measurements: [{ start: 0, end: 180 }, { start: 200, end: 240 }],
     metrics: null,
     scrollOffset: null,
-    isAtBottom: false,
     scrollElement: null,
   });
   assert.equal(detached, null, 'no owner and no fallback signal still renders nothing');
@@ -225,27 +293,26 @@ test('sessions with no preceding loaded prompt render no bar', () => {
 test('initial positioning keeps the bar reserved but hidden while a prompt exists', () => {
   const container = document.createElement('div');
   document.body.appendChild(container);
-  const metrics: ElementMetrics = { scrollTop: 0, scrollHeight: 600, clientHeight: 200 };
+  const metrics: ElementMetrics = { scrollTop: 50, scrollHeight: 600, clientHeight: 200 };
 
   const bar = renderBar(container, {
     rows: [messageRow(userMessage('prompt-1', 'js prompt'))],
-    starts: [{ start: 0 }],
+    measurements: [{ start: 0, end: 40 }],
     metrics,
-    scrollOffset: 0,
-    isAtBottom: false,
+    scrollOffset: 50,
     hidden: true,
     scrollElement: makeScrollElement(metrics),
   });
   assert.ok(bar, 'positioning with a selected prompt reserves the bar');
   assert.ok(bar.classList.contains('is-hidden'));
   assert.equal(bar.getAttribute('aria-hidden'), 'true');
+  assert.equal(bar.querySelector('.transcript-header-label'), null, 'the user-style bubble needs no redundant heading');
 
   const emptyHidden = renderBar(container, {
     rows: [],
-    starts: [],
+    measurements: [],
     metrics,
     hidden: true,
-    isAtBottom: true,
     scrollElement: makeScrollElement(metrics),
   });
   assert.equal(emptyHidden, null, 'positioning without a prompt must not reserve the bar');

@@ -9,6 +9,7 @@ import type { ReducerResult } from './helpers.js';
 // optimistic-handlers.ts, result-handlers.ts).
 import {
   handleInterrupt,
+  handleContinue,
   handleSend,
   handleEdit,
   handleEditQueued,
@@ -81,6 +82,10 @@ import {
 
 export function handleCommand(state: ArchState, cmd: Command): ReducerResult {
   switch (cmd.kind) {
+    case 'Continue': {
+      return handleContinue(state, cmd);
+    }
+
     case 'Interrupt': {
       return handleInterrupt(state, cmd);
     }

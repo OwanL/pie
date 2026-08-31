@@ -213,6 +213,16 @@ function ComposerView({
     tokenRateBySession,
   });
 
+  const canContinueInterrupted = useMemo(() => {
+    if (busy) return false;
+    for (let index = transcript.length - 1; index >= 0; index -= 1) {
+      const message = transcript[index];
+      if (message.role === 'user') return false;
+      if (message.role === 'assistant') return message.status === 'interrupted';
+    }
+    return false;
+  }, [busy, transcript]);
+
   const {
     text,
     textareaRef,
@@ -228,6 +238,7 @@ function ComposerView({
   } = useComposerInput({
     busy,
     sendBlocked: interrupting || !commandsAvailable,
+    allowEmptySend: canContinueInterrupted,
     onSend,
     onRetrySend,
     pendingComposerInputsLength: pendingComposerInputs.length,
@@ -305,8 +316,11 @@ function ComposerView({
     }
   }, [sessionPath, busy, postMessage]);
 
+  const continueMode = canContinueInterrupted
+    && text.trim().length === 0
+    && pendingComposerInputs.length === 0;
   const canSend = commandsAvailable
-    && (text.trim().length > 0 || pendingComposerInputs.length > 0)
+    && (text.trim().length > 0 || pendingComposerInputs.length > 0 || continueMode)
     && !submitting.current;
   const attachmentSummary = useMemo(
     () => describeComposerInputSummary(pendingComposerInputs),
@@ -424,6 +438,7 @@ function ComposerView({
             onClearQueue={onClearQueue}
             sendCurrentText={sendCurrentText}
             canSend={canSend}
+            continueMode={continueMode}
           />
         </div>
       </div>

@@ -2,6 +2,7 @@ import { produce } from 'immer';
 
 import type { ArchState } from '../arch-state.js';
 import type { ChatMessage } from '../../../shared/protocol/messages.js';
+import type { ThinkingLevel } from '../../../shared/protocol/models.js';
 import { LIVE_PIPELINE_LIMITS, type LivePipelineState } from '../../../shared/live-pipeline-protocol.js';
 import type { Event } from '../events.js';
 import type { Effect } from '../effects.js';
@@ -40,6 +41,13 @@ export function handleTurnSemanticEvent(
   const effects: Effect[] = [];
 
   if (envelope.kind === 'turn.started' && transition.classification === 'applied') {
+    nextState = reconcileServingModelSummary(
+      nextState,
+      envelope.sessionPath,
+      envelope.modelId,
+      envelope.provider,
+      envelope.thinkingLevel,
+    );
     const commit = commitPromotedSend(nextState, envelope.sessionPath, envelope.requestId, envelope.canonicalMessageId);
     nextState = commit.state;
     effects.push(...commit.effects);
@@ -96,7 +104,13 @@ export function handleLiveTurnCheckpointResult(
     if (applied.classification === 'stale') return { state, effects: [] };
     return markCheckpointFailure(state, event.sessionPath, event.turnId, event.attemptId, event.occurredAt);
   }
-  let next = { ...state, livePipeline: applied.state };
+  let next = reconcileServingModelSummary(
+    { ...state, livePipeline: applied.state },
+    event.checkpoint.sessionPath,
+    event.checkpoint.turn.modelId,
+    event.checkpoint.turn.provider,
+    event.checkpoint.turn.thinkingLevel,
+  );
   // A checkpoint can be the first authoritative proof that a turn crossed its
   // commit point. This happens when turn.started was missed, arrived behind a
   // cold session.opened checkpoint, or was classified for repair. Reconcile
@@ -162,6 +176,33 @@ export function handleLiveTurnCheckpointResult(
     return { state: replayed.state, effects: [...commitEffects, ...replayed.effects] };
   }
   return { state: next, effects: commitEffects };
+}
+
+function reconcileServingModelSummary(
+  state: ArchState,
+  sessionPath: string,
+  modelId: string | undefined,
+  provider: string | undefined,
+  thinkingLevel: ThinkingLevel | undefined,
+): ArchState {
+  if (!modelId) return state;
+  let changed = false;
+  const sessions = state.sessions.sessions.map((session) => {
+    if (session.path !== sessionPath
+      || (session.modelId === modelId
+        && (provider === undefined || session.provider === provider)
+        && (thinkingLevel === undefined || session.thinkingLevel === thinkingLevel))) return session;
+    changed = true;
+    return {
+      ...session,
+      modelId,
+      ...(provider !== undefined ? { provider } : {}),
+      ...(thinkingLevel !== undefined ? { thinkingLevel } : {}),
+    };
+  });
+  return changed
+    ? { ...state, sessions: { ...state.sessions, sessions } }
+    : state;
 }
 
 function replayPendingAfterCheckpoint(

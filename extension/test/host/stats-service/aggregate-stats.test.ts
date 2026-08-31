@@ -14,7 +14,7 @@ import {
   trailingLocalDates,
   MAX_INTRADAY_CHART_POINTS,
 } from '../../../src/host/stats-service/aggregate-stats';
-import type { RunSnapshot } from '../../../src/host/run-analytics';
+import { MAX_USER_INPUT_SAMPLE_CHARS, type RunSnapshot } from '../../../src/host/run-analytics';
 import type { ModelPricingRecord } from '../../../../shared/pricing-core';
 import type { AggregateSeriesSegment } from '../../../src/shared/protocol/aggregate-stats';
 import type { TokenRateIndicatorState } from '../../../src/shared/token-rate';
@@ -1215,6 +1215,135 @@ test('daily work trend stays bounded to 14 points across a long history', () => 
   assert.equal(stats.dailyWorkTrend[0]!.date, '2026-06-21');
 });
 
+test('user-input character volume uses one trailing-14-day lower-rank P95 cap and reconciles windows', () => {
+  const pricingMap = new Map<string, ModelPricingRecord[]>([['m', [pricing('openai', 0, 0)]]]);
+  const samples = [
+    { id: 'd4', day: 4, length: 10 },
+    { id: 'd3', day: 3, length: 20 },
+    { id: 'd2', day: 2, length: 30 },
+    { id: 'd1', day: 1, length: 40 },
+    { id: 'today-outlier', day: 0, length: 10_000 },
+    { id: 'older', day: 10, length: 35 },
+  ];
+  const runs = samples.map(({ id, day, length }, index) => {
+    const at = isoLocal(2026, 7, 4 - day, 9 + (index % 3));
+    return makeRun({
+      runId: id,
+      sessionPath: `/s/${id}`,
+      modelId: 'm',
+      userInputCharSamples: [{ occurredAt: at, chars: length }],
+      askUserAnsweredCount: 0,
+      askUserCancelledCount: 0,
+      startedAt: at,
+      updatedAt: at,
+      finalizedAt: at,
+    });
+  });
+  const stats = computeAggregateStats(runs, pricingMap, NOW, [], {}, 0);
+
+  // Six pooled samples sort to 10,20,30,35,40,10000. Lower-rank P95 is index
+  // floor((6 - 1) * .95) = 4, so the pasted outlier contributes only 40.
+  assert.equal(stats.todayProductivity.userInputCharCap, 40);
+  assert.equal(stats.todayProductivity.adjustedUserInputChars, 40);
+  assert.equal(stats.todayProductivity.knownUserInputCharSampleCount, 1);
+  assert.equal(stats.todayProductivity.expectedUserInputCharSampleCount, 1);
+  assert.equal(stats.todayProductivity.cappedUserInputCharSampleCount, 1);
+
+  assert.equal(stats.weekProductivity.userInputCharCap, 40, 'Today and 7-day use the same 14-day cap');
+  assert.equal(stats.weekProductivity.adjustedUserInputChars, 140, '10 + 20 + 30 + 40 + capped 40');
+  assert.equal(stats.weekProductivity.knownUserInputCharSampleCount, 5);
+  assert.equal(stats.weekProductivity.expectedUserInputCharSampleCount, 5);
+  assert.equal(stats.weekProductivity.cappedUserInputCharSampleCount, 1);
+
+  const trendByDate = new Map(stats.dailyWorkTrend.map((day) => [day.date, day.productivity]));
+  assert.equal(trendByDate.get('2026-07-04')?.adjustedUserInputChars, stats.todayProductivity.adjustedUserInputChars);
+  const weekDates = new Set(['2026-06-28', '2026-06-29', '2026-06-30', '2026-07-01', '2026-07-02', '2026-07-03', '2026-07-04']);
+  const graphWeekSum = stats.dailyWorkTrend
+    .filter((day) => weekDates.has(day.date))
+    .reduce((sum, day) => sum + day.productivity.adjustedUserInputChars, 0);
+  assert.equal(graphWeekSum, stats.weekProductivity.adjustedUserInputChars, 'daily graph and 7-day headline reconcile');
+  assert.ok(stats.dailyWorkTrend.every((day) => day.productivity.userInputCharCap === 40), 'every graph point exposes the shared cap');
+});
+
+test('legacy initial prompt characters contribute a lower-bound sample without full coverage', () => {
+  const pricingMap = new Map<string, ModelPricingRecord[]>([['m', [pricing('openai', 0, 0)]]]);
+  const at = isoLocal(2026, 7, 4, 10);
+  const legacy = makeRun({
+    runId: 'legacy-input',
+    modelId: 'm',
+    initialUserMessageChars: 60,
+    startedAt: at,
+    updatedAt: at,
+    finalizedAt: at,
+  });
+  delete legacy.userInputCharSamples;
+  delete legacy.askUserAnsweredCount;
+  delete legacy.askUserCancelledCount;
+  const stats = computeAggregateStats([legacy], pricingMap, NOW, [], {}, 0);
+
+  assert.equal(stats.todayProductivity.adjustedUserInputChars, 60);
+  assert.equal(stats.todayProductivity.knownUserInputCharSampleCount, 1);
+  assert.equal(stats.todayProductivity.expectedUserInputCharSampleCount, 2,
+    'historical ask answer coverage remains conservatively incomplete');
+  assert.equal(stats.todayProductivity.userInputCharCap, 60, 'fewer than five samples use the maximum without adjustment');
+  assert.equal(stats.todayProductivity.cappedUserInputCharSampleCount, 0);
+});
+
+test('timestamped user input is attributed across local midnight independently of run completion', () => {
+  const pricingMap = new Map<string, ModelPricingRecord[]>([['m', [pricing('openai', 0, 0)]]]);
+  const beforeMidnight = isoLocal(2026, 7, 3, 23, 55);
+  const afterMidnight = isoLocal(2026, 7, 4, 0, 5);
+  const finalized = isoLocal(2026, 7, 4, 0, 10);
+  const run = makeRun({
+    runId: 'cross-midnight-input',
+    modelId: 'm',
+    sendCount: 1,
+    askUserAnsweredCount: 1,
+    askUserCancelledCount: 0,
+    startedAt: beforeMidnight,
+    updatedAt: finalized,
+    finalizedAt: finalized,
+    userInputCharSamples: [
+      { occurredAt: beforeMidnight, chars: 10 },
+      { occurredAt: afterMidnight, chars: 20 },
+    ],
+  });
+  const stats = computeAggregateStats([run], pricingMap, NOW, [], {}, 0);
+
+  assert.equal(stats.todayRunCount, 1, 'the run itself still belongs to its completion day');
+  assert.equal(stats.todayProductivity.adjustedUserInputChars, 20, 'Today includes only input captured after midnight');
+  assert.equal(stats.todayProductivity.knownUserInputCharSampleCount, 1);
+  assert.equal(stats.todayProductivity.expectedUserInputCharSampleCount, 1);
+  const yesterday = stats.dailyWorkTrend.find((day) => day.date === '2026-07-03');
+  assert.equal(yesterday?.sessionsUsed, 0, 'input-day coverage is not compared with completion-day session counts');
+  assert.equal(yesterday?.productivity.adjustedUserInputChars, 10);
+  assert.equal(yesterday?.productivity.expectedUserInputCharSampleCount, 1);
+  assert.equal(stats.weekProductivity.adjustedUserInputChars, 30, 'daily input points reconcile with the 7-day total');
+});
+
+test('huge persisted user-input samples are bounded and aggregates remain finite', () => {
+  const pricingMap = new Map<string, ModelPricingRecord[]>([['m', [pricing('openai', 0, 0)]]]);
+  const at = isoLocal(2026, 7, 4, 10);
+  const run = makeRun({
+    runId: 'huge-input',
+    modelId: 'm',
+    startedAt: at,
+    updatedAt: at,
+    finalizedAt: at,
+    userInputCharSamples: [
+      { occurredAt: at, chars: Number.MAX_VALUE },
+      { occurredAt: at, chars: Number.POSITIVE_INFINITY },
+    ],
+  });
+  const stats = computeAggregateStats([run], pricingMap, NOW, [], {}, 0);
+
+  assert.equal(stats.todayProductivity.adjustedUserInputChars, MAX_USER_INPUT_SAMPLE_CHARS);
+  assert.equal(stats.todayProductivity.userInputCharCap, MAX_USER_INPUT_SAMPLE_CHARS);
+  assert.equal(stats.todayProductivity.knownUserInputCharSampleCount, 1);
+  assert.equal(stats.todayProductivity.expectedUserInputCharSampleCount, 2);
+  assert.ok(Number.isFinite(stats.todayProductivity.adjustedUserInputChars));
+});
+
 test('productivity summaries: sends, prompt chars/tokens with coverage, attachments, and ask_user', () => {
   const pricingMap = new Map<string, ModelPricingRecord[]>([['m', [pricing('openai', 1, 0)]]]);
   const today = isoLocal(2026, 7, 4, 10);
@@ -1311,6 +1440,11 @@ test('layered completed/open accumulation matches one-pass productivity and work
     makeRun({
       runId: 'completed', sessionPath: '/s/1', modelId: 'm', sendCount: 2,
       initialUserMessageChars: 40, initialUserMessageTokens: 10,
+      userInputCharSamples: [
+        { occurredAt: isoLocal(2026, 7, 4, 9), chars: 40 },
+        { occurredAt: isoLocal(2026, 7, 4, 9, 10), chars: 10 },
+        { occurredAt: isoLocal(2026, 7, 4, 9, 20), chars: 5 },
+      ],
       askUserAnsweredCount: 1, askUserCancelledCount: 0, busyPeriodCount: 1,
       startedAt: isoLocal(2026, 7, 4, 9), updatedAt: isoLocal(2026, 7, 4, 9, 30), finalizedAt: isoLocal(2026, 7, 4, 9, 30),
       turnThroughputSamples: [sample(isoLocal(2026, 7, 4, 9, 30), 2)],
@@ -1318,6 +1452,7 @@ test('layered completed/open accumulation matches one-pass productivity and work
     makeRun({
       runId: 'open', sessionPath: '/s/2', modelId: 'm', sendCount: 1,
       initialUserMessageChars: 80,
+      userInputCharSamples: [{ occurredAt: isoLocal(2026, 7, 4, 10), chars: 80 }],
       askUserAnsweredCount: 0, askUserCancelledCount: 1, busyPeriodCount: 1,
       startedAt: isoLocal(2026, 7, 4, 10), updatedAt: isoLocal(2026, 7, 4, 10, 30), finalizedAt: isoLocal(2026, 7, 4, 10, 30),
       turnThroughputSamples: [sample(isoLocal(2026, 7, 4, 10, 30), 1)],
@@ -1335,6 +1470,10 @@ test('layered completed/open accumulation matches one-pass productivity and work
   assert.equal(todayTrend.sessionsUsed, 2);
   assert.equal(todayTrend.peakWorkingSessions, 2, 'peak is the max across merged runs, never their sum');
   assert.equal(todayTrend.productivity.promptChars, 120);
+  assert.equal(todayTrend.productivity.adjustedUserInputChars, 135);
+  assert.equal(todayTrend.productivity.knownUserInputCharSampleCount, 4);
+  assert.equal(todayTrend.productivity.expectedUserInputCharSampleCount, 4, 'coverage survives accumulator merging');
+  assert.equal(todayTrend.productivity.userInputCharCap, 80, 'fewer than five merged samples use the maximum');
 });
 
 test('completed throughput samples without output are unavailable for historical rates', () => {

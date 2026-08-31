@@ -313,6 +313,37 @@ test('App posts send message when composer submits', () => {
   assert.equal(sendMsg!.sessionPath, '/session/a');
 });
 
+test('an empty submit continues an interrupted response without an optimistic user message', () => {
+  const adapter = makeAdapter();
+  const interrupted = sessionViewState();
+  interrupted.transcript = interrupted.transcript.map((message) =>
+    message.id === 'assistant-1' ? { ...message, status: 'interrupted' as const } : message);
+  adapter.initialState = interrupted;
+
+  act(() => {
+    render(h(App, { adapter }), container);
+  });
+  act(() => {
+    window.dispatchEvent(new MessageEvent('message', { data: stateEnvelope(1, interrupted) }));
+  });
+
+  const submit = container.querySelector('[data-action="continue"]') as HTMLButtonElement | null;
+  assert.ok(submit, 'interrupted tail exposes the empty continuation submit');
+  assert.equal(submit.disabled, false);
+  const messageCountBefore = container.querySelectorAll('[data-message-id]').length;
+  act(() => submit.click());
+
+  const send = adapter.messages.find((message) => message.type === 'send');
+  assert.ok(send);
+  assert.equal(send.text, '');
+  assert.equal(send.sessionPath, '/session/a');
+  assert.equal(
+    container.querySelectorAll('[data-message-id]').length,
+    messageCountBefore,
+    'continuation does not add an optimistic user row',
+  );
+});
+
 test('a click-to-send transport race preserves the draft and creates no optimistic message', () => {
   const adapter = makeAdapter();
   adapter.initialState = sessionViewState();

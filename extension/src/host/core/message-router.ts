@@ -428,7 +428,19 @@ export class MessageRouter {
       ...(this.getArchState().composer.pendingComposerInputsBySession[sessionPath] ?? []),
     ];
     if (!text.trim() && inputs.length === 0) {
-      this.rejectBrowser(msg, context, 'empty-send');
+      // Codex-style continuation: an empty submit is an execution command, not
+      // an empty user message. It deliberately bypasses the normal Send path,
+      // so there is no optimistic user row, prompt expansion, or skill-pruning
+      // prepass. The backend remains authoritative about whether the durable
+      // tail is actually an interrupted assistant turn.
+      this.dispatchEvent({
+        kind: 'Command',
+        cmd: {
+          kind: 'Continue',
+          corrId: crypto.randomUUID(),
+          sessionPath,
+        },
+      });
       return;
     }
 

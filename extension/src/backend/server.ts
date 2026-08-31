@@ -89,6 +89,7 @@ import type { WorkerJsonObject, WorkerJsonValue } from './worker-protocol';
 
 const ISOLATED_PROMOTION_METHODS = new Set([
   'message.send',
+  'message.continue',
   'message.compact',
 ]);
 

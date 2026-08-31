@@ -31,6 +31,7 @@ import type {
 import { EMPTY_TRANSCRIPT_WINDOW } from '../../shared/protocol';
 import { EMPTY_AGGREGATE_STATS } from '../../shared/protocol';
 import { pruningTotals } from '../../shared/pruning.js';
+import { isPendingTabPath } from '../../shared/tab-behavior.js';
 import { redactSensitiveText } from '../../shared/sensitive-redaction.js';
 import { projectTranscriptView } from './live-pipeline/projection.js';
 import type {
@@ -76,6 +77,24 @@ function sortUniqueNames(names: readonly string[]): string[] {
       .map((name) => name.trim())
       .filter((name) => name.length > 0),
   )].sort((a, b) => a.localeCompare(b));
+}
+
+/** Deterministically borrow a non-empty model catalog from another host-known
+ *  real session. Mirrors the reducer's `provisionalCatalogForSession` source
+ *  rule — pending pseudo-paths are never catalog sources — so projection-only
+ *  borrowing and reducer-time seeding agree on what "the last usable catalog"
+ *  means. Preference: open real tabs in tab order, then any other known
+ *  catalog in map insertion order. Pure and side-effect-free. */
+function borrowAvailableModels(state: ArchState, activePath: string): ModelInfo[] {
+  const availableModelsBySession = state.settings.availableModelsBySession;
+  const isUsableSource = (path: string): boolean =>
+    path !== activePath
+    && !isPendingTabPath(path)
+    && (availableModelsBySession[path]?.length ?? 0) > 0;
+  const fromOpenTab = state.sessions.openTabPaths.find(isUsableSource);
+  if (fromOpenTab !== undefined) return availableModelsBySession[fromOpenTab]!;
+  const fallbackPath = Object.keys(availableModelsBySession).find(isUsableSource);
+  return fallbackPath !== undefined ? availableModelsBySession[fallbackPath]! : EMPTY_AVAILABLE_MODELS;
 }
 
 function selectActivePruningCatalog(
@@ -374,12 +393,21 @@ function projectViewState(state: ArchState): ViewState {
   const activeDraftText: string =
     activePath ? composer.draftTextBySession[activePath] ?? '' : '';
 
-  const activeAvailableModels: ModelInfo[] =
+  const activeOwnAvailableModels: ModelInfo[] =
     activePath ? settings.availableModelsBySession[activePath] ?? EMPTY_AVAILABLE_MODELS : EMPTY_AVAILABLE_MODELS;
   const activeAvailableModelsStatus: 'provisional' | 'loading' | 'authoritative' = activePath
     ? settings.availableModelsStatusBySession[activePath]
-      ?? (activeAvailableModels.length > 0 ? 'authoritative' : 'loading')
+      ?? (activeOwnAvailableModels.length > 0 ? 'authoritative' : 'loading')
     : 'authoritative';
+  // While the active session's own catalog is still loading/provisional and
+  // empty, borrow a non-empty catalog the host already knows from another
+  // real session so the picker stays interactive until this session's own
+  // hydration lands. A successful (authoritative) empty catalog is never
+  // overridden — the backend proved no models are usable this way.
+  const activeAvailableModels: ModelInfo[] =
+    activePath && activeOwnAvailableModels.length === 0 && activeAvailableModelsStatus !== 'authoritative'
+      ? borrowAvailableModels(state, activePath)
+      : activeOwnAvailableModels;
 
   const activeContextUsage: ContextWindowUsage | null =
     activePath ? settings.contextUsageBySession[activePath] ?? null : null;

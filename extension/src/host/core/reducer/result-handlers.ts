@@ -25,6 +25,32 @@ import { mapSendOrEditError, mapPreflightError, stripReqIds } from '../../../sha
 import { isPendingTabPath } from '../../../shared/tab-behavior.js';
 import { handleFileRevertResult } from './file-handlers.js';
 
+export function handleContinueResult(state: ArchState, event: Extract<Event, { kind: 'ContinueResult' }>): ReducerResult {
+  if (event.ok) return { state, effects: [] };
+  const sessionIsStillRunning = event.error?.includes('REQUEST_IN_PROGRESS') === true;
+  return {
+    state: produce(state, (draft) => {
+      if (!sessionIsStillRunning) {
+        draft.sessions.runningSessionPaths = removeFromArray(
+          draft.sessions.runningSessionPaths,
+          event.sessionPath,
+        );
+      }
+      draft.settings.notice = 'Could not continue the interrupted response.';
+      draft.settings.noticeKind = 'operational-error';
+      draft.settings.noticeRaw = event.error ?? 'message.continue failed';
+      draft.settings.noticeSessionPath = event.sessionPath;
+    }),
+    effects: [{
+      kind: 'Log',
+      corrId: event.corrId,
+      level: 'error',
+      message: `Continuation failed for session ${event.sessionPath}`,
+      data: { error: event.error },
+    }],
+  };
+}
+
 export function handleInterruptResult(state: ArchState, event: Extract<Event, { kind: 'InterruptResult' }>): ReducerResult {
   let nextState = state;
   const effects: Effect[] = [];
@@ -812,6 +838,8 @@ export function handleMcpSessionServersUpdated(state: ArchState, event: Extract<
 
 export function handleEffectResult(state: ArchState, event: Exclude<EffectResultEvent, { kind: 'TruncateResult' } | { kind: 'ClearQueueResult' } | { kind: 'ReplaceQueueResult' } | { kind: 'OpenSessionResult' } | { kind: 'CreateSessionResult' } | { kind: 'DuplicateSessionResult' } | { kind: 'CloseSessionResult' } | { kind: 'PersistTabsResult' } | { kind: 'ModelSwitchConfirmResult' } | { kind: 'LiveTurnCheckpointResult' }>): ReducerResult {
   switch (event.kind) {
+    case 'ContinueResult':
+      return handleContinueResult(state, event);
     case 'InterruptResult':
       return handleInterruptResult(state, event);
     case 'CompactResult':

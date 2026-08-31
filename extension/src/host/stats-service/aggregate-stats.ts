@@ -33,7 +33,11 @@ import type {
 } from '../../shared/protocol';
 import { EMPTY_PRODUCTIVITY_STATS, EMPTY_PROVIDER_GATE_STATS } from '../../shared/protocol/aggregate-stats';
 import type { TokenRateIndicatorState } from '../../shared/token-rate';
-import type { RunSnapshot, TurnThroughputSample } from '../run-analytics';
+import {
+  MAX_USER_INPUT_SAMPLE_CHARS,
+  type RunSnapshot,
+  type TurnThroughputSample,
+} from '../run-analytics';
 
 /** How many trailing days (inclusive of today) the daily-cost series covers. */
 export const DAILY_COST_WINDOW_DAYS = 14;
@@ -78,6 +82,11 @@ interface DayAccumulator {
   /** Per-day productivity counters (see AggregateProductivityStats). Sample
    *  counters track coverage so legacy runs stay untracked, not zero. */
   sendCount: number;
+  /** Known numeric flattened user-input lengths. The shared rolling cap is
+   * applied only at finalization so independently accumulated layers merge. */
+  knownUserInputCharLengths: number[];
+  /** Expected input events, including explicit/compatibility null coverage. */
+  expectedUserInputCharSampleCount: number;
   promptChars: number;
   promptCharSamples: number;
   promptTokens: number;
@@ -231,6 +240,8 @@ function createDayAccumulator(date: string): DayAccumulator {
     toolCallCount: 0,
     touchedFileCount: 0,
     sendCount: 0,
+    knownUserInputCharLengths: [],
+    expectedUserInputCharSampleCount: 0,
     promptChars: 0,
     promptCharSamples: 0,
     promptTokens: 0,
@@ -271,6 +282,7 @@ function accumulateRunDayActivity(day: DayAccumulator, run: RunSnapshot): void {
   day.imageInputCount += run.imageInputCount ?? 0;
   day.imageInputBytes += run.imageInputBytes ?? 0;
   day.filesystemPathRefCount += run.filesystemPathRefCount ?? 0;
+
   if (typeof run.initialUserMessageChars === 'number') {
     day.promptChars += run.initialUserMessageChars;
     day.promptCharSamples += 1;
@@ -287,6 +299,55 @@ function accumulateRunDayActivity(day: DayAccumulator, run: RunSnapshot): void {
   if (run.sessionPath) day.sessionPaths.add(run.sessionPath);
   const peak = runPeakWorkingSessions(run);
   if (peak > day.peakWorkingSessions) day.peakWorkingSessions = peak;
+}
+
+function boundedUserInputChars(value: unknown): number | null {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return null;
+  return Math.min(Math.trunc(value), MAX_USER_INPUT_SAMPLE_CHARS);
+}
+
+/** Attribute user input to its own local occurrence day. Compatibility gaps
+ * remain expected-but-unknown on the run day, so totals are explicit lower
+ * bounds without comparing input-day samples against completion-day runs. */
+function accumulateRunUserInput(
+  run: RunSnapshot,
+  runDayDate: string | null,
+  dayAccumulator: (date: string) => DayAccumulator,
+): void {
+  let representedExpected = 0;
+  if (Array.isArray(run.userInputCharSamples)) {
+    for (const sample of run.userInputCharSamples) {
+      const occurredAtMs = Date.parse(sample.occurredAt);
+      if (!Number.isFinite(occurredAtMs)) continue;
+      const day = dayAccumulator(localDateString(occurredAtMs));
+      day.expectedUserInputCharSampleCount += 1;
+      representedExpected += 1;
+      const chars = boundedUserInputChars(sample.chars);
+      if (chars !== null) day.knownUserInputCharLengths.push(chars);
+    }
+  } else {
+    const initialChars = boundedUserInputChars(run.initialUserMessageChars);
+    const startedAtMs = Date.parse(run.startedAt);
+    if (initialChars !== null && Number.isFinite(startedAtMs)) {
+      const day = dayAccumulator(localDateString(startedAtMs));
+      day.expectedUserInputCharSampleCount += 1;
+      day.knownUserInputCharLengths.push(initialChars);
+      representedExpected += 1;
+    }
+  }
+
+  const compatibilityExpected = Math.max(0, Math.trunc(run.sendCount))
+    + Math.max(0, Math.trunc(run.askUserAnsweredCount ?? 0));
+  let missingExpected = Math.max(0, compatibilityExpected - representedExpected);
+  if (!Array.isArray(run.userInputCharSamples)
+    && (run.askUserAnsweredCount === undefined || run.askUserCancelledCount === undefined)) {
+    // Historical runs without ask outcome tracking cannot prove that no prior
+    // answered ask occurred. One null marker keeps their coverage conservative.
+    missingExpected = Math.max(1, missingExpected);
+  }
+  if (missingExpected > 0 && runDayDate !== null) {
+    dayAccumulator(runDayDate).expectedUserInputCharSampleCount += missingExpected;
+  }
 }
 
 function createSubagentLifecycleStats(): AggregateSubagentLifecycleStats {
@@ -1109,9 +1170,11 @@ export function accumulateAggregateStats(
       day.outputTokens += item.outputTokens;
     }
 
-    if (!Number.isNaN(dayMs)) {
-      accumulateRunDayActivity(dayAccumulator(localDateString(dayMs)), run);
+    const runDayDate = Number.isNaN(dayMs) ? null : localDateString(dayMs);
+    if (runDayDate !== null) {
+      accumulateRunDayActivity(dayAccumulator(runDayDate), run);
     }
+    accumulateRunUserInput(run, runDayDate, dayAccumulator);
 
     const usageByDate = new Map<string, AttributedUsage[]>();
     for (const item of usage) {
@@ -1309,6 +1372,8 @@ export function mergeAccumulatorInto(
     targetDay.toolCallCount += sourceDay.toolCallCount;
     targetDay.touchedFileCount += sourceDay.touchedFileCount;
     targetDay.sendCount += sourceDay.sendCount;
+    targetDay.knownUserInputCharLengths.push(...sourceDay.knownUserInputCharLengths);
+    targetDay.expectedUserInputCharSampleCount += sourceDay.expectedUserInputCharSampleCount;
     targetDay.promptChars += sourceDay.promptChars;
     targetDay.promptCharSamples += sourceDay.promptCharSamples;
     targetDay.promptTokens += sourceDay.promptTokens;
@@ -1754,10 +1819,43 @@ function buildDailyRunCount(byDay: Map<string, DayAccumulator>, nowMs: number): 
   return out.slice(first);
 }
 
-/** Convert a day bucket into the protocol-facing productivity rollup. */
-function productivityFromDay(day: DayAccumulator): AggregateProductivityStats {
+/** Shared lower-rank P95 cap over the trailing 14 local dates. With fewer
+ * than five samples the maximum preserves every value (no adjustment). */
+function trailingUserInputCharCap(
+  byDay: Map<string, DayAccumulator>,
+  nowMs: number,
+): number | null {
+  const pooled: number[] = [];
+  for (const date of trailingLocalDates(nowMs, DAILY_COST_WINDOW_DAYS)) {
+    pooled.push(...(byDay.get(date)?.knownUserInputCharLengths ?? []));
+  }
+  if (pooled.length === 0) return null;
+  pooled.sort((left, right) => left - right);
+  return pooled.length >= 5
+    ? pooled[Math.floor((pooled.length - 1) * 0.95)]!
+    : pooled[pooled.length - 1]!;
+}
+
+/** Convert a day bucket into the protocol-facing productivity rollup using the
+ * same rolling cap as every other displayed character-volume window. */
+function productivityFromDay(day: DayAccumulator, userInputCharCap: number | null): AggregateProductivityStats {
+  let adjustedUserInputChars = 0;
+  let cappedUserInputCharSampleCount = 0;
+  for (const length of day.knownUserInputCharLengths) {
+    if (userInputCharCap !== null && length > userInputCharCap) {
+      adjustedUserInputChars += userInputCharCap;
+      cappedUserInputCharSampleCount += 1;
+    } else {
+      adjustedUserInputChars += length;
+    }
+  }
   return {
     sendCount: day.sendCount,
+    adjustedUserInputChars,
+    knownUserInputCharSampleCount: day.knownUserInputCharLengths.length,
+    expectedUserInputCharSampleCount: day.expectedUserInputCharSampleCount,
+    cappedUserInputCharSampleCount,
+    userInputCharCap,
     promptCharSamples: day.promptCharSamples,
     promptChars: day.promptChars,
     averagePromptChars: day.promptCharSamples > 0 ? day.promptChars / day.promptCharSamples : null,
@@ -1773,13 +1871,17 @@ function productivityFromDay(day: DayAccumulator): AggregateProductivityStats {
   };
 }
 
-/** Sum productivity rollups across a set of day buckets. Averaged fields are
- *  recomputed from the pooled samples so the week average is a true mean. */
-function productivityFromDays(days: Array<DayAccumulator | undefined>): AggregateProductivityStats {
+/** Sum productivity rollups across a set of day buckets. */
+function productivityFromDays(
+  days: Array<DayAccumulator | undefined>,
+  userInputCharCap: number | null,
+): AggregateProductivityStats {
   const total = createDayAccumulator('');
   for (const day of days) {
     if (!day) continue;
     total.sendCount += day.sendCount;
+    total.knownUserInputCharLengths.push(...day.knownUserInputCharLengths);
+    total.expectedUserInputCharSampleCount += day.expectedUserInputCharSampleCount;
     total.promptChars += day.promptChars;
     total.promptCharSamples += day.promptCharSamples;
     total.promptTokens += day.promptTokens;
@@ -1792,13 +1894,17 @@ function productivityFromDays(days: Array<DayAccumulator | undefined>): Aggregat
     total.askUserCancelledCount += day.askUserCancelledCount;
     total.askUserTrackedRuns += day.askUserTrackedRuns;
   }
-  return productivityFromDay(total);
+  return productivityFromDay(total, userInputCharCap);
 }
 
 /** Build the 14-day work trend (ascending date), pruning leading idle days
  *  while keeping the trailing activity through today for context. Bounded to
  *  {@link DAILY_COST_WINDOW_DAYS} points. */
-function buildDailyWorkTrend(byDay: Map<string, DayAccumulator>, nowMs: number): AggregateDailyWorkTrend[] {
+function buildDailyWorkTrend(
+  byDay: Map<string, DayAccumulator>,
+  nowMs: number,
+  userInputCharCap: number | null,
+): AggregateDailyWorkTrend[] {
   const out: AggregateDailyWorkTrend[] = [];
   for (const date of trailingLocalDates(nowMs, DAILY_COST_WINDOW_DAYS)) {
     const day = byDay.get(date);
@@ -1806,11 +1912,18 @@ function buildDailyWorkTrend(byDay: Map<string, DayAccumulator>, nowMs: number):
       date,
       sessionsUsed: day?.sessionPaths.size ?? 0,
       peakWorkingSessions: day?.peakWorkingSessions ?? 0,
-      productivity: day ? productivityFromDay(day) : EMPTY_PRODUCTIVITY_STATS,
+      productivity: day ? productivityFromDay(day, userInputCharCap) : {
+        ...EMPTY_PRODUCTIVITY_STATS,
+        userInputCharCap,
+      },
     });
   }
   let first = 0;
-  while (first < out.length - 1 && out[first]!.sessionsUsed === 0) first += 1;
+  while (
+    first < out.length - 1
+    && out[first]!.sessionsUsed === 0
+    && out[first]!.productivity.expectedUserInputCharSampleCount === 0
+  ) first += 1;
   return out.slice(first);
 }
 
@@ -2179,12 +2292,14 @@ export function finalizeAggregateStats(
   const todayThroughputSeries = buildThroughputSeries(
     acc.throughputByHourByDay.get(todayDate) ?? new Map(),
   );
+  const userInputCharCap = trailingUserInputCharCap(acc.byDay, nowMs);
   const dailyRunCount = buildDailyRunCount(acc.byDay, nowMs);
-  const dailyWorkTrend = buildDailyWorkTrend(acc.byDay, nowMs);
+  const dailyWorkTrend = buildDailyWorkTrend(acc.byDay, nowMs, userInputCharCap);
   let weekRunCount = 0;
   for (const date of weekDates) weekRunCount += acc.byDay.get(date)?.runCount ?? 0;
   const weekProductivity = productivityFromDays(
     weekDates.map((date) => acc.byDay.get(date)),
+    userInputCharCap,
   );
 
   // ── Live aggregate tok/s ──
@@ -2204,7 +2319,9 @@ export function finalizeAggregateStats(
     todayInputTokenSeries,
     todayTokenSeries,
     todayThroughputSeries,
-    todayProductivity: todayDay ? productivityFromDay(todayDay) : EMPTY_PRODUCTIVITY_STATS,
+    todayProductivity: todayDay
+      ? productivityFromDay(todayDay, userInputCharCap)
+      : { ...EMPTY_PRODUCTIVITY_STATS, userInputCharCap },
     weekCost: weekStats.weekCost,
     weekCostByProvider: weekStats.weekCostByProvider,
     weekRunCount,

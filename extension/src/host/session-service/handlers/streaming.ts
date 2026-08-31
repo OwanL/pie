@@ -19,6 +19,8 @@ import type {
   RetryMeasuredPayload,
   RetryStartedPayload,
   RetryStuckPayload,
+  SessionSummary,
+  ThinkingLevel,
 } from '../../../shared/protocol';
 import type { TurnThroughputStatus } from '../../run-analytics';
 import { stripReqIds } from '../../../shared/error-mapping.js';
@@ -91,6 +93,35 @@ export function onMessageToolCallDelta(payload: MessageToolCallDeltaPayload, dep
   recordStreamEvent('delta');
 }
 
+/** Reconcile one turn's exact serving identity into run analytics and the
+ *  session summary. The backend-reported provider/model is the billing
+ *  identity for this exact turn — update the run before it starts so per-turn
+ *  usage cannot inherit a stale selection (notably same-id Codex vs Copilot
+ *  models) — and the composer's per-session badge must not keep falling back
+ *  to the stale global default. Shared by the legacy `message.started` path
+ *  and the live semantic `turn.started` path so both behave identically. */
+export function reconcileServingModelConfig(
+  sessionPath: string,
+  modelId: string | undefined,
+  thinkingLevel: ThinkingLevel | undefined,
+  provider: string | undefined,
+  deps: Pick<HandlerDeps, 'runObserver' | 'getArchState' | 'dispatchArch'>,
+): void {
+  deps.runObserver.onModelConfigChanged(sessionPath, modelId, thinkingLevel, provider);
+  if (!modelId) return;
+  const archState = deps.getArchState();
+  const session = archState.sessions.sessions.find((s: SessionSummary) => s.path === sessionPath);
+  if (session && (session.modelId !== modelId || session.provider !== provider || session.thinkingLevel !== thinkingLevel)) {
+    deps.dispatchArch({
+      kind: 'SessionMetadataChanged',
+      sessionPath,
+      modelId,
+      provider,
+      thinkingLevel,
+    });
+  }
+}
+
 export function onMessageStarted(payload: MessageStartedPayload, deps: HandlerDeps): void {
   const sessionPath = deps.requireEventSessionPath('message.started', payload.sessionPath);
   if (!sessionPath) {
@@ -109,30 +140,8 @@ export function onMessageStarted(payload: MessageStartedPayload, deps: HandlerDe
   });
 
   deps.state.bindRequestSessionPath(payload.requestId, sessionPath);
-  // Backend-reported provider/model is the billing identity for this exact
-  // turn. Update the run before it starts so per-turn usage cannot inherit a
-  // stale selection (notably same-id Codex vs Copilot models).
-  deps.runObserver.onModelConfigChanged(
-    sessionPath,
-    payload.modelId,
-    payload.thinkingLevel,
-    payload.provider,
-  );
+  reconcileServingModelConfig(sessionPath, payload.modelId, payload.thinkingLevel, payload.provider, deps);
   deps.runObserver.onAssistantTurnStarted(sessionPath, payload.messageId);
-
-  if (payload.modelId) {
-    const archState = deps.getArchState();
-    const session = archState.sessions.sessions.find((s: any) => s.path === sessionPath);
-    if (session && (session.modelId !== payload.modelId || session.provider !== payload.provider || session.thinkingLevel !== payload.thinkingLevel)) {
-      deps.dispatchArch({
-        kind: 'SessionMetadataChanged',
-        sessionPath,
-        modelId: payload.modelId,
-        provider: payload.provider,
-        thinkingLevel: payload.thinkingLevel,
-      });
-    }
-  }
 
   deps.state.touchSessionTranscript(sessionPath);
 }

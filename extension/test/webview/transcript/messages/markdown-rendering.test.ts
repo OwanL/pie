@@ -126,6 +126,55 @@ test('renderMarkdown marks local inline paths and links without changing ordinar
   assert.match(plainHtml, /<span role="link" tabindex="0">ordinary<\/span>/);
 });
 
+test('renderMarkdown emits semantic rich markdown and task-list controls', async () => {
+  const renderMarkdown = await loadRenderMarkdown();
+  const html = renderMarkdown([
+    '# Heading',
+    '',
+    '- first',
+    '  - nested',
+    '',
+    '1. ordered',
+    '',
+    '> quoted',
+    '',
+    '---',
+    '',
+    '| Name | Value |',
+    '| --- | --- |',
+    '| a | b |',
+    '',
+    '- [ ] todo',
+    '- [x] done',
+    '',
+    'separator paragraph',
+    '',
+    '- [ ] loose todo',
+    '',
+    '- [x] loose done',
+  ].join('\n'));
+  const document = new JSDOM(`<body>${html}</body>`).window.document;
+
+  assert.equal(document.querySelector('h1')?.textContent, 'Heading');
+  assert.ok(document.querySelector('ul > li > ul'), 'nested unordered list remains semantic');
+  assert.ok(document.querySelector('ol > li'), 'ordered list remains semantic');
+  assert.equal(document.querySelector('blockquote')?.textContent?.trim(), 'quoted');
+  assert.ok(document.querySelector('hr'));
+  assert.ok(document.querySelector('.md-table-wrap > table'));
+
+  const taskInputs = [...document.querySelectorAll('li > input[type="checkbox"]')];
+  assert.equal(taskInputs.length, 2);
+  assert.equal(taskInputs[0]?.hasAttribute('disabled'), true);
+  assert.equal(taskInputs[1]?.hasAttribute('checked'), true);
+
+  // Loose lists wrap each item's checkbox in a paragraph; the marker-suppression
+  // selector must cover this shape too.
+  const looseTaskInputs = [...document.querySelectorAll('li > p > input[type="checkbox"]')];
+  assert.equal(looseTaskInputs.length, 2);
+  assert.equal(looseTaskInputs[0]?.hasAttribute('disabled'), true);
+  assert.equal(looseTaskInputs[1]?.hasAttribute('checked'), true);
+});
+
 test('renderMarkdown keeps code identifiers and CSS selectors as plain inline code', async () => {
   const renderMarkdown = await loadRenderMarkdown();
   const html = renderMarkdown('`response.ok` `.message-body` `README.md` `foo.ts` `package.json` `.gitignore`');

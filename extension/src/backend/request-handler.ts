@@ -1147,6 +1147,7 @@ async function handleMessageSend(
       attemptId,
       canonicalMessageId,
       modelId,
+      provider,
       thinkingLevel,
       startedAt: Date.now(),
     }),
@@ -1385,6 +1386,118 @@ async function handleMessageSend(
     clearActiveRequest(context, requestId, ownedRequest);
     throw syncError;
   }
+
+  return { requestId };
+}
+
+async function handleMessageContinue(
+  deps: BackendRequestHandlerDeps,
+  request: RequestEnvelope,
+): Promise<unknown> {
+  const params = validateSessionPath('message.continue', request.params);
+  markRequestValidated(deps);
+  let context = await deps.ensureSessionContext(params.sessionPath);
+  while (deps.isSessionTransitionPending?.(params.sessionPath)) {
+    context = await deps.ensureSessionContext(params.sessionPath);
+  }
+  if (context.recoveryPromise) {
+    try {
+      context = await context.recoveryPromise;
+    } catch (error) {
+      throw new BackendError(
+        'SESSION_RUNTIME_RECOVERY_FAILED',
+        `The session runtime could not be replaced: ${toErrorMessage(error)}`,
+      );
+    }
+  }
+  if (context.retired) {
+    throw new BackendError(
+      'SESSION_RUNTIME_RECOVERY_FAILED',
+      'The previous session runtime was retired before a replacement became available.',
+    );
+  }
+  if (context.activeRequest || context.session.isStreaming) {
+    throw new BackendError('REQUEST_IN_PROGRESS', 'Cannot continue while this session is running.');
+  }
+  if (isProviderExplicitlyDisabled(context.session.model?.provider)) {
+    throw new BackendError(
+      'PROVIDER_DISABLED',
+      'PROVIDER_DISABLED: The selected model provider is disabled in Pie settings. Select a model from an enabled provider before continuing.',
+    );
+  }
+  if (typeof context.session.continueAfterInterruption !== 'function') {
+    throw new BackendError('SDK_INCOMPATIBLE', 'The active PI runtime does not support interrupted-turn continuation.');
+  }
+  const messages = context.session.messages;
+  const lastMessage = Array.isArray(messages) ? messages[messages.length - 1] : undefined;
+  if (!lastMessage || typeof lastMessage !== 'object'
+      || (lastMessage as { role?: unknown }).role !== 'assistant'
+      || (lastMessage as { stopReason?: unknown }).stopReason !== 'aborted') {
+    throw new BackendError(
+      'CONTINUATION_NOT_AVAILABLE',
+      'The session does not end with an interrupted assistant turn.',
+    );
+  }
+
+  const requestId = crypto.randomUUID();
+  const ownedRequest: ActiveRequest = {
+    id: requestId,
+    messageIndex: 0,
+    liveTurnAccumulator: new BackendLiveTurnAccumulator({
+      protocolVersion: LIVE_PIPELINE_PROTOCOL_VERSION,
+      sessionPath: context.sessionPath,
+      requestId,
+      turnId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      canonicalMessageId: `${requestId}:1`,
+      modelId: context.session.model?.id,
+      provider: context.session.model?.provider,
+      thinkingLevel: normalizeThinkingLevel(context.session.thinkingLevel),
+      startedAt: Date.now(),
+    }),
+    modelId: context.session.model?.id,
+    provider: context.session.model?.provider,
+    thinkingLevel: normalizeThinkingLevel(context.session.thinkingLevel),
+    extensionCommand: false,
+    turnBoundaryAt: Date.now(),
+    aborted: false,
+  };
+  context.activeRequest = ownedRequest;
+  const ownedSession = context.session;
+  const ownedSessionPath = context.sessionPath;
+  const ownedSessionOwnershipEpoch = context.sessionOwnershipEpoch ?? 0;
+  const ownsRequest = (): boolean => (
+    !context.retired
+    && context.activeRequest === ownedRequest
+    && context.session === ownedSession
+    && context.sessionPath === ownedSessionPath
+    && (context.sessionOwnershipEpoch ?? 0) === ownedSessionOwnershipEpoch
+  );
+
+  // Publish the acknowledgement before starting the SDK run. Unlike Send,
+  // Continue has no optimistic prompt correlation that can route an error
+  // arriving before the ack; delaying one event-loop phase lets the host bind
+  // requestId → sessionPath first. An interrupt that wins this gap clears or
+  // aborts the owned request, and the ownership check prevents resurrection.
+  setImmediate(() => {
+    if (!ownsRequest() || ownedRequest.aborted) return;
+    try {
+      void context.session.continueAfterInterruption!()
+        .catch((error: Error) => {
+          if (!ownsRequest()) return;
+          reportPromptFailure(deps, context, requestId, error, ownedRequest);
+        });
+    } catch (error) {
+      if (!ownsRequest()) return;
+      reportPromptFailure(
+        deps,
+        context,
+        requestId,
+        error instanceof Error ? error : new Error(toErrorMessage(error)),
+        ownedRequest,
+      );
+    }
+  });
 
   return { requestId };
 }
@@ -2025,6 +2138,7 @@ const handlers: Record<string, RequestHandler> = {
   'session.truncateAfter': handleSessionTruncateAfter,
   'session.title.generate': handleSessionTitleGenerate,
   'message.send': handleMessageSend,
+  'message.continue': handleMessageContinue,
   'message.compact': handleMessageCompact,
   'message.interrupt': handleMessageInterrupt,
   'message.clearQueue': handleMessageClearQueue,

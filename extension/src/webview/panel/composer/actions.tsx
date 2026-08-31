@@ -19,6 +19,8 @@ export interface ComposerActionsProps {
   onClearQueue: () => void;
   sendCurrentText: () => void;
   canSend: boolean;
+  /** Empty submit will resume an interrupted assistant turn. */
+  continueMode?: boolean;
 }
 
 function ClearQueueIcon() {
@@ -57,13 +59,22 @@ export function ComposerActions({
   onClearQueue,
   sendCurrentText,
   canSend,
+  continueMode = false,
 }: ComposerActionsProps) {
   const submitTitle = interrupting
     ? 'Wait for the current stop to finish'
     : busy
       ? 'Queue message (Enter) — runs after the current turn'
-      : 'Send message (Enter)';
-  const submitLabel = interrupting ? 'Waiting for stop' : busy ? 'Queue message' : 'Send message';
+      : continueMode
+        ? 'Continue interrupted response (Enter)'
+        : 'Send message (Enter)';
+  const submitLabel = interrupting
+    ? 'Waiting for stop'
+    : busy
+      ? 'Queue message'
+      : continueMode
+        ? 'Continue interrupted response'
+        : 'Send message';
 
   return (
     <div class="composer-actions">
@@ -101,7 +112,7 @@ export function ComposerActions({
         onClick={sendCurrentText}
         disabled={!canSend || interrupting || !commandsAvailable}
         aria-label={submitLabel}
-        data-action={busy ? 'queue' : 'send'}
+        data-action={busy ? 'queue' : continueMode ? 'continue' : 'send'}
       >
         <SubmitIcon queued={busy} />
       </button>

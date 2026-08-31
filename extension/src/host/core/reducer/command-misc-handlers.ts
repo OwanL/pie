@@ -9,6 +9,20 @@ import { addToArray, appendLocalUserMessage, truncateLocalTranscriptAfter } from
 import { BACKEND_READY_TIMEOUT_MS } from '../../../shared/backend-ready-timeout.js';
 import { sessionHasDeferredModelWrite } from './set-model-handlers.js';
 
+export function handleContinue(state: ArchState, cmd: Extract<Command, { kind: 'Continue' }>): ReducerResult {
+  const nextState = produce(state, (draft) => {
+    draft.sessions.runningSessionPaths = addToArray(draft.sessions.runningSessionPaths, cmd.sessionPath);
+    draft.sessions.interruptSettledSessionPaths = draft.sessions.interruptSettledSessionPaths.filter(
+      (path) => path !== cmd.sessionPath,
+    );
+    delete draft.pending.prepassBySession[cmd.sessionPath];
+  });
+  return {
+    state: nextState,
+    effects: [{ kind: 'ContinueRpc', corrId: cmd.corrId, sessionPath: cmd.sessionPath }],
+  };
+}
+
 export function handleInterrupt(state: ArchState, cmd: Extract<Command, { kind: 'Interrupt' }>): ReducerResult {
   // Stop takes effect INSTANTLY in the reducer while remaining truthful about
   // teardown. The partial reply is frozen immediately, but busy remains set

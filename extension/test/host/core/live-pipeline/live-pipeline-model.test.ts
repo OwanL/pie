@@ -337,6 +337,57 @@ test('checkpoint repair preserves richer settled-tool details already received b
   });
 });
 
+test('turn.started carries the exact serving provider through transitions, checkpoints, validation, and projection', () => {
+  const startedEnvelope: TurnSemanticEnvelope = {
+    ...base,
+    kind: 'turn.started',
+    seq: 1,
+    canonicalMessageId: 'message-1',
+    modelId: 'gpt-4o',
+    provider: 'azure-openai',
+    thinkingLevel: 'high',
+    startedAt: 900,
+  };
+  assert.equal(isTurnSemanticEnvelope(startedEnvelope), true);
+
+  const applied = apply(createEmptyLivePipelineState(), startedEnvelope);
+  assert.equal(applied.classification, 'applied');
+  const turn = applied.state.turnsBySession[base.sessionPath];
+  assert.equal(turn?.modelId, 'gpt-4o');
+  assert.equal(turn?.provider, 'azure-openai');
+  assert.equal(turn?.thinkingLevel, 'high');
+
+  // Provider identity survives the checkpoint repair path unchanged.
+  const checkpoint: LiveTurnCheckpoint = {
+    protocolVersion: 7,
+    sessionPath: base.sessionPath,
+    turnId: base.turnId,
+    attemptId: base.attemptId,
+    checkpointSeq: 1,
+    phase: turn!.phase,
+    checkpointBytes: turn!.checkpointBytes,
+    turn: { ...turn!, seq: 1, checkpointSeq: 1 },
+    tools: [],
+    pendingExtensionUiRequestIds: [],
+  };
+  const checkpointApplied = applyLiveTurnCheckpoint(createEmptyLivePipelineState(), checkpoint);
+  const checkpointTurn = checkpointApplied.state.turnsBySession[base.sessionPath];
+  assert.equal(checkpointApplied.classification, 'applied');
+  assert.equal(checkpointTurn?.provider, 'azure-openai');
+
+  // The projected live ChatMessage carries the same serving identity so the
+  // composer and reply header never resolve a shared model id against the
+  // wrong provider.
+  const view = projectTranscriptView([], checkpointApplied.state, base.sessionPath);
+  assert.equal(view.activeTurn?.modelId, 'gpt-4o');
+  assert.equal(view.activeTurn?.provider, 'azure-openai');
+  assert.equal(view.activeTurn?.thinkingLevel, 'high');
+
+  // Validation stays strict about the provider shape at the transport boundary.
+  assert.equal(isTurnSemanticEnvelope({ ...startedEnvelope, provider: 42 }), false);
+  assert.equal(isTurnSemanticEnvelope({ ...startedEnvelope, provider: undefined }), true);
+});
+
 test('projection places queued follow-ups after the active turn at their delivery boundary', () => {
   const state = apply(createEmptyLivePipelineState(), start()).state;
   const view = projectTranscriptView([

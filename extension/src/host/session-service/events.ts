@@ -14,7 +14,7 @@ import type { ArchState } from '../core/arch-state';
 import type { CoordinatorToHostDetailMessage } from '../../shared/protocol/subagent-detail';
 import { SessionServiceState } from './state';
 import type { DeferredTriggerRegistry } from '../deferred-triggers/registry';
-import { onMessageDelta, onMessageThinking, onMessageToolCallDelta, onMessageStarted, onMessageFinished, onMessageAborted, onPreflightFailed, onQueuedDelivered, onRetryStarted, onRetryEnded, onRetryMeasured, onRetryStuck, onCompaction, onCompactionStarted, onAuxiliaryLlmUsage } from './handlers/streaming.js';
+import { onMessageDelta, onMessageThinking, onMessageToolCallDelta, onMessageStarted, onMessageFinished, onMessageAborted, onPreflightFailed, onQueuedDelivered, onRetryStarted, onRetryEnded, onRetryMeasured, onRetryStuck, onCompaction, onCompactionStarted, onAuxiliaryLlmUsage, reconcileServingModelConfig } from './handlers/streaming.js';
 import { onToolStarted, onToolFinished, onToolProgress } from './handlers/tools.js';
 import { onSessionListChanged, onCustomMessage, onExtensionUIRequest, onError, onOperationalError, onContextUsageChanged } from './handlers/session.js';
 import { applySessionOpenedPayload, handleBusyChangedPayload, attach as attachHandlers, detach as detachHandlers } from './handlers/attach.js';
@@ -119,9 +119,22 @@ export class SessionServiceEvents {
         }
         this.dispatchArch({ kind: 'TurnSemanticEventReceived', envelope });
         if (envelope.kind === 'turn.started') {
-          this.state.bindRequestSessionPath(envelope.requestId, envelope.sessionPath);
-          this.runObserver.onAssistantTurnStarted(envelope.sessionPath, envelope.canonicalMessageId);
-          this.state.touchSessionTranscript(envelope.sessionPath);
+          const acceptedTurn = this.getArchState().livePipeline.turnsBySession[envelope.sessionPath];
+          if (acceptedTurn?.turnId === envelope.turnId && acceptedTurn.attemptId === envelope.attemptId) {
+            this.state.bindRequestSessionPath(envelope.requestId, envelope.sessionPath);
+            // Mirror the legacy message.started behavior only after the reducer
+            // accepted this owner. A conflicting or tombstoned start must not
+            // overwrite the composer's model badge or analytics identity.
+            reconcileServingModelConfig(
+              envelope.sessionPath,
+              envelope.modelId,
+              envelope.thinkingLevel,
+              envelope.provider,
+              deps,
+            );
+            this.runObserver.onAssistantTurnStarted(envelope.sessionPath, envelope.canonicalMessageId);
+            this.state.touchSessionTranscript(envelope.sessionPath);
+          }
         } else if (envelope.kind === 'tool.started') {
           onToolStarted({
             requestId: envelope.requestId,

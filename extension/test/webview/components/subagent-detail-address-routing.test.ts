@@ -18,6 +18,7 @@ import {
 } from '../../../src/shared/protocol';
 import {
   clearDetailSubscriptionStore,
+  receiveDetailImperative,
   setDetailStoreContext,
 } from '../../../src/webview/panel/transcript/detail-subscription-store';
 import {
@@ -121,4 +122,24 @@ test('an addressable terminal subagent subscribes instead of issuing a generic d
   assert.deepEqual(subscribes[0]?.address, detailAddress);
   assert.equal(messages.some((message) => message.type === 'requestDetail'), false,
     'the legacy one-shot path must stay idle when an immutable producer address is available');
+
+  act(() => receiveDetailImperative({
+    type: 'detail.error',
+    hostInstanceId: 'host-1', hostGeneration: 0, viewGeneration: 1,
+    rendererId: 'renderer-1', rendererGeneration: 1,
+    backendGeneration: 1, coordinatorGeneration: 1,
+    workerId: 'worker-1', workerGeneration: 1,
+    detailKey: subscribes[0]!.detailKey,
+    detailAttempt: subscribes[0]!.detailAttempt,
+    subscriptionId: 'subscription-1',
+    code: 'UNAVAILABLE', message: 'Subagent transcript temporarily unavailable.', retryable: true,
+  }));
+  assert.match(container.textContent ?? '', /Subagent transcript temporarily unavailable/,
+    'subscription failures must not look like an empty transcript');
+  const retry = [...container.querySelectorAll('button')]
+    .find((button) => button.textContent?.trim() === 'Retry') as HTMLButtonElement | undefined;
+  assert.ok(retry, 'a retryable subscription error keeps an explicit recovery action');
+
+  await act(async () => retry.click());
+  assert.equal(messages.filter((message) => message.type === 'detail.subscribe').length, 2);
 });

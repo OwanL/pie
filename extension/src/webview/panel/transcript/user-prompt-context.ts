@@ -1,10 +1,6 @@
 import type { ChatMessage, UserContentPart } from '../../../shared/protocol';
-import { isNearBottom } from '../auto-scroll';
 import { getRenderableUserParts } from './parts';
 import type { TranscriptRow } from './virtual-list-rows';
-
-/** The prompt changes once a new user row is close to the viewport's top edge. */
-export const USER_PROMPT_SWITCH_THRESHOLD_PX = 10;
 
 export interface UserPromptEntry {
   /** Index into the virtual transcript row list, used by Locate. */
@@ -86,48 +82,40 @@ export function buildUserPromptEntries(rows: readonly TranscriptRow[]): UserProm
 
 export interface SelectUserPromptAtViewportOptions {
   entries: readonly UserPromptEntry[];
-  /** Read the current start from the virtualizer's dense measurement cache. */
-  getRowStart: (rowIndex: number) => number | null;
+  /** Read the current end from the virtualizer's dense measurement cache. */
+  getRowEnd: (rowIndex: number) => number | null;
   scrollOffset: number | null;
-  isAtBottom: boolean;
   /** Optional content-origin correction for a padded scroll container. */
   contentOriginPx?: number;
-  switchThresholdPx?: number;
 }
 
 /**
- * Select the user prompt governing the first meaningful row in the viewport.
- * The entries are already ordered by row index, and virtualizer starts are
- * monotonic, so this remains O(log user-prompts) per render.
+ * Select the latest user prompt that has fully scrolled above the viewport.
+ * A prompt that is even partly visible must never be duplicated in the context
+ * bar, so its predecessor is selected instead (or no bar when none exists).
+ * Entries and virtualizer ends are monotonic, keeping this O(log prompts).
  */
 export function selectUserPromptAtViewport({
   entries,
-  getRowStart,
+  getRowEnd,
   scrollOffset,
-  isAtBottom,
   contentOriginPx = 0,
-  switchThresholdPx = USER_PROMPT_SWITCH_THRESHOLD_PX,
 }: SelectUserPromptAtViewportOptions): UserPromptEntry | null {
-  if (entries.length === 0) return null;
-  if (isAtBottom) return entries[entries.length - 1] ?? null;
-  if (scrollOffset === null || !Number.isFinite(scrollOffset)) return null;
+  if (entries.length === 0 || scrollOffset === null || !Number.isFinite(scrollOffset)) return null;
 
   const origin = Number.isFinite(contentOriginPx) ? contentOriginPx : 0;
-  const threshold = Number.isFinite(switchThresholdPx)
-    ? switchThresholdPx
-    : USER_PROMPT_SWITCH_THRESHOLD_PX;
-  const viewportBoundary = scrollOffset - origin + threshold;
+  const viewportTop = scrollOffset - origin;
 
   let low = 0;
   let high = entries.length - 1;
   let selected = -1;
   while (low <= high) {
     const middle = low + Math.floor((high - low) / 2);
-    const start = getRowStart(entries[middle]?.rowIndex ?? -1);
+    const end = getRowEnd(entries[middle]?.rowIndex ?? -1);
     // TanStack's measurements cache is dense. If a caller supplies an
-    // incomplete cache, do not invent a preceding prompt from a future row.
-    if (start === null || !Number.isFinite(start)) return null;
-    if (start <= viewportBoundary) {
+    // incomplete cache, do not invent an offscreen prompt.
+    if (end === null || !Number.isFinite(end)) return null;
+    if (end <= viewportTop) {
       selected = middle;
       low = middle + 1;
     } else {
@@ -157,13 +145,11 @@ export function readPromptMetrics(element: HTMLDivElement | null): PromptViewpor
 
 export interface SelectPromptFromMetricsOptions {
   entries: readonly UserPromptEntry[];
-  getRowStart: (rowIndex: number) => number | null;
+  getRowEnd: (rowIndex: number) => number | null;
   /** Live metrics read from the scroll element, when measurable. */
   metrics: PromptViewportMetrics | null;
   /** Used only while metrics are unavailable (virtualizer offset). */
   fallbackScrollOffset: number | null;
-  /** Used only while metrics are unavailable (parent reactive state). */
-  fallbackIsAtBottom: boolean;
   contentOriginPx?: number;
 }
 
@@ -171,38 +157,25 @@ export interface SelectPromptFromMetricsOptions {
  * Select the governing prompt from an element's actual scroll position.
  * TanStack's virtualizer only notifies on virtual-range changes, so scroll
  * movement inside one range must be resolved by re-reading these metrics.
- * Near-bottom is measured from the same element metrics (same threshold as
- * the transcript's bottom-follow state), so the latest loadable prompt is
- * selected immediately even when its row starts below the top-edge boundary.
  */
 export function selectPromptFromElementMetrics({
   entries,
-  getRowStart,
+  getRowEnd,
   metrics,
   fallbackScrollOffset,
-  fallbackIsAtBottom,
   contentOriginPx = 0,
 }: SelectPromptFromMetricsOptions): UserPromptEntry | null {
-  if (
+  const scrollOffset = (
     metrics === null
     || !Number.isFinite(metrics.scrollTop)
     || metrics.scrollHeight <= 0
     || metrics.clientHeight <= 0
-  ) {
-    return selectUserPromptAtViewport({
-      entries,
-      getRowStart,
-      scrollOffset: fallbackScrollOffset,
-      isAtBottom: fallbackIsAtBottom,
-      contentOriginPx,
-    });
-  }
+  ) ? fallbackScrollOffset : metrics.scrollTop;
 
   return selectUserPromptAtViewport({
     entries,
-    getRowStart,
-    scrollOffset: metrics.scrollTop,
-    isAtBottom: isNearBottom(metrics),
+    getRowEnd,
+    scrollOffset,
     contentOriginPx,
   });
 }

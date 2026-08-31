@@ -462,7 +462,11 @@ export class SessionService implements vscode.Disposable {
           || (this.detailEpochBySession.get(sessionPath) ?? 0) !== requestEpoch) {
           return { sessionPath, key: ref.key, status: 'stale', message: 'The session changed while details were loading.' };
         }
-        if (result.status === 'loaded') this.cacheDetail(cacheKey, result);
+        // Live detail is a moving view. In particular, fallback subagent refs
+        // intentionally keep one stable owner while progress advances, so a
+        // retry must re-read current host state instead of replaying the first
+        // expanded snapshot. Durable detail is immutable and remains cached.
+        if (result.status === 'loaded' && ref.source === 'durable') this.cacheDetail(cacheKey, result);
         return result;
       } catch {
         return { sessionPath, key: ref.key, status: 'failure', message: 'Could not load details. Retry to try again.' };

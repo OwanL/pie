@@ -89,6 +89,15 @@ export interface ReplaceQueueResultEvent {
   error?: string;
 }
 
+export interface ContinueResultEvent {
+  kind: 'ContinueResult';
+  corrId: string;
+  sessionPath: string;
+  ok: boolean;
+  requestId?: string;
+  error?: string;
+}
+
 export interface InterruptResultEvent {
   kind: 'InterruptResult';
   corrId: string;
@@ -361,6 +370,7 @@ export type EffectResultEvent =
   | SendResultEvent
   | EditResultEvent
   | ReplaceQueueResultEvent
+  | ContinueResultEvent
   | InterruptResultEvent
   | TruncateResultEvent
   | CompactResultEvent

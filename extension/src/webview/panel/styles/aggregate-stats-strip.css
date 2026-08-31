@@ -115,12 +115,51 @@
   padding-left: 4px;
 }
 
-/* Right-align the session-counts segment. It is wrapped in a custom tooltip
-   trigger (`pie-tooltip-trigger`, see aggregate-stats-strip/index.tsx), so the
-   auto margin must live on the trigger — the flex item — not the inner span,
-   otherwise the segment no longer pins to the right edge of the strip. */
-.aggregate-strip-counts-trigger {
+.aggregate-strip-user-input {
+  color: var(--panel-muted);
+  font-weight: normal;
+}
+
+.aggregate-strip-user-input-total {
+  color: inherit;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Keep the user-input and work segments together as one right-aligned status
+   cluster. The tooltip wrappers are the flex items, so the cluster owns the
+   auto margin rather than either inner segment. */
+.aggregate-strip-status-cluster {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
   margin-left: auto;
+}
+
+.aggregate-strip-status-cluster .pie-tooltip-trigger {
+  flex-shrink: 0;
+}
+
+.aggregate-strip-user-input-section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.aggregate-strip-user-input-section + .aggregate-strip-user-input-section {
+  margin-top: 6px;
+  padding-top: 5px;
+  border-top: 1px solid color-mix(in srgb, var(--panel-border) 60%, transparent);
+}
+
+.aggregate-strip-user-input-trend {
+  width: 100%;
+}
+
+.aggregate-strip-user-input-note {
+  margin-top: 6px;
+  padding-top: 5px;
+  border-top: 1px solid color-mix(in srgb, var(--panel-border) 60%, transparent);
 }
 
 .aggregate-strip-active {

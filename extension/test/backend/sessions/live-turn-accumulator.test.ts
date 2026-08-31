@@ -45,6 +45,32 @@ test('backend accumulator reserves every candidate sequence including rejections
   assert.equal(value.checkpoint().turn.thinkingLevel, 'high');
 });
 
+test('backend accumulator carries the exact serving provider on turn.started and checkpoints', () => {
+  const value = new BackendLiveTurnAccumulator({
+    protocolVersion: 7,
+    sessionPath: '/session.jsonl',
+    requestId: 'request',
+    turnId: 'turn',
+    attemptId: 'attempt',
+    canonicalMessageId: 'message',
+    modelId: 'gpt-4o',
+    provider: 'azure-openai',
+    thinkingLevel: 'high',
+    startedAt: 100,
+  });
+  const started = value.observe({ kind: 'turn.started' }, 100);
+  assert.equal(started.kind, 'turn.started');
+  assert.equal(started.kind === 'turn.started' ? started.modelId : undefined, 'gpt-4o');
+  assert.equal(started.kind === 'turn.started' ? started.provider : undefined, 'azure-openai');
+  assert.equal(started.kind === 'turn.started' ? started.thinkingLevel : undefined, 'high');
+  // The checkpoint repair path is the recovery authority: the same serving
+  // identity must survive it for host-side reconciliation.
+  const checkpoint = value.checkpoint();
+  assert.equal(checkpoint.turn.modelId, 'gpt-4o');
+  assert.equal(checkpoint.turn.provider, 'azure-openai');
+  assert.equal(checkpoint.turn.thinkingLevel, 'high');
+});
+
 test('backend accumulator retains ordered sibling drafts and promotes only the matching call', () => {
   const value = accumulator();
   value.observe({ kind: 'turn.started' }, 100);

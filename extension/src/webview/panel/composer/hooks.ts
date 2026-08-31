@@ -36,6 +36,7 @@ export function resizeComposerTextarea(textarea: HTMLTextAreaElement): void {
 export function useComposerInput({
   busy,
   sendBlocked = false,
+  allowEmptySend = false,
   onSend,
   onRetrySend,
   pendingComposerInputsLength,
@@ -51,6 +52,8 @@ export function useComposerInput({
   busy: boolean;
   /** Prevent both button and keyboard submission while a Stop is settling. */
   sendBlocked?: boolean;
+  /** Allow a blank submit to resume an interrupted turn without a user message. */
+  allowEmptySend?: boolean;
   onSend: (text: string) => boolean | void;
   /** Brief H: retry re-send. Mirrors `onSend` but the host disables pruning
    *  atomically before re-sending when `disablePruning` is set ("retry without
@@ -254,7 +257,7 @@ export function useComposerInput({
   const sendCurrentText = useCallback(() => {
     const trimmed = text.trim();
     if (submitting.current || sendBlocked) return;
-    if (trimmed.length === 0 && pendingComposerInputsLength === 0) return;
+    if (trimmed.length === 0 && pendingComposerInputsLength === 0 && !allowEmptySend) return;
     submitting.current = true;
     if (onSend(trimmed) === false) {
       submitting.current = false;
@@ -275,7 +278,7 @@ export function useComposerInput({
     setHistory(trimmed);
     setHistory('', true);
     resetComposer();
-  }, [busy, sendBlocked, onSend, pendingComposerInputsLength, resetComposer, setHistory, clearCheckpointTimer, text]);
+  }, [allowEmptySend, busy, sendBlocked, onSend, pendingComposerInputsLength, resetComposer, setHistory, clearCheckpointTimer, text]);
 
   // Brief H: re-send the current draft as a `retrySend` (optionally disabling
   // pruning first). Mirrors `sendCurrentText` (trim + submit-latch + clear +

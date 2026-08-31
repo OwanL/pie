@@ -66,6 +66,7 @@ export function applyLiveSemanticEnvelope(
       sessionPath: event.sessionPath,
       canonicalMessageId: event.canonicalMessageId,
       modelId: event.modelId,
+      provider: event.provider,
       thinkingLevel: event.thinkingLevel,
       seq: event.seq,
       checkpointSeq: 0,

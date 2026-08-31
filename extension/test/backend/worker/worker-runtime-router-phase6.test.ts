@@ -3,7 +3,10 @@ import test from 'node:test';
 
 import { WorkerRuntimeRouter } from '../../../src/backend/worker-runtime-router';
 import { CoordinatorProviderNetworkLeaseAuthority } from '../../../src/backend/coordinator-provider-network-lease';
-import type { WorkerClientScheduler } from '../../../src/backend/worker-client';
+import {
+  WorkerRequestEnqueueError,
+  type WorkerClientScheduler,
+} from '../../../src/backend/worker-client';
 
 class FakeRouterClock implements WorkerClientScheduler {
   private current = 0;
@@ -459,7 +462,7 @@ test('phase6 runtime.report is retained without replacing configured authority',
   assert.equal(router.inspectRuntimeReports().length, 1);
 });
 
-test('phase6 auth refresh bumps revision, broadcasts, and retires unacknowledging workers', async () => {
+test('phase6 auth refresh retries slow ACKs but retires definite worker failures', async () => {
   const { router, sessionPath, stopped } = makeRouter(makeClient());
   const route = await router.promote(sessionPath);
   const result = await router.refreshAuth('fp-2', '/agent/auth.json');
@@ -470,7 +473,8 @@ test('phase6 auth refresh bumps revision, broadcasts, and retires unacknowledgin
   assert.deepEqual(sync.payload, { authPath: '/agent/auth.json', fingerprint: 'fp-2' });
   // An unchanged fingerprint does not bump again.
   assert.deepEqual(await router.refreshAuth('fp-2', '/agent/auth.json'), { bumped: false, retiredWorkers: 0 });
-  // A worker that cannot acknowledge is retired fail-closed.
+  // A definite worker/transport failure remains fail-closed; only an ACK
+  // deadline or bounded queue pressure is retryable.
   const failingClient = makeClient({
     requestFrame: async (body: any) => {
       if (body.kind === 'sync' && body.domain === 'auth' && body.payload?.fingerprint === 'fp-3') throw new Error('worker is wedged');
@@ -642,6 +646,97 @@ test('phase6 session registry timeout keeps a busy worker hot and retries the la
   assert.equal(router.getRoute(sessionPath).state, 'hot');
   assert.equal(emitted.some(([event, payload]) => event === 'operational-error'
     && payload.code === 'SESSION_WORKER_SYNC_FAILED'), false);
+});
+
+test('phase6 live sync retries bounded enqueue pressure without retiring healthy work', async () => {
+  const clock = new FakeRouterClock();
+  let runtimePrefsAttempts = 0;
+  const client = makeClient({
+    requestFrame: async (body: any, _expectedKind: string, options: any) => {
+      client.calls.push(body);
+      if (body.kind === 'sync') {
+        if (body.domain === 'runtimePrefs' && body.revision === 2) {
+          runtimePrefsAttempts += 1;
+          assert.equal(options.fatalOnEnqueueRejection, false);
+          if (runtimePrefsAttempts === 1) {
+            throw new WorkerRequestEnqueueError('capacity', 'control lane is temporarily full');
+          }
+        }
+        return { kind: 'sync.ack', requestId: 'x', domain: body.domain, revision: body.revision };
+      }
+      if (body.kind === 'runtime.promote') {
+        return { kind: 'runtime.ready', requestId: 'x', runtimeMetadata: { mode: 'phase4', startedAt: 1 } };
+      }
+      throw new Error(`unexpected frame ${body.kind}`);
+    },
+  });
+  const { router, sessionPath, stopped, emitted } = makeRouter(client, {
+    options: { scheduler: clock, syncAckTimeoutMs: 50 },
+  });
+  await router.promote(sessionPath);
+
+  await router.syncRuntimePrefs({ compact: true });
+  assert.equal(router.getRoute(sessionPath).state, 'hot');
+  assert.deepEqual(stopped, []);
+  assert.equal(emitted.some(([event, payload]) => event === 'operational-error'
+    && payload.code === 'SESSION_WORKER_SYNC_FAILED'), false);
+
+  clock.advance(1_000);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(runtimePrefsAttempts, 2);
+  assert.equal(router.getRoute(sessionPath).state, 'hot');
+});
+
+test('phase6 live-sync retry never targets a replacement worker generation at the same path', async () => {
+  const clock = new FakeRouterClock();
+  let runtimePrefsAttempts = 0;
+  const oldClient = makeClient({
+    requestFrame: async (body: any) => {
+      oldClient.calls.push(body);
+      if (body.kind === 'sync') {
+        if (body.domain === 'runtimePrefs' && body.revision === 2) {
+          runtimePrefsAttempts += 1;
+          return new Promise(() => undefined);
+        }
+        return { kind: 'sync.ack', requestId: 'x', domain: body.domain, revision: body.revision };
+      }
+      if (body.kind === 'runtime.promote') {
+        return { kind: 'runtime.ready', requestId: 'x', runtimeMetadata: { mode: 'phase4', startedAt: 1 } };
+      }
+      throw new Error(`unexpected frame ${body.kind}`);
+    },
+  });
+  const replacementClient = makeClient();
+  let supervisedWorker: any;
+  const { router, sessionPath } = makeRouter(oldClient, {
+    supervisor: {
+      startWorker: async (root: string, prepare: any) => {
+        await prepare({ workerId: 'old-worker', workerGeneration: 1, sessionPath: root });
+        supervisedWorker = {
+          workerId: 'old-worker', workerGeneration: 1, sessionPath: root, client: oldClient,
+        };
+        return supervisedWorker;
+      },
+      listWorkers: () => supervisedWorker ? [supervisedWorker] : [],
+    },
+    options: { scheduler: clock, syncAckTimeoutMs: 50 },
+  });
+  await router.promote(sessionPath);
+
+  const sync = router.syncRuntimePrefs({ compact: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  clock.advance(51);
+  await sync;
+  assert.equal(runtimePrefsAttempts, 1);
+
+  supervisedWorker = {
+    workerId: 'replacement-worker', workerGeneration: 2, sessionPath, client: replacementClient,
+  };
+  clock.advance(1_000);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(runtimePrefsAttempts, 1, 'the retired generation receives no retry');
+  assert.equal(replacementClient.calls.length, 0, 'startup synchronization alone may address the replacement');
 });
 
 test('phase6 simultaneous registry and settings delay does not kill a healthy review at the old 5s boundary', async () => {
@@ -952,7 +1047,7 @@ test('phase6 sync failure terminalizes an early-acknowledged send as preflight f
   assert.equal(router.getRoute(sessionPath).state, 'cold');
 });
 
-test('phase6 sync: a never-resolving worker ACK is quarantined without blocking another session promotion', async () => {
+test('phase6 sync: a timed-out live ACK preserves active work, retries, and does not block another promotion', async () => {
   const clock = new FakeRouterClock();
   const sessionA = `${process.cwd()}/phase6-stalled-a.jsonl`;
   const sessionB = `${process.cwd()}/phase6-healthy-b.jsonl`;
@@ -961,6 +1056,7 @@ test('phase6 sync: a never-resolving worker ACK is quarantined without blocking 
   const stopped: string[] = [];
   const emitted: Array<[string, any]> = [];
   let generation = 0;
+  let stalledRuntimePrefsAttempts = 0;
 
   const supervisor = {
     startWorker: async (root: string, prepare: any) => {
@@ -974,7 +1070,8 @@ test('phase6 sync: a never-resolving worker ACK is quarantined without blocking 
           workerCalls.push(body);
           if (body.kind === 'sync') {
             if (root === sessionA && body.domain === 'runtimePrefs' && body.revision === 2) {
-              return new Promise(() => undefined);
+              stalledRuntimePrefsAttempts += 1;
+              if (stalledRuntimePrefsAttempts === 1) return new Promise(() => undefined);
             }
             return Promise.resolve({ kind: 'sync.ack', domain: body.domain, revision: body.revision });
           }
@@ -1037,7 +1134,15 @@ test('phase6 sync: a never-resolving worker ACK is quarantined without blocking 
     }),
   });
 
-  await router.promote(sessionA);
+  const routeA = await router.promote(sessionA);
+  await router.handleWorkerFrame(sessionA, eventFrame(
+    routeA, sessionA, 'busy.changed', { sessionPath: sessionA, busy: true, seq: 1 }, 1,
+  ));
+  await router.handleWorkerFrame(sessionA, eventFrame(
+    routeA, sessionA, 'message.started',
+    { sessionPath: sessionA, requestId: 'healthy-request', messageId: 'healthy-message' }, 2,
+  ));
+  emitted.length = 0;
   const stalledBroadcast = router.syncRuntimePrefs({ compact: true });
   for (let turn = 0; turn < 4 && !calls.get(sessionA)?.some((body) =>
     body.kind === 'sync' && body.domain === 'runtimePrefs' && body.revision === 2); turn += 1) {
@@ -1063,13 +1168,18 @@ test('phase6 sync: a never-resolving worker ACK is quarantined without blocking 
 
   clock.advance(51);
   await stalledBroadcast;
-  assert.ok(stopped.includes(sessionA), 'the non-acking worker is retired after its deadline');
-  assert.equal(router.getRoute(sessionA).state, 'cold');
+  assert.deepEqual(stopped, [], 'a missed live-sync ACK must not retire the active worker');
+  assert.equal(router.getRoute(sessionA).state, 'hot');
   assert.equal(router.getRoute(sessionB).state, 'hot');
-  assert.ok(emitted.some(([event, payload]) => event === 'operational-error'
-    && payload.code === 'SESSION_WORKER_SYNC_FAILED'
-    && payload.domain === 'runtimePrefs'
-    && payload.workerId === 'isolation-worker-1'));
+  assert.equal(emitted.some(([event]) =>
+    event === 'tool.finished' || event === 'message.aborted' || event === 'preflight.failed'), false);
+  assert.equal(emitted.some(([event, payload]) => event === 'operational-error'
+    && payload.code === 'SESSION_WORKER_SYNC_FAILED'), false);
+
+  clock.advance(1_000);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(stalledRuntimePrefsAttempts, 2, 'the exact retained preference revision is retried');
+  assert.equal(router.getRoute(sessionA).state, 'hot');
 
   // The failed completion is rejection-neutral in both the global revision
   // lock and worker-local tails; unrelated authoritative updates keep flowing.

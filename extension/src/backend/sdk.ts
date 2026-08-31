@@ -300,6 +300,10 @@ export interface SdkSession {
   navigateTree: (targetId: string, options?: SdkNavigateTreeOptions) => Promise<{ cancelled: boolean }>;
   reload: () => Promise<void>;
   prompt: (text: string, options?: SdkPromptOptions) => Promise<void>;
+  /** Resume an interrupted turn without appending a new user message or running
+   * the before_agent_start prompt preflight. Installed by Pie's runtime adapter
+   * over the pinned SDK's internal continuation seam. */
+  continueAfterInterruption?: () => Promise<void>;
   /** Manually summarize older history to free context. */
   compact: (customInstructions?: string) => Promise<unknown>;
   abort: () => Promise<void>;
@@ -577,6 +581,7 @@ interface PatchableAgentSession {
     state: { messages: unknown[] };
     streamFn?: unknown;
   };
+  continueAfterInterruption?: () => Promise<void>;
   model?: PatchableModel;
   thinkingLevel?: ThinkingLevel;
   settingsManager?: { getCompactionSettings(): SdkCompactionSettings };
@@ -589,6 +594,7 @@ interface PatchableAgentSession {
     env?: Record<string, string>;
   }>;
   _isAgentRunActive?: boolean;
+  _runAgentPrompt?: (messages: unknown[]) => Promise<void>;
   _installAgentNextTurnRefresh(): void;
   _buildRuntime?: (...args: unknown[]) => unknown;
   _checkCompaction(assistantMessage: PatchableAssistantMessage, skipAbortedCheck?: boolean): Promise<boolean>;
@@ -597,6 +603,37 @@ interface PatchableAgentSession {
 }
 
 export type SdkHistoryCompactionPatchResult = 'patched' | 'already-present' | 'missing-target' | 'unsupported-shape';
+export type SdkInterruptedContinuationPatchResult = 'patched' | 'already-present' | 'missing-target' | 'unsupported-shape';
+
+/** Install the narrow continuation API Pie needs without changing the pinned
+ * SDK on disk. The SDK already owns the complete run lifecycle in
+ * `_runAgentPrompt`; passing an empty prompt list reaches agent-core's
+ * continuation loop without emitting a user message or `before_agent_start`.
+ * The durable interrupted assistant remains in session history, matching Pi's
+ * retry behavior, while it is removed from provider context for this retry. */
+export function applySdkInterruptedContinuationRuntimePatch(sdk: {
+  AgentSession?: { prototype?: Record<string, unknown> };
+}): SdkInterruptedContinuationPatchResult {
+  const rawPrototype = sdk.AgentSession?.prototype;
+  if (!rawPrototype) return 'missing-target';
+  const prototype = rawPrototype as unknown as PatchableAgentSession;
+  if (typeof prototype.continueAfterInterruption === 'function') return 'already-present';
+  if (typeof prototype._runAgentPrompt !== 'function') return 'unsupported-shape';
+
+  prototype.continueAfterInterruption = async function continueAfterInterruption(
+    this: PatchableAgentSession,
+  ): Promise<void> {
+    const messages = this.agent?.state?.messages;
+    const last = Array.isArray(messages) ? messages[messages.length - 1] : undefined;
+    if (!last || typeof last !== 'object' || (last as { role?: unknown }).role !== 'assistant'
+        || (last as { stopReason?: unknown }).stopReason !== 'aborted') {
+      throw new Error('The session does not end with an interrupted assistant turn.');
+    }
+    this.agent.state.messages = messages.slice(0, -1);
+    await this._runAgentPrompt!([]);
+  };
+  return 'patched';
+}
 
 function readLiveHistoryCompactionSettings(): HistoryCompactionSettings | undefined {
   const raw = process.env[HISTORY_COMPACTION_ENV];
@@ -1037,6 +1074,10 @@ export async function loadSdk(
   });
   if (historyCompactionPatch === 'missing-target' || historyCompactionPatch === 'unsupported-shape') {
     throw new Error(`SDK history-compaction patch failed: ${historyCompactionPatch}.`);
+  }
+  const continuationPatch = applySdkInterruptedContinuationRuntimePatch({ AgentSession: typed.AgentSession });
+  if (continuationPatch === 'missing-target' || continuationPatch === 'unsupported-shape') {
+    throw new Error(`SDK interrupted-continuation patch failed: ${continuationPatch}.`);
   }
   return typed;
 }

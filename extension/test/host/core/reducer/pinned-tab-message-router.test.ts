@@ -73,7 +73,10 @@ function newRouter(): { router: import('../../../../src/host/core/message-router
   const events: unknown[] = [];
   const router = new MessageRouterCtor(
     (event) => events.push(event),
-    () => ({ sessions: { activeSessionPath: null, openTabPaths: [], pinnedTabPaths: [], pinnedTabGroups: [], runningSessionPaths: [] } } as never),
+    () => ({
+      sessions: { activeSessionPath: null, openTabPaths: ['/a'], pinnedTabPaths: [], pinnedTabGroups: [], runningSessionPaths: [] },
+      composer: { pendingComposerInputsBySession: {} },
+    } as never),
     {} as never,
     { reveal: () => undefined, postState: () => undefined, postImperative: () => undefined } as never,
     () => undefined,
@@ -97,6 +100,17 @@ function newRouter(): { router: import('../../../../src/host/core/message-router
 async function send(router: import('../../../../src/host/core/message-router').MessageRouter, msg: WebviewToHostMessage): Promise<void> {
   await router.handle(msg);
 }
+
+test('empty send dispatches Continue without creating a Send command', async () => {
+  const { router, capture } = newRouter();
+  await send(router, { type: 'send', sessionPath: '/a', text: '', localId: 'local-empty' });
+
+  const { notices, commands } = capture();
+  assert.deepEqual(notices, []);
+  assert.equal(commands.length, 1);
+  assert.equal(commands[0].cmdKind, 'Continue');
+  assert.equal(commands[0].cmd.sessionPath, '/a');
+});
 
 // ─── groupPinnedTab ────────────────────────────────────────────────────────
 

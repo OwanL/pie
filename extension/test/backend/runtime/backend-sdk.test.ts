@@ -8,12 +8,65 @@ import test from 'node:test';
 import { cloneTreeByHardlink } from '../../helpers/clone-tree-by-hardlink';
 
 import {
+  applySdkInterruptedContinuationRuntimePatch,
   applySdkRetryHotPatch,
   applySdkTerminalDurabilityPatch,
   ensureSdkPatchBarrier,
   loadSdk,
   loadSdkInternalModule,
 } from '../../../src/backend/sdk';
+
+test('interrupted continuation removes only the aborted provider-context tail and starts without a user prompt', async () => {
+  const runInputs: unknown[][] = [];
+  class FakeAgentSession {
+    agent = {
+      state: {
+        messages: [
+          { role: 'user', content: 'work' },
+          { role: 'assistant', stopReason: 'aborted', content: 'partial' },
+        ] as unknown[],
+      },
+    };
+    async _runAgentPrompt(messages: unknown[]): Promise<void> {
+      runInputs.push(messages);
+    }
+  }
+
+  const patch = applySdkInterruptedContinuationRuntimePatch({
+    AgentSession: FakeAgentSession as unknown as { prototype: Record<string, unknown> },
+  });
+  assert.equal(patch, 'patched');
+  const session = new FakeAgentSession() as FakeAgentSession & {
+    continueAfterInterruption(): Promise<void>;
+  };
+  await session.continueAfterInterruption();
+
+  assert.deepEqual(session.agent.state.messages, [{ role: 'user', content: 'work' }]);
+  assert.deepEqual(runInputs, [[]], 'continuation enters the run lifecycle with no prompt messages');
+  assert.equal(
+    applySdkInterruptedContinuationRuntimePatch({
+      AgentSession: FakeAgentSession as unknown as { prototype: Record<string, unknown> },
+    }),
+    'already-present',
+  );
+});
+
+test('interrupted continuation rejects a non-interrupted durable tail', async () => {
+  class FakeAgentSession {
+    agent = { state: { messages: [{ role: 'assistant', stopReason: 'stop' }] as unknown[] } };
+    async _runAgentPrompt(): Promise<void> {}
+  }
+  applySdkInterruptedContinuationRuntimePatch({
+    AgentSession: FakeAgentSession as unknown as { prototype: Record<string, unknown> },
+  });
+  const session = new FakeAgentSession() as FakeAgentSession & {
+    continueAfterInterruption(): Promise<void>;
+  };
+  await assert.rejects(
+    session.continueAfterInterruption(),
+    /does not end with an interrupted assistant turn/,
+  );
+});
 
 const SESSION_MANAGER_PATCH_SOURCE = `
 import { randomUUID } from "crypto";
@@ -307,6 +360,7 @@ test('loadSdk imports allowed ESM SDK modules that satisfy the contract', async 
         _installAgentNextTurnRefresh() {}
         _buildRuntime() {}
         async _checkCompaction() { return false; }
+        async _runAgentPrompt() {}
       }
       export const getAgentDir = () => '/agent';
       export const AuthStorage = { create: (filePath) => ({ filePath }) };

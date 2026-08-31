@@ -333,11 +333,16 @@ test('a delayed checkpoint cannot revive an attempt after its terminal tombstone
   assert.equal(late.state.transcript.bySession[base.sessionPath], transcript);
 });
 
-test('checkpoint recovery commits the matching optimistic send and clears its watchdog', () => {
+test('checkpoint recovery commits the matching optimistic send and restores its serving model identity', () => {
   const seeded = dispatch(createInitialArchState(), {
-    ...base, kind: 'turn.started', seq: 1, canonicalMessageId: 'message', startedAt: 90,
+    ...base, kind: 'turn.started', seq: 1, canonicalMessageId: 'message',
+    modelId: 'gpt-5.6-sol', provider: 'openai-codex', thinkingLevel: 'high', startedAt: 90,
   }).state.livePipeline.turnsBySession[base.sessionPath]!;
   const initial = createInitialArchState();
+  initial.sessions.sessions = [{
+    path: base.sessionPath, name: 's', cwd: '/', modifiedAt: '', messageCount: 1,
+    modelId: 'claude-opus-5', provider: 'github-copilot', thinkingLevel: 'xhigh',
+  }];
   initial.pending.promoted['send-corr'] = {
     kind: 'send', sessionPath: base.sessionPath, localId: 'local:user', previousSummary: null,
     text: 'Do the work', inputs: [], requestId: base.requestId, startedAt: 80,
@@ -370,6 +375,13 @@ test('checkpoint recovery commits the matching optimistic send and clears its wa
   assert.deepEqual(result.state.pending.currentTurnBySession[base.sessionPath], {
     requestId: base.requestId, firstMessageId: 'message',
   });
+  assert.deepEqual(
+    result.state.sessions.sessions.find((session) => session.path === base.sessionPath),
+    {
+      path: base.sessionPath, name: 's', cwd: '/', modifiedAt: '', messageCount: 1,
+      modelId: 'gpt-5.6-sol', provider: 'openai-codex', thinkingLevel: 'high',
+    },
+  );
 });
 
 test('sequence gaps request a checkpoint and a terminal checkpoint repairs missed terminal delivery', () => {

@@ -64,6 +64,7 @@ export type WorkerRuntimeOperation =
   | 'models.list'
   | 'liveTurn.checkpoint'
   | 'message.send'
+  | 'message.continue'
   | 'message.compact'
   | 'message.clearQueue'
   | 'message.replaceQueue'
@@ -896,7 +897,7 @@ function validateCommand(value: Record<string, unknown>, requireSeq: boolean): s
 
 const RUNTIME_OPERATIONS: ReadonlySet<WorkerRuntimeOperation> = new Set([
   'session.open', 'session.preload', 'session.loadTranscriptPage', 'session.loadDetail',
-  'session.truncateAfter', 'session.title.generate', 'models.list', 'liveTurn.checkpoint', 'message.send', 'message.compact',
+  'session.truncateAfter', 'session.title.generate', 'models.list', 'liveTurn.checkpoint', 'message.send', 'message.continue', 'message.compact',
   'message.clearQueue', 'message.replaceQueue', 'extension_ui.response',
   'settings.set', 'systemPromptToggles.set', 'test.extensionCommand',
 ]);

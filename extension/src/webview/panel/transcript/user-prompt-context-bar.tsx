@@ -2,7 +2,7 @@
 /** @jsxImportSource preact */
 
 import type { Virtualizer } from '@tanstack/virtual-core';
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 
 import {
   readPromptMetrics,
@@ -15,7 +15,6 @@ interface UserPromptContextBarProps {
   entries: readonly UserPromptEntry[];
   virtualizer: Virtualizer<HTMLDivElement, HTMLDivElement>;
   scrollRef: { current: HTMLDivElement | null };
-  isAtBottom: boolean;
   hidden?: boolean;
   onLocate: (rowIndex: number) => void;
 }
@@ -54,12 +53,10 @@ export function UserPromptContextBar({
   entries,
   virtualizer,
   scrollRef,
-  isAtBottom,
   hidden = false,
   onLocate,
 }: UserPromptContextBarProps) {
   const contentOriginPx = useTranscriptContentOrigin(scrollRef);
-  const [expandedMessageId, setExpandedMessageId] = useState<string | null>(null);
 
   // TanStack's virtualizer only notifies on virtual-range changes, so a same
   // -range scroll never re-renders this component from the parent. The bar
@@ -76,10 +73,9 @@ export function UserPromptContextBar({
     if (!element) return;
     const next = selectPromptFromElementMetrics({
       entries,
-      getRowStart: (rowIndex) => virtualizer.measurementsCache[rowIndex]?.start ?? null,
+      getRowEnd: (rowIndex) => virtualizer.measurementsCache[rowIndex]?.end ?? null,
       metrics: readPromptMetrics(element),
       fallbackScrollOffset: null,
-      fallbackIsAtBottom: false,
       contentOriginPx,
     });
     const nextId = next?.messageId ?? null;
@@ -96,20 +92,18 @@ export function UserPromptContextBar({
     return () => element.removeEventListener('scroll', onScroll);
   }, [scrollRef]);
 
-  const getRowStart = useCallback(
-    (rowIndex: number) => virtualizer.measurementsCache[rowIndex]?.start ?? null,
+  const getRowEnd = useCallback(
+    (rowIndex: number) => virtualizer.measurementsCache[rowIndex]?.end ?? null,
     [virtualizer],
   );
 
   // Render-time selection prefers the element's live metrics; the virtualizer
-  // offset plus the parent's isAtBottom only covers the unmeasurable window
-  // (first render before the scroll element exists).
+  // offset covers the unmeasurable window before the scroll element exists.
   const selected = selectPromptFromElementMetrics({
     entries,
-    getRowStart,
+    getRowEnd,
     metrics: readPromptMetrics(scrollRef.current),
     fallbackScrollOffset: virtualizer.scrollOffset ?? null,
-    fallbackIsAtBottom: isAtBottom,
     contentOriginPx,
   });
 
@@ -122,12 +116,12 @@ export function UserPromptContextBar({
     [selectedMessage?.id, selectedMessage?.markdown, selectedMessage?.userParts],
   );
 
-  const expanded = selected !== null && expandedMessageId === selected.messageId;
+  // Data and measurement updates can change the render-time selection without
+  // a scroll event. Keep the listener's comparison baseline aligned with what
+  // is actually rendered so the next same-range scroll cannot be ignored.
+  selectedMessageIdRef.current = selected?.messageId ?? null;
 
-  const toggleExpanded = useCallback(() => {
-    if (!selected) return;
-    setExpandedMessageId((current) => current === selected.messageId ? null : selected.messageId);
-  }, [selected]);
+  const locateDescriptionId = useId();
   const locate = useCallback(() => {
     if (selected) onLocate(selected.rowIndex);
   }, [onLocate, selected]);
@@ -141,6 +135,8 @@ export function UserPromptContextBar({
     return null;
   }
 
+  const hasMetadata = selectedDetails.imageCount > 0 || selected.isQueued || selected.isAutoResume;
+
   return (
     <section
       class={`transcript-prompt-context${hidden ? ' is-hidden' : ''}`}
@@ -148,37 +144,29 @@ export function UserPromptContextBar({
       aria-label="User prompt context"
       aria-hidden={hidden ? 'true' : undefined}
     >
-      <div class="transcript-prompt-context-heading">
-        <span class="transcript-header-label">User prompt</span>
-        <div class="transcript-prompt-context-meta" aria-label="Prompt metadata">
-          {selectedDetails.imageCount > 0 && (
-            <span title={`${selectedDetails.imageCount} image attachment${selectedDetails.imageCount === 1 ? '' : 's'}`}>
-              {imageLabel(selectedDetails.imageCount)}
-            </span>
-          )}
-          {selected.isQueued && <span>Queued</span>}
-          {selected.isAutoResume && <span>Auto-resume</span>}
-        </div>
-      </div>
+      <span id={locateDescriptionId} class="transcript-prompt-context-action-description">
+        Locate this user prompt in the transcript
+      </span>
       <div class="transcript-prompt-context-row">
+        {hasMetadata && (
+          <div class="transcript-prompt-context-meta" aria-label="Prompt metadata">
+            {selectedDetails.imageCount > 0 && (
+              <span title={`${selectedDetails.imageCount} image attachment${selectedDetails.imageCount === 1 ? '' : 's'}`}>
+                {imageLabel(selectedDetails.imageCount)}
+              </span>
+            )}
+            {selected.isQueued && <span>Queued</span>}
+            {selected.isAutoResume && <span>Auto-resume</span>}
+          </div>
+        )}
         <button
           type="button"
-          class={`transcript-prompt-context-preview${expanded ? ' is-expanded' : ''}`}
-          aria-expanded={expanded}
-          aria-label={expanded ? 'Collapse user prompt' : 'Expand user prompt'}
-          title={expanded ? 'Collapse user prompt' : 'Expand user prompt'}
-          onClick={toggleExpanded}
-        >
-          {selectedDetails.plainText}
-        </button>
-        <button
-          type="button"
-          class="transcript-prompt-context-locate"
-          aria-label="Locate user prompt in transcript"
+          class="transcript-prompt-context-preview"
+          aria-describedby={locateDescriptionId}
           title="Locate user prompt in transcript"
           onClick={locate}
         >
-          Locate
+          {selectedDetails.plainText}
         </button>
       </div>
     </section>

@@ -157,13 +157,12 @@ function PinnedTabGroupView({
               ) : (
                 <span
                   key={tile.path}
-                  class={`pinned-tab-group-tile${activePath === tile.path ? ' member-active' : ''}`}
+                  class={`pinned-tab-group-tile${activePath === tile.path ? ' member-active' : ''}${generatingTitlePathSet.has(tile.path) ? ' session-title-loading session-title-loading-avatar' : ''}`}
+                  data-label={generatingTitlePathSet.has(tile.path) ? getTabAvatarLabel(sessionByPath.get(tile.path)?.name ?? '?') : undefined}
                   style={{ background: getTabAvatarColor(tile.path) }}
                   aria-hidden="true"
                 >
-                  {generatingTitlePathSet.has(tile.path)
-                    ? <span class="loading-wheel loading-wheel-sm" />
-                    : getTabAvatarLabel(sessionByPath.get(tile.path)?.name ?? '?')}
+                  {getTabAvatarLabel(sessionByPath.get(tile.path)?.name ?? '?')}
                 </span>
               ),
             )}
@@ -212,11 +211,14 @@ function PinnedTabGroupView({
                   style={{ background: getTabAvatarColor(memberPath) }}
                   aria-hidden="true"
                 >
-                  {isGeneratingTitle
-                    ? <span class="loading-wheel loading-wheel-sm" />
-                    : getTabAvatarLabel(label)}
+                  {getTabAvatarLabel(label)}
                 </span>
-                <span class="pinned-tab-group-member-label">{label}</span>
+                <span
+                  class={isGeneratingTitle ? 'pinned-tab-group-member-label session-title-loading' : 'pinned-tab-group-member-label'}
+                  data-label={isGeneratingTitle ? label : undefined}
+                >
+                  {label}
+                </span>
                 {isRunning || isPreparing
                   ? <span class={isStartingModel ? 'session-tab-running starting-model' : 'session-tab-running'} aria-hidden="true" />
                   : isDeferredTimer

@@ -21,7 +21,12 @@ import {
 } from './session-ownership-authority';
 import type { SdkSessionWriteLease, SdkWorkerOwnershipIdentity } from './sdk';
 import type { SupervisedWorker, WorkerSupervisor } from './worker-supervisor';
-import type { WorkerClientScheduler, WorkerClientSnapshot } from './worker-client';
+import {
+  WorkerRequestEnqueueError,
+  WorkerRequestTimeoutError,
+  type WorkerClientScheduler,
+  type WorkerClientSnapshot,
+} from './worker-client';
 import { backendDebug, backendWarn } from './log';
 import { BackendError } from './server-io';
 import type {
@@ -161,6 +166,13 @@ class UnconfirmedWorkerExitError extends Error {
   }
 }
 
+class OperationDeadlineError extends Error {
+  constructor(message: string, readonly timeoutMs: number) {
+    super(`${message} within ${timeoutMs} ms.`);
+    this.name = 'OperationDeadlineError';
+  }
+}
+
 type SyncDomain = WorkerSyncDomain;
 
 interface WorkerSyncState {
@@ -184,7 +196,7 @@ const DEFAULT_BROADCAST_SYNC_ACK_TIMEOUT_MS = 30_000;
 const DEFAULT_RUNTIME_READY_TIMEOUT_MS = 120_000;
 const SYNC_SLOW_ACK_DIAGNOSTIC_MS = 250;
 const MAX_REPORTED_UNEXPECTED_WORKERS = 1_024;
-const SESSION_REGISTRY_RETRY_DELAYS_MS = [1_000, 5_000, 15_000, 30_000] as const;
+const LIVE_SYNC_RETRY_DELAYS_MS = [1_000, 5_000, 15_000, 30_000] as const;
 
 const defaultRouterScheduler: WorkerClientScheduler = {
   now: () => Date.now(),
@@ -202,6 +214,7 @@ const HOT_OPERATIONS: ReadonlySet<string> = new Set<WorkerRuntimeOperation>([
   'models.list',
   'liveTurn.checkpoint',
   'message.send',
+  'message.continue',
   'message.compact',
   'message.clearQueue',
   'message.replaceQueue',
@@ -228,11 +241,17 @@ export class WorkerRuntimeRouter {
   private readonly syncPayloads: Partial<Record<SyncDomain, WorkerJsonObject>> = {};
   private readonly workerSyncRevisions = new WeakMap<SupervisedWorker, Partial<Record<SyncDomain, number>>>();
   private readonly workerSyncStates = new WeakMap<SupervisedWorker, Partial<Record<SyncDomain, WorkerSyncState>>>();
-  /** Registry publication is auxiliary to an active turn. A missed ACK must
-   * never retire useful work, so retain one bounded latest-wins retry timer per
-   * ready worker instead of feeding this domain through fail-closed quarantine. */
-  private readonly sessionRegistryRetryTimers = new Map<SupervisedWorker, ReturnType<WorkerClientScheduler['setTimeout']>>();
-  private readonly sessionRegistryRetryAttempts = new WeakMap<SupervisedWorker, number>();
+  /** A live-sync deadline is evidence of delayed control traffic, not worker
+   * death. Retain one latest-wins retry per worker/domain so an active turn is
+   * never destroyed merely because its acknowledgement arrived slowly. */
+  private readonly liveSyncRetryTimers = new Map<
+    SupervisedWorker,
+    Partial<Record<SyncDomain, ReturnType<WorkerClientScheduler['setTimeout']>>>
+  >();
+  private readonly liveSyncRetryAttempts = new WeakMap<
+    SupervisedWorker,
+    Partial<Record<SyncDomain, number>>
+  >();
   private syncTail = Promise.resolve();
   private readonly scheduler: WorkerClientScheduler;
   private readonly syncAckTimeoutMs: number;
@@ -577,7 +596,7 @@ export class WorkerRuntimeRouter {
     const route = this.requireHot(sessionPath);
     const rootKey = routeKey(route.rootSessionPath);
     const retirement = (async () => {
-      this.clearSessionRegistryRetry(route.worker);
+      this.clearLiveSyncRetries(route.worker);
       await this.options.supervisor.stopWorker(route.currentLeasePath, reason);
       // Keep an active response body fenced until process-tree death is
       // confirmed. Releasing before stop could overlap it with the next worker.
@@ -652,7 +671,7 @@ export class WorkerRuntimeRouter {
     // settings, or ownership authority. Do not hold the host publication RPC
     // open (or kill a busy review) while a worker is synchronously occupied.
     // Each failed acknowledgement is retried with the newest revision below.
-    this.observeSessionRegistryBroadcast(scheduled.settlements);
+    this.observeLiveSyncBroadcast(scheduled.settlements);
     return { applied: true, revision: scheduled.revision, retiredWorkers: 0 };
   }
 
@@ -672,9 +691,9 @@ export class WorkerRuntimeRouter {
   }
 
   /** Auth fingerprint refresh: bump the auth sync revision and broadcast the
-   * new fingerprint to every worker. A worker that cannot acknowledge is
-   * retired fail-closed (its runtime may hold stale credentials); other
-   * workers continue. Returns the number of retired workers. */
+   * new fingerprint to every worker. A missed live acknowledgement retries
+   * without interrupting active work; a definite transport/protocol failure
+   * still retires that worker. Returns the number of retired workers. */
   async refreshAuth(fingerprint: string, authPath?: string): Promise<{ bumped: boolean; retiredWorkers: number }> {
     if (authPath) this.authPath = authPath;
     if (!this.authPath) return { bumped: false, retiredWorkers: 0 };
@@ -687,8 +706,12 @@ export class WorkerRuntimeRouter {
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
-    for (const timer of this.sessionRegistryRetryTimers.values()) this.scheduler.clearTimeout(timer);
-    this.sessionRegistryRetryTimers.clear();
+    for (const timers of this.liveSyncRetryTimers.values()) {
+      for (const timer of Object.values(timers)) {
+        if (timer) this.scheduler.clearTimeout(timer);
+      }
+    }
+    this.liveSyncRetryTimers.clear();
     const hot = [...this.roots.values()].filter((route): route is HotWorkerRoute => route.state === 'hot');
     for (const route of hot) this.extensionUiOwners.clearWorker(route.owner.workerId, route.owner.workerGeneration);
     await Promise.allSettled(hot.map((route) => this.retire(route.currentLeasePath, 'coordinator shutdown')));
@@ -704,7 +727,7 @@ export class WorkerRuntimeRouter {
       ? this.workersById.get(identity.workerId)
       : [...this.workersById.values()].find((candidate) => routeKey(candidate.workerRootSessionPath) === routeKey(rootSessionPath));
     if (!route || route.state !== 'hot') return;
-    this.clearSessionRegistryRetry(route.worker);
+    this.clearLiveSyncRetries(route.worker);
     // Snapshot the bounded checkpoint (including the detail subscription
     // manifest) BEFORE invalidating live subscriptions so crash diagnostics
     // still describe what was in flight.
@@ -1273,7 +1296,12 @@ export class WorkerRuntimeRouter {
           worker.client.requestFrame!(
             { kind: 'sync', domain, revision, payload } as never,
             'sync.ack',
-            { fatalOnEnqueueRejection: domain !== 'sessionRegistry' },
+            {
+              timeoutMs: ackTimeoutMs,
+              // A bounded live enqueue failure may be retried without marking
+              // the whole worker transport failed. Startup remains fail-closed.
+              fatalOnEnqueueRejection: phase === 'startup',
+            },
           ),
           ackTimeoutMs,
           `Worker ${worker.workerId} did not acknowledge ${domain}@${revision}`,
@@ -1313,77 +1341,137 @@ export class WorkerRuntimeRouter {
     };
     states[domain] = state;
     this.workerSyncStates.set(worker, states);
-    if (domain === 'sessionRegistry') {
-      // A rejected latest state must be retryable. Keep an older state's
-      // cleanup from deleting a newer queued revision that already replaced it.
-      void completion.then(
-        () => undefined,
-        () => {
-          const current = this.workerSyncStates.get(worker);
-          if (current?.sessionRegistry?.completion === completion) {
-            delete current.sessionRegistry;
-          }
-        },
-      );
-    }
+    // A deadline-rejected latest state must be retryable. Keep an older
+    // state's cleanup from deleting a newer queued revision that replaced it.
+    void completion.catch((error) => {
+      if (!this.isRetryableLiveSyncFailure(error)) return;
+      const current = this.workerSyncStates.get(worker);
+      if (current?.[domain]?.completion === completion) delete current[domain];
+    });
     return completion;
   }
 
-  private observeSessionRegistryBroadcast(settlements: WorkerSyncSettlement[]): void {
+  private observeLiveSyncBroadcast(settlements: WorkerSyncSettlement[]): void {
     for (const settlement of settlements) {
       void settlement.completion.then(
-        () => this.clearSessionRegistryRetry(settlement.worker),
-        (error) => this.scheduleSessionRegistryRetry(settlement.worker, settlement.revision, error),
-      );
+        () => this.clearLiveSyncRetry(settlement.worker, settlement.domain),
+        async (error) => {
+          if (this.isRetryableLiveSyncFailure(error)) {
+            this.scheduleLiveSyncRetry(settlement.worker, settlement.domain, settlement.revision, error);
+            return;
+          }
+          await this.quarantineSyncFailure(settlement, error);
+        },
+      ).catch((error) => backendWarn('backend-worker-sync', 'sync.settlement-failed', {
+        workerId: settlement.worker.workerId,
+        workerGeneration: settlement.worker.workerGeneration,
+        domain: settlement.domain,
+        revision: settlement.revision,
+        error: toErrorMessage(error),
+      }));
     }
   }
 
-  private scheduleSessionRegistryRetry(
+  private scheduleLiveSyncRetry(
     worker: SupervisedWorker,
+    domain: SyncDomain,
     failedRevision: number,
     error: unknown,
   ): void {
-    if (this.disposed || !this.isWorkerTransportUsable(worker)
-      || this.sessionRegistryRetryTimers.has(worker)) return;
-    const attempt = (this.sessionRegistryRetryAttempts.get(worker) ?? 0) + 1;
-    this.sessionRegistryRetryAttempts.set(worker, attempt);
-    const delayMs = SESSION_REGISTRY_RETRY_DELAYS_MS[
-      Math.min(attempt - 1, SESSION_REGISTRY_RETRY_DELAYS_MS.length - 1)
+    if (!this.canRetryWorkerSync(worker)) return;
+    const timers = this.liveSyncRetryTimers.get(worker) ?? {};
+    if (timers[domain]) return;
+    const attempts = this.liveSyncRetryAttempts.get(worker) ?? {};
+    const attempt = (attempts[domain] ?? 0) + 1;
+    attempts[domain] = attempt;
+    this.liveSyncRetryAttempts.set(worker, attempts);
+    const delayMs = LIVE_SYNC_RETRY_DELAYS_MS[
+      Math.min(attempt - 1, LIVE_SYNC_RETRY_DELAYS_MS.length - 1)
     ]!;
-    backendWarn('backend-worker-sync', 'session-registry.retry-scheduled', {
+    backendWarn('backend-worker-sync', 'sync.retry-scheduled', {
       workerId: worker.workerId,
       workerGeneration: worker.workerGeneration,
       sessionPath: worker.sessionPath,
+      domain,
       failedRevision,
       delayMs,
       error: toErrorMessage(error),
     });
     const timer = this.scheduler.setTimeout(() => {
-      this.sessionRegistryRetryTimers.delete(worker);
-      if (this.disposed || !this.isWorkerTransportUsable(worker)) return;
+      const currentTimers = this.liveSyncRetryTimers.get(worker);
+      if (currentTimers?.[domain] === timer) delete currentTimers[domain];
+      if (currentTimers && Object.values(currentTimers).every((value) => value === undefined)) {
+        this.liveSyncRetryTimers.delete(worker);
+      }
+      if (!this.canRetryWorkerSync(worker)) return;
       void this.withSyncLock(async () => {
-        const revision = this.syncRevisions.sessionRegistry;
-        const payload = this.syncPayloads.sessionRegistry ?? { tabs: this.sessionRegistry };
+        // The exact generation can retire while this retry waits behind another
+        // revision allocation. Recheck inside the lock before touching it.
+        if (!this.canRetryWorkerSync(worker)) return undefined;
+        const revision = this.syncRevisions[domain];
+        const payload = this.syncPayloads[domain];
+        if (!payload) return undefined;
         return {
           worker,
-          domain: 'sessionRegistry' as const,
+          domain,
           revision,
-          completion: this.queueWorkerSync(worker, 'sessionRegistry', revision, payload, 'broadcast'),
+          completion: this.queueWorkerSync(worker, domain, revision, payload, 'broadcast'),
         };
       }).then(
-        (settlement) => this.observeSessionRegistryBroadcast([settlement]),
-        (retryError) => this.scheduleSessionRegistryRetry(worker, failedRevision, retryError),
+        (settlement) => {
+          if (settlement) this.observeLiveSyncBroadcast([settlement]);
+        },
+        (retryError) => this.scheduleLiveSyncRetry(worker, domain, failedRevision, retryError),
       );
     }, delayMs);
     timer.unref?.();
-    this.sessionRegistryRetryTimers.set(worker, timer);
+    timers[domain] = timer;
+    this.liveSyncRetryTimers.set(worker, timers);
   }
 
-  private clearSessionRegistryRetry(worker: SupervisedWorker): void {
-    const timer = this.sessionRegistryRetryTimers.get(worker);
+  private clearLiveSyncRetry(worker: SupervisedWorker, domain: SyncDomain): void {
+    const timers = this.liveSyncRetryTimers.get(worker);
+    const timer = timers?.[domain];
     if (timer) this.scheduler.clearTimeout(timer);
-    this.sessionRegistryRetryTimers.delete(worker);
-    this.sessionRegistryRetryAttempts.delete(worker);
+    if (timers) {
+      delete timers[domain];
+      if (Object.values(timers).every((value) => value === undefined)) {
+        this.liveSyncRetryTimers.delete(worker);
+      }
+    }
+    const attempts = this.liveSyncRetryAttempts.get(worker);
+    if (attempts) {
+      delete attempts[domain];
+      if (Object.values(attempts).every((value) => value === undefined)) {
+        this.liveSyncRetryAttempts.delete(worker);
+      }
+    }
+  }
+
+  private clearLiveSyncRetries(worker: SupervisedWorker): void {
+    const timers = this.liveSyncRetryTimers.get(worker);
+    if (timers) {
+      for (const timer of Object.values(timers)) {
+        if (timer) this.scheduler.clearTimeout(timer);
+      }
+    }
+    this.liveSyncRetryTimers.delete(worker);
+    this.liveSyncRetryAttempts.delete(worker);
+  }
+
+  private canRetryWorkerSync(worker: SupervisedWorker): boolean {
+    return !this.disposed
+      && this.isWorkerTransportUsable(worker)
+      && this.options.supervisor.listWorkers().some((candidate) =>
+        candidate.workerId === worker.workerId
+        && candidate.workerGeneration === worker.workerGeneration,
+      );
+  }
+
+  private isRetryableLiveSyncFailure(error: unknown): boolean {
+    return error instanceof OperationDeadlineError
+      || error instanceof WorkerRequestTimeoutError
+      || (error instanceof WorkerRequestEnqueueError && error.reason === 'capacity');
   }
 
   private isWorkerTransportUsable(worker: SupervisedWorker): boolean {
@@ -1397,13 +1485,23 @@ export class WorkerRuntimeRouter {
 
   private async settleBroadcastSync(settlements: WorkerSyncSettlement[]): Promise<number> {
     const results = await Promise.allSettled(settlements.map((settlement) => settlement.completion));
-    const failures = settlements.filter((_settlement, index) => results[index]?.status === 'rejected');
-    await Promise.all(failures.map(async (failure) => {
-      const index = settlements.indexOf(failure);
-      const result = results[index] as PromiseRejectedResult;
-      await this.quarantineSyncFailure(failure, result.reason);
-    }));
-    return failures.length;
+    const quarantines: Array<{ settlement: WorkerSyncSettlement; error: unknown }> = [];
+    for (const [index, settlement] of settlements.entries()) {
+      const result = results[index];
+      if (result?.status === 'fulfilled') {
+        this.clearLiveSyncRetry(settlement.worker, settlement.domain);
+        continue;
+      }
+      if (!result || result.status !== 'rejected') continue;
+      if (this.isRetryableLiveSyncFailure(result.reason)) {
+        this.scheduleLiveSyncRetry(settlement.worker, settlement.domain, settlement.revision, result.reason);
+      } else {
+        quarantines.push({ settlement, error: result.reason });
+      }
+    }
+    await Promise.all(quarantines.map(({ settlement, error }) =>
+      this.quarantineSyncFailure(settlement, error)));
+    return quarantines.length;
   }
 
   private async quarantineSyncFailure(settlement: WorkerSyncSettlement, error: unknown): Promise<void> {
@@ -1473,7 +1571,7 @@ export class WorkerRuntimeRouter {
       const timer = this.scheduler.setTimeout(() => {
         if (settled) return;
         settled = true;
-        reject(new Error(`${message} within ${timeoutMs} ms.`));
+        reject(new OperationDeadlineError(message, timeoutMs));
       }, timeoutMs);
       timer.unref?.();
       void operation.then(

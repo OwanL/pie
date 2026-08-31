@@ -410,6 +410,57 @@ body.session-tab-dragging {
   color: color-mix(in srgb, var(--panel-foreground) 90%, var(--panel-muted) 10%);
 }
 
+/* Title generation is deliberately quieter than general progress states. The
+   title stays readable while a soft highlight breathes over it. Keeping the
+   gradient stationary and animating only opacity avoids the repaint cost and
+   hard edge produced by a background-position shimmer. */
+.session-title-loading {
+  position: relative;
+}
+
+.session-title-loading::after {
+  /* The slash supplies empty accessibility alternative text: the real label
+     remains the sole announced name while this duplicate is visual only. */
+  content: attr(data-label) / "";
+  position: absolute;
+  inset: 0;
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: transparent;
+  background: linear-gradient(
+    105deg,
+    transparent 34%,
+    color-mix(in srgb, var(--panel-foreground) 82%, var(--panel-accent) 18%) 50%,
+    transparent 66%
+  );
+  background-clip: text;
+  -webkit-background-clip: text;
+  opacity: 0.12;
+  pointer-events: none;
+  animation: session-title-sheen 1.8s ease-in-out infinite;
+  will-change: opacity;
+}
+
+.session-title-loading-avatar::after {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-overflow: clip;
+}
+
+@keyframes session-title-sheen {
+  0%,
+  100% {
+    opacity: 0.12;
+  }
+
+  50% {
+    opacity: 0.62;
+  }
+}
+
 /* ── Pinned tabs (browser-style: icon-only chips clustered at the left) ───── */
 /* A pinned tab drops its title + close button and renders a colored
    letter-avatar instead. The avatar's hue is derived from the session path

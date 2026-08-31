@@ -89,8 +89,20 @@ export interface AggregateDailyRunCount {
  *  also expose their coverage so runs recorded before a metric existed stay
  *  untracked instead of silently reading as zeros. */
 export interface AggregateProductivityStats {
-  /** User prompts (sends) in the window. */
+  /** User prompts (sends) in the window. Retained for analytics compatibility. */
   sendCount: number;
+  /** Sum of flattened composer-prompt and answered ask_user character samples
+   * after applying the shared trailing-14-day percentile cap. */
+  adjustedUserInputChars: number;
+  /** Known numeric character samples contributing to the adjusted sum. */
+  knownUserInputCharSampleCount: number;
+  /** Expected user-input events, including null markers for unavailable or
+   * malformed lengths. The total is exact iff known count reaches this count. */
+  expectedUserInputCharSampleCount: number;
+  /** Known samples in this window whose raw length exceeded the shared cap. */
+  cappedUserInputCharSampleCount: number;
+  /** Shared trailing-14-day cap in Unicode code points; null with no known samples. */
+  userInputCharCap: number | null;
   /** Runs in the window that recorded `initialUserMessageChars`. 0 means no
    *  tracked samples in the window (average unknown), not a zero average. */
   promptCharSamples: number;
@@ -127,6 +139,11 @@ export interface AggregateProductivityStats {
  *  zero-activity work-trend days. */
 export const EMPTY_PRODUCTIVITY_STATS: AggregateProductivityStats = {
   sendCount: 0,
+  adjustedUserInputChars: 0,
+  knownUserInputCharSampleCount: 0,
+  expectedUserInputCharSampleCount: 0,
+  cappedUserInputCharSampleCount: 0,
+  userInputCharCap: null,
   promptCharSamples: 0,
   promptChars: 0,
   averagePromptChars: null,

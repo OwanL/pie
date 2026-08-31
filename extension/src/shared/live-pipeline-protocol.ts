@@ -187,6 +187,7 @@ export interface LiveTurnRecord {
   sessionPath: string;
   canonicalMessageId: string;
   modelId?: string;
+  provider?: string;
   thinkingLevel?: ThinkingLevel;
   seq: number;
   checkpointSeq: number;
@@ -288,6 +289,7 @@ export type TurnSemanticEnvelope =
       kind: 'turn.started';
       canonicalMessageId: string;
       modelId?: string;
+      provider?: string;
       thinkingLevel?: ThinkingLevel;
       startedAt: number;
     })
@@ -402,6 +404,7 @@ export function isTurnSemanticEnvelope(value: unknown): value is TurnSemanticEnv
   switch (value.kind) {
     case 'turn.started': return typeof value.canonicalMessageId === 'string'
       && (value.modelId === undefined || typeof value.modelId === 'string')
+      && (value.provider === undefined || typeof value.provider === 'string')
       && (value.thinkingLevel === undefined || isThinkingLevel(value.thinkingLevel))
       && isFiniteNumber(value.startedAt);
     case 'turn.phase': return isLiveTurnPhase(value.phase) && value.phase !== 'reconciling_gap' && optionalFiniteNumber(value.inactivityBudgetMs);

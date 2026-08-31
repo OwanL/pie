@@ -34,6 +34,7 @@ import type {
   SendRpcEffect,
   EditRpcEffect,
   ReplaceQueueRpcEffect,
+  ContinueRpcEffect,
   InterruptRpcEffect,
   RequestLiveTurnCheckpointEffect,
   CompactRpcEffect,
@@ -483,6 +484,7 @@ export class EffectRunner {
       GenerateSessionTitle: (e) => this.handleGenerateSessionTitle(e),
       EditRpc: (e) => this.runRpc(e),
       ReplaceQueueRpc: (e) => this.runReplaceQueueRpc(e),
+      ContinueRpc: (e) => this.runContinueRpc(e),
       InterruptRpc: (e) => this.runRpc(e),
       RequestLiveTurnCheckpoint: (e) => this.handleRequestLiveTurnCheckpoint(e),
       CompactRpc: (e) => this.runRpc(e),
@@ -1673,6 +1675,47 @@ export class EffectRunner {
             dispatch(rpcResultFor(effect, { ok: false, error }));
           }
         }
+    });
+  }
+
+  /** Continue is early-acknowledged like Send so backend failures can bind to
+   * the exact session before any stream event exists. Cold continuation also
+   * receives the measured runtime-promotion budget. */
+  private runContinueRpc(effect: ContinueRpcEffect): void {
+    const { queues, backend, dispatch, service } = this.deps;
+    void queues.enqueueSessionOperation(effect.sessionPath, async () => {
+      try {
+        service.bumpSessionDataEpoch(effect.sessionPath);
+        const coldPromotion = service.isSessionRuntimeReady?.(effect.sessionPath) === false;
+        const response = await backend.request<{ requestId: string }>('message.continue', {
+          sessionPath: effect.sessionPath,
+        }, {
+          ...(coldPromotion ? { timeoutMs: BACKEND_READY_TIMEOUT_MS } : {}),
+        });
+        dispatch({
+          kind: 'ContinueResult',
+          corrId: effect.corrId,
+          sessionPath: effect.sessionPath,
+          ok: true,
+          requestId: response.requestId,
+        });
+      } catch (error) {
+        if (isLocalRequestTimeout(error)) {
+          this.deps.log.log('warn', 'message.continue acknowledgement delayed', {
+            corrId: effect.corrId,
+            sessionPath: effect.sessionPath,
+            error: toErrorMessage(error),
+          });
+          return;
+        }
+        dispatch({
+          kind: 'ContinueResult',
+          corrId: effect.corrId,
+          sessionPath: effect.sessionPath,
+          ok: false,
+          error: toErrorMessage(error),
+        });
+      }
     });
   }
 

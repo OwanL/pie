@@ -30,7 +30,7 @@ function messageRow(message: ChatMessage): Extract<TranscriptRow, { kind: 'messa
   return { kind: 'message', key: `message:${message.id}`, message };
 }
 
-function startsByRow(values: Record<number, number>): (rowIndex: number) => number | null {
+function endsByRow(values: Record<number, number>): (rowIndex: number) => number | null {
   return (rowIndex) => values[rowIndex] ?? null;
 }
 
@@ -98,170 +98,101 @@ test('entries expose queued and auto-resume state for user messages', () => {
   assert.equal(entries[1]?.isAutoResume, true);
 });
 
-test('viewport selection follows the last prompt at the turn boundary', () => {
+test('viewport selection only returns prompts fully above the viewport', () => {
   const entries = buildUserPromptEntries([
     messageRow(userMessage('prompt-1', 'first')),
     messageRow(userMessage('assistant-1', '', { role: 'assistant' })),
     messageRow(userMessage('prompt-2', 'second')),
   ]);
-  const getRowStart = startsByRow({ 0: 0, 1: 70, 2: 160 });
+  const getRowEnd = endsByRow({ 0: 40, 1: 150, 2: 200 });
 
-  assert.equal(selectUserPromptAtViewport({
-    entries,
-    getRowStart,
-    scrollOffset: 80,
-    isAtBottom: false,
-  })?.messageId, 'prompt-1');
-  assert.equal(selectUserPromptAtViewport({
-    entries,
-    getRowStart,
-    scrollOffset: 150,
-    isAtBottom: false,
-  })?.messageId, 'prompt-2');
+  assert.equal(selectUserPromptAtViewport({ entries, getRowEnd, scrollOffset: 20 }), null,
+    'the first visible prompt has no predecessor to show');
+  assert.equal(selectUserPromptAtViewport({ entries, getRowEnd, scrollOffset: 180 })?.messageId, 'prompt-1',
+    'a visible second prompt falls back to its offscreen predecessor');
+  assert.equal(selectUserPromptAtViewport({ entries, getRowEnd, scrollOffset: 200 })?.messageId, 'prompt-2',
+    'the second prompt takes over only once its full row is offscreen');
 });
 
-test('selection switches at the padded-origin boundary, not the raw offset', () => {
-  // Prompt row starts 200px into the content; the container pads the top by
-  // 100px, so the boundary is offset - origin + threshold.
+test('selection uses the padded content origin when deciding whether a row is offscreen', () => {
   const entries = buildUserPromptEntries([messageRow(userMessage('prompt-1', 'first'))]);
-  const getRowStart = startsByRow({ 0: 200 });
+  const getRowEnd = endsByRow({ 0: 240 });
 
   assert.equal(selectUserPromptAtViewport({
     entries,
-    getRowStart,
-    scrollOffset: 289,
-    isAtBottom: false,
+    getRowEnd,
+    scrollOffset: 339,
     contentOriginPx: 100,
-  }), null, 'offset 289 puts the boundary at 199, still before the prompt');
+  }), null);
   assert.equal(selectUserPromptAtViewport({
     entries,
-    getRowStart,
-    scrollOffset: 290,
-    isAtBottom: false,
+    getRowEnd,
+    scrollOffset: 340,
     contentOriginPx: 100,
-  })?.messageId, 'prompt-1', 'offset 290 puts the boundary exactly at the prompt start');
+  })?.messageId, 'prompt-1');
 
-  // A non-finite origin is treated as no padding.
   assert.equal(selectUserPromptAtViewport({
     entries,
-    getRowStart,
+    getRowEnd,
     scrollOffset: null,
-    isAtBottom: false,
     contentOriginPx: Number.NaN,
   }), null);
 });
 
-test('viewport selection switches at the ten-pixel threshold', () => {
-  const entries = buildUserPromptEntries([messageRow(userMessage('prompt-1', 'first'))]);
-  const getRowStart = startsByRow({ 0: 100 });
-
-  assert.equal(selectUserPromptAtViewport({
-    entries,
-    getRowStart,
-    scrollOffset: 89,
-    isAtBottom: false,
-  }), null);
-  assert.equal(selectUserPromptAtViewport({
-    entries,
-    getRowStart,
-    scrollOffset: 90,
-    isAtBottom: false,
-  })?.messageId, 'prompt-1');
-});
-
-test('bottom selection returns the latest loaded prompt', () => {
+test('selection fails closed when prompt geometry is incomplete', () => {
   const entries = buildUserPromptEntries([
     messageRow(userMessage('prompt-1', 'first')),
-    messageRow(userMessage('prompt-2', 'latest')),
-  ]);
-
-  assert.equal(selectUserPromptAtViewport({
-    entries,
-    getRowStart: () => null,
-    scrollOffset: null,
-    isAtBottom: true,
-  })?.messageId, 'prompt-2');
-});
-
-test('selection hides above a loaded window that begins with an assistant', () => {
-  const entries = buildUserPromptEntries([
-    messageRow(userMessage('prompt-2', 'later')),
-  ]);
-
-  assert.equal(selectUserPromptAtViewport({
-    entries: entries.map((entry) => ({ ...entry, rowIndex: 1 })),
-    getRowStart: startsByRow({ 1: 120 }),
-    scrollOffset: 0,
-    isAtBottom: false,
-  }), null);
-});
-
-test('element metrics select from scrollTop and force the latest prompt near the bottom', () => {
-  const entries = buildUserPromptEntries([
-    messageRow(userMessage('prompt-1', 'first')),
-    messageRow(userMessage('assistant-1', '', { role: 'assistant' })),
     messageRow(userMessage('prompt-2', 'second')),
   ]);
-  // The latest prompt starts a full viewport above the maximum scrollTop, so
-  // the top-edge boundary math alone would keep the earlier prompt.
-  const getRowStart = startsByRow({ 0: 0, 1: 50, 2: 380 });
-  const metrics = { scrollTop: 50, scrollHeight: 600, clientHeight: 200 };
-  const options = {
-    entries,
-    getRowStart,
-    metrics,
-    fallbackScrollOffset: null as number | null,
-    fallbackIsAtBottom: false,
-  };
-  const select = () => selectPromptFromElementMetrics(options);
 
-  assert.equal(select()?.messageId, 'prompt-1');
-  metrics.scrollTop = 370;
-  assert.equal(select()?.messageId, 'prompt-2', 'scrollTop follows the element, not the fallback offset');
-
-  // Near the bottom (distance-from-bottom within the bottom threshold) the
-  // latest prompt wins even when its row start lies below the boundary.
   assert.equal(selectUserPromptAtViewport({
     entries,
-    getRowStart: startsByRow({ 0: 0, 1: 50, 2: 580 }),
-    scrollOffset: 400,
-    isAtBottom: false,
-  })?.messageId, 'prompt-1', 'the top-edge boundary math alone keeps the earlier prompt');
-  assert.equal(selectPromptFromElementMetrics({
-    ...options,
-    getRowStart: startsByRow({ 0: 0, 1: 50, 2: 580 }),
-    metrics: { scrollTop: 400, scrollHeight: 600, clientHeight: 200 },
-  })?.messageId, 'prompt-2', 'metric near-bottom promotes the latest prompt');
+    getRowEnd: () => null,
+    scrollOffset: 500,
+  }), null);
 });
 
-test('unmeasurable elements fall back to the virtualizer offset and isAtBottom', () => {
+test('element metrics drive selection and unmeasurable elements use the virtualizer offset', () => {
   const entries = buildUserPromptEntries([
     messageRow(userMessage('prompt-1', 'first')),
     messageRow(userMessage('prompt-2', 'latest')),
   ]);
-  const getRowStart = startsByRow({ 0: 0, 1: 160 });
+  const getRowEnd = endsByRow({ 0: 40, 1: 200 });
+  const metrics = { scrollTop: 100, scrollHeight: 600, clientHeight: 200 };
 
   assert.equal(selectPromptFromElementMetrics({
     entries,
-    getRowStart,
+    getRowEnd,
+    metrics,
+    fallbackScrollOffset: null,
+  })?.messageId, 'prompt-1');
+
+  metrics.scrollTop = 180;
+  assert.equal(selectPromptFromElementMetrics({
+    entries,
+    getRowEnd,
+    metrics,
+    fallbackScrollOffset: null,
+  })?.messageId, 'prompt-1', 'the visible latest prompt does not replace its predecessor');
+
+  metrics.scrollTop = 210;
+  assert.equal(selectPromptFromElementMetrics({
+    entries,
+    getRowEnd,
+    metrics,
+    fallbackScrollOffset: null,
+  })?.messageId, 'prompt-2');
+
+  assert.equal(selectPromptFromElementMetrics({
+    entries,
+    getRowEnd,
     metrics: null,
-    fallbackScrollOffset: 80,
-    fallbackIsAtBottom: false,
-  })?.messageId, 'prompt-1', 'null metrics defer to the virtualizer offset');
-
+    fallbackScrollOffset: 100,
+  })?.messageId, 'prompt-1');
   assert.equal(selectPromptFromElementMetrics({
     entries,
-    getRowStart,
+    getRowEnd,
     metrics: { scrollTop: 0, scrollHeight: 0, clientHeight: 0 },
     fallbackScrollOffset: null,
-    fallbackIsAtBottom: true,
-  })?.messageId, 'prompt-2', 'zero-size metrics defer to the parent isAtBottom state');
-
-  assert.equal(selectPromptFromElementMetrics({
-    entries,
-    getRowStart,
-    metrics: { scrollTop: 0, scrollHeight: 0, clientHeight: 0 },
-    fallbackScrollOffset: null,
-    fallbackIsAtBottom: false,
-  }), null, 'no recoverable signal leaves the bar unowned');
+  }), null, 'without trustworthy geometry, hiding avoids duplicating a visible prompt');
 });

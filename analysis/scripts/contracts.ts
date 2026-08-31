@@ -18,7 +18,7 @@ import type {
   SessionSkillFactor, SessionAnalyticsFactors, FunctionalSettingsSnapshot,
   ToolFailureSample, ToolResultIssueSample, TurnThroughputStatus,
   TurnThroughputSample, RetryTimingSample, ToolUsageRollup, FileMutationRollup, FileExtensionRollup,
-  VerificationRollup, RunSnapshot as BaseRunSnapshot, TaskBoundaryIntent,
+  VerificationRollup, RunSnapshot as BaseRunSnapshot, TaskBoundaryIntent, UserInputCharSample,
 } from '../../shared/run-analytics-contracts.js';
 
 export type {
@@ -27,13 +27,17 @@ export type {
   SessionSkillFactor, SessionAnalyticsFactors, FunctionalSettingsSnapshot,
   ToolFailureSample, ToolResultIssueSample, TurnThroughputStatus,
   TurnThroughputSample, RetryTimingSample, ToolUsageRollup, FileMutationRollup, FileExtensionRollup,
-  VerificationRollup, TaskBoundaryIntent,
+  VerificationRollup, TaskBoundaryIntent, UserInputCharSample,
 };
 
 /** Analysis accepts the stable session-header identity when present in newer exports. */
 export type RunSnapshot = BaseRunSnapshot & { sessionId?: string };
 
-export { RUN_ANALYTICS_SCHEMA_VERSION, CURRENT_HARNESS_REVISION } from '../../shared/run-analytics-contracts.js';
+export {
+  RUN_ANALYTICS_SCHEMA_VERSION,
+  CURRENT_HARNESS_REVISION,
+  MAX_USER_INPUT_SAMPLE_CHARS,
+} from '../../shared/run-analytics-contracts.js';
 
 export const SITE_DATA_SCHEMA_VERSION = 7;
 export const DATA_MODE_LOCAL_DEFAULT = 'local-default';

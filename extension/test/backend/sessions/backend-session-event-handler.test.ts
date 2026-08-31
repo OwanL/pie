@@ -2017,14 +2017,14 @@ test('tool_execution_end emits transient execution end before phase and durable 
   assert.equal(accumulator.checkpoint().tools.find((tool) => tool.transcriptToolCallId === 'tool-a')?.terminal?.durableEntryId, 'tool-a-entry');
 });
 
-test('semantic inactivity budget gives slow Umans responses more time without weakening other providers', () => {
+test('semantic inactivity budget allows extended healthy provider silence and honors the environment override', () => {
   const previous = process.env.PIE_PROVIDER_SEMANTIC_INACTIVITY_MS;
   delete process.env.PIE_PROVIDER_SEMANTIC_INACTIVITY_MS;
   try {
-    assert.equal(resolveProviderSemanticInactivityMs('umans'), 15 * 60_000);
-    assert.equal(resolveProviderSemanticInactivityMs('UMANS'), 15 * 60_000);
-    assert.equal(resolveProviderSemanticInactivityMs('openai-codex'), 360_000);
-    assert.equal(resolveProviderSemanticInactivityMs(undefined), 360_000);
+    assert.equal(resolveProviderSemanticInactivityMs('umans'), 18 * 60_000);
+    assert.equal(resolveProviderSemanticInactivityMs('UMANS'), 18 * 60_000);
+    assert.equal(resolveProviderSemanticInactivityMs('openai-codex'), 18 * 60_000);
+    assert.equal(resolveProviderSemanticInactivityMs(undefined), 18 * 60_000);
 
     process.env.PIE_PROVIDER_SEMANTIC_INACTIVITY_MS = '1234';
     assert.equal(resolveProviderSemanticInactivityMs('umans'), 1234, 'operator override remains authoritative');

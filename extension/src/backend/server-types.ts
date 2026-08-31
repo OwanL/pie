@@ -104,6 +104,10 @@ export interface ActiveRequest {
     durableEntryId: string;
     reason?: string;
   };
+  /** The final assistant message may be classified by the SDK as provider
+   * overflow after agent_end. Retain this bit so Pie can keep the request
+   * correlation across the later compact-and-continue lifecycle. */
+  mayNeedOverflowRecovery?: boolean;
   aborted: boolean;
   /** Backend pre-commit safety-net timer (see `PROMPT_TIMEOUT_MS` in
    *  `request-handler.ts`). Armed at `message.send` dispatch; MUST be cleared
@@ -131,6 +135,11 @@ export interface SessionContext {
   sessionOwnershipEpoch?: number;
   unsubscribe: () => void;
   activeRequest?: ActiveRequest;
+  /** A finalized error request retained across the SDK's unusual overflow
+   * lifecycle: agent_end(willRetry=false) precedes compaction_start/end, then
+   * the SDK continues automatically without a new public request. Restored
+   * only when compaction_end confirms reason=overflow and willRetry=true. */
+  overflowRecoveryCandidate?: ActiveRequest;
   /** Per-session monotonic counter for `busy.changed` events. */
   busySeq: number;
   lastContextUsage?: ContextWindowUsage | null;

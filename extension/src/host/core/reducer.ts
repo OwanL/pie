@@ -116,6 +116,7 @@ export function reducer(state: ArchState, event: Event): ReducerResult {
 
     // ─── Effect result events ─────────────────────────────────────────
 
+    case 'ContinueResult':
     case 'InterruptResult':
     case 'CompactResult':
     case 'SendResult':

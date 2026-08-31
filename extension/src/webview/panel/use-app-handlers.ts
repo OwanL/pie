@@ -106,7 +106,11 @@ export function useAppHandlers(
     if (!postMessage({ type: 'send', sessionPath, text, localId })) return false;
 
     setDraftRestore(null);
-    addOptimisticMessage({ localId, text, sessionPath, queued: isBusy });
+    // An empty submit is a continuation command. It deliberately has no
+    // optimistic user row because no user message is added to PI context.
+    if (text.trim().length > 0) {
+      addOptimisticMessage({ localId, text, sessionPath, queued: isBusy });
+    }
     return true;
   }, [postMessage, activeSessionPathRef, setDraftRestore, addOptimisticMessage, isBusy, commandsAvailable]);
 
