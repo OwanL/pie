@@ -140,6 +140,16 @@ export interface SessionContext {
    * the SDK continues automatically without a new public request. Restored
    * only when compaction_end confirms reason=overflow and willRetry=true. */
   overflowRecoveryCandidate?: ActiveRequest;
+  /** A threshold compaction may start only after agent_end has detached the
+   * active request. Retain that completed request until the SDK's post-run
+   * compaction decision is known so a successful zero-prompt continuation can
+   * restore its public correlation and live owner. */
+  thresholdCompactionContinuationCandidate?: ActiveRequest;
+  /** A successful threshold compaction terminalized the current assistant
+   * segment but requested a zero-prompt continuation from the SDK outer loop.
+   * Keeps request ownership across the intermediate agent_end until the
+   * continuation's agent_start arrives. */
+  hardCompactionContinuationPending?: boolean;
   /** Per-session monotonic counter for `busy.changed` events. */
   busySeq: number;
   lastContextUsage?: ContextWindowUsage | null;

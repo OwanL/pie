@@ -135,7 +135,7 @@ test('connect(): stays connecting until rendererHello completes the application 
   assert.deepEqual(states, ['connecting', 'connected']);
 });
 
-test('an incompatible rendererHello fails closed and never reconnects the stale page', () => {
+test('a rendererHello from another build remains connected when the protocol matches', () => {
   const { transport, states, timers, handshakes } = createBrowserHarness();
   transport.connect();
   const socket = socketInstances[0]!;
@@ -150,12 +150,35 @@ test('an incompatible rendererHello fails closed and never reconnects the stale 
     assetVersion: 'asset-1',
   }) });
 
+  assert.equal(transport.getConnectionState(), 'connected');
+  assert.deepEqual(states, ['connecting', 'connected']);
+  assert.deepEqual(handshakes, [{ rendererId: 'renderer-9', viewGeneration: 5 }]);
+  assert.equal(socket.sent.length, 4, 'the ordinary handshake completes across build skew');
+  assert.deepEqual(socket.closed, []);
+  assert.equal(timers.length, 0);
+});
+
+test('an incompatible rendererHello protocol fails closed', () => {
+  const { transport, states, timers, handshakes } = createBrowserHarness();
+  transport.connect();
+  const socket = socketInstances[0]!;
+  socket.onmessage?.({ data: JSON.stringify({
+    type: 'rendererHello',
+    protocolVersion: WEBVIEW_PROTOCOL_VERSION + 1,
+    buildId: PIE_BUILD_ID,
+    hostInstanceId: 'host-1',
+    rendererId: 'renderer-9',
+    rendererGeneration: 2,
+    viewGeneration: 5,
+    assetVersion: 'asset-1',
+  }) });
+
   assert.equal(transport.getConnectionState(), 'reload-required');
   assert.deepEqual(states, ['connecting', 'reload-required']);
   assert.deepEqual(handshakes, []);
-  assert.deepEqual(socket.sent, [], 'no frame crosses an incompatible boundary');
-  assert.equal(socket.closed[0]?.reason, 'renderer-build-mismatch');
-  assert.equal(timers.length, 0, 'the stale page does not enter a reconnect storm');
+  assert.deepEqual(socket.sent, [], 'no frame crosses an incompatible protocol boundary');
+  assert.equal(socket.closed[0]?.reason, 'protocol-violation');
+  assert.equal(timers.length, 0);
 });
 
 test('a malformed or duplicate rendererHello never replaces live identity', () => {
@@ -362,7 +385,7 @@ test('a failed ready send does not reset reconnect backoff', () => {
 });
 
 test('terminal policy closes latch reload-required and never reconnect', () => {
-  for (const reason of ['ready-required', 'renderer-build-mismatch', 'invalid-renderer-hello']) {
+  for (const reason of ['ready-required', 'renderer-asset-mismatch', 'protocol-violation', 'invalid-renderer-hello']) {
     const { transport, timers, states } = createBrowserHarness();
     transport.connect();
     socketInstances[0]?.peerClose(1008, reason);

@@ -7,6 +7,8 @@ import { CHAT_PREF_MENU_SECTIONS } from '../chat-prefs';
 import { ChatPrefItem } from './settings-menu-chat-prefs';
 import type { OnSetPrefs } from './settings-menu-types';
 
+export const SOUND_SETTING_LABELS = ['Sound volume'] as const;
+
 const notificationItem = CHAT_PREF_MENU_SECTIONS
   .find((section) => section.id === 'notifications')
   ?.items[0];

@@ -266,6 +266,15 @@ export class WorkerRuntimeHost {
     context.session.clearQueue();
     context.queuedLocalIds = [];
     if (!running) return { interrupted: false, alreadyStopped: true };
+    // The isolated worker's priority interrupt bypasses request-handler.ts.
+    // Cancel the same deferred threshold-compaction continuation here so
+    // the SDK cannot start a fresh zero-prompt run after Stop has settled.
+    context.session.cancelPendingHardCompactionContinuation?.();
+    context.hardCompactionContinuationPending = false;
+    if (context.thresholdCompactionContinuationCandidate) {
+      context.thresholdCompactionContinuationCandidate.aborted = true;
+      context.thresholdCompactionContinuationCandidate = undefined;
+    }
     if (context.activeRequest) context.activeRequest.aborted = true;
     context.session.abortCompaction?.();
     context.session.abortBranchSummary?.();
@@ -297,6 +306,21 @@ export class WorkerRuntimeHost {
         error: 'Extension command was interrupted before starting an agent turn.',
       });
       context.pendingExtensionCommand = undefined;
+      context.activeRequest = undefined;
+      this.emitBusyChanged(context, false);
+    }
+    // Some provider/compaction abort paths settle without a final agent_end.
+    // Match the public interrupt reconciliation so a re-armed continuation
+    // request cannot remain attached to an idle isolated worker.
+    if (interruptedRequest
+        && !context.session.isStreaming
+        && context.activeRequest === interruptedRequest) {
+      if (interruptedRequest.promptSafetyTimer) clearTimeout(interruptedRequest.promptSafetyTimer);
+      if (interruptedRequest.semanticLeaseTimer) clearTimeout(interruptedRequest.semanticLeaseTimer);
+      if (interruptedRequest.quotaSettlementTimer) clearTimeout(interruptedRequest.quotaSettlementTimer);
+      interruptedRequest.pendingDurableToolTerminals?.clear();
+      context.willRetryWatchdogClear?.();
+      context.willRetryWatchdogClear = undefined;
       context.activeRequest = undefined;
       this.emitBusyChanged(context, false);
     }

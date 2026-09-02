@@ -1115,15 +1115,41 @@ function startQueuedFollowUpSegment(
   active.providerFirstDeltaAt = undefined;
 }
 
-/** Restore the request correlation after successful provider-overflow
- * compaction. Pi emits agent_end(willRetry=false) before it discovers the
- * overflow, so the ordinary finalizer has already detached activeRequest by
- * the time the SDK's internal agent.continue() starts. Allocate a fresh live
- * owner while preserving the public request id; otherwise every continuation
- * event is rejected as ownerless and the session appears to stop. */
-function rearmOverflowRecoveryRequest(context: SessionContext, occurredAt: number): void {
-  const active = context.overflowRecoveryCandidate;
-  if (!active || context.activeRequest) return;
+/** Retain only the small request-correlation state needed if the SDK's
+ * post-agent threshold check compacts and continues. The completed live owner
+ * and tool maps can be multi-megabyte, so an idle session must not keep them
+ * alive merely because a compaction decision produced no event. */
+function createThresholdCompactionContinuationCandidate(active: ActiveRequest): ActiveRequest {
+  return {
+    ...active,
+    providerQueueByTurn: undefined,
+    retryTiming: undefined,
+    toolStartTimes: undefined,
+    toolParallelGroupByCallId: undefined,
+    toolStartMetadata: undefined,
+    pendingDurableToolTerminals: undefined,
+    providerIncidentNoticeKeys: undefined,
+    pendingQueuedBoundaryTerminal: undefined,
+    pendingErrorTerminal: undefined,
+    quotaSettlementTimer: undefined,
+    promptSafetyTimer: undefined,
+    liveTurnAccumulator: undefined,
+    semanticLeaseTimer: undefined,
+  };
+}
+
+/** Restore request correlation after a successful post-agent compaction.
+ * Pi emits agent_end(willRetry=false) before it discovers provider overflow or
+ * runs its threshold check, so the ordinary finalizer may already have
+ * detached activeRequest by the time agent.continue() starts. Allocate a fresh
+ * live owner while preserving the public request id; otherwise continuation
+ * events are rejected as ownerless and the session appears to stop. */
+function rearmPostAgentCompactionRequest(
+  context: SessionContext,
+  active: ActiveRequest | undefined,
+  occurredAt: number,
+): boolean {
+  if (!active || active.aborted || context.activeRequest) return false;
 
   active.liveTurnAccumulator = new BackendLiveTurnAccumulator({
     protocolVersion: LIVE_PIPELINE_PROTOCOL_VERSION,
@@ -1155,7 +1181,52 @@ function rearmOverflowRecoveryRequest(context: SessionContext, occurredAt: numbe
   active.turnBoundaryAt = occurredAt;
   active.aborted = false;
   context.activeRequest = active;
-  context.overflowRecoveryCandidate = undefined;
+  if (context.overflowRecoveryCandidate === active) context.overflowRecoveryCandidate = undefined;
+  if (context.thresholdCompactionContinuationCandidate === active) {
+    context.thresholdCompactionContinuationCandidate = undefined;
+  }
+  return true;
+}
+
+/** Start a fresh live segment after hard-threshold compaction terminalized the
+ * prior assistant response. Unlike overflow recovery the request is still
+ * attached; only its semantic owner needs rotating before the SDK outer loop
+ * performs the zero-prompt continuation. A tool-use segment has no terminal
+ * watermark and continues naturally inside agent-core, so it is left alone. */
+function rearmHardCompactionContinuation(context: SessionContext, occurredAt: number): boolean {
+  const active = context.activeRequest;
+  const previous = active?.liveTurnAccumulator;
+  if (!active || !previous?.lifecycleWatermark()) return false;
+
+  context.terminalLiveTurn = { accumulator: previous, expiresAt: occurredAt + 10_000 };
+  active.liveTurnAccumulator = new BackendLiveTurnAccumulator({
+    protocolVersion: LIVE_PIPELINE_PROTOCOL_VERSION,
+    sessionPath: context.sessionPath,
+    requestId: active.id,
+    turnId: randomUUID(),
+    attemptId: randomUUID(),
+    canonicalMessageId: `${active.id}:${active.messageIndex + 1}`,
+    modelId: active.modelId,
+    provider: active.provider,
+    thinkingLevel: active.thinkingLevel,
+    startedAt: occurredAt,
+  });
+  active.pendingQueuedBoundaryTerminal = undefined;
+  active.pendingErrorTerminal = undefined;
+  active.pendingDurableToolTerminals?.clear();
+  active.toolStartTimes?.clear();
+  active.toolStartMetadata?.clear();
+  active.toolParallelGroupByCallId?.clear();
+  active.providerQueueByTurn?.clear();
+  active.providerNetworkPendingAttemptId = undefined;
+  active.providerNetworkPending = false;
+  active.retryTiming = undefined;
+  active.currentMessageId = undefined;
+  active.currentMessageStartedAt = undefined;
+  active.providerFirstDeltaAt = undefined;
+  active.turnStartedAt = undefined;
+  active.turnBoundaryAt = occurredAt;
+  return true;
 }
 
 export function handleSdkSessionEvent(
@@ -1181,11 +1252,18 @@ export function handleSdkSessionEvent(
   }
   switch (event.type) {
     case 'agent_start': {
+      // A hard-compaction continuation has now crossed its real SDK start
+      // boundary; its eventual agent_end is once again terminal.
+      context.hardCompactionContinuationPending = false;
       // A later ordinary request supersedes any finalized error that did not
       // lead to overflow compaction. Successful overflow recovery clears the
       // candidate while re-arming it before this event arrives.
       if (context.activeRequest && context.overflowRecoveryCandidate !== context.activeRequest) {
         context.overflowRecoveryCandidate = undefined;
+      }
+      if (context.activeRequest
+          && context.thresholdCompactionContinuationCandidate !== context.activeRequest) {
+        context.thresholdCompactionContinuationCandidate = undefined;
       }
       // before_agent_start extensions persist their injected custom message
       // before agent_start. Read it from the authoritative branch so pruning
@@ -1197,6 +1275,10 @@ export function handleSdkSessionEvent(
     }
 
     case 'turn_start': {
+      // A real next turn means agent-core continued naturally after the hard
+      // compaction (for tools or queued input), so no deferred outer-loop
+      // continuation may survive to the eventual agent_end.
+      context.hardCompactionContinuationPending = false;
       // Some SDK versions append the before_agent_start custom entry just after
       // agent_start. Re-check at turn_start; stable-id dedupe makes this cheap.
       emitLatestPruningResult(deps, context);
@@ -2014,6 +2096,27 @@ export function handleSdkSessionEvent(
         if (context.activeRequest) context.activeRequest.pendingErrorTerminal = undefined;
         return;
       }
+      if (context.hardCompactionContinuationPending
+          && context.session.hasPendingHistoryCompactionContinuation?.() === false) {
+        // compaction_end is emitted before the SDK decides whether a tool or
+        // queued turn needs a deferred outer-loop continuation. Reconcile with
+        // the SDK's final decision so a terminating tool batch cannot leave
+        // the backend holding a request that will never restart.
+        context.hardCompactionContinuationPending = false;
+      }
+      if (context.hardCompactionContinuationPending && context.activeRequest) {
+        // No natural turn followed the hard compaction. Rotate the already
+        // terminal live segment now, then retain request correlation while the
+        // patched SDK outer loop calls agent.continue(). Deferring rotation
+        // until this boundary lets queued-input continuations use their normal
+        // user-boundary segment handoff instead.
+        context.hardCompactionContinuationPending = rearmHardCompactionContinuation(context, Date.now());
+        if (context.hardCompactionContinuationPending) {
+          clearSemanticLease(context);
+          deps.emitBusyChanged(context, true);
+          return;
+        }
+      }
       clearSemanticLease(context);
       const requestId = context.activeRequest?.id;
       const messageId = context.activeRequest?.lastAssistantMessageId;
@@ -2080,6 +2183,15 @@ export function handleSdkSessionEvent(
       context.overflowRecoveryCandidate = context.activeRequest?.mayNeedOverflowRecovery
         ? context.activeRequest
         : undefined;
+      // Pie's proactive threshold check also runs after this event. Unlike
+      // overflow, there is no reliable provider message shape that predicts
+      // whether that check will compact, so retain the non-aborted request
+      // until compaction_end or the next ordinary agent_start settles it.
+      context.thresholdCompactionContinuationCandidate = context.activeRequest?.aborted === true
+        ? undefined
+        : context.activeRequest
+          ? createThresholdCompactionContinuationCandidate(context.activeRequest)
+          : undefined;
 
       // Clear activeRequest BEFORE emitting session.opened so the payload
       // sees the final idle state instead of a stale in-progress request.
@@ -2136,18 +2248,40 @@ export function handleSdkSessionEvent(
       // compaction. Restore the finalized request before publishing the
       // refreshed snapshot or receiving continuation events.
       if (event.reason === 'overflow' && event.willRetry) {
-        rearmOverflowRecoveryRequest(context, Date.now());
+        rearmPostAgentCompactionRequest(context, context.overflowRecoveryCandidate, Date.now());
+        context.overflowRecoveryCandidate = undefined;
       } else {
         context.overflowRecoveryCandidate = undefined;
       }
+      if (event.reason === 'threshold' && event.willRetry) {
+        // Soft-threshold checks happen after agent_end and therefore need the
+        // finalized candidate restored now. Hard-threshold checks happen before
+        // agent_end and still have activeRequest, so they rotate at that later
+        // boundary through rearmHardCompactionContinuation.
+        const rearmedAfterAgentEnd = rearmPostAgentCompactionRequest(
+          context,
+          context.thresholdCompactionContinuationCandidate,
+          Date.now(),
+        );
+        context.thresholdCompactionContinuationCandidate = undefined;
+        context.hardCompactionContinuationPending = rearmedAfterAgentEnd
+          || (context.activeRequest?.aborted !== true
+            && !!context.activeRequest?.liveTurnAccumulator?.lifecycleWatermark());
+      } else if (event.reason === 'threshold') {
+        context.thresholdCompactionContinuationCandidate = undefined;
+        context.hardCompactionContinuationPending = false;
+      } else {
+        context.thresholdCompactionContinuationCandidate = undefined;
+      }
 
-      // `willRetry` also marks Pie's hard-threshold between-turn continuation:
-      // the current agent loop resumes directly after this awaited compaction,
-      // without another `agent_start`. Keep busy asserted in that case. Native
-      // overflow recovery does emit another `agent_start`, so retaining busy
-      // also removes its transient idle flicker. A terminal/manual/soft
-      // compaction clears busy as before.
-      if (!event.willRetry) deps.emitBusyChanged(context, false);
+      // `willRetry` is only intent; interruption or a missing continuation
+      // owner can still prevent the next run. Keep busy asserted only when the
+      // backend actually retained that ownership. This also prevents a Stop
+      // during compaction from leaving an isolated worker permanently busy.
+      const continuationOwned = event.reason === 'overflow'
+        ? !!context.activeRequest
+        : event.reason === 'threshold' && context.hardCompactionContinuationPending === true;
+      if (!event.willRetry || !continuationOwned) deps.emitBusyChanged(context, false);
       // A successful compaction has now appended the CompactionEntry. Refresh
       // both the context indicator and transcript so manual and automatic
       // compaction visibly surface the generated summary instead of only

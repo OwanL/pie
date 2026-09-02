@@ -98,6 +98,70 @@ function waitForAsyncEvent(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
+test('priority interrupt cancels deferred hard-compaction continuation ownership', async () => {
+  const { host } = makeHost();
+  const internals = getInternals(host);
+  let cancelCalls = 0;
+  const activeRequest = { id: 'request-1', messageIndex: 1, aborted: false };
+  internals.context = {
+    runtime: {} as SessionContext['runtime'],
+    session: {
+      isStreaming: true,
+      isCompacting: false,
+      isRetrying: false,
+      isBashRunning: false,
+      clearQueue() {},
+      cancelPendingHardCompactionContinuation() { cancelCalls += 1; },
+      async abort() {},
+    } as unknown as SessionContext['session'],
+    sessionPath: '/session.jsonl',
+    unsubscribe: () => undefined,
+    busySeq: 0,
+    activeRequest,
+    hardCompactionContinuationPending: true,
+  };
+
+  assert.deepEqual(await host.interrupt(), { interrupted: true, settled: true });
+  assert.equal(cancelCalls, 1);
+  assert.equal(internals.context.hardCompactionContinuationPending, false);
+  assert.equal(activeRequest.aborted, true);
+});
+
+test('priority interrupt detaches a re-armed request when abort emits no agent_end', async () => {
+  const { host, sent } = makeHost();
+  const internals = getInternals(host);
+  const activeRequest = { id: 'request-1', messageIndex: 1, aborted: false };
+  let watchdogClears = 0;
+  const session = {
+    isStreaming: true,
+    isCompacting: false,
+    isRetrying: false,
+    isBashRunning: false,
+    clearQueue() {},
+    cancelPendingHardCompactionContinuation() {},
+    async abort() { session.isStreaming = false; },
+  };
+  internals.context = {
+    runtime: {} as SessionContext['runtime'],
+    session: session as unknown as SessionContext['session'],
+    sessionPath: '/session.jsonl',
+    unsubscribe: () => undefined,
+    busySeq: 0,
+    activeRequest,
+    hardCompactionContinuationPending: true,
+    willRetryWatchdogClear: () => { watchdogClears += 1; },
+  };
+
+  assert.deepEqual(await host.interrupt(), { interrupted: true, settled: true });
+  assert.equal(internals.context.activeRequest, undefined);
+  assert.equal(watchdogClears, 1);
+  assert.equal(
+    sent.some((frame) => frame.event === 'busy.changed'
+      && (frame.payload as { busy?: unknown } | undefined)?.busy === false),
+    true,
+  );
+});
+
 test('automatic semantic recovery fails the worker once when session.abort never settles', async () => {
   const { host, sent, runtimeFailures } = makeHost({ automaticRecoveryAbortGraceMs: 10 });
   const internals = getInternals(host);

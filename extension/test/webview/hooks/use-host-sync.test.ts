@@ -105,74 +105,135 @@ test('a queued background draft survives a same-host session switch', () => {
   assert.equal(queuedDrafts.has('/session/b'), false);
 });
 
-test('protocol or build skew latches before hydration, evidence, revision, or later imperatives', () => {
-  for (const mismatch of [
-    { protocolVersion: WEBVIEW_PROTOCOL_VERSION + 1, buildId: PIE_BUILD_ID },
-    { protocolVersion: WEBVIEW_PROTOCOL_VERSION, buildId: 'stale-build' },
-  ]) {
-    let hydrated = 0;
-    let compatibilityFailures = 0;
-    let stateUpdates = 0;
-    let posted = 0;
-    let restoredDrafts = 0;
-    const compatibilityFailedRef = { current: false };
-    const lastRevisionRef = { current: 4 };
-    const ctx = {
-      hydrateViewState: (state: ViewState) => { hydrated += 1; return state; },
-      resetPerSessionState: () => undefined,
-      hostInstanceIdRef: { current: 'host-1' },
-      viewGenerationRef: { current: 1 },
-      lastRevisionRef,
-      activeSessionPathRef: { current: '/session/a' },
-      committedSessionPathRef: { current: '/session/a' },
-      compatibilityFailedRef,
-      onCompatibilityMismatch: () => { compatibilityFailures += 1; },
-      clearTransientUi: () => undefined,
-      optimisticOps: {
-        clear: () => undefined,
-        reconcileWithHostIds: () => undefined,
-        removeByLocalId: () => undefined,
-        removeBySessionPath: () => undefined,
-      },
-      draftOps: {
-        applyQueued: () => false,
-        clearQueued: () => undefined,
-        queueForSession: () => undefined,
-        restoreNow: () => { restoredDrafts += 1; },
-      },
-      inputsOps: { restoreNow: () => undefined, clear: () => undefined },
-      setViewState: () => { stateUpdates += 1; },
-      setCommitTarget: () => undefined,
-      setInlineConfirm: () => undefined,
-      postMessage: () => { posted += 1; },
-    };
-    const state = {
-      activeSession: null,
-      openTabPaths: [],
-      transcript: [],
-      transcriptWindow: { start: 0, end: 0, total: 0, hasOlder: false, hasNewer: false },
-    } as unknown as ViewState;
+test('protocol skew latches before hydration, evidence, revision, or later imperatives', () => {
+  const mismatch = { protocolVersion: WEBVIEW_PROTOCOL_VERSION + 1, buildId: PIE_BUILD_ID };
+  let hydrated = 0;
+  let compatibilityFailures = 0;
+  let stateUpdates = 0;
+  let posted = 0;
+  let restoredDrafts = 0;
+  const compatibilityFailedRef = { current: false };
+  const lastRevisionRef = { current: 4 };
+  const ctx = {
+    hydrateViewState: (state: ViewState) => { hydrated += 1; return state; },
+    resetPerSessionState: () => undefined,
+    hostInstanceIdRef: { current: 'host-1' },
+    viewGenerationRef: { current: 1 },
+    lastRevisionRef,
+    activeSessionPathRef: { current: '/session/a' },
+    committedSessionPathRef: { current: '/session/a' },
+    compatibilityFailedRef,
+    onCompatibilityMismatch: () => { compatibilityFailures += 1; },
+    clearTransientUi: () => undefined,
+    optimisticOps: {
+      clear: () => undefined,
+      reconcileWithHostIds: () => undefined,
+      removeByLocalId: () => undefined,
+      removeBySessionPath: () => undefined,
+    },
+    draftOps: {
+      applyQueued: () => false,
+      clearQueued: () => undefined,
+      queueForSession: () => undefined,
+      restoreNow: () => { restoredDrafts += 1; },
+    },
+    inputsOps: { restoreNow: () => undefined, clear: () => undefined },
+    setViewState: () => { stateUpdates += 1; },
+    setCommitTarget: () => undefined,
+    setInlineConfirm: () => undefined,
+    postMessage: () => { posted += 1; },
+  };
+  const state = {
+    activeSession: null,
+    openTabPaths: [],
+    transcript: [],
+    transcriptWindow: { start: 0, end: 0, total: 0, hasOlder: false, hasNewer: false },
+  } as unknown as ViewState;
 
-    dispatchHostMessage({
-      type: 'state',
-      ...mismatch,
-      hostInstanceId: 'host-1',
-      rendererId: 'renderer-1',
-      rendererGeneration: 1,
-      viewGeneration: 1,
-      revision: 5,
-      expectedTranscriptIdentity: 'incompatible',
-      snapshotBytes: 100,
-      state,
-    }, ctx);
-    dispatchHostMessage({ type: 'sendRejected', sessionPath: '/session/a', text: 'must not apply' }, ctx);
+  dispatchHostMessage({
+    type: 'state',
+    ...mismatch,
+    hostInstanceId: 'host-1',
+    rendererId: 'renderer-1',
+    rendererGeneration: 1,
+    viewGeneration: 1,
+    revision: 5,
+    expectedTranscriptIdentity: 'incompatible',
+    snapshotBytes: 100,
+    state,
+  }, ctx);
+  dispatchHostMessage({ type: 'sendRejected', sessionPath: '/session/a', text: 'must not apply' }, ctx);
 
-    assert.equal(compatibilityFailedRef.current, true);
-    assert.equal(compatibilityFailures, 1);
-    assert.equal(hydrated, 0);
-    assert.equal(stateUpdates, 0, 'the last compatible UI state is preserved');
-    assert.equal(posted, 0, 'no stateReceived evidence acknowledges incompatible state');
-    assert.equal(lastRevisionRef.current, 4);
-    assert.equal(restoredDrafts, 0, 'later imperatives are ignored after the terminal fence');
-  }
+  assert.equal(compatibilityFailedRef.current, true);
+  assert.equal(compatibilityFailures, 1);
+  assert.equal(hydrated, 0);
+  assert.equal(stateUpdates, 0, 'the last compatible UI state is preserved');
+  assert.equal(posted, 0, 'no stateReceived evidence acknowledges incompatible state');
+  assert.equal(lastRevisionRef.current, 4);
+  assert.equal(restoredDrafts, 0, 'later imperatives are ignored after the terminal fence');
+});
+
+test('build skew is accepted when the webview protocol still matches', () => {
+  let hydrated = 0;
+  let compatibilityFailures = 0;
+  let stateUpdates = 0;
+  let posted = 0;
+  const compatibilityFailedRef = { current: false };
+  const lastRevisionRef = { current: 4 };
+  const ctx = {
+    hydrateViewState: (state: ViewState) => { hydrated += 1; return state; },
+    resetPerSessionState: () => undefined,
+    hostInstanceIdRef: { current: 'host-1' },
+    viewGenerationRef: { current: 1 },
+    lastRevisionRef,
+    activeSessionPathRef: { current: '/session/a' },
+    committedSessionPathRef: { current: '/session/a' },
+    compatibilityFailedRef,
+    onCompatibilityMismatch: () => { compatibilityFailures += 1; },
+    clearTransientUi: () => undefined,
+    optimisticOps: {
+      clear: () => undefined,
+      reconcileWithHostIds: () => undefined,
+      removeByLocalId: () => undefined,
+      removeBySessionPath: () => undefined,
+    },
+    draftOps: {
+      applyQueued: () => false,
+      clearQueued: () => undefined,
+      queueForSession: () => undefined,
+      restoreNow: () => undefined,
+    },
+    inputsOps: { restoreNow: () => undefined, clear: () => undefined },
+    setViewState: () => { stateUpdates += 1; },
+    setCommitTarget: () => undefined,
+    setInlineConfirm: () => undefined,
+    postMessage: () => { posted += 1; },
+  };
+  const state = {
+    activeSession: null,
+    openTabPaths: [],
+    transcript: [],
+    transcriptWindow: { start: 0, end: 0, total: 0, hasOlder: false, hasNewer: false },
+  } as unknown as ViewState;
+
+  dispatchHostMessage({
+    type: 'state',
+    protocolVersion: WEBVIEW_PROTOCOL_VERSION,
+    buildId: 'stale-build',
+    hostInstanceId: 'host-1',
+    rendererId: 'renderer-1',
+    rendererGeneration: 1,
+    viewGeneration: 1,
+    revision: 5,
+    expectedTranscriptIdentity: 'compatible',
+    snapshotBytes: 100,
+    state,
+  }, ctx);
+
+  assert.equal(compatibilityFailedRef.current, false);
+  assert.equal(compatibilityFailures, 0);
+  assert.equal(hydrated, 1);
+  assert.equal(stateUpdates, 1);
+  assert.equal(posted, 1, 'compatible state still receives receipt evidence');
+  assert.equal(lastRevisionRef.current, 5);
 });

@@ -8,6 +8,7 @@ import { h, render } from 'preact';
 import { act } from 'preact/test-utils';
 
 import { ComposerSettingsMenu } from '../../../src/webview/panel/composer/settings-menu';
+import { orderModelsForPicker } from '../../../src/webview/panel/composer/model-list';
 import { DEFAULT_CHAT_PREFS, DEFAULT_PRUNING_SETTINGS, DEFAULT_TOOL_RESULT_PRUNING_SETTINGS, EMPTY_PROVIDER_GATE_STATS } from '../../../src/shared/protocol';
 import type { ExtensionInfo, ModelInfo } from '../../../src/shared/protocol';
 
@@ -27,7 +28,11 @@ function click(el: Element | null): void {
   el!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
 }
 
-function mount(extensions: ExtensionInfo[] = [], models: ModelInfo[] = []) {
+function mount(
+  extensions: ExtensionInfo[] = [],
+  models: ModelInfo[] = [],
+  onModelChange: (model: string, provider: string | undefined, thinkingLevel: import('../../../src/shared/protocol').ThinkingLevel) => void = () => undefined,
+) {
   act(() => {
     render(
       h(ComposerSettingsMenu, {
@@ -39,6 +44,11 @@ function mount(extensions: ExtensionInfo[] = [], models: ModelInfo[] = []) {
         availableExtensions: extensions,
         availableModels: models,
         providerGateStats: EMPTY_PROVIDER_GATE_STATS,
+        selectedModel: models[0]?.id ?? '',
+        selectedProvider: models[0]?.provider,
+        selectedLevel: 'low',
+        chatModelEntries: orderModelsForPicker(models, { useSubagentEligibility: false }),
+        onModelChange,
         onSetPrefs: () => undefined,
         mcpServers: [],
         mcpPendingApply: false,
@@ -68,10 +78,10 @@ test('the menu is tabbed and defaults to Chat; switching tabs swaps content', ()
   const menu = openMenu();
 
   const tabs = menu.querySelectorAll('.toolbar-settings-tab');
-  // Tab strip present with the always-on categories (Extensions/Providers are
-  // hidden because no extensions/models were passed; MCP is unconditional).
+  // Models and Context are always present; Extensions and Subagents depend on
+  // available extensions, while MCP remains unconditional.
   const tabIds = Array.from(menu.querySelectorAll('.toolbar-settings-tab')).map((t) => t.getAttribute('data-tab'));
-  assert.deepEqual(tabIds, ['chat', 'history', 'appearance', 'mcp']);
+  assert.deepEqual(tabIds, ['chat', 'models', 'context', 'appearance', 'mcp']);
 
   // Chat is active by default. Transcript behavior, completion notifications,
   // and diagnostics stay here; status/usage visibility moved to Appearance.
@@ -84,11 +94,20 @@ test('the menu is tabbed and defaults to Chat; switching tabs swaps content', ()
   assert.doesNotMatch(chatText, /Hide bottom usage strip/);
   assert.doesNotMatch(chatText, /History compaction/);
 
-  // History is a first-class settings category, not a subsection of Chat.
-  act(() => { click(menu.querySelector('.toolbar-settings-tab[data-tab="history"]')); });
+  // Context owns history-compaction behavior, not its model assignment.
+  act(() => { click(menu.querySelector('.toolbar-settings-tab[data-tab="context"]')); });
   const body = menu.querySelector('.toolbar-settings-menu-body')!;
   assert.match(body.textContent!, /History compaction/);
+  assert.doesNotMatch(body.textContent!, /Summary model/);
   assert.doesNotMatch(body.textContent!, /Transcript/);
+
+  // Models owns all baseline assignments and the provider section.
+  act(() => { click(menu.querySelector('.toolbar-settings-tab[data-tab="models"]')); });
+  assert.match(body.textContent!, /Model assignments/);
+  assert.match(body.textContent!, /Chat default/);
+  assert.match(body.textContent!, /Title model/);
+  assert.match(body.textContent!, /Summary model/);
+  assert.match(body.textContent!, /Providers/);
 
   // Switch to Appearance — layout, theme, and status/usage visibility now live
   // together under semantic groups.
@@ -100,7 +119,7 @@ test('the menu is tabbed and defaults to Chat; switching tabs swaps content', ()
   assert.doesNotMatch(body.textContent!, /History compaction/);
 });
 
-test('Extensions and Providers tabs appear only when their content exists', () => {
+test('Extensions remains conditional while providers are integrated into Models', () => {
   const extensions: ExtensionInfo[] = [{ id: 'skill-pruner', label: 'Skill Pruner', description: 'Prunes' }];
   const models: ModelInfo[] = [
     { id: 'm1', name: 'Model One', provider: 'test', reasoning: false, inputKinds: ['text'] },
@@ -111,7 +130,7 @@ test('Extensions and Providers tabs appear only when their content exists', () =
   const menu = openMenu();
 
   const tabIds = Array.from(menu.querySelectorAll('.toolbar-settings-tab')).map((t) => t.getAttribute('data-tab'));
-  assert.deepEqual(tabIds, ['chat', 'history', 'appearance', 'extensions', 'providers', 'mcp']);
+  assert.deepEqual(tabIds, ['chat', 'models', 'context', 'appearance', 'extensions', 'mcp']);
 
   act(() => { click(menu.querySelector('.toolbar-settings-tab[data-tab="extensions"]')); });
   assert.equal(
@@ -119,12 +138,70 @@ test('Extensions and Providers tabs appear only when their content exists', () =
     false,
     'the active Extensions tab should not repeat its own label in the body',
   );
-  act(() => { click(menu.querySelector('.toolbar-settings-tab[data-tab="providers"]')); });
+  act(() => { click(menu.querySelector('.toolbar-settings-tab[data-tab="models"]')); });
   assert.equal(
     Array.from(menu.querySelectorAll('.toolbar-settings-section-label')).some((label) => label.textContent === 'Providers'),
-    false,
-    'the active Providers tab should not repeat its own label in the body',
+    true,
+    'Providers should render as a section inside Models',
   );
+});
+
+test('Chat default uses the toolbar model entries and normalizes thinking through onModelChange', () => {
+  const models: ModelInfo[] = [
+    { id: 'reasoning', name: 'Reasoning', provider: 'test', reasoning: true, thinkingLevels: ['off', 'low'], inputKinds: ['text'] },
+    { id: 'plain', name: 'Plain', provider: 'test', reasoning: false, thinkingLevels: ['off'], inputKinds: ['text'] },
+  ];
+  const calls: Array<[string, string | undefined, import('../../../src/shared/protocol').ThinkingLevel]> = [];
+  mount([], models, (...args) => calls.push(args));
+  const menu = openMenu();
+  act(() => { click(menu.querySelector('.toolbar-settings-tab[data-tab="models"]')); });
+  const trigger = menu.querySelector('[aria-label="Chat default model"]');
+  assert.ok(trigger);
+  assert.match(trigger.textContent ?? '', /Reasoning/);
+
+  act(() => { click(trigger); });
+  const plainRow = [...document.querySelectorAll('.model-picker-row')]
+    .find((row) => row.textContent?.includes('Plain'));
+  assert.ok(plainRow);
+  act(() => { click(plainRow!); });
+  assert.deepEqual(calls, [['plain', 'test', 'off']]);
+});
+
+test('extension-backed settings route to Models, Context, and Subagents', () => {
+  const extensions: ExtensionInfo[] = [
+    { id: 'skill-pruner', label: 'Skill Pruner', description: 'Prunes' },
+    { id: 'subagent', label: 'Subagent', description: 'Delegates' },
+    { id: 'tool-result-pruner', label: 'Tool Result Pruner', description: 'Prunes results' },
+  ];
+  const models: ModelInfo[] = [
+    { id: 'm1', name: 'Model One', provider: 'test', reasoning: false, inputKinds: ['text'] },
+  ];
+  mount(extensions, models);
+  const menu = openMenu();
+  const tabIds = Array.from(menu.querySelectorAll('.toolbar-settings-tab')).map((tab) => tab.getAttribute('data-tab'));
+  assert.deepEqual(tabIds, ['chat', 'models', 'context', 'subagents', 'appearance', 'extensions', 'mcp']);
+  const body = menu.querySelector('.toolbar-settings-menu-body')!;
+
+  act(() => { click(menu.querySelector('.toolbar-settings-tab[data-tab="models"]')); });
+  assert.match(body.textContent!, /Prepass model/);
+  assert.match(body.textContent!, /Low-cost busywork/);
+
+  act(() => { click(menu.querySelector('.toolbar-settings-tab[data-tab="context"]')); });
+  assert.match(body.textContent!, /Skill pruning/);
+  assert.match(body.textContent!, /Tool-result pruning/);
+  assert.doesNotMatch(body.textContent!, /Prepass model/);
+
+  act(() => { click(menu.querySelector('.toolbar-settings-tab[data-tab="subagents"]')); });
+  assert.match(body.textContent!, /Always use parent model/);
+  assert.match(body.textContent!, /Nesting levels/);
+  assert.doesNotMatch(body.textContent!, /Low-cost busywork/);
+
+  act(() => { click(menu.querySelector('.toolbar-settings-tab[data-tab="extensions"]')); });
+  const chevrons = body.querySelectorAll('.toolbar-settings-ext-chevron');
+  act(() => { click(chevrons[0]); });
+  assert.match(body.textContent!, /Settings moved to the Context and Models tabs/);
+  act(() => { click(chevrons[1]); });
+  assert.match(body.textContent!, /Settings moved to the Subagents and Models tabs/);
 });
 
 // The MCP tab is unconditional and carries the global on/off toggle; toggling
@@ -316,6 +393,35 @@ test('search surfaces the subagent busy-provider routing toggle', () => {
   assert.ok(body.querySelector('.toolbar-settings-search-result[role="checkbox"]'));
 });
 
+test('search routes moved settings to their new tabs', () => {
+  mount([
+    { id: 'skill-pruner', label: 'Skill Pruner', description: 'Prunes' },
+    { id: 'subagent', label: 'Subagent', description: 'Delegates' },
+  ]);
+  const menu = openMenu();
+  const input = menu.querySelector('.toolbar-settings-search-input') as HTMLInputElement;
+
+  act(() => {
+    input.value = 'prepass model';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  const prepass = [...menu.querySelectorAll('.toolbar-settings-search-result-jump')]
+    .find((result) => result.textContent?.includes('Prepass model'));
+  assert.ok(prepass);
+  assert.match(prepass!.textContent ?? '', /Models/);
+  act(() => { click(prepass!); });
+  assert.ok(menu.querySelector('.toolbar-settings-tab[data-tab="models"].active'));
+
+  act(() => {
+    input.value = 'tree session budget';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  const budget = [...menu.querySelectorAll('.toolbar-settings-search-result-jump')]
+    .find((result) => result.textContent?.includes('Tree session budget'));
+  assert.ok(budget);
+  assert.match(budget!.textContent ?? '', /Subagents/);
+});
+
 test('a search with no matches shows an empty-state message', () => {
   mount();
   const menu = openMenu();
@@ -346,6 +452,22 @@ test('search finds the initial composer rows setting', () => {
   const body = menu.querySelector('.toolbar-settings-menu-body')!;
   assert.match(body.textContent!, /Initial composer rows/);
   assert.match(body.textContent!, /Appearance/);
+});
+
+test('search routes display prefs and the visible Mono font label to Appearance', () => {
+  mount();
+  const menu = openMenu();
+  const input = menu.querySelector('.toolbar-settings-search-input') as HTMLInputElement;
+
+  for (const query of ['hide session cost', 'mono font']) {
+    act(() => {
+      input.value = query;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    const jump = menu.querySelector('.toolbar-settings-search-result-jump');
+    assert.ok(jump, `${query} should produce a jump result`);
+    assert.match(jump!.textContent ?? '', /Appearance/);
+  }
 });
 
 test('search finds continuous settings by name and offers a jump to their tab', () => {

@@ -40,7 +40,6 @@ export const BROWSER_CLOSE_REASONS = {
   handshakeOrder: 'ready-required',
   malformedRate: 'too-many-malformed-messages',
   protocolViolation: 'protocol-violation',
-  buildMismatch: 'renderer-build-mismatch',
   serverShutdown: 'server-shutdown',
   recovery: 'recovery',
   clientLimit: 'client-limit',
@@ -263,19 +262,8 @@ export class BrowserRendererTransport implements RendererTransport {
         this.closeSocket(BROWSER_CLOSE_REASONS.handshakeOrder);
         return;
       }
-      if (message.buildId !== PIE_BUILD_ID) {
-        this.closeSocket(BROWSER_CLOSE_REASONS.buildMismatch);
-        return;
-      }
       this.handshakeComplete = true;
       this.clearHandshakeTimer();
-    }
-    if (
-      (message.type === 'ready' || message.type === 'refreshState' || message.type === 'requestSnapshot')
-      && message.buildId !== PIE_BUILD_ID
-    ) {
-      this.closeSocket(BROWSER_CLOSE_REASONS.buildMismatch);
-      return;
     }
     if (message.type === 'rendererVisibilityChanged') {
       this.visibilityHandler?.(message.visible);

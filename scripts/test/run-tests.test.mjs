@@ -56,6 +56,20 @@ test('buildTestArgs applies an explicit fast worker budget', () => {
   assert.equal(args.includes('--experimental-test-coverage'), false);
 });
 
+test('buildTestArgs can use a stable single-process release coverage entrypoint', () => {
+  const config = {
+    testGlobs: ['test/**/*.test.ts'],
+    coverageTestGlobs: ['test/coverage-suite.ts'],
+    coverageIncludes: ['src/**/*.ts'],
+  };
+  const releaseArgs = buildTestArgs(config, false);
+  assert.ok(releaseArgs.includes('test/coverage-suite.ts'));
+  assert.equal(releaseArgs.includes('test/**/*.test.ts'), false);
+  const fastArgs = buildTestArgs(config, true);
+  assert.ok(fastArgs.includes('test/**/*.test.ts'));
+  assert.equal(fastArgs.includes('test/coverage-suite.ts'), false);
+});
+
 test('buildTestArgs can run infrastructure tests without coverage collection', () => {
   const args = buildTestArgs({
     testGlobs: ['scripts/test/*.test.mjs'],

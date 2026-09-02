@@ -3,11 +3,22 @@
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 
-import { DEFAULT_SESSION_TITLES_SETTINGS, resolveHistoryCompactionSettings, type ChatPrefs, type ExtensionInfo, type McpServerInfo, type ModelInfo, type PruningCatalog, type PruningResult, type PruningSettings, type ProviderGateStats, type SessionTitlesSettings, type ToolResultPruningSettings } from '../../../shared/protocol';
+import { DEFAULT_SESSION_TITLES_SETTINGS, resolveHistoryCompactionSettings, type ChatPrefs, type ExtensionInfo, type McpServerInfo, type ModelInfo, type PruningCatalog, type PruningResult, type PruningSettings, type ProviderGateStats, type SessionTitlesSettings, type ThinkingLevel, type ToolResultPruningSettings } from '../../../shared/protocol';
 import { filterEnabledProviders, orderModelsForPicker, type ModelPickerEntry } from './model-list';
 import { Tooltip } from '../components/tooltip';
-import { HistoryCompactionSection } from './settings-menu-history-compaction';
-import { SessionTitlesSection } from './settings-menu-session-titles';
+import { HISTORY_COMPACTION_BEHAVIOR_SETTING_LABELS, HISTORY_COMPACTION_MODEL_SETTING_LABELS } from './settings-menu-history-compaction';
+import { SESSION_TITLES_BEHAVIOR_SETTING_LABELS, SESSION_TITLES_MODEL_SETTING_LABELS } from './settings-menu-session-titles';
+import { SKILL_PRUNER_BEHAVIOR_SETTING_LABELS, SKILL_PRUNER_MODEL_SETTING_LABELS } from './settings-menu-skill-pruner';
+import { NESTED_TOGGLE_DEFS, SUBAGENT_BEHAVIOR_SETTING_LABELS, SUBAGENT_MODEL_SETTING_LABELS } from './settings-menu-subagent';
+import { TOOL_RESULT_PRUNER_SETTING_LABELS } from './settings-menu-tool-result-pruner';
+import { BASH_SETTING_LABELS } from './settings-menu-bash';
+import { ASK_USER_SETTING_LABELS } from './settings-menu-ask-user';
+import { PROVIDER_SETTING_LABELS } from './settings-menu-providers';
+import { MCP_SETTING_LABELS } from './settings-menu-mcp';
+import { CHAT_PREF_SECTION_SEARCH_DEFS } from './settings-menu-chat-prefs';
+import { SOUND_SETTING_LABELS } from './settings-menu-sound';
+import { APPEARANCE_SETTING_LABELS } from './ui-appearance-settings';
+import { CHAT_DEFAULT_MODEL_SETTING_LABELS } from './settings-menu-models';
 
 import {
   computeKeepCatalog,
@@ -16,11 +27,21 @@ import {
 
 import {
   AppearanceSection,
+  ChatDefaultModelAssignment,
   ChatPrefSections,
   ExtensionsSection,
+  HistoryCompactionModelAssignment,
+  HistoryCompactionSection,
   McpSection,
   ProvidersSection,
+  SessionTitlesModelAssignment,
+  SessionTitlesSection,
+  SkillPrunerModelAssignment,
+  SkillPrunerSettings,
   SoundSection,
+  SubagentModelAssignments,
+  SubagentSection,
+  ToolResultPrunerSettings,
 } from './settings-menu-subcomponents';
 
 import {
@@ -59,6 +80,11 @@ export interface ComposerSettingsMenuProps {
   providerGateStats: ProviderGateStats;
   activeContextWindow?: number;
   activeModel?: { provider?: string; id: string };
+  selectedModel?: string;
+  selectedProvider?: string;
+  selectedLevel?: ThinkingLevel;
+  chatModelEntries?: ModelPickerEntry[];
+  onModelChange?: (model: string, provider: string | undefined, thinkingLevel: ThinkingLevel) => void;
   onSetPrefs: (prefs: Partial<ChatPrefs>) => void;
   onMcpListRequested: () => void;
   onMcpSetServerEnabled: (name: string, enabled: boolean) => void;
@@ -69,25 +95,21 @@ export interface ComposerSettingsMenuProps {
 
 /** Settings categories, in tab-strip order. Each renders one at a time
  *  inside the menu body; search can jump to any of them. */
-type SettingsTab = 'chat' | 'history' | 'appearance' | 'extensions' | 'providers' | 'mcp';
+type SettingsTab = 'chat' | 'models' | 'context' | 'subagents' | 'appearance' | 'extensions' | 'mcp';
 
 const TAB_DEFS: { id: SettingsTab; label: string }[] = [
   { id: 'chat', label: 'Chat' },
-  { id: 'history', label: 'History' },
+  { id: 'models', label: 'Models' },
+  { id: 'context', label: 'Context' },
+  { id: 'subagents', label: 'Subagents' },
   { id: 'appearance', label: 'Appearance' },
   { id: 'extensions', label: 'Extensions' },
-  { id: 'providers', label: 'Providers' },
   { id: 'mcp', label: 'MCP' },
 ];
 
-const TAB_LABEL: Record<SettingsTab, string> = {
-  chat: 'Chat',
-  history: 'History',
-  appearance: 'Appearance',
-  extensions: 'Extensions',
-  providers: 'Providers',
-  mcp: 'MCP',
-};
+function getTabLabel(tab: SettingsTab): string {
+  return TAB_DEFS.find((definition) => definition.id === tab)?.label ?? tab;
+}
 
 /** Fixed height for the settings menu, capped to the available vertical space
  *  at runtime. A fixed height keeps the menu from growing/shrinking as the
@@ -117,11 +139,27 @@ function TabIcon({ id }: { id: SettingsTab }) {
           <path d="M2.5 4.5h11a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1H6l-3.5 3V5.5a1 1 0 0 1 1-1z" />
         </svg>
       );
-    case 'history':
+    case 'models':
+      return (
+        <svg {...common}>
+          <circle cx="8" cy="8" r="2.5" />
+          <path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M12.6 3.4l-1.4 1.4M4.8 11.2l-1.4 1.4" />
+        </svg>
+      );
+    case 'context':
       return (
         <svg {...common}>
           <path d="M3 3.5h10M4.5 7h7M6 10.5h4" />
           <path d="m6.5 13 1.5 1.5L9.5 13" />
+        </svg>
+      );
+    case 'subagents':
+      return (
+        <svg {...common}>
+          <circle cx="8" cy="4" r="2" />
+          <circle cx="4" cy="12" r="2" />
+          <circle cx="12" cy="12" r="2" />
+          <path d="M8 6v2M8 8 4.8 10M8 8l3.2 2" />
         </svg>
       );
     case 'appearance':
@@ -142,15 +180,6 @@ function TabIcon({ id }: { id: SettingsTab }) {
           <rect x="9" y="9" width="4.5" height="4.5" rx="1" />
         </svg>
       );
-    case 'providers':
-      return (
-        <svg {...common}>
-          <rect x="2" y="3" width="12" height="4" rx="1" />
-          <rect x="2" y="9" width="12" height="4" rx="1" />
-          <circle cx="5" cy="5" r="0.6" fill="currentColor" stroke="none" />
-          <circle cx="5" cy="11" r="0.6" fill="currentColor" stroke="none" />
-        </svg>
-      );
     case 'mcp':
       return (
         <svg {...common}>
@@ -162,53 +191,6 @@ function TabIcon({ id }: { id: SettingsTab }) {
   }
 }
 
-/** Nested-bucket allowlist labels, mirrored from the subagent section so the
- *  search index can surface those toggles by their tier name. Highest tier
- *  first to match the in-tab order. */
-const NESTED_LABELS: { key: 'small' | 'medium' | 'frontier'; label: string }[] = [
-  { key: 'frontier', label: 'Frontier' },
-  { key: 'medium', label: 'Medium' },
-  { key: 'small', label: 'Small' },
-];
-
-/** Continuous (non-boolean) controls surfaced as search jump entries. Clicking
- *  one switches to its tab (and expands the owning extension when applicable)
- *  so the user lands directly on the control. Haystacks include the control's
- *  own words so searching "font", "radius", "timeout", etc. always hits. */
-const APPEARANCE_SETTING_LABELS = [
-  'Theme', 'Background color', 'Text color', 'Border color', 'Accent color',
-  'Muted text color', 'Link color', 'Corner radius', 'Density', 'Message width',
-  'Path parent depth', 'Initial composer rows', 'Expanded section height', 'Activity preview rows', 'Message rail markers',
-  'Base text size', 'Composer text size', 'Expanded section text size',
-  'Sans-serif font', 'Monospace font',
-];
-const HISTORY_COMPACTION_SETTING_LABELS = [
-  'History compaction', 'Compaction threshold type', 'Soft compaction trigger', 'Hard compaction trigger',
-  'Recent retention', 'Summary instructions', 'Summary thinking level', 'Summary model',
-  'Custom thresholds for active model',
-];
-const BASH_SETTING_LABELS = ['Warm pool size', 'Bash shell path', 'Warmup timeout', 'Fast path'];
-const PROVIDER_CONCURRENCY_LABELS = [
-  'Max concurrent', 'Afterburn', 'Queue wait', 'Header wait',
-];
-const SKILL_PRUNER_SETTING_LABELS = [
-  'Pruning mode', 'Skip small prepasses', 'Skip below tokens',
-  'Pruning prepass model', 'Pruning thinking level',
-  'Pruning skill limit', 'Pruning tool limit', 'Omitted skills (never pruned)',
-  'Omitted tools (never pruned)',
-];
-const SUBAGENT_SETTING_LABELS = [
-  'Subagent default providers', 'Subagent dropped tools', 'Subagent model buckets', 'Subagent nested bucket allowlist',
-  'Subagent delegation by bucket', 'Subagent nesting levels',
-  'Subagent tree session budget', 'Subagent max active trees',
-  'Subagent max concurrency', 'Subagent max parallel tasks',
-];
-const TOOL_RESULT_PRUNER_SETTING_LABELS = [
-  'Tool-result pruning enabled', 'Tool-result pruning profile',
-  'Tool-result pruning tools', 'Prune ANSI escapes',
-  'Prune trailing whitespace', 'Prune blank-line runs', 'Prune JSON',
-];
-const MCP_SETTING_LABELS = ['MCP enabled', 'Server config'];
 
 interface SearchJumpEntry {
   type: 'jump';
@@ -259,27 +241,52 @@ function buildSettingsSearchIndex(
     });
   }
 
-  // Continuous setting jumps.
-  const pushSettings = (labels: readonly string[], tab: SettingsTab, expandExt?: string) => {
+  // Section-owned label lists keep search aligned with the controls each
+  // section actually renders. The tab routing here is the IA map.
+  const pushSettings = (
+    labels: readonly string[],
+    tab: SettingsTab,
+    section: string,
+    expandExt?: string,
+  ) => {
     for (const label of labels) {
       entries.push({
         type: 'jump',
-        id: `set:${tab}:${expandExt ?? ''}:${label}`,
+        id: `set:${tab}:${section}:${label}`,
         label,
-        haystack: `${TAB_LABEL[tab]} ${label}`.toLowerCase(),
+        haystack: `${getTabLabel(tab)} ${section} ${label}`.toLowerCase(),
         tab,
         expandExt,
       });
     }
   };
-  pushSettings(HISTORY_COMPACTION_SETTING_LABELS, 'history');
-  if (visibleTabs.some((t) => t.id === 'appearance')) pushSettings(APPEARANCE_SETTING_LABELS, 'appearance');
-  if (visibleTabs.some((t) => t.id === 'providers')) pushSettings(PROVIDER_CONCURRENCY_LABELS, 'providers');
-  if (visibleTabs.some((t) => t.id === 'mcp')) pushSettings(MCP_SETTING_LABELS, 'mcp');
-  if (hasWarmBash) pushSettings(BASH_SETTING_LABELS, 'extensions', 'warm-bash');
-  if (hasSkillPruner) pushSettings(SKILL_PRUNER_SETTING_LABELS, 'extensions', 'skill-pruner');
-  if (hasSubagent) pushSettings(SUBAGENT_SETTING_LABELS, 'extensions', 'subagent');
-  if (hasToolResultPruner) pushSettings(TOOL_RESULT_PRUNER_SETTING_LABELS, 'extensions', 'tool-result-pruner');
+  pushSettings(SESSION_TITLES_BEHAVIOR_SETTING_LABELS, 'chat', 'session titles');
+  for (const section of CHAT_PREF_SECTION_SEARCH_DEFS) {
+    pushSettings(
+      section.labels,
+      section.id === 'display' ? 'appearance' : 'chat',
+      section.label ?? section.id,
+    );
+  }
+  pushSettings(SOUND_SETTING_LABELS, 'chat', 'completion notifications');
+  pushSettings(CHAT_DEFAULT_MODEL_SETTING_LABELS, 'models', 'chat default');
+  pushSettings(SESSION_TITLES_MODEL_SETTING_LABELS, 'models', 'session titles');
+  pushSettings(HISTORY_COMPACTION_MODEL_SETTING_LABELS, 'models', 'compaction summary');
+  pushSettings(PROVIDER_SETTING_LABELS, 'models', 'providers');
+  pushSettings(HISTORY_COMPACTION_BEHAVIOR_SETTING_LABELS, 'context', 'history compaction');
+  pushSettings(APPEARANCE_SETTING_LABELS, 'appearance', 'appearance');
+  pushSettings(MCP_SETTING_LABELS, 'mcp', 'mcp');
+  if (hasWarmBash) pushSettings(BASH_SETTING_LABELS, 'extensions', 'warm bash', 'warm-bash');
+  if (extIds.has('ask-user')) pushSettings(ASK_USER_SETTING_LABELS, 'extensions', 'ask user', 'ask-user');
+  if (hasSkillPruner) {
+    pushSettings(SKILL_PRUNER_MODEL_SETTING_LABELS, 'models', 'pruning prepass');
+    pushSettings(SKILL_PRUNER_BEHAVIOR_SETTING_LABELS, 'context', 'skill pruning');
+  }
+  if (hasSubagent) {
+    pushSettings(SUBAGENT_MODEL_SETTING_LABELS, 'models', 'subagent model buckets');
+    pushSettings(SUBAGENT_BEHAVIOR_SETTING_LABELS, 'subagents', 'subagents');
+  }
+  if (hasToolResultPruner) pushSettings(TOOL_RESULT_PRUNER_SETTING_LABELS, 'context', 'tool-result pruning');
 
   // Chat prefs (transcript / alerts / diagnostics).
   for (const section of CHAT_PREF_MENU_SECTIONS) {
@@ -342,7 +349,7 @@ function buildSettingsSearchIndex(
       type: 'toggle',
       id: 'pruning:show',
       label: 'Show pruning summary',
-      haystack: 'extensions skill-pruner show pruning summary'.toLowerCase(),
+      haystack: 'context skill-pruner show pruning summary'.toLowerCase(),
       checked: !!prefs.showPruningMessages,
       apply: () => onSetPrefs(toggleChatPref(prefs, 'showPruningMessages')),
     });
@@ -374,7 +381,7 @@ function buildSettingsSearchIndex(
       checked: !!prefs.subagentFallbackOnProviderFailure,
       apply: () => onSetPrefs(toggleChatPref(prefs, 'subagentFallbackOnProviderFailure')),
     });
-    for (const def of NESTED_LABELS) {
+    for (const def of NESTED_TOGGLE_DEFS) {
       const enabled = prefs.subagentNestedAllowedBuckets[def.key] ?? true;
       entries.push({
         type: 'toggle',
@@ -444,7 +451,7 @@ function SettingsSearchResults({ query, jumps, toggles, onJump }: SettingsSearch
           onClick={() => onJump(entry.tab, entry.expandExt)}
         >
           <span class="toolbar-settings-search-result-label">{entry.label}</span>
-          <span class="toolbar-settings-search-result-meta">{TAB_LABEL[entry.tab]}</span>
+          <span class="toolbar-settings-search-result-meta">{getTabLabel(entry.tab)}</span>
         </button>
       ))}
       {toggles.map((entry) => (
@@ -533,6 +540,11 @@ interface SettingsTabBodyProps {
   toolCatalog: string[];
   activeContextWindow?: number;
   activeModel?: { provider?: string; id: string };
+  selectedModel: string;
+  selectedProvider?: string;
+  selectedLevel: ThinkingLevel;
+  chatModelEntries: ModelPickerEntry[];
+  onModelChange: (model: string, provider: string | undefined, thinkingLevel: ThinkingLevel) => void;
 }
 
 /** Renders the content of the active settings tab. */
@@ -563,19 +575,75 @@ function SettingsTabBody(props: SettingsTabBodyProps) {
     toolCatalog,
     activeContextWindow,
     activeModel,
+    selectedModel,
+    selectedProvider,
+    selectedLevel,
+    chatModelEntries,
+    onModelChange,
   } = props;
+  const extensionIds = new Set(availableExtensions.map((extension) => extension.id));
+  const hasSkillPruner = extensionIds.has('skill-pruner');
+  const hasSubagent = extensionIds.has('subagent');
+  const hasToolResultPruner = extensionIds.has('tool-result-pruner');
+  const historySettings = resolveHistoryCompactionSettings(prefs.historyCompaction);
+
   return (
     <>
       {effectiveTab === 'chat' && (
         <>
-          <SessionTitlesSection settings={sessionTitlesSettings} modelEntries={modelEntries} availableModels={availableModels} onSetSessionTitlesSettings={onSetSessionTitlesSettings} />
+          <div class="toolbar-settings-section">
+            <div class="toolbar-settings-section-label">Session titles</div>
+            <SessionTitlesSection settings={sessionTitlesSettings} onSetSessionTitlesSettings={onSetSessionTitlesSettings} />
+          </div>
           <ChatPrefSections prefs={prefs} onSetPrefs={onSetPrefs} sectionIds={['transcript']} />
           <SoundSection prefs={prefs} onSetPrefs={onSetPrefs} />
           <ChatPrefSections prefs={prefs} onSetPrefs={onSetPrefs} sectionIds={['diagnostics']} />
         </>
       )}
-      {effectiveTab === 'history' && (
-        <HistoryCompactionSection settings={resolveHistoryCompactionSettings(prefs.historyCompaction)} contextWindow={activeContextWindow} availableModels={availableModels} modelEntries={modelEntries} activeModel={activeModel} onSetPrefs={onSetPrefs} />
+      {effectiveTab === 'models' && (
+        <>
+          <div class="toolbar-settings-section">
+            <div class="toolbar-settings-section-label">Model assignments</div>
+            <div class="toolbar-settings-list">
+              <ChatDefaultModelAssignment
+                selectedModel={selectedModel}
+                selectedProvider={selectedProvider}
+                selectedLevel={selectedLevel}
+                modelEntries={chatModelEntries}
+                availableModels={availableModels}
+                onModelChange={onModelChange}
+              />
+              <SessionTitlesModelAssignment settings={sessionTitlesSettings} modelEntries={modelEntries} availableModels={availableModels} onSetSessionTitlesSettings={onSetSessionTitlesSettings} />
+              <HistoryCompactionModelAssignment settings={historySettings} availableModels={availableModels} modelEntries={modelEntries} activeModel={activeModel} onSetPrefs={onSetPrefs} />
+              {hasSkillPruner && <SkillPrunerModelAssignment pruningSettings={pruningSettings} modelEntries={modelEntries} availableModels={availableModels} onSetPruningSettings={onSetPruningSettings} />}
+              {hasSubagent && <SubagentModelAssignments prefs={prefs} onSetPrefs={onSetPrefs} availableModels={availableModels} />}
+            </div>
+          </div>
+          <div class="toolbar-settings-section">
+            <div class="toolbar-settings-section-label">Providers</div>
+            <ProvidersSection providers={providers} prefs={prefs} onSetPrefs={onSetPrefs} providerGateStats={providerGateStats} />
+          </div>
+        </>
+      )}
+      {effectiveTab === 'context' && (
+        <>
+          <HistoryCompactionSection settings={historySettings} contextWindow={activeContextWindow} availableModels={availableModels} activeModel={activeModel} onSetPrefs={onSetPrefs} />
+          {hasSkillPruner && (
+            <div class="toolbar-settings-section">
+              <div class="toolbar-settings-section-label">Skill pruning</div>
+              <SkillPrunerSettings prefs={prefs} pruningSettings={pruningSettings} skillCatalog={skillCatalog} toolCatalog={toolCatalog} onSetPrefs={onSetPrefs} onSetPruningSettings={onSetPruningSettings} />
+            </div>
+          )}
+          {hasToolResultPruner && (
+            <div class="toolbar-settings-section">
+              <div class="toolbar-settings-section-label">Tool-result pruning</div>
+              <ToolResultPrunerSettings settings={toolResultPruningSettings} onSetToolResultPruningSettings={onSetToolResultPruningSettings} />
+            </div>
+          )}
+        </>
+      )}
+      {effectiveTab === 'subagents' && hasSubagent && (
+        <SubagentSection prefs={prefs} onSetPrefs={onSetPrefs} availableModels={availableModels} />
       )}
       {effectiveTab === 'appearance' && (
         <AppearanceSection prefs={prefs} onSetPrefs={onSetPrefs} />
@@ -587,18 +655,7 @@ function SettingsTabBody(props: SettingsTabBodyProps) {
           onSetPrefs={onSetPrefs}
           expandedExt={expandedExt}
           setExpandedExt={setExpandedExt}
-          pruningSettings={pruningSettings}
-          toolResultPruningSettings={toolResultPruningSettings}
-          modelEntries={modelEntries}
-          availableModels={availableModels}
-          skillCatalog={skillCatalog}
-          toolCatalog={toolCatalog}
-          onSetPruningSettings={onSetPruningSettings}
-          onSetToolResultPruningSettings={onSetToolResultPruningSettings}
         />
-      )}
-      {effectiveTab === 'providers' && (
-        <ProvidersSection providers={providers} prefs={prefs} onSetPrefs={onSetPrefs} providerGateStats={providerGateStats} />
       )}
       {effectiveTab === 'mcp' && (
         <McpSection prefs={prefs} mcpServers={mcpServers} mcpServersStatus={mcpServersStatus} mcpPendingApply={mcpPendingApply} onSetPrefs={onSetPrefs} onMcpListRequested={onMcpListRequested} onMcpSetServerEnabled={onMcpSetServerEnabled} />
@@ -607,7 +664,7 @@ function SettingsTabBody(props: SettingsTabBodyProps) {
   );
 }
 
-export function ComposerSettingsMenu({ prefs, mcpServers, mcpServersStatus, mcpPendingApply, pruningSettings, pruningCatalog, pruningResult, toolResultPruningSettings, sessionTitlesSettings = DEFAULT_SESSION_TITLES_SETTINGS, availableExtensions, availableModels, providerGateStats, activeContextWindow, activeModel, onSetPrefs, onMcpListRequested, onMcpSetServerEnabled, onSetPruningSettings, onSetToolResultPruningSettings, onSetSessionTitlesSettings = () => undefined }: ComposerSettingsMenuProps) {
+export function ComposerSettingsMenu({ prefs, mcpServers, mcpServersStatus, mcpPendingApply, pruningSettings, pruningCatalog, pruningResult, toolResultPruningSettings, sessionTitlesSettings = DEFAULT_SESSION_TITLES_SETTINGS, availableExtensions, availableModels, providerGateStats, activeContextWindow, activeModel, selectedModel, selectedProvider, selectedLevel, chatModelEntries, onModelChange, onSetPrefs, onMcpListRequested, onMcpSetServerEnabled, onSetPruningSettings, onSetToolResultPruningSettings, onSetSessionTitlesSettings = () => undefined }: ComposerSettingsMenuProps) {
   const skillCatalog = useMemo(
     () => computeKeepCatalog(
       pruningCatalog.skills,
@@ -659,15 +716,15 @@ export function ComposerSettingsMenu({ prefs, mcpServers, mcpServersStatus, mcpP
     [availableModels],
   );
 
-  // Tabs that have content to show. Extensions and Providers are conditional on
-  // available extensions/models; the rest always have content.
+  // Extensions and Subagents disappear when their backing content is absent;
+  // Models and Context always retain their baseline sections.
   const visibleTabs = useMemo(
     () => TAB_DEFS.filter((t) => {
       if (t.id === 'extensions') return availableExtensions.length > 0;
-      if (t.id === 'providers') return providers.length > 0;
+      if (t.id === 'subagents') return availableExtensions.some((extension) => extension.id === 'subagent');
       return true;
     }),
-    [availableExtensions.length, providers.length],
+    [availableExtensions],
   );
 
   // Effective tab falls back to the first visible one if the active tab's
@@ -927,6 +984,11 @@ export function ComposerSettingsMenu({ prefs, mcpServers, mcpServersStatus, mcpP
                 toolCatalog={toolCatalog}
                 activeContextWindow={activeContextWindow}
                 activeModel={activeModel}
+                selectedModel={selectedModel ?? activeModel?.id ?? ''}
+                selectedProvider={selectedProvider ?? activeModel?.provider}
+                selectedLevel={selectedLevel ?? 'off'}
+                chatModelEntries={chatModelEntries ?? modelEntries}
+                onModelChange={onModelChange ?? (() => undefined)}
               />
             )}
           </div>

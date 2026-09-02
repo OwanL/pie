@@ -52,6 +52,12 @@ export function handleMessageStarted(state: ArchState, event: Extract<Event, { k
   effects.push(...titleStart.effects);
 
   const nextState = produce(titleStart.state, (draft) => {
+    // In the legacy event path, message_start is the first proof that the
+    // retried provider response resumed. The SDK does not emit retry.ended
+    // until message_end, so retaining this UI marker would label healthy
+    // streaming output as still retrying.
+    delete draft.sessions.retryStatusBySession[sessionPath];
+
     // Update alias map or currentTurnBySession
     if (isAlias) {
       draft.pending.messageIdAlias[messageId] = { canonicalId: currentTurn!.firstMessageId, sessionPath: event.sessionPath };

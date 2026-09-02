@@ -349,6 +349,11 @@
   color: var(--panel-foreground);
 }
 
+.transcript-prompt-context.is-compact {
+  min-height: 26px;
+  padding-block: 1px;
+}
+
 .transcript-prompt-context.is-hidden {
   visibility: hidden;
   pointer-events: none;

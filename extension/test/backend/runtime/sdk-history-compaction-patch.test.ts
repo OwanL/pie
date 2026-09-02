@@ -37,8 +37,17 @@ function withConfig<T>(
 function createFakeSessionClass() {
   return class FakeAgentSession {
     agent = {
-      state: { messages: ['raw'] as unknown[] },
-      prepareNextTurnWithContext: undefined as undefined | ((turn: { context: Record<string, unknown> }) => Promise<Record<string, unknown>>),
+      state: {
+        messages: [
+          { role: 'user', content: 'work' },
+          { role: 'assistant', stopReason: 'stop', content: 'partial result' },
+        ] as unknown[],
+      },
+      prepareNextTurnWithContext: undefined as undefined | ((turn: {
+        context: Record<string, unknown>;
+        message?: { role?: string; stopReason?: string; content?: unknown[] };
+        toolResults?: unknown[];
+      }) => Promise<Record<string, unknown> | undefined>),
     };
     sessionManager = {
       entries: [] as Array<{ type: string; id: string }>,
@@ -48,6 +57,13 @@ function createFakeSessionClass() {
     usage = { tokens: 0 as number | null, contextWindow: 10_000 };
     originalChecks = 0;
     compactions: boolean[] = [];
+    compactionStarted?: () => void;
+    compactionGate?: Promise<void>;
+    postRunMessage?: {
+      stopReason?: string;
+      content?: unknown[];
+      usage?: { input?: number; cacheRead?: number; output?: number };
+    };
 
     constructor() {
       this._installAgentNextTurnRefresh();
@@ -57,17 +73,32 @@ function createFakeSessionClass() {
       this.agent.prepareNextTurnWithContext = async (turn) => ({ context: turn.context });
     }
 
-    async _checkCompaction(_assistantMessage: { stopReason?: string } = {}): Promise<boolean> {
+    async _checkCompaction(
+      _assistantMessage: { stopReason?: string } = {},
+      _skipAbortedCheck = true,
+    ): Promise<boolean> {
       this.originalChecks += 1;
       return false;
     }
 
     async _runAutoCompaction(_reason: 'threshold', willRetry: boolean): Promise<boolean> {
       this.compactions.push(willRetry);
+      this.compactionStarted?.();
+      await this.compactionGate;
       const id = `cmp-${this.compactions.length}`;
       this.sessionManager.entries.push({ type: 'compaction', id });
-      this.agent.state.messages = [`summary-${id}`];
+      this.agent.state.messages = [
+        { role: 'compactionSummary', summary: `summary-${id}` },
+        { role: 'user', content: 'work' },
+        { role: 'assistant', stopReason: 'stop', content: 'partial result' },
+      ];
       return willRetry;
+    }
+
+    async _handlePostAgentRun(): Promise<boolean> {
+      const message = this.postRunMessage;
+      this.postRunMessage = undefined;
+      return message ? await this._checkCompaction(message) : false;
     }
 
     getContextUsage() {
@@ -105,29 +136,191 @@ test('hard trigger compacts at the awaited between-turn barrier and refreshes lo
     const session = new FakeAgentSession();
     session.usage.tokens = 2_000;
 
-    const snapshot = await session.agent.prepareNextTurnWithContext?.({ context: { messages: ['raw'] } });
+    const snapshot = await session.agent.prepareNextTurnWithContext?.({
+      context: { messages: ['raw'] },
+      message: { role: 'assistant', stopReason: 'stop', content: [] },
+      toolResults: [],
+    });
 
     assert.deepEqual(session.compactions, [true], 'hard compaction marks that the current run will continue');
-    assert.deepEqual(snapshot?.context, { messages: ['summary-cmp-1'] });
+    assert.deepEqual(snapshot?.context, { messages: session.agent.state.messages });
   });
 });
 
-test('soft trigger runs only after an active run and idle preflight uses the hard threshold', async () => {
+test('hard compaction after a terminal provider turn schedules a zero-prompt continuation', async () => {
+  await withConfig(async () => {
+    const FakeAgentSession = createFakeSessionClass();
+    applySdkHistoryCompactionRuntimePatch({ AgentSession: FakeAgentSession as never });
+    const session = new FakeAgentSession();
+    session.usage.tokens = 2_000;
+
+    await session.agent.prepareNextTurnWithContext?.({
+      context: { messages: session.agent.state.messages },
+      message: { role: 'assistant', stopReason: 'stop', content: [] },
+      toolResults: [],
+    });
+    const shouldContinue = await session._handlePostAgentRun();
+
+    assert.equal(shouldContinue, true, 'the AgentSession outer loop must invoke agent.continue()');
+    assert.deepEqual(
+      session.agent.state.messages,
+      [
+        { role: 'compactionSummary', summary: 'summary-cmp-1' },
+        { role: 'user', content: 'work' },
+      ],
+      'the durable terminal assistant is removed only from provider context before continuation',
+    );
+  });
+});
+
+test('hard compaction during a tool batch does not arm an extra outer-loop continuation', async () => {
+  await withConfig(async () => {
+    const FakeAgentSession = createFakeSessionClass();
+    applySdkHistoryCompactionRuntimePatch({ AgentSession: FakeAgentSession as never });
+    const session = new FakeAgentSession() as InstanceType<typeof FakeAgentSession> & {
+      hasPendingHistoryCompactionContinuation(): boolean;
+    };
+    session.usage.tokens = 2_000;
+
+    await session.agent.prepareNextTurnWithContext?.({
+      context: { messages: session.agent.state.messages },
+      message: { role: 'assistant', stopReason: 'stop', content: [{ type: 'toolCall' }] },
+      toolResults: [{ terminate: true }],
+    });
+
+    assert.deepEqual(session.compactions, [true]);
+    assert.equal(session.hasPendingHistoryCompactionContinuation(), false);
+    assert.equal(await session._handlePostAgentRun(), false);
+  });
+});
+
+test('interrupt cancels a deferred hard-compaction continuation before post-run settlement', async () => {
+  await withConfig(async () => {
+    const FakeAgentSession = createFakeSessionClass();
+    applySdkHistoryCompactionRuntimePatch({ AgentSession: FakeAgentSession as never });
+    const session = new FakeAgentSession() as InstanceType<typeof FakeAgentSession> & {
+      cancelPendingHardCompactionContinuation(): void;
+    };
+    session.usage.tokens = 2_000;
+
+    await session.agent.prepareNextTurnWithContext?.({
+      context: { messages: session.agent.state.messages },
+      message: { role: 'assistant', stopReason: 'stop', content: [] },
+      toolResults: [],
+    });
+    session.cancelPendingHardCompactionContinuation();
+
+    assert.equal(await session._handlePostAgentRun(), false);
+    assert.equal(
+      (session.agent.state.messages.at(-1) as { role?: string } | undefined)?.role,
+      'assistant',
+      'cancel leaves durable provider context intact',
+    );
+  });
+});
+
+test('interrupt during a settling hard compaction cannot re-arm its deferred continuation', async () => {
+  await withConfig(async () => {
+    const FakeAgentSession = createFakeSessionClass();
+    applySdkHistoryCompactionRuntimePatch({ AgentSession: FakeAgentSession as never });
+    const session = new FakeAgentSession() as InstanceType<typeof FakeAgentSession> & {
+      cancelPendingHardCompactionContinuation(): void;
+    };
+    session.usage.tokens = 2_000;
+    let releaseCompaction!: () => void;
+    let markCompactionStarted!: () => void;
+    session.compactionGate = new Promise<void>((resolve) => { releaseCompaction = resolve; });
+    const compactionStarted = new Promise<void>((resolve) => { markCompactionStarted = resolve; });
+    session.compactionStarted = markCompactionStarted;
+
+    const prepare = session.agent.prepareNextTurnWithContext?.({
+      context: { messages: session.agent.state.messages },
+      message: { role: 'assistant', stopReason: 'stop', content: [] },
+      toolResults: [],
+    });
+    await compactionStarted;
+    session.cancelPendingHardCompactionContinuation();
+    releaseCompaction();
+    await prepare;
+
+    assert.equal(await session._handlePostAgentRun(), false);
+  });
+});
+
+test('an aborted natural turn after hard compaction cancels the deferred fallback', async () => {
+  await withConfig(async () => {
+    const FakeAgentSession = createFakeSessionClass();
+    applySdkHistoryCompactionRuntimePatch({ AgentSession: FakeAgentSession as never });
+    const session = new FakeAgentSession();
+    session.usage.tokens = 2_000;
+
+    await session.agent.prepareNextTurnWithContext?.({
+      context: { messages: session.agent.state.messages },
+      message: { role: 'assistant', stopReason: 'stop', content: [] },
+      toolResults: [],
+    });
+    session.agent.state.messages.push({ role: 'assistant', stopReason: 'aborted', content: 'queued turn partial' });
+
+    const shouldContinue = await session._handlePostAgentRun();
+
+    assert.equal(shouldContinue, false, 'the aborted natural turn must not be restarted');
+    assert.deepEqual(
+      session.agent.state.messages.at(-1),
+      { role: 'assistant', stopReason: 'aborted', content: 'queued turn partial' },
+    );
+  });
+});
+
+test('soft threshold compaction after agent_end schedules a zero-prompt continuation', async () => {
   await withConfig(async () => {
     const FakeAgentSession = createFakeSessionClass();
     applySdkHistoryCompactionRuntimePatch({ AgentSession: FakeAgentSession as never });
     const session = new FakeAgentSession();
     session.usage.tokens = 1_500;
 
-    const softResult = await session._checkCompaction({});
-    assert.equal(softResult, false);
-    assert.deepEqual(session.compactions, [false]);
-    assert.equal(session.originalChecks, 0);
+    session.postRunMessage = {
+      stopReason: 'length',
+      content: [],
+      usage: { input: 0, cacheRead: 0, output: 0 },
+    };
 
+    assert.equal(
+      await session._handlePostAgentRun(),
+      true,
+      'the patched post-run loop continues only after removing the assistant tail',
+    );
+    assert.deepEqual(session.compactions, [true], 'the compaction lifecycle must report willRetry');
+    assert.deepEqual(session.agent.state.messages, [
+      { role: 'compactionSummary', summary: 'summary-cmp-1' },
+      { role: 'user', content: 'work' },
+    ]);
+    assert.equal(session.originalChecks, 0);
+  });
+});
+
+test('pre-prompt soft compaction does not create a second continuation', async () => {
+  await withConfig(async () => {
+    const FakeAgentSession = createFakeSessionClass();
+    applySdkHistoryCompactionRuntimePatch({ AgentSession: FakeAgentSession as never });
+    const session = new FakeAgentSession();
+    session.usage.tokens = 1_500;
+
+    assert.equal(await session._checkCompaction({}, false), false);
+    assert.deepEqual(session.compactions, [false]);
+    assert.equal(await session._handlePostAgentRun(), false);
+  });
+});
+
+test('idle preflight uses the hard threshold', async () => {
+  await withConfig(async () => {
+    const FakeAgentSession = createFakeSessionClass();
+    applySdkHistoryCompactionRuntimePatch({ AgentSession: FakeAgentSession as never });
     const idle = new FakeAgentSession();
     idle._isAgentRunActive = false;
     idle.usage.tokens = 1_500;
+
     await idle._checkCompaction({});
+
     assert.deepEqual(idle.compactions, []);
     assert.equal(idle.originalChecks, 0, 'the configured hard limit replaces pi native threshold timing');
   });

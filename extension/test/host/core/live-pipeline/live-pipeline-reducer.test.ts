@@ -39,6 +39,53 @@ function withPendingUiRequest(state: ReturnType<typeof createInitialArchState>) 
   };
 }
 
+test('provider progress clears the retry chip while retry timing continues to message completion', () => {
+  let state = createInitialArchState();
+  state = dispatch(state, {
+    ...base, kind: 'turn.started', seq: 1, canonicalMessageId: 'message', startedAt: 90,
+  }).state;
+  state = dispatch(state, {
+    ...base, kind: 'turn.phase', seq: 2, phase: 'retry_wait', inactivityBudgetMs: 1_000,
+  }).state;
+  state = reducer(state, {
+    kind: 'RetryStarted', sessionPath: base.sessionPath,
+    attempt: 1, maxAttempts: 8, delayMs: 1_000, errorMessage: 'WebSocket closed 1006',
+  }).state;
+
+  state = dispatch(state, {
+    ...base, kind: 'turn.phase', seq: 3, phase: 'waiting_provider', inactivityBudgetMs: 120_000,
+  }).state;
+  assert.equal(state.sessions.retryStatusBySession[base.sessionPath]?.attempt, 1,
+    'the retry indicator remains while the replacement provider response is still pending');
+
+  state = dispatch(state, {
+    ...base, kind: 'turn.reasoning', seq: 4, delta: 'healthy resumed reasoning',
+  }).state;
+  assert.equal(state.sessions.retryStatusBySession[base.sessionPath], undefined,
+    'accepted provider output proves that the visible retry phase has ended');
+  assert.equal(state.livePipeline.turnsBySession[base.sessionPath]?.phase, 'streaming');
+
+  const lateTerminal = reducer(state, {
+    kind: 'RetryEnded', sessionPath: base.sessionPath, success: true, attempt: 1,
+  });
+  assert.equal(lateTerminal.state, state, 'the SDK retry terminal remains an idempotent analytics boundary');
+});
+
+test('legacy message start clears a retry chip when no live-pipeline owner exists', () => {
+  const initial = createInitialArchState();
+  initial.sessions.retryStatusBySession[base.sessionPath] = {
+    attempt: 1, maxAttempts: 8, delayMs: 1_000, errorMessage: 'WebSocket closed 1006',
+  };
+
+  const result = reducer(initial, {
+    kind: 'MessageStarted', sessionPath: base.sessionPath,
+    messageId: 'legacy-message', requestId: base.requestId, timestamp: 100,
+  });
+
+  assert.equal(result.state.sessions.retryStatusBySession[base.sessionPath], undefined);
+  assert.equal(result.state.transcript.bySession[base.sessionPath]?.at(-1)?.status, 'streaming');
+});
+
 test('sequenced live events project without mutating durable transcript and terminalize atomically', () => {
   let state = createInitialArchState();
   state.sessions.activeSessionPath = base.sessionPath;

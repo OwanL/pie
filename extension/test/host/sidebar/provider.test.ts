@@ -131,7 +131,6 @@ function createProvider(
   clock: FakeClock,
   routed: WebviewToHostMessage[],
   assetResolutions?: Array<string | Promise<string>>,
-  onBuildMismatch?: (details: { actualBuildId: string | null; expectedBuildId: string }) => void,
 ) {
   let assetCount = 0;
   const provider = new SidebarViewProvider(
@@ -153,7 +152,6 @@ function createProvider(
       retryDelayMs: 5,
       maxRetryAttempts: 2,
       acceptedLedgerCapacity: 8,
-      onBuildMismatch,
     },
   );
   return { provider, getAssetCount: () => assetCount };
@@ -174,16 +172,10 @@ function stateMessages(view: FakeView): StateMessage[] {
   return view.posted.filter((message): message is StateMessage => message.type === 'state');
 }
 
-test('a matching-asset renderer from another build is terminally fenced until window reload', async () => {
+test('a matching-asset renderer from another build remains usable without a window reload', async () => {
   const clock = new FakeClock();
   const routed: WebviewToHostMessage[] = [];
-  const mismatches: Array<{ actualBuildId: string | null; expectedBuildId: string }> = [];
-  const { provider, getAssetCount } = createProvider(
-    clock,
-    routed,
-    undefined,
-    (details) => mismatches.push(details),
-  );
+  const { provider, getAssetCount } = createProvider(clock, routed);
   const view = new FakeView();
   await provider.resolveWebviewView(view as never, {} as never, {} as never);
   const generationBefore = provider.getDebugState().viewGeneration;
@@ -191,19 +183,15 @@ test('a matching-asset renderer from another build is terminally fenced until wi
   view.send({ type: 'ready', assetVersion: 'v1', buildId: 'stale-build', viewGeneration: generationBefore });
   await settle();
 
-  assert.deepEqual(mismatches, [{ actualBuildId: 'stale-build', expectedBuildId: PIE_BUILD_ID }]);
-  assert.equal(provider.getDebugState().hasView, false, 'the incompatible transport is detached');
-  assert.equal(provider.getDebugState().webviewReady, false);
-  assert.ok(provider.getDebugState().viewGeneration > generationBefore, 'renderer ownership is invalidated');
-  assert.match(view.webview.html, /Reload required/);
+  assert.equal(provider.getDebugState().hasView, true, 'the current transport remains attached');
+  assert.equal(provider.getDebugState().webviewReady, true);
+  assert.equal(provider.getDebugState().viewGeneration, generationBefore, 'renderer ownership is preserved');
+  assert.doesNotMatch(view.webview.html, /Reload required/);
 
-  view.send({ type: 'newSession', viewGeneration: provider.getDebugState().viewGeneration });
-  provider.scheduleState();
-  clock.advance(60_000);
+  view.send({ type: 'newSession', viewGeneration: generationBefore });
   await settle();
-  assert.deepEqual(routed, [], 'no later command crosses the terminal boundary');
-  assert.equal(getAssetCount(), 1, 'ordinary readiness recovery is not re-armed');
-  assert.equal(mismatches.length, 1, 'the reload prompt is deduplicated');
+  assert.deepEqual(routed.map((message) => message.type), ['ready', 'newSession']);
+  assert.equal(getAssetCount(), 1, 'build skew does not trigger an asset reload');
   provider.dispose();
 });
 

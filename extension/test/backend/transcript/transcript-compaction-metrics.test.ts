@@ -214,6 +214,58 @@ test('mapTranscript ignores a custom entry with a different customType (not a si
   assert.notEqual(transcript[0].customDetails, undefined);
 });
 
+test('mapTranscript hides the failed provider row consumed by overflow compaction and makes a repeated overflow continuable', () => {
+  const entries: SessionEntryLike[] = [
+    {
+      id: 'user-1',
+      type: 'message',
+      timestamp: '2026-07-15T00:00:00.000Z',
+      message: { role: 'user', content: 'finish the task' },
+    },
+    {
+      id: 'overflow-1',
+      type: 'message',
+      timestamp: '2026-07-15T00:00:01.000Z',
+      message: {
+        role: 'assistant',
+        content: [],
+        stopReason: 'error',
+        errorMessage: 'prompt is too long: 201000 tokens > 200000 maximum',
+      },
+    },
+    {
+      ...compactionEntry('compact-overflow'),
+      timestamp: '2026-07-15T00:00:02.000Z',
+      details: { pieCompaction: { reason: 'overflow' } },
+    },
+    metricsSidecar('sidecar-overflow', 'compact-overflow', {
+      reason: 'overflow',
+      tokensBefore: 201_000,
+      estimatedTokensAfter: 30_000,
+    }),
+    {
+      id: 'overflow-2',
+      type: 'message',
+      timestamp: '2026-07-15T00:00:04.000Z',
+      message: {
+        role: 'assistant',
+        content: [],
+        stopReason: 'error',
+        errorMessage: 'Your input exceeds the context window of this model',
+      },
+    },
+  ];
+
+  const transcript = mapTranscript(entries);
+
+  assert.deepEqual(transcript.map((message) => message.id), [
+    'user-1',
+    'compact-overflow',
+    'overflow-2',
+  ]);
+  assert.equal(transcript.at(-1)?.status, 'interrupted');
+});
+
 test('mapTranscript handles a compaction entry with an empty reason in the sidecar', () => {
   const entries: SessionEntryLike[] = [
     compactionEntry('compact-1'),

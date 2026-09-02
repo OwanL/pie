@@ -215,6 +215,34 @@ test('writer rejects invalid, oversize, and over-capacity frames without assigni
   assert.equal(target.sent.length, 1);
 });
 
+test('an exceptional oversized lifecycle frame leaves the lane reservation available for following terminals', () => {
+  const target = new FakeSendTarget();
+  const writer = new BoundedWorkerIpcWriter(target, { maxQueuedLifecycleBytes: 1024 });
+  writer.enqueue(command('active'));
+  const opened: WorkerIpcFrameDraft = {
+    ...frameBase,
+    kind: 'runtime.event',
+    event: 'session.opened',
+    payload: { transcript: 'x'.repeat(1_200) },
+  };
+  const busy: WorkerIpcFrameDraft = {
+    ...frameBase,
+    kind: 'runtime.event',
+    event: 'busy.changed',
+    payload: { sessionPath: '/session.jsonl', busy: true, seq: 1 },
+  };
+
+  assert.equal(writer.enqueue(opened).accepted, true,
+    'the first queued lifecycle frame may exceed the reservation');
+  assert.equal(writer.enqueue(busy).accepted, true,
+    'the oversized frame must not consume the reservation intended for following lifecycle frames');
+
+  while (target.callbacks.length > 0) target.callbacks.shift()!(null);
+  assert.deepEqual(target.sent.map((frame) => frame.kind === 'runtime.event' ? frame.event : frame.kind), [
+    'command', 'session.opened', 'busy.changed',
+  ]);
+});
+
 test('writer admits a single large control frame that exceeds the lane capacity', () => {
   const target = new FakeSendTarget();
   const writer = new BoundedWorkerIpcWriter(target, { maxQueuedControlBytes: 1024 });

@@ -875,6 +875,64 @@ test('duplicate, tree, context, paging, and durable detail retain SDK and public
   }
 });
 
+test('provider-forced compaction rebuilds and duplicates without restoring the consumed overflow error', async () => {
+  const h = await makeHarness();
+  try {
+    const sessionPath = path.join(h.sessionDir, 'overflow-compacted.jsonl');
+    await writeJsonl(sessionPath, [
+      header(h.root, 3, 'overflow-compacted'),
+      userEntry('user', null, 'finish the task'),
+      {
+        type: 'message',
+        id: 'overflow-error',
+        parentId: 'user',
+        timestamp: '2026-08-15T00:00:02.000Z',
+        message: {
+          role: 'assistant',
+          content: [],
+          provider: 'mock',
+          model: 'model-a',
+          stopReason: 'error',
+          errorMessage: 'prompt is too long: 201000 tokens > 200000 maximum',
+          usage: { input: 201_000, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 201_000 },
+          timestamp: 2,
+        },
+      },
+      {
+        type: 'compaction',
+        id: 'compact-overflow',
+        parentId: 'overflow-error',
+        timestamp: '2026-08-15T00:00:03.000Z',
+        summary: 'Kept task context',
+        firstKeptEntryId: 'user',
+        tokensBefore: 201_000,
+        details: { pieCompaction: { reason: 'overflow' } },
+      },
+    ]);
+
+    const sourceContext = h.store.context(sessionPath);
+    assert.deepEqual(sourceContext.messages.map((message: any) => message.role), [
+      'compactionSummary',
+      'user',
+    ]);
+    const sourceSnapshot = await h.store.openSnapshot(sessionPath, browseOpenOptions);
+    assert.deepEqual(sourceSnapshot.transcript.map((message) => message.id), [
+      'user',
+      'compact-overflow',
+    ]);
+
+    const duplicate = h.store.duplicate(sessionPath);
+    const duplicateContext = h.store.context(duplicate.sessionPath);
+    assert.deepEqual(
+      duplicateContext.messages.map((message: any) => message.role),
+      ['compactionSummary', 'user'],
+      'forkFrom must preserve the same cleaned provider context as the live source',
+    );
+  } finally {
+    await fs.rm(h.root, { recursive: true, force: true });
+  }
+});
+
 test('cold model settings append canonical Pi entries and survive a fresh store generation', async () => {
   const h = await makeHarness();
   const SessionManager = await getRealSessionManager();

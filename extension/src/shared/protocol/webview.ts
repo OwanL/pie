@@ -405,7 +405,7 @@ export type HostToWebviewMessage =
   | {
       type: 'state';
       protocolVersion: number;
-      /** Exact source-build identity shared by host and renderer bundles. */
+      /** Compiled source identity used for diagnostics and build verification. */
       buildId: string;
       /** Shared extension-host incarnation (same value for every renderer). */
       hostInstanceId: string;

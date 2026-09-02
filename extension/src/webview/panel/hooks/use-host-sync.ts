@@ -34,7 +34,7 @@ import type {
 } from '../../../shared/protocol';
 import type { ClientTransport, ClientConnectionState } from '../../transport/client-transport';
 import { pendingCommandStore } from '../../transport/pending-command-store';
-import { DEFAULT_CHAT_PREFS, DEFAULT_PRUNING_SETTINGS, DEFAULT_SESSION_TITLES_SETTINGS, DEFAULT_TOOL_RESULT_PRUNING_SETTINGS, EMPTY_TRANSCRIPT_WINDOW, PIE_BUILD_ID, WEBVIEW_PROTOCOL_VERSION } from '../../../shared/protocol';
+import { DEFAULT_CHAT_PREFS, DEFAULT_PRUNING_SETTINGS, DEFAULT_SESSION_TITLES_SETTINGS, DEFAULT_TOOL_RESULT_PRUNING_SETTINGS, EMPTY_TRANSCRIPT_WINDOW, WEBVIEW_PROTOCOL_VERSION } from '../../../shared/protocol';
 import { EMPTY_AGGREGATE_STATS } from '../../../shared/protocol';
 import { pickStable } from '../utils/view-state-stabilize';
 import { pickStableModelList } from '../utils/model-list-stabilize';
@@ -335,7 +335,7 @@ interface HostMessageContext {
   lastRevisionRef: { current: number };
   activeSessionPathRef: { current: string | null };
   committedSessionPathRef: { current: string | null };
-  /** Terminal fence for a host/webview generation mismatch. */
+  /** Terminal fence for a host/webview protocol mismatch. */
   compatibilityFailedRef: { current: boolean };
   onCompatibilityMismatch: () => void;
   clearTransientUi: () => void;
@@ -353,27 +353,23 @@ interface HostMessageContext {
  * message. */
 let warnedCompatibilityMismatch = false;
 
-/**
- * Reject state from a different protocol or source build. A stale renderer may
- * observe a new host (or vice versa) during an in-place rebuild; applying even
- * one incompatible snapshot would let the two generations exchange commands.
- */
+/** Reject state whose wire protocol is incompatible with this renderer. Build
+ * identities are diagnostic only: same-protocol in-place rebuilds keep the
+ * current extension host and its sessions usable until the user reloads. */
 function rejectCompatibilityMismatch(
   message: Extract<HostToWebviewMessage, { type: 'state' }>,
   ctx: HostMessageContext,
 ): boolean {
-  if (message.protocolVersion === WEBVIEW_PROTOCOL_VERSION && message.buildId === PIE_BUILD_ID) return false;
+  if (message.protocolVersion === WEBVIEW_PROTOCOL_VERSION) return false;
   ctx.compatibilityFailedRef.current = true;
   if (!warnedCompatibilityMismatch) {
     warnedCompatibilityMismatch = true;
     webviewLog(
       'error',
       'host-sync',
-      'host/webview compatibility mismatch; state was rejected',
+      'host/webview protocol mismatch; state was rejected',
       {
-        actualBuildId: message.buildId ?? null,
         actualProtocolVersion: message.protocolVersion,
-        expectedBuildId: PIE_BUILD_ID,
         expectedProtocolVersion: WEBVIEW_PROTOCOL_VERSION,
       },
     );

@@ -320,3 +320,53 @@ test('initial positioning keeps the bar reserved but hidden while a prompt exist
   render(null, container);
   container.remove();
 });
+
+test('short prompts compact the original row while long prompts keep its full height', () => {
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  const metrics: ElementMetrics = { scrollTop: 50, scrollHeight: 600, clientHeight: 200 };
+  const element = makeScrollElement(metrics);
+  const originalClientWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth');
+  const originalScrollWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollWidth');
+
+  Object.defineProperty(HTMLElement.prototype, 'clientWidth', {
+    configurable: true,
+    get() {
+      return this.classList.contains('transcript-prompt-context-row') ? 400 : 0;
+    },
+  });
+  Object.defineProperty(HTMLElement.prototype, 'scrollWidth', {
+    configurable: true,
+    get() {
+      if (this.classList.contains('transcript-prompt-context-preview')) {
+        return (this.textContent?.length ?? 0) * 8 + 16;
+      }
+      return 0;
+    },
+  });
+
+  try {
+    const shortBar = renderBar(container, {
+      rows: [messageRow(userMessage('short', 'continue'))],
+      measurements: [{ start: 0, end: 40 }],
+      metrics,
+      scrollElement: element,
+    });
+    assert.ok(shortBar?.classList.contains('is-compact'));
+
+    const longBar = renderBar(container, {
+      rows: [messageRow(userMessage('long', 'A prompt long enough to occupy well over half of the available context row width.'))],
+      measurements: [{ start: 0, end: 40 }],
+      metrics,
+      scrollElement: element,
+    });
+    assert.equal(longBar?.classList.contains('is-compact'), false);
+  } finally {
+    if (originalClientWidth) Object.defineProperty(HTMLElement.prototype, 'clientWidth', originalClientWidth);
+    else Reflect.deleteProperty(HTMLElement.prototype, 'clientWidth');
+    if (originalScrollWidth) Object.defineProperty(HTMLElement.prototype, 'scrollWidth', originalScrollWidth);
+    else Reflect.deleteProperty(HTMLElement.prototype, 'scrollWidth');
+    render(null, container);
+    container.remove();
+  }
+});

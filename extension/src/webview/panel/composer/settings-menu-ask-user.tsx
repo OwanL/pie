@@ -3,7 +3,10 @@
 
 import type { ChatPrefs } from '../../../shared/protocol';
 import { isAskUserForSubagentsEnabled, setAskUserForSubagents } from '../chat-prefs';
+import { SettingCheckbox } from '../components/setting-checkbox';
 import type { OnSetPrefs } from './settings-menu-types';
+
+export const ASK_USER_SETTING_LABELS = ['Include for subagents'] as const;
 
 interface AskUserSettingsProps {
   prefs: ChatPrefs;
@@ -28,20 +31,11 @@ export function AskUserSettings({ prefs, onSetPrefs }: AskUserSettingsProps) {
   const enabled = isAskUserForSubagentsEnabled(prefs);
   return (
     <div class="toolbar-settings-ext-settings">
-      <button
-        class={`toolbar-settings-item${enabled ? ' checked' : ''}`}
-        type="button"
-        role="checkbox"
-        aria-checked={enabled}
-        onClick={() => onSetPrefs(setAskUserForSubagents(prefs, !enabled))}
-      >
-        <span class="toolbar-settings-item-check" aria-hidden="true">
-          <svg width="14" height="14" viewBox="0 0 13 13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style={enabled ? '' : 'opacity:0'}>
-            <polyline points="2.5,6.5 5,9 10.5,3.5" />
-          </svg>
-        </span>
-        <span class="toolbar-settings-item-label">Include for subagents</span>
-      </button>
+      <SettingCheckbox
+        label="Include for subagents"
+        checked={enabled}
+        onChange={() => onSetPrefs(setAskUserForSubagents(prefs, !enabled))}
+      />
       <div class="toolbar-settings-item-hint">
         When off, subagents cannot call <code>ask_user</code> — they must decide without prompting you. Mirrored to the subagent runner via the shared dropped-tools list.
       </div>

@@ -4,10 +4,10 @@
  * tests share the explicit fallback below.
  *
  * This is deliberately separate from the wire-protocol version. The protocol
- * version describes compatibility, while the build id proves that a running
- * extension host and a freshly loaded renderer came from the same source
- * snapshot. That distinction prevents a stale host from accepting commands
- * from newly written webview assets after an in-place extension rebuild.
+ * version owns runtime compatibility; the build id identifies the source
+ * snapshot for diagnostics and verifies that one-shot builds emitted
+ * coordinated host and renderer bundles. Runtime build skew is allowed so an
+ * in-place rebuild does not force the user to reload active sessions.
  */
 declare const __PIE_BUILD_ID__: string | undefined;
 

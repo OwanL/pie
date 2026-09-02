@@ -21,6 +21,7 @@ export const KNOWN_EXTENSIONS: ExtensionInfo[] = [
   { id: 'copilot-model-discovery', label: 'Copilot Model Discovery', description: 'Keep the GitHub Copilot model catalog up to date' },
   { id: 'web-access-guard', label: 'Web Access Guard', description: 'Enforce raw web results and repair damaged web-access installs' },
   { id: 'image-context-guard', label: 'Image Context Guard', description: 'Bound projected image parts to each model request limit' },
+  { id: 'playwright', label: 'Playwright', description: 'Automate rendered web pages in an isolated headless Chromium via accessibility refs' },
   { id: 'pi-web-access', label: 'Web Access', description: 'Search the web and fetch page or video content' },
 ];
 

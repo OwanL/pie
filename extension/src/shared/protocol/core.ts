@@ -11,11 +11,10 @@ export const SESSION_SNAPSHOT_TOO_LARGE_CODE = 'SESSION_SNAPSHOT_TOO_LARGE' as c
 /**
  * Wire-protocol version for the host↔webview channel. Bump when changing the
  * shape of `HostToWebviewMessage` or `WebviewToHostMessage` in a way that an
- * older webview build cannot tolerate. Both sides fail closed on a mismatch:
- * a renderer never applies incompatible state and the host never routes
- * commands from an incompatible renderer. `PIE_BUILD_ID` adds a stricter
- * same-source-snapshot check for in-place rebuilds that do not otherwise need
- * a protocol bump.
+ * older webview build cannot tolerate. Both sides fail closed on a protocol
+ * mismatch. `PIE_BUILD_ID` separately identifies the compiled source snapshot
+ * for diagnostics and build-output verification; it does not block a
+ * same-protocol renderer after an in-place rebuild.
  *
  * v5 (browser server): multi-renderer identity (`rendererHello`,
  * `rendererVisibilityChanged`, `rendererFocusChanged`), command
@@ -34,8 +33,8 @@ export const SESSION_SNAPSHOT_TOO_LARGE_CODE = 'SESSION_SNAPSHOT_TOO_LARGE' as c
  * v7: Phase-5 detail streams add attempt ownership (`detailAttempt`) and
  * exact Unicode sizing (`totalCodePoints`) for paged reasoning/subagent data.
  *
- * v8: every state/hello and readiness handshake carries `buildId`; protocol
- * or build skew is a reload-required boundary, never a warning-only path.
+ * v8: every state/hello and readiness handshake carries `buildId`. Protocol
+ * skew remains a reload-required boundary; build skew is accepted at runtime.
  */
 export const WEBVIEW_PROTOCOL_VERSION = 8;
 

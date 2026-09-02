@@ -638,14 +638,15 @@ test('message.send accepts requests, handles preflight rejection, and guards con
   assert.equal(rejectedHarness.context.activeRequest, undefined);
 });
 
-test('message.continue resumes without invoking the prompt preflight path', async () => {
+test('message.continue resumes after a completed tool without invoking the prompt preflight path', async () => {
   let continueCalls = 0;
   let promptCalls = 0;
   const harness = createHarness({
     sessionOverrides: {
       messages: [
         { role: 'user', content: 'work' },
-        { role: 'assistant', stopReason: 'aborted', content: 'partial' },
+        { role: 'assistant', stopReason: 'toolUse', content: [{ type: 'toolCall', id: 'tool-1' }] },
+        { role: 'toolResult', toolCallId: 'tool-1', content: 'done' },
       ],
       prompt: async () => { promptCalls += 1; },
       continueAfterInterruption: async () => { continueCalls += 1; },
@@ -669,6 +670,31 @@ test('message.continue resumes without invoking the prompt preflight path', asyn
     false,
     'continuation has no pruning preflight phase',
   );
+});
+
+test('message.continue accepts a repeated provider-forced context overflow', async () => {
+  let continueCalls = 0;
+  const harness = createHarness({
+    sessionOverrides: {
+      messages: [{
+        role: 'assistant',
+        stopReason: 'error',
+        errorMessage: 'prompt is too long: 201000 tokens > 200000 maximum',
+        content: [],
+      }],
+      continueAfterInterruption: async () => { continueCalls += 1; },
+    },
+  });
+
+  const result = await handleBackendRequest(harness.deps, {
+    id: 'continue-overflow',
+    method: 'message.continue',
+    params: { sessionPath: harness.context.sessionPath },
+  });
+
+  assert.equal(typeof (result as { requestId?: string }).requestId, 'string');
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(continueCalls, 1);
 });
 
 test('message.continue rejects a non-interrupted tail before acknowledging provider work', async () => {
@@ -936,12 +962,15 @@ test('message.interrupt validates running state and reports abort failures', asy
     params: { sessionPath: '/repo/session.jsonl' },
   }), { interrupted: false, alreadyStopped: true });
 
+  let cancelledDeferredContinuation = 0;
   const activeHarness = createHarness({
     context: {
       activeRequest: { id: 'req-1', messageIndex: 0, aborted: false },
+      hardCompactionContinuationPending: true,
     },
     sessionOverrides: {
       isStreaming: true,
+      cancelPendingHardCompactionContinuation: () => { cancelledDeferredContinuation += 1; },
       abort: async () => {
         throw new Error('abort failed');
       },
@@ -953,6 +982,8 @@ test('message.interrupt validates running state and reports abort failures', asy
     params: { sessionPath: '/repo/session.jsonl' },
   }), /abort failed/);
   assert.equal(activeHarness.context.activeRequest?.aborted, true);
+  assert.equal(activeHarness.context.hardCompactionContinuationPending, false);
+  assert.equal(cancelledDeferredContinuation, 1);
 });
 
 test('interrupt watchdog duration uses readable singular, plural, and millisecond labels', () => {

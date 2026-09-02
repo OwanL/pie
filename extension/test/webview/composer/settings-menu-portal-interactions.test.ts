@@ -65,14 +65,12 @@ function mount() {
   return { setPruningCalls };
 }
 
-// Shared setup: open the settings menu, expand skill-pruner, and open its
+// Shared setup: open the settings menu's Models tab and open the pruning
 // prepass ModelPicker. Returns the portaled dropdown element.
 function openPrepassPicker(): HTMLElement {
   act(() => { click(container.querySelector('.toolbar-settings-trigger')); });
-  // Skill-pruner lives on the Extensions tab of the tabbed settings menu.
-  act(() => { click(container.querySelector('.toolbar-settings-tab[data-tab="extensions"]')); });
-  act(() => { click(container.querySelector('.toolbar-settings-ext-chevron')); });
-  act(() => { click(container.querySelector('.model-picker-trigger')); });
+  act(() => { click(container.querySelector('.toolbar-settings-tab[data-tab="models"]')); });
+  act(() => { click(container.querySelector('[aria-label="Pruning prepass model"]')); });
   const dropdown = document.querySelector('.model-picker-dropdown') as HTMLElement | null;
   assert.ok(dropdown, 'prepass ModelPicker dropdown should be portaled to the document');
   return dropdown!;

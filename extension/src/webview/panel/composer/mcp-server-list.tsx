@@ -2,7 +2,7 @@
 /** @jsxImportSource preact */
 
 import type { McpServerInfo } from '../../../shared/protocol';
-import { cx } from '../utils/cx';
+import { SettingCheckbox } from '../components/setting-checkbox';
 
 interface McpServerListProps {
   servers: McpServerInfo[];
@@ -55,27 +55,20 @@ export function McpServerList({ servers, loading = false, error = false, pending
         </div>
       )}
       {servers.map((server) => (
-        <button
+        <SettingCheckbox
           key={server.name}
-          type="button"
-          class={cx('toolbar-settings-item', !server.disabled && 'checked')}
-          role="checkbox"
-          aria-checked={!server.disabled}
-          onClick={() => onToggle(server.name, server.disabled)}
+          label={
+            <>
+              <span class="system-prompt-toggle-entry-title">{server.name}</span>
+              <span class="system-prompt-toggle-entry-summary">
+                {server.disabled ? 'Disabled — hidden from the model' : 'Enabled — connects when used'}
+              </span>
+            </>
+          }
+          checked={!server.disabled}
+          onChange={() => onToggle(server.name, server.disabled)}
           title={server.disabled ? `${server.name} is disabled` : `${server.name} is enabled`}
-        >
-          <span class="toolbar-settings-item-check" aria-hidden="true">
-            <svg width="14" height="14" viewBox="0 0 13 13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style={server.disabled ? 'opacity:0' : ''}>
-              <polyline points="2.5,6.5 5,9 10.5,3.5" />
-            </svg>
-          </span>
-          <span class="toolbar-settings-item-label">
-            <span class="system-prompt-toggle-entry-title">{server.name}</span>
-            <span class="system-prompt-toggle-entry-summary">
-              {server.disabled ? 'Disabled — hidden from the model' : 'Enabled — connects when used'}
-            </span>
-          </span>
-        </button>
+        />
       ))}
       {error && (
         <div class="system-prompt-toggle-entry-summary mcp-server-error">

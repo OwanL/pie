@@ -5,7 +5,16 @@ import { useState } from 'preact/hooks';
 import type { ChatPrefs, ProviderGateStats, ProviderGateProviderMetrics } from '../../../shared/protocol';
 import { setProviderEnabled } from '../chat-prefs';
 import { CollapsibleChevron } from '../components/chevron';
+import { SettingCheckbox } from '../components/setting-checkbox';
+import { SliderRow } from '../components/slider-row';
 import type { OnSetPrefs } from './settings-menu-types';
+
+export const PROVIDER_SETTING_LABELS = [
+  'Max concurrent',
+  'Afterburn',
+  'Queue wait',
+  'Header wait',
+] as const;
 
 interface ProviderItemProps {
   provider: string;
@@ -44,97 +53,58 @@ function ProviderConcurrencyControls({
   };
 
   return (
-    <div class="toolbar-settings-ext-settings" style="padding-left: 28px;">
+    <div class="toolbar-settings-ext-settings toolbar-settings-indent">
       <div class="toolbar-settings-list">
         {/* Max concurrent requests */}
-        <div class="toolbar-settings-ui-control">
-          <div class="toolbar-settings-ui-control-head">
-            <span class="toolbar-settings-ui-control-label">Max concurrent</span>
-            <span class="toolbar-settings-ui-control-value">{maxConcurrent}</span>
-          </div>
-          <input
-            type="range"
-            class="toolbar-settings-slider toolbar-settings-ui-slider"
-            min="1"
-            max="8"
-            step="1"
-            value={maxConcurrent}
-            onInput={(e) => setOverride('maxConcurrentRequests', Number((e.target as HTMLInputElement).value))}
-            aria-label={`Max concurrent requests for ${provider}`}
-          />
-          <div class="toolbar-settings-item-hint">
-            Max in-flight LLM requests to this provider. Lower = gentler on rate limits.
-          </div>
-        </div>
+        <SliderRow
+          label="Max concurrent"
+          value={maxConcurrent}
+          min={1}
+          max={8}
+          step={1}
+          ariaLabel={`Max concurrent requests for ${provider}`}
+          hint="Max in-flight LLM requests to this provider. Lower = gentler on rate limits."
+          onChange={(value) => setOverride('maxConcurrentRequests', value)}
+        />
 
         {/* Afterburn sticky-slot window */}
-        <div class="toolbar-settings-ui-control">
-          <div class="toolbar-settings-ui-control-head">
-            <span class="toolbar-settings-ui-control-label">Afterburn</span>
-            <span class="toolbar-settings-ui-control-value">
-              {afterburn === 0 ? 'Off' : `${afterburn}s`}
-            </span>
-          </div>
-          <input
-            type="range"
-            class="toolbar-settings-slider toolbar-settings-ui-slider"
-            min="0"
-            max="60"
-            step="5"
-            value={afterburn}
-            onInput={(e) => setOverride('afterburnSeconds', Number((e.target as HTMLInputElement).value))}
-            aria-label={`Afterburn sticky-slot window for ${provider}`}
-          />
-          <div class="toolbar-settings-item-hint">
-            Reserves a slot for the same session after it finishes. 0 = disabled.
-          </div>
-        </div>
+        <SliderRow
+          label="Afterburn"
+          value={afterburn}
+          min={0}
+          max={60}
+          step={5}
+          formatValue={(v) => (v === 0 ? 'Off' : `${v}s`)}
+          ariaLabel={`Afterburn sticky-slot window for ${provider}`}
+          hint="Reserves a slot for the same session after it finishes. 0 = disabled."
+          onChange={(value) => setOverride('afterburnSeconds', value)}
+        />
 
         {/* Queue wait timeout */}
-        <div class="toolbar-settings-ui-control">
-          <div class="toolbar-settings-ui-control-head">
-            <span class="toolbar-settings-ui-control-label">Queue wait</span>
-            <span class="toolbar-settings-ui-control-value">
-              {queueWait === 0 ? '300s max' : `${queueWait}s`}
-            </span>
-          </div>
-          <input
-            type="range"
-            class="toolbar-settings-slider toolbar-settings-ui-slider"
-            min="0"
-            max="300"
-            step="5"
-            value={queueWait}
-            onInput={(e) => setOverride('queueWaitSeconds', Number((e.target as HTMLInputElement).value))}
-            aria-label={`Queue wait timeout for ${provider}`}
-          />
-          <div class="toolbar-settings-item-hint">
-            How long a queued request waits before failing with 429. 0 uses the 300s safety maximum.
-          </div>
-        </div>
+        <SliderRow
+          label="Queue wait"
+          value={queueWait}
+          min={0}
+          max={300}
+          step={5}
+          formatValue={(v) => (v === 0 ? '300s max' : `${v}s`)}
+          ariaLabel={`Queue wait timeout for ${provider}`}
+          hint="How long a queued request waits before failing with 429. 0 uses the 300s safety maximum."
+          onChange={(value) => setOverride('queueWaitSeconds', value)}
+        />
 
         {/* Header wait timeout */}
-        <div class="toolbar-settings-ui-control">
-          <div class="toolbar-settings-ui-control-head">
-            <span class="toolbar-settings-ui-control-label">Header wait</span>
-            <span class="toolbar-settings-ui-control-value">
-              {headerWait === 0 ? 'default' : `${headerWait}s`}
-            </span>
-          </div>
-          <input
-            type="range"
-            class="toolbar-settings-slider toolbar-settings-ui-slider"
-            min="0"
-            max="300"
-            step="10"
-            value={headerWait}
-            onInput={(e) => setOverride('headerWaitSeconds', Number((e.target as HTMLInputElement).value))}
-            aria-label={`Header wait timeout for ${provider}`}
-          />
-          <div class="toolbar-settings-item-hint">
-            Max seconds to wait for upstream response headers. 0 = provider default.
-          </div>
-        </div>
+        <SliderRow
+          label="Header wait"
+          value={headerWait}
+          min={0}
+          max={300}
+          step={10}
+          formatValue={(v) => (v === 0 ? 'default' : `${v}s`)}
+          ariaLabel={`Header wait timeout for ${provider}`}
+          hint="Max seconds to wait for upstream response headers. 0 = provider default."
+          onChange={(value) => setOverride('headerWaitSeconds', value)}
+        />
 
         {/* Live metrics */}
         {metrics && (
@@ -155,31 +125,22 @@ function ProviderItem({ provider, prefs, onSetPrefs, metrics, expanded, onToggle
   return (
     <div class="toolbar-settings-ext-group">
       <div class="toolbar-settings-ext-row">
-        <button
-          class={`toolbar-settings-item${checked ? ' checked' : ''}`}
-          type="button"
-          role="checkbox"
-          aria-checked={checked}
-          onClick={() => onSetPrefs(setProviderEnabled(prefs, provider, !checked))}
-        >
-          <span class="toolbar-settings-item-check" aria-hidden="true">
-            <svg width="14" height="14" viewBox="0 0 13 13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style={checked ? '' : 'opacity:0'}>
-              <polyline points="2.5,6.5 5,9 10.5,3.5" />
-            </svg>
-          </span>
-          <span class="toolbar-settings-item-label">{provider}</span>
-        </button>
-        {hasConcurrency && (
-          <button
-            class="toolbar-settings-ext-chevron"
-            type="button"
-            aria-label={`${expanded ? 'Collapse' : 'Expand'} ${provider} concurrency settings`}
-            aria-expanded={expanded}
-            onClick={onToggleExpand}
-          >
-            <CollapsibleChevron open={expanded} size={12} />
-          </button>
-        )}
+        <SettingCheckbox
+          label={provider}
+          checked={checked}
+          onChange={() => onSetPrefs(setProviderEnabled(prefs, provider, !checked))}
+          trailing={hasConcurrency && (
+            <button
+              class="toolbar-settings-ext-chevron"
+              type="button"
+              aria-label={`${expanded ? 'Collapse' : 'Expand'} ${provider} concurrency settings`}
+              aria-expanded={expanded}
+              onClick={onToggleExpand}
+            >
+              <CollapsibleChevron open={expanded} size={12} />
+            </button>
+          )}
+        />
       </div>
       {expanded && hasConcurrency && (
         <ProviderConcurrencyControls provider={provider} prefs={prefs} onSetPrefs={onSetPrefs} metrics={metrics} />

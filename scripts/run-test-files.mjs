@@ -42,12 +42,13 @@ export function inferRepoRoot() {
 }
 
 /**
- * The subagent package is the only one whose tests need a `--tsconfig` for
- * path-alias resolution (mirrors run-tests.mjs `tsxConfig`). Kept here rather
- * than in the shared lib because the affected-test planner does not need it.
+ * Packages whose tests need a `--tsconfig` for host-SDK path-alias resolution
+ * (mirrors run-tests.mjs `tsxConfig`). Kept here rather than in the shared lib
+ * because the affected-test planner does not need it.
  */
 const TSX_CONFIG_BY_PACKAGE = {
   subagent: 'extensions/subagent/tsconfig.json',
+  playwright: 'extensions/playwright/tsconfig.runtime.json',
 };
 
 /**

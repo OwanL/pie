@@ -10,8 +10,32 @@ import {
 } from '../../../shared/protocol';
 import { CHAT_PREF_MENU_SECTIONS } from '../chat-prefs';
 import { ChatPrefItem } from './settings-menu-chat-prefs';
+import { SliderRow } from '../components/slider-row';
 import { DENSITY_OPTIONS, UI_THEME_PRESETS, matchUiThemePreset, uiThemePresetToPrefs } from './settings-menu-helpers';
 import type { OnSetPrefs } from './settings-menu-types';
+
+export const APPEARANCE_SETTING_LABELS = [
+  'Theme',
+  'Background',
+  'Text',
+  'Border',
+  'Accent',
+  'Muted text',
+  'Links',
+  'Corner radius',
+  'Density',
+  'Path parent depth',
+  'Message width',
+  'Initial composer rows',
+  'Expanded height',
+  'Activity rows',
+  'Rail markers',
+  'Base text',
+  'Composer text',
+  'Expanded text',
+  'Sans font',
+  'Mono font',
+] as const;
 
 interface FontOption {
   label: string;
@@ -265,23 +289,16 @@ export function AppearanceSection({ prefs, onSetPrefs }: AppearanceSectionProps)
       </UiSettingsGroup>
 
       <UiSettingsGroup label="Spacing & shape">
-      <div class="toolbar-settings-ui-control">
-        <div class="toolbar-settings-ui-control-head">
-          <span class="toolbar-settings-ui-control-label">Corner radius</span>
-          <span class="toolbar-settings-ui-control-value">{prefs.uiCornerRadius}px</span>
-        </div>
-        <input
-          type="range"
-          class="toolbar-settings-slider toolbar-settings-ui-slider"
-          min="0"
-          max="24"
-          step="1"
-          value={prefs.uiCornerRadius}
-          onInput={(e) => onSetPrefs({ uiCornerRadius: Number((e.target as HTMLInputElement).value) })}
-          aria-label="Corner radius"
-        />
-        <div class="toolbar-settings-item-hint">Roundness of cards, buttons, and inputs across the panel.</div>
-      </div>
+      <SliderRow
+        label="Corner radius"
+        value={prefs.uiCornerRadius}
+        min={0}
+        max={24}
+        step={1}
+        formatValue={(v) => `${v}px`}
+        hint="Roundness of cards, buttons, and inputs across the panel."
+        onChange={(uiCornerRadius) => onSetPrefs({ uiCornerRadius })}
+      />
       <div class="toolbar-settings-ui-control">
         <span class="toolbar-settings-ui-control-label">Density</span>
         <select
@@ -300,171 +317,111 @@ export function AppearanceSection({ prefs, onSetPrefs }: AppearanceSectionProps)
       </UiSettingsGroup>
 
       <UiSettingsGroup label="Files & paths">
-      <div class="toolbar-settings-ui-control">
-        <div class="toolbar-settings-ui-control-head">
-          <span class="toolbar-settings-ui-control-label">Path parent depth</span>
-          <span class="toolbar-settings-ui-control-value">{prefs.uiPathParentDepth}</span>
-        </div>
-        <input
-          type="range"
-          class="toolbar-settings-slider toolbar-settings-ui-slider"
-          min="0"
-          max="8"
-          step="1"
-          value={prefs.uiPathParentDepth}
-          onInput={(e) => onSetPrefs({ uiPathParentDepth: Number((e.target as HTMLInputElement).value) })}
-          aria-label="Path parent depth"
-        />
-        <div class="toolbar-settings-item-hint">Number of parent directories shown before a filename. 0 = filename only, 1 = parent/filename.</div>
-      </div>
+      <SliderRow
+        label="Path parent depth"
+        value={prefs.uiPathParentDepth}
+        min={0}
+        max={8}
+        step={1}
+        hint="Number of parent directories shown before a filename. 0 = filename only, 1 = parent/filename."
+        onChange={(uiPathParentDepth) => onSetPrefs({ uiPathParentDepth })}
+      />
       </UiSettingsGroup>
 
       <UiSettingsGroup label="Layout">
-      <div class="toolbar-settings-ui-control">
-        <div class="toolbar-settings-ui-control-head">
-          <span class="toolbar-settings-ui-control-label">Message width</span>
-          <span class="toolbar-settings-ui-control-value">{prefs.uiMessageWidth}%</span>
-        </div>
-        <input
-          type="range"
-          class="toolbar-settings-slider toolbar-settings-ui-slider"
-          min="40"
-          max="100"
-          step="2"
-          value={prefs.uiMessageWidth}
-          onInput={(e) => onSetPrefs({ uiMessageWidth: Number((e.target as HTMLInputElement).value) })}
-          aria-label="Message width"
-        />
-        <div class="toolbar-settings-item-hint">Max width of chat bubbles. Narrow view scales up to keep content readable.</div>
-      </div>
-      <div class="toolbar-settings-ui-control">
-        <div class="toolbar-settings-ui-control-head">
-          <span class="toolbar-settings-ui-control-label">Initial composer rows</span>
-          <span class="toolbar-settings-ui-control-value">
-            {prefs.composerInitialRows} {prefs.composerInitialRows === 1 ? 'row' : 'rows'}
-          </span>
-        </div>
-        <input
-          type="range"
-          class="toolbar-settings-slider toolbar-settings-ui-slider"
-          min={COMPOSER_INITIAL_ROWS_MIN}
-          max={COMPOSER_INITIAL_ROWS_MAX}
-          step="1"
-          value={prefs.composerInitialRows}
-          onInput={(e) => onSetPrefs({ composerInitialRows: Number((e.target as HTMLInputElement).value) })}
-          aria-label="Initial composer rows"
-        />
-        <div class="toolbar-settings-item-hint">Rows available for typing before the composer starts expanding.</div>
-      </div>
+      <SliderRow
+        label="Message width"
+        value={prefs.uiMessageWidth}
+        min={40}
+        max={100}
+        step={2}
+        formatValue={(v) => `${v}%`}
+        hint="Max width of chat bubbles. Narrow view scales up to keep content readable."
+        onChange={(uiMessageWidth) => onSetPrefs({ uiMessageWidth })}
+      />
+      <SliderRow
+        label="Initial composer rows"
+        value={prefs.composerInitialRows}
+        min={COMPOSER_INITIAL_ROWS_MIN}
+        max={COMPOSER_INITIAL_ROWS_MAX}
+        step={1}
+        formatValue={(v) => `${v} ${v === 1 ? 'row' : 'rows'}`}
+        hint="Rows available for typing before the composer starts expanding."
+        ariaLabel="Initial composer rows"
+        onChange={(composerInitialRows) => onSetPrefs({ composerInitialRows })}
+      />
       </UiSettingsGroup>
 
       <UiSettingsGroup label="Content & navigation">
-      <div class="toolbar-settings-ui-control">
-        <div class="toolbar-settings-ui-control-head">
-          <span class="toolbar-settings-ui-control-label">Expanded height</span>
-          <span class="toolbar-settings-ui-control-value">{prefs.expandedSectionMaxHeight}px</span>
-        </div>
-        <input
-          type="range"
-          class="toolbar-settings-slider toolbar-settings-ui-slider"
-          min="80"
-          max="1600"
-          step="20"
-          value={prefs.expandedSectionMaxHeight}
-          onInput={(e) => onSetPrefs({ expandedSectionMaxHeight: Number((e.target as HTMLInputElement).value) })}
-          aria-label="Expanded section max height"
-        />
-        <div class="toolbar-settings-item-hint">Max height of expanded sections — reasoning, tool output, and subagent threads.</div>
-      </div>
-      <div class="toolbar-settings-ui-control">
-        <div class="toolbar-settings-ui-control-head">
-          <span class="toolbar-settings-ui-control-label">Activity rows</span>
-          <span class="toolbar-settings-ui-control-value">{prefs.activityTailLines}</span>
-        </div>
-        <input
-          type="range"
-          class="toolbar-settings-slider toolbar-settings-ui-slider"
-          min="1"
-          max="12"
-          step="1"
-          value={prefs.activityTailLines}
-          onInput={(e) => onSetPrefs({ activityTailLines: Number((e.target as HTMLInputElement).value) })}
-          aria-label="Activity preview rows"
-        />
-        <div class="toolbar-settings-item-hint">Rows shown in the live activity preview at the bottom of a turn.</div>
-      </div>
-      <div class="toolbar-settings-ui-control">
-        <div class="toolbar-settings-ui-control-head">
-          <span class="toolbar-settings-ui-control-label">Rail markers</span>
-          <span class="toolbar-settings-ui-control-value">{prefs.uiMessageRailSize}px</span>
-        </div>
-        <input
-          type="range"
-          class="toolbar-settings-slider toolbar-settings-ui-slider"
-          min="8"
-          max="40"
-          step="1"
-          value={prefs.uiMessageRailSize}
-          onInput={(e) => onSetPrefs({ uiMessageRailSize: Number((e.target as HTMLInputElement).value) })}
-          aria-label="Message rail marker size"
-        />
-        <div class="toolbar-settings-item-hint">Size of the user-message jump buttons beside the scrollbar — both the click target and the visible dot. Larger is easier to click and see.</div>
-      </div>
+      <SliderRow
+        label="Expanded height"
+        value={prefs.expandedSectionMaxHeight}
+        min={80}
+        max={1600}
+        step={20}
+        formatValue={(v) => `${v}px`}
+        hint="Max height of expanded sections — reasoning, tool output, and subagent threads."
+        ariaLabel="Expanded section max height"
+        onChange={(expandedSectionMaxHeight) => onSetPrefs({ expandedSectionMaxHeight })}
+      />
+      <SliderRow
+        label="Activity rows"
+        value={prefs.activityTailLines}
+        min={1}
+        max={12}
+        step={1}
+        ariaLabel="Activity preview rows"
+        hint="Rows shown in the live activity preview at the bottom of a turn."
+        onChange={(activityTailLines) => onSetPrefs({ activityTailLines })}
+      />
+      <SliderRow
+        label="Rail markers"
+        value={prefs.uiMessageRailSize}
+        min={8}
+        max={40}
+        step={1}
+        formatValue={(v) => `${v}px`}
+        hint="Size of the user-message jump buttons beside the scrollbar — both the click target and the visible dot. Larger is easier to click and see."
+        ariaLabel="Message rail marker size"
+        onChange={(uiMessageRailSize) => onSetPrefs({ uiMessageRailSize })}
+      />
 
       </UiSettingsGroup>
 
       <UiSettingsGroup label="Typography">
-      <div class="toolbar-settings-ui-control">
-        <div class="toolbar-settings-ui-control-head">
-          <span class="toolbar-settings-ui-control-label">Base text</span>
-          <span class="toolbar-settings-ui-control-value">{prefs.uiBaseFontSize}px</span>
-        </div>
-        <input
-          type="range"
-          class="toolbar-settings-slider toolbar-settings-ui-slider"
-          min="10"
-          max="24"
-          step="1"
-          value={prefs.uiBaseFontSize}
-          onInput={(e) => onSetPrefs({ uiBaseFontSize: Number((e.target as HTMLInputElement).value) })}
-          aria-label="Base font size"
-        />
-        <div class="toolbar-settings-item-hint">Message body and primary readable text across the panel.</div>
-      </div>
-      <div class="toolbar-settings-ui-control">
-        <div class="toolbar-settings-ui-control-head">
-          <span class="toolbar-settings-ui-control-label">Composer text</span>
-          <span class="toolbar-settings-ui-control-value">{prefs.uiComposerFontSize}px</span>
-        </div>
-        <input
-          type="range"
-          class="toolbar-settings-slider toolbar-settings-ui-slider"
-          min="11"
-          max="28"
-          step="1"
-          value={prefs.uiComposerFontSize}
-          onInput={(e) => onSetPrefs({ uiComposerFontSize: Number((e.target as HTMLInputElement).value) })}
-          aria-label="Composer font size"
-        />
-        <div class="toolbar-settings-item-hint">The message input box where you type.</div>
-      </div>
-      <div class="toolbar-settings-ui-control">
-        <div class="toolbar-settings-ui-control-head">
-          <span class="toolbar-settings-ui-control-label">Expanded text</span>
-          <span class="toolbar-settings-ui-control-value">{prefs.expandedSectionFontSize}px</span>
-        </div>
-        <input
-          type="range"
-          class="toolbar-settings-slider toolbar-settings-ui-slider"
-          min="8"
-          max="32"
-          step="1"
-          value={prefs.expandedSectionFontSize}
-          onInput={(e) => onSetPrefs({ expandedSectionFontSize: Number((e.target as HTMLInputElement).value) })}
-          aria-label="Expanded section font size"
-        />
-        <div class="toolbar-settings-item-hint">Tool-call output, reasoning, system prompts, and code blocks.</div>
-      </div>
+      <SliderRow
+        label="Base text"
+        value={prefs.uiBaseFontSize}
+        min={10}
+        max={24}
+        step={1}
+        formatValue={(v) => `${v}px`}
+        hint="Message body and primary readable text across the panel."
+        ariaLabel="Base font size"
+        onChange={(uiBaseFontSize) => onSetPrefs({ uiBaseFontSize })}
+      />
+      <SliderRow
+        label="Composer text"
+        value={prefs.uiComposerFontSize}
+        min={11}
+        max={28}
+        step={1}
+        formatValue={(v) => `${v}px`}
+        hint="The message input box where you type."
+        ariaLabel="Composer font size"
+        onChange={(uiComposerFontSize) => onSetPrefs({ uiComposerFontSize })}
+      />
+      <SliderRow
+        label="Expanded text"
+        value={prefs.expandedSectionFontSize}
+        min={8}
+        max={32}
+        step={1}
+        formatValue={(v) => `${v}px`}
+        hint="Tool-call output, reasoning, system prompts, and code blocks."
+        ariaLabel="Expanded section font size"
+        onChange={(expandedSectionFontSize) => onSetPrefs({ expandedSectionFontSize })}
+      />
       <div class="toolbar-settings-ui-control">
         <span class="toolbar-settings-ui-control-label">Sans font</span>
         <FontSelect

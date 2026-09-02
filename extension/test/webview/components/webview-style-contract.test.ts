@@ -251,6 +251,9 @@ test('unified transcript refinement keeps operational rows quiet and user prompt
   const promptContextShellRule = transcriptCss.match(/\.transcript-prompt-context\s*\{([^}]*)\}/)?.[1] ?? '';
   assert.match(promptContextShellRule, /min-height:\s*34px/);
   assert.match(promptContextShellRule, /padding:\s*var\(--panel-gap-xs\)/);
+  const compactPromptContextRule = transcriptCss.match(/\.transcript-prompt-context\.is-compact\s*\{([^}]*)\}/)?.[1] ?? '';
+  assert.match(compactPromptContextRule, /min-height:\s*26px/);
+  assert.match(compactPromptContextRule, /padding-block:\s*1px/);
   const promptContextMetaRule = transcriptCss.match(/\.transcript-prompt-context-meta\s*\{([^}]*)\}/)?.[1] ?? '';
   assert.match(promptContextMetaRule, /flex:\s*0 1 auto/);
   assert.match(promptContextMetaRule, /max-width:\s*40%/);

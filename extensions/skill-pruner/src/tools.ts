@@ -88,11 +88,11 @@ export function createRequestCapabilityDefinition(toolSeams: PiToolSeams) {
 		}
 
 		if (capabilityType === "skill") {
-			if (hiddenToolNames.includes(capabilityName)) {
-				return { content: [{ type: "text" as const, text: `'${capabilityName}' is a hidden tool, not a skill. Use capabilityType='tool'.` }], isError: true };
-			}
 			const skill = hiddenSkills.get(capabilityName);
 			if (!skill || loadedSkills.has(capabilityName)) {
+				if (hiddenToolNames.includes(capabilityName)) {
+					return { content: [{ type: "text" as const, text: `'${capabilityName}' is a hidden tool, not a skill. Use capabilityType='tool'.` }], isError: true };
+				}
 				return { content: [{ type: "text" as const, text: `No hidden skill named '${capabilityName}'. Poll without arguments for exact names.` }], isError: true };
 			}
 			try {
@@ -105,10 +105,10 @@ export function createRequestCapabilityDefinition(toolSeams: PiToolSeams) {
 			}
 		}
 
-		if (hiddenSkillNames.includes(capabilityName)) {
-			return { content: [{ type: "text" as const, text: `'${capabilityName}' is a hidden skill, not a tool. Use capabilityType='skill'.` }], isError: true };
-		}
 		if (!hiddenToolNames.includes(capabilityName)) {
+			if (hiddenSkillNames.includes(capabilityName)) {
+				return { content: [{ type: "text" as const, text: `'${capabilityName}' is a hidden skill, not a tool. Use capabilityType='skill'.` }], isError: true };
+			}
 			return { content: [{ type: "text" as const, text: `No hidden tool named '${capabilityName}'. Poll without arguments for exact names.` }], isError: true };
 		}
 

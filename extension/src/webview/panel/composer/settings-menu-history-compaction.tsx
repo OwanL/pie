@@ -10,20 +10,45 @@ import {
   type ChatPrefs,
   type HistoryCompactionModelProfile,
   type HistoryCompactionSettings,
-  type HistoryCompactionSummaryThinkingLevel,
   type HistoryCompactionThresholdMode,
   type ModelInfo,
+  type ThinkingLevel,
 } from '../../../shared/protocol';
-import { THINKING_LEVEL_OPTIONS } from '../../../shared/thinking-level.js';
-import { ModelPicker } from '../components/model-picker';
-import { formatModelSpec, getModelThinkingLevels, orderModelsForPicker, parseModelSpec, type ModelPickerEntry } from './model-list';
+import { ModelAssignmentRow } from '../components/model-assignment-row';
+import { NumberField } from '../components/number-field';
+import { SettingCheckbox } from '../components/setting-checkbox';
+import { formatModelSpec, type ModelPickerEntry } from './model-list';
 import type { OnSetPrefs } from './settings-menu-types';
+
+export const HISTORY_COMPACTION_BEHAVIOR_SETTING_LABELS = [
+  'Proactive automatic compaction',
+  'Threshold type',
+  'Soft trigger',
+  'Hard trigger',
+  'Recent retention',
+  'Summary instructions',
+  'Custom thresholds for active model',
+  'Soft threshold',
+  'Hard threshold',
+] as const;
+
+export const HISTORY_COMPACTION_MODEL_SETTING_LABELS = [
+  'Summary model',
+  'Thinking',
+] as const;
 
 interface Props {
   settings: HistoryCompactionSettings;
   contextWindow?: number;
   availableModels: ModelInfo[];
-  modelEntries?: ModelPickerEntry[];
+  activeModel?: { provider?: string; id: string };
+  onSetPrefs: OnSetPrefs;
+}
+
+interface HistoryCompactionModelAssignmentProps {
+  settings: HistoryCompactionSettings;
+  availableModels: ModelInfo[];
+  modelEntries: ModelPickerEntry[];
   activeModel?: { provider?: string; id: string };
   onSetPrefs: OnSetPrefs;
 }
@@ -110,7 +135,6 @@ export function HistoryCompactionSection({
   settings,
   contextWindow,
   availableModels,
-  modelEntries: modelEntriesProp,
   activeModel,
   onSetPrefs,
 }: Props) {
@@ -138,28 +162,6 @@ export function HistoryCompactionSection({
         'hard',
       )
     : undefined;
-
-  const entries = modelEntriesProp ?? orderModelsForPicker(availableModels);
-  const summaryModelValue = settings.summaryModel
-    ? formatModelSpec(settings.summaryModel)
-    : '';
-  const summaryModelEntry = settings.summaryModel
-    ? entries.find((entry) =>
-        entry.model.provider === settings.summaryModel?.provider
-        && entry.model.id === settings.summaryModel?.id)
-    : undefined;
-  const summaryModelLabel = summaryModelEntry?.label
-    ?? (settings.summaryModel ? summaryModelValue : 'Active model');
-  const activeModelInfo = activeModel
-    ? availableModels.find((model) => model.id === activeModel.id
-      && (!activeModel.provider || model.provider === activeModel.provider))
-    : undefined;
-  const effectiveSummaryModel = summaryModelEntry?.model ?? activeModelInfo;
-  const summaryThinkingOptions: Array<{ value: HistoryCompactionSummaryThinkingLevel; label: string }> = [
-    { value: 'inherit', label: 'Inherit' },
-    ...THINKING_LEVEL_OPTIONS.filter((option) =>
-      getModelThinkingLevels(effectiveSummaryModel).includes(option.value)),
-  ];
 
   const update = (next: HistoryCompactionSettings) => {
     onSetPrefs({ historyCompaction: resolveHistoryCompactionSettings(next) } satisfies Partial<ChatPrefs>);
@@ -189,30 +191,6 @@ export function HistoryCompactionSection({
 
   const updateSummaryInstructions = (raw: string) => {
     update({ ...settings, summaryInstructions: raw.slice(0, 4_000) });
-  };
-
-  const updateSummaryThinkingLevel = (value: HistoryCompactionSummaryThinkingLevel) => {
-    update({ ...settings, summaryThinkingLevel: value });
-  };
-
-  const updateSummaryModel = (value: string) => {
-    const selected = value
-      ? (() => {
-          const { provider, id } = parseModelSpec(value);
-          return provider ? availableModels.find((model) => model.provider === provider && model.id === id) : undefined;
-        })()
-      : activeModelInfo;
-    if (value && !selected) return;
-    let summaryThinkingLevel = settings.summaryThinkingLevel;
-    if (summaryThinkingLevel !== 'inherit' && selected) {
-      const supported = getModelThinkingLevels(selected);
-      if (!supported.includes(summaryThinkingLevel)) summaryThinkingLevel = supported[0] ?? 'off';
-    }
-    update({
-      ...settings,
-      summaryModel: value && selected ? { provider: selected.provider, id: selected.id } : null,
-      summaryThinkingLevel,
-    });
   };
 
   const toggleActiveProfile = () => {
@@ -255,20 +233,11 @@ export function HistoryCompactionSection({
     <div class="toolbar-settings-section" data-settings-section="history-compaction">
       <div class="toolbar-settings-section-label">History compaction</div>
       <div class="toolbar-settings-list">
-        <button
-          class={`toolbar-settings-item${settings.enabled ? ' checked' : ''}`}
-          type="button"
-          role="checkbox"
-          aria-checked={settings.enabled}
-          onClick={() => update({ ...settings, enabled: !settings.enabled })}
-        >
-          <span class="toolbar-settings-item-check" aria-hidden="true">
-            <svg width="14" height="14" viewBox="0 0 13 13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style={settings.enabled ? '' : 'opacity:0'}>
-              <polyline points="2.5,6.5 5,9 10.5,3.5" />
-            </svg>
-          </span>
-          <span class="toolbar-settings-item-label">Proactive automatic compaction</span>
-        </button>
+        <SettingCheckbox
+          label="Proactive automatic compaction"
+          checked={settings.enabled}
+          onChange={() => update({ ...settings, enabled: !settings.enabled })}
+        />
 
         <div class="toolbar-settings-item toolbar-settings-mode-row">
           <span class="toolbar-settings-item-label">Threshold type</span>
@@ -284,56 +253,44 @@ export function HistoryCompactionSection({
           </select>
         </div>
 
-        <label class="toolbar-settings-item toolbar-settings-mode-row">
-          <span class="toolbar-settings-item-label">Soft trigger</span>
-          <input
-            class="toolbar-settings-select toolbar-settings-number-input"
-            type="number"
-            min={settings.thresholdMode === 'tokens' ? Math.max(minimum, settings.keepRecentTokens + step) : minimum}
-            max={settings.hardThreshold - step}
-            step={step}
-            value={settings.softThreshold}
-            disabled={!settings.enabled}
-            aria-label={`Soft compaction trigger${suffix}`}
-            onChange={(event) => updateThreshold('softThreshold', (event.target as HTMLInputElement).value)}
-          />
-        </label>
+        <NumberField
+          label="Soft trigger"
+          min={settings.thresholdMode === 'tokens' ? Math.max(minimum, settings.keepRecentTokens + step) : minimum}
+          max={settings.hardThreshold - step}
+          step={step}
+          value={settings.softThreshold}
+          disabled={!settings.enabled}
+          ariaLabel={`Soft compaction trigger${suffix}`}
+          onChange={(value) => updateThreshold('softThreshold', String(value))}
+        />
         <div class="toolbar-settings-item-hint">
           Compact after the current run settles{resolvedSoft !== undefined ? ` (about ${formatTokens(resolvedSoft)} tokens for this model)` : ''}.
         </div>
 
-        <label class="toolbar-settings-item toolbar-settings-mode-row">
-          <span class="toolbar-settings-item-label">Hard trigger</span>
-          <input
-            class="toolbar-settings-select toolbar-settings-number-input"
-            type="number"
-            min={settings.softThreshold + step}
-            max={maximum}
-            step={step}
-            value={settings.hardThreshold}
-            disabled={!settings.enabled}
-            aria-label={`Hard compaction trigger${suffix}`}
-            onChange={(event) => updateThreshold('hardThreshold', (event.target as HTMLInputElement).value)}
-          />
-        </label>
+        <NumberField
+          label="Hard trigger"
+          min={settings.softThreshold + step}
+          max={maximum}
+          step={step}
+          value={settings.hardThreshold}
+          disabled={!settings.enabled}
+          ariaLabel={`Hard compaction trigger${suffix}`}
+          onChange={(value) => updateThreshold('hardThreshold', String(value))}
+        />
         <div class="toolbar-settings-item-hint">
           Compact between complete agent steps before another model request{resolvedHard !== undefined ? ` (about ${formatTokens(resolvedHard)} tokens for this model)` : ''}. Never interrupts reasoning or a running tool.
         </div>
 
-        <label class="toolbar-settings-item toolbar-settings-mode-row">
-          <span class="toolbar-settings-item-label">Recent retention</span>
-          <input
-            class="toolbar-settings-select toolbar-settings-number-input"
-            type="number"
-            min={0}
-            max={settings.thresholdMode === 'tokens' ? Math.max(0, settings.softThreshold - step) : 10_000_000}
-            step={step}
-            value={settings.keepRecentTokens}
-            disabled={!settings.enabled}
-            aria-label="Recent token retention"
-            onChange={(event) => updateKeepRecentTokens((event.target as HTMLInputElement).value)}
-          />
-        </label>
+        <NumberField
+          label="Recent retention"
+          min={0}
+          max={settings.thresholdMode === 'tokens' ? Math.max(0, settings.softThreshold - step) : 10_000_000}
+          step={step}
+          value={settings.keepRecentTokens}
+          disabled={!settings.enabled}
+          ariaLabel="Recent token retention"
+          onChange={(value) => updateKeepRecentTokens(String(value))}
+        />
         <div class="toolbar-settings-item-hint">
           Tokens to preserve when compacting. Profiles can override this in token mode.
         </div>
@@ -352,110 +309,47 @@ export function HistoryCompactionSection({
           />
         </div>
 
-        <div class="toolbar-settings-item toolbar-settings-mode-row">
-          <span class="toolbar-settings-item-label">Thinking</span>
-          <select
-            class="toolbar-settings-select"
-            value={settings.summaryThinkingLevel}
-            disabled={!settings.enabled}
-            aria-label="Summary thinking level"
-            onChange={(event) => updateSummaryThinkingLevel((event.target as HTMLSelectElement).value as HistoryCompactionSummaryThinkingLevel)}
-          >
-            {summaryThinkingOptions.map((opt) => (
-              <option key={opt.value} value={opt.value}>{opt.label}</option>
-            ))}
-          </select>
-        </div>
-
-        <div class="toolbar-settings-item toolbar-settings-mode-row">
-          <span class="toolbar-settings-item-label">Summary model</span>
-          <div class="toolbar-settings-inline-actions">
-            <ModelPicker
-              compact
-              dropdownDirection="down"
-              value={summaryModelValue}
-              label={summaryModelLabel}
-              ariaLabel="Summary model"
-              title="Select summary model"
-              entries={entries}
-              disabled={!settings.enabled}
-              onChange={updateSummaryModel}
-            />
-            {settings.summaryModel && (
-              <button
-                type="button"
-                class="toolbar-settings-stepper-btn"
-                disabled={!settings.enabled}
-                aria-label="Use active model for summaries"
-                title="Use active model"
-                onClick={() => updateSummaryModel('')}
-              >×</button>
-            )}
-          </div>
-        </div>
-
         {settings.thresholdMode === 'tokens' && activeKey && (
           <>
-            <button
-              class={`toolbar-settings-item${activeProfile ? ' checked' : ''}`}
-              type="button"
-              role="checkbox"
-              aria-checked={!!activeProfile}
+            <SettingCheckbox
+              label="Custom thresholds for active model"
+              checked={!!activeProfile}
               disabled={!settings.enabled}
-              onClick={toggleActiveProfile}
-            >
-              <span class="toolbar-settings-item-check" aria-hidden="true">
-                <svg width="14" height="14" viewBox="0 0 13 13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style={activeProfile ? '' : 'opacity:0'}>
-                  <polyline points="2.5,6.5 5,9 10.5,3.5" />
-                </svg>
-              </span>
-              <span class="toolbar-settings-item-label">Custom thresholds for active model</span>
-            </button>
+              onChange={toggleActiveProfile}
+            />
 
             {activeProfile && (
               <>
-                <label class="toolbar-settings-item toolbar-settings-mode-row">
-                  <span class="toolbar-settings-item-label">Soft threshold</span>
-                  <input
-                    class="toolbar-settings-select toolbar-settings-number-input"
-                    type="number"
-                    min={1_000}
-                    max={activeProfile.hardThreshold - 1_000}
-                    step={1_000}
-                    value={activeProfile.softThreshold}
-                    disabled={!settings.enabled}
-                    aria-label="Active model soft threshold"
-                    onChange={(event) => updateProfile('softThreshold', (event.target as HTMLInputElement).value)}
-                  />
-                </label>
-                <label class="toolbar-settings-item toolbar-settings-mode-row">
-                  <span class="toolbar-settings-item-label">Hard threshold</span>
-                  <input
-                    class="toolbar-settings-select toolbar-settings-number-input"
-                    type="number"
-                    min={activeProfile.softThreshold + 1_000}
-                    max={10_000_000}
-                    step={1_000}
-                    value={activeProfile.hardThreshold}
-                    disabled={!settings.enabled}
-                    aria-label="Active model hard threshold"
-                    onChange={(event) => updateProfile('hardThreshold', (event.target as HTMLInputElement).value)}
-                  />
-                </label>
-                <label class="toolbar-settings-item toolbar-settings-mode-row">
-                  <span class="toolbar-settings-item-label">Recent retention</span>
-                  <input
-                    class="toolbar-settings-select toolbar-settings-number-input"
-                    type="number"
-                    min={0}
-                    max={activeProfile.softThreshold - 1_000}
-                    step={1_000}
-                    value={activeProfile.keepRecentTokens}
-                    disabled={!settings.enabled}
-                    aria-label="Active model recent retention"
-                    onChange={(event) => updateProfile('keepRecentTokens', (event.target as HTMLInputElement).value)}
-                  />
-                </label>
+                <NumberField
+                  label="Soft threshold"
+                  min={1_000}
+                  max={activeProfile.hardThreshold - 1_000}
+                  step={1_000}
+                  value={activeProfile.softThreshold}
+                  disabled={!settings.enabled}
+                  ariaLabel="Active model soft threshold"
+                  onChange={(value) => updateProfile('softThreshold', String(value))}
+                />
+                <NumberField
+                  label="Hard threshold"
+                  min={activeProfile.softThreshold + 1_000}
+                  max={10_000_000}
+                  step={1_000}
+                  value={activeProfile.hardThreshold}
+                  disabled={!settings.enabled}
+                  ariaLabel="Active model hard threshold"
+                  onChange={(value) => updateProfile('hardThreshold', String(value))}
+                />
+                <NumberField
+                  label="Recent retention"
+                  min={0}
+                  max={activeProfile.softThreshold - 1_000}
+                  step={1_000}
+                  value={activeProfile.keepRecentTokens}
+                  disabled={!settings.enabled}
+                  ariaLabel="Active model recent retention"
+                  onChange={(value) => updateProfile('keepRecentTokens', String(value))}
+                />
               </>
             )}
           </>
@@ -465,6 +359,66 @@ export function HistoryCompactionSection({
           Provider-overflow recovery remains enabled as an emergency fallback.
         </div>
       </div>
+    </div>
+  );
+}
+
+/** Models-tab assignment for history-compaction summaries. */
+export function HistoryCompactionModelAssignment({
+  settings,
+  availableModels,
+  modelEntries,
+  activeModel,
+  onSetPrefs,
+}: HistoryCompactionModelAssignmentProps) {
+  const activeModelInfo = activeModel
+    ? availableModels.find((model) => model.id === activeModel.id
+      && (!activeModel.provider || model.provider === activeModel.provider))
+    : undefined;
+  const update = (next: HistoryCompactionSettings) => {
+    onSetPrefs({ historyCompaction: resolveHistoryCompactionSettings(next) } satisfies Partial<ChatPrefs>);
+  };
+  const updateSummaryModel = (
+    value: { provider: string; model: string } | null,
+    normalizedThinking?: 'inherit' | ThinkingLevel | '',
+  ) => {
+    update({
+      ...settings,
+      summaryModel: value ? { provider: value.provider, id: value.model } : null,
+      ...(normalizedThinking !== undefined && normalizedThinking !== ''
+        ? { summaryThinkingLevel: normalizedThinking }
+        : {}),
+    });
+  };
+
+  return (
+    <div class="toolbar-settings-ext-settings">
+      <ModelAssignmentRow
+        label="Summary model"
+        entries={modelEntries}
+        current={settings.summaryModel
+          ? { provider: settings.summaryModel.provider, model: settings.summaryModel.id }
+          : null}
+        emptyLabel="Active model"
+        fallbackModel={activeModelInfo}
+        clearable
+        disabled={!settings.enabled}
+        clearLabel="Use active model for summaries"
+        clearTitle="Use active model"
+        thinking={{
+          value: settings.summaryThinkingLevel,
+          includeInherit: true,
+          ariaLabel: 'Summary thinking level',
+          onChange: (value) => {
+            update({ ...settings, summaryThinkingLevel: value === '' ? 'inherit' : value });
+          },
+        }}
+        onChange={updateSummaryModel}
+        dropdownDirection="down"
+      />
+      {!settings.enabled && (
+        <div class="toolbar-settings-item-hint">Enable history compaction in Context to change this assignment.</div>
+      )}
     </div>
   );
 }

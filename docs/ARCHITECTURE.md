@@ -44,6 +44,10 @@ An explicit restart is a configuration commit boundary: the host projects backen
 
 The generic `computer` pi extension adds a separate native sidecar boundary below the PI backend. Each durable pie session owns one lazy Node child that loads Cua Driver and NutJS and communicates through bounded JSONL; screenshots and sequence traces remain artifact files. Exact PID/HWND and foreground validation gates global physical input, while parent/child held-input ledgers provide cancellation, timeout, restart, close, and shutdown release barriers. The webview's ordinary tool-result renderer displays mixed text/image content; no computer-specific host state or transcript component is introduced. See [COMPUTER-USE.md](COMPUTER-USE.md) for the full contract and evidence.
 
+### Playwright runtime isolation
+
+The first-class `playwright` pi extension adds an independent rendered-page sidecar boundary below the PI backend. Each durable Pie session owns one lazy Node child, and each Playwright tool session owns one dedicated Playwright-pinned headless Chromium process plus an isolated primary `BrowserContext`. Bounded versioned JSONL carries requests and accessibility evidence; complete reduced snapshots, screenshots, downloads, oversized code results, and storage state remain session artifacts. Revision-scoped AI accessibility refs fail closed after any state-changing action, while parent deadlines, Windows process-tree termination, stdin/parent-liveness watching, explicit close, and `session_shutdown` prevent Chromium descendants from outliving their owner. The parent never imports Playwright or attaches to user browsers. Ordinary tool-result rendering and generic image-context projection require no Playwright-specific host state or transcript component. See [PLAYWRIGHT.md](PLAYWRIGHT.md) for the full behavior and evidence.
+
 ## 2. Architecture Pattern
 
 The system follows a **CQRS/Elm-style MVI** pattern. User actions and backend events are unified into a single `Event` type processed by a pure reducer. The reducer returns updated state plus effect descriptors. An effect runner executes side effects (RPCs, persistence, logging) and feeds results back as events. The webview is a passive renderer of projected state — it never mutates logic state directly.
@@ -218,7 +222,7 @@ See git history (commit `d581d83`) for historical context on the migration from 
   scrolling.
 - Per-session revision counter detects missed snapshots; recovery is a full snapshot.
 - `hostInstanceId` detects extension restarts; webview resets all mirrors on change.
-- `WEBVIEW_PROTOCOL_VERSION` plus the deterministic compile-time `PIE_BUILD_ID` fail closed on protocol or source-build skew. State/hello and readiness handshakes carry both identities; a mismatch never routes commands or applies/acknowledges state, is terminal rather than ordinary hot-reload recovery, and leaves a persistent Reload Required surface. The build id is substituted before chunk hashing on every watch emission, so a running old host cannot silently accept freshly emitted renderer assets.
+- `WEBVIEW_PROTOCOL_VERSION` fails closed on incompatible host/webview wire shapes. State/hello and readiness handshakes also carry the deterministic compile-time `PIE_BUILD_ID`, but build identity is diagnostic only at runtime: same-protocol renderer assets emitted by an in-place rebuild remain usable with the running extension host, so active sessions continue until the user chooses to reload. One-shot builds still verify that the emitted host and webview bundles have coordinated build identities.
 
 See [`docs/STATE_CONTRACT.md`](STATE_CONTRACT.md) for the full invariant set.
 

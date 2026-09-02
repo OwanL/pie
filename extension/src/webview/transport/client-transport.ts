@@ -160,7 +160,7 @@ const RECONNECT_MAX_DELAY_MS = 30_000;
 const RELOAD_REQUIRED_CLOSE_REASONS = new Set([
   'invalid-renderer-hello',
   'ready-required',
-  'renderer-build-mismatch',
+  'renderer-asset-mismatch',
   'protocol-violation',
   'too-many-malformed-messages',
 ]);
@@ -278,13 +278,14 @@ export class BrowserClientTransport implements ClientTransport {
         }
         const hello = message;
         const pageAssetVersion = getAssetVersion();
-        if (
-          hello.protocolVersion !== WEBVIEW_PROTOCOL_VERSION
-          || hello.buildId !== PIE_BUILD_ID
-          || (pageAssetVersion !== undefined && hello.assetVersion !== pageAssetVersion)
-        ) {
+        if (hello.protocolVersion !== WEBVIEW_PROTOCOL_VERSION) {
           this.latchReloadRequired();
-          socket.close(CLIENT_POLICY_CLOSE_CODE, 'renderer-build-mismatch');
+          socket.close(CLIENT_POLICY_CLOSE_CODE, 'protocol-violation');
+          return;
+        }
+        if (pageAssetVersion !== undefined && hello.assetVersion !== pageAssetVersion) {
+          this.latchReloadRequired();
+          socket.close(CLIENT_POLICY_CLOSE_CODE, 'renderer-asset-mismatch');
           return;
         }
         this.identity = {
@@ -447,7 +448,7 @@ export class BrowserClientTransport implements ClientTransport {
     for (const handler of this.stateHandlers) handler(next);
   }
 
-  /** Terminal protocol/build failures require a page reload. They must also
+  /** Terminal protocol/asset failures require a page reload. They must also
    *  cancel any already-armed retry so one bad page cannot reconnect-storm. */
   private latchReloadRequired(): void {
     this.compatibilityBlocked = true;

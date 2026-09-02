@@ -66,8 +66,11 @@ export function UserPromptContextBar({
   // governing prompt's identity changes. The element keeps the listener
   // stable across streaming rebuilds via the ref indirection.
   const [, setPromptRevision] = useState(0);
+  const [isCompact, setIsCompact] = useState(false);
   const selectedMessageIdRef = useRef<string | null>(null);
   const scrollSelectRef = useRef<(() => void) | null>(null);
+  const contextRowRef = useRef<HTMLDivElement | null>(null);
+  const previewRef = useRef<HTMLButtonElement | null>(null);
   scrollSelectRef.current = () => {
     const element = scrollRef.current;
     if (!element) return;
@@ -116,6 +119,35 @@ export function UserPromptContextBar({
     [selectedMessage?.id, selectedMessage?.markdown, selectedMessage?.userParts],
   );
 
+  // Keep the original row treatment, but reclaim vertical space when its
+  // complete contents use less than half the available width. scrollWidth
+  // measures the prompt before ellipsis, so long prompts never compact merely
+  // because their button is capped by max-width.
+  useLayoutEffect(() => {
+    const row = contextRowRef.current;
+    const preview = previewRef.current;
+    if (!row || !preview || selectedDetails === null) {
+      setIsCompact(false);
+      return;
+    }
+
+    const measure = () => {
+      const metadata = row.querySelector<HTMLElement>('.transcript-prompt-context-meta');
+      const parsedGap = Number.parseFloat(window.getComputedStyle(row).columnGap);
+      const occupiedWidth = preview.scrollWidth
+        + (metadata?.scrollWidth ?? 0)
+        + (metadata && Number.isFinite(parsedGap) ? parsedGap : 0);
+      const next = row.clientWidth > 0 && occupiedWidth <= row.clientWidth * 0.5;
+      setIsCompact((previous) => previous === next ? previous : next);
+    };
+
+    measure();
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure);
+    observer?.observe(row);
+    observer?.observe(preview);
+    return () => observer?.disconnect();
+  }, [selected?.messageId, selected?.isAutoResume, selected?.isQueued, selectedDetails?.plainText]);
+
   // Data and measurement updates can change the render-time selection without
   // a scroll event. Keep the listener's comparison baseline aligned with what
   // is actually rendered so the next same-range scroll cannot be ignored.
@@ -139,7 +171,7 @@ export function UserPromptContextBar({
 
   return (
     <section
-      class={`transcript-prompt-context${hidden ? ' is-hidden' : ''}`}
+      class={`transcript-prompt-context${isCompact ? ' is-compact' : ''}${hidden ? ' is-hidden' : ''}`}
       role="region"
       aria-label="User prompt context"
       aria-hidden={hidden ? 'true' : undefined}
@@ -147,7 +179,7 @@ export function UserPromptContextBar({
       <span id={locateDescriptionId} class="transcript-prompt-context-action-description">
         Locate this user prompt in the transcript
       </span>
-      <div class="transcript-prompt-context-row">
+      <div class="transcript-prompt-context-row" ref={contextRowRef}>
         {hasMetadata && (
           <div class="transcript-prompt-context-meta" aria-label="Prompt metadata">
             {selectedDetails.imageCount > 0 && (
@@ -162,6 +194,7 @@ export function UserPromptContextBar({
         <button
           type="button"
           class="transcript-prompt-context-preview"
+          ref={previewRef}
           aria-describedby={locateDescriptionId}
           title="Locate user prompt in transcript"
           onClick={locate}

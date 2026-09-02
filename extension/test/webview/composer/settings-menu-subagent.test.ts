@@ -8,7 +8,7 @@ import { act } from 'preact/test-utils';
 import { installDom } from '../../_helpers/dom';
 installDom();
 
-import { SubagentSection } from '../../../src/webview/panel/composer/settings-menu-subcomponents';
+import { SubagentModelAssignments as SubagentSection, SubagentSection as SubagentBehaviorSection } from '../../../src/webview/panel/composer/settings-menu-subcomponents';
 import { filterEnabledProviders, getModelThinkingLevels, orderModelsForPicker } from '../../../src/webview/panel/composer/model-list';
 import { DEFAULT_CHAT_PREFS } from '../../../src/shared/protocol';
 import type { ChatPrefs, ModelInfo } from '../../../src/shared/protocol';
@@ -24,13 +24,12 @@ const AVAILABLE_MODELS: ModelInfo[] = [
   { id: 'gpt-5', name: 'GPT-5', provider: 'openai', reasoning: true, thinkingLevels: ['off', 'minimal', 'low', 'medium', 'high', 'max'], inputKinds: ['text'] },
 ];
 
-test('SubagentSection renders the inline container, toggle, buckets, and nesting controls', () => {
+test('SubagentSection renders behavior and nesting controls without model buckets', () => {
   const html = renderToString(
-    h(SubagentSection, {
+    h(SubagentBehaviorSection, {
       prefs: prefsWith({}),
       onSetPrefs: () => undefined,
       availableModels: AVAILABLE_MODELS,
-      modelEntries: orderModelsForPicker(AVAILABLE_MODELS),
     }),
   );
 
@@ -45,13 +44,10 @@ test('SubagentSection renders the inline container, toggle, buckets, and nesting
 
   // Default provider section explains why it has no toggles until buckets are configured.
   assert.match(html, /Default providers</);
-  assert.match(html, /Add models to the buckets below to configure provider defaults/);
+  assert.match(html, /Add models to the buckets in Models to configure provider defaults/);
 
-  // Model buckets group + all three bucket labels + hints.
-  assert.match(html, /Model buckets</);
-  assert.match(html, /Low-cost busywork</);
-  assert.match(html, /Balanced main development</);
-  assert.match(html, /Most capable for hardest problems</);
+  assert.doesNotMatch(html, /Low-cost busywork/);
+  assert.doesNotMatch(html, /Choose model for Small bucket/);
 
   // Nesting + throughput controls.
   assert.match(html, /Nesting levels</);
@@ -63,11 +59,10 @@ test('SubagentSection renders the inline container, toggle, buckets, and nesting
 
 test('SubagentSection renders the nested-bucket allowlist toggles reflecting prefs', () => {
   const html = renderToString(
-    h(SubagentSection, {
+    h(SubagentBehaviorSection, {
       prefs: prefsWith({ subagentNestedAllowedBuckets: { small: true, medium: true, frontier: false } }),
       onSetPrefs: () => undefined,
       availableModels: AVAILABLE_MODELS,
-      modelEntries: orderModelsForPicker(AVAILABLE_MODELS),
     }),
   );
 
@@ -82,11 +77,10 @@ test('SubagentSection renders the nested-bucket allowlist toggles reflecting pre
 
 test('SubagentSection renders per-bucket delegation toggles reflecting prefs', () => {
   const html = renderToString(
-    h(SubagentSection, {
+    h(SubagentBehaviorSection, {
       prefs: prefsWith({ subagentBucketCanSpawn: { small: false, medium: false, frontier: true } }),
       onSetPrefs: () => undefined,
       availableModels: AVAILABLE_MODELS,
-      modelEntries: orderModelsForPicker(AVAILABLE_MODELS),
     }),
   );
 
@@ -99,7 +93,7 @@ test('SubagentSection renders per-bucket delegation toggles reflecting prefs', (
 
 test('SubagentSection renders default toggles only for providers used by subagent buckets', () => {
   const html = renderToString(
-    h(SubagentSection, {
+    h(SubagentBehaviorSection, {
       prefs: prefsWith({
         subagentBuckets: {
           small: [{ model: 'anthropic/haiku', thinkingLevel: 'off' }],
@@ -113,7 +107,6 @@ test('SubagentSection renders default toggles only for providers used by subagen
         ...AVAILABLE_MODELS,
         { id: 'gemini', name: 'Gemini', provider: 'google', reasoning: true, inputKinds: ['text'] },
       ],
-      modelEntries: orderModelsForPicker(AVAILABLE_MODELS),
     }),
   );
 

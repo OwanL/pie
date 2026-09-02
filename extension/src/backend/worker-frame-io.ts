@@ -246,7 +246,13 @@ export class BoundedWorkerIpcWriter {
     // the semantic frame limit above), but only when the lane is otherwise
     // empty. This lets a large promotion snapshot or session.opened pass while
     // still bounding the backlog of many queued frames under backpressure.
-    if (retainedLaneBytes > 0 && nextLaneBytes > this.capacities[lane]) {
+    // That exceptional frame does not consume the lane's ordinary reservation:
+    // lifecycle records such as busy.changed must still fit behind a large
+    // session.opened instead of turning valid backpressure into worker death.
+    const exceptionalQueuedFrameBytes = this.lanes[lane]
+      .find((entry) => entry.bytes > this.capacities[lane])?.bytes ?? 0;
+    const reservedLaneBytes = retainedLaneBytes - exceptionalQueuedFrameBytes;
+    if (retainedLaneBytes > 0 && reservedLaneBytes + pending.bytes > this.capacities[lane]) {
       return this.reject(options.onSettled, 'capacity', capacityDetail(lane, nextLaneBytes, this.capacities[lane]));
     }
     this.lanes[lane].push(pending);

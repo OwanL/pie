@@ -8,7 +8,14 @@ import './styles/index.css';
 
 import type { WebviewToHostMessage } from '../../shared/protocol';
 import { App } from './app';
-import { isSuspenseThenable, sanitizedRenderFailure, sanitizedRenderLog } from './render-error';
+import {
+  isBenignResizeObserverError,
+  isSuspenseThenable,
+  sanitizedRenderDiagnostic,
+  sanitizedRenderFailure,
+  sanitizedRenderLog,
+  type SanitizedRenderDiagnostic,
+} from './render-error';
 import { setWebviewLogSink } from './utils/log';
 import {
   BrowserClientTransport,
@@ -104,15 +111,59 @@ function showRenderErrorOverlay(error: unknown) {
   document.body.appendChild(overlay);
 }
 
+const AMBIENT_ERROR_LOG_WINDOW_MS = 10_000;
+const MAX_AMBIENT_ERROR_FINGERPRINTS = 32;
+const ambientErrorLastLoggedAt = new Map<string, number>();
+const fatalErrorsAwaitingWindowEvent = new WeakSet<object>();
+
+function isWeakSetKey(value: unknown): value is object {
+  return (typeof value === 'object' && value !== null) || typeof value === 'function';
+}
+
+function shouldLogAmbientError(
+  classification: 'uncaught_error' | 'unhandled_rejection',
+  diagnostic: SanitizedRenderDiagnostic,
+): boolean {
+  const now = Date.now();
+  const fingerprint = `${classification}:${diagnostic.errorName ?? ''}:${diagnostic.errorMessage}`;
+  const lastLoggedAt = ambientErrorLastLoggedAt.get(fingerprint);
+  if (lastLoggedAt !== undefined && now - lastLoggedAt < AMBIENT_ERROR_LOG_WINDOW_MS) return false;
+  if (!ambientErrorLastLoggedAt.has(fingerprint)
+    && ambientErrorLastLoggedAt.size >= MAX_AMBIENT_ERROR_FINGERPRINTS) {
+    const oldestFingerprint = ambientErrorLastLoggedAt.keys().next().value;
+    if (typeof oldestFingerprint === 'string') ambientErrorLastLoggedAt.delete(oldestFingerprint);
+  }
+  ambientErrorLastLoggedAt.delete(fingerprint);
+  ambientErrorLastLoggedAt.set(fingerprint, now);
+  return true;
+}
+
 function reportRenderFailure(
-  classification: 'component_error' | 'uncaught_error' | 'unhandled_rejection',
-  scope: 'panel' | 'webview',
+  classification: 'component_error',
+  scope: 'panel',
+  error: unknown,
 ): void {
-  // Host logs are deliberately classification-only. The original error stays
-  // local to the overlay below, where it is useful to the person debugging.
-  console.error(`[pie:webview:${scope}] render failure`, classification);
-  postMessage(sanitizedRenderLog(classification, scope));
+  const diagnostic = sanitizedRenderDiagnostic(error);
+  if (isWeakSetKey(error)) fatalErrorsAwaitingWindowEvent.add(error);
+  console.error(`[pie:webview:${scope}] fatal render failure`, classification, diagnostic);
+  postMessage(sanitizedRenderLog(classification, scope, diagnostic, { fatal: true }));
   postMessage({ type: 'renderFailure', payload: sanitizedRenderFailure(classification) });
+}
+
+function reportAmbientError(
+  classification: 'uncaught_error' | 'unhandled_rejection',
+  scope: 'panel' | 'webview',
+  diagnostic: SanitizedRenderDiagnostic,
+  benign = false,
+): void {
+  if (!shouldLogAmbientError(classification, diagnostic)) return;
+  const level = benign ? 'warn' : 'error';
+  console[level](`[pie:webview:${scope}] non-fatal browser error`, classification, diagnostic);
+  postMessage(sanitizedRenderLog(classification, scope, diagnostic, {
+    fatal: false,
+    benign,
+    level,
+  }));
 }
 
 const prevCatchError = (options as any).__e;
@@ -125,17 +176,28 @@ const prevCatchError = (options as any).__e;
     throw error;
   }
 
-  reportRenderFailure('component_error', 'panel');
+  reportRenderFailure('component_error', 'panel', error);
   showRenderErrorOverlay(error);
   if (prevCatchError) prevCatchError(error, vnode, oldVNode);
 };
 
-window.addEventListener('error', () => {
-  reportRenderFailure('uncaught_error', 'panel');
+window.addEventListener('error', (event) => {
+  if (isWeakSetKey(event.error) && fatalErrorsAwaitingWindowEvent.delete(event.error)) return;
+  const benign = isBenignResizeObserverError(event.message);
+  reportAmbientError('uncaught_error', 'panel', sanitizedRenderDiagnostic(event.error, {
+    message: event.message,
+    source: event.filename,
+    line: event.lineno,
+    column: event.colno,
+  }), benign);
 });
 
-window.addEventListener('unhandledrejection', () => {
-  reportRenderFailure('unhandled_rejection', 'webview');
+window.addEventListener('unhandledrejection', (event) => {
+  reportAmbientError(
+    'unhandled_rejection',
+    'webview',
+    sanitizedRenderDiagnostic(event.reason),
+  );
 });
 
 // ─── Mount ───────────────────────────────────────────────────────────────────

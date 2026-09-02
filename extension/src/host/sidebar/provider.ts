@@ -8,7 +8,6 @@ import type { RendererRegistration, RendererTransport } from '../renderers/types
 import type { StateDeliveryClock } from './state-delivery-controller';
 import type { StateDeliveryRecoveryReason } from './state-delivery-controller';
 import type { HostToWebviewMessage, ViewState, WebviewToHostMessage } from '../../shared/protocol';
-import { PIE_BUILD_ID } from '../../shared/protocol';
 
 type ResolvedWebviewHtml = Awaited<ReturnType<typeof resolveWebviewHtml>>;
 
@@ -36,8 +35,6 @@ export interface SidebarViewProviderOptions {
   onForeignPostImperative?(rendererId: string, message: HostToWebviewMessage): void;
   /** Release resources owned by a renderer document before invalidation. */
   onRendererInvalidated?(rendererId: string, rendererGeneration: number): void;
-  /** Test/embedding seam for the reload-required compatibility boundary. */
-  onBuildMismatch?(details: { actualBuildId: string | null; expectedBuildId: string }): void | Promise<void>;
 }
 
 /**
@@ -58,7 +55,6 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
   private readonly providerOptions: SidebarViewProviderOptions;
   private messageHandler?: (message: WebviewToHostMessage) => void;
   private visibilityHandler?: (visible: boolean) => void;
-  private buildMismatchDetected = false;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -288,10 +284,10 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
     });
   }
 
-  /** VS Code-specific prelude: asset self-heal, then build compatibility. The hot-reload
-   *  gate for unstamped messages lives in the renderer session, after the
-   *  render-evidence branch and generation check (matching the original
-   *  provider order, so evidence is never dropped during a reload). */
+  /** VS Code-specific prelude: asset self-heal. The hot-reload gate for
+   *  unstamped messages lives in the renderer session, after the render-evidence
+   *  branch and generation check (matching the original provider order, so
+   *  evidence is never dropped during a reload). */
   private preludeMessage(msg: WebviewToHostMessage): boolean {
     const incomingAssetVersion = this.hotReloader.getIncomingAssetVersion(msg);
     if (this.hotReloader.shouldReloadForAssetMismatch(msg, incomingAssetVersion)) {
@@ -303,55 +299,7 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
       void this.hotReloader.reloadForAssetMismatch();
       return false;
     }
-    if (this.buildMismatchDetected) return false;
-    if (
-      (msg.type === 'ready' || msg.type === 'refreshState' || msg.type === 'requestSnapshot')
-      && msg.buildId !== PIE_BUILD_ID
-    ) {
-      this.buildMismatchDetected = true;
-      const incompatibleView = this.view;
-      // Compatibility skew is terminal for this extension-host incarnation,
-      // not an ordinary hot-reload episode. Detach the transport and dispose
-      // renderer ownership so later global dirty events cannot re-arm the
-      // normal readiness/hot-reload recovery loop.
-      this.view = undefined;
-      this.messageDisposable?.dispose();
-      this.session.handleViewDisposed();
-      if (incompatibleView) incompatibleView.webview.html = this.reloadRequiredHtml();
-      bootLog('sidebar-provider', 'buildId.mismatch', {
-        actualBuildId: msg.buildId ?? null,
-        expectedBuildId: PIE_BUILD_ID,
-        type: msg.type,
-      });
-      void this.notifyBuildMismatch(msg.buildId ?? null);
-      return false;
-    }
     return true;
-  }
-
-  private async notifyBuildMismatch(actualBuildId: string | null): Promise<void> {
-    if (this.providerOptions.onBuildMismatch) {
-      await this.providerOptions.onBuildMismatch({ actualBuildId, expectedBuildId: PIE_BUILD_ID });
-      return;
-    }
-    const action = await vscode.window.showWarningMessage(
-      'Pie was rebuilt while this extension host was running. Reload the VS Code window to continue safely.',
-      'Reload Window',
-    );
-    if (action === 'Reload Window') {
-      await vscode.commands.executeCommand('workbench.action.reloadWindow');
-    }
-  }
-
-  private reloadRequiredHtml(): string {
-    return `<!DOCTYPE html>
-<html lang="en">
-<head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" /></head>
-<body style="padding:16px;color:var(--vscode-foreground);background:var(--vscode-sideBar-background);font-family:var(--vscode-font-family)">
-  <h2 style="font-size:14px">Reload required</h2>
-  <p>Pie was rebuilt while this extension host was running. Use the <strong>Reload Window</strong> notification action to continue safely.</p>
-</body>
-</html>`;
   }
 
   private installViewLifecycleHandlers(webviewView: vscode.WebviewView): void {

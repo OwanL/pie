@@ -32,7 +32,7 @@ import { listMcpServers, setMcpServerEnabled } from './mcp-config';
 import { readSessionMcpOverrides, writeSessionMcpOverrides, type SessionMcpOverrides } from './mcp-session-config';
 import { CreateOperationLedger } from './create-operation-ledger';
 import { resolveActiveModel } from './session-metadata';
-import type { SdkModule, SdkSessionManager } from './sdk';
+import { classifyInterruptedContinuationTail, type SdkModule, type SdkSessionManager } from './sdk';
 import { buildPromptText, lowerImageInputs, normalizeThinkingLevel } from './message-inputs';
 import type { ActiveRequest, SessionContext, SessionContextCreationReason } from './server-types';
 import { BackendLiveTurnAccumulator } from './live-turn-accumulator';
@@ -1429,13 +1429,10 @@ async function handleMessageContinue(
     throw new BackendError('SDK_INCOMPATIBLE', 'The active PI runtime does not support interrupted-turn continuation.');
   }
   const messages = context.session.messages;
-  const lastMessage = Array.isArray(messages) ? messages[messages.length - 1] : undefined;
-  if (!lastMessage || typeof lastMessage !== 'object'
-      || (lastMessage as { role?: unknown }).role !== 'assistant'
-      || (lastMessage as { stopReason?: unknown }).stopReason !== 'aborted') {
+  if (!classifyInterruptedContinuationTail(messages, context.session.model?.contextWindow)) {
     throw new BackendError(
       'CONTINUATION_NOT_AVAILABLE',
-      'The session does not end with an interrupted assistant turn.',
+      'The session does not end at an interrupted continuation point.',
     );
   }
 
@@ -1552,6 +1549,16 @@ async function handleMessageInterrupt(
     context.session.clearQueue();
     context.queuedLocalIds = [];
     return { interrupted: false, alreadyStopped: true };
+  }
+  // Stop owns every not-yet-started continuation too. Threshold history
+  // compaction can defer a zero-prompt provider turn until after the current
+  // agent_end; cancel both the SDK and backend markers before aborting so that
+  // a fresh AbortController cannot resurrect work after this barrier settles.
+  context.session.cancelPendingHardCompactionContinuation?.();
+  context.hardCompactionContinuationPending = false;
+  if (context.thresholdCompactionContinuationCandidate) {
+    context.thresholdCompactionContinuationCandidate.aborted = true;
+    context.thresholdCompactionContinuationCandidate = undefined;
   }
   if (context.activeRequest) {
     context.activeRequest.aborted = true;

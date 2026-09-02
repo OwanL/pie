@@ -3,27 +3,25 @@
 
 import type { ChatPrefs } from '../../../shared/protocol';
 import { CHAT_PREF_MENU_SECTIONS, toggleChatPref } from '../chat-prefs';
+import { SettingCheckbox } from '../components/setting-checkbox';
 import type { OnSetPrefs } from './settings-menu-types';
 
 export type ChatPrefItemDef = (typeof CHAT_PREF_MENU_SECTIONS)[number]['items'][number];
 
+export const CHAT_PREF_SECTION_SEARCH_DEFS = CHAT_PREF_MENU_SECTIONS.map((section) => ({
+  id: section.id,
+  label: section.label,
+  labels: section.items.map((item) => item.label),
+}));
+
+/** Prefs-bound wrapper over the generic {@link SettingCheckbox} row. */
 export function ChatPrefItem({ item, prefs, onSetPrefs }: { item: ChatPrefItemDef; prefs: ChatPrefs; onSetPrefs: OnSetPrefs }) {
-  const checked = prefs[item.key];
   return (
-    <button
-      class={`toolbar-settings-item${checked ? ' checked' : ''}`}
-      type="button"
-      role="checkbox"
-      aria-checked={checked}
-      onClick={() => onSetPrefs(toggleChatPref(prefs, item.key))}
-    >
-      <span class="toolbar-settings-item-check" aria-hidden="true">
-        <svg width="14" height="14" viewBox="0 0 13 13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style={checked ? '' : 'opacity:0'}>
-          <polyline points="2.5,6.5 5,9 10.5,3.5" />
-        </svg>
-      </span>
-      <span class="toolbar-settings-item-label">{item.label}</span>
-    </button>
+    <SettingCheckbox
+      label={item.label}
+      checked={prefs[item.key]}
+      onChange={() => onSetPrefs(toggleChatPref(prefs, item.key))}
+    />
   );
 }
 

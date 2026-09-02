@@ -45,10 +45,10 @@ function computeBuildId(): string {
 
 /**
  * Replace the compile sentinel at emission time, not config-load time. Vite
- * watch keeps one config alive, while an in-place rebuild must mint a new id
- * so a running old host cannot accept a newly emitted renderer. Watching the
- * complete identity input set also makes both bundle graphs rebuild before a
- * window reload, even when a changed file is exclusive to the other graph.
+ * watch keeps one config alive, while every emission needs an identity for
+ * diagnostics and coordinated-output verification. Watching the complete
+ * identity input set also makes both bundle graphs rebuild together, even when
+ * a changed file is exclusive to the other graph.
  */
 function buildIdentityPlugin(): Plugin {
   let buildId = '';

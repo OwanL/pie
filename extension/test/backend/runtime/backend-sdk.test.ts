@@ -9,12 +9,18 @@ import { cloneTreeByHardlink } from '../../helpers/clone-tree-by-hardlink';
 
 import {
   applySdkInterruptedContinuationRuntimePatch,
+  applySdkOverflowCompactionContextPatch,
   applySdkRetryHotPatch,
   applySdkTerminalDurabilityPatch,
+  classifyInterruptedContinuationTail,
   ensureSdkPatchBarrier,
   loadSdk,
   loadSdkInternalModule,
 } from '../../../src/backend/sdk';
+import {
+  consumedOverflowMessageEntryIds,
+  isContextOverflowMessage,
+} from '../../../src/backend/history-compaction';
 
 test('interrupted continuation removes only the aborted provider-context tail and starts without a user prompt', async () => {
   const runInputs: unknown[][] = [];
@@ -51,7 +57,116 @@ test('interrupted continuation removes only the aborted provider-context tail an
   );
 });
 
-test('interrupted continuation rejects a non-interrupted durable tail', async () => {
+test('interrupted continuation resumes an open provider turn after a user or tool result', async (t) => {
+  for (const tail of [
+    { role: 'user', content: 'work' },
+    { role: 'toolResult', toolCallId: 'tool-1', content: 'done' },
+  ]) {
+    await t.test(tail.role, async () => {
+      const runInputs: unknown[][] = [];
+      class FakeAgentSession {
+        agent = { state: { messages: [tail] as unknown[] } };
+        async _runAgentPrompt(messages: unknown[]): Promise<void> {
+          runInputs.push(messages);
+        }
+      }
+      applySdkInterruptedContinuationRuntimePatch({
+        AgentSession: FakeAgentSession as unknown as { prototype: Record<string, unknown> },
+      });
+      const session = new FakeAgentSession() as FakeAgentSession & {
+        continueAfterInterruption(): Promise<void>;
+      };
+
+      await session.continueAfterInterruption();
+
+      assert.deepEqual(session.agent.state.messages, [tail], 'the existing provider boundary remains intact');
+      assert.deepEqual(runInputs, [[]], 'continuation enters the run lifecycle with no prompt messages');
+    });
+  }
+});
+
+test('interrupted continuation retries a provider-forced context overflow and resets the bounded recovery attempt', async () => {
+  const runInputs: unknown[][] = [];
+  class FakeAgentSession {
+    agent = {
+      state: {
+        messages: [
+          { role: 'compactionSummary', summary: 'kept work' },
+          { role: 'user', content: 'finish the task' },
+          {
+            role: 'assistant',
+            stopReason: 'error',
+            errorMessage: 'prompt is too long: 201000 tokens > 200000 maximum',
+            content: [],
+          },
+        ] as unknown[],
+      },
+    };
+    _overflowRecoveryAttempted = true;
+    async _runAgentPrompt(messages: unknown[]): Promise<void> {
+      runInputs.push(messages);
+    }
+  }
+  applySdkInterruptedContinuationRuntimePatch({
+    AgentSession: FakeAgentSession as unknown as { prototype: Record<string, unknown> },
+  });
+  const session = new FakeAgentSession() as FakeAgentSession & {
+    continueAfterInterruption(): Promise<void>;
+  };
+
+  await session.continueAfterInterruption();
+
+  assert.deepEqual(session.agent.state.messages, [
+    { role: 'compactionSummary', summary: 'kept work' },
+    { role: 'user', content: 'finish the task' },
+  ]);
+  assert.equal(session._overflowRecoveryAttempted, false);
+  assert.deepEqual(runInputs, [[]]);
+});
+
+test('forced-overflow classification keeps transcript and continuation decisions aligned', () => {
+  const dashScope = {
+    role: 'assistant' as const,
+    stopReason: 'error',
+    errorMessage: 'Range of input length should be [1, 131072]',
+    content: [],
+  };
+  const emptyLength = {
+    role: 'assistant' as const,
+    stopReason: 'length',
+    content: [],
+    usage: { input: 10, output: 0, cacheRead: 0 },
+  };
+  const completedOverWindow = {
+    role: 'assistant' as const,
+    stopReason: 'stop',
+    content: 'delivered answer',
+    usage: { input: 201_000, output: 10, cacheRead: 0 },
+  };
+
+  assert.equal(isContextOverflowMessage(dashScope), true);
+  assert.equal(classifyInterruptedContinuationTail([dashScope], 200_000), 'overflow-assistant');
+  assert.equal(isContextOverflowMessage(emptyLength), true);
+  assert.equal(classifyInterruptedContinuationTail([emptyLength], 200_000), 'overflow-assistant');
+  assert.equal(isContextOverflowMessage(completedOverWindow, 200_000), false);
+  assert.equal(classifyInterruptedContinuationTail([completedOverWindow], 200_000), undefined);
+});
+
+test('successful assistant output is never consumed by an overflow-marked compaction', () => {
+  const entries = [
+    {
+      id: 'answer', type: 'message', timestamp: '2026-01-01T00:00:00.000Z',
+      message: { role: 'assistant' as const, stopReason: 'stop', content: 'delivered answer' },
+    },
+    {
+      id: 'compact', type: 'compaction', timestamp: '2026-01-01T00:00:01.000Z',
+      details: { pieCompaction: { reason: 'overflow' } },
+    },
+  ];
+  assert.deepEqual([...consumedOverflowMessageEntryIds(entries)], []);
+});
+
+test('interrupted continuation rejects a completed assistant tail', async () => {
   class FakeAgentSession {
     agent = { state: { messages: [{ role: 'assistant', stopReason: 'stop' }] as unknown[] } };
     async _runAgentPrompt(): Promise<void> {}
@@ -64,8 +179,47 @@ test('interrupted continuation rejects a non-interrupted durable tail', async ()
   };
   await assert.rejects(
     session.continueAfterInterruption(),
-    /does not end with an interrupted assistant turn/,
+    /does not end at an interrupted continuation point/,
   );
+});
+
+test('overflow context projection omits the provider error across reopen and duplicate rebuilds', () => {
+  const user = { role: 'user', content: 'finish the task' };
+  const overflow = {
+    role: 'assistant',
+    stopReason: 'error',
+    errorMessage: 'context length exceeded',
+  };
+  const entries = [
+    { id: 'user', type: 'message', message: user },
+    { id: 'overflow', type: 'message', message: overflow },
+    {
+      id: 'compact',
+      type: 'compaction',
+      details: { pieCompaction: { reason: 'overflow' } },
+    },
+  ];
+  class FakeSessionManager {
+    getBranch() { return entries; }
+    buildContextEntries() { return [entries[2], entries[0], entries[1]]; }
+    buildSessionContext() {
+      return {
+        messages: [{ role: 'compactionSummary', summary: 'kept work' }, user, { ...overflow, content: [] }],
+        thinkingLevel: 'off',
+        model: null,
+      };
+    }
+  }
+
+  assert.equal(applySdkOverflowCompactionContextPatch({
+    SessionManager: FakeSessionManager as unknown as { prototype: Record<string, unknown> },
+  }), 'patched');
+  const context = new FakeSessionManager().buildSessionContext();
+
+  assert.deepEqual(context.messages, [
+    { role: 'compactionSummary', summary: 'kept work' },
+    user,
+  ]);
 });
 
 const SESSION_MANAGER_PATCH_SOURCE = `
@@ -360,17 +514,26 @@ test('loadSdk imports allowed ESM SDK modules that satisfy the contract', async 
         _installAgentNextTurnRefresh() {}
         _buildRuntime() {}
         async _checkCompaction() { return false; }
+        async _handlePostAgentRun() { return false; }
         async _runAgentPrompt() {}
       }
       export const getAgentDir = () => '/agent';
       export const AuthStorage = { create: (filePath) => ({ filePath }) };
-      export const SessionManager = {
-        listAll: async () => [],
-        continueRecent: (cwd) => ({ cwd, getCwd: () => cwd, getSessionFile: () => undefined, getSessionName: () => undefined, getBranch: () => [], getEntries: () => [] }),
-        create: (cwd) => ({ cwd, getCwd: () => cwd, getSessionFile: () => undefined, getSessionName: () => undefined, getBranch: () => [], getEntries: () => [] }),
-        inMemory: (cwd) => ({ cwd, getCwd: () => cwd, getSessionFile: () => undefined, getSessionName: () => undefined, getBranch: () => [], getEntries: () => [] }),
-        open: (sessionPath) => ({ getCwd: () => '/repo', getSessionFile: () => sessionPath, getSessionName: () => undefined, getBranch: () => [], getEntries: () => [] }),
-      };
+      export class SessionManager {
+        constructor(cwd = '/repo', sessionPath) { this.cwd = cwd; this.sessionPath = sessionPath; }
+        static listAll = async () => [];
+        static continueRecent = (cwd) => new SessionManager(cwd);
+        static create = (cwd) => new SessionManager(cwd);
+        static inMemory = (cwd) => new SessionManager(cwd);
+        static open = (sessionPath) => new SessionManager('/repo', sessionPath);
+        getCwd() { return this.cwd; }
+        getSessionFile() { return this.sessionPath; }
+        getSessionName() { return undefined; }
+        getBranch() { return []; }
+        getEntries() { return []; }
+        buildContextEntries() { return []; }
+        buildSessionContext() { return { messages: [], thinkingLevel: 'off', model: null }; }
+      }
       export const createAgentSessionServices = async () => ({ services: true });
       export const createAgentSessionFromServices = async () => ({ session: true });
       export const createAgentSessionRuntime = async () => ({ session: { isStreaming: false }, services: { modelRegistry: { getAvailable: () => [], find: () => undefined } }, dispose: async () => {} });

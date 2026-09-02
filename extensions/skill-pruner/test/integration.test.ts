@@ -1254,6 +1254,38 @@ test("request_capability loads a hidden trusted skill immediately", async () => 
 	}
 });
 
+test("request_capability disambiguates a hidden tool and skill with the same name by capabilityType", async () => {
+	const dir = mkdtempSync(path.join(tmpdir(), "skill-recovery-collision-"));
+	const filePath = path.join(dir, "SKILL.md");
+	writeFileSync(filePath, "---\nname: playwright\ndescription: browser skill\n---\n\n# Playwright procedure\n");
+	const skill = { name: "playwright", description: "browser skill", filePath, baseDir: dir, source: "test" } as Skill;
+	const { registeredTools } = register(config({}, "auto", { ceiling: 3 }));
+	const toolDef = registeredTools.get("request_capability");
+	assert.ok(toolDef);
+	let activeTools = ["read", "edit", "bash"];
+	__setToolSeams({
+		getAllTools: () => [...mockToolInfo, { name: "playwright", description: "Headless browser" }] as any[],
+		getActiveTools: () => activeTools,
+		setActiveTools: (names) => { activeTools = names; },
+	});
+	try {
+		recordPrunedTools("session-skill-collision", ["playwright"]);
+		recordHiddenSkills("session-skill-collision", [skill]);
+		const loaded = await toolDef.execute("skill-collision", { capabilityType: "skill", capabilityName: "playwright" }, undefined, undefined, { sessionManager: { getSessionId: () => "session-skill-collision" } }) as any;
+		assert.match(loaded.content[0].text, /<skill name="playwright"/);
+		assert.equal(loaded.isError, undefined);
+
+		recordPrunedTools("session-tool-collision", ["playwright"]);
+		recordHiddenSkills("session-tool-collision", [skill]);
+		const enabled = await toolDef.execute("tool-collision", { capabilityType: "tool", capabilityName: "playwright" }, undefined, undefined, { sessionManager: { getSessionId: () => "session-tool-collision" } }) as any;
+		assert.equal(enabled.isError, undefined);
+		assert.ok(activeTools.includes("playwright"));
+	} finally {
+		__setToolSeams({ getAllTools: null, getActiveTools: null, setActiveTools: null });
+		clearCapabilityStateForTesting();
+	}
+});
+
 test("request_capability rejects an unknown exact name", async () => {
 	const { registeredTools } = register(config({}, "auto", { ceiling: 3 }));
 	const toolDef = registeredTools.get("request_capability");

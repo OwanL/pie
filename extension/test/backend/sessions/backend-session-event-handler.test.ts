@@ -170,7 +170,13 @@ test('compaction_end publishes the SDK post-compaction estimate immediately', ()
 
 test('compaction_end keeps busy asserted when the agent run continues', () => {
   const { deps, busy } = createDeps();
-  const context = createContext();
+  const context = createContext({
+    thresholdCompactionContinuationCandidate: {
+      id: 'request-1',
+      messageIndex: 1,
+      aborted: false,
+    },
+  });
 
   handleSdkSessionEvent(deps, context, { type: 'compaction_start', reason: 'threshold' });
   handleSdkSessionEvent(deps, context, {

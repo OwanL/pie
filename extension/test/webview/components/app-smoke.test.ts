@@ -344,6 +344,84 @@ test('an empty submit continues an interrupted response without an optimistic us
   );
 });
 
+test('an empty submit continues when interruption left only the delivered user boundary', () => {
+  const adapter = makeAdapter();
+  const interruptedBeforeResponse = sessionViewState();
+  interruptedBeforeResponse.transcript = interruptedBeforeResponse.transcript.filter(
+    (message) => message.role === 'user',
+  );
+  adapter.initialState = interruptedBeforeResponse;
+
+  act(() => render(h(App, { adapter }), container));
+  act(() => {
+    window.dispatchEvent(new MessageEvent('message', {
+      data: stateEnvelope(1, interruptedBeforeResponse),
+    }));
+  });
+
+  const submit = container.querySelector('[data-action="continue"]') as HTMLButtonElement | null;
+  assert.ok(submit);
+  assert.equal(submit.disabled, false);
+  act(() => submit.click());
+  assert.equal(adapter.messages.some((message) => message.type === 'send' && message.text === ''), true);
+});
+
+test('an empty submit continues from a folded durable tool-result boundary', () => {
+  const adapter = makeAdapter();
+  const toolBoundary = sessionViewState();
+  toolBoundary.transcript = toolBoundary.transcript.map((message) => message.role === 'assistant'
+    ? {
+        ...message,
+        parts: [{
+          kind: 'toolCall' as const,
+          toolCall: { id: 'tool-1', name: 'bash', input: {}, result: 'done', status: 'completed' as const },
+        }],
+        toolCalls: [{ id: 'tool-1', name: 'bash', input: {}, result: 'done', status: 'completed' as const }],
+      }
+    : message);
+  adapter.initialState = toolBoundary;
+
+  act(() => render(h(App, { adapter }), container));
+  act(() => {
+    window.dispatchEvent(new MessageEvent('message', { data: stateEnvelope(1, toolBoundary) }));
+  });
+
+  const submit = container.querySelector('[data-action="continue"]') as HTMLButtonElement | null;
+  assert.ok(submit);
+  assert.equal(submit.disabled, false);
+  act(() => submit.click());
+  assert.equal(adapter.messages.some((message) => message.type === 'send' && message.text === ''), true);
+});
+
+test('a completed provider response after tools does not expose empty continuation', () => {
+  const adapter = makeAdapter();
+  const completedAgenticTurn = sessionViewState();
+  completedAgenticTurn.transcript = completedAgenticTurn.transcript.map((message) => message.role === 'assistant'
+    ? {
+        ...message,
+        parts: [
+          {
+            kind: 'toolCall' as const,
+            toolCall: { id: 'tool-1', name: 'bash', input: {}, result: 'done', status: 'completed' as const },
+          },
+          { kind: 'text' as const, text: 'All done.' },
+        ],
+        toolCalls: [{ id: 'tool-1', name: 'bash', input: {}, result: 'done', status: 'completed' as const }],
+      }
+    : message);
+  adapter.initialState = completedAgenticTurn;
+
+  act(() => render(h(App, { adapter }), container));
+  act(() => {
+    window.dispatchEvent(new MessageEvent('message', { data: stateEnvelope(1, completedAgenticTurn) }));
+  });
+
+  assert.equal(container.querySelector('[data-action="continue"]'), null);
+  const submit = container.querySelector('[data-action="send"]') as HTMLButtonElement | null;
+  assert.ok(submit);
+  assert.equal(submit.disabled, true);
+});
+
 test('a click-to-send transport race preserves the draft and creates no optimistic message', () => {
   const adapter = makeAdapter();
   adapter.initialState = sessionViewState();

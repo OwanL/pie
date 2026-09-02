@@ -8,6 +8,7 @@ import { DEFAULT_HISTORY_COMPACTION_SETTINGS } from '../../../src/shared/protoco
 import type { ModelInfo } from '../../../src/shared/protocol';
 import {
   convertMode,
+  HistoryCompactionModelAssignment,
   HistoryCompactionSection,
 } from '../../../src/webview/panel/composer/settings-menu-history-compaction';
 
@@ -41,14 +42,28 @@ test('HistoryCompactionSection renders soft and hard trigger controls with model
   assert.match(html, /Never interrupts reasoning or a running tool/);
 });
 
-test('HistoryCompactionSection renders summary and retention controls', () => {
+test('HistoryCompactionSection renders retention and instructions without model assignment', () => {
   const html = renderToString(h(HistoryCompactionSection, makeProps()));
 
   assert.match(html, /Recent retention/);
   assert.match(html, /Summary instructions/);
-  assert.match(html, /Summary thinking level/);
+  assert.doesNotMatch(html, /Summary model/);
+  assert.doesNotMatch(html, /Summary thinking level/);
+});
+
+test('HistoryCompactionModelAssignment renders the clearable active-model fallback and inherit thinking', () => {
+  const html = renderToString(h(HistoryCompactionModelAssignment, {
+    settings: DEFAULT_HISTORY_COMPACTION_SETTINGS,
+    availableModels,
+    modelEntries: [],
+    activeModel,
+    onSetPrefs: () => undefined,
+  }));
+
   assert.match(html, /Summary model/);
   assert.match(html, /Active model/);
+  assert.match(html, /Summary thinking level/);
+  assert.match(html, /Inherit/);
   assert.match(html, /aria-haspopup="listbox"/);
 });
 

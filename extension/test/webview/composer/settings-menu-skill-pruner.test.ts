@@ -5,14 +5,12 @@ import { h } from 'preact';
 import renderToString from 'preact-render-to-string';
 
 import { DEFAULT_CHAT_PREFS, DEFAULT_PRUNING_SETTINGS } from '../../../src/shared/protocol';
-import { SkillPrunerSettings } from '../../../src/webview/panel/composer/settings-menu-skill-pruner';
+import { SkillPrunerModelAssignment, SkillPrunerSettings } from '../../../src/webview/panel/composer/settings-menu-skill-pruner';
 
 function renderAutoSkip(autoSkipBelowTokens: number | null): string {
   return renderToString(h(SkillPrunerSettings, {
     prefs: DEFAULT_CHAT_PREFS,
     pruningSettings: { ...DEFAULT_PRUNING_SETTINGS, autoSkipBelowTokens },
-    modelEntries: [],
-    availableModels: [],
     skillCatalog: [],
     toolCatalog: [],
     onSetPrefs: () => undefined,
@@ -35,4 +33,17 @@ test('SkillPrunerSettings hides the threshold when small-prepass skipping is dis
   assert.match(html, /Skip small prepasses/);
   assert.match(html, /aria-checked="false"/);
   assert.doesNotMatch(html, /Skip below tokens/);
+  assert.doesNotMatch(html, /Prepass model/);
+});
+
+test('SkillPrunerModelAssignment owns the prepass model and thinking controls', () => {
+  const html = renderToString(h(SkillPrunerModelAssignment, {
+    pruningSettings: DEFAULT_PRUNING_SETTINGS,
+    modelEntries: [],
+    availableModels: [],
+    onSetPruningSettings: () => undefined,
+  }));
+
+  assert.match(html, /Prepass model/);
+  assert.match(html, /Pruning thinking level/);
 });

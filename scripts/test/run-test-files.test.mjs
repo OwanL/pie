@@ -94,10 +94,13 @@ test('classifyTestFile classifies extensions/* files (cwd=repoRoot) and sets the
   assert.doesNotMatch(fwd(d.tsxBin), /extensions\/subagent/);
 });
 
-test('classifyTestFile leaves non-subagent extensions without a tsxConfig', () => {
-  const d = classifyTestFile(repoRoot, 'extensions/cwd-skills/test/cwd-skills-extension.test.ts');
-  assert.equal(d.id, 'cwd-skills');
-  assert.equal(d.tsxConfig, undefined);
+test('classifyTestFile applies package-specific tsconfig and leaves ordinary extensions unconfigured', () => {
+  const playwright = classifyTestFile(repoRoot, 'extensions/playwright/test/schema.test.ts');
+  assert.equal(playwright.id, 'playwright');
+  assert.equal(playwright.tsxConfig, 'extensions/playwright/tsconfig.runtime.json');
+  const ordinary = classifyTestFile(repoRoot, 'extensions/cwd-skills/test/cwd-skills-extension.test.ts');
+  assert.equal(ordinary.id, 'cwd-skills');
+  assert.equal(ordinary.tsxConfig, undefined);
 });
 
 test('classifyTestFile throws for unclassifiable paths', () => {

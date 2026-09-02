@@ -780,6 +780,21 @@
   padding: 8px;
 }
 
+/* Extra gutter indent for nested settings so their rows align under the
+   parent row's check box plus label (e.g. provider concurrency controls). */
+.toolbar-settings-indent {
+  padding-left: 28px;
+}
+
+/* Muted footnote row inside settings lists (e.g. lossy-rule gating notes,
+   disabled-mode notes in SessionTitles / ToolResultPruner). */
+.toolbar-settings-note {
+  padding: 2px 8px;
+  opacity: 0.6;
+  font-size: 11px;
+  cursor: default;
+}
+
 /* ── Pruning settings ────────────────────────────────────────────────────── */
 /* Mode select and numeric stepper rows */
 
@@ -1160,9 +1175,11 @@
   max-width: 100%;
 }
 
-.toolbar-settings-bucket-assignment .toolbar-settings-keep-select {
+.toolbar-settings-bucket-assignment .toolbar-settings-keep-select,
+.toolbar-settings-bucket-assignment .toolbar-settings-select {
   width: auto;
   min-width: 86px;
+  max-width: 100%;
   font-size: 10px;
   padding: 1px 5px;
   border-radius: var(--panel-radius-sm);

@@ -197,6 +197,20 @@ const PACKAGE_CONFIGS = [
     thresholds: { lines: 80, branches: 60 },
     tsxConfig: 'extensions/image-context-guard/tsconfig.json',
   },
+  {
+    id: 'playwright',
+    cwd: repoRoot,
+    testGlobs: ['extensions/playwright/test/**/*.test.ts'],
+    coverageTestGlobs: ['extensions/playwright/test/coverage-suite.ts'],
+    coverageIncludes: [
+      'extensions/playwright/index.ts',
+      'extensions/playwright/src/**/*.ts',
+      'extensions/playwright/src/**/*.mjs',
+    ],
+    thresholds: { lines: 80, branches: 60 },
+    tsxConfig: 'extensions/playwright/tsconfig.runtime.json',
+    fastBatchMode: 'playwright',
+  },
 ];
 
 const PACKAGE_LOOKUP = new Map();
@@ -499,9 +513,8 @@ function summarizeCoverageFailures(config, coverage) {
 
 export function buildTestArgs(config, fast = false, testArgs = []) {
   // `--tsconfig` (when configured) tells tsx which tsconfig to use for module
-  // resolution / path aliases. Only the subagent package sets this today: its
-  // schema test needs the `paths` aliases in extensions/subagent/tsconfig.json
-  // to resolve the pi SDK's nested typebox/pi-ai to a single instance. Must
+  // resolution / path aliases. Subagent and Playwright use this to resolve the
+  // embedded pi SDK's nested typebox/pi-ai to one pinned instance. It must
   // precede the positional test globs.
   const tsxConfigArgs = config.tsxConfig ? [`--tsconfig=${config.tsxConfig}`] : [];
   const collectCoverage = !fast && config.coverage !== false;
@@ -518,7 +531,7 @@ export function buildTestArgs(config, fast = false, testArgs = []) {
     `--test-reporter=${reporterSpecifier}`,
     ...(collectCoverage ? config.coverageIncludes.map((pattern) => `--test-coverage-include=${pattern}`) : []),
     ...testArgs,
-    ...config.testGlobs,
+    ...(collectCoverage && config.coverageTestGlobs ? config.coverageTestGlobs : config.testGlobs),
   ];
 }
 
@@ -758,7 +771,8 @@ async function attemptFlakyRerun(result, fast, integration, testArgs, signal) {
 
   const rerun = await runFailedFiles(failedFiles, signal);
   if (rerun.passed) {
-    console.log(`⚠ ${result.config.id}: ${failedFiles.length} failing test file(s) passed on rerun — treated as flaky, not cached.`);
+    console.log(`⚠ ${result.config.id}: ${failedFiles.length} failing test file(s) (${failedFiles.join(', ')}) passed on rerun — treated as flaky, not cached.`);
+    for (const failure of result.failures) console.log(indent(formatFailureDetails(failure), '    '));
     const counts = result.summary?.counts;
     return {
       ...result,

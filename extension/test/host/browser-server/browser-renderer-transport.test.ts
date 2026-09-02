@@ -175,15 +175,15 @@ test('ingress: valid messages route; lifecycle messages update the session direc
   assert.deepEqual(registration.focused, [true]);
 });
 
-test('ingress: readiness from another compiled build closes before routing', () => {
+test('ingress: readiness from another compiled build routes normally', () => {
   const { socket, transport, registration, routed } = createHarness();
   transport.start(registration.registration);
 
   socket.emit('message', JSON.stringify({ type: 'ready', buildId: 'stale-build', viewGeneration: 7 }), false);
+  socket.emit('message', JSON.stringify({ type: 'refreshState', buildId: 'stale-build', viewGeneration: 7 }), false);
 
-  assert.deepEqual(routed, []);
-  assert.equal(socket.closed[0]?.code, 1008);
-  assert.equal(socket.closed[0]?.reason, BROWSER_CLOSE_REASONS.buildMismatch);
+  assert.deepEqual(routed.map((message) => message.type), ['ready', 'refreshState']);
+  assert.deepEqual(socket.closed, []);
 });
 
 test('ingress: lifecycle traffic cannot clear the ready-first handshake bound', () => {

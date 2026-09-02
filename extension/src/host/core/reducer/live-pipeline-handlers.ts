@@ -3,7 +3,11 @@ import { produce } from 'immer';
 import type { ArchState } from '../arch-state.js';
 import type { ChatMessage } from '../../../shared/protocol/messages.js';
 import type { ThinkingLevel } from '../../../shared/protocol/models.js';
-import { LIVE_PIPELINE_LIMITS, type LivePipelineState } from '../../../shared/live-pipeline-protocol.js';
+import {
+  LIVE_PIPELINE_LIMITS,
+  type LivePipelineState,
+  type TurnSemanticEnvelope,
+} from '../../../shared/live-pipeline-protocol.js';
 import type { Event } from '../events.js';
 import type { Effect } from '../effects.js';
 import { commitPromotedSend, startSessionTitleGeneration, type ReducerResult } from './helpers.js';
@@ -40,6 +44,16 @@ export function handleTurnSemanticEvent(
     : { ...state, livePipeline: transition.state };
   const effects: Effect[] = [];
 
+  // `retry.started` is emitted before the SDK's backoff. Its matching success
+  // event arrives only after the retried assistant message completes, so using
+  // retry.ended alone leaves a misleading "Retrying…" chip over healthy live
+  // output. The first accepted provider-authored semantic progress proves the
+  // retry has resumed; clear only the UI marker while backend retry timing
+  // continues to its real terminal boundary.
+  if (transition.classification === 'applied' && isProviderResponseProgress(envelope.kind)) {
+    nextState = clearRetryStatus(nextState, envelope.sessionPath);
+  }
+
   if (envelope.kind === 'turn.started' && transition.classification === 'applied') {
     nextState = reconcileServingModelSummary(
       nextState,
@@ -67,6 +81,17 @@ export function handleTurnSemanticEvent(
     nextState = clearPendingExtensionUiRequests(nextState, envelope.sessionPath);
   }
   return { state: nextState, effects };
+}
+
+function isProviderResponseProgress(kind: TurnSemanticEnvelope['kind']): boolean {
+  return kind === 'turn.text' || kind === 'turn.reasoning' || kind === 'turn.toolDraft' || kind === 'tool.started';
+}
+
+function clearRetryStatus(state: ArchState, sessionPath: string): ArchState {
+  if (!(sessionPath in state.sessions.retryStatusBySession)) return state;
+  const retryStatusBySession = { ...state.sessions.retryStatusBySession };
+  delete retryStatusBySession[sessionPath];
+  return { ...state, sessions: { ...state.sessions, retryStatusBySession } };
 }
 
 export function handleLiveLifecycleWatermark(

@@ -44,6 +44,16 @@ export function getModelThinkingLevels(model: ModelInfo | undefined): ThinkingLe
     : ['off'];
 }
 
+/** Keep a persisted thinking level valid when the selected model changes. */
+export function normalizeThinkingLevelForModel(
+  thinkingLevel: ThinkingLevel,
+  model: ModelInfo | undefined,
+): ThinkingLevel {
+  if (!model) return thinkingLevel;
+  const supported = getModelThinkingLevels(model);
+  return supported.includes(thinkingLevel) ? thinkingLevel : (supported[0] ?? 'off');
+}
+
 export function isModelSelectedBySpec(
   model: Pick<ModelInfo, 'provider' | 'id'>,
   selectedSpecs: string[],

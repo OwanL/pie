@@ -98,6 +98,7 @@ async function buildPlan(mode, tempDir) {
   const definitions = {
     analysis: { cwd: path.join(repoRoot, 'analysis'), dir: 'analysis/test', batches: 4, tsxConfig: null },
     'computer-use': { cwd: repoRoot, dir: 'extensions/computer-use/test', batches: 3, tsxConfig: 'extensions/computer-use/tsconfig.json' },
+    playwright: { cwd: repoRoot, dir: 'extensions/playwright/test', batches: 2, tsxConfig: 'extensions/playwright/tsconfig.runtime.json' },
     subagent: { cwd: repoRoot, dir: 'extensions/subagent/test', batches: 4, tsxConfig: 'extensions/subagent/tsconfig.json' },
   };
   const definition = definitions[mode];
@@ -128,7 +129,7 @@ async function buildPlan(mode, tempDir) {
 
 async function main() {
   const mode = process.argv[2];
-  if (!mode) throw new Error('Usage: run-fast-batched-tests.mjs <root|analysis|subagent|computer-use>');
+  if (!mode) throw new Error('Usage: run-fast-batched-tests.mjs <root|analysis|subagent|computer-use|playwright>');
   const startedAt = performance.now();
   const tempDir = await mkdtemp(path.join(os.tmpdir(), `pie-${mode}-tests-`));
   try {

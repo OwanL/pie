@@ -76,23 +76,25 @@ test('ledger overflow and retry exhaustion also request immediate reload', async
   assert.deepEqual(h.reloads.map((value) => value.reason), ['ledger-overflow', 'retry-exhausted']);
 });
 
-test('reload storm opens a circuit until real commit progress occurs', async () => {
+test('reload storm stays circuit-broken across commits until the rolling window elapses', async () => {
   const h = harness();
   h.setNow(10_000);
   for (let i = 0; i < STATE_APPLIED_RELOAD_LIMIT; i++) {
     assert.equal(h.watchdog.handleRecovery(recovery('render-failure', i + 1)), true);
     await settle();
+    h.watchdog.recordCommitAdvanced();
   }
+
   assert.equal(h.watchdog.handleRecovery(recovery('render-failure', 99)), false);
   assert.equal(h.watchdog.getLastDecision(), 'throttled');
   assert.equal(h.reloads.length, STATE_APPLIED_RELOAD_LIMIT);
 
-  h.setNow(10_000 + STATE_APPLIED_RELOAD_WINDOW_MS + 1);
+  h.watchdog.recordCommitAdvanced();
   assert.equal(h.watchdog.handleRecovery(recovery('render-failure', 100)), false);
   assert.equal(h.watchdog.getLastDecision(), 'circuit-open');
   assert.equal(h.reloads.length, STATE_APPLIED_RELOAD_LIMIT);
 
-  h.watchdog.recordCommitAdvanced();
+  h.setNow(10_000 + STATE_APPLIED_RELOAD_WINDOW_MS + 1);
   assert.equal(h.watchdog.handleRecovery(recovery('render-failure', 101)), true);
   await settle();
   assert.equal(h.reloads.length, STATE_APPLIED_RELOAD_LIMIT + 1);

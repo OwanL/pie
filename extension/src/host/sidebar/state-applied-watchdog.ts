@@ -26,8 +26,7 @@ export interface StateAppliedWatchdogDeps {
  * or after the provisional resnapshot budget.
  */
 export class StateAppliedWatchdog {
-  private reloadWindowStartedAt: number | undefined;
-  private reloadAttempts = 0;
+  private reloadAttemptTimestamps: number[] = [];
   private commitTimeouts = 0;
   private reloadInFlight = false;
   private reloadCircuitOpen = false;
@@ -37,10 +36,10 @@ export class StateAppliedWatchdog {
   constructor(private readonly deps: StateAppliedWatchdogDeps) {}
 
   recordCommitAdvanced(): void {
+    // A commit proves that state reached the replacement renderer, but not that
+    // the renderer is stable. Keep reload history across commits so a
+    // mount → commit → error cycle cannot reset the storm circuit.
     this.commitTimeouts = 0;
-    this.reloadCircuitOpen = false;
-    this.reloadAttempts = 0;
-    this.reloadWindowStartedAt = undefined;
   }
 
   resetRecoveryEpisode(): void {
@@ -51,8 +50,13 @@ export class StateAppliedWatchdog {
     this.lastDecision = 'ignored';
     if (this.disposed) return false;
     if (this.reloadCircuitOpen) {
-      this.lastDecision = 'circuit-open';
-      return false;
+      const now = this.deps.now?.() ?? Date.now();
+      this.pruneReloadAttempts(now);
+      if (this.reloadAttemptTimestamps.length >= STATE_APPLIED_RELOAD_LIMIT) {
+        this.lastDecision = 'circuit-open';
+        return false;
+      }
+      this.reloadCircuitOpen = false;
     }
 
     if (recovery.reason === 'commit-timeout') {
@@ -79,24 +83,24 @@ export class StateAppliedWatchdog {
   }
 
   shouldThrottleStateAppliedReload(now: number): boolean {
-    if (
-      this.reloadWindowStartedAt === undefined
-      || now - this.reloadWindowStartedAt > STATE_APPLIED_RELOAD_WINDOW_MS
-    ) {
-      this.reloadWindowStartedAt = now;
-      this.reloadAttempts = 0;
-    }
-
-    if (this.reloadAttempts >= STATE_APPLIED_RELOAD_LIMIT) return true;
-    this.reloadAttempts += 1;
+    this.pruneReloadAttempts(now);
+    if (this.reloadAttemptTimestamps.length >= STATE_APPLIED_RELOAD_LIMIT) return true;
+    this.reloadAttemptTimestamps.push(now);
     return false;
   }
 
   dispose(): void {
     this.disposed = true;
     this.commitTimeouts = 0;
+    this.reloadAttemptTimestamps = [];
     this.reloadInFlight = false;
     this.reloadCircuitOpen = true;
+  }
+
+  private pruneReloadAttempts(now: number): void {
+    this.reloadAttemptTimestamps = this.reloadAttemptTimestamps.filter(
+      (attemptedAt) => now - attemptedAt < STATE_APPLIED_RELOAD_WINDOW_MS,
+    );
   }
 
   private requestReload(recovery: StateDeliveryRecovery): boolean {

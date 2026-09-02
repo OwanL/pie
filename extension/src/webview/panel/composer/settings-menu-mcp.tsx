@@ -5,7 +5,14 @@ import { useEffect } from 'preact/hooks';
 
 import type { ChatPrefs, McpServerInfo } from '../../../shared/protocol';
 import { McpServerList } from './mcp-server-list';
+import { SettingCheckbox } from '../components/setting-checkbox';
 import type { OnSetPrefs } from './settings-menu-types';
+
+export const MCP_SETTING_LABELS = [
+  'MCP enabled',
+  'Servers',
+  'Server config',
+] as const;
 
 /** Settings section for MCP (Model Context Protocol) servers — the GLOBAL
  *  controls. These apply to every session: the pi-mcp-adapter package's
@@ -36,20 +43,11 @@ export function McpSection({ prefs, mcpServers, mcpServersStatus, mcpPendingAppl
         <div class="toolbar-settings-ui-control-head">
           <span class="toolbar-settings-ui-control-label">Global — applies to every session</span>
         </div>
-        <button
-          class={`toolbar-settings-item${prefs.mcpEnabled ? ' checked' : ''}`}
-          type="button"
-          role="checkbox"
-          aria-checked={prefs.mcpEnabled}
-          onClick={() => onSetPrefs({ mcpEnabled: !prefs.mcpEnabled })}
-        >
-          <span class="toolbar-settings-item-check" aria-hidden="true">
-            <svg width="14" height="14" viewBox="0 0 13 13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style={prefs.mcpEnabled ? '' : 'opacity:0'}>
-              <polyline points="2.5,6.5 5,9 10.5,3.5" />
-            </svg>
-          </span>
-          <span class="toolbar-settings-item-label">MCP enabled</span>
-        </button>
+        <SettingCheckbox
+          label="MCP enabled"
+          checked={prefs.mcpEnabled}
+          onChange={() => onSetPrefs({ mcpEnabled: !prefs.mcpEnabled })}
+        />
         <div class="toolbar-settings-item-hint">
           Exposes configured MCP servers to the model through the mcp tool. Turning it off hides the
           tools immediately — servers stay configured and are re-exposed when re-enabled.

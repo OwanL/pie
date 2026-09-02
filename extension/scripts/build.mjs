@@ -1,9 +1,11 @@
 import { watch as fsWatch } from 'node:fs';
-import { cp, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { cp, mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+
+import { isActiveDirectoryLockError, syncActiveDestinationInPlace } from './sync-output.mjs';
 
 const rootDir = path.dirname(fileURLToPath(new URL('../package.json', import.meta.url)));
 const outDir = path.join(rootDir, 'out');
@@ -15,6 +17,12 @@ const webviewViewName = 'panel';
 const webviewRelativeDir = path.join('webview', webviewViewName);
 const buildIdentityFile = 'pie-build-id.txt';
 const buildIdentityPattern = /^[0-9a-f]{20}$/u;
+const requiredBuildFiles = Object.freeze([
+  'extension.js',
+  'backend.js',
+  'worker-entry.js',
+  path.join(webviewRelativeDir, '.vite', 'manifest.json'),
+]);
 
 let syncTimer;
 let syncQueue = Promise.resolve();
@@ -93,11 +101,14 @@ async function writeSdkLocalManifest() {
   }
 }
 
-async function verifyCoordinatedBuildIdentity() {
-  const [hostBuildId, webviewBuildId] = await Promise.all([
-    readFile(path.join(outDir, buildIdentityFile), 'utf8'),
-    readFile(path.join(outDir, webviewRelativeDir, buildIdentityFile), 'utf8'),
-  ]).then((values) => values.map((value) => value.trim()));
+async function verifyCoordinatedBuildIdentity(buildDir = outDir) {
+  const [hostBuildIdRaw, webviewBuildIdRaw] = await Promise.all([
+    readFile(path.join(buildDir, buildIdentityFile), 'utf8'),
+    readFile(path.join(buildDir, webviewRelativeDir, buildIdentityFile), 'utf8'),
+  ]);
+  await Promise.all(requiredBuildFiles.map((relativePath) => stat(path.join(buildDir, relativePath))));
+  const hostBuildId = hostBuildIdRaw.trim();
+  const webviewBuildId = webviewBuildIdRaw.trim();
   if (!buildIdentityPattern.test(hostBuildId) || !buildIdentityPattern.test(webviewBuildId)) {
     throw new Error('Vite emitted an invalid Pie build identity.');
   }
@@ -112,6 +123,11 @@ async function syncToInstalledExtension() {
     return;
   }
 
+  // Watch mode emits the host and webview independently. Never replace a
+  // healthy installation with the half-built directory visible between them.
+  await verifyCoordinatedBuildIdentity();
+  await writeSdkLocalManifest();
+
   const pkg = JSON.parse(await readFile(path.join(rootDir, 'package.json'), 'utf8'));
   const extDir = await chooseInstalledExtensionDir(pkg);
   if (!extDir) {
@@ -123,16 +139,50 @@ async function syncToInstalledExtension() {
   }
 
   const dest = path.join(extDir, 'out');
-  await rm(dest, { recursive: true, force: true });
-  await mkdir(path.dirname(dest), { recursive: true });
-  await cp(outDir, dest, { recursive: true, force: true });
+  const staging = `${dest}.pie-staging-${process.pid}`;
+  const backup = `${dest}.pie-backup-${process.pid}`;
+  await Promise.all([
+    rm(staging, { recursive: true, force: true }),
+    rm(backup, { recursive: true, force: true }),
+  ]);
+  await cp(outDir, staging, { recursive: true, force: true });
+  await verifyCoordinatedBuildIdentity(staging);
+
+  let movedExistingOutput = false;
+  try {
+    try {
+      await rename(dest, backup);
+      movedExistingOutput = true;
+    } catch (error) {
+      if (!(error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT')) {
+        throw error;
+      }
+    }
+    await rename(staging, dest);
+  } catch (error) {
+    if (movedExistingOutput) {
+      await rename(backup, dest);
+      throw error;
+    }
+    if (isActiveDirectoryLockError(error)) {
+      await syncActiveDestinationInPlace({
+        staging,
+        dest,
+        backup,
+        verify: verifyCoordinatedBuildIdentity,
+      });
+    } else {
+      throw error;
+    }
+  }
+  await rm(backup, { recursive: true, force: true });
   await writeFile(path.join(extDir, 'package.json'), JSON.stringify(pkg, null, 2));
   console.log(`Synced → ${extDir}`);
 }
 
 function scheduleSyncToInstalledExtension() {
   if (syncTimer !== undefined) {
-    return;
+    clearTimeout(syncTimer);
   }
 
   syncTimer = setTimeout(() => {
@@ -175,6 +225,7 @@ function runViteBuild(args = []) {
 function runViteWatch(mode) {
   const args = ['build', '--watch'];
   if (mode) args.push('--mode', mode);
+  if (mode === 'node') args.push('--emptyOutDir=false');
   return spawnLocalCli(viteCli, args, `Starting Vite watch (${mode ?? 'webview'})`);
 }
 
@@ -182,11 +233,10 @@ function runTypecheckWatch() {
   return spawnLocalCli(tscCli, ['--noEmit', '--project', 'tsconfig.json', '--watch', '--preserveWatchOutput'], 'Starting TypeScript watch');
 }
 
-function createBuiltWebviewWatcher() {
-  const builtDir = path.join(outDir, webviewRelativeDir);
-  const watcher = fsWatch(builtDir, { recursive: true }, (_eventType, fileName) => {
+function createBuiltOutputWatcher() {
+  const watcher = fsWatch(outDir, { recursive: true }, (_eventType, fileName) => {
     const changedFile = typeof fileName === 'string' ? fileName : fileName?.toString();
-    if (!changedFile || changedFile.endsWith('.map')) {
+    if (!changedFile || changedFile.endsWith('.map') || changedFile === 'sdk-local-path.json') {
       return;
     }
 
@@ -194,7 +244,7 @@ function createBuiltWebviewWatcher() {
   });
 
   watcher.on('error', (error) => {
-    console.error('[build] Built webview watcher failed', error);
+    console.error('[build] Built output watcher failed', error);
   });
 
   return watcher;
@@ -223,22 +273,18 @@ async function buildOnce() {
     runViteBuild(),
   ]);
   await verifyCoordinatedBuildIdentity();
-  await writeSdkLocalManifest();
   await syncToInstalledExtension();
 }
 
 if (watchMode) {
+  await rm(outDir, { recursive: true, force: true });
   await mkdir(outDir, { recursive: true });
   await mkdir(path.join(outDir, webviewRelativeDir), { recursive: true });
 
+  const builtOutputWatcher = createBuiltOutputWatcher();
   const nodeViteProcess = runViteWatch('node');
   const webviewViteProcess = runViteWatch();
   const typecheckProcess = skipTypecheck ? null : runTypecheckWatch();
-  const builtWebviewWatcher = createBuiltWebviewWatcher();
-
-  // Sync once after initial Node build; the webview watcher will handle subsequent changes.
-  await writeSdkLocalManifest();
-  await syncToInstalledExtension();
 
   const shutdown = async () => {
     if (syncTimer !== undefined) {
@@ -246,7 +292,7 @@ if (watchMode) {
       syncTimer = undefined;
     }
 
-    builtWebviewWatcher.close();
+    builtOutputWatcher.close();
     nodeViteProcess.kill();
     webviewViteProcess.kill();
     typecheckProcess?.kill();

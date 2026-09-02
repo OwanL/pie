@@ -2,7 +2,7 @@
 /** @jsxImportSource preact */
 
 import { useEffect, useMemo, useState } from 'preact/hooks';
-import { PickerTag } from './PickerTag';
+import { ChipEditor } from './chip-editor';
 
 /**
  * Filter a keep catalog by hiding already-selected names.
@@ -24,6 +24,12 @@ interface AlwaysKeepPickerProps {
   onChange: (next: string[]) => void;
 }
 
+/** Chip picker backed by a fixed catalog (the never-pruned skills/tools in the
+ *  skill-pruner settings). Adds happen through an enum <select> offering every
+ *  not-yet-selected name, so users can't introduce unknown names. Built on the
+ *  shared {@link ChipEditor} foundation; the catalog select is the add slot and
+ *  duplicate selection is guarded both by that filtering and by an optimistic
+ *  pending-name lock below. */
 export function AlwaysKeepPicker({ label, selected, catalog, category, onChange }: AlwaysKeepPickerProps) {
   const availableOptions = useMemo(() => filterKeepCatalog(catalog, selected), [catalog, selected]);
 
@@ -60,46 +66,37 @@ export function AlwaysKeepPicker({ label, selected, catalog, category, onChange 
     onChange(selected.filter((n) => n !== name));
   };
 
+  const addControl = (
+    <select
+      class="toolbar-settings-select toolbar-settings-keep-select"
+      value=""
+      aria-label={label}
+      disabled={availableOptions.length === 0}
+      onChange={(e) => {
+        const name = (e.target as HTMLSelectElement).value;
+        if (name) {
+          addName(name);
+          (e.target as HTMLSelectElement).value = '';
+        }
+      }}
+    >
+      <option value="">
+        {availableOptions.length === 0
+          ? `No ${category}s available`
+          : `Select ${category} to omit from pruning...`}
+      </option>
+      {availableOptions.map((name) => (
+        <option key={name} value={name}>{name}</option>
+      ))}
+    </select>
+  );
+
   return (
-    <div class="toolbar-settings-keep-picker">
-      <div class="toolbar-settings-keep-picker-label">{label}</div>
-      {selected.length > 0 && (
-        <div class="toolbar-settings-keep-chips">
-          {selected.map((name) => (
-            <PickerTag
-              key={name}
-              value={name}
-              label={name}
-              removeLabel={`Remove ${name}`}
-              onRemove={() => removeName(name)}
-            />
-          ))}
-        </div>
-      )}
-      <div class="toolbar-settings-keep-picker-wrap">
-        <select
-          class="toolbar-settings-select toolbar-settings-keep-select"
-          value=""
-          aria-label={label}
-          disabled={availableOptions.length === 0}
-          onChange={(e) => {
-            const name = (e.target as HTMLSelectElement).value;
-            if (name) {
-              addName(name);
-              (e.target as HTMLSelectElement).value = '';
-            }
-          }}
-        >
-          <option value="">
-            {availableOptions.length === 0
-              ? `No ${category}s available`
-              : `Select ${category} to omit from pruning...`}
-          </option>
-          {availableOptions.map((name) => (
-            <option key={name} value={name}>{name}</option>
-          ))}
-        </select>
-      </div>
-    </div>
+    <ChipEditor
+      label={label}
+      selected={selected}
+      onRemove={removeName}
+      addControl={addControl}
+    />
   );
 }

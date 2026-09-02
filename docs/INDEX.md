@@ -24,6 +24,7 @@ This folder contains active design contracts, implementation plans, and operatio
 
 - `skills/evaluate-sessions/SKILL.md` — operational reference for evidence-based, blinded agent-session evaluation: criterion-ledger reviews, independent proposals/classification, compact canonical records, batch persistence, and explicit close actions.
 - [COMPUTER-USE.md](COMPUTER-USE.md) — selected dependencies, isolated runtime architecture, tool/coordinate/lifecycle contracts, acceptance evidence, verification commands, and known limitations for the generic Windows `computer` tool and skill.
+- [PLAYWRIGHT.md](PLAYWRIGHT.md) — implemented contract, isolated headless runtime architecture, revision-scoped accessibility refs, artifact/output bounds, lifecycle recovery, acceptance evidence, and known limits for the first-class `playwright` tool and skill.
 
 ## Reference / informational
 

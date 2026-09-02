@@ -67,20 +67,49 @@ function aggregateFileSummaries(fileSummaries) {
   };
 }
 
-function normalizeCoverage(coverageSummary) {
+export function normalizeCoverage(coverageSummary) {
   const totals = coverageSummary?.totals;
   if (!totals || typeof totals !== 'object') {
     return null;
   }
 
+  // Node's experimental coverage event can contain duplicate source-map line
+  // records when TSX/jiti evaluate one source through multiple transforms. Its
+  // built-in spec reporter unions those records by source line, while the raw
+  // totals can undercount covered lines based on arrival order. Recompute only
+  // line coverage from the file records; branch/function totals do not have the
+  // same line-identity semantics and remain authoritative from Node.
+  const byPath = new Map();
+  for (const file of Array.isArray(coverageSummary.files) ? coverageSummary.files : []) {
+    if (!file || typeof file !== 'object' || typeof file.path !== 'string' || !Array.isArray(file.lines)) continue;
+    let byLine = byPath.get(file.path);
+    if (!byLine) { byLine = new Map(); byPath.set(file.path, byLine); }
+    for (const entry of file.lines) {
+      const line = Number(entry?.line);
+      const count = Number(entry?.count ?? 0);
+      if (!Number.isInteger(line) || line < 1) continue;
+      byLine.set(line, Math.max(byLine.get(line) ?? 0, Number.isFinite(count) ? count : 0));
+    }
+  }
+  let totalLineCount = 0;
+  let coveredLineCount = 0;
+  for (const lines of byPath.values()) {
+    totalLineCount += lines.size;
+    coveredLineCount += [...lines.values()].filter((count) => count > 0).length;
+  }
+  if (totalLineCount === 0) {
+    totalLineCount = Number(totals.totalLineCount ?? 0);
+    coveredLineCount = Number(totals.coveredLineCount ?? 0);
+  }
+
   return {
-    totalLineCount: Number(totals.totalLineCount ?? 0),
+    totalLineCount,
     totalBranchCount: Number(totals.totalBranchCount ?? 0),
     totalFunctionCount: Number(totals.totalFunctionCount ?? 0),
-    coveredLineCount: Number(totals.coveredLineCount ?? 0),
+    coveredLineCount,
     coveredBranchCount: Number(totals.coveredBranchCount ?? 0),
     coveredFunctionCount: Number(totals.coveredFunctionCount ?? 0),
-    coveredLinePercent: Number(totals.coveredLinePercent ?? 0),
+    coveredLinePercent: totalLineCount === 0 ? Number(totals.coveredLinePercent ?? 0) : (coveredLineCount / totalLineCount) * 100,
     coveredBranchPercent: Number(totals.coveredBranchPercent ?? 0),
     coveredFunctionPercent: Number(totals.coveredFunctionPercent ?? 0),
   };

@@ -27,6 +27,10 @@ import {
   usageFromMessage,
   userPartsFromContent,
 } from './transcript/content';
+import {
+  consumedOverflowMessageEntryIds,
+  isContextOverflowMessage,
+} from './history-compaction';
 import type { AssistantMessageDiagnosticLike, MessageLike } from './transcript/types';
 
 const PROVIDER_TRANSPORT_FAILURE_DIAGNOSTIC = 'provider_transport_failure';
@@ -610,6 +614,7 @@ function dispatchSummaryEntry(
 
 export function mapTranscript(entries: SessionEntryLike[]): ChatMessage[] {
   const transcript: ChatMessage[] = [];
+  const consumedOverflowIds = consumedOverflowMessageEntryIds(entries);
   const state: MapLoopState = {
     currentAssistant: undefined,
     currentModelId: undefined,
@@ -619,7 +624,14 @@ export function mapTranscript(entries: SessionEntryLike[]): ChatMessage[] {
   };
 
   for (const entry of entries) {
+    if (consumedOverflowIds.has(entry.id)) continue;
     const result = dispatchEntry(entry, state);
+    if (result.kind === 'push'
+        && entry.type === 'message'
+        && entry.message?.role === 'assistant'
+        && isContextOverflowMessage(entry.message)) {
+      result.message.status = 'interrupted';
+    }
     applyResult(result, transcript, state);
   }
 

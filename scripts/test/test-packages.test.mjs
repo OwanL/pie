@@ -11,16 +11,16 @@ import {
   mapFilesToPackages,
 } from '../lib/test-packages.mjs';
 
-test('PACKAGE_DIRECTIVES covers the 17 run-tests.mjs package ids', () => {
+test('PACKAGE_DIRECTIVES covers the 18 run-tests.mjs package ids', () => {
   const expected = [
     'extension', 'analysis', 'scripts',
     'cwd-skills', 'safeguard', 'skill-pruner', 'subagent', 'ask-user',
     'warm-bash', 'copilot-model-discovery', 'web-access-guard', 'tool-result-pruner',
     'session-reviewer', 'deferred-triggers', 'session-changes', 'computer-use',
-    'image-context-guard',
+    'image-context-guard', 'playwright',
   ];
   assert.deepEqual(ALL_PACKAGE_IDS, expected);
-  assert.equal(PACKAGE_DIRECTIVES.length, 17);
+  assert.equal(PACKAGE_DIRECTIVES.length, 18);
 });
 
 test('classifyFileToPackage maps a file under each package directory to its id', () => {

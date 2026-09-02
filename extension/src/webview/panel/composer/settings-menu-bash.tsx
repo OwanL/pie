@@ -3,7 +3,16 @@
 
 import { useEffect, useState } from 'preact/hooks';
 import type { ChatPrefs } from '../../../shared/protocol';
+import { SettingCheckbox } from '../components/setting-checkbox';
+import { SliderRow } from '../components/slider-row';
 import type { OnSetPrefs } from './settings-menu-types';
+
+export const BASH_SETTING_LABELS = [
+  'Idle target',
+  'Fast path (no shell for simple commands)',
+  'Shell path',
+  'Warmup timeout',
+] as const;
 
 /** Settings section for the warm-bash bash-tool accelerator.
  *
@@ -26,43 +35,24 @@ export function BashSection({ prefs, onSetPrefs }: { prefs: ChatPrefs; onSetPref
     <div class="toolbar-settings-ext-settings">
       <div class="toolbar-settings-list">
         {/* Idle target (shared warm pool) */}
-        <div class="toolbar-settings-ui-control">
-          <div class="toolbar-settings-ui-control-head">
-            <span class="toolbar-settings-ui-control-label">Idle target</span>
-            <span class="toolbar-settings-ui-control-value">
-              {prefs.bashWarmPoolSize === 0 ? 'Off' : prefs.bashWarmPoolSize}
-            </span>
-          </div>
-          <input
-            type="range"
-            class="toolbar-settings-slider toolbar-settings-ui-slider"
-            min="0"
-            max="8"
-            step="1"
-            value={prefs.bashWarmPoolSize}
-            onInput={(e) => onSetPrefs({ bashWarmPoolSize: Number((e.target as HTMLInputElement).value) })}
-            aria-label="Warm bash idle target"
-          />
-          <div class="toolbar-settings-item-hint">
-            Idle bash processes kept warm across ALL sessions (shared pool) to hide shell-spawn latency. Dynamically spawns up to the target and kills excess when lowered. 0 = off (today's fresh-spawn behaviour).
-          </div>
-        </div>
+        <SliderRow
+          label="Idle target"
+          value={prefs.bashWarmPoolSize}
+          min={0}
+          max={8}
+          step={1}
+          formatValue={(v) => (v === 0 ? 'Off' : String(v))}
+          ariaLabel="Warm bash idle target"
+          hint="Idle bash processes kept warm across ALL sessions (shared pool) to hide shell-spawn latency. Dynamically spawns up to the target and kills excess when lowered. 0 = off (today's fresh-spawn behaviour)."
+          onChange={(bashWarmPoolSize) => onSetPrefs({ bashWarmPoolSize })}
+        />
 
         {/* Fast path toggle */}
-        <button
-          class={`toolbar-settings-item${fastPathChecked ? ' checked' : ''}`}
-          type="button"
-          role="checkbox"
-          aria-checked={fastPathChecked}
-          onClick={() => onSetPrefs({ bashFastPath: !prefs.bashFastPath })}
-        >
-          <span class="toolbar-settings-item-check" aria-hidden="true">
-            <svg width="14" height="14" viewBox="0 0 13 13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style={fastPathChecked ? '' : 'opacity:0'}>
-              <polyline points="2.5,6.5 5,9 10.5,3.5" />
-            </svg>
-          </span>
-          <span class="toolbar-settings-item-label">Fast path (no shell for simple commands)</span>
-        </button>
+        <SettingCheckbox
+          label="Fast path (no shell for simple commands)"
+          checked={fastPathChecked}
+          onChange={() => onSetPrefs({ bashFastPath: !prefs.bashFastPath })}
+        />
 
         {/* Shell path */}
         <div class="toolbar-settings-ui-control">
@@ -86,27 +76,17 @@ export function BashSection({ prefs, onSetPrefs }: { prefs: ChatPrefs; onSetPref
         </div>
 
         {/* Warmup timeout */}
-        <div class="toolbar-settings-ui-control">
-          <div class="toolbar-settings-ui-control-head">
-            <span class="toolbar-settings-ui-control-label">Warmup timeout</span>
-            <span class="toolbar-settings-ui-control-value">
-              {prefs.bashWarmupTimeoutMs === 0 ? 'default' : `${Math.round(prefs.bashWarmupTimeoutMs / 1000)}s`}
-            </span>
-          </div>
-          <input
-            type="range"
-            class="toolbar-settings-slider toolbar-settings-ui-slider"
-            min="0"
-            max="60"
-            step="1"
-            value={Math.round(prefs.bashWarmupTimeoutMs / 1000)}
-            onInput={(e) => onSetPrefs({ bashWarmupTimeoutMs: Number((e.target as HTMLInputElement).value) * 1000 })}
-            aria-label="Warm bash warmup timeout"
-          />
-          <div class="toolbar-settings-item-hint">
-            How long to wait for a bash process to be ready before falling back. 0 = default (10s). Useful on slow shells / WSL.
-          </div>
-        </div>
+        <SliderRow
+          label="Warmup timeout"
+          value={Math.round(prefs.bashWarmupTimeoutMs / 1000)}
+          min={0}
+          max={60}
+          step={1}
+          formatValue={(v) => (v === 0 ? 'default' : `${v}s`)}
+          ariaLabel="Warm bash warmup timeout"
+          hint="How long to wait for a bash process to be ready before falling back. 0 = default (10s). Useful on slow shells / WSL."
+          onChange={(seconds) => onSetPrefs({ bashWarmupTimeoutMs: seconds * 1000 })}
+        />
 
       </div>
     </div>

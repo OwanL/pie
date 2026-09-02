@@ -217,8 +217,16 @@ function ComposerView({
     if (busy) return false;
     for (let index = transcript.length - 1; index >= 0; index -= 1) {
       const message = transcript[index];
-      if (message.role === 'user') return false;
-      if (message.role === 'assistant') return message.status === 'interrupted';
+      // A delivered user tail means interruption won before the provider
+      // produced an assistant message. Likewise, a final rendered assistant
+      // with tool calls represents a durable tool-result boundary because Pie
+      // folds tool-result rows into their owning assistant. Both can resume
+      // with the backend's zero-prompt continuation path.
+      if (message.role === 'user') return message.status !== 'queued';
+      if (message.role === 'assistant') {
+        return message.status === 'interrupted'
+          || message.parts?.at(-1)?.kind === 'toolCall';
+      }
     }
     return false;
   }, [busy, transcript]);

@@ -2,7 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { BackendLiveTurnAccumulator } from '../../../src/backend/live-turn-accumulator';
-import { handleSdkSessionEvent } from '../../../src/backend/session-event-handler';
+import {
+  handleSdkSessionEvent,
+  type BackendSessionEventHandlerDeps,
+} from '../../../src/backend/session-event-handler';
 import type { ActiveRequest, SessionContext } from '../../../src/backend/server-types';
 import { LIVE_PIPELINE_PROTOCOL_VERSION } from '../../../src/shared/live-pipeline-protocol';
 
@@ -37,7 +40,7 @@ function createHarness() {
       liveTurnAccumulator: accumulator,
     },
   } as unknown as SessionContext;
-  const deps = {
+  const deps: BackendSessionEventHandlerDeps = {
     emit: (event: string, payload?: unknown) => emitted.push({ event, payload }),
     emitBusyChanged: () => undefined,
     emitContextUsageChanged: () => undefined,
@@ -140,6 +143,223 @@ test('overflow compaction re-arms the finalized request before the SDK automatic
     entry.event === 'live.semantic' && entry.payload?.kind === 'turn.terminal');
   assert.equal(continuationTerminal?.payload?.requestId, 'request-1');
   assert.equal(continuationTerminal?.payload?.durableEntryId, 'continued-entry');
+});
+
+test('soft threshold compaction re-arms a request finalized before compaction starts', () => {
+  const harness = createHarness();
+
+  handleSdkSessionEvent(harness.deps, harness.context, {
+    type: 'message_start',
+    message: { role: 'assistant' },
+  });
+  handleSdkSessionEvent(harness.deps, harness.context, {
+    type: 'message_end',
+    sessionEntryId: 'zero-usage-length-terminal',
+    message: {
+      role: 'assistant',
+      content: [],
+      stopReason: 'length',
+      usage: { input: 0, cacheRead: 0, output: 0 },
+    },
+  });
+  handleSdkSessionEvent(harness.deps, harness.context, { type: 'agent_end', willRetry: false });
+
+  assert.equal(harness.context.activeRequest, undefined);
+  assert.equal(
+    harness.context.thresholdCompactionContinuationCandidate?.id,
+    'request-1',
+    'post-run threshold timing retains correlation even when provider usage is unavailable',
+  );
+  assert.equal(
+    harness.context.thresholdCompactionContinuationCandidate?.liveTurnAccumulator,
+    undefined,
+    'idle candidate retention must not pin the completed live transcript in memory',
+  );
+
+  handleSdkSessionEvent(harness.deps, harness.context, {
+    type: 'compaction_end',
+    reason: 'threshold',
+    willRetry: true,
+    result: {
+      summary: 'Compacted context',
+      firstKeptEntryId: 'kept-entry',
+      tokensBefore: 196_541,
+      estimatedTokensAfter: 41_133,
+    },
+  });
+
+  const continued = harness.context.activeRequest as ActiveRequest | undefined;
+  assert.equal(continued?.id, 'request-1');
+  assert.notEqual(continued?.liveTurnAccumulator, harness.accumulator);
+  assert.equal(harness.context.hardCompactionContinuationPending, true);
+
+  handleSdkSessionEvent(harness.deps, harness.context, { type: 'agent_start' });
+  assert.equal(harness.context.hardCompactionContinuationPending, false);
+  handleSdkSessionEvent(harness.deps, harness.context, { type: 'agent_end', willRetry: false });
+  assert.equal(harness.context.activeRequest, undefined);
+});
+
+test('hard threshold compaction preserves request ownership for its deferred continuation', () => {
+  const harness = createHarness();
+
+  handleSdkSessionEvent(harness.deps, harness.context, {
+    type: 'message_start',
+    message: { role: 'assistant' },
+  });
+  handleSdkSessionEvent(harness.deps, harness.context, {
+    type: 'message_end',
+    sessionEntryId: 'pre-compaction-terminal',
+    message: {
+      role: 'assistant',
+      content: [{ type: 'text', text: 'partial result before compaction' }],
+      stopReason: 'stop',
+      usage: { input: 80_000, output: 20 },
+    },
+  });
+  assert.ok(harness.accumulator.lifecycleWatermark(), 'the pre-compaction reply is durably terminal');
+
+  handleSdkSessionEvent(harness.deps, harness.context, {
+    type: 'compaction_end',
+    reason: 'threshold',
+    willRetry: true,
+    result: {
+      summary: 'Compacted context',
+      firstKeptEntryId: 'kept-entry',
+      tokensBefore: 80_000,
+      estimatedTokensAfter: 20_000,
+    },
+  });
+
+  assert.equal(
+    harness.context.activeRequest?.liveTurnAccumulator,
+    harness.accumulator,
+    'rotation waits until agent_end proves no tool or queued turn continued naturally',
+  );
+
+  handleSdkSessionEvent(harness.deps, harness.context, { type: 'agent_end', willRetry: false });
+  const continued = harness.context.activeRequest;
+  assert.equal(continued?.id, 'request-1', 'intermediate agent_end must not detach the continuation');
+  assert.notEqual(continued?.liveTurnAccumulator, harness.accumulator, 'continuation gets a fresh live owner');
+  assert.equal(continued?.liveTurnAccumulator?.checkpoint().terminal, undefined);
+
+  handleSdkSessionEvent(harness.deps, harness.context, { type: 'agent_start' });
+  handleSdkSessionEvent(harness.deps, harness.context, { type: 'agent_end', willRetry: false });
+  assert.equal(harness.context.activeRequest, undefined, 'the continued run still settles normally');
+});
+
+test('backend finalizes when the SDK declines a deferred threshold continuation', () => {
+  const harness = createHarness();
+  (harness.context.session as unknown as {
+    hasPendingHistoryCompactionContinuation: () => boolean;
+  }).hasPendingHistoryCompactionContinuation = () => false;
+
+  handleSdkSessionEvent(harness.deps, harness.context, { type: 'message_start', message: { role: 'assistant' } });
+  handleSdkSessionEvent(harness.deps, harness.context, {
+    type: 'message_end',
+    sessionEntryId: 'terminating-tool-result',
+    message: {
+      role: 'assistant',
+      content: [{ type: 'text', text: 'tool requested termination' }],
+      stopReason: 'stop',
+      usage: { input: 80_000, output: 10 },
+    },
+  });
+  handleSdkSessionEvent(harness.deps, harness.context, {
+    type: 'compaction_end',
+    reason: 'threshold',
+    willRetry: true,
+    result: { summary: 'summary', firstKeptEntryId: 'kept', tokensBefore: 80_000 },
+  });
+  assert.equal(harness.context.hardCompactionContinuationPending, true);
+
+  handleSdkSessionEvent(harness.deps, harness.context, { type: 'agent_end', willRetry: false });
+
+  assert.equal(harness.context.hardCompactionContinuationPending, false);
+  assert.equal(harness.context.activeRequest, undefined, 'a declined SDK continuation must settle normally');
+});
+
+test('a successful threshold compaction settling after interrupt cannot re-arm continuation', () => {
+  const harness = createHarness();
+  handleSdkSessionEvent(harness.deps, harness.context, { type: 'message_start', message: { role: 'assistant' } });
+  handleSdkSessionEvent(harness.deps, harness.context, {
+    type: 'message_end',
+    sessionEntryId: 'terminal-before-interrupt',
+    message: {
+      role: 'assistant',
+      content: [{ type: 'text', text: 'terminal result' }],
+      stopReason: 'stop',
+      usage: { input: 80_000, output: 10 },
+    },
+  });
+  assert.ok(harness.context.activeRequest);
+  harness.context.activeRequest.aborted = true;
+  harness.context.hardCompactionContinuationPending = false;
+
+  handleSdkSessionEvent(harness.deps, harness.context, {
+    type: 'compaction_end',
+    reason: 'threshold',
+    willRetry: true,
+    result: { summary: 'summary', firstKeptEntryId: 'kept', tokensBefore: 80_000 },
+  });
+  handleSdkSessionEvent(harness.deps, harness.context, { type: 'agent_end', willRetry: false });
+
+  assert.equal(harness.context.hardCompactionContinuationPending, false);
+  assert.equal(harness.context.activeRequest, undefined, 'the interrupted request settles instead of being re-armed');
+});
+
+test('willRetry compaction clears busy when interruption removed the continuation owner', () => {
+  const harness = createHarness();
+  const busy: boolean[] = [];
+  harness.deps.emitBusyChanged = (_context: SessionContext, value: boolean) => { busy.push(value); };
+
+  handleSdkSessionEvent(harness.deps, harness.context, { type: 'message_start', message: { role: 'assistant' } });
+  handleSdkSessionEvent(harness.deps, harness.context, {
+    type: 'message_end',
+    sessionEntryId: 'terminal-before-post-agent-compaction',
+    message: {
+      role: 'assistant', content: [], stopReason: 'length',
+      usage: { input: 0, cacheRead: 0, output: 0 },
+    },
+  });
+  handleSdkSessionEvent(harness.deps, harness.context, { type: 'agent_end', willRetry: false });
+  harness.context.thresholdCompactionContinuationCandidate = undefined;
+  handleSdkSessionEvent(harness.deps, harness.context, { type: 'compaction_start', reason: 'threshold' });
+  handleSdkSessionEvent(harness.deps, harness.context, {
+    type: 'compaction_end',
+    reason: 'threshold',
+    willRetry: true,
+    result: { summary: 'summary', firstKeptEntryId: 'kept', tokensBefore: 80_000 },
+  });
+
+  assert.equal(busy.at(-1), false);
+  assert.equal(harness.context.activeRequest, undefined);
+});
+
+test('a natural post-compaction turn cancels the deferred outer-loop continuation', () => {
+  const harness = createHarness();
+  handleSdkSessionEvent(harness.deps, harness.context, { type: 'message_start', message: { role: 'assistant' } });
+  handleSdkSessionEvent(harness.deps, harness.context, {
+    type: 'message_end',
+    sessionEntryId: 'terminal-before-queued-turn',
+    message: {
+      role: 'assistant',
+      content: [{ type: 'text', text: 'first segment' }],
+      stopReason: 'stop',
+      usage: { input: 80_000, output: 10 },
+    },
+  });
+  handleSdkSessionEvent(harness.deps, harness.context, {
+    type: 'compaction_end',
+    reason: 'threshold',
+    willRetry: true,
+    result: { summary: 'summary', firstKeptEntryId: 'kept', tokensBefore: 80_000 },
+  });
+
+  handleSdkSessionEvent(harness.deps, harness.context, { type: 'turn_start' });
+  handleSdkSessionEvent(harness.deps, harness.context, { type: 'agent_end', willRetry: false });
+
+  assert.equal(harness.context.activeRequest, undefined, 'the natural turn owns the only continuation');
+  assert.equal(harness.context.hardCompactionContinuationPending, false);
 });
 
 test('failed overflow compaction discards the finalized recovery candidate', () => {

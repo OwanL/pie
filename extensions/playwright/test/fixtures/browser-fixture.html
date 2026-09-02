@@ -1,0 +1,84 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>PW Fixture</title></head>
+<body>
+  <main>
+    <h1 id="heading">Fixture home</h1>
+    <form id="signup" action="#">
+      <label>Email <input id="email" type="email" name="email"></label>
+      <label><input id="agree" type="checkbox"> Agree to terms</label>
+      <label for="color">Color</label>
+      <select id="color"><option value="red">Red</option><option value="blue">Blue</option></select>
+      <button id="submit" type="submit">Submit</button>
+    </form>
+    <div id="status">idle</div>
+    <button id="alert-btn" type="button">Trigger alert</button>
+    <button id="multi-dialog-btn" type="button">Trigger two dialogs</button>
+    <button id="confirm-btn" type="button">Trigger confirm</button>
+    <button id="prompt-btn" type="button">Trigger prompt</button>
+    <button id="mutate-btn" type="button">Mutate form</button>
+    <button id="noise-btn" type="button">Make noise</button>
+    <button id="spa-btn" type="button">SPA navigate</button>
+    <canvas id="demo-canvas" width="20" height="10" aria-label="Demo canvas"></canvas>
+    <a id="download-link" href="/download" download="fixture-download.txt">Download file</a>
+    <a id="big-download-link" href="/download-big" download="big.bin">Download big file</a>
+    <a id="page2-link" href="/page2">Go to page 2</a>
+    <input id="file-input" type="file">
+    <iframe id="demo-frame" title="Demo frame"></iframe>
+  </main>
+  <script>
+    const status = document.getElementById('status');
+    document.getElementById('demo-frame').srcdoc = '<html><body><button id="frame-button">Frame button</button></body></html>';
+    document.getElementById('signup').addEventListener('submit', (event) => {
+      event.preventDefault();
+      const email = document.getElementById('email').value;
+      status.textContent = 'submitted:' + email;
+      localStorage.setItem('fixture-email', email);
+      document.cookie = 'fixture_email=' + encodeURIComponent(email) + '; path=/';
+    });
+    document.getElementById('agree').addEventListener('change', (event) => {
+      status.textContent = 'agree:' + event.target.checked;
+    });
+    document.getElementById('color').addEventListener('change', (event) => {
+      status.textContent = 'color:' + event.target.value;
+    });
+    document.getElementById('color').addEventListener('focus', () => { status.textContent = 'focused:color'; });
+    document.getElementById('heading').addEventListener('mouseover', () => { status.textContent = 'hovered:heading'; });
+    document.getElementById('alert-btn').addEventListener('click', () => { alert('fixture-alert'); });
+    document.getElementById('multi-dialog-btn').addEventListener('click', () => { alert('fixture-first'); alert('fixture-second'); });
+    document.getElementById('confirm-btn').addEventListener('click', () => {
+      const ok = confirm('fixture-confirm');
+      status.textContent = 'confirm:' + ok;
+    });
+    document.getElementById('prompt-btn').addEventListener('click', () => {
+      const value = prompt('fixture-prompt', 'seed-text');
+      status.textContent = 'prompt:' + value;
+    });
+    document.getElementById('mutate-btn').addEventListener('click', () => {
+      const submit = document.getElementById('submit');
+      const replacement = document.createElement('button');
+      replacement.id = 'submit-v2';
+      replacement.type = 'submit';
+      replacement.textContent = 'Submit version two';
+      submit.replaceWith(replacement);
+      status.textContent = 'mutated';
+    });
+    document.getElementById('noise-btn').addEventListener('click', () => {
+      console.error('fixture-console-error');
+      fetch('http://127.0.0.1:9/closed-port').catch(() => {});
+      setTimeout(() => { throw new Error('fixture-page-error'); }, 0);
+    });
+    document.getElementById('spa-btn').addEventListener('click', () => {
+      history.pushState({ fixture: true }, '', '/spa-state');
+      status.textContent = 'spa:ready';
+    });
+    const canvas = document.getElementById('demo-canvas');
+    const context = canvas.getContext('2d');
+    context.fillStyle = 'rgb(255, 0, 0)';
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    document.getElementById('file-input').addEventListener('change', (event) => {
+      status.textContent = 'files:' + event.target.files.length;
+    });
+  </script>
+</body>
+</html>
