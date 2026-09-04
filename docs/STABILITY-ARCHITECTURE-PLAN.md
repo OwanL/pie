@@ -487,6 +487,8 @@ Work includes:
 
 **Consolidation commit 2a complete (2026-09-05).** `EffectRunner` remains the sole executor façade while send timing, acknowledgement ambiguity/status reconciliation, and edit/interrupt/continue/compact execution resources are isolated in a session-operation effect controller. The controller retains only opaque execution/correlation resources; operation phase and outcomes remain reducer-owned. Deterministic façade and architectural-boundary tests preserve FIFO behavior and prevent ownership drift.
 
+**Consolidation commit 2b complete (2026-09-05).** The backend request handler remains the public dispatch, tracing, and completion façade while shared dependency/transition contracts, session lifecycle and durable-read handlers, and message mutation handlers live in focused acyclic modules. Exact route ordering, validation settlement, idempotency ledgers, transition deadlines, worker ownership fences, and incident behavior remain covered through route-parity, module-boundary, and existing handler tests.
+
 1. Split remaining multi-concern modules along the new domain boundaries.
 2. Consolidate registries and shared primitives.
 3. Remove proven-dead compatibility paths and historical comments.
