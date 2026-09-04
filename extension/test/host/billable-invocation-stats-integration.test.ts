@@ -283,8 +283,8 @@ test('StatsService retries a failed durable ledger append by stable invocation i
     await stats.start();
     stats.prepareForSend(sessionPath, []);
     const ledger = (stats as unknown as {
-      invocationLedger: { append: (...args: unknown[]) => unknown };
-    }).invocationLedger;
+      accounting: { invocationLedger: { append: (...args: unknown[]) => unknown } };
+    }).accounting.invocationLedger;
     const append = ledger.append.bind(ledger);
     let fail = true;
     ledger.append = (...args: unknown[]) => {
@@ -324,8 +324,8 @@ test('retry heals a crash boundary after ledger commit but before activity commi
     await stats.start();
     stats.prepareForSend(sessionPath, []);
     const timeline = (stats as unknown as {
-      activityTimeline: { record: (...args: unknown[]) => unknown };
-    }).activityTimeline;
+      accounting: { activityTimeline: { record: (...args: unknown[]) => unknown } };
+    }).accounting.activityTimeline;
     const record = timeline.record.bind(timeline);
     let fail = true;
     timeline.record = (...args: unknown[]) => {
@@ -384,8 +384,8 @@ test('two StatsService hosts preserve both checkpoints and privacy-safe exports'
     stateA = stateFor('/workspace/a.jsonl', true, 'session-a');
     await first.setSessionPrivacy('/workspace/a.jsonl', true);
     const firstLedger = (first as unknown as {
-      invocationLedger: { filePath: string };
-    }).invocationLedger;
+      accounting: { invocationLedger: { filePath: string } };
+    }).accounting.invocationLedger;
     const staleLedger = new BillableInvocationLedger(firstLedger.filePath);
     staleLedger.append(invocation('stale-null-id', {
       sessionId: null,

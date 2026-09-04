@@ -1,8 +1,3 @@
-import * as fsAsync from 'node:fs/promises';
-import * as path from 'node:path';
-
-import { loadModelPricing } from '../backend/pricing';
-import type { ModelPricingRecord } from '../../../shared/pricing-core';
 import { EMPTY_AGGREGATE_STATS, type AggregateStats, type ProviderGateStats } from '../shared/protocol/aggregate-stats';
 import type { ArchState } from './core/arch-state';
 import type { TokenRateService } from './token-rate-service';
@@ -11,16 +6,17 @@ import type { StatsService } from './stats-service';
 import {
   accumulateAggregateStats,
   finalizeAggregateStatsLayers,
-  mergeAccumulatorInto,
-  prepareAggregateStatsLayer,
+  localDateString,
   type AggregateStatsAccumulator,
-  type PreparedAggregateStatsLayer,
 } from './stats-service/aggregate-stats';
-import { coerceRunSnapshot, type RunSnapshot } from './run-analytics';
+import type { RunSnapshot } from './run-analytics';
 import type { TokenRateIndicatorState } from '../shared/token-rate';
+import type { ModelPricingRecord } from '../../../shared/pricing-core';
 import { appendPieLog } from './util/pie-log';
 import { toErrorMessage } from './util/error-message';
 import { projectLedgerUsageOntoAggregate } from './billable-invocation-ledger/aggregate';
+import { AggregatePricingCache } from './aggregate-pricing-cache';
+import { CompletedHistoryCache, type CompletedHistoryMtimeFn } from './completed-history-cache';
 
 /**
  * Measures aggregate usage stats across ALL sessions host-side — total + per-
@@ -37,7 +33,9 @@ import { projectLedgerUsageOntoAggregate } from './billable-invocation-ledger/ag
  * ## Refresh model
  *
  * A {@link RECOMPUTE_MS} interval refreshes history and backend metrics.
- * Completed runs are cached by snapshot/pricing signatures. Independently,
+ * Completed-run history and pricing live in {@link CompletedHistoryCache} and
+ * {@link AggregatePricingCache}; this service owns only the refresh cadence,
+ * the open-run layer, the rolling rate, and ledger projection. Independently,
  * TokenRateService signals aggregate-relevant changes every 200 ms; that path
  * rebuilds only the small in-memory open-run layer and reuses completed history.
  * Live throughput, counts, token totals, and charts therefore move during all
@@ -63,12 +61,13 @@ export interface AggregateStatsServiceDeps {
   /** Called when the posted aggregate changed, so the host can schedule a
    *  debounced snapshot post to the webview. */
   onChanged: () => void;
-  /** File-system stat callback used by the cache-mutation detector. Defaults
-   *  to `fs.stat` in production; tests inject a mock to control mtime values.
-   *  `size` is optional for backward-compatible mocks; when absent the
-   *  incremental append path is disabled (every change falls back to a full
-   *  re-read), which keeps mocked tests on the deterministic full path. */
-  mtimeFn?: (path: string, cb: (err: NodeJS.ErrnoException | null, stats: { mtimeMs: number; size?: number }) => void) => void;
+  /** File-system stat callback used by the completed-history cache-mutation
+   *  detector. Defaults to `fs.stat` in production; tests inject a mock to
+   *  control mtime values. `size` is optional for backward-compatible mocks;
+   *  when absent the incremental append path is disabled (every change falls
+   *  back to a full re-read), which keeps mocked tests on the deterministic
+   *  full path. */
+  mtimeFn?: CompletedHistoryMtimeFn;
   /** Test/benchmark seam for proving which run set was accumulated. */
   onAccumulatorBuilt?: (scope: 'completed' | 'open', runCount: number) => void;
   /** Test/benchmark seam proving unbounded completed-history entries are only
@@ -87,39 +86,11 @@ const RECOMPUTE_MS = 1000;
  *  `ready:false` until the first compute lands. */
 const FIRST_TICK_DELAY_MS = 3000;
 
-interface PricingCache {
-  signature: string;
-  map: Map<string, ModelPricingRecord[]>;
-}
-
-interface DataSignature {
-  /** Mtime of the completed-run JSONL (the only file completed aggregates
-   *  depend on). The checkpoint (`open-runs.gen`) is deliberately excluded
-   *  so live checkpoint churn never forces a full completed-history reread. */
-  snapshotsMtimeMs: number;
-  /** Byte size of the completed-run JSONL. Together with the mtime it drives
-   *  the incremental append path: a strictly larger size means new lines were
-   *  appended (parse only the suffix), while a smaller/equal size with a new
-   *  mtime means the file was rewritten (full re-read). */
-  snapshotsSize: number;
-}
-
 export class AggregateStatsService {
   private readonly deps: AggregateStatsServiceDeps;
   private cached: AggregateStats = EMPTY_AGGREGATE_STATS;
-  private pricingCache: PricingCache | null = null;
-  private lastDataSignature: DataSignature | null = null;
-  private completedRunsCache: RunSnapshot[] = [];
-  private completedRunIds = new Set<string>();
-  /** Per-run accumulators keyed by runId, so a pending-override rebuild (or a
-   *  re-appended runId) can re-merge the completed layer without re-accumulating
-   *  every historical run. Rebuilt wholesale when the pricing signature changes. */
-  private runAccumulators: Map<string, AggregateStatsAccumulator> | null = null;
-  private runAccumulatorsPricingSignature: string | null = null;
-  private completedAccumulator: AggregateStatsAccumulator | null = null;
-  private completedAccumulatorKey: string | null = null;
-  private completedLayer: PreparedAggregateStatsLayer | null = null;
-  private completedLayerKey: string | null = null;
+  private readonly pricing: AggregatePricingCache;
+  private readonly completedHistory: CompletedHistoryCache;
   private openAccumulator: AggregateStatsAccumulator | null = null;
   private liveRunIds = new Set<string>();
   private liveRevision = 0;
@@ -132,6 +103,14 @@ export class AggregateStatsService {
 
   constructor(deps: AggregateStatsServiceDeps) {
     this.deps = deps;
+    this.pricing = new AggregatePricingCache({ getAgentDir: deps.getAgentDir });
+    this.completedHistory = new CompletedHistoryCache({
+      source: {
+        getStorageDir: () => deps.statsService.getStorageDir(),
+        queryPersistedRunAnalytics: () => deps.statsService.queryPersistedRunAnalytics(),
+      },
+      mtimeFn: deps.mtimeFn,
+    });
   }
 
   start(): void {
@@ -180,7 +159,8 @@ export class AggregateStatsService {
     const openRuns = this.deps.statsService.getOpenRuns();
     const pendingCompletedRuns = this.deps.statsService.getPendingCompletedRuns();
     const rollingRate = this.observeRollingRate(nowMs, openRuns, pendingCompletedRuns, ratesBySession);
-    if (this.completedLayer === null || this.lastFinalizedDate === null) return;
+    const completedLayer = this.completedHistory.currentLayer();
+    if (completedLayer === null || this.lastFinalizedDate === null) return;
 
     const runningSessionPaths = archState.sessions.runningSessionPaths;
     const openTabCount = archState.sessions.openTabPaths.length;
@@ -190,20 +170,20 @@ export class AggregateStatsService {
       return;
     }
 
-    const pricing = this.pricingCache?.map;
-    if (!pricing) return;
+    const pricingCatalog = this.pricing.cached;
+    if (!pricingCatalog) return;
     const nextLiveRunIds = liveRunIdSet(openRuns, pendingCompletedRuns);
     // A run that just moved pending → persisted is not in the cached completed
     // layer until the slow mtime refresh lands. Keep the last good aggregate
     // instead of briefly dropping the whole run from every total/chart.
     for (const runId of this.liveRunIds) {
-      if (!nextLiveRunIds.has(runId) && !this.completedRunIds.has(runId)) {
+      if (!nextLiveRunIds.has(runId) && !this.completedHistory.completedRunIds.has(runId)) {
         void this.tick();
         return;
       }
     }
     const nextOpenAccumulator = this.buildOpenAccumulator(
-      pricing,
+      pricingCatalog.map,
       ratesBySession,
       openRuns,
       pendingCompletedRuns,
@@ -213,7 +193,7 @@ export class AggregateStatsService {
     this.liveRunIds = nextLiveRunIds;
 
     let next = finalizeAggregateStatsLayers(
-      this.completedLayer,
+      completedLayer,
       nextOpenAccumulator,
       nowMs,
       runningSessionPaths,
@@ -262,35 +242,13 @@ export class AggregateStatsService {
     const pendingCompletedRuns = this.deps.statsService.getPendingCompletedRuns();
     const rollingRate = this.observeRollingRate(nowMs, openRuns, pendingCompletedRuns, ratesBySession);
 
-    const storageDir = this.deps.statsService.getStorageDir();
-    const dataSignature = await this.readDataSignature(storageDir);
-    const pricing = await this.loadPricingCached();
+    const pricing = await this.pricing.load();
     const pendingRunIds = new Set(pendingCompletedRuns.map((run) => run.runId));
 
-    let completedRebuilt = false;
-    const completedDataUnchanged = this.lastDataSignature !== null
-      && dataSignature !== null
-      && signaturesEqual(this.lastDataSignature, dataSignature);
-    if (!completedDataUnchanged) {
-      completedRebuilt = await this.refreshCompletedRuns(storageDir, dataSignature, pricing.map, pendingRunIds);
-      this.lastDataSignature = dataSignature;
-    }
-
-    const pendingOverrideKey = [...pendingRunIds].sort().join(',');
-    const completedKey = `${pricing.signature}:overrides=${pendingOverrideKey}`;
-    if (
-      this.completedAccumulator === null
-      || this.completedAccumulatorKey !== completedKey
-    ) {
-      this.completedAccumulator = this.buildCompletedAccumulatorFromCache(pendingRunIds, pricing.map);
-      this.completedAccumulatorKey = completedKey;
-      completedRebuilt = true;
-    }
+    const { rebuilt: completedRebuilt, effectiveCompletedRunCount } =
+      await this.completedHistory.refresh(pricing, pendingRunIds);
     if (completedRebuilt) {
-      const effectiveCompletedRuns = pendingRunIds.size === 0
-        ? this.completedRunsCache
-        : this.completedRunsCache.filter((run) => !pendingRunIds.has(run.runId));
-      this.deps.onAccumulatorBuilt?.('completed', effectiveCompletedRuns.length);
+      this.deps.onAccumulatorBuilt?.('completed', effectiveCompletedRunCount);
     }
 
     // Live accumulation is intentionally rebuilt every tick from only the
@@ -325,15 +283,12 @@ export class AggregateStatsService {
       || !this.cached.ready;
     let next: AggregateStats;
     if (historicalChanged) {
-      const layerKey = `${this.completedAccumulatorKey ?? 'volatile'}:${currentDate}`;
-      if (completedRebuilt || this.completedLayer === null || this.completedLayerKey !== layerKey) {
-        this.completedLayer = prepareAggregateStatsLayer(this.completedAccumulator, nowMs, {
-          onCompletedSourceEntryVisited: this.deps.onCompletedSourceEntryVisited,
-        });
-        this.completedLayerKey = layerKey;
-      }
+      const completedLayer = this.completedHistory.ensureLayer(nowMs, {
+        force: completedRebuilt,
+        onCompletedSourceEntryVisited: this.deps.onCompletedSourceEntryVisited,
+      });
       next = finalizeAggregateStatsLayers(
-        this.completedLayer,
+        completedLayer,
         nextOpenAccumulator,
         nowMs,
         runningSessionPaths,
@@ -366,150 +321,6 @@ export class AggregateStatsService {
       this.cached = next;
       this.deps.onChanged();
     }
-  }
-
-  /**
-   * Refresh the completed-run cache from the JSONL. Full re-read when the
-   * file was rewritten (or on first load); suffix-only incremental parse when
-   * the file merely grew (the normal append path). Returns true when the
-   * completed accumulator content changed.
-   */
-  private async refreshCompletedRuns(
-    storageDir: string,
-    dataSignature: DataSignature | null,
-    pricing: Map<string, ModelPricingRecord[]>,
-    pendingRunIds: Set<string>,
-  ): Promise<boolean> {
-    const last = this.lastDataSignature;
-    if (last === null || dataSignature === null) {
-      return await this.fullReloadCompletedRuns();
-    }
-    if (dataSignature.snapshotsSize < last.snapshotsSize) {
-      // Rewritten (retention prune) — the offset cache is invalid.
-      return await this.fullReloadCompletedRuns();
-    }
-    if (dataSignature.snapshotsSize === last.snapshotsSize) {
-      // Same size: unchanged unless the mtime moved (rewrite with same size).
-      if (dataSignature.snapshotsMtimeMs === last.snapshotsMtimeMs) return false;
-      return await this.fullReloadCompletedRuns();
-    }
-    // Strictly larger: appended lines only — parse the suffix.
-    return await this.incrementalAppendCompletedRuns(storageDir, last.snapshotsSize, pricing, pendingRunIds);
-  }
-
-  /** Replace the completed cache from the authoritative query (JSONL + checkpoint merge). */
-  private async fullReloadCompletedRuns(): Promise<boolean> {
-    const { completedRuns } = await this.deps.statsService.queryPersistedRunAnalytics();
-    this.completedRunsCache = completedRuns;
-    this.completedRunIds = new Set(completedRuns.map((run) => run.runId));
-    // Per-run accumulators + completed accumulator are rebuilt by the
-    // completed-key check in recompute (the null key forces exactly one build).
-    this.runAccumulators = null;
-    this.runAccumulatorsPricingSignature = null;
-    this.completedAccumulator = null;
-    this.completedAccumulatorKey = null;
-    return true;
-  }
-
-  /**
-   * Parse only the appended suffix of the completed-run JSONL and fold the new
-   * runs into the cache + completed accumulator. A re-appended runId (crash
-   * retry / re-finalize) falls back to a full rebuild from the per-run cache
-   * so the stale entry is never double-counted.
-   */
-  private async incrementalAppendCompletedRuns(
-    storageDir: string,
-    fromOffset: number,
-    pricing: Map<string, ModelPricingRecord[]>,
-    pendingRunIds: Set<string>,
-  ): Promise<boolean> {
-    const newRuns = await this.readAppendedSnapshotLines(storageDir, fromOffset);
-    if (newRuns.length === 0) return false;
-
-    const deduped = new Map<string, RunSnapshot>();
-    let replaced = false;
-    for (const run of newRuns) {
-      if (this.completedRunIds.has(run.runId)) replaced = true;
-      deduped.set(run.runId, run);
-    }
-    for (const [runId, run] of deduped) {
-      if (this.completedRunIds.has(runId)) {
-        const index = this.completedRunsCache.findIndex((entry) => entry.runId === runId);
-        if (index >= 0) this.completedRunsCache[index] = run;
-      } else {
-        this.completedRunsCache.push(run);
-        this.completedRunIds.add(runId);
-      }
-    }
-
-    if (replaced || this.completedAccumulator === null || this.runAccumulators === null) {
-      // Refresh the per-run entries for the new/replaced runs, then rebuild so
-      // the stale entry is never double-counted.
-      this.ensureRunAccumulators(pricing);
-      for (const [runId, run] of deduped) {
-        this.runAccumulators!.set(runId, accumulateAggregateStats([run], pricing));
-      }
-      this.completedAccumulator = this.buildCompletedAccumulatorFromCache(pendingRunIds, pricing);
-      return true;
-    }
-    // Fast path: cache every newly persisted run, but merge only runs that are
-    // no longer represented by an authoritative pending snapshot. Caching a
-    // pending run is essential: once the pending bridge clears, the unchanged
-    // JSONL signature will not trigger another suffix read.
-    for (const [runId, run] of deduped) {
-      const runAccumulator = accumulateAggregateStats([run], pricing);
-      this.runAccumulators.set(runId, runAccumulator);
-      if (pendingRunIds.has(runId)) continue;
-      mergeAccumulatorInto(this.completedAccumulator, runAccumulator);
-    }
-    return true;
-  }
-
-  /** Read + parse the byte suffix of the completed-run JSONL (append-only). */
-  private async readAppendedSnapshotLines(storageDir: string, fromOffset: number): Promise<RunSnapshot[]> {
-    const filePath = path.join(storageDir, 'run-snapshots.jsonl');
-    let handle: fsAsync.FileHandle | null = null;
-    try {
-      handle = await fsAsync.open(filePath, 'r');
-      const { size } = await handle.stat();
-      if (size <= fromOffset) return [];
-      const buffer = Buffer.alloc(size - fromOffset);
-      await handle.read(buffer, 0, buffer.length, fromOffset);
-      return parseSnapshotLines(buffer.toString('utf8'));
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
-      throw error;
-    } finally {
-      await handle?.close().catch(() => undefined);
-    }
-  }
-
-  /** Rebuild the completed accumulator from the per-run cache, excluding any
-   *  pending run (its authoritative snapshot lives in the open accumulator). */
-  private buildCompletedAccumulatorFromCache(
-    pendingRunIds: Set<string>,
-    pricing: Map<string, ModelPricingRecord[]>,
-  ): AggregateStatsAccumulator {
-    this.ensureRunAccumulators(pricing);
-    const target = accumulateAggregateStats([], pricing);
-    for (const [runId, accumulator] of this.runAccumulators!) {
-      if (pendingRunIds.has(runId)) continue;
-      mergeAccumulatorInto(target, accumulator);
-    }
-    return target;
-  }
-
-  /** Rebuild the per-run accumulator cache when it is missing or the pricing
-   *  signature changed (pricing is applied while accumulating). */
-  private ensureRunAccumulators(pricing: Map<string, ModelPricingRecord[]>): void {
-    if (this.runAccumulators !== null && this.runAccumulatorsPricingSignature === this.pricingCache?.signature) {
-      return;
-    }
-    this.runAccumulators = new Map();
-    for (const run of this.completedRunsCache) {
-      this.runAccumulators.set(run.runId, accumulateAggregateStats([run], pricing));
-    }
-    this.runAccumulatorsPricingSignature = this.pricingCache?.signature ?? null;
   }
 
   private observeRollingRate(
@@ -563,7 +374,7 @@ export class AggregateStatsService {
     const pendingRunIds = new Set(pendingCompletedRuns.map((run) => run.runId));
     const effectiveOpenById = new Map<string, RunSnapshot>();
     for (const run of openRuns) {
-      if (this.completedRunIds.has(run.runId) || pendingRunIds.has(run.runId)) continue;
+      if (this.completedHistory.completedRunIds.has(run.runId) || pendingRunIds.has(run.runId)) continue;
       const liveOutputTokens = ratesBySession[run.sessionPath]?.liveOutputTokens ?? 0;
       effectiveOpenById.set(run.runId, liveOutputTokens > 0
         ? { ...run, outputTokens: run.outputTokens + liveOutputTokens }
@@ -574,104 +385,6 @@ export class AggregateStatsService {
     for (const run of pendingCompletedRuns) effectiveOpenById.set(run.runId, run);
     return accumulateAggregateStats([...effectiveOpenById.values()], pricing);
   }
-
-  /** Mtime + size of the completed-run JSONL. The checkpoint (`open-runs.gen`)
-   *  is deliberately excluded so live checkpoint churn never forces a full
-   *  completed-history reread. Returns null only if the storage dir itself is
-   *  unreadable. */
-  private async readDataSignature(storageDir: string): Promise<DataSignature | null> {
-    try {
-      const snapshotsPath = path.join(storageDir, 'run-snapshots.jsonl');
-      const stat = await this.statFile(snapshotsPath);
-      // Absent → treat as an empty store with a stable signature (-1) so the
-      // fast-path engages (no point re-reading nothing).
-      return { snapshotsMtimeMs: stat.mtimeMs, snapshotsSize: stat.size };
-    } catch (error) {
-      appendPieLog('debug', 'aggregate-stats', 'data signature read failed; retaining cached signature', {
-        error: toErrorMessage(error),
-      });
-      return null;
-    }
-  }
-
-  /** Resolve an `fs.stat` callback — production uses the module's `mtimeMs`,
-   *  tests may override via `deps.mtimeFn`. A missing `size` (legacy mocks)
-   *  resolves to -1, which disables the incremental append path. */
-  private statFile(path: string): Promise<{ mtimeMs: number; size: number }> {
-    const stat = this.deps.mtimeFn ?? ((p, cb) => {
-      fsAsync.stat(p).then(
-        (stats) => cb(null, { mtimeMs: stats.mtimeMs, size: stats.size }),
-        (err) => cb(err as NodeJS.ErrnoException, { mtimeMs: -1, size: -1 }),
-      );
-    });
-    return new Promise((resolve) => {
-      stat(path, (err, stats) => {
-        if (err) resolve({ mtimeMs: -1, size: -1 });
-        else resolve({ mtimeMs: stats.mtimeMs, size: stats.size ?? -1 });
-      });
-    });
-  }
-
-  /** Load + cache active and historical pricing by their stat signatures. */
-  private async loadPricingCached(): Promise<PricingCache> {
-    const agentDir = this.deps.getAgentDir();
-    if (!agentDir) return this.cachePricing('unresolved', new Map());
-
-    const modelsJsonPath = path.join(agentDir, 'models.json');
-    const historicalPricingPath = path.join(agentDir, 'analysis', 'model-pricing-history.json');
-    let signature: string;
-    try {
-      const stat = await fsAsync.stat(modelsJsonPath);
-      signature = `${modelsJsonPath}:${stat.mtimeMs}:${stat.size}`;
-    } catch (error) {
-      appendPieLog('debug', 'aggregate-stats', 'models.json stat failed; no pricing available', {
-        error: toErrorMessage(error),
-      });
-      return this.cachePricing(`missing:${modelsJsonPath}`, new Map());
-    }
-    try {
-      const stat = await fsAsync.stat(historicalPricingPath);
-      signature += `:${historicalPricingPath}:${stat.mtimeMs}:${stat.size}`;
-    } catch {
-      // History is optional for portable/custom agent dirs. Keep its absence in
-      // the signature so creating the generated file invalidates the cache.
-      signature += `:missing:${historicalPricingPath}`;
-    }
-    if (this.pricingCache?.signature === signature) return this.pricingCache;
-    return this.cachePricing(signature, loadModelPricing(modelsJsonPath, historicalPricingPath));
-  }
-
-  private cachePricing(signature: string, map: Map<string, ModelPricingRecord[]>): PricingCache {
-    if (this.pricingCache?.signature === signature) return this.pricingCache;
-    this.pricingCache = { signature, map };
-    return this.pricingCache;
-  }
-}
-
-function signaturesEqual(a: DataSignature | null, b: DataSignature | null): boolean {
-  if (!a || !b) return false;
-  return a.snapshotsMtimeMs === b.snapshotsMtimeMs && a.snapshotsSize === b.snapshotsSize;
-}
-
-/** Parse a chunk of `run-snapshots.jsonl` into coerced run snapshots, mirroring
- *  `queryRunAnalyticsStore`'s envelope filtering exactly. Malformed lines are
- *  skipped (the retention pass rewrites the file atomically, so a torn line can
- *  only appear mid-append and is retried on the next tick). */
-function parseSnapshotLines(text: string): RunSnapshot[] {
-  const runs: RunSnapshot[] = [];
-  for (const line of text.split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    try {
-      const parsed = JSON.parse(trimmed) as { kind?: unknown; run?: unknown };
-      if (parsed.kind !== 'run_snapshot') continue;
-      const snapshot = coerceRunSnapshot(parsed.run);
-      if (snapshot) runs.push(snapshot);
-    } catch {
-      // Skip malformed lines; the next tick's signature check self-heals.
-    }
-  }
-  return runs;
 }
 
 /** Complete structural equality for protocol aggregates and accumulator caches. */
@@ -680,8 +393,9 @@ export function aggregateStatsEqual(a: AggregateStats, b: AggregateStats): boole
 }
 
 function projectLedgerIfAvailable(statsService: StatsService, aggregate: AggregateStats, nowMs: number): AggregateStats {
-  // Several embedding/test adapters implement the pre-M3 StatsService shape.
-  // Preserve their legacy projection; production always supplies the ledger.
+  // Some embedding/test adapters implement a StatsService shape without the
+  // invocation-ledger getter. Preserve their legacy projection; production
+  // always supplies the ledger.
   const getter = (statsService as StatsService & {
     getBillableInvocationRecords?: () => ReturnType<StatsService['getBillableInvocationRecords']>;
   }).getBillableInvocationRecords;
@@ -731,9 +445,4 @@ function deepEqualValue(a: unknown, b: unknown): boolean {
 
 function liveRunIdSet(openRuns: RunSnapshot[], pendingCompletedRuns: RunSnapshot[]): Set<string> {
   return new Set([...openRuns, ...pendingCompletedRuns].map((run) => run.runId));
-}
-
-function localDateString(ms: number): string {
-  const date = new Date(ms);
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 }

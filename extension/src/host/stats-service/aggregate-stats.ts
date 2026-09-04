@@ -922,7 +922,7 @@ function distributeUsageForSeries(
  *  Uses the host's local timezone so "today" / "this week" reset at local
  *  midnight (not UTC midnight) — matching the user's wall-clock expectation
  *  of when a daily spend budget rolls over. */
-function localDateString(ms: number): string {
+export function localDateString(ms: number): string {
   const d = new Date(ms);
   const y = d.getFullYear();
   const m = String(d.getMonth() + 1).padStart(2, '0');
