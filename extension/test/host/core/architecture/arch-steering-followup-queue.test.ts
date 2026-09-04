@@ -66,10 +66,6 @@ function clearQueueCmd(corrId = 'cq'): Event {
   return { kind: 'Command', cmd: { kind: 'ClearQueue', corrId, sessionPath: SESSION } };
 }
 
-function interruptResult(ok = true): Event {
-  return { kind: 'InterruptResult', corrId: 'ci', sessionPath: SESSION, ok };
-}
-
 // ─── Send while busy: optimistic 'queued' message + SendRpc ──────────────────
 
 test('Send while busy: inserts an optimistic queued message, flags the PendingOp queued, emits SendRpc, leaves runningSessionPaths untouched', () => {
@@ -258,7 +254,15 @@ test('ClearQueue command: removes queued transcript messages, drops pending snap
 test('InterruptResult{ok:true}: removes queued transcript messages and drops pending snapshots (Stop cancels the queue too)', () => {
   let out = reducer(busyState(), sendCmd('c1', SESSION, 'first'));
   out = reducer(out.state, sendResult('c1', true, true));
-  out = reducer(out.state, interruptResult(true));
+  out = reducer(out.state, {
+    kind: 'Command', cmd: { kind: 'Interrupt', corrId: 'ci', operationId: 'stop-op',
+      operationAttempt: 1, operationSource: { kind: 'host' }, backendGeneration: 0,
+      sessionPath: SESSION },
+  });
+  out = reducer(out.state, {
+    kind: 'InterruptResult', corrId: 'ci', operationId: 'stop-op', operationAttempt: 1,
+    backendGeneration: 0, sessionPath: SESSION, ok: true, committed: true, settled: true,
+  });
 
   assert.equal(out.state.transcript.bySession[SESSION]?.length, 0, 'queued message removed on interrupt');
   assert.equal(out.state.pending.promoted['c1'], undefined, 'promoted snapshot dropped on interrupt');

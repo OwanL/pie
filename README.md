@@ -52,7 +52,7 @@ chmod +x install.sh
 Both installers are idempotent and safe to re-run. On each run they:
 
 1. **Set `PI_CODING_AGENT_DIR`** to the repo root (User env var on Windows; shell rc on macOS/Linux) so the `pi` CLI reads `settings.json` and `models.json` from here.
-2. **Pin `PI_CODING_AGENT_SESSION_DIR`** to this checkout's `data/outcomes/sessions/` on Windows so standalone `pi` writes session JSONL to the repo-local store even when launched from an arbitrary working directory such as `C:\Windows\System32`.
+2. **Pin `PI_CODING_AGENT_SESSION_DIR`** to this checkout's `data/outcomes/sessions/` so standalone `pi` writes session JSONL to the repo-local store even when launched outside the checkout.
 3. **Pin `pi`** ([`@earendil-works/pi-coding-agent`](https://www.npmjs.com/package/@earendil-works/pi-coding-agent)) globally to the exact version in `extension/package-lock.json`, then restore packages with `pi update --extensions` without self-updating the CLI.
 4. **Relocate `auth.json`** out of the working tree into a secure OS user-data directory (`%LOCALAPPDATA%\pie\` on Windows; `~/.config/pie/` or `~/Library/Application Support/pie/` on macOS/Linux) and set `PI_CODING_AGENT_AUTH_DIR`.
 5. **Merge split-brain auth** — if a *new* in-tree `auth.json` appears after relocation (from running `pi` in a shell without `PI_CODING_AGENT_AUTH_DIR`), the installer merges its credentials into the secure location and removes the in-tree copy.
@@ -77,7 +77,7 @@ Do not edit `models.json` or `model-profiles.yaml` directly. Change active chat 
 
 ## Authentication
 
-The pie panel needs provider credentials to send messages. There are two ways to authenticate:
+Remote providers need credentials before the pie panel can send messages through them. There are two ways to authenticate:
 
 ### Option A: Provider API key (env var)
 
@@ -85,24 +85,24 @@ Set a provider API key as a persistent environment variable. The backend reads i
 
 **Windows:**
 ```cmd
-setx UMANS_API_KEY "sk-..."
+setx ANTHROPIC_API_KEY "sk-ant-..."
 REM then open a NEW terminal for it to take effect
 ```
 
 **macOS / Linux:**
 ```bash
-echo 'export UMANS_API_KEY="sk-..."' >> ~/.zshrc   # or ~/.bashrc
+echo 'export ANTHROPIC_API_KEY="sk-ant-..."' >> ~/.zshrc   # or ~/.bashrc
 source ~/.zshrc
 ```
 
-Supported env vars (checked in this order): `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `UMANS_API_KEY`.
+Supported env vars (checked in this order): `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`.
 
 ### Option B: Interactive `pi` login (writes auth.json)
 
-Run `pi` once interactively — it will prompt for an API key and cache it in `auth.json`:
+Start `pi`, enter `/login`, and select a subscription provider:
 
 ```bash
-pi --provider umans --model umans-glm-5.2 "hello"
+pi
 ```
 
 > **Important:** Run this in a terminal that has `PI_CODING_AGENT_AUTH_DIR` set (open a new terminal after install). Otherwise `pi` writes `auth.json` back to the repo root, creating a split-brain where the backend reads the secure (empty) location and returns 401. If this happens, **re-run the installer** — it will auto-merge the in-tree creds into the secure location.
@@ -127,7 +127,7 @@ pi --provider umans --model umans-glm-5.2 "hello"
 
 1. Open VS Code Settings (JSON) and verify `"pie.agentDir": "C:\path\to\pie"` is present.
 2. Reload the VS Code window (Developer: Reload Window) — not just the panel.
-3. If running the extension from source, rebuild: `cd extension && npm run build`.
+3. If running the extension from source, rebuild with `npm run extension:build` from the repository root.
 
 ### 401 / "invalid api key" error
 
@@ -135,16 +135,13 @@ pi --provider umans --model umans-glm-5.2 "hello"
 
 This happens when `pi` was run in a shell that didn't inherit `PI_CODING_AGENT_AUTH_DIR`.
 
-**Fix:** Re-run the installer — it auto-merges the in-tree creds into the secure location:
+**Fix:** Re-run the installer; it safely merges in-tree credentials into the secure location:
+
 ```cmd
 .\install.bat
 ```
-(on macOS/Linux: `./install.sh`)
 
-Or merge manually (Windows):
-```cmd
-copy "%USERPROFILE%\Documents\GitHub\pie\auth.json" "%LOCALAPPDATA%\pie\auth.json"
-```
+On macOS/Linux, run `./install.sh` instead.
 
 ### Backend fails to start: "SDK path not allowed"
 
@@ -156,7 +153,7 @@ copy "%USERPROFILE%\Documents\GitHub\pie\auth.json" "%LOCALAPPDATA%\pie\auth.jso
 
 **Cause:** The extension backend previously loaded whatever `@earendil-works/pi-coding-agent` `npm root -g` resolved, so a `npm i -g` upgrade (or a different version on another machine) could silently swap the SDK out from under the backend.
 
-**Fix:** The SDK is now a pinned `extension/package.json` dependency. `cd extension && npm install` (or `npm ci` for a reproducible install from the lockfile) installs the exact version into `extension/node_modules/`, and the backend resolves that copy first. Run `npm install` in `extension/` after pulling if the SDK version in the lockfile changed.
+**Fix:** The SDK is now a pinned `extension/package.json` dependency. From the repository root, run `npm ci`; its postinstall restores the locked dependency trees, including the exact SDK version under `extension/node_modules/`. The backend resolves that copy first.
 
 ### `pi` command not found after install
 
@@ -195,27 +192,34 @@ See [SECURITY.md](SECURITY.md) before sharing a checkout or backing up local sta
 
 ## Quick start
 
-### Run repo-wide tests
+### Test and validate
+
+Run the canonical wrappers from the repository root:
 
 ```bash
-# canonical development command: dependency-aware affected tests
+# dependency-aware tests for working-tree changes (default final development test)
 npm test
 
-# full unit suite without coverage (normally only needed for runner changes)
+# focused test file(s) while iterating; pass multiple paths if needed
+npm run test:file -- extension/test/path/to/test.ts
+
+# full fast suite and opt-in integration suite
 npm run test:all
-
-# coverage gates used by the release verification workflow
-npm run test:coverage
-
-# opt-in real-SDK, real-Git, and real-shell integration tests
 npm run test:integration
 
-# coverage verification scoped to one package
+# individual and combined validation
+npm run typecheck
+npm run lint
+npm run check      # model drift + typecheck + lint + changed tests
+npm run verify     # pre-push gate: model drift + typecheck + lint + full fast suite + build
+
+# release coverage gate, optionally scoped to one package
+npm run test:coverage
 npm run test:coverage -- --package extension
 npm run test:coverage -- --package subagent
 ```
 
-`npm test` is the one development command to remember. It traces changed files through static relative imports and file-URL fixtures, runs affected test files concurrently, and conservatively falls back to a package suite when a changed source has no dependency edge. Test-runner or global shared-infrastructure changes trigger the full fast suite. Slow tests that require real SDK sessions, process trees, Git repositories, or shell pools live behind `npm run test:integration`. Pre-push `npm run verify` runs the full fast suite; the slower coverage release gate remains available as `npm run verify:release` or `npm run test:coverage`.
+`npm test` traces changed files through static relative imports and file-URL fixtures, runs affected test files concurrently, and conservatively falls back to a package suite when a changed source has no dependency edge. Test-runner or global shared-infrastructure changes trigger the full fast suite. Use `npm run test:file` for focused tests rather than invoking `npx tsx` directly. Slow tests that require real SDK sessions, process trees, Git repositories, or shell pools live behind `npm run test:integration`. The slower release gate remains available as `npm run verify:release` or `npm run test:coverage`.
 
 Test and typecheck children have a 20-minute watchdog that kills the complete process tree on timeout or runner interruption (including `taskkill /T /F` on Windows). Override it with `PIE_TEST_PROCESS_TIMEOUT_MS`; set `0` only to disable it explicitly.
 
@@ -224,8 +228,9 @@ Test and typecheck children have a 20-minute watchdog that kills the complete pr
 From a fresh checkout, install every dependency tree once from the repository root:
 
 ```bash
-npm ci             # also installs extension/ and analysis/ via postinstall
-npm run extension:build
+npm ci                    # also installs extension/ and analysis/ via postinstall
+npm run extension:build   # build + sync into the installed extension
+npm run extension:package # produce a .vsix when needed
 ```
 
 For an extension-only refresh after dependencies are already installed:

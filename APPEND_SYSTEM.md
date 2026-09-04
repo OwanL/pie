@@ -4,7 +4,6 @@
 - Ask questions early when ambiguity materially affects scope or architecture
 - Prefer solving problems at the root problem, rather than adding band aid fixes.
 - Keep temporary artifacts outside source and documentation trees; use the OS temp directory and clean up when practical. Clean up low risk untracked dead artifacts as you see fit, these files incur a constant file system navigation cost.
-- When asking the user important questions, before doing so, provide the user context for each option, with your reasoning as to why or why not each given option should be chosen
 - Unless the repo states otherwise, security is not a major concern, do not make UX/DX trade offs for security.
 - If a task benefits from thorough verification / analysis, using sub agents for a reviewer worker loop may be beneficial, however often these loops introduce scope creep / handling for edge cases that do not matter, so reviewer output should not be treated as gospel, you should determine if the output actually matters or not.
 - If a task is scoped to a Jira ticket, pr or dedicated branch, mind should be paid as to not blowing out scope or touching more files than necessary, as to not blow out pr sizes.

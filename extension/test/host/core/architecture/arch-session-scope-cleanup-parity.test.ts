@@ -23,6 +23,12 @@ import assert from 'node:assert/strict';
 import { reducer, initialArchState, type ArchState } from '../../../../src/host/core/reducer';
 import type { Event } from '../../../../src/host/core/events';
 import { evictSession } from '../../../../src/host/core/reducer/helpers';
+import {
+  activeInterruptOperation,
+  hasRetiredInterruptEventFence,
+  settleSessionOperationSucceeded,
+  startSessionOperation,
+} from '../../../../src/host/core/operation-registry';
 import type { SessionSummary, ModelSettings, ComposerInput, ExtensionUIRequestPayload } from '../../../../src/shared/protocol';
 import type {
   CurrentTurn,
@@ -102,6 +108,18 @@ function setModelPending(sessionPath: string): SetModelPending {
 
 const extUiPayload = {} as unknown as ExtensionUIRequestPayload;
 
+function interruptOperation(sessionPath: string, operationId: string, settled: boolean) {
+  const operation = startSessionOperation({
+    operationId, kind: 'message.interrupt', source: { kind: 'host' },
+    pendingPath: sessionPath, selectionToken: operationId, backendGeneration: 1,
+  });
+  return settled
+    ? settleSessionOperationSucceeded(operation, {
+        pendingPath: sessionPath, backendGeneration: 1,
+      })!
+    : operation;
+}
+
 // ─── handleSessionScopeCleared (tab-close path, via the reducer) ────────────
 
 test('handleSessionScopeCleared cleans editingMessageIdBySession', () => {
@@ -116,28 +134,26 @@ test('handleSessionScopeCleared cleans editingMessageIdBySession', () => {
   assert.equal(result.state.transcript.editingMessageIdBySession['/a'], undefined);
 });
 
-test('handleSessionScopeCleared cleans interruptInFlightBySession', () => {
+test('handleSessionScopeCleared clears only the evicted session retired-event fence', () => {
   const state: ArchState = {
     ...readyState,
-    sessions: {
-      ...readyState.sessions,
-      interruptInFlightBySession: { '/a': true },
+    operations: {
+      stopA: interruptOperation('/a', 'stopA', true),
+      stopB: interruptOperation('/b', 'stopB', true),
     },
   };
   const result = reducer(state, sessionScopeCleared('/a', false));
-  assert.equal(result.state.sessions.interruptInFlightBySession['/a'], undefined);
+  assert.equal(hasRetiredInterruptEventFence(result.state.operations, '/a'), false);
+  assert.equal(hasRetiredInterruptEventFence(result.state.operations, '/b'), true);
 });
 
-test('handleSessionScopeCleared cleans interruptSettledSessionPaths', () => {
+test('handleSessionScopeCleared preserves an active interrupt lifecycle', () => {
   const state: ArchState = {
     ...readyState,
-    sessions: {
-      ...readyState.sessions,
-      interruptSettledSessionPaths: ['/a', '/b'],
-    },
+    operations: { stopA: interruptOperation('/a', 'stopA', false) },
   };
   const result = reducer(state, sessionScopeCleared('/a', false));
-  assert.deepEqual(result.state.sessions.interruptSettledSessionPaths, ['/b']);
+  assert.equal(activeInterruptOperation(result.state.operations, '/a')?.operationId, 'stopA');
 });
 
 test('handleSessionScopeCleared cleans currentTurnBySession', () => {
@@ -174,10 +190,6 @@ test('handleSessionScopeCleared preserves maps for other sessions', () => {
       ...readyState.transcript,
       editingMessageIdBySession: { '/a': 'msg-a', '/b': 'msg-b' },
     },
-    sessions: {
-      ...readyState.sessions,
-      interruptInFlightBySession: { '/a': true, '/b': false },
-    },
     pending: {
       ...readyState.pending,
       currentTurnBySession: { '/a': currentTurn('/a'), '/b': currentTurn('/b') },
@@ -186,8 +198,6 @@ test('handleSessionScopeCleared preserves maps for other sessions', () => {
   const result = reducer(state, sessionScopeCleared('/a', false));
   assert.equal(result.state.transcript.editingMessageIdBySession['/a'], undefined);
   assert.equal(result.state.transcript.editingMessageIdBySession['/b'], 'msg-b');
-  assert.equal(result.state.sessions.interruptInFlightBySession['/a'], undefined);
-  assert.equal(result.state.sessions.interruptInFlightBySession['/b'], false);
   assert.equal(result.state.pending.currentTurnBySession['/a'], undefined);
   assert.deepEqual(result.state.pending.currentTurnBySession['/b'], currentTurn('/b'));
 });
@@ -324,8 +334,10 @@ test('Both dispatch routes clean the same set of per-session keyed maps', () => 
       unreadFinishedSessionPaths: [sp],
       activeSessionPath: sp,
       analyticsFactorsBySession: { [sp]: null, [other]: null },
-      interruptInFlightBySession: { [sp]: true, [other]: false },
-      interruptSettledSessionPaths: [sp, other],
+    },
+    operations: {
+      stopA: interruptOperation(sp, 'stopA', true),
+      stopB: interruptOperation(other, 'stopB', true),
     },
     settings: {
       ...readyState.settings,
@@ -365,8 +377,10 @@ test('Both dispatch routes clean the same set of per-session keyed maps', () => 
   // Route 2: evictSession directly (the full-eviction path).
   const evicted = evictSession(base, sp, { removeSummary: true, removeTabs: true });
 
-  assert.deepEqual(cleared.state.sessions.interruptSettledSessionPaths, [other]);
-  assert.deepEqual(evicted.state.sessions.interruptSettledSessionPaths, [other]);
+  assert.equal(hasRetiredInterruptEventFence(cleared.state.operations, sp), false);
+  assert.equal(hasRetiredInterruptEventFence(cleared.state.operations, other), true);
+  assert.equal(hasRetiredInterruptEventFence(evicted.state.operations, sp), false);
+  assert.equal(hasRetiredInterruptEventFence(evicted.state.operations, other), true);
 
   // Collect every per-session keyed map and check both results have no `/a`.
   const checks: Array<{ name: string; map: Record<string, unknown> }> = [
@@ -376,7 +390,6 @@ test('Both dispatch routes clean the same set of per-session keyed maps', () => 
     { name: 'transcript.editingMessageIdBySession', map: cleared.state.transcript.editingMessageIdBySession },
     { name: 'transcript.pagingInFlightBySession', map: cleared.state.transcript.pagingInFlightBySession },
     { name: 'sessions.analyticsFactorsBySession', map: cleared.state.sessions.analyticsFactorsBySession },
-    { name: 'sessions.interruptInFlightBySession', map: cleared.state.sessions.interruptInFlightBySession },
     { name: 'settings.availableModelsBySession', map: cleared.state.settings.availableModelsBySession },
     { name: 'settings.contextUsageBySession', map: cleared.state.settings.contextUsageBySession },
     { name: 'settings.pendingExtensionUIRequestsBySession', map: cleared.state.settings.pendingExtensionUIRequestsBySession },
@@ -433,7 +446,6 @@ test('Both dispatch routes clean the same set of per-session keyed maps', () => 
     { name: 'transcript.editingMessageIdBySession', map: evicted.state.transcript.editingMessageIdBySession },
     { name: 'transcript.pagingInFlightBySession', map: evicted.state.transcript.pagingInFlightBySession },
     { name: 'sessions.analyticsFactorsBySession', map: evicted.state.sessions.analyticsFactorsBySession },
-    { name: 'sessions.interruptInFlightBySession', map: evicted.state.sessions.interruptInFlightBySession },
     { name: 'settings.availableModelsBySession', map: evicted.state.settings.availableModelsBySession },
     { name: 'settings.contextUsageBySession', map: evicted.state.settings.contextUsageBySession },
     { name: 'settings.pendingExtensionUIRequestsBySession', map: evicted.state.settings.pendingExtensionUIRequestsBySession },

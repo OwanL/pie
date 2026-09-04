@@ -1,6 +1,6 @@
 ---
 name: pie-logs
-description: Inspect and group Pie persistent, debug, session, and truncated-tool logs. Use when debugging Pie extension/runtime/TUI behavior, auditing what a model received or did, or recovering full tool output; not for unrelated application logging.
+description: Inspect and group Pie persistent, debug, session, and truncated-tool logs. Use when debugging Pie extension/runtime/TUI behavior, auditing what a model received or did, or recovering full tool output
 ---
 
 # Pie Logs

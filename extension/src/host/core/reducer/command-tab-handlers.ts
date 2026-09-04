@@ -31,6 +31,21 @@ function persistTabsEffect(corrId: string, state: ArchState) {
   };
 }
 
+/** Reducer result for a pinned-tab/group mutation: apply the given next tab
+ *  fields to `state.sessions` and emit a `PersistTabs` effect carrying the
+ *  resulting full tab slice. */
+function pinnedMutationResult(
+  corrId: string,
+  state: ArchState,
+  nextTabs: Partial<Pick<ArchState['sessions'], 'openTabPaths' | 'pinnedTabPaths' | 'pinnedTabGroups'>>,
+): ReducerResult {
+  const nextState = {
+    ...state,
+    sessions: { ...state.sessions, ...nextTabs },
+  };
+  return { state: nextState, effects: [persistTabsEffect(corrId, nextState)] };
+}
+
 export function handleCloseTab(state: ArchState, cmd: Extract<Command, { kind: 'CloseTab' }>): ReducerResult {
   // Closing a tab also unpins it — a pinned tab cannot outlive its open tab
   // (the pinned ⊆ openTabPaths invariant). Group membership is cleaned too:
@@ -100,19 +115,11 @@ export function handleTogglePinTab(state: ArchState, cmd: Extract<Command, { kin
   const nextPinnedTabGroups = isPinned
     ? cleanPinnedTabGroups(pinnedTabGroups, next.pinnedTabPaths)
     : pinnedTabGroups;
-  const nextState = {
-    ...state,
-    sessions: {
-      ...state.sessions,
-      openTabPaths: next.openTabPaths,
-      pinnedTabPaths: next.pinnedTabPaths,
-      pinnedTabGroups: nextPinnedTabGroups,
-    },
-  };
-  return {
-    state: nextState,
-    effects: [persistTabsEffect(cmd.corrId, nextState)],
-  };
+  return pinnedMutationResult(cmd.corrId, state, {
+    openTabPaths: next.openTabPaths,
+    pinnedTabPaths: next.pinnedTabPaths,
+    pinnedTabGroups: nextPinnedTabGroups,
+  });
 }
 
 /** Pin an unpinned tab and merge it into the leftmost pinned-strip item
@@ -126,19 +133,11 @@ export function handlePinAndMergePinnedTab(state: ArchState, cmd: Extract<Comman
     return { state, effects: [] };
   }
   const result = pinAndMergeToFirstPinned(openTabPaths, pinnedTabPaths, pinnedTabGroups, cmd.sessionPath);
-  const nextState = {
-    ...state,
-    sessions: {
-      ...state.sessions,
-      openTabPaths: reorderPinnedPrefix(openTabPaths, result.pinnedTabPaths),
-      pinnedTabPaths: result.pinnedTabPaths,
-      pinnedTabGroups: result.pinnedTabGroups,
-    },
-  };
-  return {
-    state: nextState,
-    effects: [persistTabsEffect(cmd.corrId, nextState)],
-  };
+  return pinnedMutationResult(cmd.corrId, state, {
+    openTabPaths: reorderPinnedPrefix(openTabPaths, result.pinnedTabPaths),
+    pinnedTabPaths: result.pinnedTabPaths,
+    pinnedTabGroups: result.pinnedTabGroups,
+  });
 }
 
 /** Group a pinned tab with a target (Discord-style "drag onto"). Pure state
@@ -157,19 +156,11 @@ export function handleGroupPinnedTab(state: ArchState, cmd: Extract<Command, { k
     return { state, effects: [] };
   }
   const result = groupPinnedTab(pinnedTabPaths, pinnedTabGroups, cmd.sourcePath, cmd.targetPath);
-  const nextState = {
-    ...state,
-    sessions: {
-      ...state.sessions,
-      openTabPaths: reorderPinnedPrefix(openTabPaths, result.pinnedTabPaths),
-      pinnedTabPaths: result.pinnedTabPaths,
-      pinnedTabGroups: result.pinnedTabGroups,
-    },
-  };
-  return {
-    state: nextState,
-    effects: [persistTabsEffect(cmd.corrId, nextState)],
-  };
+  return pinnedMutationResult(cmd.corrId, state, {
+    openTabPaths: reorderPinnedPrefix(openTabPaths, result.pinnedTabPaths),
+    pinnedTabPaths: result.pinnedTabPaths,
+    pinnedTabGroups: result.pinnedTabGroups,
+  });
 }
 
 /** Merge two pinned groups (Discord-style "drag group chip onto group chip").
@@ -187,19 +178,11 @@ export function handleMergePinnedGroups(state: ArchState, cmd: Extract<Command, 
     return { state, effects: [] };
   }
   const result = mergePinnedGroups(pinnedTabPaths, pinnedTabGroups, cmd.sourcePath, cmd.targetPath);
-  const nextState = {
-    ...state,
-    sessions: {
-      ...state.sessions,
-      openTabPaths: reorderPinnedPrefix(openTabPaths, result.pinnedTabPaths),
-      pinnedTabPaths: result.pinnedTabPaths,
-      pinnedTabGroups: result.pinnedTabGroups,
-    },
-  };
-  return {
-    state: nextState,
-    effects: [persistTabsEffect(cmd.corrId, nextState)],
-  };
+  return pinnedMutationResult(cmd.corrId, state, {
+    openTabPaths: reorderPinnedPrefix(openTabPaths, result.pinnedTabPaths),
+    pinnedTabPaths: result.pinnedTabPaths,
+    pinnedTabGroups: result.pinnedTabGroups,
+  });
 }
 
 /** Remove a pinned tab from its group and reposition it as a standalone pinned
@@ -211,19 +194,11 @@ export function handleUngroupPinnedTab(state: ArchState, cmd: Extract<Command, {
     return { state, effects: [] };
   }
   const result = ungroupPinnedTab(pinnedTabPaths, pinnedTabGroups, cmd.sourcePath, cmd.toItemIndex);
-  const nextState = {
-    ...state,
-    sessions: {
-      ...state.sessions,
-      openTabPaths: reorderPinnedPrefix(openTabPaths, result.pinnedTabPaths),
-      pinnedTabPaths: result.pinnedTabPaths,
-      pinnedTabGroups: result.pinnedTabGroups,
-    },
-  };
-  return {
-    state: nextState,
-    effects: [persistTabsEffect(cmd.corrId, nextState)],
-  };
+  return pinnedMutationResult(cmd.corrId, state, {
+    openTabPaths: reorderPinnedPrefix(openTabPaths, result.pinnedTabPaths),
+    pinnedTabPaths: result.pinnedTabPaths,
+    pinnedTabGroups: result.pinnedTabGroups,
+  });
 }
 
 /** Dissolve exactly one pinned group while preserving its members' pinned state
@@ -234,15 +209,10 @@ export function handleDissolvePinnedGroup(state: ArchState, cmd: Extract<Command
     return { state, effects: [] };
   }
   const result = dissolvePinnedGroup(pinnedTabPaths, pinnedTabGroups, cmd.sourcePath);
-  const nextState = {
-    ...state,
-    sessions: {
-      ...state.sessions,
-      pinnedTabPaths: result.pinnedTabPaths,
-      pinnedTabGroups: result.pinnedTabGroups,
-    },
-  };
-  return { state: nextState, effects: [persistTabsEffect(cmd.corrId, nextState)] };
+  return pinnedMutationResult(cmd.corrId, state, {
+    pinnedTabPaths: result.pinnedTabPaths,
+    pinnedTabGroups: result.pinnedTabGroups,
+  });
 }
 
 /** Unpin exactly one whole pinned group while leaving every member session
@@ -253,16 +223,11 @@ export function handleUnpinPinnedGroup(state: ArchState, cmd: Extract<Command, {
     return { state, effects: [] };
   }
   const result = unpinPinnedGroup(pinnedTabPaths, pinnedTabGroups, cmd.sourcePath);
-  const nextState = {
-    ...state,
-    sessions: {
-      ...state.sessions,
-      openTabPaths: reorderPinnedPrefix(openTabPaths, result.pinnedTabPaths),
-      pinnedTabPaths: result.pinnedTabPaths,
-      pinnedTabGroups: result.pinnedTabGroups,
-    },
-  };
-  return { state: nextState, effects: [persistTabsEffect(cmd.corrId, nextState)] };
+  return pinnedMutationResult(cmd.corrId, state, {
+    openTabPaths: reorderPinnedPrefix(openTabPaths, result.pinnedTabPaths),
+    pinnedTabPaths: result.pinnedTabPaths,
+    pinnedTabGroups: result.pinnedTabGroups,
+  });
 }
 
 /** Reorder a pinned item (standalone chip or group block) horizontally. Pure
@@ -273,19 +238,11 @@ export function handleMovePinnedItem(state: ArchState, cmd: Extract<Command, { k
     return { state, effects: [] };
   }
   const result = movePinnedItem(pinnedTabPaths, pinnedTabGroups, cmd.sourcePath, cmd.toItemIndex);
-  const nextState = {
-    ...state,
-    sessions: {
-      ...state.sessions,
-      openTabPaths: reorderPinnedPrefix(openTabPaths, result.pinnedTabPaths),
-      pinnedTabPaths: result.pinnedTabPaths,
-      pinnedTabGroups: result.pinnedTabGroups,
-    },
-  };
-  return {
-    state: nextState,
-    effects: [persistTabsEffect(cmd.corrId, nextState)],
-  };
+  return pinnedMutationResult(cmd.corrId, state, {
+    openTabPaths: reorderPinnedPrefix(openTabPaths, result.pinnedTabPaths),
+    pinnedTabPaths: result.pinnedTabPaths,
+    pinnedTabGroups: result.pinnedTabGroups,
+  });
 }
 
 /** Reorder the pinned prefix of `openTabPaths` to match a mutated

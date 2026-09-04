@@ -3,7 +3,7 @@ import '../../helpers/vscode-stub';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { onCustomMessage } from '../../../src/host/session-service/handlers/session';
+import { onCustomMessage, onExtensionUIRequest } from '../../../src/host/session-service/handlers/session';
 import { NOOP_RUN_OBSERVER, type RunObserver } from '../../../src/host/stats-service';
 import type { CustomMessagePayload } from '../../../src/shared/protocol';
 
@@ -79,4 +79,51 @@ test('onCustomMessage does not forward unrelated custom messages as pruning usag
   });
 
   assert.equal(callCount, 0);
+});
+
+test('onExtensionUIRequest preserves notify severity instead of routing every notification as an error', () => {
+  const events: Array<Record<string, unknown>> = [];
+  let renderCount = 0;
+  const dispatchArch = (event: unknown): void => {
+    events.push(event as Record<string, unknown>);
+  };
+  const deps = {
+    context: {} as never,
+    getArchState: () => ({} as never),
+    dispatchArch,
+    runObserver: NOOP_RUN_OBSERVER,
+    state: {} as never,
+    scheduleRender: () => { renderCount += 1; },
+    requireEventSessionPath: (_eventName: string, sessionPath: string | undefined) => sessionPath ?? null,
+  };
+
+  for (const notifyType of ['info', 'warning', 'error'] as const) {
+    onExtensionUIRequest({
+      id: `notify-${notifyType}`,
+      method: 'notify',
+      message: `notification ${notifyType}`,
+      notifyType,
+      sessionPath: '/workspace/session.jsonl',
+    }, deps);
+  }
+
+  assert.deepEqual(events, [
+    {
+      kind: 'NoticeShown',
+      notice: 'Info: notification info',
+      sessionPath: '/workspace/session.jsonl',
+    },
+    {
+      kind: 'NoticeShown',
+      notice: 'Warning: notification warning',
+      sessionPath: '/workspace/session.jsonl',
+    },
+    {
+      kind: 'NoticeShown',
+      notice: 'Error: notification error',
+      noticeKind: 'operational-error',
+      sessionPath: '/workspace/session.jsonl',
+    },
+  ]);
+  assert.equal(renderCount, 3);
 });

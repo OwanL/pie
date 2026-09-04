@@ -17,6 +17,7 @@ import {
 import {
   buildSessionUsageSnapshot,
   mergeSessionUsageSnapshots,
+  type SessionUsageSnapshot,
 } from '../../../src/shared/session-usage';
 import { estimateTextTokens } from '../../../src/shared/tokenize';
 
@@ -29,6 +30,8 @@ function makeSummary(partial: Partial<SessionTokenUsageSummary> = {}): SessionTo
     totalTokens: 0,
     reasoningTokens: 0,
     reportedTurnCount: 0,
+    incompleteInvocationCount: 0,
+    knownTokenInvocationCount: 0,
     lastTurn: null,
     ...partial,
   };
@@ -66,6 +69,28 @@ test('buildSessionTokenIndicator shows real counts once usage is reported', () =
   const indicator = buildSessionTokenIndicator(summary);
   assert.equal(indicator.label, '\u2191 1.8k \u2193 540');
   assert.match(indicator.tooltip, /Reasoning \(included in output\): 400/);
+});
+
+test('session token indicator marks incomplete invocation totals instead of known zero', () => {
+  const summary = buildSessionTokenUsageFromSnapshot({
+    samples: [{
+      sourceId: 'gap',
+      kind: 'conversation',
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      totalTokens: 0,
+      tokenChannelsKnown: false,
+      provenance: 'unknown',
+      instrumentationGap: true,
+    }],
+    incompleteInvocationCount: 1,
+  });
+  const indicator = buildSessionTokenIndicator(summary);
+  assert.equal(indicator.label, '↑ — ↓ —*');
+  assert.match(indicator.tooltip, /Known subtotal · 1 invocation/);
+  assert.match(indicator.ariaLabel, /known subtotal/);
 });
 
 test('buildSessionCostIndicator returns null when nothing has been spent', () => {
@@ -165,6 +190,173 @@ test('replacing aggregate subagent usage with attempt usage does not double-coun
   assert.equal(summary.modelCosts.get('other-provider/other-model')?.cost, 0.03);
 });
 
+test('total-only usage falls back to reported cost for assistant, subagent, and prepass samples', () => {
+  const pricing = { input: 10, output: 20, cacheRead: 1, cacheWrite: 2 };
+  const accounting: SessionUsageSnapshot = {
+    samples: [
+      {
+        sourceId: 'assistant:total-only', kind: 'assistant', provider: 'provider-a', modelId: 'assistant-model',
+        inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 100,
+        reportedCostUsd: 0.42,
+      },
+      {
+        sourceId: 'subagent:total-only', groupId: 'subagent:total-only', kind: 'subagent', provider: 'provider-b', modelId: 'subagent-model',
+        inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 200,
+        reportedCostUsd: 0.33,
+      },
+      {
+        sourceId: 'skill-pruning:total-only', kind: 'skill_pruning_prepass', provider: 'provider-c', modelId: 'prepass-model',
+        inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 300,
+        reportedCostUsd: 0.11,
+      },
+    ],
+  };
+  const rawSubagentAccounting = buildSessionUsageSnapshot([{
+    id: 'raw-subagent', role: 'assistant' as const, createdAt: '', markdown: '', status: 'completed' as const,
+    toolCalls: [{
+      id: 'raw-subagent-call', name: 'subagent', input: {}, status: 'completed' as const,
+      result: { details: { results: [{
+        provider: 'provider-b', model: 'subagent-model',
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 200, cost: 0.33 },
+      }] } },
+    }],
+  }] as never);
+  assert.equal(rawSubagentAccounting.samples[0]?.totalTokens, 200);
+
+  const resolvePricing = () => pricing;
+  const rawSubagentSummary = extractSubagentCostSummaryFromSnapshot(rawSubagentAccounting, resolvePricing);
+  assert.equal(rawSubagentSummary.totalCost, 0.33);
+  assert.equal(rawSubagentSummary.modelCosts.get('provider-b/subagent-model')?.hasKnownCost, true);
+  const summary = buildSessionTokenUsageFromSnapshot(accounting);
+  const completed = buildCompletedCostSummaryFromSnapshot(accounting, undefined, resolvePricing);
+  const subagents = extractSubagentCostSummaryFromSnapshot(accounting, resolvePricing);
+
+  assert.equal(completed.totalCost, 0.42);
+  assert.equal(completed.modelCosts.get('provider-a/assistant-model')?.cost, 0.42);
+  assert.equal(subagents.totalCost, 0.33);
+  assert.equal(subagents.modelCosts.get('provider-b/subagent-model')?.cost, 0.33);
+
+  const explicitZero = buildCompletedCostSummaryFromSnapshot({
+    samples: [{
+      sourceId: 'assistant:free', kind: 'assistant', provider: 'provider-a', modelId: 'assistant-model',
+      inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 100,
+      reportedCostUsd: 0,
+    }],
+  }, undefined, resolvePricing);
+  assert.equal(explicitZero.totalCost, 0);
+  assert.equal(explicitZero.modelCosts.get('provider-a/assistant-model')?.hasKnownCost, true);
+  assert.equal(explicitZero.modelCosts.get('provider-a/assistant-model')?.unpricedTokens, 0);
+
+  const result = buildSessionCostIndicator(
+    summary,
+    undefined,
+    'Selected',
+    completed,
+    subagents,
+    undefined,
+    resolvePricing,
+    undefined,
+    undefined,
+    undefined,
+    accounting,
+  );
+  assert.ok(result);
+  assert.equal(result.label, '$0.86');
+  assert.deepEqual(
+    result.breakdown.sources.map((source) => [source.key, source.cost]),
+    [['conversation', 0.42], ['subagents', 0.33], ['pruning', 0.11]],
+  );
+});
+
+test('ledger-unpriced usage is not repriced from the current catalog', () => {
+  const summary = buildCompletedCostSummaryFromSnapshot({
+    samples: [{
+      sourceId: 'historical-unpriced',
+      kind: 'conversation',
+      modelId: 'model-now-priced',
+      inputTokens: 1_000,
+      outputTokens: 500,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      totalTokens: 1_500,
+      provenance: 'unpriced',
+    }],
+  }, { input: 10, output: 10, cacheRead: 10, cacheWrite: 10 }, () => ({
+    input: 10,
+    output: 10,
+    cacheRead: 10,
+    cacheWrite: 10,
+  }));
+
+  assert.equal(summary.totalCost, 0);
+  assert.equal(summary.pricedTurnCount, 0);
+  assert.equal(summary.modelCosts.get('model-now-priced')?.hasKnownCost, false);
+  assert.equal(summary.modelCosts.get('model-now-priced')?.unpricedTokens, 1_500);
+});
+
+test('total-only usage without a usable cost stays unavailable instead of known zero', () => {
+  const accounting: SessionUsageSnapshot = {
+    samples: [
+      {
+        sourceId: 'assistant:unknown-total', kind: 'assistant', provider: 'provider-a', modelId: 'assistant-model',
+        inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 100,
+      },
+      {
+        sourceId: 'subagent:unknown-total', groupId: 'subagent:unknown-total', kind: 'subagent', provider: 'provider-b', modelId: 'subagent-model',
+        inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 200,
+      },
+      {
+        sourceId: 'skill-pruning:unknown-total', kind: 'skill_pruning_prepass', provider: 'provider-c', modelId: 'prepass-model',
+        inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 300,
+      },
+    ],
+  };
+  const resolvePricing = () => ({ input: 10, output: 20, cacheRead: 1, cacheWrite: 2 });
+  const summary = buildSessionTokenUsageFromSnapshot(accounting);
+  const completed = buildCompletedCostSummaryFromSnapshot(accounting, undefined, resolvePricing);
+  const subagents = extractSubagentCostSummaryFromSnapshot(accounting, resolvePricing);
+
+  assert.equal(completed.modelCosts.get('provider-a/assistant-model')?.hasKnownCost, false);
+  assert.equal(completed.modelCosts.get('provider-a/assistant-model')?.unpricedTokens, 100);
+  assert.equal(subagents.modelCosts.get('provider-b/subagent-model')?.hasKnownCost, false);
+  assert.equal(subagents.modelCosts.get('provider-b/subagent-model')?.unpricedTokens, 200);
+
+  const rawUnknownAccounting = buildSessionUsageSnapshot([{
+    id: 'raw-unknown-subagent', role: 'assistant' as const, createdAt: '', markdown: '', status: 'completed' as const,
+    toolCalls: [{
+      id: 'raw-unknown-subagent-call', name: 'subagent', input: {}, status: 'completed' as const,
+      result: { details: { results: [{
+        provider: 'provider-b', model: 'subagent-model',
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 400 },
+      }] } },
+    }],
+  }] as never);
+  const rawUnknownSummary = extractSubagentCostSummaryFromSnapshot(rawUnknownAccounting, resolvePricing);
+  assert.equal(rawUnknownSummary.modelCosts.get('provider-b/subagent-model')?.hasKnownCost, false);
+  assert.equal(rawUnknownSummary.modelCosts.get('provider-b/subagent-model')?.unpricedTokens, 400);
+
+  const result = buildSessionCostIndicator(
+    summary,
+    undefined,
+    'Selected',
+    completed,
+    subagents,
+    undefined,
+    resolvePricing,
+    undefined,
+    undefined,
+    undefined,
+    accounting,
+  );
+  assert.ok(result);
+  assert.equal(result.label, '—*');
+  assert.match(result.tooltip, /provider-a \/ assistant-model: unavailable\* \(100 tokens\)/);
+  assert.match(result.tooltip, /provider-b \/ subagent-model: unavailable\* \(200 tokens\)/);
+  assert.match(result.tooltip, /provider-c \/ prepass-model: unavailable\* \(300 tokens\)/);
+  assert.match(result.tooltip, /Total: unavailable/);
+  assert.doesNotMatch(result.tooltip, /Known subtotal: \$0\.0000/);
+});
+
 test('whole-session accounting includes every pruning prepass rather than only the latest', () => {
   const pruningMessages = [0.01, 0.02].map((cost, index) => ({
     id: `pruning-${index}`,
@@ -243,6 +435,18 @@ test('displayed provider/model rows add exactly to the displayed total', () => {
   assert.match(result.tooltip, /provider-a \/ model-a:\s+\$1\.0000/);
   assert.match(result.tooltip, /provider-b \/ model-b:\s+\$2\.0000/);
   assert.match(result.tooltip, /Total: \$3\.0000/);
+  assert.deepEqual(
+    result.breakdown.providers.map((provider) => ({
+      provider: provider.provider,
+      cost: provider.cost,
+      models: provider.models.map((model) => model.model),
+    })),
+    [
+      { provider: 'provider-b', cost: 2, models: ['model-b'] },
+      { provider: 'provider-a', cost: 1, models: ['model-a'] },
+    ],
+  );
+  assert.deepEqual(result.breakdown.sources.map((source) => source.key), ['conversation']);
 });
 
 test('buildSessionCostIndicator computes cost across all channels', () => {
@@ -334,6 +538,10 @@ test('buildSessionCostIndicator shows sub-agent costs from transcript', () => {
   assert.match(result.tooltip, /Unknown provider \/ Unknown subagent model:\s+\$0\.0500/);
   assert.match(result.tooltip, /Unknown provider \/ Selected model:\s+\$0\.0600/);
   assert.match(result.tooltip, /Total: \$0\.1100/);
+  assert.deepEqual(
+    result.breakdown.sources.map((source) => [source.key, source.cost]),
+    [['conversation', 0.06], ['subagents', 0.05]],
+  );
 });
 
 test('live typed subagent previews contribute their reported costs to the parent session total', () => {

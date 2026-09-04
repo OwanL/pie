@@ -16,7 +16,7 @@ import {
 import {
   hasSdkSessionOpenSingleReadMarkers,
 } from '../../../src/backend/sdk-session-open-patch';
-test.after(async () => { void cleanupPristineTemplate(); });
+test.after(async () => { await cleanupPristineTemplate(); });
 
 test('coordinator fails closed without touching other targets when the pinned create seam changes', async () => {
   await withFixture(async ({ sdkPath, lockRoot }) => {

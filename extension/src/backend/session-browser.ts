@@ -23,6 +23,7 @@ import { normalizeThinkingLevel } from './message-inputs';
 import { buildDisplayTranscriptCache, buildTailTranscriptWindow } from './transcript-window';
 import { normalizeDanglingTranscript } from './session-opened';
 import type { SessionEntryLike } from './transcript';
+import { buildIdleSessionCapabilities } from './session-activity';
 
 export interface SessionBrowseSnapshot {
   readonly sessionPath: string;
@@ -31,6 +32,9 @@ export interface SessionBrowseSnapshot {
   readonly summary: Readonly<SessionSummary>;
   readonly activeModel: Readonly<{ provider: string; modelId: string }> | null;
   readonly contextTokens?: number;
+  /** Minimal complete-context tail retained for capability reclassification
+   * once the coordinator model catalog supplies the context-window size. */
+  readonly continuationMessages: readonly unknown[];
   readonly hasExplicitThinkingLevel: boolean;
 }
 
@@ -96,12 +100,16 @@ export async function openSessionBrowseSnapshot(options: {
   Object.freeze(cache);
   Object.freeze(summary);
   if (activeModel) Object.freeze(activeModel);
+  const continuationMessages = Object.freeze(
+    durableContext?.messages.length ? [durableContext.messages.at(-1)] : [],
+  );
   return Object.freeze({
     sessionPath,
     cache,
     summary,
     activeModel,
     contextTokens,
+    continuationMessages,
     hasExplicitThinkingLevel: branch.some((entry) => entry.type === 'thinking_level_change'),
   });
 }
@@ -172,11 +180,21 @@ export function buildBrowseSessionOpenedPayload(options: {
         // an explicit reasoning choice.
         thinkingLevel: options.modelSettings.defaultThinkingLevel,
       };
+  const activeModelInfo = options.browse.activeModel
+    ? options.availableModels?.find((model) =>
+        model.id === options.browse.activeModel?.modelId
+        && model.provider === options.browse.activeModel?.provider)
+    : undefined;
+  const capabilities = buildIdleSessionCapabilities(
+    options.browse.continuationMessages,
+    activeModelInfo?.contextWindow,
+  );
   const payload: SessionOpenedPayload = {
     session,
     transcript,
     transcriptWindow: slice.transcriptWindow,
     busy: false,
+    capabilities,
     runtimeReady: false,
     selectionToken: options.selectionToken,
     operationId: options.operationId,

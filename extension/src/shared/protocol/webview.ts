@@ -18,6 +18,55 @@ import type {
 } from './subagent-detail.js';
 import type { JsonStructuralPatchOperation } from '../json-structural-patch.js';
 
+/** Measured attribution within a session's cumulative working time. Category
+ * totals are derived from durable run telemetry; `toolDurationMsByName` is
+ * cumulative call time and may exceed `toolExecutionMs` when tools overlap. */
+export interface WorkingTimeBreakdown {
+  /** Parent assistant response-generation time. */
+  generationMs: number;
+  /** Non-overlapping tool wall time, or a capped estimate for legacy runs. */
+  toolExecutionMs: number;
+  /** Portion of `toolExecutionMs` estimated from legacy cumulative call time. */
+  estimatedToolExecutionMs: number;
+  /** Observed or scheduled retry delay before a provider attempt. */
+  retryWaitMs: number;
+  /** Portion of `retryWaitMs` using scheduled delay because measurement was unavailable. */
+  estimatedRetryWaitMs: number;
+  /** Timed non-parent model calls such as skill pruning and compaction. */
+  auxiliaryGenerationMs: number;
+  /** Cumulative child-attempt time, including retry backoff. Parallel and nested
+   * attempts each contribute independently, so this may exceed session wall time. */
+  subagentDurationMs?: number;
+  /** Portion of `subagentDurationMs` derived from explicitly estimated timing. */
+  estimatedSubagentDurationMs?: number;
+  /** Number of terminal child attempts observed, including untimed attempts. */
+  subagentAttemptCount?: number;
+  /** Attempts or calls whose duration telemetry was unavailable. */
+  unknownSubagentDurationCount?: number;
+  /** Cumulative execution time by normalized tool name. */
+  toolDurationMsByName: Record<string, number>;
+  /** Number of timed calls by normalized tool name. */
+  toolCallCountByName: Record<string, number>;
+}
+
+/** Host-owned cumulative agent working-time clock for one session. The
+ * webview may advance the display from `activeSince`, but never owns timing
+ * boundaries or accumulated duration. */
+export interface WorkingTimeState {
+  /** Settled agent work from completed busy intervals plus measured preflight. */
+  accumulatedMs: number;
+  /** Epoch milliseconds when the current busy interval began, or null idle. */
+  activeSince: number | null;
+  /** Start of the currently uncovered non-overlapping tool interval. The
+   * renderer may advance this interval locally but never creates its boundary. */
+  activeToolSince?: number | null;
+  /** Currently executing calls. Their individual durations are cumulative and
+   * may overlap; they feed the live per-tool detail rows only. */
+  activeTools?: Array<{ id: string; name: string; startedAt: number }>;
+  /** Optional for build-skew compatibility with the initial v9 clock. */
+  breakdown?: WorkingTimeBreakdown;
+}
+
 /** Most recent completed history compaction for a session, surfaced as a
  *  transient "Compacted · freed N tokens" chip. Host-owned; cleared after a
  *  bounded TTL (`ClearLastCompaction` effect) so the chip does not linger. */
@@ -213,6 +262,9 @@ export interface ViewState {
    *  identifies its group. Persisted across restarts. */
   pinnedTabGroups: string[][];
   runningSessionPaths: string[];
+  /** Host-authoritative per-session controls/activity. Keyed records preserve
+   * background-session state and never depend on the active transcript window. */
+  sessionCapabilitiesBySession: Record<string, import('./sessions.js').SessionCapabilities>;
   /** Sessions currently waiting for their asynchronous LLM title. */
   generatingTitleSessionPaths: string[];
   /** Session paths whose running turn is in the 'starting model' phase —
@@ -261,6 +313,13 @@ export interface ViewState {
    */
   tokenRateBySession: Record<string, TokenRateIndicatorState>;
   /**
+   * Cumulative agent-busy wall time per session. Busy time includes provider
+   * waits, retries, history compaction, and tool execution; idle time waiting
+   * for the user between runs is excluded. The webview advances an active
+   * interval locally from its host-owned start timestamp.
+   */
+  workingTimeBySession: Record<string, WorkingTimeState>;
+  /**
    * Aggregate usage stats across ALL sessions (cost per provider, daily spend,
    * token totals, generation throughput), computed host-side by
    * `AggregateStatsService` and merged in `PieExtension.buildViewState` (the
@@ -294,9 +353,8 @@ export interface ViewState {
    *  only when `notice` is an H-category error message. */
   noticeKind?: NoticeKind | null;
   /** Full diagnostic string behind the short `notice` summary, or null. The
-   *  host redacts credentials at the webview boundary while retaining useful
-   *  context such as internal `req-NN` correlation ids. Cleared alongside
-   *  `notice` on dismiss/replace. */
+   *  host redacts credentials and internal `req-NN` correlation ids at the
+   *  webview boundary. Cleared alongside `notice` on dismiss/replace. */
   noticeRaw?: string | null;
   /** True once the backend process has started and emitted `backend.ready`. */
   backendReady: boolean;

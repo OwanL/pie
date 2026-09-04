@@ -49,12 +49,14 @@ function validState(): ViewState {
     transcript: [],
     sessions: [],
     openTabPaths: [],
+    sessionCapabilitiesBySession: {},
     generatingTitleSessionPaths: [],
     systemPrompts: [],
     availableModels: [],
     availableModelsStatus: 'authoritative',
     availableExtensions: [],
     aggregateStats: {},
+    workingTimeBySession: {},
     fileChanges: [],
     readFilePaths: [],
     pendingComposerInputs: [],
@@ -83,12 +85,14 @@ const CRITICAL_FIELDS: Array<{ path: string; type: string }> = [
   { path: 'transcript', type: 'array' },
   { path: 'sessions', type: 'array' },
   { path: 'openTabPaths', type: 'array' },
+  { path: 'sessionCapabilitiesBySession', type: 'object' },
   { path: 'generatingTitleSessionPaths', type: 'array' },
   { path: 'systemPrompts', type: 'array' },
   { path: 'availableModels', type: 'array' },
   { path: 'availableModelsStatus', type: 'string' },
   { path: 'availableExtensions', type: 'array' },
   { path: 'aggregateStats', type: 'object' },
+  { path: 'workingTimeBySession', type: 'object' },
   { path: 'fileChanges', type: 'array' },
   { path: 'readFilePaths', type: 'array' },
   { path: 'pendingComposerInputs', type: 'array' },
@@ -154,6 +158,53 @@ for (const spec of CRITICAL_FIELDS) {
     assert.ok(msg.includes('wrong type'), `violation must say 'wrong type': ${msg}`);
   });
 }
+
+test('session capabilities accept every valid primary operation projection', () => {
+  for (const kind of ['session.create', 'message.edit', 'message.interrupt', 'message.continue', 'message.compact'] as const) {
+    const state = validState();
+    state.sessionCapabilitiesBySession = {
+      '/pending': {
+        billableActivity: false,
+        canContinue: false,
+        canInterrupt: false,
+        canCompact: false,
+        primaryOperation: {
+          operationId: 'operation-1',
+          kind,
+          phase: 'ambiguous',
+          attempt: 2,
+          committed: false,
+          recovery: 'retry',
+        },
+      },
+    };
+    assert.deepEqual(validateViewState(state), [], kind);
+  }
+});
+
+test('session capabilities reject malformed primary operation projections', () => {
+  const state = validState() as unknown as Record<string, unknown>;
+  state.sessionCapabilitiesBySession = {
+    '/pending': {
+      billableActivity: false,
+      canContinue: false,
+      canInterrupt: false,
+      canCompact: false,
+      primaryOperation: {
+        operationId: 'operation-1',
+        kind: 'session.create',
+        phase: 'ambiguous',
+        attempt: 0,
+        committed: false,
+        recovery: 'unsafe-duplicate',
+      },
+    },
+  };
+  assert.deepEqual(
+    validateViewState(state as unknown as ViewState),
+    ['ViewState.sessionCapabilitiesBySession[/pending].primaryOperation is invalid'],
+  );
+});
 
 test('multiple violations at once are all returned in CRITICAL_FIELDS iteration order', () => {
   let state: ViewState = validState();

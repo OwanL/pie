@@ -419,6 +419,19 @@ export interface AggregateStats {
   totalOutputTokens: number;
   totalCacheReadTokens: number;
   totalCacheWriteTokens: number;
+  /** Ledger completeness provenance. Absent only for pre-M3 host snapshots. */
+  billableAccounting?: {
+    invocationCount: number;
+    todayUnknownInvocationCount: number;
+    todayUnpricedInvocationCount: number;
+    todayInstrumentationGapInvocationCount: number;
+    weekUnknownInvocationCount: number;
+    weekUnpricedInvocationCount: number;
+    weekInstrumentationGapInvocationCount: number;
+    unknownInvocationCount: number;
+    unpricedInvocationCount: number;
+    instrumentationGapInvocationCount: number;
+  };
   /** Number of runs included in the aggregate (completed + open). */
   runCount: number;
   /** Number of distinct sessions that ever had a run (all-time). */

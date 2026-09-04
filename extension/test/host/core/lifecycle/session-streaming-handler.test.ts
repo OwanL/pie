@@ -179,6 +179,8 @@ test('onCompaction counts the run and dispatches CompactionEnded with token metr
 
   onCompaction({
     sessionPath: '/s',
+    reason: 'threshold',
+    outcome: 'succeeded',
     occurredAt: 1_700_000_000_000,
     tokensBefore: 120_000,
     estimatedTokensAfter: 30_000,
@@ -188,20 +190,30 @@ test('onCompaction counts the run and dispatches CompactionEnded with token metr
   assert.deepEqual(dispatched, [{
     kind: 'CompactionEnded',
     sessionPath: '/s',
+    reason: 'threshold',
+    outcome: 'succeeded',
     occurredAt: 1_700_000_000_000,
     tokensBefore: 120_000,
     estimatedTokensAfter: 30_000,
   }]);
 });
 
-test('onCompaction omits absent token metrics from the arch event', () => {
+test('onCompaction preserves failed outcomes without token metrics', () => {
   const { deps, dispatched } = createDeps();
 
-  onCompaction({ sessionPath: '/s' }, deps as any);
+  onCompaction({ sessionPath: '/s', reason: 'manual', outcome: 'failed' }, deps as any);
 
-  const event = dispatched[0] as { kind: string; sessionPath: string; occurredAt: number };
+  const event = dispatched[0] as {
+    kind: string;
+    sessionPath: string;
+    reason?: string;
+    outcome: string;
+    occurredAt: number;
+  };
   assert.equal(event.kind, 'CompactionEnded');
   assert.equal(event.sessionPath, '/s');
+  assert.equal(event.reason, 'manual');
+  assert.equal(event.outcome, 'failed');
   assert.equal(typeof event.occurredAt, 'number');
   assert.equal('tokensBefore' in event, false);
   assert.equal('estimatedTokensAfter' in event, false);

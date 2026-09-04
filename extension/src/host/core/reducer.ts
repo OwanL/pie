@@ -40,6 +40,7 @@ import {
   handleSessionListChanged,
   handleSessionOpened,
   handleSessionNameDerived,
+  handleAgentSettled,
   handleBusyChanged,
   handleBusyCompleted,
   handleCompactionStarted,
@@ -55,6 +56,10 @@ import {
   handleSessionSummariesReplaced,
   handleSessionScopeCleared,
   handlePendingPathReplaced,
+  handleSendOperationDelayed,
+  handleSendOperationStatus,
+  handleMessageOperationDelayed,
+  handleMessageOperationStatus,
   handleCreateOperationDelayed,
   handleCreateOperationSucceeded,
   handleCreateOperationFailed,
@@ -82,7 +87,6 @@ import {
   handleExtensionUIRequest,
   handleError,
   handleNoticeShown,
-  handleEditTruncateRecoveryChanged,
   handlePendingExtensionUIRequestsCleared,
 } from './reducer/ui-handlers.js';
 import {
@@ -190,6 +194,10 @@ export function reducer(state: ArchState, event: Event): ReducerResult {
       return handleSessionOpened(state, event);
     }
 
+    case 'AgentSettled': {
+      return handleAgentSettled(state, event);
+    }
+
     case 'BusyChanged': {
       return handleBusyChanged(state, event);
     }
@@ -287,6 +295,18 @@ export function reducer(state: ArchState, event: Event): ReducerResult {
       return handlePendingPathReplaced(state, event);
     }
 
+    case 'SendOperationDelayed': {
+      return handleSendOperationDelayed(state, event);
+    }
+    case 'SendOperationStatus': {
+      return handleSendOperationStatus(state, event);
+    }
+    case 'MessageOperationDelayed': {
+      return handleMessageOperationDelayed(state, event);
+    }
+    case 'MessageOperationStatus': {
+      return handleMessageOperationStatus(state, event);
+    }
     case 'CreateOperationDelayed': {
       return handleCreateOperationDelayed(state, event);
     }
@@ -365,10 +385,6 @@ export function reducer(state: ArchState, event: Event): ReducerResult {
 
     case 'NoticeShown': {
       return handleNoticeShown(state, event);
-    }
-
-    case 'EditTruncateRecoveryChanged': {
-      return handleEditTruncateRecoveryChanged(state, event);
     }
 
     case 'McpServersUpdated': {

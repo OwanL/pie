@@ -10,6 +10,7 @@ import { findTestBash } from './test-shell.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const autoPruneUrl = pathToFileURL(path.resolve(__dirname, '../src/auto-prune.ts')).href;
 const opsUrl = pathToFileURL(path.resolve(__dirname, '../src/operations.ts')).href;
+const policyUrl = pathToFileURL(path.resolve(__dirname, '../../../shared/traversal-policy.ts')).href;
 
 type Rewrite = (command: string, opts: { gnuGrepProbe: () => boolean }) => string;
 
@@ -40,8 +41,20 @@ async function loadOps(): Promise<CreateOps> {
   return m.createWarmBashOperations as unknown as CreateOps;
 }
 
-const EXCLUDE_FLAGS =
-  '--exclude-dir=node_modules --exclude-dir=.git --exclude-dir=.venv --exclude-dir=dist --exclude-dir=build --exclude-dir=.next --exclude-dir=coverage --exclude-dir=.turbo --exclude-dir=.moon';
+type Policy = typeof import('../../../shared/traversal-policy.js');
+
+async function loadPolicy(): Promise<Policy> {
+  return await import(policyUrl) as Policy;
+}
+
+const EXCLUDE_FLAGS = (await loadPolicy()).grepExcludeFlags();
+const ALL_DIRS = (await loadPolicy()).PROTECTED_DIRECTORY_NAMES;
+/** Canonical exclude-dir flags excluding the given dirs (what a rewrite should ADD). */
+const MISSING_FLAGS = (...already: string[]) =>
+  ALL_DIRS.filter((d) => !already.includes(d)).map((d) => `--exclude-dir=${d}`).join(' ');
+const PRUNE_EXPR = (await loadPolicy()).findPruneExpression();
+/** Bare-root find rewrite prefix: wrap the canonical prune expression. */
+const PRUNE_WRAP = `\\( ${PRUNE_EXPR} \\) -prune -o`;
 const gnu = () => true;
 const noGnu = () => false;
 
@@ -82,18 +95,126 @@ describe('warm-bash auto-prune: grep rule', () => {
     assert.equal(rewrite('grep foo .', { gnuGrepProbe: gnu }), 'grep foo .');
   });
 
-  test('grep already carrying --exclude-dir=node_modules passes through', () => {
+  test('grep already excluding node_modules is COMPLETED with every missing canonical exclusion (no duplication)', () => {
+    // injection goes right after the program token, before the caller's existing flag
     assert.equal(
       rewrite('grep --exclude-dir=node_modules -rn foo .', { gnuGrepProbe: gnu }),
-      'grep --exclude-dir=node_modules -rn foo .',
+      `grep ${MISSING_FLAGS('node_modules')} --exclude-dir=node_modules -rn foo .`,
+    );
+    // node_modules must not be duplicated by the completion
+    assert.equal(
+      rewrite('grep --exclude-dir=node_modules -rn foo .', { gnuGrepProbe: gnu }).split('--exclude-dir=node_modules').length - 1,
+      1,
     );
     // space-separated form too
     assert.equal(
       rewrite('grep --exclude-dir node_modules -rn foo .', { gnuGrepProbe: gnu }),
-      'grep --exclude-dir node_modules -rn foo .',
+      `grep ${MISSING_FLAGS('node_modules')} --exclude-dir node_modules -rn foo .`,
     );
-    // a different --exclude-dir does NOT count as already-excluded (idempotent dup is harmless)
+  });
+
+  test('existing non-canonical exclude-dirs are never duplicated; only the missing set is added', () => {
+    const r = rewrite('grep --exclude-dir=dist --exclude-dir=.git -rn foo .', { gnuGrepProbe: gnu });
+    assert.ok(r.includes('--exclude-dir=node_modules'), 'missing canonical dirs are added');
+    for (const dir of ALL_DIRS) {
+      const flag = `--exclude-dir=${dir}`;
+      const count = r.split(/\s+/).filter((tok) => tok === flag).length;
+      assert.equal(count, 1, `${flag} must appear exactly once in: ${r}`);
+    }
+    // a different --exclude-dir does NOT count as already-excluded (node_modules is still added)
     assert.ok(rewrite('grep --exclude-dir=dist -rn foo .', { gnuGrepProbe: gnu }).includes('--exclude-dir=node_modules'));
+  });
+
+  test('grep already carrying EVERY canonical exclusion passes through byte-identical', () => {
+    const input = `grep ${ALL_DIRS.map((d) => `--exclude-dir=${d}`).join(' ')} -rn foo .`;
+    assert.strictEqual(rewrite(input, { gnuGrepProbe: gnu }), input);
+  });
+});
+
+describe('warm-bash auto-prune: canonical traversal policy (shared/traversal-policy.ts)', () => {
+  let rewrite: Rewrite;
+  test.before(async () => { rewrite = await loadRewrite(); });
+
+  test('recursive grep excludes every protected class (deps, build, caches, coverage, runtime, sessions, logs, packages, SDK temp)', () => {
+    for (const dir of ['node_modules', '.git', 'dist', 'build', 'out', 'coverage', '.cache', 'data', 'sessions', 'logs', '.venv', '.pie-sdk-*']) {
+      assert.ok(EXCLUDE_FLAGS.includes(`--exclude-dir=${dir}`), `missing --exclude-dir=${dir} in: ${EXCLUDE_FLAGS}`);
+    }
+  });
+
+  test('bare-root find prunes every protected class, not just node_modules/.git', () => {
+    for (const name of ['node_modules', '.git', 'data', 'sessions', 'logs', 'coverage']) {
+      assert.ok(PRUNE_EXPR.includes(`-name ${name}`), `missing -name ${name} in: ${PRUNE_EXPR}`);
+    }
+    // glob-class entries are quoted in the generated expression
+    assert.ok(PRUNE_EXPR.includes("-name '.pie-sdk-*'"), `missing quoted glob entry in: ${PRUNE_EXPR}`);
+  });
+
+  test('scoped opt-in: grep aimed at a protected path passes through unpruned', () => {
+    assert.equal(rewrite('grep -rn foo data', { gnuGrepProbe: gnu }), 'grep -rn foo data');
+    assert.equal(rewrite('grep -rn foo ./sessions/cache', { gnuGrepProbe: gnu }), 'grep -rn foo ./sessions/cache');
+    assert.equal(rewrite('grep -rn foo .pie-sdk-worktree', { gnuGrepProbe: gnu }), 'grep -rn foo .pie-sdk-worktree');
+    // ordinary source paths still rewrite
+    assert.ok(rewrite('grep -rn foo src', { gnuGrepProbe: gnu }).includes('--exclude-dir=node_modules'));
+    // a pattern that merely mentions a protected name does NOT block the rewrite
+    assert.ok(rewrite('grep -rn database .', { gnuGrepProbe: gnu }).includes('--exclude-dir=node_modules'));
+  });
+
+  test('find expressions referencing newly-protected dirs pass through (prune would hide results)', () => {
+    assert.equal(rewrite('find . -name data', { gnuGrepProbe: gnu }), 'find . -name data');
+    assert.equal(rewrite('find . -iname sessions', { gnuGrepProbe: gnu }), 'find . -iname sessions');
+    assert.equal(rewrite('find . -name .pie-sdk-x', { gnuGrepProbe: gnu }), 'find . -name .pie-sdk-x');
+  });
+});
+
+describe('warm-bash auto-prune: bare-root recursive ls fail-fast', () => {
+  let rewrite: Rewrite;
+  test.before(async () => { rewrite = await loadRewrite(); });
+
+  test('ls -R / ls --recursive / ls -laR rooted at . are rejected with an explanatory message + bounded exit', () => {
+    for (const cmd of ['ls -R', 'ls --recursive', 'ls -laR', 'ls -1Ra', 'ls -R .', 'ls -R ./', 'ls --recursive .']) {
+      const r = rewrite(cmd, { gnuGrepProbe: gnu });
+      assert.ok(r.startsWith('echo "pie warm-bash:'), `${cmd} → rejection, got: ${r}`);
+      assert.ok(r.endsWith('>&2; (exit 2)'), `${cmd} → bounded subshell exit, got: ${r}`);
+      assert.ok(r.includes('PIE_BASH_AUTO_PRUNE=0'), 'message names the opt-out');
+    }
+  });
+
+  test('exact / scoped inspection passes through unchanged', () => {
+    for (const cmd of ['ls', 'ls -la', 'ls -R src', 'ls -R src lib', 'ls -R node_modules', 'ls -R /tmp', 'ls -R ..', 'ls -R -- file']) {
+      assert.strictEqual(rewrite(cmd, { gnuGrepProbe: gnu }), cmd, cmd);
+    }
+  });
+
+  test('shell-meta segments pass through (conservative)', () => {
+    assert.strictEqual(rewrite('ls -R > out.txt', { gnuGrepProbe: gnu }), 'ls -R > out.txt');
+    assert.strictEqual(rewrite('ls -R . > out.txt', { gnuGrepProbe: gnu }), 'ls -R . > out.txt');
+    assert.strictEqual(rewrite('ls -R *', { gnuGrepProbe: gnu }), 'ls -R *');
+    assert.strictEqual(rewrite('ls -R $(pwd)', { gnuGrepProbe: gnu }), 'ls -R $(pwd)');
+  });
+
+  test('a leading VAR=val assignment prefix opts out (deliberate env override)', () => {
+    assert.strictEqual(
+      rewrite('PIE_BASH_AUTO_PRUNE=0 ls -R .', { gnuGrepProbe: gnu }),
+      'PIE_BASH_AUTO_PRUNE=0 ls -R .',
+    );
+  });
+
+  test('rejected ls inside a compound command leaves other segments byte-identical', () => {
+    const r = rewrite('echo hi && ls -R', { gnuGrepProbe: gnu });
+    assert.ok(r.startsWith('echo hi && echo "pie warm-bash:'), `got: ${r}`);
+    assert.ok(r.endsWith('>&2; (exit 2)'), `got: ${r}`);
+  });
+
+  test('rewritten rejection fails fast under real bash (exit 2, message on stderr, no traversal)', () => {
+    const BASH = findTestBash();
+    const r = spawnSync(
+      BASH,
+      ['-c', rewrite('ls -R', { gnuGrepProbe: gnu })],
+      { encoding: 'utf8', cwd: os.tmpdir(), windowsHide: true },
+    );
+    assert.equal(r.status, 2);
+    assert.ok((r.stderr ?? '').includes('pie warm-bash:'), `stderr: ${r.stderr}`);
+    assert.equal(r.stdout ?? '', '');
   });
 });
 
@@ -121,39 +242,39 @@ describe('warm-bash auto-prune: find rule', () => {
   test('bare-path find wraps expr in prune + -print', () => {
     assert.equal(
       rewrite('find . -name \'*.ts\'', { gnuGrepProbe: gnu }),
-      'find . \\( -name node_modules -o -name .git \\) -prune -o \\( -name \'*.ts\' \\) -print',
+      `find . ${PRUNE_WRAP} \\( -name '*.ts' \\) -print`,
     );
   });
 
   test('no-path find defaults to .', () => {
     assert.equal(
       rewrite('find -name \'*.ts\'', { gnuGrepProbe: gnu }),
-      'find . \\( -name node_modules -o -name .git \\) -prune -o \\( -name \'*.ts\' \\) -print',
+      `find . ${PRUNE_WRAP} \\( -name '*.ts' \\) -print`,
     );
   });
 
   test('find with no expression appends -print only', () => {
     assert.equal(
       rewrite('find .', { gnuGrepProbe: gnu }),
-      'find . \\( -name node_modules -o -name .git \\) -prune -o -print',
+      `find . ${PRUNE_WRAP} -print`,
     );
     assert.equal(
       rewrite('find', { gnuGrepProbe: gnu }),
-      'find . \\( -name node_modules -o -name .git \\) -prune -o -print',
+      `find . ${PRUNE_WRAP} -print`,
     );
   });
 
   test('multi-primary expression preserved verbatim', () => {
     assert.equal(
       rewrite('find . -name \'*.ts\' -type f', { gnuGrepProbe: gnu }),
-      'find . \\( -name node_modules -o -name .git \\) -prune -o \\( -name \'*.ts\' -type f \\) -print',
+      `find . ${PRUNE_WRAP} \\( -name '*.ts' -type f \\) -print`,
     );
   });
 
   test('user OR-chain (-o) is wrapped in \\( … \\) to preserve precedence', () => {
     assert.equal(
       rewrite("find . -name '*.ts' -o -name '*.js'", { gnuGrepProbe: gnu }),
-      'find . \\( -name node_modules -o -name .git \\) -prune -o \\( -name \'*.ts\' -o -name \'*.js\' \\) -print',
+      `find . ${PRUNE_WRAP} \\( -name '*.ts' -o -name '*.js' \\) -print`,
     );
   });
 
@@ -171,7 +292,7 @@ describe('warm-bash auto-prune: find rule', () => {
   test('negation (!) and -not are preserved inside the wrapped expression', () => {
     assert.equal(
       rewrite("find . ! -name '*.ts'", { gnuGrepProbe: gnu }),
-      'find . \\( -name node_modules -o -name .git \\) -prune -o \\( ! -name \'*.ts\' \\) -print',
+      `find . ${PRUNE_WRAP} \\( ! -name '*.ts' \\) -print`,
     );
   });
 
@@ -334,9 +455,9 @@ describe('warm-bash auto-prune: segment battery', () => {
     assert.equal(r, `cd ext && grep ${EXCLUDE_FLAGS} -rn foo .`);
   });
 
-  test('rg / ls -R / xargs grep pass through (not grep/find programs)', () => {
+  test('rg / non-recursive ls / xargs grep pass through (not grep/find/ls-R programs)', () => {
     assert.equal(rewrite('rg -n foo .', { gnuGrepProbe: gnu }), 'rg -n foo .');
-    assert.equal(rewrite('ls -R', { gnuGrepProbe: gnu }), 'ls -R');
+    assert.equal(rewrite('ls -la', { gnuGrepProbe: gnu }), 'ls -la');
     assert.equal(rewrite('xargs grep -rn foo', { gnuGrepProbe: gnu }), 'xargs grep -rn foo');
   });
 
@@ -437,7 +558,7 @@ describe('warm-bash auto-prune: splitter & edge-case robustness', () => {
 
   test('many segments: each grep/find segment rewritten independently', () => {
     const r = rewrite('grep -rn a . ; find . -name \'*.ts\' ; echo done ; grep -rn b .', { gnuGrepProbe: gnu });
-    assert.equal(r, `grep ${EXCLUDE_FLAGS} -rn a . ; find . \\( -name node_modules -o -name .git \\) -prune -o \\( -name \'*.ts\' \\) -print ; echo done ; grep ${EXCLUDE_FLAGS} -rn b .`);
+    assert.equal(r, `grep ${EXCLUDE_FLAGS} -rn a . ; find . ${PRUNE_WRAP} \\( -name \'*.ts\' \\) -print ; echo done ; grep ${EXCLUDE_FLAGS} -rn b .`);
   });
 
   test('command with only separators / whitespace returns the same reference', () => {

@@ -15,11 +15,11 @@ import {
 } from '../../../src/shared/protocol';
 
 const baseViewState: ViewState = {
-  sessions: [], openTabPaths: [], pinnedTabPaths: [], pinnedTabGroups: [], runningSessionPaths: [], generatingTitleSessionPaths: [], startingModelSessionPaths: [], compactingSessionPaths: [], lastCompactionBySession: {}, unreadFinishedSessionPaths: [],
+  sessions: [], openTabPaths: [], pinnedTabPaths: [], pinnedTabGroups: [], runningSessionPaths: [], sessionCapabilitiesBySession: {}, generatingTitleSessionPaths: [], startingModelSessionPaths: [], compactingSessionPaths: [], lastCompactionBySession: {}, unreadFinishedSessionPaths: [],
   activeSession: null, transcript: [],
   transcriptWindow: { totalCount: 0, loadedStart: 0, loadedEnd: 0, hasOlder: false, hasNewer: false, isPartial: false, hasUserMessages: false },
   transcriptLoaded: false, pendingComposerInputs: [], activeRunSummary: null, runSummariesBySession: {}, tokenRateBySession: {},
-  aggregateStats: EMPTY_AGGREGATE_STATS, deferredTriggers: [], draftText: '', busy: false, retryStatus: null, liveTurnPhase: null, notice: null,
+  workingTimeBySession: {}, aggregateStats: EMPTY_AGGREGATE_STATS, deferredTriggers: [], draftText: '', busy: false, retryStatus: null, liveTurnPhase: null, notice: null,
   backendReady: true, workspaceCwd: '/workspace', systemPrompts: [], modelSettings: null, availableModels: [],
   availableModelsStatus: 'authoritative', contextUsage: null, initialContextEstimate: null,
   prefs: DEFAULT_CHAT_PREFS, mcpServers: [], mcpPendingApply: false, mcpSessionServers: [], mcpSessionPendingApply: false, availableExtensions: [], fileChanges: [], fileChangesExpanded: false, readFilePaths: [], pruningResult: null,

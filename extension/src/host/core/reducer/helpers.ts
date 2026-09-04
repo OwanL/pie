@@ -14,6 +14,10 @@ import { TRANSCRIPT_WINDOW_BUDGETS } from '../../../shared/transcript-window.js'
 import type { Effect } from '../effects.js';
 import { cleanPinnedTabGroups } from '../../../shared/tab-behavior.js';
 import { startNextDeferredSetModel } from './set-model-handlers.js';
+import {
+  clearRetiredInterruptEventFence,
+  settleSessionOperationSucceeded,
+} from '../operation-registry.js';
 
 // Re-export from arch-state for downstream consumers
 export type { ArchState, PendingOp, CurrentTurn } from '../arch-state.js';
@@ -41,6 +45,7 @@ export function resolveAlias(state: ArchState, id: string): string {
 export interface PendingTurnOwner {
   corrId: string;
   source: 'ops' | 'promoted';
+  operationId?: string;
 }
 
 /** Commit an optimistic send from any authoritative turn boundary.
@@ -54,8 +59,9 @@ export function commitPromotedSend(
   sessionPath: string,
   requestId: string,
   canonicalMessageId: string,
+  operationId?: string,
 ): ReducerResult {
-  const turnOwner = findPendingTurnOwner(state, sessionPath, requestId);
+  const turnOwner = findPendingTurnOwner(state, sessionPath, requestId, true, operationId);
   const currentTurnBySession = {
     ...state.pending.currentTurnBySession,
     [sessionPath]: { requestId, firstMessageId: canonicalMessageId },
@@ -68,10 +74,22 @@ export function commitPromotedSend(
   else if (turnOwner) delete ops[turnOwner.corrId];
   const prepassBySession = { ...state.pending.prepassBySession };
   delete prepassBySession[sessionPath];
+  const operations = { ...state.operations };
+  const stableOperationId = operationId ?? turnOwner?.operationId;
+  const operation = stableOperationId ? operations[stableOperationId] : undefined;
+  if (operation?.kind === 'message.send' || operation?.kind === 'message.edit' || operation?.kind === 'message.continue') {
+    const settled = settleSessionOperationSucceeded(operation, {
+      pendingPath: operation.session.pendingPath,
+      resolvedPath: sessionPath,
+      backendGeneration: operation.backendGeneration,
+    });
+    if (settled) operations[stableOperationId!] = settled;
+  }
 
   return {
     state: {
       ...state,
+      operations,
       pending: {
         ...state.pending,
         currentTurnBySession,
@@ -98,16 +116,29 @@ export function findPendingTurnOwner(
   state: ArchState,
   sessionPath: string,
   requestId: string,
+  allowSessionFifoFallback = true,
+  operationId?: string,
 ): PendingTurnOwner | undefined {
   for (const [corrId, operation] of Object.entries(state.pending.promoted)) {
-    if (operation.requestId === requestId) return { corrId, source: 'promoted' };
+    if ((operationId && operation.operationId === operationId) || operation.requestId === requestId) {
+      return { corrId, source: 'promoted', operationId: operation.operationId };
+    }
+  }
+  if (operationId) {
+    for (const [corrId, operation] of Object.entries(state.pending.ops)) {
+      if (operation.operationId === operationId) {
+        return { corrId, source: 'ops', operationId };
+      }
+    }
   }
   // A terminal duplicate for an already-started turn must not consume a newer
-  // operation that happens to be pending on the same session.
-  if (state.pending.currentTurnBySession[sessionPath]?.requestId === requestId) return undefined;
+  // operation that happens to be pending on the same session. Explicit typed
+  // pre-start settlements also have complete request identity and never borrow
+  // FIFO ownership from a later mutation.
+  if (!allowSessionFifoFallback || state.pending.currentTurnBySession[sessionPath]?.requestId === requestId) return undefined;
   for (const [corrId, operation] of Object.entries(state.pending.ops)) {
     if (operation.sessionPath === sessionPath && !operation.queued) {
-      return { corrId, source: 'ops' };
+      return { corrId, source: 'ops', operationId: operation.operationId };
     }
   }
   return undefined;
@@ -271,7 +302,6 @@ export function evictSession(
   const { [sp]: _ed, ...remainingEditingDrafts } = state.transcript.editingDraftBySession;
   const { [sp]: _deferred, ...remainingDeferredWindowReplacements } = state.transcript.deferredWindowReplacementBySession;
   const { [sp]: _pf, ...remainingPagingInFlight } = state.transcript.pagingInFlightBySession;
-  const { [sp]: _i, ...remainingInterrupts } = state.sessions.interruptInFlightBySession;
   const { [sp]: _title, ...remainingTitleGeneration } = state.sessions.titleGenerationBySession;
   const { [sp]: _rtry, ...remainingRetryStatus } = state.sessions.retryStatusBySession;
   const { [sp]: _a, ...remainingAnalytics } = state.sessions.analyticsFactorsBySession;
@@ -349,16 +379,15 @@ export function evictSession(
   const nextRunningPaths = removeSummary
     ? removeFromArray(state.sessions.runningSessionPaths, sp)
     : state.sessions.runningSessionPaths;
+  const nextCapabilitiesBySession = removeSummary
+    ? Object.fromEntries(Object.entries(state.sessions.capabilitiesBySession).filter(([path]) => path !== sp))
+    : state.sessions.capabilitiesBySession;
   const nextCompactingPaths = removeSummary
     ? removeFromArray(state.sessions.compactingSessionPaths, sp)
     : state.sessions.compactingSessionPaths;
   const nextIntentionallyHiddenRunningPaths = removeSummary
     ? removeFromArray(state.sessions.intentionallyHiddenRunningPaths, sp)
     : state.sessions.intentionallyHiddenRunningPaths;
-  const nextInterruptSettledSessionPaths = removeFromArray(
-    state.sessions.interruptSettledSessionPaths,
-    sp,
-  );
   const { [sp]: _lastCompaction, ...remainingLastCompaction } = state.sessions.lastCompactionBySession;
 
   // ── Tab arrays (removeTabs: close the tab) ──
@@ -393,6 +422,7 @@ export function evictSession(
 
   const evictedState: ArchState = {
       ...state,
+      operations: clearRetiredInterruptEventFence(state.operations, sp),
       transcript: {
         ...state.transcript,
         bySession: remainingTranscripts,
@@ -411,15 +441,14 @@ export function evictSession(
         pinnedTabPaths: nextPinnedPaths,
         pinnedTabGroups: nextPinnedGroups,
         runningSessionPaths: nextRunningPaths,
+        capabilitiesBySession: nextCapabilitiesBySession,
         compactingSessionPaths: nextCompactingPaths,
         lastCompactionBySession: remainingLastCompaction,
         intentionallyHiddenRunningPaths: nextIntentionallyHiddenRunningPaths,
-        interruptSettledSessionPaths: nextInterruptSettledSessionPaths,
         unreadFinishedSessionPaths: nextUnreadPaths,
         activeSessionPath: nextActivePath,
         analyticsFactorsBySession: remainingAnalytics,
         privacyModeBySession: remainingPrivacyModes,
-        interruptInFlightBySession: remainingInterrupts,
         titleGenerationBySession: remainingTitleGeneration,
         retryStatusBySession: remainingRetryStatus,
       },

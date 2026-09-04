@@ -5,6 +5,7 @@ import { h } from 'preact';
 import renderToString from 'preact-render-to-string';
 
 import { EMPTY_AGGREGATE_STATS } from '../../../src/shared/protocol';
+import { DeferredTriggersMenu } from '../../../src/webview/panel/aggregate-stats-strip/deferred-triggers-menu';
 import {
   AggregateStatsStrip,
   ProviderLegend,
@@ -13,6 +14,41 @@ import {
   userInputTooltipNode,
   workTooltipNode,
 } from '../../../src/webview/panel/aggregate-stats-strip';
+
+test('deferred trigger menu exposes safe crash recovery separately from ambiguous delivery', () => {
+  const common = {
+    sessionPath: '/workspace/session.jsonl',
+    triggers: [{ kind: 'timer' as const, ms: 1000 }],
+    note: 'resume work',
+    registeredAt: '2026-09-03T10:00:00.000Z',
+  };
+  const html = renderToString(h(DeferredTriggersMenu, {
+    triggers: [
+      {
+        ...common,
+        id: 'recovered',
+        deliveryState: 'retryable' as const,
+        recoveryState: 'dead-owner-recovered' as const,
+        deliveryDetail: 'claim owner exited before dispatch; delivery recovered and is retryable',
+      },
+      {
+        ...common,
+        id: 'ambiguous',
+        deliveryState: 'claimed' as const,
+        recoveryState: 'acknowledgement-ambiguous' as const,
+        deliveryDetail: 'delivery may have started; awaiting acknowledgement and automatic retry is blocked',
+      },
+    ],
+    sessionByPath: new Map(),
+    x: 0,
+    y: 0,
+    onCancel: () => undefined,
+    onClose: () => undefined,
+  }));
+
+  assert.match(html, /owner exited before dispatch; delivery recovered and is retryable/);
+  assert.match(html, /delivery may have started; awaiting acknowledgement and automatic retry is blocked/);
+});
 
 function renderRate(
   runningSessionCount: number,

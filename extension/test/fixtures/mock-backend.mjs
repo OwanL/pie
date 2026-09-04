@@ -17,7 +17,9 @@ import * as readline from 'node:readline';
 const SESSION_PATH = '/mock/sessions/test-session.jsonl';
 const SESSION_NAME = 'Test Session';
 const CWD = '/mock';
-const PROTOCOL_VERSION = 14;
+const PROTOCOL_VERSION = 15;
+const IDLE_CAPABILITIES = { billableActivity: false, canContinue: false, canInterrupt: false, canCompact: true };
+const BUSY_CAPABILITIES = { billableActivity: true, canContinue: false, canInterrupt: true, canCompact: false };
 const HANDSHAKE = {
   sdkPath: '/mock/sdk',
   agentDir: '/mock/agent',
@@ -106,6 +108,7 @@ rl.on('line', (line) => {
           hasUserMessages: false,
         },
         busy: false,
+        capabilities: IDLE_CAPABILITIES,
         systemPrompts: [
           {
             source: 'provider',
@@ -178,7 +181,7 @@ rl.on('line', (line) => {
 
       // Busy on
       seq += 1;
-      emit('busy.changed', { sessionPath, busy: true, seq });
+      emit('busy.changed', { sessionPath, busy: true, capabilities: BUSY_CAPABILITIES, seq });
       emit('contextUsage.changed', {
         sessionPath,
         contextUsage: {
@@ -258,7 +261,7 @@ rl.on('line', (line) => {
 
                   // Busy off
                   seq += 1;
-                  emit('busy.changed', { sessionPath, busy: false, seq });
+                  emit('busy.changed', { sessionPath, busy: false, capabilities: IDLE_CAPABILITIES, seq });
                 }, 10);
               }, 10);
             }, 10);
@@ -279,7 +282,7 @@ rl.on('line', (line) => {
           percent: 32.4,
         },
       });
-      emit('busy.changed', { sessionPath: params?.sessionPath ?? SESSION_PATH, busy: false, seq });
+      emit('busy.changed', { sessionPath: params?.sessionPath ?? SESSION_PATH, busy: false, capabilities: IDLE_CAPABILITIES, seq });
       break;
 
     case 'test.shutdown':

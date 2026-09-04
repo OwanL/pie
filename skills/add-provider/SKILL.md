@@ -1,6 +1,6 @@
 ---
 name: add-provider
-description: Add or update an LLM provider in pie's centralized model catalog (`models.yaml`), including secure auth references, model metadata, host-side concurrency, generated config, and verification. Use when the user asks to register a direct API provider, custom OpenAI-compatible endpoint, local model server, or new models for an existing provider.
+description: Use when the user asks to register a direct API provider, custom OpenAI-compatible endpoint, local model server, or new models for an existing provider.
 ---
 
 # Add a Provider

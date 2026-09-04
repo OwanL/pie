@@ -104,10 +104,10 @@ test('DuplicateSession timeout retry keeps one operation identity and the pendin
     kind: 'CreateOperationDelayed', operationId, pendingPath: PENDING,
     selectionToken: 'duplicate-token', notice: 'still duplicating', ownsSelection: true,
   });
-  assert.equal(delayed.state.pending.createOperations[operationId]?.status, 'delayed-awaiting-outcome');
+  assert.equal(delayed.state.operations[operationId]?.phase, 'ambiguous');
   assert.equal(delayed.state.sessions.openTabPaths.includes(PENDING), true);
   const retried = reducer(delayed.state, createCmd('duplicate-2', { operationId, selectionToken: 'duplicate-token' }));
-  assert.equal(retried.state.pending.createOperations[operationId]?.status, 'pending');
+  assert.equal(retried.state.operations[operationId]?.phase, 'awaiting-acceptance');
   const effect = retried.effects.find((item) => item.kind === 'DuplicateSession');
   assert.equal(effect?.kind, 'DuplicateSession');
   if (effect?.kind === 'DuplicateSession') {

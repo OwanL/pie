@@ -175,12 +175,14 @@ instead of the home file.
 ## Verification harness
 
 `../local_utils/mcp-smoke/` (workspace root, not a repo) contains a
-dependency-free echo MCP server + `.mcp.json`. Headless end-to-end check:
+dependency-free echo MCP server + `.mcp.json`. From the pie repository root,
+run this headless end-to-end check:
 
 ```bash
-cd local_utils/mcp-smoke
-PI_CODING_AGENT_DIR=C:/Users/OwanLazic/Documents/GitHub/pie \
-  node <pie>/extension/node_modules/@earendil-works/pi-coding-agent/dist/cli.js \
+PIE_REPO="$(node -p "require('node:path').resolve('.')")"
+cd ../local_utils/mcp-smoke
+PI_CODING_AGENT_DIR="$PIE_REPO" \
+  node "$PIE_REPO/extension/node_modules/@earendil-works/pi-coding-agent/dist/cli.js" \
   -p "Use the mcp tool: search for a tool containing 'echo', call it with 'mcp works', report the result."
 ```
 

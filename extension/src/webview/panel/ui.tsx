@@ -23,11 +23,13 @@ import type {
   ProviderGateStats,
   RetryStatus,
   SessionUsageSnapshot,
+  SessionCapabilities,
   SystemPromptEntry,
   ThinkingLevel,
   ToolResultPruningSettings,
   TranscriptWindow,
   WebviewToHostMessage,
+  WorkingTimeState,
 } from '../../shared/protocol';
 import type { TokenRateIndicatorState } from '../../shared/token-rate';
 import { describeComposerInputSummary } from './composer/inputs';
@@ -48,6 +50,7 @@ export { AggregateStatsStrip } from './aggregate-stats-strip';
 
 interface ComposerProps {
   busy: boolean;
+  capabilities?: SessionCapabilities;
   /** Brief E: optimistic one-frame "stopping…" mirror of an in-flight
    *  interrupt (the host clears `busy` only after the abort round-trip). */
   interrupting?: boolean;
@@ -85,6 +88,7 @@ interface ComposerProps {
   pendingComposerInputs: ComposerInput[];
   activeRunSummary?: ActiveRunSummary | null;
   tokenRateBySession: Record<string, TokenRateIndicatorState>;
+  workingTimeBySession: Record<string, WorkingTimeState>;
   /** True while the active session runs a history-compaction LLM call. */
   compacting: boolean;
   /** Most recent completed compaction for the active session (transient chip). */
@@ -127,6 +131,7 @@ interface ComposerProps {
 
 function ComposerView({
   busy,
+  capabilities,
   interrupting,
   commandsAvailable = true,
   retryStatus,
@@ -157,6 +162,7 @@ function ComposerView({
   pendingComposerInputs,
   activeRunSummary,
   tokenRateBySession,
+  workingTimeBySession,
   compacting,
   lastCompaction,
   focusTrigger,
@@ -195,6 +201,7 @@ function ComposerView({
     contextIndicator,
     sessionCostIndicator,
     tokenRateIndicator,
+    workingTimeIndicator,
   } = useComposerIndicators({
     activeModelId,
     activeProvider,
@@ -211,25 +218,20 @@ function ComposerView({
     busy,
     sessionPath,
     tokenRateBySession,
+    workingTimeBySession,
   });
 
-  const canContinueInterrupted = useMemo(() => {
-    if (busy) return false;
-    for (let index = transcript.length - 1; index >= 0; index -= 1) {
-      const message = transcript[index];
-      // A delivered user tail means interruption won before the provider
-      // produced an assistant message. Likewise, a final rendered assistant
-      // with tool calls represents a durable tool-result boundary because Pie
-      // folds tool-result rows into their owning assistant. Both can resume
-      // with the backend's zero-prompt continuation path.
-      if (message.role === 'user') return message.status !== 'queued';
-      if (message.role === 'assistant') {
-        return message.status === 'interrupted'
-          || message.parts?.at(-1)?.kind === 'toolCall';
-      }
-    }
-    return false;
-  }, [busy, transcript]);
+  // The backend classifies the complete SDK context. A bounded renderer
+  // transcript is never continuation authority.
+  const canContinueInterrupted = capabilities?.canContinue === true;
+  const primaryOperation = capabilities?.primaryOperation;
+  const executionBusy = capabilities?.billableActivity ?? busy;
+  const canInterrupt = capabilities?.canInterrupt ?? busy;
+  const editOperationActive = primaryOperation?.kind === 'message.edit';
+  const operationBlocksSend = primaryOperation !== undefined
+    && (primaryOperation.kind === 'message.edit'
+      || primaryOperation.kind === 'message.interrupt'
+      || primaryOperation.recovery !== null);
 
   const {
     text,
@@ -244,8 +246,8 @@ function ComposerView({
     applyComposerTransfer,
     submitting,
   } = useComposerInput({
-    busy,
-    sendBlocked: interrupting || !commandsAvailable,
+    busy: executionBusy,
+    sendBlocked: interrupting || !commandsAvailable || operationBlocksSend,
     allowEmptySend: canContinueInterrupted,
     onSend,
     onRetrySend,
@@ -307,6 +309,17 @@ function ComposerView({
     () => getComposerRunControls(activeRunSummary ?? null),
     [activeRunSummary],
   );
+  const operationRunStatus = editOperationActive
+    ? {
+        text: primaryOperation.committed ? 'Restarting…' : 'Saving edit…',
+        tone: 'accent',
+        title: primaryOperation.recovery
+          ? 'The edit outcome is being reconciled with the backend. Do not submit it again.'
+          : primaryOperation.committed
+            ? 'The conversation was updated. Pie is starting the replacement response.'
+            : 'Pie is saving the edit before restarting the conversation.',
+      }
+    : null;
   // Steering (FollowUp): any optimistic 'queued' user messages (sent while a
   // turn was running) show a "Clear queued" affordance in the composer actions.
   const hasQueuedMessages = useMemo(
@@ -319,15 +332,16 @@ function ComposerView({
     }
   }, [sessionPath, postMessage]);
   const onCompact = useCallback(() => {
-    if (sessionPath && !busy) {
+    if (sessionPath && capabilities?.canCompact === true) {
       postMessage({ type: 'compact', sessionPath });
     }
-  }, [sessionPath, busy, postMessage]);
+  }, [sessionPath, capabilities?.canCompact, postMessage]);
 
   const continueMode = canContinueInterrupted
     && text.trim().length === 0
     && pendingComposerInputs.length === 0;
   const canSend = commandsAvailable
+    && !operationBlocksSend
     && (text.trim().length > 0 || pendingComposerInputs.length > 0 || continueMode)
     && !submitting.current;
   const attachmentSummary = useMemo(
@@ -395,7 +409,7 @@ function ComposerView({
         <div class="composer-bottom-bar">
           <ComposerToolbar
             sessionPath={sessionPath}
-            busy={busy}
+            canCompact={capabilities?.canCompact === true}
             commandsAvailable={commandsAvailable}
             prefs={prefs}
             pruningSettings={pruningSettings}
@@ -431,14 +445,16 @@ function ComposerView({
             contextBreakdown={contextBreakdown}
             sessionCostIndicator={sessionCostIndicator}
             tokenRateIndicator={tokenRateIndicator}
-            runStatus={runControls.status}
+            workingTimeIndicator={workingTimeIndicator}
+            runStatus={operationRunStatus ?? runControls.status}
             compacting={compacting}
             lastCompaction={lastCompaction}
             onModelChange={onModelChange}
             onCompact={onCompact}
           />
           <ComposerActions
-            busy={busy}
+            busy={executionBusy}
+            canInterrupt={canInterrupt}
             interrupting={interrupting}
             commandsAvailable={commandsAvailable}
             hasQueuedMessages={hasQueuedMessages}

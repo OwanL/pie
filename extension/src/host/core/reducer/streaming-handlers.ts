@@ -16,9 +16,16 @@ import {
   withIncrementedWindowCounts,
 } from '../transcript-window.js';
 import type { ReducerResult } from './helpers.js';
-import { findPendingTurnOwner, resolveAlias, enforceLoadedWindowBudget, startSessionTitleGeneration } from './helpers.js';
+import { findPendingTurnOwner, resolveAlias, enforceLoadedWindowBudget, removeMessage, startSessionTitleGeneration } from './helpers.js';
 import type { Event, BackendEvent } from '../events.js';
 import type { Effect } from '../effects.js';
+import {
+  activeInterruptOperation,
+  hasRetiredInterruptEventFence,
+  settleSessionOperationCancelled,
+  settleSessionOperationFailed,
+  settleSessionOperationSucceeded,
+} from '../operation-registry.js';
 
 export function handleMessageStarted(state: ArchState, event: Extract<Event, { kind: 'MessageStarted' }>): ReducerResult {
   // Atomic live-pipeline cutover: the sequenced turn.started event owns active
@@ -42,7 +49,7 @@ export function handleMessageStarted(state: ArchState, event: Extract<Event, { k
   // MessageStarted, so the scan is skipped for them.)
   const effects: Effect[] = [];
   const turnOwner = !isAlias && requestId
-    ? findPendingTurnOwner(state, sessionPath, requestId)
+    ? findPendingTurnOwner(state, sessionPath, requestId, true, event.operationId)
     : undefined;
   if (turnOwner) effects.push({ kind: 'ClearSendTimer', corrId: turnOwner.corrId });
 
@@ -77,6 +84,18 @@ export function handleMessageStarted(state: ArchState, event: Extract<Event, { k
         // a later in-turn failure is surfaced by the error mapper, never a
         // rollback.
         delete draft.pending.prepassBySession[sessionPath];
+      }
+    }
+
+    if (event.operationId) {
+      const operation = draft.operations[event.operationId];
+      if ((operation?.kind === 'message.send' || operation?.kind === 'message.edit' || operation?.kind === 'message.continue') && !operation.terminal) {
+        const settled = settleSessionOperationSucceeded(operation, {
+          pendingPath: operation.session.pendingPath,
+          resolvedPath: sessionPath,
+          backendGeneration: operation.backendGeneration,
+        });
+        if (settled) draft.operations[event.operationId] = settled;
       }
     }
 
@@ -142,13 +161,11 @@ export function handleMessageStarted(state: ArchState, event: Extract<Event, { k
 
 export function handleMessageDelta(state: ArchState, event: Extract<Event, { kind: 'MessageDelta' }>): ReducerResult {
   if (state.livePipeline.turnsBySession[event.sessionPath]) return { state, effects: [] };
-  // Defense-in-depth: while a user-initiated Stop's abort is in flight
-  // (`interruptInFlightBySession`), drop late deltas as a pure no-op. The
-  // optimistic `interrupted` mark on streaming messages (handleInterrupt)
-  // already gates appending via `status !== 'interrupted'`; this catches the
-  // race where a stray `MessageStarted` created a fresh `streaming` message
-  // after the optimistic mark so its content does not grow during the window.
-  if (state.sessions.interruptInFlightBySession[event.sessionPath]) {
+  // Defense-in-depth: while a reducer-owned Stop operation is in flight,
+  // drop late deltas as a pure no-op. The optimistic `interrupted` mark on
+  // streaming messages (handleInterrupt) already gates appending via
+  // `status !== 'interrupted'`; this catches a stray post-Stop MessageStarted.
+  if (activeInterruptOperation(state.operations, event.sessionPath)) {
     return { state, effects: [] };
   }
   const messageId = resolveAlias(state, event.messageId);
@@ -176,7 +193,7 @@ export function handleMessageThinking(state: ArchState, event: Extract<Event, { 
   if (state.livePipeline.turnsBySession[event.sessionPath]) return { state, effects: [] };
   // Defense-in-depth: mirror handleMessageDelta's in-flight-abort gate so
   // late thinking deltas are dropped while a Stop's abort is settling.
-  if (state.sessions.interruptInFlightBySession[event.sessionPath]) {
+  if (activeInterruptOperation(state.operations, event.sessionPath)) {
     return { state, effects: [] };
   }
   const messageId = resolveAlias(state, event.messageId);
@@ -231,7 +248,7 @@ export function handleMessageFinished(state: ArchState, event: Extract<Event, { 
   // model-start timer cannot report a second, stale timeout later.
   const requestId = event.requestId;
   const turnOwner = requestId
-    ? findPendingTurnOwner(state, event.sessionPath, requestId)
+    ? findPendingTurnOwner(state, event.sessionPath, requestId, true, event.operationId)
     : undefined;
   const effects: Effect[] = turnOwner
     ? [{ kind: 'ClearSendTimer', corrId: turnOwner.corrId }]
@@ -243,6 +260,17 @@ export function handleMessageFinished(state: ArchState, event: Extract<Event, { 
       else delete draft.pending.ops[turnOwner.corrId];
       if (requestId) delete draft.pending.requestIdToLocalId[requestId];
       delete draft.pending.prepassBySession[event.sessionPath];
+    }
+    if (event.operationId) {
+      const operation = draft.operations[event.operationId];
+      if ((operation?.kind === 'message.send' || operation?.kind === 'message.edit' || operation?.kind === 'message.continue') && !operation.terminal) {
+        const settled = settleSessionOperationSucceeded(operation, {
+          pendingPath: operation.session.pendingPath,
+          resolvedPath: event.sessionPath,
+          backendGeneration: operation.backendGeneration,
+        });
+        if (settled) draft.operations[event.operationId] = settled;
+      }
     }
     const list = draft.transcript.bySession[event.sessionPath] ??= [];
 
@@ -308,7 +336,7 @@ export function handleMessageFinished(state: ArchState, event: Extract<Event, { 
 export function handleMessageAborted(state: ArchState, event: Extract<Event, { kind: 'MessageAborted' }>): ReducerResult {
   const { sessionPath, messageId, requestId } = event;
   const turnOwner = requestId
-    ? findPendingTurnOwner(state, sessionPath, requestId)
+    ? findPendingTurnOwner(state, sessionPath, requestId, event.outcome === undefined, event.operationId)
     : undefined;
   const effects: Effect[] = turnOwner
     ? [{ kind: 'ClearSendTimer', corrId: turnOwner.corrId }]
@@ -321,6 +349,50 @@ export function handleMessageAborted(state: ArchState, event: Extract<Event, { k
       else delete draft.pending.ops[turnOwner.corrId];
       if (requestId) delete draft.pending.requestIdToLocalId[requestId];
       delete draft.pending.prepassBySession[sessionPath];
+    }
+    if (event.localId) {
+      removeMessage(draft, sessionPath, event.localId);
+    }
+    if (event.operationId) {
+      const operation = draft.operations[event.operationId];
+      if ((operation?.kind === 'message.send' || operation?.kind === 'message.edit' || operation?.kind === 'message.continue') && !operation.terminal) {
+        const settled = messageId
+          ? settleSessionOperationSucceeded(operation, {
+              pendingPath: operation.session.pendingPath,
+              resolvedPath: sessionPath,
+              backendGeneration: operation.backendGeneration,
+            })
+          // An abort carrying an edit operation ID came from the replacement
+          // worker, which is promoted only after the atomic truncate. Even if
+          // this event outruns the coordinator acknowledgement, it is
+          // post-commit terminal evidence and must not claim rollback safety.
+          : operation.kind === 'message.edit'
+            ? settleSessionOperationFailed(operation, {
+                pendingPath: operation.session.pendingPath,
+                backendGeneration: operation.backendGeneration,
+                reason: 'execution-failed',
+                detail: event.reason,
+                committed: true,
+                preserveCommit: true,
+              })
+            : event.outcome === 'cancelled' || event.outcome === 'superseded'
+              ? settleSessionOperationCancelled(operation, {
+                  pendingPath: operation.session.pendingPath,
+                  backendGeneration: operation.backendGeneration,
+                  outcome: event.outcome,
+                  reason: event.outcome === 'superseded'
+                    ? 'superseded-before-commit'
+                    : 'interrupted-before-commit',
+                  detail: event.reason,
+                })
+              : settleSessionOperationFailed(operation, {
+                  pendingPath: operation.session.pendingPath,
+                  backendGeneration: operation.backendGeneration,
+                  reason: 'definitive-rejection',
+                  detail: event.reason,
+                });
+        if (settled) draft.operations[event.operationId] = settled;
+      }
     }
     if (!canonicalId) return;
     const message = draft.transcript.bySession[sessionPath]?.find(
@@ -339,6 +411,21 @@ export function handleMessageAborted(state: ArchState, event: Extract<Event, { k
 }
 
 export function handleStreamingEvent(state: ArchState, event: Extract<BackendEvent, { kind: 'MessageStarted' } | { kind: 'MessageDelta' } | { kind: 'MessageThinking' } | { kind: 'ToolCall' } | { kind: 'MessageFinished' } | { kind: 'MessageAborted' }>): ReducerResult {
+  // Successful delivery settles at MessageStarted, before the rest of that
+  // accepted turn streams. Only failed/cancelled terminals retire their frames.
+  const operationTerminal = 'operationId' in event && event.operationId
+    ? state.operations[event.operationId]?.terminal
+    : undefined;
+  if (operationTerminal && operationTerminal.outcome !== 'settled') {
+    return { state, effects: [] };
+  }
+  // Stop owns the session until its full backend settlement barrier. Frames
+  // already queued by the retired turn cannot mutate transcript or re-arm work;
+  // a genuine next execution command clears the settled fence before starting.
+  if (activeInterruptOperation(state.operations, event.sessionPath)
+    || hasRetiredInterruptEventFence(state.operations, event.sessionPath)) {
+    return { state, effects: [] };
+  }
   switch (event.kind) {
     case 'MessageStarted':
       return handleMessageStarted(state, event);
@@ -377,14 +464,38 @@ export function handleStreamingEvent(state: ArchState, event: Extract<BackendEve
  * the steering queue in FIFO order) and drop its rollback snapshot. */
 export function handleQueuedDelivered(state: ArchState, event: Extract<Event, { kind: 'QueuedDelivered' }>): ReducerResult {
   const list = state.transcript.bySession[event.sessionPath];
-  if (!list) return { state, effects: [] };
+  if (!list) {
+    if (!event.operationId) return { state, effects: [] };
+    const operation = state.operations[event.operationId];
+    if (!operation || operation.kind !== 'message.send' || operation.terminal) return { state, effects: [] };
+    const settled = settleSessionOperationSucceeded(operation, {
+      pendingPath: operation.session.pendingPath,
+      resolvedPath: event.sessionPath,
+      backendGeneration: operation.backendGeneration,
+    });
+    return settled
+      ? { state: { ...state, operations: { ...state.operations, [event.operationId]: settled } }, effects: [] }
+      : { state, effects: [] };
+  }
 
   const idx = event.localId
     ? list.findIndex((message) => message.id === event.localId && message.role === 'user' && message.status === 'queued')
     : list.findIndex((message) => message.role === 'user' && message.status === 'queued');
   // A correlated duplicate/mismatch is never allowed to promote a different
   // queued row. FIFO fallback exists only for legacy producers without id.
-  if (idx < 0) return { state, effects: [] };
+  if (idx < 0) {
+    if (!event.operationId) return { state, effects: [] };
+    const operation = state.operations[event.operationId];
+    if (!operation || operation.kind !== 'message.send' || operation.terminal) return { state, effects: [] };
+    const settled = settleSessionOperationSucceeded(operation, {
+      pendingPath: operation.session.pendingPath,
+      resolvedPath: event.sessionPath,
+      backendGeneration: operation.backendGeneration,
+    });
+    return settled
+      ? { state: { ...state, operations: { ...state.operations, [event.operationId]: settled } }, effects: [] }
+      : { state, effects: [] };
+  }
   const localId = list[idx].id;
   const nextState = produce(state, (draft) => {
     const transcript = draft.transcript.bySession[event.sessionPath];
@@ -409,6 +520,18 @@ export function handleQueuedDelivered(state: ArchState, event: Extract<Event, { 
     // later SendResult no-ops instead of rolling back a delivered message).
     for (const [corrId, op] of Object.entries(draft.pending.ops)) {
       if (op.queued && op.localId === localId) delete draft.pending.ops[corrId];
+    }
+    const operationId = event.operationId
+      ?? Object.values(state.pending.promoted).find((op) => op.queued && op.localId === localId)?.operationId
+      ?? Object.values(state.pending.ops).find((op) => op.queued && op.localId === localId)?.operationId;
+    const operation = operationId ? draft.operations[operationId] : undefined;
+    if (operation?.kind === 'message.send' && !operation.terminal) {
+      const settled = settleSessionOperationSucceeded(operation, {
+        pendingPath: operation.session.pendingPath,
+        resolvedPath: event.sessionPath,
+        backendGeneration: operation.backendGeneration,
+      });
+      if (settled) draft.operations[operationId!] = settled;
     }
   });
   return { state: nextState, effects: [] };

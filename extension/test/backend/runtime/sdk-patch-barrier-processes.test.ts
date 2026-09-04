@@ -17,7 +17,7 @@ import {
   removeSdkPatchBarrierDirectory,
   validateSdkPatchBarrier,
 } from '../../../src/backend/sdk-patch-barrier';
-test.after(async () => { void cleanupPristineTemplate(); });
+test.after(async () => { await cleanupPristineTemplate(); });
 
 test('patched create publication never replaces an existing destination', async () => {
   await withFixture(async ({ sdkPath, lockRoot }) => {

@@ -16,7 +16,7 @@ import { authHasContent, authProviderNames, readAuthProviders } from './auth.mjs
 import { readJsonFile } from './json.mjs';
 import { resolveVscodeSettingsDirs } from './vscode-settings.mjs';
 
-const PROVIDER_ENV_VARS = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GOOGLE_API_KEY', 'UMANS_API_KEY'];
+const PROVIDER_ENV_VARS = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GOOGLE_API_KEY'];
 
 /**
  * @typedef {'ok' | 'warn' | 'fail'} ReadinessLevel
@@ -67,10 +67,11 @@ export function checkAuthReadiness({ authPath, providerEnv = process.env, provid
     );
   }
   lines.push(
-    '      - Or run pi once interactively (then re-run this installer to merge creds):',
-    '          pi --provider umans --model umans-glm-5.2 "hello"',
-    '        (pi will prompt for an API key on first use and cache it in auth.json.)',
-    '      See README.md → Authentication for the full list of supported providers.',
+    '      - Or authenticate a subscription provider interactively:',
+    '          pi',
+    '        Then enter /login and select a provider. Re-run this installer afterward',
+    '        if pi wrote credentials into the checkout instead of the configured auth directory.',
+    '      See README.md → Authentication for the supported options.',
   );
   return { level: 'warn', lines };
 }

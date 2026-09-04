@@ -6,6 +6,7 @@ import {
   PROVIDER_GATE_REQUEST_CLASS_SESSION_TITLE,
 } from '../../../shared/provider-gate-request-class.js';
 import type { SessionContext } from './server-types.js';
+import type { AssistantUsage } from '../shared/protocol.js';
 
 export const SESSION_TITLE_TIMEOUT_MS = 15_000;
 export const SESSION_TITLE_MAX_INPUT_CHARS = 4_000;
@@ -53,6 +54,19 @@ interface TitleCapableSession {
 interface CompleteSimpleMessage {
   content?: Array<{ type?: string; text?: string }>;
   errorMessage?: string;
+  usage?: {
+    input?: number;
+    output?: number;
+    cacheRead?: number;
+    cacheWrite?: number;
+    totalTokens?: number;
+    cost?: { total?: number };
+  };
+}
+
+interface TitleCompletion {
+  text: string;
+  usage?: AssistantUsage;
 }
 
 type CompleteSimpleFn = (
@@ -73,6 +87,12 @@ export interface SessionTitleGeneratorDeps {
   completeSimple?: CompleteSimpleFn;
   now?: () => number;
   timeoutMs?: number;
+  onSettled?: (settlement: {
+    usage?: AssistantUsage;
+    startedAt: string;
+    endedAt: string;
+    outcome: 'succeeded' | 'failed' | 'cancelled';
+  }) => void;
 }
 
 export type SessionTitleGenerationResult =
@@ -130,7 +150,7 @@ async function completeOllamaNative(
   headers: Record<string, string>,
   fetchFn: typeof fetch,
   thinkingLevel: import('../shared/protocol.js').ThinkingLevel,
-): Promise<string> {
+): Promise<TitleCompletion> {
   if (!model.baseUrl) throw new Error('The selected Ollama model has no base URL.');
   const url = new URL(model.baseUrl);
   url.pathname = `${url.pathname.replace(/\/(?:v1)?\/?$/u, '')}/api/chat`;
@@ -155,8 +175,25 @@ async function completeOllamaNative(
     const detail = (await response.text()).slice(0, 500);
     throw new Error(`Ollama title request failed (${response.status}): ${detail || response.statusText}`);
   }
-  const payload = await response.json() as { message?: { content?: unknown } };
-  return typeof payload.message?.content === 'string' ? payload.message.content : '';
+  const payload = await response.json() as {
+    message?: { content?: unknown };
+    prompt_eval_count?: unknown;
+    eval_count?: unknown;
+  };
+  const inputTokens = finiteNonNegative(payload.prompt_eval_count);
+  const outputTokens = finiteNonNegative(payload.eval_count);
+  return {
+    text: typeof payload.message?.content === 'string' ? payload.message.content : '',
+    ...(inputTokens !== undefined && outputTokens !== undefined ? {
+      usage: {
+        inputTokens,
+        outputTokens,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        totalTokens: inputTokens + outputTokens,
+      },
+    } : {}),
+  };
 }
 
 async function loadCompleteSimple(sdkPath: string): Promise<CompleteSimpleFn> {
@@ -174,7 +211,7 @@ async function completeGeneric(
   auth: { apiKey?: string; headers?: Record<string, string> },
   deps: SessionTitleGeneratorDeps,
   thinkingLevel: import('../shared/protocol.js').ThinkingLevel,
-): Promise<string> {
+): Promise<TitleCompletion> {
   const completeSimple = deps.completeSimple ?? await loadCompleteSimple(sdkPath);
   const response = await completeSimple(model, {
     systemPrompt: SESSION_TITLE_SYSTEM_PROMPT,
@@ -192,10 +229,36 @@ async function completeGeneric(
     maxRetries: 0,
   });
   if (response.errorMessage) throw new Error(response.errorMessage);
-  return (response.content ?? [])
-    .filter((part) => part.type === 'text')
-    .map((part) => part.text ?? '')
-    .join('');
+  const rawUsage = response.usage;
+  const inputTokens = finiteNonNegative(rawUsage?.input);
+  const outputTokens = finiteNonNegative(rawUsage?.output);
+  const cacheReadTokens = finiteNonNegative(rawUsage?.cacheRead);
+  const cacheWriteTokens = finiteNonNegative(rawUsage?.cacheWrite);
+  const usage = inputTokens !== undefined && outputTokens !== undefined
+    && cacheReadTokens !== undefined && cacheWriteTokens !== undefined
+    ? {
+        inputTokens,
+        outputTokens,
+        cacheReadTokens,
+        cacheWriteTokens,
+        totalTokens: finiteNonNegative(rawUsage?.totalTokens)
+          ?? inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens,
+        ...(finiteNonNegative(rawUsage?.cost?.total) !== undefined
+          ? { reportedCostUsd: finiteNonNegative(rawUsage?.cost?.total) }
+          : {}),
+      }
+    : undefined;
+  return {
+    text: (response.content ?? [])
+      .filter((part) => part.type === 'text')
+      .map((part) => part.text ?? '')
+      .join(''),
+    ...(usage ? { usage } : {}),
+  };
+}
+
+function finiteNonNegative(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
 function hasExplicitSessionName(session: TitleCapableSession): boolean {
@@ -233,11 +296,20 @@ export async function generateSessionTitle(
     ...(auth.headers ?? {}),
     [PROVIDER_GATE_REQUEST_CLASS_HEADER]: PROVIDER_GATE_REQUEST_CLASS_SESSION_TITLE,
   };
+  const startedAt = new Date((deps.now ?? Date.now)()).toISOString();
+  let settled = false;
   try {
-    const raw = model.provider === 'ollama'
+    const completion = model.provider === 'ollama'
       ? await completeOllamaNative(model, prompt, timeoutController.signal, headers, deps.fetchFn ?? fetch, thinkingLevel)
       : await completeGeneric(options.sdkPath, model, prompt, timeoutController.signal, { ...auth, headers }, deps, thinkingLevel);
-    const name = sanitizeGeneratedSessionTitle(raw);
+    settled = true;
+    deps.onSettled?.({
+      usage: completion.usage,
+      startedAt,
+      endedAt: new Date((deps.now ?? Date.now)()).toISOString(),
+      outcome: 'succeeded',
+    });
+    const name = sanitizeGeneratedSessionTitle(completion.text);
     if (!name) return { generated: false, reason: 'invalid-output' };
 
     // A TUI/manual rename that landed while the model was running always wins.
@@ -245,6 +317,15 @@ export async function generateSessionTitle(
     if (!session.setSessionName) return { generated: false, reason: 'unsupported-runtime' };
     session.setSessionName(name);
     return { generated: true, name };
+  } catch (error) {
+    if (!settled) {
+      deps.onSettled?.({
+        startedAt,
+        endedAt: new Date((deps.now ?? Date.now)()).toISOString(),
+        outcome: timeoutController.signal.aborted ? 'cancelled' : 'failed',
+      });
+    }
+    throw error;
   } finally {
     clearTimeout(timeout);
     options.signal?.removeEventListener('abort', abort);

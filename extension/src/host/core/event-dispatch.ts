@@ -1,4 +1,5 @@
 import type {
+  AgentSettledPayload,
   AuxiliaryLlmUsagePayload,
   BusyChangedPayload,
   CompactionPayload,
@@ -28,6 +29,7 @@ import type {
   ToolStartedPayload,
 } from '../../shared/protocol';
 import {
+  isAgentSettledPayload,
   isAuxiliaryLlmUsagePayload,
   isBusyChangedPayload,
   isCompactionPayload,
@@ -85,6 +87,7 @@ export interface SessionBackendEventHandlers {
   onAuxiliaryLlmUsage(payload: AuxiliaryLlmUsagePayload): void;
   onOperationalError(payload: OperationalErrorPayload): void;
   onRetryStuck(payload: RetryStuckPayload): void;
+  onAgentSettled?(payload: AgentSettledPayload): void;
   onBusyChanged(payload: BusyChangedPayload): void;
   onContextUsageChanged(payload: ContextUsageChangedPayload): void;
   onExtensionUIRequest(payload: ExtensionUIRequestPayload): void;
@@ -194,6 +197,9 @@ export function dispatchSessionBackendEvent(
       return;
     case 'retry.stuck':
       dispatch(event, isRetryStuckPayload, handlers.onRetryStuck);
+      return;
+    case 'agent.settled':
+      if (handlers.onAgentSettled) dispatch(event, isAgentSettledPayload, handlers.onAgentSettled);
       return;
     case 'busy.changed':
       dispatch(event, isBusyChangedPayload, handlers.onBusyChanged);

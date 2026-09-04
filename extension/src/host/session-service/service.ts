@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 
 import { BackendClient } from '../backend/client';
 import { resolveChatPrefs, buildRuntimePrefsPayload } from '../../shared/protocol';
-import type { ChatPrefs, DetailResult, LazyDetailRef, PruningSettings, SessionTitlesSettings, ToolResultPruningSettings, ThinkingLevel, TranscriptMode, DeferredTriggerView, McpServerInfo } from '../../shared/protocol';
+import type { ChatPrefs, DetailResult, LazyDetailRef, PruningSettings, SessionTitlesSettings, ToolResultPruningSettings, ThinkingLevel, TranscriptMode, DeferredTriggerView, McpServerInfo, RendererCommandContext } from '../../shared/protocol';
 import {
   loadPersistedPruningSettings,
   savePruningSettings,
@@ -94,7 +94,10 @@ export class SessionService implements vscode.Disposable {
     this.dispatchArch = dispatchArch;
 
     this.state = new SessionServiceState(context, backend, scheduleRender, getArchState, dispatchArch);
-    this.triggers = new DeferredTriggerRegistry({ getArchState, dispatchArch, scheduleRender });
+    this.triggers = new DeferredTriggerRegistry({
+      getArchState, dispatchArch, scheduleRender,
+      getBackendGeneration: () => this.state.getBackendGeneration(),
+    });
     this.detailSubscriptions = new DetailSubscriptionService({
       backend,
       postImperative,
@@ -163,16 +166,24 @@ export class SessionService implements vscode.Disposable {
       events: this.events,
       state: this.state,
       service: this,
-      openSession: (sessionPath) => this.tabs.openSession(sessionPath),
+      openSession: (sessionPath) => {
+        this.tabs.openSession(sessionPath);
+        this.triggers.onSessionOpened(sessionPath);
+      },
       getArchState: this.getArchState,
       dispatchArch: this.dispatchArch,
     });
   }
 
-  /** Notify deferred triggers that the user sent a message in `sessionPath`
-   *  (webview Send path). Fires any `user_input` trigger registered for it. */
-  notifyUserInput(sessionPath: string): void {
-    this.triggers.onUserInput(sessionPath);
+  /** Notify deferred triggers that the user sent a real message in
+   * `sessionPath`. The prompt consumes `user_input` without a synthetic Send. */
+  notifyUserInput(sessionPath: string, corrId: string): void {
+    this.triggers.onUserInput(sessionPath, corrId);
+  }
+
+  /** Settle durable deferred-trigger claims at the ordinary Send ack boundary. */
+  notifyDeferredTriggerSendResult(corrId: string, ok: boolean, error?: string): void {
+    this.triggers.onSendResult(corrId, ok, error);
   }
 
   /** Snapshot of all currently-active deferred triggers (across every
@@ -231,6 +242,7 @@ export class SessionService implements vscode.Disposable {
     this.detailCache.clear();
     this.detailCacheBytes = 0;
     this.events.detach();
+    this.state.failPendingSendOperations('PI backend generation ended before the send commit was observed.');
     this.state.failPendingCreateOperations('PI backend generation ended while the session was being created.');
     // Publish unready before the first await. Otherwise a queued preference or
     // model action can observe the old ready=true snapshot after stop() has
@@ -257,8 +269,12 @@ export class SessionService implements vscode.Disposable {
     this.correlatedFailureSubscription.dispose();
   }
 
-  createNewSession(): string {
-    return this.tabs.createNewSession();
+  createNewSession(source?: RendererCommandContext): string {
+    return this.tabs.createNewSession(source);
+  }
+
+  getBackendGeneration(): number {
+    return this.state.getBackendGeneration();
   }
 
   // ─── Phase 5 detail subscription ownership (public routing) ────────────────
@@ -346,6 +362,11 @@ export class SessionService implements vscode.Disposable {
     return this.tabs.retryCreateSession(operationId);
   }
 
+  /** Terminalize non-terminal message operations when their backend generation dies. */
+  failPendingSendOperations(notice: string): void {
+    this.state.failPendingSendOperations(notice);
+  }
+
   /** Fail delayed creates when the backend generation dies. */
   failPendingCreateOperations(notice: string): void {
     this.state.failPendingCreateOperations(notice);
@@ -371,6 +392,7 @@ export class SessionService implements vscode.Disposable {
 
   openSession(sessionPath: string): void {
     this.tabs.openSession(sessionPath);
+    this.triggers.onSessionOpened(sessionPath);
   }
 
   async closeSession(sessionPath: string, nextPath: string | null, privacyMode = false, selectionChanged = false): Promise<void> {
@@ -415,8 +437,8 @@ export class SessionService implements vscode.Disposable {
     }
   }
 
-  duplicateSession(sessionPath: string): void {
-    this.tabs.duplicateSession(sessionPath);
+  duplicateSession(sessionPath: string, source?: RendererCommandContext): void {
+    this.tabs.duplicateSession(sessionPath, source);
   }
 
   async addFilesystemPaths(

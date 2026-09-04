@@ -33,6 +33,7 @@ import {
 } from '../run-analytics';
 import { SessionRunStateManager } from './run-state-manager';
 import type { GetArchState, DispatchArchEvent } from './types';
+import type { PersistedBusyInterval } from '../working-time-service';
 
 const TOOL_FAILURE_SAMPLE_LIMIT = 20;
 
@@ -97,6 +98,20 @@ export class SessionRunTracker {
       if (state.currentRun) runs.push(state.currentRun);
     }
     return runs;
+  }
+
+  getOpenBusyIntervals(): PersistedBusyInterval[] {
+    const intervals: PersistedBusyInterval[] = [];
+    for (const [sessionPath, state] of this.runState.sessions) {
+      if (state.currentRun && state.busyStartedAt) {
+        intervals.push({ sessionPath, busyStartedAt: state.busyStartedAt });
+      }
+    }
+    return intervals;
+  }
+
+  getMostRelevantRun(sessionPath: string): RunSnapshot | null {
+    return this.runState.getMostRelevantRun(sessionPath);
   }
 
   prepareForSend(sessionPath: string, inputs: ComposerInput[], initialUserMessage = ''): string {
@@ -839,7 +854,7 @@ export class SessionRunTracker {
   onAuxiliaryLlmUsage(
     sessionPath: string,
     sample: {
-      kind: 'assistant_message' | 'history_compaction' | 'branch_summary';
+      kind: 'assistant_message' | 'history_compaction' | 'branch_summary' | 'session_title' | 'other';
       sourceId: string;
       occurredAt: string;
       modelId?: string;

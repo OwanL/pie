@@ -55,6 +55,32 @@ test('replay: fire removes the trigger', () => {
   assert.equal(replayTriggers(readTriggerOps()).size, 0);
 });
 
+test('replay: claim is visible, release is retryable, and matching fire consumes', () => {
+  appendTriggerOp({ id: 't1', op: 'register', sessionPath: '/w.jsonl', triggers: [{ kind: 'timer', ms: 1000 }], at: new Date().toISOString() });
+  appendTriggerOp({ id: 't1', op: 'claim', sessionPath: '/w.jsonl', claimId: 'c1', ownerId: 'host-a', reason: 'timer', at: new Date().toISOString() });
+  assert.equal(replayTriggers(readTriggerOps()).get('t1')?.deliveryState, 'claimed');
+  appendTriggerOp({ id: 't1', op: 'release', sessionPath: '/w.jsonl', claimId: 'c1', reason: 'tab closed', at: new Date().toISOString() });
+  assert.equal(replayTriggers(readTriggerOps()).get('t1')?.deliveryState, 'retryable');
+  appendTriggerOp({ id: 't1', op: 'claim', sessionPath: '/w.jsonl', claimId: 'c2', ownerId: 'host-b', reason: 'retry', at: new Date().toISOString() });
+  appendTriggerOp({ id: 't1', op: 'fire', sessionPath: '/w.jsonl', claimId: 'c2', reason: 'retry', at: new Date().toISOString() });
+  assert.equal(replayTriggers(readTriggerOps()).size, 0);
+});
+
+test('replay: host crash-recovery and ambiguous acknowledgement states remain visible to the tool', () => {
+  appendTriggerOp({ id: 'safe', op: 'register', sessionPath: '/w.jsonl', triggers: [{ kind: 'timer', ms: 1000 }], at: new Date().toISOString() });
+  appendTriggerOp({ id: 'safe', op: 'claim', sessionPath: '/w.jsonl', claimId: 'c-safe', ownerId: 'host-a', ownerPid: 101, reason: 'timer', at: new Date().toISOString() });
+  appendTriggerOp({ id: 'safe', op: 'release', sessionPath: '/w.jsonl', claimId: 'c-safe', reason: 'owner exited before dispatch', recoveryState: 'dead-owner-recovered', at: new Date().toISOString() });
+
+  appendTriggerOp({ id: 'ambiguous', op: 'register', sessionPath: '/w.jsonl', triggers: [{ kind: 'user_input' }], at: new Date().toISOString() });
+  appendTriggerOp({ id: 'ambiguous', op: 'claim', sessionPath: '/w.jsonl', claimId: 'c-ambiguous', ownerId: 'host-b', ownerPid: 102, reason: 'user input', at: new Date().toISOString(), dispatchStartedAt: new Date().toISOString() });
+
+  const active = replayTriggers(readTriggerOps());
+  assert.equal(active.get('safe')?.deliveryState, 'retryable');
+  assert.equal(active.get('safe')?.recoveryState, 'dead-owner-recovered');
+  assert.equal(active.get('ambiguous')?.deliveryState, 'claimed');
+  assert.equal(active.get('ambiguous')?.recoveryState, 'acknowledgement-ambiguous');
+});
+
 test('replay: cancel-all removes only that session’s triggers', () => {
   appendTriggerOp({ id: 'a', op: 'register', sessionPath: '/w.jsonl', triggers: [{ kind: 'user_input' }], at: new Date().toISOString() });
   appendTriggerOp({ id: 'b', op: 'register', sessionPath: '/w.jsonl', triggers: [{ kind: 'timer', ms: 1000 }], at: new Date().toISOString() });

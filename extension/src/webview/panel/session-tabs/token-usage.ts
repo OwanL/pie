@@ -26,8 +26,12 @@ export interface SessionTokenUsageSummary {
   totalTokens: number;
   /** Sum of provider-reported reasoning tokens (a subset of `outputTokens`). */
   reasoningTokens: number;
-  /** Number of assistant turns that contributed usage data. */
+  /** Number of invocation rows represented by the summary. */
   reportedTurnCount: number;
+  /** Rows whose token channels are unavailable; displayed totals are known subtotals. */
+  incompleteInvocationCount: number;
+  /** Rows contributing known token-channel values. */
+  knownTokenInvocationCount: number;
   /** Usage from the most recent assistant turn that reported it. */
   lastTurn: AssistantUsage | null;
 }
@@ -54,10 +58,11 @@ export function buildSessionTokenUsageFromSnapshot(snapshot: SessionUsageSnapsho
   let totalTokens = 0;
   let reasoningTokens = 0;
   let reportedTurnCount = 0;
+  let incompleteInvocationCount = 0;
+  let knownTokenInvocationCount = 0;
   let lastTurn: AssistantUsage | null = null;
 
   for (const sample of snapshot.samples) {
-    if (sample.kind !== 'assistant') continue;
     const usage = assistantUsageFromSample(sample);
     inputTokens += usage.inputTokens;
     outputTokens += usage.outputTokens;
@@ -66,7 +71,12 @@ export function buildSessionTokenUsageFromSnapshot(snapshot: SessionUsageSnapsho
     totalTokens += usage.totalTokens;
     reasoningTokens += usage.reasoningTokens ?? 0;
     reportedTurnCount += 1;
-    lastTurn = usage;
+    if (sample.tokenChannelsKnown === false || sample.instrumentationGap) {
+      incompleteInvocationCount += 1;
+    } else {
+      knownTokenInvocationCount += 1;
+      lastTurn = usage;
+    }
   }
 
   return {
@@ -77,6 +87,8 @@ export function buildSessionTokenUsageFromSnapshot(snapshot: SessionUsageSnapsho
     totalTokens,
     reasoningTokens,
     reportedTurnCount,
+    incompleteInvocationCount: Math.max(incompleteInvocationCount, snapshot.incompleteInvocationCount ?? 0),
+    knownTokenInvocationCount,
     lastTurn,
   };
 }
@@ -95,11 +107,13 @@ export function buildSessionTokenIndicator(
   summary: SessionTokenUsageSummary,
 ): SessionTokenIndicatorState {
   // Always show token indicator, even when no usage reported
-  const compactIn = summary.reportedTurnCount > 0 ? formatCompactTokens(summary.inputTokens) : '\u2014';
-  const compactOut = summary.reportedTurnCount > 0 ? formatCompactTokens(summary.outputTokens) : '\u2014';
+  const hasKnownTokens = summary.knownTokenInvocationCount > 0
+    || (summary.incompleteInvocationCount === 0 && summary.reportedTurnCount > 0);
+  const compactIn = hasKnownTokens ? formatCompactTokens(summary.inputTokens) : '\u2014';
+  const compactOut = hasKnownTokens ? formatCompactTokens(summary.outputTokens) : '\u2014';
 
-  // Token counts label (always present)
-  const label = `\u2191 ${compactIn} \u2193 ${compactOut}`;
+  // Token counts label (always present). An asterisk marks a known subtotal.
+  const label = `\u2191 ${compactIn} \u2193 ${compactOut}${summary.incompleteInvocationCount > 0 ? '*' : ''}`;
 
   const tooltipLines: string[] = [
     `Session tokens (${summary.reportedTurnCount} assistant turn${summary.reportedTurnCount === 1 ? '' : 's'})`,
@@ -116,6 +130,9 @@ export function buildSessionTokenIndicator(
     );
   }
   tooltipLines.push(`  Total: ${formatReadableTokens(summary.totalTokens)}`);
+  if (summary.incompleteInvocationCount > 0) {
+    tooltipLines.push(`  Known subtotal · ${summary.incompleteInvocationCount} invocation(s) have incomplete token usage`);
+  }
   if (summary.lastTurn) {
     tooltipLines.push(
       '',
@@ -126,7 +143,10 @@ export function buildSessionTokenIndicator(
 
   const ariaLabel =
     `Session token usage: input ${formatReadableTokens(summary.inputTokens)}, `
-    + `output ${formatReadableTokens(summary.outputTokens)}.`;
+    + `output ${formatReadableTokens(summary.outputTokens)}`
+    + (summary.incompleteInvocationCount > 0
+      ? `; known subtotal with ${summary.incompleteInvocationCount} incomplete invocation(s).`
+      : '.');
 
   return {
     label,
@@ -163,10 +183,48 @@ export interface LiveSessionCostEstimate extends CostUsage {
   unclassifiedContextTokens: number;
 }
 
+export interface SessionCostModelBreakdown {
+  provider: string;
+  model: string;
+  cost: number;
+  hasKnownCost: boolean;
+  unpricedTokens: number;
+}
+
+export interface SessionCostProviderBreakdown {
+  provider: string;
+  cost: number;
+  hasKnownCost: boolean;
+  unpricedTokens: number;
+  models: SessionCostModelBreakdown[];
+}
+
+export interface SessionCostSourceBreakdown {
+  key: 'conversation' | 'subagents' | 'pruning' | 'retry' | 'history_compaction' | 'branch_summary' | 'session_title' | 'other' | 'live';
+  label: string;
+  cost: number;
+  hasKnownCost: boolean;
+  unpricedTokens: number;
+  tokens: number;
+}
+
+export interface SessionCostBreakdown {
+  totalCost: number;
+  hasIncompleteCost: boolean;
+  unpricedTokens: number;
+  reportedTurnCount: number;
+  inputTokens: number;
+  outputTokens: number;
+  providers: SessionCostProviderBreakdown[];
+  sources: SessionCostSourceBreakdown[];
+}
+
 export interface SessionCostIndicatorState {
   label: string;
   ariaLabel: string;
   tooltip: string;
+  /** Structured whole-branch data for the graph-bearing rich tooltip. */
+  breakdown: SessionCostBreakdown;
 }
 
 type PruningCostDetails = PruningDetails & {
@@ -265,6 +323,54 @@ function formatCostDetailUnits(units: number): string {
   return `$${(units / COST_DETAIL_SCALE).toFixed(4)}`;
 }
 
+function providerModelBreakdown(models: Map<string, ModelCostBreakdown>): SessionCostProviderBreakdown[] {
+  const providers = new Map<string, SessionCostProviderBreakdown>();
+  for (const entry of models.values()) {
+    if (!entry.hasKnownCost && entry.unpricedTokens <= 0) continue;
+    const separator = entry.modelId.indexOf('/');
+    const provider = separator > 0 ? entry.modelId.slice(0, separator) : 'Unknown provider';
+    const model = separator > 0 ? entry.modelId.slice(separator + 1) : entry.modelId;
+    const roundedCost = costDetailUnits(entry.cost) / COST_DETAIL_SCALE;
+    const existing = providers.get(provider) ?? {
+      provider,
+      cost: 0,
+      hasKnownCost: false,
+      unpricedTokens: 0,
+      models: [],
+    };
+    existing.cost += roundedCost;
+    existing.hasKnownCost ||= entry.hasKnownCost;
+    existing.unpricedTokens += entry.unpricedTokens;
+    existing.models.push({
+      provider,
+      model,
+      cost: roundedCost,
+      hasKnownCost: entry.hasKnownCost,
+      unpricedTokens: entry.unpricedTokens,
+    });
+    providers.set(provider, existing);
+  }
+  return [...providers.values()]
+    .map((provider) => ({
+      ...provider,
+      cost: costDetailUnits(provider.cost) / COST_DETAIL_SCALE,
+      models: provider.models.sort((a, b) => b.cost - a.cost || a.model.localeCompare(b.model)),
+    }))
+    .sort((a, b) => b.cost - a.cost || a.provider.localeCompare(b.provider));
+}
+
+function unpricedTokensIn(models: Map<string, ModelCostBreakdown>): number {
+  return [...models.values()].reduce((total, entry) => total + entry.unpricedTokens, 0);
+}
+
+function hasKnownCostIn(models: Map<string, ModelCostBreakdown>): boolean {
+  return [...models.values()].some((entry) => entry.hasKnownCost);
+}
+
+function tokensIn(models: Map<string, ModelCostBreakdown>): number {
+  return [...models.values()].reduce((total, entry) => total + entry.totalTokens, 0);
+}
+
 function formatProviderModelCosts(models: Map<string, ModelCostBreakdown>): FormattedProviderModelCosts {
   const entries = Array.from(models.values())
     .filter((entry) => entry.hasKnownCost || entry.unpricedTokens > 0)
@@ -327,6 +433,62 @@ function costBreakdownFromUsage(usage: CostUsage, pricing: TokenPricing) {
     cacheRead,
     cacheWrite,
     total: input + output + cacheRead + cacheWrite,
+  };
+}
+
+interface ResolvedUsageCost {
+  cost: number;
+  hasKnownCost: boolean;
+  unpricedTokens: number;
+  catalogBreakdown: ReturnType<typeof costBreakdownFromUsage> | null;
+}
+
+function tokenChannelTotal(usage: CostUsage): number {
+  return usage.inputTokens + usage.outputTokens + usage.cacheReadTokens + usage.cacheWriteTokens;
+}
+
+/** Resolve one usage record without turning an unavailable token split into a
+ * known zero. A catalog can price a record only when its four channels account
+ * for the reported total; otherwise a stored/provider cost is the only usable
+ * total. */
+function resolveUsageCost(
+  usage: CostUsage,
+  pricing: TokenPricing | undefined,
+  reportedCostUsd: number | undefined,
+  applyLongContextTier = true,
+): ResolvedUsageCost {
+  const channelTokens = tokenChannelTotal(usage);
+  const canUseCatalog = pricing !== undefined && usage.totalTokens > 0 && channelTokens === usage.totalTokens;
+  if (canUseCatalog) {
+    const catalogBreakdown = applyLongContextTier ? costBreakdownFromUsage(usage, pricing!) : null;
+    return {
+      cost: catalogBreakdown?.total ?? costFromUsage(usage, pricing!, false),
+      hasKnownCost: true,
+      unpricedTokens: 0,
+      catalogBreakdown,
+    };
+  }
+
+  // A reported cost, including an explicit zero, remains authoritative when
+  // channel pricing cannot be reconstructed. An absent report is unpriced,
+  // rather than a known zero.
+  const hasUsableReportedCost = typeof reportedCostUsd === 'number'
+    && Number.isFinite(reportedCostUsd)
+    && reportedCostUsd >= 0;
+  if (hasUsableReportedCost) {
+    return {
+      cost: reportedCostUsd,
+      hasKnownCost: true,
+      unpricedTokens: 0,
+      catalogBreakdown: null,
+    };
+  }
+
+  return {
+    cost: 0,
+    hasKnownCost: false,
+    unpricedTokens: usage.totalTokens,
+    catalogBreakdown: null,
   };
 }
 
@@ -398,22 +560,27 @@ function emptySubagentCostSummary(): SubagentCostSummary {
   };
 }
 
-function usageFromSubagentUsage(rawUsage: unknown): (CostUsage & { cost: number }) | null {
+function usageFromSubagentUsage(rawUsage: unknown): (CostUsage & { cost?: number }) | null {
   if (!isRecord(rawUsage)) return null;
   const inputTokens = numberValue(rawUsage.input);
   const outputTokens = numberValue(rawUsage.output);
   const cacheReadTokens = numberValue(rawUsage.cacheRead);
   const cacheWriteTokens = numberValue(rawUsage.cacheWrite);
-  const totalTokens = inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens;
-  const cost = numberValue(rawUsage.cost);
-  if (cost <= 0 && totalTokens <= 0) return null;
+  const channelTokens = inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens;
+  const reportedTotal = numberValue(rawUsage.totalTokens);
+  const totalTokens = Math.max(channelTokens, reportedTotal);
+  const rawCost = rawUsage.cost;
+  const cost = typeof rawCost === 'number' && Number.isFinite(rawCost) && rawCost >= 0
+    ? rawCost
+    : undefined;
+  if (cost === undefined && totalTokens <= 0) return null;
   return {
     inputTokens,
     outputTokens,
     cacheReadTokens,
     cacheWriteTokens,
     totalTokens,
-    cost,
+    ...(cost !== undefined ? { cost } : {}),
   };
 }
 
@@ -482,11 +649,16 @@ function addSubagentToolCallCost(
           depth <= 1 ? 'Unknown subagent model' : 'Unknown nested subagent model',
         );
         const estimatedPricing = item.modelId ? pricingForModel?.(item.modelId, item.provider) : undefined;
-        const attributedCost = item.usage.cost > 0
-          ? item.usage.cost
-          : estimatedPricing ? costFromUsage(item.usage, estimatedPricing) : 0;
+        const channelTokens = tokenChannelTotal(item.usage);
+        const canUseCatalog = estimatedPricing !== undefined
+          && item.usage.totalTokens > 0
+          && item.usage.totalTokens === channelTokens;
+        const hasReportedCost = item.usage.cost !== undefined;
+        const attributedCost = hasReportedCost
+          ? item.usage.cost!
+          : canUseCatalog ? costFromUsage(item.usage, estimatedPricing!) : 0;
         resultCost += attributedCost;
-        const hasKnownCost = item.usage.cost > 0 || estimatedPricing !== undefined;
+        const hasKnownCost = hasReportedCost || canUseCatalog;
         addModelCost(
           summary.modelCosts,
           modelId,
@@ -546,8 +718,8 @@ export function extractSubagentDirectCost(transcript: ChatMessage[]): number {
 function buildPruningPrepassSummary(
   details: PruningCostDetails | undefined,
   pricingForModel?: TokenPricingResolver,
-): { cost: number; usage: CostUsage; modelId?: string; hasUsage: boolean; hasKnownCost: boolean } {
-  const empty = { cost: 0, usage: emptyCostUsage(), hasUsage: false, hasKnownCost: false };
+): { cost: number; usage: CostUsage; modelId?: string; hasUsage: boolean; hasKnownCost: boolean; unpricedTokens: number } {
+  const empty = { cost: 0, usage: emptyCostUsage(), hasUsage: false, hasKnownCost: false, unpricedTokens: 0 };
   if (!details?.prepassModel) return empty;
   const billingModelId = qualifyBillingModelId(details.prepassModel, details.prepassProvider);
   // Resolve the prepass model's OWN pricing — do NOT fall back to the
@@ -568,12 +740,16 @@ function buildPruningPrepassSummary(
     && Number.isFinite(details.prepassReportedCostUsd) && details.prepassReportedCostUsd >= 0
     ? details.prepassReportedCostUsd
     : undefined;
-  const hasKnownCost = reportedCost !== undefined || (hasUsage && prepassPricing !== undefined);
-  const cost = prepassPricing && hasUsage
-    ? costFromUsage(usage, prepassPricing)
-    : reportedCost ?? 0;
+  const resolved = resolveUsageCost(usage, prepassPricing, reportedCost);
 
-  return { cost, usage, modelId: billingModelId, hasUsage, hasKnownCost };
+  return {
+    cost: resolved.cost,
+    usage,
+    modelId: billingModelId,
+    hasUsage,
+    hasKnownCost: resolved.hasKnownCost,
+    unpricedTokens: resolved.unpricedTokens,
+  };
 }
 
 export interface CompletedCostSummary extends CostUsage {
@@ -619,30 +795,24 @@ function addCompletedUsageCost(
   summary.totalTokens += usage.totalTokens;
   const billingModelId = qualifyBillingModelId(modelId, provider);
   if (billingModelId) summary.modelIds.add(billingModelId);
-  const reportedCost = usage.reportedCostUsd;
-  const hasKnownCost = pricing !== undefined || reportedCost !== undefined;
-  const costs = pricing ? costBreakdownFromUsage(usage, pricing) : null;
-  // Persisted usage cost is a catalog calculation, not an invoice. Prefer the
-  // current catalog when token channels are present so price corrections also
-  // repair existing sessions; retain reported cost as the unpriced fallback.
-  const totalCost = costs?.total ?? reportedCost ?? 0;
-  if (costs) {
-    summary.inputCost += costs.input;
-    summary.outputCost += costs.output;
-    summary.cacheReadCost += costs.cacheRead;
-    summary.cacheWriteCost += costs.cacheWrite;
+  const resolved = resolveUsageCost(usage, pricing, usage.reportedCostUsd);
+  if (resolved.catalogBreakdown) {
+    summary.inputCost += resolved.catalogBreakdown.input;
+    summary.outputCost += resolved.catalogBreakdown.output;
+    summary.cacheReadCost += resolved.catalogBreakdown.cacheRead;
+    summary.cacheWriteCost += resolved.catalogBreakdown.cacheWrite;
   }
-  if (hasKnownCost) {
-    summary.totalCost += totalCost;
+  if (resolved.hasKnownCost) {
+    summary.totalCost += resolved.cost;
     summary.pricedTurnCount += 1;
   }
   addModelCost(
     summary.modelCosts,
     normalizeModelId(billingModelId, 'Selected model'),
     usage,
-    totalCost,
-    hasKnownCost,
-    hasKnownCost ? 0 : usage.totalTokens,
+    resolved.cost,
+    resolved.hasKnownCost,
+    resolved.unpricedTokens,
   );
 }
 
@@ -653,10 +823,12 @@ export function buildCompletedCostSummaryFromSnapshot(
 ): CompletedCostSummary {
   const completed = emptyCompletedCostSummary();
   for (const sample of snapshot.samples) {
-    if (sample.kind !== 'assistant') continue;
-    const pricing = sample.modelId
-      ? pricingForModel ? pricingForModel(sample.modelId, sample.provider) : fallbackPricing
-      : fallbackPricing;
+    if (sample.kind !== 'assistant' && sample.kind !== 'conversation') continue;
+    const pricing = sample.provenance !== undefined
+      ? undefined
+      : sample.modelId
+        ? pricingForModel ? pricingForModel(sample.modelId, sample.provider) : fallbackPricing
+        : fallbackPricing;
     addCompletedUsageCost(
       completed,
       assistantUsageFromSample(sample),
@@ -684,26 +856,32 @@ export function extractSubagentCostSummaryFromSnapshot(
   const catalogPricedGroups = new Set<string>();
   for (const [groupId, group] of grouped) {
     const tokenBearing = group.filter((sample) => sample.totalTokens > 0);
-    if (tokenBearing.length > 0 && tokenBearing.every((sample) => (
-      !!sample.modelId && pricingForModel?.(sample.modelId, sample.provider) !== undefined
-    ))) {
+    if (tokenBearing.length > 0 && tokenBearing.every((sample) => {
+      const usage = assistantUsageFromSample(sample);
+      const channelTokens = tokenChannelTotal(usage);
+      return sample.provenance === undefined
+        && !!sample.modelId
+        && usage.totalTokens === channelTokens
+        && pricingForModel?.(sample.modelId, sample.provider) !== undefined;
+    })) {
       catalogPricedGroups.add(groupId);
     }
   }
 
   for (const sample of samples) {
-    const pricing = sample.modelId ? pricingForModel?.(sample.modelId, sample.provider) : undefined;
+    const pricing = sample.provenance !== undefined
+      ? undefined
+      : sample.modelId ? pricingForModel?.(sample.modelId, sample.provider) : undefined;
     const usage = assistantUsageFromSample(sample);
     const useCatalog = catalogPricedGroups.has(sample.groupId ?? sample.sourceId);
     // A result-level exact cost may be represented as a tokenless residual
     // beside token-bearing attempts. In catalog mode those attempts replace
     // the whole stale aggregate, so the residual must not be added again.
-    const cost = useCatalog
-      ? pricing && usage.totalTokens > 0 ? costFromUsage(usage, pricing, false) : 0
-      : sample.reportedCostUsd ?? (pricing ? costFromUsage(usage, pricing) : 0);
-    const hasKnownCost = useCatalog
-      ? usage.totalTokens > 0 && pricing !== undefined
-      : sample.reportedCostUsd !== undefined || pricing !== undefined;
+    const resolved = useCatalog
+      ? resolveUsageCost(usage, pricing, undefined, false)
+      : resolveUsageCost(usage, pricing, sample.reportedCostUsd ?? sample.calculatedCostUsd);
+    const cost = resolved.cost;
+    const hasKnownCost = resolved.hasKnownCost;
     summary.totalCost += cost;
     summary.directCost += cost;
     summary.directResultCount += 1;
@@ -711,7 +889,7 @@ export function extractSubagentCostSummaryFromSnapshot(
       qualifyBillingModelId(sample.modelId, sample.provider),
       'Unknown subagent model',
     );
-    addModelCost(summary.modelCosts, modelId, usage, cost, hasKnownCost, hasKnownCost ? 0 : usage.totalTokens);
+    addModelCost(summary.modelCosts, modelId, usage, cost, hasKnownCost, resolved.unpricedTokens);
   }
   return summary;
 }
@@ -743,7 +921,6 @@ export function buildCompletedCostSummary(
   }
 
   addCompletedUsageCost(completed, usageSummary, fallbackPricing, undefined);
-  completed.pricedTurnCount = fallbackPricing ? usageSummary.reportedTurnCount : 0;
   return completed;
 }
 
@@ -778,32 +955,71 @@ export function buildSessionCostIndicator(
     prepassHasKnownCost = false;
     for (const sample of sessionUsage.samples) {
       if (sample.kind !== 'skill_pruning_prepass') continue;
-      const samplePricing = sample.modelId ? pricingForModel?.(sample.modelId, sample.provider) : undefined;
+      const samplePricing = sample.provenance !== undefined
+        ? undefined
+        : sample.modelId ? pricingForModel?.(sample.modelId, sample.provider) : undefined;
       const usage = assistantUsageFromSample(sample);
-      const cost = samplePricing && usage.totalTokens > 0
-        ? costFromUsage(usage, samplePricing)
-        : sample.reportedCostUsd ?? 0;
-      const hasKnownCost = sample.reportedCostUsd !== undefined || samplePricing !== undefined;
+      const resolved = resolveUsageCost(
+        usage,
+        samplePricing,
+        sample.reportedCostUsd ?? sample.calculatedCostUsd,
+      );
       const modelId = normalizeModelId(
         qualifyBillingModelId(sample.modelId, sample.provider),
         'Unknown pruning prepass model',
       );
-      prepassCost += cost;
+      prepassCost += resolved.cost;
       prepassHasUsage ||= usage.totalTokens > 0;
-      prepassHasKnownCost ||= hasKnownCost;
-      addModelCost(prepassModelCosts, modelId, usage, cost, hasKnownCost, hasKnownCost ? 0 : usage.totalTokens);
+      prepassHasKnownCost ||= resolved.hasKnownCost;
+      addModelCost(prepassModelCosts, modelId, usage, resolved.cost, resolved.hasKnownCost, resolved.unpricedTokens);
     }
   }
+  const auxiliaryKinds = [
+    ['retry', 'Provider retry attempts'],
+    ['history_compaction', 'History compaction'],
+    ['branch_summary', 'Branch summaries'],
+    ['session_title', 'Session titles'],
+    ['other', 'Other automation'],
+  ] as const;
+  const auxiliarySources = auxiliaryKinds.map(([kind, label]) => {
+    const models = new Map<string, ModelCostBreakdown>();
+    let cost = 0;
+    for (const sample of sessionUsage?.samples ?? []) {
+      if (sample.kind !== kind) continue;
+      const usage = assistantUsageFromSample(sample);
+      const samplePricing = sample.provenance !== undefined
+        ? undefined
+        : sample.modelId ? pricingForModel?.(sample.modelId, sample.provider) : undefined;
+      const resolved = resolveUsageCost(
+        usage,
+        samplePricing,
+        sample.reportedCostUsd ?? sample.calculatedCostUsd,
+      );
+      cost += resolved.cost;
+      addModelCost(
+        models,
+        normalizeModelId(qualifyBillingModelId(sample.modelId, sample.provider), `Unknown ${label.toLowerCase()} model`),
+        usage,
+        resolved.cost,
+        resolved.hasKnownCost,
+        resolved.unpricedTokens,
+      );
+    }
+    return { kind, label, cost, models };
+  });
+  const auxiliaryCost = auxiliarySources.reduce((total, source) => total + source.cost, 0);
   const liveCost = pricing && liveEstimate ? costFromUsage(liveEstimate, pricing) : 0;
   const mainCost = completed.totalCost;
-  const totalCost = mainCost + liveCost + subagents.totalCost + prepassCost;
+  const totalCost = mainCost + auxiliaryCost + liveCost + subagents.totalCost + prepassCost;
+  const subagentsHaveUsage = tokensIn(subagents.modelCosts) > 0 || unpricedTokensIn(subagents.modelCosts) > 0;
 
-  if (summary.reportedTurnCount === 0 && !liveEstimate && totalCost <= 0 && !prepassHasUsage && !prepassHasKnownCost) return null;
+  if (summary.reportedTurnCount === 0 && !liveEstimate && totalCost <= 0 && !prepassHasUsage && !prepassHasKnownCost && !subagentsHaveUsage) return null;
 
   const modelCosts = new Map<string, ModelCostBreakdown>();
   mergeModelCosts(modelCosts, completed.modelCosts);
   mergeModelCosts(modelCosts, subagents.modelCosts);
   mergeModelCosts(modelCosts, prepassModelCosts);
+  for (const source of auxiliarySources) mergeModelCosts(modelCosts, source.models);
   if (numericSubagentCost && subagents.totalCost > 0) {
     addModelCost(
       modelCosts,
@@ -832,22 +1048,87 @@ export function buildSessionCostIndicator(
       prepass.usage,
       prepass.cost,
       prepass.hasKnownCost,
-      prepass.hasKnownCost ? 0 : prepass.usage.totalTokens,
+      prepass.unpricedTokens,
     );
   }
 
   const formattedModelCosts = formatProviderModelCosts(modelCosts);
   const tooltipLines = formattedModelCosts.lines;
-  const unpricedTokens = Array.from(modelCosts.values())
-    .reduce((total, entry) => total + entry.unpricedTokens, 0);
-  const hasIncompleteCost = unpricedTokens > 0;
-  const hasAnyKnownCost = Array.from(modelCosts.values()).some((entry) => entry.hasKnownCost);
+  const unpricedTokens = unpricedTokensIn(modelCosts);
+  const provenanceIncomplete = (sessionUsage?.incompleteInvocationCount ?? 0) > 0;
+  const provenanceUnpriced = (sessionUsage?.unpricedInvocationCount ?? 0) > 0;
+  const hasIncompleteCost = unpricedTokens > 0 || provenanceIncomplete || provenanceUnpriced;
+  const hasAnyKnownCost = hasKnownCostIn(modelCosts);
+
+  const prepassSourceModels = sessionUsage ? prepassModelCosts : new Map<string, ModelCostBreakdown>();
+  if (!sessionUsage && prepass.modelId && (prepass.hasUsage || prepass.hasKnownCost)) {
+    addModelCost(
+      prepassSourceModels,
+      prepass.modelId,
+      prepass.usage,
+      prepass.cost,
+      prepass.hasKnownCost,
+      prepass.unpricedTokens,
+    );
+  }
+  const sources = ([
+    {
+      key: 'conversation',
+      label: 'Main conversation',
+      cost: mainCost,
+      hasKnownCost: hasKnownCostIn(completed.modelCosts),
+      unpricedTokens: unpricedTokensIn(completed.modelCosts),
+      tokens: completed.totalTokens,
+    },
+    {
+      key: 'subagents',
+      label: 'Subagents',
+      cost: subagents.totalCost,
+      hasKnownCost: numericSubagentCost ? subagents.totalCost > 0 : hasKnownCostIn(subagents.modelCosts),
+      unpricedTokens: unpricedTokensIn(subagents.modelCosts),
+      tokens: tokensIn(subagents.modelCosts),
+    },
+    {
+      key: 'pruning',
+      label: 'Skill pruning prepasses',
+      cost: prepassCost,
+      hasKnownCost: prepassHasKnownCost,
+      unpricedTokens: unpricedTokensIn(prepassSourceModels),
+      tokens: tokensIn(prepassSourceModels),
+    },
+    ...auxiliarySources.map((source) => ({
+      key: source.kind,
+      label: source.label,
+      cost: source.cost,
+      hasKnownCost: hasKnownCostIn(source.models),
+      unpricedTokens: unpricedTokensIn(source.models),
+      tokens: tokensIn(source.models),
+    })),
+    {
+      key: 'live',
+      label: 'Current turn estimate',
+      cost: liveCost,
+      hasKnownCost: pricing !== undefined && liveEstimate !== null && liveEstimate !== undefined,
+      unpricedTokens: liveEstimate
+        ? pricing ? liveEstimate.unclassifiedContextTokens : liveEstimate.totalTokens
+        : 0,
+      tokens: liveEstimate?.totalTokens ?? 0,
+    },
+  ] satisfies SessionCostSourceBreakdown[]).filter(
+    (source) => source.cost > 0 || source.tokens > 0 || source.unpricedTokens > 0 || source.hasKnownCost,
+  );
 
   if (tooltipLines.length === 0) {
     tooltipLines.push('Session cost by provider / model (whole branch):', '  No priced usage');
   }
   if (hasIncompleteCost) {
-    tooltipLines.push('', `* Excludes ${formatCostTokens(unpricedTokens)} pending billing details or pricing.`);
+    const incompleteInvocations = sessionUsage?.incompleteInvocationCount ?? 0;
+    const unpricedInvocations = sessionUsage?.unpricedInvocationCount ?? 0;
+    tooltipLines.push(
+      '',
+      `* Excludes ${formatCostTokens(unpricedTokens)} pending billing details or pricing.`,
+      `  Provenance: ${incompleteInvocations} unknown and ${unpricedInvocations} unpriced invocation(s).`,
+    );
   }
   // Make the displayed subtotal reconcile with the independently rounded rows.
   // Full-precision totalCost remains authoritative for the compact label.
@@ -873,5 +1154,15 @@ export function buildSessionCostIndicator(
     label,
     ariaLabel,
     tooltip: tooltipLines.join('\n'),
+    breakdown: {
+      totalCost,
+      hasIncompleteCost,
+      unpricedTokens,
+      reportedTurnCount: summary.reportedTurnCount,
+      inputTokens: summary.inputTokens,
+      outputTokens: summary.outputTokens,
+      providers: providerModelBreakdown(modelCosts),
+      sources,
+    },
   };
 }

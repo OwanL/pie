@@ -12,7 +12,9 @@ import {
 import { backendWarn } from './log';
 import {
   consumedOverflowMessageEntryIds,
+  isAllZeroEmptyLengthMessage,
   isContextOverflowMessage,
+  isEstimatedContextOverflowMessage,
 } from './history-compaction';
 import {
   ensureSdkPatchBarrier,
@@ -46,6 +48,7 @@ export interface SdkSessionEvent {
     | 'session_start'
     | 'agent_start'
     | 'agent_end'
+    | 'agent_settled'
     | 'message_start'
     | 'message_update'
     | 'message_end'
@@ -98,6 +101,8 @@ export interface SdkSessionEvent {
   success?: boolean;
   /** `auto_retry_end`: final error on a failed/exhausted/cancelled retry. */
   finalError?: string;
+  /** `compaction_end`: true when the compaction was cancelled by abort. */
+  aborted?: boolean;
   /** Session lifecycle or history-compaction reason metadata. */
   reason?: 'manual' | 'threshold' | 'overflow' | 'new' | 'resume' | 'fork' | 'startup' | 'reload' | 'quit';
   previousSessionFile?: string;
@@ -309,12 +314,6 @@ export interface SdkSession {
    * the before_agent_start prompt preflight. Installed by Pie's runtime adapter
    * over the pinned SDK's internal continuation seam. */
   continueAfterInterruption?: () => Promise<void>;
-  /** Cancel Pie's deferred zero-prompt continuation after threshold history
-   * compaction. Called by the public interrupt barrier before SDK abort. */
-  cancelPendingHardCompactionContinuation?: () => void;
-  /** Whether Pie's patched SDK outer loop still owns a deferred threshold
-   * continuation. Used to reconcile backend event ordering at agent_end. */
-  hasPendingHistoryCompactionContinuation?: () => boolean;
   /** Manually summarize older history to free context. */
   compact: (customInstructions?: string) => Promise<unknown>;
   abort: () => Promise<void>;
@@ -334,14 +333,15 @@ export interface SdkSession {
   /** Clear all queued steering + follow-up messages and return what was cleared.
    *  Synchronous. Used by `message.clearQueue` and on interrupt. */
   clearQueue: () => { steering: string[]; followUp: string[] };
-  /** Billable windows that may still be running after `agent_end` (the backend
-   *  already cleared `activeRequest` + emitted busy=false). `message.interrupt`
-   *  treats any of these as "running" so a Stop hard-stops the spend instead of
-   *  being rejected as SESSION_NOT_RUNNING. Optional: an older SDK that doesn't
-   *  expose a predicate is `undefined` → falsy → the legacy guard behaviour. */
+  /** SDK activity predicates used by Pie's single billable-activity authority.
+   * `isStreaming` spans the complete agent run through `agent_settled`; the
+   * remaining getters cover maintenance, retry, queue, and user-bash windows
+   * that can exist outside an ordinary provider turn. */
   isCompacting?: boolean;
   isRetrying?: boolean;
   isBashRunning?: boolean;
+  hasPendingBashMessages?: boolean;
+  pendingMessageCount?: number;
   /** Hard-stop the corresponding billable window. `session.abort()` alone does
    *  NOT stop these post-agent_end LLM/tool calls, so `message.interrupt` calls
    *  them synchronously before the un-awaited `abort()` runs. Each is a no-op
@@ -596,10 +596,9 @@ interface PatchableAgentSession {
     }, signal?: AbortSignal) => Promise<Record<string, unknown> | undefined>;
     state: { messages: unknown[] };
     streamFn?: unknown;
+    hasQueuedMessages?: () => boolean;
   };
   continueAfterInterruption?: () => Promise<void>;
-  cancelPendingHardCompactionContinuation?: () => void;
-  hasPendingHistoryCompactionContinuation?: () => boolean;
   model?: PatchableModel;
   thinkingLevel?: ThinkingLevel;
   settingsManager?: { getCompactionSettings(): SdkCompactionSettings };
@@ -614,14 +613,12 @@ interface PatchableAgentSession {
   _isAgentRunActive?: boolean;
   _runAgentPrompt?: (messages: unknown[]) => Promise<void>;
   _handlePostAgentRun(): Promise<boolean>;
-  __pieHardCompactionContinuationPending?: boolean;
-  __pieHardCompactionContinuationBoundary?: unknown;
-  __pieHardCompactionContinuationCancelled?: boolean;
   _overflowRecoveryAttempted?: boolean;
+  _emit?: (event: unknown) => void;
   _installAgentNextTurnRefresh(): void;
   _buildRuntime?: (...args: unknown[]) => unknown;
   _checkCompaction(assistantMessage: PatchableAssistantMessage, skipAbortedCheck?: boolean): Promise<boolean>;
-  _runAutoCompaction(reason: 'threshold', willRetry: boolean): Promise<boolean>;
+  _runAutoCompaction(reason: 'threshold' | 'overflow', willRetry: boolean): Promise<boolean>;
   getContextUsage(): HistoryCompactionUsage | undefined;
 }
 
@@ -797,22 +794,21 @@ async function runPatchedHistoryCompaction(
   session: PatchableAgentSession,
   trigger: 'soft' | 'hard',
   continueRun: boolean,
-): Promise<{ compacted: boolean; continueRequested: boolean }> {
+): Promise<boolean> {
   const settings = readLiveHistoryCompactionSettings();
   if (!shouldRunHistoryCompaction(settings, session.getContextUsage(), trigger, session.model)) {
-    return { compacted: false, continueRequested: false };
+    return false;
   }
   const before = latestCompactionId(session);
-  const continueRequested = await session._runAutoCompaction('threshold', continueRun);
-  return {
-    compacted: latestCompactionId(session) !== before,
-    continueRequested,
-  };
+  await session._runAutoCompaction('threshold', continueRun);
+  return latestCompactionId(session) !== before;
 }
 
 interface PatchableAssistantMessage {
   stopReason?: string;
   content?: unknown[];
+  provider?: string;
+  model?: string;
   usage?: {
     input?: number;
     output?: number;
@@ -825,17 +821,6 @@ function hasAssistantToolCall(message: PatchableAssistantMessage | undefined): b
     !!part && typeof part === 'object' && (part as { type?: unknown }).type === 'toolCall') ?? false;
 }
 
-function armPendingHistoryCompactionContinuation(
-  session: PatchableAgentSession,
-  shouldArm: boolean,
-): void {
-  session.__pieHardCompactionContinuationPending = shouldArm
-    && !session.__pieHardCompactionContinuationCancelled;
-  session.__pieHardCompactionContinuationBoundary = session.__pieHardCompactionContinuationPending
-    ? session.agent.state.messages[session.agent.state.messages.length - 1]
-    : undefined;
-}
-
 function isSilentContextOverflow(
   message: PatchableAssistantMessage,
   contextWindow: number | undefined,
@@ -846,6 +831,44 @@ function isSilentContextOverflow(
   return message.stopReason === 'length'
     && (message.usage.output ?? 0) === 0
     && input >= contextWindow * 0.99;
+}
+
+async function recoverEstimatedContextOverflow(
+  session: PatchableAgentSession,
+  assistantMessage: PatchableAssistantMessage,
+): Promise<boolean | undefined> {
+  const model = session.model;
+  const sameModel = !!model
+    && assistantMessage.provider === model.provider
+    && assistantMessage.model === model.id;
+  if (!sameModel || !isAllZeroEmptyLengthMessage(assistantMessage)) return undefined;
+
+  const usage = session.getContextUsage();
+  if (!isEstimatedContextOverflowMessage(
+    assistantMessage,
+    model.contextWindow,
+    usage?.tokens,
+  )) return undefined;
+
+  if (session._overflowRecoveryAttempted) {
+    session._emit?.({
+      type: 'compaction_end',
+      reason: 'overflow',
+      result: undefined,
+      aborted: false,
+      willRetry: false,
+      errorMessage: 'Context overflow recovery failed after one compact-and-retry attempt. Try reducing context or switching to a larger-context model.',
+    });
+    return false;
+  }
+
+  session._overflowRecoveryAttempted = true;
+  const messages = session.agent.state.messages;
+  const last = messages[messages.length - 1];
+  if (last && typeof last === 'object' && (last as { role?: unknown }).role === 'assistant') {
+    session.agent.state.messages = messages.slice(0, -1);
+  }
+  return await session._runAutoCompaction('overflow', true);
 }
 
 function isBeforeCompactEvent(event: unknown): event is BeforeCompactEvent {
@@ -1028,10 +1051,8 @@ export function applySdkHistoryCompactionRuntimePatch(
   const originalInstall = prototype._installAgentNextTurnRefresh;
   const originalBuildRuntime = prototype._buildRuntime;
   const originalCheck = prototype._checkCompaction;
-  const originalHandlePostAgentRun = prototype._handlePostAgentRun;
   if (typeof originalInstall !== 'function'
-      || typeof originalCheck !== 'function'
-      || typeof originalHandlePostAgentRun !== 'function') return 'unsupported-shape';
+      || typeof originalCheck !== 'function') return 'unsupported-shape';
   const hasCompactionCustomization = typeof sdk.prepareCompaction === 'function'
     && typeof sdk.compact === 'function';
   if (hasCompactionCustomization && typeof originalBuildRuntime !== 'function') return 'unsupported-shape';
@@ -1054,25 +1075,17 @@ export function applySdkHistoryCompactionRuntimePatch(
     const previousPrepare = this.agent.prepareNextTurnWithContext;
     if (typeof previousPrepare !== 'function') return;
     this.agent.prepareNextTurnWithContext = async (turn, signal) => {
-      // If the core loop naturally made another provider turn after an earlier
-      // hard compaction (tools or queued input), that callback proves the
-      // deferred fallback is stale and prevents an extra continuation.
-      this.__pieHardCompactionContinuationPending = false;
-      this.__pieHardCompactionContinuationBoundary = undefined;
-      this.__pieHardCompactionContinuationCancelled = false;
       const previousSnapshot = await previousPrepare.call(this.agent, turn, signal);
-      const result = await runPatchedHistoryCompaction(this, 'hard', true);
-      if (!result.compacted) return previousSnapshot;
-      const hasToolContinuation = (turn.toolResults?.length ?? 0) > 0
-        || hasAssistantToolCall(turn.message);
-      // agent-core naturally loops after tools and queued input, but a terminal
-      // assistant turn would otherwise exit even though successful hard
-      // compaction requested continuation. Defer that case to the outer SDK
-      // post-run loop below, which can safely invoke agent.continue().
-      armPendingHistoryCompactionContinuation(
-        this,
-        result.continueRequested && !hasToolContinuation,
-      );
+      // A hard-threshold check runs after every provider turn, including a
+      // normal terminal response. Only tools or an already-queued user message
+      // prove the agent loop has more work. Compaction after completed output
+      // alone is maintenance for the next user turn and must not manufacture a
+      // zero-prompt provider call.
+      const hasNaturalContinuation = (turn.toolResults?.length ?? 0) > 0
+        || hasAssistantToolCall(turn.message)
+        || this.agent.hasQueuedMessages?.() === true;
+      const compacted = await runPatchedHistoryCompaction(this, 'hard', hasNaturalContinuation);
+      if (!compacted) return previousSnapshot;
       const baseContext = (previousSnapshot?.context ?? turn.context) as Record<string, unknown>;
       return {
         ...(previousSnapshot ?? {}),
@@ -1084,63 +1097,18 @@ export function applySdkHistoryCompactionRuntimePatch(
     };
   };
 
-  prototype.cancelPendingHardCompactionContinuation = function cancelPendingHardCompactionContinuation(
-    this: PatchableAgentSession,
-  ): void {
-    this.__pieHardCompactionContinuationPending = false;
-    this.__pieHardCompactionContinuationBoundary = undefined;
-    this.__pieHardCompactionContinuationCancelled = true;
-  };
-
-  prototype.hasPendingHistoryCompactionContinuation = function hasPendingHistoryCompactionContinuation(
-    this: PatchableAgentSession,
-  ): boolean {
-    return this.__pieHardCompactionContinuationPending === true;
-  };
-
-  prototype._handlePostAgentRun = async function patchedHandlePostAgentRun(
-    this: PatchableAgentSession,
-  ): Promise<boolean> {
-    const nativeContinuation = await (originalHandlePostAgentRun as PatchableAgentSession['_handlePostAgentRun']).call(this);
-    if (nativeContinuation) {
-      this.__pieHardCompactionContinuationPending = false;
-      this.__pieHardCompactionContinuationBoundary = undefined;
-      return true;
-    }
-    if (!this.__pieHardCompactionContinuationPending) return false;
-    this.__pieHardCompactionContinuationPending = false;
-    const boundary = this.__pieHardCompactionContinuationBoundary;
-    this.__pieHardCompactionContinuationBoundary = undefined;
-    if (this.agent.state.messages[this.agent.state.messages.length - 1] !== boundary) {
-      // A queued/tool-driven provider turn started naturally after compaction.
-      // Error/abort paths exit before prepareNextTurn runs again, so the changed
-      // transcript tail is the authoritative proof that the deferred fallback
-      // has already been consumed.
-      return false;
-    }
-
-    // agent.continue() rejects an assistant tail. The hard-compaction summary
-    // and durable transcript already retain that terminal response, so remove
-    // only its in-memory provider-context copy before the zero-prompt retry.
-    const messages = this.agent.state.messages;
-    const last = messages[messages.length - 1];
-    if (last && typeof last === 'object' && (last as { role?: unknown }).role === 'assistant') {
-      this.agent.state.messages = messages.slice(0, -1);
-    }
-    const continuationTail = this.agent.state.messages[this.agent.state.messages.length - 1];
-    if (!continuationTail
-        || (typeof continuationTail === 'object'
-          && (continuationTail as { role?: unknown }).role === 'assistant')) {
-      throw new Error('History compaction could not establish a provider continuation boundary.');
-    }
-    return true;
-  };
-
   prototype._checkCompaction = async function patchedCheck(
     this: PatchableAgentSession,
     assistantMessage: PatchableAssistantMessage,
     skipAbortedCheck = true,
   ): Promise<boolean> {
+    // Some providers return an empty length stop with all usage counters zero
+    // when the prompt exhausts their context. Native pi cannot recognize that
+    // shape because its overflow classifier requires direct input usage, so
+    // recover it here from the SDK's last-valid-usage context estimate.
+    const estimatedOverflowRecovery = await recoverEstimatedContextOverflow(this, assistantMessage);
+    if (estimatedOverflowRecovery !== undefined) return estimatedOverflowRecovery;
+
     // Provider errors and silent overflow signals must reach pi's native
     // classifier first so overflow compacts, removes a truncated assistant
     // where required, and performs its one bounded retry. Normal successful
@@ -1155,25 +1123,11 @@ export function applySdkHistoryCompactionRuntimePatch(
       );
     }
     const trigger = this._isAgentRunActive ? 'soft' : 'hard';
-    // `_checkCompaction(..., true)` is the post-agent-run seam. A threshold
-    // compaction there happens after agent_end, so ask the SDK to keep the
-    // accepted prompt alive and defer its zero-prompt continuation through our
-    // patched outer loop. Pre-prompt checks (`skipAbortedCheck=false`) already
-    // have a user message to send and must not create a second continuation.
-    const shouldContinueRun = skipAbortedCheck
-      && this._isAgentRunActive === true
-      && !hasAssistantToolCall(assistantMessage);
-    const result = await runPatchedHistoryCompaction(this, trigger, shouldContinueRun);
-    if (result.compacted) {
-      if (shouldContinueRun && result.continueRequested) {
-        armPendingHistoryCompactionContinuation(this, true);
-        // Returning true directly would make the native outer loop call
-        // agent.continue() while provider context still ends in an assistant.
-        // Let patchedHandlePostAgentRun remove only that in-memory tail first.
-        return false;
-      }
-      return result.continueRequested;
-    }
+    // `_checkCompaction(..., true)` is the post-agent-run seam. A successful
+    // response is complete: threshold compaction prepares the next user turn
+    // and, unlike provider-overflow recovery, never calls agent.continue().
+    const compacted = await runPatchedHistoryCompaction(this, trigger, false);
+    if (compacted) return false;
     // Any valid live Pie policy owns normal threshold timing completely,
     // including enabled=false. Native error/overflow handling was delegated
     // above; falling through while disabled would silently re-enable pi's

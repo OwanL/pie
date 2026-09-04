@@ -729,13 +729,17 @@ Run the existing UX reliability smoke tests plus:
 Use focused tests during each milestone, then the repository gates:
 
 ```bash
+# During each milestone
 npm run test:file -- extension/test/host/renderers/renderer-hub.test.ts
 npm run test:file -- extension/test/host/browser-server/browser-server.test.ts
-npm run test:file -- extension/test/webview/components/browser-transport.test.ts
-npm run typecheck
+npm run test:file -- extension/test/host/browser-server/browser-renderer-transport.test.ts
+npm run test:file -- extension/test/webview/transport/client-transport.test.ts
+npm run check
 npm run extension:build
-npm test
-cd extension && npm run package
+
+# Before push or release
+npm run verify
+npm run extension:package
 ```
 
 Any edit under `extension/src/` requires the extension build, which also syncs output to the installed extension.

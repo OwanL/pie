@@ -15,7 +15,7 @@ import { estimateTokens } from "../logger.js";
 import { countTokens } from "../../../shared/tokenize.js";
 import type { PruningConfig, PruningDecision, PruningResult } from "../types.js";
 
-import type { PrepassUsage, SkillPruningResult, ToolPruningResult } from "./pruning-types.js";
+import type { PrepassInvocation, PrepassUsage, SkillPruningResult, ToolPruningResult } from "./pruning-types.js";
 
 export interface PrepassDiagnostics {
 	model: string;
@@ -27,6 +27,7 @@ export interface PrepassDiagnostics {
 	userMessage: string;
 	latencyMs: number;
 	usage?: PrepassUsage;
+	prepassInvocations?: PrepassInvocation[];
 	cacheHit?: boolean;
 	error?: string | null;
 	safeguardReason?: string | null;
@@ -206,6 +207,7 @@ export function buildFeedbackMessage(
 		if (prepass.userMessage) details.prepassUserMessage = prepass.userMessage;
 		details.prepassLatencyMs = prepass.latencyMs;
 		applyPrepassUsage(details, prepass.usage);
+		if (prepass.prepassInvocations !== undefined) details.prepassInvocations = prepass.prepassInvocations;
 		// Surface the error verbatim — never swallow it. Transport errors
 		// (5xx/429/network) are prefixed so users can tell an upstream blip
 		// apart from a genuine content/parse failure. This is the only
@@ -246,6 +248,7 @@ export function buildFeedbackMessage(
 		if (prepass.userMessage) details.prepassUserMessage = prepass.userMessage;
 		details.prepassLatencyMs = prepass.latencyMs;
 		applyPrepassUsage(details, prepass.usage);
+		if (prepass.prepassInvocations !== undefined) details.prepassInvocations = prepass.prepassInvocations;
 		if (prepass.cacheHit) details.cacheHit = true;
 		if (prepass.safeguardReason) details.prepassSafeguardReason = prepass.safeguardReason;
 	}

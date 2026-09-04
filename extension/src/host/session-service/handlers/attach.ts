@@ -61,8 +61,10 @@ export function applySessionOpenedPayload(
     deps.dispatchArch({
       kind: 'CreateOperationSucceeded',
       operationId: flags.createResolution.operation.operationId,
-      pendingPath: flags.createResolution.operation.pendingPath,
+      pendingPath: flags.createResolution.operation.session.pendingPath,
       sessionPath: session.path,
+      attempt: payload.operationAttempt,
+      backendGeneration: flags.operationBackendGeneration,
     });
   }
 
@@ -77,6 +79,16 @@ export function applySessionOpenedPayload(
   }
 
   const transcriptResolution = resolveAndDispatch(payload, deps, session.path, flags.staleSessionData);
+
+  // Whole-branch transcript usage is accepted only as a migration/rebuild
+  // source. Steady-state usage/cost surfaces read the host invocation ledger.
+  if (!flags.staleSessionData && payload.sessionUsage) {
+    deps.runObserver.onSessionUsageSnapshot(
+      session.path,
+      session.identityFallback === true ? undefined : session.sessionId?.trim() || undefined,
+      payload.sessionUsage,
+    );
+  }
 
   applyPostDispatchState(deps, payload, session.path, flags, transcriptResolution.transcript);
 
@@ -97,24 +109,28 @@ function computeOpeningFlags(payload: SessionOpenedPayload, deps: ApplySessionOp
   const archState = deps.getArchState();
   const selectionRequest = deps.state.getSelectionRequest(selectionToken);
   const operation = payload.operationId
-    ? archState.pending.createOperations[payload.operationId]
+    ? archState.operations[payload.operationId]
     : selectionRequest?.operationId
-      ? archState.pending.createOperations[selectionRequest.operationId]
+      ? archState.operations[selectionRequest.operationId]
       : undefined;
   const operationMatches = !!operation
     && (!payload.operationId || operation.operationId === payload.operationId)
-    && (!payload.operationId || selectionToken === operation.selectionToken)
+    && (!payload.operationId || selectionToken === operation.causal.selectionToken)
     && (!payload.operationId || !!selectionToken)
-    && operation.pendingPath !== session.path;
-  const fresh = operationMatches
-    && (operation.status === 'pending' || operation.status === 'delayed-awaiting-outcome');
+    && operation.session.pendingPath !== session.path;
+  const fresh = operationMatches && !operation.terminal;
   const duplicate = operationMatches
-    && operation.status === 'succeeded'
-    && operation.resolvedSessionPath === session.path;
-  const rejected = !!payload.operationId && (!operation || !operationMatches || operation.status === 'failed');
+    && operation.terminal?.outcome === 'settled'
+    && operation.session.resolvedPath === session.path;
+  const rejected = !!payload.operationId
+    && (!operation || !operationMatches || (!!operation.terminal && operation.terminal.outcome !== 'settled'));
   const createResolution = operation
     ? { operation, fresh, duplicate, rejected, hidden: operation.hidden === true }
     : undefined;
+  const operationFences = payload.operationAttempt !== undefined
+    ? selectionRequest?.modelFencesByOperationAttempt?.[payload.operationAttempt]
+    : selectionRequest;
+  const operationBackendGeneration = operationFences?.backendGeneration ?? deps.state.getBackendGeneration();
   const staleSessionData = selectionRequest?.requestEpoch !== undefined
     && deps.state.getSessionDataEpoch(session.path) !== selectionRequest.requestEpoch;
   const replacementSource = payload.replacesSessionPath;
@@ -134,7 +150,7 @@ function computeOpeningFlags(payload: SessionOpenedPayload, deps: ApplySessionOp
             && selectionRequest.pendingPath !== session.path
             && archState.sessions.activeSessionPath === selectionRequest.pendingPath))));
 
-  return { selectionRequest, staleSessionData, shouldOpenTab, shouldActivate, createResolution };
+  return { selectionRequest, staleSessionData, shouldOpenTab, shouldActivate, createResolution, operationBackendGeneration };
 }
 
 function logSessionOpened(
@@ -170,7 +186,7 @@ function handlePendingPathReplacement(
   sessionPath: string,
   stableSessionId: string | undefined,
 ): void {
-  const pendingPath = operation.pendingPath ?? selectionRequest?.pendingPath;
+  const pendingPath = operation.session.pendingPath ?? selectionRequest?.pendingPath;
   if (!pendingPath || pendingPath === sessionPath) return;
 
   deps.dispatchArch({
@@ -354,6 +370,12 @@ export function handleBusyChangedPayload(
     kind: 'BusyChanged',
     sessionPath,
     running: payload.busy,
+    capabilities: payload.capabilities ?? {
+      billableActivity: payload.busy,
+      canInterrupt: payload.busy,
+      canCompact: !payload.busy,
+      canContinue: false,
+    },
   });
   deps.runObserver.onBusyChanged(sessionPath, payload.busy);
   // The reducer has now applied the authoritative host running state. If the
@@ -449,6 +471,7 @@ export function attach(
     // those operation-ledger entries before clearing generation-scoped host
     // waiters; resolved operations remain tombstoned and stale opened events
     // cannot replace them.
+    deps.state.failPendingSendOperations(exitNotice);
     deps.state.failPendingCreateOperations(exitNotice);
     // Clear dead-process runtime state now, but generation ownership advances
     // exactly once when the replacement process starts. BackendClient follows

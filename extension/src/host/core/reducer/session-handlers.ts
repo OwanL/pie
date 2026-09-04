@@ -26,6 +26,17 @@ import { pendingOwnerKey, pruneExpiredTerminalAttempts, terminalAttemptKey } fro
 import { applyLiveTurnCheckpoint } from '../live-pipeline/checkpoint.js';
 import type { LiveTurnCheckpoint } from '../../../shared/live-pipeline-protocol.js';
 import { sessionHasDeferredModelWrite, startNextDeferredSetModel } from './set-model-handlers.js';
+import {
+  activeInterruptOperation,
+  hasRetiredInterruptEventFence,
+  markSessionOperationAccepted,
+  markSessionOperationAmbiguous,
+  settleSessionOperationCancelled,
+  settleSessionOperationFailed,
+  settleSessionOperationSucceeded,
+} from '../operation-registry.js';
+import { handleEditResult, handlePreflightFailed } from './result-handlers.js';
+import { interruptLivePipelineForSession } from './live-pipeline-handlers.js';
 
 const BACKEND_EXIT_TOMBSTONE_GRACE_MS = 15_000;
 
@@ -158,6 +169,16 @@ export function handleSessionOpened(state: ArchState, event: Extract<Event, { ki
   ) || Object.values(state.pending.promoted).some(
     (operation) => operation.sessionPath === sessionPath && !operation.queued,
   );
+  const hostOwnsMessageExecution = Object.values(state.operations).some(
+    (operation) => !operation.terminal
+      && (operation.kind === 'message.continue' || operation.kind === 'message.compact')
+      && (operation.session.resolvedPath ?? operation.session.pendingPath) === sessionPath,
+  );
+  const hostOwnsManualCompaction = Object.values(state.operations).some(
+    (operation) => !operation.terminal
+      && operation.kind === 'message.compact'
+      && (operation.session.resolvedPath ?? operation.session.pendingPath) === sessionPath,
+  );
   const deferredInlineEditResolution = preserveInlineEdit
     ? resolveSessionOpenedTranscript({
         busy: false,
@@ -187,19 +208,43 @@ export function handleSessionOpened(state: ArchState, event: Extract<Event, { ki
         localTranscript,
       });
 
-  // Sessions: running state, backend ready, upsert summary
-  const interruptSettled = state.sessions.interruptSettledSessionPaths.includes(sessionPath);
-  const nextRunningSessionPaths = payload.busy && !interruptSettled
-    ? addToArray(state.sessions.runningSessionPaths, sessionPath)
-    : hostOwnsOptimisticTurn
-      ? state.sessions.runningSessionPaths
-      : removeFromArray(state.sessions.runningSessionPaths, sessionPath);
+  // Sessions: running state, backend ready, upsert summary. An active Stop
+  // retains ownership until its settlement barrier; a successful Stop's
+  // registry fence rejects stale busy snapshots from the retired turn.
+  const interruptActive = activeInterruptOperation(state.operations, sessionPath) !== undefined;
+  const interruptRetired = hasRetiredInterruptEventFence(state.operations, sessionPath);
+  const nextRunningSessionPaths = interruptActive
+    ? state.sessions.runningSessionPaths
+    : payload.busy && !interruptRetired
+      ? addToArray(state.sessions.runningSessionPaths, sessionPath)
+      : hostOwnsOptimisticTurn || hostOwnsMessageExecution
+        ? state.sessions.runningSessionPaths
+        : removeFromArray(state.sessions.runningSessionPaths, sessionPath);
+  const openedCapabilities = interruptActive || (payload.busy && interruptRetired)
+    ? state.sessions.capabilitiesBySession[sessionPath] ?? {
+        billableActivity: false,
+        canInterrupt: false,
+        canCompact: true,
+        canContinue: false,
+      }
+    : payload.capabilities ?? {
+        billableActivity: payload.busy,
+        canInterrupt: payload.busy,
+        canCompact: !payload.busy,
+        canContinue: false,
+      };
   // A session opened mid-compaction carries `isCompacting` (the backend's
   // `isStreaming`/`activeRequest` are both false while compaction runs, so
   // `busy` alone cannot restore the "Compacting…" indicator).
-  const nextCompactingSessionPaths = payload.isCompacting === true
-    ? addToArray(state.sessions.compactingSessionPaths, sessionPath)
-    : state.sessions.compactingSessionPaths;
+  const nextCompactingSessionPaths = interruptActive
+    ? state.sessions.compactingSessionPaths
+    : interruptRetired
+      ? removeFromArray(state.sessions.compactingSessionPaths, sessionPath)
+      : payload.isCompacting === true
+        ? addToArray(state.sessions.compactingSessionPaths, sessionPath)
+        : hostOwnsManualCompaction
+          ? state.sessions.compactingSessionPaths
+          : removeFromArray(state.sessions.compactingSessionPaths, sessionPath);
 
   // Preserve review fields across `session.opened`'s full-replace upsert.
   // `payload.session` comes from `buildCurrentSummary`, which merges the
@@ -286,6 +331,10 @@ export function handleSessionOpened(state: ArchState, event: Extract<Event, { ki
     sessions: {
       ...next.sessions,
       runningSessionPaths: nextRunningSessionPaths,
+      capabilitiesBySession: {
+        ...next.sessions.capabilitiesBySession,
+        [sessionPath]: openedCapabilities,
+      },
       compactingSessionPaths: nextCompactingSessionPaths,
       sessions: upsertSessionSummary(next.sessions.sessions, guardedSummary),
       ...(payload.analyticsFactors && {
@@ -361,7 +410,7 @@ export function handleSessionOpened(state: ArchState, event: Extract<Event, { ki
   };
 
   const effects: Effect[] = [];
-  if (payload.liveTurnCheckpoint) {
+  if (!interruptActive && !interruptRetired && payload.liveTurnCheckpoint) {
     next = applyAuthoritativeOpenedCheckpoint(next, sessionPath, payload.liveTurnCheckpoint);
     const recoveredTurn = next.livePipeline.turnsBySession[sessionPath];
     if (recoveredTurn?.turnId === payload.liveTurnCheckpoint.turnId
@@ -374,11 +423,12 @@ export function handleSessionOpened(state: ArchState, event: Extract<Event, { ki
         sessionPath,
         payload.liveTurnCheckpoint.turn.requestId,
         payload.liveTurnCheckpoint.turn.canonicalMessageId,
+        payload.liveTurnCheckpoint.turn.operationId,
       );
       next = committedSend.state;
       effects.push(...committedSend.effects);
     }
-  } else if (payload.busy) {
+  } else if (!interruptActive && !interruptRetired && payload.busy) {
     // The backend kept the durable assistant tail visible because it could not
     // provide an atomic checkpoint. Prefer the bounded recovery identity from
     // this authoritative open; unlike local live state it also works for a
@@ -394,7 +444,7 @@ export function handleSessionOpened(state: ArchState, event: Extract<Event, { ki
         attemptId: recoveryIdentity.attemptId,
       });
     }
-  } else if (!hostOwnsOptimisticTurn) {
+  } else if (!interruptActive && !hostOwnsOptimisticTurn) {
     // A full idle snapshot is authoritative for live ownership. If the host
     // has no optimistic send/edit in flight, any surviving active row belongs
     // to an earlier missed terminal boundary and would otherwise be projected
@@ -525,15 +575,48 @@ export function handleSessionNameDerived(state: ArchState, event: Extract<Event,
   return { state: nextState, effects: [] };
 }
 
+export function handleAgentSettled(state: ArchState, event: Extract<Event, { kind: 'AgentSettled' }>): ReducerResult {
+  return {
+    state: {
+      ...state,
+      sessions: {
+        ...state.sessions,
+        capabilitiesBySession: {
+          ...state.sessions.capabilitiesBySession,
+          [event.sessionPath]: event.capabilities,
+        },
+      },
+    },
+    effects: [],
+  };
+}
+
 export function handleBusyChanged(state: ArchState, event: Extract<Event, { kind: 'BusyChanged' }>): ReducerResult {
+  if (activeInterruptOperation(state.operations, event.sessionPath)) return { state, effects: [] };
+  // A successful interrupt is a completion barrier. Provider/SDK lifecycle
+  // events already queued before that acknowledgement may still arrive, but
+  // they describe the retired turn and must not resurrect activity or its
+  // capabilities. A real next Send/Edit/Compact command clears this fence.
+  if (event.running && hasRetiredInterruptEventFence(state.operations, event.sessionPath)) {
+    return { state, effects: [] };
+  }
+  const capabilities = event.capabilities ?? {
+    billableActivity: event.running,
+    canInterrupt: event.running,
+    canCompact: !event.running,
+    canContinue: false,
+  };
+  state = {
+    ...state,
+    sessions: {
+      ...state.sessions,
+      capabilitiesBySession: {
+        ...state.sessions.capabilitiesBySession,
+        [event.sessionPath]: capabilities,
+      },
+    },
+  };
   if (event.running) {
-    // A successful interrupt is a completion barrier. Provider/SDK lifecycle
-    // events already queued before that acknowledgement may still arrive, but
-    // they describe the retired turn and must not resurrect it. A real next
-    // Send/Edit/Compact command clears this fence before starting work.
-    if (state.sessions.interruptSettledSessionPaths.includes(event.sessionPath)) {
-      return { state, effects: [] };
-    }
     return {
       state: {
         ...state,
@@ -614,46 +697,88 @@ export function handleBusyChanged(state: ArchState, event: Extract<Event, { kind
  *  starts. The backend re-arms busy at the same time, so the session is also in
  *  `runningSessionPaths`; this separate marker lets the UI label the activity. */
 export function handleCompactionStarted(state: ArchState, event: Extract<Event, { kind: 'CompactionStarted' }>): ReducerResult {
+  const operation = event.operationId ? state.operations[event.operationId] : undefined;
+  if (event.operationId && (!operation || operation.kind !== 'message.compact' || operation.terminal
+    || (operation.session.resolvedPath ?? operation.session.pendingPath) !== event.sessionPath)) {
+    return { state, effects: [] };
+  }
+  const accepted = operation ? markSessionOperationAccepted(operation, {
+    pendingPath: operation.session.pendingPath,
+  }) : null;
   return {
-    state: {
-      ...state,
-      sessions: {
-        ...state.sessions,
-        compactingSessionPaths: addToArray(state.sessions.compactingSessionPaths, event.sessionPath),
-      },
-    },
+    state: produce(state, (draft) => {
+      draft.sessions.compactingSessionPaths = addToArray(draft.sessions.compactingSessionPaths, event.sessionPath);
+      if (accepted && event.operationId) draft.operations[event.operationId] = accepted;
+    }),
     effects: [],
   };
 }
 
 /** Clear the "Compacting…" indicator when a history-compaction LLM call
- *  finishes (success, failure, or abort) and record the transient "Compacted"
- *  chip. The chip expires after `LAST_COMPACTION_CHIP_TTL_MS` via the
- *  `ClearLastCompaction` effect. */
+ *  finishes. Only a succeeded outcome records the transient "Compacted" chip;
+ *  failed and aborted calls remove any older success chip so the UI cannot make
+ *  the just-finished operation look successful. The success chip expires after
+ *  `LAST_COMPACTION_CHIP_TTL_MS` via the `ClearLastCompaction` effect. */
 export function handleCompactionEnded(state: ArchState, event: Extract<Event, { kind: 'CompactionEnded' }>): ReducerResult {
-  const summary = {
-    at: event.occurredAt,
-    ...(event.tokensBefore !== undefined ? { tokensBefore: event.tokensBefore } : {}),
-    ...(event.estimatedTokensAfter !== undefined ? { estimatedTokensAfter: event.estimatedTokensAfter } : {}),
-  };
+  const operation = event.operationId ? state.operations[event.operationId] : undefined;
+  if (event.operationId && (!operation || operation.kind !== 'message.compact'
+    || operation.terminalEvidenceApplied === true
+    || (operation.session.resolvedPath ?? operation.session.pendingPath) !== event.sessionPath)) {
+    return { state, effects: [] };
+  }
+  let settled = operation;
+  if (operation && !operation.terminal) {
+    settled = event.outcome === 'succeeded'
+      ? settleSessionOperationSucceeded(operation, {
+          pendingPath: operation.session.pendingPath,
+          resolvedPath: event.sessionPath,
+          backendGeneration: operation.backendGeneration,
+        }) ?? operation
+      : event.outcome === 'aborted'
+        ? settleSessionOperationCancelled(operation, {
+            pendingPath: operation.session.pendingPath,
+            backendGeneration: operation.backendGeneration,
+            outcome: 'cancelled',
+            reason: 'interrupted-before-commit',
+          }) ?? operation
+        : settleSessionOperationFailed(operation, {
+            pendingPath: operation.session.pendingPath,
+            backendGeneration: operation.backendGeneration,
+            reason: 'execution-failed',
+          }) ?? operation;
+  } else if (operation?.terminal) {
+    const expectedOutcome = event.outcome === 'succeeded' ? 'settled'
+      : event.outcome === 'aborted' ? 'cancelled' : 'failed';
+    if (operation.terminal.outcome !== expectedOutcome) return { state, effects: [] };
+  }
+
+  const { [event.sessionPath]: _lastCompaction, ...withoutLastCompaction } = state.sessions.lastCompactionBySession;
+  const nextState = produce(state, (draft) => {
+    draft.sessions.compactingSessionPaths = removeFromArray(draft.sessions.compactingSessionPaths, event.sessionPath);
+    if (event.reason === 'manual') {
+      draft.sessions.runningSessionPaths = removeFromArray(draft.sessions.runningSessionPaths, event.sessionPath);
+    }
+    if (event.operationId && settled) {
+      draft.operations[event.operationId] = { ...settled, terminalEvidenceApplied: true };
+    }
+    if (event.outcome !== 'succeeded') {
+      draft.sessions.lastCompactionBySession = withoutLastCompaction;
+      return;
+    }
+    draft.sessions.lastCompactionBySession[event.sessionPath] = {
+      at: event.occurredAt,
+      ...(event.tokensBefore !== undefined ? { tokensBefore: event.tokensBefore } : {}),
+      ...(event.estimatedTokensAfter !== undefined ? { estimatedTokensAfter: event.estimatedTokensAfter } : {}),
+    };
+  });
   return {
-    state: {
-      ...state,
-      sessions: {
-        ...state.sessions,
-        compactingSessionPaths: removeFromArray(state.sessions.compactingSessionPaths, event.sessionPath),
-        lastCompactionBySession: {
-          ...state.sessions.lastCompactionBySession,
-          [event.sessionPath]: summary,
-        },
-      },
-    },
-    effects: [{
+    state: nextState,
+    effects: event.outcome === 'succeeded' ? [{
       kind: 'ClearLastCompaction',
       corrId: `clear-last-compaction:${event.sessionPath}:${event.occurredAt}`,
       sessionPath: event.sessionPath,
       ttlMs: LAST_COMPACTION_CHIP_TTL_MS,
-    }],
+    }] : [],
   };
 }
 
@@ -724,8 +849,13 @@ export function handleSessionMetadataChanged(state: ArchState, event: Extract<Ev
 
 export function handleRunningSessionsChanged(state: ArchState, event: Extract<Event, { kind: 'RunningSessionsChanged' }>): ReducerResult {
   const sessionPaths = event.sessionPaths.filter(
-    (path) => !state.sessions.interruptSettledSessionPaths.includes(path),
+    (path) => !hasRetiredInterruptEventFence(state.operations, path),
   );
+  for (const path of state.sessions.runningSessionPaths) {
+    if (activeInterruptOperation(state.operations, path) && !sessionPaths.includes(path)) {
+      sessionPaths.push(path);
+    }
+  }
   const running = new Set(sessionPaths);
   return {
     state: {
@@ -836,24 +966,50 @@ export function handleSessionsInterrupted(state: ArchState, event: Extract<Event
     }
     restoredComposerBySession.set(sessionPath, { text, inputs });
   }
-  const rollbackEffects: Effect[] = rollbackOps.flatMap(([corrId, op]) => op.kind === 'send' ? [{
-    kind: 'PostImperative' as const,
-    corrId,
-    imperativeMessage: {
-      type: 'sendRejected' as const,
-      sessionPath: op.sessionPath,
-      text: restoredComposerBySession.get(op.sessionPath)?.text ?? op.text ?? '',
-      localId: op.localId,
-      inputs: restoredComposerBySession.get(op.sessionPath)?.inputs ?? op.inputs ?? [],
-    },
-  }] : []);
+  const rollbackEffects: Effect[] = [];
+  for (const [corrId, op] of rollbackOps) {
+    if (op.kind !== 'send') continue;
+    rollbackEffects.push({
+      kind: 'PostImperative',
+      corrId,
+      imperativeMessage: {
+        type: 'sendRejected',
+        sessionPath: op.sessionPath,
+        text: restoredComposerBySession.get(op.sessionPath)?.text ?? op.text ?? '',
+        localId: op.localId,
+        inputs: restoredComposerBySession.get(op.sessionPath)?.inputs ?? op.inputs ?? [],
+      },
+    });
+    rollbackEffects.push({ kind: 'ClearSendTimer', corrId });
+  }
   const nextState = produce(state, (draft) => {
     for (const sessionPath of sessionPaths) {
+      for (const operation of Object.values(draft.operations)) {
+        if (!operation.kind.startsWith('message.') || operation.terminal
+          || (operation.session.resolvedPath ?? operation.session.pendingPath) !== sessionPath) continue;
+        // Backend death without a status response cannot prove whether the
+        // atomic rename ran. Preserve every in-flight edit conservatively;
+        // settleSessionOperationFailed upgrades still-pending commit evidence
+        // to unknown, while an explicit committed:false status uses the
+        // MessageOperationStatus path and remains rollback authority.
+        const preserveEditCommit = operation.kind === 'message.edit';
+        const settled = settleSessionOperationFailed(operation, {
+          pendingPath: operation.session.pendingPath,
+          backendGeneration: operation.backendGeneration,
+          reason: 'backend-generation-ended',
+          detail: reason,
+          preserveCommit: preserveEditCommit,
+        });
+        if (settled) draft.operations[operation.operationId] = settled;
+      }
+      draft.sessions.compactingSessionPaths = removeFromArray(
+        draft.sessions.compactingSessionPaths,
+        sessionPath,
+      );
       // A backend death mid-retry leaves a stale retry status; the retry is
       // dead (no `auto_retry_end` will fire), so clear it alongside the
       // streaming-message interruption.
       delete draft.sessions.retryStatusBySession[sessionPath];
-      delete draft.sessions.interruptInFlightBySession[sessionPath];
       delete draft.settings.pendingExtensionUIRequestsBySession[sessionPath];
       delete draft.transcript.pagingInFlightBySession[sessionPath];
       delete draft.pending.currentTurnBySession[sessionPath];
@@ -905,11 +1061,16 @@ export function handleSessionsInterrupted(state: ArchState, event: Extract<Event
       // no-op because the corresponding pending entry is then absent.
       for (const [, op] of rollbackOps) {
         if (op.sessionPath !== sessionPath) continue;
-        removeMessage(draft, sessionPath, op.localId);
-        if (op.kind === 'edit' && op.removedTail?.length) {
+        const registered = op.operationId ? draft.operations[op.operationId] : undefined;
+        const editMayHaveCommitted = op.kind === 'edit'
+          && (registered?.commit === 'committed' || registered?.commit === 'unknown');
+        if (!editMayHaveCommitted) {
+          removeMessage(draft, sessionPath, op.localId);
+        }
+        if (!editMayHaveCommitted && op.kind === 'edit' && op.removedTail?.length) {
           restoreRemovedTail(draft, sessionPath, op.removedTail);
         }
-        if (op.kind === 'edit' && op.editDraft) {
+        if (!editMayHaveCommitted && op.kind === 'edit' && op.editDraft) {
           draft.transcript.editingMessageIdBySession[sessionPath] = op.editDraft.messageId;
           draft.transcript.editingDraftBySession[sessionPath] = {
             ...op.editDraft,
@@ -1069,21 +1230,337 @@ export function handleSessionScopeCleared(state: ArchState, event: Extract<Event
   });
 }
 
+export function handleSendOperationDelayed(state: ArchState, event: Extract<Event, { kind: 'SendOperationDelayed' }>): ReducerResult {
+  const operation = state.operations[event.operationId];
+  if (!operation || operation.kind !== 'message.send') return { state, effects: [] };
+  const delayed = markSessionOperationAmbiguous(operation, {
+    pendingPath: operation.session.pendingPath,
+    backendGeneration: event.backendGeneration,
+  }, 'reconcile');
+  if (!delayed) return { state, effects: [] };
+  return {
+    state: produce(state, (draft) => {
+      draft.operations[event.operationId] = delayed;
+      draft.settings.notice = 'Send acknowledgement delayed. Pie is reconciling this message; do not send it again.';
+      draft.settings.noticeKind = null;
+      draft.settings.noticeRaw = null;
+      draft.settings.noticeSessionPath = event.sessionPath;
+    }),
+    effects: [],
+  };
+}
+
+export function handleSendOperationStatus(state: ArchState, event: Extract<Event, { kind: 'SendOperationStatus' }>): ReducerResult {
+  const operation = state.operations[event.operationId];
+  if (!operation || operation.kind !== 'message.send' || operation.terminal
+    || operation.backendGeneration !== event.backendGeneration) return { state, effects: [] };
+  let updated = operation;
+  if (event.state === 'accepted') {
+    updated = markSessionOperationAccepted(operation, {
+      pendingPath: operation.session.pendingPath,
+      backendGeneration: event.backendGeneration,
+    }) ?? operation;
+  } else if (event.state === 'committed') {
+    updated = settleSessionOperationSucceeded(operation, {
+      pendingPath: operation.session.pendingPath,
+      resolvedPath: event.sessionPath,
+      backendGeneration: event.backendGeneration,
+    }) ?? operation;
+  } else if (event.state === 'failed' || event.state === 'generation-ended') {
+    updated = settleSessionOperationFailed(operation, {
+      pendingPath: operation.session.pendingPath,
+      backendGeneration: event.backendGeneration,
+      reason: event.state === 'generation-ended' ? 'backend-generation-ended' : 'definitive-rejection',
+      detail: event.error,
+    }) ?? operation;
+  } else if (event.state === 'reconciliation-exhausted') {
+    const ambiguous = markSessionOperationAmbiguous(operation, {
+      pendingPath: operation.session.pendingPath,
+      backendGeneration: event.backendGeneration,
+    }, 'reconcile');
+    updated = ambiguous ? { ...ambiguous, recovery: 'restart-backend' } : operation;
+  }
+  if (updated === operation) return { state, effects: [] };
+  const owningCorrIds = [
+    ...Object.entries(state.pending.ops),
+    ...Object.entries(state.pending.promoted),
+  ].filter(([, pending]) => pending.operationId === event.operationId)
+    .map(([corrId]) => corrId);
+  const registryState = produce(state, (draft) => {
+    draft.operations[event.operationId] = updated;
+    if (event.state === 'committed') {
+      for (const corrId of owningCorrIds) {
+        delete draft.pending.ops[corrId];
+        delete draft.pending.promoted[corrId];
+      }
+      if (event.requestId) delete draft.pending.requestIdToLocalId[event.requestId];
+      delete draft.pending.prepassBySession[event.sessionPath];
+      if (operation.delivery === 'queued' && operation.localId) {
+        const list = draft.transcript.bySession[event.sessionPath];
+        const index = list?.findIndex((message) => message.id === operation.localId
+          && message.role === 'user' && message.status === 'queued') ?? -1;
+        if (list && index >= 0) {
+          const [delivered] = list.splice(index, 1);
+          delivered.status = 'completed';
+          list.push(delivered);
+        }
+      }
+    }
+    if (event.state === 'reconciliation-exhausted') {
+      draft.settings.notice = 'Pie could not confirm whether this send committed. Sending again is blocked; restart the backend to reconcile safely.';
+      draft.settings.noticeKind = 'backend-exit';
+      draft.settings.noticeRaw = event.error ?? null;
+      draft.settings.noticeSessionPath = event.sessionPath;
+    } else if (updated.terminal?.outcome === 'settled'
+      && draft.settings.noticeSessionPath === event.sessionPath
+      && draft.settings.notice?.startsWith('Send acknowledgement delayed.')) {
+      draft.settings.notice = null;
+      draft.settings.noticeKind = null;
+      draft.settings.noticeRaw = null;
+      draft.settings.noticeSessionPath = null;
+    }
+  });
+  if (event.state === 'failed' || event.state === 'generation-ended') {
+    const pendingEntry = Object.entries(registryState.pending.promoted)
+      .find(([, pending]) => pending.operationId === event.operationId)
+      ?? Object.entries(registryState.pending.ops)
+        .find(([, pending]) => pending.operationId === event.operationId);
+    if (pendingEntry) {
+      const rollback = handlePreflightFailed(registryState, {
+        kind: 'PreflightFailed',
+        corrId: pendingEntry[0],
+        operationId: event.operationId,
+        sessionPath: event.sessionPath,
+        requestId: event.requestId ?? '',
+        error: event.error ?? (event.state === 'generation-ended'
+          ? 'The backend generation ended before the send committed.'
+          : 'The backend rejected the send before it started.'),
+      });
+      return {
+        state: rollback.state,
+        effects: [...rollback.effects, { kind: 'ClearSendTimer', corrId: pendingEntry[0] }],
+      };
+    }
+  }
+  return {
+    state: registryState,
+    effects: updated.terminal?.outcome === 'settled'
+      ? (owningCorrIds.length > 0 ? owningCorrIds : [operation.causal.selectionToken])
+        .map((corrId) => ({ kind: 'ClearSendTimer' as const, corrId }))
+      : [],
+  };
+}
+
+export function handleMessageOperationDelayed(state: ArchState, event: Extract<Event, { kind: 'MessageOperationDelayed' }>): ReducerResult {
+  const operation = state.operations[event.operationId];
+  if (!operation || operation.kind !== event.operationKind) return { state, effects: [] };
+  const delayed = markSessionOperationAmbiguous(operation, {
+    pendingPath: operation.session.pendingPath,
+    backendGeneration: event.backendGeneration,
+  }, 'reconcile');
+  if (!delayed) return { state, effects: [] };
+  const label = event.operationKind === 'message.continue' ? 'Continue'
+    : event.operationKind === 'message.compact' ? 'History compaction'
+      : event.operationKind === 'message.edit' ? 'Edit' : 'Interrupt';
+  return {
+    state: produce(state, (draft) => {
+      draft.operations[event.operationId] = delayed;
+      draft.settings.notice = `${label} acknowledgement delayed. Pie is reconciling this operation; do not retry it.`;
+      draft.settings.noticeKind = null;
+      draft.settings.noticeRaw = null;
+      draft.settings.noticeSessionPath = event.sessionPath;
+    }),
+    effects: [],
+  };
+}
+
+export function handleMessageOperationStatus(state: ArchState, event: Extract<Event, { kind: 'MessageOperationStatus' }>): ReducerResult {
+  const operation = state.operations[event.operationId];
+  if (!operation || operation.kind !== event.operationKind || operation.terminal
+    || operation.backendGeneration !== event.backendGeneration) return { state, effects: [] };
+  const editCommitMayHaveOccurred = operation.kind === 'message.edit'
+    && (event.committed === true || (event.committed === undefined
+      && (event.state === 'generation-ended'
+        || operation.commit === 'committed'
+        || operation.commit === 'unknown')));
+  let updated = operation;
+  if (event.state === 'accepted') {
+    updated = markSessionOperationAccepted(operation, {
+      pendingPath: operation.session.pendingPath,
+      backendGeneration: event.backendGeneration,
+      committed: event.committed,
+    }) ?? operation;
+  } else if (event.state === 'committed') {
+    updated = settleSessionOperationSucceeded(operation, {
+      pendingPath: operation.session.pendingPath,
+      resolvedPath: event.sessionPath,
+      backendGeneration: event.backendGeneration,
+    }) ?? operation;
+  } else if (event.state === 'cancelled' || event.state === 'superseded' || event.state === 'aborted') {
+    updated = editCommitMayHaveOccurred
+      ? settleSessionOperationFailed(operation, {
+          pendingPath: operation.session.pendingPath,
+          backendGeneration: event.backendGeneration,
+          reason: 'execution-failed',
+          detail: event.error,
+          committed: event.committed,
+          preserveCommit: true,
+        }) ?? operation
+      : settleSessionOperationCancelled(operation, {
+          pendingPath: operation.session.pendingPath,
+          backendGeneration: event.backendGeneration,
+          outcome: event.state === 'superseded' ? 'superseded' : 'cancelled',
+          reason: event.state === 'superseded' ? 'superseded-before-commit' : 'interrupted-before-commit',
+          detail: event.error,
+        }) ?? operation;
+  } else if (event.state === 'failed' || event.state === 'generation-ended') {
+    updated = settleSessionOperationFailed(operation, {
+      pendingPath: operation.session.pendingPath,
+      backendGeneration: event.backendGeneration,
+      reason: event.state === 'generation-ended' ? 'backend-generation-ended'
+        : editCommitMayHaveOccurred ? 'execution-failed' : 'definitive-rejection',
+      detail: event.error,
+      committed: event.committed,
+      preserveCommit: editCommitMayHaveOccurred,
+    }) ?? operation;
+  } else if (event.state === 'reconciliation-exhausted') {
+    const ambiguous = markSessionOperationAmbiguous(operation, {
+      pendingPath: operation.session.pendingPath,
+      backendGeneration: event.backendGeneration,
+    }, 'reconcile');
+    if (ambiguous && operation.kind === 'message.interrupt') {
+      updated = settleSessionOperationFailed(ambiguous, {
+        pendingPath: ambiguous.session.pendingPath,
+        backendGeneration: event.backendGeneration,
+        reason: 'execution-failed',
+        detail: event.error ?? 'Interrupt settlement could not be confirmed.',
+        recovery: 'restart-backend',
+        preserveCommit: true,
+      }) ?? operation;
+    } else {
+      updated = ambiguous ? { ...ambiguous, recovery: 'restart-backend' } : operation;
+    }
+  }
+  if (updated === operation) return { state, effects: [] };
+
+  const lifecycleState = event.operationKind === 'message.interrupt'
+    && updated.terminal?.outcome === 'settled'
+    ? interruptLivePipelineForSession(state, event.sessionPath, event.occurredAt ?? 0).state
+    : state;
+  let next = produce(lifecycleState, (draft) => {
+    draft.operations[event.operationId] = updated;
+    if (updated.terminal) {
+      if (event.operationKind === 'message.interrupt') {
+        draft.sessions.runningSessionPaths = removeFromArray(draft.sessions.runningSessionPaths, event.sessionPath);
+        if (updated.terminal.outcome === 'settled') {
+          const list = draft.transcript.bySession[event.sessionPath];
+          if (list) {
+            draft.transcript.bySession[event.sessionPath] = list.filter((message) => !(message.role === 'user' && message.status === 'queued'));
+          }
+          for (const candidate of Object.values(draft.operations)) {
+            if (candidate.kind !== 'message.send' || candidate.terminal
+              || (candidate.session.resolvedPath ?? candidate.session.pendingPath) !== event.sessionPath) continue;
+            const cancelled = settleSessionOperationCancelled(candidate, {
+              pendingPath: candidate.session.pendingPath, backendGeneration: candidate.backendGeneration,
+              outcome: 'cancelled', reason: 'interrupted-before-commit',
+            });
+            if (cancelled) draft.operations[candidate.operationId] = cancelled;
+          }
+          for (const collection of [draft.pending.ops, draft.pending.promoted]) {
+            for (const [corrId, pending] of Object.entries(collection)) {
+              if (pending.sessionPath !== event.sessionPath) continue;
+              const owner = pending.operationId ? draft.operations[pending.operationId] : undefined;
+              if (!pending.queued && !(owner?.kind === 'message.send' && owner.terminal)) continue;
+              if (pending.requestId) delete draft.pending.requestIdToLocalId[pending.requestId];
+              delete collection[corrId];
+            }
+          }
+        }
+      } else if (event.operationKind === 'message.compact') {
+        draft.sessions.compactingSessionPaths = removeFromArray(draft.sessions.compactingSessionPaths, event.sessionPath);
+        draft.sessions.runningSessionPaths = removeFromArray(draft.sessions.runningSessionPaths, event.sessionPath);
+      } else if (event.operationKind === 'message.continue' || event.operationKind === 'message.edit') {
+        if (!event.error?.includes('REQUEST_IN_PROGRESS')) {
+          draft.sessions.runningSessionPaths = removeFromArray(draft.sessions.runningSessionPaths, event.sessionPath);
+        }
+      }
+    }
+    if (event.operationKind === 'message.edit' && updated.terminal) {
+      for (const [corrId, pending] of [...Object.entries(draft.pending.ops), ...Object.entries(draft.pending.promoted)]) {
+        if (pending.operationId !== event.operationId) continue;
+        delete draft.pending.ops[corrId];
+        delete draft.pending.promoted[corrId];
+      }
+      delete draft.pending.prepassBySession[event.sessionPath];
+    }
+    if (event.state === 'reconciliation-exhausted') {
+      draft.settings.notice = `Pie could not confirm whether this ${event.operationKind.replace('message.', '')} operation settled. Restart the backend to reconcile safely.`;
+      draft.settings.noticeKind = 'backend-exit';
+      draft.settings.noticeRaw = event.error ?? null;
+      draft.settings.noticeSessionPath = event.sessionPath;
+    } else if (updated.terminal?.outcome === 'failed') {
+      draft.settings.notice = event.operationKind === 'message.edit' && editCommitMayHaveOccurred
+        ? 'The edit was saved, but its replacement response could not start.'
+        : event.state === 'generation-ended'
+          ? `The backend ended before Pie could finish this ${event.operationKind.replace('message.', '')} operation.`
+          : `Could not complete the ${event.operationKind.replace('message.', '')} operation.`;
+      draft.settings.noticeKind = event.state === 'generation-ended' ? 'backend-exit' : 'operational-error';
+      draft.settings.noticeRaw = event.error ?? null;
+      draft.settings.noticeSessionPath = event.sessionPath;
+    } else if ((updated.terminal || updated.acceptance === 'accepted')
+      && draft.settings.noticeSessionPath === event.sessionPath
+      && draft.settings.notice?.includes('acknowledgement delayed.')) {
+      draft.settings.notice = null;
+      draft.settings.noticeKind = null;
+      draft.settings.noticeRaw = null;
+      draft.settings.noticeSessionPath = null;
+    }
+  });
+
+  // Only a status that proves the destructive edit commit did not occur may
+  // restore the old tail/editor. Post-commit failure and unknown generation
+  // death intentionally retain the optimistic replacement.
+  if (event.operationKind === 'message.edit' && updated.terminal
+    && !editCommitMayHaveOccurred
+    && (event.state === 'failed' || event.state === 'generation-ended'
+      || event.state === 'cancelled' || event.state === 'superseded' || event.state === 'aborted')) {
+    const pending = Object.entries(state.pending.promoted).find(([, value]) => value.operationId === event.operationId)
+      ?? Object.entries(state.pending.ops).find(([, value]) => value.operationId === event.operationId);
+    if (pending) {
+      const rolledBack = handleEditResult(state, {
+        kind: 'EditResult', corrId: pending[0], operationId: event.operationId,
+        backendGeneration: event.backendGeneration, sessionPath: event.sessionPath,
+        ok: false, committed: false, error: event.error,
+      }).state;
+      next = produce(rolledBack, (draft) => {
+        // Preserve the authoritative status reason/recovery; EditResult owns
+        // only the rollback mechanics for this path.
+        draft.operations[event.operationId] = updated;
+        if (event.state === 'generation-ended') {
+          draft.settings.notice = 'The backend ended before Pie could finish this edit operation.';
+          draft.settings.noticeKind = 'backend-exit';
+          draft.settings.noticeRaw = event.error ?? null;
+          draft.settings.noticeSessionPath = event.sessionPath;
+        }
+      });
+    }
+  }
+  return { state: next, effects: [] };
+}
+
 export function handleCreateOperationDelayed(state: ArchState, event: Extract<Event, { kind: 'CreateOperationDelayed' }>): ReducerResult {
-  const operation = state.pending.createOperations[event.operationId];
-  if (!operation
-    || operation.pendingPath !== event.pendingPath
-    || operation.selectionToken !== event.selectionToken
-    || (event.attempt !== undefined && operation.attempt !== event.attempt)
-    || operation.status === 'succeeded'
-    || operation.status === 'failed') {
+  const operation = state.operations[event.operationId];
+  if (!operation || operation.causal.selectionToken !== event.selectionToken) {
     return { state, effects: [] };
   }
+  const delayed = markSessionOperationAmbiguous(operation, {
+    pendingPath: event.pendingPath,
+    attempt: event.attempt,
+    backendGeneration: event.backendGeneration,
+  });
+  if (!delayed) return { state, effects: [] };
   const next = produce(state, (draft) => {
-    draft.pending.createOperations[event.operationId] = {
-      ...operation,
-      status: 'delayed-awaiting-outcome',
-    };
+    draft.operations[event.operationId] = delayed;
     const summary = draft.sessions.sessions.find((item) => item.path === event.pendingPath);
     if (summary) summary.creationState = 'delayed';
     if (event.ownsSelection && event.notice) {
@@ -1097,48 +1574,39 @@ export function handleCreateOperationDelayed(state: ArchState, event: Extract<Ev
 }
 
 export function handleCreateOperationSucceeded(state: ArchState, event: Extract<Event, { kind: 'CreateOperationSucceeded' }>): ReducerResult {
-  const operation = state.pending.createOperations[event.operationId];
-  if (!operation
-    || operation.pendingPath !== event.pendingPath
-    || operation.status === 'failed'
-    || (operation.status === 'succeeded' && operation.resolvedSessionPath !== event.sessionPath)) {
-    return { state, effects: [] };
-  }
-  if (operation.status === 'succeeded') return { state, effects: [] };
+  const operation = state.operations[event.operationId];
+  if (!operation) return { state, effects: [] };
+  const settled = settleSessionOperationSucceeded(operation, {
+    pendingPath: event.pendingPath,
+    resolvedPath: event.sessionPath,
+    attempt: event.attempt,
+    backendGeneration: event.backendGeneration,
+  });
+  if (!settled) return { state, effects: [] };
   return {
     state: {
       ...state,
-      pending: {
-        ...state.pending,
-        createOperations: {
-          ...state.pending.createOperations,
-          [event.operationId]: {
-            ...operation,
-            status: 'succeeded',
-            resolvedSessionPath: event.sessionPath,
-          },
-        },
-      },
+      operations: { ...state.operations, [event.operationId]: settled },
     },
     effects: [],
   };
 }
 
 export function handleCreateOperationFailed(state: ArchState, event: Extract<Event, { kind: 'CreateOperationFailed' }>): ReducerResult {
-  const operation = state.pending.createOperations[event.operationId];
-  if (!operation || operation.pendingPath !== event.pendingPath || operation.status === 'succeeded') {
-    return { state, effects: [] };
-  }
+  const operation = state.operations[event.operationId];
+  if (!operation) return { state, effects: [] };
+  const settled = settleSessionOperationFailed(operation, {
+    pendingPath: event.pendingPath,
+    attempt: event.attempt,
+    backendGeneration: event.backendGeneration,
+    reason: event.reason ?? 'definitive-rejection',
+    detail: event.error,
+  });
+  if (!settled) return { state, effects: [] };
   return {
     state: {
       ...state,
-      pending: {
-        ...state.pending,
-        createOperations: {
-          ...state.pending.createOperations,
-          [event.operationId]: { ...operation, status: 'failed' },
-        },
-      },
+      operations: { ...state.operations, [event.operationId]: settled },
     },
     effects: [],
   };
@@ -1152,6 +1620,22 @@ export function handlePendingPathReplaced(state: ArchState, event: Extract<Event
   const deferredSetModel = state.pending.deferredSetModelBySession[oldPendingPath];
 
   const nextState = produce(state, (draft) => {
+    for (const operation of Object.values(draft.operations)) {
+      if (operation.kind === 'message.send' && !operation.terminal
+        && operation.session.pendingPath === oldPendingPath) {
+        operation.session.resolvedPath = newSessionPath;
+        const queued = draft.pending.sendQueueBySession[oldPendingPath]
+          ?.find((entry) => entry.operationId === operation.operationId);
+        if (queued) {
+          operation.intentFingerprint = JSON.stringify({
+            sessionPath: newSessionPath,
+            text: queued.text,
+            inputs: queued.inputs,
+            localId: queued.localId,
+          });
+        }
+      }
+    }
     // Normally SessionOpened has already inserted the durable summary. When a
     // post-commit publication failure leaves only the RPC acknowledgement,
     // promote the pending placeholder itself so the resolved tab is not
@@ -1283,9 +1767,9 @@ export function handlePendingPathReplaced(state: ArchState, event: Extract<Event
     // A hidden create with queued work is about to become a hidden running
     // session. Persist that intent under the durable path before the async
     // drain starts so a renderer reload cannot reopen/focus it in the gap.
-    const hiddenOperation = Object.values(draft.pending.createOperations).find(
-      (operation) => operation.pendingPath === oldPendingPath
-        && operation.status === 'succeeded'
+    const hiddenOperation = Object.values(draft.operations).find(
+      (operation) => operation.session.pendingPath === oldPendingPath
+        && operation.terminal?.outcome === 'settled'
         && operation.hidden,
     );
     if (hiddenOperation && queuedSends.length > 0

@@ -106,6 +106,18 @@ export interface PruningResult {
 	prepassCacheWriteTokens?: number;
 	/** Cost attached to the prepass provider responses, including retries. */
 	prepassReportedCostUsd?: number;
+	/** Per-provider-call settlements; aggregate fields above remain compatibility projections. */
+	prepassInvocations?: Array<{
+		invocationId: string;
+		startedAt: string;
+		endedAt: string;
+		outcome: "succeeded" | "failed" | "cancelled";
+		input?: number;
+		output?: number;
+		cacheRead?: number;
+		cacheWrite?: number;
+		reportedCostUsd?: number;
+	}>;
 	/** Error message if the prepass failed. */
 	prepassError?: string;
 	/** Human-readable explanation of why the pruner kept a category instead of trusting the model. */

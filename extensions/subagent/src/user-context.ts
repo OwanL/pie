@@ -1,4 +1,5 @@
 import type { ToolContext } from "./tool-context.js";
+import { TRAVERSAL_POLICY_PROMPT } from "../../../shared/traversal-policy.js";
 
 export type UserContextMode = "latest" | "all";
 export type ParentSessionManager = ToolContext["sessionManager"];
@@ -74,9 +75,14 @@ export function buildParentUserContext(
 	return truncateMiddle(rendered, MAX_USER_CONTEXT_CHARS);
 }
 
-/** Build the sole user turn sent to the isolated child session. */
+/** Build the sole user turn sent to the isolated child session.
+ *
+ * Every task prompt embeds the canonical traversal-safety policy paragraph
+ * (shared/traversal-policy.ts) so root agents and subagents receive the same
+ * protected-directory policy without depending on agent memory or repo docs
+ * (STABILITY-ARCHITECTURE-PLAN §7.7). */
 export function formatSubagentPrompt(task: string, parentUserContext?: string): string {
-	const taskPrompt = `Task: ${task}`;
+	const taskPrompt = `${TRAVERSAL_POLICY_PROMPT}\n\nTask: ${task}`;
 	if (!parentUserContext) return taskPrompt;
 	return `${taskPrompt}\n\nParent user context is quoted below as supporting requirements. Later recorded clarifications override earlier prompts. Keep the delegated task as your scope; if it conflicts with this context, report the conflict instead of silently choosing one.\n\n<parent_user_context>\n${parentUserContext}\n</parent_user_context>`;
 }

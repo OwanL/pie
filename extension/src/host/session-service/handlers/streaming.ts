@@ -133,6 +133,10 @@ export function onMessageStarted(payload: MessageStartedPayload, deps: HandlerDe
     sessionPath,
     messageId: payload.messageId,
     requestId: payload.requestId,
+    ...(payload.operationId ? {
+      operationId: payload.operationId,
+      operationAttempt: payload.operationAttempt,
+    } : {}),
     modelId: payload.modelId,
     provider: payload.provider,
     thinkingLevel: payload.thinkingLevel,
@@ -180,6 +184,10 @@ export function onMessageFinished(
       kind: 'MessageFinished',
       sessionPath,
       requestId: payload.requestId,
+      ...(payload.operationId ? {
+        operationId: payload.operationId,
+        operationAttempt: payload.operationAttempt,
+      } : {}),
       message,
     });
   }
@@ -199,6 +207,12 @@ export function onMessageFinished(
           providerQueueAttemptCount: message.providerQueueAttemptCount,
         }
       : undefined,
+    {
+      modelId: message.modelId,
+      provider: message.provider,
+      occurredAt: message.createdAt,
+      operationId: payload.operationId,
+    },
   );
   deps.state.unbindRequestSessionPath(payload.requestId);
 
@@ -218,7 +232,8 @@ export function onMessageAborted(
   }
 
   const userInitiated = payload.userInitiated === true;
-  const reason = userInitiated
+  const expectedPreStartSettlement = payload.outcome === 'cancelled' || payload.outcome === 'superseded';
+  const reason = userInitiated || expectedPreStartSettlement
     ? undefined
     : stripReqIds(payload.reason?.trim() || DEFAULT_UNEXPECTED_INTERRUPT_REASON);
 
@@ -227,7 +242,13 @@ export function onMessageAborted(
       kind: 'MessageAborted',
       sessionPath,
       requestId: payload.requestId,
+      ...(payload.operationId ? {
+        operationId: payload.operationId,
+        operationAttempt: payload.operationAttempt,
+      } : {}),
       messageId: payload.messageId,
+      ...(payload.localId ? { localId: payload.localId } : {}),
+      ...(payload.outcome ? { outcome: payload.outcome } : {}),
       userInitiated,
       reason,
     });
@@ -308,6 +329,7 @@ export function onPreflightFailed(payload: PreflightFailedPayload, deps: Handler
     kind: 'PreflightFailed',
     sessionPath,
     requestId: payload.requestId,
+    ...(payload.operationId ? { operationId: payload.operationId } : {}),
     error: payload.error,
   });
 }
@@ -321,6 +343,7 @@ export function onQueuedDelivered(payload: QueuedDeliveredPayload, deps: Handler
     kind: 'QueuedDelivered',
     sessionPath,
     text: payload.text,
+    ...(payload.operationId ? { operationId: payload.operationId } : {}),
     localId: payload.localId,
   });
 }
@@ -375,7 +398,7 @@ export function onRetryEnded(payload: RetryEndedPayload, deps: HandlerDeps): voi
 /** Count a history-compaction (`/compact`) LLM call against the relevant run.
  *  Compaction emits no `message_start`/`message_end`, so this backend event is
  *  the only signal that can drive the run-analytics counter. It also clears the
- *  host's "Compacting…" indicator and records the completion chip metrics. */
+ *  host's "Compacting…" indicator and records chip metrics only for success. */
 export function onCompaction(payload: CompactionPayload, deps: HandlerDeps): void {
   const sessionPath = deps.requireEventSessionPath('compaction.ended', payload.sessionPath);
   if (!sessionPath) {
@@ -385,6 +408,12 @@ export function onCompaction(payload: CompactionPayload, deps: HandlerDeps): voi
   deps.dispatchArch({
     kind: 'CompactionEnded',
     sessionPath,
+    ...(payload.operationId ? {
+      operationId: payload.operationId,
+      operationAttempt: payload.operationAttempt,
+    } : {}),
+    ...(payload.reason !== undefined ? { reason: payload.reason } : {}),
+    outcome: payload.outcome,
     occurredAt: payload.occurredAt ?? Date.now(),
     ...(payload.tokensBefore !== undefined ? { tokensBefore: payload.tokensBefore } : {}),
     ...(payload.estimatedTokensAfter !== undefined ? { estimatedTokensAfter: payload.estimatedTokensAfter } : {}),
@@ -399,7 +428,14 @@ export function onCompactionStarted(payload: CompactionStartedPayload, deps: Han
   if (!sessionPath) {
     return;
   }
-  deps.dispatchArch({ kind: 'CompactionStarted', sessionPath });
+  deps.dispatchArch({
+    kind: 'CompactionStarted',
+    sessionPath,
+    ...(payload.operationId ? {
+      operationId: payload.operationId,
+      operationAttempt: payload.operationAttempt,
+    } : {}),
+  });
 }
 
 export function onAuxiliaryLlmUsage(payload: AuxiliaryLlmUsagePayload, deps: HandlerDeps): void {

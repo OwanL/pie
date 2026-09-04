@@ -2,14 +2,10 @@
  * Immediate-stop interrupt (host-side). Verifies that dispatching an `Interrupt`
  * Command takes effect INSTANTLY in the reducer (Copilot/Codex-style): the
  * currently-streaming assistant message is marked `interrupted`,
- * `runningSessionPaths` remains set until the abort completion barrier,
- * `interruptInFlightBySession` is set, and an
- * `InterruptRpc` effect is emitted — without waiting for the async
- * `session.abort()` to settle. Late streaming events (`MessageDelta`/
- * `MessageThinking`) arriving during the in-flight abort window are dropped as
- * no-ops, and `InterruptResult{ok:true}` clears the flag (idempotent with the
- * optimistic writes). A late `MessageFinished` self-corrects the optimistic
- * `interrupted` to `completed`.
+ * `runningSessionPaths` remains set until the abort completion barrier, a
+ * reducer-owned interrupt operation is active, and an `InterruptRpc` effect is
+ * emitted — without waiting for the async `session.abort()` to settle. Late
+ * streaming events arriving during or after the retired abort are no-ops.
  *
  * The SDK/subagent cascade (parent abort → child aborts) is already covered by
  * `extensions/subagent/test/interrupt-hardening.test.ts`; this file owns the
@@ -22,13 +18,13 @@ import { produce } from 'immer';
 import { createInitialArchState, type ArchState } from '../../../../src/host/core/arch-state';
 import { reducer } from '../../../../src/host/core/reducer';
 import type { Event } from '../../../../src/host/core/events';
+import { activeInterruptOperation, hasRetiredInterruptEventFence } from '../../../../src/host/core/operation-registry';
 import type { ChatMessage } from '../../../../src/shared/protocol';
 
 const SESSION = '/s1';
 const MSG_ID = 'a1';
 
-/** Seed a session with a streaming assistant message, in `runningSessionPaths`,
- *  with `interruptInFlightBySession` false (the pre-Stop state). */
+/** Seed a session with a streaming assistant message and running marker. */
 function withStreamingAssistant(state: ArchState): ArchState {
   return produce(state, (draft) => {
     draft.transcript.bySession[SESSION] = [
@@ -51,8 +47,6 @@ function withStreamingAssistant(state: ArchState): ArchState {
     draft.sessions.runningSessionPaths = Array.from(
       new Set([...draft.sessions.runningSessionPaths, SESSION]),
     );
-    // Explicitly false / absent: no abort in flight before Stop.
-    draft.sessions.interruptInFlightBySession[SESSION] = false;
   });
 }
 
@@ -61,13 +55,13 @@ function assistant(state: ArchState): ChatMessage {
   return list.find((m) => m.id === MSG_ID)!;
 }
 
-test('Interrupt instantly marks the streaming message interrupted, keeps running until acknowledgement, sets the flag, emits InterruptRpc, and drops late deltas', () => {
+test('Interrupt instantly marks the streaming message interrupted, keeps running until acknowledgement, registers Stop, emits InterruptRpc, and drops late deltas', () => {
   const initial = withStreamingAssistant(createInitialArchState());
 
   // Sanity: pre-Stop state.
   assert.equal(assistant(initial).status, 'streaming');
   assert.ok(initial.sessions.runningSessionPaths.includes(SESSION));
-  assert.equal(initial.sessions.interruptInFlightBySession[SESSION], false);
+  assert.equal(activeInterruptOperation(initial.operations, SESSION), undefined);
 
   const r1 = reducer(initial, {
     kind: 'Command',
@@ -80,11 +74,14 @@ test('Interrupt instantly marks the streaming message interrupted, keeps running
   // (b) running remains truthful until the backend abort settles. This keeps
   // the composer in Stopping… and prevents stop→send from becoming follow-up.
   assert.ok(state.sessions.runningSessionPaths.includes(SESSION), 'running retained during stop');
-  // (c) flag set.
-  assert.equal(state.sessions.interruptInFlightBySession[SESSION], true, 'flag set');
+  // (c) reducer-owned Stop operation is active.
+  assert.equal(activeInterruptOperation(state.operations, SESSION)?.operationId, 'c-int');
   // (d) InterruptRpc effect emitted.
   assert.equal(r1.effects.length, 1);
-  assert.deepEqual(r1.effects[0], { kind: 'InterruptRpc', corrId: 'c-int', sessionPath: SESSION });
+  assert.deepEqual(r1.effects[0], {
+    kind: 'InterruptRpc', corrId: 'c-int', operationId: 'c-int', operationAttempt: 1,
+    backendGeneration: 0, sessionPath: SESSION,
+  });
 
   // Late delta during the abort window is dropped (text unchanged).
   const markdownBefore = assistant(state).markdown;
@@ -101,19 +98,19 @@ test('Interrupt instantly marks the streaming message interrupted, keeps running
     'late delta does not append while abort is in flight',
   );
 
-  // InterruptResult{ok:true} clears the flag; running stays clear.
+  // InterruptResult{ok:true} terminalizes Stop; running stays clear.
   const r3 = reducer(r2.state, {
     kind: 'InterruptResult',
     corrId: 'c-int',
     sessionPath: SESSION,
     ok: true,
   } as Event);
-  assert.equal(r3.state.sessions.interruptInFlightBySession[SESSION], false, 'flag cleared');
+  assert.equal(activeInterruptOperation(r3.state.operations, SESSION), undefined);
+  assert.equal(hasRetiredInterruptEventFence(r3.state.operations, SESSION), true);
   assert.ok(
     !r3.state.sessions.runningSessionPaths.includes(SESSION),
     'running stays clear after ok result',
   );
-  assert.deepEqual(r3.state.sessions.interruptSettledSessionPaths, [SESSION]);
   // The message remains interrupted (the turn was aborted, not completed).
   assert.equal(assistant(r3.state).status, 'interrupted');
 });
@@ -173,7 +170,7 @@ test('late busy/opened events cannot resurrect an interrupted turn, while the ne
       localId: 'local:next', previousSummary: null, timestamp: 2,
     },
   } as Event);
-  assert.deepEqual(sent.state.sessions.interruptSettledSessionPaths, []);
+  assert.equal(hasRetiredInterruptEventFence(sent.state.operations, SESSION), false);
   assert.ok(sent.state.sessions.runningSessionPaths.includes(SESSION));
 });
 
@@ -184,7 +181,7 @@ test('MessageThinking is also dropped during the in-flight abort window', () => 
     kind: 'Command',
     cmd: { kind: 'Interrupt', corrId: 'c-int', sessionPath: SESSION },
   } as Event);
-  assert.equal(r1.state.sessions.interruptInFlightBySession[SESSION], true);
+  assert.equal(activeInterruptOperation(r1.state.operations, SESSION)?.operationId, 'c-int');
 
   // Late thinking delta during the abort window is dropped (reasoning unchanged).
   const thinkingBefore = assistant(r1.state).thinking;
@@ -198,7 +195,7 @@ test('MessageThinking is also dropped during the in-flight abort window', () => 
   assert.equal(assistant(r2.state).thinking, thinkingBefore, 'late thinking not appended');
 });
 
-test('A late MessageFinished self-corrects the optimistic interrupted status to completed', () => {
+test('A late MessageFinished from the dying turn cannot contradict Stop', () => {
   const initial = withStreamingAssistant(createInitialArchState());
 
   // Stop → optimistic interrupted.
@@ -207,11 +204,11 @@ test('A late MessageFinished self-corrects the optimistic interrupted status to 
     cmd: { kind: 'Interrupt', corrId: 'c-int', sessionPath: SESSION },
   } as Event);
   assert.equal(assistant(r1.state).status, 'interrupted');
-  // The flag is still in flight when the turn actually finishes.
-  assert.equal(r1.state.sessions.interruptInFlightBySession[SESSION], true);
+  // The reducer-owned Stop is still in flight when the turn actually finishes.
+  assert.equal(activeInterruptOperation(r1.state.operations, SESSION)?.operationId, 'c-int');
 
-  // The turn finished normally (race: finished between click and abort) →
-  // MessageFinished is NOT gated and overwrites the message to completed.
+  // A terminal already queued by the retired turn is stale while Stop owns the
+  // session and cannot overwrite the optimistic interruption.
   const r2 = reducer(r1.state, {
     kind: 'MessageFinished',
     sessionPath: SESSION,
@@ -224,7 +221,8 @@ test('A late MessageFinished self-corrects the optimistic interrupted status to 
       status: 'completed',
     } satisfies ChatMessage,
   } as Event);
-  assert.equal(assistant(r2.state).status, 'completed', 'optimistic interrupted self-corrects to completed');
+  assert.equal(r2.state, r1.state, 'late terminal is a pure no-op');
+  assert.equal(assistant(r2.state).status, 'interrupted');
 });
 
 test('Interrupt clears an in-flight prepass chip', () => {

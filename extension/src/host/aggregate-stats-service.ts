@@ -20,6 +20,7 @@ import { coerceRunSnapshot, type RunSnapshot } from './run-analytics';
 import type { TokenRateIndicatorState } from '../shared/token-rate';
 import { appendPieLog } from './util/pie-log';
 import { toErrorMessage } from './util/error-message';
+import { projectLedgerUsageOntoAggregate } from './billable-invocation-ledger/aggregate';
 
 /**
  * Measures aggregate usage stats across ALL sessions host-side — total + per-
@@ -211,7 +212,7 @@ export class AggregateStatsService {
     this.openAccumulator = nextOpenAccumulator;
     this.liveRunIds = nextLiveRunIds;
 
-    const next = finalizeAggregateStatsLayers(
+    let next = finalizeAggregateStatsLayers(
       this.completedLayer,
       nextOpenAccumulator,
       nowMs,
@@ -221,6 +222,7 @@ export class AggregateStatsService {
     );
     next.liveTokensPerSecond = rollingRate;
     next.providerGate = this.cached.providerGate;
+    next = projectLedgerIfAvailable(this.deps.statsService, next, nowMs);
     if (!aggregateStatsEqual(this.cached, next)) {
       this.cached = next;
       this.deps.onChanged();
@@ -359,6 +361,7 @@ export class AggregateStatsService {
       this.refreshLive();
       return;
     }
+    next = projectLedgerIfAvailable(this.deps.statsService, next, nowMs);
     if (!aggregateStatsEqual(this.cached, next)) {
       this.cached = next;
       this.deps.onChanged();
@@ -674,6 +677,17 @@ function parseSnapshotLines(text: string): RunSnapshot[] {
 /** Complete structural equality for protocol aggregates and accumulator caches. */
 export function aggregateStatsEqual(a: AggregateStats, b: AggregateStats): boolean {
   return deepEqualValue(a, b);
+}
+
+function projectLedgerIfAvailable(statsService: StatsService, aggregate: AggregateStats, nowMs: number): AggregateStats {
+  // Several embedding/test adapters implement the pre-M3 StatsService shape.
+  // Preserve their legacy projection; production always supplies the ledger.
+  const getter = (statsService as StatsService & {
+    getBillableInvocationRecords?: () => ReturnType<StatsService['getBillableInvocationRecords']>;
+  }).getBillableInvocationRecords;
+  return getter
+    ? projectLedgerUsageOntoAggregate(aggregate, getter.call(statsService), nowMs)
+    : aggregate;
 }
 
 function deepEqualValue(a: unknown, b: unknown): boolean {

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { EffectRunner, decideModelStartTimerAction, type BackendLike, type CommitAwareRequestOptions, type EffectRunnerDeps, type TimerSink, type TimerHandle } from '../../../../src/host/core/effect-runner';
+import { EffectRunner, decideModelStartTimerAction, type EffectRunnerDeps, type TimerSink, type TimerHandle } from '../../../../src/host/core/effect-runner';
 import type { Effect } from '../../../../src/host/core/effects';
 import type { EffectResultEvent, CommandEvent, Event } from '../../../../src/host/core/events';
 import type { ProviderGateStats } from '../../../../src/shared/protocol';
@@ -77,7 +77,7 @@ test('EffectRunner routes InterruptRpc only through the target session queue', a
   assert.deepEqual(callsSansEffectDispatch[1], {
     kind: 'request',
     method: 'message.interrupt',
-    params: { sessionPath: '/a' },
+    params: { sessionPath: '/a', operationId: 'c1', operationAttempt: 1 },
   });
   assert.equal(callsSansEffectDispatch.some((call) => call.kind === 'lifecycle'), false);
 
@@ -100,11 +100,72 @@ test('EffectRunner routes ContinueRpc through the session queue without a user p
   assert.deepEqual(request, {
     kind: 'request',
     method: 'message.continue',
-    params: { sessionPath: '/a' },
+    params: { sessionPath: '/a', operationId: 'continue-1', operationAttempt: 1 },
   });
   assert.equal(events[0]?.kind, 'ContinueResult');
   assert.equal(events[0]?.ok, true);
   assert.equal(events[0]?.requestId, 'continue-request');
+});
+
+test('message.continue acknowledgement timeout reconciles to committed without a false rejection', async () => {
+  const timers = new FakeTimerSink();
+  const hostEvents: Event[] = [];
+  const { deps, events, calls } = makeEffectRunnerDeps({
+    requestImpl: async (method) => {
+      if (method === 'message.continue') throw new RequestTimeoutError('continue-ack-lost');
+      if (method === 'operation.status') return { state: 'accepted', requestId: 'continue-request', committed: true };
+      return {};
+    },
+    dispatchEvent: (event) => hostEvents.push(event),
+    timer: timers,
+  });
+  const runner = new EffectRunner(deps);
+
+  runner.run({
+    kind: 'ContinueRpc', corrId: 'continue-lost', operationId: 'continue-op',
+    operationAttempt: 1, backendGeneration: 7, sessionPath: '/a',
+  });
+  await settle();
+
+  assert.ok(hostEvents.some((event) => event.kind === 'MessageOperationDelayed'
+    && event.operationId === 'continue-op'));
+  assert.ok(hostEvents.some((event) => event.kind === 'MessageOperationStatus'
+    && event.operationId === 'continue-op' && event.state === 'committed'));
+  assert.equal(events.some((event) => event.kind === 'ContinueResult'), false);
+  assert.ok(calls.some((call) => call.kind === 'request' && call.method === 'operation.status'
+    && (call.params as { backendGeneration?: number }).backendGeneration === 7));
+  runner.dispose();
+});
+
+test('message.compact acknowledgement ambiguity reaches bounded visible recovery', async () => {
+  const timers = new FakeTimerSink();
+  const hostEvents: Event[] = [];
+  const { deps } = makeEffectRunnerDeps({
+    requestImpl: async (method) => {
+      if (method === 'message.compact') throw new RequestTimeoutError('compact-ack-lost');
+      if (method === 'operation.status') return { state: 'pending' };
+      return {};
+    },
+    dispatchEvent: (event) => hostEvents.push(event),
+    timer: timers,
+  });
+  const runner = new EffectRunner(deps);
+
+  runner.run({
+    kind: 'CompactRpc', corrId: 'compact-lost', operationId: 'compact-op',
+    operationAttempt: 1, backendGeneration: 9, sessionPath: '/a',
+  });
+  await settle();
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    timers.runAll();
+    await settle();
+  }
+
+  assert.ok(hostEvents.some((event) => event.kind === 'MessageOperationDelayed'
+    && event.operationKind === 'message.compact'));
+  assert.ok(hostEvents.some((event) => event.kind === 'MessageOperationStatus'
+    && event.state === 'reconciliation-exhausted'));
+  runner.dispose();
 });
 
 test('EffectRunner serializes rapid system-prompt toggle snapshots per session', async () => {
@@ -247,9 +308,77 @@ test('EffectRunner routes CompactRpc through the target session queue', async ()
   );
   assert.deepEqual(relevantCalls[0], { kind: 'session', sessionPath: '/a' });
   assert.deepEqual(relevantCalls[1], {
-    kind: 'request', method: 'message.compact', params: { sessionPath: '/a' },
+    kind: 'request', method: 'message.compact', params: {
+      sessionPath: '/a', operationId: 'compact-1', operationAttempt: 1, reason: 'manual',
+    },
   });
-  assert.deepEqual(events, [{ kind: 'CompactResult', corrId: 'compact-1', sessionPath: '/a', ok: true }]);
+  assert.deepEqual(events, [{
+    kind: 'CompactResult', corrId: 'compact-1', operationId: 'compact-1',
+    operationAttempt: 1, backendGeneration: 0, sessionPath: '/a', ok: true,
+  }]);
+});
+
+test('Stop interrupts an in-flight manual compact immediately and later sends remain FIFO-ordered', async () => {
+  const queueTails = new Map<string, Promise<void>>();
+  const queues: EffectRunnerDeps['queues'] = {
+    async enqueueLifecycle<T>(task: () => Promise<T>): Promise<T> { return await task(); },
+    async enqueueSessionOperation<T>(sessionPath: string, task: () => Promise<T>): Promise<T> {
+      const previous = queueTails.get(sessionPath) ?? Promise.resolve();
+      const next = previous.then(task, task);
+      queueTails.set(sessionPath, next.then(() => undefined, () => undefined));
+      return await next;
+    },
+  };
+  let markCompactStarted!: () => void;
+  const compactStarted = new Promise<void>((resolve) => { markCompactStarted = resolve; });
+  let finishCompact!: () => void;
+  const compactFinished = new Promise<void>((resolve) => { finishCompact = resolve; });
+  let finishInterrupt!: () => void;
+  const interruptFinished = new Promise<void>((resolve) => { finishInterrupt = resolve; });
+  const executionOrder: string[] = [];
+  const { deps, events } = makeEffectRunnerDeps({
+    queues,
+    timer: { schedule: () => ({}), cancel: () => undefined },
+    requestImpl: async (method) => {
+      executionOrder.push(method);
+      if (method === 'message.compact') {
+        markCompactStarted();
+        await compactFinished;
+      } else if (method === 'message.interrupt') {
+        finishCompact();
+        await interruptFinished;
+        return { interrupted: true, settled: true };
+      } else if (method === 'message.send') {
+        return { requestId: 'send-after-stop' };
+      }
+      return {};
+    },
+  });
+  const runner = new EffectRunner(deps);
+
+  runner.run({ kind: 'CompactRpc', corrId: 'compact-active', sessionPath: '/a' });
+  await compactStarted;
+  runner.run({ kind: 'InterruptRpc', corrId: 'stop-compact', sessionPath: '/a' });
+  await settle();
+
+  assert.deepEqual(
+    executionOrder,
+    ['message.compact', 'message.interrupt'],
+    'Stop reaches the backend while compact still owns the session FIFO',
+  );
+
+  runner.run({
+    kind: 'SendRpc', corrId: 'send-later', sessionPath: '/a', text: 'after stop',
+    inputs: [], composedText: 'after stop', localId: 'local-after-stop',
+  });
+  await settle();
+  assert.equal(executionOrder.includes('message.send'), false, 'later send waits for the interrupt barrier');
+
+  finishInterrupt();
+  await settle();
+  assert.deepEqual(executionOrder, ['message.compact', 'message.interrupt', 'message.send']);
+  assert.deepEqual(events.map((event) => event.kind), ['CompactResult', 'InterruptResult', 'SendResult']);
+  runner.dispose();
 });
 
 test('ExtensionUiResponseRpc treats an already-consumed backend request as terminal success', async () => {
@@ -1038,6 +1167,91 @@ test('EffectRunner keeps a send pending when only its local acknowledgement dead
   runner.dispose();
 });
 
+test('message.send acknowledgement timeout reconciles through operation.status without rollback', async () => {
+  const timers = new FakeTimerSink();
+  const hostEvents: Event[] = [];
+  const { deps, events, calls } = makeEffectRunnerDeps({
+    requestImpl: async (method) => {
+      if (method === 'message.send') throw new RequestTimeoutError('req-stable-operation');
+      if (method === 'operation.status') {
+        return { state: 'accepted', requestId: 'request-1', committed: false };
+      }
+      return {};
+    },
+    dispatchEvent: (event) => hostEvents.push(event),
+    timer: timers,
+  });
+  const runner = new EffectRunner(deps);
+
+  runner.run({
+    kind: 'SendRpc', corrId: 'corr-stable', operationId: 'op-stable', backendGeneration: 4,
+    sessionPath: '/a', text: 'hello', inputs: [], composedText: 'hello', localId: 'local-stable',
+  });
+  await settle();
+
+  assert.ok(hostEvents.some((event) => event.kind === 'SendOperationDelayed'
+    && event.operationId === 'op-stable'));
+  assert.ok(hostEvents.some((event) => event.kind === 'SendOperationStatus'
+    && event.state === 'accepted'));
+  assert.ok(events.some((event) => event.kind === 'SendResult' && event.ok
+    && event.operationId === 'op-stable' && event.requestId === 'request-1'));
+  assert.ok(calls.some((call) => call.kind === 'request' && call.method === 'operation.status'));
+  assert.equal(hostEvents.some((event) => event.kind === 'PreflightFailed'), false);
+  runner.dispose();
+});
+
+test('message.send ambiguity reaches bounded visible recovery when status stays pending', async () => {
+  const timers = new FakeTimerSink();
+  const hostEvents: Event[] = [];
+  const { deps } = makeEffectRunnerDeps({
+    requestImpl: async (method) => method === 'message.send'
+      ? { requestId: 'request-pending' }
+      : { state: 'pending' },
+    dispatchEvent: (event) => hostEvents.push(event),
+    timer: timers,
+  });
+  const runner = new EffectRunner(deps);
+  runner.run({
+    kind: 'SendRpc', corrId: 'corr-pending', operationId: 'op-pending', backendGeneration: 4,
+    sessionPath: '/a', text: 'hello', inputs: [], composedText: 'hello', localId: 'local-pending',
+  });
+  await settle();
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    timers.runAll();
+    await settle();
+  }
+
+  assert.ok(hostEvents.some((event) => event.kind === 'SendOperationStatus'
+    && event.state === 'reconciliation-exhausted'));
+  assert.equal(hostEvents.some((event) => event.kind === 'PreflightFailed'), false);
+  runner.dispose();
+});
+
+test('message.send post-ack watchdog records ambiguity instead of rolling back', async () => {
+  const timers = new FakeTimerSink();
+  const hostEvents: Event[] = [];
+  const { deps } = makeEffectRunnerDeps({
+    requestImpl: async (method) => method === 'message.send'
+      ? { requestId: 'request-watchdog' }
+      : { state: 'accepted', requestId: 'request-watchdog', committed: false },
+    dispatchEvent: (event) => hostEvents.push(event),
+    timer: timers,
+  });
+  const runner = new EffectRunner(deps);
+  runner.run({
+    kind: 'SendRpc', corrId: 'corr-watchdog', operationId: 'op-watchdog', backendGeneration: 4,
+    sessionPath: '/a', text: 'hello', inputs: [], composedText: 'hello', localId: 'local-watchdog',
+  });
+  await settle();
+  timers.runAll();
+  await settle();
+
+  assert.ok(hostEvents.some((event) => event.kind === 'SendOperationDelayed'
+    && event.operationId === 'op-watchdog'));
+  assert.equal(hostEvents.some((event) => event.kind === 'PreflightFailed'), false);
+  runner.dispose();
+});
+
 test('EffectRunner SendRpc calls getSendTimerTimeoutMs() with no argument for the dynamic send-timer budget', async () => {
   // The production wiring derives the budget from the current
   // prepassTimeoutSec + first-token headroom. Verify the runner calls the
@@ -1221,226 +1435,234 @@ test('EffectRunner SendRpc send-timer budget honors getSendTimerTimeoutMs (prepa
   runner.dispose();
 });
 
-test('EffectRunner EditRpc send-timer dispatches PreflightFailed on timeout (edit follows the same phase-scoped shape)', async () => {
+test('EffectRunner EditRpc issues one idempotent compound request with commit evidence', async () => {
   const timers = new FakeTimerSink();
-  const dispatchedEvents: Event[] = [];
-  const { deps, events } = makeEffectRunnerDeps({
-    requestImpl: () => Promise.resolve({ requestId: 'req-9' }),
-    sendTimerTimeoutMs: 50,
-    timer: timers,
-    dispatchEvent: (e) => dispatchedEvents.push(e),
-  });
-  const runner = new EffectRunner(deps);
-
-  runner.run({ kind: 'EditRpc', corrId: 'c-pf-edit', sessionPath: '/a', messageId: 'msg-1', text: 'edited', inputs: [], localId: 'loc-e1', interruptFirst: false });
-  await settle();
-  // Early-ack happened (EditResult{ok:true}); the send-timer is armed.
-  assert.equal(events.length, 1);
-  assert.equal(events[0]?.kind, 'EditResult');
-  assert.equal(events[0]?.ok, true);
-  assert.equal(timers.size, 1);
-
-  // Fire the send-timer → PreflightFailed (STATE_CONTRACT § Optimistic
-  // Reconciliation "Timer ownership": edit follows the same phase-scoped shape).
-  timers.runAll();
-  assert.equal(dispatchedEvents.length, 1);
-  const pf = dispatchedEvents[0];
-  assert.equal(pf?.kind, 'PreflightFailed');
-  if (pf?.kind === 'PreflightFailed') {
-    assert.equal(pf.corrId, 'c-pf-edit');
-    assert.equal(pf.requestId, 'req-9');
-  }
-  runner.dispose();
-});
-
-test('EffectRunner EditRpc interrupts before truncating and sending when interruptFirst is true', async () => {
-  let suppressionCount = 0;
+  const hostEvents: Event[] = [];
   const { deps, calls, events } = makeEffectRunnerDeps({
-    requestImpl: async () => ({ requestId: 'req-edit-running' }),
-    serviceOverrides: {
-      suppressNextCompletionNotificationFor: () => { suppressionCount += 1; },
-    },
-  });
-  const runner = new EffectRunner(deps);
-
-  runner.run({ kind: 'EditRpc', corrId: 'c-edit-running', sessionPath: '/a', messageId: 'msg-1', text: 'edited', inputs: [], localId: 'loc-e1', interruptFirst: true });
-  await settle();
-
-  assert.deepEqual(
-    calls.filter((call) => call.kind === 'request').map((call) => call.method),
-    ['message.interrupt', 'session.truncateAfter', 'message.send'],
-  );
-  assert.equal(suppressionCount, 1);
-  assert.equal(events.length, 1);
-  assert.equal(events[0]?.kind, 'EditResult');
-  assert.equal(events[0]?.ok, true);
-  runner.dispose();
-});
-
-test('EffectRunner EditRpc truncates then sends without interrupting an idle session', async () => {
-  let suppressionCount = 0;
-  const { deps, calls, events } = makeEffectRunnerDeps({
-    requestImpl: async () => ({ requestId: 'req-edit-idle' }),
-    serviceOverrides: {
-      suppressNextCompletionNotificationFor: () => { suppressionCount += 1; },
-    },
-  });
-  const runner = new EffectRunner(deps);
-
-  runner.run({ kind: 'EditRpc', corrId: 'c-edit-idle', sessionPath: '/a', messageId: 'msg-1', text: 'edited', inputs: [], localId: 'loc-e2', interruptFirst: false });
-  await settle();
-
-  assert.deepEqual(
-    calls.filter((call) => call.kind === 'request').map((call) => call.method),
-    ['session.truncateAfter', 'message.send'],
-  );
-  assert.equal(suppressionCount, 0);
-  assert.equal(events.length, 1);
-  assert.equal(events[0]?.kind, 'EditResult');
-  assert.equal(events[0]?.ok, true);
-  runner.dispose();
-});
-
-test('EffectRunner keeps an edit pending when only message.send acknowledgement times out', async () => {
-  const timers = new FakeTimerSink();
-  const { deps, events } = makeEffectRunnerDeps({
-    requestImpl: async (method) => {
-      if (method === 'message.send') throw new RequestTimeoutError('req-edit-delayed-ack');
-      return {};
-    },
+    requestImpl: async (method) => method === 'message.edit'
+      ? { operationId: 'edit-op', operationAttempt: 1, requestId: 'replacement', committed: true }
+      : { state: 'accepted', requestId: 'replacement', committed: true },
+    dispatchEvent: (event) => hostEvents.push(event),
     timer: timers,
   });
   const runner = new EffectRunner(deps);
 
   runner.run({
-    kind: 'EditRpc', corrId: 'c-edit-delayed-ack', sessionPath: '/a',
-    messageId: 'msg-1', text: 'edited', inputs: [], localId: 'loc-edit-delayed-ack',
-    interruptFirst: false,
+    kind: 'EditRpc', corrId: 'edit-corr', operationId: 'edit-op', operationAttempt: 1,
+    backendGeneration: 7, sessionPath: '/a', messageId: 'old-user', text: 'replacement',
+    inputs: [], composedText: 'replacement', localId: 'replacement-local',
   });
   await settle();
 
-  assert.equal(events.some((event) => event.kind === 'EditResult'), false);
-  assert.equal(timers.size, 1);
-  runner.run({ kind: 'ClearSendTimer', corrId: 'c-edit-delayed-ack' });
-  assert.equal(timers.size, 0);
+  const requests = calls.filter((call) => call.kind === 'request');
+  assert.equal(requests[0]?.method, 'message.edit');
+  assert.deepEqual(requests[0]?.params, {
+    sessionPath: '/a', entryId: 'old-user', text: 'replacement', inputs: [],
+    localId: 'replacement-local', operationId: 'edit-op', operationAttempt: 1,
+  });
+  assert.equal(requests.some((call) => call.method === 'message.interrupt'
+    || call.method === 'session.truncateAfter' || call.method === 'message.send'), false);
+  assert.deepEqual(events, [{
+    kind: 'EditResult', corrId: 'edit-corr', operationId: 'edit-op', operationAttempt: 1,
+    backendGeneration: 7, sessionPath: '/a', ok: true, committed: true, requestId: 'replacement',
+  }]);
+  assert.equal(timers.size, 0, 'a correlated committed acknowledgement needs no semantic-status polling');
+  assert.equal(hostEvents.some((event) => event.kind === 'MessageOperationStatus'
+    && event.state === 'reconciliation-exhausted'), false);
   runner.dispose();
 });
 
-test('EffectRunner retains edit ownership across a truncate waiter timeout, then sends only after the exact late acknowledgement', async () => {
-  const requestCalls: Array<{ method: string; params: unknown }> = [];
-  let acknowledgeTruncate!: () => void;
-  const backend: BackendLike = {
-    request<T>(method: string, params?: unknown, options?: CommitAwareRequestOptions<T>): Promise<T> {
-      requestCalls.push({ method, params });
-      if (method === 'session.truncateAfter') {
-        acknowledgeTruncate = () => options?.onCorrelatedResponse?.({ ok: true, result: {} as T });
-        return Promise.reject(new RequestTimeoutError('req-truncate-delayed'));
-      }
-      if (method === 'message.send') {
-        return Promise.resolve({ requestId: 'replacement-turn' } as T);
-      }
-      return Promise.resolve({} as T);
-    },
-  };
-  let sessionTail = Promise.resolve();
-  const queues: EffectRunnerDeps['queues'] = {
-    async enqueueLifecycle<T>(task: () => Promise<T>): Promise<T> {
-      return await task();
-    },
-    async enqueueSessionOperation<T>(_sessionPath: string, task: () => Promise<T>): Promise<T> {
-      const operation = sessionTail.then(task, task);
-      sessionTail = operation.then(() => undefined, () => undefined);
-      return await operation;
-    },
-  };
+test('EditRpc dropped acknowledgement reconciles committed status without a false terminal deadline', async () => {
+  const timers = new FakeTimerSink();
   const hostEvents: Event[] = [];
-  const { deps, events } = makeEffectRunnerDeps({
-    backend,
+  const methods: string[] = [];
+  const { deps } = makeEffectRunnerDeps({
+    requestImpl: async (method) => {
+      methods.push(method);
+      if (method === 'message.edit') throw new RequestTimeoutError('edit ack dropped');
+      return { operationId: 'edit-op', state: 'accepted', requestId: 'replacement', committed: true };
+    },
+    dispatchEvent: (event) => hostEvents.push(event),
+    timer: timers,
+  });
+  const runner = new EffectRunner(deps);
+  runner.run({
+    kind: 'EditRpc', corrId: 'edit-corr', operationId: 'edit-op', operationAttempt: 1,
+    backendGeneration: 7, sessionPath: '/a', messageId: 'old-user', text: 'replacement',
+    inputs: [], localId: 'replacement-local',
+  });
+  await settle();
+
+  assert.deepEqual(methods, ['message.edit', 'operation.status']);
+  assert.ok(hostEvents.some((event) => event.kind === 'MessageOperationDelayed'
+    && event.operationKind === 'message.edit'));
+  assert.ok(hostEvents.some((event) => event.kind === 'MessageOperationStatus'
+    && event.operationKind === 'message.edit' && event.state === 'accepted'
+    && event.committed === true));
+  assert.equal(timers.size, 0);
+  assert.equal(hostEvents.some((event) => event.kind === 'MessageOperationStatus'
+    && event.state === 'reconciliation-exhausted'), false);
+  runner.dispose();
+});
+
+test('Stop cancels an edit waiting in the session FIFO before any destructive request', async () => {
+  let releaseBlocker!: () => void;
+  const blocker = new Promise<void>((resolve) => { releaseBlocker = resolve; });
+  const tails = new Map<string, Promise<void>>();
+  const queues = {
+    async enqueueLifecycle<T>(task: () => Promise<T>): Promise<T> { return await task(); },
+    async enqueueSessionOperation<T>(path: string, task: () => Promise<T>): Promise<T> {
+      const next = (tails.get(path) ?? Promise.resolve()).then(task, task);
+      tails.set(path, next.then(() => undefined, () => undefined));
+      return await next;
+    },
+  };
+  void queues.enqueueSessionOperation('/a', async () => await blocker);
+
+  const hostEvents: Event[] = [];
+  const methods: string[] = [];
+  const { deps } = makeEffectRunnerDeps({
     queues,
+    requestImpl: async (method) => {
+      methods.push(method);
+      if (method === 'message.interrupt') return { interrupted: true, settled: true };
+      if (method === 'message.edit') return { requestId: 'must-not-run', committed: true };
+      return {};
+    },
     dispatchEvent: (event) => hostEvents.push(event),
   });
   const runner = new EffectRunner(deps);
-
   runner.run({
-    kind: 'EditRpc', corrId: 'c-edit-truncate-delayed', sessionPath: '/a',
-    messageId: 'old-user', text: 'replacement', inputs: [],
-    composedText: 'replacement', localId: 'replacement-local', interruptFirst: false,
+    kind: 'EditRpc', corrId: 'edit-corr', operationId: 'edit-op', operationAttempt: 1,
+    backendGeneration: 7, sessionPath: '/a', messageId: 'old-user', text: 'replacement',
+    inputs: [], localId: 'replacement-local',
+  });
+  runner.run({
+    kind: 'InterruptRpc', corrId: 'stop-corr', operationId: 'stop-op', operationAttempt: 1,
+    backendGeneration: 7, sessionPath: '/a',
   });
   await settle();
+  assert.deepEqual(methods, ['message.interrupt'], 'Stop reaches the backend while the edit remains queued');
 
-  assert.deepEqual(requestCalls.map((call) => call.method), ['session.truncateAfter']);
-  assert.equal(
-    events.some((event) => event.kind === 'EditResult'),
-    false,
-    'the local timeout must not emit the rollback-owning EditResult failure',
-  );
-  assert.deepEqual(
-    hostEvents.filter((event) => event.kind === 'EditTruncateRecoveryChanged')
-      .map((event) => event.phase),
-    ['recovering'],
-  );
-
-  // A user interrupt is admitted immediately but must remain behind the edit's
-  // queue ownership while the destructive acknowledgement is ambiguous.
-  runner.run({ kind: 'InterruptRpc', corrId: 'c-interrupt-after-edit', sessionPath: '/a' });
+  releaseBlocker();
   await settle();
-  assert.deepEqual(requestCalls.map((call) => call.method), ['session.truncateAfter']);
-
-  acknowledgeTruncate();
-  await settle();
-
-  assert.deepEqual(
-    requestCalls.map((call) => call.method),
-    ['session.truncateAfter', 'message.send', 'message.interrupt'],
-  );
-  assert.deepEqual(requestCalls[1], {
-    method: 'message.send',
-    params: {
-      sessionPath: '/a',
-      text: 'replacement',
-      inputs: [],
-      localId: 'replacement-local',
-    },
-  });
-  const editResults = events.filter((event) => event.kind === 'EditResult');
-  assert.equal(editResults.length, 1, 'the replacement receives one acknowledgement and is never rolled back');
-  assert.equal(editResults[0]?.ok, true);
-  assert.equal(editResults[0]?.requestId, 'replacement-turn');
-  assert.deepEqual(
-    hostEvents.filter((event) => event.kind === 'EditTruncateRecoveryChanged')
-      .map((event) => event.phase),
-    ['recovering', 'recovered'],
-  );
+  assert.equal(methods.includes('message.edit'), false);
+  assert.ok(hostEvents.some((event) => event.kind === 'MessageOperationStatus'
+    && event.operationId === 'edit-op' && event.state === 'cancelled'
+    && event.committed === false));
   runner.dispose();
 });
 
-test('EffectRunner EditRpc stops after an interrupt failure and dispatches EditResult{ok:false}', async () => {
-  let suppressionCount = 0;
-  const { deps, calls, events } = makeEffectRunnerDeps({
+test('EditRpc acknowledgement loss reconciles read-only and never repeats the mutation', async () => {
+  const timers = new FakeTimerSink();
+  const hostEvents: Event[] = [];
+  const methods: string[] = [];
+  const { deps } = makeEffectRunnerDeps({
     requestImpl: async (method) => {
-      if (method === 'message.interrupt') throw new Error('interrupt failed');
-      return { requestId: 'req-edit-failed' };
+      methods.push(method);
+      if (method === 'message.edit') throw new RequestTimeoutError('edit ack lost');
+      return { operationId: 'edit-op', state: 'failed', committed: true,
+        code: 'MESSAGE_SEND_PRECOMMIT_FAILED', message: 'replacement failed', outcome: 'failed' };
     },
-    serviceOverrides: {
-      suppressNextCompletionNotificationFor: () => { suppressionCount += 1; },
+    dispatchEvent: (event) => hostEvents.push(event),
+    timer: timers,
+  });
+  const runner = new EffectRunner(deps);
+
+  runner.run({
+    kind: 'EditRpc', corrId: 'edit-corr', operationId: 'edit-op', operationAttempt: 1,
+    backendGeneration: 7, sessionPath: '/a', messageId: 'old-user', text: 'replacement',
+    inputs: [], localId: 'replacement-local',
+  });
+  await settle();
+
+  assert.deepEqual(methods, ['message.edit', 'operation.status']);
+  assert.ok(hostEvents.some((event) => event.kind === 'MessageOperationDelayed'
+    && event.operationKind === 'message.edit'));
+  assert.ok(hostEvents.some((event) => event.kind === 'MessageOperationStatus'
+    && event.operationKind === 'message.edit' && event.state === 'failed'
+    && event.committed === true));
+  runner.dispose();
+});
+
+test('InterruptRpc carries stable identity and blocks a following send until settlement', async () => {
+  const timers = new FakeTimerSink();
+  let releaseStop!: () => void;
+  const stopPending = new Promise<void>((resolve) => { releaseStop = resolve; });
+  const methods: string[] = [];
+  const queues = (() => {
+    const tails = new Map<string, Promise<void>>();
+    return {
+      async enqueueLifecycle<T>(task: () => Promise<T>): Promise<T> { return await task(); },
+      async enqueueSessionOperation<T>(path: string, task: () => Promise<T>): Promise<T> {
+        const next = (tails.get(path) ?? Promise.resolve()).then(task, task);
+        tails.set(path, next.then(() => undefined, () => undefined));
+        return await next;
+      },
+    };
+  })();
+  const { deps, events } = makeEffectRunnerDeps({
+    queues, timer: timers,
+    requestImpl: async (method) => {
+      methods.push(method);
+      if (method === 'message.interrupt') {
+        await stopPending;
+        return { interrupted: true, settled: true };
+      }
+      if (method === 'message.send') return { requestId: 'after-stop' };
+      return {};
     },
   });
   const runner = new EffectRunner(deps);
 
-  runner.run({ kind: 'EditRpc', corrId: 'c-edit-interrupt-fail', sessionPath: '/a', messageId: 'msg-1', text: 'edited', inputs: [], localId: 'loc-e3', interruptFirst: true });
+  runner.run({ kind: 'InterruptRpc', corrId: 'stop-corr', operationId: 'stop-op',
+    operationAttempt: 1, backendGeneration: 7, sessionPath: '/a' });
+  runner.run({ kind: 'SendRpc', corrId: 'send-corr', operationId: 'send-op',
+    backendGeneration: 7, sessionPath: '/a', text: 'later', inputs: [],
+    composedText: 'later', localId: 'later-local' });
   await settle();
+  assert.deepEqual(methods, ['message.interrupt']);
 
-  assert.deepEqual(
-    calls.filter((call) => call.kind === 'request').map((call) => call.method),
-    ['message.interrupt'],
-  );
-  assert.equal(suppressionCount, 1);
-  assert.equal(events.length, 1);
-  assert.equal(events[0]?.kind, 'EditResult');
-  assert.equal(events[0]?.ok, false);
-  if (events[0]?.kind === 'EditResult' && !events[0].ok) {
-    assert.equal(events[0].error, 'interrupt failed');
-  }
+  releaseStop();
+  await settle();
+  assert.deepEqual(methods, ['message.interrupt', 'message.send']);
+  const stop = events.find((event) => event.kind === 'InterruptResult');
+  assert.ok(stop?.kind === 'InterruptResult' && stop.committed === true && stop.settled === true);
+  runner.dispose();
+});
+
+test('an unsettled interrupt acknowledgement keeps status reconciliation alive', async () => {
+  const timers = new FakeTimerSink();
+  const methods: string[] = [];
+  const hostEvents: Event[] = [];
+  const { deps } = makeEffectRunnerDeps({
+    timer: timers,
+    dispatch: (event) => hostEvents.push(event),
+    dispatchEvent: (event) => hostEvents.push(event),
+    requestImpl: async (method) => {
+      methods.push(method);
+      if (method === 'message.interrupt') {
+        return { interrupted: false, alreadyStopped: true, settled: false, recoveryPending: true };
+      }
+      return { state: 'accepted', committed: true, interrupted: true, settled: true };
+    },
+  });
+  const runner = new EffectRunner(deps);
+  runner.run({
+    kind: 'InterruptRpc', corrId: 'stop-corr', operationId: 'stop-op', operationAttempt: 1,
+    backendGeneration: 7, sessionPath: '/a',
+  });
+  await settle();
+  const acknowledgement = hostEvents.find((event) => event.kind === 'InterruptResult');
+  assert.ok(acknowledgement?.kind === 'InterruptResult');
+  assert.equal(acknowledgement.committed, false);
+  assert.equal(timers.size, 1);
+
+  timers.runAll();
+  await settle();
+  assert.deepEqual(methods, ['message.interrupt', 'operation.status']);
+  assert.ok(hostEvents.some((event) => event.kind === 'MessageOperationStatus'
+    && event.operationKind === 'message.interrupt' && event.state === 'committed'));
   runner.dispose();
 });
 

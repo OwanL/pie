@@ -23,6 +23,7 @@ import type {
   PruningDetails,
   PruningResult,
   RetryStatus,
+  SessionCapabilities,
   SessionSummary,
   SystemPromptEntry,
   TranscriptWindow,
@@ -32,6 +33,7 @@ import { EMPTY_TRANSCRIPT_WINDOW } from '../../shared/protocol';
 import { EMPTY_AGGREGATE_STATS } from '../../shared/protocol';
 import { pruningTotals } from '../../shared/pruning.js';
 import { isPendingTabPath } from '../../shared/tab-behavior.js';
+import { stripReqIds } from '../../shared/error-mapping.js';
 import { redactSensitiveText } from '../../shared/sensitive-redaction.js';
 import { projectTranscriptView } from './live-pipeline/projection.js';
 import type {
@@ -49,6 +51,52 @@ import type {
 /** Merge the global effective MCP list with one session's overrides. A
  *  session override only affects servers present in the global list; an
  *  override for an unknown name is ignored (stale rows die silently). */
+export function projectSessionCapabilities(
+  state: ArchState,
+): Record<string, SessionCapabilities> {
+  const projected: Record<string, SessionCapabilities> = { ...state.sessions.capabilitiesBySession };
+  const primaryBySession: Record<string, (typeof state.operations)[string]> = {};
+  const priority = (kind: (typeof state.operations)[string]['kind']): number =>
+    kind === 'message.interrupt' ? 3 : kind === 'message.edit' ? 2 : kind.startsWith('message.') ? 1 : 0;
+
+  for (const operation of Object.values(state.operations)) {
+    if (operation.terminal || operation.phase === 'settled') continue;
+    const sessionPath = operation.session.resolvedPath ?? operation.session.pendingPath;
+    const current = primaryBySession[sessionPath];
+    if (!current || priority(operation.kind) > priority(current.kind)) {
+      primaryBySession[sessionPath] = operation;
+    }
+  }
+
+  for (const [sessionPath, operation] of Object.entries(primaryBySession)) {
+    // Re-narrow after the per-session selection map; settled operations were
+    // excluded above but their declared registry type still includes the phase.
+    if (operation.phase === 'settled') continue;
+    const base = projected[sessionPath] ?? {
+      billableActivity: false,
+      canContinue: false,
+      canInterrupt: false,
+      canCompact: false,
+    };
+    const executionOperation = operation.kind.startsWith('message.');
+    projected[sessionPath] = {
+      ...base,
+      ...(executionOperation ? { billableActivity: true, canInterrupt: true } : {}),
+      canContinue: false,
+      canCompact: false,
+      primaryOperation: {
+        operationId: operation.operationId,
+        kind: operation.kind,
+        phase: operation.phase,
+        attempt: operation.attempt,
+        committed: operation.commit === 'committed',
+        recovery: operation.recovery,
+      },
+    };
+  }
+  return projected;
+}
+
 export function mergeSessionMcpServers(
   globalServers: readonly { name: string; disabled: boolean }[],
   overrides: Record<string, boolean> | undefined,
@@ -239,6 +287,7 @@ interface ProjectionSignature {
   activeSessionPath: string | null;
   transcriptLoaded: boolean;
   sessions: SessionsState;
+  operations: ArchState['operations'];
   settings: SettingsState;
   composer: ComposerState;
   fileChanges: FileChangesState;
@@ -269,6 +318,7 @@ function computeProjectionSignature(state: ArchState): ProjectionSignature {
       ? Object.prototype.hasOwnProperty.call(windowBySession, activePath)
       : false,
     sessions: state.sessions,
+    operations: state.operations,
     settings: state.settings,
     composer: state.composer,
     fileChanges: state.fileChanges,
@@ -305,6 +355,7 @@ function signaturesEqual(a: ProjectionSignature, b: ProjectionSignature): boolea
     a.activeSessionPath === b.activeSessionPath &&
     a.transcriptLoaded === b.transcriptLoaded &&
     a.sessions === b.sessions &&
+    a.operations === b.operations &&
     a.settings === b.settings &&
     a.composer === b.composer &&
     a.fileChanges === b.fileChanges &&
@@ -456,6 +507,7 @@ function projectViewState(state: ArchState): ViewState {
   const pruningCatalog = selectActivePruningCatalog(activePath, sessions.analyticsFactorsBySession);
   // ── Prepass status (Brief F) — live, cancelable chip ──
   const prepass = derivePrepassStatus(state, activePath);
+  const noticeVisible = settings.noticeSessionPath === null || settings.noticeSessionPath === activePath;
 
   return {
     sessions: sessions.sessions,
@@ -464,6 +516,7 @@ function projectViewState(state: ArchState): ViewState {
     pinnedTabPaths: sessions.pinnedTabPaths,
     pinnedTabGroups: sessions.pinnedTabGroups,
     runningSessionPaths: sessions.runningSessionPaths,
+    sessionCapabilitiesBySession: projectSessionCapabilities(state),
     generatingTitleSessionPaths: Object.entries(sessions.titleGenerationBySession)
       .filter(([, generation]) => generation.status === 'armed' || generation.status === 'pending')
       .map(([sessionPath]) => sessionPath),
@@ -484,6 +537,9 @@ function projectViewState(state: ArchState): ViewState {
     // `TokenRateService` and merged in by `PieExtension.buildViewState`
     // (this pure projection must not call the service).
     tokenRateBySession: {},
+    // Placeholder: cumulative working time is measured by the host-side
+    // StatsService and merged in by `PieExtension.buildViewState`.
+    workingTimeBySession: {},
     // Placeholder: aggregate stats are computed host-side by
     // `AggregateStatsService` (reads run-analytics + pricing, ticks on a
     // timer) and merged in by `PieExtension.buildViewState`. The pure
@@ -499,13 +555,16 @@ function projectViewState(state: ArchState): ViewState {
     busy,
     retryStatus,
     liveTurnPhase: activePath ? state.livePipeline.turnsBySession[activePath]?.phase ?? null : null,
-    notice: settings.noticeSessionPath === null || settings.noticeSessionPath === activePath ? settings.notice : null,
-    noticeSessionPath: settings.noticeSessionPath === null || settings.noticeSessionPath === activePath
-      ? settings.noticeSessionPath
+    // Notice strings are host state until this boundary. Remove internal
+    // request identities from both renderer-visible fields here, while the
+    // host-side raw value remains available to logs and diagnostics.
+    notice: noticeVisible && settings.notice !== null
+      ? redactSensitiveText(stripReqIds(settings.notice))
       : null,
-    noticeKind: settings.noticeSessionPath === null || settings.noticeSessionPath === activePath ? settings.noticeKind : null,
-    noticeRaw: settings.noticeSessionPath === null || settings.noticeSessionPath === activePath
-      ? (settings.noticeRaw === null ? null : redactSensitiveText(settings.noticeRaw))
+    noticeSessionPath: noticeVisible ? settings.noticeSessionPath : null,
+    noticeKind: noticeVisible ? settings.noticeKind : null,
+    noticeRaw: noticeVisible && settings.noticeRaw !== null
+      ? redactSensitiveText(stripReqIds(settings.noticeRaw))
       : null,
     backendReady: settings.backendReady,
     workspaceCwd: sessions.workspaceCwd,

@@ -56,12 +56,16 @@ function main(): void {
             result: { kind: 'runtime.command', payload: result },
           });
         } catch (error) {
+          const code = error && typeof error === 'object' && 'code' in error
+            && (error as { code?: unknown }).code === 'OPERATION_INTENT_MISMATCH'
+            ? 'OPERATION_INTENT_MISMATCH' as const
+            : 'RUNTIME_COMMAND_FAILED' as const;
           currentServer.sendFrame({
             kind: 'response',
             requestId: frame.requestId,
             ok: false,
             error: {
-              code: 'RUNTIME_COMMAND_FAILED',
+              code,
               message: error instanceof Error ? error.message : String(error),
               retryable: false,
             },

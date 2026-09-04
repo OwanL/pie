@@ -1,6 +1,6 @@
 ---
 name: diagnose
-description: "Disciplined evidence-first diagnosis for hard, unclear, intermittent, or performance bugs: reproduce → minimise → hypothesise → instrument → fix → regression-test. Use when the user asks for diagnosis/debugging or the cause is genuinely uncertain; not for straightforward fixes with an obvious failing line and remedy."
+description: "Use when the user asks for diagnosis/debugging or the cause is genuinely uncertain; not for straightforward fixes with an obvious failing line and remedy."
 ---
 
 # Diagnose
@@ -20,7 +20,7 @@ Spend disproportionate effort here. **Be aggressive. Be creative. Refuse to give
 1. **Failing test** at whatever seam reaches the bug — unit, integration, e2e.
 2. **Curl / HTTP script** against a running dev server.
 3. **CLI invocation** with a fixture input, diffing stdout against a known-good snapshot.
-4. **Headless browser script** (Playwright / Puppeteer) — drives the UI, asserts on DOM/console/network. In pie, the checked-in commands are `cd extension && npm run test:browser` (Playwright), with `test:browser:configure-provider-gate` and `test:browser:live-model` for focused flows; pie's loopback browser server serves the real Preact UI from the VS Code extension host over `127.0.0.1` HTTP/WebSocket (see pie's `docs/BROWSER_SERVER_PLAN.md`). In another repository, use its configured browser/e2e command and documentation.
+4. **Headless browser script** (Playwright / Puppeteer) — drives the UI, asserts on DOM/console/network. In pie, run `npm run extension:test:browser` from the repository root. Pass a focused Playwright file after `--` when needed, for example `npm run extension:test:browser -- provider-gate.pw.ts` or `npm run extension:test:browser -- live-races.pw.ts`. Pie's loopback browser server serves the real Preact UI from the VS Code extension host over `127.0.0.1` HTTP/WebSocket (see pie's `docs/BROWSER_SERVER_PLAN.md`). In another repository, use its configured browser/e2e command and documentation.
 5. **Replay a captured trace.** Save a real network request / payload / event log to disk; replay it through the code path in isolation. Sanitize before replaying: redact credentials, tokens, and identifiable session paths, stub live endpoints where possible, and run in a disposable environment. If replay could produce side effects (writes, network mutation, session changes), get explicit user confirmation first.
 6. **Throwaway harness.** Spin up a minimal subset of the system (one service, mocked deps) that exercises the bug code path with a single function call.
 7. **Property / fuzz loop.** If the bug is "sometimes wrong output", run 1000 random inputs and look for the failure mode.

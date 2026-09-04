@@ -53,6 +53,27 @@ test('meters native/custom history compaction and preserves provider-qualified i
   }]);
 });
 
+test('emits an explicit gap when a summarization response omits provider usage', async () => {
+  const session = makeSession();
+  session.agent.streamFn = async () => ({ result: async () => ({
+    usage: undefined as never,
+  }) });
+  session._compactionAbortController = {};
+  const payloads: Array<{
+    instrumentationGap?: boolean;
+    outcome?: string;
+    instrumentationGapReason?: string;
+  }> = [];
+  installAuxiliaryLlmMeter(session, '/session.jsonl', (_event, payload) => payloads.push(payload));
+
+  await (await session.agent.streamFn({ id: 'model-a', provider: 'provider-a' })).result();
+
+  assert.equal(payloads.length, 1);
+  assert.equal(payloads[0]?.instrumentationGap, true);
+  assert.equal(payloads[0]?.outcome, undefined);
+  assert.match(String(payloads[0]?.instrumentationGapReason), /no provider usage/);
+});
+
 test('classifies branch summaries separately and ignores ordinary assistant streams', async () => {
   const session = makeSession();
   const kinds: string[] = [];

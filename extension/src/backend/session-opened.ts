@@ -16,6 +16,7 @@ import { SESSION_SNAPSHOT_TOO_LARGE_CODE, type SessionOpenedPayload, type System
 import type { SessionContext, SessionPromptState } from './server-types';
 import type { SdkBuildSystemPromptOptions } from './sdk';
 import type { SessionEntryLike } from './transcript';
+import { buildSessionCapabilities, hasBillableSessionActivity } from './session-activity';
 import {
   LIVE_PIPELINE_LIMITS,
   type LiveTurnCheckpoint,
@@ -72,8 +73,9 @@ export async function buildSessionOpenedPayload(
   // defends against a stale host decision racing a just-started turn: the
   // authoritative snapshot is required during streaming (STATE_CONTRACT
   // "Snapshot Recovery"), so we must not omit it.
+  const billableActivity = hasBillableSessionActivity(context);
   const streaming = context.session.isStreaming || !!context.activeRequest;
-  const mode: TranscriptMode = transcript === 'skip' && !streaming ? 'skip' : 'tail';
+  const mode: TranscriptMode = transcript === 'skip' && !billableActivity ? 'skip' : 'tail';
 
   const cache = ensureDisplayTranscriptCache(context);
   const liveTurnSnapshot = buildSessionOpenedLiveSnapshot(context);
@@ -96,7 +98,8 @@ export async function buildSessionOpenedPayload(
     session: buildCurrentSummary(context, deps.startupCwd),
     transcript: transportTranscript,
     transcriptWindow: rawTranscriptSlice.transcriptWindow,
-    busy: context.session.isStreaming || !!context.activeRequest || context.session.isCompacting === true,
+    busy: billableActivity,
+    capabilities: buildSessionCapabilities(context),
     runtimeReady: true,
     // Compaction re-arms busy via `compaction_start`, but `isStreaming` /
     // `activeRequest` are both false while it runs. Carry the explicit flag so

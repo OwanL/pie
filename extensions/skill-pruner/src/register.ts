@@ -20,6 +20,7 @@ import {
 	getCachedPrepassCrossSession,
 } from "./prepass-cache.js";
 import { pruningResultRenderer } from "./render.js";
+import type { PrepassInvocation } from "./pruning-types.js";
 import {
 	shouldSkipPruning,
 	resolveVisibleSkills,
@@ -183,6 +184,7 @@ export default function register(pi: ExtensionAPI) {
 		let prepassThinkingLevel = activeConfig.thinkingLevel;
 		let latencyMs = 0;
 		let prepassUsage: PrepassUsage | undefined;
+		let prepassInvocations: PrepassInvocation[] | undefined;
 		let skillSafeguardReason: string | undefined;
 		let toolSafeguardReason: string | undefined;
 		let keptAllDueToParseFailure = false;
@@ -278,6 +280,7 @@ export default function register(pi: ExtensionAPI) {
 				prepassThinkingLevel = prepassResult.thinkingLevel;
 				latencyMs = prepassResult.latencyMs;
 				prepassUsage = prepassResult.usage;
+				prepassInvocations = prepassResult.prepassInvocations;
 				keptAllDueToParseFailure = prepassResult.keptAllDueToParseFailure ?? false;
 				cacheHit = prepassResult.cacheHit ?? false;
 			}
@@ -402,6 +405,7 @@ export default function register(pi: ExtensionAPI) {
 			userMessage: rawUserMessage,
 			latencyMs,
 			usage: prepassUsage,
+			prepassInvocations,
 			cacheHit,
 			error: pruningError,
 			safeguardReason,

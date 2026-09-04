@@ -17,6 +17,9 @@ import { formatModelSpec, getModelThinkingLevels, orderModelsForPicker, parseMod
 import { ContextWindowBreakdownChart } from '../context-window/breakdown-chart';
 import type { ContextWindowBreakdown } from '../context-window/breakdown';
 import type { TokenRateIndicatorState } from './use-token-rate';
+import type { WorkingTimeIndicatorState } from './use-working-time';
+import type { SessionCostIndicatorState } from '../session-tabs/token-usage';
+import { SessionCostTooltip } from './session-cost-tooltip';
 import { ComposerSettingsMenu } from './settings-menu';
 import { SubagentProviderMenu } from './subagent-provider-menu';
 import { CompactionButton } from './compaction-button';
@@ -59,7 +62,7 @@ interface ComposerToolbarStatus {
 
 interface ComposerToolbarProps {
   sessionPath: string | null;
-  busy: boolean;
+  canCompact: boolean;
   /** False while transport/backend lifecycle work makes mutations unsafe. */
   commandsAvailable?: boolean;
   prefs: ChatPrefs;
@@ -94,8 +97,9 @@ interface ComposerToolbarProps {
   supportsReasoning: boolean;
   contextIndicator: { label: string | null; ariaLabel: string; severity: string | null } | null;
   contextBreakdown: ContextWindowBreakdown | null;
-  sessionCostIndicator: { label: string; ariaLabel: string; tooltip: string } | null;
+  sessionCostIndicator: SessionCostIndicatorState | null;
   tokenRateIndicator: TokenRateIndicatorState;
+  workingTimeIndicator: WorkingTimeIndicatorState;
   runStatus: ComposerToolbarStatus | null;
   /** True while the active session runs a history-compaction LLM call. */
   compacting: boolean;
@@ -107,7 +111,7 @@ interface ComposerToolbarProps {
 
 export const ComposerToolbar = memo(function ComposerToolbar({
   sessionPath,
-  busy,
+  canCompact,
   commandsAvailable = true,
   prefs,
   pruningSettings,
@@ -142,6 +146,7 @@ export const ComposerToolbar = memo(function ComposerToolbar({
   contextBreakdown,
   sessionCostIndicator,
   tokenRateIndicator,
+  workingTimeIndicator,
   runStatus,
   compacting,
   lastCompaction,
@@ -228,7 +233,7 @@ export const ComposerToolbar = memo(function ComposerToolbar({
         <McpToggleMenu prefs={prefs} mcpServers={mcpSessionServers} mcpServersStatus={mcpServersStatus} mcpPendingApply={mcpSessionPendingApply} onMcpListRequested={onMcpListRequested} onMcpSetServerEnabledForSession={onMcpSetServerEnabledForSession} />
 
         <CompactionButton
-          availability={!sessionPath ? 'no-session' : compacting ? 'compacting' : busy ? 'busy' : 'available'}
+          availability={!sessionPath ? 'no-session' : compacting ? 'compacting' : !canCompact ? 'busy' : 'available'}
           onCompact={onCompact}
         />
 
@@ -273,6 +278,8 @@ export const ComposerToolbar = memo(function ComposerToolbar({
             kind="cost"
             ariaLabel={sessionCostIndicator.ariaLabel}
             tooltip={sessionCostIndicator.tooltip}
+            tooltipNode={<SessionCostTooltip indicator={sessionCostIndicator} />}
+            richRole="region"
             label={sessionCostIndicator.label}
             freezeWhileVisible
           />
@@ -286,6 +293,17 @@ export const ComposerToolbar = memo(function ComposerToolbar({
             ariaLabel={tokenRateIndicator.ariaLabel}
             tooltip={tokenRateIndicator.tooltip}
             label={tokenRateIndicator.label}
+            freezeWhileVisible
+          />
+        )}
+
+        {workingTimeIndicator.label && (
+          <ToolbarIndicatorChip
+            kind="time"
+            ariaLabel={workingTimeIndicator.ariaLabel}
+            tooltip={workingTimeIndicator.tooltip}
+            tooltipNode={workingTimeIndicator.tooltipNode}
+            label={workingTimeIndicator.label}
             freezeWhileVisible
           />
         )}

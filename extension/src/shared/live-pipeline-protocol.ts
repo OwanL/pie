@@ -184,6 +184,8 @@ export interface LiveTurnRecord {
   turnId: string;
   attemptId: string;
   requestId: string;
+  /** Stable mutation identity; distinct from request/turn/attempt IDs. */
+  operationId?: string;
   sessionPath: string;
   canonicalMessageId: string;
   modelId?: string;
@@ -274,6 +276,8 @@ export interface SemanticEnvelopeBase {
   protocolVersion: number;
   sessionPath: string;
   requestId: string;
+  /** Stable message.send mutation identity, when initiated by a current host. */
+  operationId?: string;
   turnId: string;
   attemptId: string;
   seq: number;
@@ -393,6 +397,7 @@ export function isTurnSemanticEnvelope(value: unknown): value is TurnSemanticEnv
     || value.protocolVersion !== LIVE_PIPELINE_PROTOCOL_VERSION
     || typeof value.sessionPath !== 'string'
     || typeof value.requestId !== 'string'
+    || (value.operationId !== undefined && typeof value.operationId !== 'string')
     || typeof value.turnId !== 'string'
     || typeof value.attemptId !== 'string'
     || !Number.isSafeInteger(value.seq) || (value.seq as number) < 1

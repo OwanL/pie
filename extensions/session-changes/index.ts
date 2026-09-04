@@ -149,10 +149,12 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: 'session_changes',
     label: 'Session changes',
-    description: 'List files changed by a pi session or return focused diffs for selected paths. Defaults to this session and includes subagent edits.',
-    promptSnippet: 'Inspect a session\'s changed-file manifest and focused diffs.',
+    description: 'Review files changed by the current or specified Pi session after editing, using a session-scoped manifest and focused diffs before workspace-wide Git checks; includes subagent edits. Use git status/diff separately for overall worktree state; focused diffs may include pre-existing hunks in files already dirty at session start.',
+    promptSnippet: 'Review this session\'s changed-file manifest and focused diffs after file edits.',
     promptGuidelines: [
-      'Use session_changes list before diff to isolate this session; read files when generated or untracked-file diffs are incomplete.',
+      'After editing files, use session_changes list before claiming or reviewing what this session changed; then use session_changes diff only for relevant manifest paths.',
+      'Use git status/diff separately for overall worktree state and integration checks. For files already dirty at session start, session_changes diff may include pre-existing hunks from its Git baseline; do not attribute those hunks to the session without corroboration.',
+      'Read files when session_changes reports generated or untracked files whose focused diff is incomplete.',
     ],
     parameters: sessionChangesSchema,
 

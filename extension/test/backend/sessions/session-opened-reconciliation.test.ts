@@ -10,6 +10,7 @@ test('session.opened accepts an additive create operation identity for late reco
     transcript: [],
     transcriptWindow: { totalCount: 0, loadedStart: 0, loadedEnd: 0, hasOlder: false, hasNewer: false, isPartial: false, hasUserMessages: false },
     busy: false,
+    capabilities: { billableActivity: false, canContinue: false, canInterrupt: false, canCompact: true },
     selectionToken: 'selection-1',
     operationId: 'create-operation-1',
     operationAttempt: 2,
@@ -25,6 +26,7 @@ test('session.opened validates the additive cold initial-context estimate indepe
     transcript: [],
     transcriptWindow: { totalCount: 0, loadedStart: 0, loadedEnd: 0, hasOlder: false, hasNewer: false, isPartial: false, hasUserMessages: false },
     busy: false,
+    capabilities: { billableActivity: false, canContinue: false, canInterrupt: false, canCompact: true },
     runtimeReady: false,
     initialContextEstimate: { tokens: 12_345, contextWindow: 200_000 },
   };

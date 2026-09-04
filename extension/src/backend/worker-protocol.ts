@@ -64,6 +64,7 @@ export type WorkerRuntimeOperation =
   | 'models.list'
   | 'liveTurn.checkpoint'
   | 'message.send'
+  | 'operation.status'
   | 'message.continue'
   | 'message.compact'
   | 'message.clearQueue'
@@ -86,6 +87,7 @@ export type WorkerRuntimeEventName =
   | 'tool.started'
   | 'tool.progress'
   | 'tool.finished'
+  | 'agent.settled'
   | 'busy.changed'
   | 'contextUsage.changed'
   | 'extension_ui.request'
@@ -428,7 +430,8 @@ export type WorkerResponseResult =
   | { kind: 'shutting-down' }
   | { kind: 'runtime.command'; payload: WorkerJsonValue };
 
-export type WorkerErrorCode = 'COMMAND_FAILED' | 'RUNTIME_COMMAND_FAILED' | 'INTERRUPT_FAILED' | 'SHUTDOWN_FAILED';
+export type WorkerErrorCode = 'COMMAND_FAILED' | 'RUNTIME_COMMAND_FAILED' | 'INTERRUPT_FAILED' | 'SHUTDOWN_FAILED'
+  | 'OPERATION_INTENT_MISMATCH';
 
 export interface WorkerError {
   code: WorkerErrorCode;
@@ -897,7 +900,7 @@ function validateCommand(value: Record<string, unknown>, requireSeq: boolean): s
 
 const RUNTIME_OPERATIONS: ReadonlySet<WorkerRuntimeOperation> = new Set([
   'session.open', 'session.preload', 'session.loadTranscriptPage', 'session.loadDetail',
-  'session.truncateAfter', 'session.title.generate', 'models.list', 'liveTurn.checkpoint', 'message.send', 'message.continue', 'message.compact',
+  'session.truncateAfter', 'session.title.generate', 'models.list', 'liveTurn.checkpoint', 'message.send', 'operation.status', 'message.continue', 'message.compact',
   'message.clearQueue', 'message.replaceQueue', 'extension_ui.response',
   'settings.set', 'systemPromptToggles.set', 'test.extensionCommand',
 ]);
@@ -906,7 +909,7 @@ const RUNTIME_EVENT_NAMES: ReadonlySet<WorkerRuntimeEventName> = new Set([
   'session.opened', 'message.started', 'message.delta', 'message.thinking',
   'message.toolCallDelta', 'message.finished', 'message.aborted', 'message.custom',
   'message.queuedDelivered', 'tool.started', 'tool.progress', 'tool.finished',
-  'busy.changed', 'contextUsage.changed', 'extension_ui.request', 'preflight.failed',
+  'agent.settled', 'busy.changed', 'contextUsage.changed', 'extension_ui.request', 'preflight.failed',
   'retry.started', 'retry.ended', 'retry.measured', 'retry.stuck',
   'compaction.started', 'compaction.ended', 'auxiliary-llm.usage', 'live.semantic',
   'live.lifecycle', 'operational-error', 'error',
@@ -1306,7 +1309,8 @@ function validateWorkerError(value: unknown): string | undefined {
   const extra = exactKeys(value, ['code', 'message', 'retryable']);
   if (extra) return `response.error ${extra}`;
   if (value.code !== 'COMMAND_FAILED' && value.code !== 'RUNTIME_COMMAND_FAILED'
-      && value.code !== 'INTERRUPT_FAILED' && value.code !== 'SHUTDOWN_FAILED') return 'response.error.code is invalid.';
+      && value.code !== 'INTERRUPT_FAILED' && value.code !== 'SHUTDOWN_FAILED'
+      && value.code !== 'OPERATION_INTENT_MISMATCH') return 'response.error.code is invalid.';
   if (!boundedString(value.message, MAX_ERROR_MESSAGE_BYTES)) return 'response.error.message must be a bounded non-empty string.';
   if (typeof value.retryable !== 'boolean') return 'response.error.retryable must be boolean.';
   return undefined;

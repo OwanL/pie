@@ -21,7 +21,7 @@ import {
   SDK_SESSION_OPEN_SINGLE_READ_PATCH_VERSION,
   hasSdkSessionOpenSingleReadMarkers,
 } from '../../../src/backend/sdk-session-open-patch';
-test.after(async () => { void cleanupPristineTemplate(); });
+test.after(async () => { await cleanupPristineTemplate(); });
 
 test('coordinator barrier patches both files and returns a closed, versioned identity', async () => {
   await withFixture(async ({ sdkPath, lockRoot }) => {

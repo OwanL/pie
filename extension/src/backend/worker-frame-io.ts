@@ -409,7 +409,7 @@ function laneFor(frame: WorkerIpcFrame): WriterLane {
 function isLifecycleRuntimeEvent(event: string): boolean {
   return event === 'session.opened' || event === 'message.started' || event === 'message.finished'
     || event === 'message.aborted' || event === 'tool.started' || event === 'tool.finished'
-    || event === 'busy.changed' || event === 'live.lifecycle';
+    || event === 'agent.settled' || event === 'busy.changed' || event === 'live.lifecycle';
 }
 
 function validateCapacity(value: number, name: string): number {

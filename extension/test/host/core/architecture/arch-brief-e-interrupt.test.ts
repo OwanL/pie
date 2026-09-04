@@ -101,6 +101,7 @@ test('Brief E (a): interrupt aborts an in-flight pre-ack message.send AND enqueu
     // message.send hangs (slow prepass, pre-ack); message.interrupt resolves.
     requestImpl: async (method: string) => {
       if (method === 'message.send') return new Promise(() => {});
+      if (method === 'message.interrupt') return { interrupted: false, alreadyStopped: true, settled: true };
       return {};
     },
   });
@@ -176,51 +177,6 @@ test('Brief E (b): interrupt on a streaming (post-commit) turn does not roll bac
   );
   const intResult = findResult(events, 'InterruptResult');
   assert.ok(intResult && intResult.ok);
-
-  runner.dispose();
-});
-
-test('Brief E: interrupt during edit truncate preserves the edit transaction, then stops its turn', async () => {
-  const timers = new FakeTimerSink();
-  let resolveTruncate!: () => void;
-  const truncatePending = new Promise<void>((resolve) => { resolveTruncate = resolve; });
-  const { deps, calls, events } = makeEffectRunnerDeps({
-    timer: timers,
-    queues: makeSerializingQueues(),
-    requestImpl: async (method: string) => {
-      if (method === 'session.truncateAfter') await truncatePending;
-      if (method === 'message.send') return { requestId: 'edited-turn' };
-      return {};
-    },
-  });
-  const runner = new EffectRunner(deps);
-
-  runner.run({
-    kind: 'EditRpc', corrId: 'c-edit', sessionPath: '/s', messageId: 'old-user',
-    text: 'edited', inputs: [], localId: 'edited-local', interruptFirst: false,
-  });
-  await settle();
-  assert.deepEqual(
-    calls.filter((call) => call.kind === 'request').map((call) => call.method),
-    ['session.truncateAfter'],
-    'truncate owns the session queue before the user interrupts',
-  );
-
-  runner.run({ kind: 'InterruptRpc', corrId: 'c-stop-edit', sessionPath: '/s' });
-  await settle();
-  assert.equal(findResult(events, 'EditResult'), undefined, 'edit is not locally rolled back after truncate was issued');
-  assert.equal(findResult(events, 'InterruptResult'), undefined, 'interrupt remains serialized behind the edit transaction');
-
-  resolveTruncate();
-  await settle();
-  assert.deepEqual(
-    calls.filter((call) => call.kind === 'request').map((call) => call.method),
-    ['session.truncateAfter', 'message.send', 'message.interrupt'],
-  );
-  const editResult = findResult(events, 'EditResult');
-  assert.ok(editResult && editResult.ok && editResult.requestId === 'edited-turn');
-  const interruptResult = findResult(events, 'InterruptResult');
-  assert.ok(interruptResult && interruptResult.ok);
 
   runner.dispose();
 });

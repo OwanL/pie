@@ -2,6 +2,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
 import { atomicWriteText } from '../../shared/atomic-write';
+import type { BillableInvocationRecord, BillableInvocationSummary } from '../../shared/billable-invocation';
 
 import {
   RUN_ANALYTICS_SCHEMA_VERSION,
@@ -27,6 +28,9 @@ export interface RunAnalyticsExportPayload extends RunAnalyticsQueryResult, Glob
   schemaVersion: number;
   exportedAt: string;
   workspaceKey: string;
+  /** Conserved usage authority. Legacy exports may omit these migration fields. */
+  billableInvocations?: BillableInvocationRecord[];
+  billableInvocationSummary?: BillableInvocationSummary;
 }
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
@@ -101,6 +105,7 @@ export async function exportRunAnalyticsStore(
   now: () => Date = () => new Date(),
   excludeSessionPaths?: ReadonlySet<string>,
   excludeSessionIds?: ReadonlySet<string>,
+  billableInvocationExport?: Pick<RunAnalyticsExportPayload, 'billableInvocations' | 'billableInvocationSummary'>,
 ): Promise<RunAnalyticsExportPayload> {
   const result = await queryRunAnalyticsStore(storageDir);
   if (excludeSessionPaths && excludeSessionPaths.size > 0) {
@@ -123,6 +128,7 @@ export async function exportRunAnalyticsStore(
     workspaceKey: path.basename(storageDir),
     ...result,
     ...sideChannels,
+    ...(billableInvocationExport ?? {}),
   };
 
   await fs.mkdir(path.dirname(targetPath), { recursive: true });

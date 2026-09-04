@@ -443,20 +443,26 @@ export class SessionServiceState {
   }
 
   handleCreateOperationAcknowledged(selectionToken: string, operationId: string, sessionPath: string): string | undefined {
-    const operation = this.getArchState().pending.createOperations[operationId];
+    const operation = this.getArchState().operations[operationId];
     if (!operation
-      || operation.selectionToken !== selectionToken
-      || operation.status === 'failed'
-      || operation.status === 'succeeded') return undefined;
+      || operation.causal.selectionToken !== selectionToken
+      || operation.terminal) return undefined;
+    const request = this.selectionRequests.get(selectionToken);
+    const attempt = request?.operationAttempt ?? operation.attempt;
+    const backendGeneration = request?.modelFencesByOperationAttempt?.[attempt]?.backendGeneration
+      ?? request?.backendGeneration
+      ?? this.backendGeneration;
     this.dispatchArch({
       kind: 'CreateOperationSucceeded',
       operationId,
-      pendingPath: operation.pendingPath,
+      pendingPath: operation.session.pendingPath,
       sessionPath,
+      attempt,
+      backendGeneration,
     });
     this.dispatchArch({
       kind: 'PendingPathReplaced',
-      oldPendingPath: operation.pendingPath,
+      oldPendingPath: operation.session.pendingPath,
       newSessionPath: sessionPath,
     });
     // Keep the request-start hydration fences until a trailing session.opened
@@ -464,16 +470,16 @@ export class SessionServiceState {
     // so dropping the request here would make the normal subsequent event look
     // unsolicited and incorrectly discard its authoritative model metadata.
     this.clearSelectionRequestTimeout(selectionToken);
-    this.clearSessionScope(operation.pendingPath, true);
+    this.clearSessionScope(operation.session.pendingPath, true);
     this.scheduleRender();
-    return operation.pendingPath;
+    return operation.session.pendingPath;
   }
 
   handleCreateOperationDelayed(selectionToken: string, operationId: string, notice: string, expectedAttempt?: number): void {
     const request = this.selectionRequests.get(selectionToken);
     if (!request || request.operationId !== operationId || !request.pendingPath) return;
-    const operation = this.getArchState().pending.createOperations[operationId];
-    if (!operation || operation.status === 'succeeded' || operation.status === 'failed') return;
+    const operation = this.getArchState().operations[operationId];
+    if (!operation || operation.terminal) return;
     if (expectedAttempt !== undefined && operation.attempt !== expectedAttempt) return;
     const ownsSelection = this.currentSelectionToken === selectionToken;
     this.clearSelectionRequestTimeout(selectionToken);
@@ -483,6 +489,8 @@ export class SessionServiceState {
       pendingPath: request.pendingPath,
       selectionToken,
       attempt: operation.attempt,
+      backendGeneration: request.modelFencesByOperationAttempt?.[operation.attempt]?.backendGeneration
+        ?? request.backendGeneration,
       notice,
       ownsSelection,
     });
@@ -492,13 +500,53 @@ export class SessionServiceState {
   /** Re-arm the local waiter for a delayed create without minting a new
    * operation identity, pending path, or selection token. */
   retryCreateOperation(operationId: string): boolean {
-    const operation = this.getArchState().pending.createOperations[operationId];
-    if (!operation || operation.status !== 'delayed-awaiting-outcome') return false;
-    const request = this.selectionRequests.get(operation.selectionToken);
+    const operation = this.getArchState().operations[operationId];
+    if (!operation || operation.phase !== 'ambiguous' || operation.terminal) return false;
+    const request = this.selectionRequests.get(operation.causal.selectionToken);
     if (!request) return false;
     request.operationAttempt = operation.attempt + 1;
-    this.armSelectionRequestTimeout(operation.selectionToken);
+    this.armSelectionRequestTimeout(operation.causal.selectionToken);
     return true;
+  }
+
+  /** Resolve every non-terminal message mutation owned by a dead backend
+   * generation. Send retains its exact optimistic rollback path; compound edit
+   * preserves unknown commit authority, and the rowless operations terminalize
+   * through their shared status path. */
+  failPendingSendOperations(notice: string): void {
+    const operations = Object.values(this.getArchState().operations).filter(
+      (operation) => operation.kind.startsWith('message.')
+        && !operation.terminal
+        && operation.backendGeneration === this.backendGeneration,
+    );
+    for (const operation of operations) {
+      const sessionPath = operation.session.resolvedPath ?? operation.session.pendingPath;
+      if (operation.kind === 'message.edit' || operation.kind === 'message.interrupt'
+        || operation.kind === 'message.continue' || operation.kind === 'message.compact') {
+        this.dispatchArch({
+          kind: 'MessageOperationStatus', operationId: operation.operationId,
+          operationKind: operation.kind, sessionPath,
+          backendGeneration: operation.backendGeneration,
+          state: 'generation-ended', error: notice,
+        });
+        continue;
+      }
+      if (operation.kind !== 'message.send') continue;
+      const pending = this.getArchState().pending.ops[operation.causal.selectionToken]
+        ?? this.getArchState().pending.promoted[operation.causal.selectionToken];
+      this.dispatchArch({
+        kind: 'SendOperationStatus', operationId: operation.operationId,
+        sessionPath, backendGeneration: operation.backendGeneration,
+        state: 'generation-ended', error: notice,
+      });
+      if (pending) {
+        this.dispatchArch({
+          kind: 'PreflightFailed', corrId: operation.causal.selectionToken,
+          operationId: operation.operationId,
+          sessionPath: pending.sessionPath, requestId: pending.requestId ?? '', error: notice,
+        });
+      }
+    }
   }
 
   /** Generation death is the one non-RPC path allowed to definitively clean up
@@ -508,18 +556,25 @@ export class SessionServiceState {
     const tokens = [...this.selectionRequests.values()]
       .filter((request) => request.operationId && request.pendingPath)
       .map((request) => request.token);
-    for (const token of tokens) this.handleSelectionFailure(token, notice);
+    for (const token of tokens) {
+      this.handleSelectionFailure(token, notice, undefined, 'backend-generation-ended');
+    }
   }
 
-  handleSelectionFailure(selectionToken: string, notice: string, expectedAttempt?: number): void {
+  handleSelectionFailure(
+    selectionToken: string,
+    notice: string,
+    expectedAttempt?: number,
+    reason: 'definitive-rejection' | 'backend-generation-ended' = 'definitive-rejection',
+  ): void {
     const request = this.selectionRequests.get(selectionToken);
     const operation = request?.operationId
-      ? this.getArchState().pending.createOperations[request.operationId]
+      ? this.getArchState().operations[request.operationId]
       : undefined;
     // A matching session.opened may have won the race with a late RPC error.
     // Its durable success is authoritative; never roll the resolved session
     // back because a local waiter settled afterward.
-    if (operation?.status === 'succeeded') {
+    if (operation?.terminal?.outcome === 'settled') {
       this.finishSelectionRequest(selectionToken);
       return;
     }
@@ -527,12 +582,17 @@ export class SessionServiceState {
       return;
     }
     const ownsSelection = this.currentSelectionToken === selectionToken;
-    if (operation && operation.status !== 'failed') {
+    if (operation && !operation.terminal) {
+      const attempt = request?.operationAttempt ?? operation.attempt;
       this.dispatchArch({
         kind: 'CreateOperationFailed',
         operationId: operation.operationId,
-        pendingPath: operation.pendingPath,
+        pendingPath: operation.session.pendingPath,
         error: notice,
+        attempt,
+        backendGeneration: request?.modelFencesByOperationAttempt?.[attempt]?.backendGeneration
+          ?? request?.backendGeneration,
+        reason,
       });
     }
     bootLog('session-state', 'selection.failed', {

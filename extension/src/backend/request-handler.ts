@@ -11,6 +11,8 @@ import {
   validateLiveTurnCheckpoint,
   validateLoadTranscriptPage,
   validateMessageSend,
+  validateMessageOperation,
+  validateMessageInterrupt,
   validateMessageReplaceQueue,
   validateRuntimePrefsSet,
   validateSessionCreate,
@@ -24,6 +26,7 @@ import {
   validateTruncateAfter,
   validateExtensionUiResponse,
   validateOpenTabsSet,
+  validateOperationStatus,
   validateMcpSetServerEnabled,
   validateMcpSetSessionServerEnabled,
 } from './rpc';
@@ -31,9 +34,21 @@ import { ProviderGate, type ProviderGateMetrics } from './provider-gate';
 import { listMcpServers, setMcpServerEnabled } from './mcp-config';
 import { readSessionMcpOverrides, writeSessionMcpOverrides, type SessionMcpOverrides } from './mcp-session-config';
 import { CreateOperationLedger } from './create-operation-ledger';
+import {
+  canonicalCompactIntentFingerprint,
+  canonicalContinueIntentFingerprint,
+  canonicalSendIntentFingerprint,
+  SendOperationLedger,
+} from './send-operation-ledger';
+import {
+  canonicalInterruptIntentFingerprint,
+  InterruptOperationLedger,
+  type InterruptOperationResult,
+} from './interrupt-operation-ledger';
 import { resolveActiveModel } from './session-metadata';
-import { classifyInterruptedContinuationTail, type SdkModule, type SdkSessionManager } from './sdk';
+import type { SdkModule, SdkSessionManager } from './sdk';
 import { buildPromptText, lowerImageInputs, normalizeThinkingLevel } from './message-inputs';
+import { buildSessionCapabilities, hasBillableSessionActivity } from './session-activity';
 import type { ActiveRequest, SessionContext, SessionContextCreationReason } from './server-types';
 import { BackendLiveTurnAccumulator } from './live-turn-accumulator';
 import { BackendError } from './server-io';
@@ -153,6 +168,22 @@ const INTERRUPT_ABORT_WATCHDOG_ENV = 'PIE_INTERRUPT_ABORT_WATCHDOG_MS';
  *  live-switching models (Bug 4). The healthy-abort path (settles promptly) is
  *  untouched — this only bounds the never-settles window. */
 const DEFAULT_INTERRUPT_ABORT_WATCHDOG_MS = 30 * 1000;
+const DEFAULT_SESSION_TRANSITION_WAIT_MS = 30 * 1000;
+const DEFAULT_SESSION_TRANSITION_POLL_MS = 10;
+
+export type SessionTransitionWaitOutcome<T> =
+  | { status: 'ready'; value: T }
+  | { status: 'timed-out'; timeoutMs: number };
+
+export interface SessionTransitionWaitOptions<T> {
+  resolveCurrent(): Promise<T>;
+  isPending(): boolean;
+  timeoutMs?: number;
+  pollIntervalMs?: number;
+  setTimeout?: (callback: () => void, delayMs: number) => ReturnType<typeof setTimeout>;
+  clearTimeout?: (timer: ReturnType<typeof setTimeout>) => void;
+}
+
 export function formatInterruptWatchdogDuration(watchdogMs: number): string {
   if (watchdogMs < 1000 || watchdogMs % 1000 !== 0) return `${watchdogMs}ms`;
   const seconds = watchdogMs / 1000;
@@ -167,6 +198,8 @@ function resolveInterruptAbortWatchdogMs(): number {
 
 export interface BackendRequestHandlerDeps {
   sdkPath: string;
+  /** Process generation used to reject stale operation-status reconciliation. */
+  backendGeneration?: number;
   agentDir: string;
   startupCwd: string;
   sessionDir?: string;
@@ -189,6 +222,18 @@ export interface BackendRequestHandlerDeps {
   duplicateColdSession?(sessionPath: string): { sessionPath: string };
   truncateColdSessionAfter?(sessionPath: string, entryId: string): Promise<{ sessionPath: string }>;
   isSessionTransitionPending?(sessionPath: string): boolean;
+  /** Synchronous generation/ownership fence checked immediately before a
+   * session mutation enters the SDK. Isolated workers use this to reject a
+   * context revoked while an async transition wait was settling. */
+  isSessionContextCurrent?(sessionPath: string, context: SessionContext): boolean;
+  /** Bounded transition-wait scheduler. Injectable only to make timeout/race
+   * boundaries deterministic at the request-handler seam. */
+  sessionTransitionWait?: {
+    timeoutMs?: number;
+    pollIntervalMs?: number;
+    setTimeout?: (callback: () => void, delayMs: number) => ReturnType<typeof setTimeout>;
+    clearTimeout?: (timer: ReturnType<typeof setTimeout>) => void;
+  };
   /** Register a per-path authoritative replacement before any async mutation. */
   transitionSessionContext?(
     sessionPath: string,
@@ -271,7 +316,11 @@ export interface BackendRequestHandlerDeps {
    * coordinator's revisioned worker-sync domain. Optional for standalone
    * request-handler tests and legacy embeddings. */
   syncOpenTabsRegistry?(tabs: unknown[], sourceRevision?: number): Promise<void>;
-  emitBusyChanged(context: SessionContext, busy: boolean): void;
+  emitBusyChanged(
+    context: SessionContext,
+    busy: boolean,
+    capabilities?: import('../shared/protocol').SessionCapabilities,
+  ): void;
   emitContextUsageChanged(context: SessionContext): void;
   emitSessionListChanged(): Promise<void>;
   listSessions(): Promise<SessionSummary[]>;
@@ -320,6 +369,124 @@ export interface BackendRequestHandlerDeps {
 
 function markRequestValidated(deps: BackendRequestHandlerDeps): void {
   deps.onRequestValidated?.();
+}
+
+/** Join the currently visible runtime owner without relying on an unbounded
+ * resolved-promise loop. The deadline also bounds a stuck
+ * `ensureSessionContext`; poll wake-ups yield to timers so a synchronously
+ * resolving stale owner cannot starve the deadline. */
+export async function waitForSessionTransition<T>(
+  options: SessionTransitionWaitOptions<T>,
+): Promise<SessionTransitionWaitOutcome<T>> {
+  const timeoutMs = options.timeoutMs && options.timeoutMs > 0
+    ? options.timeoutMs
+    : DEFAULT_SESSION_TRANSITION_WAIT_MS;
+  const pollIntervalMs = options.pollIntervalMs && options.pollIntervalMs > 0
+    ? options.pollIntervalMs
+    : DEFAULT_SESSION_TRANSITION_POLL_MS;
+  const schedule = options.setTimeout ?? setTimeout;
+  const cancel = options.clearTimeout ?? clearTimeout;
+  const timedOut: SessionTransitionWaitOutcome<T> = { status: 'timed-out', timeoutMs };
+  let expired = false;
+  let pollTimer: ReturnType<typeof setTimeout> | undefined;
+  let wakePoll: (() => void) | undefined;
+  let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+
+  const deadline = new Promise<SessionTransitionWaitOutcome<T>>((resolve) => {
+    deadlineTimer = schedule(() => {
+      expired = true;
+      if (pollTimer !== undefined) cancel(pollTimer);
+      pollTimer = undefined;
+      wakePoll?.();
+      wakePoll = undefined;
+      resolve(timedOut);
+    }, timeoutMs);
+  });
+
+  const transition = (async (): Promise<SessionTransitionWaitOutcome<T>> => {
+    let value = await options.resolveCurrent();
+    while (!expired && options.isPending()) {
+      await new Promise<void>((resolve) => {
+        wakePoll = resolve;
+        pollTimer = schedule(resolve, pollIntervalMs);
+      });
+      pollTimer = undefined;
+      wakePoll = undefined;
+      if (expired) return timedOut;
+      value = await options.resolveCurrent();
+    }
+    return expired ? timedOut : { status: 'ready', value };
+  })();
+
+  try {
+    return await Promise.race([transition, deadline]);
+  } finally {
+    if (deadlineTimer !== undefined) cancel(deadlineTimer);
+    if (pollTimer !== undefined) cancel(pollTimer);
+  }
+}
+
+async function requireSessionTransition(
+  deps: BackendRequestHandlerDeps,
+  sessionPath: string,
+): Promise<SessionContext> {
+  const configured = deps.sessionTransitionWait;
+  const outcome = await waitForSessionTransition({
+    resolveCurrent: async () => {
+      let context = await deps.ensureSessionContext(sessionPath);
+      // Semantic-recovery ownership lives on the retiring context until its
+      // replacement is authoritative. Join it inside the same bounded wait as
+      // coordinator/worker transitions instead of awaiting recoveryPromise at
+      // individual mutation sites without a deadline.
+      const joinedRecoveries = new Set<Promise<SessionContext>>();
+      while (context.recoveryPromise) {
+        const recovery = context.recoveryPromise;
+        if (joinedRecoveries.has(recovery)) {
+          throw new BackendError(
+            'SESSION_RUNTIME_RECOVERY_FAILED',
+            'The session runtime recovery did not publish a replacement owner.',
+          );
+        }
+        joinedRecoveries.add(recovery);
+        try {
+          context = await recovery;
+        } catch (error) {
+          throw new BackendError(
+            'SESSION_RUNTIME_RECOVERY_FAILED',
+            `The session runtime could not be replaced: ${toErrorMessage(error)}`,
+          );
+        }
+      }
+      if (context.retired) {
+        throw new BackendError(
+          'SESSION_RUNTIME_RECOVERY_FAILED',
+          'The previous session runtime was retired before a replacement became available.',
+        );
+      }
+      return context;
+    },
+    isPending: () => deps.isSessionTransitionPending?.(sessionPath) === true,
+    ...configured,
+  });
+  if (outcome.status === 'ready') return outcome.value;
+  throw new BackendError(
+    'SESSION_TRANSITION_TIMEOUT',
+    `The session runtime transition did not settle within ${formatInterruptWatchdogDuration(outcome.timeoutMs)}.`,
+  );
+}
+
+function assertCurrentSessionMutationOwner(
+  deps: BackendRequestHandlerDeps,
+  sessionPath: string,
+  context: SessionContext,
+): void {
+  if (context.retired || context.recoveryPromise
+    || deps.isSessionContextCurrent?.(sessionPath, context) === false) {
+    throw new BackendError(
+      'SESSION_RUNTIME_RECOVERY_FAILED',
+      'The session runtime owner changed before the mutation could start.',
+    );
+  }
 }
 
 type RequestHandler = (deps: BackendRequestHandlerDeps, request: RequestEnvelope) => Promise<unknown>;
@@ -507,6 +674,14 @@ function getCreateOperationLedger(deps: BackendRequestHandlerDeps): CreateOperat
   return fallback;
 }
 
+/** Attempt and selection metadata are transport concerns, not mutation intent. */
+function createOperationIntentFingerprint(
+  kind: 'session.create' | 'session.duplicate',
+  pathIdentity: string,
+): string {
+  return JSON.stringify([kind, path.resolve(pathIdentity)]);
+}
+
 /** Shared post-durable-create publication phase for `session.create` and
  * `session.duplicate`. Durable manager-handle installation is already complete
  * before this runs; publication remains runtime-free and therefore reports the
@@ -568,6 +743,10 @@ async function handleSessionCreate(
     // behind by a failed publication is resumed instead of recreated.
     const result = await getCreateOperationLedger(deps).run({
       operationId: params.operationId,
+      intentFingerprint: createOperationIntentFingerprint(
+        'session.create',
+        params.cwd || deps.startupCwd,
+      ),
       execute: async (registerDurablePath) => {
         const created = createColdSession(deps, params.cwd);
         // The server callback installs the process-local manager handle before
@@ -628,10 +807,7 @@ async function handleSessionOpen(
   deps.emit('session.opened', openPayload);
   const context = deps.getSessionContext(params.sessionPath);
   if (context) {
-    deps.emitBusyChanged(
-      context,
-      context.session.isStreaming || !!context.activeRequest || context.session.isCompacting === true,
-    );
+    deps.emitBusyChanged(context, hasBillableSessionActivity(context));
   }
   void deps.emitSessionListChanged();
   // The authoritative snapshot is the session.opened event above. Return only
@@ -665,6 +841,7 @@ async function handleSessionDuplicate(
     // §6.3 idempotent duplicate: same ledger semantics as `session.create`.
     const result = await getCreateOperationLedger(deps).run({
       operationId: params.operationId,
+      intentFingerprint: createOperationIntentFingerprint('session.duplicate', params.sessionPath),
       execute: async (registerDurablePath) => {
         const duplicate = duplicateColdSession(deps, params.sessionPath);
         registerDurablePath(duplicate.sessionPath);
@@ -784,8 +961,8 @@ async function handleSessionTruncateAfter(
   markRequestValidated(deps);
 
   const existingCtx = deps.getSessionContext(params.sessionPath);
-  if (existingCtx?.activeRequest || existingCtx?.session.isStreaming) {
-    throw new BackendError('STREAMING_BUSY', 'Cannot truncate a session that is currently streaming.');
+  if (existingCtx && hasBillableSessionActivity(existingCtx)) {
+    throw new BackendError('STREAMING_BUSY', 'Cannot truncate a session while billable activity is still running.');
   }
 
   if (!existingCtx) {
@@ -969,7 +1146,7 @@ function reportPromptFailure(
     requestId,
   } satisfies ErrorPayload);
   clearActiveRequest(context, requestId, expected);
-  deps.emitBusyChanged(context, false);
+  deps.emitBusyChanged(context, hasBillableSessionActivity(context));
 }
 
 /**
@@ -991,13 +1168,16 @@ function emitPreflightFailed(
   expected?: ActiveRequest,
   sessionPath = context.sessionPath,
 ): void {
+  const operationId = expected?.operationId ?? context.activeRequest?.operationId;
+  context.sendOperationLedger?.markFailed(operationId, 'MESSAGE_SEND_PRECOMMIT_FAILED', message);
   deps.emit('preflight.failed', {
     requestId,
+    ...(operationId ? { operationId } : {}),
     sessionPath,
     error: message,
   } satisfies PreflightFailedPayload);
   clearActiveRequest(context, requestId, expected);
-  deps.emitBusyChanged(context, false);
+  deps.emitBusyChanged(context, hasBillableSessionActivity(context));
 }
 
 class PromptCancelledBeforeStartError extends Error {
@@ -1033,10 +1213,7 @@ async function handleSessionTitleGenerate(
 ): Promise<unknown> {
   const params = validateSessionTitleGenerate(request.params);
   markRequestValidated(deps);
-  let context = await deps.ensureSessionContext(params.sessionPath);
-  while (deps.isSessionTransitionPending?.(params.sessionPath)) {
-    context = await deps.ensureSessionContext(params.sessionPath);
-  }
+  const context = await requireSessionTransition(deps, params.sessionPath);
   return await generateSessionTitle(context, {
     sdkPath: deps.sdkPath,
     prompt: params.prompt,
@@ -1044,6 +1221,29 @@ async function handleSessionTitleGenerate(
     model: params.model,
     thinkingLevel: params.thinkingLevel,
     timeoutSec: params.timeoutSec,
+  }, {
+    onSettled: ({ usage, startedAt, endedAt, outcome }) => {
+      deps.emit('auxiliary-llm.usage', {
+        sessionPath: params.sessionPath,
+        kind: 'session_title',
+        sourceId: `session-title:${request.id}`,
+        occurredAt: endedAt,
+        startedAt,
+        modelId: params.model,
+        provider: params.provider,
+        inputTokens: usage?.inputTokens ?? 0,
+        outputTokens: usage?.outputTokens ?? 0,
+        cacheReadTokens: usage?.cacheReadTokens ?? 0,
+        cacheWriteTokens: usage?.cacheWriteTokens ?? 0,
+        ...(usage?.reportedCostUsd !== undefined ? { reportedCostUsd: usage.reportedCostUsd } : {}),
+        durationMs: Math.max(0, Date.parse(endedAt) - Date.parse(startedAt)),
+        outcome,
+        ...(!usage ? {
+          instrumentationGap: true,
+          instrumentationGapReason: 'The session-title provider invocation exposed no usage.',
+        } : {}),
+      } satisfies import('../shared/protocol').AuxiliaryLlmUsagePayload);
+    },
   });
 }
 
@@ -1053,36 +1253,43 @@ async function handleMessageSend(
 ): Promise<unknown> {
   const params = validateMessageSend(request.params);
   markRequestValidated(deps);
-  let context = await deps.ensureSessionContext(params.sessionPath);
   // An existing-hot lookup can resolve just before truncate/recovery reserves
   // the path. Rejoin that synchronously visible owner before claiming active
   // work; after this check activeRequest is installed without another await,
   // so a later truncate observes STREAMING_BUSY instead of replacing us.
-  while (deps.isSessionTransitionPending?.(params.sessionPath)) {
-    context = await deps.ensureSessionContext(params.sessionPath);
-  }
-  if (context.recoveryPromise) {
-    try {
-      context = await context.recoveryPromise;
-    } catch (error) {
-      throw new BackendError(
-        'SESSION_RUNTIME_RECOVERY_FAILED',
-        `The session runtime could not be replaced: ${toErrorMessage(error)}`,
-      );
-    }
-  }
-  if (context.retired) {
-    throw new BackendError(
-      'SESSION_RUNTIME_RECOVERY_FAILED',
-      'The previous session runtime was retired before a replacement became available.',
+  const context = await requireSessionTransition(deps, params.sessionPath);
+  assertCurrentSessionMutationOwner(deps, params.sessionPath, context);
+  if (params.operationId) {
+    const ledger = context.sendOperationLedger ??= new SendOperationLedger();
+    return await ledger.run(
+      params.operationId,
+      canonicalSendIntentFingerprint(params),
+      async () => ({
+        ...await executeMessageSend(deps, context, params),
+        operationId: params.operationId!,
+      }),
     );
   }
+  return await executeMessageSend(deps, context, params);
+}
+
+async function executeMessageSend(
+  deps: BackendRequestHandlerDeps,
+  context: SessionContext,
+  params: ReturnType<typeof validateMessageSend>,
+): Promise<{ operationId?: string; requestId?: string; queued?: boolean }> {
   if (isProviderExplicitlyDisabled(context.session.model?.provider)) {
     throw new BackendError(
       'PROVIDER_DISABLED',
       'PROVIDER_DISABLED: The selected model provider is disabled in Pie settings. Select a model from an enabled provider before sending.',
     );
   }
+  const billableActivity = hasBillableSessionActivity(context);
+  const conversationActivity = context.activeRequest !== undefined || context.session.isStreaming;
+  if (billableActivity && !conversationActivity) {
+    throw new BackendError('REQUEST_IN_PROGRESS', 'Cannot send while session maintenance or shell activity is running.');
+  }
+
   // Steering: if a turn is already running, inject this message into the
   // current turn via the SDK's `steer()` (delivered after in-flight tool calls
   // finish, before the next LLM call). During the preflight window an
@@ -1099,7 +1306,7 @@ async function handleMessageSend(
   // The SDK emits `message_start` (role 'user') when the loop injects the
   // queued message; the backend forwards that as `message.queuedDelivered` so
   // the host promotes the message from 'queued' to 'completed'.
-  if (context.activeRequest || context.session.isStreaming) {
+  if (conversationActivity) {
     if ((context.queuedLocalIds?.length ?? 0) >= LIVE_PIPELINE_LIMITS.queuedMessageCorrelations) {
       throw new BackendError('QUEUE_CAPACITY_EXCEEDED', 'Too many queued follow-up messages. Wait for delivery or clear the queue before sending more.');
     }
@@ -1110,7 +1317,9 @@ async function handleMessageSend(
     // the delivery message_start before its promise settles.
     const deliveryLocalId = params.localId ?? '';
     const queuedLocalIds = context.queuedLocalIds ??= [];
+    const queuedOperationIds = context.queuedOperationIds ??= [];
     queuedLocalIds.push(deliveryLocalId);
+    queuedOperationIds.push(params.operationId ?? '');
     try {
       if (context.activeRequest && !context.session.isStreaming) {
         await context.session.followUp(queuedPromptText, queuedImagePayload);
@@ -1123,10 +1332,16 @@ async function handleMessageSend(
       // Remove only our still-pending slot. If synchronous delivery already
       // consumed it, there is no stale correlation to remove.
       const index = queuedLocalIds.indexOf(deliveryLocalId);
-      if (index >= 0) queuedLocalIds.splice(index, 1);
+      if (index >= 0) {
+        queuedLocalIds.splice(index, 1);
+        queuedOperationIds.splice(index, 1);
+      }
       throw error;
     }
-    return { queued: true };
+    return {
+      ...(params.operationId ? { operationId: params.operationId } : {}),
+      queued: true,
+    };
   }
 
   const requestId = crypto.randomUUID();
@@ -1138,11 +1353,14 @@ async function handleMessageSend(
   const thinkingLevel = normalizeThinkingLevel(context.session.thinkingLevel);
   context.activeRequest = {
     id: requestId,
+    ...(params.operationId ? { operationId: params.operationId } : {}),
+    ...(params.operationAttempt !== undefined ? { operationAttempt: params.operationAttempt } : {}),
     messageIndex: 0,
     liveTurnAccumulator: new BackendLiveTurnAccumulator({
       protocolVersion: LIVE_PIPELINE_PROTOCOL_VERSION,
       sessionPath: context.sessionPath,
       requestId,
+      ...(params.operationId ? { operationId: params.operationId } : {}),
       turnId,
       attemptId,
       canonicalMessageId,
@@ -1293,6 +1511,7 @@ async function handleMessageSend(
             // durable pruning-result entry independently supplies the UI summary.
             deps.emit('message.custom', {
               requestId,
+              ...(ownedRequest.operationId ? { operationId: ownedRequest.operationId } : {}),
               sessionPath: ownedSessionPath,
               message: {
                 id: `${requestId}:preflight-succeeded`,
@@ -1307,7 +1526,7 @@ async function handleMessageSend(
             // `emitBusyChanged(true)` is idempotent (the host set running
             // optimistically at Send time; `agent_start` will also fire it) —
             // kept for parity with the pre-early-ack path.
-            deps.emitBusyChanged(context, true);
+            deps.emitBusyChanged(context, hasBillableSessionActivity(context));
           } else {
             preflightFailed = true;
             emitPreflightFailed(
@@ -1387,37 +1606,57 @@ async function handleMessageSend(
     throw syncError;
   }
 
-  return { requestId };
+  return { ...(params.operationId ? { operationId: params.operationId } : {}), requestId };
+}
+
+async function handleOperationStatus(
+  deps: BackendRequestHandlerDeps,
+  request: RequestEnvelope,
+): Promise<unknown> {
+  const params = validateOperationStatus(request.params);
+  markRequestValidated(deps);
+  const context = deps.getSessionContext(params.sessionPath);
+  if (!context || context.retired) {
+    throw new BackendError('SESSION_GENERATION_ENDED', 'The session mutation generation is no longer available.');
+  }
+  if (params.backendGeneration !== undefined && deps.backendGeneration !== undefined
+    && params.backendGeneration !== deps.backendGeneration) {
+    throw new BackendError('SESSION_GENERATION_ENDED', 'The session mutation generation is no longer available.');
+  }
+  const status = context.interruptOperationLedger?.status(params.operationId)
+    ?? context.sendOperationLedger?.status(params.operationId);
+  return status ?? { operationId: params.operationId, state: 'pending' };
 }
 
 async function handleMessageContinue(
   deps: BackendRequestHandlerDeps,
   request: RequestEnvelope,
 ): Promise<unknown> {
-  const params = validateSessionPath('message.continue', request.params);
+  const params = validateMessageOperation('message.continue', request.params);
   markRequestValidated(deps);
-  let context = await deps.ensureSessionContext(params.sessionPath);
-  while (deps.isSessionTransitionPending?.(params.sessionPath)) {
-    context = await deps.ensureSessionContext(params.sessionPath);
-  }
-  if (context.recoveryPromise) {
-    try {
-      context = await context.recoveryPromise;
-    } catch (error) {
-      throw new BackendError(
-        'SESSION_RUNTIME_RECOVERY_FAILED',
-        `The session runtime could not be replaced: ${toErrorMessage(error)}`,
-      );
-    }
-  }
-  if (context.retired) {
-    throw new BackendError(
-      'SESSION_RUNTIME_RECOVERY_FAILED',
-      'The previous session runtime was retired before a replacement became available.',
+  const context = await requireSessionTransition(deps, params.sessionPath);
+  assertCurrentSessionMutationOwner(deps, params.sessionPath, context);
+  if (params.operationId) {
+    const ledger = context.sendOperationLedger ??= new SendOperationLedger();
+    return await ledger.run(
+      params.operationId,
+      canonicalContinueIntentFingerprint(params),
+      async () => ({
+        ...executeMessageContinue(deps, context, params),
+        operationId: params.operationId!,
+      }),
     );
   }
-  if (context.activeRequest || context.session.isStreaming) {
-    throw new BackendError('REQUEST_IN_PROGRESS', 'Cannot continue while this session is running.');
+  return executeMessageContinue(deps, context, params);
+}
+
+function executeMessageContinue(
+  deps: BackendRequestHandlerDeps,
+  context: SessionContext,
+  params: ReturnType<typeof validateMessageOperation>,
+): { operationId?: string; requestId: string } {
+  if (hasBillableSessionActivity(context)) {
+    throw new BackendError('REQUEST_IN_PROGRESS', 'Cannot continue while this session has billable activity.');
   }
   if (isProviderExplicitlyDisabled(context.session.model?.provider)) {
     throw new BackendError(
@@ -1428,8 +1667,7 @@ async function handleMessageContinue(
   if (typeof context.session.continueAfterInterruption !== 'function') {
     throw new BackendError('SDK_INCOMPATIBLE', 'The active PI runtime does not support interrupted-turn continuation.');
   }
-  const messages = context.session.messages;
-  if (!classifyInterruptedContinuationTail(messages, context.session.model?.contextWindow)) {
+  if (!buildSessionCapabilities(context).canContinue) {
     throw new BackendError(
       'CONTINUATION_NOT_AVAILABLE',
       'The session does not end at an interrupted continuation point.',
@@ -1437,13 +1675,17 @@ async function handleMessageContinue(
   }
 
   const requestId = crypto.randomUUID();
+  const operationId = params.operationId;
+  const operationAttempt = params.operationAttempt;
   const ownedRequest: ActiveRequest = {
     id: requestId,
+    ...(operationId ? { operationId, operationAttempt } : {}),
     messageIndex: 0,
     liveTurnAccumulator: new BackendLiveTurnAccumulator({
       protocolVersion: LIVE_PIPELINE_PROTOCOL_VERSION,
       sessionPath: context.sessionPath,
       requestId,
+      ...(operationId ? { operationId } : {}),
       turnId: crypto.randomUUID(),
       attemptId: crypto.randomUUID(),
       canonicalMessageId: `${requestId}:1`,
@@ -1471,94 +1713,158 @@ async function handleMessageContinue(
     && (context.sessionOwnershipEpoch ?? 0) === ownedSessionOwnershipEpoch
   );
 
-  // Publish the acknowledgement before starting the SDK run. Unlike Send,
-  // Continue has no optimistic prompt correlation that can route an error
-  // arriving before the ack; delaying one event-loop phase lets the host bind
-  // requestId → sessionPath first. An interrupt that wins this gap clears or
-  // aborts the owned request, and the ownership check prevents resurrection.
+  const hasMatchingAssistantTurn = (): boolean => ownedRequest.messageIndex > 0
+    || !!ownedRequest.currentMessageId
+    || !!ownedRequest.lastAssistantMessageId;
+  const emitTerminalWithoutAssistant = (
+    outcome?: MessageAbortedPayload['outcome'],
+    reason?: string,
+  ): void => {
+    if (ownedRequest.terminalWithoutMessageEmitted) return;
+    ownedRequest.terminalWithoutMessageEmitted = true;
+    if (outcome) {
+      context.sendOperationLedger?.markFailed(
+        operationId,
+        outcome === 'cancelled' ? 'MESSAGE_CONTINUE_CANCELLED'
+          : outcome === 'superseded' ? 'MESSAGE_CONTINUE_SUPERSEDED' : 'MESSAGE_CONTINUE_FAILED',
+        reason ?? `Continuation ${outcome} before it started.`,
+        outcome,
+      );
+    }
+    deps.emit('message.aborted', {
+      requestId,
+      ...(operationId ? { operationId, operationAttempt } : {}),
+      sessionPath: ownedSessionPath,
+      ...(outcome ? { outcome } : {}),
+      ...(outcome === 'cancelled' ? { userInitiated: true } : {}),
+      ...(reason ? { reason } : {}),
+    } satisfies MessageAbortedPayload);
+  };
+  const settleContinuationFailure = (error: Error): void => {
+    if (!ownsRequest()) {
+      emitTerminalWithoutAssistant(ownedRequest.aborted ? 'cancelled' : 'superseded');
+      return;
+    }
+    if (hasMatchingAssistantTurn()) {
+      reportPromptFailure(deps, context, requestId, error, ownedRequest);
+      return;
+    }
+    // A zero-prompt continuation can reject before Pi emits message_start.
+    // Settle without a messageId so an older interrupted assistant is never
+    // relabelled as this attempt's failure.
+    emitTerminalWithoutAssistant('failed', enrichConnectionError(error));
+    clearActiveRequest(context, requestId, ownedRequest);
+    deps.emitBusyChanged(context, hasBillableSessionActivity(context));
+  };
+
+  // Acknowledgement precedes SDK start. An interrupt or ownership replacement
+  // in this gap receives one typed terminal observation and cannot enter Pi.
   setImmediate(() => {
-    if (!ownsRequest() || ownedRequest.aborted) return;
+    if (!ownsRequest() || ownedRequest.aborted) {
+      emitTerminalWithoutAssistant(ownedRequest.aborted ? 'cancelled' : 'superseded');
+      return;
+    }
     try {
       void context.session.continueAfterInterruption!()
-        .catch((error: Error) => {
-          if (!ownsRequest()) return;
-          reportPromptFailure(deps, context, requestId, error, ownedRequest);
-        });
+        .catch((error: Error) => settleContinuationFailure(error));
     } catch (error) {
-      if (!ownsRequest()) return;
-      reportPromptFailure(
-        deps,
-        context,
-        requestId,
-        error instanceof Error ? error : new Error(toErrorMessage(error)),
-        ownedRequest,
-      );
+      settleContinuationFailure(error instanceof Error ? error : new Error(toErrorMessage(error)));
     }
   });
 
-  return { requestId };
+  return { ...(operationId ? { operationId } : {}), requestId };
 }
 
 async function handleMessageCompact(
   deps: BackendRequestHandlerDeps,
   request: RequestEnvelope,
 ): Promise<unknown> {
-  const params = validateSessionPath('message.compact', request.params);
+  const params = validateMessageOperation('message.compact', request.params);
   markRequestValidated(deps);
-  const context = await deps.ensureSessionContext(params.sessionPath);
-  if (context.activeRequest || context.session.isStreaming || context.session.isCompacting) {
+  const context = await requireSessionTransition(deps, params.sessionPath);
+  assertCurrentSessionMutationOwner(deps, params.sessionPath, context);
+  if (params.operationId) {
+    const ledger = context.sendOperationLedger ??= new SendOperationLedger();
+    return await ledger.run(
+      params.operationId,
+      canonicalCompactIntentFingerprint({ sessionPath: params.sessionPath, reason: 'manual' }),
+      async () => ({
+        ...await executeMessageCompact(context, request.id, params.operationId, params.operationAttempt),
+        operationId: params.operationId!,
+      }),
+    );
+  }
+  return await executeMessageCompact(context, request.id);
+}
+
+async function executeMessageCompact(
+  context: SessionContext,
+  requestId: string,
+  operationId?: string,
+  operationAttempt?: number,
+): Promise<{ compacted: true; requestId?: string; operationId?: string }> {
+  if (hasBillableSessionActivity(context)) {
     throw new BackendError('REQUEST_IN_PROGRESS', 'Cannot compact while this session is running.');
   }
-  await context.session.compact();
-  return { compacted: true };
+  const compactionRequest = {
+    requestId,
+    ...(operationId ? { operationId, operationAttempt } : {}),
+    cancelled: false,
+  };
+  context.manualCompactionRequest = compactionRequest;
+  try {
+    await context.session.compact();
+    return operationId ? { compacted: true, requestId, operationId } : { compacted: true };
+  } finally {
+    if (context.manualCompactionRequest === compactionRequest) {
+      context.manualCompactionRequest = undefined;
+    }
+  }
 }
 
 async function handleMessageInterrupt(
   deps: BackendRequestHandlerDeps,
   request: RequestEnvelope,
 ): Promise<unknown> {
-  const params = validateSessionPath('message.interrupt', request.params);
+  const params = validateMessageInterrupt(request.params);
   markRequestValidated(deps);
   const context = deps.getSessionContext(params.sessionPath);
   if (!context) {
     throw new BackendError('SESSION_NOT_FOUND', `Cannot interrupt an unopened session: ${params.sessionPath}`);
   }
+  if (params.operationId) {
+    const ledger = context.interruptOperationLedger ??= new InterruptOperationLedger();
+    const result = await ledger.run(
+      params.operationId,
+      canonicalInterruptIntentFingerprint(params.sessionPath),
+      async () => await executeMessageInterrupt(deps, request, params, context),
+    );
+    return { ...result, operationId: params.operationId, operationAttempt: params.operationAttempt };
+  }
+  return await executeMessageInterrupt(deps, request, params, context);
+}
+
+async function executeMessageInterrupt(
+  deps: BackendRequestHandlerDeps,
+  request: RequestEnvelope,
+  params: ReturnType<typeof validateMessageInterrupt>,
+  context: SessionContext,
+): Promise<InterruptOperationResult> {
   if (context.retired || context.recoveryPromise) {
     return { interrupted: false, alreadyStopped: true, recoveryPending: true };
   }
-  // Relaxed guard: an interrupt is valid whenever ANY billable window is
-  // running — a streaming turn (activeRequest / isStreaming) OR one of the
-  // post-agent_end billable LLM/tool windows the SDK exposes (compaction,
-  // branch summary, retry, bash). After agent_end the backend already cleared
-  // activeRequest + emitted busy=false, but the SDK may still be running a
-  // billable compaction/retry/bash call (isCompacting/isRetrying/isBashRunning)
-  // — the legacy `!activeRequest && !isStreaming` guard would wrongly reject
-  // that as SESSION_NOT_RUNNING (the "appears stopped but still burning money"
-  // bug). An older SDK that doesn't expose the predicates (undefined → falsy)
-  // keeps the legacy behaviour: only an activeRequest or isStreaming passes.
-  const nothingRunning =
-    !context.activeRequest
-    && !context.session.isStreaming
-    && !context.session.isCompacting
-    && !context.session.isRetrying
-    && !context.session.isBashRunning;
-  if (nothingRunning) {
+  if (!hasBillableSessionActivity(context)) {
     // Stop is idempotent. The host can be a few events ahead/behind the SDK at
     // turn boundaries; treating that race as an error wedges the optimistic
     // "Stopping…" state and makes rapid stop→send unnecessarily fragile.
     context.session.clearQueue();
+    emitQueuedSendCancellations(deps, context, 'The queued message was cancelled by Stop before delivery.');
     context.queuedLocalIds = [];
+    context.queuedOperationIds = [];
     return { interrupted: false, alreadyStopped: true };
   }
-  // Stop owns every not-yet-started continuation too. Threshold history
-  // compaction can defer a zero-prompt provider turn until after the current
-  // agent_end; cancel both the SDK and backend markers before aborting so that
-  // a fresh AbortController cannot resurrect work after this barrier settles.
-  context.session.cancelPendingHardCompactionContinuation?.();
-  context.hardCompactionContinuationPending = false;
-  if (context.thresholdCompactionContinuationCandidate) {
-    context.thresholdCompactionContinuationCandidate.aborted = true;
-    context.thresholdCompactionContinuationCandidate = undefined;
+  if (context.manualCompactionRequest) {
+    context.manualCompactionRequest.cancelled = true;
   }
   if (context.activeRequest) {
     context.activeRequest.aborted = true;
@@ -1569,7 +1875,8 @@ async function handleMessageInterrupt(
       }, Date.now()));
     }
   }
-  const abortRequestId = context.activeRequest?.id;
+  const abortRequest = context.activeRequest;
+  const abortRequestId = abortRequest?.id;
   context.uiBridge?.cancelAll();
   // Clear any queued follow-up messages so a Stop cancels pending queued
   // messages too. The SDK `abort()` preserves the followUp queue; without this
@@ -1577,10 +1884,12 @@ async function handleMessageInterrupt(
   // of an unrelated future send. The host also removes 'queued' transcript
   // messages on `InterruptResult{ok:true}` to stay in sync.
   context.session.clearQueue();
+  emitQueuedSendCancellations(deps, context, 'The queued message was cancelled by Stop before delivery.');
   // Handoff §F: the SDK queue is gone; drop the localId correlation queue so
   // we don't try to match stale ids if the backend emits a late user-role
   // message_start before the host finishes reconciling the interrupt.
   context.queuedLocalIds = [];
+  context.queuedOperationIds = [];
   // Hard-stop every billable window the SDK exposes BEFORE the un-awaited
   // `session.abort()` runs. `abort()` alone does NOT stop the post-agent_end
   // compaction / branch-summary / retry / bash LLM calls, so spend would keep
@@ -1595,7 +1904,52 @@ async function handleMessageInterrupt(
   // requested" acknowledgement. The host serializes stop→send/edit operations
   // behind this request; returning before abort settles allowed the next send
   // to enter the dying turn as a queued follow-up and then disappear.
+  const reconcileOwnedIdleRequest = () => {
+    // turn_end normally clears this. Defensively reconcile providers that
+    // settle abort without emitting turn_end, but only after every other
+    // billable window is already closed.
+    if (context.activeRequest?.id !== abortRequestId
+      || hasBillableSessionActivity({ ...context, activeRequest: undefined })) return;
+    const preCommit = abortRequest?.messageIndex === 0
+      && !abortRequest.lastAssistantMessageId
+      && !abortRequest.currentMessageId
+      && abortRequest.semanticStarted !== true;
+    if (preCommit && abortRequest?.operationId) {
+      context.sendOperationLedger?.markFailed(
+        abortRequest.operationId,
+        'MESSAGE_OPERATION_CANCELLED',
+        'The message operation was cancelled by Stop before it started.',
+        'cancelled',
+      );
+      abortRequest.terminalWithoutMessageEmitted = true;
+      deps.emit('message.aborted', {
+        requestId: abortRequest.id,
+        operationId: abortRequest.operationId,
+        ...(abortRequest.operationAttempt !== undefined ? { operationAttempt: abortRequest.operationAttempt } : {}),
+        sessionPath: params.sessionPath,
+        outcome: 'cancelled',
+        userInitiated: true,
+        reason: 'The send was cancelled by Stop before it started.',
+      } satisfies MessageAbortedPayload);
+    } else if (abortRequest?.semanticStarted === true) {
+      deps.emit('message.aborted', {
+        requestId: abortRequest.id,
+        ...(abortRequest.operationId ? { operationId: abortRequest.operationId } : {}),
+        ...(abortRequest.operationAttempt !== undefined ? { operationAttempt: abortRequest.operationAttempt } : {}),
+        sessionPath: params.sessionPath,
+        messageId: abortRequest.lastAssistantMessageId
+          ?? abortRequest.currentMessageId
+          ?? abortRequest.liveTurnAccumulator?.checkpoint().turn.canonicalMessageId
+          ?? `${abortRequest.id}:1`,
+        userInitiated: true,
+      } satisfies MessageAbortedPayload);
+    }
+    context.activeRequest = undefined;
+    deps.emitBusyChanged(context, hasBillableSessionActivity(context));
+  };
+
   const watchdogMs = resolveInterruptAbortWatchdogMs();
+  const deadlineAt = Date.now() + watchdogMs;
   let watchdogTimer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<'timeout'>((resolve) => {
     watchdogTimer = setTimeout(() => resolve('timeout'), watchdogMs);
@@ -1604,7 +1958,25 @@ async function handleMessageInterrupt(
     () => 'settled' as const,
     (error: unknown) => ({ error: toErrorMessage(error) } as const),
   );
-  const outcome = await Promise.race([abort, timeout]);
+  let outcome = await Promise.race([abort, timeout]);
+  if (outcome === 'settled') {
+    reconcileOwnedIdleRequest();
+    // abort() resolution is not settlement. Recheck the complete classifier
+    // through the remainder of the same cooperative grace so retry, compaction,
+    // bash, queued work, or a still-streaming provider cannot escape Stop.
+    while (hasBillableSessionActivity(context)) {
+      const remaining = deadlineAt - Date.now();
+      if (remaining <= 0) {
+        outcome = 'timeout';
+        break;
+      }
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, Math.min(DEFAULT_SESSION_TRANSITION_POLL_MS, remaining));
+        timer.unref?.();
+      });
+      reconcileOwnedIdleRequest();
+    }
+  }
   if (watchdogTimer) clearTimeout(watchdogTimer);
 
   // Another watchdog may have retired this runtime while abort() was pending.
@@ -1631,13 +2003,23 @@ async function handleMessageInterrupt(
       incidentId: `interrupt-stuck:${abortRequestId ?? request.id}`,
       code: 'INTERRUPT_ABORT_STUCK', message, requestId: abortRequestId, sessionPath: params.sessionPath,
     });
-    if (abortRequestId) deps.emit('message.aborted', {
-      requestId: abortRequestId,
-      sessionPath: params.sessionPath,
-      messageId: active?.lastAssistantMessageId,
-      userInitiated: true,
-    } satisfies MessageAbortedPayload);
-    deps.emitBusyChanged(context, false);
+    if (abortRequestId) {
+      const semanticMessageId = active?.semanticStarted === true
+        ? active.liveTurnAccumulator?.checkpoint().turn.canonicalMessageId
+        : undefined;
+      const messageId = active?.lastAssistantMessageId ?? semanticMessageId;
+      if (!messageId && active) active.terminalWithoutMessageEmitted = true;
+      deps.emit('message.aborted', {
+        requestId: abortRequestId,
+        ...(active?.operationId ? { operationId: active.operationId } : {}),
+        ...(active?.operationAttempt !== undefined ? { operationAttempt: active.operationAttempt } : {}),
+        sessionPath: params.sessionPath,
+        messageId,
+        ...(!messageId ? { outcome: 'cancelled' as const } : {}),
+        userInitiated: true,
+      } satisfies MessageAbortedPayload);
+    }
+    deps.emitBusyChanged(context, hasBillableSessionActivity(context));
     const createReplacement = async () => {
       const replacement = await deps.createSessionContext(
         deps.sdk.SessionManager.open(params.sessionPath),
@@ -1670,12 +2052,7 @@ async function handleMessageInterrupt(
     throw new BackendError('MESSAGE_INTERRUPT_FAILED', outcome.error);
   }
 
-  // turn_end normally clears this. Defensively reconcile providers that settle
-  // abort without emitting turn_end before acknowledging Stop to the host.
-  if (!context.session.isStreaming && context.activeRequest?.id === abortRequestId) {
-    context.activeRequest = undefined;
-    deps.emitBusyChanged(context, false);
-  }
+  reconcileOwnedIdleRequest();
   return { interrupted: true, settled: true };
 }
 
@@ -1739,6 +2116,7 @@ async function handleMessageReplaceQueue(
     } catch (restoreError) {
       context.session.clearQueue();
       context.queuedLocalIds = [];
+      context.queuedOperationIds = [];
       return {
         updated: false,
         queueCleared: true,
@@ -1750,13 +2128,33 @@ async function handleMessageReplaceQueue(
   return { updated: true, count: params.messages.length };
 }
 
+function emitQueuedSendCancellations(
+  deps: BackendRequestHandlerDeps,
+  context: SessionContext,
+  reason: string,
+): void {
+  for (const [index, operationId] of (context.queuedOperationIds ?? []).entries()) {
+    if (!operationId) continue;
+    context.sendOperationLedger?.markFailed(operationId, 'MESSAGE_SEND_QUEUE_CLEARED', reason);
+    deps.emit('message.aborted', {
+      requestId: `queued:${operationId}`,
+      operationId,
+      sessionPath: context.sessionPath,
+      ...(context.queuedLocalIds?.[index] ? { localId: context.queuedLocalIds[index] } : {}),
+      outcome: 'cancelled',
+      userInitiated: true,
+      reason,
+    } satisfies MessageAbortedPayload);
+  }
+}
+
 async function handleMessageClearQueue(
-  _deps: BackendRequestHandlerDeps,
+  deps: BackendRequestHandlerDeps,
   request: RequestEnvelope,
 ): Promise<unknown> {
   const params = validateSessionPath('message.clearQueue', request.params);
-  markRequestValidated(_deps);
-  const context = _deps.getSessionContext(params.sessionPath);
+  markRequestValidated(deps);
+  const context = deps.getSessionContext(params.sessionPath);
   if (!context) {
     throw new BackendError('SESSION_NOT_FOUND', `Cannot clear queue for an unopened session: ${params.sessionPath}`);
   }
@@ -1764,9 +2162,13 @@ async function handleMessageClearQueue(
   // optimistic 'queued' transcript messages on the result; this is the
   // authoritative backend clear so the SDK will not drain them later.
   const cleared = context.session.clearQueue();
+  // Emit one operation terminal independently of the correlated clear
+  // acknowledgement, which may be delayed or dropped after the queue changed.
+  emitQueuedSendCancellations(deps, context, 'The queued message was cleared before delivery.');
   // Handoff §F: drop the localId correlation queue so a late user-role
   // message_start cannot carry a stale localId back to the host.
   context.queuedLocalIds = [];
+  context.queuedOperationIds = [];
   return { cleared };
 }
 
@@ -1946,8 +2348,8 @@ async function handleSettingsSet(
     }
   }
 
-  if ((isChangingModel || isChangingThinkingLevel) && targetContext && (targetContext.activeRequest || targetContext.session.isStreaming)) {
-    throw new BackendError('REQUEST_IN_PROGRESS', 'Cannot switch model or thinking level while a request is in progress for this session.');
+  if ((isChangingModel || isChangingThinkingLevel) && targetContext && hasBillableSessionActivity(targetContext)) {
+    throw new BackendError('REQUEST_IN_PROGRESS', 'Cannot switch model or thinking level while this session has billable activity.');
   }
 
   const result = hasPersistedChanges
@@ -2145,6 +2547,7 @@ const handlers: Record<string, RequestHandler> = {
   'session.truncateAfter': handleSessionTruncateAfter,
   'session.title.generate': handleSessionTitleGenerate,
   'message.send': handleMessageSend,
+  'operation.status': handleOperationStatus,
   'message.continue': handleMessageContinue,
   'message.compact': handleMessageCompact,
   'message.interrupt': handleMessageInterrupt,

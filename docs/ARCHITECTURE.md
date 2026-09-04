@@ -280,7 +280,13 @@ Effects are grouped into namespaces (e.g., `SessionRpc`, `SessionLifecycle`, `Fi
 
 ---
 
-## 9. Invariants
+## 9. Conserved Accounting
+
+`StatsService` owns two correlated but separate persisted authorities. The append-only billable-invocation ledger records one immutable settlement for every observable provider call and supplies session usage/cost, aggregate usage/cost, and exports. Run analytics remain a compatibility dual-write and own productivity/outcome dimensions. `WorkingTimeService` projects the separately persisted run activity timeline; time is never inferred from tokens or cost.
+
+Provider seams emit exact usage when available and explicit gap settlements otherwise. Ledger rows preserve provider-qualified model identity, source kind, session/branch and parent operation/run/tool correlation, outcome/timing, provider totals/reported cost, and an immutable pricing-catalog snapshot. Transcript-derived usage is accepted only for idempotent migration/rebuild. Private rows are memory-only and exports contain ordinary rows only. See [`docs/STATE_CONTRACT.md`](STATE_CONTRACT.md#conserved-billable-accounting).
+
+## 10. Invariants
 
 1. **Reducer purity** — `(State, Event) → { state, effects }`. No I/O, no `Date.now()`, no randomness.
 2. **Single effect executor** — side effects only happen in the EffectRunner.
@@ -290,19 +296,21 @@ Effects are grouped into namespaces (e.g., `SessionRpc`, `SessionLifecycle`, `Fi
 6. **Background preservation** — snapshots to non-active sessions update their mirrors; they are never dropped.
 7. **Record-only state** — `Record<string, T>` for keyed collections (no Map/Set in host state).
 8. **Serialized execution** — session RPCs are FIFO-ordered through the lifecycle + session queues.
+9. **Accounting conservation** — one billable provider invocation maps to at most one immutable ledger row; missing usage is an explicit gap, never an inferred zero.
 
 See [`docs/STATE_CONTRACT.md`](STATE_CONTRACT.md) for additional invariants (snapshot recovery, cleanup, selection ownership).
 
 ---
 
-## 10. Module Map
+## 11. Module Map
 
 | Directory | Responsibility |
 |-----------|---------------|
 | `extension/src/host/core/` | Pure CQRS spine: reducer, effects, events, commands, projection, dispatch |
 | `extension/src/host/session-service/` | Backend client lifecycle, session startup, tab actions, message actions |
 | `extension/src/host/sidebar/` | Webview provider, sync state machine, hot reload |
-| `extension/src/host/stats-service/` | Run analytics tracking, persistence, query |
+| `extension/src/host/stats-service/` | Run/activity analytics tracking, compatibility persistence, query |
+| `extension/src/host/billable-invocation-ledger/` | Immutable provider-invocation persistence and session/aggregate/export projections |
 | `extension/src/backend/` | JSON-RPC server, SDK abstraction, request routing, session context |
 | `extension/src/webview/panel/` | Preact UI: transcript, composer, tabs, settings |
 | `extension/src/shared/` | Protocol types, validation, cross-layer helpers |

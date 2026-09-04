@@ -23,7 +23,7 @@ function mount(autonomousMode: boolean, onSetPrefs: (prefs: Partial<ChatPrefs>) 
   act(() => {
     render(h(ComposerToolbar, {
       sessionPath: '/session/test.jsonl',
-      busy: false,
+      canCompact: true,
       prefs: { ...DEFAULT_CHAT_PREFS, autonomousMode },
       pruningSettings: DEFAULT_PRUNING_SETTINGS,
       pruningCatalog: { skills: [], tools: [] },
@@ -53,6 +53,7 @@ function mount(autonomousMode: boolean, onSetPrefs: (prefs: Partial<ChatPrefs>) 
       contextBreakdown: null,
       sessionCostIndicator: null,
       tokenRateIndicator: { label: '', ariaLabel: '', tooltip: '', state: 'idle', paused: false },
+      workingTimeIndicator: { label: '0s', ariaLabel: 'Total agent working time: 0 seconds', tooltip: 'Total agent working time' },
       runStatus: null,
       compacting: false,
       lastCompaction: null,

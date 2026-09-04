@@ -77,6 +77,7 @@ export function chatMessageEqual(a: ChatMessage, b: ChatMessage): boolean {
   if (!deepEqual(a.userParts, b.userParts)) return false;
   if (!deepEqual(a.usage, b.usage)) return false;
   if (!deepEqual(a.customDetails, b.customDetails)) return false;
+  if (!deepEqual(a.billingSourceEntryIds, b.billingSourceEntryIds)) return false;
   return true;
 }
 

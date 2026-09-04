@@ -635,6 +635,8 @@ test("runPruningPrepass: 500 then recovery on retry -> returns parsed pruned ski
 	assert.ok(result.prunedSkills, "should have parsed prune list after recovery");
 	assert.deepEqual(result.prunedSkills, ["alpha"]);
 	assert.equal(result.error, null);
+	assert.equal(result.prepassInvocations?.length, 2, "every provider attempt is settled independently");
+	assert.deepEqual(result.prepassInvocations?.map((entry) => entry.outcome), ["failed", "succeeded"]);
 });
 
 test("runPruningPrepass: malformed JSON is retried once with a correction prompt", async () => {

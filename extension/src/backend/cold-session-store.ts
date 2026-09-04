@@ -49,6 +49,7 @@ import {
 import { SessionCatalog } from './session-catalog';
 import { backendSessionPathKey } from './session-directory';
 import { recordWriteOwnership } from './write-ownership-trace';
+import { BackendError } from './server-io';
 import type { SdkModule, SdkSessionManager } from './sdk';
 import { normalizeDanglingTranscript } from './session-opened';
 import { buildPagedTranscriptWindow } from './transcript-window';
@@ -869,8 +870,19 @@ export class ColdSessionStore {
     }
   }
 
-  async truncateAfter(sessionPath: string, entryId: string): Promise<ColdSessionTruncateResult> {
+  async truncateAfter(
+    sessionPath: string,
+    entryId: string,
+    options?: { requireCurrentBranchTarget?: boolean; onCommit?: () => void },
+  ): Promise<ColdSessionTruncateResult> {
     const opened = this.openManagerWithMigrationLease(sessionPath);
+    if (options?.requireCurrentBranchTarget
+      && !opened.manager.getBranch().some((entry) => entry.id === entryId)) {
+      throw new BackendError(
+        'STALE_BRANCH_TARGET',
+        `The edit target is not on the current authoritative branch: ${entryId}`,
+      );
+    }
     const beforeContext = (opened.manager as ColdSdkSessionManager).buildSessionContext();
     const raw = await this.fileSystem.readFile(sessionPath);
     this.leases.assertCurrent(opened.stamp);
@@ -907,8 +919,12 @@ export class ColdSessionStore {
           ownerRole: 'coordinator',
         });
         this.fileSystem.renameSync(temporaryPath, sessionPath);
+        committed = true;
+        // The rename is the destructive commit point. Record it in the
+        // generation ledger in this same synchronous ownership turn so no
+        // post-rename failure can be misclassified as pre-commit.
+        options?.onCommit?.();
       });
-      committed = true;
       this.invalidateBrowsePath(sessionPath);
       this.refreshCatalog();
     } finally {

@@ -39,6 +39,7 @@ export interface BackendLiveTurnIdentity {
   protocolVersion: number;
   sessionPath: string;
   requestId: string;
+  operationId?: string;
   turnId: string;
   attemptId: string;
   canonicalMessageId: string;
@@ -114,6 +115,7 @@ export class BackendLiveTurnAccumulator {
       turnId: identity.turnId,
       attemptId: identity.attemptId,
       requestId: identity.requestId,
+      ...(identity.operationId ? { operationId: identity.operationId } : {}),
       sessionPath: identity.sessionPath,
       canonicalMessageId: identity.canonicalMessageId,
       modelId: identity.modelId,
@@ -938,6 +940,7 @@ export class BackendLiveTurnAccumulator {
       protocolVersion: this.identity.protocolVersion,
       sessionPath: this.identity.sessionPath,
       requestId: this.identity.requestId,
+      ...(this.identity.operationId ? { operationId: this.identity.operationId } : {}),
       turnId: this.identity.turnId,
       attemptId: this.identity.attemptId,
       seq,

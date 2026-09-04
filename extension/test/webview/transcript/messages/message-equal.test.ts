@@ -24,7 +24,7 @@ const CHAT_MESSAGE_TOP_LEVEL_FIELDS = [
   'thinkingLevel', 'status', 'errorDetail', 'toolCalls', 'toolStateRevision',
   'durationMs', 'turnLatencyMs', 'overheadMs', 'providerLatencyMs',
   'providerQueueMs', 'providerQueueAttemptCount', 'usage', 'customType',
-  'customDetails', 'durableEntryId',
+  'customDetails', 'durableEntryId', 'billingSourceEntryIds',
 ] as const satisfies readonly (keyof ChatMessage)[];
 type MissingChatMessageField = Exclude<keyof ChatMessage, typeof CHAT_MESSAGE_TOP_LEVEL_FIELDS[number]>;
 
@@ -78,6 +78,7 @@ function makeBaseMessage(): ChatMessage {
     customType: undefined,
     customDetails: undefined,
     durableEntryId: 'entry-msg-1',
+    billingSourceEntryIds: ['entry-msg-1'],
   };
 }
 

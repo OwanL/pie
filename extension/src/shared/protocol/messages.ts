@@ -247,6 +247,8 @@ export interface ChatMessage {
   customDetails?: CustomMessageDetails;
   /** Stable SDK session entry for a durability-confirmed terminal message. */
   durableEntryId?: string;
+  /** Raw assistant entries folded into this display row, retained for billing migration. */
+  billingSourceEntryIds?: string[];
 }
 
 /** Custom-type tag for the durable compaction-metrics sidecar entry appended

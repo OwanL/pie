@@ -10,12 +10,13 @@
  * - **settings**: Model config, prefs, pruning, backend readiness, extensions
  * - **composer**: Pending inputs, run summaries
  * - **fileChanges**: File change entries per session
- * - **pending**: Optimistic ops, interrupt flags, message aliases, turn tracking
+ * - **pending**: Optimistic ops, message aliases, turn tracking
  *
  * State-shape rule: keyed collections MUST use `Record<string, T>`,
  * never `Map`/`Set`.
  */
 
+import type { SessionOperation, SessionOperationSource } from './operation-types.js';
 import type {
   ChatMessage,
   SystemPromptEntry,
@@ -42,6 +43,7 @@ import type {
   UserContentPart,
   InlineEditDraft,
   LastCompactionSummary,
+  SessionCapabilities,
   ThinkingLevel,
 } from '../../shared/protocol';
 import type { NoticeKind } from '../../shared/error-mapping.js';
@@ -123,8 +125,10 @@ export interface SessionsState {
    *  order), and groups with < 2 members are dissolved. Persisted to
    *  globalState alongside `pinnedTabPaths`. */
   pinnedTabGroups: string[][];
-  /** Session paths currently streaming a response. */
+  /** Session paths with any backend-authoritative billable activity. */
   runningSessionPaths: string[];
+  /** Backend/host-authoritative capabilities keyed by durable session path. */
+  capabilitiesBySession: Record<string, SessionCapabilities>;
   /** Session paths currently running a history-compaction (`/compact`) LLM
    *  call. Always a subset of `runningSessionPaths` (the backend re-arms busy
    *  while compacting); tracked separately so the UI can show a live
@@ -146,15 +150,8 @@ export interface SessionsState {
    *  restart cannot reopen a private session as ordinary; transcript/content is
    *  never persisted through this field and the marker is removed on close. */
   privacyModeBySession: Record<string, boolean>;
-  /** Per-session interrupt-in-flight flag (formerly SessionArchState). */
-  interruptInFlightBySession: Record<string, boolean>;
   /** Host-owned async title lifecycle. Only `pending` paths render a spinner. */
   titleGenerationBySession: Record<string, SessionTitleGenerationState>;
-  /** Sessions whose most recent interrupt completion barrier settled
-   *  successfully. Late busy/opened events from the retired turn cannot
-   *  re-arm these paths; the next genuine execution command clears the
-   *  fence before optimistically starting new work. */
-  interruptSettledSessionPaths: string[];
   /** Per-session live auto-retry status (absent entry = no retry in flight).
    *  Driven by the SDK's `auto_retry_start` / `auto_retry_end` events; surfaced
    *  to the webview as a "Retrying N of M…" chip with a Cancel button.
@@ -219,10 +216,10 @@ export interface SettingsState {
    *  is an H-category error. */
   noticeKind: NoticeKind | null;
   /** Full host-side error string behind the current `notice` summary, or null.
-   *  Projection redacts credentials before exposing `ViewState.noticeRaw` but
-   *  retains useful context such as internal `req-NN` correlation ids. Cleared
-   *  alongside `notice`/`noticeKind` whenever a notice is dismissed or
-   *  replaced by a non-error notice. */
+   *  The projection redacts credentials and internal `req-NN` correlation ids
+   *  before exposing `ViewState.noticeRaw`; the host retains this detail for
+   *  logs. Cleared alongside `notice`/`noticeKind` whenever a notice is
+   *  dismissed or replaced by a non-error notice. */
   noticeRaw: string | null;
   /** Session that owns the current notice, or null for a truly global notice.
    * Session-owned notices are projected only while their session is active so
@@ -308,6 +305,8 @@ export interface FileChangesState {
 /** Tracks an in-flight optimistic send or edit for rollback on failure. */
 export interface PendingOp {
   kind: 'send' | 'edit';
+  /** Stable mutation identity for sends; edit migration remains separate. */
+  operationId?: string;
   sessionPath: string;
   /** The local transcript entry ID inserted optimistically. */
   localId: string;
@@ -360,30 +359,6 @@ export interface PendingOp {
  *  disambiguates the terminal phases (`succeeded` within the promoted window,
  *  `failed` after the promoted op is dropped) and carries the post-hoc latency
  *  for the high-latency hint. An absent entry means `idle`. */
-export type CreateOperationStatus = 'pending' | 'delayed-awaiting-outcome' | 'succeeded' | 'failed';
-
-/** Host-owned ledger entry for one create/duplicate operation. The operation
- * identity is stable across local acknowledgement retries; the pending path
- * is never reused by another operation. */
-export interface CreateOperation {
-  operationId: string;
-  kind: 'create' | 'duplicate';
-  pendingPath: string;
-  selectionToken: string;
-  status: CreateOperationStatus;
-  /** Monotonic local attempt fence. Retries keep operationId but stale
-   * acknowledgements/errors from an older waiter cannot settle the retry. */
-  attempt: number;
-  /** Durable path learned from the authoritative session.opened event or ack. */
-  resolvedSessionPath?: string;
-  /** Duplicate source, retained so a delayed retry can reconstruct its RPC. */
-  sourceSessionPath?: string;
-  cwd?: string;
-  /** A hidden delayed operation still resolves and drains sends, but must not
-   * reopen or focus its tab when the late success arrives. */
-  hidden?: boolean;
-}
-
 export interface PrepassPhaseState {
   phase: 'running' | 'succeeded' | 'failed';
   /** Prepass LLM latency (ms) from the pruning-result `CustomMessage`'s
@@ -467,6 +442,9 @@ export interface CurrentTurn {
  */
 export interface PendingSendQueueEntry {
   corrId: string;
+  operationId?: string;
+  operationSource?: SessionOperationSource;
+  backendGeneration?: number;
   text: string;
   inputs: ComposerInput[];
   composedText: string;
@@ -499,6 +477,9 @@ export interface PendingSendQueueEntry {
 export interface BackendReadyQueueEntry {
   sessionPath: string;
   corrId: string;
+  operationId?: string;
+  operationSource?: SessionOperationSource;
+  backendGeneration?: number;
   text: string;
   inputs: ComposerInput[];
   composedText: string;
@@ -513,7 +494,7 @@ export interface BackendReadyQueueEntry {
 }
 
 /**
- * Optimistic operations, interrupt flags, message aliases, and turn tracking.
+ * Optimistic operations, message aliases, and turn tracking.
  * This sub-state is only touched by the reducer — never by the webview.
  */
 export interface PendingState {
@@ -551,8 +532,6 @@ export interface PendingState {
   requestIdToLocalId: Record<string, { sessionPath: string; localId: string }>;
   /** Sends queued while the target session was a pending tab, keyed by pending path. */
   sendQueueBySession: Record<string, PendingSendQueueEntry[]>;
-  /** Create/duplicate operation ledger, keyed by host-generated operation ID. */
-  createOperations: Record<string, CreateOperation>;
   /** Sends queued while the backend was not yet ready, keyed by session path. */
   backendReadyQueueBySession: Record<string, BackendReadyQueueEntry[]>;
   /** Per-session pruning prepass phase for the live status chip (Brief F).
@@ -581,6 +560,8 @@ export interface ArchState {
   composer: ComposerState;
   fileChanges: FileChangesState;
   pending: PendingState;
+  /** Common reducer-owned semantic operation registry, keyed by stable ID. */
+  operations: Record<string, SessionOperation>;
   /** Canonical host authority for active turn/tool work. */
   livePipeline: LivePipelineState;
 }
@@ -605,6 +586,7 @@ export function createInitialArchState(): ArchState {
       pinnedTabPaths: [],
       pinnedTabGroups: [],
       runningSessionPaths: [],
+      capabilitiesBySession: {},
       compactingSessionPaths: [],
       lastCompactionBySession: {},
       unreadFinishedSessionPaths: [],
@@ -612,9 +594,7 @@ export function createInitialArchState(): ArchState {
       workspaceCwd: null,
       analyticsFactorsBySession: {},
       privacyModeBySession: {},
-      interruptInFlightBySession: {},
       titleGenerationBySession: {},
-      interruptSettledSessionPaths: [],
       retryStatusBySession: {},
       intentionallyHiddenRunningPaths: [],
     },
@@ -655,6 +635,7 @@ export function createInitialArchState(): ArchState {
       expandedBySession: {},
       readFilePathsBySession: {},
     },
+    operations: {},
     livePipeline: {
       turnsBySession: {},
       toolsByExecutionId: {},
@@ -675,7 +656,6 @@ export function createInitialArchState(): ArchState {
       currentTurnBySession: {},
       requestIdToLocalId: {},
       sendQueueBySession: {},
-      createOperations: {},
       backendReadyQueueBySession: {},
       prepassBySession: {},
     },

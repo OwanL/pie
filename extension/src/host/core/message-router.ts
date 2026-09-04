@@ -10,6 +10,7 @@ import { appendPieError, appendPieLog, showPieLogs } from '../util/pie-log';
 import { buildOptimisticUserParts, buildPromptText } from './composer';
 import { resolveSettingsPath } from '../util/settings-path';
 import { NEW_SESSION_NAME } from '../../shared/session-name';
+import { operationSourceFromRenderer } from './operation-types.js';
 
 /** Minimal sidebar provider surface the router needs. */
 export interface SidebarProviderLike {
@@ -29,10 +30,11 @@ export interface SidebarProviderLike {
 export interface SessionServiceLike {
   bumpSessionDataEpoch(sessionPath: string): void;
   addFilesystemPaths(requestedSessionPath: string | undefined, paths: string[], source: 'picker' | 'drop'): Promise<void>;
-  createNewSession(): string;
+  createNewSession(source?: RendererCommandContext): string;
   openSession(sessionPath: string): void;
-  duplicateSession(sessionPath: string): void;
+  duplicateSession(sessionPath: string, source?: RendererCommandContext): void;
   retryCreateOperation(operationId: string): boolean;
+  getBackendGeneration?(): number;
   loadOlderTranscript(sessionPath?: string): Promise<void>;
   loadNewerTranscript(sessionPath?: string): Promise<void>;
   jumpToLatestTranscript(sessionPath?: string): Promise<void>;
@@ -41,8 +43,8 @@ export interface SessionServiceLike {
   setPruningSettings(updates: Partial<PruningSettings>): Promise<void>;
   setToolResultPruningSettings(updates: Partial<ToolResultPruningSettings>): Promise<void>;
   setSessionTitlesSettings(updates: Partial<SessionTitlesSettings>): Promise<void>;
-  /** Notify deferred triggers that the user sent a message in `sessionPath`. */
-  notifyUserInput(sessionPath: string): void;
+  /** Consume `user_input` triggers using the real prompt (no synthetic Send). */
+  notifyUserInput(sessionPath: string, corrId: string): void;
   /** Cancel a deferred trigger (or all for `sessionPath` when `triggerId` is
    *  omitted). Invoked by the webview's status-strip cancel affordance. */
   cancelDeferredTrigger(sessionPath: string, triggerId?: string): void;
@@ -149,7 +151,7 @@ export class MessageRouter {
       case 'interrupt':
         return this.onInterrupt(msg as Extract<WebviewToHostMessage, { type: 'interrupt' }>, context);
       case 'compact':
-        return this.onCompact(msg as Extract<WebviewToHostMessage, { type: 'compact' }>);
+        return this.onCompact(msg as Extract<WebviewToHostMessage, { type: 'compact' }>, context);
       case 'clearQueue':
         return this.onClearQueue(msg as Extract<WebviewToHostMessage, { type: 'clearQueue' }>, context);
 
@@ -169,7 +171,7 @@ export class MessageRouter {
         return await this.onOpenFile(msg as Extract<WebviewToHostMessage, { type: 'openFile' }>, context);
 
       case 'newSession':
-        return this.onNewSession();
+        return this.onNewSession(context);
 
       case 'openSession':
         return this.onOpenSession(msg as Extract<WebviewToHostMessage, { type: 'openSession' }>);
@@ -394,10 +396,16 @@ export class MessageRouter {
     this.postStateFor(context);
   }
 
-  private onCompact(msg: Extract<WebviewToHostMessage, { type: 'compact' }>): void {
+  private onCompact(msg: Extract<WebviewToHostMessage, { type: 'compact' }>, context?: RendererCommandContext): void {
+    const corrId = crypto.randomUUID();
     this.dispatchEvent({
       kind: 'Command',
-      cmd: { kind: 'Compact', corrId: crypto.randomUUID(), sessionPath: msg.sessionPath },
+      cmd: {
+        kind: 'Compact', corrId, operationId: crypto.randomUUID(), operationAttempt: 1,
+        operationSource: operationSourceFromRenderer(context),
+        backendGeneration: this.service.getBackendGeneration?.() ?? 0,
+        sessionPath: msg.sessionPath,
+      },
     });
   }
 
@@ -418,15 +426,38 @@ export class MessageRouter {
     // otherwise the normal path (SendRpc). The optimistic message insert + draft
     // clear + session-name derivation happen uniformly in the reducer / onSend.
 
-    if (!this.getArchState().sessions.openTabPaths.includes(sessionPath)) {
+    const archState = this.getArchState();
+    if (!archState.sessions.openTabPaths.includes(sessionPath)) {
       this.rejectBrowser(msg, context, 'session-not-open');
       this.dispatchEvent({ kind: 'NoticeShown', notice: 'Cannot send: the selected session is no longer open.' });
       return;
     }
 
     const inputs = [
-      ...(this.getArchState().composer.pendingComposerInputsBySession[sessionPath] ?? []),
+      ...(archState.composer.pendingComposerInputsBySession[sessionPath] ?? []),
     ];
+    const ambiguousSend = Object.values(archState.operations ?? {}).find((operation) =>
+      operation.kind === 'message.send'
+      && !operation.terminal
+      && (operation.phase === 'ambiguous' || operation.commit === 'unknown')
+      && (operation.session.resolvedPath ?? operation.session.pendingPath) === sessionPath,
+    );
+    if (ambiguousSend) {
+      this.rejectBrowser(msg, context, 'send-outcome-ambiguous');
+      const rejected = {
+        type: 'sendRejected' as const,
+        sessionPath,
+        text,
+        ...(webviewLocalId ? { localId: webviewLocalId } : {}),
+        inputs,
+      };
+      if (context?.rendererId && this.sidebarProvider.postImperativeToRenderer) {
+        this.sidebarProvider.postImperativeToRenderer(context.rendererId, rejected);
+      } else {
+        this.sidebarProvider.postImperative(rejected);
+      }
+      return;
+    }
     if (!text.trim() && inputs.length === 0) {
       // Codex-style continuation: an empty submit is an execution command, not
       // an empty user message. It deliberately bypasses the normal Send path,
@@ -438,6 +469,10 @@ export class MessageRouter {
         cmd: {
           kind: 'Continue',
           corrId: crypto.randomUUID(),
+          operationId: crypto.randomUUID(),
+          operationAttempt: 1,
+          operationSource: operationSourceFromRenderer(context),
+          backendGeneration: this.service.getBackendGeneration?.() ?? 0,
           sessionPath,
         },
       });
@@ -470,16 +505,20 @@ export class MessageRouter {
 
     // Dispatch through CQRS spine.
     const corrId = crypto.randomUUID();
+    const operationId = crypto.randomUUID();
     this.dispatchEvent({
       kind: 'Command',
-      cmd: { kind: 'Send', corrId, sessionPath, text, inputs, composedText, localId, userParts, previousSummary, priorPruningMode: opts?.priorPruningMode, timestamp: Date.now() },
+      cmd: {
+        kind: 'Send', corrId, operationId, operationSource: operationSourceFromRenderer(context),
+        backendGeneration: this.service.getBackendGeneration?.() ?? 0, sessionPath, text, inputs,
+        composedText, localId, userParts, previousSummary,
+        priorPruningMode: opts?.priorPruningMode, timestamp: Date.now(),
+      },
     });
-    // After the user's message is dispatched, fire any `user_input` deferred
-    // trigger for this session. The wake-up it injects lands as a follow-up
-    // (queued after the user's turn) rather than preempting the user's
-    // message. Synthetic wake-up sends bypass `onSend`, so this never
-    // self-triggers.
-    this.service.notifyUserInput(sessionPath);
+    // After the real message is dispatched, durably consume any `user_input`
+    // trigger for this session. The real prompt is itself the wake-up; the
+    // registry must not inject a second synthetic Send.
+    this.service.notifyUserInput(sessionPath, corrId);
   }
 
   private async onEditMessage(msg: Extract<WebviewToHostMessage, { type: 'editMessage' }>, context?: RendererCommandContext): Promise<void> {
@@ -534,10 +573,16 @@ export class MessageRouter {
     const webviewLocalId = msg.localId;
     const localId = webviewLocalId ?? `local:edit:${crypto.randomUUID()}`;
 
-    // Dispatch through CQRS spine.
+    // Assign operation identity once at trusted ingress. Retries and status
+    // reconciliation retain this identity while corrId remains presentation-only.
     this.dispatchEvent({
       kind: 'Command',
-      cmd: { kind: 'Edit', corrId, sessionPath, messageId, text, inputs, composedText, userParts, localId, timestamp: Date.now() },
+      cmd: {
+        kind: 'Edit', corrId, operationId: crypto.randomUUID(), operationAttempt: 1,
+        operationSource: operationSourceFromRenderer(context),
+        backendGeneration: this.service.getBackendGeneration?.() ?? 0,
+        sessionPath, messageId, text, inputs, composedText, userParts, localId, timestamp: Date.now(),
+      },
     });
   }
 
@@ -552,7 +597,12 @@ export class MessageRouter {
     const corrId = crypto.randomUUID();
     this.dispatchEvent({
       kind: 'Command',
-      cmd: { kind: 'Interrupt', corrId, sessionPath },
+      cmd: {
+        kind: 'Interrupt', corrId, operationId: crypto.randomUUID(), operationAttempt: 1,
+        operationSource: operationSourceFromRenderer(context),
+        backendGeneration: this.service.getBackendGeneration?.() ?? 0,
+        sessionPath,
+      },
     });
     // Completion-notification suppression is now set in the EffectRunner's
     // InterruptRpc path (the side-effect executor), not as a router side-call.
@@ -628,12 +678,12 @@ export class MessageRouter {
     });
   }
 
-  private onNewSession(): void {
+  private onNewSession(context?: RendererCommandContext): void {
     // The service generates the impure pending path + placeholder summary,
     // mints the selection token (before the reducer activates the pending tab
     // so failure recovery can restore the previous active path), and dispatches
     // the CreateSession Command. The reducer owns the optimistic tab setup.
-    this.service.createNewSession();
+    this.service.createNewSession(context);
     this.sidebarProvider.postState();
   }
 
@@ -670,7 +720,7 @@ export class MessageRouter {
     // DuplicateSession Command directly with only the source sessionPath (no
     // pending path, placeholder, or registered selection token), so the runner
     // fell back to the old fat service.duplicateSession imperative path.
-    this.service.duplicateSession(sessionPath);
+    this.service.duplicateSession(sessionPath, context);
     this.sidebarProvider.postState();
   }
 

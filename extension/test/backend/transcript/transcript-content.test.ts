@@ -133,6 +133,43 @@ test('assistant mapping suppresses raw provider tool protocol on terminal and re
   }
 });
 
+test('folded tool turn ending in an all-zero empty length response remains interrupted', () => {
+  const transcript = mapTranscript([
+    {
+      id: 'assistant-tool',
+      timestamp: '2026-01-01T00:00:00.000Z',
+      type: 'message',
+      message: {
+        role: 'assistant',
+        stopReason: 'toolUse',
+        content: [{ type: 'toolCall', id: 'tool-1', name: 'read', arguments: { path: 'file.ts' } }],
+      },
+    },
+    {
+      id: 'tool-result',
+      timestamp: '2026-01-01T00:00:01.000Z',
+      type: 'message',
+      message: { role: 'toolResult', toolCallId: 'tool-1', content: 'contents' },
+    },
+    {
+      id: 'empty-length',
+      timestamp: '2026-01-01T00:00:02.000Z',
+      type: 'message',
+      message: {
+        role: 'assistant',
+        stopReason: 'length',
+        content: [{ type: 'thinking', thinking: '' }],
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 },
+      },
+    },
+  ]);
+
+  assert.equal(transcript.length, 1);
+  assert.equal(transcript[0].role, 'assistant');
+  assert.equal(transcript[0].status, 'interrupted');
+  assert.equal(transcript[0].toolCalls?.[0]?.status, 'completed');
+});
+
 test('appendAssistantParts preserves boundaries when requested and tool results update in place', () => {
   const target = assistantTarget([{ kind: 'text', text: 'existing' }]);
 
@@ -174,6 +211,8 @@ test('usageFromMessage preserves reasoning as an output subset without double-co
     cacheReadTokens: 0,
     cacheWriteTokens: 0,
     totalTokens: 1_100,
+    tokenChannelsKnown: false,
+    tokenChannelPresence: { input: true, output: true, cacheRead: false, cacheWrite: false },
     reasoningTokens: 800,
   });
 
@@ -272,6 +311,8 @@ test('assistantStatus, usage helpers, and systemMessage normalize edge cases', (
     cacheReadTokens: 0,
     cacheWriteTokens: 0,
     totalTokens: 17,
+    tokenChannelsKnown: false,
+    tokenChannelPresence: { input: true, output: true, cacheRead: false, cacheWrite: false },
   });
 
   assert.deepEqual(addAssistantUsage(undefined, undefined), undefined);

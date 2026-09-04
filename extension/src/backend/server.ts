@@ -25,15 +25,21 @@ import {
 } from '../shared/protocol';
 import { getDefaultAuthDir, ensureDir, isInsideGitWorkTree, migrateAuthFile } from './auth.js';
 import {
+  formatInterruptWatchdogDuration,
   handleBackendRequest,
   parseLivePipelineToggleParams,
+  waitForSessionTransition,
   type TranscriptPageLoadOptions,
 } from './request-handler';
 import {
   validateDetailFetch,
   validateDetailSubscribe,
   validateDetailUnsubscribe,
+  validateMessageEdit,
+  validateMessageInterrupt,
+  validateOperationStatus,
   validateTruncateAfter,
+  type MessageEditParams,
   type DetailFetchParams,
   type DetailSubscribeParams,
   type DetailUnsubscribeParams,
@@ -64,6 +70,16 @@ import {
 } from './sdk';
 import { ProviderGate, type ProviderConcurrencyConfig } from './provider-gate.js';
 import { CreateOperationLedger } from './create-operation-ledger';
+import {
+  canonicalEditIntentFingerprint,
+  SendOperationLedger,
+  type SendOperationAcceptance,
+} from './send-operation-ledger';
+import {
+  canonicalInterruptIntentFingerprint,
+  InterruptOperationLedger,
+  type InterruptOperationResult,
+} from './interrupt-operation-ledger';
 import { BackendError, extractRequestError, log, responseError, responseOk, writeStdout } from './server-io';
 import {
   flushBackendLivePipelineTrace,
@@ -92,6 +108,8 @@ const ISOLATED_PROMOTION_METHODS = new Set([
   'message.continue',
   'message.compact',
 ]);
+/** Keep a transition-bound Stop below the host's 15-second RPC deadline. */
+const INTERRUPT_TRANSITION_WAIT_MS = 10_000;
 
 /** Live worker detail errors that mean the worker no longer retains the
  *  source and the durable JSONL is authoritative. */
@@ -308,6 +326,15 @@ export class BackendServer {
    *  results for this backend generation. A backend restart (generation
    *  death) naturally drops the ledger with the process. */
   private readonly createOperationLedger = new CreateOperationLedger();
+  /** Coordinator-generation authority for compound edit operations. Unlike a
+   * worker send ledger, this survives the edit's deliberate worker replacement
+   * and therefore owns both commit evidence and retry replay. */
+  private readonly editOperationLedger = new SendOperationLedger();
+  private readonly editOperationSessions = new Map<string, string>();
+  /** Coordinator-generation Stop authority survives the worker generation it
+   * may have to force-retire. */
+  private readonly interruptOperationLedger = new InterruptOperationLedger();
+  private readonly interruptOperationSessions = new Map<string, string>();
   private readonly workerEntryPath?: string;
   private readonly coldBrowseHelperEntryPath?: string;
   private coldBrowseHelper?: ColdBrowseHelperClient;
@@ -1872,15 +1899,328 @@ export class BackendServer {
     // queued session.open cannot recreate the deleted file after this RPC.
   }
 
+  private async handleMessageEdit(
+    router: WorkerRuntimeRouter,
+    request: RequestEnvelope,
+    params: MessageEditParams,
+  ): Promise<SendOperationAcceptance & { operationAttempt: number; committed: true }> {
+    const existingStatus = this.editOperationLedger.status(params.operationId);
+    if (!existingStatus && router.hasMessageOperationOwner(params.operationId)) {
+      throw new BackendError(
+        'OPERATION_INTENT_MISMATCH',
+        `Operation ${params.operationId} was already used for a different message mutation intent.`,
+      );
+    }
+    const previousSession = this.editOperationSessions.get(params.operationId);
+    if (previousSession === undefined) this.editOperationSessions.set(params.operationId, params.sessionPath);
+
+    const result = await this.editOperationLedger.run(
+      params.operationId,
+      canonicalEditIntentFingerprint(params),
+      async () => await this.executeMessageEdit(router, request, params),
+    );
+    return { ...result, operationAttempt: params.operationAttempt, committed: true };
+  }
+
+  private async executeMessageEdit(
+    router: WorkerRuntimeRouter,
+    request: RequestEnvelope,
+    params: MessageEditParams,
+  ): Promise<SendOperationAcceptance> {
+    const cancellationGeneration = router.operationCancellationGeneration(params.sessionPath);
+    const assertNotCancelled = () => {
+      if (router.operationCancellationGeneration(params.sessionPath) !== cancellationGeneration) {
+        throw new BackendError('SESSION_OPERATION_CANCELLED', 'The edit was interrupted before its compound transition committed.');
+      }
+    };
+    let route = router.getRoute(params.sessionPath);
+    if (route.state === 'promoting') {
+      await route.promotion;
+      route = router.getRoute(params.sessionPath);
+    } else if (route.state === 'retiring') {
+      await route.retirement;
+      route = router.getRoute(params.sessionPath);
+    }
+    if (route.state === 'transitioning') {
+      throw new BackendError('SESSION_TRANSITION_IN_PROGRESS', `Session transition is already in progress for ${params.sessionPath}.`);
+    }
+
+    const truncate = async () => {
+      const store = this.initializeColdSessionStore();
+      return await this.runColdSessionMutation(params.sessionPath, async () => {
+        store.leases.invalidate(params.sessionPath);
+        this.coldSessionManagerHandles.delete(this.coldManagerKey(params.sessionPath));
+        const truncated = await store.truncateAfter(params.sessionPath, params.entryId, {
+          requireCurrentBranchTarget: true,
+          onCommit: () => this.editOperationLedger.markCommitted(params.operationId),
+        });
+        this.retainColdSessionManager(truncated, 'resume');
+        return truncated;
+      });
+    };
+    const replacementRequest: RequestEnvelope = {
+      ...request,
+      id: `${request.id}:replacement`,
+      method: 'message.send',
+      params: {
+        sessionPath: params.sessionPath,
+        text: params.text,
+        inputs: params.inputs,
+        ...(params.localId !== undefined ? { localId: params.localId } : {}),
+        operationId: params.operationId,
+        operationAttempt: params.operationAttempt,
+      },
+    };
+
+    // Promote a cold source before installing the compound transition. This
+    // makes cold and hot edits share the same backend serialization fence;
+    // priority Stop can cancel promotion before any destructive commit.
+    if (!router.hasHotOwner(params.sessionPath)) await router.promote(params.sessionPath);
+    assertNotCancelled();
+    const result: WorkerJsonValue = await router.runHotTransition(
+      params.sessionPath,
+      `message-edit:${params.operationId}`,
+      async (transition) => {
+        await transition.interrupt(`message edit ${request.id}`);
+        await transition.retire('message edit source quiesced');
+        const truncated = await truncate();
+        transition.assertActive();
+        await transition.promote(truncated.sessionPath);
+        transition.assertActive();
+        return await transition.routePromoted(replacementRequest);
+      },
+    );
+    void this.emitSessionListChanged();
+
+    const response = result && typeof result === 'object' && !Array.isArray(result)
+      ? result as WorkerJsonObject
+      : {};
+    return {
+      operationId: params.operationId,
+      ...(typeof response.requestId === 'string' ? { requestId: response.requestId } : {}),
+      ...(response.queued === true ? { queued: true } : {}),
+    };
+  }
+
+  private editOperationStatus(sessionPath: string, operationId: string): ReturnType<SendOperationLedger['status']> {
+    const owner = this.editOperationSessions.get(operationId);
+    if (owner === undefined) return undefined;
+    if (this.coldManagerKey(owner) !== this.coldManagerKey(sessionPath)) {
+      throw new BackendError('OPERATION_INTENT_MISMATCH', `Operation ${operationId} belongs to a different edit session.`);
+    }
+    return this.editOperationLedger.status(operationId);
+  }
+
+  private async reconcileAcceptedEditStatus(
+    router: WorkerRuntimeRouter,
+    request: RequestEnvelope,
+    sessionPath: string,
+    operationId: string,
+  ): Promise<void> {
+    const status = this.editOperationLedger.status(operationId);
+    if (status?.state !== 'accepted' || !status.committed) return;
+    if (!router.hasHotOwner(sessionPath)) {
+      if (router.hasMessageOperationOwner(operationId)) {
+        this.editOperationLedger.markFailedAfterCommit(
+          operationId,
+          'SESSION_GENERATION_ENDED',
+          'The worker generation that owned the replacement send is no longer available.',
+        );
+      }
+      return;
+    }
+    try {
+      const downstream = await router.routeExisting({
+        ...request,
+        id: `${request.id}:edit-send-status`,
+        method: 'operation.status',
+        params: { sessionPath, operationId, backendGeneration: this.backendGeneration },
+      });
+      if (downstream && typeof downstream === 'object' && !Array.isArray(downstream)
+        && downstream.state === 'failed') {
+        this.editOperationLedger.markFailedAfterCommit(
+          operationId,
+          typeof downstream.code === 'string' ? downstream.code : 'MESSAGE_OPERATION_REJECTED',
+          typeof downstream.message === 'string' ? downstream.message : 'The replacement send failed after edit commit.',
+        );
+      }
+    } catch (error) {
+      if (error instanceof BackendError && error.code === 'SESSION_GENERATION_ENDED') {
+        this.editOperationLedger.markFailedAfterCommit(operationId, error.code, error.message);
+      } else {
+        throw error;
+      }
+    }
+  }
+
+  private interruptOperationStatus(sessionPath: string, operationId: string) {
+    const owner = this.interruptOperationSessions.get(operationId);
+    if (owner === undefined) return undefined;
+    if (this.coldManagerKey(owner) !== this.coldManagerKey(sessionPath)) {
+      throw new BackendError('OPERATION_INTENT_MISMATCH', `Operation ${operationId} belongs to a different interrupt session.`);
+    }
+    return this.interruptOperationLedger.status(operationId);
+  }
+
+  private async executeCoordinatorInterrupt(
+    router: WorkerRuntimeRouter,
+    requestId: string,
+    sessionPath: string,
+  ): Promise<InterruptOperationResult> {
+    let routeState = router.getRoute(sessionPath);
+    if (routeState.state === 'promoting' && router.cancelPendingRuntimeOperations(sessionPath)) {
+      return { interrupted: true, settled: true };
+    }
+    if (routeState.state === 'retiring') {
+      router.cancelPendingRuntimeOperations(sessionPath);
+      await routeState.retirement;
+      return { interrupted: false, alreadyStopped: true, settled: true };
+    }
+    if (routeState.state === 'transitioning') {
+      router.cancelPendingRuntimeOperations(sessionPath);
+      const transitionOutcome = await waitForSessionTransition({
+        resolveCurrent: async () => {
+          const current = router.getRoute(sessionPath);
+          if (current.state === 'transitioning') await current.completion.catch(() => undefined);
+          return router.getRoute(sessionPath);
+        },
+        isPending: () => router.getRoute(sessionPath).state === 'transitioning',
+        timeoutMs: INTERRUPT_TRANSITION_WAIT_MS,
+      });
+      if (transitionOutcome.status === 'timed-out') {
+        const recovered = await router.forceRecoverTransition(
+          sessionPath,
+          `interrupt ${requestId} transition settlement timeout`,
+        );
+        if (!recovered) routeState = router.getRoute(sessionPath);
+        else {
+          return {
+            interrupted: true,
+            settled: true,
+            forcedRecovery: true,
+            teardownTimedOut: true,
+          };
+        }
+      } else {
+        routeState = transitionOutcome.value;
+      }
+    }
+    if (router.hasHotOwner(sessionPath)) {
+      const result = await router.interrupt(sessionPath, `public request ${requestId}`);
+      return result.soft
+        ? { interrupted: true, settled: true }
+        : {
+            interrupted: true,
+            settled: true,
+            forcedRecovery: true,
+            teardownTimedOut: true,
+          };
+    }
+    return { interrupted: false, alreadyStopped: true, settled: true };
+  }
+
   private async handleRequest(
     request: RequestEnvelope,
     onRequestValidated?: () => void,
     livePipelineTraceToggleGeneration?: number,
   ): Promise<unknown> {
     const router = this.workerRuntimeRouter;
+    if (request.method === 'message.edit') {
+      const params = validateMessageEdit(request.params);
+      onRequestValidated?.();
+      if (!router) {
+        throw new BackendError(
+          'ISOLATED_RUNTIME_ROUTING_UNAVAILABLE',
+          'Operation message.edit requires Phase 4 isolated-runtime routing; Phase 4 isolated-runtime routing is unavailable.',
+        );
+      }
+      if (this.interruptOperationLedger.status(params.operationId)) {
+        throw new BackendError('OPERATION_INTENT_MISMATCH', `Operation ${params.operationId} was already used for an interrupt intent.`);
+      }
+      return await this.handleMessageEdit(router, request, params);
+    }
+    if (request.method === 'message.interrupt' && router) {
+      const params = validateMessageInterrupt(request.params);
+      onRequestValidated?.();
+      if (!params.operationId) {
+        return await this.executeCoordinatorInterrupt(router, request.id, params.sessionPath);
+      }
+      if (this.editOperationLedger.status(params.operationId)
+        || router.hasMessageOperationOwner(params.operationId)) {
+        throw new BackendError('OPERATION_INTENT_MISMATCH', `Operation ${params.operationId} was already used for a different message mutation intent.`);
+      }
+      if (!this.interruptOperationSessions.has(params.operationId)) {
+        this.interruptOperationSessions.set(params.operationId, params.sessionPath);
+      }
+      const result = await this.interruptOperationLedger.run(
+        params.operationId,
+        canonicalInterruptIntentFingerprint(params.sessionPath),
+        async () => await this.executeCoordinatorInterrupt(router, request.id, params.sessionPath),
+      );
+      return { ...result, operationId: params.operationId, operationAttempt: params.operationAttempt };
+    }
+    if (request.method === 'operation.status') {
+      const params = validateOperationStatus(request.params);
+      const interruptStatus = this.interruptOperationStatus(params.sessionPath, params.operationId);
+      if (interruptStatus) {
+        onRequestValidated?.();
+        if (params.backendGeneration !== undefined && params.backendGeneration !== this.backendGeneration) {
+          throw new BackendError('SESSION_GENERATION_ENDED', 'The session mutation generation is no longer available.');
+        }
+        return interruptStatus;
+      }
+      const editStatus = this.editOperationStatus(params.sessionPath, params.operationId);
+      if (editStatus) {
+        onRequestValidated?.();
+        if (params.backendGeneration !== undefined && params.backendGeneration !== this.backendGeneration) {
+          throw new BackendError('SESSION_GENERATION_ENDED', 'The session mutation generation is no longer available.');
+        }
+        if (router) {
+          await this.reconcileAcceptedEditStatus(router, request, params.sessionPath, params.operationId);
+        }
+        return this.editOperationLedger.status(params.operationId)!;
+      }
+    }
     if (router) {
         const sessionPath = requestSessionPath(request.params);
-        const routeState = sessionPath ? router.getRoute(sessionPath) : undefined;
+        const messageOperationId = request.params && typeof request.params === 'object'
+          && !Array.isArray(request.params)
+          && typeof (request.params as { operationId?: unknown }).operationId === 'string'
+          ? (request.params as { operationId: string }).operationId
+          : undefined;
+        if (request.method !== 'operation.status' && messageOperationId
+          && this.interruptOperationLedger.status(messageOperationId)) {
+          throw new BackendError(
+            'OPERATION_INTENT_MISMATCH',
+            `Operation ${messageOperationId} was already used for an interrupt intent.`,
+          );
+        }
+        let routeState = sessionPath ? router.getRoute(sessionPath) : undefined;
+        const operationCancellationGeneration = sessionPath
+          && ISOLATED_PROMOTION_METHODS.has(request.method)
+          ? router.operationCancellationGeneration(sessionPath)
+          : undefined;
+        const waitsForRuntimeTransition = request.method === 'message.send'
+          || request.method === 'message.continue'
+          || request.method === 'message.compact'
+          || request.method === 'session.title.generate';
+        if (routeState?.state === 'transitioning' && waitsForRuntimeTransition && sessionPath) {
+          const outcome = await waitForSessionTransition({
+            resolveCurrent: async () => {
+              const current = router.getRoute(sessionPath);
+              if (current.state === 'transitioning') await current.completion.catch(() => undefined);
+              return router.getRoute(sessionPath);
+            },
+            isPending: () => router.getRoute(sessionPath).state === 'transitioning',
+          });
+          if (outcome.status === 'timed-out') {
+            throw new BackendError(
+              'SESSION_TRANSITION_TIMEOUT',
+              `The session runtime transition did not settle within ${formatInterruptWatchdogDuration(outcome.timeoutMs)}.`,
+            );
+          }
+          routeState = outcome.value;
+        }
         if (routeState?.state === 'transitioning'
             && request.method !== 'session.truncateAfter'
             && request.method !== 'session.viewed'
@@ -1889,29 +2229,6 @@ export class BackendServer {
             'SESSION_TRANSITION_IN_PROGRESS',
             `Session transition is already in progress for ${sessionPath}.`,
           );
-        }
-        if (routeState?.state === 'transitioning' && request.method === 'message.interrupt' && sessionPath) {
-          // The transition has already fenced the old worker and its first step
-          // is an interrupt. Serialize this later public interrupt behind the
-          // transition instead of rejecting a legitimate user action. If the
-          // transition restores or promotes a hot owner, interrupt that current
-          // owner; if it settles cold/fenced, there is no live turn left.
-          onRequestValidated?.();
-          await routeState.completion.catch(() => undefined);
-          if (router.hasHotOwner(sessionPath)) {
-            const result = await router.interrupt(sessionPath, `public request ${request.id} after session transition`);
-            return result.soft
-              ? { interrupted: true, settled: true }
-              : { interrupted: true, settled: false, teardownTimedOut: true };
-          }
-          return { interrupted: true, settled: true };
-        }
-        if (request.method === 'message.interrupt' && sessionPath && router.hasHotOwner(sessionPath)) {
-          onRequestValidated?.();
-          const result = await router.interrupt(sessionPath, `public request ${request.id}`);
-          return result.soft
-            ? { interrupted: true, settled: true }
-            : { interrupted: true, settled: false, teardownTimedOut: true };
         }
         // Phase 5 demand-driven subagent detail. These are router/store-level
         // operations, not worker runtime commands: subscribe/unsubscribe/fetch
@@ -1958,6 +2275,7 @@ export class BackendServer {
                 this.retainColdSessionManager(truncated, 'resume');
                 return truncated;
               });
+              transition.assertActive();
               await transition.promote(handle.sessionPath);
               void this.emitSessionListChanged();
               return { ok: true, sessionPath: handle.sessionPath };
@@ -1977,8 +2295,21 @@ export class BackendServer {
             throw new BackendError('UI_REQUEST_NOT_PENDING', 'The extension UI request is no longer pending.');
           }
           const shouldPromote = ISOLATED_PROMOTION_METHODS.has(request.method);
-          if (shouldPromote) return await router.route(request);
+          if (shouldPromote) return await router.route(request, operationCancellationGeneration);
           if (router.hasHotOwner(sessionPath)) return await router.routeExisting(request);
+          if (request.method === 'operation.status') {
+            const operationId = request.params && typeof request.params === 'object'
+              && !Array.isArray(request.params)
+              && typeof (request.params as { operationId?: unknown }).operationId === 'string'
+              ? (request.params as { operationId: string }).operationId
+              : undefined;
+            if (operationId && router.hasMessageOperationOwner(operationId)) {
+              throw new BackendError(
+                'SESSION_GENERATION_ENDED',
+                'The worker generation that owned this message operation is no longer available.',
+              );
+            }
+          }
           if (!isCoordinatorOperationAllowed(request.method, request.params)) {
             throw new BackendError('SESSION_NOT_FOUND', `No hot worker owns ${sessionPath}.`);
           }
@@ -1995,6 +2326,7 @@ export class BackendServer {
     const sessionDir = this.getSessionDir();
     const result = await handleBackendRequest({
       sdkPath: this.sdkPath,
+      backendGeneration: this.backendGeneration,
       agentDir: this.agentDir,
       startupCwd: this.startupCwd,
       sessionDir,

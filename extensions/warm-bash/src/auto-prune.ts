@@ -10,7 +10,8 @@
  *
  * It is an APPROXIMATION of rg, not exact parity: rg derives its excludes
  * dynamically from each repo's actual .gitignore (nested files, global excludes,
- * etc.), while this uses one static hardcoded prune-dir list. The two diverge in
+ * etc.), while this uses the canonical protected-directory policy from
+ * shared/traversal-policy.ts (plus the static trade-offs described there). The two diverge in
  * both directions — e.g. twin-api's .gitignore also lists typings/ .grunt
  * boulder_components (not here), while this list adds .venv/.turbo/.moon for other
  * workspace repos. Deriving the list from .gitignore at rewrite time would defeat
@@ -24,6 +25,18 @@
  *   - Anything ambiguous (heredocs, shell control keywords, comments, find with
  *     actions/-prune/globals/grouping, scoped finds, prune-dir searches) is
  *     passed through unchanged. Conservative by design.
+ *   - Scoped opt-in is preserved: a grep whose path operand deliberately
+ *     targets a protected tree (e.g. `grep -rn foo data/`) is passed through
+ *     unpruned so the scoped inspection still returns results.
+ *   - Grep commands that already carry some --exclude-dir flags are completed,
+ *     not skipped: only the canonical exclusions they are MISSING are injected,
+ *     and an already-present directory is never duplicated.
+ *   - Bare-root recursive `ls` (`ls -R` / `ls --recursive`, path absent or `.`)
+ *     has no prune mechanism at all, so it is rewritten to a bounded FAIL-FAST
+ *     rejection (explanatory stderr message + nonzero exit) instead of being
+ *     allowed to traverse known multi-gigabyte trees. Exact/scoped inspection
+ *     (`ls -la`, `ls -R src`) passes through, and a leading `VAR=val`
+ *     assignment prefix (e.g. `PIE_BASH_AUTO_PRUNE=0 ls -R`) opts out entirely.
  *
  * Reassembly is byte-preserving at the SEGMENT level: only segments whose
  * program was rewritten have their substring spliced; every separator, newline,
@@ -31,6 +44,12 @@
  */
 
 import { spawnSync } from "node:child_process";
+import {
+  findPruneExpression,
+  PROTECTED_DIRECTORY_NAMES,
+  PROTECTED_DIRECTORY_REF,
+  referencesProtectedDirectory,
+} from "../../../shared/traversal-policy.js";
 import { QUOTED, TOKEN, HEREDOC, unquote } from "./classifier.js";
 
 /** Options for {@link rewriteForPrune}. */
@@ -39,17 +58,12 @@ export interface PruneOpts {
   gnuGrepProbe: () => boolean;
 }
 
-/** Directories pruned from recursive grep via --exclude-dir. */
-const GREP_EXCLUDE_DIRS = [
-  "node_modules", ".git", ".venv", "dist", "build",
-  ".next", "coverage", ".turbo", ".moon",
-];
-
-/** Directories pruned from `find` via -prune (the two that matter for traversal). */
-const FIND_PRUNE_DIRS = ["node_modules", ".git"];
-
-const GREP_EXCLUDE_FLAGS =
-  GREP_EXCLUDE_DIRS.map((d) => `--exclude-dir=${d}`).join(" ");
+/** Prune/exclude directories come from the canonical traversal-safety policy
+ *  (shared/traversal-policy.ts): dependencies, version control, generated/build
+ *  output, caches, coverage, runtime data, sessions, logs, packaged artifacts,
+ *  and temporary SDK trees. One policy, three consumers (warm-bash,
+ *  codebase-maintenance .ignore drift checks, subagent prompts). */
+const FIND_PRUNE_EXPR = findPruneExpression();
 
 /** Shell control keywords → passthrough the WHOLE command (FIX #1). Word-boundary
  *  so `foreach` / `#include` (quoted) don't false-trigger. */
@@ -81,7 +95,7 @@ const NAME_FLAGS = new Set([
  *  `*node_modules*`-style substring references, at the cost of also passthroughing
  *  `.gitignore` / `.github` / `.gitconfig` (rewriting those would actually be
  *  safe, but correctness-first wins over the marginal speedup). */
-const PRUNE_DIR_REF = /node_modules|\.git/i;
+const PRUNE_DIR_REF = PROTECTED_DIRECTORY_REF;
 
 /** find actions (presence → passthrough; we'd otherwise append -print). */
 const FIND_ACTIONS = new Set([
@@ -281,7 +295,10 @@ function rewriteSegment(text: string, opts: PruneOpts): string {
   if (name === "find") {
     return rewriteFindSegment(text, toks, idx, prog);
   }
-  return text; // rule 3 passthrough (rg, ls, xargs grep …, etc.)
+  if (name === "ls") {
+    return rewriteLsSegment(text, toks, idx, prog);
+  }
+  return text; // rule 3 passthrough (rg, xargs grep …, etc.)
 }
 
 function rewriteGrepSegment(
@@ -304,25 +321,56 @@ function rewriteGrepSegment(
   }
   if (!recursive) return text;
 
-  // Already excluded node_modules? passthrough (duplicate flags are pointless).
-  if (hasExcludeNodeModules(args)) return text;
+  // Scoped opt-in: a path operand deliberately aimed at a protected tree (e.g.
+  // `grep -rn foo data/`) must not be pruned into an empty result — passthrough.
+  if (referencesProtectedPath(args)) return text;
 
   // FIX #3: gate on GNU grep. --exclude-dir is a GNU extension; a BSD/busybox
   // grep lacking it would ERROR the command — strictly worse than status quo.
   // NOTE: this also documents the GNU-grep dependency for the injection below.
   if (!opts.gnuGrepProbe()) return text;
 
+  // Complete the canonical policy instead of all-or-nothing: inject ONLY the
+  // protected directories the command does not already exclude, and never
+  // duplicate a flag the caller already carries. A command that already covers
+  // every canonical directory passes through byte-identical.
+  const existing = existingExcludeDirValues(args);
+  const missing = PROTECTED_DIRECTORY_NAMES.filter((d) => !existing.has(d));
+  if (missing.length === 0) return text;
+  const insert = ` ${missing.map((d) => `--exclude-dir=${d}`).join(" ")}`;
   // Inject flags immediately after the program token (pipe-safe: the rest of the
   // segment — args, redirects, etc. — follows unchanged).
-  const insert = ` ${GREP_EXCLUDE_FLAGS}`;
   return text.slice(0, prog.end) + insert + text.slice(prog.end);
 }
 
-function hasExcludeNodeModules(args: RawTok[]): boolean {
+/** Values already excluded by the command itself, from both flag spellings:
+ *  `--exclude-dir=V` and `--exclude-dir V`. Exact basename match against the
+ *  canonical names is the dedupe rule; a user glob (e.g. `'*sdk*'`) is NOT
+ *  treated as covering a canonical entry (harmless: we would only add a flag
+ *  that is not a duplicate of theirs). */
+function existingExcludeDirValues(args: RawTok[]): ReadonlySet<string> {
+  const out = new Set<string>();
   for (let i = 0; i < args.length; i++) {
     const v = args[i]!.value;
-    if (v === "--exclude-dir=node_modules") return true;
-    if (v === "--exclude-dir" && args[i + 1]?.value === "node_modules") return true;
+    if (v.startsWith("--exclude-dir=")) {
+      out.add(v.slice("--exclude-dir=".length));
+    } else if (v === "--exclude-dir") {
+      const next = args[i + 1]?.value;
+      if (next !== undefined) out.add(next);
+    }
+  }
+  return out;
+}
+
+/** A non-option argument after the first one is a path operand; when one of
+ *  them lives inside a protected tree the caller is deliberately inspecting it
+ *  (scoped opt-in), so the segment passes through unpruned. */
+function referencesProtectedPath(args: RawTok[]): boolean {
+  let sawPattern = false;
+  for (const t of args) {
+    if (t.value.startsWith("-")) continue; // options (incl. --exclude-dir=…)
+    if (!sawPattern) { sawPattern = true; continue; } // first operand = pattern
+    if (referencesProtectedDirectory(t.value)) return true;
   }
   return false;
 }
@@ -333,7 +381,7 @@ function rewriteFindSegment(text: string, toks: RawTok[], progIdx: number, prog:
   // "No shell operators in the segment": a find reaching here was already split
   // on top-level operators, but it may still carry `$(…)`, backticks, globs,
   // redirects, or backslash escapes (`\( \) \;`). Any of those → passthrough.
-  if (findHasShellMeta(text.slice(prog.start))) return text;
+  if (hasShellMeta(text.slice(prog.start))) return text;
 
   // Parse [path...] [expression]. Leading path tokens are the maximal run of
   // non-option, non-grouping tokens before the first `-flag` / `(` / `)` / `!`.
@@ -373,7 +421,7 @@ function rewriteFindSegment(text: string, toks: RawTok[], progIdx: number, prog:
 
   const prefix = text.slice(0, prog.start); // leading whitespace + assignments
   const exprStr = exprTokens.map((t) => t.raw).join(" ");
-  const pruneExpr = FIND_PRUNE_DIRS.map((d) => `-name ${d}`).join(" -o ");
+  const pruneExpr = FIND_PRUNE_EXPR;
   const tail = exprStr ? `\\( ${exprStr} \\) -print` : "-print";
   // Preserve the segment's trailing bytes (whitespace after the last token) so
   // the splice is byte-faithful at the trailing edge — e.g. `find … *.ts ' ;`
@@ -383,10 +431,68 @@ function rewriteFindSegment(text: string, toks: RawTok[], progIdx: number, prog:
   return `${prefix}${prog.raw} ${pathStr} \\( ${pruneExpr} \\) -prune -o ${tail}${suffix}`;
 }
 
-/** Mirror classifier.ts's shell-meta checks (without its cd-peel / builtin
- *  logic, which don't apply to a single split segment). Also catches bare `( )`
- *  (subshell grouping) which classifier's OPERATORS regex does not. */
-function findHasShellMeta(remainder: string): boolean {
+/** Bounded fail-fast for broad walkers the rewriter cannot express exclusions
+ *  for (STABILITY-ARCHITECTURE-PLAN §7.7). `ls -R` has no prune mechanism at
+ *  all, so a bare-root recursive listing would traverse known multi-gigabyte
+ *  trees (runtime data, sessions, caches) with nothing to stop it. The segment
+ *  is replaced with a rejection that explains itself on stderr and exits 2 via
+ *  a SUBSHELL (`(exit 2)`) so the warm-pool marker protocol survives and the
+ *  real exit code still propagates. Everything except a bare-root recursive
+ *  ls passes through: exact listings, scoped inspection (`ls -R src`), and any
+ *  leading `VAR=val` assignment prefix (deliberate env override, e.g.
+ *  `PIE_BASH_AUTO_PRUNE=0 ls -R`). */
+const LS_REJECT_MESSAGE =
+  "pie warm-bash: bare-root recursive 'ls -R' is blocked to avoid traversing " +
+  "protected and multi-gigabyte trees; scope it to a subdirectory, list an exact " +
+  "path, or prefix the command with PIE_BASH_AUTO_PRUNE=0 to disable this guard.";
+
+function rewriteLsSegment(text: string, toks: RawTok[], progIdx: number, prog: RawTok): string {
+  const args = toks.slice(progIdx + 1);
+
+  // A leading `VAR=val` assignment (e.g. `PIE_BASH_AUTO_PRUNE=0 ls -R`) is a
+  // deliberate env override — passthrough instead of rejecting.
+  if (progIdx > 0) return text;
+
+  // Recursive? `--recursive`, or any single-dash flag cluster containing `R`
+  // (`-R`, `-laR`, `-1Ra`; GNU ls has no other flag with an `R`).
+  let recursive = false;
+  for (const t of args) {
+    const v = t.value;
+    if (v === "--recursive") { recursive = true; break; }
+    if (v.startsWith("-") && !v.startsWith("--") && v.slice(1).includes("R")) {
+      recursive = true;
+      break;
+    }
+  }
+  if (!recursive) return text;
+
+  // Anything beyond plain flags/paths (redirects, globs, vars, parens, …) →
+  // passthrough; we only reject the plain broad walk.
+  if (hasShellMeta(text.slice(prog.start))) return text;
+
+  // Path operands: ls accepts multiple; a `.`/`./` operand (or none at all —
+  // ls defaults to `.`) makes the recursive walk a bare-root one. Any other
+  // operand set is exact/scoped inspection — passthrough.
+  const paths = args.filter((t) => !t.value.startsWith("-")).map((t) => t.value);
+  const bareRoot =
+    paths.length === 0 ||
+    paths.some((p) => p === "." || /^\.[\\/]+$/.test(p));
+  if (!bareRoot) return text;
+
+  // Preserve the segment's leading bytes (whitespace, which for an accepted
+  // rejection is never an assignment) so compound reassembly stays faithful.
+  const prefix = text.slice(0, prog.start);
+  const suffix = text.slice(toks[toks.length - 1]!.end);
+  return `${prefix}echo "${LS_REJECT_MESSAGE}" >&2; (exit 2)${suffix}`;
+}
+
+/** Shell-meta guard for the find rewrite AND the ls fail-fast: a candidate
+ *  segment containing anything beyond plain flags/paths is passthrough
+ *  (conservative). Mirror classifier.ts's shell-meta checks (without its
+ *  cd-peel / builtin logic, which don't apply to a single split segment). Also
+ *  catches bare `( )` (subshell grouping) which classifier's OPERATORS regex
+ *  does not. */
+function hasShellMeta(remainder: string): boolean {
   if (HEREDOC.test(remainder)) return true;
   const stripped = remainder.replace(QUOTED, "");
   if (/[()]/.test(stripped)) return true; // subshell / find grouping via bare parens

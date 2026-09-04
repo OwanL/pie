@@ -1,6 +1,6 @@
 ---
 name: evaluate-sessions
-description: "Use when asked to assess, audit, grade, benchmark, or review one or more agent sessions or their delivered work—especially requirement attainment, outcome quality, process discipline, evidence, or the accuracy of final claims. Apply an evidence-based session-evaluation workflow with blinded review and explicit target closure; not ordinary code review, debugging, or implementation."
+description: "Use when asked to assess, audit, grade, benchmark, or review one or more agent sessions or their delivered work—especially requirement attainment, outcome quality, process discipline, evidence, or the accuracy of final claims."
 ---
 
 # Evaluate sessions

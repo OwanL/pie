@@ -200,29 +200,39 @@ export function usageFromMessage(message: MessageLike): AssistantUsage | undefin
   }
 
   const promptDetails = usage.prompt_tokens_details;
-  const promptTokens = toNonNegativeInt(firstNumber(usage.prompt_tokens, usage.prompt_eval_count));
-  const output = toNonNegativeInt(firstNumber(usage.output, usage.output_tokens, usage.completion_tokens, usage.eval_count));
-  const cacheWrite = toNonNegativeInt(firstNumber(
+  const promptTokensRaw = firstNumber(usage.prompt_tokens, usage.prompt_eval_count);
+  const outputRaw = firstNumber(usage.output, usage.output_tokens, usage.completion_tokens, usage.eval_count);
+  const cacheWriteRaw = firstNumber(
     usage.cacheWrite,
     usage.cache_creation_input_tokens,
     promptDetails?.cache_creation_input_tokens,
     promptDetails?.cache_write_input_tokens,
     promptDetails?.cache_write_tokens,
-  ));
-  const cacheRead = toNonNegativeInt(firstNumber(
+  );
+  const cacheReadRaw = firstNumber(
     usage.cacheRead,
     usage.cache_read_input_tokens,
     promptDetails?.cache_read_input_tokens,
     usage.prompt_cache_hit_tokens,
     promptDetails?.cached_tokens,
-  ));
-  const input = usage.input !== undefined
-    ? toNonNegativeInt(usage.input)
-    : usage.input_tokens !== undefined
-      ? toNonNegativeInt(usage.input_tokens)
-      : promptTokens > 0
-        ? Math.max(0, promptTokens - cacheRead - cacheWrite)
-        : 0;
+  );
+  const promptTokens = toNonNegativeInt(promptTokensRaw);
+  const output = toNonNegativeInt(outputRaw);
+  const cacheWrite = toNonNegativeInt(cacheWriteRaw);
+  const cacheRead = toNonNegativeInt(cacheReadRaw);
+  const inputRaw = firstNumber(usage.input, usage.input_tokens);
+  const input = inputRaw !== undefined
+    ? toNonNegativeInt(inputRaw)
+    : promptTokensRaw !== undefined
+      ? Math.max(0, promptTokens - cacheRead - cacheWrite)
+      : 0;
+  const tokenChannelPresence = {
+    input: inputRaw !== undefined || promptTokensRaw !== undefined,
+    output: outputRaw !== undefined,
+    cacheRead: cacheReadRaw !== undefined,
+    cacheWrite: cacheWriteRaw !== undefined,
+  };
+  const tokenChannelsKnown = Object.values(tokenChannelPresence).every(Boolean);
   const reportedTotal = toNonNegativeInt(firstNumber(usage.totalTokens, usage.total_tokens));
   const total = reportedTotal > 0 ? reportedTotal : input + output + cacheRead + cacheWrite;
 
@@ -241,7 +251,7 @@ export function usageFromMessage(message: MessageLike): AssistantUsage | undefin
     ? reportedCostRaw
     : undefined;
 
-  if (total === 0) {
+  if (total === 0 && reportedCostUsd === undefined) {
     return undefined;
   }
 
@@ -251,6 +261,7 @@ export function usageFromMessage(message: MessageLike): AssistantUsage | undefin
     cacheReadTokens: cacheRead,
     cacheWriteTokens: cacheWrite,
     totalTokens: total,
+    ...(!tokenChannelsKnown ? { tokenChannelsKnown: false, tokenChannelPresence } : {}),
     ...(reasoningTokens !== undefined ? { reasoningTokens } : {}),
     ...(reportedCostUsd !== undefined ? { reportedCostUsd } : {}),
   };
@@ -280,6 +291,17 @@ export function addAssistantUsage(
     cacheReadTokens: a.cacheReadTokens + b.cacheReadTokens,
     cacheWriteTokens: a.cacheWriteTokens + b.cacheWriteTokens,
     totalTokens: a.totalTokens + b.totalTokens,
+    ...(a.tokenChannelsKnown !== undefined || b.tokenChannelsKnown !== undefined ? {
+      tokenChannelsKnown: a.tokenChannelsKnown !== false && b.tokenChannelsKnown !== false,
+    } : {}),
+    ...(a.tokenChannelPresence || b.tokenChannelPresence ? {
+      tokenChannelPresence: {
+        input: a.tokenChannelPresence?.input !== false && b.tokenChannelPresence?.input !== false,
+        output: a.tokenChannelPresence?.output !== false && b.tokenChannelPresence?.output !== false,
+        cacheRead: a.tokenChannelPresence?.cacheRead !== false && b.tokenChannelPresence?.cacheRead !== false,
+        cacheWrite: a.tokenChannelPresence?.cacheWrite !== false && b.tokenChannelPresence?.cacheWrite !== false,
+      },
+    } : {}),
     ...(reasoningTokens !== undefined ? { reasoningTokens } : {}),
     ...(reportedCostUsd !== undefined ? { reportedCostUsd } : {}),
   };

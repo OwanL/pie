@@ -14,19 +14,61 @@
 # analysis/data/exports/
 # *.generated.ts
 
+# --- Dependencies ---
 node_modules/
-out/
-.vscode-test/
-coverage/
+.venv/
+venv/
+.pnpm-store/
+# --- Version control ---
 .git/
+# --- Generated / build output ---
+out/
+out-tsc/
+dist/
+build/
+.next/
+.turbo/
+.moon/
+# --- Caches ---
 .cache/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.temp/
+.tmp/
+.parcel-cache/
+.skylos/
+web-search-cache/
+mcp-cache.json
+# --- Coverage ---
+coverage/
+.nyc_output/
+# --- Runtime data (multi-gigabyte pi runtime artifacts) ---
 data/
 analysis/data/
+pie/
+bin/
+npm/
+proxy/.venv/
+proxy/.uv-cache/
+# --- Session transcripts / per-session workspaces ---
+sessions/
+# --- Logs ---
+logs/
+*.log
+# --- Packaged / test-run artifacts ---
+.vscode-test/
+test-results/
+playwright-report/
+*.egg-info/
+# --- Temporary SDK test worktrees (may survive interrupted runs) ---
+extension/.pie-sdk-*/
+
 analysis/site/dist/
 skills/codebase-maintenance/
 extension/test/_helpers/
 extension/test/fixtures/
-*.egg-info/
 *.min.js
 *.bundle.*
 *.chunk.*

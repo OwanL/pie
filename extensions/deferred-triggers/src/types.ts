@@ -31,13 +31,19 @@ export interface DeferTriggerParams {
 /** The op-log shapes written to `triggers.jsonl` (must match the host store). */
 export interface TriggerOp {
   id?: string;
-  op: 'register' | 'cancel' | 'fire';
+  op: 'register' | 'cancel' | 'claim' | 'dispatch-started' | 'release' | 'failed' | 'fire';
   sessionPath: string;
   triggers?: TriggerSpec[];
   note?: string;
   at?: string;
   targetId?: string;
   reason?: string;
+  wakeReason?: string;
+  claimId?: string;
+  ownerId?: string;
+  ownerPid?: number;
+  dispatchStartedAt?: string;
+  recoveryState?: 'dead-owner-recovered';
 }
 
 export interface ActiveTrigger {
@@ -46,6 +52,15 @@ export interface ActiveTrigger {
   triggers: TriggerSpec[];
   note: string;
   registeredAt: string;
+  deliveryState: 'pending' | 'claimed' | 'retryable';
+  recoveryState?: 'dead-owner-recovered' | 'acknowledgement-ambiguous';
+  deliveryDetail?: string;
+  claimId?: string;
+  claimOwnerId?: string;
+  claimOwnerPid?: number;
+  claimAt?: string;
+  dispatchStartedAt?: string;
+  wakeReason?: string;
 }
 
 export const deferTriggerSchema = {

@@ -36,6 +36,9 @@ import type {
   ModelSettings,
   UserContentPart,
   McpServerInfo,
+  CompactionOutcome,
+  CompactionReason,
+  SessionCapabilities,
 } from '../../shared/protocol';
 
 /** Wraps a `Command` so it can flow through the same event channel. */
@@ -49,6 +52,8 @@ export interface CommandEvent {
 export interface SendResultEvent {
   kind: 'SendResult';
   corrId: string;
+  operationId?: string;
+  backendGeneration?: number;
   sessionPath: string;
   ok: boolean;
   /** Backend-assigned request ID, used to bind events to sessions. Absent for
@@ -66,8 +71,13 @@ export interface SendResultEvent {
 export interface EditResultEvent {
   kind: 'EditResult';
   corrId: string;
+  operationId?: string;
+  operationAttempt?: number;
+  backendGeneration?: number;
   sessionPath: string;
   ok: boolean;
+  /** Backend evidence that the destructive truncate/branch commit occurred. */
+  committed?: boolean;
   /** Backend-assigned request ID (early-ack). Stamped on success so a
    *  post-ack `PreflightFailed` and the commit-point `MessageStarted` can
    *  resolve the edit's corrId via `pending.promoted` — mirroring `SendResult`.
@@ -93,6 +103,9 @@ export interface ContinueResultEvent {
   kind: 'ContinueResult';
   corrId: string;
   sessionPath: string;
+  operationId?: string;
+  operationAttempt?: number;
+  backendGeneration?: number;
   ok: boolean;
   requestId?: string;
   error?: string;
@@ -101,8 +114,19 @@ export interface ContinueResultEvent {
 export interface InterruptResultEvent {
   kind: 'InterruptResult';
   corrId: string;
+  operationId?: string;
+  operationAttempt?: number;
+  backendGeneration?: number;
   sessionPath: string;
   ok: boolean;
+  committed?: boolean;
+  interrupted?: boolean;
+  settled?: boolean;
+  alreadyStopped?: boolean;
+  forcedRecovery?: boolean;
+  teardownTimedOut?: boolean;
+  recoveryPending?: boolean;
+  occurredAt?: number;
   error?: string;
 }
 
@@ -118,7 +142,11 @@ export interface CompactResultEvent {
   kind: 'CompactResult';
   corrId: string;
   sessionPath: string;
+  operationId?: string;
+  operationAttempt?: number;
+  backendGeneration?: number;
   ok: boolean;
+  requestId?: string;
   error?: string;
 }
 
@@ -406,6 +434,8 @@ export interface MessageStartedEvent {
   sessionPath: string;
   messageId: string;
   requestId?: string;
+  operationId?: string;
+  operationAttempt?: number;
   modelId?: string;
   provider?: string;
   thinkingLevel?: ChatMessage['thinkingLevel'];
@@ -430,7 +460,11 @@ export interface MessageAbortedEvent {
   kind: 'MessageAborted';
   sessionPath: string;
   requestId?: string;
+  operationId?: string;
+  operationAttempt?: number;
   messageId?: string;
+  localId?: string;
+  outcome?: 'cancelled' | 'superseded' | 'failed';
   userInitiated?: boolean;
   reason?: string;
 }
@@ -446,14 +480,23 @@ export interface MessageFinishedEvent {
   kind: 'MessageFinished';
   sessionPath: string;
   requestId?: string;
+  operationId?: string;
+  operationAttempt?: number;
   message: ChatMessage;
 }
 
 /** Emitted when a session starts or stops streaming. */
+export interface AgentSettledEvent {
+  kind: 'AgentSettled';
+  sessionPath: string;
+  capabilities: SessionCapabilities;
+}
+
 export interface BusyChangedEvent {
   kind: 'BusyChanged';
   sessionPath: string;
   running: boolean;
+  capabilities?: SessionCapabilities;
 }
 
 /** Emitted when a history-compaction (`/compact`) LLM call starts. The backend
@@ -463,14 +506,22 @@ export interface BusyChangedEvent {
 export interface CompactionStartedEvent {
   kind: 'CompactionStarted';
   sessionPath: string;
+  operationId?: string;
+  operationAttempt?: number;
 }
 
 /** Emitted when a history-compaction (`/compact`) LLM call finishes — whether
- *  it produced a result or failed/aborted. Clears the "Compacting…" indicator
- *  and records the completion chip metrics when the SDK reported them. */
+ *  it produced a result or failed/aborted. Clears the "Compacting…" indicator;
+ *  only a succeeded outcome records the transient success chip. */
 export interface CompactionEndedEvent {
   kind: 'CompactionEnded';
   sessionPath: string;
+  operationId?: string;
+  operationAttempt?: number;
+  /** SDK reason (`manual`, `threshold`, or `overflow`), when reported. */
+  reason?: CompactionReason;
+  /** Explicit terminal outcome for this compaction attempt. */
+  outcome: CompactionOutcome;
   /** Epoch milliseconds when the compaction LLM call finished. */
   occurredAt: number;
   /** Prompt tokens before compaction, when the SDK reported them. */
@@ -510,6 +561,7 @@ export interface SessionListChangedEvent {
 export interface CustomMessageEvent {
   kind: 'CustomMessage';
   sessionPath: string;
+  operationId?: string;
   message: ChatMessage;
 }
 
@@ -529,18 +581,6 @@ export interface NoticeShownEvent {
   /** Omit for application-wide notices. Session-owned notices are only
    * projected while this path is the active chat. */
   sessionPath?: string | null;
-}
-
-/** Host-owned status for an edit whose destructive truncate crossed stdio but
- * whose application waiter timed out before the exact correlated response.
- * This is deliberately not an EditResult: neither `recovering` nor
- * `unresolved` may roll optimistic transcript state back. */
-export interface EditTruncateRecoveryChangedEvent {
-  kind: 'EditTruncateRecoveryChanged';
-  corrId: string;
-  sessionPath: string;
-  phase: 'recovering' | 'recovered' | 'unresolved';
-  error?: string;
 }
 
 /** Emitted when the backend reports an error. */
@@ -749,6 +789,7 @@ export interface PendingPathReplacedEvent {
 export interface PreflightFailedEvent {
   kind: 'PreflightFailed';
   corrId?: string;
+  operationId?: string;
   sessionPath: string;
   requestId: string;
   error: string;
@@ -812,6 +853,60 @@ export interface SessionScopeClearedEvent {
   removeSessionSummary: boolean;
 }
 
+/** A local message.send acknowledgement deadline expired. This records
+ * uncertainty only: it never rolls back a prompt that may already commit. */
+export interface SendOperationDelayedEvent {
+  kind: 'SendOperationDelayed';
+  operationId: string;
+  sessionPath: string;
+  backendGeneration: number;
+  error?: string;
+}
+
+/** Read-only backend-ledger reconciliation after acknowledgement ambiguity. */
+export interface SendOperationStatusEvent {
+  kind: 'SendOperationStatus';
+  operationId: string;
+  sessionPath: string;
+  backendGeneration: number;
+  state: 'pending' | 'accepted' | 'committed' | 'failed' | 'generation-ended' | 'reconciliation-exhausted';
+  requestId?: string;
+  queued?: boolean;
+  error?: string;
+}
+
+/** A local Continue/Compact acknowledgement deadline expired. The mutation
+ * may still commit, so the reducer records ambiguity and reconciliation. */
+export interface MessageOperationDelayedEvent {
+  kind: 'MessageOperationDelayed';
+  operationId: string;
+  operationKind: 'message.edit' | 'message.interrupt' | 'message.continue' | 'message.compact';
+  sessionPath: string;
+  backendGeneration: number;
+  error?: string;
+}
+
+/** Read-only reconciliation of an ambiguous Continue/Compact mutation. */
+export interface MessageOperationStatusEvent {
+  kind: 'MessageOperationStatus';
+  operationId: string;
+  operationKind: 'message.edit' | 'message.interrupt' | 'message.continue' | 'message.compact';
+  sessionPath: string;
+  backendGeneration: number;
+  state: 'pending' | 'accepted' | 'committed' | 'failed' | 'cancelled' | 'superseded' | 'aborted' | 'generation-ended' | 'reconciliation-exhausted';
+  /** Backend commit evidence is independent from acknowledgement state. */
+  committed?: boolean;
+  requestId?: string;
+  interrupted?: boolean;
+  settled?: boolean;
+  alreadyStopped?: boolean;
+  forcedRecovery?: boolean;
+  teardownTimedOut?: boolean;
+  recoveryPending?: boolean;
+  occurredAt?: number;
+  error?: string;
+}
+
 /** The local create/duplicate acknowledgement timed out. This is not a
  * definitive backend failure: the ledger retains the pending tab and queue so
  * a later session.opened can reconcile the durable result. */
@@ -823,6 +918,8 @@ export interface CreateOperationDelayedEvent {
   /** Attempt that timed out; absent only for compatibility with direct host
    * events from older callers. */
   attempt?: number;
+  /** Backend generation owning the idempotency ledger for this observation. */
+  backendGeneration?: number;
   notice?: string;
   ownsSelection?: boolean;
 }
@@ -833,6 +930,9 @@ export interface CreateOperationSucceededEvent {
   operationId: string;
   pendingPath: string;
   sessionPath: string;
+  /** Success from any attempt of the same generation may settle the operation. */
+  attempt?: number;
+  backendGeneration?: number;
 }
 
 /** A definitive backend failure or backend-generation death ended one create
@@ -842,6 +942,9 @@ export interface CreateOperationFailedEvent {
   operationId: string;
   pendingPath: string;
   error: string;
+  attempt?: number;
+  backendGeneration?: number;
+  reason?: 'definitive-rejection' | 'backend-generation-ended';
 }
 
 /** Emitted when a tab is opened (added to openTabPaths). */
@@ -901,6 +1004,7 @@ export interface QueuedDeliveredEvent {
   kind: 'QueuedDelivered';
   sessionPath: string;
   text: string;
+  operationId?: string;
   localId?: string;
 }
 
@@ -948,6 +1052,7 @@ export type BackendEvent =
   | MessageThinkingEvent
   | ToolCallEvent
   | MessageFinishedEvent
+  | AgentSettledEvent
   | BusyChangedEvent
   | BusyCompletedEvent
   | CompactionStartedEvent
@@ -972,7 +1077,6 @@ export interface SessionSummaryUpsertedEvent {
 
 export type HostEvent =
   | NoticeShownEvent
-  | EditTruncateRecoveryChangedEvent
   | McpServersUpdatedEvent
   | McpSessionServersUpdatedEvent
   | SessionNameDerivedEvent
@@ -995,6 +1099,10 @@ export type HostEvent =
   | AssistantMessageErrorStampedEvent
   | ComposerInputsReplacedEvent
   | PendingPathReplacedEvent
+  | SendOperationDelayedEvent
+  | SendOperationStatusEvent
+  | MessageOperationDelayedEvent
+  | MessageOperationStatusEvent
   | CreateOperationDelayedEvent
   | CreateOperationSucceededEvent
   | CreateOperationFailedEvent

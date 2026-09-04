@@ -318,6 +318,9 @@ test('an empty submit continues an interrupted response without an optimistic us
   const interrupted = sessionViewState();
   interrupted.transcript = interrupted.transcript.map((message) =>
     message.id === 'assistant-1' ? { ...message, status: 'interrupted' as const } : message);
+  interrupted.sessionCapabilitiesBySession = {
+    '/session/a': { billableActivity: false, canContinue: true, canInterrupt: false, canCompact: true },
+  };
   adapter.initialState = interrupted;
 
   act(() => {
@@ -350,6 +353,9 @@ test('an empty submit continues when interruption left only the delivered user b
   interruptedBeforeResponse.transcript = interruptedBeforeResponse.transcript.filter(
     (message) => message.role === 'user',
   );
+  interruptedBeforeResponse.sessionCapabilitiesBySession = {
+    '/session/a': { billableActivity: false, canContinue: true, canInterrupt: false, canCompact: true },
+  };
   adapter.initialState = interruptedBeforeResponse;
 
   act(() => render(h(App, { adapter }), container));
@@ -379,6 +385,9 @@ test('an empty submit continues from a folded durable tool-result boundary', () 
         toolCalls: [{ id: 'tool-1', name: 'bash', input: {}, result: 'done', status: 'completed' as const }],
       }
     : message);
+  toolBoundary.sessionCapabilitiesBySession = {
+    '/session/a': { billableActivity: false, canContinue: true, canInterrupt: false, canCompact: true },
+  };
   adapter.initialState = toolBoundary;
 
   act(() => render(h(App, { adapter }), container));
@@ -893,6 +902,19 @@ test('Brief H: NoticeBanner renders [retry, show-logs] for a model-start-timeout
   assert.equal(findNoticeAction(container, 'Retry without pruning'), null);
   assert.equal(findNoticeAction(container, 'Open settings'), null);
   assert.equal(findNoticeAction(container, 'Restart backend'), null);
+});
+
+test('NoticeBanner uses typed severity instead of classifying notification copy', () => {
+  const adapter = makeAdapter();
+  adapter.initialState = sessionViewState({
+    notice: 'Info: the error was recovered.',
+    noticeKind: null,
+    noticeRaw: null,
+  });
+  act(() => { render(h(App, { adapter }), container); });
+
+  assert.ok(container.querySelector('.notice'));
+  assert.equal(container.querySelector('.notice.error'), null);
 });
 
 test('operational error More reveals the exact backend diagnostic', () => {

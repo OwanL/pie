@@ -12,7 +12,7 @@ import {
 	withCopilotOptions,
 	COPILOT_IDE_HEADERS,
 } from "./copilot-headers.js";
-import type { PrepassRunResult, PrepassUsage } from "./pruning-types.js";
+import type { PrepassInvocation, PrepassRunResult, PrepassUsage } from "./pruning-types.js";
 import { toErrorMessage, enrichConnectionError } from "../../../shared/error-message.js";
 import { PROVIDER_GATE_REQUEST_CLASS_HEADER, PROVIDER_GATE_REQUEST_CLASS_SKILL_PRUNER } from "../../../shared/provider-gate-request-class.js";
 
@@ -547,6 +547,7 @@ export async function runPruningPrepass(
 	activeConfig: PruningConfig,
 	completeFn: CompleteSimpleFn,
 ): Promise<PrepassRunResult> {
+	const prepassInvocations: PrepassInvocation[] = [];
 	const emptyResult = (thinkingLevel: string, error: string | null): PrepassRunResult => ({
 		prunedSkills: null,
 		prunedTools: null,
@@ -557,6 +558,7 @@ export async function runPruningPrepass(
 		rawUserMessage: "",
 		latencyMs: 0,
 		thinkingLevel,
+		prepassInvocations,
 	});
 
 	// Model resolution and auth run outside the per-attempt retry loop below. A
@@ -585,6 +587,43 @@ export async function runPruningPrepass(
 	auth = {
 		...auth,
 		headers: { ...(auth.headers ?? {}), [PROVIDER_GATE_REQUEST_CLASS_HEADER]: PROVIDER_GATE_REQUEST_CLASS_SKILL_PRUNER },
+	};
+
+	let invocationSequence = 0;
+	const meteredCompleteFn: CompleteSimpleFn = async (attemptModel, context, options) => {
+		const started = Date.now();
+		const invocationId = `skill-pruning:${started}:${++invocationSequence}`;
+		try {
+			const response = await completeFn(attemptModel, context, options);
+			const ended = Date.now();
+			const usage = response.usage;
+			const outcome = response.stopReason === "aborted"
+				? "cancelled" as const
+				: response.stopReason === "error" || !!response.errorMessage
+					? "failed" as const : "succeeded" as const;
+			prepassInvocations.push({
+				invocationId,
+				startedAt: new Date(started).toISOString(),
+				endedAt: new Date(ended).toISOString(),
+				outcome,
+				...(typeof usage?.input === "number" ? { input: usage.input } : {}),
+				...(typeof usage?.output === "number" ? { output: usage.output } : {}),
+				...(typeof usage?.cacheRead === "number" ? { cacheRead: usage.cacheRead } : {}),
+				...(typeof usage?.cacheWrite === "number" ? { cacheWrite: usage.cacheWrite } : {}),
+				...(typeof usage?.cost?.total === "number"
+					? { reportedCostUsd: usage.cost.total }
+					: typeof usage?.reportedCostUsd === "number" ? { reportedCostUsd: usage.reportedCostUsd } : {}),
+			});
+			return response;
+		} catch (error) {
+			prepassInvocations.push({
+				invocationId,
+				startedAt: new Date(started).toISOString(),
+				endedAt: new Date().toISOString(),
+				outcome: options.signal instanceof AbortSignal && options.signal.aborted ? "cancelled" : "failed",
+			});
+			throw error;
+		}
 	};
 
 	// Fail open when auth was explicitly attempted and produced no usable key
@@ -654,7 +693,7 @@ export async function runPruningPrepass(
 				llmInput,
 				model,
 				buildAttemptOptions(thinkingLevel, timeoutMs),
-				completeFn,
+				meteredCompleteFn,
 				timeoutMs,
 			);
 			accountResult(result);
@@ -670,6 +709,7 @@ export async function runPruningPrepass(
 				latencyMs: cumulativeLatencyMs,
 				thinkingLevel,
 				usage: cumulativeUsage,
+				prepassInvocations,
 				keptAllDueToParseFailure: result.keptAllDueToParseFailure,
 			};
 
@@ -692,7 +732,7 @@ export async function runPruningPrepass(
 							llmInput,
 							model,
 							buildAttemptOptions(thinkingLevel, timeoutMs),
-							completeFn,
+							meteredCompleteFn,
 							timeoutMs,
 						);
 						accountResult(retryResult);
@@ -709,6 +749,7 @@ export async function runPruningPrepass(
 								latencyMs: cumulativeLatencyMs,
 								thinkingLevel,
 								usage: cumulativeUsage,
+								prepassInvocations,
 								keptAllDueToParseFailure: retryResult.keptAllDueToParseFailure,
 							};
 							recovered = true;
@@ -759,7 +800,7 @@ export async function runPruningPrepass(
 							llmInput,
 							model,
 							buildAttemptOptions(thinkingLevel, timeoutMs),
-							completeFn,
+							meteredCompleteFn,
 							timeoutMs,
 						);
 						accountResult(retryResult);
@@ -776,6 +817,7 @@ export async function runPruningPrepass(
 								latencyMs: cumulativeLatencyMs,
 								thinkingLevel,
 								usage: cumulativeUsage,
+								prepassInvocations,
 								keptAllDueToParseFailure: retryResult.keptAllDueToParseFailure,
 							};
 							recovered = true;

@@ -269,6 +269,20 @@ test('arrival-order: terminal abort before message start settles the promoted op
   assert.ok(aborted.state.transcript.bySession['/s']?.some((message) => message.id === 'local:c-terminal'));
 });
 
+test('arrival-order: typed pre-start continuation settlement cannot consume a newer pending operation', () => {
+  const newSend = reducer(readyState, sendCommand('c-new-after-continue', '/s'));
+
+  const lateContinueSettlement = reducer(newSend.state, {
+    kind: 'MessageAborted',
+    sessionPath: '/s',
+    requestId: 'request-old-continue',
+    outcome: 'superseded',
+  });
+
+  assert.ok(lateContinueSettlement.state.pending.ops['c-new-after-continue']);
+  assert.deepEqual(lateContinueSettlement.effects, []);
+});
+
 test('arrival-order: duplicate terminal from the current turn cannot consume a newer pending operation', () => {
   const oldTurn = reducer(readyState, {
     kind: 'MessageStarted',

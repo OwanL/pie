@@ -144,7 +144,7 @@ test('Bug 6: an `agent_end willRetry:true` that is never followed by a retry tur
   else process.env.PIE_WILLRETRY_WATCHDOG_GRACE_MS = prevGrace;
 });
 
-test('Bug 6 (control): a completed retry (auto_retry_end success → agent_end willRetry:false) finalizes correctly (the happy retry path must NOT be changed by the Phase 2 fix)', async () => {
+test('Bug 6 (control): a completed retry finalizes at agent_settled without firing the retry watchdog', async () => {
   // Control proving the willRetry early-return is correct for the happy path.
   // Phase 2's watchdog must NOT fire here — only when a willRetry never
   // resolves within a bounded window.
@@ -162,9 +162,12 @@ test('Bug 6 (control): a completed retry (auto_retry_end success → agent_end w
   // The retry completes normally.
   handleSdkSessionEvent(h.deps, h.context, { type: 'auto_retry_start', attempt: 1, maxAttempts: 6, delayMs: 0, errorMessage: 'transient' });
   handleSdkSessionEvent(h.deps, h.context, { type: 'auto_retry_end', attempt: 1, success: true });
-  // Then the successful retry turn's agent_end (willRetry:false) finalizes.
+  // The successful retry attempt ends before the complete SDK run settles.
   handleSdkSessionEvent(h.deps, h.context, { type: 'agent_end', willRetry: false });
+  assert.notEqual(h.context.activeRequest, undefined);
+  h.context.session.isStreaming = false;
+  handleSdkSessionEvent(h.deps, h.context, { type: 'agent_settled' });
 
-  assert.equal(h.context.activeRequest, undefined, 'happy retry path clears activeRequest');
+  assert.equal(h.context.activeRequest, undefined, 'happy retry path clears activeRequest at settlement');
   assert.equal(h.busyEvents.at(-1), false, 'happy retry path sets busy false');
 });

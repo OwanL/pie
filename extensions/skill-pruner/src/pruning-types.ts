@@ -27,6 +27,18 @@ export interface PrepassUsage {
 	reportedCostUsd?: number;
 }
 
+export interface PrepassInvocation {
+	invocationId: string;
+	startedAt: string;
+	endedAt: string;
+	outcome: "succeeded" | "failed" | "cancelled";
+	input?: number;
+	output?: number;
+	cacheRead?: number;
+	cacheWrite?: number;
+	reportedCostUsd?: number;
+}
+
 export interface PrepassRunResult {
 	/** Skills the LLM chose to prune (null = no usable prepass signal → keep all). */
 	prunedSkills: string[] | null;
@@ -40,6 +52,8 @@ export interface PrepassRunResult {
 	latencyMs: number;
 	thinkingLevel: string;
 	usage?: PrepassUsage;
+	/** One immutable settlement per actual scorer provider request, including retries. */
+	prepassInvocations?: PrepassInvocation[];
 	/** True when the prepass response was unreadable as JSON → kept all (parse failure). */
 	keptAllDueToParseFailure?: boolean;
 	/** True when this result was reused from the per-session cache. */

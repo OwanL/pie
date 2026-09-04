@@ -19,6 +19,7 @@ export interface BottomSectionProps {
   activeSessionPath: string | null;
   postMessage: (msg: WebviewToHostMessage) => void;
   busy: ViewState['busy'];
+  capabilities?: ViewState['sessionCapabilitiesBySession'][string];
   retryStatus: ViewState['retryStatus'];
   /** Brief E: optimistic in-flight interrupt flag (webview-local). Drives the
    *  "Stopping…" affordance so the click reflects within one frame. */
@@ -57,6 +58,7 @@ export interface BottomSectionProps {
   pendingComposerInputs: ViewState['pendingComposerInputs'];
   activeRunSummary: ViewState['activeRunSummary'];
   tokenRateBySession: ViewState['tokenRateBySession'];
+  workingTimeBySession: ViewState['workingTimeBySession'];
   /** True while the active session runs a history-compaction LLM call. */
   compacting: boolean;
   /** Most recent completed compaction for the active session (transient chip). */
@@ -71,6 +73,7 @@ export const BottomSection = memo(function BottomSection({
   activeSessionPath,
   postMessage,
   busy,
+  capabilities,
   retryStatus,
   interrupting,
   commandsAvailable = true,
@@ -104,6 +107,7 @@ export const BottomSection = memo(function BottomSection({
   pendingComposerInputs,
   activeRunSummary,
   tokenRateBySession,
+  workingTimeBySession,
   compacting,
   lastCompaction,
   handlers,
@@ -125,6 +129,7 @@ export const BottomSection = memo(function BottomSection({
         draftText={draftText}
         postMessage={postMessage}
         busy={busy}
+        capabilities={capabilities}
         retryStatus={retryStatus}
         interrupting={interrupting}
         commandsAvailable={commandsAvailable}
@@ -154,6 +159,7 @@ export const BottomSection = memo(function BottomSection({
         pendingComposerInputs={pendingComposerInputs}
         activeRunSummary={activeRunSummary}
         tokenRateBySession={tokenRateBySession}
+        workingTimeBySession={workingTimeBySession}
         compacting={compacting}
         lastCompaction={lastCompaction}
         focusTrigger={activeSession?.path}

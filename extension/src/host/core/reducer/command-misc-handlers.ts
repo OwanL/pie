@@ -8,79 +8,216 @@ import type { ReducerResult } from './helpers.js';
 import { addToArray, appendLocalUserMessage, truncateLocalTranscriptAfter } from './helpers.js';
 import { BACKEND_READY_TIMEOUT_MS } from '../../../shared/backend-ready-timeout.js';
 import { sessionHasDeferredModelWrite } from './set-model-handlers.js';
+import {
+  activeInterruptOperation,
+  clearRetiredInterruptEventFence,
+  retrySessionOperation,
+  startSessionOperation,
+} from '../operation-registry.js';
 
 export function handleContinue(state: ArchState, cmd: Extract<Command, { kind: 'Continue' }>): ReducerResult {
+  if (!cmd.operationId || !cmd.operationSource || cmd.backendGeneration === undefined) {
+    return handleContinue(state, {
+      ...cmd,
+      operationId: cmd.operationId ?? cmd.corrId,
+      operationAttempt: cmd.operationAttempt ?? 1,
+      operationSource: cmd.operationSource ?? { kind: 'host' },
+      backendGeneration: cmd.backendGeneration ?? 0,
+    });
+  }
+  const attempt = cmd.operationAttempt ?? 1;
+  const fingerprint = JSON.stringify({ kind: 'message.continue', sessionPath: cmd.sessionPath });
+  const unresolved = Object.values(state.operations).find((candidate) =>
+    candidate.operationId !== cmd.operationId && !candidate.terminal
+    && (candidate.session.resolvedPath ?? candidate.session.pendingPath) === cmd.sessionPath,
+  );
+  if (unresolved) {
+    return {
+      state,
+      effects: [{ kind: 'Log', corrId: cmd.corrId, level: 'warn', message: `Blocked message.continue while operation ${unresolved.operationId} is unresolved` }],
+    };
+  }
+  const existing = state.operations[cmd.operationId];
+  let operation = existing;
+  if (existing) {
+    if (existing.terminal) return { state, effects: [] };
+    if (existing.kind !== 'message.continue'
+      || existing.intentFingerprint !== fingerprint
+      || existing.backendGeneration !== cmd.backendGeneration
+      || (existing.session.resolvedPath ?? existing.session.pendingPath) !== cmd.sessionPath) {
+      return {
+        state,
+        effects: [{ kind: 'Log', corrId: cmd.corrId, level: 'error', message: `Rejected changed message.continue intent for operation ${cmd.operationId}` }],
+      };
+    }
+    operation = retrySessionOperation(existing, {
+      kind: 'message.continue', pendingPath: existing.session.pendingPath,
+      selectionToken: existing.causal.selectionToken, backendGeneration: cmd.backendGeneration,
+      attempt,
+    }) ?? existing;
+    if (operation === existing) return { state, effects: [] };
+  } else {
+    operation = startSessionOperation({
+      operationId: cmd.operationId,
+      kind: 'message.continue',
+      source: cmd.operationSource,
+      pendingPath: cmd.sessionPath,
+      selectionToken: cmd.corrId,
+      backendGeneration: cmd.backendGeneration,
+      attempt,
+      intentFingerprint: fingerprint,
+    });
+  }
   const nextState = produce(state, (draft) => {
-    draft.sessions.runningSessionPaths = addToArray(draft.sessions.runningSessionPaths, cmd.sessionPath);
-    draft.sessions.interruptSettledSessionPaths = draft.sessions.interruptSettledSessionPaths.filter(
-      (path) => path !== cmd.sessionPath,
+    draft.operations = clearRetiredInterruptEventFence(
+      { ...draft.operations, [cmd.operationId!]: operation! },
+      cmd.sessionPath,
     );
+    draft.sessions.runningSessionPaths = addToArray(draft.sessions.runningSessionPaths, cmd.sessionPath);
     delete draft.pending.prepassBySession[cmd.sessionPath];
   });
   return {
     state: nextState,
-    effects: [{ kind: 'ContinueRpc', corrId: cmd.corrId, sessionPath: cmd.sessionPath }],
+    effects: [{
+      kind: 'ContinueRpc', corrId: cmd.corrId, sessionPath: cmd.sessionPath,
+      operationId: cmd.operationId, operationAttempt: attempt, backendGeneration: cmd.backendGeneration,
+    }],
   };
 }
 
 export function handleInterrupt(state: ArchState, cmd: Extract<Command, { kind: 'Interrupt' }>): ReducerResult {
-  // Stop takes effect INSTANTLY in the reducer while remaining truthful about
-  // teardown. The partial reply is frozen immediately, but busy remains set
-  // until the abort-completion barrier returns, so the user sees Stopping… and
-  // cannot race a new send into the dying turn:
-  //  - `interruptInFlightBySession` is set: the in-flight-abort gate in
-  //    `handleMessageDelta` / `handleMessageThinking` drops late deltas as
-  //    pure no-ops during the abort window.
-  //  - `runningSessionPaths` deliberately stays set until InterruptResult: the
-  //    composer remains in a truthful, disabled "Stopping…" state and a new
-  //    send cannot race into the still-running backend turn as a follow-up.
-  //  - Streaming assistant messages are marked `interrupted`: this gates
-  //    appending via the `status !== 'interrupted'` check in the delta/thinking
-  //    handlers (defense-in-depth alongside the flag gate) and renders the
-  //    partial reply as cancelled.
-  //  - An in-flight prepass chip is cleared (idle): a Stop cancels the prepass
-  //    too, not only the streaming turn.
-  // `InterruptResult{ok}` later clears the flag (idempotent with these writes);
-  // a late `MessageFinished` is intentionally NOT gated and self-corrects the
-  // optimistic `interrupted` to `completed` (race: the turn finished between
-  // the click and the abort).
+  if (!cmd.operationId || !cmd.operationSource || cmd.backendGeneration === undefined) {
+    return handleInterrupt(state, {
+      ...cmd,
+      operationId: cmd.operationId ?? cmd.corrId,
+      operationAttempt: cmd.operationAttempt ?? 1,
+      operationSource: cmd.operationSource ?? { kind: 'host' },
+      backendGeneration: cmd.backendGeneration ?? 0,
+    });
+  }
+  const attempt = cmd.operationAttempt ?? 1;
+  const fingerprint = JSON.stringify({ kind: 'message.interrupt', sessionPath: cmd.sessionPath });
+  const competingStop = activeInterruptOperation(state.operations, cmd.sessionPath);
+  if (competingStop && competingStop.operationId !== cmd.operationId) return { state, effects: [] };
+
+  const existing = state.operations[cmd.operationId];
+  let operation = existing;
+  if (existing) {
+    if (existing.terminal) return { state, effects: [] };
+    if (existing.kind !== 'message.interrupt' || existing.intentFingerprint !== fingerprint
+      || existing.backendGeneration !== cmd.backendGeneration
+      || (existing.session.resolvedPath ?? existing.session.pendingPath) !== cmd.sessionPath) {
+      return {
+        state,
+        effects: [{ kind: 'Log', corrId: cmd.corrId, level: 'error', message: `Rejected changed message.interrupt intent for operation ${cmd.operationId}` }],
+      };
+    }
+    operation = retrySessionOperation(existing, {
+      kind: 'message.interrupt', pendingPath: existing.session.pendingPath,
+      selectionToken: existing.causal.selectionToken, backendGeneration: cmd.backendGeneration, attempt,
+    }) ?? existing;
+    if (operation === existing) return { state, effects: [] };
+  } else {
+    operation = startSessionOperation({
+      operationId: cmd.operationId,
+      kind: 'message.interrupt',
+      source: cmd.operationSource,
+      pendingPath: cmd.sessionPath,
+      selectionToken: cmd.corrId,
+      backendGeneration: cmd.backendGeneration,
+      attempt,
+      intentFingerprint: fingerprint,
+    });
+  }
+
+  // Freeze the partial reply immediately, but retain running/stopping until the
+  // backend's complete settlement barrier (or generation death) is authoritative.
   const nextState = produce(state, (draft) => {
-    draft.sessions.interruptInFlightBySession[cmd.sessionPath] = true;
+    draft.operations[cmd.operationId!] = operation!;
     delete draft.pending.prepassBySession[cmd.sessionPath];
     const list = draft.transcript.bySession[cmd.sessionPath];
     if (list) {
       for (const message of list) {
-        if (message.role === 'assistant' && message.status === 'streaming') {
-          message.status = 'interrupted';
-        }
+        if (message.role === 'assistant' && message.status === 'streaming') message.status = 'interrupted';
       }
     }
   });
   return {
     state: nextState,
-    effects: [{ kind: 'InterruptRpc', corrId: cmd.corrId, sessionPath: cmd.sessionPath }],
+    effects: [{
+      kind: 'InterruptRpc', corrId: cmd.corrId, operationId: cmd.operationId,
+      operationAttempt: attempt, backendGeneration: cmd.backendGeneration, sessionPath: cmd.sessionPath,
+    }],
   };
 }
 
 export function handleCompact(state: ArchState, cmd: Extract<Command, { kind: 'Compact' }>): ReducerResult {
-  // Optimistically mark the session as compacting so the UI shows the
-  // "Compacting…" spinner immediately, even when the backend must first
-  // promote a cold worker (which can take several seconds). The marker is
-  // cleared by the backend's `CompactionEnded` event on success/failure/abort,
-  // and by `CompactResult{ok:false}` when the RPC itself fails before
-  // compaction starts (e.g. REQUEST_IN_PROGRESS or a promotion error).
+  if (!cmd.operationId || !cmd.operationSource || cmd.backendGeneration === undefined) {
+    return handleCompact(state, {
+      ...cmd,
+      operationId: cmd.operationId ?? cmd.corrId,
+      operationAttempt: cmd.operationAttempt ?? 1,
+      operationSource: cmd.operationSource ?? { kind: 'host' },
+      backendGeneration: cmd.backendGeneration ?? 0,
+    });
+  }
+  const attempt = cmd.operationAttempt ?? 1;
+  const fingerprint = JSON.stringify({ kind: 'message.compact', sessionPath: cmd.sessionPath, reason: 'manual' });
+  const unresolved = Object.values(state.operations).find((candidate) =>
+    candidate.operationId !== cmd.operationId && !candidate.terminal
+    && (candidate.session.resolvedPath ?? candidate.session.pendingPath) === cmd.sessionPath,
+  );
+  if (unresolved) {
+    return {
+      state,
+      effects: [{ kind: 'Log', corrId: cmd.corrId, level: 'warn', message: `Blocked message.compact while operation ${unresolved.operationId} is unresolved` }],
+    };
+  }
+  const existing = state.operations[cmd.operationId];
+  let operation = existing;
+  if (existing) {
+    if (existing.terminal) return { state, effects: [] };
+    if (existing.kind !== 'message.compact'
+      || existing.intentFingerprint !== fingerprint
+      || existing.backendGeneration !== cmd.backendGeneration
+      || (existing.session.resolvedPath ?? existing.session.pendingPath) !== cmd.sessionPath) {
+      return {
+        state,
+        effects: [{ kind: 'Log', corrId: cmd.corrId, level: 'error', message: `Rejected changed message.compact intent for operation ${cmd.operationId}` }],
+      };
+    }
+    operation = retrySessionOperation(existing, {
+      kind: 'message.compact', pendingPath: existing.session.pendingPath,
+      selectionToken: existing.causal.selectionToken, backendGeneration: cmd.backendGeneration,
+      attempt,
+    }) ?? existing;
+    if (operation === existing) return { state, effects: [] };
+  } else {
+    operation = startSessionOperation({
+      operationId: cmd.operationId,
+      kind: 'message.compact',
+      source: cmd.operationSource,
+      pendingPath: cmd.sessionPath,
+      selectionToken: cmd.corrId,
+      backendGeneration: cmd.backendGeneration,
+      attempt,
+      intentFingerprint: fingerprint,
+    });
+  }
+  const nextState = produce(state, (draft) => {
+    draft.operations = clearRetiredInterruptEventFence(
+      { ...draft.operations, [cmd.operationId!]: operation! },
+      cmd.sessionPath,
+    );
+    draft.sessions.runningSessionPaths = addToArray(draft.sessions.runningSessionPaths, cmd.sessionPath);
+    draft.sessions.compactingSessionPaths = addToArray(draft.sessions.compactingSessionPaths, cmd.sessionPath);
+  });
   return {
-    state: {
-      ...state,
-      sessions: {
-        ...state.sessions,
-        interruptSettledSessionPaths: state.sessions.interruptSettledSessionPaths.filter(
-          (path) => path !== cmd.sessionPath,
-        ),
-        compactingSessionPaths: addToArray(state.sessions.compactingSessionPaths, cmd.sessionPath),
-      },
-    },
-    effects: [{ kind: 'CompactRpc', corrId: cmd.corrId, sessionPath: cmd.sessionPath }],
+    state: nextState,
+    effects: [{
+      kind: 'CompactRpc', corrId: cmd.corrId, sessionPath: cmd.sessionPath,
+      operationId: cmd.operationId, operationAttempt: attempt, backendGeneration: cmd.backendGeneration,
+    }],
   };
 }
 
@@ -111,7 +248,81 @@ export function handleClearQueue(state: ArchState, cmd: Extract<Command, { kind:
   };
 }
 
+function sendIntentFingerprint(cmd: Extract<Command, { kind: 'Send' }>): string {
+  return JSON.stringify({
+    sessionPath: cmd.sessionPath,
+    text: cmd.text,
+    inputs: cmd.inputs,
+    localId: cmd.localId,
+  });
+}
+
 export function handleSend(state: ArchState, cmd: Extract<Command, { kind: 'Send' }>): ReducerResult {
+  // Additive compatibility for internal callers compiled before operation IDs.
+  // Production ingress always supplies all three fields.
+  if (!cmd.operationId || !cmd.operationSource || cmd.backendGeneration === undefined) {
+    return handleSend(state, {
+      ...cmd,
+      operationId: cmd.operationId ?? cmd.corrId,
+      operationSource: cmd.operationSource ?? { kind: 'host' },
+      backendGeneration: cmd.backendGeneration ?? 0,
+    });
+  }
+  const intentFingerprint = sendIntentFingerprint(cmd);
+  const unresolvedSend = Object.values(state.operations).find((operation) =>
+    operation.operationId !== cmd.operationId
+    && !operation.terminal
+    && ((operation.kind === 'message.send'
+      && (operation.phase === 'ambiguous' || operation.commit === 'unknown'))
+      || operation.kind === 'message.edit'
+      || operation.kind === 'message.interrupt')
+    && (operation.session.resolvedPath ?? operation.session.pendingPath) === cmd.sessionPath,
+  );
+  if (unresolvedSend) {
+    return {
+      state,
+      effects: [{
+        kind: 'Log', corrId: cmd.corrId, level: 'warn',
+        message: `Blocked message.send while operation ${unresolvedSend.operationId} remains ambiguous`,
+      }],
+    };
+  }
+  const existingOperation = state.operations[cmd.operationId];
+  if (existingOperation?.terminal) return { state, effects: [] };
+  if (existingOperation) {
+    const effectivePath = existingOperation.session.resolvedPath ?? existingOperation.session.pendingPath;
+    if (existingOperation.kind !== 'message.send'
+      || existingOperation.localId !== cmd.localId
+      || existingOperation.intentFingerprint !== intentFingerprint
+      || effectivePath !== cmd.sessionPath
+      || existingOperation.backendGeneration !== cmd.backendGeneration) {
+      return {
+        state,
+        effects: [{
+          kind: 'Log', corrId: cmd.corrId, level: 'error',
+          message: `Rejected changed message.send intent for operation ${cmd.operationId}`,
+        }],
+      };
+    }
+  } else {
+    state = {
+      ...state,
+      operations: {
+        ...state.operations,
+        [cmd.operationId]: startSessionOperation({
+          operationId: cmd.operationId,
+          kind: 'message.send',
+          source: cmd.operationSource,
+          pendingPath: cmd.sessionPath,
+          selectionToken: cmd.corrId,
+          backendGeneration: cmd.backendGeneration,
+          localId: cmd.localId,
+          intentFingerprint,
+        }),
+      },
+    };
+  }
+
   // If the target session is still a pending tab (backend `session.create`
   // in flight), queue the send into ArchState instead of emitting `SendRpc`.
   // The optimistic user message is still inserted immediately (the user sees
@@ -128,6 +339,9 @@ export function handleSend(state: ArchState, cmd: Extract<Command, { kind: 'Send
         ...(draft.pending.sendQueueBySession[cmd.sessionPath] ?? []),
         {
           corrId: cmd.corrId,
+          operationId: cmd.operationId,
+          operationSource: cmd.operationSource,
+          backendGeneration: cmd.backendGeneration,
           text: cmd.text,
           inputs: cmd.inputs,
           composedText: cmd.composedText,
@@ -162,6 +376,9 @@ export function handleSend(state: ArchState, cmd: Extract<Command, { kind: 'Send
         {
           sessionPath: cmd.sessionPath,
           corrId: cmd.corrId,
+          operationId: cmd.operationId,
+          operationSource: cmd.operationSource,
+          backendGeneration: cmd.backendGeneration,
           text: cmd.text,
           inputs: cmd.inputs,
           composedText: cmd.composedText,
@@ -184,6 +401,13 @@ export function handleSend(state: ArchState, cmd: Extract<Command, { kind: 'Send
         : [{ kind: 'StartBackendReadyWatchdog', corrId: 'watchdog', timeoutMs: BACKEND_READY_TIMEOUT_MS }],
     };
   }
+
+  // Reaching this point means Send will execute now rather than merely wait in
+  // a host queue. It therefore takes ownership from a successfully retired Stop.
+  state = {
+    ...state,
+    operations: clearRetiredInterruptEventFence(state.operations, cmd.sessionPath),
+  };
 
   // Steering (FollowUp): a turn is already running for this session. Queue
   // the message as a follow-up (SDK `AgentSession.followUp()`) — it runs as a
@@ -209,8 +433,10 @@ export function handleSend(state: ArchState, cmd: Extract<Command, { kind: 'Send
         cmd.customType,
         cmd.customDetails,
       );
+      draft.operations[cmd.operationId!]!.delivery = 'queued';
       draft.pending.ops[cmd.corrId] = {
         kind: 'send',
+        operationId: cmd.operationId,
         sessionPath: cmd.sessionPath,
         localId: cmd.localId,
         previousSummary: cmd.previousSummary,
@@ -228,6 +454,8 @@ export function handleSend(state: ArchState, cmd: Extract<Command, { kind: 'Send
         {
           kind: 'SendRpc',
           corrId: cmd.corrId,
+          operationId: cmd.operationId,
+          backendGeneration: cmd.backendGeneration,
           sessionPath: cmd.sessionPath,
           text: cmd.text,
           inputs: cmd.inputs,
@@ -252,8 +480,10 @@ export function handleSend(state: ArchState, cmd: Extract<Command, { kind: 'Send
   const inputsSnapshot = state.composer.pendingComposerInputsBySession[cmd.sessionPath] ?? [];
   const nextState = produce(state, (draft) => {
     appendLocalUserMessage(draft, cmd.sessionPath, cmd.localId, cmd.composedText, cmd.userParts, new Date(cmd.timestamp).toISOString(), 'completed', cmd.customType, cmd.customDetails);
+    draft.operations[cmd.operationId!]!.delivery = 'direct';
     draft.pending.ops[cmd.corrId] = {
       kind: 'send',
+      operationId: cmd.operationId,
       sessionPath: cmd.sessionPath,
       localId: cmd.localId,
       previousSummary: cmd.previousSummary,
@@ -265,9 +495,6 @@ export function handleSend(state: ArchState, cmd: Extract<Command, { kind: 'Send
       startedAt: cmd.timestamp,
     };
     draft.sessions.runningSessionPaths = nextRunningPaths;
-    draft.sessions.interruptSettledSessionPaths = draft.sessions.interruptSettledSessionPaths.filter(
-      (path) => path !== cmd.sessionPath,
-    );
     delete draft.composer.draftTextBySession[cmd.sessionPath];
     // Retry clears a stale prepass 'failed' chip from a previous turn
     // (Brief F); the phase returns to 'running' on the early-ack promote.
@@ -287,6 +514,8 @@ export function handleSend(state: ArchState, cmd: Extract<Command, { kind: 'Send
       {
         kind: 'SendRpc',
         corrId: cmd.corrId,
+        operationId: cmd.operationId,
+        backendGeneration: cmd.backendGeneration,
         sessionPath: cmd.sessionPath,
         text: cmd.text,
         inputs: cmd.inputs,
@@ -352,65 +581,115 @@ export function handleEditQueued(state: ArchState, cmd: Extract<Command, { kind:
 }
 
 export function handleEdit(state: ArchState, cmd: Extract<Command, { kind: 'Edit' }>): ReducerResult {
-  // Insert optimistic edit message + mark session busy immediately so the
-  // webview shows an activity indicator right away.
-  // Read BEFORE the optimistic running mark below, otherwise every edit would
-  // look like it needs an interrupt.
-  const wasRunning = state.sessions.runningSessionPaths.includes(cmd.sessionPath);
+  if (!cmd.operationId || !cmd.operationSource || cmd.backendGeneration === undefined) {
+    return handleEdit(state, {
+      ...cmd,
+      operationId: cmd.operationId ?? cmd.corrId,
+      operationAttempt: cmd.operationAttempt ?? 1,
+      operationSource: cmd.operationSource ?? { kind: 'host' },
+      backendGeneration: cmd.backendGeneration ?? 0,
+    });
+  }
+  const attempt = cmd.operationAttempt ?? 1;
+  const fingerprint = JSON.stringify({
+    kind: 'message.edit', sessionPath: cmd.sessionPath, entryId: cmd.messageId,
+    text: cmd.text, inputs: cmd.inputs, localId: cmd.localId,
+  });
+  const unresolved = Object.values(state.operations).find((operation) =>
+    operation.operationId !== cmd.operationId && !operation.terminal
+    && (operation.kind === 'message.edit' || operation.kind === 'message.interrupt'
+      || operation.phase === 'ambiguous' || operation.commit === 'unknown')
+    && (operation.session.resolvedPath ?? operation.session.pendingPath) === cmd.sessionPath,
+  );
+  if (unresolved) {
+    return {
+      state,
+      effects: [{ kind: 'Log', corrId: cmd.corrId, level: 'warn', message: `Blocked message.edit while operation ${unresolved.operationId} is unresolved` }],
+    };
+  }
+  const existing = state.operations[cmd.operationId];
+  let operation = existing;
+  if (existing) {
+    if (existing.terminal) return { state, effects: [] };
+    if (existing.kind !== 'message.edit' || existing.intentFingerprint !== fingerprint
+      || existing.backendGeneration !== cmd.backendGeneration
+      || existing.localId !== cmd.localId
+      || (existing.session.resolvedPath ?? existing.session.pendingPath) !== cmd.sessionPath) {
+      return {
+        state,
+        effects: [{ kind: 'Log', corrId: cmd.corrId, level: 'error', message: `Rejected changed message.edit intent for operation ${cmd.operationId}` }],
+      };
+    }
+    operation = retrySessionOperation(existing, {
+      kind: 'message.edit', pendingPath: existing.session.pendingPath,
+      selectionToken: existing.causal.selectionToken, backendGeneration: cmd.backendGeneration,
+      localId: cmd.localId, attempt,
+    }) ?? existing;
+    if (operation === existing) return { state, effects: [] };
+    // A transport retry reuses the original optimistic owner and rollback
+    // snapshot. Re-applying truncation here would erase the pre-edit tail.
+    return {
+      state: produce(state, (draft) => {
+        draft.operations = clearRetiredInterruptEventFence(
+          { ...draft.operations, [cmd.operationId!]: operation! },
+          cmd.sessionPath,
+        );
+        draft.sessions.runningSessionPaths = addToArray(draft.sessions.runningSessionPaths, cmd.sessionPath);
+      }),
+      effects: [{
+        kind: 'EditRpc', corrId: cmd.corrId, operationId: cmd.operationId!,
+        operationAttempt: operation.attempt, backendGeneration: operation.backendGeneration,
+        sessionPath: cmd.sessionPath, messageId: cmd.messageId, text: cmd.text,
+        localId: cmd.localId, composedText: cmd.composedText, inputs: cmd.inputs, userParts: cmd.userParts,
+      }],
+    };
+  } else {
+    operation = startSessionOperation({
+      operationId: cmd.operationId,
+      kind: 'message.edit',
+      source: cmd.operationSource,
+      pendingPath: cmd.sessionPath,
+      selectionToken: cmd.corrId,
+      backendGeneration: cmd.backendGeneration,
+      attempt,
+      localId: cmd.localId,
+      intentFingerprint: fingerprint,
+    });
+  }
+
   const nextRunningPaths = addToArray(state.sessions.runningSessionPaths, cmd.sessionPath);
   const nextState = produce(state, (draft) => {
-    draft.sessions.interruptSettledSessionPaths = draft.sessions.interruptSettledSessionPaths.filter(
-      (path) => path !== cmd.sessionPath,
+    draft.operations = clearRetiredInterruptEventFence(
+      { ...draft.operations, [cmd.operationId!]: operation! },
+      cmd.sessionPath,
     );
     draft.transcript.editingMessageIdBySession[cmd.sessionPath] = null;
     delete draft.transcript.editingDraftBySession[cmd.sessionPath];
-    // The edit operation establishes a newer authority than any page/tail
-    // replacement deferred while the user was typing.
     delete draft.transcript.deferredWindowReplacementBySession[cmd.sessionPath];
-    // Optimistically truncate the edited message + everything after it (the
-    // old user message, agent reply, and any continuation turns) so the UI
-    // reflects the edit instantly. The removed tail is captured on the pending
-    // op so the failure handlers (`EditResult{ok:false}`, `PreflightFailed`)
-    // can restore it on rollback.
     const removedTail = truncateLocalTranscriptAfter(draft, cmd.sessionPath, cmd.messageId);
     appendLocalUserMessage(draft, cmd.sessionPath, cmd.localId, cmd.composedText, cmd.userParts, new Date(cmd.timestamp).toISOString());
     draft.pending.ops[cmd.corrId] = {
       kind: 'edit',
+      operationId: cmd.operationId,
       sessionPath: cmd.sessionPath,
       localId: cmd.localId,
       previousSummary: null,
-      // PURE: from the command timestamp, not a reducer wall-clock read. An
-      // edit also runs the prepass (before_agent_start), so it gets a startedAt
-      // and a 'running' chip on promote, mirroring send (Brief F).
       startedAt: cmd.timestamp,
       removedTail,
-      editDraft: {
-        messageId: cmd.messageId,
-        text: cmd.text,
-        inputs: [...cmd.inputs],
-      },
+      editDraft: { messageId: cmd.messageId, text: cmd.text, inputs: [...cmd.inputs] },
     };
     draft.sessions.runningSessionPaths = nextRunningPaths;
-    // Retry clears a stale prepass 'failed' chip from a previous turn.
     delete draft.pending.prepassBySession[cmd.sessionPath];
   });
 
   return {
     state: nextState,
-    effects: [
-      {
-        kind: 'EditRpc',
-        corrId: cmd.corrId,
-        sessionPath: cmd.sessionPath,
-        messageId: cmd.messageId,
-        text: cmd.text,
-        localId: cmd.localId,
-        composedText: cmd.composedText,
-        inputs: cmd.inputs,
-        userParts: cmd.userParts,
-        interruptFirst: wasRunning,
-      },
-    ],
+    effects: [{
+      kind: 'EditRpc', corrId: cmd.corrId, operationId: cmd.operationId,
+      operationAttempt: attempt, backendGeneration: cmd.backendGeneration,
+      sessionPath: cmd.sessionPath, messageId: cmd.messageId, text: cmd.text,
+      localId: cmd.localId, composedText: cmd.composedText, inputs: cmd.inputs, userParts: cmd.userParts,
+    }],
   };
 }
 

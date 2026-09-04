@@ -2,15 +2,19 @@
  * Sidecar I/O + replay for the `defer_trigger` tool.
  *
  * `PIE_TRIGGERS_DIR` (host→backend env) holds `triggers.jsonl` — an append-only
- * JSONL op log SHARED with the host-side registry (the host appends `fire` /
- * `cancel` ops; this tool appends `register` / `cancel` ops). Both sides replay
- * the log to compute the active set. The format MUST match the host's
+ * JSONL op log SHARED with the host-side registry (the host appends claim /
+ * delivery / cancel ops; this tool appends `register` / `cancel` ops). Both
+ * sides replay the log to compute the active set. The format MUST match the host's
  * `extension/src/host/deferred-triggers/store.ts`.
  *
  * Op shapes (one JSON object per line):
  *   register: { id, op:'register', sessionPath, triggers, note, at }
- *   fire:     { id, op:'fire',     sessionPath, reason, at }   (id = fired trigger)
- *   cancel:   { op:'cancel',       sessionPath, targetId?, at } (targetId absent = all for sessionPath)
+ *   claim:    { id, op:'claim', sessionPath, claimId, ownerId, ownerPid, reason, at, dispatchStartedAt? }
+ *   dispatch: { id, op:'dispatch-started', sessionPath, claimId, ownerId, ownerPid, at }
+ *   release:  { id, op:'release', sessionPath, claimId, reason, at, recoveryState? }
+ *   failed:   { id, op:'failed', sessionPath, reason, at }
+ *   fire:     { id, op:'fire', sessionPath, claimId, reason, at }
+ *   cancel:   { op:'cancel', sessionPath, targetId?, at }
  *
  * `sessionPath` is the WATCHER's session (the session that called `defer_trigger`
  * and will be resumed). The tool reads the watcher's path from
@@ -53,6 +57,32 @@ export function readTriggerOps(): TriggerOp[] {
     const op = normalizeOp(parsed);
     if (op) ops.push(op);
   }
+  // Claim artifacts are authoritative if a host died after its atomic claim
+  // but before the matching JSONL append.
+  const prefix = `${TRIGGERS_FILE}.claim-`;
+  try {
+    for (const name of fs.readdirSync(path.dirname(file)).filter((entry) => entry.startsWith(prefix)).sort()) {
+      try {
+        const artifactPath = path.join(path.dirname(file), name);
+        const op = normalizeOp(JSON.parse(fs.readFileSync(artifactPath, 'utf8')) as unknown);
+        if (op?.op !== 'claim' || !op.claimId) continue;
+        const terminal = ops.some((candidate) =>
+          candidate.id === op.id
+          && candidate.claimId === op.claimId
+          && (candidate.op === 'release' || candidate.op === 'fire'));
+        if (terminal) {
+          try { fs.unlinkSync(artifactPath); } catch { /* fail closed */ }
+          continue;
+        }
+        const logged = ops.some((candidate) => candidate.op === 'claim' && candidate.claimId === op.claimId);
+        if (!logged) ops.push(op);
+      } catch {
+        // Ignore malformed foreign artifacts.
+      }
+    }
+  } catch {
+    // Sidecar directory may disappear while listing.
+  }
   return ops;
 }
 
@@ -63,7 +93,13 @@ export function appendTriggerOp(op: TriggerOp): string {
     throw new Error('PIE_TRIGGERS_DIR is not set — the host has not configured the deferred-triggers sidecar.');
   }
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.appendFileSync(file, JSON.stringify(op) + '\n', 'utf8');
+  const fd = fs.openSync(file, 'a');
+  try {
+    fs.writeSync(fd, JSON.stringify(op) + '\n', undefined, 'utf8');
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
   return file;
 }
 
@@ -79,9 +115,8 @@ export function replayTriggers(ops: TriggerOp[]): Map<string, ActiveTrigger> {
         triggers: op.triggers,
         note: op.note ?? '',
         registeredAt: op.at ?? new Date(0).toISOString(),
+        deliveryState: 'pending',
       });
-    } else if (op.op === 'fire') {
-      if (op.id) map.delete(op.id);
     } else if (op.op === 'cancel') {
       if (op.targetId) {
         map.delete(op.targetId);
@@ -89,6 +124,58 @@ export function replayTriggers(ops: TriggerOp[]): Map<string, ActiveTrigger> {
         for (const [id, t] of map) {
           if (t.sessionPath === op.sessionPath) map.delete(id);
         }
+      }
+    } else if (op.id) {
+      const trigger = map.get(op.id);
+      if (!trigger) continue;
+      if (op.op === 'claim') {
+        if (op.claimId && trigger.deliveryState !== 'claimed') {
+          const dispatchStartedAt = op.dispatchStartedAt;
+          map.set(op.id, {
+            ...trigger,
+            deliveryState: 'claimed',
+            recoveryState: dispatchStartedAt ? 'acknowledgement-ambiguous' : undefined,
+            deliveryDetail: dispatchStartedAt
+              ? 'delivery may have started; awaiting acknowledgement and automatic retry is blocked'
+              : 'delivery claimed; dispatch is pending',
+            claimId: op.claimId,
+            claimOwnerId: op.ownerId,
+            claimOwnerPid: op.ownerPid,
+            claimAt: op.at,
+            dispatchStartedAt,
+            wakeReason: op.reason,
+          });
+        }
+      } else if (op.op === 'dispatch-started') {
+        if (op.claimId && trigger.claimId === op.claimId) {
+          map.set(op.id, {
+            ...trigger,
+            deliveryState: 'claimed',
+            recoveryState: 'acknowledgement-ambiguous',
+            deliveryDetail: 'delivery may have started; awaiting acknowledgement and automatic retry is blocked',
+            dispatchStartedAt: op.dispatchStartedAt ?? op.at ?? trigger.claimAt,
+          });
+        }
+      } else if (op.op === 'release') {
+        if (op.claimId && trigger.claimId === op.claimId) {
+          map.set(op.id, {
+            ...trigger,
+            deliveryState: 'retryable',
+            recoveryState: op.recoveryState,
+            deliveryDetail: op.reason ?? 'delivery failed before dispatch',
+            claimId: undefined,
+            claimOwnerId: undefined,
+            claimOwnerPid: undefined,
+            claimAt: undefined,
+            dispatchStartedAt: undefined,
+          });
+        }
+      } else if (op.op === 'failed') {
+        if (trigger.deliveryState !== 'claimed') {
+          map.set(op.id, { ...trigger, deliveryState: 'retryable', recoveryState: undefined, deliveryDetail: op.reason ?? 'delivery could not be attempted', wakeReason: op.wakeReason ?? trigger.wakeReason });
+        }
+      } else if (op.op === 'fire' && (!op.claimId || trigger.claimId === op.claimId)) {
+        map.delete(op.id);
       }
     }
   }
@@ -104,20 +191,28 @@ export function listActiveForSession(sessionPath: string): ActiveTrigger[] {
 function normalizeOp(value: unknown): TriggerOp | undefined {
   if (!value || typeof value !== 'object') return undefined;
   const v = value as Record<string, unknown>;
-  if (v.op !== 'register' && v.op !== 'cancel' && v.op !== 'fire') return undefined;
+  if (!['register', 'cancel', 'claim', 'dispatch-started', 'release', 'failed', 'fire'].includes(String(v.op))) return undefined;
   if (typeof v.sessionPath !== 'string') return undefined;
-  const op: TriggerOp = { op: v.op, sessionPath: v.sessionPath };
+  const op: TriggerOp = { op: v.op as TriggerOp['op'], sessionPath: v.sessionPath };
   if (typeof v.id === 'string') op.id = v.id;
   if (typeof v.at === 'string') op.at = v.at;
   if (typeof v.note === 'string') op.note = v.note;
   if (typeof v.reason === 'string') op.reason = v.reason;
+  if (typeof v.wakeReason === 'string') op.wakeReason = v.wakeReason;
   if (typeof v.targetId === 'string') op.targetId = v.targetId;
+  if (typeof v.claimId === 'string') op.claimId = v.claimId;
+  if (typeof v.ownerId === 'string') op.ownerId = v.ownerId;
+  if (typeof v.ownerPid === 'number' && Number.isSafeInteger(v.ownerPid) && v.ownerPid > 0) op.ownerPid = v.ownerPid;
+  if (typeof v.dispatchStartedAt === 'string') op.dispatchStartedAt = v.dispatchStartedAt;
+  if (v.recoveryState === 'dead-owner-recovered') op.recoveryState = v.recoveryState;
   if (v.op === 'register') {
     if (!op.id) return undefined;
     const triggers = normalizeSpecs(v.triggers);
     if (!triggers || triggers.length === 0) return undefined;
     op.triggers = triggers;
   }
+  if ((op.op === 'claim' || op.op === 'dispatch-started' || op.op === 'release') && (!op.id || !op.claimId)) return undefined;
+  if ((op.op === 'failed' || op.op === 'fire') && !op.id) return undefined;
   return op;
 }
 

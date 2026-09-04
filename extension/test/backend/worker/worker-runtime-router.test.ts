@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { WorkerRuntimeRouter } from '../../../src/backend/worker-runtime-router';
+import { BackendError } from '../../../src/backend/server-io';
 
 function opened(sessionPath: string) {
   return {
@@ -32,6 +33,12 @@ test('worker router promotion is single-flight and runtime.ready precedes the in
       order.push(body.kind);
       if (body.kind === 'sync') return { kind: 'sync.ack', requestId: 'x', domain: body.domain, revision: body.revision };
       if (body.kind === 'runtime.promote') return { kind: 'runtime.ready', requestId: 'x', runtimeMetadata: { mode: 'phase4', startedAt: 1 } };
+      if (body.payload?.params?.text === 'mismatch') {
+        return {
+          kind: 'response', requestId: 'x', ok: false,
+          error: { code: 'OPERATION_INTENT_MISMATCH', message: 'operation intent changed', retryable: false },
+        };
+      }
       return { kind: 'response', requestId: 'x', ok: true, result: { kind: 'runtime.command', payload: { requestId: 'run' } } };
     },
     sendFrame: () => true,
@@ -40,8 +47,9 @@ test('worker router promotion is single-flight and runtime.ready precedes the in
   const supervisor = {
     startWorker: async (root: string, prepare: any) => {
       starts += 1;
-      await prepare({ workerId: 'worker-a', workerGeneration: 1, sessionPath: root });
-      return { workerId: 'worker-a', workerGeneration: 1, sessionPath: root, client };
+      const workerId = `worker-${starts}`;
+      await prepare({ workerId, workerGeneration: starts, sessionPath: root });
+      return { workerId, workerGeneration: starts, sessionPath: root, client };
     },
     interrupt: async () => ({ soft: true }),
     stopWorker: async () => undefined,
@@ -65,7 +73,10 @@ test('worker router promotion is single-flight and runtime.ready precedes the in
       modelSettings: { defaultModel: 'm', defaultThinkingLevel: 'off' },
     }),
   });
-  const request = { id: 'public', method: 'message.send', params: { sessionPath, text: 'x', inputs: [] } };
+  const request = {
+    id: 'public', method: 'message.send',
+    params: { sessionPath, operationId: 'operation-1', text: 'x', inputs: [] },
+  };
   const [left, right] = await Promise.all([router.route(request), router.route(request)]);
   assert.equal(starts, 1);
   assert.deepEqual(left, { requestId: 'run' });
@@ -74,6 +85,32 @@ test('worker router promotion is single-flight and runtime.ready precedes the in
   const promoteIndex = order.indexOf('runtime.promote');
   assert.ok(promoteIndex >= 5);
   assert.ok(order.slice(promoteIndex + 1).every((kind) => kind === 'runtime.command'));
+
+  await assert.rejects(
+    router.route({ id: 'mismatch', method: 'message.send', params: { sessionPath, text: 'mismatch', inputs: [] } }),
+    (error: unknown) => error instanceof BackendError && error.code === 'OPERATION_INTENT_MISMATCH',
+  );
+
+  await router.retire(sessionPath, 'test replacement');
+  await router.promote(sessionPath);
+  await assert.rejects(
+    router.route({
+      id: 'status-after-replacement', method: 'operation.status',
+      params: { sessionPath, operationId: 'operation-1', backendGeneration: 1 },
+    }),
+    (error: unknown) => error instanceof BackendError && error.code === 'SESSION_GENERATION_ENDED',
+  );
+
+  const blockedTransition = router.runHotTransition(sessionPath, 'blocked-transition', async (control) => {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    control.assertActive();
+  });
+  assert.equal(await router.forceRecoverTransition(sessionPath, 'test stop timeout'), true);
+  await assert.rejects(
+    blockedTransition,
+    (error: unknown) => error instanceof BackendError && error.code === 'SESSION_OPERATION_CANCELLED',
+  );
+  assert.equal(router.getRoute(sessionPath).state, 'cold');
 });
 
 test('failed promotion preserves the exact durable path and new-session reason for retry', async () => {
@@ -300,7 +337,7 @@ test('confirmed worker crash reconciles only checkpointed live identities and cl
   await router.handleWorkerFrame(sessionPath, frame('tool.started', { sessionPath, requestId: 'request-1', messageId: 'message-1', toolCallId: 'tool-1', name: 'bash', input: {}, startedAt: 1 }, 3));
   emitted.length = 0;
   await router.handleWorkerStateChange(sessionPath, client.getSnapshot(), { workerId: route.owner.workerId, workerGeneration: 1 });
-  assert.deepEqual(emitted.map(([event]) => event), ['tool.finished', 'message.aborted', 'busy.changed', 'operational-error']);
+  assert.deepEqual(emitted.map(([event]) => event), ['tool.finished', 'message.aborted', 'agent.settled', 'busy.changed', 'operational-error']);
   assert.equal(emitted.find(([event]) => event === 'message.aborted')?.[1].messageId, 'message-1');
   assert.equal(emitted.find(([event]) => event === 'busy.changed')?.[1].seq, 2);
   assert.equal(router.getRoute(sessionPath).state, 'cold');

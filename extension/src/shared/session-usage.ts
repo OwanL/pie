@@ -2,8 +2,18 @@ import type { AssistantUsage, ChatMessage, PruningDetails, ToolCall } from './pr
 import { formatToolResult } from './tool-result-format';
 import { getSubagentResultEntries, type RawMessage } from './subagent-result';
 import { isRecord } from './type-guards';
+import type { BillableInvocationRecord } from './billable-invocation';
 
-export type SessionUsageKind = 'assistant' | 'subagent' | 'skill_pruning_prepass';
+export type SessionUsageKind =
+  | 'assistant'
+  | 'conversation'
+  | 'retry'
+  | 'history_compaction'
+  | 'branch_summary'
+  | 'skill_pruning_prepass'
+  | 'session_title'
+  | 'subagent'
+  | 'other';
 
 /** One independently billable model invocation retained outside transcript windows. */
 export interface SessionUsageSample {
@@ -19,21 +29,56 @@ export interface SessionUsageSample {
   cacheWriteTokens: number;
   totalTokens: number;
   reasoningTokens?: number;
-  /** Exact provider-reported cost. Absent means catalog pricing must be used. */
+  /** Exact provider-reported cost. Catalog pricing is used only when all token channels are present. */
   reportedCostUsd?: number;
+  /** Historical catalog calculation retained by the invocation ledger. */
+  calculatedCostUsd?: number;
+  priceCatalogVersion?: string;
+  providerTotalTokens?: number;
+  /** False when numeric zero channel placeholders represent unavailable data. */
+  tokenChannelsKnown?: boolean;
+  tokenChannelPresence?: {
+    input: boolean;
+    output: boolean;
+    cacheRead: boolean;
+    cacheWrite: boolean;
+  };
+  provenance?: 'exact' | 'estimated' | 'unpriced' | 'unknown';
+  instrumentationGap?: boolean;
+  instrumentationGapReason?: string;
+  outcome?: 'succeeded' | 'failed' | 'cancelled' | 'unknown';
+  startedAt?: string;
+  endedAt?: string;
+  parentOperationId?: string;
+  parentRunId?: string;
+  parentToolId?: string;
+  /** Raw durable provider-response sources represented by a folded migration row. */
+  constituentSourceIds?: string[];
 }
 
-/** Complete durable accounting for a session branch. */
+/** Complete ledger projection for a session branch. */
 export interface SessionUsageSnapshot {
   samples: SessionUsageSample[];
+  branchId?: string;
+  /** Raw durable IDs in the selected branch, including assistant responses
+   * folded together by the display transcript mapper. */
+  branchEntryIds?: string[];
+  incompleteInvocationCount?: number;
+  unpricedInvocationCount?: number;
 }
 
 function nonNegativeNumber(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0;
 }
 
-function reportedPositiveCost(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined;
+function isoTimestamp(value: unknown): string | undefined {
+  if (typeof value === 'string' && !Number.isNaN(Date.parse(value))) return value;
+  if (typeof value === 'number' && Number.isFinite(value)) return new Date(value).toISOString();
+  return undefined;
+}
+
+function reportedCost(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
 function sampleFromAssistant(message: ChatMessage): SessionUsageSample | null {
@@ -44,19 +89,58 @@ function sampleFromAssistant(message: ChatMessage): SessionUsageSample | null {
     kind: 'assistant',
     modelId: message.modelId,
     provider: message.provider,
+    ...(message.billingSourceEntryIds?.length ? {
+      constituentSourceIds: message.billingSourceEntryIds.map((entryId) => `assistant:${entryId}`),
+    } : {}),
     inputTokens: usage.inputTokens,
     outputTokens: usage.outputTokens,
     cacheReadTokens: usage.cacheReadTokens,
     cacheWriteTokens: usage.cacheWriteTokens,
     totalTokens: usage.totalTokens,
+    providerTotalTokens: usage.totalTokens,
+    ...(usage.tokenChannelsKnown !== undefined ? { tokenChannelsKnown: usage.tokenChannelsKnown } : {}),
+    ...(usage.tokenChannelPresence ? { tokenChannelPresence: usage.tokenChannelPresence } : {}),
+    ...(usage.tokenChannelsKnown === false ? {
+      instrumentationGap: true,
+      instrumentationGapReason: 'The historical provider response omitted one or more token channels.',
+    } : {}),
     ...(usage.reasoningTokens !== undefined ? { reasoningTokens: usage.reasoningTokens } : {}),
     ...(usage.reportedCostUsd !== undefined ? { reportedCostUsd: usage.reportedCostUsd } : {}),
   };
 }
 
-function sampleFromPruning(message: ChatMessage): SessionUsageSample | null {
-  if (message.customType !== 'pruning-result' || !isRecord(message.customDetails)) return null;
+function samplesFromPruning(message: ChatMessage): SessionUsageSample[] {
+  if (message.customType !== 'pruning-result' || !isRecord(message.customDetails)) return [];
   const details = message.customDetails as unknown as PruningDetails;
+  if (details.prepassInvocations?.length) {
+    return details.prepassInvocations.map((invocation) => {
+      const channelsKnown = invocation.input !== undefined && invocation.output !== undefined
+        && invocation.cacheRead !== undefined && invocation.cacheWrite !== undefined;
+      return {
+        sourceId: invocation.invocationId,
+        kind: 'skill_pruning_prepass',
+        modelId: details.prepassModel,
+        provider: details.prepassProvider,
+        inputTokens: invocation.input ?? 0,
+        outputTokens: invocation.output ?? 0,
+        cacheReadTokens: invocation.cacheRead ?? 0,
+        cacheWriteTokens: invocation.cacheWrite ?? 0,
+        totalTokens: channelsKnown
+          ? (invocation.input ?? 0) + (invocation.output ?? 0)
+            + (invocation.cacheRead ?? 0) + (invocation.cacheWrite ?? 0)
+          : 0,
+        ...(invocation.reportedCostUsd !== undefined ? { reportedCostUsd: invocation.reportedCostUsd } : {}),
+        provenance: channelsKnown
+          ? invocation.reportedCostUsd !== undefined ? 'exact' : 'estimated'
+          : 'unknown',
+        instrumentationGap: !channelsKnown,
+        ...(!channelsKnown ? { instrumentationGapReason: 'The pruning provider invocation exposed no complete usage.' } : {}),
+        outcome: invocation.outcome,
+        startedAt: invocation.startedAt,
+        endedAt: invocation.endedAt,
+      };
+    });
+  }
   const inputTokens = nonNegativeNumber(details.prepassInputTokens);
   const outputTokens = nonNegativeNumber(details.prepassOutputTokens);
   const cacheReadTokens = nonNegativeNumber(details.prepassCacheReadTokens);
@@ -66,8 +150,8 @@ function sampleFromPruning(message: ChatMessage): SessionUsageSample | null {
     && Number.isFinite(details.prepassReportedCostUsd) && details.prepassReportedCostUsd >= 0
     ? details.prepassReportedCostUsd
     : undefined;
-  if (!details.prepassModel || (totalTokens <= 0 && reportedCostUsd === undefined)) return null;
-  return {
+  if (!details.prepassModel || (totalTokens <= 0 && reportedCostUsd === undefined)) return [];
+  return [{
     sourceId: `skill-pruning:${message.durableEntryId ?? message.id}`,
     kind: 'skill_pruning_prepass',
     modelId: details.prepassModel,
@@ -78,7 +162,7 @@ function sampleFromPruning(message: ChatMessage): SessionUsageSample | null {
     cacheWriteTokens,
     totalTokens,
     ...(reportedCostUsd !== undefined ? { reportedCostUsd } : {}),
-  };
+  }];
 }
 
 function toolCallsFromMessage(message: ChatMessage): ToolCall[] {
@@ -114,6 +198,10 @@ interface RawSubagentUsage {
   cacheWriteTokens: number;
   totalTokens: number;
   reportedCostUsd?: number;
+  tokenChannelsKnown?: boolean;
+  tokenChannelPresence?: SessionUsageSample['tokenChannelPresence'];
+  instrumentationGap?: boolean;
+  instrumentationGapReason?: string;
 }
 
 function subagentUsage(value: unknown): RawSubagentUsage | null {
@@ -122,9 +210,18 @@ function subagentUsage(value: unknown): RawSubagentUsage | null {
   const outputTokens = nonNegativeNumber(value.output);
   const cacheReadTokens = nonNegativeNumber(value.cacheRead);
   const cacheWriteTokens = nonNegativeNumber(value.cacheWrite);
-  const totalTokens = inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens;
-  const reportedCostUsd = reportedPositiveCost(value.cost);
+  const channelTokens = inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens;
+  const reportedTotal = nonNegativeNumber(value.totalTokens);
+  const totalTokens = Math.max(channelTokens, reportedTotal);
+  const reportedCostUsd = reportedCost(value.cost);
   if (totalTokens <= 0 && reportedCostUsd === undefined) return null;
+  const presence = {
+    input: typeof value.input === 'number',
+    output: typeof value.output === 'number',
+    cacheRead: typeof value.cacheRead === 'number',
+    cacheWrite: typeof value.cacheWrite === 'number',
+  };
+  const channelsKnown = Object.values(presence).every(Boolean);
   return {
     inputTokens,
     outputTokens,
@@ -132,6 +229,12 @@ function subagentUsage(value: unknown): RawSubagentUsage | null {
     cacheWriteTokens,
     totalTokens,
     ...(reportedCostUsd !== undefined ? { reportedCostUsd } : {}),
+    ...(!channelsKnown ? {
+      tokenChannelsKnown: false,
+      tokenChannelPresence: presence,
+      instrumentationGap: true,
+      instrumentationGapReason: 'The subagent provider result omitted one or more token channels.',
+    } : {}),
   };
 }
 
@@ -145,7 +248,21 @@ function subtractUsage(total: RawSubagentUsage, part: RawSubagentUsage): RawSuba
     outputTokens,
     cacheReadTokens,
     cacheWriteTokens,
-    totalTokens: inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens,
+    totalTokens: Math.max(
+      inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens,
+      Math.max(0, total.totalTokens - part.totalTokens),
+    ),
+    ...(total.tokenChannelsKnown === false || part.tokenChannelsKnown === false ? {
+      tokenChannelsKnown: false,
+      tokenChannelPresence: {
+        input: total.tokenChannelPresence?.input !== false && part.tokenChannelPresence?.input !== false,
+        output: total.tokenChannelPresence?.output !== false && part.tokenChannelPresence?.output !== false,
+        cacheRead: total.tokenChannelPresence?.cacheRead !== false && part.tokenChannelPresence?.cacheRead !== false,
+        cacheWrite: total.tokenChannelPresence?.cacheWrite !== false && part.tokenChannelPresence?.cacheWrite !== false,
+      },
+      instrumentationGap: true,
+      instrumentationGapReason: 'The subagent aggregate residual has incomplete token channels.',
+    } : {}),
   };
 }
 
@@ -170,27 +287,67 @@ function addSubagentToolSamples(
     const resultProvider = typeof rawResult.provider === 'string' ? rawResult.provider : undefined;
     const resultUsage = subagentUsage(rawResult.usage);
     const groupId = `subagent:${toolCall.id}:${path}${resultIndex}`;
+    const attemptRecords = Array.isArray(rawResult.attemptRecords) ? rawResult.attemptRecords : [];
+    const resultStartedAt = attemptRecords
+      .map((attempt) => isRecord(attempt) ? isoTimestamp(attempt.startedAt) : undefined)
+      .find((timestamp) => timestamp !== undefined);
+    const resultEndedAt = [...attemptRecords]
+      .reverse()
+      .map((attempt) => isRecord(attempt)
+        ? isoTimestamp(attempt.completedAt) ?? isoTimestamp(attempt.endedAt)
+        : undefined)
+      .find((timestamp) => timestamp !== undefined);
+    const resultOutcome = rawResult.exitCode === 0 ? 'succeeded'
+      : typeof rawResult.exitCode === 'number' ? 'failed' : 'unknown';
     let remaining = resultUsage;
     let attributedReportedCost = 0;
 
-    if (Array.isArray(rawResult.attemptRecords)) {
-      for (const [attemptIndex, attempt] of rawResult.attemptRecords.entries()) {
+    if (attemptRecords.length > 0) {
+      for (const [attemptIndex, attempt] of attemptRecords.entries()) {
         if (!isRecord(attempt)) continue;
+        const attemptId = typeof attempt.attemptId === 'string' && attempt.attemptId.trim()
+          ? attempt.attemptId.trim()
+          : String(attemptIndex);
         const usage = subagentUsage(attempt.usage);
-        if (!usage) continue;
+        const outcome = attempt.outcome === 'success' ? 'succeeded'
+          : attempt.outcome === 'aborted' ? 'cancelled'
+            : attempt.outcome === 'failure' ? 'failed' : 'unknown';
+        const startedAt = isoTimestamp(attempt.startedAt);
+        const endedAt = isoTimestamp(attempt.completedAt) ?? isoTimestamp(attempt.endedAt);
+        if (!usage) {
+          samples.push({
+            sourceId: `${groupId}:attempt:${attemptId}`,
+            groupId,
+            kind: 'subagent',
+            modelId: typeof attempt.model === 'string' ? attempt.model : resultModelId,
+            provider: typeof attempt.provider === 'string' ? attempt.provider : resultProvider,
+            inputTokens: 0,
+            outputTokens: 0,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+            totalTokens: 0,
+            provenance: 'unknown',
+            instrumentationGap: true,
+            instrumentationGapReason: 'The terminal subagent attempt exposed no provider usage.',
+            outcome,
+            ...(startedAt ? { startedAt } : {}),
+            ...(endedAt ? { endedAt } : {}),
+          });
+          continue;
+        }
         const bounded = remaining ? {
           ...usage,
           inputTokens: Math.min(remaining.inputTokens, usage.inputTokens),
           outputTokens: Math.min(remaining.outputTokens, usage.outputTokens),
           cacheReadTokens: Math.min(remaining.cacheReadTokens, usage.cacheReadTokens),
           cacheWriteTokens: Math.min(remaining.cacheWriteTokens, usage.cacheWriteTokens),
-          totalTokens: 0,
+          totalTokens: Math.min(remaining.totalTokens, usage.totalTokens),
         } : usage;
-        bounded.totalTokens = bounded.inputTokens + bounded.outputTokens + bounded.cacheReadTokens + bounded.cacheWriteTokens;
+        bounded.totalTokens = Math.max(
+          bounded.inputTokens + bounded.outputTokens + bounded.cacheReadTokens + bounded.cacheWriteTokens,
+          bounded.totalTokens,
+        );
         if (bounded.totalTokens <= 0 && bounded.reportedCostUsd === undefined) continue;
-        const attemptId = typeof attempt.attemptId === 'string' && attempt.attemptId.trim()
-          ? attempt.attemptId.trim()
-          : String(attemptIndex);
         samples.push({
           sourceId: `${groupId}:attempt:${attemptId}`,
           groupId,
@@ -204,6 +361,9 @@ function addSubagentToolSamples(
           ...(bounded.reportedCostUsd === undefined && resultUsage?.reportedCostUsd !== undefined
             ? { reportedCostUsd: 0 }
             : {}),
+          outcome,
+          ...(startedAt ? { startedAt } : {}),
+          ...(endedAt ? { endedAt } : {}),
         });
         attributedReportedCost += bounded.reportedCostUsd ?? 0;
         if (remaining) remaining = subtractUsage(remaining, bounded);
@@ -223,6 +383,9 @@ function addSubagentToolSamples(
         provider: resultProvider,
         ...remainingUsage,
         ...(residualReportedCost !== undefined ? { reportedCostUsd: residualReportedCost } : {}),
+        outcome: resultOutcome,
+        ...(resultStartedAt ? { startedAt: resultStartedAt } : {}),
+        ...(resultEndedAt ? { endedAt: resultEndedAt } : {}),
       });
     } else if (residualReportedCost !== undefined && residualReportedCost > 0) {
       samples.push({
@@ -237,6 +400,9 @@ function addSubagentToolSamples(
         cacheWriteTokens: 0,
         totalTokens: 0,
         reportedCostUsd: residualReportedCost,
+        outcome: resultOutcome,
+        ...(resultStartedAt ? { startedAt: resultStartedAt } : {}),
+        ...(resultEndedAt ? { endedAt: resultEndedAt } : {}),
       });
     }
 
@@ -258,20 +424,73 @@ function addSubagentToolSamples(
 }
 
 /** Build price-independent accounting from every renderable message supplied. */
-export function buildSessionUsageSnapshot(transcript: ChatMessage[]): SessionUsageSnapshot {
+export function buildSubagentUsageSamples(toolCall: Pick<ToolCall, 'id' | 'result' | 'status'>): SessionUsageSample[] {
+  const samples: SessionUsageSample[] = [];
+  addSubagentToolSamples(samples, toolCall, '', 1);
+  return samples;
+}
+
+export function buildSessionUsageSnapshot(transcript: ChatMessage[], branchId?: string): SessionUsageSnapshot {
   const samples: SessionUsageSample[] = [];
   for (const message of transcript) {
     const assistant = sampleFromAssistant(message);
     if (assistant) samples.push(assistant);
-    const pruning = sampleFromPruning(message);
-    if (pruning) samples.push(pruning);
+    samples.push(...samplesFromPruning(message));
     if (message.role !== 'assistant') continue;
     for (const toolCall of toolCallsFromMessage(message)) {
       if (typeof toolCall.name !== 'string' || toolCall.name.trim().toLowerCase() !== 'subagent') continue;
-      addSubagentToolSamples(samples, toolCall, '', 1);
+      samples.push(...buildSubagentUsageSamples(toolCall));
     }
   }
-  return { samples };
+  return { samples, ...(branchId ? { branchId } : {}) };
+}
+
+/** Convert immutable ledger rows to the compatibility snapshot consumed by the
+ * session token/cost surfaces. Unknown channels remain visible through
+ * provenance/instrumentation metadata rather than masquerading as known zero. */
+export function sessionUsageSnapshotFromLedger(records: readonly BillableInvocationRecord[]): SessionUsageSnapshot {
+  const samples = records.map((record): SessionUsageSample => ({
+    sourceId: record.sourceId,
+    kind: record.kind,
+    modelId: record.model === 'unknown-model' ? undefined : record.model,
+    provider: record.provider === 'unknown-provider' ? undefined : record.provider,
+    inputTokens: record.inputTokens ?? 0,
+    outputTokens: record.outputTokens ?? 0,
+    cacheReadTokens: record.cacheReadTokens ?? 0,
+    cacheWriteTokens: record.cacheWriteTokens ?? 0,
+    totalTokens: record.providerTotalTokens
+      ?? (record.inputTokens ?? 0) + (record.outputTokens ?? 0)
+        + (record.cacheReadTokens ?? 0) + (record.cacheWriteTokens ?? 0),
+    ...(record.reasoningTokens !== undefined ? { reasoningTokens: record.reasoningTokens } : {}),
+    ...(record.providerReportedCostUsd !== undefined ? { reportedCostUsd: record.providerReportedCostUsd } : {}),
+    ...(record.pricing ? {
+      calculatedCostUsd: record.pricing.calculatedCostUsd,
+      priceCatalogVersion: record.pricing.catalogVersion,
+    } : {}),
+    ...(record.providerTotalTokens !== undefined ? { providerTotalTokens: record.providerTotalTokens } : {}),
+    tokenChannelsKnown: record.inputTokens !== undefined && record.outputTokens !== undefined
+      && record.cacheReadTokens !== undefined && record.cacheWriteTokens !== undefined,
+    tokenChannelPresence: {
+      input: record.inputTokens !== undefined,
+      output: record.outputTokens !== undefined,
+      cacheRead: record.cacheReadTokens !== undefined,
+      cacheWrite: record.cacheWriteTokens !== undefined,
+    },
+    provenance: record.provenance,
+    instrumentationGap: record.instrumentationGap,
+    ...(record.instrumentationGapReason ? { instrumentationGapReason: record.instrumentationGapReason } : {}),
+    outcome: record.outcome,
+    startedAt: record.startedAt,
+    endedAt: record.endedAt,
+    ...(record.parentOperationId ? { parentOperationId: record.parentOperationId } : {}),
+    ...(record.parentRunId ? { parentRunId: record.parentRunId } : {}),
+    ...(record.parentToolId ? { parentToolId: record.parentToolId } : {}),
+  }));
+  return {
+    samples,
+    incompleteInvocationCount: records.filter((record) => record.provenance === 'unknown' || record.instrumentationGap).length,
+    unpricedInvocationCount: records.filter((record) => record.provenance === 'unpriced').length,
+  };
 }
 
 /**
@@ -293,6 +512,12 @@ export function sessionUsageSignature(snapshot: SessionUsageSnapshot | null | un
     sample.totalTokens,
     sample.reasoningTokens ?? '',
     sample.reportedCostUsd ?? '',
+    sample.calculatedCostUsd ?? '',
+    sample.priceCatalogVersion ?? '',
+    sample.providerTotalTokens ?? '',
+    sample.provenance ?? '',
+    sample.instrumentationGap ?? '',
+    sample.outcome ?? '',
   ]));
 }
 
@@ -355,6 +580,8 @@ export function assistantUsageFromSample(sample: SessionUsageSample): AssistantU
     cacheWriteTokens: sample.cacheWriteTokens,
     totalTokens: sample.totalTokens,
     ...(sample.reasoningTokens !== undefined ? { reasoningTokens: sample.reasoningTokens } : {}),
-    ...(sample.reportedCostUsd !== undefined ? { reportedCostUsd: sample.reportedCostUsd } : {}),
+    ...(sample.reportedCostUsd !== undefined || sample.calculatedCostUsd !== undefined
+      ? { reportedCostUsd: sample.reportedCostUsd ?? sample.calculatedCostUsd }
+      : {}),
   };
 }

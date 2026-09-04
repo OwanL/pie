@@ -1262,6 +1262,41 @@ test('truncate atomically rewrites and durably restores supported model/thinking
   }
 });
 
+test('edit truncate validates the authoritative branch and records commit at atomic rename', async () => {
+  const h = await makeHarness();
+  try {
+    const sessionPath = path.join(h.sessionDir, 'edit-branch.jsonl');
+    const rows = [
+      header(h.root, 3, 'edit-branch-session'),
+      userEntry('root', null, 'root'),
+      userEntry('stale-target', 'root', 'old branch'),
+      userEntry('current-target', 'root', 'current branch'),
+    ];
+    await writeJsonl(sessionPath, rows);
+
+    await assert.rejects(
+      h.store.truncateAfter(sessionPath, 'stale-target', { requireCurrentBranchTarget: true }),
+      (error: unknown) => error instanceof Error
+        && (error as { code?: string }).code === 'STALE_BRANCH_TARGET',
+    );
+    assert.deepEqual(await readJsonl(sessionPath), rows, 'stale branch rejection is pre-commit');
+
+    let commitCalls = 0;
+    await h.store.truncateAfter(sessionPath, 'current-target', {
+      requireCurrentBranchTarget: true,
+      onCommit: () => {
+        commitCalls += 1;
+        const committedRows = fsSync.readFileSync(sessionPath, 'utf8')
+          .trim().split('\n').map((line) => JSON.parse(line) as { id?: string });
+        assert.equal(committedRows.some((entry) => entry.id === 'current-target'), false);
+      },
+    });
+    assert.equal(commitCalls, 1);
+  } finally {
+    await fs.rm(h.root, { recursive: true, force: true });
+  }
+});
+
 test('stale ownership rejects fork, truncate, forget, publication, and manager installation before commit', async () => {
   const h = await makeHarness();
   const SessionManager = await getRealSessionManager();

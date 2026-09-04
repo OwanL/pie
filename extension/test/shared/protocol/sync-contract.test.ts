@@ -183,6 +183,14 @@ test('HostToWebviewMessage state envelope carries hostInstanceId and revision', 
       pinnedTabPaths: [],
       pinnedTabGroups: [],
       runningSessionPaths: [],
+      sessionCapabilitiesBySession: {
+        '/workspace/session.jsonl': {
+          billableActivity: false,
+          canContinue: true,
+          canInterrupt: false,
+          canCompact: true,
+        },
+      },
       generatingTitleSessionPaths: [],
       startingModelSessionPaths: [],
       compactingSessionPaths: [],
@@ -218,6 +226,7 @@ test('HostToWebviewMessage state envelope carries hostInstanceId and revision', 
       activeRunSummary: null,
       runSummariesBySession: {},
       tokenRateBySession: {},
+      workingTimeBySession: {},
       aggregateStats: EMPTY_AGGREGATE_STATS,
       deferredTriggers: [],
       draftText: '',
@@ -272,6 +281,7 @@ test('HostToWebviewMessage state envelope carries hostInstanceId and revision', 
     assert.equal(msg.rendererId, 'renderer-1', 'per-renderer identity is host-assigned');
     assert.equal(msg.rendererGeneration, 1, 'renderer reload/reconnect fence');
     assert.equal(msg.revision, 7);
+    assert.equal(msg.state.sessionCapabilitiesBySession['/workspace/session.jsonl']?.canContinue, true);
     assert.deepEqual(msg.state.pendingComposerInputs, []);
     assert.equal(msg.state.activeRunSummary, null);
     assert.deepEqual(msg.state.runSummariesBySession, {});
@@ -366,9 +376,16 @@ test('SessionOpenedPayload can carry structured analytics factors', () => {
       hasUserMessages: false,
     },
     busy: false,
+    capabilities: {
+      billableActivity: false,
+      canContinue: true,
+      canInterrupt: false,
+      canCompact: true,
+    },
     analyticsFactors,
   };
 
+  assert.equal(payload.capabilities?.canContinue, true);
   assert.equal(payload.analyticsFactors?.promptHash, 'prompt-hash');
   assert.equal(payload.analyticsFactors?.selectedToolIds[0], 'read');
 });

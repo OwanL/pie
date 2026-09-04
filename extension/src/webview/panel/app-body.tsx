@@ -106,25 +106,27 @@ export function AppBody({ adapter }: AppBodyProps) {
   //  Retry click doesn't re-render — it just calls the latest registered closure.
   const sendRetryDraftRef = useRef<((disablePruning?: boolean) => void) | null>(null);
 
-  const handlers = useAppHandlers(
-    postApplicationCommand,
-    activeSessionPathRef,
-    setDraftRestore,
-    addOptimisticMessage,
-    viewState.busy,
-    setContextMenu,
-    setInterrupting,
-    connectionState === 'connected',
-  );
-
-  useWarmupAudio();
-
   const derived = useAppBodyDerivedState(
     viewState,
     postMessage,
     registerInlineRequest,
     unregisterInlineRequest,
   );
+  const activeCapabilities = derived.activeSessionPath
+    ? viewState.sessionCapabilitiesBySession[derived.activeSessionPath]
+    : undefined;
+  const handlers = useAppHandlers(
+    postApplicationCommand,
+    activeSessionPathRef,
+    setDraftRestore,
+    addOptimisticMessage,
+    activeCapabilities?.billableActivity ?? viewState.busy,
+    setContextMenu,
+    setInterrupting,
+    connectionState === 'connected',
+  );
+
+  useWarmupAudio();
   const fixedPendingExtensionUIRequest = useMemo(() => selectFixedPromptRequest(
     derived.activeSessionPath
       ? (viewState.pendingExtensionUIRequestsBySession[derived.activeSessionPath] ?? {})
@@ -142,14 +144,16 @@ export function AppBody({ adapter }: AppBodyProps) {
   // the captured session path as a routing backstop.
   useEffect(() => setContextMenu(null), [derived.activeSessionPath]);
 
-  // Brief E: clear the optimistic "stopping…" flag once the host confirms the
-  // abort (`busy` flips false — the abort round-trip completed) or the active
-  // session changes (transient UI clear per STATE_CONTRACT § Webview-Local
-  // State). `busy` is the host's authoritative running signal; the local flag
-  // only bridges the host round-trip so the click reflects within one frame.
+  // Clear the one-frame optimistic flag after the host operation registry has
+  // taken ownership (or the session is definitively idle). The projected
+  // interrupt operation remains the authority across renderer reloads.
+  const interruptOperationActive = activeCapabilities?.primaryOperation?.kind === 'message.interrupt';
+  const effectiveInterrupting = interrupting || interruptOperationActive;
   useEffect(() => {
-    if (!viewState.busy) setInterrupting(false);
-  }, [viewState.busy]);
+    if (interruptOperationActive || activeCapabilities?.billableActivity === false || !viewState.busy) {
+      setInterrupting(false);
+    }
+  }, [activeCapabilities?.billableActivity, interruptOperationActive, viewState.busy]);
   useEffect(() => {
     setInterrupting(false);
   }, [derived.activeSessionPath]);
@@ -166,7 +170,8 @@ export function AppBody({ adapter }: AppBodyProps) {
   // typing indicator within one frame (the host clears `busy` only after the
   // abort completes). The transcript components are unchanged — only the
   // `busy` value they receive is gated.
-  const transcriptBusy = viewState.busy && !interrupting;
+  const transcriptBusy = (activeCapabilities?.billableActivity ?? viewState.busy)
+    && !effectiveInterrupting;
 
   const handleNoticeAction = useNoticeAction(postMessage, sendRetryDraftRef);
 
@@ -300,8 +305,11 @@ export function AppBody({ adapter }: AppBodyProps) {
         activeSessionPath={derived.activeSessionPath}
         postMessage={postMessage}
         busy={viewState.busy}
+        capabilities={derived.activeSessionPath
+          ? viewState.sessionCapabilitiesBySession[derived.activeSessionPath]
+          : undefined}
         retryStatus={viewState.retryStatus}
-        interrupting={interrupting}
+        interrupting={effectiveInterrupting}
         // Keep the composer and configuration controls interactive while the
         // backend starts/restarts. Sends and model choices have host-owned
         // deferred queues; renderer disconnection remains the hard boundary.
@@ -336,6 +344,7 @@ export function AppBody({ adapter }: AppBodyProps) {
         pendingComposerInputs={viewState.pendingComposerInputs}
         activeRunSummary={viewState.activeRunSummary}
         tokenRateBySession={viewState.tokenRateBySession}
+        workingTimeBySession={viewState.workingTimeBySession}
         compacting={viewState.compactingSessionPaths.includes(derived.activeSessionPath ?? '')}
         lastCompaction={viewState.lastCompactionBySession[derived.activeSessionPath ?? ''] ?? null}
         handlers={handlers}

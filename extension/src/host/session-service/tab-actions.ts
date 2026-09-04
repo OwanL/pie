@@ -8,7 +8,8 @@ import {
   isPendingTabPath,
 } from '../../shared/tab-behavior';
 import { toErrorMessage } from '../../shared/error-message';
-import type { SessionSummary } from '../../shared/protocol';
+import type { RendererCommandContext, SessionSummary } from '../../shared/protocol';
+import { operationSourceFromRenderer } from '../core/operation-types.js';
 import type { ScheduleRender } from './types';
 import { SessionServiceState } from './state';
 import type { Event } from '../core/events';
@@ -86,7 +87,7 @@ export class SessionTabActions {
     });
   }
 
-  createNewSession(): string {
+  createNewSession(source?: RendererCommandContext): string {
     // Host-side entry: generate the impure bits the reducer can't (pending
     // path counter + Date.now/Math.random, placeholder modifiedAt, and the
     // selection token), then dispatch the CreateSession Command. The reducer
@@ -137,6 +138,8 @@ export class SessionTabActions {
         placeholderSummary,
         selectionToken,
         operationId,
+        operationSource: operationSourceFromRenderer(source),
+        backendGeneration: this.state.getBackendGeneration(),
       },
     });
     this.scheduleRender();
@@ -355,7 +358,7 @@ export class SessionTabActions {
     this.scheduleRender();
   }
 
-  duplicateSession(sourceSessionPath: string): void {
+  duplicateSession(sourceSessionPath: string, initiatingSource?: RendererCommandContext): void {
     // Host-side entry: generate the impure bits the reducer can't (pending
     // path counter + Date.now placeholder modifiedAt + the selection token),
     // then dispatch the DuplicateSession Command. The reducer owns the
@@ -421,6 +424,8 @@ export class SessionTabActions {
         placeholderSummary,
         selectionToken,
         operationId,
+        operationSource: operationSourceFromRenderer(initiatingSource),
+        backendGeneration: this.state.getBackendGeneration(),
       },
     });
     this.scheduleRender();
@@ -430,50 +435,59 @@ export class SessionTabActions {
    * This is host-owned so any future retry UI cannot accidentally create a new
    * pending tab or lose the original queued sends. */
   retryCreateSession(operationId: string): boolean {
-    const operation = this.getArchState().pending.createOperations[operationId];
-    if (!operation || operation.status !== 'delayed-awaiting-outcome') return false;
-    const summary = this.getArchState().sessions.sessions.find((item) => item.path === operation.pendingPath);
-    if ((!summary && !operation.hidden) || (operation.kind === 'duplicate' && !operation.sourceSessionPath)) return false;
+    const operation = this.getArchState().operations[operationId];
+    if (!operation || operation.phase !== 'ambiguous' || operation.terminal) return false;
+    const summary = this.getArchState().sessions.sessions.find((item) => item.path === operation.session.pendingPath);
+    if ((!summary && !operation.hidden)
+      || (operation.kind === 'session.duplicate' && !operation.session.sourcePath)) return false;
     if (!this.state.retryCreateOperation(operationId)) return false;
     const corrId = crypto.randomUUID();
-    if (operation.kind === 'create') {
+    if (operation.kind === 'session.create') {
       this.dispatchArch({
         kind: 'Command',
         cmd: {
           kind: 'CreateSession',
           corrId,
-          sessionPath: operation.pendingPath,
+          sessionPath: operation.session.pendingPath,
           cwd: operation.cwd ?? summary?.cwd ?? this.getArchState().sessions.workspaceCwd ?? '',
           placeholderSummary: summary ?? {
-            path: operation.pendingPath,
+            path: operation.session.pendingPath,
             name: 'New Session',
             cwd: operation.cwd ?? this.getArchState().sessions.workspaceCwd ?? '',
             modifiedAt: new Date().toISOString(),
             messageCount: 0,
             isPlaceholder: true,
           },
-          selectionToken: operation.selectionToken,
+          selectionToken: operation.causal.selectionToken,
           operationId,
+          operationAttempt: operation.attempt + 1,
+          operationSource: operation.source,
+          causalParentOperationId: operation.causal.parentOperationId,
+          backendGeneration: operation.backendGeneration,
         },
       });
-    } else if (operation.sourceSessionPath) {
+    } else if (operation.session.sourcePath) {
       this.dispatchArch({
         kind: 'Command',
         cmd: {
           kind: 'DuplicateSession',
           corrId,
-          sessionPath: operation.pendingPath,
-          sourceSessionPath: operation.sourceSessionPath,
+          sessionPath: operation.session.pendingPath,
+          sourceSessionPath: operation.session.sourcePath,
           placeholderSummary: summary ?? {
-            path: operation.pendingPath,
+            path: operation.session.pendingPath,
             name: 'Session copy',
             cwd: this.getArchState().sessions.workspaceCwd ?? '',
             modifiedAt: new Date().toISOString(),
             messageCount: 0,
             isPlaceholder: true,
           },
-          selectionToken: operation.selectionToken,
+          selectionToken: operation.causal.selectionToken,
           operationId,
+          operationAttempt: operation.attempt + 1,
+          operationSource: operation.source,
+          causalParentOperationId: operation.causal.parentOperationId,
+          backendGeneration: operation.backendGeneration,
         },
       });
     }

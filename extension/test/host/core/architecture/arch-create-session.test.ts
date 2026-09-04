@@ -121,13 +121,13 @@ test('a create timeout retains the delayed ledger, pending tab, queued sends, an
     kind: 'CreateOperationDelayed', operationId, pendingPath: PENDING,
     selectionToken: 'tok-timeout', notice: 'still creating', ownsSelection: true,
   });
-  assert.equal(delayed.state.pending.createOperations[operationId]?.status, 'delayed-awaiting-outcome');
+  assert.equal(delayed.state.operations[operationId]?.phase, 'ambiguous');
   assert.equal(delayed.state.sessions.openTabPaths.includes(PENDING), true);
   assert.equal(delayed.state.sessions.sessions[0]?.creationState, 'delayed');
   assert.deepEqual(delayed.state.pending.sendQueueBySession[PENDING], [queued]);
 
   const retried = reducer(delayed.state, createCmd('c-retry', PENDING, PLACEHOLDER, '/w', 'tok-timeout', operationId));
-  assert.equal(retried.state.pending.createOperations[operationId]?.status, 'pending');
+  assert.equal(retried.state.operations[operationId]?.phase, 'awaiting-acceptance');
   assert.deepEqual(retried.state.pending.sendQueueBySession[PENDING], [queued]);
   const retryEffect = retried.effects.find((effect) => effect.kind === 'CreateSession');
   assert.equal(retryEffect?.kind, 'CreateSession');
@@ -154,7 +154,7 @@ test('hiding a delayed create preserves its ledger and queued sends without reop
   });
   assert.equal(hidden.state.sessions.openTabPaths.includes(PENDING), false);
   assert.equal(hidden.state.sessions.activeSessionPath, OLD);
-  assert.equal(hidden.state.pending.createOperations[operationId]?.hidden, true);
+  assert.equal(hidden.state.operations[operationId]?.hidden, true);
   assert.deepEqual(hidden.state.pending.sendQueueBySession[PENDING], queue);
   assert.equal(hidden.effects.length, 1);
   assert.equal(hidden.effects[0]?.kind, 'PersistTabs');

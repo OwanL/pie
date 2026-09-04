@@ -2,6 +2,10 @@ import { randomUUID } from 'node:crypto';
 
 import type {
   AuxiliaryLlmUsagePayload,
+  CompactionOutcome,
+  CompactionPayload,
+  CompactionReason,
+  CompactionStartedPayload,
   CompactionSummaryDetails,
   CustomMessagePayload,
   MessageAbortedPayload,
@@ -38,8 +42,13 @@ import {
   type SessionEntryLike,
 } from './transcript';
 import type { ActiveRequest, SessionContext } from './server-types';
+import { buildSessionCapabilities, hasBillableSessionActivity } from './session-activity';
 import { backendLog, type BackendLogLevel } from './log';
 import { isBackendLivePipelineTraceEnabled, recordBackendLivePipelineTrace } from './live-pipeline-trace-runtime';
+import {
+  isAllZeroEmptyLengthMessage,
+  isEstimatedContextOverflowMessage,
+} from './history-compaction';
 
 /**
  * Assistant-message streaming event types that count as the provider "replying
@@ -659,7 +668,11 @@ function extractUserMessageText(message: { content?: unknown }): string {
 
 export interface BackendSessionEventHandlerDeps {
   emit(event: string, payload?: unknown): void;
-  emitBusyChanged(context: SessionContext, busy: boolean): void;
+  emitBusyChanged(
+    context: SessionContext,
+    busy: boolean,
+    capabilities?: import('../shared/protocol').SessionCapabilities,
+  ): void;
   emitContextUsageChanged(context: SessionContext, postCompactionEstimatedTokens?: number): void;
   emitSessionOpened(sessionPath: string, selectionToken?: string): Promise<void>;
   emitSessionListChanged(): Promise<void>;
@@ -713,7 +726,11 @@ function mayNeedOverflowRecovery(context: SessionContext, message: SdkSessionEve
   const input = readTokenCount(usage?.input) ?? 0;
   const cacheRead = readTokenCount(usage?.cacheRead) ?? 0;
   const output = readTokenCount(usage?.output) ?? 0;
-  return output === 0 && input + cacheRead >= contextWindow * 0.99;
+  if (output === 0 && input + cacheRead >= contextWindow * 0.99) return true;
+  if (!isAllZeroEmptyLengthMessage(message)) return false;
+
+  const estimatedTokens = context.session.getContextUsage?.()?.tokens;
+  return isEstimatedContextOverflowMessage(message, contextWindow, estimatedTokens);
 }
 
 /** Minimal slice of the SDK SessionManager's sidecar append surface. The runtime
@@ -851,6 +868,7 @@ function emitLatestPruningResult(
   active.pruningResultLookupComplete = true;
   deps.emit('message.custom', {
     requestId: active.id,
+    ...(active.operationId ? { operationId: active.operationId } : {}),
     sessionPath: context.sessionPath,
     message,
   } satisfies CustomMessagePayload);
@@ -1090,6 +1108,7 @@ function startQueuedFollowUpSegment(
     protocolVersion: LIVE_PIPELINE_PROTOCOL_VERSION,
     sessionPath: context.sessionPath,
     requestId: active.id,
+    ...(active.operationId ? { operationId: active.operationId } : {}),
     turnId: randomUUID(),
     attemptId: randomUUID(),
     canonicalMessageId: `${active.id}:${active.messageIndex + 1}`,
@@ -1115,46 +1134,22 @@ function startQueuedFollowUpSegment(
   active.providerFirstDeltaAt = undefined;
 }
 
-/** Retain only the small request-correlation state needed if the SDK's
- * post-agent threshold check compacts and continues. The completed live owner
- * and tool maps can be multi-megabyte, so an idle session must not keep them
- * alive merely because a compaction decision produced no event. */
-function createThresholdCompactionContinuationCandidate(active: ActiveRequest): ActiveRequest {
-  return {
-    ...active,
-    providerQueueByTurn: undefined,
-    retryTiming: undefined,
-    toolStartTimes: undefined,
-    toolParallelGroupByCallId: undefined,
-    toolStartMetadata: undefined,
-    pendingDurableToolTerminals: undefined,
-    providerIncidentNoticeKeys: undefined,
-    pendingQueuedBoundaryTerminal: undefined,
-    pendingErrorTerminal: undefined,
-    quotaSettlementTimer: undefined,
-    promptSafetyTimer: undefined,
-    liveTurnAccumulator: undefined,
-    semanticLeaseTimer: undefined,
-  };
-}
-
-/** Restore request correlation after a successful post-agent compaction.
- * Pi emits agent_end(willRetry=false) before it discovers provider overflow or
- * runs its threshold check, so the ordinary finalizer may already have
- * detached activeRequest by the time agent.continue() starts. Allocate a fresh
- * live owner while preserving the public request id; otherwise continuation
- * events are rejected as ownerless and the session appears to stop. */
+/** Restore request correlation after successful provider-overflow recovery.
+ * Pi emits agent_end(willRetry=false) before it identifies the overflow. Keep
+ * or restore the same public request owner before agent.continue() starts so
+ * continuation events retain their correlation. */
 function rearmPostAgentCompactionRequest(
   context: SessionContext,
   active: ActiveRequest | undefined,
   occurredAt: number,
 ): boolean {
-  if (!active || active.aborted || context.activeRequest) return false;
+  if (!active || active.aborted || (context.activeRequest && context.activeRequest !== active)) return false;
 
   active.liveTurnAccumulator = new BackendLiveTurnAccumulator({
     protocolVersion: LIVE_PIPELINE_PROTOCOL_VERSION,
     sessionPath: context.sessionPath,
     requestId: active.id,
+    ...(active.operationId ? { operationId: active.operationId } : {}),
     turnId: randomUUID(),
     attemptId: randomUUID(),
     canonicalMessageId: `${active.id}:${active.messageIndex + 1}`,
@@ -1182,50 +1177,6 @@ function rearmPostAgentCompactionRequest(
   active.aborted = false;
   context.activeRequest = active;
   if (context.overflowRecoveryCandidate === active) context.overflowRecoveryCandidate = undefined;
-  if (context.thresholdCompactionContinuationCandidate === active) {
-    context.thresholdCompactionContinuationCandidate = undefined;
-  }
-  return true;
-}
-
-/** Start a fresh live segment after hard-threshold compaction terminalized the
- * prior assistant response. Unlike overflow recovery the request is still
- * attached; only its semantic owner needs rotating before the SDK outer loop
- * performs the zero-prompt continuation. A tool-use segment has no terminal
- * watermark and continues naturally inside agent-core, so it is left alone. */
-function rearmHardCompactionContinuation(context: SessionContext, occurredAt: number): boolean {
-  const active = context.activeRequest;
-  const previous = active?.liveTurnAccumulator;
-  if (!active || !previous?.lifecycleWatermark()) return false;
-
-  context.terminalLiveTurn = { accumulator: previous, expiresAt: occurredAt + 10_000 };
-  active.liveTurnAccumulator = new BackendLiveTurnAccumulator({
-    protocolVersion: LIVE_PIPELINE_PROTOCOL_VERSION,
-    sessionPath: context.sessionPath,
-    requestId: active.id,
-    turnId: randomUUID(),
-    attemptId: randomUUID(),
-    canonicalMessageId: `${active.id}:${active.messageIndex + 1}`,
-    modelId: active.modelId,
-    provider: active.provider,
-    thinkingLevel: active.thinkingLevel,
-    startedAt: occurredAt,
-  });
-  active.pendingQueuedBoundaryTerminal = undefined;
-  active.pendingErrorTerminal = undefined;
-  active.pendingDurableToolTerminals?.clear();
-  active.toolStartTimes?.clear();
-  active.toolStartMetadata?.clear();
-  active.toolParallelGroupByCallId?.clear();
-  active.providerQueueByTurn?.clear();
-  active.providerNetworkPendingAttemptId = undefined;
-  active.providerNetworkPending = false;
-  active.retryTiming = undefined;
-  active.currentMessageId = undefined;
-  active.currentMessageStartedAt = undefined;
-  active.providerFirstDeltaAt = undefined;
-  active.turnStartedAt = undefined;
-  active.turnBoundaryAt = occurredAt;
   return true;
 }
 
@@ -1252,33 +1203,22 @@ export function handleSdkSessionEvent(
   }
   switch (event.type) {
     case 'agent_start': {
-      // A hard-compaction continuation has now crossed its real SDK start
-      // boundary; its eventual agent_end is once again terminal.
-      context.hardCompactionContinuationPending = false;
       // A later ordinary request supersedes any finalized error that did not
       // lead to overflow compaction. Successful overflow recovery clears the
       // candidate while re-arming it before this event arrives.
       if (context.activeRequest && context.overflowRecoveryCandidate !== context.activeRequest) {
         context.overflowRecoveryCandidate = undefined;
       }
-      if (context.activeRequest
-          && context.thresholdCompactionContinuationCandidate !== context.activeRequest) {
-        context.thresholdCompactionContinuationCandidate = undefined;
-      }
       // before_agent_start extensions persist their injected custom message
       // before agent_start. Read it from the authoritative branch so pruning
       // summaries do not depend on the SDK also producing message_end/custom.
       emitLatestPruningResult(deps, context);
-      deps.emitBusyChanged(context, true);
+      deps.emitBusyChanged(context, hasBillableSessionActivity(context));
       deps.emitContextUsageChanged(context);
       return;
     }
 
     case 'turn_start': {
-      // A real next turn means agent-core continued naturally after the hard
-      // compaction (for tools or queued input), so no deferred outer-loop
-      // continuation may survive to the eventual agent_end.
-      context.hardCompactionContinuationPending = false;
       // Some SDK versions append the before_agent_start custom entry just after
       // agent_start. Re-check at turn_start; stable-id dedupe makes this cheap.
       emitLatestPruningResult(deps, context);
@@ -1291,6 +1231,7 @@ export function handleSdkSessionEvent(
         return;
       }
       context.activeRequest.turnStartedAt = Date.now();
+      context.activeRequest.semanticStarted = true;
       context.activeRequest.providerTurnSequence = (context.activeRequest.providerTurnSequence ?? 0) + 1;
       // message_start is too late to own provider hangs before the first
       // assistant event (for example, no response headers after a tool result).
@@ -1301,6 +1242,9 @@ export function handleSdkSessionEvent(
       const accumulator = context.activeRequest.liveTurnAccumulator;
       const liveSeq = accumulator?.currentSeq ?? 0;
       if (liveSeq === 0) {
+        // The first semantic provider-turn boundary is commit evidence even if
+        // the following event is delayed or dropped before reaching the host.
+        context.sendOperationLedger?.markCommitted(context.activeRequest.operationId);
         emitSemanticCandidate(deps, context, { kind: 'turn.started' }, context.activeRequest.turnStartedAt);
         emitSemanticCandidate(deps, context, {
           kind: 'turn.phase', phase: 'preparing', inactivityBudgetMs: providerLeaseMs,
@@ -1322,18 +1266,25 @@ export function handleSdkSessionEvent(
       // this subscribed stream, so this branch only handles injected messages.
       if (event.message?.role === 'user') {
         const deliveredAt = Date.now();
-        startQueuedFollowUpSegment(deps, context, deliveredAt);
-        // Handoff §F: correlate this delivery to the host's optimistic localId
-        // by shifting the next id from the FIFO queue we built in
-        // `handleMessageSend`. An empty sentinel means the original send carried
-        // no localId (legacy host) — fall back to FIFO matching in the reducer.
+        // Shift both delivery identities before opening the next segment so
+        // that its semantic events own this queued follow-up operation.
         const queuedLocalIds = context.queuedLocalIds;
         const localId = queuedLocalIds && queuedLocalIds.length > 0
           ? queuedLocalIds.shift()
           : undefined;
+        const queuedOperationIds = context.queuedOperationIds;
+        const operationId = queuedOperationIds && queuedOperationIds.length > 0
+          ? queuedOperationIds.shift()
+          : undefined;
+        if (operationId) {
+          context.sendOperationLedger?.markCommitted(operationId);
+          if (context.activeRequest) context.activeRequest.operationId = operationId;
+        }
+        startQueuedFollowUpSegment(deps, context, deliveredAt);
         deps.emit('message.queuedDelivered', {
           sessionPath: context.sessionPath,
           text: extractUserMessageText(event.message),
+          ...(operationId ? { operationId } : {}),
           localId: localId || undefined,
         } satisfies QueuedDeliveredPayload);
         return;
@@ -1361,9 +1312,12 @@ export function handleSdkSessionEvent(
       // settle) and abort any healthy multi-turn agentic run exceeding
       // `PROMPT_TIMEOUT_MS` mid-stream. Only the first message_start clears
       // (subsequent turns re-enter with `promptSafetyTimer === undefined`).
-      if (context.activeRequest.messageIndex === 1 && context.activeRequest.promptSafetyTimer) {
-        clearTimeout(context.activeRequest.promptSafetyTimer);
-        context.activeRequest.promptSafetyTimer = undefined;
+      if (context.activeRequest.messageIndex === 1) {
+        context.sendOperationLedger?.markCommitted(context.activeRequest.operationId);
+        if (context.activeRequest.promptSafetyTimer) {
+          clearTimeout(context.activeRequest.promptSafetyTimer);
+          context.activeRequest.promptSafetyTimer = undefined;
+        }
       }
 
       if ((context.activeRequest.liveTurnAccumulator?.currentSeq ?? 0) === 0) {
@@ -1376,6 +1330,9 @@ export function handleSdkSessionEvent(
 
       if (!context.activeRequest.liveTurnAccumulator) deps.emit('message.started', {
         requestId: context.activeRequest.id,
+        ...(context.activeRequest.operationId ? { operationId: context.activeRequest.operationId } : {}),
+        ...(context.activeRequest.operationAttempt !== undefined
+          ? { operationAttempt: context.activeRequest.operationAttempt } : {}),
         messageId: context.activeRequest.currentMessageId,
         sessionPath: context.sessionPath,
         modelId: context.activeRequest.modelId,
@@ -1760,6 +1717,7 @@ export function handleSdkSessionEvent(
 
         deps.emit('message.custom', {
           requestId: context.activeRequest.id,
+          ...(context.activeRequest.operationId ? { operationId: context.activeRequest.operationId } : {}),
           sessionPath: context.sessionPath,
           message,
         } satisfies CustomMessagePayload);
@@ -1947,24 +1905,35 @@ export function handleSdkSessionEvent(
       // This keeps active and interrupted long-running turns current without
       // publishing their heavy transcript state. Aggregate accounting
       // reconciles these samples against the eventual terminal run totals.
-      if (message.usage) {
-        deps.emit('auxiliary-llm.usage', {
-          sessionPath: context.sessionPath,
-          kind: 'assistant_message',
-          sourceId: event.sessionEntryId,
-          occurredAt: message.createdAt,
-          ...(message.modelId ? { modelId: message.modelId } : {}),
-          ...(message.provider ? { provider: message.provider } : {}),
-          inputTokens: message.usage.inputTokens,
-          outputTokens: message.usage.outputTokens,
-          cacheReadTokens: message.usage.cacheReadTokens,
-          cacheWriteTokens: message.usage.cacheWriteTokens,
+      deps.emit('auxiliary-llm.usage', {
+        sessionPath: context.sessionPath,
+        kind: 'assistant_message',
+        sourceId: `assistant:${event.sessionEntryId ?? message.id}`,
+        occurredAt: message.createdAt,
+        ...(message.modelId ? { modelId: message.modelId } : {}),
+        ...(message.provider ? { provider: message.provider } : {}),
+        ...(context.activeRequest.operationId ? { parentOperationId: context.activeRequest.operationId } : {}),
+        ...(message.usage ? {
+          ...(message.usage.tokenChannelPresence?.input !== false
+            ? { inputTokens: message.usage.inputTokens } : {}),
+          ...(message.usage.tokenChannelPresence?.output !== false
+            ? { outputTokens: message.usage.outputTokens } : {}),
+          ...(message.usage.tokenChannelPresence?.cacheRead !== false
+            ? { cacheReadTokens: message.usage.cacheReadTokens } : {}),
+          ...(message.usage.tokenChannelPresence?.cacheWrite !== false
+            ? { cacheWriteTokens: message.usage.cacheWriteTokens } : {}),
+          providerTotalTokens: message.usage.totalTokens,
           ...(message.usage.reportedCostUsd !== undefined
             ? { reportedCostUsd: message.usage.reportedCostUsd }
             : {}),
-          ...(durationMs !== undefined ? { durationMs } : {}),
-        } satisfies AuxiliaryLlmUsagePayload);
-      }
+        } : {
+          instrumentationGap: true,
+          instrumentationGapReason: 'The durable assistant response exposed no provider usage.',
+        }),
+        ...(durationMs !== undefined ? { durationMs } : {}),
+        ...(message.status === 'error' ? { outcome: 'failed' as const }
+          : message.status === 'interrupted' ? { outcome: 'cancelled' as const } : {}),
+      } satisfies AuxiliaryLlmUsagePayload);
       if (isBackendLivePipelineTraceEnabled()) {
         recordBackendLivePipelineTrace({
           stage: 'backend.persistence.confirmed',
@@ -2045,6 +2014,9 @@ export function handleSdkSessionEvent(
 
       if (!context.activeRequest.liveTurnAccumulator) deps.emit('message.finished', {
         requestId: context.activeRequest.id,
+        ...(context.activeRequest.operationId ? { operationId: context.activeRequest.operationId } : {}),
+        ...(context.activeRequest.operationAttempt !== undefined
+          ? { operationAttempt: context.activeRequest.operationAttempt } : {}),
         sessionPath: context.sessionPath,
         message,
       } satisfies MessageFinishedPayload);
@@ -2062,6 +2034,9 @@ export function handleSdkSessionEvent(
         }
         if (!context.activeRequest.liveTurnAccumulator) deps.emit('message.aborted', {
           requestId: context.activeRequest.id,
+          ...(context.activeRequest.operationId ? { operationId: context.activeRequest.operationId } : {}),
+          ...(context.activeRequest.operationAttempt !== undefined
+            ? { operationAttempt: context.activeRequest.operationAttempt } : {}),
           sessionPath: context.sessionPath,
           messageId,
           userInitiated,
@@ -2096,29 +2071,27 @@ export function handleSdkSessionEvent(
         if (context.activeRequest) context.activeRequest.pendingErrorTerminal = undefined;
         return;
       }
-      if (context.hardCompactionContinuationPending
-          && context.session.hasPendingHistoryCompactionContinuation?.() === false) {
-        // compaction_end is emitted before the SDK decides whether a tool or
-        // queued turn needs a deferred outer-loop continuation. Reconcile with
-        // the SDK's final decision so a terminating tool batch cannot leave
-        // the backend holding a request that will never restart.
-        context.hardCompactionContinuationPending = false;
-      }
-      if (context.hardCompactionContinuationPending && context.activeRequest) {
-        // No natural turn followed the hard compaction. Rotate the already
-        // terminal live segment now, then retain request correlation while the
-        // patched SDK outer loop calls agent.continue(). Deferring rotation
-        // until this boundary lets queued-input continuations use their normal
-        // user-boundary segment handoff instead.
-        context.hardCompactionContinuationPending = rearmHardCompactionContinuation(context, Date.now());
-        if (context.hardCompactionContinuationPending) {
-          clearSemanticLease(context);
-          deps.emitBusyChanged(context, true);
-          return;
-        }
-      }
+      // agent_end closes one low-level attempt only. Pi may still perform
+      // post-run compaction, retry, queued continuation, or tool/bash work;
+      // retain request/busy ownership until the pinned agent_settled boundary.
       clearSemanticLease(context);
+      deps.emitContextUsageChanged(context);
+      if (context.willRetryWatchdogClear) {
+        context.willRetryWatchdogClear();
+        context.willRetryWatchdogClear = undefined;
+      }
+      context.overflowRecoveryCandidate = context.activeRequest?.mayNeedOverflowRecovery
+        ? context.activeRequest
+        : undefined;
+      return;
+    }
+
+    case 'agent_settled': {
+      clearSemanticLease(context);
+      const settledRequest = context.activeRequest;
       const requestId = context.activeRequest?.id;
+      const operationId = context.activeRequest?.operationId;
+      const operationAttempt = context.activeRequest?.operationAttempt;
       const messageId = context.activeRequest?.lastAssistantMessageId;
       const modelId = context.activeRequest?.modelId;
       const userInitiated = context.activeRequest?.aborted === true;
@@ -2152,8 +2125,10 @@ export function handleSdkSessionEvent(
       }
 
       if (extensionCommandWithoutAgent && extensionCommandRequestId) {
+        context.sendOperationLedger?.markFailed(operationId, 'MESSAGE_SEND_PRECOMMIT_FAILED', 'Extension command ended without starting an agent turn.');
         deps.emit('preflight.failed', {
           requestId: extensionCommandRequestId,
+          ...(operationId ? { operationId } : {}),
           sessionPath: pendingExtensionCommand?.sessionPath ?? context.sessionPath,
           error: 'Extension command ended without starting an agent turn.',
         } satisfies PreflightFailedPayload);
@@ -2161,10 +2136,8 @@ export function handleSdkSessionEvent(
       if (pendingExtensionCommand?.requestId === extensionCommandRequestId) {
         context.pendingExtensionCommand = undefined;
       }
-      deps.emitBusyChanged(context, false);
       deps.emitContextUsageChanged(context);
 
-      // Bug 6 watchdog: clear on the final (non-retrying) agent_end.
       if (context.willRetryWatchdogClear) {
         context.willRetryWatchdogClear();
         context.willRetryWatchdogClear = undefined;
@@ -2174,33 +2147,13 @@ export function handleSdkSessionEvent(
         context.activeRequest.quotaSettlementTimer = undefined;
       }
 
-      // Retain an error-ended request until the SDK's post-agent compaction
-      // decision is known. Context-overflow recovery is unusual: this
-      // agent_end says willRetry=false, but a later compaction_end may say
-      // willRetry=true and continue inside the same session.prompt() call.
-      // Non-overflow candidates are discarded by the next compaction outcome
-      // or ordinary agent_start.
-      context.overflowRecoveryCandidate = context.activeRequest?.mayNeedOverflowRecovery
-        ? context.activeRequest
-        : undefined;
-      // Pie's proactive threshold check also runs after this event. Unlike
-      // overflow, there is no reliable provider message shape that predicts
-      // whether that check will compact, so retain the non-aborted request
-      // until compaction_end or the next ordinary agent_start settles it.
-      context.thresholdCompactionContinuationCandidate = context.activeRequest?.aborted === true
-        ? undefined
-        : context.activeRequest
-          ? createThresholdCompactionContinuationCandidate(context.activeRequest)
-          : undefined;
-
-      // Clear activeRequest BEFORE emitting session.opened so the payload
-      // sees the final idle state instead of a stale in-progress request.
+      context.overflowRecoveryCandidate = undefined;
+      // Clear activeRequest only at full SDK settlement. agent_end above is not
+      // sufficient evidence because Pi can continue automatically afterwards.
       context.activeRequest = undefined;
 
-      void deps.emitSessionOpened(context.sessionPath);
-      void deps.emitSessionListChanged();
-
-      if (requestId && interruptedWithoutMessage) {
+      if (requestId && interruptedWithoutMessage && !settledRequest?.terminalWithoutMessageEmitted) {
+        if (settledRequest) settledRequest.terminalWithoutMessageEmitted = true;
         if (!userInitiated) {
           logBackendDiagnostic('info', 'request.interruptedWithoutMessage', {
             requestId,
@@ -2209,84 +2162,124 @@ export function handleSdkSessionEvent(
             reason: DEFAULT_UNEXPECTED_INTERRUPT_REASON,
           });
         }
+        context.sendOperationLedger?.markFailed(
+          operationId,
+          'MESSAGE_OPERATION_ABORTED_BEFORE_COMMIT',
+          userInitiated ? 'The message operation was cancelled before it started.' : DEFAULT_UNEXPECTED_INTERRUPT_REASON,
+          userInitiated ? 'cancelled' : 'failed',
+        );
         deps.emit('message.aborted', {
           requestId,
+          ...(operationId ? { operationId } : {}),
+          ...(operationAttempt !== undefined ? { operationAttempt } : {}),
           sessionPath: context.sessionPath,
+          ...(operationId ? { outcome: userInitiated ? 'cancelled' as const : 'failed' as const } : {}),
           userInitiated,
           reason: userInitiated ? undefined : DEFAULT_UNEXPECTED_INTERRUPT_REASON,
         } satisfies MessageAbortedPayload);
       }
 
+      const capabilities = buildSessionCapabilities(context);
+      deps.emit('agent.settled', { sessionPath: context.sessionPath, capabilities });
+      deps.emitBusyChanged(context, capabilities.billableActivity, capabilities);
+      void deps.emitSessionOpened(context.sessionPath);
+      void deps.emitSessionListChanged();
       return;
     }
 
     case 'compaction_start': {
-      // Auto/manual compaction is a billable LLM call the SDK runs AFTER
-      // `agent_end` (in `_handlePostAgentRun`) — by which point `agent_end`
-      // already emitted busy=false (Stop button gone) and cleared
-      // `activeRequest`. Without re-arming busy here, the session reads idle
-      // while compaction still bills ("appears stopped but burning money") and
-      // cannot be interrupted. Re-arm running so the Stop button stays
-      // available; `activeRequest` is intentionally NOT re-armed (compaction
-      // emits no message_start/message_end, which require it). `compaction_end`
-      // (or a continuation turn's `agent_start`) restores idle.
+      // Auto/manual compaction is a billable LLM call. Automatic compaction can
+      // run after `agent_end`, while manual compaction has no active request;
+      // the shared activity classifier keeps both paths interruptible until the
+      // SDK reaches its terminal activity boundary.
       //
       // Capture the start time so `compaction_end` can compute `durationMs`
       // for the `pie.compaction-metrics` sidecar. Cleared on `compaction_end`
       // (whether successful or not).
       context.compactionStartedAt = Date.now();
-      deps.emitBusyChanged(context, true);
+      const manualOperation = event.reason === 'manual' ? context.manualCompactionRequest : undefined;
+      // Manual compact first awaits agent abort and only then creates the SDK
+      // compaction controller. Stop can win that gap; replay its cancellation
+      // intent now that abortCompaction has an authoritative controller to hit,
+      // before provider auth/hooks can advance to the billable request.
+      if (event.reason === 'manual' && context.manualCompactionRequest?.cancelled) {
+        context.session.abortCompaction?.();
+      }
+      const compactionCapabilities = buildSessionCapabilities(context, { compacting: true });
+      deps.emitBusyChanged(context, true, compactionCapabilities);
       // Host-facing signal so the UI can show a live "Compacting…" indicator
       // (compaction emits no message_start/message_end, so busy alone reads as
       // a generic run).
-      deps.emit('compaction.started', { sessionPath: context.sessionPath });
+      deps.emit('compaction.started', {
+        sessionPath: context.sessionPath,
+        ...(manualOperation?.operationId ? { operationId: manualOperation.operationId } : {}),
+        ...(manualOperation?.operationAttempt !== undefined
+          ? { operationAttempt: manualOperation.operationAttempt } : {}),
+      } satisfies CompactionStartedPayload);
       return;
     }
     case 'compaction_end': {
+      // The SDK's result/aborted fields are the terminal authority: a result is
+      // success, an aborted event is cancellation, and a result-less event is
+      // failure. Keep this mapping explicit instead of inferring success from
+      // compaction_end itself, since the SDK emits the same boundary for all
+      // three outcomes.
+      const outcome: CompactionOutcome = event.aborted === true
+        ? 'aborted'
+        : event.result !== undefined && event.result !== null
+          ? 'succeeded'
+          : 'failed';
+      const reason: CompactionReason | undefined = event.reason === 'manual'
+        || event.reason === 'threshold'
+        || event.reason === 'overflow'
+        ? event.reason
+        : undefined;
+      const succeeded = outcome === 'succeeded';
+      const manualOperation = event.reason === 'manual' ? context.manualCompactionRequest : undefined;
+      if (manualOperation?.operationId) {
+        if (succeeded) {
+          context.sendOperationLedger?.markCommitted(manualOperation.operationId);
+        } else {
+          context.sendOperationLedger?.markFailed(
+            manualOperation.operationId,
+            outcome === 'aborted' ? 'MESSAGE_COMPACT_ABORTED' : 'MESSAGE_COMPACT_FAILED',
+            event.errorMessage ?? `Manual history compaction ${outcome}.`,
+            outcome === 'aborted' ? 'aborted' : 'failed',
+          );
+        }
+      }
+
       // Native provider-overflow recovery reports agent_end(willRetry=false)
       // before compaction, then resumes with agent.continue() after a successful
       // compaction. Restore the finalized request before publishing the
       // refreshed snapshot or receiving continuation events.
       if (event.reason === 'overflow' && event.willRetry) {
-        rearmPostAgentCompactionRequest(context, context.overflowRecoveryCandidate, Date.now());
-        context.overflowRecoveryCandidate = undefined;
-      } else {
-        context.overflowRecoveryCandidate = undefined;
-      }
-      if (event.reason === 'threshold' && event.willRetry) {
-        // Soft-threshold checks happen after agent_end and therefore need the
-        // finalized candidate restored now. Hard-threshold checks happen before
-        // agent_end and still have activeRequest, so they rotate at that later
-        // boundary through rearmHardCompactionContinuation.
-        const rearmedAfterAgentEnd = rearmPostAgentCompactionRequest(
+        rearmPostAgentCompactionRequest(
           context,
-          context.thresholdCompactionContinuationCandidate,
+          context.activeRequest ?? context.overflowRecoveryCandidate,
           Date.now(),
         );
-        context.thresholdCompactionContinuationCandidate = undefined;
-        context.hardCompactionContinuationPending = rearmedAfterAgentEnd
-          || (context.activeRequest?.aborted !== true
-            && !!context.activeRequest?.liveTurnAccumulator?.lifecycleWatermark());
-      } else if (event.reason === 'threshold') {
-        context.thresholdCompactionContinuationCandidate = undefined;
-        context.hardCompactionContinuationPending = false;
+        context.overflowRecoveryCandidate = undefined;
       } else {
-        context.thresholdCompactionContinuationCandidate = undefined;
+        context.overflowRecoveryCandidate = undefined;
       }
-
-      // `willRetry` is only intent; interruption or a missing continuation
-      // owner can still prevent the next run. Keep busy asserted only when the
-      // backend actually retained that ownership. This also prevents a Stop
-      // during compaction from leaving an isolated worker permanently busy.
-      const continuationOwned = event.reason === 'overflow'
-        ? !!context.activeRequest
-        : event.reason === 'threshold' && context.hardCompactionContinuationPending === true;
-      if (!event.willRetry || !continuationOwned) deps.emitBusyChanged(context, false);
+      // SDK emits compaction_end before clearing its compaction controller.
+      // Ignore only that ending window; retained request/queue/retry/bash
+      // activity keeps the session busy until agent_settled. The manual marker
+      // ends at the same authoritative event so it cannot keep capabilities
+      // artificially busy until the request-handler promise resumes.
+      if (event.reason === 'manual') context.manualCompactionRequest = undefined;
+      const postCompactionCapabilities = buildSessionCapabilities(context, { compacting: false });
+      deps.emitBusyChanged(
+        context,
+        postCompactionCapabilities.billableActivity,
+        postCompactionCapabilities,
+      );
       // A successful compaction has now appended the CompactionEntry. Refresh
       // both the context indicator and transcript so manual and automatic
       // compaction visibly surface the generated summary instead of only
       // appearing after reopen. Failed/aborted attempts append nothing.
-      if (event.result) {
+      if (succeeded) {
         // Append the durable `pie.compaction-metrics` sidecar BEFORE
         // `emitSessionOpened` so the refreshed transcript scan picks it up and
         // attaches typed `CompactionSummaryDetails` to the compaction-summary
@@ -2309,12 +2302,17 @@ export function handleSdkSessionEvent(
       // come from the SDK result when the compaction produced one.
       deps.emit('compaction.ended', {
         sessionPath: context.sessionPath,
+        ...(manualOperation?.operationId ? { operationId: manualOperation.operationId } : {}),
+        ...(manualOperation?.operationAttempt !== undefined
+          ? { operationAttempt: manualOperation.operationAttempt } : {}),
+        ...(reason !== undefined ? { reason } : {}),
+        outcome,
         occurredAt: Date.now(),
-        ...(event.result ? {
+        ...(succeeded ? {
           tokensBefore: readTokenCount((event.result as { tokensBefore?: unknown }).tokensBefore),
           estimatedTokensAfter: readPostCompactionEstimatedTokens(event.result),
         } : {}),
-      });
+      } satisfies CompactionPayload);
       return;
     }
     case 'auto_retry_start': {
@@ -2419,7 +2417,7 @@ function sdkTraceEventKind(eventType: string) {
   if (eventType === 'tool_execution_update') return 'tool_progress' as const;
   if (eventType === 'tool_execution_end') return 'tool_terminal' as const;
   if (eventType === 'message_start') return 'turn_start' as const;
-  if (eventType === 'message_end' || eventType === 'agent_end') return 'turn_terminal' as const;
+  if (eventType === 'message_end' || eventType === 'agent_settled') return 'turn_terminal' as const;
   return 'control' as const;
 }
 

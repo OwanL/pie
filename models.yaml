@@ -1,7 +1,7 @@
 # pie model configuration — SINGLE SOURCE OF TRUTH.
 #
-# Edit this file to add/change models, then run:  npm run sync-models
-# (or: node scripts/sync-models.mjs --check  to verify drift).
+# Edit this file to add/change models, then run: npm run sync-models
+# Verify generated-file drift with: npm run sync-models -- --check
 #
 # Do NOT edit the derived files directly:
 #   models.json, model-profiles.yaml, settings.json

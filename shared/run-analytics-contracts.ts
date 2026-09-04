@@ -42,6 +42,15 @@ export interface AssistantUsage {
   cacheReadTokens: number;
   cacheWriteTokens: number;
   totalTokens: number;
+  /** False when zero-valued channel placeholders represent fields the provider
+   * omitted; consumers must not catalog-price those placeholders. */
+  tokenChannelsKnown?: boolean;
+  tokenChannelPresence?: {
+    input: boolean;
+    output: boolean;
+    cacheRead: boolean;
+    cacheWrite: boolean;
+  };
   /**
    * Provider-reported reasoning/thinking tokens, when the provider breaks them
    * out. A SUBSET of `outputTokens` — never added to totals or cost separately
@@ -231,7 +240,9 @@ export type AuxiliaryLlmUsageKind =
   | 'skill_pruning_prepass'
   | 'subagent'
   | 'history_compaction'
-  | 'branch_summary';
+  | 'branch_summary'
+  | 'session_title'
+  | 'other';
 
 /**
  * Timestamped usage from an individually observable LLM response. Parent

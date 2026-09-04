@@ -239,6 +239,41 @@ test('session.create with distinct operationIds creates distinct sessions', asyn
   assert.equal(openedEvents(harness).length, 2);
 });
 
+test('same operationId cannot be reused with a different create cwd', async () => {
+  const harness = createHarness();
+
+  await handleBackendRequest(harness.deps, CREATE('op-cwd-mismatch'));
+  await assert.rejects(
+    handleBackendRequest(harness.deps, {
+      ...CREATE('op-cwd-mismatch'),
+      id: 'create-op-cwd-mismatch-reused',
+      params: { ...CREATE('op-cwd-mismatch').params, cwd: '/different-workspace' },
+    }),
+    (error: unknown) => (error as { code?: string }).code === 'OPERATION_INTENT_MISMATCH',
+  );
+  assert.equal(harness.createCalls, 1);
+  assert.equal(openedEvents(harness).length, 1);
+});
+
+test('same operationId cannot switch from create to duplicate', async () => {
+  const harness = createHarness();
+
+  await handleBackendRequest(harness.deps, CREATE('op-kind-mismatch'));
+  await assert.rejects(
+    handleBackendRequest(harness.deps, {
+      id: 'duplicate-op-kind-mismatch',
+      method: 'session.duplicate',
+      params: {
+        sessionPath: '/repo/source.jsonl',
+        selectionToken: 'dup-sel',
+        operationId: 'op-kind-mismatch',
+      },
+    }),
+    (error: unknown) => (error as { code?: string }).code === 'OPERATION_INTENT_MISMATCH',
+  );
+  assert.equal(openedEvents(harness).length, 1);
+});
+
 test('session.duplicate dedupes concurrent same-id forks through the same ledger', async () => {
   const harness = createHarness();
   const duplicate = (operationId: string) => ({
@@ -257,6 +292,22 @@ test('session.duplicate dedupes concurrent same-id forks through the same ledger
   const opened = openedEvents(harness);
   assert.equal(opened.length, 1, 'the concurrent duplicate joiner must not publish a second session.opened');
   assert.equal((opened[0]?.payload as { operationId?: string }).operationId, 'op-dup');
+});
+
+test('same duplicate operationId cannot be reused with a different source session', async () => {
+  const harness = createHarness();
+  const duplicate = (sourcePath: string) => ({
+    id: `duplicate-${sourcePath}`,
+    method: 'session.duplicate' as const,
+    params: { sessionPath: sourcePath, selectionToken: 'dup-sel', operationId: 'op-dup-source' },
+  });
+
+  await handleBackendRequest(harness.deps, duplicate('/repo/source-a.jsonl'));
+  await assert.rejects(
+    handleBackendRequest(harness.deps, duplicate('/repo/source-b.jsonl')),
+    (error: unknown) => (error as { code?: string }).code === 'OPERATION_INTENT_MISMATCH',
+  );
+  assert.equal(openedEvents(harness).length, 1);
 });
 
 test('publication failure after durable creation returns the committed path and never creates twice', async () => {
@@ -333,11 +384,39 @@ test('session.create without operationId keeps the legacy non-deduplicated behav
 
 // ─── ledger-level semantics ─────────────────────────────────────────────────
 
+test('ledger: an intent mismatch cannot join an in-flight operation', async () => {
+  const ledger = new CreateOperationLedger();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const first = ledger.run({
+    operationId: 'op-pending-mismatch',
+    intentFingerprint: 'session.create:/workspace-a',
+    execute: async () => {
+      await gate;
+      return { sessionPath: '/sessions/created.jsonl' };
+    },
+    resume: async () => ({ sessionPath: '/sessions/created.jsonl' }),
+  });
+
+  await assert.rejects(
+    async () => await ledger.run({
+      operationId: 'op-pending-mismatch',
+      intentFingerprint: 'session.create:/workspace-b',
+      execute: async () => ({ sessionPath: '/sessions/wrong.jsonl' }),
+      resume: async () => ({ sessionPath: '/sessions/wrong.jsonl' }),
+    }),
+    (error: unknown) => (error as { code?: string }).code === 'OPERATION_INTENT_MISMATCH',
+  );
+  release();
+  assert.deepEqual(await first, { sessionPath: '/sessions/created.jsonl' });
+});
+
 test('ledger: failed operation without a durable path retries as a fresh attempt', async () => {
   const ledger = new CreateOperationLedger();
   let attempts = 0;
   const run = () => ledger.run({
     operationId: 'op-fresh',
+    intentFingerprint: 'session.create:/workspace',
     execute: async () => {
       attempts += 1;
       if (attempts === 1) throw new Error('durable create failed');
@@ -360,6 +439,7 @@ test('ledger: an error after durable-path registration settles as committed succ
   let republishes = 0;
   const run = () => ledger.run({
     operationId: 'op-committed',
+    intentFingerprint: 'session.create:/workspace',
     execute: async (registerDurablePath) => {
       executes += 1;
       registerDurablePath('/sessions/committed.jsonl');
@@ -383,6 +463,7 @@ test('ledger: completed retry reuses the result and swallows republish errors', 
   let republishes = 0;
   const run = () => ledger.run({
     operationId: 'op-republish',
+    intentFingerprint: 'session.create:/workspace',
     execute: async () => {
       executes += 1;
       return { sessionPath: '/sessions/done.jsonl' };
@@ -408,6 +489,7 @@ test('ledger: a synchronously throwing republish still cannot fail the completed
   const ledger = new CreateOperationLedger();
   const run = () => ledger.run({
     operationId: 'op-sync-republish',
+    intentFingerprint: 'session.create:/workspace',
     execute: async () => ({ sessionPath: '/sessions/done.jsonl' }),
     resume: async () => {
       throw new Error('resume must not run for a completed operation');

@@ -14,7 +14,7 @@ import {
   resolveSdkPatchBarrierLockPath,
   validateSdkPatchBarrier,
 } from '../../../src/backend/sdk-patch-barrier';
-test.after(async () => { void cleanupPristineTemplate(); });
+test.after(async () => { await cleanupPristineTemplate(); });
 
 test('coordinator rejects an already-patched runtime missing any quiescence abort seam', async () => {
   await withFixture(async ({ sdkPath, lockRoot }) => {

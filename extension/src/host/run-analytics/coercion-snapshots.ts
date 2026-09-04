@@ -64,6 +64,8 @@ const AUXILIARY_LLM_USAGE_KINDS = new Set([
   'subagent',
   'history_compaction',
   'branch_summary',
+  'session_title',
+  'other',
 ]);
 
 function coerceAuxiliaryLlmUsage(value: unknown): AuxiliaryLlmUsageSample[] {

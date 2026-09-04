@@ -376,7 +376,7 @@ set "AUTH_DIR_RESOLVED=%REPO_ROOT%"
 if defined PI_CODING_AGENT_AUTH_DIR set "AUTH_DIR_RESOLVED=%PI_CODING_AGENT_AUTH_DIR%"
 set "BACKEND_AUTH=%AUTH_DIR_RESOLVED%\auth.json"
 set "PROVIDER_ENV_PRESENT=0"
-for %%P in (ANTHROPIC_API_KEY OPENAI_API_KEY GOOGLE_API_KEY UMANS_API_KEY) do call :check_provider %%P
+for %%P in (ANTHROPIC_API_KEY OPENAI_API_KEY GOOGLE_API_KEY) do call :check_provider %%P
 node "%RUNNER%" readiness --auth "%BACKEND_AUTH%" --in-tree-auth "%REPO_ROOT%\auth.json" --auth-dir "%AUTH_DIR_RESOLVED%" --repo-root "%REPO_ROOT%" --provider-env-present %PROVIDER_ENV_PRESENT% --vscode-agent-dir-expected "%REPO_ROOT%"
 exit /b %ERRORLEVEL%
 

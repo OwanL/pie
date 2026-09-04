@@ -40,11 +40,83 @@ function finiteUsage(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : 0;
 }
 
+function hasAssistantOutput(content: unknown): boolean {
+  if (typeof content === 'string') return content.trim().length > 0;
+  if (!Array.isArray(content)) return false;
+  return content.some((rawPart) => {
+    if (!rawPart || typeof rawPart !== 'object') return true;
+    const part = rawPart as { type?: unknown; text?: unknown; thinking?: unknown };
+    if (part.type === 'text') return typeof part.text === 'string' && part.text.trim().length > 0;
+    if (part.type === 'thinking') return typeof part.thinking === 'string' && part.thinking.trim().length > 0;
+    // Tool calls and unknown future provider parts are substantive output.
+    return true;
+  });
+}
+
+/** Providers can report context exhaustion as an empty `length` response with
+ * every usage field set to zero. The encrypted signature attached to an empty
+ * thinking part is protocol metadata, not generated output. */
+export function isAllZeroEmptyLengthMessage(
+  message: {
+    stopReason?: string;
+    content?: unknown;
+    usage?: MessageLike['usage'];
+  },
+): boolean {
+  if (message.stopReason !== 'length' || !message.usage || hasAssistantOutput(message.content)) return false;
+  const usage = message.usage;
+  const reported = [
+    usage.input,
+    usage.output,
+    usage.cacheRead,
+    usage.cacheWrite,
+    usage.totalTokens,
+    usage.input_tokens,
+    usage.output_tokens,
+    usage.cache_read_input_tokens,
+    usage.cache_creation_input_tokens,
+    usage.prompt_tokens,
+    usage.completion_tokens,
+    usage.total_tokens,
+    usage.prompt_cache_hit_tokens,
+    usage.prompt_eval_count,
+    usage.eval_count,
+    usage.prompt_tokens_details?.cached_tokens,
+    usage.prompt_tokens_details?.cache_read_input_tokens,
+    usage.prompt_tokens_details?.cache_creation_input_tokens,
+    usage.prompt_tokens_details?.cache_write_input_tokens,
+    usage.prompt_tokens_details?.cache_write_tokens,
+  ];
+  return reported.every((value) => value === undefined
+    || (typeof value === 'number' && Number.isFinite(value) && value === 0));
+}
+
+/** The automatic-recovery classifier is intentionally narrower than the
+ * transcript classifier: an all-zero empty length response is retried only
+ * when the SDK's estimate still places the prompt at the context boundary. */
+export function isEstimatedContextOverflowMessage(
+  message: {
+    stopReason?: string;
+    content?: unknown;
+    usage?: MessageLike['usage'];
+  },
+  contextWindow: number | undefined,
+  estimatedContextTokens: number | null | undefined,
+): boolean {
+  return isAllZeroEmptyLengthMessage(message)
+    && typeof contextWindow === 'number'
+    && Number.isFinite(contextWindow)
+    && contextWindow > 0
+    && typeof estimatedContextTokens === 'number'
+    && Number.isFinite(estimatedContextTokens)
+    && estimatedContextTokens >= contextWindow * 0.98;
+}
+
 /** Mirror the pinned SDK's provider-overflow classification at the seams Pie
  * owns. Keeping this pure lets transcript affordances and zero-prompt
  * continuation agree after a runtime rebuild. */
 export function isContextOverflowMessage(
-  message: Pick<MessageLike, 'stopReason' | 'errorMessage' | 'usage'>,
+  message: Pick<MessageLike, 'stopReason' | 'errorMessage' | 'content' | 'usage'>,
   _contextWindow?: number,
 ): boolean {
   const errorMessage = message.errorMessage;
@@ -57,9 +129,11 @@ export function isContextOverflowMessage(
   const output = finiteUsage(message.usage?.output);
   // A successful stop is a completed answer even when the provider reports an
   // over-window usage estimate. Only a no-output length stop is resumable.
-  // Treat that shape consistently with and without a known model window so the
-  // transcript affordance and backend continuation gate cannot disagree.
-  if (message.stopReason === 'length' && output === 0 && input > 0) return true;
+  // Some providers incorrectly zero every usage field at this boundary; an
+  // empty response remains interrupted, while automatic retry separately
+  // requires a near-window estimate.
+  if (message.stopReason === 'length' && output === 0
+      && (input > 0 || isAllZeroEmptyLengthMessage(message))) return true;
   return false;
 }
 

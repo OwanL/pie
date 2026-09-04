@@ -36,6 +36,7 @@ function withConfig<T>(
 
 function createFakeSessionClass() {
   return class FakeAgentSession {
+    queuedMessages = false;
     agent = {
       state: {
         messages: [
@@ -48,6 +49,7 @@ function createFakeSessionClass() {
         message?: { role?: string; stopReason?: string; content?: unknown[] };
         toolResults?: unknown[];
       }) => Promise<Record<string, unknown> | undefined>),
+      hasQueuedMessages: () => this.queuedMessages,
     };
     sessionManager = {
       entries: [] as Array<{ type: string; id: string }>,
@@ -57,8 +59,9 @@ function createFakeSessionClass() {
     usage = { tokens: 0 as number | null, contextWindow: 10_000 };
     originalChecks = 0;
     compactions: boolean[] = [];
-    compactionStarted?: () => void;
-    compactionGate?: Promise<void>;
+    compactionReasons: Array<'threshold' | 'overflow'> = [];
+    messagesAtCompaction: unknown[][] = [];
+    emitted: unknown[] = [];
     postRunMessage?: {
       stopReason?: string;
       content?: unknown[];
@@ -74,17 +77,23 @@ function createFakeSessionClass() {
     }
 
     async _checkCompaction(
-      _assistantMessage: { stopReason?: string } = {},
+      _assistantMessage: {
+        stopReason?: string;
+        provider?: string;
+        model?: string;
+        content?: unknown[];
+        usage?: { input?: number; cacheRead?: number; output?: number };
+      } = {},
       _skipAbortedCheck = true,
     ): Promise<boolean> {
       this.originalChecks += 1;
       return false;
     }
 
-    async _runAutoCompaction(_reason: 'threshold', willRetry: boolean): Promise<boolean> {
+    async _runAutoCompaction(reason: 'threshold' | 'overflow', willRetry: boolean): Promise<boolean> {
+      this.compactionReasons.push(reason);
       this.compactions.push(willRetry);
-      this.compactionStarted?.();
-      await this.compactionGate;
+      this.messagesAtCompaction.push(this.agent.state.messages.slice());
       const id = `cmp-${this.compactions.length}`;
       this.sessionManager.entries.push({ type: 'compaction', id });
       this.agent.state.messages = [
@@ -93,6 +102,10 @@ function createFakeSessionClass() {
         { role: 'assistant', stopReason: 'stop', content: 'partial result' },
       ];
       return willRetry;
+    }
+
+    _emit(event: unknown): void {
+      this.emitted.push(event);
     }
 
     async _handlePostAgentRun(): Promise<boolean> {
@@ -129,7 +142,7 @@ test('history compaction threshold helper resolves percentage and token modes', 
   );
 });
 
-test('hard trigger compacts at the awaited between-turn barrier and refreshes loop context', async () => {
+test('hard trigger compacts at the awaited between-turn barrier and refreshes a continuing tool loop', async () => {
   await withConfig(async () => {
     const FakeAgentSession = createFakeSessionClass();
     assert.equal(applySdkHistoryCompactionRuntimePatch({ AgentSession: FakeAgentSession as never }), 'patched');
@@ -138,16 +151,16 @@ test('hard trigger compacts at the awaited between-turn barrier and refreshes lo
 
     const snapshot = await session.agent.prepareNextTurnWithContext?.({
       context: { messages: ['raw'] },
-      message: { role: 'assistant', stopReason: 'stop', content: [] },
-      toolResults: [],
+      message: { role: 'assistant', stopReason: 'stop', content: [{ type: 'toolCall' }] },
+      toolResults: [{ role: 'toolResult' }],
     });
 
-    assert.deepEqual(session.compactions, [true], 'hard compaction marks that the current run will continue');
+    assert.deepEqual(session.compactions, [true], 'hard compaction marks the natural tool loop as continuing');
     assert.deepEqual(snapshot?.context, { messages: session.agent.state.messages });
   });
 });
 
-test('hard compaction after a terminal provider turn schedules a zero-prompt continuation', async () => {
+test('hard compaction after a completed terminal response does not resume the agent', async () => {
   await withConfig(async () => {
     const FakeAgentSession = createFakeSessionClass();
     applySdkHistoryCompactionRuntimePatch({ AgentSession: FakeAgentSession as never });
@@ -161,25 +174,39 @@ test('hard compaction after a terminal provider turn schedules a zero-prompt con
     });
     const shouldContinue = await session._handlePostAgentRun();
 
-    assert.equal(shouldContinue, true, 'the AgentSession outer loop must invoke agent.continue()');
-    assert.deepEqual(
-      session.agent.state.messages,
-      [
-        { role: 'compactionSummary', summary: 'summary-cmp-1' },
-        { role: 'user', content: 'work' },
-      ],
-      'the durable terminal assistant is removed only from provider context before continuation',
+    assert.deepEqual(session.compactions, [false], 'completed output is compacted without retry intent');
+    assert.equal(shouldContinue, false, 'the AgentSession outer loop must remain settled');
+    assert.equal(
+      (session.agent.state.messages.at(-1) as { role?: string } | undefined)?.role,
+      'assistant',
+      'the completed assistant response remains the provider-context tail',
     );
   });
 });
 
-test('hard compaction during a tool batch does not arm an extra outer-loop continuation', async () => {
+test('hard compaction preserves an already-queued user continuation', async () => {
   await withConfig(async () => {
     const FakeAgentSession = createFakeSessionClass();
     applySdkHistoryCompactionRuntimePatch({ AgentSession: FakeAgentSession as never });
-    const session = new FakeAgentSession() as InstanceType<typeof FakeAgentSession> & {
-      hasPendingHistoryCompactionContinuation(): boolean;
-    };
+    const session = new FakeAgentSession();
+    session.usage.tokens = 2_000;
+    session.queuedMessages = true;
+
+    await session.agent.prepareNextTurnWithContext?.({
+      context: { messages: session.agent.state.messages },
+      message: { role: 'assistant', stopReason: 'stop', content: [] },
+      toolResults: [],
+    });
+
+    assert.deepEqual(session.compactions, [true], 'queued user work keeps the existing run active');
+  });
+});
+
+test('hard compaction during a terminating tool batch does not add an outer-loop continuation', async () => {
+  await withConfig(async () => {
+    const FakeAgentSession = createFakeSessionClass();
+    applySdkHistoryCompactionRuntimePatch({ AgentSession: FakeAgentSession as never });
+    const session = new FakeAgentSession();
     session.usage.tokens = 2_000;
 
     await session.agent.prepareNextTurnWithContext?.({
@@ -189,89 +216,11 @@ test('hard compaction during a tool batch does not arm an extra outer-loop conti
     });
 
     assert.deepEqual(session.compactions, [true]);
-    assert.equal(session.hasPendingHistoryCompactionContinuation(), false);
     assert.equal(await session._handlePostAgentRun(), false);
   });
 });
 
-test('interrupt cancels a deferred hard-compaction continuation before post-run settlement', async () => {
-  await withConfig(async () => {
-    const FakeAgentSession = createFakeSessionClass();
-    applySdkHistoryCompactionRuntimePatch({ AgentSession: FakeAgentSession as never });
-    const session = new FakeAgentSession() as InstanceType<typeof FakeAgentSession> & {
-      cancelPendingHardCompactionContinuation(): void;
-    };
-    session.usage.tokens = 2_000;
-
-    await session.agent.prepareNextTurnWithContext?.({
-      context: { messages: session.agent.state.messages },
-      message: { role: 'assistant', stopReason: 'stop', content: [] },
-      toolResults: [],
-    });
-    session.cancelPendingHardCompactionContinuation();
-
-    assert.equal(await session._handlePostAgentRun(), false);
-    assert.equal(
-      (session.agent.state.messages.at(-1) as { role?: string } | undefined)?.role,
-      'assistant',
-      'cancel leaves durable provider context intact',
-    );
-  });
-});
-
-test('interrupt during a settling hard compaction cannot re-arm its deferred continuation', async () => {
-  await withConfig(async () => {
-    const FakeAgentSession = createFakeSessionClass();
-    applySdkHistoryCompactionRuntimePatch({ AgentSession: FakeAgentSession as never });
-    const session = new FakeAgentSession() as InstanceType<typeof FakeAgentSession> & {
-      cancelPendingHardCompactionContinuation(): void;
-    };
-    session.usage.tokens = 2_000;
-    let releaseCompaction!: () => void;
-    let markCompactionStarted!: () => void;
-    session.compactionGate = new Promise<void>((resolve) => { releaseCompaction = resolve; });
-    const compactionStarted = new Promise<void>((resolve) => { markCompactionStarted = resolve; });
-    session.compactionStarted = markCompactionStarted;
-
-    const prepare = session.agent.prepareNextTurnWithContext?.({
-      context: { messages: session.agent.state.messages },
-      message: { role: 'assistant', stopReason: 'stop', content: [] },
-      toolResults: [],
-    });
-    await compactionStarted;
-    session.cancelPendingHardCompactionContinuation();
-    releaseCompaction();
-    await prepare;
-
-    assert.equal(await session._handlePostAgentRun(), false);
-  });
-});
-
-test('an aborted natural turn after hard compaction cancels the deferred fallback', async () => {
-  await withConfig(async () => {
-    const FakeAgentSession = createFakeSessionClass();
-    applySdkHistoryCompactionRuntimePatch({ AgentSession: FakeAgentSession as never });
-    const session = new FakeAgentSession();
-    session.usage.tokens = 2_000;
-
-    await session.agent.prepareNextTurnWithContext?.({
-      context: { messages: session.agent.state.messages },
-      message: { role: 'assistant', stopReason: 'stop', content: [] },
-      toolResults: [],
-    });
-    session.agent.state.messages.push({ role: 'assistant', stopReason: 'aborted', content: 'queued turn partial' });
-
-    const shouldContinue = await session._handlePostAgentRun();
-
-    assert.equal(shouldContinue, false, 'the aborted natural turn must not be restarted');
-    assert.deepEqual(
-      session.agent.state.messages.at(-1),
-      { role: 'assistant', stopReason: 'aborted', content: 'queued turn partial' },
-    );
-  });
-});
-
-test('soft threshold compaction after agent_end schedules a zero-prompt continuation', async () => {
+test('soft threshold compaction after a completed agent run does not resume it', async () => {
   await withConfig(async () => {
     const FakeAgentSession = createFakeSessionClass();
     applySdkHistoryCompactionRuntimePatch({ AgentSession: FakeAgentSession as never });
@@ -279,21 +228,17 @@ test('soft threshold compaction after agent_end schedules a zero-prompt continua
     session.usage.tokens = 1_500;
 
     session.postRunMessage = {
-      stopReason: 'length',
+      stopReason: 'stop',
       content: [],
-      usage: { input: 0, cacheRead: 0, output: 0 },
+      usage: { input: 1_500, cacheRead: 0, output: 100 },
     };
 
+    assert.equal(await session._handlePostAgentRun(), false);
+    assert.deepEqual(session.compactions, [false], 'completed output is compacted without retry intent');
     assert.equal(
-      await session._handlePostAgentRun(),
-      true,
-      'the patched post-run loop continues only after removing the assistant tail',
+      (session.agent.state.messages.at(-1) as { role?: string } | undefined)?.role,
+      'assistant',
     );
-    assert.deepEqual(session.compactions, [true], 'the compaction lifecycle must report willRetry');
-    assert.deepEqual(session.agent.state.messages, [
-      { role: 'compactionSummary', summary: 'summary-cmp-1' },
-      { role: 'user', content: 'work' },
-    ]);
     assert.equal(session.originalChecks, 0);
   });
 });
@@ -376,6 +321,113 @@ test('silent stop and length overflows delegate to pi overflow recovery', async 
     } as never);
     assert.equal(stopOverflow.originalChecks, 1);
     assert.deepEqual(stopOverflow.compactions, []);
+  });
+});
+
+test('all-zero empty length response near the context window uses bounded overflow recovery', async () => {
+  await withConfig(async () => {
+    const FakeAgentSession = createFakeSessionClass();
+    applySdkHistoryCompactionRuntimePatch({ AgentSession: FakeAgentSession as never });
+    const session = new FakeAgentSession();
+    (session as unknown as { model: unknown }).model = { provider: 'test', id: 'm', contextWindow: 10_000 };
+    session.usage.tokens = 9_840;
+
+    const shouldContinue = await session._checkCompaction({
+      stopReason: 'length',
+      provider: 'test',
+      model: 'm',
+      content: [{ type: 'thinking', thinking: '', thinkingSignature: 'opaque' }],
+      usage: { input: 0, cacheRead: 0, output: 0 },
+    });
+
+    assert.equal(shouldContinue, true);
+    assert.deepEqual(session.compactionReasons, ['overflow']);
+    assert.deepEqual(session.compactions, [true]);
+    assert.equal(
+      (session.messagesAtCompaction[0]?.at(-1) as { role?: string } | undefined)?.role,
+      'user',
+      'the failed assistant tail is removed before automatic continuation',
+    );
+  });
+});
+
+test('all-zero empty length recovery respects an already-owned SDK overflow attempt', async () => {
+  await withConfig(async () => {
+    const FakeAgentSession = createFakeSessionClass();
+    applySdkHistoryCompactionRuntimePatch({ AgentSession: FakeAgentSession as never });
+    const session = new FakeAgentSession();
+    (session as unknown as { model: unknown }).model = { provider: 'test', id: 'm', contextWindow: 10_000 };
+    (session as unknown as { _overflowRecoveryAttempted: boolean })._overflowRecoveryAttempted = true;
+    session.usage.tokens = 9_840;
+
+    assert.equal(await session._checkCompaction({
+      stopReason: 'length',
+      provider: 'test',
+      model: 'm',
+      content: [],
+      usage: { input: 0, cacheRead: 0, output: 0 },
+    }), false);
+
+    assert.deepEqual(session.compactionReasons, []);
+    assert.deepEqual(session.emitted, [{
+      type: 'compaction_end',
+      reason: 'overflow',
+      result: undefined,
+      aborted: false,
+      willRetry: false,
+      errorMessage: 'Context overflow recovery failed after one compact-and-retry attempt. Try reducing context or switching to a larger-context model.',
+    }]);
+  });
+});
+
+test('post-compaction unknown usage prevents a second all-zero empty length recovery', async () => {
+  await withConfig(async () => {
+    const FakeAgentSession = createFakeSessionClass();
+    applySdkHistoryCompactionRuntimePatch({ AgentSession: FakeAgentSession as never });
+    const session = new FakeAgentSession();
+    (session as unknown as { model: unknown }).model = { provider: 'test', id: 'm', contextWindow: 10_000 };
+    session.usage.tokens = 9_840;
+    const overflow = {
+      stopReason: 'length',
+      provider: 'test',
+      model: 'm',
+      content: [{ type: 'thinking', thinking: '' }],
+      usage: { input: 0, cacheRead: 0, output: 0 },
+    };
+
+    assert.equal(await session._checkCompaction(overflow), true);
+    session.usage.tokens = null;
+    (session as unknown as { _overflowRecoveryAttempted: boolean })._overflowRecoveryAttempted = false;
+    assert.equal(await session._checkCompaction(overflow), false);
+
+    assert.deepEqual(session.compactionReasons, ['overflow']);
+  });
+});
+
+test('all-zero empty length recovery rejects model mismatch and sub-boundary estimates', async () => {
+  await withConfig(async () => {
+    const FakeAgentSession = createFakeSessionClass();
+    applySdkHistoryCompactionRuntimePatch({ AgentSession: FakeAgentSession as never });
+
+    const mismatch = new FakeAgentSession();
+    (mismatch as unknown as { model: unknown }).model = { provider: 'test', id: 'current', contextWindow: 10_000 };
+    mismatch.usage.tokens = 9_840;
+    assert.equal(await mismatch._checkCompaction({
+      stopReason: 'length', provider: 'test', model: 'old', content: [],
+      usage: { input: 0, cacheRead: 0, output: 0 },
+    }), false);
+    assert.deepEqual(mismatch.compactionReasons, ['threshold']);
+    assert.deepEqual(mismatch.compactions, [false]);
+
+    const belowBoundary = new FakeAgentSession();
+    (belowBoundary as unknown as { model: unknown }).model = { provider: 'test', id: 'current', contextWindow: 10_000 };
+    belowBoundary.usage.tokens = 9_799;
+    assert.equal(await belowBoundary._checkCompaction({
+      stopReason: 'length', provider: 'test', model: 'current', content: [],
+      usage: { input: 0, cacheRead: 0, output: 0 },
+    }), false);
+    assert.deepEqual(belowBoundary.compactionReasons, ['threshold']);
+    assert.deepEqual(belowBoundary.compactions, [false]);
   });
 });
 

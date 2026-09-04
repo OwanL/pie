@@ -2,7 +2,10 @@
 /** @jsxImportSource preact */
 
 export interface ComposerActionsProps {
+  /** Capability-projected billable activity for the selected session. */
   busy: boolean;
+  /** Capability-projected eligibility for the Stop command. */
+  canInterrupt?: boolean;
   /** Brief E: an interrupt was just clicked and the host hasn't yet cleared
    *  `busy`. While true the Stop affordance renders as a disabled "Stopping…"
    *  button so the click reflects within one frame (the host clears `busy`
@@ -52,6 +55,7 @@ function SubmitIcon({ queued }: { queued: boolean }) {
 
 export function ComposerActions({
   busy,
+  canInterrupt = busy,
   interrupting,
   commandsAvailable = true,
   hasQueuedMessages,
@@ -91,7 +95,7 @@ export function ComposerActions({
           <ClearQueueIcon />
         </button>
       )}
-      {busy && (
+      {busy && canInterrupt && (
         <button
           class={`action-btn danger composer-action-icon composer-action-stop${interrupting ? ' is-stopping' : ''}`}
           type="button"

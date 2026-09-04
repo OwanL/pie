@@ -39,4 +39,12 @@ export interface DeferredTriggerView {
   note: string;
   /** ISO timestamp of registration (used to render elapsed "waiting" time). */
   registeredAt: string;
+  /** Durable delivery state. Claimed triggers remain visible but cannot be
+   * dispatched by another host; retryable triggers were not consumed. */
+  deliveryState: 'pending' | 'claimed' | 'retryable';
+  /** Distinguishes a safely recovered pre-dispatch owner crash from an
+   * acknowledgement-ambiguous claim that must remain fail-closed. */
+  recoveryState?: 'dead-owner-recovered' | 'acknowledgement-ambiguous';
+  /** Human-readable explanation for claimed/retryable delivery state. */
+  deliveryDetail?: string;
 }

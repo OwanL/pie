@@ -194,6 +194,12 @@ export class SessionServiceEvents {
       onAuxiliaryLlmUsage: (payload) => onAuxiliaryLlmUsage(payload, deps),
       onOperationalError: (payload) => onOperationalError(payload, deps),
       onRetryStuck: (payload) => onRetryStuck(payload, deps),
+      onAgentSettled: (payload) => {
+        const sessionPath = this.requireEventSessionPath('agent.settled', payload.sessionPath);
+        if (!sessionPath) return;
+        this.dispatchArch({ kind: 'AgentSettled', sessionPath, capabilities: payload.capabilities });
+        this.scheduleRender();
+      },
       onBusyChanged: (payload) => this.onBusyChanged(payload),
       onContextUsageChanged: (payload) => onContextUsageChanged(payload, deps),
       onExtensionUIRequest: (payload) => onExtensionUIRequest(payload, deps),

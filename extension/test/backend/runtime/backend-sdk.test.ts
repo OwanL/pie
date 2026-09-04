@@ -137,6 +137,12 @@ test('forced-overflow classification keeps transcript and continuation decisions
     content: [],
     usage: { input: 10, output: 0, cacheRead: 0 },
   };
+  const allZeroEmptyLength = {
+    role: 'assistant' as const,
+    stopReason: 'length',
+    content: [{ type: 'thinking', thinking: '', thinkingSignature: 'opaque' }],
+    usage: { input: 0, output: 0, cacheRead: 0 },
+  };
   const completedOverWindow = {
     role: 'assistant' as const,
     stopReason: 'stop',
@@ -148,8 +154,34 @@ test('forced-overflow classification keeps transcript and continuation decisions
   assert.equal(classifyInterruptedContinuationTail([dashScope], 200_000), 'overflow-assistant');
   assert.equal(isContextOverflowMessage(emptyLength), true);
   assert.equal(classifyInterruptedContinuationTail([emptyLength], 200_000), 'overflow-assistant');
+  assert.equal(isContextOverflowMessage(allZeroEmptyLength), true);
+  assert.equal(classifyInterruptedContinuationTail([allZeroEmptyLength], 200_000), 'overflow-assistant');
   assert.equal(isContextOverflowMessage(completedOverWindow, 200_000), false);
   assert.equal(classifyInterruptedContinuationTail([completedOverWindow], 200_000), undefined);
+});
+
+test('threshold compaction consumes an all-zero empty length failure left by context exhaustion', () => {
+  const entries = [
+    {
+      id: 'tool', type: 'message', timestamp: '2026-01-01T00:00:00.000Z',
+      message: { role: 'toolResult' as const, toolCallId: 'tool-1', content: 'large result' },
+    },
+    {
+      id: 'empty-length', type: 'message', timestamp: '2026-01-01T00:00:01.000Z',
+      message: {
+        role: 'assistant' as const,
+        stopReason: 'length',
+        content: [{ type: 'thinking', thinking: '', thinkingSignature: 'opaque' }],
+        usage: { input: 0, output: 0, cacheRead: 0 },
+      },
+    },
+    {
+      id: 'compact', type: 'compaction', timestamp: '2026-01-01T00:00:02.000Z',
+      details: { pieCompaction: { reason: 'threshold' } },
+    },
+  ];
+
+  assert.deepEqual([...consumedOverflowMessageEntryIds(entries)], ['empty-length']);
 });
 
 test('successful assistant output is never consumed by an overflow-marked compaction', () => {

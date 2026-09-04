@@ -26,13 +26,6 @@ const readyState: ArchState = {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function archStateWithSession(path: string): ArchState {
-  return {
-    ...initialArchState,
-    sessions: { ...initialArchState.sessions, interruptInFlightBySession: { [path]: false } },
-  };
-}
-
 function archStateWithPending(
   corrId: string,
   op: { kind: 'send' | 'edit'; sessionPath: string; localId: string; previousSummary?: any },
@@ -51,16 +44,9 @@ function archStateWithPending(
 
 // ─── Arch reducer: SessionClosed ──────────────────────────────────────────────
 
-test('arch: SessionClosed removes per-session arch state but preserves other sessions', () => {
+test('arch: SessionClosed removes per-session turn state but preserves other sessions', () => {
   const state: ArchState = {
     ...initialArchState,
-    sessions: {
-      ...initialArchState.sessions,
-      interruptInFlightBySession: {
-        '/s/a': true,
-        '/s/b': false,
-      },
-    },
     pending: {
       ...initialArchState.pending,
       currentTurnBySession: {
@@ -72,8 +58,6 @@ test('arch: SessionClosed removes per-session arch state but preserves other ses
 
   const result = reducer(state, { kind: 'SessionClosed', sessionPath: '/s/a' });
 
-  assert.equal(result.state.sessions.interruptInFlightBySession['/s/a'], undefined);
-  assert.equal(result.state.sessions.interruptInFlightBySession['/s/b'], false);
   assert.equal(result.state.pending.currentTurnBySession['/s/a'], undefined);
   assert.deepEqual(result.state.pending.currentTurnBySession['/s/b'], {
     requestId: 'req-2',
@@ -154,6 +138,7 @@ test('arch: concurrent sends across different sessions do not interfere', () => 
 
   assert.deepEqual(result.state.pending.ops['c-a'], {
     kind: 'send',
+    operationId: 'c-a',
     sessionPath: '/s/a',
     localId: 'loc-a',
     previousSummary: null,
@@ -163,6 +148,7 @@ test('arch: concurrent sends across different sessions do not interfere', () => 
   });
   assert.deepEqual(result.state.pending.ops['c-b'], {
     kind: 'send',
+    operationId: 'c-b',
     sessionPath: '/s/b',
     localId: 'loc-b',
     previousSummary: null,
@@ -172,16 +158,16 @@ test('arch: concurrent sends across different sessions do not interfere', () => 
   });
 });
 
-test('arch: Interrupt on one session does not affect another session', () => {
-  const state: ArchState = archStateWithSession('/s/b');
-
-  const result = reducer(state, {
+test('arch: Interrupt on one session does not register an operation for another session', () => {
+  const result = reducer(initialArchState, {
     kind: 'Command',
     cmd: { kind: 'Interrupt', corrId: 'c1', sessionPath: '/s/a' },
   });
 
-  assert.equal(result.state.sessions.interruptInFlightBySession['/s/a'], true);
-  assert.equal(result.state.sessions.interruptInFlightBySession['/s/b'], false);
+  assert.equal(result.state.operations.c1?.session.pendingPath, '/s/a');
+  assert.equal(Object.values(result.state.operations).some(
+    (operation) => operation.session.pendingPath === '/s/b',
+  ), false);
 });
 
 // ─── Arch reducer: Edit edge cases ────────────────────────────────────────────
@@ -394,17 +380,44 @@ test('selectViewState: workspaceCwd propagates when set', () => {
   assert.equal(vs.workspaceCwd, '/project');
 });
 
-test('selectViewState redacts credentials from noticeRaw at the webview boundary', () => {
+test('arch: an untyped notice clears typed error detail', () => {
   const state = produce(initialArchState, draft => {
-    draft.settings.notice = 'Backend failed.';
+    draft.settings.notice = 'An earlier error';
+    draft.settings.noticeKind = 'operational-error';
+    draft.settings.noticeRaw = 'backend detail';
+    draft.settings.noticeSessionPath = '/project/session.jsonl';
+  });
+
+  const result = reducer(state, {
+    kind: 'NoticeShown',
+    notice: 'Info: the operation recovered.',
+    sessionPath: '/project/session.jsonl',
+  });
+
+  assert.equal(result.state.settings.notice, 'Info: the operation recovered.');
+  assert.equal(result.state.settings.noticeKind, null);
+  assert.equal(result.state.settings.noticeRaw, null);
+  assert.equal(result.state.settings.noticeSessionPath, '/project/session.jsonl');
+});
+
+test('selectViewState redacts request ids and credentials from notice fields at the webview boundary', () => {
+  const state = produce(initialArchState, draft => {
+    draft.settings.notice = 'Backend request req-42 failed with apiKey=short-secret';
     draft.settings.noticeKind = 'operational-error';
     draft.settings.noticeRaw = 'req-42 failed with apiKey=projection-secret';
   });
 
   const view = selectViewState(state);
 
+  // The host retains the original diagnostic for logs; only the projection is
+  // sanitized for renderer consumers.
+  assert.equal(state.settings.notice, 'Backend request req-42 failed with apiKey=short-secret');
   assert.equal(state.settings.noticeRaw, 'req-42 failed with apiKey=projection-secret');
-  assert.equal(view.noticeRaw, 'req-42 failed with apiKey=[redacted]');
+  assert.equal(view.notice, 'Backend request request failed with apiKey=[redacted]');
+  assert.equal(view.noticeKind, 'operational-error');
+  assert.equal(view.noticeRaw, 'request failed with apiKey=[redacted]');
+  assert.doesNotMatch(view.notice ?? '', /req-\d+/);
+  assert.doesNotMatch(view.noticeRaw ?? '', /req-\d+/);
 });
 
 test('selectViewState: busy is false when no active session even if sessions are running', () => {
@@ -771,7 +784,6 @@ test('chatPrefs: menu sections expose all toggleable transcript prefs', () => {
 test('arch reducer: pure — does not mutate input state', () => {
   const state: ArchState = {
     ...initialArchState,
-    sessions: { ...initialArchState.sessions, interruptInFlightBySession: { '/s': false } },
     pending: {
       ...initialArchState.pending,
       ops: { 'c1': { kind: 'send', sessionPath: '/s', localId: 'loc', previousSummary: null, startedAt: 0 } },
@@ -795,5 +807,5 @@ test('arch reducer: pure — returns new state references', () => {
   });
 
   assert.notStrictEqual(result.state, initialArchState);
-  assert.notStrictEqual(result.state.sessions, initialArchState.sessions);
+  assert.notStrictEqual(result.state.operations, initialArchState.operations);
 });

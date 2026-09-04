@@ -364,7 +364,11 @@ function mapAssistantTurn(
 
   const currentAssistant = state.currentAssistant;
   const deferredWaitAbort = isLegacyDeferredWaitAbort(message, currentAssistant);
-  const terminalStatus = deferredWaitAbort ? 'completed' : assistantStatus(message);
+  const terminalStatus = deferredWaitAbort
+    ? 'completed'
+    : isContextOverflowMessage(message)
+      ? 'interrupted'
+      : assistantStatus(message);
   const terminalErrorDetail = deferredWaitAbort ? undefined : assistantErrorDetail(message);
   if (currentAssistant) {
     mergeAssistantTurn(currentAssistant, messageParts, {
@@ -396,6 +400,7 @@ function mapAssistantTurn(
     durationMs,
     usage: turnUsage,
     durableEntryId: entry.id,
+    billingSourceEntryIds: [entry.id],
   };
   state.currentAssistant = next;
   return { kind: 'push', resetAssistant: false, message: next };
@@ -439,6 +444,10 @@ function mergeAssistantTurn(
   }
   current.toolCalls = toolCallsFromMessageParts(current.parts);
   current.status = update.status;
+  current.billingSourceEntryIds = [
+    ...(current.billingSourceEntryIds ?? (current.durableEntryId ? [current.durableEntryId] : [])),
+    update.durableEntryId,
+  ];
   current.durableEntryId = update.durableEntryId;
   if (update.errorDetail) {
     current.errorDetail = update.errorDetail;

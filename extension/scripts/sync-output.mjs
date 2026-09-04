@@ -1,4 +1,4 @@
-import { cp, mkdir, readdir, rm } from 'node:fs/promises';
+import { cp, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 export function isActiveDirectoryLockError(error, platform = process.platform) {
@@ -60,6 +60,22 @@ export async function mirrorDirectoryInPlace(sourceDir, destinationDir) {
   await prepareDestinationEntryTypes(sourceDir, destinationDir);
   await cp(sourceDir, destinationDir, { recursive: true, force: true });
   await removeDestinationEntriesMissingFromSource(sourceDir, destinationDir);
+}
+
+export async function writeFileIfChanged(filePath, contents) {
+  // Rewriting an unchanged installed extension manifest can prompt VS Code to
+  // react to the extension during watch-mode syncs, so identical bytes must be
+  // left untouched (including their modification time).
+  try {
+    const existing = await readFile(filePath, 'utf8');
+    if (existing === contents) return false;
+  } catch (error) {
+    if (!(error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT')) {
+      throw error;
+    }
+  }
+  await writeFile(filePath, contents);
+  return true;
 }
 
 export async function syncActiveDestinationInPlace({ staging, dest, backup, verify, warn = console.warn }) {

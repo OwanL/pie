@@ -1,10 +1,15 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { isActiveDirectoryLockError, mirrorDirectoryInPlace, syncActiveDestinationInPlace } from '../../../scripts/sync-output.mjs';
+import {
+  isActiveDirectoryLockError,
+  mirrorDirectoryInPlace,
+  syncActiveDestinationInPlace,
+  writeFileIfChanged,
+} from '../../../scripts/sync-output.mjs';
 import { isHotReloadAssetFileName } from '../../../src/host/webview/hot-reload';
 
 test('isHotReloadAssetFileName matches built assets and ignores sourcemaps', () => {
@@ -165,6 +170,59 @@ test('invalid backup aborts before mutating the active destination', async () =>
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test('writeFileIfChanged leaves an identical installed manifest untouched', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'pie-manifest-unchanged-'));
+  const manifestPath = path.join(root, 'package.json');
+  const contents = JSON.stringify({ publisher: 'owanl', name: 'pie', version: '1.2.3' }, null, 2);
+  try {
+    await writeFile(manifestPath, contents);
+    const before = await stat(manifestPath);
+
+    assert.equal(await writeFileIfChanged(manifestPath, contents), false);
+
+    const after = await stat(manifestPath);
+    assert.equal(after.mtimeMs, before.mtimeMs, 'unchanged manifest must not be rewritten or touched');
+    assert.equal(await readFile(manifestPath, 'utf8'), contents);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('writeFileIfChanged rewrites a changed manifest and creates a missing one', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'pie-manifest-changed-'));
+  const manifestPath = path.join(root, 'package.json');
+  const oldContents = JSON.stringify({ publisher: 'owanl', name: 'pie', version: '1.2.3' }, null, 2);
+  const newContents = JSON.stringify({ publisher: 'owanl', name: 'pie', version: '1.2.4' }, null, 2);
+  try {
+    await writeFile(manifestPath, oldContents);
+
+    assert.equal(await writeFileIfChanged(manifestPath, newContents), true);
+    assert.equal(await readFile(manifestPath, 'utf8'), newContents);
+
+    const missingPath = path.join(root, 'nested', 'package.json');
+    await mkdir(path.dirname(missingPath), { recursive: true });
+    assert.equal(await writeFileIfChanged(missingPath, newContents), true);
+    assert.equal(await readFile(missingPath, 'utf8'), newContents);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('build script writes the installed manifest only when its content changed', async () => {
+  const buildScript = await readFile(new URL('../../../scripts/build.mjs', import.meta.url), 'utf8');
+
+  assert.match(
+    buildScript,
+    /await writeFileIfChanged\(path\.join\(extDir, 'package\.json'\), JSON\.stringify\(pkg, null, 2\)\);/,
+  );
+  assert.match(buildScript, /writeFileIfChanged } from '\.\/sync-output\.mjs';/);
+  assert.doesNotMatch(
+    buildScript,
+    /await writeFile\(path\.join\(extDir, 'package\.json'\)/,
+    'installed manifest must not be rewritten unconditionally during sync',
+  );
 });
 
 test('watch mode waits for complete host and webview output before syncing', async () => {

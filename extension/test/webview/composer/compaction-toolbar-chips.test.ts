@@ -16,7 +16,7 @@ import { ComposerToolbar } from '../../../src/webview/panel/composer/toolbar';
 function renderToolbar(overrides: Partial<Parameters<typeof ComposerToolbar>[0]> = {}): string {
   return renderToString(h(ComposerToolbar, {
     sessionPath: '/session/test.jsonl',
-    busy: false,
+    canCompact: true,
     prefs: DEFAULT_CHAT_PREFS,
     pruningSettings: DEFAULT_PRUNING_SETTINGS,
     pruningCatalog: { skills: [], tools: [] },
@@ -46,6 +46,7 @@ function renderToolbar(overrides: Partial<Parameters<typeof ComposerToolbar>[0]>
     contextBreakdown: null,
     sessionCostIndicator: null,
     tokenRateIndicator: { label: '', ariaLabel: '', tooltip: '', state: 'idle', paused: false },
+    workingTimeIndicator: { label: '0s', ariaLabel: 'Total agent working time: 0 seconds', tooltip: 'Total agent working time' },
     runStatus: null,
     compacting: false,
     lastCompaction: null,
@@ -115,6 +116,11 @@ test('toolbar shows a plain Compacted chip when token metrics are absent', () =>
   const html = renderToolbar({ lastCompaction: { at: 1_700_000_000_000 } });
   assert.match(html, /Compacted/);
   assert.doesNotMatch(html, /freed/);
+});
+
+test('toolbar has no success chip when a compaction has no successful summary', () => {
+  const html = renderToolbar({ compacting: false, lastCompaction: null });
+  assert.doesNotMatch(html, /Compacted/);
 });
 
 test('toolbar hides compaction chips when hideRunStatus is set', () => {

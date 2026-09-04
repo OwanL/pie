@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { BackendLiveTurnAccumulator } from '../../../../src/backend/live-turn-accumulator';
 import { initialArchState, reducer, type ArchState } from '../../../../src/host/core/reducer';
 import { projectTranscriptView } from '../../../../src/host/core/live-pipeline/projection';
+import { hasRetiredInterruptEventFence } from '../../../../src/host/core/operation-registry';
 import type { SessionOpenedPayload } from '../../../../src/shared/protocol';
 import { LIVE_PIPELINE_PROTOCOL_VERSION } from '../../../../src/shared/live-pipeline-protocol';
 
@@ -54,6 +55,27 @@ function payload(checkpoint = liveCheckpoint('Recovered work')): SessionOpenedPa
     liveTurnCheckpoint: checkpoint,
   };
 }
+
+test('a retired interrupt fence rejects a late busy session.opened checkpoint', () => {
+  const stopping = reducer(initialArchState, {
+    kind: 'Command', cmd: { kind: 'Interrupt', corrId: 'stop', sessionPath },
+  }).state;
+  const retired = reducer(stopping, {
+    kind: 'InterruptResult', corrId: 'stop', operationId: 'stop', backendGeneration: 0,
+    sessionPath, ok: true, committed: true, settled: true,
+  }).state;
+  assert.equal(hasRetiredInterruptEventFence(retired.operations, sessionPath), true);
+
+  const result = reducer(retired, {
+    kind: 'SessionOpened', backendGeneration: 0, modelWriteFence: 0,
+    modelHydrationRevision: 0, catalogHydrationRevision: 0, sessionPath,
+    payload: payload(),
+  });
+
+  assert.equal(result.state.livePipeline.turnsBySession[sessionPath], undefined);
+  assert.equal(result.state.sessions.runningSessionPaths.includes(sessionPath), false);
+  assert.deepEqual(result.effects, []);
+});
 
 test('busy session.opened atomically replaces a stale/tombstoned live turn from its checkpoint', () => {
   const stale = liveCheckpoint('starting model...');

@@ -36,6 +36,7 @@ interface RunAnalyticsStorageOptions {
   legacyWorkspaceIds?: string[];
   now: () => Date;
   serializeSessions: () => Record<string, PersistedSessionRunState>;
+  getBillableInvocationExport?: () => Pick<RunAnalyticsExportPayload, 'billableInvocations' | 'billableInvocationSummary'>;
   onPersistError?: (error: { message: string; at: string }) => void;
   /** Max lines retained per JSONL history file (`run-snapshots`).
    *  `<= 0` disables line-based pruning. */
@@ -73,6 +74,7 @@ export class RunAnalyticsStorage {
   private readonly autoExportPath: string;
   private readonly now: () => Date;
   private readonly serializeSessions: () => Record<string, PersistedSessionRunState>;
+  private readonly getBillableInvocationExport?: RunAnalyticsStorageOptions['getBillableInvocationExport'];
   private readonly onPersistError?: (error: { message: string; at: string }) => void;
   private readonly maxRunHistoryEntries: number;
   private readonly maxRunHistoryBytes: number;
@@ -143,6 +145,7 @@ export class RunAnalyticsStorage {
     this.autoExportPath = path.join(this.storageDir, 'run-analytics.json');
     this.now = options.now;
     this.serializeSessions = options.serializeSessions;
+    this.getBillableInvocationExport = options.getBillableInvocationExport;
     this.onPersistError = options.onPersistError;
     this.maxRunHistoryEntries = options.maxRunHistoryEntries ?? 2000;
     this.maxRunHistoryBytes = options.maxRunHistoryBytes ?? 5_000_000;
@@ -880,6 +883,11 @@ export class RunAnalyticsStorage {
     }
   }
 
+  /** Signal that an external authority included in the derived export changed. */
+  markDerivedExportDirty(): void {
+    this.markAutoExportDirty();
+  }
+
   private markAutoExportDirty(): void {
     if (this.disposed) return;
     this.autoExportDirtyVersion += 1;
@@ -933,7 +941,14 @@ export class RunAnalyticsStorage {
   }
 
   private async writeAutoExport(): Promise<void> {
-    await exportRunAnalyticsStore(this.storageDir, this.autoExportPath, this.now);
+    await exportRunAnalyticsStore(
+      this.storageDir,
+      this.autoExportPath,
+      this.now,
+      undefined,
+      undefined,
+      this.getBillableInvocationExport?.(),
+    );
   }
 
   private async writeAutoExportSafely(surfaceImmediately = false): Promise<boolean> {

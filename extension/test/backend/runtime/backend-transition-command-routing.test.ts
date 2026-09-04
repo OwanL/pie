@@ -12,6 +12,7 @@ interface TransitionRoute {
 interface TransitionRouterStub {
   getRoute(sessionPath: string): TransitionRoute | { state: 'hot' | 'cold' };
   hasHotOwner(sessionPath: string): boolean;
+  cancelPendingRuntimeOperations(sessionPath: string): boolean;
   interrupt(sessionPath: string, reason: string): Promise<{ soft: boolean }>;
 }
 
@@ -27,10 +28,13 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-function createServer(router: TransitionRouterStub): ServerTransitionTestPort {
+function createServer(
+  router: Omit<TransitionRouterStub, 'cancelPendingRuntimeOperations'>
+    & Partial<Pick<TransitionRouterStub, 'cancelPendingRuntimeOperations'>>,
+): ServerTransitionTestPort {
   const server = new BackendServer({ sdkPath: '/sdk', cwd: '/repo', workerEntryPath: '/worker.js' });
   const port = server as unknown as ServerTransitionTestPort;
-  port.workerRuntimeRouter = router;
+  port.workerRuntimeRouter = { cancelPendingRuntimeOperations: () => false, ...router };
   return port;
 }
 
@@ -90,14 +94,18 @@ test('message.interrupt serializes behind a hot transition and targets only the 
   assert.deepEqual(await request, { interrupted: true, settled: true });
   assert.equal(interruptCalls.length, 1);
   assert.equal(interruptCalls[0]?.sessionPath, sessionPath);
-  assert.match(interruptCalls[0]?.reason ?? '', /after session transition/);
+  assert.match(interruptCalls[0]?.reason ?? '', /public request interrupt-during-transition/);
 });
 
 test('message.interrupt succeeds after a transition settles cold with no live turn', async () => {
   const transition = deferred<unknown>();
   const sessionPath = '/repo/session.jsonl';
+  let transitioning = true;
+  const completion = transition.promise.finally(() => { transitioning = false; });
   const port = createServer({
-    getRoute: () => ({ state: 'transitioning', completion: transition.promise }),
+    getRoute: () => transitioning
+      ? { state: 'transitioning', completion }
+      : { state: 'cold' },
     hasHotOwner: () => false,
     interrupt: async () => { throw new Error('must not target a retired owner'); },
   });
@@ -108,5 +116,5 @@ test('message.interrupt succeeds after a transition settles cold with no live tu
     params: { sessionPath },
   });
   transition.reject(new Error('promotion failed after retirement'));
-  assert.deepEqual(await request, { interrupted: true, settled: true });
+  assert.deepEqual(await request, { interrupted: false, alreadyStopped: true, settled: true });
 });

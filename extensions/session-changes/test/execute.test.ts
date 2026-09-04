@@ -25,6 +25,22 @@ function textOf(res: any): string {
   return res.content[0].text;
 }
 
+test('tool metadata makes session-scoped review the default after file edits', () => {
+  const firstDescriptionSentence = tool.description.split('. ')[0];
+  assert.match(firstDescriptionSentence, /current or specified Pi session after editing/);
+  assert.match(firstDescriptionSentence, /session-scoped manifest/);
+  assert.match(firstDescriptionSentence, /before workspace-wide Git checks/);
+  assert.match(tool.promptSnippet, /after file edits/);
+  assert.ok(tool.promptGuidelines.some((guideline: string) => (
+    guideline.includes('use session_changes list')
+    && guideline.includes('what this session changed')
+  )));
+  assert.ok(tool.promptGuidelines.some((guideline: string) => (
+    guideline.includes('git status/diff separately')
+    && guideline.includes('pre-existing hunks')
+  )));
+});
+
 /** Build a temp session JSONL (well-formed) whose cwd is the temp dir and
  *  that "created" `created.ts` there — so `diff` on it resolves to a file that
  *  exists and produces a synthetic all-additions body (no git needed). */

@@ -27,6 +27,8 @@ export interface EffectBase {
 
 export interface SendRpcEffect extends EffectBase {
   kind: 'SendRpc';
+  operationId?: string;
+  backendGeneration?: number;
   sessionPath: string;
   text: string;
   /** Composer inputs (file refs, images) sent alongside the text. */
@@ -57,6 +59,9 @@ export interface GenerateSessionTitleEffect extends EffectBase {
 
 export interface EditRpcEffect extends EffectBase {
   kind: 'EditRpc';
+  operationId?: string;
+  operationAttempt?: number;
+  backendGeneration?: number;
   sessionPath: string;
   messageId: string;
   text: string;
@@ -70,11 +75,6 @@ export interface EditRpcEffect extends EffectBase {
   composedText?: string;
   /** User content parts for rich rendering of the optimistic replacement message. */
   userParts?: UserContentPart[];
-  /** The session was already running when the edit was issued, so the composite
-   *  operation must interrupt the live turn before truncating (STATE_CONTRACT §
-   *  Execution Ordering: edit = interrupt → truncate → send). Captured in the
-   *  reducer because `handleEdit` optimistically marks the session running. */
-  interruptFirst: boolean;
 }
 
 export interface QueuedMessageRpcPayload {
@@ -98,10 +98,16 @@ export interface ReplaceQueueRpcEffect extends EffectBase {
 export interface ContinueRpcEffect extends EffectBase {
   kind: 'ContinueRpc';
   sessionPath: string;
+  operationId?: string;
+  operationAttempt?: number;
+  backendGeneration?: number;
 }
 
 export interface InterruptRpcEffect extends EffectBase {
   kind: 'InterruptRpc';
+  operationId?: string;
+  operationAttempt?: number;
+  backendGeneration?: number;
   sessionPath: string;
 }
 
@@ -115,6 +121,9 @@ export interface RequestLiveTurnCheckpointEffect extends EffectBase {
 export interface CompactRpcEffect extends EffectBase {
   kind: 'CompactRpc';
   sessionPath: string;
+  operationId?: string;
+  operationAttempt?: number;
+  backendGeneration?: number;
 }
 
 export interface ClearQueueRpcEffect extends EffectBase {
@@ -147,6 +156,8 @@ export interface CreateSessionEffect extends EffectBase {
   operationId?: string;
   /** Attempt fence for stale timeout/error settlement. */
   operationAttempt?: number;
+  /** Backend generation whose process-scoped ledger owns the operation. */
+  backendGeneration?: number;
 }
 
 export interface NotifySessionViewedEffect extends EffectBase {
@@ -418,6 +429,8 @@ export interface DuplicateSessionEffect extends EffectBase {
   operationId?: string;
   /** Attempt fence for stale timeout/error settlement. */
   operationAttempt?: number;
+  /** Backend generation whose process-scoped ledger owns the operation. */
+  backendGeneration?: number;
 }
 
 export type Effect =

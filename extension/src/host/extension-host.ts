@@ -168,6 +168,7 @@ export class PieExtension implements vscode.Disposable {
       getExperimentAssignment: () => this.getExperimentAssignment(),
       getArchState: () => this.archState,
       dispatchArchEvent: (event) => this.dispatchArchEvent(event),
+      getAgentDir: () => process.env.PI_CODING_AGENT_DIR?.trim() || null,
     });
 
     this.service = new SessionService(
@@ -521,6 +522,21 @@ export class PieExtension implements vscode.Disposable {
         && event.ok && event.requestId) {
       this.service.bindRequestSessionPath(event.requestId, event.sessionPath);
     }
+    if (event.kind === 'SendResult') {
+      this.service.notifyDeferredTriggerSendResult(event.corrId, event.ok, event.error);
+    }
+    if (event.kind === 'BackendReadyWatchdogFired') {
+      // These queued sends never crossed the backend boundary and are about to
+      // be dropped by the reducer, so any deferred-trigger claims are
+      // definitively retryable rather than ambiguously retained.
+      for (const entry of Object.values(this.archState.pending.backendReadyQueueBySession).flat()) {
+        this.service.notifyDeferredTriggerSendResult(
+          entry.corrId,
+          false,
+          'backend readiness timed out; delivery remains retryable',
+        );
+      }
+    }
     if (event.kind === 'CloseSessionResult' || event.kind === 'PersistTabsResult') {
       this.service.handleReviewClosureEffectResult(event);
     }
@@ -814,7 +830,13 @@ export class PieExtension implements vscode.Disposable {
       : { ...cachedAggregateStats, runningSessionCount, openTabCount };
     const viewState: ViewState = {
       ...projected,
+      // Transcript-derived usage is migration-only. The live and recovered UI
+      // always receives the host-owned immutable invocation-ledger projection.
+      sessionUsage: projected.activeSession
+        ? this.statsService.getSessionUsage(projected.activeSession.path)
+        : null,
       tokenRateBySession: this.tokenRateService.getRates(),
+      workingTimeBySession: this.statsService.getWorkingTimeBySession(),
       aggregateStats,
       // Active deferred triggers are owned by the `DeferredTriggerRegistry`
       // (host-side, not in ArchState) — merged here like `aggregateStats` /

@@ -32,6 +32,7 @@ import { projectRegistryModels, resolveActiveModel } from './session-metadata';
 import { ExtensionUIBridge } from './extension-ui-bridge';
 import { installAuxiliaryLlmMeter } from './auxiliary-llm-meter';
 import { handleBackendRequest } from './request-handler';
+import { buildSessionCapabilities, hasBillableSessionActivity } from './session-activity';
 import { createRuntimeFactory, ServiceLoadingGate } from './runtime-factory';
 import { handleSdkSessionEvent } from './session-event-handler';
 import {
@@ -258,23 +259,32 @@ export class WorkerRuntimeHost {
   async interrupt(): Promise<{ interrupted: boolean; settled?: boolean; alreadyStopped?: boolean }> {
     const context = this.context;
     if (!context) return { interrupted: false, alreadyStopped: true };
-    const running = !!context.activeRequest || context.session.isStreaming || context.session.isCompacting
-      || context.session.isRetrying || context.session.isBashRunning;
+    const running = hasBillableSessionActivity(context);
     const interruptedRequest = context.activeRequest;
     const interruptedExtensionCommand = context.pendingExtensionCommand;
     context.uiBridge?.cancelAll();
     context.session.clearQueue();
-    context.queuedLocalIds = [];
-    if (!running) return { interrupted: false, alreadyStopped: true };
-    // The isolated worker's priority interrupt bypasses request-handler.ts.
-    // Cancel the same deferred threshold-compaction continuation here so
-    // the SDK cannot start a fresh zero-prompt run after Stop has settled.
-    context.session.cancelPendingHardCompactionContinuation?.();
-    context.hardCompactionContinuationPending = false;
-    if (context.thresholdCompactionContinuationCandidate) {
-      context.thresholdCompactionContinuationCandidate.aborted = true;
-      context.thresholdCompactionContinuationCandidate = undefined;
+    for (const [index, operationId] of (context.queuedOperationIds ?? []).entries()) {
+      if (!operationId) continue;
+      context.sendOperationLedger?.markFailed(
+        operationId,
+        'MESSAGE_SEND_QUEUE_CLEARED',
+        'The queued message was cancelled by Stop before delivery.',
+      );
+      this.emit('message.aborted', {
+        requestId: `queued:${operationId}`,
+        operationId,
+        sessionPath: context.sessionPath,
+        ...(context.queuedLocalIds?.[index] ? { localId: context.queuedLocalIds[index] } : {}),
+        outcome: 'cancelled',
+        userInitiated: true,
+        reason: 'The queued message was cancelled by Stop before delivery.',
+      });
     }
+    context.queuedLocalIds = [];
+    context.queuedOperationIds = [];
+    if (!running) return { interrupted: false, alreadyStopped: true };
+    if (context.manualCompactionRequest) context.manualCompactionRequest.cancelled = true;
     if (context.activeRequest) context.activeRequest.aborted = true;
     context.session.abortCompaction?.();
     context.session.abortBranchSummary?.();
@@ -300,10 +310,19 @@ export class WorkerRuntimeHost {
         interruptedRequest.quotaSettlementTimer = undefined;
         interruptedRequest.pendingDurableToolTerminals?.clear();
       }
-      this.emit('preflight.failed', {
+      context.sendOperationLedger?.markFailed(
+        interruptedRequest?.operationId,
+        'MESSAGE_OPERATION_CANCELLED',
+        'The message operation was interrupted before starting an agent turn.',
+        'cancelled',
+      );
+      this.emit('message.aborted', {
         requestId: interruptedExtensionCommand.requestId,
+        ...(interruptedRequest?.operationId ? { operationId: interruptedRequest.operationId } : {}),
         sessionPath: interruptedExtensionCommand.sessionPath,
-        error: 'Extension command was interrupted before starting an agent turn.',
+        outcome: 'cancelled',
+        userInitiated: true,
+        reason: 'Extension command was interrupted before starting an agent turn.',
       });
       context.pendingExtensionCommand = undefined;
       context.activeRequest = undefined;
@@ -311,10 +330,45 @@ export class WorkerRuntimeHost {
     }
     // Some provider/compaction abort paths settle without a final agent_end.
     // Match the public interrupt reconciliation so a re-armed continuation
-    // request cannot remain attached to an idle isolated worker.
-    if (interruptedRequest
-        && !context.session.isStreaming
-        && context.activeRequest === interruptedRequest) {
+    // request cannot remain attached to an otherwise-idle isolated worker.
+    const reconcileOwnedIdleRequest = () => {
+      if (!interruptedRequest
+          || context.activeRequest !== interruptedRequest
+          || hasBillableSessionActivity({ ...context, activeRequest: undefined })) return;
+      const preCommit = interruptedRequest.messageIndex === 0
+        && !interruptedRequest.lastAssistantMessageId
+        && !interruptedRequest.currentMessageId
+        && interruptedRequest.semanticStarted !== true;
+      if (preCommit && interruptedRequest.operationId) {
+        context.sendOperationLedger?.markFailed(
+          interruptedRequest.operationId,
+          'MESSAGE_OPERATION_CANCELLED',
+          'The message operation was cancelled by Stop before it started.',
+          'cancelled',
+        );
+        interruptedRequest.terminalWithoutMessageEmitted = true;
+        this.emit('message.aborted', {
+          requestId: interruptedRequest.id,
+          operationId: interruptedRequest.operationId,
+          ...(interruptedRequest.operationAttempt !== undefined ? { operationAttempt: interruptedRequest.operationAttempt } : {}),
+          sessionPath: context.sessionPath,
+          outcome: 'cancelled',
+          userInitiated: true,
+          reason: 'The send was cancelled by Stop before it started.',
+        });
+      } else if (interruptedRequest.semanticStarted === true) {
+        this.emit('message.aborted', {
+          requestId: interruptedRequest.id,
+          ...(interruptedRequest.operationId ? { operationId: interruptedRequest.operationId } : {}),
+          ...(interruptedRequest.operationAttempt !== undefined ? { operationAttempt: interruptedRequest.operationAttempt } : {}),
+          sessionPath: context.sessionPath,
+          messageId: interruptedRequest.lastAssistantMessageId
+            ?? interruptedRequest.currentMessageId
+            ?? interruptedRequest.liveTurnAccumulator?.checkpoint().turn.canonicalMessageId
+            ?? `${interruptedRequest.id}:1`,
+          userInitiated: true,
+        });
+      }
       if (interruptedRequest.promptSafetyTimer) clearTimeout(interruptedRequest.promptSafetyTimer);
       if (interruptedRequest.semanticLeaseTimer) clearTimeout(interruptedRequest.semanticLeaseTimer);
       if (interruptedRequest.quotaSettlementTimer) clearTimeout(interruptedRequest.quotaSettlementTimer);
@@ -323,6 +377,21 @@ export class WorkerRuntimeHost {
       context.willRetryWatchdogClear = undefined;
       context.activeRequest = undefined;
       this.emitBusyChanged(context, false);
+    };
+    reconcileOwnedIdleRequest();
+    // `session.abort()` may resolve before the SDK publishes terminal lifecycle
+    // state. Keep the priority response open while any billable window remains;
+    // the coordinator owns the single bounded cooperative grace and will
+    // force-kill this worker if the complete classifier never becomes idle.
+    while (!this.disposed && this.context === context && hasBillableSessionActivity(context)) {
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, 10);
+        timer.unref?.();
+      });
+      reconcileOwnedIdleRequest();
+    }
+    if (this.disposed || this.context !== context) {
+      return { interrupted: true, settled: false };
     }
     return { interrupted: true, settled: true };
   }
@@ -479,8 +548,12 @@ export class WorkerRuntimeHost {
     // emits agent_end/message_start. Close the source's busy window while its
     // path still identifies the source; otherwise the replacement's later
     // callbacks can leave an unmatched busy=true on the source path.
-    if (previousActiveRequest || pendingExtensionCommandOwned || previousSession.isStreaming || previousSession.isCompacting
-      || previousSession.isRetrying || previousSession.isBashRunning) {
+    if (hasBillableSessionActivity({
+      ...context,
+      activeRequest: previousActiveRequest,
+      pendingExtensionCommand: pendingExtensionCommandOwned ? pendingExtensionCommand : undefined,
+      session: previousSession,
+    })) {
       this.emitBusyChanged(context, false);
     }
     // The public message.send already acknowledged this request, but the
@@ -491,8 +564,10 @@ export class WorkerRuntimeHost {
       || (previousActiveRequest.messageIndex === 0
         && !previousActiveRequest.lastAssistantMessageId
         && !previousActiveRequest.currentMessageId))) {
+      context.sendOperationLedger?.markFailed(previousActiveRequest?.operationId, 'MESSAGE_SEND_PRECOMMIT_FAILED', 'Extension command replaced the session before starting an agent turn.');
       this.emit('preflight.failed', {
         requestId: pendingExtensionCommand!.requestId,
+        ...(previousActiveRequest?.operationId ? { operationId: previousActiveRequest.operationId } : {}),
         sessionPath: previousSessionPath,
         error: 'Extension command replaced the session before starting an agent turn.',
       });
@@ -511,6 +586,7 @@ export class WorkerRuntimeHost {
     context.session = session;
     context.sessionPath = sessionPath;
     context.activeRequest = undefined;
+    context.manualCompactionRequest = undefined;
     context.overflowRecoveryCandidate = undefined;
     if (!sameSessionPath(previousSessionPath, sessionPath)) {
       context.busySeq = 0;
@@ -519,6 +595,7 @@ export class WorkerRuntimeHost {
       context.compactionStartedAt = undefined;
     }
     context.queuedLocalIds = [];
+    context.queuedOperationIds = [];
     context.terminalLiveTurn = undefined;
     context.willRetryWatchdogTimer = undefined;
     context.willRetryWatchdogClear = undefined;
@@ -675,7 +752,7 @@ export class WorkerRuntimeHost {
     if (event.type === 'turn_start') this.enforceMcpToolsDisabled(context);
     handleSdkSessionEvent({
       emit: (name, payload) => this.emit(name, payload),
-      emitBusyChanged: (owner, busy) => this.emitBusyChanged(owner, busy),
+      emitBusyChanged: (owner, busy, capabilities) => this.emitBusyChanged(owner, busy, capabilities),
       emitContextUsageChanged: (owner, estimated) => this.emitContextUsageChanged(owner, estimated),
       emitSessionOpened: async (sessionPath) => this.emitRefreshedSessionOpened(sessionPath),
       emitSessionListChanged: async () => undefined,
@@ -714,7 +791,8 @@ export class WorkerRuntimeHost {
       // that lifecycle event the remainder of the same bounded grace, but do
       // not equate an abort promise resolution with semantic recovery.
       while (!this.disposed && this.context === context
-        && (ownedRequest ? context.activeRequest === ownedRequest : !!context.activeRequest)) {
+        && hasBillableSessionActivity(context)
+        && (ownedRequest ? context.activeRequest === ownedRequest : true)) {
         const remaining = deadlineAt - Date.now();
         if (remaining <= 0) return 'unsettled' as const;
         await new Promise<void>((resolve) => {
@@ -937,9 +1015,28 @@ export class WorkerRuntimeHost {
     this.emit('session.opened', { ...this.openedPayload, runtimeReady: true });
   }
 
-  private emitBusyChanged(context: SessionContext, busy: boolean): void {
+  private emitBusyChanged(
+    context: SessionContext,
+    busy = hasBillableSessionActivity(context),
+    suppliedCapabilities?: import('../shared/protocol').SessionCapabilities,
+  ): void {
     context.busySeq += 1;
-    this.emit('busy.changed', { sessionPath: context.sessionPath, busy, seq: context.busySeq });
+    const current = suppliedCapabilities ?? buildSessionCapabilities(context);
+    const capabilities = current.billableActivity === busy
+      ? current
+      : {
+          ...current,
+          billableActivity: busy,
+          canInterrupt: busy,
+          canCompact: !busy,
+          canContinue: !busy && current.canContinue,
+        };
+    this.emit('busy.changed', {
+      sessionPath: context.sessionPath,
+      busy,
+      capabilities,
+      seq: context.busySeq,
+    });
   }
 
   private emitContextUsageChanged(context: SessionContext, estimated?: number): void {
@@ -1002,6 +1099,7 @@ export class WorkerRuntimeHost {
     const context = this.context!;
     return {
       sdkPath: this.options.patchIdentity.sdkPath,
+      backendGeneration: this.options.owner.coordinatorGeneration,
       agentDir: this.agentDir,
       startupCwd: this.startupCwd,
       sessionDir: this.sessionDir,
@@ -1013,6 +1111,14 @@ export class WorkerRuntimeHost {
         return context;
       },
       isSessionTransitionPending: () => false,
+      // Priority interruption and fail-closed disposal can revoke this owner
+      // while a queued command is crossing an async transition wait. Fence the
+      // exact context again at the final synchronous SDK mutation boundary.
+      isSessionContextCurrent: (sessionPath, candidate) => this.context === candidate
+        && candidate === context
+        && !candidate.retired
+        && candidate.recoveryPromise === undefined
+        && sameSessionPath(sessionPath, candidate.sessionPath),
       setViewedSessionPath: () => undefined,
       buildSessionOpenedPayload: async (sessionPath, selectionToken, transcript, transport, operationId, operationAttempt) => (
         this.buildOpenedPayload(sessionPath, selectionToken, operationId, operationAttempt, transcript, transport)
@@ -1027,7 +1133,7 @@ export class WorkerRuntimeHost {
       ),
       loadDetail: async (sessionPath, ref) => this.loadDetail(context, sessionPath, ref),
       emit: (event, payload) => this.emit(event, payload),
-      emitBusyChanged: (owner, busy) => this.emitBusyChanged(owner, busy),
+      emitBusyChanged: (owner, busy, capabilities) => this.emitBusyChanged(owner, busy, capabilities),
       emitContextUsageChanged: (owner) => this.emitContextUsageChanged(owner),
       emitSessionListChanged: async () => undefined,
       listSessions: async () => this.openedPayload ? [this.openedPayload.session] : [],
@@ -1060,7 +1166,7 @@ export class WorkerRuntimeHost {
       direction, loadedStart, loadedEnd,
       pinnedMessageId: context.activeRequest?.currentMessageId ?? context.activeRequest?.lastAssistantMessageId,
     });
-    const busy = context.session.isStreaming || !!context.activeRequest || context.session.isCompacting === true;
+    const busy = hasBillableSessionActivity(context);
     return {
       sessionPath: context.sessionPath,
       transcript: (busy ? page.transcript : normalizeDanglingTranscript(page.transcript))

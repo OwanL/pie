@@ -105,7 +105,7 @@ test('createNewSession mints the selection token before the reducer activates th
   assert.equal(requestFences?.[2]?.modelWriteFence, 2);
   state.handleSelectionFailure(capturedToken!, 'stale failure', 1);
   assert.equal(archState.sessions.openTabPaths.includes(pendingPath), true);
-  assert.equal(archState.pending.createOperations[capturedOperationId!]?.status, 'pending');
+  assert.equal(archState.operations[capturedOperationId!]?.phase, 'awaiting-acceptance');
 
   // A correlated success is authoritative even if session.opened publication
   // never arrives after the backend's durable commit point.
@@ -114,7 +114,7 @@ test('createNewSession mints the selection token before the reducer activates th
     state.handleCreateOperationAcknowledged(capturedToken!, capturedOperationId!, acknowledgedPath),
     pendingPath,
   );
-  assert.equal(archState.pending.createOperations[capturedOperationId!]?.status, 'succeeded');
+  assert.equal(archState.operations[capturedOperationId!]?.terminal?.outcome, 'settled');
   assert.equal(archState.sessions.openTabPaths.includes(acknowledgedPath), true);
   assert.equal(archState.sessions.sessions.some((summary) => summary.path === acknowledgedPath), true);
   assert.equal(archState.sessions.activeSessionPath, acknowledgedPath);
@@ -196,7 +196,7 @@ test('late session.opened reconciles a timed-out create exactly once and a late 
     },
   };
   state.handleCreateOperationDelayed(selectionToken!, operationId!, 'still creating');
-  assert.equal(archState.pending.createOperations[operationId!]?.status, 'delayed-awaiting-outcome');
+  assert.equal(archState.operations[operationId!]?.phase, 'ambiguous');
 
   const resolvedPath = '/workspace/resolved.jsonl';
   const payload: SessionOpenedPayload = {
@@ -214,7 +214,7 @@ test('late session.opened reconciles a timed-out create exactly once and a late 
     }, scheduleRender: () => undefined, context, state,
   };
   applySessionOpenedPayload(payload, deps);
-  assert.equal(archState.pending.createOperations[operationId!]?.status, 'succeeded');
+  assert.equal(archState.operations[operationId!]?.terminal?.outcome, 'settled');
   assert.deepEqual(archState.sessions.openTabPaths, [OLD, resolvedPath]);
   assert.equal(archState.sessions.activeSessionPath, resolvedPath);
   assert.equal(replacements, 1);
@@ -282,7 +282,7 @@ test('a hidden delayed create resolves late without reopening or focusing its ta
     getArchState, dispatchArch, runObserver: NOOP_RUN_OBSERVER,
     scheduleRender: () => undefined, context, state,
   });
-  assert.equal(archState.pending.createOperations[operationId!]?.status, 'succeeded');
+  assert.equal(archState.operations[operationId!]?.terminal?.outcome, 'settled');
   assert.equal(archState.sessions.openTabPaths.includes(pendingPath), false);
   assert.equal(archState.sessions.openTabPaths.includes(resolvedPath), false);
   assert.equal(archState.sessions.activeSessionPath, OLD);
@@ -362,7 +362,7 @@ test('backend-generation death is the definitive cleanup path for a delayed crea
   const pendingPath = tabs.createNewSession();
   state.handleCreateOperationDelayed(selectionToken!, operationId!, 'still creating');
   state.failPendingCreateOperations('PI backend stopped');
-  assert.equal(archState.pending.createOperations[operationId!]?.status, 'failed');
+  assert.equal(archState.operations[operationId!]?.terminal?.outcome, 'failed');
   assert.equal(archState.sessions.openTabPaths.includes(pendingPath), false);
   assert.equal(archState.sessions.activeSessionPath, OLD);
   assert.equal(state.getSelectionRequest(selectionToken!), null);

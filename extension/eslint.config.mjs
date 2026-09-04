@@ -8,6 +8,7 @@ export default tseslint.config(
       'node_modules/**',
       'out/**',
       '.tmp/**',
+      '.pie-sdk-*/**',
       '*.vsix',
     ],
   },

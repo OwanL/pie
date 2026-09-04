@@ -65,6 +65,18 @@ export interface PruningDetails {
   prepassCacheWriteTokens?: number;
   /** Exact provider-reported prepass cost, when available. */
   prepassReportedCostUsd?: number;
+  /** One settlement for every scorer provider request, including retries. */
+  prepassInvocations?: Array<{
+    invocationId: string;
+    startedAt: string;
+    endedAt: string;
+    outcome: 'succeeded' | 'failed' | 'cancelled';
+    input?: number;
+    output?: number;
+    cacheRead?: number;
+    cacheWrite?: number;
+    reportedCostUsd?: number;
+  }>;
   /** Error message if pruning prepass failed. */
   prepassError?: string;
   /** Reason surfaced when a keep-all safeguard retained every item (prepass pruned 100% of a category, or a non-JSON parse failure). */

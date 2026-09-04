@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { reducer, initialArchState, type ArchState } from '../../../../src/host/core/reducer';
 import { selectViewState } from '../../../../src/host/core/projection';
 import type { Event } from '../../../../src/host/core/events';
+import { activeInterruptOperation, hasRetiredInterruptEventFence } from '../../../../src/host/core/operation-registry';
 import type { ChatMessage, SessionSummary } from '../../../../src/shared/protocol';
 
 // A state with backendReady=true — needed because the Send Command handler
@@ -16,66 +17,7 @@ const readyState: ArchState = {
 test('reducer: initial state has empty pending ops and sessions records', () => {
   assert.deepEqual(initialArchState.pending.ops, {});
   assert.deepEqual(initialArchState.sessions.sessions, []);
-  assert.deepEqual(initialArchState.sessions.interruptInFlightBySession, {});
-});
-
-test('reducer: truncate-timeout recovery notice preserves its optimistic edit and clears only its own notice', () => {
-  const state: ArchState = {
-    ...readyState,
-    pending: {
-      ...readyState.pending,
-      ops: {
-        'edit-recovery': {
-          kind: 'edit',
-          sessionPath: '/a',
-          localId: 'replacement-local',
-          previousSummary: null,
-          startedAt: 1,
-          removedTail: [],
-          editDraft: { messageId: 'old-user', text: 'replacement', inputs: [] },
-        },
-      },
-    },
-  };
-
-  const recovering = reducer(state, {
-    kind: 'EditTruncateRecoveryChanged',
-    corrId: 'edit-recovery',
-    sessionPath: '/a',
-    phase: 'recovering',
-  });
-  assert.equal(recovering.state.settings.notice, 'Saving your edit and restarting this session…');
-  assert.equal(recovering.state.settings.noticeSessionPath, '/a');
-  assert.deepEqual(recovering.state.pending.ops['edit-recovery'], state.pending.ops['edit-recovery']);
-
-  const unrelated = reducer(recovering.state, {
-    kind: 'NoticeShown',
-    notice: 'A newer warning',
-    sessionPath: '/a',
-  });
-  const lateRecovered = reducer(unrelated.state, {
-    kind: 'EditTruncateRecoveryChanged',
-    corrId: 'edit-recovery',
-    sessionPath: '/a',
-    phase: 'recovered',
-  });
-  assert.equal(lateRecovered.state.settings.notice, 'A newer warning');
-  assert.ok(lateRecovered.state.pending.ops['edit-recovery'], 'recovery status never consumes rollback ownership');
-
-  const restartedNotice = reducer(lateRecovered.state, {
-    kind: 'EditTruncateRecoveryChanged',
-    corrId: 'edit-recovery',
-    sessionPath: '/a',
-    phase: 'recovering',
-  });
-  const acknowledged = reducer(restartedNotice.state, {
-    kind: 'EditTruncateRecoveryChanged',
-    corrId: 'edit-recovery',
-    sessionPath: '/a',
-    phase: 'recovered',
-  });
-  assert.equal(acknowledged.state.settings.notice, null);
-  assert.ok(acknowledged.state.pending.ops['edit-recovery']);
+  assert.deepEqual(initialArchState.operations, {});
 });
 
 test('reducer: SendResult for unknown corrId is a no-op (state unchanged, no effects)', () => {
@@ -192,7 +134,7 @@ test('reducer: stable session identity clears a stale path-fallback marker', () 
   assert.equal(result.state.sessions.sessions[0]?.identityFallback, false);
 });
 
-test('reducer: Interrupt command sets interruptInFlight and returns InterruptRpc effect', () => {
+test('reducer: Interrupt command registers active Stop and returns InterruptRpc effect', () => {
   const event: Event = {
     kind: 'Command',
     cmd: { kind: 'Interrupt', corrId: 'c1', sessionPath: '/session/a' },
@@ -200,12 +142,11 @@ test('reducer: Interrupt command sets interruptInFlight and returns InterruptRpc
 
   const result = reducer(initialArchState, event);
 
-  assert.equal(result.state.sessions.interruptInFlightBySession['/session/a'], true);
+  assert.equal(activeInterruptOperation(result.state.operations, '/session/a')?.operationId, 'c1');
   assert.equal(result.effects.length, 1);
   assert.deepEqual(result.effects[0], {
-    kind: 'InterruptRpc',
-    corrId: 'c1',
-    sessionPath: '/session/a',
+    kind: 'InterruptRpc', corrId: 'c1', operationId: 'c1', operationAttempt: 1,
+    backendGeneration: 0, sessionPath: '/session/a',
   });
 });
 
@@ -221,28 +162,27 @@ test('reducer: Compact command returns a session-scoped CompactRpc effect', () =
   assert.deepEqual(result.state.sessions.compactingSessionPaths, ['/session/a']);
   assert.deepEqual(result.effects, [{
     kind: 'CompactRpc', corrId: 'compact-1', sessionPath: '/session/a',
+    operationId: 'compact-1', operationAttempt: 1, backendGeneration: 0,
   }]);
 });
 
 test('reducer: CompactResult failure surfaces an operational notice', () => {
-  const result = reducer(initialArchState, {
-    kind: 'CompactResult', corrId: 'compact-1', sessionPath: '/session/a', ok: false, error: 'provider failed',
+  const started = reducer(initialArchState, {
+    kind: 'Command', cmd: { kind: 'Compact', corrId: 'compact-1', sessionPath: '/session/a' },
+  }).state;
+  const result = reducer(started, {
+    kind: 'CompactResult', corrId: 'compact-1', sessionPath: '/session/a', ok: false,
+    error: 'REQUEST_IN_PROGRESS: provider failed before compaction started',
   });
 
   assert.equal(result.state.settings.notice, 'Could not compact this conversation.');
   assert.equal(result.state.settings.noticeKind, 'operational-error');
-  assert.equal(result.state.settings.noticeRaw, 'provider failed');
+  assert.equal(result.state.settings.noticeRaw, 'REQUEST_IN_PROGRESS: provider failed before compaction started');
   assert.deepEqual(result.effects, []);
 });
 
 test('reducer: Interrupt does not affect other sessions', () => {
-  const stateWithB: ArchState = {
-    ...initialArchState,
-    sessions: {
-      ...initialArchState.sessions,
-      interruptInFlightBySession: { '/b': false },
-    },
-  };
+  const stateWithB: ArchState = initialArchState;
 
   const event: Event = {
     kind: 'Command',
@@ -251,56 +191,47 @@ test('reducer: Interrupt does not affect other sessions', () => {
 
   const result = reducer(stateWithB, event);
 
-  assert.equal(result.state.sessions.interruptInFlightBySession['/a'], true);
-  assert.equal(result.state.sessions.interruptInFlightBySession['/b'], false);
+  assert.equal(activeInterruptOperation(result.state.operations, '/a')?.operationId, 'c2');
+  assert.equal(activeInterruptOperation(result.state.operations, '/b'), undefined);
 });
 
-test('reducer: InterruptResult{ok:true} clears interruptInFlight and sets running=false directly', () => {
-  const state: ArchState = {
+test('reducer: authoritatively settled InterruptResult retires Stop and sets running=false directly', () => {
+  const state = reducer({
     ...initialArchState,
-    sessions: {
-      ...initialArchState.sessions,
-      runningSessionPaths: ['/a'],
-      interruptInFlightBySession: { '/a': true },
-    },
-  };
+    sessions: { ...initialArchState.sessions, runningSessionPaths: ['/a'] },
+  }, {
+    kind: 'Command', cmd: { kind: 'Interrupt', corrId: 'c1', sessionPath: '/a' },
+  }).state;
 
   const event: Event = {
-    kind: 'InterruptResult',
-    corrId: 'c1',
-    sessionPath: '/a',
-    ok: true,
+    kind: 'InterruptResult', corrId: 'c1', operationId: 'c1', backendGeneration: 0,
+    sessionPath: '/a', ok: true, committed: true, settled: true,
   };
 
   const result = reducer(state, event);
 
-  assert.equal(result.state.sessions.interruptInFlightBySession['/a'], false);
+  assert.equal(activeInterruptOperation(result.state.operations, '/a'), undefined);
+  assert.equal(hasRetiredInterruptEventFence(result.state.operations, '/a'), true);
   // Watchdog: running=false set directly in state
   assert.ok(!result.state.sessions.runningSessionPaths.includes('/a'), 'running should be cleared for /a');
   // No SyncEffect — running state is mutated directly
   assert.equal(result.effects.length, 0);
 });
 
-test('reducer: InterruptResult{ok:false} clears flag and produces Log effect', () => {
-  const state: ArchState = {
-    ...initialArchState,
-    sessions: {
-      ...initialArchState.sessions,
-      interruptInFlightBySession: { '/a': true },
-    },
-  };
+test('reducer: definitive InterruptResult failure terminalizes Stop and produces Log effect', () => {
+  const state = reducer(initialArchState, {
+    kind: 'Command', cmd: { kind: 'Interrupt', corrId: 'c1', sessionPath: '/a' },
+  }).state;
 
   const event: Event = {
-    kind: 'InterruptResult',
-    corrId: 'c1',
-    sessionPath: '/a',
-    ok: false,
-    error: 'connection lost',
+    kind: 'InterruptResult', corrId: 'c1', operationId: 'c1', backendGeneration: 0,
+    sessionPath: '/a', ok: false, committed: false, error: 'connection lost',
   };
 
   const result = reducer(state, event);
 
-  assert.equal(result.state.sessions.interruptInFlightBySession['/a'], false);
+  assert.equal(activeInterruptOperation(result.state.operations, '/a'), undefined);
+  assert.equal(hasRetiredInterruptEventFence(result.state.operations, '/a'), false);
   assert.equal(result.effects.length, 1);
   assert.equal(result.effects[0]?.kind, 'Log');
   if (result.effects[0]?.kind === 'Log') {
@@ -339,6 +270,7 @@ test('reducer: Send command inserts optimistic message and produces SendRpc', ()
   // Pending entry recorded.
   assert.deepEqual(result.state.pending.ops['c-send'], {
     kind: 'send',
+    operationId: 'c-send',
     sessionPath: '/s',
     localId: 'loc-1',
     previousSummary: null,
@@ -564,6 +496,7 @@ test('reducer: Edit command records pending, inserts optimistic message, produce
 
   assert.deepEqual(result.state.pending.ops['c-edit'], {
     kind: 'edit',
+    operationId: 'c-edit',
     sessionPath: '/s',
     localId: 'loc-e1',
     previousSummary: null,
@@ -1093,11 +1026,42 @@ test('reducer: BusyChanged running=true adds session to runningSessionPaths', ()
     kind: 'BusyChanged',
     sessionPath: '/s',
     running: true,
+    capabilities: {
+      billableActivity: true,
+      canContinue: false,
+      canInterrupt: true,
+      canCompact: false,
+    },
   });
 
   assert.ok(result.state.sessions.runningSessionPaths.includes('/s'));
+  assert.deepEqual(result.state.sessions.capabilitiesBySession['/s'], {
+    billableActivity: true,
+    canContinue: false,
+    canInterrupt: true,
+    canCompact: false,
+  });
   assert.equal(result.state.sessions.unreadFinishedSessionPaths.length, 0);
   assert.deepEqual(result.effects, []);
+});
+
+test('reducer: AgentSettled updates capabilities without pre-empting the ordered busy boundary', () => {
+  const running = reducer(initialArchState, {
+    kind: 'BusyChanged', sessionPath: '/s', running: true,
+  }).state;
+  const result = reducer(running, {
+    kind: 'AgentSettled',
+    sessionPath: '/s',
+    capabilities: {
+      billableActivity: false,
+      canContinue: true,
+      canInterrupt: false,
+      canCompact: true,
+    },
+  });
+
+  assert.equal(result.state.sessions.runningSessionPaths.includes('/s'), true);
+  assert.equal(result.state.sessions.capabilitiesBySession['/s']?.canContinue, true);
 });
 
 test('reducer: BusyChanged running=false when was running adds to unreadFinishedSessionPaths', () => {

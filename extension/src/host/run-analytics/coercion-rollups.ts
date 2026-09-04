@@ -316,8 +316,16 @@ export function coerceToolUsageRollup(value: unknown): ToolUsageRollup {
       if (Object.values(split.execution).some((c) => c > 0)) {
         failureCountsByNameAndKind[toolName] = split.execution;
       }
-      if (split.verificationTotal > 0 || split.probeTotal > 0 || split.pendingTotal > 0) {
+      const resultIssueTotal = split.verificationTotal + split.probeTotal + split.pendingTotal;
+      if (resultIssueTotal > 0) {
         derivedResultIssueByNameAndKind[toolName] = split.resultIssue;
+        // Recompute the per-tool failure count to execution-only: legacy data
+        // embedded result issues in failureCountsByName, so subtract
+        // the result-issue count now attributed to this tool. (New-format data has
+        // no result issues in failureCountsByNameAndKind, so this is a no-op.)
+        if (typeof failureCountsByName[toolName] === 'number') {
+          failureCountsByName[toolName] = Math.max(0, failureCountsByName[toolName] - resultIssueTotal);
+        }
       }
     }
   }

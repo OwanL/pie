@@ -681,6 +681,9 @@ test('coerceToolUsageRollup remaps legacy failure kinds into result-issue rollup
 
   // Per-tool split: bash keeps execution kinds, gains result-issue kinds.
   assert.equal(toolUsage.failureCountsByNameAndKind.bash?.timeout, 1);
+  // bash's embedded legacy result-issue counts (1 + 1) are subtracted from
+  // failureCountsByName (3 -> 1) to keep the per-tool totals execution-only.
+  assert.deepEqual(toolUsage.failureCountsByName, { bash: 1, read: 1 });
   assert.equal(('verification_project_failure' in (toolUsage.failureCountsByNameAndKind.bash ?? {})), false);
   assert.equal(toolUsage.resultIssueCountsByNameAndKind.bash?.verification_failure, 1);
   assert.equal(toolUsage.resultIssueCountsByNameAndKind.bash?.probe_no_match, 1);

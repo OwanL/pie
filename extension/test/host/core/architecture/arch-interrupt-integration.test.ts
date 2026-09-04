@@ -10,6 +10,7 @@ import { EffectRunner, type EffectRunnerDeps, type TimerSink } from '../../../..
 import { reducer, initialArchState, type ArchState } from '../../../../src/host/core/reducer';
 import type { Effect } from '../../../../src/host/core/effects';
 import type { Event, EffectResultEvent } from '../../../../src/host/core/events';
+import { activeInterruptOperation, hasRetiredInterruptEventFence } from '../../../../src/host/core/operation-registry';
 import { makeEffectRunnerDeps } from '../../../helpers/effect-runner-deps';
 
 /** No-op timer sink: schedules nothing (no real wall-clock timer) so the
@@ -143,7 +144,7 @@ test('end-to-end: interrupt command through reducer produces effect and result c
   const r1 = reducer(state, interruptCmd);
   state = r1.state;
 
-  assert.equal(state.sessions.interruptInFlightBySession['/x'], true);
+  assert.equal(activeInterruptOperation(state.operations, '/x')?.operationId, 'c-e2e');
   assert.equal(r1.effects.length, 1);
   assert.equal(r1.effects[0]?.kind, 'InterruptRpc');
 
@@ -157,7 +158,8 @@ test('end-to-end: interrupt command through reducer produces effect and result c
   const r2 = reducer(state, resultEvent);
   state = r2.state;
 
-  assert.equal(state.sessions.interruptInFlightBySession['/x'], false);
+  assert.equal(activeInterruptOperation(state.operations, '/x'), undefined);
+  assert.equal(hasRetiredInterruptEventFence(state.operations, '/x'), true);
   // Successful interrupt sets running=false directly in state.
   assert.ok(!state.sessions.runningSessionPaths.includes('/x'), 'running should be cleared by watchdog');
   // No SyncEffects — running state is mutated directly.

@@ -98,47 +98,16 @@ function waitForAsyncEvent(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
-test('priority interrupt cancels deferred hard-compaction continuation ownership', async () => {
+test('priority interrupt marks the active request aborted', async () => {
   const { host } = makeHost();
   const internals = getInternals(host);
-  let cancelCalls = 0;
   const activeRequest = { id: 'request-1', messageIndex: 1, aborted: false };
-  internals.context = {
-    runtime: {} as SessionContext['runtime'],
-    session: {
-      isStreaming: true,
-      isCompacting: false,
-      isRetrying: false,
-      isBashRunning: false,
-      clearQueue() {},
-      cancelPendingHardCompactionContinuation() { cancelCalls += 1; },
-      async abort() {},
-    } as unknown as SessionContext['session'],
-    sessionPath: '/session.jsonl',
-    unsubscribe: () => undefined,
-    busySeq: 0,
-    activeRequest,
-    hardCompactionContinuationPending: true,
-  };
-
-  assert.deepEqual(await host.interrupt(), { interrupted: true, settled: true });
-  assert.equal(cancelCalls, 1);
-  assert.equal(internals.context.hardCompactionContinuationPending, false);
-  assert.equal(activeRequest.aborted, true);
-});
-
-test('priority interrupt detaches a re-armed request when abort emits no agent_end', async () => {
-  const { host, sent } = makeHost();
-  const internals = getInternals(host);
-  const activeRequest = { id: 'request-1', messageIndex: 1, aborted: false };
-  let watchdogClears = 0;
   const session = {
     isStreaming: true,
     isCompacting: false,
     isRetrying: false,
     isBashRunning: false,
     clearQueue() {},
-    cancelPendingHardCompactionContinuation() {},
     async abort() { session.isStreaming = false; },
   };
   internals.context = {
@@ -148,7 +117,64 @@ test('priority interrupt detaches a re-armed request when abort emits no agent_e
     unsubscribe: () => undefined,
     busySeq: 0,
     activeRequest,
-    hardCompactionContinuationPending: true,
+  };
+
+  assert.deepEqual(await host.interrupt(), { interrupted: true, settled: true });
+  assert.equal(activeRequest.aborted, true);
+});
+
+test('priority interrupt keeps its response pending when abort resolves but billable activity remains', async () => {
+  const { host } = makeHost();
+  const internals = getInternals(host);
+  const session = {
+    isStreaming: false,
+    isCompacting: false,
+    isRetrying: true,
+    isBashRunning: false,
+    hasPendingBashMessages: false,
+    pendingMessageCount: 0,
+    clearQueue() {},
+    async abort() {},
+  };
+  internals.context = {
+    runtime: {} as SessionContext['runtime'],
+    session: session as unknown as SessionContext['session'],
+    sessionPath: '/session.jsonl',
+    unsubscribe: () => undefined,
+    busySeq: 0,
+  };
+
+  const interrupt = host.interrupt();
+  assert.equal(await Promise.race([
+    interrupt.then(() => 'settled'),
+    new Promise<string>((resolve) => setTimeout(() => resolve('pending'), 20)),
+  ]), 'pending');
+  session.isRetrying = false;
+  assert.deepEqual(await interrupt, { interrupted: true, settled: true });
+});
+
+test('priority interrupt detaches and terminalizes a pre-commit send when abort emits no agent_end', async () => {
+  const { host, sent } = makeHost();
+  const internals = getInternals(host);
+  const activeRequest = {
+    id: 'request-1', operationId: 'operation-preflight-stop', messageIndex: 0, aborted: false,
+  };
+  let watchdogClears = 0;
+  const session = {
+    isStreaming: true,
+    isCompacting: false,
+    isRetrying: false,
+    isBashRunning: false,
+    clearQueue() {},
+    async abort() { session.isStreaming = false; },
+  };
+  internals.context = {
+    runtime: {} as SessionContext['runtime'],
+    session: session as unknown as SessionContext['session'],
+    sessionPath: '/session.jsonl',
+    unsubscribe: () => undefined,
+    busySeq: 0,
+    activeRequest,
     willRetryWatchdogClear: () => { watchdogClears += 1; },
   };
 
@@ -159,6 +185,50 @@ test('priority interrupt detaches a re-armed request when abort emits no agent_e
     sent.some((frame) => frame.event === 'busy.changed'
       && (frame.payload as { busy?: unknown } | undefined)?.busy === false),
     true,
+  );
+  assert.deepEqual(
+    sent.filter((frame) => frame.event === 'message.aborted').map((frame) => frame.payload),
+    [{
+      requestId: 'request-1', operationId: 'operation-preflight-stop', sessionPath: '/session.jsonl',
+      outcome: 'cancelled', userInitiated: true,
+      reason: 'The send was cancelled by Stop before it started.',
+    }],
+  );
+});
+
+test('priority interrupt closes a semantic turn when abort emits no agent_end', async () => {
+  const { host, sent } = makeHost();
+  const internals = getInternals(host);
+  const session = {
+    isStreaming: true,
+    isCompacting: false,
+    isRetrying: false,
+    isBashRunning: false,
+    clearQueue() {},
+    async abort() { session.isStreaming = false; },
+  };
+  internals.context = {
+    runtime: {} as SessionContext['runtime'],
+    session: session as unknown as SessionContext['session'],
+    sessionPath: '/session.jsonl',
+    unsubscribe: () => undefined,
+    busySeq: 0,
+    activeRequest: {
+      id: 'request-committed', operationId: 'operation-committed', messageIndex: 0,
+      semanticStarted: true, aborted: false,
+      liveTurnAccumulator: {
+        checkpoint: () => ({ turn: { canonicalMessageId: 'message-committed' } }),
+      } as NonNullable<SessionContext['activeRequest']>['liveTurnAccumulator'],
+    },
+  };
+
+  assert.deepEqual(await host.interrupt(), { interrupted: true, settled: true });
+  assert.deepEqual(
+    sent.filter((frame) => frame.event === 'message.aborted').map((frame) => frame.payload),
+    [{
+      requestId: 'request-committed', operationId: 'operation-committed',
+      sessionPath: '/session.jsonl', messageId: 'message-committed', userInitiated: true,
+    }],
   );
 });
 
@@ -263,7 +333,10 @@ test('automatic semantic recovery accepts a terminal lifecycle event after abort
       clearQueue: () => undefined,
       abort: async () => {
         abortCalls += 1;
-        setTimeout(() => { context.activeRequest = undefined; }, 5);
+        setTimeout(() => {
+          context.activeRequest = undefined;
+          context.session.isStreaming = false;
+        }, 5);
       },
     } as unknown as SessionContext['session'],
     sessionPath: '/sessions/abort-delayed-terminal.jsonl',
@@ -335,7 +408,7 @@ test('quota recovery uses the bounded abort watchdog when session.abort never se
   assert.equal((errors[1]!.payload as { code?: string }).code, 'SESSION_RUNTIME_RECOVERY_FAILED');
 });
 
-test('agent_end refreshes session.opened from the current session and preserves cached operation identity', async () => {
+test('agent_settled refreshes session.opened from the current session and preserves cached operation identity', async () => {
   const { host, sent } = makeHost();
   const internals = getInternals(host);
   const sessionPath = '/sessions/current.jsonl';
@@ -355,7 +428,7 @@ test('agent_end refreshes session.opened from the current session and preserves 
     return makeOpenedPayload(openedPath, freshTranscript, { selectionToken, operationId, operationAttempt });
   };
 
-  internals.handleSessionEvent(makeSessionEventContext(sessionPath), { type: 'agent_end' });
+  internals.handleSessionEvent(makeSessionEventContext(sessionPath), { type: 'agent_settled' });
   await waitForAsyncEvent();
 
   assert.deepEqual(rebuildCalls, [[sessionPath, 'selection-1', 'operation-1', 3]]);

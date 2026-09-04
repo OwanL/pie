@@ -7,6 +7,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -52,6 +53,44 @@ class IgnoreTests(unittest.TestCase):
             target.parent.mkdir()
             target.write_text("x\n", encoding="utf-8")
             self.assertTrue(large.is_skipped(target, root))
+
+
+class TraversalPolicyDriftTests(unittest.TestCase):
+    """Drift check: the canonical protected-directory policy
+    (shared/traversal-policy.ts, STABILITY-ARCHITECTURE-PLAN §7.7) must be
+    covered by this skill's .ignore so maintenance scans and shell traversal
+    stay aligned. The policy module is parsed directly so the check follows
+    the source of truth instead of a mirrored copy."""
+
+    POLICY_PATH = HERE.parent.parent / "shared" / "traversal-policy.ts"
+
+    def _protected_dirs(self) -> list[str]:
+        text = self.POLICY_PATH.read_text(encoding="utf-8")
+        dirs = re.findall(r'\bdir:\s*"([^"]+)"', text)
+        self.assertTrue(dirs, f"no protected directories parsed from {self.POLICY_PATH}")
+        return dirs
+
+    @staticmethod
+    def _ignore_covers(patterns: list[str], name: str) -> bool:
+        for pattern in patterns:
+            base = pattern.rstrip("/")
+            if base == name or base.endswith(name):
+                return True
+        return False
+
+    def test_ignore_covers_every_canonical_protected_directory(self):
+        patterns, _contexts = large.load_ignore_patterns(HERE)
+        missing = [
+            name
+            for name in self._protected_dirs()
+            if not self._ignore_covers(patterns, name)
+        ]
+        self.assertEqual(
+            missing,
+            [],
+            ".ignore is missing entries for canonical protected directories; "
+            "add them (see shared/traversal-policy.ts)",
+        )
 
 
 class DuplicateTests(unittest.TestCase):

@@ -2,6 +2,7 @@ import type {
   AssistantUsage,
   AuxiliaryLlmUsagePayload,
   ComposerInput,
+  SessionUsageSnapshot,
   ThinkingLevel,
   ToolCall,
 } from '../../shared/protocol';
@@ -47,6 +48,18 @@ export interface RunObserver {
     usage?: AssistantUsage,
     status?: TurnThroughputStatus,
     latency?: TurnLatencyMeasurement,
+    billing?: {
+      modelId?: string;
+      provider?: string;
+      occurredAt?: string;
+      operationId?: string;
+    },
+  ): void;
+  /** Transcript-derived usage is migration/rebuild input only. */
+  onSessionUsageSnapshot(
+    sessionPath: string,
+    sessionId: string | undefined,
+    snapshot: SessionUsageSnapshot,
   ): void;
   onToolStarted(sessionPath: string, toolCall: ToolCall): void;
   onToolFinished(sessionPath: string, toolCall: ToolCall): void;
@@ -81,6 +94,7 @@ export const NOOP_RUN_OBSERVER: RunObserver = {
   onAssistantTurnStarted: () => undefined,
   onSkillPruningUsage: () => undefined,
   onAssistantTurnEnded: () => undefined,
+  onSessionUsageSnapshot: () => undefined,
   onToolStarted: () => undefined,
   onToolFinished: () => undefined,
   onInterrupted: () => undefined,
@@ -111,6 +125,8 @@ export interface StatsServiceOptions {
   now?: () => Date;
   createId?: () => string;
   getExperimentAssignment?: () => string | null;
+  /** Resolve the catalog directory containing models.json for immutable pricing snapshots. */
+  getAgentDir?: () => string | null;
 }
 
 export function emptySessionRunState(): SessionRunState {

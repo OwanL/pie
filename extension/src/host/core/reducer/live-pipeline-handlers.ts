@@ -20,6 +20,7 @@ import {
 } from '../live-pipeline/terminal-reconciliation.js';
 import { withIncrementedWindowCounts } from '../transcript-window.js';
 import { pendingOwnerKey, pruneExpiredTerminalAttempts, terminalAttemptKey } from '../live-pipeline/model.js';
+import { activeInterruptOperation, hasRetiredInterruptEventFence } from '../operation-registry.js';
 
 const TERMINAL_TOMBSTONE_GRACE_MS = 15_000;
 
@@ -28,6 +29,19 @@ export function handleTurnSemanticEvent(
   event: Extract<Event, { kind: 'TurnSemanticEventReceived' }>,
 ): ReducerResult {
   const envelope = event.envelope;
+  const operationTerminal = envelope.operationId
+    ? state.operations[envelope.operationId]?.terminal
+    : undefined;
+  // A successful delivery operation settles at turn.started; its remaining
+  // semantic stream still belongs to that accepted turn. Failed/cancelled
+  // operation terminals are retirement fences.
+  if (operationTerminal && operationTerminal.outcome !== 'settled') {
+    return { state, effects: [] };
+  }
+  if (activeInterruptOperation(state.operations, envelope.sessionPath)
+    || hasRetiredInterruptEventFence(state.operations, envelope.sessionPath)) {
+    return { state, effects: [] };
+  }
   const ownerBefore = state.livePipeline.turnsBySession[envelope.sessionPath];
   const pendingBefore = state.livePipeline.pendingOwnerEvents[pendingOwnerKey(envelope.turnId, envelope.attemptId)] ?? [];
   const repairAlreadyRequested = ownerBefore?.turnId === envelope.turnId
@@ -62,7 +76,9 @@ export function handleTurnSemanticEvent(
       envelope.provider,
       envelope.thinkingLevel,
     );
-    const commit = commitPromotedSend(nextState, envelope.sessionPath, envelope.requestId, envelope.canonicalMessageId);
+    const commit = commitPromotedSend(
+      nextState, envelope.sessionPath, envelope.requestId, envelope.canonicalMessageId, envelope.operationId,
+    );
     nextState = commit.state;
     effects.push(...commit.effects);
     const titleStart = startSessionTitleGeneration(nextState, envelope.sessionPath, envelope.requestId);
@@ -99,6 +115,10 @@ export function handleLiveLifecycleWatermark(
   event: Extract<Event, { kind: 'LiveLifecycleWatermarkReceived' }>,
 ): ReducerResult {
   const { watermark } = event;
+  if (activeInterruptOperation(state.operations, watermark.sessionPath)
+    || hasRetiredInterruptEventFence(state.operations, watermark.sessionPath)) {
+    return { state, effects: [] };
+  }
   const turn = state.livePipeline.turnsBySession[watermark.sessionPath];
   const tombstone = state.livePipeline.terminalAttempts[`${watermark.turnId}\u0000${watermark.attemptId}`];
   if (tombstone?.finalSeq === watermark.finalSeq) return { state, effects: [] };
@@ -115,9 +135,13 @@ export function handleLiveTurnCheckpointResult(
   state: ArchState,
   event: Extract<Event, { kind: 'LiveTurnCheckpointResult' }>,
 ): ReducerResult {
+  if (activeInterruptOperation(state.operations, event.sessionPath)
+    || hasRetiredInterruptEventFence(state.operations, event.sessionPath)) {
+    return { state, effects: [] };
+  }
   if (!event.ok || !event.checkpoint) {
     if (event.status === 'inactive' || event.status === 'backend_restarted') {
-      return interruptOne(state, event.sessionPath, event.occurredAt);
+      return interruptLivePipelineForSession(state, event.sessionPath, event.occurredAt);
     }
     return markCheckpointFailure(state, event.sessionPath, event.turnId, event.attemptId, event.occurredAt);
   }
@@ -146,6 +170,7 @@ export function handleLiveTurnCheckpointResult(
     event.checkpoint.sessionPath,
     event.checkpoint.turn.requestId,
     event.checkpoint.turn.canonicalMessageId,
+    event.checkpoint.turn.operationId,
   );
   next = committedSend.state;
   const titleStart = startSessionTitleGeneration(
@@ -194,7 +219,7 @@ export function handleLiveTurnCheckpointResult(
     next = appendDurableTerminal(next, event.sessionPath, terminal);
     next = clearPendingExtensionUiRequests(next, event.sessionPath);
   } else if (event.status === 'terminal_grace') {
-    const interrupted = interruptOne(next, event.sessionPath, event.occurredAt);
+    const interrupted = interruptLivePipelineForSession(next, event.sessionPath, event.occurredAt);
     return { state: interrupted.state, effects: [...commitEffects, ...interrupted.effects] };
   } else {
     const replayed = replayPendingAfterCheckpoint(next, event.turnId, event.attemptId);
@@ -332,7 +357,11 @@ function appendDurableTerminal(state: ArchState, sessionPath: string, terminal: 
   });
 }
 
-function interruptOne(state: ArchState, sessionPath: string, occurredAt: number): ReducerResult {
+export function interruptLivePipelineForSession(
+  state: ArchState,
+  sessionPath: string,
+  occurredAt: number,
+): ReducerResult {
   const turn = state.livePipeline.turnsBySession[sessionPath];
   if (!turn) return { state, effects: [] };
   const transformed = interruptLivePipelineForRestart(
@@ -441,7 +470,7 @@ function markCheckpointFailure(
     };
   }
   const attempts = (turn.reconciliation?.attempts ?? 0) + 1;
-  if (attempts >= 3) return interruptOne(state, sessionPath, occurredAt);
+  if (attempts >= 3) return interruptLivePipelineForSession(state, sessionPath, occurredAt);
   return {
     state: {
       ...state,

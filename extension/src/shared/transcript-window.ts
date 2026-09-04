@@ -110,6 +110,7 @@ export function buildSlimSessionOpenedUnavailableFallback(
       hasUserMessages: transcriptWindow.hasUserMessages,
     },
     busy: payload.busy,
+    capabilities: payload.capabilities,
     ...(payload.runtimeReady !== undefined ? { runtimeReady: payload.runtimeReady } : {}),
     ...(payload.initialContextEstimate !== undefined
       ? { initialContextEstimate: payload.initialContextEstimate }

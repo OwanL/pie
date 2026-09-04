@@ -1,6 +1,6 @@
 ---
 name: develop-pie
-description: "Work effectively in the pie repository: its VS Code extension, custom Pi extensions, agents, skills, model catalog, settings, analytics, architecture, build commands, tests, and documentation. Use when implementing, debugging, reviewing, or documenting pie itself or its Pi-based configuration; do not load for unrelated repositories merely because pie is the active agent harness. Route model-catalog work to `add-provider`, hard or unclear bug diagnosis to `diagnose`, and plan stress-testing to `grill-with-docs`."
+description: "Use when implementing, debugging, reviewing, or documenting pie itself or its Pi-based configuration; do not load for unrelated repositories merely because pie is the active agent harness."
 ---
 
 # Develop pie
@@ -65,12 +65,15 @@ npm run test:all                             # full fast suite
 npm run test:all -- --package extension --test-name-pattern="pattern"
 npm run test:changed                        # fast suites affected by working-tree changes
 npm run typecheck                           # all TypeScript projects
+npm run lint                                # all configured lint checks (currently the extension)
 npm run check                               # model drift + typecheck + lint + changed tests
 npm run verify                              # pre-push gate: drift + typecheck + lint + all fast suites + build
 npm run verify:release                      # release gate: replaces the fast suites with coverage-gated runs
 npm run sync-models                         # regenerate centralized model configuration
 npm run sync-models -- --check              # fail on generated-config drift
-npm run extension:build                     # build extension from the root
+npm run extension:build                     # build + installed-extension sync
+npm run extension:package                   # build a .vsix from the root
+npm run extension:test:browser              # extension Playwright browser suite
 npm run analytics:serve                     # local analytics workspace
 npm run doctor                              # non-destructive installation/config check
 ```
@@ -83,6 +86,7 @@ npm run build       # required after extension/src changes; build + installed-ex
 npm run watch       # incremental Vite and TypeScript watchers
 npm run test        # extension tests
 npm run typecheck   # extension typecheck
+npm run lint        # extension ESLint
 npm run package     # build a .vsix
 ```
 

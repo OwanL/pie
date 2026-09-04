@@ -9,7 +9,7 @@ import {
   DeferredTriggerRegistry,
   MAX_TIMER_SLICE_MS,
 } from '../../../src/host/deferred-triggers/registry';
-import { appendTriggerOp } from '../../../src/host/deferred-triggers/store';
+import { appendTriggerOp, DeferredTriggerStore, replayTriggers } from '../../../src/host/deferred-triggers/store';
 import type { ArchState } from '../../../src/host/core/arch-state';
 import type { Event } from '../../../src/host/core/events';
 
@@ -83,10 +83,10 @@ function sentTexts(): string[] {
     .map((e) => (e as { cmd?: { text?: string } }).cmd?.text ?? '');
 }
 
-function sentCommands(): { kind: string; customType?: string; customDetails?: unknown; text?: string }[] {
+function sentCommands(): { kind: string; corrId?: string; customType?: string; customDetails?: unknown; text?: string }[] {
   return dispatched
     .filter((e) => e.kind === 'Command')
-    .map((e) => (e as { cmd?: { kind: string; customType?: string; customDetails?: unknown; text?: string } }).cmd ?? { kind: 'unknown' });
+    .map((e) => (e as { cmd?: { kind: string; corrId?: string; customType?: string; customDetails?: unknown; text?: string } }).cmd ?? { kind: 'unknown' });
 }
 
 function flushMicrotasks(): Promise<void> {
@@ -103,14 +103,14 @@ test('session_finished (any): fires when another session finishes, delivers wake
   assert.match(text, /Task note:\nmark done \+ close/);
 });
 
-test('wake-up Send is tagged with customType=deferred-trigger + reason for webview differentiation', () => {
-  register('t1', WATCHER, [{ kind: 'user_input' }], 'note');
+test('synthetic wake-up Send is tagged for timer/session-finished differentiation', () => {
+  register('t1', WATCHER, [{ kind: 'session_finished' }], 'note');
   const r = newRegistry();
-  r.onUserInput(WATCHER);
+  r.onSessionFinished(OTHER);
   const cmd = sentCommands()[0];
   assert.equal(cmd.kind, 'Send');
   assert.equal(cmd.customType, 'deferred-trigger');
-  assert.deepEqual(cmd.customDetails, { reason: 'user input received in this session' });
+  assert.deepEqual(cmd.customDetails, { reason: 'session finished (any open session)' });
 });
 
 test('session_finished: does NOT self-wake when the watcher itself finishes', () => {
@@ -129,14 +129,21 @@ test('session_finished (specific): fires only for the matching path', () => {
   assert.equal(dispatched.length, 1);
 });
 
-test('user_input: fires when the user sends in the watcher session', () => {
+test('user_input: the real user prompt consumes the trigger without a synthetic Send', () => {
   register('t1', WATCHER, [{ kind: 'user_input' }], 'note');
   const r = newRegistry();
-  r.onUserInput('/repo/unrelated.jsonl');
+  r.onUserInput('/repo/unrelated.jsonl', 'real-send');
   assert.equal(dispatched.length, 0);
-  r.onUserInput(WATCHER);
-  assert.equal(dispatched.length, 1);
-  assert.match(sentTexts()[0], /user input received in this session/);
+  r.onUserInput(WATCHER, 'real-send');
+  assert.equal(dispatched.length, 0, 'the router already dispatched the sole real-user Send');
+  const claimed = replayTriggers(new DeferredTriggerStore().readOps()).get('t1');
+  assert.equal(claimed?.deliveryState, 'claimed');
+  assert.equal(claimed?.recoveryState, 'acknowledgement-ambiguous', 'the real prompt was already dispatched');
+  r.onSendResult('real-send', true);
+  assert.equal(replayTriggers(new DeferredTriggerStore().readOps()).size, 0);
+  const sidecar = fs.readFileSync(path.join(dir, 'deferred-triggers', 'triggers.jsonl'), 'utf8');
+  assert.match(sidecar, /"op":"claim"/);
+  assert.match(sidecar, /"op":"fire"/);
 });
 
 test('timer: delays beyond Node setTimeout range are scheduled in bounded slices', () => {
@@ -163,15 +170,35 @@ test('OR semantics: once one spec fires, the whole trigger is consumed', async (
   assert.equal(dispatched.length, 1);
 });
 
-test('watcher tab closed: fire persists the op but skips delivery', () => {
+test('watcher tab closed: delivery is explicit and retryable, not consumed', () => {
   register('t1', WATCHER, [{ kind: 'session_finished' }], 'note');
   openTabs = []; // watcher no longer open
   const r = newRegistry();
   r.onSessionFinished(OTHER);
   assert.equal(dispatched.length, 0);
-  // The fire op was still persisted (a restart won't re-arm it).
+  const active = r.getActiveTriggers();
+  assert.equal(active.length, 1);
+  assert.equal(active[0]?.deliveryState, 'retryable');
+  assert.match(active[0]?.deliveryDetail ?? '', /tab is closed/);
   const sidecar = fs.readFileSync(path.join(dir, 'deferred-triggers', 'triggers.jsonl'), 'utf8');
-  assert.match(sidecar, /"op":"fire"/);
+  assert.match(sidecar, /"op":"failed"/);
+  assert.doesNotMatch(sidecar, /"op":"fire"/);
+});
+
+test('opening a watcher retries a retained one-shot timer wake', async () => {
+  const past = new Date(Date.now() - 60_000).toISOString();
+  register('t1', WATCHER, [{ kind: 'timer', ms: 1000 }], 'note', past);
+  openTabs = [];
+  const r = newRegistry();
+  await flushMicrotasks();
+  assert.equal(r.getActiveTriggers()[0]?.deliveryState, 'retryable');
+
+  openTabs = [WATCHER];
+  r.onSessionOpened(WATCHER);
+  assert.equal(dispatched.length, 1);
+  const corrId = sentCommands()[0]?.corrId ?? '';
+  r.onSendResult(corrId, true);
+  assert.equal(r.getActiveTriggers().length, 0);
 });
 
 test('fire is idempotent: a second fire for the same id does not double-deliver', () => {
@@ -180,6 +207,151 @@ test('fire is idempotent: a second fire for the same id does not double-deliver'
   r.onSessionFinished(OTHER);
   r.fire('t1', 'again'); // already consumed
   assert.equal(dispatched.length, 1);
+});
+
+test('two registry/store instances racing the same stale trigger dispatch at most once', () => {
+  register('t1', WATCHER, [{ kind: 'session_finished' }], 'note');
+  const file = path.join(dir, 'deferred-triggers', 'triggers.jsonl');
+  const first = new DeferredTriggerRegistry({
+    getArchState: fakeArchState,
+    dispatchArch: (event) => dispatched.push(event),
+    startWatcher: () => () => {},
+    store: new DeferredTriggerStore(file),
+    instanceId: 'host-a',
+  });
+  const second = new DeferredTriggerRegistry({
+    getArchState: fakeArchState,
+    dispatchArch: (event) => dispatched.push(event),
+    startWatcher: () => () => {},
+    store: new DeferredTriggerStore(file),
+    instanceId: 'host-b',
+  });
+  first.start();
+  second.start();
+  registries.push(first, second);
+
+  // Both registries loaded the trigger before either tried delivery.
+  first.fire('t1', 'race');
+  second.fire('t1', 'race');
+
+  assert.equal(dispatched.length, 1);
+  assert.equal(replayTriggers(new DeferredTriggerStore(file).readOps()).get('t1')?.deliveryState, 'claimed');
+  first.onSendResult(sentCommands()[0]?.corrId ?? '', true);
+  assert.equal(replayTriggers(new DeferredTriggerStore(file).readOps()).size, 0);
+});
+
+test('startup automatically retries a safely recovered synthetic wake for an open watcher', async () => {
+  const past = new Date(Date.now() - 60_000).toISOString();
+  register('t1', WATCHER, [{ kind: 'timer', ms: 1000 }], 'note', past);
+  const file = path.join(dir, 'deferred-triggers', 'triggers.jsonl');
+  const crashedStore = new DeferredTriggerStore(file);
+  assert.ok(crashedStore.tryClaim('t1', WATCHER, 'crashed-host', 51_000, 'timer elapsed'));
+
+  const registry = new DeferredTriggerRegistry({
+    getArchState: fakeArchState,
+    dispatchArch: (event) => dispatched.push(event),
+    startWatcher: () => () => {},
+    store: new DeferredTriggerStore(file),
+    instanceId: 'recovery-host',
+    ownerPid: 51_001,
+    checkOwnerLiveness: () => 'dead',
+  });
+  registry.start();
+  registries.push(registry);
+
+  assert.equal(registry.getActiveTriggers()[0]?.recoveryState, 'dead-owner-recovered');
+  await flushMicrotasks();
+  assert.equal(dispatched.length, 1);
+  assert.match(sentTexts()[0] ?? '', /timer elapsed/);
+});
+
+test('two registries racing dead-owner recovery produce one retryable state and at most one new dispatch', async () => {
+  register('t1', WATCHER, [{ kind: 'session_finished' }], 'note');
+  const file = path.join(dir, 'deferred-triggers', 'triggers.jsonl');
+  const crashedStore = new DeferredTriggerStore(file);
+  assert.ok(crashedStore.tryClaim('t1', WATCHER, 'crashed-host', 51_001, 'session finished'));
+
+  let secondStarted = false;
+  const second = new DeferredTriggerRegistry({
+    getArchState: fakeArchState,
+    dispatchArch: (event) => dispatched.push(event),
+    startWatcher: () => () => {},
+    store: new DeferredTriggerStore(file),
+    instanceId: 'recovery-host-b',
+    ownerPid: 51_003,
+    checkOwnerLiveness: () => 'dead',
+  });
+  const first = new DeferredTriggerRegistry({
+    getArchState: fakeArchState,
+    dispatchArch: (event) => dispatched.push(event),
+    startWatcher: () => () => {},
+    store: new DeferredTriggerStore(file),
+    instanceId: 'recovery-host-a',
+    ownerPid: 51_002,
+    checkOwnerLiveness: () => {
+      if (!secondStarted) {
+        secondStarted = true;
+        second.start();
+      }
+      return 'dead';
+    },
+  });
+  first.start();
+  registries.push(first, second);
+
+  for (const registry of [first, second]) {
+    const active = registry.getActiveTriggers()[0];
+    assert.equal(active?.deliveryState, 'retryable');
+    assert.equal(active?.recoveryState, 'dead-owner-recovered');
+  }
+
+  // Both hosts schedule the same safe automatic retry. The fixed claim
+  // artifact still selects exactly one new live owner.
+  await flushMicrotasks();
+  assert.equal(dispatched.length, 1);
+  const active = replayTriggers(new DeferredTriggerStore(file).readOps()).get('t1');
+  assert.equal(active?.deliveryState, 'claimed');
+  assert.equal(active?.recoveryState, 'acknowledgement-ambiguous');
+
+  first.onSendResult(sentCommands()[0]?.corrId ?? '', true);
+  second.onSendResult(sentCommands()[0]?.corrId ?? '', true);
+  assert.equal(replayTriggers(new DeferredTriggerStore(file).readOps()).size, 0);
+});
+
+test('a rejected synthetic Send remains retryable without an automatic refire loop', async () => {
+  const past = new Date(Date.now() - 60_000).toISOString();
+  register('t1', WATCHER, [{ kind: 'timer', ms: 1000 }], 'note', past);
+  const registry = newRegistry();
+  await flushMicrotasks();
+  const corrId = sentCommands()[0]?.corrId ?? '';
+
+  registry.onSendResult(corrId, false, 'backend rejected wake');
+
+  const active = registry.getActiveTriggers();
+  assert.equal(active.length, 1);
+  assert.equal(active[0]?.deliveryState, 'retryable');
+  assert.equal(active[0]?.deliveryDetail, 'backend rejected wake');
+  await flushMicrotasks();
+  assert.equal(dispatched.length, 1, 'retry waits for an explicit reopen instead of spinning');
+});
+
+test('a definite dispatch failure releases the claim and remains retryable', () => {
+  register('t1', WATCHER, [{ kind: 'session_finished' }], 'note');
+  const registry = new DeferredTriggerRegistry({
+    getArchState: fakeArchState,
+    dispatchArch: () => { throw new Error('closed delivery surface'); },
+    startWatcher: () => () => {},
+    instanceId: 'failing-host',
+  });
+  registry.start();
+  registries.push(registry);
+
+  registry.fire('t1', 'delivery test');
+
+  const active = registry.getActiveTriggers();
+  assert.equal(active.length, 1);
+  assert.equal(active[0]?.deliveryState, 'retryable');
+  assert.match(active[0]?.deliveryDetail ?? '', /dispatch failed/);
 });
 
 test('timer: multiple timer specs arm the earliest deadline (OR semantics)', async () => {

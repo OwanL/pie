@@ -5,9 +5,19 @@ import type { SdkBuildSystemPromptOptions, SdkRuntime, SdkSession } from './sdk'
 import type { SessionManagerFence } from './session-manager-fence';
 import type { BackendLiveTurnAccumulator } from './live-turn-accumulator';
 import type { ProviderIncident } from './provider-incident';
+import type { SendOperationLedger } from './send-operation-ledger';
+import type { InterruptOperationLedger } from './interrupt-operation-ledger';
 
 export interface ActiveRequest {
   id: string;
+  /** Stable message mutation identity; distinct from request/turn IDs. */
+  operationId?: string;
+  /** Host acknowledgement attempt which established this backend owner. */
+  operationAttempt?: number;
+  /** First provider-turn semantic start crossed the mutation commit boundary. */
+  semanticStarted?: boolean;
+  /** A no-message terminal event has already been emitted for this request. */
+  terminalWithoutMessageEmitted?: boolean;
   messageIndex: number;
   modelId?: string;
   /** Provider selected when this request started. */
@@ -140,16 +150,6 @@ export interface SessionContext {
    * the SDK continues automatically without a new public request. Restored
    * only when compaction_end confirms reason=overflow and willRetry=true. */
   overflowRecoveryCandidate?: ActiveRequest;
-  /** A threshold compaction may start only after agent_end has detached the
-   * active request. Retain that completed request until the SDK's post-run
-   * compaction decision is known so a successful zero-prompt continuation can
-   * restore its public correlation and live owner. */
-  thresholdCompactionContinuationCandidate?: ActiveRequest;
-  /** A successful threshold compaction terminalized the current assistant
-   * segment but requested a zero-prompt continuation from the SDK outer loop.
-   * Keeps request ownership across the intermediate agent_end until the
-   * continuation's agent_start arrives. */
-  hardCompactionContinuationPending?: boolean;
   /** Per-session monotonic counter for `busy.changed` events. */
   busySeq: number;
   lastContextUsage?: ContextWindowUsage | null;
@@ -198,6 +198,14 @@ export interface SessionContext {
    *  back to the exact optimistic message. Cleared on interrupt/clearQueue.
    *  Absent/empty → fall back to FIFO matching in the host reducer. */
   queuedLocalIds?: string[];
+  /** Stable operation identities aligned with queuedLocalIds. Empty strings
+   * preserve legacy callers which supplied no operationId. */
+  queuedOperationIds?: string[];
+  /** Generation-scoped mutation idempotency authority for this hot session. */
+  sendOperationLedger?: SendOperationLedger;
+  /** Legacy in-process interrupt authority. Production interrupt ownership is
+   * coordinator-scoped so it survives forced worker retirement. */
+  interruptOperationLedger?: InterruptOperationLedger;
   /** A public extension-command send that has not crossed an agent
    *  message_start. Retained separately so a replacement can terminalize the
    *  early-ack request even if source abort events clear activeRequest first. */
@@ -209,6 +217,16 @@ export interface SessionContext {
   };
   /** Short-lived in-memory terminal checkpoint retained for host gap repair. */
   terminalLiveTurn?: { accumulator: BackendLiveTurnAccumulator; expiresAt: number };
+  /** Manual compaction owns this marker before the pinned SDK creates its
+   * compaction AbortController (it first awaits agent abort). Priority Stop
+   * marks it cancelled; compaction_start then aborts the newly created
+   * controller before provider work can begin. */
+  manualCompactionRequest?: {
+    requestId: string;
+    operationId?: string;
+    operationAttempt?: number;
+    cancelled: boolean;
+  };
   /** Replacement runtime created after provider abort teardown failed. */
   recoveryPromise?: Promise<SessionContext>;
   /** This runtime was locally terminalized and must ignore subsequent SDK events. */

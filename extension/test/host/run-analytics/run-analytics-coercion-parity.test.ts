@@ -12,11 +12,10 @@ import test from 'node:test';
  * and asserts they produce identical coerced outputs, so silent drift between
  * the duplicates is caught.
  *
- * The two implementations have two known, pre-existing divergences (documented
- * in the "known divergences" test below): the extension recomputes
- * `failureCountsByName` differently for legacy per-tool result-issue kinds and
- * defaults `providerQueueAttemptCount` to 0 instead of omitting it. The matrix
- * avoids both by construction so all shared coercion logic is compared directly.
+ * The two implementations have one known, pre-existing divergence (documented
+ * in the "known divergences" test below): the extension defaults
+ * `providerQueueAttemptCount` to 0 instead of omitting it. The matrix avoids it
+ * by construction so all shared coercion logic is compared directly.
  */
 
 import { coerceRunSnapshot as extensionCoerce } from '../../../src/host/run-analytics/coercion-snapshots';
@@ -188,8 +187,9 @@ const EDGE_CASES: Array<{ name: string; snapshot: AnySnapshot }> = [
         executionFailureCount: 2,
         // Aggregate by-kind carries legacy kinds → both split into execution/result-issue.
         failureCountsByKind: { timeout: 1, nonzero_exit: 1, verification_project_failure: 1, probe_no_match: 1 },
-        // Per-tool by-name-and-kind uses ONLY execution kinds (no legacy) so the
-        // failureCountsByName recomputation divergence does not apply.
+        // Per-tool by-name-and-kind uses ONLY execution kinds here; the legacy
+        // per-tool split (with its failureCountsByName recomputation) is covered
+        // by its own edge case below.
         failureCountsByNameAndKind: { bash: { timeout: 1 }, read: { nonzero_exit: 1 } },
         failureCountsByName: { bash: 1, read: 1 },
         // Samples carrying legacy kinds → both split into result-issue samples.
@@ -229,6 +229,23 @@ const EDGE_CASES: Array<{ name: string; snapshot: AnySnapshot }> = [
         failureSamples: [
           { toolName: 'bash', failureKind: 'timeout', exitCode: 124, errorExcerpt: 'timed out', verificationKinds: [], occurredAt: '2026-01-02T00:00:00.000Z' },
         ],
+      },
+      fileMutation: EMPTY_FILE_MUTATION,
+      fileExtensions: EMPTY_FILE_EXTENSIONS,
+      verification: EMPTY_VERIFICATION,
+    },
+  },
+  {
+    name: 'legacy per-tool result-issue kinds recompute failureCountsByName',
+    snapshot: {
+      ...validBase(),
+      toolUsage: {
+        ...EMPTY_TOOL_USAGE,
+        failureCountsByName: { bash: 3 },
+        // Legacy data embedded result issues under failureCountsByName; both
+        // implementations must subtract the 2 result-issue counts attributed
+        // to bash (3 -> 1) when splitting by-name-and-kind.
+        failureCountsByNameAndKind: { bash: { timeout: 1, verification_project_failure: 1, probe_no_match: 1 } },
       },
       fileMutation: EMPTY_FILE_MUTATION,
       fileExtensions: EMPTY_FILE_EXTENSIONS,
@@ -365,20 +382,9 @@ test('analysis is lenient where the extension is strict (counter/array coercion 
 });
 
 test('known divergences are pinned (fail loudly if either side is changed without the other)', () => {
-  // 1. Legacy per-tool result-issue kinds: analysis recomputes failureCountsByName
-  //    (subtracts the result-issue total); the extension leaves the raw value.
-  const legacyPerTool = {
-    ...validBase(),
-    toolUsage: {
-      ...EMPTY_TOOL_USAGE,
-      failureCountsByName: { bash: 3 },
-      failureCountsByNameAndKind: { bash: { timeout: 1, verification_project_failure: 1, probe_no_match: 1 } },
-    },
-  };
-  assert.equal(analysisCoerce(legacyPerTool)!.toolUsage.failureCountsByName.bash, 1, 'analysis subtracts legacy result-issue total (3 - 2)');
-  assert.equal(extensionCoerce(legacyPerTool)!.toolUsage.failureCountsByName.bash, 3, 'extension keeps the raw failureCountsByName value');
-
-  // 2. providerQueueAttemptCount: extension defaults to 0; analysis omits the key.
+  // providerQueueAttemptCount: extension defaults to 0; analysis omits the key.
+  // (The legacy per-tool failureCountsByName recomputation divergence was fixed:
+  // both implementations now subtract, covered by the parity matrix above.)
   const noQueueAttempt = {
     ...validBase(),
     turnThroughputSamples: [{ endedAt: '2026-01-01T00:00:00.000Z', outputTokens: 5, generationDurationMs: 100, concurrentBusySessions: 1, status: 'completed' }],

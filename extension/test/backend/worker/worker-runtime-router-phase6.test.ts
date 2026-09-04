@@ -123,6 +123,34 @@ function eventFrame(route: any, sessionPath: string, event: string, payload: any
   };
 }
 
+test('forced interrupt retires authority, terminalizes once, and drops late retired frames', async () => {
+  const { router, sessionPath, emitted, stopped } = makeRouter(makeClient(), {
+    supervisor: { interrupt: async () => ({ soft: false }) },
+  });
+  const route = await router.promote(sessionPath);
+  await router.handleWorkerFrame(sessionPath, eventFrame(
+    route, sessionPath, 'busy.changed', { sessionPath, busy: true, seq: 1 }, 1,
+  ));
+  await router.handleWorkerFrame(sessionPath, eventFrame(
+    route, sessionPath, 'message.started',
+    { sessionPath, requestId: 'forced-request', messageId: 'forced-message' }, 2,
+  ));
+  emitted.length = 0;
+
+  assert.deepEqual(await router.interrupt(sessionPath, 'forced test stop'), { soft: false });
+  assert.equal(router.getRoute(sessionPath).state, 'cold');
+  assert.deepEqual(stopped, [sessionPath]);
+  assert.equal(emitted.filter(([event]) => event === 'message.aborted').length, 1);
+  assert.equal(emitted.filter(([event, payload]) => event === 'busy.changed' && payload.busy === false).length, 1);
+
+  const terminalCount = emitted.length;
+  await router.handleWorkerFrame(sessionPath, eventFrame(
+    route, sessionPath, 'message.delta',
+    { sessionPath, requestId: 'forced-request', messageId: 'forced-message', delta: 'late' }, 3,
+  ));
+  assert.equal(emitted.length, terminalCount, 'retired generation frames are telemetry-only drops');
+});
+
 function providerFrame(route: any, sessionPath: string, kind: string, body: Record<string, unknown>): any {
   return {
     ipcVersion: 1, coordinatorGeneration: 1, workerId: route.owner.workerId,
@@ -130,6 +158,39 @@ function providerFrame(route: any, sessionPath: string, kind: string, body: Reco
     leasePath: sessionPath, leaseRevision: 1, sessionPath, seq: 1, kind, ...body,
   };
 }
+
+test('phase6 replacement forwards an explicit pre-start continuation settlement for the previous lease', async () => {
+  const { router, sessionPath, emitted } = makeRouter(makeClient());
+  const route = await router.promote(sessionPath);
+  const replacementPath = `${sessionPath}.replacement`;
+  route.previousLeasePath = sessionPath;
+  route.currentLeasePath = replacementPath;
+
+  await router.handleWorkerFrame(sessionPath, {
+    ipcVersion: 1,
+    coordinatorGeneration: route.owner.coordinatorGeneration,
+    workerId: route.owner.workerId,
+    workerGeneration: route.owner.workerGeneration,
+    workerPid: 1,
+    rootSessionPath: route.workerRootSessionPath,
+    leasePath: replacementPath,
+    leaseRevision: route.currentLeaseRevision,
+    sessionPath: replacementPath,
+    seq: 1,
+    kind: 'runtime.event',
+    event: 'message.aborted',
+    payload: {
+      requestId: 'continue-before-replacement',
+      sessionPath,
+      outcome: 'superseded',
+    },
+  } as any);
+
+  assert.deepEqual(emitted, [[
+    'message.aborted',
+    { requestId: 'continue-before-replacement', sessionPath, outcome: 'superseded' },
+  ]]);
+});
 
 test('phase6 provider: a queued admission cancelled via provider.cancel settles exactly once', async () => {
   const sent: Array<Record<string, unknown>> = [];
@@ -256,6 +317,72 @@ test('phase6 provider: an acquire during promotion is granted (not dropped) so t
   releasePromote();
   await promoting;
   assert.equal(router.getRoute(sessionPath).state, 'hot');
+});
+
+test('priority Stop cancels a manual compact waiting on cold worker promotion', async () => {
+  let releasePromote!: () => void;
+  const promoteGate = new Promise<void>((resolve) => { releasePromote = resolve; });
+  const client = makeClient({
+    requestFrame: async (body: any) => {
+      client.calls.push(body);
+      if (body.kind === 'sync') {
+        return { kind: 'sync.ack', requestId: 'x', domain: body.domain, revision: body.revision };
+      }
+      if (body.kind === 'runtime.promote') {
+        await promoteGate;
+        return { kind: 'runtime.ready', requestId: 'x', runtimeMetadata: { mode: 'phase4', startedAt: 1 } };
+      }
+      if (body.kind === 'runtime.command') {
+        return { kind: 'response', requestId: 'x', ok: true, result: { kind: 'runtime.command', payload: { ok: true } } };
+      }
+      throw new Error(`unexpected frame ${body.kind}`);
+    },
+  });
+  const { router, sessionPath } = makeRouter(client);
+  const compact = router.route({
+    id: 'compact-during-promotion',
+    method: 'message.compact',
+    params: { sessionPath },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(router.getRoute(sessionPath).state, 'promoting');
+  assert.equal(router.cancelPendingRuntimeOperations(sessionPath), true);
+  releasePromote();
+  await assert.rejects(compact, /interrupted before runtime promotion completed/);
+  assert.equal(
+    client.calls.some((call) => call.kind === 'runtime.command'),
+    false,
+    'the cancelled compact must not enter the newly promoted runtime',
+  );
+});
+
+test('priority Stop cancels a manual compact waiting on worker retirement', async () => {
+  let releaseRetirement!: () => void;
+  const retirementGate = new Promise<void>((resolve) => { releaseRetirement = resolve; });
+  const client = makeClient();
+  const { router, sessionPath } = makeRouter(client, {
+    supervisor: { stopWorker: async () => { await retirementGate; } },
+  });
+  await router.promote(sessionPath);
+  const retirement = router.retire(sessionPath, 'test retirement');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(router.getRoute(sessionPath).state, 'retiring');
+
+  const compact = router.route({
+    id: 'compact-during-retirement',
+    method: 'message.compact',
+    params: { sessionPath },
+  });
+  assert.equal(router.cancelPendingRuntimeOperations(sessionPath), true);
+  releaseRetirement();
+  await retirement;
+  await assert.rejects(compact, /interrupted before runtime promotion completed/);
+  assert.equal(
+    client.calls.some((call) => call.kind === 'runtime.command'),
+    false,
+    'the cancelled compact must not enter the replacement runtime',
+  );
 });
 
 test('phase6 provider: an open global circuit still settles the exact acquire', async () => {
@@ -1045,6 +1172,71 @@ test('phase6 sync failure terminalizes an early-acknowledged send as preflight f
   assert.equal(emitted.filter(([event]) => event === 'message.aborted').length, 0);
   assert.equal(emitted.filter(([event, payload]) => event === 'busy.changed' && payload.busy === false).length, 1);
   assert.equal(router.getRoute(sessionPath).state, 'cold');
+});
+
+test('phase6 crash classifies live.semantic turn.started as committed, not preflight-only', async () => {
+  const client = makeClient({
+    requestFrame: async (body: any) => {
+      if (body.kind === 'sync') {
+        if (body.domain === 'runtimePrefs' && body.revision === 2) throw new Error('worker sync failed');
+        return { kind: 'sync.ack', requestId: 'x', domain: body.domain, revision: body.revision };
+      }
+      if (body.kind === 'runtime.promote') {
+        return { kind: 'runtime.ready', requestId: 'x', runtimeMetadata: { mode: 'phase4', startedAt: 1 } };
+      }
+      if (body.kind === 'runtime.command' && body.operation === 'message.send') {
+        return {
+          kind: 'response', requestId: 'x', ok: true,
+          result: {
+            kind: 'runtime.command',
+            payload: { requestId: 'request-live-started', operationId: 'operation-live-started' },
+          },
+        };
+      }
+      throw new Error(`unexpected frame ${body.kind}`);
+    },
+  });
+  const { router, sessionPath, emitted } = makeRouter(client);
+  const route = await router.promote(sessionPath);
+  await router.route({
+    id: 'public-live-started', method: 'message.send',
+    params: { sessionPath, operationId: 'operation-live-started', text: 'hello', inputs: [] },
+  });
+  await router.handleWorkerFrame(sessionPath, eventFrame(
+    route,
+    sessionPath,
+    'live.semantic',
+    {
+      protocolVersion: 7,
+      sessionPath,
+      requestId: 'request-live-started',
+      operationId: 'operation-live-started',
+      turnId: 'turn-live-started',
+      attemptId: 'attempt-live-started',
+      seq: 1,
+      occurredAt: 1,
+      checkpointBytes: 1,
+      kind: 'turn.started',
+      canonicalMessageId: 'message-live-started',
+      startedAt: 1,
+    },
+    1,
+  ));
+  emitted.length = 0;
+
+  await router.syncRuntimePrefs({ compact: true });
+
+  assert.equal(emitted.filter(([event]) => event === 'preflight.failed').length, 0);
+  assert.deepEqual(
+    emitted.filter(([event]) => event === 'message.aborted').map(([, payload]) => payload),
+    [{
+      requestId: 'request-live-started',
+      operationId: 'operation-live-started',
+      sessionPath,
+      messageId: 'message-live-started',
+      reason: 'The session worker exited before live work settled.',
+    }],
+  );
 });
 
 test('phase6 sync: a timed-out live ACK preserves active work, retries, and does not block another promotion', async () => {

@@ -23,6 +23,37 @@ import {
 } from '../../../src/backend/live-pipeline-trace-runtime';
 import { readBackendRequestTracePhases } from '../../helpers/backend-live-pipeline-trace';
 
+class FakeTransitionClock {
+  private nextId = 1;
+  private nowMs = 0;
+  private readonly timers = new Map<number, { at: number; callback: () => void }>();
+
+  readonly setTimeout = (callback: () => void, delayMs: number): ReturnType<typeof setTimeout> => {
+    const id = this.nextId++;
+    this.timers.set(id, { at: this.nowMs + delayMs, callback });
+    return id as unknown as ReturnType<typeof setTimeout>;
+  };
+
+  readonly clearTimeout = (timer: ReturnType<typeof setTimeout>): void => {
+    this.timers.delete(timer as unknown as number);
+  };
+
+  advance(milliseconds: number): void {
+    const target = this.nowMs + milliseconds;
+    for (;;) {
+      const due = [...this.timers.entries()]
+        .filter(([, timer]) => timer.at <= target)
+        .sort((left, right) => left[1].at - right[1].at || left[0] - right[0])[0];
+      if (!due) break;
+      const [id, timer] = due;
+      this.timers.delete(id);
+      this.nowMs = timer.at;
+      timer.callback();
+    }
+    this.nowMs = target;
+  }
+}
+
 interface Harness {
   deps: BackendRequestHandlerDeps;
   context: SessionContext;
@@ -226,7 +257,7 @@ test('handleBackendRequest covers handshake and session orchestration methods', 
     sdkPath: '/sdk',
     agentDir: '/agent',
     sdkVersion: '1.0.0',
-    protocolVersion: 14,
+    protocolVersion: 15,
   });
 
   const listed = await handleBackendRequest(harness.deps, { id: '2', method: 'session.list' });
@@ -672,6 +703,212 @@ test('message.continue resumes after a completed tool without invoking the promp
   );
 });
 
+test('send, continue, compact, and title transition waits terminate at one deterministic typed deadline', async () => {
+  const requests = [
+    {
+      method: 'message.send',
+      params: { sessionPath: '/repo/session.jsonl', text: 'bounded send', inputs: [] },
+    },
+    {
+      method: 'message.continue',
+      params: { sessionPath: '/repo/session.jsonl' },
+    },
+    {
+      method: 'message.compact',
+      params: { sessionPath: '/repo/session.jsonl' },
+    },
+    {
+      method: 'session.title.generate',
+      params: {
+        sessionPath: '/repo/session.jsonl',
+        prompt: 'Name this session',
+        provider: 'mock',
+        model: 'model-a',
+        thinkingLevel: 'medium',
+        timeoutSec: 10,
+      },
+    },
+  ] as const;
+
+  for (const [index, candidate] of requests.entries()) {
+    const clock = new FakeTransitionClock();
+    let ensureCalls = 0;
+    let providerStarts = 0;
+    const harness = createHarness({
+      sessionOverrides: {
+        messages: [
+          { role: 'user', content: 'work' },
+          { role: 'assistant', stopReason: 'toolUse', content: [{ type: 'toolCall', id: 'tool-1' }] },
+          { role: 'toolResult', toolCallId: 'tool-1', content: 'done' },
+        ],
+        prompt: async () => { providerStarts += 1; },
+        continueAfterInterruption: async () => { providerStarts += 1; },
+        compact: async () => { providerStarts += 1; },
+      },
+    });
+    harness.deps.ensureSessionContext = async () => {
+      ensureCalls += 1;
+      return harness.context;
+    };
+    harness.deps.isSessionTransitionPending = () => true;
+    harness.deps.sessionTransitionWait = {
+      timeoutMs: 50,
+      pollIntervalMs: 10,
+      setTimeout: clock.setTimeout,
+      clearTimeout: clock.clearTimeout,
+    };
+
+    const rejected = assert.rejects(
+      handleBackendRequest(harness.deps, {
+        id: `transition-timeout-${index}`,
+        method: candidate.method,
+        params: candidate.params,
+      }),
+      (error: unknown) => error instanceof BackendError
+        && error.code === 'SESSION_TRANSITION_TIMEOUT'
+        && /50ms/.test(error.message),
+    );
+    await Promise.resolve();
+    clock.advance(50);
+    await rejected;
+
+    assert.ok(ensureCalls >= 1);
+    assert.equal(providerStarts, 0, `${candidate.method} must not start work after transition timeout`);
+    assert.equal(harness.context.activeRequest, undefined);
+  }
+});
+
+test('message.continue replays one stable operation without starting provider work twice', async () => {
+  let continueCalls = 0;
+  const harness = createHarness({
+    sessionOverrides: {
+      messages: [
+        { role: 'assistant', stopReason: 'toolUse', content: [{ type: 'toolCall', id: 'tool-1' }] },
+        { role: 'toolResult', toolCallId: 'tool-1', content: 'done' },
+      ],
+      continueAfterInterruption: async () => { continueCalls += 1; },
+    },
+  });
+  const params = {
+    sessionPath: harness.context.sessionPath,
+    operationId: 'continue-operation',
+    operationAttempt: 1,
+  };
+
+  const first = await handleBackendRequest(harness.deps, {
+    id: 'continue-first', method: 'message.continue', params,
+  });
+  const replay = await handleBackendRequest(harness.deps, {
+    id: 'continue-replay', method: 'message.continue',
+    params: { ...params, operationAttempt: 2 },
+  });
+  assert.deepEqual(replay, first);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(continueCalls, 1);
+
+  const status = await handleBackendRequest(harness.deps, {
+    id: 'continue-status', method: 'operation.status',
+    params: { sessionPath: harness.context.sessionPath, operationId: params.operationId },
+  });
+  assert.equal((status as { state: string }).state, 'accepted');
+});
+
+test('message.continue emits explicit cancelled settlement when Stop wins the acknowledgement/start gap', async () => {
+  let continueCalls = 0;
+  const harness = createHarness({
+    sessionOverrides: {
+      messages: [
+        { role: 'user', content: 'work' },
+        { role: 'assistant', stopReason: 'toolUse', content: [{ type: 'toolCall', id: 'tool-1' }] },
+        { role: 'toolResult', toolCallId: 'tool-1', content: 'done' },
+      ],
+      continueAfterInterruption: async () => { continueCalls += 1; },
+    },
+  });
+
+  const result = await handleBackendRequest(harness.deps, {
+    id: 'continue-cancelled-before-start',
+    method: 'message.continue',
+    params: { sessionPath: harness.context.sessionPath },
+  }) as { requestId: string };
+  harness.context.activeRequest!.aborted = true;
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  const terminal = harness.emitted.find((entry) => entry.event === 'message.aborted');
+  assert.deepEqual(terminal?.payload, {
+    requestId: result.requestId,
+    sessionPath: harness.context.sessionPath,
+    outcome: 'cancelled',
+    userInitiated: true,
+  });
+  assert.equal((terminal?.payload as { messageId?: string }).messageId, undefined);
+  assert.equal(continueCalls, 0);
+});
+
+test('message.continue emits explicit superseded settlement when runtime ownership changes before start', async () => {
+  let continueCalls = 0;
+  const harness = createHarness({
+    sessionOverrides: {
+      messages: [
+        { role: 'user', content: 'work' },
+        { role: 'assistant', stopReason: 'toolUse', content: [{ type: 'toolCall', id: 'tool-1' }] },
+        { role: 'toolResult', toolCallId: 'tool-1', content: 'done' },
+      ],
+      continueAfterInterruption: async () => { continueCalls += 1; },
+    },
+  });
+
+  const result = await handleBackendRequest(harness.deps, {
+    id: 'continue-superseded-before-start',
+    method: 'message.continue',
+    params: { sessionPath: harness.context.sessionPath },
+  }) as { requestId: string };
+  harness.context.sessionOwnershipEpoch = (harness.context.sessionOwnershipEpoch ?? 0) + 1;
+  harness.context.activeRequest = undefined;
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  const terminal = harness.emitted.find((entry) => entry.event === 'message.aborted');
+  assert.deepEqual(terminal?.payload, {
+    requestId: result.requestId,
+    sessionPath: harness.context.sessionPath,
+    outcome: 'superseded',
+  });
+  assert.equal((terminal?.payload as { messageId?: string }).messageId, undefined);
+  assert.equal(continueCalls, 0);
+});
+
+test('message.continue rejection before message_start settles without stamping an older assistant row', async () => {
+  const harness = createHarness({
+    sessionOverrides: {
+      messages: [
+        { role: 'user', content: 'work' },
+        { role: 'assistant', stopReason: 'toolUse', content: [{ type: 'toolCall', id: 'tool-1' }] },
+        { role: 'toolResult', toolCallId: 'tool-1', content: 'done' },
+      ],
+      continueAfterInterruption: async () => { throw new Error('continuation start failed'); },
+    },
+  });
+
+  const result = await handleBackendRequest(harness.deps, {
+    id: 'continue-rejected-before-start',
+    method: 'message.continue',
+    params: { sessionPath: harness.context.sessionPath },
+  }) as { requestId: string };
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  const terminal = harness.emitted.find((entry) => entry.event === 'message.aborted');
+  assert.deepEqual(terminal?.payload, {
+    requestId: result.requestId,
+    sessionPath: harness.context.sessionPath,
+    outcome: 'failed',
+    reason: 'continuation start failed',
+  });
+  assert.equal((terminal?.payload as { messageId?: string }).messageId, undefined);
+  assert.equal(harness.emitted.some((entry) => entry.event === 'error'), false);
+  assert.equal(harness.context.activeRequest, undefined);
+  assert.deepEqual(harness.busyEvents, [false]);
+});
+
 test('message.continue accepts a repeated provider-forced context overflow', async () => {
   let continueCalls = 0;
   const harness = createHarness({
@@ -813,7 +1050,10 @@ test('message.interrupt during preflight prevents the later agent prompt from st
   const sent = await handleBackendRequest(harness.deps, {
     id: 'send-interrupted-during-preflight',
     method: 'message.send',
-    params: { sessionPath: harness.context.sessionPath, text: 'do not start', inputs: [] },
+    params: {
+      sessionPath: harness.context.sessionPath, operationId: 'operation-preflight-stop',
+      text: 'do not start', inputs: [], localId: 'local-preflight-stop',
+    },
   });
   assert.equal(typeof (sent as { requestId: string }).requestId, 'string');
   assert.ok(harness.context.activeRequest, 'send owns the preflight window before interrupt');
@@ -831,6 +1071,18 @@ test('message.interrupt during preflight prevents the later agent prompt from st
 
   assert.equal(agentPromptStarts, 0, 'a cancelled preflight must not cross into a billable agent prompt');
   assert.equal(harness.emitted.some((entry) => entry.event === 'preflight.failed'), false);
+  assert.deepEqual(
+    harness.emitted.filter((entry) => entry.event === 'message.aborted')
+      .map((entry) => entry.payload),
+    [{
+      requestId: (sent as { requestId: string }).requestId,
+      operationId: 'operation-preflight-stop',
+      sessionPath: harness.context.sessionPath,
+      outcome: 'cancelled',
+      userInitiated: true,
+      reason: 'The send was cancelled by Stop before it started.',
+    }],
+  );
   assert.deepEqual(harness.busyEvents, [false]);
 });
 
@@ -924,6 +1176,47 @@ test('message.send pre-commit safety timer is cleared at the first message_start
   assert.equal(failed, undefined, 'no preflight.failed must fire after the commit point');
 });
 
+test('message.compact joins duplicate attempts and preserves manual intent identity', async () => {
+  let compactCalls = 0;
+  let finishCompact!: () => void;
+  const compactGate = new Promise<void>((resolve) => { finishCompact = resolve; });
+  const harness = createHarness({
+    sessionOverrides: {
+      compact: async () => { compactCalls += 1; await compactGate; },
+    },
+  });
+  const params = {
+    sessionPath: harness.context.sessionPath,
+    operationId: 'compact-operation', operationAttempt: 1, reason: 'manual',
+  };
+  const first = handleBackendRequest(harness.deps, {
+    id: 'compact-first', method: 'message.compact', params,
+  });
+  await Promise.resolve();
+  const replay = handleBackendRequest(harness.deps, {
+    id: 'compact-replay', method: 'message.compact', params: { ...params, operationAttempt: 2 },
+  });
+  finishCompact();
+
+  assert.deepEqual(await replay, await first);
+  assert.equal(compactCalls, 1);
+});
+
+test('operation.status rejects reconciliation from a stale backend generation', async () => {
+  const harness = createHarness();
+  harness.deps.backendGeneration = 8;
+  await assert.rejects(
+    handleBackendRequest(harness.deps, {
+      id: 'stale-status', method: 'operation.status',
+      params: {
+        sessionPath: harness.context.sessionPath,
+        operationId: 'unknown-operation', backendGeneration: 7,
+      },
+    }),
+    (error: unknown) => error instanceof BackendError && error.code === 'SESSION_GENERATION_ENDED',
+  );
+});
+
 test('message.compact compacts an idle session and rejects a running session', async () => {
   let compactCalls = 0;
   const idleHarness = createHarness({
@@ -962,15 +1255,12 @@ test('message.interrupt validates running state and reports abort failures', asy
     params: { sessionPath: '/repo/session.jsonl' },
   }), { interrupted: false, alreadyStopped: true });
 
-  let cancelledDeferredContinuation = 0;
   const activeHarness = createHarness({
     context: {
       activeRequest: { id: 'req-1', messageIndex: 0, aborted: false },
-      hardCompactionContinuationPending: true,
     },
     sessionOverrides: {
       isStreaming: true,
-      cancelPendingHardCompactionContinuation: () => { cancelledDeferredContinuation += 1; },
       abort: async () => {
         throw new Error('abort failed');
       },
@@ -982,8 +1272,6 @@ test('message.interrupt validates running state and reports abort failures', asy
     params: { sessionPath: '/repo/session.jsonl' },
   }), /abort failed/);
   assert.equal(activeHarness.context.activeRequest?.aborted, true);
-  assert.equal(activeHarness.context.hardCompactionContinuationPending, false);
-  assert.equal(cancelledDeferredContinuation, 1);
 });
 
 test('interrupt watchdog duration uses readable singular, plural, and millisecond labels', () => {
@@ -1066,6 +1354,150 @@ test('message.interrupt preserves semantic recovery that starts while abort is p
   } finally {
     if (previous === undefined) delete process.env.PIE_INTERRUPT_ABORT_WATCHDOG_MS;
     else process.env.PIE_INTERRUPT_ABORT_WATCHDOG_MS = previous;
+  }
+});
+
+test('send, continue, and compact bound an unresolved runtime recovery before mutating the session', async () => {
+  const requests = [
+    {
+      method: 'message.send',
+      params: { sessionPath: '/repo/session.jsonl', text: 'bounded recovery', inputs: [] },
+    },
+    {
+      method: 'message.continue',
+      params: { sessionPath: '/repo/session.jsonl' },
+    },
+    {
+      method: 'message.compact',
+      params: { sessionPath: '/repo/session.jsonl' },
+    },
+  ] as const;
+
+  for (const [index, candidate] of requests.entries()) {
+    const clock = new FakeTransitionClock();
+    let mutations = 0;
+    const harness = createHarness({
+      context: {
+        retired: true,
+        recoveryPromise: new Promise<SessionContext>(() => undefined),
+      },
+      sessionOverrides: {
+        messages: [
+          { role: 'user', content: 'work' },
+          { role: 'assistant', stopReason: 'toolUse', content: [{ type: 'toolCall', id: 'tool-1' }] },
+          { role: 'toolResult', toolCallId: 'tool-1', content: 'done' },
+        ],
+        prompt: async () => { mutations += 1; },
+        continueAfterInterruption: async () => { mutations += 1; },
+        compact: async () => { mutations += 1; },
+      },
+    });
+    harness.deps.sessionTransitionWait = {
+      timeoutMs: 50,
+      pollIntervalMs: 10,
+      setTimeout: clock.setTimeout,
+      clearTimeout: clock.clearTimeout,
+    };
+
+    const rejected = assert.rejects(
+      handleBackendRequest(harness.deps, {
+        id: `recovery-timeout-${index}`,
+        method: candidate.method,
+        params: candidate.params,
+      }),
+      (error: unknown) => error instanceof BackendError
+        && error.code === 'SESSION_TRANSITION_TIMEOUT'
+        && /50ms/.test(error.message),
+    );
+    await Promise.resolve();
+    clock.advance(50);
+    await rejected;
+    assert.equal(mutations, 0, `${candidate.method} must not enter a runtime whose recovery did not settle`);
+    assert.equal(harness.context.activeRequest, undefined);
+  }
+});
+
+test('send, continue, and compact reject a retired runtime before mutating it', async () => {
+  const requests = [
+    {
+      method: 'message.send',
+      params: { sessionPath: '/repo/session.jsonl', text: 'retired runtime', inputs: [] },
+    },
+    {
+      method: 'message.continue',
+      params: { sessionPath: '/repo/session.jsonl' },
+    },
+    {
+      method: 'message.compact',
+      params: { sessionPath: '/repo/session.jsonl' },
+    },
+  ] as const;
+
+  for (const [index, candidate] of requests.entries()) {
+    let mutations = 0;
+    const harness = createHarness({
+      context: { retired: true },
+      sessionOverrides: {
+        prompt: async () => { mutations += 1; },
+        continueAfterInterruption: async () => { mutations += 1; },
+        compact: async () => { mutations += 1; },
+      },
+    });
+
+    await assert.rejects(
+      handleBackendRequest(harness.deps, {
+        id: `retired-runtime-${index}`,
+        method: candidate.method,
+        params: candidate.params,
+      }),
+      (error: unknown) => error instanceof BackendError
+        && error.code === 'SESSION_RUNTIME_RECOVERY_FAILED'
+        && /retired/.test(error.message),
+    );
+    assert.equal(mutations, 0, `${candidate.method} must not mutate a retired runtime`);
+    assert.equal(harness.context.activeRequest, undefined);
+  }
+});
+
+test('send, continue, and compact revalidate worker ownership at the SDK mutation boundary', async () => {
+  const requests = [
+    {
+      method: 'message.send',
+      params: { sessionPath: '/repo/session.jsonl', text: 'revoked owner', inputs: [] },
+    },
+    {
+      method: 'message.continue',
+      params: { sessionPath: '/repo/session.jsonl' },
+    },
+    {
+      method: 'message.compact',
+      params: { sessionPath: '/repo/session.jsonl' },
+    },
+  ] as const;
+
+  for (const [index, candidate] of requests.entries()) {
+    let mutations = 0;
+    const harness = createHarness({
+      sessionOverrides: {
+        prompt: async () => { mutations += 1; },
+        continueAfterInterruption: async () => { mutations += 1; },
+        compact: async () => { mutations += 1; },
+      },
+    });
+    harness.deps.isSessionContextCurrent = () => false;
+
+    await assert.rejects(
+      handleBackendRequest(harness.deps, {
+        id: `revoked-runtime-${index}`,
+        method: candidate.method,
+        params: candidate.params,
+      }),
+      (error: unknown) => error instanceof BackendError
+        && error.code === 'SESSION_RUNTIME_RECOVERY_FAILED'
+        && /owner changed/.test(error.message),
+    );
+    assert.equal(mutations, 0, `${candidate.method} must not mutate after worker ownership is revoked`);
+    assert.equal(harness.context.activeRequest, undefined);
   }
 });
 
@@ -1205,7 +1637,10 @@ test('message.interrupt defensively clears a stuck activeRequest when abort sett
   let abortResolve: (() => void) | undefined;
   const harness = createHarness({
     context: {
-      activeRequest: { id: 'req-stuck', messageIndex: 0, aborted: false },
+      activeRequest: {
+        id: 'req-stuck', operationId: 'operation-stuck', messageIndex: 0,
+        semanticStarted: true, currentMessageId: 'message-stuck', aborted: false,
+      },
     },
     sessionOverrides: {
       isStreaming: true,
@@ -1228,6 +1663,13 @@ test('message.interrupt defensively clears a stuck activeRequest when abort sett
   // The defensive clear fired: activeRequest is gone and busy=false emitted.
   assert.equal(harness.context.activeRequest, undefined);
   assert.equal(harness.busyEvents.at(-1), false);
+  assert.deepEqual(
+    harness.emitted.filter((entry) => entry.event === 'message.aborted').map((entry) => entry.payload),
+    [{
+      requestId: 'req-stuck', operationId: 'operation-stuck', sessionPath: '/repo/session.jsonl',
+      messageId: 'message-stuck', userInitiated: true,
+    }],
+  );
 
   // A subsequent settings.set carrying a different model is no longer blocked
   // by the stale REQUEST_IN_PROGRESS — the live switch proceeds.
@@ -1244,33 +1686,33 @@ test('message.interrupt defensively clears a stuck activeRequest when abort sett
   assert.equal((harness.context.session.model as { id: string }).id, 'model-b');
 });
 
-test('message.interrupt defensive clear does not clobber a still-streaming turn when abort resolves but streaming continues', async () => {
-  // abort() resolved but the session is still streaming (abort couldn't stop
-  // it). The defensive clear must NOT touch activeRequest — the session-event
-  // handler's own `turn_end` clear still owns that path.
-  let abortResolve: (() => void) | undefined;
-  const harness = createHarness({
-    context: {
-      activeRequest: { id: 'req-streaming', messageIndex: 0, aborted: false },
-    },
-    sessionOverrides: {
-      isStreaming: true,
-      abort: () => new Promise<void>((resolve) => { abortResolve = resolve; }),
-    },
-  });
+test('message.interrupt escalates when abort resolves but full billable activity remains', async () => {
+  const previous = process.env.PIE_INTERRUPT_ABORT_WATCHDOG_MS;
+  process.env.PIE_INTERRUPT_ABORT_WATCHDOG_MS = '5';
+  try {
+    let abortResolve: (() => void) | undefined;
+    const harness = createHarness({
+      context: {
+        activeRequest: { id: 'req-streaming', messageIndex: 0, aborted: false },
+      },
+      sessionOverrides: {
+        isStreaming: true,
+        abort: () => new Promise<void>((resolve) => { abortResolve = resolve; }),
+      },
+    });
 
-  const interruptPromise = handleBackendRequest(harness.deps, {
-    id: '1',
-    method: 'message.interrupt',
-    params: { sessionPath: '/repo/session.jsonl' },
-  });
-
-  // Streaming continues after abort resolves.
-  abortResolve!();
-  assert.deepEqual(await interruptPromise, { interrupted: true, settled: true });
-
-  // activeRequest is preserved (turn_end will clear it later).
-  assert.equal(harness.context.activeRequest?.id, 'req-streaming');
+    const interruptPromise = handleBackendRequest(harness.deps, {
+      id: '1',
+      method: 'message.interrupt',
+      params: { sessionPath: '/repo/session.jsonl' },
+    });
+    abortResolve!();
+    assert.deepEqual(await interruptPromise, { interrupted: true, settled: false, teardownTimedOut: true });
+    assert.equal(harness.context.retired, true);
+  } finally {
+    if (previous === undefined) delete process.env.PIE_INTERRUPT_ABORT_WATCHDOG_MS;
+    else process.env.PIE_INTERRUPT_ABORT_WATCHDOG_MS = previous;
+  }
 });
 
 test('message.interrupt hard-stops compaction when interrupted during the post-agent_end window', async () => {
@@ -1288,7 +1730,10 @@ test('message.interrupt hard-stops compaction when interrupted during the post-a
       isCompacting: true,      // compaction LLM call in flight
       isRetrying: false,
       isBashRunning: false,
-      abortCompaction: () => { aborted.compaction = true; },
+      abortCompaction: () => {
+        aborted.compaction = true;
+        harness.context.session.isCompacting = false;
+      },
       abortBranchSummary: () => { aborted.branchSummary = true; },
       abortBash: () => { aborted.bash = true; },
       abortRetry: () => { aborted.retry = true; },
@@ -1311,6 +1756,71 @@ test('message.interrupt hard-stops compaction when interrupted during the post-a
   assert.equal(aborted.branchSummary, true);
   assert.equal(aborted.bash, true);
   assert.equal(aborted.retry, true);
+});
+
+test('Stop cancels manual compaction that is still awaiting the SDK pre-compaction abort', async () => {
+  const harness = createHarness();
+  const eventDeps: BackendSessionEventHandlerDeps = {
+    ...harness.deps,
+    recoverStuckSession() {},
+    async emitSessionOpened() {},
+  };
+  let markInitialAbortStarted!: () => void;
+  const initialAbortStarted = new Promise<void>((resolve) => { markInitialAbortStarted = resolve; });
+  let releaseInitialAbort!: () => void;
+  const initialAbort = new Promise<void>((resolve) => { releaseInitialAbort = resolve; });
+  let abortCalls = 0;
+  let controllerReady = false;
+  let compactionAborted = false;
+  let providerStarted = false;
+  const session = harness.context.session as unknown as {
+    abort: () => Promise<void>;
+    abortCompaction: () => void;
+    compact: () => Promise<void>;
+  };
+  session.abort = async () => {
+    abortCalls += 1;
+    if (abortCalls === 1) {
+      markInitialAbortStarted();
+      await initialAbort;
+    }
+  };
+  session.abortCompaction = () => {
+    if (controllerReady) compactionAborted = true;
+  };
+  session.compact = async () => {
+    await session.abort();
+    controllerReady = true;
+    handleSdkSessionEvent(eventDeps, harness.context, { type: 'compaction_start', reason: 'manual' });
+    if (!compactionAborted) providerStarted = true;
+    handleSdkSessionEvent(eventDeps, harness.context, {
+      type: 'compaction_end', reason: 'manual', aborted: compactionAborted,
+    });
+    if (compactionAborted) throw new Error('Compaction cancelled');
+  };
+
+  const compact = handleBackendRequest(harness.deps, {
+    id: 'compact-before-controller',
+    method: 'message.compact',
+    params: { sessionPath: harness.context.sessionPath },
+  });
+  await initialAbortStarted;
+  assert.equal(harness.context.manualCompactionRequest?.cancelled, false);
+
+  const stop = handleBackendRequest(harness.deps, {
+    id: 'stop-before-controller',
+    method: 'message.interrupt',
+    params: { sessionPath: harness.context.sessionPath },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(harness.context.manualCompactionRequest?.cancelled, true);
+
+  releaseInitialAbort();
+  await assert.rejects(compact, /Compaction cancelled/);
+  assert.deepEqual(await stop, { interrupted: true, settled: true });
+  assert.equal(compactionAborted, true, 'compaction_start replays Stop onto the newly created controller');
+  assert.equal(providerStarted, false, 'the cancelled manual compact never reaches provider work');
+  assert.equal(harness.context.manualCompactionRequest, undefined);
 });
 
 test('session.open re-arms busy while history compaction is active', async () => {
@@ -2048,6 +2558,104 @@ test('message.send removes a pre-registered localId when SDK queueing rejects', 
     params: { sessionPath: harness.context.sessionPath, text: 'queued', inputs: [], localId: 'local-failed' },
   }), /queue failed/);
   assert.deepEqual(harness.context.queuedLocalIds, []);
+});
+
+test('message.send joins and replays one operation without prompting twice', async () => {
+  let promptCalls = 0;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const harness = createHarness({
+    sessionOverrides: {
+      prompt: async (_text: string, options?: { preflightResult?: (success: boolean) => void }) => {
+        promptCalls += 1;
+        options?.preflightResult?.(true);
+        await gate;
+      },
+    },
+  });
+  const request = {
+    method: 'message.send',
+    params: {
+      sessionPath: harness.context.sessionPath,
+      operationId: 'op-retry',
+      text: 'only once', inputs: [], localId: 'local-retry',
+    },
+  };
+  const first = handleBackendRequest(harness.deps, { id: 'send-1', ...request });
+  await Promise.resolve();
+  const retry = handleBackendRequest(harness.deps, { id: 'send-2', ...request });
+  release();
+  const [firstResult, retryResult] = await Promise.all([first, retry]);
+
+  assert.deepEqual(retryResult, firstResult);
+  assert.equal(promptCalls, 1);
+  const status = await handleBackendRequest(harness.deps, {
+    id: 'status-1', method: 'operation.status',
+    params: { sessionPath: harness.context.sessionPath, operationId: 'op-retry' },
+  });
+  assert.equal((status as { state: string }).state, 'accepted');
+});
+
+test('message.send rejects changed intent for an existing operationId', async () => {
+  let promptCalls = 0;
+  const harness = createHarness({
+    sessionOverrides: { prompt: async () => { promptCalls += 1; } },
+  });
+  await handleBackendRequest(harness.deps, {
+    id: 'send-original', method: 'message.send', params: {
+      sessionPath: harness.context.sessionPath, operationId: 'op-mismatch',
+      text: 'original', inputs: [], localId: 'local-original',
+    },
+  });
+  await assert.rejects(handleBackendRequest(harness.deps, {
+    id: 'send-changed', method: 'message.send', params: {
+      sessionPath: harness.context.sessionPath, operationId: 'op-mismatch',
+      text: 'changed', inputs: [], localId: 'local-original',
+    },
+  }), (error: unknown) => error instanceof BackendError && error.code === 'OPERATION_INTENT_MISMATCH');
+  assert.equal(promptCalls, 1);
+});
+
+test('queued message.send operations retain independent identities', async () => {
+  const steerCalls: string[] = [];
+  const harness = createHarness({
+    sessionOverrides: {
+      isStreaming: true,
+      steer: async (text: string) => { steerCalls.push(text); },
+    },
+  });
+  const first = await handleBackendRequest(harness.deps, {
+    id: 'queued-1', method: 'message.send', params: {
+      sessionPath: harness.context.sessionPath, operationId: 'op-queued-1',
+      text: 'first', inputs: [], localId: 'local-1',
+    },
+  });
+  const second = await handleBackendRequest(harness.deps, {
+    id: 'queued-2', method: 'message.send', params: {
+      sessionPath: harness.context.sessionPath, operationId: 'op-queued-2',
+      text: 'second', inputs: [], localId: 'local-2',
+    },
+  });
+  assert.deepEqual(steerCalls, ['first', 'second']);
+  assert.equal((first as { operationId?: string }).operationId, 'op-queued-1');
+  assert.equal((second as { operationId?: string }).operationId, 'op-queued-2');
+  assert.deepEqual(harness.context.queuedOperationIds, ['op-queued-1', 'op-queued-2']);
+
+  await handleBackendRequest(harness.deps, {
+    id: 'clear-queued', method: 'message.clearQueue', params: { sessionPath: harness.context.sessionPath },
+  });
+  assert.deepEqual(
+    harness.emitted.filter((entry) => entry.event === 'message.aborted')
+      .map((entry) => (entry.payload as { operationId?: string }).operationId),
+    ['op-queued-1', 'op-queued-2'],
+  );
+  for (const operationId of ['op-queued-1', 'op-queued-2']) {
+    const status = await handleBackendRequest(harness.deps, {
+      id: `status-${operationId}`, method: 'operation.status',
+      params: { sessionPath: harness.context.sessionPath, operationId },
+    });
+    assert.equal((status as { state: string }).state, 'failed');
+  }
 });
 
 test('message.replaceQueue clears and requeues edited messages in order with stable local ids', async () => {

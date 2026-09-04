@@ -95,9 +95,18 @@ test('hot transition fences the old worker before interrupt awaits and same trun
   const current = router.getRoute(sessionPath);
   assert.equal(current.state, 'hot');
   if (current.state === 'hot') assert.notEqual(current.owner.workerId, original.owner.workerId);
+
+  const stop = router.interrupt(sessionPath, 'public stop fence');
+  assert.equal(router.getRoute(sessionPath).state, 'transitioning');
+  await assert.rejects(
+    router.routeExisting({ id: 'send-during-stop', method: 'message.send', params: { sessionPath, text: 'must wait' } }),
+    (error) => error instanceof SessionTransitionInProgressError,
+  );
+  assert.deepEqual(await stop, { soft: true });
+  assert.equal(router.getRoute(sessionPath).state, 'hot');
 });
 
-test('hot transition restores the same route when interrupt fails before retirement', async () => {
+test('hot transition remains fenced when escalated interrupt cannot confirm worker exit', async () => {
   const sessionPath = `${process.cwd()}/transition-restore.jsonl`;
   const client = {
     getSnapshot: () => ({ status: 'ready' as const, stdoutTail: '', stderrTail: '' }),
@@ -128,7 +137,7 @@ test('hot transition restores the same route when interrupt fails before retirem
       modelSettings: { defaultModel: 'm', defaultThinkingLevel: 'off' },
     }),
   });
-  const original = await router.promote(sessionPath);
+  await router.promote(sessionPath);
   await assert.rejects(
     router.runHotTransition(sessionPath, 'hot-truncate:entry', async (control) => {
       await control.interrupt('truncate');
@@ -136,8 +145,11 @@ test('hot transition restores the same route when interrupt fails before retirem
     }),
     /interrupt transport failed/,
   );
-  assert.equal(router.getRoute(sessionPath), original);
-  assert.deepEqual(await router.routeExisting({ id: 'after', method: 'models.list', params: { sessionPath } }), { restored: true });
+  assert.equal(router.getRoute(sessionPath).state, 'transitioning');
+  await assert.rejects(
+    router.routeExisting({ id: 'after', method: 'models.list', params: { sessionPath } }),
+    (error) => error instanceof SessionTransitionInProgressError,
+  );
 });
 
 test('replacement worker provider acquire is correlated beneath a transitioning root', async () => {

@@ -29,6 +29,7 @@ import {
 } from './worker-client';
 import { backendDebug, backendWarn } from './log';
 import { BackendError } from './server-io';
+import { SETTLED_SESSION_CAPABILITIES } from './session-activity';
 import type {
   WorkerJsonObject,
   WorkerJsonValue,
@@ -51,14 +52,23 @@ export interface WorkerRuntimeTransitionRoute {
   owner: SdkWorkerOwnershipIdentity;
   completion: Promise<unknown>;
   source: HotWorkerRoute;
+  promoted?: HotWorkerRoute;
   retireStarted: boolean;
   retired: boolean;
+  cancelled: boolean;
+  recoveryStops: Map<string, Promise<void>>;
 }
 
 export interface WorkerRuntimeTransitionControl {
   interrupt(reason: string): Promise<{ soft: boolean }>;
   retire(reason: string): Promise<void>;
   promote(sessionPath: string): Promise<HotWorkerRoute>;
+  /** Dispatch to the replacement while the public path remains fenced by this
+   * transition. Used by compound mutations so no unrelated command can enter
+   * between runtime promotion and their final replacement send. */
+  routePromoted(request: RequestEnvelope): Promise<WorkerJsonValue>;
+  /** Fail the compound mutation after a priority interrupt has taken ownership. */
+  assertActive(): void;
 }
 
 export class SessionTransitionInProgressError extends BackendError {
@@ -84,6 +94,7 @@ export interface HotWorkerRoute {
   checkpoint: {
     busySeq: number;
     requestId?: string;
+    operationId?: string;
     terminalRequestId?: string;
     preflightOnly?: boolean;
     messageId?: string;
@@ -214,6 +225,7 @@ const HOT_OPERATIONS: ReadonlySet<string> = new Set<WorkerRuntimeOperation>([
   'models.list',
   'liveTurn.checkpoint',
   'message.send',
+  'operation.status',
   'message.continue',
   'message.compact',
   'message.clearQueue',
@@ -229,6 +241,10 @@ export class WorkerRuntimeRouter {
   private readonly roots = new Map<string, WorkerRuntimeRouteState>();
   private readonly currentPaths = new Map<string, HotWorkerRoute>();
   private readonly workersById = new Map<string, HotWorkerRoute>();
+  /** Per-path cancellation generation for commands waiting on a runtime
+   * transition, retirement, or cold promotion. Stop advances it synchronously so
+   * an earlier command cannot enter the eventual owner after cancellation. */
+  private readonly operationCancellationGenerations = new Map<string, number>();
   private readonly providerLeases: CoordinatorProviderNetworkLeaseAuthority;
   private readonly syncRevisions: Record<SyncDomain, number> = {
     settings: 1,
@@ -282,6 +298,10 @@ export class WorkerRuntimeRouter {
   /** Bounded per-worker runtime discovery reports; never replaces the configured catalog authority. */
   private readonly reportedRuntimeCatalogs = new Map<string, { reportedAt: number; models: unknown[] }>();
   private readonly pendingProviderAcquires = new Map<string, HotWorkerRoute>();
+  /** Generation fence for idempotent message mutations. Retained for the
+   * coordinator lifetime so a retry/status query can never move to a
+   * replacement worker with an empty generation-scoped ledger. */
+  private readonly messageOperationOwners = new Map<string, SdkWorkerOwnershipIdentity>();
   private authPath?: string;
   private authFingerprint?: string;
 
@@ -321,8 +341,32 @@ export class WorkerRuntimeRouter {
       && this.roots.get(routeKey(route.rootSessionPath)) === route;
   }
 
-  async route(request: RequestEnvelope): Promise<WorkerJsonValue> {
-    return await this.routeCommand(request, true);
+  hasMessageOperationOwner(operationId: string): boolean {
+    return this.messageOperationOwners.has(operationId);
+  }
+
+  operationCancellationGeneration(sessionPath: string): number {
+    return this.operationCancellationGenerations.get(routeKey(sessionPath)) ?? 0;
+  }
+
+  cancelPendingRuntimeOperations(sessionPath: string): boolean {
+    const route = this.getRoute(sessionPath);
+    const state = route.state;
+    if (state !== 'promoting' && state !== 'retiring' && state !== 'transitioning') return false;
+    if (route.state === 'transitioning') route.cancelled = true;
+    const key = routeKey(sessionPath);
+    this.operationCancellationGenerations.set(
+      key,
+      this.operationCancellationGeneration(sessionPath) + 1,
+    );
+    return true;
+  }
+
+  async route(
+    request: RequestEnvelope,
+    expectedCancellationGeneration?: number,
+  ): Promise<WorkerJsonValue> {
+    return await this.routeCommand(request, true, expectedCancellationGeneration);
   }
 
   async routeExisting(request: RequestEnvelope): Promise<WorkerJsonValue> {
@@ -390,37 +434,69 @@ export class WorkerRuntimeRouter {
     if (!sent) throw new Error('Detail fetch could not be queued to its owning worker.');
   }
 
-  private async routeCommand(request: RequestEnvelope, promoteIfCold: boolean): Promise<WorkerJsonValue> {
+  private async routeCommand(
+    request: RequestEnvelope,
+    promoteIfCold: boolean,
+    expectedCancellationGeneration?: number,
+  ): Promise<WorkerJsonValue> {
     if (!WorkerRuntimeRouter.isHotOperation(request.method)) {
       throw new Error(`Operation ${request.method} is not a worker-runtime command.`);
     }
     const sessionPath = readSessionPath(request.params);
+    const operationCancellationGeneration = expectedCancellationGeneration
+      ?? this.operationCancellationGeneration(sessionPath);
     const hot = promoteIfCold ? await this.promote(sessionPath) : this.requireHot(sessionPath);
+    if (promoteIfCold
+      && this.operationCancellationGeneration(sessionPath) !== operationCancellationGeneration) {
+      throw new BackendError(
+        'SESSION_OPERATION_CANCELLED',
+        'The pending session operation was interrupted before runtime promotion completed.',
+      );
+    }
     this.assertCurrentOwner(hot, sessionPath);
-    const extensionUiResponse = request.method === 'extension_ui.response'
+    return await this.dispatchRuntimeCommand(hot, request);
+  }
+
+  private async dispatchRuntimeCommand(
+    hot: HotWorkerRoute,
+    request: RequestEnvelope,
+  ): Promise<WorkerJsonValue> {
+    if (!WorkerRuntimeRouter.isHotOperation(request.method)) {
+      throw new Error(`Operation ${request.method} is not a worker-runtime command.`);
+    }
+    const operation = request.method;
+    const sessionPath = readSessionPath(request.params);
+    const operationId = (operation === 'message.send'
+      || operation === 'message.continue'
+      || operation === 'message.compact'
+      || operation === 'operation.status')
+      ? readMessageOperationId(request.params)
+      : undefined;
+    if (operationId) {
+      const existingOwner = this.messageOperationOwners.get(operationId);
+      if (existingOwner && !sameWorkerOwner(existingOwner, hot.owner)) {
+        throw new BackendError(
+          'SESSION_GENERATION_ENDED',
+          'The worker generation that owned this message operation is no longer available.',
+        );
+      }
+      if (!existingOwner && operation !== 'operation.status') {
+        this.messageOperationOwners.set(operationId, hot.owner);
+      }
+    }
+    const extensionUiResponse = operation === 'extension_ui.response'
       ? readExtensionUiResponseId(request.params)
       : undefined;
     if (extensionUiResponse !== undefined) {
-      // Only the exact first response for a recorded owner is routed. A
-      // duplicate, mismatched, timed-out, cancelled, or stale-generation
-      // response finds no owner and receives the correlated typed terminal
-      // result without ever invoking the worker callback.
       const owner = this.extensionUiOwners.resolve(sessionPath, extensionUiResponse, hot.owner);
-      if (!owner) {
-        throw new BackendError('UI_REQUEST_NOT_PENDING', 'The extension UI request is no longer pending.');
-      }
+      if (!owner) throw new BackendError('UI_REQUEST_NOT_PENDING', 'The extension UI request is no longer pending.');
     }
     const response = await hot.worker.client.requestFrame!({
       kind: 'runtime.command',
-      operation: request.method,
+      operation,
       payload: asWorkerJsonObject({ params: request.params ?? {}, publicRequestId: request.id }),
     }, 'response');
     if (extensionUiResponse !== undefined) {
-      // The owning worker settled (accepted or definitively rejected); the
-      // owner is cleared so any duplicate response is typed stale. A worker
-      // that already consumed the dialog locally reports the legacy terminal
-      // error; surface the exact typed message so the host treats it as the
-      // same already-consumed terminal state it does in legacy mode.
       this.extensionUiOwners.settle(sessionPath, extensionUiResponse);
       if (!response.ok && typeof response.error?.message === 'string'
         && (response.error.message.startsWith('UI_REQUEST_NOT_PENDING:')
@@ -428,7 +504,7 @@ export class WorkerRuntimeRouter {
         throw new BackendError('UI_REQUEST_NOT_PENDING', 'The extension UI request is no longer pending.');
       }
     }
-    if (!response.ok) throw new Error(`${response.error.code}: ${response.error.message}`);
+    if (!response.ok) throw new BackendError(response.error.code, response.error.message);
     if (response.result.kind !== 'runtime.command') throw new Error('Worker returned the wrong runtime command result.');
     const resultPayload = response.result.payload;
     const earlyAckRequestId = resultPayload !== null
@@ -437,13 +513,17 @@ export class WorkerRuntimeRouter {
       && typeof resultPayload.requestId === 'string'
       ? resultPayload.requestId
       : undefined;
-    if (request.method === 'message.send' && earlyAckRequestId
+    const earlyAckOperationId = resultPayload !== null
+      && typeof resultPayload === 'object'
+      && !Array.isArray(resultPayload)
+      && typeof resultPayload.operationId === 'string'
+      ? resultPayload.operationId
+      : undefined;
+    if ((operation === 'message.send' || operation === 'message.continue') && earlyAckRequestId
       && hot.checkpoint.requestId === undefined
       && hot.checkpoint.terminalRequestId !== earlyAckRequestId) {
-      // Early-acked sends have no message.started checkpoint yet. Retain the
-      // request identity so a worker crash can terminalize the promoted send
-      // as preflight.failed instead of waiting for the host timeout.
       hot.checkpoint.requestId = earlyAckRequestId;
+      hot.checkpoint.operationId = earlyAckOperationId;
       hot.checkpoint.messageId = undefined;
       hot.checkpoint.preflightOnly = true;
     }
@@ -524,13 +604,37 @@ export class WorkerRuntimeRouter {
       source: route,
       retireStarted: false,
       retired: false,
+      cancelled: false,
+      recoveryStops: new Map(),
     };
     this.roots.set(routeKey(route.rootSessionPath), transition);
     this.notify(transition);
 
+    const assertActive = () => {
+      if (transition.cancelled) {
+        throw new BackendError(
+          'SESSION_OPERATION_CANCELLED',
+          `The ${transition.transitionKey} transition was interrupted before settlement.`,
+        );
+      }
+    };
     const control: WorkerRuntimeTransitionControl = {
-      interrupt: async (reason) => await this.options.supervisor.interrupt(route.currentLeasePath, undefined, reason),
+      assertActive,
+      interrupt: async (reason) => {
+        assertActive();
+        try {
+          return await this.options.supervisor.interrupt(route.currentLeasePath, undefined, reason);
+        } catch (error) {
+          // WorkerSupervisor only rejects after escalation could not confirm
+          // process-tree exit. Keep this transition fenced permanently rather
+          // than restoring routing or write authority to an ambiguous owner.
+          transition.retireStarted = true;
+          throw error;
+        }
+        assertActive();
+      },
       retire: async (reason) => {
+        assertActive();
         if (transition.retired) return;
         transition.retireStarted = true;
         await this.options.supervisor.stopWorker(route.currentLeasePath, reason);
@@ -541,17 +645,43 @@ export class WorkerRuntimeRouter {
         this.currentPaths.delete(routeKey(route.currentLeasePath));
         this.workersById.delete(route.owner.workerId);
         transition.retired = true;
+        assertActive();
       },
-      promote: async (target) => await this.promoteOnce(target),
+      promote: async (target) => {
+        assertActive();
+        const promoted = await this.promoteOnce(target);
+        transition.promoted = promoted;
+        if (transition.cancelled) {
+          await this.stopTransitionRouteOnce(transition, promoted, 'cancelled transition promotion');
+          throw new BackendError('SESSION_OPERATION_CANCELLED', `The ${transition.transitionKey} transition was interrupted during promotion.`);
+        }
+        return promoted;
+      },
+      routePromoted: async (request) => {
+        assertActive();
+        const promoted = transition.promoted;
+        if (!promoted
+          || this.roots.get(routeKey(transition.rootSessionPath)) !== transition
+          || !this.isCurrentOrPromoting(promoted)) {
+          throw new BackendError('SESSION_GENERATION_ENDED', 'The promoted edit runtime is no longer authoritative.');
+        }
+        if (!WorkerRuntimeRouter.isHotOperation(request.method)) {
+          throw new Error(`Operation ${request.method} is not a worker-runtime command.`);
+        }
+        const result = await this.dispatchRuntimeCommand(promoted, request);
+        assertActive();
+        return result;
+      },
     };
 
     void (async () => {
       try {
         const result = await operation(control);
         if (this.roots.get(routeKey(transition.rootSessionPath)) === transition) {
-          const settled: WorkerRuntimeRouteState = transition.retired
-            ? { state: 'cold', rootSessionPath: route.currentLeasePath }
-            : route;
+          const settled: WorkerRuntimeRouteState = transition.promoted
+            ?? (transition.retired
+              ? { state: 'cold', rootSessionPath: route.currentLeasePath }
+              : route);
           this.roots.set(routeKey(settled.rootSessionPath), settled);
           this.notify(settled);
         }
@@ -564,12 +694,13 @@ export class WorkerRuntimeRouter {
           this.roots.set(routeKey(route.rootSessionPath), route);
           this.notify(route);
         } else if (transition.retired && (!current || current === transition)) {
-          // A failed fresh promotion removes its provisional lookup. Publish an
-          // explicit retryable cold route while the coordinator retains the
-          // exact durable manager created by the truncate.
-          const cold: WorkerRuntimeRouteState = { state: 'cold', rootSessionPath: route.currentLeasePath };
-          this.roots.set(routeKey(route.currentLeasePath), cold);
-          this.notify(cold);
+          // A post-promotion compound-command failure keeps the fresh runtime
+          // authoritative. A promotion failure instead falls back to the
+          // retained cold handle for explicit retry.
+          const settled: WorkerRuntimeRouteState = transition.promoted
+            ?? { state: 'cold', rootSessionPath: route.currentLeasePath };
+          this.roots.set(routeKey(settled.rootSessionPath), settled);
+          this.notify(settled);
         }
         // An unconfirmed retirement remains transitioning/fenced. No command
         // may be routed back to a process whose death is ambiguous.
@@ -579,17 +710,75 @@ export class WorkerRuntimeRouter {
     return completion;
   }
 
-  async interrupt(sessionPath: string, reason: string): Promise<{ soft: boolean }> {
-    const route = this.requireHot(sessionPath);
-    const result = await this.options.supervisor.interrupt(route.currentLeasePath, undefined, reason);
-    if (!result.soft && this.isCurrent(route)) {
-      await this.handleWorkerStateChange(
-        route.workerRootSessionPath,
-        route.worker.client.getSnapshot(),
-        { workerId: route.owner.workerId, workerGeneration: route.owner.workerGeneration },
-      );
+  private async stopTransitionRoute(route: HotWorkerRoute, reason: string): Promise<void> {
+    await this.options.supervisor.stopWorker(route.currentLeasePath, reason);
+    this.extensionUiOwners.clearWorker(route.owner.workerId, route.owner.workerGeneration);
+    this.clearPendingProviderAcquires(route);
+    this.providerLeases.releaseOwner(route.owner, reason);
+    await this.options.ownership.reconcileCrash({ owner: route.owner, processDeathConfirmed: true });
+    this.currentPaths.delete(routeKey(route.currentLeasePath));
+    this.workersById.delete(route.owner.workerId);
+  }
+
+  private stopTransitionRouteOnce(
+    transition: WorkerRuntimeTransitionRoute,
+    route: HotWorkerRoute,
+    reason: string,
+  ): Promise<void> {
+    const key = `${route.owner.workerId}\u0000${route.owner.workerGeneration}`;
+    const existing = transition.recoveryStops.get(key);
+    if (existing) return existing;
+    const stopping = this.stopTransitionRoute(route, reason);
+    transition.recoveryStops.set(key, stopping);
+    return stopping;
+  }
+
+  /** Priority Stop recovery after a compound transition exceeded its cooperative
+   * settlement budget. The transition is cancelled, every current worker
+   * authority is revoked after confirmed process exit, and completion is joined
+   * so it cannot publish a later promoted owner behind the Stop acknowledgement. */
+  async forceRecoverTransition(sessionPath: string, reason: string): Promise<boolean> {
+    const route = this.getRoute(sessionPath);
+    if (route.state !== 'transitioning') return false;
+    this.cancelPendingRuntimeOperations(sessionPath);
+    if (route.promoted) {
+      await this.stopTransitionRouteOnce(route, route.promoted, reason);
+      route.retired = true;
+    } else if (!route.retired) {
+      // `retireStarted` is not death evidence: it is also set when a prior
+      // interrupt/retirement failed to confirm exit. Retry termination and do
+      // not publish cold authority unless this call confirms process death.
+      await this.stopTransitionRouteOnce(route, route.source, reason);
+      route.retireStarted = true;
+      route.retired = true;
     }
-    return result;
+    await route.completion.catch(() => undefined);
+    if (this.roots.get(routeKey(route.rootSessionPath)) === route) {
+      const cold: WorkerRuntimeRouteState = { state: 'cold', rootSessionPath: sessionPath };
+      this.roots.set(routeKey(sessionPath), cold);
+      this.notify(cold);
+    }
+    return true;
+  }
+
+  async interrupt(sessionPath: string, reason: string): Promise<{ soft: boolean }> {
+    const interruptedRoute = this.requireHot(sessionPath);
+    return await this.runHotTransition(
+      sessionPath,
+      `public-interrupt:${reason}`,
+      async (control) => {
+        const result = await control.interrupt(reason);
+        if (!result.soft) {
+          // WorkerSupervisor has force-killed and confirmed process-tree exit.
+          // Finish the same transition before acknowledging Stop so write,
+          // provider-network, UI, and routing authority are all revoked and an
+          // immediate next send can only promote a fresh generation.
+          await control.retire('forced interrupt recovery');
+          this.reconcileInterruptedCheckpoint(interruptedRoute);
+        }
+        return result;
+      },
+    );
   }
 
   async retire(sessionPath: string, reason = 'runtime retirement'): Promise<void> {
@@ -712,6 +901,7 @@ export class WorkerRuntimeRouter {
       }
     }
     this.liveSyncRetryTimers.clear();
+    this.operationCancellationGenerations.clear();
     const hot = [...this.roots.values()].filter((route): route is HotWorkerRoute => route.state === 'hot');
     for (const route of hot) this.extensionUiOwners.clearWorker(route.owner.workerId, route.owner.workerGeneration);
     await Promise.allSettled(hot.map((route) => this.retire(route.currentLeasePath, 'coordinator shutdown')));
@@ -727,6 +917,23 @@ export class WorkerRuntimeRouter {
       ? this.workersById.get(identity.workerId)
       : [...this.workersById.values()].find((candidate) => routeKey(candidate.workerRootSessionPath) === routeKey(rootSessionPath));
     if (!route || route.state !== 'hot') return;
+    const owningState = this.roots.get(routeKey(route.rootSessionPath));
+    let confirmedExitOwnsFailedTransition = false;
+    if (owningState?.state === 'transitioning'
+      && sameWorkerOwner(owningState.owner, route.owner)) {
+      // A controlled interrupt/retirement owns authority revocation. Wait for
+      // that transition to publish its terminal route before applying the exit
+      // snapshot; this avoids both duplicate terminalization and restoring a
+      // process whose exit raced a nominally-soft interrupt.
+      await owningState.completion.catch(() => undefined);
+      if (this.roots.get(routeKey(route.rootSessionPath)) !== owningState) {
+        return await this.handleWorkerStateChange(rootSessionPath, snapshot, identity);
+      }
+      // Escalation previously could not confirm death and deliberately left the
+      // transition fenced. This later exited snapshot is the missing proof;
+      // finish revocation below instead of recursing on the same transition.
+      confirmedExitOwnsFailedTransition = true;
+    }
     this.clearLiveSyncRetries(route.worker);
     // Snapshot the bounded checkpoint (including the detail subscription
     // manifest) BEFORE invalidating live subscriptions so crash diagnostics
@@ -738,7 +945,7 @@ export class WorkerRuntimeRouter {
     this.providerLeases.releaseOwner(route.owner, 'Worker crashed.');
     await this.options.supervisor.stopWorker(route.currentLeasePath, 'confirmed worker exit').catch(() => undefined);
     await this.options.ownership.reconcileCrash({ owner: route.owner, processDeathConfirmed: true });
-    if (!this.isCurrent(route)) return;
+    if (!this.isCurrent(route) && !confirmedExitOwnsFailedTransition) return;
     this.currentPaths.delete(routeKey(route.currentLeasePath));
     this.workersById.delete(route.owner.workerId);
     const cold: WorkerRuntimeRouteState = { state: 'cold', rootSessionPath: route.currentLeasePath };
@@ -788,6 +995,9 @@ export class WorkerRuntimeRouter {
       const isSupersededTerminal = route.previousLeasePath !== undefined
         && routeKey(eventPath) === routeKey(route.previousLeasePath)
         && (frame.event === 'preflight.failed'
+          || (frame.event === 'message.aborted'
+            && (frame.payload.outcome === 'cancelled' || frame.payload.outcome === 'superseded'))
+          || frame.event === 'agent.settled'
           || (frame.event === 'busy.changed' && frame.payload.busy === false));
       if (routeKey(eventPath) !== routeKey(route.currentLeasePath) && !isSupersededTerminal) return;
       if (frame.event === 'extension_ui.request' && !isSupersededTerminal) {
@@ -1144,8 +1354,14 @@ export class WorkerRuntimeRouter {
       );
       this.options.coldStore.consumePromotionGrant(grant);
       snapshot.commitPromotion?.();
-      this.roots.set(routeKey(route.rootSessionPath), route);
-      this.notify(route);
+      const root = this.roots.get(routeKey(route.rootSessionPath));
+      // A compound hot transition keeps its public root fenced until its final
+      // replacement command has acknowledged. Normal cold promotion still
+      // publishes the hot route immediately after runtime.ready.
+      if (root?.state !== 'transitioning') {
+        this.roots.set(routeKey(route.rootSessionPath), route);
+        this.notify(route);
+      }
       return route;
     } catch (error) {
       this.options.coldStore.abortPromotionGrant(grant);
@@ -1705,17 +1921,43 @@ export class WorkerRuntimeRouter {
 
   private observeCheckpoint(route: HotWorkerRoute, event: string, payload: WorkerJsonObject): void {
     const requestId = typeof payload.requestId === 'string' ? payload.requestId : undefined;
+    const operationId = typeof payload.operationId === 'string' ? payload.operationId : undefined;
     const messageId = typeof payload.messageId === 'string' ? payload.messageId : undefined;
     if (event === 'busy.changed' && Number.isSafeInteger(payload.seq)) {
       route.checkpoint.busySeq = Math.max(route.checkpoint.busySeq, payload.seq as number);
+    } else if (event === 'live.semantic' && payload.kind === 'turn.started') {
+      route.checkpoint.requestId = requestId;
+      route.checkpoint.operationId = operationId;
+      route.checkpoint.terminalRequestId = undefined;
+      route.checkpoint.messageId = typeof payload.canonicalMessageId === 'string'
+        ? payload.canonicalMessageId
+        : undefined;
+      route.checkpoint.preflightOnly = false;
+    } else if (event === 'live.semantic' && payload.kind === 'turn.terminal') {
+      if (requestId) route.checkpoint.terminalRequestId = requestId;
+      route.checkpoint.requestId = undefined;
+      route.checkpoint.operationId = undefined;
+      route.checkpoint.messageId = undefined;
+      route.checkpoint.preflightOnly = undefined;
+      route.checkpoint.tools = [];
+      const durableId = typeof payload.durableEntryId === 'string'
+        && payload.durableEntryId.length > 0 && payload.durableEntryId.length <= 512
+        ? payload.durableEntryId
+        : undefined;
+      if (durableId) route.checkpoint.durableWatermark = durableId;
+    } else if (event === 'message.aborted' && requestId?.startsWith('queued:')) {
+      // A queued send has its own operation terminal but never owns the active
+      // request checkpoint. Forward it without clearing the running turn.
     } else if (event === 'message.started') {
       route.checkpoint.requestId = requestId;
+      route.checkpoint.operationId = operationId;
       route.checkpoint.terminalRequestId = undefined;
       route.checkpoint.messageId = messageId;
       route.checkpoint.preflightOnly = false;
     } else if (event === 'message.finished' || event === 'message.aborted' || event === 'preflight.failed') {
       if (requestId) route.checkpoint.terminalRequestId = requestId;
       route.checkpoint.requestId = undefined;
+      route.checkpoint.operationId = undefined;
       route.checkpoint.messageId = undefined;
       route.checkpoint.preflightOnly = undefined;
       route.checkpoint.tools = [];
@@ -1778,21 +2020,28 @@ export class WorkerRuntimeRouter {
       if (route.checkpoint.preflightOnly) {
         this.options.emit('preflight.failed', {
           requestId,
+          ...(route.checkpoint.operationId ? { operationId: route.checkpoint.operationId } : {}),
           sessionPath: route.currentLeasePath,
           error: reason,
         });
       } else {
         this.options.emit('message.aborted', {
           requestId,
+          ...(route.checkpoint.operationId ? { operationId: route.checkpoint.operationId } : {}),
           sessionPath: route.currentLeasePath,
           ...(route.checkpoint.messageId ? { messageId: route.checkpoint.messageId } : {}),
           reason,
         });
       }
     }
+    this.options.emit('agent.settled', {
+      sessionPath: route.currentLeasePath,
+      capabilities: { ...SETTLED_SESSION_CAPABILITIES },
+    });
     const busyPayload = this.normalizeRuntimeEventPayload(route, 'busy.changed', {
       sessionPath: route.currentLeasePath,
       busy: false,
+      capabilities: { ...SETTLED_SESSION_CAPABILITIES },
       seq: route.checkpoint.busySeq + 1,
     });
     this.observeCheckpoint(route, 'busy.changed', busyPayload);
@@ -1971,6 +2220,18 @@ function readSessionPath(params: unknown): string {
     throw new Error('Worker runtime command requires an exact sessionPath.');
   }
   return (params as { sessionPath: string }).sessionPath;
+}
+
+function readMessageOperationId(params: unknown): string | undefined {
+  if (!params || typeof params !== 'object' || Array.isArray(params)) return undefined;
+  const operationId = (params as { operationId?: unknown }).operationId;
+  return typeof operationId === 'string' && operationId.length > 0 ? operationId : undefined;
+}
+
+function sameWorkerOwner(left: SdkWorkerOwnershipIdentity, right: SdkWorkerOwnershipIdentity): boolean {
+  return left.coordinatorGeneration === right.coordinatorGeneration
+    && left.workerId === right.workerId
+    && left.workerGeneration === right.workerGeneration;
 }
 
 function readExtensionUiResponseId(params: unknown): string | undefined {

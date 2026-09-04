@@ -119,11 +119,11 @@ test('reducer: Edit command optimistically truncates the original message + repl
   assert.equal(result.effects.length, 1);
   assert.equal(result.effects[0]?.kind, 'EditRpc');
   if (result.effects[0]?.kind === 'EditRpc') {
-    assert.equal(result.effects[0].interruptFirst, false);
+    assert.equal(result.effects[0].operationId, 'c-edit');
   }
 });
 
-test('reducer: Edit command sets interruptFirst when the session is already running', () => {
+test('reducer: Edit command remains one compound backend operation while running', () => {
   const result = reducer({
     ...initialArchState,
     sessions: {
@@ -148,9 +148,7 @@ test('reducer: Edit command sets interruptFirst when the session is already runn
 
   assert.equal(result.effects.length, 1);
   assert.equal(result.effects[0]?.kind, 'EditRpc');
-  if (result.effects[0]?.kind === 'EditRpc') {
-    assert.equal(result.effects[0].interruptFirst, true);
-  }
+  assert.equal(result.effects.filter((effect) => effect.kind === 'EditRpc').length, 1);
 });
 
 test('restoreRemovedTail appends only missing message ids and keeps the transcript window in sync', () => {

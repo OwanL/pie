@@ -138,14 +138,14 @@ The extension can also be turned off via the global toggle env var
 
 ## Develop
 
+From the repository root:
+
 ```bash
-# typecheck this extension
-npm --prefix extension run typecheck:tool-result-pruner --
+# typecheck and test this extension
+npm run typecheck -- --project tool-result-pruner
+npm run test:all -- --package tool-result-pruner
 
-# run its tests (via the repo test runner)
-node ./scripts/run-tests.mjs --package tool-result-pruner
-
-# or the whole extensions suite
+# or check the whole reusable-extension suite
 npm run extensions:typecheck
 npm run extensions:test
 ```

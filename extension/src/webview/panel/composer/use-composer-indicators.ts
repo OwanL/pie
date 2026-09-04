@@ -11,6 +11,7 @@ import type {
   SystemPromptEntry,
   ThinkingLevel,
   TranscriptWindow,
+  WorkingTimeState,
 } from '../../../shared/protocol';
 import type { TokenRateIndicatorState } from '../../../shared/token-rate';
 import { stripProviderPrefix } from '../../../shared/model-id';
@@ -32,7 +33,6 @@ import {
 } from '../session-tabs/token-usage';
 import {
   buildSessionUsageSnapshot,
-  mergeSessionUsageSnapshots,
   sessionUsageSignature,
   type SessionUsageSnapshot,
 } from '../../../shared/session-usage';
@@ -46,6 +46,7 @@ import {
 } from './indicator-signature';
 import { resolveComposerModelState } from './model-state';
 import { useTokenRateIndicator } from './use-token-rate';
+import { useWorkingTimeIndicator } from './use-working-time';
 import contextBreakdownWorkerUrl from '../context-window/breakdown-worker?worker&url';
 import { documentAllowsContextBreakdownWorker } from '../context-window/worker-policy';
 
@@ -102,6 +103,7 @@ export function useComposerIndicators({
   busy,
   sessionPath,
   tokenRateBySession,
+  workingTimeBySession,
 }: {
   activeModelId?: string;
   activeProvider?: string;
@@ -118,6 +120,7 @@ export function useComposerIndicators({
   busy: boolean;
   sessionPath: string | null;
   tokenRateBySession: Record<string, TokenRateIndicatorState>;
+  workingTimeBySession: Record<string, WorkingTimeState>;
 }) {
   const {
     selectedModel,
@@ -183,15 +186,6 @@ export function useComposerIndicators({
     () => contextBreakdownTranscriptSignature(transcript),
     [transcript],
   );
-  // Cheap O(toolCalls) revision that gates the O(result-tree)
-  // `subagentCostSignature` walk. The host posts a structured-cloned transcript
-  // ~7×/sec while streaming (fresh refs even when byte-identical), so keying the
-  // fingerprint memo on the `transcript` ref would re-walk the multi-megabyte
-  // subagent preview on every snapshot. The revision is built from each tool
-  // call's monotonic `seq` (advances on every structural preview change,
-  // including nested completions) and is stable while only streaming prose
-  // grows — so the fingerprint memo skips its recursive walk on unchanged
-  // snapshots without weakening correctness for nested completion changes.
   const subagentRev = useMemo(() => subagentToolCallRevision(transcript), [transcript]);
   const subagentSig = useMemo(() => subagentCostSignature(transcript), [subagentRev]);
   const liveStreamSig = useMemo(() => streamingContentSignature(transcript), [transcript]);
@@ -303,7 +297,9 @@ export function useComposerIndicators({
   // transcript/subagent accounting walk on every streaming tick.
   const durableUsageSig = useMemo(() => sessionUsageSignature(sessionUsage), [sessionUsage]);
   const effectiveSessionUsage = useMemo(
-    () => mergeSessionUsageSnapshots(sessionUsage, buildSessionUsageSnapshot(transcript)),
+    // Production always supplies a ledger snapshot. Transcript derivation is a
+    // compatibility fallback for old hosts/fixtures, never merged into ledger data.
+    () => sessionUsage ?? buildSessionUsageSnapshot(transcript),
     [sessionPath, durableUsageSig, usageSig, subagentSig],
   );
   const sessionTokenUsage = useMemo(
@@ -366,6 +362,7 @@ export function useComposerIndicators({
   );
 
   const tokenRateIndicator = useTokenRateIndicator({ sessionPath, tokenRateBySession });
+  const workingTimeIndicator = useWorkingTimeIndicator({ sessionPath, workingTimeBySession });
 
   return {
     selectedModel,
@@ -379,5 +376,6 @@ export function useComposerIndicators({
     sessionTokenIndicator,
     sessionCostIndicator,
     tokenRateIndicator,
+    workingTimeIndicator,
   };
 }

@@ -21,7 +21,7 @@ export interface NoticeBannerProps {
   kind?: NoticeKind | null;
   /** Credential-redacted full diagnostic behind the short `notice` summary, or
    *  null. When present, the banner renders a More toggle that reveals the
-   *  backend code, correlation, and available root-cause detail.
+   *  backend code and available root-cause detail.
    *  Absent for plain info/warning notices. */
   rawDetail?: string | null;
   /** Invoked when the user clicks a recovery action. The parent decides whether
@@ -35,7 +35,10 @@ export interface NoticeBannerProps {
 }
 
 export function NoticeBanner({ notice, kind, rawDetail, onAction, onDismiss }: NoticeBannerProps) {
-  const isError = notice.toLowerCase().includes('error') || notice.toLowerCase().includes('fail');
+  // Severity comes from the host-owned typed notice kind, never from words in
+  // the user-facing copy. An info/warning extension notification can mention
+  // an error without becoming an operational-error banner.
+  const isError = kind !== undefined && kind !== null;
   const isLong = notice.length > TRUNCATE_LENGTH;
   const [expanded, setExpanded] = useState(false);
   const [detailExpanded, setDetailExpanded] = useState(false);

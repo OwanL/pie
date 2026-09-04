@@ -28,6 +28,30 @@ test('backend accumulator exposes lightweight identity and sequence metadata', (
   assert.equal(value.currentSeq, started.seq);
 });
 
+test('backend accumulator propagates operation identity on every semantic envelope and checkpoint', () => {
+  const value = new BackendLiveTurnAccumulator({
+    protocolVersion: 7,
+    sessionPath: '/session.jsonl',
+    requestId: 'request',
+    operationId: 'operation',
+    turnId: 'turn',
+    attemptId: 'attempt',
+    canonicalMessageId: 'message',
+    startedAt: 100,
+  });
+  const started = value.observe({ kind: 'turn.started' }, 100);
+  const text = value.observe({ kind: 'turn.text', delta: 'hello' }, 101);
+  const terminal = value.observe({
+    kind: 'turn.terminal', terminalKind: 'completed', durableEntryId: 'entry', durableMessage: {
+      id: 'message', role: 'assistant', status: 'completed', markdown: 'hello', createdAt: '2026-01-01T00:00:00.000Z',
+    },
+  }, 102);
+  assert.equal(started.operationId, 'operation');
+  assert.equal(text.operationId, 'operation');
+  assert.equal(terminal.operationId, 'operation');
+  assert.equal(value.checkpoint().turn.operationId, 'operation');
+});
+
 test('backend accumulator reserves every candidate sequence including rejections', () => {
   const value = accumulator();
   const started = value.observe({ kind: 'turn.started' }, 100);

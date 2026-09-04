@@ -49,7 +49,18 @@ function askResult(id: string, answer: string, details: Record<string, unknown> 
 
 test("omitted userContext preserves task-only behavior", () => {
 	assert.equal(buildParentUserContext(undefined, manager([])), undefined);
-	assert.equal(formatSubagentPrompt("inspect the parser"), "Task: inspect the parser");
+	const prompt = formatSubagentPrompt("inspect the parser");
+	assert.match(prompt, /Traversal safety:/);
+	assert.match(prompt, /Task: inspect the parser$/);
+	assert.ok(prompt.indexOf("Traversal safety:") < prompt.indexOf("Task:"));
+});
+
+test("every task prompt embeds the canonical traversal-safety policy paragraph", () => {
+	const prompt = formatSubagentPrompt("anything");
+	for (const protectedClass of ["dependency", "version-control", "generated/build", "cache", "coverage", "runtime-data", "session", "log", "packaged-artifact", "temporary-SDK"]) {
+		assert.match(prompt, new RegExp(protectedClass), `policy paragraph must name the ${protectedClass} class`);
+	}
+	assert.match(prompt, /Git-aware tool \(rg\)/);
 });
 
 test("latest mode includes the latest prompt and only later ask_user decisions", () => {
@@ -119,7 +130,8 @@ test("context is bounded and the child prompt clearly delimits it", () => {
 	assert.match(context ?? "", /-end$/);
 
 	const prompt = formatSubagentPrompt("review it", context);
-	assert.match(prompt, /^Task: review it/);
+	assert.match(prompt, /Traversal safety:/);
+	assert.match(prompt, /^Traversal safety:[\s\S]*Task: review it/);
 	assert.match(prompt, /<parent_user_context>/);
 	assert.match(prompt, /Later recorded clarifications override earlier prompts/);
 	assert.match(prompt, /<\/parent_user_context>$/);

@@ -88,6 +88,100 @@ function createOpenRunSnapshot(sessionPath: string, runId: string): RunSnapshot 
   };
 }
 
+test('StatsService does not restore working-time telemetry for sessions already marked private', async () => {
+  await withTempDir(async (tempDir) => {
+    const sessionPath = '/workspace/private-session.jsonl';
+    let nowMs = Date.parse('2026-01-01T00:00:00.000Z');
+    const analyticsRoot = path.join(tempDir, 'data', 'outcomes');
+    const publicState = createInitialArchState();
+    const first = new StatsService({
+      dataOutcomesRootPath: analyticsRoot,
+      legacyUsageDataRootPath: tempDir,
+      workspaceId: 'workspace-private-restore',
+      getArchState: () => publicState,
+      now: () => new Date(nowMs),
+      createId: () => 'private-run-before-marker',
+    });
+    await first.start();
+    first.prepareForSend(sessionPath, [], 'test');
+    first.onBusyChanged(sessionPath, true);
+    nowMs += 5_000;
+    first.onAssistantTurnEnded(sessionPath, 'turn-1', 2_000);
+    first.onBusyChanged(sessionPath, false);
+    first.onSessionClosed(sessionPath);
+    await first.flush();
+    await first.shutdown();
+
+    const privateState = produce(createInitialArchState(), draft => {
+      draft.sessions.privacyModeBySession[sessionPath] = true;
+    });
+    const restored = new StatsService({
+      dataOutcomesRootPath: analyticsRoot,
+      legacyUsageDataRootPath: tempDir,
+      workspaceId: 'workspace-private-restore',
+      getArchState: () => privateState,
+      now: () => new Date(nowMs),
+    });
+    await restored.start();
+    assert.equal(restored.getWorkingTimeBySession()[sessionPath], undefined);
+    await restored.shutdown();
+  });
+});
+
+test('StatsService restores an open busy interval from the checkpoint without double-counting', async () => {
+  await withTempDir(async (tempDir) => {
+    const workspaceId = 'workspace-open-busy-restore';
+    const sessionPath = '/workspace/restarted-session.jsonl';
+    const startedAt = Date.parse('2026-01-01T00:00:00.000Z');
+    let nowMs = startedAt + 10_000;
+    const storageDir = path.join(tempDir, 'data', 'outcomes', workspaceHash(workspaceId));
+    const run = {
+      ...createOpenRunSnapshot(sessionPath, 'open-run'),
+      busyDurationMs: 2_000,
+    };
+    await fs.mkdir(storageDir, { recursive: true });
+    await fs.writeFile(path.join(storageDir, 'open-runs.a.json'), JSON.stringify({
+      schemaVersion: RUN_ANALYTICS_SCHEMA_VERSION,
+      seq: 1,
+      sessions: {
+        [sessionPath]: {
+          currentRun: run,
+          lastRun: null,
+          nextTaskIntent: null,
+          queuedUnsupportedInputCount: 0,
+          busyStartedAt: new Date(startedAt).toISOString(),
+        },
+      },
+    }), 'utf8');
+    await fs.writeFile(path.join(storageDir, 'open-runs.gen'), 'a', 'utf8');
+
+    const stats = new StatsService({
+      dataOutcomesRootPath: path.join(tempDir, 'data', 'outcomes'),
+      legacyUsageDataRootPath: tempDir,
+      workspaceId,
+      getArchState: () => createInitialArchState(),
+      now: () => new Date(nowMs),
+    });
+
+    await stats.start();
+    assert.deepEqual(stats.getWorkingTimeBySession()[sessionPath], {
+      accumulatedMs: 2_000,
+      activeSince: startedAt,
+    });
+
+    stats.onBusyChanged(sessionPath, false);
+    assert.deepEqual(stats.getWorkingTimeBySession()[sessionPath], {
+      accumulatedMs: 12_000,
+      activeSince: null,
+    });
+    nowMs += 5_000;
+    stats.onBusyChanged(sessionPath, false);
+    assert.equal(stats.getWorkingTimeBySession()[sessionPath]?.accumulatedMs, 12_000);
+
+    await stats.shutdown();
+  });
+});
+
 test('StatsService records run outcomes and persists snapshot metrics', async () => {
   await withTempDir(async (tempDir) => {
     let archState = createInitialArchState();

@@ -33,12 +33,14 @@ const CRITICAL_FIELDS: FieldSpec[] = [
   { path: 'transcript', type: 'array' },
   { path: 'sessions', type: 'array' },
   { path: 'openTabPaths', type: 'array' },
+  { path: 'sessionCapabilitiesBySession', type: 'object' },
   { path: 'generatingTitleSessionPaths', type: 'array' },
   { path: 'systemPrompts', type: 'array' },
   { path: 'availableModels', type: 'array' },
   { path: 'availableModelsStatus', type: 'string' },
   { path: 'availableExtensions', type: 'array' },
   { path: 'aggregateStats', type: 'object' },
+  { path: 'workingTimeBySession', type: 'object' },
   { path: 'fileChanges', type: 'array' },
   { path: 'readFilePaths', type: 'array' },
   { path: 'pendingComposerInputs', type: 'array' },
@@ -60,6 +62,46 @@ function checkType(value: unknown, expectedType: FieldSpec['type']): boolean {
   return typeof value === expectedType;
 }
 
+function isValidPrimaryOperation(value: unknown): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const operation = value as Record<string, unknown>;
+  return typeof operation.operationId === 'string'
+    && (operation.kind === 'session.create' || operation.kind === 'session.duplicate'
+      || operation.kind === 'message.send' || operation.kind === 'message.edit'
+      || operation.kind === 'message.interrupt' || operation.kind === 'message.continue'
+      || operation.kind === 'message.compact')
+    && (operation.phase === 'awaiting-acceptance' || operation.phase === 'awaiting-commit' || operation.phase === 'ambiguous')
+    && Number.isInteger(operation.attempt)
+    && (operation.attempt as number) >= 1
+    && typeof operation.committed === 'boolean'
+    && (operation.recovery === null
+      || operation.recovery === 'retry'
+      || operation.recovery === 'restart-backend'
+      || operation.recovery === 'reconcile');
+}
+
+function validateSessionCapabilities(value: unknown): string[] {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return [];
+  const violations: string[] = [];
+  for (const [sessionPath, candidate] of Object.entries(value)) {
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+      violations.push(`ViewState.sessionCapabilitiesBySession[${sessionPath}] is not an object`);
+      continue;
+    }
+    const capabilities = candidate as Record<string, unknown>;
+    for (const field of ['billableActivity', 'canContinue', 'canInterrupt', 'canCompact']) {
+      if (typeof capabilities[field] !== 'boolean') {
+        violations.push(`ViewState.sessionCapabilitiesBySession[${sessionPath}].${field} is not a boolean`);
+      }
+    }
+    if (capabilities.primaryOperation !== undefined
+      && !isValidPrimaryOperation(capabilities.primaryOperation)) {
+      violations.push(`ViewState.sessionCapabilitiesBySession[${sessionPath}].primaryOperation is invalid`);
+    }
+  }
+  return violations;
+}
+
 /** Validate incoming ViewState. Returns list of violations (empty = valid). */
 export function validateViewState(state: ViewState): string[] {
   const violations: string[] = [];
@@ -74,6 +116,7 @@ export function validateViewState(state: ViewState): string[] {
       violations.push(`ViewState.${spec.path} is a Promise`);
     }
   }
+  violations.push(...validateSessionCapabilities(state.sessionCapabilitiesBySession));
 
   if (violations.length > 0) {
     webviewLog(

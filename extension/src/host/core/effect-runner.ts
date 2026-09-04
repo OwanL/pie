@@ -201,11 +201,18 @@ export interface SessionServiceLike {
   /** Recover from a failed/timed-out selection: finish the request and
    *  dispatch the reducer transitions that undo the optimistic tab setup
    *  (CloseTab / SelectSession-fallback / SessionScopeCleared / NoticeShown). */
-  handleSelectionFailure(selectionToken: string, notice: string, expectedAttempt?: number): void;
+  handleSelectionFailure(
+    selectionToken: string,
+    notice: string,
+    expectedAttempt?: number,
+    reason?: 'definitive-rejection' | 'backend-generation-ended',
+  ): void;
   /** Retain a timed-out create/duplicate operation instead of rolling back. */
   handleCreateOperationDelayed?(selectionToken: string, operationId: string, notice: string, expectedAttempt?: number): void;
   /** Refresh lifecycle metadata fences at actual RPC start (after queue wait). */
   captureSelectionRequestStart?(selectionToken: string, operationAttempt?: number): void;
+  /** Current backend process generation for queued lifecycle ownership fences. */
+  getBackendGeneration?(): number;
   /** Reconcile an authoritative durable acknowledgement when session.opened is
    * delayed or publication failed after creation committed. */
   handleCreateOperationAcknowledged?(selectionToken: string, operationId: string, sessionPath: string): void;
@@ -357,6 +364,8 @@ type EffectHandler = (effect: any) => void;
  *  `message.send` on interrupt. Keyed by `corrId` in `EffectRunner`. */
 interface InFlightSend {
   corrId: string;
+  operationId?: string;
+  backendGeneration?: number;
   sessionPath: string;
   /** Which optimistic op this is — surfaces in the fire error + rollback kind. */
   kind: 'send' | 'edit';
@@ -369,6 +378,9 @@ interface InFlightSend {
   userParts?: UserContentPart[];
   /** The send-timer handle (cleared at the commit point / pre-ack failure / fire). */
   timer: TimerHandle | null;
+  /** Bounded read-only reconciliation after an ambiguous local deadline. */
+  reconcileTimer: TimerHandle | null;
+  reconcileAttempts: number;
   /** The budget this send's timer was armed with (prepass-aware when
    *  `getSendTimerTimeoutMs` is wired); surfaces in the fire error message. */
   budgetMs: number;
@@ -402,7 +414,24 @@ interface InFlightSend {
   priorPruningMode?: PruningMode;
 }
 
+interface InFlightMessageOperation {
+  corrId: string;
+  operationId: string;
+  operationKind: 'message.edit' | 'message.interrupt' | 'message.continue' | 'message.compact';
+  sessionPath: string;
+  backendGeneration: number;
+  operationAttempt: number;
+  reconcileTimer: TimerHandle | null;
+  reconcileAttempts: number;
+  acknowledgementTimedOut: boolean;
+  /** Interrupt keeps its session FIFO barrier until authoritative settlement. */
+  releaseBarrier?: () => void;
+}
+
 export class EffectRunner {
+  private static readonly SEND_RECONCILIATION_MAX_ATTEMPTS = 4;
+  private static readonly SEND_RECONCILIATION_BASE_DELAY_MS = 1_000;
+
   /** The backend-ready watchdog timer. Started by `StartBackendReadyWatchdog`,
    * cleared by `CancelBackendReadyWatchdog` / `DrainBackendReadyQueue` / fire. */
   private backendReadyWatchdog: TimerHandle | null = null;
@@ -416,6 +445,18 @@ export class EffectRunner {
   /** Per-session timers that expire the transient "Compacted" chip
    *  (`ClearLastCompaction` effect → `LastCompactionCleared` on fire). */
   private lastCompactionTimers: Map<string, TimerHandle> = new Map();
+
+  /** Compact/continue RPCs that currently occupy a session FIFO and cannot be
+   * cancelled through the send AbortController. Stop uses this execution-only
+   * index to reach the backend priority path immediately, then installs an
+   * interrupt barrier so later sends cannot overtake teardown. */
+  private priorityInterruptibleMutations = new Set<string>();
+  /** Opaque FIFO cancellation tickets installed before an edit can wait behind
+   * another session mutation. Stop marks them synchronously, so a queued edit
+   * cannot begin its destructive backend transition after Stop has won. */
+  private queuedEditOperations = new Map<string, { sessionPath: string; cancelled: boolean }>();
+  /** Execution resources for acknowledgement-ambiguous Continue/Compact. */
+  private inFlightMessageOperations = new Map<string, InFlightMessageOperation>();
 
   /** Secondary index: which corrId owns the in-flight send for a session
    *  (one at a time under FIFO serialization). Used by `abortInFlightSend`. */
@@ -522,7 +563,11 @@ export class EffectRunner {
       // ── Send-timer (Brief B): clear the post-ack send-timer at the commit
       //    point (the reducer emits this in `handleMessageStarted` where it
       //    drops `pending.promoted`). ──
-      ClearSendTimer: (e) => this.clearInFlightSend(e.corrId),
+      ClearSendTimer: (e) => {
+        this.clearInFlightSend(e.corrId);
+        const operation = [...this.inFlightMessageOperations.values()].find((candidate) => candidate.corrId === e.corrId);
+        if (operation) this.finishMessageOperationReconciliation(operation);
+      },
       // ── Transient "Compacted" chip TTL: expire the host-owned entry after a
       //    bounded delay so the chip does not linger. ──
       ClearLastCompaction: (e) => this.handleClearLastCompaction(e),
@@ -1249,6 +1294,9 @@ export class EffectRunner {
             cmd: {
               kind: 'Send',
               corrId: entry.corrId,
+              operationId: entry.operationId,
+              operationSource: entry.operationSource,
+              backendGeneration: entry.backendGeneration,
               sessionPath: resolvedSessionPath,
               text: entry.text,
               inputs: entry.inputs,
@@ -1288,6 +1336,9 @@ export class EffectRunner {
             cmd: {
               kind: 'Send',
               corrId: entry.corrId,
+              operationId: entry.operationId,
+              operationSource: entry.operationSource,
+              backendGeneration: entry.backendGeneration,
               sessionPath: entry.sessionPath,
               text: entry.text,
               inputs: entry.inputs,
@@ -1412,6 +1463,8 @@ export class EffectRunner {
     composedText: string,
     userParts: UserContentPart[] | undefined,
     priorPruningMode?: PruningMode,
+    operationId?: string,
+    backendGeneration?: number,
   ): InFlightSend {
     const abort = new AbortController();
     // Prepass-aware budget (read fresh each send so a runtime prepassTimeoutSec
@@ -1419,12 +1472,16 @@ export class EffectRunner {
     const budgetMs = this.deps.getSendTimerTimeoutMs?.(sessionPath) ?? this.sendTimerTimeoutMs;
     const send: InFlightSend = {
       corrId,
+      ...(operationId ? { operationId } : {}),
+      ...(backendGeneration !== undefined ? { backendGeneration } : {}),
       sessionPath,
       kind,
       localId,
       composedText,
       userParts,
       timer: null,
+      reconcileTimer: null,
+      reconcileAttempts: 0,
       budgetMs,
       phase: 'prepass',
       firstArmedAt: 0,
@@ -1472,9 +1529,21 @@ export class EffectRunner {
     // positive rollback. The entry is removed when the commit-point clear
     // arrives, or on `dispose()`.
     send.timer = null;
-    // Brief H: restore pruning (a "retry without pruning" send's prepass timed
-    //  out — the turn is rolling back, so pruning returns to the user's prior
-    //  mode for the next turn).
+    if (send.kind === 'send' && send.operationId && send.backendGeneration !== undefined) {
+      // A host timer is not backend rejection evidence. Keep the optimistic
+      // prompt and correlation alive, expose ambiguity, and reconcile through
+      // the generation-scoped read-only ledger.
+      this.deps.dispatchEvent({
+        kind: 'SendOperationDelayed',
+        operationId: send.operationId,
+        sessionPath: send.sessionPath,
+        backendGeneration: send.backendGeneration,
+      });
+      void this.reconcileSendOperation(send);
+      return;
+    }
+    // Edit has not migrated to the send registry yet and retains its existing
+    // local recovery behavior.
     this.restorePruningMode(send);
     if (send.requestId) {
       this.deps.dispatchEvent({
@@ -1533,12 +1602,14 @@ export class EffectRunner {
     const hadFired = send.fired;
     send.disposed = true;
     if (send.timer) this.timer.cancel(send.timer);
+    if (send.reconcileTimer) this.timer.cancel(send.reconcileTimer);
+    send.reconcileTimer = null;
     this.inFlightSends.delete(corrId);
     if (this.inFlightSendBySession.get(send.sessionPath) === send.corrId) {
       this.inFlightSendBySession.delete(send.sessionPath);
     }
 
-    if (hadFired && send.requestId) {
+    if (hadFired && send.requestId && (send.kind !== 'send' || !send.operationId)) {
       // Late commit after a POST-ACK send-timer fire: the turn started streaming
       // after the false-positive `PreflightFailed` rollback. Emit a retraction
       // so the reducer restores the optimistic user message, clears the notice,
@@ -1610,6 +1681,7 @@ export class EffectRunner {
     for (const send of this.inFlightSends.values()) {
       send.disposed = true;
       if (send.timer) this.timer.cancel(send.timer);
+      if (send.reconcileTimer) this.timer.cancel(send.reconcileTimer);
     }
     this.inFlightSends.clear();
     this.inFlightSendBySession.clear();
@@ -1617,6 +1689,13 @@ export class EffectRunner {
       this.timer.cancel(timer);
     }
     this.lastCompactionTimers.clear();
+    this.priorityInterruptibleMutations.clear();
+    this.queuedEditOperations.clear();
+    for (const operation of this.inFlightMessageOperations.values()) {
+      if (operation.reconcileTimer) this.timer.cancel(operation.reconcileTimer);
+      operation.releaseBarrier?.();
+    }
+    this.inFlightMessageOperations.clear();
   }
 
   /**
@@ -1634,89 +1713,403 @@ export class EffectRunner {
       this.runSendRpc(effect);
       return;
     }
-    // InterruptRpc: set the host-local completion-suppression flag for this
-    // session synchronously (same tick as the click), so the busy-completed
-    // handler suppresses the "run finished" notification the interrupt causes.
-    // The runner is the side-effect executor — this host-local flag stays out
-    // of the reducer (no read-vs-clear ordering hazard).
-    //
-    // Brief E — BEST-EFFORT pre-ack cancel of an in-flight message.send/edit.
-    // `abortInFlightSend` aborts the AbortController passed to `backend.request`
-    // synchronously and OUTSIDE the session queue, so it can unblock a send whose
-    // session-op is still awaiting the (slow-prepass) RPC: pre-ack, the RPC
-    // rejects → SendResult/EditResult{ok:false} (rollback via pending.ops) and
-    // the send-timer is cleared. Post-ack (RPC already resolved) the abort is a
-    // no-op on the RPC; the `message.interrupt` enqueued below handles the
-    // streaming phase. Calling both is safe in every phase and makes interrupt
-    // responsive whether the send is pre- or post-ack (STATE_CONTRACT §
-    // Optimistic Reconciliation "Timer ownership").
-    if (effect.kind === 'InterruptRpc') {
-      this.deps.service.suppressNextCompletionNotificationFor(effect.sessionPath);
-      this.abortInFlightSend(effect.sessionPath);
+    if (effect.kind === 'CompactRpc') {
+      this.runMessageOperationRpc(effect);
+      return;
     }
-    const { queues, backend, dispatch } = this.deps;
+    if (effect.kind === 'InterruptRpc') {
+      this.runInterruptRpc(effect);
+      return;
+    }
+    const { queues } = this.deps;
     void queues.enqueueSessionOperation(effect.sessionPath, async () => {
-        try {
-          await backend.request(rpcMethodFor(effect), rpcParamsFor(effect));
-          dispatch(rpcResultFor(effect, { ok: true }));
-        } catch (err) {
-          const error = toErrorMessage(err);
-          // A response timeout can race a backend acknowledgement: the backend
-          // consumes the dialog response, the host restores it, then the retry
-          // receives UI_REQUEST_NOT_PENDING. That state is terminal rather than
-          // retryable—the dialog no longer has an owner—so reconcile it as
-          // success instead of restoring a permanently stale prompt.
-          if (
-            effect.kind === 'ExtensionUiResponseRpc'
-            && error === 'The extension UI request is no longer pending.'
-          ) {
-            dispatch(rpcResultFor(effect, { ok: true }));
-          } else {
-            dispatch(rpcResultFor(effect, { ok: false, error }));
-          }
-        }
+      await this.executeGenericRpc(effect);
     });
+  }
+
+  private async executeGenericRpc(effect: RpcEffect): Promise<void> {
+    const { backend, dispatch } = this.deps;
+    try {
+      await backend.request(rpcMethodFor(effect), rpcParamsFor(effect));
+      dispatch(rpcResultFor(effect, { ok: true }));
+    } catch (err) {
+      const error = toErrorMessage(err);
+      // A response timeout can race a backend acknowledgement: the backend
+      // consumes the dialog response, the host restores it, then the retry
+      // receives UI_REQUEST_NOT_PENDING. That state is terminal rather than
+      // retryable—the dialog no longer has an owner—so reconcile it as
+      // success instead of restoring a permanently stale prompt.
+      if (
+        effect.kind === 'ExtensionUiResponseRpc'
+        && error === 'The extension UI request is no longer pending.'
+      ) {
+        dispatch(rpcResultFor(effect, { ok: true }));
+      } else {
+        dispatch(rpcResultFor(effect, { ok: false, error }));
+      }
+    }
+  }
+
+  private runInterruptRpc(effect: InterruptRpcEffect): void {
+    this.deps.service.suppressNextCompletionNotificationFor(effect.sessionPath);
+    this.abortInFlightSend(effect.sessionPath);
+    for (const queuedEdit of this.queuedEditOperations.values()) {
+      if (queuedEdit.sessionPath === effect.sessionPath) queuedEdit.cancelled = true;
+    }
+    const execute = async (): Promise<void> => await this.executeCompoundMessageOperation(effect);
+    const retriesInFlightInterrupt = effect.operationId !== undefined
+      && this.inFlightMessageOperations.get(effect.operationId)?.operationKind === 'message.interrupt';
+    if (this.priorityInterruptibleMutations.has(effect.sessionPath) || retriesInFlightInterrupt) {
+      // Reach the backend priority lane immediately, while installing a FIFO
+      // barrier ahead of every later send. The barrier is released only by an
+      // authoritative interrupt settlement or runner disposal.
+      let release!: () => void;
+      const barrier = new Promise<void>((resolve) => { release = resolve; });
+      void this.deps.queues.enqueueSessionOperation(effect.sessionPath, async () => await barrier);
+      void execute().finally(release);
+      return;
+    }
+    void this.deps.queues.enqueueSessionOperation(effect.sessionPath, execute);
+  }
+
+  private async executeCompoundMessageOperation(effect: EditRpcEffect | InterruptRpcEffect): Promise<void> {
+    const { backend, dispatch, service, statsService } = this.deps;
+    const operationKind = effect.kind === 'EditRpc' ? 'message.edit' as const : 'message.interrupt' as const;
+    const operationId = effect.operationId ?? effect.corrId;
+    const backendGeneration = effect.backendGeneration ?? service.getBackendGeneration?.() ?? 0;
+    const operationAttempt = effect.operationAttempt ?? 1;
+    let releaseBarrier: (() => void) | undefined;
+    const settlementBarrier = operationKind === 'message.interrupt'
+      ? new Promise<void>((resolve) => { releaseBarrier = resolve; })
+      : undefined;
+    const priorAttempt = this.inFlightMessageOperations.get(operationId);
+    if (priorAttempt) this.finishMessageOperationReconciliation(priorAttempt);
+    const inFlight: InFlightMessageOperation = {
+      corrId: effect.corrId, operationId, operationKind, sessionPath: effect.sessionPath,
+      backendGeneration, operationAttempt, reconcileTimer: null, reconcileAttempts: 0,
+      acknowledgementTimedOut: false, ...(releaseBarrier ? { releaseBarrier } : {}),
+    };
+    this.inFlightMessageOperations.set(operationId, inFlight);
+    if (effect.kind === 'EditRpc') {
+      this.priorityInterruptibleMutations.add(effect.sessionPath);
+      service.bumpSessionDataEpoch(effect.sessionPath);
+      if (operationAttempt === 1) {
+        statsService.onTruncatedAfter(effect.sessionPath, effect.messageId);
+        statsService.onMessageEdited(effect.sessionPath, effect.messageId);
+        statsService.prepareForSend(effect.sessionPath, effect.inputs, effect.composedText ?? effect.text);
+      }
+    }
+
+    type Response = {
+      operationId?: string;
+      operationAttempt?: number;
+      requestId?: string;
+      committed?: boolean;
+      interrupted?: boolean;
+      settled?: boolean;
+      alreadyStopped?: boolean;
+      forcedRecovery?: boolean;
+      teardownTimedOut?: boolean;
+      recoveryPending?: boolean;
+    };
+    const dispatchAcknowledgement = (response: Response): void => {
+      if (this.inFlightMessageOperations.get(operationId) !== inFlight) return;
+      const committed = response.committed === true
+        || (operationKind === 'message.interrupt'
+          && (response.settled === true
+            || (response.alreadyStopped === true && response.settled !== false)));
+      if (effect.kind === 'EditRpc') {
+        dispatch({
+          kind: 'EditResult', corrId: effect.corrId, operationId, operationAttempt,
+          backendGeneration, sessionPath: effect.sessionPath, ok: true, committed,
+          ...(response.requestId ? { requestId: response.requestId } : {}),
+        });
+        // A correlated committed acknowledgement resolves transport ambiguity.
+        // Semantic completion remains reducer-owned and arrives through the
+        // replacement lifecycle stream; polling it on a short fixed budget
+        // would misclassify a healthy long preflight as failed recovery.
+        if (committed) this.finishMessageOperationReconciliation(inFlight);
+        else this.scheduleMessageOperationReconciliation(inFlight);
+      } else {
+        dispatch({
+          kind: 'InterruptResult', corrId: effect.corrId, operationId, operationAttempt,
+          backendGeneration, sessionPath: effect.sessionPath, ok: true, committed,
+          interrupted: response.interrupted, settled: response.settled,
+          alreadyStopped: response.alreadyStopped, forcedRecovery: response.forcedRecovery,
+          teardownTimedOut: response.teardownTimedOut, recoveryPending: response.recoveryPending,
+          occurredAt: Date.now(),
+        });
+        if (response.settled === true
+          || (response.alreadyStopped === true && response.settled !== false)) {
+          this.finishMessageOperationReconciliation(inFlight);
+        } else {
+          this.scheduleMessageOperationReconciliation(inFlight);
+        }
+      }
+    };
+
+    try {
+      const params = effect.kind === 'EditRpc'
+        ? {
+            sessionPath: effect.sessionPath, entryId: effect.messageId, text: effect.text,
+            inputs: effect.inputs, localId: effect.localId, operationId, operationAttempt,
+          }
+        : { sessionPath: effect.sessionPath, operationId, operationAttempt };
+      const response = await backend.request<Response>(operationKind, params, {
+        onCorrelatedResponse: (settlement) => {
+          if (!inFlight.acknowledgementTimedOut
+            || this.inFlightMessageOperations.get(operationId) !== inFlight) return;
+          if (settlement.ok) dispatchAcknowledgement(settlement.result);
+          else void this.reconcileMessageOperation(inFlight);
+        },
+      });
+      dispatchAcknowledgement(response);
+    } catch (error) {
+      if (isLocalRequestTimeout(error)) {
+        inFlight.acknowledgementTimedOut = true;
+        this.deps.dispatchEvent({
+          kind: 'MessageOperationDelayed', operationId, operationKind,
+          sessionPath: effect.sessionPath, backendGeneration, error: toErrorMessage(error),
+        });
+        void this.reconcileMessageOperation(inFlight);
+      } else {
+        // The compound backend ledger, not transport error wording, owns the
+        // destructive commit boundary. Reconcile before deciding rollback.
+        inFlight.acknowledgementTimedOut = true;
+        this.deps.dispatchEvent({
+          kind: 'MessageOperationDelayed', operationId, operationKind,
+          sessionPath: effect.sessionPath, backendGeneration, error: toCodedErrorMessage(error),
+        });
+        void this.reconcileMessageOperation(inFlight);
+      }
+    }
+    if (settlementBarrier) await settlementBarrier;
   }
 
   /** Continue is early-acknowledged like Send so backend failures can bind to
    * the exact session before any stream event exists. Cold continuation also
    * receives the measured runtime-promotion budget. */
   private runContinueRpc(effect: ContinueRpcEffect): void {
+    this.runMessageOperationRpc(effect);
+  }
+
+  private runMessageOperationRpc(effect: ContinueRpcEffect | CompactRpcEffect): void {
     const { queues, backend, dispatch, service } = this.deps;
     void queues.enqueueSessionOperation(effect.sessionPath, async () => {
-      try {
-        service.bumpSessionDataEpoch(effect.sessionPath);
-        const coldPromotion = service.isSessionRuntimeReady?.(effect.sessionPath) === false;
-        const response = await backend.request<{ requestId: string }>('message.continue', {
+      const operationKind = effect.kind === 'ContinueRpc' ? 'message.continue' as const : 'message.compact' as const;
+      const operationId = effect.operationId ?? effect.corrId;
+      const backendGeneration = effect.backendGeneration ?? service.getBackendGeneration?.() ?? 0;
+      const operationAttempt = effect.operationAttempt ?? 1;
+      const inFlight: InFlightMessageOperation = {
+        corrId: effect.corrId,
+        operationId,
+        operationKind,
+        sessionPath: effect.sessionPath,
+        backendGeneration,
+        operationAttempt,
+        reconcileTimer: null,
+        reconcileAttempts: 0,
+        acknowledgementTimedOut: false,
+      };
+      this.inFlightMessageOperations.set(operationId, inFlight);
+      this.priorityInterruptibleMutations.add(effect.sessionPath);
+      const dispatchResult = (outcome: { ok: true; requestId?: string } | { ok: false; error: string }): void => {
+        dispatch({
+          kind: effect.kind === 'ContinueRpc' ? 'ContinueResult' : 'CompactResult',
+          corrId: effect.corrId,
+          operationId,
+          operationAttempt,
+          backendGeneration,
           sessionPath: effect.sessionPath,
+          ...outcome,
+        });
+      };
+      try {
+        if (operationKind === 'message.continue') service.bumpSessionDataEpoch(effect.sessionPath);
+        const coldPromotion = service.isSessionRuntimeReady?.(effect.sessionPath) === false;
+        const settleAcknowledgement = (settlement: CorrelatedBackendResponse<{ requestId?: string }>): void => {
+          if (!inFlight.acknowledgementTimedOut) return;
+          if (settlement.ok) {
+            dispatchResult({
+              ok: true,
+              ...(settlement.result.requestId ? { requestId: settlement.result.requestId } : {}),
+            });
+            if (operationKind === 'message.compact') this.finishMessageOperationReconciliation(inFlight);
+          } else {
+            dispatchResult({ ok: false, error: toCodedErrorMessage(settlement.error) });
+            if (operationKind === 'message.compact') void this.reconcileMessageOperation(inFlight);
+            else this.finishMessageOperationReconciliation(inFlight);
+          }
+        };
+        const response = await backend.request<{ requestId?: string }>(operationKind, {
+          sessionPath: effect.sessionPath,
+          operationId,
+          operationAttempt,
+          ...(operationKind === 'message.compact' ? { reason: 'manual' } : {}),
         }, {
+          onCorrelatedResponse: settleAcknowledgement,
           ...(coldPromotion ? { timeoutMs: BACKEND_READY_TIMEOUT_MS } : {}),
         });
-        dispatch({
-          kind: 'ContinueResult',
-          corrId: effect.corrId,
-          sessionPath: effect.sessionPath,
-          ok: true,
-          requestId: response.requestId,
-        });
+        dispatchResult({ ok: true, ...(response.requestId ? { requestId: response.requestId } : {}) });
+        if (operationKind === 'message.compact') this.finishMessageOperationReconciliation(inFlight);
+        else this.scheduleMessageOperationReconciliation(inFlight);
       } catch (error) {
         if (isLocalRequestTimeout(error)) {
-          this.deps.log.log('warn', 'message.continue acknowledgement delayed', {
-            corrId: effect.corrId,
-            sessionPath: effect.sessionPath,
+          inFlight.acknowledgementTimedOut = true;
+          this.deps.log.log('warn', `${operationKind} acknowledgement delayed`, {
+            corrId: effect.corrId, operationId, sessionPath: effect.sessionPath,
             error: toErrorMessage(error),
           });
+          this.deps.dispatchEvent({
+            kind: 'MessageOperationDelayed', operationId, operationKind,
+            sessionPath: effect.sessionPath, backendGeneration,
+            error: toErrorMessage(error),
+          });
+          void this.reconcileMessageOperation(inFlight);
           return;
         }
-        dispatch({
-          kind: 'ContinueResult',
-          corrId: effect.corrId,
-          sessionPath: effect.sessionPath,
-          ok: false,
-          error: toErrorMessage(error),
-        });
+        dispatchResult({ ok: false, error: toCodedErrorMessage(error) });
+        if (operationKind === 'message.compact') {
+          void this.reconcileMessageOperation(inFlight);
+        } else {
+          this.finishMessageOperationReconciliation(inFlight);
+        }
+      } finally {
+        if (!inFlight.acknowledgementTimedOut) {
+          this.priorityInterruptibleMutations.delete(effect.sessionPath);
+        }
       }
     });
+  }
+
+  private finishMessageOperationReconciliation(operation: InFlightMessageOperation): void {
+    if (operation.reconcileTimer) this.timer.cancel(operation.reconcileTimer);
+    const stillOwnsTracking = this.inFlightMessageOperations.get(operation.operationId) === operation;
+    if (stillOwnsTracking) {
+      this.inFlightMessageOperations.delete(operation.operationId);
+      if (operation.operationKind !== 'message.interrupt') {
+        this.priorityInterruptibleMutations.delete(operation.sessionPath);
+      }
+    }
+    const release = operation.releaseBarrier;
+    operation.releaseBarrier = undefined;
+    release?.();
+  }
+
+  private scheduleMessageOperationReconciliation(operation: InFlightMessageOperation, detail?: string): void {
+    if (operation.reconcileTimer) return;
+    if (operation.reconcileAttempts >= EffectRunner.SEND_RECONCILIATION_MAX_ATTEMPTS) {
+      this.deps.dispatchEvent({
+        kind: 'MessageOperationStatus', operationId: operation.operationId,
+        operationKind: operation.operationKind, sessionPath: operation.sessionPath,
+        backendGeneration: operation.backendGeneration, state: 'reconciliation-exhausted', error: detail,
+        occurredAt: Date.now(),
+      });
+      // The bounded ambiguity policy releases runner resources. Interrupt is
+      // terminalized by the reducer with restart recovery so its FIFO barrier
+      // cannot deadlock every later operation forever.
+      this.finishMessageOperationReconciliation(operation);
+      return;
+    }
+    const delay = EffectRunner.SEND_RECONCILIATION_BASE_DELAY_MS
+      * (2 ** Math.max(0, operation.reconcileAttempts - 1));
+    operation.reconcileTimer = this.timer.schedule(() => {
+      operation.reconcileTimer = null;
+      void this.reconcileMessageOperation(operation);
+    }, delay);
+  }
+
+  private async reconcileMessageOperation(operation: InFlightMessageOperation): Promise<void> {
+    if (this.inFlightMessageOperations.get(operation.operationId) !== operation) return;
+    operation.reconcileAttempts += 1;
+    try {
+      const status = await this.deps.backend.request<{
+        state: 'pending' | 'accepted' | 'failed';
+        requestId?: string;
+        committed?: boolean;
+        outcome?: 'failed' | 'cancelled' | 'superseded' | 'aborted';
+        code?: string;
+        message?: string;
+        interrupted?: boolean;
+        settled?: boolean;
+        alreadyStopped?: boolean;
+        forcedRecovery?: boolean;
+        teardownTimedOut?: boolean;
+        recoveryPending?: boolean;
+      }>('operation.status', {
+        sessionPath: operation.sessionPath,
+        operationId: operation.operationId,
+        backendGeneration: operation.backendGeneration,
+      });
+      if (status.state === 'pending') {
+        this.deps.dispatchEvent({
+          kind: 'MessageOperationStatus', operationId: operation.operationId,
+          operationKind: operation.operationKind, sessionPath: operation.sessionPath,
+          backendGeneration: operation.backendGeneration, state: 'pending', committed: status.committed,
+          occurredAt: Date.now(),
+        });
+        this.scheduleMessageOperationReconciliation(operation);
+        return;
+      }
+      if (status.state === 'failed') {
+        this.deps.dispatchEvent({
+          kind: 'MessageOperationStatus', operationId: operation.operationId,
+          operationKind: operation.operationKind, sessionPath: operation.sessionPath,
+          backendGeneration: operation.backendGeneration,
+          state: status.outcome ?? 'failed', committed: status.committed, requestId: status.requestId,
+          error: status.code && status.message ? `${status.code}: ${status.message}` : status.message ?? status.code,
+          occurredAt: Date.now(),
+        });
+        this.finishMessageOperationReconciliation(operation);
+        return;
+      }
+      const interruptSettled = operation.operationKind === 'message.interrupt'
+        && (status.settled === true
+          || (status.alreadyStopped === true && status.settled !== false));
+      const editDestructiveCommitObserved = status.committed === true
+        && operation.operationKind === 'message.edit';
+      const semanticStatusCommitted = status.committed === true
+        && operation.operationKind !== 'message.edit';
+      this.deps.dispatchEvent({
+        kind: 'MessageOperationStatus', operationId: operation.operationId,
+        operationKind: operation.operationKind, sessionPath: operation.sessionPath,
+        backendGeneration: operation.backendGeneration,
+        state: interruptSettled || semanticStatusCommitted ? 'committed' : 'accepted',
+        committed: status.committed, requestId: status.requestId,
+        interrupted: status.interrupted, settled: status.settled,
+        alreadyStopped: status.alreadyStopped, forcedRecovery: status.forcedRecovery,
+        teardownTimedOut: status.teardownTimedOut, recoveryPending: status.recoveryPending,
+        occurredAt: Date.now(),
+      });
+      // Edit's committed bit proves only the destructive rename, not provider
+      // start. It resolves acknowledgement ambiguity and releases bounded poll
+      // resources while the reducer-owned operation remains awaiting semantic
+      // start; late lifecycle evidence or generation death terminalizes it.
+      if (interruptSettled || semanticStatusCommitted || editDestructiveCommitObserved) {
+        this.finishMessageOperationReconciliation(operation);
+      } else {
+        this.scheduleMessageOperationReconciliation(operation);
+      }
+    } catch (error) {
+      const detail = toErrorMessage(error);
+      const code = error && typeof error === 'object' && 'code' in error
+        ? String((error as { code?: unknown }).code ?? '') : '';
+      if (code === 'SESSION_GENERATION_ENDED' || code === 'SESSION_NOT_FOUND'
+        || detail.includes('SESSION_GENERATION_ENDED') || detail.includes('SESSION_NOT_FOUND')) {
+        this.deps.dispatchEvent({
+          kind: 'MessageOperationStatus', operationId: operation.operationId,
+          operationKind: operation.operationKind, sessionPath: operation.sessionPath,
+          backendGeneration: operation.backendGeneration, state: 'generation-ended', error: detail,
+          occurredAt: Date.now(),
+        });
+        this.finishMessageOperationReconciliation(operation);
+      } else {
+        this.deps.log.log('warn', `${operation.operationKind} reconciliation delayed`, {
+          operationId: operation.operationId, sessionPath: operation.sessionPath, error: detail,
+        });
+        this.scheduleMessageOperationReconciliation(operation, detail);
+      }
+    }
   }
 
   /**
@@ -1728,18 +2121,43 @@ export class EffectRunner {
     void queues.enqueueSessionOperation(effect.sessionPath, async () => {
         // Start the send-timer at RPC dispatch (queue time) + arm the abort
         // controller (Brief E cancels an in-flight message.send on interrupt).
-        const send = this.startInFlightSend(effect.corrId, effect.sessionPath, 'send', effect.localId, effect.composedText, effect.userParts, effect.priorPruningMode);
+        const send = this.startInFlightSend(
+          effect.corrId, effect.sessionPath, 'send', effect.localId, effect.composedText,
+          effect.userParts, effect.priorPruningMode, effect.operationId, effect.backendGeneration,
+        );
+        let acknowledgementTimedOut = false;
         try {
           service.bumpSessionDataEpoch(effect.sessionPath);
           statsService.prepareForSend(effect.sessionPath, effect.inputs, effect.text);
           const coldPromotion = service.isSessionRuntimeReady?.(effect.sessionPath) === false;
-          const response = await backend.request<{ requestId?: string; queued?: boolean }>('message.send', {
+          const settleAcknowledgement = (settlement: CorrelatedBackendResponse<{ requestId?: string; queued?: boolean; operationId?: string }>): void => {
+            if (!acknowledgementTimedOut) return;
+            if (settlement.ok) {
+              send.requestId = settlement.result.requestId;
+              dispatch({
+                kind: 'SendResult', corrId: effect.corrId, operationId: effect.operationId,
+                backendGeneration: effect.backendGeneration, sessionPath: effect.sessionPath, ok: true,
+                requestId: settlement.result.requestId,
+                queued: settlement.result.queued === true ? true : undefined,
+              });
+            } else {
+              this.clearInFlightSend(effect.corrId);
+              dispatch({
+                kind: 'SendResult', corrId: effect.corrId, operationId: effect.operationId,
+                backendGeneration: effect.backendGeneration, sessionPath: effect.sessionPath,
+                ok: false, error: toErrorMessage(settlement.error),
+              });
+            }
+          };
+          const response = await backend.request<{ requestId?: string; queued?: boolean; operationId?: string }>('message.send', {
             sessionPath: effect.sessionPath,
+            operationId: effect.operationId,
             text: effect.text,
             inputs: effect.inputs,
             localId: effect.localId,
           }, {
             signal: send.abort.signal,
+            onCorrelatedResponse: settleAcknowledgement,
             // Promotion loads the same SDK/services as a cold backend start.
             // Share its measured startup budget: a healthy cold worker can
             // take more than 60s on Windows, and timing out its acknowledgement
@@ -1764,6 +2182,8 @@ export class EffectRunner {
           dispatch({
             kind: 'SendResult',
             corrId: effect.corrId,
+            operationId: effect.operationId,
+            backendGeneration: effect.backendGeneration,
             sessionPath: effect.sessionPath,
             ok: true,
             requestId: response.requestId,
@@ -1771,15 +2191,27 @@ export class EffectRunner {
           });
         } catch (err) {
           if (isLocalRequestTimeout(err)) {
+            acknowledgementTimedOut = true;
             // RequestTracker cancellation is local: the backend may already
             // have accepted the send and can still publish its semantic start.
             // Keep optimistic ownership + the watchdog until that start (or a
             // later terminal recovery boundary) proves the outcome.
             this.deps.log.log('warn', 'message.send acknowledgement delayed', {
               corrId: effect.corrId,
+              operationId: effect.operationId,
               sessionPath: effect.sessionPath,
               error: toErrorMessage(err),
             });
+            if (effect.operationId && effect.backendGeneration !== undefined) {
+              this.deps.dispatchEvent({
+                kind: 'SendOperationDelayed',
+                operationId: effect.operationId,
+                sessionPath: effect.sessionPath,
+                backendGeneration: effect.backendGeneration,
+                error: toErrorMessage(err),
+              });
+              void this.reconcileSendOperation(send);
+            }
             return;
           }
           // A definitive pre-ack rejection or explicit abort cannot commit.
@@ -1788,12 +2220,103 @@ export class EffectRunner {
           dispatch({
             kind: 'SendResult',
             corrId: effect.corrId,
+            operationId: effect.operationId,
+            backendGeneration: effect.backendGeneration,
             sessionPath: effect.sessionPath,
             ok: false,
             error: toErrorMessage(err),
           });
         }
     });
+  }
+
+  private scheduleSendReconciliation(send: InFlightSend, detail?: string): void {
+    if (!send.operationId || send.backendGeneration === undefined || send.reconcileTimer) return;
+    if (send.reconcileAttempts >= EffectRunner.SEND_RECONCILIATION_MAX_ATTEMPTS) {
+      this.deps.dispatchEvent({
+        kind: 'SendOperationStatus', operationId: send.operationId,
+        sessionPath: send.sessionPath, backendGeneration: send.backendGeneration,
+        state: 'reconciliation-exhausted',
+        error: detail,
+      });
+      return;
+    }
+    const delay = EffectRunner.SEND_RECONCILIATION_BASE_DELAY_MS
+      * (2 ** Math.max(0, send.reconcileAttempts - 1));
+    send.reconcileTimer = this.timer.schedule(() => {
+      send.reconcileTimer = null;
+      void this.reconcileSendOperation(send);
+    }, delay);
+  }
+
+  private async reconcileSendOperation(send: InFlightSend): Promise<void> {
+    if (!send.operationId || send.backendGeneration === undefined || send.disposed && !send.fired) return;
+    send.reconcileAttempts += 1;
+    try {
+      const status = await this.deps.backend.request<{
+        state: 'pending' | 'accepted' | 'failed';
+        requestId?: string;
+        queued?: boolean;
+        committed?: boolean;
+        code?: string;
+        message?: string;
+      }>('operation.status', {
+        sessionPath: send.sessionPath,
+        operationId: send.operationId,
+      });
+      if (status.state === 'pending') {
+        this.deps.dispatchEvent({
+          kind: 'SendOperationStatus', operationId: send.operationId,
+          sessionPath: send.sessionPath, backendGeneration: send.backendGeneration,
+          state: 'pending',
+        });
+        this.scheduleSendReconciliation(send);
+        return;
+      }
+      if (status.state === 'failed') {
+        this.deps.dispatchEvent({
+          kind: 'SendOperationStatus', operationId: send.operationId,
+          sessionPath: send.sessionPath, backendGeneration: send.backendGeneration,
+          state: 'failed', requestId: status.requestId,
+          error: status.message ?? status.code ?? 'The backend rejected the send before it started.',
+        });
+        return;
+      }
+      send.requestId = status.requestId;
+      if (status.queued) this.clearInFlightSend(send.corrId);
+      this.deps.dispatch({
+        kind: 'SendResult', corrId: send.corrId, operationId: send.operationId,
+        backendGeneration: send.backendGeneration, sessionPath: send.sessionPath,
+        ok: true, requestId: status.requestId, queued: status.queued === true ? true : undefined,
+      });
+      this.deps.dispatchEvent({
+        kind: 'SendOperationStatus', operationId: send.operationId,
+        sessionPath: send.sessionPath, backendGeneration: send.backendGeneration,
+        state: status.committed ? 'committed' : 'accepted',
+        requestId: status.requestId, queued: status.queued,
+      });
+      if (send.fired && !status.committed && !status.queued) {
+        this.scheduleSendReconciliation(send);
+      }
+    } catch (error) {
+      const detail = toErrorMessage(error);
+      const code = error && typeof error === 'object' && 'code' in error
+        ? String((error as { code?: unknown }).code ?? '')
+        : '';
+      if (code === 'SESSION_GENERATION_ENDED' || code === 'SESSION_NOT_FOUND'
+        || detail.includes('SESSION_GENERATION_ENDED') || detail.includes('SESSION_NOT_FOUND')) {
+        this.deps.dispatchEvent({
+          kind: 'SendOperationStatus', operationId: send.operationId,
+          sessionPath: send.sessionPath, backendGeneration: send.backendGeneration,
+          state: 'generation-ended', error: detail,
+        });
+      } else {
+        this.deps.log.log('warn', 'message.send reconciliation delayed', {
+          operationId: send.operationId, sessionPath: send.sessionPath, error: detail,
+        });
+        this.scheduleSendReconciliation(send, detail);
+      }
+    }
   }
 
   private runReplaceQueueRpc(effect: ReplaceQueueRpcEffect): void {
@@ -1821,140 +2344,31 @@ export class EffectRunner {
     });
   }
 
-  /**
-   * EditRpc is a composite operation: interrupt-then-truncate-then-send in a
-   * single session operation (STATE_CONTRACT § Execution Ordering: "Editing has
-   * restart semantics"). The interrupt is required — `session.truncateAfter`
-   * rejects with `STREAMING_BUSY` while the session has an `activeRequest` or is
-   * streaming, so editing during a live turn would otherwise always fail and
-   * roll the optimistic truncate back (stale transcript + flicker). If any step
-   * fails, the rest are skipped and the whole operation fails atomically.
-   */
+  /** One host request; the backend owns interrupt → truncate → replacement. */
   private runEditRpc(effect: Extract<Effect, { kind: 'EditRpc' }>): void {
-    const { queues, backend, dispatch, service, statsService } = this.deps;
-    // Interrupting the turn being replaced must not surface a "run finished"
-    // notification. Set outside the queue, in the same tick as the effect, so
-    // the busy-completed handler sees it. Only when a turn is actually live —
-    // an unconditional call would swallow the edit's OWN completion.
-    if (effect.interruptFirst) {
-      service.suppressNextCompletionNotificationFor(effect.sessionPath);
-    }
-    void queues.enqueueSessionOperation(effect.sessionPath, async () => {
-        // edit follows the same phase-scoped shape as send (STATE_CONTRACT §
-        // Optimistic Reconciliation "Timer ownership"): one send-timer owns the
-        // post-ack, pre-commit phase; the abort controller covers the whole
-        // operation. Cancellation is safe through the optional initial
-        // interrupt, but is fenced before truncate crosses the transport
-        // boundary because JSON-RPC cancellation only rejects the local waiter.
-        const send = this.startInFlightSend(effect.corrId, effect.sessionPath, 'edit', effect.localId, effect.composedText ?? effect.text, effect.userParts);
-        let awaitingSendAcknowledgement = false;
-        try {
-          service.bumpSessionDataEpoch(effect.sessionPath);
-          statsService.onTruncatedAfter(effect.sessionPath, effect.messageId);
-          statsService.onMessageEdited(effect.sessionPath, effect.messageId);
-          statsService.prepareForSend(effect.sessionPath, [], effect.composedText ?? effect.text);
-          if (effect.interruptFirst) {
-            // Idempotent: interrupting an already-idle session is a no-op.
-            await backend.request('message.interrupt', {
-              sessionPath: effect.sessionPath,
-            }, { signal: send.abort.signal });
-          }
-          // Destructive-commit boundary: from this point the per-session queue
-          // must retain ownership until truncate + send acknowledge. A user
-          // interrupt is queued behind this edit and stops the resulting turn,
-          // preserving one coherent durable/optimistic transcript.
-          send.locallyAbortable = false;
-          let settleTruncateResponse!: (response: CorrelatedBackendResponse<unknown>) => void;
-          const correlatedTruncateResponse = new Promise<CorrelatedBackendResponse<unknown>>((resolve) => {
-            settleTruncateResponse = resolve;
-          });
-          try {
-            await backend.request('session.truncateAfter', {
-              sessionPath: effect.sessionPath,
-              entryId: effect.messageId,
-            }, {
-              signal: send.abort.signal,
-              // BackendClient retains this exact request's correlation
-              // tombstone after the application timeout. The late response is
-              // the commit acknowledgement; do not issue message.send before
-              // it arrives.
-              onCorrelatedResponse: settleTruncateResponse,
-            });
-          } catch (err) {
-            if (!isLocalRequestTimeout(err)) throw err;
-
-            this.deps.log.log('warn', 'session.truncateAfter acknowledgement delayed', {
-              corrId: effect.corrId,
-              sessionPath: effect.sessionPath,
-              messageId: effect.messageId,
-              error: toErrorMessage(err),
-            });
-            this.deps.dispatchEvent({
-              kind: 'EditTruncateRecoveryChanged',
-              corrId: effect.corrId,
-              sessionPath: effect.sessionPath,
-              phase: 'recovering',
-            });
-
-            // The JSON-RPC timeout rejected only the local waiter. Keep the
-            // serialized session operation (and therefore any later
-            // interrupt) behind the destructive request until its exact
-            // correlated response proves whether the commit completed.
-            const lateResponse = await correlatedTruncateResponse;
-            if (!lateResponse.ok) {
-              this.clearInFlightSend(effect.corrId);
-              this.deps.log.log('error', 'session.truncateAfter outcome remained unresolved', {
-                corrId: effect.corrId,
-                sessionPath: effect.sessionPath,
-                messageId: effect.messageId,
-                error: toErrorMessage(lateResponse.error),
-              });
-              this.deps.dispatchEvent({
-                kind: 'EditTruncateRecoveryChanged',
-                corrId: effect.corrId,
-                sessionPath: effect.sessionPath,
-                phase: 'unresolved',
-                error: toErrorMessage(lateResponse.error),
-              });
-              // Never emit EditResult{ok:false} after an ambiguous destructive
-              // boundary: that would restore the old tail over a truncate that
-              // may already be durable. The optimistic replacement remains
-              // host-owned for authoritative reopen/restart reconciliation.
-              return;
-            }
-            this.deps.dispatchEvent({
-              kind: 'EditTruncateRecoveryChanged',
-              corrId: effect.corrId,
-              sessionPath: effect.sessionPath,
-              phase: 'recovered',
-            });
-          }
-          // Capture the backend-assigned requestId so a post-ack prepass
-          // failure (`PreflightFailed`) and the commit-point `MessageStarted`
-          // can resolve the edit's corrId via `pending.promoted` (mirrors
-          // runSendRpc). See STATE_CONTRACT § Optimistic Reconciliation.
-          awaitingSendAcknowledgement = true;
-          const response = await backend.request<{ requestId?: string }>('message.send', {
-            sessionPath: effect.sessionPath,
-            text: effect.text,
-            inputs: effect.inputs,
-            localId: effect.localId,
-          }, { signal: send.abort.signal });
-          send.requestId = response.requestId;
-          dispatch({ kind: 'EditResult', corrId: effect.corrId, sessionPath: effect.sessionPath, ok: true, requestId: response.requestId });
-        } catch (err) {
-          if (awaitingSendAcknowledgement && isLocalRequestTimeout(err)) {
-            this.deps.log.log('warn', 'message.send acknowledgement delayed', {
-              corrId: effect.corrId,
-              sessionPath: effect.sessionPath,
-              operation: 'edit',
-              error: toErrorMessage(err),
-            });
-            return;
-          }
-          this.clearInFlightSend(effect.corrId);
-          dispatch({ kind: 'EditResult', corrId: effect.corrId, sessionPath: effect.sessionPath, ok: false, error: toErrorMessage(err) });
-        }
+    const operationId = effect.operationId ?? effect.corrId;
+    const ticket = { sessionPath: effect.sessionPath, cancelled: false };
+    this.queuedEditOperations.set(operationId, ticket);
+    // Register before queue admission so Stop can preempt an edit waiting
+    // behind older work rather than running after its destructive transition.
+    this.priorityInterruptibleMutations.add(effect.sessionPath);
+    void this.deps.queues.enqueueSessionOperation(effect.sessionPath, async () => {
+      if (this.queuedEditOperations.get(operationId) === ticket) {
+        this.queuedEditOperations.delete(operationId);
+      }
+      if (ticket.cancelled) {
+        this.priorityInterruptibleMutations.delete(effect.sessionPath);
+        this.deps.dispatchEvent({
+          kind: 'MessageOperationStatus', operationId, operationKind: 'message.edit',
+          sessionPath: effect.sessionPath,
+          backendGeneration: effect.backendGeneration ?? this.deps.service.getBackendGeneration?.() ?? 0,
+          state: 'cancelled', committed: false,
+          error: 'The edit was interrupted before its backend transition started.',
+          occurredAt: Date.now(),
+        });
+        return;
+      }
+      await this.executeCompoundMessageOperation(effect);
     });
   }
 
@@ -2026,6 +2440,25 @@ export class EffectRunner {
       // CreateSession.
       void queues.enqueueLifecycle(async () => {
         try {
+          if (effect.backendGeneration !== undefined
+            && service.getBackendGeneration
+            && service.getBackendGeneration() !== effect.backendGeneration) {
+            service.handleSelectionFailure(
+              effect.selectionToken,
+              'PI backend generation ended while the session was being duplicated.',
+              effect.operationAttempt,
+              'backend-generation-ended',
+            );
+            dispatch({
+              kind: 'DuplicateSessionResult',
+              corrId: effect.corrId,
+              sessionPath: effect.sessionPath,
+              ...(effect.operationId ? { operationId: effect.operationId } : {}),
+              ok: false,
+              error: 'backend generation changed before duplicate started',
+            });
+            return;
+          }
           service.captureSelectionRequestStart?.(effect.selectionToken, effect.operationAttempt);
           const response = await backend.request<{ sessionPath?: string }>('session.duplicate', {
             sessionPath: effect.sourceSessionPath,
@@ -2062,6 +2495,25 @@ export class EffectRunner {
     // recovery path.
     void queues.enqueueLifecycle(async () => {
       try {
+        if (effect.backendGeneration !== undefined
+          && service.getBackendGeneration
+          && service.getBackendGeneration() !== effect.backendGeneration) {
+          service.handleSelectionFailure(
+            effect.selectionToken,
+            'PI backend generation ended while the session was being created.',
+            effect.operationAttempt,
+            'backend-generation-ended',
+          );
+          dispatch({
+            kind: 'CreateSessionResult',
+            corrId: effect.corrId,
+            sessionPath: effect.sessionPath,
+            ...(effect.operationId ? { operationId: effect.operationId } : {}),
+            ok: false,
+            error: 'backend generation changed before create started',
+          });
+          return;
+        }
         service.captureSelectionRequestStart?.(effect.selectionToken, effect.operationAttempt);
         const response = await backend.request<{ sessionPath?: string }>('session.create', {
           cwd: effect.cwd,
@@ -2110,18 +2562,23 @@ function isLocalRequestTimeout(error: unknown): boolean {
       && (error as { code?: unknown }).code === 'PIE_RPC_TIMEOUT');
 }
 
+function toCodedErrorMessage(error: unknown): string {
+  const message = toErrorMessage(error);
+  const code = error && typeof error === 'object' && 'code' in error
+    && typeof (error as { code?: unknown }).code === 'string'
+    ? (error as { code: string }).code
+    : undefined;
+  return code && !message.includes(code) ? `${code}: ${message}` : message;
+}
+
 /** RPC kinds that reach the generic double-wrap path in {@link runRpc} after
  *  Send/Edit have been short-circuited to their dedicated handlers. Kept
  *  exhaustive over this 3-kind set so the helper switches below stay
  *  exhaustive with no `never`-unreachable arms. */
-type RpcEffect = InterruptRpcEffect | CompactRpcEffect | ClearQueueRpcEffect | TruncateRpcEffect | ExtensionUiResponseRpcEffect;
+type RpcEffect = ClearQueueRpcEffect | TruncateRpcEffect | ExtensionUiResponseRpcEffect;
 
 function rpcMethodFor(effect: RpcEffect): string {
   switch (effect.kind) {
-    case 'InterruptRpc':
-      return 'message.interrupt';
-    case 'CompactRpc':
-      return 'message.compact';
     case 'ClearQueueRpc':
       return 'message.clearQueue';
     case 'TruncateRpc':
@@ -2133,10 +2590,6 @@ function rpcMethodFor(effect: RpcEffect): string {
 
 function rpcParamsFor(effect: RpcEffect): unknown {
   switch (effect.kind) {
-    case 'InterruptRpc':
-      return { sessionPath: effect.sessionPath };
-    case 'CompactRpc':
-      return { sessionPath: effect.sessionPath };
     case 'ClearQueueRpc':
       return { sessionPath: effect.sessionPath };
     case 'TruncateRpc':
@@ -2156,10 +2609,6 @@ function rpcResultFor(
     ...outcome,
   };
   switch (effect.kind) {
-    case 'InterruptRpc':
-      return { kind: 'InterruptResult', ...base };
-    case 'CompactRpc':
-      return { kind: 'CompactResult', ...base };
     case 'ClearQueueRpc':
       return { kind: 'ClearQueueResult', ...base };
     case 'TruncateRpc':

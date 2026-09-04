@@ -84,9 +84,10 @@ function AggregateStatsStripView({ stats, deferredTriggers, onOpenDeferredMenu }
         <span
           class="aggregate-strip-seg aggregate-strip-seg--primary"
           tabIndex={0}
-          aria-label={`Today's estimated token cost ${formatCostAdaptive(todayCost)}. Focus for today's cost and provider details.`}
+          aria-label={`Today's estimated token cost ${formatCostAdaptive(todayCost)}${(stats.billableAccounting?.todayUnknownInvocationCount ?? 0) + (stats.billableAccounting?.todayUnpricedInvocationCount ?? 0) > 0 ? '; incomplete billing provenance' : ''}. Focus for today's cost and provider details.`}
         >
           today <Num value={todayCost} format={formatCostAdaptive} width={8} class="aggregate-strip-cost" />
+          {(stats.billableAccounting?.todayUnknownInvocationCount ?? 0) + (stats.billableAccounting?.todayUnpricedInvocationCount ?? 0) > 0 ? '*' : null}
         </span>
       </Tooltip>
       <Sep />
@@ -94,9 +95,10 @@ function AggregateStatsStripView({ stats, deferredTriggers, onOpenDeferredMenu }
         <span
           class="aggregate-strip-seg"
           tabIndex={0}
-          aria-label={`Estimated token cost this week ${formatCostAdaptive(weekCost)}. Focus for seven-day cost and provider details.`}
+          aria-label={`Estimated token cost this week ${formatCostAdaptive(weekCost)}${(stats.billableAccounting?.weekUnknownInvocationCount ?? 0) + (stats.billableAccounting?.weekUnpricedInvocationCount ?? 0) > 0 ? '; incomplete billing provenance' : ''}. Focus for seven-day cost and provider details.`}
         >
           wk <Num value={weekCost} format={formatCostAdaptive} width={8} class="aggregate-strip-cost" />
+          {(stats.billableAccounting?.weekUnknownInvocationCount ?? 0) + (stats.billableAccounting?.weekUnpricedInvocationCount ?? 0) > 0 ? '*' : null}
         </span>
       </Tooltip>
       <Sep />
@@ -104,10 +106,11 @@ function AggregateStatsStripView({ stats, deferredTriggers, onOpenDeferredMenu }
         <span
           class="aggregate-strip-seg aggregate-strip-tokens"
           tabIndex={0}
-          aria-label={`Today's tokens: ${formatCompactTokens(todayInputTokens)} input and ${formatCompactTokens(todayOutputTokens)} output. Focus for token chart and provider details.`}
+          aria-label={`Today's tokens: ${formatCompactTokens(todayInputTokens)} input and ${formatCompactTokens(todayOutputTokens)} output${(stats.billableAccounting?.todayInstrumentationGapInvocationCount ?? 0) > 0 ? '; known subtotal with incomplete invocation usage' : ''}. Focus for token chart and provider details.`}
         >
           <span class="aggregate-strip-tok-down">↓<Num value={todayInputTokens} format={formatCompactTokens} width={5} /></span>
           {' '}<span class="aggregate-strip-tok-up">↑<Num value={todayOutputTokens} format={formatCompactTokens} width={5} /></span>
+          {(stats.billableAccounting?.todayInstrumentationGapInvocationCount ?? 0) > 0 ? '*' : null}
         </span>
       </Tooltip>
       <Sep />
@@ -242,7 +245,7 @@ function arePropsEqual(
  *  strip skips re-render when the set is unchanged across a fresh host-serialised
  *  `deferredTriggers` array reference (the host re-serialises every snapshot). */
 function deferredSignature(t: DeferredTriggerView[]): string {
-  return t.map((x) => `${x.id}:${x.sessionPath}`).sort().join(',');
+  return t.map((x) => `${x.id}:${x.sessionPath}:${x.deliveryState}:${x.recoveryState ?? ''}:${x.deliveryDetail ?? ''}`).sort().join(',');
 }
 
 function seriesSignature(series: AggregateSeriesPoint[]): string {
@@ -280,6 +283,18 @@ export function aggregateStatsSignature(s: AggregateStats): string {
     s.totalCost, s.totalInputTokens, s.totalOutputTokens,
     s.totalCacheReadTokens, s.totalCacheWriteTokens,
     s.runCount, s.sessionCount,
+    s.billableAccounting ? [
+      s.billableAccounting.invocationCount,
+      s.billableAccounting.todayUnknownInvocationCount,
+      s.billableAccounting.todayUnpricedInvocationCount,
+      s.billableAccounting.todayInstrumentationGapInvocationCount,
+      s.billableAccounting.weekUnknownInvocationCount,
+      s.billableAccounting.weekUnpricedInvocationCount,
+      s.billableAccounting.weekInstrumentationGapInvocationCount,
+      s.billableAccounting.unknownInvocationCount,
+      s.billableAccounting.unpricedInvocationCount,
+      s.billableAccounting.instrumentationGapInvocationCount,
+    ].join(':') : '',
     s.costByProvider.map((p) => `${p.provider}:${p.cost}`).join(','),
     s.todayCostByProvider.map((p) => `${p.provider}:${p.cost}:${p.inputTokens}:${p.outputTokens}`).join(','),
     s.weekCostByProvider.map((p) => `${p.provider}:${p.cost}`).join(','),
@@ -515,6 +530,18 @@ function todayCostTooltipNode(s: AggregateStats): JSX.Element {
       </div>
       <div class="rich-tooltip-sub">API-equivalent catalog estimate · subscriptions, plan allowances, and invoices are not reconciled</div>
       <div class="rich-tooltip-sub">{sub.join('  ·  ')}</div>
+      {!!s.billableAccounting && (
+        s.billableAccounting.todayUnknownInvocationCount > 0
+        || s.billableAccounting.todayUnpricedInvocationCount > 0
+      ) && (
+        <div class="rich-tooltip-sub">
+          Incomplete billing provenance: {s.billableAccounting.todayUnknownInvocationCount} unknown and{' '}
+          {s.billableAccounting.todayUnpricedInvocationCount} unpriced invocation(s) today
+          {s.billableAccounting.todayInstrumentationGapInvocationCount > 0
+            ? ` (${s.billableAccounting.todayInstrumentationGapInvocationCount} instrumentation gap(s))`
+            : ''}.
+        </div>
+      )}
       <StackedAreaChart points={s.todayCostSeries} mode="cumulative" formatY={formatCostAdaptive} formatX={formatTimeOfDay}
         colorKeys={s.todayCostByProvider.map((p) => p.provider)} />
       {s.todayCostByProvider.length > 0 && (
@@ -524,7 +551,13 @@ function todayCostTooltipNode(s: AggregateStats): JSX.Element {
           models: modelValuesForProvider(s.todayCostSeries, p.provider, formatCostAdaptive),
         }))} />
       )}
-      <div class="rich-tooltip-sub">All-time {formatCostAdaptive(s.totalCost)} · {s.runCount} runs · {s.sessionCount} sessions</div>
+      <div class="rich-tooltip-sub">
+        All-time {formatCostAdaptive(s.totalCost)} · {s.runCount} runs · {s.sessionCount} sessions
+        {!!s.billableAccounting && (s.billableAccounting.unknownInvocationCount > 0
+          || s.billableAccounting.unpricedInvocationCount > 0)
+          ? ` · incomplete: ${s.billableAccounting.unknownInvocationCount} unknown, ${s.billableAccounting.unpricedInvocationCount} unpriced`
+          : ''}
+      </div>
     </div>
   );
 }
@@ -539,6 +572,16 @@ function weekCostTooltipNode(s: AggregateStats): string | JSX.Element {
       </div>
       <div class="rich-tooltip-sub">API-equivalent catalog estimate · subscriptions, plan allowances, and invoices are not reconciled</div>
       <div class="rich-tooltip-sub">{s.weekRunCount} run{s.weekRunCount === 1 ? '' : 's'}</div>
+      {!!s.billableAccounting && (s.billableAccounting.weekUnknownInvocationCount > 0
+        || s.billableAccounting.weekUnpricedInvocationCount > 0) && (
+        <div class="rich-tooltip-sub">
+          Incomplete billing provenance: {s.billableAccounting.weekUnknownInvocationCount} unknown and{' '}
+          {s.billableAccounting.weekUnpricedInvocationCount} unpriced invocation(s)
+          {s.billableAccounting.weekInstrumentationGapInvocationCount > 0
+            ? ` (${s.billableAccounting.weekInstrumentationGapInvocationCount} instrumentation gap(s))`
+            : ''}.
+        </div>
+      )}
       <StackedAreaChart points={s.weekCostSeries} mode="cumulative" formatY={formatCostAdaptive} formatX={formatDateTimeShort}
         colorKeys={s.weekCostByProvider.map((p) => p.provider)} />
       {s.weekCostByProvider.length > 0 && (
@@ -570,6 +613,11 @@ function TokensTooltip({ stats }: { stats: AggregateStats }): JSX.Element {
         </span>
       </div>
       <div class="rich-tooltip-sub">↓{formatCompactTokens(stats.todayInputTokens)} in  ·  ↑{formatCompactTokens(stats.todayOutputTokens)} out</div>
+      {(stats.billableAccounting?.todayInstrumentationGapInvocationCount ?? 0) > 0 && (
+        <div class="rich-tooltip-sub">
+          Known subtotal · {stats.billableAccounting?.todayInstrumentationGapInvocationCount} invocation(s) have incomplete token usage
+        </div>
+      )}
       <div class="rich-tooltip-toggle" role="group" aria-label="Token chart series">
         <button type="button" aria-pressed={input} onClick={() => setKind('input')}>Input</button>
         <button type="button" aria-pressed={!input} onClick={() => setKind('output')}>Output</button>
@@ -807,7 +855,8 @@ function deferredTooltipNode(triggers: DeferredTriggerView[]): JSX.Element {
   const lines: string[] = [`${triggers.length} pending — click to cancel`, ''];
   for (const t of triggers) {
     const note = t.note.trim() || '(no note)';
-    const head = `${t.sessionPath.split(/[\\/]/).pop() ?? t.sessionPath}: ${note}`;
+    const status = t.deliveryState === 'pending' ? '' : ` [${t.deliveryState}]`;
+    const head = `${t.sessionPath.split(/[\\/]/).pop() ?? t.sessionPath}${status}: ${note}`;
     lines.push(head.length > 80 ? `${head.slice(0, 77)}…` : head);
   }
   return (

@@ -32,6 +32,7 @@ function createHandlers() {
     onAuxiliaryLlmUsage: (payload) => calls.push({ name: 'auxiliary-llm.usage', payload }),
     onOperationalError: (payload) => calls.push({ name: 'operational-error', payload }),
     onRetryStuck: (payload) => calls.push({ name: 'retry.stuck', payload }),
+    onAgentSettled: (payload) => calls.push({ name: 'agent.settled', payload }),
     onBusyChanged: (payload) => calls.push({ name: 'busy.changed', payload }),
     onContextUsageChanged: (payload) => calls.push({ name: 'contextUsage.changed', payload }),
     onExtensionUIRequest: (payload) => calls.push({ name: 'extension_ui.request', payload }),
@@ -59,6 +60,27 @@ test('dispatchSessionBackendEvent validates sequenced live envelopes', () => {
     update: { kind: 'snapshot', preview: { kind: 'generic', summary: 'invalid jump' } },
   } }, handlers);
   assert.deepEqual(calls, [{ name: 'live.semantic', payload }]);
+});
+
+test('dispatchSessionBackendEvent routes authoritative agent settlement capabilities', () => {
+  const { handlers, calls } = createHandlers();
+  const payload = {
+    sessionPath: '/workspace/session.jsonl',
+    capabilities: {
+      billableActivity: false,
+      canContinue: true,
+      canInterrupt: false,
+      canCompact: true,
+    },
+  };
+
+  dispatchSessionBackendEvent({ event: 'agent.settled', payload }, handlers);
+  dispatchSessionBackendEvent({ event: 'agent.settled', payload: {
+    sessionPath: payload.sessionPath,
+    capabilities: { ...payload.capabilities, canContinue: 'yes' },
+  } }, handlers);
+
+  assert.deepEqual(calls, [{ name: 'agent.settled', payload }]);
 });
 
 test('dispatchSessionBackendEvent validates progressive session-catalog status', () => {
@@ -264,10 +286,12 @@ test('dispatchSessionBackendEvent routes compaction.started payloads', () => {
   assert.deepEqual(calls, [{ name: 'compaction.started', payload }]);
 });
 
-test('dispatchSessionBackendEvent routes compaction.ended payloads with token metrics', () => {
+test('dispatchSessionBackendEvent routes compaction.ended payloads with outcome and token metrics', () => {
   const { handlers, calls } = createHandlers();
   const payload = {
     sessionPath: '/workspace/session.jsonl',
+    reason: 'threshold' as const,
+    outcome: 'succeeded' as const,
     occurredAt: 1_700_000_000_000,
     tokensBefore: 120_000,
     estimatedTokensAfter: 30_000,
@@ -276,6 +300,19 @@ test('dispatchSessionBackendEvent routes compaction.ended payloads with token me
   dispatchSessionBackendEvent({ event: 'compaction.ended', payload }, handlers);
 
   assert.deepEqual(calls, [{ name: 'compaction.ended', payload }]);
+});
+
+test('dispatchSessionBackendEvent accepts failed and aborted compaction outcomes', () => {
+  const { handlers, calls } = createHandlers();
+  const base = { sessionPath: '/workspace/session.jsonl', reason: 'manual' as const };
+
+  dispatchSessionBackendEvent({ event: 'compaction.ended', payload: { ...base, outcome: 'failed' as const } }, handlers);
+  dispatchSessionBackendEvent({ event: 'compaction.ended', payload: { ...base, outcome: 'aborted' as const } }, handlers);
+
+  assert.deepEqual(calls, [
+    { name: 'compaction.ended', payload: { ...base, outcome: 'failed' } },
+    { name: 'compaction.ended', payload: { ...base, outcome: 'aborted' } },
+  ]);
 });
 
 test('dispatchSessionBackendEvent drops a malformed compaction.started payload', () => {
@@ -288,10 +325,15 @@ test('dispatchSessionBackendEvent drops a malformed compaction.started payload',
 
 test('dispatchSessionBackendEvent drops a malformed compaction.ended payload', () => {
   const { handlers, calls } = createHandlers();
-  // `tokensBefore` is a string — fails the guard, must be dropped.
+  // `outcome` is not a recognized terminal outcome — fails the guard.
   dispatchSessionBackendEvent({
     event: 'compaction.ended',
-    payload: { sessionPath: '/workspace/session.jsonl', tokensBefore: '120000' },
+    payload: {
+      sessionPath: '/workspace/session.jsonl',
+      reason: 'threshold',
+      outcome: 'complete',
+      tokensBefore: 120_000,
+    },
   }, handlers);
 
   assert.deepEqual(calls, []);

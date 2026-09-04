@@ -30,6 +30,8 @@ interface PanelChipBaseProps {
    *  textContent), and becomes hoverable. Takes precedence over {@link tooltip}.
    *  See `Tooltip.contentNode`. */
   tooltipNode?: ComponentChildren;
+  /** ARIA role for rich tooltip content that contains interactive controls. */
+  richRole?: 'tooltip' | 'region';
   /**
    * When true, freeze the tooltip text at show time for the duration of the
    * hover (see `Tooltip.freezeWhileVisible`). Use for live-updating indicator
@@ -79,9 +81,9 @@ function chipContent({ label, children, leading, trailing }: Pick<PanelChipBaseP
   );
 }
 
-function wrapTooltip(node: JSX.Element, tooltip: string | undefined, tooltipNode: ComponentChildren | undefined, freezeWhileVisible?: boolean, placement?: 'top' | 'bottom'): JSX.Element {
+function wrapTooltip(node: JSX.Element, tooltip: string | undefined, tooltipNode: ComponentChildren | undefined, freezeWhileVisible?: boolean, placement?: 'top' | 'bottom', richRole?: 'tooltip' | 'region'): JSX.Element {
   if (tooltipNode !== undefined && tooltipNode !== null && tooltipNode !== '') {
-    return <Tooltip contentNode={tooltipNode} freezeWhileVisible={freezeWhileVisible} placement={placement}>{node}</Tooltip>;
+    return <Tooltip contentNode={tooltipNode} freezeWhileVisible={freezeWhileVisible} placement={placement} richRole={richRole}>{node}</Tooltip>;
   }
   if (!tooltip) return node;
   return <Tooltip content={tooltip} freezeWhileVisible={freezeWhileVisible} placement={placement}>{node}</Tooltip>;
@@ -108,6 +110,7 @@ export function PanelChip(props: PanelChipProps) {
       props.tooltipNode,
       props.freezeWhileVisible,
       props.placement,
+      props.richRole,
     );
   }
 
@@ -127,6 +130,7 @@ export function PanelChip(props: PanelChipProps) {
       props.tooltipNode,
       props.freezeWhileVisible,
       props.placement,
+      props.richRole,
     );
   }
 
@@ -145,6 +149,7 @@ export function PanelChip(props: PanelChipProps) {
     props.tooltipNode,
     props.freezeWhileVisible,
     props.placement,
+    props.richRole,
   );
 }
 
@@ -155,6 +160,8 @@ interface ToolbarChipProps {
   tooltip?: string;
   /** Rich tooltip content (JSX); takes precedence over {@link tooltip}. */
   tooltipNode?: ComponentChildren;
+  /** ARIA role for rich tooltip content that contains interactive controls. */
+  richRole?: 'tooltip' | 'region';
   ariaLabel?: string;
   tone?: PanelChipTone;
   /** Tooltip placement; defaults to `'top'` so toolbar tooltips open upward. */
@@ -165,11 +172,11 @@ interface ToolbarChipProps {
   ariaLive?: 'off' | 'polite' | 'assertive';
 }
 
-export function ToolbarChip({ label, title, tooltip, tooltipNode, ariaLabel, tone = 'muted', placement = 'top', role, ariaLive }: ToolbarChipProps) {
-  return <PanelChip variant="toolbar" tone={tone} label={label} title={title} tooltip={tooltip} tooltipNode={tooltipNode} ariaLabel={ariaLabel} placement={placement} role={role} ariaLive={ariaLive} />;
+export function ToolbarChip({ label, title, tooltip, tooltipNode, richRole, ariaLabel, tone = 'muted', placement = 'top', role, ariaLive }: ToolbarChipProps) {
+  return <PanelChip variant="toolbar" tone={tone} label={label} title={title} tooltip={tooltip} tooltipNode={tooltipNode} richRole={richRole} ariaLabel={ariaLabel} placement={placement} role={role} ariaLive={ariaLive} />;
 }
 
-export type ToolbarIndicatorKind = 'tokens' | 'cost' | 'context' | 'speed';
+export type ToolbarIndicatorKind = 'tokens' | 'cost' | 'context' | 'speed' | 'time';
 
 interface ToolbarIndicatorChipProps extends ToolbarChipProps {
   kind: ToolbarIndicatorKind;
@@ -194,7 +201,7 @@ function indicatorClassName(kind: ToolbarIndicatorKind, severity?: string | null
   ].filter(Boolean).join(' ');
 }
 
-export function ToolbarIndicatorChip({ kind, severity, state, label, title, tooltip, tooltipNode, ariaLabel, freezeWhileVisible, placement = 'top' }: ToolbarIndicatorChipProps) {
+export function ToolbarIndicatorChip({ kind, severity, state, label, title, tooltip, tooltipNode, richRole, ariaLabel, freezeWhileVisible, placement = 'top' }: ToolbarIndicatorChipProps) {
   return (
     <PanelChip
       as="div"
@@ -207,6 +214,7 @@ export function ToolbarIndicatorChip({ kind, severity, state, label, title, tool
       title={title}
       tooltip={tooltip}
       tooltipNode={tooltipNode}
+      richRole={richRole}
       freezeWhileVisible={freezeWhileVisible}
       placement={placement}
       label={label}

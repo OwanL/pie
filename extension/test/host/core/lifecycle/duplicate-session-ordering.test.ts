@@ -22,7 +22,8 @@ import type { ArchState } from '../../../../src/host/core/arch-state';
 import { reducer } from '../../../../src/host/core/reducer';
 import { SessionServiceState } from '../../../../src/host/session-service/state';
 import { SessionTabActions } from '../../../../src/host/session-service/tab-actions';
-import type { SessionSummary } from '../../../../src/shared/protocol';
+import { applySessionOpenedPayload } from '../../../../src/host/session-service/handlers/attach';
+import type { SessionOpenedPayload, SessionSummary } from '../../../../src/shared/protocol';
 import { EffectRunner, type EffectRunnerDeps } from '../../../../src/host/core/effect-runner';
 import type { Event, EffectResultEvent } from '../../../../src/host/core/events';
 import { makeEffectRunnerDeps } from '../../../helpers/effect-runner-deps';
@@ -90,6 +91,79 @@ test('duplicateSession mints the selection token before the reducer activates th
   assert.ok(request, 'a selection request was registered for the duplicate');
   assert.equal(request?.previousActivePath, OLD);
   assert.notEqual(request?.previousActivePath, pendingPath);
+});
+
+test('a hidden timed-out duplicate accepts event-before-ack success without reopening', () => {
+  const OLD = '/workspace/old-hidden-duplicate.jsonl';
+  let archState: ArchState = {
+    ...createInitialArchState(),
+    sessions: {
+      ...createInitialArchState().sessions,
+      sessions: [{ path: OLD, name: 'Old', cwd: '/w', modifiedAt: '2024-01-01T00:00:00.000Z', messageCount: 1 }],
+      openTabPaths: [OLD],
+      activeSessionPath: OLD,
+    },
+  };
+  const context = createExtensionContext();
+  const getArchState = () => archState;
+  const effects: unknown[] = [];
+  let operationId: string | undefined;
+  let selectionToken: string | undefined;
+  const dispatchArch = (event: Event): void => {
+    if (event.kind === 'Command' && event.cmd.kind === 'DuplicateSession') {
+      operationId = event.cmd.operationId;
+      selectionToken = event.cmd.selectionToken;
+    }
+    const result = reducer(archState, event);
+    archState = result.state;
+    effects.push(...result.effects);
+  };
+  const state = new SessionServiceState(
+    context,
+    { request: async () => ({}) } as any,
+    () => undefined,
+    getArchState,
+    dispatchArch,
+    0,
+  );
+  const tabs = new SessionTabActions({
+    context,
+    scheduleRender: () => undefined,
+    runObserver: NOOP_RUN_OBSERVER,
+    state,
+    getArchState,
+    dispatchArch,
+  });
+
+  tabs.duplicateSession(OLD);
+  const pendingPath = archState.sessions.activeSessionPath!;
+  state.handleCreateOperationDelayed(selectionToken!, operationId!, 'still duplicating');
+  dispatchArch({ kind: 'Command', cmd: { kind: 'CloseSession', corrId: 'hide-duplicate', sessionPath: pendingPath } });
+
+  const resolvedPath = '/workspace/duplicate-resolved.jsonl';
+  const payload: SessionOpenedPayload = {
+    operationId,
+    selectionToken,
+    session: { path: resolvedPath, name: 'Old (copy)', cwd: '/w', modifiedAt: '2026-01-01T00:00:00.000Z', messageCount: 1 },
+    transcript: [],
+    transcriptWindow: { totalCount: 0, loadedStart: 0, loadedEnd: 0, hasOlder: false, hasNewer: false, isPartial: false, hasUserMessages: false },
+    busy: false,
+  };
+  applySessionOpenedPayload(payload, {
+    getArchState,
+    dispatchArch,
+    runObserver: NOOP_RUN_OBSERVER,
+    scheduleRender: () => undefined,
+    context,
+    state,
+  });
+
+  assert.equal(archState.operations[operationId!]?.terminal?.outcome, 'settled');
+  assert.equal(archState.operations[operationId!]?.kind, 'session.duplicate');
+  assert.equal(archState.sessions.openTabPaths.includes(pendingPath), false);
+  assert.equal(archState.sessions.openTabPaths.includes(resolvedPath), false);
+  assert.equal(archState.sessions.activeSessionPath, OLD);
+  assert.equal(effects.filter((effect: any) => effect.kind === 'DrainPendingSendQueue').length, 0);
 });
 
 test('duplicateSession → backend session.duplicate rejection → handleSelectionFailure restores the pre-duplicate state (e2e through the EffectRunner)', async () => {

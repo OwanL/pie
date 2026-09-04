@@ -9,7 +9,7 @@ import {
 } from '../../../src/backend/session-title-generator';
 import type { SessionContext } from '../../../src/backend/server-types';
 
-function fakeContext(options: { explicitName?: string; explicitPropertyName?: string; nameAfterFetch?: string; output?: string; expectedThink?: false | string } = {}) {
+function fakeContext(options: { explicitName?: string; explicitPropertyName?: string; nameAfterFetch?: string; output?: string; expectedThink?: false | string; usage?: { input: number; output: number } } = {}) {
   let writtenName: string | undefined;
   let explicitName = options.explicitName;
   let fetchCalls = 0;
@@ -36,7 +36,13 @@ function fakeContext(options: { explicitName?: string; explicitPropertyName?: st
     const headers = new Headers(init?.headers);
     assert.equal(headers.get('x-pi-request-class'), 'session-title');
     if (options.nameAfterFetch) explicitName = options.nameAfterFetch;
-    return new Response(JSON.stringify({ message: { content: options.output ?? 'Fix Slow MCP Settings' } }), {
+    return new Response(JSON.stringify({
+      message: { content: options.output ?? 'Fix Slow MCP Settings' },
+      ...(options.usage ? {
+        prompt_eval_count: options.usage.input,
+        eval_count: options.usage.output,
+      } : {}),
+    }), {
       status: 200,
       headers: { 'content-type': 'application/json' },
     });
@@ -61,6 +67,29 @@ test('generates and durably writes a bounded title through Ollama native chat', 
   assert.deepEqual(result, { generated: true, name: 'Fix Slow MCP Settings' });
   assert.equal(fake.writtenName, 'Fix Slow MCP Settings');
   assert.equal(fake.fetchCalls, 1);
+});
+
+test('reports one provider settlement with title usage and timing', async () => {
+  const fake = fakeContext({ usage: { input: 19, output: 4 } });
+  const settlements: Array<Record<string, unknown>> = [];
+  let now = Date.parse('2026-09-04T10:00:00.000Z');
+  await generateSessionTitle(fake.context, {
+    sdkPath: '/sdk', prompt: 'Fix title accounting.', provider: 'ollama', model: 'title-model',
+  }, {
+    fetchFn: fake.fetchFn as typeof fetch,
+    now: () => (now += 25),
+    onSettled: (settlement) => settlements.push(settlement),
+  });
+
+  assert.equal(settlements.length, 1);
+  assert.deepEqual(settlements[0]?.usage, {
+    inputTokens: 19,
+    outputTokens: 4,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    totalTokens: 23,
+  });
+  assert.equal(settlements[0]?.outcome, 'succeeded');
 });
 
 test('an existing explicit/manual name wins without making a model call', async () => {

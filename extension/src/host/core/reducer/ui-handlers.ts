@@ -6,8 +6,6 @@ import type { ReducerResult } from './helpers.js';
 import { upsertTranscriptMessage } from './helpers.js';
 import { stripReqIds } from '../../../shared/error-mapping.js';
 
-export const EDIT_TRUNCATE_RECOVERY_NOTICE = 'Saving your edit and restarting this session…';
-
 export function handleCustomMessage(state: ArchState, event: Extract<Event, { kind: 'CustomMessage' }>): ReducerResult {
   const existing = state.transcript.bySession[event.sessionPath] ?? [];
   // Brief F: a pruning-result custom message arrives when the prepass
@@ -124,53 +122,15 @@ export function handleError(state: ArchState, event: Extract<Event, { kind: 'Err
 export function handleNoticeShown(state: ArchState, event: Extract<Event, { kind: 'NoticeShown' }>): ReducerResult {
   return {
     state: produce(state, (draft) => {
+      const hasNotice = event.notice !== null;
+      const noticeKind = hasNotice ? event.noticeKind ?? null : null;
       draft.settings.notice = event.notice;
-      draft.settings.noticeKind = event.noticeKind ?? null;
-      draft.settings.noticeRaw = event.noticeRaw ?? null;
-      draft.settings.noticeSessionPath = event.notice ? (event.sessionPath ?? null) : null;
-    }),
-    effects: [],
-  };
-}
-
-export function handleEditTruncateRecoveryChanged(
-  state: ArchState,
-  event: Extract<Event, { kind: 'EditTruncateRecoveryChanged' }>,
-): ReducerResult {
-  const pending = state.pending.ops[event.corrId];
-  if (!pending || pending.kind !== 'edit' || pending.sessionPath !== event.sessionPath) {
-    return { state, effects: [] };
-  }
-
-  return {
-    state: produce(state, (draft) => {
-      if (event.phase === 'recovering') {
-        draft.settings.notice = EDIT_TRUNCATE_RECOVERY_NOTICE;
-        draft.settings.noticeKind = null;
-        draft.settings.noticeRaw = null;
-        draft.settings.noticeSessionPath = event.sessionPath;
-        return;
-      }
-
-      if (event.phase === 'unresolved') {
-        draft.settings.notice = 'Pie could not confirm the edited session restart. Your replacement is still held locally; restart the backend before continuing.';
-        draft.settings.noticeKind = 'operational-error';
-        draft.settings.noticeRaw = event.error ?? 'session.truncateAfter ended without a correlated response';
-        draft.settings.noticeSessionPath = event.sessionPath;
-        return;
-      }
-
-      // Clear only the notice this corrId could have installed. A newer or
-      // unrelated warning must survive a late recovery acknowledgement.
-      if (
-        draft.settings.noticeSessionPath === event.sessionPath
-        && draft.settings.notice === EDIT_TRUNCATE_RECOVERY_NOTICE
-      ) {
-        draft.settings.notice = null;
-        draft.settings.noticeKind = null;
-        draft.settings.noticeRaw = null;
-        draft.settings.noticeSessionPath = null;
-      }
+      draft.settings.noticeKind = noticeKind;
+      // Plain info/warning notices never carry diagnostic detail. Clearing the
+      // raw field here also prevents a previous error's "More" content from
+      // surviving when a notice is replaced by an untyped notification.
+      draft.settings.noticeRaw = noticeKind === null ? null : event.noticeRaw ?? null;
+      draft.settings.noticeSessionPath = hasNotice ? (event.sessionPath ?? null) : null;
     }),
     effects: [],
   };

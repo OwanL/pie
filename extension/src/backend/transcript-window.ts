@@ -128,8 +128,13 @@ function deriveCacheFingerprint(entries: SessionEntryLike[]): {
 export function buildDisplayTranscriptCache(entries: SessionEntryLike[], sessionPath = ''): DisplayTranscriptCache {
   const transcript = mapTranscript(entries);
   const transportTranscript = transcript.map((message) => compactDurableMessageDetails(message, sessionPath));
-  const sessionUsage = buildSessionUsageSnapshot(transcript);
   const { branchEntryCount, branchLastEntryId } = deriveCacheFingerprint(entries);
+  // Transcript accounting is retained only as a historical migration/rebuild
+  // input; steady-state product surfaces project the host invocation ledger.
+  const sessionUsage = {
+    ...buildSessionUsageSnapshot(transcript, branchLastEntryId),
+    branchEntryIds: entries.map((entry) => entry.id),
+  };
   return {
     transcript,
     transportTranscript,

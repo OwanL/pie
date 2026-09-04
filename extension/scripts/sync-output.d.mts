@@ -8,6 +8,11 @@ export function mirrorDirectoryInPlace(
   destinationDir: string,
 ): Promise<void>;
 
+export function writeFileIfChanged(
+  filePath: string,
+  contents: string,
+): Promise<boolean>;
+
 export function syncActiveDestinationInPlace(options: {
   staging: string;
   dest: string;

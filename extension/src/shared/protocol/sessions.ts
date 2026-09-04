@@ -150,11 +150,47 @@ export interface BackendReadyPayload {
   authPath?: string;
 }
 
+export type SessionPrimaryOperationKind =
+  | 'session.create'
+  | 'session.duplicate'
+  | 'message.send'
+  | 'message.edit'
+  | 'message.interrupt'
+  | 'message.continue'
+  | 'message.compact';
+export type SessionPrimaryOperationPhase = 'awaiting-acceptance' | 'awaiting-commit' | 'ambiguous';
+export type SessionOperationRecoveryAction = 'retry' | 'restart-backend' | 'reconcile' | null;
+
+/** Compact projection of reducer-owned operation truth. The backend continues
+ * to own billable activity; it does not originate this host-only projection. */
+export type SessionPrimaryOperation = Record<string, string | number | boolean | null> & {
+  operationId: string;
+  kind: SessionPrimaryOperationKind;
+  phase: SessionPrimaryOperationPhase;
+  attempt: number;
+  committed: boolean;
+  recovery: SessionOperationRecoveryAction;
+};
+
+export interface SessionCapabilities {
+  /** True while provider, retry, compaction, queued continuation, bash/tool, or
+   * another backend-exposed billable window can still run automatically. */
+  billableActivity: boolean;
+  canContinue: boolean;
+  canInterrupt: boolean;
+  canCompact: boolean;
+  /** Current non-terminal reducer-owned operation, when one controls the path. */
+  primaryOperation?: SessionPrimaryOperation;
+}
+
 export interface SessionOpenedPayload {
   session: SessionSummary;
   transcript: ChatMessage[];
   transcriptWindow: TranscriptWindow;
   busy: boolean;
+  /** Backend-classified capabilities from the complete live/durable session,
+   * independent of the bounded transcript window transported to the host. */
+  capabilities?: SessionCapabilities;
   /** Whether the backend has materialized the execution runtime for this
    * session. Cold durable browsing explicitly reports false; hot snapshots
    * report true. Omission is accepted only for legacy peers and means ready. */
@@ -251,6 +287,8 @@ export interface SessionListChangedPayload {
 
 export interface MessageStartedPayload {
   requestId: string;
+  operationId?: string;
+  operationAttempt?: number;
   messageId: string;
   sessionPath: string;
   modelId?: string;
@@ -320,6 +358,7 @@ export interface ToolFinishedPayload {
 
 export interface CustomMessagePayload {
   requestId: string;
+  operationId?: string;
   sessionPath: string;
   message: ChatMessage;
 }
@@ -335,23 +374,38 @@ export interface ToolProgressPayload {
 
 export interface MessageFinishedPayload {
   requestId: string;
+  operationId?: string;
+  operationAttempt?: number;
   sessionPath: string;
   message: ChatMessage;
 }
 
 export interface MessageAbortedPayload {
   requestId: string;
+  operationId?: string;
+  operationAttempt?: number;
   sessionPath: string;
   messageId?: string;
+  /** Optimistic queued-user identity when cancellation occurs before delivery. */
+  localId?: string;
+  /** Explicit terminal settlement when a continuation is cancelled,
+   * superseded, or fails before Pi creates a matching assistant turn. */
+  outcome?: 'cancelled' | 'superseded' | 'failed';
   /** True when the interruption came from an explicit user action (e.g. Stop). */
   userInitiated?: boolean;
   /** Plain-language reason shown to the user for unexpected interruptions. */
   reason?: string;
 }
 
+export interface AgentSettledPayload {
+  sessionPath: string;
+  capabilities: SessionCapabilities;
+}
+
 export interface BusyChangedPayload {
   sessionPath: string;
   busy: boolean;
+  capabilities?: SessionCapabilities;
   /**
    * Monotonic per-session sequence number. The host drops out-of-order events
    * for a session (e.g. a stale `busy=false` arriving after an optimistic set).
@@ -378,6 +432,7 @@ export interface ErrorPayload {
  *  Reconciliation "Two failure windows for send". */
 export interface PreflightFailedPayload {
   requestId: string;
+  operationId?: string;
   sessionPath: string;
   error: string;
 }
@@ -394,6 +449,7 @@ export interface PreflightFailedPayload {
 export interface QueuedDeliveredPayload {
   sessionPath: string;
   text: string;
+  operationId?: string;
   /** Host-side optimistic message ID of the delivered queued message, when the
    *  backend can correlate it (handoff §F: queued-message liveness). The backend
    *  mirrors the SDK's FIFO steering/followUp drain order in a per-session
@@ -469,15 +525,33 @@ export interface RetryMeasuredPayload {
  *  event the session would read as idle or generically busy). */
 export interface CompactionStartedPayload {
   sessionPath: string;
+  /** Present for a host-requested manual compaction. */
+  operationId?: string;
+  operationAttempt?: number;
 }
+
+/** Why history compaction was requested. This mirrors the SDK's
+ *  `compaction_end.reason` field. */
+export type CompactionReason = 'manual' | 'threshold' | 'overflow';
+
+/** Explicit terminal result for one history-compaction LLM call. */
+export type CompactionOutcome = 'succeeded' | 'failed' | 'aborted';
 
 /** Emitted by the backend when a history-compaction (`/compact`) LLM call
  *  finishes. Compaction emits no `message_start`/`message_end`, so this event is
- *  the only signal the host has to count it against the run. When the compaction
+ *  the only signal the host has to count it against the run. The outcome is
+ *  derived from the SDK's `result` and `aborted` fields. When the compaction
  *  produced a result, the payload also carries the token metrics so the UI can
  *  report how much context was freed. */
 export interface CompactionPayload {
   sessionPath: string;
+  /** Present for a host-requested manual compaction. */
+  operationId?: string;
+  operationAttempt?: number;
+  /** SDK reason (`manual`, `threshold`, or `overflow`), when reported. */
+  reason?: CompactionReason;
+  /** Explicit terminal outcome for this compaction attempt. */
+  outcome: CompactionOutcome;
   /** Epoch milliseconds when the compaction LLM call finished. */
   occurredAt?: number;
   /** Prompt tokens before compaction (from the SDK result). */
@@ -486,20 +560,27 @@ export interface CompactionPayload {
   estimatedTokensAfter?: number;
 }
 
-/** Exact usage from one observable SDK LLM response. */
+/** Settlement evidence from one observable SDK LLM response. Optional token
+ * fields plus instrumentationGap represent providers that omit usage. */
 export interface AuxiliaryLlmUsagePayload {
   sessionPath: string;
-  kind: 'assistant_message' | 'history_compaction' | 'branch_summary';
+  kind: 'assistant_message' | 'history_compaction' | 'branch_summary' | 'session_title' | 'other';
   sourceId: string;
   occurredAt: string;
   modelId?: string;
   provider?: string;
-  inputTokens: number;
-  outputTokens: number;
-  cacheReadTokens: number;
-  cacheWriteTokens: number;
+  parentOperationId?: string;
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+  providerTotalTokens?: number;
   reportedCostUsd?: number;
   durationMs?: number;
+  startedAt?: string;
+  outcome?: 'succeeded' | 'failed' | 'cancelled' | 'unknown';
+  instrumentationGap?: boolean;
+  instrumentationGapReason?: string;
 }
 
 /** Operational (non-fatal) backend condition that the user should be made

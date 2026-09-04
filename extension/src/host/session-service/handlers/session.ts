@@ -73,6 +73,7 @@ export function onCustomMessage(payload: CustomMessagePayload, deps: HandlerDeps
   deps.dispatchArch({
     kind: 'CustomMessage',
     sessionPath,
+    ...(payload.operationId ? { operationId: payload.operationId } : {}),
     message: payload.message,
   });
   if (payload.message.customType === 'pruning-result') {
@@ -90,8 +91,18 @@ export function onCustomMessage(payload: CustomMessagePayload, deps: HandlerDeps
 export function onExtensionUIRequest(payload: ExtensionUIRequestPayload, deps: HandlerDeps): void {
   if (payload.method === 'notify') {
     // Notify is fire-and-forget; use the notice banner instead of blocking the prompt slot.
+    // Keep informational and warning notifications out of the operational-error
+    // reducer path. Errors may opt into the existing typed error notice so the
+    // banner can offer its normal error affordances without stamping a turn.
     const prefix = payload.notifyType === 'error' ? 'Error' : payload.notifyType === 'warning' ? 'Warning' : 'Info';
-    deps.dispatchArch({ kind: 'Error', sessionPath: payload.sessionPath || '', error: `${prefix}: ${payload.message}` });
+    const event: Extract<Event, { kind: 'NoticeShown' }> = {
+      kind: 'NoticeShown',
+      notice: `${prefix}: ${payload.message}`,
+      sessionPath: payload.sessionPath,
+    };
+    if (payload.notifyType === 'error') event.noticeKind = 'operational-error';
+    deps.dispatchArch(event);
+    deps.scheduleRender();
     return;
   }
   deps.dispatchArch({ kind: 'ExtensionUIRequest', sessionPath: payload.sessionPath || '', request: payload });

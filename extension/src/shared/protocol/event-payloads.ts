@@ -21,6 +21,7 @@
  */
 
 import type {
+  AgentSettledPayload,
   AuxiliaryLlmUsagePayload,
   BusyChangedPayload,
   CompactionPayload,
@@ -180,6 +181,31 @@ function isOptionalSnapshotUnavailable(value: unknown): boolean {
 
 // ─── per-event payload guards ────────────────────────────────────────────────
 
+function isSessionPrimaryOperation(value: unknown): boolean {
+  return isObject(value)
+    && isString(value.operationId)
+    && (value.kind === 'session.create' || value.kind === 'session.duplicate' || value.kind === 'message.send'
+      || value.kind === 'message.edit' || value.kind === 'message.interrupt'
+      || value.kind === 'message.continue' || value.kind === 'message.compact')
+    && (value.phase === 'awaiting-acceptance' || value.phase === 'awaiting-commit' || value.phase === 'ambiguous')
+    && Number.isInteger(value.attempt)
+    && (value.attempt as number) >= 1
+    && isBoolean(value.committed)
+    && (value.recovery === null
+      || value.recovery === 'retry'
+      || value.recovery === 'restart-backend'
+      || value.recovery === 'reconcile');
+}
+
+function isSessionCapabilities(value: unknown): boolean {
+  return isObject(value)
+    && isBoolean(value.billableActivity)
+    && isBoolean(value.canContinue)
+    && isBoolean(value.canInterrupt)
+    && isBoolean(value.canCompact)
+    && (value.primaryOperation === undefined || isSessionPrimaryOperation(value.primaryOperation));
+}
+
 export function isSessionOpenedPayload(value: unknown): value is SessionOpenedPayload {
   return (
     isObject(value)
@@ -187,6 +213,7 @@ export function isSessionOpenedPayload(value: unknown): value is SessionOpenedPa
     && isChatMessageArray(value.transcript)
     && isTranscriptWindow(value.transcriptWindow)
     && isBoolean(value.busy)
+    && isSessionCapabilities(value.capabilities)
     && (value.runtimeReady === undefined || isBoolean(value.runtimeReady))
     && (value.systemPromptDisabledEntries === undefined
       || (Array.isArray(value.systemPromptDisabledEntries)
@@ -214,6 +241,8 @@ export function isMessageStartedPayload(value: unknown): value is MessageStarted
   return (
     isObject(value)
     && isString(value.requestId)
+    && isOptionalString(value.operationId)
+    && (value.operationAttempt === undefined || (typeof value.operationAttempt === 'number' && Number.isInteger(value.operationAttempt) && value.operationAttempt >= 1))
     && isString(value.messageId)
     && isString(value.sessionPath)
     && isOptionalString(value.modelId)
@@ -257,6 +286,8 @@ export function isMessageFinishedPayload(value: unknown): value is MessageFinish
   return (
     isObject(value)
     && isString(value.requestId)
+    && isOptionalString(value.operationId)
+    && (value.operationAttempt === undefined || (typeof value.operationAttempt === 'number' && Number.isInteger(value.operationAttempt) && value.operationAttempt >= 1))
     && isString(value.sessionPath)
     && isChatMessage(value.message)
   );
@@ -266,8 +297,12 @@ export function isMessageAbortedPayload(value: unknown): value is MessageAborted
   return (
     isObject(value)
     && isString(value.requestId)
+    && isOptionalString(value.operationId)
+    && (value.operationAttempt === undefined || (typeof value.operationAttempt === 'number' && Number.isInteger(value.operationAttempt) && value.operationAttempt >= 1))
     && isString(value.sessionPath)
     && isOptionalString(value.messageId)
+    && isOptionalString(value.localId)
+    && (value.outcome === undefined || value.outcome === 'cancelled' || value.outcome === 'superseded' || value.outcome === 'failed')
     && isOptionalBoolean(value.userInitiated)
     && isOptionalString(value.reason)
   );
@@ -277,6 +312,7 @@ export function isCustomMessagePayload(value: unknown): value is CustomMessagePa
   return (
     isObject(value)
     && isString(value.requestId)
+    && isOptionalString(value.operationId)
     && isString(value.sessionPath)
     && isChatMessage(value.message)
   );
@@ -323,11 +359,18 @@ export function isToolProgressPayload(value: unknown): value is ToolProgressPayl
   );
 }
 
+export function isAgentSettledPayload(value: unknown): value is AgentSettledPayload {
+  return isObject(value)
+    && isString(value.sessionPath)
+    && isSessionCapabilities(value.capabilities);
+}
+
 export function isBusyChangedPayload(value: unknown): value is BusyChangedPayload {
   return (
     isObject(value)
     && isString(value.sessionPath)
     && isBoolean(value.busy)
+    && isSessionCapabilities(value.capabilities)
     && isOptionalFiniteNumber(value.seq)
   );
 }
@@ -398,6 +441,7 @@ export function isPreflightFailedPayload(value: unknown): value is PreflightFail
   return (
     isObject(value)
     && isString(value.requestId)
+    && isOptionalString(value.operationId)
     && isString(value.sessionPath)
     && isString(value.error)
   );
@@ -408,6 +452,7 @@ export function isQueuedDeliveredPayload(value: unknown): value is QueuedDeliver
     isObject(value)
     && isString(value.sessionPath)
     && isString(value.text)
+    && isOptionalString(value.operationId)
     && isOptionalString(value.localId)
   );
 }
@@ -451,6 +496,8 @@ export function isCompactionStartedPayload(value: unknown): value is CompactionS
   return (
     isObject(value)
     && isString(value.sessionPath)
+    && isOptionalString(value.operationId)
+    && (value.operationAttempt === undefined || (typeof value.operationAttempt === 'number' && Number.isInteger(value.operationAttempt) && value.operationAttempt >= 1))
   );
 }
 
@@ -458,6 +505,10 @@ export function isCompactionPayload(value: unknown): value is CompactionPayload 
   return (
     isObject(value)
     && isString(value.sessionPath)
+    && isOptionalString(value.operationId)
+    && (value.operationAttempt === undefined || (typeof value.operationAttempt === 'number' && Number.isInteger(value.operationAttempt) && value.operationAttempt >= 1))
+    && (value.reason === undefined || value.reason === 'manual' || value.reason === 'threshold' || value.reason === 'overflow')
+    && (value.outcome === 'succeeded' || value.outcome === 'failed' || value.outcome === 'aborted')
     && isOptionalFiniteNumber(value.occurredAt)
     && isOptionalFiniteNumber(value.tokensBefore)
     && isOptionalFiniteNumber(value.estimatedTokensAfter)
@@ -468,17 +519,25 @@ export function isAuxiliaryLlmUsagePayload(value: unknown): value is AuxiliaryLl
   return (
     isObject(value)
     && isString(value.sessionPath)
-    && (value.kind === 'assistant_message' || value.kind === 'history_compaction' || value.kind === 'branch_summary')
+    && (value.kind === 'assistant_message' || value.kind === 'history_compaction'
+      || value.kind === 'branch_summary' || value.kind === 'session_title' || value.kind === 'other')
     && isString(value.sourceId)
     && isString(value.occurredAt)
     && isOptionalString(value.modelId)
     && isOptionalString(value.provider)
-    && isFiniteNumber(value.inputTokens)
-    && isFiniteNumber(value.outputTokens)
-    && isFiniteNumber(value.cacheReadTokens)
-    && isFiniteNumber(value.cacheWriteTokens)
+    && isOptionalString(value.parentOperationId)
+    && isOptionalFiniteNumber(value.inputTokens)
+    && isOptionalFiniteNumber(value.outputTokens)
+    && isOptionalFiniteNumber(value.cacheReadTokens)
+    && isOptionalFiniteNumber(value.cacheWriteTokens)
+    && isOptionalFiniteNumber(value.providerTotalTokens)
     && isOptionalFiniteNumber(value.reportedCostUsd)
     && isOptionalFiniteNumber(value.durationMs)
+    && isOptionalString(value.startedAt)
+    && (value.outcome === undefined || value.outcome === 'succeeded' || value.outcome === 'failed'
+      || value.outcome === 'cancelled' || value.outcome === 'unknown')
+    && (value.instrumentationGap === undefined || typeof value.instrumentationGap === 'boolean')
+    && isOptionalString(value.instrumentationGapReason)
   );
 }
 

@@ -8,10 +8,11 @@
   "typescript.preferences.quoteStyle": "single",
   "javascript.preferences.quoteStyle": "single",
   "github.copilot.chat.claudeAgent.allowDangerouslySkipPermissions": true,
-  // pie.sdkPath is intentionally NOT set here. The extension auto-resolves
-  // the SDK via `npm root -g` (falling back to PI_SDK_PATH env then a cached
-  // path) — see extension/src/shared/runtime-resolution.ts. Committing an
-  // absolute, username-scoped path here breaks every other machine on pull.
+  // pie.sdkPath is intentionally NOT set here. Resolution prefers explicit
+  // User settings / PI_SDK_PATH, then the repo-local SDK pinned by
+  // extension/package-lock.json, before cached or global fallbacks — see
+  // extension/src/shared/runtime-resolution.ts. Committing an absolute,
+  // username-scoped path here breaks every other machine on pull.
   // To pin a non-standard SDK location, set pie.sdkPath in VS Code *User*
   // settings (per-machine), or set PI_SDK_PATH.
   // Hide PI runtime artifacts from the explorer

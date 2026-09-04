@@ -13,6 +13,7 @@ import { produce } from 'immer';
 
 import { createInitialArchState, type ArchState } from '../../../../src/host/core/arch-state';
 import { reducer } from '../../../../src/host/core/reducer';
+import { activeInterruptOperation, startSessionOperation } from '../../../../src/host/core/operation-registry';
 import type { ChatMessage } from '../../../../src/shared/protocol';
 
 function withStreamingAssistant(state: ArchState, sessionPath: string, messageId: string): ArchState {
@@ -127,7 +128,10 @@ test('SessionsInterrupted terminalizes tools and clears crash transients', () =>
   const initial = produce(withStreamingAssistant(createInitialArchState(), '/s6', 'a6'), (draft) => {
     draft.transcript.bySession['/s6']![1]!.toolCalls = [{ id: 't1', name: 'bash', input: {}, status: 'running' }];
     draft.sessions.retryStatusBySession['/s6'] = { attempt: 1, maxAttempts: 3, delayMs: 100, errorMessage: 'retry' };
-    draft.sessions.interruptInFlightBySession['/s6'] = true;
+    draft.operations.stop = startSessionOperation({
+      operationId: 'stop', kind: 'message.interrupt', source: { kind: 'host' },
+      pendingPath: '/s6', selectionToken: 'stop', backendGeneration: 1,
+    });
     draft.settings.pendingExtensionUIRequestsBySession['/s6'] = { req: { id: 'req', sessionPath: '/s6', extensionId: 'x', method: 'input', title: 'Input' } };
   });
   const { state } = reducer(initial, { kind: 'SessionsInterrupted', sessionPaths: ['/s6'], reason: 'backend exited' });
@@ -135,7 +139,8 @@ test('SessionsInterrupted terminalizes tools and clears crash transients', () =>
   assert.equal(tool.status, 'failed');
   assert.deepEqual(tool.result, { error: 'backend exited' });
   assert.equal(state.sessions.retryStatusBySession['/s6'], undefined);
-  assert.equal(state.sessions.interruptInFlightBySession['/s6'], undefined);
+  assert.equal(activeInterruptOperation(state.operations, '/s6'), undefined);
+  assert.equal(state.operations.stop?.terminal?.reason, 'backend-generation-ended');
   assert.equal(state.settings.pendingExtensionUIRequestsBySession['/s6'], undefined);
 });
 
@@ -267,7 +272,10 @@ test('SessionsInterrupted tombstones the active attempt and clears every pending
 
 test('SessionsInterrupted clears non-transcript crash state when no transcript is loaded', () => {
   const s = produce(createInitialArchState(), (draft) => {
-    draft.sessions.interruptInFlightBySession['/s5'] = true;
+    draft.operations.stop = startSessionOperation({
+      operationId: 'stop', kind: 'message.interrupt', source: { kind: 'host' },
+      pendingPath: '/s5', selectionToken: 'stop', backendGeneration: 1,
+    });
     draft.sessions.retryStatusBySession['/s5'] = { attempt: 1, maxAttempts: 3, delayMs: 100, errorMessage: 'retry' };
     draft.settings.pendingExtensionUIRequestsBySession['/s5'] = { req: { id: 'req', sessionPath: '/s5', extensionId: 'x', method: 'input', title: 'Input' } };
     draft.pending.prepassBySession['/s5'] = { phase: 'running', latencyMs: null };
@@ -280,7 +288,8 @@ test('SessionsInterrupted clears non-transcript crash state when no transcript i
   });
 
   assert.equal(state.transcript.bySession['/s5'], undefined);
-  assert.equal(state.sessions.interruptInFlightBySession['/s5'], undefined);
+  assert.equal(activeInterruptOperation(state.operations, '/s5'), undefined);
+  assert.equal(state.operations.stop?.terminal?.reason, 'backend-generation-ended');
   assert.equal(state.sessions.retryStatusBySession['/s5'], undefined);
   assert.equal(state.settings.pendingExtensionUIRequestsBySession['/s5'], undefined);
   assert.equal(state.pending.prepassBySession['/s5'], undefined);

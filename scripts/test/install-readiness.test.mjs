@@ -45,6 +45,15 @@ test('checkAuthReadiness gives Windows setx advice on Windows', () => withTempDi
   const joined = check.lines.join('\n');
   assert.match(joined, /setx ANTHROPIC_API_KEY/);
   assert.doesNotMatch(joined, /export ANTHROPIC_API_KEY/);
+  assert.match(joined, /enter \/login/);
+  assert.doesNotMatch(joined, /umans/i);
+}));
+
+test('checkAuthReadiness does not accept a retired provider key', () => withTempDir((root) => {
+  const auth = path.join(root, 'auth.json');
+  writeFileSync(auth, '{}');
+  const check = checkAuthReadiness({ authPath: auth, providerEnv: { UMANS_API_KEY: 'retired' }, platform: 'posix' });
+  assert.equal(check.level, 'warn');
 }));
 
 test('checkAuthReadiness gives POSIX export advice on POSIX', () => withTempDir((root) => {

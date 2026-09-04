@@ -107,6 +107,7 @@ export function getCachedPrepass(
 		rawUserMessage: "",
 		latencyMs: 0,
 		usage: undefined,
+		prepassInvocations: [],
 		cacheHit: true,
 	};
 }
@@ -156,6 +157,7 @@ export function getCachedPrepassCrossSession(
 		rawUserMessage: "",
 		latencyMs: 0,
 		usage: undefined,
+		prepassInvocations: [],
 		cacheHit: true,
 	};
 }

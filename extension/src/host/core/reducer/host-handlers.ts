@@ -23,6 +23,8 @@ import {
   sessionHasDeferredModelWrite,
   startNextDeferredSetModel,
 } from './set-model-handlers.js';
+import { handleSessionsInterrupted } from './session-handlers.js';
+import { settleSessionOperationFailed } from '../operation-registry.js';
 
 export function handleBackendReadyChanged(
   state: ArchState,
@@ -75,15 +77,26 @@ export function handleBackendReadyChanged(
         });
       }
     }
+    const unresolvedMessagePaths = [...new Set(Object.values(nextState.operations)
+      .filter((operation) => operation.kind.startsWith('message.') && !operation.terminal)
+      .map((operation) => operation.session.resolvedPath ?? operation.session.pendingPath))];
+    const generationEnded = unresolvedMessagePaths.length > 0
+      ? handleSessionsInterrupted(nextState, {
+          kind: 'SessionsInterrupted',
+          sessionPaths: unresolvedMessagePaths,
+          reason: 'The backend generation ended before the operation settled.',
+          occurredAt: 0,
+        })
+      : { state: nextState, effects: [] };
     return {
-      state: produce(nextState, (draft) => {
+      state: produce(generationEnded.state, (draft) => {
         draft.settings.backendReady = false;
         // Catalog progress is generation-scoped. A replacement backend will
         // publish its own incomplete/complete status; do not carry a stale
         // indexing indicator across the restart boundary.
         draft.sessions.sessionCatalogProgress = { complete: true, processed: 0, total: 0 };
       }),
-      effects: [],
+      effects: generationEnded.effects,
     };
   }
 
@@ -153,6 +166,16 @@ export function handleBackendReadyWatchdogFired(
   const nextState = produce(state, (draft) => {
     for (const entry of allEntries) {
       removeMessage(draft, entry.sessionPath, entry.localId);
+      const operation = entry.operationId ? draft.operations[entry.operationId] : undefined;
+      if (operation?.kind === 'message.send' && !operation.terminal) {
+        const settled = settleSessionOperationFailed(operation, {
+          pendingPath: operation.session.pendingPath,
+          backendGeneration: operation.backendGeneration,
+          reason: 'definitive-rejection',
+          detail: `Backend did not become ready within ${timeoutSec}s.`,
+        });
+        if (settled) draft.operations[operation.operationId] = settled;
+      }
     }
     draft.pending.backendReadyQueueBySession = {};
     draft.settings.notice = `Backend did not become ready within ${timeoutSec}s. ${allEntries.length} queued message${allEntries.length === 1 ? '' : 's'} dropped — please retry.`;

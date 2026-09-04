@@ -14,6 +14,7 @@ import type { SdkSessionEvent } from '../../../src/backend/sdk';
 import type { SessionContext } from '../../../src/backend/server-types';
 import { BackendLiveTurnAccumulator } from '../../../src/backend/live-turn-accumulator';
 import { OrderedJsonlWriter } from '../../../src/backend/server-io';
+import { SendOperationLedger, canonicalSendIntentFingerprint } from '../../../src/backend/send-operation-ledger';
 
 interface EmittedEvent {
   event: string;
@@ -105,6 +106,36 @@ test('compaction_start emits compaction.started and re-arms busy', () => {
   assert.deepEqual(emitted, [{ event: 'compaction.started', payload: { sessionPath: context.sessionPath } }]);
 });
 
+test('manual compaction events retain operation identity and commit the backend ledger', async () => {
+  const { deps, emitted } = createDeps();
+  const ledger = new SendOperationLedger();
+  await ledger.run('compact-op', 'manual-fingerprint', async () => ({
+    operationId: 'compact-op', requestId: 'compact-request',
+  }));
+  const context = createContext({
+    sendOperationLedger: ledger,
+    manualCompactionRequest: {
+      requestId: 'compact-request', operationId: 'compact-op', operationAttempt: 2, cancelled: false,
+    },
+  });
+
+  handleSdkSessionEvent(deps, context, { type: 'compaction_start', reason: 'manual' });
+  handleSdkSessionEvent(deps, context, {
+    type: 'compaction_end', reason: 'manual',
+    result: { summary: 'done', firstKeptEntryId: 'kept', tokensBefore: 100, details: {} },
+  });
+
+  assert.deepEqual(emitted[0], {
+    event: 'compaction.started',
+    payload: { sessionPath: context.sessionPath, operationId: 'compact-op', operationAttempt: 2 },
+  });
+  assert.equal((emitted[1]?.payload as { operationId?: string }).operationId, 'compact-op');
+  assert.equal((emitted[1]?.payload as { operationAttempt?: number }).operationAttempt, 2);
+  assert.equal((emitted[1]?.payload as { outcome?: string }).outcome, 'succeeded');
+  assert.equal(ledger.status('compact-op')?.state, 'accepted');
+  assert.equal((ledger.status('compact-op') as { committed?: boolean }).committed, true);
+});
+
 test('compaction_end emits compaction.ended with token metrics and occurredAt', () => {
   const { deps, emitted } = createDeps();
   const context = createContext();
@@ -125,28 +156,68 @@ test('compaction_end emits compaction.ended with token metrics and occurredAt', 
 
   assert.equal(emitted.length, 1);
   assert.equal(emitted[0].event, 'compaction.ended');
-  const payload = emitted[0].payload as { sessionPath: string; occurredAt: number; tokensBefore: number; estimatedTokensAfter: number };
+  const payload = emitted[0].payload as {
+    sessionPath: string;
+    reason: string;
+    outcome: string;
+    occurredAt: number;
+    tokensBefore: number;
+    estimatedTokensAfter: number;
+  };
   assert.equal(payload.sessionPath, context.sessionPath);
+  assert.equal(payload.reason, 'threshold');
+  assert.equal(payload.outcome, 'succeeded');
   assert.equal(typeof payload.occurredAt, 'number');
   assert.equal(payload.tokensBefore, 100_000);
   assert.equal(payload.estimatedTokensAfter, 12_345);
 });
 
-test('compaction_end emits compaction.ended without token metrics when the result is absent', () => {
+test('compaction_end translates a result-less non-aborted event into failed', () => {
   const { deps, emitted } = createDeps();
   const context = createContext();
 
   handleSdkSessionEvent(deps, context, { type: 'compaction_start', reason: 'threshold' });
   emitted.length = 0;
-  handleSdkSessionEvent(deps, context, { type: 'compaction_end', reason: 'threshold' });
+  handleSdkSessionEvent(deps, context, {
+    type: 'compaction_end',
+    reason: 'threshold',
+    result: undefined,
+    aborted: false,
+  });
 
   assert.equal(emitted.length, 1);
   assert.equal(emitted[0].event, 'compaction.ended');
   const payload = emitted[0].payload as Record<string, unknown>;
   assert.equal(payload.sessionPath, context.sessionPath);
+  assert.equal(payload.reason, 'threshold');
+  assert.equal(payload.outcome, 'failed');
   assert.equal(typeof payload.occurredAt, 'number');
   assert.equal('tokensBefore' in payload, false);
   assert.equal('estimatedTokensAfter' in payload, false);
+});
+
+test('compaction_end translates an aborted SDK event into aborted', () => {
+  const { deps, emitted } = createDeps();
+  const context = createContext();
+
+  handleSdkSessionEvent(deps, context, { type: 'compaction_start', reason: 'manual' });
+  emitted.length = 0;
+  handleSdkSessionEvent(deps, context, {
+    type: 'compaction_end',
+    reason: 'manual',
+    result: undefined,
+    aborted: true,
+  });
+
+  assert.deepEqual(emitted, [{
+    event: 'compaction.ended',
+    payload: {
+      sessionPath: context.sessionPath,
+      reason: 'manual',
+      outcome: 'aborted',
+      occurredAt: (emitted[0]!.payload as { occurredAt: number }).occurredAt,
+    },
+  }]);
 });
 
 test('compaction_end publishes the SDK post-compaction estimate immediately', () => {
@@ -155,6 +226,7 @@ test('compaction_end publishes the SDK post-compaction estimate immediately', ()
 
   handleSdkSessionEvent(deps, context, {
     type: 'compaction_end',
+    reason: 'threshold',
     result: {
       summary: 'Condensed history',
       firstKeptEntryId: 'kept-entry',
@@ -171,7 +243,7 @@ test('compaction_end publishes the SDK post-compaction estimate immediately', ()
 test('compaction_end keeps busy asserted when the agent run continues', () => {
   const { deps, busy } = createDeps();
   const context = createContext({
-    thresholdCompactionContinuationCandidate: {
+    activeRequest: {
       id: 'request-1',
       messageIndex: 1,
       aborted: false,
@@ -191,7 +263,21 @@ test('compaction_end keeps busy asserted when the agent run continues', () => {
     },
   });
 
-  assert.deepEqual(busy, [true]);
+  assert.deepEqual(busy, [true, true]);
+});
+
+test('threshold compaction cannot keep busy asserted without an active run', () => {
+  const { deps, busy } = createDeps();
+  const context = createContext();
+
+  handleSdkSessionEvent(deps, context, { type: 'compaction_start', reason: 'threshold' });
+  handleSdkSessionEvent(deps, context, {
+    type: 'compaction_end',
+    reason: 'threshold',
+    willRetry: true,
+  });
+
+  assert.deepEqual(busy, [true, false]);
 });
 
 test('compaction_start captures the start time and compaction_end appends a pie.compaction-metrics sidecar', () => {
@@ -1188,7 +1274,9 @@ test('message_end emits finished and aborted payloads and clears the current mes
       outputTokens: 3,
       cacheReadTokens: 1,
       cacheWriteTokens: 0,
+      providerTotalTokens: 6,
       durationMs: 3000,
+      outcome: 'cancelled',
     });
     const finished = emitted[1]?.payload as { message: { id: string; markdown: string; status: string; durationMs?: number; usage?: { totalTokens: number } } };
     assert.equal(finished.message.id, 'req-3:1');
@@ -1230,7 +1318,7 @@ test('message_end marks user-initiated interruptions without surfacing an unexpe
     },
   });
 
-  assert.deepEqual(emitted[1], {
+  assert.deepEqual(emitted.find((entry) => entry.event === 'message.aborted'), {
     event: 'message.aborted',
     payload: {
       requestId: 'req-user-stop',
@@ -1301,7 +1389,7 @@ test('message_end emits custom transcript messages for displayed extension outpu
   assert.equal(getContextUsageChangedCount(), 0);
 });
 
-test('agent_end emits busy false, refreshes session state, and aborts requests with no message id', async () => {
+test('agent_end retains activity until agent_settled finalizes and refreshes session state', async () => {
   const { deps, emitted, busy, sessionOpened, getListChangedCount, getContextUsageChangedCount } = createDeps();
   const context = createContext({
     activeRequest: {
@@ -1312,20 +1400,17 @@ test('agent_end emits busy false, refreshes session state, and aborts requests w
   });
 
   handleSdkSessionEvent(deps, context, { type: 'agent_end' });
+  assert.deepEqual(busy, []);
+  assert.notEqual(context.activeRequest, undefined);
+  assert.equal(getContextUsageChangedCount(), 1);
+
+  handleSdkSessionEvent(deps, context, { type: 'agent_settled' });
 
   assert.deepEqual(busy, [false]);
-  assert.equal(getContextUsageChangedCount(), 1);
+  assert.equal(getContextUsageChangedCount(), 2);
   assert.deepEqual(sessionOpened, ['/workspace/session.jsonl']);
   assert.equal(getListChangedCount(), 1);
-  assert.deepEqual(emitted, [{
-    event: 'message.aborted',
-    payload: {
-      requestId: 'req-4',
-      sessionPath: '/workspace/session.jsonl',
-      userInitiated: true,
-      reason: undefined,
-    },
-  }]);
+  assert.deepEqual(emitted.map((entry) => entry.event), ['message.aborted', 'agent.settled']);
   assert.equal(context.activeRequest, undefined);
 });
 
@@ -1539,8 +1624,10 @@ test('agent_end reports unexpected interruptions when the run ends without any a
   });
 
   handleSdkSessionEvent(deps, context, { type: 'agent_end' });
+  assert.deepEqual(emitted, []);
+  handleSdkSessionEvent(deps, context, { type: 'agent_settled' });
 
-  assert.deepEqual(emitted, [{
+  assert.deepEqual(emitted.slice(0, 1), [{
     event: 'message.aborted',
     payload: {
       requestId: 'req-no-message',
@@ -1571,12 +1658,14 @@ test('message_end falls back to the last or inferred message id and agent_end sk
     },
   });
 
-  const finished = emitted[0]?.payload as { message: { id: string; status: string } };
+  const finished = emitted.find((entry) => entry.event === 'message.finished')?.payload as { message: { id: string; status: string } };
   assert.equal(finished.message.id, 'req-5:2');
   assert.equal(finished.message.status, 'error');
   assert.equal(emitted.find((entry) => entry.event === 'message.aborted'), undefined);
 
   handleSdkSessionEvent(deps, context, { type: 'agent_end' });
+  assert.notEqual(context.activeRequest, undefined);
+  handleSdkSessionEvent(deps, context, { type: 'agent_settled' });
   assert.equal(emitted.filter((entry) => entry.event === 'message.aborted').length, 0);
   assert.equal(context.activeRequest, undefined);
 
@@ -1595,7 +1684,7 @@ test('message_end falls back to the last or inferred message id and agent_end sk
       content: [{ type: 'text', text: 'fresh reply' }],
     },
   });
-  const inferred = secondDeps.emitted[0]?.payload as { message: { id: string } };
+  const inferred = secondDeps.emitted.find((entry) => entry.event === 'message.finished')?.payload as { message: { id: string } };
   assert.equal(inferred.message.id, 'req-6:1');
 });
 
@@ -1720,14 +1809,50 @@ test('tool execution and message end events cover completed payloads and fallbac
   } as any);
 
   assert.deepEqual(emitted.map((entry) => entry.event), [
+    'auxiliary-llm.usage',
     'message.finished',
+    'auxiliary-llm.usage',
     'message.finished',
   ]);
-  assert.equal((emitted[0]?.payload as any).message.id, 'req-7b:last');
-  assert.equal((emitted[0]?.payload as any).message.status, 'completed');
-  assert.equal((emitted[1]?.payload as any).message.id, 'req-7c:5');
-  assert.equal((emitted[1]?.payload as any).message.durationMs, undefined);
+  const finishedMessages = emitted.filter((entry) => entry.event === 'message.finished');
+  assert.equal((finishedMessages[0]?.payload as any).message.id, 'req-7b:last');
+  assert.equal((finishedMessages[0]?.payload as any).message.status, 'completed');
+  assert.equal((finishedMessages[1]?.payload as any).message.id, 'req-7c:5');
+  assert.equal((finishedMessages[1]?.payload as any).message.durationMs, undefined);
   assert.equal(getContextUsageChangedCount(), 2);
+});
+
+test('turn_start marks backend send status committed before assistant message_start', async () => {
+  const { deps } = createDeps({ captureLive: true });
+  const ledger = new SendOperationLedger();
+  const fingerprint = canonicalSendIntentFingerprint({
+    sessionPath: '/workspace/session.jsonl', text: 'hello', inputs: [], localId: 'local-1',
+  });
+  await ledger.run('operation-1', fingerprint, async () => ({
+    operationId: 'operation-1', requestId: 'request-1',
+  }));
+  const context = createContext({
+    sendOperationLedger: ledger,
+    activeRequest: {
+      id: 'request-1', operationId: 'operation-1', messageIndex: 0, aborted: false,
+      turnBoundaryAt: Date.now() - 20,
+      liveTurnAccumulator: new BackendLiveTurnAccumulator({
+        protocolVersion: 7,
+        sessionPath: '/workspace/session.jsonl',
+        requestId: 'request-1',
+        operationId: 'operation-1',
+        turnId: 'turn-1',
+        attemptId: 'attempt-1',
+        canonicalMessageId: 'request-1:1',
+        startedAt: 100,
+      }),
+    },
+  });
+
+  handleSdkSessionEvent(deps, context, { type: 'turn_start' });
+  assert.deepEqual(ledger.status('operation-1'), {
+    operationId: 'operation-1', state: 'accepted', requestId: 'request-1', queued: false, committed: true,
+  });
 });
 
 test('sequenced production path emits only typed live envelopes with a durable terminal', () => {
@@ -2141,7 +2266,7 @@ test('pre-first-semantic inactivity retires and replaces a runtime even when abo
   }
 });
 
-test('agent_end does not emit an extra aborted event when the request already has an assistant message', () => {
+test('agent_settled does not emit an extra aborted event when the request already has an assistant message', () => {
   const { deps, emitted, busy, sessionOpened, getListChangedCount, getContextUsageChangedCount } = createDeps();
   const context = createContext({
     activeRequest: {
@@ -2153,12 +2278,15 @@ test('agent_end does not emit an extra aborted event when the request already ha
   });
 
   handleSdkSessionEvent(deps, context, { type: 'agent_end' });
+  assert.deepEqual(busy, []);
+  assert.notEqual(context.activeRequest, undefined);
+  handleSdkSessionEvent(deps, context, { type: 'agent_settled' });
 
   assert.deepEqual(busy, [false]);
-  assert.equal(getContextUsageChangedCount(), 1);
+  assert.equal(getContextUsageChangedCount(), 2);
   assert.deepEqual(sessionOpened, ['/workspace/session.jsonl']);
   assert.equal(getListChangedCount(), 1);
-  assert.deepEqual(emitted, []);
+  assert.deepEqual(emitted.map((entry) => entry.event), ['agent.settled']);
   assert.equal(context.activeRequest, undefined);
 });
 

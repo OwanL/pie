@@ -5,7 +5,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-import { isActiveDirectoryLockError, syncActiveDestinationInPlace } from './sync-output.mjs';
+import { isActiveDirectoryLockError, syncActiveDestinationInPlace, writeFileIfChanged } from './sync-output.mjs';
 
 const rootDir = path.dirname(fileURLToPath(new URL('../package.json', import.meta.url)));
 const outDir = path.join(rootDir, 'out');
@@ -176,7 +176,10 @@ async function syncToInstalledExtension() {
     }
   }
   await rm(backup, { recursive: true, force: true });
-  await writeFile(path.join(extDir, 'package.json'), JSON.stringify(pkg, null, 2));
+  // Watch mode publishes renderer assets frequently. Rewriting the installed
+  // manifest when its bytes are unchanged can prompt VS Code to react to the
+  // extension mid-session, so only touch it when content actually differs.
+  await writeFileIfChanged(path.join(extDir, 'package.json'), JSON.stringify(pkg, null, 2));
   console.log(`Synced → ${extDir}`);
 }
 

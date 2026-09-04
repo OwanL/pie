@@ -3,7 +3,7 @@
  * extension host and the backend process. The host refuses to start the backend
  * unless the values match.
  */
-export const PROTOCOL_VERSION = 14;
+export const PROTOCOL_VERSION = 15;
 
 /** Stable RPC error returned when a lossless required session snapshot row cannot fit. */
 export const SESSION_SNAPSHOT_TOO_LARGE_CODE = 'SESSION_SNAPSHOT_TOO_LARGE' as const;
@@ -35,8 +35,14 @@ export const SESSION_SNAPSHOT_TOO_LARGE_CODE = 'SESSION_SNAPSHOT_TOO_LARGE' as c
  *
  * v8: every state/hello and readiness handshake carries `buildId`. Protocol
  * skew remains a reload-required boundary; build skew is accepted at runtime.
+ *
+ * v9: ViewState carries host-owned cumulative per-session agent working time
+ * with optional durable run-telemetry attribution for its rich tooltip.
+ *
+ * v10: ViewState carries backend-authored per-session activity and continuation
+ * capabilities; the renderer no longer classifies continuation from transcript.
  */
-export const WEBVIEW_PROTOCOL_VERSION = 8;
+export const WEBVIEW_PROTOCOL_VERSION = 10;
 
 export function assertProtocolVersion(peerLabel: string, protocolVersion: unknown): void {
   if (!Number.isInteger(protocolVersion)) {

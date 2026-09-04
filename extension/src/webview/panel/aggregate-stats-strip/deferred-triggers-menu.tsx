@@ -90,7 +90,9 @@ export function DeferredTriggersMenu({
                 {t.note.trim() && (
                   <div class="deferred-triggers-menu-item-note" title={t.note}>{t.note.trim()}</div>
                 )}
-                <div class="deferred-triggers-menu-item-wait">waiting {formatElapsed(t.registeredAt)}</div>
+                <div class="deferred-triggers-menu-item-wait">
+                  {formatDeliveryState(t)} · waiting {formatElapsed(t.registeredAt)}
+                </div>
               </div>
               <button
                 class="context-menu-item deferred-triggers-menu-item-cancel"
@@ -153,6 +155,18 @@ function formatMs(ms: number): string {
   const min = sec / 60;
   if (min < 60) return `${Math.round(min)}m`;
   return `${(min / 60).toFixed(1)}h`;
+}
+
+function formatDeliveryState(trigger: DeferredTriggerView): string {
+  if (trigger.recoveryState === 'dead-owner-recovered') {
+    return trigger.deliveryDetail ?? 'host exited before dispatch; delivery recovered and retryable';
+  }
+  if (trigger.recoveryState === 'acknowledgement-ambiguous') {
+    return trigger.deliveryDetail ?? 'delivery acknowledgement pending; automatic retry blocked';
+  }
+  if (trigger.deliveryState === 'claimed') return trigger.deliveryDetail ?? 'delivery claimed';
+  if (trigger.deliveryState === 'retryable') return trigger.deliveryDetail ?? 'delivery retryable';
+  return 'pending';
 }
 
 function formatElapsed(iso: string): string {

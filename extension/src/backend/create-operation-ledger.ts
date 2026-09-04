@@ -31,6 +31,7 @@
  */
 
 import { toErrorMessage } from '../shared/error-message';
+import { BackendError } from './server-io';
 
 /** Outcome of one create/duplicate operation handled through the ledger. */
 export interface CreateOperationResult {
@@ -40,6 +41,9 @@ export interface CreateOperationResult {
 export interface CreateOperationRunOptions {
   /** Stable host-generated operation identity. Must be a non-empty string. */
   operationId: string;
+  /** Canonical mutation-defining intent. Attempt and selection metadata are
+   * excluded so safe retries can join while changed mutation params fail. */
+  intentFingerprint: string;
   /** Full operation including the SDK-owned atomic durable-header barrier and
    * process-local manager installation. Must call `registerDurablePath`
    * synchronously immediately after both succeed, so a later publication failure cannot create a
@@ -57,9 +61,9 @@ export interface CreateOperationRunOptions {
 }
 
 type LedgerEntry =
-  | { state: 'pending'; promise: Promise<CreateOperationResult>; durablePath?: string }
-  | { state: 'succeeded'; sessionPath: string }
-  | { state: 'failed'; error: string; durablePath?: string };
+  | { state: 'pending'; intentFingerprint: string; promise: Promise<CreateOperationResult>; durablePath?: string }
+  | { state: 'succeeded'; intentFingerprint: string; sessionPath: string }
+  | { state: 'failed'; intentFingerprint: string; error: string; durablePath?: string };
 
 export class CreateOperationLedger {
   private readonly entries = new Map<string, LedgerEntry>();
@@ -67,6 +71,12 @@ export class CreateOperationLedger {
   run(options: CreateOperationRunOptions): Promise<CreateOperationResult> {
     const existing = this.entries.get(options.operationId);
     if (existing) {
+      if (existing.intentFingerprint !== options.intentFingerprint) {
+        throw new BackendError(
+          'OPERATION_INTENT_MISMATCH',
+          `Operation ${options.operationId} was already used for a different create intent.`,
+        );
+      }
       if (existing.state === 'pending') {
         // Concurrent/retried call while the durable attempt is in flight:
         // join the same operation; it owns the single durable creation and
@@ -97,6 +107,7 @@ export class CreateOperationLedger {
   ): Promise<CreateOperationResult> {
     const pending: Extract<LedgerEntry, { state: 'pending' }> = {
       state: 'pending',
+      intentFingerprint: options.intentFingerprint,
       promise: undefined as never,
       ...(durablePath !== undefined ? { durablePath } : {}),
     };
@@ -105,7 +116,11 @@ export class CreateOperationLedger {
         const result = durablePath !== undefined
           ? await options.resume(durablePath)
           : await options.execute((path) => { pending.durablePath = path; });
-        this.entries.set(options.operationId, { state: 'succeeded', sessionPath: result.sessionPath });
+        this.entries.set(options.operationId, {
+          state: 'succeeded',
+          intentFingerprint: options.intentFingerprint,
+          sessionPath: result.sessionPath,
+        });
         return result;
       } catch (error) {
         if (pending.durablePath !== undefined) {
@@ -116,12 +131,14 @@ export class CreateOperationLedger {
           // retry may still best-effort republish the full snapshot.
           this.entries.set(options.operationId, {
             state: 'succeeded',
+            intentFingerprint: options.intentFingerprint,
             sessionPath: pending.durablePath,
           });
           return { sessionPath: pending.durablePath };
         }
         this.entries.set(options.operationId, {
           state: 'failed',
+          intentFingerprint: options.intentFingerprint,
           error: toErrorMessage(error),
         });
         throw error;

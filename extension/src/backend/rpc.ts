@@ -116,6 +116,9 @@ export interface MessageSendParams {
   sessionPath: string;
   text: string;
   inputs: ComposerInput[];
+  /** Stable host mutation identity. Optional only for legacy callers. */
+  operationId?: string;
+  operationAttempt?: number;
   /** Host-side optimistic message ID for this send. For queued (steering/
    *  followUp) messages the backend mirrors the SDK's FIFO drain order in
    *  `SessionContext.queuedLocalIds` and echoes the ID back in
@@ -478,8 +481,7 @@ function validateImageBlobInput(method: string, index: number, id: string, kind:
   return { id, kind: 'imageBlob', mimeType, name, sizeBytes, dataBase64, width, height, source };
 }
 
-function validateComposerInput(input: unknown, index: number): ComposerInput {
-  const method = 'message.send';
+function validateComposerInput(method: string, input: unknown, index: number): ComposerInput {
   const envelope = readEnvelope(method, index, input);
   const { id, kind } = readIdAndKind(method, index, envelope);
 
@@ -516,25 +518,21 @@ export function validateSessionTitleGenerate(params: unknown): SessionTitleGener
   return { sessionPath, prompt, provider, model, thinkingLevel, timeoutSec: timeoutSec as number };
 }
 
-export function validateMessageSend(params: unknown): MessageSendParams {
-  if (!isObj(params)) fail('message.send', 'expected an object');
-  const text = (params as Record<string, unknown>)['text'];
-  if (typeof text !== 'string') {
-    fail('message.send', 'text must be a string');
-  }
-  const sp = (params as Record<string, unknown>)['sessionPath'];
-  if (typeof sp !== 'string' || !sp) {
-    fail('message.send', 'requires a string sessionPath');
-  }
-  rejectPendingSessionPath('message.send', sp);
+function validateMessageContent(
+  method: 'message.send' | 'message.edit',
+  params: Record<string, unknown>,
+): { sessionPath: string; text: string; inputs: ComposerInput[]; localId?: string } {
+  const text = params['text'];
+  if (typeof text !== 'string') fail(method, 'text must be a string');
+  const sessionPath = params['sessionPath'];
+  if (typeof sessionPath !== 'string' || !sessionPath) fail(method, 'requires a string sessionPath');
+  rejectPendingSessionPath(method, sessionPath);
 
-  const rawInputs = (params as Record<string, unknown>)['inputs'];
+  const rawInputs = params['inputs'];
   let inputs: ComposerInput[] = [];
   if (rawInputs !== undefined) {
-    if (!Array.isArray(rawInputs)) {
-      fail('message.send', 'inputs must be an array when provided');
-    }
-    inputs = rawInputs.map((input, index) => validateComposerInput(input, index));
+    if (!Array.isArray(rawInputs)) fail(method, 'inputs must be an array when provided');
+    inputs = rawInputs.map((input, index) => validateComposerInput(method, input, index));
     const aggregateImageBytes = inputs.reduce(
       (total, input) => total + (input.kind === 'imageBlob'
         ? Math.max(input.sizeBytes, decodedBase64ByteLength(input.dataBase64))
@@ -542,20 +540,131 @@ export function validateMessageSend(params: unknown): MessageSendParams {
       0,
     );
     if (aggregateImageBytes > MAX_AGGREGATE_IMAGE_INPUT_BYTES) {
-      fail('message.send', `image inputs exceed the ${MAX_AGGREGATE_IMAGE_INPUT_BYTES} byte aggregate limit`);
+      fail(method, `image inputs exceed the ${MAX_AGGREGATE_IMAGE_INPUT_BYTES} byte aggregate limit`);
     }
   }
+  if (!text.trim() && inputs.length === 0) fail(method, 'requires non-empty text or at least one input');
 
-  if (!text.trim() && inputs.length === 0) {
-    fail('message.send', 'requires non-empty text or at least one input');
-  }
-
-  const localId = (params as Record<string, unknown>)['localId'];
+  const localId = params['localId'];
   if (localId !== undefined && typeof localId !== 'string') {
-    fail('message.send', 'localId must be a string when provided');
+    fail(method, 'localId must be a string when provided');
   }
+  return { sessionPath, text, inputs, ...(typeof localId === 'string' ? { localId } : {}) };
+}
 
-  return { text: text as string, sessionPath: sp as string, inputs, localId };
+export function validateMessageSend(params: unknown): MessageSendParams {
+  if (!isObj(params)) fail('message.send', 'expected an object');
+  const content = validateMessageContent('message.send', params);
+  const operationId = readOperationId('message.send', params);
+  const operationAttempt = readOperationAttempt('message.send', params);
+  return {
+    ...content,
+    localId: content.localId,
+    ...(operationId ? { operationId } : {}),
+    ...(operationAttempt !== undefined ? { operationAttempt } : {}),
+  };
+}
+
+export interface MessageEditParams {
+  sessionPath: string;
+  entryId: string;
+  text: string;
+  inputs: ComposerInput[];
+  localId?: string;
+  operationId: string;
+  operationAttempt: number;
+}
+
+export function validateMessageEdit(params: unknown): MessageEditParams {
+  const method = 'message.edit';
+  if (!isObj(params)) fail(method, 'expected an object');
+  const content = validateMessageContent(method, params);
+  const entryId = params['entryId'];
+  const messageId = params['messageId'];
+  if (entryId !== undefined && messageId !== undefined && entryId !== messageId) {
+    fail(method, 'entryId and messageId must match when both are provided');
+  }
+  const targetId = entryId ?? messageId;
+  if (typeof targetId !== 'string' || !targetId) fail(method, 'requires a non-empty entryId or messageId');
+  const operationId = readOperationId(method, params);
+  const operationAttempt = readOperationAttempt(method, params);
+  if (!operationId || operationAttempt === undefined) {
+    fail(method, 'operationId and operationAttempt are required');
+  }
+  return { ...content, entryId: targetId, operationId, operationAttempt };
+}
+
+export interface MessageOperationParams extends SessionPathParams {
+  operationId?: string;
+  operationAttempt?: number;
+}
+
+export interface MessageInterruptParams extends SessionPathParams {
+  operationId?: string;
+  operationAttempt?: number;
+}
+
+/** Stable identity is required as a pair by production callers. Both fields
+ * remain optional together for legacy clients during protocol migration. */
+export function validateMessageInterrupt(params: unknown): MessageInterruptParams {
+  const method = 'message.interrupt';
+  if (!isObj(params)) fail(method, 'expected an object');
+  const { sessionPath } = validateSessionPath(method, params);
+  const operationId = readOperationId(method, params);
+  const operationAttempt = readOperationAttempt(method, params);
+  if ((operationId === undefined) !== (operationAttempt === undefined)) {
+    fail(method, 'operationId and operationAttempt must be provided together');
+  }
+  return { sessionPath, ...(operationId ? { operationId, operationAttempt } : {}) };
+}
+
+export interface CompactOperationParams extends MessageOperationParams {
+  reason: 'manual';
+}
+
+export function validateMessageOperation(
+  method: 'message.continue' | 'message.compact',
+  params: unknown,
+): MessageOperationParams | CompactOperationParams {
+  if (!isObj(params)) fail(method, 'expected an object');
+  const { sessionPath } = validateSessionPath(method, params);
+  const operationId = readOperationId(method, params);
+  const operationAttempt = readOperationAttempt(method, params);
+  if ((operationId === undefined) !== (operationAttempt === undefined)) {
+    fail(method, 'operationId and operationAttempt must be provided together');
+  }
+  if (method === 'message.compact') {
+    const reason = params.reason ?? 'manual';
+    if (reason !== 'manual') fail(method, 'reason must be manual');
+    return {
+      sessionPath,
+      reason,
+      ...(operationId ? { operationId, operationAttempt } : {}),
+    };
+  }
+  return { sessionPath, ...(operationId ? { operationId, operationAttempt } : {}) };
+}
+
+export interface OperationStatusParams extends SessionPathParams {
+  operationId: string;
+  backendGeneration?: number;
+}
+
+export function validateOperationStatus(params: unknown): OperationStatusParams {
+  if (!isObj(params)) fail('operation.status', 'expected an object');
+  const { sessionPath } = validateSessionPath('operation.status', params);
+  const operationId = readOperationId('operation.status', params as Record<string, unknown>);
+  if (!operationId) fail('operation.status', 'requires operationId');
+  const backendGeneration = params.backendGeneration;
+  if (backendGeneration !== undefined
+    && (!Number.isSafeInteger(backendGeneration) || (backendGeneration as number) < 1)) {
+    fail('operation.status', 'backendGeneration must be a positive integer when provided');
+  }
+  return {
+    sessionPath,
+    operationId,
+    ...(backendGeneration !== undefined ? { backendGeneration: backendGeneration as number } : {}),
+  };
 }
 
 export interface SettingsSetParams extends Partial<ModelSettings> {

@@ -2,8 +2,10 @@
 
 Design and behavioral contract for the `defer_trigger` tool and its host-side
 registry: a session can register an asynchronous condition — a timer, user
-input, or another session finishing — and end its turn; the host resumes that
-session with a synthetic wake-up message when the condition fires.
+input, or another session finishing — and end its turn. Timer and
+session-finished conditions resume with a synthetic wake-up message; a real
+user prompt is itself the wake for `user_input` and consumes the trigger
+without dispatching a second `Send`.
 
 Runtime code:
 
@@ -24,7 +26,8 @@ synthetic user message on the same session — when the condition fires.
 
 ## 2. Architecture and ownership
 
-Three owners, two processes, one append-only sidecar.
+Three owners, two processes, one append-only sidecar plus per-trigger atomic
+claim artifacts in the same sidecar directory.
 
 ### 2.1 The sidecar (`triggers.jsonl`)
 
@@ -48,13 +51,49 @@ the whole file; files stay small — a handful of ops per session):
 
 ```jsonc
 {"id":"…","op":"register","sessionPath":"…","triggers":[{"kind":"timer","ms":60000}],"note":"…","at":"…"}
-{"id":"…","op":"fire","sessionPath":"…","reason":"…","at":"…"}
+{"id":"…","op":"claim","sessionPath":"…","claimId":"…","ownerId":"…","ownerPid":1234,"reason":"…","at":"…","dispatchStartedAt":"…"} // dispatchStartedAt only when delivery already began
+{"id":"…","op":"dispatch-started","sessionPath":"…","claimId":"…","ownerId":"…","ownerPid":1234,"reason":"…","at":"…","dispatchStartedAt":"…"}
+{"id":"…","op":"release","sessionPath":"…","claimId":"…","reason":"…","recoveryState":"dead-owner-recovered","at":"…"} // recoveryState only for crash recovery
+{"id":"…","op":"failed","sessionPath":"…","reason":"…","at":"…"}
+{"id":"…","op":"fire","sessionPath":"…","claimId":"…","reason":"…","at":"…"}
 {"op":"cancel","sessionPath":"…","targetId":"…","at":"…"}   // targetId absent = cancel all for sessionPath
 ```
 
+Before appending `claim`, a host publishes
+`triggers.jsonl.claim-<sha256(triggerId)>` with an atomic hard link. The source
+file is fully written before linking, and the destination is never replaced.
+That artifact is the compare-and-set shared by host processes; the JSONL ops
+are the replayable state. A claim artifact carries the registry instance ID,
+OS process ID, claim timestamp, and whether delivery had already begun. Only
+host registries create/remove claim artifacts; the backend tool never does.
+Claim artifacts are also replayed directly, so a host crash between atomic
+publication and the `claim` append remains visible and cannot permit a second
+dispatch. Every append and the complete temporary claim payload are `fsync`ed
+before progressing.
+
+Synthetic delivery appends and fsyncs `dispatch-started` immediately before
+calling the host `Send` path. A `user_input` claim includes
+`dispatchStartedAt` in its initial artifact because the real prompt was already
+dispatched before trigger consumption. On startup and every reload, a registry
+checks a claim's owner PID. Only a confirmed-dead owner with no durable dispatch
+boundary is released as `dead-owner-recovered`. After confirming death, the
+registry replays the exact claim once more so a dispatch boundary fsynced just
+before owner exit cannot be missed. It persists an idempotent `claim` first (so
+artifact-only crashes remain replayable), then makes the release durable before
+the exact old artifact is removed. The fixed artifact therefore remains the
+cross-host compare-and-set even when two registries race recovery and retry.
+A live PID, permission/lookup ambiguity, a legacy claim without a PID, PID
+reuse, or any claim with dispatch-started evidence remains fail-closed. The
+last case may represent a lost acknowledgement and must not be retried
+automatically.
+
+Durable `fire`/`release` records make a leftover artifact stale; replay removes
+that crash residue. The JSONL remains the historical source and is not
+compacted today; terminal artifacts are removed eagerly and on replay.
+
 - The **backend process** (`defer_trigger` tool) appends `register`/`cancel`.
-- The **extension host** (`DeferredTriggerRegistry`) appends `fire`/`cancel`
-  and reads the log.
+- The **extension host** (`DeferredTriggerRegistry`) owns claim artifacts,
+  appends `claim`/`release`/`failed`/`fire`/`cancel`, and reads the log.
 - Two host instances (two VS Code windows) share the sidecar; each registry
   reconciles on reload and `fs.watch` changes, so a trigger registered in one
   window can be listed/cancelled in the other.
@@ -80,7 +119,8 @@ the whole trigger):
 
 - `timer(ms)` — fires after `ms` from registration; re-armed on host restart
   against the absolute registration deadline.
-- `user_input` — fires when the user sends a message in the watcher session.
+- `user_input` — is consumed by the real user message sent in the watcher
+  session. It does not create synthetic content.
 - `session_finished` — fires when a session (specific path, or any session)
   finishes streaming. **Never fires on the watcher's own session** (a
   self-wake loop guard: the watcher's own deferring turn ends as a session
@@ -95,20 +135,45 @@ the whole trigger):
   boundaries and reconcile the sidecar synchronously first — so a register op
   appended by the tool immediately before the event cannot miss its only
   matching event due to watcher debounce;
-- `fire(id, reason)` removes the trigger, best-effort appends the `fire` op
-  (so a restart does not re-arm an already-consumed trigger), and dispatches a
-  synthetic `Send` Command through the reducer — the exact same path as a
-  typed message — when the watcher's tab is open. If the tab is closed the
-  trigger is still consumed (it cannot be delivered to a closed session);
+- `fire(id, reason)` is used only for timer/session-finished synthetic wakes.
+  It first verifies that the watcher tab is open, then atomically claims the
+  trigger, durably marks dispatch as started, and dispatches one synthetic
+  `Send`. The claim remains until the ordinary `SendResult` reports acceptance,
+  which appends `fire`; a definitive
+  rejection appends `release`. A second host cannot dispatch while the claim
+  artifact exists. A stale registry that wins after completion replays the
+  `fire` under its claim and exits without dispatching;
+- `onUserInput(path, corrId)` claims after the message router has dispatched
+  the real prompt and settles from that prompt's ordinary `SendResult`. It
+  never calls the synthetic wake path, so one user action creates exactly one
+  `Send`;
+- startup/reload releases a confirmed-dead owner's pre-dispatch claim to
+  `retryable` with `recoveryState: dead-owner-recovered`; an open watcher
+  automatically retries that safely recovered timer/session-finished wake on
+  the next event-loop turn, while a closed watcher retains it until reopen.
+  Live, unknown, legacy, PID-reused, and dispatch-started claims remain
+  `claimed`. A dispatch-started claim is projected with
+  `recoveryState: acknowledgement-ambiguous` so the UI explains why automatic
+  retry is blocked;
+- a closed tab records `failed` and leaves the trigger `retryable`; a definite
+  dispatch exception, rejected `SendResult`, or backend-ready watchdog drop
+  appends `release` and removes its claim artifact. If dispatch succeeded but
+  acknowledgement/completion is lost, the claim is retained as an explicit
+  ambiguous `claimed` state rather than risking duplicate delivery. Reopening
+  the watcher retries retained timer/session-finished failures; `user_input`
+  waits for the next real prompt. Ordinary retryable elapsed timers are not
+  automatically re-armed, preventing a persistent rejection from creating a
+  refire loop; the narrow exception is a confirmed-safe dead-owner recovery;
 - `cancel(...)` updates in-memory state immediately and appends the sidecar op
   (the webview must not wait for the debounced watcher to reflect a cancel).
 
-The wake-up message starts with the stable prefix `[deferred trigger fired: …]`
-and carries `customType: 'deferred-trigger'` + `customDetails: { reason }` on
-the optimistic user message so the webview renders it as an auto-resume (not a
-typed message). The SDK persists user messages without custom metadata, so
-`extension/src/backend/transcript.ts` re-derives the tag from the text prefix
-on transcript reload.
+Synthetic timer/session-finished wake-up messages start with the stable prefix
+`[deferred trigger fired: …]` and carry `customType: 'deferred-trigger'` +
+`customDetails: { reason }` on the optimistic user message so the webview
+renders them as an auto-resume (not a typed message). The SDK persists user
+messages without custom metadata, so `extension/src/backend/transcript.ts`
+re-derives the tag from the text prefix on transcript reload. A `user_input`
+trigger has no synthetic text or metadata because the real prompt is its wake.
 
 Long timers: Node clamps `setTimeout` delays beyond ~24.8 days to 1ms, so
 `armTimer` schedules bounded slices (`MAX_TIMER_SLICE_MS = 2^31 - 1`) and
@@ -129,21 +194,31 @@ across the postMessage boundary.
 
 ## 3. Contract and invariants
 
-- A registered trigger fires **at most once** per process; the in-memory set
-  and the persisted `fire` op agree on consumption. If the `fire` append fails
-  (sidecar unavailable), the in-memory state is still consumed — a later
-  reload may re-arm from the sidecar's `register` op, an acceptable rare case
-  (idempotent fire guards double-delivery within one process).
+- A registered trigger produces **at most one dispatch across host
+  processes**. The atomic per-trigger artifact selects one claim owner. It is
+  removed only after durable `fire`, or after a durable `release` proving that
+  dispatch failed before completion.
 - A `session_finished` trigger never fires on the watcher's own session.
-- Delivery is exactly-once per host instance: the wake-up dispatches through
-  the reducer `Send` path; if the watcher's tab is busy, the existing
-  `message.send` → `followUp` queue defers the wake-up until the current turn
-  ends.
+- Timer/session-finished delivery dispatches through the reducer `Send` path;
+  if the watcher's tab is busy, the existing `message.send` → `followUp` queue
+  defers the synthetic wake until the current turn ends. `user_input` consumes
+  the claim using the already-dispatched real prompt and never dispatches a
+  follow-up.
+- Closed-tab, claim-persistence, synchronous dispatch, confirmed pre-dispatch
+  owner death, and definitive Send rejection failures remain active with
+  `deliveryState: retryable` and a visible reason. Recovered owner death also
+  carries `recoveryState: dead-owner-recovered` and is automatically retried
+  only when its watcher is open. An unconfirmed dispatch remains
+  active with `deliveryState: claimed` and
+  `recoveryState: acknowledgement-ambiguous`; it is fail-closed and requires
+  cancellation rather than an automatic duplicate dispatch.
 - The webview can cancel triggers from the menu (`cancelDeferredTrigger`
   command → host `registry.cancel`) — same sidecar op as the tool's `cancel`,
   so both surfaces stay consistent.
-- Best-effort persistence everywhere: a failed sidecar append never blocks
-  in-memory behavior or the webview.
+- Claim persistence is fail-closed. Failure before a claim means no automatic
+  delivery. A confirmed process death may recover a claim only before the
+  durable dispatch boundary; failure after that boundary retains the claim.
+  Cancel remains available when acknowledgement is ambiguous.
 - The webview differentiates wake-up messages by `customType`; the backend
   re-derives it from the stable text prefix on reload.
 
@@ -159,13 +234,23 @@ across the postMessage boundary.
 - `extensions/deferred-triggers/test/store.test.ts` — op-log append/replay,
   cancel semantics, OR-trigger resolution.
 - `extension/test/host/deferred-triggers/deferred-triggers-registry.test.ts`
-  — registry lifecycle: reload, timer re-arm vs absolute deadline, fire paths
-  (tab open/closed), cancel, self-wake guard.
+  — registry lifecycle: real-input consumption without synthetic `Send`,
+  timer re-arm, retryable delivery failures, self-wake guard, dead-owner
+  recovery, ambiguous acknowledgement retention, and two registry instances
+  racing both recovery and retry.
 - `extension/test/host/deferred-triggers/deferred-triggers-store.test.ts` —
-  sidecar store edge cases.
+  sidecar replay/claim edge cases, including owner PID artifacts, injected
+  liveness, safe dead-owner release, ambiguous dispatch retention, and two
+  stores sharing one file.
 - `extension/test/backend/transcript/transcript-deferred-trigger.test.ts` —
   wake-up prefix → customType re-derivation on transcript reload.
 - `extension/test/webview/…` — aggregate-stats-strip menu render + cancel.
 
-Run: `npm run test:file -- extensions/deferred-triggers/test/store.test.ts` and
-the extension suite (`npm run test:all`).
+Run the focused tests with:
+
+```bash
+npm run test:file -- \
+  extensions/deferred-triggers/test/store.test.ts \
+  extension/test/host/deferred-triggers/deferred-triggers-store.test.ts \
+  extension/test/host/deferred-triggers/deferred-triggers-registry.test.ts
+```

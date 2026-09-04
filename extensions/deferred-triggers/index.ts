@@ -106,10 +106,10 @@ function describeTrigger(specs: TriggerSpec[]): string {
     .join(' OR ');
 }
 
-function renderList(triggers: { id: string; triggers: TriggerSpec[]; note: string; registeredAt: string }[]): string {
+function renderList(triggers: { id: string; triggers: TriggerSpec[]; note: string; registeredAt: string; deliveryState: 'pending' | 'claimed' | 'retryable'; deliveryDetail?: string }[]): string {
   if (triggers.length === 0) return 'No pending deferred triggers for this session.';
   const rows = triggers.map(
-    (t) => `  ${t.id}  [${describeTrigger(t.triggers)}]  note: ${t.note || '(none)'}  registered: ${t.registeredAt}`,
+    (t) => `  ${t.id}  [${describeTrigger(t.triggers)}]  delivery: ${t.deliveryState}${t.deliveryDetail ? ` (${t.deliveryDetail})` : ''}  note: ${t.note || '(none)'}  registered: ${t.registeredAt}`,
   );
   return `Pending deferred triggers (${triggers.length}):\n${rows.join('\n')}`;
 }

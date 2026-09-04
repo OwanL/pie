@@ -46,8 +46,10 @@ loading.
 
 ## Tests
 
+From the repository root:
+
 ```bash
-node ./scripts/run-tests.mjs --package web-access-guard
+npm run test:all -- --package web-access-guard
 ```
 
 Pure rewrite/strip helpers and the filesystem patch+repair logic are covered

@@ -11,6 +11,7 @@
  */
 
 import type { ComposerInput, ComposerInputDraft, SessionSummary, UserContentPart, ExtensionUIResponsePayload, PruningMode, RendererCommandContext } from '../../shared/protocol';
+import type { SessionOperationSource } from './operation-types.js';
 import type { LiveSubagentDetailAddress, DetailCursor, DetailPageRef } from '../../shared/protocol/subagent-detail';
 
 import type { ModelSettings, ChatPrefs } from '../../shared/protocol';
@@ -23,6 +24,10 @@ export interface CommandBase {
 /** Send a new user message. */
 export interface SendCommand extends CommandBase {
   kind: 'Send';
+  /** Stable mutation identity; distinct from corrId/localId/requestId/turnId. */
+  operationId?: string;
+  operationSource?: SessionOperationSource;
+  backendGeneration?: number;
   sessionPath: string;
   /** Raw user text (sent to backend). */
   text: string;
@@ -55,6 +60,11 @@ export interface SendCommand extends CommandBase {
 /** Edit an existing message (truncates the transcript after it). */
 export interface EditCommand extends CommandBase {
   kind: 'Edit';
+  /** Stable compound-mutation identity, assigned once at trusted ingress. */
+  operationId?: string;
+  operationAttempt?: number;
+  operationSource?: SessionOperationSource;
+  backendGeneration?: number;
   sessionPath: string;
   messageId: string;
   /** Raw user text (sent to backend). */
@@ -87,11 +97,20 @@ export interface EditQueuedCommand extends CommandBase {
 export interface ContinueCommand extends CommandBase {
   kind: 'Continue';
   sessionPath: string;
+  operationId?: string;
+  operationAttempt?: number;
+  operationSource?: SessionOperationSource;
+  backendGeneration?: number;
 }
 
 /** Interrupt the in-flight assistant turn for a session. */
 export interface InterruptCommand extends CommandBase {
   kind: 'Interrupt';
+  /** Stable stop identity, assigned once at trusted ingress. */
+  operationId?: string;
+  operationAttempt?: number;
+  operationSource?: SessionOperationSource;
+  backendGeneration?: number;
   sessionPath: string;
 }
 
@@ -99,6 +118,10 @@ export interface InterruptCommand extends CommandBase {
 export interface CompactCommand extends CommandBase {
   kind: 'Compact';
   sessionPath: string;
+  operationId?: string;
+  operationAttempt?: number;
+  operationSource?: SessionOperationSource;
+  backendGeneration?: number;
 }
 
 /** Clear all queued follow-up (steering) messages for a session. Removes the
@@ -154,6 +177,12 @@ export interface CreateSessionCommand extends CommandBase {
   operationId?: string;
   /** Attempt fence for a retried create operation. */
   operationAttempt?: number;
+  /** Trusted, serializable initiating identity retained by the operation registry. */
+  operationSource?: SessionOperationSource;
+  /** Causal parent when another operation initiated this create. */
+  causalParentOperationId?: string | null;
+  /** Backend generation whose ledger owns this operationId. */
+  backendGeneration?: number;
 }
 
 /** Persist the tab order / active tab / pinned tabs to globalState. */
@@ -532,6 +561,12 @@ export interface DuplicateSessionCommand extends CommandBase {
   operationId?: string;
   /** Attempt fence for a retried duplicate operation. */
   operationAttempt?: number;
+  /** Trusted, serializable initiating identity retained by the operation registry. */
+  operationSource?: SessionOperationSource;
+  /** Causal parent when another operation initiated this duplicate. */
+  causalParentOperationId?: string | null;
+  /** Backend generation whose ledger owns this operationId. */
+  backendGeneration?: number;
 }
 
 export interface MoveSessionTabCommand extends CommandBase {

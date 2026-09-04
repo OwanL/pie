@@ -80,9 +80,12 @@ Raw `run-analytics.json` exports and generated `analysis/site/data/*.json` are l
 
 ## Install
 
+From the repository root, run `npm ci`. Its postinstall restores this package's
+locked dependency tree. To restore only this package in an existing checkout, use:
+
 ```bash
 cd analysis
-npm install
+npm ci
 ```
 
 ## Common commands
@@ -90,7 +93,6 @@ npm install
 Inside `analysis/`:
 
 ```bash
-cd analysis
 npm run build-db
 npm run query -- --name model_quality
 npm run export-site-data

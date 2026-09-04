@@ -7,7 +7,6 @@ Implemented for Windows with Playwright `1.62.1`, Chromium revision `1234` (`151
 The capability consists of:
 
 - one pruneable Pi tool named `playwright` under `extensions/playwright/`;
-- one pruneable workflow skill under `skills/playwright/`;
 - one lazy Playwright sidecar per durable Pie session;
 - one dedicated browser process and primary isolated `BrowserContext` per Playwright tool session.
 
@@ -319,11 +318,11 @@ The runtime checks `chromium.executablePath()` and returns `BROWSER_NOT_INSTALLE
 
 ## Context-lean integration
 
-The tool and skill are ordinary skill-pruning candidates. `playwright` is not in `pruning.tools.alwaysKeep`, and no Playwright-specific dependency exception exists.
+The tool is an ordinary skill-pruning candidate. `playwright` is not in `pruning.tools.alwaysKeep`, and no Playwright-specific dependency exception exists.
 
 The tool bounds semantic output before returning it. Generic tool-result pruning may still remove whitespace or ANSI noise; it does not parse Playwright snapshots. Every source-level lossy snapshot/result reduction carries its own artifact and fidelity marker.
 
-Tool prompt metadata is sufficient for basic use when the skill is omitted. Every active guideline names `playwright`, because prompt guidelines are appended flat to Pi's global guideline list.
+Tool prompt metadata is sufficient for operation without a separate skill. Every active guideline names `playwright`, because prompt guidelines are appended flat to Pi's global guideline list.
 
 ## Deterministic verification
 

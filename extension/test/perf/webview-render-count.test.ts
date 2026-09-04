@@ -393,6 +393,7 @@ function stableInputs(overrides: Partial<IndicatorsInputs> = {}): IndicatorsInpu
     busy: false,
     sessionPath: SESSION_PATH,
     tokenRateBySession: {},
+    workingTimeBySession: {},
     ...overrides,
   };
 }
