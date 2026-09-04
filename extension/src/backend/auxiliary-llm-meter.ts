@@ -25,7 +25,7 @@ function readModel(model: unknown): { modelId?: string; provider?: string } {
   };
 }
 
-function readUsage(usage: unknown): Pick<AuxiliaryLlmUsagePayload,
+function readUsage(usage: unknown, kind: AuxiliaryLlmUsagePayload['kind']): Pick<AuxiliaryLlmUsagePayload,
   'inputTokens' | 'outputTokens' | 'cacheReadTokens' | 'cacheWriteTokens' | 'reportedCostUsd'
   | 'instrumentationGap' | 'instrumentationGapReason'> {
   if (!usage || typeof usage !== 'object') {
@@ -35,7 +35,9 @@ function readUsage(usage: unknown): Pick<AuxiliaryLlmUsagePayload,
       cacheReadTokens: 0,
       cacheWriteTokens: 0,
       instrumentationGap: true,
-      instrumentationGapReason: 'The summarization response exposed no provider usage.',
+      instrumentationGapReason: kind === 'other'
+        ? 'The unexpected auxiliary response exposed no provider usage.'
+        : 'The summarization response exposed no provider usage.',
     };
   }
   const candidate = usage as {
@@ -58,7 +60,9 @@ function readUsage(usage: unknown): Pick<AuxiliaryLlmUsagePayload,
       : {}),
     ...(!hasChannels ? {
       instrumentationGap: true,
-      instrumentationGapReason: 'The summarization response omitted one or more provider usage channels.',
+      instrumentationGapReason: kind === 'other'
+        ? 'The unexpected auxiliary response omitted one or more provider usage channels.'
+        : 'The summarization response omitted one or more provider usage channels.',
     } : {}),
   };
 }
@@ -74,6 +78,7 @@ export function installAuxiliaryLlmMeter(
   sessionPath: string,
   emit: (event: string, payload: AuxiliaryLlmUsagePayload) => void,
   now: () => number = Date.now,
+  isOrdinaryConversationCall: () => boolean = () => true,
 ): void {
   const meterable = session as MeterableSession;
   const agent = meterable.agent;
@@ -88,7 +93,7 @@ export function installAuxiliaryLlmMeter(
       ? 'branch_summary' as const
       : meterable._compactionAbortController !== undefined
         ? 'history_compaction' as const
-        : null;
+        : isOrdinaryConversationCall() ? null : 'other' as const;
     const startedAt = now();
     const invocationSequence = kind ? ++sequence : 0;
     const sourceId = kind ? `${kind}:${startedAt}:${invocationSequence}` : '';
@@ -112,7 +117,9 @@ export function installAuxiliaryLlmMeter(
           durationMs: Math.max(0, endedAt - startedAt),
           outcome: 'failed',
           instrumentationGap: true,
-          instrumentationGapReason: 'The summarization provider request failed before exposing usage.',
+          instrumentationGapReason: kind === 'other'
+            ? 'The unexpected auxiliary provider request failed before exposing usage.'
+            : 'The summarization provider request failed before exposing usage.',
         });
       }
       throw error;
@@ -134,7 +141,9 @@ export function installAuxiliaryLlmMeter(
         durationMs: Math.max(0, endedAt - startedAt),
         outcome: 'unknown',
         instrumentationGap: true,
-        instrumentationGapReason: 'The summarization stream exposed no result settlement hook.',
+        instrumentationGapReason: kind === 'other'
+          ? 'The unexpected auxiliary stream exposed no result settlement hook.'
+          : 'The summarization stream exposed no result settlement hook.',
       });
       return stream;
     }
@@ -156,7 +165,7 @@ export function installAuxiliaryLlmMeter(
                 sourceId,
                 occurredAt: new Date(endedAt).toISOString(),
                 ...readModel(model),
-                ...readUsage(response?.usage),
+                ...readUsage(response?.usage, kind),
                 durationMs: Math.max(0, endedAt - startedAt),
               });
             }
@@ -179,7 +188,9 @@ export function installAuxiliaryLlmMeter(
                 durationMs: Math.max(0, endedAt - startedAt),
                 outcome: 'failed',
                 instrumentationGap: true,
-                instrumentationGapReason: 'The summarization result failed before exposing usage.',
+                instrumentationGapReason: kind === 'other'
+                  ? 'The unexpected auxiliary result failed before exposing usage.'
+                  : 'The summarization result failed before exposing usage.',
               });
             }
             throw error;

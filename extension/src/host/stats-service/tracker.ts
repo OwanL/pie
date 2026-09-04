@@ -585,12 +585,21 @@ export class SessionRunTracker {
       analysis.subagentAgentNames,
     );
     const billing = getSubagentBillingEntries(toolCall.result);
-    const billingTotals = billing.reduce((totals, entry) => ({
-      input: totals.input + entry.usage.input,
-      output: totals.output + entry.usage.output,
-      cacheRead: totals.cacheRead + entry.usage.cacheRead,
-      cacheWrite: totals.cacheWrite + entry.usage.cacheWrite,
-    }), { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+    const usageForEntry = (entry: (typeof billing)[number]) => entry.usage ?? {
+      input: (entry.invocations ?? []).reduce((sum, item) => sum + (item.usage?.input ?? 0), 0),
+      output: (entry.invocations ?? []).reduce((sum, item) => sum + (item.usage?.output ?? 0), 0),
+      cacheRead: (entry.invocations ?? []).reduce((sum, item) => sum + (item.usage?.cacheRead ?? 0), 0),
+      cacheWrite: (entry.invocations ?? []).reduce((sum, item) => sum + (item.usage?.cacheWrite ?? 0), 0),
+    };
+    const billingTotals = billing.reduce((totals, entry) => {
+      const usage = usageForEntry(entry);
+      return {
+        input: totals.input + usage.input,
+        output: totals.output + usage.output,
+        cacheRead: totals.cacheRead + usage.cacheRead,
+        cacheWrite: totals.cacheWrite + usage.cacheWrite,
+      };
+    }, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
     // These are the canonical subagent totals. Prefer the terminal accounting
     // sideband because the UI-safe preview intentionally omits recursive child
     // transcripts; fall back to legacy analysis when no sideband is present.
@@ -609,13 +618,16 @@ export class SessionRunTracker {
         const occurredAt = entry.occurredAt === undefined
           ? this.runState.isoNow()
           : new Date(entry.occurredAt).toISOString();
+        const entryUsage = usageForEntry(entry);
         const remaining = {
-          inputTokens: toNonNegativeInt(entry.usage.input),
-          outputTokens: toNonNegativeInt(entry.usage.output),
-          cacheReadTokens: toNonNegativeInt(entry.usage.cacheRead),
-          cacheWriteTokens: toNonNegativeInt(entry.usage.cacheWrite),
+          inputTokens: toNonNegativeInt(entryUsage.input),
+          outputTokens: toNonNegativeInt(entryUsage.output),
+          cacheReadTokens: toNonNegativeInt(entryUsage.cacheRead),
+          cacheWriteTokens: toNonNegativeInt(entryUsage.cacheWrite),
         };
-        for (const [attemptIndex, attempt] of (entry.attempts ?? []).entries()) {
+        const invocationOrAttempts = (entry.invocations?.length ? entry.invocations : entry.attempts) ?? [];
+        for (const [attemptIndex, attempt] of invocationOrAttempts.entries()) {
+          if (!attempt.usage) continue;
           const counts = {
             inputTokens: Math.min(remaining.inputTokens, toNonNegativeInt(attempt.usage.input)),
             outputTokens: Math.min(remaining.outputTokens, toNonNegativeInt(attempt.usage.output)),
@@ -625,7 +637,7 @@ export class SessionRunTracker {
           if (counts.inputTokens + counts.outputTokens + counts.cacheReadTokens + counts.cacheWriteTokens === 0) continue;
           additions.push({
             kind: 'subagent',
-            sourceId: `${sourceId}:attempt:${attempt.attemptId || attemptIndex}`,
+            sourceId: `${sourceId}:${'invocationId' in attempt ? `invocation:${attempt.invocationId}` : `attempt:${attempt.attemptId || attemptIndex}`}`,
             occurredAt,
             modelId: attempt.model ?? entry.model ?? entry.selectedModel,
             ...(attempt.provider ? { provider: attempt.provider } : entry.provider ? { provider: entry.provider } : {}),
@@ -647,7 +659,7 @@ export class SessionRunTracker {
             modelId: entry.model ?? entry.selectedModel,
             ...(entry.provider ? { provider: entry.provider } : {}),
             ...remaining,
-            ...(entry.attempts?.length ? {} : typeof entry.usage.cost === 'number' && entry.usage.cost > 0
+            ...(invocationOrAttempts.length ? {} : typeof entry.usage?.cost === 'number' && entry.usage.cost > 0
               ? { reportedCostUsd: entry.usage.cost }
               : {}),
           });

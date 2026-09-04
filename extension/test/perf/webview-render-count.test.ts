@@ -487,7 +487,7 @@ test('Part B (busy, idle transcript): all indicator walks are independent of del
   );
 });
 
-test('Part B: the parent cost indicator updates as typed live subagent usage grows', () => {
+test('Part B: typed live subagent previews cannot mutate ledger-authoritative cost', () => {
   let latest: ReturnType<typeof useComposerIndicators> | undefined;
   function Probe({ inputs }: { inputs: IndicatorsInputs }) {
     latest = useComposerIndicators(inputs);
@@ -512,7 +512,7 @@ test('Part B: the parent cost indicator updates as typed live subagent usage gro
   });
   const first = latest?.sessionCostIndicator;
   assert.ok(first);
-  assert.match(first.tooltip, /github-copilot \/ gpt-5\.6-sol:\s+\$0\.1000/);
+  assert.doesNotMatch(first.tooltip, /github-copilot \/ gpt-5\.6-sol/);
 
   transcript = structuredClone(transcript);
   const toolCall = transcript[0].toolCalls![0];
@@ -525,8 +525,8 @@ test('Part B: the parent cost indicator updates as typed live subagent usage gro
   const grown = latest?.sessionCostIndicator;
 
   assert.ok(grown);
-  assert.match(grown.tooltip, /github-copilot \/ gpt-5\.6-sol:\s+\$2\.5000/);
-  assert.notEqual(grown.tooltip, first.tooltip);
+  assert.doesNotMatch(grown.tooltip, /github-copilot \/ gpt-5\.6-sol/);
+  assert.equal(grown.tooltip, first.tooltip);
 });
 
 test('Part B: fresh structured-cloned whole-session usage does not reopen transcript cost walks', () => {
@@ -555,7 +555,7 @@ test('Part B: fresh structured-cloned whole-session usage does not reopen transc
   );
 });
 
-test('Part B: equal-shaped session switches cannot reuse prior transcript indicators', () => {
+test('Part B: sessions without ledger snapshots remain equally explicit unknown despite transcript costs', () => {
   let latest: ReturnType<typeof useComposerIndicators> | undefined;
   function Probe({ inputs }: { inputs: IndicatorsInputs }) {
     latest = useComposerIndicators(inputs);
@@ -585,7 +585,9 @@ test('Part B: equal-shaped session switches cannot reuse prior transcript indica
 
   assert.ok(firstCost);
   assert.ok(secondCost);
-  assert.notEqual(secondCost.tooltip, firstCost.tooltip, 'the second session must expose its own historical subagent cost');
+  assert.equal(secondCost.tooltip, firstCost.tooltip);
+  assert.match(secondCost.tooltip, /authoritative ledger unavailable/);
+  assert.doesNotMatch(secondCost.tooltip, /\$0\.2500/);
 });
 
 test('Part B: recompute count is independent of transcript length for stable results', () => {

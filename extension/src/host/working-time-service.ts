@@ -1,4 +1,5 @@
 import type { WorkingTimeBreakdown, WorkingTimeState } from '../shared/protocol';
+import type { ActivityIntervalRecord } from '../shared/activity-interval';
 import { normalizeToolCallName } from '../shared/tool-call-analysis/summary';
 import type { RunSnapshot } from './run-analytics';
 
@@ -36,6 +37,8 @@ export class WorkingTimeService {
   private readonly breakdownBySession: Record<string, WorkingTimeBreakdown> = {};
   private readonly observedRunsById: Record<string, ObservedRun> = {};
   private readonly restoredBusyRunIds: Record<string, true> = {};
+  private readonly restoredActivityIds: Record<string, true> = {};
+  private readonly timelineCoveredRunIds: Record<string, true> = {};
   private readonly activeToolsBySession: Record<string, Record<string, { name: string; startedAt: number }>> = {};
   private readonly activeToolSinceBySession: Record<string, number> = {};
   private readonly toolExecutionFloorMsBySession: Record<string, number> = {};
@@ -46,16 +49,54 @@ export class WorkingTimeService {
     this.onChanged = options.onChanged;
   }
 
-  /** Seed durable totals, attribution, and any open busy interval from
-   * persisted analytics snapshots. Open intervals are restored separately from
-   * run.busyDurationMs because the latter excludes the currently open period. */
+  /** Restore the correlated timeline before compatibility run analytics. Busy
+   * intervals own the clock for runs they cover; open tool intervals recover
+   * their original starts rather than being restarted at host startup. */
+  restoreActivityIntervals(intervals: readonly ActivityIntervalRecord[]): void {
+    let changed = false;
+    const nowMs = this.now().getTime();
+    for (const interval of intervals) {
+      if (this.restoredActivityIds[interval.intervalId]) continue;
+      this.restoredActivityIds[interval.intervalId] = true;
+      if (interval.kind === 'busy' && interval.parentRunId) this.timelineCoveredRunIds[interval.parentRunId] = true;
+      const startedAt = Math.min(Date.parse(interval.startedAt), nowMs);
+      const endedAt = interval.endedAt ? Math.min(Date.parse(interval.endedAt), nowMs) : undefined;
+      if (!Number.isFinite(startedAt) || (endedAt !== undefined && !Number.isFinite(endedAt))) continue;
+      if (interval.kind === 'busy') {
+        if (endedAt === undefined) {
+          const existing = this.activeSinceBySession[interval.sessionPath];
+          this.activeSinceBySession[interval.sessionPath] = existing === undefined
+            ? startedAt : Math.min(existing, startedAt);
+        } else {
+          this.totalMsBySession[interval.sessionPath] = (this.totalMsBySession[interval.sessionPath] ?? 0)
+            + Math.max(0, endedAt - startedAt);
+        }
+        changed = true;
+      } else if (interval.kind === 'tool' && endedAt === undefined && interval.toolId) {
+        const tools = this.activeToolsBySession[interval.sessionPath] ?? {};
+        tools[interval.toolId] = { name: '(recovered)', startedAt };
+        this.activeToolsBySession[interval.sessionPath] = tools;
+        this.activeToolSinceBySession[interval.sessionPath] = Math.min(
+          this.activeToolSinceBySession[interval.sessionPath] ?? startedAt,
+          startedAt,
+        );
+        changed = true;
+      }
+    }
+    if (changed) this.publish();
+  }
+
+  /** Seed historical totals and attribution from compatibility analytics.
+   * Runs already covered by the correlated timeline do not contribute their
+   * aggregate busy duration a second time. */
   restoreRuns(runs: RunSnapshot[], openBusyIntervals: readonly PersistedBusyInterval[] = []): void {
     let changed = false;
     for (const run of runs) {
       if (!run.runId) continue;
       if (!this.restoredBusyRunIds[run.runId]) {
         this.restoredBusyRunIds[run.runId] = true;
-        const durationMs = finiteDuration(run.busyDurationMs);
+        const durationMs = this.timelineCoveredRunIds[run.runId]
+          ? 0 : finiteDuration(run.busyDurationMs);
         if (durationMs > 0) {
           this.totalMsBySession[run.sessionPath] = (this.totalMsBySession[run.sessionPath] ?? 0) + durationMs;
           changed = true;

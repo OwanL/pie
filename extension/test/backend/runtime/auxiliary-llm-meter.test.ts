@@ -74,6 +74,47 @@ test('emits an explicit gap when a summarization response omits provider usage',
   assert.match(String(payloads[0]?.instrumentationGapReason), /no provider usage/);
 });
 
+test('unexpected controller-free stream calls emit other while known conversation calls remain unmetered', async () => {
+  const session = makeSession();
+  const payloads: Array<{ kind: string; instrumentationGap?: boolean }> = [];
+  let ordinary = true;
+  installAuxiliaryLlmMeter(
+    session,
+    '/session.jsonl',
+    (_event, payload) => payloads.push(payload),
+    Date.now,
+    () => ordinary,
+  );
+
+  await (await session.agent.streamFn({ id: 'chat', provider: 'provider-a' })).result();
+  ordinary = false;
+  await (await session.agent.streamFn({ id: 'automation', provider: 'provider-a' })).result();
+
+  assert.equal(payloads.length, 1);
+  assert.equal(payloads[0]?.kind, 'other');
+  assert.equal(payloads[0]?.instrumentationGap, undefined);
+});
+
+test('unexpected auxiliary calls without usage emit one explicit other gap', async () => {
+  const session = makeSession();
+  session.agent.streamFn = async () => ({ result: async () => ({ usage: undefined as never }) });
+  const payloads: Array<{ kind: string; instrumentationGap?: boolean }> = [];
+  installAuxiliaryLlmMeter(
+    session,
+    '/session.jsonl',
+    (_event, payload) => payloads.push(payload),
+    Date.now,
+    () => false,
+  );
+
+  const stream = await session.agent.streamFn({ id: 'automation', provider: 'provider-a' });
+  await stream.result();
+  await stream.result();
+  assert.equal(payloads.length, 1);
+  assert.equal(payloads[0]?.kind, 'other');
+  assert.equal(payloads[0]?.instrumentationGap, true);
+});
+
 test('classifies branch summaries separately and ignores ordinary assistant streams', async () => {
   const session = makeSession();
   const kinds: string[] = [];

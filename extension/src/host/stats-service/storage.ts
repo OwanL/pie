@@ -10,6 +10,11 @@ import { appendPieError, appendPieLog } from '../util/pie-log';
 import { resolveSessionIdentity } from '../../backend/session-review-store';
 import { workspaceHash } from './helpers';
 import { writeCheckpointToDisk } from './persistence';
+import { withFileUpdateLock } from '../../shared/settings-json-update';
+import {
+  accountingLockTarget,
+  readAccountingPrivacySelectors,
+} from '../billable-invocation-ledger/service';
 import { readCheckpointSlots } from '../run-analytics/checkpoint';
 import type { CheckpointSlot } from '../shared/checkpoint-slots';
 import {
@@ -36,7 +41,7 @@ interface RunAnalyticsStorageOptions {
   legacyWorkspaceIds?: string[];
   now: () => Date;
   serializeSessions: () => Record<string, PersistedSessionRunState>;
-  getBillableInvocationExport?: () => Pick<RunAnalyticsExportPayload, 'billableInvocations' | 'billableInvocationSummary'>;
+  getBillableInvocationExport?: () => Pick<RunAnalyticsExportPayload, 'billableInvocations' | 'billableInvocationSummary' | 'activityIntervals'>;
   onPersistError?: (error: { message: string; at: string }) => void;
   /** Max lines retained per JSONL history file (`run-snapshots`).
    *  `<= 0` disables line-based pruning. */
@@ -163,17 +168,18 @@ export class RunAnalyticsStorage {
   }
 
   async start(): Promise<RunCheckpoint | null> {
-    // Legacy migration is recoverable. A concurrent Pie/VS Code process or a
-    // Windows scanner can briefly hold the destination during the atomic
-    // replacement; that must not prevent the rest of Pie from starting.
-    try {
-      await this.migrateLegacyStorage();
-    } catch (error) {
-      this.recordPersistError(error);
-    }
     await fs.mkdir(this.storageDir, { recursive: true });
-    await this.sweepStaleTempFiles();
-    const checkpoint = await this.readCheckpoint();
+    const checkpoint = await withFileUpdateLock(accountingLockTarget(this.storageDir), async () => {
+      // Legacy migration and checkpoint selection share the accounting lock so
+      // a second host cannot publish a stale merge while this host starts.
+      try {
+        await this.migrateLegacyStorage();
+      } catch (error) {
+        this.recordPersistError(error);
+      }
+      await this.sweepStaleTempFiles();
+      return await this.readCheckpoint();
+    });
     this.seq = checkpoint?.seq ?? 0;
     this.lastAutoExportAtMs = this.now().getTime();
     // Freshness metadata is advisory for a derived export. Never put its I/O on
@@ -315,14 +321,26 @@ export class RunAnalyticsStorage {
   }
 
   private async runPersistJob(): Promise<void> {
+    await fs.mkdir(this.storageDir, { recursive: true });
+    await withFileUpdateLock(accountingLockTarget(this.storageDir), async () => this.runPersistJobLocked());
+  }
+
+  private async runPersistJobLocked(): Promise<void> {
     const needsCheckpoint = this.dirty;
     this.dirty = false;
-    await fs.mkdir(this.storageDir, { recursive: true });
+    const privacySelectors = readAccountingPrivacySelectors(this.storageDir);
+    const isPrivateRun = (run: RunSnapshot): boolean => privacySelectors.some((selector) => (
+      (selector.sessionPath !== undefined && selector.sessionPath === run.sessionPath)
+      || (selector.sessionId !== undefined && selector.sessionId === run.sessionId)
+    ));
     // Snapshot each pending map and append one concatenated chunk per file.
     // Entries are removed only after that file append succeeds and only when
     // they were not replaced while I/O was in flight. A failed append leaves
     // the whole batch pending for retry, avoiding partial-batch duplicates.
-    const snapshots = [...this.pendingSnapshots.values()];
+    const snapshots = [...this.pendingSnapshots.values()].filter((snapshot) => !isPrivateRun(snapshot));
+    for (const [runId, snapshot] of this.pendingSnapshots) {
+      if (isPrivateRun(snapshot)) this.pendingSnapshots.delete(runId);
+    }
     if (snapshots.length > 0) {
       const chunk = snapshots.map((snapshot) => serializeJsonLine({
         schemaVersion: RUN_ANALYTICS_SCHEMA_VERSION,
@@ -334,8 +352,27 @@ export class RunAnalyticsStorage {
       this.deleteAppendedEntries(this.pendingSnapshots, snapshots);
     }
     if (needsCheckpoint) {
-      const checkpoint = this.buildCheckpoint(++this.seq);
-      await this.writeCheckpoint(checkpoint);
+      const current = await readCheckpointSlots(this.storageDir);
+      const local = this.buildCheckpoint(0);
+      const sessions: Record<string, PersistedSessionRunState> = { ...(current.checkpoint?.sessions ?? {}) };
+      for (const [sessionPath, sessionState] of Object.entries(local.sessions)) {
+        const privateSession = privacySelectors.some((selector) => selector.sessionPath === sessionPath
+          || (!!selector.sessionId && (sessionState.currentRun?.sessionId === selector.sessionId
+            || sessionState.lastRun?.sessionId === selector.sessionId)));
+        if (privateSession) {
+          delete sessions[sessionPath];
+          continue;
+        }
+        sessions[sessionPath] = this.mergeCheckpointSessionState(sessions[sessionPath], sessionState);
+      }
+      for (const [sessionPath, sessionState] of Object.entries(sessions)) {
+        if (privacySelectors.some((selector) => selector.sessionPath === sessionPath
+          || (!!selector.sessionId && (sessionState.currentRun?.sessionId === selector.sessionId
+            || sessionState.lastRun?.sessionId === selector.sessionId)))) delete sessions[sessionPath];
+      }
+      this.seq = Math.max(this.seq, current.checkpoint?.seq ?? 0) + 1;
+      this.activeSlot = current.activeSlot;
+      await this.writeCheckpoint({ schemaVersion: RUN_ANALYTICS_SCHEMA_VERSION, seq: this.seq, sessions });
     }
     try {
       await this.pruneHistoryIfNeeded();
@@ -386,6 +423,8 @@ export class RunAnalyticsStorage {
     this.persistenceQueue = this.persistenceQueue
       .catch((error) => this.recordPersistError(error))
       .then(async () => {
+        await fs.mkdir(this.storageDir, { recursive: true });
+        await withFileUpdateLock(accountingLockTarget(this.storageDir), async () => {
         const effectiveSessionId = sessionId ?? (() => {
           try { return resolveSessionIdentity(sessionPath).sessionId; } catch { return undefined; }
         })();
@@ -413,6 +452,7 @@ export class RunAnalyticsStorage {
           await forgetGlobalSideChannels(root, sessionPath, effectiveSessionId);
         }
         this.markAutoExportDirty();
+        });
       });
     await this.persistenceQueue;
     await this.queueAutoExport(true, true);
@@ -492,7 +532,24 @@ export class RunAnalyticsStorage {
     excludeSessionIds?: ReadonlySet<string>,
   ): Promise<RunAnalyticsExportPayload> {
     await this.flush();
-    const payload = await exportRunAnalyticsStore(this.storageDir, targetPath, this.now, excludeSessionPaths, excludeSessionIds);
+    await fs.mkdir(this.storageDir, { recursive: true });
+    const payload = await withFileUpdateLock(accountingLockTarget(this.storageDir), async () => {
+      const privacy = readAccountingPrivacySelectors(this.storageDir);
+      const paths = new Set(excludeSessionPaths ?? []);
+      const ids = new Set(excludeSessionIds ?? []);
+      for (const selector of privacy) {
+        if (selector.sessionPath) paths.add(selector.sessionPath);
+        if (selector.sessionId) ids.add(selector.sessionId);
+      }
+      return exportRunAnalyticsStore(
+        this.storageDir,
+        targetPath,
+        this.now,
+        paths,
+        ids,
+        this.getBillableInvocationExport?.(),
+      );
+    });
     if (path.resolve(targetPath) === path.resolve(this.autoExportPath)) {
       this.autoExportDirtyVersion = 0;
       this.autoExportFailureCount = 0;
@@ -941,14 +998,20 @@ export class RunAnalyticsStorage {
   }
 
   private async writeAutoExport(): Promise<void> {
-    await exportRunAnalyticsStore(
-      this.storageDir,
-      this.autoExportPath,
-      this.now,
-      undefined,
-      undefined,
-      this.getBillableInvocationExport?.(),
-    );
+    await fs.mkdir(this.storageDir, { recursive: true });
+    await withFileUpdateLock(accountingLockTarget(this.storageDir), async () => {
+      const privacy = readAccountingPrivacySelectors(this.storageDir);
+      const paths = new Set(privacy.flatMap((selector) => selector.sessionPath ? [selector.sessionPath] : []));
+      const ids = new Set(privacy.flatMap((selector) => selector.sessionId ? [selector.sessionId] : []));
+      await exportRunAnalyticsStore(
+        this.storageDir,
+        this.autoExportPath,
+        this.now,
+        paths,
+        ids,
+        this.getBillableInvocationExport?.(),
+      );
+    });
   }
 
   private async writeAutoExportSafely(surfaceImmediately = false): Promise<boolean> {

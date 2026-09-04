@@ -32,6 +32,8 @@ export interface SessionTokenUsageSummary {
   incompleteInvocationCount: number;
   /** Rows contributing known token-channel values. */
   knownTokenInvocationCount: number;
+  /** True when no authoritative ledger snapshot was supplied. */
+  accountingUnknown: boolean;
   /** Usage from the most recent assistant turn that reported it. */
   lastTurn: AssistantUsage | null;
 }
@@ -89,6 +91,7 @@ export function buildSessionTokenUsageFromSnapshot(snapshot: SessionUsageSnapsho
     reportedTurnCount,
     incompleteInvocationCount: Math.max(incompleteInvocationCount, snapshot.incompleteInvocationCount ?? 0),
     knownTokenInvocationCount,
+    accountingUnknown: snapshot.authority === 'unknown',
     lastTurn,
   };
 }
@@ -109,8 +112,8 @@ export function buildSessionTokenIndicator(
   // Always show token indicator, even when no usage reported
   const hasKnownTokens = summary.knownTokenInvocationCount > 0
     || (summary.incompleteInvocationCount === 0 && summary.reportedTurnCount > 0);
-  const compactIn = hasKnownTokens ? formatCompactTokens(summary.inputTokens) : '\u2014';
-  const compactOut = hasKnownTokens ? formatCompactTokens(summary.outputTokens) : '\u2014';
+  const compactIn = hasKnownTokens && !summary.accountingUnknown ? formatCompactTokens(summary.inputTokens) : '\u2014';
+  const compactOut = hasKnownTokens && !summary.accountingUnknown ? formatCompactTokens(summary.outputTokens) : '\u2014';
 
   // Token counts label (always present). An asterisk marks a known subtotal.
   const label = `\u2191 ${compactIn} \u2193 ${compactOut}${summary.incompleteInvocationCount > 0 ? '*' : ''}`;
@@ -130,7 +133,9 @@ export function buildSessionTokenIndicator(
     );
   }
   tooltipLines.push(`  Total: ${formatReadableTokens(summary.totalTokens)}`);
-  if (summary.incompleteInvocationCount > 0) {
+  if (summary.accountingUnknown) {
+    tooltipLines.push('  Usage unknown · no authoritative ledger snapshot is available');
+  } else if (summary.incompleteInvocationCount > 0) {
     tooltipLines.push(`  Known subtotal · ${summary.incompleteInvocationCount} invocation(s) have incomplete token usage`);
   }
   if (summary.lastTurn) {
@@ -144,9 +149,11 @@ export function buildSessionTokenIndicator(
   const ariaLabel =
     `Session token usage: input ${formatReadableTokens(summary.inputTokens)}, `
     + `output ${formatReadableTokens(summary.outputTokens)}`
-    + (summary.incompleteInvocationCount > 0
-      ? `; known subtotal with ${summary.incompleteInvocationCount} incomplete invocation(s).`
-      : '.');
+    + (summary.accountingUnknown
+      ? '; authoritative ledger usage is unknown.'
+      : summary.incompleteInvocationCount > 0
+        ? `; known subtotal with ${summary.incompleteInvocationCount} incomplete invocation(s).`
+        : '.');
 
   return {
     label,
@@ -1013,7 +1020,9 @@ export function buildSessionCostIndicator(
   const totalCost = mainCost + auxiliaryCost + liveCost + subagents.totalCost + prepassCost;
   const subagentsHaveUsage = tokensIn(subagents.modelCosts) > 0 || unpricedTokensIn(subagents.modelCosts) > 0;
 
-  if (summary.reportedTurnCount === 0 && !liveEstimate && totalCost <= 0 && !prepassHasUsage && !prepassHasKnownCost && !subagentsHaveUsage) return null;
+  if (!summary.accountingUnknown
+    && summary.reportedTurnCount === 0 && !liveEstimate && totalCost <= 0
+    && !prepassHasUsage && !prepassHasKnownCost && !subagentsHaveUsage) return null;
 
   const modelCosts = new Map<string, ModelCostBreakdown>();
   mergeModelCosts(modelCosts, completed.modelCosts);
@@ -1055,7 +1064,8 @@ export function buildSessionCostIndicator(
   const formattedModelCosts = formatProviderModelCosts(modelCosts);
   const tooltipLines = formattedModelCosts.lines;
   const unpricedTokens = unpricedTokensIn(modelCosts);
-  const provenanceIncomplete = (sessionUsage?.incompleteInvocationCount ?? 0) > 0;
+  const provenanceIncomplete = summary.accountingUnknown
+    || (sessionUsage?.incompleteInvocationCount ?? 0) > 0;
   const provenanceUnpriced = (sessionUsage?.unpricedInvocationCount ?? 0) > 0;
   const hasIncompleteCost = unpricedTokens > 0 || provenanceIncomplete || provenanceUnpriced;
   const hasAnyKnownCost = hasKnownCostIn(modelCosts);
@@ -1119,7 +1129,10 @@ export function buildSessionCostIndicator(
   );
 
   if (tooltipLines.length === 0) {
-    tooltipLines.push('Session cost by provider / model (whole branch):', '  No priced usage');
+    tooltipLines.push(
+      'Session cost by provider / model (whole branch):',
+      summary.accountingUnknown ? '  Unknown · authoritative ledger unavailable' : '  No priced usage',
+    );
   }
   if (hasIncompleteCost) {
     const incompleteInvocations = sessionUsage?.incompleteInvocationCount ?? 0;

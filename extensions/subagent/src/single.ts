@@ -22,6 +22,7 @@ import {
 	type SubagentDetails,
 	type SubagentResult,
 	type SubagentAttemptRecord,
+	type SubagentProviderInvocationRecord,
 	type UsageStats,
 } from "../types.js";
 import {
@@ -112,6 +113,7 @@ async function runWithModelRetry(args: RunWithModelRetryArgs): Promise<SingleRes
 	let retryCount = 0;
 	let lastFailedModel: string | undefined;
 	const attemptRecords: SubagentAttemptRecord[] = [];
+	const providerInvocations: SubagentProviderInvocationRecord[] = [];
 	const excludeModels = new Set<string>(args.excludeModels);
 	const policy = readRetryPolicy();
 	const clock = args.clock;
@@ -253,6 +255,7 @@ async function runWithModelRetry(args: RunWithModelRetryArgs): Promise<SingleRes
 		Object.assign(result, stampIdentity(result));
 		attachSelectionMetadata(result, resolved);
 		attemptRecords.push(buildAttemptRecord(result, nextBackoffMs));
+		providerInvocations.push(...(result.providerInvocations ?? []));
 		addUsage(cumulativeUsage, result.usage);
 
 		if (args.signal?.aborted) break;
@@ -321,7 +324,7 @@ async function runWithModelRetry(args: RunWithModelRetryArgs): Promise<SingleRes
 	}
 	// REM-03: the returned result must be billable for every dispatched attempt,
 	// including failed retries that were discarded before the final successful one.
-	return { ...result, usage: cumulativeUsage, attemptRecords };
+	return { ...result, usage: cumulativeUsage, attemptRecords, providerInvocations };
 }
 
 /** Execute exactly one delegated task. Parallelism is provided exclusively by

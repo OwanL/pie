@@ -4,6 +4,7 @@ import { isLiveSubagentDetailAddress } from './protocol/subagent-detail';
 import type {
   SubagentBillingAttempt,
   SubagentBillingEntry,
+  SubagentBillingInvocation,
   SubagentBillingUsage,
 } from './live-pipeline-protocol';
 import type { LifecycleValueSource, SubagentAttemptPhase, SubagentAttemptSample } from '../../../shared/run-analytics-contracts.js';
@@ -403,13 +404,17 @@ function billingUsage(value: unknown): SubagentBillingUsage | undefined {
   const cost = typeof value.cost === 'number' && Number.isFinite(value.cost) && value.cost >= 0
     ? value.cost
     : undefined;
-  return { input, output, cacheRead, cacheWrite, ...(cost === undefined ? {} : { cost }) };
+  const totalTokens = finiteNonNegative(value.totalTokens);
+  return {
+    input, output, cacheRead, cacheWrite,
+    ...(totalTokens === null ? {} : { totalTokens }),
+    ...(cost === undefined ? {} : { cost }),
+  };
 }
 
 function billingAttempt(value: unknown, index: number): SubagentBillingAttempt | undefined {
   if (!isRecord(value)) return undefined;
   const usage = billingUsage(value.usage);
-  if (!usage) return undefined;
   const attemptId = typeof value.attemptId === 'string' && value.attemptId.trim()
     ? value.attemptId.trim()
     : String(index);
@@ -417,8 +422,23 @@ function billingAttempt(value: unknown, index: number): SubagentBillingAttempt |
     attemptId,
     ...(typeof value.model === 'string' && value.model ? { model: value.model } : {}),
     ...(typeof value.provider === 'string' && value.provider ? { provider: value.provider } : {}),
-    usage,
+    ...(usage ? { usage } : {}),
+    ...(typeof value.providerResponseObserved === 'boolean'
+      ? { providerResponseObserved: value.providerResponseObserved } : {}),
+    ...(value.outcome === 'success' || value.outcome === 'failure' || value.outcome === 'aborted'
+      ? { outcome: value.outcome } : {}),
+    ...(finiteNonNegative(value.startedAt) !== null ? { startedAt: finiteNonNegative(value.startedAt)! } : {}),
+    ...(finiteNonNegative(value.completedAt) !== null ? { completedAt: finiteNonNegative(value.completedAt)! } : {}),
   };
+}
+
+function billingInvocation(value: unknown, index: number): SubagentBillingInvocation | undefined {
+  if (!isRecord(value)) return undefined;
+  const attempt = billingAttempt(value, index);
+  if (!attempt) return undefined;
+  const invocationId = typeof value.invocationId === 'string' && value.invocationId.trim()
+    ? value.invocationId.trim() : `${attempt.attemptId}:provider:${index}`;
+  return { ...attempt, invocationId };
 }
 
 function billingOccurredAt(result: Record<string, unknown>): number | undefined {
@@ -438,12 +458,19 @@ function billingOccurredAt(result: Record<string, unknown>): number | undefined 
 function coerceBillingEntry(value: unknown): SubagentBillingEntry | undefined {
   if (!isRecord(value) || typeof value.path !== 'string') return undefined;
   const usage = billingUsage(value.usage);
-  if (!usage) return undefined;
   const attempts = Array.isArray(value.attempts)
     ? value.attempts.slice(0, MAX_SUBAGENT_BILLING_ATTEMPTS)
       .map(billingAttempt)
       .filter((attempt): attempt is SubagentBillingAttempt => !!attempt)
     : [];
+  const rawInvocations = Array.isArray(value.invocations) ? value.invocations : [];
+  const invocations = rawInvocations.slice(0, MAX_SUBAGENT_BILLING_ATTEMPTS * 16)
+    .map(billingInvocation)
+    .filter((invocation): invocation is SubagentBillingInvocation => !!invocation);
+  const explicitOmitted = Math.trunc(finiteNonNegative(value.omittedInvocationCount) ?? 0);
+  const omittedInvocationCount = explicitOmitted
+    + Math.max(0, rawInvocations.length - invocations.length);
+  if (!usage && attempts.length === 0 && invocations.length === 0 && omittedInvocationCount === 0) return undefined;
   return {
     path: value.path,
     ...(typeof value.model === 'string' && value.model ? { model: value.model } : {}),
@@ -452,20 +479,41 @@ function coerceBillingEntry(value: unknown): SubagentBillingEntry | undefined {
     ...(typeof value.occurredAt === 'number' && Number.isFinite(value.occurredAt) && value.occurredAt >= 0
       ? { occurredAt: value.occurredAt }
       : {}),
-    usage,
+    ...(usage ? { usage } : {}),
     ...(attempts.length > 0 ? { attempts } : {}),
+    ...(invocations.length > 0 ? { invocations } : {}),
+    ...(omittedInvocationCount > 0 ? { omittedInvocationCount } : {}),
   };
+}
+
+const MAX_SUBAGENT_BILLING_INVOCATION_RECORDS = 64;
+
+function boundBillingInvocations(entries: readonly SubagentBillingEntry[]): SubagentBillingEntry[] {
+  let remaining = MAX_SUBAGENT_BILLING_INVOCATION_RECORDS;
+  return entries.map((entry) => {
+    const invocations = entry.invocations ?? [];
+    const retained = invocations.slice(0, remaining);
+    remaining -= retained.length;
+    const omittedInvocationCount = (entry.omittedInvocationCount ?? 0)
+      + Math.max(0, invocations.length - retained.length);
+    return {
+      ...entry,
+      ...(retained.length > 0 ? { invocations: retained } : { invocations: undefined }),
+      ...(omittedInvocationCount > 0 ? { omittedInvocationCount } : {}),
+    };
+  });
 }
 
 /** Flatten recursive subagent billing into a compact terminal-only sideband.
  * The ordinary live preview remains bounded to recent child UI state; this
- * preserves only token/model/cost evidence needed for exact aggregation. */
+ * preserves exact evidence up to the transport budget and one explicit gap
+ * count for every observable response omitted beyond that budget. */
 export function getSubagentBillingEntries(rawResult: unknown): SubagentBillingEntry[] {
   if (!isRecord(rawResult)) return [];
   if (Array.isArray(rawResult.billing)) {
-    return rawResult.billing.slice(0, MAX_SUBAGENT_BILLING_ENTRIES)
+    return boundBillingInvocations(rawResult.billing.slice(0, MAX_SUBAGENT_BILLING_ENTRIES)
       .map(coerceBillingEntry)
-      .filter((entry): entry is SubagentBillingEntry => !!entry);
+      .filter((entry): entry is SubagentBillingEntry => !!entry));
   }
 
   const entries: SubagentBillingEntry[] = [];
@@ -477,20 +525,27 @@ export function getSubagentBillingEntries(rawResult: unknown): SubagentBillingEn
       seen.add(value);
       const path = `${prefix}${index}`;
       const usage = billingUsage(value.usage);
-      if (usage) {
-        const attempts = Array.isArray(value.attemptRecords)
+      const attempts = Array.isArray(value.attemptRecords)
           ? value.attemptRecords.slice(0, MAX_SUBAGENT_BILLING_ATTEMPTS)
             .map(billingAttempt)
             .filter((attempt): attempt is SubagentBillingAttempt => !!attempt)
           : [];
+      const rawInvocations = Array.isArray(value.providerInvocations) ? value.providerInvocations : [];
+      const invocations = rawInvocations.slice(0, MAX_SUBAGENT_BILLING_ATTEMPTS * 16)
+        .map(billingInvocation)
+        .filter((invocation): invocation is SubagentBillingInvocation => !!invocation);
+      const omittedInvocationCount = Math.max(0, rawInvocations.length - invocations.length);
+      if (usage || attempts.length > 0 || invocations.length > 0 || omittedInvocationCount > 0) {
         entries.push({
           path,
           ...(typeof value.model === 'string' && value.model ? { model: value.model } : {}),
           ...(typeof value.selectedModel === 'string' && value.selectedModel ? { selectedModel: value.selectedModel } : {}),
           ...(typeof value.provider === 'string' && value.provider ? { provider: value.provider } : {}),
           ...(billingOccurredAt(value) !== undefined ? { occurredAt: billingOccurredAt(value) } : {}),
-          usage,
+          ...(usage ? { usage } : {}),
           ...(attempts.length > 0 ? { attempts } : {}),
+          ...(invocations.length > 0 ? { invocations } : {}),
+          ...(omittedInvocationCount > 0 ? { omittedInvocationCount } : {}),
         });
       }
       if (!Array.isArray(value.messages)) continue;
@@ -502,7 +557,7 @@ export function getSubagentBillingEntries(rawResult: unknown): SubagentBillingEn
     }
   };
   visit(getSubagentResultEntries(rawResult), '', 0);
-  return entries;
+  return boundBillingInvocations(entries);
 }
 
 export function getRenderableSubagentResult(rawResult: unknown): SubagentResult | undefined {

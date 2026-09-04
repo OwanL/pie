@@ -32,6 +32,7 @@ function makeSummary(partial: Partial<SessionTokenUsageSummary> = {}): SessionTo
     reportedTurnCount: 0,
     incompleteInvocationCount: 0,
     knownTokenInvocationCount: 0,
+    accountingUnknown: false,
     lastTurn: null,
     ...partial,
   };
@@ -48,6 +49,24 @@ test('formatCostUsd renders zero, sub-cent, and normal amounts', () => {
 test('buildSessionTokenIndicator shows em-dash counts when no usage is reported', () => {
   const indicator = buildSessionTokenIndicator(makeSummary());
   assert.equal(indicator.label, '\u2191 \u2014 \u2193 \u2014');
+});
+
+test('explicitly unknown ledger authority never renders transcript-like known zero', () => {
+  const summary = buildSessionTokenUsageFromSnapshot({ samples: [], authority: 'unknown' });
+  const indicator = buildSessionTokenIndicator(summary);
+  assert.equal(indicator.label, '↑ — ↓ —');
+  assert.match(indicator.tooltip, /authoritative ledger snapshot is available/);
+
+  const cost = buildSessionCostIndicator(
+    summary,
+    undefined,
+    'Selected',
+    buildCompletedCostSummaryFromSnapshot({ samples: [] }, undefined, undefined),
+    0,
+    undefined,
+  );
+  assert.equal(cost?.label, '—*');
+  assert.match(cost?.tooltip ?? '', /authoritative ledger unavailable/);
 });
 
 test('buildSessionTokenIndicator shows real counts once usage is reported', () => {

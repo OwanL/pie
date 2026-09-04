@@ -32,17 +32,13 @@ import {
   type TokenPricing,
 } from '../session-tabs/token-usage';
 import {
-  buildSessionUsageSnapshot,
   sessionUsageSignature,
   type SessionUsageSnapshot,
 } from '../../../shared/session-usage';
 import {
   contextBreakdownTranscriptSignature,
   streamingContentSignature,
-  subagentCostSignature,
-  subagentToolCallRevision,
   systemPromptsSignature,
-  transcriptUsageSignature,
 } from './indicator-signature';
 import { resolveComposerModelState } from './model-state';
 import { useTokenRateIndicator } from './use-token-rate';
@@ -177,7 +173,6 @@ export function useComposerIndicators({
   //    ref: pre-fix that ref was fresh every snapshot (recomputing both memos
   //    every tick); post-fix it is stable across snapshots whose model list
   //    didn't change, so those memos now skip their work as intended.
-  const usageSig = useMemo(() => transcriptUsageSignature(transcript), [transcript]);
   const sysPromptsSig = useMemo(() => systemPromptsSignature(systemPrompts), [systemPrompts]);
   // This digest covers every transcript field read by the breakdown builder,
   // including generic tool inputs/results and their live seq revisions. It is
@@ -186,8 +181,6 @@ export function useComposerIndicators({
     () => contextBreakdownTranscriptSignature(transcript),
     [transcript],
   );
-  const subagentRev = useMemo(() => subagentToolCallRevision(transcript), [transcript]);
-  const subagentSig = useMemo(() => subagentCostSignature(transcript), [subagentRev]);
   const liveStreamSig = useMemo(() => streamingContentSignature(transcript), [transcript]);
 
   const breakdownKey = `${sessionPath ?? ''}\0${contextUsage?.tokens ?? ''}\0${contextUsage?.contextWindow ?? ''}\0${initialContextEstimate?.tokens ?? ''}\0${initialContextEstimate?.contextWindow ?? ''}\0${effectiveContextWindow}\0${sysPromptsSig}\0${breakdownTranscriptSig}\0${transcriptWindow.isPartial ? 1 : 0}`;
@@ -297,10 +290,10 @@ export function useComposerIndicators({
   // transcript/subagent accounting walk on every streaming tick.
   const durableUsageSig = useMemo(() => sessionUsageSignature(sessionUsage), [sessionUsage]);
   const effectiveSessionUsage = useMemo(
-    // Production always supplies a ledger snapshot. Transcript derivation is a
-    // compatibility fallback for old hosts/fixtures, never merged into ledger data.
-    () => sessionUsage ?? buildSessionUsageSnapshot(transcript),
-    [sessionPath, durableUsageSig, usageSig, subagentSig],
+    // Ledger state is the sole steady-state authority. An old/unavailable host
+    // is explicit unknown; transcript rows are never promoted into accounting.
+    () => sessionUsage ?? { samples: [], authority: 'unknown' as const },
+    [sessionPath, durableUsageSig],
   );
   const sessionTokenUsage = useMemo(
     () => buildSessionTokenUsageFromSnapshot(effectiveSessionUsage),

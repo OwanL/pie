@@ -9,6 +9,7 @@ import {
   classifyFileUpdateLockContention,
   updateSettingsJsonObject,
   withFileUpdateLock,
+  withFileUpdateLockSync,
 } from '../../../src/shared/settings-json-update';
 
 async function withTempSettings(run: (file: string) => Promise<void>): Promise<void> {
@@ -116,6 +117,26 @@ test('a persistent unconfirmed platform lock error is propagated on the second a
   });
 });
 
+test('a synchronous same-process mutation joins an async-owned lock without blocking its release', async () => {
+  await withTempSettings(async (file) => {
+    let releaseHolder!: () => void;
+    let signalAcquired!: () => void;
+    const acquired = new Promise<void>((resolve) => { signalAcquired = resolve; });
+    const release = new Promise<void>((resolve) => { releaseHolder = resolve; });
+    const holder = withFileUpdateLock(file, async () => {
+      signalAcquired();
+      await release;
+    });
+    await acquired;
+
+    let joined = false;
+    withFileUpdateLockSync(file, () => { joined = true; }, { timeoutMs: 20 });
+    assert.equal(joined, true);
+    releaseHolder();
+    await holder;
+  });
+});
+
 test('an external lock holds the complete settings read-modify-write cycle', async () => {
   await withTempSettings(async (file) => {
     await fs.writeFile(file, '{"model":"before"}\n', 'utf8');
@@ -143,6 +164,34 @@ test('an external lock holds the complete settings read-modify-write cycle', asy
       pruning: { mode: 'off' },
     });
     await assert.rejects(fs.access(`${file}.pie-lock`), { code: 'ENOENT' });
+  });
+});
+
+test('an old lock owned by a live process is never stolen', async () => {
+  await withTempSettings(async (file) => {
+    let releaseHolder!: () => void;
+    let signalAcquired!: () => void;
+    const acquired = new Promise<void>((resolve) => { signalAcquired = resolve; });
+    const release = new Promise<void>((resolve) => { releaseHolder = resolve; });
+    const holder = withFileUpdateLock(file, async () => {
+      signalAcquired();
+      await release;
+    });
+    await acquired;
+    const old = new Date(Date.now() - 60_000);
+    await fs.utimes(`${file}.pie-lock`, old, old);
+
+    let contenderEntered = false;
+    const contender = withFileUpdateLock(file, async () => { contenderEntered = true; }, {
+      retryMs: 1,
+      staleMs: 0,
+      timeoutMs: 1_000,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.equal(contenderEntered, false);
+    releaseHolder();
+    await Promise.all([holder, contender]);
+    assert.equal(contenderEntered, true);
   });
 });
 

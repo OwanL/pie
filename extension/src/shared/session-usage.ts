@@ -1,6 +1,6 @@
 import type { AssistantUsage, ChatMessage, PruningDetails, ToolCall } from './protocol';
 import { formatToolResult } from './tool-result-format';
-import { getSubagentResultEntries, type RawMessage } from './subagent-result';
+import { getSubagentBillingEntries, getSubagentResultEntries, type RawMessage } from './subagent-result';
 import { isRecord } from './type-guards';
 import type { BillableInvocationRecord } from './billable-invocation';
 
@@ -59,6 +59,9 @@ export interface SessionUsageSample {
 /** Complete ledger projection for a session branch. */
 export interface SessionUsageSnapshot {
   samples: SessionUsageSample[];
+  /** Steady-state renderer authority. Absent is treated as unknown for an old
+   * host; transcript data is never substituted. */
+  authority?: 'ledger' | 'unknown';
   branchId?: string;
   /** Raw durable IDs in the selected branch, including assistant responses
    * folded together by the display transcript mapper. */
@@ -423,10 +426,130 @@ function addSubagentToolSamples(
   }
 }
 
-/** Build price-independent accounting from every renderable message supplied. */
+function sampleFromBillingUsage(
+  sourceId: string,
+  groupId: string,
+  modelId: string | undefined,
+  provider: string | undefined,
+  usage: { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens?: number; cost?: number } | undefined,
+  outcome: SessionUsageSample['outcome'],
+  startedAt?: number,
+  completedAt?: number,
+): SessionUsageSample {
+  const channelsKnown = usage !== undefined;
+  return {
+    sourceId,
+    groupId,
+    kind: 'subagent',
+    modelId,
+    provider,
+    inputTokens: usage?.input ?? 0,
+    outputTokens: usage?.output ?? 0,
+    cacheReadTokens: usage?.cacheRead ?? 0,
+    cacheWriteTokens: usage?.cacheWrite ?? 0,
+    totalTokens: usage ? Math.max(
+      usage.totalTokens ?? 0,
+      usage.input + usage.output + usage.cacheRead + usage.cacheWrite,
+    ) : 0,
+    ...(usage?.cost !== undefined ? { reportedCostUsd: usage.cost } : {}),
+    tokenChannelsKnown: channelsKnown,
+    ...(!channelsKnown ? {
+      provenance: 'unknown' as const,
+      instrumentationGap: true,
+      instrumentationGapReason: 'The observable subagent provider invocation exposed no usage.',
+    } : {}),
+    outcome,
+    ...(startedAt !== undefined ? { startedAt: new Date(startedAt).toISOString() } : {}),
+    ...(completedAt !== undefined ? { endedAt: new Date(completedAt).toISOString() } : {}),
+  };
+}
+
+/** Build one row per observable subagent provider invocation. The compact
+ * terminal billing sideband is authoritative when present; render transcript
+ * aggregates are compatibility input only. */
 export function buildSubagentUsageSamples(toolCall: Pick<ToolCall, 'id' | 'result' | 'status'>): SessionUsageSample[] {
+  const billing = getSubagentBillingEntries(toolCall.result);
+  if (billing.length > 0) {
+    const samples: SessionUsageSample[] = [];
+    for (const entry of billing) {
+      const groupId = `subagent:${toolCall.id}:${entry.path}`;
+      const representedAttempts = new Set<string>();
+      for (const invocation of entry.invocations ?? []) {
+        representedAttempts.add(invocation.attemptId);
+        samples.push(sampleFromBillingUsage(
+          `${groupId}:invocation:${invocation.invocationId}`,
+          groupId,
+          invocation.model ?? entry.model ?? entry.selectedModel,
+          invocation.provider ?? entry.provider,
+          invocation.usage,
+          invocation.outcome === 'failure' ? 'failed' : invocation.outcome === 'aborted' ? 'cancelled' : 'succeeded',
+          invocation.startedAt,
+          invocation.completedAt,
+        ));
+      }
+      for (let omittedIndex = 0; omittedIndex < (entry.omittedInvocationCount ?? 0); omittedIndex += 1) {
+        samples.push(sampleFromBillingUsage(
+          `${groupId}:invocation:omitted:${omittedIndex}`,
+          groupId,
+          entry.model ?? entry.selectedModel,
+          entry.provider,
+          undefined,
+          'unknown',
+          undefined,
+          entry.occurredAt,
+        ));
+      }
+      for (const attempt of entry.attempts ?? []) {
+        if (representedAttempts.has(attempt.attemptId)) continue;
+        const sample = sampleFromBillingUsage(
+          `${groupId}:attempt:${attempt.attemptId}`,
+          groupId,
+          attempt.model ?? entry.model ?? entry.selectedModel,
+          attempt.provider ?? entry.provider,
+          attempt.providerResponseObserved === false ? undefined : attempt.usage,
+          attempt.outcome === 'failure' ? 'failed' : attempt.outcome === 'aborted' ? 'cancelled' : 'succeeded',
+          attempt.startedAt,
+          attempt.completedAt,
+        );
+        if (sample.reportedCostUsd === undefined && entry.usage?.cost !== undefined) sample.reportedCostUsd = 0;
+        samples.push(sample);
+      }
+      if ((entry.invocations?.length ?? 0) === 0 && (entry.attempts?.length ?? 0) === 0
+        && (entry.omittedInvocationCount ?? 0) === 0) {
+        const aggregateHasEvidence = !!entry.usage && (entry.usage.input > 0 || entry.usage.output > 0
+          || entry.usage.cacheRead > 0 || entry.usage.cacheWrite > 0 || (entry.usage.totalTokens ?? 0) > 0
+          || (entry.usage.cost ?? 0) > 0);
+        samples.push(sampleFromBillingUsage(
+          groupId,
+          groupId,
+          entry.model ?? entry.selectedModel,
+          entry.provider,
+          aggregateHasEvidence ? entry.usage : undefined,
+          toolCall.status === 'failed' ? 'failed' : 'succeeded',
+          undefined,
+          entry.occurredAt,
+        ));
+      }
+    }
+    return samples;
+  }
+
   const samples: SessionUsageSample[] = [];
   addSubagentToolSamples(samples, toolCall, '', 1);
+  // A terminal child result with no usage and no attempt/provider sideband is
+  // itself observable dispatch evidence and must not disappear as known zero.
+  if (samples.length === 0 && getSubagentResultEntries(toolCall.result).length > 0) {
+    for (const [index, result] of getSubagentResultEntries(toolCall.result).entries()) {
+      samples.push(sampleFromBillingUsage(
+        `subagent:${toolCall.id}:${index}:instrumentation-gap`,
+        `subagent:${toolCall.id}:${index}`,
+        typeof result.model === 'string' ? result.model : undefined,
+        typeof result.provider === 'string' ? result.provider : undefined,
+        undefined,
+        toolCall.status === 'failed' ? 'failed' : 'unknown',
+      ));
+    }
+  }
   return samples;
 }
 
@@ -488,6 +611,7 @@ export function sessionUsageSnapshotFromLedger(records: readonly BillableInvocat
   }));
   return {
     samples,
+    authority: 'ledger',
     incompleteInvocationCount: records.filter((record) => record.provenance === 'unknown' || record.instrumentationGap).length,
     unpricedInvocationCount: records.filter((record) => record.provenance === 'unpriced').length,
   };
@@ -499,7 +623,7 @@ export function sessionUsageSnapshotFromLedger(records: readonly BillableInvocat
  * transcript/subagent walks on content rather than reference identity.
  */
 export function sessionUsageSignature(snapshot: SessionUsageSnapshot | null | undefined): string {
-  return JSON.stringify((snapshot?.samples ?? []).map((sample) => [
+  return JSON.stringify({ authority: snapshot?.authority ?? 'unknown', samples: (snapshot?.samples ?? []).map((sample) => [
     sample.sourceId,
     sample.groupId ?? '',
     sample.kind,
@@ -518,7 +642,7 @@ export function sessionUsageSignature(snapshot: SessionUsageSnapshot | null | un
     sample.provenance ?? '',
     sample.instrumentationGap ?? '',
     sample.outcome ?? '',
-  ]));
+  ]) });
 }
 
 function sessionUsageGroupId(sample: SessionUsageSample): string {

@@ -26,7 +26,7 @@ import { getFinalOutput } from "./formatting.js";
 import type { ThinkingLevel, BucketSelection } from "./bucket-selector.js";
 import { resolveExecutionModel } from "./model-resolution.js";
 import { formatRequirementDiagnostic, requirementIsActive } from "./src/selection.js";
-import type { ModelRequirements, OnUpdateCallback, SingleResult, SubagentAttemptPhase, SubagentChildIdentity, SubagentDetails, SubagentTurnThroughputSample } from "./types.js";
+import type { ModelRequirements, OnUpdateCallback, SingleResult, SubagentAttemptPhase, SubagentChildIdentity, SubagentDetails, SubagentProviderInvocationRecord, SubagentTurnThroughputSample } from "./types.js";
 import { createInvalidAgentResult } from "./validation.js";
 import { toErrorMessage } from "../../shared/error-message.js";
 import { subagentContext } from "../../shared/subagent-context.js";
@@ -539,6 +539,24 @@ function recordAssistantMessage(
 		typeof turnStartMs === "number" && Number.isFinite(turnStartMs) && turnStartMs > 0
 			? Math.max(0, endedMs - turnStartMs)
 			: 0;
+	const providerInvocation: SubagentProviderInvocationRecord = {
+		invocationId: `${result.attemptId ?? "unknown-attempt"}:provider:${result.usage.turns}`,
+		attemptId: result.attemptId ?? 'unknown-attempt',
+		...(result.model ? { model: result.model } : {}),
+		...(result.provider ? { provider: result.provider } : {}),
+		...(usage ? { usage: {
+			...(typeof usage.input === 'number' ? { input: usage.input } : {}),
+			...(typeof usage.output === 'number' ? { output: usage.output } : {}),
+			...(typeof usage.cacheRead === 'number' ? { cacheRead: usage.cacheRead } : {}),
+			...(typeof usage.cacheWrite === 'number' ? { cacheWrite: usage.cacheWrite } : {}),
+			...(typeof usage.cost?.total === 'number' ? { cost: usage.cost.total } : {}),
+		} } : {}),
+		startedAt: typeof turnStartMs === 'number' && Number.isFinite(turnStartMs) ? turnStartMs : endedMs,
+		completedAt: endedMs,
+		outcome: msg.stopReason === 'aborted' ? 'aborted' : msg.errorMessage ? 'failure' : 'success',
+	};
+	result.providerInvocations = [...(result.providerInvocations ?? []), providerInvocation];
+
 	const sample: SubagentTurnThroughputSample = {
 		endedAt: new Date(endedMs).toISOString(),
 		outputTokens: usage?.output || 0,

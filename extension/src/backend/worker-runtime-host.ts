@@ -683,7 +683,13 @@ export class WorkerRuntimeHost {
         }));
       },
     });
-    installAuxiliaryLlmMeter(session, sessionPath, (event, eventPayload) => this.emit(event, eventPayload));
+    installAuxiliaryLlmMeter(
+      session,
+      sessionPath,
+      (event, eventPayload) => this.emit(event, eventPayload),
+      Date.now,
+      () => context.activeRequest != null,
+    );
     context.unsubscribe = session.subscribe((event: SdkSessionEvent) => this.handleSessionEvent(context, event));
     // The adapter's registerTool auto-activates its tools (bypassing the
     // setActiveTools guard), so re-apply the disabled state after extension

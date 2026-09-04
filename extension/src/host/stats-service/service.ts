@@ -20,6 +20,8 @@ import type { RunObserver, StatsServiceOptions } from './types';
 import { resolveSessionIdentity } from '../../backend/session-review-store';
 import { WorkingTimeService } from '../working-time-service';
 import { BillableInvocationLedger } from '../billable-invocation-ledger/service';
+import { ActivityTimeline } from '../activity-timeline/service';
+import type { ActivityIntervalRecord } from '../../shared/activity-interval';
 import type {
   BillableInvocationKind,
   BillableInvocationOutcome,
@@ -34,7 +36,6 @@ import {
 import { loadModelPricing } from '../../backend/pricing';
 import { pricingForPromptTokens, type ModelTokenPricing } from '../../../../shared/pricing-core';
 import { resolvePricingCatalogKey } from '../../shared/model-id';
-import { atomicWriteText } from '../../shared/atomic-write';
 
 export class StatsService implements RunObserver {
   private readonly scheduleRender: () => void;
@@ -44,6 +45,9 @@ export class StatsService implements RunObserver {
   private readonly storage: RunAnalyticsStorage;
   private readonly workingTime: WorkingTimeService;
   private readonly invocationLedger: BillableInvocationLedger;
+  private readonly activityTimeline: ActivityTimeline;
+  private readonly activeBusyIntervalsBySession: Record<string, Set<string> | undefined> = {};
+  private readonly activeToolIntervalBySessionAndTool: Record<string, string | undefined> = {};
   private readonly now: () => Date;
   private readonly createId: () => string;
   private readonly getAgentDir: () => string | null;
@@ -81,6 +85,7 @@ export class StatsService implements RunObserver {
 
     const trackerRef: { current: SessionRunTracker | null } = { current: null };
     const ledgerRef: { current: BillableInvocationLedger | null } = { current: null };
+    const timelineRef: { current: ActivityTimeline | null } = { current: null };
     this.storage = new RunAnalyticsStorage({
       dataOutcomesRootPath: options.dataOutcomesRootPath,
       legacyUsageDataRootPath: options.legacyUsageDataRootPath,
@@ -93,7 +98,8 @@ export class StatsService implements RunObserver {
         return ledger ? {
           billableInvocations: [...ledger.exportRecords()],
           billableInvocationSummary: ledger.projectAll({ includePrivate: false }).summary,
-        } : { billableInvocations: [] };
+          activityIntervals: [...(timelineRef.current?.projectAll() ?? [])],
+        } : { billableInvocations: [], activityIntervals: [] };
       },
       onPersistError: ({ message, at }) => {
         appendPieLog('warn', 'run-analytics', 'persistence error surfaced to UI', { at, error: message });
@@ -109,6 +115,10 @@ export class StatsService implements RunObserver {
       path.join(this.storage.getStorageDir(), 'billable-invocations.jsonl'),
     );
     ledgerRef.current = this.invocationLedger;
+    this.activityTimeline = new ActivityTimeline(
+      path.join(this.storage.getStorageDir(), 'activity-intervals.json'),
+    );
+    timelineRef.current = this.activityTimeline;
     const tracker = new SessionRunTracker({
       getArchState,
       dispatchArchEvent,
@@ -145,7 +155,30 @@ export class StatsService implements RunObserver {
           error: error instanceof Error ? error.message : String(error),
         });
       }
-      this.workingTime.restoreRuns(persistedRuns, openBusyIntervals);
+      // Heal the only possible cross-file crash boundary before projections:
+      // ledger commit is authoritative and activity insertion is idempotent.
+      this.invocationLedger.transaction(() => {
+        for (const record of this.invocationLedger.projectAll({ includePrivate: false }).records) {
+          this.recordInvocationActivity(record);
+        }
+      });
+      const activityIntervals = this.activityTimeline.projectAll()
+        .filter((interval) => !this.isPrivateSession(interval.sessionPath));
+      this.workingTime.restoreActivityIntervals(activityIntervals);
+      const timelineCoveredBusyPaths = new Set(activityIntervals
+        .filter((interval) => interval.kind === 'busy')
+        .map((interval) => interval.sessionPath));
+      this.workingTime.restoreRuns(
+        persistedRuns,
+        openBusyIntervals.filter((interval) => !timelineCoveredBusyPaths.has(interval.sessionPath)),
+      );
+      for (const interval of activityIntervals) {
+        if (!interval.endedAt && interval.kind === 'busy') {
+          (this.activeBusyIntervalsBySession[interval.sessionPath] ??= new Set()).add(interval.intervalId);
+        } else if (!interval.endedAt && interval.kind === 'tool' && interval.toolId) {
+          this.activeToolIntervalBySessionAndTool[this.toolIntervalKey(interval.sessionPath, interval.toolId)] = interval.intervalId;
+        }
+      }
       this.migrateHistoricalRunUsage(persistedRuns);
       this.started = true;
       this.scheduleRender();
@@ -228,12 +261,19 @@ export class StatsService implements RunObserver {
     };
   }
 
+  private persistInvocationRecord(record: BillableInvocationRecord): void {
+    this.invocationLedger.transaction(() => {
+      this.invocationLedger.append(record, {
+        visibility: record.sessionPath && this.isPrivateSession(record.sessionPath) ? 'private' : 'ordinary',
+      });
+      this.recordInvocationActivity(record);
+    });
+  }
+
   private retryPendingInvocationWrites(): void {
     for (const [invocationId, record] of this.pendingInvocationWrites) {
       try {
-        this.invocationLedger.append(record, {
-          visibility: record.sessionPath && this.isPrivateSession(record.sessionPath) ? 'private' : 'ordinary',
-        });
+        this.persistInvocationRecord(record);
         this.pendingInvocationWrites.delete(invocationId);
         this.storage.markDerivedExportDirty();
         if (record.sessionPath && (record.kind === 'conversation' || record.kind === 'retry'
@@ -260,13 +300,17 @@ export class StatsService implements RunObserver {
       migration?: boolean;
       sessionId?: string | null;
     } = {},
-  ): void {
+  ): string {
     this.retryPendingInvocationWrites();
     const identity = this.sessionIdentity(sessionPath);
     const stableSessionId = options.sessionId ?? identity.sessionId;
     const kind = options.kind ?? ledgerKind(sample.kind);
     const invocationId = stableInvocationId(stableSessionId ?? sessionPath, kind, sample.sourceId);
-    if (this.invocationLedger.hasInvocation(invocationId)) return;
+    const existing = this.invocationLedger.projectAll().records.find((record) => record.invocationId === invocationId);
+    if (existing) {
+      this.invocationLedger.transaction(() => this.recordInvocationActivity(existing));
+      return invocationId;
+    }
     const endedAt = validIso(sample.endedAt) ?? validIso(sample.startedAt) ?? this.now().toISOString();
     const startedAt = validIso(sample.startedAt)
       ?? new Date(Math.max(0, Date.parse(endedAt))).toISOString();
@@ -326,9 +370,7 @@ export class StatsService implements RunObserver {
       ...costEvidence,
     };
     try {
-      this.invocationLedger.append(record, {
-        visibility: this.isPrivateSession(sessionPath) ? 'private' : 'ordinary',
-      });
+      this.persistInvocationRecord(record);
       this.storage.markDerivedExportDirty();
       if (kind === 'conversation' || kind === 'retry' || kind === 'subagent' || kind === 'skill_pruning_prepass') {
         this.currentBranchSourcesBySession[sessionPath]?.add(sample.sourceId);
@@ -348,6 +390,43 @@ export class StatsService implements RunObserver {
         noticeRaw: `Billable invocation ${record.invocationId} persistence failed: ${error instanceof Error ? error.message : String(error)}`,
       });
     }
+    return invocationId;
+  }
+
+  private activeOperationId(sessionPath: string): string | null {
+    const operation = Object.values(this.getArchState().operations).find((candidate) => (
+      !candidate.terminal
+      && (candidate.session.resolvedPath === sessionPath || candidate.session.pendingPath === sessionPath)
+    ));
+    return operation?.operationId ?? null;
+  }
+
+  private toolIntervalKey(sessionPath: string, toolId: string): string {
+    return `${sessionPath}\0${toolId}`;
+  }
+
+  private recordInvocationActivity(record: BillableInvocationRecord): void {
+    const sessionPath = record.sessionPath;
+    if (!sessionPath || this.isPrivateSession(sessionPath)) return;
+    const kind: ActivityIntervalRecord['kind'] = record.kind === 'history_compaction'
+      ? 'history_compaction'
+      : record.kind === 'conversation' || record.kind === 'retry'
+        ? 'provider' : 'auxiliary';
+    this.activityTimeline.record({
+      schemaVersion: 1,
+      intervalId: `activity:invocation:${record.invocationId}`,
+      sessionId: record.sessionId,
+      sessionPath,
+      parentRunId: record.parentRunId,
+      parentOperationId: record.parentOperationId,
+      invocationId: record.invocationId,
+      toolId: record.parentToolId,
+      kind,
+      startedAt: record.startedAt,
+      endedAt: record.endedAt,
+      outcome: record.outcome,
+    }, { durableRequired: true });
+    this.storage.markDerivedExportDirty();
   }
 
   private migrateHistoricalRunUsage(runs: readonly RunSnapshot[]): void {
@@ -466,7 +545,10 @@ export class StatsService implements RunObserver {
   async setSessionPrivacy(sessionPath: string, enabled: boolean): Promise<void> {
     const sessionId = this.getArchState().sessions.sessions.find((session) => session.path === sessionPath)?.sessionId;
     if (!enabled) {
-      this.invocationLedger.markSessionOrdinary(sessionId ? { sessionId } : { sessionPath });
+      this.invocationLedger.transaction(() => {
+        this.invocationLedger.markSessionOrdinary({ sessionPath });
+        if (sessionId) this.invocationLedger.markSessionOrdinary({ sessionId });
+      });
       return;
     }
     this.workingTime.resetSession(
@@ -474,12 +556,18 @@ export class StatsService implements RunObserver {
       this.getArchState().sessions.runningSessionPaths.includes(sessionPath),
     );
     this.tracker.discardSession(sessionPath);
+    // Publish the durable privacy fence before touching pending rows. Stale
+    // sibling hosts then classify any concurrent append as process-local.
+    this.invocationLedger.transaction(() => {
+      this.invocationLedger.markSessionPrivate({ sessionPath });
+      if (sessionId) this.invocationLedger.markSessionPrivate({ sessionId });
+    });
+    this.activityTimeline.forgetSession(sessionPath, sessionId);
     for (const [invocationId, record] of this.pendingInvocationWrites) {
       if (record.sessionPath !== sessionPath && (!sessionId || record.sessionId !== sessionId)) continue;
       this.pendingInvocationWrites.delete(invocationId);
       this.invocationLedger.append(record, { visibility: 'private' });
     }
-    this.invocationLedger.markSessionPrivate(sessionId ? { sessionId } : { sessionPath });
     this.storage.markDerivedExportDirty();
     await this.storage.forgetSession(sessionPath, sessionId);
   }
@@ -634,6 +722,23 @@ export class StatsService implements RunObserver {
     if (this.isPrivateSession(sessionPath)) return;
     this.tracker.onToolStarted(sessionPath, toolCall);
     this.workingTime.onToolStarted(sessionPath, toolCall);
+    const runId = this.currentRunId(sessionPath);
+    const intervalId = `activity:tool:${runId ?? sessionPath}:${toolCall.id}`;
+    this.activeToolIntervalBySessionAndTool[this.toolIntervalKey(sessionPath, toolCall.id)] = intervalId;
+    const startedAt = new Date(toolCall.startedAt ?? this.now().getTime()).toISOString();
+    this.activityTimeline.start({
+      schemaVersion: 1,
+      intervalId,
+      sessionId: this.sessionIdentity(sessionPath).sessionId,
+      sessionPath,
+      parentRunId: runId,
+      parentOperationId: this.activeOperationId(sessionPath),
+      invocationId: null,
+      toolId: toolCall.id,
+      kind: 'tool',
+      startedAt,
+    });
+    this.storage.markDerivedExportDirty();
   }
 
   onToolFinished(sessionPath: string, toolCall: ToolCall): void {
@@ -646,6 +751,18 @@ export class StatsService implements RunObserver {
     // Close the live wall-time interval before durable telemetry catches up;
     // the service reconciles the two sources without double-counting.
     this.workingTime.onToolFinished(sessionPath, toolCall);
+    const toolKey = this.toolIntervalKey(sessionPath, toolCall.id);
+    const intervalId = this.activeToolIntervalBySessionAndTool[toolKey];
+    if (intervalId) {
+      this.activityTimeline.settle(
+        intervalId,
+        new Date(toolCall.startedAt !== undefined && toolCall.durationMs !== undefined
+          ? toolCall.startedAt + toolCall.durationMs : this.now().getTime()).toISOString(),
+        toolCall.status === 'failed' ? 'failed' : 'succeeded',
+      );
+      delete this.activeToolIntervalBySessionAndTool[toolKey];
+      this.storage.markDerivedExportDirty();
+    }
     this.tracker.onToolFinished(sessionPath, toolCall);
     this.syncWorkingTimeBreakdown(sessionPath);
   }
@@ -769,6 +886,23 @@ export class StatsService implements RunObserver {
   ): void {
     if (this.isPrivateSession(sessionPath)) return;
     this.tracker.onAutoRetryMeasured(sessionPath, sourceId, measuredDelayMs, durationMs);
+    const endedAtMs = this.now().getTime();
+    const elapsed = Math.max(0, measuredDelayMs ?? durationMs);
+    this.activityTimeline.record({
+      schemaVersion: 1,
+      intervalId: `activity:retry-wait:${this.currentRunId(sessionPath) ?? sessionPath}:${sourceId}`,
+      sessionId: this.sessionIdentity(sessionPath).sessionId,
+      sessionPath,
+      parentRunId: this.currentRunId(sessionPath),
+      parentOperationId: this.activeOperationId(sessionPath),
+      invocationId: null,
+      toolId: null,
+      kind: 'retry_wait',
+      startedAt: new Date(Math.max(0, endedAtMs - elapsed)).toISOString(),
+      endedAt: new Date(endedAtMs).toISOString(),
+      outcome: 'succeeded',
+    });
+    this.storage.markDerivedExportDirty();
     this.syncWorkingTimeBreakdown(sessionPath);
   }
 
@@ -796,6 +930,32 @@ export class StatsService implements RunObserver {
     this.workingTime.onBusyChanged(sessionPath, busy);
     if (this.isPrivateSession(sessionPath)) return;
     this.tracker.onBusyChanged(sessionPath, busy);
+    const nowIso = this.now().toISOString();
+    if (busy && (this.activeBusyIntervalsBySession[sessionPath]?.size ?? 0) === 0) {
+      const runId = this.currentRunId(sessionPath);
+      const operationId = this.activeOperationId(sessionPath);
+      const intervalId = `activity:busy:${operationId ?? runId ?? `${sessionPath}:${nowIso}`}`;
+      (this.activeBusyIntervalsBySession[sessionPath] ??= new Set()).add(intervalId);
+      this.activityTimeline.start({
+        schemaVersion: 1,
+        intervalId,
+        sessionId: this.sessionIdentity(sessionPath).sessionId,
+        sessionPath,
+        parentRunId: runId,
+        parentOperationId: operationId,
+        invocationId: null,
+        toolId: null,
+        kind: 'busy',
+        startedAt: nowIso,
+      });
+    } else if (!busy) {
+      const intervalIds = this.activeBusyIntervalsBySession[sessionPath];
+      for (const intervalId of intervalIds ?? []) {
+        this.activityTimeline.settle(intervalId, nowIso, 'succeeded');
+      }
+      delete this.activeBusyIntervalsBySession[sessionPath];
+    }
+    this.storage.markDerivedExportDirty();
     this.syncWorkingTimeBreakdown(sessionPath);
   }
 
@@ -816,6 +976,7 @@ export class StatsService implements RunObserver {
 
   onSessionClosed(sessionPath: string): void {
     if (this.isPrivateSession(sessionPath)) {
+      const sessionId = this.getArchState().sessions.sessions.find((session) => session.path === sessionPath)?.sessionId;
       this.workingTime.resetSession(sessionPath, false);
       this.tracker.discardSession(sessionPath);
       this.invocationLedger.scrubPrivateRecords({ sessionPath });
@@ -825,6 +986,14 @@ export class StatsService implements RunObserver {
       delete this.currentBranchSourcesBySession[sessionPath];
       delete this.currentBranchEntriesBySession[sessionPath];
       delete this.currentBranchLeafBySession[sessionPath];
+      delete this.activeBusyIntervalsBySession[sessionPath];
+      for (const key of Object.keys(this.activeToolIntervalBySessionAndTool)) {
+        if (key.startsWith(`${sessionPath}\0`)) delete this.activeToolIntervalBySessionAndTool[key];
+      }
+      this.invocationLedger.transaction(() => {
+        this.invocationLedger.markSessionOrdinary({ sessionPath });
+        if (sessionId) this.invocationLedger.markSessionOrdinary({ sessionId });
+      });
       return;
     }
     this.syncWorkingTimeBreakdown(sessionPath);
@@ -903,6 +1072,11 @@ export class StatsService implements RunObserver {
     return sessionUsageSnapshotFromLedger(records);
   }
 
+  /** Correlated activity authority used by conservation tests and exports. */
+  getActivityIntervals(): readonly ActivityIntervalRecord[] {
+    return this.activityTimeline.projectAll();
+  }
+
   /** Immutable ordinary invocation rows used by aggregate projections/export. */
   getBillableInvocationRecords(): readonly BillableInvocationRecord[] {
     return this.invocationLedger.exportRecords();
@@ -940,25 +1114,21 @@ export class StatsService implements RunObserver {
       if (summaryId) privateIds.add(summaryId);
       try { privateIds.add(resolveSessionIdentity(sessionPath).sessionId); } catch { /* path filtering remains authoritative */ }
     }
-    const payload = await this.storage.exportRunAnalytics(targetPath, privatePaths, privateIds);
-    const withLedger: RunAnalyticsExportPayload = {
-      ...payload,
-      billableInvocations: [...this.invocationLedger.exportRecords()],
-      billableInvocationSummary: this.invocationLedger.projectAll({ includePrivate: false }).summary,
-    };
-    await atomicWriteText(targetPath, `${JSON.stringify(withLedger, null, 2)}\n`);
-    return withLedger;
+    return await this.storage.exportRunAnalytics(targetPath, privatePaths, privateIds);
   }
 
   async flush(): Promise<void> {
     this.retryPendingInvocationWrites();
+    this.activityTimeline.flush();
     await this.storage.flush();
     this.retryPendingInvocationWrites();
+    this.activityTimeline.flush();
   }
 
   async shutdown(): Promise<void> {
     this.tracker.finalizeOpenRunsForShutdown();
     this.retryPendingInvocationWrites();
+    this.activityTimeline.flush();
     await this.storage.dispose();
   }
 }

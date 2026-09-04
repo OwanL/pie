@@ -262,6 +262,29 @@ test("runSingleAgent stamps runtime provider and model from the assistant messag
 	assert.equal(result.usage.input, 10);
 	assert.equal(result.usage.output, 5);
 	assert.equal(result.usage.cost, 0.0015);
+	assert.equal(result.providerInvocations?.length, 1);
+	assert.deepEqual(result.providerInvocations?.[0]?.usage, {
+		input: 10, output: 5, cacheRead: 0, cacheWrite: 0, cost: 0.0015,
+	});
+});
+
+test("runSingleAgent records a provider invocation even when usage is absent", async () => {
+	const registry = makeModelRegistry([{ id: "runtime-model", provider: "runtime-provider" }]);
+	const { sdk } = createFakeSdk([{
+		type: "message_end",
+		message: {
+			role: "assistant",
+			content: [{ type: "text", text: "failed" }],
+			model: "runtime-model",
+			errorMessage: "provider omitted usage",
+			stopReason: "error",
+		},
+	}]);
+
+	const result = await runFakeAgent(sdk, undefined, undefined, registry);
+	assert.equal(result.providerInvocations?.length, 1);
+	assert.equal(result.providerInvocations?.[0]?.usage, undefined);
+	assert.equal(result.providerInvocations?.[0]?.outcome, "failure");
 });
 
 test("runSingleAgent never lets a same-id registry collision override the runtime provider", async () => {

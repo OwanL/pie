@@ -229,6 +229,20 @@ export interface SingleResult {
 	attemptId?: string;
 	/** Bounded per-attempt analytics for this subagent dispatch (success + failed retries). */
 	attemptRecords?: SubagentAttemptRecord[];
+	/** One record per observable child provider response. Unlike aggregate usage,
+	 * absent channels stay absent so no-usage responses become explicit gaps. */
+	providerInvocations?: SubagentProviderInvocationRecord[];
+}
+
+export interface SubagentProviderInvocationRecord {
+	invocationId: string;
+	attemptId: string;
+	provider?: string;
+	model?: string;
+	usage?: Partial<Pick<UsageStats, "input" | "output" | "cacheRead" | "cacheWrite" | "cost">>;
+	startedAt: number;
+	completedAt: number;
+	outcome: "success" | "failure" | "aborted";
 }
 
 /** Per-attempt analytics persisted on the final subagent result. */
@@ -239,6 +253,8 @@ export interface SubagentAttemptRecord {
 	provider?: string;
 	/** Model id used for this attempt. */
 	model?: string;
+	/** Whether this dispatched attempt produced at least one observable provider response. */
+	providerResponseObserved?: boolean;
 	/** Usage attributed to this individual attempt (not tree-cumulative). */
 	usage?: UsageStats;
 	/** Epoch milliseconds when the attempt started. */

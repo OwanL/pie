@@ -68,6 +68,37 @@ test('append is idempotent by invocationId across duplicate calls and restart', 
   assert.ok(Object.isFrozen(restarted.projectAll().records[0]));
 });
 
+test('independent host instances merge appends instead of overwriting stale state', () => {
+  const firstHost = new BillableInvocationLedger(ledgerPath);
+  const secondHost = new BillableInvocationLedger(ledgerPath);
+
+  firstHost.append(invocation('host-a'), { visibility: 'ordinary' });
+  secondHost.append(invocation('host-b', { sessionId: 'session-b', sessionPath: '/sessions/b.jsonl' }), { visibility: 'ordinary' });
+
+  assert.deepEqual(
+    firstHost.exportRecords().map((record) => record.invocationId).sort(),
+    ['host-a', 'host-b'],
+  );
+});
+
+test('privacy fence defeats stale-host append and preserves unrelated concurrent rows', () => {
+  const privacyHost = new BillableInvocationLedger(ledgerPath);
+  const staleHost = new BillableInvocationLedger(ledgerPath);
+  privacyHost.append(invocation('private-before'), { visibility: 'ordinary' });
+
+  privacyHost.markSessionPrivate({ sessionId: 'session-a' });
+  staleHost.append(invocation('private-after'), { visibility: 'ordinary' });
+  staleHost.append(invocation('unrelated', {
+    sessionId: 'session-b',
+    sessionPath: '/sessions/b.jsonl',
+  }), { visibility: 'ordinary' });
+
+  assert.deepEqual(privacyHost.exportRecords().map((record) => record.invocationId), ['unrelated']);
+  const durable = fs.readFileSync(ledgerPath, 'utf8');
+  assert.doesNotMatch(durable, /private-before|private-after/);
+  assert.match(durable, /unrelated/);
+});
+
 test('replay skips malformed, torn, and duplicate lines without losing later valid records', () => {
   const firstRecord = invocation('invocation-1');
   fs.writeFileSync(
@@ -209,7 +240,7 @@ test('private records never persist or export and privacy/forget scrub durable s
   assert.doesNotMatch(ledger.exportJsonl(), /"private"/);
 
   assert.equal(ledger.markSessionPrivate({ sessionId: 'session-a' }), 1);
-  assert.equal(fs.readFileSync(ledgerPath, 'utf8'), '');
+  assert.equal(fs.existsSync(ledgerPath), false);
   assert.equal(ledger.exportRecords().length, 0);
   assert.equal(ledger.projectAll().records.length, 2, 'live private projection remains process-local');
   assert.equal(ledger.scrubPrivateRecords({ sessionId: 'session-a' }), 1);
@@ -220,7 +251,7 @@ test('private records never persist or export and privacy/forget scrub durable s
     sessionPath: '/sessions/forgotten.jsonl',
   }), { visibility: 'ordinary' });
   assert.equal(ledger.forgetSession({ sessionPath: '/sessions/forgotten.jsonl' }), 1);
-  assert.equal(fs.readFileSync(ledgerPath, 'utf8'), '');
+  assert.equal(fs.existsSync(ledgerPath), false);
 
   const restarted = new BillableInvocationLedger(ledgerPath);
   assert.equal(restarted.projectAll().summary.invocationCount, 0);

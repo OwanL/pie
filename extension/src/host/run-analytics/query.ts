@@ -3,6 +3,7 @@ import * as path from 'node:path';
 
 import { atomicWriteText } from '../../shared/atomic-write';
 import type { BillableInvocationRecord, BillableInvocationSummary } from '../../shared/billable-invocation';
+import type { ActivityIntervalRecord } from '../../shared/activity-interval';
 
 import {
   RUN_ANALYTICS_SCHEMA_VERSION,
@@ -31,6 +32,8 @@ export interface RunAnalyticsExportPayload extends RunAnalyticsQueryResult, Glob
   /** Conserved usage authority. Legacy exports may omit these migration fields. */
   billableInvocations?: BillableInvocationRecord[];
   billableInvocationSummary?: BillableInvocationSummary;
+  /** Correlated working-time authority. */
+  activityIntervals?: ActivityIntervalRecord[];
 }
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
@@ -105,7 +108,7 @@ export async function exportRunAnalyticsStore(
   now: () => Date = () => new Date(),
   excludeSessionPaths?: ReadonlySet<string>,
   excludeSessionIds?: ReadonlySet<string>,
-  billableInvocationExport?: Pick<RunAnalyticsExportPayload, 'billableInvocations' | 'billableInvocationSummary'>,
+  billableInvocationExport?: Pick<RunAnalyticsExportPayload, 'billableInvocations' | 'billableInvocationSummary' | 'activityIntervals'>,
 ): Promise<RunAnalyticsExportPayload> {
   const result = await queryRunAnalyticsStore(storageDir);
   if (excludeSessionPaths && excludeSessionPaths.size > 0) {

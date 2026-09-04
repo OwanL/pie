@@ -458,14 +458,14 @@ Work includes:
 
 ### Milestone 3: conserved accounting
 
-**Implemented (2026-09-04).** `StatsService` now owns the append-only idempotent billable invocation ledger and projects it into session UI, aggregate stats, and explicit/automatic exports. Provider seams dual-write legacy run analytics during migration; fixture conservation tests compare the shared authority across projections. The existing persisted run activity evidence remains the separate input to `WorkingTimeService`.
+**Acceptance-complete (2026-09-05).** `StatsService` owns the idempotent billable invocation ledger and correlated activity timeline and projects them into session UI, working-time UI, aggregate stats, and explicit/automatic exports. Conversation/retry, compaction/branch-summary, pruning, title, subagent, and unexpected auxiliary seams emit one immutable invocation or explicit gap row. Multi-turn subagent provider responses and no-usage attempts survive terminal transport compaction. Ledger/activity/history/checkpoint/privacy/export mutations share a cross-process transaction lock and durable privacy fence; checkpoint writes merge independent hosts. Open busy/tool intervals retain their original identities and starts across restart without double count. Renderer accounting is ledger-only and explicit unknown when absent.
 
 1. Introduce the billable invocation ledger and correlated activity/settlement timeline alongside existing analytics.
 2. Dual-write and compare usage totals and interval boundaries.
 3. Migrate usage surfaces to the ledger and working-time surfaces to the activity timeline.
 4. Retire transcript-derived steady-state accounting and duplicated pricing logic.
 
-**Exit:** all surfaces agree by construction, with visible incomplete/unpriced provenance.
+**Exit:** all surfaces agree by construction, with visible incomplete/unpriced provenance. Evidence: `extension/test/host/billable-invocation-ledger.test.ts` (multi-instance append/privacy), `extension/test/host/billable-invocation-stats-integration.test.ts` (checkpoint/export/privacy races, ledger↔activity conservation, restart recovery), `extension/test/host/activity-timeline.test.ts` (multi-instance settlement/identity), `extension/test/backend/runtime/auxiliary-llm-meter.test.ts` (`other` calls/gaps), `extensions/subagent/test/usage-accounting.test.ts` and compacted-terminal integration coverage (per-response/no-usage child evidence), and session cost indicator unknown-authority coverage.
 
 ### Milestone 4: non-disruptive publication
 
@@ -579,9 +579,9 @@ This section records why the workstreams exist. It is evidence, not a required i
 | P0 | Confirmed | Some session transition waits are unbounded. | Send/continue/title paths loop while transition pending without a local bound or typed wait outcome. |
 | P0 | Confirmed | Activity predicates differ by operation. | Interrupt includes retry/compaction/bash windows, while current open/compact checks use narrower subsets. |
 | P0 | Confirmed | Failed/aborted compaction can look successful. | Host-facing compaction-ended data omits outcome and the reducer records a success chip on every end event. |
-| P0 | Confirmed | Session usage and aggregate analytics do not cover the same calls. | Session usage kinds omit history compaction and branch summaries that auxiliary run analytics record; title-generation accounting is also not part of the session snapshot. |
-| P0 | Confirmed | Total-only usage can be priced as zero. | Transcript normalization can retain total tokens without channels; catalog pricing of zero channels takes precedence over reported cost. |
-| P0 | Confirmed | Working-time restart can lose an open interval. | Restored run duration is accumulated but the active busy start is not restored into the working-time service. |
+| P0 | Resolved 2026-09-05 | Session usage and aggregate analytics previously covered different calls. | All usage/cost surfaces now consume the invocation ledger; compaction, branch summary, title, retry, pruning, subagent, and other automation retain explicit source kinds. |
+| P0 | Resolved 2026-09-05 | Total-only usage could be priced as zero. | Provider totals/reported cost remain independent immutable evidence; unavailable channels remain absent and explicit incomplete provenance prevents known-zero display. |
+| P0 | Resolved 2026-09-05 | Working-time restart could lose an open interval. | Correlated busy/tool intervals are persisted open, restored from their original start, and settled idempotently; covered run aggregates are excluded from clock restoration. |
 | P0 | Confirmed | Info/warning notifications use the generic error path. | Extension UI notifications are prefixed and dispatched as `Error` regardless of severity. |
 | P0 | Confirmed | Notice request-ID documentation and behavior disagree. | The state contract says renderer-visible raw detail excludes internal IDs; host state/tests preserve them and projection currently only performs credential redaction. |
 | P1 | Structural risk | Continuation failure can mark an older assistant row failed. | Generic backend error stamping selects a latest assistant when no matching new assistant exists; reproduce at the continuation pre-message seam. |

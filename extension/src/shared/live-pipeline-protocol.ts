@@ -132,6 +132,7 @@ export interface SubagentBillingUsage {
   output: number;
   cacheRead: number;
   cacheWrite: number;
+  totalTokens?: number;
   cost?: number;
 }
 
@@ -139,7 +140,15 @@ export interface SubagentBillingAttempt {
   attemptId: string;
   model?: string;
   provider?: string;
-  usage: SubagentBillingUsage;
+  usage?: SubagentBillingUsage;
+  providerResponseObserved?: boolean;
+  outcome?: 'success' | 'failure' | 'aborted';
+  startedAt?: number;
+  completedAt?: number;
+}
+
+export interface SubagentBillingInvocation extends SubagentBillingAttempt {
+  invocationId: string;
 }
 
 export interface SubagentBillingEntry {
@@ -150,8 +159,12 @@ export interface SubagentBillingEntry {
   provider?: string;
   /** Epoch milliseconds of the latest observed child provider response. */
   occurredAt?: number;
-  usage: SubagentBillingUsage;
+  usage?: SubagentBillingUsage;
   attempts?: SubagentBillingAttempt[];
+  invocations?: SubagentBillingInvocation[];
+  /** Observable responses omitted from bounded transport; consumers emit one
+   * explicit gap settlement per omitted response. */
+  omittedInvocationCount?: number;
 }
 
 export type LiveAssistantPart =
@@ -500,22 +513,35 @@ function isSubagentBillingUsage(value: unknown): boolean {
     && isFiniteNumber(value.output)
     && isFiniteNumber(value.cacheRead)
     && isFiniteNumber(value.cacheWrite)
+    && optionalFiniteNumber(value.totalTokens)
     && (value.cost === undefined || isFiniteNumber(value.cost));
 }
 
+function isSubagentBillingAttempt(value: unknown, requireInvocationId = false): boolean {
+  return isRecord(value)
+    && typeof value.attemptId === 'string'
+    && (!requireInvocationId || typeof value.invocationId === 'string')
+    && (value.model === undefined || typeof value.model === 'string')
+    && (value.provider === undefined || typeof value.provider === 'string')
+    && (value.usage === undefined || isSubagentBillingUsage(value.usage))
+    && (value.providerResponseObserved === undefined || typeof value.providerResponseObserved === 'boolean')
+    && (value.outcome === undefined || value.outcome === 'success' || value.outcome === 'failure' || value.outcome === 'aborted')
+    && optionalFiniteNumber(value.startedAt)
+    && optionalFiniteNumber(value.completedAt);
+}
+
 function isSubagentBillingEntry(value: unknown): boolean {
-  if (!isRecord(value) || typeof value.path !== 'string' || !isSubagentBillingUsage(value.usage)) return false;
+  if (!isRecord(value) || typeof value.path !== 'string'
+    || (value.usage !== undefined && !isSubagentBillingUsage(value.usage))) return false;
   if (value.model !== undefined && typeof value.model !== 'string') return false;
   if (value.selectedModel !== undefined && typeof value.selectedModel !== 'string') return false;
   if (value.provider !== undefined && typeof value.provider !== 'string') return false;
   if (value.occurredAt !== undefined && !isFiniteNumber(value.occurredAt)) return false;
-  return value.attempts === undefined || (Array.isArray(value.attempts) && value.attempts.every((attempt) => (
-    isRecord(attempt)
-    && typeof attempt.attemptId === 'string'
-    && (attempt.model === undefined || typeof attempt.model === 'string')
-    && (attempt.provider === undefined || typeof attempt.provider === 'string')
-    && isSubagentBillingUsage(attempt.usage)
-  )));
+  return (value.attempts === undefined || (Array.isArray(value.attempts)
+    && value.attempts.every((attempt) => isSubagentBillingAttempt(attempt))))
+    && (value.invocations === undefined || (Array.isArray(value.invocations)
+      && value.invocations.every((invocation) => isSubagentBillingAttempt(invocation, true))))
+    && (value.omittedInvocationCount === undefined || isNonNegativeSafeInteger(value.omittedInvocationCount));
 }
 
 function isLiveTurnPhase(value: unknown): value is LiveTurnPhase {

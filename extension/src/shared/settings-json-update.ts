@@ -1,9 +1,21 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
+import fsSync from 'node:fs';
 import fs from 'node:fs/promises';
+import * as path from 'node:path';
 
 import { atomicWriteText } from './atomic-write';
 
 const writeTailsByPath = new Map<string, Promise<void>>();
+/** Ownership is scoped to the current async transaction, not the whole process:
+ * another StatsService task in the same host must still contend rather than
+ * accidentally entering a sibling transaction's lock. */
+const heldLockContext = new AsyncLocalStorage<ReadonlyMap<string, string>>();
+/** Node executes only one JavaScript stack at a time. A synchronous ledger
+ * mutation that arrives while this process owns an async storage transaction
+ * must join that process-owned lock rather than block the event loop needed to
+ * release it; cross-process contenders remain excluded by the lock file. */
+const processHeldLocks = new Map<string, string>();
 const DEFAULT_LOCK_TIMEOUT_MS = 5_000;
 const DEFAULT_STALE_LOCK_MS = 30_000;
 const DEFAULT_LOCK_RETRY_MS = 25;
@@ -53,11 +65,21 @@ export async function classifyFileUpdateLockContention(
 
 async function removeStaleLock(lockPath: string, staleMs: number): Promise<void> {
   try {
-    const stat = await fs.stat(lockPath);
+    const [stat, owner] = await Promise.all([fs.stat(lockPath), fs.readFile(lockPath, 'utf8')]);
     if (Date.now() - stat.mtimeMs <= staleMs) return;
-    await fs.unlink(lockPath);
+    const ownerPid = parseLockOwnerPid(owner);
+    if (ownerPid !== undefined) {
+      try {
+        process.kill(ownerPid, 0);
+        return; // Age never permits stealing a lock from a proven-live owner.
+      } catch (error) {
+        if (!isErrno(error, 'ESRCH')) return;
+      }
+    }
+    if (await fs.readFile(lockPath, 'utf8') === owner) await fs.unlink(lockPath);
   } catch (error) {
-    if (!isErrno(error, 'ENOENT')) throw error;
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== 'ENOENT' && !EXISTING_LOCK_CONTENTION_CODES.has(code ?? '')) throw error;
   }
 }
 
@@ -78,7 +100,8 @@ async function removeAbandonedProcessLock(lockPath: string): Promise<void> {
   try {
     observedOwner = await fs.readFile(lockPath, 'utf8');
   } catch (error) {
-    if (isErrno(error, 'ENOENT')) return;
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || EXISTING_LOCK_CONTENTION_CODES.has(code ?? '')) return;
     throw error;
   }
   const ownerPid = parseLockOwnerPid(observedOwner);
@@ -149,9 +172,14 @@ export async function withFileUpdateLock<T>(
     }
   }
 
+  processHeldLocks.set(lockPath, token);
   try {
-    return await action();
+    const inherited = heldLockContext.getStore();
+    const owned = new Map(inherited);
+    owned.set(lockPath, token);
+    return await heldLockContext.run(owned, action);
   } finally {
+    processHeldLocks.delete(lockPath);
     await handle.close().catch(() => undefined);
     // Do not remove a successor's lock if this lock was externally deemed
     // stale and replaced while the action was still finishing.
@@ -163,6 +191,88 @@ export async function withFileUpdateLock<T>(
       // stale-lock path; throwing here could make callers retry an update that
       // was successfully committed.
     }
+  }
+}
+
+/** Synchronous companion used by the finalized invocation/activity ledgers.
+ * It shares the exact lock file and owner format with withFileUpdateLock(). */
+export function withFileUpdateLockSync<T>(
+  filePath: string,
+  action: () => T,
+  options: FileUpdateLockOptions = {},
+): T {
+  const lockPath = `${filePath}.pie-lock`;
+  if (heldLockContext.getStore()?.has(lockPath) || processHeldLocks.has(lockPath)) return action();
+  const timeoutMs = options.timeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS;
+  const staleMs = options.staleMs ?? DEFAULT_STALE_LOCK_MS;
+  const retryMs = options.retryMs ?? DEFAULT_LOCK_RETRY_MS;
+  const startedAt = Date.now();
+  const token = `${process.pid}:${randomUUID()}`;
+  let fd: number | undefined;
+  const sleeper = new Int32Array(new SharedArrayBuffer(4));
+  fsSync.mkdirSync(path.dirname(lockPath), { recursive: true });
+
+  while (fd === undefined) {
+    try {
+      fd = fsSync.openSync(lockPath, 'wx');
+      fsSync.writeFileSync(fd, `${token}\n`, 'utf8');
+    } catch (error) {
+      if (fd !== undefined) {
+        try { fsSync.closeSync(fd); } catch { /* best effort */ }
+        fd = undefined;
+      }
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== 'EEXIST' && code !== 'EPERM' && code !== 'EACCES' && code !== 'EBUSY') throw error;
+      recoverSynchronousLock(lockPath, staleMs);
+      if (Date.now() - startedAt >= timeoutMs) {
+        throw new Error(`Timed out waiting for file update lock ${lockPath} after ${timeoutMs}ms.`);
+      }
+      Atomics.wait(sleeper, 0, 0, retryMs);
+    }
+  }
+
+  processHeldLocks.set(lockPath, token);
+  try {
+    const inherited = heldLockContext.getStore();
+    const owned = new Map(inherited);
+    owned.set(lockPath, token);
+    return heldLockContext.run(owned, action);
+  } finally {
+    processHeldLocks.delete(lockPath);
+    try { fsSync.closeSync(fd); } catch { /* best effort */ }
+    try {
+      if (fsSync.readFileSync(lockPath, 'utf8').trim() === token) fsSync.unlinkSync(lockPath);
+    } catch { /* stale-owner recovery handles a failed release */ }
+  }
+}
+
+function recoverSynchronousLock(lockPath: string, staleMs: number): void {
+  let owner: string;
+  let stat: fsSync.Stats;
+  try {
+    owner = fsSync.readFileSync(lockPath, 'utf8');
+    stat = fsSync.statSync(lockPath);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || EXISTING_LOCK_CONTENTION_CODES.has(code ?? '')) return;
+    throw error;
+  }
+  const ownerPid = parseLockOwnerPid(owner);
+  let dead = false;
+  if (ownerPid !== undefined) {
+    try {
+      process.kill(ownerPid, 0);
+      return; // A long transaction owned by a live process is never stale.
+    } catch (error) {
+      dead = isErrno(error, 'ESRCH');
+      if (!dead) return;
+    }
+  }
+  if (!dead && Date.now() - stat.mtimeMs <= staleMs) return;
+  try {
+    if (fsSync.readFileSync(lockPath, 'utf8') === owner) fsSync.unlinkSync(lockPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
   }
 }
 

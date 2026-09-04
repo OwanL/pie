@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
+import { withFileUpdateLockSync } from '../../shared/settings-json-update';
 import {
   BILLABLE_INVOCATION_KINDS,
   type BillableInvocationAggregateProjection,
@@ -33,54 +34,93 @@ export interface BillableInvocationProjectionOptions {
   readonly includePrivate?: boolean;
 }
 
+export const ACCOUNTING_LOCK_BASENAME = '.accounting';
+export const ACCOUNTING_PRIVACY_BASENAME = 'accounting-private-sessions.json';
+
+export function accountingLockTarget(storageDir: string): string {
+  return path.join(storageDir, ACCOUNTING_LOCK_BASENAME);
+}
+
+/** Read the durable privacy fence while the caller owns the accounting lock. */
+export function readAccountingPrivacySelectors(storageDir: string): BillableInvocationSessionSelector[] {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(path.join(storageDir, ACCOUNTING_PRIVACY_BASENAME), 'utf8')) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.flatMap((value): BillableInvocationSessionSelector[] => {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) return [];
+      const raw = value as Record<string, unknown>;
+      const selector = {
+        ...(typeof raw.sessionId === 'string' && raw.sessionId ? { sessionId: raw.sessionId } : {}),
+        ...(typeof raw.sessionPath === 'string' && raw.sessionPath ? { sessionPath: raw.sessionPath } : {}),
+        ...(typeof raw.branchId === 'string' && raw.branchId ? { branchId: raw.branchId } : {}),
+      };
+      return selector.sessionId || selector.sessionPath || selector.branchId ? [selector] : [];
+    });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw error;
+  }
+}
+
 /**
- * Host-owned finalized invocation ledger.
- *
- * Writer/append contract: exactly one live service instance owns a ledger file.
- * There is deliberately no cross-process lock. The owner opens in append mode,
- * writes one complete JSON object plus newline, fsyncs it, and only then updates
- * its projection. A caller retries with the same invocationId after ambiguity.
- * Equal retries are no-ops; conflicting reuse is rejected. Replay accepts the
- * first valid identity and skips malformed, torn, duplicate, or later-conflict
- * lines, so a crash cannot duplicate a projection.
- *
- * The file is append-only during ordinary operation. Privacy and forget are the
- * sole exceptions: they atomically replace it with a filtered file because
- * deletion is stronger than append-only history. Private entries never enter
- * the file or export projection and exist only in this process.
+ * Host-owned finalized invocation ledger. All durable reads, appends, privacy
+ * fences, rewrites, and exports share one workspace lock. Each transaction
+ * reloads canonical disk state, so stale host processes cannot overwrite a
+ * sibling append or export an already-forgotten/private row.
  */
 export class BillableInvocationLedger {
   private readonly entriesById: Record<string, LedgerEntry> = {};
   private readonly order: string[] = [];
   private readonly privateSessionSelectors: BillableInvocationSessionSelector[] = [];
+  private readonly storageDir: string;
+  private readonly lockTarget: string;
+  private readonly privacyPath: string;
 
   constructor(private readonly filePath: string) {
     if (!filePath.trim()) throw new Error('Billable invocation ledger file path is required.');
-    this.replay();
+    this.storageDir = path.dirname(filePath);
+    this.lockTarget = accountingLockTarget(this.storageDir);
+    this.privacyPath = path.join(this.storageDir, ACCOUNTING_PRIVACY_BASENAME);
+    fs.mkdirSync(this.storageDir, { recursive: true });
+    this.withLock(() => this.reloadDurable());
+  }
+
+  /** Coordinate a ledger row and its correlated activity interval as one
+   * workspace transaction. Nested ledger/timeline mutations are reentrant. */
+  transaction<T>(action: () => T): T {
+    return this.withLock(action);
   }
 
   hasInvocation(invocationId: string): boolean {
-    return Object.prototype.hasOwnProperty.call(this.entriesById, invocationId);
+    return this.withLock(() => {
+      this.reloadDurable();
+      return Object.prototype.hasOwnProperty.call(this.entriesById, invocationId);
+    });
   }
 
   append(
     record: BillableInvocationRecord,
     options: BillableInvocationAppendOptions,
   ): BillableInvocationAppendResult {
-    const normalized = normalizeRecord(record);
-    const existing = this.entriesById[normalized.invocationId];
-    if (existing) {
-      if (canonical(existing.record) !== canonical(normalized)) {
-        throw new Error(`Billable invocation ${normalized.invocationId} was finalized with conflicting data.`);
+    return this.withLock(() => {
+      this.reloadDurable();
+      const normalized = normalizeRecord(record);
+      const existing = this.entriesById[normalized.invocationId];
+      if (existing) {
+        if (canonical(existing.record) !== canonical(normalized)) {
+          throw new Error(`Billable invocation ${normalized.invocationId} was finalized with conflicting data.`);
+        }
+        return 'duplicate';
       }
-      return 'duplicate';
-    }
 
-    const isPrivate = options.visibility === 'private'
-      || this.privateSessionSelectors.some((selector) => matchesSession(normalized, selector));
-    if (!isPrivate) this.appendDurable(normalized);
-    this.addEntry(normalized, isPrivate);
-    return 'appended';
+      const durablePrivacy = readAccountingPrivacySelectors(this.storageDir);
+      const isPrivate = options.visibility === 'private'
+        || [...this.privateSessionSelectors, ...durablePrivacy]
+          .some((selector) => matchesSession(normalized, selector));
+      if (!isPrivate) this.appendDurable(normalized);
+      this.addEntry(normalized, isPrivate);
+      return 'appended';
+    });
   }
 
   projectSession(
@@ -88,17 +128,26 @@ export class BillableInvocationLedger {
     options: BillableInvocationProjectionOptions = {},
   ): BillableInvocationProjection {
     assertSelector(selector);
-    return makeProjection(this.records(options).filter((record) => matchesSession(record, selector)));
+    return this.withLock(() => {
+      this.reloadDurable();
+      return makeProjection(this.records(options).filter((record) => matchesSession(record, selector)));
+    });
   }
 
   projectAll(options: BillableInvocationProjectionOptions = {}): BillableInvocationProjection {
-    return makeProjection(this.records(options));
+    return this.withLock(() => {
+      this.reloadDurable();
+      return makeProjection(this.records(options));
+    });
   }
 
   projectAggregate(
     options: BillableInvocationProjectionOptions = {},
   ): BillableInvocationAggregateProjection {
-    const records = this.records(options);
+    const records = this.withLock(() => {
+      this.reloadDurable();
+      return this.records(options);
+    });
     const grouped: Record<string, BillableInvocationRecord[]> = {};
     for (const record of records) {
       const key = JSON.stringify([record.provider, record.model, record.kind]);
@@ -115,7 +164,10 @@ export class BillableInvocationLedger {
 
   /** Export authority: process-local private entries are excluded unconditionally. */
   exportRecords(): readonly BillableInvocationRecord[] {
-    return Object.freeze(this.records({ includePrivate: false }));
+    return this.withLock(() => {
+      this.reloadDurable();
+      return Object.freeze(this.records({ includePrivate: false }));
+    });
   }
 
   exportJsonl(): string {
@@ -130,30 +182,41 @@ export class BillableInvocationLedger {
    */
   markSessionPrivate(selector: BillableInvocationSessionSelector): number {
     assertSelector(selector);
-    const matchingIds = this.order.filter((id) => matchesSession(this.entriesById[id].record, selector));
-    const durableIds = matchingIds.filter((id) => !this.entriesById[id].private);
-    if (durableIds.length > 0) {
-      const excluded: Record<string, true> = {};
-      for (const id of durableIds) excluded[id] = true;
-      this.rewriteDurable((entry) => !excluded[entry.record.invocationId]);
-      for (const id of durableIds) {
-        this.entriesById[id] = Object.freeze({ record: this.entriesById[id].record, private: true });
+    return this.withLock(() => {
+      this.reloadDurable();
+      const selectors = readAccountingPrivacySelectors(this.storageDir);
+      if (!selectors.some((current) => selectorsOverlap(current, selector))) {
+        selectors.push(Object.freeze({ ...selector }));
+        this.writePrivacySelectors(selectors);
       }
-    }
-    this.privateSessionSelectors.push(Object.freeze({ ...selector }));
-    return matchingIds.length;
+      if (!this.privateSessionSelectors.some((current) => selectorsOverlap(current, selector))) {
+        this.privateSessionSelectors.push(Object.freeze({ ...selector }));
+      }
+      const matchingIds = this.order.filter((id) => matchesSession(this.entriesById[id].record, selector));
+      const durableIds = matchingIds.filter((id) => !this.entriesById[id].private);
+      if (durableIds.length > 0) {
+        this.rewriteDurable((entry) => !matchesSession(entry.record, selector));
+        for (const id of durableIds) {
+          this.entriesById[id] = Object.freeze({ record: this.entriesById[id].record, private: true });
+        }
+      }
+      return matchingIds.length;
+    });
   }
 
   /** Stop classifying future rows as private. Existing private rows remain
    * process-local until their normal scrub/close boundary. */
   markSessionOrdinary(selector: BillableInvocationSessionSelector): void {
     assertSelector(selector);
-    for (let index = this.privateSessionSelectors.length - 1; index >= 0; index -= 1) {
-      const current = this.privateSessionSelectors[index];
-      const sameSession = !!selector.sessionId && selector.sessionId === current.sessionId;
-      const samePath = !!selector.sessionPath && selector.sessionPath === current.sessionPath;
-      if (sameSession || samePath) this.privateSessionSelectors.splice(index, 1);
-    }
+    this.withLock(() => {
+      const keep = readAccountingPrivacySelectors(this.storageDir)
+        .filter((current) => !selectorsOverlap(current, selector));
+      this.writePrivacySelectors(keep);
+      for (let index = this.privateSessionSelectors.length - 1; index >= 0; index -= 1) {
+        if (selectorsOverlap(this.privateSessionSelectors[index], selector)) this.privateSessionSelectors.splice(index, 1);
+      }
+      this.reloadDurable();
+    });
   }
 
   /** Remove process-local private usage when the private session is closed or scrubbed. */
@@ -165,13 +228,21 @@ export class BillableInvocationLedger {
   /** Forget removes both ordinary durable data and private process-local data. */
   forgetSession(selector: BillableInvocationSessionSelector): number {
     assertSelector(selector);
-    const matchingIds = this.order.filter((id) => matchesSession(this.entriesById[id].record, selector));
-    if (matchingIds.some((id) => !this.entriesById[id].private)) {
-      this.rewriteDurable((entry) => !matchesSession(entry.record, selector));
-    }
-    const matching: Record<string, true> = {};
-    for (const id of matchingIds) matching[id] = true;
-    return this.removeEntries((_entry, id) => Boolean(matching[id]));
+    return this.withLock(() => {
+      this.reloadDurable();
+      const selectors = readAccountingPrivacySelectors(this.storageDir);
+      if (!selectors.some((current) => selectorsOverlap(current, selector))) {
+        selectors.push(Object.freeze({ ...selector }));
+        this.writePrivacySelectors(selectors);
+      }
+      const matchingIds = this.order.filter((id) => matchesSession(this.entriesById[id].record, selector));
+      if (matchingIds.some((id) => !this.entriesById[id].private)) {
+        this.rewriteDurable((entry) => !matchesSession(entry.record, selector));
+      }
+      const matching: Record<string, true> = {};
+      for (const id of matchingIds) matching[id] = true;
+      return this.removeEntries((_entry, id) => Boolean(matching[id]));
+    });
   }
 
   private records(options: BillableInvocationProjectionOptions): BillableInvocationRecord[] {
@@ -199,7 +270,14 @@ export class BillableInvocationLedger {
     return removed;
   }
 
-  private replay(): void {
+  private withLock<T>(action: () => T): T {
+    return withFileUpdateLockSync(this.lockTarget, action);
+  }
+
+  /** Replace only durable entries from canonical disk state. Process-local
+   * private rows remain available to the live private tab. */
+  private reloadDurable(): void {
+    this.removeEntries((entry) => !entry.private);
     let content: string;
     try {
       content = fs.readFileSync(this.filePath, 'utf8');
@@ -211,12 +289,37 @@ export class BillableInvocationLedger {
       if (!line.trim()) continue;
       try {
         const record = normalizeRecord(JSON.parse(line) as unknown);
-        if (this.entriesById[record.invocationId]) continue;
+        const existing = this.entriesById[record.invocationId];
+        if (existing) {
+          if (canonical(existing.record) !== canonical(record)) continue;
+          continue;
+        }
         this.addEntry(record, false);
       } catch {
         // Each line is an independent commit. Malformed/torn lines do not
         // prevent replay of valid records before or after them.
       }
+    }
+  }
+
+  private writePrivacySelectors(selectors: readonly BillableInvocationSessionSelector[]): void {
+    if (selectors.length === 0) {
+      try { fs.unlinkSync(this.privacyPath); } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
+      return;
+    }
+    fs.mkdirSync(this.storageDir, { recursive: true });
+    const tempPath = `${this.privacyPath}.${randomUUID()}.tmp`;
+    try {
+      fs.writeFileSync(tempPath, `${JSON.stringify(selectors, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' });
+      const fd = fs.openSync(tempPath, 'r+');
+      try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+      fs.renameSync(tempPath, this.privacyPath);
+      fsyncDirectory(this.storageDir);
+    } catch (error) {
+      try { fs.unlinkSync(tempPath); } catch { /* best effort */ }
+      throw error;
     }
   }
 
@@ -245,10 +348,17 @@ export class BillableInvocationLedger {
       .map((id) => this.entriesById[id])
       .filter((entry) => !entry.private && include(entry))
       .map((entry) => canonical(entry.record));
+    if (records.length === 0) {
+      try { fs.unlinkSync(this.filePath); } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
+      fsyncDirectory(path.dirname(this.filePath));
+      return;
+    }
     let fd: number | undefined;
     try {
       fd = fs.openSync(tempPath, 'wx');
-      if (records.length > 0) writeAll(fd, Buffer.from(`${records.join('\n')}\n`, 'utf8'));
+      writeAll(fd, Buffer.from(`${records.join('\n')}\n`, 'utf8'));
       fs.fsyncSync(fd);
       fs.closeSync(fd);
       fd = undefined;
@@ -289,6 +399,12 @@ function matchesSession(record: BillableInvocationRecord, selector: BillableInvo
   return (selector.sessionId === undefined || record.sessionId === selector.sessionId)
     && (selector.sessionPath === undefined || record.sessionPath === selector.sessionPath)
     && (selector.branchId === undefined || record.branchId === selector.branchId);
+}
+
+function selectorsOverlap(left: BillableInvocationSessionSelector, right: BillableInvocationSessionSelector): boolean {
+  return (!!left.sessionId && left.sessionId === right.sessionId)
+    || (!!left.sessionPath && left.sessionPath === right.sessionPath)
+    || (!!left.branchId && left.branchId === right.branchId);
 }
 
 function metric(records: readonly BillableInvocationRecord[], value: (record: BillableInvocationRecord) => number | undefined): BillableInvocationMetricProjection {
