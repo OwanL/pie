@@ -70,5 +70,6 @@ The UI lives inside a VS Code sidebar panel and must feel like it belongs there:
 - Run `npm run watch` inside `extension/` while working on the sidebar UI. It runs both Vite watchers and `tsc --watch`; pass `-- --skip-typecheck` only when a separate typecheck watcher is already running.
 - The composer accepts pasted images and file drops when the selected model reports image support.
 - Screenshot/image paste is wired at the panel level, so pasting anywhere in the pie chat while it is focused attaches the image to the active composer.
-- Changes to files under `src/webview/panel/` are rebuilt by Vite automatically.
-- The running sidebar webview reloads itself when built assets change, so UI tweaks no longer need a manual Reload Window cycle.
+- Changes to files under `src/webview/panel/` are rebuilt by Vite automatically. A complete immutable renderer generation is verified before selection, and the prior generation remains available for recovery.
+- The running sidebar webview reloads itself after renderer publication, so same-protocol UI tweaks do not need a manual Reload Window cycle.
+- Ordinary `build` and `watch` never replace the running host/backend bundles or rewrite the installed manifest. Use `npm run build:validate` for compile-only validation, `npm run publish:renderer` to publish existing renderer output, and `npm run activate` only when you deliberately want host/backend code activated. Close or reload active Pie sessions before activation.

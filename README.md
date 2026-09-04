@@ -228,25 +228,32 @@ Test and typecheck children have a 20-minute watchdog that kills the complete pr
 From a fresh checkout, install every dependency tree once from the repository root:
 
 ```bash
-npm ci                    # also installs extension/ and analysis/ via postinstall
-npm run extension:build   # build + sync into the installed extension
-npm run extension:package # produce a .vsix when needed
+npm ci                             # also installs extension/ and analysis/ via postinstall
+npm run extension:build            # compile/validate + publish renderer assets only
+npm run extension:build:validate   # compile/validate without publishing
+npm run extension:activate         # explicitly replace installed host/backend output
+npm run extension:package          # produce a .vsix when needed
 ```
 
 For an extension-only refresh after dependencies are already installed:
 
 ```bash
 cd extension
-npm run build      # builds and syncs into the installed extension
+npm run build      # compile/validate + publish one renderer generation
 ```
 
 Useful extension commands:
 
-- `npm run watch` — incremental Vite rebuilds plus a concurrent TypeScript watch
+- `npm run build:validate` — compile and validate coordinated host/renderer output without touching the installed extension
+- `npm run publish:renderer` — publish already-validated renderer output only
+- `npm run watch` — incremental Vite rebuilds plus a concurrent TypeScript watch; each complete emission publishes an immutable renderer generation
 - `npm run watch -- --skip-typecheck` — Vite-only watch when typechecking elsewhere
+- `npm run activate` — explicit user-controlled host/backend activation; close or reload active Pie sessions first
 - `npm run test` — unit tests
 - `npm run typecheck` — incremental type-only check
 - `npm run package` — produce a `.vsix`
+
+Ordinary build/watch publication never replaces installed `extension.js`, backend, or worker bundles and never rewrites the installed `package.json`. Renderer generations are copied and verified before an append-only selection marker becomes visible; the selected and immediately prior generations are retained. Host/backend changes therefore require `extension:activate`, VSIX installation, or another explicit extension reload/install boundary. Publication is refused unless the installed folder name and manifest both match the workspace extension identity and version.
 
 ### Run the analytics workspace
 

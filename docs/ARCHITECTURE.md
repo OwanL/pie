@@ -222,7 +222,7 @@ See git history (commit `d581d83`) for historical context on the migration from 
   scrolling.
 - Per-session revision counter detects missed snapshots; recovery is a full snapshot.
 - `hostInstanceId` detects extension restarts; webview resets all mirrors on change.
-- `WEBVIEW_PROTOCOL_VERSION` fails closed on incompatible host/webview wire shapes. State/hello and readiness handshakes also carry the deterministic compile-time `PIE_BUILD_ID`, but build identity is diagnostic only at runtime: same-protocol renderer assets emitted by an in-place rebuild remain usable with the running extension host, so active sessions continue until the user chooses to reload. One-shot builds still verify that the emitted host and webview bundles have coordinated build identities.
+- `WEBVIEW_PROTOCOL_VERSION` fails closed on incompatible host/webview wire shapes. State/hello and readiness handshakes also carry the deterministic compile-time `PIE_BUILD_ID`, but build identity is diagnostic only at runtime: same-protocol renderer assets remain usable with the running extension host, so active sessions continue until the user chooses to reload. Compile/validate emits coordinated host and renderer identities. Ordinary build/watch publication copies only the renderer into an immutable generation, verifies its manifest references, then atomically creates an append-only selection marker; the current and prior generations remain available. It never replaces installed host/backend/worker bundles or rewrites the installed extension manifest. Host/backend activation is an explicit command or install/reload boundary and refuses folder/manifest version skew.
 
 See [`docs/STATE_CONTRACT.md`](STATE_CONTRACT.md) for the full invariant set.
 

@@ -6,8 +6,8 @@
  * This is deliberately separate from the wire-protocol version. The protocol
  * version owns runtime compatibility; the build id identifies the source
  * snapshot for diagnostics and verifies that one-shot builds emitted
- * coordinated host and renderer bundles. Runtime build skew is allowed so an
- * in-place rebuild does not force the user to reload active sessions.
+ * coordinated host and renderer bundles. Runtime build skew is allowed so a
+ * renderer-only publication does not force host/backend activation.
  */
 declare const __PIE_BUILD_ID__: string | undefined;
 

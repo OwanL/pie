@@ -467,11 +467,13 @@ Work includes:
 
 ### Milestone 4: non-disruptive publication
 
-1. Use the active-session reproduction to choose the smallest safe publication change.
-2. Prove renderer reload and active streaming behavior on Windows.
-3. Remove manifest rewriting from ordinary renderer-asset sync and retire any live replacement behavior that cannot prove complete-generation loading.
+**Implemented (2026-09-04).** A fast deterministic mock-streaming reproduction is the decision gate. It repeatedly publishes renderer generations while checking stable mock backend PID and worker ownership, host-owned composer continuity, one tool execution, complete coordinated assets, unchanged installed host/backend/worker files and manifest, prior-generation retention, and failure recovery. This proves the isolated publication boundary exercised by the test; it does not claim observation of real VS Code process behavior.
 
-**Exit:** repeated builds during active work do not stop the backend, lose composer state, duplicate tools, or load mixed assets.
+1. Compile/validate, renderer publication, and host/backend activation are separate commands; the existing build/watch convenience path compiles and publishes only renderer assets.
+2. Renderer output is copied to an immutable generation and verified before an append-only selection marker is atomically created. Resolution skips torn/invalid markers, and current plus prior generations are retained.
+3. Ordinary publication never rewrites the installed manifest or host/backend/worker bundles. Explicit activation uses directory replacement without the Windows live in-place fallback and requires an exact installed-folder/manifest identity and version match.
+
+**Exit:** satisfied by the deterministic publication acceptance boundary. Real VS Code behavior remains limited to later focused/manual evidence rather than inferred from the mock.
 
 ### Milestone 5: consolidation and retirement
 

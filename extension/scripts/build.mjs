@@ -1,11 +1,16 @@
 import { watch as fsWatch } from 'node:fs';
-import { cp, mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-import { isActiveDirectoryLockError, syncActiveDestinationInPlace, writeFileIfChanged } from './sync-output.mjs';
+import {
+  activateInstalledOutput,
+  findCompatibleInstalledExtensionDir,
+  publishRendererGeneration,
+  writeFileIfChanged,
+} from './publication.mjs';
 
 const rootDir = path.dirname(fileURLToPath(new URL('../package.json', import.meta.url)));
 const outDir = path.join(rootDir, 'out');
@@ -13,6 +18,9 @@ const outDir = path.join(rootDir, 'out');
 const watchMode = process.argv.includes('--watch');
 const skipTypecheck = process.argv.includes('--skip-typecheck');
 const noSync = process.argv.includes('--no-sync');
+const activate = process.argv.includes('--activate');
+if (activate && noSync) throw new Error('--activate and --no-sync are mutually exclusive.');
+if (activate && watchMode) throw new Error('--activate is a one-shot explicit boundary and cannot run in watch mode.');
 const webviewViewName = 'panel';
 const webviewRelativeDir = path.join('webview', webviewViewName);
 const buildIdentityFile = 'pie-build-id.txt';
@@ -27,60 +35,20 @@ const requiredBuildFiles = Object.freeze([
 let syncTimer;
 let syncQueue = Promise.resolve();
 
-const LEGACY_EXTENSION_IDS = Object.freeze([
-  'pi-config.pi-assistant',
-]);
-
-async function listInstalledExtensionDirs(extensionRoot) {
-  try {
-    const entries = await readdir(extensionRoot, { withFileTypes: true });
-    return entries
-      .filter((entry) => entry.isDirectory())
-      .map((entry) => path.join(extensionRoot, entry.name));
-  } catch {
-    return [];
-  }
-}
-
-async function chooseInstalledExtensionDir(pkg) {
-  const extensionRoots = [
+function installedExtensionRoots() {
+  return [
     path.join(os.homedir(), '.vscode', 'extensions'),
     path.join(os.homedir(), '.vscode-insiders', 'extensions'),
   ];
-  const currentExtensionId = `${pkg.publisher}.${pkg.name}`;
-  const knownExtensionIds = [currentExtensionId, ...LEGACY_EXTENSION_IDS];
+}
 
-  for (const extensionRoot of extensionRoots) {
-    const exactCurrent = path.join(extensionRoot, `${currentExtensionId}-${pkg.version}`);
-    try {
-      await stat(exactCurrent);
-      return exactCurrent;
-    } catch {
-      // fall through to prefix/package inspection
-    }
-
-    const installedDirs = await listInstalledExtensionDirs(extensionRoot);
-    const prefixMatches = installedDirs.filter((dir) => {
-      const baseName = path.basename(dir);
-      return knownExtensionIds.some((extensionId) => baseName === extensionId || baseName.startsWith(`${extensionId}-`));
-    });
-    if (prefixMatches.length > 0) {
-      return prefixMatches.sort((left, right) => right.localeCompare(left))[0];
-    }
-
-    for (const extDir of installedDirs) {
-      try {
-        const installedPkg = JSON.parse(await readFile(path.join(extDir, 'package.json'), 'utf8'));
-        const installedExtensionId = `${installedPkg.publisher}.${installedPkg.name}`;
-        if (knownExtensionIds.includes(installedExtensionId)) {
-          return extDir;
-        }
-      } catch {
-        // ignore directories without a readable extension manifest
-      }
-    }
-  }
-
+async function resolveCompatibleInstalledExtension(pkg) {
+  const extDir = await findCompatibleInstalledExtensionDir(installedExtensionRoots(), pkg);
+  if (extDir) return extDir;
+  const id = `${pkg.publisher}.${pkg.name}`;
+  console.warn(
+    `[build] No exact installed ${id}@${pkg.version} folder/manifest match. Renderer publication and activation were skipped; install the matching VSIX first.`,
+  );
   return null;
 }
 
@@ -118,72 +86,37 @@ async function verifyCoordinatedBuildIdentity(buildDir = outDir) {
   console.log(`[build] Coordinated host/webview identity ${hostBuildId}`);
 }
 
-async function syncToInstalledExtension() {
-  if (noSync) {
-    return;
-  }
+async function publishToInstalledExtension() {
+  if (noSync) return;
 
-  // Watch mode emits the host and webview independently. Never replace a
-  // healthy installation with the half-built directory visible between them.
+  // Watch mode emits host and renderer bundles independently. The host bundle
+  // is validation evidence only: ordinary publication installs one complete,
+  // immutable renderer generation and never replaces active host/backend code.
   await verifyCoordinatedBuildIdentity();
-  await writeSdkLocalManifest();
-
   const pkg = JSON.parse(await readFile(path.join(rootDir, 'package.json'), 'utf8'));
-  const extDir = await chooseInstalledExtensionDir(pkg);
-  if (!extDir) {
-    const currentExtensionId = `${pkg.publisher}.${pkg.name}`;
-    console.warn(
-      `[build] No installed VS Code extension directory found for ${currentExtensionId} (legacy fallback: ${LEGACY_EXTENSION_IDS.join(', ')}).`,
-    );
+  const extDir = await resolveCompatibleInstalledExtension(pkg);
+  if (!extDir) return;
+
+  if (activate) {
+    await writeSdkLocalManifest();
+    await activateInstalledOutput({
+      sourceOutDir: outDir,
+      extensionDir: extDir,
+      verify: verifyCoordinatedBuildIdentity,
+    });
+    await writeFileIfChanged(path.join(extDir, 'package.json'), `${JSON.stringify(pkg, null, 2)}\n`);
+    console.log(`[build] Activated host/backend output → ${extDir}`);
     return;
   }
 
-  const dest = path.join(extDir, 'out');
-  const staging = `${dest}.pie-staging-${process.pid}`;
-  const backup = `${dest}.pie-backup-${process.pid}`;
-  await Promise.all([
-    rm(staging, { recursive: true, force: true }),
-    rm(backup, { recursive: true, force: true }),
-  ]);
-  await cp(outDir, staging, { recursive: true, force: true });
-  await verifyCoordinatedBuildIdentity(staging);
-
-  let movedExistingOutput = false;
-  try {
-    try {
-      await rename(dest, backup);
-      movedExistingOutput = true;
-    } catch (error) {
-      if (!(error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT')) {
-        throw error;
-      }
-    }
-    await rename(staging, dest);
-  } catch (error) {
-    if (movedExistingOutput) {
-      await rename(backup, dest);
-      throw error;
-    }
-    if (isActiveDirectoryLockError(error)) {
-      await syncActiveDestinationInPlace({
-        staging,
-        dest,
-        backup,
-        verify: verifyCoordinatedBuildIdentity,
-      });
-    } else {
-      throw error;
-    }
-  }
-  await rm(backup, { recursive: true, force: true });
-  // Watch mode publishes renderer assets frequently. Rewriting the installed
-  // manifest when its bytes are unchanged can prompt VS Code to react to the
-  // extension mid-session, so only touch it when content actually differs.
-  await writeFileIfChanged(path.join(extDir, 'package.json'), JSON.stringify(pkg, null, 2));
-  console.log(`Synced → ${extDir}`);
+  const published = await publishRendererGeneration({
+    sourceDir: path.join(outDir, webviewRelativeDir),
+    extensionDir: extDir,
+  });
+  console.log(`[build] Published renderer generation ${published.generation} → ${extDir}`);
 }
 
-function scheduleSyncToInstalledExtension() {
+function scheduleRendererPublication() {
   if (syncTimer !== undefined) {
     clearTimeout(syncTimer);
   }
@@ -191,7 +124,7 @@ function scheduleSyncToInstalledExtension() {
   syncTimer = setTimeout(() => {
     syncTimer = undefined;
     syncQueue = syncQueue
-      .then(() => syncToInstalledExtension())
+      .then(() => publishToInstalledExtension())
       .catch((error) => {
         console.error('[build] Failed to sync installed extension output', error);
       });
@@ -243,7 +176,7 @@ function createBuiltOutputWatcher() {
       return;
     }
 
-    scheduleSyncToInstalledExtension();
+    scheduleRendererPublication();
   });
 
   watcher.on('error', (error) => {
@@ -276,7 +209,7 @@ async function buildOnce() {
     runViteBuild(),
   ]);
   await verifyCoordinatedBuildIdentity();
-  await syncToInstalledExtension();
+  await publishToInstalledExtension();
 }
 
 if (watchMode) {

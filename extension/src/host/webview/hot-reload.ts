@@ -13,12 +13,24 @@ export function isHotReloadAssetFileName(
   fileName: string | null | undefined,
   _viewName = DEFAULT_WEBVIEW_VIEW_NAME,
 ): boolean {
-  if (!fileName) {
-    return false;
+  if (!fileName || fileName.endsWith('.map')) return false;
+
+  const normalized = fileName.replaceAll('\\', '/');
+  const generationRoot = '/pie-generations';
+  if (normalized.endsWith(generationRoot)) return false;
+  const generationSegment = `${generationRoot}/`;
+  const generationIndex = normalized.indexOf(generationSegment);
+  if (generationIndex < 0) {
+    // Packaged/explicitly activated flat assets retain the legacy behavior.
+    return true;
   }
 
-  // Any built asset or manifest change should trigger a webview reload.
-  // Ignore sourcemaps, which churn on every build but do not affect runtime.
-  return !fileName.endsWith('.map');
+  // Immutable generation files are copied and verified before selection.
+  // Reload only for the atomic selection marker, never for intermediate copy
+  // events or retention cleanup.
+  const relative = normalized.slice(generationIndex + generationSegment.length);
+  return relative.startsWith('selections/')
+    && relative.endsWith('.json')
+    && !relative.split('/').at(-1)?.startsWith('.pie-staging-');
 }
 

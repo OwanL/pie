@@ -14,7 +14,7 @@ export const SESSION_SNAPSHOT_TOO_LARGE_CODE = 'SESSION_SNAPSHOT_TOO_LARGE' as c
  * older webview build cannot tolerate. Both sides fail closed on a protocol
  * mismatch. `PIE_BUILD_ID` separately identifies the compiled source snapshot
  * for diagnostics and build-output verification; it does not block a
- * same-protocol renderer after an in-place rebuild.
+ * same-protocol renderer-only publication.
  *
  * v5 (browser server): multi-renderer identity (`rendererHello`,
  * `rendererVisibilityChanged`, `rendererFocusChanged`), command

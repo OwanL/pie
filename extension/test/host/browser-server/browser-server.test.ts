@@ -207,7 +207,7 @@ test('start binds loopback and serves the HTML shell, health, and allowlisted as
   await stop();
 });
 
-test('HTML requests refresh a replaced asset manifest without restarting the server', async () => {
+test('HTML requests refresh a replaced asset manifest and retain prior assets', async () => {
   const { server, assetDir, stop } = await createHarness();
   const outcome = await server.start();
   assert.equal(outcome.kind, 'started');
@@ -236,7 +236,7 @@ test('HTML requests refresh a replaced asset manifest without restarting the ser
   assert.match(after.body, /panel-new456\.css/);
   assert.doesNotMatch(after.body, /panel-abc123\.js/);
   assert.equal((await httpGet(port, '/assets/panel-new456.js')).status, 200);
-  assert.equal((await httpGet(port, '/assets/panel-abc123.js')).status, 404);
+  assert.equal((await httpGet(port, '/assets/panel-abc123.js')).status, 200);
 
   await stop();
 });

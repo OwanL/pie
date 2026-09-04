@@ -173,7 +173,10 @@
   },
   "scripts": {
     "build": "node ./scripts/build.mjs",
+    "build:validate": "node ./scripts/build.mjs --no-sync",
     "build:webview": "vite build",
+    "publish:renderer": "node ./scripts/publish-renderer.mjs",
+    "activate": "node ./scripts/build.mjs --activate",
     "watch": "node ./scripts/build.mjs --watch",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit -p tsconfig.json",

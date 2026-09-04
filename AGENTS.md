@@ -26,18 +26,23 @@ while iterating rather than invoking `npx tsx` directly. Use
 `npm run test:coverage` only for the explicit release coverage gate.
 
 **Always rebuild after editing `extension/src/`** with
-`npm run extension:build`; it auto-syncs output to the installed VS Code
-extension. Package from the root with `npm run extension:package`. For an
-extension-only loop:
+`npm run extension:build`; it compiles/validates all bundles and publishes only
+a complete renderer generation to a matching installed extension. It does not
+activate host/backend changes. Use `npm run extension:activate` only at an
+explicit reload/install boundary after closing or reloading active Pie sessions.
+Package from the root with `npm run extension:package`. For an extension-only loop:
 
 ```bash
 cd extension
-npm run build      # build + sync
-npm run watch      # incremental
-npm run test       # extension unit tests
-npm run typecheck  # extension type-check only
-npm run lint       # extension ESLint
-npm run package    # produce .vsix
+npm run build            # compile/validate + renderer publish
+npm run build:validate   # compile/validate only
+npm run publish:renderer # publish existing renderer output
+npm run activate         # explicit host/backend activation
+npm run watch            # incremental + renderer publish
+npm run test             # extension unit tests
+npm run typecheck        # extension type-check only
+npm run lint             # extension ESLint
+npm run package          # produce .vsix
 ```
 
 On Windows the harness `bash` tool is Git Bash, not PowerShell. Use `/dev/null`

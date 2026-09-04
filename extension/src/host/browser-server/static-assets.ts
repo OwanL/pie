@@ -18,6 +18,8 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
+import { resolvePublishedWebviewDir } from '../webview/published-generations';
+
 interface ViteManifestChunk {
   file: string;
   src?: string;
@@ -84,7 +86,11 @@ export interface ResolvedBrowserAssets {
 /** Absolute path → `/assets/<file>` URL. */
 export function toAssetUrl(absolutePath: string, assetDir: string): string {
   const relative = path.relative(path.resolve(assetDir), absolutePath).split(path.sep).join('/');
-  return `/assets/${urlKeyFor(relative)}`;
+  const nestedAssetsIndex = relative.lastIndexOf('/assets/');
+  const manifestRelative = nestedAssetsIndex >= 0
+    ? relative.slice(nestedAssetsIndex + 1)
+    : relative;
+  return `/assets/${urlKeyFor(manifestRelative)}`;
 }
 
 /** Minimal attribute escaping for meta content (defense in depth). */
@@ -148,19 +154,21 @@ function collectManifestFiles(manifest: ViteManifest, entry: ViteManifestChunk, 
 /** Browser-mode static assets, refreshed from the manifest at each HTML load. */
 export class BrowserStaticAssets {
   private resolved: ResolvedBrowserAssets | null = null;
+  private currentGenerationFiles: ReadonlyMap<string, string> | null = null;
 
   constructor(private readonly assetDir: string) {}
 
   /** Load the manifest and resolve the serving allowlist. Throws when the
    *  webview bundle is missing/malformed (terminal server start failure). */
   async load(): Promise<void> {
-    const manifest = await loadViteManifest(this.assetDir);
+    const selectedAssetDir = await resolvePublishedWebviewDir(this.assetDir);
+    const manifest = await loadViteManifest(selectedAssetDir);
     const entry = findEntryChunk(manifest);
     if (!entry) {
-      throw new Error(`No Vite entry chunk found in manifest at ${path.join(this.assetDir, '.vite', 'manifest.json')}`);
+      throw new Error(`No Vite entry chunk found in manifest at ${path.join(selectedAssetDir, '.vite', 'manifest.json')}`);
     }
-    const files = collectManifestFiles(manifest, entry, this.assetDir);
-    const entryPath = files.get(urlKeyFor(entry.file));
+    const currentFiles = collectManifestFiles(manifest, entry, selectedAssetDir);
+    const entryPath = currentFiles.get(urlKeyFor(entry.file));
     if (!entryPath) throw new Error(`Entry chunk ${entry.file} is not under the webview asset dir.`);
     // Vite 6 emits `?worker&url` chunks beside the entry but does not record
     // them in manifest.json. Recover only hashed worker filenames referenced
@@ -172,21 +180,24 @@ export class BrowserStaticAssets {
     for (const match of entrySource.matchAll(workerPattern)) {
       const fileName = match[1];
       if (!fileName) continue;
-      const absolute = path.resolve(this.assetDir, 'assets', fileName);
-      const assetBase = path.resolve(this.assetDir) + path.sep;
-      if (absolute.startsWith(assetBase)) files.set(fileName, absolute);
+      const absolute = path.resolve(selectedAssetDir, 'assets', fileName);
+      const assetBase = path.resolve(selectedAssetDir) + path.sep;
+      if (absolute.startsWith(assetBase)) currentFiles.set(fileName, absolute);
     }
     // Publish the new allowlist only after every referenced artifact exists.
-    // Build/install sync may replace the manifest and hashed files in separate
-    // filesystem operations; retaining the last complete snapshot prevents a
-    // concurrent request from observing a half-published bundle.
-    await Promise.all([...files.values()].map((file) => fs.access(file)));
+    // Renderer generations are immutable and selected only after verification;
+    // retaining the prior allowlist also keeps an already-loaded browser page's
+    // hashed requests recoverable across the next publication.
+    await Promise.all([...currentFiles.values()].map((file) => fs.access(file)));
+    const files = new Map(this.currentGenerationFiles ?? []);
+    for (const [key, value] of currentFiles) files.set(key, value);
+    this.currentGenerationFiles = currentFiles;
     this.resolved = {
       assetVersion: assetVersionFromManifest(manifest),
       files,
       entryPath,
       cssPaths: (entry.css ?? [])
-        .map((css) => files.get(urlKeyFor(css)))
+        .map((css) => currentFiles.get(urlKeyFor(css)))
         .filter((p): p is string => !!p),
     };
   }

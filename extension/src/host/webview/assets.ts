@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 
 import { DEFAULT_WEBVIEW_VIEW_NAME, getWebviewAssetDir } from './hot-reload';
+import { resolvePublishedWebviewDir } from './published-generations';
 
 interface ViteManifestChunk {
   file: string;
@@ -38,13 +39,11 @@ function assetUri(webview: vscode.Webview, baseDir: string, relativePath: string
 }
 
 function renderWebviewHtmlFromManifest(
-  context: vscode.ExtensionContext,
   webview: vscode.Webview,
+  baseDir: string,
   manifest: ViteManifest,
   assetVersionOverride?: string,
 ): string {
-  const viewName = DEFAULT_WEBVIEW_VIEW_NAME;
-  const baseDir = getWebviewAssetDir(context.extensionPath, viewName);
   const entry = findEntryChunk(manifest);
   if (!entry) {
     throw new Error(`No Vite entry chunk found in manifest at ${path.join(baseDir, '.vite', 'manifest.json')}`);
@@ -83,12 +82,13 @@ export async function resolveWebviewHtml(
   context: vscode.ExtensionContext,
   webview: vscode.Webview,
 ): Promise<{ html: string; assetVersion: string }> {
-  const baseDir = getWebviewAssetDir(context.extensionPath, DEFAULT_WEBVIEW_VIEW_NAME);
+  const panelDir = getWebviewAssetDir(context.extensionPath, DEFAULT_WEBVIEW_VIEW_NAME);
+  const baseDir = await resolvePublishedWebviewDir(panelDir);
   const manifest = await readManifest(baseDir);
   const assetVersion = crypto.createHash('sha256').update(JSON.stringify(manifest)).digest('hex').slice(0, 16);
   return {
     assetVersion,
-    html: renderWebviewHtmlFromManifest(context, webview, manifest, assetVersion),
+    html: renderWebviewHtmlFromManifest(webview, baseDir, manifest, assetVersion),
   };
 }
 

@@ -356,8 +356,8 @@ interface HostMessageContext {
 let warnedCompatibilityMismatch = false;
 
 /** Reject state whose wire protocol is incompatible with this renderer. Build
- * identities are diagnostic only: same-protocol in-place rebuilds keep the
- * current extension host and its sessions usable until the user reloads. */
+ * identities are diagnostic only: same-protocol renderer publications keep
+ * the current extension host and its sessions usable until explicit activation. */
 function rejectCompatibilityMismatch(
   message: Extract<HostToWebviewMessage, { type: 'state' }>,
   ctx: HostMessageContext,
