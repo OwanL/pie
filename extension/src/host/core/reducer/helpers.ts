@@ -62,6 +62,9 @@ export function commitPromotedSend(
   operationId?: string,
 ): ReducerResult {
   const turnOwner = findPendingTurnOwner(state, sessionPath, requestId, true, operationId);
+  const ownerPending = turnOwner
+    ? (state.pending.promoted[turnOwner.corrId] ?? state.pending.ops[turnOwner.corrId])
+    : undefined;
   const currentTurnBySession = {
     ...state.pending.currentTurnBySession,
     [sessionPath]: { requestId, firstMessageId: canonicalMessageId },
@@ -99,7 +102,12 @@ export function commitPromotedSend(
         prepassBySession,
       },
     },
-    effects: turnOwner ? [{ kind: 'ClearSendTimer', corrId: turnOwner.corrId }] : [],
+    effects: turnOwner ? [{
+      kind: 'ClearSendTimer', corrId: turnOwner.corrId,
+      ...(ownerPending?.priorPruningMode
+        ? { restorePruningMode: ownerPending.priorPruningMode }
+        : {}),
+    }] : [],
   };
 }
 
@@ -382,6 +390,9 @@ export function evictSession(
   const nextCapabilitiesBySession = removeSummary
     ? Object.fromEntries(Object.entries(state.sessions.capabilitiesBySession).filter(([path]) => path !== sp))
     : state.sessions.capabilitiesBySession;
+  const nextSettlementGenerations = removeSummary
+    ? Object.fromEntries(Object.entries(state.sessions.settlementGenerationBySession).filter(([path]) => path !== sp))
+    : state.sessions.settlementGenerationBySession;
   const nextCompactingPaths = removeSummary
     ? removeFromArray(state.sessions.compactingSessionPaths, sp)
     : state.sessions.compactingSessionPaths;
@@ -442,6 +453,7 @@ export function evictSession(
         pinnedTabGroups: nextPinnedGroups,
         runningSessionPaths: nextRunningPaths,
         capabilitiesBySession: nextCapabilitiesBySession,
+        settlementGenerationBySession: nextSettlementGenerations,
         compactingSessionPaths: nextCompactingPaths,
         lastCompactionBySession: remainingLastCompaction,
         intentionallyHiddenRunningPaths: nextIntentionallyHiddenRunningPaths,

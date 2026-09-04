@@ -38,7 +38,7 @@ Restored-session preloads run through a FIFO, single-flight background queue. No
 
 The host distinguishes intentional stops from unexpected, generation-tagged exits. Intentional stop during startup rejects that child’s readiness wait, and an old-generation exit cannot clear a replacement process. Unexpected exits terminalize orphaned in-flight state and preserve a classified interruption notice. There is no automatic backend restart; restart remains an explicit user action.
 
-An explicit restart is a configuration commit boundary: the host projects backend unavailability first, drains model/reasoning/preference effects that were already accepted, closes coordinator stdin, and waits for accepted coordinator requests to settle before spawning the next generation. Settings updates use a PID-owned cross-process lock with dead-owner recovery, so forced termination cannot strand the replacement behind an orphaned lock.
+An explicit restart is a reducer-owned `backend.restart` operation and configuration commit boundary. Trusted ingress assigns stable identity/source/causality; the reducer projects backend unavailability first, records configuration drain and confirmed old-generation death, and settles exactly once with the replacement generation or typed failure. Effect execution only holds the opaque promise while it drains already-accepted model/reasoning/preference effects, closes coordinator stdin, waits for accepted requests to settle, and spawns the replacement. Settings updates use a PID-owned cross-process lock with dead-owner recovery, so forced termination cannot strand the replacement behind an orphaned lock.
 
 ### Computer-use runtime isolation
 
@@ -104,7 +104,9 @@ See git history (commit `d581d83`) for historical context on the migration from 
 
 **Effect** — a plain data descriptor of a side effect the reducer wants performed (e.g., `SendRpc`, `InterruptRpc`, `PersistTabs`). Never executed inside the reducer. Defined in `extension/src/host/core/effects.ts`.
 
-**EffectRunner** — the single host-side executor of effects. Owns no state. Consumes effects, produces result events. Located at `extension/src/host/core/effect-runner.ts`.
+**EffectRunner** — the single host-side executor of effects. Owns no semantic application or lifecycle state. It may retain only opaque execution resources such as timer handles, abort controllers, promises, resolver functions, and cancellation tickets. It consumes effects and produces result events. Located at `extension/src/host/core/effect-runner.ts`.
+
+**Operation registry** — `ArchState.operations`, a reducer-owned `Record` keyed by stable operation ID. It owns source and causal identity, session/branch and process generations when known, semantic phase, acknowledgement/commit evidence, bounded reconciliation, recovery, and one immutable terminal outcome for create/duplicate/open/close/restart/send/edit/interrupt/continue/manual-compact.
 
 **Projection** — the pure function `ArchState → ViewState` that computes what the webview should display. Located at `extension/src/host/core/projection.ts`.
 
@@ -124,10 +126,10 @@ See git history (commit `d581d83`) for historical context on the migration from 
 
 1. Webview dispatches `{ type: 'send', sessionPath, text, localId }`.
 2. For non-empty text or composer inputs, the host wraps it as a `Send` Command with a fresh `corrId` + local message ID.
-3. Reducer inserts an optimistic user message into `state.pending[corrId]` and returns a `SendRpc` effect.
-4. EffectRunner routes the RPC through the per-session operation queue.
-5. On success: `SendResult` promotes the pending entry to authoritative.
-6. On failure: reducer reverts via the snapshot in `state.pending[corrId]`.
+3. Reducer inserts an optimistic user message into `state.pending[corrId]`, registers the stable operation/attempt, and returns a `SendRpc` effect.
+4. EffectRunner routes the RPC through the per-session operation queue and retains only its execution resources.
+5. Acknowledgement is non-terminal. Correlated semantic start, status, settlement, or generation death updates the reducer-owned operation; bounded status reconciliation resolves acknowledgement ambiguity.
+6. A definitive pre-commit failure reverts via `state.pending[corrId]`; commit evidence permanently retires rollback ownership. Every accepted operation receives at most one immutable terminal outcome.
 7. An empty submit after an interrupted assistant tail is different: the host emits `Continue` → `ContinueRpc` → `message.continue`, adds no user row, and enters the SDK continuation lifecycle without `session.prompt()` or the `before_agent_start` skill-pruning prepass.
 
 ### Streaming assistant reply
@@ -232,7 +234,8 @@ See [`docs/STATE_CONTRACT.md`](STATE_CONTRACT.md) for the full invariant set.
 
 | Owner | What it holds |
 |-------|--------------|
-| **ArchState** (reducer) | All application state: sessions, transcripts, model settings, prefs, file changes, pending optimistic ops, UI logic state, interrupt-in-flight flags, backend event routing |
+| **ArchState** (reducer) | All application and semantic lifecycle state: sessions, transcripts, operation registry, phase/ack/commit/reconciliation/recovery, model settings, prefs, file changes, optimistic rollback state, and backend event routing |
+| **EffectRunner** (opaque resources only) | Timer handles, abort controllers, promises/resolvers, cancellation tickets, and execution queues; never user-visible semantic phase or outcome |
 | **Webview** (local only) | Scroll position, focus/caret, hover, drag, animation, context menu position, protocol bookkeeping (revision refs), per-keystroke draft buffer |
 
 **Rule of thumb:** if you're unsure whether something is host state or webview state, it's host state.
@@ -292,11 +295,13 @@ Provider seams emit exact usage when available and explicit gap settlements othe
 2. **Single effect executor** — side effects only happen in the EffectRunner.
 3. **Webview passivity** — the webview dispatches Commands and applies snapshots. It never mutates logic state.
 4. **Session addressing** — every snapshot and session-scoped event carries `sessionPath`.
-5. **Optimistic correlation** — pending ops are tagged with `corrId` and reconciled by `EffectResult`.
-6. **Background preservation** — snapshots to non-active sessions update their mirrors; they are never dropped.
-7. **Record-only state** — `Record<string, T>` for keyed collections (no Map/Set in host state).
-8. **Serialized execution** — session RPCs are FIFO-ordered through the lifecycle + session queues.
-9. **Accounting conservation** — one billable provider invocation maps to at most one immutable ledger row; missing usage is an explicit gap, never an inferred zero.
+5. **Operation conservation** — every accepted state-changing action has a stable reducer-owned operation identity and at most one immutable terminal outcome; transport acknowledgement is never completion.
+6. **Settlement correlation** — `agent.settled` must match operation/request/turn/attempt plus backend/worker generation when present; stale settlement cannot mutate newer work.
+7. **Optimistic correlation** — pending ops are tagged with `corrId` for exact rollback, independently of stable lifecycle identity.
+8. **Background preservation** — snapshots to non-active sessions update their mirrors; they are never dropped.
+9. **Record-only state** — `Record<string, T>` for keyed collections (no Map/Set in host state).
+10. **Serialized execution** — session RPCs are FIFO-ordered through the lifecycle + session queues, but queues are execution aids rather than lifecycle authority.
+11. **Accounting conservation** — one billable provider invocation maps to at most one immutable ledger row; missing usage is an explicit gap, never an inferred zero.
 
 See [`docs/STATE_CONTRACT.md`](STATE_CONTRACT.md) for additional invariants (snapshot recovery, cleanup, selection ownership).
 

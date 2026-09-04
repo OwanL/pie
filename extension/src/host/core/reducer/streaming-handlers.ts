@@ -51,7 +51,15 @@ export function handleMessageStarted(state: ArchState, event: Extract<Event, { k
   const turnOwner = !isAlias && requestId
     ? findPendingTurnOwner(state, sessionPath, requestId, true, event.operationId)
     : undefined;
-  if (turnOwner) effects.push({ kind: 'ClearSendTimer', corrId: turnOwner.corrId });
+  if (turnOwner) {
+    const ownerPending = state.pending.promoted[turnOwner.corrId] ?? state.pending.ops[turnOwner.corrId];
+    effects.push({
+      kind: 'ClearSendTimer', corrId: turnOwner.corrId,
+      ...(ownerPending?.priorPruningMode
+        ? { restorePruningMode: ownerPending.priorPruningMode }
+        : {}),
+    });
+  }
 
   const titleStart = !isAlias
     ? startSessionTitleGeneration(state, sessionPath, turnOwner?.corrId ?? requestId ?? messageId)
@@ -250,8 +258,16 @@ export function handleMessageFinished(state: ArchState, event: Extract<Event, { 
   const turnOwner = requestId
     ? findPendingTurnOwner(state, event.sessionPath, requestId, true, event.operationId)
     : undefined;
+  const ownerPending = turnOwner
+    ? (state.pending.promoted[turnOwner.corrId] ?? state.pending.ops[turnOwner.corrId])
+    : undefined;
   const effects: Effect[] = turnOwner
-    ? [{ kind: 'ClearSendTimer', corrId: turnOwner.corrId }]
+    ? [{
+        kind: 'ClearSendTimer', corrId: turnOwner.corrId,
+        ...(ownerPending?.priorPruningMode
+          ? { restorePruningMode: ownerPending.priorPruningMode }
+          : {}),
+      }]
     : [];
 
   const nextState = produce(state, (draft) => {
@@ -338,8 +354,16 @@ export function handleMessageAborted(state: ArchState, event: Extract<Event, { k
   const turnOwner = requestId
     ? findPendingTurnOwner(state, sessionPath, requestId, event.outcome === undefined, event.operationId)
     : undefined;
+  const ownerPending = turnOwner
+    ? (state.pending.promoted[turnOwner.corrId] ?? state.pending.ops[turnOwner.corrId])
+    : undefined;
   const effects: Effect[] = turnOwner
-    ? [{ kind: 'ClearSendTimer', corrId: turnOwner.corrId }]
+    ? [{
+        kind: 'ClearSendTimer', corrId: turnOwner.corrId,
+        ...(ownerPending?.priorPruningMode
+          ? { restorePruningMode: ownerPending.priorPruningMode }
+          : {}),
+      }]
     : [];
 
   const canonicalId = messageId ? resolveAlias(state, messageId) : undefined;
@@ -467,7 +491,8 @@ export function handleQueuedDelivered(state: ArchState, event: Extract<Event, { 
   if (!list) {
     if (!event.operationId) return { state, effects: [] };
     const operation = state.operations[event.operationId];
-    if (!operation || operation.kind !== 'message.send' || operation.terminal) return { state, effects: [] };
+    if (!operation || operation.kind !== 'message.send' || operation.terminal
+      || (event.operationAttempt !== undefined && event.operationAttempt !== operation.attempt)) return { state, effects: [] };
     const settled = settleSessionOperationSucceeded(operation, {
       pendingPath: operation.session.pendingPath,
       resolvedPath: event.sessionPath,
@@ -486,7 +511,8 @@ export function handleQueuedDelivered(state: ArchState, event: Extract<Event, { 
   if (idx < 0) {
     if (!event.operationId) return { state, effects: [] };
     const operation = state.operations[event.operationId];
-    if (!operation || operation.kind !== 'message.send' || operation.terminal) return { state, effects: [] };
+    if (!operation || operation.kind !== 'message.send' || operation.terminal
+      || (event.operationAttempt !== undefined && event.operationAttempt !== operation.attempt)) return { state, effects: [] };
     const settled = settleSessionOperationSucceeded(operation, {
       pendingPath: operation.session.pendingPath,
       resolvedPath: event.sessionPath,
@@ -525,7 +551,8 @@ export function handleQueuedDelivered(state: ArchState, event: Extract<Event, { 
       ?? Object.values(state.pending.promoted).find((op) => op.queued && op.localId === localId)?.operationId
       ?? Object.values(state.pending.ops).find((op) => op.queued && op.localId === localId)?.operationId;
     const operation = operationId ? draft.operations[operationId] : undefined;
-    if (operation?.kind === 'message.send' && !operation.terminal) {
+    if (operation?.kind === 'message.send' && !operation.terminal
+      && (event.operationAttempt === undefined || event.operationAttempt === operation.attempt)) {
       const settled = settleSessionOperationSucceeded(operation, {
         pendingPath: operation.session.pendingPath,
         resolvedPath: event.sessionPath,

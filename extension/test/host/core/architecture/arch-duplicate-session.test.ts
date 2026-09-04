@@ -116,6 +116,41 @@ test('DuplicateSession timeout retry keeps one operation identity and the pendin
   }
 });
 
+test('closing a pending duplicate settles a correlated close without cancelling the duplicate ledger', () => {
+  const duplicateOperationId = 'duplicate-op-hidden';
+  const duplicated = reducer(buildState(), {
+    kind: 'Command',
+    cmd: {
+      kind: 'DuplicateSession', corrId: 'duplicate-hidden', operationId: duplicateOperationId,
+      operationSource: { kind: 'host' }, backendGeneration: 13,
+      sessionPath: PENDING, sourceSessionPath: OLD, placeholderSummary: PLACEHOLDER,
+      selectionToken: 'duplicate-hidden-selection',
+    },
+  });
+  const hidden = reducer(duplicated.state, {
+    kind: 'Command',
+    cmd: {
+      kind: 'CloseSession', corrId: 'close-duplicate', operationId: 'close-duplicate-op',
+      operationSource: { kind: 'host' }, backendGeneration: 13, sessionPath: PENDING,
+    },
+  });
+  assert.equal(hidden.state.operations[duplicateOperationId]?.hidden, true);
+  assert.equal(hidden.state.operations[duplicateOperationId]?.terminal, undefined);
+  assert.equal(hidden.state.operations['close-duplicate-op']?.kind, 'session.close');
+  assert.equal(hidden.state.operations['close-duplicate-op']?.causal.parentOperationId, duplicateOperationId);
+  const persist = hidden.effects[0];
+  assert.ok(persist?.kind === 'PersistTabs'
+    && persist.operationId === 'close-duplicate-op'
+    && persist.backendGeneration === 13);
+
+  const settled = reducer(hidden.state, {
+    kind: 'PersistTabsResult', corrId: 'close-duplicate', operationId: 'close-duplicate-op',
+    backendGeneration: 13, ok: true,
+  });
+  assert.equal(settled.state.operations['close-duplicate-op']?.terminal?.outcome, 'settled');
+  assert.equal(settled.state.operations[duplicateOperationId]?.hidden, true);
+});
+
 test('DuplicateSession does not duplicate the summary or tab if the pending path is already present', () => {
   const state = buildState({
     summaries: [PLACEHOLDER, OLD_SUMMARY],

@@ -81,10 +81,16 @@ export function handlePersistTabs(state: ArchState, cmd: Extract<Command, { kind
       {
         kind: 'PersistTabs',
         corrId: cmd.corrId,
+        ...(cmd.operationId ? {
+          operationId: cmd.operationId,
+          backendGeneration: cmd.backendGeneration,
+        } : {}),
+        ...(cmd.acknowledgementKey ? { acknowledgementKey: cmd.acknowledgementKey } : {}),
         openTabPaths: cmd.openTabPaths,
         activeSessionPath: cmd.activeSessionPath,
         pinnedTabPaths: cmd.pinnedTabPaths,
         pinnedTabGroups: cmd.pinnedTabGroups,
+        ...(cmd.privateSessionPaths ? { privateSessionPaths: cmd.privateSessionPaths } : {}),
       },
     ],
   };

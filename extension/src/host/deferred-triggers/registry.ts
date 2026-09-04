@@ -334,6 +334,7 @@ export class DeferredTriggerRegistry {
         kind: 'Send',
         corrId,
         operationId: randomUUID(),
+        operationAttempt: 1,
         operationSource: { kind: 'host' },
         backendGeneration: this.deps.getBackendGeneration?.() ?? 0,
         sessionPath: t.sessionPath,

@@ -795,6 +795,9 @@ async function handleSessionOpen(
       params.sessionPath,
       params.selectionToken,
       params.transcript,
+      undefined,
+      params.operationId,
+      params.operationAttempt,
     );
   } catch (error) {
     deps.discardPreparedViewedSessionPath?.(params.sessionPath, viewedPathRollback);
@@ -1186,10 +1189,12 @@ function emitPreflightFailed(
   sessionPath = context.sessionPath,
 ): void {
   const operationId = expected?.operationId ?? context.activeRequest?.operationId;
+  const operationAttempt = expected?.operationAttempt ?? context.activeRequest?.operationAttempt;
   context.sendOperationLedger?.markFailed(operationId, 'MESSAGE_SEND_PRECOMMIT_FAILED', message);
   deps.emit('preflight.failed', {
     requestId,
     ...(operationId ? { operationId } : {}),
+    ...(operationAttempt !== undefined ? { operationAttempt } : {}),
     sessionPath,
     error: message,
   } satisfies PreflightFailedPayload);
@@ -1277,15 +1282,40 @@ async function handleMessageSend(
   const context = await requireSessionTransition(deps, params.sessionPath);
   assertCurrentSessionMutationOwner(deps, params.sessionPath, context);
   if (params.operationId) {
+    const operationId = params.operationId;
+    const operationAttempt = params.operationAttempt;
     const ledger = context.sendOperationLedger ??= new SendOperationLedger();
-    return await ledger.run(
-      params.operationId,
+    const advanceAttemptOwnership = (): void => {
+      if (operationAttempt === undefined) return;
+      const active = context.activeRequest;
+      if (active?.operationId === operationId
+        && operationAttempt > (active.operationAttempt ?? 0)) {
+        active.operationAttempt = operationAttempt;
+      }
+      const queuedIndex = context.queuedOperationIds?.lastIndexOf(operationId) ?? -1;
+      if (queuedIndex >= 0) {
+        const attempts = context.queuedOperationAttempts ??= [];
+        attempts[queuedIndex] = Math.max(attempts[queuedIndex] ?? 0, operationAttempt);
+      }
+    };
+    const resultPromise = ledger.run(
+      operationId,
       canonicalSendIntentFingerprint(params),
       async () => ({
         ...await executeMessageSend(deps, context, params),
-        operationId: params.operationId!,
+        operationId,
       }),
     );
+    // A replay can race the SDK's terminal event. Advance the existing owner
+    // synchronously after the ledger validates immutable intent, then repeat
+    // after first-attempt execution has had a chance to install its owner.
+    advanceAttemptOwnership();
+    const result = await resultPromise;
+    advanceAttemptOwnership();
+    return {
+      ...result,
+      ...(operationAttempt !== undefined ? { operationAttempt } : {}),
+    };
   }
   return await executeMessageSend(deps, context, params);
 }
@@ -1294,7 +1324,7 @@ async function executeMessageSend(
   deps: BackendRequestHandlerDeps,
   context: SessionContext,
   params: ReturnType<typeof validateMessageSend>,
-): Promise<{ operationId?: string; requestId?: string; queued?: boolean }> {
+): Promise<{ operationId?: string; operationAttempt?: number; requestId?: string; queued?: boolean }> {
   if (isProviderExplicitlyDisabled(context.session.model?.provider)) {
     throw new BackendError(
       'PROVIDER_DISABLED',
@@ -1335,8 +1365,10 @@ async function executeMessageSend(
     const deliveryLocalId = params.localId ?? '';
     const queuedLocalIds = context.queuedLocalIds ??= [];
     const queuedOperationIds = context.queuedOperationIds ??= [];
+    const queuedOperationAttempts = context.queuedOperationAttempts ??= [];
     queuedLocalIds.push(deliveryLocalId);
     queuedOperationIds.push(params.operationId ?? '');
+    queuedOperationAttempts.push(params.operationAttempt);
     try {
       if (context.activeRequest && !context.session.isStreaming) {
         await context.session.followUp(queuedPromptText, queuedImagePayload);
@@ -1352,11 +1384,13 @@ async function executeMessageSend(
       if (index >= 0) {
         queuedLocalIds.splice(index, 1);
         queuedOperationIds.splice(index, 1);
+        queuedOperationAttempts.splice(index, 1);
       }
       throw error;
     }
     return {
       ...(params.operationId ? { operationId: params.operationId } : {}),
+      ...(params.operationAttempt !== undefined ? { operationAttempt: params.operationAttempt } : {}),
       queued: true,
     };
   }
@@ -1623,7 +1657,11 @@ async function executeMessageSend(
     throw syncError;
   }
 
-  return { ...(params.operationId ? { operationId: params.operationId } : {}), requestId };
+  return {
+    ...(params.operationId ? { operationId: params.operationId } : {}),
+    ...(params.operationAttempt !== undefined ? { operationAttempt: params.operationAttempt } : {}),
+    requestId,
+  };
 }
 
 async function handleOperationStatus(
@@ -1899,6 +1937,7 @@ async function executeMessageInterrupt(
     emitQueuedSendCancellations(deps, context, 'The queued message was cancelled by Stop before delivery.');
     context.queuedLocalIds = [];
     context.queuedOperationIds = [];
+    context.queuedOperationAttempts = [];
     return { interrupted: false, alreadyStopped: true };
   }
   if (context.manualCompactionRequest) {
@@ -1928,6 +1967,7 @@ async function executeMessageInterrupt(
   // message_start before the host finishes reconciling the interrupt.
   context.queuedLocalIds = [];
   context.queuedOperationIds = [];
+  context.queuedOperationAttempts = [];
   // Hard-stop every billable window the SDK exposes BEFORE the un-awaited
   // `session.abort()` runs. `abort()` alone does NOT stop the post-agent_end
   // compaction / branch-summary / retry / bash LLM calls, so spend would keep
@@ -2180,6 +2220,7 @@ async function handleMessageReplaceQueue(
       context.session.clearQueue();
       context.queuedLocalIds = [];
       context.queuedOperationIds = [];
+      context.queuedOperationAttempts = [];
       return {
         updated: false,
         queueCleared: true,
@@ -2202,6 +2243,8 @@ function emitQueuedSendCancellations(
     deps.emit('message.aborted', {
       requestId: `queued:${operationId}`,
       operationId,
+      ...(context.queuedOperationAttempts?.[index] !== undefined
+        ? { operationAttempt: context.queuedOperationAttempts[index] } : {}),
       sessionPath: context.sessionPath,
       ...(context.queuedLocalIds?.[index] ? { localId: context.queuedLocalIds[index] } : {}),
       outcome: 'cancelled',
@@ -2232,6 +2275,7 @@ async function handleMessageClearQueue(
   // message_start cannot carry a stale localId back to the host.
   context.queuedLocalIds = [];
   context.queuedOperationIds = [];
+  context.queuedOperationAttempts = [];
   return { cleared };
 }
 

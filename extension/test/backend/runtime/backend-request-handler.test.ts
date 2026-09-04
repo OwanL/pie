@@ -358,6 +358,38 @@ test('cold open/preload and models refresh do not cross the runtime-promotion se
   assert.equal((harness.emitted.find((item) => item.event === 'session.opened')?.payload as { runtimeReady?: boolean }).runtimeReady, false);
 });
 
+test('session.open echoes stable operation identity on its authoritative opened event', async () => {
+  const harness = createHarness();
+  let buildArgs: unknown[] = [];
+  harness.deps.getSessionContext = () => undefined;
+  harness.deps.buildSessionOpenedPayload = async (...args) => {
+    buildArgs = args;
+    return {
+      session: { path: '/cold.jsonl', cwd: '/repo', name: 'Cold', modifiedAt: '2026-01-01T00:00:00.000Z', messageCount: 0 },
+      transcript: [],
+      transcriptWindow: { totalCount: 0, loadedStart: 0, loadedEnd: 0, hasOlder: false, hasNewer: false, isPartial: false, hasUserMessages: false },
+      busy: false,
+      capabilities: { billableActivity: false, canContinue: false, canInterrupt: false, canCompact: true },
+      selectionToken: 'selection-open',
+      operationId: 'open-operation',
+      operationAttempt: 2,
+    };
+  };
+
+  const response = await handleBackendRequest(harness.deps, {
+    id: 'open-correlated', method: 'session.open', params: {
+      sessionPath: '/cold.jsonl', selectionToken: 'selection-open',
+      operationId: 'open-operation', operationAttempt: 2,
+    },
+  });
+
+  assert.deepEqual(buildArgs, [
+    '/cold.jsonl', 'selection-open', undefined, undefined, 'open-operation', 2,
+  ]);
+  assert.deepEqual(response, { ok: true, sessionPath: '/cold.jsonl' });
+  assert.equal((harness.emitted.find((entry) => entry.event === 'session.opened')?.payload as { operationId?: string }).operationId, 'open-operation');
+});
+
 test('explicit cold runtime mutations promote while live-only stop requests do not', async () => {
   const harness = createHarness();
   let promotions = 0;
@@ -613,6 +645,43 @@ test('concurrent cold message.send requests share one promotion', async () => {
   assert.equal(creations, 1);
   assert.ok((first as { requestId?: string }).requestId || (second as { requestId?: string }).requestId);
   assert.ok((first as { queued?: boolean }).queued || (second as { queued?: boolean }).queued);
+});
+
+test('registered message.send carries its operation attempt through active ownership and agent settlement', async () => {
+  const harness = createHarness();
+  const result = await handleBackendRequest(harness.deps, {
+    id: 'registered-send-attempt', method: 'message.send',
+    params: {
+      sessionPath: harness.context.sessionPath, text: 'Hello', inputs: [],
+      operationId: 'send-operation', operationAttempt: 2,
+    },
+  }) as { requestId: string; operationId: string; operationAttempt: number };
+
+  assert.equal(result.operationId, 'send-operation');
+  assert.equal(result.operationAttempt, 2);
+  assert.equal(harness.context.activeRequest?.operationId, 'send-operation');
+  assert.equal(harness.context.activeRequest?.operationAttempt, 2);
+  const requestId = harness.context.activeRequest?.id;
+  const turnId = harness.context.activeRequest?.liveTurnAccumulator?.turnId;
+  const attemptId = harness.context.activeRequest?.liveTurnAccumulator?.attemptId;
+
+  handleSdkSessionEvent(
+    {
+      ...harness.deps,
+      emitSessionOpened: async () => undefined,
+      emitSessionListChanged: async () => undefined,
+    } as unknown as BackendSessionEventHandlerDeps,
+    harness.context,
+    { type: 'agent_settled' },
+  );
+  const settled = harness.emitted.find((entry) => entry.event === 'agent.settled')?.payload as Record<string, unknown>;
+  assert.deepEqual({
+    operationId: settled.operationId,
+    operationAttempt: settled.operationAttempt,
+    requestId: settled.requestId,
+    turnId: settled.turnId,
+    attemptId: settled.attemptId,
+  }, { operationId: 'send-operation', operationAttempt: 2, requestId, turnId, attemptId });
 });
 
 test('message.send accepts requests, handles preflight rejection, and guards concurrent sends', async () => {
@@ -2592,17 +2661,25 @@ test('message.send joins and replays one operation without prompting twice', asy
     method: 'message.send',
     params: {
       sessionPath: harness.context.sessionPath,
-      operationId: 'op-retry',
+      operationId: 'op-retry', operationAttempt: 1,
       text: 'only once', inputs: [], localId: 'local-retry',
     },
   };
   const first = handleBackendRequest(harness.deps, { id: 'send-1', ...request });
   await Promise.resolve();
-  const retry = handleBackendRequest(harness.deps, { id: 'send-2', ...request });
+  const retry = handleBackendRequest(harness.deps, {
+    id: 'send-2', ...request,
+    params: { ...request.params, operationAttempt: 2 },
+  });
   release();
-  const [firstResult, retryResult] = await Promise.all([first, retry]);
+  const [firstResult, retryResult] = await Promise.all([first, retry]) as Array<{
+    requestId?: string; operationId?: string; operationAttempt?: number;
+  }>;
 
-  assert.deepEqual(retryResult, firstResult);
+  assert.equal(retryResult.requestId, firstResult.requestId);
+  assert.equal(firstResult.operationAttempt, 1);
+  assert.equal(retryResult.operationAttempt, 2);
+  assert.equal(harness.context.activeRequest?.operationAttempt, 2);
   assert.equal(promptCalls, 1);
   const status = await handleBackendRequest(harness.deps, {
     id: 'status-1', method: 'operation.status',

@@ -184,10 +184,14 @@ function isOptionalSnapshotUnavailable(value: unknown): boolean {
 function isSessionPrimaryOperation(value: unknown): boolean {
   return isObject(value)
     && isString(value.operationId)
-    && (value.kind === 'session.create' || value.kind === 'session.duplicate' || value.kind === 'message.send'
+    && (value.kind === 'session.create' || value.kind === 'session.duplicate'
+      || value.kind === 'session.open' || value.kind === 'session.close'
+      || value.kind === 'backend.restart' || value.kind === 'message.send'
       || value.kind === 'message.edit' || value.kind === 'message.interrupt'
       || value.kind === 'message.continue' || value.kind === 'message.compact')
-    && (value.phase === 'awaiting-acceptance' || value.phase === 'awaiting-commit' || value.phase === 'ambiguous')
+    && (value.phase === 'awaiting-acceptance' || value.phase === 'draining'
+      || value.phase === 'awaiting-old-generation-death'
+      || value.phase === 'awaiting-commit' || value.phase === 'ambiguous')
     && Number.isInteger(value.attempt)
     && (value.attempt as number) >= 1
     && isBoolean(value.committed)
@@ -224,6 +228,8 @@ export function isSessionOpenedPayload(value: unknown): value is SessionOpenedPa
     && isOptionalString(value.operationId)
     && (value.operationAttempt === undefined
       || (Number.isInteger(value.operationAttempt) && (value.operationAttempt as number) >= 1))
+    && (value.workerGeneration === undefined
+      || (Number.isInteger(value.workerGeneration) && (value.workerGeneration as number) >= 1))
   );
 }
 
@@ -363,7 +369,14 @@ export function isToolProgressPayload(value: unknown): value is ToolProgressPayl
 export function isAgentSettledPayload(value: unknown): value is AgentSettledPayload {
   return isObject(value)
     && isString(value.sessionPath)
-    && isSessionCapabilities(value.capabilities);
+    && isSessionCapabilities(value.capabilities)
+    && (value.operationId === undefined || isString(value.operationId))
+    && (value.requestId === undefined || isString(value.requestId))
+    && (value.turnId === undefined || isString(value.turnId))
+    && (value.attemptId === undefined || isString(value.attemptId))
+    && (value.operationAttempt === undefined || (Number.isSafeInteger(value.operationAttempt) && (value.operationAttempt as number) > 0))
+    && (value.backendGeneration === undefined || (Number.isSafeInteger(value.backendGeneration) && (value.backendGeneration as number) > 0))
+    && (value.workerGeneration === undefined || (Number.isSafeInteger(value.workerGeneration) && (value.workerGeneration as number) > 0));
 }
 
 export function isBusyChangedPayload(value: unknown): value is BusyChangedPayload {
@@ -476,6 +489,8 @@ export function isPreflightFailedPayload(value: unknown): value is PreflightFail
     isObject(value)
     && isString(value.requestId)
     && isOptionalString(value.operationId)
+    && (value.operationAttempt === undefined
+      || (Number.isSafeInteger(value.operationAttempt) && (value.operationAttempt as number) > 0))
     && isString(value.sessionPath)
     && isString(value.error)
   );
@@ -487,6 +502,8 @@ export function isQueuedDeliveredPayload(value: unknown): value is QueuedDeliver
     && isString(value.sessionPath)
     && isString(value.text)
     && isOptionalString(value.operationId)
+    && (value.operationAttempt === undefined
+      || (Number.isSafeInteger(value.operationAttempt) && (value.operationAttempt as number) > 0))
     && isOptionalString(value.localId)
   );
 }

@@ -154,12 +154,20 @@ export interface BackendReadyPayload {
 export type SessionPrimaryOperationKind =
   | 'session.create'
   | 'session.duplicate'
+  | 'session.open'
+  | 'session.close'
+  | 'backend.restart'
   | 'message.send'
   | 'message.edit'
   | 'message.interrupt'
   | 'message.continue'
   | 'message.compact';
-export type SessionPrimaryOperationPhase = 'awaiting-acceptance' | 'awaiting-commit' | 'ambiguous';
+export type SessionPrimaryOperationPhase =
+  | 'awaiting-acceptance'
+  | 'draining'
+  | 'awaiting-old-generation-death'
+  | 'awaiting-commit'
+  | 'ambiguous';
 export type SessionOperationRecoveryAction = 'retry' | 'restart-backend' | 'reconcile' | null;
 
 /** Compact projection of reducer-owned operation truth. The backend continues
@@ -226,16 +234,15 @@ export interface SessionOpenedPayload {
    * selected/open tab from this released source to `session.path`; this is not
    * a create/duplicate operation identity or a reusable selection token. */
   replacesSessionPath?: string;
-  /** Host-generated create-operation identity (additive optional). When a
-   *  `session.create`/`session.duplicate` carried an `operationId`, the
-   *  resulting `session.opened` echoes it so the host can reconcile a late
-   *  success with the exact operation across retries. Absent for legacy
-   *  peers and for `session.opened` events that are not create/duplicate
-   *  publications. */
+  /** Host-generated lifecycle-operation identity (additive optional). Create,
+   * duplicate, and open publications echo it so response/event order and a
+   * dropped local acknowledgement reconcile against one reducer operation. */
   operationId?: string;
   /** Attempt that produced this publication; pairs with operationId so host
    * request-start fences remain exact across timed-out retries. */
   operationAttempt?: number;
+  /** Owning isolated worker generation for a hot publication. */
+  workerGeneration?: number;
   /** When true, `transcript`/`transcriptWindow` are NOT authoritative — the
    *  host already holds the loaded transcript and must keep its existing
    *  `bySession`/`windowBySession` entries. The backend omits the (potentially
@@ -404,6 +411,13 @@ export interface MessageAbortedPayload {
 export interface AgentSettledPayload {
   sessionPath: string;
   capabilities: SessionCapabilities;
+  operationId?: string;
+  requestId?: string;
+  turnId?: string;
+  attemptId?: string;
+  operationAttempt?: number;
+  backendGeneration?: number;
+  workerGeneration?: number;
 }
 
 export interface BusyChangedPayload {
@@ -450,6 +464,7 @@ export interface ErrorPayload {
 export interface PreflightFailedPayload {
   requestId: string;
   operationId?: string;
+  operationAttempt?: number;
   sessionPath: string;
   error: string;
 }
@@ -467,6 +482,7 @@ export interface QueuedDeliveredPayload {
   sessionPath: string;
   text: string;
   operationId?: string;
+  operationAttempt?: number;
   /** Host-side optimistic message ID of the delivered queued message, when the
    *  backend can correlate it (handoff §F: queued-message liveness). The backend
    *  mirrors the SDK's FIFO steering/followUp drain order in a per-session

@@ -166,6 +166,41 @@ test('edit acknowledgement ambiguity reconciles commit evidence and semantic sta
   assert.equal(contradictory.state.operations['edit-op']?.terminal, terminal);
 });
 
+test('edit reconciliation policy is reducer-owned and ignores duplicate attempt observations', () => {
+  const delayed = reducer(edit(readyState()).state, {
+    kind: 'MessageOperationDelayed', operationId: 'edit-op', operationKind: 'message.edit',
+    sessionPath: SESSION, backendGeneration: 7, error: 'ack lost',
+  });
+  assert.deepEqual(delayed.state.operations['edit-op']?.reconciliation, {
+    attempts: 0, maxAttempts: 4,
+  });
+  assert.equal(delayed.effects[0]?.kind, 'ScheduleOperationReconciliation');
+  if (delayed.effects[0]?.kind === 'ScheduleOperationReconciliation') {
+    assert.equal(delayed.effects[0].reconciliationAttempt, 1);
+    assert.equal(delayed.effects[0].delayMs, 0);
+  }
+
+  const pending = reducer(delayed.state, {
+    kind: 'MessageOperationStatus', operationId: 'edit-op', operationKind: 'message.edit',
+    sessionPath: SESSION, backendGeneration: 7, operationAttempt: 1,
+    reconciliationAttempt: 1, state: 'pending',
+  });
+  assert.equal(pending.state.operations['edit-op']?.reconciliation?.attempts, 1);
+  assert.equal(pending.effects[0]?.kind, 'ScheduleOperationReconciliation');
+  if (pending.effects[0]?.kind === 'ScheduleOperationReconciliation') {
+    assert.equal(pending.effects[0].reconciliationAttempt, 2);
+    assert.equal(pending.effects[0].delayMs, 1_000);
+  }
+
+  const duplicate = reducer(pending.state, {
+    kind: 'MessageOperationStatus', operationId: 'edit-op', operationKind: 'message.edit',
+    sessionPath: SESSION, backendGeneration: 7, operationAttempt: 1,
+    reconciliationAttempt: 1, state: 'failed', committed: false,
+  });
+  assert.strictEqual(duplicate.state, pending.state);
+  assert.deepEqual(duplicate.effects, []);
+});
+
 test('replacement preflight failure before edit acknowledgement proves commit and cannot restore stale history', () => {
   const optimistic = edit(readyState()).state;
   const failed = reducer(optimistic, {

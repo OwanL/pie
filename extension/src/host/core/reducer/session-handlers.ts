@@ -37,8 +37,56 @@ import {
 } from '../operation-registry.js';
 import { handleEditResult, handlePreflightFailed } from './result-handlers.js';
 import { interruptLivePipelineForSession } from './live-pipeline-handlers.js';
+import type { SessionOperation } from '../operation-types.js';
 
 const BACKEND_EXIT_TOMBSTONE_GRACE_MS = 15_000;
+const OPERATION_RECONCILIATION_MAX_ATTEMPTS = 4;
+const OPERATION_RECONCILIATION_BASE_DELAY_MS = 1_000;
+
+function scheduleOperationReconciliation(
+  operation: SessionOperation,
+  reconciliationAttempt: number,
+  delayMs: number,
+): Effect {
+  return {
+    kind: 'ScheduleOperationReconciliation',
+    corrId: operation.causal.selectionToken,
+    operationId: operation.operationId,
+    operationKind: operation.kind as Extract<SessionOperation['kind'], `message.${string}`>,
+    sessionPath: operation.session.resolvedPath ?? operation.session.pendingPath,
+    backendGeneration: operation.backendGeneration,
+    operationAttempt: operation.attempt,
+    reconciliationAttempt,
+    delayMs,
+  };
+}
+
+function releaseOperationResources(operation: SessionOperation): Effect {
+  return {
+    kind: 'ReleaseOperationResources',
+    corrId: operation.causal.selectionToken,
+    operationId: operation.operationId,
+    operationAttempt: operation.attempt,
+  };
+}
+
+function withStartedReconciliation(operation: SessionOperation): SessionOperation {
+  return {
+    ...operation,
+    reconciliation: { attempts: 0, maxAttempts: OPERATION_RECONCILIATION_MAX_ATTEMPTS },
+  };
+}
+
+function scheduleNextReconciliation(operation: SessionOperation): Effect | null {
+  const attempts = operation.reconciliation?.attempts ?? 0;
+  const maxAttempts = operation.reconciliation?.maxAttempts ?? OPERATION_RECONCILIATION_MAX_ATTEMPTS;
+  if (attempts >= maxAttempts) return null;
+  const nextAttempt = attempts + 1;
+  const delayMs = attempts === 0
+    ? 0
+    : OPERATION_RECONCILIATION_BASE_DELAY_MS * (2 ** Math.max(0, attempts - 1));
+  return scheduleOperationReconciliation(operation, nextAttempt, delayMs);
+}
 
 /** Deterministic corrId suffix for a session's pending MCP recycle retry —
  *  pure function of the override set, unique per effective change. */
@@ -452,6 +500,38 @@ export function handleSessionOpened(state: ArchState, event: Extract<Event, { ki
     next = clearAuthoritativeIdleLiveState(next, sessionPath);
   }
 
+  if (payload.operationId) {
+    const operation = next.operations[payload.operationId];
+    if (operation?.kind === 'session.open'
+      && operation.backendGeneration === event.backendGeneration
+      && operation.session.pendingPath === sessionPath) {
+      const settled = settleSessionOperationSucceeded(operation, {
+        pendingPath: sessionPath,
+        resolvedPath: sessionPath,
+        attempt: payload.operationAttempt,
+        backendGeneration: event.backendGeneration,
+      });
+      const authoritative = settled ?? (operation.terminal ? operation : undefined);
+      if (authoritative) {
+        next = {
+          ...next,
+          operations: {
+            ...next.operations,
+            [payload.operationId]: {
+              ...authoritative,
+              ...(payload.workerGeneration !== undefined ? { workerGeneration: payload.workerGeneration } : {}),
+              session: {
+                ...authoritative.session,
+                ...(payload.session.sessionId ? { sessionId: payload.session.sessionId } : {}),
+                ...(payload.sessionUsage?.branchId ? { branchId: payload.sessionUsage.branchId } : {}),
+              },
+            },
+          },
+        };
+      }
+    }
+  }
+
   return { state: next, effects };
 }
 
@@ -576,6 +656,87 @@ export function handleSessionNameDerived(state: ArchState, event: Extract<Event,
 }
 
 export function handleAgentSettled(state: ArchState, event: Extract<Event, { kind: 'AgentSettled' }>): ReducerResult {
+  if (event.backendGeneration !== undefined
+    && event.currentBackendGeneration !== undefined
+    && event.backendGeneration !== event.currentBackendGeneration) {
+    return { state, effects: [] };
+  }
+
+  const priorSettlement = state.sessions.settlementGenerationBySession[event.sessionPath];
+  if (event.workerGeneration !== undefined
+    && priorSettlement !== undefined
+    && priorSettlement.backendGeneration === event.backendGeneration
+    && event.workerGeneration < priorSettlement.workerGeneration) {
+    return { state, effects: [] };
+  }
+
+  const liveTurn = state.livePipeline.turnsBySession[event.sessionPath];
+  const currentTurn = state.pending.currentTurnBySession[event.sessionPath];
+  if ((liveTurn && (event.requestId !== liveTurn.requestId
+      || event.turnId !== liveTurn.turnId
+      || event.attemptId !== liveTurn.attemptId
+      || (liveTurn.operationId !== undefined && event.operationId !== liveTurn.operationId)))
+    || (currentTurn && event.requestId !== currentTurn.requestId)) {
+    return { state, effects: [] };
+  }
+
+  const messageOperations = Object.values(state.operations).filter((candidate) =>
+    candidate.kind.startsWith('message.')
+    && (candidate.session.resolvedPath ?? candidate.session.pendingPath) === event.sessionPath,
+  );
+  const unresolvedMessageOperation = messageOperations.find((candidate) => !candidate.terminal);
+  if (event.operationId === undefined && unresolvedMessageOperation) return { state, effects: [] };
+
+  if (event.operationId !== undefined) {
+    const operation = state.operations[event.operationId];
+    const operationPath = operation?.session.resolvedPath ?? operation?.session.pendingPath;
+    if (!operation
+      || !operation.kind.startsWith('message.')
+      || operationPath !== event.sessionPath
+      || (event.backendGeneration !== undefined && operation.backendGeneration !== event.backendGeneration)
+      || (operation.kind === 'message.send'
+        ? event.operationAttempt !== operation.attempt
+        : event.operationAttempt !== undefined && operation.attempt !== event.operationAttempt)) {
+      return { state, effects: [] };
+    }
+
+    // Registry insertion order is reducer-owned command order. Retain terminal
+    // records as lineage: after current/live turn records clear, a delayed
+    // settlement for an older operation on the same worker must not overwrite
+    // capabilities established by a newer terminal operation.
+    const latestMessageOperation = messageOperations.at(-1);
+    if (latestMessageOperation && latestMessageOperation.operationId !== event.operationId) {
+      return { state, effects: [] };
+    }
+  }
+
+  if (priorSettlement !== undefined
+    && event.workerGeneration !== undefined
+    && priorSettlement.backendGeneration === event.backendGeneration
+    && priorSettlement.workerGeneration === event.workerGeneration) {
+    const sameOperation = priorSettlement.operationId === event.operationId;
+    if (priorSettlement.operationId !== undefined && !sameOperation) {
+      const priorIndex = messageOperations.findIndex((candidate) => candidate.operationId === priorSettlement.operationId);
+      const eventIndex = messageOperations.findIndex((candidate) => candidate.operationId === event.operationId);
+      if (eventIndex < 0 || (priorIndex >= 0 && eventIndex < priorIndex)) return { state, effects: [] };
+    }
+    if (sameOperation) {
+      if (priorSettlement.operationAttempt !== undefined
+        && (event.operationAttempt === undefined
+          || event.operationAttempt < priorSettlement.operationAttempt)) {
+        return { state, effects: [] };
+      }
+      if (event.operationAttempt === priorSettlement.operationAttempt
+        && (event.requestId !== priorSettlement.requestId
+          || event.turnId !== priorSettlement.turnId
+          || event.attemptId !== priorSettlement.attemptId)) {
+        return { state, effects: [] };
+      }
+    } else if (event.operationId === undefined && priorSettlement.operationId !== undefined) {
+      return { state, effects: [] };
+    }
+  }
+
   return {
     state: {
       ...state,
@@ -585,6 +746,20 @@ export function handleAgentSettled(state: ArchState, event: Extract<Event, { kin
           ...state.sessions.capabilitiesBySession,
           [event.sessionPath]: event.capabilities,
         },
+        settlementGenerationBySession: event.workerGeneration === undefined
+          ? state.sessions.settlementGenerationBySession
+          : {
+              ...state.sessions.settlementGenerationBySession,
+              [event.sessionPath]: {
+                ...(event.backendGeneration !== undefined ? { backendGeneration: event.backendGeneration } : {}),
+                workerGeneration: event.workerGeneration,
+                ...(event.operationId !== undefined ? { operationId: event.operationId } : {}),
+                ...(event.requestId !== undefined ? { requestId: event.requestId } : {}),
+                ...(event.turnId !== undefined ? { turnId: event.turnId } : {}),
+                ...(event.attemptId !== undefined ? { attemptId: event.attemptId } : {}),
+                ...(event.operationAttempt !== undefined ? { operationAttempt: event.operationAttempt } : {}),
+              },
+            },
       },
     },
     effects: [],
@@ -980,7 +1155,10 @@ export function handleSessionsInterrupted(state: ArchState, event: Extract<Event
         inputs: restoredComposerBySession.get(op.sessionPath)?.inputs ?? op.inputs ?? [],
       },
     });
-    rollbackEffects.push({ kind: 'ClearSendTimer', corrId });
+    rollbackEffects.push({
+      kind: 'ClearSendTimer', corrId,
+      ...(op.priorPruningMode ? { restorePruningMode: op.priorPruningMode } : {}),
+    });
   }
   const nextState = produce(state, (draft) => {
     for (const sessionPath of sessionPaths) {
@@ -1232,30 +1410,66 @@ export function handleSessionScopeCleared(state: ArchState, event: Extract<Event
 
 export function handleSendOperationDelayed(state: ArchState, event: Extract<Event, { kind: 'SendOperationDelayed' }>): ReducerResult {
   const operation = state.operations[event.operationId];
-  if (!operation || operation.kind !== 'message.send') return { state, effects: [] };
+  if (!operation || operation.kind !== 'message.send'
+    || (event.operationAttempt !== undefined && event.operationAttempt !== operation.attempt)
+    || (operation.phase === 'ambiguous' && operation.reconciliation)) return { state, effects: [] };
   const delayed = markSessionOperationAmbiguous(operation, {
     pendingPath: operation.session.pendingPath,
     backendGeneration: event.backendGeneration,
   }, 'reconcile');
   if (!delayed) return { state, effects: [] };
+  const reconciling = withStartedReconciliation(delayed);
   return {
     state: produce(state, (draft) => {
-      draft.operations[event.operationId] = delayed;
+      draft.operations[event.operationId] = reconciling;
       draft.settings.notice = 'Send acknowledgement delayed. Pie is reconciling this message; do not send it again.';
       draft.settings.noticeKind = null;
       draft.settings.noticeRaw = null;
       draft.settings.noticeSessionPath = event.sessionPath;
     }),
-    effects: [],
+    effects: [scheduleNextReconciliation(reconciling)!],
   };
 }
 
 export function handleSendOperationStatus(state: ArchState, event: Extract<Event, { kind: 'SendOperationStatus' }>): ReducerResult {
-  const operation = state.operations[event.operationId];
+  let operation = state.operations[event.operationId];
   if (!operation || operation.kind !== 'message.send' || operation.terminal
-    || operation.backendGeneration !== event.backendGeneration) return { state, effects: [] };
+    || operation.backendGeneration !== event.backendGeneration
+    || (event.operationAttempt !== undefined && event.operationAttempt !== operation.attempt)) {
+    return { state, effects: [] };
+  }
+  if (event.reconciliationAttempt !== undefined) {
+    const reconciliation = operation.reconciliation;
+    if (!reconciliation || event.reconciliationAttempt !== reconciliation.attempts + 1) {
+      return { state, effects: [] };
+    }
+    operation = {
+      ...operation,
+      reconciliation: {
+        ...reconciliation,
+        attempts: event.reconciliationAttempt,
+        ...(event.error ? { lastError: event.error } : {}),
+      },
+    };
+    if (event.state === 'pending' || event.state === 'reconciliation-unavailable') {
+      const next = scheduleNextReconciliation(operation);
+      if (next) {
+        return {
+          state: { ...state, operations: { ...state.operations, [operation.operationId]: operation } },
+          effects: [next],
+        };
+      }
+      event = { ...event, state: 'reconciliation-exhausted', error: event.error ?? operation.reconciliation?.lastError };
+    }
+  }
   let updated = operation;
-  if (event.state === 'accepted') {
+  if (event.state === 'accepted' && event.committed) {
+    updated = settleSessionOperationSucceeded(operation, {
+      pendingPath: operation.session.pendingPath,
+      resolvedPath: event.sessionPath,
+      backendGeneration: event.backendGeneration,
+    }) ?? operation;
+  } else if (event.state === 'accepted') {
     updated = markSessionOperationAccepted(operation, {
       pendingPath: operation.session.pendingPath,
       backendGeneration: event.backendGeneration,
@@ -1288,6 +1502,30 @@ export function handleSendOperationStatus(state: ArchState, event: Extract<Event
     }, 'reconcile');
     updated = ambiguous ? { ...ambiguous, recovery: 'restart-backend' } : operation;
   }
+  // Acceptance without commit proves only that the backend received the send.
+  // Keep observing the reducer-owned bounded ledger schedule until semantic
+  // commit or a typed terminal outcome is known; never release after one
+  // accepted-but-uncommitted read.
+  if (event.state === 'accepted' && event.committed !== true
+    && event.reconciliationAttempt !== undefined) {
+    const next = scheduleNextReconciliation(updated);
+    if (next) {
+      return {
+        state: { ...state, operations: { ...state.operations, [updated.operationId]: updated } },
+        effects: [next],
+      };
+    }
+    event = {
+      ...event,
+      state: 'reconciliation-exhausted',
+      error: event.error ?? updated.reconciliation?.lastError,
+    };
+    const ambiguous = markSessionOperationAmbiguous(updated, {
+      pendingPath: updated.session.pendingPath,
+      backendGeneration: event.backendGeneration,
+    }, 'reconcile');
+    updated = ambiguous ? { ...ambiguous, recovery: 'restart-backend' } : updated;
+  }
   if (updated === operation) return { state, effects: [] };
   const owningCorrIds = [
     ...Object.entries(state.pending.ops),
@@ -1310,7 +1548,7 @@ export function handleSendOperationStatus(state: ArchState, event: Extract<Event
         if (list && index >= 0) list.splice(index, 1);
       }
     }
-    if (event.state === 'committed') {
+    if (event.state === 'committed' || (event.state === 'accepted' && event.committed === true)) {
       for (const corrId of owningCorrIds) {
         delete draft.pending.ops[corrId];
         delete draft.pending.promoted[corrId];
@@ -1360,46 +1598,106 @@ export function handleSendOperationStatus(state: ArchState, event: Extract<Event
       });
       return {
         state: rollback.state,
-        effects: [...rollback.effects, { kind: 'ClearSendTimer', corrId: pendingEntry[0] }],
+        effects: [
+          ...rollback.effects,
+          {
+            kind: 'ClearSendTimer', corrId: pendingEntry[0],
+            ...(pendingEntry[1].priorPruningMode
+              ? { restorePruningMode: pendingEntry[1].priorPruningMode }
+              : {}),
+          },
+          releaseOperationResources(operation),
+        ],
       };
     }
   }
-  return {
-    state: registryState,
-    effects: updated.terminal?.outcome === 'settled'
-      ? (owningCorrIds.length > 0 ? owningCorrIds : [operation.causal.selectionToken])
-        .map((corrId) => ({ kind: 'ClearSendTimer' as const, corrId }))
-      : [],
-  };
+  const effects: Effect[] = [];
+  if (updated.terminal?.outcome === 'settled') {
+    effects.push(...(owningCorrIds.length > 0 ? owningCorrIds : [operation.causal.selectionToken])
+      .map((corrId) => {
+        const mode = (state.pending.promoted[corrId] ?? state.pending.ops[corrId])?.priorPruningMode;
+        return {
+          kind: 'ClearSendTimer' as const, corrId,
+          ...(mode ? { restorePruningMode: mode } : {}),
+        };
+      }));
+  }
+  if (updated.terminal || event.reconciliationAttempt !== undefined) {
+    const release = releaseOperationResources(operation);
+    const corrId = owningCorrIds[0];
+    const mode = corrId
+      ? (state.pending.promoted[corrId] ?? state.pending.ops[corrId])?.priorPruningMode
+      : undefined;
+    effects.push(event.state === 'reconciliation-exhausted'
+      && release.kind === 'ReleaseOperationResources' && mode
+      ? { ...release, restorePruningMode: mode }
+      : release);
+  }
+  return { state: registryState, effects };
 }
 
 export function handleMessageOperationDelayed(state: ArchState, event: Extract<Event, { kind: 'MessageOperationDelayed' }>): ReducerResult {
   const operation = state.operations[event.operationId];
-  if (!operation || operation.kind !== event.operationKind) return { state, effects: [] };
+  if (!operation || operation.kind !== event.operationKind
+    || (operation.phase === 'ambiguous' && operation.reconciliation)) return { state, effects: [] };
   const delayed = markSessionOperationAmbiguous(operation, {
     pendingPath: operation.session.pendingPath,
     backendGeneration: event.backendGeneration,
   }, 'reconcile');
   if (!delayed) return { state, effects: [] };
+  const reconciling = withStartedReconciliation(delayed);
   const label = event.operationKind === 'message.continue' ? 'Continue'
     : event.operationKind === 'message.compact' ? 'History compaction'
       : event.operationKind === 'message.edit' ? 'Edit' : 'Interrupt';
   return {
     state: produce(state, (draft) => {
-      draft.operations[event.operationId] = delayed;
+      draft.operations[event.operationId] = reconciling;
       draft.settings.notice = `${label} acknowledgement delayed. Pie is reconciling this operation; do not retry it.`;
       draft.settings.noticeKind = null;
       draft.settings.noticeRaw = null;
       draft.settings.noticeSessionPath = event.sessionPath;
     }),
-    effects: [],
+    effects: [scheduleNextReconciliation(reconciling)!],
   };
 }
 
 export function handleMessageOperationStatus(state: ArchState, event: Extract<Event, { kind: 'MessageOperationStatus' }>): ReducerResult {
-  const operation = state.operations[event.operationId];
+  let operation = state.operations[event.operationId];
   if (!operation || operation.kind !== event.operationKind || operation.terminal
-    || operation.backendGeneration !== event.backendGeneration) return { state, effects: [] };
+    || operation.backendGeneration !== event.backendGeneration
+    || (event.operationAttempt !== undefined && event.operationAttempt !== operation.attempt)) {
+    return { state, effects: [] };
+  }
+  if (event.reconciliationAttempt !== undefined) {
+    const reconciliation = operation.reconciliation;
+    if (!reconciliation || event.reconciliationAttempt !== reconciliation.attempts + 1) {
+      return { state, effects: [] };
+    }
+    operation = {
+      ...operation,
+      reconciliation: {
+        ...reconciliation,
+        attempts: event.reconciliationAttempt,
+        ...(event.error ? { lastError: event.error } : {}),
+      },
+    };
+    if (event.state === 'pending' || event.state === 'reconciliation-unavailable') {
+      const next = scheduleNextReconciliation(operation);
+      if (next) {
+        return {
+          state: { ...state, operations: { ...state.operations, [operation.operationId]: operation } },
+          effects: [next],
+        };
+      }
+      event = { ...event, state: 'reconciliation-exhausted', error: event.error ?? operation.reconciliation?.lastError };
+    }
+  }
+  if (event.state === 'accepted' && event.operationKind !== 'message.edit'
+    && (event.committed === true
+      || (event.operationKind === 'message.interrupt'
+        && (event.settled === true || (event.alreadyStopped === true && event.settled !== false))))) {
+    event = { ...event, state: 'committed' };
+  }
   const editCommitMayHaveOccurred = operation.kind === 'message.edit'
     && (event.committed === true || (event.committed === undefined
       && (event.state === 'generation-ended'
@@ -1567,7 +1865,25 @@ export function handleMessageOperationStatus(state: ArchState, event: Extract<Ev
       });
     }
   }
-  return { state: next, effects: [] };
+  const shouldRelease = updated.terminal
+    || (updated.kind === 'message.edit' && event.state === 'accepted' && event.committed === true);
+  const nextReconciliation = event.reconciliationAttempt !== undefined && !shouldRelease
+    ? scheduleNextReconciliation(updated)
+    : null;
+  if (event.reconciliationAttempt !== undefined && !shouldRelease && !nextReconciliation) {
+    return handleMessageOperationStatus(next, {
+      ...event,
+      reconciliationAttempt: undefined,
+      state: 'reconciliation-exhausted',
+      error: event.error ?? updated.reconciliation?.lastError,
+    });
+  }
+  return {
+    state: next,
+    effects: shouldRelease
+      ? [releaseOperationResources(operation)]
+      : nextReconciliation ? [nextReconciliation] : [],
+  };
 }
 
 export function handleCreateOperationDelayed(state: ArchState, event: Extract<Event, { kind: 'CreateOperationDelayed' }>): ReducerResult {

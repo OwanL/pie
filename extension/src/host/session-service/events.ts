@@ -197,7 +197,12 @@ export class SessionServiceEvents {
       onAgentSettled: (payload) => {
         const sessionPath = this.requireEventSessionPath('agent.settled', payload.sessionPath);
         if (!sessionPath) return;
-        this.dispatchArch({ kind: 'AgentSettled', sessionPath, capabilities: payload.capabilities });
+        this.dispatchArch({
+          kind: 'AgentSettled',
+          ...payload,
+          sessionPath,
+          currentBackendGeneration: this.state.getBackendGeneration(),
+        });
         this.scheduleRender();
       },
       onBusyChanged: (payload) => this.onBusyChanged(payload),

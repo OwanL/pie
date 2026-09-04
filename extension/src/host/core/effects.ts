@@ -28,6 +28,7 @@ export interface EffectBase {
 export interface SendRpcEffect extends EffectBase {
   kind: 'SendRpc';
   operationId?: string;
+  operationAttempt?: number;
   backendGeneration?: number;
   sessionPath: string;
   text: string;
@@ -41,9 +42,8 @@ export interface SendRpcEffect extends EffectBase {
   composedText: string;
   /** User content parts for rich rendering of the optimistic message. */
   userParts?: UserContentPart[];
-  /** Brief H: prior pruning mode to restore after a "retry without pruning" send
-   *  resolves (threads `SendCommand.priorPruningMode` → the EffectRunner's
-   *  in-flight send, which restores it at commit/fire/pre-ack-failure). */
+  /** Brief H compatibility payload. Registered operations keep restoration
+   * intent in reducer state and describe it on their cleanup effect. */
   priorPruningMode?: PruningMode;
 }
 
@@ -109,6 +109,13 @@ export interface InterruptRpcEffect extends EffectBase {
   operationAttempt?: number;
   backendGeneration?: number;
   sessionPath: string;
+  /** Reducer-selected pre-ack sends whose execution controller may be aborted. */
+  abortSendCorrIds?: string[];
+  /** Reducer-selected queued edits that must not cross their destructive boundary. */
+  cancelQueuedOperationIds?: string[];
+  /** Reducer evidence that unresolved session mutation work requires the
+   * backend priority lane instead of ordinary FIFO admission. */
+  usePriorityLane?: boolean;
 }
 
 export interface RequestLiveTurnCheckpointEffect extends EffectBase {
@@ -141,6 +148,30 @@ export interface OpenSessionEffect extends EffectBase {
   kind: 'OpenSession';
   sessionPath: string;
   selectionToken: string;
+  operationId?: string;
+  operationAttempt?: number;
+  backendGeneration?: number;
+}
+
+/** Opaque timer requested by the reducer after an open acknowledgement becomes
+ * ambiguous. The timer carries no lifecycle authority; its due event is fenced
+ * against the current reducer-owned operation attempt. */
+export interface ScheduleOpenSessionReconciliationEffect extends EffectBase {
+  kind: 'ScheduleOpenSessionReconciliation';
+  operationId: string;
+  sessionPath: string;
+  operationAttempt: number;
+  backendGeneration: number;
+  delayMs: number;
+}
+
+/** Apply reducer-decided selection recovery after bounded repeat-safe open
+ * reconciliation is exhausted. */
+export interface RecoverOpenSessionEffect extends EffectBase {
+  kind: 'RecoverOpenSession';
+  selectionToken: string;
+  operationAttempt: number;
+  notice: string;
 }
 
 export interface CreateSessionEffect extends EffectBase {
@@ -168,6 +199,11 @@ export interface NotifySessionViewedEffect extends EffectBase {
 
 export interface PersistTabsEffect extends EffectBase {
   kind: 'PersistTabs';
+  /** Present when persistence is one acknowledgement in a lifecycle barrier. */
+  operationId?: string;
+  backendGeneration?: number;
+  /** Omitted for the ordinary/initial tab-persistence acknowledgement. */
+  acknowledgementKey?: 'privacy-marker-removal';
   openTabPaths: string[];
   activeSessionPath: string | null;
   pinnedTabPaths: string[];
@@ -404,6 +440,8 @@ export interface SetSessionTitlesSettingsEffect extends EffectBase {
 export interface CloseSessionEffect extends EffectBase {
   kind: 'CloseSession';
   sessionPath: string;
+  operationId?: string;
+  backendGeneration?: number;
   /** Private sessions must be forgotten instead of retained for reopening. */
   privacyMode?: boolean;
   /** The next tab to activate after closing, computed by the reducer via
@@ -414,6 +452,12 @@ export interface CloseSessionEffect extends EffectBase {
   nextPath: string | null;
   /** Whether closing this tab changed the visual selection. */
   selectionChanged?: boolean;
+}
+
+export interface RestartBackendEffect extends EffectBase {
+  kind: 'RestartBackend';
+  operationId: string;
+  backendGeneration: number;
 }
 
 export interface DuplicateSessionEffect extends EffectBase {
@@ -445,6 +489,8 @@ export type Effect =
   | ClearQueueRpcEffect
   | TruncateRpcEffect
   | OpenSessionEffect
+  | ScheduleOpenSessionReconciliationEffect
+  | RecoverOpenSessionEffect
   | CreateSessionEffect
   | NotifySessionViewedEffect
   | PersistTabsEffect
@@ -482,6 +528,7 @@ export type Effect =
   | SetToolResultPruningSettingsEffect
   | SetSessionTitlesSettingsEffect
   | CloseSessionEffect
+  | RestartBackendEffect
   | DuplicateSessionEffect
   | DrainPendingSendQueueEffect
   | DrainBackendReadyQueueEffect
@@ -490,6 +537,8 @@ export type Effect =
   | CancelBackendReadyWatchdogEffect
   | MarkPrepassSucceededEffect
   | ClearSendTimerEffect
+  | ScheduleOperationReconciliationEffect
+  | ReleaseOperationResourcesEffect
   | ClearLastCompactionEffect;
 
 /**
@@ -560,6 +609,12 @@ export interface CancelBackendReadyWatchdogEffect extends EffectBase {
  */
 export interface MarkPrepassSucceededEffect extends EffectBase {
   kind: 'MarkPrepassSucceeded';
+  /** Registered operations carry immutable timer-event correlation so the
+   * runner stores only the opaque TimerHandle. Absent for legacy callers. */
+  operationId?: string;
+  operationAttempt?: number;
+  sessionPath?: string;
+  backendGeneration?: number;
 }
 
 /**
@@ -574,5 +629,30 @@ export interface MarkPrepassSucceededEffect extends EffectBase {
  */
 export interface ClearSendTimerEffect extends EffectBase {
   kind: 'ClearSendTimer';
+  /** Reducer-described user preference restoration; never retained in a
+   * registered runner resource map. */
+  restorePruningMode?: PruningMode;
+}
+
+/** Reducer-described bounded read-only ledger observation. The attempt and
+ * delay are semantic policy; the runner owns only the scheduled timer and RPC. */
+export interface ScheduleOperationReconciliationEffect extends EffectBase {
+  kind: 'ScheduleOperationReconciliation';
+  operationId: string;
+  operationKind: 'message.send' | 'message.edit' | 'message.interrupt' | 'message.continue' | 'message.compact';
+  sessionPath: string;
+  backendGeneration: number;
+  operationAttempt: number;
+  reconciliationAttempt: number;
+  delayMs: number;
+}
+
+/** Release opaque execution resources only after the reducer has decided the
+ * operation no longer requires acknowledgement reconciliation or a barrier. */
+export interface ReleaseOperationResourcesEffect extends EffectBase {
+  kind: 'ReleaseOperationResources';
+  operationId: string;
+  operationAttempt: number;
+  restorePruningMode?: PruningMode;
 }
 

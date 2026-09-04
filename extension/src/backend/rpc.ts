@@ -182,6 +182,9 @@ export interface SessionCreateParams {
 
 export interface SessionOpenParams extends SessionPathParams {
   selectionToken?: string;
+  /** Stable host lifecycle identity echoed by session.opened. */
+  operationId?: string;
+  operationAttempt?: number;
   /** How much transcript to ship back. Defaults to `'tail'` (full tail window)
    *  for backward compatibility; `'skip'` requests a metadata-only response
    *  (host already has the transcript loaded). See {@link TranscriptMode}. */
@@ -309,10 +312,14 @@ export function validateSessionOpen(params: unknown): SessionOpenParams {
   if (transcript !== undefined && transcript !== 'tail' && transcript !== 'skip') {
     fail('session.open', `transcript must be 'tail' or 'skip' when provided`);
   }
+  const operationId = readOperationId('session.open', params);
+  const operationAttempt = readOperationAttempt('session.open', params);
   return {
     sessionPath,
     selectionToken: readSelectionToken('session.open', params),
     transcript: transcript as SessionOpenParams['transcript'],
+    ...(operationId !== undefined ? { operationId } : {}),
+    ...(operationAttempt !== undefined ? { operationAttempt } : {}),
   };
 }
 

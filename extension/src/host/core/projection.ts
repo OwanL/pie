@@ -61,7 +61,7 @@ export function projectSessionCapabilities(
     kind === 'message.interrupt' ? 3 : kind === 'message.edit' ? 2 : kind.startsWith('message.') ? 1 : 0;
 
   for (const operation of Object.values(state.operations)) {
-    if (operation.terminal || operation.phase === 'settled') continue;
+    if (operation.terminal || operation.phase === 'settled' || operation.kind === 'backend.restart') continue;
     const sessionPath = operation.session.resolvedPath ?? operation.session.pendingPath;
     const current = primaryBySession[sessionPath];
     if (!current || priority(operation.kind) > priority(current.kind)) {

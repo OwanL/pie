@@ -99,9 +99,9 @@ test('arrival-order: send → failure rolls back pending and notifies', () => {
   assert.ok(!r2.state.transcript.bySession['/s']?.some((m: import('../../../../src/shared/protocol').ChatMessage) => m.id === 'local:c2'), 'optimistic message should be removed');
   // Notice set directly in state
   assert.ok(r2.state.settings.notice);
-  // Only PostImperative is a remaining real effect
-  assert.equal(r2.effects.length, 1);
-  assert.equal(r2.effects[0]?.kind, 'PostImperative');
+  assert.ok(r2.effects.some((effect) => effect.kind === 'PostImperative'));
+  assert.ok(r2.effects.some((effect) => effect.kind === 'ClearSendTimer'));
+  assert.ok(r2.effects.some((effect) => effect.kind === 'ReleaseOperationResources'));
 });
 
 // ─── send-then-delta-before-ack ─────────────────────────────────────────────
@@ -340,7 +340,7 @@ test('arrival-order: edit → success → unhandled event — edit pending clear
   // 2. EditResult{ok:true} arrives.
   const r2 = reducer(r1.state, { kind: 'EditResult', corrId: 'c6', sessionPath: '/s', ok: true });
   assert.equal(r2.state.pending.ops['c6'], undefined, 'edit pending cleared');
-  assert.deepEqual(r2.effects, []);
+  assert.equal(r2.effects[0]?.kind, 'ScheduleOperationReconciliation');
 
   // 3. Streaming events arrive after edit ack — state stays clean.
   const stream: Event = {

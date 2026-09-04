@@ -8,6 +8,7 @@ import type { SdkSessionEvent } from '../../../src/backend/sdk';
 import type { SessionContext } from '../../../src/backend/server-types';
 import type { ProviderIncident } from '../../../src/backend/provider-incident';
 import type { ProviderTransportObservation } from '../../../src/backend/provider-progress-bus';
+import { BackendLiveTurnAccumulator } from '../../../src/backend/live-turn-accumulator';
 import { WorkerRuntimeHost } from '../../../src/backend/worker-runtime-host';
 import type { SessionOpenedPayload } from '../../../src/shared/protocol';
 
@@ -433,10 +434,42 @@ test('agent_settled refreshes session.opened from the current session and preser
     return makeOpenedPayload(openedPath, freshTranscript, { selectionToken, operationId, operationAttempt });
   };
 
-  internals.handleSessionEvent(makeSessionEventContext(sessionPath), { type: 'agent_settled' });
+  const context = makeSessionEventContext(sessionPath);
+  context.activeRequest = {
+    id: 'request-1', operationId: 'operation-1', operationAttempt: 3,
+    messageIndex: 1, aborted: false,
+    liveTurnAccumulator: new BackendLiveTurnAccumulator({
+      protocolVersion: 7,
+      sessionPath,
+      requestId: 'request-1',
+      operationId: 'operation-1',
+      turnId: 'turn-1',
+      attemptId: 'attempt-1',
+      canonicalMessageId: 'message-1',
+      startedAt: 1,
+    }),
+  };
+  internals.handleSessionEvent(context, { type: 'agent_settled' });
   await waitForAsyncEvent();
 
   assert.deepEqual(rebuildCalls, [[sessionPath, 'selection-1', 'operation-1', 3]]);
+  const settledFrame = sent.find((frame) => frame.kind === 'runtime.event' && frame.event === 'agent.settled');
+  assert.deepEqual(settledFrame?.payload, {
+    sessionPath,
+    capabilities: {
+      billableActivity: false,
+      canInterrupt: false,
+      canCompact: true,
+      canContinue: false,
+    },
+    operationId: 'operation-1',
+    requestId: 'request-1',
+    turnId: 'turn-1',
+    attemptId: 'attempt-1',
+    operationAttempt: 3,
+    backendGeneration: 1,
+    workerGeneration: 1,
+  });
   const openedFrames = sent.filter((frame) => frame.kind === 'runtime.event' && frame.event === 'session.opened');
   assert.equal(openedFrames.length, 1);
   const emittedPayload = openedFrames[0]!.payload as SessionOpenedPayload;

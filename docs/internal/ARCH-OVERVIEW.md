@@ -28,7 +28,7 @@ All core architecture types live in `extension/src/host/core/`:
 | `events.ts` | `Event` discriminated union — inputs to the reducer (commands, backend events, effect results). |
 | `effects.ts` | `Effect` discriminated union — side-effect descriptors grouped into namespaces (`SessionRpc`, `SessionLifecycle`, `FileOperation`, `Notification`). |
 | `reducer.ts` | Pure function `(ArchState, Event) → { archState, effects }`. No I/O. |
-| `effect-runner.ts` | Executes effects, posts result events back to reducer. Owns no state. |
+| `effect-runner.ts` | Executes effects and posts observations back to the reducer. Retains opaque timers/controllers/promises only; semantic lifecycle state lives in `ArchState.operations`. |
 | `projection.ts` | Pure function `ArchState → ViewState`. Computes what the webview should display. |
 | `event-dispatch.ts` | Dispatches raw backend JSON lines — read + `JSON.parse`d in `host/backend/client.ts` (`attachJsonlLineReader`, `JSON.parse`) — as typed `BackendEvent` objects to the reducer. |
 | `message-router.ts` | Converts `WebviewToHostMessage` into `Command` objects and dispatches to the reducer. |
@@ -73,7 +73,8 @@ All application state lives in `ArchState` — no separate Redux store.
 | `settings` | Model settings, chat prefs, pruning config, available models, backend ready | `settings-slice` + `ui-slice` (backendReady) |
 | `composer` | Pending composer inputs, active run summaries | `session-state-slice` (partial) |
 | `fileChanges` | File change entries, derived state | `file-changes-slice` |
-| `pending` | Optimistic ops table, interrupt flags | was already in `ArchState` |
+| `pending` | Exact optimistic rollback snapshots and execution queues | was already in `ArchState` |
+| `operations` | Stable operation identity, source/causality, session/branch and process generations, phase/ack/commit/reconciliation, recovery, immutable terminal outcome | common lifecycle registry |
 
 ---
 
@@ -84,7 +85,8 @@ All application state lives in `ArchState` — no separate Redux store.
 | **Command** | Webview → host intent, carries `corrId` | `host/core/commands.ts` |
 | **Event** | Reducer input (command, backend event, or effect result) | `host/core/events.ts` |
 | **Effect** | Plain data describing a side effect, grouped by namespace | `host/core/effects.ts` |
-| **EffectRunner** | Executes effects, produces result events | `host/core/effect-runner.ts` |
+| **EffectRunner** | Executes effects and retains opaque execution resources only | `host/core/effect-runner.ts` |
+| **Operation registry** | Reducer-owned lifecycle authority for accepted state-changing actions | `host/core/operation-types.ts`, `host/core/operation-registry.ts` |
 | **Projection** | `ArchState → ViewState` | `host/core/projection.ts` |
 | **ArchState** | All application state, nested into sub-states | `host/core/arch-state.ts` |
 | **Snapshot** | Full ViewState for recovery | `shared/protocol.ts` |
@@ -98,10 +100,12 @@ All application state lives in `ArchState` — no separate Redux store.
 2. Side effects only happen inside the EffectRunner.
 3. Webview never mutates logic state directly — it dispatches Commands and applies Patches/Snapshots.
 4. Every Patch and session-scoped backend event carries an explicit `sessionPath`.
-5. Optimistic state is tagged with `corrId` and reconciled by matching `EffectResult`.
-6. Background-tab patches update that tab's mirror; they are never dropped.
-7. Host state uses `Record<string, T>` only (no `Map`/`Set`).
-8. See `STATE_CONTRACT.md` for the full set.
+5. Stable `operationId`/attempt—not transport `corrId` or queue membership—owns lifecycle truth and one immutable terminal outcome.
+6. `agent.settled` is accepted only for matching operation/request/turn/attempt and backend/worker generation lineage.
+7. Optimistic state uses `corrId` only for exact rollback and imperative response targeting.
+8. Background-tab snapshots update that tab's mirror; they are never dropped.
+9. Host state uses `Record<string, T>` only (no `Map`/`Set`).
+10. See `STATE_CONTRACT.md` for the full set.
 
 ---
 
@@ -109,9 +113,10 @@ All application state lives in `ArchState` — no separate Redux store.
 
 | Effect category | Queue path |
 |-----------------|----------|
-| `SessionRpc` (Send, Edit, Interrupt, Truncate, ExtensionUiResponse) | `enqueueLifecycle → enqueueSessionOperation(sessionPath, doRpc)` |
-| `SessionLifecycle` (Open, Create, Duplicate) | `enqueueLifecycle(...)` only |
-| `CloseSession` | Direct execution (host-side cleanup, no backend RPC) |
+| `SessionRpc` (Send, Edit, Interrupt, Truncate, ExtensionUiResponse) | Per-session FIFO; queue membership is execution-only |
+| `SessionLifecycle` (Open, Create, Duplicate) | Global lifecycle FIFO |
+| `CloseSession` | Host cleanup plus reducer-joined persistence/cleanup acknowledgements |
+| `RestartBackend` | Configuration drain → confirmed old-generation death → replacement start; phases are reducer events |
 | `FileOperation` (Diff, Revert, OpenFileInEditor) | Direct execution, no queue |
 | `PostImperative` (sendRejected) | Direct execution, fire-and-forget |
 | `Log` | Direct execution, no queue |

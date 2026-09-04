@@ -98,6 +98,19 @@ export function handleInterrupt(state: ArchState, cmd: Extract<Command, { kind: 
   const attempt = cmd.operationAttempt ?? 1;
   const fingerprint = JSON.stringify({ kind: 'message.interrupt', sessionPath: cmd.sessionPath });
   const competingStop = activeInterruptOperation(state.operations, cmd.sessionPath);
+  const abortSendCorrIds = Object.entries(state.pending.ops)
+    .filter(([, pending]) => pending.kind === 'send' && pending.sessionPath === cmd.sessionPath)
+    .map(([corrId]) => corrId);
+  const cancelQueuedOperationIds = Object.values(state.operations)
+    .filter((candidate) => candidate.kind === 'message.edit' && !candidate.terminal
+      && (candidate.session.resolvedPath ?? candidate.session.pendingPath) === cmd.sessionPath)
+    .map((candidate) => candidate.operationId);
+  const usePriorityLane = Object.values(state.operations).some((candidate) =>
+    !candidate.terminal
+    && candidate.kind !== 'message.send'
+    && candidate.kind !== 'message.interrupt'
+    && (candidate.session.resolvedPath ?? candidate.session.pendingPath) === cmd.sessionPath,
+  );
   if (competingStop && competingStop.operationId !== cmd.operationId) return { state, effects: [] };
 
   const existing = state.operations[cmd.operationId];
@@ -147,6 +160,9 @@ export function handleInterrupt(state: ArchState, cmd: Extract<Command, { kind: 
     effects: [{
       kind: 'InterruptRpc', corrId: cmd.corrId, operationId: cmd.operationId,
       operationAttempt: attempt, backendGeneration: cmd.backendGeneration, sessionPath: cmd.sessionPath,
+      ...(abortSendCorrIds.length > 0 ? { abortSendCorrIds } : {}),
+      ...(cancelQueuedOperationIds.length > 0 ? { cancelQueuedOperationIds } : {}),
+      ...(usePriorityLane ? { usePriorityLane: true } : {}),
     }],
   };
 }
@@ -259,15 +275,17 @@ function sendIntentFingerprint(cmd: Extract<Command, { kind: 'Send' }>): string 
 
 export function handleSend(state: ArchState, cmd: Extract<Command, { kind: 'Send' }>): ReducerResult {
   // Additive compatibility for internal callers compiled before operation IDs.
-  // Production ingress always supplies all three fields.
+  // Production ingress always supplies all four fields.
   if (!cmd.operationId || !cmd.operationSource || cmd.backendGeneration === undefined) {
     return handleSend(state, {
       ...cmd,
       operationId: cmd.operationId ?? cmd.corrId,
+      operationAttempt: cmd.operationAttempt ?? 1,
       operationSource: cmd.operationSource ?? { kind: 'host' },
       backendGeneration: cmd.backendGeneration ?? 0,
     });
   }
+  const attempt = cmd.operationAttempt ?? 1;
   const intentFingerprint = sendIntentFingerprint(cmd);
   const unresolvedSend = Object.values(state.operations).find((operation) =>
     operation.operationId !== cmd.operationId
@@ -304,6 +322,40 @@ export function handleSend(state: ArchState, cmd: Extract<Command, { kind: 'Send
         }],
       };
     }
+    if (existingOperation.phase === 'ambiguous') {
+      const retried = retrySessionOperation(existingOperation, {
+        kind: 'message.send',
+        pendingPath: existingOperation.session.pendingPath,
+        selectionToken: existingOperation.causal.selectionToken,
+        backendGeneration: cmd.backendGeneration,
+        localId: cmd.localId,
+        attempt,
+      });
+      if (!retried) return { state, effects: [] };
+      const owningEntry = Object.entries(state.pending.ops).find(([, pending]) => pending.operationId === cmd.operationId)
+        ?? Object.entries(state.pending.promoted).find(([, pending]) => pending.operationId === cmd.operationId);
+      const owningCorrId = owningEntry?.[0] ?? existingOperation.causal.selectionToken;
+      return {
+        state: produce(state, (draft) => {
+          draft.operations[cmd.operationId!] = retried;
+          const pending = draft.pending.ops[owningCorrId] ?? draft.pending.promoted[owningCorrId];
+          if (pending) pending.operationAttempt = retried.attempt;
+        }),
+        effects: [
+          {
+            kind: 'ReleaseOperationResources', corrId: owningCorrId,
+            operationId: cmd.operationId, operationAttempt: existingOperation.attempt,
+          },
+          {
+            kind: 'SendRpc', corrId: owningCorrId, operationId: cmd.operationId,
+            operationAttempt: retried.attempt, backendGeneration: retried.backendGeneration,
+            sessionPath: cmd.sessionPath, text: cmd.text, inputs: cmd.inputs,
+            localId: cmd.localId, composedText: cmd.composedText, userParts: cmd.userParts,
+            priorPruningMode: cmd.priorPruningMode,
+          },
+        ],
+      };
+    }
   } else {
     state = {
       ...state,
@@ -316,6 +368,7 @@ export function handleSend(state: ArchState, cmd: Extract<Command, { kind: 'Send
           pendingPath: cmd.sessionPath,
           selectionToken: cmd.corrId,
           backendGeneration: cmd.backendGeneration,
+          attempt,
           localId: cmd.localId,
           intentFingerprint,
         }),
@@ -340,6 +393,7 @@ export function handleSend(state: ArchState, cmd: Extract<Command, { kind: 'Send
         {
           corrId: cmd.corrId,
           operationId: cmd.operationId,
+          operationAttempt: attempt,
           operationSource: cmd.operationSource,
           backendGeneration: cmd.backendGeneration,
           text: cmd.text,
@@ -377,6 +431,7 @@ export function handleSend(state: ArchState, cmd: Extract<Command, { kind: 'Send
           sessionPath: cmd.sessionPath,
           corrId: cmd.corrId,
           operationId: cmd.operationId,
+          operationAttempt: attempt,
           operationSource: cmd.operationSource,
           backendGeneration: cmd.backendGeneration,
           text: cmd.text,
@@ -437,6 +492,7 @@ export function handleSend(state: ArchState, cmd: Extract<Command, { kind: 'Send
       draft.pending.ops[cmd.corrId] = {
         kind: 'send',
         operationId: cmd.operationId,
+        operationAttempt: attempt,
         sessionPath: cmd.sessionPath,
         localId: cmd.localId,
         previousSummary: cmd.previousSummary,
@@ -444,6 +500,7 @@ export function handleSend(state: ArchState, cmd: Extract<Command, { kind: 'Send
         inputs: [...inputsSnapshot],
         startedAt: cmd.timestamp,
         queued: true,
+        ...(cmd.priorPruningMode ? { priorPruningMode: cmd.priorPruningMode } : {}),
       };
       delete draft.composer.draftTextBySession[cmd.sessionPath];
       delete draft.composer.pendingComposerInputsBySession[cmd.sessionPath];
@@ -455,6 +512,7 @@ export function handleSend(state: ArchState, cmd: Extract<Command, { kind: 'Send
           kind: 'SendRpc',
           corrId: cmd.corrId,
           operationId: cmd.operationId,
+          operationAttempt: attempt,
           backendGeneration: cmd.backendGeneration,
           sessionPath: cmd.sessionPath,
           text: cmd.text,
@@ -484,11 +542,13 @@ export function handleSend(state: ArchState, cmd: Extract<Command, { kind: 'Send
     draft.pending.ops[cmd.corrId] = {
       kind: 'send',
       operationId: cmd.operationId,
+      operationAttempt: attempt,
       sessionPath: cmd.sessionPath,
       localId: cmd.localId,
       previousSummary: cmd.previousSummary,
       text: cmd.text,
       inputs: [...inputsSnapshot],
+      ...(cmd.priorPruningMode ? { priorPruningMode: cmd.priorPruningMode } : {}),
       // PURE: from the command timestamp, not a reducer wall-clock read.
       // Carried onto the promoted op so the projection can read it while the
       // prepass runs (Brief F prepassStartedAt).
@@ -515,6 +575,7 @@ export function handleSend(state: ArchState, cmd: Extract<Command, { kind: 'Send
         kind: 'SendRpc',
         corrId: cmd.corrId,
         operationId: cmd.operationId,
+        operationAttempt: attempt,
         backendGeneration: cmd.backendGeneration,
         sessionPath: cmd.sessionPath,
         text: cmd.text,

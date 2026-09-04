@@ -54,7 +54,12 @@ export interface SendResultEvent {
   kind: 'SendResult';
   corrId: string;
   operationId?: string;
+  operationAttempt?: number;
   backendGeneration?: number;
+  /** True when this acknowledgement was reconstructed by operation.status.
+   * The paired SendOperationStatus owns lifecycle/reconciliation state; this
+   * result only promotes the optimistic payload and binds its request ID. */
+  reconciled?: boolean;
   sessionPath: string;
   ok: boolean;
   /** Backend-assigned request ID, used to bind events to sessions. Absent for
@@ -163,8 +168,23 @@ export interface OpenSessionResultEvent {
   kind: 'OpenSessionResult';
   corrId: string;
   sessionPath: string;
+  operationId?: string;
+  operationAttempt?: number;
+  backendGeneration?: number;
   ok: boolean;
+  /** A local waiter expired, but the repeat-safe read/event may still complete. */
+  ambiguous?: boolean;
   error?: string;
+}
+
+/** Reducer-requested open reconciliation timer expired. Attempt and generation
+ * make stale timers harmless after a late acknowledgement or a retry. */
+export interface OpenSessionReconciliationDueEvent {
+  kind: 'OpenSessionReconciliationDue';
+  operationId: string;
+  sessionPath: string;
+  operationAttempt: number;
+  backendGeneration: number;
 }
 
 export interface CreateSessionResultEvent {
@@ -181,6 +201,10 @@ export interface CreateSessionResultEvent {
 export interface PersistTabsResultEvent {
   kind: 'PersistTabsResult';
   corrId: string;
+  operationId?: string;
+  backendGeneration?: number;
+  /** Omitted for the ordinary/initial tab-persistence acknowledgement. */
+  acknowledgementKey?: 'privacy-marker-removal';
   ok: boolean;
   error?: string;
 }
@@ -363,9 +387,33 @@ export interface SessionTitleResultEvent {
 export interface CloseSessionResultEvent {
   kind: 'CloseSessionResult';
   corrId: string;
+  operationId?: string;
+  backendGeneration?: number;
   ok: boolean;
   /** The closed session path, if ok. */
   sessionPath?: string;
+  error?: string;
+}
+
+export interface BackendRestartDrainCompletedEvent {
+  kind: 'BackendRestartDrainCompleted';
+  operationId: string;
+  backendGeneration: number;
+}
+
+export interface BackendRestartOldGenerationDiedEvent {
+  kind: 'BackendRestartOldGenerationDied';
+  operationId: string;
+  backendGeneration: number;
+}
+
+export interface BackendRestartResultEvent {
+  kind: 'BackendRestartResult';
+  corrId: string;
+  operationId: string;
+  backendGeneration: number;
+  replacementBackendGeneration?: number;
+  ok: boolean;
   error?: string;
 }
 
@@ -425,6 +473,7 @@ export type EffectResultEvent =
   | SetSessionTitlesSettingsResultEvent
   | SessionTitleResultEvent
   | CloseSessionResultEvent
+  | BackendRestartResultEvent
   | DuplicateSessionResultEvent;
 
 // ─── Backend streaming events ─────────────────────────────────────────────────
@@ -491,6 +540,15 @@ export interface AgentSettledEvent {
   kind: 'AgentSettled';
   sessionPath: string;
   capabilities: SessionCapabilities;
+  operationId?: string;
+  requestId?: string;
+  turnId?: string;
+  attemptId?: string;
+  operationAttempt?: number;
+  backendGeneration?: number;
+  workerGeneration?: number;
+  /** Trusted host generation at receipt, used by the pure reducer as a fence. */
+  currentBackendGeneration?: number;
 }
 
 export interface BusyChangedEvent {
@@ -802,6 +860,7 @@ export interface PreflightFailedEvent {
   kind: 'PreflightFailed';
   corrId?: string;
   operationId?: string;
+  operationAttempt?: number;
   sessionPath: string;
   requestId: string;
   error: string;
@@ -870,6 +929,7 @@ export interface SessionScopeClearedEvent {
 export interface SendOperationDelayedEvent {
   kind: 'SendOperationDelayed';
   operationId: string;
+  operationAttempt?: number;
   sessionPath: string;
   backendGeneration: number;
   error?: string;
@@ -881,9 +941,12 @@ export interface SendOperationStatusEvent {
   operationId: string;
   sessionPath: string;
   backendGeneration: number;
-  state: 'pending' | 'accepted' | 'committed' | 'failed' | 'cancelled' | 'superseded' | 'aborted' | 'generation-ended' | 'reconciliation-exhausted';
+  operationAttempt?: number;
+  reconciliationAttempt?: number;
+  state: 'pending' | 'accepted' | 'committed' | 'failed' | 'cancelled' | 'superseded' | 'aborted' | 'generation-ended' | 'reconciliation-unavailable' | 'reconciliation-exhausted';
   requestId?: string;
   queued?: boolean;
+  committed?: boolean;
   error?: string;
 }
 
@@ -905,7 +968,9 @@ export interface MessageOperationStatusEvent {
   operationKind: 'message.edit' | 'message.interrupt' | 'message.continue' | 'message.compact';
   sessionPath: string;
   backendGeneration: number;
-  state: 'pending' | 'accepted' | 'committed' | 'failed' | 'cancelled' | 'superseded' | 'aborted' | 'generation-ended' | 'reconciliation-exhausted';
+  operationAttempt?: number;
+  reconciliationAttempt?: number;
+  state: 'pending' | 'accepted' | 'committed' | 'failed' | 'cancelled' | 'superseded' | 'aborted' | 'generation-ended' | 'reconciliation-unavailable' | 'reconciliation-exhausted';
   /** Backend commit evidence is independent from acknowledgement state. */
   committed?: boolean;
   requestId?: string;
@@ -1017,6 +1082,7 @@ export interface QueuedDeliveredEvent {
   sessionPath: string;
   text: string;
   operationId?: string;
+  operationAttempt?: number;
   localId?: string;
 }
 
@@ -1119,12 +1185,15 @@ export type HostEvent =
   | CreateOperationDelayedEvent
   | CreateOperationSucceededEvent
   | CreateOperationFailedEvent
+  | OpenSessionReconciliationDueEvent
   | TranscriptTrimmedEvent
   | RunningSessionsChangedEvent
   | UnreadFinishedSessionsChangedEvent
   | SessionSummaryUpsertedEvent
   | SessionSummariesReplacedEvent
   | SessionScopeClearedEvent
+  | BackendRestartDrainCompletedEvent
+  | BackendRestartOldGenerationDiedEvent
   | TabOpenedEvent
   | OpenTabsChangedEvent
   | PreflightFailedEvent

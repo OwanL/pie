@@ -55,6 +55,10 @@ export function onSessionListChanged(payload: SessionListChangedPayload, deps: H
       cmd: {
         kind: 'CloseSession',
         corrId,
+        operationId: `${corrId}:operation`,
+        operationAttempt: 1,
+        operationSource: { kind: 'host' },
+        backendGeneration: deps.state.getBackendGeneration(),
         sessionPath: attempt.sessionPath,
         ensureClosed: true,
         reviewClosure: true,

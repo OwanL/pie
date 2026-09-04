@@ -113,19 +113,23 @@ function computeOpeningFlags(payload: SessionOpenedPayload, deps: ApplySessionOp
     : selectionRequest?.operationId
       ? archState.operations[selectionRequest.operationId]
       : undefined;
-  const operationMatches = !!operation
-    && (!payload.operationId || operation.operationId === payload.operationId)
-    && (!payload.operationId || selectionToken === operation.causal.selectionToken)
+  const createOperation = operation
+    && (operation.kind === 'session.create' || operation.kind === 'session.duplicate')
+    ? operation
+    : undefined;
+  const operationMatches = !!createOperation
+    && (!payload.operationId || createOperation.operationId === payload.operationId)
+    && (!payload.operationId || selectionToken === createOperation.causal.selectionToken)
     && (!payload.operationId || !!selectionToken)
-    && operation.session.pendingPath !== session.path;
-  const fresh = operationMatches && !operation.terminal;
+    && createOperation.session.pendingPath !== session.path;
+  const fresh = operationMatches && !createOperation.terminal;
   const duplicate = operationMatches
-    && operation.terminal?.outcome === 'settled'
-    && operation.session.resolvedPath === session.path;
-  const rejected = !!payload.operationId
-    && (!operation || !operationMatches || (!!operation.terminal && operation.terminal.outcome !== 'settled'));
-  const createResolution = operation
-    ? { operation, fresh, duplicate, rejected, hidden: operation.hidden === true }
+    && createOperation.terminal?.outcome === 'settled'
+    && createOperation.session.resolvedPath === session.path;
+  const rejected = !!createOperation && !!payload.operationId
+    && (!operationMatches || (!!createOperation.terminal && createOperation.terminal.outcome !== 'settled'));
+  const createResolution = createOperation
+    ? { operation: createOperation, fresh, duplicate, rejected, hidden: createOperation.hidden === true }
     : undefined;
   const operationFences = payload.operationAttempt !== undefined
     ? selectionRequest?.modelFencesByOperationAttempt?.[payload.operationAttempt]

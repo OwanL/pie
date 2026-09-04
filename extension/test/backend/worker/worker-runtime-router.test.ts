@@ -333,12 +333,34 @@ test('confirmed worker crash reconciles only checkpointed live identities and cl
     leasePath: sessionPath, leaseRevision: 1, sessionPath, seq, kind: 'runtime.event', event, payload,
   });
   await router.handleWorkerFrame(sessionPath, frame('busy.changed', { sessionPath, busy: true, seq: 7 }, 1));
-  await router.handleWorkerFrame(sessionPath, frame('message.started', { sessionPath, requestId: 'request-1', messageId: 'message-1' }, 2));
-  await router.handleWorkerFrame(sessionPath, frame('tool.started', { sessionPath, requestId: 'request-1', messageId: 'message-1', toolCallId: 'tool-1', name: 'bash', input: {}, startedAt: 1 }, 3));
+  await router.handleWorkerFrame(sessionPath, frame('live.semantic', {
+    kind: 'turn.started', sessionPath, requestId: 'request-1', operationId: 'operation-1',
+    turnId: 'turn-1', attemptId: 'attempt-1', canonicalMessageId: 'message-1',
+  }, 2));
+  await router.handleWorkerFrame(sessionPath, frame('message.started', {
+    sessionPath, requestId: 'request-1', operationId: 'operation-1', operationAttempt: 2, messageId: 'message-1',
+  }, 3));
+  await router.handleWorkerFrame(sessionPath, frame('tool.started', { sessionPath, requestId: 'request-1', messageId: 'message-1', toolCallId: 'tool-1', name: 'bash', input: {}, startedAt: 1 }, 4));
   emitted.length = 0;
   await router.handleWorkerStateChange(sessionPath, client.getSnapshot(), { workerId: route.owner.workerId, workerGeneration: 1 });
   assert.deepEqual(emitted.map(([event]) => event), ['tool.finished', 'message.aborted', 'agent.settled', 'busy.changed', 'operational-error']);
   assert.equal(emitted.find(([event]) => event === 'message.aborted')?.[1].messageId, 'message-1');
+  assert.deepEqual(emitted.find(([event]) => event === 'agent.settled')?.[1], {
+    sessionPath,
+    capabilities: {
+      billableActivity: false,
+      canInterrupt: false,
+      canCompact: true,
+      canContinue: false,
+    },
+    operationId: 'operation-1',
+    requestId: 'request-1',
+    turnId: 'turn-1',
+    attemptId: 'attempt-1',
+    operationAttempt: 2,
+    backendGeneration: 1,
+    workerGeneration: 1,
+  });
   assert.equal(emitted.find(([event]) => event === 'busy.changed')?.[1].seq, 2);
   assert.equal(router.getRoute(sessionPath).state, 'cold');
 });

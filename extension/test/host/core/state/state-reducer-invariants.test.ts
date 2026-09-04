@@ -139,6 +139,7 @@ test('arch: concurrent sends across different sessions do not interfere', () => 
   assert.deepEqual(result.state.pending.ops['c-a'], {
     kind: 'send',
     operationId: 'c-a',
+    operationAttempt: 1,
     sessionPath: '/s/a',
     localId: 'loc-a',
     previousSummary: null,
@@ -149,6 +150,7 @@ test('arch: concurrent sends across different sessions do not interfere', () => 
   assert.deepEqual(result.state.pending.ops['c-b'], {
     kind: 'send',
     operationId: 'c-b',
+    operationAttempt: 1,
     sessionPath: '/s/b',
     localId: 'loc-b',
     previousSummary: null,

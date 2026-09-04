@@ -60,6 +60,9 @@ export interface StartSessionOperation {
   selectionToken: string;
   parentOperationId?: string | null;
   backendGeneration: number;
+  workerGeneration?: number;
+  sessionId?: string;
+  branchId?: string;
   attempt?: number;
   cwd?: string;
   localId?: string;
@@ -75,12 +78,15 @@ export function startSessionOperation(input: StartSessionOperation): SessionOper
     session: {
       pendingPath: input.pendingPath,
       ...(input.sourcePath !== undefined ? { sourcePath: input.sourcePath } : {}),
+      ...(input.sessionId !== undefined ? { sessionId: input.sessionId } : {}),
+      ...(input.branchId !== undefined ? { branchId: input.branchId } : {}),
     },
     causal: {
       parentOperationId: input.parentOperationId ?? null,
       selectionToken: input.selectionToken,
     },
     backendGeneration: input.backendGeneration,
+    ...(input.workerGeneration !== undefined ? { workerGeneration: input.workerGeneration } : {}),
     attempt: input.attempt ?? 1,
     phase: 'awaiting-acceptance',
     acceptance: 'pending',
@@ -90,6 +96,9 @@ export function startSessionOperation(input: StartSessionOperation): SessionOper
     ...(input.localId !== undefined ? { localId: input.localId } : {}),
     ...(input.intentFingerprint !== undefined ? { intentFingerprint: input.intentFingerprint } : {}),
     ...(input.kind === 'message.send' ? { delivery: 'pending' as const } : {}),
+    ...(input.kind === 'message.send' || input.kind === 'message.edit'
+      ? { executionPhase: 'prepass' as const }
+      : {}),
   };
 }
 
@@ -109,6 +118,67 @@ export function matchesSessionOperationIntent(
     && operation.localId === input.localId;
 }
 
+/** Observe one required host acknowledgement. Completion is reducer-owned and
+ * independent of effect completion order. No acknowledgement can immutable-
+ * terminalize the operation until the complete barrier is known: a failure may
+ * arrive before a later success crosses an irreversible commit boundary. */
+export function observeSessionOperationAcknowledgement(
+  operation: SessionOperation,
+  acknowledgement: string,
+  ok: boolean,
+  detail?: string,
+): SessionOperation | null {
+  if (operation.terminal || !operation.acknowledgements
+    || operation.acknowledgements[acknowledgement] === undefined
+    || operation.acknowledgements[acknowledgement] !== 'pending') return null;
+  const acknowledgements = {
+    ...operation.acknowledgements,
+    [acknowledgement]: ok ? 'succeeded' as const : 'failed' as const,
+  };
+  const acknowledgementErrors = !ok && detail !== undefined
+    ? { ...operation.acknowledgementErrors, [acknowledgement]: detail }
+    : operation.acknowledgementErrors;
+  const acknowledgementStates = Object.values(acknowledgements);
+  const allObserved = acknowledgementStates.every((state) => state !== 'pending');
+  const anySucceeded = acknowledgementStates.some((state) => state === 'succeeded');
+  if (!allObserved) {
+    return {
+      ...operation,
+      acknowledgements,
+      ...(acknowledgementErrors ? { acknowledgementErrors } : {}),
+      phase: 'awaiting-commit',
+      acceptance: anySucceeded ? 'accepted' : operation.acceptance,
+      commit: anySucceeded ? 'committed' : operation.commit,
+      recovery: anySucceeded ? 'reconcile' : operation.recovery,
+    };
+  }
+  const failure = acknowledgementStates.some((state) => state === 'failed');
+  if (failure) {
+    const recovery = anySucceeded ? 'reconcile' as const : 'none' as const;
+    return {
+      ...operation,
+      acknowledgements,
+      ...(acknowledgementErrors ? { acknowledgementErrors } : {}),
+      phase: 'settled',
+      commit: anySucceeded ? 'committed' : 'not-committed',
+      recovery: null,
+      terminal: {
+        outcome: 'failed',
+        reason: 'execution-failed',
+        recovery,
+        ...(Object.values(acknowledgementErrors ?? {})[0] !== undefined
+          ? { detail: Object.values(acknowledgementErrors ?? {})[0] }
+          : {}),
+      },
+    };
+  }
+  return settleSessionOperationSucceeded({ ...operation, acknowledgements }, {
+    pendingPath: operation.session.pendingPath,
+    resolvedPath: operation.session.resolvedPath ?? operation.session.pendingPath,
+    backendGeneration: operation.backendGeneration,
+  });
+}
+
 /** Retry an ambiguous waiter without changing operation or mutation identity. */
 export function retrySessionOperation(
   operation: SessionOperation,
@@ -118,8 +188,9 @@ export function retrySessionOperation(
   if (!matchesSessionOperationIntent(operation, input)) return null;
   const nextAttempt = input.attempt ?? operation.attempt + 1;
   if (nextAttempt !== operation.attempt + 1) return null;
+  const { reconciliation: _reconciliation, ...base } = operation;
   return {
-    ...operation,
+    ...base,
     attempt: nextAttempt,
     phase: 'awaiting-acceptance',
     acceptance: 'pending',
@@ -236,7 +307,7 @@ export function settleSessionOperationFailed(
   observation: SessionOperationObservation & {
     reason: Extract<SessionOperationTerminalReason, 'definitive-rejection' | 'backend-generation-ended' | 'execution-failed'>;
     detail?: string;
-    recovery?: Extract<SessionOperationRecovery, 'restart-backend' | 'none'>;
+    recovery?: Extract<SessionOperationRecovery, 'retry' | 'restart-backend' | 'reconcile' | 'none'>;
     /** Preserve destructive-commit evidence for compound operations. */
     committed?: boolean;
     /** Generation death can terminalize an unknown commit without inventing rollback safety. */

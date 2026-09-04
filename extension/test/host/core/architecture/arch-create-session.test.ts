@@ -160,6 +160,55 @@ test('hiding a delayed create preserves its ledger and queued sends without reop
   assert.equal(hidden.effects[0]?.kind, 'PersistTabs');
 });
 
+test('closing a pending create registers and settles a correlated close while preserving hidden create ownership', () => {
+  const createOperationId = 'create-op-hidden-correlated';
+  const created = reducer(buildState(), {
+    kind: 'Command',
+    cmd: {
+      kind: 'CreateSession', corrId: 'create-correlated', operationId: createOperationId,
+      operationSource: { kind: 'host' }, backendGeneration: 11,
+      sessionPath: PENDING, cwd: '/w', placeholderSummary: PLACEHOLDER,
+      selectionToken: 'create-selection',
+    },
+  });
+  const hidden = reducer(created.state, {
+    kind: 'Command',
+    cmd: {
+      kind: 'CloseSession', corrId: 'close-correlated', operationId: 'close-op',
+      operationSource: {
+        kind: 'renderer', rendererId: 'browser-1', rendererKind: 'browser', rendererGeneration: 4,
+      },
+      backendGeneration: 11,
+      sessionPath: PENDING,
+    },
+  });
+
+  assert.equal(hidden.state.operations[createOperationId]?.hidden, true);
+  assert.equal(hidden.state.operations[createOperationId]?.terminal, undefined);
+  assert.deepEqual(hidden.state.operations['close-op']?.source, {
+    kind: 'renderer', rendererId: 'browser-1', rendererKind: 'browser', rendererGeneration: 4,
+  });
+  assert.equal(hidden.state.operations['close-op']?.causal.parentOperationId, createOperationId);
+  assert.equal(hidden.state.operations['close-op']?.causal.selectionToken, 'close-correlated');
+  assert.equal(hidden.state.operations['close-op']?.backendGeneration, 11);
+  assert.equal(hidden.state.operations['close-op']?.session.pendingPath, PENDING);
+  assert.deepEqual(hidden.state.operations['close-op']?.acknowledgements, { 'persist-tabs': 'pending' });
+  const persist = hidden.effects[0];
+  assert.equal(persist?.kind, 'PersistTabs');
+  if (persist?.kind === 'PersistTabs') {
+    assert.equal(persist.operationId, 'close-op');
+    assert.equal(persist.backendGeneration, 11);
+  }
+
+  const settled = reducer(hidden.state, {
+    kind: 'PersistTabsResult', corrId: 'close-correlated', operationId: 'close-op',
+    backendGeneration: 11, ok: true,
+  });
+  assert.equal(settled.state.operations['close-op']?.terminal?.outcome, 'settled');
+  assert.equal(settled.state.operations[createOperationId]?.hidden, true);
+  assert.equal(settled.state.operations[createOperationId]?.terminal, undefined);
+});
+
 test('the optimistic CreateSession setup is fully undone by the host-side failure path (SessionScopeCleared + SelectSession-fallback)', () => {
   // Pin that handleSelectionFailure's dispatched transitions revert exactly
   // what the reducer applied: after scope-clear (removeSummary) + select

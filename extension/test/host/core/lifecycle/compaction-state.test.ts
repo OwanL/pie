@@ -321,7 +321,9 @@ test('CompactResult failure clears the optimistic compacting marker and surfaces
   assert.deepEqual(next.sessions.compactingSessionPaths, []);
   assert.equal(next.settings.notice, 'Could not compact this conversation.');
   assert.equal(next.settings.noticeKind, 'operational-error');
-  assert.deepEqual(effects, []);
+  assert.deepEqual(effects, [{
+    kind: 'ReleaseOperationResources', corrId: 'c1', operationId: 'c1', operationAttempt: 1,
+  }]);
 });
 
 test('CompactResult success settles the operation but leaves the compacting marker for CompactionEnded', () => {

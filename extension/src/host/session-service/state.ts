@@ -425,13 +425,30 @@ export class SessionServiceState {
       }
 
       const request = this.selectionRequests.get(selectionToken);
-      if (request?.operationId && request.pendingPath) {
-        this.handleCreateOperationDelayed(
-          selectionToken,
-          request.operationId,
-          `Timed out waiting to create session. The session is still being created; retry or wait for completion.`,
-        );
-        return;
+      if (request?.operationId) {
+        const operation = this.getArchState().operations[request.operationId];
+        if (request.pendingPath) {
+          this.handleCreateOperationDelayed(
+            selectionToken,
+            request.operationId,
+            `Timed out waiting to create session. The session is still being created; retry or wait for completion.`,
+          );
+          return;
+        }
+        if (operation?.kind === 'session.open') {
+          this.dispatchArch({
+            kind: 'OpenSessionResult',
+            corrId: `open-timeout:${request.operationId}`,
+            sessionPath: request.requestedPath,
+            operationId: request.operationId,
+            operationAttempt: request.operationAttempt,
+            backendGeneration: request.backendGeneration,
+            ok: false,
+            ambiguous: true,
+            error: 'session.open acknowledgement timed out',
+          });
+          return;
+        }
       }
       const action = request?.pendingPath ? 'create session' : 'open session';
       this.handleSelectionFailure(

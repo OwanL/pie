@@ -247,6 +247,39 @@ test('replayed close interaction IDs are deduplicated before command dispatch', 
   assert.equal(events.filter((event) => (event as { cmd?: { kind?: string } }).cmd?.kind === 'CloseSession').length, 1);
 });
 
+test('open and close trusted ingress preserve renderer operation source', async () => {
+  const events: unknown[] = [];
+  const opened: unknown[] = [];
+  const context = {
+    rendererId: 'browser-1', kind: 'browser' as const, rendererGeneration: 6,
+  };
+  const router = new MessageRouterCtor(
+    (event) => events.push(event),
+    () => ({ sessions: { activeSessionPath: '/s', openTabPaths: ['/s'], runningSessionPaths: [] } } as never),
+    {
+      openSession: (_sessionPath: string, source: unknown) => opened.push(source),
+      getBackendGeneration: () => 9,
+    } as never,
+    { reveal: () => undefined, postState: () => undefined, postImperative: () => undefined },
+    () => undefined,
+    (text: string) => ({ name: text, isPlaceholder: false }),
+    () => false,
+  );
+
+  await router.handle({ type: 'openSession', sessionPath: '/s' }, context);
+  await router.handle({ type: 'closeSession', sessionPath: '/s' }, context);
+
+  assert.deepEqual(opened, [context]);
+  const close = events.find((event) => (event as { cmd?: { kind?: string } }).cmd?.kind === 'CloseSession') as {
+    cmd?: { operationId?: string; operationSource?: unknown; backendGeneration?: number };
+  } | undefined;
+  assert.equal(typeof close?.cmd?.operationId, 'string');
+  assert.deepEqual(close?.cmd?.operationSource, {
+    kind: 'renderer', rendererId: 'browser-1', rendererKind: 'browser', rendererGeneration: 6,
+  });
+  assert.equal(close?.cmd?.backendGeneration, 9);
+});
+
 test('an unexpected detail-service failure settles the initiating card immediately', async () => {
   const events: unknown[] = [];
   const imperatives: unknown[] = [];

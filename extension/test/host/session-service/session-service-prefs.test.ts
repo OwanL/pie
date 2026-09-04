@@ -8,6 +8,7 @@ import { EventEmitter } from 'node:events';
 
 import { createInitialArchState } from '../../../src/host/core/arch-state';
 import type { ArchState } from '../../../src/host/core/arch-state';
+import { reducer } from '../../../src/host/core/reducer';
 import type { Event } from '../../../src/host/core/events';
 import { NOOP_RUN_OBSERVER } from '../../../src/host/stats-service';
 import type { SessionService as SessionServiceType } from '../../../src/host/session-service/service';
@@ -360,12 +361,18 @@ test('private close does not reopen a deleted transcript when the final analytic
   tabs.openSession = (path) => { tabCalls.push(`open:${path}`); };
   tabs.closeSession = async (path) => { tabCalls.push(`close:${path}`); };
 
-  await service.closeSession('/sessions/private.jsonl', null, true);
+  await service.closeSession('/sessions/private.jsonl', null, true, false, 'close-private', 7);
 
   assert.deepEqual(backendRequests, ['session.forget']);
   assert.deepEqual(tabCalls, ['close:/sessions/private.jsonl']);
   assert.equal(privacyCalls, 2);
-  assert.ok(dispatched.some((event) => event.kind === 'Command' && event.cmd.kind === 'PersistTabs'));
+  const finalPersistence = dispatched.find((event) => event.kind === 'Command'
+    && event.cmd.kind === 'PersistTabs'
+    && event.cmd.acknowledgementKey === 'privacy-marker-removal');
+  assert.ok(finalPersistence && finalPersistence.kind === 'Command' && finalPersistence.cmd.kind === 'PersistTabs');
+  assert.equal(finalPersistence.cmd.operationId, 'close-private');
+  assert.equal(finalPersistence.cmd.backendGeneration, 7);
+  assert.deepEqual(finalPersistence.cmd.privateSessionPaths, []);
 });
 
 test('private close retains its retry marker and reopens when backend deletion fails', async () => {
@@ -396,6 +403,150 @@ test('private close retains its retry marker and reopens when backend deletion f
   assert.ok(dispatched.some((event) => event.kind === 'Command'
     && event.cmd.kind === 'SetPrivacyMode'
     && event.cmd.enabled === true));
+});
+
+test('restart waits for confirmed death before terminalizing an ambiguous send and pending create', async () => {
+  const sessionPath = '/sessions/running.jsonl';
+  const oldSessionPath = '/sessions/old.jsonl';
+  let archState: ArchState = {
+    ...createInitialArchState(),
+    settings: { ...createInitialArchState().settings, backendReady: true },
+    sessions: {
+      ...createInitialArchState().sessions,
+      sessions: [{
+        path: oldSessionPath, name: 'Old', cwd: '/sessions',
+        modifiedAt: '2026-01-01T00:00:00.000Z', messageCount: 1,
+      }],
+      openTabPaths: [oldSessionPath],
+      activeSessionPath: oldSessionPath,
+    },
+  };
+  const dispatched: Event[] = [];
+  const terminalTransitions: Record<string, number> = {};
+  let createOperationId = '';
+  let createSelectionToken = '';
+  let stopResolved = false;
+  const generationEndingEventsBeforeDeath: string[] = [];
+  const dispatchArch = (event: Event): void => {
+    if (event.kind === 'Command' && event.cmd.kind === 'CreateSession') {
+      createOperationId = event.cmd.operationId ?? '';
+      createSelectionToken = event.cmd.selectionToken;
+    }
+    if (!stopResolved && (
+      ((event.kind === 'SendOperationStatus' || event.kind === 'MessageOperationStatus')
+        && event.state === 'generation-ended')
+      || (event.kind === 'CreateOperationFailed' && event.reason === 'backend-generation-ended')
+      || (event.kind === 'RunningSessionsChanged' && event.sessionPaths.length === 0)
+      || (event.kind === 'BackendReadyChanged' && event.ready === false)
+    )) generationEndingEventsBeforeDeath.push(event.kind);
+    const previousTerminals = Object.fromEntries(
+      Object.entries(archState.operations).map(([operationId, operation]) => [operationId, operation.terminal]),
+    );
+    dispatched.push(event);
+    archState = reducer(archState, event).state;
+    for (const [operationId, operation] of Object.entries(archState.operations)) {
+      if (!previousTerminals[operationId] && operation.terminal) {
+        terminalTransitions[operationId] = (terminalTransitions[operationId] ?? 0) + 1;
+      }
+    }
+  };
+
+  let releaseStop!: () => void;
+  const stopGate = new Promise<void>((resolve) => { releaseStop = resolve; });
+  const order: string[] = [];
+  const backend = new BackendClientCtor();
+  (backend as unknown as { stop(): Promise<void> }).stop = async () => {
+    order.push('stop-called');
+    await stopGate;
+    stopResolved = true;
+    order.push('stop-resolved');
+  };
+  const service = new SessionServiceCtor(
+    createExtensionContext(), backend, () => undefined, () => undefined,
+    dispatchArch, () => archState, undefined, NOOP_RUN_OBSERVER,
+  );
+  (service as unknown as { start(): Promise<void> }).start = async () => {
+    order.push('replacement-start');
+  };
+
+  dispatchArch({
+    kind: 'Command',
+    cmd: {
+      kind: 'Send', corrId: 'send-corr', operationId: 'send-operation', operationAttempt: 1,
+      operationSource: { kind: 'host' }, backendGeneration: 0,
+      sessionPath, text: 'hello', inputs: [], composedText: 'hello',
+      localId: 'local-send', previousSummary: null, timestamp: 100,
+    },
+  });
+  dispatchArch({
+    kind: 'SendOperationDelayed', operationId: 'send-operation', operationAttempt: 1,
+    sessionPath, backendGeneration: 0, error: 'acknowledgement timeout',
+  });
+  const pendingPath = service.createNewSession();
+  service.handleCreateOperationDelayed(createSelectionToken, createOperationId, 'create acknowledgement timeout', 1);
+  dispatchArch({
+    kind: 'Command',
+    cmd: {
+      kind: 'RestartBackend', corrId: 'restart-corr', operationId: 'restart-operation',
+      operationSource: { kind: 'host' }, backendGeneration: 0,
+    },
+  });
+  dispatchArch({
+    kind: 'BackendRestartDrainCompleted', operationId: 'restart-operation', backendGeneration: 0,
+  });
+
+  const terminalFor = (operationId: string) => archState.operations[operationId]?.terminal;
+  const restarting = service.restart(() => {
+    assert.equal(terminalFor('send-operation')?.outcome, 'failed');
+    assert.equal(terminalFor(createOperationId)?.outcome, 'failed');
+    order.push('death-callback');
+    dispatchArch({
+      kind: 'BackendRestartOldGenerationDied', operationId: 'restart-operation', backendGeneration: 0,
+    });
+  });
+  await Promise.resolve();
+
+  assert.deepEqual(order, ['stop-called']);
+  assert.equal(terminalFor('send-operation'), undefined);
+  assert.equal(terminalFor(createOperationId), undefined);
+  assert.ok(archState.pending.ops['send-corr']);
+  assert.ok(archState.sessions.openTabPaths.includes(pendingPath));
+  assert.ok(archState.sessions.runningSessionPaths.includes(sessionPath));
+  assert.deepEqual(generationEndingEventsBeforeDeath, []);
+
+  releaseStop();
+  await restarting;
+
+  const sendTerminal = terminalFor('send-operation');
+  const createTerminal = terminalFor(createOperationId);
+  assert.equal(sendTerminal?.outcome, 'failed');
+  assert.equal(createTerminal?.outcome, 'failed');
+  assert.equal(terminalTransitions['send-operation'], 1);
+  assert.equal(terminalTransitions[createOperationId], 1);
+  assert.equal(archState.pending.ops['send-corr'], undefined);
+  assert.equal(archState.transcript.bySession[sessionPath]?.some((message) => message.id === 'local-send'), false);
+  assert.equal(archState.sessions.openTabPaths.includes(pendingPath), false);
+  assert.deepEqual(archState.sessions.runningSessionPaths, []);
+  assert.deepEqual(order, ['stop-called', 'stop-resolved', 'death-callback', 'replacement-start']);
+
+  dispatchArch({
+    kind: 'MessageStarted', sessionPath, messageId: 'late-assistant', requestId: 'late-request',
+    operationId: 'send-operation', timestamp: 200,
+  });
+  dispatchArch({
+    kind: 'CreateOperationSucceeded', operationId: createOperationId, pendingPath,
+    sessionPath: '/sessions/late-created.jsonl', attempt: 1, backendGeneration: 0,
+  });
+  assert.strictEqual(terminalFor('send-operation'), sendTerminal);
+  assert.strictEqual(terminalFor(createOperationId), createTerminal);
+  assert.equal(archState.sessions.openTabPaths.includes('/sessions/late-created.jsonl'), false);
+  assert.equal(archState.livePipeline.turnsBySession[sessionPath], undefined);
+  assert.equal(terminalTransitions['send-operation'], 1);
+  assert.equal(terminalTransitions[createOperationId], 1);
+  assert.equal(dispatched.filter((event) => event.kind === 'SendOperationStatus'
+    && event.operationId === 'send-operation' && event.state === 'generation-ended').length, 1);
+  assert.equal(dispatched.filter((event) => event.kind === 'CreateOperationFailed'
+    && event.operationId === createOperationId && event.reason === 'backend-generation-ended').length, 1);
 });
 
 // Restore the real module loader after all tests so later tests are unaffected.

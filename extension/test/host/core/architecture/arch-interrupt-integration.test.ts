@@ -162,8 +162,11 @@ test('end-to-end: interrupt command through reducer produces effect and result c
   assert.equal(hasRetiredInterruptEventFence(state.operations, '/x'), true);
   // Successful interrupt sets running=false directly in state.
   assert.ok(!state.sessions.runningSessionPaths.includes('/x'), 'running should be cleared by watchdog');
-  // No SyncEffects — running state is mutated directly.
-  assert.equal(r2.effects.length, 0);
+  // Semantic state is direct; the sole effect releases the runner's opaque barrier.
+  assert.deepEqual(r2.effects, [{
+    kind: 'ReleaseOperationResources', corrId: 'c-e2e', operationId: 'c-e2e', operationAttempt: 1,
+  }]);
+  for (const effect of r2.effects) runner.run(effect);
 });
 
 test('interrupt: InterruptRpc suppresses the next completion notification for the session (flag set in the runner)', async () => {

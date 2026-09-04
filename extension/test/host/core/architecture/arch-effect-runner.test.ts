@@ -45,6 +45,25 @@ async function settle(): Promise<void> {
   }
 }
 
+function reconciliationEffect(options: {
+  corrId: string;
+  operationId: string;
+  operationKind: Extract<Effect, { kind: 'ScheduleOperationReconciliation' }>['operationKind'];
+  sessionPath?: string;
+  backendGeneration: number;
+  operationAttempt?: number;
+  reconciliationAttempt: number;
+  delayMs?: number;
+}): Extract<Effect, { kind: 'ScheduleOperationReconciliation' }> {
+  return {
+    kind: 'ScheduleOperationReconciliation',
+    sessionPath: '/a',
+    operationAttempt: 1,
+    delayMs: 0,
+    ...options,
+  };
+}
+
 test('EffectRunner logs effect.dispatch at debug for normal effect execution', () => {
   const { deps, calls } = makeEffectRunnerDeps();
   const runner = new EffectRunner(deps);
@@ -129,8 +148,14 @@ test('message.continue acknowledgement timeout reconciles to committed without a
 
   assert.ok(hostEvents.some((event) => event.kind === 'MessageOperationDelayed'
     && event.operationId === 'continue-op'));
+  runner.run(reconciliationEffect({
+    corrId: 'continue-lost', operationId: 'continue-op', operationKind: 'message.continue',
+    backendGeneration: 7, reconciliationAttempt: 1,
+  }));
+  timers.runAll();
+  await settle();
   assert.ok(hostEvents.some((event) => event.kind === 'MessageOperationStatus'
-    && event.operationId === 'continue-op' && event.state === 'committed'));
+    && event.operationId === 'continue-op' && event.state === 'accepted' && event.committed === true));
   assert.equal(events.some((event) => event.kind === 'ContinueResult'), false);
   assert.ok(calls.some((call) => call.kind === 'request' && call.method === 'operation.status'
     && (call.params as { backendGeneration?: number }).backendGeneration === 7));
@@ -156,15 +181,82 @@ test('message.compact acknowledgement ambiguity reaches bounded visible recovery
     operationAttempt: 1, backendGeneration: 9, sessionPath: '/a',
   });
   await settle();
-  for (let attempt = 0; attempt < 4; attempt += 1) {
+  assert.ok(hostEvents.some((event) => event.kind === 'MessageOperationDelayed'
+    && event.operationKind === 'message.compact'));
+  for (let attempt = 1; attempt <= 4; attempt += 1) {
+    runner.run(reconciliationEffect({
+      corrId: 'compact-lost', operationId: 'compact-op', operationKind: 'message.compact',
+      backendGeneration: 9, reconciliationAttempt: attempt,
+    }));
     timers.runAll();
     await settle();
   }
 
-  assert.ok(hostEvents.some((event) => event.kind === 'MessageOperationDelayed'
-    && event.operationKind === 'message.compact'));
-  assert.ok(hostEvents.some((event) => event.kind === 'MessageOperationStatus'
-    && event.state === 'reconciliation-exhausted'));
+  assert.equal(hostEvents.filter((event) => event.kind === 'MessageOperationStatus'
+    && event.state === 'pending').length, 4);
+  assert.equal(hostEvents.some((event) => event.kind === 'MessageOperationStatus'
+    && event.state === 'reconciliation-exhausted'), false,
+  'exhaustion is a reducer decision, not runner-owned state');
+  runner.dispose();
+});
+
+test('session.open timeout stays ambiguous and a late correlated response settles the same operation', async () => {
+  let lateSuccess: (() => void) | undefined;
+  const backend: EffectRunnerDeps['backend'] = {
+    async request<T>(_method: string, _params?: unknown, options?: import('../../../../src/host/core/effect-runner').CommitAwareRequestOptions<T>) {
+      lateSuccess = () => options?.onCorrelatedResponse?.({ ok: true, result: {} as T });
+      throw new RequestTimeoutError('open acknowledgement lost');
+    },
+  };
+  const { deps, events, calls } = makeEffectRunnerDeps({ backend });
+  const runner = new EffectRunner(deps);
+
+  runner.run({
+    kind: 'OpenSession', corrId: 'open-corr', sessionPath: '/a', selectionToken: 'selection-1',
+    operationId: 'open-operation', operationAttempt: 1, backendGeneration: 1,
+  });
+  await settle();
+
+  assert.equal(calls.some((call) => call.kind === 'handleSelectionFailure'), false);
+  assert.equal(events.some((event) => event.kind === 'OpenSessionResult'
+    && event.operationId === 'open-operation' && event.ambiguous === true), true);
+
+  lateSuccess?.();
+  await settle();
+  assert.equal(events.some((event) => event.kind === 'OpenSessionResult'
+    && event.operationId === 'open-operation' && event.ok && !event.ambiguous), true);
+});
+
+test('EffectRunner keeps session.open reconciliation timers opaque and dispatches the reducer fence', async () => {
+  const timers = new FakeTimerSink();
+  const hostEvents: Event[] = [];
+  const { deps, calls } = makeEffectRunnerDeps({
+    timer: timers,
+    dispatchEvent: (event) => hostEvents.push(event),
+  });
+  const runner = new EffectRunner(deps);
+  const schedule: Effect = {
+    kind: 'ScheduleOpenSessionReconciliation',
+    corrId: 'open-reconcile-timer:open-operation:1',
+    operationId: 'open-operation', sessionPath: '/a', operationAttempt: 1,
+    backendGeneration: 7, delayMs: 1_000,
+  };
+
+  runner.run(schedule);
+  runner.run(schedule);
+  assert.equal(timers.size, 1, 'duplicate reducer effects share one opaque attempt timer');
+  timers.runAll();
+  assert.deepEqual(hostEvents, [{
+    kind: 'OpenSessionReconciliationDue', operationId: 'open-operation',
+    sessionPath: '/a', operationAttempt: 1, backendGeneration: 7,
+  }]);
+
+  runner.run({
+    kind: 'RecoverOpenSession', corrId: 'open-recover:open-operation:3',
+    selectionToken: 'selection-1', operationAttempt: 3, notice: 'Open could not be confirmed.',
+  });
+  await settle();
+  assert.ok(calls.some((call) => call.kind === 'handleSelectionFailure'));
   runner.dispose();
 });
 
@@ -358,7 +450,10 @@ test('Stop interrupts an in-flight manual compact immediately and later sends re
 
   runner.run({ kind: 'CompactRpc', corrId: 'compact-active', sessionPath: '/a' });
   await compactStarted;
-  runner.run({ kind: 'InterruptRpc', corrId: 'stop-compact', sessionPath: '/a' });
+  runner.run({
+    kind: 'InterruptRpc', corrId: 'stop-compact', sessionPath: '/a',
+    usePriorityLane: true,
+  });
   await settle();
 
   assert.deepEqual(
@@ -375,6 +470,11 @@ test('Stop interrupts an in-flight manual compact immediately and later sends re
   assert.equal(executionOrder.includes('message.send'), false, 'later send waits for the interrupt barrier');
 
   finishInterrupt();
+  await settle();
+  runner.run({
+    kind: 'ReleaseOperationResources', corrId: 'stop-compact',
+    operationId: 'stop-compact', operationAttempt: 1,
+  });
   await settle();
   assert.deepEqual(executionOrder, ['message.compact', 'message.interrupt', 'message.send']);
   assert.deepEqual(events.map((event) => event.kind), ['CompactResult', 'InterruptResult', 'SendResult']);
@@ -730,6 +830,64 @@ test('EffectRunner runs PersistTabs outside lifecycle and session queues', async
   assert.equal(events[0]?.ok, true);
 });
 
+test('EffectRunner preserves private marker-removal lifecycle correlation on PersistTabs results', async () => {
+  const { deps, events } = makeEffectRunnerDeps();
+  const runner = new EffectRunner(deps);
+
+  runner.run({
+    kind: 'PersistTabs',
+    corrId: 'private-final',
+    operationId: 'close-private',
+    backendGeneration: 7,
+    acknowledgementKey: 'privacy-marker-removal',
+    openTabPaths: [],
+    activeSessionPath: null,
+    pinnedTabPaths: [],
+    pinnedTabGroups: [],
+    privateSessionPaths: [],
+  });
+  await settle();
+
+  assert.deepEqual(events, [{
+    kind: 'PersistTabsResult',
+    corrId: 'private-final',
+    operationId: 'close-private',
+    backendGeneration: 7,
+    acknowledgementKey: 'privacy-marker-removal',
+    ok: true,
+  }]);
+});
+
+test('EffectRunner fails the blocked private marker-removal acknowledgement when cleanup fails', async () => {
+  let closeArgs: unknown[] = [];
+  const { deps, events } = makeEffectRunnerDeps({
+    serviceOverrides: {
+      async closeSession(...args) {
+        closeArgs = args;
+        throw new Error('forget failed');
+      },
+    },
+  });
+  const runner = new EffectRunner(deps);
+
+  runner.run({
+    kind: 'CloseSession', corrId: 'private-close', sessionPath: '/private',
+    operationId: 'close-private', backendGeneration: 7,
+    privacyMode: true, nextPath: null,
+  });
+  await settle();
+
+  assert.deepEqual(closeArgs, ['/private', null, true, false, 'close-private', 7]);
+  assert.deepEqual(events.map((event) => {
+    if (event.kind === 'PersistTabsResult') return [event.kind, event.acknowledgementKey, event.ok];
+    if (event.kind === 'CloseSessionResult') return [event.kind, undefined, event.ok];
+    return [event.kind, undefined, 'unexpected'];
+  }), [
+    ['CloseSessionResult', undefined, false],
+    ['PersistTabsResult', 'privacy-marker-removal', false],
+  ]);
+});
+
 test('EffectRunner serializes complete PersistTabs snapshots in dispatch order', async () => {
   const { deps, events } = makeEffectRunnerDeps();
   const started: string[] = [];
@@ -945,6 +1103,48 @@ test('EffectRunner restart drain waits for an accepted model/reasoning write to 
   await drain;
   assert.equal(drained, true);
   assert.equal(events.some((event) => event.kind === 'SetModelResult' && event.ok), true);
+});
+
+test('RestartBackend effect drains configuration, confirms old death, then commits one result', async () => {
+  let releaseWrite!: () => void;
+  const writeBlocked = new Promise<void>((resolve) => { releaseWrite = resolve; });
+  const hostEvents: Event[] = [];
+  let restartCalled = false;
+  const { deps, events } = makeEffectRunnerDeps({
+    requestImpl: async (method) => {
+      if (method === 'settings.set') await writeBlocked;
+      return undefined;
+    },
+    dispatchEvent: (event) => hostEvents.push(event),
+    serviceOverrides: {
+      async restart(onOldGenerationDeathConfirmed) {
+        restartCalled = true;
+        onOldGenerationDeathConfirmed?.();
+      },
+      getBackendGeneration: () => 8,
+    },
+  });
+  const runner = new EffectRunner(deps);
+  runner.run({
+    kind: 'SetModelRpc', corrId: 'config-write', sessionPath: '/s',
+    modelSettings: { defaultModel: 'model', defaultThinkingLevel: 'high' },
+  });
+  runner.run({
+    kind: 'RestartBackend', corrId: 'restart-corr', operationId: 'restart-operation', backendGeneration: 7,
+  });
+  await settle();
+  assert.equal(restartCalled, false);
+  assert.equal(hostEvents.some((event) => event.kind === 'BackendRestartDrainCompleted'), false);
+
+  releaseWrite();
+  await settle();
+  assert.equal(restartCalled, true);
+  assert.deepEqual(hostEvents.map((event) => event.kind), [
+    'BackendRestartDrainCompleted', 'BackendRestartOldGenerationDied',
+  ]);
+  const result = events.find((event) => event.kind === 'BackendRestartResult');
+  assert.equal(result?.ok, true);
+  assert.equal(result?.replacementBackendGeneration, 8);
 });
 
 test('EffectRunner DrainDeferredSetModelQueue re-dispatches confirmed choices against durable paths', async () => {
@@ -1170,6 +1370,7 @@ test('EffectRunner keeps a send pending when only its local acknowledgement dead
 test('message.send acknowledgement timeout reconciles through operation.status without rollback', async () => {
   const timers = new FakeTimerSink();
   const hostEvents: Event[] = [];
+  const observations: string[] = [];
   const { deps, events, calls } = makeEffectRunnerDeps({
     requestImpl: async (method) => {
       if (method === 'message.send') throw new RequestTimeoutError('req-stable-operation');
@@ -1178,23 +1379,47 @@ test('message.send acknowledgement timeout reconciles through operation.status w
       }
       return {};
     },
-    dispatchEvent: (event) => hostEvents.push(event),
+    dispatch: (event) => {
+      events.push(event);
+      observations.push(event.kind);
+    },
+    dispatchEvent: (event) => {
+      hostEvents.push(event);
+      observations.push(event.kind);
+    },
     timer: timers,
   });
   const runner = new EffectRunner(deps);
 
   runner.run({
-    kind: 'SendRpc', corrId: 'corr-stable', operationId: 'op-stable', backendGeneration: 4,
-    sessionPath: '/a', text: 'hello', inputs: [], composedText: 'hello', localId: 'local-stable',
+    kind: 'SendRpc', corrId: 'corr-stable', operationId: 'op-stable', operationAttempt: 2,
+    backendGeneration: 4, sessionPath: '/a', text: 'hello', inputs: [], composedText: 'hello', localId: 'local-stable',
   });
   await settle();
 
   assert.ok(hostEvents.some((event) => event.kind === 'SendOperationDelayed'
-    && event.operationId === 'op-stable'));
+    && event.operationId === 'op-stable' && event.operationAttempt === 2));
+  assert.deepEqual(calls.find((call) => call.kind === 'request' && call.method === 'message.send'), {
+    kind: 'request', method: 'message.send', params: {
+      sessionPath: '/a', operationId: 'op-stable', operationAttempt: 2,
+      text: 'hello', inputs: [], localId: 'local-stable',
+    },
+  });
+  runner.run(reconciliationEffect({
+    corrId: 'corr-stable', operationId: 'op-stable', operationKind: 'message.send',
+    backendGeneration: 4, operationAttempt: 2, reconciliationAttempt: 1,
+  }));
+  timers.runAll();
+  await settle();
   assert.ok(hostEvents.some((event) => event.kind === 'SendOperationStatus'
-    && event.state === 'accepted'));
+    && event.state === 'accepted' && event.operationAttempt === 2));
   assert.ok(events.some((event) => event.kind === 'SendResult' && event.ok
-    && event.operationId === 'op-stable' && event.requestId === 'request-1'));
+    && event.operationId === 'op-stable' && event.operationAttempt === 2
+    && event.requestId === 'request-1'));
+  const statusIndex = observations.lastIndexOf('SendOperationStatus');
+  const resultIndex = observations.lastIndexOf('SendResult');
+  assert.ok(statusIndex >= 0 && resultIndex > statusIndex,
+    'ledger lifecycle status is delivered before its synthetic payload acknowledgement');
   assert.ok(calls.some((call) => call.kind === 'request' && call.method === 'operation.status'));
   assert.equal(hostEvents.some((event) => event.kind === 'PreflightFailed'), false);
   runner.dispose();
@@ -1216,13 +1441,19 @@ test('message.send ambiguity reaches bounded visible recovery when status stays 
     sessionPath: '/a', text: 'hello', inputs: [], composedText: 'hello', localId: 'local-pending',
   });
   await settle();
-  for (let attempt = 0; attempt < 4; attempt += 1) {
+  for (let attempt = 1; attempt <= 4; attempt += 1) {
+    runner.run(reconciliationEffect({
+      corrId: 'corr-pending', operationId: 'op-pending', operationKind: 'message.send',
+      backendGeneration: 4, reconciliationAttempt: attempt,
+    }));
     timers.runAll();
     await settle();
   }
 
-  assert.ok(hostEvents.some((event) => event.kind === 'SendOperationStatus'
-    && event.state === 'reconciliation-exhausted'));
+  assert.equal(hostEvents.filter((event) => event.kind === 'SendOperationStatus'
+    && event.state === 'pending').length, 4);
+  assert.equal(hostEvents.some((event) => event.kind === 'SendOperationStatus'
+    && event.state === 'reconciliation-exhausted'), false);
   assert.equal(hostEvents.some((event) => event.kind === 'PreflightFailed'), false);
   runner.dispose();
 });
@@ -1492,10 +1723,16 @@ test('EditRpc dropped acknowledgement reconciles committed status without a fals
     inputs: [], localId: 'replacement-local',
   });
   await settle();
-
-  assert.deepEqual(methods, ['message.edit', 'operation.status']);
   assert.ok(hostEvents.some((event) => event.kind === 'MessageOperationDelayed'
     && event.operationKind === 'message.edit'));
+  runner.run(reconciliationEffect({
+    corrId: 'edit-corr', operationId: 'edit-op', operationKind: 'message.edit',
+    backendGeneration: 7, reconciliationAttempt: 1,
+  }));
+  timers.runAll();
+  await settle();
+
+  assert.deepEqual(methods, ['message.edit', 'operation.status']);
   assert.ok(hostEvents.some((event) => event.kind === 'MessageOperationStatus'
     && event.operationKind === 'message.edit' && event.state === 'accepted'
     && event.committed === true));
@@ -1540,6 +1777,7 @@ test('Stop cancels an edit waiting in the session FIFO before any destructive re
   runner.run({
     kind: 'InterruptRpc', corrId: 'stop-corr', operationId: 'stop-op', operationAttempt: 1,
     backendGeneration: 7, sessionPath: '/a',
+    cancelQueuedOperationIds: ['edit-op'], usePriorityLane: true,
   });
   await settle();
   assert.deepEqual(methods, ['message.interrupt'], 'Stop reaches the backend while the edit remains queued');
@@ -1575,10 +1813,16 @@ test('EditRpc acknowledgement loss reconciles read-only and never repeats the mu
     inputs: [], localId: 'replacement-local',
   });
   await settle();
-
-  assert.deepEqual(methods, ['message.edit', 'operation.status']);
   assert.ok(hostEvents.some((event) => event.kind === 'MessageOperationDelayed'
     && event.operationKind === 'message.edit'));
+  runner.run(reconciliationEffect({
+    corrId: 'edit-corr', operationId: 'edit-op', operationKind: 'message.edit',
+    backendGeneration: 7, reconciliationAttempt: 1,
+  }));
+  timers.runAll();
+  await settle();
+
+  assert.deepEqual(methods, ['message.edit', 'operation.status']);
   assert.ok(hostEvents.some((event) => event.kind === 'MessageOperationStatus'
     && event.operationKind === 'message.edit' && event.state === 'failed'
     && event.committed === true));
@@ -1625,9 +1869,14 @@ test('InterruptRpc carries stable identity and blocks a following send until set
 
   releaseStop();
   await settle();
+  runner.run({
+    kind: 'ReleaseOperationResources', corrId: 'stop-corr',
+    operationId: 'stop-op', operationAttempt: 1,
+  });
+  await settle();
   assert.deepEqual(methods, ['message.interrupt', 'message.send']);
   const stop = events.find((event) => event.kind === 'InterruptResult');
-  assert.ok(stop?.kind === 'InterruptResult' && stop.committed === true && stop.settled === true);
+  assert.ok(stop?.kind === 'InterruptResult' && stop.committed === undefined && stop.settled === true);
   runner.dispose();
 });
 
@@ -1655,14 +1904,19 @@ test('an unsettled interrupt acknowledgement keeps status reconciliation alive',
   await settle();
   const acknowledgement = hostEvents.find((event) => event.kind === 'InterruptResult');
   assert.ok(acknowledgement?.kind === 'InterruptResult');
-  assert.equal(acknowledgement.committed, false);
+  assert.equal(acknowledgement.committed, undefined);
+  runner.run(reconciliationEffect({
+    corrId: 'stop-corr', operationId: 'stop-op', operationKind: 'message.interrupt',
+    backendGeneration: 7, reconciliationAttempt: 1, delayMs: 1_000,
+  }));
   assert.equal(timers.size, 1);
 
   timers.runAll();
   await settle();
   assert.deepEqual(methods, ['message.interrupt', 'operation.status']);
   assert.ok(hostEvents.some((event) => event.kind === 'MessageOperationStatus'
-    && event.operationKind === 'message.interrupt' && event.state === 'committed'));
+    && event.operationKind === 'message.interrupt' && event.state === 'accepted'
+    && event.committed === true && event.settled === true));
   runner.dispose();
 });
 
@@ -1786,6 +2040,31 @@ test('EffectRunner dispose clears all send-timers', async () => {
   timers.runAll();
 
   assert.equal(events.length, 0);
+});
+
+test('registered send cancellation executes only the reducer-described corrId', async () => {
+  const timers = new FakeTimerSink();
+  const { deps, events } = makeEffectRunnerDeps({
+    timer: timers,
+    requestImpl: async (method) => method === 'message.send'
+      ? new Promise(() => {})
+      : { interrupted: false, alreadyStopped: true, settled: true },
+  });
+  const runner = new EffectRunner(deps);
+  runner.run({
+    kind: 'SendRpc', corrId: 'registered-send', operationId: 'send-op', backendGeneration: 7,
+    sessionPath: '/a', text: 'hi', inputs: [], composedText: 'hi', localId: 'local-registered',
+  });
+  runner.run({
+    kind: 'InterruptRpc', corrId: 'registered-stop', operationId: 'stop-op', operationAttempt: 1,
+    backendGeneration: 7, sessionPath: '/a', abortSendCorrIds: ['registered-send'],
+  });
+  await settle();
+
+  const rejected = events.find((event) => event.kind === 'SendResult');
+  assert.ok(rejected?.kind === 'SendResult' && rejected.ok === false);
+  assert.equal(timers.size, 0);
+  runner.dispose();
 });
 
 test('EffectRunner abortInFlightSend cancels an in-flight message.send (pre-ack) → SendResult{ok:false} + send-timer cleared', async () => {

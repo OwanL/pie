@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { reducer, initialArchState, type ArchState } from '../../../../src/host/core/reducer';
 import { selectViewState } from '../../../../src/host/core/projection';
 import type { Event } from '../../../../src/host/core/events';
-import { activeInterruptOperation, hasRetiredInterruptEventFence } from '../../../../src/host/core/operation-registry';
+import { activeInterruptOperation, hasRetiredInterruptEventFence, startSessionOperation } from '../../../../src/host/core/operation-registry';
 import type { ChatMessage, SessionSummary } from '../../../../src/shared/protocol';
 
 // A state with backendReady=true — needed because the Send Command handler
@@ -178,7 +178,7 @@ test('reducer: CompactResult failure surfaces an operational notice', () => {
   assert.equal(result.state.settings.notice, 'Could not compact this conversation.');
   assert.equal(result.state.settings.noticeKind, 'operational-error');
   assert.equal(result.state.settings.noticeRaw, 'REQUEST_IN_PROGRESS: provider failed before compaction started');
-  assert.deepEqual(result.effects, []);
+  assert.equal(result.effects[0]?.kind, 'ReleaseOperationResources');
 });
 
 test('reducer: Interrupt does not affect other sessions', () => {
@@ -214,8 +214,9 @@ test('reducer: authoritatively settled InterruptResult retires Stop and sets run
   assert.equal(hasRetiredInterruptEventFence(result.state.operations, '/a'), true);
   // Watchdog: running=false set directly in state
   assert.ok(!result.state.sessions.runningSessionPaths.includes('/a'), 'running should be cleared for /a');
-  // No SyncEffect — running state is mutated directly
-  assert.equal(result.effects.length, 0);
+  assert.deepEqual(result.effects, [{
+    kind: 'ReleaseOperationResources', corrId: 'c1', operationId: 'c1', operationAttempt: 1,
+  }]);
 });
 
 test('reducer: definitive InterruptResult failure terminalizes Stop and produces Log effect', () => {
@@ -232,12 +233,13 @@ test('reducer: definitive InterruptResult failure terminalizes Stop and produces
 
   assert.equal(activeInterruptOperation(result.state.operations, '/a'), undefined);
   assert.equal(hasRetiredInterruptEventFence(result.state.operations, '/a'), false);
-  assert.equal(result.effects.length, 1);
-  assert.equal(result.effects[0]?.kind, 'Log');
-  if (result.effects[0]?.kind === 'Log') {
-    assert.equal(result.effects[0].level, 'error');
-    assert.match(result.effects[0].message, /Interrupt failed/);
-    assert.deepEqual(result.effects[0].data, { error: 'connection lost' });
+  assert.equal(result.effects.length, 2);
+  assert.equal(result.effects[0]?.kind, 'ReleaseOperationResources');
+  assert.equal(result.effects[1]?.kind, 'Log');
+  if (result.effects[1]?.kind === 'Log') {
+    assert.equal(result.effects[1].level, 'error');
+    assert.match(result.effects[1].message, /Interrupt failed/);
+    assert.deepEqual(result.effects[1].data, { error: 'connection lost' });
   }
 });
 
@@ -271,6 +273,7 @@ test('reducer: Send command inserts optimistic message and produces SendRpc', ()
   assert.deepEqual(result.state.pending.ops['c-send'], {
     kind: 'send',
     operationId: 'c-send',
+    operationAttempt: 1,
     sessionPath: '/s',
     localId: 'loc-1',
     previousSummary: null,
@@ -450,9 +453,8 @@ test('reducer: SendResult{ok:false} clears pending, removes optimistic, restores
   // Session summary restored.
   const restored = result.state.sessions.sessions.find(s => s.path === '/s');
   assert.equal(restored?.name, 'Old');
-  // Only PostImperative remains as a real side-effect effect.
-  assert.equal(result.effects.length, 1);
-  assert.equal(result.effects[0]?.kind, 'PostImperative');
+  assert.ok(result.effects.some((effect) => effect.kind === 'PostImperative'));
+  assert.ok(result.effects.some((effect) => effect.kind === 'ClearSendTimer'));
 });
 
 test('reducer: SendResult{ok:false} without previousSummary does not restore session name', () => {
@@ -1045,8 +1047,27 @@ test('reducer: BusyChanged running=true adds session to runningSessionPaths', ()
   assert.deepEqual(result.effects, []);
 });
 
-test('reducer: AgentSettled updates capabilities without pre-empting the ordered busy boundary', () => {
-  const running = reducer(initialArchState, {
+test('reducer: correlated AgentSettled updates capabilities without pre-empting the ordered busy boundary', () => {
+  const operation = startSessionOperation({
+    operationId: 'operation-1', kind: 'message.send', source: { kind: 'host' },
+    pendingPath: '/s', selectionToken: '', backendGeneration: 3, attempt: 2,
+  });
+  const running = reducer({
+    ...initialArchState,
+    operations: { [operation.operationId]: operation },
+    livePipeline: {
+      ...initialArchState.livePipeline,
+      turnsBySession: {
+        '/s': {
+          requestId: 'request-1', operationId: 'operation-1', turnId: 'turn-1', attemptId: 'attempt-1',
+        } as ArchState['livePipeline']['turnsBySession'][string],
+      },
+    },
+    pending: {
+      ...initialArchState.pending,
+      currentTurnBySession: { '/s': { requestId: 'request-1', firstMessageId: 'message-1' } },
+    },
+  }, {
     kind: 'BusyChanged', sessionPath: '/s', running: true,
   }).state;
   const result = reducer(running, {
@@ -1058,10 +1079,141 @@ test('reducer: AgentSettled updates capabilities without pre-empting the ordered
       canInterrupt: false,
       canCompact: true,
     },
+    operationId: 'operation-1', requestId: 'request-1', turnId: 'turn-1', attemptId: 'attempt-1',
+    operationAttempt: 2, backendGeneration: 3, workerGeneration: 4, currentBackendGeneration: 3,
   });
 
   assert.equal(result.state.sessions.runningSessionPaths.includes('/s'), true);
   assert.equal(result.state.sessions.capabilitiesBySession['/s']?.canContinue, true);
+  assert.deepEqual(result.state.sessions.settlementGenerationBySession['/s'], {
+    backendGeneration: 3,
+    workerGeneration: 4,
+    operationId: 'operation-1',
+    requestId: 'request-1',
+    turnId: 'turn-1',
+    attemptId: 'attempt-1',
+    operationAttempt: 2,
+  });
+});
+
+test('reducer: stale worker, request, turn, attempt, and backend settlements cannot change capabilities', () => {
+  const operation = startSessionOperation({
+    operationId: 'operation-current', kind: 'message.send', source: { kind: 'host' },
+    pendingPath: '/s', selectionToken: '', backendGeneration: 7, attempt: 3,
+  });
+  const state: ArchState = {
+    ...initialArchState,
+    operations: { [operation.operationId]: operation },
+    sessions: {
+      ...initialArchState.sessions,
+      capabilitiesBySession: {
+        '/s': { billableActivity: true, canContinue: false, canInterrupt: true, canCompact: false },
+      },
+      settlementGenerationBySession: { '/s': { backendGeneration: 7, workerGeneration: 5 } },
+    },
+    pending: {
+      ...initialArchState.pending,
+      currentTurnBySession: { '/s': { requestId: 'request-current', firstMessageId: 'message-current' } },
+    },
+    livePipeline: {
+      ...initialArchState.livePipeline,
+      turnsBySession: {
+        '/s': {
+          requestId: 'request-current', operationId: 'operation-current',
+          turnId: 'turn-current', attemptId: 'attempt-current',
+        } as ArchState['livePipeline']['turnsBySession'][string],
+      },
+    },
+  };
+  const settlement = {
+    kind: 'AgentSettled' as const,
+    sessionPath: '/s',
+    capabilities: { billableActivity: false, canContinue: true, canInterrupt: false, canCompact: true },
+    operationId: 'operation-current', requestId: 'request-current',
+    turnId: 'turn-current', attemptId: 'attempt-current', operationAttempt: 3,
+    backendGeneration: 7, workerGeneration: 5, currentBackendGeneration: 7,
+  };
+
+  const uncorrelated = {
+    kind: settlement.kind,
+    sessionPath: settlement.sessionPath,
+    capabilities: settlement.capabilities,
+    backendGeneration: settlement.backendGeneration,
+    workerGeneration: settlement.workerGeneration,
+    currentBackendGeneration: settlement.currentBackendGeneration,
+  };
+  for (const stale of [
+    uncorrelated,
+    { ...settlement, workerGeneration: 4 },
+    { ...settlement, requestId: 'request-stale' },
+    { ...settlement, turnId: 'turn-stale' },
+    { ...settlement, attemptId: 'attempt-stale' },
+    { ...settlement, operationAttempt: undefined },
+    { ...settlement, operationAttempt: 2 },
+    { ...settlement, backendGeneration: 6 },
+  ]) {
+    const result = reducer(state, stale);
+    assert.equal(result.state, state);
+    assert.deepEqual(result.effects, []);
+  }
+});
+
+test('reducer: older same-worker AgentSettled cannot overwrite newer terminal capabilities after turn records clear', () => {
+  const oldOperation = {
+    ...startSessionOperation({
+      operationId: 'operation-old', kind: 'message.send', source: { kind: 'host' },
+      pendingPath: '/s', selectionToken: '', backendGeneration: 7, attempt: 1,
+    }),
+    phase: 'settled' as const,
+    commit: 'committed' as const,
+    terminal: {
+      outcome: 'settled' as const, reason: 'durable-commit-observed' as const, recovery: 'none' as const,
+    },
+  };
+  const newerOperation = {
+    ...startSessionOperation({
+      operationId: 'operation-new', kind: 'message.send', source: { kind: 'host' },
+      pendingPath: '/s', selectionToken: '', backendGeneration: 7, attempt: 1,
+    }),
+    phase: 'settled' as const,
+    commit: 'committed' as const,
+    terminal: {
+      outcome: 'settled' as const, reason: 'durable-commit-observed' as const, recovery: 'none' as const,
+    },
+  };
+  const newerCapabilities = {
+    billableActivity: false, canContinue: true, canInterrupt: false, canCompact: true,
+  };
+  const state: ArchState = {
+    ...initialArchState,
+    operations: {
+      [oldOperation.operationId]: oldOperation,
+      [newerOperation.operationId]: newerOperation,
+    },
+    sessions: {
+      ...initialArchState.sessions,
+      capabilitiesBySession: { '/s': newerCapabilities },
+      settlementGenerationBySession: {
+        '/s': {
+          backendGeneration: 7, workerGeneration: 5,
+          operationId: 'operation-new', requestId: 'request-new',
+          turnId: 'turn-new', attemptId: 'attempt-new', operationAttempt: 1,
+        },
+      },
+    },
+    pending: { ...initialArchState.pending, currentTurnBySession: {} },
+    livePipeline: { ...initialArchState.livePipeline, turnsBySession: {} },
+  };
+
+  const stale = reducer(state, {
+    kind: 'AgentSettled', sessionPath: '/s',
+    capabilities: { billableActivity: true, canContinue: false, canInterrupt: true, canCompact: false },
+    operationId: 'operation-old', requestId: 'request-old', turnId: 'turn-old', attemptId: 'attempt-old',
+    operationAttempt: 1, backendGeneration: 7, workerGeneration: 5, currentBackendGeneration: 7,
+  });
+
+  assert.equal(stale.state, state);
+  assert.deepEqual(stale.state.sessions.capabilitiesBySession['/s'], newerCapabilities);
 });
 
 test('reducer: BusyChanged running=false when was running adds to unreadFinishedSessionPaths', () => {

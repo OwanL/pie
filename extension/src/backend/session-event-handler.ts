@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import type {
+  AgentSettledPayload,
   AuxiliaryLlmUsagePayload,
   CompactionOutcome,
   CompactionPayload,
@@ -694,6 +695,9 @@ function extractUserMessageText(message: { content?: unknown }): string {
 
 export interface BackendSessionEventHandlerDeps {
   emit(event: string, payload?: unknown): void;
+  /** Process fences attached to full-agent settlement by isolated workers. */
+  backendGeneration?: number;
+  workerGeneration?: number;
   emitBusyChanged(
     context: SessionContext,
     busy: boolean,
@@ -1324,15 +1328,23 @@ export function handleSdkSessionEvent(
         const operationId = queuedOperationIds && queuedOperationIds.length > 0
           ? queuedOperationIds.shift()
           : undefined;
+        const queuedOperationAttempts = context.queuedOperationAttempts;
+        const operationAttempt = queuedOperationAttempts && queuedOperationAttempts.length > 0
+          ? queuedOperationAttempts.shift()
+          : undefined;
         if (operationId) {
           context.sendOperationLedger?.markCommitted(operationId);
-          if (context.activeRequest) context.activeRequest.operationId = operationId;
+          if (context.activeRequest) {
+            context.activeRequest.operationId = operationId;
+            context.activeRequest.operationAttempt = operationAttempt;
+          }
         }
         startQueuedFollowUpSegment(deps, context, deliveredAt);
         deps.emit('message.queuedDelivered', {
           sessionPath: context.sessionPath,
           text: extractUserMessageText(event.message),
           ...(operationId ? { operationId } : {}),
+          ...(operationAttempt !== undefined ? { operationAttempt } : {}),
           localId: localId || undefined,
         } satisfies QueuedDeliveredPayload);
         return;
@@ -2140,6 +2152,8 @@ export function handleSdkSessionEvent(
       const requestId = context.activeRequest?.id;
       const operationId = context.activeRequest?.operationId;
       const operationAttempt = context.activeRequest?.operationAttempt;
+      const turnId = context.activeRequest?.liveTurnAccumulator?.turnId;
+      const attemptId = context.activeRequest?.liveTurnAccumulator?.attemptId;
       const messageId = context.activeRequest?.lastAssistantMessageId;
       const modelId = context.activeRequest?.modelId;
       const userInitiated = context.activeRequest?.aborted === true;
@@ -2177,6 +2191,7 @@ export function handleSdkSessionEvent(
         deps.emit('preflight.failed', {
           requestId: extensionCommandRequestId,
           ...(operationId ? { operationId } : {}),
+          ...(operationAttempt !== undefined ? { operationAttempt } : {}),
           sessionPath: pendingExtensionCommand?.sessionPath ?? context.sessionPath,
           error: 'Extension command ended without starting an agent turn.',
         } satisfies PreflightFailedPayload);
@@ -2228,7 +2243,17 @@ export function handleSdkSessionEvent(
       }
 
       const capabilities = buildSessionCapabilities(context);
-      deps.emit('agent.settled', { sessionPath: context.sessionPath, capabilities });
+      deps.emit('agent.settled', {
+        sessionPath: context.sessionPath,
+        capabilities,
+        ...(operationId ? { operationId } : {}),
+        ...(requestId ? { requestId } : {}),
+        ...(turnId ? { turnId } : {}),
+        ...(attemptId ? { attemptId } : {}),
+        ...(operationAttempt !== undefined ? { operationAttempt } : {}),
+        ...(deps.backendGeneration !== undefined ? { backendGeneration: deps.backendGeneration } : {}),
+        ...(deps.workerGeneration !== undefined ? { workerGeneration: deps.workerGeneration } : {}),
+      } satisfies AgentSettledPayload);
       deps.emitBusyChanged(context, capabilities.billableActivity, capabilities);
       void deps.emitSessionOpened(context.sessionPath);
       void deps.emitSessionListChanged();

@@ -96,8 +96,14 @@ export interface HotWorkerRoute {
     busySeq: number;
     requestId?: string;
     operationId?: string;
+    operationAttempt?: number;
     turnId?: string;
+    attemptId?: string;
     terminalRequestId?: string;
+    terminalOperationId?: string;
+    terminalOperationAttempt?: number;
+    terminalTurnId?: string;
+    terminalAttemptId?: string;
     preflightOnly?: boolean;
     messageId?: string;
     tools: Array<{ requestId: string; messageId: string; toolCallId: string; name?: string; input?: WorkerJsonValue; startedAt?: number }>;
@@ -521,14 +527,28 @@ export class WorkerRuntimeRouter {
       && typeof resultPayload.operationId === 'string'
       ? resultPayload.operationId
       : undefined;
-    if ((operation === 'message.send' || operation === 'message.continue') && earlyAckRequestId
-      && hot.checkpoint.requestId === undefined
-      && hot.checkpoint.terminalRequestId !== earlyAckRequestId) {
-      hot.checkpoint.requestId = earlyAckRequestId;
-      hot.checkpoint.operationId = earlyAckOperationId;
-      hot.checkpoint.turnId = undefined;
-      hot.checkpoint.messageId = undefined;
-      hot.checkpoint.preflightOnly = true;
+    const earlyAckOperationAttempt = resultPayload !== null
+      && typeof resultPayload === 'object'
+      && !Array.isArray(resultPayload)
+      && Number.isSafeInteger(resultPayload.operationAttempt)
+      && (resultPayload.operationAttempt as number) > 0
+      ? resultPayload.operationAttempt as number
+      : undefined;
+    if ((operation === 'message.send' || operation === 'message.continue') && earlyAckRequestId) {
+      if (hot.checkpoint.requestId === undefined
+        && hot.checkpoint.terminalRequestId !== earlyAckRequestId) {
+        hot.checkpoint.requestId = earlyAckRequestId;
+        hot.checkpoint.operationId = earlyAckOperationId;
+        hot.checkpoint.operationAttempt = earlyAckOperationAttempt;
+        hot.checkpoint.turnId = undefined;
+        hot.checkpoint.messageId = undefined;
+        hot.checkpoint.preflightOnly = true;
+      } else if (hot.checkpoint.requestId === earlyAckRequestId
+        && hot.checkpoint.operationId === earlyAckOperationId
+        && earlyAckOperationAttempt !== undefined
+        && earlyAckOperationAttempt > (hot.checkpoint.operationAttempt ?? 0)) {
+        hot.checkpoint.operationAttempt = earlyAckOperationAttempt;
+      }
     }
     return resultPayload;
   }
@@ -1949,24 +1969,44 @@ export class WorkerRuntimeRouter {
   private observeCheckpoint(route: HotWorkerRoute, event: string, payload: WorkerJsonObject): void {
     const requestId = typeof payload.requestId === 'string' ? payload.requestId : undefined;
     const operationId = typeof payload.operationId === 'string' ? payload.operationId : undefined;
+    const operationAttempt = Number.isSafeInteger(payload.operationAttempt) && (payload.operationAttempt as number) > 0
+      ? payload.operationAttempt as number
+      : undefined;
     const turnId = typeof payload.turnId === 'string' ? payload.turnId : undefined;
+    const attemptId = typeof payload.attemptId === 'string' ? payload.attemptId : undefined;
     const messageId = typeof payload.messageId === 'string' ? payload.messageId : undefined;
     if (event === 'busy.changed' && Number.isSafeInteger(payload.seq)) {
       route.checkpoint.busySeq = Math.max(route.checkpoint.busySeq, payload.seq as number);
     } else if (event === 'live.semantic' && payload.kind === 'turn.started') {
+      const retainedOperationAttempt = operationId !== undefined
+        && operationId === route.checkpoint.operationId
+        ? route.checkpoint.operationAttempt
+        : undefined;
       route.checkpoint.requestId = requestId;
       route.checkpoint.operationId = operationId;
+      route.checkpoint.operationAttempt = operationAttempt ?? retainedOperationAttempt;
       route.checkpoint.turnId = turnId;
+      route.checkpoint.attemptId = attemptId;
       route.checkpoint.terminalRequestId = undefined;
+      route.checkpoint.terminalOperationId = undefined;
+      route.checkpoint.terminalOperationAttempt = undefined;
+      route.checkpoint.terminalTurnId = undefined;
+      route.checkpoint.terminalAttemptId = undefined;
       route.checkpoint.messageId = typeof payload.canonicalMessageId === 'string'
         ? payload.canonicalMessageId
         : undefined;
       route.checkpoint.preflightOnly = false;
     } else if (event === 'live.semantic' && payload.kind === 'turn.terminal') {
       if (requestId) route.checkpoint.terminalRequestId = requestId;
+      route.checkpoint.terminalOperationId = operationId ?? route.checkpoint.operationId;
+      route.checkpoint.terminalOperationAttempt = operationAttempt ?? route.checkpoint.operationAttempt;
+      route.checkpoint.terminalTurnId = turnId ?? route.checkpoint.turnId;
+      route.checkpoint.terminalAttemptId = attemptId ?? route.checkpoint.attemptId;
       route.checkpoint.requestId = undefined;
       route.checkpoint.operationId = undefined;
+      route.checkpoint.operationAttempt = undefined;
       route.checkpoint.turnId = undefined;
+      route.checkpoint.attemptId = undefined;
       route.checkpoint.messageId = undefined;
       route.checkpoint.preflightOnly = undefined;
       route.checkpoint.tools = [];
@@ -1978,17 +2018,39 @@ export class WorkerRuntimeRouter {
     } else if (event === 'message.aborted' && requestId?.startsWith('queued:')) {
       // A queued send has its own operation terminal but never owns the active
       // request checkpoint. Forward it without clearing the running turn.
+    } else if (event === 'message.queuedDelivered') {
+      // Delivery transfers the still-running SDK loop to the queued send. Keep
+      // its transport attempt until the next turn.started supplies request/turn
+      // identity, so crash settlement cannot lose the retry fence.
+      route.checkpoint.operationId = operationId;
+      route.checkpoint.operationAttempt = operationAttempt;
     } else if (event === 'message.started') {
       route.checkpoint.requestId = requestId;
       route.checkpoint.operationId = operationId;
+      route.checkpoint.operationAttempt = operationAttempt;
       route.checkpoint.terminalRequestId = undefined;
+      route.checkpoint.terminalOperationId = undefined;
+      route.checkpoint.terminalOperationAttempt = undefined;
+      route.checkpoint.terminalTurnId = undefined;
+      route.checkpoint.terminalAttemptId = undefined;
       route.checkpoint.messageId = messageId;
       route.checkpoint.preflightOnly = false;
     } else if (event === 'message.finished' || event === 'message.aborted' || event === 'preflight.failed') {
+      const sameTerminalRequest = requestId !== undefined && requestId === route.checkpoint.terminalRequestId;
       if (requestId) route.checkpoint.terminalRequestId = requestId;
+      route.checkpoint.terminalOperationId = operationId
+        ?? (sameTerminalRequest ? route.checkpoint.terminalOperationId : route.checkpoint.operationId);
+      route.checkpoint.terminalOperationAttempt = operationAttempt
+        ?? (sameTerminalRequest ? route.checkpoint.terminalOperationAttempt : route.checkpoint.operationAttempt);
+      route.checkpoint.terminalTurnId = turnId
+        ?? (sameTerminalRequest ? route.checkpoint.terminalTurnId : route.checkpoint.turnId);
+      route.checkpoint.terminalAttemptId = attemptId
+        ?? (sameTerminalRequest ? route.checkpoint.terminalAttemptId : route.checkpoint.attemptId);
       route.checkpoint.requestId = undefined;
       route.checkpoint.operationId = undefined;
+      route.checkpoint.operationAttempt = undefined;
       route.checkpoint.turnId = undefined;
+      route.checkpoint.attemptId = undefined;
       route.checkpoint.messageId = undefined;
       route.checkpoint.preflightOnly = undefined;
       route.checkpoint.tools = [];
@@ -2052,6 +2114,8 @@ export class WorkerRuntimeRouter {
         this.options.emit('preflight.failed', {
           requestId,
           ...(route.checkpoint.operationId ? { operationId: route.checkpoint.operationId } : {}),
+          ...(route.checkpoint.operationAttempt !== undefined
+            ? { operationAttempt: route.checkpoint.operationAttempt } : {}),
           sessionPath: route.currentLeasePath,
           error: reason,
         });
@@ -2065,9 +2129,22 @@ export class WorkerRuntimeRouter {
         });
       }
     }
+    const settlementOperationId = route.checkpoint.operationId ?? route.checkpoint.terminalOperationId;
+    const settlementRequestId = route.checkpoint.requestId ?? route.checkpoint.terminalRequestId;
+    const settlementTurnId = route.checkpoint.turnId ?? route.checkpoint.terminalTurnId;
+    const settlementAttemptId = route.checkpoint.attemptId ?? route.checkpoint.terminalAttemptId;
+    const settlementOperationAttempt = route.checkpoint.operationAttempt ?? route.checkpoint.terminalOperationAttempt;
     this.options.emit('agent.settled', {
       sessionPath: route.currentLeasePath,
       capabilities: { ...SETTLED_SESSION_CAPABILITIES },
+      ...(settlementOperationId ? { operationId: settlementOperationId } : {}),
+      ...(settlementRequestId ? { requestId: settlementRequestId } : {}),
+      ...(settlementTurnId ? { turnId: settlementTurnId } : {}),
+      ...(settlementAttemptId ? { attemptId: settlementAttemptId } : {}),
+      ...(settlementOperationAttempt !== undefined
+        ? { operationAttempt: settlementOperationAttempt } : {}),
+      backendGeneration: route.owner.coordinatorGeneration,
+      workerGeneration: route.owner.workerGeneration,
     });
     const busyPayload = this.normalizeRuntimeEventPayload(route, 'busy.changed', {
       sessionPath: route.currentLeasePath,
@@ -2084,10 +2161,21 @@ export class WorkerRuntimeRouter {
     event: string,
     payload: WorkerJsonObject,
   ): WorkerJsonObject {
-    if (event !== 'busy.changed') return payload;
     const sessionPath = typeof payload.sessionPath === 'string'
       ? payload.sessionPath
       : route.currentLeasePath;
+    if (event === 'agent.settled') {
+      return {
+        ...payload,
+        sessionPath,
+        backendGeneration: route.owner.coordinatorGeneration,
+        workerGeneration: route.owner.workerGeneration,
+      };
+    }
+    if (event === 'session.opened') {
+      return { ...payload, workerGeneration: route.owner.workerGeneration };
+    }
+    if (event !== 'busy.changed') return payload;
     const key = routeKey(sessionPath);
     const seq = (this.publicBusySeqByPath.get(key) ?? 0) + 1;
     this.publicBusySeqByPath.set(key, seq);

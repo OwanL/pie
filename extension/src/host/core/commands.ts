@@ -26,6 +26,8 @@ export interface SendCommand extends CommandBase {
   kind: 'Send';
   /** Stable mutation identity; distinct from corrId/localId/requestId/turnId. */
   operationId?: string;
+  /** Transport attempt for this logical operation; production ingress starts at 1. */
+  operationAttempt?: number;
   operationSource?: SessionOperationSource;
   backendGeneration?: number;
   sessionPath: string;
@@ -42,10 +44,8 @@ export interface SendCommand extends CommandBase {
   /** Snapshot of the session summary before optimistic name change (null if no change). */
   previousSummary: SessionSummary | null;
   /** Brief H: prior pruning mode to restore after a "retry without pruning" send
-   *  commits/fails. Set ONLY by `retrySend` with `disablePruning` (captured
-   *  before the host disables pruning); absent on a normal send. Restored by the
-   *  EffectRunner when the in-flight send resolves (commit / fire / pre-ack
-   *  failure) so pruning returns to the user's prior mode for the next turn. */
+   * commits/fails. The reducer retains this intent and includes it only on the
+   * terminal/commit cleanup effect; the runner executes but does not own it. */
   priorPruningMode?: PruningMode;
   /** Host-side tag for synthetic (non-user-typed) sends. NOT forwarded to
    *  the backend `message.send` RPC (the SDK persists user messages without
@@ -144,6 +144,11 @@ export interface TruncateAfterCommand extends CommandBase {
 export interface OpenSessionCommand extends CommandBase {
   kind: 'OpenSession';
   sessionPath: string;
+  operationId?: string;
+  operationAttempt?: number;
+  operationSource?: SessionOperationSource;
+  causalParentOperationId?: string | null;
+  backendGeneration?: number;
   /** Pre-built placeholder summary (modifiedAt set host-side); inserted by the
    *  reducer iff the session isn't already summarized. null when the session
    *  already has a summary (no placeholder needed). Mirrors CreateSession's
@@ -188,12 +193,19 @@ export interface CreateSessionCommand extends CommandBase {
 /** Persist the tab order / active tab / pinned tabs to globalState. */
 export interface PersistTabsCommand extends CommandBase {
   kind: 'PersistTabs';
+  /** Correlates lifecycle-owned persistence to its reducer operation. */
+  operationId?: string;
+  backendGeneration?: number;
+  /** Omitted for the ordinary/initial tab-persistence acknowledgement. */
+  acknowledgementKey?: 'privacy-marker-removal';
   openTabPaths: string[];
   activeSessionPath: string | null;
   /** Pinned tab paths, persisted alongside open tabs. */
   pinnedTabPaths: string[];
   /** Pinned-session groups, persisted alongside pinned tabs. */
   pinnedTabGroups: string[][];
+  /** Persist only the supplied session-scoped privacy markers. */
+  privateSessionPaths?: string[];
 }
 
 /** Add a composer input draft (file attachment) to a session. */
@@ -400,6 +412,7 @@ export type Command =
   | OpenFileDiffCommand
   | RevertFileCommand
   | CloseSessionCommand
+  | RestartBackendCommand
   | SetEditingMessageCommand
   | DismissNoticeCommand
   | RespondExtensionUICommand
@@ -525,6 +538,11 @@ export interface RevertFileCommand extends CommandBase {
 export interface CloseSessionCommand extends CommandBase {
   kind: 'CloseSession';
   sessionPath: string;
+  operationId?: string;
+  operationAttempt?: number;
+  operationSource?: SessionOperationSource;
+  causalParentOperationId?: string | null;
+  backendGeneration?: number;
   /** Outbox closure retries must re-run idempotent cleanup/persistence even
    *  when an earlier optimistic command already hid the tab. */
   ensureClosed?: boolean;
@@ -538,6 +556,14 @@ export interface CloseSessionCommand extends CommandBase {
  *  `CreateSession`'s host-built placeholder + selection token, but targets a
  *  COPY of a source session (backend `session.duplicate` RPC) and inserts the
  *  new tab adjacent to the source (`insertAfter` semantics). */
+export interface RestartBackendCommand extends CommandBase {
+  kind: 'RestartBackend';
+  operationId: string;
+  operationSource: SessionOperationSource;
+  causalParentOperationId?: string | null;
+  backendGeneration: number;
+}
+
 export interface DuplicateSessionCommand extends CommandBase {
   kind: 'DuplicateSession';
   /** Host-allocated pending session path for the COPY (the new tab). Generated

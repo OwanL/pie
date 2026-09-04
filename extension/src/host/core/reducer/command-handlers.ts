@@ -34,6 +34,7 @@ import {
   handleCreateSession,
   handleSelectSession,
   handleCloseSession,
+  handleRestartBackend,
   handleDuplicateSession,
   handleMoveSessionTab,
 } from './command-session-handlers.js';
@@ -192,6 +193,10 @@ export function handleCommand(state: ArchState, cmd: Command): ReducerResult {
 
     case 'CloseSession': {
       return handleCloseSession(state, cmd);
+    }
+
+    case 'RestartBackend': {
+      return handleRestartBackend(state, cmd);
     }
 
     case 'PersistTabs': {

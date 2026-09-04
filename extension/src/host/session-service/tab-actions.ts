@@ -147,7 +147,7 @@ export class SessionTabActions {
     return pendingPath;
   }
 
-  openSession(sessionPath: string): void {
+  openSession(sessionPath: string, source?: RendererCommandContext, causalParentOperationId?: string): void {
     const transitionEpoch = this.getArchState().sessions.activeSessionPath !== sessionPath
       ? ++this.visualTransitionEpoch
       : this.visualTransitionEpoch;
@@ -244,12 +244,14 @@ export class SessionTabActions {
     }
 
     const requestEpoch = this.state.bumpSessionDataEpoch(sessionPath);
+    const operationId = crypto.randomUUID();
     const selectionToken = this.state.beginSelectionRequest(
       sessionPath,
       undefined,
       wasOpenTab,
       !existing,
       requestEpoch,
+      operationId,
     );
 
     auditLog('session-service', 'session.open.requested', {
@@ -283,6 +285,11 @@ export class SessionTabActions {
         sessionPath,
         placeholderSummary,
         selectionToken,
+        operationId,
+        operationAttempt: 1,
+        operationSource: operationSourceFromRenderer(source),
+        causalParentOperationId,
+        backendGeneration: this.state.getBackendGeneration(),
       },
     });
 
@@ -293,7 +300,12 @@ export class SessionTabActions {
     this.scheduleRender();
   }
 
-  async closeSession(sessionPath: string, nextPath: string | null, selectionChanged = false): Promise<void> {
+  async closeSession(
+    sessionPath: string,
+    nextPath: string | null,
+    selectionChanged = false,
+    causalParentOperationId?: string,
+  ): Promise<void> {
     // Thin host-side cleanup — the reducer already did the tab-close +
     // per-session map clearing + select-next-tab (via the CloseSession Command
     // handler, which computed nextPath and passed it through the Effect). This
@@ -349,7 +361,7 @@ export class SessionTabActions {
       const isSummarizedOrPending =
         isPendingTabPath(nextPath) || !!archState.sessions.sessions.find((s) => s.path === nextPath);
       if (!isSummarizedOrPending) {
-        void this.openSession(nextPath);
+        void this.openSession(nextPath, undefined, causalParentOperationId);
       }
     }
 

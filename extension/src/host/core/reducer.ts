@@ -95,8 +95,12 @@ import {
   handleCreateSessionResult,
   handleDuplicateSessionResult,
   handleOpenSessionResult,
+  handleOpenSessionReconciliationDue,
   handleCloseSessionResult,
   handlePersistTabsResult,
+  handleBackendRestartDrainCompleted,
+  handleBackendRestartOldGenerationDied,
+  handleBackendRestartResult,
 } from './reducer/misc-handlers.js';
 import { handleAvailableModelsChanged, handleModelSettingsHydrated } from './reducer/set-model-handlers.js';
 import { handleFileChangesUpdated } from './reducer/file-handlers.js';
@@ -432,8 +436,24 @@ export function reducer(state: ArchState, event: Event): ReducerResult {
       return handleOpenSessionResult(state, event);
     }
 
+    case 'OpenSessionReconciliationDue': {
+      return handleOpenSessionReconciliationDue(state, event);
+    }
+
     case 'PersistTabsResult': {
       return handlePersistTabsResult(state, event);
+    }
+
+    case 'BackendRestartDrainCompleted': {
+      return handleBackendRestartDrainCompleted(state, event);
+    }
+
+    case 'BackendRestartOldGenerationDied': {
+      return handleBackendRestartOldGenerationDied(state, event);
+    }
+
+    case 'BackendRestartResult': {
+      return handleBackendRestartResult(state, event);
     }
 
     case 'ModelSwitchConfirmResult': {

@@ -277,6 +277,8 @@ export class WorkerRuntimeHost {
       this.emit('message.aborted', {
         requestId: `queued:${operationId}`,
         operationId,
+        ...(context.queuedOperationAttempts?.[index] !== undefined
+          ? { operationAttempt: context.queuedOperationAttempts[index] } : {}),
         sessionPath: context.sessionPath,
         ...(context.queuedLocalIds?.[index] ? { localId: context.queuedLocalIds[index] } : {}),
         outcome: 'cancelled',
@@ -286,6 +288,7 @@ export class WorkerRuntimeHost {
     }
     context.queuedLocalIds = [];
     context.queuedOperationIds = [];
+    context.queuedOperationAttempts = [];
     if (!running) return { interrupted: false, alreadyStopped: true };
     if (context.manualCompactionRequest) context.manualCompactionRequest.cancelled = true;
     if (context.activeRequest) context.activeRequest.aborted = true;
@@ -571,6 +574,8 @@ export class WorkerRuntimeHost {
       this.emit('preflight.failed', {
         requestId: pendingExtensionCommand!.requestId,
         ...(previousActiveRequest?.operationId ? { operationId: previousActiveRequest.operationId } : {}),
+        ...(previousActiveRequest?.operationAttempt !== undefined
+          ? { operationAttempt: previousActiveRequest.operationAttempt } : {}),
         sessionPath: previousSessionPath,
         error: 'Extension command replaced the session before starting an agent turn.',
       });
@@ -599,6 +604,7 @@ export class WorkerRuntimeHost {
     }
     context.queuedLocalIds = [];
     context.queuedOperationIds = [];
+    context.queuedOperationAttempts = [];
     context.terminalLiveTurn = undefined;
     context.willRetryWatchdogTimer = undefined;
     context.willRetryWatchdogClear = undefined;
@@ -772,6 +778,8 @@ export class WorkerRuntimeHost {
     if (event.type === 'turn_start') this.enforceMcpToolsDisabled(context);
     handleSdkSessionEvent({
       emit: (name, payload) => this.emit(name, payload),
+      backendGeneration: this.options.owner.coordinatorGeneration,
+      workerGeneration: this.options.owner.workerGeneration,
       emitBusyChanged: (owner, busy, capabilities) => this.emitBusyChanged(owner, busy, capabilities),
       emitContextUsageChanged: (owner, estimated) => this.emitContextUsageChanged(owner, estimated),
       emitSessionOpened: async (sessionPath) => this.emitRefreshedSessionOpened(sessionPath),

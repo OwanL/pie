@@ -130,6 +130,18 @@ export interface SessionsState {
   runningSessionPaths: string[];
   /** Backend/host-authoritative capabilities keyed by durable session path. */
   capabilitiesBySession: Record<string, SessionCapabilities>;
+  /** Exact latest correlated settlement lineage retained after live/current-turn
+   * records clear, so an older terminal from the same worker cannot restore
+   * stale capabilities. */
+  settlementGenerationBySession: Record<string, {
+    backendGeneration?: number;
+    workerGeneration: number;
+    operationId?: string;
+    requestId?: string;
+    turnId?: string;
+    attemptId?: string;
+    operationAttempt?: number;
+  }>;
   /** Session paths currently running a history-compaction (`/compact`) LLM
    *  call. Always a subset of `runningSessionPaths` (the backend re-arms busy
    *  while compacting); tracked separately so the UI can show a live
@@ -311,6 +323,8 @@ export interface PendingOp {
   kind: 'send' | 'edit';
   /** Stable mutation identity for sends; edit migration remains separate. */
   operationId?: string;
+  /** Latest transport attempt that owns this rollback snapshot. */
+  operationAttempt?: number;
   sessionPath: string;
   /** The local transcript entry ID inserted optimistically. */
   localId: string;
@@ -345,6 +359,9 @@ export interface PendingOp {
    *  `SendResult.queued` (authoritative backend ack) to reconcile the
    *  optimistic message status. */
   queued?: boolean;
+  /** Reducer-owned restoration intent for retry-without-pruning. The runner
+   * receives it only on a terminal/commit cleanup effect and never stores it. */
+  priorPruningMode?: PruningMode;
   /** Transcript messages removed by an optimistic edit so rollback handlers can
    *  restore the pre-edit tail if preflight or commit fails. */
   removedTail?: ChatMessage[];
@@ -447,6 +464,7 @@ export interface CurrentTurn {
 export interface PendingSendQueueEntry {
   corrId: string;
   operationId?: string;
+  operationAttempt?: number;
   operationSource?: SessionOperationSource;
   backendGeneration?: number;
   text: string;
@@ -482,6 +500,7 @@ export interface BackendReadyQueueEntry {
   sessionPath: string;
   corrId: string;
   operationId?: string;
+  operationAttempt?: number;
   operationSource?: SessionOperationSource;
   backendGeneration?: number;
   text: string;
@@ -591,6 +610,7 @@ export function createInitialArchState(): ArchState {
       pinnedTabGroups: [],
       runningSessionPaths: [],
       capabilitiesBySession: {},
+      settlementGenerationBySession: {},
       compactingSessionPaths: [],
       lastCompactionBySession: {},
       unreadFinishedSessionPaths: [],

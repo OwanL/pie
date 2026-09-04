@@ -5,6 +5,7 @@ import type { ReducerResult } from './helpers.js';
 import { evictSession, removeFromArray, addToArray } from './helpers.js';
 import { getNextVisibleTabPathOnClose, moveOpenTabPath, insertTabRespectingPinnedPrefix, cleanPinnedTabGroups, isPendingTabPath } from '../../../shared/tab-behavior.js';
 import { retrySessionOperation, startSessionOperation } from '../operation-registry.js';
+import type { SessionOperation } from '../operation-types.js';
 
 /** Seed a pending picker from the last catalog known to the host. A duplicate
  * prefers its real predecessor; a new session prefers the active real tab and
@@ -72,8 +73,54 @@ function seedProvisionalModelCatalog(
   };
 }
 
+function operationIdentityForSession(state: ArchState, sessionPath: string, backendGeneration: number) {
+  const summary = state.sessions.sessions.find((candidate) => candidate.path === sessionPath);
+  const branchId = state.transcript.sessionUsageBySession?.[sessionPath]?.branchId;
+  const settlement = state.sessions.settlementGenerationBySession[sessionPath];
+  return {
+    ...(summary?.sessionId ? { sessionId: summary.sessionId } : {}),
+    ...(branchId ? { branchId } : {}),
+    ...(settlement?.backendGeneration === backendGeneration
+      ? { workerGeneration: settlement.workerGeneration } : {}),
+  };
+}
+
+function startCloseOperation(
+  state: ArchState,
+  cmd: Extract<Command, { kind: 'CloseSession' }>,
+  mode: NonNullable<SessionOperation['closeMode']>,
+  causalParentOperationId?: string,
+): SessionOperation | undefined {
+  if (!cmd.operationId) return undefined;
+  const backendGeneration = cmd.backendGeneration ?? 0;
+  const operation = startSessionOperation({
+    operationId: cmd.operationId,
+    kind: 'session.close',
+    source: cmd.operationSource ?? { kind: 'host' },
+    pendingPath: cmd.sessionPath,
+    selectionToken: cmd.corrId,
+    parentOperationId: cmd.causalParentOperationId ?? causalParentOperationId,
+    backendGeneration,
+    attempt: cmd.operationAttempt ?? 1,
+    ...operationIdentityForSession(state, cmd.sessionPath, backendGeneration),
+  });
+  return {
+    ...operation,
+    phase: 'awaiting-commit',
+    acceptance: 'accepted',
+    closeMode: mode,
+    acknowledgements: mode === 'running-hide'
+      ? { 'persist-tabs': 'pending' }
+      : mode === 'private-cleanup'
+        ? { 'persist-tabs': 'pending', cleanup: 'pending', 'privacy-marker-removal': 'pending' }
+        : { 'persist-tabs': 'pending', cleanup: 'pending' },
+  };
+}
+
 export function handleOpenSession(state: ArchState, cmd: Extract<Command, { kind: 'OpenSession' }>): ReducerResult {
   const { sessionPath, placeholderSummary, selectionToken } = cmd;
+  const backendGeneration = cmd.backendGeneration ?? 0;
+  if (cmd.operationId && state.operations[cmd.operationId]) return { state, effects: [] };
   // Optimistic tab setup — was imperative dispatchArch calls in the service
   // (SessionSummaryUpserted placeholder + TabOpened + SelectSession +
   // saveOpenTabs). The reducer now owns these purely; the runner only does
@@ -97,6 +144,22 @@ export function handleOpenSession(state: ArchState, cmd: Extract<Command, { kind
     ?? state.sessions.sessions.find((summary) => summary.path === sessionPath);
   const nextState = {
     ...state,
+    operations: cmd.operationId
+      ? {
+          ...state.operations,
+          [cmd.operationId]: startSessionOperation({
+            operationId: cmd.operationId,
+            kind: 'session.open',
+            source: cmd.operationSource ?? { kind: 'host' },
+            pendingPath: sessionPath,
+            selectionToken,
+            parentOperationId: cmd.causalParentOperationId,
+            backendGeneration,
+            attempt: cmd.operationAttempt ?? 1,
+            ...operationIdentityForSession(state, sessionPath, backendGeneration),
+          }),
+        }
+      : state.operations,
     sessions: {
       ...state.sessions,
       sessions: nextSessions,
@@ -113,7 +176,14 @@ export function handleOpenSession(state: ArchState, cmd: Extract<Command, { kind
     state: nextState,
     effects: [
       { kind: 'PersistTabs', corrId: cmd.corrId, openTabPaths: nextOpenTabPaths, activeSessionPath: sessionPath, pinnedTabPaths: state.sessions.pinnedTabPaths, pinnedTabGroups: state.sessions.pinnedTabGroups },
-      { kind: 'OpenSession', corrId: cmd.corrId, sessionPath, selectionToken },
+      {
+        kind: 'OpenSession', corrId: cmd.corrId, sessionPath, selectionToken,
+        ...(cmd.operationId ? {
+          operationId: cmd.operationId,
+          operationAttempt: cmd.operationAttempt ?? 1,
+          backendGeneration,
+        } : {}),
+      },
     ],
   };
 }
@@ -229,6 +299,39 @@ export function handleCreateSession(state: ArchState, cmd: Extract<Command, { ki
   };
 }
 
+export function handleRestartBackend(state: ArchState, cmd: Extract<Command, { kind: 'RestartBackend' }>): ReducerResult {
+  const activeRestart = Object.values(state.operations).find((operation) =>
+    operation.kind === 'backend.restart' && !operation.terminal,
+  );
+  if (activeRestart || state.operations[cmd.operationId]) return { state, effects: [] };
+  const operation = {
+    ...startSessionOperation({
+      operationId: cmd.operationId,
+      kind: 'backend.restart',
+      source: cmd.operationSource,
+      pendingPath: '',
+      selectionToken: '',
+      parentOperationId: cmd.causalParentOperationId,
+      backendGeneration: cmd.backendGeneration,
+    }),
+    phase: 'draining' as const,
+    acceptance: 'accepted' as const,
+  };
+  return {
+    state: {
+      ...state,
+      operations: { ...state.operations, [operation.operationId]: operation },
+      settings: { ...state.settings, backendReady: false },
+    },
+    effects: [{
+      kind: 'RestartBackend',
+      corrId: cmd.corrId,
+      operationId: operation.operationId,
+      backendGeneration: operation.backendGeneration,
+    }],
+  };
+}
+
 export function handleSelectSession(state: ArchState, cmd: Extract<Command, { kind: 'SelectSession' }>): ReducerResult {
   const sessionPath = cmd.sessionPath || null;
   return {
@@ -249,8 +352,10 @@ export function handleSelectSession(state: ArchState, cmd: Extract<Command, { ki
 
 export function handleCloseSession(state: ArchState, cmd: Extract<Command, { kind: 'CloseSession' }>): ReducerResult {
   const { sessionPath } = cmd;
+  if (cmd.operationId && state.operations[cmd.operationId]) return { state, effects: [] };
   const pendingCreate = Object.values(state.operations)
-    .find((operation) => operation.session.pendingPath === sessionPath && !operation.terminal);
+    .find((operation) => (operation.kind === 'session.create' || operation.kind === 'session.duplicate')
+      && operation.session.pendingPath === sessionPath && !operation.terminal);
   if (pendingCreate) {
     // Hiding a delayed create is not definitive cancellation. Keep the ledger,
     // queued sends, and selection request alive so a late matching opened event
@@ -268,6 +373,12 @@ export function handleCloseSession(state: ArchState, cmd: Extract<Command, { kin
           activeSessionPath: state.sessions.activeSessionPath,
         })
       : state.sessions.activeSessionPath;
+    const closeOperation = startCloseOperation(
+      state,
+      cmd,
+      'running-hide',
+      pendingCreate.operationId,
+    );
     const nextState = {
       ...state,
       sessions: {
@@ -280,6 +391,7 @@ export function handleCloseSession(state: ArchState, cmd: Extract<Command, { kin
       operations: {
         ...state.operations,
         [pendingCreate.operationId]: { ...pendingCreate, hidden: true },
+        ...(closeOperation ? { [closeOperation.operationId]: closeOperation } : {}),
       },
     };
     return {
@@ -287,6 +399,10 @@ export function handleCloseSession(state: ArchState, cmd: Extract<Command, { kin
       effects: [{
         kind: 'PersistTabs',
         corrId: cmd.corrId,
+        ...(closeOperation ? {
+          operationId: closeOperation.operationId,
+          backendGeneration: closeOperation.backendGeneration,
+        } : {}),
         openTabPaths: nextOpenTabPaths,
         activeSessionPath: nextState.sessions.activeSessionPath,
         pinnedTabPaths: nextPinnedTabPaths,
@@ -301,23 +417,34 @@ export function handleCloseSession(state: ArchState, cmd: Extract<Command, { kin
   // host cleanup so success is backed by fresh authoritative effect results.
   if (!state.sessions.openTabPaths.includes(sessionPath)) {
     if (!cmd.ensureClosed) return { state, effects: [] };
+    const running = state.sessions.runningSessionPaths.includes(sessionPath);
+    const privacyMode = state.sessions.privacyModeBySession[sessionPath] === true;
+    const closeOperation = startCloseOperation(
+      state,
+      cmd,
+      running && !privacyMode ? 'running-hide' : privacyMode ? 'private-cleanup' : 'idle-cleanup',
+    );
+    const operationState = closeOperation
+      ? { ...state, operations: { ...state.operations, [closeOperation.operationId]: closeOperation } }
+      : state;
     const persistEffect = {
       kind: 'PersistTabs' as const,
       corrId: cmd.corrId,
+      ...(closeOperation ? { operationId: closeOperation.operationId, backendGeneration: closeOperation.backendGeneration } : {}),
       openTabPaths: state.sessions.openTabPaths,
       activeSessionPath: state.sessions.activeSessionPath,
       pinnedTabPaths: state.sessions.pinnedTabPaths,
       pinnedTabGroups: state.sessions.pinnedTabGroups,
     };
-    if (state.sessions.runningSessionPaths.includes(sessionPath)) {
+    if (running && !privacyMode) {
       // A review-closure retry may land here after a crash left the tab already
       // hidden. Re-mark it so the ready handshake still won't resurrect it.
-      if (!cmd.reviewClosure) return { state, effects: [persistEffect] };
+      if (!cmd.reviewClosure) return { state: operationState, effects: [persistEffect] };
       return {
         state: {
-          ...state,
+          ...operationState,
           sessions: {
-            ...state.sessions,
+            ...operationState.sessions,
             intentionallyHiddenRunningPaths: addToArray(state.sessions.intentionallyHiddenRunningPaths, sessionPath),
           },
         },
@@ -325,10 +452,13 @@ export function handleCloseSession(state: ArchState, cmd: Extract<Command, { kin
       };
     }
     return {
-      state,
+      state: operationState,
       effects: [
         persistEffect,
-        { kind: 'CloseSession', corrId: cmd.corrId, sessionPath, nextPath: null },
+        {
+          kind: 'CloseSession', corrId: cmd.corrId, sessionPath, nextPath: null,
+          ...(closeOperation ? { operationId: closeOperation.operationId, backendGeneration: closeOperation.backendGeneration } : {}),
+        },
       ],
     };
   }
@@ -370,6 +500,7 @@ export function handleCloseSession(state: ArchState, cmd: Extract<Command, { kin
   const privacyMode = state.sessions.privacyModeBySession[sessionPath] === true;
 
   if (state.sessions.runningSessionPaths.includes(sessionPath) && !privacyMode) {
+    const closeOperation = startCloseOperation(state, cmd, 'running-hide');
     // Closing a running tab means hide, not teardown. Preserve transcript,
     // live-pipeline, pending ownership, composer inputs, file changes, and run
     // analytics while the backend continues. A later webview ready handshake
@@ -384,6 +515,9 @@ export function handleCloseSession(state: ArchState, cmd: Extract<Command, { kin
     );
     const nextState = {
       ...state,
+      operations: closeOperation
+        ? { ...state.operations, [closeOperation.operationId]: closeOperation }
+        : state.operations,
       sessions: {
         ...state.sessions,
         openTabPaths: nextOpenTabPaths,
@@ -399,6 +533,7 @@ export function handleCloseSession(state: ArchState, cmd: Extract<Command, { kin
         {
           kind: 'PersistTabs',
           corrId: cmd.corrId,
+          ...(closeOperation ? { operationId: closeOperation.operationId, backendGeneration: closeOperation.backendGeneration } : {}),
           openTabPaths: nextOpenTabPaths,
           activeSessionPath: nextActivePath,
           pinnedTabPaths: nextPinnedTabPaths,
@@ -421,9 +556,13 @@ export function handleCloseSession(state: ArchState, cmd: Extract<Command, { kin
   // transcript, so closing the tab cannot leave a private session recoverable.
   // Idle close performs the existing teardown. Clear per-session keyed maps +
   // drop the tab arrays while retaining the durable session summary.
+  const closeOperation = startCloseOperation(state, cmd, privacyMode ? 'private-cleanup' : 'idle-cleanup');
   const evicted = evictSession(state, sessionPath, { removeSummary: privacyMode, removeTabs: true });
   const nextState = {
     ...evicted.state,
+    operations: closeOperation
+      ? { ...evicted.state.operations, [closeOperation.operationId]: closeOperation }
+      : evicted.state.operations,
     sessions: {
       ...evicted.state.sessions,
       activeSessionPath: nextActivePath,
@@ -435,6 +574,7 @@ export function handleCloseSession(state: ArchState, cmd: Extract<Command, { kin
       {
         kind: 'PersistTabs',
         corrId: cmd.corrId,
+        ...(closeOperation ? { operationId: closeOperation.operationId, backendGeneration: closeOperation.backendGeneration } : {}),
         openTabPaths: nextState.sessions.openTabPaths,
         activeSessionPath: nextActivePath,
         pinnedTabPaths: nextState.sessions.pinnedTabPaths,
@@ -450,7 +590,10 @@ export function handleCloseSession(state: ArchState, cmd: Extract<Command, { kin
             ])]
           : undefined,
       },
-      { kind: 'CloseSession', corrId: cmd.corrId, sessionPath, nextPath, privacyMode, selectionChanged: wasActive },
+      {
+        kind: 'CloseSession', corrId: cmd.corrId, sessionPath, nextPath, privacyMode, selectionChanged: wasActive,
+        ...(closeOperation ? { operationId: closeOperation.operationId, backendGeneration: closeOperation.backendGeneration } : {}),
+      },
       ...(wasActive && nextActivePath && !isPendingTabPath(nextActivePath)
         ? [{
             kind: 'NotifySessionViewed' as const,

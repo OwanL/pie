@@ -15,6 +15,7 @@ import {
   type LiveSubagentDetailAddress,
   type ModelInfo,
   type SessionAnalyticsFactors,
+  type SessionCapabilities,
   type SessionOpenedPayload,
   type ToolFinishedPayload,
   type ViewState,
@@ -287,6 +288,45 @@ test('HostToWebviewMessage state envelope carries hostInstanceId and revision', 
     assert.deepEqual(msg.state.runSummariesBySession, {});
     assert.equal(msg.state.sessionUsage?.samples[0]?.reportedCostUsd, 0.01);
   }
+});
+
+test('host-webview sync carries session.open/session.close and lifecycle transition phases', () => {
+  const lifecycleOperations: NonNullable<SessionCapabilities['primaryOperation']>[] = [
+    {
+      operationId: 'open-operation', kind: 'session.open', phase: 'awaiting-acceptance',
+      attempt: 1, committed: false, recovery: null,
+    },
+    {
+      operationId: 'close-operation', kind: 'session.close', phase: 'awaiting-commit',
+      attempt: 1, committed: true, recovery: 'reconcile',
+    },
+    {
+      operationId: 'restart-operation', kind: 'backend.restart', phase: 'draining',
+      attempt: 1, committed: false, recovery: null,
+    },
+    {
+      operationId: 'restart-operation', kind: 'backend.restart', phase: 'awaiting-old-generation-death',
+      attempt: 1, committed: false, recovery: null,
+    },
+  ];
+
+  const sessionCapabilitiesBySession: ViewState['sessionCapabilitiesBySession'] = Object.fromEntries(
+    lifecycleOperations.map((primaryOperation, index) => [`/session-${index}.jsonl`, {
+      billableActivity: false,
+      canContinue: false,
+      canInterrupt: false,
+      canCompact: false,
+      primaryOperation,
+    }]),
+  );
+  assert.deepEqual(
+    Object.values(sessionCapabilitiesBySession).map((capabilities) => capabilities.primaryOperation?.phase),
+    ['awaiting-acceptance', 'awaiting-commit', 'draining', 'awaiting-old-generation-death'],
+  );
+  assert.deepEqual(
+    Object.values(sessionCapabilitiesBySession).slice(0, 2).map((capabilities) => capabilities.primaryOperation?.kind),
+    ['session.open', 'session.close'],
+  );
 });
 
 // ---------------------------------------------------------------------------

@@ -241,23 +241,29 @@ export class SessionService implements vscode.Disposable {
     this.state.bumpSessionDataEpoch(sessionPath);
   }
 
-  async restart(): Promise<void> {
+  async restart(onOldGenerationDeathConfirmed?: () => void): Promise<void> {
+    await this.backend.stop();
+
+    // RestartBackend already projects backendReady=false synchronously. Keep
+    // every old-generation operation and its rollback state intact until
+    // stop() confirms that the old process is dead: before that boundary late
+    // acknowledgement or commit evidence may still be authoritative.
     this.detailGeneration += 1;
     this.detailSubscriptions.reset();
     this.detailCache.clear();
     this.detailCacheBytes = 0;
     this.events.detach();
     this.state.failPendingSendOperations('PI backend generation ended before the send commit was observed.');
+    // Selection cleanup must run before the reducer receives the generation-
+    // death callback. The callback terminalizes unresolved session.open
+    // records, after which handleSelectionFailure can no longer dispatch the
+    // failure transition that owns their optimistic rollback.
     this.state.failPendingCreateOperations('PI backend generation ended while the session was being created.');
-    // Publish unready before the first await. Otherwise a queued preference or
-    // model action can observe the old ready=true snapshot after stop() has
-    // already detached the transport and fail against a backend that is no
-    // longer running.
     this.dispatchArch({ kind: 'RunningSessionsChanged', sessionPaths: [] });
     this.dispatchArch({ kind: 'BackendReadyChanged', ready: false });
     this.dispatchArch({ kind: 'NoticeShown', notice: null });
     this.scheduleRender();
-    await this.backend.stop();
+    onOldGenerationDeathConfirmed?.();
     // startSessionBackend owns the single generation reset for the replacement
     // process. Resetting here as well would drift host failure identities one
     // generation ahead of BackendClient after every restart.
@@ -395,12 +401,19 @@ export class SessionService implements vscode.Disposable {
     return loaded && !running ? 'skip' : 'tail';
   }
 
-  openSession(sessionPath: string): void {
-    this.tabs.openSession(sessionPath);
+  openSession(sessionPath: string, source?: RendererCommandContext, causalParentOperationId?: string): void {
+    this.tabs.openSession(sessionPath, source, causalParentOperationId);
     this.triggers.onSessionOpened(sessionPath);
   }
 
-  async closeSession(sessionPath: string, nextPath: string | null, privacyMode = false, selectionChanged = false): Promise<void> {
+  async closeSession(
+    sessionPath: string,
+    nextPath: string | null,
+    privacyMode = false,
+    selectionChanged = false,
+    operationId?: string,
+    backendGeneration?: number,
+  ): Promise<void> {
     this.clearDetailCacheForSession(sessionPath);
     if (privacyMode) {
       // The reducer evicts the privacy marker before this effect runs, so
@@ -423,7 +436,7 @@ export class SessionService implements vscode.Disposable {
       // best-effort and must never attempt to reopen a deleted transcript.
       await Promise.resolve(this.runObserver.setSessionPrivacy?.(sessionPath, true)).catch(() => undefined);
     }
-    await this.tabs.closeSession(sessionPath, nextPath, selectionChanged);
+    await this.tabs.closeSession(sessionPath, nextPath, selectionChanged, operationId);
     if (privacyMode) {
       // The close effect initially persisted the marker as a retry guard;
       // clear it only after backend deletion and host cleanup both succeed.
@@ -433,10 +446,15 @@ export class SessionService implements vscode.Disposable {
         cmd: {
           kind: 'PersistTabs',
           corrId: `private-cleared:${Date.now()}`,
+          ...(operationId ? { operationId, backendGeneration } : {}),
+          acknowledgementKey: 'privacy-marker-removal',
           openTabPaths: archState.sessions.openTabPaths,
           activeSessionPath: archState.sessions.activeSessionPath,
           pinnedTabPaths: archState.sessions.pinnedTabPaths,
           pinnedTabGroups: archState.sessions.pinnedTabGroups,
+          privateSessionPaths: Object.entries(archState.sessions.privacyModeBySession)
+            .filter(([privatePath, enabled]) => enabled && privatePath !== sessionPath)
+            .map(([privatePath]) => privatePath),
         },
       });
     }

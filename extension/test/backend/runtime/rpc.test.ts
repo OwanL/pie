@@ -40,6 +40,20 @@ test('validateMessageSend requires an explicit sessionPath', () => {
   );
 });
 
+test('validateMessageSend preserves a registered operation attempt', () => {
+  assert.deepEqual(validateMessageSend({
+    sessionPath: '/workspace/session.jsonl', text: 'hello', inputs: [],
+    operationId: 'send-operation', operationAttempt: 2,
+  }), {
+    sessionPath: '/workspace/session.jsonl', text: 'hello', inputs: [],
+    localId: undefined, operationId: 'send-operation', operationAttempt: 2,
+  });
+  assert.throws(() => validateMessageSend({
+    sessionPath: '/workspace/session.jsonl', text: 'hello', inputs: [],
+    operationId: 'send-operation', operationAttempt: 0,
+  }), /operationAttempt must be a positive integer/);
+});
+
 test('validateOpenTabsSet preserves compatibility and accepts only positive source revisions', () => {
   const tabs = [{ path: '/workspace/session.jsonl', pinned: true, isRunning: false }];
   assert.deepEqual(validateOpenTabsSet({ tabs }), { tabs });
@@ -175,6 +189,23 @@ test('validateSessionOpen accepts an optional selection token', () => {
   assert.deepEqual(
     validateSessionOpen({ sessionPath: '/workspace/session.jsonl', selectionToken: 'selection:2' }),
     { sessionPath: '/workspace/session.jsonl', selectionToken: 'selection:2', transcript: undefined },
+  );
+});
+
+test('validateSessionOpen accepts stable lifecycle identity', () => {
+  assert.deepEqual(
+    validateSessionOpen({
+      sessionPath: '/workspace/session.jsonl', selectionToken: 'selection:2',
+      operationId: 'open-operation', operationAttempt: 3,
+    }),
+    {
+      sessionPath: '/workspace/session.jsonl', selectionToken: 'selection:2', transcript: undefined,
+      operationId: 'open-operation', operationAttempt: 3,
+    },
+  );
+  assert.throws(
+    () => validateSessionOpen({ sessionPath: '/s.jsonl', operationId: '', operationAttempt: 0 }),
+    /operationId must be a non-empty string|operationAttempt must be a positive integer/,
   );
 });
 

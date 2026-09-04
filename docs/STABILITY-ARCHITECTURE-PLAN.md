@@ -2,7 +2,7 @@
 
 **Status:** working plan
 **Scope:** Pie extension host, webview, backend coordinator, session workers, bundled Pi extensions, persistence, accounting, and local build/install workflow
-**Updated:** 2026-09-03
+**Updated:** 2026-09-05
 
 ## 1. Purpose
 
@@ -447,12 +447,14 @@ Work includes:
 
 ### Milestone 2: unified operation lifecycle
 
-1. Introduce the reducer-owned operation registry and capability projection.
-2. Add idempotent backend operation handling.
-3. Move edit and interruption to the new contract.
-4. Remove replaced semantic state from the effect runner and ad hoc fences incrementally.
+**Implemented (2026-09-05).** `ArchState.operations` now owns the common lifecycle for create, duplicate, open, close, restart, send, edit, interrupt, continue, and manual history compaction. Records preserve trusted source/causality, session/branch and backend/worker identity when known, acknowledgement/commit evidence, bounded ambiguity reconciliation, and one immutable terminal. Backend mutation ledgers deduplicate retryable mutations. `agent.settled` is correlated through operation/request/turn/attempt and generation lineage. The generic EffectRunner retains only opaque execution resources for registered operations; queues and selection tokens remain execution/presentation aids.
 
-**Exit:** every accepted mutation reaches exactly one terminal state under the race matrix; deliberately injected acknowledgement loss may enter ambiguity, but reconciliation, generation death, or explicit recovery resolves it without a duplicate mutation.
+1. Introduced the reducer-owned operation registry and capability projection.
+2. Added idempotent backend operation handling and read-only status reconciliation.
+3. Moved edit, interruption, open/close, and restart to the common contract.
+4. Moved registered-operation phase, acknowledgement, reconciliation policy, and barrier-release decisions out of generic effect state.
+
+**Exit:** deterministic model tests cover response/event order, running versus idle/private close, restart drain/death, dropped acknowledgement, stale worker settlement, renderer source, and immutable one-terminal behavior. Injected ambiguity resolves through correlated late evidence, bounded status reconciliation, generation death, or explicit restart recovery without duplicate mutation.
 
 ### Milestone 3: conserved accounting
 
@@ -585,8 +587,8 @@ This section records why the workstreams exist. It is evidence, not a required i
 | P1 | Structural risk | Continuation failure can mark an older assistant row failed. | Generic backend error stamping selects a latest assistant when no matching new assistant exists; reproduce at the continuation pre-message seam. |
 | P1 | Structural risk | Live build publication may load mixed generations or trigger host churn. | Windows lock fallback mirrors multiple files in place; watch sync rewrites the installed manifest; active-session reproduction is pending. |
 | P1 | Confirmed | Installed extension folder and manifest versions can diverge. | Installed-directory selection permits prefix fallback, followed by writing the workspace manifest into that directory. |
-| P1 | Confirmed | Full Pi settlement is not propagated as a first-class host event. | The pinned SDK/RPC contract exposes `agent_settled`, while Pie's current live worker/host protocol reconstructs activity from narrower events and predicates. |
-| P2 | Maintenance pressure | Effect infrastructure owns semantic operation state despite the documented ownership rule. | In-flight send phase, commit ambiguity, timer outcome, request identity, and cancellation eligibility live in the effect runner. |
+| P1 | Resolved 2026-09-05 | Full Pi settlement previously lacked complete host correlation. | `agent_settled` now propagates as `agent.settled` with operation/request/turn/attempt, operation-attempt, backend-generation, and worker-generation lineage; stale settlements are reducer-rejected. |
+| P2 | Resolved 2026-09-05 | Effect infrastructure previously owned semantic operation state despite the documented ownership rule. | Registered-operation phase, commit ambiguity, acknowledgement/reconciliation policy, and cancellation/barrier decisions now live in reducer state/events; the runner retains opaque execution resources only. |
 | P2 | Maintenance pressure | Core lifecycle and accounting modules have concentrated complexity. | Static analysis found high complexity in SDK event handling, live transitions, protocol validation, aggregate accounting, request handling, and session cost projection; more than twenty production modules exceed 800 lines. |
 | P2 | Maintenance pressure | Similar algorithms are duplicated across process/UI boundaries. | Duplicate scan identified usage reconciliation, detail subscription/storage, and live transition/checkpoint blocks. Some parity is intentional, but each pair needs an explicit shared-contract or generated-test strategy. |
 | P2 | Maintenance pressure | Test/package registration is repeated. | Package lists are maintained in root scripts, typecheck scripts, batch runners, and package scripts without one drift authority. |

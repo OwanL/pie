@@ -17,7 +17,7 @@ function send(state: ArchState, overrides: Partial<Extract<Event, { kind: 'Comma
   return reducer(state, {
     kind: 'Command',
     cmd: {
-      kind: 'Send', corrId: 'corr-1', operationId: 'op-1',
+      kind: 'Send', corrId: 'corr-1', operationId: 'op-1', operationAttempt: 1,
       operationSource: {
         kind: 'renderer', rendererId: 'renderer-1', rendererKind: 'sidebar', rendererGeneration: 3,
       },
@@ -62,6 +62,117 @@ test('ack timeout records ambiguity without rollback and a correlated start comm
   assert.equal(committed.state.operations['op-1']?.terminal?.outcome, 'settled');
 });
 
+test('reducer owns send reconciliation attempts, backoff, exhaustion, and stale observations', () => {
+  const delayed = reducer(send(readyState()), {
+    kind: 'SendOperationDelayed', operationId: 'op-1', sessionPath: SESSION,
+    backendGeneration: 7, error: 'ack timeout',
+  });
+  assert.deepEqual(delayed.state.operations['op-1']?.reconciliation, {
+    attempts: 0, maxAttempts: 4,
+  });
+  assert.deepEqual(delayed.effects, [{
+    kind: 'ScheduleOperationReconciliation', corrId: 'corr-1',
+    operationId: 'op-1', operationKind: 'message.send', sessionPath: SESSION,
+    backendGeneration: 7, operationAttempt: 1, reconciliationAttempt: 1, delayMs: 0,
+  }]);
+
+  const firstPending = reducer(delayed.state, {
+    kind: 'SendOperationStatus', operationId: 'op-1', sessionPath: SESSION,
+    backendGeneration: 7, operationAttempt: 1, reconciliationAttempt: 1, state: 'pending',
+  });
+  assert.equal(firstPending.state.operations['op-1']?.reconciliation?.attempts, 1);
+  assert.equal(firstPending.effects[0]?.kind, 'ScheduleOperationReconciliation');
+  if (firstPending.effects[0]?.kind === 'ScheduleOperationReconciliation') {
+    assert.equal(firstPending.effects[0].reconciliationAttempt, 2);
+    assert.equal(firstPending.effects[0].delayMs, 1_000);
+  }
+
+  const duplicate = reducer(firstPending.state, {
+    kind: 'SendOperationStatus', operationId: 'op-1', sessionPath: SESSION,
+    backendGeneration: 7, operationAttempt: 1, reconciliationAttempt: 1, state: 'committed',
+  });
+  assert.strictEqual(duplicate.state, firstPending.state);
+  assert.deepEqual(duplicate.effects, []);
+
+  const staleAttempt = reducer(firstPending.state, {
+    kind: 'SendOperationStatus', operationId: 'op-1', sessionPath: SESSION,
+    backendGeneration: 7, operationAttempt: 2, reconciliationAttempt: 2, state: 'committed',
+  });
+  assert.strictEqual(staleAttempt.state, firstPending.state);
+
+  let current = firstPending;
+  for (const [attempt, expectedDelay] of [[2, 2_000], [3, 4_000]] as const) {
+    current = reducer(current.state, {
+      kind: 'SendOperationStatus', operationId: 'op-1', sessionPath: SESSION,
+      backendGeneration: 7, operationAttempt: 1, reconciliationAttempt: attempt, state: 'pending',
+    });
+    assert.equal(current.effects[0]?.kind, 'ScheduleOperationReconciliation');
+    if (current.effects[0]?.kind === 'ScheduleOperationReconciliation') {
+      assert.equal(current.effects[0].delayMs, expectedDelay);
+    }
+  }
+  const exhausted = reducer(current.state, {
+    kind: 'SendOperationStatus', operationId: 'op-1', sessionPath: SESSION,
+    backendGeneration: 7, operationAttempt: 1, reconciliationAttempt: 4,
+    state: 'reconciliation-unavailable', error: 'ledger unavailable',
+  });
+  assert.equal(exhausted.state.operations['op-1']?.reconciliation?.attempts, 4);
+  assert.equal(exhausted.state.operations['op-1']?.phase, 'ambiguous');
+  assert.equal(exhausted.state.operations['op-1']?.recovery, 'restart-backend');
+  assert.equal(exhausted.effects[0]?.kind, 'ReleaseOperationResources');
+});
+
+test('accepted reconciliation status is retained across its synthetic acknowledgement and schedules bounded follow-up', () => {
+  const delayed = reducer(send(readyState()), {
+    kind: 'SendOperationDelayed', operationId: 'op-1', sessionPath: SESSION,
+    backendGeneration: 7,
+  });
+  const acceptedStatus = reducer(delayed.state, {
+    kind: 'SendOperationStatus', operationId: 'op-1', sessionPath: SESSION,
+    backendGeneration: 7, operationAttempt: 1, reconciliationAttempt: 1,
+    state: 'accepted', committed: false, requestId: 'request-1',
+  });
+  assert.equal(acceptedStatus.state.operations['op-1']?.acceptance, 'accepted');
+  assert.equal(acceptedStatus.state.operations['op-1']?.reconciliation?.attempts, 1);
+  assert.equal(acceptedStatus.effects[0]?.kind, 'ScheduleOperationReconciliation');
+  if (acceptedStatus.effects[0]?.kind === 'ScheduleOperationReconciliation') {
+    assert.equal(acceptedStatus.effects[0].reconciliationAttempt, 2);
+  }
+  assert.equal(acceptedStatus.effects.some((effect) => effect.kind === 'ReleaseOperationResources'), false);
+
+  const syntheticAck = reducer(acceptedStatus.state, {
+    kind: 'SendResult', corrId: 'corr-1', operationId: 'op-1', operationAttempt: 1,
+    backendGeneration: 7, sessionPath: SESSION, reconciled: true,
+    ok: true, requestId: 'request-1',
+  });
+  assert.equal(syntheticAck.state.operations['op-1']?.reconciliation?.attempts, 1);
+  assert.equal(syntheticAck.state.pending.ops['corr-1'], undefined);
+  assert.equal(syntheticAck.state.pending.promoted['corr-1']?.requestId, 'request-1');
+  assert.deepEqual(syntheticAck.effects, []);
+});
+
+test('accepted-but-uncommitted send reconciliation exhausts after the reducer-owned bound', () => {
+  let current = reducer(send(readyState()), {
+    kind: 'SendOperationDelayed', operationId: 'op-1', sessionPath: SESSION,
+    backendGeneration: 7,
+  });
+  for (let attempt = 1; attempt <= 4; attempt += 1) {
+    current = reducer(current.state, {
+      kind: 'SendOperationStatus', operationId: 'op-1', sessionPath: SESSION,
+      backendGeneration: 7, operationAttempt: 1, reconciliationAttempt: attempt,
+      state: 'accepted', committed: false, requestId: 'request-1',
+    });
+    if (attempt < 4) {
+      assert.equal(current.effects[0]?.kind, 'ScheduleOperationReconciliation');
+      assert.equal(current.effects.some((effect) => effect.kind === 'ReleaseOperationResources'), false);
+    }
+  }
+  assert.equal(current.state.operations['op-1']?.phase, 'ambiguous');
+  assert.equal(current.state.operations['op-1']?.recovery, 'restart-backend');
+  assert.equal(current.state.operations['op-1']?.reconciliation?.attempts, 4);
+  assert.ok(current.effects.some((effect) => effect.kind === 'ReleaseOperationResources'));
+});
+
 test('read-only committed status drops rollback ownership even when the semantic event was lost', () => {
   const delayed = reducer(send(readyState()), {
     kind: 'SendOperationDelayed', operationId: 'op-1', sessionPath: SESSION,
@@ -74,6 +185,78 @@ test('read-only committed status drops rollback ownership even when the semantic
   assert.equal(committed.state.operations['op-1']?.terminal?.outcome, 'settled');
   assert.equal(committed.state.pending.ops['corr-1'], undefined);
   assert.ok(committed.effects.some((effect) => effect.kind === 'ClearSendTimer'));
+});
+
+test("accepted committed status clears optimistic ownership before its synthetic SendResult", () => {
+  const delayed = reducer(send(readyState()), {
+    kind: 'SendOperationDelayed', operationId: 'op-1', operationAttempt: 1,
+    sessionPath: SESSION, backendGeneration: 7,
+  }).state;
+  const committed = reducer(delayed, {
+    kind: 'SendOperationStatus', operationId: 'op-1', operationAttempt: 1,
+    sessionPath: SESSION, backendGeneration: 7, reconciliationAttempt: 1,
+    state: 'accepted', committed: true, requestId: 'request-1',
+  });
+
+  assert.equal(committed.state.operations['op-1']?.terminal?.outcome, 'settled');
+  assert.equal(committed.state.pending.ops['corr-1'], undefined);
+  assert.equal(committed.state.pending.promoted['corr-1'], undefined);
+  assert.ok(committed.effects.some((effect) => effect.kind === 'ClearSendTimer'));
+  assert.ok(committed.effects.some((effect) => effect.kind === 'ReleaseOperationResources'));
+
+  const synthetic = reducer(committed.state, {
+    kind: 'SendResult', corrId: 'corr-1', operationId: 'op-1', operationAttempt: 1,
+    backendGeneration: 7, sessionPath: SESSION, reconciled: true,
+    ok: true, requestId: 'request-1',
+  });
+  assert.strictEqual(synthetic.state, committed.state);
+  assert.deepEqual(synthetic.effects, []);
+
+  const promoted = reducer(send(readyState()), {
+    kind: 'SendResult', corrId: 'corr-1', operationId: 'op-1', operationAttempt: 1,
+    backendGeneration: 7, sessionPath: SESSION, ok: true, requestId: 'request-1',
+  }).state;
+  assert.ok(promoted.pending.promoted['corr-1']);
+  const committedAfterAck = reducer(promoted, {
+    kind: 'SendOperationStatus', operationId: 'op-1', operationAttempt: 1,
+    sessionPath: SESSION, backendGeneration: 7,
+    state: 'accepted', committed: true, requestId: 'request-1',
+  });
+  assert.equal(committedAfterAck.state.pending.promoted['corr-1'], undefined);
+  assert.ok(committedAfterAck.effects.some((effect) => effect.kind === 'ClearSendTimer'));
+});
+
+test('message.send retry keeps its operation identity and increments the transport attempt', () => {
+  const first = send(readyState());
+  const delayed = reducer(first, {
+    kind: 'SendOperationDelayed', operationId: 'op-1', operationAttempt: 1,
+    sessionPath: SESSION, backendGeneration: 7,
+  }).state;
+  const retried = reducer(delayed, {
+    kind: 'Command', cmd: {
+      kind: 'Send', corrId: 'retry-corr', operationId: 'op-1', operationAttempt: 2,
+      operationSource: { kind: 'host' }, backendGeneration: 7,
+      sessionPath: SESSION, text: 'hello', inputs: [], composedText: 'hello',
+      localId: 'local-1', previousSummary: null, timestamp: 200,
+    },
+  });
+
+  assert.equal(retried.state.operations['op-1']?.attempt, 2);
+  assert.equal(retried.state.operations['op-1']?.reconciliation, undefined);
+  assert.equal(retried.state.pending.ops['corr-1']?.operationAttempt, 2);
+  assert.equal(retried.state.transcript.bySession[SESSION]?.filter((message) => message.id === 'local-1').length, 1);
+  assert.deepEqual(retried.effects, [
+    {
+      kind: 'ReleaseOperationResources', corrId: 'corr-1',
+      operationId: 'op-1', operationAttempt: 1,
+    },
+    {
+      kind: 'SendRpc', corrId: 'corr-1', operationId: 'op-1', operationAttempt: 2,
+      backendGeneration: 7, sessionPath: SESSION, text: 'hello', inputs: [],
+      localId: 'local-1', composedText: 'hello', userParts: undefined,
+      priorPruningMode: undefined,
+    },
+  ]);
 });
 
 test('bounded reconciliation exhaustion exposes restart recovery without rollback', () => {
@@ -90,6 +273,57 @@ test('bounded reconciliation exhaustion exposes restart recovery without rollbac
   assert.equal(exhausted.settings.noticeKind, 'backend-exit');
   assert.ok(exhausted.pending.ops['corr-1']);
   assert.ok(exhausted.transcript.bySession[SESSION]?.some((message) => message.id === 'local-1'));
+});
+
+test('preflight phase is reducer-owned and duplicate observations cannot regress it', () => {
+  const optimistic = send(readyState());
+  assert.equal(optimistic.operations['op-1']?.executionPhase, 'prepass');
+  const acknowledged = reducer(optimistic, {
+    kind: 'SendResult', corrId: 'corr-1', operationId: 'op-1', backendGeneration: 7,
+    sessionPath: SESSION, ok: true, requestId: 'request-1',
+  }).state;
+  const succeeded = reducer(acknowledged, {
+    kind: 'CustomMessage', sessionPath: SESSION,
+    message: { id: 'preflight', role: 'system', createdAt: '2026-01-01T00:00:00.000Z', markdown: '', status: 'completed', customType: 'preflight-succeeded' },
+  });
+  assert.equal(succeeded.state.operations['op-1']?.executionPhase, 'model-start');
+  const duplicate = reducer(succeeded.state, {
+    kind: 'CustomMessage', sessionPath: SESSION,
+    message: { id: 'preflight-duplicate', role: 'system', createdAt: '2026-01-01T00:00:01.000Z', markdown: '', status: 'completed', customType: 'preflight-succeeded' },
+  });
+  assert.equal(duplicate.state.operations['op-1']?.executionPhase, 'model-start');
+  assert.deepEqual(duplicate.effects, []);
+});
+
+test('registered pruning restoration is reducer-described at the send commit boundary', () => {
+  const optimistic = send(readyState(), { priorPruningMode: 'auto' });
+  const acknowledged = reducer(optimistic, {
+    kind: 'SendResult', corrId: 'corr-1', operationId: 'op-1', backendGeneration: 7,
+    sessionPath: SESSION, ok: true, requestId: 'request-1',
+  }).state;
+  const committed = reducer(acknowledged, {
+    kind: 'MessageStarted', sessionPath: SESSION, messageId: 'assistant-1',
+    requestId: 'request-1', operationId: 'op-1', timestamp: 101,
+  });
+  assert.ok(committed.effects.some((effect) => effect.kind === 'ClearSendTimer'
+    && effect.corrId === 'corr-1' && effect.restorePruningMode === 'auto'));
+});
+
+test('interrupt describes registered pre-ack send cancellation to the runner', () => {
+  const optimistic = send(readyState());
+  const interrupted = reducer(optimistic, {
+    kind: 'Command',
+    cmd: {
+      kind: 'Interrupt', corrId: 'stop-corr', operationId: 'stop-op', operationAttempt: 1,
+      operationSource: { kind: 'host' }, backendGeneration: 7, sessionPath: SESSION,
+    },
+  });
+  const effect = interrupted.effects.find((candidate) => candidate.kind === 'InterruptRpc');
+  assert.equal(effect?.kind, 'InterruptRpc');
+  if (effect?.kind === 'InterruptRpc') {
+    assert.deepEqual(effect.abortSendCorrIds, ['corr-1']);
+    assert.equal(effect.usePriorityLane, undefined);
+  }
 });
 
 test('stale-generation reconciliation cannot settle the current send operation', () => {

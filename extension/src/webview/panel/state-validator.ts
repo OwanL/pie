@@ -67,10 +67,13 @@ function isValidPrimaryOperation(value: unknown): boolean {
   const operation = value as Record<string, unknown>;
   return typeof operation.operationId === 'string'
     && (operation.kind === 'session.create' || operation.kind === 'session.duplicate'
-      || operation.kind === 'message.send' || operation.kind === 'message.edit'
-      || operation.kind === 'message.interrupt' || operation.kind === 'message.continue'
-      || operation.kind === 'message.compact')
-    && (operation.phase === 'awaiting-acceptance' || operation.phase === 'awaiting-commit' || operation.phase === 'ambiguous')
+      || operation.kind === 'session.open' || operation.kind === 'session.close'
+      || operation.kind === 'backend.restart' || operation.kind === 'message.send'
+      || operation.kind === 'message.edit' || operation.kind === 'message.interrupt'
+      || operation.kind === 'message.continue' || operation.kind === 'message.compact')
+    && (operation.phase === 'awaiting-acceptance' || operation.phase === 'draining'
+      || operation.phase === 'awaiting-old-generation-death'
+      || operation.phase === 'awaiting-commit' || operation.phase === 'ambiguous')
     && Number.isInteger(operation.attempt)
     && (operation.attempt as number) >= 1
     && typeof operation.committed === 'boolean'

@@ -73,12 +73,23 @@ test('dispatchSessionBackendEvent routes authoritative agent settlement capabili
       canInterrupt: false,
       canCompact: true,
     },
+    operationId: 'operation-1',
+    requestId: 'request-1',
+    turnId: 'turn-1',
+    attemptId: 'attempt-1',
+    operationAttempt: 2,
+    backendGeneration: 3,
+    workerGeneration: 4,
   };
 
   dispatchSessionBackendEvent({ event: 'agent.settled', payload }, handlers);
   dispatchSessionBackendEvent({ event: 'agent.settled', payload: {
     sessionPath: payload.sessionPath,
     capabilities: { ...payload.capabilities, canContinue: 'yes' },
+  } }, handlers);
+  dispatchSessionBackendEvent({ event: 'agent.settled', payload: {
+    ...payload,
+    workerGeneration: 0,
   } }, handlers);
 
   assert.deepEqual(calls, [{ name: 'agent.settled', payload }]);

@@ -4,6 +4,9 @@ import type { RendererCommandContext } from '../../shared/protocol.js';
 export type SessionOperationKind =
   | 'session.create'
   | 'session.duplicate'
+  | 'session.open'
+  | 'session.close'
+  | 'backend.restart'
   | 'message.send'
   | 'message.edit'
   | 'message.interrupt'
@@ -21,7 +24,13 @@ export type SessionOperationSource =
       rendererGeneration: number;
     };
 
-export type SessionOperationPhase = 'awaiting-acceptance' | 'awaiting-commit' | 'ambiguous' | 'settled';
+export type SessionOperationPhase =
+  | 'awaiting-acceptance'
+  | 'draining'
+  | 'awaiting-old-generation-death'
+  | 'awaiting-commit'
+  | 'ambiguous'
+  | 'settled';
 export type SessionOperationAcceptance = 'pending' | 'ambiguous' | 'accepted' | 'rejected';
 export type SessionOperationCommit = 'pending' | 'unknown' | 'committed' | 'not-committed';
 export type SessionOperationRecovery = 'retry' | 'restart-backend' | 'reconcile' | 'none';
@@ -56,6 +65,10 @@ export interface SessionOperation {
     sourcePath?: string;
     /** Durable identity learned at the create commit boundary. */
     resolvedPath?: string;
+    /** Stable header identity, when the host has already hydrated it. */
+    sessionId?: string;
+    /** Current durable branch leaf, when the host has already hydrated it. */
+    branchId?: string;
   };
   causal: {
     parentOperationId: string | null;
@@ -63,6 +76,10 @@ export interface SessionOperation {
   };
   /** Backend process generation which owns idempotency for this operation. */
   backendGeneration: number;
+  /** Worker process generation when the host has current correlated evidence. */
+  workerGeneration?: number;
+  /** Replacement generation committed by backend.restart. */
+  replacementBackendGeneration?: number;
   /** Monotonic local acknowledgement attempt; operationId remains stable. */
   attempt: number;
   phase: SessionOperationPhase;
@@ -86,6 +103,23 @@ export interface SessionOperation {
    * lifecycle events from the retired turn cannot resurrect session activity.
    * The next genuine execution command for this session clears the fence. */
   retiredEventFence?: boolean;
+  /** Reducer-owned acknowledgement barrier for compound host lifecycle work.
+   * Private close distinguishes the initial marker-retaining tab write from
+   * the final privacy-marker-removal write. */
+  acknowledgements?: Record<string, 'pending' | 'succeeded' | 'failed'>;
+  /** Failure detail retained until the complete acknowledgement barrier settles. */
+  acknowledgementErrors?: Record<string, string>;
+  /** Close semantics are fixed at ingress so late results cannot reclassify cleanup. */
+  closeMode?: 'running-hide' | 'idle-cleanup' | 'private-cleanup';
+  /** Reducer-owned bounded read-only reconciliation progress. EffectRunner
+   * retains only the timer/promise resource for the described attempt. */
+  reconciliation?: {
+    attempts: number;
+    maxAttempts: number;
+    lastError?: string;
+  };
+  /** User-visible execution phase for send/edit before semantic commit. */
+  executionPhase?: 'prepass' | 'model-start';
   /** Prevent duplicate compact terminal events from re-applying UI outcome. */
   terminalEvidenceApplied?: boolean;
 }

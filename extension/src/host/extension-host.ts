@@ -36,6 +36,7 @@ import { EffectRunner } from './core/effect-runner';
 import { dispatch } from './core/dispatch';
 import { initialArchState, type ArchState } from './core/reducer';
 import type { Event } from './core/events';
+import type { SessionOperationSource } from './core/operation-types.js';
 import { selectViewState } from './core/projection';
 import { auditLog, bootLog } from './util/audit';
 import { getDiagPath, isStreamDiagEnabled, setStreamDiagEnabled } from './util/stream-telemetry';
@@ -126,6 +127,9 @@ export class PieExtension implements vscode.Disposable {
   /** Coalesce command-palette, notice-action, and browser requests that can
    * arrive before the first restart projection disables renderer controls. */
   private restartPromise: Promise<void> | null = null;
+  private restartOperationId: string | null = null;
+  private restartResolve: (() => void) | null = null;
+  private restartReject: ((error: Error) => void) | null = null;
   private statusBarUpdateScheduled = false;
 
   private readonly messageRouter: MessageRouter;
@@ -474,22 +478,32 @@ export class PieExtension implements vscode.Disposable {
     this.pushOpenTabsRegistry(true);
   }
 
-  async restart(): Promise<void> {
+  async restart(source: SessionOperationSource = { kind: 'host' }): Promise<void> {
     if (!this.restartPromise) {
-      const operation = (async () => {
-        this.updateStatusBar('Starting');
-        // Fence renderer mutations before awaiting already-accepted config work.
-        // A model/reasoning write is optimistic in the UI; killing its RPC here
-        // would roll it back after restart and make the picker appear broken.
-        this.dispatchArchEvent({ kind: 'BackendReadyChanged', ready: false });
-        await this.effectRunner.drainConfigurationOperations();
-        await this.service.restart();
-        this.pushOpenTabsRegistry(true);
-      })();
+      const operationId = crypto.randomUUID();
+      this.restartOperationId = operationId;
+      const operation = new Promise<void>((resolve, reject) => {
+        this.restartResolve = resolve;
+        this.restartReject = reject;
+      });
       const tracked = operation.finally(() => {
         if (this.restartPromise === tracked) this.restartPromise = null;
+        this.restartOperationId = null;
+        this.restartResolve = null;
+        this.restartReject = null;
       });
       this.restartPromise = tracked;
+      this.updateStatusBar('Starting');
+      this.dispatchArchEvent({
+        kind: 'Command',
+        cmd: {
+          kind: 'RestartBackend',
+          corrId: `restart:${operationId}`,
+          operationId,
+          operationSource: source,
+          backendGeneration: this.service.getBackendGeneration(),
+        },
+      });
     }
     await this.restartPromise;
   }
@@ -563,6 +577,14 @@ export class PieExtension implements vscode.Disposable {
     }
     for (const effect of result.effects) {
       this.effectRunner.run(effect);
+    }
+    if (event.kind === 'BackendRestartResult' && event.operationId === this.restartOperationId) {
+      if (event.ok) {
+        this.pushOpenTabsRegistry(true);
+        this.restartResolve?.();
+      } else {
+        this.restartReject?.(new Error(event.error ?? 'Backend restart failed'));
+      }
     }
     this.scheduleRender();
   }
@@ -684,8 +706,8 @@ export class PieExtension implements vscode.Disposable {
         this.service.createNewSession();
         this.sidebarProvider.reveal();
       }),
-      vscode.commands.registerCommand('pie.restartBackend', async () => {
-        await this.restart();
+      vscode.commands.registerCommand('pie.restartBackend', async (source?: SessionOperationSource) => {
+        await this.restart(source);
       }),
       vscode.commands.registerCommand('pie.exportRunAnalytics', async (
         target?: vscode.Uri | string,

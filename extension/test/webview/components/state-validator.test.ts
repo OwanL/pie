@@ -159,26 +159,35 @@ for (const spec of CRITICAL_FIELDS) {
   });
 }
 
-test('session capabilities accept every valid primary operation projection', () => {
-  for (const kind of ['session.create', 'message.edit', 'message.interrupt', 'message.continue', 'message.compact'] as const) {
-    const state = validState();
-    state.sessionCapabilitiesBySession = {
-      '/pending': {
-        billableActivity: false,
-        canContinue: false,
-        canInterrupt: false,
-        canCompact: false,
-        primaryOperation: {
-          operationId: 'operation-1',
-          kind,
-          phase: 'ambiguous',
-          attempt: 2,
-          committed: false,
-          recovery: 'retry',
+test('session capabilities accept every lifecycle kind and non-terminal phase projection', () => {
+  const kinds = [
+    'session.create', 'session.duplicate', 'session.open', 'session.close', 'backend.restart',
+    'message.send', 'message.edit', 'message.interrupt', 'message.continue', 'message.compact',
+  ] as const;
+  const phases = [
+    'awaiting-acceptance', 'draining', 'awaiting-old-generation-death', 'awaiting-commit', 'ambiguous',
+  ] as const;
+  for (const kind of kinds) {
+    for (const phase of phases) {
+      const state = validState();
+      state.sessionCapabilitiesBySession = {
+        '/pending': {
+          billableActivity: false,
+          canContinue: false,
+          canInterrupt: false,
+          canCompact: false,
+          primaryOperation: {
+            operationId: 'operation-1',
+            kind,
+            phase,
+            attempt: 2,
+            committed: false,
+            recovery: 'retry',
+          },
         },
-      },
-    };
-    assert.deepEqual(validateViewState(state), [], kind);
+      };
+      assert.deepEqual(validateViewState(state), [], `${kind}:${phase}`);
+    }
   }
 });
 

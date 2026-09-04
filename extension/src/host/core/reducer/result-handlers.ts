@@ -25,6 +25,7 @@ import { mapSendOrEditError, mapPreflightError, stripReqIds } from '../../../sha
 import { isPendingTabPath } from '../../../shared/tab-behavior.js';
 import { handleFileRevertResult } from './file-handlers.js';
 import { interruptLivePipelineForSession } from './live-pipeline-handlers.js';
+import type { SessionOperation } from '../operation-types.js';
 import {
   markSessionOperationAccepted,
   markSessionOperationAmbiguous,
@@ -33,6 +34,40 @@ import {
   settleSessionOperationSucceeded,
 } from '../operation-registry.js';
 
+const OPERATION_RECONCILIATION_MAX_ATTEMPTS = 4;
+const OPERATION_RECONCILIATION_BASE_DELAY_MS = 1_000;
+
+function beginOperationReconciliation(operation: SessionOperation, delayMs: number): {
+  operation: SessionOperation;
+  effect: Effect;
+} {
+  const reconciling: SessionOperation = {
+    ...operation,
+    reconciliation: { attempts: 0, maxAttempts: OPERATION_RECONCILIATION_MAX_ATTEMPTS },
+  };
+  return {
+    operation: reconciling,
+    effect: {
+      kind: 'ScheduleOperationReconciliation',
+      corrId: operation.causal.selectionToken,
+      operationId: operation.operationId,
+      operationKind: operation.kind as Extract<SessionOperation['kind'], `message.${string}`>,
+      sessionPath: operation.session.resolvedPath ?? operation.session.pendingPath,
+      backendGeneration: operation.backendGeneration,
+      operationAttempt: operation.attempt,
+      reconciliationAttempt: 1,
+      delayMs,
+    },
+  };
+}
+
+function releaseOperationResourcesEffect(operation: SessionOperation): Effect {
+  return {
+    kind: 'ReleaseOperationResources', corrId: operation.causal.selectionToken,
+    operationId: operation.operationId, operationAttempt: operation.attempt,
+  };
+}
+
 export function handleContinueResult(state: ArchState, event: Extract<Event, { kind: 'ContinueResult' }>): ReducerResult {
   const operationId = event.operationId ?? Object.values(state.operations).find(
     (operation) => operation.kind === 'message.continue'
@@ -40,11 +75,12 @@ export function handleContinueResult(state: ArchState, event: Extract<Event, { k
   )?.operationId;
   const operation = operationId ? state.operations[operationId] : undefined;
   if (!operation || operation.kind !== 'message.continue' || operation.terminal
+    || (operation.acceptance === 'accepted' && operation.reconciliation)
     || (event.backendGeneration !== undefined && operation.backendGeneration !== event.backendGeneration)) {
     return { state, effects: [] };
   }
   const cancelledBeforeStart = !event.ok && event.error?.includes('SESSION_OPERATION_CANCELLED');
-  const updated = event.ok
+  let updated = event.ok
     ? markSessionOperationAccepted(operation, {
         pendingPath: operation.session.pendingPath,
         backendGeneration: event.backendGeneration,
@@ -66,6 +102,12 @@ export function handleContinueResult(state: ArchState, event: Extract<Event, { k
           detail: event.error,
         });
   if (!updated) return { state, effects: [] };
+  let reconciliationEffect: Effect | undefined;
+  if (event.ok) {
+    const reconciliation = beginOperationReconciliation(updated, OPERATION_RECONCILIATION_BASE_DELAY_MS);
+    updated = reconciliation.operation;
+    reconciliationEffect = reconciliation.effect;
+  }
   return {
     state: produce(state, (draft) => {
       draft.operations[operationId!] = updated;
@@ -81,13 +123,16 @@ export function handleContinueResult(state: ArchState, event: Extract<Event, { k
         }
       }
     }),
-    effects: event.ok ? [] : [{
-      kind: 'Log',
-      corrId: event.corrId,
-      level: 'error',
-      message: `Continuation failed for session ${event.sessionPath}`,
-      data: { error: event.error },
-    }],
+    effects: event.ok ? [reconciliationEffect!] : [
+      {
+        kind: 'Log',
+        corrId: event.corrId,
+        level: 'error',
+        message: `Continuation failed for session ${event.sessionPath}`,
+        data: { error: event.error },
+      },
+      releaseOperationResourcesEffect(operation),
+    ],
   };
 }
 
@@ -101,7 +146,7 @@ export function handleInterruptResult(state: ArchState, event: Extract<Event, { 
     return { state, effects: [] };
   }
   const authoritativeSettlement = event.ok && event.settled !== false;
-  const updated = authoritativeSettlement
+  let updated = authoritativeSettlement
     ? settleSessionOperationSucceeded(operation, {
         pendingPath: operation.session.pendingPath,
         resolvedPath: event.sessionPath,
@@ -122,6 +167,12 @@ export function handleInterruptResult(state: ArchState, event: Extract<Event, { 
           committed: event.committed,
         });
   if (!updated) return { state, effects: [] };
+  let reconciliationEffect: Effect | undefined;
+  if (event.ok && !updated.terminal) {
+    const reconciliation = beginOperationReconciliation(updated, OPERATION_RECONCILIATION_BASE_DELAY_MS);
+    updated = reconciliation.operation;
+    reconciliationEffect = reconciliation.effect;
+  }
 
   const lifecycleState = updated.terminal?.outcome === 'settled'
     ? interruptLivePipelineForSession(state, event.sessionPath, event.occurredAt ?? 0).state
@@ -161,10 +212,15 @@ export function handleInterruptResult(state: ArchState, event: Extract<Event, { 
   });
   return {
     state: nextState,
-    effects: !event.ok ? [{
-      kind: 'Log', corrId: event.corrId, level: 'error',
-      message: `Interrupt failed for session ${event.sessionPath}`, data: { error: event.error },
-    }] : [],
+    effects: updated.terminal
+      ? [
+          releaseOperationResourcesEffect(operation),
+          ...(!event.ok ? [{
+            kind: 'Log' as const, corrId: event.corrId, level: 'error' as const,
+            message: `Interrupt failed for session ${event.sessionPath}`, data: { error: event.error },
+          }] : []),
+        ]
+      : [reconciliationEffect!],
   };
 }
 
@@ -294,6 +350,13 @@ export function handleClearQueueResult(state: ArchState, event: Extract<Event, {
 export function handleSendResult(state: ArchState, event: Extract<Event, { kind: 'SendResult' }>): ReducerResult {
   const pending = state.pending.ops[event.corrId];
   if (!pending) return { state, effects: [] };
+  const operationId = event.operationId ?? pending.operationId;
+  const operation = operationId ? state.operations[operationId] : undefined;
+  if (operation?.kind === 'message.send'
+    && event.operationAttempt !== undefined
+    && event.operationAttempt !== operation.attempt) return { state, effects: [] };
+  if (event.operationAttempt !== undefined && pending.operationAttempt !== undefined
+    && event.operationAttempt !== pending.operationAttempt) return { state, effects: [] };
 
   const { [event.corrId]: _removed, ...restOps } = state.pending.ops;
 
@@ -309,12 +372,20 @@ export function handleSendResult(state: ArchState, event: Extract<Event, { kind:
       const operationId = event.operationId ?? pending.operationId;
       const operation = operationId ? draft.operations[operationId] : undefined;
       if (operation?.kind === 'message.send') {
-        const accepted = markSessionOperationAccepted(operation, {
-          pendingPath: operation.session.pendingPath,
-          backendGeneration: event.backendGeneration,
-        });
+        // A ledger-derived acknowledgement is paired with a
+        // SendOperationStatus event, which exclusively owns lifecycle and
+        // bounded reconciliation. This result only promotes rollback/request
+        // ownership; it must not regress an exhausted or still-reconciling op.
+        const accepted = event.reconciled
+          ? operation
+          : markSessionOperationAccepted(operation, {
+              pendingPath: operation.session.pendingPath,
+              backendGeneration: event.backendGeneration,
+            });
         if (accepted) {
           accepted.delivery = event.queued ? 'queued' : 'direct';
+          if (!event.reconciled) delete accepted.reconciliation;
+          if (event.queued) delete accepted.executionPhase;
           draft.operations[operationId!] = accepted;
         }
       }
@@ -366,7 +437,11 @@ export function handleSendResult(state: ArchState, event: Extract<Event, { kind:
         }
       }
     });
-    return { state: nextState, effects: [] };
+    const effects: Effect[] = event.queued ? [{
+      kind: 'ClearSendTimer', corrId: event.corrId,
+      ...(pending.priorPruningMode ? { restorePruningMode: pending.priorPruningMode } : {}),
+    }] : [];
+    return { state: nextState, effects };
   }
 
   // Failure: rollback optimistic message, notify user, restore session name
@@ -380,6 +455,13 @@ export function handleSendResult(state: ArchState, event: Extract<Event, { kind:
     state.composer.pendingComposerInputsBySession[pending.sessionPath],
   );
   const effects: Effect[] = [
+    {
+      kind: 'ClearSendTimer', corrId: event.corrId,
+      ...(pending.priorPruningMode ? { restorePruningMode: pending.priorPruningMode } : {}),
+    },
+    ...(pending.operationId && state.operations[pending.operationId]
+      ? [releaseOperationResourcesEffect(state.operations[pending.operationId]!)]
+      : []),
     {
       kind: 'PostImperative',
       corrId: event.corrId,
@@ -532,6 +614,10 @@ export function handlePreflightFailed(state: ArchState, event: Extract<Event, { 
   // Stale/unknown: the send already committed, or no operation for this
   // session is still in preflight. A later failure is an in-turn error.
   if (!corrId || !snapshot || !source) return { state, effects: [] };
+  const correlatedOperation = snapshot.operationId ? state.operations[snapshot.operationId] : undefined;
+  if (correlatedOperation?.kind === 'message.send'
+    && event.operationAttempt !== undefined
+    && event.operationAttempt !== correlatedOperation.attempt) return { state, effects: [] };
 
   // A replacement preflight event carrying this edit's stable operation ID can
   // only originate from the freshly promoted worker, after the atomic truncate.
@@ -557,7 +643,10 @@ export function handlePreflightFailed(state: ArchState, event: Extract<Event, { 
       });
       return {
         state: failed.state,
-        effects: [...failed.effects, { kind: 'ClearSendTimer', corrId }],
+        effects: [...failed.effects, {
+          kind: 'ClearSendTimer', corrId,
+          ...(snapshot.priorPruningMode ? { restorePruningMode: snapshot.priorPruningMode } : {}),
+        }],
       };
     }
   }
@@ -581,7 +670,10 @@ export function handlePreflightFailed(state: ArchState, event: Extract<Event, { 
       state.composer.pendingComposerInputsBySession[snapshot.sessionPath],
     )
     : [];
-  const effects: Effect[] = event.corrId ? [] : [{ kind: 'ClearSendTimer', corrId }];
+  const effects: Effect[] = event.corrId ? [] : [{
+    kind: 'ClearSendTimer', corrId,
+    ...(snapshot.priorPruningMode ? { restorePruningMode: snapshot.priorPruningMode } : {}),
+  }];
   if (snapshot.kind === 'send') {
     effects.push({
       kind: 'PostImperative',
@@ -728,17 +820,29 @@ export function handleEditResult(state: ArchState, event: Extract<Event, { kind:
   const operationId = event.operationId ?? pending?.operationId;
   const operation = operationId ? state.operations[operationId] : undefined;
   if (!pending || (operation && (operation.kind !== 'message.edit' || operation.terminal
+    || (event.ok && operation.acceptance === 'accepted'
+      && (operation.reconciliation !== undefined || operation.commit === 'committed'))
     || (event.backendGeneration !== undefined && operation.backendGeneration !== event.backendGeneration)))) {
     return { state, effects: [] };
   }
 
   if (event.ok) {
-    const accepted = operation ? markSessionOperationAccepted(operation, {
+    let accepted = operation ? markSessionOperationAccepted(operation, {
       pendingPath: operation.session.pendingPath,
       backendGeneration: event.backendGeneration,
       committed: event.committed,
     }) : undefined;
     if (operation && !accepted) return { state, effects: [] };
+    let resourceEffect: Effect | undefined;
+    if (accepted && operation) {
+      if (event.committed === true) {
+        resourceEffect = releaseOperationResourcesEffect(operation);
+      } else {
+        const reconciliation = beginOperationReconciliation(accepted, OPERATION_RECONCILIATION_BASE_DELAY_MS);
+        accepted = reconciliation.operation;
+        resourceEffect = reconciliation.effect;
+      }
+    }
     return {
       state: produce(state, (draft) => {
         if (accepted && operationId) draft.operations[operationId] = accepted;
@@ -751,7 +855,7 @@ export function handleEditResult(state: ArchState, event: Extract<Event, { kind:
           draft.pending.prepassBySession[pending.sessionPath] = { phase: 'running', latencyMs: null };
         }
       }),
-      effects: [],
+      effects: resourceEffect ? [resourceEffect] : [],
     };
   }
 
@@ -796,7 +900,7 @@ export function handleEditResult(state: ArchState, event: Extract<Event, { kind:
         draft.settings.noticeSessionPath = pending.sessionPath;
       }
     }),
-    effects: [],
+    effects: operation ? [releaseOperationResourcesEffect(operation)] : [],
   };
 }
 
@@ -1020,7 +1124,7 @@ export function handleMcpSessionServersUpdated(state: ArchState, event: Extract<
   };
 }
 
-export function handleEffectResult(state: ArchState, event: Exclude<EffectResultEvent, { kind: 'TruncateResult' } | { kind: 'ClearQueueResult' } | { kind: 'ReplaceQueueResult' } | { kind: 'OpenSessionResult' } | { kind: 'CreateSessionResult' } | { kind: 'DuplicateSessionResult' } | { kind: 'CloseSessionResult' } | { kind: 'PersistTabsResult' } | { kind: 'ModelSwitchConfirmResult' } | { kind: 'LiveTurnCheckpointResult' }>): ReducerResult {
+export function handleEffectResult(state: ArchState, event: Exclude<EffectResultEvent, { kind: 'TruncateResult' } | { kind: 'ClearQueueResult' } | { kind: 'ReplaceQueueResult' } | { kind: 'OpenSessionResult' } | { kind: 'CreateSessionResult' } | { kind: 'DuplicateSessionResult' } | { kind: 'CloseSessionResult' } | { kind: 'PersistTabsResult' } | { kind: 'BackendRestartResult' } | { kind: 'ModelSwitchConfirmResult' } | { kind: 'LiveTurnCheckpointResult' }>): ReducerResult {
   switch (event.kind) {
     case 'ContinueResult':
       return handleContinueResult(state, event);
@@ -1046,7 +1150,7 @@ export function handleEffectResult(state: ArchState, event: Exclude<EffectResult
         'SESSION_TRANSITION_TIMEOUT',
         'OPERATION_INTENT_MISMATCH',
       ].some((code) => event.error?.includes(code));
-      const updated = event.ok
+      let updated = event.ok
         ? settleSessionOperationSucceeded(operation, {
             pendingPath: operation.session.pendingPath,
             resolvedPath: event.sessionPath,
@@ -1075,6 +1179,14 @@ export function handleEffectResult(state: ArchState, event: Exclude<EffectResult
                 backendGeneration: event.backendGeneration,
               }, 'reconcile');
       if (!updated) return { state, effects: [] };
+      let resourceEffect: Effect;
+      if (updated.terminal) {
+        resourceEffect = releaseOperationResourcesEffect(operation);
+      } else {
+        const reconciliation = beginOperationReconciliation(updated, 0);
+        updated = reconciliation.operation;
+        resourceEffect = reconciliation.effect;
+      }
       return {
         state: produce(state, (draft) => {
           draft.operations[operationId!] = updated;
@@ -1102,7 +1214,7 @@ export function handleEffectResult(state: ArchState, event: Exclude<EffectResult
             draft.settings.noticeSessionPath = event.sessionPath;
           }
         }),
-        effects: [],
+        effects: [resourceEffect],
       };
     }
     case 'SendResult':

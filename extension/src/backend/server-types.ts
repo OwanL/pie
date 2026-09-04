@@ -204,6 +204,8 @@ export interface SessionContext {
   /** Stable operation identities aligned with queuedLocalIds. Empty strings
    * preserve legacy callers which supplied no operationId. */
   queuedOperationIds?: string[];
+  /** Transport attempts aligned with queuedOperationIds. */
+  queuedOperationAttempts?: Array<number | undefined>;
   /** Generation-scoped mutation idempotency authority for this hot session. */
   sendOperationLedger?: SendOperationLedger;
   /** Legacy in-process interrupt authority. Production interrupt ownership is

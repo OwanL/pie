@@ -31,7 +31,7 @@ export interface SessionServiceLike {
   bumpSessionDataEpoch(sessionPath: string): void;
   addFilesystemPaths(requestedSessionPath: string | undefined, paths: string[], source: 'picker' | 'drop'): Promise<void>;
   createNewSession(source?: RendererCommandContext): string;
-  openSession(sessionPath: string): void;
+  openSession(sessionPath: string, source?: RendererCommandContext, causalParentOperationId?: string): void;
   duplicateSession(sessionPath: string, source?: RendererCommandContext): void;
   retryCreateOperation(operationId: string): boolean;
   getBackendGeneration?(): number;
@@ -174,10 +174,10 @@ export class MessageRouter {
         return this.onNewSession(context);
 
       case 'openSession':
-        return this.onOpenSession(msg as Extract<WebviewToHostMessage, { type: 'openSession' }>);
+        return this.onOpenSession(msg as Extract<WebviewToHostMessage, { type: 'openSession' }>, context);
 
       case 'closeSession':
-        return await this.onCloseSession(msg as Extract<WebviewToHostMessage, { type: 'closeSession' }>);
+        return await this.onCloseSession(msg as Extract<WebviewToHostMessage, { type: 'closeSession' }>, context);
 
       case 'requestDetail':
         return await this.onRequestDetail(msg as Extract<WebviewToHostMessage, { type: 'requestDetail' }>, context);
@@ -313,7 +313,7 @@ export class MessageRouter {
         return this.onOpenSettings();
 
       case 'restartBackend':
-        return this.onRestartBackend();
+        return this.onRestartBackend(context);
 
       case 'retrySend':
         return await this.onRetrySend(msg as Extract<WebviewToHostMessage, { type: 'retrySend' }>, context);
@@ -509,7 +509,8 @@ export class MessageRouter {
     this.dispatchEvent({
       kind: 'Command',
       cmd: {
-        kind: 'Send', corrId, operationId, operationSource: operationSourceFromRenderer(context),
+        kind: 'Send', corrId, operationId, operationAttempt: 1,
+        operationSource: operationSourceFromRenderer(context),
         backendGeneration: this.service.getBackendGeneration?.() ?? 0, sessionPath, text, inputs,
         composedText, localId, userParts, previousSummary,
         priorPruningMode: opts?.priorPruningMode, timestamp: Date.now(),
@@ -687,7 +688,10 @@ export class MessageRouter {
     this.sidebarProvider.postState();
   }
 
-  private onOpenSession(msg: Extract<WebviewToHostMessage, { type: 'openSession' }>): void {
+  private onOpenSession(
+    msg: Extract<WebviewToHostMessage, { type: 'openSession' }>,
+    context?: RendererCommandContext,
+  ): void {
     // The service mints the data epoch + selection token (before the reducer
     // activates the opened tab so failure recovery can restore the previous
     // active path) + builds the placeholder summary, and dispatches the
@@ -697,7 +701,7 @@ export class MessageRouter {
     // was never registered with beginSelectionRequest, so handleSelectionFailure
     // could not restore the previous active tab on failure.
     this.dispatchEvent({ kind: 'Command', cmd: { kind: 'SetEditingMessage', corrId: crypto.randomUUID(), sessionPath: msg.sessionPath, messageId: null } });
-    this.service.openSession(msg.sessionPath);
+    this.service.openSession(msg.sessionPath, context);
     // Explicit selection is interaction-critical: do not make it wait behind
     // an accepted streaming snapshot's transcript-commit gate.
     if (this.sidebarProvider.postSelectionState) this.sidebarProvider.postSelectionState();
@@ -724,7 +728,10 @@ export class MessageRouter {
     this.sidebarProvider.postState();
   }
 
-  private onCloseSession(msg: Extract<WebviewToHostMessage, { type: 'closeSession' }>): void {
+  private onCloseSession(
+    msg: Extract<WebviewToHostMessage, { type: 'closeSession' }>,
+    context?: RendererCommandContext,
+  ): void {
     if (msg.interactionId) {
       if (this.recentCloseInteractionIds.has(msg.interactionId)) return;
       this.recentCloseInteractionIds.add(msg.interactionId);
@@ -734,7 +741,18 @@ export class MessageRouter {
         if (retired) this.recentCloseInteractionIds.delete(retired);
       }
     }
-    this.dispatchEvent({ kind: 'Command', cmd: { kind: 'CloseSession', corrId: crypto.randomUUID(), sessionPath: msg.sessionPath } });
+    this.dispatchEvent({
+      kind: 'Command',
+      cmd: {
+        kind: 'CloseSession',
+        corrId: crypto.randomUUID(),
+        operationId: crypto.randomUUID(),
+        operationAttempt: 1,
+        operationSource: operationSourceFromRenderer(context),
+        backendGeneration: this.service.getBackendGeneration?.() ?? 0,
+        sessionPath: msg.sessionPath,
+      },
+    });
     this.dispatchEvent({ kind: 'Command', cmd: { kind: 'SetEditingMessage', corrId: crypto.randomUUID(), sessionPath: msg.sessionPath, messageId: null } });
     this.sidebarProvider.postState();
   }
@@ -1356,8 +1374,8 @@ export class MessageRouter {
 
   /** `restartBackend` — re-run the registered `pie.restartBackend` command
    *  after a backend-exit error. The command owns the full restart lifecycle. */
-  private async onRestartBackend(): Promise<void> {
-    await vscode.commands.executeCommand('pie.restartBackend');
+  private async onRestartBackend(context?: RendererCommandContext): Promise<void> {
+    await vscode.commands.executeCommand('pie.restartBackend', operationSourceFromRenderer(context));
   }
 
   /** `retrySend` — re-send the draft text (composer draft + inputs were
