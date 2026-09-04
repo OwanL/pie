@@ -28,7 +28,8 @@ All core architecture types live in `extension/src/host/core/`:
 | `events.ts` | `Event` discriminated union — inputs to the reducer (commands, backend events, effect results). |
 | `effects.ts` | `Effect` discriminated union — side-effect descriptors grouped into namespaces (`SessionRpc`, `SessionLifecycle`, `FileOperation`, `Notification`). |
 | `reducer.ts` | Pure function `(ArchState, Event) → { archState, effects }`. No I/O. |
-| `effect-runner.ts` | Executes effects and posts observations back to the reducer. Retains opaque timers/controllers/promises only; semantic lifecycle state lives in `ArchState.operations`. |
+| `effect-runner.ts` | Single executor façade: routes effects and posts observations back to the reducer. |
+| `session-operation-effect-controller.ts` | Executes send/edit/interrupt/continue/compact effects and status reconciliation; retains opaque timers/controllers/promises/correlation resources only. |
 | `projection.ts` | Pure function `ArchState → ViewState`. Computes what the webview should display. |
 | `event-dispatch.ts` | Dispatches raw backend JSON lines — read + `JSON.parse`d in `host/backend/client.ts` (`attachJsonlLineReader`, `JSON.parse`) — as typed `BackendEvent` objects to the reducer. |
 | `message-router.ts` | Converts `WebviewToHostMessage` into `Command` objects and dispatches to the reducer. |
@@ -85,7 +86,7 @@ All application state lives in `ArchState` — no separate Redux store.
 | **Command** | Webview → host intent, carries `corrId` | `host/core/commands.ts` |
 | **Event** | Reducer input (command, backend event, or effect result) | `host/core/events.ts` |
 | **Effect** | Plain data describing a side effect, grouped by namespace | `host/core/effects.ts` |
-| **EffectRunner** | Executes effects and retains opaque execution resources only | `host/core/effect-runner.ts` |
+| **EffectRunner** | Single effect executor façade; delegates session-operation resources without owning lifecycle state | `host/core/effect-runner.ts`, `host/core/session-operation-effect-controller.ts` |
 | **Operation registry** | Reducer-owned lifecycle authority for accepted state-changing actions | `host/core/operation-types.ts`, `host/core/operation-registry.ts` |
 | **Projection** | `ArchState → ViewState` | `host/core/projection.ts` |
 | **ArchState** | All application state, nested into sub-states | `host/core/arch-state.ts` |

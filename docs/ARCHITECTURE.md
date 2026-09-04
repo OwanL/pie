@@ -88,7 +88,8 @@ See git history (commit `d581d83`) for historical context on the migration from 
 | Box | File |
 |-----|------|
 | Reducer | `extension/src/host/core/reducer.ts` |
-| EffectRunner | `extension/src/host/core/effect-runner.ts` |
+| EffectRunner façade | `extension/src/host/core/effect-runner.ts` |
+| Session-operation effect controller | `extension/src/host/core/session-operation-effect-controller.ts` |
 | Projection | `extension/src/host/core/projection.ts` |
 | Snapshot transport | `extension/src/host/sidebar/sync.ts`, `extension/src/host/sidebar/provider.ts` |
 | Backend event dispatch | `extension/src/host/core/event-dispatch.ts` |
@@ -104,7 +105,7 @@ See git history (commit `d581d83`) for historical context on the migration from 
 
 **Effect** — a plain data descriptor of a side effect the reducer wants performed (e.g., `SendRpc`, `InterruptRpc`, `PersistTabs`). Never executed inside the reducer. Defined in `extension/src/host/core/effects.ts`.
 
-**EffectRunner** — the single host-side executor of effects. Owns no semantic application or lifecycle state. It may retain only opaque execution resources such as timer handles, abort controllers, promises, resolver functions, and cancellation tickets. It consumes effects and produces result events. Located at `extension/src/host/core/effect-runner.ts`.
+**EffectRunner** — the single host-side executor façade. It owns no semantic application or lifecycle state, routes generic effects directly, and delegates session-operation execution to `session-operation-effect-controller.ts`. That controller may retain only opaque timer handles, abort controllers, promises, resolver functions, cancellation tickets, and correlation resources. Effects produce typed observations for the reducer.
 
 **Operation registry** — `ArchState.operations`, a reducer-owned `Record` keyed by stable operation ID. It owns source and causal identity, session/branch and process generations when known, semantic phase, acknowledgement/commit evidence, bounded reconciliation, recovery, and one immutable terminal outcome for create/duplicate/open/close/restart/send/edit/interrupt/continue/manual-compact.
 
@@ -127,7 +128,7 @@ See git history (commit `d581d83`) for historical context on the migration from 
 1. Webview dispatches `{ type: 'send', sessionPath, text, localId }`.
 2. For non-empty text or composer inputs, the host wraps it as a `Send` Command with a fresh `corrId` + local message ID.
 3. Reducer inserts an optimistic user message into `state.pending[corrId]`, registers the stable operation/attempt, and returns a `SendRpc` effect.
-4. EffectRunner routes the RPC through the per-session operation queue and retains only its execution resources.
+4. EffectRunner delegates the RPC to the session-operation effect controller, which routes it through the per-session operation queue and retains only opaque execution/correlation resources.
 5. Acknowledgement is non-terminal. Correlated semantic start, status, settlement, or generation death updates the reducer-owned operation; bounded status reconciliation resolves acknowledgement ambiguity.
 6. A definitive pre-commit failure reverts via `state.pending[corrId]`; commit evidence permanently retires rollback ownership. Every accepted operation receives at most one immutable terminal outcome.
 7. An empty submit after an interrupted assistant tail is different: the host emits `Continue` → `ContinueRpc` → `message.continue`, adds no user row, and enters the SDK continuation lifecycle without `session.prompt()` or the `before_agent_start` skill-pruning prepass.
@@ -235,7 +236,7 @@ See [`docs/STATE_CONTRACT.md`](STATE_CONTRACT.md) for the full invariant set.
 | Owner | What it holds |
 |-------|--------------|
 | **ArchState** (reducer) | All application and semantic lifecycle state: sessions, transcripts, operation registry, phase/ack/commit/reconciliation/recovery, model settings, prefs, file changes, optimistic rollback state, and backend event routing |
-| **EffectRunner** (opaque resources only) | Timer handles, abort controllers, promises/resolvers, cancellation tickets, and execution queues; never user-visible semantic phase or outcome |
+| **EffectRunner façade and delegated controllers** (opaque resources only) | Timer handles, abort controllers, promises/resolvers, cancellation tickets, correlation resources, and execution queues; never user-visible semantic phase or outcome |
 | **Webview** (local only) | Scroll position, focus/caret, hover, drag, animation, context menu position, protocol bookkeeping (revision refs), per-keystroke draft buffer |
 
 **Rule of thumb:** if you're unsure whether something is host state or webview state, it's host state.

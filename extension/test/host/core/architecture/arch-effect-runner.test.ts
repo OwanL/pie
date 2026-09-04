@@ -126,6 +126,49 @@ test('EffectRunner routes ContinueRpc through the session queue without a user p
   assert.equal(events[0]?.requestId, 'continue-request');
 });
 
+test('EffectRunner façade preserves FIFO order across delegated session operations', async () => {
+  let tail = Promise.resolve();
+  const queues: EffectRunnerDeps['queues'] = {
+    enqueueLifecycle: async <T>(task: () => Promise<T>): Promise<T> => task(),
+    enqueueSessionOperation<T>(_sessionPath: string, task: () => Promise<T>): Promise<T> {
+      const operation = tail.then(task);
+      tail = operation.then(() => undefined, () => undefined);
+      return operation;
+    },
+  };
+  const timers = new FakeTimerSink();
+  const { deps, calls } = makeEffectRunnerDeps({
+    queues,
+    timer: timers,
+    requestImpl: async (method) => method === 'message.send' || method === 'message.continue'
+      ? { requestId: `${method}:request` }
+      : {},
+  });
+  const runner = new EffectRunner(deps);
+
+  runner.run({
+    kind: 'SendRpc', corrId: 'send-corr', operationId: 'send-op', operationAttempt: 1,
+    backendGeneration: 4, sessionPath: '/a', text: 'one', composedText: 'one',
+    inputs: [], localId: 'local-one',
+  });
+  runner.run({
+    kind: 'ContinueRpc', corrId: 'continue-corr', operationId: 'continue-op',
+    operationAttempt: 1, backendGeneration: 4, sessionPath: '/a',
+  });
+  runner.run({
+    kind: 'CompactRpc', corrId: 'compact-corr', operationId: 'compact-op',
+    operationAttempt: 1, backendGeneration: 4, sessionPath: '/a',
+  });
+  await tail;
+  await settle();
+
+  assert.deepEqual(
+    calls.filter((call) => call.kind === 'request').map((call) => call.method),
+    ['message.send', 'message.continue', 'message.compact'],
+  );
+  runner.dispose();
+});
+
 test('message.continue acknowledgement timeout reconciles to committed without a false rejection', async () => {
   const timers = new FakeTimerSink();
   const hostEvents: Event[] = [];

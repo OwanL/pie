@@ -16,6 +16,8 @@ declare const __dirname: string;
 
 const CORE_ROOT = resolve(__dirname, '..', '..', '..', '..', 'src', 'host', 'core');
 const ARCH_STATE_PATH = resolve(CORE_ROOT, 'arch-state.ts');
+const EFFECT_RUNNER_PATH = resolve(CORE_ROOT, 'effect-runner.ts');
+const SESSION_OPERATION_CONTROLLER_PATH = resolve(CORE_ROOT, 'session-operation-effect-controller.ts');
 
 // ─── Guard: TranscriptState has no alias/turn fields ─────────────────────────
 
@@ -36,6 +38,39 @@ test('TranscriptState must not contain messageIdAlias or currentTurnBySession fi
 // and window helpers from core/transcript-window, which is intentional
 // for the Phase 5+ migration where the reducer owns transcript state directly.
 // These imports are pure functions (no Redux coupling), so they are allowed.
+
+test('EffectRunner delegates session-operation resources to the dedicated controller', () => {
+  const effectRunner = readFileSync(EFFECT_RUNNER_PATH, 'utf8');
+  const controller = readFileSync(SESSION_OPERATION_CONTROLLER_PATH, 'utf8');
+  const resourcesOwnedByController = [
+    'registeredSends',
+    'legacyInFlightSends',
+    'operationReconciliationTimers',
+    'queuedEditOperations',
+    'messageOperationTickets',
+    'messageOperationBarriers',
+    'queryOperationStatus(',
+  ];
+
+  assert.match(effectRunner, /private readonly sessionOperations: SessionOperationEffectController/);
+  for (const resource of resourcesOwnedByController) {
+    assert.ok(!effectRunner.includes(resource), `EffectRunner must not own session-operation resource ${resource}`);
+    assert.ok(controller.includes(resource), `session-operation controller must own ${resource}`);
+  }
+
+  const fieldRegion = controller.match(/export class SessionOperationEffectController \{([\s\S]+?)\n {2}constructor/);
+  assert.ok(fieldRegion, 'session-operation controller field region not found');
+  assert.doesNotMatch(
+    fieldRegion[1],
+    /private[^\n]*(?:phase|outcome|acknowledgement|commitEvidence|recovery|terminal)/i,
+    'controller fields must remain opaque execution/correlation resources, not semantic lifecycle state',
+  );
+  assert.doesNotMatch(
+    controller,
+    /from ['"].*(?:arch-state|operation-registry|reducer)/,
+    'session-operation controller must observe reducer effects without importing semantic state',
+  );
+});
 
 test('arch reducer must not import from extension-host', () => {
   const reducerPath = resolve(__dirname, '..', '..', '..', '..', 'src', 'host', 'core', 'reducer.ts');
