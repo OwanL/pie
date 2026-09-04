@@ -304,7 +304,7 @@ export class MessageRouter {
       case 'setFileChangesExpanded':
         return this.onSetFileChangesExpanded(msg as Extract<WebviewToHostMessage, { type: 'setFileChangesExpanded' }>);
 
-      // ── Brief H: recovery actions surfaced from an error notice. These are
+      // ── Recovery actions surfaced from an error notice. These are
       //    side-effect-only (no reducer event), mirroring openFilePicker/openFile.
       case 'showLogs':
         return this.onShowLogs();
@@ -380,7 +380,7 @@ export class MessageRouter {
   private async onRefreshState(context?: RendererCommandContext): Promise<void> {
     const activeSessionPath = this.getArchState().sessions.activeSessionPath;
     if (activeSessionPath && !this.isPendingTabPathFn(activeSessionPath)) {
-      // Phase 2: route through the CQRS reducer + effect runner instead of
+      // Route through the CQRS reducer + effect runner instead of
       // calling the service directly. The HydrateModel effect is fire-and-forget;
       // the service's dispatched ModelSettingsHydrated/AvailableModelsChanged events apply
       // the results.
@@ -594,7 +594,7 @@ export class MessageRouter {
       this.dispatchEvent({ kind: 'NoticeShown', notice: 'Protocol defect: interrupt arrived without a sessionPath.' });
       return;
     }
-    // Phase 3: route through the CQRS reducer + effect runner.
+    // Route through the CQRS reducer + effect runner.
     const corrId = crypto.randomUUID();
     this.dispatchEvent({
       kind: 'Command',
@@ -1048,7 +1048,7 @@ export class MessageRouter {
     });
   }
 
-  // ─── Phase 5 detail subscription routing ───────────────────────────────────
+  // ─── Detail subscription routing ───────────────────────────────────
   // The webview owns `detailKey`; every message carries its exact renderer
   // `viewGeneration`. Commands flow through the reducer (which stores nothing)
   // to the EffectRunner, which mints the subscription ID and hands the
@@ -1334,7 +1334,7 @@ export class MessageRouter {
     });
   }
 
-  // ── Brief H: recovery action handlers (side-effect only) ────────────────
+  // ── Recovery action handlers (side-effect only) ────────────────
 
   /** `showLogs` — reveal the pie OutputChannel so the user can inspect
    *  diagnostics after a malformed-response / backend-exit error. The channel
@@ -1387,7 +1387,7 @@ export class MessageRouter {
   private async onRetrySend(msg: Extract<WebviewToHostMessage, { type: 'retrySend' }>, context?: RendererCommandContext): Promise<void> {
     let priorPruningMode: PruningMode | undefined;
     if (msg.disablePruning) {
-      // Brief H: capture the user's prior pruning mode BEFORE disabling, so the
+      // Capture the user's prior pruning mode BEFORE disabling, so the
       //   host restores it once the retried send resolves (commit / fire /
       //   pre-ack failure — handled by the EffectRunner's in-flight send via
       //   `restorePruningMode`; or the backend-ready-watchdog drop for a queued

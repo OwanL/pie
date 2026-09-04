@@ -21,7 +21,7 @@ export interface BottomSectionProps {
   busy: ViewState['busy'];
   capabilities?: ViewState['sessionCapabilitiesBySession'][string];
   retryStatus: ViewState['retryStatus'];
-  /** Brief E: optimistic in-flight interrupt flag (webview-local). Drives the
+  /** Optimistic in-flight interrupt flag (webview-local). Drives the
    *  "Stopping…" affordance so the click reflects within one frame. */
   interrupting: boolean;
   /** False while the browser renderer has no completed host handshake. */
@@ -52,7 +52,7 @@ export interface BottomSectionProps {
   sessionUsage: ViewState['sessionUsage'];
   draftRestore: { text: string; nonce: number } | null;
   draftText: string;
-  /** Brief H: AppBody registers the composer's `sendAsRetry` here so the
+  /** AppBody registers the composer's `sendAsRetry` here so the
    *  NoticeBanner's Retry button (AppBody-level) can re-send the live draft. */
   sendRetryDraftRef?: { current: ((disablePruning?: boolean) => void) | null };
   pendingComposerInputs: ViewState['pendingComposerInputs'];

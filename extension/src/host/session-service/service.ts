@@ -33,7 +33,7 @@ import { resolveLiveDetail } from './detail-retrieval';
 import type { LiveSubagentDetailAddress, DetailCursor, DetailPageRef } from '../../shared/protocol/subagent-detail';
 import { DetailSubscriptionService } from './detail-subscriptions';
 
-/** Host-owned identities the Phase 5 detail subscription service fences its
+/** Host-owned identities the detail subscription service fences its
  *  imperatives with: the current webview document generation and the current
  *  extension-host instance identity. Wired from `SidebarViewProvider` in
  *  extension-host. */
@@ -204,7 +204,7 @@ export class SessionService implements vscode.Disposable {
     this.triggers.cancel(sessionPath, triggerId);
   }
 
-  /** Expose queue routing for the Phase 3 EffectRunner. */
+  /** Expose queue routing for the EffectRunner. */
   get queues(): { enqueueLifecycle: SessionServiceState['enqueueLifecycle']; enqueueSessionOperation: SessionServiceState['enqueueSessionOperation'] } {
     return {
       enqueueLifecycle: (task) => this.state.enqueueLifecycle(task),
@@ -212,12 +212,12 @@ export class SessionService implements vscode.Disposable {
     };
   }
 
-  /** Expose completion-notification suppression for interrupt (Phase 3). */
+  /** Expose completion-notification suppression for interrupt. */
   suppressNextCompletionNotificationFor(sessionPath: string): void {
     this.state.suppressNextCompletionNotificationFor(sessionPath);
   }
 
-  /** Bind a backend request ID to a session path (Phase 4). */
+  /** Bind a backend request ID to a session path. */
   bindRequestSessionPath(requestId: string, sessionPath: string): void {
     this.state.bindRequestSessionPath(requestId, sessionPath);
   }
@@ -235,7 +235,7 @@ export class SessionService implements vscode.Disposable {
     this.state.handleReviewClosureEffectResult(event);
   }
 
-  /** Bump the data epoch for a session (Phase 4, pre-send/edit). */
+  /** Bump the data epoch for a session (pre-send/edit). */
   bumpSessionDataEpoch(sessionPath: string): void {
     this.clearDetailCacheForSession(sessionPath);
     this.state.bumpSessionDataEpoch(sessionPath);
@@ -288,7 +288,7 @@ export class SessionService implements vscode.Disposable {
     return this.state.getBackendGeneration();
   }
 
-  // ─── Phase 5 detail subscription ownership (public routing) ────────────────
+  // ─── Detail subscription ownership (public routing) ────────────────
 
   /** Subscribe a renderer-owned detail key. The EffectRunner mints the
    *  `subscriptionId`; the service records the exact owner and forwards the

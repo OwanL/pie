@@ -4,7 +4,7 @@
 import { highlightToolResultText } from '../highlight';
 
 /**
- * Generic mixed text/image tool-result rendering (Phase 2 — computer-use
+ * Generic mixed text/image tool-result rendering (computer-use
  * image-result foundation).
  *
  * pi tool results use the SDK's standard `{ content: [...] }` shape. Content

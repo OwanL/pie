@@ -1,5 +1,5 @@
 /**
- * Phase 2 type spine — `Effect` discriminated union.
+ * `Effect` discriminated union type spine.
  *
  * Effects are produced by the reducer and consumed exclusively by the
  * `EffectRunner`. They describe a side-effecting intent (an RPC call, a
@@ -14,7 +14,7 @@
  * - `PersistTabs` and `Log` execute synchronously without queueing.
  *
  * Each effect's `corrId` is propagated back into the matching `*Result` event
- * so the reducer can reconcile optimistic state (Phase 4).
+ * so the reducer can reconcile optimistic state.
  */
 
 import type { ComposerInput, ModelSettings, ChatPrefs, HostToWebviewMessage, PruningMode, ThinkingLevel, UserContentPart, RendererCommandContext } from '../../shared/protocol';
@@ -42,7 +42,7 @@ export interface SendRpcEffect extends EffectBase {
   composedText: string;
   /** User content parts for rich rendering of the optimistic message. */
   userParts?: UserContentPart[];
-  /** Brief H compatibility payload. Registered operations keep restoration
+  /** Compatibility payload for unregistered send paths. Registered operations keep restoration
    * intent in reducer state and describe it on their cleanup effect. */
   priorPruningMode?: PruningMode;
 }
@@ -297,7 +297,7 @@ export interface SetSystemPromptTogglesRpcEffect extends EffectBase {
   disabledEntries: string[];
 }
 
-// ─── Phase 5 detail subscription effects ─────────────────────────────────────
+// ─── Detail subscription effects ─────────────────────────────────────
 // The EffectRunner mints the `subscriptionId` and routes each effect to the
 // owning session service. All three are fire-and-forget: stream content
 // reaches the webview as detail imperatives, never as *Result events, so the
@@ -350,7 +350,7 @@ export interface HydrateModelEffect extends EffectBase {
 /** The precise shape of an imperative message posted to the webview.
  *
  *  Tightened from the original `{ type: string; ... }` so a missing `text`
- *  (the Phase 5.2 `sendRejected` bug) is a compile error rather than a runtime
+ *  (a missing `sendRejected` `text`) is a compile error rather than a runtime
  *  defect. Only one `PostImperative` emission exists today (`sendRejected`);
  *  if future emissions need additional imperative message types, extend this
  *  union with the corresponding `Extract<HostToWebviewMessage, { type: '...' }>`
@@ -625,7 +625,7 @@ export interface MarkPrepassSucceededEffect extends EffectBase {
  * phase. Both the pre-ack `RequestTracker` timeout and this send-timer are
  * short-circuited by the same commit-point event, so they can never both fire
  * for one send. See `docs/STATE_CONTRACT.md` § Optimistic Reconciliation
- * "Timer ownership" (Brief B).
+ * "Timer ownership".
  */
 export interface ClearSendTimerEffect extends EffectBase {
   kind: 'ClearSendTimer';

@@ -332,7 +332,7 @@ interface HostMessageContext {
   resetPerSessionState: () => void;
   hostInstanceIdRef: { current: string };
   viewGenerationRef: { current: number };
-  /** Last applied snapshot revision (Brief D). Allowlisted webview-local
+  /** Last applied snapshot revision. Allowlisted webview-local
    *  protocol-sync bookkeeping (STATE_CONTRACT § Webview-Local State). */
   lastRevisionRef: { current: number };
   activeSessionPathRef: { current: string | null };
@@ -388,7 +388,7 @@ function handleStateMessage(msg: HostToWebviewMessage, ctx: HostMessageContext) 
   const m = msg as Extract<HostToWebviewMessage, { type: 'state' }>;
   if (rejectCompatibilityMismatch(m, ctx)) return;
 
-  // ── Brief D: revision guard (total) ──────────────────────────────────
+  // ── Revision guard (total) ──────────────────────────────────
   // Discard out-of-order / duplicate envelopes TOTALLY, before any state
   // mutation. Transport is snapshots-only; a delayed or re-posted envelope
   // whose revision is not strictly newer than the last applied one (for the
@@ -466,7 +466,7 @@ function handleStateMessage(msg: HostToWebviewMessage, ctx: HostMessageContext) 
       clearDetailSubscriptionStore();
     }
   } else {
-    // Brief D length/identity guard: the optimistic overlay is reconciled
+    // Length/identity guard: the optimistic overlay is reconciled
     // ONLY by localId identity — a confirmed host message (id === localId)
     // replaces its placeholder. The overlay is never shrunk by transcript
     // length or dropped by a stale snapshot: the revision guard above already
@@ -498,7 +498,7 @@ function handleStateMessage(msg: HostToWebviewMessage, ctx: HostMessageContext) 
   // ledger (queried via `commandStatusRequest` after reconnect) is
   // authoritative for that.
   pendingCommandStore.confirmAcceptedBySnapshot(m.state.pendingComposerInputs);
-  // Phase 5 detail subscriptions are key-scoped webview state: refresh the
+  // Detail subscriptions are key-scoped webview state: refresh the
   // store context (current host instance, view generation, and the control
   // post function) after every snapshot so expansions always subscribe with
   // the exact generation the host expects. The renderer identity is part of
@@ -616,7 +616,7 @@ export function useHostSync(
   }, [postMessage]);
 
   const hostInstanceIdRef = useRef('');
-  // Brief D: last applied snapshot revision. Revisions are 1-based on the
+  // Last applied snapshot revision. Revisions are 1-based on the
   // host (globalRevision starts at 0, buildStateEnvelope does +1), so 0 means
   // "no snapshot applied yet" — the first envelope always passes the guard.
   const lastRevisionRef = useRef(0);
@@ -718,13 +718,13 @@ export function useHostSync(
     const handleMessage = (message: HostToWebviewMessage) => {
       if (compatibilityFailedRef.current) return;
       // Legacy lazy-detail correlation (superseded for NEW subscriptions by
-      // Phase 5's detail.subscribe protocol, but still served for existing
+      // the detail.subscribe protocol, but still served for existing
       // lazy refs).
       if (message.type === 'detailResult' && message.result) {
         receiveLazyDetailResult(message.result);
         return;
       }
-      // Phase 5 detail stream imperatives (detail.start/page/delta/rebase/
+      // Detail stream imperatives (detail.start/page/delta/rebase/
       // terminal/error) are routed to the key-scoped subscription store. They
       // carry the full HostDetailRoute; the store drops stale/cross-key
       // traffic and never lets it touch ViewState.

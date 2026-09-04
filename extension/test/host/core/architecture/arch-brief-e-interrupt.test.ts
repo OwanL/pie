@@ -1,5 +1,5 @@
 /**
- * Brief E — Edit / interrupt UX clunkiness.
+ * Interrupt / edit UX hardening.
  *
  * Interrupt responsiveness (Heuristic #3): on interrupt the runner calls
  * `abortInFlightSend(sessionPath)` (BEST-EFFORT pre-ack cancel of an in-flight
@@ -94,7 +94,7 @@ function findResult<K extends EffectResultEvent['kind']>(
 
 // ─── (a) Pre-ack interrupt: abortInFlightSend cancels the send → SendResult{ok:false},
 //        AND message.interrupt is dispatched. ────────────────────────────────────
-test('Brief E (a): interrupt aborts an in-flight pre-ack message.send AND enqueues message.interrupt', async () => {
+test('interrupt aborts an in-flight pre-ack message.send AND enqueues message.interrupt', async () => {
   const timers = new FakeTimerSink();
   const { deps, calls, events } = makeEffectRunnerDeps({
     timer: timers,
@@ -142,7 +142,7 @@ test('Brief E (a): interrupt aborts an in-flight pre-ack message.send AND enqueu
 //        (ClearSendTimer at the first MessageStarted). abortInFlightSend finds
 //        no in-flight send (returns false → no rollback); message.interrupt
 //        handles the streaming phase. ─────────────────────────────────────────
-test('Brief E (b): interrupt on a streaming (post-commit) turn does not roll back the send; message.interrupt dispatched', async () => {
+test('interrupt on a streaming (post-commit) turn does not roll back the send; message.interrupt dispatched', async () => {
   const timers = new FakeTimerSink();
   const { deps, calls, events } = makeEffectRunnerDeps({
     timer: timers,
@@ -189,7 +189,7 @@ test('Brief E (b): interrupt on a streaming (post-commit) turn does not roll bac
 //        STATE_CONTRACT "Execution Ordering" still holds (serialization, not
 //        deferral — the second send runs after the first settles in the
 //        per-session queue). ────────────────────────────────────────────────
-test('Brief E (c): a second send while a turn is in-flight is queued as a steering injection', async () => {
+test('a second send while a turn is in-flight is queued as a steering injection', async () => {
   const timers = new FakeTimerSink();
   let sendCount = 0;
   const { deps, events } = makeEffectRunnerDeps({

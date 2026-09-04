@@ -55,7 +55,7 @@ export function useComposerInput({
   /** Allow a blank submit to resume an interrupted turn without a user message. */
   allowEmptySend?: boolean;
   onSend: (text: string) => boolean | void;
-  /** Brief H: retry re-send. Mirrors `onSend` but the host disables pruning
+  /** Retry re-send. Mirrors `onSend` but the host disables pruning
    *  atomically before re-sending when `disablePruning` is set ("retry without
    *  pruning"). Invoked by `sendAsRetry` (registered into `sendRetryDraftRef`
    *  in AppBody so the NoticeBanner's Retry button can re-send the live draft). */
@@ -280,7 +280,7 @@ export function useComposerInput({
     resetComposer();
   }, [allowEmptySend, busy, sendBlocked, onSend, pendingComposerInputsLength, resetComposer, setHistory, clearCheckpointTimer, text]);
 
-  // Brief H: re-send the current draft as a `retrySend` (optionally disabling
+  // Re-send the current draft as a `retrySend` (optionally disabling
   // pruning first). Mirrors `sendCurrentText` (trim + submit-latch + clear +
   // undo checkpoint) but routes through `onRetrySend` so the host can disable
   // pruning atomically before the re-send. Registered into `sendRetryDraftRef`

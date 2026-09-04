@@ -122,7 +122,7 @@ export interface SessionServiceLike {
    *  backend (`systemPromptToggles.set`). Fire-and-forget: the backend re-emits
    *  `session.opened` to update host state, so no *Result event is expected. */
   setSystemPromptToggles(sessionPath: string, disabledEntries: readonly string[]): Promise<void>;
-  /** Phase 5: subscribe a renderer-owned detail key. The runner mints the
+  /** Subscribe a renderer-owned detail key. The runner mints the
    *  `subscriptionId`; the service records the exact owner and routes the
    *  coordinator's stream imperatives for it. Fire-and-forget: failures
    *  surface as `detail.error` imperatives, not *Result events. */
@@ -136,7 +136,7 @@ export interface SessionServiceLike {
     rendererId?: string;
     rendererGeneration?: number;
   }): void;
-  /** Phase 5: discard the owner for a detail key, tombstone its subscription,
+  /** Discard the owner for a detail key, tombstone its subscription,
    *  and notify the backend best-effort. */
   unsubscribeDetail(options: {
     viewGeneration: number;
@@ -146,7 +146,7 @@ export interface SessionServiceLike {
     rendererId?: string;
     rendererGeneration?: number;
   }): void;
-  /** Phase 5: refetch a page of the active baseline for a subscribed key. */
+  /** Refetch a page of the active baseline for a subscribed key. */
   fetchDetailPages(options: {
     viewGeneration: number;
     detailKey: string;
@@ -1135,7 +1135,7 @@ export class EffectRunner {
     });
   }
 
-  // ─── Phase 5 detail subscription effects ───────────────────────────────────
+  // ─── Detail subscription effects ───────────────────────────────────
   // Fire-and-forget: the session service owns the subscription lifecycle and
   // stream content crosses as imperatives, never as *Result events. The
   // runner mints the subscription ID here so the service never guesses one.

@@ -122,7 +122,7 @@ function sameAddress(left: LiveSubagentDetailAddress, right: LiveSubagentDetailA
 }
 
 /**
- * Host-owned Phase 5 detail subscription registry. It owns:
+ * Host-owned detail subscription registry. It owns:
  *
  * - exactly one active subscription record per `{viewGeneration, detailKey}`
  *   (the host instance is fixed per `hostInstanceId`, which every imperative

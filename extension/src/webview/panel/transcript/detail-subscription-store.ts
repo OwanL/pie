@@ -1,5 +1,5 @@
 /**
- * Phase 5 webview page-backed detail subscription store.
+ * Webview page-backed detail subscription store.
  *
  * The webview owns the demand side of the closed subagent detail protocol:
  *

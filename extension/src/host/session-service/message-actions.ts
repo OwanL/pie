@@ -268,7 +268,7 @@ export class SessionMessageActions {
     // needs its own in-flight Set or request-seq counter. The in-flight flag is
     // cleared by the matching *Result (or SessionScopeCleared on tab close).
     // The epoch/window/open-tabs staleness re-checks below stay host-side for
-    // now (Phase 3/4 will fold the reducer-state reads into the reducer).
+    // now; reducer-state reads are not folded back into the reducer here.
     const requestEpoch = this.state.getSessionDataEpoch(sessionPath);
     const requestWindow = {
       totalCount: transcriptWindow.totalCount,

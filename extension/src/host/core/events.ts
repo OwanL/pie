@@ -850,7 +850,7 @@ export interface PendingPathReplacedEvent {
  *  Reconciliation "Two failure windows for send"). The reducer reverts via
  *  `pending.promoted[corrId]`.
  *
- *  `corrId` is present when the dispatcher knows it (e.g. Brief B's send-timer,
+ *  `corrId` is present when the dispatcher knows it (e.g. the registry-backed send-timer,
  *  started in `runSendRpc` where the effect's `corrId` is known). It is absent
  *  when dispatched from the backend prepass-failure bridge — the backend mints
  *  `requestId` but never sees the host `corrId` — in which case the reducer

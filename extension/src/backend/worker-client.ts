@@ -49,7 +49,7 @@ export interface WorkerClientOptions {
   coordinatorGeneration: number;
   workerId: string;
   workerGeneration: number;
-  /** Compatibility spawn identity; defaults all Phase 4 path identities. */
+  /** Compatibility spawn identity; defaults all isolated-runtime path identities. */
   sessionPath: string;
   rootSessionPath?: string;
   leasePath?: string;
@@ -334,7 +334,7 @@ export class WorkerClient {
     return this.enqueue({ ...this.frameBase, ...body } as WorkerIpcFrameDraft);
   }
 
-  /** Correlate any Phase 4 request with its exact dedicated response kind. */
+  /** Correlate any worker request with its exact dedicated response kind. */
   requestFrame<K extends WorkerToCoordinatorResponseFrame['kind']>(
     body: CoordinatorToWorkerRequestBody,
     expectedKind: K,

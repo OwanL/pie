@@ -18,7 +18,7 @@ import type { SessionTabRunAction } from './session-tabs/run-state';
 
 export interface AppHandlers {
   handleSend: (text: string) => boolean;
-  /** Brief H: re-send the (restored) composer draft as a `retrySend` — mirrors
+  /** Re-send the (restored) composer draft as a `retrySend` — mirrors
    *  `handleSend` (optimistic message + draft-restore clear) but posts
    *  `retrySend` so the host can disable pruning atomically before re-sending
    *  (`disablePruning: true` → "retry without pruning"). The host's `onRetrySend`
@@ -80,7 +80,7 @@ export function useAppHandlers(
   addOptimisticMessage: (msg: { localId: string; text: string; sessionPath: string; queued: boolean }) => void,
   isBusy: boolean,
   setContextMenu: (state: ContextMenuState | null) => void,
-  /** Brief E: set true synchronously on interrupt so the webview reflects
+  /** Set true synchronously on interrupt so the webview reflects
    *  "stopping…" within one frame (before the host round-trip clears
    *  `busy`). Cleared by `AppBody` when `busy` flips false (abort confirmed)
    *  or the active session changes. Allowlisted webview-local protocol-sync
@@ -114,7 +114,7 @@ export function useAppHandlers(
     return true;
   }, [postMessage, activeSessionPathRef, setDraftRestore, addOptimisticMessage, isBusy, commandsAvailable]);
 
-  // Brief H: retry re-sends the restored draft. Mirrors `handleSend` (optimistic
+  // Retry re-sends the restored draft. Mirrors `handleSend` (optimistic
   // message + draft-restore clear) but posts `retrySend` so the host can disable
   // pruning atomically before the re-send when `disablePruning` is set ("retry
   // without pruning"). The text comes from the composer's live draft (registered
@@ -141,7 +141,7 @@ export function useAppHandlers(
     // Optimistic one-frame "stopping…" feedback: the host clears `busy` only
     // once the abort completes (a round-trip), so without this local flag the
     // Stop button + typing indicator would keep animating until then. The host
-    // ALSO calls `abortInFlightSend` for a pre-ack send (Brief E) — this flag
+    // ALSO calls `abortInFlightSend` for a pre-ack send — this flag
     // is the visual mirror of that. `AppBody` clears it when `busy` flips false.
     setInterrupting(true);
     return true;

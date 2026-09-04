@@ -264,7 +264,7 @@ async function runWithModelRetry(args: RunWithModelRetryArgs): Promise<SingleRes
 			&& isModelFailure(result, resolved.modelOverride, !!args.selectionCtx.bucketAssignments);
 		if (!failure || attempt >= MAX_MODEL_RETRIES) break;
 
-		// REM-03: provider-aware failover excludes every configured model belonging
+		// Provider-aware failover excludes every configured model belonging
 		// to the failed provider so fallback cannot retry that provider. Prefer the
 		// provider stamped on the result (the actual runtime provider) over an
 		// ambiguous model-id-to-provider registry lookup. If the result provider is
@@ -277,7 +277,7 @@ async function runWithModelRetry(args: RunWithModelRetryArgs): Promise<SingleRes
 		excludeModels.add(resolved.modelOverride);
 		lastFailedModel = resolved.modelOverride;
 
-		// REM-03: use a structured Retry-After hint when present, otherwise bounded
+		// Use a structured Retry-After hint when present, otherwise bounded
 		// exponential backoff. The wait is immediately abortable.
 		const retryAfter = result.retryAfterMs !== undefined ? clampRetryAfter(result.retryAfterMs, policy) : undefined;
 		const baseBackoff = computeBackoffMs(retryCount, policy);
@@ -322,7 +322,7 @@ async function runWithModelRetry(args: RunWithModelRetryArgs): Promise<SingleRes
 		result.failedModel = lastFailedModel;
 		result.retryCount = retryCount;
 	}
-	// REM-03: the returned result must be billable for every dispatched attempt,
+	// The returned result must be billable for every dispatched attempt,
 	// including failed retries that were discarded before the final successful one.
 	return { ...result, usage: cumulativeUsage, attemptRecords, providerInvocations };
 }

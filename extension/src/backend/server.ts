@@ -1286,7 +1286,7 @@ export class BackendServer {
     throw new BackendError('SESSION_CHANGED_DURING_READ', `The session changed repeatedly while detail was being read: ${sessionPath}`);
   }
 
-  // ─── Phase 5 detail routing: live worker vs coordinator durable authority ──
+  // ─── Detail routing: live worker vs coordinator durable authority ──
 
   /** Route `detail.subscribe`. A hot session's live source wins (the worker's
    *  canonical store is authoritative while the subagent runs); a terminal or
@@ -1605,7 +1605,7 @@ export class BackendServer {
         await this.emitSessionListChanged();
       }
 
-      // Phase 6 monotonic sync: auth fingerprint refresh bumps/broadcasts (or
+      // Monotonic worker sync: auth fingerprint refresh bumps/broadcasts (or
       // retires unacknowledging workers) and a moved models.json re-broadcasts
       // the configured catalog authority. Both are best-effort poll extensions;
       // the next poll retries a failed broadcast.
@@ -2230,7 +2230,7 @@ export class BackendServer {
             `Session transition is already in progress for ${sessionPath}.`,
           );
         }
-        // Phase 5 demand-driven subagent detail. These are router/store-level
+        // Demand-driven subagent detail. These are router/store-level
         // operations, not worker runtime commands: subscribe/unsubscribe/fetch
         // settle as correlated control responses while stream content crosses
         // only through the six `detail.stream` events. Hot live sources are

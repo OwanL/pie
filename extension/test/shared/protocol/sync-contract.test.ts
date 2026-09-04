@@ -568,7 +568,7 @@ test('HostToWebviewMessage.sendRejected carries the text draft payload and optio
   if (msg.type === 'sendRejected') {
     assert.equal(msg.sessionPath, '/workspace/a.ts');
     assert.equal(msg.text, 'hello');
-    // Brief C: inputs is optional — absent for a text-only rejection.
+    // inputs is optional — absent for a text-only rejection.
     assert.equal(msg.inputs, undefined);
   }
 

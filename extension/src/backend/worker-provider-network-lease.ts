@@ -55,7 +55,7 @@ function abortError(signal: AbortSignal): Error {
 }
 
 /**
- * Installs the Phase 4 conservative cross-worker provider fence at the actual
+ * Installs the conservative cross-worker provider fence at the actual
  * network boundary. Install this before ProviderGate so retries, compaction,
  * tools, and nested agents all acquire independently immediately before the
  * underlying fetch. A permit is retained through response-body settlement.

@@ -184,7 +184,7 @@ export function handleBackendReadyWatchdogFired(
     draft.settings.noticeSessionPath = null;
   });
 
-  // Brief H: restore pruning for any dropped "retry without pruning" sends. The
+  // Restore pruning for any dropped "retry without pruning" sends. The
   //  retry disabled pruning (mode:'off') before dispatching; if the backend
   //  never became ready the send was dropped without ever reaching the in-flight
   //  restore path (clearInFlightSend / onSendTimerFire), so pruning would be

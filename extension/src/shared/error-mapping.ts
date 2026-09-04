@@ -1,5 +1,5 @@
 /**
- * User-facing error mapper (Brief H).
+ * User-facing error mapper.
  *
  * Maps internal RPC/backend error strings to **plain-language** notice
  * messages + a failure `kind` that the webview uses to render recovery action
@@ -8,17 +8,17 @@
  * without violating `STATE_CONTRACT.md` § Reducer Purity.
  *
  * Hard contract: **no internal `req-NN` id ever reaches the user.** Every
- * error string produced by Brief B's `RequestTracker` / `BackendClient`
+ * error string produced by `RequestTracker` / `BackendClient`
  * carries a `req-NN` correlation id; this mapper strips it and names the
  * problem in plain language. The raw error is still logged host-side (via the
  * `Log` effect / `console.warn` in `handleLine`) so diagnostics are not lost.
  *
- * The classification is a contract with Brief B, which produces these known
- * error strings:
+ * The classification is a contract with the error producers, which emit these
+ * known error strings:
  *  - `RequestTracker` timeout: `"Timed out waiting for response to req-NN"`.
  *  - `RequestTracker` cancel:  `"Request req-NN was cancelled."` (or with a
- *    reason) — produced by `cancelledError` / the abort path (Brief E
- *    interrupt cancels an in-flight send).
+ *    reason) — produced by `cancelledError` / the abort path (an interrupt
+ *    cancels an in-flight send).
  *  - `BackendClient` dropped line: `"Backend sent an unparseable response for
  *    req-NN: <reason> :: <snippet> (stderr tail: …)"`.
  *  - `BackendClient` exit rejection: `"Backend exited unexpectedly with code
@@ -31,13 +31,14 @@
  *
  * Recovery ACTIONS are webview-side: the host surfaces the failure `kind`;
  * the webview maps `kind → action buttons` via {@link noticeActionsFor} and
- * `noticeActionLabel`. See the UX-reliability remediation (Brief H, §10 of the
- * since-removed plan; code is authoritative).
+ * `noticeActionLabel`. This mapping is authoritative here; keep it in sync
+ * with the notice projection contract.
  */
 
 /** User-facing failure category. Drives the recovery action buttons the
  *  webview renders. `edit-failed` carries no buttons (re-editing is a separate
- *  affordance Brief E owns; the message names the next action in prose). */
+ *  affordance owned by the inline editor; the message names the next action in
+ *  prose). */
 export type NoticeKind =
   | 'send-timeout'
   | 'prepass-timeout'
@@ -68,7 +69,7 @@ export interface MappedNotice {
  *  ops get a prose action (re-editing is a separate affordance). */
 export type OpKind = 'send' | 'edit';
 
-// ─── Internal classification patterns (contract with Brief B) ────────────────
+// ─── Internal classification patterns (contract with the error producers) ────────────────
 
 /** `req-NN` correlation id, anywhere in a string. Used to STRIP ids so none
  *  leaks to the user. */
@@ -77,7 +78,7 @@ const REQ_ID_PATTERN = /req-\d+/g;
 /** `RequestTracker` pre-ack timeout: `"Timed out waiting for response to req-NN"`. */
 const REQUEST_TIMEOUT_PATTERN = /^Timed out waiting for response to req-\d+$/;
 
-/** `RequestTracker` cancel (Brief E abort): `"Request req-NN was cancelled."` (+ optional reason). */
+/** `RequestTracker` user-initiated cancel: `"Request req-NN was cancelled."` (+ optional reason). */
 const CANCELLED_PATTERN = /^Request req-\d+ was cancelled/;
 
 /** `BackendClient` dropped line: `"Backend sent an unparseable response for req-NN: …"`. */
@@ -93,8 +94,8 @@ const BACKEND_EXIT_PATTERN = /^Backend (exited unexpectedly|stopped|is not runni
  *  `12.5s`) — the send-timer budget derives from `prepassTimeoutSec` +
  *  first-token headroom and may be fractional, so the capture group accepts an
  *  optional decimal. Without it a decimal budget (e.g. `12.5s`) would fail to
- *  match and the error would misclassify as a generic `prepass-failed` (Brief H
- *  follow-up). This is a GENUINE pruning/prepass timeout (pruning had not yet
+ *  match and the error would misclassify as a generic `prepass-failed`. This
+ *  is a GENUINE pruning/prepass timeout (pruning had not yet
  *  completed when the budget elapsed). */
 const PREPASS_TIMEOUT_PATTERN = /^Timed out waiting for the turn to start streaming \((\d+(?:\.\d+)?)s\)$/;
 
@@ -131,7 +132,7 @@ export function stripReqIds(text: string): string {
   return text.replace(REQ_ID_PATTERN, 'request');
 }
 
-/** True if `error` is a user-initiated cancel (Brief E abort). The reducer
+/** True if `error` is a user-initiated cancel. The reducer
  *  SUPPRESSES the notice for a cancel — the user initiated it, so an error
  *  banner would be noise. The rollback (optimistic message removal + composer
  *  input restore) still happens; only the error surfacing is skipped. */
@@ -334,7 +335,7 @@ export function mapPreflightError(
 
 /** The recovery action buttons the webview should render for a notice kind.
  *  `edit-failed` carries none — the message names the next action in prose
- *  (re-editing is a separate affordance Brief E owns). Pure; the webview
+ *  (re-editing is a separate affordance owned by the inline editor). Pure; the webview
  *  imports this so the kind → actions mapping has one source of truth. */
 export function noticeActionsFor(kind: NoticeKind): NoticeAction[] {
   switch (kind) {

@@ -67,14 +67,14 @@ export interface SubagentUsageSummary {
 export interface SubagentSingleResult {
   agent: string;
   task: string;
-  /** Producer-issued logical child identity (Phase 5 detail addressing). */
+  /** Producer-issued logical child identity (page-backed detail addressing). */
   childId?: string;
   /** Complete root-to-target producer lineage. Legacy durable results without
    *  this field may render, but are explicitly not live-addressable. */
   lineage?: SubagentChildIdentity[];
   /** True when the producer stamped a stable addressable identity. */
   liveAddressable?: boolean;
-  /** Immutable producer-owned address for the Phase 5 page-backed detail
+  /** Immutable producer-owned address for the page-backed detail
    *  subscription. Absent for legacy/durable refs that cannot own live
    *  deltas; those keep the generic one-shot detail path. */
   detailAddress?: LiveSubagentDetailAddress;

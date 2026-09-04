@@ -6,7 +6,7 @@ export interface ComposerActionsProps {
   busy: boolean;
   /** Capability-projected eligibility for the Stop command. */
   canInterrupt?: boolean;
-  /** Brief E: an interrupt was just clicked and the host hasn't yet cleared
+  /** An interrupt was just clicked and the host hasn't yet cleared
    *  `busy`. While true the Stop affordance renders as a disabled "Stopping…"
    *  button so the click reflects within one frame (the host clears `busy`
    *  only after the abort round-trip completes). */

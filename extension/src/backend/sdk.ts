@@ -397,7 +397,7 @@ export interface SdkSystemPromptModule {
 
 export interface SdkRuntime {
   session: SdkSession;
-  /** Present only on the Phase 4 patched pinned SDK runtime. */
+  /** Present only on the patched pinned SDK runtime. */
   ownershipAdapter?: SdkSessionOwnershipAdapter;
   services: {
     modelRegistry: SdkModelRegistry;

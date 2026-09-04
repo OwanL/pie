@@ -9,7 +9,7 @@ export function useNoticeAction(
   postMessage: (msg: WebviewToHostMessage) => void,
   sendRetryDraftRef: { current: ((disablePruning?: boolean) => void) | null },
 ) {
-  // Brief H: map a NoticeBanner recovery action to the matching
+  // Map a NoticeBanner recovery action to the matching
   //  WebviewToHostMessage. Retry / Retry-without-pruning re-send the live
   //  composer draft (via `sendRetryDraftRef`) as a `retrySend` — the host
   //  disables pruning atomically before the re-send for the latter. Retry +

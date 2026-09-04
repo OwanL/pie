@@ -183,7 +183,7 @@ export interface SessionContext {
    * re-enabling it restores exactly what was removed (including tools the
    * adapter re-registered while the pref was off). */
   mcpToolsWereActive?: string[];
-  /** Bug 6 watchdog: armed on `agent_end willRetry:true`, re-armed on
+  /** Retry watchdog: armed on `agent_end willRetry:true`, re-armed on
    *  `auto_retry_start` (delayMs + grace), cleared on `auto_retry_end` /
    *  `agent_end willRetry:false`. If it elapses, emits `operational-error` +
    *  `retry.stuck` so a retry that never completes (provider dies mid-backoff,
@@ -194,7 +194,7 @@ export interface SessionContext {
    *  the context so `auto_retry_end` / `agent_end willRetry:false` can clear it
    *  without re-implementing the timer lookup. */
   willRetryWatchdogClear?: () => void;
-  /** Handoff §F: per-session FIFO queue of host-side optimistic `localId`s for
+  /** Per-session FIFO queue of host-side optimistic `localId`s for
    *  steering/followUp messages that have been queued but not yet delivered.
    *  Pushed on successful `steer()`/`followUp()` in `handleMessageSend`; shifted
    *  on each user-role `message_start` so the backend can correlate delivery

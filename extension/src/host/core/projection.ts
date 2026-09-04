@@ -210,7 +210,7 @@ export function derivePruningResult(transcript: ChatMessage[]): PruningResult | 
   return null;
 }
 
-// ─── Prepass status derivation (Brief F) ──────────────────────────────────────
+// ─── Prepass status derivation ──────────────────────────────────────
 
 /** Find the pre-commit op for a session in one pending table, if any.
  *  At most one non-queued op can execute per session because session mutations
@@ -277,7 +277,7 @@ function derivePrepassStatus(state: ArchState, activePath: string | null): Prepa
 // editingMessageIdBy) rather than the whole `transcript` slice, so a
 // *background* session streaming while another is viewed does NOT bust the
 // cache for the unchanged active view. That is what keeps unchanged-delta
-// posts O(1) amortized under Brief D's higher post frequency.
+// posts O(1) amortized under the delivery controller's higher post frequency.
 //
 // Purity: the cache is transparent memoization — selectViewState remains a
 // pure function of its input (deterministic; same input ⇒ same output
@@ -298,7 +298,7 @@ interface ProjectionSignature {
   activeEditingMessageId: string | null;
   activeEditingDraft: import('../../shared/protocol').InlineEditDraft | null;
   activeLiveRevision: number;
-  // ── Brief F ───────────────────────────────────────────────────────────────
+  // ── Prepass state ─────────────────────────────────────────────────────────
   // `prepassPhase` / `prepassStartedAt` / `prepassLatencyMs` are derived from
   // the active session's pending/promoted op (`pending.ops` / `promoted`,
   // startedAt) and its prepass phase entry. The
@@ -508,7 +508,7 @@ function projectViewState(state: ArchState): ViewState {
   // ── Pruning projection ──
   const pruningResult = selectActivePruningResult(state);
   const pruningCatalog = selectActivePruningCatalog(activePath, sessions.analyticsFactorsBySession);
-  // ── Prepass status (Brief F) — live, cancelable chip ──
+  // ── Prepass status — live, cancelable chip ──
   const prepass = derivePrepassStatus(state, activePath);
   const noticeVisible = settings.noticeSessionPath === null || settings.noticeSessionPath === activePath;
 

@@ -258,7 +258,7 @@ describe('warm-bash auto-prune: unsupported broad root walkers fail fast', () =>
   });
 });
 
-describe('warm-bash auto-prune: FIX #3 GNU-grep gate', () => {
+describe('warm-bash auto-prune: GNU-grep gate', () => {
   let rewrite: Rewrite;
   test.before(async () => { rewrite = await loadRewrite(); });
 
@@ -362,7 +362,7 @@ describe('warm-bash auto-prune: find rule', () => {
   });
 });
 
-describe('warm-bash auto-prune: FIX #2 prune-dir references pass through', () => {
+describe('warm-bash auto-prune: prune-dir references pass through', () => {
   let rewrite: Rewrite;
   test.before(async () => { rewrite = await loadRewrite(); });
 
@@ -407,7 +407,7 @@ describe('warm-bash auto-prune: FIX #2 prune-dir references pass through', () =>
   });
 });
 
-describe('warm-bash auto-prune: FIX #1 byte-preservation + keyword/comment guard', () => {
+describe('warm-bash auto-prune: byte-preservation + keyword/comment guard', () => {
   let rewrite: Rewrite;
   test.before(async () => { rewrite = await loadRewrite(); });
 
@@ -463,7 +463,7 @@ describe('warm-bash auto-prune: FIX #1 byte-preservation + keyword/comment guard
   });
 });
 
-describe('warm-bash auto-prune: FIX #5 heredoc short-circuits the whole rewrite', () => {
+describe('warm-bash auto-prune: heredoc short-circuits the whole rewrite', () => {
   let rewrite: Rewrite;
   test.before(async () => { rewrite = await loadRewrite(); });
 

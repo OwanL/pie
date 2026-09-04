@@ -2,7 +2,7 @@
  * `RequestTracker` — promise + timeout bookkeeping for in-flight
  * JSON-RPC requests, keyed by request id (`req-NN`).
  *
- * Brief B (phase-scoped timers): the tracker timeout owns the **pre-ack**
+ * Phase-scoped timers: the tracker timeout owns the **pre-ack**
  * window (the queue-time RPC itself, e.g. `message.send` sized ~10s). Its
  * rejection is the pre-ack failure window (→ `SendResult{ok:false}` /
  * `EditResult{ok:false}` in the effect-runner). The **post-ack, pre-commit**
@@ -11,7 +11,7 @@
  * Reconciliation "Timer ownership".
  *
  * Cancellation: `create` accepts an `AbortSignal`. Aborting rejects the request
- * with a cancel error. Brief E (round 3) uses this to cancel an in-flight
+ * with a cancel error. Interrupt uses this to cancel an in-flight
  * `message.send` on interrupt; session close / backend stop reject all via
  * `rejectAll`. The signal listener is detached on every settle path
  * (resolve / reject / rejectAll / timeout) so no listener leaks.
@@ -31,7 +31,7 @@ export interface RequestOptions {
 }
 
 /** A cancel error produced by the tracker's abort path. Carries a
- *  stable `name`/`code` so Brief E/H can distinguish a cancel from a backend
+ *  stable `name`/`code` so the error mapper can distinguish a cancel from a backend
  *  failure when mapping to a user-facing message (cross-realm safe via the
  *  name check, not just `instanceof`). */
 export class RequestTimeoutError extends Error {
@@ -51,7 +51,7 @@ export class CancelError extends Error {
 }
 
 /** Build a descriptive cancel error for a request id. Exported so callers
- *  (Brief E) can recognise / construct cancel errors with a stable shape. */
+ *  can recognise / construct cancel errors with a stable shape. */
 export function cancelledError(id: string): CancelError {
   return new CancelError(`Request ${id} was cancelled.`);
 }

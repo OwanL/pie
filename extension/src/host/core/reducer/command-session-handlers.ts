@@ -738,7 +738,7 @@ export function handleDuplicateSession(state: ArchState, cmd: Extract<Command, {
 }
 
 export function handleMoveSessionTab(state: ArchState, cmd: Extract<Command, { kind: 'MoveSessionTab' }>): ReducerResult {
-  // Phase 2 send/edit-style cutover: the reducer owns the reorder. The
+  // The reducer owns the reorder. The
   // pure shared helper computes the new openTabPaths, state is updated, and
   // a PersistTabs effect is emitted so the runner writes globalState. The
   // legacy MoveSessionTab Effect / service.moveSessionTab / ReorderTabs

@@ -3,7 +3,7 @@ import type { Command } from '../commands.js';
 import type { ReducerResult } from './helpers.js';
 
 /**
- * Phase 5 detail subscription commands — pass-through reducers. The webview
+ * Detail subscription commands — pass-through reducers. The webview
  * owns `detailKey` and its heavy key store; the host session service owns the
  * subscription lifecycle. These commands store nothing in `ArchState`: pages,
  * deltas, and stream state never cross the state boundary. Each handler only

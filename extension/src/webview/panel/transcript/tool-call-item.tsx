@@ -621,7 +621,7 @@ function SubagentSingleBlock({
   // modifier still marks the free-flowing body.
   const isNested = subagentDepth > 1;
 
-  // Phase 5 page-backed detail: a producer-stamped child is live-addressable
+  // Page-backed detail: a producer-stamped child is live-addressable
   // and subscribes to its complete transcript on expansion (never while
   // collapsed). Depth-1 children carry the address in their live preview;
   // nested children combine the enclosing subscription's immutable address

@@ -5,7 +5,9 @@ This folder contains active design contracts, implementation plans, and operatio
 ## Active design contracts (read first)
 
 - [ARCHITECTURE.md](ARCHITECTURE.md) — **primary architecture reference**. System overview, pattern explanation, data flow scenarios, extension-point recipes, and invariants. Start here.
-- [STATE_CONTRACT.md](STATE_CONTRACT.md) — authoritative rules for host ↔ webview state sync. Any change here requires matching tests in `extension/test/` (see `sync-contract.test.ts`).
+- [STATE_CONTRACT.md](STATE_CONTRACT.md) — authoritative normative rules for host ↔ webview state sync, session lifecycle, and accounting. Any change here requires matching tests in `extension/test/` (see `sync-contract.test.ts`).
+- [STATE_CONTRACT_IMPLEMENTATION.md](STATE_CONTRACT_IMPLEMENTATION.md) — non-normative mechanics behind the state contract: transport/protocol internals, byte budgets, thresholds, and file mappings. Not pinned by tests.
+- [STATE_CONTRACT_HISTORY.md](STATE_CONTRACT_HISTORY.md) — completed remediation chronology (retired Brief/Phase/REM/Bug/FIX labels) and documentation-structure decisions.
 - [internal/ARCH-OVERVIEW.md](internal/ARCH-OVERVIEW.md) — concise developer-onboarding file map. Spine file locations, glossary table, and "where to make changes" quick-reference.
 
 ## Active plans (in progress)
@@ -38,4 +40,4 @@ This folder contains active design contracts, implementation plans, and operatio
 
 - A doc named `*_PLAN.md` under `docs/` describes work that is **either in progress or not yet started**. Remove it when the work completes and update this index.
 - Plans under `docs/internal/` are status reports or implementation notes, not user-facing contracts.
-- The only file in `docs/` that downstream code is allowed to depend on (via tests pinning invariants) is `STATE_CONTRACT.md`.
+- The only files downstream code may depend on (via tests pinning invariants) are `STATE_CONTRACT.md` (normative) and the runtime evidence it names. `STATE_CONTRACT_IMPLEMENTATION.md` and `STATE_CONTRACT_HISTORY.md` are supporting references and must never be pinned.

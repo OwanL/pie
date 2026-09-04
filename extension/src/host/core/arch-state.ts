@@ -221,7 +221,7 @@ export interface SettingsState {
   backendReady: boolean;
   /** User-facing notice message (short summary), or null. */
   notice: string | null;
-  /** Failure category for the current notice (Brief H), or null when the
+  /** Failure category for the current notice, or null when the
    *  notice is a plain info/warning string (or absent). Set alongside a
    *  plain-language `notice` at the send/edit/prepass failure sites; the
    *  projection surfaces it as `ViewState.noticeKind` so the webview can
@@ -335,8 +335,8 @@ export interface PendingOp {
   /** Composer inputs captured at Send command time (from
    *  `pendingComposerInputsBySession[sessionPath]`), carried onto the
    *  promoted snapshot so a post-ack `PreflightFailed` can restore them.
-   *  Populated for send ops by Brief A; the webview `sendRejected.inputs`
-   *  restore is wired by Brief C. */
+   *  Populated for send ops so the webview `sendRejected.inputs`
+   *  restore can re-stage the draft. */
   inputs?: ComposerInput[];
   /** Backend-assigned request ID, stamped when a send is promoted
    *  (`SendResult{ok:true}`) so a post-ack `PreflightFailed` (which carries
@@ -348,7 +348,7 @@ export interface PendingOp {
    *  Command's `timestamp` at command time — PURE (not a reducer wall-clock
    *  read: STATE_CONTRACT § Reducer Purity). Carried onto the promoted op (via the
    *  `SendResult{ok:true}` spread) so the projection can read it while the
-   *  prepass runs. Brief F's `prepassStartedAt` ViewState field is the active
+   *  prepass runs. The projected `prepassStartedAt` ViewState field is the active
    *  session's promoted op `startedAt` (null when no promoted op exists). */
   startedAt: number;
   /** Steering (FollowUp): true when this send was issued while a turn was
@@ -370,7 +370,7 @@ export interface PendingOp {
 }
 
 /** The pruning prepass phase for a session, surfaced as the live/cancelable
- *  prepass status chip (Brief F). Driven by the existing send lifecycle
+ *  prepass status chip. Driven by the existing send lifecycle
  *  signals — `pending.promoted` (running), the pruning-result `CustomMessage`
  *  (succeeded), `PreflightFailed` (failed), and the commit-point
  *  `MessageStarted` (idle) — NOT a redefined signal source.
@@ -474,7 +474,7 @@ export interface PendingSendQueueEntry {
   userParts?: UserContentPart[];
   previousSummary: SessionSummary | null;
   timestamp: number;
-  /** Brief H: prior pruning mode to restore after a "retry without pruning" send
+  /** Prior pruning mode to restore after a "retry without pruning" send
    *  resolves. Threads through the queue so a retry queued while a pending tab
    *  resolves (or the backend is not ready) still restores pruning when the
    *  re-dispatched send commits/fails. */
@@ -510,7 +510,7 @@ export interface BackendReadyQueueEntry {
   userParts?: UserContentPart[];
   previousSummary: SessionSummary | null;
   timestamp: number;
-  /** Brief H: prior pruning mode to restore after a "retry without pruning"
+  /** Prior pruning mode to restore after a "retry without pruning"
    *  send resolves — threaded through the backend-ready queue for the same
    *  reason as `PendingSendQueueEntry.priorPruningMode`. */
   priorPruningMode?: PruningMode;
@@ -557,7 +557,7 @@ export interface PendingState {
   sendQueueBySession: Record<string, PendingSendQueueEntry[]>;
   /** Sends queued while the backend was not yet ready, keyed by session path. */
   backendReadyQueueBySession: Record<string, BackendReadyQueueEntry[]>;
-  /** Per-session pruning prepass phase for the live status chip (Brief F).
+  /** Per-session pruning prepass phase for the live status chip.
    *  Absent entry = `idle`. See {@link PrepassPhaseState}. */
   prepassBySession: Record<string, PrepassPhaseState>;
 }

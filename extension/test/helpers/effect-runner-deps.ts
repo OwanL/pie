@@ -96,7 +96,7 @@ export function makeEffectRunnerDeps(opts: MakeEffectRunnerDepsOpts = {}): MakeE
       calls.push({ kind: 'request', method, params });
       const sig = options?.signal;
       // Signal-aware: a hanging requestImpl rejects when the signal aborts, so
-      // the effect-runner's abortInFlightSend (Brief E) can cancel an in-flight
+      // the effect-runner's abortInFlightSend can cancel an in-flight
       // message.send in tests. Without a signal, delegates to requestImpl (or
       // resolves {} by default — the original behavior). Options are NOT
       // recorded on the Call (existing assertions deepEqual {method,params}).

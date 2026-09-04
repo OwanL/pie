@@ -477,7 +477,7 @@ interface ColdSessionCatalogPublicationStamp {
 
 /** Narrow, runtime-free adapter over the SDK SessionManager and Pie's existing
  * browse/catalog/transcript projections. It intentionally has no route or
- * AgentSession ownership; Phase 3 callers can adopt it incrementally. */
+ * AgentSession ownership. */
 export class ColdSessionStore {
   readonly placement = COLD_SESSION_STORE_PLACEMENT;
   readonly leases: ColdSessionLeaseAuthority;
@@ -628,7 +628,7 @@ export class ColdSessionStore {
   }
 
   /** Resolve one live detail address against the durable JSONL under the cold
-   *  ownership lease. This is the paged-durable authority behind Phase 5
+   *  ownership lease. This is the paged-durable authority behind
    *  `detail.subscribe`: the terminal tool result (already written before the
    *  terminal handoff) is addressed by its stable tool-call id and producer
    *  lineage, and the caller segments it into exact pages. The generic bounded

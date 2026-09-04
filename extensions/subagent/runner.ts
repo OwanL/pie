@@ -1532,7 +1532,7 @@ export async function runSingleAgent(
 		// transcript/toolResult is written. This is the structural guarantee
 		// that a stuck worker can't silently dangle the parent session.
 		//
-		// REM-02: if session creation lost the abort/timeout race, retain
+		// If session creation lost the abort/timeout race, retain
 		// ownership of the underlying promise. A late resolution may still
 		// produce a session; fence it from setup/prompt, dispose it exactly
 		// once, reclaim attempt-owned loader listeners, and never retain a

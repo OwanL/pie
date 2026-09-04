@@ -8,7 +8,7 @@ import { stripReqIds } from '../../../shared/error-mapping.js';
 
 export function handleCustomMessage(state: ArchState, event: Extract<Event, { kind: 'CustomMessage' }>): ReducerResult {
   const existing = state.transcript.bySession[event.sessionPath] ?? [];
-  // Brief F: a pruning-result custom message arrives when the prepass
+  // A pruning-result custom message arrives when the prepass
   // completes (the skill-pruner `before_agent_start` extension emits it).
   // While the session's prepass phase is 'running' (a promoted op exists,
   // post-ack/pre-commit), this is the success signal — transition to
@@ -138,12 +138,12 @@ export function handleError(state: ArchState, event: Extract<Event, { kind: 'Err
       ...state,
       settings: {
         ...state.settings,
-        // Brief H: strip any internal req-NN before surfacing (transcript-paging
+        // Strip any internal req-NN before surfacing (transcript-paging
         // RPC timeouts carry req-NN). The full host-side error is retained as
         // `noticeRaw`; projection redacts credentials before the webview can
         // reveal it via More.
         notice: stripReqIds(event.error),
-        // Brief H: classify the generic backend error so the webview renders a
+        // Classify the generic backend error so the webview renders a
         // fitting recovery action (`operational-error` → show-logs) instead of
         // leaking the prior notice's kind. Reset to null when there is no error
         // text (a clear), matching the clear pattern used elsewhere (NoticeShown,

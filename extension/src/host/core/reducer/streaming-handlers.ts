@@ -41,7 +41,7 @@ export function handleMessageStarted(state: ArchState, event: Extract<Event, { k
   // Commit point: a promoted (early-acked) send has started streaming. The
   // reducer drops its rollback snapshot (below in produce) AND emits a
   // ClearSendTimer effect so EffectRunner cancels the post-ack send-timer for
-  // this corrId (Brief B). Both the pre-ack RequestTracker timeout and the
+  // this corrId. Both the pre-ack RequestTracker timeout and the
   // send-timer are short-circuited by this commit point, so neither can fire
   // for this send afterward. MessageStarted carries requestId and precedes any
   // Delta, so it is the precise commit point. (Aliases — continuations of an
@@ -86,7 +86,7 @@ export function handleMessageStarted(state: ArchState, event: Extract<Event, { k
       if (turnOwner) {
         if (turnOwner.source === 'promoted') delete draft.pending.promoted[turnOwner.corrId];
         else delete draft.pending.ops[turnOwner.corrId];
-        // Brief F: commit point — the turn started streaming, so the prepass
+        // Commit point — the turn started streaming, so the prepass
         // window is over. Drop the live chip (→ idle). Aligned with the
         // optimistic-operation drop above so phase + startedAt clear together;
         // a later in-turn failure is surfaced by the error mapper, never a

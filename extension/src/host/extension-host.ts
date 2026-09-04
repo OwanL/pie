@@ -135,7 +135,7 @@ export class PieExtension implements vscode.Disposable {
 
   private readonly messageRouter: MessageRouter;
 
-  // Phase 3: CQRS architecture spine
+  // CQRS architecture spine
   private archState: ArchState = initialArchState;
   private readonly effectRunner: EffectRunner;
   private readonly fileDiffService: FileDiffService;
@@ -266,7 +266,7 @@ export class PieExtension implements vscode.Disposable {
 
     this.effectRunner = new EffectRunner({
       backend: this.backend,
-      // Prepass-aware send-timer budget (Brief B follow-up): when the user sets
+      // Prepass-aware send-timer budget: when the user sets
       // an explicit `prepassTimeoutSec`, budget for it + first-token headroom so
       // a long-but-legitimate prepass never trips a spurious `PreflightFailed`
       // (which would roll back the user message — promoted still present — and
@@ -521,8 +521,8 @@ export class PieExtension implements vscode.Disposable {
 
 
   /**
-   * Phase 3: dispatch an event through the arch reducer and execute resulting effects.
-   * This is the single point where the new CQRS spine integrates with the extension.
+   * Dispatch an event through the arch reducer and execute resulting effects.
+   * This is the single point where the CQRS spine integrates with the extension.
    */
   private dispatchArchEvent(event: Event): void {
     const traceEnabled = isLivePipelineTraceEnabled();

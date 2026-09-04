@@ -68,8 +68,8 @@ function compactSubagentChild(value: unknown): Record<string, unknown> | undefin
   copy('lineage', Array.isArray(value.lineage) ? value.lineage.slice(0, 64).map((item) => compactUnknownPreview(item, 1024)) : undefined);
   copy('liveAddressable', value.liveAddressable === true);
   // The immutable live detail address (root identity + lineage) is small and
-  // must survive the compact preview so an expanded card can open the Phase 5
-  // page-backed subscription without a backend round-trip.
+  // must survive the compact preview so an expanded card can open the page-backed
+  // detail subscription without a backend round-trip.
   copy('detailAddress', value.detailAddress);
   copy('parentUserContextMode');
   copy('model', boundedStart(value.model, 256));

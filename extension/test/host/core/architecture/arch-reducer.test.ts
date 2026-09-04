@@ -2383,7 +2383,7 @@ test('reducer: post-ack PreflightFailed rolls back an EDIT via promoted (no send
   // rollback snapshot lives in `promoted`. PreflightFailed rolls it back — but,
   // matching the legacy pre-ack EditResult{ok:false} path, edits do NOT fire
   // sendRejected (the inline editor is already closed by the Edit command;
-  // restoring the edited text to the composer is a UX change Brief E owns).
+  // restoring the edited text to the composer is owned by the inline editor).
   // Pre-Brief-A-fix this path silently lost the rollback (optimistic edit
   // message stuck, running stuck on, no error).
   const state: ArchState = {

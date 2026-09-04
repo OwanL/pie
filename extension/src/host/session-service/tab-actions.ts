@@ -294,7 +294,7 @@ export class SessionTabActions {
     });
 
     // Host-side transcript-window LRU: touch the opened session + evict inactive
-    // windows. Stays host-side (Phase 3/4 folds these reads into the reducer).
+    // windows. Stays host-side rather than reading reducer state from the session service.
     this.state.touchSessionTranscript(sessionPath);
     this.state.evictInactiveTranscriptWindows();
     this.scheduleRender();

@@ -59,7 +59,7 @@ import type {
 
 /** Imperative message types that survive a not-ready/reloading renderer: they
  *  are queued and flushed on readiness, and requeued when delivery fails.
- *  Phase 5 detail streams are included because the host keeps the subscription
+ *  Detail streams are included because the host keeps the subscription
  *  owner alive regardless of renderer readiness; dropping the stream would
  *  orphan the expanded card (a stale-route message is still rejected later by
  *  the webview's view-generation check). */

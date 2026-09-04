@@ -308,7 +308,7 @@ export function onMessageAborted(
  * `PreflightFailed` reducer event so the reducer reverts via
  * `pending.promoted[corrId]` (resolved by `requestId`). The backend mints
  * `requestId` but never sees the host `corrId`, so no `corrId` is dispatched
- * here; the reducer resolves it. (Brief B's send-timer dispatches the same
+ * here; the reducer resolves it. (The registry-backed send-timer dispatches the same
  * event WITH `corrId`.) See `docs/STATE_CONTRACT.md` § Optimistic
  * Reconciliation "Two failure windows for send".
  */

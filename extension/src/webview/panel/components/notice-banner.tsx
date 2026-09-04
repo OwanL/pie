@@ -14,7 +14,7 @@ const TRUNCATE_LENGTH = 120;
 
 export interface NoticeBannerProps {
   notice: string;
-  /** Failure category (Brief H). When set, the banner renders recovery action
+  /** Failure category. When set, the banner renders recovery action
    *  buttons (Retry / Retry without pruning / Show logs / Open settings /
    *  Restart backend) alongside the message. `null`/`undefined` for plain
    *  info/warning notices — no action buttons. */
@@ -30,8 +30,7 @@ export interface NoticeBannerProps {
    *  to dismiss the notice afterwards (e.g. Retry dismisses; Show logs does not).
    *  Optional: when absent (or `kind` is null), no action buttons render — the
    *  notice shows its plain-language message (which already names the next
-   *  action in prose) + a dismiss. Full action-button wiring is a Brief H
-   *  follow-up. */
+   *  action in prose) + a dismiss. */
   onAction?: (action: NoticeAction) => void;
   onDismiss: () => void;
 }

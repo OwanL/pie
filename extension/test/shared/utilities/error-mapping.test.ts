@@ -33,7 +33,7 @@ test('stripReqIds replaces every req-NN id with the neutral token "request"', ()
   assert.equal(stripReqIds('pre-request hook'), 'pre-request hook');
 });
 
-test('isCancelErrorString detects RequestTracker cancel strings (Brief E abort)', () => {
+test('isCancelErrorString detects RequestTracker cancel strings', () => {
   assert.equal(isCancelErrorString('Request req-12 was cancelled.'), true);
   assert.equal(isCancelErrorString('Request req-12 was cancelled: user aborted'), true);
   // Non-cancel errors are not cancels.
@@ -209,7 +209,7 @@ test('noticeActionsFor maps each kind to its recovery actions (single source of 
     'provider-disabled': ['open-settings'],
     'operational-error': ['show-logs'],
     'send-failed': ['retry'],
-    'edit-failed': [], // re-editing is a separate affordance Brief E owns
+    'edit-failed': [], // re-editing is a separate affordance owned by the inline editor
   };
   for (const kind of Object.keys(cases) as NoticeKind[]) {
     assert.deepEqual(noticeActionsFor(kind), cases[kind], `actions for ${kind}`);

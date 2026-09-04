@@ -44,7 +44,7 @@ export interface PanelMainProps {
   editingDraft: ViewState['editingDraft'];
   workspaceCwd: ViewState['workspaceCwd'];
   openTabPaths: ViewState['openTabPaths'];
-  /** Wired to the agent-reply pruning chip's Cancel button (Brief F). */
+  /** Wired to the agent-reply pruning chip's Cancel button. */
   onCancelPrepass: () => void;
 }
 

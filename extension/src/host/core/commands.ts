@@ -1,10 +1,10 @@
 /**
- * Phase 2 type spine — `Command` discriminated union.
+ * `Command` discriminated union type spine.
  *
  * Commands are intents originating from the webview (user actions) or other
  * inputs that the host must process. Each command carries a `corrId` for
- * optimistic-update reconciliation (Phase 4) and, where applicable, an
- * explicit `sessionPath` (the Phase 1 session-routing invariant — no implicit
+ * optimistic-update reconciliation and, where applicable, an
+ * explicit `sessionPath` (the session-routing invariant — no implicit
  * "viewed session" fallback). This file is the future replacement for the
  * action-shaped variants of `WebviewToHostMessage`; today, no code consumes
  * these types yet.
@@ -43,7 +43,7 @@ export interface SendCommand extends CommandBase {
   userParts?: UserContentPart[];
   /** Snapshot of the session summary before optimistic name change (null if no change). */
   previousSummary: SessionSummary | null;
-  /** Brief H: prior pruning mode to restore after a "retry without pruning" send
+  /** Prior pruning mode to restore after a "retry without pruning" send
    * commits/fails. The reducer retains this intent and includes it only on the
    * terminal/commit cleanup effect; the runner executes but does not own it. */
   priorPruningMode?: PruningMode;
@@ -345,7 +345,7 @@ export interface SetSystemPromptTogglesCommand extends CommandBase {
   disabledEntries: string[];
 }
 
-// ─── Phase 5 detail subscription commands ───────────────────────────────────
+// ─── Detail subscription commands ───────────────────────────────────
 // The webview owns `detailKey`; the EffectRunner mints the `subscriptionId`
 // and the session service owns the subscription lifecycle. The reducer stores
 // nothing: these commands only emit side-effect records, keeping pages and

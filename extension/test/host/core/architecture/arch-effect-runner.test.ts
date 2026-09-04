@@ -2111,7 +2111,7 @@ test('registered send cancellation executes only the reducer-described corrId', 
 });
 
 test('EffectRunner abortInFlightSend cancels an in-flight message.send (pre-ack) → SendResult{ok:false} + send-timer cleared', async () => {
-  // Cancel path (Brief E consumes this): aborting the in-flight send's
+  // Cancel path (the interrupt flow consumes this): aborting the in-flight send's
   // AbortController rejects backend.request → catch → SendResult{ok:false}
   // (pre-ack rollback) + the send-timer cleared (no spurious PreflightFailed).
   const timers = new FakeTimerSink();
@@ -2126,7 +2126,7 @@ test('EffectRunner abortInFlightSend cancels an in-flight message.send (pre-ack)
 
   runner.run({ kind: 'SendRpc', corrId: 'c-abort', sessionPath: '/a', text: 'hi', inputs: [], composedText: 'hi', localId: 'loc-1' });
   await settle();
-  // The send is in-flight (pre-ack, hanging). Abort it (Brief E interrupt).
+  // The send is in-flight (pre-ack, hanging). Abort it (interrupt).
   assert.equal(runner.abortInFlightSend('/a'), true);
   await settle();
 

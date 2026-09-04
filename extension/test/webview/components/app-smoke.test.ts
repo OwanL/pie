@@ -1050,8 +1050,8 @@ test('Brief H: plain Retry re-sends the live draft as a retrySend (no disablePru
   assert.ok(after.some((m) => m.type === 'dismissNotice'), 'Retry dismisses the notice');
 });
 
-// ─── Brief E: interrupt one-frame "Stopping…" feedback (automatable §12 item) ─
-test('Brief E: interrupt reflects "Stopping…" within one frame (optimistic, before the host round-trip clears busy)', () => {
+// ─── Interrupt one-frame "Stopping…" feedback (automatable §12 item) ─
+test('interrupt reflects "Stopping…" within one frame (optimistic, before the host round-trip clears busy)', () => {
   // The webview sets `interrupting` synchronously in handleInterrupt so the
   // Stop button reflects "Stopping…" within one frame — BEFORE the host
   // round-trip clears `busy` (the host clears busy only once the abort

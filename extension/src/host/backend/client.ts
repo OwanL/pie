@@ -145,7 +145,7 @@ const READY_TIMEOUT_MS = BACKEND_READY_TIMEOUT_MS;
  * Per-method timeouts. Methods doing disk I/O or batch work get a longer
  * budget; very fast in-memory queries can use the default.
  *
- * `message.send` is sized short (~10s) because Brief A made it early-ack at
+ * `message.send` is sized short (~10s) because it early-acks at
  * queue time (before the pruning prepass): it only needs to cover accepting
  * the prompt, not the prepass or first token. The post-ack, pre-commit phase
  * is owned by `EffectRunner`'s send-timer (dispatches `PreflightFailed` on
@@ -167,7 +167,7 @@ const RPC_TIMEOUTS_MS: Record<string, number> = {
   // a late backend delete race the host's rollback reopen.
   'session.forget': 60_000,
   'session.loadTranscriptPage': 30_000,
-  // Phase 5 demand-driven subagent detail. Subscribe awaits the worker's
+  // Demand-driven subagent detail. Subscribe awaits the worker's
   // correlated `detail.start`; fetch awaits the requested page baseline match.
   'detail.subscribe': 30_000,
   'detail.unsubscribe': 15_000,
@@ -699,9 +699,9 @@ export class BackendClient implements vscode.Disposable {
     // only emit valid JSON-RPC envelopes on stdout; a stray log line or a
     // corrupted stream previously caused "random hangs" — an expected response
     // never arrives, the UI stays busy, the RPC eventually times out with no
-    // clear cause. Brief B: attempt to correlate the dropped line to a pending
+    // clear cause. Attempt to correlate the dropped line to a pending
     // `req-NN` and reject that request with a diagnostic (snippet + stderr
-    // tail) instead of letting it time out opaquely. Brief H maps these to
+    // tail) instead of letting it time out opaquely. The error mapper converts these to
     // plain-language messages.
     const reqId = extractRequestId(line, value);
     if (reqId) {
@@ -764,7 +764,7 @@ export class BackendClient implements vscode.Disposable {
 
   /** Build a descriptive rejection error for a dropped line correlated to a
    *  pending request. Includes the parse reason, a line snippet, and the
-   *  stderr tail when present (Brief H consumes this for plain-language
+   *  stderr tail when present (the error mapper consumes this for plain-language
    *  mapping). */
   private buildDroppedLineError(
     reqId: string,

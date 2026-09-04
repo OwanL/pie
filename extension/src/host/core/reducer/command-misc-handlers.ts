@@ -420,7 +420,7 @@ export function handleSend(state: ArchState, cmd: Extract<Command, { kind: 'Send
       ];
       delete draft.composer.draftTextBySession[cmd.sessionPath];
       // Retry clears a stale prepass 'failed' chip from a previous turn
-      // (Brief F): the queued send has not been dispatched yet, so the
+      // The queued send has not been dispatched yet, so the
       // phase is idle until the queue drains and the send is promoted.
       delete draft.pending.prepassBySession[cmd.sessionPath];
     });
@@ -455,7 +455,7 @@ export function handleSend(state: ArchState, cmd: Extract<Command, { kind: 'Send
         },
       ];
       delete draft.composer.draftTextBySession[cmd.sessionPath];
-      // Retry clears a stale prepass 'failed' chip (Brief F): see the pending
+      // Retry clears a stale prepass 'failed' chip: see the pending
       // tab path above for the same rationale.
       delete draft.pending.prepassBySession[cmd.sessionPath];
     });
@@ -543,8 +543,8 @@ export function handleSend(state: ArchState, cmd: Extract<Command, { kind: 'Send
   const nextRunningPaths = addToArray(state.sessions.runningSessionPaths, cmd.sessionPath);
   // Snapshot the pending composer inputs onto the optimistic op so the
   // promoted rollback snapshot (after early-ack) carries them — a post-ack
-  // PreflightFailed restores them to the composer host state, and Brief C
-  // wires the webview `sendRejected.inputs` restore from the same payload.
+  // PreflightFailed restores them to the composer host state, and the webview
+  // `sendRejected.inputs` restore consumes the same payload.
   const inputsSnapshot = state.composer.pendingComposerInputsBySession[cmd.sessionPath] ?? [];
   const nextState = produce(state, (draft) => {
     appendLocalUserMessage(draft, cmd.sessionPath, cmd.localId, cmd.composedText, cmd.userParts, new Date(cmd.timestamp).toISOString(), 'completed', cmd.customType, cmd.customDetails);
@@ -561,13 +561,13 @@ export function handleSend(state: ArchState, cmd: Extract<Command, { kind: 'Send
       ...(cmd.priorPruningMode ? { priorPruningMode: cmd.priorPruningMode } : {}),
       // PURE: from the command timestamp, not a reducer wall-clock read.
       // Carried onto the promoted op so the projection can read it while the
-      // prepass runs (Brief F prepassStartedAt).
+      // prepass runs (prepassStartedAt).
       startedAt: cmd.timestamp,
     };
     draft.sessions.runningSessionPaths = nextRunningPaths;
     delete draft.composer.draftTextBySession[cmd.sessionPath];
     // Retry clears a stale prepass 'failed' chip from a previous turn
-    // (Brief F); the phase returns to 'running' on the early-ack promote.
+    // The phase returns to 'running' on the early-ack promote.
     delete draft.pending.prepassBySession[cmd.sessionPath];
     // Clear pending composer inputs at SEND time (not ack time): the inputs
     // have already been folded into the sent message by MessageRouter, so
@@ -900,7 +900,7 @@ export function handleSetPrefs(state: ArchState, cmd: Extract<Command, { kind: '
       subagentBucketCanSpawn: normalizeSubagentBucketCanSpawn(cmd.prefs.subagentBucketCanSpawn),
     }),
   };
-  // Phase 2 cutover: the unread-finished-sessions clear moved here from
+  // The unread-finished-sessions clear lives here rather than in
   // service.setPrefs (the SetPrefsRpc effect handler). When the merged
   // prefs suppress completion notifications, clear unread finished sessions
   // in the same reducer transition. This is a pure state mutation — no

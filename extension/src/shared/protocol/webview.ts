@@ -192,7 +192,7 @@ export interface RenderFailurePayload {
   classification: 'component_error' | 'uncaught_error' | 'unhandled_rejection' | 'unknown';
 }
 
-// ─── Public subagent detail subscription protocol (Phase 5) ──────────────────
+// ─── Public subagent detail subscription protocol ──────────────────────────
 //
 // Explicit expansion subscribes to the complete child transcript through a
 // closed key-scoped subscription. The webview owns `detailKey` (opaque,
@@ -345,8 +345,8 @@ export interface ViewState {
    *  Optional for compatibility with older hosts. */
   noticeSessionPath?: string | null;
   /** Failure category for the current notice, or null when the notice is a
-   *  plain info/warning string (or there is no notice). Set ONLY at the Brief H
-   *  error sites (send/edit/prepass failures) alongside a plain-language
+   *  plain info/warning string (or there is no notice). Set ONLY at the operational-error
+   *  sites (send/edit/prepass failures) alongside a plain-language
    *  `notice`; the webview renders recovery action buttons for known kinds
    *  (see `noticeActionsFor`). `null` everywhere else so non-error notices keep
    *  their existing string-only rendering. Invariant: `noticeKind` is non-null
@@ -423,7 +423,7 @@ export interface ViewState {
   sessionTitlesSettings: SessionTitlesSettings;
   /** Active pruning choices surfaced to the composer/settings UI. */
   pruningCatalog: PruningCatalog;
-  /** Pruning prepass phase for the active session (Brief F). Driven host-side
+  /** Pruning prepass phase for the active session. Driven host-side
    *  from the send lifecycle (`pending.promoted` = running, pruning-result
    *  `CustomMessage` = succeeded, `PreflightFailed` = failed, commit-point
    *  `MessageStarted` = idle) — the webview stays passive (host ViewState).
@@ -504,7 +504,7 @@ export type HostToWebviewMessage =
       type: 'detailResult';
       result: DetailResult;
     }
-  // ── Phase 5 subagent detail stream. The six variants below are the ONLY
+  // ── Subagent detail stream. The six variants below are the ONLY
   //    stream content; subscribe/unsubscribe/fetchPages acknowledgements are
   //    correlated control responses and never carry pages. Each message
   //    carries the full `HostDetailRoute` so a stale or cross-key message can
@@ -669,7 +669,7 @@ type WebviewToHostMessagePayload =
   | { type: 'openSession'; sessionPath: string }
   | { type: 'closeSession'; sessionPath: string; interactionId?: string }
   | { type: 'requestDetail'; sessionPath: string; ref: LazyDetailRef }
-  // ── Phase 5: demand-driven subagent detail. `viewGeneration`, `detailKey`,
+  // ── Demand-driven subagent detail. `viewGeneration`, `detailKey`,
   //    and `detailAttempt` are required (not optional wrapper fields): the host
   //    records the exact renderer owner before forwarding any stream content.
   //    The host mints `subscriptionId`; the webview learns it from `detail.start`.
@@ -794,7 +794,7 @@ type WebviewToHostMessagePayload =
     }
   | { type: 'extensionUiResponse'; sessionPath: string; response: ExtensionUIResponsePayload }
   | { type: 'setFileChangesExpanded'; sessionPath: string; expanded: boolean }
-  // ── Brief H: recovery actions surfaced from an error notice. The host owns
+  // ── Recovery actions surfaced from an error notice. The host owns
   //    the side effects (open settings/logs, restart backend, retry the send
   //    — optionally disabling pruning first so the slow prepass is skipped).
   //    These carry no reducer event (pure side effects), mirroring

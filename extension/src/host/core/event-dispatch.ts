@@ -92,7 +92,7 @@ export interface SessionBackendEventHandlers {
   onContextUsageChanged(payload: ContextUsageChangedPayload): void;
   onExtensionUIRequest(payload: ExtensionUIRequestPayload): void;
   onError(payload: ErrorPayload): void;
-  /** Phase 5: one of the six coordinator→host detail stream variants. */
+  /** One of the six coordinator→host detail stream variants. */
   onDetailStream(message: CoordinatorToHostDetailMessage): void;
 }
 

@@ -83,7 +83,7 @@ export function AppBody({ adapter }: AppBodyProps) {
     });
   }, []);
 
-  // Brief E: optimistic one-frame "stopping…" flag for interrupt. Set
+  // Optimistic one-frame "stopping…" flag for interrupt. Set
   // synchronously in `handleInterrupt` (use-app-handlers) so the click reflects
   // within one frame; cleared below when the host confirms the abort
   // (`busy` flips false) or the active session changes. Allowlisted webview-
@@ -100,7 +100,7 @@ export function AppBody({ adapter }: AppBodyProps) {
     triggerEl: HTMLElement | null;
   } | null>(null);
 
-  // Brief H: bridge from the AppBody-level NoticeBanner's Retry button to the
+  // Bridge from the AppBody-level NoticeBanner's Retry button to the
   //  composer-level live draft. The composer registers its `sendAsRetry` here;
   //  `handleNoticeAction` invokes it on a Retry click. A ref (not state) so a
   //  Retry click doesn't re-render — it just calls the latest registered closure.

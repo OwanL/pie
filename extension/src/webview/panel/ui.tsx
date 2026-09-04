@@ -51,7 +51,7 @@ export { AggregateStatsStrip } from './aggregate-stats-strip';
 interface ComposerProps {
   busy: boolean;
   capabilities?: SessionCapabilities;
-  /** Brief E: optimistic one-frame "stopping…" mirror of an in-flight
+  /** Optimistic one-frame "stopping…" mirror of an in-flight
    *  interrupt (the host clears `busy` only after the abort round-trip). */
   interrupting?: boolean;
   /** False while the browser transport is connecting/reconnecting. */
@@ -96,7 +96,7 @@ interface ComposerProps {
   focusTrigger?: string;
   postMessage: (msg: WebviewToHostMessage) => void;
   onSend: (text: string) => boolean | void;
-  /** Brief H: re-send the draft as a `retrySend` (the host disables pruning
+  /** Re-send the draft as a `retrySend` (the host disables pruning
    *  atomically first when `disablePruning` is set — "retry without pruning").
    *  Invoked by the NoticeBanner's Retry button via `sendRetryDraftRef`. */
   onRetrySend: (text: string, disablePruning?: boolean) => boolean | void;
@@ -121,7 +121,7 @@ interface ComposerProps {
   onSetPruningSettings: (settings: Partial<PruningSettings>) => void;
   onSetToolResultPruningSettings: (settings: Partial<ToolResultPruningSettings>) => void;
   onSetSessionTitlesSettings: (settings: Partial<SessionTitlesSettings>) => void;
-  /** Brief H: AppBody registers the composer's `sendAsRetry` here so the
+  /** AppBody registers the composer's `sendAsRetry` here so the
    *  NoticeBanner's Retry button (rendered at the AppBody level, outside the
    *  composer) can re-send the LIVE composer draft. A ref (not state) — no
    *  re-render, just a stable callback bridge from the app-level notice to the
@@ -270,7 +270,7 @@ function ComposerView({
     handleDrop,
   } = useComposerDragDrop({ applyComposerTransfer });
 
-  // Brief H: keep `sendRetryDraftRef` pointing at the LATEST `sendAsRetry`
+  // Keep `sendRetryDraftRef` pointing at the LATEST `sendAsRetry`
   //  (which closes over the live draft `text`). Writing the ref during render
   //  (rather than in a `useEffect`) guarantees the AppBody-level NoticeBanner's
   //  Retry click always re-sends the up-to-date draft — an effect would lag one

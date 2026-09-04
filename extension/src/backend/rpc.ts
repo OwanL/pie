@@ -1238,7 +1238,7 @@ export function validateSystemPromptTogglesSet(params: unknown): SystemPromptTog
   return { sessionPath: sessionPath as string, disabledEntries };
 }
 
-// ─── Phase 5 detail subscription RPC validation ─────────────────────────────
+// ─── Detail subscription RPC validation ─────────────────────────────
 // The wire shapes mirror `HostToCoordinatorDetailMessage` from
 // `shared/protocol/subagent-detail.ts`; the JSONL `id` becomes `requestId` at
 // the server routing seam, so these validators accept everything except it.

@@ -392,7 +392,7 @@ interface RunningSubagent {
  * `TokenRateService` ticks every running session every 200 ms; without this
  * cache, a multi-megabyte live subagent preview would be re-walked and
  * re-tokenized on every tick even while the subagent is stalled in a tool call
- * or waiting for the provider (STATE_CONTRACT § REM-04). */
+ * or waiting for the provider — states that produce no token-rate activity. */
 interface SubagentProjection {
   /** Counted running subagents (descendant-inclusive filter applied) with
    * pre-computed token estimates, so unchanged revisions skip re-tokenization. */

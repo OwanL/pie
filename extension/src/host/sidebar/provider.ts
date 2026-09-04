@@ -247,12 +247,12 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
     return this.hub.isRendererOwnerCurrent(rendererId, viewGeneration, rendererGeneration);
   }
 
-  /** Stable host identity for Phase 5 detail routing. */
+  /** Stable host identity for detail routing. */
   getHostInstanceId(): string {
     return this.session.getHostInstanceId();
   }
 
-  /** Current renderer generation used to fence Phase 5 subscription owners. */
+  /** Current renderer generation used to fence detail subscription owners. */
   getViewGeneration(): number {
     return this.session.getViewGeneration();
   }

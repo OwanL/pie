@@ -515,9 +515,9 @@ export function handleSendResult(state: ArchState, event: Extract<Event, { kind:
         pending.sessionPath,
       );
     }
-    // Brief H: map the raw RPC error (which may carry a `req-NN` id) to a
+    // Map the raw RPC error (which may carry a `req-NN` id) to a
     // plain-language notice + a failure kind that the webview renders recovery
-    // buttons for. A user-initiated cancel (Brief E abort) returns null →
+    // buttons for. A user-initiated cancel returns null →
     // SUPPRESS the notice (the user initiated it; the rollback above still
     // removes the optimistic message + restores inputs). Leaving the prior
     // notice untouched on cancel avoids clobbering an unrelated banner.
@@ -538,7 +538,7 @@ export function handleSendResult(state: ArchState, event: Extract<Event, { kind:
     if (restoredInputs.length > 0) {
       draft.composer.pendingComposerInputsBySession[pending.sessionPath] = restoredInputs;
     }
-    // Brief F: the send was rejected before the prepass ran — clear any
+    // The send was rejected before the prepass ran — clear any
     // prepass chip (idle).
     delete draft.pending.prepassBySession[pending.sessionPath];
     // Restore session summary if we had one.
@@ -566,7 +566,7 @@ export function handleSendResult(state: ArchState, event: Extract<Event, { kind:
  *
  * `corrId` resolution: the backend bridge dispatches WITHOUT `corrId`, so the
  * reducer first scans promoted entries by `requestId`, then falls back to the
- * currently executing pending op for the session. Brief B's send-timer
+ * currently executing pending op for the session. The registry-backed send-timer
  * dispatches WITH `corrId`. See STATE_CONTRACT § Optimistic Reconciliation.
  */
 export function handlePreflightFailed(state: ArchState, event: Extract<Event, { kind: 'PreflightFailed' }>): ReducerResult {
@@ -739,19 +739,19 @@ export function handlePreflightFailed(state: ArchState, event: Extract<Event, { 
       delete draft.pending.requestIdToLocalId[event.requestId];
     }
     // Restore composer inputs from the promoted snapshot so a retry can re-send
-    // them (no data loss). Brief C wires the webview-side restore.
+    // them (no data loss). The webview-side restore consumes `sendRejected.inputs`.
     if (snapshot.kind === 'send') {
       draft.composer.draftTextBySession[snapshot.sessionPath] = restoredDraftText;
     }
     if (restoredInputs.length > 0) {
       draft.composer.pendingComposerInputsBySession[snapshot.sessionPath] = restoredInputs;
     }
-    // Brief F: the prepass failed post-ack. Surface a 'failed' status chip
-    // (Brief H refines the message copy); the notice below carries the
+    // The prepass failed post-ack. Surface a 'failed' status chip
+    // (the error mapper refines the message copy); the notice below carries the
     // plain-language error. The promoted op is dropped above so startedAt is
     // null (no elapsed timer for a failed chip).
     draft.pending.prepassBySession[snapshot.sessionPath] = { phase: 'failed', latencyMs: null };
-    // Brief H: map the pre-commit setup failure to a plain-language notice.
+    // Map the pre-commit setup failure to a plain-language notice.
     // The send-timer's phase-specific strings distinguish pruning from model
     // start; a generic backend rejection is not attributed to pruning because
     // SDK preflight also owns auth/model checks, compaction, and other hooks.

@@ -240,7 +240,7 @@ export class WorkerSupervisor {
     this.workers.delete(workerKey(sessionPath));
   }
 
-  async restartWorker(sessionPath: string, reason = 'explicit Phase 2 restart'): Promise<SupervisedWorker> {
+  async restartWorker(sessionPath: string, reason = 'explicit supervisor restart'): Promise<SupervisedWorker> {
     // stopWorker does not return until the owning ChildProcess emitted exit.
     // No command or side effect is retained or replayed into the replacement.
     await this.stopWorker(sessionPath, reason);

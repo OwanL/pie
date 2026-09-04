@@ -3,7 +3,7 @@
  *
  * The bottom status chip is removed. While the prepass is running, the
  * placeholder assistant row shows a pending "pruning skills/tools" chip with a
- * Cancel button that reuses Brief E's interrupt dispatch.
+ * Cancel button that reuses the interrupt dispatch.
  */
 import test, { beforeEach } from 'node:test';
 import assert from 'node:assert/strict';

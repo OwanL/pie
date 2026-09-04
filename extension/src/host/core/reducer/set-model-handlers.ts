@@ -228,7 +228,7 @@ export function revertSetModel(state: ArchState, corrId: string, error: string |
     return state;
   }
   // Strip any internal req-NN correlation id before the notice reaches the
-  // user (Brief H criterion 1: no req-NN leaks). `settings.set` RPC timeouts
+  // user (no req-NN leaks to the renderer boundary). `settings.set` RPC timeouts
   // carry req-NN; the raw error is still logged host-side via the Log effect.
   const notice = `Failed to set model: ${stripReqIds(error ?? 'unknown error')}`;
   const raw = error ? stripReqIds(error) : null;

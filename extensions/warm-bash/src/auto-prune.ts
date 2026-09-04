@@ -40,7 +40,7 @@
  *
  * Reassembly is byte-preserving at the SEGMENT level: only segments whose
  * program was rewritten have their substring spliced; every separator, newline,
- * and whitespace run between segments is left identical (FIX #1).
+ * and whitespace run between segments is left identical (byte-preservation guard).
  */
 
 import { spawnSync } from "node:child_process";
@@ -65,7 +65,7 @@ export interface PruneOpts {
  *  codebase-maintenance .ignore drift checks, subagent prompts). */
 const FIND_PRUNE_EXPR = findPruneExpression();
 
-/** Shell control keywords → passthrough the WHOLE command (FIX #1). Word-boundary
+/** Shell control keywords → passthrough the WHOLE command. Word-boundary
  *  so `foreach` / `#include` (quoted) don't false-trigger. */
 const CONTROL_KEYWORD = /\b(for|while|until|if|then|case|do|function)\b/;
 
@@ -77,8 +77,8 @@ const COMMENT_START = /(^|[\s;&|()<>])#/;
  *  starts with `-`). */
 const ASSIGN = /^[A-Za-z_]\w*=/;
 
-/** find primaries that take a name/path pattern argument (FIX #2 detection). */
-/** find primaries that take a name/path pattern argument (FIX #2 detection).
+/** find primaries that take a name/path pattern argument (used to detect explicit prune-dir searches). */
+/** find primaries that take a name/path pattern argument (used to detect explicit prune-dir searches).
  *  Includes the -path aliases (-wholename/-iwholename) and regex/symlink-target
  *  primaries (-regex/-iregex/-lname/-ilname), all of which can reference a prune
  *  dir and so must trigger passthrough when they do. */
@@ -131,11 +131,11 @@ interface RawTok {
  * reference (byte-identical) when no segment changed.
  */
 export function rewriteForPrune(command: string, opts: PruneOpts): string {
-  // FIX #5: a heredoc body is unquoted free text that may contain `;`, `&&`, and
+  // A heredoc body is unquoted free text that may contain `;`, `&&`, and
   // even literal `grep -rn foo .`-looking lines. Never split/rewrite it.
   if (HEREDOC.test(command)) return command;
 
-  // FIX #1: shell control structures and comments are passthrough-the-whole-
+  // Shell control structures and comments are passthrough-the-whole-
   // command. Rebuilding would risk `do ; grep` syntax errors and swallow
   // trailing `# comment` lines (the comment would eat the following command).
   // Match against the quote-stripped command so quoted `#include` / `foreach`
@@ -248,7 +248,7 @@ function makeSeg(command: string, start: number, end: number): Segment {
 }
 
 /** Splice only changed segments back; leave every separator/newline/whitespace
- *  run between segments identical (FIX #1 byte-preservation). */
+ *  run between segments identical (byte-preservation guard). */
 function reassemble(command: string, segments: Segment[], rewritten: string[]): string {
   let result = "";
   let cursor = 0;
@@ -329,7 +329,7 @@ function rewriteGrepSegment(
   // `grep -rn foo data/`) must not be pruned into an empty result — passthrough.
   if (referencesProtectedPath(args)) return text;
 
-  // FIX #3: gate on GNU grep. --exclude-dir is a GNU extension; a BSD/busybox
+  // Gate on GNU grep. --exclude-dir is a GNU extension; a BSD/busybox
   // grep lacking it would ERROR the command — strictly worse than status quo.
   // NOTE: this also documents the GNU-grep dependency for the injection below.
   if (!opts.gnuGrepProbe()) return text;
@@ -434,7 +434,7 @@ function rewriteFindSegment(text: string, toks: RawTok[], progIdx: number, prog:
     if (FIND_GLOBALS.has(v)) return text;
   }
 
-  // FIX #2: don't defeat explicit prune-dir searches. `-name node_modules` (or
+  // Don't defeat explicit prune-dir searches. `-name node_modules` (or
   // -iname/-path/-ipath referencing node_modules/.git) would match the prune
   // branch and yield zero results.
   if (referencesPruneDir(exprTokens)) return text;

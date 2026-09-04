@@ -30,7 +30,7 @@ interface SessionServiceEventsOptions {
   dispatchArch: (event: Event) => void;
   getArchState: () => ArchState;
   triggers: DeferredTriggerRegistry;
-  /** Phase 5: routes one of the six coordinator→host detail stream variants
+  /** Routes one of the six coordinator→host detail stream variants
    *  to the host's detail subscription service. */
   onDetailStream?: (message: CoordinatorToHostDetailMessage) => void;
 }

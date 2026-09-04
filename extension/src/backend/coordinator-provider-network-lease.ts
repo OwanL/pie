@@ -200,7 +200,7 @@ function positivePolicyMilliseconds(
 }
 
 /**
- * Coordinator-owned Phase 6 provider authority. Capacity, circuits, and the
+ * Coordinator-owned provider authority. Capacity, circuits, and the
  * half-open probe are global across worker processes while provider I/O remains
  * in the owning worker. Pools are independent by configured provider key.
  */

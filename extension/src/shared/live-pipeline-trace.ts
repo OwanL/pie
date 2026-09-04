@@ -39,7 +39,7 @@ export const LIVE_PIPELINE_TRACE_STAGES = [
   'host.readiness.transition',
   'host.recovery.action',
   'trace.health',
-  // Phase 0 process/runtime evidence. These stages carry metadata only; they
+  // Process/runtime evidence. These stages carry metadata only; they
   // never contain prompts, tool bodies, or recursive payloads.
   'process.lifecycle',
   'backend.request',

@@ -48,7 +48,7 @@ export interface WorkerServerTransport {
 }
 
 export interface WorkerServerHandlers {
-  /** Called in descriptor sequence order for valid Phase 4 frames. */
+  /** Called in descriptor sequence order for valid coordinator frames. */
   onFrame?: (frame: CoordinatorToWorkerFrame, server: WorkerServer) => void | Promise<void>;
   onInterrupt?: (frame: Extract<CoordinatorToWorkerFrame, { kind: 'interrupt' }>) => void | Promise<void>;
   onShutdown?: (frame: Extract<CoordinatorToWorkerFrame, { kind: 'shutdown' }>) => void | Promise<void>;
@@ -211,7 +211,7 @@ export class WorkerServer {
     return result.accepted;
   }
 
-  /** Correlate a worker-originated Phase 4 request with its dedicated coordinator response. */
+  /** Correlate a worker-originated request with its dedicated coordinator response. */
   requestFrame<K extends CoordinatorToWorkerResponseFrame['kind']>(
     body: WorkerToCoordinatorRequestBody,
     expectedKind: K,
@@ -313,7 +313,7 @@ export class WorkerServer {
 
   private async bootstrap(frame: Extract<CoordinatorToWorkerFrame, { kind: 'bootstrap' }>): Promise<void> {
     try {
-      // Phase 2 imports no Pi runtime. Only the coordinator-prepared immutable
+      // Worker startup imports no Pi runtime. Only the coordinator-prepared immutable
       // patch identity is verified before a future runtime import.
       if (this.handlers.validateBootstrap) await this.handlers.validateBootstrap(frame);
       else await validateSdkPatchBarrier(frame.sdkPatchIdentity.sdkPath, frame.sdkPatchIdentity);

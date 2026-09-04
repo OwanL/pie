@@ -1,19 +1,19 @@
 /**
- * Phase 1 red-test battery — subagent interrupt / abort hardening.
+ * Red-test battery — subagent interrupt / abort hardening.
  *
  * These tests pin the THREE suspected subagent lifecycle bugs surfaced by
  * recent provider-side instability (long time-to-first-token, stream cuts):
  *
- *  Bug 1 — Stop mid-subagent-prompt: parent signal aborts AFTER the child
+ *  Stop mid-subagent-prompt: parent signal aborts AFTER the child
  *          `session.prompt()` has started streaming. Settlement must be owned
  *          by the local prompt/abort race, not delayed until the outer renewable
  *          inactivity net. Asserts a tight cancellation bound exists.
  *
- *  Bug 2 — Stop while child `session.abort()` itself hangs (provider connection
+ *  Stop while child `session.abort()` itself hangs (provider connection
  *          teardown stuck). Remote teardown is advisory: it must be observed and
  *          detached without owning parent settlement.
  *
- *  Bug 3 — Parallel sibling abort: 4 parallel tasks, abort arrives while 2 are
+ *  Parallel sibling abort: 4 parallel tasks, abort arrives while 2 are
  *          in prefill and 2 are mid-stream. Asserts ALL four settle within a
  *          bound AND the `inflightSemaphore` has zero in-flight + zero waiters
  *          afterward (no permit leak / orphan queue entry).
@@ -49,7 +49,7 @@ const MOCK_SDK_SOURCE = [
 	"  const state = (globalThis.__MOCK_SDK_STATE__ = globalThis.__MOCK_SDK_STATE__ || { createSessionCalls: 0, promptStarted: 0, promptSettled: 0, abortCalls: 0, abortSettled: 0, abortCompactionCalls: 0, abortBranchSummaryCalls: 0, abortBashCalls: 0, abortRetryCalls: 0 });",
 	"  state.createSessionCalls++;",
 	"  let promptRelease;          // set by prompt(); awaited until abort/behaviour releases it",
-	"  let abortRelease;           // set by abort(); awaited until behaviour releases it (Bug 2: hangs forever by default)",
+	"  let abortRelease;           // set by abort(); awaited until behaviour releases it (hung-abort: hangs forever by default)",
 	"  const session = {",
 	"    agent: { state: { model: { id: 'session-model' } } },",
 	"    extensionRunner: { setUIContext(){} },",
@@ -66,7 +66,7 @@ const MOCK_SDK_SOURCE = [
 	"      state.abortCalls++;",
 	"      const b = globalThis.__MOCK_SDK_BEHAVIOR__;",
 	"      if (b && b.onAbort) { await b.onAbort(function release(v){ promptRelease && promptRelease(v); }); state.abortSettled++; return; }",
-	"      // Default (Bug 2 repro): abort() NEVER resolves — simulates a hung provider teardown.",
+	"      // Default (hung-abort repro): abort() NEVER resolves — simulates a hung provider teardown.",
 	"      await new Promise(function(){});",
 	"      // unreachable in the default branch; kept for clarity.",
 	"      state.abortSettled++;",
@@ -240,14 +240,14 @@ function within<T>(ms: number, p: Promise<T>): Promise<T> {
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 // ---------------------------------------------------------------------------
-// Bug 1 — Stop mid-subagent-prompt
+// Stop mid-subagent-prompt
 // ---------------------------------------------------------------------------
 
-test("Bug 1: aborting after child prompt() starts settles locally without waiting for the outer inactivity net", async () => {
+test("aborting after child prompt() starts settles locally without waiting for the outer inactivity net", async () => {
 	// Default behaviour: prompt() hangs until abort() resolves it (realistic
 	// mid-stream shape — provider is actively streaming, then Stop fires).
-	// onAbort: the mock's default branch NEVER resolves abort() (Bug 2), so for
-	// Bug 1 we give onAbort that DOES resolve abort (the happy teardown path).
+	// onAbort: the mock's default branch NEVER resolves abort(), so for
+	// this case we give onAbort that DOES resolve abort (the happy teardown path).
 	setMockBehavior({
 		onAbort: (release: (v?: unknown) => void) => {
 			// Happy teardown: abort() resolves promptly, which releases prompt().
@@ -274,7 +274,7 @@ test("Bug 1: aborting after child prompt() starts settles locally without waitin
 	// The bug today: PI_SUBAGENT_TIMEOUT_MS=0 (disabled) + settlement net OFF
 	// (set above) → the ONLY escape is the structural abort path. With a happy
 	// abort() that releases prompt(), this settles quickly. If it does NOT,
-	// the per-prompt timeout is missing (Bug 1).
+	// the per-prompt timeout is missing.
 	const response = await within(5000, responseP);
 	const text = (response.content?.[0] as { text?: string } | undefined)?.text ?? "";
 	assert.match(text, /abort/i, "tool call must surface an abort result, not hang");
@@ -319,8 +319,8 @@ test("Nested hard-stop: a parent abort invokes the child's billable-window abort
 	assert.equal(mockState().abortRetryCalls, 1, "child abortRetry() must be invoked on parent abort");
 });
 
-test("Bug 1 gap: parent abort settles even when child abort() does not release prompt()", async () => {
-	// Bug 2's shape, isolated: abort() resolves (so the abort promise itself
+test("parent abort settles even when child abort() does not release prompt()", async () => {
+	// The hung-abort shape, isolated: abort() resolves (so the abort promise itself
 	// is fine) BUT does not release prompt() (the stream teardown didn't
 	// unblock the SDK's prompt promise). The local prompt race must still own
 	// parent settlement with the outer net disabled.
@@ -360,10 +360,10 @@ test("Bug 1 gap: parent abort settles even when child abort() does not release p
 });
 
 // ---------------------------------------------------------------------------
-// Bug 2 — Stop while child session.abort() itself hangs (provider teardown stuck)
+// Stop while child session.abort() itself hangs (provider teardown stuck)
 // ---------------------------------------------------------------------------
 
-test("Bug 2: a hung child session.abort() cannot own parent settlement", async () => {
+test("a hung child session.abort() cannot own parent settlement", async () => {
 	// Default mock behaviour: abort() hangs forever (the bug window). With the
 	// outer inactivity net OFF, the prompt is raced directly against the parent
 	// signal, so the tool call settles regardless of whether abort() resolves.
@@ -395,7 +395,7 @@ test("Bug 2: a hung child session.abort() cannot own parent settlement", async (
 	process.env.PI_SUBAGENT_TIMEOUT_MS = prevTimeout;
 });
 
-test("Bug 2 (observability): the abort path emits a [pie:subagent] child.abort.invoked log so a dangling child is diagnosable (Phase 2 fix: onAbort now logs)", async () => {
+test("the abort path emits a [pie:subagent] child.abort.invoked log so a dangling child is diagnosable (onAbort now logs)", async () => {
 	// Capture console.error (the logLoud sink — reaches the pie OutputChannel
 	// via the BackendClient stderr mirror, see pie-logger.ts).
 	const captured: string[] = [];
@@ -422,17 +422,17 @@ test("Bug 2 (observability): the abort path emits a [pie:subagent] child.abort.i
 	} finally {
 		console.error = origErr;
 	}
-	// Phase 2 fix: onAbort now emits child.abort.invoked (sync, before racing
+	// onAbort now emits child.abort.invoked (sync, before racing
 	// abort for the .completed/.dangling-detected follow-up). A dangling child
 	// is thus immediately diagnosable in the [pie:subagent] log stream.
 	const subagentLogs = captured.filter((l) => l.includes('"pie:subagent"'));
 	const abortInvoked = subagentLogs.filter((l) => l.includes('"child.abort.invoked"'));
 	assert.ok(
 		abortInvoked.length >= 1,
-		"Phase 2 FIX: [pie:subagent] child.abort.invoked event MUST fire on abort so a dangling child is diagnosable",
+		"[pie:subagent] child.abort.invoked event MUST fire on abort so a dangling child is diagnosable",
 	);
 });
 
 // ---------------------------------------------------------------------------
-// Bug 3 — Parallel sibling abort (4 parallel tasks, mixed prefill + mid-stream)
+// Parallel sibling abort (4 parallel tasks, mixed prefill + mid-stream)
 // ---------------------------------------------------------------------------

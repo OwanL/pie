@@ -45,7 +45,7 @@ function measureSnapshotBytes(message: Extract<HostToWebviewMessage, { type: 'st
 
 /**
  * Builds one authoritative full snapshot for a controller-owned operation.
- * The expected identity is bounded by transcriptRenderSignature for Phase 1.
+ * The expected identity is bounded by transcriptRenderSignature.
  */
 export function buildStateEnvelope(
   syncState: SidebarSyncState,

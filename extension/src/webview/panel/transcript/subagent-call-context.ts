@@ -19,7 +19,7 @@ import type { LiveSubagentDetailAddress } from '../../../shared/protocol/subagen
  * - `depth` — nesting depth (1 = top-level subagent, 2 = subagent-of-subagent,
  *   …), shown on nested-subagent prompts to make the call stack legible.
  * - `detailRoot` — the immutable address root (session/turn/root tool call +
- *   root attempt) of the enclosing Phase 5 detail subscription. A nested
+ *   root attempt) of the enclosing page-backed detail subscription. A nested
  *   live-addressable child combines it with its own complete producer lineage
  *   to derive the address it subscribes with. Absent for cards rendered from
  *   legacy (non-live-addressable) details.

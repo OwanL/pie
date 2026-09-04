@@ -329,6 +329,8 @@ See [`docs/STATE_CONTRACT.md`](STATE_CONTRACT.md) for additional invariants (sna
 ## 11. Further Reading
 
 - [`docs/STATE_CONTRACT.md`](STATE_CONTRACT.md) — authoritative host ↔ webview invariants
+- [`docs/STATE_CONTRACT_IMPLEMENTATION.md`](STATE_CONTRACT_IMPLEMENTATION.md) — transport/protocol mechanics, byte budgets, and file mappings behind those invariants
+- [`docs/STATE_CONTRACT_HISTORY.md`](STATE_CONTRACT_HISTORY.md) — completed remediation chronology
 - [`docs/internal/ARCH-OVERVIEW.md`](internal/ARCH-OVERVIEW.md) — concise file map and glossary
 - [`AGENTS.md`](../AGENTS.md) — repo conventions, test commands, build instructions
 - Git history (commit `d581d83`) — original migration plan

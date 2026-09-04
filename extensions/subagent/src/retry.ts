@@ -1,5 +1,5 @@
 /**
- * REM-03 retry/attempt semantics: bounded per-attempt analytics, provider-aware
+ * Retry/attempt semantics: bounded per-attempt analytics, provider-aware
  * failover, Retry-After/backoff parsing, and abortable waits.
  *
  * This module keeps the deterministic policy/clock seams in one place so the
