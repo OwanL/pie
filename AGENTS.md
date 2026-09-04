@@ -2,6 +2,14 @@
 
 Personal pi config stack: VS Code extension GUI ("pie"), custom pi extensions, agents, skills, and centralized settings.
 
+## Traversal safety
+
+<!-- canonical-traversal-policy:start -->
+Traversal safety: dependency, version-control, generated/build, cache, coverage, runtime-data (e.g. data/), session, log, packaged-artifact, and temporary-SDK trees are protected. Never traverse them with broad recursive searches (`grep -r`, bare `find .`) or unscoped directory walks; known protected directories are pruned automatically, and the rest are simply very large. To inspect a protected path deliberately, read an exact file, scope the search to that path, or use a Git-aware tool (rg). Do not widen a search to work around an empty result.
+<!-- canonical-traversal-policy:end -->
+
+This block mirrors `shared/traversal-policy.ts` and is drift-checked so root agents and recursively spawned agents receive the same policy through normal project-context loading.
+
 - `extension/` — VS Code extension
 - `extensions/` — Custom pi tools ie `subagent`
 - `docs/` — Internal design docs; `STATE_CONTRACT.md` is authoritative for host↔webview sync

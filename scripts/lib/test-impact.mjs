@@ -2,10 +2,10 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 
 import { PACKAGE_DIRECTIVES, classifyFileToPackage, isGlobalTestInfra } from './test-packages.mjs';
+import { isProtectedDirectoryName } from './traversal-policy.mjs';
 
 const SOURCE_EXTENSIONS = ['.ts', '.tsx', '.mts', '.cts', '.mjs', '.cjs', '.js', '.jsx', '.json', '.css', '.sql', '.yaml', '.yml'];
 const SCAN_EXTENSIONS = new Set(SOURCE_EXTENSIONS);
-const IGNORED_DIRECTORIES = new Set(['node_modules', '.git', '.cache', 'out', 'dist', 'coverage']);
 const TEST_FILE = /(?:\.test\.(?:ts|tsx|mts|mjs|js)|\.spec\.(?:ts|tsx|mts|mjs|js))$/u;
 const PACKAGE_CONFIG = /(?:^|\/)(?:package(?:-lock)?\.json|tsconfig(?:\.[^/]*)?\.json)$/u;
 const MODEL_CONFIG_PATHS = new Set(['models.yaml', 'models.json', 'model-profiles.yaml', 'models.schema.json', 'settings.json']);
@@ -22,7 +22,7 @@ function walkFiles(repoRoot, relativeDir, output) {
   const absoluteDir = path.join(repoRoot, relativeDir);
   if (!existsSync(absoluteDir)) return;
   for (const entry of readdirSync(absoluteDir, { withFileTypes: true })) {
-    if (entry.isDirectory() && IGNORED_DIRECTORIES.has(entry.name)) continue;
+    if (entry.isDirectory() && isProtectedDirectoryName(entry.name)) continue;
     const relativePath = normalize(path.posix.join(relativeDir, entry.name));
     if (entry.isDirectory()) walkFiles(repoRoot, relativePath, output);
     else if (SCAN_EXTENSIONS.has(path.extname(entry.name))) output.push(relativePath);

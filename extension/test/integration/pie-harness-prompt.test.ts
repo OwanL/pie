@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import { pathToFileURL } from 'node:url';
 
 import { rewritePieHarnessPrompt } from '../../../shared/pie-harness-prompt.js';
+import { TRAVERSAL_POLICY_PROMPT } from '../../../shared/traversal-policy.js';
 
 const intro = 'You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.';
 const docs = `Pi documentation (read only when the user asks about pi itself, its SDK, extensions, themes, skills, or TUI):
@@ -40,9 +42,17 @@ Current working directory: C:/work`;
   assert.ok(result.includes('Pie overview and docs index: C:/Users/me/pie/README.md; C:/Users/me/pie/docs/INDEX.md'));
   assert.ok(result.includes('Underlying pi: C:\\sdk\\README.md; docs: C:\\sdk\\docs; examples: C:\\sdk\\examples'));
   assert.ok(result.includes(dynamic));
+  assert.ok(result.includes(TRAVERSAL_POLICY_PROMPT));
   assert.ok(result.endsWith(trailing));
   assert.ok(!result.includes('You are an expert coding assistant operating inside pi'));
   assert.ok(!result.includes('When asked about: extensions'));
+});
+
+test('root AGENTS policy mirror cannot drift from the canonical prompt', () => {
+  const agents = readFileSync(path.join(process.cwd(), '..', 'AGENTS.md'), 'utf8');
+  const match = agents.match(/<!-- canonical-traversal-policy:start -->([\s\S]*?)<!-- canonical-traversal-policy:end -->/u);
+  assert.ok(match, 'AGENTS.md must carry the canonical traversal-policy block');
+  assert.equal(match[1]!.replace(/\s+/gu, ' ').trim(), TRAVERSAL_POLICY_PROMPT);
 });
 
 test('matches and rewrites the locked SDK harness template', async () => {
@@ -77,8 +87,15 @@ test('matches and rewrites the locked SDK harness template', async () => {
   assert.match(result, /^You are a coding agent operating inside pie/);
   assert.ok(result.includes(`- read: ${dynamicSnippet}`));
   assert.ok(result.includes(`- ${dynamicGuideline}`));
+  assert.ok(result.includes(TRAVERSAL_POLICY_PROMPT));
   assert.ok(result.includes('Pie overview and docs index: C:/pie/README.md; C:/pie/docs/INDEX.md'));
   assert.ok(!result.includes('Pi documentation (read only'));
+});
+
+test('does not duplicate traversal policy already supplied by project context', () => {
+  const input = `${intro}\n\n${TRAVERSAL_POLICY_PROMPT}\n\n${docs}`;
+  const result = rewritePieHarnessPrompt(input, 'C:/pie');
+  assert.equal(result.split(TRAVERSAL_POLICY_PROMPT).length - 1, 1);
 });
 
 test('leaves custom and unknown prompt shapes untouched', () => {

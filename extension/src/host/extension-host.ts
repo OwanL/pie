@@ -37,6 +37,7 @@ import { dispatch } from './core/dispatch';
 import { initialArchState, type ArchState } from './core/reducer';
 import type { Event } from './core/events';
 import type { SessionOperationSource } from './core/operation-types.js';
+import { operationAndIncidentTraceEvents } from './core/operation-incident-tracing.js';
 import { selectViewState } from './core/projection';
 import { auditLog, bootLog } from './util/audit';
 import { getDiagPath, isStreamDiagEnabled, setStreamDiagEnabled } from './util/stream-telemetry';
@@ -524,7 +525,9 @@ export class PieExtension implements vscode.Disposable {
    * This is the single point where the new CQRS spine integrates with the extension.
    */
   private dispatchArchEvent(event: Event): void {
-    const traceStartedAt = isLivePipelineTraceEnabled() ? performance.now() : 0;
+    const traceEnabled = isLivePipelineTraceEnabled();
+    const traceStartedAt = traceEnabled ? performance.now() : 0;
+    const stateBefore = this.archState;
     const registryInputsBefore = {
       sessions: this.archState.sessions.sessions,
       openTabPaths: this.archState.sessions.openTabPaths,
@@ -564,7 +567,7 @@ export class PieExtension implements vscode.Disposable {
       // that a target started, stopped, opened, closed, pinned, or unpinned.
       this.pushOpenTabsRegistry();
     }
-    if (isLivePipelineTraceEnabled()) {
+    if (traceEnabled) {
       const trace = eventTraceMetadata(event);
       recordLivePipelineTrace({
         process: 'host',
@@ -574,6 +577,9 @@ export class PieExtension implements vscode.Disposable {
         eventSeq: trace.eventSeq,
         durationMs: Math.max(0, performance.now() - traceStartedAt),
       });
+      for (const semanticTrace of operationAndIncidentTraceEvents(stateBefore, this.archState, event)) {
+        recordLivePipelineTrace(semanticTrace);
+      }
     }
     for (const effect of result.effects) {
       this.effectRunner.run(effect);

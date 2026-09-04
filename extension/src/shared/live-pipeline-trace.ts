@@ -24,6 +24,8 @@ export const LIVE_PIPELINE_TRACE_STAGES = [
   'host.checkpoint.received',
   'host.checkpoint.failed',
   'host.reducer.applied',
+  'host.operation.transition',
+  'host.incident.reported',
   'host.projection.completed',
   'host.snapshot.built',
   'host.post.started',
@@ -207,7 +209,9 @@ export type LivePipelineIdentifierKind =
   | 'message'
   | 'tool'
   | 'hostInstance'
-  | 'workerId';
+  | 'workerId'
+  | 'operation'
+  | 'incident';
 
 export interface LivePipelineTraceFingerprint {
   /** Logical UTF-16 length for strings, element length for bytes. */
@@ -373,6 +377,20 @@ export interface LivePipelineTraceEvent {
   readiness?: 'ready' | 'not_ready' | 'reloading' | 'hidden';
   postResult?: 'true' | 'false' | 'rejected' | 'timeout' | 'late';
   health?: LivePipelineTraceHealthMetadata;
+  /** Semantic operation/incident metadata. Values come from closed domain
+   * vocabularies; raw IDs and free-form incident text are never serialized. */
+  operationKind?: 'session.create' | 'session.duplicate' | 'session.open' | 'session.close' | 'backend.restart'
+    | 'message.send' | 'message.edit' | 'message.interrupt' | 'message.continue' | 'message.compact';
+  previousOperationPhase?: 'awaiting-acceptance' | 'draining' | 'awaiting-old-generation-death' | 'awaiting-commit' | 'ambiguous' | 'settled';
+  operationPhase?: 'awaiting-acceptance' | 'draining' | 'awaiting-old-generation-death' | 'awaiting-commit' | 'ambiguous' | 'settled';
+  operationAcceptance?: 'pending' | 'ambiguous' | 'accepted' | 'rejected';
+  operationCommit?: 'pending' | 'unknown' | 'committed' | 'not-committed';
+  operationTerminalOutcome?: 'settled' | 'cancelled' | 'superseded' | 'failed';
+  operationTerminalReason?: 'durable-commit-observed' | 'definitive-rejection' | 'backend-generation-ended' | 'queue-cleared'
+    | 'interrupted-before-commit' | 'superseded-before-commit' | 'execution-failed';
+  incidentSeverity?: 'info' | 'warning' | 'error';
+  incidentCertainty?: 'definitive' | 'ambiguous' | 'recovered';
+  incidentPhase?: 'acceptance' | 'preflight' | 'provider' | 'retry' | 'tool' | 'settlement' | 'recovery' | 'transport' | 'runtime' | 'extension';
 }
 
 /** Serialized metadata-only record. It has no free-form content field. */
@@ -392,6 +410,8 @@ export interface LivePipelineTraceRecord extends Omit<LivePipelineTraceEvent, 'i
   toolHash?: string;
   hostInstanceHash?: string;
   workerIdHash?: string;
+  operationHash?: string;
+  incidentHash?: string;
   processRole?: 'coordinator' | 'worker' | 'host' | 'webview';
   pid?: number;
   coordinatorGeneration?: number;
@@ -483,6 +503,7 @@ function copyIdentifiers(
     ['session', 'sessionHash'], ['request', 'requestHash'], ['turn', 'turnHash'],
     ['attempt', 'attemptHash'], ['message', 'messageHash'], ['tool', 'toolHash'],
     ['hostInstance', 'hostInstanceHash'], ['workerId', 'workerIdHash'],
+    ['operation', 'operationHash'], ['incident', 'incidentHash'],
   ];
   for (const [source, target] of names) {
     const value = identifiers[source];
@@ -553,6 +574,40 @@ function copyOptionalMetadata(record: LivePipelineTraceRecord, event: LivePipeli
   if (event.readiness !== undefined) record.readiness = event.readiness;
   if (event.postResult !== undefined) record.postResult = event.postResult;
   if (event.health !== undefined) record.health = normalizedHealth(event.health);
+  copySemanticMetadata(record, event);
+}
+
+const OPERATION_KINDS = ['session.create', 'session.duplicate', 'session.open', 'session.close', 'backend.restart', 'message.send', 'message.edit', 'message.interrupt', 'message.continue', 'message.compact'] as const;
+const OPERATION_PHASES = ['awaiting-acceptance', 'draining', 'awaiting-old-generation-death', 'awaiting-commit', 'ambiguous', 'settled'] as const;
+const OPERATION_ACCEPTANCE = ['pending', 'ambiguous', 'accepted', 'rejected'] as const;
+const OPERATION_COMMIT = ['pending', 'unknown', 'committed', 'not-committed'] as const;
+const OPERATION_OUTCOMES = ['settled', 'cancelled', 'superseded', 'failed'] as const;
+const OPERATION_REASONS = ['durable-commit-observed', 'definitive-rejection', 'backend-generation-ended', 'queue-cleared', 'interrupted-before-commit', 'superseded-before-commit', 'execution-failed'] as const;
+const INCIDENT_SEVERITIES = ['info', 'warning', 'error'] as const;
+const INCIDENT_CERTAINTIES = ['definitive', 'ambiguous', 'recovered'] as const;
+const INCIDENT_PHASES = ['acceptance', 'preflight', 'provider', 'retry', 'tool', 'settlement', 'recovery', 'transport', 'runtime', 'extension'] as const;
+
+function copySemanticMetadata(record: LivePipelineTraceRecord, event: LivePipelineTraceEvent): void {
+  const fields: Array<[keyof LivePipelineTraceEvent, readonly string[]]> = [
+    ['operationKind', OPERATION_KINDS],
+    ['previousOperationPhase', OPERATION_PHASES],
+    ['operationPhase', OPERATION_PHASES],
+    ['operationAcceptance', OPERATION_ACCEPTANCE],
+    ['operationCommit', OPERATION_COMMIT],
+    ['operationTerminalOutcome', OPERATION_OUTCOMES],
+    ['operationTerminalReason', OPERATION_REASONS],
+    ['incidentSeverity', INCIDENT_SEVERITIES],
+    ['incidentCertainty', INCIDENT_CERTAINTIES],
+    ['incidentPhase', INCIDENT_PHASES],
+  ];
+  for (const [field, allowed] of fields) {
+    const value = event[field];
+    if (value === undefined) continue;
+    if (typeof value !== 'string' || !allowed.includes(value)) {
+      throw new RangeError(`Trace semantic metadata ${String(field)} must be allowlisted.`);
+    }
+    (record as unknown as Record<string, unknown>)[field] = value;
+  }
 }
 
 function normalizedEventLoopHistogram(value: LivePipelineTraceEventLoopHistogram): LivePipelineTraceEventLoopHistogram {

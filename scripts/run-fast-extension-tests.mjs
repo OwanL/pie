@@ -10,6 +10,7 @@ import process from 'node:process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { withoutPiHarnessEnv } from './lib/pi-harness-env.mjs';
+import { isProtectedDirectoryName } from './lib/traversal-policy.mjs';
 
 const REPORT_PREFIX = '__PI_TEST_SUMMARY__';
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -77,6 +78,7 @@ const UNSAFE_SCOPED_BATCH_SOURCE = /\bModule\.(?:register|_load)|\bmodule\.regis
 async function walkTestFiles(relativeDir, output) {
   const absoluteDir = path.join(extensionRoot, relativeDir);
   for (const entry of await readdir(absoluteDir, { withFileTypes: true })) {
+    if (entry.isDirectory() && isProtectedDirectoryName(entry.name)) continue;
     const relativePath = path.posix.join(relativeDir.replace(/\\/gu, '/'), entry.name);
     if (entry.isDirectory()) await walkTestFiles(relativePath, output);
     else if (entry.name.endsWith('.test.ts') || entry.name.endsWith('.test.tsx')) output.push(relativePath);

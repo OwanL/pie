@@ -382,6 +382,8 @@ Work includes:
 
 ### G. Agent and file-I/O safety
 
+**Implemented (2026-09-05).** `shared/traversal-policy.ts` is the canonical protected-directory policy. Root `AGENTS.md`, the default Pie harness rewrite, every subagent prompt, warm-bash, codebase-maintenance scanners, test impact, and broad test discovery consume it directly or through a drift-checked adapter. Recursive grep and bare find are pruned; unsupported bare-root `ls -R`, `tree`, and `du` fail fast, while exact/scoped protected-path inspection and the explicit environment opt-out remain available.
+
 **Goal:** prevent accidental traversal of generated or runtime trees without depending on agent memory.
 
 Work includes:
@@ -410,6 +412,8 @@ Static thresholds are advisory. A large single-concern table may remain; a small
 
 ### I. Verification and observability
 
+**Milestone 0 complete (2026-09-05).** A shared deterministic fake clock and model harness enumerate and fixed-seed-randomize 6,696 operation schedules across send/queue/continue/edit/compact/interrupt/open/close/restart. Focused transport tests inject acknowledgement loss, delayed events, overlong records, worker crash evidence, and backend replacement. Deferred-trigger acceptance includes a real two-process claim race and real dead-owner recovery race. Live diagnostics emit metadata-only operation-transition and incident records with HMACed semantic IDs and closed classifications; request/correlation/worker IDs, free-form incident text, and credentials are excluded.
+
 **Goal:** make races and accounting defects cheap to reproduce before changing architecture.
 
 Work includes:
@@ -426,6 +430,8 @@ Work includes:
 ## 9. Prioritization and sequencing
 
 ### Milestone 0: guardrails and reproducible baselines
+
+**Implemented (2026-09-05).** Canonical traversal policy delivery/adapters and drift tests cover agents, shell guards, maintenance scanners, test impact, and test discovery. Deterministic operation schedules, command-transport fault injection, real two-process deferred-trigger claiming/recovery, structured HMAC/redacted semantic tracing, active-session publication reproduction, and representative accounting fixtures provide the baseline evidence.
 
 1. Centralize and apply traversal exclusions so audit/implementation agents cannot repeatedly enter runtime trees.
 2. Add focused reproductions for the reported build interruption and highest-risk lifecycle races.
@@ -571,9 +577,9 @@ This section records why the workstreams exist. It is evidence, not a required i
 
 | Priority | Confidence | Finding | Current evidence |
 |---|---|---|---|
-| P0 | Confirmed | Broad agent traversal can enter very large runtime trees. | `warm-bash` excludes a static subset and its `find` rule only prunes `node_modules`/`.git`; maintenance ignores omit some root session/cache/temp/package paths while `.gitignore` contains a broader policy. |
+| P0 | Resolved 2026-09-05 | Broad agent traversal could enter very large runtime trees. | The canonical policy now drives warm-bash grep/find guards, root and subagent prompts, test impact/discovery, and scanner drift tests; unsupported root `ls -R`, `tree`, and `du` fail fast with scoped and explicit opt-ins. |
 | P0 | Confirmed | `user_input` resume adds a second synthetic prompt after dispatching the real user prompt. | The message router dispatches Send and then notifies the trigger registry; the registry dispatches another Send. |
-| P0 | Confirmed | Deferred triggers are at-most-once only per process, not across hosts. | Multiple hosts replay the same append-only sidecar and each can append `fire` and dispatch without an atomic claim. |
+| P0 | Resolved 2026-09-05 | Deferred triggers previously lacked proven cross-host at-most-once delivery. | Atomic hard-link claims and dead-owner recovery are now exercised by two independent OS-process races, including one real owner exit before dispatch. |
 | P0 | Confirmed | Continue availability has multiple classifiers. | The webview scans its loaded transcript while the backend classifies SDK messages and context-window overflow. |
 | P0 | Structural risk | A lost Continue owner in the acknowledgement/start gap can return without an explicit terminal event. | Deferred start checks ownership and returns silently; a focused race test is still required. |
 | P0 | Confirmed | Some session transition waits are unbounded. | Send/continue/title paths loop while transition pending without a local bound or typed wait outcome. |

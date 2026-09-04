@@ -41,6 +41,8 @@ export interface BackendClientOptions {
   readyTimeoutMs?: number;
   /** Test seam that prevents unit clients from enumerating machine processes. */
   orphanReaper?: () => Promise<OrphanReapResult>;
+  /** Test/diagnostic override for backend stdout record bounds. */
+  stdoutMaxLineBytes?: number;
 }
 
 export interface CorrelatedBackendFailure {
@@ -485,7 +487,7 @@ export class BackendClient implements vscode.Disposable {
       this.detachReader = attachJsonlLineReader(proc.stdout, (line) => {
         this.handleLine(line);
       }, {
-        maxLineBytes: JSONL_MAX_LINE_BYTES,
+        maxLineBytes: this.options.stdoutMaxLineBytes ?? JSONL_MAX_LINE_BYTES,
         onOverflow: ({ maxLineBytes, preview }) => {
           appendPieLog('error', 'backend-client', 'backend stdout JSONL line exceeded limit; terminating backend', {
             maxLineBytes,

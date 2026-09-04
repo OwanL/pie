@@ -1,3 +1,5 @@
+import { TRAVERSAL_POLICY_PROMPT } from './traversal-policy.js';
+
 const PI_INTRO =
   'You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.';
 
@@ -26,7 +28,10 @@ function extractBullet(block: string, label: string): string | undefined {
 export function rewritePieHarnessPrompt(prompt: string, agentDir: string): string {
   if (!prompt.startsWith(PI_INTRO)) return prompt;
 
-  let rewritten = PIE_INTRO + prompt.slice(PI_INTRO.length);
+  const traversalPolicy = prompt.includes(TRAVERSAL_POLICY_PROMPT)
+    ? ''
+    : `\n\n${TRAVERSAL_POLICY_PROMPT}`;
+  let rewritten = `${PIE_INTRO}${traversalPolicy}` + prompt.slice(PI_INTRO.length);
   const docsStart = rewritten.indexOf(PI_DOCS_START);
   if (docsStart < 0) return rewritten;
 

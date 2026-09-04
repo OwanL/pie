@@ -66,8 +66,30 @@ class TraversalPolicyDriftTests(unittest.TestCase):
 
     def _protected_dirs(self) -> list[str]:
         text = self.POLICY_PATH.read_text(encoding="utf-8")
-        dirs = re.findall(r'\bdir:\s*"([^"]+)"', text)
+        declaration = re.search(
+            r"PROTECTED_DIRECTORIES[^=]*=\s*\[([\s\S]*?)\n\s*\];",
+            text,
+        )
+        self.assertIsNotNone(
+            declaration,
+            f"cannot locate PROTECTED_DIRECTORIES in {self.POLICY_PATH}",
+        )
+        body = re.sub(r"/\*[\s\S]*?\*/", "", declaration.group(1))
+        body = re.sub(r"//[^\n]*", "", body)
+        entry_pattern = re.compile(
+            r"\{\s*dir:\s*(['\"])([^'\"]+)\1\s*,\s*"
+            r"className:\s*(['\"])([^'\"]+)\3\s*\}"
+        )
+        entries = list(entry_pattern.finditer(body))
+        residue = entry_pattern.sub("", body)
+        residue = re.sub(r"[\s,]", "", residue)
+        self.assertFalse(
+            residue,
+            f"unparsed canonical traversal-policy entry: {residue}",
+        )
+        dirs = [entry.group(2) for entry in entries]
         self.assertTrue(dirs, f"no protected directories parsed from {self.POLICY_PATH}")
+        self.assertEqual(len(dirs), len(set(dirs)), "duplicate canonical protected directory")
         return dirs
 
     @staticmethod

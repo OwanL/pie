@@ -356,6 +356,16 @@ export function handleSend(state: ArchState, cmd: Extract<Command, { kind: 'Send
         ],
       };
     }
+    const stillQueued = Object.values(state.pending.sendQueueBySession).flat()
+      .some((entry) => entry.operationId === cmd.operationId)
+      || Object.values(state.pending.backendReadyQueueBySession).flat()
+        .some((entry) => entry.operationId === cmd.operationId);
+    const transportOwned = Object.values(state.pending.ops).some((entry) => entry.operationId === cmd.operationId)
+      || Object.values(state.pending.promoted).some((entry) => entry.operationId === cmd.operationId);
+    // Replayed renderer commands are observations, not retries. The one
+    // exception is the reducer's own queue drain: it removes the queue before
+    // redispatch and has not yet created a transport owner.
+    if (stillQueued || transportOwned) return { state, effects: [] };
   } else {
     state = {
       ...state,

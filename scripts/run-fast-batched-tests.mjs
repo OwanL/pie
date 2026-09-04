@@ -8,6 +8,7 @@ import process from 'node:process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { withoutPiHarnessEnv } from './lib/pi-harness-env.mjs';
+import { isProtectedDirectoryName } from './lib/traversal-policy.mjs';
 
 const REPORT_PREFIX = '__PI_TEST_SUMMARY__';
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -29,6 +30,7 @@ const rootBatchDirs = [
 
 async function walk(directory, extensions, output) {
   for (const entry of await readdir(directory, { withFileTypes: true })) {
+    if (entry.isDirectory() && isProtectedDirectoryName(entry.name)) continue;
     const absolutePath = path.join(directory, entry.name);
     if (entry.isDirectory()) await walk(absolutePath, extensions, output);
     else if (extensions.some((suffix) => entry.name.endsWith(suffix))) output.push(absolutePath);

@@ -242,6 +242,10 @@ across the postMessage boundary.
   sidecar replay/claim edge cases, including owner PID artifacts, injected
   liveness, safe dead-owner release, ambiguous dispatch retention, and two
   stores sharing one file.
+- `extension/test/host/deferred-triggers/deferred-triggers-process-race.test.ts`
+  — two real OS processes race one claim and durable dispatch witness, then two
+  replacement processes race recovery and witnessed delivery after a real claim
+  owner exits before the dispatch boundary.
 - `extension/test/backend/transcript/transcript-deferred-trigger.test.ts` —
   wake-up prefix → customType re-derivation on transcript reload.
 - `extension/test/webview/…` — aggregate-stats-strip menu render + cancel.
@@ -252,5 +256,6 @@ Run the focused tests with:
 npm run test:file -- \
   extensions/deferred-triggers/test/store.test.ts \
   extension/test/host/deferred-triggers/deferred-triggers-store.test.ts \
-  extension/test/host/deferred-triggers/deferred-triggers-registry.test.ts
+  extension/test/host/deferred-triggers/deferred-triggers-registry.test.ts \
+  extension/test/host/deferred-triggers/deferred-triggers-process-race.test.ts
 ```

@@ -9,6 +9,33 @@ import {
   impactedTestsForChanges,
   planAffectedTests,
 } from '../lib/test-impact.mjs';
+import {
+  isProtectedDirectoryName,
+  parseProtectedDirectoryNames,
+  PROTECTED_DIRECTORY_NAMES,
+} from '../lib/traversal-policy.mjs';
+
+test('plain-Node root walkers consume every canonical protected-directory entry', () => {
+  assert.ok(PROTECTED_DIRECTORY_NAMES.length > 20);
+  for (const name of ['node_modules', '.git', 'build', 'data', 'sessions', 'logs', 'coverage']) {
+    assert.equal(isProtectedDirectoryName(name), true, name);
+  }
+  assert.equal(isProtectedDirectoryName('.pie-sdk-fixture'), true);
+  assert.equal(isProtectedDirectoryName('fixture.egg-info'), true);
+  assert.equal(isProtectedDirectoryName('src'), false);
+  assert.deepEqual(parseProtectedDirectoryNames(`
+    export const PROTECTED_DIRECTORIES = [
+      { dir: 'single-quoted', className: 'caches' },
+      { dir: "double-quoted", className: "logs" },
+    ];
+  `), ['single-quoted', 'double-quoted']);
+  assert.throws(() => parseProtectedDirectoryNames(`
+    export const PROTECTED_DIRECTORIES = [
+      { dir: 'parsed', className: 'caches' },
+      buildEntry('silently-dropped'),
+    ];
+  `), /unsupported or unparsed entry/);
+});
 
 test('extractRelativeDependencies recognizes imports, exports, require, and file URLs', () => {
   const dependencies = extractRelativeDependencies(`
@@ -62,6 +89,10 @@ async function withFixture(run) {
     await writeFile(path.join(root, 'extension', 'test', 'other.test.ts'), 'export {};');
     await writeFile(path.join(root, 'extension', 'test', 'integration', 'model-config-sync.test.ts'), 'export {};');
     await writeFile(path.join(root, 'extension', 'test', 'integration', 'model-profile-coverage.test.ts'), 'export {};');
+    for (const protectedDir of ['data', 'build', '.pie-sdk-fixture']) {
+      await mkdir(path.join(root, 'extension', protectedDir), { recursive: true });
+      await writeFile(path.join(root, 'extension', protectedDir, `${protectedDir}.test.ts`), 'export {};');
+    }
     await run(root);
   } finally {
     await rm(root, { recursive: true, force: true });

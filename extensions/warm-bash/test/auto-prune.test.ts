@@ -69,8 +69,8 @@ describe('warm-bash auto-prune: grep rule', () => {
     );
   });
 
-  test('-r, -R, -rnI, -Er all count as recursive', () => {
-    for (const flag of ['-r', '-R', '-rnI', '-Er']) {
+  test('-r, -R, -rnI, -Er and long forms all count as recursive', () => {
+    for (const flag of ['-r', '-R', '-rnI', '-Er', '--recursive', '--dereference-recursive']) {
       const r = rewrite(`grep ${flag} foo .`, { gnuGrepProbe: gnu });
       assert.ok(r.includes('--exclude-dir=node_modules'), `${flag} should rewrite`);
       assert.ok(r.startsWith(`grep ${EXCLUDE_FLAGS} ${flag} `), `${flag} prefix`);
@@ -185,18 +185,20 @@ describe('warm-bash auto-prune: bare-root recursive ls fail-fast', () => {
     }
   });
 
-  test('shell-meta segments pass through (conservative)', () => {
-    assert.strictEqual(rewrite('ls -R > out.txt', { gnuGrepProbe: gnu }), 'ls -R > out.txt');
-    assert.strictEqual(rewrite('ls -R . > out.txt', { gnuGrepProbe: gnu }), 'ls -R . > out.txt');
-    assert.strictEqual(rewrite('ls -R *', { gnuGrepProbe: gnu }), 'ls -R *');
-    assert.strictEqual(rewrite('ls -R $(pwd)', { gnuGrepProbe: gnu }), 'ls -R $(pwd)');
+  test('root globs, redirects, and variable roots fail fast while scoped globs pass', () => {
+    for (const cmd of ['ls -R > out.txt', 'ls -R . > out.txt', 'ls -R *', 'ls -R ./*/', 'ls -R ./{*,.*}', 'ls -R $(pwd)', 'ls -R -I node_modules']) {
+      assert.match(rewrite(cmd, { gnuGrepProbe: gnu }), /pie warm-bash:/, cmd);
+    }
+    assert.strictEqual(rewrite('ls -R src/*', { gnuGrepProbe: gnu }), 'ls -R src/*');
+    assert.strictEqual(rewrite('ls -R ./src/* > out.txt', { gnuGrepProbe: gnu }), 'ls -R ./src/* > out.txt');
   });
 
-  test('a leading VAR=val assignment prefix opts out (deliberate env override)', () => {
+  test('only the explicit traversal assignment opts out', () => {
     assert.strictEqual(
       rewrite('PIE_BASH_AUTO_PRUNE=0 ls -R .', { gnuGrepProbe: gnu }),
       'PIE_BASH_AUTO_PRUNE=0 ls -R .',
     );
+    assert.match(rewrite('LANG=C ls -R .', { gnuGrepProbe: gnu }), /pie warm-bash:/);
   });
 
   test('rejected ls inside a compound command leaves other segments byte-identical', () => {
@@ -215,6 +217,44 @@ describe('warm-bash auto-prune: bare-root recursive ls fail-fast', () => {
     assert.equal(r.status, 2);
     assert.ok((r.stderr ?? '').includes('pie warm-bash:'), `stderr: ${r.stderr}`);
     assert.equal(r.stdout ?? '', '');
+  });
+});
+
+describe('warm-bash auto-prune: unsupported broad root walkers fail fast', () => {
+  let rewrite: Rewrite;
+  test.before(async () => { rewrite = await loadRewrite(); });
+
+  test('bare-root tree and du forms are rejected with a bounded opt-out message', () => {
+    for (const cmd of [
+      'tree', 'tree .', 'tree -L 2', 'tree -H https://example.test', 'tree -T title',
+      'du', 'du .', 'du -sh', 'du -d 2 .', 'du -t 1', 'du -X excludes.txt', 'du -sh *',
+      'LANG=C tree', 'LANG=C du -sh', 'tree $ROOT', 'du "$ROOT"',
+      'tree ./{*,.*}', 'du ./*/', 'tree > out', 'du -sh 2>/dev/null',
+      'PIE_BASH_AUTO_PRUNE=0 PIE_BASH_AUTO_PRUNE=1 tree',
+    ]) {
+      const rewritten = rewrite(cmd, { gnuGrepProbe: gnu });
+      assert.ok(rewritten.includes('echo "pie warm-bash:'), `${cmd} → rejection, got: ${rewritten}`);
+      assert.ok(rewritten.endsWith('>&2; (exit 2)'), `${cmd} → bounded exit, got: ${rewritten}`);
+      assert.ok(rewritten.includes('PIE_BASH_AUTO_PRUNE=0'));
+    }
+  });
+
+  test('scoped and exact protected-path inspection remains an explicit opt-in', () => {
+    for (const cmd of ['tree src', 'tree data', 'tree -L 2 extension/src', 'du src', 'du -D src', 'du -sh data', 'du -d 2 sessions']) {
+      assert.strictEqual(rewrite(cmd, { gnuGrepProbe: gnu }), cmd, cmd);
+    }
+    for (const cmd of ['PIE_BASH_AUTO_PRUNE=0 tree', 'PIE_BASH_AUTO_PRUNE=0 du -sh .']) {
+      assert.strictEqual(rewrite(cmd, { gnuGrepProbe: gnu }), cmd, cmd);
+    }
+  });
+
+  test('rejected unsupported walker exits before touching a scoped sentinel', () => {
+    const BASH = findTestBash();
+    const r = spawnSync(BASH, ['-c', rewrite('tree', { gnuGrepProbe: gnu })], {
+      encoding: 'utf8', cwd: os.tmpdir(), windowsHide: true,
+    });
+    assert.equal(r.status, 2);
+    assert.match(r.stderr ?? '', /bare-root 'tree' is blocked/);
   });
 });
 
@@ -278,8 +318,11 @@ describe('warm-bash auto-prune: find rule', () => {
     );
   });
 
-  test('scoped path (src, /tmp) passes through', () => {
+  test('root globs fail fast while scoped paths and scoped globs pass through', () => {
+    assert.match(rewrite("find ./* -type f", { gnuGrepProbe: gnu }), /pie warm-bash:/);
+    assert.match(rewrite("find * -type f", { gnuGrepProbe: gnu }), /pie warm-bash:/);
     assert.equal(rewrite('find src -name \'*.ts\'', { gnuGrepProbe: gnu }), 'find src -name \'*.ts\'');
+    assert.equal(rewrite("find src/* -type f", { gnuGrepProbe: gnu }), "find src/* -type f");
     assert.equal(rewrite('find /tmp -name x', { gnuGrepProbe: gnu }), 'find /tmp -name x');
   });
 
@@ -455,7 +498,7 @@ describe('warm-bash auto-prune: segment battery', () => {
     assert.equal(r, `cd ext && grep ${EXCLUDE_FLAGS} -rn foo .`);
   });
 
-  test('rg / non-recursive ls / xargs grep pass through (not grep/find/ls-R programs)', () => {
+  test('rg / non-recursive ls / xargs grep pass through (not guarded root-walker programs)', () => {
     assert.equal(rewrite('rg -n foo .', { gnuGrepProbe: gnu }), 'rg -n foo .');
     assert.equal(rewrite('ls -la', { gnuGrepProbe: gnu }), 'ls -la');
     assert.equal(rewrite('xargs grep -rn foo', { gnuGrepProbe: gnu }), 'xargs grep -rn foo');

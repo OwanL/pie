@@ -31,12 +31,12 @@
  *   - Grep commands that already carry some --exclude-dir flags are completed,
  *     not skipped: only the canonical exclusions they are MISSING are injected,
  *     and an already-present directory is never duplicated.
- *   - Bare-root recursive `ls` (`ls -R` / `ls --recursive`, path absent or `.`)
- *     has no prune mechanism at all, so it is rewritten to a bounded FAIL-FAST
- *     rejection (explanatory stderr message + nonzero exit) instead of being
- *     allowed to traverse known multi-gigabyte trees. Exact/scoped inspection
- *     (`ls -la`, `ls -R src`) passes through, and a leading `VAR=val`
- *     assignment prefix (e.g. `PIE_BASH_AUTO_PRUNE=0 ls -R`) opts out entirely.
+ *   - Unsupported bare-root walkers (`ls -R`, `tree`, and `du`) have no safe
+ *     prune mechanism, so they are rewritten to a bounded FAIL-FAST rejection
+ *     (explanatory stderr message + nonzero exit) instead of traversing known
+ *     multi-gigabyte trees. Exact/scoped inspection (`tree src`, `du data`)
+ *     passes through, and the explicit `PIE_BASH_AUTO_PRUNE=0` assignment
+ *     prefix opts out entirely.
  *
  * Reassembly is byte-preserving at the SEGMENT level: only segments whose
  * program was rewritten have their substring spliced; every separator, newline,
@@ -298,6 +298,9 @@ function rewriteSegment(text: string, opts: PruneOpts): string {
   if (name === "ls") {
     return rewriteLsSegment(text, toks, idx, prog);
   }
+  if (name === "tree" || name === "du") {
+    return rewriteUnsupportedRootWalker(text, toks, idx, prog, name);
+  }
   return text; // rule 3 passthrough (rg, xargs grep …, etc.)
 }
 
@@ -310,11 +313,12 @@ function rewriteGrepSegment(
 ): string {
   const args = toks.slice(progIdx + 1);
 
-  // Recursive? any single-dash flag containing r/R (covers -r, -R, -rn, -rnI, -Er).
+  // Recursive? GNU grep supports both clustered short flags and long forms.
   let recursive = false;
   for (const t of args) {
     const v = t.value;
-    if (v.startsWith("-") && !v.startsWith("--") && /[rR]/.test(v.slice(1))) {
+    if (v === "--recursive" || v === "--dereference-recursive"
+      || (v.startsWith("-") && !v.startsWith("--") && /[rR]/.test(v.slice(1)))) {
       recursive = true;
       break;
     }
@@ -377,6 +381,22 @@ function referencesProtectedPath(args: RawTok[]): boolean {
 
 function rewriteFindSegment(text: string, toks: RawTok[], progIdx: number, prog: RawTok): string {
   const afterFind = toks.slice(progIdx + 1);
+  if (hasExplicitTraversalOptOut(toks, progIdx)) return text;
+
+  // Shell-expanded root globs turn into multiple unpruned find roots before
+  // find starts. They cannot be safely rewritten, so reject them rather than
+  // traversing every protected top-level tree. Scoped globs (`src/*`) pass.
+  const leadingPaths: RawTok[] = [];
+  for (const token of afterFind) {
+    if (token.value.startsWith("-") || token.value === "(" || token.value === ")" || token.value === "!") break;
+    leadingPaths.push(token);
+  }
+  if (leadingPaths.some((token) =>
+    isBroadRootOperand(token.value) && !/^\.[\\/]*$/u.test(token.value))) {
+    const prefix = text.slice(0, prog.start);
+    const suffix = text.slice(toks[toks.length - 1]!.end);
+    return `${prefix}echo "${broadWalkerRejectMessage("find root glob")}" >&2; (exit 2)${suffix}`;
+  }
 
   // "No shell operators in the segment": a find reaching here was already split
   // on top-level operators, but it may still carry `$(…)`, backticks, globs,
@@ -438,20 +458,26 @@ function rewriteFindSegment(text: string, toks: RawTok[], progIdx: number, prog:
  *  is replaced with a rejection that explains itself on stderr and exits 2 via
  *  a SUBSHELL (`(exit 2)`) so the warm-pool marker protocol survives and the
  *  real exit code still propagates. Everything except a bare-root recursive
- *  ls passes through: exact listings, scoped inspection (`ls -R src`), and any
- *  leading `VAR=val` assignment prefix (deliberate env override, e.g.
- *  `PIE_BASH_AUTO_PRUNE=0 ls -R`). */
-const LS_REJECT_MESSAGE =
-  "pie warm-bash: bare-root recursive 'ls -R' is blocked to avoid traversing " +
-  "protected and multi-gigabyte trees; scope it to a subdirectory, list an exact " +
-  "path, or prefix the command with PIE_BASH_AUTO_PRUNE=0 to disable this guard.";
+ *  ls passes through: exact listings, scoped inspection (`ls -R src`), and the
+ *  explicit `PIE_BASH_AUTO_PRUNE=0` assignment prefix. */
+function broadWalkerRejectMessage(command: string): string {
+  return `pie warm-bash: bare-root '${command}' is blocked to avoid traversing ` +
+    "protected and multi-gigabyte trees; scope it to a subdirectory, inspect an " +
+    "exact protected path, or prefix the command with PIE_BASH_AUTO_PRUNE=0 to disable this guard.";
+}
+
+const LS_REJECT_MESSAGE = broadWalkerRejectMessage("ls -R");
+const LS_OPTIONS_WITH_VALUE = new Set([
+  "-I", "-T", "-w", "--block-size", "--format", "--hide", "--ignore",
+  "--quoting-style", "--sort", "--tabsize", "--time", "--time-style", "--width",
+]);
 
 function rewriteLsSegment(text: string, toks: RawTok[], progIdx: number, prog: RawTok): string {
   const args = toks.slice(progIdx + 1);
 
-  // A leading `VAR=val` assignment (e.g. `PIE_BASH_AUTO_PRUNE=0 ls -R`) is a
-  // deliberate env override — passthrough instead of rejecting.
-  if (progIdx > 0) return text;
+  // Only the documented explicit override bypasses this guard. Ordinary
+  // environment assignments (`LANG=C`) must not accidentally disable it.
+  if (hasExplicitTraversalOptOut(toks, progIdx)) return text;
 
   // Recursive? `--recursive`, or any single-dash flag cluster containing `R`
   // (`-R`, `-laR`, `-1Ra`; GNU ls has no other flag with an `R`).
@@ -466,17 +492,27 @@ function rewriteLsSegment(text: string, toks: RawTok[], progIdx: number, prog: R
   }
   if (!recursive) return text;
 
-  // Anything beyond plain flags/paths (redirects, globs, vars, parens, …) →
-  // passthrough; we only reject the plain broad walk.
-  if (hasShellMeta(text.slice(prog.start))) return text;
-
-  // Path operands: ls accepts multiple; a `.`/`./` operand (or none at all —
-  // ls defaults to `.`) makes the recursive walk a bare-root one. Any other
-  // operand set is exact/scoped inspection — passthrough.
-  const paths = args.filter((t) => !t.value.startsWith("-")).map((t) => t.value);
-  const bareRoot =
-    paths.length === 0 ||
-    paths.some((p) => p === "." || /^\.[\\/]+$/.test(p));
+  // Path operands: stop at a redirect, whose target is not an ls path. A
+  // `.`/root glob/variable operand (or no operand — ls defaults to `.`) is an
+  // unsupported root walk. A clearly scoped operand remains deliberate opt-in,
+  // including a scoped glob such as `src/*`.
+  const paths: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const value = args[i]!.value;
+    if (/^\d*(?:>|>>|<)/u.test(value)) break;
+    if (value.startsWith("--")) {
+      const option = value.includes("=") ? value.slice(0, value.indexOf("=")) : value;
+      if (!value.includes("=") && LS_OPTIONS_WITH_VALUE.has(option)) i += 1;
+      continue;
+    }
+    if (value.startsWith("-")) {
+      if (LS_OPTIONS_WITH_VALUE.has(value)) i += 1;
+      continue;
+    }
+    paths.push(value);
+  }
+  const bareRoot = paths.length === 0 || paths.some((value) =>
+    value.includes("$") || value.includes("`") || isBroadRootOperand(value));
   if (!bareRoot) return text;
 
   // Preserve the segment's leading bytes (whitespace, which for an accepted
@@ -484,6 +520,92 @@ function rewriteLsSegment(text: string, toks: RawTok[], progIdx: number, prog: R
   const prefix = text.slice(0, prog.start);
   const suffix = text.slice(toks[toks.length - 1]!.end);
   return `${prefix}echo "${LS_REJECT_MESSAGE}" >&2; (exit 2)${suffix}`;
+}
+
+const WALKER_OPTIONS_WITH_VALUE: Readonly<Record<'tree' | 'du', ReadonlySet<string>>> = {
+  tree: new Set(["-L", "-P", "-I", "-o", "-H", "-T", "--filelimit", "--charset", "--infofile", "--fromfile"]),
+  du: new Set(["-B", "-d", "-t", "-X", "--block-size", "--exclude", "--exclude-from", "--files0-from", "--max-depth", "--threshold", "--time-style"]),
+};
+
+const WALKER_LONG_OPTIONS_WITHOUT_VALUE: Readonly<Record<'tree' | 'du', ReadonlySet<string>>> = {
+  tree: new Set(["--gitignore", "--ignore-case", "--matchdirs", "--metafirst", "--prune", "--info", "--noreport", "--si", "--du", "--inodes", "--device", "--dirsfirst", "--filesfirst", "--hyperlink", "--help", "--version"]),
+  du: new Set(["--all", "--apparent-size", "--bytes", "--count-links", "--dereference", "--dereference-args", "--human-readable", "--inodes", "--kilobytes", "--local", "--null", "--separate-dirs", "--si", "--summarize", "--total", "--time", "--help", "--version"]),
+};
+
+const WALKER_SHORT_FLAG_CHARS: Readonly<Record<'tree' | 'du', ReadonlySet<string>>> = {
+  tree: new Set("adlfxRqNQpsugDFtvcihJX"),
+  du: new Set("aAbcDhHklLmnsSx0"),
+};
+
+function hasExplicitTraversalOptOut(toks: RawTok[], progIdx: number): boolean {
+  const assignments = toks.slice(0, progIdx)
+    .map((token) => token.value)
+    .filter((value) => value.startsWith("PIE_BASH_AUTO_PRUNE="));
+  return assignments[assignments.length - 1] === "PIE_BASH_AUTO_PRUNE=0";
+}
+
+function isBroadRootOperand(value: string): boolean {
+  const normalized = value.replace(/\\/g, "/");
+  if (normalized === "." || /^\.\/+$/u.test(normalized) || normalized === "*") return true;
+  const relative = normalized.replace(/^\.\/+/, "");
+  return /^[*?\[]/u.test(relative) || (relative.startsWith("{") && relative.includes("*"));
+}
+
+/** Reject common recursive walkers that cannot express the canonical policy.
+ * A non-root path (including a protected path) is a deliberate scoped opt-in.
+ * `*`/`./*` are treated as root walks because the shell would expand them to
+ * every top-level protected tree before the command starts. */
+function rewriteUnsupportedRootWalker(
+  text: string,
+  toks: RawTok[],
+  progIdx: number,
+  prog: RawTok,
+  name: 'tree' | 'du',
+): string {
+  if (hasExplicitTraversalOptOut(toks, progIdx)) return text;
+  const args = toks.slice(progIdx + 1);
+  const paths: string[] = [];
+  const optionsWithValue = WALKER_OPTIONS_WITH_VALUE[name];
+  const longOptionsWithoutValue = WALKER_LONG_OPTIONS_WITHOUT_VALUE[name];
+  const shortFlagChars = WALKER_SHORT_FLAG_CHARS[name];
+  let endOfOptions = false;
+  let ambiguous = false;
+  for (let i = 0; i < args.length; i++) {
+    const value = args[i]!.value;
+    if (/^\d*(?:>|>>|<)/u.test(value)) break;
+    if (!endOfOptions && value === "--") { endOfOptions = true; continue; }
+    if (!endOfOptions && value.startsWith("--")) {
+      const option = value.includes("=") ? value.slice(0, value.indexOf("=")) : value;
+      if (optionsWithValue.has(option)) {
+        if (!value.includes("=")) {
+          if (args[i + 1] === undefined) ambiguous = true;
+          else i += 1;
+        }
+      } else if (!longOptionsWithoutValue.has(option)) {
+        ambiguous = true;
+      }
+      continue;
+    }
+    if (!endOfOptions && /^-[^-]/.test(value)) {
+      if (optionsWithValue.has(value)) {
+        if (args[i + 1] === undefined) ambiguous = true;
+        else i += 1;
+      } else if (![...value.slice(1)].every((flag) => shortFlagChars.has(flag))) {
+        // Attached value forms such as -d2/-t1/-L3 are safe to classify.
+        const option = value.slice(0, 2);
+        if (!optionsWithValue.has(option) || value.length === 2) ambiguous = true;
+      }
+      continue;
+    }
+    paths.push(value);
+  }
+  const broad = ambiguous || paths.length === 0 || paths.some((value) =>
+    value.includes("$") || value.includes("`") || isBroadRootOperand(value));
+  if (!broad) return text;
+
+  const prefix = text.slice(0, prog.start);
+  const suffix = text.slice(toks[toks.length - 1]!.end);
+  return `${prefix}echo "${broadWalkerRejectMessage(name)}" >&2; (exit 2)${suffix}`;
 }
 
 /** Shell-meta guard for the find rewrite AND the ls fail-fast: a candidate

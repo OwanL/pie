@@ -64,6 +64,40 @@ test('record creation joins hardened IDs while copying only closed metadata', ()
   assert.equal('error' in record || 'path' in record || 'command' in record, false);
 });
 
+test('semantic operation and incident records HMAC IDs and reject free-form metadata', () => {
+  const record = createLivePipelineTraceRecord({
+    process: 'host',
+    processRole: 'host',
+    stage: 'host.operation.transition',
+    kind: 'success',
+    identifiers: {
+      session: '/private/session.jsonl?authorization=secret',
+      operation: 'operation-internal-123',
+      incident: 'incident-internal-456',
+    },
+    operationKind: 'message.edit',
+    previousOperationPhase: 'ambiguous',
+    operationPhase: 'settled',
+    operationAcceptance: 'accepted',
+    operationCommit: 'committed',
+    operationTerminalOutcome: 'settled',
+    operationTerminalReason: 'durable-commit-observed',
+  }, { hmacKey: 'test-key', wallTimestampMs: 1, monoMs: 2 });
+
+  assert.equal(record.operationHash, createHardenedLivePipelineTraceIdentifier('operation-internal-123', 'test-key'));
+  assert.equal(record.incidentHash, createHardenedLivePipelineTraceIdentifier('incident-internal-456', 'test-key'));
+  assert.equal(record.operationKind, 'message.edit');
+  assert.equal(record.operationPhase, 'settled');
+  const serialized = JSON.stringify(record);
+  assert.doesNotMatch(serialized, /private|authorization|secret|internal-123|internal-456/u);
+  assert.equal('requestId' in record || 'operationId' in record || 'detail' in record || 'message' in record, false);
+
+  assert.throws(() => createLivePipelineTraceRecord({
+    process: 'host', stage: 'host.operation.transition', kind: 'transition',
+    operationKind: 'credential=secret' as never,
+  }, { hmacKey: 'key', wallTimestampMs: 1, monoMs: 1 }), RangeError);
+});
+
 test('Phase 0 schema carries process, event-loop, writer, and bounded recursive metrics without content', () => {
   const record = createLivePipelineTraceRecord({
     process: 'backend',
