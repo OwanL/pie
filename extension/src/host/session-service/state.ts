@@ -152,12 +152,23 @@ export class SessionServiceState {
     incidentId: string | undefined,
     requestId: string | undefined,
     backendGeneration = this.backendGeneration,
+    dedupeKey?: string,
   ): boolean {
-    const identity = incidentId ?? requestId;
-    if (!identity) return true;
-    const key = `${backendGeneration}:${identity}`;
-    if (this.operationalIncidentKeys.has(key)) return false;
-    this.operationalIncidentKeys.add(key);
+    const requestKey = requestId ? `request:${requestId}` : undefined;
+    const canonicalIdentity = dedupeKey ?? incidentId ?? requestKey;
+    const sharesRequestCondition = requestKey !== undefined
+      && (canonicalIdentity === requestKey || (!dedupeKey && !incidentId));
+    const identities = [
+      canonicalIdentity,
+      incidentId,
+      ...(sharesRequestCondition ? [requestKey] : []),
+    ].filter((identity): identity is string => !!identity)
+      .map((identity) => `${backendGeneration}:${identity}`);
+    if (identities.length === 0) return true;
+    // Claim every alias atomically. A provider incident and the correlated
+    // RPC/legacy error can have different incident IDs but share request:X.
+    if (identities.some((key) => this.operationalIncidentKeys.has(key))) return false;
+    for (const key of identities) this.operationalIncidentKeys.add(key);
     return true;
   }
 

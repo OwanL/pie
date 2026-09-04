@@ -86,6 +86,7 @@ import {
   handleCustomMessage,
   handleExtensionUIRequest,
   handleError,
+  handleIncidentReported,
   handleNoticeShown,
   handlePendingExtensionUIRequestsCleared,
 } from './reducer/ui-handlers.js';
@@ -377,6 +378,10 @@ export function reducer(state: ArchState, event: Event): ReducerResult {
 
     case 'ExtensionUIRequest': {
       return handleExtensionUIRequest(state, event);
+    }
+
+    case 'IncidentReported': {
+      return handleIncidentReported(state, event);
     }
 
     case 'Error': {

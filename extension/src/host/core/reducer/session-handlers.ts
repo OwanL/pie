@@ -1266,7 +1266,15 @@ export function handleSendOperationStatus(state: ArchState, event: Extract<Event
       resolvedPath: event.sessionPath,
       backendGeneration: event.backendGeneration,
     }) ?? operation;
-  } else if (event.state === 'failed' || event.state === 'generation-ended') {
+  } else if (event.state === 'cancelled' || event.state === 'superseded') {
+    updated = settleSessionOperationCancelled(operation, {
+      pendingPath: operation.session.pendingPath,
+      backendGeneration: event.backendGeneration,
+      outcome: event.state,
+      reason: event.state === 'superseded' ? 'superseded-before-commit' : 'queue-cleared',
+      detail: event.error,
+    }) ?? operation;
+  } else if (event.state === 'failed' || event.state === 'aborted' || event.state === 'generation-ended') {
     updated = settleSessionOperationFailed(operation, {
       pendingPath: operation.session.pendingPath,
       backendGeneration: event.backendGeneration,
@@ -1288,6 +1296,20 @@ export function handleSendOperationStatus(state: ArchState, event: Extract<Event
     .map(([corrId]) => corrId);
   const registryState = produce(state, (draft) => {
     draft.operations[event.operationId] = updated;
+    if (event.state === 'cancelled' || event.state === 'superseded') {
+      for (const corrId of owningCorrIds) {
+        delete draft.pending.ops[corrId];
+        delete draft.pending.promoted[corrId];
+      }
+      if (event.requestId) delete draft.pending.requestIdToLocalId[event.requestId];
+      delete draft.pending.prepassBySession[event.sessionPath];
+      if (operation.delivery === 'queued' && operation.localId) {
+        const list = draft.transcript.bySession[event.sessionPath];
+        const index = list?.findIndex((message) => message.id === operation.localId
+          && message.role === 'user' && message.status === 'queued') ?? -1;
+        if (list && index >= 0) list.splice(index, 1);
+      }
+    }
     if (event.state === 'committed') {
       for (const corrId of owningCorrIds) {
         delete draft.pending.ops[corrId];
@@ -1320,7 +1342,7 @@ export function handleSendOperationStatus(state: ArchState, event: Extract<Event
       draft.settings.noticeSessionPath = null;
     }
   });
-  if (event.state === 'failed' || event.state === 'generation-ended') {
+  if (event.state === 'failed' || event.state === 'aborted' || event.state === 'generation-ended') {
     const pendingEntry = Object.entries(registryState.pending.promoted)
       .find(([, pending]) => pending.operationId === event.operationId)
       ?? Object.entries(registryState.pending.ops)

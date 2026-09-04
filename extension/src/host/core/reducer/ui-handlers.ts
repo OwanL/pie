@@ -93,6 +93,28 @@ export function handleExtensionUIRequest(state: ArchState, event: Extract<Event,
   };
 }
 
+export function handleIncidentReported(
+  state: ArchState,
+  event: Extract<Event, { kind: 'IncidentReported' }>,
+): ReducerResult {
+  const { incident } = event;
+  return {
+    state: produce(state, (draft) => {
+      draft.settings.latestIncident = incident;
+      draft.settings.notice = stripReqIds(incident.message);
+      draft.settings.noticeSessionPath = incident.sessionPath;
+      if (incident.severity === 'error') {
+        draft.settings.noticeKind = incident.recovery.restart ? 'backend-exit' : 'operational-error';
+        draft.settings.noticeRaw = incident.detail ?? incident.message;
+      } else {
+        draft.settings.noticeKind = null;
+        draft.settings.noticeRaw = null;
+      }
+    }),
+    effects: [],
+  };
+}
+
 export function handleError(state: ArchState, event: Extract<Event, { kind: 'Error' }>): ReducerResult {
   return {
     state: {
@@ -113,6 +135,7 @@ export function handleError(state: ArchState, event: Extract<Event, { kind: 'Err
         noticeKind: event.error ? 'operational-error' : null,
         noticeRaw: event.error ? (event.detail ?? event.error) : null,
         noticeSessionPath: event.error ? event.sessionPath : null,
+        latestIncident: null,
       },
     },
     effects: [],
@@ -131,6 +154,7 @@ export function handleNoticeShown(state: ArchState, event: Extract<Event, { kind
       // surviving when a notice is replaced by an untyped notification.
       draft.settings.noticeRaw = noticeKind === null ? null : event.noticeRaw ?? null;
       draft.settings.noticeSessionPath = hasNotice ? (event.sessionPath ?? null) : null;
+      draft.settings.latestIncident = null;
     }),
     effects: [],
   };

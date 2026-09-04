@@ -6,7 +6,7 @@ import type { AggregateStats } from './aggregate-stats.js';
 import type { LiveTurnPhase } from '../live-pipeline-protocol.js';
 import type { DeferredTriggerView } from './deferred-triggers.js';
 import type { TokenRateIndicatorState } from '../token-rate.js';
-import type { NoticeKind } from '../error-mapping.js';
+import type { NoticeAction, NoticeKind } from '../error-mapping.js';
 import type {
   DetailChecksum,
   DetailCursor,
@@ -352,6 +352,9 @@ export interface ViewState {
    *  their existing string-only rendering. Invariant: `noticeKind` is non-null
    *  only when `notice` is an H-category error message. */
   noticeKind?: NoticeKind | null;
+  /** Exact actions projected from typed incident recovery eligibility. When
+   * absent, legacy notice-kind mapping remains authoritative. */
+  noticeActions?: NoticeAction[];
   /** Full diagnostic string behind the short `notice` summary, or null. The
    *  host redacts credentials and internal `req-NN` correlation ids at the
    *  webview boundary. Cleared alongside `notice` on dismiss/replace. */

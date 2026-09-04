@@ -12,6 +12,7 @@ import type { Event } from '../../../src/host/core/events';
 import { NOOP_RUN_OBSERVER } from '../../../src/host/stats-service';
 import type { SessionService as SessionServiceType } from '../../../src/host/session-service/service';
 import type { BackendClient as BackendClientType } from '../../../src/host/backend/client';
+import { createOperationalIncident } from '../../../src/shared/incidents';
 
 function installVscodeMock() {
   const moduleWithLoad = Module as typeof Module & { _load: (...args: any[]) => unknown };
@@ -148,6 +149,91 @@ test('correlated backend failures produce exactly one analytics record per reque
     { sessionPath: '/session.jsonl', code: 'SESSION_OPEN_FAILED' },
     { sessionPath: '/session.jsonl', code: 'SESSION_OPEN_FAILED' },
   ]);
+  service.dispose();
+});
+
+test('provider incident and correlated request failure produce one notice and one analytics error', () => {
+  const backendErrors: Array<{ sessionPath?: string; code: string }> = [];
+  const { backend, service, dispatched } = makeHarness({
+    ...NOOP_RUN_OBSERVER,
+    onBackendError: (sessionPath, code) => backendErrors.push({ sessionPath, code }),
+  });
+  const incident = createOperationalIncident({
+    incidentId: 'provider:req-7:rate_limited',
+    dedupeKey: 'request:req-7',
+    sessionPath: '/session.jsonl',
+    operationId: '64e84c7a-b210-4eb6-a17b-38d59b1cbf33',
+    requestId: 'req-7',
+    turnId: 'turn-7',
+    messageId: 'assistant-7',
+    severity: 'error',
+    certainty: 'ambiguous',
+    phase: 'provider',
+    code: 'PROVIDER_RATE_LIMITED',
+    message: 'The provider rate limited this request.',
+    detail: 'HTTP 429',
+    recovery: { retry: true },
+  });
+
+  (service as any).events.handleBackendEvent({ event: 'operational-error', payload: incident });
+  (backend as any).correlatedFailures.fire({
+    backendGeneration: 0,
+    requestId: 'req-7',
+    method: 'message.send',
+    code: 'MESSAGE_SEND_FAILED',
+    message: 'Connection error.',
+    sessionPath: '/session.jsonl',
+    incident: createOperationalIncident({
+      incidentId: 'rpc:req-7',
+      dedupeKey: incident.dedupeKey,
+      sessionPath: '/session.jsonl',
+      requestId: 'req-7',
+      severity: 'error', certainty: 'definitive', phase: 'provider',
+      code: 'MESSAGE_SEND_FAILED', message: 'Connection error.',
+      recovery: { showLogs: true },
+    }),
+  });
+  (service as any).events.handleBackendEvent({
+    event: 'error',
+    payload: {
+      ...incident,
+      incidentId: 'message-send:req-7',
+      code: 'MESSAGE_SEND_FAILED',
+      message: 'Connection error.',
+    },
+  });
+
+  assert.equal(dispatched.filter((event) => event.kind === 'IncidentReported').length, 1);
+  assert.equal(dispatched.filter((event) => event.kind === 'AssistantMessageErrorStamped').length, 1);
+  assert.deepEqual(backendErrors, [{ sessionPath: '/session.jsonl', code: 'PROVIDER_RATE_LIMITED' }]);
+  service.dispose();
+});
+
+test('condition-specific incidents on one request remain independently visible and counted', () => {
+  const backendErrors: string[] = [];
+  const { service, dispatched } = makeHarness({
+    ...NOOP_RUN_OBSERVER,
+    onBackendError: (_sessionPath, code) => backendErrors.push(code),
+  });
+  const base = {
+    sessionPath: '/session.jsonl',
+    requestId: 'req-shared',
+    severity: 'error' as const,
+    certainty: 'definitive' as const,
+    message: 'condition',
+    recovery: { showLogs: true },
+  };
+  (service as any).events.handleBackendEvent({
+    event: 'operational-error',
+    payload: createOperationalIncident({ ...base, phase: 'provider', code: 'PROVIDER_QUOTA_EXHAUSTED', dedupeKey: 'request:req-shared' }),
+  });
+  (service as any).events.handleBackendEvent({
+    event: 'operational-error',
+    payload: createOperationalIncident({ ...base, phase: 'retry', code: 'RETRY_STUCK', dedupeKey: 'retry-stuck:/session.jsonl:req-shared' }),
+  });
+
+  assert.equal(dispatched.filter((event) => event.kind === 'IncidentReported').length, 2);
+  assert.deepEqual(backendErrors, ['PROVIDER_QUOTA_EXHAUSTED', 'RETRY_STUCK']);
   service.dispose();
 });
 

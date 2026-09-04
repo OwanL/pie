@@ -19,6 +19,7 @@ import { classifyBackendStderrLine } from './stderr-classifier';
 import { reapOrphanedBackends, type OrphanReapResult } from './orphan-reaper';
 import { deriveTrustedSdkRoot } from './trusted-sdk-root';
 import type { CommitAwareRequestOptions } from '../core/effect-runner';
+import { createOperationalIncident, type OperationalIncident } from '../../shared/incidents.js';
 import {
   assertProtocolVersion,
   type BackendReadyPayload,
@@ -49,6 +50,9 @@ export interface CorrelatedBackendFailure {
   code: string;
   message: string;
   sessionPath?: string;
+  /** Typed host incident for session-scoped correlated failures. The owning
+   * effect result still owns rollback and notice projection. */
+  incident?: OperationalIncident;
 }
 
 /** Error returned by a correlated backend response. Its stable identity/code
@@ -571,7 +575,21 @@ export class BackendClient implements vscode.Disposable {
           method,
           code: response.error.code,
           message: response.error.message,
-          ...(sessionPath ? { sessionPath } : {}),
+          ...(sessionPath ? {
+            sessionPath,
+            incident: createOperationalIncident({
+              incidentId: `rpc:${id}`,
+              dedupeKey: `request:${id}`,
+              sessionPath,
+              requestId: id,
+              severity: 'error',
+              certainty: 'definitive',
+              phase: 'acceptance',
+              code: response.error.code,
+              message: response.error.message,
+              recovery: { retry: true },
+            }),
+          } : {}),
         });
         throw new BackendRpcError(id, method, response.error.code, response.error.message);
       }

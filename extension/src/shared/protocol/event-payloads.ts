@@ -303,6 +303,7 @@ export function isMessageAbortedPayload(value: unknown): value is MessageAborted
     && isOptionalString(value.messageId)
     && isOptionalString(value.localId)
     && (value.outcome === undefined || value.outcome === 'cancelled' || value.outcome === 'superseded' || value.outcome === 'failed')
+    && isOptionalString(value.incidentId)
     && isOptionalBoolean(value.userInitiated)
     && isOptionalString(value.reason)
   );
@@ -428,12 +429,45 @@ export function isExtensionUIRequestPayload(value: unknown): value is ExtensionU
   }
 }
 
+function isIncidentSeverity(value: unknown): boolean {
+  return value === 'info' || value === 'warning' || value === 'error';
+}
+
+function isIncidentCertainty(value: unknown): boolean {
+  return value === 'definitive' || value === 'ambiguous' || value === 'recovered';
+}
+
+function isIncidentPhase(value: unknown): boolean {
+  return value === 'acceptance' || value === 'preflight' || value === 'provider'
+    || value === 'retry' || value === 'tool' || value === 'settlement'
+    || value === 'recovery' || value === 'transport' || value === 'runtime'
+    || value === 'extension';
+}
+
+function isIncidentRecovery(value: unknown): boolean {
+  return isObject(value)
+    && typeof value.retry === 'boolean'
+    && typeof value.restart === 'boolean'
+    && typeof value.showLogs === 'boolean';
+}
+
 export function isErrorPayload(value: unknown): value is ErrorPayload {
   return (
     isObject(value)
     && isString(value.code)
     && isString(value.message)
+    && isOptionalString(value.incidentId)
+    && isOptionalString(value.dedupeKey)
+    && isOptionalString(value.sessionPath)
+    && isOptionalString(value.operationId)
     && isOptionalString(value.requestId)
+    && isOptionalString(value.turnId)
+    && isOptionalString(value.messageId)
+    && (value.severity === undefined || isIncidentSeverity(value.severity))
+    && (value.certainty === undefined || isIncidentCertainty(value.certainty))
+    && (value.phase === undefined || isIncidentPhase(value.phase))
+    && isOptionalString(value.detail)
+    && (value.recovery === undefined || isIncidentRecovery(value.recovery))
   );
 }
 
@@ -544,12 +578,20 @@ export function isAuxiliaryLlmUsagePayload(value: unknown): value is AuxiliaryLl
 export function isOperationalErrorPayload(value: unknown): value is OperationalErrorPayload {
   return (
     isObject(value)
-    && isOptionalString(value.incidentId)
+    && isString(value.incidentId)
+    && isString(value.dedupeKey)
+    && isString(value.sessionPath)
+    && isOptionalString(value.operationId)
+    && isOptionalString(value.requestId)
+    && isOptionalString(value.turnId)
+    && isOptionalString(value.messageId)
+    && isIncidentSeverity(value.severity)
+    && isIncidentCertainty(value.certainty)
+    && isIncidentPhase(value.phase)
     && isString(value.code)
     && isString(value.message)
     && isOptionalString(value.detail)
-    && isString(value.sessionPath)
-    && isOptionalString(value.requestId)
+    && isIncidentRecovery(value.recovery)
   );
 }
 

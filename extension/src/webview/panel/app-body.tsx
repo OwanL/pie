@@ -225,6 +225,7 @@ export function AppBody({ adapter }: AppBodyProps) {
           notice={viewState.notice}
           kind={viewState.noticeKind}
           rawDetail={viewState.noticeRaw}
+          actions={viewState.noticeActions}
           onAction={handleNoticeAction}
           onDismiss={() => postMessage({ type: 'dismissNotice' })}
         />

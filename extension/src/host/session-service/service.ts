@@ -108,7 +108,12 @@ export class SessionService implements vscode.Disposable {
     });
     this.correlatedFailureSubscription = typeof backend.onDidCorrelatedRequestFail === 'function'
       ? backend.onDidCorrelatedRequestFail((failure) => {
-          if (!this.state.claimOperationalIncident(undefined, failure.requestId, failure.backendGeneration)) return;
+          if (!this.state.claimOperationalIncident(
+            failure.incident?.incidentId,
+            failure.requestId,
+            failure.backendGeneration,
+            failure.incident?.dedupeKey ?? `request:${failure.requestId}`,
+          )) return;
           // The owning EffectResult remains responsible for rollback/user notice;
           // this shared identity registry owns the single analytics record and
           // suppresses a legacy operational-error echo with the same requestId.

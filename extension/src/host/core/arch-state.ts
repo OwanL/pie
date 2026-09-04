@@ -43,6 +43,7 @@ import type {
   UserContentPart,
   InlineEditDraft,
   LastCompactionSummary,
+  OperationalIncident,
   SessionCapabilities,
   ThinkingLevel,
 } from '../../shared/protocol';
@@ -225,6 +226,9 @@ export interface SettingsState {
    * Session-owned notices are projected only while their session is active so
    * a background failure cannot offer recovery actions against another chat. */
   noticeSessionPath: string | null;
+  /** Complete host-only identity and recovery authority for the latest typed
+   * incident. Identity/detail are never projected to a renderer. */
+  latestIncident: OperationalIncident | null;
   /** Chat display preferences. */
   prefs: ChatPrefs;
   /** Configured MCP servers with their effective disabled state, fetched from
@@ -616,6 +620,7 @@ export function createInitialArchState(): ArchState {
       noticeKind: null,
       noticeRaw: null,
       noticeSessionPath: null,
+      latestIncident: null,
       prefs: { ...DEFAULT_CHAT_PREFS },
       mcpServers: [],
       mcpServersStatus: 'loading',

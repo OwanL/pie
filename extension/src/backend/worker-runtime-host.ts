@@ -25,6 +25,7 @@ import {
   TranscriptPagePayload,
 } from '../shared/protocol';
 import { deduplicateToolCallResultsForTransport } from '../shared/chat-message-parts';
+import { createOperationalIncident } from '../shared/incidents.js';
 import { compactDurableMessageForTransport, findDurableDetail } from '../shared/lazy-details';
 import { LIVE_PIPELINE_LIMITS } from '../shared/live-pipeline-protocol';
 import { deriveContextUsageFromBranch } from './context-usage';
@@ -146,6 +147,7 @@ export class WorkerRuntimeHost {
   private promotion?: Promise<void>;
   private disposed = false;
   private commandTail = Promise.resolve();
+  private extensionIncidentSequence = 0;
   private settings: ModelSettings = { defaultModel: '', defaultThinkingLevel: 'high' };
   private openedPayload?: SessionOpenedPayload;
   private agentDir = '';
@@ -270,6 +272,7 @@ export class WorkerRuntimeHost {
         operationId,
         'MESSAGE_SEND_QUEUE_CLEARED',
         'The queued message was cancelled by Stop before delivery.',
+        'cancelled',
       );
       this.emit('message.aborted', {
         requestId: `queued:${operationId}`,
@@ -650,12 +653,29 @@ export class WorkerRuntimeHost {
       // preserve the existing worker lifecycle owner rather than letting an
       // extension tear down only its SessionContext behind the coordinator.
       shutdownHandler: () => undefined,
-      onError: (error) => this.emit('operational-error', {
-        incidentId: `extension:${this.options.owner.workerId}:${Date.now()}`,
-        code: 'EXTENSION_ERROR',
-        message: `${error.extensionPath} (${error.event}): ${error.error}`,
-        sessionPath: context.sessionPath,
-      }),
+      onError: (error) => {
+        const active = context.activeRequest;
+        const occurrence = ++this.extensionIncidentSequence;
+        const identity = `extension-error:${this.options.owner.workerId}:${context.sessionPath}:${error.extensionPath}:${error.event}:${occurrence}`;
+        this.emit('operational-error', createOperationalIncident({
+          incidentId: identity,
+          dedupeKey: identity,
+          code: 'EXTENSION_ERROR',
+          message: `${error.extensionPath} (${error.event}): ${error.error}`,
+          detail: `Extension path: ${error.extensionPath}\nEvent: ${error.event}\nError: ${error.error}`,
+          sessionPath: context.sessionPath,
+          ...(active?.operationId ? { operationId: active.operationId } : {}),
+          ...(active?.id ? { requestId: active.id } : {}),
+          ...(active?.liveTurnAccumulator ? { turnId: active.liveTurnAccumulator.turnId } : {}),
+          ...(active?.currentMessageId ?? active?.lastAssistantMessageId
+            ? { messageId: active.currentMessageId ?? active.lastAssistantMessageId }
+            : {}),
+          severity: 'error',
+          certainty: 'definitive',
+          phase: 'extension',
+          recovery: { showLogs: true },
+        }));
+      },
     });
     installAuxiliaryLlmMeter(session, sessionPath, (event, eventPayload) => this.emit(event, eventPayload));
     context.unsubscribe = session.subscribe((event: SdkSessionEvent) => this.handleSessionEvent(context, event));
@@ -833,20 +853,31 @@ export class WorkerRuntimeHost {
     recovery.terminal = true;
     const context = recovery.context;
     if (this.disposed || this.context !== context) return;
-    const requestId = context.activeRequest?.id;
+    const active = context.activeRequest;
+    const requestId = active?.id;
     const causeMessage = cause instanceof Error ? cause.message : cause === undefined ? undefined : String(cause);
     const detail = causeMessage
       ? `Automatic session recovery failed: ${causeMessage}`
       : `Automatic session recovery abort or terminalization did not settle within ${graceMs}ms.`;
     const terminal = new Error(`${detail} ${reason}`);
-    this.emit('operational-error', {
+    this.emit('operational-error', createOperationalIncident({
       incidentId: `runtime-recovery:${requestId ?? context.sessionPath}`,
+      dedupeKey: `runtime-recovery:${context.sessionPath}:${requestId ?? 'session'}`,
       code: 'SESSION_RUNTIME_RECOVERY_FAILED',
       message: reason,
       detail,
       sessionPath: context.sessionPath,
-      requestId,
-    });
+      ...(active?.operationId ? { operationId: active.operationId } : {}),
+      ...(requestId ? { requestId } : {}),
+      ...(active?.liveTurnAccumulator ? { turnId: active.liveTurnAccumulator.turnId } : {}),
+      ...(active?.currentMessageId ?? active?.lastAssistantMessageId
+        ? { messageId: active.currentMessageId ?? active.lastAssistantMessageId }
+        : {}),
+      severity: 'error',
+      certainty: 'definitive',
+      phase: 'recovery',
+      recovery: { restart: true },
+    }));
     // failRuntime closes the worker transport (and stops heartbeats) exactly
     // once. The coordinator then confirms process loss and owns transcript,
     // busy-state, and tool-terminal reconciliation.
@@ -959,16 +990,28 @@ export class WorkerRuntimeHost {
     ].join(':');
     const emitted = active.providerIncidentNoticeKeys ?? new Set<string>();
     active.providerIncidentNoticeKeys = emitted;
+    const providerDedupeKey = `provider:${active.id}:${noticeKey}`;
+    active.latestProviderIncidentDedupeKey = providerDedupeKey;
     if (!emitted.has(noticeKey)) {
       emitted.add(noticeKey);
-      this.emit('operational-error', {
+      this.emit('operational-error', createOperationalIncident({
         incidentId: `provider:${active.id}:${noticeKey}`,
+        dedupeKey: providerDedupeKey,
         code: providerIncidentCode(incident.kind),
         message: incident.userMessage,
         detail: incident.detail,
         sessionPath: context.sessionPath,
+        ...(active.operationId ? { operationId: active.operationId } : {}),
         requestId: active.id,
-      });
+        ...(active.liveTurnAccumulator ? { turnId: active.liveTurnAccumulator.turnId } : {}),
+        ...(active.currentMessageId ?? active.lastAssistantMessageId
+          ? { messageId: active.currentMessageId ?? active.lastAssistantMessageId }
+          : {}),
+        severity: 'error',
+        certainty: incident.kind === 'quota_exhausted' ? 'definitive' : 'ambiguous',
+        phase: incident.kind === 'transport_timeout' || incident.kind === 'transport_error' ? 'transport' : 'provider',
+        recovery: { showLogs: true },
+      }));
     }
 
     // Quota exhaustion cannot recover by retrying the same provider. Give the

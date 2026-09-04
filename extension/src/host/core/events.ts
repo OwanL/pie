@@ -39,6 +39,7 @@ import type {
   CompactionOutcome,
   CompactionReason,
   SessionCapabilities,
+  OperationalIncident,
 } from '../../shared/protocol';
 
 /** Wraps a `Command` so it can flow through the same event channel. */
@@ -583,7 +584,13 @@ export interface NoticeShownEvent {
   sessionPath?: string | null;
 }
 
-/** Emitted when the backend reports an error. */
+/** Emitted when the backend/host reports a fully classified condition. */
+export interface IncidentReportedEvent {
+  kind: 'IncidentReported';
+  incident: OperationalIncident;
+}
+
+/** Legacy/internal error event. Backend conditions use IncidentReported. */
 export interface ErrorEvent {
   kind: 'Error';
   sessionPath: string;
@@ -752,11 +759,16 @@ export interface AvailableExtensionsChangedEvent {
   extensions: ExtensionInfo[];
 }
 
-/** Emitted when the last assistant message in a transcript should be marked as error. */
+/** Marks only the assistant row identified by the incident. An event without
+ * exact message/turn identity is notice-only and cannot mutate transcript. */
 export interface AssistantMessageErrorStampedEvent {
   kind: 'AssistantMessageErrorStamped';
   sessionPath: string;
   errorMessage: string;
+  operationId?: string;
+  requestId?: string;
+  turnId?: string;
+  messageId?: string;
 }
 
 /** Emitted when composer inputs for a session are replaced wholesale. */
@@ -869,7 +881,7 @@ export interface SendOperationStatusEvent {
   operationId: string;
   sessionPath: string;
   backendGeneration: number;
-  state: 'pending' | 'accepted' | 'committed' | 'failed' | 'generation-ended' | 'reconciliation-exhausted';
+  state: 'pending' | 'accepted' | 'committed' | 'failed' | 'cancelled' | 'superseded' | 'aborted' | 'generation-ended' | 'reconciliation-exhausted';
   requestId?: string;
   queued?: boolean;
   error?: string;
@@ -1062,6 +1074,7 @@ export type BackendEvent =
   | SessionListChangedEvent
   | CustomMessageEvent
   | ExtensionUIRequestEvent
+  | IncidentReportedEvent
   | ErrorEvent
   | SessionOpenedEvent
   | SessionClosedEvent

@@ -24,6 +24,7 @@ import type {
   ToolStartedPayload,
 } from '../shared/protocol';
 import { COMPACTION_METRICS_CUSTOM_TYPE } from '../shared/protocol';
+import { createOperationalIncident } from '../shared/incidents.js';
 import { compactSubagentResultPreview } from '../shared/lazy-details';
 import type { SdkSessionEvent } from './sdk';
 import { BackendLiveTurnAccumulator, type BackendSemanticCandidate } from './live-turn-accumulator';
@@ -135,8 +136,11 @@ function interruptProviderToolProtocolLeak(
       rawToolCallContainers: state.rawToolCallContainers,
       dsmlInvocations: state.dsmlInvocations,
     });
-    deps.emit('operational-error', {
-      incidentId: `provider-tool-protocol-leak:${active.id}`,
+    const dedupeKey = `provider-tool-protocol-leak:${active.id}`;
+    active.latestProviderIncidentDedupeKey = dedupeKey;
+    deps.emit('operational-error', createOperationalIncident({
+      incidentId: dedupeKey,
+      dedupeKey,
       code: 'PROVIDER_TOOL_PROTOCOL_LEAK',
       message,
       detail: [
@@ -145,8 +149,17 @@ function interruptProviderToolProtocolLeak(
         `Observed: ${state.rawToolCallContainers} raw tool-call containers and ${state.dsmlInvocations} DSML invocations.`,
       ].join('\n'),
       sessionPath: context.sessionPath,
+      ...(active.operationId ? { operationId: active.operationId } : {}),
       requestId: active.id,
-    });
+      ...(active.liveTurnAccumulator ? { turnId: active.liveTurnAccumulator.turnId } : {}),
+      ...(active.currentMessageId ?? active.lastAssistantMessageId
+        ? { messageId: active.currentMessageId ?? active.lastAssistantMessageId }
+        : {}),
+      severity: 'error',
+      certainty: 'definitive',
+      phase: 'provider',
+      recovery: { showLogs: true },
+    }));
     void context.session.abort().catch(() => undefined);
   }
   return state.interrupted;
@@ -473,13 +486,26 @@ function armWillRetryWatchdog(
   const windowMs = Math.max(delayMs, 0) + grace;
   context.willRetryWatchdogTimer = setTimeout(() => {
     context.willRetryWatchdogTimer = undefined;
-    deps.emit('operational-error', {
-      incidentId: `retry-stuck:${context.activeRequest?.id ?? context.sessionPath}:${delayMs}:${grace}`,
+    const active = context.activeRequest;
+    const requestId = active?.id;
+    deps.emit('operational-error', createOperationalIncident({
+      incidentId: `retry-stuck:${requestId ?? context.sessionPath}:${delayMs}:${grace}`,
+      dedupeKey: `retry-stuck:${context.sessionPath}:${requestId ?? 'session'}`,
       code: 'RETRY_STUCK',
       message: `A retry has not completed within ${windowMs}ms (delayMs=${delayMs} + ${grace}ms grace). The provider may be down mid-backoff or an extension hook blocked the retry. Reload the window if the session stays wedged.`,
+      detail: `Retry watchdog window elapsed: ${windowMs}ms (delayMs=${delayMs}, graceMs=${grace}).`,
       sessionPath: context.sessionPath,
-      requestId: context.activeRequest?.id,
-    });
+      ...(active?.operationId ? { operationId: active.operationId } : {}),
+      ...(requestId ? { requestId } : {}),
+      ...(active?.liveTurnAccumulator ? { turnId: active.liveTurnAccumulator.turnId } : {}),
+      ...(active?.currentMessageId ?? active?.lastAssistantMessageId
+        ? { messageId: active.currentMessageId ?? active.lastAssistantMessageId }
+        : {}),
+      severity: 'error',
+      certainty: 'ambiguous',
+      phase: 'retry',
+      recovery: { showLogs: true },
+    }));
     deps.emit('retry.stuck', {
       sessionPath: context.sessionPath,
       delayMs,
@@ -944,14 +970,24 @@ function renewSemanticLease(
       modelId: current.modelId ?? 'unknown',
       ...(lastProviderError ? { lastProviderError: lastProviderError.slice(0, 4_096) } : {}),
     });
-    deps.emit('operational-error', {
+    deps.emit('operational-error', createOperationalIncident({
       incidentId: `semantic-timeout:${requestId}:${leaseKind}`,
+      dedupeKey: `semantic-timeout:${context.sessionPath}:${requestId}:${leaseKind}`,
       code: leaseKind === 'tool' ? 'TOOL_INACTIVITY_TIMEOUT' : 'PROVIDER_SEMANTIC_TIMEOUT',
       message: reason,
       detail,
       sessionPath: context.sessionPath,
+      ...(current.operationId ? { operationId: current.operationId } : {}),
       requestId,
-    });
+      ...(current.liveTurnAccumulator ? { turnId: current.liveTurnAccumulator.turnId } : {}),
+      ...(current.currentMessageId ?? current.lastAssistantMessageId
+        ? { messageId: current.currentMessageId ?? current.lastAssistantMessageId }
+        : {}),
+      severity: 'error',
+      certainty: 'ambiguous',
+      phase: leaseKind === 'tool' ? 'tool' : 'provider',
+      recovery: { restart: true },
+    }));
     deps.recoverStuckSession(context, reason);
   }, budgetMs);
   active.semanticLeaseTimer.unref?.();
@@ -1003,13 +1039,25 @@ function emitSemanticCandidate(
   deps.emit('live.semantic', envelope);
   if (envelope.kind === 'observation.rejected' && envelope.reason === 'payload_oversize') {
     logBackendDiagnostic('warn', 'semantic.payloadOversize', { candidateKind: candidate.kind });
-    deps.emit('operational-error', {
-      incidentId: `turn-too-large:${context.activeRequest?.id ?? context.sessionPath}`,
+    const active = context.activeRequest;
+    deps.emit('operational-error', createOperationalIncident({
+      incidentId: `turn-too-large:${active?.id ?? context.sessionPath}`,
+      dedupeKey: `turn-too-large:${context.sessionPath}:${active?.id ?? 'session'}`,
       code: 'TURN_TOO_LARGE',
       message: 'The active response exceeded the bounded live-pipeline record limit and was interrupted.',
+      detail: 'The bounded live-pipeline checkpoint rejected the response because its size limit was exceeded.',
       sessionPath: context.sessionPath,
-      requestId: context.activeRequest?.id,
-    });
+      ...(active?.operationId ? { operationId: active.operationId } : {}),
+      ...(active?.id ? { requestId: active.id } : {}),
+      ...(active?.liveTurnAccumulator ? { turnId: active.liveTurnAccumulator.turnId } : {}),
+      ...(active?.currentMessageId ?? active?.lastAssistantMessageId
+        ? { messageId: active.currentMessageId ?? active.lastAssistantMessageId }
+        : {}),
+      severity: 'error',
+      certainty: 'definitive',
+      phase: 'runtime',
+      recovery: { showLogs: true },
+    }));
     void context.session.abort().catch(() => undefined);
   }
   return envelope;

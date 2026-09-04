@@ -14,6 +14,7 @@ import {
 import type { HostDetailRoute, HostToWebviewMessage, LazyDetailRef } from '../../shared/protocol';
 import type { PostImperative } from './types';
 import type { RequestOptions } from '../../shared/request-tracker';
+import { redactRendererErrorText } from '../../shared/renderer-error-redaction.js';
 
 /** Minimal backend surface: BackendClient satisfies it structurally. */
 export interface DetailBackendLike {
@@ -460,7 +461,12 @@ export class DetailSubscriptionService {
         } else if (!this.matchesFence(owner, fence)) {
           return;
         }
-        this.postImperative({ type: 'detail.error', ...this.route(owner), ...message });
+        this.postImperative({
+          type: 'detail.error',
+          ...this.route(owner),
+          ...message,
+          message: redactRendererErrorText(message.message),
+        });
         this.dropOwner(owner, false);
         return;
       }
@@ -682,7 +688,13 @@ export class DetailSubscriptionService {
       detailAttempt,
       subscriptionId,
     };
-    this.options.postImperative({ type: 'detail.error', ...route, code, message, retryable });
+    this.options.postImperative({
+      type: 'detail.error',
+      ...route,
+      code,
+      message: redactRendererErrorText(message),
+      retryable,
+    });
   }
 
   private mapRpcErrorToCode(error: unknown): 'INVALID_ADDRESS' | 'NOT_FOUND' | 'UNAVAILABLE' {

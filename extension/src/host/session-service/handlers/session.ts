@@ -15,6 +15,7 @@ import type {
 import { requestWindowAttention } from '../../sidebar/completion-notification';
 import { auditLog } from '../../util/audit.js';
 import { formatOperationalErrorDetail } from '../../../shared/operational-error-detail';
+import { createOperationalIncident, type OperationalIncident } from '../../../shared/incidents.js';
 
 interface HandlerDeps {
   context: vscode.ExtensionContext;
@@ -90,18 +91,28 @@ export function onCustomMessage(payload: CustomMessagePayload, deps: HandlerDeps
 
 export function onExtensionUIRequest(payload: ExtensionUIRequestPayload, deps: HandlerDeps): void {
   if (payload.method === 'notify') {
-    // Notify is fire-and-forget; use the notice banner instead of blocking the prompt slot.
-    // Keep informational and warning notifications out of the operational-error
-    // reducer path. Errors may opt into the existing typed error notice so the
-    // banner can offer its normal error affordances without stamping a turn.
-    const prefix = payload.notifyType === 'error' ? 'Error' : payload.notifyType === 'warning' ? 'Warning' : 'Info';
-    const event: Extract<Event, { kind: 'NoticeShown' }> = {
-      kind: 'NoticeShown',
-      notice: `${prefix}: ${payload.message}`,
+    const severity = payload.notifyType ?? 'info';
+    const prefix = severity === 'error' ? 'Error' : severity === 'warning' ? 'Warning' : 'Info';
+    const incident = createOperationalIncident({
+      incidentId: `extension-notify:${payload.id}`,
+      dedupeKey: `extension-notify:${payload.id}`,
       sessionPath: payload.sessionPath,
-    };
-    if (payload.notifyType === 'error') event.noticeKind = 'operational-error';
-    deps.dispatchArch(event);
+      requestId: payload.id,
+      severity,
+      certainty: 'definitive',
+      phase: 'extension',
+      code: severity === 'error' ? 'EXTENSION_NOTIFICATION_ERROR' : 'EXTENSION_NOTIFICATION',
+      message: `${prefix}: ${payload.message}`,
+      recovery: { showLogs: severity === 'error' },
+    });
+    if (!deps.state.claimOperationalIncident(
+      incident.incidentId,
+      incident.requestId,
+      undefined,
+      incident.dedupeKey,
+    )) return;
+    if (severity === 'error') deps.runObserver.onBackendError(payload.sessionPath, incident.code);
+    deps.dispatchArch({ kind: 'IncidentReported', incident });
     deps.scheduleRender();
     return;
   }
@@ -117,26 +128,59 @@ export function onExtensionUIRequest(payload: ExtensionUIRequestPayload, deps: H
 }
 
 export function onError(payload: ErrorPayload, deps: HandlerDeps): void {
-  // STATE_CONTRACT: errors must be addressed by the requestId binding alone.
-  // We must NOT fall back to the active session, because the failing operation
-  // may belong to a backgrounded tab; stamping the error on whatever is active
-  // pollutes the wrong transcript and confuses the user.
-  const sessionPath = deps.state.resolveRequestSessionPath(payload.requestId);
-  if (!deps.state.claimOperationalIncident(undefined, payload.requestId)) {
-    return;
-  }
-  deps.runObserver.onBackendError(sessionPath ?? undefined, payload.code);
-  deps.dispatchArch({ kind: 'Error', sessionPath: sessionPath ?? '', error: payload.message });
-  if (sessionPath) {
-    deps.dispatchArch({ kind: 'AssistantMessageErrorStamped', sessionPath, errorMessage: payload.message });
-  } else {
+  // Legacy `error` events are normalized immediately. Session ownership comes
+  // only from the event or exact request binding, never the active tab.
+  const sessionPath = payload.sessionPath ?? deps.state.resolveRequestSessionPath(payload.requestId);
+  if (!sessionPath) {
     auditLog('session-service', 'protocol.defect', {
       eventName: 'error',
-      reason: 'missing or unresolved requestId',
+      reason: 'missing session/request binding',
       code: payload.code ?? null,
+      requestId: payload.requestId ?? null,
+    });
+    return;
+  }
+  const severity = payload.severity ?? 'error';
+  const incident: OperationalIncident = createOperationalIncident({
+    incidentId: payload.incidentId,
+    dedupeKey: payload.dedupeKey ?? (payload.requestId ? `request:${payload.requestId}` : undefined),
+    sessionPath,
+    operationId: payload.operationId,
+    requestId: payload.requestId,
+    turnId: payload.turnId,
+    messageId: payload.messageId,
+    severity,
+    certainty: payload.certainty ?? 'definitive',
+    phase: payload.phase ?? 'settlement',
+    code: payload.code,
+    message: payload.message,
+    detail: payload.detail,
+    recovery: payload.recovery ?? (severity === 'error' ? { showLogs: true } : { showLogs: false }),
+  });
+  const firstReport = deps.state.claimOperationalIncident(
+    incident.incidentId,
+    incident.requestId,
+    undefined,
+    incident.dedupeKey,
+  );
+  if (firstReport) {
+    if (incident.severity === 'error') deps.runObserver.onBackendError(sessionPath, incident.code);
+    deps.dispatchArch({ kind: 'IncidentReported', incident });
+  }
+  if (incident.severity === 'error' && (incident.messageId || incident.turnId)) {
+    deps.dispatchArch({
+      kind: 'AssistantMessageErrorStamped',
+      sessionPath,
+      errorMessage: incident.detail ?? incident.message,
+      operationId: incident.operationId,
+      requestId: incident.requestId,
+      turnId: incident.turnId,
+      messageId: incident.messageId,
     });
   }
-  deps.scheduleRender();
+  if (firstReport || (incident.severity === 'error' && (incident.messageId || incident.turnId))) {
+    deps.scheduleRender();
+  }
 }
 
 /** Operational (non-fatal) backend condition from a watchdog — either the
@@ -159,12 +203,16 @@ export function onOperationalError(payload: OperationalErrorPayload, deps: Handl
   if (!sessionPath) {
     return;
   }
-  if (!deps.state.claimOperationalIncident(payload.incidentId, payload.requestId)) {
-    return;
-  }
+  if (!deps.state.claimOperationalIncident(
+    payload.incidentId,
+    payload.requestId,
+    undefined,
+    payload.dedupeKey,
+  )) return;
   const detail = formatOperationalErrorDetail(payload);
-  deps.runObserver.onBackendError(sessionPath, payload.code);
-  deps.dispatchArch({ kind: 'Error', sessionPath, error: payload.message, detail });
+  const incident = { ...payload, detail };
+  if (incident.severity === 'error') deps.runObserver.onBackendError(sessionPath, incident.code);
+  deps.dispatchArch({ kind: 'IncidentReported', incident });
   deps.scheduleRender();
 }
 

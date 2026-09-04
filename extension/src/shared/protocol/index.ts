@@ -1,5 +1,6 @@
 export * from './core.js';
 export * from '../build-identity.js';
+export * from '../incidents.js';
 export * from './event-payloads.js';
 export * from './models.js';
 export * from './messages.js';

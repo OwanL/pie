@@ -4,6 +4,7 @@ import * as path from 'node:path';
 
 import { EXTENSION_TOGGLES_ENV, HISTORY_COMPACTION_ENV, NESTED_ALLOWED_BUCKETS_ENV, PROVIDER_TOGGLES_ENV, PROTOCOL_VERSION, SUBAGENT_BUCKET_CAN_SPAWN_ENV, SUBAGENT_BUCKETS_ENV, SUBAGENT_PROVIDER_DEFAULTS_ENV, SUBAGENT_PROVIDER_TOGGLES_ENV, SUBAGENT_ROUTE_AROUND_SATURATED_PROVIDERS_ENV, SUBAGENT_FALLBACK_ON_PROVIDER_FAILURE_ENV, type CustomMessagePayload, type DetailResult, type ErrorPayload, type LazyDetailRef, type MessageAbortedPayload, type ModelInfo, type ModelSettings, type PreflightFailedPayload, type RequestEnvelope, type SessionOpenedPayload, type SessionSummary, type TranscriptPageDirection, type TranscriptPagePayload } from '../shared/protocol';
 import { AUTONOMOUS_MODE_ENV } from '../../../shared/autonomous-mode.js';
+import { createOperationalIncident } from '../shared/incidents.js';
 import { toErrorMessage } from '../shared/error-message';
 import { LIVE_PIPELINE_LIMITS, LIVE_PIPELINE_PROTOCOL_VERSION } from '../shared/live-pipeline-protocol';
 import { enrichConnectionError } from '../shared/error-message';
@@ -1137,13 +1138,29 @@ function reportPromptFailure(
   error: Error,
   expected?: ActiveRequest,
 ): void {
+  const active = expected ?? context.activeRequest;
+  // Enrich connection-level errors (bare "Connection error.") with the real
+  // transport cause; clean 429/5xx with a body pass through unchanged so
+  // the upstream reason (e.g. account_suspended) shows.
+  const message = enrichConnectionError(error);
   deps.emit('error', {
-    code: 'MESSAGE_SEND_FAILED',
-    // Enrich connection-level errors (bare "Connection error.") with the real
-    // transport cause; clean 429/5xx with a body pass through unchanged so
-    // the upstream reason (e.g. account_suspended) shows.
-    message: enrichConnectionError(error),
-    requestId,
+    ...createOperationalIncident({
+      code: 'MESSAGE_SEND_FAILED',
+      message,
+      detail: toErrorMessage(error),
+      sessionPath: context.sessionPath,
+      requestId,
+      ...(active?.operationId ? { operationId: active.operationId } : {}),
+      ...(active?.liveTurnAccumulator ? { turnId: active.liveTurnAccumulator.turnId } : {}),
+      ...(active?.currentMessageId ?? active?.lastAssistantMessageId
+        ? { messageId: active.currentMessageId ?? active.lastAssistantMessageId }
+        : {}),
+      severity: 'error',
+      certainty: 'definitive',
+      phase: 'provider',
+      dedupeKey: active?.latestProviderIncidentDedupeKey ?? `request:${requestId}`,
+      recovery: { showLogs: true },
+    }),
   } satisfies ErrorPayload);
   clearActiveRequest(context, requestId, expected);
   deps.emitBusyChanged(context, hasBillableSessionActivity(context));
@@ -1731,11 +1748,32 @@ function executeMessageContinue(
         outcome,
       );
     }
+    const failureIncidentId = outcome === 'failed'
+      ? `continuation-prestart:${operationId ?? requestId}`
+      : undefined;
+    if (failureIncidentId) {
+      deps.emit('operational-error', createOperationalIncident({
+        incidentId: failureIncidentId,
+        dedupeKey: operationId ? `operation:${operationId}` : `request:${requestId}`,
+        sessionPath: ownedSessionPath,
+        ...(operationId ? { operationId } : {}),
+        requestId,
+        turnId: ownedRequest.liveTurnAccumulator!.turnId,
+        severity: 'error',
+        certainty: 'definitive',
+        phase: 'preflight',
+        code: 'MESSAGE_CONTINUE_FAILED',
+        message: 'Could not continue the interrupted response.',
+        detail: reason ?? 'Continuation failed before the assistant row was created.',
+        recovery: { showLogs: true },
+      }));
+    }
     deps.emit('message.aborted', {
       requestId,
       ...(operationId ? { operationId, operationAttempt } : {}),
       sessionPath: ownedSessionPath,
       ...(outcome ? { outcome } : {}),
+      ...(failureIncidentId ? { incidentId: failureIncidentId } : {}),
       ...(outcome === 'cancelled' ? { userInitiated: true } : {}),
       ...(reason ? { reason } : {}),
     } satisfies MessageAbortedPayload);
@@ -1999,10 +2037,24 @@ async function executeMessageInterrupt(
       context.terminalLiveTurn = { accumulator: active.liveTurnAccumulator, expiresAt: Date.now() + 10_000 };
     }
     context.activeRequest = undefined;
-    deps.emit('operational-error', {
+    deps.emit('operational-error', createOperationalIncident({
       incidentId: `interrupt-stuck:${abortRequestId ?? request.id}`,
-      code: 'INTERRUPT_ABORT_STUCK', message, requestId: abortRequestId, sessionPath: params.sessionPath,
-    });
+      dedupeKey: `interrupt-stuck:${params.sessionPath}:${abortRequestId ?? request.id}`,
+      code: 'INTERRUPT_ABORT_STUCK',
+      message,
+      detail: `session.abort() did not settle within ${watchdogLabel}. The stalled session runtime was retired before replacement.`,
+      sessionPath: params.sessionPath,
+      ...(abortRequestId ? { requestId: abortRequestId } : {}),
+      ...(active?.operationId ? { operationId: active.operationId } : {}),
+      ...(active?.liveTurnAccumulator ? { turnId: active.liveTurnAccumulator.turnId } : {}),
+      ...(active?.currentMessageId ?? active?.lastAssistantMessageId
+        ? { messageId: active.currentMessageId ?? active.lastAssistantMessageId }
+        : {}),
+      severity: 'error',
+      certainty: 'definitive',
+      phase: 'recovery',
+      recovery: { restart: true },
+    }));
     if (abortRequestId) {
       const semanticMessageId = active?.semanticStarted === true
         ? active.liveTurnAccumulator?.checkpoint().turn.canonicalMessageId
@@ -2037,13 +2089,24 @@ async function executeMessageInterrupt(
       ? deps.transitionSessionContext(params.sessionPath, createReplacement)
       : createReplacement();
     void context.recoveryPromise.catch((error) => {
-      deps.emit('operational-error', {
+      deps.emit('operational-error', createOperationalIncident({
         incidentId: `interrupt-recovery:${abortRequestId ?? request.id}`,
+        dedupeKey: `interrupt-recovery:${params.sessionPath}:${abortRequestId ?? request.id}`,
         code: 'SESSION_RUNTIME_RECOVERY_FAILED',
         message: `Could not replace the stalled session runtime: ${toErrorMessage(error)}`,
+        detail: `The replacement runtime failed after the interrupt-abort watchdog retired the previous runtime: ${toErrorMessage(error)}`,
         sessionPath: params.sessionPath,
-        requestId: abortRequestId,
-      });
+        ...(abortRequestId ? { requestId: abortRequestId } : {}),
+        ...(active?.operationId ? { operationId: active.operationId } : {}),
+        ...(active?.liveTurnAccumulator ? { turnId: active.liveTurnAccumulator.turnId } : {}),
+        ...(active?.currentMessageId ?? active?.lastAssistantMessageId
+          ? { messageId: active.currentMessageId ?? active.lastAssistantMessageId }
+          : {}),
+        severity: 'error',
+        certainty: 'definitive',
+        phase: 'recovery',
+        recovery: { restart: true },
+      }));
     });
     return { interrupted: true, settled: false, teardownTimedOut: true };
   }
@@ -2135,7 +2198,7 @@ function emitQueuedSendCancellations(
 ): void {
   for (const [index, operationId] of (context.queuedOperationIds ?? []).entries()) {
     if (!operationId) continue;
-    context.sendOperationLedger?.markFailed(operationId, 'MESSAGE_SEND_QUEUE_CLEARED', reason);
+    context.sendOperationLedger?.markFailed(operationId, 'MESSAGE_SEND_QUEUE_CLEARED', reason, 'cancelled');
     deps.emit('message.aborted', {
       requestId: `queued:${operationId}`,
       operationId,

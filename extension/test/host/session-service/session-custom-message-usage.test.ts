@@ -87,12 +87,16 @@ test('onExtensionUIRequest preserves notify severity instead of routing every no
   const dispatchArch = (event: unknown): void => {
     events.push(event as Record<string, unknown>);
   };
+  const backendErrors: string[] = [];
   const deps = {
     context: {} as never,
     getArchState: () => ({} as never),
     dispatchArch,
-    runObserver: NOOP_RUN_OBSERVER,
-    state: {} as never,
+    runObserver: {
+      ...NOOP_RUN_OBSERVER,
+      onBackendError: (_sessionPath: string | undefined, code: string) => backendErrors.push(code),
+    },
+    state: { claimOperationalIncident: () => true } as never,
     scheduleRender: () => { renderCount += 1; },
     requireEventSessionPath: (_eventName: string, sessionPath: string | undefined) => sessionPath ?? null,
   };
@@ -107,23 +111,15 @@ test('onExtensionUIRequest preserves notify severity instead of routing every no
     }, deps);
   }
 
-  assert.deepEqual(events, [
-    {
-      kind: 'NoticeShown',
-      notice: 'Info: notification info',
-      sessionPath: '/workspace/session.jsonl',
-    },
-    {
-      kind: 'NoticeShown',
-      notice: 'Warning: notification warning',
-      sessionPath: '/workspace/session.jsonl',
-    },
-    {
-      kind: 'NoticeShown',
-      notice: 'Error: notification error',
-      noticeKind: 'operational-error',
-      sessionPath: '/workspace/session.jsonl',
-    },
+  assert.deepEqual(events.map((event) => ({
+    kind: event.kind,
+    severity: (event.incident as { severity?: string } | undefined)?.severity,
+    message: (event.incident as { message?: string } | undefined)?.message,
+  })), [
+    { kind: 'IncidentReported', severity: 'info', message: 'Info: notification info' },
+    { kind: 'IncidentReported', severity: 'warning', message: 'Warning: notification warning' },
+    { kind: 'IncidentReported', severity: 'error', message: 'Error: notification error' },
   ]);
+  assert.deepEqual(backendErrors, ['EXTENSION_NOTIFICATION_ERROR']);
   assert.equal(renderCount, 3);
 });

@@ -92,6 +92,9 @@ export interface ActiveRequest {
    * may reduce this to "Connection error."; session events use this record to
    * preserve the real status, quota reset, and provider in the UI. */
   latestProviderIncident?: ProviderIncident;
+  /** Canonical identity shared with the generic terminal report for the most
+   * recent provider condition. */
+  latestProviderIncidentDedupeKey?: string;
   /** Notice identities already emitted for this request, preventing SDK-level
    * retries of one response from flooding the user with duplicate notices. */
   providerIncidentNoticeKeys?: Set<string>;

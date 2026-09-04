@@ -167,17 +167,9 @@ export function onMessageFinished(
     return;
   }
 
-  // Stamp errorDetail on error messages so the webview can display the reason.
+  // The backend terminal owns its own row detail. Never borrow the current
+  // global notice: it may belong to a different operation or a newer turn.
   const message = payload.message;
-  if (message.status === 'error' && !message.errorDetail) {
-    const settings = deps.getArchState().settings;
-    if (
-      settings.notice
-      && (settings.noticeSessionPath === null || settings.noticeSessionPath === sessionPath)
-    ) {
-      message.errorDetail = settings.notice;
-    }
-  }
 
   if (!options.skipTranscriptMutation) {
     deps.dispatchArch({
@@ -254,9 +246,10 @@ export function onMessageAborted(
     });
   }
 
-  if (reason) {
-    // Always alert the user about an unexpected (non-user-initiated)
-    // interruption — even when an unrelated error notice is already showing.
+  if (reason && !payload.incidentId) {
+    // A pre-row failure that names its typed incident is reported there;
+    // other unexpected interruptions still own this discoverable notice, even
+    // when an unrelated error notice is already showing.
     // Previously this was suppressed whenever `noticeRaw`/`noticeKind` was
     // non-null, which could hide the interrupt alert behind an unrelated
     // error notice. The per-message `errorDetail` is already stamped inline

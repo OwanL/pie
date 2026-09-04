@@ -901,10 +901,18 @@ test('message.continue rejection before message_start settles without stamping a
     requestId: result.requestId,
     sessionPath: harness.context.sessionPath,
     outcome: 'failed',
+    incidentId: `continuation-prestart:${result.requestId}`,
     reason: 'continuation start failed',
   });
   assert.equal((terminal?.payload as { messageId?: string }).messageId, undefined);
   assert.equal(harness.emitted.some((entry) => entry.event === 'error'), false);
+  const incident = harness.emitted.find((entry) => entry.event === 'operational-error')?.payload as Record<string, unknown>;
+  assert.equal(incident.code, 'MESSAGE_CONTINUE_FAILED');
+  assert.equal(incident.requestId, result.requestId);
+  assert.equal(incident.messageId, undefined);
+  assert.equal(incident.severity, 'error');
+  assert.equal(incident.certainty, 'definitive');
+  assert.equal(incident.phase, 'preflight');
   assert.equal(harness.context.activeRequest, undefined);
   assert.deepEqual(harness.busyEvents, [false]);
 });
@@ -1302,10 +1310,17 @@ test('message.interrupt terminalizes locally and replaces runtime when remote te
     assert.equal(operationalErrors.length, 1, 'one stuck interrupt must surface one recovery notice');
     assert.deepEqual(operationalErrors[0]?.payload, {
       incidentId: 'interrupt-stuck:req-stuck-abort',
+      dedupeKey: 'interrupt-stuck:/repo/session.jsonl:req-stuck-abort',
       code: 'INTERRUPT_ABORT_STUCK',
       message: 'Stop did not settle within 5ms, so Pie ended the turn locally and is refreshing the session runtime.',
-      requestId: 'req-stuck-abort',
+      detail: 'session.abort() did not settle within 5ms. The stalled session runtime was retired before replacement.',
       sessionPath: harness.context.sessionPath,
+      requestId: 'req-stuck-abort',
+      messageId: 'm1',
+      severity: 'error',
+      certainty: 'definitive',
+      phase: 'recovery',
+      recovery: { retry: false, restart: true, showLogs: true },
     });
     assert.equal(harness.emitted.some((entry) => entry.event === 'message.aborted'), true);
     assert.equal(await bridge.confirm('late', 'runtime request'), false);

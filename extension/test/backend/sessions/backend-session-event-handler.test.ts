@@ -1466,10 +1466,17 @@ test('willRetry watchdog emits operational-error + retry.stuck when a retry back
     assert.ok(opError, 'emits operational-error');
     assert.deepEqual(opError?.payload, {
       incidentId: 'retry-stuck:req-stuck:0:0',
+      dedupeKey: 'retry-stuck:/workspace/session.jsonl:req-stuck',
       code: 'RETRY_STUCK',
       message: (opError?.payload as { message: string }).message,
+      detail: 'Retry watchdog window elapsed: 0ms (delayMs=0, graceMs=0).',
       sessionPath: '/workspace/session.jsonl',
       requestId: 'req-stuck',
+      messageId: 'req-stuck:1',
+      severity: 'error',
+      certainty: 'ambiguous',
+      phase: 'retry',
+      recovery: { retry: false, restart: false, showLogs: true },
     });
     assert.match((opError?.payload as { message: string }).message, /retry has not completed/i);
     assert.ok(retryStuck, 'emits retry.stuck');
@@ -2245,6 +2252,7 @@ test('pre-first-semantic inactivity retires and replaces a runtime even when abo
     const operationalError = emitted.find((entry) => entry.event === 'operational-error');
     assert.deepEqual(operationalError?.payload, {
       incidentId: 'semantic-timeout:req-semantic-timeout:provider',
+      dedupeKey: 'semantic-timeout:/workspace/session.jsonl:req-semantic-timeout:provider',
       code: 'PROVIDER_SEMANTIC_TIMEOUT',
       message: 'The provider stopped producing semantic response events.',
       detail: [
@@ -2256,6 +2264,12 @@ test('pre-first-semantic inactivity retires and replaces a runtime even when abo
       ].join('\n'),
       sessionPath: '/workspace/session.jsonl',
       requestId: 'req-semantic-timeout',
+      turnId: 'turn-timeout',
+      messageId: 'req-semantic-timeout:1',
+      severity: 'error',
+      certainty: 'ambiguous',
+      phase: 'provider',
+      recovery: { retry: false, restart: true, showLogs: true },
     });
     assert.equal(abortCalls, 0, 'the shared recovery owner must own remote teardown');
     assert.deepEqual(busy, [], 'the old runtime must not be advertised idle before replacement');

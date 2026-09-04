@@ -194,6 +194,27 @@ test('queued cancellation event settles and removes its row without an interrupt
   assert.equal(cancelled.pending.promoted['corr-1'], undefined);
 });
 
+test('status reconciliation preserves queued cancellation when its abort event was lost', () => {
+  const busy: ArchState = {
+    ...readyState(),
+    sessions: { ...readyState().sessions, runningSessionPaths: [SESSION] },
+  };
+  const accepted = reducer(send(busy), {
+    kind: 'SendResult', corrId: 'corr-1', operationId: 'op-1', backendGeneration: 7,
+    sessionPath: SESSION, ok: true, queued: true,
+  }).state;
+  const cancelled = reducer(accepted, {
+    kind: 'SendOperationStatus', operationId: 'op-1', sessionPath: SESSION,
+    backendGeneration: 7, state: 'cancelled', error: 'queue cleared',
+  }).state;
+
+  assert.equal(cancelled.operations['op-1']?.terminal?.outcome, 'cancelled');
+  assert.equal(cancelled.operations['op-1']?.terminal?.reason, 'queue-cleared');
+  assert.equal(cancelled.pending.promoted['corr-1'], undefined);
+  assert.equal(cancelled.transcript.bySession[SESSION]?.some((message) => message.id === 'local-1'), false);
+  assert.equal(cancelled.settings.notice, null);
+});
+
 test('queue clear cancellation and a racing earlier delivery each produce one terminal outcome', () => {
   const busy: ArchState = {
     ...readyState(),

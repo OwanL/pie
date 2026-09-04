@@ -2,6 +2,7 @@ import type { ThinkingLevel, ModelSettings, ModelInfo, ContextWindowUsage, Initi
 import type { ChatMessage, ToolCall } from './messages.js';
 import type { LiveTurnCheckpoint, ToolPreview } from '../live-pipeline-protocol.js';
 import type { SessionUsageSnapshot } from '../session-usage.js';
+import type { OperationalIncident } from '../incidents.js';
 import { SESSION_SNAPSHOT_TOO_LARGE_CODE } from './core.js';
 export type { SessionUsageSnapshot } from '../session-usage.js';
 import type {
@@ -391,6 +392,9 @@ export interface MessageAbortedPayload {
   /** Explicit terminal settlement when a continuation is cancelled,
    * superseded, or fails before Pi creates a matching assistant turn. */
   outcome?: 'cancelled' | 'superseded' | 'failed';
+  /** Typed incident already emitted for this terminal; suppresses only the
+   * legacy duplicate notice path, never transcript/operation settlement. */
+  incidentId?: string;
   /** True when the interruption came from an explicit user action (e.g. Stop). */
   userInitiated?: boolean;
   /** Plain-language reason shown to the user for unexpected interruptions. */
@@ -421,7 +425,20 @@ export interface ContextUsageChangedPayload {
 export interface ErrorPayload {
   code: string;
   message: string;
+  /** Typed incident fields are present on backend event errors. They remain
+   * optional because this shape also represents correlated RPC responses. */
+  incidentId?: string;
+  dedupeKey?: string;
+  sessionPath?: string;
+  operationId?: string;
   requestId?: string;
+  turnId?: string;
+  messageId?: string;
+  severity?: OperationalIncident['severity'];
+  certainty?: OperationalIncident['certainty'];
+  phase?: OperationalIncident['phase'];
+  detail?: string;
+  recovery?: OperationalIncident['recovery'];
 }
 
 /** Post-ack, pre-commit prepass failure payload. Emitted by the backend when
@@ -600,18 +617,7 @@ export interface AuxiliaryLlmUsagePayload {
  *  remains readable while the credential-redacted diagnostic is available
  *  behind the notice's More control. It does NOT roll back optimistic state
  *  or abort a turn — the watchdogs already performed their side effects. */
-export interface OperationalErrorPayload {
-  /** Identity of this asynchronous incident, distinct from any RPC response. */
-  incidentId?: string;
-  /** Stable machine code (e.g. `INTERRUPT_ABORT_STUCK`, `RETRY_STUCK`). */
-  code: string;
-  /** Plain-language message safe to surface to the user. */
-  message: string;
-  /** Actionable backend diagnostic; may include the last provider error. */
-  detail?: string;
-  sessionPath: string;
-  requestId?: string;
-}
+export type OperationalErrorPayload = OperationalIncident;
 
 /** Emitted by the backend's willRetry watchdog when a retry's backoff did not
  *  complete within `delayMs + graceMs` (the provider may be down mid-backoff,

@@ -24,6 +24,8 @@ export interface NoticeBannerProps {
    *  backend code and available root-cause detail.
    *  Absent for plain info/warning notices. */
   rawDetail?: string | null;
+  /** Typed-incident recovery projection. Overrides legacy kind mapping. */
+  actions?: NoticeAction[];
   /** Invoked when the user clicks a recovery action. The parent decides whether
    *  to dismiss the notice afterwards (e.g. Retry dismisses; Show logs does not).
    *  Optional: when absent (or `kind` is null), no action buttons render — the
@@ -34,7 +36,7 @@ export interface NoticeBannerProps {
   onDismiss: () => void;
 }
 
-export function NoticeBanner({ notice, kind, rawDetail, onAction, onDismiss }: NoticeBannerProps) {
+export function NoticeBanner({ notice, kind, rawDetail, actions: projectedActions, onAction, onDismiss }: NoticeBannerProps) {
   // Severity comes from the host-owned typed notice kind, never from words in
   // the user-facing copy. An info/warning extension notification can mention
   // an error without becoming an operational-error banner.
@@ -43,7 +45,7 @@ export function NoticeBanner({ notice, kind, rawDetail, onAction, onDismiss }: N
   const [expanded, setExpanded] = useState(false);
   const [detailExpanded, setDetailExpanded] = useState(false);
   const [dismissing, setDismissing] = useState(false);
-  const actions = kind ? noticeActionsFor(kind) : [];
+  const actions = projectedActions ?? (kind ? noticeActionsFor(kind) : []);
   const hasRaw = !!rawDetail && rawDetail !== notice;
 
   // A new notice replaces the old one in place; reset the exit + expand state

@@ -541,18 +541,31 @@ export function handleAssistantMessageErrorStamped(
   state: ArchState,
   event: Extract<Event, { kind: 'AssistantMessageErrorStamped' }>,
 ): ReducerResult {
+  const liveTurn = state.livePipeline.turnsBySession[event.sessionPath];
+  const liveIdentityMatches = !!liveTurn
+    && (event.turnId === undefined || liveTurn.turnId === event.turnId)
+    && (event.requestId === undefined || liveTurn.requestId === event.requestId)
+    && (event.operationId === undefined || liveTurn.operationId === event.operationId);
+  const targetMessageId = event.messageId
+    ?? (event.turnId && liveIdentityMatches ? liveTurn?.canonicalMessageId : undefined);
+  // A transport/request error without exact turn/message identity is
+  // notice-only. Never guess from transcript order: a continuation can fail
+  // before creating a row, and a delayed old error can arrive after a newer
+  // turn has become the tail.
+  if (!targetMessageId) return { state, effects: [] };
+  const canonicalId = resolveAlias(state, targetMessageId);
+
   return {
     state: produce(state, (draft) => {
       const list = draft.transcript.bySession[event.sessionPath];
       if (!list) return;
-      const reversed = [...list].reverse();
-      const msg = reversed.find(
-        (m) => m.role === 'assistant' && (m.status === 'streaming' || m.status === 'error'),
-      ) ?? reversed.find((m) => m.role === 'assistant');
-      if (msg) {
-        msg.status = 'error';
-        msg.errorDetail = event.errorMessage;
-      }
+      const msg = list.find((message) => message.role === 'assistant' && (
+        message.id === canonicalId
+        || message.renderIdentity === targetMessageId
+      ));
+      if (!msg) return;
+      msg.status = 'error';
+      msg.errorDetail = event.errorMessage;
     }),
     effects: [],
   };

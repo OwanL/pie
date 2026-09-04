@@ -186,6 +186,18 @@ test('BackendClient.start resolves when backend.ready arrives immediately as std
       code: 'SESSION_OPEN_FAILED',
       message: 'open failed',
       sessionPath: '/mock/failure.jsonl',
+      incident: {
+        incidentId: 'rpc:req-1',
+        dedupeKey: 'request:req-1',
+        sessionPath: '/mock/failure.jsonl',
+        requestId: 'req-1',
+        severity: 'error',
+        certainty: 'definitive',
+        phase: 'acceptance',
+        code: 'SESSION_OPEN_FAILED',
+        message: 'open failed',
+        recovery: { retry: true, restart: false, showLogs: true },
+      },
     }]);
     failureSubscription.dispose();
 

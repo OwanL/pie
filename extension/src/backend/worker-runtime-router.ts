@@ -27,6 +27,7 @@ import {
   type WorkerClientScheduler,
   type WorkerClientSnapshot,
 } from './worker-client';
+import { createOperationalIncident } from '../shared/incidents.js';
 import { backendDebug, backendWarn } from './log';
 import { BackendError } from './server-io';
 import { SETTLED_SESSION_CAPABILITIES } from './session-activity';
@@ -95,6 +96,7 @@ export interface HotWorkerRoute {
     busySeq: number;
     requestId?: string;
     operationId?: string;
+    turnId?: string;
     terminalRequestId?: string;
     preflightOnly?: boolean;
     messageId?: string;
@@ -524,6 +526,7 @@ export class WorkerRuntimeRouter {
       && hot.checkpoint.terminalRequestId !== earlyAckRequestId) {
       hot.checkpoint.requestId = earlyAckRequestId;
       hot.checkpoint.operationId = earlyAckOperationId;
+      hot.checkpoint.turnId = undefined;
       hot.checkpoint.messageId = undefined;
       hot.checkpoint.preflightOnly = true;
     }
@@ -962,12 +965,24 @@ export class WorkerRuntimeRouter {
       stderrTail ? `Worker stderr: ${stderrTail.slice(-2000)}` : undefined,
     ].filter((part): part is string => typeof part === 'string' && part.length > 0).join('\n') || undefined;
     if (this.claimUnexpectedWorkerIncident(route.worker)) {
+      const checkpoint = route.checkpoint;
       this.options.emit('operational-error', {
-        incidentId: `worker-exit:${route.owner.workerId}:${route.owner.workerGeneration}`,
-        code: 'SESSION_WORKER_EXITED',
-        message: 'The session worker exited. Live work was interrupted and was not replayed.',
-        sessionPath: route.currentLeasePath,
-        detail,
+        ...createOperationalIncident({
+          incidentId: `worker-exit:${route.owner.workerId}:${route.owner.workerGeneration}`,
+          dedupeKey: `worker-exit:${route.owner.workerId}:${route.owner.workerGeneration}`,
+          code: 'SESSION_WORKER_EXITED',
+          message: 'The session worker exited. Live work was interrupted and was not replayed.',
+          detail: detail ?? 'The worker exited without reporting a failure detail.',
+          sessionPath: route.currentLeasePath,
+          ...(checkpoint.operationId ? { operationId: checkpoint.operationId } : {}),
+          ...(checkpoint.requestId ? { requestId: checkpoint.requestId } : {}),
+          ...(checkpoint.turnId ? { turnId: checkpoint.turnId } : {}),
+          ...(checkpoint.messageId ? { messageId: checkpoint.messageId } : {}),
+          severity: 'error',
+          certainty: 'definitive',
+          phase: 'runtime',
+          recovery: { restart: true },
+        }),
         checkpoint: crashCheckpoint,
       });
     }
@@ -1737,12 +1752,24 @@ export class WorkerRuntimeRouter {
     if (!route && !exactWorkerStillSupervised) return;
     const firstIncident = this.claimUnexpectedWorkerIncident(worker);
     if (firstIncident) {
+      const checkpoint = route?.checkpoint;
       this.options.emit('operational-error', {
-        incidentId: `worker-sync:${worker.workerId}:${worker.workerGeneration}:${domain}:${revision}`,
-        code: 'SESSION_WORKER_SYNC_FAILED',
-        message: 'A session worker stopped acknowledging coordinator state and was retired.',
-        sessionPath: route?.currentLeasePath ?? worker.sessionPath,
-        detail: reason,
+        ...createOperationalIncident({
+          incidentId: `worker-sync:${worker.workerId}:${worker.workerGeneration}:${domain}:${revision}`,
+          dedupeKey: `worker-sync:${worker.workerId}:${worker.workerGeneration}:${domain}`,
+          code: 'SESSION_WORKER_SYNC_FAILED',
+          message: 'A session worker stopped acknowledging coordinator state and was retired.',
+          sessionPath: route?.currentLeasePath ?? worker.sessionPath,
+          detail: reason,
+          ...(checkpoint?.operationId ? { operationId: checkpoint.operationId } : {}),
+          ...(checkpoint?.requestId ? { requestId: checkpoint.requestId } : {}),
+          ...(checkpoint?.turnId ? { turnId: checkpoint.turnId } : {}),
+          ...(checkpoint?.messageId ? { messageId: checkpoint.messageId } : {}),
+          severity: 'error',
+          certainty: 'definitive',
+          phase: 'runtime',
+          recovery: { restart: true },
+        }),
         domain,
         revision,
         workerId: worker.workerId,
@@ -1922,12 +1949,14 @@ export class WorkerRuntimeRouter {
   private observeCheckpoint(route: HotWorkerRoute, event: string, payload: WorkerJsonObject): void {
     const requestId = typeof payload.requestId === 'string' ? payload.requestId : undefined;
     const operationId = typeof payload.operationId === 'string' ? payload.operationId : undefined;
+    const turnId = typeof payload.turnId === 'string' ? payload.turnId : undefined;
     const messageId = typeof payload.messageId === 'string' ? payload.messageId : undefined;
     if (event === 'busy.changed' && Number.isSafeInteger(payload.seq)) {
       route.checkpoint.busySeq = Math.max(route.checkpoint.busySeq, payload.seq as number);
     } else if (event === 'live.semantic' && payload.kind === 'turn.started') {
       route.checkpoint.requestId = requestId;
       route.checkpoint.operationId = operationId;
+      route.checkpoint.turnId = turnId;
       route.checkpoint.terminalRequestId = undefined;
       route.checkpoint.messageId = typeof payload.canonicalMessageId === 'string'
         ? payload.canonicalMessageId
@@ -1937,6 +1966,7 @@ export class WorkerRuntimeRouter {
       if (requestId) route.checkpoint.terminalRequestId = requestId;
       route.checkpoint.requestId = undefined;
       route.checkpoint.operationId = undefined;
+      route.checkpoint.turnId = undefined;
       route.checkpoint.messageId = undefined;
       route.checkpoint.preflightOnly = undefined;
       route.checkpoint.tools = [];
@@ -1958,6 +1988,7 @@ export class WorkerRuntimeRouter {
       if (requestId) route.checkpoint.terminalRequestId = requestId;
       route.checkpoint.requestId = undefined;
       route.checkpoint.operationId = undefined;
+      route.checkpoint.turnId = undefined;
       route.checkpoint.messageId = undefined;
       route.checkpoint.preflightOnly = undefined;
       route.checkpoint.tools = [];
@@ -2123,12 +2154,25 @@ export class WorkerRuntimeRouter {
       // Fail closed: never forward a request the coordinator cannot settle
       // exactly once. The worker's dialog timeout still releases its own
       // pending promise, so no extension callback is leaked.
-      this.options.emit('operational-error', {
+      const checkpoint = route.checkpoint;
+      const requestId = checkpoint.requestId ?? request.id;
+      const message = error instanceof Error ? error.message : String(error);
+      this.options.emit('operational-error', createOperationalIncident({
         incidentId: `extension-ui-owner:${route.owner.workerId}:${request.id}`,
+        dedupeKey: `extension-ui-owner:${route.currentLeasePath}:${request.id}`,
         code: 'EXTENSION_UI_OWNER_UNAVAILABLE',
-        message: error instanceof Error ? error.message : String(error),
+        message,
+        detail: `The coordinator could not retain the extension UI request owner: ${message}`,
         sessionPath: route.currentLeasePath,
-      });
+        ...(checkpoint.operationId ? { operationId: checkpoint.operationId } : {}),
+        requestId,
+        ...(checkpoint.turnId ? { turnId: checkpoint.turnId } : {}),
+        ...(checkpoint.messageId ? { messageId: checkpoint.messageId } : {}),
+        severity: 'error',
+        certainty: 'definitive',
+        phase: 'extension',
+        recovery: { showLogs: true },
+      }));
       return false;
     }
   }
@@ -2201,11 +2245,24 @@ export class WorkerRuntimeRouter {
   }
 
   private async failWorkerRoute(route: HotWorkerRoute, error: unknown): Promise<void> {
-    this.options.emit('operational-error', {
+    const checkpoint = route.checkpoint;
+    const message = error instanceof Error ? error.message : String(error);
+    this.options.emit('operational-error', createOperationalIncident({
+      incidentId: `runtime-ownership:${route.currentLeasePath}`,
+      dedupeKey: `runtime-ownership:${route.currentLeasePath}`,
       code: 'SESSION_RUNTIME_OWNERSHIP_FAILED',
-      message: error instanceof Error ? error.message : String(error),
+      message,
+      detail: `The coordinator could not complete the worker ownership operation: ${message}`,
       sessionPath: route.currentLeasePath,
-    });
+      ...(checkpoint.operationId ? { operationId: checkpoint.operationId } : {}),
+      ...(checkpoint.requestId ? { requestId: checkpoint.requestId } : {}),
+      ...(checkpoint.turnId ? { turnId: checkpoint.turnId } : {}),
+      ...(checkpoint.messageId ? { messageId: checkpoint.messageId } : {}),
+      severity: 'error',
+      certainty: 'definitive',
+      phase: 'runtime',
+      recovery: { restart: true },
+    }));
     await this.retire(route.currentLeasePath, 'ownership failure');
   }
 

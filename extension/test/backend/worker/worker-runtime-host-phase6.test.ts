@@ -267,11 +267,16 @@ test('automatic semantic recovery fails the worker once when session.abort never
   assert.equal(errors.length, 1);
   assert.deepEqual(errors[0]!.payload, {
     incidentId: 'runtime-recovery:stuck-request',
+    dedupeKey: 'runtime-recovery:/sessions/stuck-semantic.jsonl:stuck-request',
     code: 'SESSION_RUNTIME_RECOVERY_FAILED',
     message: 'The provider stopped producing semantic response events.',
     detail: 'Automatic session recovery abort or terminalization did not settle within 10ms.',
     sessionPath: context.sessionPath,
     requestId: 'stuck-request',
+    severity: 'error',
+    certainty: 'definitive',
+    phase: 'recovery',
+    recovery: { retry: false, restart: true, showLogs: true },
   });
 
   internals.recoverStuckSession(context, 'late duplicate watchdog signal');
@@ -509,7 +514,7 @@ test('host applies monotonic sync domains and keeps the session registry live in
   }
 });
 
-test('worker-owned provider incidents surface a specific, deduplicated UI error', () => {
+test('worker provider incidents dedupe repeats but preserve a later definitive condition', () => {
   const { host, sent } = makeHost();
   const internals = getInternals(host);
   const context = makeSessionEventContext('/sessions/provider.jsonl');
@@ -533,19 +538,37 @@ test('worker-owned provider incidents surface a specific, deduplicated UI error'
   internals.handleProviderIncident(incident);
   internals.handleProviderIncident(incident);
   internals.handleProviderIncident({ ...incident, sessionId: 'another-session' });
+  const quotaIncident: ProviderIncident = {
+    ...incident,
+    kind: 'quota_exhausted',
+    userMessage: 'OpenAI quota is exhausted.',
+    detail: 'provider=api.openai.com; status=429; quota exhausted',
+  };
+  internals.handleProviderIncident(quotaIncident);
 
-  assert.equal(context.activeRequest?.latestProviderIncident, incident);
-  assert.equal(context.activeRequest?.lastProviderErrorForDiagnostics, incident.userMessage);
+  assert.equal(context.activeRequest?.latestProviderIncident, quotaIncident);
+  assert.equal(context.activeRequest?.lastProviderErrorForDiagnostics, quotaIncident.userMessage);
   const errors = sent.filter((frame) => frame.kind === 'runtime.event' && frame.event === 'operational-error');
-  assert.equal(errors.length, 1, 'SDK retries of the same incident do not flood the UI');
+  assert.equal(errors.length, 2, 'only an exact repeated condition is deduplicated');
   assert.deepEqual(errors[0]?.payload, {
     incidentId: 'provider:request-1:rate_limited:api.openai.com:429:5001',
+    dedupeKey: 'provider:request-1:rate_limited:api.openai.com:429:5001',
     code: 'PROVIDER_RATE_LIMITED',
     message: incident.userMessage,
     detail: incident.detail,
     sessionPath: '/sessions/provider.jsonl',
     requestId: 'request-1',
+    severity: 'error',
+    certainty: 'ambiguous',
+    phase: 'provider',
+    recovery: { retry: false, restart: false, showLogs: true },
   });
+  const quotaPayload = errors[1]?.payload as { dedupeKey?: string; certainty?: string } | undefined;
+  assert.equal(
+    quotaPayload?.dedupeKey,
+    'provider:request-1:quota_exhausted:api.openai.com:429:5001',
+  );
+  assert.equal(quotaPayload?.certainty, 'definitive');
 });
 
 test('worker-owned provider progress restores queue phase and latency ownership', () => {

@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import { dispatchSessionBackendEvent } from '../../../../src/host/core/event-dispatch';
 import type { SessionBackendEventHandlers } from '../../../../src/host/core/event-dispatch';
+import type { OperationalErrorPayload } from '../../../../src/shared/protocol';
 
 function createHandlers() {
   const calls: Array<{ name: string; payload: unknown }> = [];
@@ -237,12 +238,18 @@ test('dispatchSessionBackendEvent routes correlated retry timing', () => {
 
 test('dispatchSessionBackendEvent routes operational-error payloads', () => {
   const { handlers, calls } = createHandlers();
-  const payload = {
+  const payload: OperationalErrorPayload = {
+    incidentId: 'interrupt-stuck:req-1',
+    dedupeKey: 'interrupt-stuck:/workspace/session.jsonl:req-1',
     code: 'INTERRUPT_ABORT_STUCK',
     message: 'message.interrupt: session.abort() did not settle within 30000ms — activeRequest force-cleared.',
     detail: 'Abort remained pending after the recovery grace period.',
     sessionPath: '/workspace/session.jsonl',
     requestId: 'req-1',
+    severity: 'error',
+    certainty: 'definitive',
+    phase: 'recovery',
+    recovery: { retry: false, restart: true, showLogs: true },
   };
 
   dispatchSessionBackendEvent({ event: 'operational-error', payload }, handlers);
@@ -252,10 +259,16 @@ test('dispatchSessionBackendEvent routes operational-error payloads', () => {
 
 test('dispatchSessionBackendEvent routes operational-error without a requestId', () => {
   const { handlers, calls } = createHandlers();
-  const payload = {
+  const payload: OperationalErrorPayload = {
+    incidentId: 'retry-stuck:/workspace/session.jsonl',
+    dedupeKey: 'retry-stuck:/workspace/session.jsonl',
     code: 'RETRY_STUCK',
     message: 'A retry has not completed within 90000ms.',
     sessionPath: '/workspace/session.jsonl',
+    severity: 'error',
+    certainty: 'ambiguous',
+    phase: 'retry',
+    recovery: { retry: false, restart: false, showLogs: true },
   };
 
   dispatchSessionBackendEvent({ event: 'operational-error', payload }, handlers);

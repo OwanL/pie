@@ -34,7 +34,8 @@ import { EMPTY_AGGREGATE_STATS } from '../../shared/protocol';
 import { pruningTotals } from '../../shared/pruning.js';
 import { isPendingTabPath } from '../../shared/tab-behavior.js';
 import { stripReqIds } from '../../shared/error-mapping.js';
-import { redactSensitiveText } from '../../shared/sensitive-redaction.js';
+import { redactRendererErrorText } from '../../shared/renderer-error-redaction.js';
+import { incidentRecoveryActions } from '../../shared/incidents.js';
 import { projectTranscriptView } from './live-pipeline/projection.js';
 import type {
   ArchState,
@@ -423,7 +424,9 @@ function projectViewState(state: ArchState): ViewState {
         transcript.bySession[activePath] ?? EMPTY_TRANSCRIPT,
         state.livePipeline,
         activePath,
-      ).messages
+      ).messages.map((message) => message.errorDetail === undefined
+        ? message
+        : { ...message, errorDetail: redactRendererErrorText(message.errorDetail) })
     : EMPTY_TRANSCRIPT;
 
   const activeTranscriptWindow: TranscriptWindow =
@@ -559,12 +562,20 @@ function projectViewState(state: ArchState): ViewState {
     // request identities from both renderer-visible fields here, while the
     // host-side raw value remains available to logs and diagnostics.
     notice: noticeVisible && settings.notice !== null
-      ? redactSensitiveText(stripReqIds(settings.notice))
+      ? redactRendererErrorText(stripReqIds(settings.notice))
       : null,
     noticeSessionPath: noticeVisible ? settings.noticeSessionPath : null,
     noticeKind: noticeVisible ? settings.noticeKind : null,
+    noticeActions: noticeVisible
+      && settings.latestIncident !== null
+      && settings.notice === stripReqIds(settings.latestIncident.message)
+      && settings.noticeSessionPath === settings.latestIncident.sessionPath
+      ? settings.latestIncident.severity === 'error'
+        ? incidentRecoveryActions(settings.latestIncident)
+        : []
+      : undefined,
     noticeRaw: noticeVisible && settings.noticeRaw !== null
-      ? redactSensitiveText(stripReqIds(settings.noticeRaw))
+      ? redactRendererErrorText(stripReqIds(settings.noticeRaw))
       : null,
     backendReady: settings.backendReady,
     workspaceCwd: sessions.workspaceCwd,

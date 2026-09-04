@@ -441,8 +441,9 @@ test('fetchPages routes the exact owner address and closes on failure', async ()
   assert.equal(requests.length, 2);
 });
 
-test('subscribe RPC failure surfaces a retryable detail.error and closes the owner', async () => {
-  const { service, posted } = createHarness({ subscribeFailure: Object.assign(new Error('worker gone'), { code: 'SESSION_NOT_FOUND' }) });
+test('subscribe RPC failure redacts renderer-visible correlation and credentials', async () => {
+  const raw = 'worker gone req-77 Operation ID: 64e84c7a-b210-4eb6-a17b-38d59b1cbf33 apiKey=detail-secret';
+  const { service, posted } = createHarness({ subscribeFailure: Object.assign(new Error(raw), { code: 'SESSION_NOT_FOUND' }) });
   service.subscribe('subscription-1', 3, KEY, address());
   await tick();
   assert.equal(posted.length, 1);
@@ -453,6 +454,7 @@ test('subscribe RPC failure surfaces a retryable detail.error and closes the own
     assert.equal(posted[0]?.subscriptionId, 'subscription-1');
     assert.equal(posted[0]?.viewGeneration, 3);
     assert.equal(posted[0]?.detailKey, KEY);
+    assert.doesNotMatch(posted[0]?.message, /req-77|64e84c7a-b210-4eb6-a17b-38d59b1cbf33|detail-secret/);
   }
   // The failed owner is closed: a late start cannot bind.
   service.handleStream(startMessage('subscription-1'));

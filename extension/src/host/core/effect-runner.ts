@@ -2260,6 +2260,7 @@ export class EffectRunner {
         committed?: boolean;
         code?: string;
         message?: string;
+        outcome?: 'failed' | 'cancelled' | 'superseded' | 'aborted';
       }>('operation.status', {
         sessionPath: send.sessionPath,
         operationId: send.operationId,
@@ -2277,7 +2278,10 @@ export class EffectRunner {
         this.deps.dispatchEvent({
           kind: 'SendOperationStatus', operationId: send.operationId,
           sessionPath: send.sessionPath, backendGeneration: send.backendGeneration,
-          state: 'failed', requestId: status.requestId,
+          state: status.outcome === 'cancelled' || status.outcome === 'superseded'
+            ? status.outcome
+            : 'failed',
+          requestId: status.requestId,
           error: status.message ?? status.code ?? 'The backend rejected the send before it started.',
         });
         return;

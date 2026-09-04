@@ -712,6 +712,7 @@ export function handleDismissNotice(state: ArchState, _cmd: Extract<Command, { k
       draft.settings.noticeKind = null;
       draft.settings.noticeRaw = null;
       draft.settings.noticeSessionPath = null;
+      draft.settings.latestIncident = null;
     }),
     effects: [],
   };
