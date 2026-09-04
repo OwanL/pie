@@ -2,6 +2,7 @@ import type { ChatMessage, ToolCall } from './protocol/messages.js';
 import type { ThinkingLevel } from './protocol/models.js';
 import type { LiveSubagentDetailAddress, SubagentChildIdentity } from './protocol/subagent-detail.js';
 import { isThinkingLevel } from './thinking-level.js';
+import { isFiniteNumber, isRecord } from './type-guards.js';
 import {
   DEFAULT_JSON_PATCH_LIMITS,
   isJsonSafeValue,
@@ -547,8 +548,6 @@ function isSubagentBillingEntry(value: unknown): boolean {
 function isLiveTurnPhase(value: unknown): value is LiveTurnPhase {
   return ['queued', 'preparing', 'waiting_provider', 'streaming', 'running_tool', 'waiting_input', 'retry_wait', 'aborting', 'reconciling_gap'].includes(String(value));
 }
-function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value); }
-function isFiniteNumber(value: unknown): value is number { return typeof value === 'number' && Number.isFinite(value); }
 function optionalFiniteNumber(value: unknown): boolean { return value === undefined || isFiniteNumber(value); }
 function isNonNegativeSafeInteger(value: unknown): boolean {
   return Number.isSafeInteger(value) && (value as number) >= 0;

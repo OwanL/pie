@@ -8,6 +8,7 @@ import {
   type LiveTurnPhase,
 } from '../../../shared/live-pipeline-protocol.js';
 import { isThinkingLevel } from '../../../shared/thinking-level.js';
+import { isRecord } from '../../../shared/type-guards.js';
 import { incrementLiveRevision, pendingOwnerKey, terminalAttemptKey } from './model.js';
 
 export type CheckpointApplyResult =
@@ -237,10 +238,6 @@ function isLiveTurnPhase(value: unknown): value is LiveTurnPhase {
 
 function isLiveToolPhase(value: unknown): value is LiveToolPhase {
   return typeof value === 'string' && LIVE_TOOL_PHASES.has(value as LiveToolPhase);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function isNonNegativeSafeInteger(value: unknown): value is number {

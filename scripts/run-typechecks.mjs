@@ -11,29 +11,14 @@ import {
   watchChildProcess,
   withProcessTreeIsolation,
 } from './lib/process-watchdog.mjs';
+import { TYPECHECK_PROJECTS } from './lib/test-packages.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-export const TYPECHECK_PROJECTS = [
-  { id: 'shared', config: 'shared/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
-  { id: 'extension', config: 'extension/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
-  { id: 'analysis', config: 'analysis/tsconfig.json', compiler: 'analysis/node_modules/typescript/bin/tsc' },
-  { id: 'ask-user', config: 'extensions/ask-user/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
-  { id: 'cwd-skills', config: 'extensions/cwd-skills/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
-  { id: 'safeguard', config: 'extensions/safeguard/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
-  { id: 'skill-pruner', config: 'extensions/skill-pruner/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
-  { id: 'web-access-guard', config: 'extensions/web-access-guard/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
-  { id: 'warm-bash', config: 'extensions/warm-bash/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
-  { id: 'copilot-model-discovery', config: 'extensions/copilot-model-discovery/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
-  { id: 'tool-result-pruner', config: 'extensions/tool-result-pruner/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
-  { id: 'session-reviewer', config: 'extensions/session-reviewer/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
-  { id: 'deferred-triggers', config: 'extensions/deferred-triggers/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
-  { id: 'session-changes', config: 'extensions/session-changes/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
-  { id: 'computer-use', config: 'extensions/computer-use/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
-  { id: 'image-context-guard', config: 'extensions/image-context-guard/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
-  { id: 'playwright', config: 'extensions/playwright/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
-  { id: 'subagent', config: 'extensions/subagent/tsconfig.release.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
-];
+// Typecheck projects (ids, tsconfigs, per-project compiler selection) are
+// owned by scripts/lib/test-packages.mjs; re-exported for the drift test and
+// existing consumers.
+export { TYPECHECK_PROJECTS };
 
 export function parseArgs(argv) {
   const ids = [];

@@ -26,6 +26,7 @@
 
 import type { ComposerInput, ComposerInputDraft, WebviewToHostMessage } from '../../shared/protocol';
 import { isBrowserApplicationCommand } from '../../shared/browser-ingress';
+import { utf8ByteLength } from '../../shared/utf8';
 
 /** In-memory capacity (last 32 entries). */
 export const PENDING_COMMAND_CAPACITY = 32;
@@ -53,12 +54,6 @@ export interface PendingCommandEntry {
 }
 
 const MIRROR_KEY = 'pie.pendingCommands.v1';
-
-/** UTF-8 byte length (browser-safe). */
-const textEncoder = new TextEncoder();
-function utf8ByteLength(value: string): number {
-  return textEncoder.encode(value).length;
-}
 
 /** Compact digest of a staged input payload (never stored raw). */
 function digestOf(value: string): string {

@@ -9,24 +9,32 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { withoutPiHarnessEnv } from './lib/pi-harness-env.mjs';
 import { isProtectedDirectoryName } from './lib/traversal-policy.mjs';
+import {
+  PACKAGE_REGISTRY,
+  ROOT_BATCH_PACKAGE_IDS,
+  fastBatchMetadata,
+  packageTestDir,
+  resolvePackageEntry,
+} from './lib/test-packages.mjs';
 
 const REPORT_PREFIX = '__PI_TEST_SUMMARY__';
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const reporter = pathToFileURL(path.join(repoRoot, 'scripts', 'test-reporter.mjs')).href;
-const rootBatchDirs = [
-  'scripts/test',
-  'extensions/cwd-skills/test',
-  'extensions/safeguard/test',
-  'extensions/skill-pruner/test',
-  'extensions/ask-user/test',
-  'extensions/warm-bash/test',
-  'extensions/copilot-model-discovery/test',
-  'extensions/web-access-guard/test',
-  'extensions/tool-result-pruner/test',
-  'extensions/session-reviewer/test',
-  'extensions/deferred-triggers/test',
-  'extensions/session-changes/test',
-];
+// The root fast-batch composition is registry-derived: every package that runs
+// from the repo root, needs no tsx path aliases, and has no dedicated batch mode.
+export const rootBatchDirs = ROOT_BATCH_PACKAGE_IDS
+  .map((id) => packageTestDir(resolvePackageEntry(id)));
+
+/** Per-mode fast-batch plans, registry-derived (mode name = package id). */
+export const fastBatchDefinitions = Object.fromEntries(PACKAGE_REGISTRY
+  .map((entry) => [entry.id, fastBatchMetadata(entry)])
+  .filter(([, metadata]) => metadata !== null)
+  .map(([id, metadata]) => [id, {
+    cwd: metadata.testCwd ? path.join(repoRoot, metadata.testCwd) : repoRoot,
+    dir: metadata.testDir,
+    batches: metadata.batches,
+    tsxConfig: metadata.tsxConfig,
+  }]));
 
 async function walk(directory, extensions, output) {
   for (const entry of await readdir(directory, { withFileTypes: true })) {
@@ -97,13 +105,7 @@ async function buildPlan(mode, tempDir) {
     return { cwd: repoRoot, batches, tsxConfig: null, forceExitFiles: [] };
   }
 
-  const definitions = {
-    analysis: { cwd: path.join(repoRoot, 'analysis'), dir: 'analysis/test', batches: 4, tsxConfig: null },
-    'computer-use': { cwd: repoRoot, dir: 'extensions/computer-use/test', batches: 3, tsxConfig: 'extensions/computer-use/tsconfig.json' },
-    playwright: { cwd: repoRoot, dir: 'extensions/playwright/test', batches: 2, tsxConfig: 'extensions/playwright/tsconfig.runtime.json' },
-    subagent: { cwd: repoRoot, dir: 'extensions/subagent/test', batches: 4, tsxConfig: 'extensions/subagent/tsconfig.json' },
-  };
-  const definition = definitions[mode];
+  const definition = fastBatchDefinitions[mode];
   if (!definition) throw new Error(`Unknown fast batch mode: ${mode}`);
   const files = [];
   await walk(path.join(repoRoot, definition.dir), ['.test.ts'], files);
@@ -152,4 +154,8 @@ async function main() {
   }
 }
 
-await main();
+// Only run main() when invoked directly, so registry-derived exports can be
+// unit-tested (drift check) via `import` without side effects.
+const invokedDirectly = process.argv[1]
+  && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url;
+if (invokedDirectly) await main();

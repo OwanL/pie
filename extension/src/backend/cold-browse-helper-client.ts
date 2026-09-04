@@ -11,6 +11,7 @@ import {
   type TranscriptPagePayload,
 } from '../shared/protocol';
 import { SessionSnapshotTooLargeError } from '../shared/transcript-window';
+import { isRecord } from '../shared/type-guards';
 import {
   COLD_BROWSE_HELPER_MAX_FRAME_BYTES,
   COLD_BROWSE_HELPER_PROTOCOL_VERSION,
@@ -512,10 +513,6 @@ function parseSnapshotTooLargeData(
     maxBytes: value.maxBytes as number,
     ...(typeof value.requiredMessageId === 'string' ? { requiredMessageId: value.requiredMessageId } : {}),
   };
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
 function hasExited(child: ChildProcessWithoutNullStreams): boolean {

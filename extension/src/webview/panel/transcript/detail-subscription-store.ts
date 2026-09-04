@@ -33,6 +33,7 @@ import type {
   LiveSubagentDetailAddress,
 } from '../../../shared/protocol/subagent-detail';
 import type { HostDetailRoute, LazyDetailRef, WebviewToHostMessage } from '../../../shared/protocol';
+import { utf8ByteLength } from '../../../shared/utf8';
 
 // ─── Budgets (test-injectable) ───────────────────────────────────────────────
 
@@ -429,7 +430,7 @@ export function receiveDetailImperative(message: DetailStreamMessage): void {
         || ref.pageCount !== record.pageCount
         || ref.pageIndex >= record.pageCount) return;
       const serializedPayload = JSON.stringify(payload);
-      if (payloadBytes !== utf8Bytes(serializedPayload)) {
+      if (payloadBytes !== utf8ByteLength(serializedPayload)) {
         record.corruptIndexes.add(ref.pageIndex);
         return;
       }
@@ -768,7 +769,7 @@ function assembleRecordValue(record: DetailSubscriptionRecord): unknown {
       return undefined;
     }
     const serializedPayload = JSON.stringify(page.payload);
-    if (page.payloadBytes !== utf8Bytes(serializedPayload)
+    if (page.payloadBytes !== utf8ByteLength(serializedPayload)
       || page.checksum !== sha256Hex(serializedPayload)) {
       return undefined;
     }
@@ -777,7 +778,7 @@ function assembleRecordValue(record: DetailSubscriptionRecord): unknown {
     nextCodePoint = page.payload.endCodePoint;
   }
   const text = chunks.join('');
-  if (nextByte !== record.totalBytes || utf8Bytes(text) !== record.totalBytes
+  if (nextByte !== record.totalBytes || utf8ByteLength(text) !== record.totalBytes
     || nextCodePoint !== [...text].length
     || lastPage === undefined
     || lastPage.payload.endByte !== lastPage.payload.totalBytes
@@ -946,10 +947,6 @@ function notifyAll(): void {
   for (const subscribers of subscribersByKey.values()) {
     for (const subscriber of subscribers) subscriber();
   }
-}
-
-function utf8Bytes(value: string): number {
-  return new TextEncoder().encode(value).byteLength;
 }
 
 /** Synchronous FIPS-180-4 SHA-256 (dependency-free; the webview cannot import

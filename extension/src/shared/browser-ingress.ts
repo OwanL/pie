@@ -28,6 +28,8 @@
 
 import type { WebviewToHostMessage } from './protocol';
 import { validateWebviewToHostMessage, type ValidationResult } from './protocol-validation';
+import { isRecord } from './type-guards';
+import { utf8ByteLength } from './utf8';
 
 export const BROWSER_INGRESS_LIMITS = {
   /** Complete JSON command/frame including all known image payloads and
@@ -188,14 +190,6 @@ function fail(reason: string): { ok: false; reason: string } {
   return { ok: false, reason };
 }
 
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function utf8Length(value: string): number {
-  return new TextEncoder().encode(value).byteLength;
-}
-
 function hasOnlyKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
   const allowed = new Set(keys);
   return Object.keys(value).every((key) => allowed.has(key));
@@ -243,7 +237,7 @@ function walkJson(value: unknown, depth: number, path: string, maxDepth: number 
         || segment === 'sourcePath' || segment === 'targetPath'
         ? BROWSER_INGRESS_LIMITS.maxPathUtf8Bytes
         : BROWSER_INGRESS_LIMITS.maxStringUtf8Bytes;
-      if (utf8Length(value) > limit) {
+      if (utf8ByteLength(value) > limit) {
         return `string exceeds ${limit} bytes at ${path}`;
       }
       return null;
@@ -282,7 +276,7 @@ function walkJson(value: unknown, depth: number, path: string, maxDepth: number 
 function isClientCommandId(value: unknown): value is string {
   return typeof value === 'string'
     && CLIENT_COMMAND_ID_PATTERN.test(value)
-    && utf8Length(value) <= BROWSER_INGRESS_LIMITS.maxClientCommandIdBytes;
+    && utf8ByteLength(value) <= BROWSER_INGRESS_LIMITS.maxClientCommandIdBytes;
 }
 
 function isApplicationCommand(type: string): boolean {
@@ -298,7 +292,7 @@ export function isBrowserApplicationCommand(type: string): boolean {
 }
 
 function boundedString(value: unknown, maxBytes: number): value is string {
-  return typeof value === 'string' && utf8Length(value) <= maxBytes;
+  return typeof value === 'string' && utf8ByteLength(value) <= maxBytes;
 }
 
 /** Validate one composer input (draft or host-owned) under the browser
@@ -310,7 +304,7 @@ function validateComposerInputForBrowser(
   path: string,
   allowId: boolean,
 ): { ok: true; decodedBytes: number } | { ok: false; reason: string } {
-  if (!isObject(input)) return { ok: false, reason: `${path}: invalid input` };
+  if (!isRecord(input)) return { ok: false, reason: `${path}: invalid input` };
   const kind = input.kind;
   if (kind === 'fileBlob') {
     return { ok: false, reason: `${path}: fileBlob rejected before Milestone 4` };
@@ -407,7 +401,7 @@ function validateExtensionUiResponse(value: Record<string, unknown>): Validation
     return fail('extensionUiResponse: invalid or oversized sessionPath');
   }
   const response = value.response;
-  if (!isObject(response)) return fail('extensionUiResponse: missing `response` object');
+  if (!isRecord(response)) return fail('extensionUiResponse: missing `response` object');
   if (!hasOnlyKeys(response, EXTENSION_UI_RESPONSE_KEYS)) {
     return fail('extensionUiResponse: unknown fields in `response`');
   }
@@ -431,7 +425,7 @@ function validateRequestDetailRef(value: Record<string, unknown>): ValidationRes
     return fail('requestDetail: invalid or oversized sessionPath');
   }
   const ref = value.ref;
-  if (!isObject(ref)) return fail('requestDetail: invalid `ref`');
+  if (!isRecord(ref)) return fail('requestDetail: invalid `ref`');
   if (!hasOnlyKeys(ref, DETAIL_REF_KEYS)) return fail('requestDetail: unknown fields in `ref`');
   if (!boundedString(ref.key, 512) || ref.key.length === 0) return fail('requestDetail: invalid `ref.key`');
   if (!boundedString(ref.sessionPath, BROWSER_INGRESS_LIMITS.maxPathUtf8Bytes)) {
@@ -460,14 +454,14 @@ function validateRequestDetailRef(value: Record<string, unknown>): ValidationRes
 
 function validateLogData(value: Record<string, unknown>): ValidationResult<WebviewToHostMessage> {
   if (value.data === undefined) return { ok: true, value: value as unknown as WebviewToHostMessage };
-  if (!isObject(value.data)) return fail('log: `data` must be an object');
+  if (!isRecord(value.data)) return fail('log: `data` must be an object');
   const keys = Object.keys(value.data);
   if (keys.length > BROWSER_INGRESS_LIMITS.maxLogDataKeys) return fail('log: `data` has too many keys');
   const problem = walkJson(value.data, 1, 'log.data', BROWSER_INGRESS_LIMITS.maxLogDataDepth);
   if (problem !== null) return fail(`log: ${problem}`);
   let bytes = 0;
   try {
-    bytes = utf8Length(JSON.stringify(value.data));
+    bytes = utf8ByteLength(JSON.stringify(value.data));
   } catch {
     return fail('log: `data` is not serializable');
   }
@@ -517,7 +511,7 @@ export function validateBrowserToHostMessage(
   if (frameBytes > BROWSER_INGRESS_LIMITS.maxFrameBytes) {
     return fail('frame exceeds 32 MiB transport record limit');
   }
-  if (!isObject(value)) return fail('not an object');
+  if (!isRecord(value)) return fail('not an object');
   const type = value.type;
   if (typeof type !== 'string') return fail('missing string `type`');
 

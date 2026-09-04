@@ -11,10 +11,12 @@
 //  - scripts/test/  -> cwd repoRoot, tsx = node_modules/tsx (root)
 //  - extensions/<id>/ -> cwd repoRoot,          tsx = node_modules/tsx (root)
 //
-// Only the `subagent` package needs a `--tsconfig` (its schema test resolves pi
-// SDK path aliases); see extensions/subagent/tsconfig.json and the matching
-// tsxConfig entry in run-tests.mjs. We invoke `node <local tsx cli.mjs>`
-// directly (not `npx tsx`) to skip npx resolution overhead.
+// Only packages with a registry `tsxConfig` (subagent, playwright,
+// computer-use, image-context-guard) pass `--tsconfig` (their tests resolve
+// pi SDK path aliases); see scripts/lib/test-packages.mjs.
+//
+// The local tsx CLI is invoked directly (`node <local tsx cli.mjs>`, not
+// `npx tsx`) to skip npx resolution overhead.
 //
 // This script is always fast/no-coverage; exit code is non-zero if any tsx
 // invocation fails.
@@ -24,7 +26,7 @@ import { spawn } from 'node:child_process';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { PACKAGE_DIRECTIVES } from './lib/test-packages.mjs';
+import { PACKAGE_DIRECTIVES, resolvePackageEntry } from './lib/test-packages.mjs';
 import { withoutGitRepositoryEnv } from './lib/git-environment.mjs';
 import { withoutPiHarnessEnv } from './lib/pi-harness-env.mjs';
 import {
@@ -42,14 +44,10 @@ export function inferRepoRoot() {
 }
 
 /**
- * Packages whose tests need a `--tsconfig` for host-SDK path-alias resolution
- * (mirrors run-tests.mjs `tsxConfig`). Kept here rather than in the shared lib
- * because the affected-test planner does not need it.
+ * Per-package `--tsconfig` needs (host-SDK path-alias resolution) live in the
+ * shared registry (scripts/lib/test-packages.mjs `tsxConfig`); focused runs
+ * use the same compiler configuration as run-tests.mjs by construction.
  */
-const TSX_CONFIG_BY_PACKAGE = {
-  subagent: 'extensions/subagent/tsconfig.json',
-  playwright: 'extensions/playwright/tsconfig.runtime.json',
-};
 
 /**
  * Walk up from `startDir` to find `node_modules/tsx/dist/cli.mjs`.
@@ -116,7 +114,7 @@ export function classifyTestFile(repoRoot, input) {
   const cwd = dir.startsWith('extensions/') || id === 'scripts'
     ? repoRoot
     : path.join(repoRoot, dir);
-  const tsxConfig = TSX_CONFIG_BY_PACKAGE[id];
+  const tsxConfig = resolvePackageEntry(id)?.tsxConfig;
   const tsxBin = resolveLocalTsx(cwd);
   const relativeFilePath = path.relative(cwd, abs).replace(/\\/g, '/');
   return { id, cwd, tsxConfig, tsxBin, repoRel, abs, relativeFilePath };

@@ -30,6 +30,7 @@
 import type { HostToWebviewMessage, WebviewToHostMessage } from '../../shared/protocol';
 import { PIE_BUILD_ID, WEBVIEW_PROTOCOL_VERSION } from '../../shared/protocol';
 import { isBrowserApplicationCommand } from '../../shared/browser-ingress';
+import { utf8ByteLength } from '../../shared/utf8';
 import { pendingCommandStore } from './pending-command-store';
 
 export type ClientConnectionState = 'connecting' | 'connected' | 'disconnected' | 'reload-required';
@@ -142,12 +143,6 @@ export class VsCodeClientTransport implements ClientTransport {
 }
 
 // ─── Browser client transport ───────────────────────────────────────────────
-
-/** UTF-8 byte length (browser-safe; no Node Buffer in the webview). */
-const textEncoder = new TextEncoder();
-function utf8ByteLength(value: string): number {
-  return textEncoder.encode(value).length;
-}
 
 /** Maximum outbound frame (mirrors the host's 32 MiB transport record limit;
  *  the fail-closed ingress re-measures the exact decoded bytes). */

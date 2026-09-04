@@ -15,6 +15,7 @@ import type {
 } from '../../shared/protocol';
 import { appendUnique, summarizeInputs } from './helpers';
 import { estimateTextTokens } from '../../shared/tokenize';
+import { isRecord } from '../../shared/type-guards';
 import {
   getSubagentBillingEntries,
   getRenderableSubagentResult,
@@ -43,10 +44,6 @@ function toNonNegativeInt(value: unknown): number {
 
 function finiteOrNull(value: unknown): number | null {
   return Number.isFinite(value) && typeof value === 'number' ? value : null;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
 interface SessionRunTrackerOptions {

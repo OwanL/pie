@@ -15,6 +15,7 @@ import {
 } from './lib/process-watchdog.mjs';
 import { withoutGitRepositoryEnv } from './lib/git-environment.mjs';
 import { withoutPiHarnessEnv } from './lib/pi-harness-env.mjs';
+import { PACKAGE_REGISTRY, ROOT_BATCH_PACKAGE_IDS } from './lib/test-packages.mjs';
 import { resolveLocalTsx } from './run-test-files.mjs';
 
 const REPORT_PREFIX = '__PI_TEST_SUMMARY__';
@@ -23,19 +24,18 @@ const repoRoot = path.resolve(__dirname, '..');
 const reporterSpecifier = pathToFileURL(path.join(__dirname, 'test-reporter.mjs')).href;
 const fastCachePath = path.join(repoRoot, '.cache', 'test-results', 'unit-suite.json');
 
-const PACKAGE_CONFIGS = [
-  {
-    id: 'extension',
-    cwd: path.join(repoRoot, 'extension'),
+// Package identity, ordering, aliases, test cwd, tsx/tsc compiler selection,
+// batching, and fast concurrency live in scripts/lib/test-packages.mjs
+// (PACKAGE_REGISTRY). Only per-package test/coverage metadata is local here;
+// scripts/test/package-registry-drift.test.mjs fails when the two diverge.
+const PACKAGE_TEST_METADATA = {
+  extension: {
     testGlobs: ['./test/**/*.test.ts', './test/**/*.test.tsx'],
     coverageIncludes: ['src/**/*.ts', 'src/**/*.tsx'],
     thresholds: { lines: 80, branches: 75 },
     fastRunner: path.join(repoRoot, 'scripts', 'run-fast-extension-tests.mjs'),
   },
-  {
-    id: 'analysis',
-    aliases: ['analytics'],
-    cwd: path.join(repoRoot, 'analysis'),
+  analysis: {
     testGlobs: ['./test/**/*.test.ts'],
     // The dashboard under site/ (app.ts + charts/) is a browser-rendered UI
     // layer — declarative Vega-Lite chart specs + DOM functions — not amenable
@@ -45,41 +45,30 @@ const PACKAGE_CONFIGS = [
     // (scripts/) is unit-gated.
     coverageIncludes: ['scripts/**/*.ts'],
     thresholds: { lines: 95, branches: 78 },
-    fastBatchMode: 'analysis',
   },
-  {
-    id: 'scripts',
-    cwd: repoRoot,
+  scripts: {
     testGlobs: ['scripts/test/*.test.mjs'],
     // These tests exercise the test/typecheck runners and Git hooks themselves.
     // Keep their established no-coverage behavior: collecting coverage while
     // testing the coverage runner is both recursive in scope and misleading.
     coverage: false,
   },
-  {
-    id: 'cwd-skills',
-    cwd: repoRoot,
+  'cwd-skills': {
     testGlobs: ['extensions/cwd-skills/test/**/*.test.ts'],
     coverageIncludes: ['extensions/cwd-skills/index.ts'],
     thresholds: { lines: 95, branches: 95 },
   },
-  {
-    id: 'safeguard',
-    cwd: repoRoot,
+  safeguard: {
     testGlobs: ['extensions/safeguard/test/**/*.test.ts'],
     coverageIncludes: ['extensions/safeguard/*.ts'],
     thresholds: { lines: 85, branches: 80 },
   },
-  {
-    id: 'skill-pruner',
-    cwd: repoRoot,
+  'skill-pruner': {
     testGlobs: ['extensions/skill-pruner/test/**/*.test.ts'],
     coverageIncludes: ['extensions/skill-pruner/*.ts', 'extensions/skill-pruner/src/**/*.ts'],
     thresholds: { lines: 91, branches: 79 },
   },
-  {
-    id: 'subagent',
-    cwd: repoRoot,
+  subagent: {
     testGlobs: ['extensions/subagent/test/**/*.test.ts'],
     coverageIncludes: ['extensions/subagent/*.ts', 'extensions/subagent/src/**/*.ts'],
     // Source-only coverage excludes the previously counted test files. Much of
@@ -92,19 +81,13 @@ const PACKAGE_CONFIGS = [
     // under pi-coding-agent's node_modules, never hoisted). This tsconfig's
     // `paths` alias those to the bundled copy so the schema test resolves a
     // single TypeBox instance. See extensions/subagent/tsconfig.json.
-    tsxConfig: 'extensions/subagent/tsconfig.json',
-    fastBatchMode: 'subagent',
   },
-  {
-    id: 'ask-user',
-    cwd: repoRoot,
+  'ask-user': {
     testGlobs: ['extensions/ask-user/test/**/*.test.ts'],
     coverageIncludes: ['extensions/ask-user/index.ts', 'extensions/ask-user/src/**/*.ts'],
     thresholds: { lines: 100, branches: 100 },
   },
-  {
-    id: 'warm-bash',
-    cwd: repoRoot,
+  'warm-bash': {
     testGlobs: ['extensions/warm-bash/test/**/*.test.ts'],
     coverageIncludes: ['extensions/warm-bash/index.ts', 'extensions/warm-bash/src/**/*.ts'],
     // warm-pool tests spawn real bash and are environment-dependent; the
@@ -113,25 +96,19 @@ const PACKAGE_CONFIGS = [
     // (win32 vs unix) paths in kill.ts / warm-pool.ts.
     thresholds: { lines: 90, branches: 77 },
   },
-  {
-    id: 'copilot-model-discovery',
-    cwd: repoRoot,
+  'copilot-model-discovery': {
     testGlobs: ['extensions/copilot-model-discovery/test/**/*.test.ts'],
     coverageIncludes: ['extensions/copilot-model-discovery/src/**/*.ts'],
     thresholds: { lines: 90, branches: 80 },
   },
-  {
-    id: 'web-access-guard',
-    cwd: repoRoot,
+  'web-access-guard': {
     testGlobs: ['extensions/web-access-guard/test/**/*.test.ts'],
     coverageIncludes: ['extensions/web-access-guard/*.ts'],
     // Package-root lookup is injectable; only the production agent-dir glue
     // remains untestable. Workflow patching and npm repair are fully covered.
     thresholds: { lines: 82, branches: 78 },
   },
-  {
-    id: 'tool-result-pruner',
-    cwd: repoRoot,
+  'tool-result-pruner': {
     testGlobs: ['extensions/tool-result-pruner/test/**/*.test.ts'],
     coverageIncludes: ['extensions/tool-result-pruner/*.ts'],
     // MVP: the lossless rules + pipeline guards are pure functions; the
@@ -139,9 +116,7 @@ const PACKAGE_CONFIGS = [
     // unit-testable without the pi runtime. Types-global.d.ts is ambient only.
     thresholds: { lines: 92, branches: 80 },
   },
-  {
-    id: 'session-reviewer',
-    cwd: repoRoot,
+  'session-reviewer': {
     testGlobs: ['extensions/session-reviewer/test/**/*.test.ts'],
     coverageIncludes: ['extensions/session-reviewer/index.ts', 'extensions/session-reviewer/src/**/*.ts'],
     // transcript.ts (the JSONL parser) is the unit-testable core; index.ts is
@@ -150,9 +125,7 @@ const PACKAGE_CONFIGS = [
     // types-global.d.ts is ambient only.
     thresholds: { lines: 80, branches: 70 },
   },
-  {
-    id: 'deferred-triggers',
-    cwd: repoRoot,
+  'deferred-triggers': {
     testGlobs: ['extensions/deferred-triggers/test/**/*.test.ts'],
     coverageIncludes: ['extensions/deferred-triggers/index.ts', 'extensions/deferred-triggers/src/**/*.ts'],
     // store.ts (the op-log replay) is the unit-testable core; index.ts is
@@ -160,9 +133,7 @@ const PACKAGE_CONFIGS = [
     // types-global.d.ts is ambient only.
     thresholds: { lines: 80, branches: 70 },
   },
-  {
-    id: 'session-changes',
-    cwd: repoRoot,
+  'session-changes': {
     testGlobs: ['extensions/session-changes/test/**/*.test.ts'],
     coverageIncludes: ['extensions/session-changes/index.ts', 'extensions/session-changes/src/**/*.ts'],
     // session-jsonl.ts (the JSONL reader + toolCall↔toolResult join), render.ts
@@ -173,9 +144,7 @@ const PACKAGE_CONFIGS = [
     // live in extension/src/shared/ and are covered by the extension suite.
     thresholds: { lines: 80, branches: 70 },
   },
-  {
-    id: 'computer-use',
-    cwd: repoRoot,
+  'computer-use': {
     testGlobs: ['extensions/computer-use/test/**/*.test.ts'],
     coverageIncludes: [
       'extensions/computer-use/index.ts',
@@ -183,23 +152,16 @@ const PACKAGE_CONFIGS = [
       'extensions/computer-use/src/**/*.mjs',
     ],
     thresholds: { lines: 80, branches: 60 },
-    tsxConfig: 'extensions/computer-use/tsconfig.json',
-    fastBatchMode: 'computer-use',
   },
-  {
-    id: 'image-context-guard',
-    cwd: repoRoot,
+  'image-context-guard': {
     testGlobs: ['extensions/image-context-guard/test/**/*.test.ts'],
     coverageIncludes: [
       'extensions/image-context-guard/index.ts',
       'extensions/image-context-guard/src/**/*.ts',
     ],
     thresholds: { lines: 80, branches: 60 },
-    tsxConfig: 'extensions/image-context-guard/tsconfig.json',
   },
-  {
-    id: 'playwright',
-    cwd: repoRoot,
+  playwright: {
     testGlobs: ['extensions/playwright/test/**/*.test.ts'],
     coverageTestGlobs: ['extensions/playwright/test/coverage-suite.ts'],
     coverageIncludes: [
@@ -208,10 +170,26 @@ const PACKAGE_CONFIGS = [
       'extensions/playwright/src/**/*.mjs',
     ],
     thresholds: { lines: 80, branches: 60 },
-    tsxConfig: 'extensions/playwright/tsconfig.runtime.json',
-    fastBatchMode: 'playwright',
   },
-];
+};
+
+/** Per-package runner configs: registry identity + local test/coverage metadata. */
+export const PACKAGE_CONFIGS = PACKAGE_REGISTRY.map((entry) => {
+  const metadata = PACKAGE_TEST_METADATA[entry.id];
+  if (!metadata) {
+    throw new Error(`Package "${entry.id}" is registered in scripts/lib/test-packages.mjs but has no PACKAGE_TEST_METADATA in run-tests.mjs.`);
+  }
+  return {
+    id: entry.id,
+    ...(entry.aliases?.length ? { aliases: entry.aliases } : {}),
+    cwd: entry.testCwd ? path.join(repoRoot, entry.testCwd) : repoRoot,
+    ...(entry.tsxConfig ? { tsxConfig: entry.tsxConfig } : {}),
+    // A dedicated fast-batch mode is named after its package.
+    ...(entry.fastBatch ? { fastBatchMode: entry.id } : {}),
+    ...(entry.fastConcurrency !== undefined ? { fastConcurrency: entry.fastConcurrency } : {}),
+    ...metadata,
+  };
+});
 
 const PACKAGE_LOOKUP = new Map();
 for (const config of PACKAGE_CONFIGS) {
@@ -357,18 +335,15 @@ export function groupFastPackageConfigs(configs) {
   return [...groups.values()].map((group) => {
     const ids = group.members.map((member) => member.id);
     const isRootGroup = group.cwd === repoRoot && !group.tsxConfig;
-    const fastConcurrency = group.id === 'extension' ? 8
-      : group.id === 'analysis' ? 2
-        : group.id === 'subagent' ? 4
-          : group.id === 'computer-use' ? 2
-            : group.id === 'image-context-guard' ? 1
-              : isRootGroup ? 3
-                : undefined;
+    // fastConcurrency comes from the package registry via the first member;
+    // merged root-group members all share the registry's root budget.
+    const isFullRootBatch = isRootGroup
+      && ids.length === ROOT_BATCH_PACKAGE_IDS.length
+      && ROOT_BATCH_PACKAGE_IDS.every((id) => ids.includes(id));
     return {
       ...group,
       id: ids.length === 1 ? ids[0] : `${ids.length} root packages`,
-      fastConcurrency,
-      fastBatchMode: isRootGroup && ids.length === 12 ? 'root' : group.fastBatchMode,
+      fastBatchMode: isFullRootBatch ? 'root' : group.fastBatchMode,
     };
   });
 }

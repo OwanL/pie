@@ -6,6 +6,8 @@ import type {
 } from './protocol/messages.js';
 import { deduplicateToolCallResultsForTransport } from './chat-message-parts.js';
 import { getSubagentBillingEntries } from './subagent-result.js';
+import { isRecord } from './type-guards.js';
+import { utf8ByteLength } from './utf8.js';
 
 /** Details larger than this never ride ordinary full-state snapshots. */
 export const LAZY_DETAIL_THRESHOLD_BYTES = 16 * 1024;
@@ -19,20 +21,10 @@ const SUBAGENT_PREVIEW_TEXT_CHARS = 8 * 1024;
 const SUBAGENT_PREVIEW_TASK_CHARS = 2 * 1024;
 const SUBAGENT_PREVIEW_LIST_ITEMS = 8;
 
-const encoder = new TextEncoder();
-
-export function utf8Bytes(value: string): number {
-  return encoder.encode(value).byteLength;
-}
-
 export function jsonBytes(value: unknown): number {
   if (value === undefined) return 0;
-  try { return utf8Bytes(JSON.stringify(value)); }
+  try { return utf8ByteLength(JSON.stringify(value)); }
   catch { return Number.POSITIVE_INFINITY; }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
 function boundedStart(value: unknown, maxChars: number): unknown {
@@ -288,7 +280,7 @@ function reasoningRef(
     sessionPath,
     messageId: message.id,
     partIndex,
-    sizeBytes: utf8Bytes(text),
+    sizeBytes: utf8ByteLength(text),
     summary: shortSummary(text),
     lineCount: lineCount(text),
     available: true,
@@ -299,7 +291,7 @@ export function compactLiveReasoningPart(
   text: string,
   options: { sessionPath: string; messageId: string; partIndex: number; sourceRevision: number; sizeBytes?: number },
 ): Extract<ChatMessagePart, { kind: 'reasoning' }> {
-  const sizeBytes = options.sizeBytes ?? utf8Bytes(text);
+  const sizeBytes = options.sizeBytes ?? utf8ByteLength(text);
   if (sizeBytes <= LAZY_DETAIL_THRESHOLD_BYTES) return { kind: 'reasoning', text };
   const detailRef: LazyDetailRef = {
     key: `live:reasoning:${options.sessionPath}:${options.messageId}:${options.partIndex}:${options.sourceRevision}`,
@@ -330,7 +322,7 @@ export function compactDurableMessageDetails(
   let changed = false;
   const compactedPartTools = new Map<string, ToolCall>();
   const parts = message.parts?.map((part, partIndex): ChatMessagePart => {
-    if (part.kind === 'reasoning' && utf8Bytes(part.text) > thresholdBytes) {
+    if (part.kind === 'reasoning' && utf8ByteLength(part.text) > thresholdBytes) {
       changed = true;
       const detailRef = reasoningRef(sessionPath, message, partIndex, part.text);
       return { kind: 'reasoning', text: detailRef.summary, detailRef };
@@ -365,7 +357,7 @@ export function compactDurableMessageDetails(
 
   let thinking = message.thinking;
   let thinkingDetailRef = message.thinkingDetailRef;
-  if (thinking && utf8Bytes(thinking) > thresholdBytes) {
+  if (thinking && utf8ByteLength(thinking) > thresholdBytes) {
     changed = true;
     thinkingDetailRef = reasoningRef(sessionPath, message, -1, thinking);
     thinking = thinkingDetailRef.summary;
@@ -387,7 +379,7 @@ export function findDurableDetail(
         ? (message.parts[ref.partIndex ?? -1] as Extract<ChatMessagePart, { kind: 'reasoning' }>).text
         : undefined;
     return typeof value === 'string'
-      ? { status: 'loaded', value, sizeBytes: utf8Bytes(value) }
+      ? { status: 'loaded', value, sizeBytes: utf8ByteLength(value) }
       : { status: 'unavailable' };
   }
   const tool = message.parts
@@ -446,7 +438,7 @@ export function compactDurableMessageForTransport(
 function boundMessageTextTails(message: ChatMessage, maxBytes: number): ChatMessage {
   if (message.parts && message.parts.length > 0) {
     const boundedParts = message.parts.map((part): ChatMessagePart => {
-      if ((part.kind === 'text' || part.kind === 'reasoning') && utf8Bytes(part.text) > TRANSPORT_TEXT_PART_BUDGET) {
+      if ((part.kind === 'text' || part.kind === 'reasoning') && utf8ByteLength(part.text) > TRANSPORT_TEXT_PART_BUDGET) {
         return { ...part, text: part.text.slice(-TRANSPORT_TEXT_PART_BUDGET) };
       }
       return part;

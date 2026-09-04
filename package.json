@@ -51,8 +51,8 @@
     "computer-use:typecheck": "node ./scripts/run-typechecks.mjs --project computer-use",
     "playwright:test": "node ./scripts/run-tests.mjs --fast --package playwright",
     "playwright:typecheck": "node ./scripts/run-typechecks.mjs --project playwright",
-    "extensions:test": "node ./scripts/run-tests.mjs --package ask-user --package copilot-model-discovery --package cwd-skills --package safeguard --package skill-pruner --package subagent --package web-access-guard --package warm-bash --package tool-result-pruner --package session-reviewer --package deferred-triggers --package session-changes --package computer-use --package image-context-guard --package playwright",
-    "extensions:typecheck": "node ./scripts/run-typechecks.mjs --project ask-user --project copilot-model-discovery --project cwd-skills --project safeguard --project skill-pruner --project web-access-guard --project warm-bash --project tool-result-pruner --project session-reviewer --project deferred-triggers --project session-changes --project computer-use --project image-context-guard --project playwright --project subagent",
+    "extensions:test": "node ./scripts/run-package-group.mjs tests extensions",
+    "extensions:typecheck": "node ./scripts/run-package-group.mjs typechecks extensions",
     "sync-models": "node ./scripts/sync-models.mjs"
   },
   "devDependencies": {

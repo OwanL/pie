@@ -1,6 +1,8 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
+import { isRecord } from '../../shared/type-guards';
+
 export interface WindowsProcessRecord {
   ProcessId: number;
   CommandLine?: string | null;
@@ -14,10 +16,6 @@ export interface OrphanReapResult {
 }
 
 const execFileAsync = promisify(execFile);
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 
 /** Parse the exact JSON shape emitted by the PowerShell process query.
  * ConvertTo-Json emits either an object or an array depending on cardinality,

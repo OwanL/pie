@@ -2,6 +2,7 @@ import {
   isLiveSubagentDetailAddress,
   type LiveSubagentDetailAddress,
 } from '../../../shared/protocol/subagent-detail.js';
+import { isRecord } from '../../../shared/type-guards.js';
 
 interface ChildCollection {
   children: unknown[];
@@ -126,8 +127,4 @@ function childCollection(value: unknown): ChildCollection | undefined {
     }
   }
   return undefined;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }

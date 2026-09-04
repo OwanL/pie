@@ -1,4 +1,5 @@
 import { isJsonSafeValue, type JsonStructuralPatchOperation } from '../json-structural-patch.js';
+import { utf8ByteLength } from '../utf8.js';
 import type { LazyDetailRef } from './messages.js';
 
 export const SUBAGENT_DETAIL_PROTOCOL_VERSION = 1 as const;
@@ -153,7 +154,7 @@ export function isDetailPagePayload(value: unknown): value is DetailPagePayload 
     || !nonNegativeInteger(value.endCodePoint) || !nonNegativeInteger(value.totalCodePoints)) return false;
   return value.startByte <= value.endByte && value.endByte <= value.totalBytes
     && value.startCodePoint <= value.endCodePoint && value.endCodePoint <= value.totalCodePoints
-    && utf8Length(value.text) === value.endByte - value.startByte
+    && utf8ByteLength(value.text) === value.endByte - value.startByte
     && [...value.text].length === value.endCodePoint - value.startCodePoint;
 }
 
@@ -198,7 +199,7 @@ export function isCoordinatorToHostDetailMessage(value: unknown): value is Coord
       return recordWithKeys(value, ['kind', 'subscriptionId', 'ref', 'payload', 'payloadBytes', 'checksum', 'fence'])
         && isDetailPageRef(value.ref) && isDetailPagePayload(value.payload)
         && nonNegativeInteger(value.payloadBytes)
-        && value.payloadBytes === utf8Length(JSON.stringify(value.payload))
+        && value.payloadBytes === utf8ByteLength(JSON.stringify(value.payload))
         && isDetailChecksum(value.checksum);
     case 'detail.delta':
       return recordWithKeys(value, ['kind', 'subscriptionId', 'baseRevision', 'revision', 'operations', 'fence'])
@@ -247,15 +248,14 @@ function isLazyDetailRef(value: unknown): value is LazyDetailRef {
 }
 
 function validPathSegment(value: unknown): boolean {
-  return typeof value === 'string' ? !FORBIDDEN_KEYS.has(value) && utf8Length(value) <= ID_BYTES : nonNegativeInteger(value);
+  return typeof value === 'string' ? !FORBIDDEN_KEYS.has(value) && utf8ByteLength(value) <= ID_BYTES : nonNegativeInteger(value);
 }
 
 function optionalString(value: unknown): boolean { return value === undefined || boundedString(value, ID_BYTES); }
 function optionalNonNegative(value: unknown): boolean { return value === undefined || nonNegativeInteger(value); }
 function positiveInteger(value: unknown): value is number { return typeof value === 'number' && Number.isSafeInteger(value) && value > 0; }
 function nonNegativeInteger(value: unknown): value is number { return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0; }
-function boundedString(value: unknown, bytes: number): value is string { return typeof value === 'string' && value.length > 0 && utf8Length(value) <= bytes; }
-function utf8Length(value: string): number { return new TextEncoder().encode(value).byteLength; }
+function boundedString(value: unknown, bytes: number): value is string { return typeof value === 'string' && value.length > 0 && utf8ByteLength(value) <= bytes; }
 function isRecord(value: unknown): value is Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
   const prototype = Object.getPrototypeOf(value);

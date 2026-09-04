@@ -37,6 +37,8 @@ import type {
   HostToWebviewMessage,
 } from './protocol';
 import { isThinkingLevel, THINKING_LEVEL_SET } from './thinking-level.js';
+import { isFiniteNumber } from './type-guards.js';
+import { utf8ByteLength } from './utf8.js';
 import {
   COMPOSER_INITIAL_ROWS_MAX,
   COMPOSER_INITIAL_ROWS_MIN,
@@ -74,10 +76,6 @@ function isOptionalString(value: unknown): value is string | undefined {
 
 function isOptionalNonNegativeSafeInteger(value: unknown): value is number | undefined {
   return value === undefined || isNonNegativeSafeInteger(value);
-}
-
-function isFiniteNumber(value: unknown): value is number {
-  return typeof value === 'number' && Number.isFinite(value);
 }
 
 function isNonNegativeSafeInteger(value: unknown): value is number {
@@ -490,11 +488,7 @@ const DETAIL_ERROR_CODE_SET: ReadonlySet<string> = new Set([
 ]);
 
 function isDetailKey(value: unknown): value is string {
-  return isString(value) && value.length > 0 && utf8Length(value) <= DETAIL_KEY_MAX_BYTES;
-}
-
-function utf8Length(value: string): number {
-  return new TextEncoder().encode(value).byteLength;
+  return isString(value) && value.length > 0 && utf8ByteLength(value) <= DETAIL_KEY_MAX_BYTES;
 }
 
 function validateHostDetailRoute(value: Record<string, unknown>): value is HostDetailRoute & Record<string, unknown> {

@@ -3,6 +3,7 @@
 
 import { useMemo } from 'preact/hooks';
 import type { ComponentChildren } from 'preact';
+import { utf8ByteLength } from '../../../../shared/utf8';
 
 /**
  * Bounded rendering of oversized tool input/output text.
@@ -43,7 +44,7 @@ export interface TextSegment {
  *  lines stay intact. Returns the full text as one segment when it fits. */
 export function splitOversizedText(text: string, maxChars: number): TextSegment[] {
   const points = [...text];
-  const totalBytes = utf8Bytes(text);
+  const totalBytes = utf8ByteLength(text);
   const limit = Math.max(1, Math.floor(maxChars));
   const segments: TextSegment[] = [];
   let start = 0;
@@ -63,7 +64,7 @@ export function splitOversizedText(text: string, maxChars: number): TextSegment[
       if (breakAt !== -1) end = breakAt + 1;
     }
     const segmentText = points.slice(start, end).join('');
-    const segmentBytes = utf8Bytes(segmentText);
+    const segmentBytes = utf8ByteLength(segmentText);
     segments.push({
       start,
       end,
@@ -113,8 +114,4 @@ export function SegmentedText({ text, identity, renderSegment, maxChars }: Segme
       ))}
     </div>
   );
-}
-
-function utf8Bytes(value: string): number {
-  return new TextEncoder().encode(value).byteLength;
 }

@@ -51,6 +51,7 @@ import type {
 import type { ExtensionUIRequestPayload } from './webview.js';
 import type { ContextWindowUsage } from './models.js';
 import { isToolPreview } from '../live-pipeline-protocol.js';
+import { isFiniteNumber } from '../type-guards.js';
 
 // ─── shared primitives ───────────────────────────────────────────────────────
 
@@ -64,10 +65,6 @@ function isString(value: unknown): value is string {
 
 function isBoolean(value: unknown): value is boolean {
   return typeof value === 'boolean';
-}
-
-function isFiniteNumber(value: unknown): value is number {
-  return typeof value === 'number' && Number.isFinite(value);
 }
 
 function isOptionalString(value: unknown): value is string | undefined {
