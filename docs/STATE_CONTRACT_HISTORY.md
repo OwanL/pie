@@ -43,9 +43,10 @@ Remediation recorded in `docs/HANDOFF_SUBAGENT_PROVIDER_RESILIENCE.md`; invarian
 
 ## Stability architecture milestones
 
-Tracked in `docs/STABILITY-ARCHITECTURE-PLAN.md`; dates recorded there:
+The completed stability architecture plan was retired on 2026-09-05 under the repository convention that `*_PLAN.md` files describe only active work. Its durable outcomes are:
 
 - **Milestone 0** (2026-09-05) — canonical traversal policy, deterministic operation-schedule/fault-injection baselines, two-process deferred-trigger claim races, redacted structured tracing, active-session publication reproduction, accounting fixtures.
+- **Milestone 1** (2026-09-05) — authoritative continuation/activity capabilities, durable deferred-trigger claiming, explicit compaction outcomes, bounded transitions, severity-correct typed incidents, renderer-boundary redaction, context/cost corrections, and restored active working-time intervals.
 - **Milestone 2** (2026-09-05) — reducer-owned common operation registry across create/duplicate/open/close/restart/send/edit/interrupt/continue/compact; idempotent backend mutations; correlated `agent.settled` lineage; generic effect state reduced to opaque execution resources.
 - **Milestone 3** (2026-09-05) — conserved billable accounting: idempotent invocation ledger and correlated activity timeline owning all usage/cost/working-time surfaces; cross-process transaction lock and privacy fences.
 - **Milestone 4** (2026-09-04) — non-disruptive publication: separate compile/publish/activate concepts, immutable generation-addressed renderer output with append-only selection marker, no ordinary manifest rewrites, explicit activation with exact identity checks.
