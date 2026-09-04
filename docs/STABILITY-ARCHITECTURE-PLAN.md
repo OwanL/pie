@@ -489,6 +489,8 @@ Work includes:
 
 **Consolidation commit 2b complete (2026-09-05).** The backend request handler remains the public dispatch, tracing, and completion façade while shared dependency/transition contracts, session lifecycle and durable-read handlers, and message mutation handlers live in focused acyclic modules. Exact route ordering, validation settlement, idempotency ledgers, transition deadlines, worker ownership fences, and incident behavior remain covered through route-parity, module-boundary, and existing handler tests.
 
+**Consolidation commit 2c complete (2026-09-05).** `handleSdkSessionEvent` remains the SDK observation and dispatch façade while message/content/tool processing and agent lifecycle/retry/history-compaction/settlement processing live in focused acyclic modules behind a narrow shared event context. Exact dispatch membership and order, durable terminal publication, operation/attempt/generation correlation, live accumulator ownership, accounting emissions, retry and history-compaction outcomes, and existing test hooks remain covered through dispatch-parity, module-boundary, and existing event-handler tests.
+
 1. Split remaining multi-concern modules along the new domain boundaries.
 2. Consolidate registries and shared primitives.
 3. Remove proven-dead compatibility paths and historical comments.
