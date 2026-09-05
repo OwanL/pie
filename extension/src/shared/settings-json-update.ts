@@ -140,19 +140,23 @@ export async function withFileUpdateLock<T>(
   const retryMs = options.retryMs ?? DEFAULT_LOCK_RETRY_MS;
   const startedAt = Date.now();
   const token = `${process.pid}:${randomUUID()}`;
-  let handle: fs.FileHandle | undefined;
+  let fd: number | undefined;
   let retriedUnconfirmedContention = false;
 
-  while (!handle) {
+  while (fd === undefined) {
     try {
-      handle = await fs.open(lockPath, 'wx');
-      await handle.writeFile(`${token}\n`, 'utf8');
+      // The tiny lock-file transition must not yield. Otherwise a synchronous
+      // ledger tick can observe our newly-created lock before ownership is
+      // registered and block the event loop needed to finish acquiring it.
+      // Contention still retries asynchronously; the protected action may await.
+      fd = fsSync.openSync(lockPath, 'wx');
+      fsSync.writeFileSync(fd, `${token}\n`, 'utf8');
       retriedUnconfirmedContention = false;
     } catch (error) {
-      if (handle) {
-        await handle.close().catch(() => undefined);
-        handle = undefined;
-        await fs.unlink(lockPath).catch(() => undefined);
+      if (fd !== undefined) {
+        try { fsSync.closeSync(fd); } catch { /* best effort */ }
+        fd = undefined;
+        try { fsSync.unlinkSync(lockPath); } catch { /* best effort */ }
       }
       const contention = await classifyFileUpdateLockContention(error, lockPath);
       if (contention === 'none') throw error;
@@ -179,17 +183,19 @@ export async function withFileUpdateLock<T>(
     owned.set(lockPath, token);
     return await heldLockContext.run(owned, action);
   } finally {
-    processHeldLocks.delete(lockPath);
-    await handle.close().catch(() => undefined);
-    // Do not remove a successor's lock if this lock was externally deemed
-    // stale and replaced while the action was still finishing.
+    // Release is the other half of the same atomic process-ownership handoff:
+    // never expose a lock on disk after dropping our in-process ownership while
+    // awaiting close/read/unlink. That window deadlocks synchronous readers too.
+    try { fsSync.closeSync(fd); } catch { /* best effort */ }
     try {
-      const owner = await fs.readFile(lockPath, 'utf8');
-      if (owner.trim() === token) await fs.unlink(lockPath);
+      const owner = fsSync.readFileSync(lockPath, 'utf8');
+      if (owner.trim() === token) fsSync.unlinkSync(lockPath);
     } catch {
       // The action has already completed. A failed release is recovered by the
       // stale-lock path; throwing here could make callers retry an update that
       // was successfully committed.
+    } finally {
+      processHeldLocks.delete(lockPath);
     }
   }
 }

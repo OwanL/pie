@@ -57,6 +57,20 @@ export interface BillableAccountingDeps {
   markDerivedExportDirty: () => void;
 }
 
+interface AppendUsageOptions {
+  kind?: BillableInvocationKind;
+  branchId?: string | null;
+  operationId?: string | null;
+  toolId?: string | null;
+  outcome?: BillableInvocationRecord['outcome'];
+  migration?: boolean;
+  sessionId?: string | null;
+  /** Startup migration passes one durable snapshot so every row does not
+   * reload the full ledger and replay an already-healed activity interval. */
+  existingRecords?: Map<string, BillableInvocationRecord>;
+  skipExistingActivity?: boolean;
+}
+
 export class BillableAccounting {
   readonly invocationLedger: BillableInvocationLedger;
   readonly activityTimeline: ActivityTimeline;
@@ -86,22 +100,61 @@ export class BillableAccounting {
 
   /** Re-derive activity intervals from authoritative ledger rows after a
    *  restart. Ledger commit is authoritative and activity insertion is
-   *  idempotent, so this heals the only possible cross-file crash boundary. */
+   *  idempotent, so this heals the only possible cross-file crash boundary.
+   *  All rows are applied in one read-modify-write so the heal costs O(n)
+   *  instead of one full file rewrite per row; a transient write failure
+   *  (e.g. a sibling host or antivirus briefly holding the file) degrades to
+   *  a stale derived cache rather than aborting extension startup. */
   healActivityFromLedger(): void {
     this.invocationLedger.transaction(() => {
-      for (const record of this.invocationLedger.projectAll({ includePrivate: false }).records) {
-        this.recordInvocationActivity(record);
+      const records = this.invocationLedger.projectAll({ includePrivate: false }).records;
+      const intervals: ActivityIntervalRecord[] = [];
+      for (const record of records) {
+        if (!record.sessionPath || this.deps.isPrivateSession(record.sessionPath)) continue;
+        intervals.push(this.activityIntervalFor(record));
       }
+      if (intervals.length === 0) return;
+      let changed = false;
+      try {
+        changed = this.activityTimeline.recordMany(intervals, { durableRequired: true });
+      } catch (error) {
+        appendPieLog('warn', 'billable-accounting', 'activity heal failed; will retry on next startup', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+      if (changed) this.deps.markDerivedExportDirty();
     });
   }
 
-  migrateHistoricalRunUsage(runs: readonly RunSnapshot[]): void {
+  async migrateHistoricalRunUsage(
+    runs: readonly RunSnapshot[],
+    options?: { shouldContinue?: () => boolean },
+  ): Promise<void> {
+    const shouldContinue = options?.shouldContinue;
+    // Shutdown can cancel this pass; it then stops at the next run boundary
+    // and the remainder resumes on the next startup (same crash-resume
+    // semantics as a process exit mid-migration).
+    if (shouldContinue && !shouldContinue()) return;
     // Replay every deterministic migration source independently. Existing live
     // evidence suppresses compatibility aggregates; migration evidence does
     // not, so a crash after one row can resume the remainder on restart.
+    const existingRecords = new Map(
+      this.invocationLedger.projectAll({ includePrivate: false }).records
+        .map((record) => [record.invocationId, record] as const),
+    );
+    const recordsByRun = new Map<string, BillableInvocationRecord[]>();
+    for (const record of existingRecords.values()) {
+      if (!record.parentRunId) continue;
+      const records = recordsByRun.get(record.parentRunId);
+      if (records) {
+        records.push(record);
+      } else {
+        recordsByRun.set(record.parentRunId, [record]);
+      }
+    }
     for (const run of runs) {
-      const existingRunRecords = this.invocationLedger.projectAll({ includePrivate: false }).records
-        .filter((record) => record.parentRunId === run.runId);
+      if (shouldContinue && !shouldContinue()) return;
+      const existingRunRecords = recordsByRun.get(run.runId) ?? [];
       const hasLiveConversation = existingRunRecords.some((record) => record.evidenceOrigin !== 'migration'
         && (record.kind === 'conversation' || record.kind === 'retry'));
       const hasLiveSubagent = existingRunRecords.some((record) => record.evidenceOrigin !== 'migration'
@@ -113,7 +166,13 @@ export class BillableAccounting {
           parentRunId: run.runId,
           startedAt: sample.startedAt ?? run.startedAt,
           endedAt: sample.endedAt ?? endedAt,
-        }, { kind, migration: true, sessionId: run.sessionId ?? null });
+        }, {
+          kind,
+          migration: true,
+          sessionId: run.sessionId ?? null,
+          existingRecords,
+          skipExistingActivity: true,
+        });
       };
       const observedConversation = (run.auxiliaryLlmUsage ?? [])
         .filter((sample) => sample.kind === 'assistant_message');
@@ -202,6 +261,10 @@ export class BillableAccounting {
           outcome: 'unknown',
         }, 'history_compaction');
       }
+      // Historical migration is restart work, not a prerequisite for
+      // rendering the UI. Yield between runs so a large legacy catalogue
+      // cannot monopolize the extension host event loop.
+      await new Promise<void>((resolve) => setImmediate(resolve));
     }
   }
 
@@ -612,29 +675,28 @@ export class BillableAccounting {
   private appendUsageSample(
     sessionPath: string,
     sample: SessionUsageSample,
-    options: {
-      kind?: BillableInvocationKind;
-      branchId?: string | null;
-      operationId?: string | null;
-      toolId?: string | null;
-      outcome?: BillableInvocationRecord['outcome'];
-      migration?: boolean;
-      sessionId?: string | null;
-    } = {},
+    options: AppendUsageOptions = {},
   ): string {
     this.retryPendingWrites();
     const identity = this.deps.sessionIdentity(sessionPath);
     const stableSessionId = options.sessionId ?? identity.sessionId;
     const kind = options.kind ?? ledgerKind(sample.kind);
     const invocationId = stableInvocationId(stableSessionId ?? sessionPath, kind, sample.sourceId);
-    const existing = this.invocationLedger.projectAll().records.find((record) => record.invocationId === invocationId);
+    const existing = options.existingRecords?.get(invocationId)
+      ?? this.invocationLedger.projectAll().records.find((record) => record.invocationId === invocationId);
     if (existing) {
-      this.invocationLedger.transaction(() => this.recordInvocationActivity(existing));
+      if (!options.skipExistingActivity) {
+        this.invocationLedger.transaction(() => this.recordInvocationActivity(existing));
+      }
       return invocationId;
     }
-    const endedAt = validIso(sample.endedAt) ?? validIso(sample.startedAt) ?? this.deps.now().toISOString();
-    const startedAt = validIso(sample.startedAt)
-      ?? new Date(Math.max(0, Date.parse(endedAt))).toISOString();
+    const normalizedTimes = normalizeInvocationTimes(
+      sample.startedAt,
+      sample.endedAt,
+      this.deps.now(),
+      sample.sourceId,
+    );
+    const { startedAt, endedAt } = normalizedTimes;
     const provider = sample.provider ?? identity.provider ?? 'unknown-provider';
     const model = sample.modelId ?? identity.modelId ?? 'unknown-model';
     const gap = sample.instrumentationGap === true || sample.provenance === 'unknown';
@@ -692,6 +754,7 @@ export class BillableAccounting {
     };
     try {
       this.persistInvocationRecord(record);
+      options.existingRecords?.set(record.invocationId, record);
       this.deps.markDerivedExportDirty();
       if (kind === 'conversation' || kind === 'retry' || kind === 'subagent' || kind === 'skill_pruning_prepass') {
         this.currentBranchSourcesBySession[sessionPath]?.add(sample.sourceId);
@@ -717,15 +780,20 @@ export class BillableAccounting {
   private recordInvocationActivity(record: BillableInvocationRecord): void {
     const sessionPath = record.sessionPath;
     if (!sessionPath || this.deps.isPrivateSession(sessionPath)) return;
+    this.activityTimeline.record(this.activityIntervalFor(record), { durableRequired: true });
+    this.deps.markDerivedExportDirty();
+  }
+
+  private activityIntervalFor(record: BillableInvocationRecord): ActivityIntervalRecord {
     const kind: ActivityIntervalRecord['kind'] = record.kind === 'history_compaction'
       ? 'history_compaction'
       : record.kind === 'conversation' || record.kind === 'retry'
         ? 'provider' : 'auxiliary';
-    this.activityTimeline.record({
+    return {
       schemaVersion: 1,
       intervalId: `activity:invocation:${record.invocationId}`,
       sessionId: record.sessionId,
-      sessionPath,
+      sessionPath: record.sessionPath as string,
       parentRunId: record.parentRunId,
       parentOperationId: record.parentOperationId,
       invocationId: record.invocationId,
@@ -734,14 +802,35 @@ export class BillableAccounting {
       startedAt: record.startedAt,
       endedAt: record.endedAt,
       outcome: record.outcome,
-    }, { durableRequired: true });
-    this.deps.markDerivedExportDirty();
+    };
   }
 }
 
 function validIso(value: string | undefined): string | undefined {
   if (!value || !Number.isFinite(Date.parse(value))) return undefined;
   return new Date(Date.parse(value)).toISOString();
+}
+
+function normalizeInvocationTimes(
+  startedAtValue: string | undefined,
+  endedAtValue: string | undefined,
+  now: Date,
+  sourceId: string,
+): { startedAt: string; endedAt: string } {
+  const endedAt = validIso(endedAtValue) ?? validIso(startedAtValue) ?? now.toISOString();
+  const originalStartedAt = validIso(startedAtValue);
+  if (originalStartedAt && Date.parse(endedAt) < Date.parse(originalStartedAt)) {
+    appendPieLog('warn', 'billable-accounting', 'provider usage timestamps were reversed; clamping start to end', {
+      sourceId,
+      startedAt: originalStartedAt,
+      endedAt,
+    });
+    return { startedAt: endedAt, endedAt };
+  }
+  return {
+    startedAt: originalStartedAt ?? endedAt,
+    endedAt,
+  };
 }
 
 function stableInvocationId(sessionIdentity: string, kind: BillableInvocationKind, sourceId: string): string {

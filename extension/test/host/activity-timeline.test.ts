@@ -91,3 +91,32 @@ test('invocation activity preserves operation/run/invocation conservation identi
     ['operation-a', 'run-a', 'invocation-a'],
   );
 });
+
+test('recordMany applies a batch in one write cycle and replays idempotently', () => {
+  const timeline = new ActivityTimeline(timelinePath);
+  const internals = timeline as unknown as { writeUnlocked: (...args: unknown[]) => void };
+  const write = internals.writeUnlocked.bind(timeline);
+  let writes = 0;
+  internals.writeUnlocked = (...args: unknown[]) => {
+    writes += 1;
+    write(...args);
+  };
+
+  const records = Array.from({ length: 500 }, (_, index) => interval(`batch-${index}`, {
+    kind: 'provider',
+    invocationId: `invocation-${index}`,
+    endedAt: '2026-09-05T10:00:02.000Z',
+    outcome: 'succeeded',
+  }));
+  timeline.recordMany(records, { durableRequired: true });
+  // One read-modify-write for the whole batch, not one per record.
+  assert.equal(writes, 1);
+  assert.equal(timeline.projectAll().length, 500);
+
+  // Replaying the same batch (the heal re-runs on every restart) must not
+  // duplicate intervals or rewrite the unchanged file.
+  writes = 0;
+  timeline.recordMany(records, { durableRequired: true });
+  assert.equal(writes, 0);
+  assert.equal(timeline.projectAll().length, 500);
+});

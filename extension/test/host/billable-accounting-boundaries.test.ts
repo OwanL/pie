@@ -306,3 +306,33 @@ test('StatsService façade forwards accounting events with the same evidence as 
     await fs.rm(tempDirB, { recursive: true, force: true });
   }
 });
+
+test('accounting clamps reversed provider timestamps before ledger persistence', async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-accounting-reversed-time-'));
+  const stats = new StatsService(tempOptions(tempDir, () => stateFor(SESSION_PATH), 'workspace-reversed-time'));
+  try {
+    await stats.start();
+    stats.prepareForSend(SESSION_PATH, []);
+    stats.onAuxiliaryLlmUsage(SESSION_PATH, {
+      kind: 'history_compaction',
+      sourceId: 'reversed-provider-time',
+      occurredAt: at(1_000),
+      startedAt: at(2_000),
+      inputTokens: 1,
+      outputTokens: 1,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      outcome: 'succeeded',
+    });
+
+    const record = stats.getBillableInvocationRecords().find(
+      (candidate) => candidate.sourceId === 'reversed-provider-time',
+    );
+    assert.ok(record);
+    assert.equal(record.startedAt, at(1_000));
+    assert.equal(record.endedAt, at(1_000));
+  } finally {
+    await stats.shutdown();
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
+});

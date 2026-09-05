@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import fsSync from 'node:fs';
 import fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -85,9 +86,9 @@ test('platform lock errors distinguish confirmed, unconfirmed, and unrelated fai
 
 test('an unconfirmed platform lock error gets one retry before acquisition succeeds', async (t) => {
   await withTempSettings(async (file) => {
-    const realOpen = fs.open.bind(fs);
+    const realOpen = fsSync.openSync.bind(fsSync);
     let openCalls = 0;
-    t.mock.method(fs, 'open', async (...args: Parameters<typeof fs.open>) => {
+    t.mock.method(fsSync, 'openSync', (...args: Parameters<typeof fsSync.openSync>) => {
       openCalls += 1;
       if (openCalls === 1) throw errorWithCode('EPERM');
       return realOpen(...args);
@@ -104,7 +105,7 @@ test('an unconfirmed platform lock error gets one retry before acquisition succe
 test('a persistent unconfirmed platform lock error is propagated on the second attempt', async (t) => {
   await withTempSettings(async (file) => {
     let openCalls = 0;
-    t.mock.method(fs, 'open', async () => {
+    t.mock.method(fsSync, 'openSync', () => {
       openCalls += 1;
       throw errorWithCode('EPERM');
     });
@@ -136,6 +137,52 @@ test('a synchronous same-process mutation joins an async-owned lock without bloc
     await holder;
   });
 });
+
+for (const boundary of ['acquire', 'release'] as const) {
+  test(`a synchronous contender cannot deadlock its own async lock during ${boundary}`, async (t) => {
+    await withTempSettings(async (file) => {
+      const lockPath = `${file}.pie-lock`;
+      const failures: unknown[] = [];
+      let probes = 0;
+      const probe = (): void => {
+        probes += 1;
+        try { withFileUpdateLockSync(file, () => undefined, { timeoutMs: 10, retryMs: 1 }); }
+        catch (error) { failures.push(error); }
+      };
+      if (boundary === 'acquire') {
+        const asyncOpen = fs.open.bind(fs);
+        t.mock.method(fs, 'open', async (...args: Parameters<typeof fs.open>) => {
+          const handle = await asyncOpen(...args);
+          if (args[0] === lockPath) queueMicrotask(probe);
+          return handle;
+        });
+        const syncOpen = fsSync.openSync.bind(fsSync);
+        let scheduled = false;
+        t.mock.method(fsSync, 'openSync', (...args: Parameters<typeof fsSync.openSync>) => {
+          const fd = syncOpen(...args);
+          if (args[0] === lockPath && !scheduled) { scheduled = true; queueMicrotask(probe); }
+          return fd;
+        });
+      } else {
+        const asyncUnlink = fs.unlink.bind(fs);
+        t.mock.method(fs, 'unlink', async (...args: Parameters<typeof fs.unlink>) => {
+          if (args[0] === lockPath) probe();
+          return asyncUnlink(...args);
+        });
+        const syncUnlink = fsSync.unlinkSync.bind(fsSync);
+        let scheduled = false;
+        t.mock.method(fsSync, 'unlinkSync', (...args: Parameters<typeof fsSync.unlinkSync>) => {
+          if (args[0] === lockPath && !scheduled) { scheduled = true; queueMicrotask(probe); }
+          return syncUnlink(...args);
+        });
+      }
+      await withFileUpdateLock(file, async () => undefined);
+      assert.ok(probes > 0, 'the contender must run at the filesystem boundary');
+      assert.deepEqual(failures, []);
+      await assert.rejects(fs.access(lockPath), { code: 'ENOENT' });
+    });
+  });
+}
 
 test('an external lock holds the complete settings read-modify-write cycle', async () => {
   await withTempSettings(async (file) => {

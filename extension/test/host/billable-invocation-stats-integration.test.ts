@@ -7,6 +7,7 @@ import { produce } from 'immer';
 
 import { createInitialArchState, type ArchState } from '../../src/host/core/arch-state';
 import { BillableInvocationLedger } from '../../src/host/billable-invocation-ledger/service';
+import { workspaceHash } from '../../src/host/stats-service/helpers';
 import { StatsService } from '../../src/host/stats-service/service';
 import { isAuxiliaryLlmUsagePayload } from '../../src/shared/protocol/event-payloads';
 import { boundToolFinishedPayload } from '../../src/backend/session-event-handler';
@@ -437,6 +438,44 @@ test('restart recovers one open correlated busy interval without double counting
     assert.equal(third.getWorkingTimeBySession()[sessionPath]?.accumulatedMs, 5_000);
     assert.equal(third.getWorkingTimeBySession()[sessionPath]?.activeSince, null);
     await Promise.all([first.shutdown(), second.shutdown(), third.shutdown()]);
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test('restart heals activity intervals from a large ledger in one pass', async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-heal-large-ledger-'));
+  const sessionPath = '/workspace/heal-large.jsonl';
+  const state = stateFor(sessionPath);
+  const options = () => ({
+    dataOutcomesRootPath: path.join(tempDir, 'outcomes'),
+    legacyUsageDataRootPath: tempDir,
+    workspaceId: 'workspace-heal-large',
+    getArchState: () => state,
+    now: () => new Date(Date.parse('2026-09-05T10:00:00.000Z')),
+    createId: () => 'run-heal',
+  });
+  try {
+    // Seed a large ledger directly (the live append path rewrites the whole
+    // activity file per row, which would dominate the test's runtime).
+    const storageDir = path.join(tempDir, 'outcomes', workspaceHash('workspace-heal-large'));
+    const ledger = new BillableInvocationLedger(path.join(storageDir, 'billable-invocations.jsonl'));
+    for (let index = 0; index < 200; index += 1) {
+      ledger.append(invocation(`inv-${index}`, {
+        sourceId: `title:${index}`,
+        sessionPath,
+        startedAt: `2026-09-05T10:00:${String(index % 60).padStart(2, '0')}.000Z`,
+        endedAt: `2026-09-05T10:00:${String(index % 60).padStart(2, '0')}.001Z`,
+      }), { visibility: 'ordinary' });
+    }
+
+    // Restart replays the whole ledger through the heal; every row must
+    // surface as an activity interval (regression: the heal used to rewrite
+    // the activity file once per row, blocking startup for minutes).
+    const stats = new StatsService(options());
+    await stats.start();
+    assert.equal(stats.getActivityIntervals().length, 200);
+    await stats.shutdown();
   } finally {
     await fs.rm(tempDir, { recursive: true, force: true });
   }

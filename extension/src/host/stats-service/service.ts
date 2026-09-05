@@ -42,6 +42,8 @@ export class StatsService implements RunObserver {
   private readonly createId: () => string;
   private startPromise: Promise<void> | null = null;
   private started = false;
+  private disposed = false;
+  private historicalMigration: Promise<void> | null = null;
 
   constructor(options: StatsServiceOptions) {
     this.scheduleRender = options.scheduleRender ?? (() => undefined);
@@ -106,6 +108,10 @@ export class StatsService implements RunObserver {
   }
 
   async start(): Promise<void> {
+    // Shutdown is terminal: never reactivate storage/restoration after it.
+    if (this.disposed) {
+      return;
+    }
     if (this.started) {
       return;
     }
@@ -115,12 +121,14 @@ export class StatsService implements RunObserver {
 
     this.startPromise = (async () => {
       const checkpoint = await this.storage.start();
+      if (this.disposed) return;
       this.tracker.restore(checkpoint?.sessions ?? {});
       const openBusyIntervals = this.tracker.getOpenBusyIntervals()
         .filter((interval) => !this.isPrivateSession(interval.sessionPath));
       let persistedRuns: RunSnapshot[] = [];
       try {
         const persisted = await this.storage.queryPersistedRunAnalytics();
+        if (this.disposed) return;
         persistedRuns = [...persisted.completedRuns, ...persisted.openRuns]
           .filter((run) => !this.isPrivateSession(run.sessionPath));
       } catch (error) {
@@ -128,6 +136,7 @@ export class StatsService implements RunObserver {
           error: error instanceof Error ? error.message : String(error),
         });
       }
+      if (this.disposed) return;
       this.accounting.healActivityFromLedger();
       const activityIntervals = this.accounting.activityTimeline.projectAll()
         .filter((interval) => !this.isPrivateSession(interval.sessionPath));
@@ -146,7 +155,15 @@ export class StatsService implements RunObserver {
           this.activeToolIntervalBySessionAndTool[this.toolIntervalKey(interval.sessionPath, interval.toolId)] = interval.intervalId;
         }
       }
-      this.accounting.migrateHistoricalRunUsage(persistedRuns);
+      // Cancellation-aware: shutdown stops the pass at its next run boundary
+      // (bounded drain — never a full legacy-catalogue wait) so no ledger
+      // write, activity write, or render can land after shutdown.
+      this.historicalMigration = this.accounting.migrateHistoricalRunUsage(
+        persistedRuns,
+        { shouldContinue: () => !this.disposed },
+      );
+      await this.historicalMigration;
+      if (this.disposed) return;
       this.started = true;
       this.scheduleRender();
     })();
@@ -549,6 +566,18 @@ export class StatsService implements RunObserver {
   }
 
   async shutdown(): Promise<void> {
+    // Terminal: block start reactivation immediately, then stop an in-flight
+    // historical migration at its next run boundary instead of waiting out a
+    // large legacy catalogue. Unmigrated runs resume on the next startup.
+    this.disposed = true;
+    const migration = this.historicalMigration;
+    if (migration) {
+      await migration.catch((error) => {
+        appendPieLog('warn', 'stats-service', 'historical usage migration aborted by shutdown', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+    }
     this.tracker.finalizeOpenRunsForShutdown();
     this.accounting.retryPendingWrites();
     this.accounting.activityTimeline.flush();

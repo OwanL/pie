@@ -19,9 +19,16 @@ export class ActivityTimeline {
   private readonly storageDir: string;
   private readonly lockTarget: string;
   private readonly pendingMutations: Array<(records: ActivityIntervalRecord[]) => ActivityIntervalRecord[]> = [];
+  /** Bounds retry-queue flushes so a persistently failing write cannot turn
+   *  every projection/export into a full-file rewrite attempt. */
+  private lastPendingRetryAt = 0;
+  private pendingRetryScheduled = false;
+  private readonly now: () => number;
+  private static readonly PENDING_RETRY_BACKOFF_MS = 1_000;
 
-  constructor(private readonly filePath: string) {
+  constructor(private readonly filePath: string, options: { now?: () => number } = {}) {
     this.storageDir = path.dirname(filePath);
+    this.now = options.now ?? Date.now;
     this.lockTarget = accountingLockTarget(this.storageDir);
     fs.mkdirSync(this.storageDir, { recursive: true });
   }
@@ -56,10 +63,39 @@ export class ActivityTimeline {
     this.start(record, options);
   }
 
+  /** Apply many interval records in a single read-modify-write cycle. The
+   *  startup heal uses this so re-deriving N intervals costs one file rewrite
+   *  instead of N. Idempotent per intervalId, like start(). */
+  recordMany(
+    records: readonly ActivityIntervalRecord[],
+    options: { durableRequired?: boolean } = {},
+  ): boolean {
+    if (records.length === 0) return false;
+    return this.mutate((existing) => {
+      const byId = new Map(existing.map((record) => [record.intervalId, record]));
+      let changed = false;
+      for (const record of records) {
+        if (byId.has(record.intervalId)) continue;
+        const normalized = normalize(record);
+        byId.set(normalized.intervalId, normalized);
+        changed = true;
+      }
+      return changed ? [...byId.values()] : existing;
+    }, options.durableRequired === true);
+  }
+
   flush(): void {
     if (this.pendingMutations.length === 0) return;
-    this.applyMutations(this.pendingMutations);
-    this.pendingMutations.length = 0;
+    // An explicit flush is a caller-requested durability boundary. It must
+    // bypass the automatic retry window and surface a failure to its caller.
+    try {
+      this.applyMutations(this.pendingMutations);
+      this.pendingMutations.length = 0;
+      this.pendingRetryScheduled = false;
+    } catch (error) {
+      this.notePendingRetry();
+      throw error;
+    }
   }
 
   projectSession(sessionPath: string): readonly ActivityIntervalRecord[] {
@@ -89,37 +125,75 @@ export class ActivityTimeline {
   private mutate(
     update: (records: ActivityIntervalRecord[]) => ActivityIntervalRecord[],
     durableRequired = false,
-  ): void {
+  ): boolean {
+    // A new best-effort mutation may join the queue, but it must not turn a
+    // persistent failure into an immediate full-file rewrite on every event.
+    // Durable mutations deliberately bypass this gate and fail synchronously.
+    if (!durableRequired && this.pendingMutations.length > 0 && !this.pendingRetryDue()) {
+      this.pendingMutations.push(update);
+      return false;
+    }
+
     const pending = [...this.pendingMutations, update];
     try {
-      this.applyMutations(pending);
+      const changed = this.applyMutations(pending);
       this.pendingMutations.length = 0;
+      this.pendingRetryScheduled = false;
+      return changed;
     } catch (error) {
       if (durableRequired) throw error;
       this.pendingMutations.push(update);
+      this.notePendingRetry();
+      return false;
     }
   }
 
   private flushPending(): void {
-    if (this.pendingMutations.length === 0) return;
+    if (this.pendingMutations.length === 0 || !this.pendingRetryDue()) return;
     try {
       this.applyMutations(this.pendingMutations);
       this.pendingMutations.length = 0;
-    } catch { /* retry on the next mutation/projection */ }
+      this.pendingRetryScheduled = false;
+    } catch {
+      // Retry on the next mutation/projection, but never more often than the
+      // backoff window so a persistent failure cannot hot-loop full rewrites.
+      this.notePendingRetry();
+    }
+  }
+
+  private pendingRetryDue(): boolean {
+    return !this.pendingRetryScheduled
+      || this.now() - this.lastPendingRetryAt >= ActivityTimeline.PENDING_RETRY_BACKOFF_MS;
+  }
+
+  private notePendingRetry(): void {
+    this.lastPendingRetryAt = this.now();
+    this.pendingRetryScheduled = true;
   }
 
   private applyMutations(
     updates: readonly ((records: ActivityIntervalRecord[]) => ActivityIntervalRecord[])[],
-  ): void {
-    withFileUpdateLockSync(this.lockTarget, () => {
+  ): boolean {
+    return withFileUpdateLockSync(this.lockTarget, () => {
       const privacy = readAccountingPrivacySelectors(this.storageDir);
       const permitted = (record: ActivityIntervalRecord): boolean => !privacy.some((selector) => (
         (selector.sessionPath !== undefined && selector.sessionPath === record.sessionPath)
         || (selector.sessionId !== undefined && selector.sessionId === record.sessionId)
       ));
-      let next = this.readUnlocked().filter(permitted);
-      for (const update of updates) next = update(next).filter(permitted);
+      const loaded = this.readUnlocked();
+      const current = loaded.filter(permitted);
+      let next = current;
+      for (const update of updates) {
+        const updated = update(next);
+        const filtered = updated.filter(permitted);
+        next = filtered.length === updated.length
+          && filtered.every((record, index) => record === updated[index])
+          ? updated
+          : filtered;
+      }
+      if (next === current && current.length === loaded.length) return false;
       this.writeUnlocked(next);
+      return true;
     });
   }
 
