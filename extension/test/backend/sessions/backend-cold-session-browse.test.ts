@@ -494,6 +494,119 @@ test('cold forget routes through the store and removes the durable session witho
   }
 });
 
+test('a cold read that arrives during promotion waits for the hot owner instead of reopening under its fence', async () => {
+  const h = await makeColdServer();
+  try {
+    let releasePromotion!: () => void;
+    const promotion = new Promise<void>((resolve) => { releasePromotion = resolve; });
+    let hot = false;
+    const routed: Array<{ id: string; method: string; params?: unknown }> = [];
+    h.server.workerRuntimeRouter = {
+      getRoute: () => hot
+        ? { state: 'hot', rootSessionPath: h.sessionPath }
+        : { state: 'promoting', rootSessionPath: h.sessionPath, promotion },
+      hasHotOwner: () => hot,
+      routeExisting: async (request: { id: string; method: string; params?: unknown }) => {
+        routed.push(request);
+        return { ok: true, sessionPath: h.sessionPath };
+      },
+    };
+    let coldBuilds = 0;
+    h.server.buildSessionOpenedPayload = async () => {
+      coldBuilds += 1;
+      throw new Error('the promoting path must not be reopened through cold ownership');
+    };
+
+    const opening = h.server.handleRequest({
+      id: 'open-during-promotion',
+      method: 'session.open',
+      params: {
+        sessionPath: h.sessionPath,
+        selectionToken: 'selection-during-promotion',
+        operationId: 'open-operation',
+        operationAttempt: 2,
+      },
+    });
+    await Promise.resolve();
+    assert.equal(coldBuilds, 0, 'the read remains parked behind the promotion owner');
+    assert.deepEqual(routed, []);
+
+    hot = true;
+    releasePromotion();
+    assert.deepEqual(await opening, { ok: true, sessionPath: h.sessionPath });
+    assert.equal(coldBuilds, 0);
+    assert.deepEqual(routed, [{
+      id: 'open-during-promotion',
+      method: 'session.open',
+      params: {
+        sessionPath: h.sessionPath,
+        selectionToken: 'selection-during-promotion',
+        operationId: 'open-operation',
+        operationAttempt: 2,
+      },
+    }]);
+  } finally {
+    await fs.rm(h.dir, { recursive: true, force: true });
+  }
+});
+
+test('stale cold session.opened publication follows promotion and refreshes through the hot owner', async () => {
+  const h = await makeColdServer();
+  try {
+    const stale = await h.server.buildSessionOpenedPayload(
+      h.sessionPath,
+      'stale-selection',
+      'skip',
+      undefined,
+      'stale-open-operation',
+      3,
+    );
+    let releasePromotion!: () => void;
+    const promotion = new Promise<void>((resolve) => { releasePromotion = resolve; });
+    let hot = false;
+    let routedResolve!: (request: { id: string; method: string; params?: unknown }) => void;
+    const routed = new Promise<{ id: string; method: string; params?: unknown }>((resolve) => {
+      routedResolve = resolve;
+    });
+    h.server.workerRuntimeRouter = {
+      getRoute: () => hot
+        ? { state: 'hot', rootSessionPath: h.sessionPath }
+        : { state: 'promoting', rootSessionPath: h.sessionPath, promotion },
+      hasHotOwner: () => hot,
+      routeExisting: async (request: { id: string; method: string; params?: unknown }) => {
+        routedResolve(request);
+        return { ok: true, sessionPath: h.sessionPath };
+      },
+    };
+    let coldBuilds = 0;
+    h.server.buildSessionOpenedPayload = async () => {
+      coldBuilds += 1;
+      throw new Error('stale publication must not retry against the hot ownership fence');
+    };
+    h.server.coldSessionStore.leases.invalidate(h.sessionPath);
+
+    h.server.emit('session.opened', stale);
+    await Promise.resolve();
+    assert.equal(coldBuilds, 0, 'publication recovery waits while ownership is promoting');
+
+    hot = true;
+    releasePromotion();
+    const request = await routed;
+    assert.equal(coldBuilds, 0);
+    assert.equal(request.method, 'session.open');
+    assert.match(request.id, /^cold-publication-refresh:/u);
+    assert.deepEqual(request.params, {
+      sessionPath: h.sessionPath,
+      selectionToken: 'stale-selection',
+      transcript: 'skip',
+      operationId: 'stale-open-operation',
+      operationAttempt: 3,
+    });
+  } finally {
+    await fs.rm(h.dir, { recursive: true, force: true });
+  }
+});
+
 test('a slow create cannot overwrite a newer host-local viewed transition', async () => {
   const h = await makeColdServer();
   try {

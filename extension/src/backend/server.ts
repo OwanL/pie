@@ -362,6 +362,9 @@ export class BackendServer {
   private workerSupervisor?: WorkerSupervisor;
   private sessionOwnershipAuthority?: SessionOwnershipAuthority;
   private workerRuntimeRouter?: WorkerRuntimeRouter;
+  /** Internal public-request identities used only when a stamped cold
+   * `session.opened` must be replayed through the worker that won promotion. */
+  private coldPublicationRefreshSequence = 0;
   /** Highest coordinator-owned registry revision published to the legacy
    * process env mirror. Broadcast acknowledgements can settle out of order,
    * so completion order must never be allowed to roll this mirror back. */
@@ -1557,6 +1560,74 @@ export class BackendServer {
     }
   }
 
+  /** Wait for the current route owner to settle before choosing cold versus
+   * hot browse authority. Promotion installs its cold-lease fence before the
+   * worker is ready, so retrying through ColdSessionStore in that interval is
+   * guaranteed to fail even though the transition is healthy. Re-read after
+   * each settlement because retirement/transition may hand directly to a new
+   * promotion. Bounded churn remains a genuine publication failure. */
+  private async waitForSessionBrowseAuthority(sessionPath: string): Promise<void> {
+    const router = this.workerRuntimeRouter;
+    if (!router) return;
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const route = router.getRoute(sessionPath);
+      const settlement = route.state === 'promoting'
+        ? route.promotion
+        : route.state === 'retiring'
+          ? route.retirement
+          : route.state === 'transitioning'
+            ? route.completion
+            : undefined;
+      if (!settlement) return;
+      await settlement.catch(() => undefined);
+    }
+    throw new BackendError(
+      'SESSION_CHANGED_DURING_READ',
+      `The session ownership changed repeatedly while its browse authority was being selected: ${sessionPath}`,
+    );
+  }
+
+  /** Recover a cold payload rejected at the final publication fence. A hot
+   * winner rebuilds inside its SDK runtime (and emits the authoritative event)
+   * while a still-cold winner gets one fresh durable projection. Never weaken
+   * the cold stamp or publish the rejected payload. */
+  private async refreshStaleSessionOpened(
+    sessionPath: string,
+    opened: Partial<SessionOpenedPayload>,
+  ): Promise<void> {
+    await this.waitForSessionBrowseAuthority(sessionPath);
+    if (this.disposed || this.isSessionForgotten(sessionPath)) return;
+    const router = this.workerRuntimeRouter;
+    if (router?.hasHotOwner(sessionPath)) {
+      const params = {
+        sessionPath,
+        ...(typeof opened.selectionToken === 'string'
+          ? { selectionToken: opened.selectionToken } : {}),
+        ...(opened.transcriptSkipped === true ? { transcript: 'skip' as const } : {}),
+        ...(typeof opened.operationId === 'string'
+          ? { operationId: opened.operationId } : {}),
+        ...(Number.isSafeInteger(opened.operationAttempt) && (opened.operationAttempt ?? 0) > 0
+          ? { operationAttempt: opened.operationAttempt } : {}),
+      };
+      this.coldPublicationRefreshSequence += 1;
+      await router.routeExisting({
+        id: `cold-publication-refresh:${this.coldPublicationRefreshSequence}`,
+        method: 'session.open',
+        params,
+      });
+      return;
+    }
+    const authoritative = await this.buildSessionOpenedPayload(
+      sessionPath,
+      opened.selectionToken,
+      opened.transcriptSkipped ? 'skip' : 'tail',
+      undefined,
+      opened.operationId,
+      opened.operationAttempt,
+    );
+    this.emit('session.opened', authoritative);
+  }
+
   private async listSessionSummaries(): Promise<SessionSummary[]> {
     return await this.initializeColdSessionStore().list([]);
   }
@@ -1704,14 +1775,7 @@ export class BackendServer {
           } catch (error) {
             if (!(error instanceof StaleColdSessionLeaseError)) throw error;
             if (this.isSessionForgotten(sessionPath)) return;
-            void this.buildSessionOpenedPayload(
-              sessionPath,
-              opened.selectionToken,
-              opened.transcriptSkipped ? 'skip' : 'tail',
-              undefined,
-              opened.operationId,
-              opened.operationAttempt,
-            ).then((authoritative) => this.emit('session.opened', authoritative)).catch((refreshError) => {
+            void this.refreshStaleSessionOpened(sessionPath, opened).catch((refreshError) => {
               backendWarn('backend-session', 'sessionOpened.coldPublicationRefreshFailed', {
                 sessionPath,
                 error: toErrorMessage(refreshError),
@@ -2229,6 +2293,18 @@ export class BackendServer {
           && ISOLATED_PROMOTION_METHODS.has(request.method)
           ? router.operationCancellationGeneration(sessionPath)
           : undefined;
+        // Read/config commands do not initiate promotion, but once another
+        // command has claimed the cold lease they must wait and reselect the
+        // winning authority. Falling through to the coordinator while the
+        // route is promoting/retiring only guarantees a stale cold read.
+        if (sessionPath
+          && !ISOLATED_PROMOTION_METHODS.has(request.method)
+          && isCoordinatorOperationAllowed(request.method, request.params)
+          && WorkerRuntimeRouter.isHotOperation(request.method)
+          && (routeState?.state === 'promoting' || routeState?.state === 'retiring')) {
+          await this.waitForSessionBrowseAuthority(sessionPath);
+          routeState = router.getRoute(sessionPath);
+        }
         const waitsForRuntimeTransition = request.method === 'message.send'
           || request.method === 'message.continue'
           || request.method === 'message.compact'
