@@ -85,8 +85,11 @@ function createColdSession(deps: BackendRequestHandlerDeps, cwd?: string): { ses
   return { sessionPath: sessionManagerPath(manager) };
 }
 
-function duplicateColdSession(deps: BackendRequestHandlerDeps, sourcePath: string): { sessionPath: string } {
-  if (deps.duplicateColdSession) return deps.duplicateColdSession(sourcePath);
+async function duplicateColdSession(
+  deps: BackendRequestHandlerDeps,
+  sourcePath: string,
+): Promise<{ sessionPath: string }> {
+  if (deps.duplicateColdSession) return await deps.duplicateColdSession(sourcePath);
   const sourceCwd = deps.sdk.SessionManager.open(sourcePath).getCwd() || deps.startupCwd;
   return {
     sessionPath: sessionManagerPath(deps.sdk.SessionManager.forkFrom(sourcePath, sourceCwd, deps.sessionDir)),
@@ -209,7 +212,7 @@ async function handleSessionDuplicate(
       operationId: params.operationId,
       intentFingerprint: createOperationIntentFingerprint('session.duplicate', params.sessionPath),
       execute: async (registerDurablePath) => {
-        const duplicate = duplicateColdSession(deps, params.sessionPath);
+        const duplicate = await duplicateColdSession(deps, params.sessionPath);
         registerDurablePath(duplicate.sessionPath);
         return await publishCreatedSession(deps, duplicate.sessionPath, params);
       },
@@ -232,7 +235,7 @@ async function handleSessionDuplicate(
     });
     return { ok: true, sessionPath: result.sessionPath };
   }
-  const duplicate = duplicateColdSession(deps, params.sessionPath);
+  const duplicate = await duplicateColdSession(deps, params.sessionPath);
   const result = await publishCreatedSession(deps, duplicate.sessionPath, params);
   return { ok: true, sessionPath: result.sessionPath };
 }

@@ -494,6 +494,157 @@ test('cold forget routes through the store and removes the durable session witho
   }
 });
 
+test('duplicate of a hot session forks through its owner and retains coordinator idempotency', async () => {
+  const h = await makeColdServer();
+  try {
+    const duplicatePath = path.join(h.dir, 'hot-duplicate.jsonl');
+    let releasePromotion!: () => void;
+    const promotion = new Promise<void>((resolve) => { releasePromotion = resolve; });
+    let promoting = true;
+    let sourceHot = false;
+    let duplicateHot = false;
+    let duplicateCalls = 0;
+    let snapshotCalls = 0;
+    const opened: any[] = [];
+    h.server.emit = (event: string, payload: unknown) => {
+      if (event === 'session.opened') opened.push(payload);
+    };
+    h.server.emitSessionListChanged = async () => undefined;
+    h.server.workerRuntimeRouter = {
+      getRoute: (sessionPath: string) => promoting && sessionPath === h.sessionPath
+        ? { state: 'promoting', rootSessionPath: sessionPath, promotion }
+        : ({
+        state: sessionPath === h.sessionPath && sourceHot
+          ? 'hot'
+          : sessionPath === duplicatePath && duplicateHot
+            ? 'hot'
+            : 'cold',
+        rootSessionPath: sessionPath,
+      }),
+      hasHotOwner: (sessionPath: string) => (
+        (sessionPath === h.sessionPath && sourceHot)
+        || (sessionPath === duplicatePath && duplicateHot)
+      ),
+      duplicateHotSession: async (sourceSessionPath: string) => {
+        assert.equal(sourceSessionPath, h.sessionPath);
+        duplicateCalls += 1;
+        sourceHot = false;
+        duplicateHot = true;
+        return { sessionPath: duplicatePath };
+      },
+      buildHotSessionOpenedPayload: async (sessionPath: string, params: Record<string, unknown>) => {
+        assert.equal(sessionPath, duplicatePath);
+        snapshotCalls += 1;
+        return {
+          session: {
+            path: duplicatePath,
+            name: 'Session (copy)',
+            cwd: h.dir,
+            modifiedAt: '2026-09-06T04:03:32.000Z',
+            messageCount: 1,
+          },
+          transcript: [{ id: 'user-1', role: 'user', content: 'hello' }],
+          transcriptWindow: {
+            totalCount: 1, loadedStart: 0, loadedEnd: 1,
+            hasOlder: false, hasNewer: false, isPartial: false, hasUserMessages: true,
+          },
+          busy: false,
+          runtimeReady: true,
+          selectionToken: params.selectionToken,
+          operationId: params.operationId,
+          operationAttempt: params.operationAttempt,
+        };
+      },
+    };
+
+    const request = {
+      id: 'duplicate-hot',
+      method: 'session.duplicate',
+      params: {
+        sessionPath: h.sessionPath,
+        selectionToken: 'hot-duplicate-selection',
+        operationId: 'hot-duplicate-operation',
+        operationAttempt: 1,
+      },
+    };
+    const duplicating = h.server.handleRequest(request);
+    await Promise.resolve();
+    assert.equal(duplicateCalls, 0, 'duplicate waits for the in-flight ownership transition');
+    promoting = false;
+    sourceHot = true;
+    releasePromotion();
+    assert.deepEqual(await duplicating, { ok: true, sessionPath: duplicatePath });
+    assert.equal(duplicateCalls, 1);
+    assert.equal(snapshotCalls, 1);
+    assert.equal(h.counts().managerOpens, 0, 'the coordinator never opens the hot source');
+    assert.equal(opened.length, 1);
+    assert.equal(opened[0].session.path, duplicatePath);
+    assert.equal(opened[0].selectionToken, 'hot-duplicate-selection');
+    assert.equal(opened[0].operationId, 'hot-duplicate-operation');
+
+    assert.deepEqual(await h.server.handleRequest({
+      ...request,
+      id: 'duplicate-hot-retry',
+      params: { ...request.params, operationAttempt: 2 },
+    }), { ok: true, sessionPath: duplicatePath });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(duplicateCalls, 1, 'same-operation retry reuses the coordinator ledger result');
+    assert.equal(snapshotCalls, 2, 'retry republishes the existing hot destination snapshot');
+  } finally {
+    await fs.rm(h.dir, { recursive: true, force: true });
+  }
+});
+
+test('duplicate reselects a hot owner when promotion starts immediately before cold capture', async () => {
+  const h = await makeColdServer();
+  try {
+    const duplicatePath = path.join(h.dir, 'raced-hot-duplicate.jsonl');
+    const store = h.server.initializeColdSessionStore();
+    const originalDuplicate = store.duplicate.bind(store);
+    let phase: 'cold' | 'promoting' | 'hot' = 'cold';
+    let releasePromotion!: () => void;
+    const promotion = new Promise<void>((resolve) => { releasePromotion = resolve; });
+    let coldAttempts = 0;
+    let hotAttempts = 0;
+    store.duplicate = (sessionPath: string) => {
+      coldAttempts += 1;
+      const tokens = store.leases.reserveCanonicalPaths(
+        [sessionPath],
+        'promotion-won-before-cold-capture',
+        { hideFromCatalog: false },
+      );
+      phase = 'promoting';
+      setImmediate(() => {
+        store.leases.releaseCanonicalPaths(tokens);
+        phase = 'hot';
+        releasePromotion();
+      });
+      return originalDuplicate(sessionPath);
+    };
+    h.server.workerRuntimeRouter = {
+      getRoute: (sessionPath: string) => phase === 'promoting'
+        ? { state: 'promoting', rootSessionPath: sessionPath, promotion }
+        : { state: phase, rootSessionPath: sessionPath },
+      hasHotOwner: () => phase === 'hot',
+      duplicateHotSession: async (sourceSessionPath: string) => {
+        assert.equal(sourceSessionPath, h.sessionPath);
+        hotAttempts += 1;
+        return { sessionPath: duplicatePath };
+      },
+    };
+
+    assert.deepEqual(
+      await h.server.duplicateSessionFromCurrentOwner(h.sessionPath),
+      { sessionPath: duplicatePath },
+    );
+    assert.equal(coldAttempts, 1, 'the first cold capture loses the promotion race');
+    assert.equal(hotAttempts, 1, 'the bounded retry selects the settled hot owner');
+    assert.equal(h.counts().managerOpens, 0, 'the reserved source is never opened cold');
+  } finally {
+    await fs.rm(h.dir, { recursive: true, force: true });
+  }
+});
+
 test('a cold read that arrives during promotion waits for the hot owner instead of reopening under its fence', async () => {
   const h = await makeColdServer();
   try {

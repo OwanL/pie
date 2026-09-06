@@ -381,6 +381,55 @@ export class WorkerRuntimeRouter {
     return await this.routeCommand(request, false);
   }
 
+  /** Duplicate through the sole hot owner without moving the public
+   * create-operation ledger into the worker generation. The SDK replacement
+   * transfers this worker to the fork while the source becomes cold. */
+  async duplicateHotSession(
+    sourceSessionPath: string,
+    params: WorkerJsonObject,
+  ): Promise<{ sessionPath: string }> {
+    const hot = this.requireHot(sourceSessionPath);
+    this.assertCurrentOwner(hot, sourceSessionPath);
+    const response = await hot.worker.client.requestFrame!({
+      kind: 'runtime.command',
+      operation: 'session.duplicateHot',
+      payload: { params },
+    }, 'response');
+    if (!response.ok) throw new BackendError(response.error.code, response.error.message);
+    if (response.result.kind !== 'runtime.command') {
+      throw new Error(`Hot session duplicate returned the wrong response for ${sourceSessionPath}.`);
+    }
+    const result = response.result.payload;
+    if (!result || typeof result !== 'object' || Array.isArray(result)
+      || typeof result.sessionPath !== 'string') {
+      throw new Error(`Hot session duplicate returned an invalid result for ${sourceSessionPath}.`);
+    }
+    return { sessionPath: result.sessionPath };
+  }
+
+  /** Build an immutable snapshot inside the sole hot owner. Used after a hot
+   * duplicate transfer and by idempotent re-publication of its destination. */
+  async buildHotSessionOpenedPayload(
+    sessionPath: string,
+    params: WorkerJsonObject,
+  ): Promise<SessionOpenedPayload> {
+    const hot = this.requireHot(sessionPath);
+    this.assertCurrentOwner(hot, sessionPath);
+    const response = await hot.worker.client.requestFrame!({
+      kind: 'runtime.command',
+      operation: 'session.snapshot',
+      payload: { params },
+    }, 'response');
+    if (!response.ok) throw new BackendError(response.error.code, response.error.message);
+    if (response.result.kind !== 'runtime.command'
+      || !response.result.payload
+      || typeof response.result.payload !== 'object'
+      || Array.isArray(response.result.payload)) {
+      throw new Error(`Hot session snapshot returned an invalid result for ${sessionPath}.`);
+    }
+    return response.result.payload as unknown as SessionOpenedPayload;
+  }
+
   async subscribeDetail(message: Extract<HostToCoordinatorDetailMessage, { kind: 'detail.subscribe' }>): Promise<void> {
     if (this.detailSubscriptions.has(message.subscriptionId)) throw new Error('Detail subscription identity is already owned.');
     const route = this.requireHot(message.address.sessionPath);

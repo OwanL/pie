@@ -95,7 +95,7 @@ export interface BackendRequestHandlerDeps {
    * generation-scoped ColdSessionStore and retains its process-local manager
    * handle for the first legacy promotion (or later isolated worker transfer). */
   createColdSession?(cwd?: string): { sessionPath: string };
-  duplicateColdSession?(sessionPath: string): { sessionPath: string };
+  duplicateColdSession?(sessionPath: string): { sessionPath: string } | Promise<{ sessionPath: string }>;
   truncateColdSessionAfter?(sessionPath: string, entryId: string): Promise<{ sessionPath: string }>;
   isSessionTransitionPending?(sessionPath: string): boolean;
   /** Synchronous generation/ownership fence checked immediately before a

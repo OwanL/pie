@@ -13,6 +13,7 @@ import { WorkerRuntimeHost } from '../../../src/backend/worker-runtime-host';
 import type { SessionOpenedPayload } from '../../../src/shared/protocol';
 
 interface WorkerRuntimeHostInternals {
+  sdk?: unknown;
   context?: SessionContext;
   agentDir: string;
   availableModels: () => unknown;
@@ -29,6 +30,7 @@ interface WorkerRuntimeHostInternals {
   handleProviderProgress: (observation: ProviderTransportObservation) => void;
   recoverStuckSession: (context: SessionContext, reason: string) => void;
   resolveNetworkProvider: (url: string, fallbackProvider?: string) => string | undefined;
+  suppressNextReplacementOpened: boolean;
 }
 
 function makeHost(options: { automaticRecoveryAbortGraceMs?: number; quotaSettlementGraceMs?: number } = {}): {
@@ -98,6 +100,57 @@ function makeSessionEventContext(sessionPath: string): SessionContext {
 function waitForAsyncEvent(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
 }
+
+test('hot duplicate runs through the owning runtime replacement and suppresses its intermediate event', async () => {
+  const { host } = makeHost();
+  const internals = getInternals(host);
+  const sourcePath = '/sessions/source.jsonl';
+  const duplicatePath = '/sessions/duplicate.jsonl';
+  const context = makeSessionEventContext(sourcePath);
+  let forkCalls = 0;
+  context.runtime = {
+    fork: async (entryId: string, options: { position?: 'before' | 'at' }) => {
+      forkCalls += 1;
+      assert.equal(entryId, 'assistant-leaf');
+      assert.deepEqual(options, { position: 'at' });
+      assert.equal(internals.suppressNextReplacementOpened, true);
+      context.sessionPath = duplicatePath;
+      return { cancelled: false };
+    },
+  } as unknown as SessionContext['runtime'];
+  context.session = {
+    sessionManager: {
+      getBranch: () => [{ id: 'assistant-leaf', type: 'message' }],
+    },
+  } as unknown as SessionContext['session'];
+  internals.context = context;
+  internals.sdk = {};
+
+  assert.deepEqual(await host.command('session.duplicateHot', {
+    params: { sessionPath: sourcePath },
+  }, 'duplicate-hot'), { sessionPath: duplicatePath });
+  assert.equal(forkCalls, 1);
+  assert.equal(internals.suppressNextReplacementOpened, false);
+
+  internals.openedPayload = makeOpenedPayload(duplicatePath, [], {
+    replacesSessionPath: sourcePath,
+  });
+  internals.buildOpenedPayload = async (sessionPath, selectionToken, operationId, operationAttempt) => (
+    makeOpenedPayload(sessionPath, [], { selectionToken, operationId, operationAttempt, runtimeReady: true })
+  );
+  const snapshot = await host.command('session.snapshot', {
+    params: {
+      sessionPath: duplicatePath,
+      selectionToken: 'duplicate-selection',
+      operationId: 'duplicate-operation',
+      operationAttempt: 2,
+    },
+  }, 'snapshot-hot') as unknown as SessionOpenedPayload;
+  assert.equal(snapshot.replacesSessionPath, undefined);
+  assert.equal(snapshot.selectionToken, 'duplicate-selection');
+  assert.equal(internals.openedPayload?.replacesSessionPath, undefined,
+    'later worker refreshes must not replace the source tab');
+});
 
 test('priority interrupt marks the active request aborted', async () => {
   const { host } = makeHost();

@@ -39,6 +39,16 @@ test('worker router promotion is single-flight and runtime.ready precedes the in
           error: { code: 'OPERATION_INTENT_MISMATCH', message: 'operation intent changed', retryable: false },
         };
       }
+      if (body.operation === 'session.duplicateHot') {
+        return { kind: 'response', requestId: 'x', ok: true, result: {
+          kind: 'runtime.command', payload: { sessionPath: `${sessionPath}.copy` },
+        } };
+      }
+      if (body.operation === 'session.snapshot') {
+        return { kind: 'response', requestId: 'x', ok: true, result: {
+          kind: 'runtime.command', payload: { ...opened(sessionPath), runtimeReady: true },
+        } };
+      }
       return { kind: 'response', requestId: 'x', ok: true, result: { kind: 'runtime.command', payload: { requestId: 'run' } } };
     },
     sendFrame: () => true,
@@ -85,6 +95,15 @@ test('worker router promotion is single-flight and runtime.ready precedes the in
   const promoteIndex = order.indexOf('runtime.promote');
   assert.ok(promoteIndex >= 5);
   assert.ok(order.slice(promoteIndex + 1).every((kind) => kind === 'runtime.command'));
+
+  assert.deepEqual(
+    await router.duplicateHotSession(sessionPath, { sessionPath }),
+    { sessionPath: `${sessionPath}.copy` },
+  );
+  assert.deepEqual(
+    await router.buildHotSessionOpenedPayload(sessionPath, { sessionPath }),
+    { ...opened(sessionPath), runtimeReady: true },
+  );
 
   await assert.rejects(
     router.route({ id: 'mismatch', method: 'message.send', params: { sessionPath, text: 'mismatch', inputs: [] } }),

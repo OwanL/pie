@@ -55,6 +55,8 @@ export type WorkerJsonValue = WorkerJsonPrimitive | WorkerJsonValue[] | { [key: 
 export type WorkerJsonObject = { [key: string]: WorkerJsonValue };
 
 export type WorkerRuntimeOperation =
+  | 'session.duplicateHot'
+  | 'session.snapshot'
   | 'session.open'
   | 'session.preload'
   | 'session.loadTranscriptPage'
@@ -899,6 +901,7 @@ function validateCommand(value: Record<string, unknown>, requireSeq: boolean): s
 }
 
 const RUNTIME_OPERATIONS: ReadonlySet<WorkerRuntimeOperation> = new Set([
+  'session.duplicateHot', 'session.snapshot',
   'session.open', 'session.preload', 'session.loadTranscriptPage', 'session.loadDetail',
   'session.truncateAfter', 'session.title.generate', 'models.list', 'liveTurn.checkpoint', 'message.send', 'operation.status', 'message.continue', 'message.compact',
   'message.clearQueue', 'message.replaceQueue', 'extension_ui.response',

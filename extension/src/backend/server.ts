@@ -1461,6 +1461,16 @@ export class BackendServer {
     includeInitialContextEstimate = true,
   ): Promise<SessionOpenedPayload> {
     return await timed('buildSessionOpenedPayload', async () => {
+      const router = this.workerRuntimeRouter;
+      if (router?.hasHotOwner(sessionPath)) {
+        return await router.buildHotSessionOpenedPayload(sessionPath, {
+          sessionPath,
+          ...(selectionToken !== undefined ? { selectionToken } : {}),
+          ...(transcript !== undefined ? { transcript } : {}),
+          ...(operationId !== undefined ? { operationId } : {}),
+          ...(operationAttempt !== undefined ? { operationAttempt } : {}),
+        });
+      }
       const catalog = await loadConfiguredModels(this.agentDir, this.modelRegistry);
       const availableModels = catalog.models;
       const modelSettings = await this.readModelSettings();
@@ -1584,6 +1594,35 @@ export class BackendServer {
     throw new BackendError(
       'SESSION_CHANGED_DURING_READ',
       `The session ownership changed repeatedly while its browse authority was being selected: ${sessionPath}`,
+    );
+  }
+
+  /** Select the source owner for duplicate at the mutation boundary. A cold
+   * route can start promotion after the public pre-dispatch check but before
+   * ColdSessionStore captures its stamp; that stale capture is a re-selection
+   * signal, not a failed duplicate. Once a cold stamp is captured, its final
+   * fork commit is synchronous and cannot overlap a new promotion. */
+  private async duplicateSessionFromCurrentOwner(sessionPath: string): Promise<{ sessionPath: string }> {
+    const store = this.initializeColdSessionStore();
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      await this.waitForSessionBrowseAuthority(sessionPath);
+      const router = this.workerRuntimeRouter;
+      if (router?.hasHotOwner(sessionPath)) {
+        return await router.duplicateHotSession(sessionPath, { sessionPath });
+      }
+      let handle: ColdSessionManagerHandle;
+      try {
+        handle = store.duplicate(sessionPath);
+      } catch (error) {
+        if (error instanceof StaleColdSessionLeaseError) continue;
+        throw error;
+      }
+      this.retainColdSessionManager(handle, 'new');
+      return { sessionPath: handle.sessionPath };
+    }
+    throw new BackendError(
+      'SESSION_CHANGED_DURING_READ',
+      `The session ownership changed repeatedly while it was being duplicated: ${sessionPath}`,
     );
   }
 
@@ -2300,7 +2339,7 @@ export class BackendServer {
         if (sessionPath
           && !ISOLATED_PROMOTION_METHODS.has(request.method)
           && isCoordinatorOperationAllowed(request.method, request.params)
-          && WorkerRuntimeRouter.isHotOperation(request.method)
+          && (WorkerRuntimeRouter.isHotOperation(request.method) || request.method === 'session.duplicate')
           && (routeState?.state === 'promoting' || routeState?.state === 'retiring')) {
           await this.waitForSessionBrowseAuthority(sessionPath);
           routeState = router.getRoute(sessionPath);
@@ -2458,10 +2497,8 @@ export class BackendServer {
         this.retainColdSessionManager(handle, 'new');
         return { sessionPath: handle.sessionPath };
       },
-      duplicateColdSession: (sessionPath) => {
-        const handle = this.initializeColdSessionStore().duplicate(sessionPath);
-        this.retainColdSessionManager(handle, 'new');
-        return { sessionPath: handle.sessionPath };
+      duplicateColdSession: async (sessionPath) => {
+        return await this.duplicateSessionFromCurrentOwner(sessionPath);
       },
       truncateColdSessionAfter: async (sessionPath, entryId) => {
         const store = this.initializeColdSessionStore();

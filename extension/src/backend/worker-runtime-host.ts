@@ -150,6 +150,11 @@ export class WorkerRuntimeHost {
   private extensionIncidentSequence = 0;
   private settings: ModelSettings = { defaultModel: '', defaultThinkingLevel: 'high' };
   private openedPayload?: SessionOpenedPayload;
+  /** A coordinator-owned duplicate publishes the destination only after its
+   * create ledger has recorded the durable path. Suppress the SDK rebind's
+   * ordinary replacement event so it cannot incorrectly replace the source
+   * tab before that publication. */
+  private suppressNextReplacementOpened = false;
   private agentDir = '';
   private startupCwd = '';
   private sessionDir = '';
@@ -247,6 +252,51 @@ export class WorkerRuntimeHost {
         }
         await this.context.session.prompt(params.command, { source: 'rpc' });
         return asWorkerJson({ sessionPath: this.context.sessionPath });
+      }
+      if (operation === 'session.duplicateHot') {
+        const sourceSessionPath = typeof params.sessionPath === 'string' ? params.sessionPath : undefined;
+        if (!sourceSessionPath || !sameSessionPath(sourceSessionPath, this.context.sessionPath)) {
+          throw new Error('Hot duplicate source does not match the worker lease.');
+        }
+        const sourceContext = this.context;
+        const sourcePath = sourceContext.sessionPath;
+        const branch = sourceContext.session.sessionManager.getBranch();
+        const leaf = branch.at(-1) as { id?: unknown } | undefined;
+        this.suppressNextReplacementOpened = true;
+        try {
+          const result = typeof leaf?.id === 'string'
+            ? await sourceContext.runtime.fork?.(leaf.id, { position: 'at' })
+            : await sourceContext.runtime.newSession?.({ parentSession: sourcePath });
+          if (!result || result.cancelled) throw new Error('Hot session duplicate was cancelled before commit.');
+          if (sameSessionPath(this.context.sessionPath, sourcePath)) {
+            throw new Error('Hot session duplicate did not activate its destination.');
+          }
+          return asWorkerJson({ sessionPath: this.context.sessionPath });
+        } finally {
+          this.suppressNextReplacementOpened = false;
+        }
+      }
+      if (operation === 'session.snapshot') {
+        const sessionPath = typeof params.sessionPath === 'string' ? params.sessionPath : undefined;
+        if (!sessionPath || !sameSessionPath(sessionPath, this.context.sessionPath)) {
+          throw new Error('Hot snapshot path does not match the worker lease.');
+        }
+        const transcript = params.transcript === 'skip' || params.transcript === 'tail'
+          ? params.transcript
+          : undefined;
+        const opened = await this.buildOpenedPayload(
+          sessionPath,
+          typeof params.selectionToken === 'string' ? params.selectionToken : undefined,
+          typeof params.operationId === 'string' ? params.operationId : undefined,
+          Number.isSafeInteger(params.operationAttempt) ? params.operationAttempt as number : undefined,
+          transcript,
+        );
+        // The preceding duplicate rebind temporarily records replacement
+        // ancestry in the worker cache. The coordinator publishes this as a
+        // sibling tab, so all later worker refreshes must inherit the duplicate
+        // operation metadata rather than replaying `replacesSessionPath`.
+        this.openedPayload = opened;
+        return asWorkerJson(opened);
       }
       return asWorkerJson(await handleBackendRequest(this.requestDeps(), {
         id: publicRequestId,
@@ -528,7 +578,9 @@ export class WorkerRuntimeHost {
     this.installProviderIncidentBridge();
     runtime.setRebindSession?.(async (replacement) => {
       await this.bindSession(context, replacement);
-      this.emit('session.opened', { ...this.openedPayload, runtimeReady: true });
+      if (!this.suppressNextReplacementOpened) {
+        this.emit('session.opened', { ...this.openedPayload, runtimeReady: true });
+      }
     });
     await this.bindSession(context, session);
 
@@ -1279,7 +1331,9 @@ export class WorkerRuntimeHost {
     this.installProviderIncidentBridge();
     runtime.setRebindSession?.(async (replacement) => {
       await this.bindSession(context, replacement);
-      this.emit('session.opened', { ...this.openedPayload, runtimeReady: true });
+      if (!this.suppressNextReplacementOpened) {
+        this.emit('session.opened', { ...this.openedPayload, runtimeReady: true });
+      }
     });
     await this.bindSession(context, runtime.session);
     return context;
