@@ -2568,13 +2568,6 @@ export class BackendServer {
       pid: process.pid,
     });
     this.disposed = true;
-    if (this.coldSessionStore) {
-      // Backend generations are host-authoritative and increase across every
-      // restart. Advancing to a hard-coded generation only works for the
-      // first process; generation 2+ then throws during ordinary shutdown and
-      // forces the host to kill an otherwise healthy coordinator.
-      this.coldSessionStore.leases.advanceCoordinatorGeneration(this.backendGeneration + 1);
-    }
     this.coldSessionManagerHandles.clear();
     this.pendingLivePipelineTraceDisables.clear();
     this.stopHostWatchdog();
@@ -2616,6 +2609,15 @@ export class BackendServer {
         workerSupervisorDisposeError ??= error;
         log(`worker supervisor disposal failed closed: ${toErrorMessage(error)}`);
       }
+    }
+    if (this.coldSessionStore) {
+      // Keep coordinator-local reservations intact until every hot worker has
+      // confirmed exit and runtime ownership reconciliation has released its
+      // exact fence. Advancing sooner clears those reservations underneath the
+      // normal worker-exit callbacks, turning graceful teardown into a false
+      // stale-reservation failure. The generation advance remains the final
+      // fail-closed barrier for any in-flight cold work from this process.
+      this.coldSessionStore.leases.advanceCoordinatorGeneration(this.backendGeneration + 1);
     }
     // Reject provider waiters and clear referenced queue/afterburn timers even
     // when an SDK runtime ignores abort during shutdown. The global fetch
