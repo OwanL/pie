@@ -195,22 +195,24 @@ test('renderer block retires a stale acceptance only when newer host state is co
   await settle();
   const generation = h.controller.getDebugState().viewGeneration;
 
-  h.controller.transcriptCommitBlocked({
+  const stableBlock = h.controller.transcriptCommitBlocked({
     revision: 1,
     viewGeneration: generation,
     reason: 'leaf_mismatch',
   });
+  assert.equal(stableBlock, 'blocked', 'without newer state the mismatch remains guarded by the commit deadline');
   assert.deepEqual(h.builds.map((build) => build.desiredGeneration), [1]);
   assert.deepEqual(h.controller.getDebugState().acceptedRevisions, [1]);
 
   h.controller.markDirty();
-  h.controller.transcriptCommitBlocked({
+  const coalescedBlock = h.controller.transcriptCommitBlocked({
     revision: 1,
     viewGeneration: generation,
     reason: 'leaf_mismatch',
   });
   await settle();
 
+  assert.equal(coalescedBlock, 'coalesced', 'newer host state makes the old renderer mismatch an expected coalescing signal');
   assert.deepEqual(h.builds.map((build) => build.desiredGeneration), [1, 2]);
   assert.deepEqual(h.controller.getDebugState().acceptedRevisions, [2]);
   assert.ok(h.telemetry.some((event) => event.kind === 'commit-blocked'));

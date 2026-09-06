@@ -80,7 +80,15 @@ import {
   InterruptOperationLedger,
   type InterruptOperationResult,
 } from './interrupt-operation-ledger';
-import { BackendError, extractRequestError, log, responseError, responseOk, writeStdout } from './server-io';
+import {
+  BackendError,
+  extractRequestError,
+  isExpectedSessionOperationCancellation,
+  log,
+  responseError,
+  responseOk,
+  writeStdout,
+} from './server-io';
 import {
   flushBackendLivePipelineTrace,
   getBackendLivePipelineTraceHealth,
@@ -91,7 +99,7 @@ import {
 import {
   type SessionContextCreationReason,
 } from './server-types';
-import { backendTrace, backendError, backendInfo, backendWarn, backendLog, classifyWorkerStderrChunk } from './log';
+import { backendTrace, backendError, backendInfo, backendWarn, backendLog, classifyWorkerDiagnosticChunk } from './log';
 import { isCoordinatorOperationAllowed } from './coordinator-operations';
 import { ColdSessionStore, StaleColdSessionLeaseError, type ColdSessionManagerHandle } from './cold-session-store';
 import { ColdBrowseHelperClient } from './cold-browse-helper-client';
@@ -135,6 +143,17 @@ function timed<T>(label: string, op: () => T): T;
 function timed<T>(label: string, op: () => Promise<T>): Promise<T>;
 function timed<T>(label: string, op: () => T | Promise<T>): T | Promise<T> {
   const start = Date.now();
+  const traceFailure = (error: unknown): void => {
+    if (isExpectedSessionOperationCancellation(error)) {
+      backendTrace('timing', 'op.cancelled', {
+        code: error.code,
+        durationMs: Date.now() - start,
+        label,
+      });
+      return;
+    }
+    backendTrace('timing', 'op.failed', { level: 'warn', label, durationMs: Date.now() - start, error: toErrorMessage(error) });
+  };
   const finish = (result: T | Promise<T>): T | Promise<T> => {
     if (result instanceof Promise) {
       return result.then(
@@ -143,7 +162,7 @@ function timed<T>(label: string, op: () => T | Promise<T>): T | Promise<T> {
           return value;
         },
         (error) => {
-          backendTrace('timing', 'op.failed', { level: 'warn', label, durationMs: Date.now() - start, error: toErrorMessage(error) });
+          traceFailure(error);
           throw error;
         },
       );
@@ -154,7 +173,7 @@ function timed<T>(label: string, op: () => T | Promise<T>): T | Promise<T> {
   try {
     return finish(op());
   } catch (error) {
-    backendTrace('timing', 'op.failed', { level: 'warn', label, durationMs: Date.now() - start, error: toErrorMessage(error) });
+    traceFailure(error);
     throw error;
   }
 }
@@ -536,12 +555,10 @@ export class BackendServer {
         });
       },
       onDiagnostic: (rootSessionPath, stream, chunk) => {
-        // Worker stderr carries structured `[pie:backend] {json}` lines with an
-        // explicit `level`. Classify the chunk so debug/info/warn chatter is not
-        // mis-reported as `error` (which flooded the pie log with false errors).
-        // Non-JSON / level-less chunks (e.g. a worker crash stack) surface at
-        // `error` so genuine failures stay visible.
-        const level = classifyWorkerStderrChunk(chunk);
+        // Worker IPC uses dedicated inherited descriptors, leaving stdout and
+        // stderr as diagnostics. Routine extension stdout is informational;
+        // stderr carries structured levels and keeps raw crash output at error.
+        const level = classifyWorkerDiagnosticChunk(stream, chunk);
         backendLog(level, 'backend-worker', `worker ${stream}`, { rootSessionPath, chunk });
       },
     });
@@ -1837,20 +1854,32 @@ export class BackendServer {
     } catch (error) {
       this.cancelLivePipelineTraceDisable(request.id);
       const details = extractRequestError(error);
+      const expectedCancellation = isExpectedSessionOperationCancellation(error);
       // A correlated handler failure has exactly one public owner: the RPC
       // response. Emitting a second generic `error` event made the host show and
       // count the same failure twice. Structured trace/stderr remains the
       // diagnostic channel; later asynchronous incidents use their dedicated
       // event families and identities.
-      backendTrace('request', 'error', { level: 'warn', id: request.id, method: request.method, code: details.code, message: details.message });
+      backendTrace('request', expectedCancellation ? 'cancelled' : 'error', {
+        level: expectedCancellation ? 'debug' : 'warn',
+        id: request.id,
+        method: request.method,
+        code: details.code,
+        message: details.message,
+      });
       if (!completionEmitted) {
         recordBackendLivePipelineTrace({
           stage: 'backend.request',
-          kind: 'failure',
+          kind: expectedCancellation ? 'transition' : 'failure',
           phase: 'handler_finished',
           durationMs: Math.max(0, performance.now() - requestStartedAt),
           identifiers: { request: request.id },
-          reasonCode: 'unknown_unattributable',
+          ...(expectedCancellation
+            ? {
+              operationTerminalOutcome: 'cancelled' as const,
+              operationTerminalReason: 'interrupted-before-commit' as const,
+            }
+            : { reasonCode: 'unknown_unattributable' as const }),
           processRole: 'coordinator',
           pid: process.pid,
         });

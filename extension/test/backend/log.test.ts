@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { classifyWorkerStderrChunk } from '../../src/backend/log';
+import { classifyWorkerDiagnosticChunk, classifyWorkerStderrChunk } from '../../src/backend/log';
 
 /** Build a structured `[pie:backend] {json}` line (the backend logger shape). */
 function structuredLine(record: Record<string, unknown>): string {
@@ -70,4 +70,15 @@ test('a multi-line chunk uses the most severe level', () => {
 test('an empty chunk defaults to info', () => {
   assert.equal(classifyWorkerStderrChunk(''), 'info');
   assert.equal(classifyWorkerStderrChunk('\n  \n'), 'info');
+});
+
+test('worker stdout is informational while unstructured stderr remains an error diagnostic', () => {
+  const successfulExtensionOutput =
+    '[copilot-model-discovery] Catalog synchronized: added model-a; removed model-b';
+
+  assert.equal(classifyWorkerDiagnosticChunk('stdout', successfulExtensionOutput), 'info');
+  assert.equal(
+    classifyWorkerDiagnosticChunk('stderr', '[pie-worker] Error: boom\n    at main (worker-entry.ts:105:5)'),
+    'error',
+  );
 });

@@ -114,7 +114,7 @@ export class RendererSession implements RendererRegistration, DisposableLike {
   private visible = true;
   private focused = false;
   private rendererGeneration = 1;
-  private lastTranscriptCommitBlockedReason?: string;
+  private lastTranscriptCommitBlockedDiagnosticKey?: string;
   private pendingImperatives: Array<Exclude<HostToWebviewMessage, { type: 'state' }>> = [];
   private readonly watchdog: StateAppliedWatchdog;
   private readonly readinessProbe: WebviewReadinessProbe;
@@ -351,31 +351,44 @@ export class RendererSession implements RendererRegistration, DisposableLike {
           case 'stateReceived': this.delivery.stateReceived(msg.payload); break;
           case 'appCommitted': this.delivery.appCommitted(msg.payload); break;
           case 'transcriptCommitted':
-            this.lastTranscriptCommitBlockedReason = undefined;
+            this.lastTranscriptCommitBlockedDiagnosticKey = undefined;
             this.delivery.transcriptCommitted(msg.payload);
             break;
           case 'transcriptCommitBlocked':
-            this.delivery.transcriptCommitBlocked(msg.payload);
-            if (this.lastTranscriptCommitBlockedReason !== msg.payload.reason) {
-              this.lastTranscriptCommitBlockedReason = msg.payload.reason;
-              appendPieLog('warn', 'renderer-session', 'transcript commit blocked', {
-                reason: msg.payload.reason,
+            {
+              const disposition = this.delivery.transcriptCommitBlocked(msg.payload);
+              const diagnosticKey = `${msg.payload.viewGeneration}:${disposition}:${msg.payload.reason}`;
+              if (this.lastTranscriptCommitBlockedDiagnosticKey !== diagnosticKey) {
+                this.lastTranscriptCommitBlockedDiagnosticKey = diagnosticKey;
+                // An optimistic interaction commonly makes an accepted
+                // snapshot stale just before newer host state is posted. That
+                // is the controller's intended latest-wins coalescing path,
+                // not a renderer fault. A pre-ack optimistic overlay can also
+                // keep an otherwise-current target blocked until the backend
+                // confirms or rejects it. Keep every initial block available
+                // at debug; a genuinely stable mismatch still reaches the
+                // existing bounded commit-timeout resnapshot/reload boundary.
+                appendPieLog('debug', 'renderer-session', 'transcript commit blocked', {
+                  disposition,
+                  reason: msg.payload.reason,
+                  revision: msg.payload.revision,
+                  viewGeneration: msg.payload.viewGeneration,
+                });
+              }
+              if (isLivePipelineTraceEnabled()) recordLivePipelineTrace({
+                process: 'webview', stage: 'webview.transcript.committed',
+                kind: disposition === 'blocked' || disposition === 'protocol-defect' ? 'failure' : 'transition',
+                identifiers: { hostInstance: this.hostInstanceId },
                 revision: msg.payload.revision,
                 viewGeneration: msg.payload.viewGeneration,
+                reasonCode: msg.payload.reason === 'window_mismatch'
+                  ? 'commit_window_mismatch'
+                  : msg.payload.reason === 'structure_mismatch'
+                    ? 'commit_structure_mismatch'
+                    : msg.payload.reason === 'leaf_missing'
+                      ? 'commit_leaf_missing' : 'commit_leaf_mismatch',
               });
             }
-            if (isLivePipelineTraceEnabled()) recordLivePipelineTrace({
-              process: 'webview', stage: 'webview.transcript.committed', kind: 'failure',
-              identifiers: { hostInstance: this.hostInstanceId },
-              revision: msg.payload.revision,
-              viewGeneration: msg.payload.viewGeneration,
-              reasonCode: msg.payload.reason === 'window_mismatch'
-                ? 'commit_window_mismatch'
-                : msg.payload.reason === 'structure_mismatch'
-                  ? 'commit_structure_mismatch'
-                  : msg.payload.reason === 'leaf_missing'
-                    ? 'commit_leaf_missing' : 'commit_leaf_mismatch',
-            });
             break;
           case 'paintObserved': this.delivery.paintObserved(msg.payload); break;
           case 'renderFailure': this.delivery.renderFailure(msg.payload); break;

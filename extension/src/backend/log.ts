@@ -118,6 +118,17 @@ export function classifyWorkerStderrChunk(chunk: string): BackendLogLevel {
   return worst ?? 'info';
 }
 
+/** Classify a diagnostic chunk from an isolated worker process. Worker IPC
+ *  uses dedicated inherited descriptors, so stdout is ordinary application
+ *  output rather than a protocol channel. Keep that output visible at info;
+ *  stderr retains the fail-safe crash classification above. */
+export function classifyWorkerDiagnosticChunk(
+  stream: 'stdout' | 'stderr',
+  chunk: string,
+): BackendLogLevel {
+  return stream === 'stdout' ? 'info' : classifyWorkerStderrChunk(chunk);
+}
+
 const LEVEL_RANK: Record<BackendLogLevel, number> = {
   debug: 10,
   info: 20,

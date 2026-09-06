@@ -604,6 +604,14 @@ export class BackendError extends Error {
   }
 }
 
+/** Expected request settlement when the user interrupts a session operation
+ * before its worker promotion/compound transition commits. The correlated RPC
+ * still rejects with this typed code, but diagnostics must not report it as an
+ * operational failure. */
+export function isExpectedSessionOperationCancellation(error: unknown): error is BackendError {
+  return error instanceof BackendError && error.code === 'SESSION_OPERATION_CANCELLED';
+}
+
 export function extractRequestError(error: unknown): ErrorPayload & { data?: unknown } {
   if (error instanceof SessionSnapshotTooLargeError) {
     return { code: error.code, message: error.message, data: error.data };

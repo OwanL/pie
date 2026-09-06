@@ -90,6 +90,17 @@ export interface StateDeliveryTelemetry {
   detail?: string;
 }
 
+/** Host interpretation of renderer evidence that cannot prove one transcript
+ * snapshot. Only `blocked` represents a stable mismatch still guarded by the
+ * commit deadline; the other outcomes are expected fencing/coalescing paths
+ * or have their own protocol-defect diagnostic. */
+export type TranscriptCommitBlockDisposition =
+  | 'blocked'
+  | 'coalesced'
+  | 'deferred'
+  | 'ignored'
+  | 'protocol-defect';
+
 export interface StateDeliveryRecovery {
   reason: StateDeliveryRecoveryReason;
   viewGeneration: number;
@@ -341,12 +352,12 @@ export class StateDeliveryController<T> {
    * A block with no newer host state does not open the gate: the existing
    * commit deadline still bounds a genuine, stable render mismatch.
    */
-  transcriptCommitBlocked(payload: TranscriptCommitBlockedPayload): void {
+  transcriptCommitBlocked(payload: TranscriptCommitBlockedPayload): TranscriptCommitBlockDisposition {
     const { revision, viewGeneration, reason } = payload;
-    if (!this.validateEvidenceGeneration('transcript-committed', viewGeneration, revision)) return;
+    if (!this.validateEvidenceGeneration('transcript-committed', viewGeneration, revision)) return 'ignored';
     if (revision <= this.lastTranscriptCommittedRevision || revision <= this.retiredAcceptedRevisionHighWater) {
       this.telemetry('evidence-stale', { revision, viewGeneration }, 'transcript-commit-blocked');
-      return;
+      return 'ignored';
     }
     const entry = this.accepted.find((candidate) => candidate.revision === revision);
     if (!entry) {
@@ -355,20 +366,21 @@ export class StateDeliveryController<T> {
       if (this.activeOperation?.revision === revision) {
         this.activeOperation.deferredBlock = payload;
         this.telemetry('commit-blocked', { revision, viewGeneration }, `${reason}:pre-settlement`);
-        return;
+        return 'deferred';
       }
       this.protocolDefect('future-or-unaccepted-evidence', 'transcript-committed', revision, viewGeneration);
-      return;
+      return 'protocol-defect';
     }
 
     this.telemetry('commit-blocked', { revision, viewGeneration }, reason);
-    if (!this.dirty) return;
+    if (!this.dirty) return 'blocked';
 
     this.retiredAcceptedRevisionHighWater = Math.max(this.retiredAcceptedRevisionHighWater, revision);
     this.accepted = this.accepted.filter((candidate) => candidate.revision > revision);
     this.clearCommitTimer();
     this.armCommitDeadline();
     this.flush();
+    return 'coalesced';
   }
 
   transcriptCommitted(payload: TranscriptCommittedPayload): void;

@@ -20,6 +20,7 @@ import { RendererHub, streamingScheduleDebounceMs } from '../../../src/host/rend
 import { FakeRendererTransport } from '../../helpers/fake-renderer-transport';
 import type { StateDeliveryClock } from '../../../src/host/sidebar/state-delivery-controller';
 import type { ViewState, WebviewToHostMessage } from '../../../src/shared/protocol';
+import { getLogLevel, setLogLevel } from '../../../src/host/util/pie-logger';
 
 class FakeClock implements StateDeliveryClock {
   private nowValue = 0;
@@ -271,6 +272,50 @@ test('renderer A evidence cannot advance renderer B ledger', async () => {
   });
   await settle();
   assert.equal(regA.getDebugState().lastStateAppliedRevision, stateA.revision);
+  hub.dispose();
+});
+
+test('an initial transcript block stays debug-level while the commit deadline remains authoritative', async () => {
+  const clock = new FakeClock();
+  const { hub } = createHub(clock, []);
+  const transport = new FakeRendererTransport('browser');
+  const registration = hub.registerRenderer(transport);
+  await ready(transport, registration);
+  hub.requestState(registration.rendererId);
+  await settle();
+  const snapshot = transport.stateMessages()[0]!;
+  const previousLevel = getLogLevel();
+  const originalDebug = console.debug;
+  const originalWarn = console.warn;
+  const debug: unknown[][] = [];
+  const warnings: unknown[][] = [];
+  setLogLevel('debug');
+  console.debug = (...args: unknown[]) => debug.push(args);
+  console.warn = (...args: unknown[]) => warnings.push(args);
+
+  try {
+    transport.send({
+      type: 'transcriptCommitBlocked',
+      payload: {
+        revision: snapshot.revision,
+        viewGeneration: snapshot.viewGeneration,
+        reason: 'structure_mismatch',
+      },
+    });
+    assert.equal(debug.length, 1, 'the blocked snapshot remains available for verbose diagnosis');
+    assert.equal(warnings.length, 0, 'the initial block is not itself an operational warning');
+  } finally {
+    console.debug = originalDebug;
+    console.warn = originalWarn;
+    setLogLevel(previousLevel);
+  }
+
+  assert.deepEqual(registration.getDebugState().pendingStateAppliedRevision, snapshot.revision);
+  clock.advance(999);
+  assert.equal(transport.stateMessages().length, 1);
+  clock.advance(1);
+  await settle();
+  assert.equal(transport.stateMessages().length, 2, 'the existing bounded mismatch resnapshot remains armed');
   hub.dispose();
 });
 
