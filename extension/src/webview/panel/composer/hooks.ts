@@ -79,6 +79,12 @@ export function useComposerInput({
   // resolution (same session, path string changed) from a genuine session
   // switch. See the [sessionPath] seed effect below.
   const prevSessionPathRef = useRef<string | null>(null);
+  // Last host draft observed for this exact session. A same-session snapshot
+  // may carry a rollback restore after the transient `sendRejected` imperative
+  // was lost to renderer reconnect. Compare against this baseline so that
+  // authoritative recovery can repopulate an unchanged local composer without
+  // clobbering newer, not-yet-debounced typing.
+  const hostDraftBaselineRef = useRef({ sessionPath, draftText });
   // Word-processor-style undo/redo history for the composer text. It lives in a
   // dedicated past/present/future store so it survives the
   // programmatic clear on send — letting Ctrl+Z step back to a prompt that was
@@ -152,6 +158,7 @@ export function useComposerInput({
   useEffect(() => {
     const prevSessionPath = prevSessionPathRef.current;
     prevSessionPathRef.current = sessionPath;
+    hostDraftBaselineRef.current = { sessionPath, draftText };
 
     const isPendingResolution = (
       prevSessionPath !== null &&
@@ -189,6 +196,28 @@ export function useComposerInput({
       resizeComposerTextarea(textarea);
     }
   }, [sessionPath]);
+
+  // The session-path seed above handles mounts/navigation, but reconnect does
+  // not necessarily remount the app or change the active path. Adopt a newer
+  // host draft on the same session only while the local editor still equals
+  // the prior host baseline. That is the pre-ack send-rollback shape: the
+  // locally-cleared composer is restored by the next authoritative snapshot
+  // even when `sendRejected` could not be delivered.
+  useEffect(() => {
+    const previous = hostDraftBaselineRef.current;
+    hostDraftBaselineRef.current = { sessionPath, draftText };
+    if (previous.sessionPath !== sessionPath || previous.draftText === draftText) return;
+    if (text !== previous.draftText) return;
+
+    clearCheckpointTimer();
+    setHistory(draftText, true);
+    setText(draftText);
+    const textarea = textareaRef.current;
+    if (textarea) {
+      textarea.value = draftText;
+      resizeComposerTextarea(textarea);
+    }
+  }, [draftText]);
 
   // Debounce-post draft text back to the host so it survives reloads and
   // session switches. A 300 ms window coalesces rapid keystrokes.

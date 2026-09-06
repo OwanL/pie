@@ -111,6 +111,55 @@ test('useComposerInput seeds text from draftText on mount and session switch', (
   assert.equal((textarea as HTMLTextAreaElement).value, 'persisted draft');
 });
 
+test('useComposerInput adopts a same-session authoritative draft restored after send cancellation', () => {
+  const posted: WebviewToHostMessage[] = [];
+  const postMessage = (msg: WebviewToHostMessage) => { posted.push(msg); };
+
+  act(() => {
+    render(h(TestHarness, { sessionPath: '/cold', draftText: '', postMessage }), container);
+  });
+  const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+  assert.ok(textarea);
+  assert.equal(textarea.value, '');
+
+  // A reconnect can lose the transient sendRejected imperative while the
+  // mounted app keeps the same active session. The next authoritative snapshot
+  // still carries the reducer-restored draft and must repopulate the composer.
+  act(() => {
+    render(h(TestHarness, {
+      sessionPath: '/cold',
+      draftText: 'enumerate a long list',
+      postMessage,
+    }), container);
+  });
+
+  assert.equal(textarea.value, 'enumerate a long list');
+});
+
+test('useComposerInput does not replace a newer unsynced local draft with a same-session snapshot', () => {
+  const postMessage = (_msg: WebviewToHostMessage) => {};
+
+  act(() => {
+    render(h(TestHarness, { sessionPath: '/s', draftText: '', postMessage }), container);
+  });
+  const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+  assert.ok(textarea);
+  act(() => {
+    textarea.value = 'newer local typing';
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+
+  act(() => {
+    render(h(TestHarness, {
+      sessionPath: '/s',
+      draftText: 'older host snapshot',
+      postMessage,
+    }), container);
+  });
+
+  assert.equal(textarea.value, 'newer local typing');
+});
+
 test('useComposerInput posts setComposerDraft after debounced typing', async () => {
   const posted: WebviewToHostMessage[] = [];
   installFakeTimers();
