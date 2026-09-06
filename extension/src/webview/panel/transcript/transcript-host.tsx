@@ -185,7 +185,7 @@ export function TranscriptHost({
   const commitRegistry = useTranscriptCommitRegistry();
   const [mountGeneration, setMountGeneration] = useState(0);
   const hostRef = useRef<HTMLDivElement>(null);
-  const lastCommitRef = useRef('');
+  const lastCommitRef = useRef<{ target: typeof commitRegistry.target; mountGeneration: number } | null>(null);
   const lastBlockedRef = useRef('');
   const paintFrameRef = useRef<number | null>(null);
   useCommittedAppSurface('transcript');
@@ -256,8 +256,9 @@ export function TranscriptHost({
     // the recovery watchdog even though Chromium had already proven that
     // revision. New authoritative state always carries a new revision and still
     // goes through the full validation below.
-    const committedTargetPrefix = `${target.viewGeneration}:${target.revision}:${mountGeneration}:${target.expectedTranscriptIdentity}:`;
-    if (lastCommitRef.current.startsWith(committedTargetPrefix)) return;
+    // Snapshot targets are immutable. Compare the actual target so a fresh
+    // renderer ledger with the same revision/identity still receives evidence.
+    if (lastCommitRef.current?.target === target && lastCommitRef.current.mountGeneration === mountGeneration) return;
 
     if (target.state.activeSessionPath !== activeSessionPath
       || (activeSessionPath !== null && !target.state.openTabPaths.includes(activeSessionPath))) {
@@ -281,9 +282,7 @@ export function TranscriptHost({
       return reportBlocked(decision.reason ?? 'leaf_mismatch');
     }
 
-    const commitKey = `${target.viewGeneration}:${target.revision}:${mountGeneration}:${target.expectedTranscriptIdentity}:${decision.evidence}`;
-    if (lastCommitRef.current === commitKey) return;
-    lastCommitRef.current = commitKey;
+    lastCommitRef.current = { target, mountGeneration };
     recordRenderEvidenceTarget(target, 'transcript');
     const payload = {
       revision: target.revision,

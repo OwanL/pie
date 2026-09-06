@@ -834,6 +834,38 @@ test('Brief D: stale/duplicate state envelope is discarded without fresh receipt
   assert.equal(received.at(-1)?.payload.revision, 2, 'last accepted revision remains 2');
 });
 
+test('browser reconnect rebases renderer revisions in the mounted app and preserves same-owner fences', () => {
+  const adapter = makeAdapter();
+  adapter.initialState = sessionViewState();
+  act(() => { render(h(App, { adapter }), container); });
+  const deliver = (message: HostToWebviewMessage) => act(() => {
+    window.dispatchEvent(new MessageEvent('message', { data: message }));
+  });
+  const receipts = () => adapter.messages.filter((message) => message.type === 'stateReceived');
+  deliver(stateEnvelope(42, sessionViewState(), 'host-1', 4));
+  assert.equal(receipts().length, 1);
+
+  // Every socket registration starts its own counters. Reconnect preserves
+  // the page and host, even when both the revision and view generation drop.
+  const reconnect = {
+    ...stateEnvelope(1, sessionViewState(), 'host-1', 2),
+    rendererId: 'renderer-reconnected',
+    rendererGeneration: 2,
+  };
+  deliver(reconnect);
+  assert.equal(receipts().length, 2, 'the replacement renderer receives its first snapshot');
+  deliver(reconnect);
+  deliver({ ...reconnect, viewGeneration: 1, revision: 100 });
+  assert.equal(receipts().length, 2, 'duplicate revisions and retired views remain fenced');
+  deliver({ ...reconnect, revision: 2 });
+  assert.equal(receipts().length, 3, 'delivery keeps advancing after reconnect');
+
+  deliver({ ...reconnect, rendererGeneration: 3 });
+  assert.equal(receipts().length, 4, 'a replacement generation has its own revision domain');
+  deliver({ ...reconnect, revision: 100 });
+  assert.equal(receipts().length, 4, 'a retired renderer generation cannot roll back the replacement');
+});
+
 test('Brief D: a host-instance change rebases the revision guard (a fresh host\'s rev 1 is accepted, not discarded as stale)', () => {
   // On a host restart the revision counter resets to 1. The guard must ACCEPT
   // the first envelope from the new host instance (rebasing lastRevisionRef),

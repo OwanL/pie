@@ -274,6 +274,21 @@ test('app commit reports only a transcript block that survives the render grace 
     );
     assert.ok(messages.some((message) => message.type === 'transcriptCommitted' && message.payload.revision === 7));
 
+    // A reconnect keeps this mounted tree and its leaves, but supplies a new
+    // target from a fresh ledger. Numeric revision/generation and semantic
+    // identity may all coincide with the preceding socket's last snapshot.
+    messages.length = 0;
+    const reconnectedTarget = { ...target };
+    render(h(TranscriptCommitProvider, {
+      target: reconnectedTarget,
+      appSurface: 'transcript',
+      postMessage: (message: any) => messages.push(message),
+      children: h(TranscriptHost, hostProps as never),
+    }), root);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.ok(messages.some((message) => message.type === 'appCommitted'), 'the new target gets fresh app evidence');
+    assert.ok(messages.some((message) => message.type === 'transcriptCommitted'), 'the new ledger gets fresh transcript evidence');
+
     // Webview-local optimistic rows and tab selection may change after the
     // authoritative target was already proven. They must not retroactively
     // reopen that settled target and emit the structure_mismatch warnings seen
@@ -283,7 +298,7 @@ test('app commit reports only a transcript block that survives the render grace 
       id: 'local-pending', role: 'user', createdAt: '', markdown: 'Pending', status: 'completed',
     };
     render(h(TranscriptCommitProvider, {
-      target,
+      target: reconnectedTarget,
       appSurface: 'transcript',
       postMessage: (message: any) => messages.push(message),
       children: h(TranscriptHost, {

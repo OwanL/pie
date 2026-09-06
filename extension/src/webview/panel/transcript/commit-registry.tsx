@@ -98,7 +98,9 @@ export function TranscriptCommitProvider({ target, postMessage, appSurface, chil
   const leavesRef = useRef<Map<string, CommitLeaf>>(new Map());
   const [registryVersion, setRegistryVersion] = useState(0);
   const mountGenerationRef = useRef(0);
-  const lastAppCommitRef = useRef('');
+  // Targets are immutable, created once per accepted snapshot. Their object
+  // identity also distinguishes reconnects whose numeric counters coincide.
+  const lastAppCommitRef = useRef<{ target: TranscriptCommitTarget; surface: AppCommitSurface } | null>(null);
   const reportLeaf = useCallback((key: string, leaf: CommitLeaf | null) => {
     const registry = leavesRef.current;
     const previous = registry.get(key);
@@ -118,9 +120,8 @@ export function TranscriptCommitProvider({ target, postMessage, appSurface, chil
   const unmountHost = useCallback((_generation: number) => undefined, []);
   const commitAppSurface = useCallback((surface: AppCommitSurface) => {
     if (!target) return;
-    const evidenceKey = `${target.viewGeneration}:${target.revision}:${surface}`;
-    if (lastAppCommitRef.current === evidenceKey) return;
-    lastAppCommitRef.current = evidenceKey;
+    if (lastAppCommitRef.current?.target === target && lastAppCommitRef.current.surface === surface) return;
+    lastAppCommitRef.current = { target, surface };
     recordRenderSurface(surface === 'transcript-suspense' ? 'transcript-suspense' : surface === 'transcript' ? 'transcript' : 'app');
     postMessage({
       type: 'appCommitted',

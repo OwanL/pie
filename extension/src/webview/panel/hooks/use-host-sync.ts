@@ -331,6 +331,7 @@ interface HostMessageContext {
   hydrateViewState: (raw: ViewState) => ViewState;
   resetPerSessionState: () => void;
   hostInstanceIdRef: { current: string };
+  rendererIdentityRef: { current: { rendererId: string; rendererGeneration: number } | null };
   viewGenerationRef: { current: number };
   /** Last applied snapshot revision. Allowlisted webview-local
    *  protocol-sync bookkeeping (STATE_CONTRACT § Webview-Local State). */
@@ -392,23 +393,29 @@ function handleStateMessage(msg: HostToWebviewMessage, ctx: HostMessageContext) 
   // Discard out-of-order / duplicate envelopes TOTALLY, before any state
   // mutation. Transport is snapshots-only; a delayed or re-posted envelope
   // whose revision is not strictly newer than the last applied one (for the
-  // SAME host instance) is stale. Applying it would regress
+  // SAME host and renderer incarnation) is stale. Applying it would regress
   // viewState.transcript to older content while the optimistic overlay or
   // streaming state is still in flight — the "old + new message at once"
   // symptom (e.g. a delayed pre-send snapshot arriving after the confirm
   // snapshot would drop the just-sent message from the rendered transcript
   // while the overlay / React batch still held the optimistic copy).
   //
-  // On a host-instance change the revision counter resets to 1, so rebase
-  // `lastRevisionRef` to the incoming revision and accept — the clear below
-  // wipes transient UI, so there is nothing stale to protect. (The first
+  // Host replacement and browser reconnect both reset the delivery counters.
+  // Reconnect keeps the Preact tree mounted, so rebase protocol bookkeeping
+  // when renderer ownership changes without clearing session-local UI. (The first
   // snapshot after webview load also passes: lastRevisionRef starts at 0 and
   // host revisions are 1-based.)
   const prevHostInstanceId = ctx.hostInstanceIdRef.current;
   const hostChanged = !!prevHostInstanceId && m.hostInstanceId !== prevHostInstanceId;
+  const previousRenderer = ctx.rendererIdentityRef.current;
+  const sameRenderer = previousRenderer?.rendererId === m.rendererId;
+  if (!hostChanged && sameRenderer && m.rendererGeneration < previousRenderer.rendererGeneration) return;
+  const rendererChanged = previousRenderer !== null
+    && (!sameRenderer || m.rendererGeneration !== previousRenderer.rendererGeneration);
+  const deliveryOwnerChanged = hostChanged || rendererChanged;
   const generationChanged = ctx.viewGenerationRef.current !== 0 && m.viewGeneration !== ctx.viewGenerationRef.current;
-  if (!hostChanged && m.viewGeneration < ctx.viewGenerationRef.current) return;
-  if (!hostChanged && !generationChanged && m.revision <= ctx.lastRevisionRef.current) {
+  if (!deliveryOwnerChanged && m.viewGeneration < ctx.viewGenerationRef.current) return;
+  if (!deliveryOwnerChanged && !generationChanged && m.revision <= ctx.lastRevisionRef.current) {
     return; // stale / duplicate — discard totally (no flicker, no overlay regression)
   }
 
@@ -418,6 +425,7 @@ function handleStateMessage(msg: HostToWebviewMessage, ctx: HostMessageContext) 
 
   ctx.lastRevisionRef.current = m.revision;
   ctx.viewGenerationRef.current = m.viewGeneration;
+  ctx.rendererIdentityRef.current = { rendererId: m.rendererId, rendererGeneration: m.rendererGeneration };
   const commitTarget: TranscriptCommitTarget = {
     revision: m.revision,
     viewGeneration: m.viewGeneration,
@@ -616,6 +624,7 @@ export function useHostSync(
   }, [postMessage]);
 
   const hostInstanceIdRef = useRef('');
+  const rendererIdentityRef = useRef<HostMessageContext['rendererIdentityRef']['current']>(null);
   // Last applied snapshot revision. Revisions are 1-based on the
   // host (globalRevision starts at 0, buildStateEnvelope does +1), so 0 means
   // "no snapshot applied yet" — the first envelope always passes the guard.
@@ -736,6 +745,7 @@ export function useHostSync(
         hydrateViewState,
         resetPerSessionState,
         hostInstanceIdRef,
+        rendererIdentityRef,
         viewGenerationRef,
         lastRevisionRef,
         activeSessionPathRef,
