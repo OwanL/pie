@@ -53,6 +53,7 @@ async function publishCreatedSession(
   deps: BackendRequestHandlerDeps,
   sessionPath: string,
   params: { selectionToken?: string; operationId?: string; operationAttempt?: number },
+  publicRequestId: string,
 ): Promise<{ sessionPath: string }> {
   const viewedRevision = deps.captureViewedSessionRevision?.();
   if (deps.setViewedSessionPathIfCurrent && viewedRevision !== undefined) {
@@ -67,6 +68,8 @@ async function publishCreatedSession(
     undefined,
     params.operationId,
     params.operationAttempt,
+    undefined,
+    publicRequestId,
   );
   deps.emit('session.opened', payload);
   void deps.emitSessionListChanged();
@@ -88,8 +91,9 @@ function createColdSession(deps: BackendRequestHandlerDeps, cwd?: string): { ses
 async function duplicateColdSession(
   deps: BackendRequestHandlerDeps,
   sourcePath: string,
+  publicRequestId: string,
 ): Promise<{ sessionPath: string }> {
-  if (deps.duplicateColdSession) return await deps.duplicateColdSession(sourcePath);
+  if (deps.duplicateColdSession) return await deps.duplicateColdSession(sourcePath, publicRequestId);
   const sourceCwd = deps.sdk.SessionManager.open(sourcePath).getCwd() || deps.startupCwd;
   return {
     sessionPath: sessionManagerPath(deps.sdk.SessionManager.forkFrom(sourcePath, sourceCwd, deps.sessionDir)),
@@ -118,10 +122,10 @@ async function handleSessionCreate(
         // The server callback installs the process-local manager handle before
         // returning. Only then may the ledger record the durable commit.
         registerDurablePath(created.sessionPath);
-        return await publishCreatedSession(deps, created.sessionPath, params);
+        return await publishCreatedSession(deps, created.sessionPath, params, request.id);
       },
       resume: async (durablePath) => {
-        return await publishCreatedSession(deps, durablePath, params);
+        return await publishCreatedSession(deps, durablePath, params, request.id);
       },
       republish: async (sessionPath) => {
         // Best-effort: the durable result is committed; a lost first
@@ -133,6 +137,8 @@ async function handleSessionCreate(
           undefined,
           params.operationId,
           params.operationAttempt,
+          undefined,
+          request.id,
         );
         deps.emit('session.opened', payload);
       },
@@ -140,7 +146,7 @@ async function handleSessionCreate(
     return { ok: true, sessionPath: result.sessionPath };
   }
   const created = createColdSession(deps, params.cwd);
-  const result = await publishCreatedSession(deps, created.sessionPath, params);
+  const result = await publishCreatedSession(deps, created.sessionPath, params, request.id);
   return { ok: true, sessionPath: result.sessionPath };
 }
 
@@ -212,12 +218,12 @@ async function handleSessionDuplicate(
       operationId: params.operationId,
       intentFingerprint: createOperationIntentFingerprint('session.duplicate', params.sessionPath),
       execute: async (registerDurablePath) => {
-        const duplicate = await duplicateColdSession(deps, params.sessionPath);
+        const duplicate = await duplicateColdSession(deps, params.sessionPath, request.id);
         registerDurablePath(duplicate.sessionPath);
-        return await publishCreatedSession(deps, duplicate.sessionPath, params);
+        return await publishCreatedSession(deps, duplicate.sessionPath, params, request.id);
       },
       resume: async (durablePath) => {
-        return await publishCreatedSession(deps, durablePath, params);
+        return await publishCreatedSession(deps, durablePath, params, request.id);
       },
       republish: async (sessionPath) => {
         // Best-effort: the durable result is committed; a lost first
@@ -229,14 +235,16 @@ async function handleSessionDuplicate(
           undefined,
           params.operationId,
           params.operationAttempt,
+          undefined,
+          request.id,
         );
         deps.emit('session.opened', payload);
       },
     });
     return { ok: true, sessionPath: result.sessionPath };
   }
-  const duplicate = await duplicateColdSession(deps, params.sessionPath);
-  const result = await publishCreatedSession(deps, duplicate.sessionPath, params);
+  const duplicate = await duplicateColdSession(deps, params.sessionPath, request.id);
+  const result = await publishCreatedSession(deps, duplicate.sessionPath, params, request.id);
   return { ok: true, sessionPath: result.sessionPath };
 }
 

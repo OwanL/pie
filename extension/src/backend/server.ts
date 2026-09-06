@@ -298,6 +298,11 @@ export class BackendServer {
   /** Cold destructive mutations reserve their path before the first await so
    * promotion cannot install a writer while truncate/forget owns the file. */
   private readonly pendingColdSessionMutations = new Map<string, Promise<unknown>>();
+  /** Distinct public duplicate operations against one source execute in receipt
+   * order. A hot duplicate rekeys its worker to the first destination; only
+   * after that transfer settles may the next request reselect the original
+   * source as cold and create its own destination. */
+  private readonly pendingSessionDuplicates = new Map<string, Promise<unknown>>();
   /** Non-serialized generation stamp checked synchronously at correlated stdout
    * publication, after the request handler's final await has unwound. */
   private readonly browseResponseOwners = new WeakMap<object, {
@@ -365,6 +370,9 @@ export class BackendServer {
   /** Internal public-request identities used only when a stamped cold
    * `session.opened` must be replayed through the worker that won promotion. */
   private coldPublicationRefreshSequence = 0;
+  /** Correlation identity for coordinator-originated hot snapshot commands
+   * that are not part of a public request. */
+  private workerSnapshotRequestSequence = 0;
   /** Highest coordinator-owned registry revision published to the legacy
    * process env mirror. Broadcast acknowledgements can settle out of order,
    * so completion order must never be allowed to roll this mirror back. */
@@ -1459,17 +1467,24 @@ export class BackendServer {
     operationAttempt?: number,
     systemPromptDisabledEntries?: readonly string[],
     includeInitialContextEstimate = true,
+    publicRequestId?: string,
   ): Promise<SessionOpenedPayload> {
     return await timed('buildSessionOpenedPayload', async () => {
       const router = this.workerRuntimeRouter;
       if (router?.hasHotOwner(sessionPath)) {
-        return await router.buildHotSessionOpenedPayload(sessionPath, {
+        const snapshotRequestId = publicRequestId
+          ?? `coordinator-session-snapshot:${++this.workerSnapshotRequestSequence}`;
+        return await router.buildHotSessionOpenedPayload(
           sessionPath,
-          ...(selectionToken !== undefined ? { selectionToken } : {}),
-          ...(transcript !== undefined ? { transcript } : {}),
-          ...(operationId !== undefined ? { operationId } : {}),
-          ...(operationAttempt !== undefined ? { operationAttempt } : {}),
-        });
+          {
+            sessionPath,
+            ...(selectionToken !== undefined ? { selectionToken } : {}),
+            ...(transcript !== undefined ? { transcript } : {}),
+            ...(operationId !== undefined ? { operationId } : {}),
+            ...(operationAttempt !== undefined ? { operationAttempt } : {}),
+          },
+          snapshotRequestId,
+        );
       }
       const catalog = await loadConfiguredModels(this.agentDir, this.modelRegistry);
       const availableModels = catalog.models;
@@ -1602,13 +1617,35 @@ export class BackendServer {
    * ColdSessionStore captures its stamp; that stale capture is a re-selection
    * signal, not a failed duplicate. Once a cold stamp is captured, its final
    * fork commit is synchronous and cannot overlap a new promotion. */
-  private async duplicateSessionFromCurrentOwner(sessionPath: string): Promise<{ sessionPath: string }> {
+  private async duplicateSessionFromCurrentOwner(
+    sessionPath: string,
+    publicRequestId: string,
+  ): Promise<{ sessionPath: string }> {
+    const key = this.coldManagerKey(sessionPath);
+    const predecessor = this.pendingSessionDuplicates.get(key) ?? Promise.resolve();
+    const pending = predecessor.catch(() => undefined).then(async () => (
+      await this.executeDuplicateSessionFromCurrentOwner(sessionPath, publicRequestId)
+    ));
+    this.pendingSessionDuplicates.set(key, pending);
+    try {
+      return await pending;
+    } finally {
+      if (this.pendingSessionDuplicates.get(key) === pending) {
+        this.pendingSessionDuplicates.delete(key);
+      }
+    }
+  }
+
+  private async executeDuplicateSessionFromCurrentOwner(
+    sessionPath: string,
+    publicRequestId: string,
+  ): Promise<{ sessionPath: string }> {
     const store = this.initializeColdSessionStore();
     for (let attempt = 0; attempt < 4; attempt += 1) {
       await this.waitForSessionBrowseAuthority(sessionPath);
       const router = this.workerRuntimeRouter;
       if (router?.hasHotOwner(sessionPath)) {
-        return await router.duplicateHotSession(sessionPath, { sessionPath });
+        return await router.duplicateHotSession(sessionPath, { sessionPath }, publicRequestId);
       }
       let handle: ColdSessionManagerHandle;
       try {
@@ -2497,8 +2534,8 @@ export class BackendServer {
         this.retainColdSessionManager(handle, 'new');
         return { sessionPath: handle.sessionPath };
       },
-      duplicateColdSession: async (sessionPath) => {
-        return await this.duplicateSessionFromCurrentOwner(sessionPath);
+      duplicateColdSession: async (sessionPath, publicRequestId) => {
+        return await this.duplicateSessionFromCurrentOwner(sessionPath, publicRequestId);
       },
       truncateColdSessionAfter: async (sessionPath, entryId) => {
         const store = this.initializeColdSessionStore();
@@ -2559,7 +2596,7 @@ export class BackendServer {
         this.setViewedSessionPathIfCurrent(sessionPath, revision)
       ),
       setViewedSessionPath: (sessionPath) => this.setViewedSessionPath(sessionPath),
-      buildSessionOpenedPayload: (sessionPath, selectionToken, transcript, transport, operationId, operationAttempt, systemPromptDisabledEntries) => (
+      buildSessionOpenedPayload: (sessionPath, selectionToken, transcript, transport, operationId, operationAttempt, systemPromptDisabledEntries, publicRequestId) => (
         this.buildSessionOpenedPayload(
           sessionPath,
           selectionToken,
@@ -2568,6 +2605,8 @@ export class BackendServer {
           operationId,
           operationAttempt,
           systemPromptDisabledEntries,
+          true,
+          publicRequestId,
         )
       ),
       createOperationLedger: this.createOperationLedger,

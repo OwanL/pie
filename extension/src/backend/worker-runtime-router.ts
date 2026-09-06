@@ -387,13 +387,14 @@ export class WorkerRuntimeRouter {
   async duplicateHotSession(
     sourceSessionPath: string,
     params: WorkerJsonObject,
+    publicRequestId: string,
   ): Promise<{ sessionPath: string }> {
     const hot = this.requireHot(sourceSessionPath);
     this.assertCurrentOwner(hot, sourceSessionPath);
     const response = await hot.worker.client.requestFrame!({
       kind: 'runtime.command',
       operation: 'session.duplicateHot',
-      payload: { params },
+      payload: asWorkerJsonObject({ params, publicRequestId }),
     }, 'response');
     if (!response.ok) throw new BackendError(response.error.code, response.error.message);
     if (response.result.kind !== 'runtime.command') {
@@ -412,13 +413,14 @@ export class WorkerRuntimeRouter {
   async buildHotSessionOpenedPayload(
     sessionPath: string,
     params: WorkerJsonObject,
+    publicRequestId: string,
   ): Promise<SessionOpenedPayload> {
     const hot = this.requireHot(sessionPath);
     this.assertCurrentOwner(hot, sessionPath);
     const response = await hot.worker.client.requestFrame!({
       kind: 'runtime.command',
       operation: 'session.snapshot',
-      payload: { params },
+      payload: asWorkerJsonObject({ params, publicRequestId }),
     }, 'response');
     if (!response.ok) throw new BackendError(response.error.code, response.error.message);
     if (response.result.kind !== 'runtime.command'

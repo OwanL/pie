@@ -40,11 +40,13 @@ test('worker router promotion is single-flight and runtime.ready precedes the in
         };
       }
       if (body.operation === 'session.duplicateHot') {
+        assert.equal(body.payload.publicRequestId, 'duplicate-public-request');
         return { kind: 'response', requestId: 'x', ok: true, result: {
           kind: 'runtime.command', payload: { sessionPath: `${sessionPath}.copy` },
         } };
       }
       if (body.operation === 'session.snapshot') {
+        assert.equal(body.payload.publicRequestId, 'snapshot-public-request');
         return { kind: 'response', requestId: 'x', ok: true, result: {
           kind: 'runtime.command', payload: { ...opened(sessionPath), runtimeReady: true },
         } };
@@ -97,11 +99,11 @@ test('worker router promotion is single-flight and runtime.ready precedes the in
   assert.ok(order.slice(promoteIndex + 1).every((kind) => kind === 'runtime.command'));
 
   assert.deepEqual(
-    await router.duplicateHotSession(sessionPath, { sessionPath }),
+    await router.duplicateHotSession(sessionPath, { sessionPath }, 'duplicate-public-request'),
     { sessionPath: `${sessionPath}.copy` },
   );
   assert.deepEqual(
-    await router.buildHotSessionOpenedPayload(sessionPath, { sessionPath }),
+    await router.buildHotSessionOpenedPayload(sessionPath, { sessionPath }, 'snapshot-public-request'),
     { ...opened(sessionPath), runtimeReady: true },
   );
 

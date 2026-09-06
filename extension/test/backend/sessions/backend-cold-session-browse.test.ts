@@ -505,6 +505,7 @@ test('duplicate of a hot session forks through its owner and retains coordinator
     let duplicateHot = false;
     let duplicateCalls = 0;
     let snapshotCalls = 0;
+    const privateRequestIds: string[] = [];
     const opened: any[] = [];
     h.server.emit = (event: string, payload: unknown) => {
       if (event === 'session.opened') opened.push(payload);
@@ -525,16 +526,26 @@ test('duplicate of a hot session forks through its owner and retains coordinator
         (sessionPath === h.sessionPath && sourceHot)
         || (sessionPath === duplicatePath && duplicateHot)
       ),
-      duplicateHotSession: async (sourceSessionPath: string) => {
+      duplicateHotSession: async (
+        sourceSessionPath: string,
+        _params: Record<string, unknown>,
+        publicRequestId: string,
+      ) => {
         assert.equal(sourceSessionPath, h.sessionPath);
         duplicateCalls += 1;
+        privateRequestIds.push(`duplicate:${publicRequestId}`);
         sourceHot = false;
         duplicateHot = true;
         return { sessionPath: duplicatePath };
       },
-      buildHotSessionOpenedPayload: async (sessionPath: string, params: Record<string, unknown>) => {
+      buildHotSessionOpenedPayload: async (
+        sessionPath: string,
+        params: Record<string, unknown>,
+        publicRequestId: string,
+      ) => {
         assert.equal(sessionPath, duplicatePath);
         snapshotCalls += 1;
+        privateRequestIds.push(`snapshot:${publicRequestId}`);
         return {
           session: {
             path: duplicatePath,
@@ -581,6 +592,10 @@ test('duplicate of a hot session forks through its owner and retains coordinator
     assert.equal(opened[0].session.path, duplicatePath);
     assert.equal(opened[0].selectionToken, 'hot-duplicate-selection');
     assert.equal(opened[0].operationId, 'hot-duplicate-operation');
+    assert.deepEqual(privateRequestIds, [
+      'duplicate:duplicate-hot',
+      'snapshot:duplicate-hot',
+    ]);
 
     assert.deepEqual(await h.server.handleRequest({
       ...request,
@@ -590,6 +605,117 @@ test('duplicate of a hot session forks through its owner and retains coordinator
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(duplicateCalls, 1, 'same-operation retry reuses the coordinator ledger result');
     assert.equal(snapshotCalls, 2, 'retry republishes the existing hot destination snapshot');
+    assert.equal(privateRequestIds.at(-1), 'snapshot:duplicate-hot-retry');
+  } finally {
+    await fs.rm(h.dir, { recursive: true, force: true });
+  }
+});
+
+test('distinct concurrent duplicate requests serialize at a hot source and create two durable copies', async () => {
+  const h = await makeColdServer();
+  try {
+    const hotDuplicatePath = path.join(h.dir, 'concurrent-hot-duplicate.jsonl');
+    const coldDuplicatePath = path.join(h.dir, 'concurrent-cold-duplicate.jsonl');
+    const sourceBefore = await fs.readFile(h.sessionPath, 'utf8');
+    const originalOpen = h.server.sdk.SessionManager.open.bind(h.server.sdk.SessionManager);
+    let coldDuplicateCalls = 0;
+    h.server.sdk.SessionManager.forkFrom = (sourcePath: string) => {
+      assert.equal(sourcePath, h.sessionPath);
+      coldDuplicateCalls += 1;
+      fsSync.copyFileSync(sourcePath, coldDuplicatePath);
+      return originalOpen(coldDuplicatePath);
+    };
+
+    let sourceHot = true;
+    let hotDuplicateReady = false;
+    let hotDuplicateCalls = 0;
+    let releaseHotDuplicate!: () => void;
+    const hotDuplicateRelease = new Promise<void>((resolve) => { releaseHotDuplicate = resolve; });
+    let markHotDuplicateEntered!: () => void;
+    const hotDuplicateEntered = new Promise<void>((resolve) => { markHotDuplicateEntered = resolve; });
+    const opened: any[] = [];
+    h.server.emit = (event: string, payload: unknown) => {
+      if (event === 'session.opened') opened.push(payload);
+    };
+    h.server.emitSessionListChanged = async () => undefined;
+    h.server.workerRuntimeRouter = {
+      getRoute: (sessionPath: string) => ({
+        state: (sessionPath === h.sessionPath && sourceHot)
+          || (sessionPath === hotDuplicatePath && hotDuplicateReady)
+          ? 'hot'
+          : 'cold',
+        rootSessionPath: sessionPath,
+      }),
+      hasHotOwner: (sessionPath: string) => (
+        (sessionPath === h.sessionPath && sourceHot)
+        || (sessionPath === hotDuplicatePath && hotDuplicateReady)
+      ),
+      duplicateHotSession: async (sourceSessionPath: string) => {
+        assert.equal(sourceSessionPath, h.sessionPath);
+        hotDuplicateCalls += 1;
+        markHotDuplicateEntered();
+        await hotDuplicateRelease;
+        fsSync.copyFileSync(sourceSessionPath, hotDuplicatePath);
+        sourceHot = false;
+        hotDuplicateReady = true;
+        return { sessionPath: hotDuplicatePath };
+      },
+      buildHotSessionOpenedPayload: async (
+        sessionPath: string,
+        params: Record<string, unknown>,
+      ) => ({
+        session: {
+          path: sessionPath,
+          name: 'Session (copy)',
+          cwd: h.dir,
+          modifiedAt: '2026-09-06T05:00:06.000Z',
+          messageCount: 1,
+        },
+        transcript: [{ id: 'user-1', role: 'user', content: 'hello' }],
+        transcriptWindow: {
+          totalCount: 1, loadedStart: 0, loadedEnd: 1,
+          hasOlder: false, hasNewer: false, isPartial: false, hasUserMessages: true,
+        },
+        busy: false,
+        runtimeReady: true,
+        selectionToken: params.selectionToken,
+        operationId: params.operationId,
+        operationAttempt: params.operationAttempt,
+      }),
+    };
+
+    const duplicateRequest = (suffix: string) => ({
+      id: `duplicate-concurrent-request-${suffix}`,
+      method: 'session.duplicate',
+      params: {
+        sessionPath: h.sessionPath,
+        selectionToken: `duplicate-concurrent-selection-${suffix}`,
+        operationId: `duplicate-concurrent-operation-${suffix}`,
+        operationAttempt: 1,
+      },
+    });
+    const first = h.server.handleRequest(duplicateRequest('a'));
+    await hotDuplicateEntered;
+    const second = h.server.handleRequest(duplicateRequest('b'));
+    await new Promise((resolve) => setImmediate(resolve));
+    const hotCallsBeforeRelease = hotDuplicateCalls;
+    releaseHotDuplicate();
+    const results = await Promise.all([first, second]);
+
+    assert.equal(hotCallsBeforeRelease, 1, 'the second request waits for the hot-source transfer');
+    assert.equal(hotDuplicateCalls, 1, 'only the first request may execute through the old hot owner');
+    assert.equal(coldDuplicateCalls, 1, 'the second request reselects the released source as cold');
+    assert.deepEqual(new Set(results.map((result: { sessionPath: string }) => result.sessionPath)), new Set([
+      hotDuplicatePath,
+      coldDuplicatePath,
+    ]));
+    assert.equal(await fs.readFile(h.sessionPath, 'utf8'), sourceBefore, 'the source remains unchanged');
+    assert.equal(await fs.readFile(hotDuplicatePath, 'utf8'), sourceBefore, 'the hot copy is complete');
+    assert.equal(await fs.readFile(coldDuplicatePath, 'utf8'), sourceBefore, 'the cold copy is complete');
+    assert.deepEqual(new Set(opened.map((payload) => payload.session.path)), new Set([
+      hotDuplicatePath,
+      coldDuplicatePath,
+    ]));
   } finally {
     await fs.rm(h.dir, { recursive: true, force: true });
   }
@@ -634,7 +760,7 @@ test('duplicate reselects a hot owner when promotion starts immediately before c
     };
 
     assert.deepEqual(
-      await h.server.duplicateSessionFromCurrentOwner(h.sessionPath),
+      await h.server.duplicateSessionFromCurrentOwner(h.sessionPath, 'raced-hot-duplicate-request'),
       { sessionPath: duplicatePath },
     );
     assert.equal(coldAttempts, 1, 'the first cold capture loses the promotion race');
