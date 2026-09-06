@@ -8,9 +8,11 @@ const AUTO_DISABLED_REASON = 'Auto-discovered from GitHub Copilot; not yet vette
 type SourceModel = Record<string, unknown> & { id: string };
 type SourceProvider = { models?: SourceModel[] } & Record<string, unknown>;
 type ModelRef = string | { provider: string; id: string };
+type HistoricalModel = Record<string, unknown> & { provider: string; id: string };
 type SourceCatalog = {
   profileOrder: ModelRef[];
   providers: Record<string, SourceProvider>;
+  historicalModels?: HistoricalModel[];
 };
 
 type ModelIdentity = { provider: string; id: string };
@@ -140,6 +142,11 @@ export function reconcileCatalogText(
   const oldById = new Map(oldModels.map((model) => [model.id, model]));
   const remoteIds = new Set(remoteModels.map((model) => model.id));
   const removed = oldModels.filter((model) => !remoteIds.has(model.id)).map((model) => model.id);
+  const reactivatedHistoricalIndexes = Array.isArray(source.historicalModels)
+    ? source.historicalModels.flatMap((model, index) => (
+      model.provider === PROVIDER && remoteIds.has(model.id) ? [index] : []
+    ))
+    : [];
   const added: string[] = [];
 
   // Resolve profile references before changing the provider catalog. This
@@ -186,6 +193,7 @@ export function reconcileCatalogText(
   source.profileOrder = nextProfileOrder;
 
   const changed = added.length > 0 || removed.length > 0 ||
+    reactivatedHistoricalIndexes.length > 0 ||
     nextModels.some((model, index) => JSON.stringify(model) !== JSON.stringify(oldModels[index])) ||
     JSON.stringify(nextProfileOrder) !== JSON.stringify(originalProfileOrder);
   if (!changed) {
@@ -194,6 +202,13 @@ export function reconcileCatalogText(
 
   document.setIn(['providers', PROVIDER, 'models'], nextModels);
   document.set('profileOrder', nextProfileOrder);
+  // A retired identity can become account-visible again. Remove only the
+  // matching provider-qualified historical entry before codegen validates the
+  // candidate catalog. Deleting AST sequence items in descending order keeps
+  // unrelated pricing/attribution metadata (and its YAML comments) intact.
+  for (let index = reactivatedHistoricalIndexes.length - 1; index >= 0; index -= 1) {
+    document.deleteIn(['historicalModels', reactivatedHistoricalIndexes[index]]);
+  }
   return {
     text: document.toString({ lineWidth: 0 }),
     changed: true,

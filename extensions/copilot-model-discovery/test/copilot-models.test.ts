@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { parse } from '../../../extension/node_modules/yaml/dist/index.js';
 
@@ -15,6 +16,17 @@ import {
   parseCopilotModelsResponse,
   toDiscoveredCopilotModel,
 } from '../src/copilot-models.js';
+
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
+
+interface SyncModule {
+  loadSource: (root?: string) => unknown;
+}
+
+async function loadSyncModule(): Promise<SyncModule> {
+  const script = path.join(repoRoot, 'scripts', 'sync-models.mjs');
+  return (await import(pathToFileURL(script).href)) as SyncModule;
+}
 
 const gpt56 = {
   id: 'gpt-5.6-terra',
@@ -385,6 +397,101 @@ providers:
   assert.match(result.text, /# keep provider comment/);
 
   const idempotent = reconcileCatalogText(result.text, [terra, novel, shared]);
+  assert.equal(idempotent.changed, false);
+  assert.equal(idempotent.text, result.text);
+});
+
+test('reactivating a retired Copilot model removes only its matching historical identity', async () => {
+  const reactivated = {
+    ...toDiscoveredCopilotModel(gpt56)!,
+    id: 'claude-haiku-4.5',
+    name: 'Claude Haiku 4.5',
+    cost: {
+      input: 1.25,
+      output: 6.25,
+      cacheRead: 0.125,
+      cacheWrite: 1.5625,
+    },
+  };
+  const input = `defaults: { model: existing-model, provider: custom, thinkingLevel: minimal }
+retry:
+  enabled: true
+  maxRetries: 1
+  baseDelayMs: 1
+  provider: { maxRetries: 1, maxRetryDelayMs: 1 }
+pruning: { model: existing-model, provider: custom, thinkingLevel: minimal }
+sessionTitles: { enabled: false, model: existing-model, provider: custom, thinkingLevel: minimal, timeoutSec: 15 }
+profileOrder:
+  - existing-model
+providers:
+  github-copilot:
+    apiKey: copilot
+    models: []
+  custom:
+    apiKey: custom
+    models:
+      - id: existing-model
+        name: Existing
+        pricing: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }
+        eligible: true
+        thinking: [minimal]
+        disabledReason: null
+historicalModels:
+  - provider: github-copilot
+    id: claude-haiku-4.5
+    name: "Copilot: Claude Haiku 4.5"
+    family: claude-haiku
+    pricing: { input: 1, output: 5, cacheRead: 0.1, cacheWrite: 1.25 }
+  - provider: custom
+    id: claude-haiku-4.5
+    name: "Custom: Claude Haiku 4.5"
+    pricing: { input: 9, output: 9, cacheRead: 0, cacheWrite: 0 }
+  - provider: github-copilot
+    id: still-retired
+    name: "Copilot: Still Retired"
+    pricing: { input: 2, output: 8, cacheRead: 0.2, cacheWrite: 0 }
+`;
+
+  const result = reconcileCatalogText(input, [reactivated]);
+  const source = parse(result.text) as {
+    profileOrder: Array<string | { provider: string; id: string }>;
+    providers: Record<string, { models: Array<{ id: string; pricing: Record<string, number> }> }>;
+    historicalModels: Array<{ provider: string; id: string; pricing: Record<string, number> }>;
+  };
+
+  assert.equal(result.changed, true);
+  assert.deepEqual(result.added, ['claude-haiku-4.5']);
+  assert.deepEqual(source.providers['github-copilot'].models.map((model) => model.id), ['claude-haiku-4.5']);
+  assert.deepEqual(source.providers['github-copilot'].models[0].pricing, reactivated.cost);
+  assert.deepEqual(
+    source.historicalModels.map(({ provider, id }) => ({ provider, id })),
+    [
+      { provider: 'custom', id: 'claude-haiku-4.5' },
+      { provider: 'github-copilot', id: 'still-retired' },
+    ],
+    'only the reactivated provider-qualified identity leaves historicalModels',
+  );
+  assert.deepEqual(source.historicalModels[0].pricing, {
+    input: 9,
+    output: 9,
+    cacheRead: 0,
+    cacheWrite: 0,
+  }, 'unrelated historical pricing remains intact');
+
+  const directory = await mkdtemp(path.join(tmpdir(), 'pie-copilot-reactivation-'));
+  try {
+    await copyFile(path.join(repoRoot, 'models.schema.json'), path.join(directory, 'models.schema.json'));
+    await writeFile(path.join(directory, 'models.yaml'), result.text, 'utf8');
+    const sync = await loadSyncModule();
+    assert.doesNotThrow(
+      () => sync.loadSource(directory),
+      'the reconciled source must satisfy sync-models schema and identity invariants',
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+
+  const idempotent = reconcileCatalogText(result.text, [reactivated]);
   assert.equal(idempotent.changed, false);
   assert.equal(idempotent.text, result.text);
 });

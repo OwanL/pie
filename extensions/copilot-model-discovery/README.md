@@ -29,6 +29,8 @@ Existing subagent eligibility decisions are retained for models that remain avai
 
 Models owned by other providers are never changed or removed. Because model identity is `(provider, id)`, the same ID may exist under Copilot and another provider; reconciliation automatically provider-qualifies the corresponding `profileOrder` references.
 
+If Copilot makes a retired model available again, reconciliation promotes that exact `(github-copilot, id)` identity back into the active catalog and removes its historical entry in the same locked transaction. Unrelated historical identities and their pricing metadata remain untouched, while the active entry receives current endpoint metadata and pricing.
+
 ## Failure handling
 
 Network, authentication, parsing, validation, or generation failures leave the previous source and generated catalog in place and do not update the TTL marker, so the next session retries. An empty selectable-model response is treated as a failed refresh rather than erasing the Copilot catalog. Source and generated surfaces are never written when the catalog is unchanged.
