@@ -292,6 +292,97 @@ test('a valid live owner can commit more than 512 tool leaves', () => {
   });
 });
 
+test('a valid transcript above the legacy 256-row bound commits from real evidence', () => {
+  const historical = Array.from({ length: 300 }, (_, index) =>
+    assistantTextMessage(`historical-${index}`, `row ${index}`));
+  const tail = [
+    assistantTextMessage('tail-a', 'one'),
+    assistantTextMessage('tail-b', 'two'),
+    assistantTextMessage('tail-c', 'three'),
+  ];
+  const transcript = [...historical, ...tail];
+  const window = {
+    ...transcriptWindow,
+    totalCount: transcript.length,
+    loadedEnd: transcript.length,
+    hasUserMessages: true,
+  };
+  const largeTarget: TranscriptCommitTarget = {
+    ...target,
+    state: { ...target.state, transcript, transcriptWindow: window },
+  };
+  const largeModel = {
+    renderedTranscript: transcript,
+    window,
+    mountedVirtualRowIndexes: [300, 301, 302],
+    rowIndexByMessageId: new Map(transcript.map((item, index) => [item.id, index])),
+    intentionallyHiddenMessageIds: new Set<string>(),
+  };
+
+  // Tail rows mounted with fresh leaves: the common scrolled-to-bottom seam.
+  assert.deepEqual(decideTranscriptCommit(largeTarget, textLeaves(tail), largeModel), {
+    matches: true,
+    evidence: 'displayed',
+  });
+  // Tail scrolled out of the mounted virtual range: offscreen proof must still
+  // work above the legacy bound instead of reporting a permanent mismatch.
+  assert.deepEqual(
+    decideTranscriptCommit(largeTarget, new Map<string, CommitLeaf>(), {
+      ...largeModel,
+      mountedVirtualRowIndexes: [0, 1],
+    }),
+    { matches: true, evidence: 'offscreen' },
+  );
+});
+
+test('transcripts above 256 rows still reject real structural and leaf mismatches', () => {
+  const historical = Array.from({ length: 300 }, (_, index) =>
+    assistantTextMessage(`historical-${index}`, `row ${index}`));
+  const tail = [
+    assistantTextMessage('tail-a', 'one'),
+    assistantTextMessage('tail-b', 'two'),
+    assistantTextMessage('tail-c', 'three'),
+  ];
+  const transcript = [...historical, ...tail];
+  const window = {
+    ...transcriptWindow,
+    totalCount: transcript.length,
+    loadedEnd: transcript.length,
+    hasUserMessages: true,
+  };
+  const largeTarget: TranscriptCommitTarget = {
+    ...target,
+    state: { ...target.state, transcript, transcriptWindow: window },
+  };
+  const largeModel = {
+    renderedTranscript: transcript,
+    window,
+    mountedVirtualRowIndexes: [300, 301, 302],
+    rowIndexByMessageId: new Map(transcript.map((item, index) => [item.id, index])),
+    intentionallyHiddenMessageIds: new Set<string>(),
+  };
+
+  // Structural drift: same length, one historical row replaced (stale overlay).
+  const drifted = transcript.slice();
+  drifted[150] = { ...drifted[150]!, id: 'replaced-row' };
+  assert.equal(
+    decideTranscriptCommit(largeTarget, textLeaves(tail), { ...largeModel, renderedTranscript: drifted }).matches,
+    false,
+    'row-count parity must not waive the row-by-row structure proof',
+  );
+
+  // Stale signed-tail text leaf at the larger size.
+  const staleTail = textLeaves(tail);
+  staleTail.set('text:tail-b:0', {
+    kind: 'text', messageId: 'tail-b', partIndex: 0, text: 'stale tail text',
+  });
+  assert.equal(
+    decideTranscriptCommit(largeTarget, staleTail, largeModel).matches,
+    false,
+    'a stale tail leaf cannot acknowledge the snapshot at any transcript size',
+  );
+});
+
 test('collapsed reasoning acknowledges its visible summary, never the hidden source', () => {
   const source = 'A deliberately long reasoning source that has more than eighty visible characters and must not be acknowledged while collapsed.';
   const reasoningMessage: ChatMessage = {

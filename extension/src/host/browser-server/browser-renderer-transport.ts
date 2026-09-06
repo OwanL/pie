@@ -137,14 +137,23 @@ export class BrowserRendererTransport implements RendererTransport {
     try {
       frame = JSON.stringify(message);
     } catch {
+      // State posts are controller-managed, so preserve a deterministic JSON
+      // failure as a fixed, body-free classification. Imperatives retain the
+      // historical false result so their requeue path cannot be bypassed by a
+      // synchronous throw.
+      if (message.type === 'state') {
+        throw new TypeError('Browser renderer frame is not JSON-serializable.');
+      }
       return false;
     }
     const frameBytes = Buffer.byteLength(frame, 'utf8');
     const gate = evaluateSendGate(this.socket.bufferedAmount, frameBytes);
     if (!gate.ok) {
-      // Pre-send gate: drop/coalesce. The delivery controller marks the
-      // renderer dirty again, so a lagging browser receives the LATEST
-      // snapshot only — never a backlog queue.
+      if (gate.reason === 'combined-frame-over-limit' && message.type === 'state') {
+        throw new RangeError('Browser renderer frame exceeds the transport limit.');
+      }
+      // Socket backpressure is transient: drop/coalesce so the lagging browser
+      // receives the LATEST snapshot only — never a backlog queue.
       return false;
     }
     this.socket.send(frame);

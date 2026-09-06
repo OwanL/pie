@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   AUTO_SCROLL_BOTTOM_THRESHOLD_PX,
+  advanceSmoothScrollTop,
   captureScrollAnchor,
   distanceFromBottom,
   isNearBottom,
@@ -114,6 +115,28 @@ test('resolveAutoFollowState preserves follow mode while scrolling downward towa
   });
 
   assert.equal(nextAutoFollow, true);
+});
+
+test('advanceSmoothScrollTop bounds a burst to one gentle frame', () => {
+  assert.equal(advanceSmoothScrollTop(800, 1_400), 848);
+  assert.ok(advanceSmoothScrollTop(1_400, 800) < 1_400);
+});
+
+test('advanceSmoothScrollTop does not accumulate an ever-growing streaming backlog', () => {
+  let current = 0;
+  let target = 0;
+  for (let snapshot = 0; snapshot < 100; snapshot += 1) {
+    target += 600;
+    for (let frame = 0; frame < 9; frame += 1) current = advanceSmoothScrollTop(current, target);
+  }
+  assert.ok(target - current < 1_000, `follow lag grew to ${target - current}px`);
+  for (let frame = 0; frame < 120; frame += 1) current = advanceSmoothScrollTop(current, target);
+  assert.equal(current, target, 'the loop settles after generation stops');
+});
+
+test('advanceSmoothScrollTop snaps only the final sub-pixel remainder', () => {
+  assert.equal(advanceSmoothScrollTop(999.5, 1_000), 1_000);
+  assert.equal(advanceSmoothScrollTop(1_000, 1_000), 1_000);
 });
 
 test('captureScrollAnchor returns the first visible item and its offset', () => {

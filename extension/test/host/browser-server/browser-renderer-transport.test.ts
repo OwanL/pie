@@ -158,6 +158,41 @@ test('post(): gated until the hello is sent; dropped when the socket is not open
   socket.bufferedAmount = 0;
 });
 
+test('post(): JSON serialization failures surface as typed transport errors', () => {
+  const { transport, registration } = createHarness();
+  transport.start(registration.registration);
+  const message = {
+    type: 'state',
+    protocolVersion: WEBVIEW_PROTOCOL_VERSION,
+    buildId: PIE_BUILD_ID,
+    hostInstanceId: 'host-1',
+    rendererId: 'renderer-1',
+    rendererGeneration: 1,
+    viewGeneration: 1,
+    revision: 1,
+    expectedTranscriptIdentity: 'x',
+    snapshotBytes: 0,
+    state: {
+      transcript: [{
+        id: 'assistant-1', role: 'assistant', status: 'streaming', markdown: '', createdAt: '',
+        parts: [{ kind: 'toolCall', toolCall: {
+          id: 'subagent-1', name: 'subagent', status: 'running', input: {},
+          result: { children: [{ messages: [], usage: { input: 1n } }] },
+        } }],
+      }],
+    },
+  } as unknown as HostToWebviewMessage;
+
+  assert.throws(
+    () => transport.post(message),
+    (error: unknown) => error instanceof TypeError
+      && error.message === 'Browser renderer frame is not JSON-serializable.',
+  );
+  assert.equal(transport.post({
+    type: 'sendRejected', sessionPath: '/session', text: 'retry', inputs: [{ bytes: 1n }],
+  } as unknown as HostToWebviewMessage), false, 'imperatives retain their recoverable false-post path');
+});
+
 test('ingress: valid messages route; lifecycle messages update the session directly', () => {
   const { socket, transport, registration, routed } = createHarness();
   transport.start(registration.registration);

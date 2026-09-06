@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { Socket } from 'node:net';
 import type { Readable, Writable } from 'node:stream';
 
+import { redactSensitiveText } from '../shared/sensitive-redaction';
 import {
   attachBoundedWorkerIpcReader,
   BoundedWorkerIpcWriter,
@@ -40,6 +41,8 @@ export interface WorkerServerIdentity {
 export interface WorkerServerProcess {
   pid: number;
   exit(code?: number): never;
+  /** Optional test/embedding seam; production uses process.stderr. */
+  stderr?: { write(chunk: string): unknown };
 }
 
 export interface WorkerServerTransport {
@@ -55,6 +58,8 @@ export interface WorkerServerHandlers {
   /** Test/embedding seam; production defaults to the immutable SDK patch validator. */
   validateBootstrap?: (frame: Extract<CoordinatorToWorkerFrame, { kind: 'bootstrap' }>) => void | Promise<void>;
 }
+
+const WORKER_CLOSE_DIAGNOSTIC_MAX_BYTES = 8 * 1024;
 
 interface PendingCoordinatorResponse {
   expectedKind: CoordinatorToWorkerFrame['kind'];
@@ -130,6 +135,8 @@ export class WorkerServer {
   private bootstrapped = false;
   private closing = false;
   private exitScheduled = false;
+  private closeFailureReason?: unknown;
+  private closeDiagnosticWritten = false;
   private inbound = Promise.resolve();
   private readonly pending = new Map<string, PendingCoordinatorResponse>();
   private readonly syncRevisions: Record<WorkerSyncDomain, number> = {
@@ -161,7 +168,7 @@ export class WorkerServer {
       sessionPath: identity.rootSessionPath,
     };
     const target: WorkerIpcWriteTarget = transport.writable;
-    this.writer = new BoundedWorkerIpcWriter(target, { onFatal: () => this.close(1) });
+    this.writer = new BoundedWorkerIpcWriter(target, { onFatal: (error) => this.close(1, error) });
   }
 
   start(): void {
@@ -177,10 +184,10 @@ export class WorkerServer {
         });
       },
       onFatal: (error) => this.failProtocol(error.message, 'PROTOCOL_ERROR'),
-      onEnd: () => this.close(1),
+      onEnd: () => this.close(1, new Error('Coordinator IPC read descriptor closed.')),
     });
-    this.transport.writable.once('error', () => this.close(1));
-    this.transport.writable.once('close', () => this.close(1));
+    this.transport.writable.once('error', (error) => this.close(1, error));
+    this.transport.writable.once('close', () => this.close(1, new Error('Worker IPC write descriptor closed.')));
   }
 
   /** Send a closed worker frame while the transport supplies exact identity and sequence fields. */
@@ -205,7 +212,7 @@ export class WorkerServer {
     if (body.kind === 'detail.terminal') this.lastDurableAppendId = body.durableRef.messageId;
     const result = this.writer.enqueue({ ...this.frameBase, ...body } as WorkerIpcFrameDraft, {
       onSettled: (settlement) => {
-        if (settlement.status === 'failed') this.close(1);
+        if (settlement.status === 'failed') this.close(1, settlement.error);
       },
     });
     return result.accepted;
@@ -451,24 +458,26 @@ export class WorkerServer {
     if (this.closing) return;
     this.closing = true;
     this.stopHeartbeat();
+    const failure = new Error(message || 'Worker protocol failed closed.');
+    this.closeFailureReason = failure;
     const accepted = this.send({
       ...this.frameBase,
       kind: 'fatal',
-      error: { code, phase, message: message || 'Worker protocol failed closed.' },
-    }, () => this.close(1));
+      error: { code, phase, message: failure.message },
+    }, () => this.close(1, failure));
     // A fatal frame can itself be rejected (for example when its diagnostic is
     // oversized). Heartbeats have already stopped, so close immediately rather
     // than leaving a coordinator-orphaned process alive forever.
-    if (!accepted) this.close(1);
+    if (!accepted) this.close(1, failure);
   }
 
   private send(draft: WorkerIpcFrameDraft, onSettled?: () => void): boolean {
     const result = this.writer.enqueue(draft, {
       onSettled: (settlement) => {
         if (settlement.status === 'sent') onSettled?.();
-        else if (settlement.status === 'failed') this.close(1);
+        else if (settlement.status === 'failed') this.close(1, settlement.error);
         else if (settlement.status === 'rejected') {
-          if (this.closing) this.close(1);
+          if (this.closing) this.close(1, new Error(`Worker IPC frame rejected (${settlement.reason}): ${settlement.detail}`));
           else {
             this.failProtocol(
               `Worker IPC frame rejected (${settlement.reason}): ${settlement.detail}`,
@@ -487,9 +496,33 @@ export class WorkerServer {
     return result.accepted;
   }
 
-  private close(code: number): void {
+  private writeCloseDiagnostic(reason: unknown): void {
+    if (this.closeDiagnosticWritten) return;
+    this.closeDiagnosticWritten = true;
+    const raw = reason instanceof Error
+      ? reason.stack ?? reason.message
+      : reason === undefined
+        ? 'Worker server closed with code 1 without a failure reason.'
+        : String(reason);
+    const redacted = redactSensitiveText(raw);
+    const bytes = Buffer.from(redacted, 'utf8');
+    const bounded = bytes.length > WORKER_CLOSE_DIAGNOSTIC_MAX_BYTES
+      ? `${bytes.subarray(0, WORKER_CLOSE_DIAGNOSTIC_MAX_BYTES - 1).toString('utf8')}…`
+      : redacted;
+    try {
+      this.processRef.stderr?.write(`[pie-worker] close(1): ${bounded}\n`);
+    } catch {
+      // Diagnostics must never alter the worker's fail-closed exit path.
+    }
+  }
+
+  private close(code: number, reason?: unknown): void {
     if (this.exitScheduled) return;
     this.exitScheduled = true;
+    if (code === 1) {
+      this.closeFailureReason ??= reason;
+      this.writeCloseDiagnostic(this.closeFailureReason);
+    }
     if (!this.closing) this.closing = true;
     this.stopHeartbeat();
     const closedError = new Error('Coordinator transport closed.');

@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import { h, render } from 'preact';
+import { act } from 'preact/test-utils';
 import { memo } from 'preact/compat';
 import { useLayoutEffect } from 'preact/hooks';
 import type { ChatMessage, ToolCall } from '../../../../src/shared/protocol/messages';
@@ -38,12 +39,14 @@ Object.defineProperty(globalThis, 'ResizeObserver', {
 });
 
 let TranscriptCommitProvider: typeof import('../../../../src/webview/panel/transcript/commit-registry').TranscriptCommitProvider;
+let BufferedTextPart: typeof import('../../../../src/webview/panel/transcript/buffered-text-part').BufferedTextPart;
 let TranscriptHost: typeof import('../../../../src/webview/panel/transcript/transcript-host').TranscriptHost;
 let commitRegistryModule: typeof import('../../../../src/webview/panel/transcript/commit-registry');
 
 test.before(async () => {
   commitRegistryModule = await import('../../../../src/webview/panel/transcript/commit-registry');
   ({ TranscriptCommitProvider } = commitRegistryModule);
+  ({ BufferedTextPart } = await import('../../../../src/webview/panel/transcript/buffered-text-part'));
   ({ TranscriptHost } = await import('../../../../src/webview/panel/transcript/transcript-host'));
 });
 
@@ -339,6 +342,247 @@ test('app commit reports only a transcript block that survives the render grace 
   }
 });
 
+test('a multi-KB streaming snapshot reaches the DOM and commit registry without a body typewriter backlog', async () => {
+  const root = document.getElementById('root')!;
+  const offsetWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetWidth');
+  const offsetHeight = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetHeight');
+  const originalRaf = window.requestAnimationFrame;
+  const originalCaf = window.cancelAnimationFrame;
+  const originalSetTimeout = window.setTimeout;
+  const originalClearTimeout = window.clearTimeout;
+  const pendingRaf = new Map<number, FrameRequestCallback>();
+  const pendingTimers = new Map<number, { callback: TimerHandler; delay: number }>();
+  let nextRaf = 1;
+  let nextTimer = 1;
+  const messages: any[] = [];
+
+  window.requestAnimationFrame = ((callback: FrameRequestCallback) => {
+    const id = nextRaf++;
+    pendingRaf.set(id, callback);
+    return id;
+  }) as typeof window.requestAnimationFrame;
+  window.cancelAnimationFrame = ((id: number) => { pendingRaf.delete(id); }) as typeof window.cancelAnimationFrame;
+  window.setTimeout = ((callback: TimerHandler, delay?: number) => {
+    const id = nextTimer++;
+    pendingTimers.set(id, { callback, delay: delay ?? 0 });
+    return id;
+  }) as typeof window.setTimeout;
+  window.clearTimeout = ((id: number) => { pendingTimers.delete(id); }) as typeof window.clearTimeout;
+  Object.defineProperties(HTMLElement.prototype, {
+    offsetWidth: { configurable: true, get: () => 320 },
+    offsetHeight: { configurable: true, get: () => 640 },
+  });
+
+  const transcriptWindow = {
+    loadedStart: 0,
+    loadedEnd: 1,
+    totalCount: 1,
+    hasOlder: false,
+    hasNewer: false,
+    isPartial: false,
+    hasUserMessages: false,
+  };
+  const seed = 'seed';
+  const snapshotText = 'A multi-KB reply that must be available as soon as the bounded markdown parse runs. '.repeat(256);
+  const message = (markdown: string): ChatMessage => ({
+    id: 'streaming-reply',
+    role: 'assistant',
+    createdAt: '',
+    markdown,
+    parts: [{ kind: 'text', text: markdown }],
+    status: 'streaming',
+  });
+  const target = (revision: number, current: ChatMessage) => ({
+    revision,
+    viewGeneration: 1,
+    expectedTranscriptIdentity: `identity-${revision}`,
+    acceptedAt: 1,
+    state: {
+      transcript: [current],
+      transcriptWindow,
+      activeSessionPath: '/streaming',
+      openTabPaths: ['/streaming'],
+    },
+  });
+  const hostProps = (current: ChatMessage) => ({
+    openTabPaths: ['/streaming'],
+    activeSessionPath: '/streaming',
+    transcript: [current],
+    transcriptWindow,
+    transcriptLoaded: true,
+    busy: true,
+    prefs: { showPruningMessages: true },
+    pruningSettings: {},
+    systemPrompts: [],
+    pruningResult: null,
+    workingDirectory: null,
+    editingId: null,
+    onEditRequest() {},
+    onEditConfirm() {},
+    onEditCancel() {},
+    onOpenFile() {},
+    onContextMenu() {},
+    postMessage: (message: any) => messages.push(message),
+  });
+  const flushRaf = () => {
+    const callbacks = [...pendingRaf.values()];
+    pendingRaf.clear();
+    for (const callback of callbacks) callback(0);
+  };
+  const flushMarkdownTimer = () => {
+    for (const [id, timer] of [...pendingTimers]) {
+      if (timer.delay !== 100) continue;
+      pendingTimers.delete(id);
+      if (typeof timer.callback === 'function') timer.callback();
+    }
+  };
+
+  try {
+    const firstMessage = message(seed);
+    render(h(TranscriptCommitProvider, {
+      target: target(1, firstMessage),
+      appSurface: 'transcript',
+      postMessage: (message: any) => messages.push(message),
+      children: h(TranscriptHost, hostProps(firstMessage) as never),
+    }), root);
+    await new Promise((resolve) => setImmediate(resolve));
+    flushRaf();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(root.querySelector('.message-body')?.textContent?.trim(), seed);
+
+    const latestMessage = message(snapshotText);
+    await act(async () => {
+      render(h(TranscriptCommitProvider, {
+        target: target(2, latestMessage),
+        appSurface: 'transcript',
+        postMessage: (message: any) => messages.push(message),
+        children: h(TranscriptHost, hostProps(latestMessage) as never),
+      }), root);
+      await Promise.resolve();
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    // The body parser is deliberately throttled, but it must not add a second
+    // per-frame reveal queue behind that bounded parse. With the old buffered
+    // body, no rAF is allowed to run here, so the later parse still sees only
+    // the seed prefix and the latest target cannot receive truthful evidence.
+    assert.equal(root.querySelector('.message-body')?.textContent?.trim(), seed);
+    assert.equal(messages.some((message) => message.type === 'transcriptCommitted'
+      && message.payload.revision === 2), false, 'the registry must not acknowledge host text before it reaches the DOM');
+    await act(async () => {
+      flushMarkdownTimer();
+      await Promise.resolve();
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(root.querySelector('.message-body')?.textContent?.trim(), snapshotText.trim());
+    assert.ok(messages.some((message) => message.type === 'transcriptCommitted'
+      && message.payload.revision === 2
+      && message.payload.identity === 'identity-2'), 'commit evidence must follow the text actually mounted in the DOM');
+  } finally {
+    render(null, root);
+    pendingRaf.clear();
+    pendingTimers.clear();
+    window.requestAnimationFrame = originalRaf;
+    window.cancelAnimationFrame = originalCaf;
+    window.setTimeout = originalSetTimeout;
+    window.clearTimeout = originalClearTimeout;
+    Object.defineProperties(HTMLElement.prototype, {
+      offsetWidth: offsetWidth!,
+      offsetHeight: offsetHeight!,
+    });
+  }
+});
+
+test('streaming markdown timers are latest-wins, terminal-safe, and canceled on unmount', async () => {
+  const root = document.getElementById('root')!;
+  const originalSetTimeout = window.setTimeout;
+  const originalClearTimeout = window.clearTimeout;
+  const originalNow = Date.now;
+  let now = 1000;
+  Date.now = () => now;
+  const pendingTimers = new Map<number, { callback: TimerHandler; delay: number }>();
+  let nextTimer = 1;
+  window.setTimeout = ((callback: TimerHandler, delay?: number) => {
+    const id = nextTimer++;
+    pendingTimers.set(id, { callback, delay: delay ?? 0 });
+    return id;
+  }) as typeof window.setTimeout;
+  window.clearTimeout = ((id: number) => { pendingTimers.delete(id); }) as typeof window.clearTimeout;
+
+  const renderPart = (text: string, streaming: boolean) => render(h(TranscriptCommitProvider, {
+    target: null,
+    appSurface: 'transcript',
+    postMessage() {},
+    children: h(BufferedTextPart, {
+      messageId: 'streaming-text',
+      index: 0,
+      text,
+      streaming,
+      workingDirectory: null,
+      onOpenFile() {},
+      onContextMenu() {},
+      onFilePathContextMenu() {},
+    }),
+  }), root);
+  const flushMarkdown = async () => {
+    const callbacks = [...pendingTimers.entries()]
+      .filter(([, timer]) => timer.delay === 100)
+      .map(([id, timer]) => {
+        pendingTimers.delete(id);
+        return timer.callback;
+      });
+    await act(async () => {
+      for (const callback of callbacks) {
+        if (typeof callback === 'function') callback();
+      }
+      await Promise.resolve();
+    });
+  };
+
+  try {
+    await act(async () => {
+      renderPart('seed', true);
+      await Promise.resolve();
+    });
+    now = 1050;
+    await act(async () => {
+      renderPart('first replacement', true);
+      await Promise.resolve();
+    });
+    assert.equal([...pendingTimers.values()].filter((timer) => timer.delay === 100).length, 1);
+
+    await act(async () => {
+      renderPart('latest replacement', true);
+      await Promise.resolve();
+    });
+    assert.equal([...pendingTimers.values()].filter((timer) => timer.delay === 100).length, 1, 'a replacement re-arms one current-generation parse');
+    await flushMarkdown();
+    assert.equal(root.querySelector('.message-body')?.textContent?.trim(), 'latest replacement');
+
+    await act(async () => {
+      renderPart('terminal text', false);
+      await Promise.resolve();
+    });
+    assert.equal(root.querySelector('.message-body')?.textContent?.trim(), 'terminal text');
+    assert.equal([...pendingTimers.values()].some((timer) => timer.delay === 100), false, 'terminal rendering clears streaming work');
+
+    await act(async () => {
+      renderPart('deferred before unmount', true);
+      await Promise.resolve();
+    });
+    assert.equal([...pendingTimers.values()].some((timer) => timer.delay === 100), true);
+    render(null, root);
+    assert.equal([...pendingTimers.values()].some((timer) => timer.delay === 100), false, 'unmount clears deferred markdown work');
+  } finally {
+    render(null, root);
+    pendingTimers.clear();
+    window.setTimeout = originalSetTimeout;
+    window.clearTimeout = originalClearTimeout;
+    Date.now = originalNow;
+  }
+});
+
 test('switching session props preserves the transcript host and surface while committing the new session content', async () => {
   const root = document.getElementById('root')!;
   const offsetWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetWidth');
@@ -418,6 +662,10 @@ test('switching session props preserves the transcript host and surface while co
     transcript: sessionB,
   });
   await new Promise((resolve) => setImmediate(resolve));
+  // Session switching remounts the keyed virtualizer. Its first range change
+  // is delivered through a timer-backed rAF in this DOM harness, so wait one
+  // timer turn before asserting the new leaf evidence.
+  await new Promise((resolve) => setTimeout(resolve, 0));
   const secondHost = root.querySelector('.transcript-host');
   const secondSurface = root.querySelector('.transcript-surface');
   const secondView = root.querySelector('.transcript-virtual-wrap');

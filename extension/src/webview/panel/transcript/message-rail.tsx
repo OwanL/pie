@@ -1,7 +1,8 @@
 /** @jsxRuntime automatic */
 /** @jsxImportSource preact */
 
-import { useCallback, useEffect, useMemo, useRef } from 'preact/hooks';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks';
+import { memo } from 'preact/compat';
 import type { VirtualItem, Virtualizer } from '@tanstack/virtual-core';
 
 import type { ChatMessage, UserContentPart } from '../../../shared/protocol';
@@ -98,6 +99,16 @@ interface MessageRailProps {
    *  `uiMessageRailSize` pref. The visible dot scales with it via the
    *  `--message-rail-marker-size` CSS var. */
   markerSize: number;
+  /** Total virtualized content height. Owning this as a prop (instead of
+   *  reading `virtualizer.getTotalSize()` during render) lets the memo
+   *  boundary bail on pure scroll frames: the parent re-renders on every
+   *  rAF-batched virtualizer change, and without this prop the rail would
+   *  rebuild every marker vnode + preview for the whole loaded window each
+   *  frame (measured at ~30% of scroll-path CPU on a fully paged transcript).
+   *  `totalSize` refreshes marker positions after ordinary row measurement.
+   *  Equal-sum grow/shrink batches may defer their marker refresh until the
+   *  next size or content change. */
+  totalSize: number;
   /** Shared bounded jump owner supplied by the transcript surface. Keeping
    *  this shared with the context bar prevents competing settle loops. */
   onJumpToRow?: (rowIndex: number) => void;
@@ -119,7 +130,7 @@ interface MessageRailProps {
  * those already measured. The parent re-renders on every virtualizer change
  * (content growth, scroll, viewport resize) which keeps the rail live.
  */
-export function MessageRail({
+function MessageRailView({
   rows,
   virtualizer,
   scrollRef,
@@ -127,11 +138,25 @@ export function MessageRail({
   navigationActiveRef,
   programmaticScrollTargetRef,
   markerSize,
+  totalSize,
   onJumpToRow,
   hidden,
 }: MessageRailProps) {
-  const railHeight = scrollRef.current?.clientHeight ?? 0;
-  const totalSize = virtualizer.getTotalSize();
+  // Viewport height is not a prop (the parent must not read layout per
+  // frame); a ResizeObserver keeps it fresh across viewport resizes and
+  // supplies the first post-mount observation (the scroll element is not
+  // attached during the initial render, so the render-time read would
+  // otherwise stay 0 forever under the memo boundary).
+  const [railHeight, setRailHeight] = useState(scrollRef.current?.clientHeight ?? 0);
+  useEffect(() => {
+    const element = scrollRef.current;
+    if (!element || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(() => {
+      setRailHeight(element.clientHeight);
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [scrollRef]);
   const measurements = virtualizer.measurementsCache;
   const markerHitHeight = markerSize > 0 ? markerSize : DEFAULT_MARKER_HIT_HEIGHT_PX;
 
@@ -188,3 +213,12 @@ export function MessageRail({
     </div>
   );
 }
+
+/** Memoized against every prop the parent owns. During pure scrolling the
+ *  parent re-renders per rAF-batched virtualizer change while all of these
+ *  props stay reference-equal (rows are content-stable, handlers are
+ *  useCallback-stable, refs are stable, totalSize only moves when row sizes
+ *  move), so the rail skips the per-frame marker rebuild entirely. Marker
+ *  refresh still happens through `totalSize` changes and the internal
+ *  viewport ResizeObserver. */
+export const MessageRail = memo(MessageRailView);

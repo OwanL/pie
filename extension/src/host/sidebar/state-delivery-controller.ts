@@ -101,12 +101,21 @@ export type TranscriptCommitBlockDisposition =
   | 'ignored'
   | 'protocol-defect';
 
+export interface StateDeliveryRetryFailure {
+  stage: 'snapshot-build' | 'transport-post';
+  outcome: 'threw' | 'false' | 'rejected' | 'timeout';
+  /** Bounded built-in classification only; never an Error message/body. */
+  errorType?: 'Error' | 'TypeError' | 'RangeError' | 'DataCloneError' | 'unknown';
+}
+
 export interface StateDeliveryRecovery {
   reason: StateDeliveryRecoveryReason;
   viewGeneration: number;
   desiredGeneration: number;
   revision?: number;
   attempts?: number;
+  /** Last failed retry boundary, retained when retry exhaustion escalates. */
+  failure?: StateDeliveryRetryFailure;
   renderFailure?: Pick<RenderFailurePayload, 'surface' | 'classification'>;
 }
 
@@ -179,6 +188,17 @@ type PostOperation<T> = {
   deferredBlock?: TranscriptCommitBlockedPayload;
 };
 
+function classifyErrorType(error: unknown): StateDeliveryRetryFailure['errorType'] {
+  if (!(error instanceof Error)) return 'unknown';
+  switch (error.name) {
+    case 'TypeError': return 'TypeError';
+    case 'RangeError': return 'RangeError';
+    case 'DataCloneError': return 'DataCloneError';
+    case 'Error': return 'Error';
+    default: return 'Error';
+  }
+}
+
 /**
  * Sole owner of authoritative snapshot delivery and transcript-commit progress.
  * It permits exactly one unsettled post and one accepted-but-uncommitted
@@ -208,6 +228,7 @@ export class StateDeliveryController<T> {
   private retryTimer: unknown;
   private retryAttempts = 0;
   private retryExhausted = false;
+  private lastRetryFailure: StateDeliveryRetryFailure | undefined;
   private deliverySuspended = false;
   /** Latest interaction-critical desired generation not yet accepted. */
   private priorityDesiredGeneration = 0;
@@ -295,6 +316,7 @@ export class StateDeliveryController<T> {
     this.accepted = [];
     this.retryAttempts = 0;
     this.retryExhausted = false;
+    this.lastRetryFailure = undefined;
     this.deliverySuspended = false;
     this.overflowReported = false;
     this.desiredGeneration += 1;
@@ -513,6 +535,7 @@ export class StateDeliveryController<T> {
     if (this.retryExhausted) {
       this.retryExhausted = false;
       this.retryAttempts = 0;
+      this.lastRetryFailure = undefined;
       this.deliverySuspended = false;
     }
     this.flush();
@@ -538,8 +561,13 @@ export class StateDeliveryController<T> {
     let snapshot: StateDeliverySnapshot<T>;
     try {
       snapshot = this.options.buildSnapshot(context);
-    } catch {
-      this.telemetry('post-rejected', context, 'snapshot-build-failed');
+    } catch (error: unknown) {
+      this.lastRetryFailure = {
+        stage: 'snapshot-build',
+        outcome: 'threw',
+        errorType: classifyErrorType(error),
+      };
+      this.telemetry('post-rejected', context, `snapshot-build-failed:${this.lastRetryFailure.errorType}`);
       resolveProbe?.(false);
       this.scheduleRetry();
       return false;
@@ -564,10 +592,10 @@ export class StateDeliveryController<T> {
       const result = this.options.post(snapshot, { ...context, operationId: operation.id, readinessProbe });
       void Promise.resolve(result).then(
         (accepted) => this.handlePostSettlement(operation, accepted),
-        () => this.handlePostRejection(operation),
+        (error: unknown) => this.handlePostRejection(operation, error),
       );
-    } catch {
-      this.handlePostRejection(operation);
+    } catch (error: unknown) {
+      this.handlePostRejection(operation, error, 'threw');
     }
     return true;
   }
@@ -581,6 +609,7 @@ export class StateDeliveryController<T> {
     this.clearActiveOperation(accepted);
 
     if (!accepted) {
+      this.lastRetryFailure = { stage: 'transport-post', outcome: 'false' };
       this.telemetry('post-false', operation);
       this.scheduleRetry();
       return;
@@ -589,6 +618,7 @@ export class StateDeliveryController<T> {
     this.lastAcceptedDesiredGeneration = Math.max(this.lastAcceptedDesiredGeneration, operation.desiredGeneration);
     this.retryAttempts = 0;
     this.retryExhausted = false;
+    this.lastRetryFailure = undefined;
     this.accepted.push({
       revision: operation.revision,
       expectedTranscriptIdentity: operation.snapshot.expectedTranscriptIdentity,
@@ -628,14 +658,23 @@ export class StateDeliveryController<T> {
     this.flush();
   }
 
-  private handlePostRejection(operation: PostOperation<T>): void {
+  private handlePostRejection(
+    operation: PostOperation<T>,
+    error?: unknown,
+    outcome: 'rejected' | 'threw' = 'rejected',
+  ): void {
     if (!this.isCurrentOperation(operation)) {
       this.telemetry('post-late-settlement', operation, 'rejected');
       operation.resolveProbe?.(false);
       return;
     }
     this.clearActiveOperation(false);
-    this.telemetry('post-rejected', operation, 'post-rejected');
+    this.lastRetryFailure = {
+      stage: 'transport-post',
+      outcome,
+      ...(error === undefined ? {} : { errorType: classifyErrorType(error) }),
+    };
+    this.telemetry('post-rejected', operation, `post-${outcome}:${this.lastRetryFailure.errorType ?? 'unknown'}`);
     this.scheduleRetry();
   }
 
@@ -650,6 +689,7 @@ export class StateDeliveryController<T> {
       operation.revision,
     );
     this.clearActiveOperation(false);
+    this.lastRetryFailure = { stage: 'transport-post', outcome: 'timeout' };
     this.telemetry('post-timeout', operation);
     this.scheduleRetry();
   }
@@ -675,6 +715,7 @@ export class StateDeliveryController<T> {
         viewGeneration: this.viewGeneration,
         desiredGeneration: this.desiredGeneration,
         attempts: this.retryAttempts,
+        ...(this.lastRetryFailure ? { failure: this.lastRetryFailure } : {}),
       });
       return;
     }

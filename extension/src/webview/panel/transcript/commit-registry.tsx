@@ -10,7 +10,14 @@ import { assistantPartsFromMessage, getRenderableUserParts } from './parts';
 import { reasoningSummary } from '../markdown';
 import { recordRenderSurface } from '../render-error';
 
-const MAX_COMMIT_ROWS = 256;
+// Bound for the renderer-owned offscreen-position scan only. Transcript row
+// count is NOT corruption evidence: the host budget (240 loaded rows) can be
+// legitimately exceeded by live/optimistic/queued rows, pinned editing, and
+// reducer paths that merge or roll back windows without a fresh cull, and a
+// valid snapshot at that size must still commit. Every stale/overlay/structural
+// mismatch at any size is rejected by the row-by-row structure, window, and
+// leaf comparisons below — size alone proves nothing.
+const MAX_COMMIT_EVIDENCE_ROWS = 256;
 
 export interface TranscriptCommitTarget {
   revision: number;
@@ -272,9 +279,6 @@ export function decideTranscriptCommit(
   model: TranscriptModelEvidence,
 ): TranscriptCommitDecision {
   const expected = target.state.transcript;
-  if (expected.length > MAX_COMMIT_ROWS || model.renderedTranscript.length > MAX_COMMIT_ROWS) {
-    return { matches: false, evidence: 'displayed', reason: 'structure_mismatch' };
-  }
   if (!equalWindow(target.state.transcriptWindow, model.window)) {
     return { matches: false, evidence: 'displayed', reason: 'window_mismatch' };
   }
@@ -393,7 +397,7 @@ function isProvenOffscreen(messageId: string, model: TranscriptModelEvidence): b
   if (expectedIndex === undefined || model.mountedVirtualRowIndexes.length === 0) return false;
   let minimum = Number.POSITIVE_INFINITY;
   let maximum = Number.NEGATIVE_INFINITY;
-  for (const index of model.mountedVirtualRowIndexes.slice(0, MAX_COMMIT_ROWS)) {
+  for (const index of model.mountedVirtualRowIndexes.slice(0, MAX_COMMIT_EVIDENCE_ROWS)) {
     minimum = Math.min(minimum, index);
     maximum = Math.max(maximum, index);
   }

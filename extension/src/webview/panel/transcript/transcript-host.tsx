@@ -31,6 +31,11 @@ import {
 } from './commit-registry';
 import { recordRenderEvidenceTarget } from '../render-error';
 
+// Offscreen evidence is a bounded proof. If the mounted DOM exceeds this
+// bound, do not use a partial scan to claim that a missing leaf is offscreen.
+// The full row-index map below is intentionally not bounded.
+const MAX_MOUNTED_COMMIT_EVIDENCE_ROWS = 256;
+
 interface TranscriptSurfaceProps extends TranscriptVirtualListProps {
   sessionPath: string;
   isActive: boolean;
@@ -208,7 +213,7 @@ export function TranscriptHost({
   }), [transcript, systemPrompts.length, transcriptWindow.hasOlder, transcriptWindow.hasNewer, transcriptWindow.loadedStart, transcriptWindow.loadedEnd, transcriptWindow.totalCount, busy, prefs.showPruningMessages]);
   const rowIndexByMessageId = useMemo(() => {
     const result = new Map<string, number>();
-    for (let index = 0; index < commitRows.length && index < 256; index += 1) {
+    for (let index = 0; index < commitRows.length; index += 1) {
       const row = commitRows[index];
       if (row?.kind === 'message') result.set(row.message.id, index);
     }
@@ -267,9 +272,22 @@ export function TranscriptHost({
 
     const mountedVirtualRowIndexes: number[] = [];
     const rowElements = hostRef.current.querySelectorAll<HTMLElement>('.transcript-virtual-inner > [data-index]');
-    for (let index = 0; index < rowElements.length && index < 256; index += 1) {
-      const value = Number(rowElements[index]?.dataset.index);
-      if (Number.isSafeInteger(value) && value >= 0) mountedVirtualRowIndexes.push(value);
+    // A partial mounted-range scan is not evidence: it could omit a legitimate
+    // tail row that happens to be after the bound. Keep the proof bounded, but
+    // fail closed whenever the complete mounted set cannot be inspected.
+    if (rowElements.length <= MAX_MOUNTED_COMMIT_EVIDENCE_ROWS) {
+      const seenIndexes = new Set<number>();
+      let complete = true;
+      for (const rowElement of rowElements) {
+        const value = Number(rowElement.dataset.index);
+        if (!Number.isSafeInteger(value) || value < 0 || seenIndexes.has(value)) {
+          complete = false;
+          break;
+        }
+        seenIndexes.add(value);
+        mountedVirtualRowIndexes.push(value);
+      }
+      if (!complete) mountedVirtualRowIndexes.length = 0;
     }
     const decision = decideTranscriptCommit(target, commitRegistry.leaves, {
       renderedTranscript: transcript,

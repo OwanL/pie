@@ -442,14 +442,21 @@ function billingInvocation(value: unknown, index: number): SubagentBillingInvoca
 }
 
 function billingOccurredAt(result: Record<string, unknown>): number | undefined {
-  const ended = Array.isArray(result.turnThroughputSamples)
-    ? result.turnThroughputSamples.flatMap((sample): number[] => {
-        if (!isRecord(sample) || typeof sample.endedAt !== 'string') return [];
-        const parsed = Date.parse(sample.endedAt);
-        return Number.isNaN(parsed) ? [] : [parsed];
-      })
-    : [];
-  if (ended.length > 0) return Math.max(...ended);
+  let latestEndedAt: number | undefined;
+  if (Array.isArray(result.turnThroughputSamples)) {
+    // Do not spread an untrusted, potentially long child-turn history into
+    // Math.max(). V8 rejects large argument lists with RangeError, and this
+    // runs while building the compact lazy-detail preview for every renderer
+    // snapshot; one long nested-agent result must not abort all state delivery.
+    for (const sample of result.turnThroughputSamples) {
+      if (!isRecord(sample) || typeof sample.endedAt !== 'string') continue;
+      const parsed = Date.parse(sample.endedAt);
+      if (!Number.isNaN(parsed) && (latestEndedAt === undefined || parsed > latestEndedAt)) {
+        latestEndedAt = parsed;
+      }
+    }
+  }
+  if (latestEndedAt !== undefined) return latestEndedAt;
   return typeof result.completedAt === 'number' && Number.isFinite(result.completedAt) && result.completedAt >= 0
     ? result.completedAt
     : undefined;

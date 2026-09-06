@@ -88,11 +88,11 @@ function setupSession(state: ArchState, sessionPath: string): ArchState {
 interface PipelineResult {
   session: string;
   bytes: number;
-  dispatchMs: number;
-  projectionMs: number;
-  envelopeMs: number;
-  cloneMs: number;
-  stringifyMs: number;
+  dispatchUs: number;
+  projectionUs: number;
+  envelopeUs: number;
+  cloneUs: number;
+  stringifyUs: number;
   viewStateBytes: number;
   messageBytes: number;
 }
@@ -159,11 +159,11 @@ async function main(): Promise<void> {
             console.log(`  [debug] sample=${sample.name.slice(0, 24)} trial=${trial} dispatch=${((t1 - t0) * 1000).toFixed(1)}us proj=${((t3 - t2) * 1000).toFixed(1)}us env=${((t5 - t4) * 1000).toFixed(1)}us clone=${(cloneMs * 1000).toFixed(1)}us str=${((t7 - t6) * 1000).toFixed(1)}us`);
           }
           trials.push({
-            dispatchMs: (t1 - t0) * 1000,
-            projectionMs: (t3 - t2) * 1000,
-            envelopeMs: (t5 - t4) * 1000,
-            cloneMs: cloneMs * 1000,
-            stringifyMs: (t7 - t6) * 1000,
+            dispatchUs: (t1 - t0) * 1000,
+            projectionUs: (t3 - t2) * 1000,
+            envelopeUs: (t5 - t4) * 1000,
+            cloneUs: cloneMs * 1000,
+            stringifyUs: (t7 - t6) * 1000,
             viewStateBytes: Buffer.byteLength(JSON.stringify(viewState), 'utf8'),
             messageBytes: Buffer.byteLength(messageJson, 'utf8'),
           });
@@ -175,19 +175,19 @@ async function main(): Promise<void> {
       const row: PipelineResult = {
         session: sample.name,
         bytes: sample.bytes,
-        dispatchMs: pick('dispatchMs'),
-        projectionMs: pick('projectionMs'),
-        envelopeMs: pick('envelopeMs'),
-        cloneMs: pick('cloneMs'),
-        stringifyMs: pick('stringifyMs'),
+        dispatchUs: pick('dispatchUs'),
+        projectionUs: pick('projectionUs'),
+        envelopeUs: pick('envelopeUs'),
+        cloneUs: pick('cloneUs'),
+        stringifyUs: pick('stringifyUs'),
         viewStateBytes: pick('viewStateBytes'),
         messageBytes: pick('messageBytes'),
       };
       results.push(row);
       console.log(
         `${sample.name.slice(0, 40).padEnd(42)} ${fmtBytes(sample.bytes).padStart(8)} → ` +
-        `dispatch ${fmtUs(row.dispatchMs).padStart(8)} proj ${fmtUs(row.projectionMs).padStart(8)} env ${fmtUs(row.envelopeMs).padStart(8)} ` +
-        `clone ${fmtUs(row.cloneMs).padStart(8)} str ${fmtUs(row.stringifyMs).padStart(8)} | VS ${fmtBytes(row.viewStateBytes).padStart(8)} msg ${fmtBytes(row.messageBytes).padStart(8)}`,
+        `dispatch ${fmtUs(row.dispatchUs).padStart(8)} proj ${fmtUs(row.projectionUs).padStart(8)} env ${fmtUs(row.envelopeUs).padStart(8)} ` +
+        `clone ${fmtUs(row.cloneUs).padStart(8)} str ${fmtUs(row.stringifyUs).padStart(8)} | VS ${fmtBytes(row.viewStateBytes).padStart(8)} msg ${fmtBytes(row.messageBytes).padStart(8)}`,
       );
     }
   } finally {

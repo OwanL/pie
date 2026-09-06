@@ -275,7 +275,7 @@ test('valid response JSON without LF is never settled at EOF and fails the worke
   }
 });
 
-for (const mode of ['malformed', 'gap', 'oversize', 'raw-fd-oversize', 'close'] as const) {
+for (const mode of ['malformed', 'gap', 'oversize', 'raw-fd-oversize'] as const) {
   test(`real inherited-FD transport fails the worker generation on ${mode} IPC`, async () => {
     // These fixtures must reach their deliberately invalid first frame before
     // the readiness watchdog wins. Process startup can exceed the production
@@ -291,6 +291,45 @@ for (const mode of ['malformed', 'gap', 'oversize', 'raw-fd-oversize', 'close'] 
     }
   });
 }
+
+test('EOF grace force-kills a worker that closes its descriptor but stays alive', async () => {
+  const clock = new FakeClock();
+  const client = createClient('close', { scheduler: clock, exitGraceMs: 10, startupTimeoutMs: 15_000 });
+  try {
+    await assert.rejects(client.start(), /Worker IPC read descriptor closed before process exit/);
+    await assert.rejects(client.ping(), /Worker is unavailable/);
+    assert.equal(clock.timerCount(), 1, 'EOF owns exactly one bounded exit-grace timer');
+    const pid = client.getSnapshot().pid;
+    assert.ok(pid);
+    assert.equal(isAlive(pid), true, 'the fixture remains alive after closing the worker→coordinator descriptor');
+
+    clock.advance(11);
+    await client.waitForConfirmedExit(5_000);
+    assert.equal(client.getSnapshot().status, 'exited');
+    assert.equal(clock.timerCount(), 0, 'forced disposal clears the EOF grace timer');
+
+    // A late transport event from the retired generation must not re-arm it.
+    (client as unknown as { handleIpcEnd: () => void }).handleIpcEnd();
+    assert.equal(clock.timerCount(), 0);
+  } finally {
+    await cleanup(client);
+  }
+});
+
+test('EOF grace preserves a real exit code when the child exits with code 1', async () => {
+  const clock = new FakeClock();
+  const client = createClient('close-exit1', { scheduler: clock, exitGraceMs: 1_000, startupTimeoutMs: 15_000 });
+  try {
+    await assert.rejects(client.start(), /Worker IPC read descriptor closed before process exit/);
+    const exit = await client.waitForConfirmedExit(5_000);
+    assert.deepEqual(exit, { code: 1, signal: null });
+    assert.equal(client.getSnapshot().status, 'exited');
+    assert.match(client.getSnapshot().failure ?? '', /descriptor closed before process exit/);
+    assert.equal(clock.timerCount(), 0, 'true exit clears the unused EOF grace timer');
+  } finally {
+    await cleanup(client);
+  }
+});
 
 for (const scenario of ['graceful', 'crash'] as const) {
   test(`${scenario} worker exit removes a real descendant process tree`, async () => {

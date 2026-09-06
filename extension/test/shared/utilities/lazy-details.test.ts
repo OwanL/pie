@@ -125,6 +125,25 @@ test('subagent preview preserves every top-level card while bounding recursive h
   assert.equal(Buffer.byteLength(JSON.stringify(preview), 'utf8') <= SUBAGENT_PREVIEW_MAX_BYTES, true);
 });
 
+test('large nested-agent throughput history stays stack-safe and bounded', () => {
+  const turnThroughputSamples = Array.from({ length: 150_000 }, (_, index) => ({
+    endedAt: new Date(index).toISOString(),
+    outputTokens: 1,
+    generationDurationMs: 1,
+    status: 'completed',
+  }));
+  const preview = compactSubagentResultPreview({
+    details: { mode: 'single', results: [{
+      agent: 'worker', task: 'long nested session', exitCode: 0, messages: [],
+      usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+      turnThroughputSamples,
+    }] },
+  });
+
+  assert.ok(preview, 'large JSON-safe live detail projects instead of aborting the whole snapshot');
+  assert.ok(Buffer.byteLength(JSON.stringify(preview), 'utf8') <= SUBAGENT_PREVIEW_MAX_BYTES);
+});
+
 test('subagent preview preserves recursive billing while omitting recursive messages', () => {
   const preview = compactSubagentResultPreview({
     details: { mode: 'single', results: [{

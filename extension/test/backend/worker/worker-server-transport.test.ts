@@ -306,6 +306,36 @@ test('worker server reports rejected runtime frames before exiting', async () =>
   }
 });
 
+test('worker server close(1) writes one bounded redacted stderr diagnosis', async () => {
+  const inbound = new PassThrough();
+  const outbound = new PassThrough();
+  outbound.resume();
+  const exitCodes: number[] = [];
+  let stderr = '';
+  const server = new WorkerServer(identity, {
+    pid: frameBase.workerPid,
+    exit: (code = 0) => {
+      exitCodes.push(code);
+      return undefined as never;
+    },
+    stderr: { write: (chunk: string) => { stderr += chunk; return true; } },
+  }, { readable: inbound, writable: outbound }, { validateBootstrap: () => undefined });
+  server.start();
+
+  try {
+    server.failRuntime(new Error(`authorization=worker-secret ${'x'.repeat(32 * 1024)}`));
+    await waitUntil(() => exitCodes.length > 0);
+    assert.deepEqual(exitCodes, [1]);
+    assert.match(stderr, /\[pie-worker\] close\(1\):/);
+    assert.match(stderr, /authorization=\[redacted\]/);
+    assert.doesNotMatch(stderr, /worker-secret/);
+    assert.ok(Buffer.byteLength(stderr, 'utf8') <= 9 * 1024, 'worker close diagnosis is bounded');
+  } finally {
+    inbound.destroy();
+    outbound.destroy();
+  }
+});
+
 test('worker server exits when its fatal frame is itself rejected', async () => {
   const inbound = new PassThrough();
   const outbound = new PassThrough();

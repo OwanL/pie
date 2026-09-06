@@ -64,6 +64,8 @@ export interface WorkerClientOptions {
   startupTimeoutMs?: number;
   /** Default deadline for one correlated coordinator -> worker request. */
   requestTimeoutMs?: number;
+  /** Bounded wait for a worker's EOF to be followed by its exit event. */
+  exitGraceMs?: number;
   diagnosticByteLimit?: number;
   env?: NodeJS.ProcessEnv;
   scheduler?: WorkerClientScheduler;
@@ -134,6 +136,8 @@ export class WorkerRequestEnqueueError extends Error {
 }
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
+const DEFAULT_EXIT_GRACE_MS = 1_000;
+const MAX_EXIT_GRACE_MS = 2_000;
 const MAX_EXPIRED_REQUEST_IDS = 256;
 
 class DiagnosticTail {
@@ -195,6 +199,7 @@ export class WorkerClient {
   private readonly missedHeartbeatMs: number;
   private readonly startupTimeoutMs: number;
   private readonly requestTimeoutMs: number;
+  private readonly exitGraceMs: number;
   private readonly stdoutTail: DiagnosticTail;
   private readonly stderrTail: DiagnosticTail;
   private readonly terminateTree: typeof terminateProcessTree;
@@ -212,11 +217,13 @@ export class WorkerClient {
   private readonly exited = deferred<{ code: number | null; signal: NodeJS.Signals | null }>();
   private startupTimer?: ReturnType<typeof setTimeout>;
   private heartbeatTimer?: ReturnType<typeof setTimeout>;
+  private exitGraceTimer?: ReturnType<typeof setTimeout>;
   private status: WorkerClientStatus = 'new';
   private lastHeartbeatAt?: number;
   private lastHeartbeat?: WorkerHeartbeatFrame['heartbeat'];
   private failure?: Error;
   private readySeen = false;
+  private ipcClosed = false;
   private exitSeen = false;
   private killStarted?: Promise<void>;
   private processTreeGuardian?: WindowsProcessTreeGuardian;
@@ -232,6 +239,10 @@ export class WorkerClient {
     this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
     if (!Number.isSafeInteger(this.requestTimeoutMs) || this.requestTimeoutMs <= 0) {
       throw new Error('requestTimeoutMs must be a positive safe integer.');
+    }
+    this.exitGraceMs = options.exitGraceMs ?? DEFAULT_EXIT_GRACE_MS;
+    if (!Number.isSafeInteger(this.exitGraceMs) || this.exitGraceMs <= 0 || this.exitGraceMs > MAX_EXIT_GRACE_MS) {
+      throw new Error(`exitGraceMs must be a positive safe integer no greater than ${MAX_EXIT_GRACE_MS}.`);
     }
     const diagnosticByteLimit = options.diagnosticByteLimit ?? 64 * 1024;
     if (!Number.isSafeInteger(diagnosticByteLimit) || diagnosticByteLimit <= 0) throw new Error('diagnosticByteLimit must be positive.');
@@ -310,9 +321,7 @@ export class WorkerClient {
     this.detachReader = attachBoundedWorkerIpcReader(inbound, {
       onFrame: (message) => this.handleMessage(message),
       onFatal: (error) => this.fail(error, true),
-      onEnd: () => {
-        if (!this.exitSeen && this.status !== 'stopping') this.fail(new Error('Worker IPC read descriptor closed before process exit.'), true);
-      },
+      onEnd: () => this.handleIpcEnd(),
     });
 
     this.startupTimer = this.scheduler.setTimeout(() => {
@@ -330,7 +339,7 @@ export class WorkerClient {
 
   /** Send a closed coordinator frame while the transport supplies identity and sequence fields. */
   sendFrame(body: CoordinatorToWorkerFrameBody): boolean {
-    if (!this.frameBase || !this.writer || this.exitSeen || this.status === 'failed') return false;
+    if (!this.frameBase || !this.writer || this.ipcClosed || this.exitSeen || this.status === 'failed') return false;
     return this.enqueue({ ...this.frameBase, ...body } as WorkerIpcFrameDraft);
   }
 
@@ -340,7 +349,7 @@ export class WorkerClient {
     expectedKind: K,
     options: WorkerRequestOptions = {},
   ): Promise<Extract<WorkerToCoordinatorResponseFrame, { kind: K }>> {
-    if (!this.frameBase || !this.writer || this.exitSeen || this.status === 'failed') return Promise.reject(new Error('Worker is unavailable.'));
+    if (!this.frameBase || !this.writer || this.ipcClosed || this.exitSeen || this.status === 'failed') return Promise.reject(new Error('Worker is unavailable.'));
     const timeoutMs = options.timeoutMs ?? this.requestTimeoutMs;
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
       return Promise.reject(new Error('Worker request timeout must be a positive safe integer.'));
@@ -395,7 +404,7 @@ export class WorkerClient {
   }
 
   async shutdown(reason: string): Promise<WorkerResponseResult> {
-    if (this.status !== 'exited') {
+    if (this.status !== 'exited' && !this.ipcClosed) {
       this.status = 'stopping';
       this.notify();
     }
@@ -403,6 +412,7 @@ export class WorkerClient {
   }
 
   async forceKill(): Promise<void> {
+    this.clearExitGraceTimer();
     if (this.killStarted) return await this.killStarted;
     const pid = this.child?.pid;
     if (!pid) throw new Error('Cannot kill worker before its PID is known.');
@@ -441,7 +451,7 @@ export class WorkerClient {
   }
 
   private requestLegacy(draft: { kind: 'command'; operation: 'ping' } | { kind: 'interrupt'; targetRequestId?: string; reason: string } | { kind: 'shutdown'; reason: string }): Promise<WorkerResponseResult> {
-    if (!this.frameBase || !this.writer || this.exitSeen || this.status === 'failed') return Promise.reject(new Error('Worker is unavailable.'));
+    if (!this.frameBase || !this.writer || this.ipcClosed || this.exitSeen || this.status === 'failed') return Promise.reject(new Error('Worker is unavailable.'));
     const requestId = randomUUID();
     const expectedResultKind: WorkerResponseResult['kind'] = draft.kind === 'command'
       ? 'pong'
@@ -498,7 +508,7 @@ export class WorkerClient {
   }
 
   private handleMessage(message: unknown): void {
-    if (!this.frameBase || this.exitSeen) return;
+    if (!this.frameBase || this.ipcClosed || this.exitSeen) return;
     const expectation: WorkerFrameExpectation = { ...this.frameBase, expectedSeq: this.expectedInboundSeq };
     const parsed = parseWorkerToCoordinatorFrame(message, expectation);
     if (parsed.status === 'stale') return;
@@ -590,6 +600,9 @@ export class WorkerClient {
   }
 
   private fail(error: Error, kill: boolean): void {
+    if (this.exitSeen) return;
+    const transportAlreadyClosed = this.ipcClosed;
+    if (transportAlreadyClosed && (this.failure || this.status === 'stopping')) return;
     if (!this.failure) this.failure = error;
     if (!this.readySeen) this.rejectReadySeamlessly();
     if (!this.exitSeen) this.status = 'failed';
@@ -600,7 +613,32 @@ export class WorkerClient {
     for (const requestId of [...this.pending.keys()]) this.takePending(requestId)?.reject(this.failure);
     this.expiredRequestIds.clear();
     this.notify();
-    if (kill && this.child?.pid && !this.exitSeen) void this.forceKill().catch(() => undefined);
+    if (kill && !transportAlreadyClosed) {
+      this.clearExitGraceTimer();
+      if (this.child?.pid && !this.exitSeen) void this.forceKill().catch(() => undefined);
+    }
+  }
+
+  /** Fail closed on EOF, but leave a short window for the child to report its
+   * actual exit status before force-killing a process whose IPC is gone. */
+  private handleIpcEnd(): void {
+    if (this.exitSeen || this.ipcClosed || this.exitGraceTimer) return;
+    this.ipcClosed = true;
+    if (this.status === 'stopping' || this.status === 'failed') return;
+    this.fail(new Error('Worker IPC read descriptor closed before process exit.'), false);
+    if (this.exitSeen) return;
+    this.exitGraceTimer = this.scheduler.setTimeout(() => {
+      this.exitGraceTimer = undefined;
+      if (this.exitSeen) return;
+      void this.forceKill().catch(() => undefined);
+    }, this.exitGraceMs);
+    this.exitGraceTimer.unref?.();
+  }
+
+  private clearExitGraceTimer(): void {
+    if (!this.exitGraceTimer) return;
+    this.scheduler.clearTimeout(this.exitGraceTimer);
+    this.exitGraceTimer = undefined;
   }
 
   /**
@@ -617,6 +655,8 @@ export class WorkerClient {
   private async handleExit(code: number | null, signal: NodeJS.Signals | null): Promise<void> {
     if (this.exitSeen) return;
     this.exitSeen = true;
+    this.ipcClosed = true;
+    this.clearExitGraceTimer();
     this.detachReader?.();
     this.detachReader = undefined;
     if (this.startupTimer) this.scheduler.clearTimeout(this.startupTimer);

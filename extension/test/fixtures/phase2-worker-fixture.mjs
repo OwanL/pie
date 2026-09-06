@@ -82,6 +82,10 @@ input.on('data', (chunk) => {
         output.end();
         continue;
       }
+      if (mode === 'close-exit1') {
+        output.end(() => setImmediate(() => process.exit(1)));
+        continue;
+      }
       if (mode === 'eof-ready') {
         sendWithoutDelimiter({ kind: 'ready', runtimeMetadata: { mode: 'phase2', startedAt: Date.now() } }, () => output.end());
         continue;

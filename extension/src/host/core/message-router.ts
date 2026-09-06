@@ -685,7 +685,10 @@ export class MessageRouter {
     // so failure recovery can restore the previous active path), and dispatches
     // the CreateSession Command. The reducer owns the optimistic tab setup.
     this.service.createNewSession(context);
-    this.sidebarProvider.postState();
+    // The optimistic tab is a selection, just like opening an existing one.
+    // Do not wait for the previous transcript's commit before showing it.
+    if (this.sidebarProvider.postSelectionState) this.sidebarProvider.postSelectionState();
+    else this.sidebarProvider.postState();
   }
 
   private onOpenSession(
@@ -725,7 +728,8 @@ export class MessageRouter {
     // pending path, placeholder, or registered selection token), so the runner
     // fell back to the old fat service.duplicateSession imperative path.
     this.service.duplicateSession(sessionPath, context);
-    this.sidebarProvider.postState();
+    if (this.sidebarProvider.postSelectionState) this.sidebarProvider.postSelectionState();
+    else this.sidebarProvider.postState();
   }
 
   private onCloseSession(

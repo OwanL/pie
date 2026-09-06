@@ -111,6 +111,7 @@ export class StateAppliedWatchdog {
       this.reloadCircuitOpen = true;
       recordWatchdog('throttled');
       const context = {
+        failure: recovery.failure ?? null,
         hostInstanceId: this.deps.getHostInstanceId(),
         reason: recovery.reason,
         revision: recovery.revision ?? null,
@@ -127,6 +128,7 @@ export class StateAppliedWatchdog {
     recordWatchdog('reload');
     const context = {
       classification: recovery.renderFailure?.classification ?? null,
+      failure: recovery.failure ?? null,
       hostInstanceId: this.deps.getHostInstanceId(),
       reason: recovery.reason,
       revision: recovery.revision ?? null,

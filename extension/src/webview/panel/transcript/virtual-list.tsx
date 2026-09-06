@@ -590,6 +590,7 @@ export function TranscriptVirtualList({
           navigationActiveRef={navigationActiveRef}
           programmaticScrollTargetRef={programmaticScrollTargetRef}
           markerSize={prefs.uiMessageRailSize}
+          totalSize={totalSize}
           onJumpToRow={jumpToRow}
           hidden={isInitialPositioning}
         />

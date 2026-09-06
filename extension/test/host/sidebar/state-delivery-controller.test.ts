@@ -66,7 +66,7 @@ type Harness = {
 
 function harness(
   post: (context: StateDeliveryPostContext) => boolean | Promise<boolean>,
-  overrides: Partial<Omit<StateDeliveryControllerOptions<string>, 'clock' | 'buildSnapshot' | 'isEligible' | 'post' | 'onRecovery' | 'onProtocolDefect'>> = {},
+  overrides: Partial<Omit<StateDeliveryControllerOptions<string>, 'clock' | 'isEligible' | 'post' | 'onRecovery' | 'onProtocolDefect'>> = {},
   onRecoveryHook?: (recovery: StateDeliveryRecovery, controller: StateDeliveryController<string>) => void,
 ): Harness {
   const clock = new FakeClock();
@@ -255,6 +255,42 @@ test('renderer block racing post settlement is replayed against the accepted rev
 
   assert.deepEqual(h.builds.map((build) => build.desiredGeneration), [1, 2]);
   assert.equal(h.posts.length, 2);
+});
+
+test('snapshot-build retry exhaustion preserves a bounded root failure classification', () => {
+  const h = harness(() => true, {
+    buildSnapshot: () => {
+      throw new RangeError('SECRET nested-agent payload');
+    },
+  });
+
+  h.controller.markDirty();
+  h.clock.advance(5);
+  h.clock.advance(5);
+
+  assert.equal(h.posts.length, 0, 'a failed snapshot build never reaches the transport');
+  assert.deepEqual(h.recoveries, [{
+    reason: 'retry-exhausted',
+    viewGeneration: 1,
+    desiredGeneration: 1,
+    attempts: 2,
+    failure: { stage: 'snapshot-build', outcome: 'threw', errorType: 'RangeError' },
+  }]);
+  assert.equal(JSON.stringify(h.telemetry).includes('SECRET'), false, 'raw error bodies never enter telemetry');
+});
+
+test('synchronous transport throws retain their distinct boundary at retry exhaustion', () => {
+  const h = harness(() => {
+    throw new TypeError('SECRET browser serialization body');
+  }, { maxRetryAttempts: 1 });
+
+  h.controller.markDirty();
+  h.clock.advance(5);
+
+  assert.deepEqual(h.recoveries[0]?.failure, {
+    stage: 'transport-post', outcome: 'threw', errorType: 'TypeError',
+  });
+  assert.equal(JSON.stringify(h.telemetry).includes('SECRET'), false);
 });
 
 test('false, reject, never-settling timeout, and late true retry autonomously without raw error telemetry', async () => {

@@ -1,9 +1,9 @@
 /**
- * Auto-follow target-refresh harness for exact bottom pinning.
+ * Auto-follow target-refresh harness for smooth bottom following.
  *
  * `useRefreshFollowTarget` keeps a cached *bottom* target
- * (`scrollHeight - clientHeight`) fresh, and `useAutoFollow` applies it in the
- * same layout commit. The pinning effect never reads `scrollHeight` or
+ * (`scrollHeight - clientHeight`) fresh, and `useAutoFollow` advances toward it
+ * over bounded animation frames. The follow loop never reads `scrollHeight` or
  * `clientHeight`; the target is re-read exactly once per content-height change, keyed
  * on the virtualizer's `totalSize` — which changes for EVERY height-relevant
  * mutation (streaming markdown, tool-body output, reasoning/preview
@@ -20,14 +20,15 @@
  * and reading them is free — so the *forced-reflow* cost can't be measured
  * here (that needs a real browser). What this harness DOES prove, faithfully:
  *   (1) auto-follow tracks growth (correctness) — a `totalSize` change re-reads
- *       `scrollHeight` exactly once and pins `scrollTop` to the new bottom in
- *       the same commit, for ANY growth source (totalSize is source-agnostic);
+ *       `scrollHeight` exactly once and advances `scrollTop` toward the new
+ *       bottom without jumping the whole arriving block, for ANY growth source
+ *       (totalSize is source-agnostic);
  *   (2) settled stable content leaves ZERO follow callbacks queued and reads
  *       `scrollHeight` zero times (no idle main-thread churn or reflow);
- *   (3) every `totalSize` change re-pins IMMEDIATELY — there is no timed
- *       fallback cadence anymore (no `Date.now` dependency), so a late image /
- *       table load is caught the same frame its row re-measures, not 250ms
- *       later.
+ *   (3) every `totalSize` change refreshes the target IMMEDIATELY — there is no
+ *       timed fallback cadence anymore (no `Date.now` dependency), so a late
+ *       image/table load starts following the same frame its row re-measures,
+ *       without jumping the whole block.
  *
  * Determinism: `requestAnimationFrame` is faked and flushed synchronously one
  * frame at a time. `scrollHeight`/`clientHeight`/`scrollTop` are own-property
@@ -258,20 +259,21 @@ test('auto-follow tracks totalSize growth and reads scrollHeight only once per c
   assert.equal(scrollTopValue, bottom(), 'scrollTop should remain pinned to the cached bottom');
 });
 
-test('a pinned transcript stays exactly at the bottom across ordinary tool-section growth', () => {
+test('a pinned transcript eases across ordinary tool-section growth', () => {
   mountProbe(true);
   settle();
   assert.equal(scrollTopValue, bottom(), 'sanity: pinned before the section expands');
 
-  // A single bash/tool section typically adds less than the old 480px snap
-  // threshold. Auto-follow must still preserve the bottom invariant in the
-  // layout that observes the growth; easing behind creates a temporary gap
-  // that repeated streaming/expand updates can turn into a stuck transcript.
+  // A single tool section should not move the whole arriving block into view
+  // in one frame. The bounded follow catches up over the next frames.
   scrollHeightValue += 320;
   rerender(true, 0);
 
-  assert.equal(scrollTopValue, bottom(), 'pinned follow must remain at the exact bottom without waiting for animation frames');
-  assert.equal(rafMap.size, 0, 'exact pinning should not leave catch-up work queued');
+  assert.ok(scrollTopValue < bottom(), 'the first follow step should not jump the whole block');
+  assert.ok(rafMap.size > 0, 'a gap to the cached bottom should retain one follow frame');
+  act(() => flushFrames(20));
+  assert.equal(scrollTopValue, bottom(), 'bounded follow should settle at the bottom');
+  assert.equal(rafMap.size, 0, 'settled follow should leave no catch-up work queued');
 });
 
 test('settled idle follow leaves the rAF queue empty even while busy', () => {
@@ -289,13 +291,13 @@ test('settled idle follow leaves the rAF queue empty even while busy', () => {
   assert.equal(rafMap.size, 0, 'quiescent follow must keep the scheduler empty');
 });
 
-test('every totalSize change re-pins immediately — no timed fallback cadence', () => {
+test('every totalSize change refreshes immediately — no timed fallback cadence', () => {
   mountProbe(true);
   settle();
   // Simulate a late image / table load: scrollHeight grows, and because the
   // row re-measures, totalSize grows too. There is no longer a 250ms fallback
-  // cadence — the totalSize-keyed layout effect re-reads on the change render,
-  // so the view re-pins the same frame, not 250ms later.
+  // cadence — the totalSize-keyed layout effect re-reads scrollHeight at the
+  // change render and starts following the new target without a one-frame jump.
   scrollHeightValue = 1800;
   const readsBefore = scrollHeightReads;
   const scrollTopBefore = scrollTopValue;
@@ -352,7 +354,10 @@ test('container resize re-pins quiescent follow without catch-up frames', () => 
   const scrollTopBefore = scrollTopValue;
   act(() => notifyResizeObservers());
   assert.equal(scrollHeightReads, readsBefore + 1, 'resize should refresh the cached bottom once');
+  assert.equal(scrollTopValue, scrollTopBefore, 'resize should not jump before the follow frame');
+  assert.ok(rafMap.size > 0, 'resize should wake bounded follow');
+  act(() => flushFrames(20));
   assert.ok(scrollTopValue > scrollTopBefore, 'resize-triggered follow should advance to the new bottom');
-  assert.equal(scrollTopValue, bottom(), 'resize-triggered follow should pin to the new bottom immediately');
-  assert.equal(rafMap.size, 0, 'resize pinning should not schedule catch-up frames');
+  assert.equal(scrollTopValue, bottom(), 'resize-triggered follow should settle at the new bottom');
+  assert.equal(rafMap.size, 0, 'settled resize follow should leave no catch-up frames');
 });

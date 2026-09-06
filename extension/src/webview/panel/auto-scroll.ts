@@ -9,6 +9,17 @@ const AUTO_FOLLOW_BOTTOM_EPSILON_PX = 1;
 const SCROLL_TOP_DELTA_EPSILON_PX = 1;
 const SCROLL_ANCHOR_VISIBILITY_EPSILON_PX = 1;
 
+/**
+ * Bounds each auto-follow movement so a burst of rendered content glides into
+ * view instead of moving the whole viewport in one frame. The interpolation
+ * handles small updates without a visible stutter. Large backlogs relax the
+ * ordinary cap so a fast producer cannot outrun follow indefinitely.
+ */
+export const SMOOTH_SCROLL_INTERPOLATION = 0.35;
+export const SMOOTH_SCROLL_MIN_STEP_PX = 2;
+export const SMOOTH_SCROLL_MAX_STEP_PX = 48;
+export const SMOOTH_SCROLL_SNAP_EPSILON_PX = 1;
+
 export interface ScrollAnchorSnapshot {
   key: string;
   offsetTop: number;
@@ -106,4 +117,31 @@ export function resolveScrollAnchorDelta(
   }
 
   return nextAnchor.top - containerTop - previousAnchor.offsetTop;
+}
+
+/**
+ * Return the next bounded bottom-follow position. Explicit navigation and the
+ * initial session placement intentionally do not use this helper: they retain
+ * their immediate snap semantics. This is only for ordinary content/viewport
+ * growth while the user has chosen to follow the live edge.
+ */
+export function advanceSmoothScrollTop(
+  currentScrollTop: number,
+  targetScrollTop: number,
+  interpolation = SMOOTH_SCROLL_INTERPOLATION,
+  minStepPx = SMOOTH_SCROLL_MIN_STEP_PX,
+  maxStepPx = SMOOTH_SCROLL_MAX_STEP_PX,
+  snapEpsilonPx = SMOOTH_SCROLL_SNAP_EPSILON_PX,
+): number {
+  const delta = targetScrollTop - currentScrollTop;
+  if (Math.abs(delta) <= snapEpsilonPx) return targetScrollTop;
+
+  // Preserve gentle ordinary bursts, but catch up proportionally when a
+  // producer adds content faster than the ordinary per-frame cap can follow.
+  const catchUpCap = Math.max(maxStepPx, Math.abs(delta) / 16);
+  const step = Math.min(catchUpCap, Math.max(minStepPx, Math.abs(delta) * interpolation));
+  const next = currentScrollTop + Math.sign(delta) * step;
+  return delta > 0
+    ? Math.min(next, targetScrollTop)
+    : Math.max(next, targetScrollTop);
 }

@@ -7,7 +7,6 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 import { renderMarkdown } from '../markdown';
 import { handleDelegatedFilePathClick, handleDelegatedFilePathContextMenu, handleDelegatedFilePathKeyDown } from './file-path-interactions';
 import type { TranscriptContextMenuHandler } from './types';
-import { useBufferedText } from './use-buffered-text';
 import { useCommittedTextLeaf } from './commit-registry';
 
 interface BufferedTextPartProps {
@@ -44,16 +43,15 @@ function hasSelectionInBody(el: HTMLDivElement | null): boolean {
 }
 
 /**
- * Renders a text part with buffered smooth streaming.
+ * Renders a text part while it streams.
  *
- * During streaming, text is revealed progressively to prevent layout jumps
- * when large chunks arrive at once. Once streaming ends, full text is shown.
- *
- * Markdown is re-parsed at most every `MARKDOWN_PARSE_THROTTLE_MS` during
- * streaming instead of on every rAF tick: the buffered text is sliced to the
- * revealed length each frame, so re-parsing every frame both wastes work
- * (marked + DOMPurify) and flickers, since mid-token slices yield malformed
- * markdown. When streaming ends the complete text is parsed immediately.
+ * The body does not typewriter-reveal host snapshots. A large snapshot is
+ * already bounded by host delivery and must become visible as one truthful
+ * DOM update; otherwise the renderer creates an artificial backlog behind the
+ * host and cannot acknowledge the text it has actually received. Markdown is
+ * still re-parsed at most every `MARKDOWN_PARSE_THROTTLE_MS` while streaming,
+ * and the rendered text is kept alongside the HTML so commit evidence only
+ * reports what is mounted in the body.
  *
  * While the user is selecting text inside the streaming body, innerHTML
  * updates are deferred (re-applied once the selection clears or after a short
@@ -61,16 +59,28 @@ function hasSelectionInBody(el: HTMLDivElement | null): boolean {
  * DOM nodes and clearing the user's Selection up to 10x/s.
  */
 export function BufferedTextPart({ messageId, index, text, streaming, workingDirectory, onOpenFile, onContextMenu, onFilePathContextMenu }: BufferedTextPartProps) {
-  const visibleText = useBufferedText(text, streaming);
-  const initialText = streaming ? visibleText : text;
+  // Advance this synchronously with prop replacement, before effects from the
+  // previous render can run. A terminal/replacement render therefore fences an
+  // already-queued streaming parse instead of allowing it to publish stale
+  // text after the newer render wins.
+  const streamGenerationRef = useRef({ text, streaming, generation: 0 });
+  if (streamGenerationRef.current.text !== text || streamGenerationRef.current.streaming !== streaming) {
+    streamGenerationRef.current = {
+      text,
+      streaming,
+      generation: streamGenerationRef.current.generation + 1,
+    };
+  }
+  const streamGeneration = streamGenerationRef.current.generation;
   const [rendered, setRendered] = useState(() => ({
-    html: renderMarkdown(initialText, !streaming),
-    text: initialText,
+    html: renderMarkdown(text, !streaming),
+    text,
   }));
   const lastParseAtRef = useRef(0);
   const timerRef = useRef<number | null>(null);
-  const visibleTextRef = useRef(visibleText);
-  visibleTextRef.current = visibleText;
+  const timerGenerationRef = useRef<number | null>(null);
+  const latestTextRef = useRef(text);
+  latestTextRef.current = text;
 
   // Selection-aware update machinery: the body element, the latest desired
   // html, and a deferred-apply timer used while a selection is active.
@@ -111,44 +121,64 @@ export function BufferedTextPart({ messageId, index, text, streaming, workingDir
   }
 
   useEffect(() => {
+    // If a newer streaming render superseded a deferred parse, re-arm it for
+    // the current generation. This is needed when snapshots replace text more
+    // quickly than the markdown throttle rather than merely append to it.
+    if (timerRef.current !== null && timerGenerationRef.current !== streamGeneration) {
+      window.clearTimeout(timerRef.current);
+      timerRef.current = null;
+      timerGenerationRef.current = null;
+    }
+
     if (!streaming) {
       // Final render: parse the complete text immediately and cancel any
       // pending throttled parse.
       if (timerRef.current !== null) {
-        clearTimeout(timerRef.current);
+        window.clearTimeout(timerRef.current);
         timerRef.current = null;
+        timerGenerationRef.current = null;
       }
-      applyHtml(renderMarkdown(visibleTextRef.current), visibleTextRef.current);
+      applyHtml(renderMarkdown(latestTextRef.current), latestTextRef.current);
       return;
     }
 
     const now = Date.now();
     if (now - lastParseAtRef.current >= MARKDOWN_PARSE_THROTTLE_MS) {
       lastParseAtRef.current = now;
-      applyHtml(renderMarkdown(visibleTextRef.current, false), visibleTextRef.current);
+      applyHtml(renderMarkdown(latestTextRef.current, false), latestTextRef.current);
       return;
     }
 
     // Schedule a parse at the end of the throttle window if one isn't already
-    // pending. The scheduled parse reads the latest revealed text via the ref
-    // so it always reflects the most recent frame.
+    // pending. The scheduled parse reads the latest host text via the ref, so
+    // a newer snapshot wins even when it arrives before the timer fires.
     if (timerRef.current === null) {
-      timerRef.current = window.setTimeout(() => {
-        timerRef.current = null;
+      const generation = streamGeneration;
+      const timerId = window.setTimeout(() => {
+        if (timerRef.current === timerId) {
+          timerRef.current = null;
+          timerGenerationRef.current = null;
+        }
+        // Effects can be delayed across a terminal/replacement commit. Do not
+        // let a stale callback acknowledge or render text from that old stream.
+        if (streamGenerationRef.current.generation !== generation || !streamGenerationRef.current.streaming) return;
         lastParseAtRef.current = Date.now();
-        applyHtml(renderMarkdown(visibleTextRef.current, false), visibleTextRef.current);
+        applyHtml(renderMarkdown(latestTextRef.current, false), latestTextRef.current);
       }, MARKDOWN_PARSE_THROTTLE_MS);
+      timerRef.current = timerId;
+      timerGenerationRef.current = generation;
     }
-  }, [visibleText, streaming]);
+  }, [text, streaming, streamGeneration]);
 
   // Clear any pending throttled / deferred parse on unmount.
   useEffect(() => () => {
     if (timerRef.current !== null) {
-      clearTimeout(timerRef.current);
+      window.clearTimeout(timerRef.current);
       timerRef.current = null;
+      timerGenerationRef.current = null;
     }
     if (deferTimerRef.current !== null) {
-      clearTimeout(deferTimerRef.current);
+      window.clearTimeout(deferTimerRef.current);
       deferTimerRef.current = null;
     }
   }, []);

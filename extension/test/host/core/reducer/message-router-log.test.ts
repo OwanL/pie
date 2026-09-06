@@ -117,6 +117,34 @@ test('webview `log` message with warn level is routed through appendPieLog at wa
   assert.ok(prefix.includes('render took too long'), `message should be preserved: ${prefix}`);
 });
 
+test('create and duplicate publish optimistic tabs through the selection fast path', async () => {
+  for (const message of [
+    { type: 'newSession' },
+    { type: 'duplicateSession', sessionPath: '/s' },
+  ] as WebviewToHostMessage[]) {
+    const calls: string[] = [];
+    const router = new MessageRouterCtor(
+      () => undefined,
+      () => ({ sessions: { activeSessionPath: '/s', openTabPaths: ['/s'] }, settings: {} } as never),
+      {
+        createNewSession: () => calls.push('optimistic'),
+        duplicateSession: () => calls.push('optimistic'),
+      } as never,
+      {
+        reveal: () => undefined,
+        postState: () => calls.push('ordinary'),
+        postSelectionState: () => calls.push('priority'),
+        postImperative: () => undefined,
+      },
+      () => undefined,
+      (text: string) => ({ name: text, isPlaceholder: false }),
+      () => false,
+    );
+    await router.handle(message);
+    assert.deepEqual(calls, ['optimistic', 'priority'], message.type);
+  }
+});
+
 test('ready restores running sessions hidden from persisted tabs', async () => {
   const events: unknown[] = [];
   let posts = 0;

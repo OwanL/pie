@@ -214,9 +214,9 @@ function AssistantParts({
             index={index}
             text={part.text}
             // Only the last part is actively streaming (new text is appended
-            // there); earlier text parts are complete. Passing streaming=true
-            // to every part would spin up a never-stopping rAF loop per part
-            // for the whole streaming duration (see use-buffered-text).
+            // there); earlier text parts are complete. Restricting the
+            // streaming flag to that part keeps bounded markdown parsing off
+            // completed text parts.
             streaming={isCurrentlyStreaming && index === parts.length - 1}
             workingDirectory={workingDirectory}
             onOpenFile={onOpenFile}

@@ -1,7 +1,7 @@
 /**
  * Auto-follow drift / spurious-disengage harness for `useTranscriptScroll`.
  *
- * The sibling `perf/auto-follow-reflow.test.ts` proves exact pinning tracks the
+ * The sibling `perf/auto-follow-reflow.test.ts` proves bounded follow tracks the
  * cached target without repeated reflows, but it deliberately stubs
  * `scrollTop` so writes do not dispatch scroll events. That leaves the
  * ownership path (`onScroll` → `resolveAutoFollowState`) unexercised. A false
@@ -170,12 +170,14 @@ afterEach(() => {
   restoreRaf();
 });
 
-function rerender(busy: boolean, flush: number, transcript?: readonly ChatMessage[]): void {
+function rerender(busy: boolean, flush: number, transcript?: readonly ChatMessage[], sessionKey = '/s'): void {
   tick += 1;
   act(() => {
-    render(h(Probe, { totalSize: tick, busy, transcript }), container);
-    if (flush > 0) flushFrames(flush);
+    render(h(Probe, { totalSize: tick, busy, transcript, sessionKey }), container);
   });
+  // Let effects schedule the bounded follow frame before driving the fake
+  // scheduler. This mirrors the browser's commit → rAF ordering.
+  if (flush > 0) act(() => flushFrames(flush));
 }
 
 function mountProbe(busy: boolean): void {
@@ -219,6 +221,13 @@ function settle(): void {
   scrollDispatchCount = 0;
 }
 
+function setDocumentHidden(hidden: boolean): void {
+  Object.defineProperty(document, 'hidden', {
+    configurable: true,
+    value: hidden,
+  });
+}
+
 const bottom = () => scrollHeightValue - clientHeightValue;
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -235,9 +244,9 @@ test('steady streaming growth: auto-follow stays engaged and tracks the bottom',
   // flip false (no user scroll-up).
   for (let i = 0; i < 20; i++) {
     scrollHeightValue += 40; // ~40px of new content per snapshot
-    rerender(true, 6, []);   // fresh transcript identity + flush reset frames
+    rerender(true, 12, []);  // fresh transcript identity + bounded catch-up
     assert.equal(capture.r!.autoFollowRef.current, true, `autoFollow must stay true across snapshot ${i} (no user input)`);
-    assert.equal(scrollTopValue, bottom(), `snapshot ${i}: follow should stay exactly pinned`);
+    assert.equal(scrollTopValue, bottom(), `snapshot ${i}: follow should settle at the bottom`);
   }
 });
 
@@ -255,16 +264,80 @@ test('manual scroll-up disables follow even while the agent is busy', () => {
   assert.equal(rafMap.size, 0, 'no follow frame remains queued while scrolled up');
 });
 
-test('large burst growth stays exactly pinned and keeps follow engaged', () => {
+test('hidden transcript cancels follow frames and resumes only when visible', () => {
+  mountProbe(true);
+  settle();
+  setDocumentHidden(false);
+
+  scrollHeightValue += 600;
+  rerender(true, 0, []);
+  const pausedScrollTop = scrollTopValue;
+  assert.ok(rafMap.size > 0, 'growth should schedule bounded follow while visible');
+
+  setDocumentHidden(true);
+  el.ownerDocument.dispatchEvent(new Event('visibilitychange'));
+  assert.equal(rafMap.size, 0, 'hiding the document must cancel the follow frame');
+  act(() => flushFrames(10));
+  assert.equal(scrollTopValue, pausedScrollTop, 'hidden follow must not move the viewport');
+
+  setDocumentHidden(false);
+  el.ownerDocument.dispatchEvent(new Event('visibilitychange'));
+  assert.ok(rafMap.size > 0, 'becoming visible should wake the pending follow');
+  act(() => flushFrames(30));
+  assert.equal(scrollTopValue, bottom(), 'visible follow should settle at the current bottom');
+});
+
+test('reduced motion follows immediately without a frame animation', () => {
+  const view = document.defaultView!;
+  const originalMatchMedia = view.matchMedia;
+  Object.defineProperty(view, 'matchMedia', {
+    configurable: true,
+    value: () => ({ matches: true }),
+  });
+  try {
+    setDocumentHidden(false);
+    mountProbe(true);
+    settle();
+    scrollHeightValue += 600;
+    rerender(true, 0, []);
+
+    assert.equal(scrollTopValue, bottom(), 'reduced motion should retain immediate follow');
+    assert.equal(rafMap.size, 0, 'reduced motion should not retain an animation frame');
+  } finally {
+    Object.defineProperty(view, 'matchMedia', {
+      configurable: true,
+      value: originalMatchMedia,
+    });
+  }
+});
+
+test('session switch cancels pending follow before the new session snaps into place', () => {
+  mountProbe(true);
+  settle();
+  scrollHeightValue += 600;
+  rerender(true, 0, []);
+  assert.equal(rafMap.size, 1, 'the burst should have one pending follow frame');
+
+  rerender(true, 0, undefined, '/next');
+  assert.equal(scrollTopValue, bottom(), 'the new session keeps immediate placement semantics');
+  assert.equal(rafMap.size, 1, 'only the new session positioning frame should remain');
+});
+
+test('large burst growth follows gently without a one-frame jump', () => {
   mountProbe(true);
   settle();
   assert.equal(scrollTopValue, bottom());
 
   // A single big burst (e.g. two sections opening): 600px in one snapshot.
+  const previousBottom = bottom();
   scrollHeightValue += 600;
-  rerender(true, 6, []);
+  rerender(true, 1, []);
   assert.equal(capture.r!.autoFollowRef.current, true, 'autoFollow must stay true after a large burst');
-  assert.equal(scrollTopValue, bottom(), 'large growth should stay exactly pinned');
+  assert.ok(scrollTopValue > previousBottom, 'follow should begin moving toward the burst');
+  assert.ok(scrollTopValue < bottom(), 'follow must not jump the whole burst in one frame');
+
+  act(() => flushFrames(30));
+  assert.equal(scrollTopValue, bottom(), 'large growth should settle at the bottom');
 });
 
 test('content shrink while pinned: clamp must NOT disengage auto-follow', () => {
@@ -350,7 +423,7 @@ test('REGRESSION: two parallel tool calls growing then animated-collapsing must 
   scrollHeightValue += 300;
   rerender(true, 8, []);
   assert.equal(capture.r!.autoFollowRef.current, true, 'autoFollow during tool growth');
-  assert.ok(Math.abs(scrollTopValue - bottom()) <= 24, `growth: scrollTop=${scrollTopValue} bottom=${bottom()}`);
+  assert.ok(Math.abs(scrollTopValue - bottom()) <= 24, `growth should settle near bottom: scrollTop=${scrollTopValue} bottom=${bottom()}`);
 
   // Animated close: the two cards collapse gradually over ~12 frames (CSS
   // transition). scrollHeight recedes each frame; the browser clamps scrollTop
@@ -474,8 +547,10 @@ test('isAtBottom remains true when followed content grows', () => {
 
   scrollHeightValue += 400;
   rerender(true, 0, []);
-  assert.equal(scrollTopValue, bottom(), 'follow should pin to growth in the same commit');
-  assert.equal(capture.r!.isAtBottom, true, 'the Bottom control must not flash while exact follow is active');
+  assert.ok(scrollTopValue < bottom(), 'smooth follow should not jump to growth in the same commit');
+  act(() => flushFrames(30));
+  assert.equal(scrollTopValue, bottom(), 'follow should settle at growth');
+  assert.equal(capture.r!.isAtBottom, true, 'the Bottom control must not flash while follow is active');
 });
 
 test('detached geometry growth reveals the Bottom control without requiring a scroll event', () => {
