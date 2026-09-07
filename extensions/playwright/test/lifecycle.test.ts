@@ -56,6 +56,27 @@ async function readReady(child: ReturnType<typeof spawn>, timeoutMs = 30_000): P
   });
 }
 
+test('run_code console output cannot corrupt sidecar protocol stdout', { skip: !HAS_BROWSER, timeout: 40_000 }, async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'pw-console-protocol-'));
+  const client = new RuntimeClient(path.join(root, 'session.jsonl'));
+  try {
+    await client.request('open', { sessionId: 'console', artifactDir: path.join(root, 'artifacts'), url: 'about:blank' }, { timeoutMs: 30_000, allowNeedsReopen: true });
+    client.markReopened();
+    for (const code of [
+      "console.log('not JSONL'); console.info({ diagnostic: true }); console.debug('debug'); return 'body-ok';",
+      "async ({ page }) => { console.log('function diagnostic'); await page.evaluate(() => { document.title = 'console-safe'; }); return 'function-ok'; }",
+    ]) {
+      const result = await client.request('run_code', { sessionId: 'console', code, observation: { mode: 'none' } }, { timeoutMs: 10_000 });
+      assert.match(result.runCode!.text, /(?:body|function)-ok/);
+    }
+    const observed = await client.request('observe', { sessionId: 'console' }, { timeoutMs: 10_000 });
+    assert.equal(observed.observation!.title, 'console-safe');
+  } finally {
+    await client.shutdown();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('force-killing a live sidecar terminates its Chromium process tree and invalidates the runtime', { skip: !HAS_BROWSER, timeout: 40_000 }, async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'pw-tree-kill-'));
   const client = new RuntimeClient(path.join(root, 'session.jsonl'));

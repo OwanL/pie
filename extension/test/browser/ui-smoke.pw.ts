@@ -32,7 +32,7 @@ async function captureBrowserSockets(page: Page): Promise<void> {
 async function expectReadySurface(page: Page): Promise<void> {
   await expect(page.getByRole('textbox', { name: 'Message composer' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Settings', exact: true })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'New session' })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'New session', exact: true })).toBeEnabled();
   await expect(page.locator('[data-connection-banner]')).toHaveCount(0);
 }
 
@@ -76,7 +76,7 @@ test.describe('pie browser UI no-spend smoke', () => {
       sockets.at(-1)?.close(1000, 'playwright offline test');
     });
     await expect(page.locator('[data-connection-banner]')).toContainText('Reconnecting');
-    await expect(page.getByRole('button', { name: 'New session' })).toBeDisabled();
+    await expect(page.getByRole('button', { name: 'New session', exact: true })).toBeDisabled();
 
     await context.setOffline(false);
     await expectReadySurface(page);

@@ -21,7 +21,7 @@ import {
 import { NOOP_RUN_OBSERVER, type RunObserver } from '../stats-service';
 import { SessionServiceEvents } from './events';
 import { SessionMessageActions } from './message-actions';
-import { SessionServiceState } from './state';
+import { PRIVATE_SESSION_PATHS_STORAGE_KEY, SessionServiceState } from './state';
 import { DeferredTriggerRegistry } from '../deferred-triggers/registry';
 import { startSessionBackend } from './startup';
 import { setRuntimeAuditLogEnabled } from '../util/audit';
@@ -32,6 +32,7 @@ import type { ArchState } from '../core/arch-state';
 import { resolveLiveDetail } from './detail-retrieval';
 import type { LiveSubagentDetailAddress, DetailCursor, DetailPageRef } from '../../shared/protocol/subagent-detail';
 import { DetailSubscriptionService } from './detail-subscriptions';
+import { PrivateSessionCleanup } from './private-session-cleanup';
 
 /** Host-owned identities the detail subscription service fences its
  *  imperatives with: the current webview document generation and the current
@@ -71,6 +72,7 @@ export class SessionService implements vscode.Disposable {
   private readonly messages: SessionMessageActions;
   private readonly getArchState: () => ArchState;
   private readonly detailSubscriptions: DetailSubscriptionService;
+  private readonly privateSessionCleanup: PrivateSessionCleanup;
   private readonly dispatchArch: (event: Event) => void;
   private readonly detailCache = new Map<string, { result: DetailResult; bytes: number }>();
   private readonly detailRequests = new Map<string, Promise<DetailResult>>();
@@ -94,6 +96,47 @@ export class SessionService implements vscode.Disposable {
     this.dispatchArch = dispatchArch;
 
     this.state = new SessionServiceState(context, backend, scheduleRender, getArchState, dispatchArch);
+    this.privateSessionCleanup = new PrivateSessionCleanup({
+      // Keep startup cleanup on the same host-local analytics seam as the
+      // interactive SetPrivacyMode effect. The marker is not committed until
+      // this completes and the backend deletion also succeeds.
+      forgetLocalAnalytics: async (sessionPath) => {
+        await this.runObserver.setSessionPrivacy?.(sessionPath, true);
+      },
+      requestForget: (sessionPath, timeoutMs, onTransportSettled) => this.backend.request(
+        'session.forget',
+        { sessionPath },
+        { timeoutMs, onTransportSettled },
+      ).then(() => undefined),
+      clearPrivacyMarker: (sessionPath) => this.dispatchArch({
+        kind: 'Command',
+        cmd: {
+          kind: 'SetPrivacyMode',
+          corrId: `privacy-cleared:${Date.now()}:${sessionPath}`,
+          sessionPath,
+          enabled: false,
+          persist: false,
+        },
+      }),
+      persistMarkers: (sessionPaths, removedSessionPaths = []) => {
+        const removed = new Set(removedSessionPaths);
+        const stored = this.context.globalState.get<unknown[]>(PRIVATE_SESSION_PATHS_STORAGE_KEY)
+          ?.filter((sessionPath): sessionPath is string => typeof sessionPath === 'string' && sessionPath.length > 0)
+          ?? [];
+        // Merge with markers written by a concurrent ordinary tab checkpoint,
+        // removing only the exact paths whose backend forget already succeeded.
+        // This prevents startup cleanup from racing a later PersistTabs write
+        // and accidentally dropping an unrelated failed marker.
+        const next = [...new Set([
+          ...sessionPaths,
+          ...stored.filter((sessionPath) => !removed.has(sessionPath)),
+        ])];
+        return Promise.resolve(this.context.globalState.update(PRIVATE_SESSION_PATHS_STORAGE_KEY, next));
+      },
+      isBackendReady: () => this.getArchState().settings.backendReady,
+      getBackendGeneration: () => this.backend.getGeneration(),
+      isSessionOpen: (sessionPath) => this.getArchState().sessions.openTabPaths.includes(sessionPath),
+    });
     this.triggers = new DeferredTriggerRegistry({
       getArchState, dispatchArch, scheduleRender,
       getBackendGeneration: () => this.state.getBackendGeneration(),
@@ -156,6 +199,12 @@ export class SessionService implements vscode.Disposable {
     this.state.setPreloadedSessionOpenedHandler((payload) => {
       this.events.applySessionOpened(payload);
     });
+  }
+
+  /** Schedule removal of stale private-session markers without extending the
+   * backend/browser startup critical path. */
+  schedulePrivateSessionCleanup(storedPrivatePaths: readonly string[], restoredTabPaths: readonly string[]): void {
+    this.privateSessionCleanup.schedule(storedPrivatePaths, restoredTabPaths);
   }
 
   async start(): Promise<void> {
@@ -276,6 +325,7 @@ export class SessionService implements vscode.Disposable {
     this.detailCache.clear();
     this.detailCacheBytes = 0;
     this.events.detach();
+    this.privateSessionCleanup.dispose();
     this.triggers.dispose();
     this.correlatedFailureSubscription.dispose();
   }

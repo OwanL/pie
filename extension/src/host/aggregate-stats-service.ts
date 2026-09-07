@@ -14,7 +14,12 @@ import type { TokenRateIndicatorState } from '../shared/token-rate';
 import type { ModelPricingRecord } from '../../../shared/pricing-core';
 import { appendPieLog } from './util/pie-log';
 import { toErrorMessage } from './util/error-message';
-import { projectLedgerUsageOntoAggregate } from './billable-invocation-ledger/aggregate';
+import type { BillableInvocationRecord } from '../shared/billable-invocation';
+import {
+  applyLedgerUsageOverlay,
+  buildLedgerUsageProjection,
+  type LedgerUsageOverlay,
+} from './billable-invocation-ledger/aggregate';
 import { AggregatePricingCache } from './aggregate-pricing-cache';
 import { CompletedHistoryCache, type CompletedHistoryMtimeFn } from './completed-history-cache';
 
@@ -39,7 +44,9 @@ import { CompletedHistoryCache, type CompletedHistoryMtimeFn } from './completed
  * TokenRateService signals aggregate-relevant changes every 200 ms; that path
  * rebuilds only the small in-memory open-run layer and reuses completed history.
  * Live throughput, counts, token totals, and charts therefore move during all
- * active streams without polling disk/backend services at the fast cadence.
+ * active streams without rereading completed history or rebuilding ledger
+ * snapshots at the fast cadence; the ledger authority check remains cheap and
+ * signature-gated.
  *
  * Side-effectful (wall-clock + `setInterval` + disk reads) by design — it lives
  * outside the pure reducer, mirroring `TokenRateService`.
@@ -86,6 +93,17 @@ const RECOMPUTE_MS = 1000;
  *  `ready:false` until the first compute lands. */
 const FIRST_TICK_DELAY_MS = 3000;
 
+interface LedgerOverlayCacheEntry {
+  records: readonly BillableInvocationRecord[];
+  overlay: LedgerUsageOverlay;
+  validFromMs: number;
+  validUntilMs: number;
+}
+
+interface LedgerOverlayCacheState {
+  entry: LedgerOverlayCacheEntry | null;
+}
+
 export class AggregateStatsService {
   private readonly deps: AggregateStatsServiceDeps;
   private cached: AggregateStats = EMPTY_AGGREGATE_STATS;
@@ -96,6 +114,9 @@ export class AggregateStatsService {
   private liveRevision = 0;
   private lastFinalizedDate: string | null = null;
   private readonly rollingRate = new RollingAggregateRate();
+  /** Only ledger-owned arrays/totals are cached. The surrounding aggregate is
+   * rebuilt so live working/time productivity fields never become stale. */
+  private readonly ledgerOverlayCache: LedgerOverlayCacheState = { entry: null };
   private timer?: ReturnType<typeof setInterval>;
   private firstTickTimer?: ReturnType<typeof setTimeout>;
   private inFlight = false;
@@ -192,7 +213,7 @@ export class AggregateStatsService {
     this.openAccumulator = nextOpenAccumulator;
     this.liveRunIds = nextLiveRunIds;
 
-    let next = finalizeAggregateStatsLayers(
+    const next = finalizeAggregateStatsLayers(
       completedLayer,
       nextOpenAccumulator,
       nowMs,
@@ -202,9 +223,17 @@ export class AggregateStatsService {
     );
     next.liveTokensPerSecond = rollingRate;
     next.providerGate = this.cached.providerGate;
-    next = projectLedgerIfAvailable(this.deps.statsService, next, nowMs);
-    if (!aggregateStatsEqual(this.cached, next)) {
-      this.cached = next;
+    // Preserve the cheap live path: it does not rebuild the ledger projection.
+    // The authority getter still runs so its lock/signature/privacy fence is
+    // honored; an immutable records identity reuses the small ledger overlay.
+    const nextWithLedger = projectLedgerIfAvailable(
+      this.deps.statsService,
+      next,
+      nowMs,
+      this.ledgerOverlayCache,
+    );
+    if (!aggregateStatsEqual(this.cached, nextWithLedger)) {
+      this.cached = nextWithLedger;
       this.deps.onChanged();
     }
   }
@@ -316,7 +345,7 @@ export class AggregateStatsService {
       this.refreshLive();
       return;
     }
-    next = projectLedgerIfAvailable(this.deps.statsService, next, nowMs);
+    next = projectLedgerIfAvailable(this.deps.statsService, next, nowMs, this.ledgerOverlayCache);
     if (!aggregateStatsEqual(this.cached, next)) {
       this.cached = next;
       this.deps.onChanged();
@@ -392,16 +421,38 @@ export function aggregateStatsEqual(a: AggregateStats, b: AggregateStats): boole
   return deepEqualValue(a, b);
 }
 
-function projectLedgerIfAvailable(statsService: StatsService, aggregate: AggregateStats, nowMs: number): AggregateStats {
+function projectLedgerIfAvailable(
+  statsService: StatsService,
+  aggregate: AggregateStats,
+  nowMs: number,
+  cache: LedgerOverlayCacheState,
+): AggregateStats {
   // Some embedding/test adapters implement a StatsService shape without the
   // invocation-ledger getter. Preserve their legacy projection; production
-  // always supplies the ledger.
+  // always supplies the ledger. When present, the getter is called on every
+  // refresh so its authority lock/signature/privacy fence cannot be bypassed.
   const getter = (statsService as StatsService & {
     getBillableInvocationRecords?: () => ReturnType<StatsService['getBillableInvocationRecords']>;
   }).getBillableInvocationRecords;
-  return getter
-    ? projectLedgerUsageOntoAggregate(aggregate, getter.call(statsService), nowMs)
-    : aggregate;
+  if (!getter) return aggregate;
+
+  const records = getter.call(statsService);
+  const cached = cache.entry;
+  if (cached
+    && cached.records === records
+    && nowMs >= cached.validFromMs
+    && nowMs < cached.validUntilMs) {
+    return applyLedgerUsageOverlay(aggregate, cached.overlay);
+  }
+
+  const projection = buildLedgerUsageProjection(records, nowMs);
+  cache.entry = {
+    records,
+    overlay: projection.overlay,
+    validFromMs: projection.validFromMs,
+    validUntilMs: projection.validUntilMs,
+  };
+  return applyLedgerUsageOverlay(aggregate, projection.overlay);
 }
 
 function deepEqualValue(a: unknown, b: unknown): boolean {

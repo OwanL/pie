@@ -12,9 +12,9 @@
  *   (`test_scanner_regressions.py`), so the scanner ignores cannot silently
  *   fall behind this policy.
  * - `AGENTS.md` mirrors {@link TRAVERSAL_POLICY_PROMPT} under a drift-tested
- *   marker, the default Pie harness rewrite imports it directly, and every
- *   subagent task prompt embeds it, so root agents and subagents receive the
- *   same policy.
+ *   marker, and every subagent task prompt embeds it, so root agents and
+ *   subagents receive the same policy without putting traversal prose in the
+ *   Pie base prompt.
  *
  * These entries exclude basename matches at any depth from BROAD traversal
  * only. Exact reads and deliberate, scoped inspection of a protected path stay

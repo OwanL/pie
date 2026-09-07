@@ -8,8 +8,8 @@ Before each agent turn, `skill-pruner` sends the user prompt + available skill/t
 
 1. Keeps every skill the LLM did **not** prune. `pinned` / `alwaysKeep` skills are protected and can never be pruned — they're excluded from the prepass entirely so the model never sees them or spends tokens reasoning about them, then re-added unconditionally afterward.
 2. Keeps every currently available tool the LLM did not prune, additionally protecting any dependency of a kept tool (so pruning a tool never strands a tool that needs it). Tools hidden by the preceding pruning decision are reconsidered, but tools disabled by the user, the Tools prompt toggle, or another extension are outside the candidate set and are never re-enabled by the pruner. If both the Skills and Tools prompt entries are empty/disabled, the LLM prepass is skipped entirely.
-3. Rewrites the system prompt to drop the pruned skills.
-4. Disables pruned tools via `pi.setActiveTools()` (auto mode only).
+3. Applies the tool decision via `pi.setActiveTools()` (auto mode only), which synchronously rebuilds Pie's base prompt with the selected tools and their live guidance.
+4. Rebases the chained prompt onto that fresh base, preserving earlier extension prefix/suffix contributions and foreign tool-guideline additions, then drops the pruned skills. Later extensions still receive and may modify this result normally. Standalone Pi sessions without Pie's narrow fresh-base seam fail open for skill filtering rather than returning a stale tool-guidance copy.
 5. Logs the decision — including tool pruning — to `data/pruning.jsonl`.
 
 The scorer returns only the tiny JSON shape `{"keep":[]}` with no explanation. The parser remains backward-compatible with the former `{"pruneSkills":[],"pruneTools":[]}` response and its optional `reasoning` field so cached/test responses remain readable.

@@ -11,6 +11,7 @@ import type {
   TranscriptPagePayload,
 } from '../shared/protocol';
 import type { SessionSnapshotTransport } from '../shared/transcript-window';
+import type { LiveSubagentDetailAddress } from '../shared/protocol/subagent-detail';
 import type { SdkPatchIdentity } from './sdk-patch-barrier';
 
 export const COLD_BROWSE_HELPER_PROTOCOL_VERSION = 1 as const;
@@ -40,6 +41,16 @@ export interface ColdBrowseHelperPageOptions {
   readonly requiredMessageId?: string;
 }
 
+/** The lossless durable-detail shape returned by the helper. It intentionally
+ * remains separate from the public paged-detail protocol. */
+export interface ColdBrowseHelperResolvedDurableDetail {
+  readonly value: unknown;
+  readonly sizeBytes: number;
+  readonly messageId: string;
+  readonly toolCallId: string;
+  readonly kind: 'tool-result' | 'reasoning';
+}
+
 export type ColdBrowseHelperOperation =
   | {
       readonly operation: 'open';
@@ -58,6 +69,12 @@ export type ColdBrowseHelperOperation =
       readonly operation: 'detail';
       readonly fence: ColdBrowseHelperFence;
       readonly ref: LazyDetailRef;
+    }
+  | {
+      readonly operation: 'durable-detail';
+      readonly fence: ColdBrowseHelperFence;
+      readonly address: LiveSubagentDetailAddress;
+      readonly durableRef?: LazyDetailRef;
     }
   | {
       readonly operation: 'invalidate';
@@ -103,7 +120,12 @@ export interface ColdBrowseHelperSuccessFrame {
   readonly requestId: string;
   readonly ok: true;
   readonly fingerprint?: string;
-  readonly result: SessionOpenedPayload | TranscriptPagePayload | DetailResult | { invalidated: true };
+  readonly result:
+    | SessionOpenedPayload
+    | TranscriptPagePayload
+    | DetailResult
+    | ColdBrowseHelperResolvedDurableDetail
+    | { invalidated: true };
 }
 
 export interface ColdBrowseHelperErrorFrame {

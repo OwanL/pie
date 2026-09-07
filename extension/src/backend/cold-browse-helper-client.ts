@@ -11,6 +11,7 @@ import {
   type TranscriptPagePayload,
 } from '../shared/protocol';
 import { SessionSnapshotTooLargeError } from '../shared/transcript-window';
+import type { LiveSubagentDetailAddress } from '../shared/protocol/subagent-detail';
 import { isRecord } from '../shared/type-guards';
 import {
   COLD_BROWSE_HELPER_MAX_FRAME_BYTES,
@@ -23,6 +24,11 @@ import {
   type ColdBrowseHelperPageOptions,
   type ColdBrowseHelperSuccessFrame,
 } from './cold-browse-helper-protocol';
+import {
+  DurableDetailNotAddressableError,
+  DurableDetailNotFoundError,
+  type ResolvedDurableDetail,
+} from './durable-detail-store';
 import type { SdkPatchIdentity } from './sdk-patch-barrier';
 
 export interface ColdBrowseHelper {
@@ -36,6 +42,13 @@ export interface ColdBrowseHelper {
     options?: ColdBrowseHelperPageOptions,
   ): Promise<TranscriptPagePayload>;
   loadDetail(fence: ColdBrowseHelperFence, ref: LazyDetailRef): Promise<DetailResult>;
+  /** Optional for compatibility with test/fixture helpers from before the
+   * bounded durable-detail operation was added. */
+  resolveDurableDetail?(
+    fence: ColdBrowseHelperFence,
+    address: LiveSubagentDetailAddress,
+    durableRef?: LazyDetailRef,
+  ): Promise<ResolvedDurableDetail>;
   invalidatePath(sessionPathKey: string): Promise<void>;
   dispose(): Promise<void>;
 }
@@ -155,6 +168,14 @@ export class ColdBrowseHelperClient implements ColdBrowseHelper {
 
   async loadDetail(fence: ColdBrowseHelperFence, ref: LazyDetailRef): Promise<DetailResult> {
     return await this.request({ operation: 'detail', fence, ref }) as DetailResult;
+  }
+
+  async resolveDurableDetail(
+    fence: ColdBrowseHelperFence,
+    address: LiveSubagentDetailAddress,
+    durableRef?: LazyDetailRef,
+  ): Promise<ResolvedDurableDetail> {
+    return await this.request({ operation: 'durable-detail', fence, address, durableRef }) as ResolvedDurableDetail;
   }
 
   async invalidatePath(sessionPathKey: string): Promise<void> {
@@ -375,7 +396,23 @@ export class ColdBrowseHelperClient implements ColdBrowseHelper {
     }
 
     let error: Error;
-    if (value.error.code === SESSION_SNAPSHOT_TOO_LARGE_CODE) {
+    if (value.error.code === 'DURABLE_DETAIL_NOT_FOUND'
+      || value.error.code === 'DURABLE_DETAIL_NOT_ADDRESSABLE') {
+      const fence = operationFence(pending.operation);
+      if (pending.operation.operation !== 'durable-detail'
+        || !fence
+        || value.fingerprint !== fence.fingerprint) {
+        this.failGeneration(
+          generation,
+          new Error('Cold browse helper returned an invalid durable-detail resolution error frame.'),
+          true,
+        );
+        return;
+      }
+      error = value.error.code === 'DURABLE_DETAIL_NOT_FOUND'
+        ? new DurableDetailNotFoundError(value.error.message)
+        : new DurableDetailNotAddressableError(value.error.message);
+    } else if (value.error.code === SESSION_SNAPSHOT_TOO_LARGE_CODE) {
       const fence = operationFence(pending.operation);
       const data = parseSnapshotTooLargeData(value.error.data);
       if (!fence || value.fingerprint !== fence.fingerprint || !data) {
@@ -484,13 +521,24 @@ function validateSuccessFrame(
       ? undefined
       : 'Cold browse helper returned an invalid page result.';
   }
-  return result.sessionPath === operation.fence.sessionPath
-    && result.key === operation.ref.key
-    && (result.status === 'loaded'
-      || result.status === 'unavailable'
-      || result.status === 'stale')
+  if (operation.operation === 'detail') {
+    return result.sessionPath === operation.fence.sessionPath
+      && result.key === operation.ref.key
+      && (result.status === 'loaded'
+        || result.status === 'unavailable'
+        || result.status === 'stale')
+      ? undefined
+      : 'Cold browse helper returned an invalid detail result.';
+  }
+  return typeof result.messageId === 'string'
+    && typeof result.toolCallId === 'string'
+    && (result.kind === 'tool-result' || result.kind === 'reasoning')
+    && typeof result.sizeBytes === 'number'
+    && Number.isSafeInteger(result.sizeBytes)
+    && result.sizeBytes >= 0
+    && Object.hasOwn(result, 'value')
     ? undefined
-    : 'Cold browse helper returned an invalid detail result.';
+    : 'Cold browse helper returned an invalid durable-detail result.';
 }
 
 function hasTranscriptSnapshotShape(value: Record<string, unknown>): boolean {

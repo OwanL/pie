@@ -5,15 +5,13 @@ description: "Use when the user asks for diagnosis/debugging or the cause is gen
 
 # Diagnose
 
-A discipline for hard bugs. Skip phases only when explicitly justified.
+A discipline for hard bugs. Use the phases as a feedback loop, not a mandatory waterfall; hypotheses and reproduction work often inform each other. Explain any material verification limits.
 
-When exploring a codebase, first read its applicable repository instructions (`AGENTS.md` and, when present, `CONTEXT.md`), then follow that repository's documented entry point and relevant docs and structure to build a mental model of the affected modules. Use the vocabulary and patterns established there. When working in pie, start from its curated `docs/INDEX.md` instead of scanning `docs/` directly, read the INDEX-listed docs relevant to the bug, and use the `develop-pie` skill for Pie-specific workflow and references. For other repositories, follow their `AGENTS.md`/`CONTEXT.md`/docs conventions and relevant structure instead; do not assume Pie's docs, filenames, or workflow.
+Follow the target repository's `AGENTS.md`, `CONTEXT.md` when present, and documented entry points. For Pie work, load `develop-pie`; do not impose Pie's layout or workflow on other repositories.
 
 ## Phase 1 — Build a feedback loop
 
-**This is the skill.** Everything else is mechanical. If you have a fast, deterministic, agent-runnable pass/fail signal for the bug, you will find the cause — bisection, hypothesis-testing, and instrumentation all just consume that signal. If you don't have one, no amount of staring at code will save you.
-
-Spend disproportionate effort here. **Be aggressive. Be creative. Refuse to give up.**
+Prioritize a fast, repeatable signal for the reported failure. It supports hypothesis testing, bisection, and verification. Use code inspection and provisional hypotheses to help construct it; a reproduction alone does not establish the cause.
 
 ### Ways to construct one — try them in roughly this order
 
@@ -28,9 +26,7 @@ Spend disproportionate effort here. **Be aggressive. Be creative. Refuse to give
 9. **Differential loop.** Run the same input through old-version vs new-version (or two configs) and diff outputs.
 10. **HITL bash script.** Last resort. If a human must click, drive _them_ with a small shell script that prompts, captures the result, and feeds it back to you so the loop is still structured.
 
-For visible desktop UI bugs, use the repository's supported UI-driving path and observe before acting; confirm with the user before any side-effectful or destructive input. In pie, route the loop through its `computer` tool (see pie's `docs/COMPUTER-USE.md`) and use screenshot-relative coordinates.
-
-Build the right feedback loop, and the bug is 90% fixed.
+For visible desktop UI bugs, use the repository's supported UI-driving path and observe before acting. Ask before computer control unless the user's request clearly includes it; obtain confirmation for destructive input. In Pie, use its `computer` tool and follow its observation and targeting guidance.
 
 ### Iterate on the loop itself
 
@@ -40,17 +36,15 @@ Treat the loop as a product. Once you have _a_ loop, ask:
 - Can I make the signal sharper? (Assert on the specific symptom, not "didn't crash".)
 - Can I make it more deterministic? (Pin time, seed RNG, isolate filesystem, freeze network.)
 
-A 30-second flaky loop is barely better than no loop. A 2-second deterministic loop is a debugging superpower.
+Prefer fast, deterministic checks where possible; retain a slower or intermittent check when it is the only faithful signal.
 
 ### Non-deterministic bugs
 
-The goal is not a clean repro but a **higher reproduction rate**. Loop the trigger 100×, parallelise, add stress, narrow timing windows, inject sleeps. A 50%-flake bug is debuggable; 1% is not — keep raising the rate until it's debuggable.
+Measure the reproduction rate and improve it with bounded repetition, stress, or controlled timing changes. Confirm that any amplified failure is still the user's bug, and retain useful evidence even when reproduction remains rare.
 
 ### When you genuinely cannot build a loop
 
-Stop and say so explicitly. List what you tried. Ask the user for: (a) access to whatever environment reproduces it, (b) a captured artifact (HAR file, log dump, core dump, screen recording with timestamps), or (c) permission to add temporary production instrumentation. Do **not** proceed to hypothesise without a loop.
-
-Do not proceed to Phase 2 until you have a loop you believe in.
+State what you tried and what remains unverified. Continue bounded code or trace analysis if it can narrow the cause; label conclusions as provisional. Ask for missing environment access, a captured artifact, or permission for temporary production instrumentation when it would unblock verification. Do not claim a reproduced or verified fix without evidence.
 
 ## Phase 2 — Reproduce
 
@@ -62,19 +56,19 @@ Confirm:
 - [ ] The failure is reproducible across multiple runs (or, for non-deterministic bugs, reproducible at a high enough rate to debug against).
 - [ ] You have captured the exact symptom (error message, wrong output, slow timing) so later phases can verify the fix actually addresses it.
 
-Do not proceed until you reproduce the bug.
+If reproduction is unavailable, carry that limitation into subsequent analysis and final claims.
 
 ## Phase 3 — Hypothesise
 
-Generate **3–5 ranked hypotheses** before testing any of them. Single-hypothesis generation anchors on the first plausible idea.
+Rank the plausible hypotheses supported by the evidence and choose checks that distinguish them. Consider alternatives when uncertainty is material; do not invent a fixed number of hypotheses.
 
 Each hypothesis must be **falsifiable**: state the prediction it makes.
 
 > Format: "If <X> is the cause, then <changing Y> will make the bug disappear / <changing Z> will make it worse."
 
-If you cannot state the prediction, the hypothesis is a vibe — discard or sharpen it.
+If you cannot state a testable prediction, discard or sharpen the hypothesis.
 
-**Show the ranked list to the user before testing.** They often have domain knowledge that re-ranks instantly ("we just deployed a change to #3"), or know hypotheses they've already ruled out. Cheap checkpoint, big time saver. Don't block on it — proceed with your ranking if the user is AFK.
+Share hypotheses when user knowledge could materially change the investigation. Otherwise proceed with safe, focused checks without a mandatory reporting checkpoint.
 
 ## Phase 4 — Instrument
 

@@ -4,11 +4,19 @@ import { LIVE_PIPELINE_LIMITS } from '../shared/live-pipeline-protocol';
 import type { DetailResult, SessionOpenedPayload, TranscriptPagePayload } from '../shared/protocol';
 import { ColdBrowseProjectionCache } from './cold-browse-projection-cache';
 import {
+  COLD_BROWSE_HELPER_MAX_FRAME_BYTES,
+  COLD_BROWSE_HELPER_PROTOCOL_VERSION,
   coldBrowseSourceBytes,
   readColdBrowseFingerprintSync,
   type ColdBrowseHelperFence,
   type ColdBrowseHelperOperation,
+  type ColdBrowseHelperResolvedDurableDetail,
 } from './cold-browse-helper-protocol';
+import {
+  DurableDetailNotAddressableError,
+  DurableDetailNotFoundError,
+  resolveDurableDetailFromTranscript,
+} from './durable-detail-store';
 import { buildBrowseSessionOpenedPayload, openSessionBrowseSnapshot, type SessionBrowseSnapshot } from './session-browser';
 import { normalizeDanglingTranscript } from './session-opened';
 import { buildPagedTranscriptWindow } from './transcript-window';
@@ -25,8 +33,19 @@ export interface ColdBrowseHelperRuntimeOptions {
   readonly startupCwd: string;
   readonly maxSourceBytes?: number;
   readonly maxEntries?: number;
-  /** Test-only override; production uses the shared 30 MiB producer budget. */
+  /** Test-only override; production uses the bounded helper frame. */
   readonly maxResponseLineBytes?: number;
+}
+
+export class ColdBrowseHelperResponseTooLargeError extends Error {
+  readonly code = 'RESPONSE_TOO_LARGE';
+  readonly data: { bytes: number; maxBytes: number };
+
+  constructor(bytes: number, maxBytes: number) {
+    super(`Cold browse helper response cannot fit its bounded frame (${bytes} > ${maxBytes} bytes).`);
+    this.name = 'ColdBrowseHelperResponseTooLargeError';
+    this.data = { bytes, maxBytes };
+  }
 }
 
 /**
@@ -41,8 +60,13 @@ export class ColdBrowseHelperRuntime {
     this.cache = new ColdBrowseProjectionCache(options.maxSourceBytes, options.maxEntries);
   }
 
-  async execute(payload: ColdBrowseHelperOperation): Promise<{
-    result: SessionOpenedPayload | TranscriptPagePayload | DetailResult | { invalidated: true };
+  async execute(payload: ColdBrowseHelperOperation, requestId = 'cold-browse-helper'): Promise<{
+    result:
+      | SessionOpenedPayload
+      | TranscriptPagePayload
+      | DetailResult
+      | ColdBrowseHelperResolvedDurableDetail
+      | { invalidated: true };
     fingerprint?: string;
   }> {
     if (payload.operation === 'invalidate') {
@@ -91,6 +115,37 @@ export class ColdBrowseHelperRuntime {
           requiredMessageId: payload.options.requiredMessageId,
           maxLineBytes: this.options.maxResponseLineBytes,
         });
+      });
+    }
+
+    if (payload.operation === 'durable-detail') {
+      return this.finishResponse(payload.fence, loaded.fingerprint, () => {
+        const resolution = resolveDurableDetailFromTranscript(
+          loaded.browse.cache.transcript,
+          payload.fence.sessionPath,
+          payload.address,
+          payload.durableRef,
+        );
+        if (resolution.status === 'not-found') {
+          throw new DurableDetailNotFoundError(resolution.message);
+        }
+        if (resolution.status === 'not-addressable') {
+          throw new DurableDetailNotAddressableError(resolution.message);
+        }
+        const result: ColdBrowseHelperResolvedDurableDetail = {
+          value: resolution.value,
+          sizeBytes: resolution.sizeBytes!,
+          messageId: resolution.messageId!,
+          toolCallId: resolution.toolCallId!,
+          kind: 'tool-result',
+        };
+        assertResolvedDetailFitsFrame(
+          result,
+          payload.fence,
+          requestId,
+          this.options.maxResponseLineBytes ?? COLD_BROWSE_HELPER_MAX_FRAME_BYTES,
+        );
+        return result;
       });
     }
 
@@ -206,6 +261,29 @@ export class ColdBrowseHelperRuntime {
     }
     this.assertFingerprint(fence);
     return { fingerprint, result };
+  }
+}
+
+function assertResolvedDetailFitsFrame(
+  result: ColdBrowseHelperResolvedDurableDetail,
+  fence: ColdBrowseHelperFence,
+  requestId: string,
+  maxResponseLineBytes: number,
+): void {
+  const marker = '__pie_cold_browse_detail_value_marker__';
+  const markerBytes = Buffer.byteLength(JSON.stringify(marker), 'utf8');
+  const frameWithMarker = {
+    protocolVersion: COLD_BROWSE_HELPER_PROTOCOL_VERSION,
+    kind: 'response',
+    requestId,
+    ok: true,
+    fingerprint: fence.fingerprint,
+    result: { ...result, value: marker },
+  };
+  const fixedFrameBytes = Buffer.byteLength(`${JSON.stringify(frameWithMarker)}\n`, 'utf8');
+  const bytes = fixedFrameBytes - markerBytes + result.sizeBytes;
+  if (bytes > maxResponseLineBytes) {
+    throw new ColdBrowseHelperResponseTooLargeError(bytes, maxResponseLineBytes);
   }
 }
 

@@ -154,8 +154,11 @@ export class PieExtension implements vscode.Disposable {
     );
 
     this.openTabsRegistryPublisher = new OpenTabsRegistryPublisher({
-      request: async ({ revision, tabs }) => {
-        await this.backend.request('openTabs.set', { revision, tabs }, { timeoutMs: 5_000 });
+      request: async ({ revision, tabs }, { onTransportSettled }) => {
+        await this.backend.request('openTabs.set', { revision, tabs }, {
+          timeoutMs: 5_000,
+          onTransportSettled,
+        });
       },
       onError: (error, sync) => appendPieLog('warn', 'openTabs', 'openTabs.set failed', {
         error: toErrorMessage(error),
@@ -338,19 +341,26 @@ export class PieExtension implements vscode.Disposable {
           const persistedPinnedTabGroups = pinnedTabGroups
             .map((group) => group.filter((p) => !isPendingTabPath(p)))
             .filter((group) => group.length > 0);
+          const activePrivateSessionPaths = Object.entries(this.archState.sessions.privacyModeBySession)
+            .filter(([, enabled]) => enabled)
+            .map(([sessionPath]) => sessionPath);
+          // An omitted privateSessionPaths argument is an ordinary tab
+          // checkpoint, not an instruction to discard stale markers that a
+          // background startup cleanup has not successfully removed yet.
+          // Explicit privacy/close commands still pass an authoritative list.
+          const storedPrivateSessionPaths = context.globalState.get<unknown[]>(PRIVATE_SESSION_PATHS_STORAGE_KEY)
+            ?.filter((sessionPath): sessionPath is string => typeof sessionPath === 'string' && sessionPath.length > 0)
+            ?? [];
+          const persistedPrivateSessionPaths = (privateSessionPaths ?? [
+            ...new Set([...storedPrivateSessionPaths, ...activePrivateSessionPaths]),
+          ]).filter((sessionPath) => !isPendingTabPath(sessionPath));
           try {
             await Promise.all([
               context.globalState.update(OPEN_TABS_STORAGE_KEY, tabObjects),
               context.globalState.update(ACTIVE_SESSION_STORAGE_KEY, persistedActiveSessionPath),
               context.globalState.update(PINNED_TABS_STORAGE_KEY, persistedPinnedTabPaths),
               context.globalState.update(PINNED_TAB_GROUPS_STORAGE_KEY, persistedPinnedTabGroups),
-              context.globalState.update(
-                PRIVATE_SESSION_PATHS_STORAGE_KEY,
-                (privateSessionPaths ?? Object.entries(this.archState.sessions.privacyModeBySession)
-                  .filter(([, enabled]) => enabled)
-                  .map(([sessionPath]) => sessionPath))
-                  .filter((sessionPath) => !isPendingTabPath(sessionPath)),
-              ),
+              context.globalState.update(PRIVATE_SESSION_PATHS_STORAGE_KEY, persistedPrivateSessionPaths),
             ]);
           } catch (err) {
             appendPieLog('warn', 'globalState', 'tab persistence failed', {
@@ -476,7 +486,7 @@ export class PieExtension implements vscode.Disposable {
     // Push the restored open-tab summaries to the backend so the
     // `session_review` tool's listOpen works immediately after startup
     // (persistTabs only fires on tab changes, not on cold-start restore).
-    this.pushOpenTabsRegistry(true);
+    this.pushOpenTabsRegistry();
   }
 
   async restart(source: SessionOperationSource = { kind: 'host' }): Promise<void> {
@@ -560,6 +570,14 @@ export class PieExtension implements vscode.Disposable {
 
     const result = dispatch(this.archState, event);
     this.archState = result.state;
+    // Readiness is a post-reducer property, not just a BackendReadyChanged
+    // event. RestartBackend optimistically stops the registry before its
+    // asynchronous transport work starts, and the generation can advance
+    // before the replacement's ready event is delivered.
+    this.openTabsRegistryPublisher.setBackendReady(
+      this.archState.settings.backendReady,
+      this.backend.getGeneration(),
+    );
     const registryInputsAfter = this.archState.sessions;
     if (didOpenTabsRegistryInputsChange(registryInputsBefore, registryInputsAfter)) {
       // This covers tab/pin commands and BusyChanged in the same reducer turn;
@@ -586,6 +604,9 @@ export class PieExtension implements vscode.Disposable {
     }
     if (event.kind === 'BackendRestartResult' && event.operationId === this.restartOperationId) {
       if (event.ok) {
+        // BackendRestartResult is a replacement-generation boundary. Force a
+        // resend even when the host snapshot is structurally unchanged; the
+        // new coordinator has no acknowledgement ledger yet.
         this.pushOpenTabsRegistry(true);
         this.restartResolve?.();
       } else {

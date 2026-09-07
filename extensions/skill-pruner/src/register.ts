@@ -9,6 +9,7 @@ import {
 } from "./state.js";
 import { toErrorMessage } from "../../../shared/error-message.js";
 import { recordKeptSkills } from "../../../shared/pruned-skills.js";
+import { getPieBaseSystemPrompt, rebasePieToolPrompt } from "../../../shared/pie-harness-prompt.js";
 import { createRequestCapabilityDefinition, type PiToolSeams } from "./tools.js";
 import { getCodeVersion, prewarmCodeVersion } from "./version.js";
 import { buildPruningSystemPrompt, buildPruningUserMessage } from "../llm-scorer.js";
@@ -96,11 +97,36 @@ export default function register(pi: ExtensionAPI) {
 
 	// --- before_agent_start: skill + tool pruning ---
 	pi.on("before_agent_start", async (event: BeforeAgentStartEvent, ctx: unknown) => {
+		let modifiedSystemPrompt = event.systemPrompt;
+		let currentPieBasePrompt = getPieBaseSystemPrompt(ctx);
+		let toolPromptRefreshFailed = false;
+		const refreshToolProse = () => {
+			const freshPieBasePrompt = getPieBaseSystemPrompt(ctx);
+			if (currentPieBasePrompt === undefined || freshPieBasePrompt === undefined) {
+				toolPromptRefreshFailed = true;
+				return;
+			}
+			const rebased = rebasePieToolPrompt(modifiedSystemPrompt, currentPieBasePrompt, freshPieBasePrompt);
+			if (rebased === undefined && currentPieBasePrompt !== freshPieBasePrompt) {
+				toolPromptRefreshFailed = true;
+				return;
+			}
+			modifiedSystemPrompt = rebased ?? modifiedSystemPrompt;
+			currentPieBasePrompt = freshPieBasePrompt;
+		};
+		const setActiveTools = (names: string[]) => {
+			toolSeams.setActiveTools(names);
+			refreshToolProse();
+		};
+		const promptRefreshResult = () => modifiedSystemPrompt === event.systemPrompt
+			? undefined
+			: { systemPrompt: modifiedSystemPrompt };
+
 		const autonomousMode = isAutonomousModeEnabled();
 		if (autonomousMode) {
 			const active = toolSeams.getActiveTools();
 			if (active.includes(ASK_USER_TOOL_NAME)) {
-				toolSeams.setActiveTools(active.filter((name) => name !== ASK_USER_TOOL_NAME));
+				setActiveTools(active.filter((name) => name !== ASK_USER_TOOL_NAME));
 			}
 		}
 
@@ -108,7 +134,7 @@ export default function register(pi: ExtensionAPI) {
 		if (queuedCount > 0) {
 			if (queuedCount === 1) queuedPrompts.delete(event.prompt);
 			else queuedPrompts.set(event.prompt, queuedCount - 1);
-			return undefined;
+			return promptRefreshResult();
 		}
 
 		const activeConfig = getConfig();
@@ -140,7 +166,7 @@ export default function register(pi: ExtensionAPI) {
 			if (previouslyPruned.size === 0 || toolsManuallyDisabled) return;
 			const restored = [...new Set([...activeToolNames, ...previouslyPruned])]
 				.filter((name) => !blockedToolNames.has(name));
-			toolSeams.setActiveTools(restored);
+			setActiveTools(restored);
 			recordPrunedTools(sessionId, []);
 		};
 
@@ -152,7 +178,7 @@ export default function register(pi: ExtensionAPI) {
 				restorePrunerOwnedTools();
 				recordKeptSkills(sessionId, "keep-all");
 			}
-			return undefined;
+			return promptRefreshResult();
 		}
 
 		const skills = event.systemPromptOptions.skills ?? [];
@@ -164,7 +190,7 @@ export default function register(pi: ExtensionAPI) {
 			// off / too-short: the main session keeps every visible skill, so
 			// subagents should inherit keep-all (no filter) for this turn.
 			recordKeptSkills(sessionId, "keep-all");
-			return undefined;
+			return promptRefreshResult();
 		}
 
 		// Shadow mode observes decisions but must undo any tool filtering left by
@@ -172,7 +198,6 @@ export default function register(pi: ExtensionAPI) {
 		if (activeConfig.mode === "shadow") restorePrunerOwnedTools();
 
 		const sessionPath = getSessionPath(ctx);
-		let modifiedSystemPrompt = event.systemPrompt;
 		let skillPruningRan = false;
 		let skillResult: SkillPruningResult | null = null;
 		let toolResult: ToolPruningResult | null = null;
@@ -242,7 +267,7 @@ export default function register(pi: ExtensionAPI) {
 				if (activeConfig.mode === "auto") restorePrunerOwnedTools();
 				recordKnownSkills(sessionId, activeConfig.mode, allSkillPaths, [], []);
 				recordKeptSkills(sessionId, "keep-all");
-				return undefined;
+				return promptRefreshResult();
 			}
 
 			const fingerprint = buildPrepassFingerprint(llmInput, activeConfig);
@@ -290,10 +315,9 @@ export default function register(pi: ExtensionAPI) {
 			if (pruningError && activeConfig.mode === "auto") restorePrunerOwnedTools();
 
 			if (!pruningError || pruningError.startsWith("Model") || pruningError.startsWith("LLM pruning failed")) {
-				// Tool selection runs first so the skill keep-all safeguard can tell
-				// whether any tools survive: a legitimate full skill-prune is allowed
-				// through whenever tools remain (zero skills leaves the agent
-				// functional, unlike zero tools).
+				// Apply the tool decision first. Pi synchronously rebuilds its base prompt
+				// in setActiveTools; the Pie-only context seam then lets us rebase the
+				// chained prompt before filtering its skills block.
 				const toolSelection = applyToolSelection(
 					availableTools,
 					prunedTools,
@@ -302,12 +326,39 @@ export default function register(pi: ExtensionAPI) {
 				);
 				toolSafeguardReason = toolSelection.safeguardReason ?? toolSafeguardReason;
 
-				const toolsRemain = toolSelection.includedToolNames.length > 0;
-				const skillSelection = applySkillSelection(visibleSkills, prunedSkills, effectivePinned, activeConfig, toolsRemain);
-				skillSafeguardReason = skillSelection.safeguardReason ?? skillSafeguardReason;
+				if (activeConfig.tools && availableTools.length > 0) {
+					// Always apply the resolved auto-mode set, including keep-all and
+					// fail-open outcomes, so tools pruned on a previous turn are restored.
+					if (activeConfig.mode === "auto") {
+						const hadPrunedTools = getPrunedTools(sessionId).size > 0;
+						if (toolSelection.excludedToolNames.length > 0 || hadPrunedTools) {
+							setActiveTools(toolSelection.includedToolNames);
+						}
+						recordPrunedTools(sessionId, toolSelection.excludedToolNames);
+					}
+					toolResult = {
+						included: toolSelection.includedToolNames,
+						excluded: toolSelection.excludedToolNames,
+						tokensSaved: estimateToolTokens(availableTools, toolSelection.excludedToolNames),
+					};
+				}
 
-				// --- Skill pruning: rewrite the skills block in the system prompt ---
-				const match = event.systemPrompt.match(SKILLS_BLOCK_RE);
+				const toolsRemain = toolSelection.includedToolNames.length > 0;
+				let skillSelection = applySkillSelection(visibleSkills, prunedSkills, effectivePinned, activeConfig, toolsRemain);
+				const staleToolProseCannotBeRebased = toolPromptRefreshFailed
+					&& /(?:^|\n)Available tools:\n/.test(event.systemPrompt);
+				if (activeConfig.mode === "auto" && staleToolProseCannotBeRebased) {
+					// Standalone Pi does not expose Pie's per-session accessor. Returning a
+					// skill-edited copy of the pre-setActiveTools event would restore stale
+					// tool prose, so fail open for skills instead.
+					skillSelection = applySkillSelection(visibleSkills, null, effectivePinned, activeConfig, toolsRemain);
+					skillSafeguardReason = "Pie fresh-base accessor unavailable; kept all skills to avoid restoring stale tool guidance";
+				} else {
+					skillSafeguardReason = skillSelection.safeguardReason ?? skillSafeguardReason;
+				}
+
+				// --- Skill pruning: rewrite the skills block in the fresh prompt ---
+				const match = modifiedSystemPrompt.match(SKILLS_BLOCK_RE);
 				let newSkillBlock = "";
 				let originalSkillBlock = "";
 				if (match) {
@@ -326,34 +377,19 @@ export default function register(pi: ExtensionAPI) {
 					const excludedSkillPaths = skillSelection.excludedSkillNames.map((name) => visibleSkills.find((skill) => skill.name === name)?.filePath).filter(Boolean) as string[];
 					if (activeConfig.mode === "shadow") {
 						recordKnownSkills(sessionId, "shadow", allSkillPaths, [], excludedSkillPaths);
+					} else if (staleToolProseCannotBeRebased) {
+						recordKnownSkills(sessionId, "auto", allSkillPaths, [], []);
+						recordHiddenSkills(sessionId, []);
 					} else {
 						recordKnownSkills(sessionId, "auto", allSkillPaths, excludedSkillPaths, []);
 						recordHiddenSkills(sessionId, excludedSkills);
-						modifiedSystemPrompt = event.systemPrompt.replace(SKILLS_BLOCK_RE, replacement);
+						modifiedSystemPrompt = modifiedSystemPrompt.replace(SKILLS_BLOCK_RE, replacement);
 						skillPruningRan = true;
 					}
 				} else if (skills.length > 0) {
 					console.warn("[skill-pruner] skills block not found in system prompt; skipping skill pruning");
 					recordSkillsBlockNotFound(sessionId, activeConfig.mode);
 					recordKnownSkills(sessionId, activeConfig.mode, allSkillPaths, [], []);
-				}
-
-				// --- Tool pruning: disable pruned tools (auto mode only) ---
-				if (activeConfig.tools && availableTools.length > 0) {
-					// Always apply the resolved auto-mode set, including keep-all and
-					// fail-open outcomes, so tools pruned on a previous turn are restored.
-					if (activeConfig.mode === "auto") {
-						const hadPrunedTools = getPrunedTools(sessionId).size > 0;
-						if (toolSelection.excludedToolNames.length > 0 || hadPrunedTools) {
-							toolSeams.setActiveTools(toolSelection.includedToolNames);
-						}
-						recordPrunedTools(sessionId, toolSelection.excludedToolNames);
-					}
-					toolResult = {
-						included: toolSelection.includedToolNames,
-						excluded: toolSelection.excludedToolNames,
-						tokensSaved: estimateToolTokens(availableTools, toolSelection.excludedToolNames),
-					};
 				}
 
 				// --- Audit decision: one row covering skills + tools so analytics sees both ---
@@ -420,9 +456,12 @@ export default function register(pi: ExtensionAPI) {
 		recordKeptSkills(sessionId, skillResult?.included ?? "keep-all");
 
 		if (activeConfig.mode === "shadow") {
-			return { systemPrompt: event.systemPrompt, message: feedbackMessage ?? undefined };
+			if (toolPromptRefreshFailed && modifiedSystemPrompt === event.systemPrompt) {
+				return feedbackMessage ? { message: feedbackMessage } : undefined;
+			}
+			return { systemPrompt: modifiedSystemPrompt, message: feedbackMessage ?? undefined };
 		}
-		if (skillPruningRan) {
+		if (skillPruningRan || modifiedSystemPrompt !== event.systemPrompt) {
 			return { systemPrompt: modifiedSystemPrompt, message: feedbackMessage ?? undefined };
 		}
 		return feedbackMessage ? { message: feedbackMessage } : undefined;

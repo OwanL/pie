@@ -20,7 +20,3 @@ Load only the reference(s) relevant to the current phase.
 | GitHub mechanics: branches, commits, PRs, responding to review feedback | [github.md](references/github.md) |
 | Check a PR is ready before requesting review | [pr-readiness.md](references/pr-readiness.md) |
 | Review someone else's PR | [pr-review.md](references/pr-review.md) |
-
-## Shared rules
-
-_TODO: rules that apply in every phase (e.g. branch protection expectations, PR size ceiling, when to stop and ask the user, never widening scope silently)._

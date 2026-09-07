@@ -385,7 +385,10 @@ export default function (pi: ExtensionAPI) {
     description: 'Session evaluation: list open/pinned sessions, fetch blinded evidence, compile and persist canonical reviews, and enqueue explicit closure actions.',
     promptSnippet: 'List, inspect, and review open app sessions.',
     promptGuidelines: [
-      'List once before review work. Review only those selected targets, exclude (self), and do not re-rate already-reviewed sessions. Ordinary user follow-ups and closure of earlier targets do not invalidate the batch; every target is still revalidated against live membership and identity. Relist after an edit/resend/branch rewrite or extension restart, and to add newly selected targets. The tool permits one active evidence target: finish, record, and request closeReviewed before another; a checkpoint-blocked target remains unreviewed but no longer blocks later targets. Treat getReviewStatus.checkpoint as authoritative: launch exactly its entries with the tool-free session-evaluator, issued bucket/workflowRef/taskInstructions, and never exceed its one-retry budget. Never call closeSelf automatically. Only call it with confirmSelf:true after a same-turn listSelected when the user explicitly asked to hide/close this pinned evaluator session; closeSelf never interrupts running work.'
+      'Before using session_review, load evaluate-sessions and snapshot the requested targets with listOpen or listSelected. Exclude this evaluator; existing reviews are closure-only in the normal workflow.',
+      'For session_review, treat getReviewStatus.checkpoint as authoritative: launch only its entries with the tool-free session-evaluator and exact issued bucket/workflowRef/taskInstructions. Never exceed its one-retry budget.',
+      'Process one session_review target through recording and a closeReviewed request before starting another. A checkpoint-blocked target remains unreviewed but releases the batch guard.',
+      'Never call session_review closeSelf automatically. Require an explicit user request, a fresh same-turn listSelected confirming this evaluator is pinned, and confirmSelf:true. closeSelf never interrupts running work.',
     ],
     parameters: sessionReviewSchema,
 

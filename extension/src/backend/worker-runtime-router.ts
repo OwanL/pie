@@ -28,7 +28,7 @@ import {
   type WorkerClientSnapshot,
 } from './worker-client';
 import { createOperationalIncident } from '../shared/incidents.js';
-import { backendDebug, backendWarn } from './log';
+import { backendDebug, backendError, backendInfo, backendWarn } from './log';
 import { BackendError } from './server-io';
 import { SETTLED_SESSION_CAPABILITIES } from './session-activity';
 import type {
@@ -217,6 +217,21 @@ const SYNC_SLOW_ACK_DIAGNOSTIC_MS = 250;
 const MAX_REPORTED_UNEXPECTED_WORKERS = 1_024;
 const LIVE_SYNC_RETRY_DELAYS_MS = [1_000, 5_000, 15_000, 30_000] as const;
 
+/** Describe the exit status of a confirmed worker exit without fabricating
+ *  either field: a `null` code/signal means the OS reported none, and an
+ *  absent pair means no confirmed exit was observed at all. */
+function describeWorkerExitEvidence(snapshot: WorkerClientSnapshot): string | undefined {
+  if (snapshot.exitCode === undefined && snapshot.exitSignal === undefined) return undefined;
+  if (snapshot.exitCode === null && snapshot.exitSignal === null) {
+    return 'the operating system reported no exit code or signal';
+  }
+  const observed = [
+    snapshot.exitCode !== null && snapshot.exitCode !== undefined ? `exit code ${snapshot.exitCode}` : undefined,
+    snapshot.exitSignal ? `signal ${snapshot.exitSignal}` : undefined,
+  ].filter((part): part is string => typeof part === 'string').join(' + ');
+  return observed.length > 0 ? observed : undefined;
+}
+
 const defaultRouterScheduler: WorkerClientScheduler = {
   now: () => Date.now(),
   setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
@@ -297,6 +312,13 @@ export class WorkerRuntimeRouter {
   /** A sync rejection and the resulting process exit describe one worker-loss
    * incident. Whichever path publishes it first suppresses later duplicates. */
   private readonly reportedUnexpectedWorkerKeys = new Set<string>();
+  /** Confirmed exit evidence is owned by the worker generation, not by the
+   * route or UI incident lifecycle. This guard keeps the evidence record
+   * exact-once when sync failure and exit callbacks race. */
+  private readonly reportedConfirmedExitKeys = new Set<string>();
+  /** Generations deliberately stopped by the router retain their classification
+   * until the late confirmed-exit callback arrives, even if the route is gone. */
+  private readonly intentionalWorkerStopKeys = new Set<string>();
   /** Public busy sequencing belongs to the coordinator generation, not an
    *  individual worker. A cold->hot re-promotion creates a new process whose
    *  SDK-local counter starts at zero; forwarding that raw counter makes the
@@ -711,6 +733,7 @@ export class WorkerRuntimeRouter {
         assertActive();
         if (transition.retired) return;
         transition.retireStarted = true;
+        this.markIntentionalWorkerStop(route.worker);
         await this.options.supervisor.stopWorker(route.currentLeasePath, reason);
         this.extensionUiOwners.clearWorker(route.owner.workerId, route.owner.workerGeneration);
         this.clearPendingProviderAcquires(route);
@@ -785,6 +808,7 @@ export class WorkerRuntimeRouter {
   }
 
   private async stopTransitionRoute(route: HotWorkerRoute, reason: string): Promise<void> {
+    this.markIntentionalWorkerStop(route.worker);
     await this.options.supervisor.stopWorker(route.currentLeasePath, reason);
     this.extensionUiOwners.clearWorker(route.owner.workerId, route.owner.workerGeneration);
     this.clearPendingProviderAcquires(route);
@@ -858,6 +882,7 @@ export class WorkerRuntimeRouter {
   async retire(sessionPath: string, reason = 'runtime retirement'): Promise<void> {
     const route = this.requireHot(sessionPath);
     const rootKey = routeKey(route.rootSessionPath);
+    this.markIntentionalWorkerStop(route.worker);
     const retirement = (async () => {
       this.clearLiveSyncRetries(route.worker);
       await this.options.supervisor.stopWorker(route.currentLeasePath, reason);
@@ -990,8 +1015,15 @@ export class WorkerRuntimeRouter {
     const route = identity
       ? this.workersById.get(identity.workerId)
       : [...this.workersById.values()].find((candidate) => routeKey(candidate.workerRootSessionPath) === routeKey(rootSessionPath));
+    // A sync failure may claim the UI incident and retire the route before
+    // this confirmed-exit callback runs. Evidence therefore precedes both
+    // route lookup acceptance and the UI incident dedupe gate.
+    const owner = route?.owner ?? identity;
+    const intentionalExit = owner !== undefined && this.isIntentionalWorkerExit(owner);
+    if (owner) this.logConfirmedWorkerExitEvidence(owner, snapshot, intentionalExit);
     if (!route || route.state !== 'hot') return;
     const owningState = this.roots.get(routeKey(route.rootSessionPath));
+    if (intentionalExit && owningState?.state === 'retiring') return;
     let confirmedExitOwnsFailedTransition = false;
     if (owningState?.state === 'transitioning'
       && sameWorkerOwner(owningState.owner, route.owner)) {
@@ -1026,13 +1058,18 @@ export class WorkerRuntimeRouter {
     this.roots.delete(routeKey(route.rootSessionPath));
     this.roots.set(routeKey(route.currentLeasePath), cold);
     this.notify(cold);
-    this.reconcileInterruptedCheckpoint(route);
+    if (!intentionalExit) this.reconcileInterruptedCheckpoint(route);
+    if (intentionalExit) return;
     // Preserve the crash cause behind the notice's More control. The worker's
     // stderr tail is the only place an unhandled rejection/exception stack is
     // visible; without it a SESSION_WORKER_EXITED notice is undiagnosable.
     const stderrTail = snapshot.stderrTail?.trim();
+    const exitEvidence = describeWorkerExitEvidence(snapshot);
+    // The first causal failure (EOF/fatal) stays first; the observed exit
+    // status follows as evidence and never replaces it.
     const detail = [
       snapshot.failure,
+      exitEvidence ? `Observed exit status: ${exitEvidence}.` : undefined,
       stderrTail ? `Worker stderr: ${stderrTail.slice(-2000)}` : undefined,
     ].filter((part): part is string => typeof part === 'string' && part.length > 0).join('\n') || undefined;
     if (this.claimUnexpectedWorkerIncident(route.worker)) {
@@ -1906,7 +1943,7 @@ export class WorkerRuntimeRouter {
   }
 
   private claimUnexpectedWorkerIncident(worker: SupervisedWorker): boolean {
-    const key = `${worker.workerId}:${worker.workerGeneration}`;
+    const key = this.workerGenerationKey(worker);
     if (this.reportedUnexpectedWorkerKeys.has(key)) return false;
     this.reportedUnexpectedWorkerKeys.add(key);
     if (this.reportedUnexpectedWorkerKeys.size > MAX_REPORTED_UNEXPECTED_WORKERS) {
@@ -1914,6 +1951,51 @@ export class WorkerRuntimeRouter {
       if (oldest) this.reportedUnexpectedWorkerKeys.delete(oldest);
     }
     return true;
+  }
+
+  private markIntentionalWorkerStop(worker: SupervisedWorker): void {
+    const key = this.workerGenerationKey(worker);
+    if (this.reportedUnexpectedWorkerKeys.has(key)) return;
+    this.intentionalWorkerStopKeys.add(key);
+    while (this.intentionalWorkerStopKeys.size > MAX_REPORTED_UNEXPECTED_WORKERS) {
+      const oldest = this.intentionalWorkerStopKeys.values().next().value as string | undefined;
+      if (!oldest) break;
+      this.intentionalWorkerStopKeys.delete(oldest);
+    }
+  }
+
+  private isIntentionalWorkerExit(worker: Pick<SupervisedWorker, 'workerId' | 'workerGeneration'>): boolean {
+    const key = this.workerGenerationKey(worker);
+    return this.intentionalWorkerStopKeys.has(key) && !this.reportedUnexpectedWorkerKeys.has(key);
+  }
+
+  private logConfirmedWorkerExitEvidence(
+    worker: Pick<SupervisedWorker, 'workerId' | 'workerGeneration'>,
+    snapshot: WorkerClientSnapshot,
+    intentional: boolean,
+  ): void {
+    const key = this.workerGenerationKey(worker);
+    if (this.reportedConfirmedExitKeys.has(key)) return;
+    this.reportedConfirmedExitKeys.add(key);
+    while (this.reportedConfirmedExitKeys.size > MAX_REPORTED_UNEXPECTED_WORKERS) {
+      const oldest = this.reportedConfirmedExitKeys.values().next().value as string | undefined;
+      if (!oldest) break;
+      this.reportedConfirmedExitKeys.delete(oldest);
+    }
+    const log = intentional ? backendInfo : backendError;
+    log('backend-worker', 'worker.exit-confirmed', {
+      workerId: worker.workerId,
+      workerGeneration: worker.workerGeneration,
+      ...(snapshot.pid ? { pid: snapshot.pid } : {}),
+      exitCode: snapshot.exitCode,
+      exitSignal: snapshot.exitSignal,
+      exitClassification: intentional ? 'intentional-stop' : 'unexpected-exit',
+      ...(snapshot.failure ? { failure: snapshot.failure } : {}),
+    });
+  }
+
+  private workerGenerationKey(worker: Pick<SupervisedWorker, 'workerId' | 'workerGeneration'>): string {
+    return `${worker.workerId}:${worker.workerGeneration}`;
   }
 
   private async withSyncLock<T>(operation: () => Promise<T>): Promise<T> {

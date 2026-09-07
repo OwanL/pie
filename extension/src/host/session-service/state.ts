@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 
 import { BackendClient } from '../backend/client';
 import { assertInvariant, auditLog, bootLog } from '../util/audit';
+import { appendPieLog } from '../util/pie-log';
 import { toErrorMessage } from '../util/error-message';
 import {
   PENDING_SESSION_PREFIX,
@@ -1026,6 +1027,12 @@ export class SessionServiceState {
   }
 
   private async runPreload(record: PreloadRecord): Promise<void> {
+    const requestStartedAt = performance.now();
+    appendPieLog('info', 'session-timing', 'session.preload.request.sent', {
+      sessionPath: record.sessionPath,
+      generation: record.generation,
+      preloadId: record.id,
+    });
     try {
       const payload = await this.backend.request<SessionOpenedPayload>(
         'session.preload',
@@ -1035,11 +1042,24 @@ export class SessionServiceState {
           onTransportSettled: () => this.handlePreloadTransportSettled(record),
         },
       );
+      appendPieLog('info', 'session-timing', 'session.preload.response.received', {
+        sessionPath: record.sessionPath,
+        generation: record.generation,
+        preloadId: record.id,
+        durationMs: Math.max(0, Math.round(performance.now() - requestStartedAt)),
+      });
       if (!this.isCurrentPreloadRecord(record)) return;
       if (this.getSessionDataEpoch(record.sessionPath) !== record.requestEpoch) return;
       if (!this.getArchState().sessions.openTabPaths.includes(record.sessionPath)) return;
       this.onPreloadedSessionOpened?.(payload);
     } catch (error) {
+      appendPieLog('warn', 'session-timing', 'session.preload.request.failed', {
+        sessionPath: record.sessionPath,
+        generation: record.generation,
+        preloadId: record.id,
+        durationMs: Math.max(0, Math.round(performance.now() - requestStartedAt)),
+        error: toErrorMessage(error),
+      });
       // Cancellation and stale generations are expected during selection,
       // close, generation, and restart. The transport-settlement callback,
       // rather than this local waiter, releases the single-flight slot.

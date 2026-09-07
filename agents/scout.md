@@ -11,7 +11,7 @@ Working rules:
 - Prefer broad-to-narrow discovery: locate files first, then read only the sections that matter.
 - Trace actual entry points, ownership, dependencies, and likely change points.
 - Use `bash` only for non-mutating inspection commands.
-- Answer the delegated question directly; do not pad with generic overviews.s
+- Answer the delegated question directly; do not pad with generic overviews.
 - Do not guess. Call out uncertainty, missing context, and conflicting evidence explicitly.
 - Return exact file paths and line ranges.
 - Keep the handoff concise; include code snippets only when they materially change the next step.

@@ -11,357 +11,182 @@ was done—not merely the current diff and not the model or author.
 
 Do not use it for ordinary code review, debugging, implementation, or general feedback.
 
-## Evaluation rules
-
-- Review exactly the requested targets. Use `listOpen` both for explicitly named open
-  targets and for an explicit all-open request. `listOpen` returns the host-pushed open
-  set, so for a named request filter strictly to the requested target identities
-  (prefer the exact session ID/path; resolve a display name only when unambiguous) and
-  never review other returned tabs. Use `listSelected` for pinned-target requests.
-  Always exclude this evaluator session.
-- Use the stable session-header ID as identity. If it is absent, use the tool's path
-  fallback and preserve that fact.
-- Do not re-evaluate a target with an existing canonical review. Queue its existing
-  review for closure instead. Re-evaluation requires an explicit audit/calibration
-  request.
-- Keep authorship blind. Reviewers must not receive model/provider identity, model
-  changes, runtime/settings identity, reputation, treatment data, or raw session JSONL.
-- Use only the bounded, blinded bundle from `getEvidence`. Completion claims are
-  evidence to weigh, not proof.
-- Freeze the requirements before classifying results. Retain changed or withdrawn
-  requirements as `superseded`.
-- If available, human responses are evidence for one criterion or surface, never an overall score; human input is not required to complete a review.
-- Persist before closing. Never write sidecars, import the internal store, fabricate
-  provenance, or replace the review tool with a script.
-
 ## Evaluation standard
+
+### Scope and evidence
+
+- Review exactly the requested targets. Completion claims are evidence to weigh, not
+  proof. Use only the bounded, blinded `getEvidence` bundle; never expose model,
+  provider, model-change, runtime/settings, treatment, reputation, or raw session JSONL
+  to evaluators.
+- Freeze the requirements before classifying results. Preserve changed or withdrawn
+  requirements as `superseded`.
+- Human responses, when available, support one criterion or surface, never an overall
+  score. Human input is not required to finish a review.
+- Persist through the review tool. Never write sidecars, import its internal store,
+  fabricate provenance, or replace it with scripts.
 
 ### Criterion ledger
 
 Create observable, independently classifiable criteria from the user's requirements
-and only genuinely necessary implied conditions. Each criterion has:
+and only genuinely necessary implied conditions. Each criterion has `criterionId`, an
+observable `statement`, `origin` (`explicit` or `necessary_implied`), `importance`
+(`core`: missing it defeats the primary outcome; `supporting`: materially affects
+quality or completeness; `optional`: useful non-core value or requested polish), and
+taxonomy for activity, surface, and evidence mode. Avoid generic criteria such as
+“high quality” unless they are necessary to the requested value.
 
-```text
-criterionId, statement, origin, importance, taxonomy
-```
+Classify every frozen criterion exactly once. Use only these status/reason pairs:
 
-Use `origin: explicit` or `necessary_implied`; assign importance as:
-
-- `core` — missing it defeats the primary outcome;
-- `supporting` — materially affects quality or completeness;
-- `optional` — useful non-core value or requested polish.
-
-Taxonomy identifies activity, surface, and evidence mode. Avoid generic criteria such as
-“high quality” unless they are necessary for the requested value.
-
-### Criterion classification
-
-Classify every frozen criterion exactly once:
-
-| Status | Valid reasons |
-| --- | --- |
-| `met` | `none` |
-| `partly_met` | `omitted`, `attempt_failed`, `incorrect_result`, `regression`, `unknown` |
-| `unmet` | `omitted`, `attempt_failed`, `incorrect_result`, `regression`, `unknown` |
-| `blocked` | `external_blocker`, `user_dependency`, `unknown` |
-| `not_assessable` | `human_evidence_missing`, `insufficient_artifact_evidence`, `unknown` |
-| `superseded` | `none` |
+- `met` or `superseded` → `none`;
+- `partly_met` or `unmet` → `omitted`, `attempt_failed`, `incorrect_result`,
+  `regression`, or `unknown`;
+- `blocked` → `external_blocker`, `user_dependency`, or `unknown`;
+- `not_assessable` → `human_evidence_missing`, `insufficient_artifact_evidence`, or
+  `unknown`.
 
 Attach evidence references to every classification. Do not mark a claimed completion
-`met` when the bundle cannot verify it; use `not_assessable` when the evidence cannot
+`met` when the bundle cannot verify it; use `not_assessable` when evidence cannot
 fairly distinguish success from failure.
 
-### Process and evidence
+### Process, evidence, and confidence
 
-Return these process dimensions:
-
-```text
-requirementDiscipline: proportionate | underclarified | overclarified | not_assessable
-verificationDiscipline: proportionate | underverified | oververified | not_applicable | not_assessable
-scopeControl: controlled | minor_avoidable_drift | material_scope_drift | not_assessable
-recovery: effective | partly_effective | ineffective | not_needed | not_assessable
-finalClaimAccuracy: accurate | overclaimed | underclaimed | unclear | no_final_claim
-```
-
-Return evidence coverage:
-
-```text
-requirements: clear | partly_clear | unclear
-artifacts: direct | partial | none | not_applicable
-execution: direct | partial | reported_only | none | not_applicable
-human: not_needed | supports | contradicts | inconclusive | unanswered | unavailable
-```
-
-Include concrete limitations. Reported execution is not direct execution. Name
-transcript/diff omissions, missing artifacts, workspace drift, ambiguous attribution,
-and unanswered checks. Use confidence `high`, `medium`, or `low`; high requires direct
-support for every active core and outcome-supporting classification.
+Return process dimensions `requirementDiscipline`, `verificationDiscipline`,
+`scopeControl`, `recovery`, and `finalClaimAccuracy`, using the review tool's issued
+enums. Return evidence coverage for `requirements`, `artifacts`, `execution`, and
+`human`, plus concrete `limitations`. Reported execution is not direct execution;
+name transcript/diff omissions, missing artifacts, workspace drift, ambiguous
+attribution, and unanswered checks. Use confidence `high`, `medium`, or `low`; `high`
+requires direct support for every active core and outcome-supporting classification.
 
 Overall attainment and the quality index are derived from the canonical ledger by the
 review tool. Never ask a reviewer to choose them or hand-calculate them.
 
-## Compaction-safe workflow
+## Durable control loop
 
-The session-review tool owns workflow recovery; model context does not. Process each
-unreviewed target **end-to-end and persist it before starting the next target**. Never
-fetch evidence or accumulate role outputs for the whole batch up front. The only
-parallel calls permitted are the two independent proposals or the two independent
-classifiers for the current target.
+The `session-review` checkpoint is the executable workflow and owns recovery; model
+context does not. Its orchestrator JSONL retains tagged calls, role outputs, and
+runtime provenance across compaction. Process one unreviewed target end-to-end,
+persist it, and request closure before starting another. The
+checkpoint's `taskInstructions` is authoritative for each role's output contract,
+enums, namespace rules, retry correction, and raw-JSON requirements; do not duplicate
+or override those contracts here. This skill owns target control, evidence handling,
+phase handoffs, and evaluation principles.
 
-Every delegated role must carry the exact `workflowRef` returned by
-`getReviewStatus` in the subagent tool's `workflowRef` argument. Launch exactly the
-entries in `status.checkpoint.launch`: use its `agent` (`session-evaluator`), `bucket`,
-and `workflowRef` without substituting the general-purpose `reviewer` agent. Map the
-entry's `taskInstructions` verbatim into the required `subagent` `task` argument. The
-subagent schema has no separate `taskInstructions` field, so append the exact bounded
-evidence and phase handoff to that task string; do not paraphrase or replace the
-issued instructions or output contract. The child never sees the opaque
-`workflowRef`. The parent session JSONL retains the tagged call, final JSON output, and
-authoritative runtime details even after history compaction. Do not copy model,
-provider, prompt hash, bucket, or tool-call IDs into a draft; `recordRecoveredReview`
-recovers and validates them itself.
+For every listed launch, use exactly the issued `agent` (`session-evaluator`), bucket,
+`workflowRef`, and `taskInstructions`. Put `taskInstructions` verbatim in the
+`subagent` task and append only the exact bounded evidence and phase handoff; the
+subagent schema has no separate task-instructions field. Preserve the exact role ref,
+target, evidence manifest, and handoff. The opaque ref is for orchestration; the child
+remains tool-free and blind. Never substitute a general-purpose reviewer, change a
+bucket, paraphrase the issued instructions, or invent a role. Launch only entries in
+`checkpoint.launch`; independent proposal or classification entries may run as sibling
+calls.
 
-`checkpoint` is the executable phase boundary:
+Call `getReviewStatus` once after each settled launch group. Do not poll while children
+run or call it twice without new durable role results. A retry is the same role, target,
+evidence manifest, phase handoff, and workflow ref, with only the newly issued
+corrective `taskInstructions` changed; launch it only when `checkpoint.launch`
+explicitly issues attempt 2. Never exceed the one-retry budget.
 
-- `run-roles` — launch every and only listed role. Two listed proposal roles or two
-  listed classification roles may run as sibling calls in parallel.
-- `ready-to-record` — call `recordRecoveredReview`; do not launch another evaluator.
-- `blocked` — an allowed second attempt for a role is exhausted. Do not launch that
-  role again; report the target blocker and leave it unreviewed. A blocked target no
-  longer monopolizes the batch guard, so continue with the next requested target.
+### 1. Snapshot and target queue
 
-Call `getReviewStatus` once after a listed launch group settles. Do not poll it while
-children run, call it twice without new durable role results, or improvise retries.
-A retry is the same role, target, evidence manifest, phase handoff, and
-`workflowRef`, but uses the newly issued `taskInstructions` (including its corrective
-validation guidance) in the `task` argument. It is not a byte-for-byte replay: do not
-change the evidence/workflow or invent a new ref, and do not launch it unless the
-checkpoint explicitly issues attempt 2.
+1. Choose one snapshot action: `listSelected` for a pinned-target request, or
+   `listOpen` for explicitly named open targets or an explicit all-open request. These
+   are host-pushed tab sets, not disk-wide session listings. For a named request,
+   filter the result strictly to the requested session IDs/paths; resolve a display
+   name only when it is exact and unambiguous. Never review a returned but unrequested
+   tab. Always exclude this evaluator session.
+2. Use the stable session-header ID as identity. If absent, use the tool path fallback
+   and preserve that fact. Partition this effective set once into unreviewed and
+   already-reviewed targets; do not re-rate an existing canonical review. Only an
+   explicit calibration request (including an explicitly named audit/re-evaluation)
+   authorizes it.
+3. Queue already-reviewed targets for closure using their existing review IDs. If more
+   than one exists, make exactly one `closeReviewedBatch` call with each snapshot's
+   `sessionId`, `reviewId`, and `sessionPath`. Inspect every result; do not resend
+   successes, and relist before retrying only an authority-stale failure.
+4. The snapshot remains valid across ordinary follow-ups, deferred wake-ups, history
+   compaction, and closure of earlier targets. The tool revalidates membership,
+   identity, running state, and review state. Relist after an extension/backend
+   restart, an edited/resubmitted/rewritten evaluator branch, or to add newly requested targets. An
+   absent target is ineligible. A `listSelected` target must remain pinned; a
+   `listOpen` target may be pinned or unpinned. The old snapshot never gains targets
+   implicitly; use an explicit relist to adopt additional requested targets.
+5. After a required relist, call `getReviewStatus` for the current target. It
+   rehydrates issued manifests and completed tagged roles; never rerun a completed
+   role. History compaction alone needs no relist: call status directly and reissue
+   `getEvidence` once only if the identical bundle is no longer in context, never just
+   to check progress.
+6. Count committed targets in the current turn. For a large batch, after three
+   targets each reach persisted-review plus closure-requested, if `defer_trigger` is
+   available and targets remain, register a
+   1-second timer whose note contains `resume review batch`, the last committed
+   session ID, and the next target ID, then end the turn. Register only at a committed
+   target boundary. Resume from the existing snapshot after wake-up.
 
-### 1. Snapshot
+### 2. Evidence and checkpoint loop
 
-1. Choose one snapshot action. Use `listSelected` for a pinned-target request;
-   it lists the host's currently pinned tabs and is the authority for that batch. Use
-   `listOpen` for either explicitly named open targets or an explicit all-open request;
-   it lists all currently open tabs pushed by the host, pinned or unpinned, and is not a
-   disk-wide session listing. For a named request, filter the listing strictly to the
-   requested session IDs/paths (resolving an exact, unambiguous display name only when
-   necessary) before treating the result as the effective target set. Never call both
-   for the same snapshot.
-2. Partition only that effective target set once into unreviewed and already-reviewed
-   targets. Never review, fetch evidence for, or close a tab that was returned by
-   `listOpen`/`listSelected` but was not requested.
-3. Queue already-reviewed targets for closure using their existing review IDs. When
-   there is more than one, make exactly one `closeReviewedBatch` call with the
-   `sessionId`, `reviewId`, and `sessionPath` values from that same list snapshot.
-   Each entry is revalidated independently against live tab authority and the
-   canonical review store, so inspect every result: do not resend successes, and
-   relist before retrying only entries that failed because authority became stale.
-4. Work through unreviewed targets one at a time using phases 2–6 below.
+For the current target, call `getEvidence` once, then `getReviewStatus` to obtain the
+checkpoint and exact bounded handoff. Use the same blinded bundle for every role in
+this target; do not replace it with a parent-written summary.
 
-The snapshot remains valid across ordinary user follow-ups, deferred-trigger wake-ups,
-history compaction, and closure/removal of earlier targets. The tool live-revalidates
-each original target's membership, identity, running state, and review state. Do not
-relist for those events. Relist after an extension/backend restart or an edited,
-resubmitted, or rewritten branch, and relist to add targets that were not in the
-original snapshot. A target is ineligible while absent from the live registry. For a
-`listSelected` snapshot it must still be pinned; for a `listOpen` snapshot it may be
-pinned or unpinned. The old snapshot never expands to a different or newly selected
-target; relist to adopt new members.
+Repeat this control loop until recording or a durable blocker:
 
-After a required relist, call `getReviewStatus` for the current target. It rehydrates
-issued evidence manifests and completed tagged roles from the orchestrator JSONL.
-Never rerun a role reported complete. If a listed next role needs the evidence bundle
-and it is no longer in context, call `getEvidence` once again; the static target
-produces the same bounded bundle/manifest. History compaction alone needs no relist;
-call `getReviewStatus` directly, and reissue `getEvidence` only when the exact bundle
-is no longer in context. Do not refetch evidence merely to check progress.
+- `run-roles`: launch every and only `checkpoint.launch`, forwarding each entry's
+  exact instructions, role ref, agent, bucket, bundle, and applicable handoff. Do not
+  launch another evaluator until the next status checkpoint.
+- After the group settles, call `getReviewStatus` once. Its recovered roles and
+  `handoff` are authoritative; do not rewrite, classify, or add to them.
+- Proposals are independent, propose observable criteria only, and do not classify or
+  choose an overall. Consolidation receives the same evidence and the exact proposal
+  handoff. It merges/deduplicates and freezes the ledger; it does not classify it.
+- The two fresh classifiers receive the same evidence, the immutable frozen ledger,
+  and the recovered human response if present. They classify every frozen criterion;
+  do not mutate the ledger or reuse a proposal role.
+- If status requests `adjudication`, provide the same evidence and its exact handoff
+  (ledger, both component outputs, and every listed `materialFields`, including the
+  required criterion reason fields). Resolve every and only those fields. Do not
+  adjudicate non-material differences; the tool performs permitted deterministic
+  merges, limitation unions, and lower-confidence selection.
 
-For a large batch, count committed targets in the current turn. After three targets
-have each reached persisted-review + closure-requested, if targets remain and
-`defer_trigger` is available, register a 1-second timer with a note containing “resume
-review batch”, the last committed session ID, and the next target ID, then end the turn.
-The automatic wake-up starts the next bounded chunk from the existing snapshot without
-waiting for the user to type “Continue”. Register only at a committed target boundary,
-never mid-target.
+If the checkpoint is `ready-to-record`, stop launching roles. If it is `blocked` after
+its issued attempt-2 retry, report the role error, leave this target unreviewed, and
+continue with the next original target; a blocked target releases the one-target
+batch guard. Do not launch a third attempt, create a new evidence key, or reset the
+retry budget. Keep the evaluator session open.
 
-### 2. Evidence and independent proposals
+### 3. Record and close immediately
 
-Call `getEvidence` for only this target, then call `getReviewStatus` to obtain the
-evidence-bound checkpoint. Give the exact bounded bundle—not a parent-written
-summary—to both proposal evaluators listed in `checkpoint.launch`. Use the issued
-agent, bucket, workflow ref, and task instructions. The tool-free evaluator must return
-raw JSON only; the checkpoint carries the authoritative output contract. Its proposal
-shape is:
+When status is `ready-to-record`, call `recordRecoveredReview` with the target session
+ID. It reconstructs the compact draft, tagged role outputs, human evidence, manifest,
+and authentic runtime provenance, then derives and validates canonical fields. Do not
+create a draft or copy model/provider, prompt-hash, bucket, tool-call, or other
+runtime metadata manually.
 
-```json
-{
-  "criteria": [{
-    "criterionId": "stable-id",
-    "statement": "observable outcome",
-    "origin": "explicit",
-    "importance": "core",
-    "taxonomy": {
-      "activity": "implement",
-      "surface": ["application_logic"],
-      "evidenceMode": ["static_inspection"]
-    }
-  }]
-}
-```
+After a successful or duplicate record, immediately call `closeReviewed` with the
+returned review ID. A pending/retrying outbox action is an accepted closure request,
+not proof that the tab has visibly disappeared: say **closure requested**, do not
+relist merely to wait, and proceed to the next original target. This is the one-target
+commit boundary; later evidence must not be gathered before it.
 
-Choose one valid enum per field. Other taxonomy values are: activity `debug`,
-`investigate`, `explain`, `design`, `operate`, `verify`, `other`; surface `ui`,
-`api_integration`, `data`, `tests`, `documentation`, `configuration`, `infrastructure`,
-`developer_tooling`, `agent_harness`, `external_system`, `communication`, `other`;
-evidence mode `automated_check`, `runtime_observation`, `human_observation`,
-`external_confirmation`, `reasoning_or_sources`, `other`. `origin` also permits
-`necessary_implied`; importance also permits `supporting` and `optional`.
+Use only the listed session-review actions: `listSelected`/`listOpen`, `getEvidence`,
+`getReviewStatus`, `recordRecoveredReview`, `closeReviewed`/`closeReviewedBatch`, and
+`closeSelf`. Direct `recordReview`/`recordReviews` are legacy compatibility routes,
+not this workflow. Human input is optional. A blocked target remains unreviewed and
+must not be fabricated into a record.
 
-Do not classify, ask users, run tools, or choose an overall. Call `getReviewStatus`
-once after the sibling results settle. An invalid latest role is a phase-boundary
-failure: retry it only when `checkpoint.launch` issues attempt 2. Reuse the same role,
-target, evidence bundle/manifest, phase handoff, and issued workflow ref, and map
-that launch's corrective `taskInstructions` into the `task` argument. Do not create a
-new evidence bundle or workflow. There is no third attempt.
-
-### 3. Consolidate and freeze
-
-The status response supplies both validated proposals. Give those proposals and the
-same evidence bundle to the single `consolidation` launch entry. Use its tool-free
-agent, requested bucket, workflow ref, and task instructions. Require raw JSON only:
-
-```json
-{
-  "frozenLedger": [{
-    "criterionId": "stable-id",
-    "statement": "observable outcome",
-    "origin": "explicit",
-    "importance": "core",
-    "taxonomy": { "activity": "implement", "surface": ["application_logic"], "evidenceMode": ["static_inspection"] }
-  }],
-  "dedupNotes": ["concise merge note"]
-}
-```
-
-Do not classify or modify the frozen ledger after this role. Call `getReviewStatus`
-once to validate and obtain the next checkpoint; obey its retry budget.
-
-### 4. Fresh independent classification
-
-Give both fresh classifier launch entries the exact same evidence bundle, immutable
-ledger from status, and recovered human response if present. Use each issued agent,
-bucket, workflow ref, and task instructions; each bucket's user-configured assignment
-owns the model and reasoning level. Require raw JSON only:
-
-```json
-{
-  "criteria": [{
-    "criterionId": "frozen-id",
-    "status": "met",
-    "reason": "none",
-    "evidenceRefs": ["bundle reference"]
-  }],
-  "process": {
-    "requirementDiscipline": "proportionate",
-    "verificationDiscipline": "proportionate",
-    "scopeControl": "controlled",
-    "recovery": "not_needed",
-    "finalClaimAccuracy": "accurate"
-  },
-  "evidence": {
-    "requirements": "clear",
-    "artifacts": "direct",
-    "execution": "direct",
-    "human": "not_needed",
-    "limitations": ["concrete limitation"]
-  },
-  "confidence": "high"
-}
-```
-
-Every frozen criterion appears exactly once. Status/reason pairs must follow the
-criterion-classification table above. Do not repeat criterion definitions, propose an
-overall, mutate the ledger, ask users, run tools, or write records. Call
-`getReviewStatus` once after both settle; retry only an invalid role that appears in
-`checkpoint.launch` at attempt 2, retaining its evidence/workflow and using that
-launch's corrective `taskInstructions` as the `task` instructions.
-
-### 5. Reconcile only when requested
-
-`getReviewStatus` deterministically compares validated components. If its checkpoint
-launches `adjudication`, give that fresh evaluator the exact status handoff (ledger,
-both components, and exact `materialFields`) plus the same evidence. Use the issued
-agent, bucket, workflow ref, and task instructions. Require raw JSON only:
-
-```json
-{
-  "resolvedFields": [{
-    "field": "exact field from materialFields",
-    "value": "resolved enum/string value",
-    "rationale": "evidence-grounded rationale",
-    "evidenceRefs": ["bundle reference"]
-  }]
-}
-```
-
-Resolve every and only listed field. A material criterion status also has a listed
-reason field. Do not alter the ledger or resolve non-material differences; the tool
-performs permitted deterministic merges, unions limitations, and selects lower
-confidence. Call `getReviewStatus` once after adjudication and obey the one-retry
-checkpoint.
-
-### 6. Persist and close immediately
-
-When status reports `ready-to-record`, call `recordRecoveredReview` with the target
-session ID. It reconstructs the compact draft, reviewer outputs, human evidence,
-evidence manifest, and authentic runtime provenance from JSONL, then derives and
-validates canonical fields. Never create a temporary draft, manually copy runtime
-metadata, or use raw session scripts.
-
-After a successful or duplicate record, call `closeReviewed` immediately with the
-returned review ID. A pending/retrying outbox action is a valid asynchronous closure
-request, but it is not proof that the tab has visibly disappeared. Say “closure
-requested” until a later list snapshot omits the target, but do not relist merely to
-wait for that visual confirmation. Proceed to the next original target as soon as the
-closure request is accepted. The tool enforces this one-target commit boundary so
-later evidence cannot create a large parallel context or discard completed reviews.
-
-Do not call `closeSelf` as routine cleanup. The evaluator session may appear in a
-`listSelected` or `listOpen` result, but evaluator exclusion is a review-target rule:
-it remains excluded from evidence, classification, recording, and `closeReviewed`,
-even when it is pinned. `closeSelf` is separate: only if the user explicitly asks to
-hide/close this evaluator session, and only after a fresh `listSelected` in the same
-user turn confirms that this session is currently pinned, may you call it with
-`confirmSelf: true`. A `listOpen` result or an earlier-turn list does not authorize
-it. Make `closeSelf` the final tool call.
-
-## Tool contract
-
-Use only these session-review actions:
-
-- `listSelected` / `listOpen` — snapshot targets and rehydrate durable workflow state;
-- `getEvidence` — issue/reissue one target's bounded blinded evidence;
-- `getReviewStatus` — recover/validate tagged roles and return the next bounded handoff;
-- `recordRecoveredReview` — compile and persist a ready tagged pipeline;
-- `closeReviewed` / `closeReviewedBatch` — enqueue target closure;
-- `closeSelf` — enqueue evaluator closure only with `confirmSelf: true` after an explicit user request and a same-turn `listSelected`.
-
-The direct `recordReview`/`recordReviews` actions are legacy compatibility routes, not
-part of this workflow. The tool rejects evidence/review work for a second target until
-the current target has been recorded and its closure requested, except that a target
-whose latest checkpoint is durably `blocked` releases the guard so the requested batch
-can continue. Use `subagent` only with status-issued workflow refs. Human input is not
-required by this workflow. If a `checkpoint.state` is `blocked` after its issued attempt-2
-retry, report the blocker, leave that target unreviewed, continue with the next target,
-and keep the evaluator session open. Never start a third attempt or manufacture a
-fresh evidence key merely to reset the budget. A retry must preserve the role,
-evidence, handoff, and workflow ref; only the checkpoint-issued corrective task
-instructions change.
+Do not call `closeSelf` as cleanup. Only when the user explicitly asks to hide or close
+this evaluator session, and only after a fresh same-turn `listSelected` confirms that
+this session is pinned, may you call `closeSelf` with `confirmSelf: true`. A
+`listOpen` result or an earlier-turn list does not authorize it. Make `closeSelf` the
+final tool call; it never interrupts running work.
 
 ## Final response
 
-Give a compact per-target summary: session ID/path, new or existing review ID, delivered
-and controllable attainment, confidence, closure status, and important limitations.
-Do not close the evaluator session unless the user explicitly requested that; if so,
-call `closeSelf` with `confirmSelf: true` as the final tool action.
+Give a compact per-target summary: session ID/path, new or existing review ID,
+delivered and controllable attainment when a review was recorded, confidence, closure
+status, and important limitations. For a blocked target, state that no review was
+recorded, identify the blocker, and omit unavailable metrics rather than inventing
+values. Do not close the evaluator session unless explicitly requested; if requested,
+`closeSelf` with `confirmSelf: true` must have been the final tool action.

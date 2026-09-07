@@ -1,3 +1,10 @@
+import { Console } from 'node:console';
+
+// stdout is exclusively JSONL protocol traffic. Trusted run_code bodies and
+// imported libraries may use any console method, including in later callbacks;
+// keep diagnostics on stderr for the entire sidecar lifetime.
+globalThis.console = new Console({ stdout: process.stderr, stderr: process.stderr });
+
 const [{ PlaywrightBackend }, { SidecarCore, SidecarJsonlDecoder, encodeSidecarRecord }] = await Promise.all([
   import('./backend.mjs'), import('./sidecar-core.mjs'),
 ]);

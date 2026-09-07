@@ -62,6 +62,24 @@ lines.on('line', (line) => {
     });
     return;
   }
+  if (mode === 'durable-detail-not-found' || mode === 'durable-detail-not-addressable') {
+    send({
+      protocolVersion,
+      kind: 'response',
+      requestId: frame.requestId,
+      ok: false,
+      fingerprint: frame.payload.fence?.fingerprint,
+      error: {
+        code: mode === 'durable-detail-not-found'
+          ? 'DURABLE_DETAIL_NOT_FOUND'
+          : 'DURABLE_DETAIL_NOT_ADDRESSABLE',
+        message: mode === 'durable-detail-not-found'
+          ? 'fixture durable detail not found'
+          : 'fixture durable detail not addressable',
+      },
+    });
+    return;
+  }
   if (mode === 'fingerprint-changed' || mode === 'fingerprint-changed-wrong-fence') {
     send({
       protocolVersion,
@@ -118,6 +136,15 @@ function operationResult(payload) {
       transcript: [],
       transcriptWindow: {},
       busy: false,
+    };
+  }
+  if (payload.operation === 'durable-detail') {
+    return {
+      value: { fixture: true },
+      sizeBytes: 16,
+      messageId: 'fixture-message',
+      toolCallId: 'fixture-tool-call',
+      kind: 'tool-result',
     };
   }
   return {

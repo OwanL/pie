@@ -34,7 +34,7 @@ The backend/host isolation migration, superseded by the current runtime-free coo
 
 ## Subagent and provider resilience (REM items, Bug fixes)
 
-Remediation recorded in `docs/HANDOFF_SUBAGENT_PROVIDER_RESILIENCE.md`; invariants live in [STATE_CONTRACT.md § Execution Ordering](STATE_CONTRACT.md) and the subagent extension tests:
+Remediation completed and recorded as the operational reference in `docs/SUBAGENT_PROVIDER_RESILIENCE.md`; invariants live in [STATE_CONTRACT.md § Execution Ordering](STATE_CONTRACT.md) and the subagent extension tests:
 
 - **REM-03** — bounded per-attempt retry analytics, provider-aware failover excluding configured provider models, structured `Retry-After` handling, and billable evidence for every dispatched attempt.
 - **REM-04** — token-rate activity classification distinguishing generating, tool-executing, and provider-waiting states.

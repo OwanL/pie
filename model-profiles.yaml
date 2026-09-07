@@ -2,6 +2,108 @@
 # Source of truth: models.yaml (repo root). Edit there and re-run sync.
 profiles:
   - provider: github-copilot
+    id: claude-fable-5.1
+    eligible: false
+    thinking:
+      - minimal
+      - low
+      - medium
+      - high
+      - xhigh
+      - max
+    disabled_reason: Auto-discovered from GitHub Copilot; not yet vetted for subagents
+  - provider: github-copilot
+    id: gemini-3.5-flash
+    eligible: false
+    thinking:
+      - minimal
+      - low
+      - medium
+      - high
+    disabled_reason: Auto-discovered from GitHub Copilot; not yet vetted for subagents
+  - provider: github-copilot
+    id: gemini-3.6-flash
+    eligible: false
+    thinking:
+      - minimal
+      - low
+      - medium
+      - high
+    disabled_reason: Auto-discovered from GitHub Copilot; not yet vetted for subagents
+  - provider: github-copilot
+    id: gemini-3.8-flash
+    eligible: false
+    thinking:
+      - minimal
+      - low
+      - medium
+      - high
+    disabled_reason: Auto-discovered from GitHub Copilot; not yet vetted for subagents
+  - provider: github-copilot
+    id: gpt-5.4-mini
+    eligible: false
+    thinking:
+      - minimal
+      - low
+      - medium
+      - high
+      - xhigh
+    disabled_reason: Auto-discovered from GitHub Copilot; not yet vetted for subagents
+  - provider: github-copilot
+    id: gpt-6-astra
+    eligible: false
+    thinking:
+      - minimal
+      - low
+      - medium
+      - high
+      - xhigh
+      - max
+    disabled_reason: Auto-discovered from GitHub Copilot; not yet vetted for subagents
+  - provider: github-copilot
+    id: grok-4.5
+    eligible: false
+    thinking:
+      - minimal
+      - low
+      - medium
+      - high
+    disabled_reason: Auto-discovered from GitHub Copilot; not yet vetted for subagents
+  - provider: github-copilot
+    id: grok-4.6
+    eligible: false
+    thinking:
+      - minimal
+      - low
+      - medium
+      - high
+      - xhigh
+    disabled_reason: Auto-discovered from GitHub Copilot; not yet vetted for subagents
+  - provider: github-copilot
+    id: mai-code-1.1-flash
+    eligible: false
+    thinking:
+      - minimal
+      - low
+      - medium
+      - high
+    disabled_reason: Auto-discovered from GitHub Copilot; not yet vetted for subagents
+  - provider: github-copilot
+    id: mai-code-1-flash-picker
+    eligible: false
+    thinking:
+      - minimal
+      - low
+      - medium
+      - high
+    disabled_reason: Auto-discovered from GitHub Copilot; not yet vetted for subagents
+  - provider: github-copilot
+    id: claude-haiku-4.5
+    eligible: false
+    thinking:
+      - minimal
+    disabled_reason: Auto-discovered from GitHub Copilot; not yet vetted for subagents
+  - provider: github-copilot
     id: gemini-3.7-flash
     eligible: false
     thinking:
@@ -57,15 +159,6 @@ profiles:
       - xhigh
     disabled_reason: null
   - provider: github-copilot
-    id: claude-sonnet-4.6
-    eligible: true
-    thinking:
-      - low
-      - medium
-      - high
-      - xhigh
-    disabled_reason: null
-  - provider: github-copilot
     id: gpt-5.6-sol
     eligible: false
     thinking:
@@ -98,6 +191,17 @@ profiles:
       - xhigh
       - max
     disabled_reason: Auto-discovered from GitHub Copilot; not yet vetted for subagents
+  - provider: openai-codex
+    id: gpt-6-astra
+    eligible: true
+    thinking:
+      - minimal
+      - low
+      - medium
+      - high
+      - xhigh
+      - max
+    disabled_reason: null
   - provider: openai-codex
     id: gpt-5.6-sol
     eligible: true

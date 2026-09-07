@@ -1,6 +1,6 @@
 # Centralized Model Configuration
 
-> **Status:** Implemented, with later architecture changes. `models.yaml` owns the provider catalog and seed defaults; `npm run sync-models` regenerates `models.json` and provider-qualified `model-profiles.yaml`, then merges centrally-owned fields into `settings.json`. Model identity is the `(provider, id)` pair; duplicate ids across providers are supported by using `{ provider, id }` entries in `profileOrder`. Active chat and pruning selections are runtime user preferences: sync seeds missing values but preserves existing choices. The historical proxy sections below are retained as design rationale; see `README.md` and `AGENTS.md` for current usage.
+> **Status:** Implemented, with later architecture changes. `models.yaml` owns the provider catalog and seed defaults; `npm run sync-models` regenerates `models.json` and provider-qualified `model-profiles.yaml`, then merges centrally-owned fields into `settings.json`. Model identity is the `(provider, id)` pair; duplicate ids across providers are supported by using `{ provider, id }` entries in `profileOrder`. Active chat and pruning selections are runtime user preferences: sync seeds missing values but preserves existing choices. The historical proxy sections below are retained as design rationale; see `README.md` for current usage.
 > **Current ownership:** `models.yaml` owns catalog data and retry policy. The settings UI owns active chat/pruning model, provider, and thinking-level selections. GitHub Copilot is account-scoped and reconciles its available models into `models.yaml` at session startup via the single-flight, retryable `extensions/copilot-model-discovery`; the normal codegen then regenerates every derived catalog surface. It does not register a parallel runtime provider list.
 
 ## 1. Problem
@@ -447,8 +447,7 @@ Catches source edits that break the schema.
 
 ### CI gate (optional, recommended)
 
-Add `npm run sync-models -- --check` as a pre-commit hook or CI step so uncommitted drift
-fails the build.
+Add `npm run sync-models -- --check` as a CI step so uncommitted drift fails the build.
 
 ## 8. Migration Steps (ordered)
 
@@ -502,7 +501,7 @@ git diff --stat                    # should show only the 4 derived files + bann
 
 | File | Update |
 |---|---|
-| `AGENTS.md` (pie root) | Add: "Model config lives in `models.yaml`. Run `npm run sync-models` after editing. Do not edit models.json / model-profiles.yaml / litellm_config.yaml / settings.json model fields directly." |
+| `skills/develop-pie/SKILL.md` | Add: "Model config lives in `models.yaml`. Run `npm run sync-models` after editing. Do not edit models.json / model-profiles.yaml / litellm_config.yaml / settings.json model fields directly." |
 | `README.md` | Add a "Model Configuration" section pointing to `models.yaml` as source of truth + the sync command. |
 | `proxy/README.md` | Note that `litellm_config.yaml` is now generated from `models.yaml`'s `upstream` blocks; remove the "add a matching baseUrl redirect block in models.json" manual instruction. |
 | `docs/internal/model-token-pricing-sources.md` | Add a header note: pricing now lives in `models.yaml` `pricing:` fields; this doc remains the evidence ledger/changelog. |

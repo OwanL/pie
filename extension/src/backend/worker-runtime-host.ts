@@ -2,7 +2,10 @@ import * as fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
-import { rewritePieHarnessPrompt } from '../../../shared/pie-harness-prompt.js';
+import {
+  createPieSystemPromptBuilder,
+  installPieSystemPromptRebuildGuard,
+} from '../../../shared/pie-harness-prompt.js';
 import {
   EXTENSION_TOGGLES_ENV,
   HISTORY_COMPACTION_ENV,
@@ -666,9 +669,14 @@ export class WorkerRuntimeHost {
     const persistedPromptToggles = await readSystemPromptTogglesForSession(sessionPath);
     context.systemPromptDisabledEntries = [];
     const promptState = session as typeof session & SessionPromptState;
+    const { buildSystemPrompt } = await this.getSystemPromptModule();
+    // Install Pie's shared base-prompt wrapper before the existing toggle
+    // guard. The latter must rebuild from the same Pie builder so picker
+    // changes cannot briefly restore the upstream Pi prompt.
+    installPieSystemPromptRebuildGuard(promptState, this.agentDir);
     if (typeof promptState._rebuildSystemPrompt === 'function') {
-      const { buildSystemPrompt } = await this.getSystemPromptModule();
-      installSystemPromptToggleRebuildGuard(promptState, () => context.systemPromptDisabledEntries ?? [], buildSystemPrompt);
+      const pieBuildSystemPrompt = createPieSystemPromptBuilder(buildSystemPrompt, this.agentDir);
+      installSystemPromptToggleRebuildGuard(promptState, () => context.systemPromptDisabledEntries ?? [], pieBuildSystemPrompt);
     }
     installSystemPromptToolToggleGuard(session, () => context.systemPromptDisabledEntries ?? []);
     installAutonomousModeToolGuard(session, () => this.autonomousMode);
@@ -1345,17 +1353,17 @@ export class WorkerRuntimeHost {
     if (options) {
       try {
         const { buildSystemPrompt } = await this.getSystemPromptModule();
-        const rebuilt = normalizePromptText(buildSystemPrompt({
+        const pieBuildSystemPrompt = createPieSystemPromptBuilder(buildSystemPrompt, this.agentDir);
+        const rebuilt = normalizePromptText(pieBuildSystemPrompt({
           cwd: options.cwd,
           selectedTools: options.selectedTools,
           toolSnippets: options.toolSnippets,
           promptGuidelines: options.promptGuidelines,
         }));
-        if (rebuilt) return rewritePieHarnessPrompt(rebuilt, this.agentDir);
+        if (rebuilt) return rebuilt;
       } catch { /* fall back to the runtime's current base prompt */ }
     }
-    const base = normalizePromptText(promptState._baseSystemPrompt);
-    return base ? rewritePieHarnessPrompt(base, this.agentDir) : undefined;
+    return normalizePromptText(promptState._baseSystemPrompt);
   }
 
   private async buildSystemPrompts(
@@ -1521,7 +1529,8 @@ export class WorkerRuntimeHost {
     const source = promptState._originalSystemPromptOptions ?? promptState._baseSystemPromptOptions;
     if (source) {
       const { buildSystemPrompt } = await this.getSystemPromptModule();
-      const toggled = buildToggledSystemPrompt(source, next, buildSystemPrompt);
+      const pieBuildSystemPrompt = createPieSystemPromptBuilder(buildSystemPrompt, this.agentDir);
+      const toggled = buildToggledSystemPrompt(source, next, pieBuildSystemPrompt);
       promptState._baseSystemPrompt = toggled.prompt;
       promptState._baseSystemPromptOptions = toggled.options;
     }

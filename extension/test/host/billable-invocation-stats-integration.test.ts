@@ -471,9 +471,18 @@ test('restart heals activity intervals from a large ledger in one pass', async (
 
     // Restart replays the whole ledger through the heal; every row must
     // surface as an activity interval (regression: the heal used to rewrite
-    // the activity file once per row, blocking startup for minutes).
+    // the activity file once per row, blocking startup for minutes). The
+    // heal is deferred background work now, so startup resolves first and
+    // the single batched pass lands on the following event-loop turns.
     const stats = new StatsService(options());
     await stats.start();
+    let healTicks = 0;
+    while (stats.getActivityIntervals().length < 200) {
+      if (++healTicks > 10_000) {
+        throw new Error('deferred heal never projected the large ledger');
+      }
+      await new Promise((resolve) => setImmediate(resolve));
+    }
     assert.equal(stats.getActivityIntervals().length, 200);
     await stats.shutdown();
   } finally {

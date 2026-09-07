@@ -4,11 +4,13 @@ import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import Module, { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import type { ExtensionAPI, Skill, ToolInfo } from "@earendil-works/pi-coding-agent";
 import { clearPruningTrackingForTesting, flushLog, setLogPathForTesting } from "../logger.js";
 import { readKeptSkills, clearKeptSkills } from "../../../shared/pruned-skills.js";
 import type { PruningConfig } from "../types.js";
 import { runAsk } from "../../ask-user/src/ask.js";
+import { installPieSystemPromptRebuildGuard } from "../../../shared/pie-harness-prompt.js";
 
 installSdkResolverForTests();
 const require = createRequire(import.meta.url);
@@ -243,6 +245,18 @@ function register(configOverride: PruningConfig, logPath = path.join(mkdtempSync
 
 function systemPrompt(skills: Skill[]): string {
 	return `Base prompt.${testFormatSkillsForPrompt(skills)}\nCurrent date: 2026-05-16`;
+}
+
+function piePrompt(skills: Skill[], toolNames: string[], customPrompt?: string): string {
+	const toolLines = toolNames.map((name) => `- ${name}: ${mockToolInfo.find((tool) => tool.name === name)?.description ?? name}`).join("\n") || "(none)";
+	const guidanceLines = toolNames.map((name) => `- Use ${name} guidance.`).join("\n") || "- No tool-specific guidance.";
+	const base = customPrompt ?? [
+		"You are a coding assistant operating inside Pie, a development harness built on the Pi runtime. Pie provides project-aware guidance, specialized agents, dynamically available tools and skills, and session workflows.",
+		`Available tools:\n${toolLines}`,
+		`Tool guidance:\n${guidanceLines}`,
+		"Harness documentation\nPinned docs.",
+	].join("\n\n");
+	return `${base}${testFormatSkillsForPrompt(skills)}\nCurrent date: 2026-05-16\nCurrent working directory: /repo`;
 }
 
 async function runBeforeAgentStart(handlers: Map<string, Handler>, prompt: string, skills: Skill[], overrideSystemPrompt?: string, sessionId = "session-1"): Promise<BeforeAgentStartReturn> {
@@ -1001,6 +1015,211 @@ test("tool_call catches unexpected context errors and continues", async () => {
 	}
 });
 
+test("actual SDK hook chain applies tools before skills, preserves foreign prose, and restores next turn", async () => {
+	let scorerCalls = 0;
+	let setActiveToolsCalls = 0;
+	let rebuildCalls = 0;
+	let toolDecisionApplied = false;
+	__setCompleteFn(async () => {
+		scorerCalls++;
+		return {
+			text: JSON.stringify({
+				pruneSkills: realisticSkills.map((entry) => entry.name),
+				pruneTools: ["web_search"],
+			}),
+		};
+	});
+	try {
+		const { handlers } = register(config({}, "auto", { ceiling: 10 }));
+		const pruningHandler = handlers.get("before_agent_start");
+		assert.ok(pruningHandler);
+
+		const runnerModulePath = path.join(
+			process.cwd(),
+			"extension", "node_modules", "@earendil-works", "pi-coding-agent",
+			"dist", "core", "extensions", "runner.js",
+		);
+		const { ExtensionRunner } = await import(pathToFileURL(runnerModulePath).href) as { ExtensionRunner: new (...args: any[]) => any };
+		const earlierHandler = (event: { systemPrompt: string }) => ({
+			systemPrompt: `EARLIER PREFIX\n${event.systemPrompt.replace(
+				"Tool guidance:\n",
+				"Tool guidance:\n- Foreign extension guidance.\n",
+			)}\nEARLIER SUFFIX`,
+		});
+		const laterHandler = (event: { systemPrompt: string }) => ({
+			systemPrompt: `${event.systemPrompt}\nLATER EXTENSION`,
+		});
+		const sdkRunner = new ExtensionRunner([
+			{ path: "<earlier>", handlers: new Map([["before_agent_start", [earlierHandler]]]) },
+			{ path: "<skill-pruner>", handlers: new Map([["before_agent_start", [pruningHandler]]]) },
+			{ path: "<later>", handlers: new Map([["before_agent_start", [laterHandler]]]) },
+		], {}, "/repo", { getSessionId: () => "sdk-hook-session", getSessionFile: () => undefined }, {});
+
+		let activeTools = mockToolInfo.map((tool) => tool.name);
+		let baseSkills = realisticSkills;
+		const promptOptions = {
+			cwd: "/repo",
+			skills: realisticSkills,
+			selectedTools: activeTools,
+			contextFiles: [],
+		};
+		const initialBase = piePrompt(realisticSkills, activeTools);
+		const promptState: any = {
+			_baseSystemPrompt: initialBase,
+			_baseSystemPromptOptions: promptOptions,
+			agent: { state: { systemPrompt: initialBase } },
+			extensionRunner: sdkRunner,
+			_rebuildSystemPrompt(toolNames: string[]) {
+				rebuildCalls++;
+				this._baseSystemPromptOptions = { ...this._baseSystemPromptOptions, selectedTools: toolNames };
+				return piePrompt(baseSkills, toolNames);
+			},
+		};
+		installPieSystemPromptRebuildGuard(promptState, "/pie");
+		__setToolSeams({
+			getAllTools: () => mockToolInfo as any[],
+			getActiveTools: () => activeTools,
+			setActiveTools: (names) => {
+				setActiveToolsCalls++;
+				toolDecisionApplied = true;
+				activeTools = names;
+				const rebuilt = promptState._rebuildSystemPrompt(names);
+				promptState._baseSystemPrompt = rebuilt;
+				promptState.agent.state.systemPrompt = rebuilt;
+			},
+		});
+		__setFormatter((entries) => {
+			assert.equal(toolDecisionApplied, true, "setActiveTools must run before skill formatting");
+			return testFormatSkillsForPrompt(entries);
+		});
+
+		const first = await sdkRunner.emitBeforeAgentStart(
+			"Implement the tool and skill selection",
+			undefined,
+			initialBase,
+			promptOptions,
+		);
+		assert.equal(scorerCalls, 1, "selection uses exactly one scorer call");
+		assert.equal(setActiveToolsCalls, 1, "selection applies tools exactly once");
+		assert.equal(rebuildCalls, 1, "selection reuses setActiveTools' one synchronous rebuild");
+		assert.match(first.systemPrompt, /^EARLIER PREFIX/u);
+		assert.match(first.systemPrompt, /EARLIER SUFFIX/u);
+		assert.match(first.systemPrompt, /LATER EXTENSION$/u);
+		assert.match(first.systemPrompt, /Foreign extension guidance\./u);
+		assert.doesNotMatch(first.systemPrompt, /web_search/u);
+		assert.doesNotMatch(first.systemPrompt, /<available_skills>/u, "all skills may be pruned when tools remain");
+
+		setConfigForTesting(config({}, "off", { ceiling: 10 }));
+		toolDecisionApplied = false;
+		const second = await sdkRunner.emitBeforeAgentStart(
+			"Restore the full catalog",
+			undefined,
+			promptState._baseSystemPrompt,
+			promptState._baseSystemPromptOptions,
+		);
+		assert.equal(scorerCalls, 1, "restoration does not call the scorer");
+		assert.equal(setActiveToolsCalls, 2, "restoration applies once");
+		assert.equal(rebuildCalls, 2, "restoration also reuses the existing rebuild");
+		assert.match(second.systemPrompt, /web_search/u);
+		assert.match(second.systemPrompt, /Foreign extension guidance\./u);
+		assert.match(second.systemPrompt, /<name>frontend-design<\/name>/u);
+		assert.match(second.systemPrompt, /^EARLIER PREFIX/u);
+		assert.match(second.systemPrompt, /EARLIER SUFFIX/u);
+		assert.match(second.systemPrompt, /LATER EXTENSION$/u);
+
+		// A tool-only catalog still returns the freshly rebuilt tool prose even
+		// though there is no skills block to rewrite.
+		setConfigForTesting(config({}, "auto", { ceiling: 10 }));
+		baseSkills = [];
+		promptState._baseSystemPrompt = piePrompt([], activeTools);
+		promptState._baseSystemPromptOptions = { ...promptState._baseSystemPromptOptions, skills: [] };
+		const toolOnly = await sdkRunner.emitBeforeAgentStart(
+			"Run a tool-only selection",
+			undefined,
+			promptState._baseSystemPrompt,
+			promptState._baseSystemPromptOptions,
+		);
+		assert.equal(scorerCalls, 2, "tool-only selection adds one scorer call, not a second apply call");
+		assert.equal(setActiveToolsCalls, 3);
+		assert.equal(rebuildCalls, 3);
+		assert.doesNotMatch(toolOnly.systemPrompt, /web_search/u);
+		assert.doesNotMatch(toolOnly.systemPrompt, /<available_skills>/u);
+		assert.match(toolOnly.systemPrompt, /Foreign extension guidance\./u);
+		assert.match(toolOnly.systemPrompt, /LATER EXTENSION$/u);
+	} finally {
+		clearKeptSkills("sdk-hook-session");
+		__setCompleteFn(null);
+		__setToolSeams({ getAllTools: null, getActiveTools: null, setActiveTools: null });
+		resetForTesting();
+	}
+});
+
+test("standalone Pi without the fresh-base seam does not return stale tool prose", async () => {
+	let scorerCalls = 0;
+	let setActiveToolsCalls = 0;
+	__setCompleteFn(async () => {
+		scorerCalls++;
+		return { text: '{"pruneSkills":["frontend-design"],"pruneTools":["web_search"]}' };
+	});
+	try {
+		const { handlers } = register(config({}, "auto", { ceiling: 10 }));
+		__setToolSeams({
+			getAllTools: () => mockToolInfo as any[],
+			getActiveTools: () => mockToolInfo.map((tool) => tool.name),
+			setActiveTools: () => { setActiveToolsCalls++; },
+		});
+		const result = await runBeforeAgentStart(
+			handlers,
+			"Prune a tool and skill without Pie",
+			realisticSkills,
+			piePrompt(realisticSkills, mockToolInfo.map((tool) => tool.name)),
+			"standalone-session",
+		);
+		assert.equal(scorerCalls, 1);
+		assert.equal(setActiveToolsCalls, 1);
+		assert.equal(result?.systemPrompt, undefined, "the stale event copy must not override Pi's rebuilt base");
+		assert.deepEqual(result?.message?.details.excludedSkills, []);
+		assert.match(result?.message?.details.prepassSafeguardReason ?? "", /fresh-base accessor unavailable/u);
+	} finally {
+		clearKeptSkills("standalone-session");
+		__setCompleteFn(null);
+		__setToolSeams({ getAllTools: null, getActiveTools: null, setActiveTools: null });
+	}
+});
+
+test("shadow restoration without the Pie seam does not return the stale pre-restoration prompt", async () => {
+	let activeTools = mockToolInfo.map((tool) => tool.name).filter((name) => name !== "web_search");
+	let restoreCalls = 0;
+	__setCompleteFn(mockCompleteFn({ pruneTools: ["web_search"] }));
+	try {
+		const { handlers } = register(config({}, "shadow", { ceiling: 10 }));
+		recordPrunedTools("standalone-shadow-session", ["web_search"]);
+		__setToolSeams({
+			getAllTools: () => mockToolInfo as any[],
+			getActiveTools: () => activeTools,
+			setActiveTools: (names) => {
+				restoreCalls++;
+				activeTools = names;
+			},
+		});
+		const result = await runBeforeAgentStart(
+			handlers,
+			"Observe this pruning decision",
+			realisticSkills,
+			piePrompt(realisticSkills, activeTools),
+			"standalone-shadow-session",
+		);
+		assert.equal(restoreCalls, 1);
+		assert.ok(activeTools.includes("web_search"));
+		assert.equal(result?.systemPrompt, undefined);
+		assert.ok(result?.message);
+	} finally {
+		clearKeptSkills("standalone-shadow-session");
+		__setCompleteFn(null);
+		__setToolSeams({ getAllTools: null, getActiveTools: null, setActiveTools: null });
+	}
+});
+
 test("tool pruning in auto mode calls setActiveTools with the kept tools", async () => {
 	const setActiveToolsCalls: string[][] = [];
 	__setCompleteFn(mockCompleteFn({ pruneSkills: ["duckdb-query-optimization", "frontend-design"], pruneTools: ["web_search"] }));
@@ -1480,14 +1699,16 @@ test("disabled Tools prompt still permits skill-only pruning without re-enabling
 		});
 		const handler = handlers.get("before_agent_start");
 		assert.ok(handler);
+		const explicitCustomPrompt = `Explicit custom replacement.${testFormatSkillsForPrompt(realisticSkills)}\nCurrent date: 2026-05-16`;
 		const result = await handler({
 			type: "before_agent_start",
 			prompt: "Refactor this frontend",
-			systemPrompt: systemPrompt(realisticSkills),
-			systemPromptOptions: { cwd: "/repo", skills: realisticSkills, selectedTools: [], contextFiles: [] },
+			systemPrompt: explicitCustomPrompt,
+			systemPromptOptions: { cwd: "/repo", customPrompt: "Explicit custom replacement.", skills: realisticSkills, selectedTools: [], contextFiles: [] },
 		}, { cwd: "/repo", sessionManager: { getSessionId: () => "session-skills-only" } }) as BeforeAgentStartReturn;
 		assert.equal(calls, 1);
 		assert.ok(result?.systemPrompt);
+		assert.match(result!.systemPrompt!, /^Explicit custom replacement\./u);
 		assert.doesNotMatch(result!.systemPrompt!, /<name>frontend-design<\/name>/);
 	} finally {
 		clearKeptSkills("session-skills-only");

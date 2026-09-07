@@ -1,5 +1,5 @@
 import * as path from 'node:path';
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 
 import * as vscode from 'vscode';
 
@@ -32,6 +32,23 @@ import type { Event } from '../core/events';
 
 const PREFS_STORAGE_KEY = 'chatPrefs';
 const SDK_PATH_CACHE_KEY = 'resolvedSdkPath';
+
+/** Only classify an explicitly private path as missing when the filesystem
+ * confirms ENOENT/ENOTDIR. Sharing violations and other transient stat errors
+ * retain the tab; a false negative there must not destroy private state. */
+function isPrivateSessionPathRestorable(sessionPath: string): boolean {
+  try {
+    return statSync(sessionPath).isFile();
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return false;
+    bootLog('session-startup', 'private.restore.statUnavailable', {
+      sessionPath,
+      error: toErrorMessage(error),
+    });
+    return true;
+  }
+}
 
 interface StartSessionBackendOptions {
   context: vscode.ExtensionContext;
@@ -73,13 +90,16 @@ async function loadSessionTitlesSettingsFromService(options: StartSessionBackend
 
 function computeRestorePlan(options: StartSessionBackendOptions) {
   const storedRawTabs = options.context.globalState.get<unknown[]>('openTabPaths') ?? [];
-  // Skip fs.existsSync checks during restore — session files may be temporarily
-  // inaccessible during rapid extension host restarts (Windows file locks, race
-  // conditions). Missing sessions are handled gracefully when the backend tries
-  // to open them. Dropping tabs here permanently destroys saved tab state.
+  const storedPrivate = (options.context.globalState.get<unknown[]>(PRIVATE_SESSION_PATHS_STORAGE_KEY) ?? [])
+    .filter((value): value is string => typeof value === 'string' && value.length > 0);
+  const privatePaths = new Set(storedPrivate);
+  // Preserve the non-private tabs across transient restart/file-lock failures,
+  // but classify a private path that is definitively absent before startup as
+  // not restored. This separates preexisting missing markers from a newly
+  // failed open, which is evaluated against post-reducer openTabPaths below.
   const { rawTabs, openTabPaths: restoredTabs, droppedPaths } = filterRestorableStoredTabs(
     storedRawTabs,
-    () => true,
+    (sessionPath) => !privatePaths.has(sessionPath) || isPrivateSessionPathRestorable(sessionPath),
   );
   const preferredStartupPath = options.context.globalState.get<string>('activeSessionPath') ?? null;
   // Pinned tabs are stored as a path list (no name enrichment). Normalize
@@ -95,8 +115,6 @@ function computeRestorePlan(options: StartSessionBackendOptions) {
   // <2, restores contiguity) when OpenTabsChanged is dispatched.
   const storedRawGroups = options.context.globalState.get<unknown>('pinnedTabGroups');
   const storedGroups = normalizeStoredPinnedTabGroups(storedRawGroups);
-  const storedPrivate = (options.context.globalState.get<unknown[]>(PRIVATE_SESSION_PATHS_STORAGE_KEY) ?? [])
-    .filter((value): value is string => typeof value === 'string' && value.length > 0);
   const restoredPrivate = storedPrivate.filter((sessionPath) => restoredTabs.includes(sessionPath));
   const restoredSessionPlan = buildRestoredSessionPlan(restoredTabs, preferredStartupPath);
   const { startupPath: restoredStartupPath, preloadPaths } = restoredSessionPlan;
@@ -124,34 +142,6 @@ function applyRestoredTabPaths(options: StartSessionBackendOptions, restoredTabs
       cmd: { kind: 'SetPrivacyMode', corrId: `privacy:${Date.now()}:${sessionPath}`, sessionPath, enabled: true, persist: false },
     });
   }
-}
-
-async function forgetPrivatePathsNotRestored(
-  options: StartSessionBackendOptions,
-  storedPrivate: string[],
-  restoredTabs: string[],
-): Promise<void> {
-  const pending = [...new Set(storedPrivate)].filter((sessionPath) => !restoredTabs.includes(sessionPath));
-  if (pending.length === 0) return;
-  const remaining = new Set(storedPrivate);
-  await Promise.all(pending.map(async (sessionPath) => {
-    try {
-      await options.backend.request('session.forget', { sessionPath });
-      remaining.delete(sessionPath);
-      options.dispatchArch({
-        kind: 'Command',
-        cmd: { kind: 'SetPrivacyMode', corrId: `privacy-cleared:${Date.now()}:${sessionPath}`, sessionPath, enabled: false, persist: false },
-      });
-    } catch (error) {
-      appendPieLog('warn', 'startup', 'private session cleanup failed; retaining retry marker', {
-        sessionPath,
-        error: toErrorMessage(error),
-      });
-    }
-  }));
-  await Promise.resolve(options.context.globalState.update(PRIVATE_SESSION_PATHS_STORAGE_KEY, [...remaining])).catch((error) => {
-    appendPieLog('warn', 'startup', `globalState.update failed for ${PRIVATE_SESSION_PATHS_STORAGE_KEY}`, { error: toErrorMessage(error) });
-  });
 }
 
 function persistIfTabStateChanged(
@@ -385,6 +375,7 @@ async function startBackendWithLogging(
   workspaceCwd: string,
   restoredStartupPath: string | null,
 ): Promise<boolean> {
+  const spawnStart = performance.now();
   try {
     bootLog('session-startup', 'backend.starting', {
       backendPath,
@@ -392,14 +383,27 @@ async function startBackendWithLogging(
       nodePath,
       restoredStartupPath,
     });
-    const spawnStart = Date.now();
+    appendPieLog('info', 'session-startup', 'backend.start.requested', {
+      restoredStartupPath,
+      cwd: workspaceCwd,
+    });
     await options.backend.start({ nodePath, sdkPath, backendPath, cwd: workspaceCwd });
+    const durationMs = Math.max(0, Math.round(performance.now() - spawnStart));
     bootLog('session-startup', 'backend.started', {
       restoredStartupPath,
-      durationMs: Date.now() - spawnStart,
+      durationMs,
+    });
+    appendPieLog('info', 'session-startup', 'backend.ready', {
+      restoredStartupPath,
+      durationMs,
     });
     return true;
   } catch (err) {
+    appendPieLog('warn', 'session-startup', 'backend.start.failed', {
+      restoredStartupPath,
+      durationMs: Math.max(0, Math.round(performance.now() - spawnStart)),
+      error: toErrorMessage(err),
+    });
     // Dispatch BackendReadyChanged{ready:false} so the UI reflects the failed
     // state — without this, the sidebar can stay stuck at "loading sessions"
     // because no ready/false signal is ever sent when spawn fails.
@@ -623,7 +627,16 @@ export async function startSessionBackend(options: StartSessionBackendOptions): 
 
   bootLogBackendReadyDispatched(options);
 
-  await forgetPrivatePathsNotRestored(options, storedPrivate, restoredTabs);
+  // Stale private markers are cleanup work, not a readiness prerequisite.
+  // Use the post-reducer tab set after restore, not the pre-open plan: a
+  // definitively missing path is removed before planning, while a path that
+  // only became unavailable during startup is cleaned up only if failure
+  // recovery really removed it. The service owns bounded, deduplicated,
+  // generation-safe background requests and marker persistence.
+  options.service.schedulePrivateSessionCleanup(
+    storedPrivate,
+    options.getArchState().sessions.openTabPaths,
+  );
 
   if (restoreError) {
     bootLog('session-startup', 'restore.failed', {

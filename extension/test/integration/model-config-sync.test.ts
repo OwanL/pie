@@ -161,14 +161,22 @@ test('provider-qualified profileOrder entries support duplicate model ids across
   );
 });
 
-test('every built-in OpenAI Codex GPT model has pie-side token pricing', async () => {
+test('every configured OpenAI Codex GPT model has pie-side token pricing', async () => {
   const mod = await loadSyncModule();
   const source = mod.loadSource(repoRoot);
   const generated = mod.generate(source, parseCommitted('settings.json')).modelsJson as {
-    providers: Record<string, { modelOverrides?: Record<string, { cost?: Record<string, unknown> }> }>;
+    providers: Record<string, {
+      models?: Array<{ id: string; cost?: Record<string, unknown> }>;
+      modelOverrides?: Record<string, { cost?: Record<string, unknown> }>;
+    }>;
   };
-  const overrides = generated.providers['openai-codex'].modelOverrides ?? {};
+  const provider = generated.providers['openai-codex'];
+  const configured = new Map<string, { cost?: Record<string, unknown> }>([
+    ...(provider.models ?? []).map((model) => [model.id, model] as const),
+    ...Object.entries(provider.modelOverrides ?? {}),
+  ]);
   const expected = [
+    'gpt-6-astra',
     'gpt-5.6-sol',
     'gpt-5.6-terra',
     'gpt-5.6-luna',
@@ -179,7 +187,7 @@ test('every built-in OpenAI Codex GPT model has pie-side token pricing', async (
   ];
   for (const id of expected) {
     assert.deepEqual(
-      Object.keys(overrides[id]?.cost ?? {}).filter((key) => key !== 'tiers').sort(),
+      Object.keys(configured.get(id)?.cost ?? {}).filter((key) => key !== 'tiers').sort(),
       ['cacheRead', 'cacheWrite', 'input', 'output'],
       `${id} should have complete token pricing`,
     );

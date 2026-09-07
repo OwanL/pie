@@ -8,6 +8,10 @@ import {
   type ColdBrowseHelperClientOptions,
 } from '../../../src/backend/cold-browse-helper-client';
 import type { ColdBrowseHelperFence } from '../../../src/backend/cold-browse-helper-protocol';
+import {
+  DurableDetailNotAddressableError,
+  DurableDetailNotFoundError,
+} from '../../../src/backend/durable-detail-store';
 import { SessionSnapshotTooLargeError } from '../../../src/shared/transcript-window';
 
 const fixturePath = path.join(process.cwd(), 'test', 'fixtures', 'cold-browse-helper-client-fixture.mjs');
@@ -123,6 +127,30 @@ test('client preserves a fingerprint-change signal only for its exact request fe
   }
 });
 
+test('client preserves original durable-detail resolution error types', async () => {
+  for (const [mode, ErrorType] of [
+    ['durable-detail-not-found', DurableDetailNotFoundError],
+    ['durable-detail-not-addressable', DurableDetailNotAddressableError],
+  ] as const) {
+    const helper = client(mode);
+    try {
+      await helper.warm();
+      await assert.rejects(
+        helper.resolveDurableDetail!(fence, {
+          sessionPath: fence.sessionPath,
+          turnId: 'turn',
+          rootToolCallId: 'root-tool-call',
+          rootAttemptId: 'attempt',
+          lineage: [{ childId: 'child', spawningToolCallId: 'root-tool-call', attemptId: 'attempt' }],
+        }),
+        (error) => error instanceof ErrorType,
+      );
+    } finally {
+      await helper.dispose();
+    }
+  }
+});
+
 test('client fails the helper generation on a fingerprint-change signal for the wrong fence', async () => {
   const helper = client('fingerprint-changed-wrong-fence');
   try {
@@ -172,12 +200,26 @@ test('invalidation does not spawn a helper before the first browse', async () =>
   await helper.dispose();
 });
 
-test('client performs a correlated request and clean shutdown', async () => {
+test('client performs a typed durable-detail request and clean shutdown', async () => {
   const helper = client('success', { shutdownTimeoutMs: 1_000 });
   await helper.warm();
-  const result = await helper.openSnapshot(fence, openOptions);
-  const childPid = (result as any).fixturePid as number;
-  assert.equal(result.session.path, fence.sessionPath);
+  const result = await helper.resolveDurableDetail!(fence, {
+    sessionPath: fence.sessionPath,
+    turnId: 'turn',
+    rootToolCallId: 'root-tool-call',
+    rootAttemptId: 'attempt',
+    lineage: [{ childId: 'child', spawningToolCallId: 'root-tool-call', attemptId: 'attempt' }],
+  });
+  assert.deepEqual(result, {
+    value: { fixture: true },
+    sizeBytes: 16,
+    messageId: 'fixture-message',
+    toolCallId: 'fixture-tool-call',
+    kind: 'tool-result',
+  });
+  const opened = await helper.openSnapshot(fence, openOptions);
+  const childPid = (opened as any).fixturePid as number;
+  assert.equal(opened.session.path, fence.sessionPath);
   const startedAt = Date.now();
   await helper.dispose();
   assert.ok(Date.now() - startedAt < 1_000, 'clean shutdown exits before the forced-kill window');

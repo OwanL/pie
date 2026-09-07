@@ -7,11 +7,21 @@ import test from 'node:test';
 
 import { isParentProcessAlive, startParentProcessWatchdog } from '../../../src/backend/cold-browse-helper-entry';
 import { readColdBrowseFingerprintSync, type ColdBrowseHelperFence } from '../../../src/backend/cold-browse-helper-protocol';
-import { ColdBrowseHelperRuntime } from '../../../src/backend/cold-browse-helper-runtime';
+import {
+  ColdBrowseHelperResponseTooLargeError,
+  ColdBrowseHelperRuntime,
+} from '../../../src/backend/cold-browse-helper-runtime';
 import { loadSdk } from '../../../src/backend/sdk';
 import { sessionSnapshotLineBytes, SessionSnapshotTooLargeError } from '../../../src/shared/transcript-window';
 
 const pageOptions = { transport: { kind: 'response', requestId: 'runtime-page' } } as const;
+const detailAddress = {
+  sessionPath: '',
+  turnId: 'turn',
+  rootToolCallId: 'root-tool-call',
+  rootAttemptId: 'attempt',
+  lineage: [{ childId: 'child', spawningToolCallId: 'root-tool-call', attemptId: 'attempt' }],
+} as const;
 
 function header(cwd: string) {
   return { type: 'session', version: 3, id: 'helper-runtime', timestamp: '2026-08-25T00:00:00.000Z', cwd };
@@ -144,6 +154,100 @@ test('helper byte-fits pages before IPC and preserves a typed required-row overf
     );
     boundedRuntime.dispose();
     requiredRuntime.dispose();
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('helper durable-detail resolution matches the pure durable address and refuses an oversized response before IPC', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-cold-helper-detail-'));
+  try {
+    const sessionPath = path.join(root, 'session.jsonl');
+    await writeRows(sessionPath, [header(root), user('root', 'prompt')]);
+    const target = {
+      liveAddressable: true,
+      lineage: detailAddress.lineage,
+      payload: 'detail-value',
+    };
+    const branch = [
+      {
+        id: 'user', parentId: null, type: 'message', timestamp: '2026-08-25T00:00:01.000Z',
+        message: { role: 'user', content: 'prompt', timestamp: 1 },
+      },
+      {
+        id: 'assistant', parentId: 'user', type: 'message', timestamp: '2026-08-25T00:00:02.000Z',
+        message: {
+          role: 'assistant', content: [{ type: 'toolCall', id: 'root-tool-call', name: 'subagent', arguments: {} }],
+          provider: 'mock', model: 'model-a', stopReason: 'stop', timestamp: 2,
+        },
+      },
+      {
+        id: 'tool-result', parentId: 'assistant', type: 'message', timestamp: '2026-08-25T00:00:03.000Z',
+        message: { role: 'toolResult', toolCallId: 'root-tool-call', details: { results: [target] }, timestamp: 3 },
+      },
+    ];
+    const sdk = {
+      SessionManager: {
+        open: () => ({
+          getBranch: () => branch,
+          getSessionName: () => undefined,
+          getCwd: () => root,
+          getSessionId: () => 'helper-detail',
+          buildSessionContext: () => ({ messages: [], thinkingLevel: 'medium', model: null }),
+        }),
+      },
+    } as any;
+    const runtime = new ColdBrowseHelperRuntime({ sdk, startupCwd: root });
+    const resolved = await runtime.execute({
+      operation: 'durable-detail',
+      fence: { ...fence(sessionPath), sessionPath },
+      address: { ...detailAddress, sessionPath },
+    }, 'detail-request');
+    assert.deepEqual(resolved.result, {
+      value: target,
+      sizeBytes: Buffer.byteLength(JSON.stringify(target), 'utf8'),
+      messageId: 'assistant',
+      toolCallId: 'root-tool-call',
+      kind: 'tool-result',
+    });
+    runtime.dispose();
+
+    const oversizedRuntime = new ColdBrowseHelperRuntime({
+      sdk: {
+        SessionManager: {
+          open: () => ({
+            getBranch: () => [{
+              ...branch[0],
+            }, {
+              ...branch[1],
+            }, {
+              ...branch[2],
+              message: {
+                ...branch[2]!.message,
+                details: { results: [{ ...target, payload: 'x'.repeat(2_000) }] },
+              },
+            }],
+            getSessionName: () => undefined,
+            getCwd: () => root,
+            getSessionId: () => 'helper-detail-oversized',
+            buildSessionContext: () => ({ messages: [], thinkingLevel: 'medium', model: null }),
+          }),
+        },
+      } as any,
+      startupCwd: root,
+      maxResponseLineBytes: 512,
+    });
+    await assert.rejects(
+      oversizedRuntime.execute({
+        operation: 'durable-detail',
+        fence: { ...fence(sessionPath), sessionPath },
+        address: { ...detailAddress, sessionPath },
+      }, 'detail-request'),
+      (error) => error instanceof ColdBrowseHelperResponseTooLargeError
+        && error.data.maxBytes === 512
+        && error.data.bytes > 512,
+    );
+    oversizedRuntime.dispose();
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }

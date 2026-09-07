@@ -29,6 +29,7 @@ import { formatRequirementDiagnostic, requirementIsActive } from "./src/selectio
 import type { ModelRequirements, OnUpdateCallback, SingleResult, SubagentAttemptPhase, SubagentChildIdentity, SubagentDetails, SubagentProviderInvocationRecord, SubagentTurnThroughputSample } from "./types.js";
 import { createInvalidAgentResult } from "./validation.js";
 import { toErrorMessage } from "../../shared/error-message.js";
+import { installPieSystemPromptRebuildGuard, type PieSystemPromptOptions } from "../../shared/pie-harness-prompt.js";
 import { subagentContext } from "../../shared/subagent-context.js";
 import { readKeptSkills } from "../../shared/pruned-skills.js";
 import { readProviderCapacitySnapshot } from "../../shared/provider-capacity-bridge.js";
@@ -115,7 +116,10 @@ interface SubagentEventMessage {
 }
 
 interface SessionLike {
-	agent?: { state?: { model?: { id: string } } };
+	agent?: { state?: { model?: { id: string }; systemPrompt?: string } };
+	_baseSystemPrompt?: string;
+	_baseSystemPromptOptions?: PieSystemPromptOptions;
+	_rebuildSystemPrompt?: (toolNames: string[]) => string;
 	extensionRunner: { setUIContext: (ctx: unknown) => void };
 	subscribe: (cb: (event: SubagentSessionEvent) => void) => () => void;
 	prompt: (prompt: string) => Promise<void>;
@@ -1525,7 +1529,11 @@ export async function runSingleAgent(
 		const created = parentAlreadyAborted
 			? await raceTimeout("creating subagent session (already-aborted)", ALREADY_ABORTED_TIMEOUT_MS, createSessionPromise)
 			: await raceAbort(signal, createSessionPromise, "creating subagent session");
-		session = created.session as SessionLike;
+		session = created.session as unknown as SessionLike;
+		// Apply Pie's base prompt before any child setup, subscription, or prompt
+		// call. The wrapper preserves the agent-role append supplied above and
+		// keeps later SDK tool/resource rebuilds on the same shared path.
+		installPieSystemPromptRebuildGuard(session, sdk.getAgentDir());
 	} catch (err) {
 		// Pre-spawn abort or failure: never reach the prompt phase. Return a
 		// loud failure result so `execute()` always settles and the parent
@@ -1554,7 +1562,7 @@ export async function runSingleAgent(
 					let lateSession: SessionLike | undefined;
 					try {
 						const late = await capturedCreatePromise;
-						lateSession = late.session as SessionLike | undefined;
+						lateSession = late.session as unknown as SessionLike | undefined;
 					} catch {
 						// createSession itself ultimately failed — nothing to clean up.
 						return;

@@ -60,6 +60,33 @@ test('ack timeout records ambiguity without rollback and a correlated start comm
     requestId: 'request-1', operationId: 'op-1', timestamp: 102,
   });
   assert.equal(committed.state.operations['op-1']?.terminal?.outcome, 'settled');
+  assert.equal(committed.state.settings.notice, null);
+  assert.equal(committed.state.settings.noticeSessionPath, null);
+});
+
+test('send commit preserves a warning owned by another session or unrelated condition', () => {
+  const delayed = reducer(send(readyState()), {
+    kind: 'SendOperationDelayed', operationId: 'op-1', sessionPath: SESSION,
+    backendGeneration: 7,
+  }).state;
+  const other = send(delayed, {
+    corrId: 'corr-2', operationId: 'op-2', sessionPath: '/other/session.jsonl', localId: 'local-2',
+  });
+  const otherDelayed = reducer(other, {
+    kind: 'SendOperationDelayed', operationId: 'op-2', sessionPath: '/other/session.jsonl',
+    backendGeneration: 7,
+  }).state;
+  for (const state of [otherDelayed, {
+    ...delayed,
+    settings: { ...delayed.settings, notice: 'Unrelated warning' },
+  }]) {
+    const committed = reducer(state, {
+      kind: 'MessageStarted', sessionPath: SESSION, messageId: 'assistant-1',
+      requestId: 'request-1', operationId: 'op-1', timestamp: 102,
+    });
+    assert.equal(committed.state.settings.notice, state.settings.notice);
+    assert.equal(committed.state.settings.noticeSessionPath, state.settings.noticeSessionPath);
+  }
 });
 
 test('reducer owns send reconciliation attempts, backoff, exhaustion, and stale observations', () => {

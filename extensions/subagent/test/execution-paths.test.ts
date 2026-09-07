@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 import * as os from "node:os";
 import * as path from "node:path";
 import { mkdtemp, rm } from "node:fs/promises";
+import { pathToFileURL } from "node:url";
 import type { AgentConfig } from "../agents.js";
+import { buildPieSystemPrompt, type PieSystemPromptOptions } from "../../../shared/pie-harness-prompt.js";
 import { runSingleAgent, subagentRuntime } from "../runner.js";
 import { execute, validateSubagentParams } from "../src/execute.js";
 import { isInSubagentContext } from "../../../shared/subagent-context.js";
@@ -28,6 +30,24 @@ function makeModelRegistry() {
 	} as any;
 }
 
+async function loadPinnedSystemPrompt(): Promise<{
+	buildSystemPrompt(options: PieSystemPromptOptions): string;
+}> {
+	const modulePath = path.join(
+		process.cwd(),
+		"extension",
+		"node_modules",
+		"@earendil-works",
+		"pi-coding-agent",
+		"dist",
+		"core",
+		"system-prompt.js",
+	);
+	return await import(pathToFileURL(modulePath).href) as {
+		buildSystemPrompt(options: PieSystemPromptOptions): string;
+	};
+}
+
 function makeParentBridge() {
 	const calls = {
 		cancelAll: 0,
@@ -47,7 +67,8 @@ function makeParentBridge() {
 function createFakeSdk(options?: {
 	onCreateSession?: () => void | Promise<void>;
 	onSubscribe?: () => void;
-	onPrompt?: (emit: (event: any) => void) => Promise<void>;
+	onPrompt?: (emit: (event: any) => void, session: any) => Promise<void>;
+	sessionState?: Record<string, unknown>;
 }) {
 	const state = {
 		setUIContextCalls: 0,
@@ -66,7 +87,7 @@ function createFakeSdk(options?: {
 		for (const listener of listeners) listener(event);
 	};
 
-	const session = {
+	const session: any = {
 		agent: { state: { model: { id: "session-model" } } },
 		extensionRunner: {
 			setUIContext: (_ctx: unknown) => {
@@ -84,7 +105,7 @@ function createFakeSdk(options?: {
 			state.promptCalls++;
 			state.promptInputs.push(prompt);
 			if (options?.onPrompt) {
-				await options.onPrompt(emit);
+				await options.onPrompt(emit, session);
 				return;
 			}
 			await new Promise<void>((resolve) => {
@@ -99,6 +120,7 @@ function createFakeSdk(options?: {
 			state.disposeCalls++;
 		},
 	};
+	Object.assign(session, options?.sessionState);
 
 	const sdk = {
 		createSession: async (args: Record<string, unknown>) => {
@@ -181,6 +203,98 @@ test("runSingleAgent returns successful result and captures usage/model", async 
 	assert.equal(state.promptCalls, 1);
 	assert.equal(state.unsubscribeCalls, 1);
 	assert.equal(state.disposeCalls, 1);
+});
+
+test("runSingleAgent wires Pie ownership through child prompt and tool/resource rebuilds", async () => {
+	const sdkPrompt = await loadPinnedSystemPrompt();
+	const agentBody = "Preserved child agent body.";
+	const options: PieSystemPromptOptions = {
+		cwd: process.cwd(),
+		selectedTools: ["read", "bash"],
+		toolSnippets: { read: "Read files", bash: "Run commands" },
+		promptGuidelines: ["Child dynamic guidance."],
+		appendSystemPrompt: agentBody,
+	};
+	const stockBuild = sdkPrompt.buildSystemPrompt;
+	const sessionState: any = {
+		_baseSystemPromptOptions: options,
+		_baseSystemPrompt: stockBuild(options),
+		agent: { state: { model: { id: "session-model" }, systemPrompt: stockBuild(options) } },
+	};
+	sessionState._rebuildSystemPrompt = function (toolNames: string[]) {
+		const next = { ...options, selectedTools: toolNames };
+		this._baseSystemPromptOptions = next;
+		return stockBuild(next);
+	};
+	const { sdk, state } = createFakeSdk({
+		sessionState,
+		onPrompt: async (emit, session) => {
+			assert.match(session._baseSystemPrompt, /^You are a coding assistant operating inside Pie/u);
+			assert.match(session.agent.state.systemPrompt, /^You are a coding assistant operating inside Pie/u);
+			assert.match(session._baseSystemPrompt, /Child dynamic guidance\./u);
+			assert.match(session._baseSystemPrompt, /Preserved child agent body\./u);
+
+			const rebuild = (toolNames: string[]) => {
+				const prompt = session._rebuildSystemPrompt(toolNames);
+				// AgentSession assigns the synchronous seam's return value to both
+				// cached prompt fields after tool/resource changes.
+				session._baseSystemPrompt = prompt;
+				session.agent.state.systemPrompt = prompt;
+				return prompt;
+			};
+			const toolRebuilt = rebuild(["bash"]);
+			assert.equal(toolRebuilt, buildPieSystemPrompt(
+				{ ...options, selectedTools: ["bash"] },
+				stockBuild,
+				".",
+			));
+			assert.match(toolRebuilt, /^You are a coding assistant operating inside Pie/u);
+			assert.match(toolRebuilt, /Preserved child agent body\./u);
+			assert.doesNotMatch(toolRebuilt, /- read: Read files/u);
+
+			// Resource extension changes use the same SDK rebuild seam.
+			const resourceRebuilt = rebuild(["read"]);
+			assert.match(resourceRebuilt, /^You are a coding assistant operating inside Pie/u);
+			assert.match(resourceRebuilt, /Preserved child agent body\./u);
+			assert.equal(session._baseSystemPromptOptions.appendSystemPrompt, agentBody);
+
+			emit({
+				type: "message_end",
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "done" }],
+					usage: { input: 1, output: 1, totalTokens: 2, cost: { total: 0 } },
+					model: "session-model",
+					stopReason: "completed",
+				},
+			});
+		},
+	});
+
+	const result = await runSingleAgent(
+		process.cwd(),
+		[makeAgent({ systemPrompt: agentBody })],
+		"worker",
+		"do work",
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		(results) => ({ mode: "single", agentScope: "user", projectAgentsDir: null, results }),
+		makeModelRegistry(),
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		{ sdk: sdk as any, timeoutMs: 50 },
+	);
+
+	assert.equal(result.exitCode, 0);
+	assert.deepEqual(state.createResourceLoaderArgs[0]?.appendSystemPrompt, [agentBody]);
+	assert.equal(state.promptCalls, 1);
 });
 
 test("runSingleAgent fails closed before session creation when final provider resolution cannot satisfy image input", async () => {

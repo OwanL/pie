@@ -534,6 +534,9 @@ export class BackendClient implements vscode.Disposable {
       });
     }
     const retainCorrelation = options?.onCorrelatedResponse !== undefined;
+    const requestStartedAt = performance.now();
+    const timingLevel = ['session.open', 'session.preload', 'session.list', 'session.forget', 'openTabs.set', 'runtimePrefs.set']
+      .includes(method) ? 'info' : 'debug';
     const responsePromise = this.requests.create(
       id,
       timeoutMs,
@@ -555,6 +558,7 @@ export class BackendClient implements vscode.Disposable {
     );
 
     bootTraceSync('backend-client', 'request.sent', { id, method, timeoutMs });
+    appendPieLog(timingLevel, 'backend-client', 'request.sent', { id, method, timeoutMs });
     try {
       this.proc.stdin.write(serializeJsonLine({ id, method, params }), (error) => {
         if (error) this.requests.reject(id, new Error(`Failed to write backend request ${id}: ${toErrorMessage(error)}`));
@@ -565,7 +569,9 @@ export class BackendClient implements vscode.Disposable {
 
     try {
       const response = await responsePromise;
-      bootTraceSync('backend-client', 'response.received', { id, method });
+      const durationMs = Math.max(0, Math.round(performance.now() - requestStartedAt));
+      bootTraceSync('backend-client', 'response.received', { id, method, durationMs });
+      appendPieLog(timingLevel, 'backend-client', 'response.received', { id, method, durationMs });
       if (!response.ok) {
         const sessionPath = params && typeof params === 'object'
           && typeof (params as { sessionPath?: unknown }).sessionPath === 'string'
@@ -597,7 +603,9 @@ export class BackendClient implements vscode.Disposable {
       }
       return response.result as TResult;
     } catch (error) {
-      bootTraceSync('backend-client', 'request.failed', { id, method, error: toErrorMessage(error) });
+      const durationMs = Math.max(0, Math.round(performance.now() - requestStartedAt));
+      bootTraceSync('backend-client', 'request.failed', { id, method, durationMs, error: toErrorMessage(error) });
+      appendPieLog('warn', 'backend-client', 'request.failed', { id, method, durationMs, error: toErrorMessage(error) });
       throw error;
     }
   }

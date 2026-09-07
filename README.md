@@ -211,7 +211,7 @@ npm run test:integration
 npm run typecheck
 npm run lint
 npm run check      # model drift + typecheck + lint + changed tests
-npm run verify     # pre-push gate: model drift + typecheck + lint + full fast suite + build
+npm run verify     # full verification: model drift + typecheck + lint + full fast suite + build
 
 # release coverage gate, optionally scoped to one package
 npm run test:coverage
@@ -285,7 +285,8 @@ The backend logs resolved storage paths on startup via the `backend.ready` event
 
 ## More docs
 
-- [AGENTS.md](AGENTS.md) — repo-specific working conventions for AI assistants
+- [AGENTS.md](AGENTS.md) — global agent traversal and shell conventions
+- [develop-pie skill](skills/develop-pie/SKILL.md) — Pie-specific working conventions, commands, and architecture references
 - [docs/INDEX.md](docs/INDEX.md) — curated index of design docs and plans
 - [docs/STATE_CONTRACT.md](docs/STATE_CONTRACT.md) — authoritative host ↔ webview sync contract
 - [extension/README.md](extension/README.md) — extension design philosophy

@@ -32,15 +32,15 @@ function withTimeline(now: () => number): {
   const timelinePath = path.join(directory, 'activity-intervals.json');
   const timeline = new ActivityTimeline(timelinePath, { now });
   const internals = timeline as unknown as {
-    writeUnlocked: (...args: unknown[]) => void;
+    appendJournalUnlocked: (...args: unknown[]) => void;
   };
-  const write = internals.writeUnlocked.bind(timeline);
+  const append = internals.appendJournalUnlocked.bind(timeline);
   let failure = true;
   let writeAttempts = 0;
-  internals.writeUnlocked = (...args: unknown[]) => {
+  internals.appendJournalUnlocked = (...args: unknown[]) => {
     writeAttempts += 1;
     if (failure) throw new Error('injected activity write failure');
-    write(...args);
+    append(...args);
   };
   return {
     timeline,

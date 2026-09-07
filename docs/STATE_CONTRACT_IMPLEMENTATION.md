@@ -55,6 +55,7 @@ Provider-forced overflow compaction is treated as resumable when the provider re
 
 - The billable invocation ledger is stored as `billable-invocations.jsonl` per workspace analytics store.
 - The correlated activity timeline is stored as `activity-intervals.json` (idempotent busy, provider, retry-wait, non-overlapping tool, compaction, and auxiliary intervals).
+- The activity timeline keeps a JSONL delta journal beside that snapshot (`activity-intervals.journal.jsonl`). Routine `start`/`settle`/`recordMany` mutations append fsynced canonical interval records instead of rewriting the snapshot. Explicit background `compact()` stages a replacement outside the lock, then revalidates signatures before committing; a reset-marker recovery journal makes interrupted two-file replacement replayable. Privacy/forget scrubs synchronously remove attributed data from both files under the shared workspace lock. Every access revalidates snapshot/journal/privacy signatures; unchanged snapshots support incremental sibling-journal replay, interval identity and first settlement are immutable, and torn journal lines are skipped. Async `initialize()` parses in bounded slices without holding the lock across yields. Snapshot/privacy replacement can still require a synchronous compatibility reload. Older journal-unaware hosts see only the last compacted snapshot, so all hosts sharing this store should run the same version.
 
 ## Execution Ordering — backend operation ledger fingerprints
 

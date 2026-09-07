@@ -6,29 +6,23 @@ description: >
 
 # Codebase Maintenance
 
-This skill provides a structured static analysis workflow for improving code quality and maintainability.
-Scripts are used to identify issues for review, you will then review the flagged issues and make informed
-judgements on whether to refactor or ignore each item, flagging ambiguous cases for human review via the
-ask user tool. This would look something like the following:
-"The file at src/save.py exceeds the line threshold, however it is a single-concern module that may be
-better left as is. Which of the following approaches should we take?"
+Use targeted static analysis and human judgment to identify actionable maintenance issues. Scanner findings are candidates, not instructions to refactor. Ask the user when a material scope or design choice is unresolved; do not ask merely because a metric exceeds a threshold. For audit-only requests, report findings without making changes.
 
 Resolve script paths against this skill directory (for example, run `uv run find_large_files.py` with the skill directory as cwd). Run any script with `--help` to see full argument documentation.
 
 ## Ignoring files
 
-Make additions when you get cache, build or other similar 'noise' or non-code files in the output of the
-above steps.
+Exclude cache, build, and other irrelevant files when they create scanner noise.
 
-- Patterns live in `codebase-maintenance/.ignore`.
+- Scanner patterns live in `.ignore` in this skill directory.
 - Patterns before any `context` line apply to every scan.
 - Patterns after `context <working-directory>` only apply when the directory passed to the script matches
   that working-directory path or glob.
 - Ignore patterns are evaluated relative to the scan root; patterns ending in `/` match directories.
 
-## Execution order
+## Select relevant checks
 
-Execute the following steps sequentially:
+Choose checks that answer the requested maintenance question. For a broad code audit, use the order below; for documentation or guidance audits, start with document drift and semantic review, skipping code scanners. Scope scans to relevant source trees and follow repository traversal rules. After approved edits, rerun affected checks and proportionate verification, not every scanner.
 
 ### 1. Dead code
 
@@ -60,8 +54,7 @@ project's type-checker and linter immediately — dead-code removal often expose
 uv run detect_smells.py <directory> [options]
 ```
 
-Semgrep detects bugs and code smells. Fix findings, then re-run until clean. Use
-`--exclude-categories` to suppress noise.
+Semgrep detects bugs and code smells. Verify the flagged code paths, fix supported in-scope issues, and rerun the affected checks. Use `--exclude-categories` to suppress irrelevant categories.
 
 ### 3. Duplicates
 
@@ -69,9 +62,7 @@ Semgrep detects bugs and code smells. Fix findings, then re-run until clean. Use
 uv run find_duplicates.py <directory> [options]
 ```
 
-Copy/paste duplicates across files (jscpd). Review each duplicate, some are
-justified (shared config, test fixtures). Genuine duplicates should be extracted into shared
-utilities. Use `--show-generated` to inspect lock-file / minified duplicates, or
+Copy/paste duplicates across files (jscpd). Review whether they represent the same responsibility; shared config and test fixtures may justify repetition. Extract shared utilities only when they reduce maintenance cost without coupling unrelated behavior. Use `--show-generated` to inspect lock-file / minified duplicates, or
 `--exclude-test-directories` when test boilerplate dominates the report.
 
 ### 4. Complexity
@@ -80,9 +71,7 @@ utilities. Use `--show-generated` to inspect lock-file / minified duplicates, or
 uv run analyze_complexity.py <directory> [options]
 ```
 
-Quality scores via Qualitas. Note: Qualitas reports at the **file level** — extracting helpers
-within the same file won't reduce scores. Only moving code to separate modules improves
-file-level metrics. Domain-appropriate complexity (dispatchers, pipelines) need not be eliminated.
+Qualitas reports at the **file level**. Treat scores as investigation signals, not refactoring targets. Simplify genuinely difficult behavior or split distinct responsibilities; do not move code solely to improve a metric. Domain-appropriate complexity in dispatchers or pipelines may be justified.
 
 ### 5. Large files
 
@@ -91,17 +80,15 @@ uv run find_large_files.py <directory> [max_lines]
 ```
 
 Files exceeding the line threshold (default: 500). Evaluate each — single-concern modules may
-be fine as-is. Only refactor files that are genuinely multi-concern. Re-run after refactoring
-to confirm all large files are justified.
+be fine as-is. Only refactor files that are genuinely multi-concern. Recheck affected files after refactoring.
 
 ### 6. Lint and test verification
 
-Run the project's existing tests, type checks, and linters. Fix any regressions introduced by
-earlier refactors, then re-run until clean.
+After code changes, run the project's required tests, type checks, and linters at a proportionate scope. Fix regressions caused by the changes. For documentation-only changes, use relevant link, drift, or contract checks instead of unrelated code tests.
 
-### 7. .gitignore updates
+### 7. Ignore-pattern updates
 
-Check for any new 'noise' files that should be ignored. Add clear cut cases to the `.ignore` file, and flag ambiguous cases for human review using the ask user tool.
+Keep scanner exclusions in the skill's `.ignore`. Change the repository's `.gitignore` only when a file should also be excluded from version control. Do not hide source or required artifacts merely to silence a scanner; ask when ownership is unclear.
 
 ### 8. Document drift
 

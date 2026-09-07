@@ -1571,14 +1571,9 @@ export function handleSendOperationStatus(state: ArchState, event: Extract<Event
       draft.settings.noticeKind = 'backend-exit';
       draft.settings.noticeRaw = event.error ?? null;
       draft.settings.noticeSessionPath = event.sessionPath;
-    } else if (updated.terminal?.outcome === 'settled'
-      && draft.settings.noticeSessionPath === event.sessionPath
-      && draft.settings.notice?.startsWith('Send acknowledgement delayed.')) {
-      draft.settings.notice = null;
-      draft.settings.noticeKind = null;
-      draft.settings.noticeRaw = null;
-      draft.settings.noticeSessionPath = null;
     }
+    // Reconciliation notices are retired by the reducer's registry cleanup,
+    // shared with semantic commit and cancellation (not only status polling).
   });
   if (event.state === 'failed' || event.state === 'aborted' || event.state === 'generation-ended') {
     const pendingEntry = Object.entries(registryState.pending.promoted)

@@ -5,6 +5,7 @@ import { projectLedgerUsageOntoAggregate } from '../../src/host/billable-invocat
 import type { BillableInvocationRecord } from '../../src/shared/billable-invocation';
 import { sessionUsageSnapshotFromLedger } from '../../src/shared/session-usage';
 import { EMPTY_AGGREGATE_STATS } from '../../src/shared/protocol/aggregate-stats';
+import { MAX_INTRADAY_CHART_POINTS } from '../../src/host/stats-service/aggregate-stats';
 import {
   buildCompletedCostSummaryFromSnapshot,
   buildSessionCostIndicator,
@@ -19,6 +20,7 @@ function row(
   outputTokens: number,
   cost: number,
   endedAt: string,
+  overrides: Partial<BillableInvocationRecord> = {},
 ): BillableInvocationRecord {
   return {
     schemaVersion: 1,
@@ -44,7 +46,8 @@ function row(
     endedAt,
     outcome: 'succeeded',
     instrumentationGap: false,
-  };
+    ...overrides,
+  } as BillableInvocationRecord;
 }
 
 test('session, aggregate, and export-authority projections conserve every billable invocation', () => {
@@ -99,6 +102,61 @@ test('session, aggregate, and export-authority projections conserve every billab
     sessionCost?.breakdown.sources.map((source) => source.key).sort(),
     ['conversation', 'history_compaction', 'pruning', 'retry', 'session_title', 'subagents'].sort(),
   );
+});
+
+test('large ledger chart projection is bounded before provider/model snapshots while conserving totals', () => {
+  const nowMs = new Date(2026, 8, 4, 12, 0, 0).getTime();
+  const count = 14_469;
+  const records = Array.from({ length: count }, (_, index) => {
+    const endedAt = new Date(nowMs - (count - index) * 1000).toISOString();
+    return row(
+      `large-${index}`,
+      'conversation',
+      index + 1,
+      index + 2,
+      0.001,
+      endedAt,
+      { provider: index % 2 === 0 ? 'provider-a' : 'provider-b', model: index % 2 === 0 ? 'model-a' : 'model-b' },
+    );
+  });
+  const expectedInput = records.reduce((sum, record) => sum + (record.inputTokens ?? 0), 0);
+  const expectedOutput = records.reduce((sum, record) => sum + (record.outputTokens ?? 0), 0);
+  const expectedCost = records.reduce((sum, record) => sum + (record.providerReportedCostUsd ?? 0), 0);
+  const aggregate = projectLedgerUsageOntoAggregate(
+    { ...EMPTY_AGGREGATE_STATS, ready: true },
+    records,
+    nowMs,
+  );
+
+  for (const series of [aggregate.todayCostSeries, aggregate.todayInputTokenSeries, aggregate.todayTokenSeries]) {
+    assert.ok(series.length <= MAX_INTRADAY_CHART_POINTS);
+    const final = series.at(-1);
+    assert.ok(final);
+    assert.equal(final.ms, Date.parse(records.at(-1)!.endedAt), 'the endpoint retains the last contributing event time');
+    const expected = series === aggregate.todayCostSeries ? expectedCost
+      : series === aggregate.todayInputTokenSeries ? expectedInput : expectedOutput;
+    assert.ok(Math.abs(final!.byProvider.reduce((sum, segment) => sum + segment.value, 0) - expected) < 1e-9,
+      'the bounded endpoint conserves the exact total within floating-point currency precision');
+  }
+  assert.equal(aggregate.totalInputTokens, expectedInput);
+  assert.equal(aggregate.totalOutputTokens, expectedOutput);
+  assert.equal(aggregate.totalCost, expectedCost);
+  assert.equal(aggregate.dailyCost.at(-1)?.totalCost, expectedCost);
+  assert.ok(JSON.stringify(aggregate.todayCostSeries).length < 500_000, 'bounded chart graph stays compact');
+});
+
+test('small ledger chart inputs retain one cumulative point per invocation', () => {
+  const nowMs = new Date(2026, 8, 4, 12, 0, 0).getTime();
+  const first = new Date(nowMs - 2_000).toISOString();
+  const second = new Date(nowMs - 1_000).toISOString();
+  const aggregate = projectLedgerUsageOntoAggregate(
+    { ...EMPTY_AGGREGATE_STATS, ready: true },
+    [row('small-1', 'conversation', 10, 20, 1, first), row('small-2', 'conversation', 30, 40, 2, second)],
+    nowMs,
+  );
+  assert.deepEqual(aggregate.todayTokenSeries.map((point) => point.ms), [Date.parse(first), Date.parse(second)]);
+  assert.equal(aggregate.todayTokenSeries.length, 2);
+  assert.equal(aggregate.todayTokenSeries.at(-1)?.byModel[0]?.value, 60);
 });
 
 test('unknown and unpriced provenance remains incomplete without changing known conserved subtotals', () => {

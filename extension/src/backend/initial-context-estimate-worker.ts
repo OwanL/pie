@@ -17,6 +17,7 @@ import type {
 } from './sdk';
 import { loadSdk, loadSdkInternalModule } from './sdk';
 import type { SdkPatchIdentity } from './sdk-patch-barrier';
+import { createPieSystemPromptBuilder } from '../../../shared/pie-harness-prompt.js';
 import {
   captureOriginalSystemPromptOptions,
   normalizePromptText,
@@ -145,12 +146,13 @@ async function collectInitialContextEstimateInsideBoundary(
 
     const tools = session.getAllTools?.() ?? [];
     const inventoryPromptOptions = buildAllRegisteredPromptOptions(session, promptOptions, tools);
-    const fullSystemPrompt = normalizePromptText(systemPromptModule.buildSystemPrompt(inventoryPromptOptions));
+    const pieBuildSystemPrompt = createPieSystemPromptBuilder(systemPromptModule.buildSystemPrompt, input.agentDir);
+    const fullSystemPrompt = normalizePromptText(pieBuildSystemPrompt(inventoryPromptOptions));
     if (!fullSystemPrompt) throw new Error('Fresh inventory did not build a system prompt.');
 
-    // Count the exact SDK-built prompt text rather than Pie's display-only
-    // rewritten harness. Provider tool descriptions/schemas are separate
-    // request metadata and are added exactly once below.
+    // Count the exact Pie-owned prompt text used by runtime requests.
+    // Provider tool descriptions/schemas are separate request metadata and are
+    // added exactly once below.
     const tokens = estimateTextTokens(fullSystemPrompt) + estimateTextTokens(buildToolCatalogText(tools));
     const contextWindow = session.model?.contextWindow;
     if (!Number.isSafeInteger(tokens) || tokens < 0

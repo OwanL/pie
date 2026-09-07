@@ -11,7 +11,7 @@ test('withoutGitRepositoryEnv prevents hook-local Git state leaking into test fi
     GIT_WORK_TREE: 'real-worktree',
     GIT_CONFIG_COUNT: '1',
     GIT_CONFIG_KEY_0: 'core.hooksPath',
-    GIT_CONFIG_VALUE_0: '.githooks',
+    GIT_CONFIG_VALUE_0: 'custom-hooks-path',
     GIT_AUTHOR_NAME: 'Keep Author',
   };
 

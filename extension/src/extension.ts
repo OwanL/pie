@@ -45,16 +45,16 @@ export function activate(context: vscode.ExtensionContext): void {
   const retention = vscode.workspace
     .getConfiguration('pie')
     .get<{ maxAgeDays?: number; maxTotalSizeMb?: number }>('tempLogRetention');
+  const reaperStartedAt = performance.now();
   void reapTempLogs({
     maxAgeDays: retention?.maxAgeDays,
     maxTotalSizeMb: retention?.maxTotalSizeMb,
   }).then((r) => {
-    if (r.deleted > 0) {
-      pieLog('info', 'temp-log-reaper', `Reaped ${r.deleted} temp log(s)`, {
-        scanned: r.scanned,
-        freedKb: Math.round(r.freedBytes / 1024),
-      });
-    }
+    pieLog('info', 'temp-log-reaper', `Reaped ${r.deleted} temp log(s)`, {
+      scanned: r.scanned,
+      freedKb: Math.round(r.freedBytes / 1024),
+      durationMs: Math.round(performance.now() - reaperStartedAt),
+    });
   }).catch(() => {
     // Best-effort cleanup — never surface a reaper failure to the user.
   });

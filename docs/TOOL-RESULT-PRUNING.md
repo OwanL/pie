@@ -4,8 +4,9 @@
 > enters the model's context. Consolidates the brainstorm, prior-art survey, pi
 > architecture decision, and durability verification.
 >
-> One of three **context-lean layers** in this stack (see `AGENTS.md` § Context-lean
-> layers): **history compaction** (pi — LLM-summarize old messages; past),
+> One of three **context-lean layers** in this stack (see the [develop-pie skill's
+> context-lean terminology](../skills/develop-pie/SKILL.md#context-lean-terminology)):
+> **history compaction** (pi — LLM-summarize old messages; past),
 > **skill pruning** (pie `skill-pruner` — drop skills/tools from the catalog;
 > prepass), **tool-result pruning** (this — prune a tool result's bytes;
 > deterministic; per-result).

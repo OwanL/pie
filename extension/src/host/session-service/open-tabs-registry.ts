@@ -54,7 +54,13 @@ export interface OpenTabsRegistryPublisherScheduler {
 }
 
 export interface OpenTabsRegistryPublisherOptions {
-  request(snapshot: { revision: number; tabs: OpenTabsRegistryEntry[] }): Promise<void>;
+  /** The promise is the local waiter; `onTransportSettled` is the physical
+   * JSON-RPC boundary. A timed-out waiter must not start another request while
+   * the old request still occupies the backend client's correlation map. */
+  request(
+    snapshot: { revision: number; tabs: OpenTabsRegistryEntry[] },
+    options: { onTransportSettled: () => void },
+  ): Promise<void>;
   onError?(error: unknown, context: { revision: number; retryAttempt: number }): void;
   retryDelaysMs?: readonly number[];
   scheduler?: OpenTabsRegistryPublisherScheduler;
@@ -76,16 +82,26 @@ const defaultScheduler: OpenTabsRegistryPublisherScheduler = {
 const DEFAULT_RETRY_DELAYS_MS = [250, 1_000, 5_000] as const;
 
 /**
- * Latest-wins, retrying host→coordinator publisher. A retry reuses the same
- * source revision, so a lost response cannot apply the snapshot twice; a new
- * host snapshot supersedes a queued retry immediately.
+ * Latest-wins, readiness-gated host→coordinator publisher. A retry reuses the
+ * same source revision, so a lost response cannot apply the snapshot twice; a
+ * new host snapshot supersedes a queued retry immediately. Snapshots received
+ * before readiness are retained and the current snapshot is re-sent whenever a
+ * new backend generation becomes ready.
  */
 export class OpenTabsRegistryPublisher {
   private readonly scheduler: OpenTabsRegistryPublisherScheduler;
   private readonly retryDelaysMs: readonly number[];
   private desired?: DesiredRegistrySnapshot;
   private nextRevision = 1;
-  private inFlight = false;
+  private inFlight?: {
+    target: DesiredRegistrySnapshot;
+    generation: number;
+    waiterSettled: boolean;
+    transportSettled: boolean;
+    failed: boolean;
+  };
+  private backendGeneration = 0;
+  private backendReady = false;
   private retryAttempt = 0;
   private retryTimer?: ReturnType<typeof setTimeout>;
   private disposed = false;
@@ -95,6 +111,37 @@ export class OpenTabsRegistryPublisher {
     this.retryDelaysMs = options.retryDelaysMs?.length
       ? options.retryDelaysMs
       : DEFAULT_RETRY_DELAYS_MS;
+  }
+
+  /** Update the actual backend readiness barrier. The host calls this after
+   * every reducer turn, not when the child process merely spawns, so restart
+   * transitions and generation changes cannot publish to a stopped backend. */
+  setBackendReady(ready: boolean, generation: number): void {
+    if (this.disposed) return;
+    const generationChanged = this.backendGeneration !== generation;
+    const readinessChanged = this.backendReady !== ready;
+    this.backendGeneration = generation;
+    this.backendReady = ready;
+    if (!generationChanged && !readinessChanged) return;
+    this.cancelRetry();
+
+    if (!ready) {
+      // Preserve the latest snapshot across a restart. If a request is in
+      // flight, its completion is fenced below and the replacement generation
+      // will re-send rather than trusting an old coordinator acknowledgement.
+      if (this.desired) {
+        this.desired.needsSend = true;
+        this.desired.urgentResend = true;
+      }
+      return;
+    }
+
+    if (generationChanged && this.desired) {
+      this.desired.needsSend = true;
+      this.desired.urgentResend = true;
+      this.retryAttempt = 0;
+    }
+    void this.drain();
   }
 
   publish(tabs: OpenTabsRegistryEntry[], options: { force?: boolean } = {}): number | undefined {
@@ -143,47 +190,106 @@ export class OpenTabsRegistryPublisher {
   }
 
   private async drain(): Promise<void> {
-    if (this.disposed || this.inFlight || !this.desired?.needsSend) return;
+    if (this.disposed || !this.backendReady || this.inFlight || !this.desired?.needsSend) return;
     const target = this.desired;
+    const requestGeneration = this.backendGeneration;
+    const request = {
+      target,
+      generation: requestGeneration,
+      waiterSettled: false,
+      transportSettled: false,
+      failed: false,
+    };
     target.needsSend = false;
     target.urgentResend = false;
-    this.inFlight = true;
-    let failed = false;
+    this.inFlight = request;
+
+    const onTransportSettled = (): void => {
+      request.transportSettled = true;
+      this.releaseInFlight(request);
+    };
+
     try {
-      await this.options.request({ revision: target.revision, tabs: target.tabs });
-      if (this.desired === target) this.retryAttempt = 0;
+      await this.options.request(
+        { revision: target.revision, tabs: target.tabs },
+        { onTransportSettled },
+      );
+      // A successful promise is itself a transport settlement. Production
+      // BackendClient also invokes the hook before resolving; this fallback
+      // keeps small test/adaptor implementations from pinning the publisher.
+      request.transportSettled = true;
+      if (this.desired === target && requestGeneration === this.backendGeneration && this.backendReady) {
+        this.retryAttempt = 0;
+      }
     } catch (error) {
-      failed = true;
+      request.failed = true;
+      // BackendClient invokes the hook for ordinary transport failures. A
+      // synchronous adapter throw has no physical request, so only a timeout
+      // is allowed to retain the transport fence when the hook was not called.
+      if (!request.transportSettled && !(error instanceof Error && error.name === 'RequestTimeoutError')) {
+        request.transportSettled = true;
+      }
+      const staleGeneration = requestGeneration !== this.backendGeneration || !this.backendReady;
       if (this.desired === target && !this.disposed) {
         target.needsSend = true;
-        this.retryAttempt += 1;
-        this.options.onError?.(error, { revision: target.revision, retryAttempt: this.retryAttempt });
-        if (!target.urgentResend) this.scheduleRetry();
+        if (!staleGeneration) {
+          this.retryAttempt += 1;
+          this.options.onError?.(error, { revision: target.revision, retryAttempt: this.retryAttempt });
+          if (!target.urgentResend && request.transportSettled) this.scheduleRetry();
+        }
       }
     } finally {
-      this.inFlight = false;
-      // A newer snapshot, or an explicit force while this request was in
-      // flight, runs immediately. Ordinary failures respect retry backoff.
-      if (!this.disposed
-        && (this.desired !== target || (target.needsSend && (!failed || target.urgentResend)))) {
-        void this.drain();
-      }
+      request.waiterSettled = true;
+      this.releaseInFlight(request);
+    }
+  }
+
+  /** Release the publisher slot only after both the application waiter and the
+   * physical transport have settled. This makes a timeout a bounded retry
+   * episode rather than permission to create an unbounded set of expired
+   * backend requests. */
+  private releaseInFlight(request: NonNullable<OpenTabsRegistryPublisher['inFlight']>): void {
+    if (!request.waiterSettled || !request.transportSettled || this.inFlight !== request) return;
+    this.inFlight = undefined;
+    const staleGeneration = request.generation !== this.backendGeneration;
+    if (staleGeneration && this.desired === request.target && !this.disposed) {
+      // A response from the old backend cannot establish the new coordinator's
+      // registry. Re-send the latest authority immediately once the replacement
+      // generation is ready.
+      request.target.needsSend = true;
+      request.target.urgentResend = true;
+      this.retryAttempt = 0;
+    }
+
+    if (this.disposed || !this.backendReady) return;
+    if (this.desired !== request.target
+      || (request.target.needsSend && (!request.failed || request.target.urgentResend || staleGeneration))) {
+      void this.drain();
+    } else if (request.failed && request.target.needsSend && !request.target.urgentResend) {
+      // A timeout may have settled the local waiter before the physical
+      // response. The retry is armed only at this release boundary.
+      this.scheduleRetry();
     }
   }
 
   private scheduleRetry(): void {
-    if (this.disposed || this.retryTimer || !this.desired?.needsSend) return;
+    if (this.disposed || !this.backendReady || this.retryTimer || !this.desired?.needsSend) return;
     const delayIndex = Math.min(Math.max(0, this.retryAttempt - 1), this.retryDelaysMs.length - 1);
     const delayMs = this.retryDelaysMs[delayIndex] ?? 5_000;
+    const retryGeneration = this.backendGeneration;
     this.retryTimer = this.scheduler.setTimeout(() => {
       this.retryTimer = undefined;
+      // A timer armed for an old generation must not issue a request to the
+      // replacement coordinator. setBackendReady(true, generation) owns the
+      // immediate resync after restart.
+      if (retryGeneration !== this.backendGeneration || !this.backendReady) return;
       void this.drain();
     }, delayMs);
     this.retryTimer.unref?.();
   }
 
   private cancelRetry(): void {
-    if (!this.retryTimer) return;
+    if (this.retryTimer === undefined) return;
     this.scheduler.clearTimeout(this.retryTimer);
     this.retryTimer = undefined;
   }

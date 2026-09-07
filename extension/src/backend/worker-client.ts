@@ -89,6 +89,11 @@ export interface WorkerClientSnapshot {
   /** Last validated bounded worker checkpoint; never inferred after death. */
   lastHeartbeat?: WorkerHeartbeatFrame['heartbeat'];
   failure?: string;
+  /** Observed OS exit status, published only after death is confirmed.
+   *  Values pass through exactly what the OS reported; a `null` field means
+   *  the OS supplied no code/signal — never fabricated or inferred. */
+  exitCode?: number | null;
+  exitSignal?: NodeJS.Signals | null;
   stdoutTail: string;
   stderrTail: string;
 }
@@ -225,6 +230,8 @@ export class WorkerClient {
   private readySeen = false;
   private ipcClosed = false;
   private exitSeen = false;
+  private exitCode?: number | null;
+  private exitSignal?: NodeJS.Signals | null;
   private killStarted?: Promise<void>;
   private processTreeGuardian?: WindowsProcessTreeGuardian;
 
@@ -445,6 +452,7 @@ export class WorkerClient {
       ...(this.lastHeartbeatAt === undefined ? {} : { lastHeartbeatAt: this.lastHeartbeatAt }),
       ...(this.lastHeartbeat ? { lastHeartbeat: { ...this.lastHeartbeat } } : {}),
       ...(this.failure ? { failure: this.failure.message } : {}),
+      ...(this.exitSeen ? { exitCode: this.exitCode, exitSignal: this.exitSignal } : {}),
       stdoutTail: this.stdoutTail.toString(),
       stderrTail: this.stderrTail.toString(),
     };
@@ -655,6 +663,8 @@ export class WorkerClient {
   private async handleExit(code: number | null, signal: NodeJS.Signals | null): Promise<void> {
     if (this.exitSeen) return;
     this.exitSeen = true;
+    this.exitCode = code;
+    this.exitSignal = signal;
     this.ipcClosed = true;
     this.clearExitGraceTimer();
     this.detachReader?.();

@@ -97,6 +97,12 @@ test('real inherited-FD transport keeps JSON-looking, partial, and bounded-large
     assert.match(snapshot.stderrTail, /STDERR-END$/);
     assert.deepEqual(await client.shutdown('test complete'), { kind: 'shutting-down' });
     await client.waitForConfirmedExit(5_000);
+    // An intentional shutdown publishes its observed exit status without
+    // manufacturing a failure label.
+    const exited = client.getSnapshot();
+    assert.equal(exited.exitCode, 0);
+    assert.equal(exited.exitSignal, null);
+    assert.equal(exited.failure, undefined);
   } finally {
     await cleanup(client);
   }
@@ -325,7 +331,28 @@ test('EOF grace preserves a real exit code when the child exits with code 1', as
     assert.deepEqual(exit, { code: 1, signal: null });
     assert.equal(client.getSnapshot().status, 'exited');
     assert.match(client.getSnapshot().failure ?? '', /descriptor closed before process exit/);
+    // The EOF failure stays causal while the OS-observed exit code is
+    // published as evidence, never substituting for it.
+    assert.equal(client.getSnapshot().exitCode, 1);
+    assert.equal(client.getSnapshot().exitSignal, null);
     assert.equal(clock.timerCount(), 0, 'true exit clears the unused EOF grace timer');
+  } finally {
+    await cleanup(client);
+  }
+});
+
+test('an unexpected crash publishes the OS-observed exit code next to the failure', async () => {
+  const client = createClient('crash-descendant', { startupTimeoutMs: 15_000 });
+  try {
+    await client.start();
+    await client.waitForConfirmedExit(8_000);
+    const snapshot = client.getSnapshot();
+    assert.equal(snapshot.status, 'exited');
+    assert.equal(snapshot.exitCode, 23);
+    assert.equal(snapshot.exitSignal, null);
+    // The first causal failure (often the descriptor close that precedes the
+    // exit event) is preserved rather than overwritten by the exit code.
+    assert.ok(snapshot.failure, 'the crash retains a causal failure');
   } finally {
     await cleanup(client);
   }
@@ -386,6 +413,16 @@ test('forced worker termination removes a real descendant process tree', async (
     assert.ok(descendantPid && isAlive(descendantPid));
     await client.forceKill();
     await client.waitForConfirmedExit(5_000);
+    const forcedExit = client.getSnapshot();
+    if (process.platform === 'win32') {
+      // The Job guardian's forced termination reports an OS exit code and no
+      // signal; whatever the kernel observed is passed through unmodified.
+      assert.ok(forcedExit.exitSignal === null || forcedExit.exitSignal === undefined);
+      assert.ok(typeof forcedExit.exitCode === 'number', `expected an observed exit code, got ${forcedExit.exitCode}`);
+    } else {
+      assert.equal(forcedExit.exitSignal, 'SIGKILL');
+      assert.equal(forcedExit.exitCode, null);
+    }
     await waitUntil(() => !isAlive(descendantPid!), 15_000);
   } finally {
     await cleanup(client);

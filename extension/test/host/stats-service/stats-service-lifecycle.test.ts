@@ -187,13 +187,22 @@ test('a rejected persisted query after shutdown skips healing, migration, and re
     const seams = stats as unknown as {
       storage: { queryPersistedRunAnalytics: () => Promise<never> };
       accounting: {
-        healActivityFromLedger: () => void;
+        healActivityFromLedger: (options?: { shouldContinue?: () => boolean }) => Promise<unknown>;
         migrateHistoricalRunUsage: () => Promise<void>;
       };
     };
     let healCalls = 0;
     let migrationCalls = 0;
-    seams.accounting.healActivityFromLedger = () => { healCalls += 1; };
+    seams.accounting.healActivityFromLedger = () => {
+      healCalls += 1;
+      return Promise.resolve({
+        ledgerRowsConsidered: 0,
+        healedIntervals: 0,
+        activityBatchFlushes: 0,
+        durationMs: 0,
+        cancelled: false,
+      });
+    };
     seams.accounting.migrateHistoricalRunUsage = async () => { migrationCalls += 1; };
 
     let rejectQuery!: (reason?: unknown) => void;

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { buildPieSystemPrompt } from '../../../../shared/pie-harness-prompt.js';
 import {
   collectInitialContextEstimate,
   installInventoryProviderDenyBoundary,
@@ -68,12 +69,23 @@ test('fresh inventory binds resources, counts the unfiltered catalog, and dispos
     buildSystemPrompt: (options: any) => {
       builtPromptOptions = options;
       return [
-        'Harness instructions.',
-        ...Object.values(options.toolSnippets ?? {}),
-        ...(options.promptGuidelines ?? []),
-        options.appendSystemPrompt ?? '',
-        ...(options.contextFiles ?? []).map((file: any) => file.content),
-        ...(options.skills ?? []).map((skill: any) => `${skill.name}: ${skill.description}`),
+        'You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.',
+        '',
+        'Available tools:',
+        ...Object.entries(options.toolSnippets ?? {}).map(([name, snippet]) => `- ${name}: ${snippet}`),
+        '',
+        'In addition to the tools above, you may have access to other custom tools depending on the project.',
+        '',
+        'Guidelines:',
+        ...(options.promptGuidelines ?? []).map((guideline: string) => `- ${guideline}`),
+        '',
+        'Pi documentation (read only when the user asks about pi itself, its SDK, extensions, themes, skills, or TUI):',
+        '- Main documentation: /sdk/README.md',
+        '- Additional docs: /sdk/docs',
+        '- Examples: /sdk/examples (extensions, custom tools, SDK)',
+        '- Always read pi .md files completely and follow links to related docs (e.g., tui.md for TUI API details)',
+        'Current date: 2026-01-01',
+        'Current working directory: /workspace',
       ].join('\n');
     },
   };
@@ -90,6 +102,25 @@ test('fresh inventory binds resources, counts the unfiltered catalog, and dispos
   assert.equal(turnDenied, true, 'extension-triggered turns are rejected before session_start');
   assert.equal(estimate.contextWindow, 200_000);
   assert.deepEqual(builtPromptOptions.selectedTools, ['read', 'hidden_inventory']);
+  const expectedPiePrompt = buildPieSystemPrompt(
+    builtPromptOptions,
+    systemPromptModule.buildSystemPrompt,
+    '/agent',
+  );
+  assert.match(expectedPiePrompt, /^You are a coding assistant operating inside Pie/);
+  assert.ok(!expectedPiePrompt.includes('Traversal safety:'), 'inventory uses the approved base without traversal prose');
+  const expectedToolCatalog = session.getAllTools().map((tool: any) => {
+    let entry = `## ${tool.name}\n\n${tool.description || '(no description)'}`;
+    if (tool.parameters !== undefined) {
+      entry += '\n\n**Parameters:**\n```json\n' + JSON.stringify(tool.parameters, null, 2) + '\n```';
+    }
+    return entry;
+  }).join('\n\n---\n\n');
+  assert.equal(
+    estimate.tokens,
+    estimateTextTokens(expectedPiePrompt) + estimateTextTokens(expectedToolCatalog),
+    'initial estimate counts the same shared Pie prompt plus the separate tool catalog',
+  );
   assert.equal(builtPromptOptions.toolSnippets.hidden_inventory, inactiveSnippet);
   assert.ok(builtPromptOptions.promptGuidelines.includes(inactiveGuideline));
   assert.ok(

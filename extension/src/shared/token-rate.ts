@@ -47,6 +47,217 @@ import {
  * in the extension host.
  */
 
+/**
+ * Diagnostic counter of characters handed to the BPE tokenizer by this module
+ * (monotonically increasing until reset). Purely observational — it exists so
+ * work-bound tests and profiling can assert that a tick's tokenization work is
+ * bounded by the sampling window rather than proportional to the transcript
+ * size. It never affects any measurement result.
+ */
+let tokenizerWorkChars = 0;
+
+/** Characters handed to the BPE tokenizer since the last reset. */
+export function readTokenRateWorkChars(): number {
+  return tokenizerWorkChars;
+}
+
+/** Reset the diagnostic tokenizer-work counter (for per-tick measurement). */
+export function resetTokenRateWorkChars(): void {
+  tokenizerWorkChars = 0;
+}
+
+/** Single BPE seam for this module: routes through the diagnostic work counter. */
+function countBpeTokens(text: string): number {
+  tokenizerWorkChars += text.length;
+  return estimateTextTokens(text);
+}
+
+/** Char bound beyond which a text field is tail-sampled instead of fully
+ * tokenized. Matches the backend's live subagent counter
+ * (`estimatePossiblyLongTextTokens` in `tool-progress-normalizer.ts`) so the
+ * host rate measurement uses the same bounded-estimate strategy as the
+ * transport-side cumulative counters it mirrors. */
+const TOKEN_SAMPLE_CHARS = 8_192;
+
+/** Bounded-work token estimate: exact BPE for short text; for long text, the
+ * tail window's token density scaled by total characters. Deliberately NOT an
+ * exact incremental BPE claim — it is the same approximate magnitude estimate
+ * the backend uses for live subagent counters. Estimated quantities derived
+ * from it (rate, live/terminal estimates) remain estimates; provider-reported
+ * usage stays authoritative wherever it exists.
+ *
+ * One-shot only: this reprices the WHOLE text at the tail's density, so it
+ * must never be used per-tick for an append-mostly field — a density change in
+ * the tail would manufacture a delta on the entire prefix. Long-lived fields
+ * go through {@link updateFieldEstimate}, which prices only the appended tail
+ * incrementally. */
+function estimateBoundedTokens(text: string): number {
+  if (typeof text !== 'string' || text.length <= TOKEN_SAMPLE_CHARS) {
+    return countBpeTokens(text);
+  }
+  const tail = text.slice(-TOKEN_SAMPLE_CHARS);
+  const tailTokens = countBpeTokens(tail);
+  return Math.round(tailTokens * (text.length / tail.length));
+}
+
+/** Bounded identity + cumulative token estimate for one long-lived text field
+ * (a streaming message's markdown/thinking, a terminal turn's fields, a tool
+ * draft's arguments, or a subagent result's logical output text).
+ *
+ * The estimate is INCREMENTAL for append-mostly growth: each update tokenizes
+ * only the appended tail (itself bounded via {@link estimateBoundedTokens}),
+ * never reprices the already-counted prefix, and reuses the cumulative value
+ * with ZERO tokenizer work while the field is unchanged. Replacement and
+ * shrink are handled explicitly with a fresh bounded re-estimate. This is what
+ * keeps a typical large-stream tick under ~1ms: per-tick BPE work is
+ * proportional to the appended chunk, not to the text. */
+interface FieldState {
+  /** Exact cached content for short fields (≤ TOKEN_SAMPLE_CHARS total):
+   * compared element-wise, so ANY content change — including a same-length
+   * correction — forces a full exact re-estimate. `null` marks a long field. */
+  shortParts: string[] | null;
+  /** Long fields: character length of the estimated prefix. */
+  length: number;
+  /** Bounded fingerprint of the estimated prefix — see
+   * {@link fingerprintOfParts}. Empty for short fields. */
+  fingerprint: string;
+  /** Cumulative bounded token estimate for the estimated region. */
+  tokens: number;
+}
+
+const FINGERPRINT_EDGE_CHARS = 32;
+const FINGERPRINT_MAX_SAMPLES = 224;
+
+/** Deterministic sample positions over a prefix of `limit` characters. The
+ * positions depend only on `limit`, so fingerprints of the same prefix are
+ * comparable across ticks. Covers the head, a strided interior, and the tail
+ * of the prefix — bounded O(1) work regardless of text size. */
+function fingerprintSamplePositions(limit: number): number[] {
+  const edge = Math.min(FINGERPRINT_EDGE_CHARS, limit);
+  const positions: number[] = [];
+  for (let i = 0; i < edge; i += 1) positions.push(i);
+  const interiorStart = edge;
+  const interiorEnd = Math.max(interiorStart, limit - edge);
+  const span = interiorEnd - interiorStart;
+  if (span > 0) {
+    const stride = Math.max(1, Math.floor(span / FINGERPRINT_MAX_SAMPLES));
+    for (let pos = interiorStart; pos < interiorEnd; pos += stride) positions.push(pos);
+  }
+  for (let i = Math.max(interiorEnd, limit - edge); i < limit; i += 1) positions.push(i);
+  return positions;
+}
+
+/** Bounded fingerprint of the first `limit` characters of the logical
+ * concatenation of `parts`. Used ONLY to validate that an already-estimated
+ * prefix is unchanged (append detection) — the estimate itself is tail-based,
+ * so a probabilistic bounded fingerprint is consistent with the estimate
+ * semantics. */
+function fingerprintOfParts(parts: string[], limit: number): string {
+  if (limit <= 0) return `${limit}|`;
+  const positions = fingerprintSamplePositions(limit);
+  const chars: string[] = [];
+  let partIndex = 0;
+  let partStart = 0;
+  let partLength = parts[0]?.length ?? 0;
+  for (const pos of positions) {
+    while (partIndex < parts.length && pos >= partStart + partLength) {
+      partStart += partLength;
+      partIndex += 1;
+      partLength = parts[partIndex]?.length ?? 0;
+    }
+    chars.push(pos < partStart ? '\u0000' : (parts[partIndex]?.charAt(pos - partStart) ?? '\u0000'));
+  }
+  return `${limit.toString(36)}|${chars.join('')}`;
+}
+
+/** The portion of the logical concatenation of `parts` at or after `from`. */
+function suffixOfParts(parts: string[], from: number): string {
+  let out = '';
+  let partStart = 0;
+  for (const part of parts) {
+    const partEnd = partStart + part.length;
+    if (partEnd > from) out += part.slice(Math.max(0, from - partStart));
+    partStart = partEnd;
+  }
+  return out;
+}
+
+function partsCharLength(parts: string[]): number {
+  let total = 0;
+  for (const part of parts) total += part.length;
+  return total;
+}
+
+function sameParts(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+/** Fresh bounded token estimate of a logical multi-part text: exact BPE when
+ * short; otherwise the tail parts' density rescaled over the total (the same
+ * estimate semantics as {@link estimateBoundedTokens} for a single string). */
+function estimatePartsBoundedTokens(parts: string[]): number {
+  if (parts.length === 1) return estimateBoundedTokens(parts[0]);
+  const total = partsCharLength(parts);
+  if (total <= TOKEN_SAMPLE_CHARS) {
+    let tokens = 0;
+    for (const part of parts) tokens += countBpeTokens(part);
+    return tokens;
+  }
+  let remaining = TOKEN_SAMPLE_CHARS;
+  let tailTokens = 0;
+  for (let i = parts.length - 1; i >= 0 && remaining > 0; i -= 1) {
+    const sample = parts[i].slice(-remaining);
+    tailTokens += countBpeTokens(sample);
+    remaining -= sample.length;
+  }
+  return Math.round(tailTokens * (total / (TOKEN_SAMPLE_CHARS - remaining)));
+}
+
+/** Advance one text field's incremental estimate to `parts` (the field's
+ * current content as ordered string parts of one logical text).
+ *
+ * - Short field: exact full BPE, reused with zero work while content is
+ *   identical — every change (including same-length corrections) is fully
+ *   reflected.
+ * - Long field, unchanged: bounded fingerprint match → reuse (zero BPE work;
+ *   a stalled multi-megabyte stream costs nothing per tick).
+ * - Long field, pure append: fingerprint of the estimated prefix matches →
+ *   only the appended tail is tokenized (bounded) and added to the cumulative
+ *   estimate. The prefix is NEVER repriced, so tail-density changes cannot
+ *   manufacture deltas on old content.
+ * - Replacement / shrink / first sighting: fresh bounded re-estimate of the
+ *   whole field (tail-density semantics). */
+function updateFieldEstimate(state: FieldState | undefined, parts: string[]): FieldState {
+  const total = partsCharLength(parts);
+  if (total <= TOKEN_SAMPLE_CHARS) {
+    if (state?.shortParts && sameParts(state.shortParts, parts)) return state;
+    return { shortParts: parts, length: total, fingerprint: '', tokens: estimatePartsBoundedTokens(parts) };
+  }
+  if (state && state.shortParts === null) {
+    if (total === state.length && fingerprintOfParts(parts, total) === state.fingerprint) {
+      return state;
+    }
+    if (total > state.length && fingerprintOfParts(parts, state.length) === state.fingerprint) {
+      return {
+        shortParts: null,
+        length: total,
+        fingerprint: fingerprintOfParts(parts, total),
+        tokens: state.tokens + estimateBoundedTokens(suffixOfParts(parts, state.length)),
+      };
+    }
+  }
+  return { shortParts: null, length: total, fingerprint: fingerprintOfParts(parts, total), tokens: estimatePartsBoundedTokens(parts) };
+}
+
+/** Single-text convenience wrapper over {@link updateFieldEstimate}. */
+function updateTextFieldEstimate(state: FieldState | undefined, text: string): FieldState {
+  return updateFieldEstimate(state, [text]);
+}
+
 /** Measurement tick interval (ms). Imported by the host `TokenRateService`. */
 export const TICK_MS = 200;
 /** Rolling window length, measured in generation-time (excludes pauses). */
@@ -155,6 +366,32 @@ export interface Accumulator {
    * result index is stable because the subagent extension seeds a fixed-size
    * results array and updates entries in place by task index. */
   subagentTokens: Map<string, number>;
+  /** Incremental per-field estimates ({@link FieldState}) for the streaming
+   * message's markdown/thinking, per message id. Appends tokenize only the
+   * appended tail; unchanged fields cost zero tokenizer work; same-length
+   * corrections are caught by exact short-field identity or the bounded prefix
+   * fingerprint — never stale like the previous id+length shape cache. Kept in
+   * lockstep with {@link lastContentTokensById} (pruned together). */
+  contentFieldsById: Map<string, { markdown?: FieldState; thinking?: FieldState }>;
+  /** Per-draft incremental estimate for a streaming tool call's arguments text
+   * (keyed by draft id, in lockstep with {@link draftingTokensById}). Draft
+   * arguments are append-mostly; without this they would be fully repriced
+   * every tick. */
+  draftingFieldStates: Map<string, { args?: FieldState }>;
+  /** Incremental per-result estimates for running subagents' logical output
+   * text, keyed by the same composite keys as {@link subagentTokens}. A legacy
+   * (no producer counter) child stream is priced by appended tail only, so the
+   * per-key cumulative counts move by exactly the appended content instead of
+   * jumping with tail-density rescaling of the whole child transcript. */
+  subagentEstimateStates: Map<string, FieldState>;
+  /** Single-slot cached per-field estimates for the newest terminal assistant
+   * turn, keyed by message id. Terminal content is stable, so the per-tick
+   * scans in `latestEndToEndRate` / `latestTerminalHasNoOutput` /
+   * `latestTerminalOutputEstimate` reuse it instead of re-tokenizing a large
+   * finished turn on every tick. Content identity is exact for short fields
+   * and fingerprint-checked for long ones — a corrected terminal is
+   * re-estimated, not served stale. */
+  terminalEstimateCache?: { id: string; markdown?: FieldState; thinking?: FieldState };
   /** Cached subagent projection keyed by a monotonic revision signature. When
    * the signature is unchanged across ticks, the recursive extraction + BPE
    * tokenization is skipped entirely. `undefined` when the current transcript
@@ -172,6 +409,9 @@ export function createAccumulator(now: number): Accumulator {
     lastContentTokensById: new Map(),
     draftingTokensById: new Map(),
     subagentTokens: new Map(),
+    contentFieldsById: new Map(),
+    draftingFieldStates: new Map(),
+    subagentEstimateStates: new Map(),
   };
 }
 
@@ -186,6 +426,7 @@ function pruneContentTokenMap(acc: Accumulator, keepId: string): void {
   for (const id of acc.lastContentTokensById.keys()) {
     if (id !== keepId) {
       acc.lastContentTokensById.delete(id);
+      acc.contentFieldsById.delete(id);
     }
   }
 }
@@ -205,33 +446,76 @@ function hasRunningToolCall(message: ChatMessage | null): boolean {
   return message.toolCalls.some((tc) => tc.status === 'running');
 }
 
-/** Estimated visible output tokens for a message: text + reasoning. */
+/** Estimated visible output tokens for a message: text + reasoning. Bounded
+ * work per field (tail-sampled for long text — see {@link estimateBoundedTokens}). */
 function estimatedOutputTokens(message: ChatMessage | null): number {
   if (!message) return 0;
-  return estimateTextTokens(message.markdown ?? '') + estimateTextTokens(message.thinking ?? '');
+  return estimateBoundedTokens(message.markdown ?? '') + estimateBoundedTokens(message.thinking ?? '');
 }
 
-function provisionalToolCallTokens(message: ChatMessage | null): Array<{ id: string; tokens: number }> {
+/** Incrementally estimate the streaming message's markdown + thinking fields,
+ * reusing unchanged fields with zero tokenizer work. Appends tokenize only the
+ * appended tail (bounded); a same-length correction is caught by exact
+ * short-field identity or the bounded prefix fingerprint and re-estimated.
+ * The returned value is what `tickTokenRate` stores into
+ * `lastContentTokensById`, keeping the delta baseline identical. */
+function updateStreamingContentEstimate(acc: Accumulator, message: ChatMessage | null): number {
+  if (!message) return 0;
+  const fields = acc.contentFieldsById.get(message.id) ?? {};
+  const markdown = updateTextFieldEstimate(fields.markdown, message.markdown ?? '');
+  const thinking = updateTextFieldEstimate(fields.thinking, message.thinking ?? '');
+  acc.contentFieldsById.set(message.id, { markdown, thinking });
+  return markdown.tokens + thinking.tokens;
+}
+
+/** Token estimate for a terminal assistant message, cached per id via
+ * incremental {@link FieldState}s ({@link Accumulator.terminalEstimateCache}).
+ * Terminal content is stable, so repeated per-tick scans of a large finished
+ * turn are free after the first estimate; any content change — including a
+ * same-length correction — is caught by field identity/fingerprint and
+ * re-estimated. Without an accumulator (idle display paths) this is a one-shot
+ * bounded estimate. */
+function cachedTerminalOutputTokens(acc: Accumulator | undefined, message: ChatMessage | null): number {
+  if (!message) return 0;
+  if (!acc) return estimatedOutputTokens(message);
+  let cache = acc.terminalEstimateCache;
+  if (!cache || cache.id !== message.id) {
+    cache = { id: message.id };
+    acc.terminalEstimateCache = cache;
+  }
+  const markdown = updateTextFieldEstimate(cache.markdown, message.markdown ?? '');
+  const thinking = updateTextFieldEstimate(cache.thinking, message.thinking ?? '');
+  acc.terminalEstimateCache = { id: message.id, markdown, thinking };
+  return markdown.tokens + thinking.tokens;
+}
+
+/** Draft tool calls currently visible on the message: id, name, and raw
+ * arguments text. Pure shape extraction — no estimation, no state. */
+function provisionalToolCallDrafts(message: ChatMessage | null): Array<{ id: string; name: string; argsText: string }> {
   if (!message) return [];
-  const provisional = (message.toolCalls ?? [])
+  const drafts = (message.toolCalls ?? [])
     .filter((toolCall) => toolCall.status === 'drafting' || toolCall.status === 'ready')
     .map((toolCall) => ({
       id: toolCall.id,
-      tokens: estimateTextTokens(toolCall.name)
-        + estimateTextTokens(toolCall.argumentsText ?? (typeof toolCall.input === 'string' ? toolCall.input : '')),
+      name: toolCall.name,
+      argsText: toolCall.argumentsText ?? (typeof toolCall.input === 'string' ? toolCall.input : ''),
     }));
   const legacy = message.draftingToolCall;
-  if (legacy && !provisional.some((entry) => entry.id === legacy.id)) {
-    provisional.push({
-      id: legacy.id,
-      tokens: estimateTextTokens(legacy.name) + estimateTextTokens(legacy.argumentsText),
-    });
+  if (legacy && !drafts.some((draft) => draft.id === legacy.id)) {
+    drafts.push({ id: legacy.id, name: legacy.name, argsText: legacy.argumentsText });
   }
-  return provisional;
+  return drafts;
 }
 
+/** One-shot bounded estimate of the visible draft tool-call tokens (used by
+ * callers without an accumulator — see `estimateLiveAssistantOutputTokens`).
+ * Internal per-tick measurement goes through `measureDraftingToolCall`, which
+ * prices args incrementally. */
 function estimatedDraftingToolCallTokens(message: ChatMessage | null): number {
-  return provisionalToolCallTokens(message).reduce((total, draft) => total + draft.tokens, 0);
+  return provisionalToolCallDrafts(message).reduce(
+    (total, draft) => total + estimateBoundedTokens(draft.name) + estimateBoundedTokens(draft.argsText),
+    0,
+  );
 }
 
 /** Estimated model output currently visible on a streaming assistant message.
@@ -243,25 +527,35 @@ export function estimateLiveAssistantOutputTokens(message: ChatMessage | null): 
 
 /** Track model-generated tool-call names + raw JSON independently from reply
  * content. Multiple provider calls may draft in parallel; promotion removes
- * only the matching id and leaves sibling baselines intact. */
+ * only the matching id and leaves sibling baselines intact. Args text is
+ * estimated incrementally per draft id ({@link FieldState}): appended args
+ * tokenize only the appended tail, unchanged args cost nothing, and a
+ * replacement/shrink re-estimates fresh (the delta clamp below keeps the
+ * cumulative count monotonic either way). */
 function measureDraftingToolCall(
   acc: Accumulator,
   message: ChatMessage | null,
 ): { tokens: number; delta: number; hadPriorOutput: boolean } {
-  const drafts = provisionalToolCallTokens(message);
+  const drafts = provisionalToolCallDrafts(message);
   const currentIds = new Set(drafts.map((draft) => draft.id));
   let tokens = 0;
   let delta = 0;
   let hadPriorOutput = false;
   for (const draft of drafts) {
+    const argsState = updateTextFieldEstimate(acc.draftingFieldStates.get(draft.id)?.args, draft.argsText);
+    acc.draftingFieldStates.set(draft.id, { args: argsState });
+    const draftTokens = estimateBoundedTokens(draft.name) + argsState.tokens;
     const previous = acc.draftingTokensById.get(draft.id) ?? 0;
-    if (draft.tokens > 0 && previous > 0) hadPriorOutput = true;
-    tokens += draft.tokens;
-    delta += Math.max(0, draft.tokens - previous);
-    acc.draftingTokensById.set(draft.id, draft.tokens);
+    if (draftTokens > 0 && previous > 0) hadPriorOutput = true;
+    tokens += draftTokens;
+    delta += Math.max(0, draftTokens - previous);
+    acc.draftingTokensById.set(draft.id, draftTokens);
   }
   for (const id of acc.draftingTokensById.keys()) {
-    if (!currentIds.has(id)) acc.draftingTokensById.delete(id);
+    if (!currentIds.has(id)) {
+      acc.draftingTokensById.delete(id);
+      acc.draftingFieldStates.delete(id);
+    }
   }
   return { tokens, delta, hadPriorOutput };
 }
@@ -277,7 +571,7 @@ interface EndToEndRate {
  * visible text is a conservative estimate. A zero-output terminal is not a
  * zero-rate sample — it is unavailable and must not erase a held rate.
  */
-function latestEndToEndRate(transcript: ChatMessage[]): EndToEndRate | null {
+function latestEndToEndRate(transcript: ChatMessage[], acc?: Accumulator): EndToEndRate | null {
   for (let i = transcript.length - 1; i >= 0; i -= 1) {
     const message = transcript[i];
     if (message.role !== 'assistant'
@@ -292,7 +586,7 @@ function latestEndToEndRate(transcript: ChatMessage[]): EndToEndRate | null {
       if (typeof reported !== 'number' || !Number.isFinite(reported) || reported <= 0) continue;
       outputTokens = reported;
     } else {
-      outputTokens = estimatedOutputTokens(message);
+      outputTokens = cachedTerminalOutputTokens(acc, message);
       estimated = true;
       if (outputTokens <= 0) continue;
     }
@@ -310,13 +604,13 @@ function latestEndToEndRate(transcript: ChatMessage[]): EndToEndRate | null {
  * reconciles conservatively at settlement: authoritative reported totals win
  * and older unreported turns are never invented.
  */
-function latestTerminalOutputEstimate(transcript: ChatMessage[]): number | null {
+function latestTerminalOutputEstimate(transcript: ChatMessage[], acc?: Accumulator): number | null {
   for (let i = transcript.length - 1; i >= 0; i -= 1) {
     const message = transcript[i];
     if (message.role !== 'assistant'
       || (message.status !== 'completed' && message.status !== 'error' && message.status !== 'interrupted')) continue;
     if (message.usage !== undefined) return null;
-    const estimated = estimatedOutputTokens(message);
+    const estimated = cachedTerminalOutputTokens(acc, message);
     return estimated > 0 ? estimated : null;
   }
   return null;
@@ -325,7 +619,7 @@ function latestTerminalOutputEstimate(transcript: ChatMessage[]): number | null 
 /** Whether the newest terminal assistant turn explicitly produced no output.
  * A zero-rate terminal is unavailable; it must not turn a previous held rate
  * into a fabricated `0 tok/s` sample. */
-function latestTerminalHasNoOutput(transcript: ChatMessage[]): boolean {
+function latestTerminalHasNoOutput(transcript: ChatMessage[], acc?: Accumulator): boolean {
   for (let i = transcript.length - 1; i >= 0; i -= 1) {
     const message = transcript[i];
     if (message.role !== 'assistant'
@@ -335,12 +629,43 @@ function latestTerminalHasNoOutput(transcript: ChatMessage[]): boolean {
         && Number.isFinite(message.usage.outputTokens)
         && message.usage.outputTokens > 0);
     }
-    return estimatedOutputTokens(message) <= 0;
+    return cachedTerminalOutputTokens(acc, message) <= 0;
   }
   return false;
 }
 
-function estimatedSubagentOutputTokens(result: SubagentSingleResult): number {
+/** Ordered text/thinking parts of a legacy subagent result followed by its
+ * in-flight `streamingText`: one append-mostly logical output text. The
+ * streamingText → messages commit (message_end) replaces the in-flight tail
+ * with identical committed content at the same offsets, so the logical text
+ * only ever appends across the handoff and the incremental estimate neither
+ * double-counts nor resets. */
+function subagentOutputParts(result: SubagentSingleResult): string[] {
+  const parts: string[] = [];
+  if (Array.isArray(result.messages)) {
+    for (const msg of result.messages) {
+      if (msg.role !== 'assistant') continue;
+      if (typeof msg.content === 'string') {
+        parts.push(msg.content);
+      } else if (Array.isArray(msg.content)) {
+        for (const part of msg.content) {
+          if (!isRecord(part)) continue;
+          if (part.type === 'text' && typeof part.text === 'string') {
+            parts.push(part.text);
+          } else if (part.type === 'thinking' && typeof part.thinking === 'string') {
+            parts.push(part.thinking);
+          }
+        }
+      }
+    }
+  }
+  if (typeof result.streamingText === 'string') {
+    parts.push(result.streamingText);
+  }
+  return parts;
+}
+
+function estimatedSubagentOutputTokens(acc: Accumulator, key: string, result: SubagentSingleResult): number {
   if (
     typeof result.cumulativeOutputTokens === 'number'
     && Number.isFinite(result.cumulativeOutputTokens)
@@ -349,29 +674,14 @@ function estimatedSubagentOutputTokens(result: SubagentSingleResult): number {
     return result.cumulativeOutputTokens;
   }
 
-  let tokens = 0;
-  if (Array.isArray(result.messages)) {
-    for (const msg of result.messages) {
-      if (msg.role !== 'assistant') continue;
-      if (typeof msg.content === 'string') {
-        tokens += estimateTextTokens(msg.content);
-      } else if (Array.isArray(msg.content)) {
-        for (const part of msg.content) {
-          if (isRecord(part)) {
-            if (part.type === 'text' && typeof part.text === 'string') {
-              tokens += estimateTextTokens(part.text);
-            } else if (part.type === 'thinking' && typeof part.thinking === 'string') {
-              tokens += estimateTextTokens(part.thinking);
-            }
-          }
-        }
-      }
-    }
-  }
-  if (typeof result.streamingText === 'string') {
-    tokens += estimateTextTokens(result.streamingText);
-  }
-  return tokens;
+  // No producer counter: estimate from the visible child transcript with
+  // incremental bounded work per result (same strategy as the backend's own
+  // live counter), so a seq-advancing multi-megabyte legacy stream costs only
+  // its appended tail per tick — never a full-text re-BPE or a whole-prefix
+  // tail-density reprice.
+  const state = updateFieldEstimate(acc.subagentEstimateStates.get(key), subagentOutputParts(result));
+  acc.subagentEstimateStates.set(key, state);
+  return state.tokens;
 }
 
 interface RunningSubagent {
@@ -419,6 +729,12 @@ function findRunningSubagents(transcript: ChatMessage[]): RunningSubagent[] {
   for (const message of transcript) {
     for (const toolCall of message.toolCalls ?? []) {
       if (toolCall.name !== 'subagent') continue;
+      // Genuine terminal status settles every child result (see
+      // `normalizeRenderableSubagentResult`), so a terminal call's result —
+      // often the full multi-megabyte child history on a durable message —
+      // can never contain a running subagent. Skip the parse entirely
+      // instead of re-walking it on every tick.
+      if (toolCall.status === 'completed' || toolCall.status === 'failed') continue;
       const subagentResult = getRenderableSubagentResultFromToolCall(toolCall as ToolCall);
       if (!subagentResult) continue;
       subagentResult.results.forEach((single, index) => {
@@ -494,17 +810,21 @@ function subagentsForTokenCounting(running: RunningSubagent[]): RunningSubagent[
  * tool's `seq` captures every transition that could change the extracted
  * running subagents or their token estimates.
  *
- * Returns `null` (bypass cache) when any subagent call lacks a monotonic `seq`:
- * durable messages loaded from disk and test fixtures carry no `seq`, and their
- * content can change between ticks without advancing the signature, so caching
- * by `seq` would be unsound for them. Live (running) tool calls always carry a
- * positive `seq` projected from the live pipeline state.
+ * Returns `null` (bypass cache) when any NON-TERMINAL subagent call lacks a
+ * monotonic `seq`: live (running) tool calls always carry a positive `seq`
+ * projected from the live pipeline state, but durable messages loaded from
+ * disk and test fixtures may not — their content can change between ticks
+ * without advancing the signature, so caching by `seq` would be unsound for
+ * them. Terminal calls (`completed`/`failed`) are skipped entirely: their
+ * genuine status settles every child, they contribute no running subagents,
+ * and their seq-less durable history must not force the cache to be bypassed.
  */
 function subagentRevisionSignature(transcript: readonly ChatMessage[]): string | null {
   const parts: string[] = [`${transcript.length}`];
   for (const message of transcript) {
     for (const tc of message.toolCalls ?? []) {
       if (tc.name !== 'subagent') continue;
+      if (tc.status === 'completed' || tc.status === 'failed') continue;
       if (typeof tc.seq !== 'number' || tc.seq <= 0) return null;
       parts.push(`${tc.id}:${tc.status}:${tc.seq}:${tc.result !== undefined ? 1 : 0}`);
     }
@@ -529,7 +849,7 @@ function projectRunningSubagents(transcript: ChatMessage[], acc: Accumulator): S
   const counted = subagentsForTokenCounting(running);
   const entries = counted.map(({ key, result }) => ({
     key,
-    tokens: estimatedSubagentOutputTokens(result),
+    tokens: estimatedSubagentOutputTokens(acc, key, result),
     streaming: result.streaming === true,
   }));
   const projection: SubagentProjection = {
@@ -561,10 +881,12 @@ function computeSubagentDelta(
 
   // Drop snapshots for subagent results that are no longer running so the map
   // stays bounded over long sessions and a completed result doesn't anchor the
-  // snapshot if the same key were ever reused.
+  // snapshot if the same key were ever reused. The incremental estimate states
+  // are pruned in lockstep.
   for (const id of acc.subagentTokens.keys()) {
     if (!seenIds.has(id)) {
       acc.subagentTokens.delete(id);
+      acc.subagentEstimateStates.delete(id);
     }
   }
 
@@ -748,7 +1070,7 @@ export function tickTokenRate(
 ): TokenRateIndicatorState {
   const streaming = findStreamingMessage(transcript);
   const toolBlocked = hasRunningToolCall(streaming);
-  const currentTokens = estimatedOutputTokens(streaming);
+  const currentTokens = updateStreamingContentEstimate(acc, streaming);
   const streamingId = streaming?.id ?? null;
   const previousMainTokens = streamingId === null
     ? 0
@@ -857,14 +1179,14 @@ export function tickTokenRate(
   }
 
   const latencyStats = computeTurnLatencyStats(transcript);
-  const endToEnd = latestEndToEndRate(transcript);
-  const zeroOutputTerminal = !generating && streaming === null && latestTerminalHasNoOutput(transcript);
+  const endToEnd = latestEndToEndRate(transcript, acc);
+  const zeroOutputTerminal = !generating && streaming === null && latestTerminalHasNoOutput(transcript, acc);
   let state = buildState(acc, generating, streaming, toolBlocked, latencyStats, provisionalRate, endToEnd, zeroOutputTerminal);
   // The newest terminal turn's no-usage estimate is exposed whenever present —
   // including while a later turn generates — so the aggregate can keep counting
   // that burst until authoritative usage (or a settlement reconciliation)
   // replaces it. It is numeric only; the text is never exposed.
-  const terminalEstimate = latestTerminalOutputEstimate(transcript);
+  const terminalEstimate = latestTerminalOutputEstimate(transcript, acc);
   if (terminalEstimate !== null) {
     state = { ...state, terminalOutputTokensEstimate: terminalEstimate };
   }

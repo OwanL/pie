@@ -573,6 +573,267 @@ test('helper page overflow stays typed and never synchronously reopens the durab
   }
 });
 
+test('cold durable-detail helper preserves fallback parity without coordinator reopen', async () => {
+  const h = await makeHarness();
+  try {
+    const sessionPath = path.join(h.sessionDir, 'helper-detail.jsonl');
+    await writeJsonl(sessionPath, [header(h.root, 3, 'helper-detail'), userEntry('user', null, 'prompt')]);
+    const address = {
+      sessionPath,
+      turnId: 'turn',
+      rootToolCallId: 'root-tool-call',
+      rootAttemptId: 'attempt',
+      lineage: [{ childId: 'child', spawningToolCallId: 'root-tool-call', attemptId: 'attempt' }],
+    } as const;
+    const expected = {
+      value: { liveAddressable: true, lineage: address.lineage, payload: 'detail' },
+      sizeBytes: Buffer.byteLength(JSON.stringify({ liveAddressable: true, lineage: address.lineage, payload: 'detail' }), 'utf8'),
+      messageId: 'assistant',
+      toolCallId: 'root-tool-call',
+      kind: 'tool-result' as const,
+    };
+    const fallback = new ColdSessionStore({
+      sdk: {
+        SessionManager: {
+          open: () => ({
+            getBranch: () => [{
+              ...userEntry('user', null, 'prompt'),
+            }, {
+              type: 'message', id: 'assistant', parentId: 'user', timestamp: '2026-08-15T00:00:02.000Z',
+              message: {
+                role: 'assistant',
+                content: [{ type: 'toolCall', id: 'root-tool-call', name: 'subagent', arguments: {} }],
+                provider: 'mock', model: 'model-a', stopReason: 'stop', timestamp: 2,
+              },
+            }, {
+              type: 'message', id: 'tool-result', parentId: 'assistant', timestamp: '2026-08-15T00:00:03.000Z',
+              message: {
+                role: 'toolResult', toolCallId: 'root-tool-call',
+                details: { results: [expected.value] }, timestamp: 3,
+              },
+            }],
+            getSessionName: () => undefined,
+            getCwd: () => h.root,
+            getSessionId: () => 'helper-detail',
+            buildSessionContext: () => ({ messages: [], thinkingLevel: 'medium', model: null }),
+          }),
+        },
+      } as any,
+      coordinatorGeneration: 18,
+      startupCwd: h.root,
+      agentDir: h.root,
+      sessionDir: h.sessionDir,
+    });
+    const fallbackResult = await fallback.resolveDurableDetail(sessionPath, address);
+
+    let coordinatorOpens = 0;
+    let helperStarted!: () => void;
+    let releaseHelper!: () => void;
+    const helperGate = new Promise<void>((resolve) => { releaseHelper = resolve; });
+    const helperSeen = new Promise<void>((resolve) => { helperStarted = resolve; });
+    const helper = {
+      warm: async () => undefined,
+      openSnapshot: async () => { throw new Error('unused'); },
+      loadPage: async () => { throw new Error('unused'); },
+      loadDetail: async () => { throw new Error('unused'); },
+      resolveDurableDetail: async () => {
+        helperStarted();
+        await helperGate;
+        return expected;
+      },
+      invalidatePath: async () => undefined,
+      dispose: async () => undefined,
+    } satisfies ColdBrowseHelper;
+    const assisted = new ColdSessionStore({
+      sdk: {
+        SessionManager: {
+          open: () => {
+            coordinatorOpens += 1;
+            throw new Error('helper result should avoid coordinator reopen');
+          },
+        },
+      } as any,
+      coordinatorGeneration: 18,
+      startupCwd: h.root,
+      agentDir: h.root,
+      sessionDir: h.sessionDir,
+      browseHelper: helper,
+    });
+    const resolving = assisted.resolveDurableDetail(sessionPath, address);
+    await helperSeen;
+    assert.equal(coordinatorOpens, 0, 'coordinator SDK work is not started while helper resolution is pending');
+    releaseHelper();
+    const helperResult = await resolving;
+    assert.deepEqual(helperResult, fallbackResult, 'helper and synchronous projections retain identical durable detail semantics');
+    assert.equal(coordinatorOpens, 0);
+  } finally {
+    await fs.rm(h.root, { recursive: true, force: true });
+  }
+});
+
+test('oversized helper durable-detail responses fall back synchronously without truncation', async () => {
+  const h = await makeHarness();
+  try {
+    const sessionPath = path.join(h.sessionDir, 'helper-detail-oversized.jsonl');
+    await writeJsonl(sessionPath, [header(h.root, 3, 'helper-detail-oversized'), userEntry('user', null, 'prompt')]);
+    const address = {
+      sessionPath,
+      turnId: 'turn',
+      rootToolCallId: 'root-tool-call',
+      rootAttemptId: 'attempt',
+      lineage: [{ childId: 'child', spawningToolCallId: 'root-tool-call', attemptId: 'attempt' }],
+    } as const;
+    const expectedValue = { liveAddressable: true, lineage: address.lineage, payload: 'complete fallback value' };
+    const expected = {
+      value: expectedValue,
+      sizeBytes: Buffer.byteLength(JSON.stringify(expectedValue), 'utf8'),
+      messageId: 'assistant',
+      toolCallId: 'root-tool-call',
+      kind: 'tool-result' as const,
+    };
+    let coordinatorOpens = 0;
+    const helper = {
+      warm: async () => undefined,
+      openSnapshot: async () => { throw new Error('unused'); },
+      loadPage: async () => { throw new Error('unused'); },
+      loadDetail: async () => { throw new Error('unused'); },
+      resolveDurableDetail: async () => {
+        throw new ColdBrowseHelperRequestError(
+          'RESPONSE_TOO_LARGE',
+          'the resolved durable detail cannot fit the helper frame',
+        );
+      },
+      invalidatePath: async () => undefined,
+      dispose: async () => undefined,
+    } satisfies ColdBrowseHelper;
+    const store = new ColdSessionStore({
+      sdk: {
+        SessionManager: {
+          open: () => {
+            coordinatorOpens += 1;
+            return {
+              getBranch: () => [{
+                ...userEntry('user', null, 'prompt'),
+              }, {
+                type: 'message', id: 'assistant', parentId: 'user', timestamp: '2026-08-15T00:00:02.000Z',
+                message: {
+                  role: 'assistant',
+                  content: [{ type: 'toolCall', id: 'root-tool-call', name: 'subagent', arguments: {} }],
+                  provider: 'mock', model: 'model-a', stopReason: 'stop', timestamp: 2,
+                },
+              }, {
+                type: 'message', id: 'tool-result', parentId: 'assistant', timestamp: '2026-08-15T00:00:03.000Z',
+                message: {
+                  role: 'toolResult', toolCallId: 'root-tool-call',
+                  details: { results: [expectedValue] }, timestamp: 3,
+                },
+              }],
+              getSessionName: () => undefined,
+              getCwd: () => h.root,
+              getSessionId: () => 'helper-detail-oversized',
+              buildSessionContext: () => ({ messages: [], thinkingLevel: 'medium', model: null }),
+            };
+          },
+        },
+      } as any,
+      coordinatorGeneration: 19,
+      startupCwd: h.root,
+      agentDir: h.root,
+      sessionDir: h.sessionDir,
+      browseHelper: helper,
+    });
+    const result = await store.resolveDurableDetail(sessionPath, address);
+    assert.deepEqual(result, expected, 'the synchronous fallback returns the complete durable value');
+    assert.equal(coordinatorOpens, 1, 'oversized helper responses retain the synchronous fallback');
+  } finally {
+    await fs.rm(h.root, { recursive: true, force: true });
+  }
+});
+
+test('durable-detail helper fingerprint retries and generation fences do not cross the coordinator lease', async () => {
+  const h = await makeHarness();
+  try {
+    const sessionPath = path.join(h.sessionDir, 'helper-detail-fences.jsonl');
+    await writeJsonl(sessionPath, [header(h.root, 3, 'helper-detail-fences'), userEntry('user', null, 'prompt')]);
+    const address = {
+      sessionPath,
+      turnId: 'turn',
+      rootToolCallId: 'root-tool-call',
+      rootAttemptId: 'attempt',
+      lineage: [{ childId: 'child', spawningToolCallId: 'root-tool-call', attemptId: 'attempt' }],
+    } as const;
+    const expected = {
+      value: { complete: true }, sizeBytes: 16, messageId: 'assistant', toolCallId: 'root-tool-call', kind: 'tool-result' as const,
+    };
+    let fingerprintCalls = 0;
+    let coordinatorOpens = 0;
+    const helper = {
+      warm: async () => undefined,
+      openSnapshot: async () => { throw new Error('unused'); },
+      loadPage: async () => { throw new Error('unused'); },
+      loadDetail: async () => { throw new Error('unused'); },
+      resolveDurableDetail: async (stamp: { fingerprint: string }) => {
+        fingerprintCalls += 1;
+        if (fingerprintCalls === 1) {
+          await fs.appendFile(sessionPath, `${JSON.stringify(userEntry('changed', 'user', 'changed'))}\n`, 'utf8');
+          throw new ColdBrowseHelperRequestError('FINGERPRINT_CHANGED', 'changed', undefined, stamp.fingerprint);
+        }
+        return expected;
+      },
+      invalidatePath: async () => undefined,
+      dispose: async () => undefined,
+    } satisfies ColdBrowseHelper;
+    const store = new ColdSessionStore({
+      sdk: {
+        SessionManager: {
+          open: () => {
+            coordinatorOpens += 1;
+            throw new Error('fingerprint retry must remain off coordinator SDK open');
+          },
+        },
+      } as any,
+      coordinatorGeneration: 20,
+      startupCwd: h.root,
+      agentDir: h.root,
+      sessionDir: h.sessionDir,
+      browseHelper: helper,
+    });
+    assert.deepEqual(await store.resolveDurableDetail(sessionPath, address), expected);
+    assert.equal(fingerprintCalls, 2);
+    assert.equal(coordinatorOpens, 0);
+
+    let release!: () => void;
+    let started!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const seen = new Promise<void>((resolve) => { started = resolve; });
+    const ownershipStore = new ColdSessionStore({
+      sdk: { SessionManager: { open: () => { throw new Error('generation fence must avoid fallback'); } } } as any,
+      coordinatorGeneration: 21,
+      startupCwd: h.root,
+      agentDir: h.root,
+      sessionDir: h.sessionDir,
+      browseHelper: {
+        ...helper,
+        resolveDurableDetail: async () => {
+          started();
+          await gate;
+          return expected;
+        },
+      },
+    });
+    const pending = ownershipStore.resolveDurableDetail(sessionPath, address);
+    await seen;
+    ownershipStore.leases.advanceCoordinatorGeneration(22);
+    release();
+    await assert.rejects(
+      pending,
+      (error) => error instanceof StaleColdSessionLeaseError && error.reason === 'coordinator-generation',
+    );
+  } finally {
+    await fs.rm(h.root, { recursive: true, force: true });
+  }
+});
+
 test('browse cache enforces LRU entry/source-byte bounds while retaining one current oversize session', async () => {
   const h = await makeHarness();
   try {

@@ -638,6 +638,15 @@ export class ColdSessionStore {
     address: LiveSubagentDetailAddress,
     durableRef?: LazyDetailRef,
   ): Promise<ResolvedDurableDetail> {
+    const assisted = this.browseHelper?.resolveDurableDetail
+      ? await this.tryHelperBrowse(sessionPath, async (helper, stamp) => (
+        await helper.resolveDurableDetail!(stamp, address, durableRef)
+      ))
+      : undefined;
+    if (assisted) {
+      this.leases.assertCurrent(assisted.stamp);
+      return assisted.result;
+    }
     return await this.withStableBrowse(sessionPath, async (browse, stamp) => {
       const resolution = resolveDurableDetailFromTranscript(browse.cache.transcript, sessionPath, address, durableRef);
       if (resolution.status === 'not-found') {
@@ -1097,6 +1106,12 @@ export class ColdSessionStore {
         this.leases.assertCurrent(stamp);
         return { result, stamp };
       } catch (error) {
+        if (error instanceof DurableDetailNotFoundError || error instanceof DurableDetailNotAddressableError) {
+          // These semantic outcomes must retain the original durable-detail
+          // error types; they are not helper availability failures.
+          this.leases.assertCurrent(stamp);
+          throw error;
+        }
         if (error instanceof SessionSnapshotTooLargeError) {
           // The client accepted this typed producer error only after matching
           // the helper response to this exact fingerprint. Recheck the Pie

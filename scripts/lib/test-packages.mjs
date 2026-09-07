@@ -310,8 +310,6 @@ const GLOBAL_INFRA_EXACT_PATHS = new Set([
   'package-lock.json',
   '.nvmrc',
   '.node-version',
-  '.githooks/pre-commit',
-  '.githooks/pre-push',
 ]);
 
 const GLOBAL_INFRA_PREFIXES = [

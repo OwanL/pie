@@ -42,6 +42,7 @@ import type {
   PostImperativeMessage,
 } from './effects';
 import { toErrorMessage } from '../util/error-message';
+import { appendPieLog } from '../util/pie-log';
 import type { EffectResultEvent, CommandEvent } from './events';
 import type { FileDiffService } from './file-diff-service';
 import type { ChatPrefs, ComposerInput, McpServerInfo, ProviderGateStats, PruningSettings, SessionTitlesSettings, ToolResultPruningSettings, ThinkingLevel } from '../../shared/protocol';
@@ -1527,6 +1528,7 @@ export class EffectRunner {
       // fallback / SessionScopeCleared / NoticeShown) — so the reducer's
       // OpenSessionResult handler stays a no-op, matching CreateSession.
       void queues.enqueueLifecycle(async () => {
+        let requestStartedAt = performance.now();
         try {
           // Skip-transcript optimization: when the host already has this
           // session's transcript loaded AND it isn't actively streaming,
@@ -1545,6 +1547,14 @@ export class EffectRunner {
             operationAttempt: effect.operationAttempt,
             backendGeneration: effect.backendGeneration,
           } : {};
+          requestStartedAt = performance.now();
+          appendPieLog('info', 'session-timing', 'session.open.request.sent', {
+            sessionPath: effect.sessionPath,
+            selectionToken: effect.selectionToken,
+            operationId: effect.operationId ?? null,
+            operationAttempt: effect.operationAttempt ?? null,
+            backendGeneration: effect.backendGeneration ?? service.getBackendGeneration?.() ?? null,
+          });
           await backend.request('session.open', {
             sessionPath: effect.sessionPath,
             selectionToken: effect.selectionToken,
@@ -1561,6 +1571,13 @@ export class EffectRunner {
               ...(!response.ok ? { error: toErrorMessage(response.error) } : {}),
             }),
           } : undefined);
+          appendPieLog('info', 'session-timing', 'session.open.response.received', {
+            sessionPath: effect.sessionPath,
+            selectionToken: effect.selectionToken,
+            operationId: effect.operationId ?? null,
+            operationAttempt: effect.operationAttempt ?? null,
+            durationMs: Math.max(0, Math.round(performance.now() - requestStartedAt)),
+          });
           dispatch({
             kind: 'OpenSessionResult',
             corrId: effect.corrId,
@@ -1569,6 +1586,14 @@ export class EffectRunner {
             ok: true,
           });
         } catch (err) {
+          appendPieLog('warn', 'session-timing', 'session.open.request.failed', {
+            sessionPath: effect.sessionPath,
+            selectionToken: effect.selectionToken,
+            operationId: effect.operationId ?? null,
+            operationAttempt: effect.operationAttempt ?? null,
+            durationMs: Math.max(0, Math.round(performance.now() - requestStartedAt)),
+            error: toErrorMessage(err),
+          });
           const ambiguous = err instanceof RequestTimeoutError;
           if (!ambiguous) {
             service.handleSelectionFailure(effect.selectionToken, `Failed to open session: ${toErrorMessage(err)}`);

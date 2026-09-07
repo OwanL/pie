@@ -3,7 +3,7 @@
 **Purpose:** Authoritative traceability record for every price written to `models.json`.
 Every non-zero cost field in `models.json` MUST have a corresponding row in this document.
 
-**Retrieval date:** 2026-08-27 (GLM 5.3 Flash availability, metadata, and comparison rate); broader OpenAI, GitHub Copilot, and Ollama refresh completed 2026-08-24
+**Retrieval date:** 2026-09-05 (GPT-6 Astra); broader OpenAI, GitHub Copilot, and Ollama refresh completed 2026-08-24
 **Format:** All prices in USD per 1M tokens unless otherwise noted.
 
 ---
@@ -111,13 +111,14 @@ Cache write pricing is NOT published for Google Copilot models.
 ## OpenAI Codex Models
 
 **Source:** [OpenAI API pricing](https://developers.openai.com/api/docs/pricing)
-**Retrieval date:** 2026-08-24
+**Retrieval date:** 2026-09-05
 **Units:** USD per 1M tokens.
 
-The configured `openai-codex` provider uses a ChatGPT subscription, so these are opportunity-cost estimates rather than incremental charges to the subscription. All six built-in GPT models previously missing pie-side overrides are now represented; this lets the picker and session indicator resolve their pricing instead of reporting them as unpriced.
+The configured `openai-codex` provider uses a ChatGPT subscription, so these are opportunity-cost estimates rather than incremental charges to the subscription. Every configured GPT model has pie-side pricing so the picker and session indicator do not report it as unpriced. GPT-6 Astra's Codex context limit comes from pi.dev's live provider catalog; its rates come from OpenAI's official model page.
 
 | Model ID | Input | Cached Input | Cache Write | Output | Long-context Input | Long-context Cached | Long-context Cache Write | Long-context Output | Confidence |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| gpt-6-astra | $10.00 | $1.00 | $12.50 | $50.00 | $20.00 | $2.00 | $25.00 | $75.00 | official |
 | gpt-5.6-sol | $4.00 | $0.40 | $5.00 | $20.00 | $8.00 | $0.80 | $10.00 | $30.00 | official |
 | gpt-5.6-terra | $2.00 | $0.20 | $2.50 | $12.00 | $4.00 | $0.40 | $5.00 | $18.00 | official |
 | gpt-5.6-luna | $0.20 | $0.02 | $0.25 | $1.20 | $0.40 | $0.04 | $0.50 | $1.80 | official |
@@ -126,7 +127,7 @@ The configured `openai-codex` provider uses a ChatGPT subscription, so these are
 | gpt-5.4-mini | $0.75 | $0.075 | $0 | $4.50 | — | — | — | — | official |
 | gpt-5.3-codex-spark | $1.75 | $0.175 | $0 | $14.00 | — | — | — | — | official-inferred |
 
-`gpt-5.3-codex-spark` has no published dollar rate (OpenAI labels it “Research preview”), so its row is a planning estimate inherited from `gpt-5.3-codex`, matching pi-ai's built-in model metadata. Long-context tiers apply above 272K input tokens for the GPT-5.4–5.6 models shown with tiers.
+`gpt-5.3-codex-spark` has no published dollar rate (OpenAI labels it “Research preview”), so its row is a planning estimate inherited from `gpt-5.3-codex`, matching pi-ai's built-in model metadata. Long-context tiers apply above 272K input tokens for the GPT-5.4–GPT-6 models shown with tiers.
 
 ---
 
@@ -247,6 +248,7 @@ No active Ollama Cloud model remains unpriced as of 2026-08-27. Kimi K3 uses Oll
 10. **OpenAI GPT-5.6 Terra**: https://developers.openai.com/api/docs/models/gpt-5.6-terra
 11. **OpenAI GPT-5.6 Luna**: https://developers.openai.com/api/docs/models/gpt-5.6-luna
 12. **OpenAI ChatGPT/Codex rate card**: https://help.openai.com/en/articles/20001415-chatgpt-rate-card-enterprise-token-based-pricing
+13. **OpenAI GPT-6 Astra**: https://developers.openai.com/api/docs/models/gpt-6-astra
 
 ---
 
@@ -263,3 +265,4 @@ No active Ollama Cloud model remains unpriced as of 2026-08-27. Kimi K3 uses Oll
 | 2026-08-01 | Removed the canceled Umans provider; synchronized Ollama's active cloud catalog and retirements; added Kimi K3, Nemotron 3 Nano 30B, Mistral Large 3, and DeepSeek V4 Flash 0731; refreshed live comparison rates and served capabilities/context limits; documented signed-in local-daemon auth. |
 | 2026-08-24 | Refreshed official OpenAI and GitHub Copilot pricing. Applied the July 30 Terra/Luna reductions and August 21 Sol promotion to direct Codex comparison rates; corrected Copilot Sol, GPT-5 mini, and GPT-5.3-Codex rates; refreshed OpenRouter comparison prices for every active Ollama model and added missing DeepSeek V4 Pro 0813 evidence. Documented that persisted `usage.cost` is a catalog calculation, not an invoice amount, and changed Pie to reprice token-bearing records from the corrected catalog while retaining stored cost as the unpriced/cost-only fallback. |
 | 2026-08-27 | Added Ollama Cloud GLM 5.3 Flash availability and served metadata from Ollama's catalog plus local `/api/show`; added current `z-ai/glm-5.3-flash` OpenRouter comparison rates. |
+| 2026-09-05 | Added GPT-6 Astra using OpenAI's official token rates and pi.dev's live OpenAI Codex metadata. |

@@ -23,6 +23,53 @@ import { pricingForPromptTokens, type ModelTokenPricing } from '../../../../shar
 import { resolvePricingCatalogKey } from '../../shared/model-id';
 import type { RunAnalyticsExportPayload } from '../run-analytics/query';
 
+const MIGRATION_ACTIVITY_BATCH_SIZE = 128;
+/** Event-loop yield bounds for migration so an already-migrated giant single
+ *  run cannot monopolize the host either: yield after this many attempted
+ *  rows or after this long a synchronous slice, whichever comes first. */
+const MIGRATION_YIELD_ROW_INTERVAL = 128;
+const MIGRATION_YIELD_SLICE_MS = 16;
+/** Bounded heal batches: the ledger→timeline heal rewrites the timeline once
+ *  per this many re-derived intervals instead of one rewrite per row. */
+const HEAL_ACTIVITY_BATCH_SIZE = 128;
+
+/** Structured counters for one historical-migration pass. Persisted via the
+ *  pie log on completion/cancellation and returned to the caller. */
+export interface HistoricalMigrationMetrics {
+  /** Legacy runs the pass began processing (including an interrupted one). */
+  runsConsidered: number;
+  /** Usage rows the pass attempted, including already-present (duplicate) rows. */
+  attemptedRows: number;
+  /** Attempted rows that produced a new durable ordinary ledger record;
+ *  private (process-local) and queued-for-retry rows are not counted. */
+  newInvocationRows: number;
+  /** Bounded deferred-activity flushes (one timeline rewrite each). */
+  activityBatchFlushes: number;
+  /** Wall-clock duration of the whole pass, including yields. */
+  durationMs: number;
+  /** True when shutdown cancellation stopped the pass before the catalogue finished. */
+  cancelled: boolean;
+}
+
+/** Structured counters for one ledger→timeline heal pass, kept separate from
+ *  {@link HistoricalMigrationMetrics} because healing and historical
+ *  migration are independently deferred, cancelled, and measured startup
+ *  stages. */
+export interface ActivityHealMetrics {
+  /** Ordinary ledger rows the pass considered as heal sources. */
+  ledgerRowsConsidered: number;
+  /** Intervals actually appended to the timeline: new at heal start and
+   *  written by a batch that applied without throwing. The timeline's own
+   *  intervalId idempotence stays authoritative. */
+  healedIntervals: number;
+  /** Bounded heal batches (one durable timeline mutation each). */
+  activityBatchFlushes: number;
+  /** Monotonic duration of the whole pass, including yields. */
+  durationMs: number;
+  /** True when shutdown cancellation stopped the pass before the ledger finished. */
+  cancelled: boolean;
+}
+
 /**
  * Host-owned billable-accounting adaptation layer between run observation and
  * the durable invocation ledger. Owns:
@@ -69,6 +116,9 @@ interface AppendUsageOptions {
    * reload the full ledger and replay an already-healed activity interval. */
   existingRecords?: Map<string, BillableInvocationRecord>;
   skipExistingActivity?: boolean;
+  /** Historical migration batches derived activity writes to avoid one
+   * synchronous read-modify-write of the full timeline per ledger row. */
+  deferredActivity?: ActivityIntervalRecord[];
 }
 
 export class BillableAccounting {
@@ -98,43 +148,133 @@ export class BillableAccounting {
     );
   }
 
+  /** Warm both durable stores without a synchronous full-file parse. The ledger initializes
+   *  first (the authoritative source); the activity timeline's asynchronous
+   *  warm-up completes before any synchronous projectAll (the startup
+   *  timeline-restore stage) reads the cold cache. */
+  async initialize(): Promise<void> {
+    await this.invocationLedger.initialize();
+    await this.activityTimeline.initialize();
+  }
+
   /** Re-derive activity intervals from authoritative ledger rows after a
    *  restart. Ledger commit is authoritative and activity insertion is
    *  idempotent, so this heals the only possible cross-file crash boundary.
-   *  All rows are applied in one read-modify-write so the heal costs O(n)
-   *  instead of one full file rewrite per row; a transient write failure
-   *  (e.g. a sibling host or antivirus briefly holding the file) degrades to
-   *  a stale derived cache rather than aborting extension startup. */
-  healActivityFromLedger(): void {
-    this.invocationLedger.transaction(() => {
-      const records = this.invocationLedger.projectAll({ includePrivate: false }).records;
-      const intervals: ActivityIntervalRecord[] = [];
-      for (const record of records) {
-        if (!record.sessionPath || this.deps.isPrivateSession(record.sessionPath)) continue;
-        intervals.push(this.activityIntervalFor(record));
+   *  Rows are applied in bounded batches (one durable timeline mutation per
+   *  batch, event-loop yield between batches) so a giant ledger heal costs
+   *  O(n/batch) journal appends instead of one full file rewrite per row or one
+   *  monopolizing synchronous pass. A transient write failure (e.g. a
+   *  sibling host or antivirus briefly holding the file) degrades to a stale
+   *  derived cache — the pass stops without throwing so extension startup
+   *  never aborts — and heals again on the next startup.
+   *
+   *  Working-time note: healed intervals are always `provider`, `auxiliary`,
+   *  or `history_compaction` kinds (see {@link activityIntervalFor});
+   *  {@link ../working-time-service.ts | WorkingTimeService} consumes only
+   *  `busy`/`tool` intervals, so a heal that lands after working-time
+   *  restoration can never rewrite or double-count live clocks. */
+  async healActivityFromLedger(
+    options?: { shouldContinue?: () => boolean },
+  ): Promise<ActivityHealMetrics> {
+    const shouldContinue = options?.shouldContinue;
+    const startedAtMs = performance.now();
+    let ledgerRowsConsidered = 0;
+    let healedIntervals = 0;
+    let activityBatchFlushes = 0;
+    let cancelled = false;
+    const metrics = (): ActivityHealMetrics => ({
+      ledgerRowsConsidered,
+      healedIntervals,
+      activityBatchFlushes,
+      durationMs: Math.max(0, performance.now() - startedAtMs),
+      cancelled,
+    });
+    const finish = (): ActivityHealMetrics => {
+      const result = metrics();
+      appendPieLog('info', 'billable-accounting', 'activity heal metrics', { ...result });
+      return result;
+    };
+    if (shouldContinue && !shouldContinue()) {
+      cancelled = true;
+      return finish();
+    }
+    const records = this.invocationLedger.projectAll({ includePrivate: false }).records;
+    const intervals: ActivityIntervalRecord[] = [];
+    for (const record of records) {
+      if (!record.sessionPath || this.deps.isPrivateSession(record.sessionPath)) continue;
+      ledgerRowsConsidered += 1;
+      intervals.push(this.activityIntervalFor(record));
+    }
+    if (intervals.length === 0) return finish();
+    // Idempotence knowledge snapshot: intervals already in the timeline are
+    // not counted as healed when their bounded batch is checked for insertion.
+    const knownIntervalIds = new Set(
+      this.activityTimeline.projectAll().map((record) => record.intervalId),
+    );
+    let anyChanged = false;
+    for (let offset = 0; offset < intervals.length; offset += HEAL_ACTIVITY_BATCH_SIZE) {
+      if (shouldContinue && !shouldContinue()) {
+        cancelled = true;
+        break;
       }
-      if (intervals.length === 0) return;
-      let changed = false;
+      const batch = intervals.slice(offset, offset + HEAL_ACTIVITY_BATCH_SIZE);
       try {
-        changed = this.activityTimeline.recordMany(intervals, { durableRequired: true });
+        const batchChanged = this.activityTimeline.recordMany(batch, { durableRequired: true });
+        if (batchChanged) {
+          anyChanged = true;
+          for (const record of batch) {
+            if (!knownIntervalIds.has(record.intervalId)) {
+              knownIntervalIds.add(record.intervalId);
+              healedIntervals += 1;
+            }
+          }
+        }
       } catch (error) {
         appendPieLog('warn', 'billable-accounting', 'activity heal failed; will retry on next startup', {
           error: error instanceof Error ? error.message : String(error),
         });
+        return finish();
       }
-      if (changed) this.deps.markDerivedExportDirty();
-    });
+      activityBatchFlushes += 1;
+      // Yield between bounded batches so a giant ledger heal cannot
+      // monopolize the extension-host event loop, and so shutdown
+      // cancellation takes effect between intervals.
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    if (anyChanged) this.deps.markDerivedExportDirty();
+    return finish();
   }
 
   async migrateHistoricalRunUsage(
     runs: readonly RunSnapshot[],
     options?: { shouldContinue?: () => boolean },
-  ): Promise<void> {
+  ): Promise<HistoricalMigrationMetrics> {
     const shouldContinue = options?.shouldContinue;
-    // Shutdown can cancel this pass; it then stops at the next run boundary
-    // and the remainder resumes on the next startup (same crash-resume
-    // semantics as a process exit mid-migration).
-    if (shouldContinue && !shouldContinue()) return;
+    const startedAtMs = performance.now();
+    let runsConsidered = 0;
+    let attemptedRows = 0;
+    let newInvocationRows = 0;
+    let activityBatchFlushes = 0;
+    let cancelled = false;
+    let sliceStartedAtMs = startedAtMs;
+    const metrics = (): HistoricalMigrationMetrics => ({
+      runsConsidered,
+      attemptedRows,
+      newInvocationRows,
+      activityBatchFlushes,
+      durationMs: Math.max(0, performance.now() - startedAtMs),
+      cancelled,
+    });
+    // Shutdown can cancel this pass; it then stops at the next run boundary —
+    // and between attempted rows within a run — and the remainder resumes on
+    // the next startup (same crash-resume semantics as a process exit
+    // mid-migration).
+    if (shouldContinue && !shouldContinue()) {
+      cancelled = true;
+      const result = metrics();
+      appendPieLog('info', 'billable-accounting', 'historical usage migration skipped', { ...result });
+      return result;
+    }
     // Replay every deterministic migration source independently. Existing live
     // evidence suppresses compatibility aggregates; migration evidence does
     // not, so a crash after one row can resume the remainder on restart.
@@ -152,16 +292,42 @@ export class BillableAccounting {
         recordsByRun.set(record.parentRunId, [record]);
       }
     }
-    for (const run of runs) {
-      if (shouldContinue && !shouldContinue()) return;
+    const deferredActivity: ActivityIntervalRecord[] = [];
+    const flushDeferredActivity = (): boolean => {
+      if (deferredActivity.length === 0) return false;
+      const batch = deferredActivity.splice(0, deferredActivity.length);
+      this.activityTimeline.recordMany(batch);
+      return true;
+    };
+    const yieldNow = async (): Promise<void> => {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      sliceStartedAtMs = performance.now();
+    };
+
+    try {
+      for (const run of runs) {
+        if (shouldContinue && !shouldContinue()) {
+          cancelled = true;
+          break;
+        }
+        runsConsidered += 1;
       const existingRunRecords = recordsByRun.get(run.runId) ?? [];
       const hasLiveConversation = existingRunRecords.some((record) => record.evidenceOrigin !== 'migration'
         && (record.kind === 'conversation' || record.kind === 'retry'));
       const hasLiveSubagent = existingRunRecords.some((record) => record.evidenceOrigin !== 'migration'
         && record.kind === 'subagent');
       const endedAt = run.finalizedAt ?? run.updatedAt;
-      const append = (sample: SessionUsageSample, kind: BillableInvocationKind): void => {
-        this.appendUsageSample(run.sessionPath, {
+      const append = async (sample: SessionUsageSample, kind: BillableInvocationKind): Promise<void> => {
+        // Cancellation applies within a run, not only between runs: a giant
+        // already-migrated run must not outlast a shutdown drain.
+        if (shouldContinue && !shouldContinue()) {
+          cancelled = true;
+          return;
+        }
+        attemptedRows += 1;
+        // Only rows the ledger actually appended as durable ordinary rows
+        // count: private (process-local) and queued-for-retry rows do not.
+        const appended = this.appendUsageSample(run.sessionPath, {
           ...sample,
           parentRunId: run.runId,
           startedAt: sample.startedAt ?? run.startedAt,
@@ -172,7 +338,18 @@ export class BillableAccounting {
           sessionId: run.sessionId ?? null,
           existingRecords,
           skipExistingActivity: true,
+          deferredActivity,
         });
+        if (appended.appendedDurable) newInvocationRows += 1;
+        if (deferredActivity.length >= MIGRATION_ACTIVITY_BATCH_SIZE) {
+          // Bounded activity batches: the full timeline is rewritten only
+          // once per batch, then the host event loop gets a turn.
+          if (flushDeferredActivity()) activityBatchFlushes += 1;
+          await yieldNow();
+        } else if (attemptedRows % MIGRATION_YIELD_ROW_INTERVAL === 0
+          || performance.now() - sliceStartedAtMs >= MIGRATION_YIELD_SLICE_MS) {
+          await yieldNow();
+        }
       };
       const observedConversation = (run.auxiliaryLlmUsage ?? [])
         .filter((sample) => sample.kind === 'assistant_message');
@@ -185,7 +362,7 @@ export class BillableAccounting {
       const residualConversationTotal = residualConversation.inputTokens + residualConversation.outputTokens
         + residualConversation.cacheReadTokens + residualConversation.cacheWriteTokens;
       if (!hasLiveConversation && residualConversationTotal > 0) {
-        append({
+        await append({
           sourceId: `legacy-run:${run.runId}:conversation-residual`,
           kind: 'conversation',
           modelId: run.modelId,
@@ -196,7 +373,7 @@ export class BillableAccounting {
         }, 'conversation');
       } else if (!hasLiveConversation && observedConversation.length === 0 && run.tokenReportedTurnCount > 0) {
         for (let index = 0; index < run.tokenReportedTurnCount; index += 1) {
-          append({
+          await append({
             sourceId: `legacy-run:${run.runId}:conversation-gap:${index}`,
             kind: 'conversation',
             inputTokens: 0,
@@ -212,7 +389,7 @@ export class BillableAccounting {
         }
       }
       for (const [index, auxiliary] of (run.auxiliaryLlmUsage ?? []).entries()) {
-        append({
+        await append({
           sourceId: auxiliary.sourceId || `legacy-run:${run.runId}:auxiliary:${index}`,
           kind: auxiliary.kind === 'assistant_message' ? 'conversation' : auxiliary.kind,
           modelId: auxiliary.modelId,
@@ -237,7 +414,7 @@ export class BillableAccounting {
       const subagentTotal = subagentResidual.inputTokens + subagentResidual.outputTokens
         + subagentResidual.cacheReadTokens + subagentResidual.cacheWriteTokens;
       if (!hasLiveSubagent && subagentTotal > 0) {
-        append({
+        await append({
           sourceId: `legacy-run:${run.runId}:subagent-residual`,
           kind: 'subagent',
           ...subagentResidual,
@@ -247,7 +424,7 @@ export class BillableAccounting {
       }
       const meteredCompactions = (run.auxiliaryLlmUsage ?? []).filter((sample) => sample.kind === 'history_compaction').length;
       for (let index = meteredCompactions; index < (run.compactionCount ?? 0); index += 1) {
-        append({
+        await append({
           sourceId: `legacy-run:${run.runId}:compaction-gap:${index}`,
           kind: 'history_compaction',
           inputTokens: 0,
@@ -263,9 +440,17 @@ export class BillableAccounting {
       }
       // Historical migration is restart work, not a prerequisite for
       // rendering the UI. Yield between runs so a large legacy catalogue
-      // cannot monopolize the extension host event loop.
-      await new Promise<void>((resolve) => setImmediate(resolve));
+      // cannot monopolize the extension host event loop. Keep the activity
+      // batch across run boundaries so the large timeline is rewritten only
+      // once per bounded batch.
+      await yieldNow();
+      }
+    } finally {
+      if (flushDeferredActivity()) activityBatchFlushes += 1;
     }
+    const result = metrics();
+    appendPieLog('info', 'billable-accounting', 'historical usage migration metrics', { ...result });
+    return result;
   }
 
   /** Ledger-side reset when a turn begins: clear provider-settlement and
@@ -663,12 +848,24 @@ export class BillableAccounting {
     };
   }
 
-  private persistInvocationRecord(record: BillableInvocationRecord): void {
-    this.invocationLedger.transaction(() => {
-      this.invocationLedger.append(record, {
+  /** Persist one invocation row and its correlated activity interval as one
+   *  workspace transaction. Returns whether the row was actually appended as
+   *  a durable ordinary ledger row (private/process-local and duplicate rows
+   *  return false) so callers can report honest append metrics. */
+  private persistInvocationRecord(
+    record: BillableInvocationRecord,
+    deferredActivity?: ActivityIntervalRecord[],
+  ): boolean {
+    return this.invocationLedger.transaction(() => {
+      const appended = this.invocationLedger.append(record, {
         visibility: record.sessionPath && this.deps.isPrivateSession(record.sessionPath) ? 'private' : 'ordinary',
-      });
-      this.recordInvocationActivity(record);
+      }) === 'appended';
+      if (deferredActivity && record.sessionPath && !this.deps.isPrivateSession(record.sessionPath)) {
+        deferredActivity.push(this.activityIntervalFor(record));
+      } else {
+        this.recordInvocationActivity(record);
+      }
+      return appended;
     });
   }
 
@@ -676,7 +873,7 @@ export class BillableAccounting {
     sessionPath: string,
     sample: SessionUsageSample,
     options: AppendUsageOptions = {},
-  ): string {
+  ): { invocationId: string; appendedDurable: boolean } {
     this.retryPendingWrites();
     const identity = this.deps.sessionIdentity(sessionPath);
     const stableSessionId = options.sessionId ?? identity.sessionId;
@@ -688,7 +885,7 @@ export class BillableAccounting {
       if (!options.skipExistingActivity) {
         this.invocationLedger.transaction(() => this.recordInvocationActivity(existing));
       }
-      return invocationId;
+      return { invocationId, appendedDurable: false };
     }
     const normalizedTimes = normalizeInvocationTimes(
       sample.startedAt,
@@ -753,13 +950,14 @@ export class BillableAccounting {
       ...costEvidence,
     };
     try {
-      this.persistInvocationRecord(record);
+      const appendedDurable = this.persistInvocationRecord(record, options.deferredActivity);
       options.existingRecords?.set(record.invocationId, record);
       this.deps.markDerivedExportDirty();
       if (kind === 'conversation' || kind === 'retry' || kind === 'subagent' || kind === 'skill_pruning_prepass') {
         this.currentBranchSourcesBySession[sessionPath]?.add(sample.sourceId);
       }
       this.deps.scheduleRender();
+      return { invocationId, appendedDurable };
     } catch (error) {
       this.pendingInvocationWrites.set(record.invocationId, record);
       appendPieLog('warn', 'billable-ledger', 'could not append invocation; queued for retry', {
@@ -774,7 +972,7 @@ export class BillableAccounting {
         noticeRaw: `Billable invocation ${record.invocationId} persistence failed: ${error instanceof Error ? error.message : String(error)}`,
       });
     }
-    return invocationId;
+    return { invocationId, appendedDurable: false };
   }
 
   private recordInvocationActivity(record: BillableInvocationRecord): void {

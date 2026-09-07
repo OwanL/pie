@@ -17,6 +17,7 @@ import {
   type RunSnapshot,
 } from '../../../src/host/run-analytics';
 import { EMPTY_PROVIDER_GATE_STATS } from '../../../src/shared/protocol/aggregate-stats';
+import type { BillableInvocationRecord } from '../../../src/shared/billable-invocation';
 import { serializeJsonLine } from '../../../src/shared/jsonl';
 
 async function withTempDir(run: (dir: string) => Promise<void>): Promise<void> {
@@ -84,6 +85,38 @@ async function waitFor(predicate: () => Promise<boolean>, timeoutMs = 500): Prom
     if (Date.now() >= deadline) throw new Error(`condition not met within ${timeoutMs}ms`);
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
+}
+
+function ledgerRecord(
+  invocationId: string,
+  endedAt: string,
+  inputTokens: number,
+  outputTokens: number,
+  cost: number,
+): BillableInvocationRecord {
+  return {
+    schemaVersion: 1,
+    invocationId,
+    sourceId: `source:${invocationId}`,
+    sessionId: 'ledger-session',
+    sessionPath: '/ledger-session.jsonl',
+    branchId: 'branch-a',
+    parentOperationId: 'operation-a',
+    parentRunId: 'run-a',
+    parentToolId: null,
+    kind: 'conversation',
+    provider: 'ledger-provider',
+    model: 'ledger-model',
+    inputTokens,
+    outputTokens,
+    providerTotalTokens: inputTokens + outputTokens,
+    providerReportedCostUsd: cost,
+    provenance: 'exact',
+    startedAt: endedAt,
+    endedAt,
+    outcome: 'succeeded',
+    instrumentationGap: false,
+  };
 }
 
 async function recomputeAggregate(service: AggregateStatsService): Promise<void> {
@@ -705,6 +738,93 @@ test('AggregateStatsService refreshLive updates estimated streaming tokens and c
       'the cumulative token graph advances with the live estimate');
     assert.equal(persistedQueries, 1, 'fast refresh never reads completed history');
     assert.equal(backendPolls, pollsAfterInitialCompute, 'fast refresh never polls backend metrics');
+  });
+});
+
+test('AggregateStatsService keeps cached ledger fields authoritative across live refresh and validity changes', async () => {
+  await withTempDir(async (storageDir) => {
+    let nowMs = new Date(2026, 8, 4, 12, 0, 0).getTime();
+    const at = (hour: number, minute = 0): string => new Date(2026, 8, 4, hour, minute, 0).toISOString();
+    let records: readonly BillableInvocationRecord[] = [
+      ledgerRecord('past', at(10), 10, 20, 1),
+      ledgerRecord('future', at(13), 30, 40, 2),
+    ];
+    let recordReads = 0;
+    const openRun = {
+      ...validSnapshot('legacy-live', at(10)),
+      sessionPath: '/live',
+      status: 'open',
+      sendCount: 7,
+      inputTokens: 999,
+      outputTokens: 999,
+    } as RunSnapshot;
+    const statsService = {
+      getStorageDir: () => storageDir,
+      queryPersistedRunAnalytics: async () => ({ completedRuns: [], openRuns: [] }),
+      getOpenRuns: () => [openRun],
+      getPendingCompletedRuns: () => [],
+      getBillableInvocationRecords: () => {
+        recordReads += 1;
+        return records;
+      },
+    };
+    const service = new AggregateStatsService({
+      getArchState: () => ({
+        sessions: { runningSessionPaths: ['/live'], openTabPaths: ['/live'] },
+      }) as never,
+      statsService: statsService as never,
+      tokenRateService: { getRates: () => ({}) } as never,
+      getAgentDir: () => null,
+      fetchProviderGateStats: async () => EMPTY_PROVIDER_GATE_STATS,
+      onChanged: () => undefined,
+      now: () => new Date(nowMs),
+    });
+
+    await recomputeAggregate(service);
+    let aggregate = service.getAggregateStats();
+    assert.equal(aggregate.todayCost, 1, 'future same-day evidence is not visible early');
+    assert.equal(aggregate.todayInputTokens, 10);
+    assert.equal(aggregate.totalInputTokens, 40, 'all-time ledger totals remain exact');
+    assert.equal(aggregate.todayProductivity.inputTokens, 10);
+    assert.equal(aggregate.todayProductivity.sendCount, 7, 'live productivity remains live-owned');
+    assert.equal(aggregate.dailyCost.at(-1)?.totalCost, 1);
+    const initialSeries = aggregate.todayCostSeries;
+    const initialProviders = aggregate.costByProvider;
+
+    service.refreshLive();
+    aggregate = service.getAggregateStats();
+    assert.equal(recordReads, 2, 'fast refresh still obtains the authority records/signature');
+    assert.equal(aggregate.todayCost, 1, 'legacy live totals cannot overwrite ledger cost');
+    assert.equal(aggregate.todayOutputTokens, 20, 'legacy live totals cannot overwrite ledger tokens');
+    assert.strictEqual(aggregate.todayCostSeries, initialSeries, 'unchanged ledger identity reuses chart arrays');
+    assert.strictEqual(aggregate.costByProvider, initialProviders, 'unchanged ledger identity reuses provider arrays');
+
+    nowMs = new Date(2026, 8, 4, 14, 0, 0).getTime();
+    service.refreshLive();
+    aggregate = service.getAggregateStats();
+    assert.equal(aggregate.todayCost, 3, 'a future row appears when the clock crosses it');
+    assert.equal(aggregate.todayInputTokens, 40);
+    assert.equal(aggregate.dailyCost.at(-1)?.totalCost, 3);
+    assert.notStrictEqual(aggregate.todayCostSeries, initialSeries, 'crossing a row validity boundary rebuilds the overlay');
+
+    records = [...records, ledgerRecord('new', at(14, 30), 5, 6, 0.5)];
+    nowMs = new Date(2026, 8, 4, 15, 0, 0).getTime();
+    service.refreshLive();
+    aggregate = service.getAggregateStats();
+    assert.equal(aggregate.billableAccounting?.invocationCount, 3);
+    assert.equal(aggregate.todayCost, 3.5, 'a new immutable records identity invalidates the overlay');
+
+    records = records.filter((record) => record.invocationId !== 'future');
+    service.refreshLive();
+    aggregate = service.getAggregateStats();
+    assert.equal(aggregate.billableAccounting?.invocationCount, 2, 'privacy/authority removal invalidates the overlay');
+    assert.equal(aggregate.todayCost, 1.5);
+
+    nowMs = new Date(2026, 8, 5, 12, 0, 0).getTime();
+    await recomputeAggregate(service);
+    aggregate = service.getAggregateStats();
+    assert.equal(aggregate.todayCost, 0, 'day rollover invalidates the time-scoped overlay');
+    assert.equal(aggregate.weekCost, 1.5);
   });
 });
 

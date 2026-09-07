@@ -29,21 +29,19 @@ Route to a specialized skill when the request matches one; this skill remains th
 | `settings.json` | Tracked, committed Pi runtime settings; model-owned fields are generated from `models.yaml`, chat and pruning selections are user-owned |
 | `APPEND_SYSTEM.md` | Personal additions to Pi's system prompt |
 
-Start with [`README.md`](../../README.md) for setup, storage, and repository-wide workflows. Use [`docs/INDEX.md`](../../docs/INDEX.md) rather than scanning `docs/`.
+For setup, storage, and repository-wide workflows, see [`README.md`](../../README.md). Find task-relevant design documents through [`docs/INDEX.md`](../../docs/INDEX.md) rather than scanning `docs/`.
 
 ## Common practices
 
-- Read the relevant design documents completely and follow their cross-references before changing behavior.
-- Prefer the root path-aware test wrappers. Do not invoke `npx tsx` directly for focused tests.
-- After any edit under `extension/src/`, run the extension build; it also syncs the output into the installed VS Code extension.
+- Use the repository-root test wrappers: `test:file` for focused checks while iterating and `npm test` as the default final development test. `npm test` resolves working-tree changes to affected tests, runs package groups concurrently, and conservatively broadens when dependency evidence is incomplete. Do not invoke `npx tsx` directly. Use `test:coverage` only for an explicit release coverage gate.
+- After any edit under `extension/src/`, run `npm run extension:build`. It compiles/validates all bundles and publishes only a complete renderer generation to a matching installed extension; it does not activate host/backend changes. Use `npm run extension:activate` only at an explicit reload/install boundary after closing or reloading active Pie sessions.
 - Treat [`docs/STATE_CONTRACT.md`](../../docs/STATE_CONTRACT.md) as authoritative for host↔webview synchronization. Contract changes require matching tests under `extension/test/`, including the sync-contract coverage.
 - Keep the host architecture CQRS/Elm-style MVI: pure reducer, one effect runner, passive webview, explicit session addressing, and `Record<string, T>` host collections rather than `Map`/`Set`.
 - Preserve unrelated working-tree changes. Generated or user-owned files may already be modified; inspect status and focused diffs before finishing.
-- On Windows, the harness `bash` tool is Git Bash. Redirect to `/dev/null`, never `NUL`; a literal `NUL` file breaks Windows ripgrep traversal. Accept both `/tmp` and native `%TEMP%` paths from tools.
 
 ### Model configuration
 
-Edit `models.yaml`, then run `npm run sync-models`. This regenerates `models.json`, `model-profiles.yaml`, and model-owned fields in `settings.json`. Do not directly edit generated model files. `settings.json` is tracked and committed: synchronization rewrites only its model-owned fields, while existing chat and pruning model selections are user-owned and preserved. Use `npm run settings:init` to seed it from `settings.defaults.json` if it is ever missing. For provider work, also load the `add-provider` skill.
+Edit `models.yaml`, then run `npm run sync-models`. This regenerates `models.json`, `model-profiles.yaml`, and model-owned fields in `settings.json`. Do not directly edit generated model files; `extension/test/integration/model-config-sync.test.ts` guards against drift. `settings.json` is tracked and committed: synchronization rewrites only its model-owned fields, while existing chat and pruning model selections are user-owned and preserved. Use `npm run settings:init` to seed it from `settings.defaults.json` if it is ever missing. For provider work, also load the `add-provider` skill.
 
 ### Context-lean terminology
 
@@ -67,11 +65,13 @@ npm run test:changed                        # fast suites affected by working-tr
 npm run typecheck                           # all TypeScript projects
 npm run lint                                # all configured lint checks (currently the extension)
 npm run check                               # model drift + typecheck + lint + changed tests
-npm run verify                              # pre-push gate: drift + typecheck + lint + all fast suites + build
+npm run verify                              # full verification: drift + typecheck + lint + all fast suites + build
 npm run verify:release                      # release gate: replaces the fast suites with coverage-gated runs
 npm run sync-models                         # regenerate centralized model configuration
 npm run sync-models -- --check              # fail on generated-config drift
-npm run extension:build                     # build + installed-extension sync
+npm run extension:build                     # compile/validate + renderer publish only
+npm run extension:build:validate            # compile/validate without publishing
+npm run extension:activate                  # explicit host/backend activation boundary
 npm run extension:package                   # build a .vsix from the root
 npm run extension:test:browser              # extension Playwright browser suite
 npm run analytics:serve                     # local analytics workspace
@@ -82,12 +82,15 @@ Extension-only loop:
 
 ```bash
 cd extension
-npm run build       # required after extension/src changes; build + installed-extension sync
-npm run watch       # incremental Vite and TypeScript watchers
-npm run test        # extension tests
-npm run typecheck   # extension typecheck
-npm run lint        # extension ESLint
-npm run package     # build a .vsix
+npm run build            # compile/validate + renderer publish
+npm run build:validate   # compile/validate only
+npm run publish:renderer # publish existing renderer output
+npm run activate         # explicit host/backend activation
+npm run watch            # incremental + renderer publish
+npm run test             # extension tests
+npm run typecheck        # extension typecheck
+npm run lint             # extension ESLint
+npm run package          # build a .vsix
 ```
 
 Choose focused tests while iterating, then run checks proportionate to the changed behavior.
@@ -103,7 +106,7 @@ Choose focused tests while iterating, then run checks proportionate to the chang
 
 ### Pi runtime documentation (locked local version)
 
-Start with [Pi's README](../../extension/node_modules/@earendil-works/pi-coding-agent/README.md), then read the topic that owns the API being changed:
+For Pi API work, use the topic that owns the API being changed. [Pi's README](../../extension/node_modules/@earendil-works/pi-coding-agent/README.md) provides an overview when needed:
 
 - [extensions](../../extension/node_modules/@earendil-works/pi-coding-agent/docs/extensions.md) and [extension examples](../../extension/node_modules/@earendil-works/pi-coding-agent/examples/extensions/)
 - [skills](../../extension/node_modules/@earendil-works/pi-coding-agent/docs/skills.md)

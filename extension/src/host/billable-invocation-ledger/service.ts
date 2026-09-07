@@ -22,12 +22,23 @@ interface LedgerEntry {
   readonly private: boolean;
 }
 
+interface FileSignature {
+  readonly exists: boolean;
+  readonly size: number;
+  readonly mtimeMs: number;
+  readonly ctimeMs: number;
+}
+
+const INITIAL_LOAD_YIELD_INTERVAL = 256;
+
 export interface BillableInvocationAppendOptions {
   /** Privacy is mandatory at the call site so an omitted classification cannot leak a private invocation. */
   readonly visibility: 'ordinary' | 'private';
 }
 
-export type BillableInvocationAppendResult = 'appended' | 'duplicate';
+/** `'appended'` rows are durable ordinary ledger rows; `'appended-private'`
+ *  rows stayed process-local because a durable privacy fence covered them. */
+export type BillableInvocationAppendResult = 'appended' | 'appended-private' | 'duplicate';
 
 export interface BillableInvocationProjectionOptions {
   /** Live host projections include process-local private usage by default. */
@@ -65,8 +76,8 @@ export function readAccountingPrivacySelectors(storageDir: string): BillableInvo
 /**
  * Host-owned finalized invocation ledger. All durable reads, appends, privacy
  * fences, rewrites, and exports share one workspace lock. Each transaction
- * reloads canonical disk state, so stale host processes cannot overwrite a
- * sibling append or export an already-forgotten/private row.
+ * revalidates the canonical disk signature, reloading only when a sibling
+ * append or privacy rewrite changed it.
  */
 export class BillableInvocationLedger {
   private readonly entriesById: Record<string, LedgerEntry> = {};
@@ -75,6 +86,11 @@ export class BillableInvocationLedger {
   private readonly storageDir: string;
   private readonly lockTarget: string;
   private readonly privacyPath: string;
+  private loadedLedgerSignature?: FileSignature;
+  private loadedPrivacySignature?: FileSignature;
+  private initializationPromise: Promise<void> | null = null;
+  private allRecordsCache?: readonly BillableInvocationRecord[];
+  private ordinaryRecordsCache?: readonly BillableInvocationRecord[];
 
   constructor(private readonly filePath: string) {
     if (!filePath.trim()) throw new Error('Billable invocation ledger file path is required.');
@@ -82,7 +98,30 @@ export class BillableInvocationLedger {
     this.lockTarget = accountingLockTarget(this.storageDir);
     this.privacyPath = path.join(this.storageDir, ACCOUNTING_PRIVACY_BASENAME);
     fs.mkdirSync(this.storageDir, { recursive: true });
-    this.withLock(() => this.reloadDurable());
+  }
+
+  /**
+   * Warm the durable ledger without monopolizing the extension host. The
+   * synchronous API remains available for event handlers and uses the
+   * signature-gated cache after this initial load.
+   */
+  async initialize(): Promise<void> {
+    if (this.loadedLedgerSignature && this.loadedPrivacySignature) {
+      this.withLock(() => this.reloadDurable());
+      return;
+    }
+    if (this.initializationPromise) {
+      await this.initializationPromise;
+      return;
+    }
+
+    this.initializationPromise = this.initializeDurable().finally(() => {
+      this.initializationPromise = null;
+    });
+    await this.initializationPromise;
+    if (!this.loadedLedgerSignature || !this.loadedPrivacySignature) {
+      this.withLock(() => this.reloadDurable());
+    }
   }
 
   /** Coordinate a ledger row and its correlated activity interval as one
@@ -117,9 +156,13 @@ export class BillableInvocationLedger {
       const isPrivate = options.visibility === 'private'
         || [...this.privateSessionSelectors, ...durablePrivacy]
           .some((selector) => matchesSession(normalized, selector));
-      if (!isPrivate) this.appendDurable(normalized);
-      this.addEntry(normalized, isPrivate);
-      return 'appended';
+      if (!isPrivate) {
+        this.appendDurable(normalized);
+        this.addEntry(normalized, false);
+        return 'appended';
+      }
+      this.addEntry(normalized, true);
+      return 'appended-private';
     });
   }
 
@@ -199,6 +242,7 @@ export class BillableInvocationLedger {
         for (const id of durableIds) {
           this.entriesById[id] = Object.freeze({ record: this.entriesById[id].record, private: true });
         }
+        this.invalidateProjectionCache();
       }
       return matchingIds.length;
     });
@@ -222,7 +266,9 @@ export class BillableInvocationLedger {
   /** Remove process-local private usage when the private session is closed or scrubbed. */
   scrubPrivateRecords(selector?: BillableInvocationSessionSelector): number {
     if (selector) assertSelector(selector);
-    return this.removeEntries((entry) => entry.private && (!selector || matchesSession(entry.record, selector)));
+    const removed = this.removeEntries((entry) => entry.private && (!selector || matchesSession(entry.record, selector)));
+    if (removed > 0) this.invalidateDurableCache();
+    return removed;
   }
 
   /** Forget removes both ordinary durable data and private process-local data. */
@@ -245,17 +291,27 @@ export class BillableInvocationLedger {
     });
   }
 
-  private records(options: BillableInvocationProjectionOptions): BillableInvocationRecord[] {
+  private records(options: BillableInvocationProjectionOptions): readonly BillableInvocationRecord[] {
     const includePrivate = options.includePrivate !== false;
-    return this.order
+    const cached = includePrivate ? this.allRecordsCache : this.ordinaryRecordsCache;
+    if (cached) return cached;
+    const records = this.order
       .map((id) => this.entriesById[id])
       .filter((entry) => includePrivate || !entry.private)
       .map((entry) => entry.record);
+    const frozen = Object.freeze(records);
+    if (includePrivate) {
+      this.allRecordsCache = frozen;
+    } else {
+      this.ordinaryRecordsCache = frozen;
+    }
+    return frozen;
   }
 
   private addEntry(record: BillableInvocationRecord, isPrivate: boolean): void {
     this.entriesById[record.invocationId] = Object.freeze({ record, private: isPrivate });
     this.order.push(record.invocationId);
+    this.invalidateProjectionCache();
   }
 
   private removeEntries(predicate: (entry: LedgerEntry, id: string) => boolean): number {
@@ -267,6 +323,7 @@ export class BillableInvocationLedger {
       this.order.splice(index, 1);
       removed += 1;
     }
+    if (removed > 0) this.invalidateProjectionCache();
     return removed;
   }
 
@@ -275,31 +332,40 @@ export class BillableInvocationLedger {
   }
 
   /** Replace only durable entries from canonical disk state. Process-local
-   * private rows remain available to the live private tab. */
+   * private rows remain available to the live private tab. Rows matching the
+   * durable privacy fence reload as process-local private: the fence commits
+   * before its row-removing rewrite, so a failed rewrite must not reintroduce
+   * fenced rows as ordinary on the next reload. */
   private reloadDurable(): void {
+    // The asynchronous startup warm-up owns the first load. A synchronous
+    // projection during that window must not fall back to reparsing the whole
+    // ledger and undo the responsiveness guarantee.
+    if (this.initializationPromise) return;
+
+    const ledgerSignature = readFileSignature(this.filePath);
+    const privacySignature = readFileSignature(this.privacyPath);
+    if (this.loadedLedgerSignature
+      && this.loadedPrivacySignature
+      && sameFileSignature(this.loadedLedgerSignature, ledgerSignature)
+      && sameFileSignature(this.loadedPrivacySignature, privacySignature)) {
+      return;
+    }
+
     this.removeEntries((entry) => !entry.private);
     let content: string;
     try {
       content = fs.readFileSync(this.filePath, 'utf8');
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
-      throw error;
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      content = '';
     }
-    for (const line of content.split('\n')) {
-      if (!line.trim()) continue;
-      try {
-        const record = normalizeRecord(JSON.parse(line) as unknown);
-        const existing = this.entriesById[record.invocationId];
-        if (existing) {
-          if (canonical(existing.record) !== canonical(record)) continue;
-          continue;
-        }
-        this.addEntry(record, false);
-      } catch {
-        // Each line is an independent commit. Malformed/torn lines do not
-        // prevent replay of valid records before or after them.
-      }
+    const durablePrivacy = readAccountingPrivacySelectors(this.storageDir);
+    for (const entry of parseDurableContent(content, durablePrivacy)) {
+      if (this.entriesById[entry.record.invocationId]) continue;
+      this.addEntry(entry.record, entry.private);
     }
+    this.loadedLedgerSignature = readFileSignature(this.filePath);
+    this.loadedPrivacySignature = readFileSignature(this.privacyPath);
   }
 
   private writePrivacySelectors(selectors: readonly BillableInvocationSessionSelector[]): void {
@@ -307,6 +373,7 @@ export class BillableInvocationLedger {
       try { fs.unlinkSync(this.privacyPath); } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
       }
+      this.invalidateDurableCache();
       return;
     }
     fs.mkdirSync(this.storageDir, { recursive: true });
@@ -317,6 +384,7 @@ export class BillableInvocationLedger {
       try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
       fs.renameSync(tempPath, this.privacyPath);
       fsyncDirectory(this.storageDir);
+      this.invalidateDurableCache();
     } catch (error) {
       try { fs.unlinkSync(tempPath); } catch { /* best effort */ }
       throw error;
@@ -339,6 +407,7 @@ export class BillableInvocationLedger {
     } finally {
       fs.closeSync(fd);
     }
+    this.loadedLedgerSignature = readFileSignature(this.filePath);
   }
 
   private rewriteDurable(include: (entry: LedgerEntry) => boolean): void {
@@ -353,6 +422,7 @@ export class BillableInvocationLedger {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
       }
       fsyncDirectory(path.dirname(this.filePath));
+      this.loadedLedgerSignature = readFileSignature(this.filePath);
       return;
     }
     let fd: number | undefined;
@@ -364,10 +434,64 @@ export class BillableInvocationLedger {
       fd = undefined;
       fs.renameSync(tempPath, this.filePath);
       fsyncDirectory(path.dirname(this.filePath));
+      this.loadedLedgerSignature = readFileSignature(this.filePath);
     } catch (error) {
       if (fd !== undefined) fs.closeSync(fd);
       try { fs.unlinkSync(tempPath); } catch { /* Best-effort cleanup of an unpublished rewrite. */ }
       throw error;
+    }
+  }
+
+  private invalidateDurableCache(): void {
+    this.loadedLedgerSignature = undefined;
+    this.loadedPrivacySignature = undefined;
+  }
+
+  private invalidateProjectionCache(): void {
+    this.allRecordsCache = undefined;
+    this.ordinaryRecordsCache = undefined;
+  }
+
+  private async initializeDurable(): Promise<void> {
+    const ledgerSignatureBefore = readFileSignature(this.filePath);
+    const privacySignatureBefore = readFileSignature(this.privacyPath);
+    let content: string;
+    try {
+      content = await fs.promises.readFile(this.filePath, 'utf8');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      content = '';
+    }
+
+    const durablePrivacy = readAccountingPrivacySelectors(this.storageDir);
+    const parsed: LedgerEntry[] = [];
+    const seen = new Set<string>();
+    const lines = content.split('\n');
+    for (let index = 0; index < lines.length; index += 1) {
+      const entry = parseDurableLine(lines[index], durablePrivacy);
+      if (entry && !seen.has(entry.record.invocationId)) {
+        seen.add(entry.record.invocationId);
+        parsed.push(entry);
+      }
+      if (index > 0 && index % INITIAL_LOAD_YIELD_INTERVAL === 0) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+    }
+
+    this.removeEntries((entry) => !entry.private);
+    for (const entry of parsed) {
+      if (!this.entriesById[entry.record.invocationId]) {
+        this.addEntry(entry.record, entry.private);
+      }
+    }
+
+    this.loadedLedgerSignature = readFileSignature(this.filePath);
+    this.loadedPrivacySignature = readFileSignature(this.privacyPath);
+    // If a sibling host appended or rewrote the file while it was being
+    // loaded, reconcile the final state before the warm-up completes.
+    if (!sameFileSignature(ledgerSignatureBefore, this.loadedLedgerSignature)
+      || !sameFileSignature(privacySignatureBefore, this.loadedPrivacySignature)) {
+      this.invalidateDurableCache();
     }
   }
 }
@@ -376,6 +500,61 @@ function writeAll(fd: number, buffer: Buffer): void {
   let offset = 0;
   while (offset < buffer.length) {
     offset += fs.writeSync(fd, buffer, offset, buffer.length - offset);
+  }
+}
+
+function readFileSignature(filePath: string): FileSignature {
+  try {
+    const stat = fs.statSync(filePath);
+    return {
+      exists: true,
+      size: stat.size,
+      mtimeMs: stat.mtimeMs,
+      ctimeMs: stat.ctimeMs,
+    };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    return { exists: false, size: 0, mtimeMs: 0, ctimeMs: 0 };
+  }
+}
+
+function sameFileSignature(left: FileSignature, right: FileSignature): boolean {
+  return left.exists === right.exists
+    && left.size === right.size
+    && left.mtimeMs === right.mtimeMs
+    && left.ctimeMs === right.ctimeMs;
+}
+
+function parseDurableContent(
+  content: string,
+  durablePrivacy: readonly BillableInvocationSessionSelector[],
+): LedgerEntry[] {
+  const parsed: LedgerEntry[] = [];
+  const seen = new Set<string>();
+  for (const line of content.split('\n')) {
+    const entry = parseDurableLine(line, durablePrivacy);
+    if (!entry || seen.has(entry.record.invocationId)) continue;
+    seen.add(entry.record.invocationId);
+    parsed.push(entry);
+  }
+  return parsed;
+}
+
+function parseDurableLine(
+  line: string,
+  durablePrivacy: readonly BillableInvocationSessionSelector[],
+): LedgerEntry | undefined {
+  if (!line.trim()) return undefined;
+  try {
+    const record = normalizeRecord(JSON.parse(line) as unknown);
+    return {
+      record,
+      private: durablePrivacy.some((selector) => matchesSession(record, selector)),
+    };
+  } catch {
+    // Each line is an independent commit. Malformed/torn lines do not prevent
+    // replay of valid records before or after them.
+    return undefined;
   }
 }
 
@@ -457,7 +636,7 @@ function summarize(records: readonly BillableInvocationRecord[]): BillableInvoca
   });
 }
 
-function makeProjection(records: BillableInvocationRecord[]): BillableInvocationProjection {
+function makeProjection(records: readonly BillableInvocationRecord[]): BillableInvocationProjection {
   return Object.freeze({ records: Object.freeze(records), summary: summarize(records) });
 }
 

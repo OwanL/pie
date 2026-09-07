@@ -7,7 +7,11 @@ import {
   type ColdBrowseHelperInputFrame,
   type ColdBrowseHelperOutputFrame,
 } from './cold-browse-helper-protocol';
-import { ColdBrowseHelperRuntime } from './cold-browse-helper-runtime';
+import {
+  DurableDetailNotAddressableError,
+  DurableDetailNotFoundError,
+} from './durable-detail-store';
+import { ColdBrowseHelperResponseTooLargeError, ColdBrowseHelperRuntime } from './cold-browse-helper-runtime';
 import { loadSdk } from './sdk';
 
 const PARENT_WATCHDOG_INTERVAL_MS = 1_000;
@@ -86,7 +90,7 @@ async function main(): Promise<void> {
     }
 
     try {
-      const response = await runtime.execute(frame.payload);
+      const response = await runtime.execute(frame.payload, frame.requestId);
       await writeOutput({
         protocolVersion: COLD_BROWSE_HELPER_PROTOCOL_VERSION,
         kind: 'response',
@@ -108,11 +112,21 @@ async function main(): Promise<void> {
         error: {
           code: error instanceof SessionSnapshotTooLargeError
             ? error.code
-            : toErrorMessage(error).startsWith('COLD_BROWSE_FINGERPRINT_CHANGED:')
-              ? 'FINGERPRINT_CHANGED'
-              : 'BROWSE_FAILED',
+            : error instanceof DurableDetailNotFoundError
+              ? 'DURABLE_DETAIL_NOT_FOUND'
+              : error instanceof DurableDetailNotAddressableError
+                ? 'DURABLE_DETAIL_NOT_ADDRESSABLE'
+                : error instanceof ColdBrowseHelperResponseTooLargeError
+                  ? error.code
+                  : toErrorMessage(error).startsWith('COLD_BROWSE_FINGERPRINT_CHANGED:')
+                    ? 'FINGERPRINT_CHANGED'
+                    : 'BROWSE_FAILED',
           message: toErrorMessage(error),
-          ...(error instanceof SessionSnapshotTooLargeError ? { data: error.data } : {}),
+          ...(error instanceof SessionSnapshotTooLargeError
+            ? { data: error.data }
+            : error instanceof ColdBrowseHelperResponseTooLargeError
+              ? { data: error.data }
+              : {}),
         },
       });
     }
@@ -187,7 +201,11 @@ function parseInputFrame(value: unknown): ColdBrowseHelperInputFrame | undefined
   if (frame.kind !== 'request' || typeof frame.requestId !== 'string'
       || !frame.payload || typeof frame.payload !== 'object' || Array.isArray(frame.payload)) return undefined;
   const operation = (frame.payload as Record<string, unknown>).operation;
-  return operation === 'open' || operation === 'page' || operation === 'detail' || operation === 'invalidate'
+  return operation === 'open'
+    || operation === 'page'
+    || operation === 'detail'
+    || operation === 'durable-detail'
+    || operation === 'invalidate'
     ? value as ColdBrowseHelperInputFrame
     : undefined;
 }

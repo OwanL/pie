@@ -13,13 +13,13 @@ This folder contains active design contracts, implementation plans, and operatio
 ## Active plans (in progress)
 
 - [BROWSER_SERVER_PLAN.md](BROWSER_SERVER_PLAN.md) — staged plan to serve the existing Pie Preact UI from the VS Code extension host over a loopback HTTP/WebSocket server, with isolated per-renderer delivery and a later authenticated-internet ingress gate. Milestones 0–2 (loopback server, multi-renderer hub, fail-closed ingress, source-aware confirmations) are implemented; milestones 3–5 (resilience pass, browser-native file/diff/export, authenticated ingress) remain.
-- [HANDOFF_SUBAGENT_PROVIDER_RESILIENCE.md](HANDOFF_SUBAGENT_PROVIDER_RESILIENCE.md) — P0 implementation handoff replacing total-duration subagent timeouts with progress-aware phase leases, bounded local settlement, provider circuit breaking, orphan cleanup, and queued-message liveness.
 
 ## Implemented design references
 
+- [SUBAGENT_PROVIDER_RESILIENCE.md](SUBAGENT_PROVIDER_RESILIENCE.md) — operational reference for the implemented subagent/provider resilience model: renewable inactivity settlement leases, bounded local settlement and orphan cleanup, provider retry/failover/circuit breaking, and correlated queued-message FIFO delivery. Remaining dwell-watchdog UX and finer producer telemetry are nonblocking optional follow-ups.
 - [SESSION-TITLES.md](SESSION-TITLES.md) — behavior, settings, worker contract, validation, and host-owned lifecycle for optional asynchronous LLM session titles.
 - [DEFERRED-TRIGGERS.md](DEFERRED-TRIGGERS.md) — design and behavioral contract for the `defer_trigger` tool and its host-side registry: a session registers an asynchronous condition (timer / user input / another session finishing), ends its turn, and is resumed by a synthetic wake-up when it fires. Runtime code lives in `extensions/deferred-triggers/` (tool), `extension/src/host/deferred-triggers/` (registry + sidecar store), and the status-strip webview menu.
-- [TOOL-RESULT-PRUNING.md](TOOL-RESULT-PRUNING.md) — design and contract for the deterministic `tool_result` middleware (strip ANSI, minify JSON, prune permission columns, collapse blank lines) before results enter context. One of three context-lean layers (history compaction / skill pruning / tool-result pruning — see `AGENTS.md`). Runtime code lives in `extensions/tool-result-pruner/`; the document remains the behavioral reference and records future lossy/recall considerations.
+- [TOOL-RESULT-PRUNING.md](TOOL-RESULT-PRUNING.md) — design and contract for the deterministic `tool_result` middleware (strip ANSI, minify JSON, prune permission columns, collapse blank lines) before results enter context. One of three context-lean layers (history compaction / skill pruning / tool-result pruning — see the [develop-pie skill's context-lean terminology](../skills/develop-pie/SKILL.md#context-lean-terminology)). Runtime code lives in `extensions/tool-result-pruner/`; the document remains the behavioral reference and records future lossy/recall considerations.
 - [MCP.md](MCP.md) — operational reference for MCP support (via the pinned `pi-mcp-adapter` pi package): the proxy-tool/lazy-server model, config scopes and precedence, how to add a server (Jira current setup), security notes, version pin vs the pi runtime, and the headless verification harness.
 
 ## Operational references
@@ -30,7 +30,7 @@ This folder contains active design contracts, implementation plans, and operatio
 
 ## Reference / informational
 
-- [internal/centralized-model-config.md](internal/centralized-model-config.md) — design rationale for centralizing model config into `models.yaml` + the `sync-models` codegen. **Implemented**; see `README.md` (Model Configuration) and `AGENTS.md` for authoritative usage. Kept as the "why" record.
+- [internal/centralized-model-config.md](internal/centralized-model-config.md) — design rationale for centralizing model config into `models.yaml` + the `sync-models` codegen. **Implemented**; see `README.md` (Model Configuration) for authoritative usage and the [develop-pie skill's model configuration guidance](../skills/develop-pie/SKILL.md#model-configuration). Kept as the "why" record.
 - [internal/ollama-pro-cloud-models-ranked.md](internal/ollama-pro-cloud-models-ranked.md) — model evaluation notes.
 - [internal/model-token-pricing-sources.md](internal/model-token-pricing-sources.md) — **authoritative evidence ledger** for all real token pricing in `models.json`. Every non-zero cost field traces back to a row here.
 - [IDEAS.md](IDEAS.md) — unstructured brain-dump. Not a roadmap. Items here are candidates for evaluation, not commitments.

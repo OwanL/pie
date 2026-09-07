@@ -566,6 +566,95 @@ test('phase6 checkpoint: usage, durable watermark, and detail manifest are bound
   assert.deepEqual(incident.checkpoint.detailManifest, [{ subscriptionId: 'subscription-1', state: 'active', revision: 5, pageCount: 1 }]);
 });
 
+test('phase6 worker exit incident preserves the first causal failure and publishes observed exit status', async () => {
+  const { router, sessionPath, emitted } = makeRouter(makeClient());
+  const route = await router.promote(sessionPath);
+  emitted.length = 0;
+  await router.handleWorkerStateChange(sessionPath, {
+    status: 'exited',
+    pid: 4242,
+    failure: 'Worker IPC read descriptor closed before process exit.',
+    exitCode: 1,
+    exitSignal: null,
+    stdoutTail: '',
+    stderrTail: 'FATAL: unhandled rejection',
+  }, { workerId: route.owner.workerId, workerGeneration: 1 });
+  const incident = emitted.find(([event]) => event === 'operational-error')?.[1];
+  assert.ok(incident);
+  assert.equal(incident.code, 'SESSION_WORKER_EXITED');
+  assert.match(incident.detail, /descriptor closed before process exit/);
+  assert.match(incident.detail, /Observed exit status: exit code 1\./);
+  assert.match(incident.detail, /Worker stderr: FATAL: unhandled rejection/);
+  // The first causal failure stays ahead of the exit evidence.
+  assert.ok(incident.detail.indexOf('descriptor closed before process exit')
+    < incident.detail.indexOf('Observed exit status'));
+});
+
+test('phase6 worker exit incident never fabricates an exit code or signal', async () => {
+  const { router, sessionPath, emitted } = makeRouter(makeClient());
+  const route = await router.promote(sessionPath);
+  emitted.length = 0;
+  // Both fields null means the OS supplied neither — report exactly that.
+  await router.handleWorkerStateChange(sessionPath, {
+    status: 'exited', exitCode: null, exitSignal: null, stdoutTail: '', stderrTail: '',
+  }, { workerId: route.owner.workerId, workerGeneration: 1 });
+  const osSilent = emitted.find(([event]) => event === 'operational-error')?.[1];
+  assert.ok(osSilent);
+  assert.match(osSilent.detail, /the operating system reported no exit code or signal/);
+  assert.doesNotMatch(osSilent.detail, /exit code \d/);
+
+  // A snapshot without a confirmed exit pair carries no exit-status claim.
+  const second = makeRouter(makeClient());
+  const route2 = await second.router.promote(second.sessionPath);
+  second.emitted.length = 0;
+  await second.router.handleWorkerStateChange(second.sessionPath, {
+    status: 'exited', stdoutTail: '', stderrTail: '',
+  }, { workerId: route2.owner.workerId, workerGeneration: 1 });
+  const legacy = second.emitted.find(([event]) => event === 'operational-error')?.[1];
+  assert.ok(legacy);
+  assert.doesNotMatch(legacy.detail ?? '', /exit status/i);
+});
+
+test('phase6 confirmed worker exit publishes a durable structured coordinator record', async () => {
+  const { router, sessionPath, emitted } = makeRouter(makeClient());
+  const route = await router.promote(sessionPath);
+  emitted.length = 0;
+  const originalWrite = process.stderr.write;
+  const chunks: string[] = [];
+  process.stderr.write = ((chunk: unknown, encodingOrCallback?: unknown, callback?: unknown) => {
+    chunks.push(typeof chunk === 'string' ? chunk : String(chunk));
+    const done = typeof encodingOrCallback === 'function' ? encodingOrCallback : callback;
+    if (typeof done === 'function') done(null);
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    await router.handleWorkerStateChange(sessionPath, {
+      status: 'exited',
+      pid: 14084,
+      failure: 'Worker IPC read descriptor closed before process exit.',
+      exitCode: null,
+      exitSignal: 'SIGKILL',
+      stdoutTail: '',
+      stderrTail: '',
+    }, { workerId: route.owner.workerId, workerGeneration: 1 });
+  } finally {
+    process.stderr.write = originalWrite;
+  }
+  const records = chunks.join('').split('\n')
+    .filter((line) => line.startsWith('[pie:backend] '))
+    .map((line) => JSON.parse(line.slice('[pie:backend] '.length)) as Record<string, unknown>);
+  const record = records.find((candidate) => candidate.event === 'worker.exit-confirmed');
+  assert.ok(record, 'the confirmed exit must be durably logged');
+  assert.equal(record.scope, 'backend-worker');
+  assert.equal(record.level, 'error');
+  assert.equal(record.workerId, route.owner.workerId);
+  assert.equal(record.workerGeneration, route.owner.workerGeneration);
+  assert.equal(record.pid, 14084);
+  assert.equal(record.exitCode, null);
+  assert.equal(record.exitSignal, 'SIGKILL');
+  assert.match(String(record.failure), /descriptor closed before process exit/);
+});
+
 test('phase6 runtime.report is retained without replacing configured authority', async () => {
   const { router, sessionPath } = makeRouter(makeClient());
   const route = await router.promote(sessionPath);
@@ -1099,6 +1188,83 @@ test('phase6 concurrent sync failures terminalize a busy checkpoint and retire i
   assert.equal(emitted.length, emissionCount, 'the eventual exited callback must not terminalize or notify twice');
 });
 
+test('phase6 sync failure keeps confirmed exit evidence once after route retirement', async () => {
+  let releaseStop!: () => void;
+  const stopGate = new Promise<void>((resolve) => { releaseStop = resolve; });
+  const client = makeClient({
+    requestFrame: async (body: any) => {
+      if (body.kind === 'sync') {
+        if (body.domain === 'runtimePrefs' && body.revision === 2) throw new Error('worker sync failed');
+        return { kind: 'sync.ack', requestId: 'x', domain: body.domain, revision: body.revision };
+      }
+      if (body.kind === 'runtime.promote') {
+        return { kind: 'runtime.ready', requestId: 'x', runtimeMetadata: { mode: 'phase4', startedAt: 1 } };
+      }
+      throw new Error(`unexpected frame ${body.kind}`);
+    },
+  });
+  const { router, sessionPath, emitted } = makeRouter(client, {
+    supervisor: {
+      stopWorker: async () => await stopGate,
+    },
+  });
+  const route = await router.promote(sessionPath);
+  const sync = router.syncRuntimePrefs({ compact: true });
+  for (let turn = 0; turn < 10 && router.getRoute(sessionPath).state !== 'retiring'; turn += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(router.getRoute(sessionPath).state, 'retiring');
+
+  const originalWrite = process.stderr.write;
+  const chunks: string[] = [];
+  process.stderr.write = ((chunk: unknown, encodingOrCallback?: unknown, callback?: unknown) => {
+    chunks.push(typeof chunk === 'string' ? chunk : String(chunk));
+    const done = typeof encodingOrCallback === 'function' ? encodingOrCallback : callback;
+    if (typeof done === 'function') done(null);
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    const exit = router.handleWorkerStateChange(
+      sessionPath,
+      {
+        status: 'exited',
+        pid: 14084,
+        failure: 'Worker IPC read descriptor closed before process exit.',
+        exitCode: 23,
+        exitSignal: null,
+        stdoutTail: '',
+        stderrTail: '',
+      },
+      { workerId: route.owner.workerId, workerGeneration: route.owner.workerGeneration },
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    releaseStop();
+    await Promise.all([sync, exit]);
+    // A late duplicate callback has no route left, but the generation guard
+    // still prevents a second structured evidence record.
+    await router.handleWorkerStateChange(
+      sessionPath,
+      { status: 'exited', exitCode: 23, exitSignal: null, stdoutTail: '', stderrTail: '' },
+      { workerId: route.owner.workerId, workerGeneration: route.owner.workerGeneration },
+    );
+  } finally {
+    process.stderr.write = originalWrite;
+  }
+
+  const records = chunks.join('').split('\n')
+    .filter((line) => line.startsWith('[pie:backend] '))
+    .map((line) => JSON.parse(line.slice('[pie:backend] '.length)) as Record<string, unknown>);
+  const evidence = records.filter((record) => record.event === 'worker.exit-confirmed');
+  assert.equal(evidence.length, 1, 'confirmed exit evidence is once per worker generation');
+  assert.equal(evidence[0]?.exitCode, 23);
+  assert.equal(evidence[0]?.exitSignal, null);
+  assert.equal(evidence[0]?.exitClassification, 'unexpected-exit');
+  assert.equal(emitted.filter(([event, payload]) => event === 'operational-error'
+    && payload.code === 'SESSION_WORKER_SYNC_FAILED').length, 1);
+  assert.equal(emitted.filter(([event, payload]) => event === 'operational-error'
+    && payload.code === 'SESSION_WORKER_EXITED').length, 0);
+});
+
 test('phase6 intentional retirement does not terminalize a live checkpoint', async () => {
   const { router, sessionPath, emitted } = makeRouter(makeClient());
   const route = await router.promote(sessionPath);
@@ -1121,6 +1287,11 @@ test('phase6 intentional retirement does not terminalize a live checkpoint', asy
   emitted.length = 0;
 
   await router.retire(sessionPath, 'intentional test retirement');
+  await router.handleWorkerStateChange(
+    sessionPath,
+    { status: 'exited', pid: 14084, exitCode: 0, exitSignal: null, stdoutTail: '', stderrTail: '' },
+    { workerId: route.owner.workerId, workerGeneration: route.owner.workerGeneration },
+  );
 
   assert.equal(router.getRoute(sessionPath).state, 'cold');
   assert.deepEqual(emitted, [], 'intentional retirement must not synthesize interruption events');

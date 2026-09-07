@@ -372,6 +372,31 @@ test('disabling the harness alone preserves the independently enabled tools bloc
   assert.match(stripped, /Current date:/);
 });
 
+test('Tools extraction also recognizes the Pie Tool guidance boundary', () => {
+  const harness = [
+    'Pie base',
+    '',
+    'Available tools:',
+    '- read: read files',
+    '',
+    'Tool guidance:',
+    '- Use read carefully.',
+    '',
+    'Harness documentation',
+    'Current date: 2026-01-01',
+    'Current working directory: /repo',
+  ].join('\n');
+  const prompts = buildSessionSystemPrompts({
+    harnessPrompt: harness,
+    promptOptions: { cwd: '/repo', selectedTools: ['read'], skills: [] },
+  });
+  const harnessEntry = prompts.find((prompt) => prompt.id === HARNESS_ENTRY_ID);
+  assert.ok(harnessEntry);
+  assert.ok(!harnessEntry.text.includes('Available tools:'));
+  assert.match(harnessEntry.text, /Tool guidance:/);
+  assert.match(harnessEntry.text, /Use read carefully/);
+});
+
 test('disabling only the project-context prelude unwraps enabled context files', () => {
   const full =
     'Harness\n\n<project_context>\n\nProject-specific instructions and guidelines:\n\n' +

@@ -7,7 +7,6 @@
 #   $'\r': command not found  /  syntax error near unexpected token).
 *.sh     text eol=lf
 install.sh text eol=lf
-.githooks/* text eol=lf
 
 # Batch scripts are only ever run on Windows by cmd.exe. Normalize to CRLF so
 # they parse reliably (labels/goto/`set /p` are happiest with CRLF) regardless

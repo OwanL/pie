@@ -118,6 +118,32 @@ import {
  * Reducer: routes events to per-kind handlers.
  */
 export function reducer(state: ArchState, event: Event): ReducerResult {
+  const result = reduceEvent(state, event);
+  const next = result.state;
+  const owner = next.settings.noticeSessionPath;
+  // Send status polling is only one of several commit boundaries. Semantic
+  // start, recovered checkpoints, queue delivery, and generation death also
+  // settle the registry; none may leave a reconciliation warning behind.
+  if (next.operations !== state.operations && owner
+    && (next.settings.notice?.startsWith('Send acknowledgement delayed.')
+      || next.settings.notice?.startsWith('Pie could not confirm whether this send committed.'))
+    && !Object.values(next.operations).some((operation) => operation.kind === 'message.send'
+      && !operation.terminal
+      && (operation.session.pendingPath === owner || operation.session.resolvedPath === owner))) {
+    return {
+      ...result,
+      state: {
+        ...next,
+        settings: {
+          ...next.settings, notice: null, noticeKind: null, noticeRaw: null, noticeSessionPath: null,
+        },
+      },
+    };
+  }
+  return result;
+}
+
+function reduceEvent(state: ArchState, event: Event): ReducerResult {
   switch (event.kind) {
     case 'Command': {
       return handleCommand(state, event.cmd);

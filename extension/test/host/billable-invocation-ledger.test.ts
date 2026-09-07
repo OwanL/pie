@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { syncBuiltinESMExports } from 'node:module';
 import test, { afterEach, beforeEach } from 'node:test';
 
 import { BillableInvocationLedger } from '../../src/host/billable-invocation-ledger/service';
@@ -9,6 +11,7 @@ import type { BillableInvocationRecord } from '../../src/shared/billable-invocat
 
 let directory: string;
 let ledgerPath: string;
+const mutableFs = createRequire(import.meta.url)('node:fs') as typeof import('node:fs');
 
 beforeEach(() => {
   directory = fs.mkdtempSync(path.join(os.tmpdir(), 'pie-billable-ledger-test-'));
@@ -79,6 +82,30 @@ test('independent host instances merge appends instead of overwriting stale stat
     firstHost.exportRecords().map((record) => record.invocationId).sort(),
     ['host-a', 'host-b'],
   );
+});
+
+test('unchanged projections use the in-memory ledger instead of reparsing disk', () => {
+  const writer = new BillableInvocationLedger(ledgerPath);
+  writer.append(invocation('cached'), { visibility: 'ordinary' });
+
+  const reader = new BillableInvocationLedger(ledgerPath);
+  const originalReadFileSync = mutableFs.readFileSync;
+  let ledgerReads = 0;
+  const wrappedReadFileSync = (...args: Parameters<typeof fs.readFileSync>): ReturnType<typeof fs.readFileSync> => {
+    const [filePath] = args;
+    if (path.resolve(String(filePath)) === path.resolve(ledgerPath)) ledgerReads += 1;
+    return originalReadFileSync(...args);
+  };
+  mutableFs.readFileSync = wrappedReadFileSync as typeof mutableFs.readFileSync;
+  syncBuiltinESMExports();
+  try {
+    assert.equal(reader.projectAll().records.length, 1);
+    assert.equal(reader.projectAll().records.length, 1);
+    assert.equal(ledgerReads, 1);
+  } finally {
+    mutableFs.readFileSync = originalReadFileSync;
+    syncBuiltinESMExports();
+  }
 });
 
 test('privacy fence defeats stale-host append and preserves unrelated concurrent rows', () => {

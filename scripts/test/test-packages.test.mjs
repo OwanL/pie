@@ -70,8 +70,6 @@ test('isGlobalTestInfra recognises the test tooling and root config', () => {
     'package-lock.json',
     '.nvmrc',
     '.node-version',
-    '.githooks/pre-commit',
-    '.githooks/pre-push',
   ]) {
     assert.equal(isGlobalTestInfra(p), true, `${p} should be global`);
   }
@@ -101,7 +99,7 @@ test('mapFilesToPackages maps package files and de-duplicates ids', () => {
     'extension/src/backend/sdk.ts',     // same package, different file
     'extensions/subagent/test/schema.test.ts',
     'analysis/test/pricing.test.ts',
-    'scripts/test/pre-push-safety.test.mjs',
+    'scripts/test/git-environment.test.mjs',
   ]);
   assert.equal(plan.selectAll, false);
   assert.deepEqual(plan.packageIds, ['analysis', 'extension', 'scripts', 'subagent']);

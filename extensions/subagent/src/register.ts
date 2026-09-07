@@ -20,12 +20,10 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { discoverAgents } from "../agents.js";
-import { SubagentParams, prepareSubagentArguments, BUCKET_GUIDANCE as BUCKET_GUIDANCE_BASE } from "../schema.js";
+import { SubagentParams, prepareSubagentArguments } from "../schema.js";
 import { renderSubagentCall, renderSubagentResult } from "../render.js";
 import { execute } from "./execute.js";
 import type { OnUpdateCallback } from "../types.js";
-
-const BUCKET_GUIDANCE = BUCKET_GUIDANCE_BASE;
 
 /** Root of the pi-config repo, resolved from this extension's known position.
  *  Used as a stable fallback discovery cwd so the agent list is populated even
@@ -48,11 +46,12 @@ function buildDescription(disabled = false): string {
 		return "DISABLED: Sub agents are currently disabled. Calls to this tool will return an error immediately. Enable by removing the --no-subagent flag or unsetting the PI_SUBAGENT_DISABLED environment variable.";
 	}
 
+	// Sibling-call/dependency ordering and model-bucket guidance live in
+	// promptGuidelines and the bucket parameter schema respectively; do not
+	// duplicate them here.
 	const lines = [
 		"Delegate one concrete task to a specialized agent with isolated context.",
-		"For independent work, issue multiple sibling subagent calls in the same response; for dependent work, call subagent sequentially after reading the prior result.",
 		"Agents are discovered automatically from both user and project directories.",
-		BUCKET_GUIDANCE,
 	];
 
 	try {

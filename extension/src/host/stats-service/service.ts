@@ -16,9 +16,26 @@ import type { RunObserver, StatsServiceOptions } from './types';
 import { resolveSessionIdentity } from '../../backend/session-review-store';
 import { defaultCreateId, defaultNow } from './helpers';
 import { WorkingTimeService } from '../working-time-service';
-import { BillableAccounting, type BillableAccountingDeps } from '../billable-accounting/service';
+import {
+  BillableAccounting,
+  type BillableAccountingDeps,
+} from '../billable-accounting/service';
 import type { ActivityIntervalRecord } from '../../shared/activity-interval';
 import type { SessionUsageSnapshot } from '../../shared/session-usage';
+
+/** One persistent structured startup-stage measurement, also mirrored in
+ *  memory for tests/diagnostics. Emitted for storage.start, the persisted
+ *  analytics query, accounting.initialize (ledger and timeline warm-up),
+ *  timeline restore, timeline healing, and historical migration. Durations
+ *  use the monotonic `performance.now` clock, never the injected wall clock. */
+export interface StatsStartupStageMetric {
+  stage: string;
+  durationMs: number;
+  counts: Record<string, number>;
+  /** Delta of cumulative timeline read/write/fsync/apply counters
+   *  (ActivityTimeline.getDiagnostics()) across the stage. */
+  timelineDelta?: Record<string, number>;
+}
 
 /**
  * RunObserver/query façade for session accounting. Run observation is split by
@@ -43,7 +60,18 @@ export class StatsService implements RunObserver {
   private startPromise: Promise<void> | null = null;
   private started = false;
   private disposed = false;
-  private historicalMigration: Promise<void> | null = null;
+  /** Tracked background continuation covering the event-loop defer, ledger→
+   *  timeline healing, and historical migration, so shutdown() drains or
+   *  cancels all of it and no deferred accounting work lands afterwards. */
+  private backgroundWork: Promise<void> | null = null;
+  /** Compaction is the only deferred accounting operation that cannot consult
+   *  the service's disposed flag between every serialization batch. Abort it
+   *  explicitly so shutdown does not wait for a full-history rewrite. */
+  private readonly backgroundCompactionAbort = new AbortController();
+  /** Persisted runs captured during restoration; input to the deferred
+   *  historical-migration pass. */
+  private deferredMigrationRuns: readonly RunSnapshot[] = [];
+  private readonly startupStageMetrics: StatsStartupStageMetric[] = [];
 
   constructor(options: StatsServiceOptions) {
     this.scheduleRender = options.scheduleRender ?? (() => undefined);
@@ -107,6 +135,11 @@ export class StatsService implements RunObserver {
     this.tracker = tracker;
   }
 
+  /** In-memory mirror of the persistent startup stage metrics. */
+  getStartupStageMetrics(): readonly StatsStartupStageMetric[] {
+    return this.startupStageMetrics;
+  }
+
   async start(): Promise<void> {
     // Shutdown is terminal: never reactivate storage/restoration after it.
     if (this.disposed) {
@@ -119,25 +152,51 @@ export class StatsService implements RunObserver {
       return await this.startPromise;
     }
 
-    this.startPromise = (async () => {
+    // Startup covers only essential restoration: storage, tracker restore,
+    // the persisted analytics query, ledger and timeline warm-up, and
+    // working-time restoration. Healing and historical migration are deferred
+    // background work (see runDeferredStartupWork) so the first usable panel
+    // never waits for either.
+    const startup = (async () => {
+      const storageStartAt = performance.now();
       const checkpoint = await this.storage.start();
+      this.recordStage('storage.start', storageStartAt);
       if (this.disposed) return;
       this.tracker.restore(checkpoint?.sessions ?? {});
       const openBusyIntervals = this.tracker.getOpenBusyIntervals()
         .filter((interval) => !this.isPrivateSession(interval.sessionPath));
-      let persistedRuns: RunSnapshot[] = [];
+      const persistedRuns: RunSnapshot[] = [];
       try {
+        const queryStartAt = performance.now();
         const persisted = await this.storage.queryPersistedRunAnalytics();
         if (this.disposed) return;
-        persistedRuns = [...persisted.completedRuns, ...persisted.openRuns]
-          .filter((run) => !this.isPrivateSession(run.sessionPath));
+        for (const run of [...persisted.completedRuns, ...persisted.openRuns]) {
+          if (!this.isPrivateSession(run.sessionPath)) persistedRuns.push(run);
+        }
+        this.deferredMigrationRuns = persistedRuns;
+        this.recordStage('persisted-query', queryStartAt, {
+          completedRuns: persisted.completedRuns.length,
+          openRuns: persisted.openRuns.length,
+        });
       } catch (error) {
         appendPieLog('warn', 'working-time', 'could not restore historical session working time', {
           error: error instanceof Error ? error.message : String(error),
         });
       }
       if (this.disposed) return;
-      this.accounting.healActivityFromLedger();
+      // Capture the timeline diagnostics before the warm-up so the stage
+      // delta includes the timeline's own initialize counters.
+      const initializeDiagnostics = this.timelineDiagnostics();
+      const initializeStartAt = performance.now();
+      await this.accounting.initialize();
+      if (this.disposed) return;
+      this.recordStage('accounting.initialize', initializeStartAt, {
+        ledgerRows: this.accounting.exportRecords().length,
+      }, initializeDiagnostics);
+      // Working-time restoration reads the timeline file projection, not the
+      // ledger heal, so healing can be deferred off the startup path.
+      const restoreStartAt = performance.now();
+      const restoreDiagnostics = this.timelineDiagnostics();
       const activityIntervals = this.accounting.activityTimeline.projectAll()
         .filter((interval) => !this.isPrivateSession(interval.sessionPath));
       this.workingTime.restoreActivityIntervals(activityIntervals);
@@ -155,24 +214,144 @@ export class StatsService implements RunObserver {
           this.activeToolIntervalBySessionAndTool[this.toolIntervalKey(interval.sessionPath, interval.toolId)] = interval.intervalId;
         }
       }
-      // Cancellation-aware: shutdown stops the pass at its next run boundary
-      // (bounded drain — never a full legacy-catalogue wait) so no ledger
-      // write, activity write, or render can land after shutdown.
-      this.historicalMigration = this.accounting.migrateHistoricalRunUsage(
-        persistedRuns,
-        { shouldContinue: () => !this.disposed },
-      );
-      await this.historicalMigration;
-      if (this.disposed) return;
+      this.recordStage('timeline-restore', restoreStartAt, {
+        restoredIntervals: activityIntervals.length,
+      }, restoreDiagnostics);
+      // Startup completes here: the resolved promise and the first scheduled
+      // render precede all restart-only accounting work.
       this.started = true;
       this.scheduleRender();
     })();
+    this.startPromise = startup;
+
+    // Background continuation after startup resolved. The promise covering
+    // defer, healing, and migration is tracked on the instance so shutdown()
+    // drains/cancels all of it; failures are caught so deferred accounting
+    // work can never surface as an unhandled rejection or reject the
+    // already-resolved start() promise. It is assigned only once startup
+    // resolved: a shutdown while startup is still pending must not await the
+    // chain — the disposed checks in runDeferredStartupWork keep any
+    // late-resolving startup from starting deferred work instead.
+    void startup
+      .then(() => {
+        this.backgroundWork = this.runDeferredStartupWork()
+          .catch((error) => {
+            appendPieLog('warn', 'stats-service', 'deferred startup accounting work failed', {
+              error: error instanceof Error ? error.message : String(error),
+            });
+          });
+      })
+      .catch((error) => {
+        appendPieLog('warn', 'stats-service', 'deferred startup accounting work failed', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
 
     try {
       await this.startPromise;
     } finally {
       this.startPromise = null;
     }
+  }
+
+  /** Background continuation of start(): ledger→timeline healing and the
+   *  historical usage migration. Runs strictly after the start() promise
+   *  resolved and the first render was scheduled, deferred by an explicit
+   *  event-loop turn. Cancellation-aware: shutdown stops healing at its next
+   *  bounded batch and the migration at its next run boundary or attempted
+   *  row (bounded drain — never a full legacy-catalogue wait) so no ledger
+   *  write, activity write, or render can land after shutdown.
+   *
+   *  Healed intervals are provider/auxiliary/history_compaction kinds only,
+   *  which WorkingTimeService.restoreActivityIntervals ignores (it consumes
+   *  busy/tool intervals exclusively), so a late heal can never rewrite or
+   *  double-count live working-time clocks restored at startup. */
+  private async runDeferredStartupWork(): Promise<void> {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    if (this.disposed) return;
+
+    const healStartAt = performance.now();
+    const healDiagnostics = this.timelineDiagnostics();
+    try {
+      const heal = await this.accounting.healActivityFromLedger({
+        shouldContinue: () => !this.disposed,
+      });
+      this.recordStage('timeline-healing', healStartAt, {
+        ledgerRowsConsidered: heal.ledgerRowsConsidered,
+        healedIntervals: heal.healedIntervals,
+        activityBatchFlushes: heal.activityBatchFlushes,
+        cancelled: heal.cancelled ? 1 : 0,
+      }, healDiagnostics);
+    } catch (error) {
+      appendPieLog('warn', 'stats-service', 'activity heal failed; continuing to historical migration', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    if (this.disposed) return;
+
+    const migrationStartAt = performance.now();
+    const migrationDiagnostics = this.timelineDiagnostics();
+    try {
+      const metrics = await this.accounting.migrateHistoricalRunUsage(
+        this.deferredMigrationRuns,
+        { shouldContinue: () => !this.disposed },
+      );
+      this.recordStage('historical-migration', migrationStartAt, {
+        runsConsidered: metrics.runsConsidered,
+        attemptedRows: metrics.attemptedRows,
+        newInvocationRows: metrics.newInvocationRows,
+        activityBatchFlushes: metrics.activityBatchFlushes,
+        cancelled: metrics.cancelled ? 1 : 0,
+      }, migrationDiagnostics);
+    } catch (error) {
+      appendPieLog('warn', 'stats-service', 'historical usage migration failed', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    // Explicit background compaction boundary: routine mutations append only,
+    // and the migration's bounded journal batches leave delta-journal lines
+    // behind. Fold them into the canonical snapshot in the background, never
+    // after shutdown.
+    if (this.disposed) return;
+    try {
+      await this.accounting.activityTimeline.compact({ signal: this.backgroundCompactionAbort.signal });
+    } catch (error) {
+      appendPieLog('warn', 'stats-service', 'activity timeline compaction failed', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  /** Cumulative ActivityTimeline diagnostics snapshot for stage deltas. */
+  private timelineDiagnostics(): Record<string, number> {
+    return { ...this.accounting.activityTimeline.getDiagnostics() };
+  }
+
+  /** Record one structured startup stage: duration, counts, and (when the
+   *  timeline exposes cumulative counters) the timeline diagnostics delta.
+   *  Persisted via the pie log and mirrored in memory. */
+  private recordStage(
+    stage: string,
+    startedAtMs: number,
+    counts: Record<string, number> = {},
+    diagnosticsBefore?: Record<string, number>,
+  ): void {
+    const metric: StatsStartupStageMetric = {
+      stage,
+      durationMs: Math.max(0, performance.now() - startedAtMs),
+      counts: { ...counts },
+    };
+    if (diagnosticsBefore) {
+      const after = this.timelineDiagnostics();
+      const delta: Record<string, number> = {};
+      for (const [key, value] of Object.entries(after)) {
+        const before = diagnosticsBefore[key];
+        if (before !== undefined) delta[key] = value - before;
+      }
+      if (Object.keys(delta).length > 0) metric.timelineDelta = delta;
+    }
+    this.startupStageMetrics.push(metric);
+    appendPieLog('info', 'stats-service', 'startup stage metrics', { ...metric });
   }
 
   private isPrivateSession(sessionPath: string): boolean {
@@ -566,17 +745,16 @@ export class StatsService implements RunObserver {
   }
 
   async shutdown(): Promise<void> {
-    // Terminal: block start reactivation immediately, then stop an in-flight
-    // historical migration at its next run boundary instead of waiting out a
-    // large legacy catalogue. Unmigrated runs resume on the next startup.
+    // Terminal: block start reactivation immediately, then drain the tracked
+    // background promise (defer, healing, migration) — healing stops at its
+    // next bounded batch and the in-flight migration at its next run
+    // boundary instead of waiting out a large legacy catalogue. Unmigrated
+    // runs resume on the next startup.
     this.disposed = true;
-    const migration = this.historicalMigration;
-    if (migration) {
-      await migration.catch((error) => {
-        appendPieLog('warn', 'stats-service', 'historical usage migration aborted by shutdown', {
-          error: error instanceof Error ? error.message : String(error),
-        });
-      });
+    this.backgroundCompactionAbort.abort();
+    const background = this.backgroundWork;
+    if (background) {
+      await background;
     }
     this.tracker.finalizeOpenRunsForShutdown();
     this.accounting.retryPendingWrites();

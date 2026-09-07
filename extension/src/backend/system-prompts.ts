@@ -17,9 +17,8 @@ const SUMMARY_MAX_LENGTH = 80;
  *  in the sent prompt and not toggleable — the provider's own system prompt is
  *  injected server-side and cannot be removed by pi. */
 export const PROVIDER_ENTRY_ID = 'provider';
-/** Entry id for the core pi harness prompt (the "You are an expert coding
- *  assistant…" template). Toggling it is a footgun: the model stops behaving
- *  as a coding agent. */
+/** Entry id for the Pie-owned base prompt. Toggling it is a footgun: the
+ *  model stops behaving as a coding agent. */
 export const HARNESS_ENTRY_ID = 'harness';
 /** Entry id for a user-supplied custom prompt that replaces the harness. */
 export const CUSTOM_ENTRY_ID = 'custom';
@@ -85,18 +84,20 @@ export function applySystemPromptTogglesToOptions(
 }
 
 const RUNTIME_TRAILER_RE = /(?:^|\n)Current date: [^\n]+\nCurrent working directory: [^\n]+$/;
+// The legacy branch covers prompts persisted/reconstructed from the pinned
+// Pi wording. The lookahead branch covers the current Pie-owned wording while
+// leaving its "Tool guidance:" heading in the harness entry.
 const TOOLS_BLOCK_RE =
-  /Available tools:\n[\s\S]*?\nIn addition to the tools above, you may have access to other custom tools depending on the project\.\n\n/;
+  /Available tools:\n[\s\S]*?(?:\nIn addition to the tools above, you may have access to other custom tools depending on the project\.\n\n|\n(?=Tool guidance:\n))/;
 const PROJECT_CONTEXT_OPEN_RE =
   /\n\n<project_context>\n\nProject-specific instructions and guidelines:\n\n/;
 const PROJECT_CONTEXT_CLOSE_RE = /\n<\/project_context>\n/;
 
 /** Strip non-option-driven disabled sections (harness/custom, tools,
  *  project-context prelude, runtime) from a prompt built by `buildSystemPrompt`.
- *  `harnessPrefix` is the exact harness-template prefix (the result of
- *  `buildSystemPrompt({ cwd, selectedTools, toolSnippets, promptGuidelines })`
- *  with no custom/append/context/skills); `customPrompt` is the user's custom
- *  prompt string when one is set. */
+ *  `harnessPrefix` is the exact Pie base prefix (the result of the shared
+ *  builder with no custom/append/context/skills); `customPrompt` is the user's
+ *  custom prompt string when one is set. */
 export function stripDisabledSectionsFromPrompt(
   prompt: string,
   disabled: ReadonlySet<string>,
@@ -519,7 +520,7 @@ export function buildSessionSystemPrompts(options: {
             id: HARNESS_ENTRY_ID,
             title: 'Harness system prompt',
             summary: 'Unavailable',
-            text: 'The PI harness prompt could not be reconstructed for this session.',
+            text: 'The Pie harness prompt could not be reconstructed for this session.',
             availability: 'missing',
           },
     );
