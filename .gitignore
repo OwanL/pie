@@ -28,6 +28,7 @@ auth.json.*
 
 # pi-mcp-adapter metadata cache (written to the project/agent dir root)
 mcp-cache.json
+web-search-cache/
 
 # Package manager artifacts
 node_modules/

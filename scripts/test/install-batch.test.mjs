@@ -52,6 +52,8 @@ test('install.bat is CRLF, starts with @echo off, and references the shared runn
   const text = readFileSync(installBat, 'utf8');
   assert.match(text, /^@echo off\r?\n/);
   assert.match(text, /scripts[\\/]install[\\/]run\.mjs/);
+  assert.match(text, /package-sources.+> "%PACKAGE_SOURCES_FILE%"/);
+  assert.match(text, /if errorlevel 1 \(\r?\n\s+del "%PACKAGE_SOURCES_FILE%"/);
 });
 
 test('install.bat invokes no PowerShell/WSL/Unix tools outside REM comments', () => {
@@ -131,7 +133,10 @@ test('full install runs end-to-end against a temp repo with mocked setx/npm/pi/c
       path.join(tRepo, 'extension', 'package-lock.json'),
       JSON.stringify({ packages: { 'node_modules/@earendil-works/pi-coding-agent': { version: '9.9.9' } } }),
     );
-    writeFileSync(path.join(tRepo, 'settings.json'), JSON.stringify({ sessionDir: 'data/outcomes/sessions' }));
+    writeFileSync(path.join(tRepo, 'settings.json'), JSON.stringify({
+      sessionDir: 'data/outcomes/sessions',
+      packages: ['npm:pi-web-access@0.27.0', 'npm:pi-mcp-adapter@2.20.1'],
+    }));
     // Pre-create a vsix so the discovery + code --install-extension path runs
     // (the build shims do not produce one).
     writeFileSync(path.join(tRepo, 'extension', 'pie-9.9.9.vsix'), '');
@@ -139,6 +144,7 @@ test('full install runs end-to-end against a temp repo with mocked setx/npm/pi/c
     // --- shims (no-op + log) ---
     const shims = path.join(tmp, 'shims');
     mkdirSync(shims, { recursive: true });
+    mkdirSync(path.join(tmp, 'tmp'), { recursive: true });
     const shimLog = path.join(tmp, 'shim.log');
     const crlf = (s) => s.replace(/\n/g, '\r\n');
     writeFileSync(path.join(shims, 'setx.cmd'), crlf('@echo off\n>>"%SHIM_LOG%" echo setx %*\nexit /b 0\n'));
@@ -200,7 +206,8 @@ test('full install runs end-to-end against a temp repo with mocked setx/npm/pi/c
     assert.match(log, /npm ci/);
     assert.match(log, /npm run build/);
     assert.match(log, /npm run package/);
-    assert.match(log, /pi update/);
+    assert.match(log, /pi install "npm:pi-web-access@0\.27\.0"/);
+    assert.match(log, /pi install "npm:pi-mcp-adapter@2\.20\.1"/);
     assert.match(log, /code --install-extension/);
     // write-vscode-agent-dir wrote pie.agentDir into the isolated APPDATA tree.
     const vsSettings = path.join(tmp, 'appdata', 'Code', 'User', 'settings.json');
@@ -222,6 +229,20 @@ test('full install runs end-to-end against a temp repo with mocked setx/npm/pi/c
     const migratedReviews = readFileSync(path.join(tRepo, 'data', 'outcomes', 'session-reviews', 'reviews.jsonl'), 'utf8');
     assert.match(migratedReviews, /process-displaced-review/);
     assert.match(migratedReviews, /user-displaced-review/);
+
+    // A package-source parse failure must stop before dependency/build work;
+    // FOR /F alone does not propagate the child command's exit code.
+    writeFileSync(path.join(tRepo, 'settings.json'), JSON.stringify({
+      sessionDir: 'data/outcomes/sessions',
+      packages: {},
+    }));
+    writeFileSync(shimLog, '');
+    const invalidPackages = spawnSync(process.env.ComSpec, ['/d', '/s', '/c', `"${bat}" --no-pause`], {
+      env, cwd: tRepo, encoding: 'utf8', windowsVerbatimArguments: true,
+    });
+    const invalidLog = readFileSync(shimLog, 'utf8');
+    assert.equal(invalidPackages.status, 1);
+    assert.doesNotMatch(invalidLog, /npm ci/);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

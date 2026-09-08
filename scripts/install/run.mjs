@@ -13,6 +13,7 @@
 //   node scripts/install/run.mjs configure-sessions <repoRoot>
 //   node scripts/install/run.mjs resolve-pi
 //   node scripts/install/run.mjs pinned-versions
+//   node scripts/install/run.mjs package-sources <settings.json>
 //   node scripts/install/run.mjs verify-toolchain [--json]
 //   node scripts/install/run.mjs write-vscode-agent-dir <repoRoot>
 //   node scripts/install/run.mjs readiness --auth <path> [--in-tree-auth <path>] [--auth-dir <dir>] [--repo-root <dir>] [--vscode-agent-dir-expected <dir>]
@@ -33,6 +34,7 @@ import { mergeAuthProviders, readAuthProviders, relocateAuthFile } from './lib/a
 import { lookupOnPath, resolvePiBinary } from './lib/pi-binary.mjs';
 import { mergeAgentDirSetting, resolveVscodeSettingsDirs } from './lib/vscode-settings.mjs';
 import { checkAuthReadiness, checkSplitBrain, checkVscodeAgentDir } from './lib/readiness.mjs';
+import { readConfiguredPackageSources } from './lib/packages.mjs';
 import { readPinnedVersions, verifyToolchain } from './lib/toolchain.mjs';
 import { directoryHasJsonlFiles } from './lib/sessions.mjs';
 import { configureSessions } from './lib/sessions-config.mjs';
@@ -71,6 +73,7 @@ Commands:
   configure-sessions <repoRoot>        Rewrite settings.json#sessionDir to the canonical store and migrate legacy session history.
   resolve-pi                            Print the resolved pi binary path (or empty line).
   pinned-versions                       Print the pinned Node/npm/pi versions (one per line).
+  package-sources <settings.json>       Print configured package sources (one per line).
   verify-toolchain [--json]             Dry-run: report pinned-vs-actual Node/npm/pi drift (never installs).
   write-vscode-agent-dir <repoRoot>     Write pie.agentDir into each existing VS Code User settings.json.
   readiness --auth <path> [...]         Print auth/provider/split-brain (and optional pie.agentDir) readiness checks.
@@ -310,6 +313,14 @@ function cmdPinnedVersions() {
   process.stdout.write(`${node}\n${npm}\n${pi}\n`);
 }
 
+function cmdPackageSources(args) {
+  const settingsPath = args[0];
+  if (!settingsPath) { console.error('package-sources: missing settings.json path'); process.exit(2); }
+  for (const source of readConfiguredPackageSources(settingsPath)) {
+    process.stdout.write(`${source}\n`);
+  }
+}
+
 const commands = {
   'repair-settings': cmdRepairSettings,
   'merge-auth': cmdMergeAuth,
@@ -318,6 +329,7 @@ const commands = {
   'resolve-pi': cmdResolvePi,
   'verify-toolchain': cmdVerifyToolchain,
   'pinned-versions': cmdPinnedVersions,
+  'package-sources': cmdPackageSources,
   'write-vscode-agent-dir': cmdWriteVscodeAgentDir,
   'readiness': cmdReadiness,
   'has-jsonl': cmdHasJsonl,

@@ -232,9 +232,15 @@ elif [[ -f "$in_tree_auth" && -n "$auth_dir_env" ]]; then
   echo "    (in-tree auth.json removed to prevent future split-brain; backend reads from PI_CODING_AGENT_AUTH_DIR)"
 fi
 
-# Restore packages without updating the pinned pi CLI itself.
-echo "==> Running 'pi update --extensions' to restore packages from settings.json"
-"$PI_BIN" update --extensions || echo "WARN: 'pi update --extensions' exited non-zero; continue manually if needed"
+# Restore packages without updating the pinned pi CLI itself. Pinned npm sources
+# are intentionally skipped by `pi update`, so install each configured source.
+echo "==> Restoring packages from settings.json"
+package_sources="$(node "$repo_root/scripts/install/run.mjs" package-sources "$repo_root/settings.json")"
+while IFS= read -r package_source; do
+  [[ -n "$package_source" ]] || continue
+  echo "==> Installing $package_source"
+  "$PI_BIN" install "$package_source"
+done <<< "$package_sources"
 
 # ── Write pie.agentDir to VS Code User settings ───────────────────────────────
 # The extension host reads pie.agentDir and forwards it to the backend as

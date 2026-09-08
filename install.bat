@@ -194,9 +194,25 @@ echo     in-tree auth.json removed to prevent future split-brain; backend reads 
 :after_relocate
 
 REM --- restore pi packages without self-updating the CLI --------------------
-echo ==^> Running 'pi update --extensions' to restore packages from settings.json
-call "%PI_CMD%" update --extensions
-if errorlevel 1 echo ==^> WARN: 'pi update --extensions' exited non-zero; continue manually if needed
+REM Pinned npm sources are intentionally skipped by `pi update`, so install each
+REM configured source explicitly. `pi install` preserves an existing filtered
+REM package object in settings.json and is idempotent for an installed version.
+echo ==^> Restoring packages from settings.json
+set "PACKAGE_SOURCES_FILE=%TEMP%\pie_package_sources_%RANDOM%_%RANDOM%.txt"
+node "%RUNNER%" package-sources "%REPO_ROOT%\settings.json" > "%PACKAGE_SOURCES_FILE%"
+if errorlevel 1 (
+  del "%PACKAGE_SOURCES_FILE%" >nul 2>nul
+  goto :error
+)
+for /f "usebackq delims=" %%P in ("%PACKAGE_SOURCES_FILE%") do (
+  echo ==^> Installing %%P
+  call "%PI_CMD%" install "%%P"
+  if errorlevel 1 (
+    del "%PACKAGE_SOURCES_FILE%" >nul 2>nul
+    goto :error
+  )
+)
+del "%PACKAGE_SOURCES_FILE%" >nul 2>nul
 
 REM --- build, package, and install the pie VSCode extension ----------------
 echo.
@@ -302,7 +318,7 @@ echo   - configure global outcomes: sessions + reviews + completed run analytics
 echo   - repair extension paths in settings.json
 echo   - relocate/merge auth.json if present
 echo   - npm install -g pinned npm/pi if drifted
-echo   - pi update --extensions
+echo   - restore every package pinned in settings.json
 echo   - npm ci + build/package pie VSIX + code --install-extension
 echo   - write pie.agentDir to VS Code User settings
 exit /b %TOOLCHAIN_RC%

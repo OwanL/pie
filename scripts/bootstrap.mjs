@@ -1,11 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
 import { repoRoot, readPinnedNodeVersion, readPinnedNpmVersion, readPinnedPiVersion } from "./toolchain.mjs";
+import { readConfiguredPackageSources } from "./install/lib/packages.mjs";
+import { spawnCliSync } from "./lib/subprocess.mjs";
 
-const spawn = (command, args, options) => process.platform === "win32"
-  ? spawnSync(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", command, ...args], options)
-  : spawnSync(command, args, options);
+const spawn = (command, args, options) => spawnCliSync(command, args, options);
 const run = (command, args, cwd = repoRoot) => {
   console.log(`\n==> ${command} ${args.join(" ")}`);
   const result = spawn(command, args, { cwd, stdio: "inherit" });
@@ -35,7 +34,9 @@ if (npm.stdout.trim() !== npmVersion) throw new Error(`npm ${npmVersion} require
 // and analysis dependency trees (including build/test devDependencies).
 run("npm", ["ci", "--include=dev"]);
 run("npm", ["install", "-g", `@earendil-works/pi-coding-agent@${piVersion}`]);
-run("pi", ["update", "--extensions"]);
+for (const source of readConfiguredPackageSources(path.join(repoRoot, "settings.json"))) {
+  run("pi", ["install", source]);
+}
 run(process.execPath, ["scripts/sync-models.mjs", "--check"]);
 run("npm", ["run", "build"], `${repoRoot}/extension`);
 run(process.execPath, ["scripts/doctor.mjs", "--skip-model-check"]);

@@ -1,10 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
 import { repoRoot, readPinnedNodeVersion, readPinnedNpmVersion, readPinnedPiVersion } from "./toolchain.mjs";
 import { collectEnvironmentDiagnostics } from "./doctor-environment.mjs";
 import { collectStrandedLegacySessions } from "./doctor-sessions.mjs";
 import { collectPostMigrationOutcomeDrift } from "./doctor-outcomes.mjs";
+import { spawnCliSync } from "./lib/subprocess.mjs";
 
 const ci = process.argv.includes("--ci");
 const skipModelCheck = process.argv.includes("--skip-model-check");
@@ -14,9 +14,7 @@ const fail = (message) => { failures++; console.error(`  [FAIL] ${message}`); };
 const warn = (message) => console.warn(`  [warn] ${message}`);
 const info = (message) => console.log(`  [info] ${message}`);
 const normalize = (value) => path.resolve(value).replaceAll("\\", "/").toLowerCase();
-const run = (command, args, cwd = repoRoot) => process.platform === "win32"
-  ? spawnSync(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", command, ...args], { cwd, encoding: "utf8" })
-  : spawnSync(command, args, { cwd, encoding: "utf8" });
+const run = (command, args, cwd = repoRoot) => spawnCliSync(command, args, { cwd, encoding: "utf8" });
 
 console.log("pie multi-machine doctor");
 const diagnostics = collectEnvironmentDiagnostics();
