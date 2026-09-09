@@ -359,3 +359,11 @@ the next independent worker must inspect this dispatch after return.
 P0/P2b/P2c/P7 prototypes remain pending until this milestone is committed, pushed, and remote-verified.
 All live authority flags remain old-runtime/default-off; no new database, runtime directory, session
 closure, restart, dependency change, or production cutover occurred.
+
+### Foundation Git barrier receipt — 2026-09-09T11:5xZ
+
+Foundation commit `46cf69b715137fa542ed72494c5f494b4b85e8c0` (`Add analytics contracts and
+canonical data root`) was pushed normally to `origin/master`. A subsequent `git fetch origin master`
+verified `HEAD == origin/master == 46cf69b715137fa542ed72494c5f494b4b85e8c0`; the worktree was clean.
+This receipt-only checkpoint update is committed separately so the exact milestone hash can be named
+without a self-referential commit. P0 is now ready in contract §6 order.
