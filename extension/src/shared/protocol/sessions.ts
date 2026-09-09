@@ -617,16 +617,13 @@ export interface AuxiliaryLlmUsagePayload {
 }
 
 /** Operational (non-fatal) backend condition that the user should be made
- *  aware of without it being a hard request failure. Emitted by two backend
- *  watchdogs:
+ *  aware of without it being a hard request failure. One remaining
+ *  watchdog-originated condition is:
  *  - `INTERRUPT_ABORT_STUCK` (request-handler.ts interrupt-abort watchdog):
  *    `session.abort()` invoked by `message.interrupt` did not settle within
  *    the watchdog window; `activeRequest` was force-cleared so the session is
  *    not permanently blocked. The side effects (clear + busy=false) are
  *    already wired — only the notice was lost before this channel was wired.
- *  - `RETRY_STUCK` (session-event-handler.ts willRetry watchdog): a retry's
- *    backoff did not complete within `delayMs + grace`; emitted alongside a
- *    `retry.stuck` event carrying the structured timing detail.
  *
  *  The host surfaces this as a non-blocking `operational-error` notice
  *  (recovery action: show-logs). When `detail` is present, the short message
@@ -634,21 +631,6 @@ export interface AuxiliaryLlmUsagePayload {
  *  behind the notice's More control. It does NOT roll back optimistic state
  *  or abort a turn — the watchdogs already performed their side effects. */
 export type OperationalErrorPayload = OperationalIncident;
-
-/** Emitted by the backend's willRetry watchdog when a retry's backoff did not
- *  complete within `delayMs + graceMs` (the provider may be down mid-backoff,
- *  or an extension hook blocked the retry). Fires alongside an
- *  `operational-error` (code `RETRY_STUCK`) which carries the user-facing
- *  message. The host relies on that companion event for reporting and does not
- *  dispatch a second reducer event, avoiding duplicate notices. */
-export interface RetryStuckPayload {
-  sessionPath: string;
-  /** SDK-reported backoff delay (ms) the retry was sleeping. */
-  delayMs: number;
-  /** Grace (ms) added on top of `delayMs` before the watchdog declared stuck. */
-  graceMs: number;
-  requestId?: string;
-}
 
 export type FileChangeKind = 'created' | 'modified' | 'deleted';
 

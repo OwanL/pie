@@ -79,7 +79,6 @@ function runFakeAgent(
 	sdk: unknown,
 	onUpdate?: (partial: any) => void,
 	signal?: AbortSignal,
-	timeoutMs = 0,
 ) {
 	return runSingleAgent(
 		process.cwd(),
@@ -99,7 +98,7 @@ function runFakeAgent(
 		undefined,
 		undefined,
 		undefined,
-		{ sdk: sdk as any, timeoutMs },
+		{ sdk: sdk as any },
 	);
 }
 
@@ -259,7 +258,7 @@ test("runSingleAgent executes a qualified bucket spec on its exact provider", as
 		undefined,
 		undefined,
 		undefined,
-		{ sdk: sdk as any, timeoutMs: 0 },
+		{ sdk: sdk as any },
 	);
 
 	assert.equal(state.createdModel?.provider, "openai-codex");

@@ -34,11 +34,9 @@ import { MESSAGE_REQUEST_HANDLERS } from './request-handler-message';
 
 export {
   type BackendRequestHandlerDeps,
-  type PromptSafetyTimerDecision,
   type SessionTransitionWaitOptions,
   type SessionTransitionWaitOutcome,
   type TranscriptPageLoadOptions,
-  decidePromptSafetyTimerAction,
   formatInterruptWatchdogDuration,
   waitForSessionTransition,
 } from './request-handler-shared';

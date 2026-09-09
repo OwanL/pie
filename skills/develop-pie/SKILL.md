@@ -34,7 +34,9 @@ For setup, storage, and repository-wide workflows, see [`README.md`](../../READM
 ## Common practices
 
 - Use the repository-root test wrappers: `test:file` for focused checks while iterating and `npm test` as the default final development test. `npm test` resolves working-tree changes to affected tests, runs package groups concurrently, and conservatively broadens when dependency evidence is incomplete. Do not invoke `npx tsx` directly. Use `test:coverage` only for an explicit release coverage gate.
-- After any edit under `extension/src/`, run `npm run extension:build`. It compiles/validates all bundles and publishes only a complete renderer generation to a matching installed extension; it does not activate host/backend changes. Use `npm run extension:activate` only at an explicit reload/install boundary after closing or reloading active Pie sessions.
+- After any edit under `extension/src/`, run `npm run extension:build`. It validates and stages a complete immutable runtime in a matching installed extension, and publishes live renderer assets. The startup loader automatically selects the newest verified runtime on the next normal VS Code restart; loaded windows retain their leased host/backend files. Never force a restart or interrupt active work merely to deploy a fix.
+- Older installations need `npm run extension:activate` once to install the startup loader. This command stages immutable loader files and updates the entrypoint for the next restart without replacing locked running bundles. Routine changes need only a successful build and a normal restart, not another installation command. SDK/dependency or extension manifest upgrades remain explicit package/install work.
+- For a user-reported bug, distinguish built, staged, loaded, and behavior verified. Check the staged generation and running build evidence, not just build success. A pending host update is not a live fix; tell the user it will load on their next normal restart. Do not mistake reopening the sidebar for restarting the extension host.
 - Treat [`docs/STATE_CONTRACT.md`](../../docs/STATE_CONTRACT.md) as authoritative for host↔webview synchronization. Contract changes require matching tests under `extension/test/`, including the sync-contract coverage.
 - Keep the host architecture CQRS/Elm-style MVI: pure reducer, one effect runner, passive webview, explicit session addressing, and `Record<string, T>` host collections rather than `Map`/`Set`.
 - Preserve unrelated working-tree changes. Generated or user-owned files may already be modified; inspect status and focused diffs before finishing.
@@ -69,9 +71,9 @@ npm run verify                              # full verification: drift + typeche
 npm run verify:release                      # release gate: replaces the fast suites with coverage-gated runs
 npm run sync-models                         # regenerate centralized model configuration
 npm run sync-models -- --check              # fail on generated-config drift
-npm run extension:build                     # compile/validate + renderer publish only
+npm run extension:build                     # validate + stage runtime + live renderer publish
 npm run extension:build:validate            # compile/validate without publishing
-npm run extension:activate                  # explicit host/backend activation boundary
+npm run extension:activate                  # one-time startup loader setup or explicit upgrade
 npm run extension:package                   # build a .vsix from the root
 npm run extension:test:browser              # extension Playwright browser suite
 npm run analytics:serve                     # local analytics workspace
@@ -82,11 +84,11 @@ Extension-only loop:
 
 ```bash
 cd extension
-npm run build            # compile/validate + renderer publish
+npm run build            # validate + stage runtime + renderer publish
 npm run build:validate   # compile/validate only
 npm run publish:renderer # publish existing renderer output
-npm run activate         # explicit host/backend activation
-npm run watch            # incremental + renderer publish
+npm run activate         # startup loader setup/upgrade; loads on next restart
+npm run watch            # incremental validation + runtime/renderer publication
 npm run test             # extension tests
 npm run typecheck        # extension typecheck
 npm run lint             # extension ESLint

@@ -298,6 +298,30 @@ function isHistoryCompactionSettings(value: unknown): boolean {
   return true;
 }
 
+function isProviderConcurrencyPatch(value: unknown): boolean {
+  if (!isObject(value)) return false;
+  const allowedKeys = new Set([
+    'maxConcurrentRequests',
+    'afterburnSeconds',
+    'queueWaitSeconds',
+    'headerWaitSeconds',
+  ]);
+  for (const overrides of Object.values(value)) {
+    if (!isObject(overrides)) return false;
+    for (const [key, setting] of Object.entries(overrides)) {
+      if (!allowedKeys.has(key)) return false;
+      if (key === 'maxConcurrentRequests') {
+        if (!Number.isInteger(setting) || (setting as number) < 1) return false;
+      } else if (key === 'afterburnSeconds') {
+        if (!isFiniteNumber(setting) || setting < 0) return false;
+      } else if (!Number.isInteger(setting) || (setting as number) < 0 || (setting as number) > 300) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
 function validateChatPrefsPatch(value: unknown): value is Partial<ChatPrefs> {
   if (!isObject(value)) return false;
   const booleanKeys: Array<keyof ChatPrefs> = [
@@ -365,6 +389,10 @@ function validateChatPrefsPatch(value: unknown): value is Partial<ChatPrefs> {
     }
     if (key === 'historyCompaction') {
       if (v !== undefined && !isHistoryCompactionSettings(v)) return false;
+      continue;
+    }
+    if (key === 'providerConcurrency') {
+      if (v !== undefined && !isProviderConcurrencyPatch(v)) return false;
       continue;
     }
     if (key === 'subagentBuckets') {

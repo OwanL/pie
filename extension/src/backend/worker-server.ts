@@ -19,6 +19,7 @@ import {
   type WorkerFrameExpectation,
   type WorkerHeartbeatPhase,
   type WorkerIpcFrameDraft,
+  type WorkerJsonObject,
   type WorkerResponseResult,
   type WorkerSyncDomain,
   type WorkerToCoordinatorFrameBody,
@@ -57,6 +58,19 @@ export interface WorkerServerHandlers {
   onShutdown?: (frame: Extract<CoordinatorToWorkerFrame, { kind: 'shutdown' }>) => void | Promise<void>;
   /** Test/embedding seam; production defaults to the immutable SDK patch validator. */
   validateBootstrap?: (frame: Extract<CoordinatorToWorkerFrame, { kind: 'bootstrap' }>) => void | Promise<void>;
+}
+
+/** Recoverable-drop policy for worker enqueue rejections. Only the
+ * `runtime.event` `live.semantic` envelope may opt into it, and only for
+ * reason `capacity` or `oversize`: the dropped envelope never consumes a
+ * transport sequence, its inner semantic sequence keeps the gap, and the host
+ * checkpoint rebase is the authority that repairs the lost content.
+ * `unavailable` and `invalid` rejections, asynchronous write failures, and
+ * every other frame kind remain fatal/fail-closed. */
+export function liveSemanticDroppableRejection(
+  reason: 'invalid' | 'oversize' | 'capacity' | 'unavailable',
+): boolean {
+  return reason === 'capacity' || reason === 'oversize';
 }
 
 const WORKER_CLOSE_DIAGNOSTIC_MAX_BYTES = 8 * 1024;
@@ -216,6 +230,36 @@ export class WorkerServer {
       },
     });
     return result.accepted;
+  }
+
+  /** Emit the one recoverable ordinary-lane runtime event: `live.semantic`.
+   * Capacity and oversize enqueue rejections are intentionally dropped (see
+   * `liveSemanticDroppableRejection`): the worker generation survives, the
+   * envelope's semantic sequence keeps its gap without renumbering or
+   * synthesis, and the host checkpoint rebase recovers the lost content.
+   * `unavailable`/`invalid` rejections and asynchronous write failures stay
+   * fatal, exactly like every other frame. Returns false when the envelope
+   * was dropped. */
+  sendLiveSemanticFrame(payload: WorkerJsonObject): boolean {
+    const result = this.writer.enqueue({
+      ...this.frameBase,
+      kind: 'runtime.event',
+      event: 'live.semantic',
+      payload,
+    } as WorkerIpcFrameDraft, {
+      onSettled: (settlement) => {
+        // Enqueue rejections are decided by the synchronous result below; an
+        // asynchronous write failure remains fatal for this event.
+        if (settlement.status === 'failed') this.close(1, settlement.error);
+      },
+    });
+    if (result.accepted) return true;
+    if (liveSemanticDroppableRejection(result.reason)) return false;
+    this.failProtocol(
+      `Worker IPC frame rejected (${result.reason}): ${result.detail}`,
+      'INTERNAL_ERROR',
+    );
+    return false;
   }
 
   /** Correlate a worker-originated request with its dedicated coordinator response. */

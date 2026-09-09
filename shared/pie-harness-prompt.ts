@@ -154,6 +154,7 @@ type PiePromptContext = {
 interface PieExtensionRunnerLike {
   createContext?: () => object;
   setUIContext?: (context: unknown) => void;
+  getExtensionPaths?: () => string[];
   [PIE_BASE_PROMPT_ACCESSOR_INSTALLED]?: boolean;
 }
 
@@ -162,6 +163,10 @@ interface PiePromptState<T extends PieSystemPromptOptions> {
   _baseSystemPromptOptions?: T;
   _rebuildSystemPrompt?: (toolNames: string[]) => string;
   agent?: { state?: { systemPrompt?: string } };
+  /** The pinned SDK stores the runner on `_extensionRunner` and also exposes
+   * an `extensionRunner` getter. Older/session-like integrations may only
+   * expose the private field, so support both shapes. */
+  _extensionRunner?: PieExtensionRunnerLike;
   extensionRunner?: PieExtensionRunnerLike;
 }
 
@@ -279,7 +284,10 @@ export function installPieSystemPromptRebuildGuard<T extends PieSystemPromptOpti
   promptState: PiePromptState<T>,
   agentDir: string,
 ): void {
-  const runner = promptState.extensionRunner;
+  // AgentSession's actual private field is `_extensionRunner`. Keep the
+  // public-name fallback for older SDK/session-like callers, but prefer the
+  // private field whenever both are present.
+  const runner = promptState._extensionRunner ?? promptState.extensionRunner;
   const createContext = runner?.createContext;
   if (runner && typeof createContext === 'function' && !runner[PIE_BASE_PROMPT_ACCESSOR_INSTALLED]) {
     runner.createContext = function piePromptContext(this: PieExtensionRunnerLike): object {

@@ -183,7 +183,7 @@ test("runSingleAgent returns successful result and captures usage/model", async 
 		undefined,
 		undefined,
 		undefined,
-		{ sdk: sdk as any, timeoutMs: 50 },
+		{ sdk: sdk as any },
 		undefined,
 		{ mode: "latest", content: "[User prompt]\nPlease preserve the public API." },
 	);
@@ -289,7 +289,7 @@ test("runSingleAgent wires Pie ownership through child prompt and tool/resource 
 		undefined,
 		undefined,
 		undefined,
-		{ sdk: sdk as any, timeoutMs: 50 },
+		{ sdk: sdk as any },
 	);
 
 	assert.equal(result.exitCode, 0);
@@ -324,7 +324,7 @@ test("runSingleAgent fails closed before session creation when final provider re
 		undefined,
 		undefined,
 		undefined,
-		{ sdk: sdk as any, timeoutMs: 50 },
+		{ sdk: sdk as any },
 		undefined,
 		undefined,
 		{ inputKinds: ["image"] },
@@ -375,7 +375,7 @@ test("runSingleAgent fences late SDK events even when unsubscribe is a no-op", a
 		bridge,
 		undefined,
 		undefined,
-		{ sdk: sdk as any, timeoutMs: 50 },
+		{ sdk: sdk as any },
 	);
 
 	const generationAtCompletion = result.progressGeneration;
@@ -454,7 +454,7 @@ test("runSingleAgent publishes model details with the first lifecycle update", a
 		undefined,
 		undefined,
 		undefined,
-		{ sdk: sdk as any, timeoutMs: 0 },
+		{ sdk: sdk as any },
 	);
 
 	assert.equal(snapshots[0]?.phase, "preparing");
@@ -503,7 +503,7 @@ test("runSingleAgent aborts promptly when the parent signal is already aborted",
 		bridge,
 		undefined,
 		undefined,
-		{ sdk: sdk as any, timeoutMs: 50 },
+		{ sdk: sdk as any },
 	);
 
 	assert.equal(result.exitCode, 1);
@@ -547,7 +547,7 @@ test("runSingleAgent aborts the child prompt when the parent aborts after sessio
 		bridge,
 		undefined,
 		undefined,
-		{ sdk: sdk as any, timeoutMs: 0 },
+		{ sdk: sdk as any },
 	);
 
 	assert.equal(result.exitCode, 1);
@@ -588,7 +588,7 @@ test("runSingleAgent returns an abort result when the parent aborts before creat
 		undefined,
 		undefined,
 		undefined,
-		{ sdk: sdk as any, timeoutMs: 0 },
+		{ sdk: sdk as any },
 	);
 
 	for (let i = 0; i < 100 && state.createSessionArgs.length === 0; i++) {
@@ -612,14 +612,23 @@ test("runSingleAgent returns an abort result when the parent aborts before creat
 	assert.equal(state.disposeCalls, 1, "late-created sessions are tracked by the orphan registry and disposed exactly once");
 });
 
-test("runSingleAgent returns timeout failure and calls cancelAll", async () => {
+test("runSingleAgent with no parent signal completes normally", async () => {
+	// No parent signal: the prompt runs uninterrupted until it completes
+	// naturally — subagents settle by explicit completion, not wall-clock time.
 	const { sdk, state } = createFakeSdk({
 		onPrompt: async (emit) => {
-			emit({ type: "tool_execution_start", toolCallId: "nested-timeout", toolName: "bash" });
-			await new Promise<void>(() => undefined);
+			emit({
+				type: "message_end",
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "done" }],
+					usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { total: 0 } },
+					model: "m",
+					stopReason: "completed",
+				},
+			});
 		},
 	});
-	const { bridge, calls } = makeParentBridge();
 
 	const result = await runSingleAgent(
 		process.cwd(),
@@ -628,184 +637,73 @@ test("runSingleAgent returns timeout failure and calls cancelAll", async () => {
 		"do work",
 		undefined,
 		undefined,
-		undefined,
+		undefined, // no parent signal
 		undefined,
 		(results) => ({ mode: "single", agentScope: "user", projectAgentsDir: null, results }),
 		makeModelRegistry(),
 		undefined,
 		undefined,
 		undefined,
-		"tool-timeout",
-		bridge,
 		undefined,
 		undefined,
-		{ sdk: sdk as any, timeoutMs: 10 },
+		undefined,
+		undefined,
+		{ sdk: sdk as any },
 	);
 
-	assert.equal(result.exitCode, 1);
-	assert.equal(result.stopReason, "timeout");
-	assert.equal(result.activityPhase, "failed");
-	assert.deepEqual(result.runningTools, []);
-	assert.equal(result.streaming, false);
-	assert.match(result.errorMessage ?? "", /timed out after 0.01s/);
-	assert.equal(calls.cancelAll, 1);
-	assert.ok(state.abortCalls >= 1);
+	assert.equal(result.exitCode, 0);
+	assert.equal(result.model, "m");
+	assert.equal(state.promptCalls, 1);
 	assert.equal(state.unsubscribeCalls, 1);
 	assert.equal(state.disposeCalls, 1);
 });
 
-test("runSingleAgent with timeout disabled and no parent signal completes normally", async () => {
-	// Default (env unset) = no timeout. With no parent signal either, the prompt
-	// runs uninterrupted until it completes naturally — exercises the
-	// `!parentSignal && timeoutMs <= 0` branch of buildCombinedAbortSignal.
-	const prevTimeout = process.env.PI_SUBAGENT_TIMEOUT_MS;
-	delete process.env.PI_SUBAGENT_TIMEOUT_MS;
-	try {
-		const { sdk, state } = createFakeSdk({
-			onPrompt: async (emit) => {
-				emit({
-					type: "message_end",
-					message: {
-						role: "assistant",
-						content: [{ type: "text", text: "done" }],
-						usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { total: 0 } },
-						model: "m",
-						stopReason: "completed",
-					},
-				});
-			},
-		});
+test("runSingleAgent: parent abort interrupts without timeout stamp", async () => {
+	// A hanging prompt must be interruptible via the parent abort signal, and
+	// the result must NOT be stamped as a timeout (there is no timer to fire).
+	const { sdk, state } = createFakeSdk({
+		onPrompt: async (emit) => {
+			emit({ type: "tool_execution_start", toolCallId: "nested-abort", toolName: "read" });
+			await new Promise<void>(() => undefined);
+		},
+	});
+	const { bridge, calls } = makeParentBridge();
+	const controller = new AbortController();
 
-		const result = await runSingleAgent(
-			process.cwd(),
-			[makeAgent()],
-			"worker",
-			"do work",
-			undefined,
-			undefined,
-			undefined, // no parent signal
-			undefined,
-			(results) => ({ mode: "single", agentScope: "user", projectAgentsDir: null, results }),
-			makeModelRegistry(),
-			undefined,
-			undefined,
-			undefined,
-			undefined,
-			undefined,
-			undefined,
-			undefined,
-			{ sdk: sdk as any }, // no timeoutMs seam → default (disabled)
-		);
+	const resultPromise = runSingleAgent(
+		process.cwd(),
+		[makeAgent()],
+		"worker",
+		"do work",
+		undefined,
+		undefined,
+		controller.signal,
+		undefined,
+		(results) => ({ mode: "single", agentScope: "user", projectAgentsDir: null, results }),
+		makeModelRegistry(),
+		undefined,
+		undefined,
+		undefined,
+		"tool-no-timeout",
+		bridge,
+		undefined,
+		undefined,
+		{ sdk: sdk as any },
+	);
 
-		assert.equal(result.exitCode, 0);
-		assert.equal(result.model, "m");
-		assert.equal(state.promptCalls, 1);
-		assert.equal(state.unsubscribeCalls, 1);
-		assert.equal(state.disposeCalls, 1);
-	} finally {
-		if (prevTimeout === undefined) delete process.env.PI_SUBAGENT_TIMEOUT_MS;
-		else process.env.PI_SUBAGENT_TIMEOUT_MS = prevTimeout;
-	}
-});
+	setTimeout(() => controller.abort(), 5);
+	const result = await resultPromise;
 
-test("runSingleAgent with timeout disabled: parent abort interrupts without timeout stamp", async () => {
-	// Default (env unset) = no timeout. A hanging prompt must be interruptible
-	// via the parent abort signal, and the result must NOT be stamped as a
-	// timeout — exercises the `parentSignal && timeoutMs <= 0` branch.
-	const prevTimeout = process.env.PI_SUBAGENT_TIMEOUT_MS;
-	delete process.env.PI_SUBAGENT_TIMEOUT_MS;
-	try {
-		const { sdk, state } = createFakeSdk({
-			onPrompt: async (emit) => {
-				emit({ type: "tool_execution_start", toolCallId: "nested-abort", toolName: "read" });
-				await new Promise<void>(() => undefined);
-			},
-		});
-		const { bridge, calls } = makeParentBridge();
-		const controller = new AbortController();
-
-		const resultPromise = runSingleAgent(
-			process.cwd(),
-			[makeAgent()],
-			"worker",
-			"do work",
-			undefined,
-			undefined,
-			controller.signal,
-			undefined,
-			(results) => ({ mode: "single", agentScope: "user", projectAgentsDir: null, results }),
-			makeModelRegistry(),
-			undefined,
-			undefined,
-			undefined,
-			"tool-no-timeout",
-			bridge,
-			undefined,
-			undefined,
-			{ sdk: sdk as any }, // no timeoutMs seam → default (disabled)
-		);
-
-		setTimeout(() => controller.abort(), 5);
-		const result = await resultPromise;
-
-		assert.equal(result.exitCode, 1);
-		assert.equal(result.stopReason, "aborted");
-		assert.equal(result.activityPhase, "cancelled");
-		assert.deepEqual(result.runningTools, []);
-		assert.equal(result.streaming, false);
-		assert.doesNotMatch(result.errorMessage ?? "", /timed out/);
-		assert.ok(state.abortCalls >= 1);
-		assert.equal(calls.cancelAll, 1);
-		assert.equal(state.unsubscribeCalls, 1);
-		assert.equal(state.disposeCalls, 1);
-	} finally {
-		if (prevTimeout === undefined) delete process.env.PI_SUBAGENT_TIMEOUT_MS;
-		else process.env.PI_SUBAGENT_TIMEOUT_MS = prevTimeout;
-	}
-});
-
-test("runSingleAgent honours PI_SUBAGENT_TIMEOUT_MS env var (no seam): hanging prompt times out", async () => {
-	// End-to-end: a positive env var (with no _internal.timeoutMs seam) drives
-	// resolveSubagentTimeoutMs -> buildCombinedAbortSignal(timeoutMs > 0) ->
-	// AbortSignal.timeout fires -> session.abort -> applyTimeoutFailure.
-	const prevTimeout = process.env.PI_SUBAGENT_TIMEOUT_MS;
-	process.env.PI_SUBAGENT_TIMEOUT_MS = "20";
-	try {
-		const { sdk, state } = createFakeSdk(); // prompt hangs until abort
-		const { bridge, calls } = makeParentBridge();
-
-		const result = await runSingleAgent(
-			process.cwd(),
-			[makeAgent()],
-			"worker",
-			"do work",
-			undefined,
-			undefined,
-			undefined, // no parent signal — only the env-var timeout can interrupt
-			undefined,
-			(results) => ({ mode: "single", agentScope: "user", projectAgentsDir: null, results }),
-			makeModelRegistry(),
-			undefined,
-			undefined,
-			undefined,
-			"tool-env-timeout",
-			bridge,
-			undefined,
-			undefined,
-			{ sdk: sdk as any }, // no timeoutMs seam — env var is the source of truth
-		);
-
-		assert.equal(result.exitCode, 1);
-		assert.equal(result.stopReason, "timeout");
-		assert.match(result.errorMessage ?? "", /timed out after 0.02s/);
-		assert.ok(state.abortCalls >= 1);
-		assert.equal(calls.cancelAll, 1);
-		assert.equal(state.unsubscribeCalls, 1);
-		assert.equal(state.disposeCalls, 1);
-	} finally {
-		if (prevTimeout === undefined) delete process.env.PI_SUBAGENT_TIMEOUT_MS;
-		else process.env.PI_SUBAGENT_TIMEOUT_MS = prevTimeout;
-	}
+	assert.equal(result.exitCode, 1);
+	assert.equal(result.stopReason, "aborted");
+	assert.equal(result.activityPhase, "cancelled");
+	assert.deepEqual(result.runningTools, []);
+	assert.equal(result.streaming, false);
+	assert.doesNotMatch(result.errorMessage ?? "", /timed out/);
+	assert.ok(state.abortCalls >= 1);
+	assert.equal(calls.cancelAll, 1);
+	assert.equal(state.unsubscribeCalls, 1);
+	assert.equal(state.disposeCalls, 1);
 });
 
 test("validateSubagentParams enforces the single-task shape and validates agent names", () => {
@@ -929,7 +827,7 @@ test("runSingleAgent runs the prompt inside the shared subagent context (A)", as
 			undefined,
 			undefined,
 			undefined,
-			{ sdk: sdk as any, timeoutMs: 0 },
+			{ sdk: sdk as any },
 		);
 	});
 
@@ -966,7 +864,7 @@ test("runSingleAgent: error thrown during prefill is annotated with the run stag
 		undefined,
 		undefined,
 		undefined,
-		{ sdk: sdk as any, timeoutMs: 0 },
+		{ sdk: sdk as any },
 	);
 
 	assert.equal(result.exitCode, 1);
@@ -1036,7 +934,7 @@ test("runSingleAgent propagates nested tool_execution_update partials onto resul
 		undefined,
 		undefined,
 		undefined,
-		{ sdk: sdk as any, timeoutMs: 0 },
+		{ sdk: sdk as any },
 	);
 
 	// The depth-1 result's messages carry the assistant message whose toolCall
@@ -1080,7 +978,7 @@ test("runSingleAgent replays the latest tool_execution_update after its assistan
 		(results) => ({ mode: "single", agentScope: "user", projectAgentsDir: null, results }),
 		makeModelRegistry(), undefined,
 		{ modelId: "model-a", bucket: "medium", thinkingLevel: "low", pool: ["model-a"], fallback: false },
-		undefined, undefined, undefined, undefined, undefined, { sdk: sdk as any, timeoutMs: 0 },
+		undefined, undefined, undefined, undefined, undefined, { sdk: sdk as any },
 	);
 
 	assert.equal(result.exitCode, 0);
@@ -1116,7 +1014,7 @@ test("runSingleAgent ignores tool_execution_update received after tool_execution
 		(results) => ({ mode: "single", agentScope: "user", projectAgentsDir: null, results }),
 		makeModelRegistry(), undefined,
 		{ modelId: "model-a", bucket: "medium", thinkingLevel: "low", pool: ["model-a"], fallback: false },
-		undefined, undefined, undefined, undefined, undefined, { sdk: sdk as any, timeoutMs: 0 },
+		undefined, undefined, undefined, undefined, undefined, { sdk: sdk as any },
 	);
 
 	const assistant = result.messages.find((message) => message.role === "assistant") as any;

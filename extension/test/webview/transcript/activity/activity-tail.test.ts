@@ -254,7 +254,6 @@ test('deriveSubagentTail fills idle preview rows with lifecycle and model diagno
     activityDetail: 'first token',
     activitySince: now - 17_000,
     lastProgressAt: now - 18_000,
-    inactivityBudgetMs: 120_000,
     selectedModel: 'openai/gpt-5.2',
     provider: 'openai',
     contextWindow: 200_000,
@@ -273,7 +272,7 @@ test('deriveSubagentTail fills idle preview rows with lifecycle and model diagno
 
   const tail = deriveSubagentTail(toolCall);
   assert.ok(tail);
-  assert.match(tail.tail.lines[0]!, /Waiting for provider · first token · \d+s in state · \d+s since progress · 2m 0s stall limit/);
+  assert.match(tail.tail.lines[0]!, /Waiting for provider · first token · \d+s in state · \d+s since progress/);
   assert.equal(tail.tail.lines[1], 'openai/gpt-5.2 · thinking high · context 50k / 200k (25%) · tokens 1.3k in / 42 out · 1.0k cached · last 10.0 tok/s · 1 retry · 2 model candidates');
 });
 

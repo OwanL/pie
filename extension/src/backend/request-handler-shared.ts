@@ -7,47 +7,9 @@ import { BackendError } from './server-io';
 import { toErrorMessage } from '../shared/error-message';
 import type { SessionSnapshotTransport } from '../shared/transcript-window';
 
-/**
- * Pure prompt-safety decision used by the backend timer and deterministic
- * tests. Exact-request provider-network activity or a provider-wide circuit
- * pause may defer below the cumulative ceiling; missing evidence fails open
- * to firing so an unobservable pre-commit request cannot hang indefinitely.
- */
-export interface PromptSafetyTimerDecision {
-  action: 'defer' | 'fire';
-  /** Plain-language reason for the `preflight.failed` emission. Empty for a
-   *  `defer` (no emission). */
-  reason: string;
-}
-
 export interface TranscriptPageLoadOptions {
   transport: SessionSnapshotTransport;
   requiredMessageId?: string;
-}
-
-export function decidePromptSafetyTimerAction(opts: {
-  elapsed: number;
-  ceiling: number;
-  promptTimeoutMs: number;
-  provider?: string;
-  metrics?: readonly ProviderGateMetrics[];
-  /** Worker-local correlation for this exact active request's network phase. */
-  requestProviderPending?: boolean;
-}): PromptSafetyTimerDecision {
-  const { elapsed, ceiling, promptTimeoutMs, provider, metrics, requestProviderPending } = opts;
-  const providerMetric = provider
-    ? metrics?.find((m) => m.provider === provider)
-    : undefined;
-  const providerInProgress = requestProviderPending === true || providerMetric?.paused === true;
-
-  if (providerInProgress && elapsed < ceiling) {
-    return { action: 'defer', reason: '' };
-  }
-
-  const reason = providerInProgress
-    ? `Prompt timed out after ${elapsed}ms (hard ceiling): provider "${provider ?? 'unknown'}" remained ${providerMetric?.paused ? 'paused' : 'network-pending'} without reaching a commit point.`
-    : `Prompt timed out after ${promptTimeoutMs}ms without reaching a commit point.`;
-  return { action: 'fire', reason };
 }
 
 const DEFAULT_SESSION_TRANSITION_WAIT_MS = 30 * 1000;
@@ -207,14 +169,10 @@ export interface BackendRequestHandlerDeps {
   listAvailableModels(context?: SessionContext): ModelInfo[] | Promise<ModelInfo[]>;
   readModelSettings(): Promise<ModelSettings>;
   writeModelSettings(updates: Partial<ModelSettings>): Promise<ModelSettings>;
-  /** Provider-gate metrics for prompt-safety deferral. The production default
-   *  reads the in-process gate; injection keeps timeout boundaries
-   *  deterministic. Missing metrics fail open so the timer never hangs. */
+  /** Cross-worker provider-gate metrics for the `provider_gate.metrics` RPC.
+   *  Production injects the coordinator lease authority; standalone paths
+   *  fall back to the in-process gate inside the handler. */
   getProviderGateMetrics?: () => readonly ProviderGateMetrics[] | undefined;
-  /** Resolve the in-flight request's provider for prompt-safety deferral. The
-   *  production default uses the active session model. Missing resolution
-   *  fails open so the timer never hangs. */
-  resolveSessionProvider?: (context: SessionContext) => string | undefined;
   /** Called only after the selected handler has validated its request params. */
   onRequestValidated?: () => void;
   /** The server owns the request completion span when it may retry a browse

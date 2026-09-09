@@ -45,7 +45,7 @@ import { toErrorMessage } from '../util/error-message';
 import { appendPieLog } from '../util/pie-log';
 import type { EffectResultEvent, CommandEvent } from './events';
 import type { FileDiffService } from './file-diff-service';
-import type { ChatPrefs, ComposerInput, McpServerInfo, ProviderGateStats, PruningSettings, SessionTitlesSettings, ToolResultPruningSettings, ThinkingLevel } from '../../shared/protocol';
+import type { ChatPrefs, ComposerInput, McpServerInfo, PruningSettings, SessionTitlesSettings, ToolResultPruningSettings, ThinkingLevel } from '../../shared/protocol';
 import type { LiveSubagentDetailAddress, DetailCursor, DetailPageRef } from '../../shared/protocol/subagent-detail';
 import { RequestTimeoutError } from '../../shared/request-tracker';
 import type { LiveLifecycleWatermark, LiveTurnCheckpoint } from '../../shared/live-pipeline-protocol';
@@ -56,7 +56,6 @@ import {
 } from './session-operation-effect-controller';
 
 export {
-  decideModelStartTimerAction,
   type CommitAwareRequestOptions,
   type CorrelatedBackendResponse,
 } from './session-operation-effect-controller';
@@ -270,11 +269,13 @@ export interface EffectRunnerDeps {
    */
   dispatchEvent: (event: import('./events').Event) => void;
   /**
-   * Override the send-timer budget (default 120s). The send-timer owns the
-   * post-ack, pre-commit phase (early-ack → first `MessageStarted`); on fire
-   * it dispatches `PreflightFailed` so the reducer reverts via
-   * `pending.promoted[corrId]`. Used by tests to avoid waiting the full
-   * timeout. Ignored when `getSendTimerTimeoutMs` is provided.
+   * Override the send-timer budget (default 120s). The send-timer bounds only
+   * the acknowledgement/prepass window: on fire a registered send reports
+   * `SendOperationDelayed` ambiguity (legacy direct calls synthesize
+   * `PreflightFailed`), and `MarkPrepassSucceeded` disarms it — there is no
+   * model-start watchdog after preflight success. Used by tests to avoid
+   * waiting the full timeout. Ignored when `getSendTimerTimeoutMs` is
+   * provided.
    */
   sendTimerTimeoutMs?: number;
   /**
@@ -282,20 +283,12 @@ export interface EffectRunnerDeps {
    * changing `prepassTimeoutSec` at runtime takes effect immediately). When
    * provided, takes precedence over the static `sendTimerTimeoutMs`. The
    * production wiring (`extension-host`) derives this from the current
-   * `settings.pruningSettings.prepassTimeoutSec` + first-token headroom so a
-   * long-but-legitimate prepass never trips a spurious `PreflightFailed`
-   * (which would roll back the user message — `promoted` is still present —
-   * and orphan a late `MessageStarted` reply). Falls back to the 120s default
-   * when `prepassTimeoutSec` is null/invalid (SDK-owned default, presumed well
-   * under 120s).
+   * `settings.pruningSettings.prepassTimeoutSec` + provider queue-wait
+   * headroom so a long-but-legitimate prepass never trips a spurious
+   * watchdog fire. Falls back to the 120s default when `prepassTimeoutSec`
+   * is null/invalid (SDK-owned default, presumed well under 120s).
    */
   getSendTimerTimeoutMs?: (sessionPath: string) => number;
-  /** Live provider-gate state used to distinguish legitimate queue/pause wait. */
-  getProviderGateMetrics?: () => ProviderGateStats;
-  /** Resolve the provider serving the session's current request. */
-  resolveSessionProvider?: (sessionPath: string) => string | undefined;
-  /** True only while this exact session's live turn is queued/waiting_provider. */
-  isSessionProviderPending?: (sessionPath: string) => boolean;
   /**
    * Timer sink used for the backend-ready watchdog + send-timer.
    * Defaults to real `setTimeout`/`clearTimeout`. Tests inject a fake to
@@ -377,9 +370,6 @@ export class EffectRunner {
       timer: this.timer,
       sendTimerTimeoutMs: deps.sendTimerTimeoutMs ?? EffectRunner.SEND_TIMER_TIMEOUT_MS,
       getSendTimerTimeoutMs: deps.getSendTimerTimeoutMs,
-      getProviderGateMetrics: deps.getProviderGateMetrics,
-      resolveSessionProvider: deps.resolveSessionProvider,
-      isSessionProviderPending: deps.isSessionProviderPending,
     });
     this.handlers = {
       // Session operations delegate as one domain. Generic truncate, queue,

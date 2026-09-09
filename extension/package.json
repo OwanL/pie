@@ -18,7 +18,8 @@
     "onCommand:pie.exportRunAnalytics",
     "onView:pie.sessionsView"
   ],
-  "main": "./out/extension.js",
+  "main": "./runtime/bootstrap.cjs",
+  "pieRuntimeBootstrap": 1,
   "contributes": {
     "viewsContainers": {
       "activitybar": [

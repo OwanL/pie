@@ -128,29 +128,6 @@ test('mapPreflightError accepts DECIMAL-second budgets (Brief H follow-up — wa
   assert.equal(edit.kind, 'edit-failed');
 });
 
-test('mapPreflightError classifies a model-start timeout (pruning already succeeded) as model-start-timeout, NOT prepass-timeout', () => {
-  // The send-timer is re-armed with the model-start budget once pruning
-  // succeeds; a fire after re-arm carries the model-start error string so the
-  // notice blames model-start (concurrency/rate-limit/first-token), NOT pruning
-  // — pruning already finished. Both strings begin "Timed out waiting for … to
-  // start streaming", so the patterns must stay distinct.
-  const send = mapPreflightError('Timed out waiting for the model to start streaming (600s)', 'send');
-  assert.equal(send.kind, 'model-start-timeout', 'model-start fire classified as model-start-timeout, not prepass-timeout');
-  assert.ok(send.message.includes('600s'), 'budget surfaced in the message');
-  assert.ok(send.message.includes('concurrency slot'), 'message names the likely cause');
-  assert.ok(!send.message.toLowerCase().includes('pruning'), 'does not blame pruning');
-  assert.ok(!send.message.includes('req-'));
-
-  const edit = mapPreflightError('Timed out waiting for the model to start streaming (600s)', 'edit');
-  assert.equal(edit.kind, 'edit-failed');
-});
-
-test('mapPreflightError accepts DECIMAL-second model-start budgets', () => {
-  const send = mapPreflightError('Timed out waiting for the model to start streaming (12.5s)', 'send');
-  assert.equal(send.kind, 'model-start-timeout');
-  assert.ok(send.message.includes('12.5s'));
-});
-
 test('mapPreflightError classifies a ProviderGate saturation (queued for a concurrency slot) as model-start-timeout, NOT prepass-failed', () => {
   // When the send is legitimately QUEUED waiting for a provider concurrency
   // slot and the queueWait deadline elapses, ProviderGate throws a retryable

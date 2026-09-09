@@ -76,9 +76,6 @@ if (!(globalThis as { __PIE_SDK_HOOK_REGISTERED__?: boolean }).__PIE_SDK_HOOK_RE
 const __require = createRequire(import.meta.url);
 const __modesPath = path.resolve("extensions/subagent/src/modes.ts");
 const { executeSingleMode } = __require(__modesPath) as typeof import("../src/modes.js");
-const { resolvePhaseInactivityMs, PHASE_INACTIVITY_MS } = __require(
-	path.resolve("extensions/subagent/src/execute.ts"),
-) as typeof import("../src/execute.js");
 const { subagentRuntime } = __require(
 	path.resolve("extensions/subagent/runner.ts"),
 ) as typeof import("../runner.js");
@@ -659,11 +656,6 @@ test("retry wait publishes a running snapshot with advanced progressGeneration",
 	assert.equal(waitSnapshot.exitCode, -1, "retry_wait is an active child lifecycle, not a terminal attempt snapshot");
 	assert.equal(waitSnapshot.progressGeneration, 4, "progressGeneration must advance for retry_wait");
 	assert.ok(waitSnapshot.lastProgressAt != null, "lastProgressAt must be set");
-	assert.equal(
-		resolvePhaseInactivityMs(noOpDetails("single", [waitSnapshot])),
-		PHASE_INACTIVITY_MS.retry_wait,
-		"outer settlement must use the retry_wait phase budget",
-	);
 
 	await clock.advance(1_000_000);
 	const response = await responsePromise;

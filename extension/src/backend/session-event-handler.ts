@@ -19,7 +19,7 @@ export {
   type TerminalAppendMeasurement,
   type TerminalTransportMeasurement,
 } from './session-event-content-tool';
-export { resolveProviderSemanticInactivityMs, type BackendSessionEventHandlerDeps } from './session-event-shared';
+export { type BackendSessionEventHandlerDeps } from './session-event-shared';
 
 export const SDK_SESSION_EVENT_TYPES = [
   'agent_start',

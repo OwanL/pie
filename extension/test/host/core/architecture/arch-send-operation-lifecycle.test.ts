@@ -302,9 +302,8 @@ test('bounded reconciliation exhaustion exposes restart recovery without rollbac
   assert.ok(exhausted.transcript.bySession[SESSION]?.some((message) => message.id === 'local-1'));
 });
 
-test('preflight phase is reducer-owned and duplicate observations cannot regress it', () => {
+test('preflight success releases the send-timer once and duplicate observations cannot repeat it', () => {
   const optimistic = send(readyState());
-  assert.equal(optimistic.operations['op-1']?.executionPhase, 'prepass');
   const acknowledged = reducer(optimistic, {
     kind: 'SendResult', corrId: 'corr-1', operationId: 'op-1', backendGeneration: 7,
     sessionPath: SESSION, ok: true, requestId: 'request-1',
@@ -313,12 +312,14 @@ test('preflight phase is reducer-owned and duplicate observations cannot regress
     kind: 'CustomMessage', sessionPath: SESSION,
     message: { id: 'preflight', role: 'system', createdAt: '2026-01-01T00:00:00.000Z', markdown: '', status: 'completed', customType: 'preflight-succeeded' },
   });
-  assert.equal(succeeded.state.operations['op-1']?.executionPhase, 'model-start');
+  // The milestone removed the host-side model-start watchdog: preflight success
+  // only releases the runner's send-timer (corrId-addressed), and the accepted
+  // send then stays pre-commit indefinitely under backend authority.
+  assert.deepEqual(succeeded.effects, [{ kind: 'MarkPrepassSucceeded', corrId: 'corr-1' }]);
   const duplicate = reducer(succeeded.state, {
     kind: 'CustomMessage', sessionPath: SESSION,
     message: { id: 'preflight-duplicate', role: 'system', createdAt: '2026-01-01T00:00:01.000Z', markdown: '', status: 'completed', customType: 'preflight-succeeded' },
   });
-  assert.equal(duplicate.state.operations['op-1']?.executionPhase, 'model-start');
   assert.deepEqual(duplicate.effects, []);
 });
 

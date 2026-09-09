@@ -4,9 +4,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
+  compareNodeBundles,
   findCompatibleInstalledExtensionDir,
   publishRendererGeneration,
 } from './publication.mjs';
+import { hasRuntimeBootstrap, resolveRuntimeGeneration } from './runtime-publication.mjs';
 
 const rootDir = path.dirname(fileURLToPath(new URL('../package.json', import.meta.url)));
 const outDir = path.join(rootDir, 'out');
@@ -33,3 +35,12 @@ if (!extDir) {
 }
 const published = await publishRendererGeneration({ sourceDir: panelDir, extensionDir: extDir });
 console.log(`[build] Published renderer generation ${published.generation} → ${extDir}`);
+if (await hasRuntimeBootstrap(extDir)) {
+  const selected = await resolveRuntimeGeneration({ extensionDir: extDir, identity: pkg });
+  const status = await compareNodeBundles({ builtOutDir: outDir, installedOutDir: selected.outDir });
+  console.log(status.current
+    ? '[build] Matching runtime is staged for the next VS Code startup; running code was not changed.'
+    : '[build] Renderer-only publication. Run npm run extension:build at the repository root to stage these host/backend changes for the next VS Code startup.');
+} else {
+  console.warn('[build] One-time startup-loader setup required: npm run extension:activate at the repository root, then restart VS Code. Active sessions are not stopped by setup.');
+}

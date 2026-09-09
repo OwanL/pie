@@ -3,18 +3,17 @@
  * using injected clocks (no real-time sleeps).
  *
  * Covers:
- *  - Productive runs beyond 15 simulated minutes (fake clock, renewable lease)
+ *  - Productive runs beyond 15 simulated minutes (fake clock, no force settlement)
+ *  - Long stalled phases remain alive until explicit parent cancellation
  *  - Different-provider recovery (primary dead → secondary takes over)
- *  - Late-event fencing (stale generations rejected within same identity)
  *  - Hung abort / orphan observability (cleanup registry stats exposed)
- *  - Sibling-result preservation (force-settled child retains partial output)
- *  - Provider-change attempt identity (new identity = fresh generation)
+ *  - Explicit-abort child result preservation (partial output survives in results[])
  *  - Auth failure terminates immediately (no retry)
  *  - Abortable retry backoff (fake clock, instant abort)
  *
  * Uses injected RetryClock / CleanupScheduler for deterministic timing.
  * The `execute` function from execute.ts is used for integration scenarios.
- * `createProgressObserver` and `OrphanCleanupRegistry` are tested directly.
+ * `OrphanCleanupRegistry` is tested directly.
  */
 
 import test, { afterEach, after } from "node:test";
@@ -24,13 +23,13 @@ import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { execute, createProgressObserver, resolvePhaseInactivityMs } from "../src/execute.js";
+import { execute } from "../src/execute.js";
 import { OrphanCleanupRegistry, type CleanupScheduler } from "../src/cleanup.js";
 import type { RetryClock } from "../src/retry.js";
 
 // ESM resolve hook — redirects @mariozechner/pi-coding-agent to an in-memory mock.
 // Registered globally so all execute() calls see the mock. Guarded against
-// double-registration (modes.test.ts / settlement.test.ts may have run first).
+// double-registration (modes.test.ts may have run first).
 const MOCK_SDK_SOURCE = [
 	"export class DefaultResourceLoader { constructor(a){ this.a = a; } async reload(){} }",
 	"export const SessionManager = { inMemory(cwd){ return { cwd: cwd }; } };",
@@ -89,14 +88,10 @@ writeFileSync(
 );
 
 const ENV_KEYS = [
-	"PIE_SUBAGENT_SETTLEMENT_MS",
-	"PIE_SUBAGENT_SETTLEMENT_GRACE_MS",
-	"PIE_SUBAGENT_TIMEOUT_MS",
 	"PIE_SUBAGENT_MAX_INFLIGHT",
 	"PIE_SUBAGENT_ALWAYS_PARENT_MODEL",
 	"PIE_SUBAGENT_BUCKETS_JSON",
 	"PI_CODING_AGENT_DIR",
-	"PI_SUBAGENT_TIMEOUT_MS",
 	"PI_SUBAGENT_DEPTH",
 ] as const;
 
@@ -105,7 +100,6 @@ test.before(() => {
 	for (const key of ENV_KEYS) snapshot[key] = process.env[key];
 	process.env.PIE_SUBAGENT_ALWAYS_PARENT_MODEL = "1";
 	process.env.PIE_SUBAGENT_MAX_INFLIGHT = "8";
-	process.env.PIE_SUBAGENT_TIMEOUT_MS = "0";
 	process.env.PI_CODING_AGENT_DIR = agentDir;
 });
 test.beforeEach(() => {
@@ -133,11 +127,13 @@ after(() => {
 
 class FakeClock implements RetryClock {
 	nowMs = 0;
+	setTimerCalls = 0;
 	private timers: Array<{ deadline: number; resolve: () => void }> = [];
 
 	now(): number { return this.nowMs; }
 
 	setTimer(ms: number): ReturnType<RetryClock["setTimer"]> {
+		this.setTimerCalls++;
 		const deadline = this.nowMs + ms;
 		let resolve: () => void;
 		const promise = new Promise<void>((r) => { resolve = r; });
@@ -243,102 +239,18 @@ function messageEnd(text: string, stopReason: string): any {
 // 1. PRODUCTIVE PROGRESS BEYOND 15 SIMULATED MINUTES
 // ===========================================================================
 
-test("phase-specific inactivity leases distinguish provider, stream, and tool waits", () => {
-	delete process.env.PIE_SUBAGENT_SETTLEMENT_MS;
-	const details = (phase: "waiting_provider" | "streaming" | "running_tool") => ({
-		results: [{ exitCode: -1, activityPhase: phase }],
-	}) as never;
-	assert.equal(resolvePhaseInactivityMs(details("waiting_provider")), 5 * 60_000);
-	assert.equal(resolvePhaseInactivityMs(details("streaming")), 3 * 60_000);
-	assert.equal(resolvePhaseInactivityMs(details("running_tool")), 15 * 60_000);
-});
-
-test("execute(): a duplicate snapshot cannot relabel an already-armed settlement lease", async () => {
-	const previousSettlementMs = process.env.PIE_SUBAGENT_SETTLEMENT_MS;
-	const previousGraceMs = process.env.PIE_SUBAGENT_SETTLEMENT_GRACE_MS;
-	process.env.PIE_SUBAGENT_SETTLEMENT_MS = "690000";
-	process.env.PIE_SUBAGENT_SETTLEMENT_GRACE_MS = "0";
-	const clock = new FakeClock();
-	const capturedLogs: string[] = [];
-	const originalConsoleError = console.error;
-	let waitingProviderUpdates = 0;
-	let resolveDuplicate!: () => void;
-	const duplicateObserved = new Promise<void>((resolve) => { resolveDuplicate = resolve; });
-
-	setMockBehavior({ onPrompt: () => new Promise<void>(() => {}) });
-	console.error = (...args: unknown[]) => { capturedLogs.push(args.map(String).join(" ")); };
-	try {
-		const responseP = execute(
-			"tool-immutable-settlement-lease",
-			{ agent: "worker", task: "wait without progress" } as never,
-			new AbortController().signal,
-			(partial) => {
-				if (partial.details?.results?.[0]?.activityPhase !== "waiting_provider") return;
-				waitingProviderUpdates += 1;
-				if (waitingProviderUpdates === 1) {
-					// The first provider-wait transition credibly arms 690s. The runner
-					// publishes the same phase once more immediately before prompt(); that
-					// duplicate must not mutate the owned lease to this new selection.
-					process.env.PIE_SUBAGENT_SETTLEMENT_MS = "180000";
-				} else if (waitingProviderUpdates === 2) {
-					resolveDuplicate();
-				}
-			},
-			{ cwd: agentDir, hasUI: false, model: { id: "active-model", provider: "test" },
-				modelRegistry: { getAvailable: () => [], getAll: () => [], find: () => undefined } } as never,
-			{ getAllTools: () => [] } as never,
-			() => false,
-			{ clock },
-		);
-		await within(5000, duplicateObserved);
-
-		let settled = false;
-		void responseP.then(() => { settled = true; }, () => { settled = true; });
-		await clock.advance(689_999);
-		await flushAsync();
-		assert.equal(settled, false, "the duplicate's 180s selection must not replace the armed 690s lease");
-
-		await clock.advance(1);
-		const response = await within(5000, responseP);
-		assert.equal(response.isError, true);
-
-		const forceSettled = capturedLogs
-			.map((line) => {
-				try { return JSON.parse(line) as Record<string, unknown>; }
-				catch { return undefined; }
-			})
-			.find((event) => event?.event === "subagent force-settled");
-		assert.ok(forceSettled, "the expiration must emit its owned lease diagnostics");
-		assert.equal(forceSettled.settlementMs, 690_000);
-		assert.equal(forceSettled.idleMs, 690_000);
-		assert.equal(forceSettled.armedAt, 0);
-		assert.equal(forceSettled.deadlineAt, 690_000);
-		assert.equal(forceSettled.expiredAt, 690_000);
-		assert.equal(forceSettled.overdueMs, 0);
-	} finally {
-		console.error = originalConsoleError;
-		if (previousSettlementMs === undefined) delete process.env.PIE_SUBAGENT_SETTLEMENT_MS;
-		else process.env.PIE_SUBAGENT_SETTLEMENT_MS = previousSettlementMs;
-		if (previousGraceMs === undefined) delete process.env.PIE_SUBAGENT_SETTLEMENT_GRACE_MS;
-		else process.env.PIE_SUBAGENT_SETTLEMENT_GRACE_MS = previousGraceMs;
-	}
-});
-
-test("execute(): productive run beyond 15 simulated minutes renews the real settlement lease", async () => {
-	process.env.PIE_SUBAGENT_SETTLEMENT_MS = "120000";
-	process.env.PIE_SUBAGENT_SETTLEMENT_GRACE_MS = "0";
-
+test("execute(): productive run beyond 15 simulated minutes stays alive until explicit completion", async () => {
 	const clock = new FakeClock();
 
 	setMockBehavior({
 		onPrompt: async (emit: (event: unknown) => void) => {
 			for (let i = 0; i < 16; i++) {
-				// Advance half the inactivity budget, then publish credible progress.
-				// execute() uses this same clock, so each event re-arms the actual lease.
+				// Advance far past every historical phase lease between heartbeats.
+				// A force-settling lease would have killed this run long ago.
 				await clock.advance(60_000);
 				emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: `step ${i} ` } });
 				// Tool lifecycle changes publish immediately (unlike coalesced token
-				// bursts), giving the settlement boundary a deterministic heartbeat.
+				// bursts), giving the boundary a deterministic lifecycle heartbeat.
 				emit({ type: "tool_execution_start", toolCallId: `tc-${i}`, toolName: `read_file_${i}` });
 			}
 			emit({
@@ -366,23 +278,23 @@ test("execute(): productive run beyond 15 simulated minutes renews the real sett
 		{ clock },
 	));
 
-	assert.equal(response.isError, undefined, "productive run must not be force-settled");
+	assert.equal(response.isError, undefined, "a productive long run must complete, not be force-settled");
 	assert.equal(response.details.results[0]?.thinkingLevel, "high", "missing getThinkingLevel should use the high fallback");
 	assert.match((response.content?.[0] as { text?: string } | undefined)?.text ?? "", /more than 15 simulated minutes/);
 	assert.ok(clock.elapsed() > 900_000, `simulated time ${clock.elapsed()}ms should exceed 15 minutes`);
+	assert.equal(clock.setTimerCalls, 0, "settlement must not be replaced with another time guess");
 });
 
-test("execute(): headers with no first token settle at the inactivity bound", async () => {
-	process.env.PIE_SUBAGENT_SETTLEMENT_MS = "300000";
-	process.env.PIE_SUBAGENT_SETTLEMENT_GRACE_MS = "0";
+test("execute(): headers with no first token stay alive until explicit cancellation", async () => {
 	const clock = new FakeClock();
 	setMockBehavior({ onPrompt: () => new Promise<void>(() => {}) });
 
+	const controller = new AbortController();
 	let reachedProviderWait = false;
 	const responseP = execute(
 		"tool-no-first-token",
 		{ agent: "worker", task: "wait for first token" } as never,
-		new AbortController().signal,
+		controller.signal,
 		(partial) => {
 			reachedProviderWait ||= partial.details?.results?.[0]?.activityPhase === "waiting_provider";
 		},
@@ -394,14 +306,23 @@ test("execute(): headers with no first token settle at the inactivity bound", as
 	);
 	for (let i = 0; i < 100 && !reachedProviderWait; i++) await Promise.resolve();
 	assert.equal(reachedProviderWait, true, "the fake session must reach provider wait before time advances");
-	await clock.advance(300_000);
+
+	// No lease fires: far beyond the old provider-wait budget the dispatch is
+	// still alive. (Provider/header liveness remains bounded by ProviderGate in
+	// the host, outside this extension — not by a wall-clock run timer here.)
+	let settledEarly = false;
+	void responseP.then(() => { settledEarly = true; }, () => { settledEarly = true; });
+	await clock.advance(60 * 60_000);
+	await flushAsync();
+	assert.equal(settledEarly, false, "a stalled provider wait must not be force-settled by any time bound");
+
+	controller.abort();
 	const response = await within(5000, responseP);
 	assert.equal(response.isError, true);
-	assert.match(response.details.results[0]?.errorMessage ?? "", /abort|inactivity/i);
+	assert.match(response.details.results[0]?.errorMessage ?? "", /abort/i);
 });
 
 test("execute(): mid-stream disconnect is terminal and preserves partial output without replay", async () => {
-	process.env.PIE_SUBAGENT_SETTLEMENT_MS = "300000";
 	const clock = new FakeClock();
 	setMockBehavior({
 		onPrompt: async (emit: (event: unknown) => void) => {
@@ -427,9 +348,7 @@ test("execute(): mid-stream disconnect is terminal and preserves partial output 
 	assert.match(response.details.results[0]?.finalOutput ?? "", /partial response/);
 });
 
-test("execute(): output followed by a hung tool is bounded and retains the output", async () => {
-	process.env.PIE_SUBAGENT_SETTLEMENT_MS = "180000";
-	process.env.PIE_SUBAGENT_SETTLEMENT_GRACE_MS = "0";
+test("execute(): output followed by a hung tool stays alive and retains the output until explicit cancellation", async () => {
 	const clock = new FakeClock();
 	setMockBehavior({
 		onPrompt: async (emit: (event: unknown) => void) => {
@@ -438,11 +357,12 @@ test("execute(): output followed by a hung tool is bounded and retains the outpu
 			return new Promise<void>(() => {});
 		},
 	});
+	const controller = new AbortController();
 	let reachedHungTool = false;
 	const responseP = execute(
 		"tool-hung-after-output",
 		{ agent: "worker", task: "run a hung tool" } as never,
-		new AbortController().signal,
+		controller.signal,
 		(partial) => {
 			reachedHungTool ||= partial.details?.results?.[0]?.runningTools?.includes("external_write") === true;
 		},
@@ -454,10 +374,19 @@ test("execute(): output followed by a hung tool is bounded and retains the outpu
 	);
 	for (let i = 0; i < 100 && !reachedHungTool; i++) await Promise.resolve();
 	assert.equal(reachedHungTool, true, "the fake session must reach the hung tool phase before time advances");
-	await clock.advance(180_000);
+
+	// No lease fires: far beyond the old running_tool budget the dispatch is
+	// still alive.
+	let settledEarly = false;
+	void responseP.then(() => { settledEarly = true; }, () => { settledEarly = true; });
+	await clock.advance(30 * 60_000);
+	await flushAsync();
+	assert.equal(settledEarly, false, "a hung tool phase must not be force-settled by any time bound");
+
+	controller.abort();
 	const response = await within(5000, responseP);
 	assert.equal(response.isError, true);
-	assert.match(response.details.results[0]?.finalOutput ?? "", /answer before tool/);
+	assert.match(response.details.results[0]?.finalOutput ?? "", /answer before tool/, "partial output survives explicit cancellation");
 });
 
 // ===========================================================================
@@ -469,8 +398,6 @@ test("execute(): injected clock drives Retry-After wait and provider failover", 
 	Math.random = () => 0;
 	try {
 		delete process.env.PIE_SUBAGENT_ALWAYS_PARENT_MODEL;
-		process.env.PIE_SUBAGENT_SETTLEMENT_MS = "300000";
-		process.env.PIE_SUBAGENT_SETTLEMENT_GRACE_MS = "0";
 		process.env.PIE_SUBAGENT_BUCKETS_JSON = JSON.stringify({
 			small: [],
 			medium: assignedModels("model-a", "model-b"),
@@ -539,27 +466,7 @@ test("execute(): injected clock drives Retry-After wait and provider failover", 
 });
 
 // ===========================================================================
-// 3. LATE-EVENT FENCING
-// ===========================================================================
-
-test("createProgressObserver rejects stale 5 → 4 → 5 generations within one attempt", () => {
-	const observe = createProgressObserver();
-	assert.equal(observe({
-		results: [{ agent: "scout", task: "nested", progressGeneration: 5, messages: [], usage: { input: 0, output: 0, turns: 0 } }],
-	} as never), true, "first snapshot establishes the attempt");
-	assert.equal(observe({
-		results: [{ agent: "scout", task: "nested", progressGeneration: 4, messages: [], usage: { input: 0, output: 0, turns: 0 } }],
-	} as never), false, "decreasing generation is stale");
-	assert.equal(observe({
-		results: [{ agent: "scout", task: "nested", progressGeneration: 5, messages: [], usage: { input: 0, output: 0, turns: 0 } }],
-	} as never), false, "returning to the high-water is still stale");
-	assert.equal(observe({
-		results: [{ agent: "scout", task: "nested", progressGeneration: 6, messages: [], usage: { input: 0, output: 0, turns: 0 } }],
-	} as never), true, "only a value above the high-water mark renews");
-});
-
-// ===========================================================================
-// 4. HUNG ABORT / ORPHAN OBSERVABILITY
+// 3. HUNG ABORT / ORPHAN OBSERVABILITY
 // ===========================================================================
 
 test("OrphanCleanupRegistry: dispose failure is observable without blocking subsequent work", async () => {
@@ -607,13 +514,10 @@ test("OrphanCleanupRegistry: cleanup stats include attempt identity and observab
 });
 
 // ===========================================================================
-// 5. SIBLING-RESULT PRESERVATION
+// 4. EXPLICIT-ABORT CHILD RESULT PRESERVATION
 // ===========================================================================
 
-test("execute(): force-settled child preserves partial output in results[]", async () => {
-	process.env.PIE_SUBAGENT_SETTLEMENT_MS = "50";
-	process.env.PIE_SUBAGENT_SETTLEMENT_GRACE_MS = "0";
-
+test("execute(): a cancelled child preserves partial output in results[]", async () => {
 	setMockBehavior({
 		onPrompt: async (emit: (event: unknown) => void) => {
 			emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "partial " } });
@@ -621,48 +525,34 @@ test("execute(): force-settled child preserves partial output in results[]", asy
 		},
 	});
 
-	const response = await within(5000, execute(
+	const controller = new AbortController();
+	const responseP = execute(
 		"tool-sibling-preserve",
 		{ agent: "worker", task: "do work" } as never,
-		new AbortController().signal,
+		controller.signal,
 		() => undefined,
 		{ cwd: agentDir, hasUI: false, model: { id: "active-model", provider: "test" },
 			modelRegistry: { getAvailable: () => [], getAll: () => [], find: () => undefined } } as never,
 		{ getAllTools: () => [] } as never,
 		() => false,
-	));
+	);
+	// Give the child a moment to publish its partial output, then cancel.
+	await new Promise((resolve) => setTimeout(resolve, 30));
+	controller.abort();
+	const response = await within(5000, responseP);
 
-	assert.equal(response.isError, true, "stalled child force-settles");
+	assert.equal(response.isError, true, "the cancelled child settles with an error");
 	assert.ok(
 		response.details?.results && response.details.results.length > 0,
-		"force-settled child must preserve partial output in results[]",
+		"cancelled child must preserve partial output in results[]",
 	);
 });
 
 // ===========================================================================
-// 6. PROGRESS OBSERVER — provider/model change = new attempt identity
+// 5. RETRY CLOCK — abortable delay with fake clock
 // ===========================================================================
 
-test("createProgressObserver: provider change starts a new attempt identity", () => {
-	const observe = createProgressObserver();
-	assert.equal(observe({
-		results: [{ agent: "w", task: "t", progressGeneration: 5, provider: "provider-a", model: "model-a", messages: [], usage: { input: 0, output: 0, turns: 0 } }],
-	} as never), true, "establish attempt on provider-a");
-	assert.equal(observe({
-		results: [{ agent: "w", task: "t", progressGeneration: 6, provider: "provider-a", model: "model-a", messages: [], usage: { input: 0, output: 0, turns: 0 } }],
-	} as never), true, "newer gen on same provider is same attempt");
-	// Provider change → new identity (any generation valid).
-	assert.equal(observe({
-		results: [{ agent: "w", task: "t", progressGeneration: 0, provider: "provider-b", model: "model-b", messages: [], usage: { input: 0, output: 0, turns: 0 } }],
-	} as never), true, "provider change starts a new attempt identity");
-});
-
-// ===========================================================================
-// 7. RETRY CLOCK — abortable delay with fake clock
-// ===========================================================================
-
-test("execute(): parent abort settles even when child abort never resolves (settlement net)", async () => {
-	process.env.PIE_SUBAGENT_SETTLEMENT_MS = "0"; // net OFF — abort is the only escape
+test("execute(): parent abort settles even when child abort never resolves", async () => {
 	setMockBehavior({
 		onPrompt: () => new Promise<void>(() => {}),
 		onAbort: () => new Promise<void>(() => {}),
@@ -670,7 +560,7 @@ test("execute(): parent abort settles even when child abort never resolves (sett
 
 	const controller = new AbortController();
 	const responseP = execute(
-		"t-abort-settlement-off",
+		"t-abort-no-net",
 		{ agent: "worker", task: "do work" } as never,
 		controller.signal,
 		() => undefined,

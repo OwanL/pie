@@ -90,9 +90,6 @@ function createDeps() {
     async emitSessionListChanged() {
       observations.push({ kind: 'list' });
     },
-    recoverStuckSession(_context, reason) {
-      observations.push({ kind: 'recover', payload: reason });
-    },
   };
   return { deps, observations };
 }

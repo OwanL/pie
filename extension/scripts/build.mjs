@@ -6,11 +6,10 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 import {
-  activateInstalledOutput,
   findCompatibleInstalledExtensionDir,
   publishRendererGeneration,
-  writeFileIfChanged,
 } from './publication.mjs';
+import { hasRuntimeBootstrap, installRuntimeBootstrap, publishRuntimeGeneration, resolveRuntimeGeneration } from './runtime-publication.mjs';
 
 const rootDir = path.dirname(fileURLToPath(new URL('../package.json', import.meta.url)));
 const outDir = path.join(rootDir, 'out');
@@ -46,10 +45,23 @@ async function resolveCompatibleInstalledExtension(pkg) {
   const extDir = await findCompatibleInstalledExtensionDir(installedExtensionRoots(), pkg);
   if (extDir) return extDir;
   const id = `${pkg.publisher}.${pkg.name}`;
+  const message = `No exact installed ${id}@${pkg.version} folder/manifest match.`;
+  if (activate) {
+    throw new Error(`[build] ${message} --activate requires an exact compatible installation; install the matching VSIX first.`);
+  }
   console.warn(
-    `[build] No exact installed ${id}@${pkg.version} folder/manifest match. Renderer publication and activation were skipped; install the matching VSIX first.`,
+    `[build] ${message} Renderer publication and activation were skipped; install the matching VSIX first.`,
   );
   return null;
+}
+
+async function reportInstalledHostStatus(extDir, pkg) {
+  if (await hasRuntimeBootstrap(extDir)) {
+    const selected = await resolveRuntimeGeneration({ extensionDir: extDir, identity: pkg });
+    console.log(`[build] Runtime ${selected.generation ?? 'packaged'} is selected for the next VS Code startup. Running sessions keep their existing build; no restart was forced.`);
+    return;
+  }
+  console.warn('[build] One-time startup-loader setup required: npm run extension:activate. It does not stop active sessions. Restart VS Code afterward; subsequent builds load automatically on restart.');
 }
 
 async function writeSdkLocalManifest() {
@@ -89,24 +101,22 @@ async function verifyCoordinatedBuildIdentity(buildDir = outDir) {
 async function publishToInstalledExtension() {
   if (noSync) return;
 
-  // Watch mode emits host and renderer bundles independently. The host bundle
-  // is validation evidence only: ordinary publication installs one complete,
-  // immutable renderer generation and never replaces active host/backend code.
+  // Never mutate a loaded runtime: publish complete immutable output, then
+  // let the startup loader select it on the next natural extension activation.
   await verifyCoordinatedBuildIdentity();
+  if (watchMode && !skipTypecheck) {
+    await waitForChild(spawnLocalCli(tscCli, ['--noEmit', '--project', 'tsconfig.json'], 'Validating runtime publication'), 'TypeScript check');
+  }
   const pkg = JSON.parse(await readFile(path.join(rootDir, 'package.json'), 'utf8'));
   const extDir = await resolveCompatibleInstalledExtension(pkg);
   if (!extDir) return;
 
+  await writeSdkLocalManifest();
+  const staged = await publishRuntimeGeneration({ sourceOutDir: outDir, extensionDir: extDir, identity: pkg });
+  console.log(`[build] Staged complete runtime ${staged.generation} → ${extDir}`);
   if (activate) {
-    await writeSdkLocalManifest();
-    await activateInstalledOutput({
-      sourceOutDir: outDir,
-      extensionDir: extDir,
-      verify: verifyCoordinatedBuildIdentity,
-    });
-    await writeFileIfChanged(path.join(extDir, 'package.json'), `${JSON.stringify(pkg, null, 2)}\n`);
-    console.log(`[build] Activated host/backend output → ${extDir}`);
-    return;
+    await installRuntimeBootstrap({ extensionDir: extDir, pkg });
+    console.log('[build] Startup loader installed. Restart VS Code when convenient to load the staged runtime; active sessions were not interrupted.');
   }
 
   const published = await publishRendererGeneration({
@@ -114,6 +124,7 @@ async function publishToInstalledExtension() {
     extensionDir: extDir,
   });
   console.log(`[build] Published renderer generation ${published.generation} → ${extDir}`);
+  await reportInstalledHostStatus(extDir, pkg);
 }
 
 function scheduleRendererPublication() {

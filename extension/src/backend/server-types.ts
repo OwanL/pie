@@ -98,8 +98,6 @@ export interface ActiveRequest {
   /** Notice identities already emitted for this request, preventing SDK-level
    * retries of one response from flooding the user with duplicate notices. */
   providerIncidentNoticeKeys?: Set<string>;
-  /** Bounded settlement watchdog for terminal quota exhaustion. */
-  quotaSettlementTimer?: ReturnType<typeof setTimeout>;
   /** A durability-confirmed assistant segment that ended in tool use. When a
    * queued user message is injected after those tools settle, this candidate
    * closes the current UI reply before a fresh live accumulator is created for
@@ -122,20 +120,8 @@ export interface ActiveRequest {
    * correlation across the later compact-and-continue lifecycle. */
   mayNeedOverflowRecovery?: boolean;
   aborted: boolean;
-  /** Backend pre-commit safety-net timer (see `PROMPT_TIMEOUT_MS` in
-   *  `request-handler.ts`). Armed at `message.send` dispatch; MUST be cleared
-   *  at the commit point (first `message_start`) so a healthy multi-turn
-   *  agentic run is never aborted mid-stream. Without this clear, the timer
-   *  acts as a whole-run ceiling (only cleared on `session.prompt()`
-   *  `.finally`), killing any run exceeding `PROMPT_TIMEOUT_MS` even while it
-   *  is actively streaming. Cleared in `session-event-handler.ts` on the first
-   *  `message_start`, and defensively in `clearActiveRequest`. */
-  promptSafetyTimer?: ReturnType<typeof setTimeout>;
   /** In-memory sequenced authority for the current live turn. Never persisted. */
   liveTurnAccumulator?: BackendLiveTurnAccumulator;
-  /** Provider semantic inactivity lease; raw HTTP chunks never renew it. */
-  semanticLeaseTimer?: ReturnType<typeof setTimeout>;
-  semanticLeaseGeneration?: number;
 }
 
 export interface SessionContext {
@@ -183,17 +169,6 @@ export interface SessionContext {
    * re-enabling it restores exactly what was removed (including tools the
    * adapter re-registered while the pref was off). */
   mcpToolsWereActive?: string[];
-  /** Retry watchdog: armed on `agent_end willRetry:true`, re-armed on
-   *  `auto_retry_start` (delayMs + grace), cleared on `auto_retry_end` /
-   *  `agent_end willRetry:false`. If it elapses, emits `operational-error` +
-   *  `retry.stuck` so a retry that never completes (provider dies mid-backoff,
-   *  extension hook blocks the retry) is observable and recoverable instead of
-   *  the session sitting in willRetry forever. */
-  willRetryWatchdogTimer?: ReturnType<typeof setTimeout>;
-  /** The clear function returned by {@link armWillRetryWatchdog}. Stored on
-   *  the context so `auto_retry_end` / `agent_end willRetry:false` can clear it
-   *  without re-implementing the timer lookup. */
-  willRetryWatchdogClear?: () => void;
   /** Per-session FIFO queue of host-side optimistic `localId`s for
    *  steering/followUp messages that have been queued but not yet delivered.
    *  Pushed on successful `steer()`/`followUp()` in `handleMessageSend`; shifted

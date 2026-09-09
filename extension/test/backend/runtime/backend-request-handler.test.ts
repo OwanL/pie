@@ -1184,21 +1184,12 @@ test('message.send terminalizes an ordinary no-agent extension command', async (
   assert.equal((terminal?.payload as { sessionPath?: string }).sessionPath, harness.context.sessionPath);
 });
 
-// Regression: the backend pre-commit safety-net timer (PROMPT_TIMEOUT_MS) MUST
-// be cleared at the commit point (first assistant `message_start`), not only on
-// `session.prompt()` settle. Without this clear, a healthy multi-turn agentic
-// run (which keeps `session.prompt()` pending across all internal turns until
-// the whole run completes) is aborted mid-stream once the run exceeds
-// PROMPT_TIMEOUT_MS — surfacing as `stopReason: "aborted"` + "Request was
-// aborted." with all-zero usage. This test arms the timer with a pending
-// prompt, drives the commit-point `message_start`, then waits past the timer
-// budget and asserts no abort / preflight.failed fired.
-test('message.send pre-commit safety timer is cleared at the first message_start (no mid-stream abort)', async () => {
-  // Use a short, real timer budget to keep the test fast while still proving the
-  // clear happens. We patch PROMPT_TIMEOUT_MS indirectly by waiting longer than
-  // the production 10-min budget is impractical, so instead we assert the
-  // observable contract: after the commit point, the stashed timer handle is
-  // gone AND no abort/preflight.failed fires after a generous wait.
+// Deterministic contract: an accepted `message.send` whose prompt has not
+// committed (no first assistant `message_start`) and has not rejected is never
+// terminalized by elapsed time. No heuristic pre-commit safety-net timer is
+// armed at send time; only the exact SDK prompt lifecycle (settle/reject),
+// explicit Stop, and exact provider deadlines own the request.
+test('message.send leaves a pre-commit prompt unbounded by elapsed time (no heuristic timer)', async () => {
   let abortCalled = false;
   const promptResolve = new Promise<void>(() => {
     // Never resolves by default — simulates a long agentic run.
@@ -1221,10 +1212,10 @@ test('message.send pre-commit safety timer is cleared at the first message_start
     params: { sessionPath: '/repo/session.jsonl', text: 'Long run', inputs: [] },
   });
   assert.equal(typeof (sent as { requestId: string }).requestId, 'string');
-  // Timer armed at send time.
-  assert.ok(longRunHarness.context.activeRequest?.promptSafetyTimer, 'safety timer should be armed at send');
 
-  // Commit point: the first assistant message_start for this request.
+  // Cross the commit point (the first assistant message_start) and wait well
+  // past any historical heuristic window (10-minute safety net / 2-minute
+  // re-arms were cleared in tests at ~50ms). Nothing may fire.
   handleSdkSessionEvent(
     {
       emit: (event: string, payload?: unknown) => longRunHarness.emitted.push({ event, payload }),
@@ -1234,23 +1225,16 @@ test('message.send pre-commit safety timer is cleared at the first message_start
     longRunHarness.context,
     { type: 'message_start', message: { role: 'assistant' } } as SdkSessionEvent,
   );
+  await new Promise((resolve) => setTimeout(resolve, 60));
 
-  // The timer MUST be cleared at the commit point.
-  assert.equal(
-    longRunHarness.context.activeRequest?.promptSafetyTimer,
-    undefined,
-    'safety timer must be cleared at the first message_start (commit point)',
-  );
-
-  // Wait past the timer budget. The production budget is 10 min; we cannot wait
-  // that long in a unit test, so we assert the observable contract: the stashed
-  // handle is gone (cleared), so the timer callback cannot fire. The abort
-  // assertion is a belt-and-suspenders check that no abort was triggered by the
-  // (now-cleared) timer.
-  await new Promise((resolve) => setTimeout(resolve, 50));
-  assert.equal(abortCalled, false, 'session.abort() must not be called after the commit-point clear');
+  assert.equal(abortCalled, false, 'session.abort() must not be called by elapsed time');
   const failed = longRunHarness.emitted.find((e) => e.event === 'preflight.failed');
-  assert.equal(failed, undefined, 'no preflight.failed must fire after the commit point');
+  assert.equal(failed, undefined, 'no preflight.failed fires for a long pre-commit or committed prompt');
+  assert.notEqual(longRunHarness.context.activeRequest, undefined, 'the accepted request stays owned');
+  const timerFields = Object.keys(longRunHarness.context.activeRequest ?? {}).filter(
+    (key) => /Timer|Watchdog|Lease/.test(key),
+  );
+  assert.deepEqual(timerFields, [], 'activeRequest must not carry heuristic watchdog/lease timer fields');
 });
 
 test('message.compact joins duplicate attempts and preserves manual intent identity', async () => {
@@ -1846,7 +1830,6 @@ test('Stop cancels manual compaction that is still awaiting the SDK pre-compacti
   const harness = createHarness();
   const eventDeps: BackendSessionEventHandlerDeps = {
     ...harness.deps,
-    recoverStuckSession() {},
     async emitSessionOpened() {},
   };
   let markInitialAbortStarted!: () => void;
@@ -1948,7 +1931,6 @@ test('compaction_start/compaction_end re-arm busy so a compaction call stays int
   // provide); cast across the narrower event-handler deps shape for the test.
   const eventDeps: BackendSessionEventHandlerDeps = {
     ...harness.deps,
-    recoverStuckSession() {},
     async emitSessionOpened(sessionPath) {
       harness.emitted.push({ event: 'session.opened', payload: { sessionPath } });
     },

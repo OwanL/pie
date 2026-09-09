@@ -138,8 +138,7 @@ export function subagentActivity(result: SubagentSingleResult, now: number): Sub
         ? result.provider
         : result.activityDetail ?? (!result.activityPhase ? 'waiting for first status update' : undefined);
   const phaseElapsed = result.activitySince ? formatActivityDuration(now - result.activitySince) : undefined;
-  const budget = result.inactivityBudgetMs ? formatActivityDuration(result.inactivityBudgetMs) : undefined;
-  const diagnostic = [label, detail, phaseElapsed && `${phaseElapsed} in this state`, budget && `${budget} stall limit`]
+  const diagnostic = [label, detail, phaseElapsed && `${phaseElapsed} in this state`]
     .filter(Boolean)
     .join(' · ');
   return { label, detail, elapsed: phaseElapsed, diagnostic };

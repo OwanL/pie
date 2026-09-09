@@ -253,7 +253,7 @@ export function handleMessageFinished(state: ArchState, event: Extract<Event, { 
   const normalizedMessage = withAssistantParts(event.message);
   // A terminal can be the first observable boundary when a provider rejects
   // before emitting message_start. Settle the optimistic operation so its
-  // model-start timer cannot report a second, stale timeout later.
+  // send-timer cannot report a second, stale timeout later.
   const requestId = event.requestId;
   const turnOwner = requestId
     ? findPendingTurnOwner(state, event.sessionPath, requestId, true, event.operationId)

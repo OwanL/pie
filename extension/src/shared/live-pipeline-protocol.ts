@@ -97,7 +97,6 @@ export interface SubagentChildPreview {
   startedAt?: number;
   completedAt?: number;
   lastProgressAt?: number;
-  inactivityBudgetMs?: number;
   streaming?: boolean;
   streamingText?: string;
   streamingReasoning?: string;
@@ -211,7 +210,8 @@ export interface LiveTurnRecord {
   startedAt: number;
   phaseSince: number;
   lastSemanticProgressAt: number;
-  inactivityBudgetMs?: number;
+  /** Bounded cleanup budget published only while an explicit Stop is aborting the turn. */
+  cancellationCleanupBudgetMs?: number;
   parts: LiveAssistantPart[];
   /** Cached UTF-8 bytes by streamed part kind; maintained incrementally. */
   textBytes: number;
@@ -245,7 +245,6 @@ export interface LiveToolRecord {
   startedAt: number;
   phaseSince: number;
   lastProgressAt: number;
-  inactivityBudgetMs?: number;
   detail?: string;
   blocker?: ToolBlocker;
   preview?: ToolPreview;
@@ -311,7 +310,7 @@ export type TurnSemanticEnvelope =
       thinkingLevel?: ThinkingLevel;
       startedAt: number;
     })
-  | (SemanticEnvelopeBase & { kind: 'turn.phase'; phase: Exclude<LiveTurnPhase, 'reconciling_gap'>; inactivityBudgetMs?: number })
+  | (SemanticEnvelopeBase & { kind: 'turn.phase'; phase: Exclude<LiveTurnPhase, 'reconciling_gap'>; cancellationCleanupBudgetMs?: number })
   | (SemanticEnvelopeBase & { kind: 'turn.text'; delta: string })
   | (SemanticEnvelopeBase & { kind: 'turn.reasoning'; delta: string })
   | (SemanticEnvelopeBase & { kind: 'turn.toolDraft'; draft: LiveToolCallDraft })
@@ -426,7 +425,11 @@ export function isTurnSemanticEnvelope(value: unknown): value is TurnSemanticEnv
       && (value.provider === undefined || typeof value.provider === 'string')
       && (value.thinkingLevel === undefined || isThinkingLevel(value.thinkingLevel))
       && isFiniteNumber(value.startedAt);
-    case 'turn.phase': return isLiveTurnPhase(value.phase) && value.phase !== 'reconciling_gap' && optionalFiniteNumber(value.inactivityBudgetMs);
+    case 'turn.phase': return isLiveTurnPhase(value.phase) && value.phase !== 'reconciling_gap'
+      && (value.cancellationCleanupBudgetMs === undefined
+        || (isFiniteNumber(value.cancellationCleanupBudgetMs)
+          && value.cancellationCleanupBudgetMs >= 0
+          && value.phase === 'aborting'));
     case 'turn.text': case 'turn.reasoning': return typeof value.delta === 'string';
     case 'turn.toolDraft': return isRecord(value.draft)
       && typeof value.draft.toolCallId === 'string' && value.draft.toolCallId.length > 0

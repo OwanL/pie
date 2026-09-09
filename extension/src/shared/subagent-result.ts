@@ -114,7 +114,6 @@ export interface SubagentSingleResult {
   startedAt?: number;
   completedAt?: number;
   lastProgressAt?: number;
-  inactivityBudgetMs?: number;
   /** The model chosen for this run. */
   selectedModel?: string;
   /** Thinking level applied to this run. */
@@ -275,9 +274,9 @@ function terminalResultMessage(rawResult: unknown): string | undefined {
   return nonEmptyText(text);
 }
 
-/** A force-settle or pre-dispatch failure can legitimately finish with
+/** A pre-dispatch or compatibility-path failure can legitimately finish with
  * `details.results: []`. Falling back to the generic tool card hides every
- * requested child, which made the failed delegation appear to have vanished.
+ * requested child, which makes the failed delegation appear to have vanished.
  * Reconstruct the child cards from the immutable tool input and stamp the
  * terminal tool error onto each placeholder. */
 function synthesizeTerminalSubagentResult(input: unknown, rawResult: unknown): SubagentResult | undefined {
@@ -622,7 +621,6 @@ export function getRenderableSubagentResult(rawResult: unknown): SubagentResult 
         ...(typeof candidate.startedAt === 'number' ? { startedAt: candidate.startedAt } : {}),
         ...(typeof candidate.completedAt === 'number' ? { completedAt: candidate.completedAt } : {}),
         ...(typeof candidate.lastProgressAt === 'number' ? { lastProgressAt: candidate.lastProgressAt } : {}),
-        ...(typeof candidate.inactivityBudgetMs === 'number' ? { inactivityBudgetMs: candidate.inactivityBudgetMs } : {}),
         ...(typeof candidate.streaming === 'boolean' ? { streaming: candidate.streaming } : {}),
         ...(streamingText ? { streamingText } : {}),
         ...(typeof candidate.streamingReasoning === 'string' ? { streamingReasoning: candidate.streamingReasoning } : {}),
@@ -811,10 +809,9 @@ export function getRenderableSubagentResultFromToolCall(
   }
 
   // Terminal calls with empty/missing child results are not successful empty
-  // runs: the subagent protocol only emits that shape when execution failed
-  // before it could return per-child details (notably the settlement net).
-  // Keep the delegation visible and actionable instead of collapsing it into
-  // an opaque generic tool row.
+  // runs: legacy or pre-dispatch failures can end before per-child details are
+  // available. Keep the delegation visible and actionable instead of
+  // collapsing it into an opaque generic tool row.
   if (toolCall.result !== undefined) {
     return synthesizeTerminalSubagentResult(toolCall.input, toolCall.result);
   }

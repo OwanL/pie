@@ -602,19 +602,15 @@ export interface CancelBackendReadyWatchdogEffect extends EffectBase {
 }
 
 /**
- * Transition an in-flight send/edit from the pruning-prepass timeout window to
- * the model-start timeout window. Emitted when the backend's explicit
- * preflight-succeeded signal arrives, before the first assistant MessageStarted
- * commit point.
+ * Release the send-timer once the backend's explicit preflight-succeeded signal
+ * arrives, before the first assistant MessageStarted commit point. There is no
+ * host-side model-start watchdog: after preflight success the authoritative
+ * backend lifecycle (semantic boundaries, definitive preflight failure,
+ * generation death) plus an explicit Stop own the turn, and an accepted send
+ * may remain pre-commit indefinitely without timer side effects.
  */
 export interface MarkPrepassSucceededEffect extends EffectBase {
   kind: 'MarkPrepassSucceeded';
-  /** Registered operations carry immutable timer-event correlation so the
-   * runner stores only the opaque TimerHandle. Absent for legacy callers. */
-  operationId?: string;
-  operationAttempt?: number;
-  sessionPath?: string;
-  backendGeneration?: number;
 }
 
 /**

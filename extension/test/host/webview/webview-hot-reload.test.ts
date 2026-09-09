@@ -9,7 +9,9 @@ import test from 'node:test';
 
 import {
   activateInstalledOutput,
+  compareNodeBundles,
   findCompatibleInstalledExtensionDir,
+  formatNodeBundleStatus,
   publishRendererGeneration,
   resolvePublishedRendererGeneration,
 } from '../../../scripts/publication.mjs';
@@ -129,6 +131,81 @@ test('installed selection requires matching folder identity and manifest version
     await rm(wrongVersion, { recursive: true, force: true });
     const matching = await createInstalledExtension(root);
     assert.equal(await findCompatibleInstalledExtensionDir([root], PACKAGE), matching);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('host status compares flat bundles and dependency chunks without mutating installed output', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'pie-host-status-'));
+  const builtOutDir = path.join(root, 'built');
+  const installedOutDir = path.join(root, 'installed');
+  const bundleContents = {
+    'extension.js': 'host-v2',
+    'backend.js': 'backend-v2',
+    'worker-entry.js': 'worker-v2',
+    'shared-new-hash.js': 'dependency-v2',
+  };
+  try {
+    await Promise.all([
+      mkdir(builtOutDir, { recursive: true }),
+      mkdir(installedOutDir, { recursive: true }),
+    ]);
+    await Promise.all(Object.entries(bundleContents).flatMap(([name, contents]) => [
+      writeFile(path.join(builtOutDir, name), contents),
+      writeFile(path.join(installedOutDir, name), contents),
+    ]));
+
+    const snapshot = async (): Promise<string[]> => Promise.all(
+      (await readdir(installedOutDir)).sort().map(async (name) => `${name}:${await readFile(path.join(installedOutDir, name), 'utf8')}`),
+    );
+    const beforeMatching = await snapshot();
+    const matching = await compareNodeBundles({ builtOutDir, installedOutDir });
+    assert.equal(matching.current, true);
+    assert.deepEqual(await snapshot(), beforeMatching, 'status inspection must not mutate installed files');
+    assert.match(formatNodeBundleStatus({ status: matching, builtOutDir, installedOutDir }), /bundles match installed files on disk/);
+
+    await writeFile(path.join(installedOutDir, 'extension.js'), 'host-v1');
+    const stale = await compareNodeBundles({ builtOutDir, installedOutDir });
+    assert.equal(stale.current, false);
+    assert.deepEqual(stale.mismatched, ['extension.js']);
+    const pendingMessage = formatNodeBundleStatus({ status: stale, builtOutDir, installedOutDir });
+    assert.match(pendingMessage, /HOST INSTALL PENDING/);
+    assert.match(pendingMessage, /host\/backend changes are NOT installed/);
+    assert.match(pendingMessage, /Restarting or rebooting alone will not install/);
+    assert.match(pendingMessage, /After running work finishes/);
+
+    await writeFile(path.join(installedOutDir, 'extension.js'), bundleContents['extension.js']);
+    await rm(path.join(installedOutDir, 'worker-entry.js'));
+    const missing = await compareNodeBundles({ builtOutDir, installedOutDir });
+    assert.equal(missing.current, false);
+    assert.deepEqual(missing.missingInstalled, ['worker-entry.js']);
+
+    await writeFile(path.join(installedOutDir, 'worker-entry.js'), bundleContents['worker-entry.js']);
+    await rm(path.join(installedOutDir, 'shared-new-hash.js'));
+    await writeFile(path.join(installedOutDir, 'shared-old-hash.js'), 'dependency-v1');
+    const dependencyMismatch = await compareNodeBundles({ builtOutDir, installedOutDir });
+    assert.equal(dependencyMismatch.current, false);
+    assert.deepEqual(dependencyMismatch.missingInstalled, ['shared-new-hash.js']);
+    assert.deepEqual(dependencyMismatch.extraInstalled, ['shared-old-hash.js']);
+
+    const beforeUnreadable = await snapshot();
+    const unreadable = await compareNodeBundles({
+      builtOutDir,
+      installedOutDir,
+      readFile: async (filePath) => {
+        if (filePath === path.join(installedOutDir, 'backend.js')) {
+          const error = new Error('injected sharing violation') as NodeJS.ErrnoException;
+          error.code = 'EBUSY';
+          throw error;
+        }
+        return readFile(filePath);
+      },
+    });
+    assert.equal(unreadable.current, false);
+    assert.deepEqual(unreadable.unreadableInstalled, ['backend.js']);
+    assert.deepEqual(await snapshot(), beforeUnreadable, 'unreadable status inspection must not mutate installed files');
+    assert.match(formatNodeBundleStatus({ status: unreadable, builtOutDir, installedOutDir }), /HOST INSTALL STATUS UNKNOWN/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -314,6 +391,44 @@ test('explicit activation replaces host/backend output only through its separate
     await activateInstalledOutput({ sourceOutDir, extensionDir, verify });
     assert.equal(await readFile(path.join(extensionDir, 'out', 'extension.js'), 'utf8'), 'host-v2');
     assert.equal(await readFile(path.join(extensionDir, 'out', 'backend.js'), 'utf8'), 'backend-v2');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('activation failure gives closed-window external-terminal guidance after rollback', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'pie-explicit-activation-failure-'));
+  try {
+    const extensionDir = await createInstalledExtension(path.join(root, 'extensions'));
+    const sourceOutDir = path.join(root, 'compiled-out');
+    await mkdir(sourceOutDir, { recursive: true });
+    await Promise.all([
+      writeFile(path.join(sourceOutDir, 'extension.js'), 'host-v2'),
+      writeFile(path.join(sourceOutDir, 'backend.js'), 'backend-v2'),
+      writeFile(path.join(sourceOutDir, 'worker-entry.js'), 'worker-v2'),
+    ]);
+    let destinationVerifications = 0;
+    await assert.rejects(
+      activateInstalledOutput({
+        sourceOutDir,
+        extensionDir,
+        verify: async (directory) => {
+          await Promise.all(hostFiles(directory).map((file) => stat(file)));
+          if (directory === path.join(extensionDir, 'out') && destinationVerifications++ === 0) {
+            throw new Error('injected destination lock');
+          }
+        },
+      }),
+      (error: unknown) => {
+        assert.match(String(error), /Close all Pie-using VS Code windows/);
+        assert.match(String(error), /finished sessions\/chat tabs are insufficient/);
+        assert.match(String(error), /external terminal/);
+        assert.match(String(error), /npm run extension:activate/);
+        return true;
+      },
+    );
+    assert.equal(await readFile(path.join(extensionDir, 'out', 'extension.js'), 'utf8'), 'host-v1');
+    assert.equal(await readFile(path.join(extensionDir, 'out', 'backend.js'), 'utf8'), 'backend-v1');
   } finally {
     await rm(root, { recursive: true, force: true });
   }

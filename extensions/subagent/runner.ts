@@ -177,27 +177,6 @@ async function loadSubagentSdk(): Promise<SubagentSdk> {
 	return cachedSdkPromise;
 }
 
-/** Environment key for overriding the per-prompt subagent timeout (milliseconds). */
-const SUBAGENT_TIMEOUT_ENV = "PI_SUBAGENT_TIMEOUT_MS";
-
-/** No absolute per-prompt timeout is applied unless explicitly opted in. */
-export const DEFAULT_SUBAGENT_TIMEOUT_MS = 0;
-
-/**
- * Resolve the optional absolute per-prompt timeout for subagent runs.
- *
- * `PI_SUBAGENT_TIMEOUT_MS` is an opt-in containment ceiling: only a finite,
- * positive value enables it. Unset, empty, zero, negative, and non-finite
- * values all return `0`, leaving parent cancellation and the renewable
- * tree-wide settlement inactivity lease to handle a stalled child.
- */
-export function resolveSubagentTimeoutMs(): number {
-	const raw = process.env[SUBAGENT_TIMEOUT_ENV];
-	if (raw === undefined || raw === "") return 0;
-	const ms = Number(raw);
-	return Number.isFinite(ms) && ms > 0 ? ms : 0;
-}
-
 /**
  * Mutable counter shared across an entire nested subagent tree via
  * {@link subagentRuntime}. A fresh one is created at the outermost call and
@@ -375,8 +354,8 @@ function createInitialResult(
 	return result;
 }
 
-/** Record a credible child event. The generation, not its timestamp, is the
- * settlement lease's source of truth: duplicate snapshots leave it unchanged. */
+/** Record a credible child event. The generation (not its timestamp) is the
+ * dedupe/fencing key: duplicate snapshots leave it unchanged. */
 function markProgress(result: SingleResult): void {
 	result.progressGeneration = (result.progressGeneration ?? 0) + 1;
 	result.lastProgressAt = Date.now();
@@ -681,8 +660,8 @@ function progressFingerprint(value: unknown, trace?: ProgressFingerprintTrace): 
 }
 
 /** Only a changed nested/tool partial is a tool-update heartbeat. SDKs may
- * repeat an identical `onUpdate` payload while hung; that must remain visible
- * without renewing the parent tree's inactivity lease. */
+ * repeat an identical `onUpdate` payload while hung; deduplication keeps those
+ * duplicates from faking progress in the parent UI. */
 function isNewToolProgress(
 	toolProgress: Map<string, string>,
 	toolCallId: string,
@@ -933,7 +912,7 @@ function handleMessageEnd(
 /** Build an error stamped as an AbortError and carrying the pre-spawn `stage`
  *  that was interrupted, so callers see *where* the abort happened rather than
  *  a bare "Request was aborted". Mirrors the stage-enrichment used by
- *  `applyThrownError` / `applyTimeoutFailure` for the prompt phase. */
+ *  `applyThrownError` for the prompt phase. */
 function abortError(stage: string): Error {
 	const err = new Error(`Subagent aborted (while ${stage})`);
 	err.name = "AbortError";
@@ -966,13 +945,13 @@ async function raceAbort<T>(signal: AbortSignal | undefined, promise: Promise<T>
 	});
 }
 
-/** Race a promise against a timeout — used ONLY for the `parentAlreadyAborted`
- *  branch where `raceAbort` can't be used (the signal is already aborted so
- *  `raceAbort` would throw immediately). Without this, a hung SDK/dead proxy
- *  that ignores `session.abort()` would dangle the worker until the 30-min
- *  settlement timer fires (the "scout :2 starts after abort" timing window).
- *  The timeout is long enough for a fast SDK to settle (especially after
- *  `session.abort()` is called), short enough that the user isn't stuck. */
+/** Race a promise against a short bounded timeout — used ONLY for the
+ *  `parentAlreadyAborted` branch where `raceAbort` can't be used (the signal is
+ *  already aborted so `raceAbort` would throw immediately). Without this, a
+ *  hung SDK/dead proxy that ignores `session.abort()` would dangle the worker
+ *  forever on an already-cancelled delegation. This is bounded cleanup after
+ *  cancellation, NOT an absolute prompt timer: a live run is never raced
+ *  against wall-clock time. */
 function raceTimeout<T>(stage: string, ms: number, promise: Promise<T>): Promise<T> {
 	return new Promise<T>((resolve, reject) => {
 		const timer = setTimeout(() => reject(abortError(stage)), ms);
@@ -1010,95 +989,11 @@ function hardAbortBillable(session: unknown): void {
 }
 
 /** Emit a structured, machine-readable error log for a subagent hardening
- *  event (abort, force-settle, pre-spawn failure). Pinned to `[pie:subagent]`
+ *  event (abort, pre-spawn failure). Pinned to `[pie:subagent]`
  *  via a `source` field so it's grep-able in the host log stream. Loud, not
- *  quiet — every timeout/abort path calls this. */
+ *  quiet — every abort path calls this. */
 function logLoud(event: string, details: Record<string, unknown>): void {
 	console.error(JSON.stringify({ source: "pie:subagent", event, ...details }));
-}
-
-/** Build a per-call abort signal that fires on either the parent signal or the timeout. */
-function buildCombinedAbortSignal(parentSignal: AbortSignal | undefined, timeoutMs: number): {
-	timeoutSignal: AbortSignal | undefined;
-	/** The combined signal (parent ∨ timeout). `undefined` when neither source
-	 *  is configured (no parent signal AND timeout disabled) — callers should
-	 *  treat `undefined` as "prompt runs uninterrupted". Exposed so the caller
-	 *  can race `session.prompt()` against it: a prompt that ignores
-	 *  `session.abort()` (a hung provider stream / hung SDK) would otherwise
-	 *  hang the parent even after the timeout fires. */
-	combinedSignal: AbortSignal | undefined;
-	onAbort: (handler: () => void) => () => void;
-	/** Clear the refed timeout timer. MUST be called when the run settles
-	 *  (success, abort, or timeout) so the timer doesn't keep the event loop
-	 *  alive after the result is ready. No-op when no timeout is configured. */
-	cleanup: () => void;
-} {
-	// No timeout configured (timeoutMs <= 0): only the parent signal can
-	// interrupt the run. If there is no parent signal either, the prompt runs
-	// uninterrupted until it completes naturally — subagents do not time out.
-	if (!(timeoutMs > 0)) {
-		const onAbort = (handler: () => void): (() => void) => {
-			if (!parentSignal) return () => {};
-			parentSignal.addEventListener("abort", handler, { once: true });
-			return () => parentSignal.removeEventListener("abort", handler);
-		};
-		return { timeoutSignal: undefined, combinedSignal: parentSignal, onAbort, cleanup: () => {} };
-	}
-
-	// Create a REfed timeout timer. AbortSignal.timeout(timeoutMs) uses an
-	// internally unref'd timer (Node: "we also don't want the timer to keep the
-	// Node.js process open on its own"), which means a subagent run whose only
-	// pending work is that unref'd timer + a never-resolving promise (a hung
-	// provider stream, or a hanging test mock) will see the event loop drain
-	// and `beforeExit` fire BEFORE the timeout can trigger — the timeout never
-	// fires, the run never settles, and node:test cancels the test
-	// ("Promise resolution is still pending but the event loop has already
-	// resolved"). This was the root cause of the execution-paths.test.ts
-	// 12-test cascade: tests #3-#14 were cancelled because the timeout signal
-	// never fired under node:test. A refed setTimeout guarantees the timer
-	// fires; the `cleanup` return clears it when the run settles so it doesn't
-	// linger after the result is ready.
-	const timeoutController = new AbortController();
-	const timeoutTimer = setTimeout(() => {
-		timeoutController.abort(new Error(`Subagent timed out after ${timeoutMs}ms`));
-	}, timeoutMs);
-	const timeoutSignal = timeoutController.signal;
-	const cleanupTimeout = () => clearTimeout(timeoutTimer);
-
-	let signal: AbortSignal;
-	if (parentSignal) {
-		if (typeof AbortSignal.any === 'function') {
-			signal = AbortSignal.any([parentSignal, timeoutSignal]);
-		} else {
-			// Fallback for runtimes without AbortSignal.any
-			const controller = new AbortController();
-			const stop = (reason: () => void) => {
-				reason();
-				parentSignal.removeEventListener('abort', onParent);
-				timeoutSignal.removeEventListener('abort', onTimeout);
-			};
-			const onParent = () => stop(() => controller.abort());
-			const onTimeout = () => stop(() => controller.abort());
-			if (parentSignal.aborted) {
-				stop(() => controller.abort());
-			} else {
-				parentSignal.addEventListener('abort', onParent, { once: true });
-			}
-			if (timeoutSignal.aborted) {
-				stop(() => controller.abort());
-			} else {
-				timeoutSignal.addEventListener('abort', onTimeout, { once: true });
-			}
-			signal = controller.signal;
-		}
-	} else {
-		signal = timeoutSignal;
-	}
-	const onAbort = (handler: () => void): (() => void) => {
-		signal.addEventListener("abort", handler, { once: true });
-		return () => signal.removeEventListener("abort", handler);
-	};
-	return { timeoutSignal, combinedSignal: signal, onAbort, cleanup: cleanupTimeout };
 }
 
 /** Preserve visible partial prose before terminalization clears live-only fields. */
@@ -1117,18 +1012,6 @@ function clearLiveState(result: SingleResult): void {
 	result.streaming = false;
 }
 
-/** Apply a timeout-failure to a result. */
-function applyTimeoutFailure(result: SingleResult, timeoutMs: number, stage?: string): void {
-	result.exitCode = 1;
-	result.stopReason = "timeout";
-	const suffix = stage ? ` (while ${stage})` : "";
-	result.errorMessage = `Subagent timed out after ${timeoutMs / 1000}s waiting for model response${suffix}.`;
-	classifyProviderFailure(result);
-	preservePartialOutput(result);
-	clearLiveState(result);
-	setActivity(result, "failed", result.errorMessage);
-}
-
 /** Apply a stop-reason-based exit code to a result. */
 function applyStopReason(result: SingleResult, parentAborted: boolean, stage?: string): void {
 	const stop = result.stopReason;
@@ -1145,9 +1028,9 @@ function applyStopReason(result: SingleResult, parentAborted: boolean, stage?: s
 	}
 	if (result.exitCode !== 0) classifyProviderFailure(result);
 	// Enrich whatever message we have (the SDK's raw "Request was aborted" or
-	// similar) with the run stage and cause, mirroring applyTimeoutFailure /
-	// applyThrownError — otherwise an abort surfaces as a bare, contextless
-	// provider string with no indication of when/why it happened.
+	// similar) with the run stage and cause, mirroring applyThrownError —
+	// otherwise an abort surfaces as a bare, contextless provider string with no
+	// indication of when/why it happened.
 	if (stop === "aborted" && stage) {
 		const cause = parentAborted ? "parent interrupted" : "provider/session aborted";
 		const base = result.errorMessage || "Request was aborted";
@@ -1323,10 +1206,9 @@ export async function runSingleAgent(
 	 *  (those without a `tools:` frontmatter). Undefined → only explicit
 	 *  `agent.tools` can be filtered. */
 	allToolNames?: string[],
-	/** Internal test seam to avoid loading the real SDK and long timeout delays. */
+	/** Internal test seam to avoid loading the real SDK. */
 	_internal?: {
 		sdk?: SubagentSdk;
-		timeoutMs?: number;
 		orphanRegistry?: OrphanCleanupRegistry;
 		clock?: RetryClock;
 	},
@@ -1422,7 +1304,6 @@ export async function runSingleAgent(
 	const emitUpdate = createUpdateEmitter(currentResult, onUpdate, makeDetails, streamingTextRef, _toolCallId);
 
 	const sdk = _internal?.sdk ?? (await loadSubagentSdk());
-	const promptTimeoutMs = _internal?.timeoutMs ?? resolveSubagentTimeoutMs();
 
 	// 4. Build an isolated resource loader and create the session.
 	// - appendSystemPrompt threads the agent's instructions into the system prompt
@@ -1764,7 +1645,7 @@ export async function runSingleAgent(
 		throw error;
 	}
 
-	// 6. Run the prompt with timeout / parent-signal handling, then shape the final result.
+	// 6. Run the prompt with parent-signal handling, then shape the final result.
 	try {
 		if (parentAlreadyAborted) {
 			// If the parent signal is already aborted, run the prompt anyway
@@ -1780,13 +1661,16 @@ export async function runSingleAgent(
 			return currentResult;
 		}
 
-		const { timeoutSignal, combinedSignal, onAbort, cleanup } = buildCombinedAbortSignal(signal, promptTimeoutMs);
-		let timedOut = false;
+		// The prompt is raced directly against the parent signal. There is no
+		// absolute per-prompt timer: settlement is owned by explicit completion or
+		// parent/user cancellation, plus the local terminal CAS and bounded
+		// detached cleanup below.
+		const onAbort = (handler: () => void): (() => void) => {
+			if (!signal) return () => {};
+			signal.addEventListener("abort", handler, { once: true });
+			return () => signal.removeEventListener("abort", handler);
+		};
 		const removeAbortListener = onAbort(() => {
-			// If the prompt timeout has fired (even if the parent signal also fired
-			// simultaneously), flag it as a timeout so callers can distinguish the cause.
-			// When the timeout is disabled, timeoutSignal is undefined and this never fires.
-			if (timeoutSignal?.aborted) timedOut = true;
 			// Immediately stop the child's billable windows (compaction,
 			// branch-summary, bash, retry) — these run in the gap between
 			// agent_end and teardownSession and are NOT covered by abort().
@@ -1802,14 +1686,14 @@ export async function runSingleAgent(
 				agent: agentName,
 				task,
 				stage: stageRef.value,
-				cause: timedOut ? "timeout" : "parent-abort",
+				cause: "parent-abort",
 			});
 			// The 5s dangling-grace timer MUST be clearable: when abort() settles
 			// promptly (the common case) the raw `setTimeout` reference would
 			// otherwise linger for the full 5s, keeping the event loop alive and
 			// tripping node:test's "Promise resolution is still pending" guard on
-			// every abort/timeout path (which cascaded into cancelling every later
-			// test in execution-paths.test.ts). `clearTimeout` on settle removes it.
+			// every abort path (which cascaded into cancelling every later test in
+			// execution-paths.test.ts). `clearTimeout` on settle removes it.
 			let danglingTimer: ReturnType<typeof setTimeout> | undefined;
 			void Promise.race([
 				session.abort(),
@@ -1824,7 +1708,7 @@ export async function runSingleAgent(
 							task,
 							stage: stageRef.value,
 							cause: "abort-never-settled",
-							note: "session.abort() did not settle within 5s — provider teardown may be stuck; the prompt race + settlement net are the remaining escapes",
+							note: "session.abort() did not settle within 5s — provider teardown may be stuck; the local prompt race and detached cleanup are the remaining escapes",
 						});
 					} else {
 						logLoud("child.abort.completed", {
@@ -1852,43 +1736,20 @@ export async function runSingleAgent(
 		stageRef.value = "waiting for model response";
 		setActivity(currentResult, "waiting_provider", currentResult.provider ? `waiting for ${currentResult.provider}` : "waiting for model response");
 		emitUpdate();
-		// Race the prompt against the combined abort signal. A hung provider
-		// stream / hung SDK that ignores `session.abort()` would otherwise
-		// hang the parent even after the timeout fires — racing the prompt
-		// against the signal guarantees the parent tool-call settles promptly
-		// once the abort/timeout is observable. `combinedSignal` is undefined
-		// only when there is no parent signal AND the opt-in timeout is disabled;
-		// in that case the prompt runs uninterrupted and the settlement net is the
-		// liveness escape.
+		// Race the prompt against the parent signal. A hung provider stream /
+		// hung SDK that ignores `session.abort()` would otherwise hang the parent
+		// even after cancellation — racing the prompt against the signal
+		// guarantees the parent tool-call settles promptly once cancellation is
+		// observable. With no signal at all (test/edge shape only) the prompt runs
+		// uninterrupted until it completes naturally.
 		try {
-			if (combinedSignal) {
-				await raceAbort(combinedSignal, runPrompt(), "waiting for model response");
+			if (signal) {
+				await raceAbort(signal, runPrompt(), "waiting for model response");
 			} else {
 				await runPrompt();
 			}
-		} catch (err) {
-			// The prompt race rejects when the combined abort signal fires
-			// (parent abort OR timeout). When the timeout was the cause —
-			// recorded by the onAbort listener setting `timedOut` — stamp a
-			// timeout failure so callers can distinguish a hung model response
-			// from a user-initiated stop. This must be checked HERE, before the
-			// prompt-rejection propagates to the outer catch: the outer catch
-			// applies the generic `applyThrownError` (which leaves stopReason
-			// undefined and stamps a bare "Request was aborted" message),
-			// losing the timeout cause. Returning here short-circuits the outer
-			// catch for the timeout case; non-timeout aborts fall through to the
-			// outer catch to preserve their enriched stage/cause message.
-			if (timedOut) {
-				applyTimeoutFailure(currentResult, promptTimeoutMs, stageRef.value);
-				return currentResult;
-			}
-			throw err;
 		} finally {
 			removeAbortListener();
-			// Clear the refed timeout timer now that the race has settled —
-			// without this the timer would linger for the remaining timeout
-			// window and keep the event loop alive after the result is ready.
-			cleanup();
 		}
 
 		applyStopReason(currentResult, !!signal?.aborted, stageRef.value);

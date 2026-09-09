@@ -25,8 +25,8 @@ test('operational error detail retains code, backend cause, and request correlat
 
 test('operational error detail remains useful without optional backend fields', () => {
   assert.equal(formatOperationalErrorDetail({
-    code: 'RETRY_STUCK',
-    message: 'The retry did not settle.',
+    code: 'INTERRUPT_ABORT_STUCK',
+    message: 'The interrupt did not settle.',
     sessionPath: '/workspace/session.jsonl',
-  }), 'Code: RETRY_STUCK');
+  }), 'Code: INTERRUPT_ABORT_STUCK');
 });

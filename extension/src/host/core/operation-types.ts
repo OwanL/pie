@@ -118,8 +118,6 @@ export interface SessionOperation {
     maxAttempts: number;
     lastError?: string;
   };
-  /** User-visible execution phase for send/edit before semantic commit. */
-  executionPhase?: 'prepass' | 'model-start';
   /** Prevent duplicate compact terminal events from re-applying UI outcome. */
   terminalEvidenceApplied?: boolean;
 }

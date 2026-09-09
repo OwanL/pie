@@ -184,9 +184,9 @@ Every dispatched child result exposes audit metadata directly on its
   child. These fields are retained on running, terminal, retried, and compacted
   results; they never duplicate image bytes in the parent transcript.
 
-The immutable call fields are reattached to progress, terminal, retried, and
-force-settled details. Effective model/provider/family track the final serving
-attempt rather than the initially requested model.
+The immutable call fields are reattached to progress, terminal, and retried
+details. Effective model/provider/family track the final serving attempt rather
+than the initially requested model.
 
 ## Nested Bucket Allowlist
 
@@ -331,47 +331,38 @@ only host-side tool override.
 
 ## Timeouts
 
-Subagents have **no short wall-clock deadline by default**. Productive work may
-continue indefinitely while it reports credible progress. An outer settlement inactivity
-net force-settles a completely silent dispatch after 12 minutes by default.
-Only credible child progress renews that outer deadline: lifecycle/retry/terminal
-transitions, model/reasoning/tool-call streaming, and tool start/update/end
-(including nested descendant progress propagated through `tool_execution_update`).
-Repeated identical `onUpdate` snapshots do not renew it.
-`PIE_SUBAGENT_SETTLEMENT_MS` can override the inactivity budget or disable it
-with `0`. Parent cancellation remains immediate.
+Subagents have **no wall-clock deadline at all**. Productive work may continue
+indefinitely through long queued, preparing, streaming, tool, and retry phases;
+settlement is owned exclusively by explicit lifecycle events — the child
+completing, the parent/user cancelling, or a provider failure exhausting its
+retry bounds. There is no elapsed-inactivity net, no phase-specific lease, and
+no absolute prompt timer: none of those existed to mask a healthy child, and
+none has been replaced with another time guess. Parent cancellation remains
+immediate.
 
-Phase-specific inactivity leases are active by default: queued 10m,
-preparing 2m, provider/header wait 5m, streaming/first-token progress 3m,
-running tools 15m, retry wait 3m, and orphan cleanup 1m. The latest observable
-child phase selects the lease; an explicit `PIE_SUBAGENT_SETTLEMENT_MS` override
-continues to control every phase for compatibility. Provider-aware retry
-backoff/`Retry-After` is also active: failed transient attempts record bounded per-attempt analytics, exclude
-every configured model of the failed provider from fallback, and wait with a
-clamped Retry-After hint or bounded exponential backoff before replaying a
-safe turn. Auth/client failures and any turn with visible output or tool side
-effects are never retried.
-An orphan cleanup registry is also active: if session creation loses an
-abort/timeout race, the underlying creation promise is retained, and a
-late-resolved session is disposed exactly once without ever reaching setup or
-prompt. The registry retries disposal with bounded backoff, caps total
-retention, exposes observable stats, and drains best-effort on process shutdown.
+Provider-aware retry backoff/`Retry-After` is active: failed transient attempts
+record bounded per-attempt analytics, exclude every configured model of the
+failed provider from fallback, and wait with a clamped Retry-After hint or
+bounded exponential backoff before replaying a safe turn. Auth/client failures
+and any turn with visible output or tool side effects are never retried.
+An orphan cleanup registry is also active: if session creation loses an abort
+race, the underlying creation promise is retained, and a late-resolved session
+is disposed exactly once without ever reaching setup or prompt. The registry
+retries disposal with bounded backoff, caps total retention, exposes observable
+stats, and drains best-effort on process shutdown.
 Because the upstream `DefaultResourceLoader` has no reliable `dispose()` API,
 cleanup is limited to session disposal and reclaiming leaked exit-signal
 listeners; the loader itself is not torn down.
 
-The executable containment today is the outer renewable settlement net plus the
-optional whole-prompt ceiling below. Local settlement can release UI/permit
-ownership even when an in-process upstream operation ignores abort, but it
-cannot quarantine that operation's external side effects.
-
-Set `PI_SUBAGENT_TIMEOUT_MS` to a positive number of milliseconds only as an
-optional absolute containment ceiling. Unset, empty, zero, negative, and
-non-finite values disable this per-prompt ceiling.
+The executable containment is the bounded detached cleanup above plus the host
+provider/transport bounds (ProviderGate admission, transport connect/read
+timeouts). Local settlement can release UI/permit ownership even when an
+in-process upstream operation ignores abort, but it cannot quarantine that
+operation's external side effects.
 
 ```bash
-# Use a 10-minute safety timeout
-export PI_SUBAGENT_TIMEOUT_MS=600000
+# No subagent wall-clock timeouts exist; liveness is bounded only by provider
+# retry/admission/transport limits outside this extension.
 ```
 
 ## Persisted result size

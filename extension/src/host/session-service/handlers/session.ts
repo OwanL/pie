@@ -187,18 +187,17 @@ export function onError(payload: ErrorPayload, deps: HandlerDeps): void {
   }
 }
 
-/** Operational (non-fatal) backend condition from a watchdog — either the
- *  interrupt-abort watchdog (`session.abort()` did not settle) or the
- *  willRetry watchdog (a retry's backoff did not complete). The watchdogs
- *  already performed their side effects (force-clear `activeRequest` +
- *  `busy=false`); this handler only surfaces the notice so the user is not
- *  left looking at a silently-wedged session.
+/** Operational (non-fatal) backend condition from the interrupt-abort
+ *  watchdog (`session.abort()` did not settle). The watchdog already
+ *  performed its side effects (force-clear `activeRequest` + `busy=false`);
+ *  this handler only surfaces the notice so the user is not left looking at a
+ *  silently-wedged session.
  *
  *  Routed through the existing `Error` event so the reducer's `handleError`
  *  surfaces a non-blocking `operational-error` notice (recovery action:
  *  show-logs). It does NOT stamp `AssistantMessageErrorStamped` — the turn
- *  may still be running (retry-stuck case: `activeRequest` is still set), so
- *  marking the assistant message errored would be wrong. No rollback, no
+ *  may still be running (`activeRequest` may still be set), so marking the
+ *  assistant message errored would be wrong. No rollback, no
  *  abort: purely a notice. STATE_CONTRACT § Notice Surfacing: `handleError`
  *  keeps the short message readable and retains the code, request correlation,
  *  and backend diagnostic as credential-redacted `noticeRaw`. */

@@ -88,7 +88,7 @@ export class BrowserServer {
 
   constructor(private readonly options: BrowserServerOptions) {
     this.clock = options.clock ?? SYSTEM_CLOCK;
-    this.staticAssets = new BrowserStaticAssets(options.assetDir);
+    this.staticAssets = new BrowserStaticAssets(options.assetDir, options.rendererSelection);
     this.hub = new RendererHub({
       clock: this.clock,
       hostInstanceId: options.hostInstanceId,

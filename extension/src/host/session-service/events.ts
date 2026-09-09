@@ -14,7 +14,7 @@ import type { ArchState } from '../core/arch-state';
 import type { CoordinatorToHostDetailMessage } from '../../shared/protocol/subagent-detail';
 import { SessionServiceState } from './state';
 import type { DeferredTriggerRegistry } from '../deferred-triggers/registry';
-import { onMessageDelta, onMessageThinking, onMessageToolCallDelta, onMessageStarted, onMessageFinished, onMessageAborted, onPreflightFailed, onQueuedDelivered, onRetryStarted, onRetryEnded, onRetryMeasured, onRetryStuck, onCompaction, onCompactionStarted, onAuxiliaryLlmUsage, reconcileServingModelConfig } from './handlers/streaming.js';
+import { onMessageDelta, onMessageThinking, onMessageToolCallDelta, onMessageStarted, onMessageFinished, onMessageAborted, onPreflightFailed, onQueuedDelivered, onRetryStarted, onRetryEnded, onRetryMeasured, onCompaction, onCompactionStarted, onAuxiliaryLlmUsage, reconcileServingModelConfig } from './handlers/streaming.js';
 import { onToolStarted, onToolFinished, onToolProgress } from './handlers/tools.js';
 import { onSessionListChanged, onCustomMessage, onExtensionUIRequest, onError, onOperationalError, onContextUsageChanged } from './handlers/session.js';
 import { applySessionOpenedPayload, handleBusyChangedPayload, attach as attachHandlers, detach as detachHandlers } from './handlers/attach.js';
@@ -193,7 +193,6 @@ export class SessionServiceEvents {
       onCompactionStarted: (payload) => onCompactionStarted(payload, deps),
       onAuxiliaryLlmUsage: (payload) => onAuxiliaryLlmUsage(payload, deps),
       onOperationalError: (payload) => onOperationalError(payload, deps),
-      onRetryStuck: (payload) => onRetryStuck(payload, deps),
       onAgentSettled: (payload) => {
         const sessionPath = this.requireEventSessionPath('agent.settled', payload.sessionPath);
         if (!sessionPath) return;

@@ -2310,11 +2310,11 @@ test('reducer: PreflightSuperseded retracts a false-positive prepass-timeout (re
 });
 
 test('reducer: PreflightSuperseded also retracts a false-positive model-start-timeout (clears the notice)', () => {
-  // Mirror of the prepass-timeout retraction, but for a model-start fire:
-  // pruning already succeeded, the model-start budget then fired a false-
-  // positive PreflightFailed (concurrency wait, not a real failure). When the
-  // turn later starts streaming, PreflightSuperseded must clear the
-  // model-start-timeout notice too (the gate was extended beyond prepass-timeout).
+  // A model-start-timeout notice is still producible without the removed host
+  // watchdog: a backend-originated provider-saturation preflight failure maps
+  // to that kind. When the turn later starts streaming, PreflightSuperseded
+  // must clear the model-start-timeout notice too (the retraction covers both
+  // timeout notices, not just prepass-timeout).
   const state: ArchState = {
     ...initialArchState,
     sessions: { ...initialArchState.sessions, runningSessionPaths: [] },
@@ -2342,8 +2342,8 @@ test('reducer: PreflightSuperseded also retracts a false-positive model-start-ti
     timestamp: 1000,
   });
 
-  // False-positive model-start-timeout notice cleared (the gate was extended
-  // to model-start-timeout, not just prepass-timeout).
+  // False-positive model-start-timeout notice cleared (the retraction gate
+  // covers model-start-timeout, not just prepass-timeout).
   assert.equal(result.state.settings.notice, null);
   assert.equal(result.state.settings.noticeKind, null);
   // Optimistic user message re-inserted + running restored (same restore as

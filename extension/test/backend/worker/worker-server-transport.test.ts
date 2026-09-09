@@ -7,7 +7,7 @@ import {
   WORKER_IPC_VERSION,
   type WorkerIpcFrame,
 } from '../../../src/backend/worker-protocol';
-import { WorkerServer } from '../../../src/backend/worker-server';
+import { liveSemanticDroppableRejection, WorkerServer } from '../../../src/backend/worker-server';
 
 const identity = {
   coordinatorGeneration: 2,
@@ -357,4 +357,246 @@ test('worker server exits when its fatal frame is itself rejected', async () => 
     inbound.destroy();
     outbound.destroy();
   }
+});
+
+/** Write target whose descriptor is blocked: every write is recorded and its
+ * callback is retained until the test drains it, reproducing the production
+ * backpressure window behind which the ordinary queue accumulates. */
+class BlockedWorkerWriteTarget {
+  destroyed = false;
+  writableEnded = false;
+  readonly written: string[] = [];
+  readonly callbacks: Array<(error?: Error | null) => void> = [];
+
+  write(data: string, callback: (error?: Error | null) => void): boolean {
+    this.written.push(data);
+    this.callbacks.push(callback);
+    return false;
+  }
+
+  once(): this { return this; }
+
+  end(callback?: () => void): this {
+    if (callback) callback();
+    return this;
+  }
+
+  /** Complete every retained write callback; each completion pumps the next
+   * queued frame synchronously, so a loop drains the writer completely. */
+  drain(): void {
+    while (this.callbacks.length > 0) this.callbacks.shift()!(null);
+  }
+}
+
+type SentRuntimeFrame = WorkerIpcFrame & { event?: string; payload?: { seq?: number } };
+
+function parseFrames(lines: readonly string[]): SentRuntimeFrame[] {
+  return lines.map((line) => JSON.parse(line) as SentRuntimeFrame);
+}
+
+test('worker server drops a backpressured live.semantic enqueue instead of failing the worker', async () => {
+  const inbound = new PassThrough();
+  const target = new BlockedWorkerWriteTarget();
+  const exitCodes: number[] = [];
+  const server = new WorkerServer(identity, {
+    pid: frameBase.workerPid,
+    exit: (code = 0) => {
+      exitCodes.push(code);
+      return undefined as never;
+    },
+  }, { readable: inbound, writable: target as never }, { validateBootstrap: () => undefined });
+  server.start();
+
+  try {
+    // Fill the 2 MiB ordinary-lane reserve behind the blocked descriptor.
+    const acceptedSeqs: number[] = [];
+    let droppedSeq = 0;
+    for (let seq = 1; seq <= 24; seq += 1) {
+      const ok = server.sendLiveSemanticFrame({ kind: 'turn.text', delta: 'x'.repeat(200 * 1024), seq } as never);
+      if (!ok) {
+        droppedSeq = seq;
+        break;
+      }
+      acceptedSeqs.push(seq);
+    }
+    assert.ok(droppedSeq >= 4, `the ordinary lane must reach its 2 MiB reserve (dropped at ${droppedSeq})`);
+    assert.ok(acceptedSeqs.length >= 3);
+
+    // The dropped envelope must not schedule an exit or fail the runtime.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(exitCodes, []);
+
+    // The lane stays functional: a small semantic envelope and an ordinary
+    // non-semantic runtime event are both admitted behind the backlog.
+    assert.equal(
+      server.sendLiveSemanticFrame({ kind: 'turn.text', delta: 'recovered', seq: droppedSeq + 1 } as never),
+      true,
+    );
+    assert.equal(server.sendFrame({
+      kind: 'runtime.event',
+      event: 'tool.progress',
+      payload: { requestId: 'request-1' },
+    }), true);
+
+    // Drain the descriptor: everything that was admitted is written in FIFO
+    // order with contiguous transport sequences; the dropped envelope is
+    // simply absent and no fatal frame is ever queued.
+    target.drain();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(exitCodes, []);
+    const frames = parseFrames(target.written);
+    assert.equal(frames.some((frame) => frame.kind === 'fatal'), false);
+    const liveFrames = frames.filter((frame) => frame.kind === 'runtime.event' && frame.event === 'live.semantic');
+    assert.deepEqual(
+      liveFrames.map((frame) => (frame.payload as { seq?: number }).seq),
+      [...acceptedSeqs, droppedSeq + 1],
+      'the inner semantic sequence keeps its gap; the worker must not renumber or synthesize',
+    );
+    assert.deepEqual(frames.map((frame) => frame.seq), Array.from({ length: frames.length }, (_, index) => index + 1),
+      'transport sequences stay contiguous across a dropped envelope');
+    assert.equal(frames.some((frame) => frame.kind === 'runtime.event' && frame.event === 'tool.progress'), true);
+  } finally {
+    inbound.destroy();
+  }
+});
+
+test('worker server drops an oversized live.semantic frame instead of failing the worker', async () => {
+  const inbound = new PassThrough();
+  const outbound = new PassThrough();
+  const frames: SentRuntimeFrame[] = [];
+  let buffered = '';
+  outbound.setEncoding('utf8');
+  outbound.on('data', (chunk: string) => {
+    buffered += chunk;
+    while (buffered.includes('\n')) {
+      const newline = buffered.indexOf('\n');
+      frames.push(JSON.parse(buffered.slice(0, newline)) as WorkerIpcFrame);
+      buffered = buffered.slice(newline + 1);
+    }
+  });
+  const exitCodes: number[] = [];
+  const server = new WorkerServer(identity, {
+    pid: frameBase.workerPid,
+    exit: (code = 0) => {
+      exitCodes.push(code);
+      return undefined as never;
+    },
+  }, { readable: inbound, writable: outbound }, { validateBootstrap: () => undefined });
+  server.start();
+
+  try {
+    // The 256 KiB ordinary-frame ceiling rejects this draft before enqueue.
+    assert.equal(
+      server.sendLiveSemanticFrame({ kind: 'turn.text', delta: 'x'.repeat(300 * 1024), seq: 5 } as never),
+      false,
+    );
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(exitCodes, []);
+    assert.equal(frames.some((frame) => frame.kind === 'fatal'), false);
+
+    // The seam remains usable for subsequent bounded envelopes.
+    assert.equal(
+      server.sendLiveSemanticFrame({ kind: 'turn.text', delta: 'ok', seq: 6 } as never),
+      true,
+    );
+    await waitUntil(() => frames.length > 0);
+    const liveFrames = frames.filter((frame) => frame.kind === 'runtime.event' && frame.event === 'live.semantic');
+    assert.equal(liveFrames.length, 1);
+    assert.equal(liveFrames[0]!.payload?.seq, 6,
+      'the dropped oversized envelope keeps its semantic seq gap (5 missing)');
+  } finally {
+    inbound.destroy();
+    outbound.destroy();
+  }
+});
+
+test('worker server keeps an invalid live.semantic draft fail-closed', async () => {
+  const inbound = new PassThrough();
+  const outbound = new PassThrough();
+  const frames: WorkerIpcFrame[] = [];
+  let buffered = '';
+  outbound.setEncoding('utf8');
+  outbound.on('data', (chunk: string) => {
+    buffered += chunk;
+    while (buffered.includes('\n')) {
+      const newline = buffered.indexOf('\n');
+      frames.push(JSON.parse(buffered.slice(0, newline)) as WorkerIpcFrame);
+      buffered = buffered.slice(newline + 1);
+    }
+  });
+  const exitCodes: number[] = [];
+  const server = new WorkerServer(identity, {
+    pid: frameBase.workerPid,
+    exit: (code = 0) => {
+      exitCodes.push(code);
+      return undefined as never;
+    },
+  }, { readable: inbound, writable: outbound }, { validateBootstrap: () => undefined });
+  server.start();
+
+  try {
+    let invalidPayload: Record<string, unknown> = { kind: 'turn.text', delta: 'ok' };
+    for (let depth = 0; depth < 70; depth += 1) invalidPayload = { nested: invalidPayload };
+    assert.equal(server.sendLiveSemanticFrame(invalidPayload as never), false);
+    await waitUntil(() => frames.some((frame) => frame.kind === 'fatal'));
+    const fatal = frames.find((frame) => frame.kind === 'fatal');
+    assert.ok(fatal?.kind === 'fatal');
+    assert.match(fatal.error.message, /rejected \(invalid\)/);
+    await waitUntil(() => exitCodes.length > 0);
+    assert.deepEqual(exitCodes, [1]);
+  } finally {
+    inbound.destroy();
+    outbound.destroy();
+  }
+});
+
+test('worker server keeps an unavailable live.semantic enqueue fail-closed', async () => {
+  const target = new BlockedWorkerWriteTarget();
+  target.destroyed = true;
+  const exitCodes: number[] = [];
+  const server = new WorkerServer(identity, {
+    pid: frameBase.workerPid,
+    exit: (code = 0) => {
+      exitCodes.push(code);
+      return undefined as never;
+    },
+  }, { readable: new PassThrough(), writable: target as never }, { validateBootstrap: () => undefined });
+
+  assert.equal(server.sendLiveSemanticFrame({ kind: 'turn.text', delta: 'ok' } as never), false);
+  await waitUntil(() => exitCodes.length > 0);
+  assert.deepEqual(exitCodes, [1]);
+});
+
+test('worker server keeps a failed live.semantic write callback fail-closed', async () => {
+  const inbound = new PassThrough();
+  const target = new BlockedWorkerWriteTarget();
+  const exitCodes: number[] = [];
+  const server = new WorkerServer(identity, {
+    pid: frameBase.workerPid,
+    exit: (code = 0) => {
+      exitCodes.push(code);
+      return undefined as never;
+    },
+  }, { readable: inbound, writable: target as never }, { validateBootstrap: () => undefined });
+  server.start();
+
+  try {
+    assert.equal(
+      server.sendLiveSemanticFrame({ kind: 'turn.text', delta: 'x'.repeat(200 * 1024), seq: 1 } as never),
+      true,
+    );
+    const failure = new Error('descriptor write failed');
+    target.callbacks.shift()!(failure);
+    await waitUntil(() => exitCodes.length > 0);
+    assert.deepEqual(exitCodes, [1]);
+  } finally {
+    inbound.destroy();
+  }
+});
+
+test('the recoverable-drop policy admits only capacity and oversize rejections', () => {
+  assert.equal(liveSemanticDroppableRejection('capacity'), true);
+  assert.equal(liveSemanticDroppableRejection('oversize'), true);
+  assert.equal(liveSemanticDroppableRejection('invalid'), false);
+  assert.equal(liveSemanticDroppableRejection('unavailable'), false);
 });

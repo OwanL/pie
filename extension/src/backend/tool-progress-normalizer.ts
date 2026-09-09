@@ -178,7 +178,6 @@ function normalizeSubagent(value: unknown, counters?: ToolProgressRecursiveCount
       startedAt: numberField(child, 'startedAt'),
       completedAt: numberField(child, 'completedAt'),
       lastProgressAt: numberField(child, 'lastProgressAt'),
-      inactivityBudgetMs: numberField(child, 'inactivityBudgetMs'),
       streaming: typeof child.streaming === 'boolean' ? child.streaming : undefined,
       streamingText: boundedTailOptional(stringField(child, ['streamingText']), MAX_TAIL_CHARS),
       streamingReasoning: boundedTailOptional(stringField(child, ['streamingReasoning']), MAX_TAIL_CHARS),

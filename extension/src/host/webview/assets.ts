@@ -6,6 +6,7 @@ import * as vscode from 'vscode';
 
 import { DEFAULT_WEBVIEW_VIEW_NAME, getWebviewAssetDir } from './hot-reload';
 import { resolvePublishedWebviewDir } from './published-generations';
+import { runtimeRendererSelection } from '../runtime-location';
 
 interface ViteManifestChunk {
   file: string;
@@ -83,7 +84,7 @@ export async function resolveWebviewHtml(
   webview: vscode.Webview,
 ): Promise<{ html: string; assetVersion: string }> {
   const panelDir = getWebviewAssetDir(context.extensionPath, DEFAULT_WEBVIEW_VIEW_NAME);
-  const baseDir = await resolvePublishedWebviewDir(panelDir);
+  const baseDir = await resolvePublishedWebviewDir(panelDir, runtimeRendererSelection(context));
   const manifest = await readManifest(baseDir);
   const assetVersion = crypto.createHash('sha256').update(JSON.stringify(manifest)).digest('hex').slice(0, 16);
   return {
@@ -94,5 +95,8 @@ export async function resolveWebviewHtml(
 
 export function getWebviewRoots(context: vscode.ExtensionContext): vscode.Uri[] {
   const viewName = DEFAULT_WEBVIEW_VIEW_NAME;
-  return [vscode.Uri.joinPath(context.extensionUri, 'out', 'webview', viewName)];
+  return [
+    vscode.Uri.joinPath(context.extensionUri, 'out', 'webview', viewName),
+    vscode.Uri.file(runtimeRendererSelection(context).fallbackDir),
+  ];
 }

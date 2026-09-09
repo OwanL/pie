@@ -21,7 +21,6 @@ import type {
   RetryEndedPayload,
   RetryMeasuredPayload,
   RetryStartedPayload,
-  RetryStuckPayload,
   SessionListChangedPayload,
   SessionOpenedPayload,
   ToolFinishedPayload,
@@ -50,7 +49,6 @@ import {
   isRetryEndedPayload,
   isRetryMeasuredPayload,
   isRetryStartedPayload,
-  isRetryStuckPayload,
   isSessionListChangedPayload,
   isSessionOpenedPayload,
   isToolFinishedPayload,
@@ -86,7 +84,6 @@ export interface SessionBackendEventHandlers {
   onCompaction(payload: CompactionPayload): void;
   onAuxiliaryLlmUsage(payload: AuxiliaryLlmUsagePayload): void;
   onOperationalError(payload: OperationalErrorPayload): void;
-  onRetryStuck(payload: RetryStuckPayload): void;
   onAgentSettled?(payload: AgentSettledPayload): void;
   onBusyChanged(payload: BusyChangedPayload): void;
   onContextUsageChanged(payload: ContextUsageChangedPayload): void;
@@ -194,9 +191,6 @@ export function dispatchSessionBackendEvent(
       return;
     case 'operational-error':
       dispatch(event, isOperationalErrorPayload, handlers.onOperationalError);
-      return;
-    case 'retry.stuck':
-      dispatch(event, isRetryStuckPayload, handlers.onRetryStuck);
       return;
     case 'agent.settled':
       if (handlers.onAgentSettled) dispatch(event, isAgentSettledPayload, handlers.onAgentSettled);

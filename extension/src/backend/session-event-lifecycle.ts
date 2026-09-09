@@ -14,7 +14,6 @@ import type {
   RetryStartedPayload,
 } from '../shared/protocol';
 import { COMPACTION_METRICS_CUSTOM_TYPE } from '../shared/protocol';
-import { createOperationalIncident } from '../shared/incidents.js';
 import { LIVE_PIPELINE_PROTOCOL_VERSION } from '../shared/live-pipeline-protocol';
 import type { SdkSessionEvent } from './sdk';
 import { BackendLiveTurnAccumulator } from './live-turn-accumulator';
@@ -22,91 +21,16 @@ import type { ActiveRequest, SessionContext } from './server-types';
 import { buildSessionCapabilities, hasBillableSessionActivity } from './session-activity';
 import type { SessionEntryLike } from './transcript';
 import {
-  clearSemanticLease,
   clearSettledProviderIncident,
   emitLatestPruningResult,
   emitSemanticCandidate,
   logBackendDiagnostic,
   nonEmptyTrimmed,
   readTokenCount,
-  renewSemanticLease,
-  resolveProviderSemanticInactivityMs,
   resolveUnexpectedInterruptReason,
   type BackendSessionEventHandler,
   type BackendSessionEventHandlerDeps,
 } from './session-event-shared';
-
-/** Environment key for the willRetry watchdog grace (added on top of the
- *  SDK's reported backoff `delayMs`). */
-const WILLRETRY_WATCHDOG_GRACE_ENV = 'PIE_WILLRETRY_WATCHDOG_GRACE_MS';
-/** Default grace added on top of the SDK's backoff delayMs before the
- *  watchdog declares a retry stuck. Generous so a legitimately slow provider
- *  doesn't trip it, but bounded so a backoff that never completes is surfaced. */
-const DEFAULT_WILLRETRY_WATCHDOG_GRACE_MS = 60 * 1000;
-function resolveWillRetryWatchdogGraceMs(): number {
-  const raw = process.env[WILLRETRY_WATCHDOG_GRACE_ENV];
-  if (raw === undefined || raw === '') return DEFAULT_WILLRETRY_WATCHDOG_GRACE_MS;
-  const ms = Number(raw);
-  return Number.isFinite(ms) && ms >= 0 ? ms : DEFAULT_WILLRETRY_WATCHDOG_GRACE_MS;
-}
-
-/** Arm / re-arm the willRetry watchdog. If the watchdog elapses without the
- *  retry completing (auto_retry_end OR agent_end willRetry:false), emit an
- *  operational-error + retry.stuck notice so the user can recover instead of
- *  the session sitting in willRetry forever. Returns a clear function to call
- *  when the retry completes / the turn ends. */
-function armWillRetryWatchdog(
-  deps: BackendSessionEventHandlerDeps,
-  context: SessionContext,
-  delayMs: number,
-): () => void {
-  // Clear any existing watchdog so re-arming (e.g. on auto_retry_start) replaces it.
-  if (context.willRetryWatchdogTimer) {
-    clearTimeout(context.willRetryWatchdogTimer);
-    context.willRetryWatchdogTimer = undefined;
-  }
-  const grace = resolveWillRetryWatchdogGraceMs();
-  const windowMs = Math.max(delayMs, 0) + grace;
-  context.willRetryWatchdogTimer = setTimeout(() => {
-    context.willRetryWatchdogTimer = undefined;
-    const active = context.activeRequest;
-    const requestId = active?.id;
-    deps.emit('operational-error', createOperationalIncident({
-      incidentId: `retry-stuck:${requestId ?? context.sessionPath}:${delayMs}:${grace}`,
-      dedupeKey: `retry-stuck:${context.sessionPath}:${requestId ?? 'session'}`,
-      code: 'RETRY_STUCK',
-      message: `A retry has not completed within ${windowMs}ms (delayMs=${delayMs} + ${grace}ms grace). The provider may be down mid-backoff or an extension hook blocked the retry. Reload the window if the session stays wedged.`,
-      detail: `Retry watchdog window elapsed: ${windowMs}ms (delayMs=${delayMs}, graceMs=${grace}).`,
-      sessionPath: context.sessionPath,
-      ...(active?.operationId ? { operationId: active.operationId } : {}),
-      ...(requestId ? { requestId } : {}),
-      ...(active?.liveTurnAccumulator ? { turnId: active.liveTurnAccumulator.turnId } : {}),
-      ...(active?.currentMessageId ?? active?.lastAssistantMessageId
-        ? { messageId: active.currentMessageId ?? active.lastAssistantMessageId }
-        : {}),
-      severity: 'error',
-      certainty: 'ambiguous',
-      phase: 'retry',
-      recovery: { showLogs: true },
-    }));
-    deps.emit('retry.stuck', {
-      sessionPath: context.sessionPath,
-      delayMs,
-      graceMs: grace,
-      requestId: context.activeRequest?.id,
-    });
-    deps.recoverStuckSession?.(
-      context,
-      `The provider retry made no progress for ${windowMs}ms and was stopped automatically.`,
-    );
-  }, windowMs);
-  return () => {
-    if (context.willRetryWatchdogTimer) {
-      clearTimeout(context.willRetryWatchdogTimer);
-      context.willRetryWatchdogTimer = undefined;
-    }
-  };
-}
 function readPostCompactionEstimatedTokens(result: unknown): number | undefined {
   if (!result || typeof result !== 'object') return undefined;
   const value = (result as { estimatedTokensAfter?: unknown }).estimatedTokensAfter;
@@ -308,12 +232,6 @@ function handleLifecycleSessionEvent(
       context.activeRequest.turnStartedAt = Date.now();
       context.activeRequest.semanticStarted = true;
       context.activeRequest.providerTurnSequence = (context.activeRequest.providerTurnSequence ?? 0) + 1;
-      // message_start is too late to own provider hangs before the first
-      // assistant event (for example, no response headers after a tool result).
-      // Start the semantic lease at the SDK's provider-turn boundary and renew
-      // it again at message_start/semantic deltas.
-      const providerLeaseMs = resolveProviderSemanticInactivityMs(context.activeRequest.provider);
-      renewSemanticLease(deps, context, providerLeaseMs, 'provider');
       const accumulator = context.activeRequest.liveTurnAccumulator;
       const liveSeq = accumulator?.currentSeq ?? 0;
       if (liveSeq === 0) {
@@ -322,11 +240,11 @@ function handleLifecycleSessionEvent(
         context.sendOperationLedger?.markCommitted(context.activeRequest.operationId);
         emitSemanticCandidate(deps, context, { kind: 'turn.started' }, context.activeRequest.turnStartedAt);
         emitSemanticCandidate(deps, context, {
-          kind: 'turn.phase', phase: 'preparing', inactivityBudgetMs: providerLeaseMs,
+          kind: 'turn.phase', phase: 'preparing',
         }, context.activeRequest.turnStartedAt);
       } else if (!accumulator?.lifecycleWatermark()) {
         emitSemanticCandidate(deps, context, {
-          kind: 'turn.phase', phase: 'waiting_provider', inactivityBudgetMs: providerLeaseMs,
+          kind: 'turn.phase', phase: 'waiting_provider',
         }, context.activeRequest.turnStartedAt);
       }
       return;
@@ -341,30 +259,18 @@ function handleLifecycleSessionEvent(
       // finalization on a will-retry `agent_end`; the final `agent_end`
       // (`willRetry: false`) performs the normal idle cleanup below.
       if (event.willRetry) {
-        // A retry backoff that never completes must surface within the
-        // reported delay plus grace. If the SDK's backoff/retry never completes
-        // (provider dies mid-backoff, or an
-        // extension hook blocks the retry), `activeRequest` would stay set
-        // forever with no observable failure. The watchdog emits
-        // `operational-error` + `retry.stuck` after the backoff delay + grace so
-        // the user can recover instead of reloading the window. Re-armed with
-        // the real delayMs on `auto_retry_start`; cleared on `auto_retry_end` /
-        // the final `agent_end willRetry:false`.
-        // delayMs is unknown here (the SDK doesn't carry it on agent_end); use
-        // 0 until auto_retry_start refines it (the grace alone bounds it).
-        context.willRetryWatchdogClear = armWillRetryWatchdog(deps, context, 0);
+        // A retry backoff that never completes is NOT automatically
+        // terminalized by elapsed time: the retry remains owned by the exact
+        // SDK retry lifecycle, the provider-gate queue/header deadlines, and
+        // explicit user Stop. Finalization happens at the final `agent_end`
+        // (`willRetry: false`) or `agent_settled`.
         if (context.activeRequest) context.activeRequest.pendingErrorTerminal = undefined;
         return;
       }
       // agent_end closes one low-level attempt only. Pi may still perform
       // post-run compaction, retry, queued continuation, or tool/bash work;
       // retain request/busy ownership until the pinned agent_settled boundary.
-      clearSemanticLease(context);
       deps.emitContextUsageChanged(context);
-      if (context.willRetryWatchdogClear) {
-        context.willRetryWatchdogClear();
-        context.willRetryWatchdogClear = undefined;
-      }
       context.overflowRecoveryCandidate = context.activeRequest?.mayNeedOverflowRecovery
         ? context.activeRequest
         : undefined;
@@ -372,7 +278,6 @@ function handleLifecycleSessionEvent(
     }
 
     case 'agent_settled': {
-      clearSemanticLease(context);
       const settledRequest = context.activeRequest;
       const requestId = context.activeRequest?.id;
       const operationId = context.activeRequest?.operationId;
@@ -425,15 +330,6 @@ function handleLifecycleSessionEvent(
         context.pendingExtensionCommand = undefined;
       }
       deps.emitContextUsageChanged(context);
-
-      if (context.willRetryWatchdogClear) {
-        context.willRetryWatchdogClear();
-        context.willRetryWatchdogClear = undefined;
-      }
-      if (context.activeRequest?.quotaSettlementTimer) {
-        clearTimeout(context.activeRequest.quotaSettlementTimer);
-        context.activeRequest.quotaSettlementTimer = undefined;
-      }
 
       context.overflowRecoveryCandidate = undefined;
       // Clear activeRequest only at full SDK settlement. agent_end above is not
@@ -616,7 +512,6 @@ function handleLifecycleSessionEvent(
       return;
     }
     case 'auto_retry_start': {
-      clearSemanticLease(context);
       const startedAt = Date.now();
       finishRetryTiming(deps, context, startedAt);
       const incidentMessage = context.activeRequest?.latestProviderIncident?.userMessage;
@@ -630,16 +525,9 @@ function handleLifecycleSessionEvent(
         context.activeRequest.lastProviderErrorForDiagnostics = errorMessage
           ?? context.activeRequest.lastProviderErrorForDiagnostics;
       }
-      // Re-arm with the SDK's reported backoff delayMs so the watchdog window
-      // matches the real retry cadence (not the conservative 0 from
-      // agent_end willRetry). The grace is added on top.
-      if (context.willRetryWatchdogClear !== undefined) {
-        context.willRetryWatchdogClear = armWillRetryWatchdog(deps, context, event.delayMs ?? 0);
-      }
       emitSemanticCandidate(deps, context, {
         kind: 'turn.phase',
         phase: 'retry_wait',
-        inactivityBudgetMs: (event.delayMs ?? 0) + resolveWillRetryWatchdogGraceMs(),
       });
       const requestId = context.activeRequest?.id;
       const attempt = event.attempt ?? 0;
@@ -678,14 +566,8 @@ function handleLifecycleSessionEvent(
             ?? context.activeRequest.lastProviderErrorForDiagnostics;
         }
       }
-      // Clear the watchdog on retry completion (success or final failure).
-      // The subsequent agent_end willRetry:false will re-clear (idempotent).
-      if (context.willRetryWatchdogClear) {
-        context.willRetryWatchdogClear();
-        context.willRetryWatchdogClear = undefined;
-      }
       emitSemanticCandidate(deps, context, {
-        kind: 'turn.phase', phase: event.success === true ? 'waiting_provider' : 'aborting', inactivityBudgetMs: 120_000,
+        kind: 'turn.phase', phase: event.success === true ? 'waiting_provider' : 'aborting',
       });
       deps.emit('retry.ended', {
         sessionPath: context.sessionPath,

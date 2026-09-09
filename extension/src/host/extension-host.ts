@@ -21,6 +21,7 @@ import {
 import { type RunAnalyticsExportPayload } from './run-analytics/query';
 import { SidebarViewProvider } from './sidebar/provider';
 import { BrowserServer } from './browser-server/browser-server';
+import { runtimeRendererSelection } from './runtime-location';
 import { compactRendererViewState } from './renderers/renderer-view-state';
 import { readBrowserServerSettings } from './browser-server/settings';
 import type { BrowserServerLifecycleEvent } from './browser-server/types';
@@ -262,6 +263,7 @@ export class PieExtension implements vscode.Disposable {
       onRendererInvalidated: (rendererId, rendererGeneration) =>
         this.service.unsubscribeRendererDetails(rendererId, rendererGeneration),
       assetDir: path.join(context.extensionPath, 'out', 'webview', 'panel'),
+      rendererSelection: runtimeRendererSelection(context),
       iconPath: path.join(context.extensionPath, 'media', 'icon.svg'),
       titleSuffix: vscode.workspace.name ?? undefined,
       onLifecycle: (event) => this.handleBrowserServerLifecycle(event),
@@ -270,8 +272,8 @@ export class PieExtension implements vscode.Disposable {
     this.effectRunner = new EffectRunner({
       backend: this.backend,
       // Prepass-aware send-timer budget: when the user sets
-      // an explicit `prepassTimeoutSec`, budget for it + first-token headroom so
-      // a long-but-legitimate prepass never trips a spurious `PreflightFailed`
+      // an explicit `prepassTimeoutSec`, budget for it + bounded wait headroom
+      // so a long-but-legitimate prepass never trips a spurious watchdog fire
       // (which would roll back the user message — promoted still present — and
       // orphan a late `MessageStarted` reply). Falls back to the 120s default
       // when `prepassTimeoutSec` is unset/invalid (SDK default, presumed < 120s).
@@ -286,27 +288,11 @@ export class PieExtension implements vscode.Disposable {
         // acquired). Use the real configured value from aggregateStats.providerGate
         // (polled from the backend's ProviderGate), falling back to a
         // conservative 30s when unavailable (fail-safe — never under-size the
-        // headroom and trip a spurious PreflightFailed mid-queue).
+        // headroom and trip a spurious watchdog fire mid-queue).
         const QUEUE_WAIT_HEADROOM_MS = this.resolveQueueWaitHeadroomMs(sessionPath);
         return typeof p === 'number' && Number.isFinite(p) && p > 0
           ? (p + HEADROOM_SEC) * 1000 + QUEUE_WAIT_HEADROOM_MS
           : 120_000 + QUEUE_WAIT_HEADROOM_MS;
-      },
-      // Metric-gated re-arm for the model-start send-timer: when the in-flight
-      // request's provider is legitimately QUEUED waiting for a concurrency
-      // slot (or PAUSED by the circuit breaker), the model-start timer (whose
-      // clock starts at issue, before the slot is acquired) would otherwise
-      // fire a false-positive PreflightFailed. `getProviderGateMetrics` reads
-      // the live signal (cached in AggregateStats.providerGate, polled from the
-      // backend's ProviderGate); `resolveSessionProvider` resolves the
-      // request's provider via the session's model → available-models table
-      // (mirroring host/core/model-capability.ts). Both optional + fail-open:
-      // the runner fires as today if either is absent or yields no match.
-      getProviderGateMetrics: () => this.aggregateStatsService.getAggregateStats().providerGate,
-      resolveSessionProvider: (sessionPath: string) => this.resolveSessionProvider(sessionPath),
-      isSessionProviderPending: (sessionPath: string) => {
-        const phase = this.archState.livePipeline.turnsBySession[sessionPath]?.phase;
-        return phase === 'queued' || phase === 'waiting_provider';
       },
       queues: this.service.queues,
       tabs: {
@@ -426,8 +412,8 @@ export class PieExtension implements vscode.Disposable {
 
   /** Resolve the provider name for a session's in-flight request from its
    *  provider/model pair. A bare model-id fallback is retained only for legacy
-   *  summaries that predate provider persistence. Shared by the FP-C2a
-   *  model-start re-arm gate and FP-C3 queue-wait headroom. */
+   *  summaries that predate provider persistence. Used by the FP-C3
+   *  queue-wait headroom resolver. */
   private resolveSessionProvider(sessionPath: string): string | undefined {
     const archState = this.archState;
     const session = archState.sessions.sessions.find((item) => item.path === sessionPath);
@@ -1140,6 +1126,10 @@ export class PieExtension implements vscode.Disposable {
       await this.statsService.shutdown();
       this.service.dispose();
       this.sidebarProvider.dispose();
+      // Bootstrap releases this window's runtime lease after shutdown resolves.
+      // A fire-and-forget dispose would let retention delete worker files while
+      // the backend is still draining and closing its supervised workers.
+      await this.backend.stop();
       this.backend.dispose();
       await disposeLivePipelineTrace();
       this.statusBar.dispose();

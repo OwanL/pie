@@ -2423,9 +2423,8 @@ export class WorkerRuntimeRouter {
     }));
   }
 
-  /** Cross-worker provider truth used by the public metrics strip and its
-   * saturation-aware model-start watchdog. The legacy coordinator-local gate
-   * does not observe isolated worker fetches. */
+  /** Cross-worker provider truth used by the public metrics strip. The legacy
+   * coordinator-local gate does not observe isolated worker fetches. */
   getProviderGateMetrics(): ReturnType<CoordinatorProviderNetworkLeaseAuthority['getMetrics']> {
     return this.providerLeases.getMetrics();
   }

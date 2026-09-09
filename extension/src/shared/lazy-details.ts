@@ -85,7 +85,6 @@ function compactSubagentChild(value: unknown): Record<string, unknown> | undefin
   copy('startedAt');
   copy('completedAt');
   copy('lastProgressAt');
-  copy('inactivityBudgetMs');
   copy('streaming');
   copy('streamingText', boundedTail(value.streamingText, SUBAGENT_PREVIEW_TEXT_CHARS));
   copy('streamingReasoning', boundedTail(value.streamingReasoning, SUBAGENT_PREVIEW_TEXT_CHARS));

@@ -8,7 +8,6 @@ import type {
 import type { EffectResultEvent, Event } from './events';
 import type {
   ComposerInput,
-  ProviderGateStats,
   PruningMode,
   PruningSettings,
 } from '../../shared/protocol';
@@ -60,30 +59,6 @@ interface SessionOperationEffectControllerDeps {
   timer: SessionOperationTimerSink;
   sendTimerTimeoutMs: number;
   getSendTimerTimeoutMs?: (sessionPath: string) => number;
-  getProviderGateMetrics?: () => ProviderGateStats;
-  resolveSessionProvider?: (sessionPath: string) => string | undefined;
-  isSessionProviderPending?: (sessionPath: string) => boolean;
-}
-
-/** Decide whether a model-start observation timer should defer while the exact
- * request is still admitted or queued by its provider. Missing correlation
- * fails open so an unobservable request cannot wait forever. */
-export function decideModelStartTimerAction(opts: {
-  elapsed: number;
-  ceiling: number;
-  provider?: string;
-  metrics?: ProviderGateStats;
-  requestProviderPending?: boolean;
-}): { action: 'defer' | 'fire' } {
-  const { elapsed, ceiling, provider, metrics, requestProviderPending } = opts;
-  const providerMetric = provider && metrics?.enabled
-    ? metrics.providers.find((metric) => metric.provider === provider)
-    : undefined;
-  const providerInProgress = !!providerMetric
-    && (providerMetric.paused
-      || (requestProviderPending === true
-        && (providerMetric.activeRequests > 0 || providerMetric.queuedRequests > 0)));
-  return providerInProgress && elapsed < ceiling ? { action: 'defer' } : { action: 'fire' };
 }
 
 interface ExecutionCancellationTicket {
@@ -136,11 +111,6 @@ export class SessionOperationEffectController {
   private readonly queuedEditOperations = new Map<string, ExecutionCancellationTicket>();
   private readonly messageOperationTickets = new Map<string, object>();
   private readonly messageOperationBarriers = new Map<string, () => void>();
-
-  /** Provider admission can legitimately span several per-phase deadlines,
-   * but the complete model-start observation remains bounded. */
-  private static readonly MODEL_START_HARD_CEILING_MS = 20 * 60 * 1000;
-  private static readonly MODEL_START_TIMER_MS = 120_000;
 
   constructor(private readonly deps: SessionOperationEffectControllerDeps) {}
 
@@ -295,33 +265,23 @@ export class SessionOperationEffectController {
     this.runMessageOperationRpc(effect);
   }
 
+  /** The backend's explicit preflight-succeeded signal disarms the send-timer.
+   * There is no host-side model-start watchdog: after preflight success the
+   * accepted send is owned by the authoritative backend lifecycle (semantic
+   * start/terminal boundaries, definitive preflight failure, generation death)
+   * plus an explicit Stop, and may remain pre-commit indefinitely without
+   * timer side effects. */
   markPrepassSucceeded(effect: Extract<import('./effects').Effect, { kind: 'MarkPrepassSucceeded' }>): void {
-    const budgetMs = SessionOperationEffectController.MODEL_START_TIMER_MS;
-    const phaseStartedAt = Date.now();
-    if (effect.operationId && effect.sessionPath && effect.backendGeneration !== undefined) {
-      if (!this.registeredSends.has(effect.corrId)) return;
-      this.scheduleRegisteredSendTimer({
-        corrId: effect.corrId,
-        operationId: effect.operationId,
-        sessionPath: effect.sessionPath,
-        operationAttempt: effect.operationAttempt,
-        backendGeneration: effect.backendGeneration,
-      }, 'model-start', phaseStartedAt, budgetMs);
+    const resource = this.registeredSends.get(effect.corrId);
+    if (resource) {
+      if (resource.timer) this.deps.timer.cancel(resource.timer);
+      resource.timer = null;
       return;
     }
     const send = this.legacyInFlightSends.get(effect.corrId);
     if (!send) return;
     if (send.timer) this.deps.timer.cancel(send.timer);
-    send.logSuperseded = () => this.deps.log.log('debug', 'send-timer.superseded', {
-      corrId: send.corrId,
-      requestId: send.requestId,
-      sessionPath: send.sessionPath,
-      budgetMs,
-    });
-    send.timer = this.deps.timer.schedule(
-      () => this.onLegacySendTimerFire(send, 'model-start', phaseStartedAt, budgetMs),
-      budgetMs,
-    );
+    send.timer = null;
   }
 
   clearSendTimer(corrId: string, restorePruningMode?: PruningMode): void {
@@ -400,7 +360,22 @@ export class SessionOperationEffectController {
       this.clearRegisteredSend(effect.corrId);
       const resource: RegisteredSendResource = { abort, ticket, timer: null };
       this.registeredSends.set(effect.corrId, resource);
-      this.scheduleRegisteredSendTimer(effect, 'prepass', 0, budgetMs);
+      // The send-timer bounds only the acknowledgement/prepass window (the
+      // prepass budget plus queue-wait headroom). On fire the registry-backed
+      // operation becomes ambiguous and reconciles; `markPrepassSucceeded`
+      // disarms it, and no host timer runs between preflight success and
+      // commit. The pre-ack RPC deadline stays owned by the RequestTracker.
+      const handle = this.deps.timer.schedule(() => {
+        if (this.registeredSends.get(effect.corrId)?.timer !== handle) return;
+        resource.timer = null;
+        this.deps.dispatchEvent({
+          kind: 'SendOperationDelayed', operationId: effect.operationId!,
+          operationAttempt: effect.operationAttempt ?? 1,
+          sessionPath: effect.sessionPath,
+          backendGeneration: effect.backendGeneration!,
+        });
+      }, budgetMs);
+      resource.timer = handle;
       return { abort, ticket };
     }
 
@@ -433,7 +408,7 @@ export class SessionOperationEffectController {
       },
     };
     legacy.timer = this.deps.timer.schedule(
-      () => this.onLegacySendTimerFire(legacy, 'prepass', 0, budgetMs),
+      () => this.onLegacySendTimerFire(legacy, budgetMs),
       budgetMs,
     );
     this.legacyInFlightSends.set(effect.corrId, legacy);
@@ -441,51 +416,11 @@ export class SessionOperationEffectController {
     return { abort, ticket, legacy };
   }
 
-  private scheduleRegisteredSendTimer(
-    effect: Pick<SendRpcEffect, 'corrId' | 'operationId' | 'operationAttempt' | 'backendGeneration' | 'sessionPath'>,
-    phase: 'prepass' | 'model-start',
-    phaseStartedAt: number,
-    budgetMs: number,
-  ): void {
-    if (!effect.operationId || effect.backendGeneration === undefined) return;
-    const resource = this.registeredSends.get(effect.corrId);
-    if (!resource) return;
-    if (resource.timer) this.deps.timer.cancel(resource.timer);
-    const handle = this.deps.timer.schedule(() => {
-      if (this.registeredSends.get(effect.corrId)?.timer !== handle) return;
-      resource.timer = null;
-      if (phase === 'model-start' && this.shouldReArmModelStartTimer(effect.sessionPath, phaseStartedAt)) {
-        const remaining = Math.max(1, SessionOperationEffectController.MODEL_START_HARD_CEILING_MS
-          - (Date.now() - phaseStartedAt));
-        this.scheduleRegisteredSendTimer(effect, phase, phaseStartedAt, Math.min(budgetMs, remaining));
-        return;
-      }
-      this.deps.dispatchEvent({
-        kind: 'SendOperationDelayed', operationId: effect.operationId!,
-        operationAttempt: effect.operationAttempt ?? 1,
-        sessionPath: effect.sessionPath,
-        backendGeneration: effect.backendGeneration!,
-      });
-    }, budgetMs);
-    resource.timer = handle;
-  }
-
   private onLegacySendTimerFire(
     send: LegacySendResource,
-    phase: 'prepass' | 'model-start',
-    phaseStartedAt: number,
     budgetMs: number,
   ): void {
     if (this.legacyInFlightSends.get(send.corrId) !== send) return;
-    if (phase === 'model-start' && this.shouldReArmModelStartTimer(send.sessionPath, phaseStartedAt)) {
-      const remaining = Math.max(1, SessionOperationEffectController.MODEL_START_HARD_CEILING_MS
-        - (Date.now() - phaseStartedAt));
-      send.timer = this.deps.timer.schedule(
-        () => this.onLegacySendTimerFire(send, phase, phaseStartedAt, budgetMs),
-        Math.min(budgetMs, remaining),
-      );
-      return;
-    }
     this.legacyInFlightSends.delete(send.corrId);
     if (this.legacyInFlightSendBySession.get(send.sessionPath) === send.corrId) {
       this.legacyInFlightSendBySession.delete(send.sessionPath);
@@ -497,9 +432,7 @@ export class SessionOperationEffectController {
       this.deps.dispatchEvent({
         kind: 'PreflightFailed', corrId: send.corrId, sessionPath: send.sessionPath,
         requestId: send.requestId,
-        error: phase === 'model-start'
-          ? `Timed out waiting for the model to start streaming (${budgetMs / 1000}s)`
-          : `Timed out waiting for the turn to start streaming (${budgetMs / 1000}s)`,
+        error: `Timed out waiting for the turn to start streaming (${budgetMs / 1000}s)`,
       });
       return;
     }
@@ -507,16 +440,6 @@ export class SessionOperationEffectController {
       'warn',
       `send-timer fired before early-ack for corrId=${send.corrId} session=${send.sessionPath} (pre-ack RequestTracker timer should have fired first)`,
     );
-  }
-
-  private shouldReArmModelStartTimer(sessionPath: string, phaseStartedAt: number): boolean {
-    return decideModelStartTimerAction({
-      elapsed: Date.now() - phaseStartedAt,
-      ceiling: SessionOperationEffectController.MODEL_START_HARD_CEILING_MS,
-      provider: this.deps.resolveSessionProvider?.(sessionPath),
-      metrics: this.deps.getProviderGateMetrics?.(),
-      requestProviderPending: this.deps.isSessionProviderPending?.(sessionPath),
-    }).action === 'defer';
   }
 
   private clearRegisteredSend(corrId: string): void {

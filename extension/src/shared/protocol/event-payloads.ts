@@ -41,7 +41,6 @@ import type {
   RetryEndedPayload,
   RetryMeasuredPayload,
   RetryStartedPayload,
-  RetryStuckPayload,
   SessionListChangedPayload,
   SessionOpenedPayload,
   ToolFinishedPayload,
@@ -606,15 +605,5 @@ export function isOperationalErrorPayload(value: unknown): value is OperationalE
     && isString(value.message)
     && isOptionalString(value.detail)
     && isIncidentRecovery(value.recovery)
-  );
-}
-
-export function isRetryStuckPayload(value: unknown): value is RetryStuckPayload {
-  return (
-    isObject(value)
-    && isString(value.sessionPath)
-    && isFiniteNumber(value.delayMs)
-    && isFiniteNumber(value.graceMs)
-    && isOptionalString(value.requestId)
   );
 }

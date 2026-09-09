@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 
 import {
   assertProtocolVersion,
@@ -27,6 +28,16 @@ import {
 // Protocol contract: PROTOCOL_VERSION is a positive integer that the host and
 // backend must agree on. Bumps require a coordinated change.
 // ---------------------------------------------------------------------------
+
+test('runtime lease release stays behind awaited production backend shutdown', async () => {
+  // Bootstrap's executable delayed-deactivation tests cover lease retention.
+  // Guard the production delegate too: Disposable.dispose() is fire-and-forget
+  // and must not substitute for BackendClient.stop() at this lifecycle boundary.
+  const host = await readFile(new URL('../../../src/host/extension-host.ts', import.meta.url), 'utf8');
+  const entry = await readFile(new URL('../../../src/extension.ts', import.meta.url), 'utf8');
+  assert.match(host, /await this\.backend\.stop\(\);\s*this\.backend\.dispose\(\);/u);
+  assert.match(entry, /await extension\?\.shutdown\(\)/u);
+});
 
 test('PROTOCOL_VERSION is a positive integer', () => {
   assert.equal(typeof PROTOCOL_VERSION, 'number');

@@ -105,10 +105,6 @@ export interface WorkerRuntimeHostOptions {
   server: WorkerServer;
   owner: SdkWorkerOwnershipIdentity;
   patchIdentity: SdkPatchIdentity;
-  /** Test seam for the worker-local automatic-recovery abort bound. */
-  automaticRecoveryAbortGraceMs?: number;
-  /** Test seam for the quota incident's normal-settlement grace window. */
-  quotaSettlementGraceMs?: number;
 }
 
 /**
@@ -133,11 +129,6 @@ const WORKER_IPC_DELTA_BUDGET = WORKER_IPC_TERMINAL_MESSAGE_BUDGET;
 const WORKER_IPC_LIFECYCLE_MESSAGE_MARGIN = 24 * 1024;
 const WORKER_IPC_LIFECYCLE_MESSAGE_BUDGET =
   WORKER_IPC_DEFAULT_LIFECYCLE_QUEUE_BYTES - WORKER_IPC_LIFECYCLE_MESSAGE_MARGIN;
-/** Match the coordinator supervisor's soft-interrupt grace. A watchdog-owned
- * recovery must not wait forever for an SDK adapter whose abort promise never
- * settles; after this window the worker fails closed and the coordinator
- * reconciles the live checkpoint from confirmed process loss. */
-const DEFAULT_AUTOMATIC_RECOVERY_ABORT_GRACE_MS = 2_000;
 
 /**
  * Focused per-root execution owner. It deliberately does not embed or start a
@@ -182,10 +173,6 @@ export class WorkerRuntimeHost {
   private autonomousMode = false;
   private mcpEnabled = true;
   private readonly detailStore: WorkerLiveDetailStore;
-  /** One watchdog recovery owns a runtime generation at a time. A terminal
-   * record is retained until process exit so overlapping watchdogs cannot emit
-   * duplicate fatal/reconciliation signals for the same stuck context. */
-  private automaticRecovery?: { context: SessionContext; terminal: boolean };
 
   constructor(private readonly options: WorkerRuntimeHostOptions) {
     this.detailStore = new WorkerLiveDetailStore({
@@ -360,13 +347,7 @@ export class WorkerRuntimeHost {
         || (interruptedRequest.messageIndex === 0
           && !interruptedRequest.lastAssistantMessageId
           && !interruptedRequest.currentMessageId))) {
-      if (interruptedRequest?.promptSafetyTimer) clearTimeout(interruptedRequest.promptSafetyTimer);
-      if (interruptedRequest?.semanticLeaseTimer) clearTimeout(interruptedRequest.semanticLeaseTimer);
-      if (interruptedRequest?.quotaSettlementTimer) clearTimeout(interruptedRequest.quotaSettlementTimer);
       if (interruptedRequest) {
-        interruptedRequest.promptSafetyTimer = undefined;
-        interruptedRequest.semanticLeaseTimer = undefined;
-        interruptedRequest.quotaSettlementTimer = undefined;
         interruptedRequest.pendingDurableToolTerminals?.clear();
       }
       context.sendOperationLedger?.markFailed(
@@ -428,12 +409,7 @@ export class WorkerRuntimeHost {
           userInitiated: true,
         });
       }
-      if (interruptedRequest.promptSafetyTimer) clearTimeout(interruptedRequest.promptSafetyTimer);
-      if (interruptedRequest.semanticLeaseTimer) clearTimeout(interruptedRequest.semanticLeaseTimer);
-      if (interruptedRequest.quotaSettlementTimer) clearTimeout(interruptedRequest.quotaSettlementTimer);
       interruptedRequest.pendingDurableToolTerminals?.clear();
-      context.willRetryWatchdogClear?.();
-      context.willRetryWatchdogClear = undefined;
       context.activeRequest = undefined;
       this.emitBusyChanged(context, false);
     };
@@ -640,12 +616,7 @@ export class WorkerRuntimeHost {
     context.sessionOwnershipEpoch = previousSessionOwnershipEpoch + 1;
     try { context.unsubscribe(); } catch { /* initial placeholder or old subscription */ }
     try { context.uiBridge?.dispose(); } catch { /* old session UI is no longer authoritative */ }
-    if (context.activeRequest?.promptSafetyTimer) clearTimeout(context.activeRequest.promptSafetyTimer);
-    if (context.activeRequest?.semanticLeaseTimer) clearTimeout(context.activeRequest.semanticLeaseTimer);
-    if (context.activeRequest?.quotaSettlementTimer) clearTimeout(context.activeRequest.quotaSettlementTimer);
     context.activeRequest?.pendingDurableToolTerminals?.clear();
-    context.willRetryWatchdogClear?.();
-    if (context.willRetryWatchdogTimer) clearTimeout(context.willRetryWatchdogTimer);
     context.session = session;
     context.sessionPath = sessionPath;
     context.activeRequest = undefined;
@@ -661,8 +632,6 @@ export class WorkerRuntimeHost {
     context.queuedOperationIds = [];
     context.queuedOperationAttempts = [];
     context.terminalLiveTurn = undefined;
-    context.willRetryWatchdogTimer = undefined;
-    context.willRetryWatchdogClear = undefined;
     context.autonomousModeAskUserWasActive = undefined;
     context.systemPromptToolsBeforeDisable = undefined;
     context.displayTranscriptCache = undefined;
@@ -852,110 +821,7 @@ export class WorkerRuntimeHost {
       emitSessionListChanged: async () => undefined,
       observeSubagentDetail: (root, details) => this.detailStore.observe({ ...root, details }),
       terminalizeSubagentDetail: (root, durableEntryId) => this.detailStore.terminal(root, durableEntryId),
-      recoverStuckSession: (owner, reason) => this.recoverStuckSession(owner, reason),
     }, context, event);
-  }
-
-  /** Bound watchdog-owned teardown independently of the public interrupt
-   * command. The coordinator already bounds public interrupts and force-kills
-   * the worker after the same grace; this closes the equivalent worker-local
-   * path where awaiting `session.abort()` used to hang forever. */
-  private recoverStuckSession(context: SessionContext, reason: string): void {
-    if (this.disposed || this.context !== context) return;
-    if (this.automaticRecovery?.context === context) return;
-
-    const configuredGrace = this.options.automaticRecoveryAbortGraceMs;
-    const graceMs = typeof configuredGrace === 'number'
-      && Number.isFinite(configuredGrace)
-      && configuredGrace > 0
-      ? configuredGrace
-      : DEFAULT_AUTOMATIC_RECOVERY_ABORT_GRACE_MS;
-    const recovery = { context, terminal: false };
-    this.automaticRecovery = recovery;
-    const ownedRequest = context.activeRequest;
-    const deadlineAt = Date.now() + graceMs;
-
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const timeout = new Promise<'timeout'>((resolve) => {
-      timer = setTimeout(() => resolve('timeout'), graceMs);
-      timer.unref?.();
-    });
-    const abort = this.interrupt().then(async () => {
-      // Some adapters resolve session.abort() before publishing agent_end. Give
-      // that lifecycle event the remainder of the same bounded grace, but do
-      // not equate an abort promise resolution with semantic recovery.
-      while (!this.disposed && this.context === context
-        && hasBillableSessionActivity(context)
-        && (ownedRequest ? context.activeRequest === ownedRequest : true)) {
-        const remaining = deadlineAt - Date.now();
-        if (remaining <= 0) return 'unsettled' as const;
-        await new Promise<void>((resolve) => {
-          const settlementTimer = setTimeout(resolve, Math.min(10, remaining));
-          settlementTimer.unref?.();
-        });
-      }
-      return 'settled' as const;
-    });
-
-    void Promise.race([abort, timeout]).then((outcome) => {
-      if (outcome === 'settled') {
-        if (this.automaticRecovery === recovery) this.automaticRecovery = undefined;
-        return;
-      }
-      this.failAutomaticRecovery(
-        recovery,
-        reason,
-        graceMs,
-        outcome === 'unsettled'
-          ? new Error('session.abort() resolved but the owned request did not terminalize')
-          : undefined,
-      );
-    }, (error) => {
-      this.failAutomaticRecovery(recovery, reason, graceMs, error);
-    }).finally(() => {
-      if (timer) clearTimeout(timer);
-    });
-  }
-
-  private failAutomaticRecovery(
-    recovery: { context: SessionContext; terminal: boolean },
-    reason: string,
-    graceMs: number,
-    cause?: unknown,
-  ): void {
-    if (recovery.terminal || this.automaticRecovery !== recovery) return;
-    recovery.terminal = true;
-    const context = recovery.context;
-    if (this.disposed || this.context !== context) return;
-    const active = context.activeRequest;
-    const requestId = active?.id;
-    const causeMessage = cause instanceof Error ? cause.message : cause === undefined ? undefined : String(cause);
-    const detail = causeMessage
-      ? `Automatic session recovery failed: ${causeMessage}`
-      : `Automatic session recovery abort or terminalization did not settle within ${graceMs}ms.`;
-    const terminal = new Error(`${detail} ${reason}`);
-    this.emit('operational-error', createOperationalIncident({
-      incidentId: `runtime-recovery:${requestId ?? context.sessionPath}`,
-      dedupeKey: `runtime-recovery:${context.sessionPath}:${requestId ?? 'session'}`,
-      code: 'SESSION_RUNTIME_RECOVERY_FAILED',
-      message: reason,
-      detail,
-      sessionPath: context.sessionPath,
-      ...(active?.operationId ? { operationId: active.operationId } : {}),
-      ...(requestId ? { requestId } : {}),
-      ...(active?.liveTurnAccumulator ? { turnId: active.liveTurnAccumulator.turnId } : {}),
-      ...(active?.currentMessageId ?? active?.lastAssistantMessageId
-        ? { messageId: active.currentMessageId ?? active.lastAssistantMessageId }
-        : {}),
-      severity: 'error',
-      certainty: 'definitive',
-      phase: 'recovery',
-      recovery: { restart: true },
-    }));
-    // failRuntime closes the worker transport (and stops heartbeats) exactly
-    // once. The coordinator then confirms process loss and owns transcript,
-    // busy-state, and tool-terminal reconciliation.
-    this.options.server.failRuntime(terminal);
   }
 
   /** Bridge fetch-layer incidents into the active isolated runtime. This used
@@ -1036,12 +902,12 @@ export class WorkerRuntimeHost {
     if (!accumulator || accumulator.currentSeq <= 0) return;
     if (observation.kind === 'gate_queue') {
       this.emit('live.semantic', accumulator.observe(
-        { kind: 'turn.phase', phase: 'queued', inactivityBudgetMs: 120_000 },
+        { kind: 'turn.phase', phase: 'queued' },
         observation.occurredAt,
       ));
     } else if (observation.kind === 'headers_wait' || observation.kind === 'headers_received') {
       this.emit('live.semantic', accumulator.observe(
-        { kind: 'turn.phase', phase: 'waiting_provider', inactivityBudgetMs: 120_000 },
+        { kind: 'turn.phase', phase: 'waiting_provider' },
         observation.occurredAt,
       ));
     }
@@ -1086,19 +952,6 @@ export class WorkerRuntimeHost {
         phase: incident.kind === 'transport_timeout' || incident.kind === 'transport_error' ? 'transport' : 'provider',
         recovery: { showLogs: true },
       }));
-    }
-
-    // Quota exhaustion cannot recover by retrying the same provider. Give the
-    // SDK a short opportunity to publish its normal terminal event, then stop
-    // a still-owned request so the UI cannot remain indefinitely "running".
-    if (incident.kind === 'quota_exhausted' && !active.quotaSettlementTimer) {
-      const requestId = active.id;
-      active.quotaSettlementTimer = setTimeout(() => {
-        const current = context.activeRequest;
-        if (current?.id !== requestId || current.latestProviderIncident?.kind !== 'quota_exhausted') return;
-        this.recoverStuckSession(context, current.latestProviderIncident.userMessage);
-      }, this.options.quotaSettlementGraceMs ?? 15_000);
-      active.quotaSettlementTimer.unref?.();
     }
   }
 
@@ -1204,10 +1057,20 @@ export class WorkerRuntimeHost {
         };
       }
     }
+    const body = asWorkerJsonObject(payload ?? {});
+    if (event === 'live.semantic') {
+      // The one recoverable ordinary-lane event: a capacity or oversize
+      // enqueue rejection is dropped, the accumulator's semantic sequence
+      // keeps its gap, and the host checkpoint rebase is the authority that
+      // recovers the lost content. invalid/unavailable rejections and
+      // asynchronous write failures stay fatal, as does every other event.
+      this.options.server.sendLiveSemanticFrame(body);
+      return;
+    }
     this.options.server.sendFrame({
       kind: 'runtime.event',
       event: event as never,
-      payload: asWorkerJsonObject(payload ?? {}),
+      payload: body,
     });
   }
 

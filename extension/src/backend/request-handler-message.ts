@@ -12,7 +12,6 @@ import {
   validateOperationStatus,
   validateSessionPath,
 } from './rpc';
-import { ProviderGate } from './provider-gate';
 import {
   canonicalCompactIntentFingerprint,
   canonicalContinueIntentFingerprint,
@@ -24,7 +23,6 @@ import {
   InterruptOperationLedger,
   type InterruptOperationResult,
 } from './interrupt-operation-ledger';
-import { resolveActiveModel } from './session-metadata';
 import { buildPromptText, lowerImageInputs, normalizeThinkingLevel } from './message-inputs';
 import { buildSessionCapabilities, hasBillableSessionActivity } from './session-activity';
 import type { ActiveRequest, SessionContext } from './server-types';
@@ -34,29 +32,10 @@ import {
   type BackendRequestHandlerDeps,
   type RequestHandler,
   assertCurrentSessionMutationOwner,
-  decidePromptSafetyTimerAction,
   formatInterruptWatchdogDuration,
   markRequestValidated,
   requireSessionTransition,
 } from './request-handler-shared';
-
-/**
- * Safety-net timeout for the pre-commit phase of `message.send`. The handler
- * acknowledges when the SDK queues the prompt, so a prompt that neither
- * reaches its first `message_start` nor rejects must be bounded here. Firing
- * aborts the session and emits `preflight.failed`, allowing the host to revert
- * its promoted optimistic send.
- *
- * The first correlated `message_start` clears this timer in
- * `session-event-handler.ts`. Clearing only when `session.prompt()` settled
- * would turn this into a whole-run ceiling and abort healthy multi-turn work.
- * Exact-request bounded provider-network activity or a provider-wide circuit
- * pause can defer one window, but cumulative wall time remains capped.
- */
-const PROMPT_TIMEOUT_MS = 10 * 60 * 1000;
-
-/** Cumulative ceiling across exact-request provider-network deferrals. */
-const PROMPT_TIMEOUT_HARD_CEILING_MS = 2 * PROMPT_TIMEOUT_MS;
 
 const INTERRUPT_ABORT_WATCHDOG_ENV = 'PIE_INTERRUPT_ABORT_WATCHDOG_MS';
 /**
@@ -81,21 +60,6 @@ function clearActiveRequest(
 ): void {
   const active = context.activeRequest;
   if (!active || active.id !== requestId || (expected && active !== expected)) return;
-  // Defensive: clear the pre-commit safety-net timer if it is still armed
-  // (e.g. interrupt / preflight failure paths). The primary clear is the
-  // commit-point clear in `session-event-handler.ts`.
-  if (active.promptSafetyTimer) {
-    clearTimeout(active.promptSafetyTimer);
-    active.promptSafetyTimer = undefined;
-  }
-  if (active.semanticLeaseTimer) {
-    clearTimeout(active.semanticLeaseTimer);
-    active.semanticLeaseTimer = undefined;
-  }
-  if (active.quotaSettlementTimer) {
-    clearTimeout(active.quotaSettlementTimer);
-    active.quotaSettlementTimer = undefined;
-  }
   active.pendingDurableToolTerminals?.clear();
   if (context.pendingExtensionCommand?.requestId === requestId) {
     context.pendingExtensionCommand = undefined;
@@ -396,75 +360,15 @@ async function executeMessageSend(
   //  - failure → emit `preflight.failed` so the host dispatches `PreflightFailed`
   //    and reverts via `pending.promoted` (STATE_CONTRACT § Optimistic
   //    Reconciliation "Two failure windows for send").
-  // `preflightFailed` makes the failure emission one-shot so `preflightResult`,
-  // the `PROMPT_TIMEOUT_MS` safety net, and a concurrent `session.prompt()`
-  // rejection cannot both emit.
+  // `preflightFailed` makes the failure emission one-shot so `preflightResult`
+  // and a concurrent `session.prompt()` rejection cannot both emit.
   let preflightFailed = false;
 
-  // Backend safety net (see PROMPT_TIMEOUT_MS): bound the fire-and-forget
-  // prompt promise so a hung SDK call cannot pin `activeRequest` forever. It
-  // is cleared at the commit point (first `message_start`) — see
-  // `session-event-handler.ts` — and defensively on settle via `.finally`
-  // below, so it never fires for a healthy turn. The `activeRequest` identity
-  // check guards the edge case where this request was already superseded (turn
-  // completed or a new send started) but the old promise has not yet settled —
-  // it must not abort an unrelated turn. The handle is stashed on
-  // `activeRequest.promptSafetyTimer` so `session-event-handler.ts` can clear
-  // it at the commit point; clearing only on `.finally` would make this a
-  // whole-run ceiling that aborts healthy multi-turn runs mid-stream.
-  //
-  // EXACT-REQUEST DEFERRAL: worker transport observations mark only this
-  // active request while it is queued or waiting for bounded provider I/O.
-  // Coordinator metrics additionally expose a provider-wide circuit pause.
-  // Either can defer below the hard ceiling; unrelated provider activity
-  // cannot. `firstArmedAt` anchors the cumulative ceiling.
-  const firstArmedAt = Date.now();
-  // Resolve optional provider-wide circuit metrics. Isolated workers normally
-  // rely on their exact local transport correlation; standalone/legacy paths
-  // can still supply the in-process ProviderGate metrics.
-  const getProviderGateMetrics = deps.getProviderGateMetrics
-    ?? (() => ProviderGate.getInstance()?.getMetrics());
-  const resolveSessionProvider = deps.resolveSessionProvider
-    ?? ((ctx) => resolveActiveModel(ctx).provider);
-  const onPromptSafetyTimerFire = () => {
-    if (!ownsRequest()) return;
-    if (preflightFailed) return;
-
-    const elapsed = Date.now() - firstArmedAt;
-    const provider = resolveSessionProvider(context);
-    const metrics = getProviderGateMetrics();
-    const decision = decidePromptSafetyTimerAction({
-      elapsed,
-      ceiling: PROMPT_TIMEOUT_HARD_CEILING_MS,
-      promptTimeoutMs: PROMPT_TIMEOUT_MS,
-      provider,
-      metrics,
-      requestProviderPending: ownedRequest.providerNetworkPending === true,
-    });
-
-    if (decision.action === 'defer') {
-      // DEFER: re-arm for another window. `preflightFailed` is intentionally
-      // NOT set here — the one-shot guard is set ONLY in the FIRE branch
-      // below, so a deferred re-arm can still be superseded by a real
-      // preflight failure from `preflightResult(false)` / `.catch`. The re-
-      // armed handle replaces `promptSafetyTimer` so the commit-point clear in
-      // `session-event-handler.ts` (and `clearActiveRequest`) clears the LIVE
-      // handle, not the already-fired original.
-      const remaining = Math.max(1, PROMPT_TIMEOUT_HARD_CEILING_MS - elapsed);
-      ownedRequest.promptSafetyTimer = setTimeout(onPromptSafetyTimerFire, Math.min(PROMPT_TIMEOUT_MS, remaining));
-      return;
-    }
-
-    // FIRE: genuinely stuck, ceiling exceeded, or fail-open. The
-    // `preflightFailed` one-shot is set ONLY here.
-    preflightFailed = true;
-    void context.session.abort().catch(() => {
-      // Best-effort abort; the failure is surfaced via `preflight.failed` below.
-    });
-    emitPreflightFailed(deps, context, requestId, decision.reason, ownedRequest, ownedSessionPath);
-  };
-  const promptTimer = setTimeout(onPromptSafetyTimerFire, PROMPT_TIMEOUT_MS);
-  context.activeRequest.promptSafetyTimer = promptTimer;
+  // No heuristic elapsed-time safety net: a queued prompt that has not yet
+  // reached its first `message_start` is owned by the exact SDK prompt
+  // lifecycle (the `.catch`/`.finally` below) plus the exact provider
+  // queue/header/body deadlines, explicit Stop, and worker retirement —
+  // never by an automatic wall-clock abort.
 
   try {
     context.session
@@ -545,15 +449,6 @@ async function executeMessageSend(
         );
       })
       .finally(() => {
-        // Defensive clear: the commit-point clear in `session-event-handler.ts`
-        // is the primary clear (so a healthy long run is never aborted); this
-        // covers the settle-without-commit case (reject) and any race where the
-        // commit-point clear was skipped.
-        clearTimeout(promptTimer);
-        if (ownsRequest()) {
-          if (ownedRequest.promptSafetyTimer) clearTimeout(ownedRequest.promptSafetyTimer);
-          ownedRequest.promptSafetyTimer = undefined;
-        }
         // Extension commands are allowed to complete without an agent run.
         // They still received the early message.send ack, so close the exact
         // request here rather than leaving the host/backend busy forever. A
@@ -578,10 +473,6 @@ async function executeMessageSend(
     // `session.prompt` threw synchronously before returning a promise — treat
     // as a pre-ack failure: clear activeRequest and let the RPC reject so the
     // host dispatches `SendResult{ok:false}` and reverts via `pending.ops`.
-    clearTimeout(promptTimer);
-    if (ownsRequest() && ownedRequest.promptSafetyTimer === promptTimer) {
-      ownedRequest.promptSafetyTimer = undefined;
-    }
     clearActiveRequest(context, requestId, ownedRequest);
     throw syncError;
   }
@@ -877,7 +768,7 @@ async function executeMessageInterrupt(
     const accumulator = context.activeRequest.liveTurnAccumulator;
     if (accumulator) {
       deps.emit('live.semantic', accumulator.observe({
-        kind: 'turn.phase', phase: 'aborting', inactivityBudgetMs: resolveInterruptAbortWatchdogMs(),
+        kind: 'turn.phase', phase: 'aborting', cancellationCleanupBudgetMs: resolveInterruptAbortWatchdogMs(),
       }, Date.now()));
     }
   }
@@ -1000,7 +891,6 @@ async function executeMessageInterrupt(
     context.retired = true;
     context.sessionManagerFence?.invalidate();
     context.uiBridge?.dispose();
-    if (active?.semanticLeaseTimer) clearTimeout(active.semanticLeaseTimer);
     active?.pendingDurableToolTerminals?.clear();
     if (active?.liveTurnAccumulator) {
       context.terminalLiveTurn = { accumulator: active.liveTurnAccumulator, expiresAt: Date.now() + 10_000 };

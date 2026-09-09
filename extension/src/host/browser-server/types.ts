@@ -73,6 +73,7 @@ export interface BrowserServerOptions {
   onRendererInvalidated?(rendererId: string, rendererGeneration: number): void;
   /** Compiled webview asset directory (`out/webview/panel`). */
   assetDir: string;
+  rendererSelection?: { fallbackDir?: string; notBefore?: number };
   /** Optional pie icon path served at `/favicon.svg` (extension media). */
   iconPath?: string;
   /** Human-readable owner suffix for the served page title (workspace name). */

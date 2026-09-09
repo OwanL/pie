@@ -46,7 +46,6 @@ function createHarness() {
     emitContextUsageChanged: () => undefined,
     emitSessionOpened: async () => undefined,
     emitSessionListChanged: async () => undefined,
-    recoverStuckSession: () => undefined,
   };
   return { accumulator, context, deps, emitted };
 }

@@ -4,6 +4,7 @@ import { readFileSync, statSync } from 'node:fs';
 import * as vscode from 'vscode';
 
 import { BackendClient } from '../backend/client';
+import { runtimeOutputDirectory } from '../runtime-location';
 import { buildRestoredSessionPlan, filterRestorableStoredTabs } from '../core/restored-session-plan';
 import { normalizeStoredTabPaths, normalizeStoredPinnedTabGroups } from '../../shared/tab-behavior';
 import { createCommandExecutor } from '../../shared/exec-command';
@@ -209,7 +210,7 @@ function bootLogRestorePrepared(
  * then the globalState cache and `npm root -g`.
  */
 function readSdkLocalManifest(context: vscode.ExtensionContext): string | undefined {
-  const manifestPath = context.asAbsolutePath(path.join('out', 'sdk-local-path.json'));
+  const manifestPath = path.join(runtimeOutputDirectory(context), 'sdk-local-path.json');
   try {
     const parsed = JSON.parse(readFileSync(manifestPath, 'utf8')) as { sdkPath?: unknown };
     const sdkPath = typeof parsed.sdkPath === 'string' ? parsed.sdkPath.trim() : '';
@@ -569,7 +570,7 @@ export async function startSessionBackend(options: StartSessionBackendOptions): 
   }
   const { nodePath, sdkPath } = paths;
 
-  const backendPath = path.join(options.context.extensionPath, 'out', 'backend.js');
+  const backendPath = path.join(runtimeOutputDirectory(options.context), 'backend.js');
   setupAgentDirEnv(options);
   setupInTreeAuthEnv();
   // The child inherits this before SDK load, closing the startup window where

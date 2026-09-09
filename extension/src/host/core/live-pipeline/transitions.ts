@@ -132,7 +132,7 @@ export function applyLiveSemanticEnvelope(
       seq: event.seq,
       phase: event.phase,
       phaseSince: event.occurredAt,
-      inactivityBudgetMs: event.inactivityBudgetMs,
+      cancellationCleanupBudgetMs: event.cancellationCleanupBudgetMs,
     });
   }
 

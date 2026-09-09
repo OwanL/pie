@@ -156,7 +156,7 @@ function runFakeAgent(
 		undefined,
 		undefined,
 		undefined,
-		{ sdk: sdk as any, timeoutMs: 0 },
+		{ sdk: sdk as any },
 	);
 }
 

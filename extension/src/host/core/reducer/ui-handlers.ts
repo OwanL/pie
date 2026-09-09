@@ -37,9 +37,6 @@ export function handleCustomMessage(state: ArchState, event: Extract<Event, { ki
     ? Object.entries(state.pending.promoted).find(([, op]) => op.sessionPath === event.sessionPath)?.[0]
     : undefined;
   const ownerCorrId = promotedCorrId ?? pendingCorrId;
-  const ownerOperationId = ownerCorrId
-    ? (state.pending.promoted[ownerCorrId] ?? state.pending.ops[ownerCorrId])?.operationId
-    : undefined;
 
   const nextState = produce(state, (draft) => {
     if (isPruningResult) {
@@ -51,27 +48,12 @@ export function handleCustomMessage(state: ArchState, event: Extract<Event, { ki
         latencyMs,
       };
     }
-    if (transitionToSucceeded && ownerOperationId) {
-      const operation = draft.operations[ownerOperationId];
-      if (operation && !operation.terminal && operation.executionPhase === 'prepass') {
-        operation.executionPhase = 'model-start';
-      }
-    }
   });
 
-  const ownerOperation = ownerOperationId ? nextState.operations[ownerOperationId] : undefined;
   return {
     state: nextState,
     effects: transitionToSucceeded && ownerCorrId
-      ? [{
-          kind: 'MarkPrepassSucceeded', corrId: ownerCorrId,
-          ...(ownerOperation?.kind === 'message.send' ? {
-            operationId: ownerOperation.operationId,
-            operationAttempt: ownerOperation.attempt,
-            sessionPath: event.sessionPath,
-            backendGeneration: ownerOperation.backendGeneration,
-          } : {}),
-        }]
+      ? [{ kind: 'MarkPrepassSucceeded', corrId: ownerCorrId }]
       : [],
   };
 }

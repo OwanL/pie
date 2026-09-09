@@ -388,6 +388,20 @@ test('turn.started carries the exact serving provider through transitions, check
   assert.equal(isTurnSemanticEnvelope({ ...startedEnvelope, provider: undefined }), true);
 });
 
+test('turn phase accepts a cleanup budget only for explicit cancellation', () => {
+  const phaseEnvelope = {
+    ...base,
+    kind: 'turn.phase',
+    seq: 2,
+    phase: 'aborting',
+    cancellationCleanupBudgetMs: 30_000,
+  } as const;
+  assert.equal(isTurnSemanticEnvelope(phaseEnvelope), true);
+  assert.equal(isTurnSemanticEnvelope({ ...phaseEnvelope, phase: 'waiting_provider' }), false);
+  assert.equal(isTurnSemanticEnvelope({ ...phaseEnvelope, cancellationCleanupBudgetMs: -1 }), false);
+  assert.equal(isTurnSemanticEnvelope({ ...phaseEnvelope, cancellationCleanupBudgetMs: undefined }), true);
+});
+
 test('projection places queued follow-ups after the active turn at their delivery boundary', () => {
   const state = apply(createEmptyLivePipelineState(), start()).state;
   const view = projectTranscriptView([

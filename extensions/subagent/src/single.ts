@@ -243,8 +243,8 @@ async function runWithModelRetry(args: RunWithModelRetryArgs): Promise<SingleRes
 							usage: usageWithPriorAttempts(current.usage, cumulativeUsage),
 						};
 						// Selection is known before dispatch, so expose its effective
-						// bucket on progress snapshots too. This keeps a force-settled
-						// result as auditable as an ordinarily returned attempt.
+						// bucket on progress snapshots too. This keeps a locally
+						// cancelled child as auditable as an ordinarily returned attempt.
 						attachSelectionMetadata(enriched, resolved);
 						return enriched;
 					})),
@@ -292,8 +292,7 @@ async function runWithModelRetry(args: RunWithModelRetryArgs): Promise<SingleRes
 			result.progressGeneration = (result.progressGeneration ?? 0) + 1;
 			// The completed attempt remains terminal for analytics, but the child
 			// dispatch is still active while it waits to retry. Publish that transient
-			// lifecycle as running so the outer phase resolver applies retry_wait's
-			// bounded inactivity lease instead of its generic fallback.
+			// lifecycle so the parent UI sees retry_wait as live child state.
 			const retryWaitSnapshot: SingleResult = {
 				...result,
 				usage: { ...cumulativeUsage },

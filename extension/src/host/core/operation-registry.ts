@@ -96,9 +96,6 @@ export function startSessionOperation(input: StartSessionOperation): SessionOper
     ...(input.localId !== undefined ? { localId: input.localId } : {}),
     ...(input.intentFingerprint !== undefined ? { intentFingerprint: input.intentFingerprint } : {}),
     ...(input.kind === 'message.send' ? { delivery: 'pending' as const } : {}),
-    ...(input.kind === 'message.send' || input.kind === 'message.edit'
-      ? { executionPhase: 'prepass' as const }
-      : {}),
   };
 }
 

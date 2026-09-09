@@ -26,7 +26,7 @@ import type {
 } from '../../src/host/core/effect-runner';
 import type { FileDiffService } from '../../src/host/core/file-diff-service';
 import type { EffectResultEvent, CommandEvent, Event } from '../../src/host/core/events';
-import type { ThinkingLevel, ProviderGateStats } from '../../src/shared/protocol';
+import type { ThinkingLevel } from '../../src/shared/protocol';
 import type { LiveSubagentDetailAddress, DetailCursor, DetailPageRef } from '../../src/shared/protocol/subagent-detail';
 import type { RequestOptions } from '../../src/shared/request-tracker';
 
@@ -56,12 +56,6 @@ export interface MakeEffectRunnerDepsOpts {
   /** Dynamic send-timer budget (prepass-aware production wiring); takes
    *  precedence over `sendTimerTimeoutMs`. Used to test the getter path. */
   getSendTimerTimeoutMs?: () => number;
-  /** Live provider-gate state for the FP-C2a model-start re-arm gate. */
-  getProviderGateMetrics?: () => ProviderGateStats;
-  /** Resolve the provider serving the session's current request (FP-C2a). */
-  resolveSessionProvider?: (sessionPath: string) => string | undefined;
-  /** Correlated provider-wait phase for the exact session (FP-C2a). */
-  isSessionProviderPending?: (sessionPath: string) => boolean;
   /** Injectable timer sink (tests pass a fake to drive timers deterministically). */
   timer?: TimerSink;
   /** Inject a custom `BackendLike` (e.g. one shared with `SessionServiceState`). */
@@ -245,9 +239,6 @@ export function makeEffectRunnerDeps(opts: MakeEffectRunnerDepsOpts = {}): MakeE
     dispatchEvent: opts.dispatchEvent ?? (() => {}),
     sendTimerTimeoutMs: opts.sendTimerTimeoutMs,
     getSendTimerTimeoutMs: opts.getSendTimerTimeoutMs,
-    getProviderGateMetrics: opts.getProviderGateMetrics,
-    resolveSessionProvider: opts.resolveSessionProvider,
-    isSessionProviderPending: opts.isSessionProviderPending,
     timer: opts.timer,
   };
 

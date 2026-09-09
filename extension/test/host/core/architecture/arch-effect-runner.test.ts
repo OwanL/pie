@@ -1,10 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { EffectRunner, decideModelStartTimerAction, type EffectRunnerDeps, type TimerSink, type TimerHandle } from '../../../../src/host/core/effect-runner';
+import { EffectRunner, type EffectRunnerDeps, type TimerSink, type TimerHandle } from '../../../../src/host/core/effect-runner';
 import type { Effect } from '../../../../src/host/core/effects';
 import type { EffectResultEvent, CommandEvent, Event } from '../../../../src/host/core/events';
-import type { ProviderGateStats } from '../../../../src/shared/protocol';
 import { BACKEND_READY_TIMEOUT_MS } from '../../../../src/shared/backend-ready-timeout';
 import { RequestTimeoutError } from '../../../../src/shared/request-tracker';
 import { makeEffectRunnerDeps } from '../../../helpers/effect-runner-deps';
@@ -1584,7 +1583,7 @@ test('EffectRunner SendRpc send-timer dispatches PreflightFailed on timeout (pos
   runner.dispose();
 });
 
-test('EffectRunner re-arms a successful prepass as model-start and reports the correct timeout phase', async () => {
+test('EffectRunner disarms the send-timer at preflight success — an accepted send stays pre-commit indefinitely without timeout side effects', async () => {
   const timers = new FakeTimerSink();
   const dispatchedEvents: Event[] = [];
   const { deps } = makeEffectRunnerDeps({
@@ -1597,52 +1596,21 @@ test('EffectRunner re-arms a successful prepass as model-start and reports the c
 
   runner.run({ kind: 'SendRpc', corrId: 'c-model-start', sessionPath: '/a', text: 'hi', inputs: [], composedText: 'hi', localId: 'loc-model-start' });
   await settle();
-  runner.run({ kind: 'MarkPrepassSucceeded', corrId: 'c-model-start' });
-  assert.equal(timers.size, 1, 'prepass timer is replaced, not duplicated');
+  // The prepass watchdog is armed until the backend's explicit preflight
+  // success arrives (the preserved ack/prepass observation window).
+  assert.equal(timers.size, 1, 'send-timer armed after early-ack');
 
-  timers.runAll();
-  const pf = dispatchedEvents[0];
-  assert.equal(pf?.kind, 'PreflightFailed');
-  if (pf?.kind === 'PreflightFailed') {
-    assert.equal(pf.error, 'Timed out waiting for the model to start streaming (120s)');
-  }
+  runner.run({ kind: 'MarkPrepassSucceeded', corrId: 'c-model-start' });
+  assert.equal(timers.size, 0, 'preflight success disarms the send-timer — no model-start re-arm');
+
+  // An accepted send may remain pre-commit indefinitely: firing every timer
+  // repeatedly produces no PreflightFailed/SendOperationDelayed observation.
+  for (let i = 0; i < 100; i++) timers.runAll();
+  assert.equal(dispatchedEvents.length, 0, 'no timeout side effects after preflight success');
   runner.dispose();
 });
 
-test('decideModelStartTimerAction defers for bounded active, queued, or paused provider work under the ceiling', () => {
-  const metric = (over: { activeRequests?: number; queuedRequests?: number; paused?: boolean } = {}): ProviderGateStats => ({
-    enabled: true,
-    providers: [{
-      provider: 'openai',
-      activeRequests: 1,
-      queuedRequests: 0,
-      maxConcurrentRequests: 1,
-      afterburnSeconds: 0,
-      paused: false,
-      pausedUntilMs: 0,
-      strikeCount: 0,
-      ...over,
-    }],
-  });
-  // An admitted request may still be inside its bounded headers/first-chunk phase.
-  assert.deepEqual(decideModelStartTimerAction({ elapsed: 1000, ceiling: 240_000, provider: 'openai', metrics: metric(), requestProviderPending: true }), { action: 'defer' });
-  // Saturated (queued) + under ceiling → defer.
-  assert.deepEqual(decideModelStartTimerAction({ elapsed: 1000, ceiling: 240_000, provider: 'openai', metrics: metric({ queuedRequests: 2 }), requestProviderPending: true }), { action: 'defer' });
-  // Paused (circuit breaker) counts as saturated.
-  assert.deepEqual(decideModelStartTimerAction({ elapsed: 1000, ceiling: 240_000, provider: 'openai', metrics: metric({ paused: true }) }), { action: 'defer' });
-  // Saturated + at/over ceiling → fire (hard backstop).
-  assert.deepEqual(decideModelStartTimerAction({ elapsed: 240_000, ceiling: 240_000, provider: 'openai', metrics: metric({ queuedRequests: 2 }), requestProviderPending: true }), { action: 'fire' });
-  // Aggregate activity from a sibling session cannot mask this request.
-  assert.deepEqual(decideModelStartTimerAction({ elapsed: 1000, ceiling: 240_000, provider: 'openai', metrics: metric({ queuedRequests: 2 }), requestProviderPending: false }), { action: 'fire' });
-  // No provider work → fire.
-  assert.deepEqual(decideModelStartTimerAction({ elapsed: 1000, ceiling: 240_000, provider: 'openai', metrics: metric({ activeRequests: 0 }) }), { action: 'fire' });
-  // Fail-open: absent gate / unresolvable provider / missing metric → fire.
-  assert.deepEqual(decideModelStartTimerAction({ elapsed: 1000, ceiling: 240_000, provider: 'openai', metrics: undefined }), { action: 'fire' });
-  assert.deepEqual(decideModelStartTimerAction({ elapsed: 1000, ceiling: 240_000, provider: undefined, metrics: metric({ queuedRequests: 2 }) }), { action: 'fire' });
-  assert.deepEqual(decideModelStartTimerAction({ elapsed: 1000, ceiling: 240_000, provider: 'anthropic', metrics: metric({ queuedRequests: 2 }) }), { action: 'fire' });
-});
-
-test('EffectRunner model-start timer re-arms (defers) when the provider is saturated instead of firing PreflightFailed', async () => {
+test('EffectRunner registered send keeps the prepass ambiguity watchdog until preflight success, then has none', async () => {
   const timers = new FakeTimerSink();
   const dispatchedEvents: Event[] = [];
   const { deps } = makeEffectRunnerDeps({
@@ -1650,32 +1618,32 @@ test('EffectRunner model-start timer re-arms (defers) when the provider is satur
     sendTimerTimeoutMs: 50,
     timer: timers,
     dispatchEvent: (e) => dispatchedEvents.push(e),
-    getProviderGateMetrics: () => ({
-      enabled: true,
-      providers: [{
-        provider: 'openai',
-        activeRequests: 1,
-        queuedRequests: 2,
-        maxConcurrentRequests: 1,
-        afterburnSeconds: 0,
-        paused: false,
-        pausedUntilMs: 0,
-        strikeCount: 0,
-      }],
-    }),
-    resolveSessionProvider: () => 'openai',
-    isSessionProviderPending: () => true,
   });
   const runner = new EffectRunner(deps);
+  const registeredSend = (corrId: string): void => runner.run({
+    kind: 'SendRpc', corrId, operationId: `op-${corrId}`, operationAttempt: 1,
+    backendGeneration: 7, sessionPath: '/a', text: 'hi', inputs: [],
+    composedText: 'hi', localId: `loc-${corrId}`,
+  });
 
-  runner.run({ kind: 'SendRpc', corrId: 'c-rearm', sessionPath: '/a', text: 'hi', inputs: [], composedText: 'hi', localId: 'loc-rearm' });
+  // Before preflight success the watchdog still marks the operation ambiguous
+  // (the preserved ack/prepass observation deadline).
+  registeredSend('c-watchdog');
   await settle();
-  runner.run({ kind: 'MarkPrepassSucceeded', corrId: 'c-rearm' });
-  assert.equal(timers.size, 1, 'prepass timer replaced by the model-start timer');
+  assert.equal(timers.size, 1, 'prepass watchdog armed for the registered send');
+  timers.runAll();
+  assert.equal(dispatchedEvents.length, 1, 'SendOperationDelayed fired while the prepass window expired');
+  assert.equal(dispatchedEvents[0]?.kind, 'SendOperationDelayed');
+  assert.equal(timers.size, 0, 'the fired timer cannot re-arm');
 
-  timers.runAll(); // model-start timer fires → saturated → re-arm (defer)
-  assert.equal(dispatchedEvents.length, 0, 'no PreflightFailed while the provider is saturated');
-  assert.equal(timers.size, 1, 'timer re-armed for another window');
+  // After preflight success the accepted send has no watchdog at all.
+  registeredSend('c-rearm');
+  await settle();
+  assert.equal(timers.size, 1, 'a fresh send re-arms its prepass watchdog');
+  runner.run({ kind: 'MarkPrepassSucceeded', corrId: 'c-rearm' });
+  assert.equal(timers.size, 0, 'preflight success disarms the send-timer — no model-start re-arm');
+  for (let i = 0; i < 100; i++) timers.runAll();
+  assert.equal(dispatchedEvents.length, 1, 'no further timeout side effects after preflight success');
   runner.dispose();
 });
 

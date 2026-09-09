@@ -1068,7 +1068,7 @@ test("actual SDK hook chain applies tools before skills, preserves foreign prose
 			_baseSystemPrompt: initialBase,
 			_baseSystemPromptOptions: promptOptions,
 			agent: { state: { systemPrompt: initialBase } },
-			extensionRunner: sdkRunner,
+			_extensionRunner: sdkRunner,
 			_rebuildSystemPrompt(toolNames: string[]) {
 				rebuildCalls++;
 				this._baseSystemPromptOptions = { ...this._baseSystemPromptOptions, selectedTools: toolNames };

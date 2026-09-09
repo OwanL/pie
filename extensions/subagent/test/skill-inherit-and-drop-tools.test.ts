@@ -101,7 +101,7 @@ test("runSingleAgent subtracts the drop-tools list from an unrestricted agent's 
 			details, makeModelRegistry(), undefined, selection,
 			undefined, undefined, undefined, undefined,
 			["read", "write", "edit", "bash", "ask_user", "web_search"],
-			{ sdk, timeoutMs: 0 },
+			{ sdk },
 		);
 		assert.equal(state.createSessionArgs.length, 1);
 		assert.deepEqual(state.createSessionArgs[0].tools, ["read", "write", "edit", "bash"]);
@@ -121,7 +121,7 @@ test("runSingleAgent subtracts the drop-tools list from an agent's explicit tool
 			undefined, undefined, undefined, undefined,
 			details, makeModelRegistry(), undefined, selection,
 			undefined, undefined, undefined, undefined, undefined,
-			{ sdk, timeoutMs: 0 },
+			{ sdk },
 		);
 		assert.deepEqual(state.createSessionArgs[0].tools, ["read", "write"]);
 	} finally {
@@ -140,7 +140,7 @@ test("runSingleAgent leaves the tool set unchanged when the drop list is empty",
 			undefined, undefined, undefined, undefined,
 			details, makeModelRegistry(), undefined, selection,
 			undefined, undefined, undefined, undefined, undefined,
-			{ sdk, timeoutMs: 0 },
+			{ sdk },
 		);
 		// No drop list → agent.tools passes through unchanged.
 		assert.deepEqual(state.createSessionArgs[0].tools, ["read", "write", "ask_user"]);
@@ -160,7 +160,7 @@ test("runSingleAgent preserves an explicit zero-tool agent allowlist", async () 
 			undefined, undefined, undefined, undefined,
 			details, makeModelRegistry(), undefined, selection,
 			undefined, undefined, undefined, undefined, ["read", "write", "bash"],
-			{ sdk, timeoutMs: 0 },
+			{ sdk },
 		);
 		assert.deepEqual(state.createSessionArgs[0].tools, []);
 	} finally {
@@ -178,7 +178,7 @@ test("runSingleAgent passes a skillsOverride that filters to the parent's kept-s
 			process.cwd(), [makeAgent()], "worker", "do work", undefined, undefined, undefined, undefined,
 			details, makeModelRegistry(), undefined, selection,
 			undefined, undefined, undefined, sessionId, undefined,
-			{ sdk: sdk as any, timeoutMs: 0 },
+			{ sdk: sdk as any },
 		);
 		assert.equal(state.createResourceLoaderArgs.length, 1);
 		const override = state.createResourceLoaderArgs[0].skillsOverride as
@@ -200,7 +200,7 @@ test("depth-2+ run without a parent session record does not inherit async-local 
 			process.cwd(), [makeAgent()], "worker", "nested work", undefined, undefined, undefined, undefined,
 			details, makeModelRegistry(), undefined, selection,
 			undefined, undefined, undefined, undefined, undefined,
-			{ sdk: sdk as any, timeoutMs: 0 },
+			{ sdk: sdk as any },
 		),
 	);
 	assert.equal(state.createResourceLoaderArgs[0].skillsOverride, undefined);
@@ -243,7 +243,7 @@ test("runSingleAgent passes no skillsOverride when the parent kept-set is empty 
 			process.cwd(), [makeAgent()], "worker", "do work", undefined, undefined, undefined, undefined,
 			details, makeModelRegistry(), undefined, selection,
 			undefined, undefined, undefined, sessionId, undefined,
-			{ sdk, timeoutMs: 0 },
+			{ sdk },
 		);
 		// An empty kept set must NOT strip all skills — it falls back to no filter
 		// (keep-all), matching the pruner's own keep-all safeguard.
@@ -259,7 +259,7 @@ test("runSingleAgent passes no skillsOverride when no parent kept-set is recorde
 		process.cwd(), [makeAgent()], "worker", "do work", undefined, undefined, undefined, undefined,
 		details, makeModelRegistry(), undefined, selection,
 		undefined, undefined, undefined, undefined, undefined,
-		{ sdk, timeoutMs: 0 },
+		{ sdk },
 	);
 	assert.equal(state.createResourceLoaderArgs[0].skillsOverride, undefined);
 });

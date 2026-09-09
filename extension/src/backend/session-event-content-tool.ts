@@ -36,20 +36,14 @@ import type { ActiveRequest, SessionContext } from './server-types';
 import { isBackendLivePipelineTraceEnabled, recordBackendLivePipelineTrace } from './live-pipeline-trace-runtime';
 import { isAllZeroEmptyLengthMessage, isEstimatedContextOverflowMessage } from './history-compaction';
 import {
-  clearSemanticLease,
   clearSettledProviderIncident,
-  configuredLeaseMs,
   emitLatestPruningResult,
   emitRejectedObservation,
   emitSemanticCandidate,
   logBackendDiagnostic,
   nonEmptyTrimmed,
-  PROVIDER_SEMANTIC_INACTIVITY_MS,
   readTokenCount,
-  renewSemanticLease,
-  resolveProviderSemanticInactivityMs,
   resolveUnexpectedInterruptReason,
-  TOOL_INACTIVITY_MS,
   type BackendSessionEventHandler,
   type BackendSessionEventHandlerDeps,
 } from './session-event-shared';
@@ -263,7 +257,6 @@ export function boundToolProgress(value: unknown, maxBytes = TOOL_PROGRESS_MAX_B
             activitySince: result.activitySince,
             progressGeneration: result.progressGeneration,
             lastProgressAt: result.lastProgressAt,
-            inactivityBudgetMs: result.inactivityBudgetMs,
             streaming: result.streaming,
             streamingText: boundedText(result.streamingText, 8_192),
             streamingReasoning: boundedText(result.streamingReasoning, 8_192),
@@ -789,28 +782,20 @@ function handleContentToolSessionEvent(
       // Reset the per-message first-content marker so each assistant message
       // measures its own provider TTFT.
       context.activeRequest.providerFirstDeltaAt = undefined;
-      // Commit point (first assistant message of this request): clear the
-      // pre-commit safety-net timer armed in `handleMessageSend`. The timer is
-      // a PRE-COMMIT guard only — without this clear it would act as a
-      // whole-run ceiling (it is otherwise only cleared on `session.prompt()`
-      // settle) and abort any healthy multi-turn agentic run exceeding
-      // `PROMPT_TIMEOUT_MS` mid-stream. Only the first message_start clears
-      // (subsequent turns re-enter with `promptSafetyTimer === undefined`).
+      // Commit point (first assistant message of this request): the request
+      // has crossed into provider/streaming territory and no pre-commit
+      // safety-net timer exists — accepted activity is never terminalized by
+      // elapsed time. Only the first message_start marks the commit.
       if (context.activeRequest.messageIndex === 1) {
         context.sendOperationLedger?.markCommitted(context.activeRequest.operationId);
-        if (context.activeRequest.promptSafetyTimer) {
-          clearTimeout(context.activeRequest.promptSafetyTimer);
-          context.activeRequest.promptSafetyTimer = undefined;
-        }
       }
 
       if ((context.activeRequest.liveTurnAccumulator?.currentSeq ?? 0) === 0) {
         emitSemanticCandidate(deps, context, { kind: 'turn.started' }, context.activeRequest.currentMessageStartedAt);
       }
       emitSemanticCandidate(deps, context, {
-        kind: 'turn.phase', phase: 'waiting_provider', inactivityBudgetMs: PROVIDER_SEMANTIC_INACTIVITY_MS,
+        kind: 'turn.phase', phase: 'waiting_provider',
       }, context.activeRequest.currentMessageStartedAt);
-      renewSemanticLease(deps, context);
 
       if (!context.activeRequest.liveTurnAccumulator) deps.emit('message.started', {
         requestId: context.activeRequest.id,
@@ -842,7 +827,6 @@ function handleContentToolSessionEvent(
         }
         context.activeRequest.lastProviderErrorForDiagnostics = undefined;
         clearSettledProviderIncident(context);
-        renewSemanticLease(deps, context);
         emitSemanticCandidate(deps, context, {
           kind: 'turn.text', delta,
         });
@@ -860,7 +844,6 @@ function handleContentToolSessionEvent(
         if (thinkingContent) {
           context.activeRequest.lastProviderErrorForDiagnostics = undefined;
           clearSettledProviderIncident(context);
-          renewSemanticLease(deps, context);
           emitSemanticCandidate(deps, context, {
             kind: 'turn.reasoning',
             delta: event.assistantMessageEvent.delta ?? thinkingContent,
@@ -902,7 +885,6 @@ function handleContentToolSessionEvent(
         } else {
           context.activeRequest.lastProviderErrorForDiagnostics = undefined;
           clearSettledProviderIncident(context);
-          renewSemanticLease(deps, context);
           if (toolCallEvent.type === 'toolcall_start') {
             emitSemanticCandidate(deps, context, {
               kind: 'turn.toolDraft', action: 'start', toolCallId, name,
@@ -961,8 +943,6 @@ function handleContentToolSessionEvent(
         return;
       }
 
-      clearSemanticLease(context);
-      renewSemanticLease(deps, context, configuredLeaseMs('PIE_TOOL_INACTIVITY_MS', TOOL_INACTIVITY_MS), 'tool');
       // Diagnostic: log tool execution start to stderr for debugging file-changes tracking.
       // Raw argument values are intentionally omitted to avoid leaking secrets/PII.
       logBackendDiagnostic('debug', 'tool_execution_start', {
@@ -1028,7 +1008,6 @@ function handleContentToolSessionEvent(
         return;
       }
 
-      renewSemanticLease(deps, context, configuredLeaseMs('PIE_TOOL_INACTIVITY_MS', TOOL_INACTIVITY_MS), 'tool');
       const detailRoot = subagentDetailRoot(context, event.toolCallId ?? '');
       if (detailRoot && (event.toolName ?? '').trim().toLowerCase() === 'subagent') {
         deps.observeSubagentDetail?.(detailRoot, event.partialResult);
@@ -1107,17 +1086,7 @@ function handleContentToolSessionEvent(
       }
 
       const timing = resolveToolTiming(context, toolCallId);
-      // A tool lease must never disappear while the agent prepares its next
-      // provider turn. The post-tool/pre-message_start gap remains bounded even
-      // when the provider emits no message_start.
-      // Parallel siblings retain the tool budget; the final tool switches to
-      // the shorter provider-semantic budget until message_start renews it.
       const runningTools = context.activeRequest.toolStartTimes?.size ?? 0;
-      const nextLeaseKind = runningTools > 0 ? 'tool' as const : 'provider' as const;
-      const nextLeaseMs = nextLeaseKind === 'tool'
-        ? configuredLeaseMs('PIE_TOOL_INACTIVITY_MS', TOOL_INACTIVITY_MS)
-        : resolveProviderSemanticInactivityMs(context.activeRequest.provider);
-      renewSemanticLease(deps, context, nextLeaseMs, nextLeaseKind);
 
       const terminal: ToolFinishedPayload = {
         requestId: context.activeRequest.id,
@@ -1147,7 +1116,6 @@ function handleContentToolSessionEvent(
       emitSemanticCandidate(deps, context, {
         kind: 'turn.phase',
         phase: runningTools > 0 ? 'running_tool' : 'preparing',
-        inactivityBudgetMs: nextLeaseMs,
       });
       // Publication is deliberately withheld until the SDK's persisted
       // toolResult message_end arrives with its stable sessionEntryId.
@@ -1298,7 +1266,6 @@ function handleContentToolSessionEvent(
         return;
       }
 
-      clearSemanticLease(context);
       const messageId =
         context.activeRequest.currentMessageId
         ?? context.activeRequest.lastAssistantMessageId

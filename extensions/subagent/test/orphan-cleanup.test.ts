@@ -442,7 +442,7 @@ test("runSingleAgent: late createSession resolution after abort disposes the orp
 		makeModelRegistry(), undefined,
 		{ modelId: "model-a", bucket: "medium", thinkingLevel: "low", pool: ["model-a"], fallback: false },
 		undefined, undefined, undefined, undefined, undefined,
-		{ sdk: late.sdk as any, timeoutMs: 0 },
+		{ sdk: late.sdk as any },
 	);
 
 	// Wait for createSession to be entered, then abort before it resolves.
@@ -469,7 +469,7 @@ test("runSingleAgent: late createSession resolution after abort disposes the orp
 		makeModelRegistry(), undefined,
 		{ modelId: "model-a", bucket: "medium", thinkingLevel: "low", pool: ["model-a"], fallback: false },
 		undefined, undefined, undefined, undefined, undefined,
-		{ sdk: fast.sdk as any, timeoutMs: 0 },
+		{ sdk: fast.sdk as any },
 	));
 	assert.equal(followUp.exitCode, 0);
 	assert.equal(fast.state.createSessionCalls, 1);
@@ -503,7 +503,7 @@ test("runSingleAgent: a dispose-failing orphan retries bounded times and still r
 		makeModelRegistry(), undefined,
 		{ modelId: "model-a", bucket: "medium", thinkingLevel: "low", pool: ["model-a"], fallback: false },
 		undefined, undefined, undefined, undefined, undefined,
-		{ sdk: late.sdk as any, timeoutMs: 0, orphanRegistry: registry },
+		{ sdk: late.sdk as any, orphanRegistry: registry },
 	);
 
 	while (late.state.createSessionCalls === 0) await sleep(1);
@@ -548,7 +548,7 @@ test("runSingleAgent: orphan cleanup is routed through a test registry with obse
 		makeModelRegistry(), undefined,
 		{ modelId: "model-a", bucket: "medium", thinkingLevel: "low", pool: ["model-a"], fallback: false },
 		undefined, undefined, undefined, undefined, undefined,
-		{ sdk: late.sdk as any, timeoutMs: 0, orphanRegistry: registry },
+		{ sdk: late.sdk as any, orphanRegistry: registry },
 	);
 
 	while (late.state.createSessionCalls === 0) await sleep(1);
@@ -639,7 +639,7 @@ test("runSingleAgent: orphan dispose is claimed exactly-once across timed-out cl
 		makeModelRegistry(), undefined,
 		{ modelId: "model-a", bucket: "medium", thinkingLevel: "low", pool: ["model-a"], fallback: false },
 		undefined, undefined, undefined, undefined, undefined,
-		{ sdk: late.sdk as any, timeoutMs: 0, orphanRegistry: registry },
+		{ sdk: late.sdk as any, orphanRegistry: registry },
 	);
 
 	while (late.state.createSessionCalls === 0) await sleep(1);

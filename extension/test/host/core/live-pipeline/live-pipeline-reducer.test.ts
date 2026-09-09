@@ -45,7 +45,7 @@ test('provider progress clears the retry chip while retry timing continues to me
     ...base, kind: 'turn.started', seq: 1, canonicalMessageId: 'message', startedAt: 90,
   }).state;
   state = dispatch(state, {
-    ...base, kind: 'turn.phase', seq: 2, phase: 'retry_wait', inactivityBudgetMs: 1_000,
+    ...base, kind: 'turn.phase', seq: 2, phase: 'retry_wait',
   }).state;
   state = reducer(state, {
     kind: 'RetryStarted', sessionPath: base.sessionPath,
@@ -53,7 +53,7 @@ test('provider progress clears the retry chip while retry timing continues to me
   }).state;
 
   state = dispatch(state, {
-    ...base, kind: 'turn.phase', seq: 3, phase: 'waiting_provider', inactivityBudgetMs: 120_000,
+    ...base, kind: 'turn.phase', seq: 3, phase: 'waiting_provider',
   }).state;
   assert.equal(state.sessions.retryStatusBySession[base.sessionPath]?.attempt, 1,
     'the retry indicator remains while the replacement provider response is still pending');

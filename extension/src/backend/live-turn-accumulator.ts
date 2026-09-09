@@ -53,7 +53,7 @@ export interface BackendLiveTurnIdentity {
 
 export type BackendSemanticCandidate =
   | { kind: 'turn.started' }
-  | { kind: 'turn.phase'; phase: Exclude<LiveTurnPhase, 'reconciling_gap'>; inactivityBudgetMs?: number }
+  | { kind: 'turn.phase'; phase: Exclude<LiveTurnPhase, 'reconciling_gap'>; cancellationCleanupBudgetMs?: number }
   | { kind: 'turn.text'; delta: string }
   | { kind: 'turn.reasoning'; delta: string }
   | { kind: 'turn.toolDraft'; action: 'start'; toolCallId: string; name: string }
@@ -226,7 +226,14 @@ export class BackendLiveTurnAccumulator {
         break;
       case 'turn.phase':
         envelope = { ...base, ...candidate };
-        this.turn = { ...this.turn, seq, checkpointSeq: seq, phase: candidate.phase, phaseSince: occurredAt, inactivityBudgetMs: candidate.inactivityBudgetMs };
+        this.turn = {
+          ...this.turn,
+          seq,
+          checkpointSeq: seq,
+          phase: candidate.phase,
+          phaseSince: occurredAt,
+          cancellationCleanupBudgetMs: candidate.cancellationCleanupBudgetMs,
+        };
         break;
       case 'turn.text':
       case 'turn.reasoning': {

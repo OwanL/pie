@@ -8,6 +8,12 @@ const BUILD_ID_PATTERN = /^[0-9a-f]{20}$/u;
 
 interface SelectionRecord {
   generation?: unknown;
+  publishedAt?: unknown;
+}
+
+export interface RendererSelectionOptions {
+  fallbackDir?: string;
+  notBefore?: number;
 }
 
 interface PublishedManifestChunk {
@@ -24,7 +30,8 @@ interface PublishedManifestChunk {
  * torn, or prematurely visible selection is skipped so the prior generation
  * remains loadable. Packaged/activated flat assets are the baseline fallback.
  */
-export async function resolvePublishedWebviewDir(panelDir: string): Promise<string> {
+export async function resolvePublishedWebviewDir(panelDir: string, options: RendererSelectionOptions = {}): Promise<string> {
+  const fallbackDir = options.fallbackDir ?? panelDir;
   const publicationRoot = path.join(panelDir, PUBLISHED_GENERATIONS_DIR);
   const selectionsDir = path.join(publicationRoot, PUBLISHED_SELECTIONS_DIR);
   let selectionNames: string[];
@@ -34,7 +41,7 @@ export async function resolvePublishedWebviewDir(panelDir: string): Promise<stri
       .sort()
       .reverse();
   } catch {
-    return panelDir;
+    return fallbackDir;
   }
 
   for (const selectionName of selectionNames) {
@@ -43,6 +50,8 @@ export async function resolvePublishedWebviewDir(panelDir: string): Promise<stri
         await fs.readFile(path.join(selectionsDir, selectionName), 'utf8'),
       ) as SelectionRecord;
       if (typeof selection.generation !== 'string' || !BUILD_ID_PATTERN.test(selection.generation)) continue;
+      if ((options.notBefore ?? 0) > 0
+        && (typeof selection.publishedAt !== 'number' || selection.publishedAt < options.notBefore!)) continue;
       const generationDir = path.join(publicationRoot, selection.generation);
       const [buildId, manifestText] = await Promise.all([
         fs.readFile(path.join(generationDir, 'pie-build-id.txt'), 'utf8'),
@@ -90,5 +99,5 @@ export async function resolvePublishedWebviewDir(panelDir: string): Promise<stri
       // Try the previous immutable selection.
     }
   }
-  return panelDir;
+  return fallbackDir;
 }

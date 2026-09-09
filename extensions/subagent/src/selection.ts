@@ -356,9 +356,8 @@ export function attachSelectionMetadata(result: SingleResult, resolved: Resolved
 	}
 	// Requirement provenance: requested requirements, satisfaction flag, and the
 	// bounded diagnostic when selection failed. Stamped on progress, terminal,
-	// retried, and force-settled results so the parent UI can surface the
-	// requirement and any failure consistently. Omitted entirely when no
-	// requirement was made.
+	// and retried results so the parent UI can surface the requirement and any
+	// failure consistently. Omitted entirely when no requirement was made.
 	if (resolved.requestedModelRequirements) {
 		result.requestedModelRequirements = resolved.requestedModelRequirements;
 	}

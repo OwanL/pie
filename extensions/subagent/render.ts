@@ -64,11 +64,9 @@ function runningActivity(r: SingleResult): string {
 	if (!r.activityPhase) return "running...";
 	const label = phaseLabels[r.activityPhase] || "running";
 	const elapsed = r.activitySince ? compactDuration(Date.now() - r.activitySince) : undefined;
-	const budget = r.inactivityBudgetMs ? compactDuration(r.inactivityBudgetMs) : undefined;
 	const detail = r.activityDetail && r.activityDetail !== label ? ` · ${r.activityDetail}` : "";
 	const timing = elapsed ? ` · ${elapsed}` : "";
-	const limit = budget ? ` · stall limit ${budget}` : "";
-	return `running... · ${label}${detail}${timing}${limit}`;
+	return `running... · ${label}${detail}${timing}`;
 }
 
 export function renderDisplayItems(items: DisplayItem[], theme: Theme, expanded: boolean, limit?: number): string {

@@ -18,7 +18,6 @@ import type {
   RetryEndedPayload,
   RetryMeasuredPayload,
   RetryStartedPayload,
-  RetryStuckPayload,
   SessionSummary,
   ThinkingLevel,
 } from '../../../shared/protocol';
@@ -436,9 +435,4 @@ export function onAuxiliaryLlmUsage(payload: AuxiliaryLlmUsagePayload, deps: Han
   if (!sessionPath) return;
   const { sessionPath: _sessionPath, ...sample } = payload;
   deps.runObserver.onAuxiliaryLlmUsage(sessionPath, sample);
-}
-
-/** Retry-stuck is already surfaced by the companion operational-error event. */
-export function onRetryStuck(payload: RetryStuckPayload, deps: HandlerDeps): void {
-  deps.requireEventSessionPath('retry.stuck', payload.sessionPath);
 }

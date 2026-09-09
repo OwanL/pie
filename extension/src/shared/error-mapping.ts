@@ -25,9 +25,10 @@
  *    N."` / `"Backend stopped."` / `"Backend is not running"`.
  *  - `EffectRunner` send-timer fire (`PreflightFailed`): `"Timed out waiting
  *    for the turn to start streaming (Ns)"` (prepass still running → genuine pruning
- *    timeout) OR `"Timed out waiting for the model to start streaming (Ns)"`
- *    (prepass already succeeded → re-armed with the model-start budget; the
- *    delay is model-start/concurrency, not pruning).
+ *    timeout). There is no host-side model-start watchdog: after preflight
+ *    success an accepted send is owned by the exact backend lifecycle, so the
+ *    only remaining model-start-domain notice is provider concurrency
+ *    saturation below.
  *
  * Recovery ACTIONS are webview-side: the host surfaces the failure `kind`;
  * the webview maps `kind → action buttons` via {@link noticeActionsFor} and
@@ -98,14 +99,6 @@ const BACKEND_EXIT_PATTERN = /^Backend (exited unexpectedly|stopped|is not runni
  *  is a GENUINE pruning/prepass timeout (pruning had not yet
  *  completed when the budget elapsed). */
 const PREPASS_TIMEOUT_PATTERN = /^Timed out waiting for the turn to start streaming \((\d+(?:\.\d+)?)s\)$/;
-
-/** `EffectRunner` send-timer fire AFTER the prepass already succeeded
- *  (`PreflightFailed`, re-armed with the model-start budget): `"Timed out waiting
- *  for the model to start streaming (Ns)"`. Distinct from the prepass-timeout
- *  string so the mapper can blame model-start (concurrency/rate-limit/first-
- *  token latency) instead of pruning — pruning already finished. Captures the
- *  (possibly fractional) budget for the surfaced message. */
-const MODEL_START_TIMEOUT_PATTERN = /^Timed out waiting for the model to start streaming \((\d+(?:\.\d+)?)s\)$/;
 
 /** Host-side `ProviderGateSaturatedError` (provider concurrency gate): thrown
  *  when a send legitimately queued waiting for a free provider concurrency slot
@@ -229,12 +222,7 @@ export function mapSendOrEditError(
  * input hooks, and every `before_agent_start` extension; it is not synonymous
  * with skill pruning.
  *
- * Four sub-categories:
- *  - **model-start timeout** (send-timer fire AFTER pruning succeeded):
- *    `"Timed out waiting for the model to start streaming (Ns)"` →
- *    `model-start-timeout` (send) / `edit-failed` (edit). The prepass already
- *    finished, so the elapsed budget was the (generous) model-start budget —
- *    the delay is model-start (concurrency/rate-limit/first-token), NOT pruning.
+ * Three sub-categories:
  *  - **prepass timeout** (send-timer fire while pruning still running):
  *    `"Timed out waiting for the turn to start streaming (Ns)"` →
  *    `prepass-timeout` (send) / `edit-failed` (edit).
@@ -258,26 +246,6 @@ export function mapPreflightError(
   opKind: OpKind,
 ): MappedNotice {
   const err = error ?? '';
-
-  // Model-start timeout: the prepass already succeeded, so the elapsed budget
-  // was the (generous) model-start budget, not the prepass budget. Blame
-  // model-start (concurrency/rate-limit/first-token), NOT pruning — pruning
-  // finished. Checked before the prepass-timeout branch since both strings
-  // begin "Timed out waiting for … to start streaming".
-  const modelStartMatch = MODEL_START_TIMEOUT_PATTERN.exec(err);
-  if (modelStartMatch) {
-    const budget = modelStartMatch[1];
-    if (opKind === 'edit') {
-      return {
-        kind: 'edit-failed',
-        message: "Couldn't edit the message: the model took too long to start streaming. Try editing it again.",
-      };
-    }
-    return {
-      kind: 'model-start-timeout',
-      message: `The model took too long to start this turn${budget ? ` (it exceeded the ${budget}s budget)` : ''} — it may be waiting for an available concurrency slot or rate limit. You can retry, or show the logs for details.`,
-    };
-  }
 
   const timeoutMatch = PREPASS_TIMEOUT_PATTERN.exec(err);
   if (timeoutMatch) {

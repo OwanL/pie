@@ -28,12 +28,11 @@ interface WorkerRuntimeHostInternals {
   handleSessionEvent: (context: SessionContext, event: SdkSessionEvent) => void;
   handleProviderIncident: (incident: ProviderIncident) => void;
   handleProviderProgress: (observation: ProviderTransportObservation) => void;
-  recoverStuckSession: (context: SessionContext, reason: string) => void;
   resolveNetworkProvider: (url: string, fallbackProvider?: string) => string | undefined;
   suppressNextReplacementOpened: boolean;
 }
 
-function makeHost(options: { automaticRecoveryAbortGraceMs?: number; quotaSettlementGraceMs?: number } = {}): {
+function makeHost(): {
   host: WorkerRuntimeHost;
   sent: Array<{ kind: string; event?: string; domain?: string; payload?: unknown }>;
   runtimeFailures: Error[];
@@ -42,6 +41,10 @@ function makeHost(options: { automaticRecoveryAbortGraceMs?: number; quotaSettle
   const runtimeFailures: Error[] = [];
   const server = {
     sendFrame: (frame: any) => { sent.push(frame); return true; },
+    sendLiveSemanticFrame: (payload: any) => {
+      sent.push({ kind: 'runtime.event', event: 'live.semantic', payload });
+      return true;
+    },
     sendDetailFrame: () => true,
     failRuntime: (error: Error) => { runtimeFailures.push(error); },
   } as never;
@@ -49,7 +52,6 @@ function makeHost(options: { automaticRecoveryAbortGraceMs?: number; quotaSettle
     server,
     owner: { coordinatorGeneration: 1, workerId: 'host-worker', workerGeneration: 1 },
     patchIdentity: { relativePath: 'dist/core/session-manager.js', patchVersion: 1, sha256: 'a'.repeat(64) },
-    ...options,
   } as never);
   return { host, sent, runtimeFailures };
 }
@@ -213,7 +215,6 @@ test('priority interrupt detaches and terminalizes a pre-commit send when abort 
   const activeRequest = {
     id: 'request-1', operationId: 'operation-preflight-stop', messageIndex: 0, aborted: false,
   };
-  let watchdogClears = 0;
   const session = {
     isStreaming: true,
     isCompacting: false,
@@ -229,12 +230,10 @@ test('priority interrupt detaches and terminalizes a pre-commit send when abort 
     unsubscribe: () => undefined,
     busySeq: 0,
     activeRequest,
-    willRetryWatchdogClear: () => { watchdogClears += 1; },
   };
 
   assert.deepEqual(await host.interrupt(), { interrupted: true, settled: true });
   assert.equal(internals.context.activeRequest, undefined);
-  assert.equal(watchdogClears, 1);
   assert.equal(
     sent.some((frame) => frame.event === 'busy.changed'
       && (frame.payload as { busy?: unknown } | undefined)?.busy === false),
@@ -286,10 +285,9 @@ test('priority interrupt closes a semantic turn when abort emits no agent_end', 
   );
 });
 
-test('automatic semantic recovery fails the worker once when session.abort never settles', async () => {
-  const { host, sent, runtimeFailures } = makeHost({ automaticRecoveryAbortGraceMs: 10 });
+test('a quota incident does not schedule delayed heuristic recovery', async () => {
+  const { host, sent, runtimeFailures } = makeHost();
   const internals = getInternals(host);
-  let abortCalls = 0;
   const context: SessionContext = {
     runtime: {} as SessionContext['runtime'],
     session: {
@@ -297,144 +295,9 @@ test('automatic semantic recovery fails the worker once when session.abort never
       isCompacting: false,
       isRetrying: false,
       isBashRunning: false,
-      clearQueue: () => undefined,
-      abort: () => {
-        abortCalls += 1;
-        return new Promise<void>(() => undefined);
-      },
-    } as unknown as SessionContext['session'],
-    sessionPath: '/sessions/stuck-semantic.jsonl',
-    unsubscribe: () => undefined,
-    busySeq: 0,
-    activeRequest: { id: 'stuck-request', messageIndex: 1, aborted: false },
-  };
-  internals.context = context;
-
-  internals.recoverStuckSession(context, 'The provider stopped producing semantic response events.');
-  internals.recoverStuckSession(context, 'duplicate watchdog signal');
-  await new Promise((resolve) => setTimeout(resolve, 30));
-
-  assert.equal(abortCalls, 1, 'overlapping watchdogs share one abort attempt');
-  assert.equal(runtimeFailures.length, 1, 'the stuck runtime fails closed exactly once');
-  assert.match(runtimeFailures[0]!.message, /did not settle within 10ms/);
-  const errors = sent.filter((frame) => frame.kind === 'runtime.event' && frame.event === 'operational-error');
-  assert.equal(errors.length, 1);
-  assert.deepEqual(errors[0]!.payload, {
-    incidentId: 'runtime-recovery:stuck-request',
-    dedupeKey: 'runtime-recovery:/sessions/stuck-semantic.jsonl:stuck-request',
-    code: 'SESSION_RUNTIME_RECOVERY_FAILED',
-    message: 'The provider stopped producing semantic response events.',
-    detail: 'Automatic session recovery abort or terminalization did not settle within 10ms.',
-    sessionPath: context.sessionPath,
-    requestId: 'stuck-request',
-    severity: 'error',
-    certainty: 'definitive',
-    phase: 'recovery',
-    recovery: { retry: false, restart: true, showLogs: true },
-  });
-
-  internals.recoverStuckSession(context, 'late duplicate watchdog signal');
-  await new Promise((resolve) => setTimeout(resolve, 20));
-  assert.equal(abortCalls, 1);
-  assert.equal(runtimeFailures.length, 1, 'terminal recovery ownership remains fenced until worker exit');
-});
-
-test('automatic semantic recovery fails closed when abort resolves without terminalizing its request', async () => {
-  const { host, sent, runtimeFailures } = makeHost({ automaticRecoveryAbortGraceMs: 15 });
-  const internals = getInternals(host);
-  let abortCalls = 0;
-  const context: SessionContext = {
-    runtime: {} as SessionContext['runtime'],
-    session: {
-      isStreaming: true,
-      isCompacting: false,
-      isRetrying: false,
-      isBashRunning: false,
-      clearQueue: () => undefined,
-      abort: async () => { abortCalls += 1; },
-    } as unknown as SessionContext['session'],
-    sessionPath: '/sessions/abort-resolved-without-terminal.jsonl',
-    unsubscribe: () => undefined,
-    busySeq: 0,
-    activeRequest: { id: 'still-owned-request', messageIndex: 1, aborted: false },
-  };
-  internals.context = context;
-
-  internals.recoverStuckSession(context, 'The provider stopped producing semantic response events.');
-  await new Promise((resolve) => setTimeout(resolve, 35));
-
-  // Same watchdog-race wait as the quota recovery test above.
-  const settledDeadline = Date.now() + 2_000;
-  while (runtimeFailures.length === 0 && Date.now() < settledDeadline) {
-    await new Promise((resolve) => setTimeout(resolve, 5));
-  }
-
-  assert.equal(abortCalls, 1);
-  assert.equal(context.activeRequest?.id, 'still-owned-request');
-  assert.equal(runtimeFailures.length, 1);
-  assert.match(runtimeFailures[0]!.message, /terminalization did not settle|owned request did not terminalize/);
-  const errors = sent.filter((frame) => frame.kind === 'runtime.event' && frame.event === 'operational-error');
-  assert.equal(errors.length, 1);
-  assert.match(String((errors[0]!.payload as { detail?: string }).detail), /terminalization did not settle|did not terminalize/);
-});
-
-test('automatic semantic recovery accepts a terminal lifecycle event after abort resolves', async () => {
-  const { host, runtimeFailures } = makeHost({ automaticRecoveryAbortGraceMs: 40 });
-  const internals = getInternals(host);
-  let abortCalls = 0;
-  const context: SessionContext = {
-    runtime: {} as SessionContext['runtime'],
-    session: {
-      isStreaming: true,
-      isCompacting: false,
-      isRetrying: false,
-      isBashRunning: false,
-      clearQueue: () => undefined,
-      abort: async () => {
-        abortCalls += 1;
-        setTimeout(() => {
-          context.activeRequest = undefined;
-          context.session.isStreaming = false;
-        }, 5);
-      },
-    } as unknown as SessionContext['session'],
-    sessionPath: '/sessions/abort-delayed-terminal.jsonl',
-    unsubscribe: () => undefined,
-    busySeq: 0,
-    activeRequest: { id: 'settling-request', messageIndex: 1, aborted: false },
-  };
-  internals.context = context;
-
-  internals.recoverStuckSession(context, 'The provider stopped producing semantic response events.');
-  await new Promise((resolve) => setTimeout(resolve, 55));
-
-  assert.equal(abortCalls, 1);
-  assert.equal(context.activeRequest, undefined);
-  assert.equal(runtimeFailures.length, 0);
-});
-
-test('quota recovery uses the bounded abort watchdog when session.abort never settles', async () => {
-  const { host, sent, runtimeFailures } = makeHost({
-    automaticRecoveryAbortGraceMs: 10,
-    quotaSettlementGraceMs: 5,
-  });
-  const internals = getInternals(host);
-  let abortCalls = 0;
-  const context: SessionContext = {
-    runtime: {} as SessionContext['runtime'],
-    session: {
-      isStreaming: true,
-      isCompacting: false,
-      isRetrying: false,
-      isBashRunning: false,
-      clearQueue: () => undefined,
-      abort: () => {
-        abortCalls += 1;
-        return new Promise<void>(() => undefined);
-      },
       sessionManager: { getSessionId: () => 'session-quota' },
     } as unknown as SessionContext['session'],
-    sessionPath: '/sessions/stuck-quota.jsonl',
+    sessionPath: '/sessions/quota-no-recovery.jsonl',
     unsubscribe: () => undefined,
     busySeq: 0,
     activeRequest: { id: 'quota-request', messageIndex: 1, aborted: false },
@@ -449,24 +312,17 @@ test('quota recovery uses the bounded abort watchdog when session.abort never se
     detail: 'fixture quota response',
     occurredAt: Date.now(),
   });
-  await new Promise((resolve) => setTimeout(resolve, 35));
 
-  // The abort watchdog callback races this test's timers under full-suite
-  // load; wait for the recovery outcome instead of assuming one fixed sleep
-  // covers the watchdog's post-fire async work.
-  const deadline = Date.now() + 2_000;
-  while (runtimeFailures.length === 0 && Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 5));
-  }
-
-  assert.equal(abortCalls, 1);
-  assert.equal(runtimeFailures.length, 1, 'quota recovery fails the stuck runtime closed exactly once');
-  assert.match(runtimeFailures[0]!.message, /did not settle within 10ms/);
+  // Well past the historical heuristic settlement grace (15s default; cleared
+  // in tests at ~5-15ms). The runtime must not be failed or aborted by
+  // elapsed time: the exact SDK lifecycle owns terminalization, and the
+  // incident itself remains visible exactly once.
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(runtimeFailures.length, 0, 'no delayed runtime failure is scheduled');
   const errors = sent.filter((frame) => frame.kind === 'runtime.event' && frame.event === 'operational-error');
-  assert.equal(errors.length, 2, 'the provider incident and bounded recovery failure are both visible');
-  assert.equal((errors[1]!.payload as { code?: string }).code, 'SESSION_RUNTIME_RECOVERY_FAILED');
+  assert.equal(errors.length, 1, 'the real provider incident is still surfaced');
+  assert.equal((errors[0]!.payload as { code?: string }).code, 'PROVIDER_QUOTA_EXHAUSTED');
 });
-
 test('agent_settled refreshes session.opened from the current session and preserves cached operation identity', async () => {
   const { host, sent } = makeHost();
   const internals = getInternals(host);
@@ -876,4 +732,42 @@ test('host drops a single text delta that cannot ride the worker wire', () => {
   assert.equal(sent.length, 1);
   const frame = sent[0] as { payload: { delta?: unknown } };
   assert.equal(frame.payload.delta, 'ok');
+});
+
+test('live.semantic emission uses the recoverable-drop seam while other events stay fail-closed', () => {
+  const liveSemanticPayloads: unknown[] = [];
+  const sendFrames: Array<{ kind: string; event?: string }> = [];
+  const runtimeFailures: Error[] = [];
+  const server = {
+    sendFrame: (frame: any) => { sendFrames.push(frame); return true; },
+    sendLiveSemanticFrame: (payload: unknown) => {
+      liveSemanticPayloads.push(payload);
+      // The transport seam reports a dropped (capacity/oversize) envelope.
+      return false;
+    },
+    sendDetailFrame: () => true,
+    failRuntime: (error: Error) => { runtimeFailures.push(error); },
+  } as never;
+  const host = new WorkerRuntimeHost({
+    server,
+    owner: { coordinatorGeneration: 1, workerId: 'host-worker', workerGeneration: 1 },
+    patchIdentity: { relativePath: 'dist/core/session-manager.js', patchVersion: 1, sha256: 'a'.repeat(64) },
+  } as never);
+  const emitter = host as unknown as { emit(event: string, payload?: unknown): void };
+
+  emitter.emit('live.semantic', {
+    protocolVersion: 1, sessionPath: '/sessions/session.jsonl', requestId: 'request',
+    turnId: 'turn', attemptId: 'attempt', seq: 9, occurredAt: 130, checkpointBytes: 1,
+    kind: 'turn.text', delta: 'ok',
+  });
+  assert.equal(liveSemanticPayloads.length, 1, 'live.semantic must route through the recoverable-drop seam');
+  assert.deepEqual((liveSemanticPayloads[0] as { seq?: number }).seq, 9);
+  assert.equal(sendFrames.length, 0);
+  assert.equal(runtimeFailures.length, 0,
+    'a dropped live.semantic envelope must not fail the runtime or synthesize a replacement');
+
+  emitter.emit('tool.progress', { requestId: 'request', sessionPath: '/sessions/session.jsonl' });
+  assert.equal(sendFrames.length, 1, 'non-semantic events must stay on the fail-closed sendFrame path');
+  assert.equal(sendFrames[0]!.event, 'tool.progress');
+  assert.equal(runtimeFailures.length, 0);
 });

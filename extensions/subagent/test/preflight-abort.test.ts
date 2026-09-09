@@ -171,7 +171,7 @@ async function assertRootPermitReleased(): Promise<void> {
 		makeModelRegistry(), undefined,
 		{ modelId: "model-a", bucket: "medium", thinkingLevel: "low", pool: ["model-a"], fallback: false },
 		undefined, undefined, undefined, undefined, undefined,
-		{ sdk: fast.sdk as any, timeoutMs: 0 },
+		{ sdk: fast.sdk as any },
 	));
 	assert.equal(result.exitCode, 0);
 	assert.equal(fast.state.createSessionCalls, 1, "the released permit admits the follow-up child");
@@ -236,7 +236,7 @@ test("runSingleAgent: aborting DURING createSession (never resolves) returns pro
 		makeModelRegistry(), undefined,
 		{ modelId: "model-a", bucket: "medium", thinkingLevel: "low", pool: ["model-a"], fallback: false },
 		undefined, undefined, undefined, undefined, undefined,
-		{ sdk: sdk as any, timeoutMs: 0 },
+		{ sdk: sdk as any },
 	);
 	// Let createSession be entered & pending.
 	await new Promise((r) => setTimeout(r, 10));
@@ -256,7 +256,7 @@ test("runSingleAgent: aborting DURING resource reload (never resolves) returns p
 		makeModelRegistry(), undefined,
 		{ modelId: "model-a", bucket: "medium", thinkingLevel: "low", pool: ["model-a"], fallback: false },
 		undefined, undefined, undefined, undefined, undefined,
-		{ sdk: sdk as any, timeoutMs: 0 },
+		{ sdk: sdk as any },
 	);
 	await new Promise((r) => setTimeout(r, 10));
 	controller.abort();
@@ -279,7 +279,7 @@ test("runSingleAgent: an already-aborted root child never waits for a saturated 
 			makeModelRegistry(), undefined,
 			{ modelId: "model-a", bucket: "medium", thinkingLevel: "low", pool: ["model-a"], fallback: false },
 			undefined, undefined, undefined, undefined, undefined,
-			{ sdk: fast.sdk as any, timeoutMs: 0 },
+			{ sdk: fast.sdk as any },
 		));
 		assert.equal(result.exitCode, 1);
 		assert.equal(result.stopReason, "aborted");
@@ -300,7 +300,7 @@ test("runSingleAgent: subscribe setup exceptions dispose exactly once and releas
 			makeModelRegistry(), undefined,
 			{ modelId: "model-a", bucket: "medium", thinkingLevel: "low", pool: ["model-a"], fallback: false },
 			undefined, undefined, undefined, undefined, undefined,
-			{ sdk: failing.sdk as any, timeoutMs: 0 },
+			{ sdk: failing.sdk as any },
 		),
 		/subscribe setup exploded/,
 	);
@@ -332,7 +332,7 @@ test("runSingleAgent: setUIContext setup exceptions dispose exactly once and rel
 			makeModelRegistry(), undefined,
 			{ modelId: "model-a", bucket: "medium", thinkingLevel: "low", pool: ["model-a"], fallback: false },
 			undefined, "tool-ui-setup-failure", parentBridge, undefined, undefined,
-			{ sdk: failing.sdk as any, timeoutMs: 0 },
+			{ sdk: failing.sdk as any },
 		),
 		/setUIContext setup exploded/,
 	);
@@ -356,7 +356,7 @@ test("runSingleAgent: a createSession hang does NOT poison the process-wide sema
 		makeModelRegistry(), undefined,
 		{ modelId: "model-a", bucket: "medium", thinkingLevel: "low", pool: ["model-a"], fallback: false },
 		undefined, undefined, undefined, undefined, undefined,
-		{ sdk: sdk as any, timeoutMs: 0 },
+		{ sdk: sdk as any },
 	);
 	await new Promise((r) => setTimeout(r, 10));
 	controller.abort();
@@ -370,7 +370,7 @@ test("runSingleAgent: a createSession hang does NOT poison the process-wide sema
 		makeModelRegistry(), undefined,
 		{ modelId: "model-a", bucket: "medium", thinkingLevel: "low", pool: ["model-a"], fallback: false },
 		undefined, undefined, undefined, undefined, undefined,
-		{ sdk: fast.sdk as any, timeoutMs: 0 },
+		{ sdk: fast.sdk as any },
 	));
 	assert.equal(result.exitCode, 0);
 });

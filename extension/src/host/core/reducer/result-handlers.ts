@@ -385,7 +385,6 @@ export function handleSendResult(state: ArchState, event: Extract<Event, { kind:
         if (accepted) {
           accepted.delivery = event.queued ? 'queued' : 'direct';
           if (!event.reconciled) delete accepted.reconciliation;
-          if (event.queued) delete accepted.executionPhase;
           draft.operations[operationId!] = accepted;
         }
       }

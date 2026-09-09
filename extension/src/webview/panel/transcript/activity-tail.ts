@@ -253,13 +253,11 @@ export function subagentDetailLines(result: SubagentSingleResult, now = Date.now
     : (isSubagentSingleResultRunning(result) ? 'Waiting for status update' : undefined);
   const stateFor = result.activitySince ? compactDuration(now - result.activitySince) : undefined;
   const progressAgo = result.lastProgressAt ? compactDuration(now - result.lastProgressAt) : undefined;
-  const stallLimit = result.inactivityBudgetMs ? compactDuration(result.inactivityBudgetMs) : undefined;
   const lifecycle = [
     phase,
     result.activityDetail,
     stateFor && `${stateFor} in state`,
     progressAgo && `${progressAgo} since progress`,
-    stallLimit && `${stallLimit} stall limit`,
   ].filter(Boolean).join(' · ');
 
   const model = result.selectedModel ?? result.model;

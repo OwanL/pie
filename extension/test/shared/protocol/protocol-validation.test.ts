@@ -672,6 +672,62 @@ test('validateWebviewToHostMessage validates setPrefs patches and rejects unknow
   );
 });
 
+test('validateWebviewToHostMessage accepts valid provider concurrency preference patches', () => {
+  assert.equal(
+    validateWebviewToHostMessage({
+      type: 'setPrefs',
+      prefs: {
+        providerConcurrency: {
+          openai: {
+            maxConcurrentRequests: 4,
+            afterburnSeconds: 15,
+            queueWaitSeconds: 45,
+            headerWaitSeconds: 120,
+          },
+        },
+      },
+    }).ok,
+    true,
+    'provider settings emitted by the UI must cross the renderer validation boundary',
+  );
+});
+
+test('validateWebviewToHostMessage rejects invalid provider concurrency preference patches', () => {
+  const invalidOverrides = [
+    { maxConcurrentRequests: 0 },
+    { maxConcurrentRequests: 1.5 },
+    { afterburnSeconds: -1 },
+    { afterburnSeconds: Number.NaN },
+    { queueWaitSeconds: 1.5 },
+    { queueWaitSeconds: 301 },
+    { headerWaitSeconds: -1 },
+    { headerWaitSeconds: 301 },
+    { unknown: 1 },
+  ];
+
+  for (const overrides of invalidOverrides) {
+    assert.equal(
+      validateWebviewToHostMessage({
+        type: 'setPrefs',
+        prefs: { providerConcurrency: { openai: overrides } },
+      }).ok,
+      false,
+      `invalid provider concurrency override should be rejected: ${JSON.stringify(overrides)}`,
+    );
+  }
+
+  for (const providerConcurrency of [[], { openai: null }, { openai: 2 }]) {
+    assert.equal(
+      validateWebviewToHostMessage({
+        type: 'setPrefs',
+        prefs: { providerConcurrency },
+      }).ok,
+      false,
+      'provider concurrency must be a map of override objects',
+    );
+  }
+});
+
 test('validateWebviewToHostMessage validates split render evidence payloads', () => {
   const base = { revision: 7, viewGeneration: 3 };
   assert.equal(validateWebviewToHostMessage({ type: 'stateReceived', payload: { ...base, snapshotBytes: 1024 } }).ok, true);

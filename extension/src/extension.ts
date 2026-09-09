@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 
 import { BackendClient } from './host/backend/client';
+import { configureRuntimeLocation, type RuntimeLocation } from './host/runtime-location';
 import { PieExtension } from './host/extension-host';
 import { bootTraceSync } from './host/util/audit';
 import { toErrorMessage } from './host/util/error-message';
@@ -30,7 +31,8 @@ function originatesFromPie(err: unknown, piePath: string): boolean {
   return normalizePath(stack).includes(piePath);
 }
 
-export function activate(context: vscode.ExtensionContext): void {
+export function activate(context: vscode.ExtensionContext, runtime?: RuntimeLocation): void {
+  if (runtime) configureRuntimeLocation(context, runtime);
   initPieLogger({ devMode: context.extensionMode === 1 });
   // Apply the user-configured log verbosity. The level can also be changed
   // live via the `pie.setLogLevel` command, which keeps this setting in sync.

@@ -6,8 +6,8 @@
  *
  *  Stop mid-subagent-prompt: parent signal aborts AFTER the child
  *          `session.prompt()` has started streaming. Settlement must be owned
- *          by the local prompt/abort race, not delayed until the outer renewable
- *          inactivity net. Asserts a tight cancellation bound exists.
+ *          by the local prompt/abort race — there is no elapsed-inactivity net
+ *          to lean on. Asserts a tight cancellation bound exists.
  *
  *  Stop while child `session.abort()` itself hangs (provider connection
  *          teardown stuck). Remote teardown is advisory: it must be observed and
@@ -18,10 +18,9 @@
  *          bound AND the `inflightSemaphore` has zero in-flight + zero waiters
  *          afterward (no permit leak / orphan queue entry).
  *
- * Approach: same ESM resolve-hook technique as modes.test.ts /
- * settlement.test.ts — redirect `@mariozechner/pi-coding-agent` to an
- * in-memory mock SDK whose `prompt` / `abort` behaviour is driven by
- * `globalThis.__MOCK_SDK_BEHAVIOR__`.
+ * Approach: same ESM resolve-hook technique as modes.test.ts — redirect
+ * `@mariozechner/pi-coding-agent` to an in-memory mock SDK whose `prompt` /
+ * `abort` behaviour is driven by `globalThis.__MOCK_SDK_BEHAVIOR__`.
  */
 
 import test, { afterEach, after } from "node:test";
@@ -116,29 +115,20 @@ writeFileSync(
 );
 
 const ENV_KEYS = [
-	"PIE_SUBAGENT_SETTLEMENT_MS",
-	"PIE_SUBAGENT_SETTLEMENT_GRACE_MS",
-	"PIE_SUBAGENT_TIMEOUT_MS",
 	"PIE_SUBAGENT_MAX_INFLIGHT",
 	"PIE_SUBAGENT_ALWAYS_PARENT_MODEL",
 	"PI_CODING_AGENT_DIR",
-	"PI_SUBAGENT_TIMEOUT_MS",
 	"PI_SUBAGENT_DEPTH",
 ] as const;
 
 const snapshot: Record<string, string | undefined> = {};
 test.before(() => {
 	for (const key of ENV_KEYS) snapshot[key] = process.env[key];
-	// Force pure model selection, generous inflight, and CRUCIALLY disable the
-	// per-prompt timeout + the settlement net so the ONLY escape for a hung
-	// dispatch is the path under test (the parent abort). This surfaces the bug
-	// rather than papering over it with the outer inactivity net.
+	// Force pure model selection and a generous inflight cap so the ONLY escape
+	// for a hung dispatch is the path under test (the parent abort). This
+	// surfaces the bug rather than papering over it with a time bound.
 	process.env.PIE_SUBAGENT_ALWAYS_PARENT_MODEL = "1";
 	process.env.PIE_SUBAGENT_MAX_INFLIGHT = "8";
-	process.env.PIE_SUBAGENT_TIMEOUT_MS = "0";
-	process.env.PIE_SUBAGENT_SETTLEMENT_MS = "0";   // net OFF — the structural abort path is the only escape
-	process.env.PIE_SUBAGENT_SETTLEMENT_GRACE_MS = "0";
-	delete process.env.PI_SUBAGENT_TIMEOUT_MS;
 	delete process.env.PI_SUBAGENT_DEPTH;
 	process.env.PI_CODING_AGENT_DIR = agentDir;
 });
@@ -243,7 +233,7 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 // Stop mid-subagent-prompt
 // ---------------------------------------------------------------------------
 
-test("aborting after child prompt() starts settles locally without waiting for the outer inactivity net", async () => {
+test("aborting after child prompt() starts settles locally without any inactivity net", async () => {
 	// Default behaviour: prompt() hangs until abort() resolves it (realistic
 	// mid-stream shape — provider is actively streaming, then Stop fires).
 	// onAbort: the mock's default branch NEVER resolves abort(), so for
@@ -271,10 +261,10 @@ test("aborting after child prompt() starts settles locally without waiting for t
 	assert.equal(mockState().promptStarted, 1, "child prompt() must have started before abort");
 	controller.abort();
 
-	// The bug today: PI_SUBAGENT_TIMEOUT_MS=0 (disabled) + settlement net OFF
-	// (set above) → the ONLY escape is the structural abort path. With a happy
-	// abort() that releases prompt(), this settles quickly. If it does NOT,
-	// the per-prompt timeout is missing.
+	// The structural abort path is the only escape for a mid-stream stop: the
+	// prompt is raced directly against the parent signal and a happy abort()
+	// that releases prompt() settles it quickly. If it does NOT settle, the
+	// race is broken.
 	const response = await within(5000, responseP);
 	const text = (response.content?.[0] as { text?: string } | undefined)?.text ?? "";
 	assert.match(text, /abort/i, "tool call must surface an abort result, not hang");
@@ -323,7 +313,7 @@ test("parent abort settles even when child abort() does not release prompt()", a
 	// The hung-abort shape, isolated: abort() resolves (so the abort promise itself
 	// is fine) BUT does not release prompt() (the stream teardown didn't
 	// unblock the SDK's prompt promise). The local prompt race must still own
-	// parent settlement with the outer net disabled.
+	// parent settlement.
 	setMockBehavior({
 		onAbort: () => {
 			// abort() resolves, but DOES NOT release the prompt — simulates a
@@ -331,9 +321,6 @@ test("parent abort settles even when child abort() does not release prompt()", a
 			return Promise.resolve();
 		},
 	});
-	// Keep an explicit containment ceiling as additional test protection.
-	const prevTimeout = process.env.PI_SUBAGENT_TIMEOUT_MS;
-	process.env.PI_SUBAGENT_TIMEOUT_MS = "200";
 
 	const controller = new AbortController();
 	const responseP = execute(
@@ -353,10 +340,7 @@ test("parent abort settles even when child abort() does not release prompt()", a
 	const response = await within(5000, responseP);
 	assert.equal(response.isError, true, "an abort that doesn't release the prompt must surface an error, not hang");
 	const text = (response.content?.[0] as { text?: string } | undefined)?.text ?? "";
-	assert.match(text, /abort|timeout|timed out/i, "tool call must surface an abort/timeout result, not hang");
-
-	// Restore env (the test-suite env snapshot block restores at the end).
-	process.env.PI_SUBAGENT_TIMEOUT_MS = prevTimeout;
+	assert.match(text, /abort/i, "tool call must surface an abort result, not hang");
 });
 
 // ---------------------------------------------------------------------------
@@ -364,13 +348,10 @@ test("parent abort settles even when child abort() does not release prompt()", a
 // ---------------------------------------------------------------------------
 
 test("a hung child session.abort() cannot own parent settlement", async () => {
-	// Default mock behaviour: abort() hangs forever (the bug window). With the
-	// outer inactivity net OFF, the prompt is raced directly against the parent
-	// signal, so the tool call settles regardless of whether abort() resolves.
+	// Default mock behaviour: abort() hangs forever (the bug window). The
+	// prompt is raced directly against the parent signal, so the tool call
+	// settles regardless of whether abort() resolves.
 	setMockBehavior(undefined); // default → abort() never resolves, prompt() never released
-	// Keep an explicit containment ceiling as additional test protection.
-	const prevTimeout = process.env.PI_SUBAGENT_TIMEOUT_MS;
-	process.env.PI_SUBAGENT_TIMEOUT_MS = "200";
 
 	const controller = new AbortController();
 	const responseP = execute(
@@ -390,9 +371,7 @@ test("a hung child session.abort() cannot own parent settlement", async () => {
 	const response = await within(5000, responseP);
 	assert.equal(response.isError, true, "a hung abort() must surface an error, not hang the parent");
 	const text = (response.content?.[0] as { text?: string } | undefined)?.text ?? "";
-	assert.match(text, /abort|timeout|timed out/i, "tool call must surface an abort/timeout result, not hang");
-
-	process.env.PI_SUBAGENT_TIMEOUT_MS = prevTimeout;
+	assert.match(text, /abort/i, "tool call must surface an abort result, not hang");
 });
 
 test("the abort path emits a [pie:subagent] child.abort.invoked log so a dangling child is diagnosable (onAbort now logs)", async () => {

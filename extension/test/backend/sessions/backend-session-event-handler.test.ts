@@ -5,7 +5,6 @@ import { Writable } from 'node:stream';
 import {
   boundToolFinishedPayload,
   handleSdkSessionEvent as handleSdkSessionEventImpl,
-  resolveProviderSemanticInactivityMs,
   summarizeToolResult,
   TOOL_PROGRESS_MAX_BYTES,
   type BackendSessionEventHandlerDeps,
@@ -82,7 +81,6 @@ function createDeps(options: { captureLive?: boolean } = {}) {
     async emitSessionListChanged() {
       listChangedCount += 1;
     },
-    recoverStuckSession() {},
   };
 
   return {
@@ -1421,82 +1419,16 @@ test('agent_end with willRetry=true is a no-op (mid-retry: preserve activeReques
 
   handleSdkSessionEvent(deps, context, { type: 'agent_end', willRetry: true });
 
-  try {
-    // Mid-retry agent_end must NOT finalize: activeRequest is preserved so the
-    // retry turn can stream (message_start/message_end are gated on it), busy
-    // stays true (no flicker, no premature session_finished trigger), and no
-    // session.opened / message.aborted is emitted.
-    assert.equal(context.activeRequest, activeRequest);
-    assert.deepEqual(busy, []);
-    assert.deepEqual(sessionOpened, []);
-    assert.equal(getListChangedCount(), 0);
-    assert.equal(getContextUsageChangedCount(), 0);
-    assert.deepEqual(emitted, []);
-  } finally {
-    context.willRetryWatchdogClear?.();
-  }
-});
-
-test('willRetry watchdog emits operational-error + retry.stuck when a retry backoff never completes', async () => {
-  // The willRetry watchdog (armed on agent_end willRetry:true / re-armed on
-  // auto_retry_start) emits BOTH an operational-error (code RETRY_STUCK,
-  // user-facing message) and a retry.stuck (structured timing detail) when a
-  // retry's backoff does not complete within delayMs + grace. These were
-  // previously SILENTLY DROPPED by the host (no dispatch case); this test
-  // pins the backend emission contract so the host wiring (event-dispatch +
-  // handlers) has a signal to surface. Grace is pinned to 0 via env so the
-  // watchdog fires promptly without a real wall-clock wait.
-  const prevGrace = process.env.PIE_WILLRETRY_WATCHDOG_GRACE_MS;
-  process.env.PIE_WILLRETRY_WATCHDOG_GRACE_MS = '0';
-  try {
-    const { deps, emitted } = createDeps();
-    const context = createContext({
-      activeRequest: { id: 'req-stuck', messageIndex: 1, aborted: false, lastAssistantMessageId: 'req-stuck:1' },
-    });
-
-    // agent_end willRetry:true arms the watchdog with delayMs=0; grace=0 →
-    // windowMs=0 → the timer fires on the next macrotask.
-    handleSdkSessionEvent(deps, context, { type: 'agent_end', willRetry: true });
-
-    // Let the 0ms watchdog timer fire.
-    await new Promise((resolve) => setTimeout(resolve, 10));
-
-    const opError = emitted.find((e) => e.event === 'operational-error');
-    const retryStuck = emitted.find((e) => e.event === 'retry.stuck');
-    assert.ok(opError, 'emits operational-error');
-    assert.deepEqual(opError?.payload, {
-      incidentId: 'retry-stuck:req-stuck:0:0',
-      dedupeKey: 'retry-stuck:/workspace/session.jsonl:req-stuck',
-      code: 'RETRY_STUCK',
-      message: (opError?.payload as { message: string }).message,
-      detail: 'Retry watchdog window elapsed: 0ms (delayMs=0, graceMs=0).',
-      sessionPath: '/workspace/session.jsonl',
-      requestId: 'req-stuck',
-      messageId: 'req-stuck:1',
-      severity: 'error',
-      certainty: 'ambiguous',
-      phase: 'retry',
-      recovery: { retry: false, restart: false, showLogs: true },
-    });
-    assert.match((opError?.payload as { message: string }).message, /retry has not completed/i);
-    assert.ok(retryStuck, 'emits retry.stuck');
-    assert.deepEqual(retryStuck?.payload, {
-      sessionPath: '/workspace/session.jsonl',
-      delayMs: 0,
-      graceMs: 0,
-      requestId: 'req-stuck',
-    });
-    // The watchdog cleared its timer handle after firing.
-    assert.equal(context.willRetryWatchdogTimer, undefined);
-  } finally {
-    if (prevGrace === undefined) {
-      delete process.env.PIE_WILLRETRY_WATCHDOG_GRACE_MS;
-    } else {
-      process.env.PIE_WILLRETRY_WATCHDOG_GRACE_MS = prevGrace;
-    }
-    // Defensive: clear any lingering watchdog timer so the test never leaks.
-    // (No-op once the timer has fired.)
-  }
+  // Mid-retry agent_end must NOT finalize: activeRequest is preserved so the
+  // retry turn can stream (message_start/message_end are gated on it), busy
+  // stays true (no flicker, no premature session_finished trigger), and no
+  // session.opened / message.aborted is emitted.
+  assert.equal(context.activeRequest, activeRequest);
+  assert.deepEqual(busy, []);
+  assert.deepEqual(sessionOpened, []);
+  assert.equal(getListChangedCount(), 0);
+  assert.equal(getContextUsageChangedCount(), 0);
+  assert.deepEqual(emitted, []);
 });
 
 test('auto_retry_start emits retry.started with attempt/delay/error', () => {
@@ -2103,6 +2035,93 @@ test('concurrent semantic tool starts carry one stable parallel group into live 
   assert.equal(accumulator.checkpoint().tools[1]?.parallelGroupId, starts[0]?.parallelGroupId);
 });
 
+test('extended provider silence after a committed turn start is never terminalized by elapsed time', async () => {
+  const { deps, emitted } = createDeps({ captureLive: true });
+  const accumulator = new BackendLiveTurnAccumulator({
+    protocolVersion: 7, sessionPath: '/workspace/session.jsonl', requestId: 'req-silence',
+    turnId: 'turn-silence', attemptId: 'attempt-silence',
+    canonicalMessageId: 'req-silence:1', startedAt: 100,
+  });
+  const context = createContext({
+    activeRequest: { id: 'req-silence', messageIndex: 0, aborted: false, liveTurnAccumulator: accumulator },
+  });
+  handleSdkSessionEvent(deps, context, { type: 'turn_start' });
+  handleSdkSessionEvent(deps, context, { type: 'message_start', message: { role: 'assistant' } });
+
+  // No provider events arrive for well beyond any historical heuristic
+  // inactivity window (default 18 minutes; lease timers were cleared in tests
+  // at ~5–20ms). Nothing may terminalize the turn during the wait.
+  await new Promise((resolve) => setTimeout(resolve, 120));
+
+  assert.notEqual(context.activeRequest, undefined, 'provider silence does not clear the active request');
+  assert.equal(
+    emitted.filter((entry) => entry.event === 'operational-error').length,
+    0,
+    'no PROVIDER_SEMANTIC_TIMEOUT or other heuristic incident fires',
+  );
+  assert.equal(
+    emitted.some((entry) => entry.event === 'live.semantic' && (entry.payload as any).kind === 'turn.terminal'),
+    false,
+    'no turn terminal is published during provider silence',
+  );
+  const phases = emitted
+    .filter((entry) => entry.event === 'live.semantic' && (entry.payload as any).kind === 'turn.phase')
+    .map((entry) => (entry.payload as any).phase);
+  assert.deepEqual(phases, ['preparing', 'waiting_provider'], 'lifecycle phase publications are preserved');
+  const timerFields = Object.keys(context.activeRequest ?? {}).filter(
+    (key) => /Timer|Watchdog|Lease/.test(key),
+  );
+  assert.deepEqual(timerFields, [], 'activeRequest must not carry heuristic watchdog/lease timer fields');
+});
+
+test('tool activity silence is never terminalized by elapsed time', async () => {
+  const { deps, emitted } = createDeps({ captureLive: true });
+  const accumulator = new BackendLiveTurnAccumulator({
+    protocolVersion: 7, sessionPath: '/workspace/session.jsonl', requestId: 'req-tool-silence',
+    turnId: 'turn-tool-silence', attemptId: 'attempt-tool-silence',
+    canonicalMessageId: 'req-tool-silence:1', startedAt: 100,
+  });
+  const context = createContext({
+    activeRequest: {
+      id: 'req-tool-silence', messageIndex: 1, lastAssistantMessageId: 'req-tool-silence:1',
+      aborted: false, liveTurnAccumulator: accumulator,
+    },
+  });
+  handleSdkSessionEvent(deps, context, { type: 'message_start', message: { role: 'assistant' } });
+  handleSdkSessionEvent(deps, context, {
+    type: 'tool_execution_start', toolCallId: 'tool-silence-a', toolName: 'bash', args: {},
+  });
+  handleSdkSessionEvent(deps, context, {
+    type: 'tool_execution_start', toolCallId: 'tool-silence-b', toolName: 'read', args: {},
+  });
+  // One sibling completes while the other keeps running; the turn stays in
+  // running_tool with no provider turn following.
+  handleSdkSessionEvent(deps, context, {
+    type: 'tool_execution_end', toolCallId: 'tool-silence-a', toolName: 'bash', result: 'ok', isError: false,
+  });
+  const phases = emitted
+    .filter((entry) => entry.event === 'live.semantic' && (entry.payload as any).kind === 'turn.phase')
+    .map((entry) => (entry.payload as any).phase);
+  assert.ok(phases.includes('running_tool'), 'the running_tool phase publication is preserved');
+
+  // No tool progress arrives for well beyond any historical heuristic
+  // inactivity window (default 30 minutes; lease timers fired in tests at
+  // ~5-20ms). Nothing may terminalize the turn during the wait.
+  await new Promise((resolve) => setTimeout(resolve, 120));
+
+  assert.notEqual(context.activeRequest, undefined, 'tool silence does not clear the active request');
+  assert.equal(
+    emitted.filter((entry) => entry.event === 'operational-error').length,
+    0,
+    'no TOOL_INACTIVITY_TIMEOUT or other heuristic incident fires',
+  );
+  assert.equal(
+    emitted.some((entry) => entry.event === 'live.semantic' && (entry.payload as any).kind === 'turn.terminal'),
+    false,
+    'no turn terminal is published during tool silence',
+  );
+});
+
 test('tool_execution_end emits transient execution end before phase and durable toolResult upgrades it', () => {
   const { deps, emitted } = createDeps({ captureLive: true });
   const accumulator = new BackendLiveTurnAccumulator({
@@ -2153,131 +2172,6 @@ test('tool_execution_end emits transient execution end before phase and durable 
   assert.equal(durable?.status, 'completed');
   assert.equal(durable?.durableEntryId, 'tool-a-entry');
   assert.equal(accumulator.checkpoint().tools.find((tool) => tool.transcriptToolCallId === 'tool-a')?.terminal?.durableEntryId, 'tool-a-entry');
-});
-
-test('semantic inactivity budget allows extended healthy provider silence and honors the environment override', () => {
-  const previous = process.env.PIE_PROVIDER_SEMANTIC_INACTIVITY_MS;
-  delete process.env.PIE_PROVIDER_SEMANTIC_INACTIVITY_MS;
-  try {
-    assert.equal(resolveProviderSemanticInactivityMs('umans'), 18 * 60_000);
-    assert.equal(resolveProviderSemanticInactivityMs('UMANS'), 18 * 60_000);
-    assert.equal(resolveProviderSemanticInactivityMs('openai-codex'), 18 * 60_000);
-    assert.equal(resolveProviderSemanticInactivityMs(undefined), 18 * 60_000);
-
-    process.env.PIE_PROVIDER_SEMANTIC_INACTIVITY_MS = '1234';
-    assert.equal(resolveProviderSemanticInactivityMs('umans'), 1234, 'operator override remains authoritative');
-  } finally {
-    if (previous === undefined) delete process.env.PIE_PROVIDER_SEMANTIC_INACTIVITY_MS;
-    else process.env.PIE_PROVIDER_SEMANTIC_INACTIVITY_MS = previous;
-  }
-});
-
-test('final tool completion guards the post-tool provider wait with the provider semantic lease', async () => {
-  const previousProvider = process.env.PIE_PROVIDER_SEMANTIC_INACTIVITY_MS;
-  const previousTool = process.env.PIE_TOOL_INACTIVITY_MS;
-  process.env.PIE_PROVIDER_SEMANTIC_INACTIVITY_MS = '5';
-  process.env.PIE_TOOL_INACTIVITY_MS = '1000';
-  try {
-    const { deps, emitted } = createDeps();
-    const recoveries: Array<{ context: SessionContext; reason: string }> = [];
-    deps.recoverStuckSession = (context, reason) => recoveries.push({ context, reason });
-    const context = createContext({
-      activeRequest: {
-        id: 'req-post-tool-timeout', messageIndex: 1, aborted: false,
-        provider: 'openai-codex', modelId: 'gpt-test',
-        lastAssistantMessageId: 'req-post-tool-timeout:1',
-      },
-    });
-
-    handleSdkSessionEvent(deps, context, {
-      type: 'tool_execution_start', toolCallId: 'tool-finished', toolName: 'bash', args: {},
-    });
-    handleSdkSessionEvent(deps, context, {
-      type: 'tool_execution_end', toolCallId: 'tool-finished', toolName: 'bash', result: { ok: true }, isError: false,
-    });
-    handleSdkSessionEvent(deps, context, { type: 'turn_start' });
-
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    assert.equal(recoveries.length, 1, 'a silent provider after the final tool must be recovered promptly');
-    assert.equal(recoveries[0]?.context, context);
-    assert.match(recoveries[0]?.reason ?? '', /provider stopped producing semantic response events/i);
-    assert.equal(
-      (emitted.find((entry) => entry.event === 'operational-error')?.payload as { code?: string } | undefined)?.code,
-      'PROVIDER_SEMANTIC_TIMEOUT',
-    );
-  } finally {
-    if (previousProvider === undefined) delete process.env.PIE_PROVIDER_SEMANTIC_INACTIVITY_MS;
-    else process.env.PIE_PROVIDER_SEMANTIC_INACTIVITY_MS = previousProvider;
-    if (previousTool === undefined) delete process.env.PIE_TOOL_INACTIVITY_MS;
-    else process.env.PIE_TOOL_INACTIVITY_MS = previousTool;
-  }
-});
-
-test('pre-first-semantic inactivity retires and replaces a runtime even when abort never settles', async () => {
-  const previous = process.env.PIE_PROVIDER_SEMANTIC_INACTIVITY_MS;
-  process.env.PIE_PROVIDER_SEMANTIC_INACTIVITY_MS = '5';
-  try {
-    const { deps, emitted, busy } = createDeps();
-    let abortCalls = 0;
-    const recoveries: Array<{ context: SessionContext; reason: string }> = [];
-    deps.recoverStuckSession = (context, reason) => {
-      recoveries.push({ context, reason });
-    };
-    const context = createContext({
-      session: {
-        isStreaming: true,
-        sessionManager: { getBranch: () => [] },
-        clearQueue: () => undefined,
-        abortRetry: () => undefined,
-        abort: () => {
-          abortCalls += 1;
-          return new Promise<void>(() => undefined);
-        },
-      } as unknown as SessionContext['session'],
-      activeRequest: {
-        id: 'req-semantic-timeout', messageIndex: 0, aborted: false,
-        provider: 'umans', modelId: 'umans-test',
-        lastProviderErrorForDiagnostics: 'upstream header phase stalled for 30000ms',
-        liveTurnAccumulator: new BackendLiveTurnAccumulator({
-          protocolVersion: 7, sessionPath: '/workspace/session.jsonl', requestId: 'req-semantic-timeout',
-          turnId: 'turn-timeout', attemptId: 'attempt-timeout', canonicalMessageId: 'req-semantic-timeout:1', startedAt: Date.now(),
-        }),
-      },
-    });
-    handleSdkSessionEvent(deps, context, { type: 'message_start', message: { role: 'assistant' } });
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    assert.equal(recoveries.length, 1);
-    assert.equal(recoveries[0]?.context, context);
-    assert.match(recoveries[0]?.reason ?? '', /provider stopped producing semantic response events/i);
-    const operationalError = emitted.find((entry) => entry.event === 'operational-error');
-    assert.deepEqual(operationalError?.payload, {
-      incidentId: 'semantic-timeout:req-semantic-timeout:provider',
-      dedupeKey: 'semantic-timeout:/workspace/session.jsonl:req-semantic-timeout:provider',
-      code: 'PROVIDER_SEMANTIC_TIMEOUT',
-      message: 'The provider stopped producing semantic response events.',
-      detail: [
-        'Provider: umans',
-        'Model: umans-test',
-        'Inactivity threshold: 5 ms',
-        'Observed: no text, reasoning, or tool-call event arrived before the threshold expired.',
-        'Last provider error: upstream header phase stalled for 30000ms',
-      ].join('\n'),
-      sessionPath: '/workspace/session.jsonl',
-      requestId: 'req-semantic-timeout',
-      turnId: 'turn-timeout',
-      messageId: 'req-semantic-timeout:1',
-      severity: 'error',
-      certainty: 'ambiguous',
-      phase: 'provider',
-      recovery: { retry: false, restart: true, showLogs: true },
-    });
-    assert.equal(abortCalls, 0, 'the shared recovery owner must own remote teardown');
-    assert.deepEqual(busy, [], 'the old runtime must not be advertised idle before replacement');
-    assert.equal(emitted.some((entry) => entry.event === 'message.aborted'), false, 'the shared recovery owner emits the terminal exactly once');
-  } finally {
-    if (previous === undefined) delete process.env.PIE_PROVIDER_SEMANTIC_INACTIVITY_MS;
-    else process.env.PIE_PROVIDER_SEMANTIC_INACTIVITY_MS = previous;
-  }
 });
 
 test('agent_settled does not emit an extra aborted event when the request already has an assistant message', () => {

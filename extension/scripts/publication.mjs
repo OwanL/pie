@@ -6,6 +6,8 @@ export const PUBLISHED_GENERATIONS_DIR = 'pie-generations';
 export const PUBLISHED_SELECTIONS_DIR = 'selections';
 export const RETAINED_RENDERER_GENERATIONS = 2;
 
+const ACTIVATION_RETRY_GUIDANCE = 'Close all Pie-using VS Code windows first (finished sessions/chat tabs are insufficient for Windows locks), then from an external terminal at the repository root run `npm run extension:activate` and retry.';
+
 let selectionCounter = 0;
 
 async function acquirePublicationLock(extensionDir) {
@@ -82,6 +84,128 @@ export async function writeFileIfChanged(filePath, contents) {
   }
   await writeFile(filePath, contents);
   return true;
+}
+
+async function listTopLevelNodeBundles(directory) {
+  try {
+    const entries = await readdir(directory, { withFileTypes: true });
+    return {
+      names: entries
+        .map((entry) => entry.name)
+        .filter((name) => name.endsWith('.js'))
+        .sort(),
+      error: null,
+    };
+  } catch (error) {
+    return {
+      names: [],
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+async function readNodeBundleContents(directory, names, readBundleFile) {
+  const contents = new Map();
+  const unreadable = [];
+  await Promise.all(names.map(async (name) => {
+    try {
+      const value = await readBundleFile(path.join(directory, name));
+      contents.set(name, Buffer.from(value));
+    } catch {
+      unreadable.push(name);
+    }
+  }));
+  unreadable.sort();
+  return { contents, unreadable };
+}
+
+/**
+ * Compare the flat top-level Node output emitted by Vite with the installed
+ * output. This deliberately reads bundle bytes rather than trusting the
+ * coordinated build identity, which also includes renderer inputs and does
+ * not cover every shared Node input. The comparison is read-only.
+ */
+export async function compareNodeBundles({
+  builtOutDir,
+  installedOutDir,
+  readFile: readBundleFile = readFile,
+}) {
+  const [builtListing, installedListing] = await Promise.all([
+    listTopLevelNodeBundles(builtOutDir),
+    listTopLevelNodeBundles(installedOutDir),
+  ]);
+  const [builtRead, installedRead] = await Promise.all([
+    readNodeBundleContents(builtOutDir, builtListing.names, readBundleFile),
+    readNodeBundleContents(installedOutDir, installedListing.names, readBundleFile),
+  ]);
+
+  const installedNames = new Set(installedListing.names);
+  const builtNames = new Set(builtListing.names);
+  const missingInstalled = builtListing.names.filter((name) => !installedNames.has(name));
+  const extraInstalled = installedListing.names.filter((name) => !builtNames.has(name));
+  const mismatched = builtListing.names.filter((name) => {
+    const built = builtRead.contents.get(name);
+    const installed = installedRead.contents.get(name);
+    return built && installed && !built.equals(installed);
+  });
+
+  return {
+    builtFiles: builtListing.names,
+    installedFiles: installedListing.names,
+    missingInstalled,
+    extraInstalled,
+    mismatched,
+    unreadableBuilt: builtRead.unreadable,
+    unreadableInstalled: installedRead.unreadable,
+    builtDirectoryError: builtListing.error,
+    installedDirectoryError: installedListing.error,
+    current: builtListing.error === null
+      && installedListing.error === null
+      && builtListing.names.length > 0
+      && builtRead.unreadable.length === 0
+      && installedRead.unreadable.length === 0
+      && missingInstalled.length === 0
+      && extraInstalled.length === 0
+      && mismatched.length === 0,
+  };
+}
+
+function formatBundleNames(names) {
+  if (names.length === 0) return '(none)';
+  const preview = names.slice(0, 6).join(', ');
+  return names.length > 6 ? `${preview}, … (${names.length} files)` : preview;
+}
+
+/**
+ * Format a bounded, on-disk-only host status. It never implies that VS Code
+ * has loaded the installed files.
+ */
+export function formatNodeBundleStatus({ status, builtOutDir, installedOutDir }) {
+  const lines = [
+    '[build] Host/backend status (top-level Node .js bundles on disk; running code not verified):',
+    `  built: ${status.builtFiles.length} bundles in ${builtOutDir}`,
+    `  installed: ${status.installedFiles.length} bundles in ${installedOutDir}`,
+  ];
+  if (status.builtDirectoryError) lines.push(`  built directory unreadable: ${status.builtDirectoryError}`);
+  if (status.installedDirectoryError) lines.push(`  installed directory unreadable: ${status.installedDirectoryError}`);
+  if (status.unreadableBuilt.length > 0) lines.push(`  unreadable built files: ${formatBundleNames(status.unreadableBuilt)}`);
+  if (status.unreadableInstalled.length > 0) lines.push(`  unreadable installed files: ${formatBundleNames(status.unreadableInstalled)}`);
+
+  if (status.current) {
+    lines.push('[build] Host/backend bundles match installed files on disk. This is not proof that the matching code is running.');
+  } else {
+    if (status.missingInstalled.length > 0) lines.push(`  missing from installed: ${formatBundleNames(status.missingInstalled)}`);
+    if (status.extraInstalled.length > 0) lines.push(`  installed-only files: ${formatBundleNames(status.extraInstalled)}`);
+    if (status.mismatched.length > 0) lines.push(`  different contents: ${formatBundleNames(status.mismatched)}`);
+    const unknown = status.builtDirectoryError || status.installedDirectoryError
+      || status.unreadableBuilt.length > 0 || status.unreadableInstalled.length > 0
+      || status.builtFiles.length === 0;
+    lines.push(unknown
+      ? '[build] HOST INSTALL STATUS UNKNOWN: could not verify the installed host/backend bundles.'
+      : '[build] HOST INSTALL PENDING: host/backend changes are NOT installed.');
+    lines.push('[build] Restarting or rebooting alone will not install host changes. After running work finishes, close all Pie-using VS Code windows (finished sessions/chat tabs are insufficient for Windows locks), then run `npm run extension:activate` from an external terminal at the repository root.');
+  }
+  return lines.join('\n');
 }
 
 /**
@@ -333,12 +457,12 @@ export async function activateInstalledOutput({ sourceOutDir, extensionDir, veri
         } catch (rollbackError) {
           throw new AggregateError(
             [error, rollbackError],
-            `Pie host/backend activation failed and rollback could not restore the prior output. Recovery copy retained at ${backup}.`,
+            `Pie host/backend activation failed and rollback could not restore the prior output. Recovery copy retained at ${backup}. ${ACTIVATION_RETRY_GUIDANCE}`,
           );
         }
       }
       throw new Error(
-        `Pie host/backend activation failed without using an in-place fallback. Close or reload Pie sessions, then retry. ${error instanceof Error ? error.message : String(error)}`,
+        `Pie host/backend activation failed without using an in-place fallback. ${ACTIVATION_RETRY_GUIDANCE} ${error instanceof Error ? error.message : String(error)}`,
         { cause: error },
       );
     }

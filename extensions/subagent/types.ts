@@ -179,13 +179,10 @@ export interface SingleResult {
 	 * credible child activity, allowing parents to distinguish real work from
 	 * duplicate `onUpdate` snapshots without relying on wall-clock timestamps. */
 	progressGeneration?: number;
-	/** Epoch milliseconds at which credible progress was last observed. Kept for
-	 * display/diagnostics; settlement renewal uses {@link progressGeneration}. */
+	/** Epoch milliseconds at which credible progress was last observed. Kept
+	 * for display/diagnostics; the {@link progressGeneration} sequence fences
+	 * duplicate snapshots. */
 	lastProgressAt?: number;
-	/** Inactivity budget for this phase. Generous provider budgets remain valid;
-	 * exposing them makes a slow/unreliable provider observable rather than
-	 * falsely looking crashed. */
-	inactivityBudgetMs?: number;
 	/** The model spec chosen by bucket selection. Canonical `provider/id` for
 	 * qualified bucket entries; a bare id for legacy entries/fallbacks. */
 	selectedModel?: string;

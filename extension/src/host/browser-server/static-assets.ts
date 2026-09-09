@@ -18,7 +18,7 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
-import { resolvePublishedWebviewDir } from '../webview/published-generations';
+import { resolvePublishedWebviewDir, type RendererSelectionOptions } from '../webview/published-generations';
 
 interface ViteManifestChunk {
   file: string;
@@ -156,12 +156,14 @@ export class BrowserStaticAssets {
   private resolved: ResolvedBrowserAssets | null = null;
   private currentGenerationFiles: ReadonlyMap<string, string> | null = null;
 
-  constructor(private readonly assetDir: string) {}
+  private selectedAssetDir: string | null = null;
+
+  constructor(private readonly assetDir: string, private readonly rendererSelection: RendererSelectionOptions = {}) {}
 
   /** Load the manifest and resolve the serving allowlist. Throws when the
    *  webview bundle is missing/malformed (terminal server start failure). */
   async load(): Promise<void> {
-    const selectedAssetDir = await resolvePublishedWebviewDir(this.assetDir);
+    const selectedAssetDir = await resolvePublishedWebviewDir(this.assetDir, this.rendererSelection);
     const manifest = await loadViteManifest(selectedAssetDir);
     const entry = findEntryChunk(manifest);
     if (!entry) {
@@ -192,6 +194,7 @@ export class BrowserStaticAssets {
     const files = new Map(this.currentGenerationFiles ?? []);
     for (const [key, value] of currentFiles) files.set(key, value);
     this.currentGenerationFiles = currentFiles;
+    this.selectedAssetDir = selectedAssetDir;
     this.resolved = {
       assetVersion: assetVersionFromManifest(manifest),
       files,
@@ -209,8 +212,8 @@ export class BrowserStaticAssets {
 
   /** Whether an absolute filesystem path is inside the webview asset dir. */
   isUnderAssetDir(absolutePath: string): boolean {
-    const base = path.resolve(this.assetDir) + path.sep;
-    return absolutePath.startsWith(base);
+    return [this.assetDir, this.rendererSelection.fallbackDir]
+      .some((directory) => directory !== undefined && absolutePath.startsWith(path.resolve(directory) + path.sep));
   }
 
   /**
@@ -248,9 +251,9 @@ export class BrowserStaticAssets {
   renderHtml(options: { wsRoute: string; port: number; titleSuffix?: string; faviconRoute?: string }): { html: string; csp: string } {
     if (!this.resolved) throw new Error('BrowserStaticAssets.load() is required before renderHtml().');
     const nonce = crypto.randomBytes(16).toString('hex');
-    const entryUrl = toAssetUrl(this.resolved.entryPath, this.assetDir);
+    const entryUrl = toAssetUrl(this.resolved.entryPath, this.selectedAssetDir ?? this.assetDir);
     const styleTags = this.resolved.cssPaths
-      .map((p) => `  <link href="${toAssetUrl(p, this.assetDir)}" rel="stylesheet" nonce="${nonce}" />`)
+      .map((p) => `  <link href="${toAssetUrl(p, this.selectedAssetDir ?? this.assetDir)}" rel="stylesheet" nonce="${nonce}" />`)
       .join('\n');
     const cspParts = [
       "default-src 'none'",

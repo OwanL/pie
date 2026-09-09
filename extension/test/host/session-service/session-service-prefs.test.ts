@@ -230,11 +230,11 @@ test('condition-specific incidents on one request remain independently visible a
   });
   (service as any).events.handleBackendEvent({
     event: 'operational-error',
-    payload: createOperationalIncident({ ...base, phase: 'retry', code: 'RETRY_STUCK', dedupeKey: 'retry-stuck:/session.jsonl:req-shared' }),
+    payload: createOperationalIncident({ ...base, phase: 'recovery', code: 'INTERRUPT_ABORT_STUCK', dedupeKey: 'interrupt-stuck:/session.jsonl:req-shared' }),
   });
 
   assert.equal(dispatched.filter((event) => event.kind === 'IncidentReported').length, 2);
-  assert.deepEqual(backendErrors, ['PROVIDER_QUOTA_EXHAUSTED', 'RETRY_STUCK']);
+  assert.deepEqual(backendErrors, ['PROVIDER_QUOTA_EXHAUSTED', 'INTERRUPT_ABORT_STUCK']);
   service.dispose();
 });
 

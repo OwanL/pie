@@ -229,9 +229,9 @@ From a fresh checkout, install every dependency tree once from the repository ro
 
 ```bash
 npm ci                             # also installs extension/ and analysis/ via postinstall
-npm run extension:build            # compile/validate + publish renderer assets only
+npm run extension:build            # validate + stage runtime + publish renderer
 npm run extension:build:validate   # compile/validate without publishing
-npm run extension:activate         # explicitly replace installed host/backend output
+npm run extension:activate         # one-time startup loader setup or upgrade
 npm run extension:package          # produce a .vsix when needed
 ```
 
@@ -248,12 +248,18 @@ Useful extension commands:
 - `npm run publish:renderer` — publish already-validated renderer output only
 - `npm run watch` — incremental Vite rebuilds plus a concurrent TypeScript watch; each complete emission publishes an immutable renderer generation
 - `npm run watch -- --skip-typecheck` — Vite-only watch when typechecking elsewhere
-- `npm run activate` — explicit user-controlled host/backend activation; close or reload active Pie sessions first
+- `npm run activate` — one-time startup loader setup or explicit upgrade; takes effect on the next normal VS Code restart without stopping running sessions
 - `npm run test` — unit tests
 - `npm run typecheck` — incremental type-only check
 - `npm run package` — produce a `.vsix`
 
-Ordinary build/watch publication never replaces installed `extension.js`, backend, or worker bundles and never rewrites the installed `package.json`. Renderer generations are copied and verified before an append-only selection marker becomes visible; the selected and immediately prior generations are retained. Host/backend changes therefore require `extension:activate`, VSIX installation, or another explicit extension reload/install boundary. Publication is refused unless the installed folder name and manifest both match the workspace extension identity and version.
+Ordinary build/watch publication stages a complete immutable runtime under the matching installed extension, without overwriting loaded bundles or rewriting `package.json`. The startup loader validates content hashes and selects the newest complete generation on every normal VS Code startup. **Restarting VS Code therefore loads the latest successfully published build.** Active windows retain their own runtime leases and keep working; no automatic restart is performed. Startup displays “Loading updated Pie build…” for a new generation, while running windows show “Pie update ready”. Renderer-only changes can still publish live.
+
+Older installations need `npm run extension:activate` once, or a new VSIX installation, to install the startup loader. This setup publishes immutable loader files and changes the next-start entrypoint, so even Windows does not need locked host files replaced. Restart VS Code when convenient afterward. Routine code changes need only a build and a normal restart, not another manual installation. Extension manifest/SDK dependency upgrades remain explicit installation work.
+
+Full-runtime publication retains the current and prior generations plus leased generations. A crashed host's lease is retained conservatively because orphan workers may still need its files; it is not automatically reclaimed merely because its parent PID disappeared. Settings, credentials, sessions, and the shared SDK installation remain outside runtime generations.
+
+Keep **built**, **staged**, **loaded**, and **behavior verified** distinct. Staged files are not evidence that existing windows have loaded the update.
 
 ### Run the analytics workspace
 

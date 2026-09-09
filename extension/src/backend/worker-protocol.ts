@@ -97,7 +97,6 @@ export type WorkerRuntimeEventName =
   | 'retry.started'
   | 'retry.ended'
   | 'retry.measured'
-  | 'retry.stuck'
   | 'compaction.started'
   | 'compaction.ended'
   | 'auxiliary-llm.usage'
@@ -913,7 +912,7 @@ const RUNTIME_EVENT_NAMES: ReadonlySet<WorkerRuntimeEventName> = new Set([
   'message.toolCallDelta', 'message.finished', 'message.aborted', 'message.custom',
   'message.queuedDelivered', 'tool.started', 'tool.progress', 'tool.finished',
   'agent.settled', 'busy.changed', 'contextUsage.changed', 'extension_ui.request', 'preflight.failed',
-  'retry.started', 'retry.ended', 'retry.measured', 'retry.stuck',
+  'retry.started', 'retry.ended', 'retry.measured',
   'compaction.started', 'compaction.ended', 'auxiliary-llm.usage', 'live.semantic',
   'live.lifecycle', 'operational-error', 'error',
 ]);

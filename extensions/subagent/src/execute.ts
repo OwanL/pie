@@ -6,10 +6,9 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import type { TextContent } from "@mariozechner/pi-ai";
 import type { ToolContext } from "./tool-context.js";
 import { textContent } from "./text-content.js";
-import { realRetryClock, type RetryClock, type RetryTimer } from "./retry.js";
+import { realRetryClock, type RetryClock } from "./retry.js";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { toErrorMessage } from "../../../shared/error-message.js";
 import { readKeptSkills } from "../../../shared/pruned-skills.js";
 import { type AgentConfig, type AgentScope, discoverAgents } from "../agents.js";
 import {
@@ -50,11 +49,7 @@ import {
 } from "../bucket-selector.js";
 import { makeDetails } from "./helpers.js";
 import { executeSingleTask, type SingleSubagentParams } from "./single.js";
-import {
-	compactSubagentDetails,
-	readRecursiveProjectionCounters,
-	type RecursiveProjectionCounters,
-} from "./result-compaction.js";
+import { readRecursiveProjectionCounters } from "./result-compaction.js";
 import {
 	readAlwaysParentModelFromEnv,
 	readRouteAroundSaturatedProviders,
@@ -62,7 +57,7 @@ import {
 import type { ParentBridge } from "./parent-extension-ui-bridge-proxy.js";
 import { readFallbackOnProviderFailure } from "./provider-failure.js";
 import { hashDelegatedPrompt, loadModelFamilies, withRuntimeProvenance } from "./runtime-provenance.js";
-import { isRuntimeTraceEnabled, recordRuntimeTrace, type RuntimeTraceIdentifiers } from "./runtime-trace.js";
+import { recordRuntimeTrace } from "./runtime-trace.js";
 // Model-selection primitives live in ./selection.ts and remain re-exported
 // here for compatibility with existing focused tests and integrations.
 import {
@@ -119,260 +114,9 @@ export { resolveModel, attachSelectionMetadata, isModelFailure, checkTrailLoop, 
 /** Standard error response shape used by early returns. */
 type ErrorResponse = { content: TextContent[]; details: SubagentDetails; isError: true };
 
-/** Environment key for the last-resort settlement inactivity budget
- *  (milliseconds). Kept under its existing name for configuration compatibility.
- *  See {@link resolveSettlementMs}. */
-const SETTLEMENT_ENV = "PIE_SUBAGENT_SETTLEMENT_MS";
-/** Default settlement inactivity budget: 12 minutes. This is deliberately
- *  longer than the normal provider/tool phase leases. Credible progress renews
- *  it, so productive long-running children are not capped by total wall time;
- *  a completely silent dispatch still cannot dangle the parent forever. */
-export const DEFAULT_SETTLEMENT_MS = 12 * 60 * 1000;
-
-/** Default inactivity lease per observable child phase. Provider queue/header
- * liveness remains additionally bounded by ProviderGate; these outer leases
- * guarantee the parent tool call also reaches a terminal decision. */
-export const PHASE_INACTIVITY_MS: Partial<Record<NonNullable<SingleResult['activityPhase']>, number>> = {
-	queued: 10 * 60 * 1000,
-	preparing: 2 * 60 * 1000,
-	waiting_provider: 5 * 60 * 1000,
-	streaming: 3 * 60 * 1000,
-	running_tool: 15 * 60 * 1000,
-	retry_wait: 3 * 60 * 1000,
-	orphaned_cleanup: 60 * 1000,
-};
-
-function hasSettlementOverride(): boolean {
-	const raw = process.env[SETTLEMENT_ENV];
-	return raw !== undefined && raw !== '';
-}
-
-/** Choose the active lease. An explicit compatibility override continues to
- * control every phase; otherwise the latest child phase owns its own budget. */
-export function resolvePhaseInactivityMs(
-	details: SubagentDetails | undefined,
-	fallbackMs = DEFAULT_SETTLEMENT_MS,
-): number {
-	if (hasSettlementOverride()) return resolveSettlementMs();
-	const activeBudgets = (details?.results ?? [])
-		.filter((result) => result.exitCode === -1)
-		.map((result) => PHASE_INACTIVITY_MS[result.activityPhase ?? 'waiting_provider'] ?? fallbackMs);
-	return activeBudgets.length > 0 ? Math.max(...activeBudgets) : fallbackMs;
-}
-
-/** Resolve the settlement inactivity budget for a subagent tool call.
- *
- * Reads `PIE_SUBAGENT_SETTLEMENT_MS`:
- * - Unset/empty → {@link DEFAULT_SETTLEMENT_MS} (the net is ON by default).
- * - `0` → explicitly disabled (no net; only for debugging/emergency).
- * - A positive number → the renewable inactivity budget in ms.
- * - Invalid (NaN/negative) → {@link DEFAULT_SETTLEMENT_MS}.
- *
- * Returns the inactivity budget in ms, or `0` to disable the net entirely.
- */
-export function resolveSettlementMs(): number {
-	const raw = process.env[SETTLEMENT_ENV];
-	if (raw === undefined || raw === "") return DEFAULT_SETTLEMENT_MS;
-	const ms = Number(raw);
-	if (!Number.isFinite(ms) || ms < 0) return DEFAULT_SETTLEMENT_MS;
-	return ms;
-}
-
-/** Environment key for the post-deadline grace period (milliseconds).
- *  See {@link resolveSettlementGraceMs}. */
-const SETTLEMENT_GRACE_ENV = "PIE_SUBAGENT_SETTLEMENT_GRACE_MS";
-/** Default grace given to a force-settled dispatch to surface its own abort
- *  result before we synthesize one (prefers the real abort result over a
- *  synthesized error). */
-export const DEFAULT_SETTLEMENT_GRACE_MS = 5000;
-
-/** Resolve the grace period allowed after the settlement deadline fires before
- *  synthesizing a terminal error toolResult. Unset/invalid → default; `0` →
- *  skip the grace and synthesize immediately (useful in tests). */
-export function resolveSettlementGraceMs(): number {
-	const raw = process.env[SETTLEMENT_GRACE_ENV];
-	if (raw === undefined || raw === "") return DEFAULT_SETTLEMENT_GRACE_MS;
-	const ms = Number(raw);
-	if (!Number.isFinite(ms) || ms < 0) return DEFAULT_SETTLEMENT_GRACE_MS;
-	return ms;
-}
-
-/** Compact semantic fallback for old snapshots that predate progressGeneration.
- * Do not include timestamps: a producer repeatedly stamping Date.now() is not
- * credible work and must not keep a hung tree alive. */
-function legacyProgressFingerprint(result: SingleResult): string {
-	const startedAt = performance.now();
-	const fingerprint = JSON.stringify([
-		result.agent, result.task, result.step, result.exitCode, result.model,
-		result.stopReason, result.errorMessage, result.activityPhase, result.activityDetail,
-		result.streaming, result.streamingText, result.streamingReasoning, result.runningTools,
-		result.messages.length, result.usage.turns, result.usage.input, result.usage.output,
-		result.retryCount, result.failedModel, result.selectedModel,
-	]);
-	const producedPayloadBytes = isRuntimeTraceEnabled() ? Buffer.byteLength(fingerprint, "utf8") : undefined;
-	const runtimeContext = readRuntimeContext();
-	// Semantic fingerprint keys are not compact-event bytes; they deliberately
-	// carry no payload class so class sums never count them as such.
-	recordRuntimeTrace({
-		phase: "serialize",
-		durationMs: Math.max(0, performance.now() - startedAt),
-		producedPayloadBytes,
-		childCount: 1,
-		messageCount: result.messages.length,
-		identifiers: { session: runtimeContext.rootSessionPath, attempt: result.attemptId },
-	});
-	return fingerprint;
-}
-
-/** Identify one stable child attempt. A generation reset is only credible
- * when this identity changes (for example, a model retry moves to another
- * provider/model); agent/task/step alone are not enough. */
-function progressAttemptIdentity(result: SingleResult): string {
-	const startedAt = performance.now();
-	const identity = JSON.stringify([
-		result.agent,
-		result.task,
-		result.step ?? null,
-		result.provider ?? null,
-		result.model ?? null,
-	]);
-	const producedPayloadBytes = isRuntimeTraceEnabled() ? Buffer.byteLength(identity, "utf8") : undefined;
-	const runtimeContext = readRuntimeContext();
-	// Attempt-identity keys are fingerprint bytes, not compact-event bytes.
-	recordRuntimeTrace({
-		phase: "serialize",
-		durationMs: Math.max(0, performance.now() - startedAt),
-		producedPayloadBytes,
-		childCount: 1,
-		messageCount: result.messages.length,
-		identifiers: { session: runtimeContext.rootSessionPath, attempt: result.attemptId },
-	});
-	return identity;
-}
-
-/** Tracks the latest per-child progress sequence at this execute boundary.
- * Modern children renew only when their generation advances past the highest
- * value observed for the same attempt. Keeping a high-water mark is important:
- * a stale 5 → 4 → 5 sequence must not turn the final 5 into fresh progress.
- * Legacy snapshots use a semantic fingerprint until an explicit generation is
- * observed, so duplicate callbacks still do not renew the settlement lease.
- *
- * Every call emits one closed dedupe outcome (changed | duplicate) so the
- * settlement-lease decision itself is traceable. The fingerprints/identities
- * are already byte-counted by their own serialize events; this event carries
- * no payload class. */
-export function createProgressObserver(
-	/** Correlation identifiers for this execute boundary (e.g. the parent tool
-	 *  call), merged into every emitted dedupe outcome. */
-	traceIdentifiers?: RuntimeTraceIdentifiers,
-): (details: SubagentDetails | undefined) => boolean {
-	type ProgressState = {
-		identity: string;
-		highWaterGeneration?: number;
-		sawGeneration: boolean;
-		fingerprint: string;
-	};
-	const previous = new Map<string, ProgressState>();
-	return (details) => {
-		const startedAt = performance.now();
-		const emitDedupeOutcome = (
-			outcome: "changed" | "duplicate",
-			childCount: number,
-			messageCount: number,
-			attemptId?: string,
-		): void => {
-			const runtimeContext = readRuntimeContext();
-			recordRuntimeTrace({
-				phase: "dedupe",
-				outcome,
-				durationMs: Math.max(0, performance.now() - startedAt),
-				childCount,
-				messageCount,
-				identifiers: {
-					session: runtimeContext.rootSessionPath,
-					attempt: attemptId,
-					...traceIdentifiers,
-				},
-			});
-		};
-		if (!details?.results) {
-			emitDedupeOutcome("duplicate", 0, 0);
-			return false;
-		}
-		let progressed = false;
-		let messageCount = 0;
-		let attemptId: string | undefined;
-		for (let index = 0; index < details.results.length; index++) {
-			const result = details.results[index];
-			const childKey = result.childId ?? `legacy-index:${index}`;
-			if (attemptId === undefined && typeof result.attemptId === "string") attemptId = result.attemptId;
-			messageCount += result.messages.length;
-			const generation = Number.isSafeInteger(result.progressGeneration) && result.progressGeneration! >= 0
-				? result.progressGeneration
-				: undefined;
-			const fingerprint = legacyProgressFingerprint(result);
-			const identity = progressAttemptIdentity(result);
-			const before = previous.get(childKey);
-			if (!before || before.identity !== identity) {
-				// A changed attempt identity is the one allowed generation reset.
-				progressed = true;
-				previous.set(childKey, {
-					identity,
-					highWaterGeneration: generation,
-					sawGeneration: generation !== undefined,
-					fingerprint,
-				});
-				continue;
-			}
-
-			if (generation !== undefined) {
-				if (!before.sawGeneration) {
-					progressed = true;
-					before.sawGeneration = true;
-					before.highWaterGeneration = generation;
-				} else if (generation > (before.highWaterGeneration ?? -1)) {
-					progressed = true;
-					before.highWaterGeneration = generation;
-				}
-			} else if (!before.sawGeneration && fingerprint !== before.fingerprint) {
-				// Compatibility path for pre-generation snapshots only.
-				progressed = true;
-			}
-			before.fingerprint = fingerprint;
-		}
-		emitDedupeOutcome(progressed ? "changed" : "duplicate", details.results.length, messageCount, attemptId);
-		return progressed;
-	};
-}
-
-/** Sentinel resolved by the settlement timer when the dispatch hasn't returned. */
-const FORCE_SETTLE = Symbol("pie:subagent:force-settle");
-
-function combineSignals(left: AbortSignal, right: AbortSignal): { signal: AbortSignal; cleanup: () => void } {
-	if (typeof AbortSignal.any === "function") return { signal: AbortSignal.any([left, right]), cleanup: () => {} };
-	const controller = new AbortController();
-	const cleanup = () => {
-		left.removeEventListener("abort", onLeft);
-		right.removeEventListener("abort", onRight);
-	};
-	const abort = (source: AbortSignal) => {
-		if (!controller.signal.aborted) controller.abort(source.reason);
-		cleanup();
-	};
-	const onLeft = () => abort(left);
-	const onRight = () => abort(right);
-	if (left.aborted) abort(left);
-	else if (right.aborted) abort(right);
-	else {
-		left.addEventListener("abort", onLeft, { once: true });
-		right.addEventListener("abort", onRight, { once: true });
-	}
-	return { signal: controller.signal, cleanup };
-}
-
-/** Loud log for a settlement / hardening event. Mirrors the runner's `logLoud`
- *  shape so logs are uniformly grep-able under `source: "pie:subagent"`. Kept
- *  local to execute.ts to avoid a new cross-module import for one helper. */
+/** Loud log for a hardening event. Mirrors the runner's `logLoud` shape so
+ *  logs are uniformly grep-able under `source: "pie:subagent"`. Kept local to
+ *  execute.ts to avoid a new cross-module import for one helper. */
 function logLoud(event: string, details: Record<string, unknown>): void {
 	console.error(JSON.stringify({ source: "pie:subagent", event, ...details }));
 }
@@ -607,11 +351,11 @@ export async function execute(
 	ctx: ToolContext,
 	_pi: ExtensionAPI,
 	isDisabled: () => boolean,
-	/** Deterministic timer seam for lifecycle acceptance tests. */
+	/** Deterministic clock seam for retry/backoff acceptance tests. */
 	_internal?: { clock?: RetryClock },
 ) {
 	if (isDisabled()) return disabledErrorResponse();
-	const settlementClock = _internal?.clock ?? realRetryClock;
+	const retryClock = _internal?.clock ?? realRetryClock;
 
 	const runtimeCtx = readRuntimeContext();
 	const maxDepth = getMaxDepth();
@@ -641,7 +385,7 @@ export async function execute(
 	if (!validation.ok) {
 		throwParamsError(agents);
 	}
-	const { mode, invalidResults } = validation;
+	const { invalidResults } = validation;
 
 	if (invalidResults.length > 0) {
 		throwInvalidAgents(invalidResults);
@@ -703,408 +447,64 @@ export async function execute(
 		allToolNames = undefined;
 	}
 
-	// Settlement net (last-resort, defense-in-depth): guarantee `execute()`
-	// returns after a bounded period with NO credible progress even if a
-	// downstream phase (a future bug, an SDK that ignores abort, a dead provider
-	// stream the proxy didn't surface) hangs forever. This is NOT a total-runtime
-	// ceiling: preservingOnUpdate renews it whenever a child publishes progress,
-	// so a productive worker can run for 30+ minutes. On inactivity it aborts the
-	// run (so runner.ts can return its own abort result), then force-returns a
-	// synthesized error toolResult if the dispatch still doesn't settle.
-	// Retain the latest immutable progress snapshot at the execute boundary. If
-	// the net fires, completed siblings and partial child output must survive;
-	// only children that are still running are terminalized.
-	type DetailTraceMetadata = {
-		childCount: number;
-		messageCount: number;
-		cloneDurationMs: number;
-		attemptId?: string;
-	};
-	type CapturedDetails = {
-		metadata: DetailTraceMetadata;
-		settlementMs: number;
-	};
-	let latestDetails: SubagentDetails | undefined;
-	let latestTraceMetadata: DetailTraceMetadata | undefined;
-	const captureDetails = (details: SubagentDetails | undefined): CapturedDetails | undefined => {
-		if (!details?.results) return undefined;
-		const previous = latestDetails?.results ?? [];
-		let messageCount = 0;
-		let attemptId: string | undefined;
-		const cloneStartedAt = performance.now();
-		latestDetails = {
-			...details,
-			results: details.results.map((result, index) => {
-				messageCount += result.messages.length;
-				if (attemptId === undefined) attemptId = result.attemptId;
-				return {
-					...previous[index],
-					...result,
-					// Preserve partial prose/reasoning across the settlement-triggered abort update.
-					streamingText: result.streamingText ?? previous[index]?.streamingText,
-					streamingReasoning: result.streamingReasoning ?? previous[index]?.streamingReasoning,
-				};
-			}),
-		};
-		const metadata: DetailTraceMetadata = {
-			childCount: details.results.length,
-			messageCount,
-			cloneDurationMs: Math.max(0, performance.now() - cloneStartedAt),
-			attemptId,
-		};
-		latestTraceMetadata = metadata;
-		return {
-			metadata,
-			// This is timeout selection, not measurement of the payload. Keep the
-			// settlement budget out of the payload trace phases. The caller applies
-			// this selection only when the same snapshot is credible progress; stale
-			// or duplicate callbacks may preserve details but must never mutate the
-			// lease that is already armed.
-			settlementMs: resolvePhaseInactivityMs(latestDetails),
-		};
-	};
-	let renewSettlementDeadline: ((settlementMs: number) => void) | undefined;
-	const observeProgress = createProgressObserver({ tool: _toolCallId });
-	let acceptDispatchUpdates = true;
-	const deliverUpdate = (partial: Parameters<OnUpdateCallback>[0]): void => {
-		try { onUpdate?.(partial); } catch (error) {
+	// Dispatch with the caller's abort signal only. Settlement is owned by
+	// explicit completion, parent/user cancellation, the runner's local
+	// terminal CAS, and bounded detached cleanup after cancellation/terminal.
+	// There is deliberately NO elapsed-inactivity or absolute-duration force
+	// settlement (no settlement net, phase lease, or prompt timer): a healthy
+	// long-running child stays alive until it completes or is explicitly
+	// cancelled. Provider retry/admission/transport bounds remain in retry.ts,
+	// provider-capacity.ts, and the shared provider gate.
+	const safeOnUpdate: OnUpdateCallback = (partial) => {
+		try {
+			onUpdate?.(partial);
+		} catch (error) {
 			logLoud("subagent progress delivery failed", { toolCallId: _toolCallId, error: String(error) });
 		}
 	};
-	const preservingOnUpdate: OnUpdateCallback = (partial) => {
-		if (!acceptDispatchUpdates) return;
-		const captured = captureDetails(partial.details);
-		if (captured) {
-			const { metadata } = captured;
-			// captureDetails performs the existing shallow snapshot/merge. It does
-			// not clone or walk nested message bodies, so this is a clone boundary,
-			// not a recursive projection.
-			recordRuntimeTrace({
-				phase: "clone",
-				durationMs: metadata.cloneDurationMs,
-				childCount: metadata.childCount,
-				messageCount: metadata.messageCount,
-				identifiers: {
-					session: runtimeCtx.rootSessionPath,
-					attempt: metadata.attemptId,
-					tool: _toolCallId,
-				},
-			});
-		}
-		// Never treat callback frequency as progress. Runner-owned results advance
-		// progressGeneration for lifecycle/model/tool/terminal activity (including
-		// propagated nested children); old snapshots fall back to semantic changes.
-		if (observeProgress(partial.details) && captured) {
-			renewSettlementDeadline?.(captured.settlementMs);
-		}
-		deliverUpdate(partial);
-	};
-	const fallbackResults = (cause: string): SingleResult[] => [{
-		agent: params.agent,
-		agentSource: "unknown",
-		task: params.task,
-		exitCode: 1,
-		messages: [],
-		stderr: cause,
-		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
-		stopReason: "error",
-		errorMessage: cause,
-	}];
-	const terminalDetails = (cause: string): SubagentDetails => {
-		const handoffStartedAt = performance.now();
-		const metadata = latestTraceMetadata ?? { childCount: 1, messageCount: 0, cloneDurationMs: 0 };
-		const projectionStartedAt = performance.now();
-		const recursiveCounters: RecursiveProjectionCounters = {
-			childCount: 0,
-			messageCount: 0,
-			maxRecursiveDepth: 0,
-			durationMs: 0,
-		};
-		const projected = !latestDetails
-			? compactSubagentDetails(makeDetailsBound(fallbackResults(cause)), recursiveCounters)
-			: compactSubagentDetails({
-				...latestDetails,
-				results: latestDetails.results.map((result) => {
-					// exitCode is authoritative; runningTools/streaming can be stale when
-					// the nested lifecycle ends without its final event.
-					if (result.exitCode !== -1) return result;
-					return {
-						...result,
-						exitCode: 1,
-						streaming: false,
-						runningTools: [],
-						activityPhase: "failed",
-						activityDetail: cause,
-						stopReason: "error",
-						errorMessage: result.errorMessage ?? cause,
-						stderr: result.stderr || cause,
-					};
-				}),
-			}, recursiveCounters);
-		const runtimeContext = readRuntimeContext();
-		// compactSubagentDetails recursively projects nested subagent results to
-		// their terminal form; that traversal is a recursive projection, not
-		// JSON-safe normalization.
-		recordRuntimeTrace({
-			phase: "recursive_projection",
-			durationMs: Math.max(0, performance.now() - projectionStartedAt),
-			childCount: recursiveCounters.childCount,
-			messageCount: recursiveCounters.messageCount,
-			maxRecursiveDepth: recursiveCounters.maxRecursiveDepth,
-			identifiers: { session: runtimeContext.rootSessionPath, attempt: metadata.attemptId, tool: _toolCallId },
-		});
-		// The handoff is the existing terminal projection/return boundary. Its
-		// serialized byte size is intentionally unavailable: this producer does
-		// not serialize the recursive detail merely to measure it.
-		recordRuntimeTrace({
-			phase: "terminal",
-			durationMs: Math.max(0, performance.now() - handoffStartedAt),
-			childCount: recursiveCounters.childCount,
-			messageCount: recursiveCounters.messageCount,
-			maxRecursiveDepth: recursiveCounters.maxRecursiveDepth,
-			identifiers: { session: runtimeContext.rootSessionPath, attempt: metadata.attemptId, tool: _toolCallId },
-		});
-		return projected;
-	};
-
-	const settlementMs = resolveSettlementMs();
-	if (settlementMs <= 0) {
-		const winner = await dispatchSingle(
-			params,
-			ctx,
-			agents,
-			runtimeCtx,
-			makeDetailsBound,
-			preservingOnUpdate,
-			signal,
-			selectionCtx,
-			_toolCallId,
-			ctx.hasUI ? (ctx.ui as unknown as ParentBridge) : undefined,
-			parentSessionId,
-			allToolNames,
-			settlementClock,
-		);
-		const metadata = latestTraceMetadata;
-		const recursiveCounters = readRecursiveProjectionCounters(winner.details);
-		const runtimeContext = readRuntimeContext();
-		// The terminal result was projected inside the runner's own
-		// compactSingleResult traversal, which measured its duration alongside
-		// the counters on the same symbol metadata. Emit that measured
-		// projection before the terminal handoff; nothing here re-walks or
-		// re-serializes the recursive payload.
-		recordRuntimeTrace({
-			phase: "recursive_projection",
-			durationMs: recursiveCounters?.durationMs,
-			childCount: recursiveCounters?.childCount,
-			messageCount: recursiveCounters?.messageCount,
-			maxRecursiveDepth: recursiveCounters?.maxRecursiveDepth,
-			identifiers: {
-				session: runtimeContext.rootSessionPath,
-				attempt: metadata?.attemptId ?? winner.details?.results?.[0]?.attemptId,
-				tool: _toolCallId,
-			},
-		});
-		recordRuntimeTrace({
-			phase: "terminal",
-			childCount: recursiveCounters?.childCount,
-			messageCount: recursiveCounters?.messageCount,
-			maxRecursiveDepth: recursiveCounters?.maxRecursiveDepth,
-			identifiers: {
-				session: runtimeContext.rootSessionPath,
-				attempt: metadata?.attemptId ?? winner.details?.results?.[0]?.attemptId,
-				tool: _toolCallId,
-			},
-		});
-		return winner;
-	}
-
-	// Combine the parent signal with a settlement controller so a settlement
-	// abort propagates into runner.ts just like a user "Stop" (the runner's
-	// pre-spawn `raceAbort` and prompt-phase abort both honor it).
-	const settlementController = new AbortController();
-	const combinedRunSignal = signal
-		? combineSignals(signal, settlementController.signal)
-		: { signal: settlementController.signal, cleanup: () => {} };
-	const runSignal = combinedRunSignal.signal;
-
-	type SettlementLeaseSnapshot = {
-		budgetMs: number;
-		armedAt: number;
-		lastProgressAt: number;
-		deadlineAt: number;
-	};
-	type ArmedSettlementLease = SettlementLeaseSnapshot & { timer: RetryTimer };
-	let settlementLease: ArmedSettlementLease | undefined;
-	let expiredSettlementLease: SettlementLeaseSnapshot | undefined;
-	let settlementDeadlineActive = true;
-	let resolveSettlementDeadline!: (value: typeof FORCE_SETTLE) => void;
-	const settlementTimerPromise = new Promise<typeof FORCE_SETTLE>((resolve) => {
-		resolveSettlementDeadline = resolve;
-	});
-	const expireSettlementDeadline = (
-		lease: SettlementLeaseSnapshot,
-		expectedTimer?: RetryTimer,
-	): void => {
-		if (!settlementDeadlineActive) return;
-		if (expectedTimer && settlementLease?.timer !== expectedTimer) return;
-		settlementLease = undefined;
-		expiredSettlementLease = lease;
-		settlementDeadlineActive = false;
-		resolveSettlementDeadline(FORCE_SETTLE);
-	};
-	const armSettlementDeadline = (budgetMs: number): void => {
-		if (!settlementDeadlineActive) return;
-		settlementLease?.timer.cancel();
-		const armedAt = settlementClock.now();
-		const snapshot: SettlementLeaseSnapshot = {
-			budgetMs,
-			armedAt,
-			lastProgressAt: armedAt,
-			deadlineAt: armedAt + budgetMs,
-		};
-		if (budgetMs <= 0) {
-			expireSettlementDeadline(snapshot);
-			return;
-		}
-		const timer = settlementClock.setTimer(budgetMs);
-		const lease: ArmedSettlementLease = { ...snapshot, timer };
-		settlementLease = lease;
-		void timer.promise.then(() => {
-			expireSettlementDeadline(snapshot, timer);
-		});
-	};
-	renewSettlementDeadline = armSettlementDeadline;
-	armSettlementDeadline(settlementMs);
-
-	const dispatchPromise = dispatchSingle(
+	const winner = await dispatchSingle(
 		params,
 		ctx,
 		agents,
 		runtimeCtx,
 		makeDetailsBound,
-		preservingOnUpdate,
-		runSignal,
+		safeOnUpdate,
+		signal,
 		selectionCtx,
 		_toolCallId,
 		ctx.hasUI ? (ctx.ui as unknown as ParentBridge) : undefined,
 		parentSessionId,
 		allToolNames,
-		settlementClock,
+		retryClock,
 	);
-	// Observe a late rejection from an orphaned dispatch so it never surfaces as
-	// unhandled, but retain the root cause in diagnostics after force-settlement.
-	let forceSettlementTriggered = false;
-	void dispatchPromise.catch((error) => {
-		if (forceSettlementTriggered) {
-			logLoud("dispatch rejected after force-settle", {
-				toolCallId: _toolCallId,
-				mode,
-				error: toErrorMessage(error),
-			});
-		}
+	// The runner's compactSingleResult traversal measured its own duration
+	// alongside the counters on the same symbol metadata. Emit that measured
+	// projection before the terminal handoff; nothing here re-walks or
+	// re-serializes the recursive payload.
+	const recursiveCounters = readRecursiveProjectionCounters(winner.details);
+	const runtimeContext = readRuntimeContext();
+	recordRuntimeTrace({
+		phase: "recursive_projection",
+		durationMs: recursiveCounters?.durationMs,
+		childCount: recursiveCounters?.childCount,
+		messageCount: recursiveCounters?.messageCount,
+		maxRecursiveDepth: recursiveCounters?.maxRecursiveDepth,
+		identifiers: {
+			session: runtimeContext.rootSessionPath,
+			attempt: winner.details?.results?.[0]?.attemptId,
+			tool: _toolCallId,
+		},
 	});
-
-	try {
-		const winner = await Promise.race([dispatchPromise, settlementTimerPromise]);
-		if (winner !== FORCE_SETTLE) {
-			// Dispatch returned first (normal case AND the abort-quickly case,
-			// because on settlement abort runner.ts aborts and returns its own
-			// abort result, which dispatchToMode turns into the response).
-			const metadata = latestTraceMetadata;
-			const recursiveCounters = readRecursiveProjectionCounters(winner.details);
-			const runtimeContext = readRuntimeContext();
-			// Same measured recursive projection as the settlement-off path: the
-			// runner's compactSingleResult traversal measured its own duration
-			// alongside the counters; emit it before the terminal handoff.
-			recordRuntimeTrace({
-				phase: "recursive_projection",
-				durationMs: recursiveCounters?.durationMs,
-				childCount: recursiveCounters?.childCount,
-				messageCount: recursiveCounters?.messageCount,
-				maxRecursiveDepth: recursiveCounters?.maxRecursiveDepth,
-				identifiers: {
-					session: runtimeContext.rootSessionPath,
-					attempt: metadata?.attemptId ?? winner.details?.results?.[0]?.attemptId,
-					tool: _toolCallId,
-				},
-			});
-			recordRuntimeTrace({
-				phase: "terminal",
-				childCount: recursiveCounters?.childCount,
-				messageCount: recursiveCounters?.messageCount,
-				maxRecursiveDepth: recursiveCounters?.maxRecursiveDepth,
-				identifiers: {
-					session: runtimeContext.rootSessionPath,
-					attempt: metadata?.attemptId ?? winner.details?.results?.[0]?.attemptId,
-					tool: _toolCallId,
-				},
-			});
-			return winner;
-		}
-
-		// FORCE_SETTLE won: the dispatch hasn't returned within the deadline.
-		// Abort the run so runner.ts can return a proper abort result, then give
-		// the dispatch a short grace to surface that result (prefer the real
-		// abort result over a synthesized one). Loud-log + user-visible message.
-		const expiredLease = expiredSettlementLease;
-		if (!expiredLease) throw new Error('Settlement deadline resolved without an owned lease snapshot.');
-		const expiredAt = settlementClock.now();
-		const idleMs = Math.max(0, expiredAt - expiredLease.lastProgressAt);
-		const overdueMs = Math.max(0, expiredAt - expiredLease.deadlineAt);
-		const expiredSettlementMs = expiredLease.budgetMs;
-		const cause = `subagent settlement inactivity deadline exceeded after ${idleMs / 1000}s without progress (${expiredSettlementMs / 1000}s lease)`;
-		forceSettlementTriggered = true;
-		settlementController.abort(new Error(cause));
-		logLoud("subagent force-settled", {
-			toolCallId: _toolCallId,
-			mode,
-			stage: "settlement-inactivity-deadline",
-			settlementMs: expiredSettlementMs,
-			idleMs,
-			armedAt: expiredLease.armedAt,
-			deadlineAt: expiredLease.deadlineAt,
-			expiredAt,
-			overdueMs,
-			cause,
-		});
-		deliverUpdate({
-			content: [textContent(`⚠ Subagent force-settled after ${idleMs / 1000}s without progress (${expiredSettlementMs / 1000}s inactivity lease). This is a bug — please report. See logs for [pie:subagent].`)],
-			details: terminalDetails(cause),
-		});
-
-		const graceMs = resolveSettlementGraceMs();
-		const graceTimer = settlementClock.setTimer(graceMs);
-		const gracePromise: Promise<typeof FORCE_SETTLE> = graceTimer.promise.then(() => FORCE_SETTLE);
-		try {
-			const graceWinner = await Promise.race([dispatchPromise, gracePromise]);
-			if (graceWinner !== FORCE_SETTLE) {
-				// The settled dispatch may carry terminal attempt analytics that were
-				// never emitted through onUpdate. Capture them before applying the
-				// force-settlement terminal projection so host persistence retains the
-				// real attempt evidence instead of degrading this call to unknown.
-				captureDetails(graceWinner.details);
-				return {
-					...graceWinner,
-					details: terminalDetails(cause),
-				};
-			}
-		} finally {
-			graceTimer.cancel();
-		}
-
-		// Dispatch still didn't settle after the grace window: synthesize a
-		// terminal error toolResult so the SDK writes a result and the parent
-		// transcript records the failure rather than dangling forever.
-		return {
-			content: [textContent(`Subagent made no progress for ${idleMs / 1000}s (${expiredSettlementMs / 1000}s inactivity lease) and was force-settled. This is a bug — please report.`)],
-			details: terminalDetails(cause),
-			isError: true,
-		};
-	} finally {
-		acceptDispatchUpdates = false;
-		renewSettlementDeadline = undefined;
-		settlementDeadlineActive = false;
-		settlementLease?.timer.cancel();
-		combinedRunSignal.cleanup();
-	}
+	recordRuntimeTrace({
+		phase: "terminal",
+		childCount: recursiveCounters?.childCount,
+		messageCount: recursiveCounters?.messageCount,
+		maxRecursiveDepth: recursiveCounters?.maxRecursiveDepth,
+		identifiers: {
+			session: runtimeContext.rootSessionPath,
+			attempt: winner.details?.results?.[0]?.attemptId,
+			tool: _toolCallId,
+		},
+	});
+	return winner;
 }

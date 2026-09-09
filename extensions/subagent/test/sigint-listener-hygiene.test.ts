@@ -97,13 +97,9 @@ writeFileSync(
 );
 
 const ENV_KEYS = [
-	"PIE_SUBAGENT_SETTLEMENT_MS",
-	"PIE_SUBAGENT_SETTLEMENT_GRACE_MS",
-	"PIE_SUBAGENT_TIMEOUT_MS",
 	"PIE_SUBAGENT_MAX_INFLIGHT",
 	"PIE_SUBAGENT_ALWAYS_PARENT_MODEL",
 	"PI_CODING_AGENT_DIR",
-	"PI_SUBAGENT_TIMEOUT_MS",
 	"PI_SUBAGENT_DEPTH",
 ] as const;
 
@@ -112,12 +108,8 @@ test.before(() => {
 	for (const k of ENV_KEYS) snapshot[k] = process.env[k];
 	process.env.PIE_SUBAGENT_ALWAYS_PARENT_MODEL = "1";
 	process.env.PIE_SUBAGENT_MAX_INFLIGHT = "8";
-	// Per-prompt + settlement nets OFF so the only path under test is the
-	// session completing promptly (the leak/reclaim lifecycle around reload).
-	process.env.PIE_SUBAGENT_TIMEOUT_MS = "0";
-	process.env.PIE_SUBAGENT_SETTLEMENT_MS = "0";
-	process.env.PIE_SUBAGENT_SETTLEMENT_GRACE_MS = "0";
-	delete process.env.PI_SUBAGENT_TIMEOUT_MS;
+	// No wall-clock nets exist, so the only path under test is the session
+	// completing promptly (the leak/reclaim lifecycle around reload).
 	delete process.env.PI_SUBAGENT_DEPTH;
 	process.env.PI_CODING_AGENT_DIR = agentDir;
 });
