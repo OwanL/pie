@@ -454,3 +454,11 @@ Keep the preserved unreviewed P3 files out of the P0 acceptance set, do not chan
 and do not perform P2b/P2c/P3 production integration or either cutover in that task. Inspect its actual
 provider/model/effective-requested bucket/fallback/downgrade/attempt fields after return before any
 subsequent substantial dispatch.
+
+### Recovery checkpoint Git barrier receipt — 2026-09-09T20:30Z
+
+This checkpoint was committed as `d58cad71004e2e8223e863a76157ec42c4aed9c3`
+(`Record analytics recovery checkpoint`) and pushed normally to `origin/master`. A fresh fetch verified
+`HEAD == origin/master == d58cad71004e2e8223e863a76157ec42c4aed9c3`. The remaining dirty paths are
+only the preserved, unreviewed recorder prototype/config and the unowned `settings.json` change listed
+above; they were not included in this receipt.
