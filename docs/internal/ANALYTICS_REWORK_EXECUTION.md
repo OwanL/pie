@@ -462,3 +462,47 @@ This checkpoint was committed as `d58cad71004e2e8223e863a76157ec42c4aed9c3`
 `HEAD == origin/master == d58cad71004e2e8223e863a76157ec42c4aed9c3`. The remaining dirty paths are
 only the preserved, unreviewed recorder prototype/config and the unowned `settings.json` change listed
 above; they were not included in this receipt.
+
+---
+
+## Checkpoint 6 — P2c supported cache relocation implementation (working-tree milestone)
+
+**State: P2c implementation is present but not yet committed or activated.** The protected recorder
+prototype/config and user-owned `settings.json` remain untouched. No installed `node_modules` file was
+edited as a deliverable, no cache migration/cutover ran, and ordinary npm/`_npx` cache ownership is
+unchanged.
+
+### Supported seams and exact ownership
+
+- `extension/src/host/backend/client.ts` now resolves `resolvePieDataPaths()` once and forwards the
+  absolute internal `PIE_CACHE_DIR=<PIE_DATA_DIR>/cache` alongside the existing canonical
+  `PIE_DATA_DIR`. This is a backend child-process seam, not a second user-facing data-root override.
+- `extensions/web-access-guard/index.ts` locates only the active managed installs under
+  `<PI_CODING_AGENT_DIR>/npm/node_modules`. For exactly `pi-mcp-adapter@2.20.1`, a source-shape
+  fingerprint routes only `mcp-cache.json` and `mcp-npx-cache.json` through `PIE_CACHE_DIR`; other
+  `getAgentPath` callers (MCP config/auth/onboarding/server state) remain in the agent root. The
+  adapter's npm `_npx` package cache is deliberately not moved.
+- For exactly `pi-web-access@0.27.0`, a source-shape fingerprint routes only the fetched-content
+  `web-search-cache/` directory through `PIE_CACHE_DIR`; web configuration and credentials remain
+  under the package's existing config root. Both transforms are atomic, idempotent, and fail closed
+  on package-version/source drift. The existing web workflow/corruption guard remains independent.
+- `extensions/copilot-model-discovery/src/catalog-ttl.ts` and `index.ts` route only the advisory
+  `.copilot-catalog-sync.json` freshness marker through `PIE_CACHE_DIR`, creating its parent on
+  successful refresh. The authoritative `models.yaml` and `${catalogPath}.copilot-sync.lock` remain
+  in the agent directory; no pricing/model configuration authority moved.
+
+This satisfies the plan's “supported new package seam or reproducible pinned-package seam” condition
+without claiming an upstream independent cache-root API. The checked-in guard is the reproducible
+adapter for the locked versions and emits a visible diagnostic/no-op on version drift; a future
+upstream release with a native seam can replace it without migrating existing cache files.
+
+### Focused evidence
+
+- `npm run test:file -- extensions/web-access-guard/test/web-access-guard.test.ts extensions/copilot-model-discovery/test/copilot-models.test.ts extension/test/host/backend/backend-client.test.ts` — **3/3 packages passed; 42 + 26 + 2 tests passed**.
+- `npm run extension:typecheck` — passed.
+- Guard fixtures cover the exact 2.20.1/0.27.0 source shapes, idempotence, absolute-cache routing,
+  managed MCP lookup, and version-drift fail-closed behavior. Copilot fixtures cover cache-marker
+  selection and agent-root fallback. Backend forwarding asserts the absolute cache category.
+- Remaining gate: run the broader typecheck/lint/build/fast-suite and independent review, then commit
+  only this P2c/docs milestone. P2c does not authorize analytics activation, storage cutoff, or the
+  preserved P3 recorder integration.

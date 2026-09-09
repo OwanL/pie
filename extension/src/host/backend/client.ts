@@ -2,7 +2,7 @@ import * as cp from 'node:child_process';
 import * as vscode from 'vscode';
 
 import { attachJsonlLineReader, JSONL_MAX_LINE_BYTES, serializeJsonLine } from '../../shared/jsonl';
-import { resolvePieDataRoot } from '../../../../shared/pie-data-root';
+import { resolvePieDataPaths } from '../../../../shared/pie-data-root';
 import { resolveHostSessionStoragePaths } from '../../shared/session-storage-paths';
 import { RequestTracker } from '../../shared/request-tracker';
 import { BACKEND_READY_TIMEOUT_MS } from '../../shared/backend-ready-timeout';
@@ -274,7 +274,7 @@ export class BackendClient implements vscode.Disposable {
     // path-only foundation seam: no category is created or cut over here.
     // Relative overrides are rooted at the same normalized agent authority as
     // session storage; unresolved configuration fails startup explicitly.
-    const dataRootEnv = resolvePieDataRoot({
+    const dataPaths = resolvePieDataPaths({
       dataDir: process.env.PIE_DATA_DIR,
       agentDir: agentDirEnv,
     });
@@ -288,7 +288,10 @@ export class BackendClient implements vscode.Disposable {
     const backendEnv: NodeJS.ProcessEnv = {
       ...process.env,
       PIE_EDITOR_VERSION: vscode.version,
-      PIE_DATA_DIR: dataRootEnv,
+      PIE_DATA_DIR: dataPaths.rootDir,
+      // P2c cache consumers use this internal absolute seam; package config,
+      // auth, and SDK agent/session roots remain owned by their existing owners.
+      PIE_CACHE_DIR: dataPaths.cacheDir,
       ...(reviewsDirEnv ? { PIE_REVIEWS_DIR: reviewsDirEnv } : {}),
       ...(triggersDirEnv ? { PIE_TRIGGERS_DIR: triggersDirEnv } : {}),
       PIE_LIVE_PIPELINE_TRACE_KEY: getLivePipelineTraceHmacKey(),
@@ -337,7 +340,8 @@ export class BackendClient implements vscode.Disposable {
       sessionDir: sessionDirEnv ?? null,
       reviewsDir: reviewsDirEnv ?? null,
       triggersDir: triggersDirEnv ?? null,
-      dataRoot: dataRootEnv,
+      dataRoot: dataPaths.rootDir,
+      cacheRoot: dataPaths.cacheDir,
     });
 
     this.proc = proc;

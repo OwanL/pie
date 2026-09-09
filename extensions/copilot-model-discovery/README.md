@@ -4,7 +4,7 @@ Keeps pie's authoritative model catalog aligned with the models available to the
 
 ## Refresh policy
 
-A bounded, cross-process TTL gates the expensive work. At session startup the extension checks a shared marker file (`.copilot-catalog-sync.json` in the agent directory, visible to every VS Code window). When a recent successful refresh already verified the catalog within the TTL (default 6 hours), startup skips the network fetch, reconciliation, and codegen entirely — each session's `ModelRegistry` already loads the current `models.json` at creation, so no live-registry reload is needed.
+A bounded, cross-process TTL gates the expensive work. At session startup the extension checks a shared rebuildable marker file (`.copilot-catalog-sync.json`). In Pie, the marker follows the canonical `PIE_CACHE_DIR` seam so every VS Code window sharing the data root sees the same TTL; outside that seam it remains in the agent directory. When a recent successful refresh already verified the catalog within the TTL (default 6 hours), startup skips the network fetch, reconciliation, and codegen entirely — each session's `ModelRegistry` already loads the current `models.json` at creation, so no live-registry reload is needed.
 
 When the TTL has elapsed, a refresh runs:
 
@@ -15,7 +15,7 @@ When the TTL has elapsed, a refresh runs:
 5. runs the existing `scripts/sync-models.mjs` generator; and
 6. refreshes every participating live `ModelRegistry` from the regenerated `models.json`.
 
-Concurrent session startups share one in-process refresh (single-flight), and a cross-process file lock serializes commits from multiple VS Code windows. After a successful sync (whether or not the catalog changed) the TTL marker is updated; a failed refresh is never cached, so the next session retries instead of leaving the process stuck on a stale catalog.
+Concurrent session startups share one in-process refresh (single-flight), and a cross-process file lock beside the authoritative `models.yaml` serializes commits from multiple VS Code windows. The marker location does not move that lock or the catalog. After a successful sync (whether or not the catalog changed) the TTL marker is updated; a failed refresh is never cached, so the next session retries instead of leaving the process stuck on a stale catalog.
 
 ### Forced refresh
 

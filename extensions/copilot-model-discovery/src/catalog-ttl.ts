@@ -1,4 +1,5 @@
-import { readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import path from 'node:path';
 
 /**
  * Default TTL for the Copilot catalog refresh, shared across sessions and
@@ -7,6 +8,21 @@ import { readFile, writeFile } from 'node:fs/promises';
  * startup while still converging within hours. An explicit command bypasses it.
  */
 export const DEFAULT_CATALOG_REFRESH_TTL_MS = 6 * 60 * 60 * 1000;
+export const COPILOT_CATALOG_SYNC_MARKER = '.copilot-catalog-sync.json';
+
+/**
+ * The freshness marker is rebuildable cache state. Keep the catalog and its
+ * configuration-writer lock in the agent directory; only the advisory marker
+ * follows Pie's canonical cache seam when the backend provides one.
+ */
+export function resolveCatalogRefreshMarkerPath(
+  agentDir: string,
+  cacheDir = process.env.PIE_CACHE_DIR,
+): string {
+  const configured = cacheDir?.trim();
+  const markerRoot = configured && path.isAbsolute(configured) ? path.resolve(configured) : agentDir;
+  return path.join(markerRoot, COPILOT_CATALOG_SYNC_MARKER);
+}
 
 /**
  * Cross-process TTL gate for Copilot catalog refreshes.
@@ -43,6 +59,7 @@ export class FileCatalogRefreshTiming {
   }
 
   async markRefreshed(): Promise<void> {
+    await mkdir(path.dirname(this.markerPath), { recursive: true });
     await writeFile(this.markerPath, `${JSON.stringify({ lastRefreshMs: Date.now() })}\n`, 'utf8');
   }
 }

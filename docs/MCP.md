@@ -40,8 +40,12 @@ high-value toolsets; proxy mode is the default and the recommended default.
 - Tool results flow through `tool-result-pruner` like any other tool result:
   `minify-json` shrinks API JSON, `duplicate-collapse`/`progress-noise`
   compress repeated rows — no MCP-specific rules needed.
-- `mcp-cache.json` (tool-metadata cache) is written to the project/agent dir
-  root and gitignored in this repo.
+- `mcp-cache.json` (tool-metadata cache) and `mcp-npx-cache.json` (adapter
+  resolution state) are rebuildable caches. In the Pie backend they follow the
+  absolute `PIE_CACHE_DIR` seam into the canonical data-root `cache/` category;
+  the adapter's ordinary npm `_npx` cache remains npm-owned. The checked-in
+  `web-access-guard` applies this only to the pinned `pi-mcp-adapter@2.20.1`
+  source shape and fails closed on version/source drift.
 
 ### MCP controls (UI)
 

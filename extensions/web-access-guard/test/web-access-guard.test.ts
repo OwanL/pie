@@ -26,8 +26,13 @@ import {
 	patchWorkflowClampInSource,
 	patchWorkflowDescriptionFiles,
 	patchWorkflowDescriptionInSource,
+	patchMcpCacheFiles,
+	patchMcpCachePathInSource,
+	patchWebFetchCacheFiles,
+	patchWebFetchCachePathInSource,
 	readabilityIntact,
 	repairDeleteArtifacts,
+	resolveMcpAdapterRoot,
 	resolvePackageRoot,
 	runSelfHeal,
 	stripDeleteSuffix,
@@ -45,6 +50,40 @@ function writePkgFile(root: string, rel: string, content: string, encoding: Buff
 	writeFileSync(full, content, encoding);
 	return full;
 }
+
+const MCP_AGENT_DIR_SRC = [
+	'import { homedir } from "node:os";',
+	'import { join, resolve } from "node:path";',
+	"",
+	"export function getAgentDir(): string {",
+	'  const configured = process.env.PI_CODING_AGENT_DIR?.trim();',
+	'  if (!configured) {',
+	'    return join(homedir(), ".pi", "agent");',
+	"  }",
+	'  if (configured === "~") {',
+	"    return homedir();",
+	"  }",
+	'  if (configured.startsWith("~/")) {',
+	"    return resolve(homedir(), configured.slice(2));",
+	"  }",
+	"  return resolve(configured);",
+	"}",
+	"",
+	"export function getAgentPath(...segments: string[]): string {",
+	"  return join(getAgentDir(), ...segments);",
+	"}",
+].join("\n");
+
+const WEB_STORAGE_SRC = [
+	'import { join } from "node:path";',
+	'import { getWebSearchConfigDir } from "./utils.ts";',
+	"",
+	'const FETCH_CACHE_DIR = "web-search-cache";',
+	"",
+	"export function getFetchCacheDir(): string {",
+	"\treturn join(getWebSearchConfigDir(), FETCH_CACHE_DIR);",
+	"}",
+].join("\n");
 
 // --- pure: patchWorkflowClampInSource ---
 
@@ -145,6 +184,83 @@ test("patchWorkflowClampInSource is tolerant of a changed resolveWorkflow signat
 ].join("\n");
 	const out = patchWorkflowClampInSource(src);
 	assert.ok(out.includes('return "none";'), `signature-tolerant match should still clamp, got:\n${out}`);
+});
+
+test("patchMcpCachePathInSource routes only the two adapter state caches", () => {
+	const out = patchMcpCachePathInSource(MCP_AGENT_DIR_SRC);
+	assert.ok(out.includes("process.env.PIE_CACHE_DIR"));
+	assert.ok(out.includes('segments[0] === "mcp-cache.json"'));
+	assert.ok(out.includes('segments[0] === "mcp-npx-cache.json"'));
+	assert.ok(out.includes("return join(getAgentDir(), ...segments);"));
+	assert.equal(patchMcpCachePathInSource(out), out);
+	assert.equal(patchMcpCachePathInSource('export const changed = true;\n'), 'export const changed = true;\n');
+});
+
+test("patchWebFetchCachePathInSource preserves the config root and adds the cache seam", () => {
+	const out = patchWebFetchCachePathInSource(WEB_STORAGE_SRC);
+	assert.ok(out.includes('import { isAbsolute, join } from "node:path";'));
+	assert.ok(out.includes("process.env.PIE_CACHE_DIR"));
+	assert.ok(out.includes("return join(baseDir, FETCH_CACHE_DIR);"));
+	assert.equal(patchWebFetchCachePathInSource(out), out);
+	assert.equal(patchWebFetchCachePathInSource('export const changed = true;\n'), 'export const changed = true;\n');
+});
+
+// --- fs: cache seam relocation ---
+
+test("patchMcpCacheFiles applies the pinned 2.20.1 seam and is idempotent", async () => {
+	const root = makePkg();
+	try {
+		writePkgFile(root, "package.json", '{"name":"pi-mcp-adapter","version":"2.20.1"}');
+		writePkgFile(root, "agent-dir.ts", MCP_AGENT_DIR_SRC);
+		assert.equal(await patchMcpCacheFiles(root), 1);
+		assert.equal(await patchMcpCacheFiles(root), 0);
+		assert.ok(readFileSync(path.join(root, "agent-dir.ts"), "utf8").includes("PIE_CACHE_DIR"));
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("patchMcpCacheFiles fails closed on a version drift", async () => {
+	const root = makePkg();
+	try {
+		writePkgFile(root, "package.json", '{"name":"pi-mcp-adapter","version":"2.21.0"}');
+		writePkgFile(root, "agent-dir.ts", MCP_AGENT_DIR_SRC);
+		assert.equal(await patchMcpCacheFiles(root), 0);
+		assert.equal(readFileSync(path.join(root, "agent-dir.ts"), "utf8"), MCP_AGENT_DIR_SRC);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("patchWebFetchCacheFiles applies the pinned 0.27.0 seam and is idempotent", async () => {
+	const root = makePkg();
+	try {
+		writePkgFile(root, "package.json", '{"name":"pi-web-access","version":"0.27.0"}');
+		writePkgFile(root, "storage.ts", WEB_STORAGE_SRC);
+		assert.equal(await patchWebFetchCacheFiles(root), 1);
+		assert.equal(await patchWebFetchCacheFiles(root), 0);
+		assert.ok(readFileSync(path.join(root, "storage.ts"), "utf8").includes("PIE_CACHE_DIR"));
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("cache seam patchers fail closed on a pinned-version source-shape drift", async () => {
+	const mcpRoot = makePkg();
+	const webRoot = makePkg();
+	try {
+		writePkgFile(mcpRoot, "package.json", '{"name":"pi-mcp-adapter","version":"2.20.1"}');
+		writePkgFile(mcpRoot, "agent-dir.ts", "export function getAgentPath(): string { return \"changed\"; }\\n");
+		writePkgFile(webRoot, "package.json", '{"name":"pi-web-access","version":"0.27.0"}');
+		writePkgFile(webRoot, "storage.ts", "export function getFetchCacheDir(): string { return \"changed\"; }\\n");
+		assert.equal(await patchMcpCacheFiles(mcpRoot), 0);
+		assert.equal(await patchWebFetchCacheFiles(webRoot), 0);
+		assert.ok(!readFileSync(path.join(mcpRoot, "agent-dir.ts"), "utf8").includes("PIE_CACHE_DIR"));
+		assert.ok(!readFileSync(path.join(webRoot, "storage.ts"), "utf8").includes("PIE_CACHE_DIR"));
+	} finally {
+		rmSync(mcpRoot, { recursive: true, force: true });
+		rmSync(webRoot, { recursive: true, force: true });
+	}
 });
 
 // --- fs: patchWorkflowClampFiles ---
@@ -552,6 +668,19 @@ test("resolvePackageRoot expands a tilde-prefixed managed agent directory", asyn
 		);
 	} finally {
 		rmSync(homeDir, { recursive: true, force: true });
+	}
+});
+
+test("resolveMcpAdapterRoot locates only the active managed MCP install", async () => {
+	const agentDir = makePkg();
+	try {
+		writePkgFile(agentDir, "npm/node_modules/pi-mcp-adapter/package.json", '{"name":"pi-mcp-adapter"}');
+		assert.equal(
+			await resolveMcpAdapterRoot(lookupDeps(agentDir)),
+			path.join(agentDir, "npm", "node_modules", "pi-mcp-adapter"),
+		);
+	} finally {
+		rmSync(agentDir, { recursive: true, force: true });
 	}
 });
 

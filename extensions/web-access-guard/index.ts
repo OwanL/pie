@@ -20,14 +20,14 @@
  * WHAT IT DOES
  *
  * At extension-load time — and `pie/extensions/*` are discovered *before*
- * package entries, so this runs before `pi-web-access/index.ts` is loaded —
- * it:
- *   1. Locates the installed `pi-web-access` package with no hardcoded
- *      absolute paths: the active managed install at
- *      `<PI_CODING_AGENT_DIR>/npm/node_modules/pi-web-access` first — the copy
- *      pi actually loads (mirroring pi's `getManagedNpmInstallPath`), so it
- *      never patches a stale, inactive global copy.
- *   2. Hard-clamps the web-search workflow and schema to raw results only.
+ * package entries, so this runs before the managed package extensions are
+ * loaded — it:
+ *   1. Locates the active managed `pi-web-access` and `pi-mcp-adapter`
+ *      packages under `<PI_CODING_AGENT_DIR>/npm/node_modules` (mirroring
+ *      pi's `getManagedNpmInstallPath`), so stale global copies are never
+ *      patched.
+ *   2. Applies the exact-version/fingerprint-checked cache seams, then
+ *      hard-clamps the web-search workflow and schema to raw results only.
  *   3. Repairs `.DELETE.<hash>` corruption — renaming each artifact back to
  *      its original name only when no real file occupies that name.
  *
@@ -92,6 +92,42 @@ const RESOLVE_WORKFLOW_CLAMPED =
 	"function resolveWorkflow(input: unknown, hasUI: boolean): WebSearchWorkflow {\n" +
 	'\treturn "none";\n' +
 	"}";
+
+/**
+ * P2c uses only these exact installed package versions. The packages do not
+ * currently expose an independent cache-root option, so the checked-in
+ * load-time transforms below are deliberately fingerprinted to these source
+ * shapes and fail closed on a version/source drift.
+ */
+const MCP_ADAPTER_PACKAGE_NAME = "pi-mcp-adapter";
+const MCP_ADAPTER_VERSION = "2.20.1";
+const WEB_ACCESS_PACKAGE_NAME = "pi-web-access";
+const WEB_ACCESS_VERSION = "0.27.0";
+
+const MCP_AGENT_PATH_RE = /export function getAgentPath\(\.\.\.segments: string\[\]\): string \{\n  return join\(getAgentDir\(\), \.\.\.segments\);\n\}/;
+const MCP_AGENT_PATH_REPLACEMENT = [
+	"export function getAgentPath(...segments: string[]): string {",
+	"  const cacheDir = process.env.PIE_CACHE_DIR?.trim();",
+	"  if (cacheDir && segments.length === 1 && (segments[0] === \"mcp-cache.json\" || segments[0] === \"mcp-npx-cache.json\")) {",
+	"    return join(resolve(cacheDir), segments[0]);",
+	"  }",
+	"  return join(getAgentDir(), ...segments);",
+	"}",
+].join("\n");
+
+const WEB_FETCH_CACHE_IMPORT_RE = /import \{ join \} from \"node:path\";/;
+const WEB_FETCH_CACHE_RE = /export function getFetchCacheDir\(\): string \{\n\treturn join\(getWebSearchConfigDir\(\), FETCH_CACHE_DIR\);\n\}/;
+const WEB_FETCH_CACHE_IMPORT_REPLACEMENT = 'import { isAbsolute, join } from "node:path";';
+const WEB_FETCH_CACHE_REPLACEMENT = [
+	"export function getFetchCacheDir(): string {",
+	"  const configured = process.env.PIE_CACHE_DIR?.trim();",
+	"  const baseDir = configured && isAbsolute(configured)",
+	"    ? configured",
+	"    : getWebSearchConfigDir();",
+	"  return join(baseDir, FETCH_CACHE_DIR);",
+	"}",
+].join("\n");
+
 /** `@mozilla/readability`'s `index.js` `require()`s this; missing it = corrupted. */
 const READABILITY_ENTRY = "@mozilla/readability/Readability.js";
 
@@ -199,6 +235,27 @@ export function patchWorkflowDescriptionInSource(content: string): string {
 	return content.replace(WORKFLOW_DESCRIPTION_RE, WORKFLOW_DESCRIPTION_FIXED);
 }
 
+/**
+ * Route only pi-mcp-adapter's two Pie-owned state caches into the canonical
+ * cache category. Other getAgentPath callers (config, auth, onboarding, and
+ * server state) retain the agent directory owner.
+ */
+export function patchMcpCachePathInSource(content: string): string {
+	return content.replace(MCP_AGENT_PATH_RE, MCP_AGENT_PATH_REPLACEMENT);
+}
+
+/**
+ * Route pi-web-access's fetched-content cache into the canonical cache
+ * category. Configuration and credentials continue to use the package's
+ * existing config directory.
+ */
+export function patchWebFetchCachePathInSource(content: string): string {
+	if (!WEB_FETCH_CACHE_IMPORT_RE.test(content) || !WEB_FETCH_CACHE_RE.test(content)) return content;
+	return content
+		.replace(WEB_FETCH_CACHE_IMPORT_RE, WEB_FETCH_CACHE_IMPORT_REPLACEMENT)
+		.replace(WEB_FETCH_CACHE_RE, WEB_FETCH_CACHE_REPLACEMENT);
+}
+
 /** True for npm's "could not replace" rename artifacts, e.g. `Readability.js.DELETE.e9020…`. */
 export function isDeleteArtifact(name: string): boolean {
 	return /\.DELETE\..+$/.test(name);
@@ -279,6 +336,66 @@ async function patchFilesWith(
 		}
 	}
 	return patched;
+}
+
+async function packageVersion(root: string, expectedName: string): Promise<string | null> {
+	try {
+		const parsed = JSON.parse(await readFile(path.join(root, "package.json"), "utf8")) as {
+			name?: unknown;
+			version?: unknown;
+		};
+		if (parsed.name !== expectedName || typeof parsed.version !== "string") return null;
+		return parsed.version;
+	} catch (err) {
+		log(`could not read ${expectedName} package identity: ${describeErr(err)} — cache relocation skipped`);
+		return null;
+	}
+}
+
+async function patchPinnedCacheFile(
+	root: string,
+	fileName: string,
+	transform: (content: string) => string,
+	label: string,
+): Promise<number> {
+	const target = path.join(root, fileName);
+	try {
+		const content = await readFile(target, "utf8");
+		if (transform(content) === content && !content.includes("PIE_CACHE_DIR")) {
+			log(`unsupported ${label} source fingerprint in ${target} — cache relocation skipped`);
+		}
+	} catch (err) {
+		log(`could not read ${target}: ${describeErr(err)} — ${label} skipped`);
+		return 0;
+	}
+	return patchFilesWith(root, transform, label);
+}
+
+/**
+ * Apply the version/fingerprint-checked MCP adapter cache seam. The ordinary
+ * npm cache used for `_npx` package resolution is intentionally untouched.
+ */
+export async function patchMcpCacheFiles(root: string): Promise<number> {
+	const version = await packageVersion(root, MCP_ADAPTER_PACKAGE_NAME);
+	if (version !== MCP_ADAPTER_VERSION) {
+		if (version !== null) {
+			log(`unsupported ${MCP_ADAPTER_PACKAGE_NAME} version ${version}; expected ${MCP_ADAPTER_VERSION} — MCP cache relocation skipped`);
+		}
+		return 0;
+	}
+	return patchPinnedCacheFile(root, "agent-dir.ts", patchMcpCachePathInSource, "mcp-cache-relocation");
+}
+
+/** Apply the version/fingerprint-checked web fetched-content cache seam. */
+export async function patchWebFetchCacheFiles(root: string): Promise<number> {
+	const version = await packageVersion(root, WEB_ACCESS_PACKAGE_NAME);
+	if (version !== WEB_ACCESS_VERSION) {
+		if (version !== null) {
+			log(`unsupported ${WEB_ACCESS_PACKAGE_NAME} version ${version}; expected ${WEB_ACCESS_VERSION} — web fetch cache relocation skipped`);
+		}
+		return 0;
+	}
+	return patchPinnedCacheFile(root, "storage.ts", patchWebFetchCachePathInSource, "web-fetch-cache-relocation");
 }
 
 /** Yield every real (non-symlink) file under `dir`, recursively. */
@@ -365,7 +482,21 @@ const PRODUCTION_LOOKUP_DEPS: PackageRootLookupDeps = {
 	getHomeDir: homedir,
 	pathExists,
 };
-const PACKAGE_NAME = "pi-web-access";
+/** Locate a package in Pi's active managed npm install only. */
+async function resolveManagedPackageRoot(
+	packageName: string,
+	deps: PackageRootLookupDeps,
+): Promise<string | null> {
+	const configured = deps.getAgentDir();
+	let agentDir = configured;
+	if (configured === "~") {
+		agentDir = deps.getHomeDir();
+	} else if (/^[~][\\/]/.test(configured)) {
+		agentDir = path.join(deps.getHomeDir(), configured.slice(2));
+	}
+	const managed = path.join(agentDir, "npm", "node_modules", packageName);
+	return (await deps.pathExists(path.join(managed, "package.json"))) ? managed : null;
+}
 
 /**
  * Locate the active managed `pi-web-access` install. Modern Pi installs user
@@ -376,15 +507,14 @@ const PACKAGE_NAME = "pi-web-access";
 export async function resolvePackageRoot(
 	deps: PackageRootLookupDeps = PRODUCTION_LOOKUP_DEPS,
 ): Promise<string | null> {
-	const configured = deps.getAgentDir();
-	let agentDir = configured;
-	if (configured === "~") {
-		agentDir = deps.getHomeDir();
-	} else if (/^[~][\\/]/.test(configured)) {
-		agentDir = path.join(deps.getHomeDir(), configured.slice(2));
-	}
-	const managed = path.join(agentDir, "npm", "node_modules", PACKAGE_NAME);
-	return (await deps.pathExists(path.join(managed, "package.json"))) ? managed : null;
+	return resolveManagedPackageRoot(WEB_ACCESS_PACKAGE_NAME, deps);
+}
+
+/** Locate the active managed `pi-mcp-adapter` install. */
+export async function resolveMcpAdapterRoot(
+	deps: PackageRootLookupDeps = PRODUCTION_LOOKUP_DEPS,
+): Promise<string | null> {
+	return resolveManagedPackageRoot(MCP_ADAPTER_PACKAGE_NAME, deps);
 }
 
 /**
@@ -395,10 +525,20 @@ export async function resolvePackageRoot(
  */
 export async function runSelfHeal(
 	resolveRoot: () => string | null | Promise<string | null> = resolvePackageRoot,
+	resolveMcpRoot: () => string | null | Promise<string | null> = resolveMcpAdapterRoot,
 ): Promise<void> {
 	try {
 		const root = await resolveRoot();
-		if (root) await applyWebAccessGuard(root);
+		if (root) {
+			await applyWebAccessGuard(root);
+			await patchWebFetchCacheFiles(root);
+		}
+		// Injectable web-only tests must not mutate the active managed MCP
+		// install. Production uses the two managed-package resolvers together.
+		if (resolveRoot === resolvePackageRoot) {
+			const mcpRoot = await resolveMcpRoot();
+			if (mcpRoot) await patchMcpCacheFiles(mcpRoot);
+		}
 	} catch (err) {
 		log(`self-heal failed: ${describeErr(err)} — web tools may be unavailable; reinstall pi-web-access if its tools are missing`);
 	}

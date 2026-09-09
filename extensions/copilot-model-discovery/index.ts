@@ -12,7 +12,10 @@ import {
 
 import { withCatalogLock } from './src/catalog-lock.js';
 import { CopilotCatalogRefreshCoordinator } from './src/catalog-refresh.js';
-import { FileCatalogRefreshTiming } from './src/catalog-ttl.js';
+import {
+  FileCatalogRefreshTiming,
+  resolveCatalogRefreshMarkerPath,
+} from './src/catalog-ttl.js';
 import { reconcileCatalogText, type CatalogReconciliation } from './src/catalog-sync.js';
 import { COPILOT_HEADERS, parseCopilotModelsResponse } from './src/copilot-models.js';
 
@@ -21,10 +24,11 @@ const DISCOVERY_TIMEOUT_MS = 15_000;
 const execFileAsync = promisify(execFile);
 
 // A bounded, cross-process TTL gate avoids a network fetch, reconciliation, and
-// codegen on every session startup. The marker is shared across VS Code windows
-// through the agent directory; a missing or corrupt file is treated as stale.
+// codegen on every session startup. The advisory marker follows the canonical
+// cache seam when the backend provides one; models.yaml and its writer lock
+// remain in the agent directory.
 const timing = new FileCatalogRefreshTiming(
-  path.join(getAgentDir(), '.copilot-catalog-sync.json'),
+  resolveCatalogRefreshMarkerPath(getAgentDir()),
 );
 
 async function atomicWrite(filePath: string, content: string): Promise<void> {

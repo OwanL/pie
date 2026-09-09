@@ -170,6 +170,7 @@ test('BackendClient.start resolves when backend.ready arrives immediately as std
     assert.equal(spawnedEnv?.PI_CODING_AGENT_SESSION_DIR, path.join(agentDir, 'data/outcomes/sessions'));
     assert.equal(spawnedEnv?.PIE_REVIEWS_DIR, path.join(agentDir, 'data/outcomes/session-reviews'));
     assert.equal(spawnedEnv?.PIE_DATA_DIR, dataRoot);
+    assert.equal(spawnedEnv?.PIE_CACHE_DIR, path.join(dataRoot, 'cache'));
 
     const correlatedFailures: any[] = [];
     const failureSubscription = client.onDidCorrelatedRequestFail((failure) => correlatedFailures.push(failure));

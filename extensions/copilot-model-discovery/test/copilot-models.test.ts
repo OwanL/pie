@@ -9,7 +9,10 @@ import { parse } from '../../../extension/node_modules/yaml/dist/index.js';
 
 import { withCatalogLock } from '../src/catalog-lock.js';
 import { CopilotCatalogRefreshCoordinator } from '../src/catalog-refresh.js';
-import { FileCatalogRefreshTiming } from '../src/catalog-ttl.js';
+import {
+  FileCatalogRefreshTiming,
+  resolveCatalogRefreshMarkerPath,
+} from '../src/catalog-ttl.js';
 import { reconcileCatalogText, toCatalogModel } from '../src/catalog-sync.js';
 import {
   isSelectableCopilotModel,
@@ -588,6 +591,19 @@ test('TTL marker treats missing, corrupt, or non-numeric markers as stale', asyn
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test('catalog freshness marker follows the cache seam without moving the agent catalog', () => {
+  const agentDir = path.join('/tmp', 'pie-agent');
+  const cacheDir = path.join('/tmp', 'pie-data', 'cache');
+  assert.equal(
+    resolveCatalogRefreshMarkerPath(agentDir, cacheDir),
+    path.join(path.resolve(cacheDir), '.copilot-catalog-sync.json'),
+  );
+  assert.equal(
+    resolveCatalogRefreshMarkerPath(agentDir, 'relative-cache'),
+    path.join(agentDir, '.copilot-catalog-sync.json'),
+  );
 });
 
 test('TTL marker is fresh within the window and stale once it elapses', async () => {
