@@ -467,7 +467,8 @@ above; they were not included in this receipt.
 
 ## Checkpoint 6 — P2c supported cache relocation implementation (working-tree milestone)
 
-**State: P2c implementation is present but not yet committed or activated.** The protected recorder
+**State at this checkpoint:** P2c implementation was present but not yet committed or activated. It
+was subsequently committed and pushed; see the Git barrier receipt below. The protected recorder
 prototype/config and user-owned `settings.json` remain untouched. No installed `node_modules` file was
 edited as a deliverable, no cache migration/cutover ran, and ordinary npm/`_npx` cache ownership is
 unchanged.
@@ -503,6 +504,41 @@ upstream release with a native seam can replace it without migrating existing ca
 - Guard fixtures cover the exact 2.20.1/0.27.0 source shapes, idempotence, absolute-cache routing,
   managed MCP lookup, and version-drift fail-closed behavior. Copilot fixtures cover cache-marker
   selection and agent-root fallback. Backend forwarding asserts the absolute cache category.
-- Remaining gate: run the broader typecheck/lint/build/fast-suite and independent review, then commit
-  only this P2c/docs milestone. P2c does not authorize analytics activation, storage cutoff, or the
-  preserved P3 recorder integration.
+- At checkpoint time, the remaining gate was the broader typecheck/lint/build/fast-suite and
+  independent review before committing only this P2c/docs milestone. That gate is recorded as
+  complete in the Git barrier receipt below. P2c does not authorize analytics activation, storage
+  cutoff, or the preserved P3 recorder integration.
+
+### P2c Git barrier receipt — 2026-09-10
+
+Commit `28421714917577a300b8b98372aa92a9d9beb539` (`Add supported cache-root seams`) was pushed
+normally to `origin/master`; a fetch verified `HEAD == origin/master == 28421714917577a300b8b98372aa92a9d9beb539`.
+Only the P2c source/tests/docs listed above were staged. The modified `extension/scripts/build.mjs`,
+`extension/vite.config.ts`, `settings.json`, and untracked `extension/src/analytics/**` plus
+`extension/test/analytics/**` remain unstaged and preserved as the prior unreviewed/user-owned dirty
+set.
+
+### Current routing preflight handoff
+
+The inherited shell mirror currently reports `always-parent=0`, nested allowed buckets all true,
+frontier-only child spawning, `depth/tree/inflight=2/10/2`, and fallback-on-provider-failure enabled.
+The frontier pool names Copilot Sol and Codex Sol, but `PIE_SUBAGENT_PROVIDER_DEFAULTS_JSON` currently
+disables both `github-copilot` and `openai-codex`. The current session identity is not exposed as
+`PI_SESSION_ID` or an equivalent supported shell variable, so the per-session toggle record cannot be
+safely selected from the inherited map. Fresh delegation attempts therefore cannot prove the required
+Codex Sol route and were not accepted as frontier evidence; no settings/global/auth change and no
+unsupported environment edit was made. A future live session must use the existing supported
+session-local `runtimePrefs.set`/control surface to enable the qualified Codex provider for its own
+session, then independently inspect terminal provenance before substantial frontier work. Parent and
+nested provider resolution remain separate gates.
+
+### Durable completion status
+
+P2c is pushed and verified. P0 real-producer qualification, P2b lifecycle/close ownership, reviewed
+P3/P4/P5 production capture/query integration, P6 retirement, P7a analytics activation, P7b storage
+cutoff, and the post-restart activation helper remain incomplete. The recorder prototype is still
+disabled and not wired into the live extension; no analytics database, storage cutoff, cache migration,
+or live activation was performed. The supported cache code is source-only until a rebuilt runtime is
+loaded, so this receipt must not be reported as post-activation cache evidence. The next owner should
+recover routing through the supported control mirror, keep the preserved dirty paths isolated, and
+qualify the real producer/capture/lifecycle gates before any live activation or destructive cutoff.
