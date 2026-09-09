@@ -2,6 +2,7 @@ import * as cp from 'node:child_process';
 import * as vscode from 'vscode';
 
 import { attachJsonlLineReader, JSONL_MAX_LINE_BYTES, serializeJsonLine } from '../../shared/jsonl';
+import { resolvePieDataRoot } from '../../../../shared/pie-data-root';
 import { resolveHostSessionStoragePaths } from '../../shared/session-storage-paths';
 import { RequestTracker } from '../../shared/request-tracker';
 import { BACKEND_READY_TIMEOUT_MS } from '../../shared/backend-ready-timeout';
@@ -269,6 +270,14 @@ export class BackendClient implements vscode.Disposable {
       process.env.PI_CODING_AGENT_DIR,
       process.env.PI_CODING_AGENT_SESSION_DIR,
     );
+    // Resolve the single runtime-data authority before spawning. This is a
+    // path-only foundation seam: no category is created or cut over here.
+    // Relative overrides are rooted at the same normalized agent authority as
+    // session storage; unresolved configuration fails startup explicitly.
+    const dataRootEnv = resolvePieDataRoot({
+      dataDir: process.env.PIE_DATA_DIR,
+      agentDir: agentDirEnv,
+    });
     // Session reviews live in a sibling of the sessions dir so the backend
     // (reader) and the session_review tool (writer) — same process — agree on
     // the sidecar location via `PIE_REVIEWS_DIR`.
@@ -279,6 +288,7 @@ export class BackendClient implements vscode.Disposable {
     const backendEnv: NodeJS.ProcessEnv = {
       ...process.env,
       PIE_EDITOR_VERSION: vscode.version,
+      PIE_DATA_DIR: dataRootEnv,
       ...(reviewsDirEnv ? { PIE_REVIEWS_DIR: reviewsDirEnv } : {}),
       ...(triggersDirEnv ? { PIE_TRIGGERS_DIR: triggersDirEnv } : {}),
       PIE_LIVE_PIPELINE_TRACE_KEY: getLivePipelineTraceHmacKey(),
@@ -327,6 +337,7 @@ export class BackendClient implements vscode.Disposable {
       sessionDir: sessionDirEnv ?? null,
       reviewsDir: reviewsDirEnv ?? null,
       triggersDir: triggersDirEnv ?? null,
+      dataRoot: dataRootEnv,
     });
 
     this.proc = proc;

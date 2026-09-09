@@ -93,10 +93,13 @@ test('BackendClient.start resolves when backend.ready arrives immediately as std
   const previousTrustedRoot = process.env.PIE_TRUSTED_SDK_ROOT;
   const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
   const previousSessionDir = process.env.PI_CODING_AGENT_SESSION_DIR;
+  const previousDataRoot = process.env.PIE_DATA_DIR;
   delete process.env.PIE_TRUSTED_SDK_ROOT;
   const agentDir = path.resolve('/mock/agent');
+  const dataRoot = path.join(agentDir, 'runtime-data');
   process.env.PI_CODING_AGENT_DIR = agentDir;
   process.env.PI_CODING_AGENT_SESSION_DIR = 'data/outcomes/sessions';
+  process.env.PIE_DATA_DIR = dataRoot;
 
   const moduleWithLoad = Module as typeof Module & { _load: (...args: any[]) => unknown };
   const originalLoad = moduleWithLoad._load;
@@ -166,6 +169,7 @@ test('BackendClient.start resolves when backend.ready arrives immediately as std
     assert.equal(spawnedEnv?.PI_CODING_AGENT_DIR, agentDir);
     assert.equal(spawnedEnv?.PI_CODING_AGENT_SESSION_DIR, path.join(agentDir, 'data/outcomes/sessions'));
     assert.equal(spawnedEnv?.PIE_REVIEWS_DIR, path.join(agentDir, 'data/outcomes/session-reviews'));
+    assert.equal(spawnedEnv?.PIE_DATA_DIR, dataRoot);
 
     const correlatedFailures: any[] = [];
     const failureSubscription = client.onDidCorrelatedRequestFail((failure) => correlatedFailures.push(failure));
@@ -278,5 +282,7 @@ test('BackendClient.start resolves when backend.ready arrives immediately as std
     else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
     if (previousSessionDir === undefined) delete process.env.PI_CODING_AGENT_SESSION_DIR;
     else process.env.PI_CODING_AGENT_SESSION_DIR = previousSessionDir;
+    if (previousDataRoot === undefined) delete process.env.PIE_DATA_DIR;
+    else process.env.PIE_DATA_DIR = previousDataRoot;
   }
 });
