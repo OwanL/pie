@@ -505,9 +505,10 @@ upstream release with a native seam can replace it without migrating existing ca
   managed MCP lookup, and version-drift fail-closed behavior. Copilot fixtures cover cache-marker
   selection and agent-root fallback. Backend forwarding asserts the absolute cache category.
 - At checkpoint time, the remaining gate was the broader typecheck/lint/build/fast-suite and
-  independent review before committing only this P2c/docs milestone. That gate is recorded as
-  complete in the Git barrier receipt below. P2c does not authorize analytics activation, storage
-  cutoff, or the preserved P3 recorder integration.
+  independent review before committing only this P2c/docs milestone. The broader checks passed and
+  the milestone was committed as recorded below; independent acceptance review remains outstanding.
+  P2c does not authorize analytics activation, storage cutoff, or the preserved P3 recorder
+  integration.
 
 ### P2c Git barrier receipt — 2026-09-10
 
@@ -534,8 +535,9 @@ nested provider resolution remain separate gates.
 
 ### Durable completion status
 
-P2c is pushed and verified. P0 real-producer qualification, P2b lifecycle/close ownership, reviewed
-P3/P4/P5 production capture/query integration, P6 retirement, P7a analytics activation, P7b storage
+P2c is pushed and verified, but independent acceptance review remains outstanding. P0 real-producer
+qualification, P2b lifecycle/close ownership, reviewed P3/P4/P5 production capture/query integration,
+P6 retirement, P7a analytics activation, P7b storage
 cutoff, and the post-restart activation helper remain incomplete. The recorder prototype is still
 disabled and not wired into the live extension; no analytics database, storage cutoff, cache migration,
 or live activation was performed. The supported cache code is source-only until a rebuilt runtime is
