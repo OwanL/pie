@@ -367,3 +367,90 @@ canonical data root`) was pushed normally to `origin/master`. A subsequent `git 
 verified `HEAD == origin/master == 46cf69b715137fa542ed72494c5f494b4b85e8c0`; the worktree was clean.
 This receipt-only checkpoint update is committed separately so the exact milestone hash can be named
 without a self-referential commit. P0 is now ready in contract §6 order.
+
+---
+
+## Checkpoint 5 — 2026-09-09T20:27Z, bounded recovery after interruption
+
+**State: P1/P2a remain verified and already pushed; no analytics/storage activation or live cutover.**
+Recovery inspection found an unreviewed partial P3 prototype and unrelated working-tree changes. They
+are preserved and are not included in the foundation receipt below. The next fresh frontier task is
+P0 only after a new effective-provider preflight; no new child was dispatched from this recovery worker.
+
+### Recovered repository and runtime state
+
+- `HEAD` and `origin/master` were both `5443929b121d0005c29772c6b28dbb190ebb1b03` before this
+  checkpoint update. Foundation source is in pushed commit `46cf69b715137fa542ed72494c5f494b4b85e8c0`
+  (`Add analytics contracts and canonical data root`), with its pushed receipt in `5443929b`
+  (`Record analytics foundation milestone receipt`). The reviewed fixture and runtime invariant repairs
+  are present in that commit: copy A+B plus D=.04 proves global=.07 rather than .10; truncation keeps
+  root all-work; idempotency keys and known timestamp fields are validated at the envelope boundary.
+- The preserved interrupted work is exactly: modified `extension/scripts/build.mjs` and
+  `extension/vite.config.ts` adding three analytics bundle entries; untracked
+  `extension/src/analytics/{recorder-supervisor.ts,recorder-worker-entry.ts,sqlite-recorder.ts}` and
+  `extension/test/analytics/sqlite-recorder.test.ts`; and an unowned `settings.json` default model/provider
+  change. The partial recorder test passes, but this P3 code/config is not reviewed, integrated, or
+  committed. No unknown change was reset, stashed, deleted, or bundled.
+- The installed/loaded runtime remains generation
+  `65349a2e7ba29f220971b9d2e58d2763a5c4e479afcecd58d663cf7a1a8e6d72` (backend start evidence in
+  `/tmp/pie-logs/pie.log` at 2026-09-09T20:16:05Z); the source-only `extension:build:validate` produced
+  build identity `b85f083ec3c80257aae9` but did not publish or replace the installed generation. The
+  analytics recorder is disabled/not wired into the live extension, storage roots and old analytics
+  authority are unchanged, and no production database, migration, restart, or cutover occurred.
+
+### Completed terminal provenance recovered from the prior parent JSONL
+
+Source: `data/outcomes/sessions/2026-09-09T10-22-04-382Z_01a085b0-625e-7718-a175-5c7feff981ba.jsonl`,
+with fields read from each completed subagent `toolResult.details.results[0]` (not parent-visible prose):
+
+| Record / call | Actual provider/model; effective/requested bucket | Fallback/downgrade | Attempt evidence |
+|---|---|---|---|
+| 8 / `call_npUuHUt6f8zKXrB0RoySgbtg\|fc_0986f6d4fb825c3f016aa13430666887d094401859f8071d89` | `ollama` / `glm-5.3-flash:cloud`; medium / medium | `false` / `false` | 1 success, response observed, settlement `stop`, backoff 0 |
+| 12 / `call_onS8ErnpWkqg0I5ZpEnHiRSi\|fc_0986f6d4fb825c3f016aa1366e66d487d0ab6b9f1e0e2a3589` | `openai-codex` / `gpt-5.6-sol`; frontier / frontier | `false` / `false` | 1 success, response observed, settlement `stop`, backoff 0 |
+| 14 / `call_P9oSXWm2bO9u2nsFNjr1ne9E\|fc_0986f6d4fb825c3f016aa139f27b8487d0863e0d762a87479d` | `openai-codex` / `gpt-5.6-luna`; medium / medium | `false` / `false` | 1 success, response observed, settlement `stop`, backoff 0 |
+| 16 / `call_riVbfDl2H9GtiRoZtGXqXlua\|fc_0986f6d4fb825c3f016aa1424686f887d0952037266b902159` | `ollama` / `glm-5.3-flash:cloud`; medium / medium | `false` / `false` | 1 success, response observed, settlement `stop`, backoff 0 |
+| 18 / `call_2KAE2cSXHlsy2h0C4QCvnrr1\|fc_0986f6d4fb825c3f016aa143ec12c887d096a263a7bdf93f52` | `openai-codex` / `gpt-5.6-sol`; frontier / frontier | `false` / `false` | terminal attempt failure, response observed, settlement `error`, backoff 0; no Astra/alternate target |
+| 20 / `call_4yFihqXB4XmRWXdUQvILkpyF\|fc_0986f6d4fb825c3f016aa1bd60f62087d0ba0f167aad43681e` | `openai-codex` / `gpt-5.6-luna`; medium / medium | `false` / `false` | terminal attempt aborted, response observed, settlement `aborted`, backoff 0 |
+
+Thus every completed prior child was non-Astra; the successful frontier evidence is Codex
+`gpt-5.6-sol` at `high` with matching effective/requested frontier and no fallback/downgrade. The
+failed frontier route and aborted recovery route are recorded as outcomes only; no shutdown or provider
+outage diagnosis is made.
+
+### Recovery preflight and validation
+
+The current recovery process environment was checked before any substantial dispatch: always-parent
+`0`; nested buckets small/medium/frontier all allowed; only frontier can spawn; max depth/tree/inflight
+`2/10/2`; route-around-saturated and fallback-on-provider-failure enabled; dropped tools
+`["ask_user"]`; but both `github-copilot` and `openai-codex` are currently disabled in
+`PIE_SUBAGENT_PROVIDER_DEFAULTS_JSON`. Therefore no fresh frontier assignment was attempted; requested
+bucket would not prove an effective non-Astra route. Recovery made no intentional auth, global-state,
+generated-model-config, or machine-setting change; the unowned `settings.json` diff above remains
+untouched.
+
+Validation after recovery inspection:
+
+- Focused foundation plus preserved recorder tests (`npm run test:file -- extension/test/shared/analytics-contracts-metrics.test.ts extension/test/shared/pie-data-root.test.ts extension/test/host/backend/backend-client.test.ts extension/test/analytics/sqlite-recorder.test.ts`): **22 passed, 0 failed**.
+- Affected `npm test`: **4,499 passed, 0 failed, 19 skipped** (extension package).
+- `npm run typecheck`: passed for all registered packages; `npm run lint`: passed.
+- `npm run extension:build:validate`: passed; only the existing Vite/Zod annotation and chunk-size
+  warnings; source output was not published.
+- Full fast suite `npm run test:all`: **7/7 packages, 6,826 passed, 0 failed, 29 skipped**.
+
+No test result authorizes P3 integration or either live gate. The foundation milestone remains the
+only accepted analytics work; all P0/P2b/P2c/P3–P7 criteria remain pending, with analytics generation
+and storage cutoff still off.
+
+### Exact next fresh frontier gate
+
+After restoring/enabling a supported Codex frontier pool through the existing session-local
+`runtimePrefs.set` mirror and inspecting that child's terminal provenance, dispatch one fresh bounded
+P0 owner. It must use disposable temp data and the real nested-child producer boundary first: large
+tool/detail handoff, independent payload ownership, delayed recorder acknowledgement, completion,
+cancellation and failover, explicit reconstruction, producer overhead and retained-byte measurement.
+Only then run the bounded SQLite capture/projection/query/restart and multi-host comparison required by
+implementation contract §6, recording the selected-engine decision in `docs/ANALYTICS_EXPERIMENTS.md`.
+Keep the preserved unreviewed P3 files out of the P0 acceptance set, do not change the old authority,
+and do not perform P2b/P2c/P3 production integration or either cutover in that task. Inspect its actual
+provider/model/effective-requested bucket/fallback/downgrade/attempt fields after return before any
+subsequent substantial dispatch.
