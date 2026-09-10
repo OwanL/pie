@@ -795,3 +795,93 @@ execution-record update is committed as `13770285` and verified at `origin/maste
 and old analytics authority remain unchanged. An independent readable reviewer result was not
 available, so this hold is based on the local contract review and existing focused/full validation
 rather than an acceptance review.
+
+## Checkpoint 10 — independent P0 candidate qualification failed closed, 2026-09-11
+
+**State: NOT QUALIFIED; P3/P4 production implementation and both live gates remain closed.** Recovery
+started at `HEAD == origin/master == d3aebcf3e9aa5dd26c2da026dc15d272af358cf8` on `master` and
+inspected the actual dirty candidate before any retry. The candidate paths listed in Checkpoint 8 and
+the separate user-owned `settings.json` change were preserved. No candidate source, user setting,
+runtime generation, live session, storage root, analytics database, host process, or retention state
+was changed by this gate review.
+
+### Routing and prior-result provenance
+
+The inherited default-provider map has both Copilot and Codex disabled, but this root session has the
+exact session-scoped override `{"openai-codex":true}` in
+`PIE_SUBAGENT_PROVIDER_TOGGLES_BY_SESSION_JSON`. Always-parent is off; all nested buckets are allowed;
+only frontier may spawn; depth/tree/inflight are 2/10/2; and the configured frontier pool is Copilot
+Sol plus Codex Sol. With Copilot disabled/profile-ineligible and the root Codex override propagated,
+the effective frontier route is Codex Sol at high. The durable original-parent JSONL continues to
+show the earlier completed Codex Sol frontier results without fallback or downgrade as recorded in
+Checkpoints 3/5/7. Two fresh read-only frontier reviewers completed this gate and returned readable
+technical findings; their terminal selection metadata is not exposed to this worker before its own
+parent receives the terminal result, so this checkpoint makes no unsupported claim about their actual
+provider/model or retry chain.
+
+### Independent design-review verdict
+
+Both reviewers returned **needs changes**. Supported P0 blockers, including focused reproductions, are:
+
+1. **Accepted pending-create capture can be lost at bind.** Capture is microtask-queued while
+   `bindPendingCreate` is sent directly; binding can overtake the accepted item, after which the
+   recorder rejects it as already bound. The reproduction persisted zero observations.
+2. **Post-handoff failures can discard a `submitted` delivery.** A worker error settles/removes the
+   in-flight batch and leaves only an in-memory failure counter; there is no durable
+   `captureIncomplete`/gap fact or retryable retained ownership. The unresolved outage/overflow policy
+   therefore cannot be treated as permission to lose the accepted fact.
+3. **Producer cost evidence omits the expensive path.** The harness times synchronous `submit`, while
+   deferred queue pumping and `child.send` cloning run later on the producer event loop. A focused
+   20-by-2-MiB probe measured about 0.42 ms inside submit and a further 34.69 ms in the following pump
+   microtask. The so-called real producer probe uses a fake sink and does not close this gate.
+4. **Detail ownership and queue-byte accounting are incomplete.** `submitDetail` retains the caller's
+   mutable capture/byte buffer and charges only body bytes, excluding metadata, identities and IPC
+   wrappers. Mutating the buffer after return changed the persisted value in the review reproduction.
+5. **Sensitive exclusion is incomplete before deduplication.** Common `x-api-key` values and
+   credential-bearing `Buffer`/typed-array content survive the current shared sanitizer and can enter
+   durable content-addressed storage.
+6. **A successful logical private delete does not physically scrub WAL bytes.** A concurrent-reader
+   reproduction observed zero logical detail rows but still found the private sentinel in
+   `analytics.sqlite-wal` because deletion does not complete/verify a truncating checkpoint.
+7. **Close/pending identity and source identity remain unsafe.** Close cannot fence/delete its pending
+   create subject; tool identities are not root-session-qualified; subagent attempt identity uses a
+   process-local counter; and `sequenceBySourceKey` retains one entry for every source forever. These
+   violate restart-stable identity and history-independent producer-memory requirements.
+8. **Required failure and read contracts are incomplete.** Some subagent setup exceptions bypass
+   terminal capture. Settlement limits silently truncate without coverage metadata, and detail reads
+   do not expose the required byte range, total length, next offset, completeness and omission reason.
+9. **The §6 envelope remains unexecuted.** The checked-in result is v1 while the candidate harness is
+   v2. It still lacks the 1M/10M-or-justified tier, deterministic fixtures for both scrub orderings and
+   last-owner/new-reference races, two sustained 10k/50-fact/s runs, two five-minute 1-fact/s runs,
+   payload entropy/reuse mix, delivered/unique/byte accounting, real scan cancellation, warm/cold and
+   non-writer refresh evidence, upgrade/partial-write fixtures, and matched analytics-disabled
+   agent/UI turnaround/cancellation/failover/render baselines. Synthetic `qualificationSpin` and
+   fabricated producer fixtures do not satisfy those requirements.
+
+The currently available resource observation remains Node v24.16.0 on Windows x64; the candidate's
+own predeclared 20-GiB free-space reserve and 16-GiB temporary-data cap remain appropriate. The
+existing 10k report measured a projected 10M footprint above that cap, but a measured larger bounded
+tier and complete envelope are still required before that projection can justify skipping 10M.
+
+### Gate disposition and exact continuation
+
+Per the contract's mandatory order, no production engine is selected and no P3/P4 milestone may be
+claimed from this candidate. The next fresh capture owner must first repair immutable admission and
+complete byte bounds; serialize lifecycle operations behind admitted capture; provide bounded/time-
+sliced IPC pumping and measure all producer-thread work; remove history-sized source maps through a
+restart-stable reconciliation design; classify/retry ambiguous write failures without inventing a
+loss policy; and complete credential/WAL/pending-subject deletion barriers and deterministic races.
+It must then implement explicit completeness/range metadata and stable session-qualified identities,
+run the full predeclared §6 matrix, and obtain another independent qualified-design verdict.
+
+The outage/overflow choice is still specification-reserved. All independent engineering above can
+proceed, but production selection ultimately needs an explicit supported policy (for example a
+bounded durable handoff owner, or an explicit backpressure/availability contract); visible rejection
+alone is evidence of a closed gate, not permission to discard accepted analytics. P2b still owns
+filesystem lifecycle and close disposition, P5 owns UI/query consumption, P6 retirement remains
+pending, and P7a/P7b plus the one-shot controlled restart remain prohibited until their separate
+preconditions pass.
+
+No newer backend-start/generation evidence appeared in the bounded persistent log inspection. The
+last verified loaded runtime remains the old generation recorded above, ordinary analytics remains
+under the old authority, and no source-only validation artifact has been published or activated.
