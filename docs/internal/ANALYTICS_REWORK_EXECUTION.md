@@ -681,3 +681,89 @@ session-scoped cross-host mutation/revocation and artifact/expiry integration; t
 production recorder migrations/projections, bounded query/cancellation, asynchronous reconciliation
 and capacity-policy work after full selected-design qualification. A later P7 owner must build and
 rehearse the actual finite one-shot activation process; this helper prototype is not that authority.
+
+## Checkpoint 8 — 2026-09-10, bounded P6 prerequisite extraction and post-P0 integration review
+
+**State: P6 prerequisites are extracted and pushed; review retirement itself is not performed.** The
+neutral identity/settings seam was implemented without deleting the reviewer, evaluation skill/agent,
+review fields, review sidecars, review outbox, or review-triggered close paths. The post-P0 analytics
+capture/query integration remains a separate uncommitted candidate and is not represented by the P6
+commit below. No runtime publication/install, host restart, session closure, storage cutoff, analytics
+activation, or live cutover occurred.
+
+### P6 prerequisite milestone
+
+- Generic `sessionPathHash`/`resolveSessionIdentity` now live in
+  `extension/src/shared/session-identity.ts`; review storage imports the neutral helper, while stats
+  storage/service and privacy cleanup no longer depend on review ownership. The focused identity
+  behavior remains covered by the review-store test fixture.
+- Session-prompt toggles now have the neutral `extension/src/backend/session-settings-store.ts`
+  owner and `PIE_SESSION_SETTINGS_DIR` authority under `<PIE_DATA_DIR>/state/session-settings`.
+  `PIE_LEGACY_SESSION_SETTINGS_DIR` is a one-way compatibility source for the former review-sidecar
+  file: reads preserve existing toggles, the first successful write copies them to the neutral store,
+  and privacy cleanup scrubs the old entry. `PIE_REVIEWS_DIR` remains review-only. The old
+  `system-prompt-toggle-store.ts` is only a deprecated re-export shim so unrelated imports cannot
+  silently lose behavior during the staged retirement.
+- `extension/src/backend/server.ts`, `worker-runtime-host.ts`, `private-session-artifacts.ts`, the
+  host backend environment forwarding, and focused cold-session/backend tests were updated to use the
+  neutral settings owner. No review reader or writer was removed.
+
+Git barrier receipt: commit `d5704d26` (`Extract neutral session identity and settings ownership`) was
+pushed normally to `origin/master`; `git fetch origin master` verified `HEAD == origin/master ==
+d5704d26`. The user-owned `settings.json` change and the separate post-P0 analytics candidate remain
+unstaged and preserved.
+
+### Post-P0 candidate classification and evidence
+
+The remaining dirty product files are not P6 retirement work. They are a candidate integration layer
+across canonical capture, recorder supervision/restart, SQLite projections and query workers, dormant
+host accounting/stats adapters, subagent detail capture, redaction, build entries, qualification
+probe/tests, and shared contracts. Exact current product paths are:
+
+- modified: `extension/scripts/analytics-p0-qualification.mjs`, `extension/scripts/build.mjs`,
+  `extension/src/analytics/{recorder-supervisor,recorder-worker-entry,sqlite-recorder}.ts`,
+  `extension/src/host/{billable-accounting/service,extension-host}.ts`,
+  `extension/src/host/stats-service/{service,types}.ts`,
+  `extension/src/shared/sensitive-redaction.ts`,
+  `extension/test/analytics/sqlite-recorder.test.ts`,
+  `extension/test/shared/analytics-contracts-metrics.test.ts`, `extension/vite.config.ts`,
+  `extensions/subagent/src/analytics-capture.ts`, and `shared/analytics/contracts.ts`;
+- untracked: `extension/scripts/analytics-real-producer-probe.ts`,
+  `extension/src/analytics/{canonical-capture,query-client,query-worker-entry}.ts`,
+  `extension/test/analytics/canonical-capture.test.ts`, and `shared/sensitive-redaction.ts`;
+- separate user-owned change: `settings.json`.
+
+The real-producer qualification was rerun successfully after correcting the probe's terminal shape and
+capture call signature. It covered 10,000 fact rows, 1,000 detail payloads (950 x 2 KiB, 49 x 32 KiB,
+1 x 2 MiB), four producer helpers, clean helper restart x3, private deletion racing late detail,
+bounded queues, read-only queries, and explicit capacity rejection. It demonstrates detached serialized
+detail, nested evidence retention, credential redaction before serialization, non-blocking handoff, and
+visible `rejected` capacity status. This remains bounded qualification evidence only: no production
+engine is selected, and the 1M/10M tiers, sustained/light-load runs, UI/CPU baselines, cancellation,
+upgrade, full selected-design review, production lifecycle/reconciliation, and activation gates remain
+open.
+
+### Validation and runtime/provider evidence
+
+- `npm run lint` — passed.
+- `npm run typecheck` — all 18 registered projects passed.
+- `npm test` — 7/7 packages, **6,853 passed, 0 failed, 29 skipped**.
+- Focused P6 backend/identity/settings/backend-client tests — **36 passed, 0 failed**.
+- `npm run extension:build:validate` — passed; only existing Zod annotation and chunk-size warnings;
+  latest source validation build identity `57c618a62c42bf3c5f7e` was not published.
+- Earlier P0 focused analytics tests and the corrected disposable qualification harness also passed;
+  no generated output is tracked.
+
+Verified prior child provenance for the bounded P0 work remains: medium route
+`ollama/glm-5.3-flash:cloud`, requested/effective `medium`, `fallback:false`,
+`bucketDowngraded:false`; frontier route `openai-codex/gpt-5.6-sol`, requested/effective `frontier`,
+`fallback:false`, `bucketDowngraded:false`, one successful attempt. A separate Codex response failure
+returned HTTP 503 and its recorded circuit remained open until `2026-09-10T11:32:34.244Z`; no
+post-expiry frontier retry is claimed and no circuit bypass was attempted.
+
+The actually loaded runtime remains the old generation
+`65349a2e7ba29f220971b9d2e58d2763a5c4e479afcecd58d663cf7a1a8e6d72`, with ordinary analytics under
+`data/outcomes/8c401ee313ff7786/`. The P6 source commit and all source-only checks did not publish or
+activate a runtime. Next work is a bounded contract review and integration decision for the post-P0
+candidate, followed by the still-gated P2b/P3/P4/P5 work; do not claim P6 completion, production
+capture, live cutover, or restart activation from this checkpoint.
