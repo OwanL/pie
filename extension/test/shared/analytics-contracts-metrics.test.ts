@@ -22,6 +22,7 @@ import {
   localCalendarWeekDateKeys,
   unionDurationMs,
 } from '../../../shared/analytics/metrics';
+import { sanitizeAnalyticsDetail } from '../../../shared/sensitive-redaction';
 
 function observation(overrides: Partial<AnalyticsObservation> = {}): AnalyticsObservation {
   return {
@@ -68,6 +69,12 @@ test('observation source keys distinguish exact redelivery from conflict and gen
   assert.equal(accepted.status, 'accepted');
   const duplicate = acceptAnalyticsObservation(accepted.state, first);
   assert.equal(duplicate.status, 'duplicate');
+  const replayedByReplacement = acceptAnalyticsObservation(accepted.state, {
+    ...first,
+    sourceSequence: '99',
+    producer: { ...first.producer, processId: 'process-2', processGeneration: 'backend-2' },
+  });
+  assert.equal(replayedByReplacement.status, 'duplicate', 'transport receipts do not redefine source payload');
 
   const conflict = acceptAnalyticsObservation(accepted.state, {
     ...first,
@@ -246,4 +253,37 @@ test('copy references inherited work without adding it to the global total', () 
 test('privacy close disposition is deterministic and explicit', () => {
   assert.equal(closeDispositionForPrivacy('on'), 'delete');
   assert.equal(closeDispositionForPrivacy('off'), 'retain');
+});
+
+test('analytics detail filtering redacts credential keys and credential-shaped text recursively', () => {
+  const safe = sanitizeAnalyticsDetail({
+    authorization: 'Bearer secret-value',
+    nested: [{ apiKey: 'sk-this-is-a-long-secret-key', OPENAI_API_KEY: 'env-secret', text: 'password=hunter2 OPENAI_API_KEY=env-secret context' }],
+    usage: { inputTokens: 12 },
+  });
+  assert.deepEqual(safe, {
+    authorization: '[redacted]',
+    nested: [{ apiKey: '[redacted]', OPENAI_API_KEY: '[redacted]', text: 'password=[redacted] OPENAI_API_KEY=[redacted] context' }],
+    usage: { inputTokens: 12 },
+  });
+  assert.equal(JSON.stringify(safe).includes('hunter2'), false);
+});
+
+test('analytics detail filtering covers separator variants and credential text in binary views', () => {
+  const safe = sanitizeAnalyticsDetail({
+    'X-Api-Key': 'header-secret',
+    clientSecret: 'camel-secret',
+    sessionToken: 'session-secret',
+    proxyAuthorization: 'proxy-secret',
+    nested: { Refresh_Token: 'refresh-secret', token: 'generic-secret' },
+    bytes: Buffer.from('prefix Authorization: Bearer binary-secret suffix', 'utf8'),
+    view: new Uint8Array(Buffer.from('x-api-key=another-binary-secret', 'utf8')),
+  }) as Record<string, unknown>;
+  assert.equal(safe['X-Api-Key'], '[redacted]');
+  assert.equal(safe.clientSecret, '[redacted]');
+  assert.equal(safe.sessionToken, '[redacted]');
+  assert.equal(safe.proxyAuthorization, '[redacted]');
+  assert.deepEqual(safe.nested, { Refresh_Token: '[redacted]', token: '[redacted]' });
+  assert.equal(Buffer.from(safe.bytes as Uint8Array).toString('utf8').includes('binary-secret'), false);
+  assert.equal(Buffer.from(safe.view as Uint8Array).toString('utf8').includes('another-binary-secret'), false);
 });

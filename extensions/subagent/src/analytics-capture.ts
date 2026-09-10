@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { serialize } from 'node:v8';
 
 import {
@@ -5,14 +6,38 @@ import {
   type AnalyticsCaptureSubject,
   type AnalyticsDetailCapture,
   type AnalyticsDetailSink,
+  type AnalyticsProducerIdentity,
 } from '../../../shared/analytics/contracts.js';
+import { redactSensitiveText, sanitizeAnalyticsDetail } from '../../../shared/sensitive-redaction.js';
 import type { SingleResult } from '../types.js';
 import { recordRuntimeTrace } from './runtime-trace.js';
 
 export interface SubagentAnalyticsCaptureContext {
   generationId: string;
   captureSubject: AnalyticsCaptureSubject;
+  producer?: AnalyticsProducerIdentity;
   sink: AnalyticsDetailSink;
+}
+
+function stableCaptureOrigin(
+  generationId: string,
+  subject: AnalyticsCaptureSubject,
+  parentToolCallId: string | undefined,
+  attemptId: string,
+): string {
+  const subjectIdentity = subject.kind === 'session'
+    ? subject.rootSessionId
+    : subject.kind === 'pendingCreate'
+      ? subject.operationId
+      : subject.hostId;
+  const digest = createHash('sha256').update(JSON.stringify([
+    generationId,
+    subject.kind,
+    subjectIdentity,
+    parentToolCallId ?? null,
+    attemptId,
+  ])).digest('hex');
+  return `subagent-origin:${digest}`;
 }
 
 export type SubagentCaptureStatus = 'disabled' | 'submitted' | 'rejected';
@@ -35,16 +60,29 @@ export function captureSubagentTerminalResult(
   const startedAt = performance.now();
   let bytes: Uint8Array | undefined;
   try {
-    bytes = serialize(result);
+    context.sink.preflightDetail?.(result);
+    bytes = serialize(sanitizeAnalyticsDetail(result));
     const attemptId = result.attemptId;
     const childId = result.childId;
     const identity = attemptId ?? childId;
     if (!identity) throw new Error('Subagent terminal capture requires an attempt or child identity.');
+    const stableOriginId = stableCaptureOrigin(
+      context.generationId,
+      context.captureSubject,
+      parentToolCallId,
+      identity,
+    );
     const capture: AnalyticsDetailCapture = {
       schemaVersion: ANALYTICS_SCHEMA_VERSION,
       generationId: context.generationId,
-      payloadId: `subagent:${identity}:terminal`,
-      sourceKey: `subagent:${identity}:terminal`,
+      stableOriginId,
+      producerKind: 'subagent',
+      producer: context.producer ?? {
+        buildId: 'pie-subagent-capture-v1',
+        processId: process.pid,
+      },
+      payloadId: `${stableOriginId}:terminal`,
+      sourceKey: `${stableOriginId}:terminal`,
       observedAtMs: result.completedAt ?? Date.now(),
       captureSubject: context.captureSubject,
       mediaType: 'application/x-pie-subagent-result',
@@ -56,6 +94,8 @@ export function captureSubagentTerminalResult(
         ...(attemptId ? { attemptId } : {}),
         ...(parentToolCallId ? { parentToolCallId } : {}),
         ...(result.stopReason ? { outcome: result.stopReason } : {}),
+        captureStage: 'terminal',
+        sourceVersion: 'subagent-terminal-v1',
       },
     };
     context.sink.submitDetail(capture);
@@ -74,7 +114,10 @@ export function captureSubagentTerminalResult(
       },
     });
     return 'submitted';
-  } catch {
+  } catch (error) {
+    result.analyticsCaptureError = redactSensitiveText(
+      error instanceof Error ? error.message : String(error),
+    );
     recordRuntimeTrace({
       phase: 'clone',
       durationMs: Math.max(0, performance.now() - startedAt),

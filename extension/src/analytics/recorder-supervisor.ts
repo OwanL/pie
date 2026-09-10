@@ -1,4 +1,5 @@
 import { fork, type ChildProcess } from 'node:child_process';
+import { serialize } from 'node:v8';
 
 import type {
   AnalyticsDetailCapture,
@@ -6,7 +7,32 @@ import type {
   AnalyticsObservation,
   AnalyticsSink,
 } from '../../../shared/analytics/contracts.js';
-import type { AnalyticsDeleteReceipt } from './sqlite-recorder.js';
+
+export interface AnalyticsSubjectBindingReceipt {
+  pendingOperationId: string;
+  rootSessionId: string;
+  movedObservationCount: number;
+  movedPayloadCount: number;
+  duplicate: boolean;
+}
+
+export interface AnalyticsDeleteReceipt {
+  rootSessionId: string;
+  deletedObservationCount: number;
+  deletedPayloadCount: number;
+  deletedContentCount: number;
+  duplicate: boolean;
+}
+
+export interface AnalyticsRecorderProducerMeasurement {
+  stage: 'ownership-preflight' | 'ownership-serialize' | 'ipc-send';
+  records: number;
+  retainedBytes: number;
+  synchronousMs: number;
+  /** Time until Node reports that the IPC message was handed to the channel.
+   * This includes transport scheduling and is not mislabeled as CPU time. */
+  callbackLatencyMs?: number;
+}
 
 export interface AnalyticsRecorderSupervisorOptions {
   enabled: boolean;
@@ -17,23 +43,89 @@ export interface AnalyticsRecorderSupervisorOptions {
   maxBatchSize?: number;
   maxQueueRecords?: number;
   maxQueueBytes?: number;
+  /** One bounded helper replacement is the default normal failover policy.
+   * Further outages stay visible and retain accepted capture for an owner. */
+  maxAutomaticRestarts?: number;
   /** Disposable qualification seam; production activation must omit it. */
   rehearsalAcknowledgementDelayMs?: number;
+  onDeliveryAcknowledged?: (measurement: {
+    records: number;
+    bytes: number;
+    latencyMs: number[];
+    recordBytes: number[];
+  }) => void;
+  onProducerWorkMeasured?: (measurement: AnalyticsRecorderProducerMeasurement) => void;
 }
 
 interface PendingRequest {
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
-  records: number;
-  bytes: number;
+  stopsWorker: boolean;
 }
 
-type QueueItem =
-  | { kind: 'observation'; subject: string; value: AnalyticsObservation; bytes: number }
-  | { kind: 'detail'; subject: string; value: AnalyticsDetailCapture; bytes: number };
+interface SerializedCaptureEnvelope {
+  kind: 'observation' | 'detail';
+  subject: string;
+  value: AnalyticsObservation | AnalyticsDetailCapture;
+}
+
+interface CaptureQueueItem {
+  type: 'capture';
+  kind: SerializedCaptureEnvelope['kind'];
+  subject: string;
+  /** The immutable, independently-owned producer snapshot. */
+  encoded: Uint8Array;
+  /** Conservative serialized bound: retained snapshot plus its eventual
+   * advanced-IPC clone and measured per-record framing overhead. */
+  bytes: number;
+  enqueuedAtMs: number;
+}
+
+interface ControlQueueItem {
+  type: 'control';
+  command: Record<string, unknown>;
+  timeoutMs: number;
+  resolve: (value: unknown) => void;
+  reject: (error: Error) => void;
+}
+
+type QueueItem = CaptureQueueItem | ControlQueueItem;
+
+const CAPTURE_IPC_RECORD_OVERHEAD = serialize({
+  type: 'captureBatch',
+  requestId: Number.MAX_SAFE_INTEGER,
+  items: [new Uint8Array(0)],
+}).byteLength;
+
+function minimumOwnedBytes(value: unknown, stopAfter: number): number {
+  let bytes = 0;
+  const pending: unknown[] = [value];
+  const seen = new WeakSet<object>();
+  while (pending.length > 0 && bytes <= stopAfter) {
+    const current = pending.pop();
+    if (typeof current === 'string') bytes += current.length;
+    else if (typeof current === 'number' || typeof current === 'bigint') bytes += 8;
+    else if (typeof current === 'boolean') bytes += 1;
+    else if (current instanceof Uint8Array) bytes += current.byteLength;
+    else if (current instanceof ArrayBuffer) bytes += current.byteLength;
+    else if (ArrayBuffer.isView(current)) bytes += current.byteLength;
+    else if (typeof current === 'object' && current !== null && !seen.has(current)) {
+      seen.add(current);
+      bytes += 16;
+      if (Array.isArray(current)) pending.push(...current);
+      else {
+        for (const [key, child] of Object.entries(current)) {
+          bytes += key.length;
+          pending.push(child);
+        }
+      }
+    }
+  }
+  return bytes;
+}
 
 export interface AnalyticsRecorderWorkerStats {
-  process: NodeJS.MemoryUsage;
+  process: NodeJS.MemoryUsage & { cpuUsage: NodeJS.CpuUsage };
   recorder: Record<string, number>;
   detailStorage: Record<string, number>;
 }
@@ -47,6 +139,7 @@ export interface AnalyticsRecorderBacklog {
   peakBytes: number;
   rejectedRecords: number;
   deliveryFailures: number;
+  replayedRecords: number;
 }
 
 export class AnalyticsCaptureCapacityError extends Error {
@@ -58,22 +151,45 @@ export class AnalyticsCaptureCapacityError extends Error {
   }
 }
 
+class AnalyticsRecorderTransportError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AnalyticsRecorderTransportError';
+  }
+}
+
+class AnalyticsRecorderWorkerRequestError extends Error {
+  constructor(message: string, readonly code?: string) {
+    super(message);
+    this.name = 'AnalyticsRecorderWorkerRequestError';
+  }
+}
+
 /**
- * Disabled-by-default independent-process ingress. `submit` and `submitDetail`
- * only transfer ownership into a bounded in-memory producer queue and schedule
- * IPC; neither waits for recorder acceptance, commit, detail acknowledgement,
- * or drainage. Capacity rejection is explicit and fails qualification rather
- * than silently selecting an outage/data-loss policy.
+ * Disabled-by-default independent-process ingress. Capture ownership is
+ * transferred synchronously into a bounded serialized queue, then one
+ * time-sliced IPC batch is processed at a time. Lifecycle commands share that
+ * exact queue, so an accepted pending-create observation cannot be overtaken by
+ * its bind/delete/flush command. Agent execution never awaits recorder work.
+ *
+ * Ambiguous transport failures retain and replay the same immutable source
+ * identities after helper replacement. A definitive recorder rejection remains
+ * visible and retained for an operational owner; this boundary does not invent
+ * a discard rule for the separately deferred outage policy.
  */
 export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDetailSink {
   private child: ChildProcess | undefined;
+  private workerReady = false;
   private nextRequestId = 1;
   private readonly pending = new Map<number, PendingRequest>();
   private queue: QueueItem[] = [];
   private pumpScheduled = false;
+  private processing = false;
   private starting: Promise<void> | undefined;
   private stopping = false;
+  private accepting = false;
   private failure: Error | undefined;
+  private queuedRecords = 0;
   private queuedBytes = 0;
   private inFlightRecords = 0;
   private inFlightBytes = 0;
@@ -81,7 +197,11 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
   private peakBytes = 0;
   private rejectedRecords = 0;
   private deliveryFailures = 0;
+  private replayedRecords = 0;
+  private automaticRestartAttempts = 0;
+  private recovery: Promise<void> | undefined;
   private lastRejectedDelivery: Error | undefined;
+  private workerStderr = '';
 
   constructor(private readonly options: AnalyticsRecorderSupervisorOptions) {}
 
@@ -90,11 +210,11 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
   }
 
   get running(): boolean {
-    return Boolean(this.child?.connected);
+    return this.workerReady && Boolean(this.child?.connected);
   }
 
   get workerPid(): number | undefined {
-    return this.child?.pid;
+    return this.workerReady ? this.child?.pid : undefined;
   }
 
   get terminalError(): Error | undefined {
@@ -107,7 +227,7 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
 
   get backlog(): AnalyticsRecorderBacklog {
     return {
-      queuedRecords: this.queue.length,
+      queuedRecords: this.queuedRecords,
       queuedBytes: this.queuedBytes,
       inFlightRecords: this.inFlightRecords,
       inFlightBytes: this.inFlightBytes,
@@ -115,6 +235,7 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
       peakBytes: this.peakBytes,
       rejectedRecords: this.rejectedRecords,
       deliveryFailures: this.deliveryFailures,
+      replayedRecords: this.replayedRecords,
     };
   }
 
@@ -123,9 +244,12 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
     if (this.starting) return this.starting;
     this.stopping = false;
     this.failure = undefined;
+    this.automaticRestartAttempts = 0;
     this.starting = this.startWorker();
     try {
       await this.starting;
+      this.accepting = true;
+      this.schedulePump();
     } finally {
       this.starting = undefined;
     }
@@ -133,32 +257,53 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
 
   submit(observation: AnalyticsObservation): void {
     if (!this.options.enabled) return;
-    // Facts are contractually compact. Avoid JSON serialization on the producer
-    // path; reserve a conservative accounting unit until physical DTO limits
-    // are fixed by later P3 integration.
-    this.enqueue({
-      kind: 'observation',
-      subject: this.subjectKey(observation.captureSubject),
-      value: observation,
-      bytes: 1_024,
+    this.enqueueCapture('observation', this.subjectKey(observation.captureSubject), observation);
+  }
+
+  preflightDetail(value: unknown): void {
+    if (!this.options.enabled) return;
+    if (!this.accepting) throw this.failure ?? new Error('Analytics recorder worker is not accepting capture.');
+    const startedAt = performance.now();
+    const records = this.queuedRecords + this.inFlightRecords + 1;
+    const maximumRecords = this.options.maxQueueRecords ?? 65_536;
+    const maximumBytes = this.options.maxQueueBytes ?? 64 * 1024 * 1024;
+    const availableBytes = Math.max(0, maximumBytes - this.queuedBytes - this.inFlightBytes);
+    const preflightLimit = Math.max(0, Math.floor((availableBytes - CAPTURE_IPC_RECORD_OVERHEAD) / 2));
+    const minimumBytes = minimumOwnedBytes(value, preflightLimit);
+    const minimumRetainedBytes = (minimumBytes * 2) + CAPTURE_IPC_RECORD_OVERHEAD;
+    const synchronousMs = Math.max(0, performance.now() - startedAt);
+    this.options.onProducerWorkMeasured?.({
+      stage: 'ownership-preflight', records: 1, retainedBytes: minimumRetainedBytes, synchronousMs,
     });
+    if (records > maximumRecords || minimumRetainedBytes > availableBytes) {
+      this.rejectedRecords += 1;
+      throw new AnalyticsCaptureCapacityError(
+        records,
+        this.queuedBytes + this.inFlightBytes + minimumRetainedBytes,
+      );
+    }
   }
 
   submitDetail(capture: AnalyticsDetailCapture): void {
     if (!this.options.enabled) return;
-    this.enqueue({
-      kind: 'detail',
-      subject: this.subjectKey(capture.captureSubject),
-      value: capture,
-      bytes: capture.bytes.byteLength,
-    });
+    this.enqueueCapture('detail', this.subjectKey(capture.captureSubject), capture);
   }
 
   async flush(): Promise<void> {
     if (!this.options.enabled) return;
-    if (!this.running) throw this.failure ?? new Error('Analytics recorder worker is not running.');
-    this.pump();
-    await this.request({ type: 'flush' });
+    await this.enqueueControl({ type: 'flush' });
+  }
+
+  async bindPendingCreate(
+    pendingOperationId: string,
+    rootSessionId: string,
+    sourceKey: string,
+    timestampMs: number | string | bigint,
+  ): Promise<AnalyticsSubjectBindingReceipt | undefined> {
+    if (!this.options.enabled) return undefined;
+    return this.enqueueControl({
+      type: 'bindPendingCreate', pendingOperationId, rootSessionId, sourceKey, timestampMs,
+    }) as Promise<AnalyticsSubjectBindingReceipt>;
   }
 
   async deleteSession(
@@ -167,16 +312,16 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
     timestampMs: number | string | bigint,
   ): Promise<AnalyticsDeleteReceipt | undefined> {
     if (!this.options.enabled) return undefined;
-    return this.request({ type: 'deleteSession', rootSessionId, sourceKey, timestampMs }) as Promise<AnalyticsDeleteReceipt>;
+    return this.enqueueControl({ type: 'deleteSession', rootSessionId, sourceKey, timestampMs }) as Promise<AnalyticsDeleteReceipt>;
   }
 
   async workerStats(): Promise<AnalyticsRecorderWorkerStats | undefined> {
     if (!this.options.enabled) return undefined;
-    return this.request({ type: 'stats' }) as Promise<AnalyticsRecorderWorkerStats>;
+    return this.enqueueControl({ type: 'stats' }) as Promise<AnalyticsRecorderWorkerStats>;
   }
 
   /** Rehearses a clean helper replacement only; it does not restart VS Code or
-   * arm a later activation. Pending capture must be flushed first. */
+   * arm a later activation. Earlier accepted capture drains before shutdown. */
   async restart(): Promise<void> {
     if (!this.options.enabled) return;
     await this.shutdown();
@@ -184,34 +329,213 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
   }
 
   async shutdown(): Promise<void> {
-    if (!this.options.enabled || !this.child) return;
-    this.stopping = true;
-    const child = this.child;
+    if (!this.options.enabled || (!this.child && !this.accepting)) return;
+    if (this.failure) throw this.failure;
+    if (!this.child) throw this.failure ?? new Error('Analytics recorder worker is not running.');
+    const shutdown = this.enqueueControl({ type: 'shutdown' }, this.options.shutdownTimeoutMs ?? 10_000);
+    this.accepting = false;
     try {
-      this.pump();
-      await this.request({ type: 'shutdown' }, this.options.shutdownTimeoutMs ?? 10_000);
-      await this.waitForExit(child, this.options.shutdownTimeoutMs ?? 10_000);
+      // Until the ordered shutdown is acknowledged, a helper exit is an
+      // ambiguous transport failure and must recover/replay just like flush.
+      await shutdown;
+      this.stopping = true;
+      const acknowledgedChild = this.child;
+      if (acknowledgedChild) {
+        await this.waitForExit(acknowledgedChild, this.options.shutdownTimeoutMs ?? 10_000);
+      }
     } finally {
-      if (this.child === child) this.child = undefined;
+      if (this.child && !this.child.connected) {
+        this.child = undefined;
+        this.workerReady = false;
+      }
       this.stopping = false;
+      this.processing = false;
+      this.pumpScheduled = false;
     }
   }
 
-  private enqueue(item: QueueItem): void {
-    if (!this.running) throw this.failure ?? new Error('Analytics recorder worker is not running.');
-    const records = this.queue.length + this.inFlightRecords + 1;
-    const bytes = this.queuedBytes + this.inFlightBytes + item.bytes;
-    if (records > (this.options.maxQueueRecords ?? 65_536)
-      || bytes > (this.options.maxQueueBytes ?? 64 * 1024 * 1024)) {
+  private enqueueCapture(
+    kind: SerializedCaptureEnvelope['kind'],
+    subject: string,
+    value: AnalyticsObservation | AnalyticsDetailCapture,
+  ): void {
+    if (!this.accepting) throw this.failure ?? new Error('Analytics recorder worker is not accepting capture.');
+    const startedAt = performance.now();
+    const records = this.queuedRecords + this.inFlightRecords + 1;
+    const maximumRecords = this.options.maxQueueRecords ?? 65_536;
+    const maximumBytes = this.options.maxQueueBytes ?? 64 * 1024 * 1024;
+    if (records > maximumRecords) {
       this.rejectedRecords += 1;
-      throw new AnalyticsCaptureCapacityError(records, bytes);
+      this.options.onProducerWorkMeasured?.({
+        stage: 'ownership-preflight', records: 1, retainedBytes: 0,
+        synchronousMs: Math.max(0, performance.now() - startedAt),
+      });
+      throw new AnalyticsCaptureCapacityError(records, this.queuedBytes + this.inFlightBytes);
     }
-    this.queue.push(item);
-    this.queuedBytes += item.bytes;
+    const availableBytes = Math.max(0, maximumBytes - this.queuedBytes - this.inFlightBytes);
+    const preflightLimit = Math.max(0, Math.floor((availableBytes - CAPTURE_IPC_RECORD_OVERHEAD) / 2));
+    const minimumBytes = minimumOwnedBytes(value, preflightLimit);
+    const minimumRetainedBytes = (minimumBytes * 2) + CAPTURE_IPC_RECORD_OVERHEAD;
+    if (minimumRetainedBytes > availableBytes) {
+      this.rejectedRecords += 1;
+      this.options.onProducerWorkMeasured?.({
+        stage: 'ownership-preflight',
+        records: 1,
+        retainedBytes: minimumRetainedBytes,
+        synchronousMs: Math.max(0, performance.now() - startedAt),
+      });
+      throw new AnalyticsCaptureCapacityError(
+        records,
+        this.queuedBytes + this.inFlightBytes + minimumRetainedBytes,
+      );
+    }
+    const encoded = serialize({ kind, subject, value } satisfies SerializedCaptureEnvelope);
+    // Reserve the owned snapshot plus the advanced-IPC clone without cloning
+    // the full payload a second time on the producer loop. The fixed measured
+    // envelope overhead covers per-record transport framing.
+    const bytes = (encoded.byteLength * 2) + CAPTURE_IPC_RECORD_OVERHEAD;
+    const synchronousMs = Math.max(0, performance.now() - startedAt);
+    this.options.onProducerWorkMeasured?.({
+      stage: 'ownership-serialize',
+      records: 1,
+      retainedBytes: bytes,
+      synchronousMs,
+    });
+
+    const totalBytes = this.queuedBytes + this.inFlightBytes + bytes;
+    if (totalBytes > maximumBytes) {
+      this.rejectedRecords += 1;
+      throw new AnalyticsCaptureCapacityError(records, totalBytes);
+    }
+    this.queue.push({
+      type: 'capture',
+      kind,
+      subject,
+      encoded,
+      bytes,
+      enqueuedAtMs: performance.now(),
+    });
+    this.queuedRecords += 1;
+    this.queuedBytes += bytes;
     this.observePeak();
-    if (!this.pumpScheduled) {
-      this.pumpScheduled = true;
-      queueMicrotask(() => this.pump());
+    this.schedulePump();
+  }
+
+  private enqueueControl(command: Record<string, unknown>, timeoutMs = 30_000): Promise<unknown> {
+    if (!this.accepting || this.failure) return Promise.reject(this.failure ?? new Error('Analytics recorder worker is not accepting commands.'));
+    return new Promise((resolve, reject) => {
+      this.queue.push({ type: 'control', command, timeoutMs, resolve, reject });
+      this.schedulePump();
+    });
+  }
+
+  private schedulePump(yieldToEventLoop = false): void {
+    if (this.processing || this.pumpScheduled || this.failure || !this.running || this.queue.length === 0) return;
+    this.pumpScheduled = true;
+    const run = () => {
+      this.pumpScheduled = false;
+      void this.processNext();
+    };
+    if (yieldToEventLoop) setImmediate(run);
+    else queueMicrotask(run);
+  }
+
+  private async processNext(): Promise<void> {
+    if (this.processing || !this.running || this.queue.length === 0) return;
+    this.processing = true;
+    const first = this.queue[0]!;
+    try {
+      if (first.type === 'control') {
+        await this.processControl(first);
+      } else {
+        await this.processCaptureBatch(first);
+      }
+    } finally {
+      this.processing = false;
+    }
+    this.schedulePump(true);
+  }
+
+  private async processControl(item: ControlQueueItem): Promise<void> {
+    try {
+      const receipt = await this.requestRaw(item.command, item.timeoutMs, 0, 0);
+      if (this.queue[0] === item) this.queue.shift();
+      item.resolve(receipt);
+    } catch (error) {
+      const failure = error instanceof Error ? error : new Error(String(error));
+      this.lastRejectedDelivery = failure;
+      if (failure instanceof AnalyticsRecorderTransportError) {
+        // Keep the command in place. A committed-but-unacknowledged lifecycle
+        // operation is replayed only after the old helper has exited.
+        this.failure = failure;
+        return;
+      }
+      if (this.queue[0] === item) this.queue.shift();
+      item.reject(failure);
+    }
+  }
+
+  private async processCaptureBatch(first: CaptureQueueItem): Promise<void> {
+    const maximum = Math.max(1, this.options.maxBatchSize ?? 256);
+    const items: CaptureQueueItem[] = [];
+    while (items.length < maximum) {
+      const candidate = this.queue[items.length];
+      if (candidate?.type !== 'capture' || candidate.kind !== first.kind) break;
+      items.push(candidate);
+    }
+    this.queue.splice(0, items.length);
+    const bytes = items.reduce((sum, item) => sum + item.bytes, 0);
+    this.queuedRecords = Math.max(0, this.queuedRecords - items.length);
+    this.queuedBytes = Math.max(0, this.queuedBytes - bytes);
+    this.inFlightRecords = items.length;
+    this.inFlightBytes = bytes;
+    this.observePeak();
+
+    try {
+      const receipt = await this.requestRaw(
+        { type: 'captureBatch', items: items.map((item) => item.encoded) },
+        30_000,
+        items.length,
+        bytes,
+      ) as { rejections?: Array<{ index: number; code: string; error: string }> } | undefined;
+      const rejectedIndexes = new Set<number>();
+      for (const rejection of receipt?.rejections ?? []) {
+        if (!Number.isSafeInteger(rejection.index) || rejection.index < 0 || rejection.index >= items.length) {
+          throw new AnalyticsRecorderWorkerRequestError('Recorder returned an invalid capture rejection receipt.');
+        }
+        rejectedIndexes.add(rejection.index);
+        this.lastRejectedDelivery = new AnalyticsRecorderWorkerRequestError(rejection.error, rejection.code);
+      }
+      this.deliveryFailures += rejectedIndexes.size;
+      const acceptedItems = items.filter((_item, index) => !rejectedIndexes.has(index));
+      if (acceptedItems.length > 0) {
+        const acknowledgedAt = performance.now();
+        this.options.onDeliveryAcknowledged?.({
+          records: acceptedItems.length,
+          bytes: acceptedItems.reduce((sum, item) => sum + item.bytes, 0),
+          latencyMs: acceptedItems.map((item) => acknowledgedAt - item.enqueuedAtMs),
+          recordBytes: acceptedItems.map((item) => item.bytes),
+        });
+      }
+      this.failure = undefined;
+    } catch (error) {
+      const failure = error instanceof Error ? error : new Error(String(error));
+      this.deliveryFailures += items.length;
+      this.lastRejectedDelivery = failure;
+      // Ambiguous transport and definitive non-policy recorder failures retain
+      // the immutable ownership snapshot for an operational owner. Expected
+      // deletion-fence exclusions arrive as per-record acknowledgement receipts
+      // and therefore cannot discard unrelated batch members here.
+      this.queue.unshift(...items);
+      this.queuedRecords += items.length;
+      this.queuedBytes += bytes;
+      this.replayedRecords += failure instanceof AnalyticsRecorderTransportError ? items.length : 0;
+      this.failure = failure;
+      if (failure instanceof AnalyticsRecorderWorkerRequestError) this.rejectQueuedControls(failure);
+    } finally {
+      this.inFlightRecords = 0;
+      this.inFlightBytes = 0;
+      this.observePeak();
     }
   }
 
@@ -228,13 +552,23 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
       stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
     });
     this.child = child;
-    child.stderr?.on('data', () => undefined);
+    this.workerReady = false;
+    this.workerStderr = '';
+    child.stderr?.on('data', (chunk: Buffer | string) => {
+      this.workerStderr = `${this.workerStderr}${String(chunk)}`.slice(-8_192);
+    });
     child.on('message', (message: unknown) => this.onMessage(message));
     child.once('exit', (code, signal) => this.onExit(child, code, signal));
-    child.once('error', (error) => this.onFailure(error));
+    child.once('error', (error) => {
+      if (this.child === child) child.kill();
+      this.onFailure(error);
+    });
 
     await new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error('Analytics recorder worker startup timed out.')), this.options.startupTimeoutMs ?? 10_000);
+      const timeout = setTimeout(() => {
+        child.kill();
+        reject(new Error('Analytics recorder worker startup timed out.'));
+      }, this.options.startupTimeoutMs ?? 10_000);
       const onMessage = (raw: unknown) => {
         const message = raw as { type?: string; error?: string };
         if (message.type === 'ready') {
@@ -244,6 +578,7 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
         } else if (message.type === 'fatal') {
           clearTimeout(timeout);
           child.off('message', onMessage);
+          child.kill();
           reject(new Error(message.error ?? 'Analytics recorder worker failed to start.'));
         }
       };
@@ -254,98 +589,137 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
         reject(new Error(`Analytics recorder worker exited during startup (${code ?? signal ?? 'unknown'}).`));
       });
     });
+    // Publish replacement identity only after readiness and clear the old
+    // transport failure in the same turn, so callers cannot observe a new PID
+    // that still rejects ordered lifecycle commands for the old outage.
+    this.failure = undefined;
+    this.workerReady = true;
   }
 
-  private pump(): void {
-    this.pumpScheduled = false;
-    if (this.queue.length === 0) return;
-    const maxBatchSize = Math.max(1, this.options.maxBatchSize ?? 256);
-    while (this.queue.length > 0) {
-      const kind = this.queue[0]!.kind;
-      const subject = this.queue[0]!.subject;
-      const items: QueueItem[] = [];
-      while (items.length < maxBatchSize
-        && this.queue[0]?.kind === kind
-        && this.queue[0]?.subject === subject) {
-        items.push(this.queue.shift()!);
-      }
-      const bytes = items.reduce((sum, item) => sum + item.bytes, 0);
-      this.queuedBytes -= bytes;
-      this.inFlightRecords += items.length;
-      this.inFlightBytes += bytes;
-      this.observePeak();
-      const message = kind === 'observation'
-        ? { type: 'record', observations: items.map((item) => item.value) }
-        : { type: 'detail', captures: items.map((item) => item.value) };
-      void this.request(message, 30_000, items.length, bytes).catch((error) => {
-        this.deliveryFailures += items.length;
-        this.lastRejectedDelivery = error;
-      });
-    }
-  }
-
-  private request(
+  private requestRaw(
     message: Record<string, unknown>,
-    timeoutMs = 30_000,
-    records = 0,
-    bytes = 0,
+    timeoutMs: number,
+    records: number,
+    retainedBytes: number,
   ): Promise<unknown> {
     const child = this.child;
     if (!child?.connected) {
-      this.settleAccounting(records, bytes);
-      return Promise.reject(this.failure ?? new Error('Analytics recorder worker is not connected.'));
+      return Promise.reject(this.failure ?? new AnalyticsRecorderTransportError('Analytics recorder worker is not connected.'));
     }
     const requestId = this.nextRequestId++;
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
-        const pending = this.pending.get(requestId);
-        this.pending.delete(requestId);
-        if (pending) this.settleAccounting(pending.records, pending.bytes);
-        reject(new Error(`Analytics recorder request ${requestId} timed out.`));
+        if (!this.pending.delete(requestId)) return;
+        const error = new AnalyticsRecorderTransportError(`Analytics recorder request ${requestId} timed out.`);
+        reject(error);
+        if (this.child === child) child.kill();
       }, timeoutMs);
       this.pending.set(requestId, {
-        records,
-        bytes,
+        stopsWorker: message.type === 'shutdown',
         resolve: (value) => {
           clearTimeout(timeout);
-          this.settleAccounting(records, bytes);
           resolve(value);
         },
         reject: (error) => {
           clearTimeout(timeout);
-          this.settleAccounting(records, bytes);
           reject(error);
         },
       });
-      child.send({ ...message, requestId }, (error) => {
-        if (!error) return;
+
+      const sendStartedAt = performance.now();
+      let synchronousMs = 0;
+      child.send({ ...message, requestId }, (sendError) => {
+        const callbackLatencyMs = Math.max(0, performance.now() - sendStartedAt);
+        this.options.onProducerWorkMeasured?.({
+          stage: 'ipc-send',
+          records,
+          retainedBytes,
+          synchronousMs,
+          callbackLatencyMs,
+        });
+        if (!sendError) return;
         const pending = this.pending.get(requestId);
         this.pending.delete(requestId);
-        pending?.reject(error);
+        pending?.reject(new AnalyticsRecorderTransportError(sendError.message));
+        if (this.child === child) child.kill();
       });
+      synchronousMs = Math.max(0, performance.now() - sendStartedAt);
     });
   }
 
   private onMessage(raw: unknown): void {
-    const message = raw as { type?: string; requestId?: number; error?: string; receipt?: unknown };
+    const message = raw as { type?: string; requestId?: number; error?: string; errorCode?: string; receipt?: unknown };
     if ((message.type !== 'ack' && message.type !== 'error') || typeof message.requestId !== 'number') return;
     const pending = this.pending.get(message.requestId);
     if (!pending) return;
     this.pending.delete(message.requestId);
-    if (message.type === 'error') pending.reject(new Error(message.error ?? 'Analytics recorder request failed.'));
-    else pending.resolve(message.receipt);
+    if (message.type === 'error') {
+      pending.reject(new AnalyticsRecorderWorkerRequestError(
+        message.error ?? 'Analytics recorder request failed.',
+        message.errorCode,
+      ));
+    } else {
+      // Fence the intentional helper exit before resolving shutdown back into
+      // the async queue continuation; an exit event cannot race this marker.
+      if (pending.stopsWorker) this.stopping = true;
+      pending.resolve(message.receipt);
+    }
   }
 
   private onExit(child: ChildProcess, code: number | null, signal: NodeJS.Signals | null): void {
     if (this.child !== child) return;
     this.child = undefined;
-    if (!this.stopping) this.onFailure(new Error(`Analytics recorder worker exited (${code ?? signal ?? 'unknown'}).`));
+    this.workerReady = false;
+    if (!this.stopping) {
+      const diagnostic = this.workerStderr.trim();
+      this.onFailure(new AnalyticsRecorderTransportError(
+        `Analytics recorder worker exited (${code ?? signal ?? 'unknown'})${diagnostic ? `: ${diagnostic}` : '.'}`,
+      ));
+    }
   }
 
   private onFailure(error: Error): void {
-    this.failure ??= error;
-    for (const pending of this.pending.values()) pending.reject(this.failure);
+    this.failure = error;
+    for (const pending of this.pending.values()) pending.reject(
+      error instanceof AnalyticsRecorderTransportError
+        ? error
+        : new AnalyticsRecorderTransportError(error.message),
+    );
     this.pending.clear();
+    if (!this.stopping) this.scheduleAutomaticRecovery();
+  }
+
+  private scheduleAutomaticRecovery(): void {
+    if (this.stopping || this.recovery || this.child || this.running) return;
+    const maximum = Math.max(0, this.options.maxAutomaticRestarts ?? 1);
+    if (this.automaticRestartAttempts >= maximum) {
+      this.rejectQueuedControls(this.failure ?? new Error('Analytics recorder recovery exhausted.'));
+      return;
+    }
+    this.automaticRestartAttempts += 1;
+    this.recovery = (async () => {
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+      if (this.stopping || this.child) return;
+      try {
+        await this.startWorker();
+        this.failure = undefined;
+      } catch (error) {
+        this.failure = error instanceof Error ? error : new Error(String(error));
+      } finally {
+        this.recovery = undefined;
+      }
+      if (this.running) this.schedulePump();
+      else this.scheduleAutomaticRecovery();
+    })();
+  }
+
+  private rejectQueuedControls(error: Error): void {
+    const retained: QueueItem[] = [];
+    for (const item of this.queue) {
+      if (item.type === 'control') item.reject(error);
+      else retained.push(item);
+    }
+    this.queue = retained;
   }
 
   private subjectKey(subject: AnalyticsObservation['captureSubject']): string {
@@ -356,13 +730,9 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
     }
   }
 
-  private settleAccounting(records: number, bytes: number): void {
-    this.inFlightRecords = Math.max(0, this.inFlightRecords - records);
-    this.inFlightBytes = Math.max(0, this.inFlightBytes - bytes);
-  }
-
   private observePeak(): void {
-    this.peakRecords = Math.max(this.peakRecords, this.queue.length + this.inFlightRecords);
+    const records = this.queuedRecords + this.inFlightRecords;
+    this.peakRecords = Math.max(this.peakRecords, records);
     this.peakBytes = Math.max(this.peakBytes, this.queuedBytes + this.inFlightBytes);
   }
 

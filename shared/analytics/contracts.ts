@@ -317,6 +317,11 @@ export interface AnalyticsSink {
 export interface AnalyticsDetailCapture {
   schemaVersion: number;
   generationId: string;
+  /** Root-subject-qualified immutable producer origin. Unlike process IDs, this
+   * survives helper replacement and is safe to use in source identities. */
+  stableOriginId?: string;
+  producerKind?: AnalyticsProducerKind;
+  producer?: AnalyticsProducerIdentity;
   payloadId: string;
   sourceKey: string;
   observedAtMs: AnalyticsTimestampMs;
@@ -330,10 +335,15 @@ export interface AnalyticsDetailCapture {
     attemptId?: string;
     parentToolCallId?: string;
     outcome?: string;
+    captureStage?: string;
+    sourceVersion?: string;
   };
 }
 
 export interface AnalyticsDetailSink {
+  /** Optional bounded preflight for producers that have not yet cloned or
+   * serialized a large rich value. It acquires no ownership. */
+  preflightDetail?(value: unknown): void;
   /** Synchronous ownership transfer only. Implementations must not wait for
    * persistence or queue drainage and must fail visibly if capacity is absent. */
   submitDetail(capture: AnalyticsDetailCapture): void;
@@ -351,6 +361,9 @@ export interface AnalyticsObservation<Fields extends object = AnalyticsFields> {
   schemaVersion: number;
   generationId: string;
   producerKind: AnalyticsProducerKind;
+  /** Monotonic sequence in this producer process generation. Required for new
+   * production adapters; optional only for schema-v1/prototype compatibility. */
+  sourceSequence?: Int64Value;
   sourceKey: string;
   entityKind: AnalyticsEntityKind;
   entityKey: string;
@@ -653,6 +666,14 @@ export function validateAnalyticsObservation(value: unknown): ObservationValidat
       'must match the generation, observation kind, and source key',
     );
   }
+  if (value.sourceSequence !== undefined && value.sourceSequence !== null) {
+    validateInt64Field(value.sourceSequence, 'sourceSequence', issues, true);
+    try {
+      if (parseInt64(value.sourceSequence, 'sourceSequence') < 1n) {
+        addIssue(issues, 'sourceSequence', 'invalid_value', 'must start at 1');
+      }
+    } catch { /* the typed validation issue was already recorded */ }
+  }
   if (value.observedAtMs === undefined || value.observedAtMs === null) {
     addIssue(issues, 'observedAtMs', 'missing', 'is required');
   } else {
@@ -697,7 +718,14 @@ export function analyticsObservationRegistryKey(observation: Pick<AnalyticsObser
 /** Deterministic content identity used to distinguish exact redelivery from a
  * conflicting reuse of a source key. */
 export function analyticsObservationFingerprint<Fields extends object>(observation: AnalyticsObservation<Fields>): string {
-  return JSON.stringify(canonicalize(observation));
+  const { sourceSequence: _sourceSequence, producer, ...payload } = observation;
+  // Delivery sequence and process identity are transport receipts, not source
+  // payload. Excluding them permits exact replay after helper/producer
+  // replacement while build attribution remains conflict-checked.
+  return JSON.stringify(canonicalize({
+    ...payload,
+    producer: { buildId: producer.buildId },
+  }));
 }
 
 export interface AnalyticsObservationRegistry {

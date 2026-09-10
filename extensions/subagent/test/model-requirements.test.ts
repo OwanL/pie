@@ -792,4 +792,34 @@ test("terminal capture preserves every failover attempt and cancellation without
 	});
 	assert.equal(cancelled.details.results[0].analyticsCaptureStatus, "submitted");
 	assert.equal(deserialize(Buffer.from(captured[2].bytes)).stopReason, "aborted");
+
+	const thrown: any = await executeSingleTask({
+		params: { agent: "scout", task: "throw capture", bucket: "medium" },
+		ctx: makeCtx(callerModel),
+		agents: [makeAgent()],
+		runtimeCtx,
+		makeDetails: (results) => noOpDetails("single", results),
+		onUpdate: () => {},
+		signal: noSignal(),
+		selectionCtx: makeSelectionCtx({
+			callerModelInput: ["text"],
+			bucketAssignments: { small: [], medium: assignedModels("model-a"), frontier: [] },
+			registryModels: models,
+		}),
+		toolCallId: "throw-capture-tool",
+		parentUiBridge: undefined,
+		parentSessionId: "attempt-capture-root",
+		allToolNames: undefined,
+		_internal: {
+			clock: new ImmediateClock(),
+			runAttempt: async () => { throw new Error("provider threw authorization: Bearer secret-token-value"); },
+		},
+	});
+	assert.equal(thrown.details.results[0].analyticsCaptureStatus, "submitted");
+	const thrownSnapshot = deserialize(Buffer.from(captured[3].bytes));
+	assert.equal(thrownSnapshot.stopReason, "error");
+	assert.equal(thrownSnapshot.errorMessage, "provider threw authorization: [redacted]");
+	assert.deepEqual(captured.map((capture) => capture.metadata.outcome), ["error", "completed", "aborted", "error"]);
+	assert.ok(captured.every((capture) => capture.stableOriginId?.startsWith("subagent-origin:")));
+	assert.equal(new Set(captured.map((capture) => capture.payloadId)).size, captured.length);
 });

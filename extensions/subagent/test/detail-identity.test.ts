@@ -3,8 +3,8 @@ import test from 'node:test';
 
 import { extendSubagentLineage, nextChildIdentity } from '../runner.js';
 
-test('producer child identities are stable under single, parallel, and chain display reorder', () => {
-  const single = nextChildIdentity('worker', 'tool-single');
+test('producer child identities are root-qualified, restart-stable, and unaffected by display reorder', () => {
+  const single = nextChildIdentity('worker', 'tool-single', 'root-a');
   const parallel = [
     nextChildIdentity('scout', 'tool-parallel-a'),
     nextChildIdentity('worker', 'tool-parallel-b'),
@@ -18,6 +18,8 @@ test('producer child identities are stable under single, parallel, and chain dis
   assert.deepEqual(new Set(reordered), new Set(before));
   assert.equal(new Set(before).size, before.length);
   assert.ok(before.every((identity) => identity.includes(':child:')));
+  assert.equal(nextChildIdentity('worker', 'tool-single', 'root-a'), single, 'same stable origin redelivers the same identity');
+  assert.notEqual(nextChildIdentity('worker', 'tool-single', 'root-b'), single, 'a different root cannot collide');
 });
 
 test('nested attempts carry complete immutable ancestor lineage at every depth', () => {

@@ -207,7 +207,7 @@ async function runWithModelRetry(args: RunWithModelRetryArgs): Promise<SingleRes
 			break;
 		}
 
-		const attemptId = nextAttemptIdentity(args.agent.name, args.toolCallId);
+		const attemptId = nextAttemptIdentity(args.agent.name, args.toolCallId, args.childId, attempt + 1);
 		const identity: SubagentChildIdentity = {
 			childId: args.childId,
 			spawningToolCallId: args.toolCallId,
@@ -252,7 +252,42 @@ async function runWithModelRetry(args: RunWithModelRetryArgs): Promise<SingleRes
 				});
 			}
 			: undefined;
-		result = await subagentRuntime.run(runtimeCtx, () => args.runAttempt(resolved, attemptId, onAttemptUpdate));
+		const attemptStartedAt = clock.now();
+		try {
+			result = await subagentRuntime.run(runtimeCtx, () => args.runAttempt(resolved, attemptId, onAttemptUpdate));
+		} catch (error) {
+			const thrown = error as {
+				name?: string;
+				message?: string;
+				failureClass?: SingleResult["failureClass"];
+				retryable?: boolean;
+				replaySafety?: SingleResult["replaySafety"];
+				retryAfterMs?: number;
+				provider?: string;
+			};
+			const aborted = args.signal?.aborted === true || thrown.name === "AbortError";
+			const message = thrown.message || String(error);
+			result = {
+				agent: args.agent.name,
+				agentSource: args.agent.source,
+				task: args.task,
+				exitCode: 1,
+				messages: [],
+				stderr: message,
+				errorMessage: message,
+				usage: zeroUsage(),
+				model: resolved.modelOverride,
+				selectedModel: resolved.modelOverride,
+				provider: thrown.provider,
+				startedAt: attemptStartedAt,
+				completedAt: clock.now(),
+				stopReason: aborted ? "aborted" : "error",
+				failureClass: aborted ? "abort" : thrown.failureClass ?? "unknown",
+				retryable: aborted ? false : thrown.retryable === true,
+				replaySafety: aborted ? "terminal" : thrown.replaySafety ?? "terminal",
+				...(typeof thrown.retryAfterMs === "number" ? { retryAfterMs: thrown.retryAfterMs } : {}),
+			};
+		}
 		Object.assign(result, stampIdentity(result));
 		attachSelectionMetadata(result, resolved);
 		result.analyticsCaptureStatus = captureSubagentTerminalResult(
@@ -379,7 +414,11 @@ export async function executeSingleTask(args: {
 	// Snapshot optional parent context once so provider retries receive the same
 	// lean handoff even if the parent transcript advances while an attempt runs.
 	const parentUserContext = buildParentUserContext(params.userContext, ctx.sessionManager);
-	const childId = nextChildIdentity(agent.name, args.toolCallId);
+	const captureSubject = runtimeCtx.analyticsCapture?.captureSubject;
+	const rootOrigin = captureSubject
+		? JSON.stringify(captureSubject)
+		: args.parentSessionId ?? runtimeCtx.rootSessionPath ?? "unscoped";
+	const childId = nextChildIdentity(agent.name, args.toolCallId, rootOrigin);
 	const result = await runWithModelRetry({
 		agent,
 		excludeModels: new Set<string>(),

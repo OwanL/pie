@@ -227,6 +227,9 @@ export interface SingleResult {
 	/** Result of the nonwaiting rich-detail ownership handoff. `rejected` is an
 	 * explicit capture gap and never means the attempt failed to execute. */
 	analyticsCaptureStatus?: "disabled" | "submitted" | "rejected";
+	/** Sanitized visible reason for a rejected ownership handoff. Analytics
+	 * failure never changes the attempt's execution outcome. */
+	analyticsCaptureError?: string;
 	/** Bounded per-attempt analytics for this subagent dispatch (success + failed retries). */
 	attemptRecords?: SubagentAttemptRecord[];
 	/** One record per observable child provider response. Unlike aggregate usage,

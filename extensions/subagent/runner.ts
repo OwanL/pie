@@ -7,6 +7,7 @@
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
+import { createHash } from "node:crypto";
 import type { Message, Model } from "@mariozechner/pi-ai";
 import type {
 	AgentSession,
@@ -140,21 +141,28 @@ interface SubagentSdk {
 }
 
 let cachedSdkPromise: Promise<SubagentSdk> | undefined;
-let orphanAttemptCounter = 0;
-let childIdentityCounter = 0;
 
-/**
- * Generate a stable, globally-unique attempt identity. The same id is used for
- * orphan cleanup registry entries and per-attempt analytics, so a late-resolved
- * pre-spawn session can be correlated with its dispatch attempt.
- */
-export function nextAttemptIdentity(agentName: string, toolCallId: string | undefined): string {
-	return `${agentName}:${toolCallId ?? "no-tool-call"}:${orphanAttemptCounter++}`;
+function stableExecutionDigest(parts: readonly (string | number | undefined)[]): string {
+	return createHash("sha256").update(JSON.stringify(parts.map((part) => part ?? null))).digest("hex").slice(0, 32);
 }
 
-/** Allocate producer identity once when a logical child is created. */
-export function nextChildIdentity(agentName: string, toolCallId: string): string {
-	return `${agentName}:${toolCallId}:child:${childIdentityCounter++}`;
+/**
+ * Generate a restart-stable, root-qualified attempt identity. The retry ordinal
+ * is fixed before dispatch; process-local counters and mutable paths never
+ * participate in persisted source identity.
+ */
+export function nextAttemptIdentity(
+	agentName: string,
+	toolCallId: string | undefined,
+	rootOrigin = "unscoped",
+	retryOrdinal = 1,
+): string {
+	return `${agentName}:attempt:${stableExecutionDigest([rootOrigin, toolCallId, retryOrdinal])}`;
+}
+
+/** Allocate the immutable logical child identity from its stable root origin. */
+export function nextChildIdentity(agentName: string, toolCallId: string, rootOrigin = "unscoped"): string {
+	return `${agentName}:child:${stableExecutionDigest([rootOrigin, toolCallId])}`;
 }
 
 export function extendSubagentLineage(

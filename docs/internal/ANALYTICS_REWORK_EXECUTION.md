@@ -890,3 +890,103 @@ Checkpoint 10 was committed as `49ebed6234aaa87a7a40174c4463e837e16ba734` (`Reco
 P0 qualification gate`) and pushed normally to `origin/master`; a fresh fetch verified
 `HEAD == origin/master == 49ebed6234aaa87a7a40174c4463e837e16ba734`. Only this execution-record
 checkpoint was staged. The preserved candidate and `settings.json` remain dirty and uncommitted.
+
+## Checkpoint 11 — capture-boundary repair and bounded requalification (2026-09-11)
+
+### Scope and actual repairs
+
+This checkpoint repairs only the supported capture boundary from the failed Checkpoint 10 candidate.
+It does **not** select or activate the candidate engine. The recorder supervisor now takes synchronous
+ownership by one V8 serialization, retains immutable encoded envelopes, uses payload-sensitive
+record/byte bounds instead of the former flat 1-KiB estimate, maintains O(1) queue counters, and
+reports producer preflight, ownership-serialization, synchronous IPC-send and IPC callback-latency
+measurements under names that distinguish synchronous work from transport delay. An optional bounded
+preflight rejects obviously oversized rich values before the subagent performs its full clone.
+
+Capture and lifecycle commands now share one ordered queue. Only one time-sliced IPC batch is active;
+accepted capture cannot be overtaken by pending-create binding, deletion, flush or shutdown. A helper
+exit before shutdown acknowledgement follows the same bounded replacement/replay path as any other
+ambiguous transport failure. Replacement identity is not published before readiness. Accepted
+snapshots and their source identities are retained across ambiguous failure; definitive non-policy
+recorder errors remain visible and retained rather than caught and dropped. Durable deletion-fence
+rejections are returned per record, so forbidden private content is released under the explicit
+privacy policy without discarding or blocking unrelated members of the same IPC batch.
+
+The worker decodes immutable envelopes serially, keeps contiguous same-subject fact transactions,
+returns per-record deletion receipts, waits for acknowledgement transport before disconnecting, and
+re-applies the shared sanitizer immediately before detail reconstruction is serialized into any
+content-addressed/SQLite/WAL path. The sanitizer now covers nested mixed-case/camel/dash/underscore
+credential properties, generic/session tokens, proxy authorization, passphrases, credential-shaped
+text, and ASCII credential material embedded in Buffer, Uint8Array, ArrayBuffer and other views.
+
+Subagent child and attempt identities are deterministic hashes of stable root origin, tool call and
+retry ordinal rather than process-local counters or persisted paths. Completion, returned failures,
+cancellation, every failover attempt and pre-result thrown errors all produce independently owned
+terminal captures in attempt order. Capture rejection remains nonwaiting and cannot change execution
+outcome, but its sanitized reason is now visible on the result. Detail DTOs carry stable-origin and
+producer identity metadata for repaired producers.
+
+Focused coverage was added in:
+
+- `extension/test/analytics/recorder-supervisor.test.ts` and its isolated fixture: immutable mutation
+  isolation, payload-sensitive accounting, preflight, command ordering, per-record deletion policy,
+  shutdown-time failure recovery, ambiguous failover replay, no loss/reorder and no double-counted
+  replay peaks;
+- `extensions/subagent/test/model-requirements.test.ts` and `detail-identity.test.ts`: completion,
+  returned failure, cancellation, thrown error, retry ordering, stable root qualification and detached
+  rich content;
+- `extension/test/shared/analytics-contracts-metrics.test.ts`: nested/text/binary credential variants.
+
+### Evidence and acceptance boundary
+
+Final isolated validation after all repairs:
+
+- focused supervisor tests: 4 passed;
+- focused subagent terminal tests: 20 passed; stable-identity tests: 2 passed;
+- focused shared contracts/redaction tests: 15 passed;
+- focused SQLite recorder tests: 12 passed; canonical capture tests: 3 passed;
+- `npm test`: 6,858 passed, 0 failed, 29 skipped across all seven package groups;
+- `npm run typecheck`: all 18 projects passed;
+- `npm run lint`: passed;
+- `npm run extension:build:validate`: passed with coordinated host/webview output and no sync,
+  publication, installation, activation or restart.
+
+The final disposable 10k P0 harness run completed with `cleanup: true`. It observed 10,000 fact
+handoffs at p50 0.0070 ms, p95 0.0248 ms and max 2.4320 ms; a 2-MiB detail handoff at 1.1798 ms;
+17.0 MB peak bounded detail backlog; delayed-ack handoff at 0.6941 ms while flush observed 660.8 ms;
+250/250 replayed facts plus nested-detail reconstruction after helper kill; explicit oversized
+capacity rejection; and two visible private-race deletion rejections with zero surviving private
+facts/details and unrelated capture continuing. The standalone responsiveness proxy measured p95
+10.50 ms interval lag and 7.93% one-core producer CPU. This is bounded candidate evidence, not a live
+VS Code UI claim. The run intentionally did not execute or claim 1M, 10M, five-minute light-load,
+full endurance, or matched live UI baselines.
+
+One independent frontier review was requested only after the initial repairs and focused tests. It
+reported four supported findings: shutdown failure recovery, omitted token/authorization key forms,
+oversized pre-serialization work, and replay peak double-counting. All four were repaired and covered
+by the final tests above. The reviewer did not expose actual model/provider/thinking provenance. The
+inherited frontier pool was verified as exactly `github-copilot/gpt-5.6-sol` high then
+`openai-codex/gpt-5.6-sol` high, but absent attempt provenance means no independent qualified-design
+credit is claimed and no further child was invoked.
+
+The repaired capture subcomponent is accepted for inactive-candidate continuation on the bounded
+code/test evidence above. The committed worker transport deliberately detects an absent
+`bindPendingCreate` receiver; successful durable pending-subject migration in the harness came from
+the preserved unstaged storage candidate and remains storage-owner work, while this commit owns only
+admission/lifecycle ordering and visible receiver failure. Overall P0 remains **unqualified**: this checkpoint is not production engine
+selection and does not authorize P2b/P3/P4/P5/P6/P7, publication, activation, installation, live
+session closure, host restart, or deferred disruption. The loaded runtime and old analytics authority
+remain untouched.
+
+### Remaining storage/accounting ownership
+
+A fresh storage/accounting owner must still: (1) replace history-sized reconciliation/source maps with
+measured bounded state and prove delivered/unique/replayed/retained-byte accounting under multi-host
+scale; (2) define the specification-reserved durable outage/overflow owner without shortening 24-hour
+retention or silently discarding accepted capture; (3) prove credential removal from legacy SQLite
+pages, WAL/SHM, checkpoints and rewritten/vacuumed artifacts, including last-owner/new-reference and
+both deletion-order races; (4) complete detail range/total-length/completeness/omission contracts and
+query cancellation/freshness; and (5) run the remaining 1M/10M-or-justified, repeated endurance,
+entropy/reuse, upgrade/partial-write and matched analytics-disabled agent/UI gates. Legacy data remains
+preserved. Delivery is the single inactive-candidate repair commit containing this checkpoint; the
+terminal delivery record must supply and verify its exact `HEAD == origin/master` hash.
