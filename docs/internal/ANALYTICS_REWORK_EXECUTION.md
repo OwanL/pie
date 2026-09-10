@@ -661,3 +661,23 @@ One permitted independent reviewer was dispatched after the prototype settled, b
 returned no readable result to this worker; no reviewer approval or terminal provenance is claimed,
 and no replacement reviewer was dispatched. Session-scoped manifest/diff review, commit and push
 remain the integration barrier. No milestone commit/push is yet claimed here.
+
+### P0 prototype Git barrier receipt — 2026-09-10
+
+Commit `9f182782058136d213aa154464f7277d852127f1` (`Prototype analytics capture and SQLite
+qualification`) was pushed normally to `origin/master`; a fresh fetch verified
+`HEAD == origin/master == 9f182782058136d213aa154464f7277d852127f1`. Only the 18 P0/capture/lifecycle/
+recorder/build-test/evidence paths listed above were staged. The pre-existing user-owned
+`settings.json` diff is the sole remaining worktree change and was not staged or modified by this
+milestone.
+
+Source and tests are committed; emitted validation build identity `51d49b0c0dbc1941e394` is only a
+`build:validate` artifact and was not published or activated. The latest observed actually loaded
+runtime remains the old generation
+`65349a2e7ba29f220971b9d2e58d2763a5c4e479afcecd58d663cf7a1a8e6d72`, with ordinary analytics
+still owned by `data/outcomes/8c401ee313ff7786/`. Analytics generation activation, storage cutoff,
+session closure, host restart and cache activation therefore remain not performed. The next P2b owner owns the
+session-scoped cross-host mutation/revocation and artifact/expiry integration; the next P3 owner owns
+production recorder migrations/projections, bounded query/cancellation, asynchronous reconciliation
+and capacity-policy work after full selected-design qualification. A later P7 owner must build and
+rehearse the actual finite one-shot activation process; this helper prototype is not that authority.
