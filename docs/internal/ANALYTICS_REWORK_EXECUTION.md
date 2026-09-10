@@ -767,3 +767,31 @@ The actually loaded runtime remains the old generation
 activate a runtime. Next work is a bounded contract review and integration decision for the post-P0
 candidate, followed by the still-gated P2b/P3/P4/P5 work; do not claim P6 completion, production
 capture, live cutover, or restart activation from this checkpoint.
+
+### Checkpoint 9 — post-P0 contract review hold, 2026-09-10
+
+A bounded local review compared the dirty post-P0 candidate with the implementation contract. The
+candidate is a coherent future integration direction, but it remains intentionally uncommitted and is
+not an accepted P3/P4/P5 milestone. The following gates still require implementation and qualification:
+
+- The recorder does not yet persist the complete detail metadata contract (content/media/encoding/
+  completeness/capture-stage/source-version and omission/availability state), and its query seam has
+  no byte-range detail response or truncation/coverage metadata.
+- Pending-create binding and private deletion are recorder primitives only. The operational close owner
+  does not invoke them; the canonical StatsService branch leaves close deletion unwired, and the
+  pending-binding/deletion race needs an explicit privacy fixture and cleanup policy.
+- Source-sequence reconciliation is stored as a received-sequence projection, but the supervisor
+  protocol does not yet acknowledge contiguous fact/detail watermarks or surface capture-incomplete
+  evidence through the producer lifecycle.
+- Host canonical capture is constructed in legacy mode and the subagent seam currently captures only
+  terminal detail; actual provider/tool/execution producers, lifecycle ownership, and replacement query
+  consumers remain gated integration work.
+- The required engine-selection and production qualification envelope remains open: upgrade and
+  semantic fixtures beyond the bounded probe, sustained/light-load and topology comparisons, matched
+  analytics-disabled UI/agent baselines, capacity/loss policy, and activation/restart gates.
+
+No candidate source file or `settings.json` was staged or changed during this review. The separate
+execution-record update is committed as `13770285` and verified at `origin/master`; the loaded runtime
+and old analytics authority remain unchanged. An independent readable reviewer result was not
+available, so this hold is based on the local contract review and existing focused/full validation
+rather than an acceptance review.
