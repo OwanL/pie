@@ -6,6 +6,7 @@ import type {
   ThinkingLevel,
   ToolCall,
 } from '../../shared/protocol';
+import type { CanonicalAnalyticsCapture } from '../../analytics/canonical-capture.js';
 import type { ArchState } from '../core/arch-state';
 import type { Event } from '../core/events';
 import type { TaskBoundaryIntent, RunSnapshot, TurnLatencyMeasurement, TurnThroughputStatus } from '../run-analytics';
@@ -127,6 +128,9 @@ export interface StatsServiceOptions {
   getExperimentAssignment?: () => string | null;
   /** Resolve the catalog directory containing models.json for immutable pricing snapshots. */
   getAgentDir?: () => string | null;
+  /** Disabled/legacy by default. A canonical authority is injected only after
+   * P0/P2b/P5 activation prerequisites are independently accepted. */
+  analyticsCapture?: CanonicalAnalyticsCapture;
 }
 
 export function emptySessionRunState(): SessionRunState {

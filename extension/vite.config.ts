@@ -91,6 +91,8 @@ export default defineConfig(({ mode }) => {
             'worker-entry': path.join(srcDir, 'backend', 'worker-entry.ts'),
             'analytics-recorder-worker': path.join(srcDir, 'analytics', 'recorder-worker-entry.ts'),
             'analytics-recorder-supervisor': path.join(srcDir, 'analytics', 'recorder-supervisor.ts'),
+            'analytics-query-worker': path.join(srcDir, 'analytics', 'query-worker-entry.ts'),
+            'analytics-query-client': path.join(srcDir, 'analytics', 'query-client.ts'),
             'analytics-sqlite-recorder': path.join(srcDir, 'analytics', 'sqlite-recorder.ts'),
             'cold-browse-helper-entry': path.join(srcDir, 'backend', 'cold-browse-helper-entry.ts'),
             'initial-context-estimate-worker': path.join(srcDir, 'backend', 'initial-context-estimate-worker.ts'),

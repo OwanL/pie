@@ -22,6 +22,10 @@ import {
 } from '../billable-accounting/service';
 import type { ActivityIntervalRecord } from '../../shared/activity-interval';
 import type { SessionUsageSnapshot } from '../../shared/session-usage';
+import type {
+  AnalyticsSessionContext,
+  CanonicalAnalyticsCapture,
+} from '../../analytics/canonical-capture.js';
 
 /** One persistent structured startup-stage measurement, also mirrored in
  *  memory for tests/diagnostics. Emitted for storage.start, the persisted
@@ -54,9 +58,11 @@ export class StatsService implements RunObserver {
   private readonly workingTime: WorkingTimeService;
   private readonly accounting: BillableAccounting;
   private readonly activeBusyIntervalsBySession: Record<string, Set<string> | undefined> = {};
+  private readonly activeBusyStartedAtByInterval: Record<string, string | undefined> = {};
   private readonly activeToolIntervalBySessionAndTool: Record<string, string | undefined> = {};
   private readonly now: () => Date;
   private readonly createId: () => string;
+  private readonly canonicalCapture: CanonicalAnalyticsCapture | undefined;
   private startPromise: Promise<void> | null = null;
   private started = false;
   private disposed = false;
@@ -83,6 +89,7 @@ export class StatsService implements RunObserver {
     const createId = options.createId ?? defaultCreateId;
     this.now = now;
     this.createId = createId;
+    this.canonicalCapture = options.analyticsCapture?.enabled ? options.analyticsCapture : undefined;
     const getExperimentAssignment = options.getExperimentAssignment ?? (() => null);
     this.workingTime = new WorkingTimeService({
       now,
@@ -120,6 +127,7 @@ export class StatsService implements RunObserver {
       currentRunId: (sessionPath) => this.currentRunId(sessionPath),
       activeOperationId: (sessionPath) => this.activeOperationId(sessionPath),
       markDerivedExportDirty: () => this.storage.markDerivedExportDirty(),
+      ...(this.canonicalCapture ? { canonicalCapture: this.canonicalCapture } : {}),
     };
     accountingRef = new BillableAccounting(accountingDeps);
     this.accounting = accountingRef;
@@ -127,7 +135,9 @@ export class StatsService implements RunObserver {
       getArchState,
       dispatchArchEvent,
       scheduleRender: this.scheduleRender,
-      schedulePersist: (snapshotToAppend) => this.storage.schedulePersist(snapshotToAppend),
+      schedulePersist: this.canonicalCapture
+        ? () => undefined
+        : (snapshotToAppend) => this.storage.schedulePersist(snapshotToAppend),
       now,
       createId,
       getExperimentAssignment,
@@ -141,6 +151,12 @@ export class StatsService implements RunObserver {
   }
 
   async start(): Promise<void> {
+    // Canonical capture has no legacy restore/import fallback. P5 must replace
+    // legacy query consumers before P7 can select this authority.
+    if (this.canonicalCapture) {
+      this.started = true;
+      return;
+    }
     // Shutdown is terminal: never reactivate storage/restoration after it.
     if (this.disposed) {
       return;
@@ -376,6 +392,16 @@ export class StatsService implements RunObserver {
     return this.tracker.getMostRelevantRun(sessionPath)?.runId ?? null;
   }
 
+  private analyticsContext(sessionPath: string): AnalyticsSessionContext {
+    const identity = this.sessionIdentity(sessionPath);
+    return {
+      sessionId: identity.sessionId,
+      sessionPath,
+      runId: this.currentRunId(sessionPath),
+      operationId: this.activeOperationId(sessionPath),
+    };
+  }
+
   private activeOperationId(sessionPath: string): string | null {
     const operation = Object.values(this.getArchState().operations).find((candidate) => (
       !candidate.terminal
@@ -392,6 +418,12 @@ export class StatsService implements RunObserver {
    *  the current in-memory run and removes any already-written analytics for
    *  this session; the mode itself remains host-only. */
   async setSessionPrivacy(sessionPath: string, enabled: boolean): Promise<void> {
+    if (this.canonicalCapture) {
+      // Canonical privacy remains queryable while open. P2b owns the explicit
+      // close/delete barrier and will call the recorder deletion adapter; mode
+      // toggles alone must never erase or suppress capture.
+      return;
+    }
     const sessionId = this.getArchState().sessions.sessions.find((session) => session.path === sessionPath)?.sessionId;
     if (!enabled) {
       this.accounting.markSessionOrdinary(sessionPath, sessionId);
@@ -409,13 +441,32 @@ export class StatsService implements RunObserver {
   }
 
   prepareForSend(sessionPath: string, inputs: ComposerInput[], initialUserMessage = ''): string {
-    if (this.isPrivateSession(sessionPath)) return 'private-run';
-    return this.tracker.prepareForSend(sessionPath, inputs, initialUserMessage);
+    if (this.isPrivateSession(sessionPath) && !this.canonicalCapture) return 'private-run';
+    const runId = this.tracker.prepareForSend(sessionPath, inputs, initialUserMessage);
+    this.canonicalCapture?.captureExecution(
+      this.analyticsContext(sessionPath),
+      runId,
+      'begin',
+      `execution:${runId}:begin`,
+      this.now().getTime(),
+      { operationId: this.activeOperationId(sessionPath) ?? undefined, runId, operationKind: 'agent-run', source: 'host' },
+    );
+    return runId;
   }
 
   onAssistantTurnStarted(sessionPath: string, turnId: string): void {
     this.accounting.observeAssistantTurnStarted(sessionPath);
-    if (this.isPrivateSession(sessionPath)) return;
+    const context = this.analyticsContext(sessionPath);
+    const executionId = context.runId ?? context.operationId ?? `turn:${turnId}`;
+    this.canonicalCapture?.captureExecution(
+      context,
+      executionId,
+      'phase',
+      `turn:${turnId}:begin`,
+      this.now().getTime(),
+      { runId: context.runId ?? undefined, turnId, operationKind: 'assistant-turn', source: 'host' },
+    );
+    if (this.isPrivateSession(sessionPath) && !this.canonicalCapture) return;
     this.tracker.onAssistantTurnStarted(sessionPath, turnId);
   }
 
@@ -426,7 +477,15 @@ export class StatsService implements RunObserver {
     details: unknown,
   ): void {
     this.accounting.observeSkillPruningUsage(sessionPath, messageId, occurredAt, details);
-    if (this.isPrivateSession(sessionPath)) return;
+    const context = this.analyticsContext(sessionPath);
+    this.canonicalCapture?.captureFeature(
+      context,
+      `pruning:${messageId}`,
+      `pruning:${messageId}:observation`,
+      Date.parse(occurredAt),
+      { feature: 'pruning', decision: 'provider-settled', ruleVersion: 'legacy-adapter-v1' },
+    );
+    if (this.isPrivateSession(sessionPath) && !this.canonicalCapture) return;
     this.tracker.onSkillPruningUsage(sessionPath, messageId, occurredAt, details);
     this.syncWorkingTimeBreakdown(sessionPath);
   }
@@ -441,7 +500,24 @@ export class StatsService implements RunObserver {
     billing?: { modelId?: string; provider?: string; occurredAt?: string; operationId?: string },
   ): void {
     this.accounting.observeAssistantTurnEnded(sessionPath, turnId, durationMs, usage, status, billing);
-    if (this.isPrivateSession(sessionPath)) return;
+    const context = this.analyticsContext(sessionPath);
+    const executionId = context.runId ?? context.operationId ?? `turn:${turnId}`;
+    this.canonicalCapture?.captureExecution(
+      context,
+      executionId,
+      'phase',
+      `turn:${turnId}:end`,
+      billing?.occurredAt ? Date.parse(billing.occurredAt) : this.now().getTime(),
+      {
+        runId: context.runId ?? undefined,
+        turnId,
+        operationKind: 'assistant-turn',
+        source: 'host',
+        endedAtMs: billing?.occurredAt ? Date.parse(billing.occurredAt) : this.now().getTime(),
+        outcome: status ?? 'unknown',
+      },
+    );
+    if (this.isPrivateSession(sessionPath) && !this.canonicalCapture) return;
     this.tracker.onAssistantTurnEnded(sessionPath, turnId, durationMs, usage, status, latency);
     this.syncWorkingTimeBreakdown(sessionPath);
   }
@@ -455,14 +531,21 @@ export class StatsService implements RunObserver {
   }
 
   onToolStarted(sessionPath: string, toolCall: ToolCall): void {
-    if (this.isPrivateSession(sessionPath)) return;
+    this.canonicalCapture?.captureTool(
+      this.analyticsContext(sessionPath),
+      toolCall,
+      'begin',
+      `tool:${toolCall.id}:begin`,
+      toolCall.startedAt ?? this.now().getTime(),
+    );
+    if (this.isPrivateSession(sessionPath) && !this.canonicalCapture) return;
     this.tracker.onToolStarted(sessionPath, toolCall);
     this.workingTime.onToolStarted(sessionPath, toolCall);
     const runId = this.currentRunId(sessionPath);
     const intervalId = `activity:tool:${runId ?? sessionPath}:${toolCall.id}`;
     this.activeToolIntervalBySessionAndTool[this.toolIntervalKey(sessionPath, toolCall.id)] = intervalId;
     const startedAt = new Date(toolCall.startedAt ?? this.now().getTime()).toISOString();
-    this.accounting.activityTimeline.start({
+    const interval: ActivityIntervalRecord = {
       schemaVersion: 1,
       intervalId,
       sessionId: this.sessionIdentity(sessionPath).sessionId,
@@ -473,27 +556,57 @@ export class StatsService implements RunObserver {
       toolId: toolCall.id,
       kind: 'tool',
       startedAt,
-    });
-    this.storage.markDerivedExportDirty();
+    };
+    if (this.canonicalCapture) this.canonicalCapture.captureActivity(this.analyticsContext(sessionPath), interval);
+    else {
+      this.accounting.activityTimeline.start(interval);
+      this.storage.markDerivedExportDirty();
+    }
   }
 
   onToolFinished(sessionPath: string, toolCall: ToolCall): void {
     this.accounting.observeSubagentToolResult(sessionPath, toolCall);
-    if (this.isPrivateSession(sessionPath)) return;
+    this.canonicalCapture?.captureTool(
+      this.analyticsContext(sessionPath),
+      toolCall,
+      'end',
+      `tool:${toolCall.id}:end`,
+      toolCall.startedAt !== undefined && toolCall.durationMs !== undefined
+        ? toolCall.startedAt + toolCall.durationMs : this.now().getTime(),
+    );
+    if (this.isPrivateSession(sessionPath) && !this.canonicalCapture) return;
     // Close the live wall-time interval before durable telemetry catches up;
     // the service reconciles the two sources without double-counting.
     this.workingTime.onToolFinished(sessionPath, toolCall);
     const toolKey = this.toolIntervalKey(sessionPath, toolCall.id);
     const intervalId = this.activeToolIntervalBySessionAndTool[toolKey];
     if (intervalId) {
-      this.accounting.activityTimeline.settle(
-        intervalId,
-        new Date(toolCall.startedAt !== undefined && toolCall.durationMs !== undefined
-          ? toolCall.startedAt + toolCall.durationMs : this.now().getTime()).toISOString(),
-        toolCall.status === 'failed' ? 'failed' : 'succeeded',
-      );
+      const endedAt = new Date(toolCall.startedAt !== undefined && toolCall.durationMs !== undefined
+        ? toolCall.startedAt + toolCall.durationMs : this.now().getTime()).toISOString();
+      if (this.canonicalCapture) {
+        this.canonicalCapture.captureActivity(this.analyticsContext(sessionPath), {
+          schemaVersion: 1,
+          intervalId,
+          sessionId: this.sessionIdentity(sessionPath).sessionId,
+          sessionPath,
+          parentRunId: this.currentRunId(sessionPath),
+          parentOperationId: this.activeOperationId(sessionPath),
+          invocationId: null,
+          toolId: toolCall.id,
+          kind: 'tool',
+          startedAt: new Date(toolCall.startedAt ?? Date.parse(endedAt)).toISOString(),
+          endedAt,
+          outcome: toolCall.status === 'failed' ? 'failed' : 'succeeded',
+        });
+      } else {
+        this.accounting.activityTimeline.settle(
+          intervalId,
+          endedAt,
+          toolCall.status === 'failed' ? 'failed' : 'succeeded',
+        );
+        this.storage.markDerivedExportDirty();
+      }
       delete this.activeToolIntervalBySessionAndTool[toolKey];
-      this.storage.markDerivedExportDirty();
     }
     this.tracker.onToolFinished(sessionPath, toolCall);
     this.syncWorkingTimeBreakdown(sessionPath);
@@ -541,7 +654,7 @@ export class StatsService implements RunObserver {
     this.tracker.onAutoRetryMeasured(sessionPath, sourceId, measuredDelayMs, durationMs);
     const endedAtMs = this.now().getTime();
     const elapsed = Math.max(0, measuredDelayMs ?? durationMs);
-    this.accounting.activityTimeline.record({
+    const interval: ActivityIntervalRecord = {
       schemaVersion: 1,
       intervalId: `activity:retry-wait:${this.currentRunId(sessionPath) ?? sessionPath}:${sourceId}`,
       sessionId: this.sessionIdentity(sessionPath).sessionId,
@@ -554,8 +667,12 @@ export class StatsService implements RunObserver {
       startedAt: new Date(Math.max(0, endedAtMs - elapsed)).toISOString(),
       endedAt: new Date(endedAtMs).toISOString(),
       outcome: 'succeeded',
-    });
-    this.storage.markDerivedExportDirty();
+    };
+    if (this.canonicalCapture) this.canonicalCapture.captureActivity(this.analyticsContext(sessionPath), interval);
+    else {
+      this.accounting.activityTimeline.record(interval);
+      this.storage.markDerivedExportDirty();
+    }
     this.syncWorkingTimeBreakdown(sessionPath);
   }
 
@@ -589,7 +706,8 @@ export class StatsService implements RunObserver {
       const operationId = this.activeOperationId(sessionPath);
       const intervalId = `activity:busy:${operationId ?? runId ?? `${sessionPath}:${nowIso}`}`;
       (this.activeBusyIntervalsBySession[sessionPath] ??= new Set()).add(intervalId);
-      this.accounting.activityTimeline.start({
+      this.activeBusyStartedAtByInterval[intervalId] = nowIso;
+      const interval: ActivityIntervalRecord = {
         schemaVersion: 1,
         intervalId,
         sessionId: this.sessionIdentity(sessionPath).sessionId,
@@ -600,15 +718,35 @@ export class StatsService implements RunObserver {
         toolId: null,
         kind: 'busy',
         startedAt: nowIso,
-      });
+      };
+      if (this.canonicalCapture) this.canonicalCapture.captureActivity(this.analyticsContext(sessionPath), interval);
+      else this.accounting.activityTimeline.start(interval);
     } else if (!busy) {
       const intervalIds = this.activeBusyIntervalsBySession[sessionPath];
       for (const intervalId of intervalIds ?? []) {
-        this.accounting.activityTimeline.settle(intervalId, nowIso, 'succeeded');
+        if (this.canonicalCapture) {
+          this.canonicalCapture.captureActivity(this.analyticsContext(sessionPath), {
+            schemaVersion: 1,
+            intervalId,
+            sessionId: this.sessionIdentity(sessionPath).sessionId,
+            sessionPath,
+            parentRunId: this.currentRunId(sessionPath),
+            parentOperationId: this.activeOperationId(sessionPath),
+            invocationId: null,
+            toolId: null,
+            kind: 'busy',
+            startedAt: this.activeBusyStartedAtByInterval[intervalId] ?? nowIso,
+            endedAt: nowIso,
+            outcome: 'succeeded',
+          });
+        } else {
+          this.accounting.activityTimeline.settle(intervalId, nowIso, 'succeeded');
+        }
+        delete this.activeBusyStartedAtByInterval[intervalId];
       }
       delete this.activeBusyIntervalsBySession[sessionPath];
     }
-    this.storage.markDerivedExportDirty();
+    if (!this.canonicalCapture) this.storage.markDerivedExportDirty();
     this.syncWorkingTimeBreakdown(sessionPath);
   }
 
@@ -628,6 +766,20 @@ export class StatsService implements RunObserver {
   }
 
   onSessionClosed(sessionPath: string): void {
+    if (this.canonicalCapture) {
+      // Session-close retention/deletion is deliberately not inferred here.
+      // P2b resolves the durable close disposition before invoking recorder
+      // deletion; this observer only releases producer-local correlation.
+      this.tracker.onSessionClosed(sessionPath);
+      this.accounting.onSessionClosed(sessionPath);
+      const intervals = this.activeBusyIntervalsBySession[sessionPath];
+      for (const intervalId of intervals ?? []) delete this.activeBusyStartedAtByInterval[intervalId];
+      delete this.activeBusyIntervalsBySession[sessionPath];
+      for (const key of Object.keys(this.activeToolIntervalBySessionAndTool)) {
+        if (key.startsWith(`${sessionPath}\0`)) delete this.activeToolIntervalBySessionAndTool[key];
+      }
+      return;
+    }
     if (this.isPrivateSession(sessionPath)) {
       const sessionId = this.getArchState().sessions.sessions.find((session) => session.path === sessionPath)?.sessionId;
       this.workingTime.resetSession(sessionPath, false);
@@ -672,6 +824,7 @@ export class StatsService implements RunObserver {
   }
 
   async queryRunAnalytics(): Promise<RunAnalyticsQueryResult> {
+    if (this.canonicalCapture) throw new Error('Canonical analytics read model is not wired; P5 activation fence remains closed.');
     await this.start();
     return this.filterPrivateAnalytics(await this.storage.queryRunAnalytics());
   }
@@ -716,11 +869,13 @@ export class StatsService implements RunObserver {
   /** Query the completed-data cache source without forcing pending analytics
    * to flush. Intended for mtime-gated host rollups. */
   async queryPersistedRunAnalytics(): Promise<RunAnalyticsQueryResult> {
+    if (this.canonicalCapture) throw new Error('Canonical analytics read model is not wired; P5 activation fence remains closed.');
     await this.start();
     return this.filterPrivateAnalytics(await this.storage.queryPersistedRunAnalytics());
   }
 
   async exportRunAnalytics(targetPath: string): Promise<RunAnalyticsExportPayload> {
+    if (this.canonicalCapture) throw new Error('Canonical analytics export is not wired; P5 activation fence remains closed.');
     await this.start();
     const privatePaths = new Set(
       Object.entries(this.getArchState().sessions.privacyModeBySession)
@@ -737,6 +892,7 @@ export class StatsService implements RunObserver {
   }
 
   async flush(): Promise<void> {
+    if (this.canonicalCapture) return;
     this.accounting.retryPendingWrites();
     this.accounting.activityTimeline.flush();
     await this.storage.flush();
@@ -745,6 +901,11 @@ export class StatsService implements RunObserver {
   }
 
   async shutdown(): Promise<void> {
+    if (this.canonicalCapture) {
+      this.disposed = true;
+      this.backgroundCompactionAbort.abort();
+      return;
+    }
     // Terminal: block start reactivation immediately, then drain the tracked
     // background promise (defer, healing, migration) — healing stops at its
     // next bounded batch and the in-flight migration at its next run

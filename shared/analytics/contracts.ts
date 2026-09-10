@@ -102,7 +102,10 @@ export interface AnalyticsUsageChannels {
 }
 
 export interface AnalyticsPricingSnapshot {
-  normalizationVersion: string;
+  /** Usage/channel normalization algorithm, independent of catalog identity. */
+  normalizationVersion: 'oracle-v1';
+  /** Immutable pricing-catalog content identity used for historical reproduction. */
+  catalogVersion?: string;
   currency: 'USD';
   inputUsdPerMillionTokens?: number | null;
   outputUsdPerMillionTokens?: number | null;
@@ -125,6 +128,13 @@ export interface AnalyticsProviderCallFields extends AnalyticsUsageChannels {
   settledAtMs?: Int64Value | null;
   outcome?: string;
   reportedCostUsd?: number | null;
+  /** Producer-calculated cost is usable only when calculatedCostComplete is true. */
+  calculatedCostUsd?: number | null;
+  calculatedCostComplete?: boolean;
+  /** Explicit provider protocol conventions used to normalize overlapping channels. */
+  inputIncludesCache?: boolean;
+  outputIncludesReasoning?: boolean;
+  cacheChannelsOmittedAsZero?: boolean;
   pricing?: AnalyticsPricingSnapshot | null;
   coverage?: AnalyticsCoverage;
   errorDetailId?: string | null;
@@ -326,7 +336,7 @@ export interface AnalyticsDetailCapture {
   sourceKey: string;
   observedAtMs: AnalyticsTimestampMs;
   captureSubject: AnalyticsCaptureSubject;
-  mediaType: 'application/x-pie-subagent-result';
+  mediaType: 'application/x-pie-subagent-result' | 'application/x-pie-tool-observation';
   encoding: 'node-v8';
   complete: true;
   bytes: Uint8Array;
@@ -361,6 +371,9 @@ export interface AnalyticsObservation<Fields extends object = AnalyticsFields> {
   schemaVersion: number;
   generationId: string;
   producerKind: AnalyticsProducerKind;
+  /** Stable identity for one producer sequence stream. It must survive recorder
+   * helper replacement and must not contain a transcript/session path. */
+  stableOriginId?: string;
   /** Monotonic sequence in this producer process generation. Required for new
    * production adapters; optional only for schema-v1/prototype compatibility. */
   sourceSequence?: Int64Value;
@@ -666,6 +679,7 @@ export function validateAnalyticsObservation(value: unknown): ObservationValidat
       'must match the generation, observation kind, and source key',
     );
   }
+  if (value.stableOriginId !== undefined) validateId(value.stableOriginId, 'stableOriginId', issues);
   if (value.sourceSequence !== undefined && value.sourceSequence !== null) {
     validateInt64Field(value.sourceSequence, 'sourceSequence', issues, true);
     try {
@@ -718,9 +732,9 @@ export function analyticsObservationRegistryKey(observation: Pick<AnalyticsObser
 /** Deterministic content identity used to distinguish exact redelivery from a
  * conflicting reuse of a source key. */
 export function analyticsObservationFingerprint<Fields extends object>(observation: AnalyticsObservation<Fields>): string {
-  const { sourceSequence: _sourceSequence, producer, ...payload } = observation;
-  // Delivery sequence and process identity are transport receipts, not source
-  // payload. Excluding them permits exact replay after helper/producer
+  const { sourceSequence: _sourceSequence, stableOriginId: _stableOriginId, producer, ...payload } = observation;
+  // Delivery sequence/origin and process identity are transport receipts, not
+  // source payload. Excluding them permits exact replay after helper/producer
   // replacement while build attribution remains conflict-checked.
   return JSON.stringify(canonicalize({
     ...payload,

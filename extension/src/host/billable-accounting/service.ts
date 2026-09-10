@@ -102,6 +102,11 @@ export interface BillableAccountingDeps {
   activeOperationId: (sessionPath: string) => string | null;
   /** Flag derived exports (checkpoint/JSONL) as needing regeneration. */
   markDerivedExportDirty: () => void;
+  /** Canonical capture is an exclusive authority switch, never a dual-write.
+   * Omitted for the legacy authority and historical tests. */
+  canonicalCapture?: {
+    captureProviderSettlement(record: BillableInvocationRecord): 'disabled' | 'submitted' | 'rejected';
+  };
 }
 
 interface AppendUsageOptions {
@@ -879,8 +884,10 @@ export class BillableAccounting {
     const stableSessionId = options.sessionId ?? identity.sessionId;
     const kind = options.kind ?? ledgerKind(sample.kind);
     const invocationId = stableInvocationId(stableSessionId ?? sessionPath, kind, sample.sourceId);
-    const existing = options.existingRecords?.get(invocationId)
-      ?? this.invocationLedger.projectAll().records.find((record) => record.invocationId === invocationId);
+    const existing = this.deps.canonicalCapture ? undefined : (
+      options.existingRecords?.get(invocationId)
+      ?? this.invocationLedger.projectAll().records.find((record) => record.invocationId === invocationId)
+    );
     if (existing) {
       if (!options.skipExistingActivity) {
         this.invocationLedger.transaction(() => this.recordInvocationActivity(existing));
@@ -949,6 +956,18 @@ export class BillableAccounting {
       providerTotalTokens: sample.providerTotalTokens ?? sample.totalTokens,
       ...costEvidence,
     };
+    if (this.deps.canonicalCapture) {
+      const capture = this.deps.canonicalCapture.captureProviderSettlement(record);
+      if (capture === 'rejected') {
+        appendPieLog('warn', 'canonical-analytics', 'provider settlement capture rejected', {
+          invocationId: record.invocationId,
+          sourceId: record.sourceId,
+        });
+      }
+      // Canonical mode never falls through to the legacy JSONL ledger. P5 will
+      // move query consumers before P7 is allowed to select this authority.
+      return { invocationId, appendedDurable: false };
+    }
     try {
       const appendedDurable = this.persistInvocationRecord(record, options.deferredActivity);
       options.existingRecords?.set(record.invocationId, record);

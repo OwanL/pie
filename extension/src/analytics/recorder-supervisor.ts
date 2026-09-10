@@ -7,6 +7,7 @@ import type {
   AnalyticsObservation,
   AnalyticsSink,
 } from '../../../shared/analytics/contracts.js';
+import type { ProducerReconciliation } from './sqlite-recorder.js';
 
 export interface AnalyticsSubjectBindingReceipt {
   pendingOperationId: string;
@@ -53,6 +54,10 @@ export interface AnalyticsRecorderSupervisorOptions {
     bytes: number;
     latencyMs: number[];
     recordBytes: number[];
+    /** Recorder-durable contiguous acknowledgements for producers represented
+     * in this IPC batch. */
+    producerReconciliation: ProducerReconciliation[];
+    completeDetailWatermark: number | string;
   }) => void;
   onProducerWorkMeasured?: (measurement: AnalyticsRecorderProducerMeasurement) => void;
 }
@@ -127,7 +132,17 @@ function minimumOwnedBytes(value: unknown, stopAfter: number): number {
 export interface AnalyticsRecorderWorkerStats {
   process: NodeJS.MemoryUsage & { cpuUsage: NodeJS.CpuUsage };
   recorder: Record<string, number>;
-  detailStorage: Record<string, number>;
+  detailStorage: Record<string, number | string>;
+  delivery: Record<string, unknown>;
+  startupPrivacyRecovery: {
+    completed: string[];
+    pending: Array<{ rootSessionId: string; error: string }>;
+  };
+}
+
+export interface AnalyticsRecorderDeliveryWatermarks {
+  producerReconciliation: ProducerReconciliation[];
+  completeDetailWatermark: number | string;
 }
 
 export interface AnalyticsRecorderBacklog {
@@ -202,6 +217,10 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
   private recovery: Promise<void> | undefined;
   private lastRejectedDelivery: Error | undefined;
   private workerStderr = '';
+  private acknowledgedWatermarks: AnalyticsRecorderDeliveryWatermarks = {
+    producerReconciliation: [],
+    completeDetailWatermark: 0,
+  };
 
   constructor(private readonly options: AnalyticsRecorderSupervisorOptions) {}
 
@@ -223,6 +242,16 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
 
   get lastDeliveryError(): Error | undefined {
     return this.lastRejectedDelivery;
+  }
+
+  get deliveryWatermarks(): AnalyticsRecorderDeliveryWatermarks {
+    return {
+      producerReconciliation: this.acknowledgedWatermarks.producerReconciliation.map((entry) => ({
+        ...entry,
+        visibleGaps: entry.visibleGaps.map((gap) => ({ ...gap })),
+      })),
+      completeDetailWatermark: this.acknowledgedWatermarks.completeDetailWatermark,
+    };
   }
 
   get backlog(): AnalyticsRecorderBacklog {
@@ -310,9 +339,12 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
     rootSessionId: string,
     sourceKey: string,
     timestampMs: number | string | bigint,
+    pendingOperationId?: string,
   ): Promise<AnalyticsDeleteReceipt | undefined> {
     if (!this.options.enabled) return undefined;
-    return this.enqueueControl({ type: 'deleteSession', rootSessionId, sourceKey, timestampMs }) as Promise<AnalyticsDeleteReceipt>;
+    return this.enqueueControl({
+      type: 'deleteSession', rootSessionId, sourceKey, timestampMs, pendingOperationId,
+    }) as Promise<AnalyticsDeleteReceipt>;
   }
 
   async workerStats(): Promise<AnalyticsRecorderWorkerStats | undefined> {
@@ -497,7 +529,14 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
         30_000,
         items.length,
         bytes,
-      ) as { rejections?: Array<{ index: number; code: string; error: string }> } | undefined;
+      ) as ({
+        rejections?: Array<{ index: number; code: string; error: string }>;
+        producerReconciliation?: ProducerReconciliation[];
+        completeDetailWatermark?: number | string;
+      }) | undefined;
+      const producerReconciliation = receipt?.producerReconciliation ?? [];
+      const completeDetailWatermark = receipt?.completeDetailWatermark ?? this.acknowledgedWatermarks.completeDetailWatermark;
+      this.acknowledgedWatermarks = { producerReconciliation, completeDetailWatermark };
       const rejectedIndexes = new Set<number>();
       for (const rejection of receipt?.rejections ?? []) {
         if (!Number.isSafeInteger(rejection.index) || rejection.index < 0 || rejection.index >= items.length) {
@@ -515,6 +554,8 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
           bytes: acceptedItems.reduce((sum, item) => sum + item.bytes, 0),
           latencyMs: acceptedItems.map((item) => acknowledgedAt - item.enqueuedAtMs),
           recordBytes: acceptedItems.map((item) => item.bytes),
+          producerReconciliation,
+          completeDetailWatermark,
         });
       }
       this.failure = undefined;

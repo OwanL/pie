@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { serialize } from 'node:v8';
+import { deserialize, serialize } from 'node:v8';
 
 import {
   ANALYTICS_SCHEMA_VERSION,
@@ -12,38 +13,61 @@ import {
   type AnalyticsDetailCapture,
   type AnalyticsObservation,
 } from '../../../shared/analytics/contracts.js';
-import { SqliteAnalyticsRecorder } from '../../src/analytics/sqlite-recorder.js';
+import {
+  AnalyticsPrivacyScrubPendingError,
+  SqliteAnalyticsRecorder,
+} from '../../src/analytics/sqlite-recorder.js';
 import { SessionLifecycleStore } from '../../src/backend/session-lifecycle-store.js';
+
+interface TestDatabase {
+  close(): void;
+  exec(sql: string): void;
+  prepare(sql: string): { get(...params: unknown[]): unknown };
+}
+
+const { DatabaseSync } = createRequire(process.execPath)('node:sqlite') as {
+  DatabaseSync: new (location: string, options?: { readOnly?: boolean }) => TestDatabase;
+};
 
 function observation(options: {
   sourceKey: string;
   rootSessionId?: string;
   invocationId?: string;
+  entityKind?: AnalyticsObservation['entityKind'];
+  entityKey?: string;
+  observationKind?: AnalyticsObservation['observationKind'];
   observedAtMs?: number | string | bigint;
+  sourceSequence?: number | string | bigint;
   fields?: Record<string, unknown>;
+  captureSubject?: AnalyticsObservation['captureSubject'];
+  stableOriginId?: string;
+  processGeneration?: string;
 }): AnalyticsObservation {
   const rootSessionId = options.rootSessionId ?? 'root-a';
+  const captureSubject = options.captureSubject ?? { kind: 'session' as const, rootSessionId };
   const base = {
     schemaVersion: ANALYTICS_SCHEMA_VERSION,
     generationId: 'generation-1',
     producerKind: 'test',
+    stableOriginId: options.stableOriginId,
     sourceKey: options.sourceKey,
-    entityKind: options.invocationId ? 'providerCall' : 'execution',
-    entityKey: options.invocationId ?? options.sourceKey,
-    observationKind: options.invocationId ? 'providerSettlement' : 'end',
+    entityKind: options.entityKind ?? (options.invocationId ? 'providerCall' : 'execution'),
+    entityKey: options.entityKey ?? options.invocationId ?? options.sourceKey,
+    observationKind: options.observationKind ?? (options.invocationId ? 'providerSettlement' : 'end'),
     observedAtMs: options.observedAtMs ?? 1_750_000_000_000,
     scope: {
       workspaceCoverage: 'known' as const,
       workspaceId: 'workspace-a',
-      rootSessionId,
+      ...(captureSubject.kind === 'session' ? { rootSessionId } : {}),
       invocationId: options.invocationId,
     },
-    captureSubject: { kind: 'session' as const, rootSessionId },
-    producer: { buildId: 'test-build', processGeneration: 'test-process-1' },
+    captureSubject,
+    producer: { buildId: 'test-build', processGeneration: options.processGeneration ?? 'test-process-1' },
     fields: options.fields ?? { outcome: 'success' },
   };
   return {
     ...base,
+    ...(options.sourceSequence === undefined ? {} : { sourceSequence: options.sourceSequence }),
     idempotencyKey: deriveAnalyticsIdempotencyKey(base),
   };
 }
@@ -52,6 +76,7 @@ function detail(options: {
   payloadId: string;
   rootSessionId?: string;
   value: unknown;
+  captureSubject?: AnalyticsDetailCapture['captureSubject'];
 }): AnalyticsDetailCapture {
   const rootSessionId = options.rootSessionId ?? 'root-a';
   return {
@@ -60,7 +85,7 @@ function detail(options: {
     payloadId: options.payloadId,
     sourceKey: options.payloadId,
     observedAtMs: 1_750_000_000_000,
-    captureSubject: { kind: 'session', rootSessionId },
+    captureSubject: options.captureSubject ?? { kind: 'session', rootSessionId },
     mediaType: 'application/x-pie-subagent-result',
     encoding: 'node-v8',
     complete: true,
@@ -126,6 +151,13 @@ test('linked detail storage reconstructs exact rich results and deduplicates nes
 
     assert.throws(
       () => recorder.submitDetail({ ...childCapture, bytes: serialize({ changed: true }) }),
+      AnalyticsSourceConflictError,
+    );
+    assert.throws(
+      () => recorder.submitDetail({
+        ...childCapture,
+        metadata: { ...childCapture.metadata, sourceVersion: 'detail-v2' },
+      }),
       AnalyticsSourceConflictError,
     );
 
@@ -207,6 +239,717 @@ test('capture and query remain available while privacy is on, then explicit clos
   }
 });
 
+test('v1 upgrade retains facts, detail, deletion fences, accounting, and source reconciliation', () => {
+  const temp = tempDatabase();
+  let recorder = new SqliteAnalyticsRecorder(temp.databasePath);
+  try {
+    recorder.submit(observation({
+      sourceKey: 'legacy-settlement',
+      rootSessionId: 'root-retained',
+      invocationId: 'legacy-invocation',
+      sourceSequence: 1,
+      fields: {
+        invocationId: 'legacy-invocation',
+        provider: 'legacy-provider',
+        dispatchedModel: 'legacy-model',
+        purpose: 'conversation',
+        outcome: 'success',
+        settledAtMs: '9223372036854775807',
+        inputTokens: '9007199254740993',
+        outputTokens: 7,
+        cacheReadTokens: null,
+        calculatedCostUsd: 0.125,
+        calculatedCostComplete: true,
+        coverage: 'known',
+      },
+    }));
+    recorder.submitDetail(detail({ payloadId: 'legacy-detail', rootSessionId: 'root-retained', value: { retained: true } }));
+    recorder.deleteSession('root-deleted', 'legacy-delete', 50);
+    recorder.close();
+
+    const raw = new DatabaseSync(temp.databasePath);
+    try {
+      raw.exec(`
+        DROP INDEX analytics_pending_subject_root_idx;
+        DROP INDEX analytics_provider_settlement_subject_idx;
+        DROP INDEX analytics_provider_settlement_root_idx;
+        DROP INDEX analytics_provider_settlement_dimensions_idx;
+        DROP INDEX analytics_execution_root_idx;
+        DROP INDEX analytics_execution_state_root_idx;
+        DROP INDEX analytics_tool_root_idx;
+        DROP INDEX analytics_tool_identity_idx;
+        DROP INDEX analytics_tool_state_root_idx;
+        DROP INDEX analytics_activity_root_idx;
+        DROP INDEX analytics_activity_identity_idx;
+        DROP INDEX analytics_activity_state_root_idx;
+        DROP INDEX analytics_feature_root_idx;
+        DROP INDEX analytics_feature_dimensions_idx;
+        DROP TABLE analytics_provider_settlements;
+        DROP TABLE analytics_provider_accounting_projections;
+        DROP TABLE analytics_execution_observations;
+        DROP TABLE analytics_execution_states;
+        DROP TABLE analytics_tool_observations;
+        DROP TABLE analytics_tool_states;
+        DROP TABLE analytics_activity_observations;
+        DROP TABLE analytics_activity_states;
+        DROP TABLE analytics_feature_observations;
+        DROP TABLE analytics_producer_sequences;
+        DROP TABLE analytics_producer_reconciliation;
+        DROP TABLE analytics_pending_subject_bindings;
+        DROP TABLE analytics_projection_state;
+        DROP VIEW analytics_provider_usage_v1;
+        DROP TRIGGER analytics_detail_reference_last_owner_cleanup;
+        DROP TABLE analytics_delivery_accounting;
+        DROP TABLE analytics_generations;
+        ALTER TABLE analytics_detail_payloads DROP COLUMN omission_reason;
+        ALTER TABLE analytics_detail_payloads DROP COLUMN source_version;
+        ALTER TABLE analytics_detail_payloads DROP COLUMN capture_stage;
+        ALTER TABLE analytics_detail_payloads DROP COLUMN complete;
+        ALTER TABLE analytics_detail_payloads DROP COLUMN source_encoding;
+        ALTER TABLE analytics_detail_payloads DROP COLUMN media_type;
+        ALTER TABLE analytics_deleted_subjects DROP COLUMN scrub_error;
+        ALTER TABLE analytics_deleted_subjects DROP COLUMN scrub_state;
+        PRAGMA user_version = 1;
+      `);
+    } finally {
+      raw.close();
+    }
+
+    recorder = new SqliteAnalyticsRecorder(temp.databasePath);
+    assert.equal(recorder.getDatabaseSchemaVersion(), 3);
+    assert.equal(recorder.readDeliveryAccounting().deliveryHistoryCoverage, 'retained_only');
+    assert.equal(recorder.countObservations('root-retained'), 1);
+    assert.deepEqual(recorder.reconstructDetail('legacy-detail'), { retained: true });
+    assert.deepEqual(recorder.readProviderSettlements(), {
+      revision: 1,
+      settlements: [{
+        generationId: 'generation-1',
+        invocationId: 'legacy-invocation',
+        rootSessionId: 'root-retained',
+        provider: 'legacy-provider',
+        model: 'legacy-model',
+        dispatchedModel: 'legacy-model',
+        reportedModel: null,
+        purpose: 'conversation',
+        outcome: 'success',
+        settledAtMs: '9223372036854775807',
+        usage: {
+          inputTokens: '9007199254740993',
+          outputTokens: 7,
+          cacheReadTokens: null,
+          cacheWriteTokens: null,
+          reasoningTokens: null,
+          providerTotalTokens: null,
+        },
+        reportedCostUsd: null,
+        calculatedCostUsd: 0.125,
+        calculatedCostComplete: true,
+        normalizedUsage: {
+          baseInputTokens: null,
+          outputTokens: null,
+          cacheReadTokens: null,
+          cacheWriteTokens: null,
+          reasoningTokens: null,
+          totalTokens: null,
+          reasoningIncludedInOutput: null,
+          complete: false,
+        },
+        effectiveCostUsd: 0.125,
+        effectiveCostSource: 'calculated',
+        effectiveCostCoverage: 'known',
+        revision: 1,
+      }],
+    });
+    assert.deepEqual(recorder.readProducerReconciliation().map(({ contiguousWatermark, highestObservedSequence, visibleGaps }) => ({
+      contiguousWatermark,
+      highestObservedSequence,
+      visibleGaps,
+    })), [{ contiguousWatermark: 1, highestObservedSequence: 1, visibleGaps: [] }]);
+    assert.throws(
+      () => recorder.submit(observation({ sourceKey: 'late-legacy', rootSessionId: 'root-deleted' })),
+      /capture subject is deleted/,
+    );
+  } finally {
+    recorder.close();
+    rmSync(temp.root, { recursive: true, force: true });
+  }
+});
+
+test('pending-create binding atomically moves facts/detail and makes private deletion authoritative', () => {
+  const temp = tempDatabase();
+  const recorder = new SqliteAnalyticsRecorder(temp.databasePath);
+  try {
+    const pending = { kind: 'pendingCreate' as const, operationId: 'pending-create-a' };
+    recorder.submit(observation({
+      sourceKey: 'pending-settlement',
+      invocationId: 'pending-invocation',
+      captureSubject: pending,
+      fields: {
+        invocationId: 'pending-invocation',
+        inputTokens: 7,
+        inputIncludesCache: false,
+        outputIncludesReasoning: true,
+        cacheChannelsOmittedAsZero: true,
+        reportedCostUsd: 0,
+      },
+    }));
+    recorder.submitDetail(detail({ payloadId: 'pending-detail', captureSubject: pending, value: { value: 'owned' } }));
+    const receipt = recorder.bindPendingCreate('pending-create-a', 'bound-root-a', 'binding-a', 200);
+    assert.equal(receipt.movedObservationCount, 1);
+    assert.equal(receipt.movedPayloadCount, 1);
+    assert.equal(recorder.readProviderAccountingSummary('bound-root-a').inputTokens.value, 7);
+    recorder.submit(observation({ sourceKey: 'late-pending', captureSubject: pending }));
+    assert.equal(recorder.countObservations('bound-root-a'), 2, 'stale pending producer is durably routed to the bound root');
+    recorder.deleteSession('bound-root-a', 'private-close-bound', 300);
+    assert.equal(recorder.countObservations('bound-root-a'), 0);
+    assert.equal(recorder.countDetails('bound-root-a'), 0);
+    assert.equal(recorder.readProviderAccountingSummary('bound-root-a').invocationCount, 0);
+    assert.equal(recorder.readProviderAccountingSummary().invocationCount, 0);
+  } finally {
+    recorder.close();
+    rmSync(temp.root, { recursive: true, force: true });
+  }
+});
+
+test('privacy deletion can atomically fence and scrub an unbound pending-create subject', () => {
+  const temp = tempDatabase();
+  const recorder = new SqliteAnalyticsRecorder(temp.databasePath);
+  try {
+    const pending = { kind: 'pendingCreate' as const, operationId: 'unbound-private-create' };
+    recorder.submit(observation({ sourceKey: 'unbound-private-fact', captureSubject: pending }));
+    recorder.submitDetail(detail({
+      payloadId: 'unbound-private-detail',
+      captureSubject: pending,
+      value: { private: true },
+    }));
+    const deleted = recorder.deleteSession(
+      'future-private-root',
+      'delete-unbound-private',
+      400,
+      'unbound-private-create',
+    );
+    assert.equal(deleted.deletedObservationCount, 1);
+    assert.equal(deleted.deletedPayloadCount, 1);
+    assert.equal(recorder.countObservations(), 0);
+    assert.equal(recorder.countDetails(), 0);
+    assert.throws(
+      () => recorder.submit(observation({ sourceKey: 'late-unbound-private', captureSubject: pending })),
+      /capture subject is deleted/,
+    );
+  } finally {
+    recorder.close();
+    rmSync(temp.root, { recursive: true, force: true });
+  }
+});
+
+test('tool state identity is root-qualified and deletion cannot leave cross-session state', () => {
+  const temp = tempDatabase();
+  const recorder = new SqliteAnalyticsRecorder(temp.databasePath);
+  try {
+    recorder.submit(observation({
+      sourceKey: 'tool-root-a', rootSessionId: 'tool-root-a', entityKind: 'toolCall',
+      entityKey: 'reused-tool-id', observationKind: 'end', fields: { outcome: 'success' },
+    }));
+    recorder.submit(observation({
+      sourceKey: 'tool-root-b', rootSessionId: 'tool-root-b', entityKind: 'toolCall',
+      entityKey: 'reused-tool-id', observationKind: 'end', fields: { outcome: 'failed' },
+    }));
+    const before = recorder.executeReadOnlyQuery(`
+      SELECT capture_subject_key, outcome FROM analytics_tool_states ORDER BY capture_subject_key
+    `);
+    assert.deepEqual(before.rows, [
+      { capture_subject_key: 'tool-root-a', outcome: 'success' },
+      { capture_subject_key: 'tool-root-b', outcome: 'failed' },
+    ]);
+    recorder.deleteSession('tool-root-b', 'delete-tool-root-b', 401);
+    const after = recorder.executeReadOnlyQuery(`
+      SELECT capture_subject_key, outcome FROM analytics_tool_states
+    `);
+    assert.deepEqual(after.rows, [{ capture_subject_key: 'tool-root-a', outcome: 'success' }]);
+  } finally {
+    recorder.close();
+    rmSync(temp.root, { recursive: true, force: true });
+  }
+});
+
+test('read-only query mode serves projections and rejects every mutation', () => {
+  const temp = tempDatabase();
+  let recorder = new SqliteAnalyticsRecorder(temp.databasePath);
+  try {
+    recorder.submit(observation({
+      sourceKey: 'read-only-settlement',
+      invocationId: 'read-only-invocation',
+      fields: { invocationId: 'read-only-invocation', inputTokens: 5 },
+    }));
+    recorder.close();
+    recorder = new SqliteAnalyticsRecorder(temp.databasePath, { readOnly: true });
+    assert.equal(recorder.readProviderSettlements().settlements.length, 1);
+    assert.throws(() => recorder.submit(observation({ sourceKey: 'forbidden-write' })), /read-only/);
+    assert.throws(() => recorder.deleteSession('root-a', 'forbidden-delete', 1), /read-only/);
+    assert.throws(() => recorder.checkpoint(), /read-only/);
+  } finally {
+    recorder.close();
+    rmSync(temp.root, { recursive: true, force: true });
+  }
+});
+
+test('recorder rejects unsupported newer database schema versions', () => {
+  const temp = tempDatabase();
+  const recorder = new SqliteAnalyticsRecorder(temp.databasePath);
+  recorder.close();
+  const raw = new DatabaseSync(temp.databasePath);
+  try {
+    raw.exec('PRAGMA user_version = 4');
+  } finally {
+    raw.close();
+  }
+  try {
+    assert.throws(
+      () => new SqliteAnalyticsRecorder(temp.databasePath),
+      /Unsupported newer analytics database schema version 4/,
+    );
+  } finally {
+    rmSync(temp.root, { recursive: true, force: true });
+  }
+});
+
+test('provider settlement projection is transactional, once-only, and revisioned through deletion', () => {
+  const temp = tempDatabase();
+  let recorder = new SqliteAnalyticsRecorder(temp.databasePath);
+  try {
+    const first = observation({
+      sourceKey: 'canonical-settlement',
+      rootSessionId: 'root-accounting',
+      invocationId: 'invocation-accounting',
+      fields: {
+        invocationId: 'invocation-accounting',
+        provider: 'provider-a',
+        dispatchedModel: 'model-dispatched',
+        reportedModel: 'model-reported',
+        purpose: 'conversation',
+        outcome: 'success',
+        inputTokens: 10,
+        outputTokens: 20,
+        inputIncludesCache: false,
+        outputIncludesReasoning: true,
+        cacheChannelsOmittedAsZero: true,
+        reportedCostUsd: 0,
+        calculatedCostUsd: 99,
+      },
+    });
+    recorder.submit(first);
+    recorder.submit(first);
+    assert.equal(recorder.getProjectionRevision(), 1);
+    assert.deepEqual(recorder.readProviderSettlementProjection().settlements[0], {
+      generationId: 'generation-1',
+      invocationId: 'invocation-accounting',
+      rootSessionId: 'root-accounting',
+      provider: 'provider-a',
+      model: 'model-reported',
+      dispatchedModel: 'model-dispatched',
+      reportedModel: 'model-reported',
+      purpose: 'conversation',
+      outcome: 'success',
+      settledAtMs: null,
+      usage: {
+        inputTokens: 10,
+        outputTokens: 20,
+        cacheReadTokens: null,
+        cacheWriteTokens: null,
+        reasoningTokens: null,
+        providerTotalTokens: null,
+      },
+      reportedCostUsd: 0,
+      calculatedCostUsd: 99,
+      calculatedCostComplete: false,
+      normalizedUsage: {
+        baseInputTokens: 10,
+        outputTokens: 20,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        reasoningTokens: null,
+        totalTokens: 30,
+        reasoningIncludedInOutput: true,
+        complete: true,
+      },
+      effectiveCostUsd: 0,
+      effectiveCostSource: 'reported',
+      effectiveCostCoverage: 'known',
+      revision: 1,
+    });
+
+    const conflict = observation({
+      sourceKey: 'conflicting-settlement-source',
+      rootSessionId: 'root-accounting',
+      invocationId: 'invocation-accounting',
+      fields: { invocationId: 'invocation-accounting', outputTokens: 21 },
+    });
+    assert.throws(() => recorder.submit(conflict), AnalyticsSourceConflictError);
+    assert.equal(recorder.countObservations(), 1, 'conflicting projection rolls back generic acceptance');
+    assert.equal(recorder.getProjectionRevision(), 1);
+    const accounting = recorder.readProviderAccountingSummary('root-accounting');
+    assert.equal(accounting.invocationCount, 1);
+    assert.deepEqual(accounting.inputTokens, {
+      occurrenceCount: 1,
+      knownCount: 1,
+      unknownCount: 0,
+      knownTotal: 10,
+      value: 10,
+      complete: true,
+    });
+    assert.equal(accounting.effectiveCostUsd.value, 0);
+    assert.equal(accounting.effectiveCostUsd.reportedCount, 1);
+
+    const deleted = recorder.deleteSession('root-accounting', 'delete-accounting', 500);
+    assert.equal(deleted.deletedObservationCount, 1);
+    assert.deepEqual(recorder.readProviderSettlements(), { revision: 2, settlements: [] });
+    assert.equal(recorder.deleteSession('root-accounting', 'retry-delete', 999).duplicate, true);
+    assert.equal(recorder.getProjectionRevision(), 2, 'duplicate deletion does not advance the revision');
+
+    recorder.close();
+    recorder = new SqliteAnalyticsRecorder(temp.databasePath);
+    assert.deepEqual(recorder.readProviderSettlements(), { revision: 2, settlements: [] });
+  } finally {
+    recorder.close();
+    rmSync(temp.root, { recursive: true, force: true });
+  }
+});
+
+test('source sequence reconciliation survives restart, closes gaps, and rejects conflicting reuse', () => {
+  const temp = tempDatabase();
+  let recorder = new SqliteAnalyticsRecorder(temp.databasePath);
+  try {
+    recorder.submit(observation({ sourceKey: 'sequence-1', sourceSequence: 1, rootSessionId: 'root-a' }));
+    recorder.submit(observation({ sourceKey: 'sequence-3', sourceSequence: 3, rootSessionId: 'root-b' }));
+    let reconciliation = recorder.getProducerReconciliation();
+    assert.equal(reconciliation.length, 1);
+    assert.deepEqual({
+      contiguousWatermark: reconciliation[0]!.contiguousWatermark,
+      highestObservedSequence: reconciliation[0]!.highestObservedSequence,
+      visibleGaps: reconciliation[0]!.visibleGaps,
+    }, {
+      contiguousWatermark: 1,
+      highestObservedSequence: 3,
+      visibleGaps: [{ from: 2, to: 2 }],
+    });
+
+    recorder.close();
+    recorder = new SqliteAnalyticsRecorder(temp.databasePath);
+    recorder.submit(observation({ sourceKey: 'sequence-2', sourceSequence: 2, rootSessionId: 'root-a' }));
+    reconciliation = recorder.readProducerReconciliation();
+    assert.equal(reconciliation[0]!.contiguousWatermark, 3);
+    assert.deepEqual(reconciliation[0]!.visibleGaps, []);
+
+    recorder.submit(observation({ sourceKey: 'sequence-1', sourceSequence: 4, rootSessionId: 'root-a' }));
+    reconciliation = recorder.readProducerReconciliation();
+    assert.equal(reconciliation[0]!.contiguousWatermark, 4, 'redetected source advances its new delivery sequence');
+    assert.equal(reconciliation[0]!.pendingReceiptCount, 0);
+    assert.equal(recorder.readDeliveryAccounting().observations.replayed, 1);
+
+    assert.throws(
+      () => recorder.submit(observation({ sourceKey: 'sequence-2-conflict', sourceSequence: 2, rootSessionId: 'root-a' })),
+      /behind contiguous watermark/,
+    );
+    assert.equal(recorder.countObservations(), 3);
+
+    recorder.deleteSession('root-b', 'delete-sequence-owner', 600);
+    reconciliation = recorder.readProducerReconciliation();
+    assert.deepEqual({
+      contiguousWatermark: reconciliation[0]!.contiguousWatermark,
+      highestObservedSequence: reconciliation[0]!.highestObservedSequence,
+      visibleGaps: reconciliation[0]!.visibleGaps,
+    }, { contiguousWatermark: 4, highestObservedSequence: 4, visibleGaps: [] });
+
+    const raw = new DatabaseSync(temp.databasePath);
+    try {
+      const receiptCount = raw.prepare(`
+        SELECT COUNT(*) AS count FROM analytics_producer_sequences
+      `).get() as { count: number };
+      assert.equal(receiptCount.count, 0, 'contiguous receipts compact into the durable watermark');
+    } finally {
+      raw.close();
+    }
+
+    recorder.submit(observation({
+      sourceKey: 'large-sequence',
+      sourceSequence: '9007199254740993',
+      rootSessionId: 'root-a',
+    }));
+    reconciliation = recorder.readProducerReconciliation();
+    assert.equal(reconciliation[0]!.highestObservedSequence, '9007199254740993');
+    assert.deepEqual(reconciliation[0]!.visibleGaps, [{ from: 5, to: '9007199254740992' }]);
+    assert.equal(reconciliation[0]!.pendingReceiptCount, 1);
+  } finally {
+    recorder.close();
+    rmSync(temp.root, { recursive: true, force: true });
+  }
+});
+
+test('execution, tool, activity, and feature observations project transactionally and delete by subject', () => {
+  const temp = tempDatabase();
+  const recorder = new SqliteAnalyticsRecorder(temp.databasePath);
+  try {
+    recorder.submitBatch([
+      observation({
+        sourceKey: 'execution-begin',
+        entityKind: 'execution',
+        entityKey: 'execution-a',
+        observationKind: 'begin',
+        fields: { operationKind: 'agent-run', startedAtMs: 100 },
+      }),
+      observation({
+        sourceKey: 'tool-end',
+        entityKind: 'toolCall',
+        entityKey: 'tool-a',
+        observationKind: 'end',
+        fields: { toolCallId: 'tool-a', toolDefinitionId: 'bash', outcome: 'completed', executionEndedAtMs: 120 },
+      }),
+      observation({
+        sourceKey: 'activity-end',
+        entityKind: 'activitySpan',
+        entityKey: 'span-a',
+        observationKind: 'end',
+        fields: { spanId: 'span-a', kind: 'tool', startedAtMs: 100, endedAtMs: 120, durationMs: 20, coverage: 'observed' },
+      }),
+      observation({
+        sourceKey: 'feature-observed',
+        entityKind: 'featureObservation',
+        entityKey: 'feature-a',
+        observationKind: 'observation',
+        fields: { feature: 'pruning', decision: 'kept', ruleVersion: 'v1' },
+      }),
+    ]);
+    assert.equal(recorder.countTypedEntityObservations('execution', 'root-a'), 1);
+    assert.equal(recorder.countTypedEntityObservations('toolCall', 'root-a'), 1);
+    assert.equal(recorder.countTypedEntityObservations('activitySpan', 'root-a'), 1);
+    assert.equal(recorder.countTypedEntityObservations('featureObservation', 'root-a'), 1);
+    assert.equal(recorder.getProjectionRevision(), 4);
+
+    recorder.deleteSession('root-a', 'delete-typed-projections', 700);
+    assert.equal(recorder.countTypedEntityObservations('execution', 'root-a'), 0);
+    assert.equal(recorder.countTypedEntityObservations('toolCall', 'root-a'), 0);
+    assert.equal(recorder.countTypedEntityObservations('activitySpan', 'root-a'), 0);
+    assert.equal(recorder.countTypedEntityObservations('featureObservation', 'root-a'), 0);
+    assert.equal(recorder.getProjectionRevision(), 5);
+  } finally {
+    recorder.close();
+    rmSync(temp.root, { recursive: true, force: true });
+  }
+});
+
+test('privacy fence remains durable while WAL scrubbing is blocked and recovers without private bytes', () => {
+  const temp = tempDatabase();
+  const sentinel = 'PRIVATE-WAL-SENTINEL-0bd0e20a';
+  const recorder = new SqliteAnalyticsRecorder(temp.databasePath);
+  let reader: TestDatabase | undefined;
+  try {
+    recorder.submit(observation({ sourceKey: 'private-wal-fact', fields: { secret: sentinel } }));
+    recorder.submitDetail(detail({ payloadId: 'private-wal-detail', value: { secret: sentinel } }));
+    reader = new DatabaseSync(temp.databasePath, { readOnly: true });
+    reader.exec('BEGIN');
+    reader.prepare('SELECT COUNT(*) AS count FROM analytics_observations').get();
+
+    assert.throws(
+      () => recorder.deleteSession('root-a', 'private-wal-close', 700),
+      AnalyticsPrivacyScrubPendingError,
+    );
+    assert.equal(recorder.countObservations('root-a'), 0, 'logical fence commits before physical retry');
+    assert.equal(recorder.countDetails('root-a'), 0);
+    assert.equal(recorder.privacyScrubState('root-a')?.state, 'pending');
+
+    reader.exec('ROLLBACK');
+    reader.close();
+    reader = undefined;
+    assert.deepEqual(recorder.resumePendingPrivacyScrubs(), { completed: ['root-a'], pending: [] });
+    assert.equal(recorder.privacyScrubState('root-a')?.state, 'complete');
+
+    for (const suffix of ['', '-wal', '-shm']) {
+      const candidate = `${temp.databasePath}${suffix}`;
+      if (existsSync(candidate)) {
+        assert.equal(readFileSync(candidate).includes(Buffer.from(sentinel)), false, `${suffix || 'main'} retained private bytes`);
+      }
+    }
+  } finally {
+    try { reader?.exec('ROLLBACK'); } catch { /* already closed */ }
+    reader?.close();
+    recorder.close();
+    rmSync(temp.root, { recursive: true, force: true });
+  }
+});
+
+test('late binding to a deleted root scrubs pending data and retains a durable routing fence', () => {
+  const temp = tempDatabase();
+  const recorder = new SqliteAnalyticsRecorder(temp.databasePath);
+  try {
+    const pending = { kind: 'pendingCreate' as const, operationId: 'late-bind-operation' };
+    recorder.submit(observation({ sourceKey: 'late-bind-fact', captureSubject: pending }));
+    recorder.submitDetail(detail({ payloadId: 'late-bind-detail', captureSubject: pending, value: { private: true } }));
+    recorder.deleteSession('late-bind-root', 'late-bind-close', 800);
+    const receipt = recorder.bindPendingCreate('late-bind-operation', 'late-bind-root', 'late-bind-source', 801);
+    assert.equal(receipt.deletedSubject, true);
+    assert.equal(recorder.countObservations(), 0);
+    assert.equal(recorder.countDetails(), 0);
+    assert.deepEqual(recorder.readSubjectBinding('late-bind-operation'), {
+      pendingOperationId: 'late-bind-operation',
+      rootSessionId: 'late-bind-root',
+      deleted: true,
+    });
+    assert.throws(
+      () => recorder.submit(observation({ sourceKey: 'stale-after-late-bind', captureSubject: pending })),
+      /capture subject is deleted/,
+    );
+    assert.equal(recorder.countObservations(), 0);
+  } finally {
+    recorder.close();
+    rmSync(temp.root, { recursive: true, force: true });
+  }
+});
+
+test('durable delivery accounting separates accepted replayed deleted and retained bytes', () => {
+  const temp = tempDatabase();
+  const recorder = new SqliteAnalyticsRecorder(temp.databasePath);
+  try {
+    const fact = observation({ sourceKey: 'accounted-fact', sourceSequence: 1, stableOriginId: 'stable-origin-a' });
+    const payload = detail({ payloadId: 'accounted-detail', value: { body: 'shared body' } });
+    recorder.submit(fact);
+    recorder.submit(fact);
+    recorder.submitDetail(payload);
+    recorder.submitDetail(payload);
+    recorder.deleteSession('root-a', 'accounting-close', 900);
+    assert.throws(() => recorder.submit({ ...fact, sourceSequence: 2 }), /capture subject is deleted/);
+    assert.throws(() => recorder.submitDetail({ ...payload, payloadId: 'late-accounted', sourceKey: 'late-accounted' }), /capture subject is deleted/);
+    assert.deepEqual(recorder.readDeliveryAccounting(), {
+      deliveryHistoryCoverage: 'complete',
+      observations: { delivered: 3, accepted: 1, replayed: 1, deleted: 1 },
+      details: { delivered: 3, accepted: 1, replayed: 1, deleted: 1 },
+      completeDetailWatermark: 1,
+      retainedDetailLogicalBytes: 0,
+      retainedDetailStoredBytes: 0,
+    });
+  } finally {
+    recorder.close();
+    rmSync(temp.root, { recursive: true, force: true });
+  }
+});
+
+test('logical query surface is native read-only, bounded, and reports snapshot/detail/storage metadata', () => {
+  const temp = tempDatabase();
+  const recorder = new SqliteAnalyticsRecorder(temp.databasePath);
+  try {
+    recorder.submitBatch([
+      observation({ sourceKey: 'query-a', sourceSequence: 1, stableOriginId: 'query-origin' }),
+      observation({ sourceKey: 'query-b', sourceSequence: 2, stableOriginId: 'query-origin' }),
+      observation({ sourceKey: 'query-c', sourceSequence: 3, stableOriginId: 'query-origin' }),
+    ]);
+    recorder.submitDetail(detail({ payloadId: 'query-detail', value: { text: 'range-body'.repeat(100) } }));
+
+    const result = recorder.executeReadOnlyQuery(
+      'SELECT source_key, payload_json FROM analytics_observations WHERE source_key >= ? ORDER BY source_key',
+      ['query-a'],
+      { maxRows: 2, maxCellBytes: 32 },
+    );
+    assert.equal(result.databaseSchemaVersion, 3);
+    assert.equal(result.snapshotWatermark, 3);
+    assert.deepEqual(result.generationIds, ['generation-1']);
+    assert.equal(result.returnedRows, 2);
+    assert.equal(result.truncation.rowLimit, true);
+    assert.equal(result.truncation.cellLimit, true);
+    assert.throws(() => recorder.executeReadOnlyQuery('DELETE FROM analytics_observations'), /not authorized/);
+    assert.throws(() => recorder.executeReadOnlyQuery("ATTACH DATABASE ':memory:' AS other"), /not authorized/);
+    assert.throws(() => recorder.executeReadOnlyQuery('SELECT zeroblob(1000000000)'), /not authorized/);
+    assert.throws(() => recorder.executeReadOnlyQuery('SELECT 1', [], { maxRows: Number.NaN }), /positive safe integer/);
+    assert.equal(recorder.countObservations(), 3);
+
+    const first = recorder.readDetailRange('query-detail', 0, 100);
+    assert.equal(first.available, true);
+    assert.equal(first.truncated, true);
+    const second = recorder.readDetailRange('query-detail', first.nextOffset!, 4_096);
+    assert.equal(second.nextOffset, null);
+    assert.deepEqual(deserialize(Buffer.concat([Buffer.from(first.bytes), Buffer.from(second.bytes)])), {
+      text: 'range-body'.repeat(100),
+    });
+    assert.deepEqual(recorder.readDetailRange('absent-detail').omissionReason, 'unavailable-or-scrubbed');
+    assert.ok(recorder.describeSchema().views.includes('analytics_provider_usage_v1'));
+    assert.equal(recorder.readStorageSummary().payloadCount, 1);
+  } finally {
+    recorder.close();
+    rmSync(temp.root, { recursive: true, force: true });
+  }
+});
+
+test('provider normalization keeps base/disjoint channels and reported zero ahead of exact snapshot pricing', () => {
+  const temp = tempDatabase();
+  const recorder = new SqliteAnalyticsRecorder(temp.databasePath);
+  try {
+    recorder.submit(observation({
+      sourceKey: 'normalized-provider',
+      invocationId: 'normalized-invocation',
+      fields: {
+        invocationId: 'normalized-invocation',
+        inputTokens: 100,
+        outputTokens: 30,
+        cacheReadTokens: 20,
+        cacheWriteTokens: 5,
+        reasoningTokens: 10,
+        inputIncludesCache: true,
+        outputIncludesReasoning: true,
+        reportedCostUsd: 0,
+        pricing: {
+          normalizationVersion: 'oracle-v1',
+          currency: 'USD',
+          inputUsdPerMillionTokens: 2,
+          outputUsdPerMillionTokens: 4,
+          cacheReadUsdPerMillionTokens: 1,
+          cacheWriteUsdPerMillionTokens: 3,
+        },
+      },
+    }));
+    const settlement = recorder.readProviderSettlements().settlements[0]!;
+    assert.deepEqual(settlement.normalizedUsage, {
+      baseInputTokens: 75,
+      cacheReadTokens: 20,
+      cacheWriteTokens: 5,
+      outputTokens: 30,
+      reasoningTokens: 10,
+      totalTokens: 130,
+      reasoningIncludedInOutput: true,
+      complete: true,
+    });
+    assert.ok(Math.abs(settlement.calculatedCostUsd! - 0.000305) < 1e-12);
+    assert.equal(settlement.calculatedCostComplete, true);
+    assert.equal(settlement.effectiveCostUsd, 0);
+    assert.equal(settlement.effectiveCostSource, 'reported');
+
+    assert.throws(() => recorder.submit(observation({
+      sourceKey: 'bad-priced-provider',
+      invocationId: 'bad-priced-invocation',
+      fields: {
+        invocationId: 'bad-priced-invocation',
+        inputTokens: 1,
+        outputTokens: 1,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        inputIncludesCache: false,
+        outputIncludesReasoning: true,
+        calculatedCostUsd: 99,
+        calculatedCostComplete: true,
+        pricing: {
+          normalizationVersion: 'oracle-v1',
+          currency: 'USD',
+          inputUsdPerMillionTokens: 1,
+          outputUsdPerMillionTokens: 1,
+          cacheReadUsdPerMillionTokens: 1,
+          cacheWriteUsdPerMillionTokens: 1,
+        },
+      },
+    })), /does not match its pricing snapshot/);
+    assert.equal(recorder.countObservations(), 1, 'pricing mismatch rolls back fact and projections');
+  } finally {
+    recorder.close();
+    rmSync(temp.root, { recursive: true, force: true });
+  }
+});
+
 test('provider projection preserves missingness and signed-64-bit token strings across restart', () => {
   const temp = tempDatabase();
   let recorder = new SqliteAnalyticsRecorder(temp.databasePath);
@@ -235,6 +978,23 @@ test('provider projection preserves missingness and signed-64-bit token strings 
     ]);
     recorder.checkpoint();
     recorder.close();
+
+    const raw = new DatabaseSync(temp.databasePath);
+    try {
+      assert.deepEqual({ ...raw.prepare(`
+        SELECT typeof(input_tokens) AS input_type,
+               typeof(output_tokens) AS output_type,
+               typeof(cache_read_tokens) AS missing_type
+        FROM analytics_provider_settlements
+        WHERE invocation_id = 'invocation-a'
+      `).get() as Record<string, unknown> }, {
+        input_type: 'text',
+        output_type: 'text',
+        missing_type: 'null',
+      });
+    } finally {
+      raw.close();
+    }
 
     recorder = new SqliteAnalyticsRecorder(temp.databasePath);
     assert.deepEqual(recorder.projectProviderUsage(), [

@@ -990,3 +990,124 @@ query cancellation/freshness; and (5) run the remaining 1M/10M-or-justified, rep
 entropy/reuse, upgrade/partial-write and matched analytics-disabled agent/UI gates. Legacy data remains
 preserved. Delivery is the single inactive-candidate repair commit containing this checkpoint; the
 terminal delivery record must supply and verify its exact `HEAD == origin/master` hash.
+
+## Checkpoint 12 — inactive storage/accounting repair, review repair, and bounded evidence (2026-09-11)
+
+### Implemented inactive-candidate boundary
+
+This checkpoint completes the supported storage/accounting repair that Checkpoints 10 and 11 left
+unstaged. It still does **not** select or activate the candidate engine. SQLite schema version 3 now
+adds retained detail metadata, generation metadata, durable delivery counters with explicit migration
+coverage, normalized provider channels, contiguous producer watermarks with bounded out-of-order
+receipts, pending/complete privacy scrub state, subject indexes, last-owner content cleanup, and the
+read-only `analytics_provider_usage_v1` view. Schema-v1 migration retains facts, details, deletion
+fences and source reconciliation; migrated delivery history is labeled `retained_only`, not fabricated
+as exact replay/deletion history.
+
+Provider accounting now keeps raw provider channels and separately persists base input, disjoint
+cache/output channels, reasoning inclusion, total and completeness. The canonical billable adapter
+states its upstream disjoint-channel convention, keeps pricing-catalog identity separate from
+`oracle-v1`, does not invent a reported model, prefers a reported zero cost, and recomputes only from a
+complete supported USD snapshot. Snapshot/calculated parity conflicts reject the transaction. Global
+and session aggregates use normalized channels, preserve unknowns and are revised transactionally on
+binding/deletion. Tool state/detail identity is session-qualified so reused provider tool IDs cannot
+cross-own state.
+
+Producer reconciliation compacts contiguous receipts into a watermark and retains at most 4,096
+out-of-order digests per stable origin. Exact redetection after producer LRU eviction advances the new
+delivery sequence without duplicating the fact. Worker acknowledgements now carry the affected
+producer watermarks and the independent complete-detail watermark back through the supervisor. Durable
+accounting separates delivered, accepted, replayed and policy-deleted observations/details plus
+retained logical/stored bytes.
+
+Rich detail storage is content-addressed with atomic last-owner cleanup and semantic replay
+fingerprints that include media/encoding/completeness/version metadata. Bounded range reads expose
+representation, offset, total length, truncation, completeness and omission. The disposable query
+worker uses defensive/query-only SQLite, an authorizer and bounded function set, row/result/cell
+limits, a 64-MiB detail admission ceiling, a 192-MiB default JavaScript heap ceiling, cancellation by
+helper termination, snapshot/projection/generation metadata and storage/delivery reporting. Query
+mutation, attach and large-value construction paths are rejected. Query and worker bundles are now
+required build outputs.
+
+Privacy deletion commits the anti-resurrection fence and logical scrub before WAL checkpoint/truncate;
+a busy checkpoint leaves a durable `pending` marker, visibly fails with `privacy_scrub_pending`, and
+is retried at writer startup or through the bounded recovery API. Root and pending-create attribution
+are indexed and deleted together. A close owner can inject the stable pending operation ID into the
+same root deletion transaction, including when the root fence predates binding, so unbound pending
+facts/details are scrubbed and subsequent late capture is rejected. This is an injectable recorder
+API only: P2b still owns the live close call, filesystem writer revocation and expiry.
+
+### Independent evidence and repairs
+
+The Checkpoint 11 terminal provenance was recovered directly from its parent
+`toolResult.details.results`: requested/effective bucket `frontier`, `bucketDowngraded: false`,
+`fallback: false`, `openai-codex/gpt-5.6-sol`, high thinking, one successful terminal attempt and
+`stop`. Its 192 provider invocations were all the same provider/model (191 successful calls and one
+failed provider call recovered inside the successful attempt). The nested reviewer result is also
+durable in that parent result: requested/effective `frontier`, no downgrade/fallback,
+`openai-codex/gpt-5.6-sol` high, one successful attempt with a provider response, exit 0/stop. The
+four Checkpoint 11 review repairs therefore have independently verified qualified-review provenance;
+this corrects only the earlier evidence-availability statement and does not qualify overall P0.
+
+One additional frontier review of the storage candidate reported supported provider-adapter,
+unbound-pending deletion, tool identity, acknowledgement, execution-bound, detail fingerprint and
+migration-accounting issues. Those were repaired and focused regressions added. Its final
+provider/model/bucket provenance must still be checked by the parent after this worker returns before
+any review credit is granted.
+
+That reviewer also invoked `node extension/scripts/build.mjs --validate` instead of the documented
+validation-only npm wrapper and reported that it staged runtime `84e4356…` and published renderer
+generation `2674553…` for a future startup. No host restart was forced and the source authority remains
+`legacy`, but this publication was not authorized. This checkpoint does not delete or rewrite durable
+runtime state to conceal or undo it; the owning lead must inspect that state and obtain approval before
+any cleanup or restart.
+
+### Validation and qualification boundary
+
+Final validation after the repairs:
+
+- `npm test`: all seven package groups passed, **6,866 passed, 0 failed, 29 skipped**;
+- root `npm run typecheck`: all 18 TypeScript projects passed;
+- root `npm run lint` and `git diff --check`: passed;
+- focused canonical/supervisor/SQLite suites: **27 passed, 0 failed**;
+- `cd extension && npm run build:validate`: passed with required recorder/query artifacts and only the
+  existing Zod annotation/chunk warnings;
+- final disposable qualification exited successfully with `cleanup: true`: 10,000 facts, 2,500 each
+  provider/tool/activity/feature rows, 1,003 details, exact replay/conflict checks, four-host bursts,
+  helper failover, query mutation denial/cancellation, detail reconstruction, delivery/storage
+  accounting, and main/WAL/SHM private sentinels absent after the deletion race.
+
+The bounded run measured fact handoff p50 0.0139 ms, p95 0.0694 ms and max 49.37 ms. Its standalone
+responsiveness proxy measured 26.15 ms p95 lag, which is above the predeclared 25-ms candidate gate,
+and is not a live VS Code UI baseline. It did not run the required 1M path, repeated endurance/light
+load, matched disabled/live UI baselines or all mixed-load/upgrade/partial-write cases. The 10M tier
+was skipped under the predeclared 16-GiB temporary bound because the 10k footprint projected about
+49.52 GB. Therefore a successful script exit is repair evidence only: **P0 remains unqualified**.
+
+### Exact remaining ownership
+
+- **P0/next qualification owner:** enforce every numeric gate in the harness; run the missing 1M,
+  repeated endurance/light and matched live-agent/UI matrix; resolve the failed responsiveness proxy;
+  exercise version-2/partial-write migration and the complete mixed-load matrix; obtain independently
+  provenance-verified final review. The specification-reserved outage/overflow owner remains open.
+- **P2b lifecycle owner:** wire close to the root-plus-pending deletion API; prove all-host writer/file
+  revocation, session-scoped mutation fencing, immediate private cleanup, fixed 24-hour expiry and slow
+  unrelated-session races. Do not move filesystem authority into the recorder.
+- **P2c cache-relocation owner:** obtain the still-outstanding independent acceptance review for the
+  already pushed supported cache seams, then retain its separate final single-root/P7b gate. This
+  checkpoint neither requalifies nor activates cache relocation.
+- **P3 recorder owner:** after P0/P2b prerequisites, decide the durable outage owner, prove bounded
+  reconciliation under 1M/multi-host scale, finish partial-write/version-2 migration fixtures and tune
+  query/detail execution envelopes. This checkpoint is a source candidate, not selected production P3.
+- **P4 producer/live-consumer owner:** finish every producer identity/convention seam, selected-branch
+  and local-calendar parity, cross-host refresh, terminal-result watermark consumption and duplicate
+  child-charge fixtures under live integration.
+- **P5 query owner:** add the agent skill and canonical scoped query contract, selected-scope/pending-
+  detail coverage metadata, warm/first-query and cancellation saturation gates, and retained-detail
+  behavior after real JSONL expiry.
+- **P6 retirement owner:** extract remaining shared consumers and remove obsolete analytics only after
+  P3–P5 replacement coverage; no blanket legacy deletion.
+
+P7a analytics activation, P7b storage cutoff/expiry activation, installation and host restart remain
+closed. `settings.json`, model/catalog changes, the preserved stash and legacy analytics data are not
+owned by this checkpoint.

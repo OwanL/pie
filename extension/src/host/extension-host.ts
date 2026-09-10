@@ -61,6 +61,7 @@ import {
 import { deriveSessionNameFromText } from '../shared/session-name';
 import { isPendingTabPath } from '../shared/tab-behavior';
 import { appendPieLog } from './util/pie-log';
+import { CanonicalAnalyticsCapture } from '../analytics/canonical-capture.js';
 import {
   didOpenTabsRegistryInputsChange,
   OpenTabsRegistryPublisher,
@@ -168,6 +169,16 @@ export class PieExtension implements vscode.Disposable {
       }),
     });
 
+    // Production producer seams are always constructed, but the canonical
+    // authority remains deliberately disabled until the P2b/P5/P7 cutover
+    // gates provide a generation and recorder sink.
+    const analyticsCapture = new CanonicalAnalyticsCapture({
+      authority: 'legacy',
+      workspaceId: getWorkspaceAnalyticsId(context),
+      buildId: `pie-${String(context.extension.packageJSON.version ?? 'unknown')}`,
+      processGeneration: crypto.randomUUID(),
+    });
+
     this.statsService = new StatsService({
       dataOutcomesRootPath,
       legacyUsageDataRootPath: context.globalStorageUri.fsPath,
@@ -178,6 +189,7 @@ export class PieExtension implements vscode.Disposable {
       getArchState: () => this.archState,
       dispatchArchEvent: (event) => this.dispatchArchEvent(event),
       getAgentDir: () => process.env.PI_CODING_AGENT_DIR?.trim() || null,
+      analyticsCapture,
     });
 
     this.service = new SessionService(

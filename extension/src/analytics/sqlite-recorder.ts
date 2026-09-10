@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import { createRequire } from 'node:module';
 import * as path from 'node:path';
-import { deserialize } from 'node:v8';
+import { deserialize, serialize as serializeV8 } from 'node:v8';
 
 import {
   AnalyticsSourceConflictError,
@@ -10,7 +10,9 @@ import {
   analyticsObservationRegistryKey,
   assertValidAnalyticsObservation,
   canonicalInt64,
+  encodeInt64,
   parseInt64,
+  parseNonNegativeInt64,
   type AnalyticsDetailCapture,
   type AnalyticsDetailSink,
   type AnalyticsObservation,
@@ -18,6 +20,14 @@ import {
   type AnalyticsUsageChannels,
   type Int64Value,
 } from '../../../shared/analytics/contracts.js';
+import {
+  calculateCompleteCostUsd,
+  costWithinParityTolerance,
+  normalizeUsageChannels,
+  type CoverageMetric,
+  type EffectiveCostMetric,
+  type NormalizedUsageChannels,
+} from '../../../shared/analytics/metrics.js';
 
 interface SqliteRunResult {
   changes: number | bigint;
@@ -26,14 +36,27 @@ interface SqliteRunResult {
 
 interface SqliteStatement {
   all(...params: unknown[]): unknown[];
+  columns(): Array<{ name: string }>;
   get(...params: unknown[]): unknown;
+  iterate(...params: unknown[]): Iterable<unknown>;
   run(...params: unknown[]): SqliteRunResult;
 }
 
+type SqliteAuthorizer = (
+  actionCode: number,
+  arg1: string | null,
+  arg2: string | null,
+  databaseName: string | null,
+  triggerOrView: string | null,
+) => number;
+
 interface SqliteDatabase {
   close(): void;
+  enableDefensive(active: boolean): void;
+  enableLoadExtension(allow: boolean): void;
   exec(sql: string): void;
   prepare(sql: string): SqliteStatement;
+  setAuthorizer(callback: SqliteAuthorizer | null): void;
 }
 
 interface SqliteModule {
@@ -41,17 +64,54 @@ interface SqliteModule {
     location: string,
     options?: { readOnly?: boolean; timeout?: number; readBigInts?: boolean },
   ) => SqliteDatabase;
+  constants: Record<string, number>;
 }
 
 const sqlite = createRequire(process.execPath)('node:sqlite') as SqliteModule;
-const SCHEMA_VERSION = 1;
+const DATABASE_SCHEMA_VERSION = 3;
 const BUSY_TIMEOUT_MS = 5_000;
+const MAX_PENDING_SEQUENCES_PER_PRODUCER = 4_096;
+const DEFAULT_QUERY_ROWS = 200;
+const MAX_QUERY_ROWS = 10_000;
+const DEFAULT_QUERY_BYTES = 256 * 1024;
+const MAX_QUERY_BYTES = 16 * 1024 * 1024;
+const MAX_DETAIL_CAPTURE_BYTES = 64 * 1024 * 1024;
 
 interface RegistryRow { fingerprint: string }
+interface UserVersionRow { user_version: number | bigint }
+interface RevisionRow { revision: string }
 interface CountRow { count: number | bigint }
-interface DeletedSubjectRow { deleted_count: number | bigint; deleted_at_ms: string }
-interface PayloadRow { payload_id?: string; fingerprint: string; manifest_json: string; logical_bytes: number | bigint }
+interface DeletedSubjectRow {
+  deleted_count: number | bigint;
+  deleted_at_ms: string;
+  scrub_state: 'pending' | 'complete';
+  scrub_error: string | null;
+}
+interface PayloadRow {
+  payload_id?: string;
+  fingerprint: string;
+  manifest_json: string;
+  logical_bytes: number | bigint;
+  media_type?: string;
+  source_encoding?: string;
+  complete?: number | bigint;
+  capture_stage?: string | null;
+  source_version?: string | null;
+  omission_reason?: string | null;
+}
 interface ContentRow { digest: string; encoding: string; body: Uint8Array }
+interface WalCheckpointRow { busy: number | bigint; log: number | bigint; checkpointed: number | bigint }
+
+export interface AnalyticsSubjectBindingReceipt {
+  pendingOperationId: string;
+  rootSessionId: string;
+  movedObservationCount: number;
+  movedPayloadCount: number;
+  duplicate: boolean;
+  /** A late binding to an already-deleted root is retained as a durable fence;
+   * any pending facts/details are scrubbed instead of migrated. */
+  deletedSubject: boolean;
+}
 
 export interface AnalyticsDeleteReceipt {
   rootSessionId: string;
@@ -59,6 +119,40 @@ export interface AnalyticsDeleteReceipt {
   deletedPayloadCount: number;
   deletedAtMs: string;
   duplicate: boolean;
+  scrubState: 'complete';
+}
+
+export class AnalyticsPrivacyScrubPendingError extends Error {
+  readonly code = 'privacy_scrub_pending';
+
+  constructor(readonly rootSessionId: string, message: string) {
+    super(message);
+    this.name = 'AnalyticsPrivacyScrubPendingError';
+  }
+}
+
+export interface AnalyticsSubjectBindingState {
+  pendingOperationId: string;
+  rootSessionId: string;
+  deleted: boolean;
+}
+
+export interface AnalyticsPrivacyScrubState {
+  rootSessionId: string;
+  deletedAtMs: number | string;
+  state: 'pending' | 'complete';
+  lastError: string | null;
+}
+
+export interface AnalyticsDeliveryAccounting {
+  /** Pre-v3 migrations know retained rows, not historical replay/deletion outcomes. */
+  deliveryHistoryCoverage: 'complete' | 'retained_only';
+  observations: { delivered: number | string; accepted: number | string; replayed: number | string; deleted: number | string };
+  details: { delivered: number | string; accepted: number | string; replayed: number | string; deleted: number | string };
+  /** Monotonic recorder commit watermark for independently complete detail payloads. */
+  completeDetailWatermark: number | string;
+  retainedDetailLogicalBytes: number | string;
+  retainedDetailStoredBytes: number | string;
 }
 
 export interface AnalyticsRecorderStats {
@@ -75,11 +169,136 @@ export interface ProviderUsageProjection {
   reportedCostUsd: number | null;
 }
 
+export interface ProviderSettlementProjection extends ProviderUsageProjection {
+  generationId: string;
+  rootSessionId: string | null;
+  provider: string | null;
+  model: string | null;
+  dispatchedModel: string | null;
+  reportedModel: string | null;
+  purpose: string | null;
+  outcome: string | null;
+  settledAtMs: number | string | null;
+  calculatedCostUsd: number | null;
+  calculatedCostComplete: boolean;
+  normalizedUsage: NormalizedUsageChannels;
+  effectiveCostUsd: number | null;
+  effectiveCostSource: 'reported' | 'calculated' | null;
+  effectiveCostCoverage: 'known' | 'unknown' | 'not_applicable';
+  revision: number | string;
+}
+
+export interface ProviderSettlementReadModel {
+  revision: number | string;
+  settlements: ProviderSettlementProjection[];
+}
+
+export interface HistoricalDimensionSummary {
+  revision: number | string;
+  providers: Array<Record<string, unknown>>;
+  tools: Array<Record<string, unknown>>;
+  activities: Array<Record<string, unknown>>;
+  features: Array<Record<string, unknown>>;
+}
+
+export interface ProviderAccountingSummary {
+  revision: number | string;
+  invocationCount: number;
+  inputTokens: CoverageMetric;
+  outputTokens: CoverageMetric;
+  cacheReadTokens: CoverageMetric;
+  cacheWriteTokens: CoverageMetric;
+  reasoningTokens: CoverageMetric;
+  providerTotalTokens: CoverageMetric;
+  effectiveCostUsd: EffectiveCostMetric;
+}
+
+export interface SourceSequenceGap {
+  from: number | string;
+  to: number | string;
+}
+
+export interface ProducerReconciliation {
+  producerIdentity: string;
+  contiguousWatermark: number | string;
+  highestObservedSequence: number | string;
+  visibleGaps: SourceSequenceGap[];
+  pendingReceiptCount: number;
+}
+
+export interface AnalyticsQueryTruncation {
+  rowLimit: boolean;
+  byteLimit: boolean;
+  cellLimit: boolean;
+}
+
+export interface AnalyticsReadOnlyQueryResult {
+  databaseSchemaVersion: number;
+  projectionRevision: number | string;
+  snapshotWatermark: number | string;
+  generationIds: string[];
+  generationIdsTruncated: boolean;
+  columns: string[];
+  rows: Array<Record<string, unknown>>;
+  returnedRows: number;
+  truncation: AnalyticsQueryTruncation;
+}
+
+export interface AnalyticsDetailMetadata {
+  logicalBytes: number | string;
+  storedBytes: number | string;
+  mediaType: string;
+  sourceEncoding: string;
+  complete: boolean;
+  captureStage: string | null;
+  sourceVersion: string | null;
+  omissionReason: string | null;
+}
+
+export interface AnalyticsDetailRangeResult {
+  payloadId: string;
+  available: boolean;
+  mediaType: string | null;
+  sourceEncoding: string | null;
+  representationEncoding: 'node-v8';
+  complete: boolean;
+  captureStage: string | null;
+  sourceVersion: string | null;
+  omissionReason: string | null;
+  totalLength: number | string;
+  offset: number | string;
+  nextOffset: number | string | null;
+  truncated: boolean;
+  bytes: Uint8Array;
+}
+
+export interface AnalyticsSchemaDescription {
+  databaseSchemaVersion: number;
+  projectionVersion: number;
+  logicalCommands: readonly ['schema', 'query', 'detail', 'storage'];
+  views: string[];
+  detail: { defaultRangeBytes: number; representationEncoding: 'node-v8' };
+}
+
+export interface AnalyticsStorageSummary extends AnalyticsDetailStorageStats {
+  databaseBytes: number | string;
+  walBytes: number | string;
+  sharedMemoryBytes: number | string;
+  factsLogicalBytes: number | string;
+  engineAllocationOverheadBytes: null;
+}
+
+/** Recorder-local opt-in until producer sequencing becomes part of the shared
+ * DTO contract. Existing unsequenced AnalyticsObservation values remain valid. */
+export type SequencedAnalyticsObservation = AnalyticsObservation & {
+  sourceSequence?: Int64Value;
+};
+
 export interface AnalyticsDetailStorageStats {
   payloadCount: number;
   contentCount: number;
-  logicalBytes: number;
-  storedContentBytes: number;
+  logicalBytes: number | string;
+  storedContentBytes: number | string;
 }
 
 type DetailNode =
@@ -129,6 +348,9 @@ function contentDigest(encoding: 'utf8' | 'binary', bytes: Uint8Array): string {
 }
 
 function captureFingerprint(capture: AnalyticsDetailCapture): string {
+  const semanticMetadata = JSON.stringify(Object.fromEntries(
+    Object.entries(capture.metadata).sort(([left], [right]) => left.localeCompare(right)),
+  ));
   return createHash('sha256')
     .update(capture.generationId)
     .update('\0')
@@ -140,21 +362,36 @@ function captureFingerprint(capture: AnalyticsDetailCapture): string {
     .update('\0')
     .update(canonicalInt64(capture.observedAtMs))
     .update('\0')
+    .update(capture.mediaType)
+    .update('\0')
+    .update(capture.encoding)
+    .update('\0')
+    .update(capture.complete ? 'complete' : 'incomplete')
+    .update('\0')
+    .update(semanticMetadata)
+    .update('\0')
     .update(capture.bytes)
     .digest('hex');
 }
 
-function createSchema(database: SqliteDatabase): void {
+function configureDatabase(database: SqliteDatabase, readOnly: boolean): void {
+  database.enableLoadExtension(false);
+  database.enableDefensive(true);
   database.exec(`
     PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS};
-    PRAGMA journal_mode = WAL;
-    PRAGMA synchronous = FULL;
     PRAGMA foreign_keys = ON;
     PRAGMA trusted_schema = OFF;
-    PRAGMA secure_delete = ON;
-    PRAGMA user_version = ${SCHEMA_VERSION};
+    ${readOnly ? 'PRAGMA query_only = ON;' : `
+      PRAGMA journal_mode = WAL;
+      PRAGMA synchronous = FULL;
+      PRAGMA secure_delete = ON;
+    `}
+  `);
+}
 
-    CREATE TABLE IF NOT EXISTS analytics_observations (
+function createV1Tables(database: SqliteDatabase): void {
+  database.exec(`
+    CREATE TABLE analytics_observations (
       commit_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
       generation_id TEXT NOT NULL,
       source_key TEXT NOT NULL,
@@ -173,24 +410,22 @@ function createSchema(database: SqliteDatabase): void {
       invocation_id TEXT,
       payload_json TEXT NOT NULL
     ) STRICT;
-
-    CREATE UNIQUE INDEX IF NOT EXISTS analytics_idempotency_idx
+    CREATE UNIQUE INDEX analytics_idempotency_idx
       ON analytics_observations(generation_id, idempotency_key);
-    CREATE INDEX IF NOT EXISTS analytics_subject_idx
+    CREATE INDEX analytics_subject_idx
       ON analytics_observations(capture_subject_kind, capture_subject_key);
-    CREATE INDEX IF NOT EXISTS analytics_root_session_idx
+    CREATE INDEX analytics_root_session_idx
       ON analytics_observations(root_session_id, commit_sequence);
-    CREATE INDEX IF NOT EXISTS analytics_invocation_idx
+    CREATE INDEX analytics_invocation_idx
       ON analytics_observations(invocation_id, commit_sequence);
 
-    CREATE TABLE IF NOT EXISTS analytics_detail_content (
+    CREATE TABLE analytics_detail_content (
       digest TEXT PRIMARY KEY,
       encoding TEXT NOT NULL CHECK (encoding IN ('utf8', 'binary')),
       logical_bytes INTEGER NOT NULL,
       body BLOB NOT NULL
     ) STRICT;
-
-    CREATE TABLE IF NOT EXISTS analytics_detail_payloads (
+    CREATE TABLE analytics_detail_payloads (
       payload_id TEXT PRIMARY KEY,
       generation_id TEXT NOT NULL,
       source_key TEXT NOT NULL,
@@ -203,16 +438,14 @@ function createSchema(database: SqliteDatabase): void {
       logical_bytes INTEGER NOT NULL,
       UNIQUE(generation_id, source_key)
     ) STRICT;
-    CREATE INDEX IF NOT EXISTS analytics_detail_subject_idx
+    CREATE INDEX analytics_detail_subject_idx
       ON analytics_detail_payloads(capture_subject_kind, capture_subject_key);
-
-    CREATE TABLE IF NOT EXISTS analytics_detail_references (
+    CREATE TABLE analytics_detail_references (
       payload_id TEXT NOT NULL REFERENCES analytics_detail_payloads(payload_id) ON DELETE CASCADE,
       digest TEXT NOT NULL REFERENCES analytics_detail_content(digest),
       PRIMARY KEY(payload_id, digest)
     ) STRICT;
-
-    CREATE TABLE IF NOT EXISTS analytics_deleted_subjects (
+    CREATE TABLE analytics_deleted_subjects (
       root_session_id TEXT PRIMARY KEY,
       delete_source_key TEXT NOT NULL UNIQUE,
       deleted_count INTEGER NOT NULL,
@@ -220,6 +453,373 @@ function createSchema(database: SqliteDatabase): void {
       deleted_at_ms TEXT NOT NULL
     ) STRICT;
   `);
+}
+
+function createV2Tables(database: SqliteDatabase): void {
+  database.exec(`
+    CREATE TABLE analytics_pending_subject_bindings (
+      pending_operation_id TEXT PRIMARY KEY,
+      root_session_id TEXT NOT NULL,
+      source_key TEXT NOT NULL,
+      bound_at_ms TEXT NOT NULL
+    ) STRICT;
+    CREATE INDEX analytics_pending_subject_root_idx
+      ON analytics_pending_subject_bindings(root_session_id);
+
+    CREATE TABLE analytics_projection_state (
+      singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+      revision TEXT NOT NULL
+    ) STRICT;
+    INSERT INTO analytics_projection_state (singleton, revision) VALUES (1, '0');
+
+    CREATE TABLE analytics_provider_settlements (
+      generation_id TEXT NOT NULL,
+      invocation_id TEXT NOT NULL,
+      observation_registry_key TEXT NOT NULL UNIQUE,
+      settlement_fingerprint TEXT NOT NULL,
+      capture_subject_kind TEXT NOT NULL,
+      capture_subject_key TEXT NOT NULL,
+      root_session_id TEXT,
+      provider TEXT,
+      dispatched_model TEXT,
+      reported_model TEXT,
+      effective_model TEXT,
+      purpose TEXT,
+      outcome TEXT,
+      settled_at_ms TEXT,
+      input_tokens TEXT,
+      output_tokens TEXT,
+      cache_read_tokens TEXT,
+      cache_write_tokens TEXT,
+      reasoning_tokens TEXT,
+      provider_total_tokens TEXT,
+      reported_cost_usd REAL,
+      calculated_cost_usd REAL,
+      calculated_cost_complete INTEGER NOT NULL CHECK (calculated_cost_complete IN (0, 1)),
+      effective_cost_usd REAL,
+      effective_cost_source TEXT CHECK (effective_cost_source IN ('reported', 'calculated')),
+      effective_cost_coverage TEXT NOT NULL CHECK (effective_cost_coverage IN ('known', 'unknown', 'not_applicable')),
+      projection_revision TEXT NOT NULL,
+      PRIMARY KEY(generation_id, invocation_id)
+    ) STRICT;
+    CREATE INDEX analytics_provider_settlement_subject_idx
+      ON analytics_provider_settlements(capture_subject_kind, capture_subject_key);
+    CREATE INDEX analytics_provider_settlement_root_idx
+      ON analytics_provider_settlements(root_session_id, projection_revision);
+    CREATE INDEX analytics_provider_settlement_dimensions_idx
+      ON analytics_provider_settlements(provider, effective_model, purpose, outcome);
+    CREATE TABLE analytics_provider_accounting_projections (
+      subject_kind TEXT NOT NULL CHECK (subject_kind IN ('global', 'session')),
+      subject_key TEXT NOT NULL,
+      summary_json TEXT NOT NULL,
+      projection_revision TEXT NOT NULL,
+      PRIMARY KEY(subject_kind, subject_key)
+    ) STRICT;
+
+    CREATE TABLE analytics_execution_observations (
+      observation_registry_key TEXT PRIMARY KEY,
+      generation_id TEXT NOT NULL,
+      execution_id TEXT NOT NULL,
+      observation_kind TEXT NOT NULL,
+      capture_subject_kind TEXT NOT NULL,
+      capture_subject_key TEXT NOT NULL,
+      root_session_id TEXT,
+      operation_kind TEXT,
+      outcome TEXT,
+      started_at_ms TEXT,
+      ended_at_ms TEXT,
+      payload_json TEXT NOT NULL,
+      projection_revision TEXT NOT NULL
+    ) STRICT;
+    CREATE INDEX analytics_execution_root_idx
+      ON analytics_execution_observations(root_session_id, projection_revision);
+    CREATE TABLE analytics_execution_states (
+      generation_id TEXT NOT NULL,
+      execution_id TEXT NOT NULL,
+      capture_subject_kind TEXT NOT NULL,
+      capture_subject_key TEXT NOT NULL,
+      root_session_id TEXT,
+      operation_kind TEXT,
+      outcome TEXT,
+      started_at_ms TEXT,
+      ended_at_ms TEXT,
+      projection_revision TEXT NOT NULL,
+      PRIMARY KEY(generation_id, execution_id)
+    ) STRICT;
+    CREATE INDEX analytics_execution_state_root_idx
+      ON analytics_execution_states(root_session_id, projection_revision);
+
+    CREATE TABLE analytics_tool_observations (
+      observation_registry_key TEXT PRIMARY KEY,
+      generation_id TEXT NOT NULL,
+      tool_call_id TEXT NOT NULL,
+      observation_kind TEXT NOT NULL,
+      capture_subject_kind TEXT NOT NULL,
+      capture_subject_key TEXT NOT NULL,
+      root_session_id TEXT,
+      tool_definition_id TEXT,
+      outcome TEXT,
+      started_at_ms TEXT,
+      execution_ended_at_ms TEXT,
+      payload_json TEXT NOT NULL,
+      projection_revision TEXT NOT NULL
+    ) STRICT;
+    CREATE INDEX analytics_tool_root_idx
+      ON analytics_tool_observations(root_session_id, projection_revision);
+    CREATE INDEX analytics_tool_identity_idx
+      ON analytics_tool_observations(generation_id, tool_call_id, projection_revision);
+    CREATE TABLE analytics_tool_states (
+      generation_id TEXT NOT NULL,
+      tool_call_id TEXT NOT NULL,
+      capture_subject_kind TEXT NOT NULL,
+      capture_subject_key TEXT NOT NULL,
+      root_session_id TEXT,
+      tool_definition_id TEXT,
+      outcome TEXT,
+      started_at_ms TEXT,
+      execution_ended_at_ms TEXT,
+      projection_revision TEXT NOT NULL,
+      PRIMARY KEY(generation_id, tool_call_id)
+    ) STRICT;
+    CREATE INDEX analytics_tool_state_root_idx
+      ON analytics_tool_states(root_session_id, projection_revision);
+
+    CREATE TABLE analytics_activity_observations (
+      observation_registry_key TEXT PRIMARY KEY,
+      generation_id TEXT NOT NULL,
+      span_id TEXT NOT NULL,
+      observation_kind TEXT NOT NULL,
+      capture_subject_kind TEXT NOT NULL,
+      capture_subject_key TEXT NOT NULL,
+      root_session_id TEXT,
+      activity_kind TEXT,
+      started_at_ms TEXT,
+      ended_at_ms TEXT,
+      duration_ms REAL,
+      coverage TEXT,
+      payload_json TEXT NOT NULL,
+      projection_revision TEXT NOT NULL
+    ) STRICT;
+    CREATE INDEX analytics_activity_root_idx
+      ON analytics_activity_observations(root_session_id, projection_revision);
+    CREATE INDEX analytics_activity_identity_idx
+      ON analytics_activity_observations(generation_id, span_id, projection_revision);
+    CREATE TABLE analytics_activity_states (
+      generation_id TEXT NOT NULL,
+      span_id TEXT NOT NULL,
+      capture_subject_kind TEXT NOT NULL,
+      capture_subject_key TEXT NOT NULL,
+      root_session_id TEXT,
+      activity_kind TEXT,
+      started_at_ms TEXT,
+      ended_at_ms TEXT,
+      duration_ms REAL,
+      coverage TEXT,
+      projection_revision TEXT NOT NULL,
+      PRIMARY KEY(generation_id, span_id)
+    ) STRICT;
+    CREATE INDEX analytics_activity_state_root_idx
+      ON analytics_activity_states(root_session_id, projection_revision);
+
+    CREATE TABLE analytics_feature_observations (
+      observation_registry_key TEXT PRIMARY KEY,
+      generation_id TEXT NOT NULL,
+      feature_key TEXT NOT NULL,
+      capture_subject_kind TEXT NOT NULL,
+      capture_subject_key TEXT NOT NULL,
+      root_session_id TEXT,
+      feature TEXT,
+      decision TEXT,
+      rule_version TEXT,
+      measured_size_effect REAL,
+      estimated_size_effect REAL,
+      payload_json TEXT NOT NULL,
+      projection_revision TEXT NOT NULL
+    ) STRICT;
+    CREATE INDEX analytics_feature_root_idx
+      ON analytics_feature_observations(root_session_id, projection_revision);
+    CREATE INDEX analytics_feature_dimensions_idx
+      ON analytics_feature_observations(feature, decision, rule_version);
+
+    CREATE TABLE analytics_producer_sequences (
+      producer_identity TEXT NOT NULL,
+      source_sequence TEXT NOT NULL,
+      receipt_digest TEXT NOT NULL,
+      PRIMARY KEY(producer_identity, source_sequence)
+    ) STRICT;
+    CREATE TABLE analytics_producer_reconciliation (
+      producer_identity TEXT PRIMARY KEY,
+      contiguous_watermark TEXT NOT NULL,
+      highest_observed_sequence TEXT NOT NULL,
+      visible_gaps_json TEXT NOT NULL
+    ) STRICT;
+  `);
+}
+
+function migrateV3(database: SqliteDatabase, deliveryHistoryCoverage: 'complete' | 'retained_only'): void {
+  database.exec(`
+    ALTER TABLE analytics_provider_settlements ADD COLUMN normalized_base_input_tokens TEXT;
+    ALTER TABLE analytics_provider_settlements ADD COLUMN normalized_output_tokens TEXT;
+    ALTER TABLE analytics_provider_settlements ADD COLUMN normalized_cache_read_tokens TEXT;
+    ALTER TABLE analytics_provider_settlements ADD COLUMN normalized_cache_write_tokens TEXT;
+    ALTER TABLE analytics_provider_settlements ADD COLUMN normalized_total_tokens TEXT;
+    ALTER TABLE analytics_provider_settlements
+      ADD COLUMN normalized_usage_complete INTEGER NOT NULL DEFAULT 0 CHECK (normalized_usage_complete IN (0, 1));
+    ALTER TABLE analytics_provider_settlements
+      ADD COLUMN reasoning_included_in_output INTEGER CHECK (reasoning_included_in_output IN (0, 1));
+
+    ALTER TABLE analytics_detail_payloads
+      ADD COLUMN media_type TEXT NOT NULL DEFAULT 'application/x-pie-subagent-result';
+    ALTER TABLE analytics_detail_payloads
+      ADD COLUMN source_encoding TEXT NOT NULL DEFAULT 'node-v8';
+    ALTER TABLE analytics_detail_payloads
+      ADD COLUMN complete INTEGER NOT NULL DEFAULT 1 CHECK (complete IN (0, 1));
+    ALTER TABLE analytics_detail_payloads ADD COLUMN capture_stage TEXT;
+    ALTER TABLE analytics_detail_payloads ADD COLUMN source_version TEXT;
+    ALTER TABLE analytics_detail_payloads ADD COLUMN omission_reason TEXT;
+
+    ALTER TABLE analytics_deleted_subjects
+      ADD COLUMN scrub_state TEXT NOT NULL DEFAULT 'pending' CHECK (scrub_state IN ('pending', 'complete'));
+    ALTER TABLE analytics_deleted_subjects ADD COLUMN scrub_error TEXT;
+
+    CREATE INDEX analytics_execution_state_subject_idx
+      ON analytics_execution_states(capture_subject_kind, capture_subject_key);
+    CREATE INDEX analytics_tool_state_subject_idx
+      ON analytics_tool_states(capture_subject_kind, capture_subject_key);
+    CREATE INDEX analytics_activity_state_subject_idx
+      ON analytics_activity_states(capture_subject_kind, capture_subject_key);
+
+    CREATE TABLE analytics_generations (
+      generation_id TEXT PRIMARY KEY,
+      first_observed_at_ms TEXT NOT NULL
+    ) STRICT;
+    INSERT OR IGNORE INTO analytics_generations (generation_id, first_observed_at_ms)
+      SELECT generation_id, MIN(observed_at_ms) FROM analytics_observations GROUP BY generation_id;
+    INSERT OR IGNORE INTO analytics_generations (generation_id, first_observed_at_ms)
+      SELECT generation_id, MIN(observed_at_ms) FROM analytics_detail_payloads GROUP BY generation_id;
+
+    CREATE TABLE analytics_delivery_accounting (
+      singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+      observations_delivered TEXT NOT NULL,
+      observations_accepted TEXT NOT NULL,
+      observations_replayed TEXT NOT NULL,
+      observations_deleted TEXT NOT NULL,
+      details_delivered TEXT NOT NULL,
+      details_accepted TEXT NOT NULL,
+      details_replayed TEXT NOT NULL,
+      details_deleted TEXT NOT NULL,
+      delivery_history_coverage TEXT NOT NULL CHECK (delivery_history_coverage IN ('complete', 'retained_only'))
+    ) STRICT;
+    INSERT INTO analytics_delivery_accounting (
+      singleton,
+      observations_delivered, observations_accepted, observations_replayed, observations_deleted,
+      details_delivered, details_accepted, details_replayed, details_deleted,
+      delivery_history_coverage
+    ) SELECT 1,
+      CAST(COUNT(*) AS TEXT), CAST(COUNT(*) AS TEXT), '0', '0',
+      CAST((SELECT COUNT(*) FROM analytics_detail_payloads) AS TEXT),
+      CAST((SELECT COUNT(*) FROM analytics_detail_payloads) AS TEXT), '0', '0',
+      '${deliveryHistoryCoverage}'
+    FROM analytics_observations;
+
+    CREATE TRIGGER analytics_detail_reference_last_owner_cleanup
+    AFTER DELETE ON analytics_detail_references
+    WHEN NOT EXISTS (
+      SELECT 1 FROM analytics_detail_references WHERE digest = OLD.digest
+    )
+    BEGIN
+      DELETE FROM analytics_detail_content WHERE digest = OLD.digest;
+    END;
+
+    DELETE FROM analytics_detail_content
+    WHERE NOT EXISTS (
+      SELECT 1 FROM analytics_detail_references reference
+      WHERE reference.digest = analytics_detail_content.digest
+    );
+
+    CREATE VIEW analytics_provider_usage_v1 AS
+      SELECT generation_id, invocation_id, root_session_id AS owning_root_session_id,
+        provider, dispatched_model, reported_model, effective_model, purpose, outcome,
+        settled_at_ms, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
+        reasoning_tokens, provider_total_tokens,
+        normalized_base_input_tokens, normalized_output_tokens,
+        normalized_cache_read_tokens, normalized_cache_write_tokens,
+        normalized_total_tokens, normalized_usage_complete, reasoning_included_in_output,
+        reported_cost_usd, calculated_cost_usd,
+        calculated_cost_complete, effective_cost_usd, effective_cost_source,
+        effective_cost_coverage, projection_revision
+      FROM analytics_provider_settlements;
+  `);
+  backfillV3NormalizedUsage(database);
+  // V2 retained every accepted source sequence. V3 needs only bounded
+  // out-of-order receipts above the compact contiguous watermark.
+  database.exec(`
+    DELETE FROM analytics_producer_sequences
+    WHERE CAST(source_sequence AS INTEGER) <= CAST((
+      SELECT contiguous_watermark FROM analytics_producer_reconciliation state
+      WHERE state.producer_identity = analytics_producer_sequences.producer_identity
+    ) AS INTEGER);
+  `);
+}
+
+function databaseTransaction<T>(database: SqliteDatabase, operation: () => T): T {
+  database.exec('BEGIN IMMEDIATE');
+  try {
+    const result = operation();
+    database.exec('COMMIT');
+    return result;
+  } catch (error) {
+    try { database.exec('ROLLBACK'); } catch { /* preserve original */ }
+    throw error;
+  }
+}
+
+function initializeSchema(database: SqliteDatabase, readOnly = false): void {
+  configureDatabase(database, readOnly);
+  if (readOnly) {
+    const version = toNumber((database.prepare('PRAGMA user_version').get() as UserVersionRow).user_version);
+    if (version !== DATABASE_SCHEMA_VERSION) {
+      throw new Error(
+        `Read-only analytics query requires schema version ${DATABASE_SCHEMA_VERSION}; found ${version}.`,
+      );
+    }
+    return;
+  }
+  // Acquire the migration-writer lock before selecting the version, then
+  // re-evaluate it under that lock. Concurrent fresh helpers therefore see
+  // the schema committed by the winner rather than replaying CREATE TABLE.
+  databaseTransaction(database, () => {
+    const version = toNumber((database.prepare('PRAGMA user_version').get() as UserVersionRow).user_version);
+    if (version > DATABASE_SCHEMA_VERSION) {
+      throw new Error(
+        `Unsupported newer analytics database schema version ${version}; this recorder supports ${DATABASE_SCHEMA_VERSION}.`,
+      );
+    }
+    if (version === 0) {
+      const existing = database.prepare(`
+        SELECT name FROM sqlite_master
+        WHERE type = 'table' AND name LIKE 'analytics_%'
+        LIMIT 1
+      `).get();
+      if (existing) throw new Error('Unsupported unversioned analytics database schema.');
+      createV1Tables(database);
+      createV2Tables(database);
+      migrateV3(database, 'complete');
+      database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
+      return;
+    }
+    if (version === 1) {
+      createV2Tables(database);
+      migrateV3(database, 'retained_only');
+      backfillV2(database);
+      database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
+      return;
+    }
+    if (version === 2) {
+      migrateV3(database, 'retained_only');
+      database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
+    }
+  });
 }
 
 function validateDetailCapture(capture: AnalyticsDetailCapture): void {
@@ -234,11 +834,725 @@ function validateDetailCapture(capture: AnalyticsDetailCapture): void {
     throw new Error('Detail capture schemaVersion must be a positive safe integer.');
   }
   parseInt64(capture.observedAtMs, 'observedAtMs');
-  if (capture.mediaType !== 'application/x-pie-subagent-result'
+  if ((capture.mediaType !== 'application/x-pie-subagent-result'
+      && capture.mediaType !== 'application/x-pie-tool-observation')
     || capture.encoding !== 'node-v8'
     || capture.complete !== true
     || !(capture.bytes instanceof Uint8Array)) {
     throw new Error('Unsupported or incomplete analytics detail capture.');
+  }
+}
+
+function optionalString(value: unknown): string | null {
+  return typeof value === 'string' ? value : null;
+}
+
+function optionalCost(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+function optionalToken(fields: Record<string, unknown>, name: keyof AnalyticsUsageChannels): string | null {
+  const value = fields[name];
+  if (value === null || value === undefined) return null;
+  return parseNonNegativeInt64(value, `fields.${name}`).toString();
+}
+
+function normalizedUsage(fields: Record<string, unknown>): NormalizedUsageChannels {
+  return normalizeUsageChannels({
+    inputTokens: optionalToken(fields, 'inputTokens'),
+    outputTokens: optionalToken(fields, 'outputTokens'),
+    cacheReadTokens: optionalToken(fields, 'cacheReadTokens'),
+    cacheWriteTokens: optionalToken(fields, 'cacheWriteTokens'),
+    reasoningTokens: optionalToken(fields, 'reasoningTokens'),
+    providerTotalTokens: optionalToken(fields, 'providerTotalTokens'),
+    inputIncludesCache: fields.inputIncludesCache === true
+      ? true
+      : fields.inputIncludesCache === false ? false : undefined,
+    outputIncludesReasoning: fields.outputIncludesReasoning === true
+      ? true
+      : fields.outputIncludesReasoning === false ? false : undefined,
+    cacheChannelsOmittedAsZero: fields.cacheChannelsOmittedAsZero === true,
+  });
+}
+
+function normalizedSqlValue(value: number | string | null): string | null {
+  return value === null ? null : canonicalInt64(value);
+}
+
+interface ProviderCostProjection {
+  reportedCost: number | null;
+  calculatedCost: number | null;
+  calculatedCostComplete: boolean;
+  effectiveCost: number | null;
+  effectiveSource: 'reported' | 'calculated' | null;
+  effectiveCoverage: 'known' | 'unknown' | 'not_applicable';
+}
+
+function providerCostProjection(
+  fields: Record<string, unknown>,
+  normalized: NormalizedUsageChannels,
+  invocationId: string,
+): ProviderCostProjection {
+  const reportedCost = optionalCost(fields.reportedCostUsd);
+  const suppliedCalculatedCost = optionalCost(fields.calculatedCostUsd);
+  const pricingProvided = fields.pricing !== null && fields.pricing !== undefined;
+  const pricing = fields.pricing && typeof fields.pricing === 'object' && !Array.isArray(fields.pricing)
+    ? fields.pricing as Record<string, unknown>
+    : null;
+  const canonicalCalculatedCost = pricing?.normalizationVersion === 'oracle-v1'
+    && pricing.currency === 'USD'
+    ? calculateCompleteCostUsd(normalized, {
+        inputUsdPerMillionTokens: optionalCost(pricing.inputUsdPerMillionTokens),
+        outputUsdPerMillionTokens: optionalCost(pricing.outputUsdPerMillionTokens),
+        cacheReadUsdPerMillionTokens: optionalCost(pricing.cacheReadUsdPerMillionTokens),
+        cacheWriteUsdPerMillionTokens: optionalCost(pricing.cacheWriteUsdPerMillionTokens),
+      })
+    : null;
+  if (canonicalCalculatedCost !== null
+    && suppliedCalculatedCost !== null
+    && fields.calculatedCostComplete === true
+    && !costWithinParityTolerance(suppliedCalculatedCost, canonicalCalculatedCost)) {
+    throw new Error(`Provider settlement calculated cost does not match its pricing snapshot for ${invocationId}.`);
+  }
+  const calculatedCost = canonicalCalculatedCost ?? suppliedCalculatedCost;
+  const calculatedCostComplete = canonicalCalculatedCost !== null
+    || (!pricingProvided && suppliedCalculatedCost !== null && fields.calculatedCostComplete === true);
+  const effectiveCost = reportedCost ?? (calculatedCostComplete ? calculatedCost : null);
+  return {
+    reportedCost,
+    calculatedCost,
+    calculatedCostComplete,
+    effectiveCost,
+    effectiveSource: reportedCost !== null ? 'reported' : effectiveCost !== null ? 'calculated' : null,
+    effectiveCoverage: effectiveCost !== null
+      ? 'known'
+      : fields.effectiveCostCoverage === 'not_applicable' || fields.costCoverage === 'not_applicable'
+        ? 'not_applicable'
+        : 'unknown',
+  };
+}
+
+function backfillV3NormalizedUsage(database: SqliteDatabase): void {
+  const update = database.prepare(`
+    UPDATE analytics_provider_settlements SET
+      normalized_base_input_tokens = ?, normalized_output_tokens = ?,
+      normalized_cache_read_tokens = ?, normalized_cache_write_tokens = ?,
+      normalized_total_tokens = ?, normalized_usage_complete = ?, reasoning_included_in_output = ?,
+      reported_cost_usd = ?, calculated_cost_usd = ?, calculated_cost_complete = ?,
+      effective_cost_usd = ?, effective_cost_source = ?, effective_cost_coverage = ?
+    WHERE generation_id = ? AND invocation_id = ?
+  `);
+  database.exec('DELETE FROM analytics_provider_accounting_projections;');
+  let lastGeneration: string | null = null;
+  let lastInvocation: string | null = null;
+  while (true) {
+    const rows = database.prepare(`
+      SELECT settlement.generation_id, settlement.invocation_id,
+        settlement.root_session_id, observation.payload_json
+      FROM analytics_provider_settlements settlement
+      JOIN analytics_observations observation
+        ON observation.registry_key = settlement.observation_registry_key
+      WHERE ? IS NULL
+        OR settlement.generation_id > ?
+        OR (settlement.generation_id = ? AND settlement.invocation_id > ?)
+      ORDER BY settlement.generation_id, settlement.invocation_id
+      LIMIT 512
+    `).all(lastGeneration, lastGeneration, lastGeneration, lastInvocation) as Array<{
+      generation_id: string;
+      invocation_id: string;
+      root_session_id: string | null;
+      payload_json: string;
+    }>;
+    if (rows.length === 0) break;
+    for (const row of rows) {
+      const observation = JSON.parse(row.payload_json) as AnalyticsObservation;
+      const fields = observation.fields as Record<string, unknown>;
+      const normalized = normalizedUsage(fields);
+      const costs = providerCostProjection(fields, normalized, row.invocation_id);
+      update.run(
+        normalizedSqlValue(normalized.baseInputTokens),
+        normalizedSqlValue(normalized.outputTokens),
+        normalizedSqlValue(normalized.cacheReadTokens),
+        normalizedSqlValue(normalized.cacheWriteTokens),
+        normalizedSqlValue(normalized.totalTokens),
+        normalized.complete ? 1 : 0,
+        normalized.reasoningIncludedInOutput === null ? null : normalized.reasoningIncludedInOutput ? 1 : 0,
+        costs.reportedCost,
+        costs.calculatedCost,
+        costs.calculatedCostComplete ? 1 : 0,
+        costs.effectiveCost,
+        costs.effectiveSource,
+        costs.effectiveCoverage,
+        row.generation_id,
+        row.invocation_id,
+      );
+      const revision = nextProjectionRevision(database);
+      const accountingValues = {
+        inputTokens: normalizedSqlValue(normalized.baseInputTokens),
+        outputTokens: normalizedSqlValue(normalized.outputTokens),
+        cacheReadTokens: normalizedSqlValue(normalized.cacheReadTokens),
+        cacheWriteTokens: normalizedSqlValue(normalized.cacheWriteTokens),
+        reasoningTokens: normalizedSqlValue(normalized.reasoningTokens),
+        providerTotalTokens: optionalToken(fields, 'providerTotalTokens'),
+        effectiveCost: costs.effectiveCost,
+        effectiveSource: costs.effectiveSource,
+      };
+      updateProviderAccountingProjection(database, 'global', '*', revision, accountingValues, 1);
+      if (row.root_session_id) {
+        updateProviderAccountingProjection(database, 'session', row.root_session_id, revision, accountingValues, 1);
+      }
+    }
+    lastGeneration = rows.at(-1)!.generation_id;
+    lastInvocation = rows.at(-1)!.invocation_id;
+  }
+}
+
+function sourceSequence(observation: AnalyticsObservation): bigint | null {
+  const value = (observation as AnalyticsObservation & { sourceSequence?: unknown }).sourceSequence;
+  return value === undefined || value === null
+    ? null
+    : parseNonNegativeInt64(value, 'sourceSequence');
+}
+
+function producerIdentity(observation: AnalyticsObservation): string {
+  const stableOriginId = observation.stableOriginId?.trim();
+  if (stableOriginId) {
+    return JSON.stringify([observation.generationId, observation.producerKind, stableOriginId]);
+  }
+  // Schema-v1 compatibility. New production adapters provide stableOriginId;
+  // processId is only a last-resort discriminator for old captures.
+  return JSON.stringify([
+    observation.generationId,
+    observation.producerKind,
+    observation.producer.buildId,
+    observation.producer.processGeneration ?? observation.producer.processId ?? null,
+  ]);
+}
+
+function reconciliationGaps(sequences: readonly bigint[], contiguous: bigint): Array<{ from: string; to: string }> {
+  const gaps: Array<{ from: string; to: string }> = [];
+  let expected = contiguous + 1n;
+  for (const sequence of sequences) {
+    if (sequence <= contiguous) continue;
+    if (sequence > expected) gaps.push({ from: expected.toString(), to: (sequence - 1n).toString() });
+    expected = sequence + 1n;
+  }
+  return gaps;
+}
+
+/** Record one delivered producer sequence while retaining only bounded
+ * out-of-order receipts. Contiguous receipts are represented by the watermark,
+ * so reconciliation storage never grows with normal history. */
+function recordSourceSequence(
+  database: SqliteDatabase,
+  observation: AnalyticsObservation,
+  registryKey: string,
+  fingerprint: string,
+  replay: boolean,
+): void {
+  const sequence = sourceSequence(observation);
+  if (sequence === null) return;
+  const identity = producerIdentity(observation);
+  const encoded = sequence.toString();
+  const receiptDigest = createHash('sha256')
+    .update(registryKey)
+    .update('\0')
+    .update(fingerprint)
+    .digest('hex');
+  const current = database.prepare(`
+    SELECT contiguous_watermark, highest_observed_sequence
+    FROM analytics_producer_reconciliation WHERE producer_identity = ?
+  `).get(identity) as { contiguous_watermark: string; highest_observed_sequence: string } | undefined;
+  let contiguous = BigInt(current?.contiguous_watermark ?? '0');
+  let highest = BigInt(current?.highest_observed_sequence ?? '0');
+
+  if (sequence <= contiguous) {
+    if (replay) return;
+    throw new Error(`Analytics source sequence ${encoded} is behind contiguous watermark ${contiguous.toString()}.`);
+  }
+
+  const pending = database.prepare(`
+    SELECT receipt_digest FROM analytics_producer_sequences
+    WHERE producer_identity = ? AND source_sequence = ?
+  `).get(identity, encoded) as { receipt_digest: string } | undefined;
+  if (pending) {
+    if (pending.receipt_digest !== receiptDigest) {
+      throw new AnalyticsSourceConflictError(
+        `${identity}:sourceSequence:${encoded}`,
+        pending.receipt_digest,
+        receiptDigest,
+      );
+    }
+    if (replay) return;
+    throw new Error(`Analytics source sequence ${encoded} was already delivered without this source fact.`);
+  }
+
+  highest = sequence > highest ? sequence : highest;
+  if (sequence === contiguous + 1n) {
+    contiguous = sequence;
+    while (true) {
+      const next = (contiguous + 1n).toString();
+      const receipt = database.prepare(`
+        SELECT receipt_digest FROM analytics_producer_sequences
+        WHERE producer_identity = ? AND source_sequence = ?
+      `).get(identity, next) as { receipt_digest: string } | undefined;
+      if (!receipt) break;
+      database.prepare(`
+        DELETE FROM analytics_producer_sequences
+        WHERE producer_identity = ? AND source_sequence = ?
+      `).run(identity, next);
+      contiguous += 1n;
+    }
+  } else {
+    const pendingCount = toNumber((database.prepare(`
+      SELECT COUNT(*) AS count FROM analytics_producer_sequences WHERE producer_identity = ?
+    `).get(identity) as CountRow).count);
+    if (pendingCount >= MAX_PENDING_SEQUENCES_PER_PRODUCER) {
+      throw new Error(`Analytics producer reconciliation capacity exceeded for ${identity}.`);
+    }
+    database.prepare(`
+      INSERT INTO analytics_producer_sequences (
+        producer_identity, source_sequence, receipt_digest
+      ) VALUES (?, ?, ?)
+    `).run(identity, encoded, receiptDigest);
+  }
+
+  const pendingRows = database.prepare(`
+    SELECT source_sequence FROM analytics_producer_sequences
+    WHERE producer_identity = ? ORDER BY CAST(source_sequence AS INTEGER)
+    LIMIT ?
+  `).all(identity, MAX_PENDING_SEQUENCES_PER_PRODUCER) as Array<{ source_sequence: string }>;
+  const pendingSequences = pendingRows.map((row) => BigInt(row.source_sequence));
+  const gaps = reconciliationGaps(pendingSequences, contiguous);
+  database.prepare(`
+    INSERT INTO analytics_producer_reconciliation (
+      producer_identity, contiguous_watermark, highest_observed_sequence, visible_gaps_json
+    ) VALUES (?, ?, ?, ?)
+    ON CONFLICT(producer_identity) DO UPDATE SET
+      contiguous_watermark = excluded.contiguous_watermark,
+      highest_observed_sequence = excluded.highest_observed_sequence,
+      visible_gaps_json = excluded.visible_gaps_json
+  `).run(identity, contiguous.toString(), highest.toString(), JSON.stringify(gaps));
+}
+
+function nextProjectionRevision(database: SqliteDatabase): string {
+  const row = database.prepare(
+    'SELECT revision FROM analytics_projection_state WHERE singleton = 1',
+  ).get() as RevisionRow;
+  const revision = parseNonNegativeInt64(row.revision, 'projectionRevision') + 1n;
+  if (revision > ((1n << 63n) - 1n)) throw new Error('Analytics projection revision exhausted signed-64 range.');
+  const encoded = revision.toString();
+  database.prepare(
+    'UPDATE analytics_projection_state SET revision = ? WHERE singleton = 1',
+  ).run(encoded);
+  return encoded;
+}
+
+const ACCOUNTING_CHANNELS = [
+  'inputTokens',
+  'outputTokens',
+  'cacheReadTokens',
+  'cacheWriteTokens',
+  'reasoningTokens',
+  'providerTotalTokens',
+] as const;
+
+type AccountingChannel = typeof ACCOUNTING_CHANNELS[number];
+
+interface StoredProviderAccounting {
+  occurrenceCount: string;
+  channels: Record<AccountingChannel, { knownCount: string; unknownCount: string; knownTotal: string }>;
+  cost: {
+    knownCount: string;
+    unknownCount: string;
+    reportedCount: string;
+    calculatedCount: string;
+    knownTotal: number;
+  };
+}
+
+function emptyStoredProviderAccounting(): StoredProviderAccounting {
+  return {
+    occurrenceCount: '0',
+    channels: Object.fromEntries(ACCOUNTING_CHANNELS.map((channel) => [channel, {
+      knownCount: '0', unknownCount: '0', knownTotal: '0',
+    }])) as StoredProviderAccounting['channels'],
+    cost: { knownCount: '0', unknownCount: '0', reportedCount: '0', calculatedCount: '0', knownTotal: 0 },
+  };
+}
+
+type DeliveryKind = 'observations' | 'details';
+type DeliveryOutcome = 'accepted' | 'replayed' | 'deleted';
+
+function incrementDeliveryAccounting(
+  database: SqliteDatabase,
+  kind: DeliveryKind,
+  outcome: DeliveryOutcome,
+  count = 1n,
+): void {
+  const deliveredColumn = `${kind}_delivered`;
+  const outcomeColumn = `${kind}_${outcome}`;
+  const row = database.prepare(`
+    SELECT ${deliveredColumn} AS delivered, ${outcomeColumn} AS outcome
+    FROM analytics_delivery_accounting WHERE singleton = 1
+  `).get() as { delivered: string; outcome: string };
+  database.prepare(`
+    UPDATE analytics_delivery_accounting
+    SET ${deliveredColumn} = ?, ${outcomeColumn} = ?
+    WHERE singleton = 1
+  `).run(
+    (BigInt(row.delivered) + count).toString(),
+    (BigInt(row.outcome) + count).toString(),
+  );
+}
+
+function updateProviderAccountingProjection(
+  database: SqliteDatabase,
+  subjectKind: 'global' | 'session',
+  subject: string,
+  revision: string,
+  values: Partial<Record<AccountingChannel, string | null>> & {
+    effectiveCost: number | null;
+    effectiveSource: 'reported' | 'calculated' | null;
+  },
+  direction: 1 | -1,
+): void {
+  const row = database.prepare(`
+    SELECT summary_json FROM analytics_provider_accounting_projections
+    WHERE subject_kind = ? AND subject_key = ?
+  `).get(subjectKind, subject) as { summary_json: string } | undefined;
+  const summary = row ? JSON.parse(row.summary_json) as StoredProviderAccounting : emptyStoredProviderAccounting();
+  summary.occurrenceCount = (BigInt(summary.occurrenceCount) + BigInt(direction)).toString();
+  for (const channel of ACCOUNTING_CHANNELS) {
+    const target = summary.channels[channel];
+    const value = values[channel];
+    if (value === null || value === undefined) {
+      target.unknownCount = (BigInt(target.unknownCount) + BigInt(direction)).toString();
+    } else {
+      target.knownCount = (BigInt(target.knownCount) + BigInt(direction)).toString();
+      target.knownTotal = (BigInt(target.knownTotal) + BigInt(value) * BigInt(direction)).toString();
+    }
+  }
+  if (values.effectiveCost === null) {
+    summary.cost.unknownCount = (BigInt(summary.cost.unknownCount) + BigInt(direction)).toString();
+  } else {
+    summary.cost.knownCount = (BigInt(summary.cost.knownCount) + BigInt(direction)).toString();
+    summary.cost.knownTotal += values.effectiveCost * direction;
+    if (values.effectiveSource === 'reported') {
+      summary.cost.reportedCount = (BigInt(summary.cost.reportedCount) + BigInt(direction)).toString();
+    } else if (values.effectiveSource === 'calculated') {
+      summary.cost.calculatedCount = (BigInt(summary.cost.calculatedCount) + BigInt(direction)).toString();
+    }
+  }
+  if (summary.occurrenceCount === '0') Object.assign(summary, emptyStoredProviderAccounting());
+  database.prepare(`
+    INSERT INTO analytics_provider_accounting_projections (
+      subject_kind, subject_key, summary_json, projection_revision
+    ) VALUES (?, ?, ?, ?)
+    ON CONFLICT(subject_kind, subject_key) DO UPDATE SET
+      summary_json = excluded.summary_json,
+      projection_revision = excluded.projection_revision
+  `).run(subjectKind, subject, JSON.stringify(summary), revision);
+}
+
+function applyProviderSettlement(
+  database: SqliteDatabase,
+  observation: AnalyticsObservation,
+  registryKey: string,
+  fingerprint: string,
+): boolean {
+  if (observation.observationKind !== 'providerSettlement') return false;
+  const fields = observation.fields as Record<string, unknown>;
+  const scopedInvocation = observation.scope.invocationId;
+  const fieldInvocation = optionalString(fields.invocationId);
+  if (scopedInvocation && fieldInvocation && scopedInvocation !== fieldInvocation) {
+    throw new Error(`Provider settlement invocation identity mismatch: ${scopedInvocation} != ${fieldInvocation}.`);
+  }
+  const invocationId = scopedInvocation ?? fieldInvocation;
+  if (!invocationId) throw new Error('Provider settlement requires an invocationId.');
+
+  const existing = database.prepare(`
+    SELECT settlement_fingerprint FROM analytics_provider_settlements
+    WHERE generation_id = ? AND invocation_id = ?
+  `).get(observation.generationId, invocationId) as { settlement_fingerprint: string } | undefined;
+  if (existing) {
+    if (existing.settlement_fingerprint !== fingerprint) {
+      throw new AnalyticsSourceConflictError(
+        `providerSettlement:${observation.generationId}:${invocationId}`,
+        existing.settlement_fingerprint,
+        fingerprint,
+      );
+    }
+    return false;
+  }
+
+  const normalized = normalizedUsage(fields);
+  const costs = providerCostProjection(fields, normalized, invocationId);
+  const dispatchedModel = optionalString(fields.dispatchedModel);
+  const reportedModel = optionalString(fields.reportedModel);
+  const settledAt = fields.settledAtMs === null || fields.settledAtMs === undefined
+    ? null
+    : canonicalInt64(fields.settledAtMs as Int64Value);
+  const revision = nextProjectionRevision(database);
+  database.prepare(`
+    INSERT INTO analytics_provider_settlements (
+      generation_id, invocation_id, observation_registry_key, settlement_fingerprint,
+      capture_subject_kind, capture_subject_key, root_session_id,
+      provider, dispatched_model, reported_model, effective_model, purpose, outcome, settled_at_ms,
+      input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
+      reasoning_tokens, provider_total_tokens,
+      normalized_base_input_tokens, normalized_output_tokens,
+      normalized_cache_read_tokens, normalized_cache_write_tokens,
+      normalized_total_tokens, normalized_usage_complete, reasoning_included_in_output,
+      reported_cost_usd, calculated_cost_usd,
+      calculated_cost_complete, effective_cost_usd, effective_cost_source,
+      effective_cost_coverage, projection_revision
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    observation.generationId,
+    invocationId,
+    registryKey,
+    fingerprint,
+    observation.captureSubject.kind,
+    subjectKey(observation),
+    observation.scope.rootSessionId ?? null,
+    optionalString(fields.provider),
+    dispatchedModel,
+    reportedModel,
+    reportedModel ?? dispatchedModel,
+    optionalString(fields.purpose),
+    optionalString(fields.outcome),
+    settledAt,
+    optionalToken(fields, 'inputTokens'),
+    optionalToken(fields, 'outputTokens'),
+    optionalToken(fields, 'cacheReadTokens'),
+    optionalToken(fields, 'cacheWriteTokens'),
+    optionalToken(fields, 'reasoningTokens'),
+    optionalToken(fields, 'providerTotalTokens'),
+    normalizedSqlValue(normalized.baseInputTokens),
+    normalizedSqlValue(normalized.outputTokens),
+    normalizedSqlValue(normalized.cacheReadTokens),
+    normalizedSqlValue(normalized.cacheWriteTokens),
+    normalizedSqlValue(normalized.totalTokens),
+    normalized.complete ? 1 : 0,
+    normalized.reasoningIncludedInOutput === null ? null : normalized.reasoningIncludedInOutput ? 1 : 0,
+    costs.reportedCost,
+    costs.calculatedCost,
+    costs.calculatedCostComplete ? 1 : 0,
+    costs.effectiveCost,
+    costs.effectiveSource,
+    costs.effectiveCoverage,
+    revision,
+  );
+  const accountingValues = {
+    inputTokens: normalizedSqlValue(normalized.baseInputTokens),
+    outputTokens: normalizedSqlValue(normalized.outputTokens),
+    cacheReadTokens: normalizedSqlValue(normalized.cacheReadTokens),
+    cacheWriteTokens: normalizedSqlValue(normalized.cacheWriteTokens),
+    reasoningTokens: normalizedSqlValue(normalized.reasoningTokens),
+    providerTotalTokens: optionalToken(fields, 'providerTotalTokens'),
+    effectiveCost: costs.effectiveCost,
+    effectiveSource: costs.effectiveSource,
+  };
+  updateProviderAccountingProjection(database, 'global', '*', revision, accountingValues, 1);
+  if (observation.scope.rootSessionId) {
+    updateProviderAccountingProjection(database, 'session', observation.scope.rootSessionId, revision, accountingValues, 1);
+  }
+  return true;
+}
+
+function optionalTimestamp(value: unknown, _fieldName: string): string | null {
+  return value === null || value === undefined ? null : canonicalInt64(value as Int64Value);
+}
+
+function optionalNonNegativeFloat(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+function applyTypedObservation(
+  database: SqliteDatabase,
+  observation: AnalyticsObservation,
+  registryKey: string,
+): boolean {
+  const fields = observation.fields as Record<string, unknown>;
+  const common = [
+    registryKey,
+    observation.generationId,
+    observation.entityKey,
+    observation.observationKind,
+    observation.captureSubject.kind,
+    subjectKey(observation),
+    observation.scope.rootSessionId ?? null,
+  ] as const;
+  if (observation.entityKind === 'execution') {
+    const revision = nextProjectionRevision(database);
+    database.prepare(`
+      INSERT INTO analytics_execution_observations (
+        observation_registry_key, generation_id, execution_id, observation_kind,
+        capture_subject_kind, capture_subject_key, root_session_id,
+        operation_kind, outcome, started_at_ms, ended_at_ms, payload_json, projection_revision
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      ...common,
+      optionalString(fields.operationKind),
+      optionalString(fields.outcome),
+      optionalTimestamp(fields.startedAtMs, 'fields.startedAtMs'),
+      optionalTimestamp(fields.endedAtMs, 'fields.endedAtMs'),
+      serialize(observation),
+      revision,
+    );
+    database.prepare(`
+      INSERT INTO analytics_execution_states (
+        generation_id, execution_id, capture_subject_kind, capture_subject_key,
+        root_session_id, operation_kind, outcome, started_at_ms, ended_at_ms, projection_revision
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(generation_id, execution_id) DO UPDATE SET
+        operation_kind = COALESCE(excluded.operation_kind, operation_kind),
+        outcome = COALESCE(excluded.outcome, outcome),
+        started_at_ms = COALESCE(excluded.started_at_ms, started_at_ms),
+        ended_at_ms = COALESCE(excluded.ended_at_ms, ended_at_ms),
+        projection_revision = excluded.projection_revision
+    `).run(
+      observation.generationId, observation.entityKey, observation.captureSubject.kind,
+      subjectKey(observation), observation.scope.rootSessionId ?? null,
+      optionalString(fields.operationKind), optionalString(fields.outcome),
+      optionalTimestamp(fields.startedAtMs, 'fields.startedAtMs'),
+      optionalTimestamp(fields.endedAtMs, 'fields.endedAtMs'), revision,
+    );
+    return true;
+  }
+  if (observation.entityKind === 'toolCall') {
+    const revision = nextProjectionRevision(database);
+    const toolCallId = `tool:${createHash('sha256').update(JSON.stringify([
+      observation.captureSubject.kind,
+      subjectKey(observation),
+      observation.scope.executionId ?? null,
+      observation.entityKey,
+    ])).digest('hex')}`;
+    database.prepare(`
+      INSERT INTO analytics_tool_observations (
+        observation_registry_key, generation_id, tool_call_id, observation_kind,
+        capture_subject_kind, capture_subject_key, root_session_id,
+        tool_definition_id, outcome, started_at_ms, execution_ended_at_ms,
+        payload_json, projection_revision
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      registryKey,
+      observation.generationId,
+      toolCallId,
+      observation.observationKind,
+      observation.captureSubject.kind,
+      subjectKey(observation),
+      observation.scope.rootSessionId ?? null,
+      optionalString(fields.toolDefinitionId),
+      optionalString(fields.outcome),
+      optionalTimestamp(fields.startedAtMs, 'fields.startedAtMs'),
+      optionalTimestamp(fields.executionEndedAtMs, 'fields.executionEndedAtMs'),
+      serialize(observation),
+      revision,
+    );
+    database.prepare(`
+      INSERT INTO analytics_tool_states (
+        generation_id, tool_call_id, capture_subject_kind, capture_subject_key,
+        root_session_id, tool_definition_id, outcome, started_at_ms,
+        execution_ended_at_ms, projection_revision
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(generation_id, tool_call_id) DO UPDATE SET
+        tool_definition_id = COALESCE(excluded.tool_definition_id, tool_definition_id),
+        outcome = COALESCE(excluded.outcome, outcome),
+        started_at_ms = COALESCE(excluded.started_at_ms, started_at_ms),
+        execution_ended_at_ms = COALESCE(excluded.execution_ended_at_ms, execution_ended_at_ms),
+        projection_revision = excluded.projection_revision
+    `).run(
+      observation.generationId, toolCallId, observation.captureSubject.kind,
+      subjectKey(observation), observation.scope.rootSessionId ?? null,
+      optionalString(fields.toolDefinitionId), optionalString(fields.outcome),
+      optionalTimestamp(fields.startedAtMs, 'fields.startedAtMs'),
+      optionalTimestamp(fields.executionEndedAtMs, 'fields.executionEndedAtMs'), revision,
+    );
+    return true;
+  }
+  if (observation.entityKind === 'activitySpan') {
+    const revision = nextProjectionRevision(database);
+    database.prepare(`
+      INSERT INTO analytics_activity_observations (
+        observation_registry_key, generation_id, span_id, observation_kind,
+        capture_subject_kind, capture_subject_key, root_session_id,
+        activity_kind, started_at_ms, ended_at_ms, duration_ms, coverage,
+        payload_json, projection_revision
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      ...common,
+      optionalString(fields.kind),
+      optionalTimestamp(fields.startedAtMs, 'fields.startedAtMs'),
+      optionalTimestamp(fields.endedAtMs, 'fields.endedAtMs'),
+      optionalNonNegativeFloat(fields.durationMs),
+      optionalString(fields.coverage),
+      serialize(observation),
+      revision,
+    );
+    database.prepare(`
+      INSERT INTO analytics_activity_states (
+        generation_id, span_id, capture_subject_kind, capture_subject_key,
+        root_session_id, activity_kind, started_at_ms, ended_at_ms, duration_ms,
+        coverage, projection_revision
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(generation_id, span_id) DO UPDATE SET
+        activity_kind = COALESCE(excluded.activity_kind, activity_kind),
+        started_at_ms = COALESCE(excluded.started_at_ms, started_at_ms),
+        ended_at_ms = COALESCE(excluded.ended_at_ms, ended_at_ms),
+        duration_ms = COALESCE(excluded.duration_ms, duration_ms),
+        coverage = COALESCE(excluded.coverage, coverage),
+        projection_revision = excluded.projection_revision
+    `).run(
+      observation.generationId, observation.entityKey, observation.captureSubject.kind,
+      subjectKey(observation), observation.scope.rootSessionId ?? null,
+      optionalString(fields.kind), optionalTimestamp(fields.startedAtMs, 'fields.startedAtMs'),
+      optionalTimestamp(fields.endedAtMs, 'fields.endedAtMs'), optionalNonNegativeFloat(fields.durationMs),
+      optionalString(fields.coverage), revision,
+    );
+    return true;
+  }
+  if (observation.entityKind === 'featureObservation') {
+    const revision = nextProjectionRevision(database);
+    database.prepare(`
+      INSERT INTO analytics_feature_observations (
+        observation_registry_key, generation_id, feature_key,
+        capture_subject_kind, capture_subject_key, root_session_id,
+        feature, decision, rule_version, measured_size_effect,
+        estimated_size_effect, payload_json, projection_revision
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      registryKey,
+      observation.generationId,
+      observation.entityKey,
+      observation.captureSubject.kind,
+      subjectKey(observation),
+      observation.scope.rootSessionId ?? null,
+      optionalString(fields.feature),
+      optionalString(fields.decision),
+      optionalString(fields.ruleVersion),
+      optionalNonNegativeFloat(fields.measuredSizeEffect),
+      optionalNonNegativeFloat(fields.estimatedSizeEffect),
+      serialize(observation),
+      revision,
+    );
+    return true;
+  }
+  return false;
+}
+
+function backfillV2(database: SqliteDatabase): void {
+  const rows = database.prepare(`
+    SELECT registry_key, fingerprint, payload_json
+    FROM analytics_observations ORDER BY commit_sequence
+  `).iterate() as Iterable<{ registry_key: string; fingerprint: string; payload_json: string }>;
+  for (const row of rows) {
+    const observation = JSON.parse(row.payload_json) as AnalyticsObservation;
+    assertValidAnalyticsObservation(observation);
+    recordSourceSequence(database, observation, row.registry_key, row.fingerprint, false);
+    applyProviderSettlement(database, observation, row.registry_key, row.fingerprint);
+    applyTypedObservation(database, observation, row.registry_key);
   }
 }
 
@@ -248,8 +1562,48 @@ function validateDetailCapture(capture: AnalyticsDetailCapture): void {
  * Facts, deletion markers, linked detail manifests, shared content and
  * projections use one canonical database.
  */
+function boundedPositiveInteger(value: number | undefined, fallback: number, maximum: number, name: string): number {
+  const candidate = value ?? fallback;
+  if (!Number.isSafeInteger(candidate) || candidate < 1) {
+    throw new RangeError(`${name} must be a positive safe integer.`);
+  }
+  return Math.min(candidate, maximum);
+}
+
+function encodeQueryCell(value: unknown, maximumBytes: number): { value: unknown; truncated: boolean } {
+  if (typeof value === 'bigint') return { value: encodeInt64(value), truncated: false };
+  if (value instanceof Uint8Array) {
+    const truncated = value.byteLength > maximumBytes;
+    const bounded = truncated ? value.subarray(0, maximumBytes) : value;
+    return {
+      value: {
+        type: 'blob',
+        encoding: 'base64',
+        data: Buffer.from(bounded).toString('base64'),
+        originalBytes: value.byteLength,
+      },
+      truncated,
+    };
+  }
+  if (typeof value === 'string') {
+    const bytes = Buffer.from(value, 'utf8');
+    if (bytes.byteLength <= maximumBytes) return { value, truncated: false };
+    return {
+      value: {
+        type: 'text',
+        encoding: 'utf8',
+        data: bytes.subarray(0, maximumBytes).toString('utf8'),
+        originalBytes: bytes.byteLength,
+      },
+      truncated: true,
+    };
+  }
+  return { value, truncated: false };
+}
+
 export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSink {
   private readonly database: SqliteDatabase;
+  private readonly readOnly: boolean;
   private readonly stats: AnalyticsRecorderStats = {
     accepted: 0,
     duplicates: 0,
@@ -259,33 +1613,50 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
   };
   private closed = false;
 
-  constructor(readonly databasePath: string) {
-    fs.mkdirSync(path.dirname(databasePath), { recursive: true });
+  constructor(readonly databasePath: string, options: { readOnly?: boolean } = {}) {
+    this.readOnly = options.readOnly === true;
+    if (!this.readOnly) fs.mkdirSync(path.dirname(databasePath), { recursive: true });
     this.database = new sqlite.DatabaseSync(databasePath, {
       timeout: BUSY_TIMEOUT_MS,
       readBigInts: true,
+      readOnly: this.readOnly,
     });
-    createSchema(this.database);
+    try {
+      initializeSchema(this.database, this.readOnly);
+    } catch (error) {
+      this.database.close();
+      throw error;
+    }
   }
 
-  submit(observation: AnalyticsObservation): void {
+  submit(observation: SequencedAnalyticsObservation): void {
     this.submitBatch([observation]);
   }
 
-  submitBatch(observations: readonly AnalyticsObservation[]): void {
-    this.assertOpen();
+  submitBatch(observations: readonly SequencedAnalyticsObservation[]): void {
+    this.assertWritable();
     if (observations.length === 0) return;
     for (const observation of observations) assertValidAnalyticsObservation(observation);
-    this.transaction(() => {
-      for (const observation of observations) this.insertObservation(observation);
-    });
+    const outcomes = this.transaction(() => observations.map((observation) => this.insertObservation(observation)));
+    const accepted = outcomes.filter((outcome) => outcome === 'accepted').length;
+    const duplicates = outcomes.filter((outcome) => outcome === 'duplicate').length;
+    const deleted = outcomes.length - accepted - duplicates;
+    this.stats.accepted += accepted;
+    this.stats.duplicates += duplicates;
+    this.stats.rejectedAfterDelete += deleted;
+    if (deleted > 0) {
+      throw new Error(`Analytics capture subject is deleted: ${subjectKey(observations.find((_entry, index) => outcomes[index] === 'deleted')!)}`);
+    }
   }
 
   submitDetail(capture: AnalyticsDetailCapture): void {
-    this.assertOpen();
+    this.assertWritable();
     validateDetailCapture(capture);
+    if (capture.bytes.byteLength > MAX_DETAIL_CAPTURE_BYTES) {
+      throw new RangeError(`Analytics detail exceeds the ${MAX_DETAIL_CAPTURE_BYTES}-byte storage bound.`);
+    }
     const fingerprint = captureFingerprint(capture);
-    this.transaction(() => {
+    const outcome = this.transaction(() => {
       const existing = this.database.prepare(
         'SELECT fingerprint, manifest_json, logical_bytes FROM analytics_detail_payloads WHERE payload_id = ?',
       ).get(capture.payloadId) as PayloadRow | undefined;
@@ -293,8 +1664,8 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
         if (existing.fingerprint !== fingerprint) {
           throw new AnalyticsSourceConflictError(capture.payloadId, existing.fingerprint, fingerprint);
         }
-        this.stats.detailDuplicates += 1;
-        return;
+        incrementDeliveryAccounting(this.database, 'details', 'replayed');
+        return 'duplicate' as const;
       }
       const sourceExisting = this.database.prepare(`
         SELECT payload_id, fingerprint, manifest_json, logical_bytes
@@ -308,7 +1679,11 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
           fingerprint,
         );
       }
-      this.assertSubjectWritable(capture.captureSubject.kind, captureSubjectKey(capture));
+      const resolvedSubject = this.resolveSubject(capture.captureSubject.kind, captureSubjectKey(capture));
+      if (resolvedSubject.deleted) {
+        incrementDeliveryAccounting(this.database, 'details', 'deleted');
+        return 'deleted' as const;
+      }
 
       const value = deserialize(Buffer.from(capture.bytes));
       const references = new Map<string, { encoding: 'utf8' | 'binary'; bytes: Uint8Array }>();
@@ -366,8 +1741,9 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
         INSERT INTO analytics_detail_payloads (
           payload_id, generation_id, source_key, fingerprint, observed_at_ms,
           committed_at_ms, capture_subject_kind, capture_subject_key,
-          manifest_json, logical_bytes
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          manifest_json, logical_bytes, media_type, source_encoding, complete,
+          capture_stage, source_version, omission_reason
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         capture.payloadId,
         capture.generationId,
@@ -375,20 +1751,36 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
         fingerprint,
         canonicalInt64(capture.observedAtMs),
         Date.now().toString(),
-        capture.captureSubject.kind,
-        captureSubjectKey(capture),
+        resolvedSubject.kind,
+        resolvedSubject.key,
         JSON.stringify(manifest),
         logicalBytes,
+        capture.mediaType,
+        capture.encoding,
+        capture.complete ? 1 : 0,
+        optionalString(capture.metadata.captureStage),
+        optionalString(capture.metadata.sourceVersion),
+        null,
       );
       const insertReference = this.database.prepare(`
         INSERT INTO analytics_detail_references (payload_id, digest) VALUES (?, ?)
       `);
       for (const digest of references.keys()) insertReference.run(capture.payloadId, digest);
-      this.stats.detailsAccepted += 1;
+      this.database.prepare(`
+        INSERT OR IGNORE INTO analytics_generations (generation_id, first_observed_at_ms) VALUES (?, ?)
+      `).run(capture.generationId, canonicalInt64(capture.observedAtMs));
+      incrementDeliveryAccounting(this.database, 'details', 'accepted');
+      return 'accepted' as const;
     });
+    if (outcome === 'accepted') this.stats.detailsAccepted += 1;
+    else if (outcome === 'duplicate') this.stats.detailDuplicates += 1;
+    else {
+      this.stats.rejectedAfterDelete += 1;
+      throw new Error(`Analytics capture subject is deleted: ${captureSubjectKey(capture)}`);
+    }
   }
 
-  private insertObservation(observation: AnalyticsObservation): void {
+  private insertObservation(observation: SequencedAnalyticsObservation): 'accepted' | 'duplicate' | 'deleted' {
     const registryKey = analyticsObservationRegistryKey(observation);
     const fingerprint = analyticsObservationFingerprint(observation);
     const existing = this.database.prepare(
@@ -398,11 +1790,34 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
       if (existing.fingerprint !== fingerprint) {
         throw new AnalyticsSourceConflictError(registryKey, existing.fingerprint, fingerprint);
       }
-      this.stats.duplicates += 1;
-      return;
+      recordSourceSequence(this.database, observation, registryKey, fingerprint, true);
+      incrementDeliveryAccounting(this.database, 'observations', 'replayed');
+      return 'duplicate';
     }
 
-    this.assertSubjectWritable(observation.captureSubject.kind, subjectKey(observation));
+    const submittedSubjectKey = subjectKey(observation);
+    const resolvedSubject = this.resolveSubject(observation.captureSubject.kind, submittedSubjectKey);
+    if (resolvedSubject.deleted) {
+      recordSourceSequence(this.database, observation, registryKey, fingerprint, true);
+      incrementDeliveryAccounting(this.database, 'observations', 'deleted');
+      return 'deleted';
+    }
+    if (observation.captureSubject.kind === 'session'
+      && observation.scope.rootSessionId
+      && observation.scope.rootSessionId !== submittedSubjectKey) {
+      throw new Error('Analytics session scope and capture subject identities do not match.');
+    }
+    const effectiveObservation = resolvedSubject.kind === observation.captureSubject.kind
+      && resolvedSubject.key === submittedSubjectKey
+      ? observation
+      : {
+          ...observation,
+          captureSubject: { kind: 'session' as const, rootSessionId: resolvedSubject.key },
+          scope: { ...observation.scope, rootSessionId: resolvedSubject.key },
+        };
+    recordSourceSequence(this.database, observation, registryKey, fingerprint, false);
+    applyProviderSettlement(this.database, effectiveObservation, registryKey, fingerprint);
+    applyTypedObservation(this.database, effectiveObservation, registryKey);
     this.database.prepare(`
       INSERT INTO analytics_observations (
         generation_id, source_key, registry_key, idempotency_key, fingerprint,
@@ -411,89 +1826,400 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
         root_session_id, invocation_id, payload_json
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
-      observation.generationId,
-      observation.sourceKey,
+      effectiveObservation.generationId,
+      effectiveObservation.sourceKey,
       registryKey,
-      observation.idempotencyKey,
+      effectiveObservation.idempotencyKey,
       fingerprint,
-      canonicalInt64(observation.observedAtMs),
+      canonicalInt64(effectiveObservation.observedAtMs),
       Date.now().toString(),
-      observation.producerKind,
-      observation.entityKind,
-      observation.entityKey,
-      observation.observationKind,
-      observation.captureSubject.kind,
-      subjectKey(observation),
-      observation.scope.rootSessionId ?? null,
-      observation.scope.invocationId ?? null,
-      serialize(observation),
+      effectiveObservation.producerKind,
+      effectiveObservation.entityKind,
+      effectiveObservation.entityKey,
+      effectiveObservation.observationKind,
+      resolvedSubject.kind,
+      resolvedSubject.key,
+      effectiveObservation.scope.rootSessionId ?? null,
+      effectiveObservation.scope.invocationId ?? null,
+      serialize(effectiveObservation),
     );
-    this.stats.accepted += 1;
+    this.database.prepare(`
+      INSERT OR IGNORE INTO analytics_generations (generation_id, first_observed_at_ms) VALUES (?, ?)
+    `).run(effectiveObservation.generationId, canonicalInt64(effectiveObservation.observedAtMs));
+    incrementDeliveryAccounting(this.database, 'observations', 'accepted');
+    return 'accepted';
   }
 
-  private assertSubjectWritable(kind: string, key: string): void {
-    if (kind !== 'session') return;
-    const deleted = this.database.prepare(
-      'SELECT root_session_id FROM analytics_deleted_subjects WHERE root_session_id = ?',
-    ).get(key);
-    if (deleted) {
-      this.stats.rejectedAfterDelete += 1;
-      throw new Error(`Analytics capture subject is deleted: ${key}`);
+  private resolveSubject(kind: string, key: string): { kind: string; key: string; deleted: boolean } {
+    let resolvedKind = kind;
+    let resolvedKey = key;
+    if (kind === 'pendingCreate') {
+      const bound = this.database.prepare(`
+        SELECT root_session_id FROM analytics_pending_subject_bindings
+        WHERE pending_operation_id = ?
+      `).get(key) as { root_session_id: string } | undefined;
+      if (!bound) return { kind, key, deleted: false };
+      resolvedKind = 'session';
+      resolvedKey = bound.root_session_id;
     }
+    const deleted = resolvedKind === 'session' && Boolean(this.database.prepare(
+      'SELECT root_session_id FROM analytics_deleted_subjects WHERE root_session_id = ?',
+    ).get(resolvedKey));
+    return { kind: resolvedKind, key: resolvedKey, deleted };
+  }
+
+  private removeRootAttributedData(rootSessionId: string): {
+    deletedObservationCount: number;
+    deletedPayloadCount: number;
+  } {
+    const revision = nextProjectionRevision(this.database);
+    const subjectFilter = `(
+      capture_subject_kind = 'session' AND capture_subject_key = ?
+    ) OR (
+      capture_subject_kind = 'pendingCreate' AND capture_subject_key IN (
+        SELECT pending_operation_id FROM analytics_pending_subject_bindings WHERE root_session_id = ?
+      )
+    )`;
+    const removedSettlements = this.database.prepare(`
+      SELECT normalized_base_input_tokens AS input_tokens,
+        normalized_output_tokens AS output_tokens,
+        normalized_cache_read_tokens AS cache_read_tokens,
+        normalized_cache_write_tokens AS cache_write_tokens,
+        reasoning_tokens, provider_total_tokens, effective_cost_usd, effective_cost_source
+      FROM analytics_provider_settlements WHERE ${subjectFilter}
+    `).iterate(rootSessionId, rootSessionId) as Iterable<Record<string, unknown>>;
+    for (const row of removedSettlements) {
+      updateProviderAccountingProjection(this.database, 'global', '*', revision, {
+        inputTokens: row.input_tokens === null ? null : String(row.input_tokens),
+        outputTokens: row.output_tokens === null ? null : String(row.output_tokens),
+        cacheReadTokens: row.cache_read_tokens === null ? null : String(row.cache_read_tokens),
+        cacheWriteTokens: row.cache_write_tokens === null ? null : String(row.cache_write_tokens),
+        reasoningTokens: row.reasoning_tokens === null ? null : String(row.reasoning_tokens),
+        providerTotalTokens: row.provider_total_tokens === null ? null : String(row.provider_total_tokens),
+        effectiveCost: row.effective_cost_usd === null ? null : Number(row.effective_cost_usd),
+        effectiveSource: row.effective_cost_source === null
+          ? null
+          : row.effective_cost_source as 'reported' | 'calculated',
+      }, -1);
+    }
+    this.database.prepare(`
+      DELETE FROM analytics_provider_accounting_projections
+      WHERE subject_kind = 'session' AND subject_key = ?
+    `).run(rootSessionId);
+    for (const table of [
+      'analytics_provider_settlements',
+      'analytics_execution_observations',
+      'analytics_execution_states',
+      'analytics_tool_observations',
+      'analytics_tool_states',
+      'analytics_activity_observations',
+      'analytics_activity_states',
+      'analytics_feature_observations',
+    ]) {
+      this.database.prepare(`DELETE FROM ${table} WHERE ${subjectFilter}`).run(rootSessionId, rootSessionId);
+    }
+    const deletedObservationCount = toNumber(this.database.prepare(`
+      DELETE FROM analytics_observations WHERE ${subjectFilter}
+    `).run(rootSessionId, rootSessionId).changes);
+    const deletedPayloadCount = toNumber(this.database.prepare(`
+      DELETE FROM analytics_detail_payloads WHERE ${subjectFilter}
+    `).run(rootSessionId, rootSessionId).changes);
+    // The reference cleanup trigger deletes content exactly when its last owner
+    // is removed, atomically with these payload deletes. No history sweep is
+    // needed and a concurrently committed legitimate owner cannot be lost.
+    return { deletedObservationCount, deletedPayloadCount };
+  }
+
+  private completePrivacyScrub(rootSessionId: string): void {
+    try {
+      const row = this.database.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get() as WalCheckpointRow;
+      const busy = toNumber(row.busy);
+      if (busy !== 0) throw new Error(`WAL checkpoint is busy (${busy}).`);
+      this.transaction(() => {
+        this.database.prepare(`
+          UPDATE analytics_deleted_subjects
+          SET scrub_state = 'complete', scrub_error = NULL
+          WHERE root_session_id = ?
+        `).run(rootSessionId);
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      try {
+        this.transaction(() => {
+          this.database.prepare(`
+            UPDATE analytics_deleted_subjects
+            SET scrub_state = 'pending', scrub_error = ?
+            WHERE root_session_id = ?
+          `).run(message.slice(0, 1_024), rootSessionId);
+        });
+      } catch {
+        // Preserve the original durability failure; a later explicit retry can
+        // recover from the marker that was committed before the checkpoint.
+      }
+      throw new AnalyticsPrivacyScrubPendingError(
+        rootSessionId,
+        `Private analytics rows were fenced but WAL scrubbing is still pending for ${rootSessionId}: ${message}`,
+      );
+    }
+  }
+
+  bindPendingCreate(
+    pendingOperationId: string,
+    rootSessionId: string,
+    sourceKey: string,
+    boundAtMs: Int64Value,
+  ): AnalyticsSubjectBindingReceipt {
+    this.assertWritable();
+    if (!pendingOperationId || !rootSessionId || !sourceKey) throw new Error('Pending-create binding identity is required.');
+    const encodedBoundAt = canonicalInt64(boundAtMs);
+    const result = this.transaction(() => {
+      const existing = this.database.prepare(`
+        SELECT root_session_id, source_key FROM analytics_pending_subject_bindings
+        WHERE pending_operation_id = ?
+      `).get(pendingOperationId) as { root_session_id: string; source_key: string } | undefined;
+      if (existing && existing.root_session_id !== rootSessionId) {
+        throw new Error(`Pending-create subject ${pendingOperationId} is already bound to another session.`);
+      }
+      if (existing && existing.source_key !== sourceKey) {
+        throw new Error(`Pending-create binding source conflict for ${pendingOperationId}.`);
+      }
+      if (!existing) {
+        this.database.prepare(`
+          INSERT INTO analytics_pending_subject_bindings (
+            pending_operation_id, root_session_id, source_key, bound_at_ms
+          ) VALUES (?, ?, ?, ?)
+        `).run(pendingOperationId, rootSessionId, sourceKey, encodedBoundAt);
+      }
+      const deletedSubject = Boolean(this.database.prepare(
+        'SELECT 1 AS present FROM analytics_deleted_subjects WHERE root_session_id = ?',
+      ).get(rootSessionId));
+      if (deletedSubject) {
+        const deleted = this.removeRootAttributedData(rootSessionId);
+        this.database.prepare(`
+          UPDATE analytics_deleted_subjects
+          SET deleted_count = deleted_count + ?,
+              deleted_payload_count = deleted_payload_count + ?,
+              scrub_state = 'pending', scrub_error = NULL
+          WHERE root_session_id = ?
+        `).run(deleted.deletedObservationCount, deleted.deletedPayloadCount, rootSessionId);
+        return {
+          pendingOperationId,
+          rootSessionId,
+          movedObservationCount: 0,
+          movedPayloadCount: 0,
+          duplicate: Boolean(existing),
+          deletedSubject: true,
+        };
+      }
+
+      const revision = nextProjectionRevision(this.database);
+      const pendingSettlements = this.database.prepare(`
+        SELECT normalized_base_input_tokens AS input_tokens,
+          normalized_output_tokens AS output_tokens,
+          normalized_cache_read_tokens AS cache_read_tokens,
+          normalized_cache_write_tokens AS cache_write_tokens,
+          reasoning_tokens, provider_total_tokens, effective_cost_usd, effective_cost_source
+        FROM analytics_provider_settlements
+        WHERE capture_subject_kind = 'pendingCreate' AND capture_subject_key = ?
+      `).iterate(pendingOperationId) as Iterable<Record<string, unknown>>;
+      for (const row of pendingSettlements) {
+        updateProviderAccountingProjection(this.database, 'session', rootSessionId, revision, {
+          inputTokens: row.input_tokens === null ? null : String(row.input_tokens),
+          outputTokens: row.output_tokens === null ? null : String(row.output_tokens),
+          cacheReadTokens: row.cache_read_tokens === null ? null : String(row.cache_read_tokens),
+          cacheWriteTokens: row.cache_write_tokens === null ? null : String(row.cache_write_tokens),
+          reasoningTokens: row.reasoning_tokens === null ? null : String(row.reasoning_tokens),
+          providerTotalTokens: row.provider_total_tokens === null ? null : String(row.provider_total_tokens),
+          effectiveCost: row.effective_cost_usd === null ? null : Number(row.effective_cost_usd),
+          effectiveSource: row.effective_cost_source === null
+            ? null
+            : row.effective_cost_source as 'reported' | 'calculated',
+        }, 1);
+      }
+      for (const table of [
+        'analytics_provider_settlements',
+        'analytics_execution_observations',
+        'analytics_execution_states',
+        'analytics_tool_observations',
+        'analytics_tool_states',
+        'analytics_activity_observations',
+        'analytics_activity_states',
+        'analytics_feature_observations',
+      ]) {
+        this.database.prepare(`
+          UPDATE ${table}
+          SET capture_subject_kind = 'session', capture_subject_key = ?, root_session_id = ?
+          WHERE capture_subject_kind = 'pendingCreate' AND capture_subject_key = ?
+        `).run(rootSessionId, rootSessionId, pendingOperationId);
+      }
+      const movedObservationCount = toNumber(this.database.prepare(`
+        UPDATE analytics_observations
+        SET capture_subject_kind = 'session', capture_subject_key = ?, root_session_id = ?,
+            payload_json = json_set(payload_json,
+              '$.captureSubject', json_object('kind', 'session', 'rootSessionId', ?),
+              '$.scope.rootSessionId', ?)
+        WHERE capture_subject_kind = 'pendingCreate' AND capture_subject_key = ?
+      `).run(rootSessionId, rootSessionId, rootSessionId, rootSessionId, pendingOperationId).changes);
+      const movedPayloadCount = toNumber(this.database.prepare(`
+        UPDATE analytics_detail_payloads
+        SET capture_subject_kind = 'session', capture_subject_key = ?
+        WHERE capture_subject_kind = 'pendingCreate' AND capture_subject_key = ?
+      `).run(rootSessionId, pendingOperationId).changes);
+      return {
+        pendingOperationId,
+        rootSessionId,
+        movedObservationCount,
+        movedPayloadCount,
+        duplicate: Boolean(existing),
+        deletedSubject: false,
+      };
+    });
+    if (result.deletedSubject) this.completePrivacyScrub(rootSessionId);
+    return result;
   }
 
   deleteSession(
     rootSessionId: string,
     deleteSourceKey: string,
     deletedAtMs: Int64Value,
+    pendingOperationId?: string,
   ): AnalyticsDeleteReceipt {
-    this.assertOpen();
+    this.assertWritable();
     if (!rootSessionId || !deleteSourceKey) throw new Error('rootSessionId and deleteSourceKey are required.');
     const encodedDeletedAt = canonicalInt64(deletedAtMs);
-    return this.transaction(() => {
+    const receipt = this.transaction(() => {
+      let addedPendingFence = false;
+      if (pendingOperationId) {
+        const binding = this.database.prepare(`
+          SELECT root_session_id FROM analytics_pending_subject_bindings
+          WHERE pending_operation_id = ?
+        `).get(pendingOperationId) as { root_session_id: string } | undefined;
+        if (binding && binding.root_session_id !== rootSessionId) {
+          throw new Error(`Pending-create subject ${pendingOperationId} is already bound to another session.`);
+        }
+        if (!binding) {
+          this.database.prepare(`
+            INSERT INTO analytics_pending_subject_bindings (
+              pending_operation_id, root_session_id, source_key, bound_at_ms
+            ) VALUES (?, ?, ?, ?)
+          `).run(pendingOperationId, rootSessionId, deleteSourceKey, encodedDeletedAt);
+          addedPendingFence = true;
+        }
+      }
       const existing = this.database.prepare(`
-        SELECT deleted_count, deleted_payload_count, deleted_at_ms
+        SELECT deleted_count, deleted_payload_count, deleted_at_ms, scrub_state, scrub_error, delete_source_key
         FROM analytics_deleted_subjects WHERE root_session_id = ?
-      `).get(rootSessionId) as (DeletedSubjectRow & { deleted_payload_count: number | bigint }) | undefined;
+      `).get(rootSessionId) as (DeletedSubjectRow & {
+        deleted_payload_count: number | bigint;
+        delete_source_key: string;
+      }) | undefined;
       if (existing) {
+        let deletedObservationCount = toNumber(existing.deleted_count);
+        let deletedPayloadCount = toNumber(existing.deleted_payload_count);
+        if (addedPendingFence) {
+          const deleted = this.removeRootAttributedData(rootSessionId);
+          deletedObservationCount += deleted.deletedObservationCount;
+          deletedPayloadCount += deleted.deletedPayloadCount;
+          this.database.prepare(`
+            UPDATE analytics_deleted_subjects
+            SET deleted_count = ?, deleted_payload_count = ?, scrub_state = 'pending', scrub_error = NULL
+            WHERE root_session_id = ?
+          `).run(deletedObservationCount, deletedPayloadCount, rootSessionId);
+        }
         return {
-          rootSessionId,
-          deletedObservationCount: toNumber(existing.deleted_count),
-          deletedPayloadCount: toNumber(existing.deleted_payload_count),
-          deletedAtMs: existing.deleted_at_ms,
-          duplicate: true,
+          receipt: {
+            rootSessionId,
+            deletedObservationCount,
+            deletedPayloadCount,
+            deletedAtMs: existing.deleted_at_ms,
+            duplicate: true,
+            scrubState: 'complete' as const,
+          },
+          scrub: addedPendingFence || existing.scrub_state !== 'complete',
         };
       }
-
-      const deletedObservationCount = toNumber(this.database.prepare(`
-        DELETE FROM analytics_observations
-        WHERE capture_subject_kind = 'session' AND capture_subject_key = ?
-      `).run(rootSessionId).changes);
-      const deletedPayloadCount = toNumber(this.database.prepare(`
-        DELETE FROM analytics_detail_payloads
-        WHERE capture_subject_kind = 'session' AND capture_subject_key = ?
-      `).run(rootSessionId).changes);
-      this.database.prepare(`
-        DELETE FROM analytics_detail_content
-        WHERE NOT EXISTS (
-          SELECT 1 FROM analytics_detail_references reference
-          WHERE reference.digest = analytics_detail_content.digest
-        )
-      `).run();
+      // Commit a durable fence in the same transaction as logical deletion.
+      // Physical completion is recorded only after the WAL is truncated.
       this.database.prepare(`
         INSERT INTO analytics_deleted_subjects (
           root_session_id, delete_source_key, deleted_count,
-          deleted_payload_count, deleted_at_ms
-        ) VALUES (?, ?, ?, ?, ?)
-      `).run(rootSessionId, deleteSourceKey, deletedObservationCount, deletedPayloadCount, encodedDeletedAt);
+          deleted_payload_count, deleted_at_ms, scrub_state, scrub_error
+        ) VALUES (?, ?, 0, 0, ?, 'pending', NULL)
+      `).run(rootSessionId, deleteSourceKey, encodedDeletedAt);
+      const deleted = this.removeRootAttributedData(rootSessionId);
+      this.database.prepare(`
+        UPDATE analytics_deleted_subjects
+        SET deleted_count = ?, deleted_payload_count = ?
+        WHERE root_session_id = ?
+      `).run(deleted.deletedObservationCount, deleted.deletedPayloadCount, rootSessionId);
       return {
-        rootSessionId,
-        deletedObservationCount,
-        deletedPayloadCount,
-        deletedAtMs: encodedDeletedAt,
-        duplicate: false,
+        receipt: {
+          rootSessionId,
+          ...deleted,
+          deletedAtMs: encodedDeletedAt,
+          duplicate: false,
+          scrubState: 'complete' as const,
+        },
+        scrub: true,
       };
     });
+    if (receipt.scrub) this.completePrivacyScrub(rootSessionId);
+    return receipt.receipt;
+  }
+
+  readSubjectBinding(pendingOperationId: string): AnalyticsSubjectBindingState | null {
+    this.assertOpen();
+    const row = this.database.prepare(`
+      SELECT binding.root_session_id,
+        EXISTS(SELECT 1 FROM analytics_deleted_subjects deleted
+          WHERE deleted.root_session_id = binding.root_session_id) AS deleted
+      FROM analytics_pending_subject_bindings binding
+      WHERE binding.pending_operation_id = ?
+    `).get(pendingOperationId) as { root_session_id: string; deleted: number | bigint } | undefined;
+    return row ? {
+      pendingOperationId,
+      rootSessionId: row.root_session_id,
+      deleted: toNumber(row.deleted) === 1,
+    } : null;
+  }
+
+  privacyScrubState(rootSessionId: string): AnalyticsPrivacyScrubState | null {
+    this.assertOpen();
+    const row = this.database.prepare(`
+      SELECT deleted_at_ms, scrub_state, scrub_error
+      FROM analytics_deleted_subjects WHERE root_session_id = ?
+    `).get(rootSessionId) as Pick<DeletedSubjectRow, 'deleted_at_ms' | 'scrub_state' | 'scrub_error'> | undefined;
+    return row ? {
+      rootSessionId,
+      deletedAtMs: encodeInt64(BigInt(row.deleted_at_ms)),
+      state: row.scrub_state,
+      lastError: row.scrub_error,
+    } : null;
+  }
+
+  /** Bounded recovery hook for the lifecycle owner. It never scans fact/detail
+   * history and leaves failures durably visible for a later retry. */
+  resumePendingPrivacyScrubs(limit = 16): { completed: string[]; pending: Array<{ rootSessionId: string; error: string }> } {
+    this.assertWritable();
+    const boundedLimit = Math.max(1, Math.min(1_000, Math.trunc(limit)));
+    const rows = this.database.prepare(`
+      SELECT root_session_id FROM analytics_deleted_subjects
+      WHERE scrub_state = 'pending' ORDER BY deleted_at_ms LIMIT ?
+    `).all(boundedLimit) as Array<{ root_session_id: string }>;
+    const completed: string[] = [];
+    const pending: Array<{ rootSessionId: string; error: string }> = [];
+    for (const row of rows) {
+      try {
+        this.completePrivacyScrub(row.root_session_id);
+        completed.push(row.root_session_id);
+      } catch (error) {
+        pending.push({
+          rootSessionId: row.root_session_id,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    return { completed, pending };
   }
 
   countObservations(rootSessionId?: string): number {
@@ -506,6 +2232,31 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
     return toNumber((row as CountRow).count);
   }
 
+  countProviderSettlements(rootSessionId?: string): number {
+    this.assertOpen();
+    const row = rootSessionId
+      ? this.database.prepare('SELECT COUNT(*) AS count FROM analytics_provider_settlements WHERE root_session_id = ?').get(rootSessionId)
+      : this.database.prepare('SELECT COUNT(*) AS count FROM analytics_provider_settlements').get();
+    return toNumber((row as CountRow).count);
+  }
+
+  countTypedEntityObservations(
+    entityKind: 'execution' | 'toolCall' | 'activitySpan' | 'featureObservation',
+    rootSessionId?: string,
+  ): number {
+    this.assertOpen();
+    const table = {
+      execution: 'analytics_execution_observations',
+      toolCall: 'analytics_tool_observations',
+      activitySpan: 'analytics_activity_observations',
+      featureObservation: 'analytics_feature_observations',
+    }[entityKind];
+    const row = rootSessionId
+      ? this.database.prepare(`SELECT COUNT(*) AS count FROM ${table} WHERE root_session_id = ?`).get(rootSessionId)
+      : this.database.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get();
+    return toNumber((row as CountRow).count);
+  }
+
   countDetails(rootSessionId?: string): number {
     this.assertOpen();
     const row = rootSessionId
@@ -515,6 +2266,34 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
         `).get(rootSessionId)
       : this.database.prepare('SELECT COUNT(*) AS count FROM analytics_detail_payloads').get();
     return toNumber((row as CountRow).count);
+  }
+
+  detailMetadata(payloadId: string): AnalyticsDetailMetadata | null {
+    this.assertOpen();
+    const row = this.database.prepare(`
+      SELECT logical_bytes, media_type, source_encoding, complete,
+        capture_stage, source_version, omission_reason
+      FROM analytics_detail_payloads WHERE payload_id = ?
+    `).get(payloadId) as Required<Pick<PayloadRow,
+      'logical_bytes' | 'media_type' | 'source_encoding' | 'complete'>>
+      & Pick<PayloadRow, 'capture_stage' | 'source_version' | 'omission_reason'> | undefined;
+    if (!row) return null;
+    const stored = this.database.prepare(`
+      SELECT COALESCE(SUM(content.logical_bytes), 0) AS stored_bytes
+      FROM analytics_detail_references reference
+      JOIN analytics_detail_content content ON content.digest = reference.digest
+      WHERE reference.payload_id = ?
+    `).get(payloadId) as { stored_bytes: number | bigint };
+    return {
+      logicalBytes: encodeInt64(BigInt(row.logical_bytes)),
+      storedBytes: encodeInt64(BigInt(stored.stored_bytes)),
+      mediaType: row.media_type,
+      sourceEncoding: row.source_encoding,
+      complete: toNumber(row.complete) === 1,
+      captureStage: row.capture_stage ?? null,
+      sourceVersion: row.source_version ?? null,
+      omissionReason: row.omission_reason ?? null,
+    };
   }
 
   reconstructDetail(payloadId: string): unknown {
@@ -554,6 +2333,52 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
     return decode(JSON.parse(payload.manifest_json) as DetailNode);
   }
 
+  readDetailRange(payloadId: string, offset: Int64Value = 0, maxBytes = 64 * 1024): AnalyticsDetailRangeResult {
+    this.assertOpen();
+    const metadata = this.detailMetadata(payloadId);
+    if (!metadata) {
+      return {
+        payloadId,
+        available: false,
+        mediaType: null,
+        sourceEncoding: null,
+        representationEncoding: 'node-v8',
+        complete: false,
+        captureStage: null,
+        sourceVersion: null,
+        omissionReason: 'unavailable-or-scrubbed',
+        totalLength: 0,
+        offset: 0,
+        nextOffset: null,
+        truncated: false,
+        bytes: new Uint8Array(),
+      };
+    }
+    const start = parseInt64(offset, 'detail offset');
+    if (start < 0n || start > BigInt(Number.MAX_SAFE_INTEGER)) throw new RangeError('detail offset is out of range.');
+    const boundedBytes = boundedPositiveInteger(maxBytes, 64 * 1024, MAX_QUERY_BYTES, 'detail maxBytes');
+    const body = serializeV8(this.reconstructDetail(payloadId));
+    const numericStart = Number(start);
+    const end = Math.min(body.byteLength, numericStart + boundedBytes);
+    const bytes = numericStart >= body.byteLength ? new Uint8Array() : body.subarray(numericStart, end);
+    return {
+      payloadId,
+      available: true,
+      mediaType: metadata.mediaType,
+      sourceEncoding: metadata.sourceEncoding,
+      representationEncoding: 'node-v8',
+      complete: metadata.complete,
+      captureStage: metadata.captureStage,
+      sourceVersion: metadata.sourceVersion,
+      omissionReason: metadata.omissionReason,
+      totalLength: encodeInt64(BigInt(body.byteLength)),
+      offset: encodeInt64(start),
+      nextOffset: end < body.byteLength ? encodeInt64(BigInt(end)) : null,
+      truncated: end < body.byteLength,
+      bytes,
+    };
+  }
+
   detailStorageStats(): AnalyticsDetailStorageStats {
     this.assertOpen();
     const payload = this.database.prepare(`
@@ -567,52 +2392,392 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
     return {
       payloadCount: toNumber(payload.count),
       contentCount: toNumber(content.count),
-      logicalBytes: toNumber(payload.logical),
-      storedContentBytes: toNumber(content.stored),
+      logicalBytes: encodeInt64(BigInt(payload.logical)),
+      storedContentBytes: encodeInt64(BigInt(content.stored)),
     };
   }
 
-  /** Minimal P0 projection: one terminal provider settlement per invocation.
-   * Missing channels remain null and are not coerced to zero. */
-  projectProviderUsage(rootSessionId?: string): ProviderUsageProjection[] {
+  getDatabaseSchemaVersion(): number {
     this.assertOpen();
-    const where = rootSessionId
-      ? "WHERE observation_kind = 'providerSettlement' AND root_session_id = ?"
-      : "WHERE observation_kind = 'providerSettlement'";
-    const rows = this.database.prepare(`
-      SELECT invocation_id, payload_json
-      FROM analytics_observations
-      ${where}
-      ORDER BY commit_sequence
-    `).all(...(rootSessionId ? [rootSessionId] : [])) as Array<{
-      invocation_id: string | null;
-      payload_json: string;
-    }>;
-    const distinct = new Map<string, ProviderUsageProjection>();
-    for (const row of rows) {
-      const observation = JSON.parse(row.payload_json) as AnalyticsObservation<Record<string, unknown>>;
-      const invocationId = row.invocation_id
-        ?? (typeof observation.fields.invocationId === 'string' ? observation.fields.invocationId : undefined);
-      if (!invocationId || distinct.has(invocationId)) continue;
-      const channel = (name: keyof AnalyticsUsageChannels): number | string | null => {
-        const value = observation.fields[name];
-        return typeof value === 'number' || typeof value === 'string' ? value : null;
-      };
-      const reportedCost = observation.fields.reportedCostUsd;
-      distinct.set(invocationId, {
-        invocationId,
-        usage: {
-          inputTokens: channel('inputTokens'),
-          outputTokens: channel('outputTokens'),
-          cacheReadTokens: channel('cacheReadTokens'),
-          cacheWriteTokens: channel('cacheWriteTokens'),
-          reasoningTokens: channel('reasoningTokens'),
-          providerTotalTokens: channel('providerTotalTokens'),
-        },
-        reportedCostUsd: typeof reportedCost === 'number' ? reportedCost : null,
+    return toNumber((this.database.prepare('PRAGMA user_version').get() as UserVersionRow).user_version);
+  }
+
+  getProjectionRevision(): number | string {
+    this.assertOpen();
+    const row = this.database.prepare(
+      'SELECT revision FROM analytics_projection_state WHERE singleton = 1',
+    ).get() as RevisionRow;
+    return encodeInt64(row.revision);
+  }
+
+  describeSchema(): AnalyticsSchemaDescription {
+    this.assertOpen();
+    const views = this.database.prepare(`
+      SELECT name FROM sqlite_master WHERE type = 'view' AND name LIKE 'analytics_%' ORDER BY name
+    `).all() as Array<{ name: string }>;
+    return {
+      databaseSchemaVersion: this.getDatabaseSchemaVersion(),
+      projectionVersion: 1,
+      logicalCommands: ['schema', 'query', 'detail', 'storage'],
+      views: views.map((row) => row.name),
+      detail: { defaultRangeBytes: 64 * 1024, representationEncoding: 'node-v8' },
+    };
+  }
+
+  readDeliveryAccounting(): AnalyticsDeliveryAccounting {
+    this.assertOpen();
+    const row = this.database.prepare(`SELECT * FROM analytics_delivery_accounting WHERE singleton = 1`).get() as Record<string, string>;
+    const details = this.detailStorageStats();
+    const count = (name: string): number | string => encodeInt64(row[name]!);
+    return {
+      deliveryHistoryCoverage: row.delivery_history_coverage === 'retained_only' ? 'retained_only' : 'complete',
+      observations: {
+        delivered: count('observations_delivered'),
+        accepted: count('observations_accepted'),
+        replayed: count('observations_replayed'),
+        deleted: count('observations_deleted'),
+      },
+      details: {
+        delivered: count('details_delivered'),
+        accepted: count('details_accepted'),
+        replayed: count('details_replayed'),
+        deleted: count('details_deleted'),
+      },
+      completeDetailWatermark: count('details_accepted'),
+      retainedDetailLogicalBytes: details.logicalBytes,
+      retainedDetailStoredBytes: details.storedContentBytes,
+    };
+  }
+
+  readStorageSummary(): AnalyticsStorageSummary {
+    this.assertOpen();
+    const bytes = (suffix: string): number | string => {
+      try {
+        return encodeInt64(fs.statSync(`${this.databasePath}${suffix}`, { bigint: true }).size);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 0;
+        throw error;
+      }
+    };
+    const facts = this.database.prepare(`
+      SELECT COALESCE(SUM(LENGTH(payload_json)), 0) AS bytes FROM analytics_observations
+    `).get() as { bytes: number | bigint };
+    return {
+      ...this.detailStorageStats(),
+      databaseBytes: bytes(''),
+      walBytes: bytes('-wal'),
+      sharedMemoryBytes: bytes('-shm'),
+      factsLogicalBytes: encodeInt64(BigInt(facts.bytes)),
+      engineAllocationOverheadBytes: null,
+    };
+  }
+
+  executeReadOnlyQuery(
+    sql: string,
+    parameters: readonly unknown[] = [],
+    options: { maxRows?: number; maxBytes?: number; maxCellBytes?: number } = {},
+  ): AnalyticsReadOnlyQueryResult {
+    this.assertOpen();
+    if (!sql.trim()) throw new Error('Analytics query SQL is required.');
+    const maxRows = boundedPositiveInteger(options.maxRows, DEFAULT_QUERY_ROWS, MAX_QUERY_ROWS, 'query maxRows');
+    const maxBytes = boundedPositiveInteger(options.maxBytes, DEFAULT_QUERY_BYTES, MAX_QUERY_BYTES, 'query maxBytes');
+    const maxCellBytes = boundedPositiveInteger(options.maxCellBytes, 64 * 1024, maxBytes, 'query maxCellBytes');
+    return this.snapshot(() => {
+      const revision = this.getProjectionRevision();
+      const databaseSchemaVersion = this.getDatabaseSchemaVersion();
+      const watermarkRow = this.database.prepare(`
+        SELECT COALESCE(MAX(commit_sequence), 0) AS watermark FROM analytics_observations
+      `).get() as { watermark: number | bigint };
+      const generations = this.database.prepare(`
+        SELECT generation_id FROM analytics_generations ORDER BY first_observed_at_ms, generation_id LIMIT 1001
+      `).all() as Array<{ generation_id: string }>;
+      const generationIdsTruncated = generations.length > 1_000;
+      if (generationIdsTruncated) generations.pop();
+      const allowed = new Set([
+        sqlite.constants.SQLITE_SELECT,
+        sqlite.constants.SQLITE_READ,
+        sqlite.constants.SQLITE_RECURSIVE,
+      ]);
+      const boundedFunctions = new Set([
+        'abs', 'avg', 'coalesce', 'count', 'date', 'datetime', 'ifnull',
+        'json_array_length', 'json_extract', 'json_type', 'julianday', 'length',
+        'lower', 'max', 'min', 'nullif', 'round', 'strftime', 'sum', 'time',
+        'total', 'typeof', 'unixepoch', 'upper',
+      ]);
+      this.database.setAuthorizer((actionCode, argument1, argument2) => {
+        if (allowed.has(actionCode)) return sqlite.constants.SQLITE_OK;
+        if (actionCode === sqlite.constants.SQLITE_FUNCTION
+          && boundedFunctions.has(String(argument2 ?? argument1).toLowerCase())) {
+          return sqlite.constants.SQLITE_OK;
+        }
+        return sqlite.constants.SQLITE_DENY;
       });
-    }
-    return [...distinct.values()];
+      try {
+        const statement = this.database.prepare(sql);
+        const columns = statement.columns().map((column) => column.name);
+        const rows: Array<Record<string, unknown>> = [];
+        const truncation: AnalyticsQueryTruncation = { rowLimit: false, byteLimit: false, cellLimit: false };
+        let resultBytes = 0;
+        for (const raw of statement.iterate(...parameters) as Iterable<Record<string, unknown>>) {
+          if (rows.length >= maxRows) {
+            truncation.rowLimit = true;
+            break;
+          }
+          const row: Record<string, unknown> = {};
+          for (const [key, value] of Object.entries(raw)) {
+            const encoded = encodeQueryCell(value, maxCellBytes);
+            row[key] = encoded.value;
+            if (encoded.truncated) truncation.cellLimit = true;
+          }
+          const rowBytes = Buffer.byteLength(serialize(row), 'utf8');
+          if (resultBytes + rowBytes > maxBytes) {
+            truncation.byteLimit = true;
+            break;
+          }
+          resultBytes += rowBytes;
+          rows.push(row);
+        }
+        return {
+          databaseSchemaVersion,
+          projectionRevision: revision,
+          snapshotWatermark: encodeInt64(BigInt(watermarkRow.watermark)),
+          generationIds: generations.map((row) => row.generation_id),
+          generationIdsTruncated,
+          columns,
+          rows,
+          returnedRows: rows.length,
+          truncation,
+        };
+      } finally {
+        this.database.setAuthorizer(null);
+      }
+    });
+  }
+
+  /** Persisted, typed settlement read model. Revision and rows are read from
+   * one database snapshot so cross-host consumers never pair a new revision
+   * with stale rows. */
+  readProviderSettlements(rootSessionId?: string, limit?: number): ProviderSettlementReadModel {
+    this.assertOpen();
+    return this.snapshot(() => {
+      const revision = this.getProjectionRevision();
+      const where = rootSessionId ? 'WHERE root_session_id = ?' : '';
+      const boundedLimit = limit === undefined ? undefined : Math.max(0, Math.trunc(limit));
+      const rows = this.database.prepare(`
+        SELECT * FROM analytics_provider_settlements
+        ${where}
+        ORDER BY CAST(projection_revision AS INTEGER), generation_id, invocation_id
+        ${boundedLimit === undefined ? '' : 'LIMIT ?'}
+      `).all(...(rootSessionId ? [rootSessionId] : []), ...(boundedLimit === undefined ? [] : [boundedLimit])) as Array<Record<string, unknown>>;
+      const decodeInt = (value: unknown): number | string | null => value === null || value === undefined
+        ? null
+        : encodeInt64(String(value));
+      return {
+        revision,
+        settlements: rows.map((row) => ({
+          generationId: String(row.generation_id),
+          invocationId: String(row.invocation_id),
+          rootSessionId: row.root_session_id === null ? null : String(row.root_session_id),
+          provider: row.provider === null ? null : String(row.provider),
+          model: row.effective_model === null ? null : String(row.effective_model),
+          dispatchedModel: row.dispatched_model === null ? null : String(row.dispatched_model),
+          reportedModel: row.reported_model === null ? null : String(row.reported_model),
+          purpose: row.purpose === null ? null : String(row.purpose),
+          outcome: row.outcome === null ? null : String(row.outcome),
+          settledAtMs: decodeInt(row.settled_at_ms),
+          usage: {
+            inputTokens: decodeInt(row.input_tokens),
+            outputTokens: decodeInt(row.output_tokens),
+            cacheReadTokens: decodeInt(row.cache_read_tokens),
+            cacheWriteTokens: decodeInt(row.cache_write_tokens),
+            reasoningTokens: decodeInt(row.reasoning_tokens),
+            providerTotalTokens: decodeInt(row.provider_total_tokens),
+          },
+          reportedCostUsd: row.reported_cost_usd === null ? null : Number(row.reported_cost_usd),
+          calculatedCostUsd: row.calculated_cost_usd === null ? null : Number(row.calculated_cost_usd),
+          calculatedCostComplete: Number(row.calculated_cost_complete) === 1,
+          normalizedUsage: {
+            baseInputTokens: decodeInt(row.normalized_base_input_tokens),
+            outputTokens: decodeInt(row.normalized_output_tokens),
+            cacheReadTokens: decodeInt(row.normalized_cache_read_tokens),
+            cacheWriteTokens: decodeInt(row.normalized_cache_write_tokens),
+            reasoningTokens: decodeInt(row.reasoning_tokens),
+            totalTokens: decodeInt(row.normalized_total_tokens),
+            reasoningIncludedInOutput: row.reasoning_included_in_output === null
+              ? null
+              : Number(row.reasoning_included_in_output) === 1,
+            complete: Number(row.normalized_usage_complete) === 1,
+          },
+          effectiveCostUsd: row.effective_cost_usd === null ? null : Number(row.effective_cost_usd),
+          effectiveCostSource: row.effective_cost_source === null
+            ? null
+            : row.effective_cost_source as 'reported' | 'calculated',
+          effectiveCostCoverage: row.effective_cost_coverage as 'known' | 'unknown' | 'not_applicable',
+          revision: encodeInt64(String(row.projection_revision)),
+        })),
+      };
+    });
+  }
+
+  readProviderSettlementProjection(rootSessionId?: string): ProviderSettlementReadModel {
+    return this.readProviderSettlements(rootSessionId);
+  }
+
+  readHistoricalDimensionSummary(): HistoricalDimensionSummary {
+    this.assertOpen();
+    return this.snapshot(() => ({
+      revision: this.getProjectionRevision(),
+      providers: this.database.prepare(`
+        SELECT provider, effective_model, purpose, outcome, COUNT(*) AS occurrence_count
+        FROM analytics_provider_settlements
+        GROUP BY provider, effective_model, purpose, outcome
+        ORDER BY provider, effective_model, purpose, outcome
+      `).all() as Array<Record<string, unknown>>,
+      tools: this.database.prepare(`
+        SELECT tool_definition_id, outcome, COUNT(*) AS occurrence_count
+        FROM analytics_tool_states
+        GROUP BY tool_definition_id, outcome
+        ORDER BY tool_definition_id, outcome
+      `).all() as Array<Record<string, unknown>>,
+      activities: this.database.prepare(`
+        SELECT activity_kind, coverage, COUNT(*) AS occurrence_count
+        FROM analytics_activity_states
+        GROUP BY activity_kind, coverage
+        ORDER BY activity_kind, coverage
+      `).all() as Array<Record<string, unknown>>,
+      features: this.database.prepare(`
+        SELECT feature, decision, rule_version, COUNT(*) AS occurrence_count
+        FROM analytics_feature_observations
+        GROUP BY feature, decision, rule_version
+        ORDER BY feature, decision, rule_version
+      `).all() as Array<Record<string, unknown>>,
+    }));
+  }
+
+  /** Exact once-per-invocation accounting with explicit missingness. A total
+   * value is null whenever any contributing invocation lacks that channel. */
+  readProviderAccountingSummary(rootSessionId?: string): ProviderAccountingSummary {
+    this.assertOpen();
+    return this.snapshot(() => {
+      const row = this.database.prepare(`
+        SELECT summary_json FROM analytics_provider_accounting_projections
+        WHERE subject_kind = ? AND subject_key = ?
+      `).get(rootSessionId ? 'session' : 'global', rootSessionId ?? '*') as { summary_json: string } | undefined;
+      const stored = row ? JSON.parse(row.summary_json) as StoredProviderAccounting : emptyStoredProviderAccounting();
+      const invocationCount = Number(stored.occurrenceCount);
+      const channel = (name: AccountingChannel): CoverageMetric => {
+        const value = stored.channels[name];
+        const knownCount = Number(value.knownCount);
+        const unknownCount = Number(value.unknownCount);
+        const knownTotal = encodeInt64(value.knownTotal);
+        return {
+          occurrenceCount: invocationCount,
+          knownCount,
+          unknownCount,
+          knownTotal,
+          value: unknownCount === 0 ? knownTotal : null,
+          complete: unknownCount === 0,
+        };
+      };
+      const costKnownCount = Number(stored.cost.knownCount);
+      const costUnknownCount = Number(stored.cost.unknownCount);
+      return {
+        revision: this.getProjectionRevision(),
+        invocationCount,
+        inputTokens: channel('inputTokens'),
+        outputTokens: channel('outputTokens'),
+        cacheReadTokens: channel('cacheReadTokens'),
+        cacheWriteTokens: channel('cacheWriteTokens'),
+        reasoningTokens: channel('reasoningTokens'),
+        providerTotalTokens: channel('providerTotalTokens'),
+        effectiveCostUsd: {
+          occurrenceCount: invocationCount,
+          knownCount: costKnownCount,
+          unknownCount: costUnknownCount,
+          reportedCount: Number(stored.cost.reportedCount),
+          calculatedCount: Number(stored.cost.calculatedCount),
+          knownTotal: stored.cost.knownTotal,
+          value: costUnknownCount === 0 ? stored.cost.knownTotal : null,
+          complete: costUnknownCount === 0,
+        },
+      };
+    });
+  }
+
+  /** Backward-compatible P0 usage-only view, now served without replaying the
+   * generic observation ledger. Missing channels remain null. */
+  projectProviderUsage(rootSessionId?: string): ProviderUsageProjection[] {
+    return this.readProviderSettlements(rootSessionId).settlements.map((settlement) => ({
+      invocationId: settlement.invocationId,
+      usage: settlement.usage,
+      reportedCostUsd: settlement.reportedCostUsd,
+    }));
+  }
+
+  readProducerAcknowledgements(observations: readonly AnalyticsObservation[]): ProducerReconciliation[] {
+    this.assertOpen();
+    const identities = [...new Set(observations
+      .filter((observation) => sourceSequence(observation) !== null)
+      .map((observation) => producerIdentity(observation)))];
+    const statement = this.database.prepare(`
+      SELECT state.producer_identity, state.contiguous_watermark,
+        state.highest_observed_sequence, state.visible_gaps_json,
+        (SELECT COUNT(*) FROM analytics_producer_sequences pending
+          WHERE pending.producer_identity = state.producer_identity) AS pending_receipt_count
+      FROM analytics_producer_reconciliation state WHERE state.producer_identity = ?
+    `);
+    return identities.flatMap((identity) => {
+      const row = statement.get(identity) as {
+        producer_identity: string;
+        contiguous_watermark: string;
+        highest_observed_sequence: string;
+        visible_gaps_json: string;
+        pending_receipt_count: number | bigint;
+      } | undefined;
+      return row ? [this.decodeProducerReconciliation(row)] : [];
+    });
+  }
+
+  readProducerReconciliation(limit = 1_000): ProducerReconciliation[] {
+    this.assertOpen();
+    const boundedLimit = boundedPositiveInteger(limit, 1_000, 10_000, 'producer reconciliation limit');
+    const rows = this.database.prepare(`
+      SELECT state.producer_identity, state.contiguous_watermark,
+        state.highest_observed_sequence, state.visible_gaps_json,
+        (SELECT COUNT(*) FROM analytics_producer_sequences pending
+          WHERE pending.producer_identity = state.producer_identity) AS pending_receipt_count
+      FROM analytics_producer_reconciliation state ORDER BY state.producer_identity LIMIT ?
+    `).all(boundedLimit) as Array<{
+      producer_identity: string;
+      contiguous_watermark: string;
+      highest_observed_sequence: string;
+      visible_gaps_json: string;
+      pending_receipt_count: number | bigint;
+    }>;
+    return rows.map((row) => this.decodeProducerReconciliation(row));
+  }
+
+  private decodeProducerReconciliation(row: {
+    producer_identity: string;
+    contiguous_watermark: string;
+    highest_observed_sequence: string;
+    visible_gaps_json: string;
+    pending_receipt_count: number | bigint;
+  }): ProducerReconciliation {
+    return {
+      producerIdentity: row.producer_identity,
+      contiguousWatermark: encodeInt64(row.contiguous_watermark),
+      highestObservedSequence: encodeInt64(row.highest_observed_sequence),
+      visibleGaps: (JSON.parse(row.visible_gaps_json) as Array<{ from: string; to: string }>).map((gap) => ({
+        from: encodeInt64(gap.from),
+        to: encodeInt64(gap.to),
+      })),
+      pendingReceiptCount: toNumber(row.pending_receipt_count),
+    };
+  }
+
+  getProducerReconciliation(): ProducerReconciliation[] {
+    return this.readProducerReconciliation();
   }
 
   getStats(): Readonly<AnalyticsRecorderStats> {
@@ -620,7 +2785,7 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
   }
 
   checkpoint(): void {
-    this.assertOpen();
+    this.assertWritable();
     this.database.exec('PRAGMA wal_checkpoint(TRUNCATE)');
   }
 
@@ -631,7 +2796,11 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
   }
 
   private transaction<T>(operation: () => T): T {
-    this.database.exec('BEGIN IMMEDIATE');
+    return databaseTransaction(this.database, operation);
+  }
+
+  private snapshot<T>(operation: () => T): T {
+    this.database.exec('BEGIN');
     try {
       const result = operation();
       this.database.exec('COMMIT');
@@ -640,6 +2809,11 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
       try { this.database.exec('ROLLBACK'); } catch { /* preserve original */ }
       throw error;
     }
+  }
+
+  private assertWritable(): void {
+    this.assertOpen();
+    if (this.readOnly) throw new Error('Analytics recorder is read-only.');
   }
 
   private assertOpen(): void {

@@ -24,6 +24,7 @@ type RecorderWorkerRequest = {
   rootSessionId: string;
   sourceKey: string;
   timestampMs: number | string | bigint;
+  pendingOperationId?: string;
 } | {
   type: 'flush' | 'stats' | 'shutdown';
   requestId: number;
@@ -49,6 +50,7 @@ if (!databasePath) throw new Error('PIE_ANALYTICS_DATABASE_PATH is required.');
 const acknowledgementDelayMs = Math.max(0, Number(process.env.PIE_ANALYTICS_REHEARSAL_ACK_DELAY_MS ?? 0) || 0);
 
 let recorder: SqliteAnalyticsRecorder;
+let startupPrivacyRecovery: ReturnType<SqliteAnalyticsRecorder['resumePendingPrivacyScrubs']>;
 
 function send(message: Record<string, unknown>): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -130,7 +132,16 @@ async function handle(raw: unknown): Promise<void> {
             }
           }
         }
-        await acknowledge(request.requestId, rejections.length > 0 ? { rejections } : undefined);
+        const delivery = recorder.readDeliveryAccounting();
+        await acknowledge(request.requestId, {
+          rejections,
+          producerReconciliation: firstKind === 'observation'
+            ? recorder.readProducerAcknowledgements(
+                captures.map((capture) => capture.value as AnalyticsObservation),
+              )
+            : [],
+          completeDetailWatermark: delivery.completeDetailWatermark,
+        });
         return;
       }
       case 'bindPendingCreate': {
@@ -151,6 +162,7 @@ async function handle(raw: unknown): Promise<void> {
           request.rootSessionId,
           request.sourceKey,
           request.timestampMs,
+          request.pendingOperationId,
         );
         await acknowledge(request.requestId, receipt);
         return;
@@ -164,6 +176,8 @@ async function handle(raw: unknown): Promise<void> {
           process: { ...process.memoryUsage(), cpuUsage: process.cpuUsage() },
           recorder: recorder.getStats(),
           detailStorage: recorder.detailStorageStats(),
+          delivery: recorder.readDeliveryAccounting(),
+          startupPrivacyRecovery,
         });
         return;
       case 'shutdown':
@@ -186,7 +200,8 @@ async function handle(raw: unknown): Promise<void> {
 
 try {
   recorder = new SqliteAnalyticsRecorder(databasePath);
-  void send({ type: 'ready' }).then(() => {
+  startupPrivacyRecovery = recorder.resumePendingPrivacyScrubs(16);
+  void send({ type: 'ready', startupPrivacyRecovery }).then(() => {
     let processing = Promise.resolve();
     process.on('message', (message: unknown) => {
       processing = processing.then(() => handle(message));
