@@ -885,3 +885,8 @@ preconditions pass.
 No newer backend-start/generation evidence appeared in the bounded persistent log inspection. The
 last verified loaded runtime remains the old generation recorded above, ordinary analytics remains
 under the old authority, and no source-only validation artifact has been published or activated.
+
+Checkpoint 10 was committed as `49ebed6234aaa87a7a40174c4463e837e16ba734` (`Record failed analytics
+P0 qualification gate`) and pushed normally to `origin/master`; a fresh fetch verified
+`HEAD == origin/master == 49ebed6234aaa87a7a40174c4463e837e16ba734`. Only this execution-record
+checkpoint was staged. The preserved candidate and `settings.json` remain dirty and uncommitted.
