@@ -1,4 +1,5 @@
 import * as cp from 'node:child_process';
+import * as path from 'node:path';
 import * as vscode from 'vscode';
 
 import { attachJsonlLineReader, JSONL_MAX_LINE_BYTES, serializeJsonLine } from '../../shared/jsonl';
@@ -278,6 +279,11 @@ export class BackendClient implements vscode.Disposable {
       dataDir: process.env.PIE_DATA_DIR,
       agentDir: agentDirEnv,
     });
+    const sessionSettingsDirEnv = path.join(dataPaths.stateDir, 'session-settings');
+    // Session-scoped settings use the neutral state/session-settings authority;
+    // the legacy review-sidecar path is supplied only for one-way toggle
+    // migration/scrubbing. Reviews themselves remain on `PIE_REVIEWS_DIR`
+    // until the later review-retirement milestone.
     // Session reviews live in a sibling of the sessions dir so the backend
     // (reader) and the session_review tool (writer) — same process — agree on
     // the sidecar location via `PIE_REVIEWS_DIR`.
@@ -292,7 +298,9 @@ export class BackendClient implements vscode.Disposable {
       // P2c cache consumers use this internal absolute seam; package config,
       // auth, and SDK agent/session roots remain owned by their existing owners.
       PIE_CACHE_DIR: dataPaths.cacheDir,
+      PIE_SESSION_SETTINGS_DIR: sessionSettingsDirEnv,
       ...(reviewsDirEnv ? { PIE_REVIEWS_DIR: reviewsDirEnv } : {}),
+      ...(reviewsDirEnv ? { PIE_LEGACY_SESSION_SETTINGS_DIR: reviewsDirEnv } : {}),
       ...(triggersDirEnv ? { PIE_TRIGGERS_DIR: triggersDirEnv } : {}),
       PIE_LIVE_PIPELINE_TRACE_KEY: getLivePipelineTraceHmacKey(),
       PIE_LIVE_PIPELINE_TRACE_RUN_ID: getLivePipelineTraceRunId(),

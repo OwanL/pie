@@ -7,7 +7,7 @@ import { atomicWriteText as atomicWriteTextImpl } from '../../shared/atomic-writ
 import { withTransientFsRetry, defaultFsRetryDelay, type FsRetryDelay } from '../../shared/fs-retry';
 import { readOptionalText } from '../shared/checkpoint-io';
 import { appendPieError, appendPieLog } from '../util/pie-log';
-import { resolveSessionIdentity } from '../../backend/session-review-store';
+import { resolveSessionIdentity } from '../../shared/session-identity';
 import { workspaceHash } from './helpers';
 import { writeCheckpointToDisk } from './persistence';
 import { withFileUpdateLock } from '../../shared/settings-json-update';

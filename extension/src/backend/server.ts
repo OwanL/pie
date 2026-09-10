@@ -60,7 +60,7 @@ import { forgetPrivateSessionArtifacts } from './private-session-artifacts';
 import {
   isSystemPromptTogglePersistenceAvailable,
   writeSystemPromptTogglesForSession,
-} from './system-prompt-toggle-store';
+} from './session-settings-store';
 import {
   ensureSdkPatchBarrier,
   loadSdk,

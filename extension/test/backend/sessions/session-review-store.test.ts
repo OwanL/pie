@@ -10,8 +10,8 @@ import {
   mergeReviewIntoSummary,
   mergeReviewsIntoSummaries,
   readReviews,
-  resolveSessionIdentity,
 } from '../../../src/backend/session-review-store';
+import { resolveSessionIdentity } from '../../../src/shared/session-identity';
 import { REVIEW_CLOSURE_ACTIONS_FILE, type SessionSummary } from '../../../src/shared/protocol';
 import { validReview } from '../../../../extensions/session-reviewer/test/fixtures.js';
 

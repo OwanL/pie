@@ -13,7 +13,7 @@ import type { BillableInvocationRecord } from '../../shared/billable-invocation'
 import { RunAnalyticsStorage } from './storage';
 import { SessionRunTracker } from './tracker';
 import type { RunObserver, StatsServiceOptions } from './types';
-import { resolveSessionIdentity } from '../../backend/session-review-store';
+import { resolveSessionIdentity } from '../../shared/session-identity';
 import { defaultCreateId, defaultNow } from './helpers';
 import { WorkingTimeService } from '../working-time-service';
 import {

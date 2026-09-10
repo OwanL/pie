@@ -6,8 +6,7 @@ import * as path from 'node:path';
 import test from 'node:test';
 
 import { BackendServer } from '../../../src/backend';
-import { REVIEWS_DIR_ENV } from '../../../src/backend/session-review-store';
-import { readSystemPromptTogglesForSession } from '../../../src/backend/system-prompt-toggle-store';
+import { SESSION_SETTINGS_DIR_ENV, readSystemPromptTogglesForSession } from '../../../src/backend/session-settings-store';
 import { SESSION_SNAPSHOT_MAX_LINE_BYTES, sessionSnapshotLineBytes } from '../../../src/shared/transcript-window';
 
 function entry(id: string, role: 'user' | 'assistant', text: string) {
@@ -283,8 +282,8 @@ test('coordinator-routed cold settings survive snapshot rebuild and backend-gene
 
 test('coordinator-routed cold system-prompt toggles persist and confirm without promotion', async () => {
   const h = await makeColdServer();
-  const previousReviewsDir = process.env[REVIEWS_DIR_ENV];
-  process.env[REVIEWS_DIR_ENV] = h.dir;
+  const previousSettingsDir = process.env[SESSION_SETTINGS_DIR_ENV];
+  process.env[SESSION_SETTINGS_DIR_ENV] = h.dir;
   try {
     const emitted: Array<{ event: string; payload: any }> = [];
     h.server.emit = (event: string, payload: any) => { emitted.push({ event, payload }); };
@@ -309,8 +308,8 @@ test('coordinator-routed cold system-prompt toggles persist and confirm without 
       },
     });
   } finally {
-    if (previousReviewsDir === undefined) delete process.env[REVIEWS_DIR_ENV];
-    else process.env[REVIEWS_DIR_ENV] = previousReviewsDir;
+    if (previousSettingsDir === undefined) delete process.env[SESSION_SETTINGS_DIR_ENV];
+    else process.env[SESSION_SETTINGS_DIR_ENV] = previousSettingsDir;
     await fs.rm(h.dir, { recursive: true, force: true });
   }
 });

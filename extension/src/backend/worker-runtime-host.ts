@@ -61,7 +61,7 @@ import { loadSdk, loadSdkInternalModule } from './sdk';
 import type { SdkPatchIdentity } from './sdk-patch-barrier';
 import type { SessionContext, SessionContextCreationReason, SessionPromptState } from './server-types';
 import { ProviderGate } from './provider-gate';
-import { readSystemPromptTogglesForSession, writeSystemPromptTogglesForSession } from './system-prompt-toggle-store';
+import { readSystemPromptTogglesForSession, writeSystemPromptTogglesForSession } from './session-settings-store';
 import {
   buildSessionSystemPrompts,
   buildToggledSystemPrompt,

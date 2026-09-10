@@ -1,7 +1,8 @@
 import * as fs from 'node:fs/promises';
 
-import { forgetSessionReviewSidecars, resolveSessionIdentity } from './session-review-store';
-import { writeSystemPromptTogglesForSession } from './system-prompt-toggle-store';
+import { resolveSessionIdentity } from '../shared/session-identity';
+import { forgetSessionReviewSidecars } from './session-review-store';
+import { writeSystemPromptTogglesForSession } from './session-settings-store';
 
 export interface ForgetPrivateSessionArtifactsDeps {
   forgetReviewSidecars?: typeof forgetSessionReviewSidecars;
