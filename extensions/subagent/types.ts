@@ -224,6 +224,9 @@ export interface SingleResult {
 	requirementDiagnostic?: string;
 	/** Stable identity for this dispatched model attempt, shared with the orphan cleanup registry. */
 	attemptId?: string;
+	/** Result of the nonwaiting rich-detail ownership handoff. `rejected` is an
+	 * explicit capture gap and never means the attempt failed to execute. */
+	analyticsCaptureStatus?: "disabled" | "submitted" | "rejected";
 	/** Bounded per-attempt analytics for this subagent dispatch (success + failed retries). */
 	attemptRecords?: SubagentAttemptRecord[];
 	/** One record per observable child provider response. Unlike aggregate usage,

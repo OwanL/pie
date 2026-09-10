@@ -37,6 +37,7 @@ import { compactSingleResult } from "./result-compaction.js";
 import { textContent } from "./text-content.js";
 import { buildParentUserContext } from "./user-context.js";
 import { hashDelegatedPrompt, withRuntimeProvenance } from "./runtime-provenance.js";
+import { captureSubagentTerminalResult } from "./analytics-capture.js";
 import {
 	readRetryPolicy,
 	parseRetryAfterMs,
@@ -254,6 +255,11 @@ async function runWithModelRetry(args: RunWithModelRetryArgs): Promise<SingleRes
 		result = await subagentRuntime.run(runtimeCtx, () => args.runAttempt(resolved, attemptId, onAttemptUpdate));
 		Object.assign(result, stampIdentity(result));
 		attachSelectionMetadata(result, resolved);
+		result.analyticsCaptureStatus = captureSubagentTerminalResult(
+			result,
+			runtimeCtx.analyticsCapture,
+			args.toolCallId,
+		);
 		attemptRecords.push(buildAttemptRecord(result, nextBackoffMs));
 		providerInvocations.push(...(result.providerInvocations ?? []));
 		addUsage(cumulativeUsage, result.usage);
@@ -399,6 +405,7 @@ export async function executeSingleTask(args: {
 			keptSkills: runtimeCtx.keptSkills,
 			processPermitScope: runtimeCtx.processPermitScope,
 			lineage: extendSubagentLineage(runtimeCtx.lineage, identity.childId, identity.spawningToolCallId, identity.attemptId),
+			analyticsCapture: runtimeCtx.analyticsCapture,
 		}),
 		runAttempt: injectedRunAttempt
 			? (resolved, attemptId, onAttemptUpdate) => injectedRunAttempt(resolved, attemptId, onAttemptUpdate)

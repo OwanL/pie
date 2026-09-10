@@ -310,6 +310,35 @@ export interface AnalyticsSink {
   submit(observation: AnalyticsObservation): void | Promise<void>;
 }
 
+/** Independently-owned rich detail handed off by a producer before its
+ * execution-local objects are reclaimed. `bytes` is a detached snapshot, not
+ * a reference to mutable SDK state. The recorder expands it into linked,
+ * content-addressed leaves off the agent path. */
+export interface AnalyticsDetailCapture {
+  schemaVersion: number;
+  generationId: string;
+  payloadId: string;
+  sourceKey: string;
+  observedAtMs: AnalyticsTimestampMs;
+  captureSubject: AnalyticsCaptureSubject;
+  mediaType: 'application/x-pie-subagent-result';
+  encoding: 'node-v8';
+  complete: true;
+  bytes: Uint8Array;
+  metadata: {
+    childId?: string;
+    attemptId?: string;
+    parentToolCallId?: string;
+    outcome?: string;
+  };
+}
+
+export interface AnalyticsDetailSink {
+  /** Synchronous ownership transfer only. Implementations must not wait for
+   * persistence or queue drainage and must fail visibly if capacity is absent. */
+  submitDetail(capture: AnalyticsDetailCapture): void;
+}
+
 /** Producers outside Pie can use this sink without branching their capture
  * code. It intentionally does not acknowledge or buffer anything. */
 export const NOOP_ANALYTICS_SINK: AnalyticsSink = Object.freeze({

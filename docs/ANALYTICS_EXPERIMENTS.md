@@ -1,6 +1,6 @@
 # Analytics storage experiments
 
-Status: exploratory synthetic measurements, 2026-09-09. Not production qualification.
+Status: corrected exploratory comparison plus bounded P0 qualification, 2026-09-10. Not production selection or activation.
 Related: [scope plan](ANALYTICS_REWORK_PLAN.md),
 [implementation contract](ANALYTICS_IMPLEMENTATION_CONTRACT.md).
 
@@ -103,6 +103,72 @@ These ACK timings do not measure that overhead or establish UI/agent non-interfe
 target does not make these runs production qualification. The query results favor DuckDB's scans and
 SQLite's point/write workload in these particular prototypes.
 
+## Bounded P0 real-producer and SQLite candidate pass (2026-09-10)
+
+The required order was preserved. First, the real `executeSingleTask` attempt path transferred a
+versioned V8 snapshot of terminal results into the typed detail sink after attempt cleanup. Source
+tests cover a two-level nested tool-result wrapper with a roughly 1.4 MiB shared child body,
+independent ownership after mutation of the returned result, every failed/successful failover attempt,
+and cancellation. The producer path performs only V8 serialization plus bounded queue ownership
+transfer; hashing, recursive leaf extraction, SQLite work and acknowledgement remain in the helper.
+Capture rejection is retained as `analyticsCaptureStatus: "rejected"` rather than blocking the agent or
+claiming complete capture.
+
+Second, the separate operational lifecycle prototype persisted reversible per-session privacy and
+froze the first close decision in a short SQLite transaction. App shutdown preserves an open private
+setting. Non-private close computes exactly 24 hours with signed-64-bit arithmetic; private close
+records delete intent/epoch. The recorder independently writes a deleted-subject marker and atomically
+scrubs facts, payload references and last-owner content. Tests cover restart/idempotency, late fact and
+detail rejection, cross-owner shared-content preservation and final orphan removal. This is the early
+P2b owner only: it is not wired into live admission, SDK mutation fencing or expiry.
+
+Third, the independent recorder ingress was exercised disabled by default and did not start a worker.
+Its clean helper replacement was then rehearsed three times on disposable data (109.2 ms p50,
+132.5 ms max). This is only the P7 ingress/restart-helper prototype: it does not install, activate, restart or
+arm a Pie/VS Code host.
+
+Only then was the SQLite candidate run. The matrix was frozen in
+[`internal/ANALYTICS_P0_QUALIFICATION_2026-09-10.json`](internal/ANALYTICS_P0_QUALIFICATION_2026-09-10.json)
+before timing: 10,000 mixed primary facts across four producer helpers and 12 model/provider labels;
+1,000 rich payloads at the contract's 950 x 2 KiB, 49 x 32 KiB and 1 x 2 MiB distribution; a nested
+parent/child pair over shared content; finite burst, restart, capacity, query and private-delete race
+cases. Generation streamed in bounded chunks. Initial free disk was 859.2 GB; the run retained the
+20 GiB reserve, used 27.7 MB database/WAL, stayed below the 16 GiB temporary cap and removed its unique
+temporary directory.
+
+| Bounded candidate measurement | Result |
+|---|---:|
+| Small-fact synchronous handoff p50 / p95 / p99 / max (10,000) | 0.0011 / 0.0034 / 0.0094 / 0.4535 ms |
+| 2 KiB detail serialize + handoff p50 / p95 / p99 / max (950) | 0.0064 / 0.0417 / 0.0798 / 0.1909 ms |
+| 32 KiB detail serialize + handoff p50 / p95 / max (49) | 0.0401 / 0.0912 / 0.1779 ms |
+| 2 MiB detail serialize + handoff (one sample; no percentile claim) | 0.9566 ms |
+| Delayed acknowledgement: handoff / simulated completion / drain | 0.2265 / 2.3374 / 338.49 ms |
+| Four-helper 10k drain / finite-burst rate | 1.642 s / 6,090 facts/s |
+| Peak detail backlog / final backlog / rejected | 8.06 MB / zero / zero |
+| Logical rich bytes / stored content bytes | 10.12 MB / 3.31 MB |
+| All-history 10k projection median / max (10 reads) | 74.97 / 84.72 ms |
+| Indexed session count / 2 MiB reconstruction | 0.198 / 4.254 ms |
+| Producer RSS growth / four-helper total RSS | 28.41 MB / 223.65 MB |
+
+The deliberate 1 MiB queue cap rejected a 2 MiB handoff visibly with no retained backlog. A private
+delete raced a late fact and linked detail from another helper: the ingress remained live, both late
+deliveries reported asynchronous rejection, and final fact/detail counts were both zero. The 10k run reconstructed nested child and
+parent results exactly; shared linked bodies occupied one content leaf rather than repeated embedded
+copies. All helpers drained to zero backlog.
+
+This bounded pass meets the <=9 ms synchronous handoff starting gate in the measured mix and supports
+continuing with SQLite. It does **not** select or qualify a production engine. The 1M/10M tiers,
+10k-sample sustained 50 fact/s repetitions, two five-minute light-load runs, matched UI/agent baseline,
+idle/active CPU, cancellation/bounded analytical scans, ordinary one/two-host conditions, projection
+upgrade and full lifecycle mutation fencing remain unqualified. The single 2 MiB sample is explicitly
+not a p99. No deferred outage/loss policy was selected: capacity exhaustion remains a visible
+qualification failure.
+
+Reproduce after `npm run extension:build:validate` with
+`node extension/scripts/analytics-p0-qualification.mjs`; it uses only emitted prototype bundles and a
+uniquely-owned disposable OS-temp directory. The checked-in JSON is the sanitized result; it contains
+no session transcript, user path or runtime data.
+
 ## Interpretation and remaining gate
 
 No production engine is selected. These measurements support testing SQLite's incremental path first,
@@ -111,10 +177,11 @@ not a production choice or proof of execution isolation. The current decision pr
 gates are owned by [the implementation contract](ANALYTICS_IMPLEMENTATION_CONTRACT.md) §6. This evidence
 note does not maintain a second set of future requirements.
 
-The generic fixture's cross-session parent links, ID-modulo span kinds and placeholder prices are not
-a semantic accounting oracle. These runs did not establish nested-child payload ownership, referenced
-result reconstruction, cross-window refresh, delete-on-close races or operational writer revocation.
-The aligned follow-up changes that future qualification work, not the measurements above. No production
+The corrected comparison fixture's cross-session parent links, ID-modulo span kinds and placeholder
+prices are not a semantic accounting oracle. The bounded P0 pass adds nested-child payload ownership,
+referenced reconstruction and the recorder side of a delete-on-close race, but it does not establish
+cross-window refresh, semantic accounting parity or operational filesystem writer revocation. The
+aligned follow-up changes that future qualification work, not the measurements above. No production
 activation is authorized; the deferred outage/overflow policy remains undecided.
 
 ## Reproduction and evidence

@@ -544,3 +544,120 @@ or live activation was performed. The supported cache code is source-only until 
 loaded, so this receipt must not be reported as post-activation cache evidence. The next owner should
 recover routing through the supported control mirror, keep the preserved dirty paths isolated, and
 qualify the real producer/capture/lifecycle gates before any live activation or destructive cutoff.
+
+---
+
+## Checkpoint 7 — 2026-09-10, bounded P0/early-risk prototype milestone
+
+**State: REAL PRODUCER BOUNDARY AND BOUNDED SQLITE CANDIDATE PASS; NO ENGINE SELECTED; NO LIVE
+ACTIVATION.** `HEAD == origin/master == 8628fd0f` before this checkpoint. The worktree's pre-existing
+`settings.json` model preference diff remains unowned and untouched. The user is actively using Pie and
+current `PIE_AUTONOMOUS_MODE=0`; this milestone did not change autonomous mode, install/activate an
+extension, publish a runtime, close a live session, terminate/restart a host, or arm a later disruptive
+process. Only disposable recorder helpers and OS-temp databases were started and cleanly stopped.
+
+### Recovered routing/provenance evidence
+
+The exact root session is
+`data/outcomes/sessions/2026-09-09T10-22-04-382Z_01a085b0-625e-7718-a175-5c7feff981ba.jsonl`.
+`PIE_OPEN_TABS` identifies its active parent as OpenAI Codex/Astra. Root-path toggle resolution in
+`extensions/subagent/src/execute.ts` resolves the root snapshot once and `single.ts` propagates it;
+the exact root override `{"openai-codex":true}` therefore beats disabled defaults tree-wide. The
+effective frontier pool is `[openai-codex/gpt-5.6-sol@high]`; always-parent is off.
+
+The two terminal results that were pending at Checkpoint 6 were read from records 31 and 32:
+
+- record 31 scout: `ollama/glm-5.3-flash:cloud`, medium requested/effective, `fallback:false`,
+  `bucketDowngraded:false`, thinking `max`, prompt hash
+  `1cace3d0d91b69df3f79a12bfdf617168f7bce007edd3d84342c8d5e72069b11`; one successful,
+  response-observed attempt, zero backoff;
+- record 32 reviewer: `openai-codex/gpt-5.6-luna`, medium requested/effective,
+  `fallback:false`, `bucketDowngraded:false`, thinking `max`, prompt hash
+  `b75612afec960e2b91d39bc1d26c63faa380f03d975b84ca827100d5e48139b1`; one successful,
+  response-observed attempt, zero backoff.
+
+Neither result used Astra, fallback, downgrade or an alternate attempt. This current implementation
+worker cannot inspect its own terminal result before return and makes no self-provenance claim.
+
+### Mandated-order results
+
+1. **Real nested-child/large-detail handoff and teardown first — passed for the bounded seam.** The
+   actual `executeSingleTask` attempt loop snapshots every terminal attempt before result compaction
+   using the shared typed sink. A two-level nested tool result with a ~1.4 MiB child body remained exact
+   after the returned result was mutated. Attempt resources were released before handoff. Separate
+   fixtures retained failed and successful failover attempts plus cancellation. Capture status is
+   explicit (`disabled|submitted|rejected`); no storage acknowledgement enters completion/failover.
+2. **Privacy/close operational owner next — early prototype passed.**
+   `SessionLifecycleStore` persists reversible per-session privacy, freezes the first close operation,
+   retains non-private sessions for exactly 24 hours with signed-64-bit arithmetic, survives app-store
+   reopen, increments write epoch, and exposes indexed due selection. The recorder's own transaction
+   atomically installs a minimal deleted-subject marker and removes session facts, detail references and
+   last-owner content. Late fact/detail writes cannot resurrect the subject. This is not the still-needed
+   cross-host filesystem mutation/revocation primitive.
+3. **Independent P7 ingress/restart helper next — early prototype passed, disabled by default.** A
+   disabled supervisor started no worker. A disposable enabled rehearsal cleanly replaced only its
+   recorder helper three times (109.2 ms p50, 132.5 ms max). It does not control the extension host or
+   constitute the terminal one-shot P7a/P7b activation helper.
+4. **SQLite evaluation last — bounded candidate pass, not selection.** The matrix and full sanitized
+   output are in `docs/internal/ANALYTICS_P0_QUALIFICATION_2026-09-10.json`; interpretation is in
+   `docs/ANALYTICS_EXPERIMENTS.md`. On Node 24.16.0/Windows x64, four helpers accepted 10,000 mixed
+   facts and drained in 1.642 s. Synchronous fact handoff p99 was 0.0094 ms; 2 KiB detail
+   serialize+handoff p99 0.0798 ms (950 samples), 32 KiB max 0.1779 ms (49), and the single 2 MiB
+   sample 0.9566 ms. A deliberate 300 ms ACK delay left handoff at 0.2265 ms and simulated completion
+   at 2.3374 ms. Nested reconstruction was exact; 10.12 MB logical detail used 3.31 MB content storage.
+   Final backlog was zero; peak detail backlog 8.06 MB. Four helpers used 223.65 MB aggregate RSS;
+   producer RSS grew 28.41 MB. The database/WAL used 27.66 MB while preserving the 20 GiB free-space
+   reserve and 16 GiB temp cap; the unique temp tree was removed. A private delete racing another
+   helper's late fact/detail reported two asynchronous delivery failures, kept the ingress live for an
+   unrelated fact, and left both private counts zero. A deliberate 1 MiB cap visibly rejected one 2 MiB
+   handoff rather than silently dropping it or choosing an outage policy.
+
+### Criteria still open and exact ownership
+
+No production engine is selected because contract §6 still requires the 1M/10M history tiers (or an
+honest capacity-based smaller required envelope), two independent 10k-sample sustained 50-fact/s runs,
+two five-minute 1-fact/s runs, ordinary one/two/four-host comparisons, matched analytics-disabled
+agent/UI baselines, idle/active CPU, mixed read/write and cancellation bounds, schema/projection upgrade,
+and full semantic accounting/query fixtures. The one 2 MiB sample is not called a p99. Deferred
+storage-outage/loss policy remains unresolved; explicit capacity rejection is qualification evidence,
+not a production policy.
+
+- **P2b owner next:** integrate the durable close decision with the existing operation owner, implement
+  the session-scoped cross-host filesystem mutation/revocation and artifact/expiry barriers, then run
+  the full races. Do not move this authority into the recorder.
+- **P3/P4 owner after selected-design gate:** harden schema migration/projections, wire the typed sink at
+  host/provider/tool roots, add bounded delivery reconciliation and measured queue defaults, and retain
+  full attempt detail. Do not activate or treat the current recorder as production.
+- **P5 owner:** native read-only authorization, bounded/cancelable queries and detail ranges remain
+  absent. Current recorder methods are qualification probes only.
+- **P7 owner after all gates:** build/rehearse the independent commit-identifiable one-shot activation
+  artifact with parent-loss/idempotent recovery and all-host writer fencing. Neither P7a nor P7b may run
+  from this milestone.
+
+The **actual loaded old authority** remains the previously evidenced generation
+`65349a2e7ba29f220971b9d2e58d2763a5c4e479afcecd58d663cf7a1a8e6d72`, with old analytics under
+`data/outcomes/8c401ee313ff7786/`. `extension:build:validate` emitted a disposable source validation build
+only; it did not publish or change the loaded generation. Analytics generation and storage cutoff both
+remain off.
+
+### Verification at checkpoint
+
+- `npm run test:file -- extensions/subagent/test/model-requirements.test.ts` — 20 passed, including
+  rich success, failover-attempt and cancellation ownership.
+- `npm run test:file -- extension/test/analytics/sqlite-recorder.test.ts extension/test/analytics/session-lifecycle-store.test.ts`
+  — 7 passed: exact redelivery/conflict, linked reconstruction/dedup/last-owner removal, deletion fence,
+  projection/restart/int64, privacy/restart/first-close/24-hour due behavior.
+- `npm run typecheck` — all 18 registered projects passed.
+- `npm run extension:build:validate` — passed; emitted worker/supervisor/recorder bundles with only the
+  existing Zod annotation and large-chunk warnings; no publish/activation.
+- `node extension/scripts/analytics-p0-qualification.mjs` — passed the predeclared bounded matrix and
+  removed disposable data; exact JSON above.
+
+Final integration checks: `npm test` ran the full fast suite — **7/7 packages, 6,841 passed,
+0 failed, 29 skipped**. Full `npm run typecheck`, `npm run lint`, the focused analytics/lifecycle and
+subagent source tests (**28 passed**), `npm run extension:build:validate`, and the disposable
+qualification harness passed. Build validation emitted only the existing Vite annotation/chunk warnings and did not publish.
+One permitted independent reviewer was dispatched after the prototype settled, but its tool call
+returned no readable result to this worker; no reviewer approval or terminal provenance is claimed,
+and no replacement reviewer was dispatched. Session-scoped manifest/diff review, commit and push
+remain the integration barrier. No milestone commit/push is yet claimed here.

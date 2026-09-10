@@ -17,6 +17,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { Model } from "@mariozechner/pi-ai";
+import { deserialize } from "node:v8";
 import { resolveModel, type SelectionContext } from "../src/execute.js";
 import { resolveExecutionModel } from "../model-resolution.js";
 import { compactSingleResult } from "../src/result-compaction.js";
@@ -630,4 +631,165 @@ test("executeSingleTask: running, terminal, and retried snapshots retain require
 	const compacted = compactSingleResult(terminal);
 	assert.deepEqual(compacted.requestedModelRequirements, IMAGE_REQ);
 	assert.equal(compacted.modelRequirementsSatisfied, true);
+});
+
+test("executeSingleTask hands off an independently-owned rich terminal snapshot after attempt teardown", async () => {
+	const callerModel = model("parent", "parent-text-model", ["text"]);
+	const selectionCtx = makeSelectionCtx({
+		callerModelInput: ["text"],
+		bucketAssignments: { small: [], medium: assignedModels("child-model"), frontier: [] },
+		registryModels: [model("child-provider", "child-model", ["text"])],
+	});
+	const captured: any[] = [];
+	let attemptResourcesReleased = false;
+	const richBody = "nested terminal detail ".repeat(65_536);
+
+	const response: any = await executeSingleTask({
+		params: { agent: "scout", task: "produce nested detail", bucket: "medium" },
+		ctx: makeCtx(callerModel),
+		agents: [makeAgent()],
+		runtimeCtx: {
+			depth: 0,
+			trail: [],
+			budget: { sessions: 0 },
+			analyticsCapture: {
+				generationId: "capture-generation",
+				captureSubject: { kind: "session", rootSessionId: "capture-root" },
+				sink: {
+					submitDetail: (capture: any) => {
+						assert.equal(attemptResourcesReleased, true, "attempt resources are released before recorder handoff");
+						captured.push(capture);
+					},
+				},
+			},
+		} as any,
+		makeDetails: (results) => noOpDetails("single", results),
+		onUpdate: () => {},
+		signal: noSignal(),
+		selectionCtx,
+		toolCallId: "capture-tool-call",
+		parentUiBridge: undefined,
+		parentSessionId: "capture-root",
+		allToolNames: undefined,
+		_internal: {
+			clock: new ImmediateClock(),
+			runAttempt: (_resolved: any, attemptId: string) => {
+				attemptResourcesReleased = true;
+				return Promise.resolve(syntheticResult({
+					exitCode: 0,
+					stopReason: "completed",
+					attemptId,
+					messages: [{
+						role: "toolResult",
+						toolCallId: "nested-call",
+						toolName: "subagent",
+						content: [{ type: "text", text: "nested complete" }],
+						details: {
+							mode: "single",
+							results: [{ childId: "nested-child", messages: [{ role: "assistant", content: [{ type: "text", text: richBody }] }] }],
+						},
+					}] as any,
+				}));
+			},
+		},
+	});
+
+	assert.equal(response.details.results[0].analyticsCaptureStatus, "submitted");
+	assert.equal(captured.length, 1);
+	const detached = deserialize(Buffer.from(captured[0].bytes));
+	assert.equal(detached.messages[0].details.results[0].messages[0].content[0].text, richBody);
+	response.details.results[0].messages[0].details.results[0].messages[0].content[0].text = "mutated-after-handoff";
+	assert.equal(
+		deserialize(Buffer.from(captured[0].bytes)).messages[0].details.results[0].messages[0].content[0].text,
+		richBody,
+	);
+});
+
+test("terminal capture preserves every failover attempt and cancellation without gating execution", async () => {
+	const callerModel = model("parent", "parent-text-model", ["text"]);
+	const models = [model("provider-a", "model-a", ["text"]), model("provider-b", "model-b", ["text"])];
+	const selectionCtx = makeSelectionCtx({
+		callerModelInput: ["text"],
+		bucketAssignments: { small: [], medium: assignedModels("model-a", "model-b"), frontier: [] },
+		registryModels: models,
+		fallbackOnProviderFailure: true,
+	});
+	const captured: any[] = [];
+	const runtimeCtx = {
+		depth: 0,
+		trail: [],
+		budget: { sessions: 0 },
+		analyticsCapture: {
+			generationId: "attempt-capture-generation",
+			captureSubject: { kind: "session", rootSessionId: "attempt-capture-root" },
+			sink: { submitDetail: (capture: any) => captured.push(capture) },
+		},
+	} as any;
+	let attempts = 0;
+	const failover: any = await executeSingleTask({
+		params: { agent: "scout", task: "retry capture", bucket: "medium" },
+		ctx: makeCtx(callerModel),
+		agents: [makeAgent()],
+		runtimeCtx,
+		makeDetails: (results) => noOpDetails("single", results),
+		onUpdate: () => {},
+		signal: noSignal(),
+		selectionCtx,
+		toolCallId: "retry-capture-tool",
+		parentUiBridge: undefined,
+		parentSessionId: "attempt-capture-root",
+		allToolNames: undefined,
+		_internal: {
+			clock: new ImmediateClock(),
+			runAttempt: (resolved: any, attemptId: string) => {
+				attempts++;
+				if (attempts === 1) return Promise.resolve(syntheticResult({
+					exitCode: 1,
+					attemptId,
+					model: resolved.modelOverride,
+					provider: "provider-a",
+					stopReason: "error",
+					errorMessage: "temporary timeout",
+					retryable: true,
+					replaySafety: "safe",
+					failureClass: "timeout",
+				}));
+				return Promise.resolve(syntheticResult({ exitCode: 0, attemptId, stopReason: "completed" }));
+			},
+		},
+	});
+	assert.equal(failover.details.results[0].analyticsCaptureStatus, "submitted");
+	assert.equal(captured.length, 2, "failed and successful attempts have independent payloads");
+	assert.equal(deserialize(Buffer.from(captured[0].bytes)).stopReason, "error");
+	assert.equal(deserialize(Buffer.from(captured[1].bytes)).stopReason, "completed");
+
+	const cancelled: any = await executeSingleTask({
+		params: { agent: "scout", task: "cancel capture", bucket: "medium" },
+		ctx: makeCtx(callerModel),
+		agents: [makeAgent()],
+		runtimeCtx,
+		makeDetails: (results) => noOpDetails("single", results),
+		onUpdate: () => {},
+		signal: noSignal(),
+		selectionCtx: makeSelectionCtx({
+			callerModelInput: ["text"],
+			bucketAssignments: { small: [], medium: assignedModels("model-a"), frontier: [] },
+			registryModels: models,
+		}),
+		toolCallId: "cancel-capture-tool",
+		parentUiBridge: undefined,
+		parentSessionId: "attempt-capture-root",
+		allToolNames: undefined,
+		_internal: {
+			clock: new ImmediateClock(),
+			runAttempt: (_resolved: any, attemptId: string) => Promise.resolve(syntheticResult({
+				exitCode: 1,
+				attemptId,
+				stopReason: "aborted",
+				errorMessage: "cancelled",
+			})),
+		},
+	});
+	assert.equal(cancelled.details.results[0].analyticsCaptureStatus, "submitted");
+	assert.equal(deserialize(Buffer.from(captured[2].bytes)).stopReason, "aborted");
 });

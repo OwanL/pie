@@ -1,0 +1,230 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-09-10T02:16:05.814Z",
+  "matrix": {
+    "fixtureSeed": "analytics-p0-v1",
+    "facts": {
+      "rows": 10000,
+      "producerHosts": [
+        1,
+        2,
+        4
+      ],
+      "measuredHosts": 4,
+      "modelsProviders": 12
+    },
+    "detail": {
+      "total": 1000,
+      "sizes": {
+        "2KiB": 950,
+        "32KiB": 49,
+        "2MiB": 1
+      },
+      "nestedDepth": 2
+    },
+    "load": [
+      "10k finite burst",
+      "four concurrent producer helpers"
+    ],
+    "reads": [
+      "single-session indexed count",
+      "all-history provider projection x10",
+      "small/2MiB detail reconstruction"
+    ],
+    "lifecycle": [
+      "clean helper restart x3",
+      "private delete racing late detail from another helper"
+    ],
+    "bounds": {
+      "minUnusedDiskBytes": 21474836480,
+      "maxTemporaryBytes": 17179869184,
+      "maxQueueBytes": 67108864
+    },
+    "intentionallyNotClaimed": [
+      "1M rows",
+      "10M rows",
+      "10k-sample sustained 50 fact/s",
+      "five-minute light load",
+      "UI baseline",
+      "query cancellation"
+    ]
+  },
+  "environment": {
+    "platform": "win32-x64",
+    "node": "v24.16.0",
+    "cpu": "AMD Ryzen 9 6900HX with Radeon Graphics        ",
+    "logicalCpus": 16,
+    "totalMemoryBytes": 16387297280,
+    "initialFreeBytes": 859220398080,
+    "sqlite": "node:sqlite bundled with Node"
+  },
+  "results": {
+    "disabledIngress": {
+      "enabled": false,
+      "workerStarted": false,
+      "backlog": {
+        "queuedRecords": 0,
+        "queuedBytes": 0,
+        "inFlightRecords": 0,
+        "inFlightBytes": 0,
+        "peakRecords": 0,
+        "peakBytes": 0,
+        "rejectedRecords": 0,
+        "deliveryFailures": 0
+      }
+    },
+    "delayedAcknowledgement": {
+      "handoffMs": 0.2265000000000157,
+      "simulatedAgentCompletionMs": 2.3374000000000024,
+      "delayedFlushMs": 338.49340000000007
+    },
+    "helperRestart": {
+      "samples": 3,
+      "p50Ms": 109.1626,
+      "p95Ms": 132.52839999999992,
+      "p99Ms": 132.52839999999992,
+      "maxMs": 132.52839999999992
+    },
+    "factHandoff": {
+      "samples": 10000,
+      "p50Ms": 0.0011000000001786248,
+      "p95Ms": 0.003400000000056025,
+      "p99Ms": 0.009400000000141517,
+      "maxMs": 0.453499999999849
+    },
+    "factDrain": {
+      "rows": 10000,
+      "flushMs": 1642.1033,
+      "rowsPerSecond": 6089.750870118829,
+      "backlog": [
+        {
+          "queuedRecords": 0,
+          "queuedBytes": 0,
+          "inFlightRecords": 0,
+          "inFlightBytes": 0,
+          "peakRecords": 2437,
+          "peakBytes": 2495488,
+          "rejectedRecords": 0,
+          "deliveryFailures": 0
+        },
+        {
+          "queuedRecords": 0,
+          "queuedBytes": 0,
+          "inFlightRecords": 0,
+          "inFlightBytes": 0,
+          "peakRecords": 2500,
+          "peakBytes": 2560000,
+          "rejectedRecords": 0,
+          "deliveryFailures": 0
+        },
+        {
+          "queuedRecords": 0,
+          "queuedBytes": 0,
+          "inFlightRecords": 0,
+          "inFlightBytes": 0,
+          "peakRecords": 2500,
+          "peakBytes": 2560000,
+          "rejectedRecords": 0,
+          "deliveryFailures": 0
+        },
+        {
+          "queuedRecords": 0,
+          "queuedBytes": 0,
+          "inFlightRecords": 0,
+          "inFlightBytes": 0,
+          "peakRecords": 2125,
+          "peakBytes": 2176000,
+          "rejectedRecords": 0,
+          "deliveryFailures": 0
+        }
+      ]
+    },
+    "memory": {
+      "producerRssBefore": 50704384,
+      "producerRssPeak": 79118336,
+      "producerRssGrowthBytes": 28413952,
+      "workerRssBytes": [
+        56283136,
+        56135680,
+        56012800,
+        55222272
+      ],
+      "totalWorkerRssBytes": 223653888
+    },
+    "detailHandoff": {
+      "2KiB": {
+        "samples": 950,
+        "p50Ms": 0.006399999999757711,
+        "p95Ms": 0.04169999999976426,
+        "p99Ms": 0.07979999999997744,
+        "maxMs": 0.19090000000005602
+      },
+      "32KiB": {
+        "samples": 49,
+        "p50Ms": 0.04010000000016589,
+        "p95Ms": 0.0911999999998443,
+        "p99Ms": 0.17790000000013606,
+        "maxMs": 0.17790000000013606
+      },
+      "2MiB": {
+        "samples": 1,
+        "p50Ms": 0.9566000000004351,
+        "p95Ms": 0.9566000000004351,
+        "p99Ms": 0.9566000000004351,
+        "maxMs": 0.9566000000004351
+      }
+    },
+    "detailDrain": {
+      "flushMs": 2818.0328,
+      "peakDetailBacklog": {
+        "queuedRecords": 0,
+        "queuedBytes": 0,
+        "inFlightRecords": 0,
+        "inFlightBytes": 0,
+        "peakRecords": 989,
+        "peakBytes": 8058327,
+        "rejectedRecords": 0,
+        "deliveryFailures": 0
+      },
+      "storage": {
+        "payloadCount": 1003,
+        "contentCount": 9,
+        "logicalBytes": 10117903,
+        "storedContentBytes": 3311657
+      }
+    },
+    "queries": {
+      "allHistoryProjection": {
+        "samples": 10,
+        "p50Ms": 74.97190000000046,
+        "p95Ms": 84.72229999999945,
+        "p99Ms": 84.72229999999945,
+        "maxMs": 84.72229999999945
+      },
+      "indexedSessionMs": 0.19800000000032014,
+      "twoMiBDetailMs": 4.253600000000006
+    },
+    "capacity": {
+      "queuedRecords": 0,
+      "queuedBytes": 0,
+      "inFlightRecords": 0,
+      "inFlightBytes": 0,
+      "peakRecords": 0,
+      "peakBytes": 0,
+      "rejectedRecords": 1,
+      "deliveryFailures": 0
+    },
+    "privateDeleteRace": {
+      "outcomes": [
+        "fulfilled",
+        "fulfilled"
+      ],
+      "lateDeliveryFailures": 2,
+      "lateDeliveryError": "Analytics capture subject is deleted: private-race-root",
+      "finalFactCount": 0,
+      "finalDetailCount": 0
+    },
+    "physicalBytes": 27664384
+  },
+  "cleanup": true
+}

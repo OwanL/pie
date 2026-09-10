@@ -49,6 +49,7 @@ import { inflightSemaphore, type Release } from "./src/concurrency-limit.js";
 import { globalOrphanRegistry, type OrphanCleanupRegistry } from "./src/cleanup.js";
 import type { RetryClock } from "./src/retry.js";
 import { isRuntimeTraceEnabled, recordRuntimeTrace } from "./src/runtime-trace.js";
+import type { SubagentAnalyticsCaptureContext } from "./src/analytics-capture.js";
 
 type SubagentSkillsOverride = (base: { skills: Skill[]; diagnostics: ResourceDiagnostic[] }) => { skills: Skill[]; diagnostics: ResourceDiagnostic[] };
 
@@ -224,6 +225,9 @@ export interface SubagentRuntimeContext {
 	processPermitScope?: ProcessPermitScope;
 	/** Immutable producer lineage of the currently executing ancestor attempt. */
 	lineage?: SubagentChildIdentity[];
+	/** Optional Pie-owned rich-detail transport. Absent outside the disabled-by-
+	 * default analytics prototype and inherited unchanged by nested attempts. */
+	analyticsCapture?: SubagentAnalyticsCaptureContext;
 }
 
 // Pi loads every AgentSession's extensions through a fresh jiti instance with
