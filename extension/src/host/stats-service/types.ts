@@ -65,7 +65,25 @@ export interface RunObserver {
     sessionPath: string,
     sessionId: string | undefined,
     snapshot: SessionUsageSnapshot,
+    selectionId?: string,
+    selectionObservedAt?: number,
   ): void;
+  onBranchObserved?(
+    sessionPath: string,
+    entryId: string,
+    parentEntryId: string | null | undefined,
+    selectedEntryId: string,
+    observedAt: number,
+  ): void;
+  onSessionDuplicated?(input: {
+    destinationPath: string;
+    destinationSessionId: string;
+    sourcePath: string;
+    sourceSessionId: string;
+    sourceBranchId?: string;
+    operationId: string;
+    observedAt: number;
+  }): void;
   onToolStarted(sessionPath: string, toolCall: ToolCall): void;
   onToolFinished(sessionPath: string, toolCall: ToolCall): void;
   onInterrupted(sessionPath: string): void;
@@ -114,6 +132,8 @@ export const NOOP_RUN_OBSERVER: RunObserver = {
   onAssistantTurnEnded: () => undefined,
   onAssistantTerminalWatermark: () => undefined,
   onSessionUsageSnapshot: () => undefined,
+  onBranchObserved: () => undefined,
+  onSessionDuplicated: () => undefined,
   onToolStarted: () => undefined,
   onToolFinished: () => undefined,
   onInterrupted: () => undefined,

@@ -330,8 +330,14 @@ export interface AnalyticsBranchFields {
 
 export interface AnalyticsCopyFields {
   copySessionId: string;
-  sourceSessionId: string;
-  inheritedInvocationIds?: string[];
+  /** Present only while the source facts remain available. Private source
+   * scrubbing removes this identity and leaves a destination-scoped coverage
+   * tombstone instead of presenting inherited usage as known zero. */
+  sourceSessionId?: string | null;
+  sourceBranchId?: string | null;
+  operationId: string;
+  inheritanceCoverage: 'known' | 'unknown';
+  inheritanceUnavailableReason?: 'source_scrubbed' | null;
 }
 
 /** Default heterogeneous payload boundary. Concrete producers may supply a

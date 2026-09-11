@@ -668,6 +668,9 @@ export function handleDuplicateSession(state: ArchState, cmd: Extract<Command, {
             parentOperationId: cmd.causalParentOperationId,
             backendGeneration,
             attempt: cmd.operationAttempt ?? 1,
+            // For duplicate operations these fields identify the source
+            // snapshot. The destination identity arrives only at commit.
+            ...operationIdentityForSession(state, sourceSessionPath, backendGeneration),
           }),
         }
       : state.operations,

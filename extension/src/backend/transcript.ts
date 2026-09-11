@@ -99,6 +99,8 @@ interface SessionInfoLike {
 
 export interface SessionEntryLike {
   id: string;
+  /** Exact SDK ancestry. Older adapters may omit it; null is the root. */
+  parentId?: string | null;
   timestamp: string;
   type: string;
   summary?: string;

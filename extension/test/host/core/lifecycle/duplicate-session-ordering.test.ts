@@ -95,13 +95,19 @@ test('duplicateSession mints the selection token before the reducer activates th
 
 test('a hidden timed-out duplicate accepts event-before-ack success without reopening', () => {
   const OLD = '/workspace/old-hidden-duplicate.jsonl';
+  const duplicateCaptures: unknown[] = [];
+  const runObserver = { ...NOOP_RUN_OBSERVER, onSessionDuplicated: (input: unknown) => duplicateCaptures.push(input) };
   let archState: ArchState = {
     ...createInitialArchState(),
     sessions: {
       ...createInitialArchState().sessions,
-      sessions: [{ path: OLD, name: 'Old', cwd: '/w', modifiedAt: '2024-01-01T00:00:00.000Z', messageCount: 1 }],
+      sessions: [{ path: OLD, name: 'Old', cwd: '/w', modifiedAt: '2024-01-01T00:00:00.000Z', messageCount: 1, sessionId: 'source-root' }],
       openTabPaths: [OLD],
       activeSessionPath: OLD,
+    },
+    transcript: {
+      ...createInitialArchState().transcript,
+      sessionUsageBySession: { [OLD]: { samples: [], branchId: 'source-entry-B' } },
     },
   };
   const context = createExtensionContext();
@@ -129,7 +135,7 @@ test('a hidden timed-out duplicate accepts event-before-ack success without reop
   const tabs = new SessionTabActions({
     context,
     scheduleRender: () => undefined,
-    runObserver: NOOP_RUN_OBSERVER,
+    runObserver,
     state,
     getArchState,
     dispatchArch,
@@ -144,15 +150,16 @@ test('a hidden timed-out duplicate accepts event-before-ack success without reop
   const payload: SessionOpenedPayload = {
     operationId,
     selectionToken,
-    session: { path: resolvedPath, name: 'Old (copy)', cwd: '/w', modifiedAt: '2026-01-01T00:00:00.000Z', messageCount: 1 },
+    session: { path: resolvedPath, name: 'Old (copy)', cwd: '/w', modifiedAt: '2026-01-01T00:00:00.000Z', messageCount: 1, sessionId: 'copy-root' },
     transcript: [],
     transcriptWindow: { totalCount: 0, loadedStart: 0, loadedEnd: 0, hasOlder: false, hasNewer: false, isPartial: false, hasUserMessages: false },
     busy: false,
+    sessionUsage: { samples: [], branchId: 'copy-entry-B' },
   };
   applySessionOpenedPayload(payload, {
     getArchState,
     dispatchArch,
-    runObserver: NOOP_RUN_OBSERVER,
+    runObserver,
     scheduleRender: () => undefined,
     context,
     state,
@@ -164,6 +171,94 @@ test('a hidden timed-out duplicate accepts event-before-ack success without reop
   assert.equal(archState.sessions.openTabPaths.includes(resolvedPath), false);
   assert.equal(archState.sessions.activeSessionPath, OLD);
   assert.equal(effects.filter((effect: any) => effect.kind === 'DrainPendingSendQueue').length, 0);
+  assert.deepEqual(duplicateCaptures, [{
+    destinationPath: resolvedPath,
+    destinationSessionId: 'copy-root',
+    sourcePath: OLD,
+    sourceSessionId: 'source-root',
+    sourceBranchId: 'source-entry-B',
+    operationId,
+    observedAt: Date.parse('2026-01-01T00:00:00.000Z'),
+  }]);
+});
+
+test('duplicate inheritance is captured when the RPC acknowledgement precedes session.opened', () => {
+  const sourcePath = '/workspace/source-before-opened.jsonl';
+  const captures: unknown[] = [];
+  const runObserver = { ...NOOP_RUN_OBSERVER, onSessionDuplicated: (input: unknown) => captures.push(input) };
+  let archState: ArchState = {
+    ...createInitialArchState(),
+    sessions: {
+      ...createInitialArchState().sessions,
+      sessions: [{
+        path: sourcePath, name: 'Source', cwd: '/w', modifiedAt: '2024-01-01T00:00:00.000Z',
+        messageCount: 2, sessionId: 'source-before-root',
+      }],
+      openTabPaths: [sourcePath],
+      activeSessionPath: sourcePath,
+    },
+    transcript: {
+      ...createInitialArchState().transcript,
+      sessionUsageBySession: { [sourcePath]: { samples: [], branchId: 'source-before-B' } },
+    },
+  };
+  const context = createExtensionContext();
+  const getArchState = () => archState;
+  let operationId: string | undefined;
+  let selectionToken: string | undefined;
+  const dispatchArch = (event: Event): void => {
+    if (event.kind === 'Command' && event.cmd.kind === 'DuplicateSession') {
+      operationId = event.cmd.operationId;
+      selectionToken = event.cmd.selectionToken;
+    }
+    archState = reducer(archState, event).state;
+  };
+  const state = new SessionServiceState(
+    context,
+    { request: async () => ({}) } as any,
+    () => undefined,
+    getArchState,
+    dispatchArch,
+    0,
+  );
+  const tabs = new SessionTabActions({
+    context, scheduleRender: () => undefined, runObserver, state, getArchState, dispatchArch,
+  });
+  tabs.duplicateSession(sourcePath);
+  const pendingPath = archState.sessions.activeSessionPath!;
+  const destinationPath = '/workspace/copy-before-opened.jsonl';
+  assert.equal(state.handleCreateOperationAcknowledged(
+    selectionToken!, operationId!, destinationPath,
+  ), pendingPath);
+  assert.equal(archState.operations[operationId!]?.terminal?.outcome, 'settled');
+
+  applySessionOpenedPayload({
+    operationId,
+    selectionToken,
+    session: {
+      path: destinationPath, name: 'Copy', cwd: '/w', modifiedAt: '2026-01-02T00:00:00.000Z',
+      messageCount: 2, sessionId: 'copy-before-root',
+    },
+    transcript: [],
+    transcriptWindow: {
+      totalCount: 0, loadedStart: 0, loadedEnd: 0,
+      hasOlder: false, hasNewer: false, isPartial: false, hasUserMessages: false,
+    },
+    busy: false,
+    sessionUsage: { samples: [], branchId: 'copy-before-B' },
+  }, {
+    getArchState, dispatchArch, runObserver, scheduleRender: () => undefined, context, state,
+  });
+
+  assert.deepEqual(captures, [{
+    destinationPath,
+    destinationSessionId: 'copy-before-root',
+    sourcePath,
+    sourceSessionId: 'source-before-root',
+    sourceBranchId: 'source-before-B',
+    operationId,
+    observedAt: Date.parse('2026-01-02T00:00:00.000Z'),
+  }]);
 });
 
 test('duplicateSession → backend session.duplicate rejection → handleSelectionFailure restores the pre-duplicate state (e2e through the EffectRunner)', async () => {

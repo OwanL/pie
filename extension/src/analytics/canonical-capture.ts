@@ -5,6 +5,8 @@ import {
   ANALYTICS_SCHEMA_VERSION,
   deriveAnalyticsIdempotencyKey,
   type AnalyticsActivitySpanFields,
+  type AnalyticsBranchFields,
+  type AnalyticsCopyFields,
   type AnalyticsDetailSink,
   type AnalyticsEntityKind,
   type AnalyticsExecutionFields,
@@ -122,6 +124,15 @@ export class CanonicalAnalyticsCapture {
     return this.sequenceBySourceKey.size;
   }
 
+  scopedBranchId(context: AnalyticsSessionContext, sourceEntryId: string): string {
+    const sessionIdentity = context.sessionId?.trim()
+      || analyticsPendingOperationId(context.operationId, context.sessionPath);
+    return `branch:${createHash('sha256').update(JSON.stringify([
+      sessionIdentity,
+      sourceEntryId,
+    ])).digest('hex')}`;
+  }
+
   async bindPendingCreate(
     sessionPath: string,
     rootSessionId: string,
@@ -205,6 +216,9 @@ export class CanonicalAnalyticsCapture {
         },
       }),
     };
+    const branchId = record.branchId
+      ? this.scopedBranchId(context, record.branchId)
+      : undefined;
     return this.submit(
       context,
       'providerCall',
@@ -213,7 +227,87 @@ export class CanonicalAnalyticsCapture {
       `provider-settlement:${record.invocationId}`,
       timestamp(record.endedAt, Date.now()),
       fields,
-      { invocationId: record.invocationId, toolCallId: record.parentToolId ?? undefined },
+      {
+        invocationId: record.invocationId,
+        toolCallId: record.parentToolId ?? undefined,
+        ...(branchId ? { branchId } : {}),
+      },
+    );
+  }
+
+  captureBranchEdge(
+    context: AnalyticsSessionContext,
+    sourceEntryId: string,
+    parentSourceEntryId: string | null | undefined,
+    observedAtMs: number,
+    evidence: 'durable' | 'snapshot' = 'durable',
+  ): AnalyticsCaptureStatus {
+    const branchId = this.scopedBranchId(context, sourceEntryId);
+    const parentBranchId = parentSourceEntryId === undefined
+      ? undefined
+      : parentSourceEntryId === null
+        ? null
+        : this.scopedBranchId(context, parentSourceEntryId);
+    const fields: AnalyticsBranchFields = {
+      branchId,
+      ...(parentBranchId !== undefined ? { parentBranchId } : {}),
+      sourceEntryId,
+    };
+    return this.submit(
+      context,
+      'branch',
+      branchId,
+      'observation',
+      `branch-edge:${evidence}:${branchId}`,
+      observedAtMs,
+      fields,
+      { branchId },
+    );
+  }
+
+  captureBranchSelection(
+    context: AnalyticsSessionContext,
+    sourceEntryId: string,
+    sourceSelectionId: string,
+    observedAtMs: number,
+  ): AnalyticsCaptureStatus {
+    const branchId = this.scopedBranchId(context, sourceEntryId);
+    const fields: AnalyticsBranchFields = { branchId, sourceSelectionId, sourceEntryId };
+    return this.submit(
+      context,
+      'branch',
+      branchId,
+      'phase',
+      `branch-selection:${sourceSelectionId}`,
+      observedAtMs,
+      fields,
+      { branchId },
+    );
+  }
+
+  captureCopy(
+    destination: AnalyticsSessionContext,
+    source: AnalyticsSessionContext,
+    sourceEntryId: string | undefined,
+    operationId: string,
+    observedAtMs: number,
+  ): AnalyticsCaptureStatus {
+    if (!destination.sessionId?.trim() || !source.sessionId?.trim()) return 'rejected';
+    const fields: AnalyticsCopyFields = {
+      copySessionId: destination.sessionId.trim(),
+      sourceSessionId: source.sessionId.trim(),
+      sourceBranchId: sourceEntryId ? this.scopedBranchId(source, sourceEntryId) : null,
+      operationId,
+      inheritanceCoverage: sourceEntryId ? 'known' : 'unknown',
+    };
+    return this.submit(
+      destination,
+      'copy',
+      destination.sessionId.trim(),
+      'observation',
+      `session-copy:${operationId}`,
+      observedAtMs,
+      fields,
     );
   }
 

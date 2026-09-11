@@ -16,6 +16,14 @@ export type AnalyticsQueryRequest =
   | { type: 'storage'; maxResultBytes?: number }
   // Compatibility commands for the in-tree accounting adapters.
   | { type: 'providerSettlements'; rootSessionId?: string; limit?: number; maxResultBytes?: number }
+  | {
+      type: 'scopedProviderSettlements';
+      scope: import('./sqlite-recorder.js').ProviderSettlementScope;
+      limit?: number;
+      offset?: number;
+      expectedRevision?: number | string;
+      maxResultBytes?: number;
+    }
   | { type: 'providerAccounting'; rootSessionId?: string; maxResultBytes?: number }
   | { type: 'historicalDimensions'; maxResultBytes?: number }
   | { type: 'qualificationSpin'; iterations?: number; maxResultBytes?: number };

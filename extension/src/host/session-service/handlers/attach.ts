@@ -88,7 +88,33 @@ export function applySessionOpenedPayload(
       session.path,
       session.identityFallback === true ? undefined : session.sessionId?.trim() || undefined,
       payload.sessionUsage,
+      payload.operationId ?? selectionToken
+        ?? `snapshot:${session.sessionId ?? 'unknown'}:${payload.sessionUsage.branchId ?? 'unknown'}:${session.modifiedAt}`,
+      Number.isFinite(Date.parse(session.modifiedAt)) ? Date.parse(session.modifiedAt) : 0,
     );
+  }
+
+  const duplicateOperation = !flags.createResolution?.rejected
+    && (flags.createResolution?.fresh || flags.createResolution?.duplicate)
+    && flags.createResolution.operation.kind === 'session.duplicate'
+    ? flags.createResolution.operation
+    : undefined;
+  const destinationSessionId = session.identityFallback === true
+    ? undefined
+    : session.sessionId?.trim() || undefined;
+  if (duplicateOperation?.session.sourcePath
+    && duplicateOperation.session.sessionId
+    && destinationSessionId) {
+    const modifiedAt = Date.parse(session.modifiedAt);
+    deps.runObserver.onSessionDuplicated?.({
+      destinationPath: session.path,
+      destinationSessionId,
+      sourcePath: duplicateOperation.session.sourcePath,
+      sourceSessionId: duplicateOperation.session.sessionId,
+      sourceBranchId: duplicateOperation.session.branchId,
+      operationId: duplicateOperation.operationId,
+      observedAt: Number.isFinite(modifiedAt) ? modifiedAt : 0,
+    });
   }
 
   applyPostDispatchState(deps, payload, session.path, flags, transcriptResolution.transcript);

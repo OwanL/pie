@@ -624,6 +624,26 @@ function liveExecutionId(context: SessionContext, toolCallId: string): string {
   return `${attemptId ?? 'unknown'}:${toolCallId}`;
 }
 
+function emitDurableBranchObservation(
+  deps: BackendSessionEventHandlerDeps,
+  context: SessionContext,
+  entryId: string,
+): void {
+  const entry = context.session.sessionManager?.getEntry?.(entryId);
+  if (!entry) return;
+  const observedAt = Date.parse(entry.timestamp);
+  if (!Number.isFinite(observedAt)) return;
+  deps.emit('analytics.branch', {
+    sessionPath: context.sessionPath,
+    entryId,
+    ...(entry.parentId === null || typeof entry.parentId === 'string'
+      ? { parentEntryId: entry.parentId }
+      : {}),
+    selectedEntryId: entryId,
+    observedAt,
+  });
+}
+
 /** Close the live reply that precedes an injected queued user message, then
  * allocate a fresh semantic owner for the assistant output that follows it.
  * The SDK keeps both segments inside one agent run, but the transcript has a
@@ -1133,6 +1153,10 @@ function handleContentToolSessionEvent(
 
       if (event.message.role === 'assistant') {
         context.activeRequest.mayNeedOverflowRecovery = mayNeedOverflowRecovery(context, event.message);
+      }
+
+      if (event.sessionEntryId) {
+        emitDurableBranchObservation(deps, context, event.sessionEntryId);
       }
 
       // SDK adapters can replay a durable assistant boundary after the first

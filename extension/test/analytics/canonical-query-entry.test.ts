@@ -98,7 +98,7 @@ function tempRoot(): string {
 }
 
 function assertSnapshotMetadata(result: AnalyticsQuerySnapshotMetadata): void {
-  assert.equal(result.databaseSchemaVersion, 3);
+  assert.equal(result.databaseSchemaVersion, 4);
   assert.equal(typeof result.projectionRevision === 'number' || typeof result.projectionRevision === 'string', true);
   assert.equal(typeof result.snapshotWatermark === 'number' || typeof result.snapshotWatermark === 'string', true);
   assert.equal(result.generationIds.length > 0, true);
@@ -212,7 +212,7 @@ test('canonical read model serves schema, bounded queries, settlements, accounti
   const query = await readModel.executeQuery({
     sql: 'SELECT invocation_id, provider, effective_cost_usd FROM analytics_provider_usage_v1 ORDER BY invocation_id',
   });
-  assert.equal(query.databaseSchemaVersion, 3);
+  assert.equal(query.databaseSchemaVersion, 4);
   assertSnapshotMetadata(query);
   assert.equal(query.returnedRows, 4);
   assert.deepEqual(query.truncation, { rowLimit: false, byteLimit: false, cellLimit: false });
@@ -276,6 +276,14 @@ test('canonical read model serves schema, bounded queries, settlements, accounti
   assert.throws(() => readModel.readProviderAccountingSummary('   '));
   assert.throws(() => readModel.readProviderAccountingSummary('a\0b'));
   assert.throws(() => readModel.readDetail({ payloadId: '' }));
+  await assert.rejects(
+    Reflect.apply(readModel.readScopedProviderSettlements, readModel, [{
+      kind: 'unexpected',
+      generationId: 'generation-1',
+      copySessionId: 'root-a',
+    }]),
+    /Unsupported provider settlement scope kind/u,
+  );
 
   const aborted = new AbortController();
   aborted.abort();

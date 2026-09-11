@@ -49,6 +49,13 @@ process.on('message', (raw: unknown) => {
     } else if (message.type === 'providerSettlements') {
       const limit = boundedInteger(message.limit, DEFAULT_ROW_LIMIT, MAX_ROW_LIMIT);
       result = recorder.readProviderSettlements(message.rootSessionId, limit);
+    } else if (message.type === 'scopedProviderSettlements') {
+      const limit = boundedInteger(message.limit, DEFAULT_ROW_LIMIT, MAX_ROW_LIMIT);
+      result = recorder.readScopedProviderSettlements(message.scope, {
+        limit,
+        offset: message.offset,
+        expectedRevision: message.expectedRevision,
+      });
     } else if (message.type === 'providerAccounting') {
       result = recorder.readProviderAccountingSummary(message.rootSessionId);
     } else if (message.type === 'historicalDimensions') {

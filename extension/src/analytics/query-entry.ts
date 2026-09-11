@@ -6,7 +6,9 @@ import type {
   AnalyticsStorageReadModel,
   HistoricalDimensionSummary,
   ProviderAccountingSummary,
+  ProviderSettlementScope,
   ProviderSettlementReadModel,
+  ScopedProviderSettlementReadModel,
 } from './sqlite-recorder.js';
 
 /**
@@ -238,6 +240,23 @@ export class CanonicalAnalyticsReadModel {
       rootSessionId: request.rootSessionId,
       limit: request.limit ?? this.maxRows,
       maxResultBytes: request.maxResultBytes ?? this.maxResultBytes,
+    }, signal);
+  }
+
+  /** Accounting-only branch/copy view. Inherited rows remain references to
+   * original invocation identities and carry explicit coverage. */
+  readScopedProviderSettlements(
+    scope: ProviderSettlementScope,
+    page: { limit?: number; offset?: number; expectedRevision?: number | string } = {},
+    signal?: AbortSignal,
+  ): Promise<ScopedProviderSettlementReadModel> {
+    return this.client.query<ScopedProviderSettlementReadModel>({
+      type: 'scopedProviderSettlements',
+      scope,
+      limit: page.limit ?? this.maxRows,
+      offset: page.offset,
+      expectedRevision: page.expectedRevision,
+      maxResultBytes: this.maxResultBytes,
     }, signal);
   }
 

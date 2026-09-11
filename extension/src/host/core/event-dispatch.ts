@@ -1,5 +1,6 @@
 import type {
   AgentSettledPayload,
+  AnalyticsBranchObservedPayload,
   AuxiliaryLlmUsagePayload,
   BusyChangedPayload,
   CompactionPayload,
@@ -29,6 +30,7 @@ import type {
 } from '../../shared/protocol';
 import {
   isAgentSettledPayload,
+  isAnalyticsBranchObservedPayload,
   isAuxiliaryLlmUsagePayload,
   isBusyChangedPayload,
   isCompactionPayload,
@@ -83,6 +85,7 @@ export interface SessionBackendEventHandlers {
   onCompactionStarted(payload: CompactionStartedPayload): void;
   onCompaction(payload: CompactionPayload): void;
   onAuxiliaryLlmUsage(payload: AuxiliaryLlmUsagePayload): void;
+  onAnalyticsBranchObserved(payload: AnalyticsBranchObservedPayload): void;
   onOperationalError(payload: OperationalErrorPayload): void;
   onAgentSettled?(payload: AgentSettledPayload): void;
   onBusyChanged(payload: BusyChangedPayload): void;
@@ -188,6 +191,9 @@ export function dispatchSessionBackendEvent(
       return;
     case 'auxiliary-llm.usage':
       dispatch(event, isAuxiliaryLlmUsagePayload, handlers.onAuxiliaryLlmUsage);
+      return;
+    case 'analytics.branch':
+      dispatch(event, isAnalyticsBranchObservedPayload, handlers.onAnalyticsBranchObserved);
       return;
     case 'operational-error':
       dispatch(event, isOperationalErrorPayload, handlers.onOperationalError);

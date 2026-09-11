@@ -193,6 +193,13 @@ export class SessionServiceEvents {
       onCompaction: (payload) => onCompaction(payload, deps),
       onCompactionStarted: (payload) => onCompactionStarted(payload, deps),
       onAuxiliaryLlmUsage: (payload) => onAuxiliaryLlmUsage(payload, deps),
+      onAnalyticsBranchObserved: (payload) => this.runObserver.onBranchObserved?.(
+        payload.sessionPath,
+        payload.entryId,
+        payload.parentEntryId,
+        payload.selectedEntryId,
+        payload.observedAt,
+      ),
       onOperationalError: (payload) => onOperationalError(payload, deps),
       onAgentSettled: (payload) => {
         const sessionPath = this.requireEventSessionPath('agent.settled', payload.sessionPath);

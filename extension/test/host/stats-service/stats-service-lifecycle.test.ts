@@ -145,6 +145,92 @@ test('durable terminal evidence replays with an immutable canonical fingerprint'
   });
 });
 
+test('branch snapshot hydration submits each durable ancestry edge once across long-session refreshes', async () => {
+  await withTempDir(async (tempDir) => {
+    const observations: AnalyticsObservation<object>[] = [];
+    const capture = new CanonicalAnalyticsCapture({
+      authority: 'canonical',
+      generationId: 'generation-branch-cardinality',
+      workspaceId: 'workspace-branch-cardinality',
+      buildId: 'build-branch-cardinality',
+      processGeneration: 'process-branch-cardinality',
+      sink: { submit: (observation) => { observations.push(observation); } },
+      detailSink: { submitDetail: () => undefined },
+      lifecycleSink: {
+        bindPendingCreate: async () => undefined,
+        deleteSession: async () => undefined,
+      },
+    });
+    const sessionPath = '/sessions/long-branch.jsonl';
+    const stats = new StatsService({
+      ...optionsFor(
+        path.join(tempDir, 'analytics'),
+        tempDir,
+        createInitialArchState(),
+        { renders: 0 },
+      ),
+      analyticsCapture: capture,
+    });
+    const branchEntryIds = Array.from({ length: 10_000 }, (_, index) => `entry-${index}`);
+
+    stats.onSessionUsageSnapshot(
+      sessionPath,
+      'session-long-branch',
+      { samples: [], branchId: branchEntryIds.at(-1), branchEntryIds },
+      'snapshot-initial',
+      1_800_000_000_000,
+    );
+    const initialEdges = observations.filter((observation) => (
+      observation.entityKind === 'branch' && observation.observationKind === 'observation'
+    ));
+    assert.equal(initialEdges.length, branchEntryIds.length);
+
+    let unchangedEntryReads = 0;
+    const unchangedEntries = new Proxy(branchEntryIds, {
+      get(target, property, receiver) {
+        if (typeof property === 'string' && /^\d+$/.test(property)) unchangedEntryReads += 1;
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    stats.onSessionUsageSnapshot(
+      sessionPath,
+      'session-long-branch',
+      { samples: [], branchId: branchEntryIds.at(-1), branchEntryIds: unchangedEntries },
+      'snapshot-refresh',
+      1_800_000_001_000,
+    );
+    assert.equal(unchangedEntryReads, 0, 'an unchanged refresh must not scan branch entries');
+    assert.equal(observations.filter((observation) => (
+      observation.entityKind === 'branch' && observation.observationKind === 'observation'
+    )).length, branchEntryIds.length, 'an unchanged refresh must not resend ancestry');
+
+    const appendedEntryIds = [...branchEntryIds, 'entry-10000'];
+    let appendedEntryReads = 0;
+    const appendedEntries = new Proxy(appendedEntryIds, {
+      get(target, property, receiver) {
+        if (typeof property === 'string' && /^\d+$/.test(property)) appendedEntryReads += 1;
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    stats.onSessionUsageSnapshot(
+      sessionPath,
+      'session-long-branch',
+      { samples: [], branchId: appendedEntryIds.at(-1), branchEntryIds: appendedEntries },
+      'snapshot-appended',
+      1_800_000_002_000,
+    );
+    assert.ok(appendedEntryReads <= 6, `one appended edge read ${appendedEntryReads} ancestry entries`);
+    const finalEdges = observations.filter((observation) => (
+      observation.entityKind === 'branch' && observation.observationKind === 'observation'
+    ));
+    assert.equal(finalEdges.length, appendedEntryIds.length, 'only the appended edge is submitted');
+    const appendedEdge = finalEdges.at(-1);
+    assert.ok(appendedEdge);
+    assert.ok('sourceEntryId' in appendedEdge.fields);
+    assert.equal(appendedEdge.fields.sourceEntryId, 'entry-10000');
+  });
+});
+
 test('host replacement retains the exact pending-create origin through bind and private close', async () => {
   await withTempDir(async (tempDir) => {
     const state = createInitialArchState();

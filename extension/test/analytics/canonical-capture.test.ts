@@ -173,6 +173,42 @@ test('canonical producer replay tracking remains bounded and evicted redetection
   assert.equal(observations[0]!.stableOriginId, observations[3]!.stableOriginId);
 });
 
+test('branch and copy adapters scope SDK entry IDs and never persist session paths or copied settlements', () => {
+  const observations: AnalyticsObservation<object>[] = [];
+  const capture = new CanonicalAnalyticsCapture({
+    authority: 'canonical',
+    generationId: 'generation-branch-copy',
+    workspaceId: 'workspace-branch-copy',
+    buildId: 'build-branch-copy',
+    processGeneration: 'process-branch-copy',
+    sink: { submit: (observation) => { observations.push(observation); } },
+    detailSink: { submitDetail: () => undefined },
+    lifecycleSink: { bindPendingCreate: async () => undefined, deleteSession: async () => undefined },
+  });
+  const source = { sessionId: 'source-root', sessionPath: '/private/source.jsonl' };
+  const copy = { sessionId: 'copy-root', sessionPath: '/private/copy.jsonl' };
+  const sourceA = capture.scopedBranchId(source, 'entry-A');
+  const copyA = capture.scopedBranchId(copy, 'entry-A');
+  assert.notEqual(sourceA, copyA, 'copied raw SDK entry IDs are scoped to their owning root');
+
+  capture.captureBranchEdge(source, 'entry-A', null, 100);
+  capture.captureBranchEdge(source, 'entry-B', 'entry-A', 110);
+  capture.captureBranchSelection(source, 'entry-B', 'selection-B', 120);
+  capture.captureCopy(copy, source, 'entry-B', 'copy-operation', 130);
+  assert.deepEqual(observations.map((entry) => [entry.entityKind, entry.observationKind]), [
+    ['branch', 'observation'],
+    ['branch', 'observation'],
+    ['branch', 'phase'],
+    ['copy', 'observation'],
+  ]);
+  assert.equal(observations[1]?.scope.branchId, capture.scopedBranchId(source, 'entry-B'));
+  assert.equal((observations[1]?.fields as { parentBranchId?: string }).parentBranchId, sourceA);
+  assert.equal((observations[3]?.fields as { sourceBranchId?: string }).sourceBranchId,
+    capture.scopedBranchId(source, 'entry-B'));
+  assert.equal(observations.some((entry) => entry.entityKind === 'providerCall'), false);
+  assert.equal(JSON.stringify(observations).includes('/private/'), false);
+});
+
 test('canonical accounting seam is exclusive and never falls through to the legacy ledger', () => {
   const root = tempRoot();
   const observations: AnalyticsObservation<object>[] = [];
@@ -201,6 +237,7 @@ test('canonical accounting seam is exclusive and never falls through to the lega
       canonicalCapture: capture,
     });
 
+    accounting.observeBranchEntry('/session-exclusive.jsonl', 'entry-A', null, 'entry-A');
     accounting.observeAuxiliaryLlmUsage('/session-exclusive.jsonl', {
       sourceId: 'provider-response-a',
       kind: 'assistant_message',
@@ -210,6 +247,7 @@ test('canonical accounting seam is exclusive and never falls through to the lega
       outputTokens: 2,
       cacheReadTokens: 0,
       cacheWriteTokens: 0,
+      reportedCostUsd: 0.01,
       outcome: 'succeeded',
     });
 
@@ -217,6 +255,32 @@ test('canonical accounting seam is exclusive and never falls through to the lega
     assert.equal(observations[0]!.observationKind, 'providerSettlement');
     assert.equal('sourceId' in observations[0]!.fields ? observations[0]!.fields.sourceId : undefined,
       'provider-response-a');
+    assert.equal(observations[0]!.scope.branchId, capture.scopedBranchId({
+      sessionId: 'session-exclusive', sessionPath: '/session-exclusive.jsonl',
+      runId: 'run-exclusive', operationId: 'operation-exclusive',
+    }, 'entry-A'));
+    accounting.observeBranchEntry('/session-exclusive.jsonl', 'entry-B', 'entry-A', 'entry-B');
+    accounting.observeAuxiliaryLlmUsage('/session-exclusive.jsonl', {
+      sourceId: 'provider-response-b', kind: 'assistant_message',
+      occurredAt: '2026-09-10T00:00:02.000Z', inputTokens: 20, outputTokens: 2,
+      cacheReadTokens: 0, cacheWriteTokens: 0, reportedCostUsd: 0.02, outcome: 'succeeded',
+    });
+    accounting.observeBranchEntry('/session-exclusive.jsonl', 'entry-C', 'entry-A', 'entry-C');
+    accounting.observeAuxiliaryLlmUsage('/session-exclusive.jsonl', {
+      sourceId: 'provider-response-c', kind: 'assistant_message',
+      occurredAt: '2026-09-10T00:00:03.000Z', inputTokens: 30, outputTokens: 3,
+      cacheReadTokens: 0, cacheWriteTokens: 0, reportedCostUsd: 0.03, outcome: 'succeeded',
+    });
+    const selected = accounting.projectSessionUsage('/session-exclusive.jsonl');
+    assert.deepEqual(selected.samples.map((sample) => sample.sourceId), [
+      'provider-response-a', 'provider-response-c',
+    ]);
+    assert.equal(selected.samples.reduce((total, sample) => total + (sample.reportedCostUsd ?? 0), 0), 0.04);
+    assert.equal(observations.length, 3, 'A, B, and C remain globally captured exactly once');
+    assert.equal(observations.reduce((total, observation) => (
+      total + ('reportedCostUsd' in observation.fields
+        && typeof observation.fields.reportedCostUsd === 'number' ? observation.fields.reportedCostUsd : 0)
+    ), 0), 0.06);
     assert.deepEqual(accounting.exportRecords(), [], 'legacy JSONL remains empty in canonical mode');
   } finally {
     rmSync(root, { recursive: true, force: true });

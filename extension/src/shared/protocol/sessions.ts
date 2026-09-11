@@ -583,6 +583,16 @@ export interface AuxiliaryLlmUsagePayload {
   instrumentationGapReason?: string;
 }
 
+/** Durable SDK entry ancestry observed only after the entry was persisted.
+ * This is accounting metadata; it is not a transcript/UI payload. */
+export interface AnalyticsBranchObservedPayload {
+  sessionPath: string;
+  entryId: string;
+  parentEntryId?: string | null;
+  selectedEntryId: string;
+  observedAt: number;
+}
+
 /** Operational (non-fatal) backend condition that the user should be made
  *  aware of without it being a hard request failure. One remaining
  *  watchdog-originated condition is:

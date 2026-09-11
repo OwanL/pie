@@ -1520,3 +1520,83 @@ P0 remains unqualified pending the full scale/endurance/responsiveness matrix. F
 analytics writer/compatibility retirement and P7 recorder lifecycle, activation manifest,
 pre-dispatch/provider instrumentation, all-host cutoff, restart/restore and journaled handoff remain
 closed until their replacement gates are met.
+
+### Checkpoint 18: P4 branch/copy work in progress
+
+The preceding P4 terminal and P2c commits were pushed and independently verified: checkout `HEAD`,
+`origin/master` and the live remote master all matched `074b54dc09ede1a027a3d2e45d3d878ebcaeeaa6`.
+The next bounded P4 unit is implementing generation-fenced branch selection and duplicate-session
+inheritance by reference. Its intended arithmetic remains A=`.01`, B=`.02`, C=`.03`: selections
+A+B and A+C are `.03` and `.04`, root all-work is `.06`; a copy referencing A+B and owning D=`.04`
+is `.07`, while the combined distinct A+B+C+D fixture is `.10`. No provider settlement is copied.
+Private deletion of a source removes its identity from retained copy relations and leaves only a
+destination-owned unknown/incomplete inheritance tombstone; deleting a destination does not delete
+the source facts.
+
+This candidate is not yet accepted. Earlier focused coverage reached 155 passing tests, and the
+current shared/extension typechecks reached a clean extension compile in log 60. Independent review
+then found five material integration gaps: durable events and repeated snapshots still performed
+history-length scans; delayed older selections could replace a newer leaf; the new scoped row result
+was unbounded and lacked explicit truncation; ACK-before-`session.opened` ordering could omit the copy
+relation; and the live selected projection retained an append-only union after a branch switch. A
+suggested merge across analytics generations was explicitly withdrawn after confirming that
+analytics generation is an activation fence and process generation is the restart dimension.
+
+The fixes are in progress at this checkpoint. Durable lookup now uses the pinned SDK's indexed
+`getEntry` seam; host accounting and canonical hydration maintain leaf/depth cursors so unchanged
+refreshes avoid ancestry traversal and appends inspect only their suffix. Live branch membership is
+rebuilt through exact parent links. Current selection records producer time and a deterministic tie
+break, while remaining partitioned by analytics generation. Scoped settlement pages use bounded SQL,
+explicit complete/truncated coverage, an offset and an expected-revision retry fence. Copy relations
+are generation-scoped, and both event-before-ACK and ACK-before-event are intended to converge through
+the stable operation ID. The first diagnostic after these changes (log 61) passed 93/96; its three
+failures were narrowed to a typed backend fixture, the documented ACK method return value, and a
+second snapshot scan in live accounting. Those corrections are awaiting the next targeted rerun.
+The genuine v2/v3 migration fixture passed 3/3 and preserves historical rows with null branch
+identity and unknown selected coverage while creating the additive v4 tables.
+
+Separately, the bounded P0 baseline/scale harness received independent source review and two repairs:
+it now expects the current v4 recorder schema, and every post-scratch-root initialization failure is
+inside a cleanup/final-report boundary. Validation-only log 59 passed and wrote
+`C:\dev\scratch\pie-p0-validation-20260911-7c91e4a2\baseline-validation.json`; it created no helper,
+database or proof root and truthfully left overall P0 unqualified. Baseline and scale workloads remain
+held until this P4 source freezes and a fresh validation-only build is available.
+
+No runtime or renderer publication, activation, cutover, restart, session close, helper arming, cache
+switch or live data mutation has occurred. The four user-owned model/settings files and `stash@{0}`
+remain preserved. Later P4 still owns cross-host revision refresh; P7 still owns live sink/ack wiring,
+the canonical parent-tool resolver, pre-dispatch/provider instrumentation and all activation/cutover
+controls. P6 compatibility readers and legacy writers remain until those replacement gates pass.
+
+The branch/copy candidate subsequently closed all five review findings. Indexed durable-entry lookup
+and two prefix-safe cursors make an unchanged 10,000-entry refresh perform zero entry reads; one append
+uses constant work and emits one edge. Current selection uses producer time plus a stable registry-key
+tie break: reverse delivery at the same timestamp selects the same leaf after reopen, while a process
+restart within the same analytics generation retains selection and a distinct activation generation
+remains isolated. Scoped global/root/branch/copy rows use bounded `LIMIT + 1` pages with explicit
+coverage, next offset and expected-revision fencing; unknown scope discriminators and blank/NUL scope
+identities fail closed rather than falling through to another scope. The copy lifecycle now converges
+for both event-before-ACK and ACK-before-event ordering, and live accounting replaces selected ancestry
+through exact parent edges instead of retaining abandoned-branch membership. The final cursor run
+passed 6/6, the query-worker and equal-time ordering run passed 4/4, and shared plus extension scoped
+typechecks passed. Independent review accepted the five repairs, additive v2/v3-to-v4 migration,
+generation fencing, privacy tombstones and exact inherited-invocation projection.
+
+The serialized combined barrier passed before workload execution: `git diff --check` and lint returned
+zero; all 17 typecheck projects passed; the full suite passed 6,587 tests with zero failures and 29
+skips; and `npm run extension:build:validate` selected `--no-sync` and produced coordinated host/webview
+identity `895dea41901f9e59ca2c`. Before/after snapshots of status, `HEAD`, `stash@{0}`, the four protected
+user files and all three lockfiles were identical.
+
+P0 validation-only evidence at
+`C:\dev\scratch\pie-p0-validation-20260911-7c91e4a2\baseline-validation.json` also passed after the
+harness made `--seed` explicit; it created no helper, database or proof root and remained unqualified.
+The first actual 10,000-row baseline attempt at
+`C:\dev\scratch\pie-p0-baseline-20260911-r03\baseline.json` did not qualify: it failed during the
+one-host 1,000-facts/second burst with a visible SQLite `database is locked` error. Cleanup reported two
+recorder workers still not accepting commands and retained the failed proof root. A bounded parent-first
+teardown then stopped both identified descendants; no matching descendants remained, and the failed
+report/proof root stayed available for diagnosis. Post-failure snapshot 78 matched pre-run snapshot 76
+for status, `HEAD`, stash and all seven protected hashes. This is a harness/runtime lifecycle finding,
+not P4 branch/copy acceptance evidence. P0 remains unqualified, no baseline retry is authorized yet,
+and the recorder cold-start and shutdown fences require an independently reviewed repair first.

@@ -68,7 +68,7 @@ interface SqliteModule {
 }
 
 const sqlite = createRequire(process.execPath)('node:sqlite') as SqliteModule;
-const DATABASE_SCHEMA_VERSION = 3;
+const DATABASE_SCHEMA_VERSION = 4;
 const BUSY_TIMEOUT_MS = 5_000;
 const MAX_PENDING_SEQUENCES_PER_PRODUCER = 4_096;
 const DEFAULT_QUERY_ROWS = 200;
@@ -172,6 +172,12 @@ export interface ProviderUsageProjection {
 export interface ProviderSettlementProjection extends ProviderUsageProjection {
   generationId: string;
   rootSessionId: string | null;
+  executionId: string | null;
+  branchId: string | null;
+  /** Set only by a copy-selection read. The stored settlement remains owned
+   * by its original root and is never duplicated. */
+  selectedSessionId?: string;
+  inheritedFromInvocationId?: string;
   provider: string | null;
   model: string | null;
   dispatchedModel: string | null;
@@ -191,6 +197,29 @@ export interface ProviderSettlementProjection extends ProviderUsageProjection {
 export interface ProviderSettlementReadModel {
   revision: number | string;
   settlements: ProviderSettlementProjection[];
+}
+
+export type ProviderSettlementScope =
+  | { kind: 'global' }
+  | { kind: 'rootSession'; rootSessionId: string }
+  | { kind: 'selectedBranch'; generationId: string; rootSessionId: string }
+  | { kind: 'copySelected'; generationId: string; copySessionId: string };
+
+export interface ScopedProviderSettlementReadModel extends ProviderSettlementReadModel {
+  scope: ProviderSettlementScope;
+  settlementCoverage: 'complete' | 'truncated';
+  truncated: boolean;
+  nextOffset: number | null;
+  selectionCoverage: 'known' | 'unknown' | 'not_applicable';
+  inheritanceCoverage: 'not_applicable' | 'known' | 'unknown';
+  inheritanceUnavailableReason?: 'source_scrubbed' | 'missing_source_selection' | 'incomplete_source_ancestry';
+}
+
+export interface ScopedProviderSettlementPage {
+  limit?: number;
+  offset?: number;
+  /** Reject a later page if intervening commits changed the projection. */
+  expectedRevision?: number | string;
 }
 
 export interface HistoricalDimensionSummary {
@@ -779,6 +808,95 @@ function migrateV3(database: SqliteDatabase, deliveryHistoryCoverage: 'complete'
   `);
 }
 
+function migrateV4(database: SqliteDatabase): void {
+  database.exec(`
+    ALTER TABLE analytics_provider_settlements ADD COLUMN execution_id TEXT;
+    ALTER TABLE analytics_provider_settlements ADD COLUMN branch_id TEXT;
+    CREATE INDEX analytics_provider_settlement_branch_idx
+      ON analytics_provider_settlements(root_session_id, branch_id, projection_revision);
+
+    CREATE TABLE analytics_branch_edges (
+      generation_id TEXT NOT NULL,
+      branch_id TEXT NOT NULL,
+      capture_subject_kind TEXT NOT NULL,
+      capture_subject_key TEXT NOT NULL,
+      root_session_id TEXT,
+      parent_branch_id TEXT,
+      parent_known INTEGER NOT NULL CHECK (parent_known IN (0, 1)),
+      source_entry_id TEXT,
+      projection_revision TEXT NOT NULL,
+      PRIMARY KEY(generation_id, branch_id)
+    ) STRICT;
+    CREATE INDEX analytics_branch_edge_subject_idx
+      ON analytics_branch_edges(capture_subject_kind, capture_subject_key);
+    CREATE INDEX analytics_branch_edge_root_idx
+      ON analytics_branch_edges(root_session_id, branch_id);
+
+    CREATE TABLE analytics_branch_selections (
+      observation_registry_key TEXT PRIMARY KEY,
+      generation_id TEXT NOT NULL,
+      branch_id TEXT NOT NULL,
+      source_selection_id TEXT NOT NULL,
+      capture_subject_kind TEXT NOT NULL,
+      capture_subject_key TEXT NOT NULL,
+      root_session_id TEXT,
+      observed_at_ms TEXT NOT NULL,
+      projection_revision TEXT NOT NULL
+    ) STRICT;
+    CREATE INDEX analytics_branch_selection_subject_idx
+      ON analytics_branch_selections(capture_subject_kind, capture_subject_key);
+
+    CREATE TABLE analytics_current_branch_selections (
+      generation_id TEXT NOT NULL,
+      capture_subject_kind TEXT NOT NULL,
+      capture_subject_key TEXT NOT NULL,
+      root_session_id TEXT,
+      branch_id TEXT NOT NULL,
+      source_selection_id TEXT NOT NULL,
+      observed_at_ms TEXT NOT NULL,
+      observation_registry_key TEXT NOT NULL,
+      projection_revision TEXT NOT NULL,
+      PRIMARY KEY(generation_id, capture_subject_kind, capture_subject_key)
+    ) STRICT;
+    CREATE INDEX analytics_current_branch_root_idx
+      ON analytics_current_branch_selections(root_session_id);
+
+    CREATE TABLE analytics_session_copies (
+      generation_id TEXT NOT NULL,
+      copy_root_session_id TEXT NOT NULL,
+      capture_subject_kind TEXT NOT NULL,
+      capture_subject_key TEXT NOT NULL,
+      source_root_session_id TEXT,
+      source_branch_id TEXT,
+      operation_id TEXT NOT NULL,
+      inheritance_coverage TEXT NOT NULL CHECK (inheritance_coverage IN ('known', 'unknown')),
+      inheritance_unavailable_reason TEXT CHECK (inheritance_unavailable_reason IN ('source_scrubbed')),
+      projection_revision TEXT NOT NULL,
+      PRIMARY KEY(generation_id, copy_root_session_id),
+      UNIQUE(generation_id, operation_id)
+    ) STRICT;
+    CREATE INDEX analytics_session_copy_subject_idx
+      ON analytics_session_copies(capture_subject_kind, capture_subject_key);
+    CREATE INDEX analytics_session_copy_source_idx
+      ON analytics_session_copies(source_root_session_id);
+
+    DROP VIEW analytics_provider_usage_v1;
+    CREATE VIEW analytics_provider_usage_v1 AS
+      SELECT generation_id, invocation_id, root_session_id AS owning_root_session_id,
+        execution_id, branch_id,
+        provider, dispatched_model, reported_model, effective_model, purpose, outcome,
+        settled_at_ms, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
+        reasoning_tokens, provider_total_tokens,
+        normalized_base_input_tokens, normalized_output_tokens,
+        normalized_cache_read_tokens, normalized_cache_write_tokens,
+        normalized_total_tokens, normalized_usage_complete, reasoning_included_in_output,
+        reported_cost_usd, calculated_cost_usd,
+        calculated_cost_complete, effective_cost_usd, effective_cost_source,
+        effective_cost_coverage, projection_revision
+      FROM analytics_provider_settlements;
+  `);
+}
+
 function databaseTransaction<T>(database: SqliteDatabase, operation: () => T): T {
   database.exec('BEGIN IMMEDIATE');
   try {
@@ -822,18 +940,26 @@ function initializeSchema(database: SqliteDatabase, readOnly = false): void {
       createV1Tables(database);
       createV2Tables(database);
       migrateV3(database, 'complete');
+      migrateV4(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
       return;
     }
     if (version === 1) {
       createV2Tables(database);
       migrateV3(database, 'retained_only');
+      migrateV4(database);
       backfillV2(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
       return;
     }
     if (version === 2) {
       migrateV3(database, 'retained_only');
+      migrateV4(database);
+      database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
+      return;
+    }
+    if (version === 3) {
+      migrateV4(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
     }
   });
@@ -1314,7 +1440,7 @@ function applyProviderSettlement(
   database.prepare(`
     INSERT INTO analytics_provider_settlements (
       generation_id, invocation_id, observation_registry_key, settlement_fingerprint,
-      capture_subject_kind, capture_subject_key, root_session_id,
+      capture_subject_kind, capture_subject_key, root_session_id, execution_id, branch_id,
       provider, dispatched_model, reported_model, effective_model, purpose, outcome, settled_at_ms,
       input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
       reasoning_tokens, provider_total_tokens,
@@ -1324,7 +1450,7 @@ function applyProviderSettlement(
       reported_cost_usd, calculated_cost_usd,
       calculated_cost_complete, effective_cost_usd, effective_cost_source,
       effective_cost_coverage, projection_revision
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     observation.generationId,
     invocationId,
@@ -1333,6 +1459,8 @@ function applyProviderSettlement(
     observation.captureSubject.kind,
     subjectKey(observation),
     observation.scope.rootSessionId ?? null,
+    observation.scope.executionId ?? null,
+    observation.scope.branchId ?? null,
     optionalString(fields.provider),
     dispatchedModel,
     reportedModel,
@@ -1556,6 +1684,129 @@ function applyTypedObservation(
     );
     return true;
   }
+  if (observation.entityKind === 'branch') {
+    const branchId = optionalString(fields.branchId);
+    if (!branchId || observation.scope.branchId !== branchId) {
+      throw new Error('Branch observation requires matching field and scope branchId.');
+    }
+    const revision = nextProjectionRevision(database);
+    const sourceSelectionId = optionalString(fields.sourceSelectionId);
+    if (sourceSelectionId) {
+      database.prepare(`
+        INSERT INTO analytics_branch_selections (
+          observation_registry_key, generation_id, branch_id, source_selection_id,
+          capture_subject_kind, capture_subject_key, root_session_id,
+          observed_at_ms, projection_revision
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        registryKey, observation.generationId, branchId, sourceSelectionId,
+        observation.captureSubject.kind, subjectKey(observation),
+        observation.scope.rootSessionId ?? null,
+        canonicalInt64(observation.observedAtMs), revision,
+      );
+      database.prepare(`
+        INSERT INTO analytics_current_branch_selections (
+          generation_id, capture_subject_kind, capture_subject_key, root_session_id,
+          branch_id, source_selection_id, observed_at_ms, observation_registry_key, projection_revision
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(generation_id, capture_subject_kind, capture_subject_key) DO UPDATE SET
+          root_session_id = excluded.root_session_id,
+          branch_id = excluded.branch_id,
+          source_selection_id = excluded.source_selection_id,
+          observed_at_ms = excluded.observed_at_ms,
+          observation_registry_key = excluded.observation_registry_key,
+          projection_revision = excluded.projection_revision
+        WHERE CAST(excluded.observed_at_ms AS INTEGER) > CAST(analytics_current_branch_selections.observed_at_ms AS INTEGER)
+          OR (
+            excluded.observed_at_ms = analytics_current_branch_selections.observed_at_ms
+            AND excluded.observation_registry_key > analytics_current_branch_selections.observation_registry_key
+          )
+      `).run(
+        observation.generationId, observation.captureSubject.kind, subjectKey(observation),
+        observation.scope.rootSessionId ?? null, branchId, sourceSelectionId,
+        canonicalInt64(observation.observedAtMs), registryKey, revision,
+      );
+      return true;
+    }
+    const parentKnown = Object.prototype.hasOwnProperty.call(fields, 'parentBranchId');
+    const parentBranchId = parentKnown ? optionalString(fields.parentBranchId) : null;
+    const sourceEntryId = optionalString(fields.sourceEntryId);
+    const existingEdge = database.prepare(`
+      SELECT parent_branch_id, parent_known, source_entry_id
+      FROM analytics_branch_edges WHERE generation_id = ? AND branch_id = ?
+    `).get(observation.generationId, branchId) as {
+      parent_branch_id: string | null;
+      parent_known: number | bigint;
+      source_entry_id: string | null;
+    } | undefined;
+    if (existingEdge && parentKnown && toNumber(existingEdge.parent_known) === 1
+      && existingEdge.parent_branch_id !== parentBranchId) {
+      throw new Error(`Conflicting parent for analytics branch ${branchId}.`);
+    }
+    if (existingEdge?.source_entry_id && sourceEntryId && existingEdge.source_entry_id !== sourceEntryId) {
+      throw new Error(`Conflicting source entry for analytics branch ${branchId}.`);
+    }
+    if (parentBranchId !== null) {
+      const visited = new Set<string>([branchId]);
+      let ancestor: string | null = parentBranchId;
+      while (ancestor !== null) {
+        if (visited.has(ancestor)) throw new Error(`Cycle in analytics branch ancestry at ${ancestor}.`);
+        visited.add(ancestor);
+        const edge = database.prepare(`
+          SELECT parent_branch_id, parent_known FROM analytics_branch_edges
+          WHERE generation_id = ? AND branch_id = ?
+        `).get(observation.generationId, ancestor) as {
+          parent_branch_id: string | null;
+          parent_known: number | bigint;
+        } | undefined;
+        if (!edge || toNumber(edge.parent_known) !== 1) break;
+        ancestor = edge.parent_branch_id;
+      }
+    }
+    database.prepare(`
+      INSERT INTO analytics_branch_edges (
+        generation_id, branch_id, capture_subject_kind, capture_subject_key,
+        root_session_id, parent_branch_id, parent_known, source_entry_id, projection_revision
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(generation_id, branch_id) DO UPDATE SET
+        parent_branch_id = CASE
+          WHEN analytics_branch_edges.parent_known = 0 AND excluded.parent_known = 1
+            THEN excluded.parent_branch_id
+          ELSE analytics_branch_edges.parent_branch_id END,
+        parent_known = MAX(analytics_branch_edges.parent_known, excluded.parent_known),
+        source_entry_id = COALESCE(analytics_branch_edges.source_entry_id, excluded.source_entry_id),
+        projection_revision = excluded.projection_revision
+    `).run(
+      observation.generationId, branchId, observation.captureSubject.kind, subjectKey(observation),
+      observation.scope.rootSessionId ?? null,
+      parentBranchId,
+      parentKnown ? 1 : 0,
+      sourceEntryId, revision,
+    );
+    return true;
+  }
+  if (observation.entityKind === 'copy') {
+    const copySessionId = optionalString(fields.copySessionId);
+    const operationId = optionalString(fields.operationId);
+    const coverage = optionalString(fields.inheritanceCoverage);
+    if (!copySessionId || !operationId || observation.scope.rootSessionId !== copySessionId
+      || (coverage !== 'known' && coverage !== 'unknown')) {
+      throw new Error('Copy observation requires destination, operation, and inheritance coverage.');
+    }
+    const revision = nextProjectionRevision(database);
+    database.prepare(`
+      INSERT INTO analytics_session_copies (
+        generation_id, copy_root_session_id, capture_subject_kind, capture_subject_key,
+        source_root_session_id, source_branch_id, operation_id,
+        inheritance_coverage, inheritance_unavailable_reason, projection_revision
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      observation.generationId, copySessionId, observation.captureSubject.kind, subjectKey(observation),
+      optionalString(fields.sourceSessionId), optionalString(fields.sourceBranchId), operationId,
+      coverage, optionalString(fields.inheritanceUnavailableReason), revision,
+    );
+    return true;
+  }
   return false;
 }
 
@@ -1585,6 +1836,63 @@ function boundedPositiveInteger(value: number | undefined, fallback: number, max
     throw new RangeError(`${name} must be a positive safe integer.`);
   }
   return Math.min(candidate, maximum);
+}
+
+function providerSettlementProjection(
+  row: Record<string, unknown>,
+  inheritedForSession?: string,
+): ProviderSettlementProjection {
+  const decodeInt = (value: unknown): number | string | null => value === null || value === undefined
+    ? null
+    : encodeInt64(String(value));
+  const invocationId = String(row.invocation_id);
+  return {
+    generationId: String(row.generation_id),
+    invocationId,
+    rootSessionId: row.root_session_id === null ? null : String(row.root_session_id),
+    executionId: row.execution_id === null ? null : String(row.execution_id),
+    branchId: row.branch_id === null ? null : String(row.branch_id),
+    ...(inheritedForSession ? {
+      selectedSessionId: inheritedForSession,
+      inheritedFromInvocationId: invocationId,
+    } : {}),
+    provider: row.provider === null ? null : String(row.provider),
+    model: row.effective_model === null ? null : String(row.effective_model),
+    dispatchedModel: row.dispatched_model === null ? null : String(row.dispatched_model),
+    reportedModel: row.reported_model === null ? null : String(row.reported_model),
+    purpose: row.purpose === null ? null : String(row.purpose),
+    outcome: row.outcome === null ? null : String(row.outcome),
+    settledAtMs: decodeInt(row.settled_at_ms),
+    usage: {
+      inputTokens: decodeInt(row.input_tokens),
+      outputTokens: decodeInt(row.output_tokens),
+      cacheReadTokens: decodeInt(row.cache_read_tokens),
+      cacheWriteTokens: decodeInt(row.cache_write_tokens),
+      reasoningTokens: decodeInt(row.reasoning_tokens),
+      providerTotalTokens: decodeInt(row.provider_total_tokens),
+    },
+    reportedCostUsd: row.reported_cost_usd === null ? null : Number(row.reported_cost_usd),
+    calculatedCostUsd: row.calculated_cost_usd === null ? null : Number(row.calculated_cost_usd),
+    calculatedCostComplete: Number(row.calculated_cost_complete) === 1,
+    normalizedUsage: {
+      baseInputTokens: decodeInt(row.normalized_base_input_tokens),
+      outputTokens: decodeInt(row.normalized_output_tokens),
+      cacheReadTokens: decodeInt(row.normalized_cache_read_tokens),
+      cacheWriteTokens: decodeInt(row.normalized_cache_write_tokens),
+      reasoningTokens: decodeInt(row.reasoning_tokens),
+      totalTokens: decodeInt(row.normalized_total_tokens),
+      reasoningIncludedInOutput: row.reasoning_included_in_output === null
+        ? null
+        : Number(row.reasoning_included_in_output) === 1,
+      complete: Number(row.normalized_usage_complete) === 1,
+    },
+    effectiveCostUsd: row.effective_cost_usd === null ? null : Number(row.effective_cost_usd),
+    effectiveCostSource: row.effective_cost_source === null
+      ? null
+      : row.effective_cost_source as 'reported' | 'calculated',
+    effectiveCostCoverage: row.effective_cost_coverage as 'known' | 'unknown' | 'not_applicable',
+    revision: encodeInt64(String(row.projection_revision)),
+  };
 }
 
 function encodeQueryCell(value: unknown, maximumBytes: number): { value: unknown; truncated: boolean } {
@@ -1816,6 +2124,46 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
 
     const submittedSubjectKey = subjectKey(observation);
     const resolvedSubject = this.resolveSubject(observation.captureSubject.kind, submittedSubjectKey);
+    if (observation.entityKind === 'copy' && !resolvedSubject.deleted) {
+      const fields = observation.fields as Record<string, unknown>;
+      const sourceRootSessionId = optionalString(fields.sourceSessionId);
+      const copyRootSessionId = optionalString(fields.copySessionId);
+      const operationId = optionalString(fields.operationId);
+      const sourceDeleted = sourceRootSessionId && Boolean(this.database.prepare(
+        'SELECT 1 AS present FROM analytics_deleted_subjects WHERE root_session_id = ?',
+      ).get(sourceRootSessionId));
+      if (sourceDeleted) {
+        if (!copyRootSessionId || !operationId) throw new Error('Copy observation identity is incomplete.');
+        const existingCopy = this.database.prepare(`
+          SELECT operation_id FROM analytics_session_copies
+          WHERE generation_id = ? AND copy_root_session_id = ?
+        `).get(observation.generationId, copyRootSessionId) as { operation_id: string } | undefined;
+        if (existingCopy && existingCopy.operation_id !== operationId) {
+          throw new Error(`Copy session ${copyRootSessionId} is already owned by another operation.`);
+        }
+        const revision = nextProjectionRevision(this.database);
+        this.database.prepare(`
+          INSERT INTO analytics_session_copies (
+            generation_id, copy_root_session_id, capture_subject_kind, capture_subject_key,
+            source_root_session_id, source_branch_id, operation_id,
+            inheritance_coverage, inheritance_unavailable_reason, projection_revision
+          ) VALUES (?, ?, ?, ?, NULL, NULL, ?, 'unknown', 'source_scrubbed', ?)
+          ON CONFLICT(generation_id, copy_root_session_id) DO UPDATE SET
+            source_root_session_id = NULL,
+            source_branch_id = NULL,
+            inheritance_coverage = 'unknown',
+            inheritance_unavailable_reason = 'source_scrubbed',
+            projection_revision = excluded.projection_revision
+        `).run(
+          observation.generationId, copyRootSessionId,
+          observation.captureSubject.kind, subjectKey(observation), operationId, revision,
+        );
+        recordSourceSequence(this.database, observation, registryKey, fingerprint, true);
+        incrementDeliveryAccounting(this.database, 'observations', 'deleted');
+        return 'deleted';
+      }
+    }
+
     if (resolvedSubject.deleted) {
       recordSourceSequence(this.database, observation, registryKey, fingerprint, true);
       incrementDeliveryAccounting(this.database, 'observations', 'deleted');
@@ -1925,6 +2273,23 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
       DELETE FROM analytics_provider_accounting_projections
       WHERE subject_kind = 'session' AND subject_key = ?
     `).run(rootSessionId);
+    // A retained duplicate must not preserve its privately deleted source
+    // identity. Keep only a destination-owned coverage tombstone so its own
+    // later work remains queryable without presenting inheritance as zero.
+    this.database.prepare(`
+      UPDATE analytics_session_copies
+      SET source_root_session_id = NULL,
+          source_branch_id = NULL,
+          inheritance_coverage = 'unknown',
+          inheritance_unavailable_reason = 'source_scrubbed',
+          projection_revision = ?
+      WHERE source_root_session_id = ?
+    `).run(revision, rootSessionId);
+    const deletedSourceCopyObservations = toNumber(this.database.prepare(`
+      DELETE FROM analytics_observations
+      WHERE entity_kind = 'copy'
+        AND json_extract(payload_json, '$.fields.sourceSessionId') = ?
+    `).run(rootSessionId).changes);
     for (const table of [
       'analytics_provider_settlements',
       'analytics_execution_observations',
@@ -1934,10 +2299,14 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
       'analytics_activity_observations',
       'analytics_activity_states',
       'analytics_feature_observations',
+      'analytics_branch_edges',
+      'analytics_branch_selections',
+      'analytics_current_branch_selections',
+      'analytics_session_copies',
     ]) {
       this.database.prepare(`DELETE FROM ${table} WHERE ${subjectFilter}`).run(rootSessionId, rootSessionId);
     }
-    const deletedObservationCount = toNumber(this.database.prepare(`
+    const deletedObservationCount = deletedSourceCopyObservations + toNumber(this.database.prepare(`
       DELETE FROM analytics_observations WHERE ${subjectFilter}
     `).run(rootSessionId, rootSessionId).changes);
     const deletedPayloadCount = toNumber(this.database.prepare(`
@@ -2073,6 +2442,9 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
         'analytics_activity_observations',
         'analytics_activity_states',
         'analytics_feature_observations',
+        'analytics_branch_edges',
+        'analytics_branch_selections',
+        'analytics_current_branch_selections',
       ]) {
         this.database.prepare(`
           UPDATE ${table}
@@ -2269,7 +2641,7 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
   }
 
   countTypedEntityObservations(
-    entityKind: 'execution' | 'toolCall' | 'activitySpan' | 'featureObservation',
+    entityKind: 'execution' | 'toolCall' | 'activitySpan' | 'featureObservation' | 'branch' | 'copy',
     rootSessionId?: string,
   ): number {
     this.assertOpen();
@@ -2278,6 +2650,8 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
       toolCall: 'analytics_tool_observations',
       activitySpan: 'analytics_activity_observations',
       featureObservation: 'analytics_feature_observations',
+      branch: 'analytics_branch_selections',
+      copy: 'analytics_session_copies',
     }[entityKind];
     const row = rootSessionId
       ? this.database.prepare(`SELECT COUNT(*) AS count FROM ${table} WHERE root_session_id = ?`).get(rootSessionId)
@@ -2602,58 +2976,221 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
         ORDER BY CAST(projection_revision AS INTEGER), generation_id, invocation_id
         ${boundedLimit === undefined ? '' : 'LIMIT ?'}
       `).all(...(scoped ? [rootSessionId] : []), ...(boundedLimit === undefined ? [] : [boundedLimit])) as Array<Record<string, unknown>>;
-      const decodeInt = (value: unknown): number | string | null => value === null || value === undefined
-        ? null
-        : encodeInt64(String(value));
       return {
         revision,
-        settlements: rows.map((row) => ({
-          generationId: String(row.generation_id),
-          invocationId: String(row.invocation_id),
-          rootSessionId: row.root_session_id === null ? null : String(row.root_session_id),
-          provider: row.provider === null ? null : String(row.provider),
-          model: row.effective_model === null ? null : String(row.effective_model),
-          dispatchedModel: row.dispatched_model === null ? null : String(row.dispatched_model),
-          reportedModel: row.reported_model === null ? null : String(row.reported_model),
-          purpose: row.purpose === null ? null : String(row.purpose),
-          outcome: row.outcome === null ? null : String(row.outcome),
-          settledAtMs: decodeInt(row.settled_at_ms),
-          usage: {
-            inputTokens: decodeInt(row.input_tokens),
-            outputTokens: decodeInt(row.output_tokens),
-            cacheReadTokens: decodeInt(row.cache_read_tokens),
-            cacheWriteTokens: decodeInt(row.cache_write_tokens),
-            reasoningTokens: decodeInt(row.reasoning_tokens),
-            providerTotalTokens: decodeInt(row.provider_total_tokens),
-          },
-          reportedCostUsd: row.reported_cost_usd === null ? null : Number(row.reported_cost_usd),
-          calculatedCostUsd: row.calculated_cost_usd === null ? null : Number(row.calculated_cost_usd),
-          calculatedCostComplete: Number(row.calculated_cost_complete) === 1,
-          normalizedUsage: {
-            baseInputTokens: decodeInt(row.normalized_base_input_tokens),
-            outputTokens: decodeInt(row.normalized_output_tokens),
-            cacheReadTokens: decodeInt(row.normalized_cache_read_tokens),
-            cacheWriteTokens: decodeInt(row.normalized_cache_write_tokens),
-            reasoningTokens: decodeInt(row.reasoning_tokens),
-            totalTokens: decodeInt(row.normalized_total_tokens),
-            reasoningIncludedInOutput: row.reasoning_included_in_output === null
-              ? null
-              : Number(row.reasoning_included_in_output) === 1,
-            complete: Number(row.normalized_usage_complete) === 1,
-          },
-          effectiveCostUsd: row.effective_cost_usd === null ? null : Number(row.effective_cost_usd),
-          effectiveCostSource: row.effective_cost_source === null
-            ? null
-            : row.effective_cost_source as 'reported' | 'calculated',
-          effectiveCostCoverage: row.effective_cost_coverage as 'known' | 'unknown' | 'not_applicable',
-          revision: encodeInt64(String(row.projection_revision)),
-        })),
+        settlements: rows.map((row) => providerSettlementProjection(row)),
       };
     });
   }
 
   readProviderSettlementProjection(rootSessionId?: string): ProviderSettlementReadModel {
     return this.readProviderSettlements(rootSessionId);
+  }
+
+  readScopedProviderSettlements(
+    scope: ProviderSettlementScope,
+    page: ScopedProviderSettlementPage = {},
+  ): ScopedProviderSettlementReadModel {
+    this.assertOpen();
+    if (!scope || typeof scope !== 'object') throw new Error('Provider settlement scope is required.');
+    const scopeKind = Reflect.get(scope, 'kind');
+    if (scopeKind !== 'global'
+      && scopeKind !== 'rootSession'
+      && scopeKind !== 'selectedBranch'
+      && scopeKind !== 'copySelected') {
+      throw new Error('Unsupported provider settlement scope kind.');
+    }
+    const validateScopeId = (value: string, name: string): void => {
+      if (!value.trim() || value.includes('\0')) throw new Error(`${name} must be a non-empty string without NUL.`);
+    };
+    if (scope.kind === 'rootSession' || scope.kind === 'selectedBranch') {
+      validateScopeId(scope.rootSessionId, 'rootSessionId');
+    } else if (scope.kind === 'copySelected') {
+      validateScopeId(scope.copySessionId, 'copySessionId');
+    }
+    if (scope.kind === 'selectedBranch' || scope.kind === 'copySelected') {
+      validateScopeId(scope.generationId, 'generationId');
+    }
+    const limit = boundedPositiveInteger(page.limit, DEFAULT_QUERY_ROWS, MAX_QUERY_ROWS, 'scoped settlement limit');
+    const offset = page.offset ?? 0;
+    if (!Number.isSafeInteger(offset) || offset < 0) {
+      throw new Error('scoped settlement offset must be a non-negative safe integer.');
+    }
+    const selectedRows = (
+      generationId: string,
+      rootSessionId: string,
+      explicitBranchId?: string,
+    ): Array<Record<string, unknown>> => {
+      const branchSeed = explicitBranchId
+        ? 'SELECT ? AS generation_id, ? AS branch_id'
+        : `SELECT generation_id, branch_id FROM analytics_current_branch_selections
+           WHERE generation_id = ? AND root_session_id = ?`;
+      return this.database.prepare(`
+        WITH RECURSIVE ancestry(generation_id, branch_id) AS (
+          ${branchSeed}
+          UNION
+          SELECT edge.generation_id, edge.parent_branch_id
+          FROM analytics_branch_edges edge
+          JOIN ancestry child
+            ON child.generation_id = edge.generation_id AND child.branch_id = edge.branch_id
+          WHERE edge.parent_known = 1 AND edge.parent_branch_id IS NOT NULL
+        )
+        SELECT settlement.*
+        FROM analytics_provider_settlements settlement
+        JOIN ancestry branch
+          ON branch.generation_id = settlement.generation_id
+          AND branch.branch_id = settlement.branch_id
+        WHERE settlement.root_session_id = ? AND settlement.generation_id = ?
+        ORDER BY CAST(settlement.projection_revision AS INTEGER), settlement.generation_id, settlement.invocation_id
+        LIMIT ? OFFSET ?
+      `).all(
+        generationId,
+        ...(explicitBranchId ? [explicitBranchId] : [rootSessionId]),
+        rootSessionId, generationId, limit + 1, offset,
+      ) as Array<Record<string, unknown>>;
+    };
+    const ancestryCoverage = (
+      generationId: string,
+      rootSessionId: string,
+      explicitBranchId?: string,
+    ): 'known' | 'unknown' => {
+      const seeds = explicitBranchId
+        ? this.database.prepare(`
+            SELECT generation_id, branch_id FROM analytics_branch_edges
+            WHERE generation_id = ? AND root_session_id = ? AND branch_id = ?
+          `).all(generationId, rootSessionId, explicitBranchId) as Array<{ generation_id: string; branch_id: string }>
+        : this.database.prepare(`
+            SELECT generation_id, branch_id FROM analytics_current_branch_selections
+            WHERE generation_id = ? AND root_session_id = ?
+          `).all(generationId, rootSessionId) as Array<{ generation_id: string; branch_id: string }>;
+      if (seeds.length === 0) return 'unknown';
+      for (const seed of seeds) {
+        const visited = new Set<string>();
+        let branchId: string | null = seed.branch_id;
+        while (branchId !== null) {
+          if (visited.has(branchId)) throw new Error(`Cycle in persisted branch ancestry at ${branchId}.`);
+          visited.add(branchId);
+          const edge = this.database.prepare(`
+            SELECT parent_branch_id, parent_known FROM analytics_branch_edges
+            WHERE generation_id = ? AND branch_id = ? AND root_session_id = ?
+          `).get(seed.generation_id, branchId, rootSessionId) as {
+            parent_branch_id: string | null;
+            parent_known: number | bigint;
+          } | undefined;
+          if (!edge || toNumber(edge.parent_known) !== 1) return 'unknown';
+          branchId = edge.parent_branch_id;
+        }
+      }
+      return 'known';
+    };
+    const pageResult = (rows: ProviderSettlementProjection[]) => {
+      const truncated = rows.length > limit;
+      return {
+        settlements: rows.slice(0, limit),
+        settlementCoverage: truncated ? 'truncated' as const : 'complete' as const,
+        truncated,
+        nextOffset: truncated ? offset + limit : null,
+      };
+    };
+    return this.snapshot(() => {
+      const revision = this.getProjectionRevision();
+      if (page.expectedRevision !== undefined
+        && canonicalInt64(page.expectedRevision) !== canonicalInt64(revision)) {
+        throw new Error(`Scoped settlement projection changed from revision ${page.expectedRevision} to ${revision}.`);
+      }
+      if (scope.kind === 'global' || scope.kind === 'rootSession') {
+        const scoped = scope.kind === 'rootSession';
+        const rows = this.database.prepare(`
+          SELECT * FROM analytics_provider_settlements
+          ${scoped ? 'WHERE root_session_id = ?' : ''}
+          ORDER BY CAST(projection_revision AS INTEGER), generation_id, invocation_id
+          LIMIT ? OFFSET ?
+        `).all(...(scoped ? [scope.rootSessionId] : []), limit + 1, offset) as Array<Record<string, unknown>>;
+        return {
+          revision,
+          scope,
+          ...pageResult(rows.map((row) => providerSettlementProjection(row))),
+          selectionCoverage: 'not_applicable' as const,
+          inheritanceCoverage: 'not_applicable' as const,
+        };
+      }
+      if (scope.kind === 'selectedBranch') {
+        const coverage = ancestryCoverage(scope.generationId, scope.rootSessionId);
+        return {
+          revision,
+          scope,
+          ...pageResult(selectedRows(scope.generationId, scope.rootSessionId)
+            .map((row) => providerSettlementProjection(row))),
+          selectionCoverage: coverage,
+          inheritanceCoverage: 'not_applicable' as const,
+        };
+      }
+      const relation = this.database.prepare(`
+        SELECT source_root_session_id, source_branch_id,
+          inheritance_coverage, inheritance_unavailable_reason
+        FROM analytics_session_copies WHERE generation_id = ? AND copy_root_session_id = ?
+      `).get(scope.generationId, scope.copySessionId) as {
+        source_root_session_id: string | null;
+        source_branch_id: string | null;
+        inheritance_coverage: 'known' | 'unknown';
+        inheritance_unavailable_reason: 'source_scrubbed' | null;
+      } | undefined;
+      const ownSelectionCoverage = ancestryCoverage(scope.generationId, scope.copySessionId);
+      const inheritedAvailable = relation?.inheritance_coverage === 'known'
+        && relation.source_root_session_id !== null
+        && relation.source_branch_id !== null;
+      const inheritedAncestryCoverage = inheritedAvailable
+        ? ancestryCoverage(scope.generationId, relation.source_root_session_id!, relation.source_branch_id!)
+        : 'unknown';
+      const inheritedComplete = inheritedAvailable && inheritedAncestryCoverage === 'known';
+      const rows = this.database.prepare(`
+        WITH RECURSIVE ancestry(generation_id, branch_id, owning_root_session_id, inherited) AS (
+          SELECT generation_id, branch_id, root_session_id, 0
+          FROM analytics_current_branch_selections
+          WHERE generation_id = ? AND root_session_id = ?
+          UNION
+          SELECT ?, ?, ?, 1 WHERE ? IS NOT NULL AND ? IS NOT NULL
+          UNION
+          SELECT edge.generation_id, edge.parent_branch_id,
+            child.owning_root_session_id, child.inherited
+          FROM analytics_branch_edges edge
+          JOIN ancestry child
+            ON child.generation_id = edge.generation_id
+            AND child.branch_id = edge.branch_id
+            AND child.owning_root_session_id = edge.root_session_id
+          WHERE edge.parent_known = 1 AND edge.parent_branch_id IS NOT NULL
+        )
+        SELECT settlement.*, ancestry.inherited AS copy_inherited
+        FROM analytics_provider_settlements settlement
+        JOIN ancestry
+          ON ancestry.generation_id = settlement.generation_id
+          AND ancestry.branch_id = settlement.branch_id
+          AND ancestry.owning_root_session_id = settlement.root_session_id
+        WHERE settlement.generation_id = ?
+        ORDER BY CAST(settlement.projection_revision AS INTEGER), settlement.generation_id, settlement.invocation_id
+        LIMIT ? OFFSET ?
+      `).all(
+        scope.generationId, scope.copySessionId,
+        scope.generationId, relation?.source_branch_id ?? null, relation?.source_root_session_id ?? null,
+        inheritedAvailable ? relation?.source_branch_id : null,
+        inheritedAvailable ? relation?.source_root_session_id : null,
+        scope.generationId, limit + 1, offset,
+      ) as Array<Record<string, unknown> & { copy_inherited: number | bigint }>;
+      return {
+        revision,
+        scope,
+        ...pageResult(rows.map((row) => providerSettlementProjection(
+          row,
+          toNumber(row.copy_inherited) === 1 ? scope.copySessionId : undefined,
+        ))),
+        selectionCoverage: ownSelectionCoverage,
+        inheritanceCoverage: inheritedComplete ? 'known' : 'unknown',
+        ...(!inheritedComplete ? {
+          inheritanceUnavailableReason: relation?.inheritance_unavailable_reason
+            ?? (inheritedAvailable ? 'incomplete_source_ancestry' : 'missing_source_selection'),
+        } : {}),
+      };
+    });
   }
 
   readHistoricalDimensionSummary(): HistoricalDimensionSummary {

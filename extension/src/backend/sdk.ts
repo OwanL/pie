@@ -205,6 +205,8 @@ export interface SdkSessionManager {
   getSessionName: () => string | undefined;
   getBranch: () => SessionEntryLike[];
   getEntries: () => SessionEntryLike[];
+  /** Constant-time lookup from the pinned SDK's durable entry index. */
+  getEntry?: (entryId: string) => SessionEntryLike | undefined;
   /** Runtime-free durable context projection supplied by SessionManager. */
   buildContextEntries?: () => SessionEntryLike[];
   buildSessionContext?: () => {

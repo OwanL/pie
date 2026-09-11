@@ -18,6 +18,10 @@ import {
   SqliteAnalyticsRecorder,
 } from '../../src/analytics/sqlite-recorder.js';
 import { SessionLifecycleStore } from '../../src/backend/session-lifecycle-store.js';
+import {
+  canonicalSettlementUsageRecord,
+  summarizeCanonicalUsage,
+} from '../../src/analytics/canonical-usage.js';
 
 interface TestDatabase {
   close(): void;
@@ -33,6 +37,8 @@ function observation(options: {
   sourceKey: string;
   rootSessionId?: string;
   invocationId?: string;
+  executionId?: string;
+  branchId?: string;
   entityKind?: AnalyticsObservation['entityKind'];
   entityKey?: string;
   observationKind?: AnalyticsObservation['observationKind'];
@@ -60,6 +66,8 @@ function observation(options: {
       workspaceId: 'workspace-a',
       ...(captureSubject.kind === 'session' ? { rootSessionId } : {}),
       invocationId: options.invocationId,
+      ...(options.executionId ? { executionId: options.executionId } : {}),
+      ...(options.branchId ? { branchId: options.branchId } : {}),
     },
     captureSubject,
     producer: { buildId: 'test-build', processGeneration: options.processGeneration ?? 'test-process-1' },
@@ -284,6 +292,10 @@ test('v1 upgrade retains facts, detail, deletion fences, accounting, and source 
         DROP INDEX analytics_activity_state_root_idx;
         DROP INDEX analytics_feature_root_idx;
         DROP INDEX analytics_feature_dimensions_idx;
+        DROP TABLE analytics_session_copies;
+        DROP TABLE analytics_current_branch_selections;
+        DROP TABLE analytics_branch_selections;
+        DROP TABLE analytics_branch_edges;
         DROP TABLE analytics_provider_settlements;
         DROP TABLE analytics_provider_accounting_projections;
         DROP TABLE analytics_execution_observations;
@@ -316,7 +328,7 @@ test('v1 upgrade retains facts, detail, deletion fences, accounting, and source 
     }
 
     recorder = new SqliteAnalyticsRecorder(temp.databasePath);
-    assert.equal(recorder.getDatabaseSchemaVersion(), 3);
+    assert.equal(recorder.getDatabaseSchemaVersion(), 4);
     assert.equal(recorder.readDeliveryAccounting().deliveryHistoryCoverage, 'retained_only');
     assert.equal(recorder.countObservations('root-retained'), 1);
     assert.deepEqual(recorder.reconstructDetail('legacy-detail'), { retained: true });
@@ -326,6 +338,8 @@ test('v1 upgrade retains facts, detail, deletion fences, accounting, and source 
         generationId: 'generation-1',
         invocationId: 'legacy-invocation',
         rootSessionId: 'root-retained',
+        executionId: null,
+        branchId: null,
         provider: 'legacy-provider',
         model: 'legacy-model',
         dispatchedModel: 'legacy-model',
@@ -499,14 +513,14 @@ test('recorder rejects unsupported newer database schema versions', () => {
   recorder.close();
   const raw = new DatabaseSync(temp.databasePath);
   try {
-    raw.exec('PRAGMA user_version = 4');
+    raw.exec('PRAGMA user_version = 5');
   } finally {
     raw.close();
   }
   try {
     assert.throws(
       () => new SqliteAnalyticsRecorder(temp.databasePath),
-      /Unsupported newer analytics database schema version 4/,
+      /Unsupported newer analytics database schema version 5/,
     );
   } finally {
     rmSync(temp.root, { recursive: true, force: true });
@@ -544,6 +558,8 @@ test('provider settlement projection is transactional, once-only, and revisioned
       generationId: 'generation-1',
       invocationId: 'invocation-accounting',
       rootSessionId: 'root-accounting',
+      executionId: null,
+      branchId: null,
       provider: 'provider-a',
       model: 'model-reported',
       dispatchedModel: 'model-dispatched',
@@ -609,6 +625,251 @@ test('provider settlement projection is transactional, once-only, and revisioned
     recorder.close();
     recorder = new SqliteAnalyticsRecorder(temp.databasePath);
     assert.deepEqual(recorder.readProviderSettlements(), { revision: 2, settlements: [] });
+  } finally {
+    recorder.close();
+    rmSync(temp.root, { recursive: true, force: true });
+  }
+});
+
+test('branch and copy projections select original settlements without duplicating global charges', () => {
+  const temp = tempDatabase();
+  const recorder = new SqliteAnalyticsRecorder(temp.databasePath);
+  const branch = (
+    rootSessionId: string,
+    branchId: string,
+    parentBranchId: string | null,
+    sourceKey = `edge:${rootSessionId}:${branchId}`,
+  ) => recorder.submit(observation({
+    sourceKey,
+    rootSessionId,
+    entityKind: 'branch',
+    entityKey: branchId,
+    observationKind: 'observation',
+    branchId,
+    fields: { branchId, parentBranchId, sourceEntryId: branchId },
+  }));
+  const select = (rootSessionId: string, branchId: string, selectionId: string) => recorder.submit(observation({
+    sourceKey: `selection:${selectionId}`,
+    rootSessionId,
+    entityKind: 'branch',
+    entityKey: branchId,
+    observationKind: 'phase',
+    branchId,
+    fields: { branchId, sourceSelectionId: selectionId, sourceEntryId: branchId },
+  }));
+  const settle = (rootSessionId: string, branchId: string, invocationId: string, cost: number) => recorder.submit(observation({
+    sourceKey: `settlement:${invocationId}`,
+    rootSessionId,
+    invocationId,
+    executionId: `execution:${invocationId}`,
+    branchId,
+    fields: {
+      invocationId,
+      reportedCostUsd: cost,
+      inputTokens: Math.round(cost * 1_000),
+      inputIncludesCache: false,
+      outputIncludesReasoning: true,
+      cacheChannelsOmittedAsZero: true,
+    },
+  }));
+  const totalCost = (rows: ReturnType<typeof recorder.readProviderSettlements>['settlements']) =>
+    rows.reduce((total, row) => total + (row.effectiveCostUsd ?? 0), 0);
+  try {
+    branch('source-root', 'source:A', null);
+    branch('source-root', 'source:B', 'source:A');
+    branch('source-root', 'source:C', 'source:A');
+    settle('source-root', 'source:A', 'invocation:A', 0.01);
+    settle('source-root', 'source:B', 'invocation:B', 0.02);
+    settle('source-root', 'source:C', 'invocation:C', 0.03);
+
+    select('source-root', 'source:B', 'select:B');
+    assert.equal(totalCost(recorder.readScopedProviderSettlements({
+      kind: 'selectedBranch', generationId: 'generation-1', rootSessionId: 'source-root',
+    }).settlements), 0.03);
+    select('source-root', 'source:C', 'select:C');
+    assert.equal(totalCost(recorder.readScopedProviderSettlements({
+      kind: 'selectedBranch', generationId: 'generation-1', rootSessionId: 'source-root',
+    }).settlements), 0.04);
+    assert.equal(totalCost(recorder.readScopedProviderSettlements({
+      kind: 'rootSession', rootSessionId: 'source-root',
+    }).settlements), 0.06);
+
+    recorder.submit(observation({
+      sourceKey: 'copy:operation-1',
+      rootSessionId: 'copy-root',
+      entityKind: 'copy',
+      entityKey: 'copy-root',
+      observationKind: 'observation',
+      fields: {
+        copySessionId: 'copy-root',
+        sourceSessionId: 'source-root',
+        sourceBranchId: 'source:B',
+        operationId: 'operation-1',
+        inheritanceCoverage: 'known',
+      },
+    }));
+    branch('copy-root', 'copy:D', null);
+    select('copy-root', 'copy:D', 'select:D');
+    settle('copy-root', 'copy:D', 'invocation:D', 0.04);
+
+    const copied = recorder.readScopedProviderSettlements({ kind: 'copySelected', generationId: 'generation-1', copySessionId: 'copy-root' });
+    assert.equal(copied.selectionCoverage, 'known');
+    assert.equal(copied.inheritanceCoverage, 'known');
+    assert.deepEqual(copied.settlements.map((row) => row.invocationId), [
+      'invocation:A', 'invocation:B', 'invocation:D',
+    ]);
+    assert.equal(totalCost(copied.settlements), 0.07);
+    const copiedRecords = copied.settlements.map(canonicalSettlementUsageRecord);
+    assert.equal(summarizeCanonicalUsage(copiedRecords, {
+      kind: 'copyInherited', copySessionId: 'copy-root',
+    }).value, 0.03);
+    assert.equal(summarizeCanonicalUsage(copiedRecords, {
+      kind: 'copyOwn', copySessionId: 'copy-root',
+    }).value, 0.04);
+    assert.equal(summarizeCanonicalUsage(copiedRecords, { kind: 'global' }).value, 0.07);
+    assert.equal(totalCost(recorder.readScopedProviderSettlements({ kind: 'global' }).settlements), 0.1);
+    assert.equal(recorder.readProviderSettlements().settlements.length, 4, 'copy references never create settlement rows');
+    const firstPage = recorder.readScopedProviderSettlements({ kind: 'global' }, { limit: 2 });
+    assert.equal(firstPage.settlementCoverage, 'truncated');
+    assert.equal(firstPage.truncated, true);
+    assert.equal(firstPage.nextOffset, 2);
+    const secondPage = recorder.readScopedProviderSettlements({ kind: 'global' }, {
+      limit: 2,
+      offset: firstPage.nextOffset!,
+      expectedRevision: firstPage.revision,
+    });
+    assert.equal(secondPage.settlementCoverage, 'complete');
+    assert.equal(secondPage.truncated, false);
+    assert.equal(secondPage.nextOffset, null);
+    assert.deepEqual(
+      [...firstPage.settlements, ...secondPage.settlements].map((row) => row.invocationId),
+      ['invocation:A', 'invocation:B', 'invocation:C', 'invocation:D'],
+    );
+
+    // Exact replay is a no-op; changed ancestry under the same producer key is
+    // rejected atomically instead of silently moving usage between branches.
+    const replay = observation({
+      sourceKey: 'selection:select:D', rootSessionId: 'copy-root', entityKind: 'branch',
+      entityKey: 'copy:D', observationKind: 'phase', branchId: 'copy:D',
+      fields: { branchId: 'copy:D', sourceSelectionId: 'select:D', sourceEntryId: 'copy:D' },
+    });
+    recorder.submit(replay);
+    assert.throws(() => recorder.submit({
+      ...replay,
+      fields: { ...replay.fields, branchId: 'copy:changed' },
+    }), AnalyticsSourceConflictError);
+    assert.equal(totalCost(recorder.readScopedProviderSettlements({
+      kind: 'copySelected', generationId: 'generation-1', copySessionId: 'copy-root',
+    }).settlements), 0.07);
+  } finally {
+    recorder.close();
+    rmSync(temp.root, { recursive: true, force: true });
+  }
+});
+
+test('private source scrub removes inherited identity and keeps copy-own usage explicitly incomplete', () => {
+  const temp = tempDatabase();
+  const recorder = new SqliteAnalyticsRecorder(temp.databasePath);
+  try {
+    recorder.submitBatch([
+      observation({
+        sourceKey: 'source-edge', rootSessionId: 'private-source', entityKind: 'branch',
+        entityKey: 'source:A', observationKind: 'observation', branchId: 'source:A',
+        fields: { branchId: 'source:A', parentBranchId: null, sourceEntryId: 'A' },
+      }),
+      observation({
+        sourceKey: 'source-settlement', rootSessionId: 'private-source',
+        invocationId: 'private-source-invocation', branchId: 'source:A',
+        fields: { invocationId: 'private-source-invocation', reportedCostUsd: 0.03 },
+      }),
+      observation({
+        sourceKey: 'copy-relation', rootSessionId: 'retained-copy', entityKind: 'copy',
+        entityKey: 'retained-copy', observationKind: 'observation',
+        fields: {
+          copySessionId: 'retained-copy', sourceSessionId: 'private-source',
+          sourceBranchId: 'source:A', operationId: 'copy-private-source', inheritanceCoverage: 'known',
+        },
+      }),
+      observation({
+        sourceKey: 'copy-edge', rootSessionId: 'retained-copy', entityKind: 'branch',
+        entityKey: 'copy:D', observationKind: 'observation', branchId: 'copy:D',
+        fields: { branchId: 'copy:D', parentBranchId: null, sourceEntryId: 'D' },
+      }),
+      observation({
+        sourceKey: 'copy-selection', rootSessionId: 'retained-copy', entityKind: 'branch',
+        entityKey: 'copy:D', observationKind: 'phase', branchId: 'copy:D',
+        fields: { branchId: 'copy:D', sourceSelectionId: 'select:D', sourceEntryId: 'D' },
+      }),
+      observation({
+        sourceKey: 'copy-settlement', rootSessionId: 'retained-copy',
+        invocationId: 'copy-own-invocation', branchId: 'copy:D',
+        fields: { invocationId: 'copy-own-invocation', reportedCostUsd: 0.04 },
+      }),
+    ]);
+    recorder.deleteSession('private-source', 'private-close-source', 2_000);
+    const retained = recorder.readScopedProviderSettlements({ kind: 'copySelected', generationId: 'generation-1', copySessionId: 'retained-copy' });
+    assert.deepEqual(retained.settlements.map((row) => row.invocationId), ['copy-own-invocation']);
+    assert.equal(retained.inheritanceCoverage, 'unknown');
+    assert.equal(retained.inheritanceUnavailableReason, 'source_scrubbed');
+    assert.equal(retained.settlements[0]?.effectiveCostUsd, 0.04);
+    const relation = recorder.executeReadOnlyQuery(`
+      SELECT source_root_session_id, source_branch_id, inheritance_coverage,
+        inheritance_unavailable_reason FROM analytics_session_copies
+      WHERE copy_root_session_id = 'retained-copy'
+    `).rows[0];
+    assert.deepEqual(relation, {
+      source_root_session_id: null,
+      source_branch_id: null,
+      inheritance_coverage: 'unknown',
+      inheritance_unavailable_reason: 'source_scrubbed',
+    });
+    assert.equal(JSON.stringify(recorder.executeReadOnlyQuery(
+      "SELECT payload_json FROM analytics_observations WHERE entity_kind = 'copy'",
+    ).rows).includes('private-source'), false);
+
+    // A stale duplicate delivery after the source fence cannot resurrect its
+    // identity; it creates only the same privacy-safe destination tombstone.
+    assert.throws(() => recorder.submit(observation({
+      sourceKey: 'late-copy', rootSessionId: 'late-copy-root', entityKind: 'copy',
+      entityKey: 'late-copy-root', observationKind: 'observation',
+      fields: {
+        copySessionId: 'late-copy-root', sourceSessionId: 'private-source',
+        sourceBranchId: 'source:A', operationId: 'late-copy-op', inheritanceCoverage: 'known',
+      },
+    })), /capture subject is deleted/);
+    const late = recorder.readScopedProviderSettlements({ kind: 'copySelected', generationId: 'generation-1', copySessionId: 'late-copy-root' });
+    assert.equal(late.inheritanceCoverage, 'unknown');
+    assert.equal(late.inheritanceUnavailableReason, 'source_scrubbed');
+  } finally {
+    recorder.close();
+    rmSync(temp.root, { recursive: true, force: true });
+  }
+});
+
+test('private destination scrub removes only its copy relation and leaves source settlements', () => {
+  const temp = tempDatabase();
+  const recorder = new SqliteAnalyticsRecorder(temp.databasePath);
+  try {
+    recorder.submit(observation({
+      sourceKey: 'retained-source-settlement', rootSessionId: 'retained-source',
+      invocationId: 'retained-invocation', branchId: 'source:A',
+      fields: { invocationId: 'retained-invocation', reportedCostUsd: 0.03 },
+    }));
+    recorder.submit(observation({
+      sourceKey: 'deleted-copy-relation', rootSessionId: 'private-copy', entityKind: 'copy',
+      entityKey: 'private-copy', observationKind: 'observation',
+      fields: {
+        copySessionId: 'private-copy', sourceSessionId: 'retained-source',
+        sourceBranchId: 'source:A', operationId: 'private-copy-op', inheritanceCoverage: 'known',
+      },
+    }));
+    recorder.deleteSession('private-copy', 'private-close-copy', 2_100);
+    assert.deepEqual(recorder.readProviderSettlements('retained-source').settlements.map(
+      (row) => row.invocationId,
+    ), ['retained-invocation']);
+    assert.equal(recorder.executeReadOnlyQuery(
+      "SELECT COUNT(*) AS count FROM analytics_session_copies WHERE copy_root_session_id = 'private-copy'",
+    ).rows[0]?.count, 0);
   } finally {
     recorder.close();
     rmSync(temp.root, { recursive: true, force: true });
@@ -848,7 +1109,7 @@ test('logical query surface is native read-only, bounded, and reports snapshot/d
       ['query-a'],
       { maxRows: 2, maxCellBytes: 32 },
     );
-    assert.equal(result.databaseSchemaVersion, 3);
+    assert.equal(result.databaseSchemaVersion, 4);
     assert.equal(result.snapshotWatermark, 3);
     assert.deepEqual(result.generationIds, ['generation-1']);
     assert.equal(result.returnedRows, 2);

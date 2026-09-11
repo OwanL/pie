@@ -147,7 +147,9 @@ export class BillableAccounting {
   private readonly lastFailedAssistantSettlementBySession: Record<string, string | undefined> = {};
   private readonly currentBranchSourcesBySession: Record<string, Set<string> | undefined> = {};
   private readonly currentBranchEntriesBySession: Record<string, Set<string> | undefined> = {};
+  private readonly branchParentsBySession: Record<string, Map<string, string | null | undefined> | undefined> = {};
   private readonly currentBranchLeafBySession: Record<string, string | undefined> = {};
+  private readonly currentBranchDepthBySession: Record<string, number | undefined> = {};
   /** Canonical-authority live settlements keyed by stable invocation identity,
    * mirroring the ledger's in-memory projection for the public session-usage
    * UI. The durable authority is the canonical store (P5 read model); these
@@ -590,7 +592,7 @@ export class BillableAccounting {
     durationMs: number,
     usage?: AssistantUsage,
     status?: TurnThroughputStatus,
-    billing?: { modelId?: string; provider?: string; occurredAt?: string; operationId?: string },
+    billing?: { modelId?: string; provider?: string; occurredAt?: string; operationId?: string; durableEntryId?: string },
   ): void {
     const retry = this.pendingRetryBySession[sessionPath];
     const providerSettlementsObserved = this.assistantInvocationObservedBySession[sessionPath] === true;
@@ -614,7 +616,7 @@ export class BillableAccounting {
       }, {
         kind: retry ? 'retry' : 'conversation',
         operationId: billing?.operationId,
-        branchId: turnId,
+        branchId: billing?.durableEntryId ?? this.currentBranchLeafBySession[sessionPath] ?? null,
         outcome: status === 'interrupted' ? 'cancelled' : status === 'error' ? 'failed' : 'succeeded',
       });
       delete this.pendingRetryBySession[sessionPath];
@@ -638,7 +640,7 @@ export class BillableAccounting {
       }, {
         kind: retry ? 'retry' : 'conversation',
         operationId: billing?.operationId,
-        branchId: turnId,
+        branchId: billing?.durableEntryId ?? this.currentBranchLeafBySession[sessionPath] ?? null,
         outcome: status === 'interrupted' ? 'cancelled' : status === 'error' ? 'failed' : 'unknown',
       });
       delete this.pendingRetryBySession[sessionPath];
@@ -657,8 +659,33 @@ export class BillableAccounting {
       .projectSession(sessionId ? { sessionId } : { sessionPath }).records;
     const existingSourceIds = new Set(existingRecords.map((record) => record.sourceId));
     this.currentBranchSourcesBySession[sessionPath] = new Set(snapshot.samples.map((sample) => sample.sourceId));
-    this.currentBranchEntriesBySession[sessionPath] = new Set(snapshot.branchEntryIds ?? []);
+    const entries = snapshot.branchEntryIds ?? [];
+    const priorDepth = this.currentBranchDepthBySession[sessionPath];
+    const priorLeaf = this.currentBranchLeafBySession[sessionPath];
+    let startIndex = 0;
+    if (priorDepth !== undefined && priorLeaf !== undefined) {
+      if (entries.length === priorDepth && snapshot.branchId === priorLeaf) startIndex = entries.length;
+      else if (entries.length >= priorDepth && priorDepth > 0 && entries[priorDepth - 1] === priorLeaf) {
+        startIndex = priorDepth;
+      }
+    }
+    let branchParents = this.branchParentsBySession[sessionPath];
+    let branchEntries = this.currentBranchEntriesBySession[sessionPath];
+    if (startIndex === 0) {
+      branchParents = new Map();
+      branchEntries = new Set();
+    }
+    branchParents ??= new Map();
+    branchEntries ??= new Set();
+    for (let index = startIndex; index < entries.length; index += 1) {
+      const entryId = entries[index]!;
+      branchEntries.add(entryId);
+      branchParents.set(entryId, index === 0 ? null : entries[index - 1]!);
+    }
+    this.branchParentsBySession[sessionPath] = branchParents;
+    this.currentBranchEntriesBySession[sessionPath] = branchEntries;
     this.currentBranchLeafBySession[sessionPath] = snapshot.branchId;
+    this.currentBranchDepthBySession[sessionPath] = entries.length > 0 ? entries.length : undefined;
     for (const sample of snapshot.samples) {
       // Retry classification is host-only and older transcripts contain
       // aggregate compatibility rows. Source identity prevents either from
@@ -698,6 +725,32 @@ export class BillableAccounting {
       });
       existingSourceIds.add(sample.sourceId);
     }
+  }
+
+  observeBranchEntry(
+    sessionPath: string,
+    entryId: string,
+    parentEntryId: string | null | undefined,
+    selectedEntryId: string,
+  ): void {
+    this.currentBranchSourcesBySession[sessionPath] ??= new Set();
+    const parents = this.branchParentsBySession[sessionPath] ??= new Map();
+    parents.set(entryId, parentEntryId);
+    const priorLeaf = this.currentBranchLeafBySession[sessionPath];
+    const priorDepth = this.currentBranchDepthBySession[sessionPath];
+    const selected = new Set<string>();
+    let cursor: string | null | undefined = selectedEntryId;
+    while (cursor !== null && cursor !== undefined && !selected.has(cursor)) {
+      selected.add(cursor);
+      cursor = parents.get(cursor);
+    }
+    this.currentBranchEntriesBySession[sessionPath] = selected;
+    this.currentBranchDepthBySession[sessionPath] = priorLeaf !== undefined
+      && priorDepth !== undefined
+      && parentEntryId === priorLeaf
+      ? priorDepth + 1
+      : undefined;
+    this.currentBranchLeafBySession[sessionPath] = selectedEntryId;
   }
 
   /** Adapt one auxiliary/provider usage payload into ledger evidence.
@@ -824,7 +877,9 @@ export class BillableAccounting {
   onSessionClosed(sessionPath: string): void {
     delete this.currentBranchSourcesBySession[sessionPath];
     delete this.currentBranchEntriesBySession[sessionPath];
+    delete this.branchParentsBySession[sessionPath];
     delete this.currentBranchLeafBySession[sessionPath];
+    delete this.currentBranchDepthBySession[sessionPath];
     delete this.pendingRetryBySession[sessionPath];
     delete this.assistantInvocationObservedBySession[sessionPath];
     delete this.lastFailedAssistantSettlementBySession[sessionPath];
@@ -844,11 +899,17 @@ export class BillableAccounting {
     if (sources) this.currentBranchSourcesBySession[newPath] = sources;
     const entries = this.currentBranchEntriesBySession[oldPath];
     if (entries) this.currentBranchEntriesBySession[newPath] = entries;
+    const parents = this.branchParentsBySession[oldPath];
+    if (parents) this.branchParentsBySession[newPath] = parents;
     const leaf = this.currentBranchLeafBySession[oldPath];
     if (leaf) this.currentBranchLeafBySession[newPath] = leaf;
+    const depth = this.currentBranchDepthBySession[oldPath];
+    if (depth !== undefined) this.currentBranchDepthBySession[newPath] = depth;
     delete this.currentBranchSourcesBySession[oldPath];
     delete this.currentBranchEntriesBySession[oldPath];
+    delete this.branchParentsBySession[oldPath];
     delete this.currentBranchLeafBySession[oldPath];
+    delete this.currentBranchDepthBySession[oldPath];
     const settlements = this.canonicalSettlementsBySession.get(oldPath);
     if (settlements) this.canonicalSettlementsBySession.set(newPath, settlements);
     this.canonicalSettlementsBySession.delete(oldPath);

@@ -9,7 +9,7 @@ import {
   TOOL_PROGRESS_MAX_BYTES,
   type BackendSessionEventHandlerDeps,
 } from '../../../src/backend/session-event-handler';
-import type { SdkSessionEvent } from '../../../src/backend/sdk';
+import type { SdkSession, SdkSessionEvent, SdkSessionManager } from '../../../src/backend/sdk';
 import type { SessionContext } from '../../../src/backend/server-types';
 import { BackendLiveTurnAccumulator } from '../../../src/backend/live-turn-accumulator';
 import { OrderedJsonlWriter } from '../../../src/backend/server-io';
@@ -1294,6 +1294,54 @@ test('message_end emits finished and aborted payloads and clears the current mes
   } finally {
     Date.now = originalNow;
   }
+});
+
+test('message_end publishes exact persisted branch ancestry before role-specific handling', () => {
+  const { deps, emitted } = createDeps();
+  const sessionManager = {
+    getCwd: () => '/workspace',
+    getSessionFile: () => '/workspace/session.jsonl',
+    getSessionName: () => undefined,
+    getBranch: () => { throw new Error('durable event must not scan branch history'); },
+    getEntries: () => [],
+    getEntry: (entryId: string) => entryId === 'entry-B' ? {
+      id: 'entry-B', parentId: 'entry-A', timestamp: '2026-01-01T00:00:05.000Z', type: 'message',
+    } : undefined,
+  } satisfies SdkSessionManager;
+  const session = {
+    isStreaming: false,
+    messages: [],
+    sessionManager,
+    subscribe: () => () => undefined,
+    bindExtensions: async () => undefined,
+    waitForIdle: async () => undefined,
+    navigateTree: async () => ({ cancelled: false }),
+    reload: async () => undefined,
+    prompt: async () => undefined,
+    compact: async () => undefined,
+    abort: async () => undefined,
+    followUp: async () => undefined,
+    clearQueue: () => ({ steering: [], followUp: [] }),
+  } satisfies SdkSession;
+  const context = createContext({
+    session,
+    activeRequest: { id: 'branch-request', messageIndex: 0, aborted: false },
+  });
+  handleSdkSessionEventImpl(deps, context, {
+    type: 'message_end',
+    sessionEntryId: 'entry-B',
+    message: { role: 'user', content: 'durable user row' },
+  });
+  assert.deepEqual(emitted, [{
+    event: 'analytics.branch',
+    payload: {
+      sessionPath: '/workspace/session.jsonl',
+      entryId: 'entry-B',
+      parentEntryId: 'entry-A',
+      selectedEntryId: 'entry-B',
+      observedAt: Date.parse('2026-01-01T00:00:05.000Z'),
+    },
+  }]);
 });
 
 test('message_end marks user-initiated interruptions without surfacing an unexpected-stop reason', () => {

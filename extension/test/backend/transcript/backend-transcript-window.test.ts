@@ -110,12 +110,14 @@ test('buildDisplayTranscriptCache records transcript fingerprints and stale dete
   const entries = [
     {
       id: 'entry-1',
+      parentId: null,
       timestamp: '2026-01-01T00:00:00.000Z',
       type: 'message',
       message: { role: 'user', content: 'hello' },
     },
     {
       id: 'entry-2',
+      parentId: 'entry-1',
       timestamp: '2026-01-01T00:00:01.000Z',
       type: 'message',
       message: { role: 'assistant', content: [{ type: 'text', text: 'world' }] },
@@ -129,6 +131,8 @@ test('buildDisplayTranscriptCache records transcript fingerprints and stale dete
   assert.equal(cache.hasUserMessages, true);
   assert.equal(cache.transcript.length, 2);
   assert.deepEqual(cache.sessionUsage.samples, []);
+  assert.deepEqual(cache.sessionUsage.branchEntryIds, ['entry-1', 'entry-2']);
+  assert.equal('branchEdges' in cache.sessionUsage, false);
   assert.equal(isDisplayTranscriptCacheStale(cache, entries as any), false);
   assert.equal(isDisplayTranscriptCacheStale(cache, [...entries, { id: 'entry-3' }] as any), true);
 });

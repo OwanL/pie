@@ -31,6 +31,7 @@ function createHandlers() {
     onCompactionStarted: (payload) => calls.push({ name: 'compaction.started', payload }),
     onCompaction: (payload) => calls.push({ name: 'compaction.ended', payload }),
     onAuxiliaryLlmUsage: (payload) => calls.push({ name: 'auxiliary-llm.usage', payload }),
+    onAnalyticsBranchObserved: (payload) => calls.push({ name: 'analytics.branch', payload }),
     onOperationalError: (payload) => calls.push({ name: 'operational-error', payload }),
     onAgentSettled: (payload) => calls.push({ name: 'agent.settled', payload }),
     onBusyChanged: (payload) => calls.push({ name: 'busy.changed', payload }),
@@ -84,6 +85,27 @@ test('dispatchSessionBackendEvent requires durable transcript identity on termin
     payload: { ...payload, occurredAt: undefined },
   }, handlers);
   assert.deepEqual(calls, [{ name: 'live.lifecycle', payload }]);
+});
+
+test('dispatchSessionBackendEvent accepts exact branch ancestry and drops malformed selections', () => {
+  const { handlers, calls } = createHandlers();
+  const payload = {
+    sessionPath: '/workspace/session.jsonl',
+    entryId: 'entry-B',
+    parentEntryId: 'entry-A',
+    selectedEntryId: 'entry-B',
+    observedAt: 1_800_000_000_100,
+  };
+  dispatchSessionBackendEvent({ event: 'analytics.branch', payload }, handlers);
+  dispatchSessionBackendEvent({
+    event: 'analytics.branch',
+    payload: { ...payload, parentEntryId: 12 },
+  }, handlers);
+  dispatchSessionBackendEvent({
+    event: 'analytics.branch',
+    payload: { ...payload, selectedEntryId: undefined },
+  }, handlers);
+  assert.deepEqual(calls, [{ name: 'analytics.branch', payload }]);
 });
 
 test('dispatchSessionBackendEvent routes authoritative agent settlement capabilities', () => {

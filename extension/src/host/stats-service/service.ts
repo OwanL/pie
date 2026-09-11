@@ -75,6 +75,14 @@ export class StatsService implements RunObserver {
   /** Exact create/duplicate origin retained after the pending path is replaced.
    * A close operation ID must never enter this map. */
   private readonly pendingCreateOperationBySessionPath = new Map<string, string>();
+  /** Prevent ordinary session refreshes from rescanning or resubmitting the
+   * full selected ancestry. Branch switches rehydrate once; appends advance
+   * from the prior exact leaf in constant time plus the new suffix. */
+  private readonly canonicalBranchEntriesBySession = new Map<string, {
+    captured: Set<string>;
+    selectedEntryId?: string;
+    selectedDepth?: number;
+  }>();
   private startPromise: Promise<void> | null = null;
   private started = false;
   private disposed = false;
@@ -608,8 +616,95 @@ export class StatsService implements RunObserver {
     sessionPath: string,
     sessionId: string | undefined,
     snapshot: SessionUsageSnapshot,
+    selectionId?: string,
+    selectionObservedAt?: number,
   ): void {
     this.accounting.observeSessionUsageSnapshot(sessionPath, sessionId, snapshot);
+    const context = this.analyticsContext(sessionPath);
+    const state = this.canonicalBranchEntriesBySession.get(sessionPath) ?? { captured: new Set<string>() };
+    const entries = snapshot.branchEntryIds ?? [];
+    let startIndex = 0;
+    if (state.selectedDepth !== undefined && state.selectedEntryId !== undefined) {
+      if (entries.length === state.selectedDepth && snapshot.branchId === state.selectedEntryId) {
+        startIndex = entries.length;
+      } else if (entries.length >= state.selectedDepth
+        && state.selectedDepth > 0
+        && entries[state.selectedDepth - 1] === state.selectedEntryId) {
+        startIndex = state.selectedDepth;
+      }
+    }
+    for (let index = startIndex; index < entries.length; index += 1) {
+      const entryId = entries[index]!;
+      if (state.captured.has(entryId)) continue;
+      this.canonicalCapture?.captureBranchEdge(
+        context,
+        entryId,
+        index === 0 ? null : entries[index - 1]!,
+        0,
+        'snapshot',
+      );
+      state.captured.add(entryId);
+    }
+    if (entries.length > 0) {
+      state.selectedEntryId = snapshot.branchId ?? entries[entries.length - 1];
+      state.selectedDepth = entries.length;
+      this.canonicalBranchEntriesBySession.set(sessionPath, state);
+    }
+    if (snapshot.branchId && selectionId) {
+      this.canonicalCapture?.captureBranchSelection(
+        context,
+        snapshot.branchId,
+        selectionId,
+        selectionObservedAt ?? 0,
+      );
+    }
+  }
+
+  onBranchObserved(
+    sessionPath: string,
+    entryId: string,
+    parentEntryId: string | null | undefined,
+    selectedEntryId: string,
+    observedAt: number,
+  ): void {
+    this.accounting.observeBranchEntry(sessionPath, entryId, parentEntryId, selectedEntryId);
+    const state = this.canonicalBranchEntriesBySession.get(sessionPath) ?? { captured: new Set<string>() };
+    state.captured.add(entryId);
+    if (state.selectedEntryId !== undefined
+      && state.selectedDepth !== undefined
+      && parentEntryId === state.selectedEntryId) {
+      state.selectedDepth += 1;
+    } else {
+      state.selectedDepth = undefined;
+    }
+    state.selectedEntryId = selectedEntryId;
+    this.canonicalBranchEntriesBySession.set(sessionPath, state);
+    const context = this.analyticsContext(sessionPath);
+    this.canonicalCapture?.captureBranchEdge(context, entryId, parentEntryId, observedAt);
+    this.canonicalCapture?.captureBranchSelection(
+      context,
+      selectedEntryId,
+      `entry:${selectedEntryId}`,
+      observedAt,
+    );
+  }
+
+  onSessionDuplicated(input: {
+    destinationPath: string;
+    destinationSessionId: string;
+    sourcePath: string;
+    sourceSessionId: string;
+    sourceBranchId?: string;
+    operationId: string;
+    observedAt: number;
+  }): void {
+    this.canonicalCapture?.captureCopy(
+      { sessionId: input.destinationSessionId, sessionPath: input.destinationPath, operationId: input.operationId },
+      { sessionId: input.sourceSessionId, sessionPath: input.sourcePath },
+      input.sourceBranchId,
+      input.operationId,
+      input.observedAt,
+    );
   }
 
   onToolStarted(sessionPath: string, toolCall: ToolCall): void {
@@ -848,6 +943,7 @@ export class StatsService implements RunObserver {
   }
 
   onSessionClosed(sessionPath: string): void {
+    this.canonicalBranchEntriesBySession.delete(sessionPath);
     if (this.canonicalCapture) {
       // Session-close retention/deletion is deliberately not inferred here.
       // P2b resolves the durable close disposition before invoking recorder
@@ -887,6 +983,11 @@ export class StatsService implements RunObserver {
     this.workingTime.replaceSessionPath(oldPath, newPath);
     this.tracker.replaceSessionPath(oldPath, newPath, stableSessionId);
     this.accounting.replaceSessionPath(oldPath, newPath);
+    const capturedBranchEntries = this.canonicalBranchEntriesBySession.get(oldPath);
+    if (capturedBranchEntries) {
+      this.canonicalBranchEntriesBySession.delete(oldPath);
+      this.canonicalBranchEntriesBySession.set(newPath, capturedBranchEntries);
+    }
     const pendingOrigin = pendingCreateOperationId
       ?? this.pendingCreateOperationBySessionPath.get(oldPath);
     if (!pendingOrigin) return;

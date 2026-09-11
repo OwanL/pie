@@ -44,6 +44,8 @@ function settlement(options: {
     generationId: 'generation-1',
     invocationId: options.invocationId,
     rootSessionId: options.rootSessionId ?? 'root-a',
+    executionId: null,
+    branchId: null,
     provider: options.provider ?? 'anthropic',
     model: options.model ?? 'claude-x',
     dispatchedModel: options.model ?? 'claude-x',
