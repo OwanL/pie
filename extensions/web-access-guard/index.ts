@@ -47,6 +47,8 @@ import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
+import { classifyManagedPackageSources, MANAGED_PACKAGE_REQUIREMENTS, managedPackageRoot, managedRequiredFileCandidates, resolveManagedCacheTargets } from "../../shared/managed-package-contract.mjs";
+import { resolvePieDataPaths } from "../../shared/pie-data-root-core.mjs";
 
 /** Prefix on every diagnostic line so users can attribute/filter the source. */
 const LOG_PREFIX = "web-access-guard";
@@ -99,10 +101,12 @@ const RESOLVE_WORKFLOW_CLAMPED =
  * load-time transforms below are deliberately fingerprinted to these source
  * shapes and fail closed on a version/source drift.
  */
-const MCP_ADAPTER_PACKAGE_NAME = "pi-mcp-adapter";
-const MCP_ADAPTER_VERSION = "2.20.1";
-const WEB_ACCESS_PACKAGE_NAME = "pi-web-access";
-const WEB_ACCESS_VERSION = "0.27.0";
+const MCP_ADAPTER_REQUIREMENT = MANAGED_PACKAGE_REQUIREMENTS.find((entry) => entry.name === "pi-mcp-adapter")!;
+const WEB_ACCESS_REQUIREMENT = MANAGED_PACKAGE_REQUIREMENTS.find((entry) => entry.name === "pi-web-access")!;
+const MCP_ADAPTER_PACKAGE_NAME = MCP_ADAPTER_REQUIREMENT.name;
+const MCP_ADAPTER_VERSION = MCP_ADAPTER_REQUIREMENT.version;
+const WEB_ACCESS_PACKAGE_NAME = WEB_ACCESS_REQUIREMENT.name;
+const WEB_ACCESS_VERSION = WEB_ACCESS_REQUIREMENT.version;
 
 const MCP_AGENT_PATH_RE = /export function getAgentPath\(\.\.\.segments: string\[\]\): string \{\n  return join\(getAgentDir\(\), \.\.\.segments\);\n\}/;
 const MCP_AGENT_PATH_REPLACEMENT = [
@@ -352,6 +356,97 @@ async function packageVersion(root: string, expectedName: string): Promise<strin
 	}
 }
 
+export type ManagedPackageReadinessStatus =
+	| "ready"
+	| "missing"
+	| "malformed-manifest"
+	| "wrong-version"
+	| "missing-source"
+	| "unresolved-cache"
+	| "unsupported-source";
+
+export interface ManagedPackageReadiness {
+	name: string;
+	expectedVersion: string;
+	root: string;
+	status: ManagedPackageReadinessStatus;
+	sourceFingerprint: "pristine" | "supported-patched" | "unsupported" | "unavailable";
+	cacheTargets: readonly string[];
+	detail: string;
+	remediation: string;
+}
+
+function packageRequirement(packageName: string) {
+	return MANAGED_PACKAGE_REQUIREMENTS.find((entry) => entry.name === packageName);
+}
+
+/**
+ * Inspect one exact managed package without searching or touching global npm
+ * locations. The result is suitable for doctor output and future activation
+ * gates; it accepts both the pristine pinned source and this guard's exact
+ * idempotent patch output.
+ */
+export async function inspectManagedPackageReadiness(
+	root: string,
+	packageName: string,
+	cacheDir: string | undefined = process.env.PIE_CACHE_DIR,
+): Promise<ManagedPackageReadiness> {
+	const requirement = packageRequirement(packageName);
+	if (!requirement) throw new Error(`Unsupported managed package: ${packageName}`);
+	const remediation = `Install the managed package with: pi install ${requirement.source}`;
+	const cacheTargets = resolveManagedCacheTargets(packageName, cacheDir) ?? [];
+	const base = {
+		name: requirement.name,
+		expectedVersion: requirement.version,
+		root,
+		cacheTargets,
+		remediation,
+	};
+	const manifestPath = path.join(root, "package.json");
+	if (!(await pathExists(manifestPath))) {
+		return { ...base, status: "missing", sourceFingerprint: "unavailable", detail: `Managed package manifest is missing: ${manifestPath}` };
+	}
+	let manifest: { name?: unknown; version?: unknown };
+	try {
+		manifest = JSON.parse(await readFile(manifestPath, "utf8")) as { name?: unknown; version?: unknown };
+	} catch {
+		return { ...base, status: "malformed-manifest", sourceFingerprint: "unavailable", detail: `Managed package manifest is not valid JSON: ${manifestPath}` };
+	}
+	if (manifest.name !== requirement.name || typeof manifest.version !== "string") {
+		return { ...base, status: "malformed-manifest", sourceFingerprint: "unavailable", detail: `Managed package manifest is malformed or names ${String(manifest.name)}.` };
+	}
+	if (manifest.version !== requirement.version) {
+		return { ...base, status: "wrong-version", sourceFingerprint: "unavailable", detail: `Managed package version ${manifest.version} is unsupported; expected ${requirement.version}.` };
+	}
+	for (const relative of requirement.requiredFiles) {
+		const candidates = managedRequiredFileCandidates(root, relative);
+		if (!(await Promise.all(candidates.map((candidate) => pathExists(candidate)))).some(Boolean)) {
+			return { ...base, status: "missing-source", sourceFingerprint: "unavailable", detail: `Required managed package file is missing: ${relative}` };
+		}
+	}
+	if (cacheTargets.length !== requirement.cacheTargets.length) {
+		return { ...base, status: "unresolved-cache", sourceFingerprint: "unavailable", detail: "PIE_CACHE_DIR is unset or is not an absolute path; the canonical cache target cannot be verified." };
+	}
+
+	let fingerprint: ManagedPackageReadiness["sourceFingerprint"] = "pristine";
+	try {
+		if (requirement.name === WEB_ACCESS_PACKAGE_NAME) {
+			const index = await readFile(path.join(root, "index.ts"), "utf8");
+			const storage = await readFile(path.join(root, "storage.ts"), "utf8");
+			fingerprint = classifyManagedPackageSources(requirement.name, { index, storage });
+		} else {
+			const agentDir = await readFile(path.join(root, "agent-dir.ts"), "utf8");
+			fingerprint = classifyManagedPackageSources(requirement.name, { agentDir });
+		}
+	} catch {
+		fingerprint = "unavailable";
+	}
+	if (fingerprint === "unsupported" || fingerprint === "unavailable") {
+		return { ...base, status: "unsupported-source", sourceFingerprint: fingerprint, detail: `Pinned ${requirement.name} source fingerprint is unsupported or unreadable.` };
+	}
+	return { ...base, status: "ready", sourceFingerprint: fingerprint, detail: `Managed ${requirement.name}@${requirement.version} source is ${fingerprint}; cache target: ${cacheTargets.join(", ")}.` };
+}
+
 async function patchPinnedCacheFile(
 	root: string,
 	fileName: string,
@@ -440,6 +535,21 @@ export async function repairDeleteArtifacts(root: string): Promise<number> {
 	return restored;
 }
 
+/** Repair npm replacement artifacts in the package and its exact hoisted
+ * managed-prefix dependency root, never in an ancestor/global installation. */
+async function repairManagedDeleteArtifacts(root: string): Promise<number> {
+	const managedNodeModules = path.dirname(root);
+	if (path.basename(root) !== "pi-web-access"
+		|| path.basename(managedNodeModules) !== "node_modules"
+		|| path.basename(path.dirname(managedNodeModules)) !== "npm") {
+		return repairDeleteArtifacts(root);
+	}
+	const readabilityRoot = path.join(managedNodeModules, "@mozilla", "readability");
+	const packageRestored = await repairDeleteArtifacts(root);
+	const dependencyRestored = await repairDeleteArtifacts(readabilityRoot);
+	return packageRestored + dependencyRestored;
+}
+
 /**
  * Probe whether `@mozilla/readability` loads — its `index.js` requires
  * `./Readability`, so a missing `Readability.js` (renamed to `.DELETE.<hash>`)
@@ -459,7 +569,7 @@ export async function applyWebAccessGuard(root: string): Promise<void> {
 	await patchWorkflowClampFiles(root);
 	await patchWorkflowDescriptionFiles(root);
 	if (!(await readabilityIntact(root))) {
-		await repairDeleteArtifacts(root);
+		await repairManagedDeleteArtifacts(root);
 	}
 }
 
@@ -482,19 +592,28 @@ const PRODUCTION_LOOKUP_DEPS: PackageRootLookupDeps = {
 	getHomeDir: homedir,
 	pathExists,
 };
+function expandedAgentDir(deps: PackageRootLookupDeps): string {
+	const configured = deps.getAgentDir();
+	if (configured === "~") return deps.getHomeDir();
+	if (/^[~][\\/]/.test(configured)) return path.join(deps.getHomeDir(), configured.slice(2));
+	return configured;
+}
+
+/** Resolve the same canonical cache root used by the Pi backend client. */
+function canonicalGuardCacheDir(agentDir: string): string | undefined {
+	try {
+		return resolvePieDataPaths({ agentDir, environment: process.env }).cacheDir;
+	} catch (err) {
+		log(`canonical Pie cache root is unresolved: ${describeErr(err)}`);
+		return undefined;
+	}
+}
 /** Locate a package in Pi's active managed npm install only. */
 async function resolveManagedPackageRoot(
 	packageName: string,
 	deps: PackageRootLookupDeps,
 ): Promise<string | null> {
-	const configured = deps.getAgentDir();
-	let agentDir = configured;
-	if (configured === "~") {
-		agentDir = deps.getHomeDir();
-	} else if (/^[~][\\/]/.test(configured)) {
-		agentDir = path.join(deps.getHomeDir(), configured.slice(2));
-	}
-	const managed = path.join(agentDir, "npm", "node_modules", packageName);
+	const managed = managedPackageRoot(expandedAgentDir(deps), packageName);
 	return (await deps.pathExists(path.join(managed, "package.json"))) ? managed : null;
 }
 
@@ -517,27 +636,70 @@ export async function resolveMcpAdapterRoot(
 	return resolveManagedPackageRoot(MCP_ADAPTER_PACKAGE_NAME, deps);
 }
 
+/** Inspect both required packages below the active managed agent directory. */
+export async function inspectManagedPackages(
+	deps: PackageRootLookupDeps = PRODUCTION_LOOKUP_DEPS,
+): Promise<ManagedPackageReadiness[]> {
+	const agentDir = expandedAgentDir(deps);
+	// PIE_CACHE_DIR is injected by the VS Code backend, but direct `pi` loads
+	// the extension without that injection. Derive both cases from the one
+	// canonical data-root authority; never guess a global or package-local path.
+	const cacheDir = canonicalGuardCacheDir(agentDir);
+	if (cacheDir) process.env.PIE_CACHE_DIR = cacheDir;
+	return Promise.all(MANAGED_PACKAGE_REQUIREMENTS.map((requirement) =>
+		inspectManagedPackageReadiness(managedPackageRoot(agentDir, requirement.name), requirement.name, cacheDir)));
+}
+
 /**
  * Self-heal entry point. `resolveRoot` is injectable for testing (sync or
  * async); in production it resolves the managed install via
  * `resolvePackageRoot`. Never throws — any failure is logged with an
  * actionable hint and swallowed so extension loading continues.
  */
+export async function runManagedPackageSelfHeal(
+	resolveRoot: () => string | null | Promise<string | null> = resolvePackageRoot,
+	resolveMcpRoot: () => string | null | Promise<string | null> = resolveMcpAdapterRoot,
+	inspect: () => Promise<ManagedPackageReadiness[]> = inspectManagedPackages,
+	logger: (message: string) => void = log,
+): Promise<void> {
+	const readiness = await inspect();
+	const root = await resolveRoot();
+	const web = readiness.find((result) => result.name === WEB_ACCESS_PACKAGE_NAME);
+	let webReady = web;
+	if (webReady?.status === "missing-source" && root && !(await readabilityIntact(root))) {
+		await repairManagedDeleteArtifacts(root);
+		webReady = (await inspect()).find((result) => result.name === WEB_ACCESS_PACKAGE_NAME);
+	}
+	for (const result of readiness) {
+		const current = result.name === WEB_ACCESS_PACKAGE_NAME ? webReady : result;
+		if (current && current.status !== "ready") {
+			logger(`${current.detail} Intended cache target: ${current.cacheTargets.join(", ")}. ${current.remediation}`);
+		}
+	}
+	if (webReady?.status === "ready" && root) {
+		await applyWebAccessGuard(root);
+		await patchWebFetchCacheFiles(root);
+	}
+	const mcpRoot = await resolveMcpRoot();
+	const mcp = readiness.find((result) => result.name === MCP_ADAPTER_PACKAGE_NAME);
+	if (mcp?.status === "ready" && mcpRoot) await patchMcpCacheFiles(mcpRoot);
+}
+
 export async function runSelfHeal(
 	resolveRoot: () => string | null | Promise<string | null> = resolvePackageRoot,
 	resolveMcpRoot: () => string | null | Promise<string | null> = resolveMcpAdapterRoot,
 ): Promise<void> {
 	try {
-		const root = await resolveRoot();
-		if (root) {
+		// Injectable web-only tests must retain their direct patch behavior.
+		// Production first reports the exact managed readiness state; a global
+		// package is never considered a fallback or patched by this guard.
+		if (resolveRoot === resolvePackageRoot) {
+			await runManagedPackageSelfHeal(resolveRoot, resolveMcpRoot);
+		} else {
+			const root = await resolveRoot();
+			if (!root) return;
 			await applyWebAccessGuard(root);
 			await patchWebFetchCacheFiles(root);
-		}
-		// Injectable web-only tests must not mutate the active managed MCP
-		// install. Production uses the two managed-package resolvers together.
-		if (resolveRoot === resolvePackageRoot) {
-			const mcpRoot = await resolveMcpRoot();
-			if (mcpRoot) await patchMcpCacheFiles(mcpRoot);
 		}
 	} catch (err) {
 		log(`self-heal failed: ${describeErr(err)} — web tools may be unavailable; reinstall pi-web-access if its tools are missing`);

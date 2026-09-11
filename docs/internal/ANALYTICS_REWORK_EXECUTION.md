@@ -1464,3 +1464,59 @@ previously recorded recorder lifecycle, activation manifest, all-host cutoff, re
 journaled handoff and no-stale-review-writer obligations. No runtime or renderer publication,
 activation, cutover, restart, session closure, helper arming, cache switch or real data mutation has
 occurred. The four user-owned model/settings files and `stash@{0}` remain preserved and excluded.
+
+### Checkpoint 17: accepted P4 terminal unit and qualified P2c managed-package seam
+
+The accepted P4 terminal unit was committed at `ed97b147` (`Integrate canonical terminal evidence`).
+Its final type boundary keeps the heterogeneous `AnalyticsObservation` read API intact while allowing
+typed producers to submit concrete field objects through the supervisor and SQLite recorder without
+`any` or `unknown` casts. Shared, extension and subagent scoped typechecks passed. The expanded focused
+run covered the real producer/recorder/read-model path plus canonical capture, supervisor, SQLite,
+terminal dispatch, lifecycle and billing seams: 23 subagent and 111 extension tests passed. The unit
+remains inactive pending the production sink/acknowledgement and parent-tool resolver wiring recorded
+above.
+
+P2c is now source-complete and independently accepted. The runtime guard and read-only doctor use one
+shared managed-package contract for exact configured pins, managed root identity, package versions,
+source fingerprints, dependency readiness and resolved cache targets. Exact-plus-conflicting pins are
+rejected. The cache root comes from the same canonical Pie data-root resolver in a normal CLI shell;
+it does not depend on backend-only environment injection. Readability readiness follows the actual
+npm-hoisted dependency location. Missing, unsupported or corrupt managed prerequisites fail visibly
+and never patch a global fallback. Focused managed-package, guard and path-root coverage passed 65/65,
+and the normal-shell doctor reported both pinned packages `supported-patched` with their absolute
+default cache targets without repairing or changing live state.
+
+The real package-manager qualification used pinned Node 24.16.0, npm 11.13.0 and Pi 0.80.6 with an
+isolated agent/auth/session/data/cache/npm-config/npm-cache/temp root under
+`C:\dev\scratch\pie-managed-pi-proof-run2-20260911-e71c5ba8`. The reviewed harness source was
+`C:\dev\scratch\pie-managed-pi-proof-20260911\prove-managed-install.mjs`, SHA-256
+`693319B96C8CC7CDD351EFBCA2E2B298847E88DBF73AFDECA25538625BF64DBF`. It installed
+`pi-web-access@0.27.0` and `pi-mcp-adapter@2.20.1` through the real Pi CLI, verified exact tarball URLs,
+integrities and isolated npm cache evidence, proved pristine-to-supported-patched self-heal and the
+real web/MCP cache APIs, removed both packages, then reinstalled them offline from that proof-owned
+cache with identical results. Repository status, the seven protected file hashes and the complete
+pinned SDK tree were unchanged. All numbered stage logs completed with empty stderr. An earlier
+scratch-only harness revision stopped before installation because native Windows `spawnSync` cannot
+launch `npm.cmd`; the reviewed revision uses pinned Node plus npm's sibling `npm-cli.js` only for
+harness observations while the Pi CLI retains its supported `npm.cmd` path. That failure was test
+transport evidence, not a product or package-manager failure.
+
+The combined serialized barrier then passed: `git diff --check` returned zero with only the two known
+CRLF-to-LF notices in P2c-owned files; root typecheck passed all 17 projects; lint passed; the full fast
+suite passed 6,575 tests with zero failures and 29 skips across all seven package groups; and
+`npm run extension:build:validate` selected `--no-sync`, returned zero and produced coordinated
+host/webview identity `dc2c515facc6c99102ca`. Exact before/after snapshots of status, `HEAD`, stash
+list and the four user-owned files plus three lockfiles were identical. No runtime or renderer was
+published, and no live package repair, package/cache switch, activation, cutover, restart, session
+closure, helper arming or real data mutation occurred.
+
+P4 next owns two separate fixtures and their production identity edges. The branch fixture records
+A=`.01` with fork tips B=`.02` and C=`.03`, yielding selected branch totals `.03`/`.04` while root
+all-work remains `.06`. The copy fixture inherits A+B=`.03` by stable invocation reference and adds
+copy-owned D=`.04`, yielding source `.03`, inherited `.03`, copy-owned `.04` and globally distinct
+`.07`; it does not contain C. A combined fixture containing A+B+C+D would therefore total `.10`.
+After branch/copy persistence and projection, P4 still needs bounded cross-host revision refresh.
+P0 remains unqualified pending the full scale/endurance/responsiveness matrix. Final P6 legacy
+analytics writer/compatibility retirement and P7 recorder lifecycle, activation manifest,
+pre-dispatch/provider instrumentation, all-host cutoff, restart/restore and journaled handoff remain
+closed until their replacement gates are met.

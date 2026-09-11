@@ -5,6 +5,8 @@ import { collectEnvironmentDiagnostics } from "./doctor-environment.mjs";
 import { collectStrandedLegacySessions } from "./doctor-sessions.mjs";
 import { collectPostMigrationOutcomeDrift } from "./doctor-outcomes.mjs";
 import { spawnCliSync } from "./lib/subprocess.mjs";
+import { inspectManagedPackages, managedPackagePinsReady } from "./install/lib/managed-packages.mjs";
+import { resolvePieDataPaths } from "../shared/pie-data-root-core.mjs";
 
 const ci = process.argv.includes("--ci");
 const skipModelCheck = process.argv.includes("--skip-model-check");
@@ -55,6 +57,27 @@ for (const relative of [".", "extension", "analysis"]) {
 }
 
 const settings = JSON.parse(fs.readFileSync(path.join(repoRoot, "settings.json"), "utf8"));
+if (!managedPackagePinsReady(settings)) {
+  fail("settings.json must pin pi-web-access@0.27.0 and pi-mcp-adapter@2.20.1");
+}
+const managedAgentDir = process.env.PI_CODING_AGENT_DIR?.trim() || repoRoot;
+let managedCacheDir;
+try {
+  managedCacheDir = resolvePieDataPaths({
+    dataDir: process.env.PIE_DATA_DIR,
+    agentDir: managedAgentDir,
+    environment: process.env,
+  }).cacheDir;
+} catch (error) {
+  fail(`canonical Pie cache root is unresolved: ${error instanceof Error ? error.message : String(error)}`);
+}
+for (const result of inspectManagedPackages({ agentDir: managedAgentDir, cacheDir: managedCacheDir })) {
+  if (result.status === "ready") {
+    ok(`${result.name}@${result.expectedVersion} managed package ready (${result.sourceFingerprint}; ${result.cacheTargets.join(", ")})`);
+  } else {
+    fail(`${result.name}: ${result.detail} Intended cache target: ${result.cacheTargets.join(", ")}. ${result.remediation}`);
+  }
+}
 settings.sessionDir === "data/outcomes/sessions" ? ok("sessions are configured as checkout-local runtime data") : fail("settings.sessionDir must be data/outcomes/sessions");
 const ignore = fs.readFileSync(path.join(repoRoot, ".gitignore"), "utf8");
 ignore.includes("/data/") && ignore.includes("auth.json") ? ok("auth and runtime data are git-ignored") : fail(".gitignore must exclude auth.json and /data/");

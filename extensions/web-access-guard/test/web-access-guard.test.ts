@@ -30,10 +30,12 @@ import {
 	patchMcpCachePathInSource,
 	patchWebFetchCacheFiles,
 	patchWebFetchCachePathInSource,
+	inspectManagedPackageReadiness,
 	readabilityIntact,
 	repairDeleteArtifacts,
 	resolveMcpAdapterRoot,
 	resolvePackageRoot,
+	runManagedPackageSelfHeal,
 	runSelfHeal,
 	stripDeleteSuffix,
 	type PackageRootLookupDeps,
@@ -546,6 +548,23 @@ test("applyWebAccessGuard preserves compat imports and repairs corruption in one
 	}
 });
 
+test("applyWebAccessGuard repairs a hoisted readability .DELETE artifact only under the managed prefix", async () => {
+	const agentDir = makePkg();
+	const root = path.join(agentDir, "npm", "node_modules", "pi-web-access");
+	try {
+		writePkgFile(root, "package.json", '{"name":"pi-web-access","version":"0.27.0"}');
+		const dep = path.join(agentDir, "npm", "node_modules", "@mozilla", "readability");
+		writePkgFile(dep, "package.json", '{"name":"@mozilla/readability","main":"index.js"}');
+		writePkgFile(dep, "index.js", 'require("./Readability");');
+		writePkgFile(dep, "Readability.js.DELETE.hoisted", "x");
+		await applyWebAccessGuard(root);
+		assert.equal(existsSync(path.join(dep, "Readability.js")), true);
+		assert.equal(existsSync(path.join(dep, "Readability.js.DELETE.hoisted")), false);
+	} finally {
+		rmSync(agentDir, { recursive: true, force: true });
+	}
+});
+
 test("applyWebAccessGuard skips the repair walk when node_modules is healthy", async () => {
 	const root = makePkg();
 	try {
@@ -796,6 +815,321 @@ test("0.27: applyWebAccessGuard enforces policy while preserving the required co
 			"description should match the clamped behavior",
 		);
 		assert.ok(!firstPass.includes("Searches auto-open"), "misleading sentence should be gone");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("managed readiness reports pristine and supported-patched packages with cache targets", async () => {
+	const webRoot = makePkg();
+	try {
+		writePkgFile(webRoot, "package.json", '{"name":"pi-web-access","version":"0.27.0"}');
+		writePkgFile(webRoot, "index.ts", `${V027_RESOLVE_WORKFLOW_SRC}\n\n${V027_WORKFLOW_ENUM_SRC}\n\n${V027_WEB_SEARCH_DESCRIPTION_SRC}`);
+		writePkgFile(webRoot, "storage.ts", WEB_STORAGE_SRC);
+		writePkgFile(webRoot, "node_modules/@mozilla/readability/Readability.js", "export class Readability {};");
+		const pristine = await inspectManagedPackageReadiness(webRoot, "pi-web-access", path.join(webRoot, "cache"));
+		assert.equal(pristine.status, "ready");
+		assert.equal(pristine.sourceFingerprint, "pristine");
+		assert.deepEqual(pristine.cacheTargets, [path.join(webRoot, "cache", "web-search-cache")]);
+
+		await patchWorkflowClampFiles(webRoot);
+		const mixed = await inspectManagedPackageReadiness(webRoot, "pi-web-access", path.join(webRoot, "cache"));
+		assert.equal(mixed.status, "ready");
+		assert.equal(mixed.sourceFingerprint, "supported-patched");
+		await patchWorkflowDescriptionFiles(webRoot);
+		await patchWebFetchCacheFiles(webRoot);
+		const patched = await inspectManagedPackageReadiness(webRoot, "pi-web-access", path.join(webRoot, "cache"));
+		assert.equal(patched.status, "ready");
+		assert.equal(patched.sourceFingerprint, "supported-patched");
+	} finally {
+		rmSync(webRoot, { recursive: true, force: true });
+	}
+});
+
+test("managed readiness fails closed for malformed, wrong-version, and modified sources", async () => {
+	const root = makePkg();
+	try {
+		writePkgFile(root, "package.json", '{"name":"pi-web-access","version":"0.27.0"}');
+		writePkgFile(root, "index.ts", "export const changed = true;");
+		writePkgFile(root, "storage.ts", "export const changed = true;");
+		writePkgFile(root, "node_modules/@mozilla/readability/Readability.js", "export class Readability {};");
+		assert.equal((await inspectManagedPackageReadiness(root, "pi-web-access", path.join(root, "cache"))).status, "unsupported-source");
+		writePkgFile(root, "package.json", '{"name":"pi-web-access","version":"0.28.0"}');
+		assert.equal((await inspectManagedPackageReadiness(root, "pi-web-access", path.join(root, "cache"))).status, "wrong-version");
+		writePkgFile(root, "package.json", '{"name":"pi-web-access"}');
+		assert.equal((await inspectManagedPackageReadiness(root, "pi-web-access", path.join(root, "cache"))).status, "malformed-manifest");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("managed readiness rejects loose cache markers with an unsupported function body", async () => {
+	const webRoot = makePkg();
+	const mcpRoot = makePkg();
+	try {
+		writePkgFile(webRoot, "package.json", '{"name":"pi-web-access","version":"0.27.0"}');
+		writePkgFile(webRoot, "index.ts", `${V027_RESOLVE_WORKFLOW_SRC}\n\n${V027_WORKFLOW_ENUM_SRC}\n\n${V027_WEB_SEARCH_DESCRIPTION_SRC}`);
+		writePkgFile(
+			webRoot,
+			"storage.ts",
+			WEB_STORAGE_SRC.replace(
+				"return join(getWebSearchConfigDir(), FETCH_CACHE_DIR);",
+				"return join(baseDir, FETCH_CACHE_DIR);",
+			),
+		);
+		writePkgFile(webRoot, "node_modules/@mozilla/readability/Readability.js", "export class Readability {};");
+		assert.equal(
+			(await inspectManagedPackageReadiness(webRoot, "pi-web-access", path.join(webRoot, "cache"))).status,
+			"unsupported-source",
+		);
+
+		writePkgFile(mcpRoot, "package.json", '{"name":"pi-mcp-adapter","version":"2.20.1"}');
+		writePkgFile(
+			mcpRoot,
+			"agent-dir.ts",
+			MCP_AGENT_DIR_SRC.replace(
+				"return join(getAgentDir(), ...segments);",
+				"return join(process.env.PIE_CACHE_DIR ?? getAgentDir(), ...segments);",
+			),
+		);
+		assert.equal(
+			(await inspectManagedPackageReadiness(mcpRoot, "pi-mcp-adapter", path.join(mcpRoot, "cache"))).status,
+			"unsupported-source",
+		);
+	} finally {
+		rmSync(webRoot, { recursive: true, force: true });
+		rmSync(mcpRoot, { recursive: true, force: true });
+	}
+});
+
+test("managed readiness rejects duplicate, mixed-state, and incomplete fingerprints", async () => {
+	const root = makePkg();
+	const mcpRoot = makePkg();
+	try {
+		writePkgFile(root, "package.json", '{"name":"pi-web-access","version":"0.27.0"}');
+		writePkgFile(root, "storage.ts", WEB_STORAGE_SRC);
+		writePkgFile(root, "node_modules/@mozilla/readability/Readability.js", "export class Readability {};");
+		const duplicateWorkflow = `${V027_RESOLVE_WORKFLOW_SRC}\n${V027_RESOLVE_WORKFLOW_SRC}\n\n${V027_WORKFLOW_ENUM_SRC}\n\n${V027_WEB_SEARCH_DESCRIPTION_SRC}`;
+		writePkgFile(root, "index.ts", duplicateWorkflow);
+		assert.equal((await inspectManagedPackageReadiness(root, "pi-web-access", path.join(root, "cache"))).status, "unsupported-source");
+
+		const clampedWorkflow = patchWorkflowClampInSource(V027_RESOLVE_WORKFLOW_SRC);
+		writePkgFile(root, "index.ts", `${V027_RESOLVE_WORKFLOW_SRC}\n${clampedWorkflow}\n\n${V027_WORKFLOW_ENUM_SRC}\n\n${V027_WEB_SEARCH_DESCRIPTION_SRC}`);
+		assert.equal((await inspectManagedPackageReadiness(root, "pi-web-access", path.join(root, "cache"))).status, "unsupported-source");
+
+		const incompleteEnum = V027_WORKFLOW_ENUM_SRC.replace(
+			"Search workflow mode: none = no curator, summary-review = open curator with auto summary draft (default), auto-summary = generate summary without opening curator",
+			"changed workflow description",
+		);
+		writePkgFile(root, "index.ts", `${V027_RESOLVE_WORKFLOW_SRC}\n\n${incompleteEnum}\n\n${V027_WEB_SEARCH_DESCRIPTION_SRC}`);
+		assert.equal((await inspectManagedPackageReadiness(root, "pi-web-access", path.join(root, "cache"))).status, "unsupported-source");
+		const patchedStorage = patchWebFetchCachePathInSource(WEB_STORAGE_SRC);
+		writePkgFile(root, "storage.ts", `${patchedStorage}\n${'import { join } from "node:path";'}`);
+		writePkgFile(root, "index.ts", `${V027_RESOLVE_WORKFLOW_SRC}\n\n${V027_WORKFLOW_ENUM_SRC}\n\n${V027_WEB_SEARCH_DESCRIPTION_SRC}`);
+		assert.equal((await inspectManagedPackageReadiness(root, "pi-web-access", path.join(root, "cache"))).status, "unsupported-source");
+
+		writePkgFile(mcpRoot, "package.json", '{"name":"pi-mcp-adapter","version":"2.20.1"}');
+		writePkgFile(mcpRoot, "agent-dir.ts", `${MCP_AGENT_DIR_SRC}\n${MCP_AGENT_DIR_SRC}`);
+		assert.equal((await inspectManagedPackageReadiness(mcpRoot, "pi-mcp-adapter", path.join(mcpRoot, "cache"))).status, "unsupported-source");
+		writePkgFile(mcpRoot, "agent-dir.ts", MCP_AGENT_DIR_SRC.replace('import { join, resolve } from "node:path";', 'import { join } from "node:path";'));
+		assert.equal((await inspectManagedPackageReadiness(mcpRoot, "pi-mcp-adapter", path.join(mcpRoot, "cache"))).status, "unsupported-source");
+		const patchedMcp = patchMcpCachePathInSource(MCP_AGENT_DIR_SRC);
+		writePkgFile(mcpRoot, "agent-dir.ts", `${MCP_AGENT_DIR_SRC}\n${patchedMcp}`);
+		assert.equal((await inspectManagedPackageReadiness(mcpRoot, "pi-mcp-adapter", path.join(mcpRoot, "cache"))).status, "unsupported-source");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+		rmSync(mcpRoot, { recursive: true, force: true });
+	}
+});
+
+test("managed readiness accepts the pristine MCP source and reports both cache targets", async () => {
+	const root = makePkg();
+	try {
+		writePkgFile(root, "package.json", '{"name":"pi-mcp-adapter","version":"2.20.1"}');
+		writePkgFile(root, "agent-dir.ts", MCP_AGENT_DIR_SRC);
+		const result = await inspectManagedPackageReadiness(root, "pi-mcp-adapter", path.join(root, "cache"));
+		assert.equal(result.status, "ready");
+		assert.equal(result.sourceFingerprint, "pristine");
+		assert.deepEqual(result.cacheTargets, [path.join(root, "cache", "mcp-cache.json"), path.join(root, "cache", "mcp-npx-cache.json")]);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("managed readiness accepts npm's exact hoisted readability dependency", async () => {
+	const agentDir = makePkg();
+	const root = path.join(agentDir, "npm", "node_modules", "pi-web-access");
+	try {
+		writePkgFile(root, "package.json", '{"name":"pi-web-access","version":"0.27.0"}');
+		writePkgFile(root, "index.ts", `${V027_RESOLVE_WORKFLOW_SRC}\n\n${V027_WORKFLOW_ENUM_SRC}\n\n${V027_WEB_SEARCH_DESCRIPTION_SRC}`);
+		writePkgFile(root, "storage.ts", WEB_STORAGE_SRC);
+		writePkgFile(agentDir, "npm/node_modules/@mozilla/readability/Readability.js", "export class Readability {};");
+		const result = await inspectManagedPackageReadiness(root, "pi-web-access", path.join(agentDir, "cache"));
+		assert.equal(result.status, "ready");
+		assert.equal(result.sourceFingerprint, "pristine");
+	} finally {
+		rmSync(agentDir, { recursive: true, force: true });
+	}
+});
+
+test("hoisted repair ignores a differently named package in the same directory shape", async () => {
+	const agentDir = makePkg();
+	const root = path.join(agentDir, "npm", "node_modules", "other-package");
+	try {
+		writePkgFile(root, "package.json", '{"name":"other-package","version":"0.27.0"}');
+		const dep = path.join(agentDir, "npm", "node_modules", "@mozilla", "readability");
+		writePkgFile(dep, "package.json", '{"name":"@mozilla/readability","main":"index.js"}');
+		writePkgFile(dep, "index.js", 'require("./Readability");');
+		const artifact = path.join(dep, "Readability.js.DELETE.foreign");
+		writePkgFile(agentDir, "npm/node_modules/@mozilla/readability/Readability.js.DELETE.foreign", "x");
+		await applyWebAccessGuard(root);
+		assert.equal(existsSync(artifact), true);
+	} finally {
+		rmSync(agentDir, { recursive: true, force: true });
+	}
+});
+
+test("managed lookup fails closed when only a stale global copy exists", async () => {
+	const agentDir = makePkg();
+	const staleGlobal = makePkg();
+	try {
+		writePkgFile(staleGlobal, "package.json", '{"name":"pi-web-access","version":"0.27.0"}');
+		assert.equal(await resolvePackageRoot(lookupDeps(agentDir)), null);
+		const managed = path.join(agentDir, "npm", "node_modules", "pi-web-access");
+		const result = await inspectManagedPackageReadiness(managed, "pi-web-access", path.join(agentDir, "cache"));
+		assert.equal(result.status, "missing");
+		assert.ok(result.detail.includes(path.join("npm", "node_modules", "pi-web-access")));
+		assert.ok(!readFileSync(path.join(staleGlobal, "package.json"), "utf8").includes("PIE_CACHE_DIR"));
+	} finally {
+		rmSync(agentDir, { recursive: true, force: true });
+		rmSync(staleGlobal, { recursive: true, force: true });
+	}
+});
+
+test("production readiness branch reports both missing managed packages and exact remediation", async () => {
+	const logs: string[] = [];
+	let webResolved = false;
+	let mcpResolved = false;
+	const missing = (name: string, source: string, target: string) => ({
+		name,
+		expectedVersion: name === "pi-web-access" ? "0.27.0" : "2.20.1",
+		root: path.join("managed", name),
+		status: "missing" as const,
+		sourceFingerprint: "unavailable" as const,
+		cacheTargets: [target],
+		detail: `Managed package manifest is missing: managed/${name}`,
+		remediation: `Install the managed package with: pi install ${source}`,
+	});
+	await runManagedPackageSelfHeal(
+		async () => { webResolved = true; return null; },
+		async () => { mcpResolved = true; return null; },
+		async () => [
+			missing("pi-web-access", "npm:pi-web-access@0.27.0", "PIE_CACHE_DIR/web-search-cache"),
+			missing("pi-mcp-adapter", "npm:pi-mcp-adapter@2.20.1", "PIE_CACHE_DIR/mcp-cache.json"),
+		],
+		(message) => logs.push(message),
+	);
+	assert.equal(webResolved, true);
+	assert.equal(mcpResolved, true);
+	assert.equal(logs.length, 2);
+	assert.ok(logs.some((line) => line.includes("pi install npm:pi-web-access@0.27.0")));
+	assert.ok(logs.some((line) => line.includes("pi install npm:pi-mcp-adapter@2.20.1")));
+});
+
+test("default production self-heal derives its cache root and reports missing managed packages", async () => {
+	const agentDir = makePkg();
+	const dataDir = makePkg();
+	const previousAgent = process.env.PI_CODING_AGENT_DIR;
+	const previousData = process.env.PIE_DATA_DIR;
+	const previousCache = process.env.PIE_CACHE_DIR;
+	const warnings: string[] = [];
+	const originalWarn = console.warn;
+	try {
+		process.env.PI_CODING_AGENT_DIR = agentDir;
+		process.env.PIE_DATA_DIR = dataDir;
+		delete process.env.PIE_CACHE_DIR;
+		console.warn = (message?: unknown) => warnings.push(String(message));
+		await runSelfHeal();
+		assert.equal(warnings.filter((line) => line.includes("Managed package manifest is missing")).length, 2);
+		assert.ok(warnings.some((line) => line.includes("pi install npm:pi-web-access@0.27.0")));
+		assert.ok(warnings.some((line) => line.includes("pi install npm:pi-mcp-adapter@2.20.1")));
+		assert.equal(process.env.PIE_CACHE_DIR, path.join(dataDir, "cache"));
+	} finally {
+		console.warn = originalWarn;
+		if (previousAgent === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = previousAgent;
+		if (previousData === undefined) delete process.env.PIE_DATA_DIR;
+		else process.env.PIE_DATA_DIR = previousData;
+		if (previousCache === undefined) delete process.env.PIE_CACHE_DIR;
+		else process.env.PIE_CACHE_DIR = previousCache;
+		rmSync(agentDir, { recursive: true, force: true });
+		rmSync(dataDir, { recursive: true, force: true });
+	}
+});
+
+test("default production self-heal fails closed for an invalid data-root override", async () => {
+	const agentDir = makePkg();
+	const previousAgent = process.env.PI_CODING_AGENT_DIR;
+	const previousData = process.env.PIE_DATA_DIR;
+	const previousCache = process.env.PIE_CACHE_DIR;
+	const warnings: string[] = [];
+	const originalWarn = console.warn;
+	try {
+		process.env.PI_CODING_AGENT_DIR = agentDir;
+		process.env.PIE_DATA_DIR = "   ";
+		delete process.env.PIE_CACHE_DIR;
+		console.warn = (message?: unknown) => warnings.push(String(message));
+		await runSelfHeal();
+		assert.ok(warnings.some((line) => line.includes("canonical Pie cache root is unresolved")));
+		assert.equal(process.env.PIE_CACHE_DIR, undefined);
+		const targetLines = warnings.filter((line) => line.includes("Intended cache target: "));
+		assert.equal(targetLines.length, 2);
+		assert.ok(targetLines.every((line) => line.includes("Intended cache target: . ")));
+	} finally {
+		console.warn = originalWarn;
+		if (previousAgent === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = previousAgent;
+		if (previousData === undefined) delete process.env.PIE_DATA_DIR;
+		else process.env.PIE_DATA_DIR = previousData;
+		if (previousCache === undefined) delete process.env.PIE_CACHE_DIR;
+		else process.env.PIE_CACHE_DIR = previousCache;
+		rmSync(agentDir, { recursive: true, force: true });
+	}
+});
+
+test("managed readiness patches a ready web package while skipping a missing MCP package", async () => {
+	const root = makePkg();
+	try {
+		writePkgFile(root, "index.ts", `${V027_RESOLVE_WORKFLOW_SRC}\n\n${V027_WORKFLOW_ENUM_SRC}\n\n${V027_WEB_SEARCH_DESCRIPTION_SRC}`);
+		writePkgFile(root, "storage.ts", WEB_STORAGE_SRC);
+		const ready = {
+			name: "pi-web-access",
+			expectedVersion: "0.27.0",
+			root,
+			status: "ready" as const,
+			sourceFingerprint: "pristine" as const,
+			cacheTargets: ["PIE_CACHE_DIR/web-search-cache"],
+			detail: "ready",
+			remediation: "",
+		};
+		const missingMcp = {
+			name: "pi-mcp-adapter",
+			expectedVersion: "2.20.1",
+			root: path.join(root, "missing-mcp"),
+			status: "missing" as const,
+			sourceFingerprint: "unavailable" as const,
+			cacheTargets: ["PIE_CACHE_DIR/mcp-cache.json"],
+			detail: "missing",
+			remediation: "pi install npm:pi-mcp-adapter@2.20.1",
+		};
+		let mcpLookups = 0;
+		await runManagedPackageSelfHeal(
+			async () => root,
+			async () => { mcpLookups++; return null; },
+			async () => [ready, missingMcp],
+		);
+		assert.equal(mcpLookups, 1);
+		assert.ok(readFileSync(path.join(root, "index.ts"), "utf8").includes('return "none";'));
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
