@@ -1252,8 +1252,12 @@ checkpoint's own work has **no independent review yet**; the supervisor's post-h
   billable-invocation-conservation, stats-service + lifecycle + tracker, cost-attribution,
   aggregate-stats, analytics-structural-regression, billable-accounting-boundaries,
   session-cost-indicator, session-cost-tooltip — all passed;
-- final `npm run extension:build:validate --no-sync`: see the milestone commit evidence below;
-- `git diff --check`: passed.
+- final `npm run extension:build:validate --no-sync`: passed, honoring `--no-sync` (no sync, staging
+  or publication; only the existing Zod annotation and chunk-size warnings, coordinated host/webview
+  build identity `f0ae049474cbb7c91a04` written to source `out/` only);
+- `git diff --check`: passed;
+- full affected-suite run `npm run test`: all package groups passed (extension 3,899 passed,
+  0 failed, 15 skipped).
 
 ### Boundary and remaining ownership
 
