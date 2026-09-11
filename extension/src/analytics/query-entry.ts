@@ -1,10 +1,9 @@
 import { AnalyticsQueryClient } from './query-client.js';
 import type {
-  AnalyticsDeliveryAccounting,
   AnalyticsDetailRangeResult,
   AnalyticsReadOnlyQueryResult,
   AnalyticsSchemaDescription,
-  AnalyticsStorageSummary,
+  AnalyticsStorageReadModel,
   HistoricalDimensionSummary,
   ProviderAccountingSummary,
   ProviderSettlementReadModel,
@@ -217,8 +216,8 @@ export class CanonicalAnalyticsReadModel {
   }
 
   /** Bounded storage and delivery accounting, including pending-detail coverage. */
-  readStorageSummary(signal?: AbortSignal): Promise<{ storage: AnalyticsStorageSummary; delivery: AnalyticsDeliveryAccounting }> {
-    return this.client.query<{ storage: AnalyticsStorageSummary; delivery: AnalyticsDeliveryAccounting }>({
+  readStorageSummary(signal?: AbortSignal): Promise<AnalyticsStorageReadModel> {
+    return this.client.query<AnalyticsStorageReadModel>({
       type: 'storage',
       maxResultBytes: this.maxResultBytes,
     }, signal);
@@ -230,7 +229,8 @@ export class CanonicalAnalyticsReadModel {
     request: CanonicalSettlementRequest = {},
     signal?: AbortSignal,
   ): Promise<ProviderSettlementReadModel> {
-    if (request.rootSessionId !== undefined && (!request.rootSessionId || request.rootSessionId.includes('\0'))) {
+    if (request.rootSessionId !== undefined
+        && (!request.rootSessionId.trim() || request.rootSessionId.includes('\0'))) {
       throw new Error('Canonical analytics rootSessionId must be a non-empty string without NUL.');
     }
     return this.client.query<ProviderSettlementReadModel>({
@@ -243,6 +243,9 @@ export class CanonicalAnalyticsReadModel {
 
   /** Engine-neutral scoped accounting summary over the canonical settlements. */
   readProviderAccountingSummary(rootSessionId?: string, signal?: AbortSignal): Promise<ProviderAccountingSummary> {
+    if (rootSessionId !== undefined && (!rootSessionId.trim() || rootSessionId.includes('\0'))) {
+      throw new Error('Canonical analytics rootSessionId must be a non-empty string without NUL.');
+    }
     return this.client.query<ProviderAccountingSummary>({
       type: 'providerAccounting',
       rootSessionId,

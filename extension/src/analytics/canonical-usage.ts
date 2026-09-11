@@ -102,12 +102,37 @@ const CANONICAL_USAGE_KINDS: ReadonlySet<string> = new Set([
   'other',
 ]);
 
-/** Convert an int64 usage value (decimal string or number) to a public
- * protocol number. Token counts are far below the safe-integer range; the
- * decimal-string identity is retained for the durable read model and the
- * engine-neutral metrics. */
+/** Convert an int64 usage value to the public numeric protocol only when its
+ * integer identity is exactly representable. The durable canonical row keeps
+ * the exact decimal; an unrepresentable public channel remains explicitly
+ * unknown instead of being rounded. */
 function usageNumber(value: Int64Value | null | undefined): number | undefined {
-  return value === null || value === undefined ? undefined : Number(value);
+  if (value === null || value === undefined) return undefined;
+  try {
+    const parsed = typeof value === 'number' ? value : BigInt(value);
+    if (typeof parsed === 'number') {
+      return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : undefined;
+    }
+    return parsed >= 0n && parsed <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(parsed) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function int64IsoTimestamp(value: Int64Value | null | undefined): string | undefined {
+  if (value === null || value === undefined) return undefined;
+  try {
+    const parsed = typeof value === 'number' ? value : BigInt(value);
+    const numeric = typeof parsed === 'number'
+      ? Number.isSafeInteger(parsed) ? parsed : undefined
+      : parsed >= BigInt(Number.MIN_SAFE_INTEGER) && parsed <= BigInt(Number.MAX_SAFE_INTEGER)
+        ? Number(parsed) : undefined;
+    if (numeric === undefined) return undefined;
+    const date = new Date(numeric);
+    return Number.isNaN(date.valueOf()) ? undefined : date.toISOString();
+  } catch {
+    return undefined;
+  }
 }
 
 /** Canonical purposes are billable kinds; unknown purposes stay visible as `other`. */
@@ -134,33 +159,50 @@ export function sessionUsageSnapshotFromCanonicalSettlements(
 ): SessionUsageSnapshot {
   const records = settlements.map((settlement): SessionUsageProjectionRow => {
     const usage = settlement.usage;
-    const channelsComplete = usage.inputTokens !== null && usage.outputTokens !== null
-      && usage.cacheReadTokens !== null && usage.cacheWriteTokens !== null;
+    const inputTokens = usageNumber(usage.inputTokens);
+    const outputTokens = usageNumber(usage.outputTokens);
+    const cacheReadTokens = usageNumber(usage.cacheReadTokens);
+    const cacheWriteTokens = usageNumber(usage.cacheWriteTokens);
+    const reasoningTokens = usageNumber(usage.reasoningTokens);
+    const providerTotalTokens = usageNumber(usage.providerTotalTokens);
+    const channelsComplete = inputTokens !== undefined && outputTokens !== undefined
+      && cacheReadTokens !== undefined && cacheWriteTokens !== undefined;
+    const hasUnrepresentableChannel = [
+      [usage.inputTokens, inputTokens],
+      [usage.outputTokens, outputTokens],
+      [usage.cacheReadTokens, cacheReadTokens],
+      [usage.cacheWriteTokens, cacheWriteTokens],
+      [usage.reasoningTokens, reasoningTokens],
+      [usage.providerTotalTokens, providerTotalTokens],
+    ].some(([exact, projected]) => exact !== null && exact !== undefined && projected === undefined);
+    const instrumentationGap = !channelsComplete || hasUnrepresentableChannel;
     const provenance: 'exact' | 'estimated' | 'unpriced' | 'unknown' = settlement.effectiveCostSource === 'reported'
       ? 'exact'
       : settlement.effectiveCostSource === 'calculated' ? 'estimated'
         : channelsComplete ? 'unpriced' : 'unknown';
+    const endedAt = int64IsoTimestamp(settlement.settledAtMs);
     return {
       sourceId: settlement.invocationId,
       kind: canonicalUsageKind(settlement.purpose),
       model: settlement.model,
       provider: settlement.provider,
-      inputTokens: usageNumber(usage.inputTokens),
-      outputTokens: usageNumber(usage.outputTokens),
-      cacheReadTokens: usageNumber(usage.cacheReadTokens),
-      cacheWriteTokens: usageNumber(usage.cacheWriteTokens),
-      ...(usage.reasoningTokens !== null ? { reasoningTokens: usageNumber(usage.reasoningTokens) } : {}),
+      inputTokens,
+      outputTokens,
+      cacheReadTokens,
+      cacheWriteTokens,
+      ...(reasoningTokens !== undefined ? { reasoningTokens } : {}),
       ...(settlement.reportedCostUsd !== null ? { providerReportedCostUsd: settlement.reportedCostUsd } : {}),
       ...(settlement.calculatedCostUsd !== null ? { calculatedCostUsd: settlement.calculatedCostUsd } : {}),
-      providerTotalTokens: usageNumber(usage.providerTotalTokens),
+      providerTotalTokens,
       provenance,
-      instrumentationGap: !channelsComplete,
-      ...(channelsComplete ? {} : {
-        instrumentationGapReason: 'The canonical settlement captured incomplete provider usage channels.',
-      }),
+      instrumentationGap,
+      ...(instrumentationGap ? {
+        instrumentationGapReason: hasUnrepresentableChannel
+          ? 'A canonical token count exceeds the public numeric safe-integer range; its exact decimal remains available in the canonical read model.'
+          : 'The canonical settlement captured incomplete provider usage channels.',
+      } : {}),
       outcome: canonicalOutcome(settlement.outcome),
-      ...(settlement.settledAtMs !== null
-        ? { startedAt: new Date(Number(settlement.settledAtMs)).toISOString() } : {}),
+      ...(endedAt !== undefined ? { endedAt } : {}),
     };
   });
   return sessionUsageSnapshotFromLedger(records, 'canonical');

@@ -28,6 +28,10 @@ rooted at the agent directory); with no override it defaults to
   provider-reported zero. Report unknown ≠ zero.
 - Integer values (timestamps, token counts, revisions) are stored as
   decimal strings; compare/aggregate them as integers, not strings.
+- The compatibility session-usage UI has numeric token fields. A canonical
+  int64 outside JavaScript's safe-integer range stays exact in query results
+  and is exposed to that UI as an explicitly unknown channel; never convert it
+  with `Number(...)` or present the rounded value.
 
 ## Commands and bounds
 
@@ -35,9 +39,12 @@ The pie read helper exposes four logical commands — `schema`, `query`,
 `detail`, `storage` — as one disposable read-only process per query with a
 default 10 s inactivity timeout (caller-cancellable), a default 200-row /
 256 KiB result bound (maximum 10 000 rows / 16 MiB), and 64 KiB detail
-ranges. Results always carry the projection revision, snapshot watermark
-(`commit_sequence` coverage), generation IDs, and explicit truncation flags
-(`rowLimit`, `byteLimit`, `cellLimit`, `generationIdsTruncated`). Detail
+ranges. Every logical-command result carries metadata read in the same SQLite
+snapshot as its payload: database schema version, projection revision,
+snapshot watermark (`commit_sequence` coverage), generation IDs,
+`pendingDetailCoverage` (delivery-history coverage, complete-detail watermark,
+and retained detail bytes), and explicit truncation flags (`rowLimit`,
+`byteLimit`, `cellLimit`, `generationIdsTruncated`). Detail
 reads return `nextOffset` + `truncated`; page with `offset` instead of
 raising bounds. Queries are cancelled by aborting the caller; only that
 helper fork is terminated.

@@ -232,16 +232,28 @@ export interface AnalyticsQueryTruncation {
   cellLimit: boolean;
 }
 
-export interface AnalyticsReadOnlyQueryResult {
+export interface AnalyticsPendingDetailCoverage {
+  deliveryHistoryCoverage: AnalyticsDeliveryAccounting['deliveryHistoryCoverage'];
+  completeDetailWatermark: number | string;
+  retainedDetailLogicalBytes: number | string;
+  retainedDetailStoredBytes: number | string;
+}
+
+/** Metadata read in the same SQLite snapshot as each logical query result. */
+export interface AnalyticsQuerySnapshotMetadata {
   databaseSchemaVersion: number;
   projectionRevision: number | string;
   snapshotWatermark: number | string;
   generationIds: string[];
   generationIdsTruncated: boolean;
+  pendingDetailCoverage: AnalyticsPendingDetailCoverage;
+  truncation: AnalyticsQueryTruncation;
+}
+
+export interface AnalyticsReadOnlyQueryResult extends AnalyticsQuerySnapshotMetadata {
   columns: string[];
   rows: Array<Record<string, unknown>>;
   returnedRows: number;
-  truncation: AnalyticsQueryTruncation;
 }
 
 export interface AnalyticsDetailMetadata {
@@ -255,7 +267,7 @@ export interface AnalyticsDetailMetadata {
   omissionReason: string | null;
 }
 
-export interface AnalyticsDetailRangeResult {
+export interface AnalyticsDetailRangeResult extends AnalyticsQuerySnapshotMetadata {
   payloadId: string;
   available: boolean;
   mediaType: string | null;
@@ -272,8 +284,7 @@ export interface AnalyticsDetailRangeResult {
   bytes: Uint8Array;
 }
 
-export interface AnalyticsSchemaDescription {
-  databaseSchemaVersion: number;
+export interface AnalyticsSchemaDescription extends AnalyticsQuerySnapshotMetadata {
   projectionVersion: number;
   logicalCommands: readonly ['schema', 'query', 'detail', 'storage'];
   views: string[];
@@ -286,6 +297,11 @@ export interface AnalyticsStorageSummary extends AnalyticsDetailStorageStats {
   sharedMemoryBytes: number | string;
   factsLogicalBytes: number | string;
   engineAllocationOverheadBytes: null;
+}
+
+export interface AnalyticsStorageReadModel extends AnalyticsQuerySnapshotMetadata {
+  storage: AnalyticsStorageSummary;
+  delivery: AnalyticsDeliveryAccounting;
 }
 
 /** Recorder-local opt-in until producer sequencing becomes part of the shared
@@ -2344,48 +2360,53 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
 
   readDetailRange(payloadId: string, offset: Int64Value = 0, maxBytes = 64 * 1024): AnalyticsDetailRangeResult {
     this.assertOpen();
-    const metadata = this.detailMetadata(payloadId);
-    if (!metadata) {
+    return this.snapshot(() => {
+      const snapshotMetadata = this.readQuerySnapshotMetadata();
+      const metadata = this.detailMetadata(payloadId);
+      if (!metadata) {
+        return {
+          ...snapshotMetadata,
+          payloadId,
+          available: false,
+          mediaType: null,
+          sourceEncoding: null,
+          representationEncoding: 'node-v8',
+          complete: false,
+          captureStage: null,
+          sourceVersion: null,
+          omissionReason: 'unavailable-or-scrubbed',
+          totalLength: 0,
+          offset: 0,
+          nextOffset: null,
+          truncated: false,
+          bytes: new Uint8Array(),
+        };
+      }
+      const start = parseInt64(offset, 'detail offset');
+      if (start < 0n || start > BigInt(Number.MAX_SAFE_INTEGER)) throw new RangeError('detail offset is out of range.');
+      const boundedBytes = boundedPositiveInteger(maxBytes, 64 * 1024, MAX_QUERY_BYTES, 'detail maxBytes');
+      const body = serializeV8(this.reconstructDetail(payloadId));
+      const numericStart = Number(start);
+      const end = Math.min(body.byteLength, numericStart + boundedBytes);
+      const bytes = numericStart >= body.byteLength ? new Uint8Array() : body.subarray(numericStart, end);
       return {
+        ...snapshotMetadata,
         payloadId,
-        available: false,
-        mediaType: null,
-        sourceEncoding: null,
+        available: true,
+        mediaType: metadata.mediaType,
+        sourceEncoding: metadata.sourceEncoding,
         representationEncoding: 'node-v8',
-        complete: false,
-        captureStage: null,
-        sourceVersion: null,
-        omissionReason: 'unavailable-or-scrubbed',
-        totalLength: 0,
-        offset: 0,
-        nextOffset: null,
-        truncated: false,
-        bytes: new Uint8Array(),
+        complete: metadata.complete,
+        captureStage: metadata.captureStage,
+        sourceVersion: metadata.sourceVersion,
+        omissionReason: metadata.omissionReason,
+        totalLength: encodeInt64(BigInt(body.byteLength)),
+        offset: encodeInt64(start),
+        nextOffset: end < body.byteLength ? encodeInt64(BigInt(end)) : null,
+        truncated: end < body.byteLength,
+        bytes,
       };
-    }
-    const start = parseInt64(offset, 'detail offset');
-    if (start < 0n || start > BigInt(Number.MAX_SAFE_INTEGER)) throw new RangeError('detail offset is out of range.');
-    const boundedBytes = boundedPositiveInteger(maxBytes, 64 * 1024, MAX_QUERY_BYTES, 'detail maxBytes');
-    const body = serializeV8(this.reconstructDetail(payloadId));
-    const numericStart = Number(start);
-    const end = Math.min(body.byteLength, numericStart + boundedBytes);
-    const bytes = numericStart >= body.byteLength ? new Uint8Array() : body.subarray(numericStart, end);
-    return {
-      payloadId,
-      available: true,
-      mediaType: metadata.mediaType,
-      sourceEncoding: metadata.sourceEncoding,
-      representationEncoding: 'node-v8',
-      complete: metadata.complete,
-      captureStage: metadata.captureStage,
-      sourceVersion: metadata.sourceVersion,
-      omissionReason: metadata.omissionReason,
-      totalLength: encodeInt64(BigInt(body.byteLength)),
-      offset: encodeInt64(start),
-      nextOffset: end < body.byteLength ? encodeInt64(BigInt(end)) : null,
-      truncated: end < body.byteLength,
-      bytes,
-    };
+    });
   }
 
   detailStorageStats(): AnalyticsDetailStorageStats {
@@ -2421,16 +2442,19 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
 
   describeSchema(): AnalyticsSchemaDescription {
     this.assertOpen();
-    const views = this.database.prepare(`
-      SELECT name FROM sqlite_master WHERE type = 'view' AND name LIKE 'analytics_%' ORDER BY name
-    `).all() as Array<{ name: string }>;
-    return {
-      databaseSchemaVersion: this.getDatabaseSchemaVersion(),
-      projectionVersion: 1,
-      logicalCommands: ['schema', 'query', 'detail', 'storage'],
-      views: views.map((row) => row.name),
-      detail: { defaultRangeBytes: 64 * 1024, representationEncoding: 'node-v8' },
-    };
+    return this.snapshot(() => {
+      const metadata = this.readQuerySnapshotMetadata();
+      const views = this.database.prepare(`
+        SELECT name FROM sqlite_master WHERE type = 'view' AND name LIKE 'analytics_%' ORDER BY name
+      `).all() as Array<{ name: string }>;
+      return {
+        ...metadata,
+        projectionVersion: 1,
+        logicalCommands: ['schema', 'query', 'detail', 'storage'],
+        views: views.map((row) => row.name),
+        detail: { defaultRangeBytes: 64 * 1024, representationEncoding: 'node-v8' },
+      };
+    });
   }
 
   readDeliveryAccounting(): AnalyticsDeliveryAccounting {
@@ -2481,6 +2505,15 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
     };
   }
 
+  readStorageReadModel(): AnalyticsStorageReadModel {
+    this.assertOpen();
+    return this.snapshot(() => ({
+      ...this.readQuerySnapshotMetadata(),
+      storage: this.readStorageSummary(),
+      delivery: this.readDeliveryAccounting(),
+    }));
+  }
+
   executeReadOnlyQuery(
     sql: string,
     parameters: readonly unknown[] = [],
@@ -2492,16 +2525,7 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
     const maxBytes = boundedPositiveInteger(options.maxBytes, DEFAULT_QUERY_BYTES, MAX_QUERY_BYTES, 'query maxBytes');
     const maxCellBytes = boundedPositiveInteger(options.maxCellBytes, 64 * 1024, maxBytes, 'query maxCellBytes');
     return this.snapshot(() => {
-      const revision = this.getProjectionRevision();
-      const databaseSchemaVersion = this.getDatabaseSchemaVersion();
-      const watermarkRow = this.database.prepare(`
-        SELECT COALESCE(MAX(commit_sequence), 0) AS watermark FROM analytics_observations
-      `).get() as { watermark: number | bigint };
-      const generations = this.database.prepare(`
-        SELECT generation_id FROM analytics_generations ORDER BY first_observed_at_ms, generation_id LIMIT 1001
-      `).all() as Array<{ generation_id: string }>;
-      const generationIdsTruncated = generations.length > 1_000;
-      if (generationIdsTruncated) generations.pop();
+      const metadata = this.readQuerySnapshotMetadata();
       const allowed = new Set([
         sqlite.constants.SQLITE_SELECT,
         sqlite.constants.SQLITE_READ,
@@ -2547,11 +2571,7 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
           rows.push(row);
         }
         return {
-          databaseSchemaVersion,
-          projectionRevision: revision,
-          snapshotWatermark: encodeInt64(BigInt(watermarkRow.watermark)),
-          generationIds: generations.map((row) => row.generation_id),
-          generationIdsTruncated,
+          ...metadata,
           columns,
           rows,
           returnedRows: rows.length,
@@ -2570,14 +2590,15 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
     this.assertOpen();
     return this.snapshot(() => {
       const revision = this.getProjectionRevision();
-      const where = rootSessionId ? 'WHERE root_session_id = ?' : '';
+      const scoped = rootSessionId !== undefined;
+      const where = scoped ? 'WHERE root_session_id = ?' : '';
       const boundedLimit = limit === undefined ? undefined : Math.max(0, Math.trunc(limit));
       const rows = this.database.prepare(`
         SELECT * FROM analytics_provider_settlements
         ${where}
         ORDER BY CAST(projection_revision AS INTEGER), generation_id, invocation_id
         ${boundedLimit === undefined ? '' : 'LIMIT ?'}
-      `).all(...(rootSessionId ? [rootSessionId] : []), ...(boundedLimit === undefined ? [] : [boundedLimit])) as Array<Record<string, unknown>>;
+      `).all(...(scoped ? [rootSessionId] : []), ...(boundedLimit === undefined ? [] : [boundedLimit])) as Array<Record<string, unknown>>;
       const decodeInt = (value: unknown): number | string | null => value === null || value === undefined
         ? null
         : encodeInt64(String(value));
@@ -2668,10 +2689,11 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
   readProviderAccountingSummary(rootSessionId?: string): ProviderAccountingSummary {
     this.assertOpen();
     return this.snapshot(() => {
+      const scoped = rootSessionId !== undefined;
       const row = this.database.prepare(`
         SELECT summary_json FROM analytics_provider_accounting_projections
         WHERE subject_kind = ? AND subject_key = ?
-      `).get(rootSessionId ? 'session' : 'global', rootSessionId ?? '*') as { summary_json: string } | undefined;
+      `).get(scoped ? 'session' : 'global', rootSessionId ?? '*') as { summary_json: string } | undefined;
       const stored = row ? JSON.parse(row.summary_json) as StoredProviderAccounting : emptyStoredProviderAccounting();
       const invocationCount = Number(stored.occurrenceCount);
       const channel = (name: AccountingChannel): CoverageMetric => {
@@ -2806,6 +2828,35 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
 
   private transaction<T>(operation: () => T): T {
     return databaseTransaction(this.database, operation);
+  }
+
+  /** Read bounded query-envelope metadata. Call only inside the snapshot that
+   * also produces the command payload so revision/coverage cannot be paired
+   * with rows from another commit. */
+  private readQuerySnapshotMetadata(): AnalyticsQuerySnapshotMetadata {
+    const watermarkRow = this.database.prepare(`
+      SELECT COALESCE(MAX(commit_sequence), 0) AS watermark FROM analytics_observations
+    `).get() as { watermark: number | bigint };
+    const generations = this.database.prepare(`
+      SELECT generation_id FROM analytics_generations ORDER BY first_observed_at_ms, generation_id LIMIT 1001
+    `).all() as Array<{ generation_id: string }>;
+    const generationIdsTruncated = generations.length > 1_000;
+    if (generationIdsTruncated) generations.pop();
+    const delivery = this.readDeliveryAccounting();
+    return {
+      databaseSchemaVersion: this.getDatabaseSchemaVersion(),
+      projectionRevision: this.getProjectionRevision(),
+      snapshotWatermark: encodeInt64(BigInt(watermarkRow.watermark)),
+      generationIds: generations.map((row) => row.generation_id),
+      generationIdsTruncated,
+      pendingDetailCoverage: {
+        deliveryHistoryCoverage: delivery.deliveryHistoryCoverage,
+        completeDetailWatermark: delivery.completeDetailWatermark,
+        retainedDetailLogicalBytes: delivery.retainedDetailLogicalBytes,
+        retainedDetailStoredBytes: delivery.retainedDetailStoredBytes,
+      },
+      truncation: { rowLimit: false, byteLimit: false, cellLimit: false },
+    };
   }
 
   private snapshot<T>(operation: () => T): T {

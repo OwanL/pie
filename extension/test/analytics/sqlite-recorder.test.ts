@@ -997,6 +997,12 @@ test('provider projection preserves missingness and signed-64-bit token strings 
     }
 
     recorder = new SqliteAnalyticsRecorder(temp.databasePath);
+    assert.equal(recorder.readProviderAccountingSummary().invocationCount, 2);
+    assert.equal(
+      recorder.readProviderAccountingSummary('').invocationCount,
+      0,
+      'an explicitly scoped empty key must never alias the global projection',
+    );
     assert.deepEqual(recorder.projectProviderUsage(), [
       {
         invocationId: 'invocation-a',

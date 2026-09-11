@@ -17,7 +17,10 @@ import {
   canonicalAnalyticsDatabasePath,
 } from '../../src/analytics/query-entry.js';
 import { sessionUsageSnapshotFromCanonicalSettlements } from '../../src/analytics/canonical-usage.js';
-import { SqliteAnalyticsRecorder } from '../../src/analytics/sqlite-recorder.js';
+import {
+  SqliteAnalyticsRecorder,
+  type AnalyticsQuerySnapshotMetadata,
+} from '../../src/analytics/sqlite-recorder.js';
 
 const workerScript = fileURLToPath(new URL('../../src/analytics/query-worker-entry.ts', import.meta.url));
 const execArgv = [
@@ -94,6 +97,21 @@ function tempRoot(): string {
   return mkdtempSync(path.join(tmpdir(), 'pie-analytics-read-model-'));
 }
 
+function assertSnapshotMetadata(result: AnalyticsQuerySnapshotMetadata): void {
+  assert.equal(result.databaseSchemaVersion, 3);
+  assert.equal(typeof result.projectionRevision === 'number' || typeof result.projectionRevision === 'string', true);
+  assert.equal(typeof result.snapshotWatermark === 'number' || typeof result.snapshotWatermark === 'string', true);
+  assert.equal(result.generationIds.length > 0, true);
+  assert.equal(typeof result.generationIdsTruncated, 'boolean');
+  assert.equal(result.pendingDetailCoverage.deliveryHistoryCoverage, 'complete');
+  assert.equal(
+    typeof result.pendingDetailCoverage.completeDetailWatermark === 'number'
+      || typeof result.pendingDetailCoverage.completeDetailWatermark === 'string',
+    true,
+  );
+  assert.deepEqual(result.truncation, { rowLimit: false, byteLimit: false, cellLimit: false });
+}
+
 test('canonical read model serves schema, bounded queries, settlements, accounting, dimensions, storage, and detail ranges', async () => {
   const root = tempRoot();
   const databasePath = canonicalAnalyticsDatabasePath(path.join(root, 'analytics'));
@@ -156,7 +174,7 @@ test('canonical read model serves schema, bounded queries, settlements, accounti
 
   // Schema: canonical views and logical commands resolve through the helper.
   const schema = await readModel.describeSchema();
-  assert.equal(schema.databaseSchemaVersion, 3);
+  assertSnapshotMetadata(schema);
   assert.deepEqual(schema.logicalCommands, ['schema', 'query', 'detail', 'storage']);
   assert.ok(schema.views.includes('analytics_provider_usage_v1'));
 
@@ -195,6 +213,7 @@ test('canonical read model serves schema, bounded queries, settlements, accounti
     sql: 'SELECT invocation_id, provider, effective_cost_usd FROM analytics_provider_usage_v1 ORDER BY invocation_id',
   });
   assert.equal(query.databaseSchemaVersion, 3);
+  assertSnapshotMetadata(query);
   assert.equal(query.returnedRows, 4);
   assert.deepEqual(query.truncation, { rowLimit: false, byteLimit: false, cellLimit: false });
   assert.ok(BigInt(query.snapshotWatermark) >= 4n);
@@ -231,12 +250,14 @@ test('canonical read model serves schema, bounded queries, settlements, accounti
 
   // Storage and delivery accounting expose pending-detail coverage.
   const storage = await readModel.readStorageSummary();
+  assertSnapshotMetadata(storage);
   assert.ok(BigInt(storage.storage.databaseBytes) > 0n);
   assert.equal(storage.storage.payloadCount, 1);
   assert.equal(storage.delivery.details.accepted, 1);
 
   // Large detail payloads page within the 64 KiB default bound.
   const firstPage = await readModel.readDetail({ payloadId: 'payload-large' });
+  assertSnapshotMetadata(firstPage);
   assert.equal(firstPage.available, true);
   assert.equal(firstPage.truncated, true);
   assert.equal(firstPage.bytes.byteLength, 64 * 1024);
@@ -251,6 +272,9 @@ test('canonical read model serves schema, bounded queries, settlements, accounti
   // Validation and explicit failure semantics.
   assert.throws(() => readModel.executeQuery({ sql: 'SELECT \0' }));
   assert.throws(() => readModel.readProviderSettlements({ rootSessionId: 'a\0b' }));
+  assert.throws(() => readModel.readProviderAccountingSummary(''));
+  assert.throws(() => readModel.readProviderAccountingSummary('   '));
+  assert.throws(() => readModel.readProviderAccountingSummary('a\0b'));
   assert.throws(() => readModel.readDetail({ payloadId: '' }));
 
   const aborted = new AbortController();

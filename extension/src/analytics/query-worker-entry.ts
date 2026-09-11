@@ -45,7 +45,7 @@ process.on('message', (raw: unknown) => {
         Math.min(message.maxBytes ?? 64 * 1024, Math.max(1, maximum - 8 * 1024)),
       );
     } else if (message.type === 'storage') {
-      result = { storage: recorder.readStorageSummary(), delivery: recorder.readDeliveryAccounting() };
+      result = recorder.readStorageReadModel();
     } else if (message.type === 'providerSettlements') {
       const limit = boundedInteger(message.limit, DEFAULT_ROW_LIMIT, MAX_ROW_LIMIT);
       result = recorder.readProviderSettlements(message.rootSessionId, limit);

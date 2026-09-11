@@ -219,6 +219,8 @@ test('canonical settlements project the public session-usage snapshot', () => {
   assert.equal(reported?.reportedCostUsd, 0.05);
   assert.equal(reported?.provenance, 'exact');
   assert.equal(reported?.outcome, 'cancelled');
+  assert.equal(reported?.startedAt, undefined);
+  assert.equal(reported?.endedAt, new Date(1_750_000_000_000).toISOString());
   assert.equal(reported?.tokenChannelsKnown, true);
   const calculated = bySource.get('calculated-1');
   assert.equal(calculated?.provenance, 'estimated');
@@ -259,4 +261,45 @@ test('canonical settlement channel presence distinguishes zero from unknown', ()
   assert.equal(sample.totalTokens, 0);
   assert.equal(sample.tokenChannelPresence?.input, true);
   assert.equal(sample.reportedCostUsd, 0);
+});
+
+test('canonical public usage marks int64 values outside the numeric protocol range as unknown', () => {
+  const exactInputTokens = (BigInt(Number.MAX_SAFE_INTEGER) + 1n).toString();
+  const snapshot = sessionUsageSnapshotFromCanonicalSettlements([
+    settlement({
+      invocationId: 'unsafe-int64',
+      usage: {
+        inputTokens: exactInputTokens,
+        outputTokens: '1',
+        cacheReadTokens: '0',
+        cacheWriteTokens: '0',
+        providerTotalTokens: exactInputTokens,
+      },
+    }),
+    settlement({
+      invocationId: 'unsafe-optional-int64',
+      usage: {
+        inputTokens: '1',
+        outputTokens: '1',
+        cacheReadTokens: '0',
+        cacheWriteTokens: '0',
+        reasoningTokens: exactInputTokens,
+        providerTotalTokens: exactInputTokens,
+      },
+    }),
+  ]);
+
+  const sample = snapshot.samples[0]!;
+  assert.equal(sample.inputTokens, 0);
+  assert.equal(sample.tokenChannelPresence?.input, false);
+  assert.equal(sample.tokenChannelsKnown, false);
+  assert.equal(sample.instrumentationGap, true);
+  assert.match(sample.instrumentationGapReason ?? '', /exact decimal remains available/u);
+  const optional = snapshot.samples[1]!;
+  assert.equal(optional.tokenChannelsKnown, true);
+  assert.equal(optional.reasoningTokens, undefined);
+  assert.equal(optional.providerTotalTokens, undefined);
+  assert.equal(optional.instrumentationGap, true);
+  assert.match(optional.instrumentationGapReason ?? '', /exact decimal remains available/u);
+  assert.equal(snapshot.incompleteInvocationCount, 2);
 });
