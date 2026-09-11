@@ -302,14 +302,6 @@ export class SessionService implements vscode.Disposable {
     this.state.handleCreateOperationDelayed(selectionToken, operationId, notice, expectedAttempt);
   }
 
-  /** Feed correlated close/persistence results to the V2 closure outbox
-   *  observer before the reducer consumes its no-op result handlers. */
-  handleReviewClosureEffectResult(
-    event: Extract<Event, { kind: 'CloseSessionResult' | 'PersistTabsResult' }>,
-  ): void {
-    this.state.handleReviewClosureEffectResult(event);
-  }
-
   /** Bump the data epoch for a session (pre-send/edit). */
   bumpSessionDataEpoch(sessionPath: string): void {
     this.clearDetailCacheForSession(sessionPath);

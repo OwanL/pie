@@ -31,7 +31,7 @@ test('the production Pi skill loader discovers all repository skills without dia
     repositorySkillFiles(),
   );
 
-  for (const name of ['evaluate-sessions', 'develop-pie', 'diagnose']) {
+  for (const name of ['develop-pie', 'diagnose']) {
     const skill = result.skills.find((candidate) => candidate.name === name);
     assert.ok(skill, `${name} should be discovered`);
     assert.equal(skill.disableModelInvocation, false, `${name} should be visible`);

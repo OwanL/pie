@@ -11,7 +11,6 @@ test('withoutPiHarnessEnv strips pi-harness state from test process environments
     PI_CODING_AGENT_AUTH_DIR: 'C:/real/pie/auth',
     PIE_REVIEWS_DIR: 'C:/real/pie/data/outcomes/session-reviews',
     PIE_TRIGGERS_DIR: 'C:/real/pie/data/outcomes/deferred-triggers',
-    PIE_OPEN_TABS: '[{"path":"C:/real/session.jsonl"}]',
     PIE_SUBAGENT_MAX_TREE_SESSIONS: '100',
     PIE_SUBAGENT_PROVIDER_TOGGLES_BY_SESSION_JSON: '{"C:/real/session.jsonl":{"umans":false}}',
     PIE_AUTONOMOUS_MODE: '1',

@@ -140,10 +140,10 @@ test('worker server joins an exact equal-revision sync retry and applies it once
   try {
     send(1, { kind: 'bootstrap', heartbeatIntervalMs: 60_000, sdkPatchIdentity });
     await waitUntil(() => frames.some((frame) => frame.kind === 'ready'));
-    const sync = { domain: 'sessionRegistry', revision: 7, payload: { tabs: [{ path: '/review.jsonl' }] } };
-    send(2, { kind: 'sync', requestId: 'registry-original', ...sync });
+    const sync = { domain: 'runtimePrefs', revision: 7, payload: { values: { autonomousMode: true } } };
+    send(2, { kind: 'sync', requestId: 'prefs-original', ...sync });
     await waitUntil(() => applyCount === 1);
-    send(3, { kind: 'sync', requestId: 'registry-retry', ...sync });
+    send(3, { kind: 'sync', requestId: 'prefs-retry', ...sync });
     await new Promise<void>((resolve) => setImmediate(resolve));
     assert.equal(frames.some((frame) => frame.kind === 'sync.ack'), false);
 
@@ -152,7 +152,7 @@ test('worker server joins an exact equal-revision sync retry and applies it once
     assert.equal(applyCount, 1);
     assert.deepEqual(
       frames.filter((frame) => frame.kind === 'sync.ack').map((frame) => frame.kind === 'sync.ack' && frame.requestId),
-      ['registry-original', 'registry-retry'],
+      ['prefs-original', 'prefs-retry'],
     );
   } finally {
     releaseApply();

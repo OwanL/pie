@@ -159,7 +159,6 @@ export class WorkerServer {
     auth: 0,
     runtimePrefs: 0,
     providerPolicy: 0,
-    sessionRegistry: 0,
   };
   private readonly syncPayloadFingerprints: Partial<Record<WorkerSyncDomain, string>> = {};
   private readonly syncApplications: Partial<Record<WorkerSyncDomain, Promise<void>>> = {};

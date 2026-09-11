@@ -76,7 +76,7 @@ npm run extension:build:validate            # compile/validate without publishin
 npm run extension:activate                  # one-time startup loader setup or explicit upgrade
 npm run extension:package                   # build a .vsix from the root
 npm run extension:test:browser              # extension Playwright browser suite
-npm run analytics:serve                     # local analytics workspace
+npm run analytics:query -- --name core_runs # query the local analytics database
 npm run doctor                              # non-destructive installation/config check
 ```
 

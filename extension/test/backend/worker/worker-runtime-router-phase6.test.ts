@@ -772,98 +772,6 @@ test('phase6 settings/catalog sync broadcasts the configured authority to every 
   assert.deepEqual(catalogSync.payload.models, [{ id: 'configured-b', name: 'Configured B', provider: 'phase-0', reasoning: false }]);
 });
 
-test('phase6 session registry sync is present at startup and host revisions are latest-wins', async () => {
-  const { router, sessionPath, client } = makeRouter(makeClient());
-  await router.promote(sessionPath);
-
-  const startup = client.calls.find((call: any) => call.kind === 'sync' && call.domain === 'sessionRegistry') as any;
-  assert.ok(startup, 'every promoted worker receives the retained registry domain before runtime startup');
-  assert.equal(startup.revision, 1);
-  assert.deepEqual(startup.payload, { tabs: [] });
-
-  const first = await router.syncSessionRegistry([
-    { path: '/sessions/a.jsonl', pinned: true, isRunning: false },
-  ], 7);
-  assert.deepEqual(first, { applied: true, revision: 2, retiredWorkers: 0 });
-
-  const duplicate = await router.syncSessionRegistry([
-    { path: '/sessions/a.jsonl', pinned: true, isRunning: false },
-  ], 7);
-  assert.deepEqual(duplicate, { applied: false, revision: 2, retiredWorkers: 0 });
-
-  const stale = await router.syncSessionRegistry([
-    { path: '/sessions/stale.jsonl', pinned: false, isRunning: false },
-  ], 6);
-  assert.deepEqual(stale, { applied: false, revision: 2, retiredWorkers: 0 });
-
-  const latest = await router.syncSessionRegistry([
-    { path: '/sessions/a.jsonl', pinned: false, isRunning: true },
-  ], 8);
-  assert.deepEqual(latest, { applied: true, revision: 3, retiredWorkers: 0 });
-
-  const registrySyncs = client.calls.filter((call: any) => call.kind === 'sync' && call.domain === 'sessionRegistry') as any[];
-  assert.deepEqual(registrySyncs.map((call) => [call.revision, call.payload.tabs]), [
-    [1, []],
-    [2, [{ path: '/sessions/a.jsonl', pinned: true, isRunning: false }]],
-    [3, [{ path: '/sessions/a.jsonl', pinned: false, isRunning: true }]],
-  ]);
-});
-
-test('phase6 session registry timeout keeps a busy worker hot and retries the latest revision', async () => {
-  const clock = new FakeRouterClock();
-  let registryAttempts = 0;
-  let transportStatus: 'ready' | 'unresponsive' = 'ready';
-  const client = makeClient({
-    getSnapshot: () => ({ status: transportStatus, stdoutTail: '', stderrTail: '' }),
-    requestFrame: async (body: any) => {
-      client.calls.push(body);
-      if (body.kind === 'sync') {
-        if (body.domain === 'sessionRegistry' && body.revision === 2) {
-          registryAttempts += 1;
-          if (registryAttempts === 1) return await new Promise(() => undefined);
-        }
-        return { kind: 'sync.ack', requestId: 'x', domain: body.domain, revision: body.revision };
-      }
-      if (body.kind === 'runtime.promote') {
-        return { kind: 'runtime.ready', requestId: 'x', runtimeMetadata: { mode: 'phase4', startedAt: 1 } };
-      }
-      throw new Error(`unexpected frame ${body.kind}`);
-    },
-  });
-  const { router, sessionPath, emitted, stopped } = makeRouter(client, {
-    options: { scheduler: clock, syncAckTimeoutMs: 50 },
-  });
-  const route = await router.promote(sessionPath);
-  await router.handleWorkerFrame(sessionPath, eventFrame(
-    route, sessionPath, 'busy.changed', { sessionPath, busy: true, seq: 1 }, 1,
-  ));
-  await router.handleWorkerFrame(sessionPath, eventFrame(
-    route, sessionPath, 'message.started',
-    { sessionPath, requestId: 'review-request', messageId: 'review-message' }, 2,
-  ));
-  emitted.length = 0;
-
-  const result = await router.syncSessionRegistry([
-    { path: sessionPath, pinned: true, isRunning: true },
-  ], 10);
-  assert.deepEqual(result, { applied: true, revision: 2, retiredWorkers: 0 });
-  assert.equal(router.getRoute(sessionPath).state, 'hot');
-
-  transportStatus = 'unresponsive';
-  clock.advance(51);
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(stopped, [], 'auxiliary registry timeout must not retire active work');
-  assert.equal(emitted.some(([event]) => event === 'message.aborted' || event === 'preflight.failed'), false);
-
-  clock.advance(1_000);
-  await new Promise((resolve) => setImmediate(resolve));
-  transportStatus = 'ready';
-  assert.equal(registryAttempts, 2, 'the newest registry revision is retried after the worker responds again');
-  assert.equal(router.getRoute(sessionPath).state, 'hot');
-  assert.equal(emitted.some(([event, payload]) => event === 'operational-error'
-    && payload.code === 'SESSION_WORKER_SYNC_FAILED'), false);
-});
-
 test('phase6 live sync retries bounded enqueue pressure without retiring healthy work', async () => {
   const clock = new FakeRouterClock();
   let runtimePrefsAttempts = 0;
@@ -955,56 +863,6 @@ test('phase6 live-sync retry never targets a replacement worker generation at th
   assert.equal(replacementClient.calls.length, 0, 'startup synchronization alone may address the replacement');
 });
 
-test('phase6 simultaneous registry and settings delay does not kill a healthy review at the old 5s boundary', async () => {
-  const clock = new FakeRouterClock();
-  let releaseSettings!: () => void;
-  const settingsGate = new Promise<void>((resolve) => { releaseSettings = resolve; });
-  const client = makeClient({
-    requestFrame: async (body: any) => {
-      client.calls.push(body);
-      if (body.kind === 'sync') {
-        if (body.domain === 'sessionRegistry' && body.revision === 2) {
-          return await new Promise(() => undefined);
-        }
-        if (body.domain === 'settings' && body.revision === 2) await settingsGate;
-        return { kind: 'sync.ack', requestId: 'x', domain: body.domain, revision: body.revision };
-      }
-      if (body.kind === 'runtime.promote') {
-        return { kind: 'runtime.ready', requestId: 'x', runtimeMetadata: { mode: 'phase4', startedAt: 1 } };
-      }
-      throw new Error(`unexpected frame ${body.kind}`);
-    },
-  });
-  const { router, sessionPath, stopped, emitted } = makeRouter(client, {
-    options: {
-      scheduler: clock,
-      syncAckTimeoutMs: 50,
-      broadcastSyncAckTimeoutMs: 500,
-      readModelSettings: async () => ({ defaultModel: 'm', defaultThinkingLevel: 'off' }),
-    },
-  });
-  await router.promote(sessionPath);
-
-  await router.syncSessionRegistry([{ path: sessionPath, pinned: true, isRunning: true }], 1);
-  const settings = router.syncSettings();
-  for (let turn = 0; turn < 4 && !client.calls.some((body: any) =>
-    body.kind === 'sync' && body.domain === 'settings' && body.revision === 2); turn += 1) {
-    await new Promise((resolve) => setImmediate(resolve));
-  }
-
-  clock.advance(51);
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(router.getRoute(sessionPath).state, 'hot');
-  assert.deepEqual(stopped, [], 'the auxiliary timeout and transient settings delay must not retire the review');
-  assert.equal(emitted.some(([event, payload]) => event === 'operational-error'
-    && payload.code === 'SESSION_WORKER_SYNC_FAILED'), false);
-
-  releaseSettings();
-  await settings;
-  assert.equal(router.getRoute(sessionPath).state, 'hot');
-  assert.deepEqual(stopped, []);
-});
-
 test('phase6 broadcasts skip supervisor-owned workers until their transport is ready', async () => {
   const readyClient = makeClient();
   const unavailableCalls: any[] = [];
@@ -1046,15 +904,10 @@ test('phase6 broadcasts skip supervisor-owned workers until their transport is r
   });
   await router.promote(sessionPath);
 
-  await router.syncSessionRegistry([{ path: sessionPath, pinned: true, isRunning: false }], 1);
   await router.syncRuntimePrefs({ compact: true });
 
   assert.equal(unavailableCalls.length, 0, 'startup ownership is not yet a usable broadcast route');
   assert.deepEqual(stopped, []);
-  assert.ok(readyClient.calls.some((call: any) => call.kind === 'sync'
-    && call.domain === 'sessionRegistry' && call.revision === 2));
-  assert.ok(unresponsiveCalls.some((call: any) => call.kind === 'sync'
-    && call.domain === 'sessionRegistry' && call.revision === 2));
   assert.ok(unresponsiveCalls.some((call: any) => call.kind === 'sync'
     && call.domain === 'runtimePrefs' && call.revision === 2),
   'critical broadcasts still reach a transiently unresponsive transport');

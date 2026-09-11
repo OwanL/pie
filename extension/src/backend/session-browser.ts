@@ -17,7 +17,6 @@ import {
 } from '../shared/transcript-window';
 import { deduplicateToolCallResultsForTransport } from '../shared/chat-message-parts';
 import { deriveContextUsageFromBranch } from './context-usage';
-import { mergeReviewIntoSummary, readReviews } from './session-review-store';
 import type { SdkSessionManager } from './sdk';
 import { normalizeThinkingLevel } from './message-inputs';
 import { buildDisplayTranscriptCache, buildTailTranscriptWindow } from './transcript-window';
@@ -169,11 +168,10 @@ export function buildBrowseSessionOpenedPayload(options: {
     : buildTailTranscriptWindow(options.browse.cache);
   const transcript = normalizeDanglingTranscript(slice.transcript)
     .map(deduplicateToolCallResultsForTransport);
-  const reviewedSummary = mergeReviewIntoSummary(options.browse.summary, readReviews());
   const session = options.browse.hasExplicitThinkingLevel
-    ? reviewedSummary
+    ? options.browse.summary
     : {
-        ...reviewedSummary,
+        ...options.browse.summary,
         // Pi's empty branch context reports `off` when no durable change entry
         // exists. That is an implementation fallback, not the user's new-chat
         // preference; inherit the configured default until the branch records

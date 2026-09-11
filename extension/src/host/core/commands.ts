@@ -543,13 +543,6 @@ export interface CloseSessionCommand extends CommandBase {
   operationSource?: SessionOperationSource;
   causalParentOperationId?: string | null;
   backendGeneration?: number;
-  /** Outbox closure retries must re-run idempotent cleanup/persistence even
-   *  when an earlier optimistic command already hid the tab. */
-  ensureClosed?: boolean;
-  /** True when this close originates from a V2 review closure outbox action
-   *  (closeReviewed/closeSelf). The durable reason is retained separately
-   *  from the host-owned intentional-hide intent. */
-  reviewClosure?: boolean;
 }
 
 /** Duplicate an existing session into a new pending tab. Mirrors

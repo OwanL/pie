@@ -79,18 +79,6 @@ export interface LastCompactionSummary {
   estimatedTokensAfter?: number;
 }
 
-/** Labels a human-verification question about a reviewed session. The owning
- * request's `sessionPath` remains the reviewer session; these fields never
- * participate in prompt routing. */
-export interface ReviewHumanVerificationMetadata {
-  purpose: 'review_human_verification';
-  targetSessionId: string;
-  targetSessionPath: string;
-  criterionId: string;
-  domain: string;
-  expectedObservation: string;
-}
-
 // ─── Multi-renderer identity (browser server) ───────────────────────────────
 //
 // The host may serve the same UI to several renderer surfaces (the VS Code
@@ -127,8 +115,6 @@ export interface ExtensionUIRequestBase {
   toolCallId?: string;
   /** Optional dialog timeout in milliseconds. The webview shows a countdown and auto-cancels. */
   timeout?: number;
-  /** Review display/audit metadata; never changes `sessionPath` routing. */
-  reviewMeta?: ReviewHumanVerificationMetadata;
 }
 
 /** A pending extension UI request (backend → host → webview). */

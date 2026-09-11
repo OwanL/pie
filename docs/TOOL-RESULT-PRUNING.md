@@ -398,10 +398,9 @@ restate or re-own it.
    counts + which rules fired are written to `data/tool-result-pruning.jsonl`
    by `extensions/tool-result-pruner/logger.ts`, and ingested end-to-end by the
    analysis pipeline (`ToolResultPruningSourceEvent` -> `PreparedToolResultPruningRow`
-   -> DuckDB `tool_result_pruning` table -> `tool-result-pruning-impact.json`
-   site-data artifact with by-rule and by-tool aggregates). Per-rule savings are
-   visible on the dashboard; the lossy tier will lean on this to decide which
-   rules are worth shipping and whether any starved the agent.
+   -> DuckDB `tool_result_pruning` table). The retained rows support local SQL
+   comparisons by rule and tool; the lossy tier will use this evidence to decide
+   which rules are worth shipping and whether any starved the agent.
 4. **Benchmark on real sessions** — intuition about "noise" will be wrong in
    spots (sometimes the agent *does* want the timestamp).
 5. **Config — RESOLVED & SHIPPED:** a `toolResultPruning: { enabled, profile }`
@@ -463,10 +462,9 @@ restate or re-own it.
 - Inline visibility: `tool-result-pruning-badge.tsx` renders the `pruningBadge`
   chip on the tool-call header (§9.7).
 - Analytics wired: `logger.ts` records `tool_result_pruned` events;
-  `analysis/scripts/{contracts,source,prepare,duckdb,site-data}.ts` ingest
-  them into a `tool_result_pruning` DuckDB table and a
-  `tool-result-pruning-impact.json` site-data artifact (by-rule + by-tool
-  token-saved aggregates). Covered by `analysis/test/tool-result-pruning.test.ts`.
+  `analysis/scripts/{contracts,source,prepare,duckdb}.ts` ingest them into a
+  `tool_result_pruning` DuckDB table for local SQL comparisons by rule and
+  tool.
 
 ## 10. References
 

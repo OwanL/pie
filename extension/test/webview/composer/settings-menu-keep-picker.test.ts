@@ -56,7 +56,6 @@ describe('computeToolKeepCatalog', () => {
     assert.ok(result.includes('get_search_content'));
     assert.ok(result.includes('source_check'));
     assert.ok(result.includes('session_changes'));
-    assert.ok(result.includes('session_review'));
   });
 });
 

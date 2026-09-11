@@ -130,12 +130,6 @@ export const PACKAGE_REGISTRY = [
     fastConcurrency: 3,
   },
   {
-    id: 'session-reviewer',
-    dir: 'extensions/session-reviewer',
-    typecheck: { config: 'extensions/session-reviewer/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
-    fastConcurrency: 3,
-  },
-  {
     id: 'deferred-triggers',
     dir: 'extensions/deferred-triggers',
     typecheck: { config: 'extensions/deferred-triggers/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },

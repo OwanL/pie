@@ -110,16 +110,14 @@ export type WorkerSyncDomain =
   | 'catalog'
   | 'auth'
   | 'runtimePrefs'
-  | 'providerPolicy'
-  | 'sessionRegistry';
+  | 'providerPolicy';
 
 export type WorkerSyncPayload =
   | { domain: 'settings'; payload: { values: WorkerJsonObject } }
   | { domain: 'catalog'; payload: { models: WorkerJsonValue[] } }
   | { domain: 'auth'; payload: { authPath: string; fingerprint: string } }
   | { domain: 'runtimePrefs'; payload: { values: WorkerJsonObject } }
-  | { domain: 'providerPolicy'; payload: { providers: WorkerJsonObject } }
-  | { domain: 'sessionRegistry'; payload: { tabs: WorkerJsonValue[] } };
+  | { domain: 'providerPolicy'; payload: { providers: WorkerJsonObject } };
 
 export type WorkerProviderReleaseOutcome = 'completed' | 'failed' | 'cancelled';
 export type WorkerProviderObservationClassification = 'success' | 'http-error' | 'transport-error' | 'cancelled';
@@ -918,7 +916,7 @@ const RUNTIME_EVENT_NAMES: ReadonlySet<WorkerRuntimeEventName> = new Set([
 ]);
 
 const SYNC_DOMAINS: ReadonlySet<WorkerSyncDomain> = new Set([
-  'settings', 'catalog', 'auth', 'runtimePrefs', 'providerPolicy', 'sessionRegistry',
+  'settings', 'catalog', 'auth', 'runtimePrefs', 'providerPolicy',
 ]);
 
 function validateRuntimePromote(value: Record<string, unknown>, requireSeq: boolean): string | undefined {
@@ -1235,12 +1233,6 @@ function validateSync(value: Record<string, unknown>, requireSeq: boolean): stri
     case 'providerPolicy': {
       const nested = exactKeys(value.payload, ['providers']);
       return nested ? `sync.payload ${nested}` : validateJsonObject(value.payload.providers, 'sync.payload.providers');
-    }
-    case 'sessionRegistry': {
-      const nested = exactKeys(value.payload, ['tabs']);
-      if (nested) return `sync.payload ${nested}`;
-      if (!Array.isArray(value.payload.tabs)) return 'sync.payload.tabs must be an array.';
-      return validateJsonValue(value.payload.tabs, 'sync.payload.tabs');
     }
   }
 }

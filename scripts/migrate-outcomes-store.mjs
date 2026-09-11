@@ -33,12 +33,8 @@ try {
     const runs = result.runStores.reduce((sum, store) => sum + store.appended, 0);
     console.log(
       `Outcomes migration: ${result.sessions.copied} session(s) copied, `
-      + `${result.sessions.updated} refreshed, ${result.reviews.appended} review(s), `
-      + `${result.closureActions.appended} closure event(s), and ${runs} run snapshot(s) appended.`,
+      + `${result.sessions.updated} refreshed, and ${runs} run snapshot(s) appended.`,
     );
-    if (result.reviews.quarantined > 0) {
-      console.warn(`${result.reviews.quarantined} canonical review conflict(s) were quarantined under data/outcomes/migration-conflicts/.`);
-    }
   }
 } catch (error) {
   console.error(`Outcomes migration failed: ${error instanceof Error ? error.message : String(error)}`);

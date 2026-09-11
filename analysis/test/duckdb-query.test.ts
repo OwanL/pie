@@ -31,110 +31,28 @@ after(async () => {
 });
 
 test('DuckDB build and named queries work against the fixture', async () => {
-  const modelQualityRows = await sharedDb.queryNamed('model_quality');
-  const sessionReviewRows = await sharedDb.queryNamed('session_review_quality');
+  const coreRunRows = await sharedDb.queryNamed('core_runs');
   const toolUsageRows = await sharedDb.queryNamed('tool_usage');
   const toolFailureRows = await sharedDb.queryNamed('tool_failures');
   const timelineRows = await sharedDb.queryNamed('timeline');
 
-  assert.ok(modelQualityRows.length >= 3);
-  assert.ok(Array.isArray(sessionReviewRows));
+  assert.ok(coreRunRows.length >= 3);
   assert.ok(toolUsageRows.some((row) => row['tool_name'] === 'bash'));
   assert.ok(Array.isArray(toolFailureRows));
   assert.ok(timelineRows.some((row) => row['bucket_start'] === '2026-05-10'));
 });
 
-test('DuckDB exposes only V2 review quality tables and metrics', async () => {
-  const rows = await sharedDb.queryNamed('model_quality');
-  assert.ok(rows.every((row) => 'v2_review_count' in row && 'mean_quality_index_v1' in row));
-
+test('DuckDB omits retired review and outcome surfaces', async () => {
   const tables = await sharedDb.query("SELECT table_name FROM information_schema.tables WHERE table_schema = 'main'");
   const tableNames = new Set(tables.map((row) => String(row['table_name'])));
-  assert.ok(tableNames.has('session_reviews_v2'));
-  assert.ok(tableNames.has('review_criteria_v2'));
-  assert.equal(tableNames.has('review_findings_v2'), false);
-  assert.ok(tableNames.has('review_reviewers_v2'));
-  assert.equal(tableNames.has('agent_reviews'), false);
+  for (const retired of ['session_reviews_v2', 'review_criteria_v2', 'review_reviewers_v2', 'review_findings_v2', 'agent_reviews', 'outcomes']) {
+    assert.equal(tableNames.has(retired), false, `${retired} must not remain`);
+  }
 
   const runColumns = await sharedDb.query("SELECT column_name FROM information_schema.columns WHERE table_name = 'runs'");
   const runColumnNames = new Set(runColumns.map((row) => String(row['column_name'])));
   for (const removed of ['scored', 'resolution', 'satisfaction', 'outcome_source', 'first_attempt_success']) {
     assert.equal(runColumnNames.has(removed), false, `${removed} must not remain in runs`);
-  }
-
-  const views = await sharedDb.query("SELECT view_name FROM duckdb_views() WHERE schema_name = 'main'");
-  assert.equal(views.some((row) => row['view_name'] === 'outcomes'), false);
-
-  const leaderboardSql = await fs.readFile(new URL('../queries/model_leaderboard.sql', import.meta.url), 'utf8');
-  const leaderboardRows = await sharedDb.query(leaderboardSql);
-  assert.ok(leaderboardRows.every((row) => 'v2_review_count' in row && 'mean_quality_index_v1' in row));
-});
-
-test('V2 review mass flows through model quality and leaderboard SQL', async () => {
-  const base = prepared.runs.find((run) => run.status !== 'open' && !run.mixedModelConfig && !run.mixedTreatmentConfig);
-  assert.ok(base, 'fixture must contain a stable run');
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-analysis-duckdb-v2-review-'));
-  try {
-    const dbPath = path.join(dir, 'usage.duckdb');
-    await buildDuckDbDatabase({ dbPath, exportsDir: path.join(dir, 'exports'), prepared });
-    const runId = base.runId.replaceAll("'", "''");
-    await runDuckDbQuery(dbPath, `UPDATE runs SET session_id = 'v2-review-sql-session', identity_fallback = FALSE WHERE run_id = '${runId}'`);
-    await runDuckDbQuery(dbPath, `
-      INSERT INTO session_reviews_v2 (
-        review_id, session_id, identity_fallback, quality_index_v1,
-        criterion_coverage, external_blocker_rate, blinding_applied
-      ) VALUES ('v2-review-sql', 'v2-review-sql-session', FALSE, 87, 1, 0, TRUE)
-    `);
-
-    const qualityRows = await runNamedDuckDbQuery(dbPath, 'model_quality');
-    assert.ok(qualityRows.some((row) => Number(row['v2_review_count']) > 0 && Number(row['mean_quality_index_v1']) === 87));
-
-    const leaderboardSql = await fs.readFile(new URL('../queries/model_leaderboard.sql', import.meta.url), 'utf8');
-    const leaderboardRows = await runDuckDbQuery(dbPath, leaderboardSql);
-    assert.ok(leaderboardRows.some((row) => Number(row['v2_review_count']) > 0 && Number(row['mean_quality_index_v1']) === 87));
-  } finally {
-    await fs.rm(dir, { recursive: true, force: true });
-  }
-});
-
-test('model leaderboard SQL uses one latest stable run per task group for process diagnostics', async () => {
-  const base = prepared.runs.find((run) => run.status !== 'open' && !run.mixedModelConfig && !run.mixedTreatmentConfig);
-  assert.ok(base, 'fixture must contain an attributable stable run');
-  const first = {
-    ...base,
-    runId: 'terminal-a-first',
-    taskGroupId: 'terminal-task',
-    startedAt: '2026-05-10T01:00:00.000Z',
-    editRevisitRate: 0.1,
-  };
-  const later = {
-    ...base,
-    runId: 'terminal-a-later',
-    taskGroupId: 'terminal-task',
-    startedAt: '2026-05-10T02:00:00.000Z',
-    editRevisitRate: 0.5,
-  };
-  const tiedByRunId = {
-    ...later,
-    runId: 'terminal-z-later',
-    editRevisitRate: 0.8,
-  };
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-analysis-duckdb-terminal-task-'));
-  try {
-    const dbPath = path.join(dir, 'usage.duckdb');
-    await buildDuckDbDatabase({
-      dbPath,
-      exportsDir: path.join(dir, 'exports'),
-      prepared: { ...prepared, runs: [first, later, tiedByRunId] },
-    });
-    const sql = await fs.readFile(new URL('../queries/model_leaderboard.sql', import.meta.url), 'utf8');
-    const rows = await runDuckDbQuery(dbPath, sql);
-    assert.equal(rows.length, 1);
-    assert.equal(Number(rows[0]?.['run_count']), 3, 'all retries remain provenance');
-    assert.equal(Number(rows[0]?.['attributable_task_count']), 1);
-    assert.equal(Number(rows[0]?.['file_churn_rate']), 0.8, 'latest timestamp then greatest runId selects the canonical diagnostic run');
-  } finally {
-    await fs.rm(dir, { recursive: true, force: true });
   }
 });
 
@@ -171,18 +89,11 @@ test('DuckDB accepts unsigned Windows native exit codes', async () => {
   }
 });
 
-test('cost columns are surfaced in core_runs, model_quality, and timeline', async () => {
+test('cost columns are surfaced in core_runs and timeline', async () => {
   const coreRunsRows = await sharedDb.queryNamed('core_runs');
   assert.ok(coreRunsRows.length > 0);
   assert.ok(coreRunsRows.every((row) => 'estimated_cost_usd' in row), 'core_runs must expose estimated_cost_usd');
   assert.ok(coreRunsRows.some((row) => row['estimated_cost_usd'] != null), 'at least one priced run');
-
-  const modelQualityRows2 = await sharedDb.queryNamed('model_quality');
-  assert.ok(
-    modelQualityRows2.every((row) => 'average_estimated_cost_usd' in row && 'total_estimated_cost_usd' in row && 'priced_run_count' in row),
-    'model_quality must expose cost columns',
-  );
-  assert.ok(modelQualityRows2.some((row) => row['average_estimated_cost_usd'] != null), 'at least one priced model cell');
 
   const timelineRows2 = await sharedDb.queryNamed('timeline');
   assert.ok(
@@ -230,8 +141,8 @@ test('runs table maps every scalar PreparedRunRow field (no silent drops)', asyn
 
   // PreparedRunRow fields intentionally NOT mapped to the flat runs table:
   // nested objects/arrays whose sub-fields ARE extracted (verification_test_count
-  // etc. come from verificationCountsByKind) or that are only consumed by the
-  // dashboard path (skillEntries, the fs* functional-settings fields), or
+  // etc. come from verificationCountsByKind) or are not part of the retained
+  // flat query schema (skillEntries, the fs* functional-settings fields), or
   // harness-cohort fields not yet surfaced to DuckDB (harnessRevision,
   // harnessFingerprint, harnessStatus, isCurrentHarness).
   const excluded = new Set([

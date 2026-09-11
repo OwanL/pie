@@ -167,16 +167,14 @@ async function readMtimeMs(filePath: string): Promise<number | null> {
   }
 }
 
-/** Latest local run-store, V2 review, catalog, or side-channel input used by local-default loading. */
+/** Latest local run-store, catalog, or side-channel input used by local-default loading. */
 export async function readLatestLocalAnalyticsInputMs(
   outcomesRootDir: string,
-  reviewSidecarPath: string,
   additionalInputPaths: readonly string[] = [],
 ): Promise<number | null> {
   const candidates = await listStorageDirCandidates(outcomesRootDir);
   const timestamps = [
     candidates[0]?.latestActivityMs ?? null,
-    await readMtimeMs(reviewSidecarPath),
     ...await Promise.all(additionalInputPaths.map(readMtimeMs)),
   ].filter((timestamp): timestamp is number => timestamp !== null);
   return timestamps.length ? Math.max(...timestamps) : null;
@@ -186,11 +184,10 @@ export async function readLatestLocalAnalyticsInputMs(
 export async function shouldRebuildLocalDefaultDuckDb(
   dbPath: string,
   outcomesRootDir: string,
-  reviewSidecarPath: string,
   additionalInputPaths: readonly string[] = [],
 ): Promise<boolean> {
   const dbMtimeMs = await readMtimeMs(dbPath);
   if (dbMtimeMs === null) return true;
-  const inputMtimeMs = await readLatestLocalAnalyticsInputMs(outcomesRootDir, reviewSidecarPath, additionalInputPaths);
+  const inputMtimeMs = await readLatestLocalAnalyticsInputMs(outcomesRootDir, additionalInputPaths);
   return inputMtimeMs !== null && inputMtimeMs > dbMtimeMs;
 }

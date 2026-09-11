@@ -43,14 +43,6 @@ Provider-forced overflow compaction is treated as resumable when the provider re
 - The per-session last-compaction chip record expires after a bounded TTL via the `ClearLastCompaction` effect → `LastCompactionCleared` event.
 - `WebviewReadinessProbe` is bounded by `READINESS_PROBE_MAX_ATTEMPTS`; its reload-skip bails for the first ticks of a genuine reload but, past `RELOAD_STUCK_SKIPS` consecutive skips (~6s), treats `reloading` as stale, force-clears it, and probes. The per-renderer reload circuit uses a rolling wall-clock window that transcript commits cannot reset.
 
-## Session Cleanup — open-tab registry worker sync
-
-- `PIE_OPEN_TABS` is the compatible JSON array and `PIE_OPEN_TABS_REVISION` is its worker-sync revision fence. Reloadable control-plane broadcasts receive a 30-second acknowledgement grace; the auxiliary open-tab registry remains nonfatal and retries the newest revision with bounded backoff. Worker-sync retries at an equal revision are accepted only when the bounded payload fingerprint is identical; a changed equal-revision payload is a fatal protocol fault.
-
-## Session Cleanup — review closure drain mechanics
-
-- Drain reconciliation runs unconditionally on every backend startup/restart and uses both `fs.watch` as a low-latency hint and a bounded sidecar-fingerprint poll as the missed-event recovery path. A still-failing closure action becomes terminal `failed` after `MAX_CLOSURE_ATTEMPTS`.
-
 ## Conserved Billable Accounting — file mappings
 
 - The billable invocation ledger is stored as `billable-invocations.jsonl` per workspace analytics store.

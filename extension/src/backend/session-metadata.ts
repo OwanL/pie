@@ -14,7 +14,6 @@ import type { SdkCatalogModel, SdkModelRegistry, SdkModule, SdkSessionInfo } fro
 import type { SessionContext } from './server-types';
 import { findSubagentProfile, loadSubagentProfiles } from './subagent-profiles';
 import { summarizeSession, type SessionEntryLike } from './transcript';
-import { mergeReviewIntoSummary, mergeReviewsIntoSummaries, readReviews } from './session-review-store';
 import { backendTrace } from './log';
 import {
   backendSessionFingerprintsEqual,
@@ -420,15 +419,11 @@ export async function discoverSessionSummaries(
   return summaries.sort((left, right) => right.modifiedAt.localeCompare(left.modifiedAt));
 }
 
-export function applySessionReviews(summaries: readonly SessionSummary[]): SessionSummary[] {
-  return mergeReviewsIntoSummaries(summaries, readReviews());
-}
-
 export async function listSessions(
   sdk: SdkModule,
   sessionDir?: string,
 ): Promise<SessionSummary[]> {
-  return applySessionReviews(await discoverSessionSummaries(sdk, sessionDir));
+  return await discoverSessionSummaries(sdk, sessionDir);
 }
 
 export function deriveSessionName(context: SessionContext): { name: string; isPlaceholder: boolean } {
@@ -469,7 +464,7 @@ export function buildCurrentSummary(
     provider: resolveActiveModel(context).provider,
     thinkingLevel: normalizeThinkingLevel(context.session.thinkingLevel),
   };
-  return mergeReviewIntoSummary(summary, readReviews());
+  return summary;
 }
 
 export interface ActiveModelInfo {

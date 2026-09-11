@@ -630,37 +630,6 @@ test('rendered tool-call components cover collapsed summaries, expanded bodies, 
   assert.match(fallbackSubagentHtml, /Too many parallel tasks/);
 });
 
-test('session-review batch results do not render as failed subagents', async () => {
-  const { ToolCallItem } = await loadWebviewModules();
-  const html = renderToString(h(ToolCallItem, {
-    toolCall: toolCall({
-      id: 'review-close-batch',
-      name: 'session_review',
-      input: { action: 'closeReviewedBatch' },
-      result: {
-        content: [{ type: 'text', text: 'Requested closure batch: 2 succeeded, 0 failed.' }],
-        details: {
-          results: [
-            { index: 0, sessionId: 'session-1', reviewId: 'review-1', status: 'pending' },
-            { index: 1, sessionId: 'session-2', reviewId: 'review-2', status: 'pending' },
-          ],
-        },
-      },
-      status: 'completed',
-    }),
-    prefs: { ...DEFAULT_CHAT_PREFS, autoExpandToolCalls: true },
-    workingDirectory: '/repo',
-    onOpenFile: noop,
-    onContextMenu: noopContextMenu,
-    renderToolCall: () => null,
-  }));
-
-  assert.match(html, /Requested closure batch: 2 succeeded, 0 failed/);
-  assert.doesNotMatch(html, /tool-call-subagent/);
-  assert.doesNotMatch(html, /context task only/);
-  assert.doesNotMatch(html, />Failed</);
-});
-
 test('rendered ToolCallItem hides subagent model-selection badges in collapsed headers', async () => {
   const { ToolCallItem } = await loadWebviewModules();
 

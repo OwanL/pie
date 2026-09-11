@@ -102,7 +102,6 @@ export const DEFAULT_TOOL_KEEP_CATALOG = [
   'read',
   'request_capability',
   'session_changes',
-  'session_review',
   'source_check',
   'web_search',
   'write',

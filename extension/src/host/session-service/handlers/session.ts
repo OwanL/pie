@@ -1,6 +1,5 @@
 import * as vscode from 'vscode';
 import type { RunObserver } from '../../stats-service';
-import type { ArchState } from '../../core/arch-state';
 import type { SessionServiceState } from '../state';
 import type { Event } from '../../core/events';
 import type { OnSessionCompleted } from '../types';
@@ -19,7 +18,6 @@ import { createOperationalIncident, type OperationalIncident } from '../../../sh
 
 interface HandlerDeps {
   context: vscode.ExtensionContext;
-  getArchState: () => ArchState;
   dispatchArch: (event: Event) => void;
   runObserver: RunObserver;
   state: SessionServiceState;
@@ -28,43 +26,12 @@ interface HandlerDeps {
   requireEventSessionPath: (eventName: string, sessionPath: string | undefined) => string | null;
 }
 
-let reviewAutoCloseCorrIdCounter = 0;
-
 export function onSessionListChanged(payload: SessionListChangedPayload, deps: HandlerDeps): void {
   deps.dispatchArch({
     kind: 'SessionListChanged',
     sessionSummaries: payload.sessions,
     sessionCatalogProgress: payload.sessionCatalogProgress,
   });
-
-  // Review persistence is not a lifecycle command. Drain only explicit V2
-  // closeReviewed/closeSelf outbox actions through the normal CQRS close path.
-  // The state observer terminalizes each action only after its correlated
-  // cleanup (when applicable) and PersistTabs results both report success.
-  const archState = deps.getArchState();
-  const closeResult = deps.state.consumeReviewAutoCloseClosures(
-    payload.sessions,
-    archState.sessions.openTabPaths,
-    archState.sessions.runningSessionPaths,
-  );
-  for (const attempt of closeResult.attempts) {
-    const corrId = `review-close-action:${++reviewAutoCloseCorrIdCounter}`;
-    deps.state.beginReviewClosureAttempt(corrId, attempt);
-    deps.dispatchArch({
-      kind: 'Command',
-      cmd: {
-        kind: 'CloseSession',
-        corrId,
-        operationId: `${corrId}:operation`,
-        operationAttempt: 1,
-        operationSource: { kind: 'host' },
-        backendGeneration: deps.state.getBackendGeneration(),
-        sessionPath: attempt.sessionPath,
-        ensureClosed: true,
-        reviewClosure: true,
-      },
-    });
-  }
 
   deps.scheduleRender();
 }

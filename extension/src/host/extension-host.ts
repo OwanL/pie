@@ -67,11 +67,6 @@ import { deriveSessionNameFromText } from '../shared/session-name';
 import { isPendingTabPath } from '../shared/tab-behavior';
 import { appendPieLog } from './util/pie-log';
 import { CanonicalAnalyticsCapture } from '../analytics/canonical-capture.js';
-import {
-  didOpenTabsRegistryInputsChange,
-  OpenTabsRegistryPublisher,
-  selectOpenTabsRegistry,
-} from './session-service/open-tabs-registry';
 
 
 export const SIDEBAR_VIEW_TYPE = 'pie.sessionsView';
@@ -130,7 +125,6 @@ export class PieExtension implements vscode.Disposable {
   private readonly aggregateStatsService: AggregateStatsService;
   private readonly statsService: StatsService;
   private readonly service: SessionService;
-  private readonly openTabsRegistryPublisher: OpenTabsRegistryPublisher;
   private shutdownPromise: Promise<void> | null = null;
   /** Coalesce command-palette, notice-action, and browser requests that can
    * arrive before the first restart projection disables renderer controls. */
@@ -159,20 +153,6 @@ export class PieExtension implements vscode.Disposable {
       process.env.PI_CODING_AGENT_DIR,
       context.globalStorageUri.fsPath,
     );
-
-    this.openTabsRegistryPublisher = new OpenTabsRegistryPublisher({
-      request: async ({ revision, tabs }, { onTransportSettled }) => {
-        await this.backend.request('openTabs.set', { revision, tabs }, {
-          timeoutMs: 5_000,
-          onTransportSettled,
-        });
-      },
-      onError: (error, sync) => appendPieLog('warn', 'openTabs', 'openTabs.set failed', {
-        error: toErrorMessage(error),
-        revision: sync.revision,
-        retryAttempt: sync.retryAttempt,
-      }),
-    });
 
     // Production producer seams are always constructed, but the canonical
     // authority remains deliberately disabled until the P2b/P5/P7 cutover
@@ -386,13 +366,6 @@ export class PieExtension implements vscode.Disposable {
             throw err;
           }
 
-          // Push only after durable tab persistence succeeds. The correlated
-          // PersistTabsResult is also the closure outbox's authoritative hide
-          // completion signal for running sessions.
-          // The reducer already published the current authority immediately;
-          // this call is a retry/dedupe checkpoint after durable persistence,
-          // not a backend-generation replacement.
-          this.pushOpenTabsRegistry();
         },
       },
       log: {
@@ -500,10 +473,6 @@ export class PieExtension implements vscode.Disposable {
     // valid initial `ViewState`. Backend readiness is a field in that state;
     // the HTTP shell does not wait for provider/backend startup.
     await this.browserServer.start();
-    // Push the restored open-tab summaries to the backend so the
-    // `session_review` tool's listOpen works immediately after startup
-    // (persistTabs only fires on tab changes, not on cold-start restore).
-    this.pushOpenTabsRegistry();
   }
 
   async restart(source: SessionOperationSource = { kind: 'host' }): Promise<void> {
@@ -536,17 +505,6 @@ export class PieExtension implements vscode.Disposable {
     await this.restartPromise;
   }
 
-  /** Push the currently-open tab summaries to the backend (`openTabs.set`) so
-   *  the `session_review` tool can list "currently open" sessions (true host
-   *  tab state) without a host→tool bridge. Called from `persistTabs` (on tab
-   *  changes) and once after backend start/restart (startup gap). The
-   *  summaries already carry canonical V2 review state merged from the sidecar. */
-  private pushOpenTabsRegistry(force = false): void {
-    this.openTabsRegistryPublisher.publish(selectOpenTabsRegistry(this.archState), { force });
-  }
-
-
-
   /**
    * Dispatch an event through the arch reducer and execute resulting effects.
    * This is the single point where the CQRS spine integrates with the extension.
@@ -555,12 +513,6 @@ export class PieExtension implements vscode.Disposable {
     const traceEnabled = isLivePipelineTraceEnabled();
     const traceStartedAt = traceEnabled ? performance.now() : 0;
     const stateBefore = this.archState;
-    const registryInputsBefore = {
-      sessions: this.archState.sessions.sessions,
-      openTabPaths: this.archState.sessions.openTabPaths,
-      pinnedTabPaths: this.archState.sessions.pinnedTabPaths,
-      runningSessionPaths: this.archState.sessions.runningSessionPaths,
-    };
     // Pre-reducer side effects for specific event types.
     if ((event.kind === 'SendResult' || event.kind === 'ContinueResult')
         && event.ok && event.requestId) {
@@ -581,27 +533,8 @@ export class PieExtension implements vscode.Disposable {
         );
       }
     }
-    if (event.kind === 'CloseSessionResult' || event.kind === 'PersistTabsResult') {
-      this.service.handleReviewClosureEffectResult(event);
-    }
-
     const result = dispatch(this.archState, event);
     this.archState = result.state;
-    // Readiness is a post-reducer property, not just a BackendReadyChanged
-    // event. RestartBackend optimistically stops the registry before its
-    // asynchronous transport work starts, and the generation can advance
-    // before the replacement's ready event is delivered.
-    this.openTabsRegistryPublisher.setBackendReady(
-      this.archState.settings.backendReady,
-      this.backend.getGeneration(),
-    );
-    const registryInputsAfter = this.archState.sessions;
-    if (didOpenTabsRegistryInputsChange(registryInputsBefore, registryInputsAfter)) {
-      // This covers tab/pin commands and BusyChanged in the same reducer turn;
-      // the review tool never waits for a later persistence callback to learn
-      // that a target started, stopped, opened, closed, pinned, or unpinned.
-      this.pushOpenTabsRegistry();
-    }
     if (traceEnabled) {
       const trace = eventTraceMetadata(event);
       recordLivePipelineTrace({
@@ -621,10 +554,6 @@ export class PieExtension implements vscode.Disposable {
     }
     if (event.kind === 'BackendRestartResult' && event.operationId === this.restartOperationId) {
       if (event.ok) {
-        // BackendRestartResult is a replacement-generation boundary. Force a
-        // resend even when the host snapshot is structurally unchanged; the
-        // new coordinator has no acknowledgement ledger yet.
-        this.pushOpenTabsRegistry(true);
         this.restartResolve?.();
       } else {
         this.restartReject?.(new Error(event.error ?? 'Backend restart failed'));
@@ -1150,7 +1079,6 @@ export class PieExtension implements vscode.Disposable {
       // Clear any pending timers first so they cannot fire into a torn-down
       // store / sidebar provider after dispose.
       this.effectRunner.dispose();
-      this.openTabsRegistryPublisher.dispose();
       this.tokenRateService.dispose();
       this.aggregateStatsService.dispose();
 

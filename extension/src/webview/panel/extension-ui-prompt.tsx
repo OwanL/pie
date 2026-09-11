@@ -32,11 +32,6 @@ export function ExtensionUIPrompt({ sessionPath, request, postMessage, variant =
   }, [postMessage, sessionPath]);
 
   const rootClass = variant === 'card' ? 'ext-prompt ext-prompt--card' : 'ext-prompt';
-  // `sessionPath` is always the reviewer session passed by the caller. Review
-  // metadata labels the target only and must never be used to route a reply.
-  const reviewLabel = request.reviewMeta ? `Review · ${request.reviewMeta.targetSessionPath}` : undefined;
-  const promptSourceLabel = reviewLabel ?? sourceLabel;
-
   switch (request.method) {
     case 'confirm':
       return (
@@ -48,7 +43,7 @@ export function ExtensionUIPrompt({ sessionPath, request, postMessage, variant =
           extensionId={request.extensionId}
           rootClass={rootClass}
           context={context}
-          sourceLabel={promptSourceLabel}
+          sourceLabel={sourceLabel}
           onRespond={respond}
         />
       );
@@ -63,7 +58,7 @@ export function ExtensionUIPrompt({ sessionPath, request, postMessage, variant =
           extensionId={request.extensionId}
           rootClass={rootClass}
           context={context}
-          sourceLabel={promptSourceLabel}
+          sourceLabel={sourceLabel}
           onRespond={respond}
         />
       );
@@ -77,7 +72,7 @@ export function ExtensionUIPrompt({ sessionPath, request, postMessage, variant =
           extensionId={request.extensionId}
           rootClass={rootClass}
           context={context}
-          sourceLabel={promptSourceLabel}
+          sourceLabel={sourceLabel}
           onRespond={respond}
         />
       );

@@ -280,13 +280,9 @@ export class BackendClient implements vscode.Disposable {
       agentDir: agentDirEnv,
     });
     const sessionSettingsDirEnv = path.join(dataPaths.stateDir, 'session-settings');
-    // Session-scoped settings use the neutral state/session-settings authority;
-    // the legacy review-sidecar path is supplied only for one-way toggle
-    // migration/scrubbing. Reviews themselves remain on `PIE_REVIEWS_DIR`
-    // until the later review-retirement milestone.
-    // Session reviews live in a sibling of the sessions dir so the backend
-    // (reader) and the session_review tool (writer) — same process — agree on
-    // the sidecar location via `PIE_REVIEWS_DIR`.
+    // Session-scoped settings use the neutral state/session-settings authority.
+    // The retired review directory remains available only for one-way setting
+    // migration and private-session artifact scrubbing.
     // Deferred-trigger sidecar (sibling of sessions dir). The host registry
     // (reader/fire-writer) and the `defer_trigger` tool (register/cancel
     // writer) agree on the location through the shared session path resolver;
@@ -562,7 +558,7 @@ export class BackendClient implements vscode.Disposable {
     }
     const retainCorrelation = options?.onCorrelatedResponse !== undefined;
     const requestStartedAt = performance.now();
-    const timingLevel = ['session.open', 'session.preload', 'session.list', 'session.forget', 'openTabs.set', 'runtimePrefs.set']
+    const timingLevel = ['session.open', 'session.preload', 'session.list', 'session.forget', 'runtimePrefs.set']
       .includes(method) ? 'info' : 'debug';
     const responsePromise = this.requests.create(
       id,

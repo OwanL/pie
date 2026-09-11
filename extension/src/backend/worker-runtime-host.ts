@@ -222,13 +222,6 @@ export class WorkerRuntimeHost {
       this.applyRuntimePrefs(payload.values as WorkerJsonObject);
     } else if (domain === 'providerPolicy' && payload.providers && typeof payload.providers === 'object' && !Array.isArray(payload.providers)) {
       ProviderGate.getInstance()?.applyUserOverrides(payload.providers as never);
-    } else if (domain === 'sessionRegistry' && Array.isArray(payload.tabs)) {
-      // Extensions execute inside this long-lived worker process. Keep the
-      // compatibility environment read live instead of leaving it frozen at
-      // the process-spawn snapshot. The paired revision lets tools fence a
-      // multi-step workflow against a newer host tab/pin/busy snapshot.
-      process.env['PIE_OPEN_TABS'] = JSON.stringify(payload.tabs);
-      process.env['PIE_OPEN_TABS_REVISION'] = String(revision);
     }
   }
 

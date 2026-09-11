@@ -172,9 +172,7 @@ export interface SessionsState {
    *  `willRetry` gate on `agent_end` keeps `busy` true throughout). */
   retryStatusBySession: Record<string, RetryStatus>;
   /** Running session paths whose tab was intentionally hidden by an explicit
-   *  close. This covers ordinary user closes and V2 review closure actions
-   *  (closeReviewed/closeSelf); the durable review outbox reason remains on
-   *  the close command, while this host-owned intent controls renderer recovery.
+   *  close. The host-owned intent controls renderer recovery.
    *  Host-owned so it survives webview reloads; pruned when a path is reopened
    *  or no longer running. */
   intentionallyHiddenRunningPaths: string[];

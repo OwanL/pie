@@ -168,7 +168,6 @@ export interface BackendRequestHandlerDeps {
   /** Publish host-authoritative open/pinned/running summaries into the
    * coordinator's revisioned worker-sync domain. Optional for standalone
    * request-handler tests and legacy embeddings. */
-  syncOpenTabsRegistry?(tabs: unknown[], sourceRevision?: number): Promise<void>;
   emitBusyChanged(
     context: SessionContext,
     busy: boolean,

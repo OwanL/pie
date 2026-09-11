@@ -275,7 +275,6 @@ export class WorkerRuntimeRouter {
     auth: 1,
     runtimePrefs: 1,
     providerPolicy: 1,
-    sessionRegistry: 1,
   };
   private readonly syncPayloads: Partial<Record<SyncDomain, WorkerJsonObject>> = {};
   private readonly workerSyncRevisions = new WeakMap<SupervisedWorker, Partial<Record<SyncDomain, number>>>();
@@ -297,11 +296,6 @@ export class WorkerRuntimeRouter {
   private readonly broadcastSyncAckTimeoutMs: number;
   private readonly runtimeReadyTimeoutMs: number;
   private providerPolicy: WorkerJsonObject = {};
-  /** Latest host-authoritative open/pinned/running summaries. The separate
-   * source revision fences overlapping/retried public openTabs.set requests;
-   * the private sync revision remains coordinator-owned. */
-  private sessionRegistry: WorkerJsonValue[] = [];
-  private sessionRegistrySourceRevision = 0;
   private disposed = false;
   private readonly detailSubscriptions = new Map<string, DetailSubscriptionOwner>();
   private readonly extensionUiOwners = new ExtensionUiOwnerRegistry();
@@ -917,52 +911,6 @@ export class WorkerRuntimeRouter {
     await this.broadcastSync('providerPolicy', { providers: this.providerPolicy });
   }
 
-  /** Publish the host's complete open-tab registry to every existing worker
-   * and retain it for workers promoted later. Host revisions are latest-wins;
-   * a duplicate retry is acknowledged without reapplying an older snapshot. */
-  async syncSessionRegistry(
-    tabs: WorkerJsonValue[],
-    sourceRevision?: number,
-  ): Promise<{ applied: boolean; revision: number; retiredWorkers: number }> {
-    if (sourceRevision !== undefined
-      && (!Number.isSafeInteger(sourceRevision) || sourceRevision <= 0)) {
-      throw new Error('Session registry source revision must be a positive safe integer.');
-    }
-    const normalized = JSON.parse(JSON.stringify(tabs)) as WorkerJsonValue[];
-    if (!Array.isArray(normalized)) throw new Error('Session registry must be a JSON array.');
-
-    const scheduled = await this.withSyncLock(async () => {
-      const incomingSourceRevision = sourceRevision ?? this.sessionRegistrySourceRevision + 1;
-      if (incomingSourceRevision <= this.sessionRegistrySourceRevision) {
-        return {
-          applied: false as const,
-          revision: this.syncRevisions.sessionRegistry,
-          settlements: [] as WorkerSyncSettlement[],
-        };
-      }
-      this.sessionRegistrySourceRevision = incomingSourceRevision;
-      this.sessionRegistry = normalized;
-      const revision = this.syncRevisions.sessionRegistry + 1;
-      this.syncRevisions.sessionRegistry = revision;
-      const payload: WorkerJsonObject = { tabs: normalized };
-      this.syncPayloads.sessionRegistry = payload;
-      return {
-        applied: true as const,
-        revision,
-        settlements: this.scheduleBroadcastLocked('sessionRegistry', payload, revision, 'broadcast'),
-      };
-    });
-    if (!scheduled.applied) {
-      return { applied: false, revision: scheduled.revision, retiredWorkers: 0 };
-    }
-    // Open-tab state supports session-review tooling, but is not credential,
-    // settings, or ownership authority. Do not hold the host publication RPC
-    // open (or kill a busy review) while a worker is synchronously occupied.
-    // Each failed acknowledgement is retried with the newest revision below.
-    this.observeLiveSyncBroadcast(scheduled.settlements);
-    return { applied: true, revision: scheduled.revision, retiredWorkers: 0 };
-  }
-
   /** Broadcast the coordinator-authoritative settings snapshot after a cold
    * (global) settings write so hot workers never serve stale values. */
   async syncSettings(): Promise<void> {
@@ -1575,8 +1523,6 @@ export class WorkerRuntimeRouter {
         this.syncPayloads.providerPolicy ??= {
           providers: Object.keys(this.providerPolicy).length > 0 ? this.providerPolicy : snapshot.providerPolicy ?? {},
         };
-        this.syncPayloads.sessionRegistry ??= { tabs: this.sessionRegistry };
-
         return (Object.keys(this.syncRevisions) as SyncDomain[]).map((domain) => {
           const revision = this.syncRevisions[domain];
           const payload = this.syncPayloads[domain]!;
@@ -1628,7 +1574,7 @@ export class WorkerRuntimeRouter {
       if ((latest[domain] ?? 0) >= revision) return;
       const startedAt = this.scheduler.now();
       try {
-        const ackTimeoutMs = phase === 'startup' || domain === 'sessionRegistry'
+        const ackTimeoutMs = phase === 'startup'
           ? this.syncAckTimeoutMs
           : this.broadcastSyncAckTimeoutMs;
         const response = await this.withDeadline(

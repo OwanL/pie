@@ -286,8 +286,8 @@ test('response lane admits a greater-than-1-MiB checkpoint response alongside it
   const syncAck: WorkerIpcFrameDraft = {
     ...frameBase,
     kind: 'sync.ack',
-    requestId: 'session-registry-sync',
-    domain: 'sessionRegistry',
+    requestId: 'runtime-prefs-sync',
+    domain: 'runtimePrefs',
     revision: 1,
   };
 

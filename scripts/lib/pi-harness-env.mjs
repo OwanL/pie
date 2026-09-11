@@ -3,12 +3,12 @@
  *
  * The pi harness (VS Code extension host) exports its live state to child
  * processes through `PI_*`/`PIE_*` environment variables: the real
- * agent/session/auth directories, the reviews and deferred-trigger sidecars,
- * open-tab state, subagent routing toggles, and user config JSON. Test
+ * agent/session/auth directories, retired-review and deferred-trigger sidecars,
+ * subagent routing toggles, and user config JSON. Test
  * processes that spawn the backend or host code inherit these and leak real
  * user state into fixtures — e.g. the session catalog picking up pending
- * review actions from the real reviews store, or the backend scanning the
- * real sessions directory. Strip known harness state so test processes start
+ * private-cleanup state from the real retired-review store, or the backend
+ * scanning the real sessions directory. Strip known harness state so test processes start
  * from a clean slate; stable runtime settings such as `PIE_EDITOR_VERSION`
  * remain available, and tests that need a value set it explicitly in their
  * own child env.
@@ -24,7 +24,6 @@ const PI_HARNESS_ENV_EXACT = new Set([
   'PIE_HISTORY_COMPACTION_JSON',
   'PIE_LIVE_PIPELINE_TRACE_KEY',
   'PIE_LIVE_PIPELINE_TRACE_RUN_ID',
-  'PIE_OPEN_TABS',
   'PIE_PROVIDER_TOGGLES_JSON',
   'PIE_REVIEWS_DIR',
   'PIE_TRIGGERS_DIR',

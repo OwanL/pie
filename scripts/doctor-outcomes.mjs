@@ -18,10 +18,6 @@ function durableOutcomeFiles(root) {
   };
 
   visit(path.join(root, 'sessions'), (file) => file.endsWith('.jsonl'));
-  for (const name of ['reviews.jsonl', 'closure-actions.jsonl']) {
-    const file = path.join(root, 'session-reviews', name);
-    if (fs.existsSync(file) && fs.statSync(file).isFile()) files.push(file);
-  }
   if (fs.existsSync(root)) {
     for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
       if (!entry.isDirectory() || !/^[a-f0-9]{16}$/i.test(entry.name)) continue;

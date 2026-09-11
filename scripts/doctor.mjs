@@ -75,8 +75,8 @@ if (stranded.totalStranded > 0) {
 }
 
 // A backend launched before storage migration keeps its old process environment
-// until VS Code reloads. Detect writes made after the merge so reviews, sessions,
-// and completed runs cannot silently remain split across authorities.
+// until VS Code reloads. Detect retained sessions and completed runs written
+// after the merge so they cannot silently remain split across authorities.
 const outcomesRoot = path.join(repoRoot, "data", "outcomes");
 const outcomeDrift = collectPostMigrationOutcomeDrift({ canonicalOutcomesRoot: outcomesRoot });
 if (outcomeDrift.changedFileCount > 0) {

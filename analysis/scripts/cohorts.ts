@@ -6,7 +6,7 @@ import { CURRENT_HARNESS_REVISION, type HarnessCohortStatus } from './contracts.
  * Attributes each run to a harness cohort from its stamped `harnessRevision`
  * (and, when the revision is absent, its start time). Deterministic and
  * side-effect free so it can be unit-tested in isolation and reused by
- * prepare.ts and any future dashboard filters.
+ * prepare.ts and future query filters.
  *
  * Eras (all instants are UTC):
  * - `startedAt < 2026-07-26T00:00:00Z`: before harness stamping existed and

@@ -119,10 +119,6 @@ function mergeSessionSummaryPreservingLocalName(
     modelId: incoming.modelId ?? existing.modelId,
     provider: incoming.provider ?? existing.provider,
     thinkingLevel: incoming.thinkingLevel ?? existing.thinkingLevel,
-    // Review fields come from the session-review sidecar, which the backend
-    // merges in. A backend list refresh that omits them (e.g. sidecar read
-    // failed) must not wipe a previously-known review, so preserve the
-    // existing value when the incoming summary doesn't carry one.
     sessionId: incoming.sessionId ?? existing.sessionId,
     // `identityFallback` qualifies the identity arriving in the same summary.
     // Stable backend summaries intentionally omit the false value, so carrying
@@ -131,10 +127,6 @@ function mergeSessionSummaryPreservingLocalName(
     identityFallback: incoming.sessionId !== undefined
       ? incoming.identityFallback === true
       : existing.identityFallback,
-    reviewed: incoming.reviewed ?? existing.reviewed,
-    reviewId: incoming.reviewId ?? existing.reviewId,
-    reviewedAt: incoming.reviewedAt ?? existing.reviewedAt,
-    closureActions: incoming.closureActions ?? existing.closureActions,
   };
 }
 
@@ -294,10 +286,6 @@ export function handleSessionOpened(state: ArchState, event: Extract<Event, { ki
           ? state.sessions.compactingSessionPaths
           : removeFromArray(state.sessions.compactingSessionPaths, sessionPath);
 
-  // Preserve review fields across `session.opened`'s full-replace upsert.
-  // `payload.session` comes from `buildCurrentSummary`, which merges the
-  // review sidecar; a transient sidecar read failure must not wipe previously
-  // known V2 review state.
   const existingForOpened = state.sessions.sessions.find((s) => s.path === payload.session.path);
   const openedSummary = mergeSessionSummaryPreservingLocalName(existingForOpened, payload.session);
   const staleModelOwnership = event.backendGeneration < state.settings.modelBackendGeneration

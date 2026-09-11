@@ -14,7 +14,7 @@ test("SubagentParams exposes one required task shape without a reasoning overrid
 	assert.deepEqual(SubagentParams.required, ["agent", "task"]);
 	const props = SubagentParams.properties as Record<string, unknown>;
 	assert.deepEqual(Object.keys(props), [
-		"agent", "task", "workflowRef", "userContext", "cwd", "bucket", "modelRequirements",
+		"agent", "task", "userContext", "cwd", "bucket", "modelRequirements",
 	]);
 	assert.equal("thinkingLevel" in props, false);
 	assert.equal("tasks" in props, false);
@@ -97,15 +97,6 @@ test("SubagentParams rejects removed routes and malformed values", () => {
 	assert.equal(Value.Check(SubagentParams, { agent: "worker", task: "a", confirmProjectAgents: true }), false);
 	assert.equal(Value.Check(SubagentParams, { agent: "worker" }), false);
 	assert.equal(Value.Check(SubagentParams, { task: "a" }), false);
-});
-
-test("workflowRef is an optional bounded opaque correlation and survives argument preparation", () => {
-	assert.equal(Value.Check(SubagentParams, { agent: "worker", task: "a", workflowRef: "session-review-v1/target/proposal-small" }), true);
-	assert.equal(Value.Check(SubagentParams, { agent: "worker", task: "a", workflowRef: "" }), false);
-	assert.equal(Value.Check(SubagentParams, { agent: "worker", task: "a", workflowRef: "x".repeat(513) }), false);
-	assert.deepEqual(prepareSubagentArguments({ agent: "worker", task: "a", workflowRef: "run/role" }), {
-		agent: "worker", task: "a", workflowRef: "run/role",
-	});
 });
 
 test("modelRequirements accepts image inputKinds and is optional", () => {

@@ -117,29 +117,27 @@ test('workspace and outcomes discovery tolerate missing directories', async () =
   });
 });
 
-test('local-default freshness includes run stores, V2 reviews, catalogs, and side-channel logs', async () => {
+test('local-default freshness includes run stores, catalogs, and side-channel logs', async () => {
   await withTempDir(async (root) => {
     const outcomesRoot = path.join(root, 'outcomes');
     const storageDir = path.join(outcomesRoot, 'aaaaaaaaaaaaaaaa');
-    const reviewPath = path.join(outcomesRoot, 'session-reviews', 'reviews.jsonl');
     const dbPath = path.join(root, 'usage.duckdb');
     const modelsPath = path.join(root, 'models.json');
     const pruningPath = path.join(root, 'pruning.jsonl');
     const additionalInputs = [modelsPath, pruningPath];
 
     await writeArtifact(storageDir, 'run-snapshots.jsonl', 10_000);
-    await writeArtifact(path.dirname(reviewPath), path.basename(reviewPath), 20_000);
     await writeArtifact(root, path.basename(modelsPath), 25_000);
     await writeArtifact(root, path.basename(pruningPath), 22_000);
     await writeArtifact(root, path.basename(dbPath), 15_000);
 
-    assert.equal(await readLatestLocalAnalyticsInputMs(outcomesRoot, reviewPath, additionalInputs), 25_000);
-    assert.equal(await shouldRebuildLocalDefaultDuckDb(dbPath, outcomesRoot, reviewPath, additionalInputs), true);
+    assert.equal(await readLatestLocalAnalyticsInputMs(outcomesRoot, additionalInputs), 25_000);
+    assert.equal(await shouldRebuildLocalDefaultDuckDb(dbPath, outcomesRoot, additionalInputs), true);
 
     const newerDbTime = new Date(30_000);
     await fs.utimes(dbPath, newerDbTime, newerDbTime);
-    assert.equal(await shouldRebuildLocalDefaultDuckDb(dbPath, outcomesRoot, reviewPath, additionalInputs), false);
-    assert.equal(await shouldRebuildLocalDefaultDuckDb(path.join(root, 'missing.duckdb'), outcomesRoot, reviewPath, additionalInputs), true);
+    assert.equal(await shouldRebuildLocalDefaultDuckDb(dbPath, outcomesRoot, additionalInputs), false);
+    assert.equal(await shouldRebuildLocalDefaultDuckDb(path.join(root, 'missing.duckdb'), outcomesRoot, additionalInputs), true);
   });
 });
 

@@ -138,45 +138,6 @@ test('delayed create exposes an explicit retry affordance', () => {
   assert.match(html, /Retry session creation/);
 });
 
-test('tab omits run and review badges', () => {
-  const tabPath = '/sessions/reviewed';
-  const summary: SessionSummary = {
-    path: tabPath,
-    name: 'Reviewed Session',
-    cwd: '/workspace',
-    modifiedAt: '2026-01-01T00:00:00.000Z',
-    messageCount: 1,
-    reviewed: true,
-    reviewId: 'review-1',
-    reviewedAt: '2026-01-01T01:00:00.000Z',
-  };
-  const html = renderToString(h(SessionTab, {
-    tabPath,
-    index: 0,
-    sessionByPath: new Map([[tabPath, summary]]),
-    openIndexByPath: new Map([[tabPath, 0]]),
-    runningPathSet: new Set<string>(),
-    startingModelPathSet: new Set<string>(),
-    unreadFinishedPathSet: new Set<string>(),
-    activePath: tabPath,
-    hasPendingExtensionUIRequest: false,
-    isPinned: false,
-    isDropTarget: false,
-    hasDeferredTriggers: false,
-    hasDeferredTimer: false,
-    onContextMenu: () => undefined,
-    onPointerDown: () => undefined,
-    onClick: () => undefined,
-    onClose: () => undefined,
-  }));
-
-  assert.match(html, /session-tab-label[^>]*>Reviewed Session</);
-  assert.doesNotMatch(html, /session-tab-run-badge/);
-  assert.doesNotMatch(html, /session-tab-review-badge/);
-  assert.doesNotMatch(html, />Done</);
-  assert.doesNotMatch(html, />✓5</);
-});
-
 // ─── SessionTabContextMenu: New Session / Copy Session Path / pending pin ──
 
 function renderContextMenu(props: {

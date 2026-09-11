@@ -261,21 +261,22 @@ Full-runtime publication retains the current and prior generations plus leased g
 
 Keep **built**, **staged**, **loaded**, and **behavior verified** distinct. Staged files are not evidence that existing windows have loaded the update.
 
-### Run the analytics workspace
+### Query local analytics
 
 ```bash
 # from repo root
-npm run analytics:serve
+npm run analytics:build-db
+npm run analytics:query -- --name core_runs
 ```
 
-Other analytics helpers from the repo root: `analytics:build-db`, `analytics:query -- --name model_quality`, `analytics:export-site-data`, `analytics:validate`.
+Other analytics helpers from the repo root: `analytics:typecheck`, `analytics:test`, and `analytics:validate`.
 
 ## Persistence and storage
 
-- `data/outcomes/` is the machine-wide authority for this checkout, independent of cwd and VS Code workspace. It contains canonical session JSONL, one global V2 review sidecar, and workspace-sharded run stores that analytics aggregates globally.
-- Both installers pin `PI_CODING_AGENT_SESSION_DIR` to `data/outcomes/sessions/`; `PIE_REVIEWS_DIR` is derived as the sibling `data/outcomes/session-reviews/` directory rather than selected per cwd.
+- `data/outcomes/` is the machine-wide authority for this checkout, independent of cwd and VS Code workspace. It contains canonical session JSONL and workspace-sharded analytics stores.
+- Both installers pin `PI_CODING_AGENT_SESSION_DIR` to `data/outcomes/sessions/`.
 - `data/` is git-ignored runtime data, not portable configuration. Do not cloud-sync it and never let two machines write to the same outcomes authority.
-- When an existing session environment points elsewhere, both installers merge its durable transcripts, reviews, closure events, and completed run snapshots into the canonical authority. Conflicting reviews are appended only as later fallback candidates and audited under `data/outcomes/migration-conflicts/`; consumers retain the first valid canonical review.
+- When an existing session environment points elsewhere, both installers merge its durable transcripts and completed run snapshots into the canonical authority. Retired review and closure files remain at their source; private close still scrubs the exact session from those legacy files before deleting its transcript.
 - Back up session data only to encrypted storage; transcripts can contain source code, prompts, paths, tool output, and secrets.
 
 ### Storage locations
@@ -284,7 +285,6 @@ Other analytics helpers from the repo root: `analytics:build-db`, `analytics:que
 |---|---|---|
 | Auth tokens | `%LOCALAPPDATA%\pie\auth.json` (Win) / `~/.config/pie/auth.json` (macOS/Linux) | `PI_CODING_AGENT_AUTH_DIR` |
 | Sessions | `data/outcomes/sessions/` (in-tree, git-ignored) | `PI_CODING_AGENT_SESSION_DIR` |
-| V2 reviews | `data/outcomes/session-reviews/reviews.jsonl` | Derived from the session authority |
 | Run analytics | `data/outcomes/<workspace-id>/` (globally aggregated) | `PIE_ANALYTICS_DIR` |
 
 The backend logs resolved storage paths on startup via the `backend.ready` event.

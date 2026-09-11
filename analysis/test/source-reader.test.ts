@@ -19,7 +19,6 @@ test('readSourceAnalyticsPayload loads the committed fixture', async () => {
   assert.equal(fixture.schemaVersion, RUN_ANALYTICS_SCHEMA_VERSION);
   assert.equal(fixture.completedRuns.length, 7);
   assert.equal(fixture.openRuns.length, 2);
-  assert.equal(fixture.sessionReviewV2Diagnostics.rawProductionCount, 0);
 });
 
 test('readSourceAnalyticsPayload rejects an invalid schema version', async () => {
@@ -74,20 +73,13 @@ test('loadSourceAnalytics can query a storage-dir run store', async () => {
       'utf8',
     );
 
-    const loaded = await loadSourceAnalytics({ storageDir: dir, ...withoutLocalSessionDiscovery(dir) });
+    const loaded = await loadSourceAnalytics({ storageDir: dir });
     assert.equal(loaded.sourceKind, 'storage-dir');
     assert.equal(loaded.source.completedRuns.length, 2);
     assert.equal(loaded.source.openRuns.length, 1);
     assert.equal(loaded.source.workspaceKey, path.basename(dir));
   });
 });
-
-function withoutLocalSessionDiscovery(dir: string) {
-  return {
-    configuredSessionsDir: path.join(dir, 'no-configured-sessions'),
-    reviewSidecarPath: path.join(dir, 'no-reviews.jsonl'),
-  };
-}
 
 async function writeRunSnapshotsJsonl(dir: string, runs: RunSnapshot[]): Promise<void> {
   const lines = runs.map((run) => JSON.stringify({
@@ -113,34 +105,12 @@ test('loadSourceAnalytics aggregates every run store under an outcomes root', as
     await writeRunSnapshotsJsonl(storeA, runsA);
     await writeRunSnapshotsJsonl(storeB, runsB);
 
-    const loaded = await loadSourceAnalytics({ outcomesRoot, ...withoutLocalSessionDiscovery(outcomesRoot) });
+    const loaded = await loadSourceAnalytics({ outcomesRoot });
     assert.equal(loaded.sourceKind, 'all-stores');
     assert.equal(loaded.sourcePath, outcomesRoot);
     assert.equal(loaded.source.workspaceKey, 'all');
     // Merged source carries runs from both stores (dedup happens later in prepare).
     assert.equal(loaded.source.completedRuns.length, runsA.length + runsB.length);
-  });
-});
-
-test('loadSourceAnalytics derives reviews from the selected outcomes root', async () => {
-  await withTempDir(async (outcomesRoot) => {
-    const fixture = await loadFixture();
-    const store = path.join(outcomesRoot, 'aaaaaaaaaaaaaaaa');
-    await fs.mkdir(store, { recursive: true });
-    await writeRunSnapshotsJsonl(store, [fixture.completedRuns[0]!]);
-
-    const reviewsDir = path.join(outcomesRoot, 'session-reviews');
-    await fs.mkdir(reviewsDir, { recursive: true });
-    await fs.writeFile(
-      path.join(reviewsDir, 'reviews.jsonl'),
-      `${JSON.stringify({ schemaVersion: 2, kind: 'production' })}\n`,
-      'utf8',
-    );
-
-    const loaded = await loadSourceAnalytics({ outcomesRoot });
-    assert.equal(loaded.source.sessionReviewV2Diagnostics.rawProductionCount, 1);
-    assert.equal(loaded.source.sessionReviewV2Diagnostics.acceptedCount, 0);
-    assert.equal(loaded.source.sessionReviewV2Diagnostics.rejectedCount, 1);
   });
 });
 
@@ -157,7 +127,7 @@ test('loadSourceAnalytics dedupes the same runId across stores via prepare', asy
     await writeRunSnapshotsJsonl(storeA, [sharedRun]);
     await writeRunSnapshotsJsonl(storeB, [sharedRun]);
 
-    const loaded = await loadSourceAnalytics({ outcomesRoot, ...withoutLocalSessionDiscovery(outcomesRoot) });
+    const loaded = await loadSourceAnalytics({ outcomesRoot });
     assert.equal(loaded.source.completedRuns.length, 2); // merged before dedup
     const prepared = prepareSourceAnalytics(loaded.source);
     assert.equal(prepared.runs.length, 1); // deduped to a single run
@@ -166,7 +136,7 @@ test('loadSourceAnalytics dedupes the same runId across stores via prepare', asy
 
 test('loadSourceAnalytics falls back to the fixture when no run stores exist', async () => {
   await withTempDir(async (outcomesRoot) => {
-    const loaded = await loadSourceAnalytics({ outcomesRoot, ...withoutLocalSessionDiscovery(outcomesRoot) });
+    const loaded = await loadSourceAnalytics({ outcomesRoot });
     assert.equal(loaded.sourceKind, 'fixture');
     assert.equal(loaded.sourcePath, DEFAULT_FIXTURE_PATH);
   });
@@ -655,9 +625,6 @@ test('loadSourceAnalytics preserves embedded side channels for portable exports'
     assert.equal(loaded.source.warmBashRewrites?.[0]?.sessionId, 'embedded');
     assert.equal(loaded.source.warmBashSummaries?.length, 1);
     assert.equal(loaded.source.warmBashSummaries?.[0]?.sessionId, 'embedded');
-    // Historical sessions are not embedded and cannot be safely reconstructed,
-    // so they must not be silently replaced by the analyzer's local transcripts.
-    assert.deepEqual(loaded.source.historicalSessions, []);
   });
 });
 
@@ -767,7 +734,7 @@ test('loadSourceAnalytics attaches local side-channel logs for storage-dir sourc
       'utf8',
     );
 
-    const loaded = await loadSourceAnalytics({ storageDir: store, ...withoutLocalSessionDiscovery(configRoot) });
+    const loaded = await loadSourceAnalytics({ storageDir: store });
     assert.equal(loaded.sourceKind, 'storage-dir');
     assert.equal(loaded.source.pruningEvents.length, 1);
     assert.equal(loaded.source.pruningEvents[0]?.sessionId, 'local');

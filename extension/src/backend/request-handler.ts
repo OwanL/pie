@@ -8,7 +8,6 @@ import {
   validateSettingsSet,
   validateSystemPromptTogglesSet,
   validateExtensionUiResponse,
-  validateOpenTabsSet,
   validateMcpSetServerEnabled,
   validateMcpSetSessionServerEnabled,
 } from './rpc';
@@ -200,28 +199,6 @@ async function handleRuntimePrefsSet(
     }
   }
   return params;
-}
-
-async function handleOpenTabsSet(
-  deps: BackendRequestHandlerDeps,
-  request: RequestEnvelope,
-): Promise<unknown> {
-  const params = validateOpenTabsSet(request.params);
-  markRequestValidated(deps);
-  if (deps.syncOpenTabsRegistry) {
-    await deps.syncOpenTabsRegistry(params.tabs, params.revision);
-  } else {
-    // Compatibility path for standalone handler consumers. Production always
-    // wires the coordinator sync callback above.
-    const current = Number(process.env['PIE_OPEN_TABS_REVISION'] ?? 0);
-    const currentRevision = Number.isSafeInteger(current) && current >= 0 ? current : 0;
-    const nextRevision = params.revision ?? currentRevision + 1;
-    if (nextRevision > currentRevision) {
-      process.env['PIE_OPEN_TABS'] = JSON.stringify(params.tabs);
-      process.env['PIE_OPEN_TABS_REVISION'] = String(nextRevision);
-    }
-  }
-  return { ok: true, count: params.tabs.length };
 }
 
 /** `systemPromptToggles.set` — apply the complete disabled-entry set for a
@@ -565,7 +542,6 @@ const handlers: Record<string, RequestHandler> = {
   ...SESSION_REQUEST_HANDLERS,
   ...MESSAGE_REQUEST_HANDLERS,
   'extension_ui.response': handleExtensionUiResponse,
-  'openTabs.set': handleOpenTabsSet,
   'models.list': handleModelsList,
   'settings.get': handleSettingsGet,
   'settings.set': handleSettingsSet,

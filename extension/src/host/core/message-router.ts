@@ -354,10 +354,8 @@ export class MessageRouter {
     // repairing an unmarked omission is a cheap tab projection repair, not a
     // reopen RPC.
     //
-    // Every explicit running-tab close is intentional, whether it came from
-    // ordinary user interaction or a durable review closure. Preserve that
-    // host-owned intent across renderer reloads; only an unmarked omission is
-    // repaired here.
+    // Every explicit running-tab close is intentional. Preserve that host-owned
+    // intent across renderer reloads; only an unmarked omission is repaired here.
     const arch = this.getArchState();
     const hiddenRunning = arch.sessions.runningSessionPaths.filter(
       (sessionPath) => !arch.sessions.openTabPaths.includes(sessionPath)

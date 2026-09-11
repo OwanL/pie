@@ -201,7 +201,7 @@ test("loadConfig loads tools config with dependencies", () => {
 	assert.ok(result.tools);
 	assert.deepEqual(result.tools.dependencies.edit, ["read"]);
 	assert.deepEqual(result.tools.dependencies.subagent, ["bash"]);
-	assert.deepEqual(result.tools.dependencies.session_review, ["subagent", "ask_user"]);
+	assert.equal(result.tools.dependencies.session_review, undefined);
 	assert.equal(result.tools.ceiling, 12);
 });
 
@@ -225,7 +225,7 @@ test("loadConfig defaults tools config when absent", () => {
 	const result = loadConfig(settingsPath);
 	assert.ok(result.tools);
 	assert.equal(result.tools.ceiling, DEFAULT_TOOL_CONFIG.ceiling);
-	assert.deepEqual(result.tools.dependencies.session_review, ["subagent", "ask_user"]);
+	assert.equal(result.tools.dependencies.session_review, undefined);
 	assert.deepEqual(result.tools.alwaysKeep, []);
 });
 

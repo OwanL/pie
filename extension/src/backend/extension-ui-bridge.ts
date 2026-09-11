@@ -1,6 +1,6 @@
 import * as crypto from 'node:crypto';
 
-import type { ExtensionUIRequestPayload, ExtensionUIResponsePayload, ReviewHumanVerificationMetadata } from '../shared/protocol';
+import type { ExtensionUIRequestPayload, ExtensionUIResponsePayload } from '../shared/protocol';
 
 interface PendingRequest {
   settle: (response: ExtensionUIResponsePayload, deferContinuation?: boolean) => void;
@@ -14,8 +14,6 @@ interface DialogOptions {
   toolCallId?: string;
   /** Ask-style select prompts may accept a value outside the preset options. */
   allowCustom?: boolean;
-  /** Review display/audit metadata; never changes this bridge's session path. */
-  reviewMeta?: ReviewHumanVerificationMetadata;
 }
 
 export interface ExtensionUIBridgeEmitter {
@@ -48,7 +46,7 @@ export class ExtensionUIBridge {
 
   async select(title: string, options: string[], opts?: DialogOptions): Promise<string | undefined> {
     const id = crypto.randomUUID();
-    const payload: ExtensionUIRequestPayload = { id, method: 'select', title, options, allowCustom: opts?.allowCustom, sessionPath: this.sessionPath, subagentCallId: opts?.subagentCallId, toolCallId: opts?.toolCallId, timeout: opts?.timeout, reviewMeta: opts?.reviewMeta };
+    const payload: ExtensionUIRequestPayload = { id, method: 'select', title, options, allowCustom: opts?.allowCustom, sessionPath: this.sessionPath, subagentCallId: opts?.subagentCallId, toolCallId: opts?.toolCallId, timeout: opts?.timeout };
     const response = await this.emitAndAwait(id, payload, opts);
     if (response.cancelled) return undefined;
     return response.value;
@@ -56,7 +54,7 @@ export class ExtensionUIBridge {
 
   async input(title: string, placeholder?: string, opts?: DialogOptions): Promise<string | undefined> {
     const id = crypto.randomUUID();
-    const payload: ExtensionUIRequestPayload = { id, method: 'input', title, placeholder, sessionPath: this.sessionPath, subagentCallId: opts?.subagentCallId, toolCallId: opts?.toolCallId, timeout: opts?.timeout, reviewMeta: opts?.reviewMeta };
+    const payload: ExtensionUIRequestPayload = { id, method: 'input', title, placeholder, sessionPath: this.sessionPath, subagentCallId: opts?.subagentCallId, toolCallId: opts?.toolCallId, timeout: opts?.timeout };
     const response = await this.emitAndAwait(id, payload, opts);
     if (response.cancelled) return undefined;
     return response.value;

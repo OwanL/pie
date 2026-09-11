@@ -5,11 +5,10 @@ import { resolveHostSessionStoragePaths } from './session-storage-paths';
  *
  * The host (extension host process) and the backend spawn config both use this
  * so they agree on the sidecar location without threading a new env var back to
- * the host. The directory is a sibling of the sessions dir (mirroring the
- * `session-reviews` sidecar), one level above `<sessions>`:
+ * the host. The directory is a sibling of the sessions dir, one level above
+ * `<sessions>`:
  *
  *   <root>/data/outcomes/sessions          ← sessions
- *   <root>/data/outcomes/session-reviews   ← reviews sidecar (existing)
  *   <root>/data/outcomes/deferred-triggers ← this feature's sidecar
  *
  * The backend child additionally receives `PIE_TRIGGERS_DIR` (set in

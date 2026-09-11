@@ -1269,3 +1269,145 @@ real-JSONL-expiry retained-detail behavior (P2b expiry plus read-model integrati
 transport shell and session-usage restore-after-restart (P7a cutover wiring); canonical branch/copy
 fact capture and cross-host refresh/terminal-result watermark consumption (P4); legacy consumer
 retirement (P6). P7a/P7b activation remains closed.
+
+## Checkpoint 15 — recovered P6 retirement in progress (2026-09-11)
+
+The long execution session was recovered from its local JSONL record without broadly reading the
+193-MiB file. Its last committed source was ordinary-checkout `master` at `3c7e0130` (after P5
+`b8a3751e`). The P6 worker had stopped after a partial uncommitted edit: session-service review
+closure fields were partly removed and `startup.ts` still imported a newly deleted helper. Recovery
+repaired that inconsistent seam and continued under one P6 integration/report owner.
+
+The current user hold remains absolute: no runtime or renderer publication, activation, analytics
+cutover, session close, backend/VS Code restart, helper arming, real data deletion, or cache switch.
+Only source/test/documentation work and validation-only builds are authorized. The user-owned changes
+to `model-profiles.yaml`, `models.json`, `models.yaml`, and `settings.json`, plus `stash@{0}`,
+remain outside milestone ownership and must be preserved. No worktree, reset, stash, branch switch,
+dependency installation, or mutation under `data/` has occurred. One explicitly scoped
+`npm --prefix analysis install --package-lock-only --ignore-scripts` refreshed only
+`analysis/package-lock.json`; it did not run lifecycle scripts or mutate `analysis/node_modules`.
+
+### Current P6 candidate
+
+The independently removable review surface is now source-complete in the extension: the bundled
+review tool, evaluation skill/agent, backend review reader/decorations/watchers, review close outbox,
+review-only protocol/UI fields, and the host-to-worker open-tab registry chain are removed. Ordinary
+manual close, running-tab hide, tab persistence, generic extension UI/questions, generic subagents,
+session identity, prompt settings, working-time state, and session-catalog polling remain. Private
+close uses a narrow `legacy-review-artifact-cleanup.ts` boundary that rewrites only
+`reviews.jsonl` and `closure-actions.jsonl` for the exact forgotten session, preserving unrelated
+and malformed records. Focused canonical tests passed 4/4 outside the restricted process boundary;
+the first unchanged wrapper attempt failed before test loading with host
+`uv_os_get_passwd`/`ENOMEM`. Extension typecheck now reaches only the expected two imports from
+the still-present analysis review reader into the deleted reviewer package.
+
+Installer migration has been split at the retired category boundary: transcript and completed-run
+migration remain; reviews and closure actions are neither copied nor reported, and doctor no longer
+monitors those retired files. Legacy review files themselves remain untouched except through the
+explicit session-specific privacy scrub. The standalone dashboard, static-site pipeline, analysis
+review ingestion/rankings and associated tests/docs remain one coupled P6 removal group and are
+assigned separately under disjoint `analysis/**` ownership; no validator will be extracted merely
+to keep the forbidden review reader compiling.
+
+### Concurrent candidates and recovered qualification limits
+
+The immutable staged/loaded runtime startup failure was diagnosed as version skew rather than a new
+source defect: both old bundles carried SDK manager patch v3, while installed pinned SDK 0.80.6 has
+the v4 manager fingerprint. Current source already accepts v4. A two-test SDK regression candidate
+copies all three patch targets, proves the v3-to-v4 manager case and retains fail-closed behavior; its
+independent review approved it. Its focused 8/8 run used a deleted temporary `process.geteuid` shim
+only to bypass the same host passwd lookup failure, so the canonical wrapper still requires a normal
+or escalated rerun at the integration barrier.
+
+The independently accepted P5 repair candidate addresses all four review findings: a common snapshot
+metadata/watermark envelope, correct settlement end-time mapping, fail-closed root-session ID
+validation including empty/NUL values, and explicit unknown public numeric coverage when exact int64
+strings exceed JavaScript safe range. Focused canonical tests passed 27/27 with the same temporary
+host-only passwd workaround; the canonical no-shim rerun remains part of the integration barrier.
+
+P0 remains unqualified: only the 10k probe ran, its 26.15-ms responsiveness proxy exceeded the
+25-ms gate, and 1M/endurance/light/matched live UI-agent/mixed-load/v2/partial-write coverage is still
+missing. P4 still lacks durable terminal evidence IDs and watermark reconciliation, duplicate-child
+charge parity, branch/copy persistence/projection, and cross-host bounded revision refresh. P2c
+independent review found that the web-access guard covers only the managed package path while the
+pinned SDK may load a global fallback, lacks isolated pinned-package install/reinstall qualification,
+and lacks active package/version/fingerprint/cache-target doctor diagnostics. None of those findings
+expands this P6 source milestone.
+
+P6 is not yet accepted or committed. Remaining gates are the disjoint analysis/dashboard retirement,
+normative documentation cleanup, focused installer/reducer/worker/UI tests, root typecheck/lint/test,
+`npm run extension:build:validate` only, independent P6 review, and integration after all writers
+settle. P7a/P7b activation remains closed.
+
+### Checkpoint 15 review and canonical rerun update
+
+The P5 four-finding repair received independent acceptance. Its canonical read-model/usage/SQLite
+suite and the approved SDK patch matrix were then rerun without a shim through the normal focused
+wrapper outside the restricted process boundary: 35/35 passed. The P6 review/installer focused set
+likewise passed 127/127 canonically.
+
+Independent P6 review found that deleting review reconciliation had also removed its unconditional
+initial session-list event. This was a real restored-start regression because a restored host does
+not issue `session.list`; it could retain only cached open-tab summaries until a later inventory
+fingerprint change. Catalog polling now publishes one complete list when armed and continues to emit
+later only for changed successful inventory reads. The focused regression passed 5/5.
+
+The reviewer also examined the legacy-review scrub's read/modify/rename race. It is inherited from the
+retired helper and no post-P6 source writer for reviews or closure actions remains, so a helper-local
+lock would not coordinate immutable old generations and is not a P6 source fix. Activation has an
+explicit mixed-generation fence: all older hosts/backends sharing `PIE_REVIEWS_DIR` that can write
+review or closure records must be stopped at the coordinated boundary before private close is allowed
+under this candidate. If mixed versions must remain active, their aggregate sidecar writer and scrub
+require a real cross-host ownership fence first. The current no-live hold keeps that gate closed.
+
+A wider P6-adjacent run passed the ask-user and subagent groups, but the extension group included the
+unrelated cold-store suite and failed because its fixture attempted to load the SDK from the checkout,
+which the current allowed-path guard rejects. This was a pre-test-environment/path-authority failure,
+not P6 behavior evidence; the final affected/full barrier will run only after the analysis writer
+settles and will report its own exact result.
+
+### Checkpoint 15 settled candidate and final barrier
+
+The cold-store fixture now grants only its exact checkout-local pinned SDK package as test-scoped
+authority and restores the prior environment value after the module. Production path validation is
+unchanged. Its canonical wrapper passed 35/35 without a shim, closing the earlier environment-only
+failure.
+
+The analysis retirement is source-complete and independently accepted. The static dashboard,
+site-data build/server/validation, review and transcript ingestion, review SQL/rankings, actionability,
+statistics and pre-task-complexity surfaces are removed. The retained package reads run analytics and
+side-channel telemetry, prepares rows, builds DuckDB, and exposes ten named SQL queries. Root and
+package-local scripts retain only typecheck, tests, build-db, query and validate; obsolete CLI
+output-directory/server-port options reject explicitly. The lockfile-only refresh removed the Vega,
+Vega-Lite, Vega-Embed, direct esbuild and site dependency closure. Esbuild remains only as tsx's
+required nested dependency. No installed dependency tree changed.
+
+Existing user/local DuckDB files are not scrubbed: retired review tables may remain inert after a
+retained-table rebuild, and no ordinary retained query references them. This follows the P6 contract
+to remove producers and consumers without deleting legacy analytics or review data. Likewise, legacy
+review JSONL remains untouched except for the explicit exact-session private-close privacy scrub.
+Both the extension/installer slice and analysis slice received independent approval.
+
+The final serialized barrier used the fresh normal-user shell and passed:
+
+- `git diff --check` (exit 0; only the existing `prepare.ts` CRLF-to-LF warning);
+- root `npm run typecheck` (17 projects, exit 0) and `npm run lint` (exit 0);
+- root `npm test` (6,550 passed, 0 failed, 29 skipped across all seven packages). One
+  `deferred-triggers-process-race` case hit its known timeout once and passed the canonical rerun;
+- `npm run extension:build:validate` (exit 0), which selected actual `--no-sync`, produced coordinated
+  host/webview source output identity `666f76c5dedf9c0c1ba5`, and left working-tree status unchanged.
+
+No runtime or renderer was published; no activation, cutover, restart, session close, real deletion,
+helper arming or cache switch occurred. The four user-owned model/settings files and `stash@{0}` remain
+preserved and excluded from integration.
+
+P0 remains unqualified pending the 1M/endurance/light/matched UI-agent/mixed-load/v2/partial-write
+matrix and a passing responsiveness gate. P2c still needs managed-path precondition enforcement,
+isolated pinned-package install/reinstall qualification, and package/version/fingerprint/cache-target
+doctor diagnostics. P4 still needs terminal evidence IDs/watermark reconciliation, duplicate-child
+charge parity, branch/copy persistence/projection, and cross-host bounded revision refresh. P7 remains
+inactive and still needs recorder lifecycle and activation-manifest wiring, CLI restart/restore
+integration, a finite all-host cutoff controller with inventory/ordinary close-all/fixed targets and
+receipts, plus standalone journaled handoff with parent-loss/restart attestation and a durable morning
+report. Cooperative locks do not fence old hosts, so the no-stale-review-writer activation gate remains
+mandatory.

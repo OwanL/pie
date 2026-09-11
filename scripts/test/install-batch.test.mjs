@@ -226,9 +226,10 @@ test('full install runs end-to-end against a temp repo with mocked setx/npm/pi/c
     const migratedSessionNames = readdirSync(canonicalSessions, { recursive: true }).map(String);
     assert.ok(migratedSessionNames.some((entry) => entry.endsWith('process-displaced.jsonl')));
     assert.ok(migratedSessionNames.some((entry) => entry.endsWith('user-displaced.jsonl')));
-    const migratedReviews = readFileSync(path.join(tRepo, 'data', 'outcomes', 'session-reviews', 'reviews.jsonl'), 'utf8');
-    assert.match(migratedReviews, /process-displaced-review/);
-    assert.match(migratedReviews, /user-displaced-review/);
+    assert.ok(
+      !existsSync(path.join(tRepo, 'data', 'outcomes', 'session-reviews')),
+      'retired review sidecars are not migrated into the canonical store',
+    );
 
     // A package-source parse failure must stop before dependency/build work;
     // FOR /F alone does not propagate the child command's exit code.

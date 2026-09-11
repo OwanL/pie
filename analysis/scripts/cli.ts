@@ -3,11 +3,9 @@ import * as path from 'node:path';
 export interface CliOptions {
   exportPath?: string;
   storageDir?: string;
-  outputDir?: string;
   dbPath?: string;
   exportsDir?: string;
   name?: string;
-  port?: number;
   help: boolean;
 }
 
@@ -40,10 +38,6 @@ export function parseCliOptions(argv: string[]): CliOptions {
         options.storageDir = resolvePathArg(requireValue('--storage-dir', argv[index + 1]));
         index += 1;
         break;
-      case '--output-dir':
-        options.outputDir = resolvePathArg(requireValue('--output-dir', argv[index + 1]));
-        index += 1;
-        break;
       case '--db':
         options.dbPath = resolvePathArg(requireValue('--db', argv[index + 1]));
         index += 1;
@@ -56,15 +50,6 @@ export function parseCliOptions(argv: string[]): CliOptions {
         options.name = requireValue('--name', argv[index + 1]);
         index += 1;
         break;
-      case '--port': {
-        const value = Number.parseInt(requireValue('--port', argv[index + 1]), 10);
-        if (!Number.isInteger(value) || value <= 0) {
-          throw new Error(`Invalid value for --port: ${String(argv[index + 1])}`);
-        }
-        options.port = value;
-        index += 1;
-        break;
-      }
       default:
         throw new Error(`Unknown argument: ${arg}`);
     }
@@ -88,11 +73,9 @@ export function formatUsage(command: string, summary: string, extraLines: string
     '  --storage-dir <path>  Read analytics directly from a run store directory.',
     '',
     'Common options:',
-    '  --output-dir <path>   Target directory for generated JSON output.',
     '  --db <path>           DuckDB database path.',
     '  --exports-dir <path>  Directory for generated staging exports.',
     '  --name <query>        Named SQL query to run.',
-    '  --port <number>       Local server port.',
     '  --help                Show this help message.',
   ];
 

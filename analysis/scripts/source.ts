@@ -15,12 +15,6 @@ import * as path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseJsonOrThrow } from '../../shared/error-message.js';
 import { listStorageDirCandidates } from './source-auto.ts';
-import {
-  coerceHistoricalSessionSummaries,
-  discoverHistoricalSessions,
-  readSessionReviewsV2,
-} from './transcript-source.ts';
-import { inspectSessionReviewV2 } from './review-analytics.ts';
 
 import {
   MAX_USER_INPUT_SAMPLE_CHARS,
@@ -42,8 +36,6 @@ import {
   type RetryTimingSample,
   type RunSnapshot,
   type SessionAnalyticsFactors,
-  type SessionReviewV2IngestionDiagnostics,
-  type SessionReviewV2Source,
   type SourceAnalyticsPayload,
   type ThinkingLevel,
   type ToolFailureKind,
@@ -63,7 +55,6 @@ const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const CONFIG_ROOT = path.resolve(SCRIPT_DIR, '..', '..');
 
 export const DEFAULT_FIXTURE_PATH = fileURLToPath(new URL('../fixtures/small-run-analytics.json', import.meta.url));
-export const DEFAULT_SITE_DATA_DIR = fileURLToPath(new URL('../site/data', import.meta.url));
 export const DEFAULT_DUCKDB_PATH = fileURLToPath(new URL('../data/usage.duckdb', import.meta.url));
 export const DEFAULT_STAGING_EXPORTS_DIR = fileURLToPath(new URL('../data/exports', import.meta.url));
 export const DEFAULT_OUTCOMES_ROOT = path.join(CONFIG_ROOT, 'data', 'outcomes');
@@ -104,7 +95,7 @@ const TOOL_RESULT_ISSUE_KINDS: ToolResultIssueKind[] = ['verification_failure', 
 /**
  * Legacy failure-kind names (pre-split) that are now classified as non-success
  * results rather than tool failures, mapped to their new `ToolResultIssueKind`.
- * Used to remap historical run-analytics data on read so old dashboards stay
+ * Used to remap historical run-analytics data on read so retained queries stay
  * consistent with the execution-only failure semantics.
  */
 const LEGACY_RESULT_ISSUE_KIND_MAP: Record<string, ToolResultIssueKind> = {
@@ -116,10 +107,6 @@ const LEGACY_RESULT_ISSUE_KIND_MAP: Record<string, ToolResultIssueKind> = {
 export interface SourceSelection {
   exportPath?: string;
   storageDir?: string;
-  /** Test/embedding override for the canonical local transcript root. */
-  configuredSessionsDir?: string;
-  /** Canonical V2 production-review JSONL sidecar. */
-  reviewSidecarPath?: string;
   /**
    * Aggregate every run store found under this directory. When omitted (and no
    * exportPath/storageDir is given), defaults to {@link DEFAULT_OUTCOMES_ROOT}.
@@ -979,79 +966,6 @@ function coerceRunSnapshotArray(label: string, value: unknown): RunSnapshot[] {
   });
 }
 
-function emptySessionReviewV2Diagnostics(): SessionReviewV2IngestionDiagnostics {
-  return {
-    rawProductionCount: 0,
-    acceptedCount: 0,
-    rejectedCount: 0,
-    rejectedByReason: {
-      unsupported_schema: 0,
-      unsupported_rubric: 0,
-      unsupported_index: 0,
-      invalid_identity: 0,
-      invalid_payload: 0,
-    },
-  };
-}
-
-function coerceSessionReviewV2Diagnostics(value: unknown): SessionReviewV2IngestionDiagnostics {
-  const diagnostics = emptySessionReviewV2Diagnostics();
-  if (!isRecord(value)) return diagnostics;
-  diagnostics.acceptedCount = toNonNegativeInteger(value.acceptedCount);
-  diagnostics.rejectedCount = toNonNegativeInteger(value.rejectedCount);
-  diagnostics.rawProductionCount = Math.max(
-    toNonNegativeInteger(value.rawProductionCount),
-    diagnostics.acceptedCount + diagnostics.rejectedCount,
-  );
-  if (isRecord(value.rejectedByReason)) {
-    for (const reason of Object.keys(diagnostics.rejectedByReason) as Array<keyof typeof diagnostics.rejectedByReason>) {
-      diagnostics.rejectedByReason[reason] = toNonNegativeInteger(value.rejectedByReason[reason]);
-    }
-  }
-  return diagnostics;
-}
-
-function mergeSessionReviewV2Diagnostics(
-  computed: SessionReviewV2IngestionDiagnostics,
-  embedded: SessionReviewV2IngestionDiagnostics,
-): SessionReviewV2IngestionDiagnostics {
-  const rejectedByReason = { ...computed.rejectedByReason };
-  for (const reason of Object.keys(rejectedByReason) as Array<keyof typeof rejectedByReason>) {
-    rejectedByReason[reason] = Math.max(computed.rejectedByReason[reason], embedded.rejectedByReason[reason]);
-  }
-  const acceptedCount = Math.max(computed.acceptedCount, embedded.acceptedCount);
-  const rejectedCount = Math.max(computed.rejectedCount, embedded.rejectedCount, Object.values(rejectedByReason).reduce((sum, count) => sum + count, 0));
-  return {
-    rawProductionCount: Math.max(computed.rawProductionCount, embedded.rawProductionCount, acceptedCount + rejectedCount),
-    acceptedCount,
-    rejectedCount,
-    rejectedByReason,
-  };
-}
-
-function coerceSessionReviewsV2(value: unknown): {
-  reviews: SessionReviewV2Source[] | undefined;
-  diagnostics: SessionReviewV2IngestionDiagnostics;
-} {
-  const diagnostics = emptySessionReviewV2Diagnostics();
-  if (!Array.isArray(value)) return { reviews: undefined, diagnostics };
-  const canonical = new Map<string, SessionReviewV2Source>();
-  for (const entry of value) {
-    if (!isRecord(entry) || entry.kind !== 'production') continue;
-    diagnostics.rawProductionCount += 1;
-    const result = inspectSessionReviewV2(entry);
-    if (!result.review) {
-      diagnostics.rejectedCount += 1;
-      diagnostics.rejectedByReason[result.rejectionReason] += 1;
-      continue;
-    }
-    diagnostics.acceptedCount += 1;
-    const review = result.review;
-    if (!canonical.has(review.sessionId)) canonical.set(review.sessionId, review);
-  }
-  return { reviews: canonical.size ? [...canonical.values()] : undefined, diagnostics };
-}
-
 function coerceWarmBashRewrites(value: unknown): WarmBashRewriteSourceEvent[] | undefined {
   if (!Array.isArray(value)) {
     return undefined;
@@ -1131,11 +1045,6 @@ export function coerceSourceAnalyticsPayload(value: unknown): SourceAnalyticsPay
     throw new Error('Source analytics payload is missing workspaceKey.');
   }
 
-  const sessionReviewsV2 = coerceSessionReviewsV2(value.sessionReviewsV2);
-  const sessionReviewV2Diagnostics = mergeSessionReviewV2Diagnostics(
-    sessionReviewsV2.diagnostics,
-    coerceSessionReviewV2Diagnostics(value.sessionReviewV2Diagnostics),
-  );
   return {
     schemaVersion: RUN_ANALYTICS_SCHEMA_VERSION,
     exportedAt: value.exportedAt,
@@ -1145,9 +1054,6 @@ export function coerceSourceAnalyticsPayload(value: unknown): SourceAnalyticsPay
     pruningDecisions: Array.isArray(value.pruningDecisions) ? value.pruningDecisions : [],
     pruningEvents: coercePruningEvents(value.pruningEvents),
     toolResultPruningEvents: coerceToolResultPruningEvents(value.toolResultPruningEvents),
-    sessionReviewsV2: sessionReviewsV2.reviews,
-    sessionReviewV2Diagnostics,
-    historicalSessions: coerceHistoricalSessionSummaries(value.historicalSessions),
     warmBashRewrites: coerceWarmBashRewrites(value.warmBashRewrites),
     warmBashSummaries: coerceWarmBashSummaries(value.warmBashSummaries),
   };
@@ -1450,7 +1356,6 @@ async function querySourceAnalyticsPayloadFromStorageDir(storageDir: string): Pr
     workspaceKey: path.basename(storageDir),
     completedRuns: result.completedRuns,
     openRuns: result.openRuns,
-    sessionReviewV2Diagnostics: emptySessionReviewV2Diagnostics(),
     pruningDecisions: [],
     pruningEvents: [],
     toolResultPruningEvents: [],
@@ -1462,7 +1367,7 @@ async function querySourceAnalyticsPayloadFromStorageDir(storageDir: string): Pr
  * payload. Each `<hash>` subdirectory is one workspace's store (the hash is
  * derived from the VS Code workspace folder path, which may be an ancestor of
  * this package). Merging across stores — and deduplicating by runId later in
- * `prepareSourceAnalytics` — lets the dashboard report across all workspaces,
+ * `prepareSourceAnalytics` — lets queries report across all workspaces,
  * including migrated data recorded under old repo paths. Returns the merged
  * payload and the number of stores that contributed.
  */
@@ -1485,7 +1390,6 @@ async function queryAllRunAnalyticsStores(
     workspaceKey: 'all',
     completedRuns,
     openRuns,
-    sessionReviewV2Diagnostics: emptySessionReviewV2Diagnostics(),
     pruningDecisions: [],
     pruningEvents: [],
     toolResultPruningEvents: [],
@@ -1494,64 +1398,33 @@ async function queryAllRunAnalyticsStores(
   return { source, storeCount: candidates.length };
 }
 
-function localOutcomesRoot(selection: SourceSelection): string {
-  if (selection.outcomesRoot) return path.resolve(selection.outcomesRoot);
-  if (selection.storageDir) return path.dirname(path.resolve(selection.storageDir));
-  return DEFAULT_OUTCOMES_ROOT;
-}
-
-async function attachLocalHistoricalSessions(source: SourceAnalyticsPayload, selection: SourceSelection): Promise<void> {
-  // Sessions, reviews, and workspace-sharded run stores are one machine-local
-  // outcomes authority. Derive every sidecar from the selected root so changing
-  // cwd/workspace cannot silently splice canonical runs with another store's
-  // reviews.
-  const outcomesRoot = localOutcomesRoot(selection);
-  const configuredSessionsDir = selection.configuredSessionsDir
-    ?? path.join(outcomesRoot, 'sessions');
-  const reviewSidecarPath = selection.reviewSidecarPath
-    ?? path.join(outcomesRoot, 'session-reviews', 'reviews.jsonl');
-  source.historicalSessions = await discoverHistoricalSessions({ configuredSessionsDir });
-  const sidecar = await readSessionReviewsV2(reviewSidecarPath);
-  source.sessionReviewsV2 = sidecar.reviews;
-  source.sessionReviewV2Diagnostics = sidecar.diagnostics;
-}
-
 export async function loadSourceAnalytics(selection: SourceSelection = {}): Promise<LoadedSourceAnalytics> {
   const configRoot = CONFIG_ROOT;
   if (selection.exportPath) {
     const source = await readSourceAnalyticsPayload(selection.exportPath);
-    // Portable exports embed their own side-channel data. Do not overwrite it
-    // with the analyzing machine's local logs, and do not attach local historical
-    // session summaries (those cannot be safely reconstructed from a portable
-    // export because they depend on raw transcript content from the source
-    // machine).
     return { source, sourceKind: 'export', sourcePath: selection.exportPath };
   }
 
   if (selection.storageDir) {
     const source = await querySourceAnalyticsPayloadFromStorageDir(selection.storageDir);
     const logRoot = inferGlobalLogRoot(selection.storageDir) ?? configRoot;
-    await attachLocalHistoricalSessions(source, selection);
     attachGlobalSideChannelLogs(source, logRoot);
     return { source, sourceKind: 'storage-dir', sourcePath: selection.storageDir };
   }
 
   // Default: aggregate every run store under the outcomes root (all
   // workspaces, including migrated data recorded under old repo paths). Falls
-  // back to the bundled fixture only when no local run stores exist, so the
-  // dashboard still renders in a fresh checkout.
+  // back to the bundled fixture only when no local run stores exist, so local
+  // query development still has deterministic input in a fresh checkout.
   const outcomesRoot = selection.outcomesRoot ?? DEFAULT_OUTCOMES_ROOT;
   const { source, storeCount } = await queryAllRunAnalyticsStores(outcomesRoot);
   if (storeCount > 0) {
     const logRoot = inferGlobalLogRoot(outcomesRoot) ?? configRoot;
-    await attachLocalHistoricalSessions(source, selection);
     attachGlobalSideChannelLogs(source, logRoot);
     return { source, sourceKind: 'all-stores', sourcePath: outcomesRoot };
   }
 
   const fixtureSource = await readSourceAnalyticsPayload(DEFAULT_FIXTURE_PATH);
-  await attachLocalHistoricalSessions(fixtureSource, selection);
   attachGlobalSideChannelLogs(fixtureSource, configRoot);
   return { source: fixtureSource, sourceKind: 'fixture', sourcePath: DEFAULT_FIXTURE_PATH };
 }
-

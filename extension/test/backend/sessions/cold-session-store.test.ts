@@ -17,10 +17,18 @@ import {
   ColdBrowseHelperRequestError,
   type ColdBrowseHelper,
 } from '../../../src/backend/cold-browse-helper-client';
-import { REVIEWS_DIR_ENV } from '../../../src/backend/session-review-store';
 import { ensureSdkPatchBarrier, loadSdk, type SdkSessionManager } from '../../../src/backend/sdk';
 import { SessionSnapshotTooLargeError } from '../../../src/shared/transcript-window';
-import { validReview } from '../../../../extensions/session-reviewer/test/fixtures.js';
+
+const pinnedSdkPath = path.join(process.cwd(), 'node_modules', '@earendil-works', 'pi-coding-agent');
+const previousTrustedSdkRoot = process.env.PIE_TRUSTED_SDK_ROOT;
+// This fixture intentionally loads the repository-pinned SDK. Establish only
+// that exact package as trusted; production path validation remains unchanged.
+process.env.PIE_TRUSTED_SDK_ROOT = pinnedSdkPath;
+test.after(() => {
+  if (previousTrustedSdkRoot === undefined) delete process.env.PIE_TRUSTED_SDK_ROOT;
+  else process.env.PIE_TRUSTED_SDK_ROOT = previousTrustedSdkRoot;
+});
 
 function header(cwd: string, version: number | undefined = 3, id = 'session-test') {
   return {
@@ -83,7 +91,7 @@ async function readJsonl(filePath: string): Promise<any[]> {
 let sessionManagerPromise: Promise<any> | undefined;
 
 function realSdkPath(): string {
-  return path.join(process.cwd(), 'node_modules', '@earendil-works', 'pi-coding-agent');
+  return pinnedSdkPath;
 }
 
 async function getRealSessionManager(): Promise<any> {
@@ -233,41 +241,6 @@ test('open, preload, page, and detail share one immutable durable projection sin
     assert.equal(refreshedMetadata.contextUsage?.contextWindow, 2000);
     assert.equal(observed.store.getBrowseCacheStats().hits, 1);
   } finally {
-    await fs.rm(h.root, { recursive: true, force: true });
-  }
-});
-
-test('review decoration is refreshed on a durable projection cache hit', async () => {
-  const h = await makeHarness();
-  const previousReviewsDir = process.env[REVIEWS_DIR_ENV];
-  try {
-    const sessionPath = path.join(h.sessionDir, 'review-cache.jsonl');
-    const reviewsDir = path.join(h.root, 'reviews');
-    await fs.mkdir(reviewsDir, { recursive: true });
-    process.env[REVIEWS_DIR_ENV] = reviewsDir;
-    await writeJsonl(sessionPath, [header(h.root, 3, 'review-cache'), userEntry('user', null, 'review me')]);
-    const observed = await makeObservedBrowseStore(h);
-
-    const beforeReview = await observed.store.openSnapshot(sessionPath, browseOpenOptions);
-    assert.equal(beforeReview.session.reviewed, undefined);
-    const review = {
-      ...structuredClone(validReview()),
-      kind: 'production',
-      reviewId: 'review-cache-1',
-      sessionId: 'review-cache',
-      sessionPathAtReview: sessionPath,
-      reviewedAt: '2026-08-25T00:00:00.000Z',
-    };
-    await fs.writeFile(path.join(reviewsDir, 'reviews.jsonl'), `${JSON.stringify(review)}\n`, 'utf8');
-
-    const afterReview = await observed.store.openSnapshot(sessionPath, browseOpenOptions);
-    assert.equal(afterReview.session.reviewed, true);
-    assert.equal(afterReview.session.reviewId, 'review-cache-1');
-    assert.equal(observed.managerOpens(), 1);
-    assert.equal(observed.store.getBrowseCacheStats().hits, 1);
-  } finally {
-    if (previousReviewsDir === undefined) delete process.env[REVIEWS_DIR_ENV];
-    else process.env[REVIEWS_DIR_ENV] = previousReviewsDir;
     await fs.rm(h.root, { recursive: true, force: true });
   }
 });

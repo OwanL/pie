@@ -413,10 +413,8 @@ test('session.opened refresh falls back to the cached payload when rebuilding th
   assert.deepEqual(openedFrames[0]!.payload, { ...cachedPayload, runtimeReady: true });
 });
 
-test('host applies monotonic sync domains and keeps the session registry live in worker env', () => {
+test('host applies monotonic sync domains and runtime preferences', () => {
   const { host } = makeHost();
-  const savedTabs = process.env.PIE_OPEN_TABS;
-  const savedRevision = process.env.PIE_OPEN_TABS_REVISION;
   const savedBucketCanSpawn = process.env.PIE_SUBAGENT_BUCKET_CAN_SPAWN_JSON;
   try {
     host.applySync('catalog', 1, { models: [{ id: 'configured-c', name: 'Configured C', provider: 'phase-0', reasoning: false }] });
@@ -427,30 +425,15 @@ test('host applies monotonic sync domains and keeps the session registry live in
         subagentBucketCanSpawn: { small: false, medium: false, frontier: true },
       },
     });
-    host.applySync('sessionRegistry', 1, {
-      tabs: [{ path: '/sessions/a.jsonl', pinned: true, isRunning: false }],
-    });
-    assert.deepEqual(JSON.parse(process.env.PIE_OPEN_TABS ?? 'null'), [
-      { path: '/sessions/a.jsonl', pinned: true, isRunning: false },
-    ]);
-    assert.equal(process.env.PIE_OPEN_TABS_REVISION, '1');
     assert.deepEqual(JSON.parse(process.env.PIE_SUBAGENT_BUCKET_CAN_SPAWN_JSON ?? 'null'), {
       small: false,
       medium: false,
       frontier: true,
     });
     assert.throws(() => host.applySync('catalog', 1, { models: [] }), /Stale worker sync revision/);
-    assert.throws(() => host.applySync('sessionRegistry', 1, { tabs: [] }), /Stale worker sync revision/);
     assert.throws(() => host.applySync('catalog', 0, { models: [] }), /Stale worker sync revision/);
     host.applySync('catalog', 2, { models: [{ id: 'configured-d' }] });
-    host.applySync('sessionRegistry', 2, { tabs: [] });
-    assert.deepEqual(JSON.parse(process.env.PIE_OPEN_TABS ?? 'null'), []);
-    assert.equal(process.env.PIE_OPEN_TABS_REVISION, '2');
   } finally {
-    if (savedTabs === undefined) delete process.env.PIE_OPEN_TABS;
-    else process.env.PIE_OPEN_TABS = savedTabs;
-    if (savedRevision === undefined) delete process.env.PIE_OPEN_TABS_REVISION;
-    else process.env.PIE_OPEN_TABS_REVISION = savedRevision;
     if (savedBucketCanSpawn === undefined) delete process.env.PIE_SUBAGENT_BUCKET_CAN_SPAWN_JSON;
     else process.env.PIE_SUBAGENT_BUCKET_CAN_SPAWN_JSON = savedBucketCanSpawn;
   }

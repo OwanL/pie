@@ -3,16 +3,16 @@
  *
  * The same underlying model is often offered by multiple providers under different ids — e.g.
  * `umans-glm-5.2` (Umans) and `glm-5.2:cloud` (Ollama Cloud) are both GLM 5.2. Without
- * normalization the analytics leaderboard would rank them as two separate models, which is
- * misleading: they are the same model behind different provider facades.
+ * normalization analytics would treat them as two separate models, even though they are the
+ * same model behind different provider facades.
  *
  * `models.json` may declare an optional `family` on each model entry to group these together.
  * Entries without `family` default to their own `id` (kept distinct), so only models that are
  * explicitly declared as siblings collapse. This module builds a modelId → family lookup so
  * downstream analytics can collapse provider-specific ids into one canonical family while the
  * backend keeps storing each provider-specific `modelId` distinctly — leaving the door open to
- * investigate provider differences later (e.g. via the `providers` breakdown on leaderboard rows
- * or the `model_family` column in DuckDB).
+ * investigate provider differences later through the `provider` and `model_family` columns in
+ * DuckDB.
  *
  * Mirrors the structure of `pricing.ts` (both delegate `models.json` loading to
  * `./load-models.ts`) so the two lookups stay in lockstep.

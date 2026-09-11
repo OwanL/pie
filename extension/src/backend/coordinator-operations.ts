@@ -24,7 +24,6 @@ const COORDINATOR_METHODS: ReadonlySet<string> = new Set([
   'session.loadTranscriptPage',
   'session.loadDetail',
   'session.truncateAfter',
-  'openTabs.set',
   'models.list',
   'settings.get',
   'systemPromptToggles.set',

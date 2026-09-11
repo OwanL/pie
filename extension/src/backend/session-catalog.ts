@@ -14,7 +14,6 @@ import {
   SessionIndexStore,
 } from './session-index-store';
 import {
-  applySessionReviews,
   discoverSessionSummaries,
   readIndexedSessionMetadata,
   type IndexedSessionMetadata,
@@ -477,7 +476,7 @@ export class SessionCatalog {
       const key = backendSessionPathKey(summary.path);
       if (!this.removedPathKeys.has(key)) byPath.set(key, summary);
     }
-    return sortSummaries(applySessionReviews([...byPath.values()])
+    return sortSummaries([...byPath.values()]
       .filter((summary) => !this.removedPathKeys.has(backendSessionPathKey(summary.path))));
   }
 
@@ -485,7 +484,7 @@ export class SessionCatalog {
     const byPath = new Map(liveSummaries
       .filter((summary) => !this.removedPathKeys.has(backendSessionPathKey(summary.path)))
       .map((summary) => [backendSessionPathKey(summary.path), summary]));
-    return sortSummaries(applySessionReviews([...byPath.values()])
+    return sortSummaries([...byPath.values()]
       .filter((summary) => !this.removedPathKeys.has(backendSessionPathKey(summary.path))));
   }
 
@@ -849,7 +848,7 @@ export class SessionCatalog {
       const key = backendSessionPathKey(summary.path);
       if (!this.removedPathKeys.has(key)) byPath.set(key, summary);
     }
-    return sortSummaries(applySessionReviews([...byPath.values()])
+    return sortSummaries([...byPath.values()]
       .filter((summary) => !this.removedPathKeys.has(backendSessionPathKey(summary.path))));
   }
 

@@ -8,7 +8,6 @@ import {
   validateDetailUnsubscribe,
   validateLoadTranscriptPage,
   validateMessageSend,
-  validateOpenTabsSet,
   validateRuntimePrefsSet,
   validateSessionCreate,
   validateSessionDuplicate,
@@ -52,27 +51,6 @@ test('validateMessageSend preserves a registered operation attempt', () => {
     sessionPath: '/workspace/session.jsonl', text: 'hello', inputs: [],
     operationId: 'send-operation', operationAttempt: 0,
   }), /operationAttempt must be a positive integer/);
-});
-
-test('validateOpenTabsSet preserves compatibility and accepts only positive source revisions', () => {
-  const tabs = [{ path: '/workspace/session.jsonl', pinned: true, isRunning: false }];
-  assert.deepEqual(validateOpenTabsSet({ tabs }), { tabs });
-  assert.deepEqual(validateOpenTabsSet({ tabs, revision: 7 }), { tabs, revision: 7 });
-  assert.throws(() => validateOpenTabsSet({ tabs, revision: 0 }), /positive safe integer/);
-  assert.throws(() => validateOpenTabsSet({ tabs, revision: 1.5 }), /positive safe integer/);
-  assert.deepEqual(
-    validateOpenTabsSet({ tabs: [{ ...tabs[0], closureActions: [{ detail: 'x'.repeat(1_000) }] }] }).tabs,
-    tabs,
-    'the worker registry projects only bounded review-tool fields',
-  );
-  assert.throws(
-    () => validateOpenTabsSet({ tabs: Array.from({ length: 513 }, (_, index) => ({ path: `/s/${index}` })) }),
-    /at most 512/,
-  );
-  assert.throws(
-    () => validateOpenTabsSet({ tabs: [{ path: '/s', name: 'x'.repeat(4 * 1024 + 1) }] }),
-    /name.*at most/,
-  );
 });
 
 test('validateMessageSend accepts image-only sends with structured inputs', () => {

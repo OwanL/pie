@@ -2,7 +2,7 @@
   "name": "pie-analysis",
   "private": true,
   "type": "module",
-  "description": "Standalone local analytics transforms and dashboard build for pie run analytics.",
+  "description": "Standalone local analytics transforms and DuckDB queries for pie run analytics.",
   "engines": {
     "node": ">=24.16.0"
   },
@@ -11,25 +11,14 @@
     "test": "node ../scripts/run-tests.mjs --fast --package analysis",
     "build-db": "tsx ./scripts/build-db.ts",
     "query": "tsx ./scripts/query.ts",
-    "export-site-data": "tsx ./scripts/export-site-data.ts",
-    "validate-site-data": "tsx ./scripts/validate-site-data.ts",
-    "build-site": "tsx ./scripts/build-site.ts",
-    "serve": "npm run build-site && tsx ./scripts/serve-site.ts",
-    "validate": "npm run typecheck && npm run test && npm run validate-site-data && npm run build-site"
+    "validate": "npm run typecheck && npm run test"
   },
   "dependencies": {
-    "@duckdb/node-api": "1.5.2-r.1",
-    "vega": "6.2.0",
-    "vega-embed": "7.1.0",
-    "vega-lite": "6.4.3"
+    "@duckdb/node-api": "1.5.2-r.1"
   },
   "devDependencies": {
     "@types/node": "25.7.0",
-    "esbuild": "0.28.1",
     "tsx": "4.21.0",
     "typescript": "6.0.3"
-  },
-  "overrides": {
-    "esbuild": "$esbuild"
   }
 }

@@ -35,88 +35,6 @@ function appendJsonLines(filePath, lines) {
   appendFileSync(filePath, `${lines.join('\n')}\n`, 'utf8');
 }
 
-function reviewKey(value) {
-  if (!value || typeof value !== 'object' || value.schemaVersion !== 2) return null;
-  if (value.kind === 'production' && typeof value.sessionId === 'string' && value.sessionId) {
-    return `production:${value.sessionId}`;
-  }
-  if (value.kind === 'calibration' && typeof value.reviewId === 'string' && value.reviewId) {
-    return `calibration:${value.reviewId}`;
-  }
-  return null;
-}
-
-function mergeReviews(sourceFile, destinationFile, conflictsFile) {
-  const destination = readJsonLines(destinationFile);
-  const destinationLines = new Set(destination.map((entry) => entry.raw));
-  const canonical = new Map();
-  for (const entry of destination) {
-    const key = reviewKey(entry.value);
-    if (key && !canonical.has(key)) canonical.set(key, entry.raw);
-  }
-
-  const appended = [];
-  const existingConflicts = new Set(readJsonLines(conflictsFile).map((entry) => entry.raw));
-  const conflicts = [];
-  let conflictCount = 0;
-  let identical = 0;
-  let invalid = 0;
-  for (const entry of readJsonLines(sourceFile)) {
-    const key = reviewKey(entry.value);
-    if (!key) {
-      invalid += 1;
-      continue;
-    }
-    const existing = canonical.get(key);
-    if (existing === undefined) {
-      canonical.set(key, entry.raw);
-      destinationLines.add(entry.raw);
-      appended.push(entry.raw);
-    } else if (destinationLines.has(entry.raw)) {
-      identical += 1;
-    } else {
-      conflictCount += 1;
-      const conflict = JSON.stringify({
-        sourceFile,
-        reason: 'canonical_review_key_conflict',
-        key,
-        record: entry.value,
-      });
-      if (!existingConflicts.has(conflict)) {
-        // Append the incoming candidate after the existing record as a fallback.
-        // Every consumer selects the first *valid* production review, so this
-        // rescues a valid review when a malformed earlier envelope reused its
-        // sessionId without replacing an already-valid canonical review.
-        destinationLines.add(entry.raw);
-        appended.push(entry.raw);
-        existingConflicts.add(conflict);
-        conflicts.push(conflict);
-      }
-    }
-  }
-
-  appendJsonLines(destinationFile, appended);
-  appendJsonLines(conflictsFile, conflicts);
-  return { appended: appended.length, identical, conflicts: conflictCount, quarantined: conflicts.length, invalid };
-}
-
-function mergeClosureActions(sourceFile, destinationFile) {
-  const existing = new Set(readJsonLines(destinationFile).map((entry) => entry.raw));
-  const appended = [];
-  let identical = 0;
-  for (const entry of readJsonLines(sourceFile)) {
-    if (!entry.value) continue;
-    if (existing.has(entry.raw)) {
-      identical += 1;
-      continue;
-    }
-    existing.add(entry.raw);
-    appended.push(entry.raw);
-  }
-  appendJsonLines(destinationFile, appended);
-  return { appended: appended.length, identical };
-}
-
 function runId(entry) {
   const value = entry?.value;
   return value && typeof value === 'object'
@@ -223,9 +141,9 @@ function registerMigrationSource(conflictDir, sourceRoot, scanStartedAt, migrate
   );
 }
 
-/** Merge one displaced machine-local outcomes authority into the canonical one.
- * Open-run checkpoints and derived exports are intentionally not copied: only
- * durable completed snapshots, transcripts, reviews, and closure events move. */
+/** Merge retained session and completed-run data from one displaced machine-local
+ * outcomes authority. Retired reviews, closure actions, open-run checkpoints,
+ * and derived exports remain untouched at their old locations. */
 export function mergeOutcomesStore({ sourceOutcomesRoot, destinationOutcomesRoot }) {
   const sourceRoot = path.resolve(sourceOutcomesRoot);
   const destinationRoot = path.resolve(destinationOutcomesRoot);
@@ -244,16 +162,6 @@ export function mergeOutcomesStore({ sourceOutcomesRoot, destinationOutcomesRoot
   }).totals;
 
   const conflictDir = path.join(destinationRoot, 'migration-conflicts');
-  const reviews = mergeReviews(
-    path.join(sourceRoot, 'session-reviews', 'reviews.jsonl'),
-    path.join(destinationRoot, 'session-reviews', 'reviews.jsonl'),
-    path.join(conflictDir, 'reviews.jsonl'),
-  );
-  const closureActions = mergeClosureActions(
-    path.join(sourceRoot, 'session-reviews', 'closure-actions.jsonl'),
-    path.join(destinationRoot, 'session-reviews', 'closure-actions.jsonl'),
-  );
-
   const runStores = [];
   for (const entry of readdirSync(sourceRoot, { withFileTypes: true })) {
     if (!entry.isDirectory() || !/^[a-f0-9]{16}$/i.test(entry.name)) continue;
@@ -263,7 +171,7 @@ export function mergeOutcomesStore({ sourceOutcomesRoot, destinationOutcomesRoot
     runStores.push({ workspaceKey: entry.name, ...mergeRunSnapshots(sourceFile, destinationFile) });
   }
 
-  // Leave a small durable receipt without embedding review/session content.
+  // Leave a small durable receipt without embedding session content.
   const migratedAt = new Date().toISOString();
   const receipt = {
     migrationStartedAt,
@@ -271,8 +179,6 @@ export function mergeOutcomesStore({ sourceOutcomesRoot, destinationOutcomesRoot
     sourceRoot,
     destinationRoot,
     sessions,
-    reviews,
-    closureActions,
     runStores,
   };
   mkdirSync(conflictDir, { recursive: true });

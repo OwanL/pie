@@ -53,13 +53,7 @@ import {
   loadConfiguredModels,
 } from './session-metadata';
 import { SessionCatalog } from './session-catalog';
-import {
-  ensureReviewsDir,
-  getReviewSidecarFingerprint,
-  hasActiveReviewClosureActions,
-  forgetSessionReviewSidecars,
-  startReviewWatcher,
-} from './session-review-store';
+import { forgetLegacyReviewArtifacts } from './legacy-review-artifact-cleanup';
 import { SessionLifecycleStore } from './session-lifecycle-store';
 import {
   SessionExpiryScheduler,
@@ -330,22 +324,14 @@ export class BackendServer {
   private lifecycleStore?: SessionLifecycleStore;
   private lifecycleBarrier?: SessionFilesystemMutationBarrier;
   private lifecycleScheduler?: SessionExpiryScheduler;
-  /** Disposer for the session-review sidecar watcher (see `startReviewWatcher`). */
-  private stopReviewWatcher?: () => void;
   private sessionCatalogPollTimer?: ReturnType<typeof setInterval>;
   private sessionCatalogPollingActive = false;
   private sessionCatalogPollInFlight = false;
-  /** Last cheap snapshot of the append-only review/closure files. Used by the
-   * catalog poll to recover when fs.watch drops or coalesces an event. */
-  private reviewSidecarFingerprint = getReviewSidecarFingerprint();
   /** Auth-file fingerprint baseline; a moved fingerprint refreshes workers. */
   private authFingerprint = '';
   /** models.json fingerprint baseline; a moved fingerprint re-broadcasts the
    *  configured catalog authority to hot workers. */
   private modelsJsonFingerprint = '';
-  /** Cached active-action state belongs to `reviewSidecarFingerprint`; an
-   * unchanged poll must not synchronously reparse the growing sidecars. */
-  private reviewClosureReconciliationPending = false;
 
   /** True once `dispose()` has begun. Suppresses stale events and payload
    *  builds from in-flight async paths (recovery replacement emissions, catalog
@@ -391,7 +377,6 @@ export class BackendServer {
   /** Highest coordinator-owned registry revision published to the legacy
    * process env mirror. Broadcast acknowledgements can settle out of order,
    * so completion order must never be allowed to roll this mirror back. */
-  private mirroredSessionRegistryRevision = 0;
   private durableDetailStore?: DurableDetailStore;
   private authPath = '';
   private hostWatchdogTimer?: ReturnType<typeof setInterval>;
@@ -859,7 +844,7 @@ export class BackendServer {
       authPath,
     });
 
-    this.startReviewReconciliation();
+    this.startSessionCatalogPolling();
   }
 
   /** Opt-in packaged-artifact probe through the real cold store, promotion
@@ -1750,36 +1735,12 @@ export class BackendServer {
     return await this.initializeColdSessionStore().list([]);
   }
 
-  /** Start durable closure reconciliation. The watcher is a low-latency hint;
-   * an unconditional startup list and the bounded sidecar fingerprint poll are
-   * the correctness paths, including after a backend restart. */
-  private startReviewReconciliation(): void {
-    ensureReviewsDir();
-    this.refreshReviewSidecarState(true);
-    this.stopReviewWatcher = startReviewWatcher(() => {
-      this.refreshReviewSidecarState();
-      void this.emitSessionListChanged();
-    });
-    this.startSessionCatalogPolling();
-    void this.emitSessionListChanged();
-  }
-
-  /** Refresh parsed closure state only when its cheap file fingerprint moves.
-   * `force` establishes the startup baseline even when construction happened
-   * after PIE_REVIEWS_DIR was already configured. */
-  private refreshReviewSidecarState(force = false): boolean {
-    const fingerprint = getReviewSidecarFingerprint();
-    const changed = fingerprint !== this.reviewSidecarFingerprint;
-    if (force || changed) {
-      this.reviewSidecarFingerprint = fingerprint;
-      this.reviewClosureReconciliationPending = hasActiveReviewClosureActions();
-    }
-    return changed;
-  }
-
   private startSessionCatalogPolling(intervalMs = SESSION_CATALOG_POLL_INTERVAL_MS): void {
     if (this.sessionCatalogPollTimer) return;
     this.sessionCatalogPollingActive = true;
+    // Restored-startup hosts do not issue session.list: publish the complete
+    // catalog once even when its inventory fingerprint has not changed.
+    void this.emitSessionListChanged();
     this.sessionCatalogPollTimer = setInterval(() => {
       void this.pollSessionCatalog();
     }, intervalMs);
@@ -1802,12 +1763,7 @@ export class BackendServer {
     }
 
     try {
-      const sidecarChanged = this.refreshReviewSidecarState();
-      // Cached active actions force a bounded retry even when a prior list scan
-      // failed after the watcher/fingerprint wake was consumed. The cache is
-      // reparsed only when the append-only sidecar fingerprint changes.
-      if ((catalogChanged || sidecarChanged || this.reviewClosureReconciliationPending)
-        && this.sessionCatalogPollingActive) {
+      if (catalogChanged && this.sessionCatalogPollingActive) {
         await this.emitSessionListChanged();
       }
 
@@ -2090,7 +2046,7 @@ export class BackendServer {
         roots: { sessions: dataPaths.sessionsDir, artifacts: dataPaths.artifactsDir },
         cleanupExternalArtifact: async (artifact) => {
           if (artifact.artifactId === 'review-sidecar-entry') {
-            forgetSessionReviewSidecars(artifact.location, artifact.sessionId);
+            forgetLegacyReviewArtifacts(artifact.location, artifact.sessionId);
             return;
           }
           if (artifact.artifactId === 'prompt-setting-entry') {
@@ -2910,26 +2866,6 @@ export class BackendServer {
         this.coldSessionStore?.transferOwnershipStamp(source, target);
       },
       emit: (event, payload) => this.emit(event, payload),
-      syncOpenTabsRegistry: async (tabs, sourceRevision) => {
-        const router = this.workerRuntimeRouter;
-        if (!router) {
-          throw new BackendError(
-            'ISOLATED_RUNTIME_ROUTING_UNAVAILABLE',
-            'The coordinator cannot publish the session registry without worker routing.',
-          );
-        }
-        const normalized = JSON.parse(JSON.stringify(tabs)) as WorkerJsonValue[];
-        const outcome = await router.syncSessionRegistry(normalized, sourceRevision);
-        if (!outcome.applied || outcome.revision <= this.mirroredSessionRegistryRevision) return;
-        // Keep the coordinator mirror for diagnostics/legacy in-process
-        // consumers. Ready hot workers receive the same snapshot through the
-        // auxiliary latest-wins sync; a missed acknowledgement retries without
-        // making this host publication or an active turn wait. The synchronous
-        // revision claim fences an older publication behind a newer one.
-        this.mirroredSessionRegistryRevision = outcome.revision;
-        process.env['PIE_OPEN_TABS'] = JSON.stringify(normalized);
-        process.env['PIE_OPEN_TABS_REVISION'] = String(outcome.revision);
-      },
       emitBusyChanged: () => undefined,
       emitContextUsageChanged: () => undefined,
       emitSessionListChanged: () => this.emitSessionListChanged(),
@@ -3066,8 +3002,6 @@ export class BackendServer {
     this.sessionCatalogPollingActive = false;
     if (this.sessionCatalogPollTimer) clearInterval(this.sessionCatalogPollTimer);
     this.sessionCatalogPollTimer = undefined;
-    this.stopReviewWatcher?.();
-    this.stopReviewWatcher = undefined;
     this.browsePreviousSessionFiles.clear();
 
     await flushBackendLivePipelineTrace();

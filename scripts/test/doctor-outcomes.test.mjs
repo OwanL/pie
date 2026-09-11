@@ -69,6 +69,9 @@ test('post-migration outcome writes are detected until the displaced store is re
       schemaVersion: 2, kind: 'run_snapshot', recordedAt: '2026-08-02T00:00:00.000Z',
       run: { runId: 'run-two', startedAt: '2026-08-02T00:00:00.000Z', updatedAt: '2026-08-02T00:00:00.000Z' },
     })}\n`, 'utf8');
+    writeJsonl(path.join(source, 'session-reviews', 'reviews.jsonl'), [{
+      schemaVersion: 2, kind: 'production', sessionId: 'retired', reviewId: 'ignored',
+    }]);
     const drift = collectPostMigrationOutcomeDrift({ canonicalOutcomesRoot: destination });
     assert.equal(drift.changedFileCount, 1);
     assert.deepEqual(drift.sources[0].changedFiles, [path.join('aaaaaaaaaaaaaaaa', 'run-snapshots.jsonl')]);

@@ -1,11 +1,11 @@
 import * as fs from 'node:fs/promises';
 
 import { resolveSessionIdentity } from '../shared/session-identity';
-import { forgetSessionReviewSidecars } from './session-review-store';
+import { forgetLegacyReviewArtifacts } from './legacy-review-artifact-cleanup';
 import { writeSystemPromptTogglesForSession } from './session-settings-store';
 
 export interface ForgetPrivateSessionArtifactsDeps {
-  forgetReviewSidecars?: typeof forgetSessionReviewSidecars;
+  forgetReviewSidecars?: typeof forgetLegacyReviewArtifacts;
   clearSystemPromptToggles?: (sessionPath: string) => Promise<void>;
   deleteTranscript?: (sessionPath: string) => Promise<void>;
 }
@@ -19,7 +19,7 @@ export async function forgetPrivateSessionArtifacts(
   const sessionId = (() => {
     try { return resolveSessionIdentity(sessionPath).sessionId; } catch { return undefined; }
   })();
-  (deps.forgetReviewSidecars ?? forgetSessionReviewSidecars)(sessionPath, sessionId);
+  (deps.forgetReviewSidecars ?? forgetLegacyReviewArtifacts)(sessionPath, sessionId);
   await (deps.clearSystemPromptToggles
     ?? ((path) => writeSystemPromptTogglesForSession(path, [], true)))(sessionPath);
   await (deps.deleteTranscript ?? ((path) => fs.rm(path, { force: true })))(sessionPath);

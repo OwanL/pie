@@ -27,7 +27,6 @@ async function main(): Promise<void> {
 
   const dbPath = options.dbPath ?? DEFAULT_DUCKDB_PATH;
   const localDefaultMode = options.dbPath === undefined && !options.exportPath && !options.storageDir;
-  const reviewSidecarPath = path.join(DEFAULT_OUTCOMES_ROOT, 'session-reviews', 'reviews.jsonl');
   const configRoot = path.resolve(DEFAULT_OUTCOMES_ROOT, '..', '..');
   const localDefaultInputs = [
     path.join(configRoot, 'models.json'),
@@ -38,7 +37,7 @@ async function main(): Promise<void> {
   ];
   const shouldRebuild = !fs.existsSync(dbPath)
     || Boolean(options.exportPath || options.storageDir)
-    || (localDefaultMode && await shouldRebuildLocalDefaultDuckDb(dbPath, DEFAULT_OUTCOMES_ROOT, reviewSidecarPath, localDefaultInputs));
+    || (localDefaultMode && await shouldRebuildLocalDefaultDuckDb(dbPath, DEFAULT_OUTCOMES_ROOT, localDefaultInputs));
   if (shouldRebuild) {
     const loaded = await loadSourceAnalytics({ exportPath: options.exportPath, storageDir: options.storageDir });
     const prepared = prepareSourceAnalytics(loaded.source);

@@ -1048,28 +1048,6 @@ export function validateRuntimePrefsSet(params: unknown): RuntimePrefsSetParams 
   return { providerToggles, ...(subagentProviderDefaults !== undefined ? { subagentProviderDefaults } : {}), ...(subagentProviderTogglesBySession !== undefined ? { subagentProviderTogglesBySession } : {}), extensionToggles, autonomousMode, mcpEnabled, subagentAlwaysParentModel, subagentRouteAroundSaturatedProviders, subagentFallbackOnProviderFailure, subagentMaxDepth, subagentMaxTreeSessions, subagentMaxInflight, bashWarmPoolSize, bashFastPath, bashShellPath, bashWarmupTimeoutMs, bashDefaultTimeout, subagentBuckets, subagentNestedAllowedBuckets, subagentBucketCanSpawn, subagentDropTools, providerConcurrency, ...(historyCompaction !== undefined ? { historyCompaction } : {}) };
 }
 
-export interface OpenTabsSetParams {
-  /** Open-tab summaries the host pushes so the `session_review` tool can list
-   *  currently-open sessions without host state access. Published through the
-   *  coordinator's revisioned worker-sync domain and mirrored into
-   *  `process.env.PIE_OPEN_TABS` (JSON) for compatibility. */
-  tabs: unknown[];
-  /** Monotonic host-authority revision. Optional for legacy callers. */
-  revision?: number;
-}
-
-const MAX_OPEN_TABS = 512;
-const MAX_OPEN_TABS_PAYLOAD_BYTES = 192 * 1024;
-const OPEN_TAB_STRING_LIMITS = {
-  path: 16 * 1024,
-  name: 4 * 1024,
-  cwd: 16 * 1024,
-  modifiedAt: 256,
-  modelId: 512,
-  provider: 256,
-  thinkingLevel: 64,
-} as const;
-
 export interface McpSetServerEnabledParams {
   name: string;
   enabled: boolean;
@@ -1121,58 +1099,6 @@ export function validateMcpSetSessionServerEnabled(params: unknown): McpSetSessi
   const recycle = source['recycle'];
   if (recycle !== undefined && typeof recycle !== 'boolean') fail('mcp.setSessionServerEnabled', 'recycle must be a boolean when provided');
   return { sessionPath, overrides, recycle: recycle === true };
-}
-
-/** Validate `openTabs.set` (host → backend). The tabs are open-tab summaries;
- *  we only require each be an object with a non-empty string `path` (the rest
- *  is passed through opaquely and stringified to env for the tool to parse). */
-export function validateOpenTabsSet(params: unknown): OpenTabsSetParams {
-  if (!isObj(params)) fail('openTabs.set', 'expected an object');
-  const rawTabs = (params as Record<string, unknown>)['tabs'];
-  if (!Array.isArray(rawTabs)) fail('openTabs.set', 'tabs must be an array');
-  if (rawTabs.length > MAX_OPEN_TABS) fail('openTabs.set', `tabs must contain at most ${MAX_OPEN_TABS} entries`);
-  const tabs: unknown[] = [];
-  for (let i = 0; i < rawTabs.length; i += 1) {
-    const entry = rawTabs[i];
-    if (!isObj(entry)) fail('openTabs.set', `tabs[${i}] must be an object`);
-    const source = entry as Record<string, unknown>;
-    const p = source['path'];
-    if (typeof p !== 'string' || !p) fail('openTabs.set', `tabs[${i}].path must be a non-empty string`);
-    const normalized: Record<string, unknown> = {};
-    for (const [key, limit] of Object.entries(OPEN_TAB_STRING_LIMITS)) {
-      const value = source[key];
-      if (value === undefined) continue;
-      if (typeof value !== 'string' || value.length === 0 || value.length > limit) {
-        fail('openTabs.set', `tabs[${i}].${key} must be a non-empty string of at most ${limit} characters`);
-      }
-      normalized[key] = value;
-    }
-    const messageCount = source['messageCount'];
-    if (messageCount !== undefined) {
-      if (!Number.isSafeInteger(messageCount) || (messageCount as number) < 0) {
-        fail('openTabs.set', `tabs[${i}].messageCount must be a non-negative safe integer`);
-      }
-      normalized['messageCount'] = messageCount;
-    }
-    for (const key of ['pinned', 'isRunning'] as const) {
-      const value = source[key];
-      if (value !== undefined && typeof value !== 'boolean') {
-        fail('openTabs.set', `tabs[${i}].${key} must be a boolean when provided`);
-      }
-      if (value !== undefined) normalized[key] = value;
-    }
-    tabs.push(normalized);
-  }
-  if (Buffer.byteLength(JSON.stringify(tabs), 'utf8') > MAX_OPEN_TABS_PAYLOAD_BYTES) {
-    fail('openTabs.set', `tabs payload must be at most ${MAX_OPEN_TABS_PAYLOAD_BYTES} UTF-8 bytes`);
-  }
-  const rawRevision = (params as Record<string, unknown>)['revision'];
-  const revision = rawRevision === undefined
-    ? undefined
-    : Number.isSafeInteger(rawRevision) && (rawRevision as number) > 0
-      ? rawRevision as number
-      : fail('openTabs.set', 'revision must be a positive safe integer when provided');
-  return { tabs, ...(revision === undefined ? {} : { revision }) };
 }
 
 export function validateSettingsSet(params: unknown): SettingsSetParams {

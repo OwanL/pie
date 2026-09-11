@@ -116,15 +116,6 @@ const PACKAGE_TEST_METADATA = {
     // unit-testable without the pi runtime. Types-global.d.ts is ambient only.
     thresholds: { lines: 92, branches: 80 },
   },
-  'session-reviewer': {
-    testGlobs: ['extensions/session-reviewer/test/**/*.test.ts'],
-    coverageIncludes: ['extensions/session-reviewer/index.ts', 'extensions/session-reviewer/src/**/*.ts'],
-    // transcript.ts (the JSONL parser) is the unit-testable core; index.ts is
-    // env-glue (registers the `session_review` tool) and store.ts is fs I/O,
-    // neither of which is unit-testable without the pi runtime / a real disk.
-    // types-global.d.ts is ambient only.
-    thresholds: { lines: 80, branches: 70 },
-  },
   'deferred-triggers': {
     testGlobs: ['extensions/deferred-triggers/test/**/*.test.ts'],
     coverageIncludes: ['extensions/deferred-triggers/index.ts', 'extensions/deferred-triggers/src/**/*.ts'],

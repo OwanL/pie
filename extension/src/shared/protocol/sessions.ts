@@ -19,27 +19,6 @@ export type {
   SessionToolSnippetFactor,
 };
 
-/** Filename of the append-only closure-action outbox beside reviews.jsonl. */
-export const REVIEW_CLOSURE_ACTIONS_FILE = 'closure-actions.jsonl';
-
-export type ClosureActionKind = 'closeReviewed' | 'closeSelf';
-export type ClosureActionStatus = 'pending' | 'succeeded' | 'failed' | 'retrying';
-
-/** Explicit tab-closure action. Latest record per actionId is its current
- *  outbox state; closure actions never live in reviews.jsonl. */
-export interface ClosureAction {
-  actionId: string;
-  kind: ClosureActionKind;
-  targetSessionId: string;
-  targetSessionPath?: string;
-  reviewId?: string;
-  status: ClosureActionStatus;
-  attempts: number;
-  lastError?: string;
-  requestedAt: string;
-  settledAt?: string;
-}
-
 export interface SessionSummary {
   path: string;
   name: string;
@@ -65,18 +44,6 @@ export interface SessionSummary {
    *  path hash only when the header is missing or malformed. */
   sessionId?: string;
   identityFallback?: boolean;
-  /** True when a canonical V2 production review exists. */
-  reviewed?: boolean;
-  /** Canonical V2 production review identity. */
-  reviewId?: string;
-  reviewedAt?: string;
-  /** Current explicit closure-action outbox records targeting this session.
-   *  The host drains only pending/retrying actions. */
-  closureActions?: ClosureAction[];
-  /** True when this tab is pinned (browser-style pinned tab). Populated by
-   *  the host when pushing open-tab summaries so the `session_review` tool's
-   *  listOpen can show which tabs are pinned and skip them during review. */
-  pinned?: boolean;
 }
 
 export type TranscriptPageDirection = 'older' | 'newer' | 'latest';

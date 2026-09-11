@@ -410,57 +410,8 @@ export function handleCloseSession(state: ArchState, cmd: Extract<Command, { kin
       }],
     };
   }
-  // A repeated or delayed user close for a tab that is already hidden is a
-  // no-op. Explicit outbox retries are different: after a crash or failed
-  // terminal append the durable action may still be pending while the tab is
-  // already hidden. Re-run idempotent persistence and (for idle sessions)
-  // host cleanup so success is backed by fresh authoritative effect results.
   if (!state.sessions.openTabPaths.includes(sessionPath)) {
-    if (!cmd.ensureClosed) return { state, effects: [] };
-    const running = state.sessions.runningSessionPaths.includes(sessionPath);
-    const privacyMode = state.sessions.privacyModeBySession[sessionPath] === true;
-    const closeOperation = startCloseOperation(
-      state,
-      cmd,
-      running && !privacyMode ? 'running-hide' : privacyMode ? 'private-cleanup' : 'idle-cleanup',
-    );
-    const operationState = closeOperation
-      ? { ...state, operations: { ...state.operations, [closeOperation.operationId]: closeOperation } }
-      : state;
-    const persistEffect = {
-      kind: 'PersistTabs' as const,
-      corrId: cmd.corrId,
-      ...(closeOperation ? { operationId: closeOperation.operationId, backendGeneration: closeOperation.backendGeneration } : {}),
-      openTabPaths: state.sessions.openTabPaths,
-      activeSessionPath: state.sessions.activeSessionPath,
-      pinnedTabPaths: state.sessions.pinnedTabPaths,
-      pinnedTabGroups: state.sessions.pinnedTabGroups,
-    };
-    if (running && !privacyMode) {
-      // A review-closure retry may land here after a crash left the tab already
-      // hidden. Re-mark it so the ready handshake still won't resurrect it.
-      if (!cmd.reviewClosure) return { state: operationState, effects: [persistEffect] };
-      return {
-        state: {
-          ...operationState,
-          sessions: {
-            ...operationState.sessions,
-            intentionallyHiddenRunningPaths: addToArray(state.sessions.intentionallyHiddenRunningPaths, sessionPath),
-          },
-        },
-        effects: [persistEffect],
-      };
-    }
-    return {
-      state: operationState,
-      effects: [
-        persistEffect,
-        {
-          kind: 'CloseSession', corrId: cmd.corrId, sessionPath, nextPath: null,
-          ...(closeOperation ? { operationId: closeOperation.operationId, backendGeneration: closeOperation.backendGeneration } : {}),
-        },
-      ],
-    };
+    return { state, effects: [] };
   }
   // The reducer owns the tab-close + per-session map clearing +
   // select-next-tab; the runner owns the host-side cleanup

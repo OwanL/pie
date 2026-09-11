@@ -46,8 +46,7 @@ Add a `pruning` block to `settings.json`:
       "ceiling": 10,
       "dependencies": {
         "edit": ["read"],
-        "subagent": ["bash"],
-        "session_review": ["subagent", "ask_user"]
+        "subagent": ["bash"]
       }
     }
   }
@@ -80,7 +79,7 @@ Add a `pruning` block to `settings.json`:
 |---|---|---|
 | `strategy` | `"discretion"` | Pruning strategy (see skills) |
 | `ceiling` | `10` | Soft guidance (see skills) |
-| `dependencies` | `{ edit: [read], subagent: [bash], session_review: [subagent, ask_user] }` | Tool → dependency mapping; a dependency of a **kept** tool is protected from pruning |
+| `dependencies` | `{ edit: [read], subagent: [bash] }` | Tool → dependency mapping; a dependency of a **kept** tool is protected from pruning |
 | `alwaysKeep` | `[]` | Tools protected from pruning regardless of the LLM's list (set via the UI's "Omitted tools (never pruned)") |
 
 ### Prepass options

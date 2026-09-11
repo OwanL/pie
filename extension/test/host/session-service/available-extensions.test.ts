@@ -14,7 +14,7 @@ test('deriveAvailableExtensions shows loaded extensions even when their tools we
   const extensions = deriveAvailableExtensions([
     'subagent',
     'ask-user',
-    'session-reviewer',
+    'vendor-tools',
     'safeguard',
   ]);
 
@@ -22,7 +22,7 @@ test('deriveAvailableExtensions shows loaded extensions even when their tools we
     'subagent',
     'safeguard',
     'ask-user',
-    'session-reviewer',
+    'vendor-tools',
   ]);
 });
 

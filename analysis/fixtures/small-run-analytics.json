@@ -1215,17 +1215,5 @@
         }
       }
     }
-  ],
-  "sessionReviewV2Diagnostics": {
-    "rawProductionCount": 0,
-    "acceptedCount": 0,
-    "rejectedCount": 0,
-    "rejectedByReason": {
-      "unsupported_schema": 0,
-      "unsupported_rubric": 0,
-      "unsupported_index": 0,
-      "invalid_identity": 0,
-      "invalid_payload": 0
-    }
-  }
+  ]
 }

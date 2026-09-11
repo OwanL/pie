@@ -10,20 +10,12 @@ import type { ExtensionUIRequestPayload, ExtensionUIResponsePayload } from '../.
  * path with the request's own id, mirroring how `RequestExtensionUI` events
  * populate `pendingExtensionUIRequestsBySession`.
  */
-const pendingRequest: ExtensionUIRequestPayload = {
+const pendingRequest: Extract<ExtensionUIRequestPayload, { method: 'select' }> = {
   id: 'req-1',
   sessionPath: '/session/a',
   method: 'select',
   title: 'Can you verify this?',
   options: ['Yes', 'No'],
-  reviewMeta: {
-    purpose: 'review_human_verification',
-    targetSessionId: 'reviewed-id',
-    targetSessionPath: '/session/reviewed.jsonl',
-    criterionId: 'criterion-1',
-    domain: 'accessibility',
-    expectedObservation: 'Keyboard interaction works.',
-  },
 };
 
 /** State with a single pending extension UI request for `/session/a`. */
