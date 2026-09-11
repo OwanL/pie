@@ -1168,3 +1168,100 @@ change installed or staged artifacts. Cleanup still requires explicit user appro
 retirement and P7a/P7b activation APIs remain owned by their prior gates; P7b still requires explicit
 authorization plus a reviewed existing-session enumeration/cutoff plan, canonical single-root proof
 and the broader P0 qualification gates. P7a/P7b activation remains closed.
+
+## Checkpoint 14 — inactive P5 canonical read-model/transport/UI adapters (2026-09-11)
+
+This checkpoint adds the bounded ordinary P5 source milestone without selecting P7a. The durable
+canonical analytics store remains the only authoritative analytics root; legacy JSONL, raw logs and
+detail payloads are still never used for aggregates, and the default producer/consumer authority
+stays `legacy` until the P7a gate.
+
+### Implemented inactive-candidate surface
+
+- **Host read model/transport** (`extension/src/analytics/query-entry.ts`): `CanonicalAnalyticsReadModel`
+  resolves the canonical database as `<canonical-data-root>/analytics/analytics.sqlite`
+  (`canonicalAnalyticsDatabasePath`; the P2b lifecycle store stays separate
+  `state/session-lifecycle.sqlite`) and owns an `AnalyticsQueryClient` transport with one disposable
+  read-only helper fork per query. Typed methods cover schema, cheap projection-revision reads,
+  revision-based refresh waits (bounded 1 s default polling, cancellable, optional `maxWaitMs`),
+  bounded SELECTs (default 200 rows/256 KiB, worker caps 10k/16 MiB), paged detail ranges (default
+  64 KiB with `nextOffset`/`truncated`), storage plus delivery accounting, settlements (optionally one
+  root session), engine-neutral accounting summaries and historical dimensions. Limits, timeouts
+  (default 10 s), concurrency/queue caps and heap ceilings are validated; queries against an absent
+  database fail explicitly (no legacy fallback), NUL-bearing SQL/IDs/payloads are rejected, and
+  cancellation terminates only the cancelled helper. The fork exec args are injectable so source-mode
+  tests can load the TS worker (production uses the built `out/analytics-query-worker.js`).
+- **Canonical settlement adapters** (`extension/src/analytics/canonical-usage.ts`): pure projections of
+  durable settlement rows onto engine-neutral metrics (`shared/analytics/metrics`) — owning-root
+  attribution (`scopeKey`/`rootSessionId`), global/rootSession/execution/branch/copyOwn/copyInherited
+  scope math via `summarizeAccountingScope`, explicit-timezone daily/weekly/dimensioned calendar
+  buckets — and onto the public protocol via the shared `sessionUsageSnapshotFromLedger` mapping with
+  authority `canonical`. Unknown channels stay visibly unknown (never coerced to zero), provenance
+  distinguishes reported from calculated cost, and branch/copy scopes select only rows carrying those
+  canonical facts (current settlements attribute rows to the owning root; nothing is fabricated).
+- **Public protocol/state** (`extension/src/shared/session-usage.ts`): `SessionUsageSnapshot.authority`
+  widens to `'ledger' | 'canonical' | 'unknown'` (both `ledger` and `canonical` are authoritative;
+  the value names the durable store that answered), and the projection input is a structural
+  `SessionUsageProjectionRow` so ledger records and canonical settlement rows share one public
+  mapping with identical coverage semantics. The existing token-usage/context/working-time UI
+  components render canonical snapshots unchanged; `authority !== 'unknown'` semantics are preserved.
+- **Live consumer path** (`extension/src/host/billable-accounting/service.ts`): in canonical mode the
+  settled `BillableInvocationRecord`s are retained per session (keyed by stable invocation identity,
+  dropped on close/forget, moved on path replacement) and `projectSessionUsage` projects them with the
+  same selected-branch filter and the shared mapping. A session with no answerable canonical
+  settlements projects `{ samples: [], authority: 'unknown' }` — the legacy ledger is never
+  substituted. Capture-rejected settlements are not projected; canonical mode never writes the JSONL
+  ledger. Cross-restart restore of session usage from the canonical read model remains unwired
+  (async authority; P4/P7a integration).
+- **Wiring** (`extension/src/host/extension-host.ts`, `extension/src/host/stats-service/{service,types}.ts`,
+  `extension/src/analytics/query-client.ts`): the host constructs the read model with path-only
+  resolution (no forks until a consumer queries; canonical data-root resolution fails startup
+  explicitly, matching the backend's rule) and passes it through `StatsServiceOptions.analyticsReadModel`
+  with a `getAnalyticsReadModel()` accessor. The legacy-shaped run-analytics query/export fences in
+  StatsService stay closed; replacing those legacy consumers is P6/P7a work, not this checkpoint.
+- **Agent query skill** (`skills/query-analytics/SKILL.md`, linked from `docs/INDEX.md`): the canonical
+  scoped query contract — store location and data-root resolution, read-only rules, the four logical
+  commands with bounds/truncation/cancellation metadata, int64-as-decimal-string rule, the documented
+  `analytics_provider_usage_v1` view, owning-root scope semantics, explicit-timezone calendar
+  semantics, missingness (NULL ≠ zero), delivery/producer-reconciliation/deletion facts, example
+  SELECTs, and the no-legacy-fallback rule. The CLI transport shell itself remains part of the P7a
+  cutover, not this checkpoint.
+
+### Lifecycle provenance relay
+
+Prior-lead terminal provenance is already durable in Checkpoint 12 and is not re-derived here: the
+Checkpoint 11 lifecycle lead's parent `toolResult.details.results` recorded requested/effective bucket
+`frontier`, `bucketDowngraded: false`, `fallback: false`, `openai-codex/gpt-5.6-sol` at high thinking,
+one successful terminal attempt with `stop`, and 192 provider invocations all on that provider/model
+(191 successful, one failed provider call recovered inside the successful attempt). Checkpoint 13's
+single independent frontier review likewise recorded two repaired issues; its own final
+provider/model/bucket provenance still requires parent verification before review credit. This
+checkpoint's own work has **no independent review yet**; the supervisor's post-hoc review is pending.
+
+### Focused verification
+
+- `extension` `tsc --noEmit`: passed;
+- new focused suites: `canonical-usage` (5 passed), `canonical-query-entry` (2 passed, real recorder
+  plus real query-worker fork against a temp database, including revision waits, bounded/truncated
+  SELECTs, scoped settlements→snapshot mapping, accounting summaries, dimensions, storage/delivery
+  accounting, paged 64 KiB detail ranges, validation/cancellation/missing-database failures), and
+  `billable-accounting-canonical-usage` (3 passed: canonical authority, non-substitution of the legacy
+  ledger, rejected capture, unknown-channel preservation, re-pathing and close cleanup);
+- focused neighbors re-run through `npm run test:file`: sqlite-recorder, canonical-capture,
+  recorder-supervisor, pending-create-lifecycle-races, session-lifecycle-store,
+  billable-invocation-conservation, stats-service + lifecycle + tracker, cost-attribution,
+  aggregate-stats, analytics-structural-regression, billable-accounting-boundaries,
+  session-cost-indicator, session-cost-tooltip — all passed;
+- final `npm run extension:build:validate --no-sync`: see the milestone commit evidence below;
+- `git diff --check`: passed.
+
+### Boundary and remaining ownership
+
+This checkpoint changes no loaded or installed artifacts, arms no cutoff, closes no session and
+mutates no live data; the observed runtime distinction remains renderer `runtime84e4356f` /
+`renderer2674553cd8bc69e0ab53` versus backend `65349a2e`, untouched. P5 items still owned elsewhere:
+warm/first-query and cancellation saturation gates and the full mixed-load matrix (P0 qualification);
+real-JSONL-expiry retained-detail behavior (P2b expiry plus read-model integration); the agent CLI
+transport shell and session-usage restore-after-restart (P7a cutover wiring); canonical branch/copy
+fact capture and cross-host refresh/terminal-result watermark consumption (P4); legacy consumer
+retirement (P6). P7a/P7b activation remains closed.

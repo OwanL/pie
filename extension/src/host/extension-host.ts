@@ -21,7 +21,7 @@ import {
 import { type RunAnalyticsExportPayload } from './run-analytics/query';
 import { SidebarViewProvider } from './sidebar/provider';
 import { BrowserServer } from './browser-server/browser-server';
-import { runtimeRendererSelection } from './runtime-location';
+import { runtimeRendererSelection, runtimeOutputDirectory } from './runtime-location';
 import { compactRendererViewState } from './renderers/renderer-view-state';
 import { readBrowserServerSettings } from './browser-server/settings';
 import type { BrowserServerLifecycleEvent } from './browser-server/types';
@@ -31,6 +31,11 @@ import { AggregateStatsService } from './aggregate-stats-service';
 import { EMPTY_PROVIDER_GATE_STATS, type ProviderGateStats } from '../shared/protocol/aggregate-stats';
 import { OPEN_TABS_STORAGE_KEY, ACTIVE_SESSION_STORAGE_KEY, PINNED_TABS_STORAGE_KEY, PINNED_TAB_GROUPS_STORAGE_KEY, PRIVATE_SESSION_PATHS_STORAGE_KEY } from './session-service/state';
 import { StatsService } from './stats-service';
+import {
+  CanonicalAnalyticsReadModel,
+  canonicalAnalyticsDatabasePath,
+} from '../analytics/query-entry.js';
+import { resolvePieDataPaths } from '../../../shared/pie-data-root.js';
 import { toErrorMessage } from './util/error-message';
 import type { WebviewToHostMessage, ViewState } from '../shared/protocol';
 import { EffectRunner } from './core/effect-runner';
@@ -179,6 +184,19 @@ export class PieExtension implements vscode.Disposable {
       processGeneration: crypto.randomUUID(),
     });
 
+    // P5 durable read model: path-only resolution until a consumer queries it
+    // (one disposable helper fork per query). The canonical data root shares
+    // the backend's explicit-failure resolution; queries against an absent
+    // database fail explicitly instead of falling back to legacy stores.
+    const dataPaths = resolvePieDataPaths({
+      dataDir: process.env.PIE_DATA_DIR,
+      agentDir: process.env.PI_CODING_AGENT_DIR,
+    });
+    const analyticsReadModel = new CanonicalAnalyticsReadModel({
+      databasePath: canonicalAnalyticsDatabasePath(dataPaths.analyticsDir),
+      workerScript: path.join(runtimeOutputDirectory(context), 'analytics-query-worker.js'),
+    });
+
     this.statsService = new StatsService({
       dataOutcomesRootPath,
       legacyUsageDataRootPath: context.globalStorageUri.fsPath,
@@ -190,6 +208,7 @@ export class PieExtension implements vscode.Disposable {
       dispatchArchEvent: (event) => this.dispatchArchEvent(event),
       getAgentDir: () => process.env.PI_CODING_AGENT_DIR?.trim() || null,
       analyticsCapture,
+      analyticsReadModel,
     });
 
     this.service = new SessionService(

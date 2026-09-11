@@ -26,6 +26,7 @@ import type {
   AnalyticsSessionContext,
   CanonicalAnalyticsCapture,
 } from '../../analytics/canonical-capture.js';
+import type { CanonicalAnalyticsReadModel } from '../../analytics/query-entry.js';
 
 /** One persistent structured startup-stage measurement, also mirrored in
  *  memory for tests/diagnostics. Emitted for storage.start, the persisted
@@ -63,6 +64,7 @@ export class StatsService implements RunObserver {
   private readonly now: () => Date;
   private readonly createId: () => string;
   private readonly canonicalCapture: CanonicalAnalyticsCapture | undefined;
+  private readonly analyticsReadModel: CanonicalAnalyticsReadModel | undefined;
   /** Exact create/duplicate origin retained after the pending path is replaced.
    * A close operation ID must never enter this map. */
   private readonly pendingCreateOperationBySessionPath = new Map<string, string>();
@@ -93,6 +95,7 @@ export class StatsService implements RunObserver {
     this.now = now;
     this.createId = createId;
     this.canonicalCapture = options.analyticsCapture?.enabled ? options.analyticsCapture : undefined;
+    this.analyticsReadModel = options.analyticsReadModel;
     const getExperimentAssignment = options.getExperimentAssignment ?? (() => null);
     this.workingTime = new WorkingTimeService({
       now,
@@ -877,6 +880,14 @@ export class StatsService implements RunObserver {
   /** The resolved run-analytics storage directory (see {@link RunAnalyticsStorage.getStorageDir}). */
   getStorageDir(): string {
     return this.storage.getStorageDir();
+  }
+
+  /** Durable canonical read model (P5). Present whenever the host wired it;
+   * its queries are read-only and fail explicitly when the canonical
+   * database is absent. Consumers must gate on canonical authority until the
+   * P7a cutover. */
+  getAnalyticsReadModel(): CanonicalAnalyticsReadModel | undefined {
+    return this.analyticsReadModel;
   }
 
   /** Host-owned cumulative agent working-time clocks for renderer projection. */

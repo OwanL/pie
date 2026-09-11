@@ -2,7 +2,10 @@ import type { AssistantUsage, ChatMessage, PruningDetails, ToolCall } from './pr
 import { formatToolResult } from './tool-result-format';
 import { getSubagentBillingEntries, getSubagentResultEntries, type RawMessage } from './subagent-result';
 import { isRecord } from './type-guards';
-import type { BillableInvocationRecord } from './billable-invocation';
+import type {
+  BillableInvocationOutcome,
+  BillableInvocationProvenance,
+} from './billable-invocation';
 
 export type SessionUsageKind =
   | 'assistant'
@@ -60,8 +63,11 @@ export interface SessionUsageSample {
 export interface SessionUsageSnapshot {
   samples: SessionUsageSample[];
   /** Steady-state renderer authority. Absent is treated as unknown for an old
-   * host; transcript data is never substituted. */
-  authority?: 'ledger' | 'unknown';
+   * host; transcript data is never substituted. `ledger` is the legacy
+   * JSONL authority, `canonical` the normalized canonical analytics store.
+   * Both are authoritative; the value only tells the webview which durable
+   * store answered the projection. */
+  authority?: 'ledger' | 'canonical' | 'unknown';
   branchId?: string;
   /** Raw durable IDs in the selected branch, including assistant responses
    * folded together by the display transcript mapper. */
@@ -571,12 +577,47 @@ export function buildSessionUsageSnapshot(transcript: ChatMessage[], branchId?: 
 /** Convert immutable ledger rows to the compatibility snapshot consumed by the
  * session token/cost surfaces. Unknown channels remain visible through
  * provenance/instrumentation metadata rather than masquerading as known zero. */
-export function sessionUsageSnapshotFromLedger(records: readonly BillableInvocationRecord[]): SessionUsageSnapshot {
+/**
+ * Structural projection input shared by the legacy ledger records and P5's
+ * canonical settlement rows. Only fields the public session-usage projection
+ * consumes are part of this contract; ledger records satisfy it structurally.
+ */
+export type SessionUsageProjectionRow = {
+  readonly sourceId: string;
+  readonly kind: Exclude<SessionUsageKind, 'assistant'>;
+  readonly model: string | null;
+  readonly provider: string | null;
+  readonly inputTokens?: number | null;
+  readonly outputTokens?: number | null;
+  readonly cacheReadTokens?: number | null;
+  readonly cacheWriteTokens?: number | null;
+  readonly reasoningTokens?: number | null;
+  readonly providerTotalTokens?: number | null;
+  readonly providerReportedCostUsd?: number | null;
+  readonly calculatedCostUsd?: number | null;
+  readonly priceCatalogVersion?: string;
+  readonly pricing?: { catalogVersion: string; calculatedCostUsd: number };
+  readonly provenance?: BillableInvocationProvenance;
+  readonly instrumentationGap?: boolean;
+  readonly instrumentationGapReason?: string;
+  readonly outcome?: BillableInvocationOutcome;
+  readonly startedAt?: string;
+  readonly endedAt?: string;
+  readonly parentOperationId?: string | null;
+  readonly parentRunId?: string | null;
+  readonly parentToolId?: string | null;
+};
+
+/** Projection of one durable store into the public session-usage protocol. */
+export function sessionUsageSnapshotFromLedger(
+  records: readonly SessionUsageProjectionRow[],
+  authority: 'ledger' | 'canonical' = 'ledger',
+): SessionUsageSnapshot {
   const samples = records.map((record): SessionUsageSample => ({
     sourceId: record.sourceId,
     kind: record.kind,
-    modelId: record.model === 'unknown-model' ? undefined : record.model,
-    provider: record.provider === 'unknown-provider' ? undefined : record.provider,
+    modelId: record.model === 'unknown-model' || record.model === null ? undefined : record.model,
+    provider: record.provider === 'unknown-provider' || record.provider === null ? undefined : record.provider,
     inputTokens: record.inputTokens ?? 0,
     outputTokens: record.outputTokens ?? 0,
     cacheReadTokens: record.cacheReadTokens ?? 0,
@@ -584,20 +625,26 @@ export function sessionUsageSnapshotFromLedger(records: readonly BillableInvocat
     totalTokens: record.providerTotalTokens
       ?? (record.inputTokens ?? 0) + (record.outputTokens ?? 0)
         + (record.cacheReadTokens ?? 0) + (record.cacheWriteTokens ?? 0),
-    ...(record.reasoningTokens !== undefined ? { reasoningTokens: record.reasoningTokens } : {}),
-    ...(record.providerReportedCostUsd !== undefined ? { reportedCostUsd: record.providerReportedCostUsd } : {}),
-    ...(record.pricing ? {
-      calculatedCostUsd: record.pricing.calculatedCostUsd,
-      priceCatalogVersion: record.pricing.catalogVersion,
-    } : {}),
-    ...(record.providerTotalTokens !== undefined ? { providerTotalTokens: record.providerTotalTokens } : {}),
-    tokenChannelsKnown: record.inputTokens !== undefined && record.outputTokens !== undefined
-      && record.cacheReadTokens !== undefined && record.cacheWriteTokens !== undefined,
+    ...(record.reasoningTokens !== undefined && record.reasoningTokens !== null
+      ? { reasoningTokens: record.reasoningTokens } : {}),
+    ...(record.providerReportedCostUsd !== undefined && record.providerReportedCostUsd !== null
+      ? { reportedCostUsd: record.providerReportedCostUsd } : {}),
+    ...(record.calculatedCostUsd !== undefined && record.calculatedCostUsd !== null
+      ? { calculatedCostUsd: record.calculatedCostUsd }
+      : record.pricing ? {
+        calculatedCostUsd: record.pricing.calculatedCostUsd,
+        priceCatalogVersion: record.pricing.catalogVersion,
+      } : {}),
+    ...(record.priceCatalogVersion !== undefined ? { priceCatalogVersion: record.priceCatalogVersion } : {}),
+    ...(record.providerTotalTokens !== undefined && record.providerTotalTokens !== null
+      ? { providerTotalTokens: record.providerTotalTokens } : {}),
+    tokenChannelsKnown: record.inputTokens != null && record.outputTokens != null
+      && record.cacheReadTokens != null && record.cacheWriteTokens != null,
     tokenChannelPresence: {
-      input: record.inputTokens !== undefined,
-      output: record.outputTokens !== undefined,
-      cacheRead: record.cacheReadTokens !== undefined,
-      cacheWrite: record.cacheWriteTokens !== undefined,
+      input: record.inputTokens != null,
+      output: record.outputTokens != null,
+      cacheRead: record.cacheReadTokens != null,
+      cacheWrite: record.cacheWriteTokens != null,
     },
     provenance: record.provenance,
     instrumentationGap: record.instrumentationGap,
@@ -611,7 +658,7 @@ export function sessionUsageSnapshotFromLedger(records: readonly BillableInvocat
   }));
   return {
     samples,
-    authority: 'ledger',
+    authority,
     incompleteInvocationCount: records.filter((record) => record.provenance === 'unknown' || record.instrumentationGap).length,
     unpricedInvocationCount: records.filter((record) => record.provenance === 'unpriced').length,
   };

@@ -7,6 +7,7 @@ import type {
   ToolCall,
 } from '../../shared/protocol';
 import type { CanonicalAnalyticsCapture } from '../../analytics/canonical-capture.js';
+import type { CanonicalAnalyticsReadModel } from '../../analytics/query-entry.js';
 import type { ArchState } from '../core/arch-state';
 import type { Event } from '../core/events';
 import type { TaskBoundaryIntent, RunSnapshot, TurnLatencyMeasurement, TurnThroughputStatus } from '../run-analytics';
@@ -145,6 +146,9 @@ export interface StatsServiceOptions {
   /** Disabled/legacy by default. A canonical authority is injected only after
    * P0/P2b/P5 activation prerequisites are independently accepted. */
   analyticsCapture?: CanonicalAnalyticsCapture;
+  /** P5 durable canonical read model. Path-only until a consumer queries it;
+   * consumers must gate on canonical authority until the P7a cutover. */
+  analyticsReadModel?: CanonicalAnalyticsReadModel;
 }
 
 export function emptySessionRunState(): SessionRunState {

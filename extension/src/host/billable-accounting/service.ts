@@ -136,6 +136,12 @@ export class BillableAccounting {
   private readonly currentBranchSourcesBySession: Record<string, Set<string> | undefined> = {};
   private readonly currentBranchEntriesBySession: Record<string, Set<string> | undefined> = {};
   private readonly currentBranchLeafBySession: Record<string, string | undefined> = {};
+  /** Canonical-authority live settlements keyed by stable invocation identity,
+   * mirroring the ledger's in-memory projection for the public session-usage
+   * UI. The durable authority is the canonical store (P5 read model); these
+   * process-local rows keep the live projection synchronous and agree with
+   * what the recorder persisted. Dropped on session close/forget. */
+  private readonly canonicalSettlementsBySession = new Map<string, Map<string, BillableInvocationRecord>>();
   private readonly pendingInvocationWrites = new Map<string, BillableInvocationRecord>();
   private pricingCache?: {
     signature: string;
@@ -730,6 +736,7 @@ export class BillableAccounting {
     delete this.pendingRetryBySession[sessionPath];
     delete this.assistantInvocationObservedBySession[sessionPath];
     delete this.lastFailedAssistantSettlementBySession[sessionPath];
+    this.canonicalSettlementsBySession.delete(sessionPath);
   }
 
   /** Close a private session: scrub process-local rows, release the privacy
@@ -750,6 +757,9 @@ export class BillableAccounting {
     delete this.currentBranchSourcesBySession[oldPath];
     delete this.currentBranchEntriesBySession[oldPath];
     delete this.currentBranchLeafBySession[oldPath];
+    const settlements = this.canonicalSettlementsBySession.get(oldPath);
+    if (settlements) this.canonicalSettlementsBySession.set(newPath, settlements);
+    this.canonicalSettlementsBySession.delete(oldPath);
   }
 
   /** Flush queued ledger writes that failed transiently; retained rows keep
@@ -772,11 +782,15 @@ export class BillableAccounting {
     }
   }
 
-  /** Ledger-backed session usage projection for UI and fixture conservation checks. */
+  /** Ledger/canonical-backed session usage projection for UI and fixture
+   *  conservation checks. Canonical mode projects the in-memory settlements
+   *  this host captured; empty means the projection is not answerable
+   *  synchronously (authority `unknown`) and the P5 canonical read model is
+   *  the async authority — legacy JSONL is never substituted. */
   projectSessionUsage(sessionPath: string): SessionUsageSnapshot {
     const currentSources = this.currentBranchSourcesBySession[sessionPath];
     const currentEntries = this.currentBranchEntriesBySession[sessionPath];
-    const records = this.invocationLedger.projectSession({ sessionPath }).records.filter((record) => (
+    const filter = (record: BillableInvocationRecord): boolean => (
       !currentSources
       || (record.kind !== 'conversation' && record.kind !== 'retry'
         && record.kind !== 'subagent' && record.kind !== 'skill_pruning_prepass')
@@ -784,7 +798,15 @@ export class BillableAccounting {
       || (record.branchId !== null && currentEntries?.has(record.branchId) === true)
       || ((record.kind === 'conversation' || record.kind === 'retry') && record.sourceId.startsWith('assistant:')
         && currentEntries?.has(record.sourceId.slice('assistant:'.length)) === true)
-    ));
+    );
+    const canonical = this.canonicalSettlementsBySession.get(sessionPath);
+    if (this.deps.canonicalCapture) {
+      if (!canonical || canonical.size === 0) {
+        return { samples: [], authority: 'unknown' };
+      }
+      return sessionUsageSnapshotFromLedger([...canonical.values()].filter(filter), 'canonical');
+    }
+    const records = this.invocationLedger.projectSession({ sessionPath }).records.filter(filter);
     return sessionUsageSnapshotFromLedger(records);
   }
 
@@ -963,9 +985,20 @@ export class BillableAccounting {
           invocationId: record.invocationId,
           sourceId: record.sourceId,
         });
+      } else if (capture === 'submitted') {
+        // Live consumer path: keep the settled record in the bounded process-local
+        // projection so the synchronous session-usage UI reads the same facts the
+        // recorder persisted. Durable historical queries use the P5 read model.
+        let settlements = this.canonicalSettlementsBySession.get(sessionPath);
+        if (!settlements) {
+          settlements = new Map();
+          this.canonicalSettlementsBySession.set(sessionPath, settlements);
+        }
+        settlements.set(record.invocationId, record);
       }
-      // Canonical mode never falls through to the legacy JSONL ledger. P5 will
-      // move query consumers before P7 is allowed to select this authority.
+      // Canonical mode never falls through to the legacy JSONL ledger. P5
+      // replaces the legacy query consumers before P7 is allowed to select
+      // this authority.
       return { invocationId, appendedDurable: false };
     }
     try {

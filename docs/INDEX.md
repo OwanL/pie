@@ -28,6 +28,7 @@ This folder contains active design contracts, implementation plans, and operatio
 
 ## Operational references
 
+- `skills/query-analytics/SKILL.md` — agent-facing canonical analytics query contract: the normalized `analytics/analytics.sqlite` store, `analytics_provider_usage_v1` view, bounded read-only schema/query/detail/storage commands, int64-as-decimal-string rule, explicit truncation/cancellation/coverage metadata, owning-root scope and timezone/missingness semantics, and the no-legacy-fallback rule (P5; consumer routing stays cutover-gated until P7a).
 - `skills/evaluate-sessions/SKILL.md` — operational reference for evidence-based, blinded agent-session evaluation: criterion-ledger reviews, independent proposals/classification, compact canonical records, batch persistence, and explicit close actions.
 - [COMPUTER-USE.md](COMPUTER-USE.md) — selected dependencies, isolated runtime architecture, tool/coordinate/lifecycle contracts, acceptance evidence, verification commands, and known limitations for the generic Windows `computer` tool and skill.
 - [PLAYWRIGHT.md](PLAYWRIGHT.md) — implemented contract, isolated headless runtime architecture, revision-scoped accessibility refs, artifact/output bounds, lifecycle recovery, acceptance evidence, and known limits for the first-class `playwright` tool and skill.

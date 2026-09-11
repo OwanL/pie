@@ -29,6 +29,10 @@ export interface AnalyticsQueryClientOptions {
   /** Per-query JavaScript heap ceiling; native SQLite values remain separately
    * constrained by recorder query/detail result limits. */
   maxOldSpaceMb?: number;
+  /** Fork exec args for the disposable helper. Defaults to the inherited
+   * process exec args (minus heap-size flags); source-mode tests pass the
+   * local TS loader explicitly so the TS worker entry can run. */
+  execArgv?: readonly string[];
 }
 
 /** One disposable read-only helper per historical query. Cancellation and
@@ -65,7 +69,8 @@ export class AnalyticsQueryClient {
       const maxOldSpaceMb = Math.min(512, configuredHeapMb);
       const child = fork(this.options.workerScript, [], {
         execArgv: [
-          ...process.execArgv.filter((argument) => !argument.startsWith('--max-old-space-size=')),
+          ...(this.options.execArgv
+            ?? process.execArgv.filter((argument) => !argument.startsWith('--max-old-space-size='))),
           `--max-old-space-size=${maxOldSpaceMb}`,
         ],
         stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
