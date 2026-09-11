@@ -487,6 +487,8 @@ export class BackendLiveTurnAccumulator {
           attemptId: this.identity.attemptId,
           finalSeq: seq,
           terminalKind: candidate.terminalKind,
+          durableEntryId: candidate.durableEntryId,
+          occurredAt,
         };
         break;
       }

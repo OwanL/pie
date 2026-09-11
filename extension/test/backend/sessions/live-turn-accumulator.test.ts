@@ -390,6 +390,8 @@ test('backend accumulator ignores duplicate durability-confirmed tool completion
   assert.equal(duplicateTurnTerminal, undefined);
   assert.equal(value.currentSeq, turnSeq, 'duplicate assistant completion does not consume a sequence');
   assert.equal(value.lifecycleWatermark()?.finalSeq, turnSeq);
+  assert.equal(value.lifecycleWatermark()?.durableEntryId, 'assistant-entry');
+  assert.equal(value.lifecycleWatermark()?.occurredAt, 130);
 });
 
 test('backend accumulator rejects progress after a durability-confirmed tool terminal', () => {
@@ -432,6 +434,7 @@ test('backend terminal checkpoint and independently delivered watermark share fi
   assert.equal(checkpoint.terminal?.durableEntryId, 'assistant-entry');
   assert.equal(checkpoint.tools[0]?.terminal?.durableEntryId, 'tool-entry');
   assert.equal(watermark?.finalSeq, terminal.seq);
+  assert.equal(watermark?.occurredAt, 130);
   assert.equal(checkpoint.checkpointSeq, terminal.seq);
 });
 

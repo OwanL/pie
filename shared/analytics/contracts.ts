@@ -158,6 +158,9 @@ export interface AnalyticsExecutionFields {
   turnId?: string;
   requestId?: string;
   messageId?: string;
+  /** Exact persisted transcript entry that proves this execution reached a
+   * durable row. Execution end alone does not imply transcript durability. */
+  durableEntryId?: string;
   parentExecutionId?: string;
   parentToolCallId?: string;
   startedAtMs?: Int64Value | null;
@@ -167,6 +170,23 @@ export interface AnalyticsExecutionFields {
   acceptanceEvidence?: string;
   commitEvidence?: string;
   captureIncomplete?: boolean;
+  /** Recorder-confirmed contiguous producer sequence observed before this
+   * fact was sealed. Absence means no acknowledgement was available. */
+  lastAcknowledgedSequence?: Int64Value | null;
+  /** Producer sequence submitted before this fact was sealed. This is queue
+   * ownership evidence only and must not be interpreted as recorder durable. */
+  lastSubmittedSequence?: Int64Value | null;
+  terminalDetailPayloadId?: string | null;
+  terminalDetailComplete?: boolean;
+  terminalWatermark?: {
+    requestId: string;
+    turnId: string;
+    attemptId: string;
+    finalSequence: Int64Value;
+    terminalKind: 'completed' | 'interrupted' | 'error';
+    durableEntryId: string;
+    occurredAt: number;
+  };
 }
 
 export interface AnalyticsToolFacetFields {
@@ -314,10 +334,12 @@ export interface AnalyticsCopyFields {
   inheritedInvocationIds?: string[];
 }
 
+/** Default heterogeneous payload boundary. Concrete producers may supply a
+ * typed field object without inventing a string index signature. */
 export type AnalyticsFields = Record<string, unknown>;
 
 export interface AnalyticsSink {
-  submit(observation: AnalyticsObservation): void | Promise<void>;
+  submit<Fields extends object>(observation: AnalyticsObservation<Fields>): void | Promise<void>;
 }
 
 /** Independently-owned rich detail handed off by a producer before its

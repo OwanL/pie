@@ -230,6 +230,10 @@ export interface SingleResult {
 	/** Sanitized visible reason for a rejected ownership handoff. Analytics
 	 * failure never changes the attempt's execution outcome. */
 	analyticsCaptureError?: string;
+	/** Bounded producer fact/detail handoff receipt. Submitted means queue
+	 * ownership only; acknowledgement fields are present solely when observed
+	 * from the recorder before the terminal result was sealed. */
+	analyticsCaptureReceipt?: SubagentAnalyticsCaptureReceipt;
 	/** Bounded per-attempt analytics for this subagent dispatch (success + failed retries). */
 	attemptRecords?: SubagentAttemptRecord[];
 	/** One record per observable child provider response. Unlike aggregate usage,
@@ -239,6 +243,9 @@ export interface SingleResult {
 
 export interface SubagentProviderInvocationRecord {
 	invocationId: string;
+	/** Canonical recorder identity minted by the child producer. A parent
+	 * terminal adapter must preserve this value and never hash a replacement. */
+	canonicalInvocationId?: string;
 	attemptId: string;
 	provider?: string;
 	model?: string;
@@ -246,6 +253,18 @@ export interface SubagentProviderInvocationRecord {
 	startedAt: number;
 	completedAt: number;
 	outcome: "success" | "failure" | "aborted";
+}
+
+export interface SubagentAnalyticsCaptureReceipt {
+	factStatus: "disabled" | "submitted" | "rejected";
+	generationId: string;
+	stableOriginId: string;
+	executionId: string;
+	attemptId: string;
+	terminalDetailPayloadId: string;
+	lastSubmittedSequence: number;
+	lastAcknowledgedSequence?: number | string;
+	terminalDetailComplete: boolean;
 }
 
 /** Per-attempt analytics persisted on the final subagent result. */
@@ -282,6 +301,7 @@ export interface SubagentAttemptRecord {
 	/** Cleanup telemetry outcome when known; absence means telemetry unavailable,
 	 * not that this ordinary attempt was orphaned. */
 	cleanupOutcome?: string;
+	analyticsCaptureReceipt?: SubagentAnalyticsCaptureReceipt;
 }
 
 export interface SubagentDetails {

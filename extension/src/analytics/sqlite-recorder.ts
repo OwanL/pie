@@ -306,7 +306,8 @@ export interface AnalyticsStorageReadModel extends AnalyticsQuerySnapshotMetadat
 
 /** Recorder-local opt-in until producer sequencing becomes part of the shared
  * DTO contract. Existing unsequenced AnalyticsObservation values remain valid. */
-export type SequencedAnalyticsObservation = AnalyticsObservation & {
+export type SequencedAnalyticsObservation<Fields extends object = Record<string, unknown>> =
+  AnalyticsObservation<Fields> & {
   sourceSequence?: Int64Value;
 };
 
@@ -331,7 +332,7 @@ function serialize(value: unknown): string {
   return JSON.stringify(value, (_key, child) => typeof child === 'bigint' ? child.toString() : child);
 }
 
-function subjectKey(observation: AnalyticsObservation): string {
+function subjectKey(observation: AnalyticsObservation<object>): string {
   switch (observation.captureSubject.kind) {
     case 'session': return observation.captureSubject.rootSessionId;
     case 'pendingCreate': return observation.captureSubject.operationId;
@@ -1023,14 +1024,14 @@ function backfillV3NormalizedUsage(database: SqliteDatabase): void {
   }
 }
 
-function sourceSequence(observation: AnalyticsObservation): bigint | null {
-  const value = (observation as AnalyticsObservation & { sourceSequence?: unknown }).sourceSequence;
+function sourceSequence(observation: AnalyticsObservation<object>): bigint | null {
+  const value = (observation as AnalyticsObservation<object> & { sourceSequence?: unknown }).sourceSequence;
   return value === undefined || value === null
     ? null
     : parseNonNegativeInt64(value, 'sourceSequence');
 }
 
-function producerIdentity(observation: AnalyticsObservation): string {
+function producerIdentity(observation: AnalyticsObservation<object>): string {
   const stableOriginId = observation.stableOriginId?.trim();
   if (stableOriginId) {
     return JSON.stringify([observation.generationId, observation.producerKind, stableOriginId]);
@@ -1061,7 +1062,7 @@ function reconciliationGaps(sequences: readonly bigint[], contiguous: bigint): A
  * so reconciliation storage never grows with normal history. */
 function recordSourceSequence(
   database: SqliteDatabase,
-  observation: AnalyticsObservation,
+  observation: AnalyticsObservation<object>,
   registryKey: string,
   fingerprint: string,
   replay: boolean,
@@ -1273,7 +1274,7 @@ function updateProviderAccountingProjection(
 
 function applyProviderSettlement(
   database: SqliteDatabase,
-  observation: AnalyticsObservation,
+  observation: AnalyticsObservation<object>,
   registryKey: string,
   fingerprint: string,
 ): boolean {
@@ -1387,7 +1388,7 @@ function optionalNonNegativeFloat(value: unknown): number | null {
 
 function applyTypedObservation(
   database: SqliteDatabase,
-  observation: AnalyticsObservation,
+  observation: AnalyticsObservation<object>,
   registryKey: string,
 ): boolean {
   const fields = observation.fields as Record<string, unknown>;
@@ -1645,11 +1646,11 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
     }
   }
 
-  submit(observation: SequencedAnalyticsObservation): void {
+  submit<Fields extends object>(observation: SequencedAnalyticsObservation<Fields>): void {
     this.submitBatch([observation]);
   }
 
-  submitBatch(observations: readonly SequencedAnalyticsObservation[]): void {
+  submitBatch<Fields extends object>(observations: readonly SequencedAnalyticsObservation<Fields>[]): void {
     this.assertWritable();
     if (observations.length === 0) return;
     for (const observation of observations) assertValidAnalyticsObservation(observation);
@@ -1796,7 +1797,9 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
     }
   }
 
-  private insertObservation(observation: SequencedAnalyticsObservation): 'accepted' | 'duplicate' | 'deleted' {
+  private insertObservation<Fields extends object>(
+    observation: SequencedAnalyticsObservation<Fields>,
+  ): 'accepted' | 'duplicate' | 'deleted' {
     const registryKey = analyticsObservationRegistryKey(observation);
     const fingerprint = analyticsObservationFingerprint(observation);
     const existing = this.database.prepare(

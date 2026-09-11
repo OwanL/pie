@@ -14,6 +14,7 @@ import { StatsService } from '../../../src/host/stats-service';
 import { workspaceHash } from '../../../src/host/stats-service/helpers';
 import { createInitialArchState, type ArchState } from '../../../src/host/core/arch-state';
 import { CanonicalAnalyticsCapture } from '../../../src/analytics/canonical-capture.js';
+import type { AnalyticsObservation } from '../../../../shared/analytics/contracts.js';
 
 async function withTempDir(run: (dir: string) => Promise<void>): Promise<void> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-stats-lifecycle-'));
@@ -103,6 +104,46 @@ async function pumpMacrotasks(ticks = 25): Promise<void> {
   }
   await new Promise<void>((resolve) => setTimeout(resolve, 25));
 }
+
+test('durable terminal evidence replays with an immutable canonical fingerprint', async () => {
+  await withTempDir(async (tempDir) => {
+    const state = createInitialArchState();
+    const observations: AnalyticsObservation<object>[] = [];
+    const capture = new CanonicalAnalyticsCapture({
+      authority: 'canonical',
+      generationId: 'generation-terminal-replay',
+      workspaceId: 'workspace-terminal-replay',
+      buildId: 'build-terminal-replay',
+      processGeneration: 'process-terminal-replay',
+      sink: { submit: (observation) => { observations.push(observation); } },
+      detailSink: { submitDetail: () => undefined },
+      lifecycleSink: {
+        bindPendingCreate: async () => undefined,
+        deleteSession: async () => undefined,
+      },
+    });
+    const stats = new StatsService({
+      ...optionsFor(path.join(tempDir, 'analytics'), tempDir, state, { renders: 0 }),
+      analyticsCapture: capture,
+    });
+    const watermark = {
+      sessionPath: '/sessions/durable-replay.jsonl',
+      requestId: 'request-replay',
+      turnId: 'turn-replay',
+      attemptId: 'attempt-replay',
+      finalSeq: 7,
+      terminalKind: 'completed' as const,
+      durableEntryId: 'assistant-entry-replay',
+      occurredAt: 1_800_000_000_007,
+    };
+
+    stats.onAssistantTerminalWatermark(watermark);
+    stats.onAssistantTerminalWatermark(watermark);
+
+    assert.equal(observations.length, 2);
+    assert.deepEqual(observations[1], observations[0]);
+  });
+});
 
 test('host replacement retains the exact pending-create origin through bind and private close', async () => {
   await withTempDir(async (tempDir) => {

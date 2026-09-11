@@ -145,10 +145,24 @@ export interface SubagentBillingAttempt {
   outcome?: 'success' | 'failure' | 'aborted';
   startedAt?: number;
   completedAt?: number;
+  analyticsCaptureReceipt?: SubagentBillingCaptureReceipt;
 }
 
 export interface SubagentBillingInvocation extends SubagentBillingAttempt {
   invocationId: string;
+  canonicalInvocationId?: string;
+}
+
+export interface SubagentBillingCaptureReceipt {
+  factStatus: 'disabled' | 'submitted' | 'rejected';
+  generationId: string;
+  stableOriginId: string;
+  executionId: string;
+  attemptId: string;
+  terminalDetailPayloadId: string;
+  lastSubmittedSequence: number;
+  lastAcknowledgedSequence?: number | string;
+  terminalDetailComplete: boolean;
 }
 
 export interface SubagentBillingEntry {
@@ -397,6 +411,10 @@ export interface LiveLifecycleWatermark {
   attemptId: string;
   finalSeq: number;
   terminalKind: 'completed' | 'interrupted' | 'error';
+  /** Exact transcript row that made the terminal lifecycle durable. */
+  durableEntryId: string;
+  /** Producer event time, retained so redelivery preserves the fact fingerprint. */
+  occurredAt: number;
 }
 
 export interface TranscriptView {
@@ -472,7 +490,9 @@ export function isLiveLifecycleWatermark(value: unknown): value is LiveLifecycle
     && typeof value.turnId === 'string'
     && typeof value.attemptId === 'string'
     && Number.isSafeInteger(value.finalSeq) && (value.finalSeq as number) >= 1
-    && ['completed', 'interrupted', 'error'].includes(String(value.terminalKind));
+    && ['completed', 'interrupted', 'error'].includes(String(value.terminalKind))
+    && typeof value.durableEntryId === 'string' && value.durableEntryId.length > 0
+    && typeof value.occurredAt === 'number' && Number.isFinite(value.occurredAt) && value.occurredAt >= 0;
 }
 
 function isToolProgressUpdate(value: unknown): boolean {

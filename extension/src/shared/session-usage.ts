@@ -6,6 +6,7 @@ import type {
   BillableInvocationOutcome,
   BillableInvocationProvenance,
 } from './billable-invocation';
+import type { SubagentBillingCaptureReceipt } from './live-pipeline-protocol';
 
 export type SessionUsageKind =
   | 'assistant'
@@ -57,6 +58,12 @@ export interface SessionUsageSample {
   parentToolId?: string;
   /** Raw durable provider-response sources represented by a folded migration row. */
   constituentSourceIds?: string[];
+  /** Producer-owned canonical provider identity. The host may project or
+   * reconcile it, but must not mint a replacement. */
+  canonicalInvocationId?: string;
+  producerCaptureReceipt?: SubagentBillingCaptureReceipt;
+  producerAttemptId?: string;
+  producerEvidenceKind?: 'providerInvocation' | 'attemptGap' | 'omittedGap' | 'aggregate';
 }
 
 /** Complete ledger projection for a session branch. */
@@ -441,6 +448,12 @@ function sampleFromBillingUsage(
   outcome: SessionUsageSample['outcome'],
   startedAt?: number,
   completedAt?: number,
+  producer?: {
+    canonicalInvocationId?: string;
+    captureReceipt?: SubagentBillingCaptureReceipt;
+    attemptId?: string;
+    evidenceKind: NonNullable<SessionUsageSample['producerEvidenceKind']>;
+  },
 ): SessionUsageSample {
   const channelsKnown = usage !== undefined;
   return {
@@ -467,6 +480,10 @@ function sampleFromBillingUsage(
     outcome,
     ...(startedAt !== undefined ? { startedAt: new Date(startedAt).toISOString() } : {}),
     ...(completedAt !== undefined ? { endedAt: new Date(completedAt).toISOString() } : {}),
+    ...(producer?.canonicalInvocationId ? { canonicalInvocationId: producer.canonicalInvocationId } : {}),
+    ...(producer?.captureReceipt ? { producerCaptureReceipt: producer.captureReceipt } : {}),
+    ...(producer?.attemptId ? { producerAttemptId: producer.attemptId } : {}),
+    ...(producer ? { producerEvidenceKind: producer.evidenceKind } : {}),
   };
 }
 
@@ -482,6 +499,9 @@ export function buildSubagentUsageSamples(toolCall: Pick<ToolCall, 'id' | 'resul
       const representedAttempts = new Set<string>();
       for (const invocation of entry.invocations ?? []) {
         representedAttempts.add(invocation.attemptId);
+        const captureReceipt = entry.attempts?.find(
+          (attempt) => attempt.attemptId === invocation.attemptId,
+        )?.analyticsCaptureReceipt;
         samples.push(sampleFromBillingUsage(
           `${groupId}:invocation:${invocation.invocationId}`,
           groupId,
@@ -491,9 +511,20 @@ export function buildSubagentUsageSamples(toolCall: Pick<ToolCall, 'id' | 'resul
           invocation.outcome === 'failure' ? 'failed' : invocation.outcome === 'aborted' ? 'cancelled' : 'succeeded',
           invocation.startedAt,
           invocation.completedAt,
+          {
+            canonicalInvocationId: invocation.canonicalInvocationId ?? invocation.invocationId,
+            captureReceipt,
+            attemptId: invocation.attemptId,
+            evidenceKind: 'providerInvocation',
+          },
         ));
       }
       for (let omittedIndex = 0; omittedIndex < (entry.omittedInvocationCount ?? 0); omittedIndex += 1) {
+        const captureReceipt = entry.attempts?.find(
+          (attempt) => attempt.analyticsCaptureReceipt?.factStatus !== 'disabled',
+        )?.analyticsCaptureReceipt ?? entry.attempts?.find(
+          (attempt) => attempt.analyticsCaptureReceipt?.factStatus === 'disabled',
+        )?.analyticsCaptureReceipt;
         samples.push(sampleFromBillingUsage(
           `${groupId}:invocation:omitted:${omittedIndex}`,
           groupId,
@@ -503,6 +534,10 @@ export function buildSubagentUsageSamples(toolCall: Pick<ToolCall, 'id' | 'resul
           'unknown',
           undefined,
           entry.occurredAt,
+          {
+            captureReceipt,
+            evidenceKind: 'omittedGap',
+          },
         ));
       }
       for (const attempt of entry.attempts ?? []) {
@@ -516,6 +551,11 @@ export function buildSubagentUsageSamples(toolCall: Pick<ToolCall, 'id' | 'resul
           attempt.outcome === 'failure' ? 'failed' : attempt.outcome === 'aborted' ? 'cancelled' : 'succeeded',
           attempt.startedAt,
           attempt.completedAt,
+          {
+            captureReceipt: attempt.analyticsCaptureReceipt,
+            attemptId: attempt.attemptId,
+            evidenceKind: 'attemptGap',
+          },
         );
         if (sample.reportedCostUsd === undefined && entry.usage?.cost !== undefined) sample.reportedCostUsd = 0;
         samples.push(sample);
@@ -534,6 +574,7 @@ export function buildSubagentUsageSamples(toolCall: Pick<ToolCall, 'id' | 'resul
           toolCall.status === 'failed' ? 'failed' : 'succeeded',
           undefined,
           entry.occurredAt,
+          { evidenceKind: 'aggregate' },
         ));
       }
     }

@@ -269,5 +269,8 @@ export function buildAttemptRecord(result: SingleResult, backoffMs?: number): Su
 		...(phaseDurationsMs ? { phaseDurationsMs } : {}),
 		attemptSettlementOutcome: result.stopReason ?? result.activityPhase,
 		cleanupOutcome: undefined,
+		...(result.analyticsCaptureReceipt
+			? { analyticsCaptureReceipt: { ...result.analyticsCaptureReceipt } }
+			: {}),
 	};
 }

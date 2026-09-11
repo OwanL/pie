@@ -50,7 +50,7 @@ export interface CanonicalAnalyticsCaptureOptions {
   sink?: AnalyticsSink;
   detailSink?: AnalyticsDetailSink;
   lifecycleSink?: CanonicalAnalyticsLifecycleSink;
-  onCaptureError?: (error: Error, observation: AnalyticsObservation) => void;
+  onCaptureError?: (error: Error, observation: AnalyticsObservation<object>) => void;
   onDetailCaptureError?: (error: Error, payloadId: string) => void;
 }
 
@@ -385,14 +385,13 @@ export class CanonicalAnalyticsCapture {
       idempotencyKey: deriveAnalyticsIdempotencyKey(base),
     };
     try {
-      const sinkObservation = observation as unknown as AnalyticsObservation;
-      const submitted = this.options.sink!.submit(sinkObservation);
-      if (submitted && typeof (submitted as Promise<void>).catch === 'function') {
-        void (submitted as Promise<void>).catch((error: unknown) => this.report(error, sinkObservation));
+      const submitted = this.options.sink!.submit(observation);
+      if (submitted) {
+        void submitted.catch((error: unknown) => this.report(error, observation));
       }
       return 'submitted';
     } catch (error) {
-      this.report(error, observation as unknown as AnalyticsObservation);
+      this.report(error, observation);
       return 'rejected';
     }
   }
@@ -418,7 +417,7 @@ export class CanonicalAnalyticsCapture {
     return assigned;
   }
 
-  private report(error: unknown, observation: AnalyticsObservation): void {
+  private report(error: unknown, observation: AnalyticsObservation<object>): void {
     this.options.onCaptureError?.(
       error instanceof Error ? error : new Error(String(error)),
       observation,

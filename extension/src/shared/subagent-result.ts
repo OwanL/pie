@@ -428,6 +428,9 @@ function billingAttempt(value: unknown, index: number): SubagentBillingAttempt |
       ? { outcome: value.outcome } : {}),
     ...(finiteNonNegative(value.startedAt) !== null ? { startedAt: finiteNonNegative(value.startedAt)! } : {}),
     ...(finiteNonNegative(value.completedAt) !== null ? { completedAt: finiteNonNegative(value.completedAt)! } : {}),
+    ...(billingCaptureReceipt(value.analyticsCaptureReceipt)
+      ? { analyticsCaptureReceipt: billingCaptureReceipt(value.analyticsCaptureReceipt) }
+      : {}),
   };
 }
 
@@ -437,7 +440,46 @@ function billingInvocation(value: unknown, index: number): SubagentBillingInvoca
   if (!attempt) return undefined;
   const invocationId = typeof value.invocationId === 'string' && value.invocationId.trim()
     ? value.invocationId.trim() : `${attempt.attemptId}:provider:${index}`;
-  return { ...attempt, invocationId };
+  return {
+    ...attempt,
+    invocationId,
+    ...(typeof value.canonicalInvocationId === 'string' && value.canonicalInvocationId.trim()
+      ? { canonicalInvocationId: value.canonicalInvocationId.trim() }
+      : {}),
+  };
+}
+
+function billingCaptureReceipt(value: unknown): SubagentBillingAttempt['analyticsCaptureReceipt'] {
+  if (!isRecord(value)
+    || (value.factStatus !== 'disabled' && value.factStatus !== 'submitted' && value.factStatus !== 'rejected')
+    || typeof value.generationId !== 'string' || !value.generationId
+    || typeof value.stableOriginId !== 'string' || !value.stableOriginId
+    || typeof value.executionId !== 'string' || !value.executionId
+    || typeof value.attemptId !== 'string' || !value.attemptId
+    || typeof value.terminalDetailPayloadId !== 'string' || !value.terminalDetailPayloadId
+    || !Number.isSafeInteger(value.lastSubmittedSequence) || (value.lastSubmittedSequence as number) < 0
+    || typeof value.terminalDetailComplete !== 'boolean'
+    || (value.lastAcknowledgedSequence !== undefined
+      && !(typeof value.lastAcknowledgedSequence === 'number'
+        && Number.isSafeInteger(value.lastAcknowledgedSequence)
+        && value.lastAcknowledgedSequence >= 0)
+      && !(typeof value.lastAcknowledgedSequence === 'string'
+        && /^(0|[1-9]\d*)$/.test(value.lastAcknowledgedSequence)))) {
+    return undefined;
+  }
+  return {
+    factStatus: value.factStatus,
+    generationId: value.generationId,
+    stableOriginId: value.stableOriginId,
+    executionId: value.executionId,
+    attemptId: value.attemptId,
+    terminalDetailPayloadId: value.terminalDetailPayloadId,
+    lastSubmittedSequence: value.lastSubmittedSequence as number,
+    ...(value.lastAcknowledgedSequence === undefined
+      ? {}
+      : { lastAcknowledgedSequence: value.lastAcknowledgedSequence as number | string }),
+    terminalDetailComplete: value.terminalDetailComplete,
+  };
 }
 
 function billingOccurredAt(result: Record<string, unknown>): number | undefined {

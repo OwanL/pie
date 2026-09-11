@@ -106,6 +106,14 @@ export interface BillableAccountingDeps {
    * Omitted for the legacy authority and historical tests. */
   canonicalCapture?: {
     captureProviderSettlement(record: BillableInvocationRecord): 'disabled' | 'submitted' | 'rejected';
+    captureExecution(
+      context: { sessionId: string | null; sessionPath: string; runId?: string | null; operationId?: string | null },
+      executionId: string,
+      phase: 'begin' | 'phase' | 'end' | 'transcriptEvidence',
+      sourceKey: string,
+      observedAtMs: number,
+      fields: import('../../../../shared/analytics/contracts.js').AnalyticsExecutionFields,
+    ): 'disabled' | 'submitted' | 'rejected';
   };
 }
 
@@ -124,6 +132,10 @@ interface AppendUsageOptions {
   /** Historical migration batches derived activity writes to avoid one
    * synchronous read-modify-write of the full timeline per ledger row. */
   deferredActivity?: ActivityIntervalRecord[];
+  canonicalProjectionOnly?: boolean;
+  /** Canonical replay cannot use receipt time as a fallback for a stable
+   * producer source. Missing producer time remains the deterministic epoch. */
+  stableMissingTime?: boolean;
 }
 
 export class BillableAccounting {
@@ -486,8 +498,88 @@ export class BillableAccounting {
    *  `subagent` ledger rows before terminal transport compaction loses them. */
   observeSubagentToolResult(sessionPath: string, toolCall: ToolCall): void {
     if (typeof toolCall.name === 'string' && toolCall.name.trim().toLowerCase() === 'subagent') {
+      const reconciledCaptureGaps = new Set<string>();
       for (const sample of buildSubagentUsageSamples(toolCall)) {
-        this.appendUsageSample(sessionPath, sample, { kind: 'subagent', toolId: toolCall.id });
+        const receipt = sample.producerCaptureReceipt;
+        if (this.deps.canonicalCapture && !receipt) {
+          const evidenceIdentity = sample.producerAttemptId ?? sample.sourceId;
+          const executionId = `subagent-reconciliation:${toolCall.id}:${evidenceIdentity}`;
+          if (!reconciledCaptureGaps.has(executionId)) {
+            reconciledCaptureGaps.add(executionId);
+            const identity = this.deps.sessionIdentity(sessionPath);
+            this.deps.canonicalCapture.captureExecution(
+              {
+                sessionId: identity.sessionId,
+                sessionPath,
+                runId: this.deps.currentRunId(sessionPath),
+                operationId: this.deps.activeOperationId(sessionPath),
+              },
+              executionId,
+              'phase',
+              `${executionId}:capture-gap`,
+              stableEvidenceTime(sample.endedAt),
+              {
+                ...(sample.producerAttemptId ? { attemptId: sample.producerAttemptId } : {}),
+                parentToolCallId: toolCall.id,
+                operationKind: 'subagent-attempt',
+                source: 'host-terminal-reconciliation',
+                captureIncomplete: true,
+                reason: 'The child terminal result had no valid fact ownership receipt; parent aggregates are reconciliation only.',
+              },
+            );
+          }
+          continue;
+        }
+        if (this.deps.canonicalCapture && receipt?.factStatus === 'rejected') {
+          if (!reconciledCaptureGaps.has(receipt.executionId)) {
+            reconciledCaptureGaps.add(receipt.executionId);
+            const identity = this.deps.sessionIdentity(sessionPath);
+            this.deps.canonicalCapture.captureExecution(
+              {
+                sessionId: identity.sessionId,
+                sessionPath,
+                runId: this.deps.currentRunId(sessionPath),
+                operationId: this.deps.activeOperationId(sessionPath),
+              },
+              receipt.executionId,
+              'phase',
+              `subagent-reconciliation:${receipt.stableOriginId}:capture-gap`,
+              stableEvidenceTime(sample.endedAt),
+              {
+                attemptId: receipt.attemptId,
+                parentToolCallId: toolCall.id,
+                operationKind: 'subagent-attempt',
+                source: 'host-terminal-reconciliation',
+                captureIncomplete: true,
+                reason: 'The child fact ownership handoff was rejected; terminal aggregates are reconciliation only.',
+                lastSubmittedSequence: receipt.lastSubmittedSequence,
+                lastAcknowledgedSequence: receipt.lastAcknowledgedSequence ?? null,
+                terminalDetailPayloadId: receipt.terminalDetailPayloadId,
+                terminalDetailComplete: receipt.terminalDetailComplete,
+              },
+            );
+          }
+          continue;
+        }
+        if (this.deps.canonicalCapture && receipt?.factStatus === 'submitted') {
+          // Only a real producer invocation may enter the live projection.
+          // Attempt, omitted and inclusive aggregate rows remain reconciliation
+          // evidence and add no synthetic provider settlement.
+          if (sample.producerEvidenceKind === 'providerInvocation') {
+            this.appendUsageSample(sessionPath, sample, {
+              kind: 'subagent',
+              toolId: toolCall.id,
+              canonicalProjectionOnly: true,
+              stableMissingTime: true,
+            });
+          }
+          continue;
+        }
+        this.appendUsageSample(sessionPath, sample, {
+          kind: 'subagent',
+          toolId: toolCall.id,
+          stableMissingTime: !!this.deps.canonicalCapture,
+        });
       }
     }
   }
@@ -905,7 +997,9 @@ export class BillableAccounting {
     const identity = this.deps.sessionIdentity(sessionPath);
     const stableSessionId = options.sessionId ?? identity.sessionId;
     const kind = options.kind ?? ledgerKind(sample.kind);
-    const invocationId = stableInvocationId(stableSessionId ?? sessionPath, kind, sample.sourceId);
+    const invocationId = this.deps.canonicalCapture && sample.canonicalInvocationId
+      ? sample.canonicalInvocationId
+      : stableInvocationId(stableSessionId ?? sessionPath, kind, sample.sourceId);
     const existing = this.deps.canonicalCapture ? undefined : (
       options.existingRecords?.get(invocationId)
       ?? this.invocationLedger.projectAll().records.find((record) => record.invocationId === invocationId)
@@ -919,7 +1013,7 @@ export class BillableAccounting {
     const normalizedTimes = normalizeInvocationTimes(
       sample.startedAt,
       sample.endedAt,
-      this.deps.now(),
+      options.stableMissingTime ? new Date(0) : this.deps.now(),
       sample.sourceId,
     );
     const { startedAt, endedAt } = normalizedTimes;
@@ -979,7 +1073,9 @@ export class BillableAccounting {
       ...costEvidence,
     };
     if (this.deps.canonicalCapture) {
-      const capture = this.deps.canonicalCapture.captureProviderSettlement(record);
+      const capture = options.canonicalProjectionOnly
+        ? 'submitted'
+        : this.deps.canonicalCapture.captureProviderSettlement(record);
       if (capture === 'rejected') {
         appendPieLog('warn', 'canonical-analytics', 'provider settlement capture rejected', {
           invocationId: record.invocationId,
@@ -1059,6 +1155,11 @@ export class BillableAccounting {
 function validIso(value: string | undefined): string | undefined {
   if (!value || !Number.isFinite(Date.parse(value))) return undefined;
   return new Date(Date.parse(value)).toISOString();
+}
+
+function stableEvidenceTime(value: string | undefined): number {
+  const parsed = value ? Date.parse(value) : Number.NaN;
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.trunc(parsed) : 0;
 }
 
 function normalizeInvocationTimes(

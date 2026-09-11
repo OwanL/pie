@@ -71,7 +71,7 @@ interface PendingRequest {
 interface SerializedCaptureEnvelope {
   kind: 'observation' | 'detail';
   subject: string;
-  value: AnalyticsObservation | AnalyticsDetailCapture;
+  value: AnalyticsObservation<object> | AnalyticsDetailCapture;
 }
 
 interface CaptureQueueItem {
@@ -284,7 +284,7 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
     }
   }
 
-  submit(observation: AnalyticsObservation): void {
+  submit<Fields extends object>(observation: AnalyticsObservation<Fields>): void {
     if (!this.options.enabled) return;
     this.enqueueCapture('observation', this.subjectKey(observation.captureSubject), observation);
   }
@@ -389,7 +389,7 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
   private enqueueCapture(
     kind: SerializedCaptureEnvelope['kind'],
     subject: string,
-    value: AnalyticsObservation | AnalyticsDetailCapture,
+    value: AnalyticsObservation<object> | AnalyticsDetailCapture,
   ): void {
     if (!this.accepting) throw this.failure ?? new Error('Analytics recorder worker is not accepting capture.');
     const startedAt = performance.now();

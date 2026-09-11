@@ -6,6 +6,7 @@ import type {
   ThinkingLevel,
   ToolCall,
 } from '../../shared/protocol';
+import type { LiveLifecycleWatermark } from '../../shared/live-pipeline-protocol.js';
 import type { CanonicalAnalyticsCapture } from '../../analytics/canonical-capture.js';
 import type { CanonicalAnalyticsReadModel } from '../../analytics/query-entry.js';
 import type { ArchState } from '../core/arch-state';
@@ -55,8 +56,10 @@ export interface RunObserver {
       provider?: string;
       occurredAt?: string;
       operationId?: string;
+      durableEntryId?: string;
     },
   ): void;
+  onAssistantTerminalWatermark?(watermark: LiveLifecycleWatermark): void;
   /** Transcript-derived usage is migration/rebuild input only. */
   onSessionUsageSnapshot(
     sessionPath: string,
@@ -109,6 +112,7 @@ export const NOOP_RUN_OBSERVER: RunObserver = {
   onAssistantTurnStarted: () => undefined,
   onSkillPruningUsage: () => undefined,
   onAssistantTurnEnded: () => undefined,
+  onAssistantTerminalWatermark: () => undefined,
   onSessionUsageSnapshot: () => undefined,
   onToolStarted: () => undefined,
   onToolFinished: () => undefined,

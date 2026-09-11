@@ -455,7 +455,7 @@ test('sequence gaps request a checkpoint and a terminal checkpoint repairs misse
     ok: true,
     occurredAt: 160,
     status: 'terminal_grace',
-    watermark: { ...base, finalSeq: 4, terminalKind: 'completed' },
+    watermark: { ...base, finalSeq: 4, terminalKind: 'completed', durableEntryId: 'entry', occurredAt: 150 },
     checkpoint: {
       protocolVersion: 7,
       sessionPath: base.sessionPath,

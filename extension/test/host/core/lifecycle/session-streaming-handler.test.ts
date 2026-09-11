@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { onMessageAborted, onCompaction, onCompactionStarted } from '../../../../src/host/session-service/handlers/streaming';
+import { onMessageAborted, onCompaction, onCompactionStarted, onMessageFinished } from '../../../../src/host/session-service/handlers/streaming';
 import { createInitialArchState, type ArchState } from '../../../../src/host/core/arch-state';
 import { NOOP_RUN_OBSERVER } from '../../../../src/host/stats-service';
 import type { Event } from '../../../../src/host/core/events';
@@ -36,12 +36,44 @@ function createDeps(initialState?: ArchState) {
         touchSessionTranscript: (sessionPath: string) => {
           touched.push(sessionPath);
         },
+        unbindRequestSessionPath: () => undefined,
       } as any,
       scheduleRender: () => undefined,
       requireEventSessionPath: (_eventName: string, sessionPath: string | undefined) => sessionPath ?? null,
     },
   };
 }
+
+test('onMessageFinished forwards exact durable transcript identity to accounting', () => {
+  const { deps } = createDeps();
+  let billing: { durableEntryId?: string } | undefined;
+  const observer = {
+    ...NOOP_RUN_OBSERVER,
+    onAssistantTurnEnded: (
+      _sessionPath: string,
+      _turnId: string,
+      _durationMs: number,
+      _usage: unknown,
+      _status: unknown,
+      _latency: unknown,
+      value: { durableEntryId?: string },
+    ) => { billing = value; },
+  };
+  onMessageFinished({
+    requestId: 'request-durable',
+    sessionPath: '/session-durable',
+    message: {
+      id: 'assistant-durable',
+      role: 'assistant',
+      content: [],
+      createdAt: '2027-01-15T08:00:00.000Z',
+      status: 'completed',
+      durableEntryId: 'entry-durable-1',
+    },
+  } as any, { ...deps, runObserver: observer } as any);
+
+  assert.equal(billing?.durableEntryId, 'entry-durable-1');
+});
 
 test('onMessageAborted shows a notice for unexpected interruptions and sanitizes the reason', () => {
   const { deps, dispatched, touched } = createDeps();

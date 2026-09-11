@@ -1411,3 +1411,56 @@ integration, a finite all-host cutoff controller with inventory/ordinary close-a
 receipts, plus standalone journaled handoff with parent-loss/restart attestation and a durable morning
 report. Cooperative locks do not fence old hosts, so the no-stale-review-writer activation gate remains
 mandatory.
+
+### Checkpoint 16: pushed retirement milestone and P4 terminal evidence candidate
+
+The recovered SDK regression, P5 correctness repair and bounded P6 review/dashboard retirement were
+committed separately and pushed. Repository `HEAD`, `origin/master` and a live remote-head query all
+matched `119e648cb18ab7b4625a87834f625e9821118ee6` after the push. The checkout then contained only the
+four preserved user-owned model/settings changes. This P6 result removes review/dashboard surfaces;
+it does not yet remove the retained legacy analytics authority, compatibility readers or writers that
+must remain until their P4/P7 replacement is ready.
+
+The first P4 unit is now source-complete and independently accepted. It carries exact persisted
+assistant entry IDs and terminal lifecycle watermarks from backend to host capture. Child producers
+mint stable attempt and provider-invocation identities, detach complete nested terminal detail, and
+publish ordered facts without waiting for recorder acknowledgement. Terminal receipts distinguish
+`submitted`, `disabled` and `rejected`; acknowledgement and detail-completeness fields describe only
+what was observed before the terminal packet was sealed. Exact replay preserves the sealed fact
+fingerprint. Later recorder acknowledgement advances recorder coverage rather than rewriting the
+terminal packet.
+
+Canonical parent reconciliation now projects already-submitted child provider facts without writing a
+second settlement. Only an explicitly `disabled` producer item may use the parent fallback. Rejected,
+missing and malformed receipts create stable incomplete-evidence observations for the existing
+attempt/source and never synthesize zero usage or a provider charge. Provider retry/failover and nested
+invocation IDs survive the bounded terminal parser. Durable transcript evidence attaches separately
+from execution end, so terminal execution alone never claims transcript durability. Every new stable
+source key uses producer time or a deterministic epoch when producer time is absent; delayed replay
+therefore remains byte-identical instead of conflicting with a later host clock.
+
+The accepted focused run covered 78 extension tests and 20 subagent tests. Its real disposable path
+used the subagent producer adapter, detached a unique result larger than 1 MiB, submitted through the
+SQLite recorder and queried the canonical read model. The oracle retained root `.01`, failed child
+`.02`, failover `.03` and nested `.04` as four distinct invocations totaling `.10`; the parent's live
+child projection contained only `.02 + .03 + .04`, while terminal and producer redelivery added no
+charge. It also proved gap ordering `1,3,2`, atomic conflict rejection, abort partial usage,
+no-response incomplete evidence, mixed per-item routing, required terminal durable identity and
+immutable delayed gap/watermark facts. No shared SDK/package/configuration/cache root was loaded or
+mutated by that fixture.
+
+This unit remains inactive. P7 must inject the real production fact/detail sinks and acknowledgement
+readers into subagent execution, wire raw parent tool IDs to `CanonicalAnalyticsCapture`'s scoped tool
+entity, and instrument the pre-dispatch/provider boundary before activation. Remaining P4 units own
+incremental SDK entry-parent/selection capture, branch and duplicate-session persistence/projection,
+then bounded cross-host revision refresh. They must preserve distinct original invocation IDs, count
+inherited copy work only by reference, and avoid transcript-history rescans.
+
+The disjoint P2c source candidate is frozen after shared managed-package/path work, but is not yet
+accepted. Its focused source checks and a normal-shell doctor plus the exact isolated Pi
+install/reinstall proof remain pending independent containment review. P0 remains unqualified with the
+previously recorded missing matrix and failed responsiveness proxy. P7a/P7b remain closed with the
+previously recorded recorder lifecycle, activation manifest, all-host cutoff, restart/restore,
+journaled handoff and no-stale-review-writer obligations. No runtime or renderer publication,
+activation, cutover, restart, session closure, helper arming, cache switch or real data mutation has
+occurred. The four user-owned model/settings files and `stash@{0}` remain preserved and excluded.

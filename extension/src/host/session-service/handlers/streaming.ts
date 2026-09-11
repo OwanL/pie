@@ -203,6 +203,7 @@ export function onMessageFinished(
       provider: message.provider,
       occurredAt: message.createdAt,
       operationId: payload.operationId,
+      durableEntryId: message.durableEntryId,
     },
   );
   deps.state.unbindRequestSessionPath(payload.requestId);

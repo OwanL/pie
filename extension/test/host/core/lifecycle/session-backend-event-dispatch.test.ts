@@ -62,6 +62,30 @@ test('dispatchSessionBackendEvent validates sequenced live envelopes', () => {
   assert.deepEqual(calls, [{ name: 'live.semantic', payload }]);
 });
 
+test('dispatchSessionBackendEvent requires durable transcript identity on terminal lifecycle watermarks', () => {
+  const { handlers, calls } = createHandlers();
+  const payload = {
+    sessionPath: '/workspace/session.jsonl',
+    requestId: 'request',
+    turnId: 'turn',
+    attemptId: 'attempt',
+    finalSeq: 7,
+    terminalKind: 'completed',
+    durableEntryId: 'assistant-entry-7',
+    occurredAt: 1_800_000_000_007,
+  };
+  dispatchSessionBackendEvent({ event: 'live.lifecycle', payload }, handlers);
+  dispatchSessionBackendEvent({
+    event: 'live.lifecycle',
+    payload: { ...payload, durableEntryId: undefined },
+  }, handlers);
+  dispatchSessionBackendEvent({
+    event: 'live.lifecycle',
+    payload: { ...payload, occurredAt: undefined },
+  }, handlers);
+  assert.deepEqual(calls, [{ name: 'live.lifecycle', payload }]);
+});
+
 test('dispatchSessionBackendEvent routes authoritative agent settlement capabilities', () => {
   const { handlers, calls } = createHandlers();
   const payload = {

@@ -16,7 +16,7 @@ function tempRoot(): string {
 }
 
 test('canonical provider adapter preserves exact accounting fields and assigns contiguous producer sequence', () => {
-  const observations: AnalyticsObservation[] = [];
+  const observations: AnalyticsObservation<object>[] = [];
   const capture = new CanonicalAnalyticsCapture({
     authority: 'canonical',
     generationId: 'generation-canonical',
@@ -98,13 +98,18 @@ test('canonical provider adapter preserves exact accounting fields and assigns c
     toolCallId: undefined,
   });
   assert.match(observations[0]!.stableOriginId!, /^host-origin:[0-9a-f]{64}$/);
-  assert.equal(observations[0]!.fields.reportedCostUsd, 0, 'reported zero is retained as exact evidence');
-  assert.equal(observations[0]!.fields.reportedModel, undefined, 'an unobserved reported model is not invented');
+  const exactFields = observations[0]!.fields;
+  assert.ok('reportedCostUsd' in exactFields);
+  assert.equal(exactFields.reportedCostUsd, 0, 'reported zero is retained as exact evidence');
+  assert.equal('reportedModel' in exactFields ? exactFields.reportedModel : undefined, undefined,
+    'an unobserved reported model is not invented');
   assert.deepEqual({
-    inputIncludesCache: observations[0]!.fields.inputIncludesCache,
-    outputIncludesReasoning: observations[0]!.fields.outputIncludesReasoning,
-    cacheChannelsOmittedAsZero: observations[0]!.fields.cacheChannelsOmittedAsZero,
-    pricing: observations[0]!.fields.pricing,
+    inputIncludesCache: 'inputIncludesCache' in exactFields ? exactFields.inputIncludesCache : undefined,
+    outputIncludesReasoning: 'outputIncludesReasoning' in exactFields ? exactFields.outputIncludesReasoning : undefined,
+    cacheChannelsOmittedAsZero: 'cacheChannelsOmittedAsZero' in exactFields
+      ? exactFields.cacheChannelsOmittedAsZero
+      : undefined,
+    pricing: 'pricing' in exactFields ? exactFields.pricing : undefined,
   }, {
     inputIncludesCache: false,
     outputIncludesReasoning: true,
@@ -119,13 +124,14 @@ test('canonical provider adapter preserves exact accounting fields and assigns c
       cacheWriteUsdPerMillionTokens: 1,
     },
   });
-  assert.equal(observations[1]!.fields.inputTokens, undefined, 'unknown channels are absent rather than invented zeroes');
+  assert.equal('inputTokens' in observations[1]!.fields ? observations[1]!.fields.inputTokens : undefined,
+    undefined, 'unknown channels are absent rather than invented zeroes');
   assert.equal(JSON.stringify(observations).includes('/must/not/be/persisted'), false);
   assert.deepEqual(observations[2], observations[0], 'same source redetection is exact replay');
 });
 
 test('canonical producer replay tracking remains bounded and evicted redetections get a new sequence', () => {
-  const observations: AnalyticsObservation[] = [];
+  const observations: AnalyticsObservation<object>[] = [];
   const capture = new CanonicalAnalyticsCapture({
     authority: 'canonical',
     generationId: 'generation-bounded',
@@ -169,7 +175,7 @@ test('canonical producer replay tracking remains bounded and evicted redetection
 
 test('canonical accounting seam is exclusive and never falls through to the legacy ledger', () => {
   const root = tempRoot();
-  const observations: AnalyticsObservation[] = [];
+  const observations: AnalyticsObservation<object>[] = [];
   try {
     const capture = new CanonicalAnalyticsCapture({
       authority: 'canonical',
@@ -209,7 +215,8 @@ test('canonical accounting seam is exclusive and never falls through to the lega
 
     assert.equal(observations.length, 1);
     assert.equal(observations[0]!.observationKind, 'providerSettlement');
-    assert.equal(observations[0]!.fields.sourceId, 'provider-response-a');
+    assert.equal('sourceId' in observations[0]!.fields ? observations[0]!.fields.sourceId : undefined,
+      'provider-response-a');
     assert.deepEqual(accounting.exportRecords(), [], 'legacy JSONL remains empty in canonical mode');
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -217,7 +224,7 @@ test('canonical accounting seam is exclusive and never falls through to the lega
 });
 
 test('pending bind and private close derive the same subject from the actual create origin', async () => {
-  const observations: AnalyticsObservation[] = [];
+  const observations: AnalyticsObservation<object>[] = [];
   const binds: string[] = [];
   const deletes: Array<string | undefined> = [];
   const capture = new CanonicalAnalyticsCapture({

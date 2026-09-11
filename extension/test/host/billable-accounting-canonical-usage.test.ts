@@ -12,10 +12,17 @@ function accountingWithCapture(
   tempDir: string,
   captureOutcome: 'submitted' | 'rejected' = 'submitted',
   captured?: BillableInvocationRecord[],
+  captureGaps?: Array<{
+    executionId: string;
+    sourceKey: string;
+    observedAtMs: number;
+    fields: Record<string, unknown>;
+  }>,
+  now?: () => Date,
 ): BillableAccounting {
   const deps: BillableAccountingDeps = {
     getStorageDir: () => tempDir,
-    now: () => new Date(Date.parse('2026-01-01T00:00:00.000Z')),
+    now: now ?? (() => new Date(Date.parse('2026-01-01T00:00:00.000Z'))),
     scheduleRender: () => undefined,
     dispatchArchEvent: () => undefined,
     getAgentDir: () => null,
@@ -27,6 +34,17 @@ function accountingWithCapture(
     canonicalCapture: {
       captureProviderSettlement: (record: BillableInvocationRecord) => {
         captured?.push(record);
+        return captureOutcome;
+      },
+      captureExecution: (
+        _context: unknown,
+        executionId: string,
+        _phase: unknown,
+        sourceKey: string,
+        observedAtMs: number,
+        fields: Record<string, unknown>,
+      ) => {
+        captureGaps?.push({ executionId, sourceKey, observedAtMs, fields });
         return captureOutcome;
       },
     } as CanonicalAnalyticsCapture,
@@ -87,6 +105,151 @@ test('canonical authority projects settled invocations as the authoritative live
     // Session close drops the process-local settlements; no legacy fallback.
     accounting.onSessionClosed('/sessions/a');
     assert.deepEqual(accounting.projectSessionUsage('/sessions/a'), { samples: [], authority: 'unknown' });
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test('canonical subagent reconciliation routes mixed attempt capture status item by item', () => {
+  const temp = tempDir();
+  try {
+    const captured: BillableInvocationRecord[] = [];
+    const captureGaps: Array<{
+      executionId: string;
+      sourceKey: string;
+      observedAtMs: number;
+      fields: Record<string, unknown>;
+    }> = [];
+    let nowMs = Date.parse('2026-01-01T00:00:00.000Z');
+    const accounting = accountingWithCapture(
+      temp,
+      'submitted',
+      captured,
+      captureGaps,
+      () => new Date(nowMs),
+    );
+    const receipt = (
+      attemptId: string,
+      factStatus: 'disabled' | 'submitted' | 'rejected',
+    ) => ({
+      factStatus,
+      generationId: 'generation-mixed',
+      stableOriginId: `origin-${attemptId}`,
+      executionId: `execution-${attemptId}`,
+      attemptId,
+      terminalDetailPayloadId: `detail-${attemptId}`,
+      lastSubmittedSequence: factStatus === 'disabled' ? 0 : 3,
+      ...(factStatus === 'submitted' ? { lastAcknowledgedSequence: 3 } : {}),
+      terminalDetailComplete: factStatus !== 'rejected',
+    });
+    const attempt = (
+      attemptId: string,
+      factStatus: 'disabled' | 'submitted' | 'rejected',
+      cost: number,
+    ) => ({
+      attemptId,
+      outcome: 'success',
+      providerResponseObserved: true,
+      analyticsCaptureReceipt: receipt(attemptId, factStatus),
+      usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost },
+    });
+    const invocation = (
+      attemptId: string,
+      cost: number,
+    ) => ({
+      invocationId: `raw-${attemptId}`,
+      canonicalInvocationId: `canonical-${attemptId}`,
+      attemptId,
+      outcome: 'success',
+      startedAt: 1_800_000_000_000,
+      completedAt: 1_800_000_000_001,
+      usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost },
+    });
+
+    const terminalTool = {
+      id: 'mixed-tool',
+      name: 'subagent',
+      input: {},
+      status: 'completed' as const,
+      result: {
+        billing: [{
+          path: '0',
+          attempts: [
+            attempt('submitted', 'submitted', 0.02),
+            attempt('disabled', 'disabled', 0.03),
+            attempt('rejected', 'rejected', 0.04),
+            {
+              attemptId: 'missing',
+              outcome: 'success',
+              providerResponseObserved: true,
+              usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0.05 },
+            },
+            {
+              attemptId: 'malformed',
+              outcome: 'success',
+              providerResponseObserved: true,
+              analyticsCaptureReceipt: {
+                ...receipt('malformed', 'submitted'),
+                terminalDetailComplete: 'not-a-boolean',
+              },
+              usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0.06 },
+            },
+          ],
+          invocations: [
+            invocation('submitted', 0.02),
+            invocation('disabled', 0.03),
+            invocation('rejected', 0.04),
+            invocation('missing', 0.05),
+            invocation('malformed', 0.06),
+          ],
+        }, {
+          path: '1',
+          usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0.07 },
+        }],
+      },
+    };
+    accounting.observeSubagentToolResult('/sessions/mixed.jsonl', terminalTool);
+
+    assert.deepEqual(
+      captured.map((record) => record.invocationId),
+      ['canonical-disabled'],
+      'only the explicitly disabled producer item uses the parent fallback',
+    );
+    assert.deepEqual(captureGaps.map((gap) => gap.executionId), [
+      'execution-rejected',
+      'subagent-reconciliation:mixed-tool:missing',
+      'subagent-reconciliation:mixed-tool:malformed',
+      'subagent-reconciliation:mixed-tool:subagent:mixed-tool:1',
+    ]);
+    assert.equal(captureGaps.every((gap) => gap.fields.captureIncomplete === true), true);
+    assert.equal(captureGaps[0]?.fields.lastSubmittedSequence, 3);
+    assert.match(String(captureGaps[1]?.fields.reason), /no valid fact ownership receipt/);
+    assert.match(String(captureGaps[2]?.fields.reason), /no valid fact ownership receipt/);
+    assert.match(String(captureGaps[3]?.fields.reason), /no valid fact ownership receipt/);
+    const firstGapDelivery = captureGaps.map((gap) => ({ ...gap, fields: { ...gap.fields } }));
+    nowMs += 60_000;
+    accounting.observeSubagentToolResult('/sessions/mixed.jsonl', terminalTool);
+    assert.deepEqual(
+      captureGaps.slice(firstGapDelivery.length),
+      firstGapDelivery,
+      'delayed terminal redelivery must preserve every reconciliation fact fingerprint',
+    );
+    assert.deepEqual(
+      captured.map((record) => record.invocationId),
+      ['canonical-disabled', 'canonical-disabled'],
+      'explicitly disabled fallback retains its canonical invocation identity on replay',
+    );
+    const projected = accounting.projectSessionUsage('/sessions/mixed.jsonl');
+    assert.equal(projected.authority, 'canonical');
+    assert.deepEqual(
+      projected.samples.map((sample) => sample.sourceId).sort(),
+      [
+        'subagent:mixed-tool:0:invocation:raw-disabled',
+        'subagent:mixed-tool:0:invocation:raw-submitted',
+      ],
+    );
+    assert.equal(projected.samples.reduce((sum, sample) => sum + (sample.reportedCostUsd ?? 0), 0), 0.05);
+    assert.equal(accounting.invocationLedger.projectAll().records.length, 0);
   } finally {
     rmSync(temp, { recursive: true, force: true });
   }

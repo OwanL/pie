@@ -22,6 +22,7 @@ import {
 } from '../billable-accounting/service';
 import type { ActivityIntervalRecord } from '../../shared/activity-interval';
 import type { SessionUsageSnapshot } from '../../shared/session-usage';
+import type { LiveLifecycleWatermark } from '../../shared/live-pipeline-protocol.js';
 import type {
   AnalyticsSessionContext,
   CanonicalAnalyticsCapture,
@@ -40,6 +41,12 @@ export interface StatsStartupStageMetric {
   /** Delta of cumulative timeline read/write/fsync/apply counters
    *  (ActivityTimeline.getDiagnostics()) across the stage. */
   timelineDelta?: Record<string, number>;
+}
+
+function stableEvidenceTime(value: string | undefined): number {
+  if (!value) return 0;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.trunc(parsed) : 0;
 }
 
 /**
@@ -523,29 +530,78 @@ export class StatsService implements RunObserver {
     usage?: AssistantUsage,
     status?: TurnThroughputStatus,
     latency?: TurnLatencyMeasurement,
-    billing?: { modelId?: string; provider?: string; occurredAt?: string; operationId?: string },
+    billing?: { modelId?: string; provider?: string; occurredAt?: string; operationId?: string; durableEntryId?: string },
   ): void {
     this.accounting.observeAssistantTurnEnded(sessionPath, turnId, durationMs, usage, status, billing);
     const context = this.analyticsContext(sessionPath);
     const executionId = context.runId ?? context.operationId ?? `turn:${turnId}`;
+    const observedAtMs = stableEvidenceTime(billing?.occurredAt);
     this.canonicalCapture?.captureExecution(
       context,
       executionId,
       'phase',
       `turn:${turnId}:end`,
-      billing?.occurredAt ? Date.parse(billing.occurredAt) : this.now().getTime(),
+      observedAtMs,
       {
         runId: context.runId ?? undefined,
         turnId,
         operationKind: 'assistant-turn',
         source: 'host',
-        endedAtMs: billing?.occurredAt ? Date.parse(billing.occurredAt) : this.now().getTime(),
+        endedAtMs: observedAtMs,
         outcome: status ?? 'unknown',
       },
     );
+    if (billing?.durableEntryId) {
+      this.canonicalCapture?.captureExecution(
+        context,
+        executionId,
+        'transcriptEvidence',
+        `turn:${turnId}:transcript-evidence`,
+        observedAtMs,
+        {
+          runId: context.runId ?? undefined,
+          turnId,
+          messageId: turnId,
+          operationKind: 'assistant-turn',
+          source: 'transcript',
+          durableEntryId: billing.durableEntryId,
+        },
+      );
+    }
     if (this.isPrivateSession(sessionPath) && !this.canonicalCapture) return;
     this.tracker.onAssistantTurnEnded(sessionPath, turnId, durationMs, usage, status, latency);
     this.syncWorkingTimeBreakdown(sessionPath);
+  }
+
+  onAssistantTerminalWatermark(watermark: LiveLifecycleWatermark): void {
+    if (!watermark.durableEntryId) return;
+    const context = this.analyticsContext(watermark.sessionPath);
+    const executionId = context.runId ?? context.operationId ?? `turn:${watermark.turnId}`;
+    this.canonicalCapture?.captureExecution(
+      context,
+      executionId,
+      'phase',
+      `turn:${watermark.turnId}:terminal-watermark:${watermark.attemptId}`,
+      watermark.occurredAt,
+      {
+        runId: context.runId ?? undefined,
+        turnId: watermark.turnId,
+        requestId: watermark.requestId,
+        attemptId: watermark.attemptId,
+        operationKind: 'assistant-turn',
+        source: 'backend-live-lifecycle',
+        durableEntryId: watermark.durableEntryId,
+        terminalWatermark: {
+          requestId: watermark.requestId,
+          turnId: watermark.turnId,
+          attemptId: watermark.attemptId,
+          finalSequence: watermark.finalSeq,
+          terminalKind: watermark.terminalKind,
+          durableEntryId: watermark.durableEntryId,
+          occurredAt: watermark.occurredAt,
+        },
+      },
+    );
   }
 
   onSessionUsageSnapshot(

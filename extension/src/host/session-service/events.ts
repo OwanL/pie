@@ -166,6 +166,7 @@ export class SessionServiceEvents {
       },
       onLiveLifecycle: (watermark) => {
         this.dispatchArch({ kind: 'LiveLifecycleWatermarkReceived', watermark });
+        deps.runObserver.onAssistantTerminalWatermark?.(watermark);
         this.scheduleRender();
       },
       onSessionOpened: (payload) => this.applySessionOpened(payload),
