@@ -43,8 +43,18 @@ function sanitizeBinary(value: Uint8Array): Uint8Array {
  * producer-side serialization. */
 export function sanitizeAnalyticsDetail(value: unknown, active = new WeakSet<object>()): unknown {
   if (typeof value === 'string') return redactSensitiveText(value);
+  if (typeof value === 'number') {
+    // V8 serialization can encode the same integer as either an integer or a
+    // double based on the value's hidden representation. Re-materialize the
+    // signed-int32 range so semantic replays produce identical durable bytes.
+    // Keep -0 distinct and collapse NaN payload variants to one value.
+    if (Object.is(value, -0)) return -0;
+    if (Number.isNaN(value)) return Number.NaN;
+    if (Number.isInteger(value) && value >= -0x8000_0000 && value <= 0x7fff_ffff) return value | 0;
+    return value;
+  }
   if (value === null || value === undefined || typeof value === 'boolean'
-    || typeof value === 'number' || typeof value === 'bigint') return value;
+    || typeof value === 'bigint') return value;
   if (Buffer.isBuffer(value)) return sanitizeBinary(value);
   if (value instanceof Uint8Array) return sanitizeBinary(value);
   if (value instanceof ArrayBuffer) return sanitizeBinary(new Uint8Array(value));
@@ -56,9 +66,33 @@ export function sanitizeAnalyticsDetail(value: unknown, active = new WeakSet<obj
   if (active.has(value)) throw new Error('Cyclic analytics detail is not supported.');
   active.add(value);
   try {
-    if (Array.isArray(value)) return value.map((child) => sanitizeAnalyticsDetail(child, active));
+    if (Array.isArray(value)) {
+      // Seed then remove a nonnumeric value so V8 uses one general tagged
+      // element representation regardless of the source array's numeric
+      // history. Setting the length first retains the semantic distinction
+      // between a sparse slot and an explicit undefined value.
+      const result: unknown[] = [null];
+      result.pop();
+      result.length = value.length;
+      for (let index = 0; index < value.length; index += 1) {
+        if (Object.prototype.hasOwnProperty.call(value, index)) {
+          result[index] = sanitizeAnalyticsDetail(value[index], active);
+        }
+      }
+      return result;
+    }
     const result: Record<string, unknown> = {};
-    for (const [key, child] of Object.entries(value)) {
+    for (const key of Object.keys(value).sort()) {
+      const child = (value as Record<string, unknown>)[key];
+      // Establish a general tagged field before storing its canonical value.
+      // Otherwise V8 may specialize a numeric property from prior allocation
+      // history and serialize the same int32 as a double on a later replay.
+      Object.defineProperty(result, key, {
+        configurable: true,
+        enumerable: true,
+        writable: true,
+        value: null,
+      });
       result[key] = isSensitiveKey(key) ? '[redacted]' : sanitizeAnalyticsDetail(child, active);
     }
     return result;

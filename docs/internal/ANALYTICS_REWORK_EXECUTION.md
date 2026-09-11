@@ -1750,3 +1750,143 @@ Playwright validation of the Pie web UI and stability. That authorization supers
 operational hold only when the reviewed cutover gates are satisfied; none of those live actions has
 occurred at this checkpoint. The four unrelated user-owned model/settings files, `stash@{0}`, and all
 qualification evidence remain preserved.
+
+### Checkpoint 21: in-place fault qualification and production bridge work in progress
+
+Checkpoint 20's two reviewed commits were pushed, and local `HEAD`, `origin/master` and the live
+remote all matched `0bf45ef188d4f9720f30d1e56ce25249b3b2ecc0`. The prior calibrated baseline and
+capacity-blocked scale report remain immutable evidence; this checkpoint does not reinterpret them.
+
+A separately versioned P0 candidate replaces the capacity-dominating database-copy fault with a
+terminal in-place corruption test against the sole disposable proof database. Its report schema 4,
+harness v3 and calibration schema 2 scale facts and variable details separately with the unchanged
+1.25 safety factor, count fixed coexisting bytes once, and take the maximum of the steady tree, the
+conservatively projected contained main database family, and observed/prewrite high-water. It never
+adds the already-contained database a second time. Before truncation, the candidate requires all
+recorder and query helpers to have emitted exact ordered `spawned,ready,terminal` evidence for an
+immutable supervisor instance ID, PID and supervisor-observed spawn timestamp. The child `exit` event
+is the terminal authority; the timestamp is explicitly not an OS creation timestamp. It also requires
+no active readers/helpers, a stable raw inventory, absent-or-zero WAL/SHM, a nonsymlink database
+directly contained by the real owned proof root, and an atomic pre-fault report outside that root. It
+then truncates only `analytics.sqlite` to 100 bytes and requires a newly spawned read-only query worker
+to reject the database visibly and reach terminal exit. Cleanup still removes only the owned proof
+root and must retain/report any unconfirmed exit or failed removal.
+
+Baseline admission revalidates raw snapshot sums, path containment, fault phase and exact lifecycle
+ordering. Tampered, reordered, missing, duplicated or unknown lifecycle states fail closed. The pure
+capacity suite now includes a case where the projected contained main family exceeds the component
+steady estimate, preventing either omission or double counting. Independent review accepted this
+P0/lifecycle source. Shared and extension typecheck run 150 passed; focused run 151 passed 10/10
+capacity, 11/11 recorder-supervisor and 2/2 query-lifecycle tests. No validation-only report, build,
+fresh baseline or scale workload has run for this new version, so P0 and the 1M tier remain
+unqualified.
+
+The first dormant P7 production bridge is being implemented separately. Its intended boundary routes
+closed bounded fact frames and fixed-size detail chunks from backend/subagent producers through the
+coordinator to the existing host-owned canonical capture/recorder, then routes only the matching
+durable recorder disposition and acknowledgement back to the originating worker identity, generation
+and lease. The coordinator remains a router and does not become a competing persistence authority.
+No manifest, authority switch, activation, journal handoff or live transport is enabled by this unit.
+The bridge is still under source and focused-test review at this checkpoint.
+
+For this machine, 1M may become the selected design envelope only after the new version's fresh 10k
+baseline admits it and an actual 1M run passes. The capacity-conditional 10M tier must remain named
+unqualified if excluded; it is never inferred passed. P0 also still requires independent repeated
+50-facts/second runs, two independent five-minute 1-fact/second runs, mixed ingestion/scans/lookups,
+cancellation/backlog saturation, real nested producer coverage, matched analytics-disabled/enabled
+agent and UI responsiveness plus CPU/RSS/query-memory measurements, and upgrade/partial-write fault
+evidence. These remain selected-design qualification gates before P7a. Browser prerequisite check 143
+found the repository-owned Playwright packages at 1.62.1 and the expected Chromium executable, but no
+browser or web server was launched. Qualified cutover, Pie data disposal, publication, activation,
+restart and headless UI validation remain authorized future actions, not completed work.
+
+The dormant production bridge candidate is now independently accepted at its bounded source seam.
+The shared codec validates closed fact/detail/acknowledgement shapes, stable source-derived delivery
+IDs, signed 64-bit values, structural complexity and byte limits. Detail payloads up to 16 MiB are
+sent as fixed 96 KiB base64 chunks, one frame at a time, with an explicit abort on initial or
+midstream admission failure. Host assembly is bounded by both count and bytes; conflicting starts,
+chunks, ends and aborts reject the conflicting packet without deleting the admitted original, while
+an exact but incomplete terminal end closes the failed assembly. The coordinator retains only
+bounded route/subject metadata for outstanding deliveries, preserves the original route across a
+subject replacement, and sends acknowledgements only to the exact worker, generation and lease.
+Subject rebind is fire-and-forget and capture stays explicitly pending or disabled until the matching
+response. A rebound arriving after its non-gating timeout is ignored without closing an otherwise
+healthy provider worker.
+
+Recorder disposition is per record. Fact acknowledgements carry at most the matching producer's
+reconciliation entry; exact replay is durable and idempotent, while changed same-key facts or details
+return an explicit `source_conflict` without changing the original transaction or unrelated batch
+records. The producer seals terminal receipts before later acknowledgements, releases interest in
+every outstanding fact/detail delivery, and cannot fabricate a late watermark or settlement. The
+independent end-to-end fixture exercised the actual subagent producer and strict codec through host
+assembly into a real `AnalyticsRecorderSupervisor` child and SQLite recorder. Four facts and a unique
+detail larger than 1 MiB received exact route-bound durable acknowledgements; read-only reconstruction
+matched the original bytes and digest. Exact redelivery added no entity, detail or charge. A changed
+provider cost and changed terminal detail under the same identities produced three durable unrelated
+duplicates plus two `source_conflict` acknowledgements, while the original `$0.04` settlement and
+detail remained unchanged. Worker lifecycle evidence was exactly `spawned,ready,terminal`, and the
+disposable database root was removed.
+
+Focused evidence after the final corrections is: shared, extension and subagent typechecks passed in
+run 173; run 172 passed all 165 extension bridge tests; run 174 passed all nine subagent bridge tests,
+including the production SQLite fixture; and run 175 passed all 13 worker-server transport tests.
+Earlier diagnostic failures exposed and corrected undefined optional provider fields, changed-source
+conflict handling, assembler continuation, and late-rebind fencing rather than weakening their
+oracles. No full canonical barrier or new build has run for this bridge candidate yet. The bridge
+remains inactive: manifest/lifecycle injection, durable activation journal and handoff receipt,
+cross-host refresh, authority cutover, legacy-writer retirement and live UI validation remain later
+reviewed units.
+
+### Checkpoint 22: verified durable worker bridge and calibrated qualification source
+
+The frozen P0 lifecycle/capacity and dormant production-bridge milestone completed its canonical source
+barrier. The final milestone contains 49 reviewed source, test, fixture, script and report paths. It keeps
+one host-owned recorder authority: backend and subagent workers emit closed, bounded transport packets,
+the coordinator routes them without persisting a competing copy, and only an exact durable recorder
+disposition returns to the originating worker/generation/lease. The bridge still has no activation
+manifest or runtime authority switch.
+
+Two failures from the first full-run attempt were retained as diagnostic evidence rather than classified
+as harmless flakes. The bundled extension runner placed Node test-runner flags in `process.execArgv`, and
+the dedicated recorder/query children inherited them. Recorder children now default to an empty owned
+argument list; query children default only to their owned heap bound. Explicit source-mode loaders remain
+a test/embedding override. A parent launched with unrelated flags proves those flags do not reach either
+child, and the actual bundled extension suite subsequently passed on its first attempt. Startup failures
+include bounded redacted child stderr, while child `exit` remains the terminal lifecycle authority.
+
+The second diagnostic exposed semantically identical terminal detail whose V8 bytes varied with numeric
+and container allocation history. Producer sanitization now canonicalizes signed-int32 values while
+preserving `-0`, builds arrays and sorted own object fields in a stable tagged representation, preserves
+sparse holes separately from explicit `undefined`, and safely retains an own `__proto__` data property.
+SQLite manifests encode holes explicitly and reconstruct the same canonical array form; read ranges reuse
+the shared sanitizer before V8 serialization. Exact ingress bytes remain the recorder fingerprint, so a
+changed same-key value is still a conflict. The production SQLite oracle captures the actual transport
+start/chunks/end, proves producer bytes are a canonical fixed point, and requires exact readback length,
+SHA-256 and decoded semantics for the greater-than-1-MiB detail. Exact replay remains idempotent and a
+changed provider settlement/detail still receives `source_conflict` without modifying the original rows.
+
+After these corrections, run 206 passed shared, extension and subagent typechecks; run 207 passed all 43
+focused canonical-byte, SQLite and subagent reconciliation tests; and the exact batched subagent runner in
+run 208 passed 592 tests with zero failures and one skip on its first attempt. The fresh canonical barrier
+then passed `git diff --check`, all 17 typecheck projects and lint. Full affected `npm test` run 213 passed
+6,659 tests, failed zero, skipped 29 across all seven package groups, and reported no flaky retry. The
+`--no-sync` validation build passed with coordinated host/webview identity
+`de1d5a779ccbe3f676b4`. Snapshots 209 and 215 matched exactly for status, `HEAD`, `origin/master`,
+`stash@{0}` and all seven protected hashes. The earlier failed run 184 and its reproduction artifacts
+remain preserved; they are not counted as passing evidence.
+
+This barrier validates the versioned P0 in-place-fault source and its lifecycle evidence, but does not
+advance P0 qualification by itself. A fresh matching validation, attestation and 10k calibration baseline
+are still required before the selected 1M design can be admitted or executed. Repeated sustained/light
+runs, mixed and cancellation/backlog workloads, real nested producer, matched analytics-disabled/enabled
+agent and UI measurements, memory gates, upgrade/partial-write coverage and the selected-design P7a gate
+also remain outstanding. The capacity-conditional 10M tier remains explicitly unqualified unless it is
+separately admitted and run.
+
+Production cutover still requires the separately reviewed activation manifest/lifecycle injection,
+durable journal and terminal handoff receipt, all-host writer fence, cross-host revision refresh, legacy
+writer retirement and rollback rehearsal. No package/cache publication, activation, restart, Pie session
+close or data disposal occurred in this milestone. The user's authorization for those actions applies
+once the qualification and cutover gates are satisfied, followed by the required headless Playwright Pie
+web UI and stability journeys. The four unrelated model/settings files, `stash@{0}` and all prior evidence
+remain preserved.

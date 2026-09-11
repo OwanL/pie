@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
@@ -13,6 +14,7 @@ import {
   type AnalyticsDetailCapture,
   type AnalyticsObservation,
 } from '../../../shared/analytics/contracts.js';
+import { sanitizeAnalyticsDetail } from '../../../shared/sensitive-redaction.js';
 import {
   AnalyticsPrivacyScrubPendingError,
   SqliteAnalyticsRecorder,
@@ -174,6 +176,60 @@ test('linked detail storage reconstructs exact rich results and deduplicates nes
     assert.ok(recorder.detailStorageStats().contentCount > 0, 'shared content remains for its other owner');
     recorder.deleteSession('root-b', 'delete-root-b', 201);
     assert.equal(recorder.detailStorageStats().contentCount, 0, 'last-owner delete removes orphaned content');
+  } finally {
+    recorder.close();
+    rmSync(temp.root, { recursive: true, force: true });
+  }
+});
+
+test('detail range preserves canonical bytes and distinguishes sparse slots from undefined', () => {
+  const temp = tempDatabase();
+  const recorder = new SqliteAnalyticsRecorder(temp.databasePath);
+  try {
+    const sparse = new Array<unknown>(3);
+    sparse[1] = 1;
+    const formerlyDouble = [1.5, 0.5, 1.5, -0.5, 2_147_483_648.5];
+    formerlyDouble[0] = 1;
+    formerlyDouble[1] = 0;
+    formerlyDouble[3] = -0;
+    formerlyDouble[4] = 2_147_483_648;
+    const value = sanitizeAnalyticsDetail({
+      authorization: 'Bearer source-secret',
+      explicit: [undefined, 1, undefined],
+      mixed: formerlyDouble,
+      sparse,
+      text: 'password=source-secret',
+    });
+    const bytes = serialize(value);
+    const capture = { ...detail({ payloadId: 'canonical-detail', value }), bytes };
+    recorder.submitDetail(capture);
+    recorder.submitDetail(capture);
+
+    const reconstructed = recorder.reconstructDetail(capture.payloadId) as {
+      explicit: unknown[];
+      sparse: unknown[];
+    };
+    assert.equal(Object.prototype.hasOwnProperty.call(reconstructed.sparse, 0), false);
+    assert.equal(Object.prototype.hasOwnProperty.call(reconstructed.explicit, 0), true);
+    const range = recorder.readDetailRange(capture.payloadId, 0, bytes.byteLength + 1);
+    assert.equal(range.nextOffset, null);
+    assert.deepEqual(range.bytes, bytes);
+    assert.equal(
+      createHash('sha256').update(range.bytes).digest('hex'),
+      createHash('sha256').update(bytes).digest('hex'),
+    );
+
+    const changed = sanitizeAnalyticsDetail({
+      authorization: 'Bearer source-secret',
+      explicit: [undefined, 1, undefined],
+      mixed: [1, 0, 2.5, -0, 2_147_483_648],
+      sparse,
+      text: 'password=source-secret',
+    });
+    assert.throws(
+      () => recorder.submitDetail({ ...capture, bytes: serialize(changed) }),
+      AnalyticsSourceConflictError,
+    );
   } finally {
     recorder.close();
     rmSync(temp.root, { recursive: true, force: true });

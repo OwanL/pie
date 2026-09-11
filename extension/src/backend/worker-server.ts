@@ -26,6 +26,9 @@ import {
   type WorkerToCoordinatorRequestBody,
 } from './worker-protocol';
 import { validateSdkPatchBarrier } from './sdk-patch-barrier';
+import type { AnalyticsTransportPacket } from '../../../shared/analytics/transport.js';
+import type { AnalyticsCaptureSubject } from '../../../shared/analytics/contracts.js';
+import type { AnalyticsTransportFrameSettlement } from './analytics-worker-transport.js';
 
 export interface WorkerServerIdentity {
   coordinatorGeneration: number;
@@ -58,6 +61,8 @@ export interface WorkerServerHandlers {
   onShutdown?: (frame: Extract<CoordinatorToWorkerFrame, { kind: 'shutdown' }>) => void | Promise<void>;
   /** Test/embedding seam; production defaults to the immutable SDK patch validator. */
   validateBootstrap?: (frame: Extract<CoordinatorToWorkerFrame, { kind: 'bootstrap' }>) => void | Promise<void>;
+  /** Test-only bound for the non-gating analytics subject transition. */
+  analyticsSubjectRebindTimeoutMs?: number;
 }
 
 /** Recoverable-drop policy for worker enqueue rejections. Only the
@@ -79,6 +84,7 @@ interface PendingCoordinatorResponse {
   expectedKind: CoordinatorToWorkerFrame['kind'];
   resolve: (frame: CoordinatorToWorkerFrame) => void;
   reject: (error: Error) => void;
+  timeout?: ReturnType<typeof setTimeout>;
 }
 
 function positiveInteger(value: string | undefined, name: string): number {
@@ -153,6 +159,7 @@ export class WorkerServer {
   private closeDiagnosticWritten = false;
   private inbound = Promise.resolve();
   private readonly pending = new Map<string, PendingCoordinatorResponse>();
+  private pendingAnalyticsSubjectRebinds = 0;
   private readonly syncRevisions: Record<WorkerSyncDomain, number> = {
     settings: 0,
     catalog: 0,
@@ -206,6 +213,48 @@ export class WorkerServer {
   /** Send a closed worker frame while the transport supplies exact identity and sequence fields. */
   sendFrame(body: WorkerToCoordinatorFrameBody): boolean {
     return this.send({ ...this.frameBase, ...body } as WorkerIpcFrameDraft);
+  }
+
+  /** Analytics owns a bounded lossy-at-admission lane: a synchronous queue
+   * rejection is reported to the producer and never makes provider execution
+   * protocol-fatal. A later descriptor failure still closes the worker because
+   * the coordinator transport itself is no longer trustworthy. */
+  sendAnalyticsFrame(
+    packet: AnalyticsTransportPacket,
+    onSettled?: (settlement: AnalyticsTransportFrameSettlement) => void,
+  ): boolean {
+    const result = this.writer.enqueue({
+      ...this.frameBase,
+      kind: 'analytics.capture',
+      packet,
+    } as WorkerIpcFrameDraft, {
+      onSettled: (settlement) => {
+        if (settlement.status === 'sent') onSettled?.({ status: 'sent' });
+        else if (settlement.status === 'rejected') {
+          onSettled?.({ status: 'rejected', reason: settlement.reason, detail: settlement.detail });
+        } else if (settlement.status === 'failed') onSettled?.({ status: 'failed', error: settlement.error });
+        if (settlement.status === 'failed') this.close(1, settlement.error);
+      },
+    });
+    return result.accepted;
+  }
+
+  async requestAnalyticsSubjectRebind(captureSubject: AnalyticsCaptureSubject): Promise<AnalyticsCaptureSubject> {
+    if (this.pendingAnalyticsSubjectRebinds >= 8) {
+      throw new Error('Analytics subject transition capacity exceeded.');
+    }
+    this.pendingAnalyticsSubjectRebinds += 1;
+    try {
+      const response = await this.requestFrame(
+        { kind: 'analytics.rebind', captureSubject },
+        'analytics.rebound',
+        undefined,
+        this.handlers.analyticsSubjectRebindTimeoutMs ?? 5_000,
+      );
+      return response.captureSubject;
+    } finally {
+      this.pendingAnalyticsSubjectRebinds -= 1;
+    }
   }
 
   /** Detail pages/deltas use a separately bounded low-priority lane. Queue
@@ -266,18 +315,29 @@ export class WorkerServer {
     body: WorkerToCoordinatorRequestBody,
     expectedKind: K,
     correlatedRequestId?: string,
+    timeoutMs?: number,
   ): Promise<Extract<CoordinatorToWorkerResponseFrame, { kind: K }>> {
     if (this.closing) return Promise.reject(new Error('Coordinator transport is unavailable.'));
     const requestId = correlatedRequestId ?? randomUUID();
     if (this.pending.has(requestId)) return Promise.reject(new Error(`Coordinator IPC request ${requestId} is already pending.`));
     return new Promise((resolve, reject) => {
-      this.pending.set(requestId, {
+      const pending: PendingCoordinatorResponse = {
         expectedKind,
         resolve: (frame) => resolve(frame as Extract<CoordinatorToWorkerResponseFrame, { kind: K }>),
         reject,
-      });
+      };
+      if (timeoutMs !== undefined) {
+        pending.timeout = setTimeout(() => {
+          if (this.pending.get(requestId) !== pending) return;
+          this.pending.delete(requestId);
+          reject(new Error(`Coordinator IPC request ${requestId} timed out.`));
+        }, timeoutMs);
+        pending.timeout.unref?.();
+      }
+      this.pending.set(requestId, pending);
       if (!this.sendFrame({ ...body, requestId } as WorkerToCoordinatorFrameBody)) {
         this.pending.delete(requestId);
+        if (pending.timeout) clearTimeout(pending.timeout);
         reject(new Error('Coordinator IPC request was rejected.'));
       }
     });
@@ -327,6 +387,7 @@ export class WorkerServer {
     const pending = requestId ? this.pending.get(requestId) : undefined;
     if (pending) {
       this.pending.delete(requestId!);
+      if (pending.timeout) clearTimeout(pending.timeout);
       if (frame.kind === 'ownership.rejected') {
         pending.reject(new Error(`${frame.code}: ${frame.message}`));
         return;
@@ -354,6 +415,13 @@ export class WorkerServer {
         || frame.kind === 'provider.cancelAck'
         || frame.kind === 'provider.released' || frame.kind === 'settings.authoritative') {
       this.failProtocol(`Coordinator ${frame.kind} has unknown requestId ${frame.requestId}.`, 'PROTOCOL_ERROR');
+      return;
+    }
+    if (frame.kind === 'analytics.rebound') {
+      // Subject transitions are deliberately non-gating. A response may arrive
+      // after its bounded request timed out and was fenced locally; it cannot
+      // revive that request or change capture ownership, and must not make an
+      // otherwise healthy provider worker protocol-fatal.
       return;
     }
     void this.dispatch(frame).catch((error) => {
@@ -569,7 +637,10 @@ export class WorkerServer {
     if (!this.closing) this.closing = true;
     this.stopHeartbeat();
     const closedError = new Error('Coordinator transport closed.');
-    for (const pending of this.pending.values()) pending.reject(closedError);
+    for (const pending of this.pending.values()) {
+      if (pending.timeout) clearTimeout(pending.timeout);
+      pending.reject(closedError);
+    }
     this.pending.clear();
     this.detachReader?.();
     this.detachReader = undefined;

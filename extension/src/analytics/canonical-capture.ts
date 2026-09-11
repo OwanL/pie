@@ -21,6 +21,7 @@ import type { ActivityIntervalRecord } from '../shared/activity-interval.js';
 import type { BillableInvocationRecord } from '../shared/billable-invocation.js';
 import type { ToolCall } from '../shared/protocol.js';
 import { sanitizeAnalyticsDetail } from '../shared/sensitive-redaction.js';
+import { canonicalAnalyticsToolEntityId } from '../../../shared/analytics/transport.js';
 
 export type AnalyticsAuthority = 'legacy' | 'canonical';
 export type AnalyticsCaptureStatus = 'disabled' | 'submitted' | 'rejected';
@@ -334,10 +335,7 @@ export class CanonicalAnalyticsCapture {
   ): AnalyticsCaptureStatus {
     const sessionIdentity = context.sessionId?.trim()
       || analyticsPendingOperationId(context.operationId, context.sessionPath);
-    const scopedToolCallId = `tool:${createHash('sha256').update(JSON.stringify([
-      sessionIdentity,
-      toolCall.id,
-    ])).digest('hex')}`;
+    const scopedToolCallId = canonicalAnalyticsToolEntityId(sessionIdentity, toolCall.id);
     const payloadId = `${scopedToolCallId}:${phase}`;
     const fields: AnalyticsToolCallFields = {
       toolCallId: scopedToolCallId,

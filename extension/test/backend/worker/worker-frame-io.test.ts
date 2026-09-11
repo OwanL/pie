@@ -215,6 +215,31 @@ test('writer rejects invalid, oversize, and over-capacity frames without assigni
   assert.equal(target.sent.length, 1);
 });
 
+test('analytics abort uses reserved response capacity when the ordinary lane is saturated', () => {
+  const target = new FakeSendTarget();
+  const writer = new BoundedWorkerIpcWriter(target, { maxQueuedOrdinaryBytes: 300 });
+  writer.enqueue(command('active'));
+  assert.equal(writer.enqueue(command('queued-one')).accepted, true);
+  assert.equal(writer.enqueue(command('ordinary-capacity')).accepted, false);
+  const abort = writer.enqueue({
+    ...frameBase,
+    kind: 'analytics.capture',
+    packet: {
+      version: 1,
+      kind: 'detail.abort',
+      deliveryId: 'delivery-1',
+      generationId: 'generation-1',
+      captureSubject: { kind: 'session', rootSessionId: 'root-1' },
+      payloadId: 'payload-1',
+      code: 'transport_incomplete',
+      message: 'detail frame admission failed',
+    },
+  });
+  assert.equal(abort.accepted, true);
+  while (target.callbacks.length > 0) target.callbacks.shift()!(null);
+  assert.deepEqual(target.sent.map((frame) => frame.kind), ['command', 'analytics.capture', 'command']);
+});
+
 test('an exceptional oversized lifecycle frame leaves the lane reservation available for following terminals', () => {
   const target = new FakeSendTarget();
   const writer = new BoundedWorkerIpcWriter(target, { maxQueuedLifecycleBytes: 1024 });

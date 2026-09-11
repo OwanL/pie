@@ -48,6 +48,7 @@ const EXPECTED_BACKEND_ROUTES = [
   'settings.set',
   'systemPromptToggles.set',
   'provider_gate.metrics',
+  'analytics.ack',
   'liveTurn.checkpoint',
   'diagnostics.livePipeline.setEnabled',
 ] as const;

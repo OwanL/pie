@@ -1,8 +1,9 @@
 import { deserialize, serialize } from 'node:v8';
 
-import type {
-  AnalyticsDetailCapture,
-  AnalyticsObservation,
+import {
+  AnalyticsSourceConflictError,
+  type AnalyticsDetailCapture,
+  type AnalyticsObservation,
 } from '../../../shared/analytics/contracts.js';
 import { sanitizeAnalyticsDetail } from '../../../shared/sensitive-redaction.js';
 import { SqliteAnalyticsRecorder } from './sqlite-recorder.js';
@@ -48,6 +49,12 @@ interface PendingCreateRecorder {
 const configuredDatabasePath = process.env.PIE_ANALYTICS_DATABASE_PATH;
 if (!configuredDatabasePath) throw new Error('PIE_ANALYTICS_DATABASE_PATH is required.');
 const databasePath: string = configuredDatabasePath;
+const workerInstanceId = process.env.PIE_ANALYTICS_WORKER_INSTANCE_ID;
+const workerSpawnedAtMs = Number(process.env.PIE_ANALYTICS_WORKER_SPAWNED_AT_MS);
+if (!workerInstanceId || !Number.isSafeInteger(workerSpawnedAtMs) || workerSpawnedAtMs <= 0) {
+  throw new Error('Analytics recorder worker identity is required.');
+}
+const workerIdentity = Object.freeze({ pid: process.pid, spawnedAtMs: workerSpawnedAtMs, instanceId: workerInstanceId });
 const acknowledgementDelayMs = Math.max(0, Number(process.env.PIE_ANALYTICS_REHEARSAL_ACK_DELAY_MS ?? 0) || 0);
 const STARTUP_LOCK_RETRY_MS = 8_000;
 const STARTUP_LOCK_RETRY_MAX_DELAY_MS = 200;
@@ -141,7 +148,7 @@ async function handle(raw: unknown): Promise<void> {
         if (captures.some((capture) => capture.kind !== firstKind)) {
           throw new Error('Mixed analytics capture batch is not supported.');
         }
-        const rejections: Array<{ index: number; code: 'subject_deleted'; error: string }> = [];
+        const rejections: Array<{ index: number; code: 'subject_deleted' | 'source_conflict'; error: string }> = [];
         if (firstKind === 'observation') {
           // Preserve global queue order while retaining batch transactions for
           // contiguous captures owned by the same subject. A deletion fence can
@@ -154,9 +161,27 @@ async function handle(raw: unknown): Promise<void> {
               recorder.submitBatch(captures.slice(start, end).map((capture) => capture.value as AnalyticsObservation));
             } catch (error) {
               const deleted = deletedSubjectError(error);
-              if (!deleted) throw error;
-              for (let index = start; index < end; index += 1) {
-                rejections.push({ index, code: 'subject_deleted', error: deleted });
+              if (deleted) {
+                for (let index = start; index < end; index += 1) {
+                  rejections.push({ index, code: 'subject_deleted', error: deleted });
+                }
+              } else if (error instanceof AnalyticsSourceConflictError) {
+                // The batch transaction retained every original row. Replay the
+                // bounded slice record-by-record so only changed identities are
+                // rejected and unrelated immutable facts still advance.
+                for (let index = start; index < end; index += 1) {
+                  try {
+                    recorder.submit(captures[index]!.value as AnalyticsObservation);
+                  } catch (recordError) {
+                    const recordDeleted = deletedSubjectError(recordError);
+                    if (recordDeleted) rejections.push({ index, code: 'subject_deleted', error: recordDeleted });
+                    else if (recordError instanceof AnalyticsSourceConflictError) {
+                      rejections.push({ index, code: 'source_conflict', error: recordError.message });
+                    } else throw recordError;
+                  }
+                }
+              } else {
+                throw error;
               }
             }
             start = end;
@@ -172,8 +197,10 @@ async function handle(raw: unknown): Promise<void> {
               recorder.submitDetail({ ...detail, bytes: serialize(scrubbed) });
             } catch (error) {
               const deleted = deletedSubjectError(error);
-              if (!deleted) throw error;
-              rejections.push({ index, code: 'subject_deleted', error: deleted });
+              if (deleted) rejections.push({ index, code: 'subject_deleted', error: deleted });
+              else if (error instanceof AnalyticsSourceConflictError) {
+                rejections.push({ index, code: 'source_conflict', error: error.message });
+              } else throw error;
             }
           }
         }
@@ -218,7 +245,11 @@ async function handle(raw: unknown): Promise<void> {
         return;
       case 'stats':
         await acknowledge(request.requestId, {
-          process: { ...process.memoryUsage(), cpuUsage: process.cpuUsage() },
+          process: {
+            ...process.memoryUsage(),
+            cpuUsage: process.cpuUsage(),
+            workerIdentity,
+          },
           recorder: recorder.getStats(),
           detailStorage: recorder.detailStorageStats(),
           delivery: recorder.readDeliveryAccounting(),
@@ -246,7 +277,7 @@ async function handle(raw: unknown): Promise<void> {
 void initializeRecorder().then((initialized) => {
   recorder = initialized.recorder;
   startupPrivacyRecovery = initialized.startupPrivacyRecovery;
-  return send({ type: 'ready', startupPrivacyRecovery }).then(() => {
+  return send({ type: 'ready', startupPrivacyRecovery, workerIdentity }).then(() => {
     let processing = Promise.resolve();
     process.on('message', (message: unknown) => {
       processing = processing.then(() => handle(message));

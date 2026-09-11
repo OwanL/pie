@@ -5,6 +5,11 @@ const { deserialize } = require('node:v8');
 const databasePath = process.env.PIE_ANALYTICS_DATABASE_PATH;
 const logPath = `${databasePath}.lifecycle.jsonl`;
 const mode = path.basename(databasePath);
+const workerIdentity = {
+  pid: process.pid,
+  spawnedAtMs: Number(process.env.PIE_ANALYTICS_WORKER_SPAWNED_AT_MS),
+  instanceId: process.env.PIE_ANALYTICS_WORKER_INSTANCE_ID,
+};
 
 function append(value) {
   fs.appendFileSync(logPath, `${JSON.stringify(value)}\n`);
@@ -18,13 +23,16 @@ function send(message) {
 
 append({ type: 'started', pid: process.pid });
 
-if (mode.includes('fatal-start')) {
+if (mode.includes('require-empty-exec-argv') && process.execArgv.length > 0) {
+  void send({ type: 'fatal', error: `recorder worker inherited parent execArgv: ${process.execArgv.join(' ')}` })
+    .finally(() => process.disconnect());
+} else if (mode.includes('fatal-start')) {
   void send({ type: 'fatal', error: 'schema initialization is corrupt' })
     .finally(() => process.disconnect());
 } else {
   const readyDelayMs = mode.includes('slow-start') ? 500 : 0;
   setTimeout(() => {
-    void send({ type: 'ready' }).then(() => {
+    void send({ type: 'ready', workerIdentity }).then(() => {
       let processing = Promise.resolve();
       process.on('message', (request) => {
         processing = processing.then(async () => {

@@ -7,6 +7,7 @@ import { deserialize } from 'node:v8';
 
 import {
   AnalyticsSourceConflictError,
+  type AnalyticsDetailCapture,
   type AnalyticsObservation,
 } from '../../../shared/analytics/contracts.js';
 import { CanonicalAnalyticsCapture } from '../../../extension/src/analytics/canonical-capture.js';
@@ -92,11 +93,20 @@ test('subagent producer facts reconcile through SQLite without terminal aggregat
   try {
     const generationId = 'generation-p4-terminal';
     const rootSessionId = 'root-session-p4';
+    const submittedDetailBytes = new Map<string, Buffer[]>();
+    const detailSink = {
+      submitDetail: (capture: AnalyticsDetailCapture) => {
+        const attempts = submittedDetailBytes.get(capture.payloadId) ?? [];
+        attempts.push(Buffer.from(capture.bytes));
+        submittedDetailBytes.set(capture.payloadId, attempts);
+        return recorder.submitDetail(capture);
+      },
+    };
     const captureContext = {
       generationId,
       workspaceId: 'workspace-p4',
       captureSubject: { kind: 'session' as const, rootSessionId },
-      sink: recorder,
+      sink: detailSink,
       factSink: recorder,
       readFactAcknowledgement: (_generation: string, stableOriginId: string) => {
         const identity = JSON.stringify([generationId, 'subagent', stableOriginId]);
@@ -316,7 +326,25 @@ test('subagent producer facts reconcile through SQLite without terminal aggregat
 
     // Exact producer redelivery is an idempotent replay. The terminal sideband
     // and inclusive usage are never a second settlement authority.
-    assert.equal(captureSubagentTerminalResult(failed, captureContext, 'root-subagent-tool'), 'submitted');
+    const failedReplayStatus = captureSubagentTerminalResult(failed, captureContext, 'root-subagent-tool');
+    const failedDetailAttempts = submittedDetailBytes.get(
+      failed.analyticsCaptureReceipt!.terminalDetailPayloadId,
+    ) ?? [];
+    assert.deepEqual(
+      failedDetailAttempts.map((bytes) => deserialize(bytes)),
+      [deserialize(failedDetailAttempts[0]!), deserialize(failedDetailAttempts[0]!)],
+      'exact producer redelivery must retain identical terminal detail content',
+    );
+    assert.deepEqual(
+      failedDetailAttempts[1],
+      failedDetailAttempts[0],
+      'exact producer redelivery must retain identical terminal detail bytes',
+    );
+    assert.equal(
+      failedReplayStatus,
+      'submitted',
+      failed.analyticsCaptureError ?? 'exact producer redelivery unexpectedly rejected',
+    );
     assert.equal(captureSubagentTerminalResult(succeeded, captureContext, 'root-subagent-tool'), 'submitted');
     assert.equal(recorder.readProviderAccountingSummary(rootSessionId).invocationCount, 4);
     assert.equal(recorder.readProviderAccountingSummary(rootSessionId).effectiveCostUsd.value, 0.10);

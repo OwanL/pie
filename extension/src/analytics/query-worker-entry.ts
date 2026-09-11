@@ -5,8 +5,22 @@ import { SqliteAnalyticsRecorder } from './sqlite-recorder.js';
 
 const databasePath = process.env.PIE_ANALYTICS_DATABASE_PATH;
 if (!databasePath) throw new Error('PIE_ANALYTICS_DATABASE_PATH is required.');
+const workerInstanceId = process.env.PIE_ANALYTICS_WORKER_INSTANCE_ID;
+const workerSpawnedAtMs = Number(process.env.PIE_ANALYTICS_WORKER_SPAWNED_AT_MS);
+if (!workerInstanceId || !Number.isSafeInteger(workerSpawnedAtMs) || workerSpawnedAtMs <= 0) {
+  throw new Error('Analytics query worker identity is required.');
+}
+const workerIdentity = Object.freeze({ pid: process.pid, spawnedAtMs: workerSpawnedAtMs, instanceId: workerInstanceId });
 
-const recorder = new SqliteAnalyticsRecorder(databasePath, { readOnly: true });
+let recorder: SqliteAnalyticsRecorder | undefined;
+try {
+  recorder = new SqliteAnalyticsRecorder(databasePath, { readOnly: true });
+} catch (error) {
+  process.send?.({
+    type: 'fatal',
+    error: error instanceof Error ? error.message : String(error),
+  }, () => process.disconnect());
+}
 
 type QueryMessage = AnalyticsQueryRequest & { requestId: number };
 
@@ -25,6 +39,7 @@ function send(message: unknown): void {
 }
 
 process.on('message', (raw: unknown) => {
+  if (!recorder) return;
   const message = raw as QueryMessage;
   if (!Number.isSafeInteger(message.requestId)) return;
   try {
@@ -84,9 +99,11 @@ process.on('message', (raw: unknown) => {
   }
 });
 
-process.once('disconnect', () => {
-  recorder.close();
-  process.exit(0);
-});
+if (recorder) {
+  process.once('disconnect', () => {
+    recorder?.close();
+    process.exit(0);
+  });
 
-send({ type: 'ready' });
+  send({ type: 'ready', workerIdentity });
+}

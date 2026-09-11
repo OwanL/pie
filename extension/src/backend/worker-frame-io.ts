@@ -383,13 +383,18 @@ function isWritable(target: WorkerIpcWriteTarget): boolean {
 
 function laneFor(frame: WorkerIpcFrame): WriterLane {
   const kind = frame.kind;
+  if (kind === 'analytics.capture') {
+    if (frame.packet.kind === 'detail.abort') return 'response';
+    if (frame.packet.kind === 'detail.start') return 'lifecycle';
+    if (frame.packet.kind === 'detail.chunk' || frame.packet.kind === 'detail.end') return 'detail';
+  }
   if (kind === 'response' || kind === 'runtime.ready' || kind === 'sync.ack'
       || kind === 'ownership.reserved' || kind === 'ownership.committed'
       || kind === 'ownership.consumed' || kind === 'ownership.aborted'
       || kind === 'ownership.rejected' || kind === 'ownership.runtimeReadyAck'
       || kind === 'provider.granted' || kind === 'provider.cancelled' || kind === 'provider.rejected'
       || kind === 'provider.cancelAck' || kind === 'provider.released'
-      || kind === 'settings.authoritative'
+      || kind === 'settings.authoritative' || kind === 'analytics.ack' || kind === 'analytics.rebound'
       || kind === 'detail.unsubscribed') return 'response';
   if (kind === 'bootstrap' || kind === 'interrupt' || kind === 'shutdown'
       || kind === 'ready' || kind === 'fatal' || kind === 'runtime.promote'
@@ -399,7 +404,7 @@ function laneFor(frame: WorkerIpcFrame): WriterLane {
       || kind === 'provider.acquire' || kind === 'provider.cancel'
       || kind === 'provider.observation' || kind === 'provider.release'
       || kind === 'detail.subscribe' || kind === 'detail.unsubscribe' || kind === 'detail.fetch'
-      || kind === 'detail.rebase' || kind === 'detail.error') return 'control';
+      || kind === 'detail.rebase' || kind === 'detail.error' || kind === 'analytics.rebind') return 'control';
   if (kind === 'detail.start' || kind === 'detail.terminal') return 'lifecycle';
   if (kind === 'detail.page' || kind === 'detail.delta') return 'detail';
   if (kind === 'runtime.event' && isLifecycleRuntimeEvent(frame.event)) return 'lifecycle';

@@ -2882,6 +2882,9 @@ export class BackendServer {
       readModelSettings: () => this.readModelSettings(),
       writeModelSettings: (updates) => this.writeModelSettings(updates),
       getProviderGateMetrics: () => this.workerRuntimeRouter?.getProviderGateMetrics(),
+      acknowledgeAnalytics: (route, acknowledgement) => (
+        this.workerRuntimeRouter?.acknowledgeAnalytics(route, acknowledgement) === true
+      ),
       onRequestValidated,
       suppressRequestTrace: true,
       livePipelineTraceToggleGeneration,

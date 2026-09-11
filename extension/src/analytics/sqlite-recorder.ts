@@ -28,6 +28,7 @@ import {
   type EffectiveCostMetric,
   type NormalizedUsageChannels,
 } from '../../../shared/analytics/metrics.js';
+import { sanitizeAnalyticsDetail } from '../../../shared/sensitive-redaction.js';
 
 interface SqliteRunResult {
   changes: number | bigint;
@@ -354,7 +355,7 @@ type DetailNode =
   | { t: 'number'; v: number | 'NaN' | 'Infinity' | '-Infinity' | '-0' }
   | { t: 'bigint'; v: string }
   | { t: 'leaf'; d: string; e: 'utf8' | 'binary' }
-  | { t: 'array'; v: DetailNode[] }
+  | { t: 'array'; v: Array<DetailNode | null> }
   | { t: 'object'; v: Array<[string, DetailNode]> };
 
 function serialize(value: unknown): string {
@@ -2046,7 +2047,15 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
         if (active.has(candidate)) throw new Error('Cyclic analytics detail is not supported.');
         active.add(candidate);
         try {
-          if (Array.isArray(candidate)) return { t: 'array', v: candidate.map(encode) };
+          if (Array.isArray(candidate)) {
+            const children = new Array<DetailNode | null>(candidate.length);
+            for (let index = 0; index < candidate.length; index += 1) {
+              children[index] = Object.prototype.hasOwnProperty.call(candidate, index)
+                ? encode(candidate[index])
+                : null;
+            }
+            return { t: 'array', v: children };
+          }
           if (candidate instanceof Date) return encode(candidate.toISOString());
           return { t: 'object', v: Object.entries(candidate).map(([key, child]) => [key, encode(child)]) };
         } finally {
@@ -2728,7 +2737,19 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
           if (!row || row.encoding !== node.e) throw new Error(`Missing analytics detail content: ${node.d}`);
           return node.e === 'utf8' ? Buffer.from(row.body).toString('utf8') : Buffer.from(row.body);
         }
-        case 'array': return node.v.map(decode);
+        case 'array': {
+          // Match the producer's canonical general/holey array allocation.
+          // A null manifest entry is a sparse slot, including manifests written
+          // before holes were represented explicitly during encoding.
+          const result: unknown[] = [null];
+          result.pop();
+          result.length = node.v.length;
+          for (let index = 0; index < node.v.length; index += 1) {
+            const child = node.v[index];
+            if (child !== null) result[index] = decode(child);
+          }
+          return result;
+        }
         case 'object': return Object.fromEntries(node.v.map(([key, child]) => [key, decode(child)]));
       }
     };
@@ -2762,7 +2783,7 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
       const start = parseInt64(offset, 'detail offset');
       if (start < 0n || start > BigInt(Number.MAX_SAFE_INTEGER)) throw new RangeError('detail offset is out of range.');
       const boundedBytes = boundedPositiveInteger(maxBytes, 64 * 1024, MAX_QUERY_BYTES, 'detail maxBytes');
-      const body = serializeV8(this.reconstructDetail(payloadId));
+      const body = serializeV8(sanitizeAnalyticsDetail(this.reconstructDetail(payloadId)));
       const numericStart = Number(start);
       const end = Math.min(body.byteLength, numericStart + boundedBytes);
       const bytes = numericStart >= body.byteLength ? new Uint8Array() : body.subarray(numericStart, end);

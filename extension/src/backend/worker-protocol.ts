@@ -21,6 +21,14 @@ import type {
   SdkSessionWriteLease,
 } from './sdk';
 import { SDK_PATCH_IDENTITY_VERSION, type SdkPatchIdentity } from './sdk-patch-barrier';
+import {
+  parseAnalyticsTransportAcknowledgement,
+  parseAnalyticsCaptureSubject,
+  parseAnalyticsTransportPacket,
+  type AnalyticsTransportAcknowledgement,
+  type AnalyticsTransportPacket,
+} from '../../../shared/analytics/transport.js';
+import type { AnalyticsCaptureSubject } from '../../../shared/analytics/contracts.js';
 
 /** Private coordinator/worker protocol. It is intentionally independent from the public RPC protocol. */
 export const WORKER_IPC_VERSION = 1 as const;
@@ -290,6 +298,17 @@ export interface WorkerDetailFetchFrame extends WorkerFrameBase {
   maxPageBytes: number;
 }
 
+export interface WorkerAnalyticsAckFrame extends WorkerFrameBase {
+  kind: 'analytics.ack';
+  acknowledgement: AnalyticsTransportAcknowledgement;
+}
+
+export interface WorkerAnalyticsRebindFrame extends WorkerFrameBase {
+  kind: 'analytics.rebind';
+  requestId: string;
+  captureSubject: AnalyticsCaptureSubject;
+}
+
 export type CoordinatorToWorkerFrame =
   | WorkerBootstrapFrame
   | WorkerCommandFrame
@@ -312,7 +331,9 @@ export type CoordinatorToWorkerFrame =
   | WorkerShutdownFrame
   | WorkerDetailSubscribeFrame
   | WorkerDetailUnsubscribeFrame
-  | WorkerDetailFetchFrame;
+  | WorkerDetailFetchFrame
+  | WorkerAnalyticsAckFrame
+  | WorkerAnalyticsReboundFrame;
 
 export interface WorkerReadyFrame extends WorkerFrameBase {
   kind: 'ready';
@@ -335,6 +356,17 @@ export interface WorkerRuntimeEventFrame extends WorkerFrameBase {
   kind: 'runtime.event';
   event: WorkerRuntimeEventName;
   payload: WorkerJsonObject;
+}
+
+export interface WorkerAnalyticsCaptureFrame extends WorkerFrameBase {
+  kind: 'analytics.capture';
+  packet: AnalyticsTransportPacket;
+}
+
+export interface WorkerAnalyticsReboundFrame extends WorkerFrameBase {
+  kind: 'analytics.rebound';
+  requestId: string;
+  captureSubject: AnalyticsCaptureSubject;
 }
 
 /** Worker→coordinator runtime discovery report. The coordinator retains the
@@ -557,7 +589,9 @@ export type WorkerToCoordinatorFrame =
   | WorkerDetailRebaseFrame
   | WorkerDetailTerminalFrame
   | WorkerDetailErrorFrame
-  | WorkerDetailUnsubscribedFrame;
+  | WorkerDetailUnsubscribedFrame
+  | WorkerAnalyticsCaptureFrame
+  | WorkerAnalyticsRebindFrame;
 
 export type WorkerIpcFrame = CoordinatorToWorkerFrame | WorkerToCoordinatorFrame;
 export type WorkerIpcFrameKind = WorkerIpcFrame['kind'];
@@ -585,12 +619,12 @@ export type WorkerToCoordinatorResponseFrame = Extract<WorkerToCoordinatorFrame,
 }> | WorkerDetailPageFrame | WorkerDetailErrorFrame;
 export type WorkerToCoordinatorRequestFrame = Extract<WorkerToCoordinatorFrame, {
   kind: 'ownership.reserve' | 'ownership.commit' | 'ownership.consume' | 'ownership.abort' | 'ownership.runtimeReady'
-    | 'provider.acquire' | 'provider.cancel' | 'provider.release' | 'settings.mutate';
+    | 'provider.acquire' | 'provider.cancel' | 'provider.release' | 'settings.mutate' | 'analytics.rebind';
 }>;
 export type CoordinatorToWorkerResponseFrame = Extract<CoordinatorToWorkerFrame, {
   kind: 'ownership.reserved' | 'ownership.committed' | 'ownership.consumed' | 'ownership.aborted' | 'ownership.rejected'
     | 'ownership.runtimeReadyAck' | 'provider.granted' | 'provider.cancelled' | 'provider.rejected' | 'provider.cancelAck'
-    | 'provider.released' | 'settings.authoritative';
+    | 'provider.released' | 'settings.authoritative' | 'analytics.rebound';
 }>;
 export type CoordinatorToWorkerRequestBody = RequestFrameBody<CoordinatorToWorkerRequestFrame>;
 export type WorkerToCoordinatorRequestBody = RequestFrameBody<WorkerToCoordinatorRequestFrame>;
@@ -703,6 +737,10 @@ function parseWorkerIpcFrameShapeInternal(value: unknown, requireSeq: boolean): 
     case 'runtime.command': detail = validateRuntimeCommand(value, requireSeq); break;
     case 'runtime.event': detail = validateRuntimeEvent(value, requireSeq); break;
     case 'runtime.report': detail = validateRuntimeReport(value, requireSeq); break;
+    case 'analytics.capture': detail = validateAnalyticsCapture(value, requireSeq); break;
+    case 'analytics.ack': detail = validateAnalyticsAck(value, requireSeq); break;
+    case 'analytics.rebind': detail = validateAnalyticsRebind(value, requireSeq); break;
+    case 'analytics.rebound': detail = validateAnalyticsRebind(value, requireSeq); break;
     case 'ownership.reserve': detail = validateOwnershipReserve(value, requireSeq); break;
     case 'ownership.reserved': detail = validateOwnershipReserved(value, requireSeq); break;
     case 'ownership.commit': detail = validateOwnershipCommit(value, requireSeq); break;
@@ -776,7 +814,7 @@ function validateFrame<T extends WorkerIpcFrame>(
     'bootstrap', 'command', 'runtime.promote', 'runtime.command', 'sync',
     'ownership.reserved', 'ownership.committed', 'ownership.consumed', 'ownership.aborted', 'ownership.rejected', 'ownership.runtimeReadyAck',
     'provider.granted', 'provider.cancelled', 'provider.rejected', 'provider.cancelAck', 'provider.released', 'settings.authoritative', 'interrupt', 'shutdown',
-    'detail.subscribe', 'detail.unsubscribe', 'detail.fetch',
+    'detail.subscribe', 'detail.unsubscribe', 'detail.fetch', 'analytics.ack', 'analytics.rebound',
   ]);
   if ((direction === 'coordinator') !== coordinatorKinds.has(frame.kind)) {
     return { status: 'invalid', reason: 'wrong_direction', detail: `Frame kind ${frame.kind} is not valid in the ${direction}-to-peer direction.`, bytes: measurement.bytes };
@@ -928,7 +966,7 @@ function validateRuntimePromote(value: Record<string, unknown>, requireSeq: bool
   const payloadKeys = exactKeys(value.payload, [
     'sdkPath', 'agentDir', 'startupCwd', 'sessionDir', 'sessionPath', 'creationReason',
     'writeLease', 'openedPayload', 'modelSettings',
-  ]);
+  ], ['analytics']);
   if (payloadKeys) return `runtime.promote.payload ${payloadKeys}`;
   for (const key of ['sdkPath', 'agentDir', 'startupCwd', 'sessionDir', 'sessionPath'] as const) {
     if (!boundedString(value.payload[key], MAX_SESSION_PATH_BYTES)) return `runtime.promote.payload.${key} must be a bounded non-empty string.`;
@@ -937,6 +975,27 @@ function validateRuntimePromote(value: Record<string, unknown>, requireSeq: bool
   const leaseError = validateLease(value.payload.writeLease, value, true);
   if (leaseError) return `runtime.promote.payload.writeLease ${leaseError}`;
   if (!isRecord(value.payload.openedPayload) || !isRecord(value.payload.modelSettings)) return 'runtime.promote openedPayload and modelSettings must be objects.';
+  if (value.payload.analytics !== undefined) {
+    const analytics = value.payload.analytics;
+    if (!isRecord(analytics)) return 'runtime.promote.payload.analytics must be an object.';
+    const analyticsKeys = exactKeys(analytics, ['generationId', 'captureSubject', 'buildId'], ['workspaceId']);
+    if (analyticsKeys) return `runtime.promote.payload.analytics ${analyticsKeys}`;
+    if (!boundedString(analytics.generationId, MAX_ID_BYTES)
+        || !boundedString(analytics.buildId, MAX_ID_BYTES)
+        || (analytics.workspaceId !== undefined && !boundedString(analytics.workspaceId, MAX_ID_BYTES))) {
+      return 'runtime.promote.payload.analytics identities must be bounded non-empty strings.';
+    }
+    if (!isRecord(analytics.captureSubject)) return 'runtime.promote.payload.analytics.captureSubject must be an object.';
+    const subject = analytics.captureSubject;
+    const expectedSubjectKey = subject.kind === 'session' ? 'rootSessionId'
+      : subject.kind === 'pendingCreate' ? 'operationId'
+        : subject.kind === 'host' ? 'hostId' : undefined;
+    if (!expectedSubjectKey || !boundedString(subject[expectedSubjectKey], MAX_ID_BYTES)) {
+      return 'runtime.promote.payload.analytics.captureSubject is invalid.';
+    }
+    const subjectKeys = exactKeys(subject, ['kind', expectedSubjectKey]);
+    if (subjectKeys) return `runtime.promote.payload.analytics.captureSubject ${subjectKeys}`;
+  }
   return validateJsonObject(value.payload, 'runtime.promote.payload');
 }
 
@@ -980,6 +1039,40 @@ function validateRuntimeReport(value: Record<string, unknown>, requireSeq: boole
   if (nested) return `runtime.report.payload ${nested}`;
   if (!Array.isArray(value.payload.models)) return 'runtime.report.payload.models must be an array.';
   return validateJsonValue(value.payload.models, 'runtime.report.payload.models');
+}
+
+function validateAnalyticsCapture(value: Record<string, unknown>, requireSeq: boolean): string | undefined {
+  const extra = exactKeys(value, [...baseKeys(requireSeq), 'packet']);
+  if (extra) return extra;
+  try {
+    parseAnalyticsTransportPacket(value.packet);
+    return undefined;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+}
+
+function validateAnalyticsAck(value: Record<string, unknown>, requireSeq: boolean): string | undefined {
+  const extra = exactKeys(value, [...baseKeys(requireSeq), 'acknowledgement']);
+  if (extra) return extra;
+  try {
+    parseAnalyticsTransportAcknowledgement(value.acknowledgement);
+    return undefined;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+}
+
+function validateAnalyticsRebind(value: Record<string, unknown>, requireSeq: boolean): string | undefined {
+  const extra = exactKeys(value, [...baseKeys(requireSeq), 'requestId', 'captureSubject']);
+  if (extra) return extra;
+  if (!boundedString(value.requestId, MAX_ID_BYTES)) return 'analytics subject transition requestId is invalid.';
+  try {
+    parseAnalyticsCaptureSubject(value.captureSubject);
+    return undefined;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
 }
 
 function validateOwnershipReserve(value: Record<string, unknown>, requireSeq: boolean): string | undefined {

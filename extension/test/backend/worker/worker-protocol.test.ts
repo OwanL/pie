@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { SDK_PATCH_IDENTITY_VERSION } from '../../../src/backend/sdk-patch-barrier';
+import { deriveAnalyticsIdempotencyKey, type AnalyticsObservation } from '../../../../shared/analytics/contracts.js';
+import { createAnalyticsFactPacket } from '../../../../shared/analytics/transport.js';
 import {
   WORKER_IPC_MAX_FRAME_BYTES,
   WORKER_IPC_MAX_ORDINARY_FRAME_BYTES,
@@ -47,6 +49,27 @@ const expected: WorkerFrameExpectation = {
   sessionPath: 'C:/sessions/root.jsonl',
   expectedSeq: 11,
 };
+
+const analyticsObservationBase: Omit<AnalyticsObservation<object>, 'idempotencyKey'> = {
+  schemaVersion: 1,
+  generationId: 'analytics-generation-1',
+  producerKind: 'subagent',
+  stableOriginId: 'origin-1',
+  sourceSequence: 1,
+  sourceKey: 'source-1',
+  entityKind: 'execution',
+  entityKey: 'execution-1',
+  observationKind: 'end',
+  observedAtMs: 100,
+  scope: { workspaceCoverage: 'known', rootSessionId: 'root-1' },
+  captureSubject: { kind: 'session', rootSessionId: 'root-1' },
+  producer: { buildId: 'build-1', processGeneration: 'worker-1:7' },
+  fields: { outcome: 'succeeded' },
+};
+const analyticsPacket = createAnalyticsFactPacket({
+  ...analyticsObservationBase,
+  idempotencyKey: deriveAnalyticsIdempotencyKey(analyticsObservationBase),
+});
 
 test('Phase 2 protocol accepts only its closed coordinator and worker variants', () => {
   const coordinatorFrames = [
@@ -109,6 +132,12 @@ test('Phase 4 protocol accepts every closed runtime, ownership, provider, and sy
         sdkPath: 'C:/sdk', agentDir: 'C:/agent', startupCwd: 'C:/work', sessionDir: 'C:/sessions',
         sessionPath: base.leasePath, creationReason: 'resume', writeLease: lease,
         openedPayload: { runtimeReady: false }, modelSettings: { defaultModel: 'gpt' },
+        analytics: {
+          generationId: 'analytics-generation-1',
+          captureSubject: { kind: 'session', rootSessionId: 'root-1' },
+          workspaceId: 'workspace-1',
+          buildId: 'build-1',
+        },
       },
     },
     { ...base, kind: 'runtime.command', requestId: 'command', operation: 'message.send', payload: { params: { text: 'hello' }, publicRequestId: 'public-1' } },
@@ -133,6 +162,17 @@ test('Phase 4 protocol accepts every closed runtime, ownership, provider, and sy
     { ...base, kind: 'sync', requestId: 'auth', domain: 'auth', revision: 2, payload: { authPath: 'C:/auth', fingerprint: 'fingerprint' } },
     { ...base, kind: 'sync', requestId: 'prefs', domain: 'runtimePrefs', revision: 3, payload: { values: { autonomousMode: true } } },
     { ...base, kind: 'sync', requestId: 'policy', domain: 'providerPolicy', revision: 4, payload: { providers: { openai: { maxConcurrent: 1 } } } },
+    {
+      ...base,
+      kind: 'analytics.ack',
+      acknowledgement: {
+        version: 1,
+        deliveryId: analyticsPacket.deliveryId,
+        generationId: analyticsPacket.generationId,
+        status: 'durable',
+        producerReconciliation: [],
+      },
+    },
   ];
   const workerFrames = [
     { ...base, kind: 'runtime.ready', requestId: 'promote', runtimeMetadata: { mode: 'phase4', startedAt: 100 } },
@@ -140,6 +180,7 @@ test('Phase 4 protocol accepts every closed runtime, ownership, provider, and sy
     { ...base, kind: 'sync.ack', requestId: 'sync-worker-request', domain: 'settings', revision: 1 },
     { ...base, kind: 'runtime.event', event: 'message.delta', payload: { delta: 'hello' } },
     { ...base, kind: 'runtime.event', event: 'error', payload: { code: 'PROMPT_FAILED', message: 'failed' } },
+    { ...base, kind: 'analytics.capture', packet: analyticsPacket },
     {
       ...base, kind: 'ownership.reserve', requestId: 'reserve',
       intent: { operationId: 'operation-1', reason: 'switch', source: lease, destinationPath: reservation.canonicalDestinationPath, destinationMustNotExist: false },

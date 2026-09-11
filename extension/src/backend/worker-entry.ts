@@ -88,6 +88,11 @@ function main(): void {
         host.fetchDetail(frame.requestId, frame.subscriptionId, frame.address, frame.ref, frame.maxPageBytes);
         return;
       }
+      if (frame.kind === 'analytics.ack') {
+        if (!host) return; // late acknowledgement after retirement is harmless
+        host.acknowledgeAnalytics(frame.acknowledgement);
+        return;
+      }
       if (frame.kind === 'sync') {
         const payload = frame.payload as WorkerJsonObject;
         if (host) host.applySync(frame.domain, frame.revision, payload);

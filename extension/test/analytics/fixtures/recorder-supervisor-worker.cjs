@@ -3,6 +3,11 @@ const { deserialize } = require('node:v8');
 
 const logPath = process.env.PIE_ANALYTICS_DATABASE_PATH;
 const crashMarker = `${logPath}.crashed`;
+const workerIdentity = {
+  pid: process.pid,
+  spawnedAtMs: Number(process.env.PIE_ANALYTICS_WORKER_SPAWNED_AT_MS),
+  instanceId: process.env.PIE_ANALYTICS_WORKER_INSTANCE_ID,
+};
 
 function send(message) {
   return new Promise((resolve, reject) => {
@@ -79,7 +84,7 @@ async function handle(request) {
   }
 }
 
-void send({ type: 'ready' }).then(() => {
+void send({ type: 'ready', workerIdentity }).then(() => {
   let processing = Promise.resolve();
   process.on('message', (message) => {
     processing = processing.then(() => handle(message));

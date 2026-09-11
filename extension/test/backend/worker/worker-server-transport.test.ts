@@ -161,6 +161,71 @@ test('worker server joins an exact equal-revision sync retry and applies it once
   }
 });
 
+test('a late analytics rebound after its non-gating timeout is fenced without closing the worker', async () => {
+  const inbound = new PassThrough();
+  const outbound = new PassThrough();
+  const frames: WorkerIpcFrame[] = [];
+  let buffered = '';
+  outbound.setEncoding('utf8');
+  outbound.on('data', (chunk: string) => {
+    buffered += chunk;
+    while (buffered.includes('\n')) {
+      const newline = buffered.indexOf('\n');
+      frames.push(JSON.parse(buffered.slice(0, newline)) as WorkerIpcFrame);
+      buffered = buffered.slice(newline + 1);
+    }
+  });
+  const exitCodes: number[] = [];
+  const server = new WorkerServer(identity, {
+    pid: frameBase.workerPid,
+    exit: (code = 0) => {
+      exitCodes.push(code);
+      return undefined as never;
+    },
+  }, { readable: inbound, writable: outbound }, {
+    validateBootstrap: () => undefined,
+    analyticsSubjectRebindTimeoutMs: 10,
+    onFrame: (frame, activeServer) => {
+      if (frame.kind !== 'sync') return;
+      activeServer.sendFrame({
+        kind: 'sync.ack',
+        requestId: frame.requestId,
+        domain: frame.domain,
+        revision: frame.revision,
+      });
+    },
+  });
+  server.start();
+  const send = (seq: number, body: Record<string, unknown>): void => {
+    inbound.write(`${JSON.stringify({ ...frameBase, seq, ...body })}\n`);
+  };
+
+  try {
+    send(1, { kind: 'bootstrap', heartbeatIntervalMs: 60_000, sdkPatchIdentity });
+    await waitUntil(() => frames.some((frame) => frame.kind === 'ready'));
+
+    const rebind = server.requestAnalyticsSubjectRebind({ kind: 'session', rootSessionId: 'replacement-root' });
+    await waitUntil(() => frames.some((frame) => frame.kind === 'analytics.rebind'));
+    const request = frames.find((frame) => frame.kind === 'analytics.rebind');
+    assert.ok(request?.kind === 'analytics.rebind');
+    await assert.rejects(rebind, /timed out/);
+
+    send(2, {
+      kind: 'analytics.rebound',
+      requestId: request.requestId,
+      captureSubject: request.captureSubject,
+    });
+    send(3, { kind: 'sync', requestId: 'post-rebound-sync', domain: 'settings', revision: 1, payload: { values: {} } });
+    await waitUntil(() => frames.some((frame) => frame.kind === 'sync.ack'
+      && frame.requestId === 'post-rebound-sync'));
+    assert.deepEqual(exitCodes, []);
+    assert.equal(frames.some((frame) => frame.kind === 'fatal'), false);
+  } finally {
+    inbound.destroy();
+    outbound.destroy();
+  }
+});
+
 test('worker server callback/request plumbing correlates Phase 4 frames and fences sync domains independently', async () => {
   const inbound = new PassThrough();
   const outbound = new PassThrough();

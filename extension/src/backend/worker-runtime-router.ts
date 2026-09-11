@@ -38,6 +38,11 @@ import type {
   WorkerSyncDomain,
   WorkerToCoordinatorFrame,
 } from './worker-protocol';
+import {
+  sameAnalyticsCaptureSubject,
+  type AnalyticsTransportAcknowledgement,
+  type AnalyticsTransportIngressEnvelope,
+} from '../../../shared/analytics/transport.js';
 
 export type WorkerRuntimeRouteState =
   | { state: 'cold'; rootSessionPath: string }
@@ -92,6 +97,13 @@ export interface HotWorkerRoute {
   previousLeasePath?: string;
   owner: SdkWorkerOwnershipIdentity;
   worker: SupervisedWorker;
+  analyticsCaptureSubject?: AnalyticsTransportIngressEnvelope['packet']['captureSubject'];
+  analyticsPendingDeliveries?: Map<string, {
+    route: AnalyticsTransportIngressEnvelope['route'];
+    captureSubject: AnalyticsTransportIngressEnvelope['packet']['captureSubject'];
+    retainedBytes: number;
+  }>;
+  analyticsPendingBytes?: number;
   checkpoint: {
     busySeq: number;
     requestId?: string;
@@ -172,6 +184,12 @@ export interface WorkerRuntimeRouterOptions {
   runtimeReadyTimeoutMs?: number;
   scheduler?: WorkerClientScheduler;
   emit(event: string, payload?: unknown): void;
+  /** Inactive until the P7 manifest owner supplies one immutable generation. */
+  analyticsActivation?: {
+    generationId: string;
+    workspaceId?: string;
+    buildId: string;
+  };
   /** Closed imperative stream; detail pages never enter ViewState. */
   emitDetail?(message: CoordinatorToHostDetailMessage): void;
   onSessionReplaced?: (sourcePath: string, destinationPath: string) => void;
@@ -1078,8 +1096,74 @@ export class WorkerRuntimeRouter {
         if (!this.recordExtensionUiOwner(route, frame.payload)) return;
       }
       const publicPayload = this.normalizeRuntimeEventPayload(route, frame.event, frame.payload);
+      if (frame.event === 'session.opened' && this.options.analyticsActivation) {
+        route.analyticsCaptureSubject = this.analyticsCaptureSubject(publicPayload);
+      }
       if (!isSupersededTerminal) this.observeCheckpoint(route, frame.event, publicPayload);
       this.options.emit(frame.event, publicPayload);
+      return;
+    }
+    if (frame.kind === 'analytics.capture') {
+      const activation = this.options.analyticsActivation;
+      const captureSubject = route.analyticsCaptureSubject;
+      const workerPid = route.worker.client.getSnapshot().pid;
+      const pending = route.analyticsPendingDeliveries?.get(frame.packet.deliveryId);
+      if (!activation || !captureSubject || typeof workerPid !== 'number' || !Number.isSafeInteger(workerPid) || workerPid <= 0
+          || frame.packet.generationId !== activation.generationId
+          || (!sameAnalyticsCaptureSubject(frame.packet.captureSubject, captureSubject)
+            && (!pending || !sameAnalyticsCaptureSubject(frame.packet.captureSubject, pending.captureSubject)))) {
+        return;
+      }
+      const pendingRoute: AnalyticsTransportIngressEnvelope['route'] = pending?.route ?? {
+        coordinatorGeneration: route.owner.coordinatorGeneration,
+        workerId: route.owner.workerId,
+        workerGeneration: route.owner.workerGeneration,
+        workerPid,
+        rootSessionPath: route.workerRootSessionPath,
+        leasePath: route.currentLeasePath,
+        leaseRevision: route.currentLeaseRevision,
+      };
+      const retainedBytes = Buffer.byteLength(JSON.stringify({
+        deliveryId: frame.packet.deliveryId,
+        route: pendingRoute,
+        captureSubject: frame.packet.captureSubject,
+      }), 'utf8');
+      if (!pending && ((route.analyticsPendingDeliveries?.size ?? 0) >= 4_096
+          || (route.analyticsPendingBytes ?? 0) + retainedBytes > 8 * 1024 * 1024)) {
+        route.worker.client.sendFrame?.({
+          kind: 'analytics.ack',
+          acknowledgement: {
+            version: 1,
+            deliveryId: frame.packet.deliveryId,
+            generationId: frame.packet.generationId,
+            status: 'rejected',
+            code: 'router_capacity',
+            message: 'Analytics coordinator pending-delivery capacity exceeded.',
+          },
+        });
+        return;
+      }
+      const emittedEnvelope: AnalyticsTransportIngressEnvelope = { route: pendingRoute, packet: frame.packet };
+      if (!pending) {
+        route.analyticsPendingDeliveries?.set(frame.packet.deliveryId, {
+          route: pendingRoute,
+          captureSubject: frame.packet.captureSubject,
+          retainedBytes,
+        });
+        route.analyticsPendingBytes = (route.analyticsPendingBytes ?? 0) + retainedBytes;
+      }
+      this.options.emit('analytics.capture', emittedEnvelope);
+      return;
+    }
+    if (frame.kind === 'analytics.rebind') {
+      const activation = this.options.analyticsActivation;
+      if (!activation || frame.captureSubject.kind !== 'session' || !this.isCurrentOrPromoting(route)) return;
+      route.analyticsCaptureSubject = frame.captureSubject;
+      route.worker.client.sendFrame?.({
+        kind: 'analytics.rebound',
+        requestId: frame.requestId,
+        captureSubject: frame.captureSubject,
+      });
       return;
     }
     if (frame.kind === 'runtime.report') {
@@ -1396,6 +1480,13 @@ export class WorkerRuntimeRouter {
         currentLeaseRevision: lease.ownershipRevision,
         owner,
         worker,
+        ...(this.options.analyticsActivation
+          ? {
+              analyticsCaptureSubject: this.analyticsCaptureSubject(snapshot.openedPayload),
+              analyticsPendingDeliveries: new Map(),
+              analyticsPendingBytes: 0,
+            }
+          : {}),
         checkpoint: { busySeq: 0, tools: [] },
       };
       // Install only worker/current-path lookup while the public root remains
@@ -1418,6 +1509,14 @@ export class WorkerRuntimeRouter {
             writeLease: lease,
             openedPayload: snapshot.openedPayload,
             modelSettings: snapshot.modelSettings,
+            ...(this.options.analyticsActivation && route.analyticsCaptureSubject
+              ? {
+                analytics: {
+                  ...this.options.analyticsActivation,
+                  captureSubject: route.analyticsCaptureSubject,
+                },
+              }
+              : {}),
           }),
         }, 'runtime.ready'),
         this.runtimeReadyTimeoutMs,
@@ -1998,6 +2097,55 @@ export class WorkerRuntimeRouter {
       && root.retired
       && root.source !== route
       && routeKey(root.rootSessionPath) === routeKey(route.rootSessionPath);
+  }
+
+  private analyticsCaptureSubject(
+    openedPayload: SessionOpenedPayload | WorkerJsonObject,
+  ): AnalyticsTransportIngressEnvelope['packet']['captureSubject'] {
+    const session = openedPayload.session;
+    const sessionId = session && typeof session === 'object' && !Array.isArray(session)
+      && 'sessionId' in session && typeof session.sessionId === 'string'
+      ? session.sessionId.trim()
+      : undefined;
+    if (!sessionId || sessionId.includes('\0')) {
+      throw new BackendError('INVALID_SESSION', 'Canonical analytics activation requires a stable opened-session identity.');
+    }
+    return { kind: 'session', rootSessionId: sessionId };
+  }
+
+  /** Route a host-issued durable disposition only to the exact current worker
+   * that produced the corresponding ingress envelope. */
+  acknowledgeAnalytics(
+    routeIdentity: AnalyticsTransportIngressEnvelope['route'],
+    acknowledgement: AnalyticsTransportAcknowledgement,
+  ): boolean {
+    const route = this.workersById.get(routeIdentity.workerId);
+    if (!route || !this.options.analyticsActivation || !route.analyticsCaptureSubject) return false;
+    const pending = route.analyticsPendingDeliveries?.get(acknowledgement.deliveryId);
+    if (!pending || !this.sameAnalyticsRoute(pending.route, routeIdentity)) return false;
+    if (route.owner.coordinatorGeneration !== routeIdentity.coordinatorGeneration
+        || route.owner.workerGeneration !== routeIdentity.workerGeneration
+        || route.worker.client.getSnapshot().pid !== routeIdentity.workerPid
+        || acknowledgement.generationId !== this.options.analyticsActivation.generationId) return false;
+    const accepted = route.worker.client.sendFrame?.({ kind: 'analytics.ack', acknowledgement }) === true;
+    if (accepted) {
+      route.analyticsPendingDeliveries?.delete(acknowledgement.deliveryId);
+      route.analyticsPendingBytes = Math.max(0, (route.analyticsPendingBytes ?? 0) - pending.retainedBytes);
+    }
+    return accepted;
+  }
+
+  private sameAnalyticsRoute(
+    left: AnalyticsTransportIngressEnvelope['route'],
+    right: AnalyticsTransportIngressEnvelope['route'],
+  ): boolean {
+    return left.coordinatorGeneration === right.coordinatorGeneration
+      && left.workerId === right.workerId
+      && left.workerGeneration === right.workerGeneration
+      && left.workerPid === right.workerPid
+      && routeKey(left.rootSessionPath) === routeKey(right.rootSessionPath)
+      && routeKey(left.leasePath) === routeKey(right.leasePath)
+      && left.leaseRevision === right.leaseRevision;
   }
 
   private providerAcquireKey(route: HotWorkerRoute, requestId: string): string {

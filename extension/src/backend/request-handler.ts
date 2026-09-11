@@ -30,6 +30,10 @@ import {
 } from './request-handler-shared';
 import { SESSION_REQUEST_HANDLERS } from './request-handler-session';
 import { MESSAGE_REQUEST_HANDLERS } from './request-handler-message';
+import {
+  parseAnalyticsTransportAcknowledgement,
+  parseAnalyticsTransportRoute,
+} from '../../../shared/analytics/transport.js';
 
 export {
   type BackendRequestHandlerDeps,
@@ -533,6 +537,28 @@ async function handleProviderGateMetrics(
   return { enabled: true, providers: gate.getMetrics() };
 }
 
+async function handleAnalyticsAcknowledgement(
+  deps: BackendRequestHandlerDeps,
+  request: RequestEnvelope,
+): Promise<unknown> {
+  if (!request.params || typeof request.params !== 'object' || Array.isArray(request.params)) {
+    throw new BackendError('INVALID_PARAMS', 'analytics.ack params must be an object.');
+  }
+  const params = request.params as Record<string, unknown>;
+  const unexpected = Object.keys(params).find((key) => key !== 'route' && key !== 'acknowledgement');
+  if (unexpected) throw new BackendError('INVALID_PARAMS', `analytics.ack contains unsupported field ${unexpected}.`);
+  let route;
+  let acknowledgement;
+  try {
+    route = parseAnalyticsTransportRoute(params.route);
+    acknowledgement = parseAnalyticsTransportAcknowledgement(params.acknowledgement);
+  } catch (error) {
+    throw new BackendError('INVALID_PARAMS', error instanceof Error ? error.message : String(error));
+  }
+  markRequestValidated(deps);
+  return { accepted: deps.acknowledgeAnalytics?.(route, acknowledgement) === true };
+}
+
 const handlers: Record<string, RequestHandler> = {
   'app.ping': handleAppPing,
   'mcp.list': handleMcpList,
@@ -547,6 +573,7 @@ const handlers: Record<string, RequestHandler> = {
   'settings.set': handleSettingsSet,
   'systemPromptToggles.set': handleSystemPromptTogglesSet,
   'provider_gate.metrics': handleProviderGateMetrics,
+  'analytics.ack': handleAnalyticsAcknowledgement,
   'liveTurn.checkpoint': handleLiveTurnCheckpoint,
   'diagnostics.livePipeline.setEnabled': handleLivePipelineTraceSetEnabled,
 };

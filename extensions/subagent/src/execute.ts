@@ -17,6 +17,7 @@ import {
 	getMaxDepth,
 	type SubagentRuntimeContext,
 } from "../runner.js";
+import { resolveInstalledSubagentAnalyticsCapture } from "./analytics-runtime-bridge.js";
 import {
 	type OnUpdateCallback,
 	type SingleResult,
@@ -358,6 +359,11 @@ export async function execute(
 	const retryClock = _internal?.clock ?? realRetryClock;
 
 	const runtimeCtx = readRuntimeContext();
+	// The isolated worker installs this process-local bridge only after a
+	// canonical activation descriptor has been validated. Nested calls inherit
+	// the resulting context through AsyncLocalStorage; legacy/unconfigured
+	// workers keep the historical no-op path.
+	runtimeCtx.analyticsCapture ??= resolveInstalledSubagentAnalyticsCapture();
 	const maxDepth = getMaxDepth();
 	if (maxDepth === 0) return subagentsDisabledResponse(maxDepth);
 	if (!canSpawnFromSubagentBucket(runtimeCtx.bucket)) {

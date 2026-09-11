@@ -3229,6 +3229,43 @@ test('provider_gate.metrics reports disabled shape when the ProviderGate is not 
   assert.deepEqual(result, { enabled: false, providers: [] });
 });
 
+test('analytics.ack validates the closed route and forwards one exact durable disposition', async () => {
+  const harness = createHarness();
+  const seen: unknown[] = [];
+  harness.deps.acknowledgeAnalytics = (route, acknowledgement) => {
+    seen.push({ route, acknowledgement });
+    return true;
+  };
+  const route = {
+    coordinatorGeneration: 3,
+    workerId: 'worker-1',
+    workerGeneration: 2,
+    workerPid: 42,
+    rootSessionPath: 'C:\\sessions\\root.jsonl',
+    leasePath: 'C:\\sessions\\root.jsonl',
+    leaseRevision: 7,
+  };
+  const acknowledgement = {
+    version: 1,
+    deliveryId: 'delivery-1',
+    generationId: 'analytics-generation-1',
+    status: 'durable',
+  };
+  assert.deepEqual(await handleBackendRequest(harness.deps, {
+    id: 'analytics-ack-1', method: 'analytics.ack', params: { route, acknowledgement },
+  }), { accepted: true });
+  assert.deepEqual(seen, [{ route, acknowledgement }]);
+  await assert.rejects(handleBackendRequest(harness.deps, {
+    id: 'analytics-ack-invalid', method: 'analytics.ack',
+    params: { route: { ...route, workerPid: 0 }, acknowledgement },
+  }), /workerPid/);
+  await assert.rejects(handleBackendRequest(harness.deps, {
+    id: 'analytics-ack-extra', method: 'analytics.ack',
+    params: { route, acknowledgement, unexpected: true },
+  }), /unsupported field/);
+  assert.equal(seen.length, 1);
+});
+
 test('provider_gate.metrics returns live ProviderGate metrics when installed', async (t) => {
   ProviderGate.uninstall();
   t.after(() => ProviderGate.uninstall());

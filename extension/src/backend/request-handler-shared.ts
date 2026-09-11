@@ -6,6 +6,10 @@ import type { SessionContext, SessionContextCreationReason } from './server-type
 import { BackendError } from './server-io';
 import { toErrorMessage } from '../shared/error-message';
 import type { SessionSnapshotTransport } from '../shared/transcript-window';
+import type {
+  AnalyticsTransportAcknowledgement,
+  AnalyticsTransportRoute,
+} from '../../../shared/analytics/transport.js';
 
 export interface TranscriptPageLoadOptions {
   transport: SessionSnapshotTransport;
@@ -183,6 +187,11 @@ export interface BackendRequestHandlerDeps {
    *  Production injects the coordinator lease authority; standalone paths
    *  fall back to the in-process gate inside the handler. */
   getProviderGateMetrics?: () => readonly ProviderGateMetrics[] | undefined;
+  /** Route one host-issued recorder disposition to the exact current worker. */
+  acknowledgeAnalytics?: (
+    route: AnalyticsTransportRoute,
+    acknowledgement: AnalyticsTransportAcknowledgement,
+  ) => boolean;
   /** Called only after the selected handler has validated its request params. */
   onRequestValidated?: () => void;
   /** The server owns the request completion span when it may retry a browse

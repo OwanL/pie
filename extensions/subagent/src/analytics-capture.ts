@@ -35,6 +35,7 @@ export interface SubagentAnalyticsCaptureContext {
    * result is sealed; their absence remains explicit pending coverage. */
   readFactAcknowledgement?: (generationId: string, stableOriginId: string) => Int64Value | undefined;
   isDetailComplete?: (payloadId: string) => boolean;
+  releaseAcknowledgementInterest?: (generationId: string, stableOriginId: string, payloadId: string) => void;
   /** Host-injected mapping from the SDK tool-call ID to the canonical parent
    * tool entity. Absent keeps compatibility identity until P7 wiring. */
   resolveParentToolEntityId?: (toolCallId: string) => string;
@@ -218,13 +219,15 @@ function providerObservation(
     invocationId: canonicalInvocationId,
     sourceId: invocation.invocationId,
     purpose: 'subagent',
-    provider: invocation.provider,
-    dispatchedModel: invocation.model,
-    attemptId: invocation.attemptId,
-    startedAtMs: invocation.startedAt,
-    endedAtMs: invocation.completedAt,
-    settledAtMs: invocation.completedAt,
-    outcome: invocation.outcome,
+    ...(invocation.provider ? { provider: invocation.provider } : {}),
+    ...(invocation.model ? { dispatchedModel: invocation.model } : {}),
+    ...(invocation.attemptId ? { attemptId: invocation.attemptId } : {}),
+    ...(invocation.startedAt === undefined ? {} : { startedAtMs: invocation.startedAt }),
+    ...(invocation.completedAt === undefined ? {} : {
+      endedAtMs: invocation.completedAt,
+      settledAtMs: invocation.completedAt,
+    }),
+    ...(invocation.outcome ? { outcome: invocation.outcome } : {}),
     coverage: completeChannels ? 'known' : 'unknown',
     ...(usage?.input === undefined ? {} : { inputTokens: usage.input }),
     ...(usage?.output === undefined ? {} : { outputTokens: usage.output }),
@@ -332,9 +335,9 @@ export function captureSubagentProviderDispatch(
       childId: state.childId,
       parentToolCallId: parentToolEntityId,
       fields: {
-        childId: state.childId,
+        ...(state.childId ? { childId: state.childId } : {}),
         attemptId: state.attemptId,
-        parentToolCallId: parentToolEntityId,
+        ...(parentToolEntityId ? { parentToolCallId: parentToolEntityId } : {}),
         operationKind: 'subagent-attempt',
         source: 'subagent',
         startedAtMs: state.startedAtMs,
@@ -369,14 +372,14 @@ export function captureSubagentProviderDispatch(
     childId: state.childId,
     parentToolCallId: parentToolEntityId,
     invocationId: canonicalInvocationId,
-    fields: {
-      invocationId: canonicalInvocationId,
-      sourceId: invocationId,
-      purpose: 'subagent',
-      provider: dispatch.provider,
-      dispatchedModel: dispatch.model,
-      thinkingLevel: dispatch.thinkingLevel,
-      retryGroupId: state.childId,
+      fields: {
+        invocationId: canonicalInvocationId,
+        sourceId: invocationId,
+        purpose: 'subagent',
+        ...(dispatch.provider ? { provider: dispatch.provider } : {}),
+        ...(dispatch.model ? { dispatchedModel: dispatch.model } : {}),
+        ...(dispatch.thinkingLevel ? { thinkingLevel: dispatch.thinkingLevel } : {}),
+        ...(state.childId ? { retryGroupId: state.childId } : {}),
       attemptId: state.attemptId,
       startedAtMs: dispatch.observedAtMs,
       coverage: 'unknown',
@@ -499,9 +502,9 @@ export function captureSubagentTerminalResult(
           childId,
           parentToolCallId: parentToolEntityId,
           fields: {
-            childId,
-            attemptId,
-            parentToolCallId: parentToolEntityId,
+            ...(childId ? { childId } : {}),
+            ...(attemptId ? { attemptId } : {}),
+            ...(parentToolEntityId ? { parentToolCallId: parentToolEntityId } : {}),
             operationKind: 'subagent-attempt',
             source: 'subagent',
             startedAtMs: result.startedAt ?? null,
@@ -546,9 +549,9 @@ export function captureSubagentTerminalResult(
         childId,
         parentToolCallId: parentToolEntityId,
         fields: {
-          childId,
-          attemptId,
-          parentToolCallId: parentToolEntityId,
+          ...(childId ? { childId } : {}),
+          ...(attemptId ? { attemptId } : {}),
+          ...(parentToolEntityId ? { parentToolCallId: parentToolEntityId } : {}),
           operationKind: 'subagent-attempt',
           source: 'subagent',
           endedAtMs: result.completedAt ?? null,
@@ -592,6 +595,7 @@ export function captureSubagentTerminalResult(
     ...(predispatch ? { predispatch } : {}),
   };
   result.analyticsCaptureReceipt = receipt;
+  context.releaseAcknowledgementInterest?.(context.generationId, stableOriginId, detailPayloadId);
   const errors = [detailError, factError].filter((value): value is string => !!value);
   if (errors.length > 0) result.analyticsCaptureError = errors.join('; ');
 

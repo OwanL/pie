@@ -1,4 +1,4 @@
-const CALIBRATION_SCHEMA_VERSION = 1;
+const CALIBRATION_SCHEMA_VERSION = 2;
 
 function requireNonNegativeInteger(value, label) {
   if (!Number.isSafeInteger(value) || value < 0) {
@@ -12,6 +12,38 @@ function requirePositiveInteger(value, label) {
     throw new Error(`${label} must be a positive safe integer`);
   }
   return value;
+}
+
+export function validateTerminalWorkerEvidence(events, { requireReady = true } = {}) {
+  const errors = [];
+  if (!Array.isArray(events) || events.length === 0) {
+    return { valid: false, errors: ['worker lifecycle evidence is missing'], workers: [] };
+  }
+  const byInstance = new Map();
+  for (const [index, event] of events.entries()) {
+    const identity = event?.identity;
+    if (!Number.isSafeInteger(identity?.pid) || identity.pid <= 0
+      || !Number.isSafeInteger(identity?.spawnedAtMs) || identity.spawnedAtMs <= 0
+      || typeof identity?.instanceId !== 'string' || !/^[0-9a-f-]{36}$/i.test(identity.instanceId)) {
+      errors.push(`worker lifecycle event[${index}] identity is invalid`);
+      continue;
+    }
+    const record = byInstance.get(identity.instanceId) ?? { identity: { ...identity }, states: [] };
+    if (record.identity.pid !== identity.pid || record.identity.spawnedAtMs !== identity.spawnedAtMs) {
+      errors.push(`worker lifecycle identity changed for ${identity.instanceId}`);
+    }
+    record.states.push({ state: event.state, code: event.code ?? null, signal: event.signal ?? null });
+    byInstance.set(identity.instanceId, record);
+  }
+  const expectedStates = requireReady ? ['spawned', 'ready', 'terminal'] : ['spawned', 'terminal'];
+  for (const record of byInstance.values()) {
+    const actualStates = record.states.map((event) => event.state);
+    if (JSON.stringify(actualStates) !== JSON.stringify(expectedStates)) {
+      errors.push(`worker lifecycle ${record.identity.instanceId} must be exactly ${expectedStates.join(',')}`);
+    }
+  }
+  if (byInstance.size === 0) errors.push('worker lifecycle evidence has no valid worker identities');
+  return { valid: errors.length === 0, errors, workers: [...byInstance.values()] };
 }
 
 function requireSnapshot(snapshot, label) {
@@ -97,8 +129,7 @@ export function buildCapacityCalibration({
   const beforePrimaryFacts = requireSnapshot(snapshots.beforePrimaryFacts, 'before-primary-facts');
   const afterPrimaryFacts = requireSnapshot(snapshots.afterPrimaryFacts, 'after-primary-facts');
   const afterVariableDetails = requireSnapshot(snapshots.afterVariableDetails, 'after-variable-details');
-  const finalBeforeCorruption = requireSnapshot(snapshots.finalBeforeCorruption, 'final-before-corruption');
-  const afterCorruptionCopy = requireSnapshot(snapshots.afterCorruptionCopy, 'after-corruption-copy');
+  const finalBeforeFault = requireSnapshot(snapshots.finalBeforeFault, 'final-before-fault');
   const observedTrees = observedTreeBytes.map((value, index) => (
     requireNonNegativeInteger(value, `observedTreeBytes[${index}]`)
   ));
@@ -108,23 +139,19 @@ export function buildCapacityCalibration({
 
   const primaryFactBytes = afterPrimaryFacts.mainDatabaseBytes - beforePrimaryFacts.mainDatabaseBytes;
   const variableDetailBytes = afterVariableDetails.mainDatabaseBytes - afterPrimaryFacts.mainDatabaseBytes;
-  const preCopyHighWaterBytes = Math.max(
+  const preFaultHighWaterBytes = Math.max(
     beforePrimaryFacts.treeBytes,
     afterPrimaryFacts.treeBytes,
     afterVariableDetails.treeBytes,
-    finalBeforeCorruption.treeBytes,
+    finalBeforeFault.treeBytes,
     ...observedTrees,
   );
-  const fixedTreeBytes = preCopyHighWaterBytes - primaryFactBytes - variableDetailBytes;
-  const corruptionCopyBytes = afterCorruptionCopy.treeBytes - finalBeforeCorruption.treeBytes;
-  const observedHighWaterBytes = Math.max(
-    preCopyHighWaterBytes,
-    afterCorruptionCopy.treeBytes,
-  );
+  const fixedTreeBytes = preFaultHighWaterBytes - primaryFactBytes - variableDetailBytes;
+  const observedHighWaterBytes = preFaultHighWaterBytes;
   const prewriteHighWaterBytes = Math.max(0, ...projectedPrewrites);
   const conservativeHighWaterBytes = Math.max(observedHighWaterBytes, prewriteHighWaterBytes);
   const errors = [];
-  const orderedSnapshots = [beforePrimaryFacts, afterPrimaryFacts, afterVariableDetails, finalBeforeCorruption, afterCorruptionCopy];
+  const orderedSnapshots = [beforePrimaryFacts, afterPrimaryFacts, afterVariableDetails, finalBeforeFault];
   if (details * 10 !== rows) errors.push('detailRows must equal one tenth of baselineRows');
   if (observedTrees.length === 0) errors.push('observed proof-tree measurements are missing');
   if (projectedPrewrites.length === 0) errors.push('prewrite proof-tree projections are missing');
@@ -139,39 +166,32 @@ export function buildCapacityCalibration({
   }
   if (primaryFactBytes <= 0) errors.push('primary fact database-family increment was not positive');
   if (variableDetailBytes <= 0) errors.push('variable detail database-family increment was not positive');
-  if (finalBeforeCorruption.mainDatabaseBytes < afterVariableDetails.mainDatabaseBytes) {
+  if (finalBeforeFault.mainDatabaseBytes < afterVariableDetails.mainDatabaseBytes) {
     errors.push('final main database-family bytes moved backwards after variable detail capture');
   }
-  if (afterCorruptionCopy.mainDatabaseBytes !== finalBeforeCorruption.mainDatabaseBytes) {
-    errors.push('canonical main database-family bytes changed during the corruption copy');
-  }
   if (fixedTreeBytes < 0) errors.push('fixed tree bytes would require offsetting a variable component');
-  if (finalBeforeCorruption.mainFileBytes <= 0) errors.push('final main database file was not measured');
-  if (corruptionCopyBytes !== finalBeforeCorruption.mainFileBytes) {
-    errors.push('corruption copy snapshot does not contain exactly one full main database file copy');
-  }
+  if (finalBeforeFault.mainFileBytes <= 0) errors.push('final main database file was not measured');
 
   return {
     schemaVersion: CALIBRATION_SCHEMA_VERSION,
     units: 'bytes',
+    faultModel: 'in-place-terminal-corruption',
     baselineRows: rows,
     detailRows: details,
     snapshots: {
       beforePrimaryFacts,
       afterPrimaryFacts,
       afterVariableDetails,
-      finalBeforeCorruption,
-      afterCorruptionCopy,
+      finalBeforeFault,
     },
     observedTreeBytes: observedTrees,
     components: {
       primaryFactBytes,
       variableDetailBytes,
       fixedTreeBytes,
-      finalMainDatabaseBytes: finalBeforeCorruption.mainDatabaseBytes,
-      finalMainFileBytes: finalBeforeCorruption.mainFileBytes,
-      corruptionCopyBytes,
-      preCopyHighWaterBytes,
+      finalMainDatabaseBytes: finalBeforeFault.mainDatabaseBytes,
+      finalMainFileBytes: finalBeforeFault.mainFileBytes,
+      preFaultHighWaterBytes,
     },
     prewriteProjectedTreeBytes: projectedPrewrites,
     observedHighWaterBytes,
@@ -190,6 +210,7 @@ export function validateCapacityCalibration(calibration, { baselineRows, detailR
   }
   if (calibration.schemaVersion !== CALIBRATION_SCHEMA_VERSION) errors.push('capacity calibration schema version is unsupported');
   if (calibration.units !== 'bytes') errors.push('capacity calibration units must be bytes');
+  if (calibration.faultModel !== 'in-place-terminal-corruption') errors.push('capacity calibration fault model is unsupported');
   if (calibration.baselineRows !== baselineRows) errors.push('capacity calibration baseline row count does not match');
   if (calibration.detailRows !== detailRows) errors.push('capacity calibration detail row count does not match');
 
@@ -237,12 +258,13 @@ export function projectCapacityFromCalibration(calibration, { targetRows, safety
   const primaryFactBytes = Math.ceil(calibration.components.primaryFactBytes * rowRatio * safetyFactor);
   const variableDetailBytes = Math.ceil(calibration.components.variableDetailBytes * rowRatio * safetyFactor);
   const projectedSteadyTreeBytes = calibration.components.fixedTreeBytes + primaryFactBytes + variableDetailBytes;
-  const projectedMainDatabaseCopyBytes = Math.ceil(
+  const projectedMainDatabaseBytes = Math.ceil(
     calibration.components.finalMainDatabaseBytes * rowRatio * safetyFactor,
   );
-  const projectedFaultPeakBytes = projectedSteadyTreeBytes + projectedMainDatabaseCopyBytes;
+  const projectedFaultPeakBytes = Math.max(projectedSteadyTreeBytes, projectedMainDatabaseBytes);
   return {
     units: 'bytes',
+    faultModel: calibration.faultModel,
     targetRows: rows,
     rowRatio,
     safetyFactor,
@@ -250,7 +272,7 @@ export function projectCapacityFromCalibration(calibration, { targetRows, safety
       fixedTreeBytes: calibration.components.fixedTreeBytes,
       primaryFactBytes,
       variableDetailBytes,
-      projectedMainDatabaseCopyBytes,
+      projectedMainDatabaseBytes,
     },
     projectedSteadyTreeBytes,
     projectedFaultPeakBytes,

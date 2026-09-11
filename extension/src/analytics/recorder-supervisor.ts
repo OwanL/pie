@@ -1,4 +1,5 @@
 import { fork, type ChildProcess } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { serialize } from 'node:v8';
 
 import type {
@@ -7,7 +8,9 @@ import type {
   AnalyticsObservation,
   AnalyticsSink,
 } from '../../../shared/analytics/contracts.js';
+import { analyticsProducerIdentity } from '../../../shared/analytics/transport.js';
 import type { ProducerReconciliation } from './sqlite-recorder.js';
+import { redactSensitiveText } from '../shared/sensitive-redaction.js';
 
 export interface AnalyticsSubjectBindingReceipt {
   pendingOperationId: string;
@@ -35,6 +38,18 @@ export interface AnalyticsRecorderProducerMeasurement {
   callbackLatencyMs?: number;
 }
 
+export interface AnalyticsWorkerIdentity {
+  readonly pid: number;
+  /** Parent-observed spawn time. This is a worker-instance marker, not an OS
+   * process creation timestamp. */
+  readonly spawnedAtMs: number;
+  readonly instanceId: string;
+}
+
+export type AnalyticsWorkerLifecycleEvent =
+  | { state: 'spawned' | 'ready'; identity: AnalyticsWorkerIdentity }
+  | { state: 'terminal'; identity: AnalyticsWorkerIdentity; code: number | null; signal: NodeJS.Signals | null };
+
 export interface AnalyticsRecorderSupervisorOptions {
   enabled: boolean;
   workerScript: string;
@@ -60,6 +75,12 @@ export interface AnalyticsRecorderSupervisorOptions {
     completeDetailWatermark: number | string;
   }) => void;
   onProducerWorkMeasured?: (measurement: AnalyticsRecorderProducerMeasurement) => void;
+  /** Diagnostic lifecycle evidence for qualification and operations. The
+   * child `exit` event is the terminal authority. */
+  onWorkerLifecycle?: (event: AnalyticsWorkerLifecycleEvent) => void;
+  /** Explicit fork exec args for source-mode tests or embedding. Packaged
+   * production workers inherit no parent Node/Electron/test flags. */
+  execArgv?: readonly string[];
 }
 
 interface PendingRequest {
@@ -84,6 +105,8 @@ interface CaptureQueueItem {
    * advanced-IPC clone and measured per-record framing overhead. */
   bytes: number;
   enqueuedAtMs: number;
+  producerIdentity?: string;
+  onDisposition?: (disposition: AnalyticsRecorderCaptureDisposition) => void;
 }
 
 interface ControlQueueItem {
@@ -130,7 +153,7 @@ function minimumOwnedBytes(value: unknown, stopAfter: number): number {
 }
 
 export interface AnalyticsRecorderWorkerStats {
-  process: NodeJS.MemoryUsage & { cpuUsage: NodeJS.CpuUsage };
+  process: NodeJS.MemoryUsage & { cpuUsage: NodeJS.CpuUsage; workerIdentity: AnalyticsWorkerIdentity };
   recorder: Record<string, number>;
   detailStorage: Record<string, number | string>;
   delivery: Record<string, unknown>;
@@ -144,6 +167,14 @@ export interface AnalyticsRecorderDeliveryWatermarks {
   producerReconciliation: ProducerReconciliation[];
   completeDetailWatermark: number | string;
 }
+
+export type AnalyticsRecorderCaptureDisposition =
+  | {
+    status: 'durable';
+    producerReconciliation: ProducerReconciliation[];
+    completeDetailWatermark: number | string;
+  }
+  | { status: 'rejected'; code: string; message: string };
 
 export interface AnalyticsRecorderBacklog {
   queuedRecords: number;
@@ -223,6 +254,7 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
     producerReconciliation: [],
     completeDetailWatermark: 0,
   };
+  private readonly workerIdentities = new WeakMap<ChildProcess, AnalyticsWorkerIdentity>();
 
   constructor(private readonly options: AnalyticsRecorderSupervisorOptions) {}
 
@@ -297,6 +329,16 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
     this.enqueueCapture('observation', this.subjectKey(observation.captureSubject), observation);
   }
 
+  /** Transfer one capture into the same bounded queue while retaining an
+   * exact per-record durable disposition for an external producer ACK. */
+  submitTracked<Fields extends object>(
+    observation: AnalyticsObservation<Fields>,
+    onDisposition: (disposition: AnalyticsRecorderCaptureDisposition) => void,
+  ): void {
+    if (!this.options.enabled) throw new Error('Analytics recorder worker is disabled.');
+    this.enqueueCapture('observation', this.subjectKey(observation.captureSubject), observation, onDisposition);
+  }
+
   preflightDetail(value: unknown): void {
     if (!this.options.enabled) return;
     if (!this.accepting) throw this.failure ?? new Error('Analytics recorder worker is not accepting capture.');
@@ -324,6 +366,14 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
   submitDetail(capture: AnalyticsDetailCapture): void {
     if (!this.options.enabled) return;
     this.enqueueCapture('detail', this.subjectKey(capture.captureSubject), capture);
+  }
+
+  submitTrackedDetail(
+    capture: AnalyticsDetailCapture,
+    onDisposition: (disposition: AnalyticsRecorderCaptureDisposition) => void,
+  ): void {
+    if (!this.options.enabled) throw new Error('Analytics recorder worker is disabled.');
+    this.enqueueCapture('detail', this.subjectKey(capture.captureSubject), capture, onDisposition);
   }
 
   async flush(): Promise<void> {
@@ -456,6 +506,7 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
     kind: SerializedCaptureEnvelope['kind'],
     subject: string,
     value: AnalyticsObservation<object> | AnalyticsDetailCapture,
+    onDisposition?: (disposition: AnalyticsRecorderCaptureDisposition) => void,
   ): void {
     if (!this.accepting) throw this.failure ?? new Error('Analytics recorder worker is not accepting capture.');
     const startedAt = performance.now();
@@ -512,6 +563,10 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
       encoded,
       bytes,
       enqueuedAtMs: performance.now(),
+      ...(kind === 'observation' && value.producerKind && value.stableOriginId
+        ? { producerIdentity: analyticsProducerIdentity(value.generationId, value.producerKind, value.stableOriginId) }
+        : {}),
+      ...(onDisposition ? { onDisposition } : {}),
     });
     this.queuedRecords += 1;
     this.queuedBytes += bytes;
@@ -613,12 +668,15 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
       const producerReconciliation = receipt?.producerReconciliation ?? [];
       const completeDetailWatermark = receipt?.completeDetailWatermark ?? this.acknowledgedWatermarks.completeDetailWatermark;
       this.acknowledgedWatermarks = { producerReconciliation, completeDetailWatermark };
-      const rejectedIndexes = new Set<number>();
+      const rejectedIndexes = new Map<number, { code: string; error: string }>();
       for (const rejection of receipt?.rejections ?? []) {
         if (!Number.isSafeInteger(rejection.index) || rejection.index < 0 || rejection.index >= items.length) {
           throw new AnalyticsRecorderWorkerRequestError('Recorder returned an invalid capture rejection receipt.');
         }
-        rejectedIndexes.add(rejection.index);
+        if (rejectedIndexes.has(rejection.index)) {
+          throw new AnalyticsRecorderWorkerRequestError('Recorder returned a duplicate capture rejection receipt.');
+        }
+        rejectedIndexes.set(rejection.index, rejection);
         this.lastRejectedDelivery = new AnalyticsRecorderWorkerRequestError(rejection.error, rejection.code);
       }
       this.deliveryFailures += rejectedIndexes.size;
@@ -633,6 +691,22 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
           producerReconciliation,
           completeDetailWatermark,
         });
+      }
+      const reconciliationByProducer = new Map(
+        producerReconciliation.map((entry) => [entry.producerIdentity, entry]),
+      );
+      for (const [index, item] of items.entries()) {
+        const rejection = rejectedIndexes.get(index);
+        const exactReconciliation = item.producerIdentity
+          ? reconciliationByProducer.get(item.producerIdentity)
+          : undefined;
+        this.notifyCaptureDisposition(item, rejection
+          ? { status: 'rejected', code: rejection.code, message: rejection.error }
+          : {
+              status: 'durable',
+              producerReconciliation: exactReconciliation ? [exactReconciliation] : [],
+              completeDetailWatermark,
+            });
       }
       this.failure = undefined;
     } catch (error) {
@@ -656,11 +730,31 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
     }
   }
 
+  private notifyCaptureDisposition(
+    item: CaptureQueueItem,
+    disposition: AnalyticsRecorderCaptureDisposition,
+  ): void {
+    try {
+      item.onDisposition?.(disposition);
+    } catch {
+      // A transport ACK observer cannot change recorder durability or replay.
+    }
+  }
+
   private async startWorker(): Promise<void> {
+    const spawnedAtMs = Date.now();
+    const instanceId = randomUUID();
     const child = fork(this.options.workerScript, [], {
+      // The recorder is a dedicated packaged-JS process (test loaders own
+      // their own TS import). Inheriting Electron, debugger, or `node --test`
+      // flags can turn it into a wrapper/grandchild and break the sole IPC
+      // ownership channel.
+      execArgv: [...(this.options.execArgv ?? [])],
       env: {
         ...process.env,
         PIE_ANALYTICS_DATABASE_PATH: this.options.databasePath,
+        PIE_ANALYTICS_WORKER_INSTANCE_ID: instanceId,
+        PIE_ANALYTICS_WORKER_SPAWNED_AT_MS: String(spawnedAtMs),
         ...(this.options.rehearsalAcknowledgementDelayMs === undefined ? {} : {
           PIE_ANALYTICS_REHEARSAL_ACK_DELAY_MS: String(this.options.rehearsalAcknowledgementDelayMs),
         }),
@@ -668,6 +762,10 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
       serialization: 'advanced',
       stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
     });
+    if (!child.pid) throw new Error('Analytics recorder worker did not expose a process ID.');
+    const workerIdentity: AnalyticsWorkerIdentity = Object.freeze({ pid: child.pid, spawnedAtMs, instanceId });
+    this.workerIdentities.set(child, workerIdentity);
+    this.notifyWorkerLifecycle({ state: 'spawned', identity: workerIdentity });
     this.child = child;
     this.workerReady = false;
     this.workerStderr = '';
@@ -687,11 +785,18 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
         reject(new Error('Analytics recorder worker startup timed out.'));
       }, this.options.startupTimeoutMs ?? 10_000);
       const onMessage = (raw: unknown) => {
-        const message = raw as { type?: string; error?: string };
+        const message = raw as { type?: string; error?: string; workerIdentity?: AnalyticsWorkerIdentity };
         if (message.type === 'ready') {
           clearTimeout(timeout);
           child.off('message', onMessage);
-          resolve();
+          if (message.workerIdentity?.pid !== workerIdentity.pid
+            || message.workerIdentity.spawnedAtMs !== workerIdentity.spawnedAtMs
+            || message.workerIdentity.instanceId !== workerIdentity.instanceId) {
+            child.kill();
+            reject(new Error('Analytics recorder worker identity did not match its supervisor instance.'));
+          } else {
+            resolve();
+          }
         } else if (message.type === 'fatal') {
           clearTimeout(timeout);
           child.off('message', onMessage);
@@ -703,7 +808,10 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
       child.once('exit', (code, signal) => {
         clearTimeout(timeout);
         child.off('message', onMessage);
-        reject(new Error(`Analytics recorder worker exited during startup (${code ?? signal ?? 'unknown'}).`));
+        const diagnostic = redactSensitiveText(this.workerStderr.trim());
+        reject(new Error(
+          `Analytics recorder worker exited during startup (${code ?? signal ?? 'unknown'})${diagnostic ? `: ${diagnostic}` : '.'}`,
+        ));
       });
     });
     // Publish replacement identity only after readiness and clear the old
@@ -711,6 +819,7 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
     // that still rejects ordered lifecycle commands for the old outage.
     this.failure = undefined;
     this.workerReady = true;
+    this.notifyWorkerLifecycle({ state: 'ready', identity: workerIdentity });
   }
 
   private requestRaw(
@@ -784,6 +893,8 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
   }
 
   private onExit(child: ChildProcess, code: number | null, signal: NodeJS.Signals | null): void {
+    const identity = this.workerIdentities.get(child);
+    if (identity) this.notifyWorkerLifecycle({ state: 'terminal', identity, code, signal });
     if (this.child !== child) return;
     this.child = undefined;
     this.workerReady = false;
@@ -792,6 +903,14 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
       this.onFailure(new AnalyticsRecorderTransportError(
         `Analytics recorder worker exited (${code ?? signal ?? 'unknown'})${diagnostic ? `: ${diagnostic}` : '.'}`,
       ));
+    }
+  }
+
+  private notifyWorkerLifecycle(event: AnalyticsWorkerLifecycleEvent): void {
+    try {
+      this.options.onWorkerLifecycle?.(event);
+    } catch {
+      // Diagnostic observers cannot alter recorder ownership or recovery.
     }
   }
 

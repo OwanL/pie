@@ -12,6 +12,7 @@ import { subagentRuntime } from '../runner.js';
 import type { AgentConfig } from '../agents.js';
 import type { SelectionContext } from '../src/selection.js';
 import type { AnalyticsObservation } from '../../../shared/analytics/contracts.js';
+import { createAnalyticsFactPacket } from '../../../shared/analytics/transport.js';
 import type { SingleResult, SubagentDetails } from '../types.js';
 
 function agent(): AgentConfig {
@@ -199,6 +200,39 @@ test('one attempt observes every provider request before terminal settlements wi
     facts.slice(3).map((fact) => fact.sourceKey),
     'terminal replay reuses settlements/end and never emits duplicate begin/dispatch facts',
   );
+});
+
+test('absent optional provider fields remain valid across the strict transport codec', async () => {
+  const facts: AnalyticsObservation[] = [];
+  const response = await execute({
+    facts,
+    toolCallId: 'tool-optional-provider-fields',
+    factSubmit: (observation) => {
+      createAnalyticsFactPacket(observation);
+      facts.push(observation);
+    },
+    runAttempt: async (_resolved, attemptId, _onUpdate, onProviderDispatch) => {
+      onProviderDispatch!({ observedAtMs: 110 });
+      return result({
+        attemptId,
+        providerInvocations: [{
+          invocationId: `${attemptId}:provider:1`,
+          attemptId,
+          startedAt: 110,
+          completedAt: 140,
+          outcome: 'success',
+          usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0.01 },
+        }],
+      });
+    },
+  });
+
+  assert.notEqual(response.isError, true);
+  assert.deepEqual(facts.map((fact) => fact.observationKind), [
+    'begin', 'begin', 'providerSettlement', 'end',
+  ]);
+  assert.equal(facts.some((fact) => Object.values(fact).includes(undefined)), false);
+  assert.equal(facts.some((fact) => Object.values(fact.fields).includes(undefined)), false);
 });
 
 test('rejected predispatch capture never gates work or becomes a terminal submission', async () => {

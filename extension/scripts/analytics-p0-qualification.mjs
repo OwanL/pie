@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statfsSync, statSync, truncateSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statfsSync, statSync, truncateSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import os from 'node:os';
 import path from 'node:path';
@@ -12,6 +12,7 @@ import { performance } from 'node:perf_hooks';
 import {
   buildCapacityCalibration,
   projectCapacityFromCalibration,
+  validateTerminalWorkerEvidence,
   validateCapacityCalibration,
   validateCapacitySnapshotInventory,
 } from './analytics-p0-capacity.mjs';
@@ -21,8 +22,8 @@ const repositoryRoot = path.resolve(extensionRoot, '..');
 const outRoot = path.resolve(extensionRoot, 'out');
 const workerScript = path.join(outRoot, 'analytics-recorder-worker.js');
 const queryWorkerScript = path.join(outRoot, 'analytics-query-worker.js');
-const REPORT_SCHEMA_VERSION = 3;
-const HARNESS_VERSION = 'p0-baseline-scale-v2';
+const REPORT_SCHEMA_VERSION = 4;
+const HARNESS_VERSION = 'p0-baseline-scale-v3-in-place-fault';
 let AnalyticsRecorderSupervisor;
 let AnalyticsCaptureCapacityError;
 let SqliteAnalyticsRecorder;
@@ -114,7 +115,7 @@ const matrix = {
     ...(configuration.scenario !== 'scale' ? ['1M rows'] : []),
     '10M rows; this bounded harness rejects that input',
     'five-minute light load and repeated sustained-load processes',
-    'mixed load, schema-v2/partial-write, and fault matrix',
+    'mixed load, schema-v2/partial-write, and the broader fault matrix',
     'matched analytics-disabled/enabled agent and live VS Code UI baseline',
   ],
 };
@@ -221,6 +222,7 @@ function detailCapture(payloadId, rootSessionId, byteLength, valueOverride) {
 }
 
 function supervisor(databasePath, extra = {}) {
+  const callerLifecycle = extra.onWorkerLifecycle;
   const helper = new AnalyticsRecorderSupervisor({
     enabled: true,
     workerScript,
@@ -229,6 +231,10 @@ function supervisor(databasePath, extra = {}) {
     maxQueueRecords: 20_000,
     maxQueueBytes: matrix.bounds.maxQueueBytes,
     ...extra,
+    onWorkerLifecycle: (event) => {
+      recorderWorkerLifecycle.push(structuredClone(event));
+      callerLifecycle?.(event);
+    },
   });
   activeHelpers.add(helper);
   return helper;
@@ -457,13 +463,13 @@ function readBaselineEvidence(currentProvenance) {
   const rawCapacitySnapshots = baseline.results?.capacityComponentSnapshots;
   const resourceSamples = baseline.results?.resourceEnvelope?.samples;
   const prewriteChecks = baseline.results?.resourceEnvelope?.prewriteChecks;
+  const destructiveFault = baseline.results?.destructiveFault;
   const calibrationReportConsistencyErrors = [];
   const capacitySnapshotLabels = {
     beforePrimaryFacts: 'before-primary-facts',
     afterPrimaryFacts: 'after-primary-facts',
     afterVariableDetails: 'after-variable-details',
-    finalBeforeCorruption: 'final-before-corruption',
-    afterCorruptionCopy: 'after-corruption-copy',
+    finalBeforeFault: 'final-before-fault',
   };
   for (const [name, sampleLabel] of Object.entries(capacitySnapshotLabels)) {
     const raw = rawCapacitySnapshots?.[name];
@@ -501,6 +507,29 @@ function readBaselineEvidence(currentProvenance) {
     || JSON.stringify(reportedPrewrites) !== JSON.stringify(capacityCalibration?.prewriteProjectedTreeBytes)) {
     calibrationReportConsistencyErrors.push('capacity calibration does not match every prewrite projection');
   }
+  try {
+    requireTerminalWorkerEvidence(destructiveFault?.recorderWorkers ?? [], 'baseline recorder');
+    requireTerminalWorkerEvidence(destructiveFault?.queryWorkers ?? [], 'baseline query');
+    requireTerminalWorkerEvidence(destructiveFault?.corruptionQueryWorkers ?? [], 'baseline corruption query', { requireReady: false });
+  } catch (error) {
+    calibrationReportConsistencyErrors.push(`destructive fault lifecycle evidence is invalid: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (destructiveFault?.phase !== 'completed'
+    || destructiveFault?.containmentVerified !== true
+    || destructiveFault?.checkpointedOutsideProofRoot !== true
+    || destructiveFault?.corruptionWorkerTerminal !== true
+    || destructiveFault?.walBytes !== 0
+    || destructiveFault?.shmBytes !== 0
+    || JSON.stringify(destructiveFault?.preFaultInventory) !== JSON.stringify(rawCapacitySnapshots?.finalBeforeFault?.files)) {
+    calibrationReportConsistencyErrors.push('destructive in-place fault evidence is incomplete or inconsistent');
+  }
+  if (typeof destructiveFault?.proofRootRealPath !== 'string'
+    || typeof destructiveFault?.databaseRealPath !== 'string'
+    || typeof destructiveFault?.reportRealPath !== 'string'
+    || path.dirname(destructiveFault.databaseRealPath) !== destructiveFault.proofRootRealPath
+    || !path.relative(destructiveFault.proofRootRealPath, destructiveFault.reportRealPath).startsWith('..')) {
+    calibrationReportConsistencyErrors.push('destructive fault path containment evidence is invalid');
+  }
   const exactCounts = baseline.results?.tableRows?.primaryFacts === 10_000
     && baseline.results?.tableRows?.detailPayloads === 1_003
     && baseline.gates?.exactPrimaryRows?.decision === 'passed'
@@ -521,6 +550,7 @@ function readBaselineEvidence(currentProvenance) {
     && baseline.provenance?.fingerprint === currentProvenance.fingerprint
     && exactCounts
     && matchingFixture
+    && baseline.gates?.inPlaceCorruption?.decision === 'passed'
     && baseline.results?.capacityProjection?.units === 'bytes'
     && finalEnvelope?.label === 'final'
     && Number.isFinite(fixtureBytes) && fixtureBytes > 0
@@ -546,6 +576,7 @@ function readBaselineEvidence(currentProvenance) {
 
 const activeHelpers = new Set();
 const activeReaders = new Set();
+const recorderWorkerLifecycle = [];
 let lagTimer;
 
 async function shutdownHelper(helper) {
@@ -578,6 +609,12 @@ function openReader(databasePath) {
 function closeReader(reader) {
   reader.close();
   activeReaders.delete(reader);
+}
+
+function requireTerminalWorkerEvidence(events, label, { requireReady = true } = {}) {
+  const validation = validateTerminalWorkerEvidence(events, { requireReady });
+  assert.equal(validation.valid, true, `${label} worker lifecycle is invalid: ${validation.errors.join('; ')}`);
+  return validation.workers;
 }
 let root = null;
 let databasePath;
@@ -692,7 +729,7 @@ try {
     projectedPeakBytes,
     units: 'bytes',
     projectionMethod: calibratedCapacityProjection
-      ? 'versioned baseline component calibration: fact and variable-detail database-family increments scaled by row ratio and 1.25, fixed tree once, plus projected main database-family fault copy'
+      ? 'versioned baseline component calibration: fact and variable-detail database-family increments scaled by row ratio and 1.25, fixed tree once, with the contained main database family as a separate maximum'
       : 'serialized fixture bytes multiplied by 2',
     overheadFactor: calibratedCapacityProjection ? 1.25 : 2,
     baselineReport: baselineEvidence,
@@ -744,7 +781,12 @@ try {
 
 function ensureGateEvidence() {
   const tableRows = report.results.tableRows;
-  const envelope = report.results.resourceEnvelope?.samples?.at(-1);
+  const peakPhysicalBytes = report.results.resourceEnvelope?.samples?.length > 0
+    ? Math.max(...report.results.resourceEnvelope.samples.map((sample) => sample.physicalBytes))
+    : undefined;
+  const minimumFreeBytes = report.results.resourceEnvelope?.samples?.length > 0
+    ? Math.min(...report.results.resourceEnvelope.samples.map((sample) => sample.freeBytes))
+    : undefined;
   const required = [
     ['exactPrimaryRows', tableRows?.primaryFacts, requestedRows, (value) => value === requestedRows],
     ['exactDetailRows', tableRows?.detailPayloads, matrix.detail.total + 3, (value) => value === matrix.detail.total + 3],
@@ -752,12 +794,20 @@ function ensureGateEvidence() {
     ['responsivenessProxyP95', report.results.responsivenessProxy?.lag?.p95Ms, '<= 25 ms declared proxy gate', (value) => value <= 25],
     ['indexedQuery', report.results.queries?.indexedSessionMs, '<= 250 ms', (value) => value <= 250],
     ['largeDetailQuery', report.results.queries?.twoMiBDetailMs, '<= 9000 ms', (value) => value <= 9000],
-    ['temporaryFootprint', envelope?.physicalBytes, `<= ${matrix.bounds.effectiveTemporaryLimitBytes} bytes`, (value) => value <= matrix.bounds.effectiveTemporaryLimitBytes],
-    ['reservedFreeDisk', envelope?.freeBytes, `>= ${matrix.bounds.minUnusedDiskBytes} bytes`, (value) => value >= matrix.bounds.minUnusedDiskBytes],
+    ['temporaryFootprint', peakPhysicalBytes, `<= ${matrix.bounds.effectiveTemporaryLimitBytes} bytes`, (value) => value <= matrix.bounds.effectiveTemporaryLimitBytes],
+    ['reservedFreeDisk', minimumFreeBytes, `>= ${matrix.bounds.minUnusedDiskBytes} bytes`, (value) => value >= matrix.bounds.minUnusedDiskBytes],
     ['recorderWorkerRss', report.results.memory?.maxWorkerRssBytes, '<= 268435456 bytes per recorder/helper during ordinary ingestion', (value) => value <= 256 * 1024 ** 2],
   ];
   for (const [name, actual, threshold, predicate] of required) {
     if (!report.gates[name]) recordGate(name, actual, threshold, predicate);
+  }
+  if (!report.gates.inPlaceCorruption) {
+    recordGate(
+      'inPlaceCorruption',
+      report.results.destructiveFault?.phase,
+      'completed with a terminal fresh read-only helper',
+      (value) => value === 'completed' && report.results.destructiveFault?.corruptionWorkerTerminal === true,
+    );
   }
   if (!report.gates.scaleHistoryRows) {
     configuration.scenario === 'scale'
@@ -907,6 +957,7 @@ try {
     disabledHandoff.push(performance.now() - started);
   }
   report.results.disabledBaselineHandoff = summarize(disabledHandoff);
+  await shutdownHelper(disabled);
 
   // Deliberately delayed recorder acknowledgement: submission and simulated
   // agent completion must finish independently of the 300ms recorder delay.
@@ -1201,10 +1252,12 @@ try {
   };
   closeReader(reader);
 
+  const queryWorkerLifecycle = [];
   const queryClient = new AnalyticsQueryClient({
     databasePath,
     workerScript: queryWorkerScript,
     timeoutMs: 10_000,
+    onWorkerLifecycle: (event) => queryWorkerLifecycle.push(structuredClone(event)),
   });
   const boundedQuery = await queryClient.query({ type: 'providerSettlements' });
   assert.equal(boundedQuery.settlements.length, Math.min(200, Math.ceil(matrix.facts.rows / 4)));
@@ -1401,44 +1454,94 @@ try {
     await shutdownHelper(idleHost);
   }
 
-  const corruptionPath = path.join(root, 'corrupt.sqlite');
-  checkResourceEnvelope('final-before-corruption');
-  captureCapacitySnapshot('finalBeforeCorruption', 'final-before-corruption');
-  ensureAdditionalCapacity('before-corruption-copy', statSync(databasePath).size);
-  copyFileSync(databasePath, corruptionPath);
-  checkResourceEnvelope('after-corruption-copy');
-  captureCapacitySnapshot('afterCorruptionCopy', 'after-corruption-copy');
+  assert.equal(activeHelpers.size, 0, 'all recorder helpers must be stopped before the destructive fault');
+  assert.equal(activeReaders.size, 0, 'all in-process readers must be closed before the destructive fault');
+  const recorderTerminalEvidence = requireTerminalWorkerEvidence(recorderWorkerLifecycle, 'recorder');
+  const queryTerminalEvidence = requireTerminalWorkerEvidence(queryWorkerLifecycle, 'query');
+  const proofRootStat = lstatSync(root);
+  const databaseStat = lstatSync(databasePath);
+  assert.equal(proofRootStat.isSymbolicLink(), false, 'proof root must not be a symbolic link');
+  assert.equal(databaseStat.isSymbolicLink(), false, 'analytics database must not be a symbolic link');
+  const proofRootRealPath = realpathSync(root);
+  const databaseRealPath = realpathSync(databasePath);
+  const reportRealPath = realpathSync(configuration.report);
+  assert.equal(path.dirname(databaseRealPath), proofRootRealPath, 'analytics database must be directly contained by the owned proof root');
+  const reportRelativeToProofRoot = path.relative(proofRootRealPath, reportRealPath);
+  assert.ok(reportRelativeToProofRoot.startsWith('..') && !path.isAbsolute(reportRelativeToProofRoot), 'qualification report must remain outside the destructive proof root');
+  checkResourceEnvelope('final-before-fault');
+  const finalBeforeFault = captureCapacitySnapshot('finalBeforeFault', 'final-before-fault');
+  const stableInventory = proofTreeInventory(root);
+  assert.deepEqual(stableInventory, finalBeforeFault.files, 'pre-fault inventory must be stable after every helper exits');
+  const wal = stableInventory.find((entry) => entry.path === 'analytics.sqlite-wal');
+  const shm = stableInventory.find((entry) => entry.path === 'analytics.sqlite-shm');
+  assert.ok(!wal || wal.bytes === 0, 'analytics WAL must be absent or empty before the destructive fault');
+  assert.ok(!shm || shm.bytes === 0, 'analytics shared-memory file must be absent or empty before the destructive fault');
   report.results.capacityComponentSnapshots = capacityComponentSnapshots;
   report.results.capacityCalibration = buildCapacityCalibration({
     baselineRows: matrix.facts.rows,
     detailRows: matrix.detail.total,
     snapshots: capacityComponentSnapshots,
-    observedTreeBytes: report.results.resourceEnvelope.samples
-      .filter((sample) => sample.label !== 'after-corruption-copy')
-      .map((sample) => sample.physicalBytes),
+    observedTreeBytes: report.results.resourceEnvelope.samples.map((sample) => sample.physicalBytes),
     prewriteProjectedTreeBytes: prewriteCapacityChecks.map((sample) => sample.projectedTreeBytes),
   });
   report.results.capacityProjection.calibration = report.results.capacityCalibration;
   report.results.capacityProjection.measuredObservedHighWaterBytes = report.results.capacityCalibration.observedHighWaterBytes;
   report.results.capacityProjection.measuredPrewriteHighWaterBytes = report.results.capacityCalibration.prewriteHighWaterBytes;
   if (configuration.scenario === 'baseline') {
-    report.results.capacityProjection.projectedPeakBytes = Math.max(
-      report.results.capacityProjection.projectedPeakBytes,
-      report.results.capacityCalibration.conservativeHighWaterBytes,
-    );
-    report.results.capacityProjection.projectionMethod = 'serialized fixture preflight reconciled with observed and prewrite proof-tree high-water measurements';
+    const measuredBaselineProjection = projectCapacityFromCalibration(report.results.capacityCalibration, {
+      targetRows: matrix.facts.rows,
+      safetyFactor: 1.25,
+    });
+    report.results.capacityProjection.calibratedProjection = measuredBaselineProjection;
+    report.results.capacityProjection.projectedPeakBytes = measuredBaselineProjection.projectedPeakBytes;
+    report.results.capacityProjection.projectionMethod = 'versioned in-place-fault calibration reconciled with observed and prewrite proof-tree high-water measurements';
   }
-  truncateSync(corruptionPath, 100);
+  report.results.destructiveFault = {
+    phase: 'prepared',
+    proofRootRealPath,
+    databaseRealPath,
+    reportRealPath,
+    containmentVerified: true,
+    proofRootSymbolicLink: false,
+    databaseSymbolicLink: false,
+    walBytes: wal?.bytes ?? 0,
+    shmBytes: shm?.bytes ?? 0,
+    recorderWorkers: recorderTerminalEvidence,
+    queryWorkers: queryTerminalEvidence,
+    preFaultInventory: stableInventory,
+    checkpointedOutsideProofRoot: true,
+  };
+  checkpoint('pre-fault-checkpoint', {
+    databaseRealPath,
+    terminalRecorderWorkers: recorderTerminalEvidence.length,
+    terminalQueryWorkers: queryTerminalEvidence.length,
+  });
+  truncateSync(databasePath, 100);
+  const corruptionWorkerLifecycle = [];
+  const corruptionQueryClient = new AnalyticsQueryClient({
+    databasePath,
+    workerScript: queryWorkerScript,
+    timeoutMs: 10_000,
+    onWorkerLifecycle: (event) => corruptionWorkerLifecycle.push(structuredClone(event)),
+  });
   let corruptionError;
   try {
-    new SqliteAnalyticsRecorder(corruptionPath).close();
+    await corruptionQueryClient.query({ type: 'schema' });
   } catch (error) {
     corruptionError = error instanceof Error ? error.message : String(error);
   }
-  assert.ok(corruptionError, 'truncated database must fail visibly');
-  report.results.corruption = { truncatedToBytes: 100, visibleError: corruptionError };
+  assert.match(corruptionError ?? '', /database|sqlite|malform|corrupt|file is not/i, 'truncated database must fail visibly as corruption');
+  const corruptionTerminalEvidence = requireTerminalWorkerEvidence(corruptionWorkerLifecycle, 'corruption query', { requireReady: false });
+  report.results.destructiveFault = {
+    ...report.results.destructiveFault,
+    phase: 'completed',
+    truncatedToBytes: 100,
+    visibleError: corruptionError,
+    corruptionQueryWorkers: corruptionTerminalEvidence,
+    corruptionWorkerTerminal: true,
+  };
 
-  report.results.physicalBytes = proofTreeBytes(root);
+  report.results.physicalBytes = finalBeforeFault.treeBytes;
   const bytesPerPrimaryFact = report.results.physicalBytes / matrix.facts.rows;
   const estimatedTenMillionBytes = bytesPerPrimaryFact * 10_000_000;
   report.results.largeTierDecision = {
@@ -1468,11 +1571,14 @@ try {
   if (!recordGate('indexedQuery', report.results.queries?.indexedSessionMs, '<= 250 ms', (value) => value <= 250)) failedGates.push('indexedQuery');
   if (!recordGate('largeDetailQuery', report.results.queries?.twoMiBDetailMs, '<= 9000 ms', (value) => value <= 9000)) failedGates.push('largeDetailQuery');
   const envelope = report.results.resourceEnvelope?.samples?.at(-1);
-  if (!recordGate('temporaryFootprint', envelope?.physicalBytes, `<= ${matrix.bounds.effectiveTemporaryLimitBytes} bytes`, (value) => value <= matrix.bounds.effectiveTemporaryLimitBytes)) failedGates.push('temporaryFootprint');
+  const peakPhysicalBytes = Math.max(...(report.results.resourceEnvelope?.samples ?? []).map((sample) => sample.physicalBytes));
+  const minimumFreeBytes = Math.min(...(report.results.resourceEnvelope?.samples ?? []).map((sample) => sample.freeBytes));
+  if (!recordGate('temporaryFootprint', peakPhysicalBytes, `<= ${matrix.bounds.effectiveTemporaryLimitBytes} bytes`, (value) => value <= matrix.bounds.effectiveTemporaryLimitBytes, { finalSampleBytes: envelope?.physicalBytes })) failedGates.push('temporaryFootprint');
+  if (!recordGate('inPlaceCorruption', report.results.destructiveFault?.phase, 'completed with a terminal fresh read-only helper', (value) => value === 'completed' && report.results.destructiveFault?.corruptionWorkerTerminal === true)) failedGates.push('inPlaceCorruption');
   if (!recordGate('capacityCalibration', report.results.capacityCalibration?.eligible, true, (value) => value === true, {
     errors: report.results.capacityCalibration?.errors ?? ['capacity calibration missing'],
   })) failedGates.push('capacityCalibration');
-  if (!recordGate('reservedFreeDisk', envelope?.freeBytes, `>= ${matrix.bounds.minUnusedDiskBytes} bytes`, (value) => value >= matrix.bounds.minUnusedDiskBytes)) failedGates.push('reservedFreeDisk');
+  if (!recordGate('reservedFreeDisk', minimumFreeBytes, `>= ${matrix.bounds.minUnusedDiskBytes} bytes`, (value) => value >= matrix.bounds.minUnusedDiskBytes, { finalSampleBytes: envelope?.freeBytes })) failedGates.push('reservedFreeDisk');
   if (!recordGate('recorderWorkerRss', report.results.memory?.maxWorkerRssBytes, '<= 268435456 bytes per recorder/helper during ordinary ingestion', (value) => value <= 256 * 1024 ** 2)) failedGates.push('recorderWorkerRss');
   if (configuration.scenario === 'scale') {
     if (!recordGate('scaleHistoryRows', finalTableRows?.primaryFacts, '>= 1000000 exact rows', (value) => value >= 1_000_000)) failedGates.push('scaleHistoryRows');

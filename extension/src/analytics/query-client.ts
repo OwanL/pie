@@ -1,5 +1,8 @@
 import { fork } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { deserialize } from 'node:v8';
+
+import type { AnalyticsWorkerLifecycleEvent, AnalyticsWorkerIdentity } from './recorder-supervisor.js';
 
 export type AnalyticsQueryRequest =
   | { type: 'schema'; maxResultBytes?: number }
@@ -37,10 +40,13 @@ export interface AnalyticsQueryClientOptions {
   /** Per-query JavaScript heap ceiling; native SQLite values remain separately
    * constrained by recorder query/detail result limits. */
   maxOldSpaceMb?: number;
-  /** Fork exec args for the disposable helper. Defaults to the inherited
-   * process exec args (minus heap-size flags); source-mode tests pass the
-   * local TS loader explicitly so the TS worker entry can run. */
+  /** Explicit fork exec args for source-mode tests or embedding. Production
+   * inherits no parent Node/Electron/test flags; the helper owns only its heap
+   * ceiling below. */
   execArgv?: readonly string[];
+  /** Diagnostic process evidence. `terminal` is emitted only by the child
+   * process exit event, after query completion has requested termination. */
+  onWorkerLifecycle?: (event: AnalyticsWorkerLifecycleEvent) => void;
 }
 
 /** One disposable read-only helper per historical query. Cancellation and
@@ -75,17 +81,27 @@ export class AnalyticsQueryClient {
         throw new RangeError('Analytics query maxOldSpaceMb must be a safe integer of at least 64.');
       }
       const maxOldSpaceMb = Math.min(512, configuredHeapMb);
+      const spawnedAtMs = Date.now();
+      const instanceId = randomUUID();
       const child = fork(this.options.workerScript, [], {
         execArgv: [
-          ...(this.options.execArgv
-            ?? process.execArgv.filter((argument) => !argument.startsWith('--max-old-space-size='))),
+          ...(this.options.execArgv ?? []),
           `--max-old-space-size=${maxOldSpaceMb}`,
         ],
-        stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+        stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
         env: {
           ...process.env,
           PIE_ANALYTICS_DATABASE_PATH: this.options.databasePath,
+          PIE_ANALYTICS_WORKER_INSTANCE_ID: instanceId,
+          PIE_ANALYTICS_WORKER_SPAWNED_AT_MS: String(spawnedAtMs),
         },
+      });
+      if (!child.pid) throw new Error('Analytics query worker did not expose a process ID.');
+      const workerIdentity: AnalyticsWorkerIdentity = Object.freeze({ pid: child.pid, spawnedAtMs, instanceId });
+      this.notifyWorkerLifecycle({ state: 'spawned', identity: workerIdentity });
+      let workerStderr = '';
+      child.stderr?.on('data', (chunk: Uint8Array | string) => {
+        workerStderr = `${workerStderr}${String(chunk)}`.slice(-8_192);
       });
       const finish = (error?: Error, value?: Result): void => {
         if (settled || terminating) return;
@@ -114,9 +130,20 @@ export class AnalyticsQueryClient {
       timer.unref?.();
       signal?.addEventListener('abort', onAbort, { once: true });
       child.on('message', (raw: unknown) => {
-        const message = raw as { type?: string; requestId?: number; error?: string; bytes?: Uint8Array };
+        const message = raw as { type?: string; requestId?: number; error?: string; bytes?: Uint8Array; workerIdentity?: AnalyticsWorkerIdentity };
+        if (message.type === 'fatal') {
+          finish(new Error(message.error ?? 'Analytics query worker failed to start.'));
+          return;
+        }
         if (message.type === 'ready' && !ready) {
+          if (message.workerIdentity?.pid !== workerIdentity.pid
+            || message.workerIdentity.spawnedAtMs !== workerIdentity.spawnedAtMs
+            || message.workerIdentity.instanceId !== workerIdentity.instanceId) {
+            finish(new Error('Analytics query worker identity did not match its client instance.'));
+            return;
+          }
           ready = true;
+          this.notifyWorkerLifecycle({ state: 'ready', identity: workerIdentity });
           child.send({ ...request, requestId });
           return;
         }
@@ -131,9 +158,21 @@ export class AnalyticsQueryClient {
       });
       child.once('error', (error) => finish(error));
       child.once('exit', (code, processSignal) => {
-        if (!settled) finish(new Error(`Analytics query worker exited (${String(code)}, ${String(processSignal)}).`));
+        this.notifyWorkerLifecycle({ state: 'terminal', identity: workerIdentity, code, signal: processSignal });
+        const diagnostic = workerStderr.trim();
+        if (!settled) finish(new Error(
+          `Analytics query worker exited (${String(code)}, ${String(processSignal)})${diagnostic ? `: ${diagnostic}` : '.'}`,
+        ));
       });
     });
+  }
+
+  private notifyWorkerLifecycle(event: AnalyticsWorkerLifecycleEvent): void {
+    try {
+      this.options.onWorkerLifecycle?.(event);
+    } catch {
+      // Diagnostic observers cannot change query completion or termination.
+    }
   }
 
   private acquire(signal?: AbortSignal): Promise<void> {

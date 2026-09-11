@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { serialize } from 'node:v8';
 
 import {
   acceptAnalyticsObservation,
@@ -286,4 +287,65 @@ test('analytics detail filtering covers separator variants and credential text i
   assert.deepEqual(safe.nested, { Refresh_Token: '[redacted]', token: '[redacted]' });
   assert.equal(Buffer.from(safe.bytes as Uint8Array).toString('utf8').includes('binary-secret'), false);
   assert.equal(Buffer.from(safe.view as Uint8Array).toString('utf8').includes('another-binary-secret'), false);
+});
+
+test('analytics detail filtering produces canonical V8 bytes for semantic numeric and key-order replays', () => {
+  const coldNumbers = [73];
+  const formerlyDoubleNumbers = [73.5];
+  formerlyDoubleNumbers[0] = 73;
+  const coldMixed = [1, 0, 1.5, -0, 2_147_483_648];
+  const formerlyDoubleMixed = [1.5, 0.5, 1.5, -0.5, 2_147_483_648.5];
+  formerlyDoubleMixed[0] = 1;
+  formerlyDoubleMixed[1] = 0;
+  formerlyDoubleMixed[3] = -0;
+  formerlyDoubleMixed[4] = 2_147_483_648;
+  let formerlyDoubleExitCode = 0.5;
+  formerlyDoubleExitCode -= 0.5;
+  const firstValue: Record<string, unknown> = {
+    exitCode: 0,
+    nested: { a: 1, mixed: coldMixed, z: coldNumbers },
+  };
+  Object.defineProperty(firstValue, '__proto__', {
+    configurable: true,
+    enumerable: true,
+    writable: true,
+    value: 'owned-value',
+  });
+  const protoValue = Object.create(null) as Record<string, unknown>;
+  Object.defineProperty(protoValue, '__proto__', {
+    configurable: true,
+    enumerable: true,
+    writable: true,
+    value: 'owned-value',
+  });
+  protoValue.exitCode = formerlyDoubleExitCode;
+  protoValue.nested = { z: formerlyDoubleNumbers, mixed: formerlyDoubleMixed, a: 1 };
+
+  const first = sanitizeAnalyticsDetail(firstValue);
+  let replay: unknown;
+  for (let index = 0; index < 1_000; index += 1) replay = sanitizeAnalyticsDetail(protoValue);
+  assert.deepEqual(replay, first);
+  assert.deepEqual(serialize(replay), serialize(first));
+  assert.equal(Object.getPrototypeOf(replay), Object.prototype);
+  assert.equal(Object.hasOwn(replay as object, '__proto__'), true);
+
+  const sparse = new Array<unknown>(3);
+  sparse[1] = 1;
+  assert.notDeepEqual(
+    serialize(sanitizeAnalyticsDetail(sparse)),
+    serialize(sanitizeAnalyticsDetail([undefined, 1, undefined])),
+  );
+
+  const changedValue: Record<string, unknown> = {
+    exitCode: 0,
+    nested: { a: 1, mixed: coldMixed, z: [74] },
+  };
+  Object.defineProperty(changedValue, '__proto__', {
+    configurable: true,
+    enumerable: true,
+    writable: true,
+    value: 'owned-value',
+  });
+  const changed = sanitizeAnalyticsDetail(changedValue);
+  assert.notDeepEqual(serialize(changed), serialize(first));
 });

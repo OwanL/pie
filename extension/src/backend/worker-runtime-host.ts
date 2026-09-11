@@ -91,11 +91,15 @@ import { observeProviderTransport, type ProviderTransportObservation } from './p
 import { resolvePieDataPaths } from '../../../shared/pie-data-root.js';
 import { SessionLifecycleStore } from './session-lifecycle-store.js';
 import { SessionFilesystemMutationBarrier } from './session-filesystem-lifecycle.js';
+import {
+  AnalyticsWorkerTransport,
+  type WorkerAnalyticsActivation,
+} from './analytics-worker-transport.js';
 
 export const PIE_STORAGE_CUTOFF_AUTHORIZATION_ENV = 'PIE_STORAGE_CUTOFF_AUTHORIZATION' as const;
 export const PIE_STORAGE_CUTOFF_AUTHORIZATION_VALUE = 'p7b-authorized-v1' as const;
 
-export interface WorkerRuntimePromotionPayload extends WorkerJsonObject {
+export interface WorkerRuntimePromotionPayload {
   sdkPath: string;
   agentDir: string;
   startupCwd: string;
@@ -105,6 +109,7 @@ export interface WorkerRuntimePromotionPayload extends WorkerJsonObject {
   writeLease: WorkerJsonObject;
   openedPayload: WorkerJsonObject;
   modelSettings: WorkerJsonObject;
+  analytics?: WorkerAnalyticsActivation;
 }
 
 export interface WorkerRuntimeHostOptions {
@@ -182,6 +187,7 @@ export class WorkerRuntimeHost {
   private lifecycleStore?: SessionLifecycleStore;
   private lifecycleBarrier?: SessionFilesystemMutationBarrier;
   private lifecycleSessionsRoot?: string;
+  private analyticsTransport?: AnalyticsWorkerTransport;
 
   constructor(private readonly options: WorkerRuntimeHostOptions) {
     this.detailStore = new WorkerLiveDetailStore({
@@ -199,6 +205,10 @@ export class WorkerRuntimeHost {
 
   fetchDetail(requestId: string, subscriptionId: string, address: LiveSubagentDetailAddress, ref: DetailPageRef, maxPageBytes: number): void {
     this.detailStore.fetch(requestId, subscriptionId, address, ref, maxPageBytes);
+  }
+
+  acknowledgeAnalytics(value: unknown): void {
+    this.analyticsTransport?.acknowledge(value);
   }
 
   applySync(domain: string, revision: number, payload: WorkerJsonObject): void {
@@ -465,6 +475,8 @@ export class WorkerRuntimeHost {
     this.lifecycleStore?.close();
     this.lifecycleStore = undefined;
     this.lifecycleBarrier = undefined;
+    this.analyticsTransport?.dispose();
+    this.analyticsTransport = undefined;
   }
 
   private async promoteOnce(payload: WorkerRuntimePromotionPayload): Promise<void> {
@@ -478,6 +490,16 @@ export class WorkerRuntimeHost {
     };
     this.openedPayload = payload.openedPayload as unknown as SessionOpenedPayload;
     this.currentLease = payload.writeLease as unknown as SdkSessionWriteLease;
+
+    if (payload.analytics) {
+      const activation = payload.analytics;
+      this.analyticsTransport = new AnalyticsWorkerTransport(
+        this.options.server,
+        activation,
+        `${this.options.owner.workerId}:${this.options.owner.workerGeneration}`,
+      );
+      this.analyticsTransport.install();
+    }
 
     if (process.env[PIE_STORAGE_CUTOFF_AUTHORIZATION_ENV] === PIE_STORAGE_CUTOFF_AUTHORIZATION_VALUE) {
       const dataPaths = resolvePieDataPaths({ agentDir: this.agentDir });
@@ -759,6 +781,14 @@ export class WorkerRuntimeHost {
       );
       if (replacementSource) {
         this.openedPayload = { ...this.openedPayload, replacesSessionPath: replacementSource };
+      }
+      if (this.analyticsTransport) {
+        const analyticsSessionId = this.openedPayload.session.sessionId?.trim();
+        if (!analyticsSessionId || analyticsSessionId.includes('\0')) {
+          this.analyticsTransport.disableCaptureSubject();
+        } else {
+          this.analyticsTransport.rebindCaptureSubject({ kind: 'session', rootSessionId: analyticsSessionId });
+        }
       }
     }
   }

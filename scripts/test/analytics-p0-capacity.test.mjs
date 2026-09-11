@@ -6,11 +6,31 @@ import {
   projectCapacityFromCalibration,
   validateCapacitySnapshotInventory,
   validateCapacityCalibration,
+  validateTerminalWorkerEvidence,
 } from '../../extension/scripts/analytics-p0-capacity.mjs';
 
 const BASELINE_ROWS = 10_000;
 const BASELINE_DETAIL_ROWS = 1_000;
 const SAFETY_FACTOR = 1.25;
+
+function workerEvents(states = ['spawned', 'ready', 'terminal']) {
+  const identity = { pid: 42, spawnedAtMs: 1_780_000_000_000, instanceId: '11111111-1111-4111-8111-111111111111' };
+  return states.map((state) => ({ state, identity, code: state === 'terminal' ? 0 : undefined, signal: null }));
+}
+
+test('requires exact ordered worker lifecycle evidence and rejects tampering', () => {
+  assert.equal(validateTerminalWorkerEvidence(workerEvents()).valid, true);
+  assert.equal(validateTerminalWorkerEvidence(workerEvents(['spawned', 'terminal']), { requireReady: false }).valid, true);
+  for (const states of [
+    ['terminal', 'ready', 'spawned'],
+    ['spawned', 'terminal', 'ready'],
+    ['spawned', 'ready', 'unknown', 'terminal'],
+    ['spawned', 'ready'],
+    ['spawned', 'ready', 'terminal', 'terminal'],
+  ]) {
+    assert.equal(validateTerminalWorkerEvidence(workerEvents(states)).valid, false, states.join(','));
+  }
+});
 
 function snapshot(treeBytes, mainDatabaseBytes, mainFileBytes) {
   return { treeBytes, mainDatabaseBytes, mainFileBytes };
@@ -21,10 +41,7 @@ function validSnapshots() {
     beforePrimaryFacts: snapshot(1_000, 0, 0),
     afterPrimaryFacts: snapshot(10_001_000, 10_000_000, 9_500_000),
     afterVariableDetails: snapshot(30_001_000, 30_000_000, 29_500_000),
-    finalBeforeCorruption: snapshot(40_001_000, 30_000_000, 29_500_000),
-    // corrupt.sqlite is outside the canonical main DB family; treeBytes
-    // proves the complete copy while canonical fields remain unchanged.
-    afterCorruptionCopy: snapshot(69_501_000, 30_000_000, 29_500_000),
+    finalBeforeFault: snapshot(40_001_000, 30_000_000, 29_500_000),
   };
 }
 
@@ -92,7 +109,7 @@ test('rejects inventory tampering, unsafe paths, invalid bytes, and missing file
   }
 });
 
-test('calibrates separate components and requires a complete corruption copy', () => {
+test('calibrates separate components before an in-place disposable fault', () => {
   const calibration = validCalibration();
   const validation = validateCapacityCalibration(calibration, {
     baselineRows: BASELINE_ROWS,
@@ -102,22 +119,22 @@ test('calibrates separate components and requires a complete corruption copy', (
   assert.equal(validation.valid, true);
   assert.equal(calibration.baselineRows, BASELINE_ROWS);
   assert.equal(calibration.detailRows, BASELINE_DETAIL_ROWS);
+  assert.equal(calibration.faultModel, 'in-place-terminal-corruption');
   assert.deepEqual(calibration.components, {
     primaryFactBytes: 10_000_000,
     variableDetailBytes: 20_000_000,
     fixedTreeBytes: 20_000_000,
     finalMainDatabaseBytes: 30_000_000,
     finalMainFileBytes: 29_500_000,
-    corruptionCopyBytes: 29_500_000,
-    preCopyHighWaterBytes: 50_000_000,
+    preFaultHighWaterBytes: 50_000_000,
   });
   assert.deepEqual(calibration.prewriteProjectedTreeBytes, [75_000_000]);
-  assert.equal(calibration.observedHighWaterBytes, 69_501_000);
+  assert.equal(calibration.observedHighWaterBytes, 50_000_000);
   assert.equal(calibration.prewriteHighWaterBytes, 75_000_000);
   assert.equal(calibration.conservativeHighWaterBytes, 75_000_000);
 });
 
-test('scales facts/details, counts fixed bytes once, and adds one full DB-family copy', () => {
+test('scales facts/details and takes the maximum contained fault footprint without summing the database twice', () => {
   const projection = projectCapacityFromCalibration(validCalibration(), {
     targetRows: 1_000_000,
     safetyFactor: SAFETY_FACTOR,
@@ -130,11 +147,30 @@ test('scales facts/details, counts fixed bytes once, and adds one full DB-family
     fixedTreeBytes: 20_000_000,
     primaryFactBytes: 1_250_000_000,
     variableDetailBytes: 2_500_000_000,
-    projectedMainDatabaseCopyBytes: 3_750_000_000,
+    projectedMainDatabaseBytes: 3_750_000_000,
   });
   assert.equal(projection.projectedSteadyTreeBytes, 3_770_000_000);
-  assert.equal(projection.projectedFaultPeakBytes, 7_520_000_000);
-  assert.equal(projection.projectedPeakBytes, 7_520_000_000);
+  assert.equal(projection.projectedFaultPeakBytes, 3_770_000_000);
+  assert.equal(projection.projectedPeakBytes, 3_770_000_000);
+});
+
+test('uses the conservatively projected contained database family when it exceeds component steady state', () => {
+  const snapshots = validSnapshots();
+  snapshots.finalBeforeFault = snapshot(50_000_000, 35_000_000, 34_500_000);
+  const calibration = buildCapacityCalibration({
+    baselineRows: BASELINE_ROWS,
+    detailRows: BASELINE_DETAIL_ROWS,
+    snapshots,
+    observedTreeBytes: [50_000_000],
+    prewriteProjectedTreeBytes: [50_000_000],
+  });
+  const projection = projectCapacityFromCalibration(calibration, {
+    targetRows: 1_000_000,
+    safetyFactor: SAFETY_FACTOR,
+  });
+  assert.equal(projection.projectedSteadyTreeBytes, 3_770_000_000);
+  assert.equal(projection.components.projectedMainDatabaseBytes, 4_375_000_000);
+  assert.equal(projection.projectedPeakBytes, 4_375_000_000);
 });
 
 test('rejects reverse, negative, unknown, and offsetting deltas', () => {
@@ -171,7 +207,7 @@ test('rejects reverse, negative, unknown, and offsetting deltas', () => {
   }).valid, false);
 
   const offsetting = validSnapshots();
-  offsetting.finalBeforeCorruption.treeBytes = 1_000;
+  offsetting.finalBeforeFault.treeBytes = 1_000;
   const offsettingCalibration = buildCapacityCalibration({
     baselineRows: BASELINE_ROWS,
     detailRows: BASELINE_DETAIL_ROWS,
@@ -206,9 +242,9 @@ test('rejects reverse, negative, unknown, and offsetting deltas', () => {
   }), /non-negative|safe integer/i);
 });
 
-test('rejects a snapshot without the full copy before truncation', () => {
+test('requires a measured final database before an in-place fault', () => {
   const snapshots = validSnapshots();
-  snapshots.afterCorruptionCopy.treeBytes = snapshots.finalBeforeCorruption.treeBytes;
+  snapshots.finalBeforeFault.mainFileBytes = 0;
   const calibration = buildCapacityCalibration({
     baselineRows: BASELINE_ROWS,
     detailRows: BASELINE_DETAIL_ROWS,
@@ -221,7 +257,7 @@ test('rejects a snapshot without the full copy before truncation', () => {
     detailRows: BASELINE_DETAIL_ROWS,
   });
   assert.equal(validation.valid, false);
-  assert.match(validation.reason, /copy|truncate/i);
+  assert.match(validation.reason, /main database file/i);
 });
 
 test('rejects non-integral or sub-baseline target rows', () => {

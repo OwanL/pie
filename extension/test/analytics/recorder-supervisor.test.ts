@@ -16,12 +16,15 @@ import {
 import {
   AnalyticsCaptureCapacityError,
   AnalyticsRecorderSupervisor,
+  type AnalyticsRecorderCaptureDisposition,
+  type AnalyticsWorkerLifecycleEvent,
 } from '../../src/analytics/recorder-supervisor.js';
 import { SqliteAnalyticsRecorder } from '../../src/analytics/sqlite-recorder.js';
 
 const workerScript = fileURLToPath(new URL('./fixtures/recorder-supervisor-worker.cjs', import.meta.url));
 const lifecycleWorkerScript = fileURLToPath(new URL('./fixtures/recorder-supervisor-lifecycle-worker.cjs', import.meta.url));
-const sqliteWorkerScript = fileURLToPath(new URL('../../src/analytics/recorder-worker-entry.ts', import.meta.url));
+const sqliteWorkerScript = fileURLToPath(new URL('./fixtures/production-recorder-worker.mjs', import.meta.url));
+const sqliteWorkerExecArgv = [`--import=${new URL('../../node_modules/tsx/dist/loader.mjs', import.meta.url).href}`];
 
 async function eventually(predicate: () => boolean, message: string, timeoutMs = 3_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
@@ -135,6 +138,81 @@ test('supervisor owns immutable serialized capture, accounts retained bytes, and
   }
 });
 
+test('supervisor reports immutable worker instance identity through authoritative terminal exit', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'pie-recorder-worker-lifecycle-'));
+  const events: AnalyticsWorkerLifecycleEvent[] = [];
+  const supervisor = new AnalyticsRecorderSupervisor({
+    enabled: true,
+    workerScript,
+    databasePath: path.join(root, 'capture.log'),
+    onWorkerLifecycle: (event) => events.push(structuredClone(event)),
+  });
+  try {
+    await supervisor.start();
+    await supervisor.shutdown();
+    assert.deepEqual(events.map((event) => event.state), ['spawned', 'ready', 'terminal']);
+    assert.deepEqual(events[0]?.identity, events[1]?.identity);
+    assert.deepEqual(events[1]?.identity, events[2]?.identity);
+    assert.ok((events[0]?.identity.pid ?? 0) > 0);
+    assert.ok((events[0]?.identity.spawnedAtMs ?? 0) > 0);
+    assert.match(events[0]?.identity.instanceId ?? '', /^[0-9a-f-]{36}$/iu);
+  } finally {
+    if (supervisor.workerPid) process.kill(supervisor.workerPid, 'SIGKILL');
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('tracked capture settles each durable replay or deletion rejection from the real SQLite worker', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'pie-recorder-tracked-disposition-'));
+  const databasePath = path.join(root, 'analytics.sqlite');
+  const supervisor = new AnalyticsRecorderSupervisor({
+    enabled: true,
+    workerScript: sqliteWorkerScript,
+    databasePath,
+    execArgv: sqliteWorkerExecArgv,
+  });
+  const dispositions: AnalyticsRecorderCaptureDisposition[] = [];
+  const sessionSubject = { kind: 'session' as const, rootSessionId: 'tracked-root' };
+  const captured = observation('tracked-source', sessionSubject, { stableOriginId: 'tracked-origin' });
+  try {
+    await supervisor.start();
+    supervisor.submitTracked(captured, (disposition) => dispositions.push(disposition));
+    await supervisor.flush();
+    supervisor.submitTracked(structuredClone(captured), (disposition) => dispositions.push(disposition));
+    await supervisor.flush();
+    const beforeDelete = new SqliteAnalyticsRecorder(databasePath, { readOnly: true });
+    try {
+      assert.equal(beforeDelete.countObservations('tracked-root'), 1, 'exact replay must receive a second durable disposition without duplicating storage');
+    } finally {
+      beforeDelete.close();
+    }
+    await supervisor.deleteSession('tracked-root', 'tracked-delete', 1_780_000_000_100);
+    supervisor.submitTracked(
+      observation('tracked-late', sessionSubject, { stableOriginId: 'tracked-origin' }),
+      (disposition) => dispositions.push(disposition),
+    );
+    await supervisor.flush();
+    assert.deepEqual(dispositions.map((entry) => entry.status), ['durable', 'durable', 'rejected']);
+    assert.ok(dispositions[0]?.status === 'durable' && dispositions[0].producerReconciliation.length > 0);
+    assert.ok(dispositions[1]?.status === 'durable' && dispositions[1].producerReconciliation.length > 0);
+    assert.deepEqual(dispositions[2], {
+      status: 'rejected',
+      code: 'subject_deleted',
+      message: 'Analytics capture subject is deleted: tracked-root',
+    });
+    await supervisor.shutdown();
+    const reader = new SqliteAnalyticsRecorder(databasePath, { readOnly: true });
+    try {
+      assert.equal(reader.countObservations('tracked-root'), 0);
+    } finally {
+      reader.close();
+    }
+  } finally {
+    if (supervisor.workerPid) process.kill(supervisor.workerPid, 'SIGKILL');
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('deletion-fence rejection is visible per record and cannot discard or block unrelated batch members', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'pie-recorder-delete-fence-'));
   const logPath = path.join(root, 'capture.log');
@@ -211,6 +289,7 @@ test('one, two, and four cold supervisors open one new SQLite database within on
       workerScript: sqliteWorkerScript,
       databasePath,
       startupTimeoutMs: 10_000,
+      execArgv: sqliteWorkerExecArgv,
       shutdownTimeoutMs: 10_000,
       maxAutomaticRestarts: 0,
     }));
@@ -364,6 +443,7 @@ test('non-lock startup failures remain immediate and visible', { timeout: 5_000 
     workerScript: sqliteWorkerScript,
     databasePath,
     startupTimeoutMs: 10_000,
+    execArgv: sqliteWorkerExecArgv,
     maxAutomaticRestarts: 0,
   });
   try {
