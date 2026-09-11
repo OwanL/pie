@@ -14,6 +14,34 @@ function requirePositiveInteger(value, label) {
   return value;
 }
 
+/** Summarize a complete immutable timing sample with nearest-rank
+ * percentiles. Sorting once preserves the existing percentile definition and
+ * reading the final element avoids passing a scale-sized array as variadic
+ * function arguments. */
+export function summarizeTimingSamples(values) {
+  const isIndexedTypedArray = ArrayBuffer.isView(values) && typeof values.length === 'number';
+  if ((!Array.isArray(values) && !isIndexedTypedArray)
+    || !Number.isSafeInteger(values.length)
+    || values.length <= 0) {
+    throw new Error('timing samples must be a non-empty array or typed array');
+  }
+  const sorted = Array.from(values);
+  for (const [index, value] of sorted.entries()) {
+    if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+      throw new Error(`timing sample[${index}] must be a finite non-negative number`);
+    }
+  }
+  sorted.sort((a, b) => a - b);
+  const percentile = (fraction) => sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * fraction) - 1)];
+  return {
+    samples: sorted.length,
+    p50Ms: percentile(0.5),
+    p95Ms: percentile(0.95),
+    p99Ms: percentile(0.99),
+    maxMs: sorted[sorted.length - 1],
+  };
+}
+
 export function validateTerminalWorkerEvidence(events, { requireReady = true } = {}) {
   const errors = [];
   if (!Array.isArray(events) || events.length === 0) {

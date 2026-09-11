@@ -8,11 +8,45 @@ import {
   validateCapacityCalibration,
   validateTerminalWorkerEvidence,
   validateTerminalWorkerSummaries,
+  summarizeTimingSamples,
 } from '../../extension/scripts/analytics-p0-capacity.mjs';
 
 const BASELINE_ROWS = 10_000;
 const BASELINE_DETAIL_ROWS = 1_000;
 const SAFETY_FACTOR = 1.25;
+
+test('summarizes one million timings without a variadic call-stack boundary', () => {
+  const values = Array.from({ length: 1_000_000 }, (_, index) => index % 1_000);
+  const originalEdges = [...values.slice(0, 16), ...values.slice(-16)];
+  assert.deepEqual(summarizeTimingSamples(values), {
+    samples: 1_000_000,
+    p50Ms: 499,
+    p95Ms: 949,
+    p99Ms: 989,
+    maxMs: 999,
+  });
+  assert.deepEqual([...values.slice(0, 16), ...values.slice(-16)], originalEdges, 'source samples remain immutable');
+});
+
+test('summarizes the conditional ten-million timing tier without variadic arguments', {
+  skip: process.env.PIE_ANALYTICS_P0_TEST_10M !== '1',
+}, () => {
+  const values = new Uint8Array(10_000_000);
+  values[values.length - 1] = 1;
+  assert.deepEqual(summarizeTimingSamples(values), {
+    samples: 10_000_000,
+    p50Ms: 0,
+    p95Ms: 0,
+    p99Ms: 0,
+    maxMs: 1,
+  });
+});
+
+test('rejects missing and malformed timing evidence', () => {
+  for (const values of [[], new DataView(new ArrayBuffer(8)), [0, Number.NaN], [0, Number.POSITIVE_INFINITY], [0, -1], [0, '1']]) {
+    assert.throws(() => summarizeTimingSamples(values), /timing sample/u);
+  }
+});
 
 function workerEvents(states = ['spawned', 'ready', 'terminal']) {
   const identity = { pid: 42, spawnedAtMs: 1_780_000_000_000, instanceId: '11111111-1111-4111-8111-111111111111' };

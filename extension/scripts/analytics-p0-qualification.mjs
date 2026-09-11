@@ -16,6 +16,7 @@ import {
   validateTerminalWorkerSummaries,
   validateCapacityCalibration,
   validateCapacitySnapshotInventory,
+  summarizeTimingSamples,
 } from './analytics-p0-capacity.mjs';
 
 const extensionRoot = path.resolve(import.meta.dirname, '..');
@@ -121,19 +122,8 @@ const matrix = {
   ],
 };
 
-function percentile(values, fraction) {
-  const sorted = [...values].sort((a, b) => a - b);
-  return sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * fraction) - 1)];
-}
-
 function summarize(values) {
-  return {
-    samples: values.length,
-    p50Ms: percentile(values, 0.5),
-    p95Ms: percentile(values, 0.95),
-    p99Ms: percentile(values, 0.99),
-    maxMs: Math.max(...values),
-  };
+  return summarizeTimingSamples(values);
 }
 
 function observation(i, host, sourceSequence = Math.floor(i / 4) + 1) {

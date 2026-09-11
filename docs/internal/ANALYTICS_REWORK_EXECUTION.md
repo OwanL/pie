@@ -1935,3 +1935,49 @@ authorize a scale workload under the repaired candidate. A fresh validation, att
 followed by a fresh validation-only 1M admission decision, remain required. No activation, authority
 switch, session/data disposal or live UI action occurred; the four user model/settings files, `stash@{0}`
 and all earlier artifacts remain preserved.
+
+### Checkpoint 24: scale-sized statistics stack-boundary repair
+
+The persisted-worker-summary correction was committed and remotely verified at
+`de53d17ae0bc63f38f406896dcb700069ada603a`. Fresh validation 230 and attestation 231 bound that
+commit to the unchanged coordinated build `de1d5a779ccbe3f676b4` and harness fingerprint
+`a3ed21ca4c6d6deb5a8834396121d183a64a6da428655a5eab5138d1f08f022c`. Baseline 232 passed its
+single declared 10k attempt. Its immutable report at
+`C:\dev\scratch\pie-p0-inplace-baseline-20260912-r03\baseline.json` has SHA-256
+`C777AB05C2296FEE42909C976F4FCB43172652E57257A48C5A5FD3EAB200E9FB`, exactly 10,000 primary
+facts and 1,003 details, eligible component calibration, a completed contained in-place corruption
+phase, terminal helper evidence, and complete cleanup. Overall P0 remained unqualified.
+
+Validation-only run 234 admitted the selected 1M tier without creating a helper, database or proof
+root. Its calibrated peak projection was `10,592,256,000` bytes under the unchanged 16 GiB cap, and
+its projected memory was `582,496,256` bytes under the current resource limit. Reviewed attestation
+235 rechecked the baseline, validation, commit, build, 13-file candidate closure, repository invariants
+and current resources before the one authorized workload launch.
+
+Scale run 236 failed after submitting and flushing the one-million-fact phase. The retained report at
+`C:\dev\scratch\pie-p0-inplace-scale-20260912-r03\scale.json` has SHA-256
+`3C0703E2A1FB25C843D52C3C4B31756726A29FD1D8FD172A65865C63FBBB0B83` and records a
+`RangeError: Maximum call stack size exceeded` at `after-fact-flush`. The proof tree peaked at
+`6,989,619,200` bytes within the admitted cap. All four tracked recorder helpers shut down, none
+remained or required forced termination, cleanup had no failure, and the owned proof root was removed.
+The run did not reach exact database row/detail readback or the remaining gates, so it is failed,
+measurement-incomplete evidence and does not qualify the 1M tier.
+
+The exact failure was the qualification harness passing its array of 1,000,000 fact-handoff timings as
+variadic arguments to `Math.max`. A pure timing summarizer now validates a nonempty array or numeric
+typed array of finite nonnegative samples, copies and sorts once, retains the existing nearest-rank
+`ceil(n*fraction)-1` p50/p95/p99 definition, and reads the final sorted element for max without an
+argument-count boundary. It rejects malformed, empty, nonfinite and negative evidence, excludes
+`DataView`, and does not mutate the source samples. The remaining variadic calls were audited as bounded
+by recorder batch size, owned file/resource sample count or the four-host topology rather than history
+row count.
+
+Focused run 238 passed syntax checks and all 14 capacity tests with the 10M conditional test explicitly
+enabled. It exercised exact 1M and 10M sample arrays without SQLite, preserved nearest-rank values and
+source immutability, and rejected malformed inputs. Independent review accepted the three-file repair.
+This is a harness/statistics correction only; recorder and query runtime source did not change, so the
+prior clean runtime barrier and build remain applicable. The harness fingerprint will change after this
+commit, requiring a fresh validation, attestation and 10k baseline before another 1M attempt. P0,
+publication, activation, session/data disposal, cutover and Pie UI validation remain incomplete. The
+four unrelated model/settings files, `stash@{0}` and all historical qualification artifacts remain
+preserved.
