@@ -680,11 +680,40 @@ const report = {
   cleanup: { completed: false },
 };
 
+function sleepSync(milliseconds) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+}
+
+/** Windows can transiently deny renaming over a report file that an external
+ * reader (for example an operator inspecting progress) currently has open.
+ * A long qualification run must not be failed by that transient condition, so
+ * retry the atomic publish for a bounded time and only then surface the error.
+ * The temporary file is always removed so a failed publish leaves no debris. */
+function publishReportAtomically(temporary, destination) {
+  const deadline = Date.now() + 30_000;
+  let delay = 25;
+  for (;;) {
+    try {
+      renameSync(temporary, destination);
+      return;
+    } catch (error) {
+      const code = error && typeof error === 'object' ? error.code : undefined;
+      const transient = code === 'EPERM' || code === 'EACCES' || code === 'EBUSY';
+      if (!transient || Date.now() >= deadline) {
+        try { rmSync(temporary, { force: true }); } catch { /* best effort */ }
+        throw error;
+      }
+      sleepSync(delay);
+      delay = Math.min(delay * 2, 500);
+    }
+  }
+}
+
 function writeReportAtomically() {
   mkdirSync(path.dirname(configuration.report), { recursive: true });
   const temporary = `${configuration.report}.${process.pid}.tmp`;
   writeFileSync(temporary, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
-  renameSync(temporary, configuration.report);
+  publishReportAtomically(temporary, configuration.report);
 }
 
 function checkpoint(phase, details = {}) {

@@ -2111,3 +2111,73 @@ sources (`pie-p0-followon-load-driver-20260912-r01`,
 `pie-p0-followon-report-validator-20260912-r01`), and a P7a candidate activation design with an
 isolated matched host/browser trial contract (`pie-p7a-candidate-activation-design-20260912-r01`). These
 inform the remaining gates but do not change repository state.
+
+**Milestone landed.** The reviewed unit was committed as `a8605f03` (`perf(analytics): reuse recorder
+statements and sample topology memory`) and pushed; local `HEAD`, `origin/master` and the live remote
+all read `a8605f038823208cba056c71dcf61cc6edf56705`. The commit carries the five candidate paths plus
+this record and the runbook status line; the four user-owned model/settings files remain unstaged and
+uncommitted. The next step is the fresh P0 cycle under the new fingerprint and build
+`03607185be5a983ec979`.
+
+**Fresh P0 cycle under the sampled-memory harness (in progress).** The new fingerprint is
+`fd7e4f841e7d4d10a793045405ed207a996afcb0cbe5afa425522115a1c02009` at `a8605f03` / build
+`03607185be5a983ec979`.
+
+- Validation-only run (`pie-p0-sampled-memory-validation-20260912-r01/baseline-validation.json`, sha256
+  `cfaf81d7…`, schema 5, harness `p0-baseline-scale-v4-sampled-memory`) returned `validated` with no
+  reasons, `rootCreated: false`, `helpersCreated: false`, `databaseCreated: false` — root-free.
+- Fresh 10k baseline (`pie-p0-sampled-memory-baseline-20260912-r01/baseline.json`, sha256 `27018339…`)
+  returned `scenario-passed` with **zero failed gates** and overall P0 still unqualified. The
+  previously failing `recorderWorkerRss` gate now **passes** at `74,694,656` bytes max worker RSS
+  (previously 388,370,432 at scale), total topology peak `400,728,064` bytes, with three accepted
+  topology samples. All bounded gates passed: exact 10,000 facts and 1,003 details, handoff p99,
+  responsiveness proxy p95, indexed query, 2 MiB detail query, temporary footprint, in-place
+  corruption, capacity calibration and reserved free disk. Cleanup completed and removed the proof root.
+- Validation-only 1M admission (`pie-p0-sampled-memory-scale-validation-20260912-r01/scale-validation.json`,
+  sha256 `145089aa…`) returned `validated`, `rootCreated: false`, and admitted the selected tier:
+  projected peak `10,774,528,000` bytes (≤ the unchanged `17,179,869,184`-byte cap) and projected peak
+  memory `583,086,080` bytes. Both `projectedCapacity` and `projectedPeakMemory` gates passed.
+- Hash-binding attestation `pie-p0-sampled-memory-attestation-20260912-r01/attestation.json` recorded the
+  commit, build, fingerprint and all three report hashes before the workload launch.
+
+The single authorized 1M workload is running under this attestation; its outcome is recorded in the
+next checkpoint. Nothing has been published, activated, restarted, deleted or cut over.
+
+### Checkpoint 26: 1M attempt failed on a report-lock, not a gate; publish retry repair
+
+The first 1M attempt under the sampled-memory harness
+(`pie-p0-sampled-memory-scale-20260912-r01/scale.json`) **failed on `EPERM` renaming its own
+`scale.json.<pid>.tmp` over `scale.json`** at phase `after-detail-batch-32000`. This was operator
+induced: polling that report with a Node `require` held the file open, and Windows denies the
+harness's atomic rename over an open destination. It is **not** a product or capacity failure and must
+not be read as one. Two useful facts survive it: the run progressed from the fact phase (where the
+pre-cache build failed with queue-capacity exhaustion) through ~32,000 of 100,003 detail rows, and its
+recorded maximum worker RSS during that progress was `217,145,344` bytes — already under the
+256 MiB gate, against 388,370,432 before the statement cache. Cleanup completed and removed the proof
+root; the failed report and its 131 topology samples are retained as historical evidence.
+
+**Repair.** A long qualification run must not be killable by a transient external lock on its own
+report, so the harness's atomic publish now retries only recognized transient codes (`EPERM`,
+`EACCES`, `EBUSY`) with bounded exponential backoff for up to 30 seconds and removes the temporary file
+if it ultimately fails. Non-transient errors remain immediately fatal. This is a harness robustness
+correction; recorder and query runtime source did not change, so the previous clean runtime barrier and
+build `03607185be5a983ec979` remain applicable. The harness fingerprint moves again, so a fresh cycle is
+required.
+
+**Fresh cycle under the hardened harness (fingerprint
+`ab786a158ceef75d1438646ddbdf4636be80697d0a6035b42c75b8f97520f8ec`, build `03607185be5a983ec979`):**
+
+- Validation-only (`pie-p0-publish-retry-validation-20260912-r02/baseline-validation.json`) `validated`,
+  no reasons, root-free.
+- Fresh 10k baseline (`pie-p0-publish-retry-baseline-20260912-r02/baseline.json`) `scenario-passed` with
+  **zero failed gates**, max worker RSS `74,129,408` bytes, topology peak `387,018,752` bytes, three
+  topology samples, cleanup complete.
+- Validation-only 1M admission (`pie-p0-publish-retry-scale-validation-20260912-r02/scale-validation.json`)
+  `validated`, root-free, admitting the tier at projected peak `10,755,072,000` bytes (≤ the unchanged
+  `17,179,869,184`-byte cap) and projected peak memory `583,147,520` bytes; both capacity gates passed.
+- Attestation `pie-p0-publish-retry-attestation-20260912-r02/attestation.json` binds the commit, build,
+  fingerprint, both accepted reports and the retained failed attempt.
+
+The re-run 1M workload is executing with its output redirected to a log so nothing holds the report
+open. Its outcome is recorded in the next checkpoint. Nothing has been published, activated, restarted,
+deleted or cut over.
