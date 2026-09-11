@@ -1600,3 +1600,74 @@ report/proof root stayed available for diagnosis. Post-failure snapshot 78 match
 for status, `HEAD`, stash and all seven protected hashes. This is a harness/runtime lifecycle finding,
 not P4 branch/copy acceptance evidence. P0 remains unqualified, no baseline retry is authorized yet,
 and the recorder cold-start and shutdown fences require an independently reviewed repair first.
+
+### Checkpoint 19: accepted branch/copy unit and bounded P0 baseline evidence
+
+The P4 branch/copy unit was independently accepted, committed as `712d9616` (`Persist canonical
+branch and copy accounting`), pushed, and verified against local `HEAD`, `origin/master` and the live
+remote master. It persists branch edges and current selection within the analytics activation
+generation, preserves stable invocation references across process restarts, and projects copy
+inheritance without repersisting provider settlements. Source private scrub leaves only a
+destination-owned `source_scrubbed` unknown-coverage tombstone; destination scrub leaves source work.
+Bounded scoped pages report complete/truncated coverage and use expected-revision fencing. Durable
+terminal capture uses indexed SDK entry lookup and prefix-safe host cursors, avoiding full-history work
+on the terminal hot path. Later P4 still owns cross-host revision refresh. P7 still owns actual
+production sink/acknowledgement injection, pre-dispatch/provider observation and canonical parent-tool
+resolution before any authority switch.
+
+The first P0 baseline attempt, seed `p0-baseline-20260911-r03`, failed visibly during the one-host
+1,000-facts/second condition with SQLite `database is locked`. It retained its failed report and proof
+root. Parent-first teardown stopped the two identified descendants, left no matching child process,
+and kept repository status, `HEAD`, stash and seven protected hashes unchanged. Source inspection
+classified two pre-existing runtime defects: concurrent cold workers could lose a BUSY/LOCKED schema
+initialization race, and shutdown could return before fencing a pending start/recovery child.
+
+The independently accepted repair retries only recognized SQLite BUSY/LOCKED evidence for at most
+eight seconds inside the supervisor's ten-second startup window; corruption and other initialization
+errors remain immediately fatal. Shutdown now fences admission and background recovery before reading
+lifecycle state, awaits or terminates a not-ready child, rejects stranded controls, and keeps accepted
+ambiguous capture owned. It may use only the existing bounded restart budget for a shutdown-owned,
+fully awaited drain; no replacement can appear after shutdown settles. A stop fence remains latched if
+terminal exit is not confirmed. The real SQLite regression starts one, two and four cold supervisors
+against each new database, submits distinct per-host canonical execution facts, flushes them, confirms
+all worker exits and reopens read-only to count the exact durable rows. Together with delayed-start,
+recovery, drain, corrupt-database and delayed-exit cases, the focused supervisor suite passed 10/10;
+shared and extension scoped typechecks passed.
+
+The P0 harness now requires an explicit seed, records current source/build provenance, checks disk and
+memory capacity before writes, atomically checkpoints its report, and tracks every helper and reader.
+Successful helper shutdown unregisters only after resolution; failed teardown records stable
+helper/PID evidence, waits for confirmed forced exit, and retains the proof root whenever exit cannot
+be proven. Validation-only report
+`C:\dev\scratch\pie-p0-validation-20260911-r04\baseline-validation.json` passed without creating a
+helper, database or proof root. It recorded coordinated host/renderer build
+`9ee578421974e14b2e2e`, artifact fingerprint
+`59a15cde3e7161591510e34c7c5be07524a95ac2ed1af61e310f821c56c3ea03`, and remained explicitly
+unqualified.
+
+The fresh bounded baseline at `C:\dev\scratch\pie-p0-baseline-20260911-r04\baseline.json` then
+completed with the same provenance. It recorded exactly 10,000 primary facts and 1,003 detail
+payloads. Declared gates passed: fact handoff p99 `0.0498 ms`, standalone event-loop responsiveness
+proxy p95 `8.3793 ms`, indexed query `0.1269 ms`, 2 MiB detail query `2.6727 ms`, maximum recorder
+worker RSS `85,209,088` bytes, and final proof-tree size `186,576,996` bytes with
+`853,487,337,472` bytes free. The one-, two- and four-host 1,000-facts/second conditions completed;
+all tracked helpers stopped, no forced termination or cleanup failure remained, and the proof root was
+removed. This is a passing bounded baseline scenario, not a UI/agent or full P0 qualification.
+
+The accepted baseline projects the 1M tier at `23,322,124,500` bytes using the required 100x row ratio
+and 1.25 safety factor, above the `17,179,869,184`-byte temporary cap. Validation-only report
+`C:\dev\scratch\pie-p0-scale-validation-20260911-r04\scale-validation.json` therefore exited with
+the expected blocked-capacity decision before creating any helper, database or proof root. The
+baseline link and provenance matched; cleanup completed. No 1M workload was attempted.
+
+The final serialized source barrier passed: `git diff --check`, all 17 typecheck projects and lint
+returned zero; affected `npm test` selected 426 extension files and reported 4,539 passed, zero failed
+and 19 skipped; and `npm run extension:build:validate` selected `--no-sync` with coordinated identity
+`9ee578421974e14b2e2e`. Pre/post snapshots and the post-baseline snapshot matched for status, `HEAD`,
+stash and all protected hashes.
+
+P0 remains unqualified. The 1M tier needs a newly reviewed resource plan within the declared cap, and
+the 10M/endurance/light/mixed-load/v2/partial-write, matched UI-agent, incremental-host-memory and
+query-peak-memory evidence remains absent. No live runtime or renderer was published; no package or
+cache switch, activation, cutover, VS Code/backend restart, session close, helper arming or live data
+mutation occurred. The four user-owned model/settings files and `stash@{0}` remain preserved.

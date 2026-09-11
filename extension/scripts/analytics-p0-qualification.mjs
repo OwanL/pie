@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
-import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync, statfsSync, statSync, truncateSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statfsSync, statSync, truncateSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import os from 'node:os';
 import path from 'node:path';
@@ -10,29 +11,93 @@ import { execFileSync } from 'node:child_process';
 import { performance } from 'node:perf_hooks';
 
 const extensionRoot = path.resolve(import.meta.dirname, '..');
+const repositoryRoot = path.resolve(extensionRoot, '..');
 const outRoot = path.resolve(extensionRoot, 'out');
 const workerScript = path.join(outRoot, 'analytics-recorder-worker.js');
 const queryWorkerScript = path.join(outRoot, 'analytics-query-worker.js');
-const { AnalyticsRecorderSupervisor, AnalyticsCaptureCapacityError } = await import(
-  pathToFileURL(path.join(outRoot, 'analytics-recorder-supervisor.js')).href
-);
-const { SqliteAnalyticsRecorder } = await import(
-  pathToFileURL(path.join(outRoot, 'analytics-sqlite-recorder.js')).href
-);
-const { AnalyticsQueryClient } = await import(
-  pathToFileURL(path.join(outRoot, 'analytics-query-client.js')).href
-);
+const REPORT_SCHEMA_VERSION = 2;
+const HARNESS_VERSION = 'p0-baseline-scale-v1';
+let AnalyticsRecorderSupervisor;
+let AnalyticsCaptureCapacityError;
+let SqliteAnalyticsRecorder;
+let AnalyticsQueryClient;
 
-const requestedRows = Number.parseInt(process.env.PIE_ANALYTICS_P0_ROWS ?? '10000', 10);
-assert.ok(Number.isSafeInteger(requestedRows) && requestedRows >= 10_000, 'PIE_ANALYTICS_P0_ROWS must be an integer >= 10000');
+function parseArguments(argv) {
+  const options = { scenario: 'baseline', rows: undefined, seed: undefined, report: undefined, baselineReport: undefined, validate: false };
+  const allowedScenarios = new Set(['baseline', 'scale']);
+  const seen = new Set();
+  for (let index = 0; index < argv.length; index++) {
+    const argument = argv[index];
+    if (argument === '--validate') {
+      if (seen.has(argument)) throw new Error(`Duplicate option: ${argument}`);
+      seen.add(argument);
+      options.validate = true;
+      continue;
+    }
+    if (argument === '--scenario' || argument === '--rows' || argument === '--seed' || argument === '--report' || argument === '--baseline-report') {
+      if (seen.has(argument)) throw new Error(`Duplicate option: ${argument}`);
+      seen.add(argument);
+      const value = argv[++index];
+      if (!value || value.startsWith('--')) throw new Error(`${argument} requires a value`);
+      if (argument === '--scenario') options.scenario = value;
+      if (argument === '--rows') options.rows = value;
+      if (argument === '--seed') options.seed = value;
+      if (argument === '--report') options.report = value;
+      if (argument === '--baseline-report') options.baselineReport = value;
+      continue;
+    }
+    throw new Error(`Unsupported or ambiguous option: ${argument}`);
+  }
+  if (!allowedScenarios.has(options.scenario)) throw new Error(`Unsupported P0 scenario: ${options.scenario}; only baseline and scale are implemented`);
+  const environmentRows = process.env.PIE_ANALYTICS_P0_ROWS;
+  const rowText = options.rows ?? environmentRows ?? (options.scenario === 'scale' ? '1000000' : '10000');
+  if (!/^\d+$/.test(rowText)) throw new Error('--rows must be a decimal integer');
+  const rows = Number(rowText);
+  if (!Number.isSafeInteger(rows) || rows < 10_000) throw new Error('--rows must be a safe integer >= 10000');
+  const expectedRows = options.scenario === 'scale' ? 1_000_000 : 10_000;
+  if (rows !== expectedRows) throw new Error(`${options.scenario} requires exactly ${expectedRows} rows; larger tiers need a separately reviewed harness`);
+  if (options.seed === undefined) throw new Error('--seed is required for reproducible qualification evidence');
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(options.seed)) {
+    throw new Error('--seed must be 1-128 characters using letters, digits, dot, underscore or hyphen, starting with a letter or digit');
+  }
+  if (!options.report || !path.isAbsolute(options.report)) throw new Error('--report must be an absolute JSON report path');
+  if (!options.report.toLowerCase().endsWith('.json')) throw new Error('--report must name a .json file');
+  if (existsSync(options.report)) throw new Error('--report must name a new file so prior evidence is never overwritten');
+  if (options.baselineReport !== undefined) {
+    if (!path.isAbsolute(options.baselineReport) || !options.baselineReport.toLowerCase().endsWith('.json')) {
+      throw new Error('--baseline-report must be an absolute JSON report path');
+    }
+    options.baselineReport = path.resolve(options.baselineReport);
+  }
+  if (options.scenario === 'scale' && !options.baselineReport && !options.validate) {
+    throw new Error('scale requires --baseline-report from a fresh accepted baseline run');
+  }
+  if (options.scenario === 'baseline' && options.baselineReport) {
+    throw new Error('--baseline-report is valid only for the scale scenario');
+  }
+  if (process.env.PIE_ANALYTICS_P0_ENDURANCE === '1') throw new Error('PIE_ANALYTICS_P0_ENDURANCE is unsupported; use the separately reviewed endurance qualification');
+  return {
+    scenario: options.scenario,
+    rows,
+    seed: options.seed,
+    report: path.resolve(options.report),
+    baselineReport: options.baselineReport,
+    validate: options.validate,
+  };
+}
+
+const configuration = parseArguments(process.argv.slice(2));
+const requestedRows = configuration.rows;
+const scopedId = (value) => `${configuration.seed}-${value}`;
 const requestedDetail = Math.floor(requestedRows / 10);
 const detailCounts = {
   '2KiB': Math.floor(requestedDetail * 0.95),
   '32KiB': Math.floor(requestedDetail * 0.049),
   '2MiB': requestedDetail - Math.floor(requestedDetail * 0.95) - Math.floor(requestedDetail * 0.049),
 };
-const matrix = Object.freeze({
-  fixtureSeed: 'analytics-p0-v2',
+const matrix = {
+  scenario: configuration.scenario,
+  fixtureSeed: configuration.seed,
   facts: { rows: requestedRows, producerHosts: [1, 2, 4], measuredHosts: 4, modelsProviders: 12 },
   detail: { total: requestedDetail, sizes: detailCounts, nestedDepth: 2 },
   load: [`${requestedRows} finite burst`, 'four concurrent producer helpers'],
@@ -40,12 +105,13 @@ const matrix = Object.freeze({
   lifecycle: ['clean helper restart x3', 'private delete racing late detail from another helper'],
   bounds: { minUnusedDiskBytes: 20 * 1024 ** 3, maxTemporaryBytes: 16 * 1024 ** 3, maxQueueBytes: 64 * 1024 ** 2 },
   intentionallyNotClaimed: [
-    ...(requestedRows < 1_000_000 ? ['1M rows'] : []),
-    ...(requestedRows < 10_000_000 ? ['10M rows'] : []),
-    'five-minute light load unless PIE_ANALYTICS_P0_ENDURANCE=1',
-    'live VS Code UI baseline (no live runtime is activated or disrupted)',
+    ...(configuration.scenario !== 'scale' ? ['1M rows'] : []),
+    '10M rows; this bounded harness rejects that input',
+    'five-minute light load and repeated sustained-load processes',
+    'mixed load, schema-v2/partial-write, and fault matrix',
+    'matched analytics-disabled/enabled agent and live VS Code UI baseline',
   ],
-});
+};
 
 function percentile(values, fraction) {
   const sorted = [...values].sort((a, b) => a - b);
@@ -63,17 +129,17 @@ function summarize(values) {
 }
 
 function observation(i, host, sourceSequence = Math.floor(i / 4) + 1) {
-  const sourceKey = `host-${host}-fact-${i}`;
-  const generationId = 'qualification-generation';
-  const rootSessionId = `root-${Math.floor(i / 625)}`;
+  const sourceKey = `${configuration.seed}-host-${host}-fact-${i}`;
+  const generationId = `${configuration.seed}-generation`;
+  const rootSessionId = scopedId(`root-${Math.floor(i / 625)}`);
   const variant = i % 4;
   const entityKind = variant === 0 ? 'providerCall' : variant === 1 ? 'toolCall' : variant === 2 ? 'activitySpan' : 'featureObservation';
-  const entityKey = variant === 0 ? `invocation-${i}` : variant === 1 ? `tool-${i}` : variant === 2 ? `span-${i}` : `feature-${i}`;
+  const entityKey = variant === 0 ? scopedId(`invocation-${i}`) : variant === 1 ? scopedId(`tool-${i}`) : variant === 2 ? scopedId(`span-${i}`) : scopedId(`feature-${i}`);
   const observationKind = variant === 0 ? 'providerSettlement' : variant === 3 ? 'observation' : 'end';
   const fields = variant === 0 ? {
-    invocationId: `invocation-${i}`,
-    provider: `provider-${i % 3}`,
-    model: `model-${i % 12}`,
+    invocationId: scopedId(`invocation-${i}`),
+    provider: scopedId(`provider-${i % 3}`),
+    model: scopedId(`model-${i % 12}`),
     inputTokens: i % 17 === 0 ? null : 100 + i,
     outputTokens: i % 19 === 0 ? null : 20,
     inputIncludesCache: false,
@@ -104,7 +170,7 @@ function observation(i, host, sourceSequence = Math.floor(i / 4) + 1) {
     schemaVersion: 1,
     generationId,
     producerKind: variant === 0 ? 'provider' : variant === 1 ? 'tool' : variant === 2 ? 'span' : 'capability',
-    stableOriginId: `qualification-origin-${host}`,
+    stableOriginId: scopedId(`origin-${host}`),
     sourceKey,
     sourceSequence: String(sourceSequence),
     entityKind,
@@ -113,41 +179,43 @@ function observation(i, host, sourceSequence = Math.floor(i / 4) + 1) {
     observedAtMs: 1_780_000_000_000 + i,
     scope: {
       workspaceCoverage: 'known',
-      workspaceId: `workspace-${i % 4}`,
+      workspaceId: scopedId(`workspace-${i % 4}`),
       rootSessionId,
       ...(variant === 0 ? { invocationId: entityKey } : variant === 1 ? { toolCallId: entityKey } : {}),
     },
     captureSubject: { kind: 'session', rootSessionId },
-    producer: { buildId: 'qualification-build', processGeneration: `host-${host}` },
+    producer: { buildId: scopedId('qualification-build'), processGeneration: scopedId(`host-${host}`) },
     fields,
     idempotencyKey: JSON.stringify([generationId, observationKind, sourceKey]),
   };
 }
 
 function detailCapture(payloadId, rootSessionId, byteLength, valueOverride) {
-  const prefix = `${payloadId}:`;
+  const namespacedPayloadId = scopedId(payloadId);
+  const namespacedRootSessionId = scopedId(rootSessionId);
+  const prefix = `${namespacedPayloadId}:`;
   const body = valueOverride ?? `${prefix}${'d'.repeat(Math.max(0, byteLength - prefix.length))}`;
   const value = typeof body === 'string'
     ? { messages: [{ role: 'assistant', content: [{ type: 'text', text: body }] }] }
     : body;
   return {
     schemaVersion: 1,
-    generationId: 'qualification-generation',
-    stableOriginId: `qualification-detail:${rootSessionId}`,
-    payloadId,
-    sourceKey: payloadId,
+    generationId: `${configuration.seed}-generation`,
+    stableOriginId: scopedId(`detail:${rootSessionId}`),
+    payloadId: namespacedPayloadId,
+    sourceKey: namespacedPayloadId,
     observedAtMs: 1_780_100_000_000,
-    captureSubject: { kind: 'session', rootSessionId },
+    captureSubject: { kind: 'session', rootSessionId: namespacedRootSessionId },
     mediaType: 'application/x-pie-subagent-result',
     encoding: 'node-v8',
     complete: true,
     bytes: serialize(value),
-    metadata: { childId: payloadId },
+    metadata: { childId: namespacedPayloadId },
   };
 }
 
 function supervisor(databasePath, extra = {}) {
-  return new AnalyticsRecorderSupervisor({
+  const helper = new AnalyticsRecorderSupervisor({
     enabled: true,
     workerScript,
     databasePath,
@@ -156,6 +224,8 @@ function supervisor(databasePath, extra = {}) {
     maxQueueBytes: matrix.bounds.maxQueueBytes,
     ...extra,
   });
+  activeHelpers.add(helper);
+  return helper;
 }
 
 async function waitFor(predicate, timeoutMs = 5_000) {
@@ -172,7 +242,7 @@ function summarizeLight(values) {
 }
 
 async function runRateCondition(parentRoot, label, ratePerSecond, sampleCount, hostCount) {
-  const rateDatabasePath = path.join(parentRoot, `${label}.sqlite`);
+  const rateDatabasePath = path.join(parentRoot, `${configuration.seed}-${label}.sqlite`);
   const commitLatency = [];
   const hosts = Array.from({ length: hostCount }, () => supervisor(rateDatabasePath, {
     maxBatchSize: 100,
@@ -193,6 +263,7 @@ async function runRateCondition(parentRoot, label, ratePerSecond, sampleCount, h
     hosts[host].submit(observation(1_000_000_000 + index, host, Math.floor(index / hostCount) + 1));
     handoff.push(performance.now() - started);
     peakBacklogBytes = Math.max(peakBacklogBytes, ...hosts.map((entry) => entry.backlog.queuedBytes + entry.backlog.inFlightBytes));
+    if (index % 1_000 === 999) checkResourceEnvelope(`${label}-after-${index + 1}`);
   }
   const submissionElapsedMs = performance.now() - startedAt;
   const drainStarted = performance.now();
@@ -205,7 +276,7 @@ async function runRateCondition(parentRoot, label, ratePerSecond, sampleCount, h
     const before = workerBefore[index].process.cpuUsage;
     return total + entry.process.cpuUsage.user + entry.process.cpuUsage.system - before.user - before.system;
   }, 0);
-  await Promise.all(hosts.map((host) => host.shutdown()));
+  await shutdownHelpers(hosts);
   return {
     label,
     ratePerSecond,
@@ -224,38 +295,484 @@ async function runRateCondition(parentRoot, label, ratePerSecond, sampleCount, h
   };
 }
 
-function databaseBytes(databasePath) {
+function proofTreeBytes(directory) {
   let total = 0;
-  for (const suffix of ['', '-wal', '-shm']) {
-    try { total += statSync(databasePath + suffix).size; } catch { /* optional SQLite sidecar */ }
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    const entryPath = path.join(directory, entry.name);
+    if (entry.isDirectory()) total += proofTreeBytes(entryPath);
+    else if (entry.isFile()) {
+      try { total += statSync(entryPath).size; } catch { /* a concurrently removed sidecar is zero */ }
+    }
   }
   return total;
 }
 
-const root = mkdtempSync(path.join(tmpdir(), 'pie-analytics-p0-qualification-'));
-const databasePath = path.join(root, 'analytics.sqlite');
-const fsStats = statfsSync(root, { bigint: true });
-const initialFreeBytes = Number(fsStats.bavail * fsStats.bsize);
-assert.ok(initialFreeBytes - matrix.bounds.minUnusedDiskBytes > 64 * 1024 ** 2, 'insufficient free disk for bounded qualification');
+function nearestExistingDirectory(target) {
+  let candidate = path.resolve(target);
+  while (!existsSync(candidate)) {
+    const parent = path.dirname(candidate);
+    if (parent === candidate) return process.cwd();
+    candidate = parent;
+  }
+  return candidate;
+}
 
+function fixtureCapacityEstimate() {
+  const factSamples = [0, 1, 17, 101].map((index) => serialize(observation(index, index % 4)).byteLength);
+  const detailSamples = [2 * 1024, 32 * 1024, 2 * 1024 ** 2]
+    .map((size) => detailCapture(`capacity-detail-${size}`, 'capacity-root', size).bytes.byteLength);
+  const averageFactBytes = factSamples.reduce((sum, bytes) => sum + bytes, 0) / factSamples.length;
+  const weightedDetailBytes = detailSamples[0] * detailCounts['2KiB']
+    + detailSamples[1] * detailCounts['32KiB']
+    + detailSamples[2] * detailCounts['2MiB'];
+  const generatedFactRows = requestedRows + 25_253;
+  const generatedDetailRows = matrix.detail.total + 3 + 1 + 1 + 2;
+  const fixtureBytes = Math.ceil(generatedFactRows * averageFactBytes + weightedDetailBytes
+    + generatedDetailRows * detailSamples[0]);
+  return {
+    generatedFactRows,
+    generatedDetailRows,
+    sampleFactBytes: factSamples,
+    sampleDetailBytes: detailSamples,
+    fixtureBytes,
+  };
+}
+
+function artifactProvenance() {
+  const ownedFiles = [
+    ['extension/out/analytics-recorder-supervisor.js', path.join(outRoot, 'analytics-recorder-supervisor.js')],
+    ['extension/out/analytics-sqlite-recorder.js', path.join(outRoot, 'analytics-sqlite-recorder.js')],
+    ['extension/out/analytics-query-client.js', path.join(outRoot, 'analytics-query-client.js')],
+    ['extension/out/analytics-recorder-worker.js', workerScript],
+    ['extension/out/analytics-query-worker.js', queryWorkerScript],
+    ['extension/scripts/analytics-p0-qualification.mjs', path.join(extensionRoot, 'scripts', 'analytics-p0-qualification.mjs')],
+    ['extension/scripts/analytics-real-producer-probe.ts', path.join(extensionRoot, 'scripts', 'analytics-real-producer-probe.ts')],
+    ['extensions/subagent/src/analytics-capture.ts', path.join(repositoryRoot, 'extensions', 'subagent', 'src', 'analytics-capture.ts')],
+    ['extensions/subagent/src/runtime-trace.ts', path.join(repositoryRoot, 'extensions', 'subagent', 'src', 'runtime-trace.ts')],
+    ['extensions/subagent/types.ts', path.join(repositoryRoot, 'extensions', 'subagent', 'types.ts')],
+    ['shared/analytics/contracts.ts', path.join(repositoryRoot, 'shared', 'analytics', 'contracts.ts')],
+    ['shared/sensitive-redaction.ts', path.join(repositoryRoot, 'shared', 'sensitive-redaction.ts')],
+  ];
+  const files = Object.fromEntries(ownedFiles.map(([relativePath, filePath]) => {
+    try {
+      return [relativePath, {
+        sha256: createHash('sha256').update(readFileSync(filePath)).digest('hex'),
+        bytes: statSync(filePath).size,
+      }];
+    } catch (error) {
+      return [relativePath, { error: error instanceof Error ? error.message : String(error) }];
+    }
+  }));
+  let gitHead = null;
+  try { gitHead = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: extensionRoot, encoding: 'utf8' }).trim(); } catch { /* source may be exported without Git */ }
+  let hostBuildId = null;
+  let rendererBuildId = null;
+  try { hostBuildId = readFileSync(path.join(outRoot, 'pie-build-id.txt'), 'utf8').trim(); } catch { /* reported below */ }
+  try { rendererBuildId = readFileSync(path.join(outRoot, 'webview', 'panel', 'pie-build-id.txt'), 'utf8').trim(); } catch { /* reported below */ }
+  const fileErrors = Object.entries(files)
+    .filter(([, value]) => value.error)
+    .map(([name, value]) => `${name}: ${value.error}`);
+  const errors = [
+    ...fileErrors,
+    ...(!hostBuildId ? ['host build identity is missing'] : []),
+    ...(!rendererBuildId ? ['renderer build identity is missing'] : []),
+    ...(hostBuildId && rendererBuildId && hostBuildId !== rendererBuildId
+      ? [`host/renderer build identity mismatch (${hostBuildId} != ${rendererBuildId})`]
+      : []),
+  ];
+  const fingerprintInput = {
+    harnessVersion: HARNESS_VERSION,
+    hostBuildId,
+    rendererBuildId,
+    files: Object.fromEntries(Object.entries(files).map(([name, value]) => [name, value.sha256 ?? null])),
+  };
+  return {
+    gitHead,
+    hostBuildId,
+    rendererBuildId,
+    coordinatedBuildId: hostBuildId && hostBuildId === rendererBuildId ? hostBuildId : null,
+    fingerprint: createHash('sha256').update(JSON.stringify(fingerprintInput)).digest('hex'),
+    valid: errors.length === 0,
+    errors,
+    files,
+  };
+}
+
+function readBaselineEvidence(currentProvenance) {
+  if (!configuration.baselineReport) return null;
+  if (path.resolve(configuration.baselineReport) === path.resolve(configuration.report)) {
+    return { accepted: false, reason: 'Baseline and output report paths must be distinct.' };
+  }
+  let baseline;
+  try {
+    baseline = JSON.parse(readFileSync(configuration.baselineReport, 'utf8'));
+  } catch (error) {
+    return { accepted: false, reason: `Unable to read baseline report: ${error instanceof Error ? error.message : String(error)}` };
+  }
+  const fixtureBytes = baseline.results?.capacityProjection?.fixtureBytes;
+  const finalEnvelope = baseline.results?.resourceEnvelope?.samples?.at(-1);
+  const physicalBytes = finalEnvelope?.physicalBytes;
+  const memory = baseline.results?.memory;
+  const topologyPeakBytes = memory?.totalTopologyRssBytes;
+  const exactCounts = baseline.results?.tableRows?.primaryFacts === 10_000
+    && baseline.results?.tableRows?.detailPayloads === 1_003
+    && baseline.gates?.exactPrimaryRows?.decision === 'passed'
+    && baseline.gates?.exactDetailRows?.decision === 'passed';
+  const matchingFixture = baseline.matrix?.detail?.total === 1_000
+    && baseline.matrix?.detail?.sizes?.['2KiB'] === 950
+    && baseline.matrix?.detail?.sizes?.['32KiB'] === 49
+    && baseline.matrix?.detail?.sizes?.['2MiB'] === 1;
+  const accepted = baseline.schemaVersion === REPORT_SCHEMA_VERSION
+    && baseline.harnessVersion === HARNESS_VERSION
+    && baseline.configuration?.scenario === 'baseline'
+    && baseline.configuration?.rows === 10_000
+    && baseline.measurement?.completed === true
+    && baseline.cleanup?.completed === true
+    && baseline.cleanup?.rootRemoved === true
+    && baseline.qualification?.overallP0 === 'unqualified'
+    && baseline.provenance?.valid === true
+    && baseline.provenance?.fingerprint === currentProvenance.fingerprint
+    && exactCounts
+    && matchingFixture
+    && baseline.results?.capacityProjection?.units === 'bytes'
+    && finalEnvelope?.label === 'final'
+    && Number.isFinite(fixtureBytes) && fixtureBytes > 0
+    && Number.isFinite(physicalBytes) && physicalBytes > 0
+    && Number.isFinite(topologyPeakBytes) && topologyPeakBytes > 0;
+  return {
+    accepted,
+    reason: accepted ? undefined : 'Baseline must be a completed, cleaned 10,000-row measurement from this exact harness/build/probe fingerprint with exact counts, byte units and peak-memory evidence.',
+    fixtureBytes,
+    physicalBytes,
+    topologyPeakBytes,
+    scenarioStatus: baseline.status,
+    scenarioDecision: baseline.qualification?.decision,
+    failedGates: baseline.qualification?.failedGates ?? [],
+    reportPath: configuration.baselineReport,
+  };
+}
+
+const activeHelpers = new Set();
+const activeReaders = new Set();
+let lagTimer;
+
+async function shutdownHelper(helper) {
+  await helper.shutdown();
+  activeHelpers.delete(helper);
+}
+
+async function shutdownHelpers(helpers) {
+  const results = await Promise.allSettled(helpers.map((helper) => shutdownHelper(helper)));
+  const failure = results.find((result) => result.status === 'rejected');
+  if (failure) throw failure.reason;
+}
+
+function processIsAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (error?.code === 'ESRCH') return false;
+    throw error;
+  }
+}
+
+function openReader(databasePath) {
+  const reader = new SqliteAnalyticsRecorder(databasePath);
+  activeReaders.add(reader);
+  return reader;
+}
+
+function closeReader(reader) {
+  reader.close();
+  activeReaders.delete(reader);
+}
+let root = null;
+let databasePath;
+let envelopePath;
+let initialFreeBytes;
+let capacityFixture;
+let provenance;
+let baselineEvidence;
+let baselineRowScale;
+let projectedPeakBytes;
+let initialAvailableMemoryBytes;
+let projectedPeakMemoryBytes;
+let effectiveMemoryLimitBytes;
 const report = {
-  schemaVersion: 1,
+  schemaVersion: REPORT_SCHEMA_VERSION,
+  harnessVersion: HARNESS_VERSION,
+  status: 'running',
   generatedAt: new Date().toISOString(),
+  configuration: {
+    scenario: configuration.scenario,
+    rows: requestedRows,
+    seed: configuration.seed,
+    reportPath: configuration.report,
+    resolvedRowsFrom: process.env.PIE_ANALYTICS_P0_ROWS !== undefined && process.argv.includes('--rows') === false ? 'environment' : 'arguments/default',
+  },
   matrix,
-  environment: {
+  provenance: { valid: false, errors: ['initialization did not complete'] },
+  environment: {},
+  results: {},
+  gates: {},
+  measurement: { completed: false },
+  cleanup: { completed: false },
+};
+
+function writeReportAtomically() {
+  mkdirSync(path.dirname(configuration.report), { recursive: true });
+  const temporary = `${configuration.report}.${process.pid}.tmp`;
+  writeFileSync(temporary, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
+  renameSync(temporary, configuration.report);
+}
+
+function checkpoint(phase, details = {}) {
+  report.progress = { phase, ...details, updatedAt: new Date().toISOString() };
+  writeReportAtomically();
+}
+
+function recordGate(name, actual, threshold, predicate, evidence = {}) {
+  const measured = typeof actual === 'number' ? Number.isFinite(actual) : actual !== undefined && actual !== null;
+  const passed = measured && predicate(actual);
+  report.gates[name] = { actual: actual ?? null, threshold, decision: passed ? 'passed' : 'failed', evidence };
+  return passed;
+}
+
+function recordUnqualified(name, reason) {
+  report.gates[name] = { actual: null, threshold: null, decision: 'unqualified', reason };
+}
+
+try {
+  root = configuration.validate ? null : mkdtempSync(path.join(tmpdir(), 'pie-analytics-p0-qualification-'));
+  databasePath = root ? path.join(root, 'analytics.sqlite') : undefined;
+  envelopePath = nearestExistingDirectory(configuration.validate ? configuration.report : root);
+  const fsStats = statfsSync(envelopePath, { bigint: true });
+  initialFreeBytes = Number(fsStats.bavail * fsStats.bsize);
+  matrix.bounds.minUnusedDiskBytes = Math.max(20 * 1024 ** 3, initialFreeBytes * 0.20);
+  matrix.bounds.maxTemporaryBytes = Math.min(16 * 1024 ** 3, initialFreeBytes * 0.25);
+  matrix.bounds.effectiveTemporaryLimitBytes = Math.max(0, Math.min(
+    matrix.bounds.maxTemporaryBytes,
+    initialFreeBytes - matrix.bounds.minUnusedDiskBytes,
+  ));
+  Object.freeze(matrix.bounds);
+  Object.freeze(matrix);
+  capacityFixture = fixtureCapacityEstimate();
+  provenance = artifactProvenance();
+  baselineEvidence = readBaselineEvidence(provenance);
+  baselineRowScale = baselineEvidence?.accepted
+    ? requestedRows / 10_000
+    : undefined;
+  projectedPeakBytes = configuration.scenario === 'scale' && baselineRowScale !== undefined
+    ? Math.ceil(baselineEvidence.physicalBytes * baselineRowScale * 1.25)
+    : Math.ceil(capacityFixture.fixtureBytes * 2);
+  initialAvailableMemoryBytes = os.freemem();
+  projectedPeakMemoryBytes = configuration.scenario === 'scale' && baselineEvidence?.accepted
+    ? Math.ceil(Math.max(baselineEvidence.topologyPeakBytes * 1.25, process.memoryUsage().rss + 512 * 1024 ** 2))
+    : Math.ceil(process.memoryUsage().rss + (4 * 256 + 512) * 1024 ** 2);
+  effectiveMemoryLimitBytes = Math.floor(initialAvailableMemoryBytes * 0.75);
+  report.provenance = provenance;
+  report.environment = {
     platform: `${process.platform}-${process.arch}`,
     node: process.version,
     cpu: os.cpus()[0]?.model,
     logicalCpus: os.cpus().length,
     totalMemoryBytes: os.totalmem(),
+    initialAvailableMemoryBytes,
+    effectiveMemoryLimitBytes,
     initialFreeBytes,
     sqlite: 'node:sqlite bundled with Node',
-  },
-  results: {},
-  cleanup: false,
-};
+  };
+  report.results.capacityProjection = {
+    fixtureBytes: capacityFixture.fixtureBytes,
+    generatedFactRows: capacityFixture.generatedFactRows,
+    generatedDetailRows: capacityFixture.generatedDetailRows,
+    sampleFactBytes: capacityFixture.sampleFactBytes,
+    sampleDetailBytes: capacityFixture.sampleDetailBytes,
+    projectedPeakBytes,
+    units: 'bytes',
+    projectionMethod: configuration.scenario === 'scale' && baselineRowScale !== undefined
+      ? 'completed baseline full-tree bytes multiplied by row ratio and 1.25 safety factor'
+      : 'serialized fixture bytes multiplied by 2',
+    overheadFactor: configuration.scenario === 'scale' && baselineRowScale !== undefined ? 1.25 : 2,
+    baselineReport: baselineEvidence,
+    projectedPeakMemoryBytes,
+    decision: projectedPeakBytes <= matrix.bounds.effectiveTemporaryLimitBytes
+      && projectedPeakMemoryBytes <= effectiveMemoryLimitBytes
+      && provenance.valid
+      && (configuration.scenario !== 'scale' || baselineEvidence?.accepted)
+      ? 'within-envelope'
+      : 'blocked-capacity',
+  };
+  writeReportAtomically();
+} catch (error) {
+  report.status = 'failed';
+  report.failure = {
+    name: error instanceof Error ? error.name : 'QualificationInitializationError',
+    message: error instanceof Error ? error.message : String(error),
+  };
+  let cleanupError;
+  if (root) {
+    try {
+      rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+    } catch (cleanupFailure) {
+      cleanupError = cleanupFailure instanceof Error ? cleanupFailure.message : String(cleanupFailure);
+    }
+  }
+  report.cleanup = {
+    completed: cleanupError === undefined,
+    rootCreated: root !== null,
+    rootRemoved: root === null || cleanupError === undefined,
+    ...(cleanupError ? { error: cleanupError } : {}),
+  };
+  report.qualification = {
+    scenario: configuration.scenario,
+    decision: 'scenario-failed',
+    failedGates: ['initialization'],
+    overallP0: 'unqualified',
+    reason: 'Qualification initialization did not complete.',
+  };
+  report.finishedAt = new Date().toISOString();
+  try {
+    writeReportAtomically();
+  } catch (reportError) {
+    console.error(`Qualification initialization report write failed: ${reportError instanceof Error ? reportError.message : String(reportError)}`);
+  }
+  throw error;
+}
 
+function ensureGateEvidence() {
+  const tableRows = report.results.tableRows;
+  const envelope = report.results.resourceEnvelope?.samples?.at(-1);
+  const required = [
+    ['exactPrimaryRows', tableRows?.primaryFacts, requestedRows, (value) => value === requestedRows],
+    ['exactDetailRows', tableRows?.detailPayloads, matrix.detail.total + 3, (value) => value === matrix.detail.total + 3],
+    ['handoffP99', report.results.factHandoff?.p99Ms, '<= 9 ms', (value) => value <= 9],
+    ['responsivenessProxyP95', report.results.responsivenessProxy?.lag?.p95Ms, '<= 25 ms declared proxy gate', (value) => value <= 25],
+    ['indexedQuery', report.results.queries?.indexedSessionMs, '<= 250 ms', (value) => value <= 250],
+    ['largeDetailQuery', report.results.queries?.twoMiBDetailMs, '<= 9000 ms', (value) => value <= 9000],
+    ['temporaryFootprint', envelope?.physicalBytes, `<= ${matrix.bounds.effectiveTemporaryLimitBytes} bytes`, (value) => value <= matrix.bounds.effectiveTemporaryLimitBytes],
+    ['reservedFreeDisk', envelope?.freeBytes, `>= ${matrix.bounds.minUnusedDiskBytes} bytes`, (value) => value >= matrix.bounds.minUnusedDiskBytes],
+    ['recorderWorkerRss', report.results.memory?.maxWorkerRssBytes, '<= 268435456 bytes per recorder/helper during ordinary ingestion', (value) => value <= 256 * 1024 ** 2],
+  ];
+  for (const [name, actual, threshold, predicate] of required) {
+    if (!report.gates[name]) recordGate(name, actual, threshold, predicate);
+  }
+  if (!report.gates.scaleHistoryRows) {
+    configuration.scenario === 'scale'
+      ? recordGate('scaleHistoryRows', tableRows?.primaryFacts, '>= 1000000 exact rows', (value) => value >= 1_000_000)
+      : recordUnqualified('scaleHistoryRows', 'Scale scenario was not selected.');
+  }
+  for (const [name, reason] of [
+    ['tenMillionHistory', 'Not executed; capacity tier remains unqualified.'],
+    ['enduranceLightLoad', 'Not executed by this bounded baseline/scale harness.'],
+    ['mixedLoad', 'Not executed by this bounded baseline/scale harness.'],
+    ['schemaV2AndFaults', 'Not executed by this bounded baseline/scale harness.'],
+    ['matchedAgentUi', 'The standalone proxy is not a UI or agent baseline.'],
+    ['incrementalHostMemory', 'No matched analytics-disabled host baseline was executed.'],
+    ['queryPeakMemory', 'The bounded query helper reports process behavior, but this unit does not isolate an additional-RSS baseline.'],
+  ]) {
+    if (!report.gates[name]) recordUnqualified(name, reason);
+  }
+}
+
+function checkResourceEnvelope(label) {
+  const physicalBytes = proofTreeBytes(root);
+  const stats = statfsSync(root, { bigint: true });
+  const freeBytes = Number(stats.bavail * stats.bsize);
+  report.results.resourceEnvelope ??= { samples: [] };
+  report.results.resourceEnvelope.samples.push({ label, physicalBytes, freeBytes });
+  if (physicalBytes > matrix.bounds.effectiveTemporaryLimitBytes) throw new Error(`${label}: temporary proof tree exceeded ${matrix.bounds.effectiveTemporaryLimitBytes} bytes`);
+  if (freeBytes < matrix.bounds.minUnusedDiskBytes) throw new Error(`${label}: free disk fell below reserved ${matrix.bounds.minUnusedDiskBytes} bytes`);
+  checkpoint(label, { temporaryBytes: physicalBytes, freeBytes });
+}
+
+function ensureAdditionalCapacity(label, additionalBytes) {
+  assert.ok(Number.isFinite(additionalBytes) && additionalBytes >= 0, `${label}: invalid planned byte count`);
+  const physicalBytes = proofTreeBytes(root);
+  const stats = statfsSync(root, { bigint: true });
+  const freeBytes = Number(stats.bavail * stats.bsize);
+  const projectedTreeBytes = physicalBytes + additionalBytes;
+  const projectedFreeBytes = freeBytes - additionalBytes;
+  report.results.resourceEnvelope ??= { samples: [] };
+  report.results.resourceEnvelope.lastPrewrite = {
+    label,
+    physicalBytes,
+    additionalBytes,
+    projectedTreeBytes,
+    freeBytes,
+    projectedFreeBytes,
+  };
+  if (projectedTreeBytes > matrix.bounds.effectiveTemporaryLimitBytes) {
+    throw new Error(`${label}: planned write would exceed temporary proof-tree limit ${matrix.bounds.effectiveTemporaryLimitBytes} bytes`);
+  }
+  if (projectedFreeBytes < matrix.bounds.minUnusedDiskBytes) {
+    throw new Error(`${label}: planned write would cross reserved free disk ${matrix.bounds.minUnusedDiskBytes} bytes`);
+  }
+}
+
+if (configuration.validate) {
+  const blocked = (configuration.scenario === 'scale' && !baselineEvidence?.accepted)
+    || !provenance.valid
+    || matrix.bounds.effectiveTemporaryLimitBytes <= 0
+    || projectedPeakBytes > matrix.bounds.effectiveTemporaryLimitBytes
+    || projectedPeakMemoryBytes > effectiveMemoryLimitBytes;
+  report.status = blocked ? 'blocked' : 'validated';
+  report.progress = {
+    phase: 'validation-complete',
+    updatedAt: new Date().toISOString(),
+    helpersCreated: false,
+    databaseCreated: false,
+  };
+  report.validation = {
+    decision: blocked ? 'blocked' : 'validated',
+    reasons: [
+      ...(configuration.scenario === 'scale' && !baselineEvidence?.accepted ? [baselineEvidence?.reason ?? 'Scale requires a completed matching baseline measurement.'] : []),
+      ...(!provenance.valid ? provenance.errors : []),
+      ...(matrix.bounds.effectiveTemporaryLimitBytes <= 0 ? ['Free-space reserve leaves no temporary capacity.'] : []),
+      ...(projectedPeakBytes > matrix.bounds.effectiveTemporaryLimitBytes ? ['Projected proof tree exceeds the effective temporary-data/free-reserve limit.'] : []),
+      ...(projectedPeakMemoryBytes > effectiveMemoryLimitBytes ? ['Projected peak memory exceeds 75% of currently available memory.'] : []),
+    ],
+    envelopePath,
+  };
+  recordGate('provenanceComplete', provenance.valid, true, (value) => value === true, { errors: provenance.errors });
+  recordGate('projectedCapacity', projectedPeakBytes, `<= ${matrix.bounds.effectiveTemporaryLimitBytes} bytes`, (value) => value <= matrix.bounds.effectiveTemporaryLimitBytes, {
+    fixtureDerived: true,
+    baselineRequiredForScale: configuration.scenario === 'scale',
+  });
+  recordGate('projectedPeakMemory', projectedPeakMemoryBytes, `<= ${effectiveMemoryLimitBytes} bytes (75% of currently available memory)`, (value) => value <= effectiveMemoryLimitBytes);
+  recordGate('reservedFreeDisk', initialFreeBytes, `>= ${matrix.bounds.minUnusedDiskBytes} bytes`, (value) => value >= matrix.bounds.minUnusedDiskBytes);
+  report.qualification = {
+    scenario: configuration.scenario,
+    decision: 'unqualified',
+    overallP0: 'unqualified',
+    reason: 'Validation-only mode performs no code or workload qualification.',
+  };
+  report.cleanup = { completed: true, rootRemoved: true, rootCreated: false };
+  report.finishedAt = new Date().toISOString();
+  writeReportAtomically();
+  if (blocked) process.exitCode = 1;
+  console.log(JSON.stringify(report, null, 2));
+} else {
 try {
+  checkpoint('preflight');
+  ({ AnalyticsRecorderSupervisor, AnalyticsCaptureCapacityError } = await import(
+    pathToFileURL(path.join(outRoot, 'analytics-recorder-supervisor.js')).href
+  ));
+  ({ SqliteAnalyticsRecorder } = await import(
+    pathToFileURL(path.join(outRoot, 'analytics-sqlite-recorder.js')).href
+  ));
+  ({ AnalyticsQueryClient } = await import(
+    pathToFileURL(path.join(outRoot, 'analytics-query-client.js')).href
+  ));
+  if (initialFreeBytes - matrix.bounds.minUnusedDiskBytes <= 64 * 1024 ** 2) {
+    throw new Error(`insufficient free disk for reserved ${matrix.bounds.minUnusedDiskBytes} bytes`);
+  }
+  if (!provenance.valid) throw new Error(`artifact provenance is incomplete: ${provenance.errors.join('; ')}`);
+  if (!baselineEvidence?.accepted && configuration.scenario === 'scale') throw new Error(baselineEvidence?.reason ?? 'Scale requires a completed matching baseline measurement.');
+  if (projectedPeakBytes > matrix.bounds.effectiveTemporaryLimitBytes) throw new Error(`projected proof tree ${projectedPeakBytes} exceeds effective temporary limit ${matrix.bounds.effectiveTemporaryLimitBytes}`);
+  if (projectedPeakMemoryBytes > effectiveMemoryLimitBytes) throw new Error(`projected peak memory ${projectedPeakMemoryBytes} exceeds safe available-memory limit ${effectiveMemoryLimitBytes}`);
+  checkResourceEnvelope('preflight');
   const realProducerProbe = execFileSync(process.execPath, [
     path.join(extensionRoot, 'node_modules', 'tsx', 'dist', 'cli.mjs'),
     path.join(extensionRoot, 'scripts', 'analytics-real-producer-probe.ts'),
@@ -267,6 +784,7 @@ try {
     workerScript,
     databasePath,
   });
+  activeHelpers.add(disabled);
   await disabled.start();
   disabled.submitDetail(detailCapture('disabled-capture', 'disabled-root', 2 * 1024));
   assert.equal(disabled.workerPid, undefined);
@@ -284,6 +802,7 @@ try {
   const delayed = supervisor(databasePath, { rehearsalAcknowledgementDelayMs: 300 });
   await delayed.start();
   const delayedCapture = detailCapture('delayed-2mib', 'root-delay', 2 * 1024 ** 2);
+  ensureAdditionalCapacity('before-delayed-2mib', delayedCapture.bytes.byteLength * 2);
   const handoffStarted = performance.now();
   delayed.submitDetail(delayedCapture);
   const handoffMs = performance.now() - handoffStarted;
@@ -295,7 +814,7 @@ try {
   const delayedFlushMs = performance.now() - flushStarted;
   assert.ok(delayedFlushMs >= 250, 'deliberate recorder delay was not observed');
   report.results.delayedAcknowledgement = { handoffMs, simulatedAgentCompletionMs, delayedFlushMs };
-  await delayed.shutdown();
+  await shutdownHelper(delayed);
 
   // Clean helper restart is intentionally separate from VS Code/runtime
   // activation. No live host is touched or armed.
@@ -307,17 +826,17 @@ try {
     await restarting.restart();
     restartDurationsMs.push(performance.now() - started);
   }
-  await restarting.shutdown();
+  await shutdownHelper(restarting);
   report.results.helperRestart = summarize(restartDurationsMs);
 
   // Terminate a helper while facts and a nested rich result are awaiting a
   // deliberately delayed acknowledgement. The supervisor retains owned bytes
   // and replays stable identities after explicit failover replacement.
-  const failoverDatabasePath = path.join(root, 'failover.sqlite');
+  const failoverDatabasePath = path.join(root, `${configuration.seed}-failover.sqlite`);
   const failover = supervisor(failoverDatabasePath, { rehearsalAcknowledgementDelayMs: 500 });
   await failover.start();
   for (let index = 0; index < 250; index++) failover.submit(observation(50_000 + index, 0, index + 1));
-  const failoverBody = { childId: 'failover-child', messages: [{ role: 'assistant', content: 'retained across cancellation' }] };
+  const failoverBody = { childId: scopedId('failover-child'), messages: [{ role: 'assistant', content: 'retained across cancellation' }] };
   failover.submitDetail(detailCapture('failover-nested', 'failover-root', 0, {
     messages: [{ role: 'toolResult', details: { results: [failoverBody] } }],
   }));
@@ -331,12 +850,12 @@ try {
   await failover.flush();
   const failoverRecoveryMs = performance.now() - failoverStarted;
   const failoverBacklog = failover.backlog;
-  await failover.shutdown();
-  const failoverReader = new SqliteAnalyticsRecorder(failoverDatabasePath);
+  await shutdownHelper(failover);
+  const failoverReader = openReader(failoverDatabasePath);
   assert.equal(failoverReader.countObservations(), 250);
   assert.equal(failoverReader.countDetails(), 1);
-  assert.equal(failoverReader.reconstructDetail('failover-nested').messages[0].details.results[0].messages[0].content, 'retained across cancellation');
-  failoverReader.close();
+  assert.equal(failoverReader.reconstructDetail(scopedId('failover-nested')).messages[0].details.results[0].messages[0].content, 'retained across cancellation');
+  closeReader(failoverReader);
   report.results.crashFailover = {
     terminatedPid,
     replayedBeforeRestart,
@@ -356,7 +875,7 @@ try {
   const factSubmitDurations = [];
   const eventLoopLagMs = [];
   let nextLagSampleAt = performance.now() + 10;
-  const lagTimer = setInterval(() => {
+  lagTimer = setInterval(() => {
     const now = performance.now();
     eventLoopLagMs.push(Math.max(0, now - nextLagSampleAt));
     nextLagSampleAt = now + 10;
@@ -376,13 +895,16 @@ try {
     }
     if (i % 10_000 === 9_999 && i + 1 < matrix.facts.rows) {
       await Promise.all(hosts.map((host) => host.flush()));
+      checkResourceEnvelope(`after-fact-batch-${i + 1}`);
     }
   }
   const factsFlushStarted = performance.now();
   await Promise.all(hosts.map((host) => host.flush()));
   const factsFlushMs = performance.now() - factsFlushStarted;
+  checkResourceEnvelope('after-fact-drain');
   const workerStats = await Promise.all(hosts.map((host) => host.workerStats()));
   clearInterval(lagTimer);
+  lagTimer = undefined;
   const activeElapsedMs = performance.now() - activeStartedAt;
   const producerCpu = process.cpuUsage(producerCpuBefore);
   report.results.factHandoff = summarize(factSubmitDurations);
@@ -407,8 +929,10 @@ try {
     producerRssGrowthBytes: producerRssPeak - producerRssBefore,
     workerRssBytes: workerStats.map((entry) => entry.process.rss),
     totalWorkerRssBytes: workerStats.reduce((sum, entry) => sum + entry.process.rss, 0),
+    maxWorkerRssBytes: Math.max(...workerStats.map((entry) => entry.process.rss)),
+    totalTopologyRssBytes: producerRssPeak + workerStats.reduce((sum, entry) => sum + entry.process.rss, 0),
   };
-  await Promise.all(hosts.map((host) => host.shutdown()));
+  await shutdownHelpers(hosts);
 
   const detailCommitLatenciesBySize = { '2KiB': [], '32KiB': [], '2MiB': [] };
   const detailHost = supervisor(databasePath, {
@@ -427,28 +951,39 @@ try {
     ...Array.from({ length: detailCounts['2MiB'] }, () => ['2MiB', 2 * 1024 ** 2]),
   ];
   for (let i = 0; i < detailPlan.length; i++) {
+    if (i % 1_000 === 0) {
+      const plannedRawBytes = detailPlan
+        .slice(i, Math.min(detailPlan.length, i + 1_000))
+        .reduce((sum, [, plannedSize]) => sum + plannedSize, 0);
+      ensureAdditionalCapacity(`before-detail-batch-${i + 1}`, plannedRawBytes * 2);
+    }
     const [label, size] = detailPlan[i];
     const started = performance.now();
     const capture = detailCapture(`detail-${i}`, `detail-root-${i % 8}`, size);
     detailHost.submitDetail(capture);
     handoffDurationsBySize[label].push(performance.now() - started);
     if (i % 20 === 19) await new Promise((resolve) => setImmediate(resolve));
+    if (i % 1_000 === 999) checkResourceEnvelope(`after-detail-batch-${i + 1}`);
   }
 
   const sharedBody = 'shared-child-body '.repeat(65_536);
-  const childValue = { childId: 'shared-child', messages: [{ role: 'assistant', content: sharedBody }] };
+  const childValue = { childId: scopedId('shared-child'), messages: [{ role: 'assistant', content: sharedBody }] };
   const parentValue = {
-    childId: 'parent',
+    childId: scopedId('parent'),
     messages: [{ role: 'toolResult', details: { results: [childValue] } }],
   };
-  detailHost.submitDetail(detailCapture('shared-child-payload', 'nested-root', 0, childValue));
-  detailHost.submitDetail(detailCapture('shared-parent-payload', 'nested-root', 0, parentValue));
+  const sharedChildCapture = detailCapture('shared-child-payload', 'nested-root', 0, childValue);
+  const sharedParentCapture = detailCapture('shared-parent-payload', 'nested-root', 0, parentValue);
+  ensureAdditionalCapacity('before-shared-nested-detail', (sharedChildCapture.bytes.byteLength + sharedParentCapture.bytes.byteLength) * 2);
+  detailHost.submitDetail(sharedChildCapture);
+  detailHost.submitDetail(sharedParentCapture);
   const detailFlushStarted = performance.now();
   await detailHost.flush();
   const detailFlushMs = performance.now() - detailFlushStarted;
   const detailStats = await detailHost.workerStats();
+  checkResourceEnvelope('after-detail-drain');
   const peakDetailBacklog = detailHost.backlog;
-  await detailHost.shutdown();
+  await shutdownHelper(detailHost);
   report.results.detailHandoff = Object.fromEntries(
     Object.entries(handoffDurationsBySize).map(([label, values]) => [label, summarize(values)]),
   );
@@ -459,7 +994,7 @@ try {
   );
   report.results.detailDrain = { flushMs: detailFlushMs, peakDetailBacklog, storage: detailStats.detailStorage };
 
-  const reader = new SqliteAnalyticsRecorder(databasePath);
+  const reader = openReader(databasePath);
   assert.equal(reader.countObservations(), matrix.facts.rows);
   assert.equal(reader.countDetails(), matrix.detail.total + 3); // delayed + selected 10% mix + nested pair
   const tableRows = {
@@ -501,8 +1036,8 @@ try {
     conflictingIdentity: 'rejected',
     effectiveCostComplete: accountingSummary.effectiveCostUsd.complete,
   };
-  const childReconstructed = reader.reconstructDetail('shared-child-payload');
-  const parentReconstructed = reader.reconstructDetail('shared-parent-payload');
+  const childReconstructed = reader.reconstructDetail(scopedId('shared-child-payload'));
+  const parentReconstructed = reader.reconstructDetail(scopedId('shared-parent-payload'));
   assert.equal(childReconstructed.messages[0].content, sharedBody);
   assert.equal(parentReconstructed.messages[0].details.results[0].messages[0].content, sharedBody);
   assert.ok(reader.detailStorageStats().storedContentBytes < reader.detailStorageStats().logicalBytes);
@@ -522,10 +1057,11 @@ try {
   assert.ok(dimensionSummary.providers.length > 0 && dimensionSummary.tools.length > 0
     && dimensionSummary.activities.length > 0 && dimensionSummary.features.length > 0);
   const indexedStarted = performance.now();
-  assert.equal(reader.countObservations('root-3'), 625);
+  assert.equal(reader.countObservations(`${configuration.seed}-root-3`), 625);
   const indexedMs = performance.now() - indexedStarted;
   const largeDetailStarted = performance.now();
-  const largeDetail = reader.reconstructDetail(`detail-${detailPlan.length - 1}`);
+  const largeDetailId = scopedId(`detail-${detailPlan.length - 1}`);
+  const largeDetail = reader.reconstructDetail(largeDetailId);
   const largeDetailMs = performance.now() - largeDetailStarted;
   assert.equal(largeDetail.messages[0].content[0].text.length, 2 * 1024 ** 2);
   report.results.queries = {
@@ -540,7 +1076,7 @@ try {
     indexedSessionMs: indexedMs,
     twoMiBDetailMs: largeDetailMs,
   };
-  reader.close();
+  closeReader(reader);
 
   const queryClient = new AnalyticsQueryClient({
     databasePath,
@@ -554,7 +1090,7 @@ try {
     /exceeds 1 bytes/,
   );
   const defaultDetailRange = await queryClient.query({
-    type: 'detail', payloadId: `detail-${detailPlan.length - 1}`,
+    type: 'detail', payloadId: largeDetailId,
   });
   assert.equal(defaultDetailRange.bytes.byteLength, 64 * 1024);
   assert.equal(defaultDetailRange.truncated, true);
@@ -563,7 +1099,7 @@ try {
   do {
     const part = await queryClient.query({
       type: 'detail',
-      payloadId: `detail-${detailPlan.length - 1}`,
+      payloadId: largeDetailId,
       offset: detailOffset,
       maxBytes: 512 * 1024,
       maxResultBytes: 640 * 1024,
@@ -574,7 +1110,7 @@ try {
   const explicitLargeDetail = deserialize(Buffer.concat(detailParts));
   assert.equal(explicitLargeDetail.messages[0].content[0].text.length, 2 * 1024 ** 2);
   const schemaDescription = await queryClient.query({ type: 'schema' });
-  assert.equal(schemaDescription.databaseSchemaVersion, 3);
+  assert.equal(schemaDescription.databaseSchemaVersion, 4);
   const logicalQuery = await queryClient.query({
     type: 'query',
     sql: 'SELECT COUNT(*) AS count FROM analytics_provider_usage_v1',
@@ -621,20 +1157,20 @@ try {
   const refreshWriter = supervisor(databasePath);
   await refreshWriter.start();
   const refreshObservation = observation(90_000_000, 9, 1);
-  refreshObservation.scope.rootSessionId = 'cross-host-refresh-root';
-  refreshObservation.captureSubject.rootSessionId = 'cross-host-refresh-root';
+  refreshObservation.scope.rootSessionId = scopedId('cross-host-refresh-root');
+  refreshObservation.captureSubject.rootSessionId = scopedId('cross-host-refresh-root');
   const refreshStarted = performance.now();
   refreshWriter.submit(refreshObservation);
   await refreshWriter.flush();
-  const refreshVisible = await queryClient.query({ type: 'providerSettlements', rootSessionId: 'cross-host-refresh-root' });
+  const refreshVisible = await queryClient.query({ type: 'providerSettlements', rootSessionId: scopedId('cross-host-refresh-root') });
   const crossHostCommitVisibleMs = performance.now() - refreshStarted;
   assert.equal(refreshVisible.settlements.length, 1);
   const deleteStarted = performance.now();
-  await refreshWriter.deleteSession('cross-host-refresh-root', 'cross-host-delete', 1_780_300_000_000);
-  const refreshDeleted = await queryClient.query({ type: 'providerSettlements', rootSessionId: 'cross-host-refresh-root' });
+  await refreshWriter.deleteSession(scopedId('cross-host-refresh-root'), scopedId('cross-host-delete'), 1_780_300_000_000);
+  const refreshDeleted = await queryClient.query({ type: 'providerSettlements', rootSessionId: scopedId('cross-host-refresh-root') });
   const crossHostDeleteVisibleMs = performance.now() - deleteStarted;
   assert.equal(refreshDeleted.settlements.length, 0);
-  await refreshWriter.shutdown();
+  await shutdownHelper(refreshWriter);
   report.results.crossHostRefresh = { crossHostCommitVisibleMs, crossHostDeleteVisibleMs, replayedHistory: false };
 
   // Queue overflow is visible and bounded, not silently dropped or converted
@@ -643,7 +1179,7 @@ try {
   await bounded.start();
   assert.throws(() => bounded.submitDetail(detailCapture('overflow', 'overflow-root', 2 * 1024 ** 2)), AnalyticsCaptureCapacityError);
   report.results.capacity = bounded.backlog;
-  await bounded.shutdown();
+  await shutdownHelper(bounded);
 
   // Race the recorder-owned deletion marker against a late detail in another
   // helper. Either ordering is valid; the final state must be absent and the
@@ -654,8 +1190,8 @@ try {
   await Promise.all([deletionWriter.start(), lateWriter.start()]);
   const initialPrivateFact = observation(20_000, 0);
   initialPrivateFact.fields.privateQualificationValue = privacySentinel;
-  initialPrivateFact.scope.rootSessionId = 'private-race-root';
-  initialPrivateFact.captureSubject.rootSessionId = 'private-race-root';
+  initialPrivateFact.scope.rootSessionId = scopedId('private-race-root');
+  initialPrivateFact.captureSubject.rootSessionId = scopedId('private-race-root');
   deletionWriter.submit(initialPrivateFact);
   deletionWriter.submitDetail(detailCapture(
     'private-initial',
@@ -665,11 +1201,11 @@ try {
   ));
   await deletionWriter.flush();
   const raceResults = await Promise.allSettled([
-    deletionWriter.deleteSession('private-race-root', 'private-close', 1_780_200_000_000),
+    deletionWriter.deleteSession(scopedId('private-race-root'), scopedId('private-close'), 1_780_200_000_000),
     (async () => {
       const lateFact = observation(20_001, 1);
-      lateFact.scope.rootSessionId = 'private-race-root';
-      lateFact.captureSubject.rootSessionId = 'private-race-root';
+      lateFact.scope.rootSessionId = scopedId('private-race-root');
+      lateFact.captureSubject.rootSessionId = scopedId('private-race-root');
       lateWriter.submit(lateFact);
       lateWriter.submitDetail(detailCapture('private-late', 'private-race-root', 32 * 1024));
       await lateWriter.flush();
@@ -678,21 +1214,21 @@ try {
   assert.ok(lateWriter.backlog.deliveryFailures >= 1, 'late private delivery rejection must be visible');
   const lateDeliveryError = lateWriter.lastDeliveryError?.message;
   const unrelatedAfterDelete = observation(30_000, 1);
-  unrelatedAfterDelete.scope.rootSessionId = 'unrelated-after-private-delete';
-  unrelatedAfterDelete.captureSubject.rootSessionId = 'unrelated-after-private-delete';
+  unrelatedAfterDelete.scope.rootSessionId = scopedId('unrelated-after-private-delete');
+  unrelatedAfterDelete.captureSubject.rootSessionId = scopedId('unrelated-after-private-delete');
   lateWriter.submit(unrelatedAfterDelete);
   await lateWriter.flush();
-  await Promise.allSettled([deletionWriter.shutdown(), lateWriter.shutdown()]);
-  const privacyRecovery = new SqliteAnalyticsRecorder(databasePath);
+  await Promise.allSettled([shutdownHelper(deletionWriter), shutdownHelper(lateWriter)]);
+  const privacyRecovery = openReader(databasePath);
   const privacyScrubRecovery = privacyRecovery.resumePendingPrivacyScrubs(16);
-  privacyRecovery.close();
+  closeReader(privacyRecovery);
   assert.equal(privacyScrubRecovery.pending.length, 0);
-  const privacyReader = new SqliteAnalyticsRecorder(databasePath);
-  assert.equal(privacyReader.countDetails('private-race-root'), 0);
-  assert.equal(privacyReader.countObservations('private-race-root'), 0);
-  assert.equal(privacyReader.countObservations('unrelated-after-private-delete'), 1);
+  const privacyReader = openReader(databasePath);
+  assert.equal(privacyReader.countDetails(scopedId('private-race-root')), 0);
+  assert.equal(privacyReader.countObservations(scopedId('private-race-root')), 0);
+  assert.equal(privacyReader.countObservations(scopedId('unrelated-after-private-delete')), 1);
   const privacyAccounting = privacyReader.readDeliveryAccounting();
-  privacyReader.close();
+  closeReader(privacyReader);
   for (const suffix of ['', '-wal', '-shm']) {
     const candidate = `${databasePath}${suffix}`;
     if (existsSync(candidate)) {
@@ -739,10 +1275,11 @@ try {
       rssAfter: idleAfter.process.rss,
       historyPollingOrReplay: false,
     };
-    await idleHost.shutdown();
+    await shutdownHelper(idleHost);
   }
 
   const corruptionPath = path.join(root, 'corrupt.sqlite');
+  ensureAdditionalCapacity('before-corruption-copy', statSync(databasePath).size);
   copyFileSync(databasePath, corruptionPath);
   truncateSync(corruptionPath, 100);
   let corruptionError;
@@ -754,7 +1291,7 @@ try {
   assert.ok(corruptionError, 'truncated database must fail visibly');
   report.results.corruption = { truncatedToBytes: 100, visibleError: corruptionError };
 
-  report.results.physicalBytes = databaseBytes(databasePath);
+  report.results.physicalBytes = proofTreeBytes(root);
   const bytesPerPrimaryFact = report.results.physicalBytes / matrix.facts.rows;
   const estimatedTenMillionBytes = bytesPerPrimaryFact * 10_000_000;
   report.results.largeTierDecision = {
@@ -768,14 +1305,160 @@ try {
         ? 'Estimated footprint exceeds the predeclared 16 GiB temporary-data bound.'
         : 'Not requested by PIE_ANALYTICS_P0_ROWS; tier is not claimed.',
   };
-  assert.ok(report.results.physicalBytes < matrix.bounds.maxTemporaryBytes);
-  assert.ok(initialFreeBytes - report.results.physicalBytes >= matrix.bounds.minUnusedDiskBytes);
-  report.cleanup = true;
-  console.log(JSON.stringify(report, null, 2));
-} finally {
-  try {
-    rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
-  } catch (error) {
-    console.error(`Qualification cleanup failed for ${root}: ${error instanceof Error ? error.message : String(error)}`);
+  checkResourceEnvelope('final');
+  report.measurement = {
+    completed: true,
+    completedAt: new Date().toISOString(),
+    exactPrimaryRows: report.results.tableRows?.primaryFacts,
+    exactDetailRows: report.results.tableRows?.detailPayloads,
+  };
+  const finalTableRows = report.results.tableRows;
+  const failedGates = [];
+  if (!recordGate('exactPrimaryRows', finalTableRows?.primaryFacts, requestedRows, (value) => value === requestedRows)) failedGates.push('exactPrimaryRows');
+  if (!recordGate('exactDetailRows', finalTableRows?.detailPayloads, matrix.detail.total + 3, (value) => value === matrix.detail.total + 3)) failedGates.push('exactDetailRows');
+  if (!recordGate('handoffP99', report.results.factHandoff?.p99Ms, '<= 9 ms', (value) => value <= 9)) failedGates.push('handoffP99');
+  if (!recordGate('responsivenessProxyP95', report.results.responsivenessProxy?.lag?.p95Ms, '<= 25 ms declared proxy gate', (value) => value <= 25, { interpretation: 'standalone event-loop proxy; not UI or agent evidence' })) failedGates.push('responsivenessProxyP95');
+  if (!recordGate('indexedQuery', report.results.queries?.indexedSessionMs, '<= 250 ms', (value) => value <= 250)) failedGates.push('indexedQuery');
+  if (!recordGate('largeDetailQuery', report.results.queries?.twoMiBDetailMs, '<= 9000 ms', (value) => value <= 9000)) failedGates.push('largeDetailQuery');
+  const envelope = report.results.resourceEnvelope?.samples?.at(-1);
+  if (!recordGate('temporaryFootprint', envelope?.physicalBytes, `<= ${matrix.bounds.effectiveTemporaryLimitBytes} bytes`, (value) => value <= matrix.bounds.effectiveTemporaryLimitBytes)) failedGates.push('temporaryFootprint');
+  if (!recordGate('reservedFreeDisk', envelope?.freeBytes, `>= ${matrix.bounds.minUnusedDiskBytes} bytes`, (value) => value >= matrix.bounds.minUnusedDiskBytes)) failedGates.push('reservedFreeDisk');
+  if (!recordGate('recorderWorkerRss', report.results.memory?.maxWorkerRssBytes, '<= 268435456 bytes per recorder/helper during ordinary ingestion', (value) => value <= 256 * 1024 ** 2)) failedGates.push('recorderWorkerRss');
+  if (configuration.scenario === 'scale') {
+    if (!recordGate('scaleHistoryRows', finalTableRows?.primaryFacts, '>= 1000000 exact rows', (value) => value >= 1_000_000)) failedGates.push('scaleHistoryRows');
+  } else {
+    recordUnqualified('scaleHistoryRows', 'Scale scenario was not selected.');
   }
+  for (const [name, reason] of [
+    ['tenMillionHistory', 'Not executed; capacity tier remains unqualified.'],
+    ['enduranceLightLoad', 'Not executed by this bounded baseline/scale harness.'],
+    ['mixedLoad', 'Not executed by this bounded baseline/scale harness.'],
+    ['schemaV2AndFaults', 'Not executed by this bounded baseline/scale harness.'],
+    ['matchedAgentUi', 'The standalone proxy is not a UI or agent baseline.'],
+    ['incrementalHostMemory', 'No matched analytics-disabled host baseline was executed.'],
+    ['queryPeakMemory', 'The bounded query helper reports process behavior, but this unit does not isolate an additional-RSS baseline.'],
+  ]) recordUnqualified(name, reason);
+  report.qualification = { scenario: configuration.scenario, decision: failedGates.length === 0 ? 'scenario-passed' : 'scenario-failed', failedGates, overallP0: 'unqualified' };
+  if (failedGates.length > 0) throw new Error(`numeric qualification gates failed: ${failedGates.join(', ')}`);
+  report.status = 'passed';
+} catch (error) {
+  report.status = 'failed';
+  report.failure = {
+    name: error instanceof Error ? error.name : 'QualificationError',
+    message: error instanceof Error ? error.message : String(error),
+  };
+} finally {
+  let cleanupError = null;
+  let helperFailures = [];
+  let allHelperExitsConfirmed = true;
+  let helperCleanup = {
+    tracked: activeHelpers.size,
+    shutdownAttempted: 0,
+    remaining: activeHelpers.size,
+    forcedTerminations: [],
+    readerCloseAttempted: 0,
+    failures: helperFailures,
+  };
+  if (lagTimer) {
+    clearInterval(lagTimer);
+    lagTimer = undefined;
+  }
+  try {
+    const trackedHelpers = [...activeHelpers];
+    const helperResults = await Promise.allSettled(trackedHelpers.map((helper) => shutdownHelper(helper)));
+    helperFailures = helperResults
+      .filter((result) => result.status === 'rejected')
+      .map((result) => result.reason instanceof Error ? result.reason.message : String(result.reason));
+    const forcedTerminations = [];
+    for (const [index, result] of helperResults.entries()) {
+      if (result.status === 'rejected') {
+        const pid = trackedHelpers[index]?.workerPid;
+        if (!pid) {
+          allHelperExitsConfirmed = false;
+          helperFailures.push(`Helper ${index} shutdown failed without a worker PID; terminal exit could not be confirmed.`);
+          forcedTerminations.push({ helperIndex: index, pid: null, confirmed: false });
+          continue;
+        }
+        try {
+          if (processIsAlive(pid)) process.kill(pid, 'SIGKILL');
+          await waitFor(() => !processIsAlive(pid), 5_000);
+          forcedTerminations.push({ helperIndex: index, pid, confirmed: true });
+        } catch (error) {
+          allHelperExitsConfirmed = false;
+          const message = error instanceof Error ? error.message : String(error);
+          helperFailures.push(`Helper ${index} worker ${pid} terminal exit was not confirmed: ${message}`);
+          forcedTerminations.push({ helperIndex: index, pid, confirmed: false, error: message });
+        }
+      }
+    }
+    helperCleanup = {
+      tracked: trackedHelpers.length,
+      shutdownAttempted: helperResults.length,
+      remaining: activeHelpers.size,
+      forcedTerminations,
+      readerCloseAttempted: activeReaders.size,
+      failures: helperFailures,
+    };
+  } catch (error) {
+    helperFailures.push(error instanceof Error ? error.message : String(error));
+  }
+  for (const reader of activeReaders) {
+    try {
+      reader.close();
+    } catch (error) {
+      helperFailures.push(error instanceof Error ? error.message : String(error));
+    }
+  }
+  activeReaders.clear();
+  helperCleanup.failures = helperFailures;
+  if (!allHelperExitsConfirmed) {
+    cleanupError = 'One or more recorder helper exits could not be confirmed; the proof root was retained.';
+    report.cleanup = { completed: false, rootRemoved: false, helpers: helperCleanup, error: cleanupError };
+    report.status = 'failed';
+  } else {
+    try {
+      rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+      report.cleanup = { completed: helperFailures.length === 0, rootRemoved: true, helpers: helperCleanup };
+      if (helperFailures.length > 0) report.status = 'failed';
+    } catch (error) {
+      cleanupError = error instanceof Error ? error.message : String(error);
+      report.cleanup = { completed: false, rootRemoved: false, helpers: helperCleanup, error: cleanupError };
+      report.status = 'failed';
+    }
+  }
+  ensureGateEvidence();
+  const recordedFailedGates = Object.entries(report.gates)
+    .filter(([, gate]) => gate.decision === 'failed')
+    .map(([name]) => name);
+  if (!report.qualification) {
+    report.qualification = {
+      scenario: configuration.scenario,
+      decision: 'scenario-failed',
+      failedGates: recordedFailedGates,
+      overallP0: 'unqualified',
+      reason: 'The scenario did not reach complete gate evaluation.',
+    };
+  } else if (report.status === 'failed' && report.qualification.decision === 'scenario-passed') {
+    report.qualification = {
+      ...report.qualification,
+      decision: 'scenario-failed',
+      failedGates: [...new Set([...(report.qualification.failedGates ?? []), 'cleanup'])],
+      reason: 'Measurement gates passed, but required cleanup did not complete.',
+    };
+  }
+  report.finishedAt = new Date().toISOString();
+  if (cleanupError && !report.failure) report.failure = { name: 'CleanupError', message: cleanupError };
+  try {
+    writeReportAtomically();
+  } catch (error) {
+    report.status = 'failed';
+    console.error(`Qualification report write failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (report.status === 'failed') {
+    process.exitCode = 1;
+    console.error(JSON.stringify(report, null, 2));
+  } else {
+    console.log(JSON.stringify(report, null, 2));
+  }
+}
 }

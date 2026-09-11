@@ -1,6 +1,7 @@
 # Analytics rework: overnight execution runbook
 
-Status: execution preparation, 2026-09-09. The rework and activation helper are not implemented yet.
+Status: execution preparation, 2026-09-11. The bounded P0 validation/qualification CLI is present;
+the full rework, complete qualification and activation helper remain unfinished and unqualified.
 
 ## Goal and authority
 
@@ -212,6 +213,30 @@ completion just because a time estimate elapsed.
   (whichever is smaller). If those bounds cannot support the planned tier, first reduce duplicate
   temporary copies or use a justified smaller required envelope; name the unqualified larger tier.
   Never fill the disk, shrink rich payload coverage, or label a skipped/failed tier passed.
+- The bounded P0 harness accepts only explicit `baseline` (exactly 10,000 rows) and `scale` (exactly
+  1,000,000 rows) scenarios. Every invocation must provide a seed and an absolute JSON report path.
+  Run its validation-only preflight first; it creates no database or helper and writes `validated` or
+  `blocked` evidence while leaving code qualification unqualified:
+
+  ```powershell
+  node .\extension\scripts\analytics-p0-qualification.mjs --validate --scenario baseline --rows 10000 --seed p0-baseline-20260911-r01 --report C:\dev\scratch\pie-p0-qualification-20260911-r01\baseline-validation.json
+  ```
+
+  After the source/build identity and resource envelope are independently accepted, run baseline
+  qualification into the same uniquely owned scratch directory. A scale run additionally requires
+  that completed baseline report as matching evidence; do not substitute an old report or omit the
+  report paths:
+
+  ```powershell
+  node .\extension\scripts\analytics-p0-qualification.mjs --scenario baseline --rows 10000 --seed p0-baseline-20260911-r01 --report C:\dev\scratch\pie-p0-qualification-20260911-r01\baseline.json
+  node .\extension\scripts\analytics-p0-qualification.mjs --scenario scale --rows 1000000 --seed p0-scale-20260911-r01 --baseline-report C:\dev\scratch\pie-p0-qualification-20260911-r01\baseline.json --report C:\dev\scratch\pie-p0-qualification-20260911-r01\scale.json
+  ```
+
+  Keep reports outside the repository and retain their resolved configuration, matrix, provenance,
+  resource and cleanup evidence. A successful bounded scenario does not qualify overall P0: the
+  remaining history, endurance/light-load, mixed/fault/version, matched agent/UI and other contract
+  gates must remain explicitly unqualified until separately exercised and accepted. Never invoke
+  the retired environment-controlled endurance mode.
 - Run heavy probes one at a time, account for all host/helper/query RSS, and preserve the contract's
   idle/active resource gates. Use meaningful explicit shell timeouts, typically minutes for tests
   and longer bounded timeouts for scale runs, rather than the current 60-second bash default. A

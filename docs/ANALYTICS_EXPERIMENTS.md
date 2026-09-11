@@ -164,10 +164,25 @@ upgrade and full lifecycle mutation fencing remain unqualified. The single 2 MiB
 not a p99. No deferred outage/loss policy was selected: capacity exhaustion remains a visible
 qualification failure.
 
-Reproduce after `npm run extension:build:validate` with
-`node extension/scripts/analytics-p0-qualification.mjs`; it uses only emitted prototype bundles and a
-uniquely-owned disposable OS-temp directory. The checked-in JSON is the sanitized result; it contains
-no session transcript, user path or runtime data.
+The historical prototype report above predates the current explicit P0 CLI. For a current bounded
+reproduction, first run `npm run extension:build:validate`, then use a uniquely owned absolute report
+path and seed. Validation-only performs preflight without creating a database or loading qualification
+helpers:
+
+```powershell
+node .\extension\scripts\analytics-p0-qualification.mjs --validate --scenario baseline --rows 10000 --seed p0-baseline-20260911-r01 --report C:\dev\scratch\pie-p0-qualification-20260911-r01\baseline-validation.json
+```
+
+The real bounded scenarios accept exactly 10,000 baseline rows or exactly 1,000,000 scale rows; scale
+also requires a completed matching baseline report. Keep reports in the uniquely owned scratch tree:
+
+```powershell
+node .\extension\scripts\analytics-p0-qualification.mjs --scenario baseline --rows 10000 --seed p0-baseline-20260911-r01 --report C:\dev\scratch\pie-p0-qualification-20260911-r01\baseline.json
+node .\extension\scripts\analytics-p0-qualification.mjs --scenario scale --rows 1000000 --seed p0-scale-20260911-r01 --baseline-report C:\dev\scratch\pie-p0-qualification-20260911-r01\baseline.json --report C:\dev\scratch\pie-p0-qualification-20260911-r01\scale.json
+```
+
+These reports are evidence for their declared bounded scenario only. They do not qualify overall P0;
+unexecuted contract gates remain unqualified and no production activation is implied.
 
 ## Interpretation and remaining gate
 
