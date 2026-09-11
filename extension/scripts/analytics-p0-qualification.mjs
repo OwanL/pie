@@ -13,6 +13,7 @@ import {
   buildCapacityCalibration,
   projectCapacityFromCalibration,
   validateTerminalWorkerEvidence,
+  validateTerminalWorkerSummaries,
   validateCapacityCalibration,
   validateCapacitySnapshotInventory,
 } from './analytics-p0-capacity.mjs';
@@ -508,9 +509,9 @@ function readBaselineEvidence(currentProvenance) {
     calibrationReportConsistencyErrors.push('capacity calibration does not match every prewrite projection');
   }
   try {
-    requireTerminalWorkerEvidence(destructiveFault?.recorderWorkers ?? [], 'baseline recorder');
-    requireTerminalWorkerEvidence(destructiveFault?.queryWorkers ?? [], 'baseline query');
-    requireTerminalWorkerEvidence(destructiveFault?.corruptionQueryWorkers ?? [], 'baseline corruption query', { requireReady: false });
+    requireTerminalWorkerSummaries(destructiveFault?.recorderWorkers ?? [], 'baseline recorder');
+    requireTerminalWorkerSummaries(destructiveFault?.queryWorkers ?? [], 'baseline query');
+    requireTerminalWorkerSummaries(destructiveFault?.corruptionQueryWorkers ?? [], 'baseline corruption query', { requireReady: false });
   } catch (error) {
     calibrationReportConsistencyErrors.push(`destructive fault lifecycle evidence is invalid: ${error instanceof Error ? error.message : String(error)}`);
   }
@@ -613,6 +614,12 @@ function closeReader(reader) {
 
 function requireTerminalWorkerEvidence(events, label, { requireReady = true } = {}) {
   const validation = validateTerminalWorkerEvidence(events, { requireReady });
+  assert.equal(validation.valid, true, `${label} worker lifecycle is invalid: ${validation.errors.join('; ')}`);
+  return validation.workers;
+}
+
+function requireTerminalWorkerSummaries(workers, label, { requireReady = true } = {}) {
+  const validation = validateTerminalWorkerSummaries(workers, { requireReady });
   assert.equal(validation.valid, true, `${label} worker lifecycle is invalid: ${validation.errors.join('; ')}`);
   return validation.workers;
 }

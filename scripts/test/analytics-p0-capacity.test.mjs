@@ -7,6 +7,7 @@ import {
   validateCapacitySnapshotInventory,
   validateCapacityCalibration,
   validateTerminalWorkerEvidence,
+  validateTerminalWorkerSummaries,
 } from '../../extension/scripts/analytics-p0-capacity.mjs';
 
 const BASELINE_ROWS = 10_000;
@@ -29,6 +30,70 @@ test('requires exact ordered worker lifecycle evidence and rejects tampering', (
     ['spawned', 'ready', 'terminal', 'terminal'],
   ]) {
     assert.equal(validateTerminalWorkerEvidence(workerEvents(states)).valid, false, states.join(','));
+  }
+});
+
+test('round-trips exact terminal worker summaries through report JSON', () => {
+  const secondIdentity = {
+    pid: 43,
+    spawnedAtMs: 1_780_000_000_001,
+    instanceId: '22222222-2222-4222-8222-222222222222',
+  };
+  const captured = validateTerminalWorkerEvidence([
+    ...workerEvents(),
+    ...workerEvents().map((event) => ({ ...event, identity: secondIdentity })),
+  ]);
+  assert.equal(captured.valid, true);
+  const reportSummaries = JSON.parse(JSON.stringify(captured.workers));
+  assert.equal(validateTerminalWorkerSummaries(reportSummaries).valid, true);
+  assert.equal(validateTerminalWorkerSummaries(reportSummaries).workers.length, 2);
+  assert.equal(validateTerminalWorkerSummaries(reportSummaries, { requireReady: false }).valid, false);
+
+  const corruptStart = validateTerminalWorkerEvidence(
+    workerEvents(['spawned', 'terminal']),
+    { requireReady: false },
+  );
+  assert.equal(corruptStart.valid, true);
+  assert.equal(validateTerminalWorkerSummaries(
+    JSON.parse(JSON.stringify(corruptStart.workers)),
+    { requireReady: false },
+  ).valid, true);
+
+  const cases = [
+    ['reordered states', (workers) => { workers[0].states.reverse(); }],
+    ['duplicate state', (workers) => { workers[0].states.push(structuredClone(workers[0].states[2])); }],
+    ['unknown state', (workers) => { workers[0].states[1].state = 'unknown'; }],
+    ['identity mutation', (workers) => { workers[0].identity.pid = 0; }],
+    ['missing identity field', (workers) => { delete workers[0].identity.spawnedAtMs; }],
+    ['extra identity field', (workers) => { workers[0].identity.extra = true; }],
+    ['duplicate identity', (workers) => { workers.push(structuredClone(workers[0])); }],
+    ['extra worker field', (workers) => { workers[0].extra = true; }],
+    ['extra state field', (workers) => { workers[0].states[0].extra = true; }],
+    ['spawned exit code', (workers) => { workers[0].states[0].code = 0; }],
+    ['ready exit signal', (workers) => { workers[0].states[1].signal = 'SIGTERM'; }],
+    ['terminal malformed code', (workers) => { workers[0].states[2].code = {}; }],
+    ['terminal malformed signal', (workers) => {
+      workers[0].states[2].code = null;
+      workers[0].states[2].signal = 42;
+    }],
+    ['terminal unknown signal', (workers) => {
+      workers[0].states[2].code = null;
+      workers[0].states[2].signal = 'not-a-signal';
+    }],
+    ['terminal dual authority', (workers) => { workers[0].states[2].signal = 'SIGTERM'; }],
+    ['terminal missing authority', (workers) => { workers[0].states[2].code = null; }],
+    ['terminal negative code', (workers) => { workers[0].states[2].code = -1; }],
+    ['terminal unbounded signal', (workers) => {
+      workers[0].states[2].code = null;
+      workers[0].states[2].signal = 'S'.repeat(129);
+    }],
+    ['empty state list', (workers) => { workers[0].states = []; }],
+    ['missing state list', (workers) => { delete workers[0].states; }],
+  ];
+  for (const [label, mutate] of cases) {
+    const workers = structuredClone(reportSummaries);
+    mutate(workers);
+    assert.equal(validateTerminalWorkerSummaries(workers).valid, false, label);
   }
 });
 

@@ -1890,3 +1890,48 @@ close or data disposal occurred in this milestone. The user's authorization for 
 once the qualification and cutover gates are satisfied, followed by the required headless Playwright Pie
 web UI and stability journeys. The four unrelated model/settings files, `stash@{0}` and all prior evidence
 remain preserved.
+
+### Checkpoint 23: persisted worker lifecycle admission repair
+
+After commit `b94cc52d48b5c69e1b3d538a1cd97f47d5bd9803` was pushed and remotely
+verified, validation-only run 218 accepted report schema 4 and harness
+`p0-baseline-scale-v3-in-place-fault` without creating a proof root, helper or database. Reviewed
+attestation 219 bound the committed `HEAD`, coordinated build `de1d5a779ccbe3f676b4`, fingerprint
+`2bcb88628eb9830192d529d6d6d7868692fa0bb35b9201206afdb811d3108e98`, the 13-file P0
+runtime/probe closure and the preserved repository invariants.
+
+Baseline run 220 then completed its declared single attempt. The immutable report at
+`C:\dev\scratch\pie-p0-inplace-baseline-20260912-r02\baseline.json` has SHA-256
+`1E015FCD7F613B4F6B8F0142BD79944478A5CF5BAB272D1475146EFC29A913CD`; it passed the bounded
+scenario with exactly 10,000 primary facts and 1,003 details, no failed gates and overall P0 still
+unqualified. Component calibration measured `71,557,120` fact bytes, `9,502,720` variable-detail
+bytes, `120,668,352` fixed bytes, an `84,717,568`-byte final main database family and a
+`201,728,192`-byte conservative observed high-water. The in-place fault checkpoint was outside the
+owned proof root, WAL/SHM were zero, containment and nonsymlink checks passed, truncation affected only
+the disposable database, and a fresh read-only worker surfaced `database disk image is malformed`.
+All 24 recorder workers, 17 ordinary query workers and the corruption query worker reached their
+required terminal sequences; cleanup reported no remaining helper, forced termination or failure and
+removed the proof root. Snapshot 221 matched the committed source, build and protected repository state.
+
+Scale validation 222 correctly created no helper, database or workload, but rejected the otherwise valid
+baseline before capacity admission. Live collection had persisted grouped worker summaries of the form
+`{identity, states}`, while admission incorrectly passed those summaries back to the flat raw-event
+validator. Every group therefore appeared to contain one undefined state. The failure report and baseline
+remain preserved as historical evidence; no scale-capacity conclusion is taken from run 222.
+
+The repair adds a separate strict validator for persisted summaries and leaves live raw-event validation
+unchanged. It requires exact worker, identity and state keys; positive PID and supervisor-observed spawn
+timestamp; a unique UUID-like instance ID; exact ordered `spawned,ready,terminal` or corrupt-start
+`spawned,terminal` states; null diagnostics before terminal; and exactly one terminal authority consisting
+of a nonnegative safe exit code or bounded `SIG...` signal. Missing, extra, reordered, duplicated, unknown
+or malformed evidence fails closed. Focused run 225 passed all 11 capacity tests. Read-only artifact run
+226 applied the repaired validator to the actual saved baseline's 42 worker groups, revalidated its raw
+inventories and calibration, compared the normalized summaries exactly, and rejected mutated evidence.
+Independent review accepted the repair.
+
+This four-path harness/test/report correction does not change the runtime or invalidate the prior clean
+6,659-test barrier for runtime source. It does change the qualification fingerprint, so baseline 220 cannot
+authorize a scale workload under the repaired candidate. A fresh validation, attestation and 10k baseline,
+followed by a fresh validation-only 1M admission decision, remain required. No activation, authority
+switch, session/data disposal or live UI action occurred; the four user model/settings files, `stash@{0}`
+and all earlier artifacts remain preserved.

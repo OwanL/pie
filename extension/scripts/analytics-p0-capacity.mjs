@@ -46,6 +46,73 @@ export function validateTerminalWorkerEvidence(events, { requireReady = true } =
   return { valid: errors.length === 0, errors, workers: [...byInstance.values()] };
 }
 
+/** Validate the grouped lifecycle shape persisted in a qualification report.
+ * This is deliberately separate from validateTerminalWorkerEvidence: the live
+ * collector receives one event per transition, while report admission receives
+ * one immutable identity with an ordered states array. */
+export function validateTerminalWorkerSummaries(workers, { requireReady = true } = {}) {
+  const errors = [];
+  if (!Array.isArray(workers) || workers.length === 0) {
+    return { valid: false, errors: ['worker lifecycle summaries are missing'], workers: [] };
+  }
+  const expectedStates = requireReady ? ['spawned', 'ready', 'terminal'] : ['spawned', 'terminal'];
+  const seen = new Set();
+  const normalized = [];
+  for (const [index, worker] of workers.entries()) {
+    if (!worker || typeof worker !== 'object' || Array.isArray(worker)
+      || JSON.stringify(Object.keys(worker).sort()) !== JSON.stringify(['identity', 'states'])) {
+      errors.push(`worker lifecycle summary[${index}] must contain exactly identity and states`);
+      continue;
+    }
+    const identity = worker?.identity;
+    if (!identity || typeof identity !== 'object' || Array.isArray(identity)
+      || JSON.stringify(Object.keys(identity).sort()) !== JSON.stringify(['instanceId', 'pid', 'spawnedAtMs'])
+      || !Number.isSafeInteger(identity?.pid) || identity.pid <= 0
+      || !Number.isSafeInteger(identity?.spawnedAtMs) || identity.spawnedAtMs <= 0
+      || typeof identity?.instanceId !== 'string' || !/^[0-9a-f-]{36}$/i.test(identity.instanceId)) {
+      errors.push(`worker lifecycle summary[${index}] identity is invalid`);
+      continue;
+    }
+    if (seen.has(identity.instanceId)) {
+      errors.push(`worker lifecycle summary identity is duplicated: ${identity.instanceId}`);
+      continue;
+    }
+    seen.add(identity.instanceId);
+    if (!Array.isArray(worker.states)) {
+      errors.push(`worker lifecycle summary ${identity.instanceId} states are missing`);
+      continue;
+    }
+    const states = worker.states.map((event, stateIndex) => {
+      if (!event || typeof event !== 'object' || Array.isArray(event)
+        || JSON.stringify(Object.keys(event).sort()) !== JSON.stringify(['code', 'signal', 'state'])) {
+        errors.push(`worker lifecycle summary ${identity.instanceId} state[${stateIndex}] must contain exactly state, code and signal`);
+        return { state: undefined, code: null, signal: null };
+      }
+      const state = { state: event.state, code: event.code, signal: event.signal };
+      if (event.state === 'spawned' || event.state === 'ready') {
+        if (event.code !== null || event.signal !== null) {
+          errors.push(`worker lifecycle summary ${identity.instanceId} ${event.state} state cannot claim terminal code or signal`);
+        }
+      } else if (event.state === 'terminal') {
+        const validCode = Number.isSafeInteger(event.code) && event.code >= 0;
+        const validSignal = typeof event.signal === 'string'
+          && /^SIG[A-Z0-9]+$/.test(event.signal)
+          && Buffer.byteLength(event.signal, 'utf8') <= 128;
+        if (Number(validCode) + Number(validSignal) !== 1) {
+          errors.push(`worker lifecycle summary ${identity.instanceId} terminal state requires exactly one valid exit code or signal`);
+        }
+      }
+      return state;
+    });
+    if (JSON.stringify(states.map((event) => event.state)) !== JSON.stringify(expectedStates)) {
+      errors.push(`worker lifecycle summary ${identity.instanceId} must be exactly ${expectedStates.join(',')}`);
+    }
+    normalized.push({ identity: { ...identity }, states });
+  }
+  if (normalized.length === 0) errors.push('worker lifecycle evidence has no valid worker identities');
+  return { valid: errors.length === 0, errors, workers: normalized };
+}
+
 function requireSnapshot(snapshot, label) {
   if (!snapshot || typeof snapshot !== 'object') throw new Error(`${label} is required`);
   return {
