@@ -201,7 +201,9 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
   private pumpScheduled = false;
   private processing = false;
   private starting: Promise<void> | undefined;
+  private shutdownInProgress: Promise<void> | undefined;
   private stopping = false;
+  private shutdownAcknowledged = false;
   private accepting = false;
   private failure: Error | undefined;
   private queuedRecords = 0;
@@ -269,14 +271,20 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
   }
 
   async start(): Promise<void> {
-    if (!this.options.enabled || this.running) return;
+    if (!this.options.enabled) return;
+    if (this.stopping || this.shutdownInProgress) {
+      throw new Error('Analytics recorder worker is shutting down.');
+    }
+    if (this.running) return;
     if (this.starting) return this.starting;
     this.stopping = false;
+    this.shutdownAcknowledged = false;
     this.failure = undefined;
     this.automaticRestartAttempts = 0;
     this.starting = this.startWorker();
     try {
       await this.starting;
+      if (this.stopping) return;
       this.accepting = true;
       this.schedulePump();
     } finally {
@@ -361,26 +369,84 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
   }
 
   async shutdown(): Promise<void> {
-    if (!this.options.enabled || (!this.child && !this.accepting)) return;
-    if (this.failure) throw this.failure;
-    if (!this.child) throw this.failure ?? new Error('Analytics recorder worker is not running.');
-    const shutdown = this.enqueueControl({ type: 'shutdown' }, this.options.shutdownTimeoutMs ?? 10_000);
-    this.accepting = false;
+    if (!this.options.enabled) return;
+    if (this.shutdownInProgress) return this.shutdownInProgress;
+    this.shutdownInProgress = this.performShutdown();
     try {
-      // Until the ordered shutdown is acknowledged, a helper exit is an
-      // ambiguous transport failure and must recover/replay just like flush.
-      await shutdown;
-      this.stopping = true;
-      const acknowledgedChild = this.child;
-      if (acknowledgedChild) {
-        await this.waitForExit(acknowledgedChild, this.options.shutdownTimeoutMs ?? 10_000);
+      await this.shutdownInProgress;
+    } finally {
+      this.shutdownInProgress = undefined;
+    }
+  }
+
+  private async performShutdown(): Promise<void> {
+    const timeoutMs = this.options.shutdownTimeoutMs ?? 10_000;
+    // Fence recovery and producer admission before inspecting any lifecycle
+    // state. A concurrent failed start/recovery must never create a replacement
+    // after shutdown has returned.
+    this.stopping = true;
+    this.accepting = false;
+    this.shutdownAcknowledged = false;
+    try {
+      const starting = this.starting;
+      const recovery = this.recovery;
+      const notReadyChild = this.child && !this.workerReady ? this.child : undefined;
+      if (notReadyChild) {
+        await this.terminateChild(notReadyChild, timeoutMs);
+      }
+      await Promise.allSettled([starting, recovery].filter((pending): pending is Promise<void> => Boolean(pending)));
+
+      // Background recovery is fenced above. One already-accepted ambiguous
+      // batch may still use the configured bounded replacement budget, but the
+      // replacement is owned and awaited by this shutdown call; it cannot
+      // appear after shutdown settles.
+      while (true) {
+        const child = this.child;
+        if (!child) {
+          if (!this.failure || this.queuedRecords === 0) return;
+          const maximum = Math.max(0, this.options.maxAutomaticRestarts ?? 1);
+          if (this.automaticRestartAttempts >= maximum) throw this.failure;
+          this.automaticRestartAttempts += 1;
+          try {
+            await this.startWorker();
+          } catch (error) {
+            this.failure = error instanceof Error ? error : new Error(String(error));
+          }
+          continue;
+        }
+        if (!this.workerReady || !child.connected || this.failure) {
+          await this.terminateChild(child, timeoutMs);
+          if (this.failure && this.queuedRecords > 0) continue;
+          return;
+        }
+        try {
+          const shutdown = this.enqueueControl(
+            { type: 'shutdown' },
+            timeoutMs,
+            true,
+          );
+          await shutdown;
+          await this.waitForExit(child, timeoutMs);
+          return;
+        } catch (error) {
+          if (this.queuedRecords === 0) throw error;
+          // The capture batch was restored to the owned queue. Loop only while
+          // the explicit restart budget can make a shutdown-owned drain.
+        }
       }
     } finally {
-      if (this.child && !this.child.connected) {
+      this.rejectQueuedControls(
+        this.failure ?? new AnalyticsRecorderTransportError('Analytics recorder worker stopped before a queued command completed.'),
+      );
+      const terminal = !this.child || this.child.exitCode !== null || this.child.signalCode !== null;
+      if (this.child && terminal) {
         this.child = undefined;
         this.workerReady = false;
       }
-      this.stopping = false;
+      // A disconnected IPC channel is not proof of process exit. Keep the
+      // stop fence latched until a later cleanup call observes terminal state;
+      // otherwise that child's delayed exit could schedule recovery.
+      if (terminal) this.stopping = false;
       this.processing = false;
       this.pumpScheduled = false;
     }
@@ -453,8 +519,14 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
     this.schedulePump();
   }
 
-  private enqueueControl(command: Record<string, unknown>, timeoutMs = 30_000): Promise<unknown> {
-    if (!this.accepting || this.failure) return Promise.reject(this.failure ?? new Error('Analytics recorder worker is not accepting commands.'));
+  private enqueueControl(
+    command: Record<string, unknown>,
+    timeoutMs = 30_000,
+    allowWhileStopping = false,
+  ): Promise<unknown> {
+    if ((!this.accepting && !allowWhileStopping) || this.failure) {
+      return Promise.reject(this.failure ?? new Error('Analytics recorder worker is not accepting commands.'));
+    }
     return new Promise((resolve, reject) => {
       this.queue.push({ type: 'control', command, timeoutMs, resolve, reject });
       this.schedulePump();
@@ -500,6 +572,10 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
         // Keep the command in place. A committed-but-unacknowledged lifecycle
         // operation is replayed only after the old helper has exited.
         this.failure = failure;
+        if (this.stopping) {
+          if (this.queue[0] === item) this.queue.shift();
+          item.reject(failure);
+        }
         return;
       }
       if (this.queue[0] === item) this.queue.shift();
@@ -702,7 +778,7 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
     } else {
       // Fence the intentional helper exit before resolving shutdown back into
       // the async queue continuation; an exit event cannot race this marker.
-      if (pending.stopsWorker) this.stopping = true;
+      if (pending.stopsWorker) this.shutdownAcknowledged = true;
       pending.resolve(message.receipt);
     }
   }
@@ -711,7 +787,7 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
     if (this.child !== child) return;
     this.child = undefined;
     this.workerReady = false;
-    if (!this.stopping) {
+    if (!this.shutdownAcknowledged) {
       const diagnostic = this.workerStderr.trim();
       this.onFailure(new AnalyticsRecorderTransportError(
         `Analytics recorder worker exited (${code ?? signal ?? 'unknown'})${diagnostic ? `: ${diagnostic}` : '.'}`,
@@ -727,7 +803,8 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
         : new AnalyticsRecorderTransportError(error.message),
     );
     this.pending.clear();
-    if (!this.stopping) this.scheduleAutomaticRecovery();
+    if (this.stopping) this.rejectQueuedControls(error);
+    else this.scheduleAutomaticRecovery();
   }
 
   private scheduleAutomaticRecovery(): void {
@@ -786,5 +863,18 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
         resolve();
       });
     });
+  }
+
+  private async terminateChild(child: ChildProcess, timeoutMs: number): Promise<void> {
+    if (child.exitCode !== null || child.signalCode !== null) return;
+    child.kill();
+    try {
+      await this.waitForExit(child, timeoutMs);
+    } catch (error) {
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+      await this.waitForExit(child, timeoutMs).catch(() => {
+        throw error;
+      });
+    }
   }
 }

@@ -45,9 +45,12 @@ interface PendingCreateRecorder {
   ): unknown;
 }
 
-const databasePath = process.env.PIE_ANALYTICS_DATABASE_PATH;
-if (!databasePath) throw new Error('PIE_ANALYTICS_DATABASE_PATH is required.');
+const configuredDatabasePath = process.env.PIE_ANALYTICS_DATABASE_PATH;
+if (!configuredDatabasePath) throw new Error('PIE_ANALYTICS_DATABASE_PATH is required.');
+const databasePath: string = configuredDatabasePath;
 const acknowledgementDelayMs = Math.max(0, Number(process.env.PIE_ANALYTICS_REHEARSAL_ACK_DELAY_MS ?? 0) || 0);
+const STARTUP_LOCK_RETRY_MS = 8_000;
+const STARTUP_LOCK_RETRY_MAX_DELAY_MS = 200;
 
 let recorder: SqliteAnalyticsRecorder;
 let startupPrivacyRecovery: ReturnType<SqliteAnalyticsRecorder['resumePendingPrivacyScrubs']>;
@@ -72,6 +75,48 @@ async function acknowledge(requestId: number, receipt?: unknown): Promise<void> 
 function deletedSubjectError(error: unknown): string | undefined {
   const message = error instanceof Error ? error.message : String(error);
   return message.startsWith('Analytics capture subject is deleted:') ? message : undefined;
+}
+
+/** `node:sqlite` exposes BUSY/LOCKED through either SQLite errcodes or a
+ * generic ERR_SQLITE_ERROR plus text. Retry only those transient ownership
+ * races; schema, corruption, path, and configuration failures stay fatal. */
+function isSqliteLockContention(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const candidate = error as { code?: unknown; errcode?: unknown; errstr?: unknown; message?: unknown };
+  const code = String(candidate.code ?? '');
+  const errcode = Number(candidate.errcode);
+  const detail = `${String(candidate.errstr ?? '')} ${String(candidate.message ?? '')}`.toLowerCase();
+  return errcode === 5
+    || errcode === 6
+    || code === 'EBUSY'
+    || code === 'SQLITE_BUSY'
+    || code === 'SQLITE_LOCKED'
+    || code.startsWith('SQLITE_BUSY_')
+    || code.startsWith('SQLITE_LOCKED_')
+    || /\bdatabase(?: table)?\b[^\n]*\b(?:busy|locked)\b/u.test(detail);
+}
+
+async function initializeRecorder(): Promise<{
+  recorder: SqliteAnalyticsRecorder;
+  startupPrivacyRecovery: ReturnType<SqliteAnalyticsRecorder['resumePendingPrivacyScrubs']>;
+}> {
+  const deadline = Date.now() + STARTUP_LOCK_RETRY_MS;
+  let delayMs = 10;
+  while (true) {
+    try {
+      const opened = new SqliteAnalyticsRecorder(databasePath);
+      try {
+        return { recorder: opened, startupPrivacyRecovery: opened.resumePendingPrivacyScrubs(16) };
+      } catch (error) {
+        opened.close();
+        throw error;
+      }
+    } catch (error) {
+      if (!isSqliteLockContention(error) || Date.now() >= deadline) throw error;
+      await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+      delayMs = Math.min(STARTUP_LOCK_RETRY_MAX_DELAY_MS, delayMs * 2);
+    }
+  }
 }
 
 function decodeCaptures(items: readonly Uint8Array[]): SerializedCaptureEnvelope[] {
@@ -198,16 +243,16 @@ async function handle(raw: unknown): Promise<void> {
   }
 }
 
-try {
-  recorder = new SqliteAnalyticsRecorder(databasePath);
-  startupPrivacyRecovery = recorder.resumePendingPrivacyScrubs(16);
-  void send({ type: 'ready', startupPrivacyRecovery }).then(() => {
+void initializeRecorder().then((initialized) => {
+  recorder = initialized.recorder;
+  startupPrivacyRecovery = initialized.startupPrivacyRecovery;
+  return send({ type: 'ready', startupPrivacyRecovery }).then(() => {
     let processing = Promise.resolve();
     process.on('message', (message: unknown) => {
       processing = processing.then(() => handle(message));
     });
-  }).catch(() => process.exitCode = 1);
-} catch (error) {
-  void send({ type: 'fatal', error: error instanceof Error ? error.message : String(error) })
+  });
+}).catch((error) => {
+  return send({ type: 'fatal', error: error instanceof Error ? error.message : String(error) })
     .finally(() => process.exitCode = 1);
-}
+});
