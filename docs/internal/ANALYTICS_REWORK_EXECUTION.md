@@ -2181,3 +2181,78 @@ required.
 The re-run 1M workload is executing with its output redirected to a log so nothing holds the report
 open. Its outcome is recorded in the next checkpoint. Nothing has been published, activated, restarted,
 deleted or cut over.
+
+### Checkpoint 27: first full 1M ingestion; two genuine P0 gate failures isolated
+
+The re-run (`pie-p0-publish-retry-scale-20260912-r02/scale.json`) completed far more than any previous
+attempt and produced the first genuinely diagnostic 1M evidence. It **ingested and verified the entire
+tier** — the run is a real partial failure, not a lock or harness artefact.
+
+**Passed gates:** `exactPrimaryRows` 1,000,000; `exactDetailRows` 100,003; `scaleHistoryRows`
+1,000,000; `handoffP99` `0.0495` ms; `responsivenessProxyP95` `10.05` ms; `indexedQuery` `2.37` ms;
+`largeDetailQuery` `5.07` ms; `temporaryFootprint` `8,228,069,376` bytes (≤ 16 GiB);
+`reservedFreeDisk` passed. `tableRows` recorded exactly 1,000,000 primary facts, 250,000 provider
+settlements, 250,000 each of tool/activity/feature observations and 100,003 detail payloads. The
+correctness oracle held: 250,000 occurrences, exact redelivery `duplicate`, conflicting identity
+`rejected`, `effectiveCostComplete` false. The nested-detail drain finished normally.
+
+**Failure 1 — `recorderWorkerRss` = `331,214,848` bytes (gate 268,435,456).** The topology samples
+attribute it cleanly and it is *not* a fact-phase problem:
+
+| Phase | Max worker RSS |
+|---|---|
+| facts (peak at `after-fact-batch-910000`) | 218,046,464 |
+| variable-details, 2 KiB region (to 95,000) | 261,644,288 |
+| variable-details, 32 KiB region (to 99,900) | 286,818,304 |
+| variable-details, 2 MiB region (99,903 → 100,000) | **331,214,848** |
+
+The recorder is already over the gate before any 2 MiB detail arrives, so the 2 MiB region is an
+aggravating increment on an already-breached baseline rather than the sole cause. Worker RSS climbs
+monotonically across 118 detail batches and never releases; the nested-detail worker then reads a
+healthy 65 MB, which indicates the growth is per-settlement/per-payload retained state rather than
+payload buffering. The statement cache removed the earlier multi-hundred-MB `prepare()` leak (facts now
+plateau near 218 MB), but a second growth driver remains on the detail path. Likely candidates, in
+priority order: per-payload retained `references`/manifest structures across `submitDetail`
+deduplication, the SQLite page cache under `synchronous = FULL`/`secure_delete = ON`, and `serialize()`
+of each detail. **Not yet isolated** — this needs a bounded diagnostic in the style of the earlier RSS
+matrix (control vs. variant at a fixed detail size class), not a guess.
+
+**Failure 2 — `inPlaceCorruption` did not complete; `Error: Analytics query timed out after 10000ms`.**
+The run reached `after-detail-drain` and recorded the in-process read matrix, then failed on the **first
+`AnalyticsQueryClient` request** of the worker-query section — a *bounded* `providerSettlements` read
+(`LIMIT 200`), which should be trivially fast. `report.results.queryIsolation` was never recorded, and
+the fault step was never reached, so the corruption phase is a downstream casualty rather than the
+cause. The suspected cause is the query worker's snapshot/metadata preamble on a 1M database rather
+than the bounded row read itself; that preamble includes `SELECT COALESCE(MAX(commit_sequence), 0) FROM
+analytics_observations`, which is an unindexed aggregate over the full 1,000,000-row fact table on every
+request. **Not yet isolated** — needs a focused timing of the worker snapshot path.
+
+Independent, *in-process* read-path numbers from the same run are a related and separately actionable
+finding: `allHistoryProjection` (10 samples of `projectProviderUsage()`) recorded p50 `4,274` ms and
+p95/p99/max `10,997` ms — i.e. the all-history projection intermittently exceeds the query client's own
+10-second default at 1M, before any added load. `historicalDimensions` (`readHistoricalDimensionSummary()`)
+recorded p50 `388` ms but p95/p99/max `3,800` ms. Both are unbounded full scans:
+`projectProviderUsage()` delegates to `readProviderSettlements()` with **no** limit argument, issuing
+`SELECT *` over all 250,000 settlements in one call, and the dimension summary runs four unindexed
+`GROUP BY` aggregates over 250,000-row tables. The harness's `largeDetailQuery` gate passed at `5.07` ms,
+so the 2 MiB detail read path is healthy — this is specifically the aggregate/scan path.
+
+The repair commit `d3d08bbf` (publish retry) was landed and pushed separately; local `HEAD`,
+`origin/master` and the live remote all read `d3d08bbf2abf109e282fac211cf58795c2e25ecc`. P0 remains
+unqualified, the 1M tier remains failed on these two gates, and the 10M/endurance/light/mixed-load/
+schema-v2/matched-UI/memory gates remain outstanding. Nothing has been published, activated, restarted,
+deleted or cut over; the four user-owned model/settings files and `stash@{0}` remain preserved.
+
+**Next ready tasks:**
+1. Bounded diagnostic for the detail-path RSS growth (fixed size class, control vs. candidate variants,
+   one helper at a time), then a scoped repair with focused tests.
+2. Focused timing of the `AnalyticsQueryClient` snapshot/metadata preamble at 1M to isolate the
+   timeout — starting with the unindexed `MAX(commit_sequence)` over `analytics_observations` that every
+   worker request runs.
+3. Index/query-cost repair for the unbounded `projectProviderUsage()`/`readProviderSettlements()`
+   full scan and the four unindexed dimension aggregates; re-measure against the ≤ 9 s representative
+   gate and the query client's default timeout. `projectProviderUsage()`'s unbounded `SELECT *` has
+   several direct callers (`sqlite-recorder.test.ts`, `canonical-query-entry.test.ts`,
+   `p4-terminal-reconciliation.test.ts`), so bounding it is a contract decision, not a one-line change.
+4. After those repairs: validation → attestation → 10k baseline → 1M admission → 1M workload, then the
+   remaining P0 follow-on workloads and the P4/P7 cutover units.
