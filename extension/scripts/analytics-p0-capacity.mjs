@@ -42,6 +42,207 @@ export function summarizeTimingSamples(values) {
   };
 }
 
+/** Split a finite fixture load into deterministic batches bounded by both
+ * record count and the caller's conservative per-record byte estimate. The
+ * qualification driver drains each returned batch before admitting the next;
+ * this does not change production queue limits or measured submit latency. */
+export function planBoundedLoadBatches(recordBytes, { maxRecords, maxBytes }) {
+  if (!Array.isArray(recordBytes)) throw new Error('recordBytes must be an array');
+  const recordLimit = requirePositiveInteger(maxRecords, 'maxRecords');
+  const byteLimit = requirePositiveInteger(maxBytes, 'maxBytes');
+  const batches = [];
+  let start = 0;
+  let bytes = 0;
+  for (const [index, value] of recordBytes.entries()) {
+    const size = requirePositiveInteger(value, `recordBytes[${index}]`);
+    if (size > byteLimit) throw new Error(`recordBytes[${index}] exceeds maxBytes`);
+    const records = index - start;
+    if (records > 0 && (records >= recordLimit || bytes + size > byteLimit)) {
+      batches.push({ start, end: index, records, bytes });
+      start = index;
+      bytes = 0;
+    }
+    bytes += size;
+  }
+  if (start < recordBytes.length) {
+    batches.push({ start, end: recordBytes.length, records: recordBytes.length - start, bytes });
+  }
+  return batches;
+}
+
+/** Reconstruct the finite recorder-topology sample plan from the declared row
+ * count and unchanged queue bound. This lets baseline admission prove that no
+ * fact or detail drain sample was omitted from a persisted report. */
+export function buildExpectedTopologySamplePlan({ rows, maxQueueBytes }) {
+  const factRows = requirePositiveInteger(rows, 'rows');
+  const queueBytes = requirePositiveInteger(maxQueueBytes, 'maxQueueBytes');
+  if (factRows < 10_000 || factRows > 10_000_000 || factRows % 10_000 !== 0) {
+    throw new Error('rows must be a multiple of 10000 between 10000 and 10000000');
+  }
+  const detailRows = Math.floor(factRows / 10);
+  const smallDetails = Math.floor(detailRows * 0.95);
+  const mediumDetails = Math.floor(detailRows * 0.049);
+  const largeDetails = detailRows - smallDetails - mediumDetails;
+  const detailBytes = [
+    ...Array.from({ length: smallDetails }, () => 2 * 1024),
+    ...Array.from({ length: mediumDetails }, () => 32 * 1024),
+    ...Array.from({ length: largeDetails }, () => 2 * 1024 ** 2),
+  ];
+  const factSamples = [];
+  for (let completed = 10_000; completed < factRows; completed += 10_000) {
+    factSamples.push({ label: `after-fact-batch-${completed}`, phase: 'facts', workerCount: 4 });
+  }
+  factSamples.push({ label: 'after-fact-flush', phase: 'facts', workerCount: 4 });
+  const detailSamples = planBoundedLoadBatches(detailBytes, {
+    maxRecords: 1_000,
+    maxBytes: queueBytes / 4,
+  }).map((batch) => ({
+    label: `after-detail-batch-${batch.end}`,
+    phase: 'variable-details',
+    workerCount: 1,
+  }));
+  return [
+    ...factSamples,
+    ...detailSamples,
+    { label: 'after-nested-detail-drain', phase: 'nested-details', workerCount: 1 },
+  ];
+}
+
+/** Validate and recompute bounded recorder-topology RSS evidence. Producer RSS
+ * is the observed high-water through the sample window; each worker RSS value
+ * comes from that worker's stats response after the corresponding drain. */
+export function validateMemoryTopologySamples(samples, { expectedPlan, recorderWorkers } = {}) {
+  const errors = [];
+  if (!Array.isArray(samples) || samples.length === 0) {
+    return { valid: false, errors: ['memory topology samples are missing'] };
+  }
+  if (expectedPlan !== undefined && (!Array.isArray(expectedPlan) || expectedPlan.length === 0)) {
+    return { valid: false, errors: ['expected memory topology sample plan is invalid'] };
+  }
+  if (Array.isArray(expectedPlan) && samples.length !== expectedPlan.length) {
+    errors.push(`memory topology sample count must be exactly ${expectedPlan.length}`);
+  }
+  const terminalValidation = validateTerminalWorkerSummaries(recorderWorkers);
+  if (!terminalValidation.valid) {
+    errors.push(`memory topology recorder lifecycle is invalid: ${terminalValidation.errors.join('; ')}`);
+  }
+  const terminalByInstance = new Map(terminalValidation.workers.map((worker) => [worker.identity.instanceId, worker.identity]));
+  const seenLabels = new Set();
+  const workerIdentities = new Map();
+  const phaseIdentitySets = new Map();
+  const identityPhases = new Map();
+  let maxWorkerRssBytes = 0;
+  let maxTotalTopologyRssBytes = 0;
+  let previousObservedAtMs = -1;
+  for (const [index, sample] of samples.entries()) {
+    if (!sample || typeof sample !== 'object' || Array.isArray(sample)
+      || JSON.stringify(Object.keys(sample).sort()) !== JSON.stringify([
+        'label', 'maxWorkerRssBytes', 'observedAt', 'phase', 'producerRssBytes',
+        'totalTopologyRssBytes', 'totalWorkerRssBytes', 'workers',
+      ])) {
+      errors.push(`memory topology sample[${index}] has an invalid shape`);
+      continue;
+    }
+    const expected = expectedPlan?.[index];
+    if (typeof sample.label !== 'string' || sample.label.length === 0 || Buffer.byteLength(sample.label, 'utf8') > 128) {
+      errors.push(`memory topology sample[${index}] label is invalid`);
+    } else if (seenLabels.has(sample.label)) {
+      errors.push(`memory topology sample label is duplicated: ${sample.label}`);
+    } else {
+      seenLabels.add(sample.label);
+    }
+    if (expected && (sample.label !== expected.label || sample.phase !== expected.phase)) {
+      errors.push(`memory topology sample[${index}] does not match expected ${expected.phase}/${expected.label}`);
+    }
+    let observedAtMs = Number.NaN;
+    if (typeof sample.observedAt === 'string') observedAtMs = Date.parse(sample.observedAt);
+    if (!Number.isFinite(observedAtMs)
+      || new Date(observedAtMs).toISOString() !== sample.observedAt) {
+      errors.push(`memory topology sample[${index}] timestamp is not canonical ISO`);
+    } else if (observedAtMs < previousObservedAtMs) {
+      errors.push(`memory topology sample[${index}] timestamp precedes the prior sample`);
+    } else {
+      previousObservedAtMs = observedAtMs;
+    }
+    if (!Number.isSafeInteger(sample.producerRssBytes) || sample.producerRssBytes <= 0) {
+      errors.push(`memory topology sample[${index}] producer RSS is invalid`);
+    }
+    if (!Array.isArray(sample.workers) || sample.workers.length === 0
+      || (expected && sample.workers.length !== expected.workerCount)) {
+      errors.push(`memory topology sample[${index}] worker count is invalid`);
+      continue;
+    }
+    const sampleInstances = new Set();
+    let workerTotal = 0;
+    let workerMaximum = 0;
+    for (const [workerIndex, worker] of sample.workers.entries()) {
+      if (!worker || typeof worker !== 'object' || Array.isArray(worker)
+        || JSON.stringify(Object.keys(worker).sort()) !== JSON.stringify(['identity', 'rssBytes'])) {
+        errors.push(`memory topology sample[${index}] worker[${workerIndex}] has an invalid shape`);
+        continue;
+      }
+      const identity = worker.identity;
+      if (!identity || typeof identity !== 'object' || Array.isArray(identity)
+        || JSON.stringify(Object.keys(identity).sort()) !== JSON.stringify(['instanceId', 'pid', 'spawnedAtMs'])
+        || !Number.isSafeInteger(identity.pid) || identity.pid <= 0
+        || !Number.isSafeInteger(identity.spawnedAtMs) || identity.spawnedAtMs <= 0
+        || typeof identity.instanceId !== 'string' || !/^[0-9a-f-]{36}$/i.test(identity.instanceId)) {
+        errors.push(`memory topology sample[${index}] worker[${workerIndex}] identity is invalid`);
+        continue;
+      }
+      if (sampleInstances.has(identity.instanceId)) {
+        errors.push(`memory topology sample[${index}] repeats worker ${identity.instanceId}`);
+      }
+      sampleInstances.add(identity.instanceId);
+      const recordedIdentity = workerIdentities.get(identity.instanceId);
+      if (recordedIdentity
+        && (recordedIdentity.pid !== identity.pid || recordedIdentity.spawnedAtMs !== identity.spawnedAtMs)) {
+        errors.push(`memory topology worker identity changed for ${identity.instanceId}`);
+      }
+      workerIdentities.set(identity.instanceId, { ...identity });
+      const terminalIdentity = terminalByInstance.get(identity.instanceId);
+      if (!terminalIdentity
+        || terminalIdentity.pid !== identity.pid
+        || terminalIdentity.spawnedAtMs !== identity.spawnedAtMs) {
+        errors.push(`memory topology sample[${index}] worker ${identity.instanceId} has no matching terminal lifecycle`);
+      }
+      const priorPhase = identityPhases.get(identity.instanceId);
+      if (priorPhase !== undefined && priorPhase !== sample.phase) {
+        errors.push(`memory topology worker ${identity.instanceId} appears in both ${priorPhase} and ${sample.phase}`);
+      }
+      identityPhases.set(identity.instanceId, sample.phase);
+      if (!Number.isSafeInteger(worker.rssBytes) || worker.rssBytes <= 0) {
+        errors.push(`memory topology sample[${index}] worker[${workerIndex}] RSS is invalid`);
+        continue;
+      }
+      workerTotal += worker.rssBytes;
+      workerMaximum = Math.max(workerMaximum, worker.rssBytes);
+      if (!Number.isSafeInteger(workerTotal)) errors.push(`memory topology sample[${index}] worker RSS total exceeds safe integer range`);
+    }
+    const phaseSet = [...sampleInstances].sort().join(',');
+    const expectedPhaseSet = phaseIdentitySets.get(sample.phase);
+    if (expectedPhaseSet !== undefined && expectedPhaseSet !== phaseSet) {
+      errors.push(`memory topology ${sample.phase} worker identity set changed between samples`);
+    }
+    phaseIdentitySets.set(sample.phase, phaseSet);
+    const topologyTotal = sample.producerRssBytes + workerTotal;
+    if (sample.totalWorkerRssBytes !== workerTotal) errors.push(`memory topology sample[${index}] worker RSS total does not reconcile`);
+    if (sample.maxWorkerRssBytes !== workerMaximum) errors.push(`memory topology sample[${index}] worker RSS maximum does not reconcile`);
+    if (sample.totalTopologyRssBytes !== topologyTotal) errors.push(`memory topology sample[${index}] total RSS does not reconcile`);
+    if (!Number.isSafeInteger(topologyTotal)) errors.push(`memory topology sample[${index}] total RSS exceeds safe integer range`);
+    maxWorkerRssBytes = Math.max(maxWorkerRssBytes, workerMaximum);
+    maxTotalTopologyRssBytes = Math.max(maxTotalTopologyRssBytes, topologyTotal);
+  }
+  return {
+    valid: errors.length === 0,
+    errors,
+    sampleCount: samples.length,
+    maxWorkerRssBytes,
+    maxTotalTopologyRssBytes,
+    sampledWorkerCount: workerIdentities.size,
+  };
+}
+
 export function validateTerminalWorkerEvidence(events, { requireReady = true } = {}) {
   const errors = [];
   if (!Array.isArray(events) || events.length === 0) {

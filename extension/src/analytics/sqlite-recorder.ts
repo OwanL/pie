@@ -68,6 +68,76 @@ interface SqliteModule {
   constants: Record<string, number>;
 }
 
+const FIXED_WRITER_STATEMENT_KEYS = [
+  'reconciliation.current', 'reconciliation.pending', 'reconciliation.next',
+  'reconciliation.delete-next', 'reconciliation.pending-count', 'reconciliation.insert-pending',
+  'reconciliation.pending-rows', 'reconciliation.upsert',
+  'projection.revision.read', 'projection.revision.update',
+  'provider.accounting.lookup', 'provider.accounting.upsert',
+  'provider.settlement.lookup', 'provider.settlement.insert',
+  'typed.execution.observation.insert', 'typed.execution.state.upsert',
+  'typed.tool.observation.insert', 'typed.tool.state.upsert',
+  'typed.activity.observation.insert', 'typed.activity.state.upsert',
+  'typed.feature.observation.insert',
+  'typed.branch.selection.insert', 'typed.branch.selection-current.upsert',
+  'typed.branch.edge.lookup', 'typed.branch.edge.parent.lookup', 'typed.branch.edge.upsert',
+  'typed.copy.insert',
+  'detail.payload.lookup', 'detail.source.lookup', 'detail.content.insert',
+  'detail.payload.insert', 'detail.reference.insert', 'generation.insert',
+  'observation.registry.lookup', 'subject.deleted.present', 'copy.destination.lookup',
+  'copy.scrubbed.upsert', 'observation.insert', 'subject.pending.lookup', 'subject.deleted.lookup',
+] as const;
+const WRITER_STATEMENT_KEYS = new Set<string>(FIXED_WRITER_STATEMENT_KEYS);
+for (const kind of ['observations', 'details']) {
+  for (const outcome of ['accepted', 'replayed', 'deleted']) {
+    WRITER_STATEMENT_KEYS.add(`delivery.${kind}.${outcome}.read`);
+    WRITER_STATEMENT_KEYS.add(`delivery.${kind}.${outcome}.update`);
+  }
+}
+// 40 fixed keys plus 12 delivery kind/outcome read/update combinations.
+if (WRITER_STATEMENT_KEYS.size !== 52) throw new Error('Analytics writer statement key inventory changed.');
+const MAX_CACHED_WRITER_STATEMENTS = 64;
+const INSERT_GENERATION_SQL = `
+  INSERT OR IGNORE INTO analytics_generations (generation_id, first_observed_at_ms) VALUES (?, ?)
+`;
+
+/** Connection-local cache for the recorder's explicitly named, static write-path
+ * statements. Schema setup, PRAGMAs, iterators, and ad-hoc/read-only queries
+ * continue to use the raw database directly. */
+class WriterStatementCache {
+  private readonly statements = new Map<string, { readonly sql: string; readonly statement: SqliteStatement }>();
+
+  constructor(private readonly database: SqliteDatabase) {}
+
+  prepare(key: string, sql: string): SqliteStatement {
+    if (!WRITER_STATEMENT_KEYS.has(key)) throw new Error(`Unknown analytics writer statement key: ${key}`);
+    const existing = this.statements.get(key);
+    if (existing) {
+      if (existing.sql !== sql) throw new Error(`Analytics writer statement key changed SQL: ${key}`);
+      return existing.statement;
+    }
+    if (this.statements.size >= MAX_CACHED_WRITER_STATEMENTS) {
+      throw new Error(`Analytics writer statement cache exceeded ${MAX_CACHED_WRITER_STATEMENTS} entries.`);
+    }
+    const statement = this.database.prepare(sql);
+    this.statements.set(key, { sql, statement });
+    return statement;
+  }
+
+  clear(): void {
+    this.statements.clear();
+  }
+}
+
+function prepareWriterStatement(
+  database: SqliteDatabase,
+  statements: WriterStatementCache | undefined,
+  key: string,
+  sql: string,
+): SqliteStatement {
+  return statements ? statements.prepare(key, sql) : database.prepare(sql);
+}
+
 const sqlite = createRequire(process.execPath)('node:sqlite') as SqliteModule;
 const DATABASE_SCHEMA_VERSION = 4;
 const BUSY_TIMEOUT_MS = 5_000;
@@ -1141,9 +1211,9 @@ function backfillV3NormalizedUsage(database: SqliteDatabase): void {
         effectiveCost: costs.effectiveCost,
         effectiveSource: costs.effectiveSource,
       };
-      updateProviderAccountingProjection(database, 'global', '*', revision, accountingValues, 1);
+      updateProviderAccountingProjection(database, undefined, 'global', '*', revision, accountingValues, 1);
       if (row.root_session_id) {
-        updateProviderAccountingProjection(database, 'session', row.root_session_id, revision, accountingValues, 1);
+        updateProviderAccountingProjection(database, undefined, 'session', row.root_session_id, revision, accountingValues, 1);
       }
     }
     lastGeneration = rows.at(-1)!.generation_id;
@@ -1189,6 +1259,7 @@ function reconciliationGaps(sequences: readonly bigint[], contiguous: bigint): A
  * so reconciliation storage never grows with normal history. */
 function recordSourceSequence(
   database: SqliteDatabase,
+  statements: WriterStatementCache | undefined,
   observation: AnalyticsObservation<object>,
   registryKey: string,
   fingerprint: string,
@@ -1203,7 +1274,7 @@ function recordSourceSequence(
     .update('\0')
     .update(fingerprint)
     .digest('hex');
-  const current = database.prepare(`
+  const current = prepareWriterStatement(database, statements, 'reconciliation.current', `
     SELECT contiguous_watermark, highest_observed_sequence
     FROM analytics_producer_reconciliation WHERE producer_identity = ?
   `).get(identity) as { contiguous_watermark: string; highest_observed_sequence: string } | undefined;
@@ -1215,7 +1286,7 @@ function recordSourceSequence(
     throw new Error(`Analytics source sequence ${encoded} is behind contiguous watermark ${contiguous.toString()}.`);
   }
 
-  const pending = database.prepare(`
+  const pending = prepareWriterStatement(database, statements, 'reconciliation.pending', `
     SELECT receipt_digest FROM analytics_producer_sequences
     WHERE producer_identity = ? AND source_sequence = ?
   `).get(identity, encoded) as { receipt_digest: string } | undefined;
@@ -1236,39 +1307,39 @@ function recordSourceSequence(
     contiguous = sequence;
     while (true) {
       const next = (contiguous + 1n).toString();
-      const receipt = database.prepare(`
+      const receipt = prepareWriterStatement(database, statements, 'reconciliation.next', `
         SELECT receipt_digest FROM analytics_producer_sequences
         WHERE producer_identity = ? AND source_sequence = ?
       `).get(identity, next) as { receipt_digest: string } | undefined;
       if (!receipt) break;
-      database.prepare(`
+      prepareWriterStatement(database, statements, 'reconciliation.delete-next', `
         DELETE FROM analytics_producer_sequences
         WHERE producer_identity = ? AND source_sequence = ?
       `).run(identity, next);
       contiguous += 1n;
     }
   } else {
-    const pendingCount = toNumber((database.prepare(`
+    const pendingCount = toNumber((prepareWriterStatement(database, statements, 'reconciliation.pending-count', `
       SELECT COUNT(*) AS count FROM analytics_producer_sequences WHERE producer_identity = ?
     `).get(identity) as CountRow).count);
     if (pendingCount >= MAX_PENDING_SEQUENCES_PER_PRODUCER) {
       throw new Error(`Analytics producer reconciliation capacity exceeded for ${identity}.`);
     }
-    database.prepare(`
+    prepareWriterStatement(database, statements, 'reconciliation.insert-pending', `
       INSERT INTO analytics_producer_sequences (
         producer_identity, source_sequence, receipt_digest
       ) VALUES (?, ?, ?)
     `).run(identity, encoded, receiptDigest);
   }
 
-  const pendingRows = database.prepare(`
+  const pendingRows = prepareWriterStatement(database, statements, 'reconciliation.pending-rows', `
     SELECT source_sequence FROM analytics_producer_sequences
     WHERE producer_identity = ? ORDER BY CAST(source_sequence AS INTEGER)
     LIMIT ?
   `).all(identity, MAX_PENDING_SEQUENCES_PER_PRODUCER) as Array<{ source_sequence: string }>;
   const pendingSequences = pendingRows.map((row) => BigInt(row.source_sequence));
   const gaps = reconciliationGaps(pendingSequences, contiguous);
-  database.prepare(`
+  prepareWriterStatement(database, statements, 'reconciliation.upsert', `
     INSERT INTO analytics_producer_reconciliation (
       producer_identity, contiguous_watermark, highest_observed_sequence, visible_gaps_json
     ) VALUES (?, ?, ?, ?)
@@ -1279,14 +1350,14 @@ function recordSourceSequence(
   `).run(identity, contiguous.toString(), highest.toString(), JSON.stringify(gaps));
 }
 
-function nextProjectionRevision(database: SqliteDatabase): string {
-  const row = database.prepare(
+function nextProjectionRevision(database: SqliteDatabase, statements?: WriterStatementCache): string {
+  const row = prepareWriterStatement(database, statements, 'projection.revision.read',
     'SELECT revision FROM analytics_projection_state WHERE singleton = 1',
   ).get() as RevisionRow;
   const revision = parseNonNegativeInt64(row.revision, 'projectionRevision') + 1n;
   if (revision > ((1n << 63n) - 1n)) throw new Error('Analytics projection revision exhausted signed-64 range.');
   const encoded = revision.toString();
-  database.prepare(
+  prepareWriterStatement(database, statements, 'projection.revision.update',
     'UPDATE analytics_projection_state SET revision = ? WHERE singleton = 1',
   ).run(encoded);
   return encoded;
@@ -1330,17 +1401,18 @@ type DeliveryOutcome = 'accepted' | 'replayed' | 'deleted';
 
 function incrementDeliveryAccounting(
   database: SqliteDatabase,
+  statements: WriterStatementCache | undefined,
   kind: DeliveryKind,
   outcome: DeliveryOutcome,
   count = 1n,
 ): void {
   const deliveredColumn = `${kind}_delivered`;
   const outcomeColumn = `${kind}_${outcome}`;
-  const row = database.prepare(`
+  const row = prepareWriterStatement(database, statements, `delivery.${kind}.${outcome}.read`, `
     SELECT ${deliveredColumn} AS delivered, ${outcomeColumn} AS outcome
     FROM analytics_delivery_accounting WHERE singleton = 1
   `).get() as { delivered: string; outcome: string };
-  database.prepare(`
+  prepareWriterStatement(database, statements, `delivery.${kind}.${outcome}.update`, `
     UPDATE analytics_delivery_accounting
     SET ${deliveredColumn} = ?, ${outcomeColumn} = ?
     WHERE singleton = 1
@@ -1352,6 +1424,7 @@ function incrementDeliveryAccounting(
 
 function updateProviderAccountingProjection(
   database: SqliteDatabase,
+  statements: WriterStatementCache | undefined,
   subjectKind: 'global' | 'session',
   subject: string,
   revision: string,
@@ -1361,7 +1434,7 @@ function updateProviderAccountingProjection(
   },
   direction: 1 | -1,
 ): void {
-  const row = database.prepare(`
+  const row = prepareWriterStatement(database, statements, 'provider.accounting.lookup', `
     SELECT summary_json FROM analytics_provider_accounting_projections
     WHERE subject_kind = ? AND subject_key = ?
   `).get(subjectKind, subject) as { summary_json: string } | undefined;
@@ -1389,7 +1462,7 @@ function updateProviderAccountingProjection(
     }
   }
   if (summary.occurrenceCount === '0') Object.assign(summary, emptyStoredProviderAccounting());
-  database.prepare(`
+  prepareWriterStatement(database, statements, 'provider.accounting.upsert', `
     INSERT INTO analytics_provider_accounting_projections (
       subject_kind, subject_key, summary_json, projection_revision
     ) VALUES (?, ?, ?, ?)
@@ -1401,6 +1474,7 @@ function updateProviderAccountingProjection(
 
 function applyProviderSettlement(
   database: SqliteDatabase,
+  statements: WriterStatementCache | undefined,
   observation: AnalyticsObservation<object>,
   registryKey: string,
   fingerprint: string,
@@ -1415,7 +1489,7 @@ function applyProviderSettlement(
   const invocationId = scopedInvocation ?? fieldInvocation;
   if (!invocationId) throw new Error('Provider settlement requires an invocationId.');
 
-  const existing = database.prepare(`
+  const existing = prepareWriterStatement(database, statements, 'provider.settlement.lookup', `
     SELECT settlement_fingerprint FROM analytics_provider_settlements
     WHERE generation_id = ? AND invocation_id = ?
   `).get(observation.generationId, invocationId) as { settlement_fingerprint: string } | undefined;
@@ -1437,8 +1511,8 @@ function applyProviderSettlement(
   const settledAt = fields.settledAtMs === null || fields.settledAtMs === undefined
     ? null
     : canonicalInt64(fields.settledAtMs as Int64Value);
-  const revision = nextProjectionRevision(database);
-  database.prepare(`
+  const revision = nextProjectionRevision(database, statements);
+  prepareWriterStatement(database, statements, 'provider.settlement.insert', `
     INSERT INTO analytics_provider_settlements (
       generation_id, invocation_id, observation_registry_key, settlement_fingerprint,
       capture_subject_kind, capture_subject_key, root_session_id, execution_id, branch_id,
@@ -1500,9 +1574,9 @@ function applyProviderSettlement(
     effectiveCost: costs.effectiveCost,
     effectiveSource: costs.effectiveSource,
   };
-  updateProviderAccountingProjection(database, 'global', '*', revision, accountingValues, 1);
+  updateProviderAccountingProjection(database, statements, 'global', '*', revision, accountingValues, 1);
   if (observation.scope.rootSessionId) {
-    updateProviderAccountingProjection(database, 'session', observation.scope.rootSessionId, revision, accountingValues, 1);
+    updateProviderAccountingProjection(database, statements, 'session', observation.scope.rootSessionId, revision, accountingValues, 1);
   }
   return true;
 }
@@ -1517,6 +1591,7 @@ function optionalNonNegativeFloat(value: unknown): number | null {
 
 function applyTypedObservation(
   database: SqliteDatabase,
+  statements: WriterStatementCache | undefined,
   observation: AnalyticsObservation<object>,
   registryKey: string,
 ): boolean {
@@ -1531,8 +1606,8 @@ function applyTypedObservation(
     observation.scope.rootSessionId ?? null,
   ] as const;
   if (observation.entityKind === 'execution') {
-    const revision = nextProjectionRevision(database);
-    database.prepare(`
+    const revision = nextProjectionRevision(database, statements);
+    prepareWriterStatement(database, statements, 'typed.execution.observation.insert', `
       INSERT INTO analytics_execution_observations (
         observation_registry_key, generation_id, execution_id, observation_kind,
         capture_subject_kind, capture_subject_key, root_session_id,
@@ -1547,7 +1622,7 @@ function applyTypedObservation(
       serialize(observation),
       revision,
     );
-    database.prepare(`
+    prepareWriterStatement(database, statements, 'typed.execution.state.upsert', `
       INSERT INTO analytics_execution_states (
         generation_id, execution_id, capture_subject_kind, capture_subject_key,
         root_session_id, operation_kind, outcome, started_at_ms, ended_at_ms, projection_revision
@@ -1568,14 +1643,14 @@ function applyTypedObservation(
     return true;
   }
   if (observation.entityKind === 'toolCall') {
-    const revision = nextProjectionRevision(database);
+    const revision = nextProjectionRevision(database, statements);
     const toolCallId = `tool:${createHash('sha256').update(JSON.stringify([
       observation.captureSubject.kind,
       subjectKey(observation),
       observation.scope.executionId ?? null,
       observation.entityKey,
     ])).digest('hex')}`;
-    database.prepare(`
+    prepareWriterStatement(database, statements, 'typed.tool.observation.insert', `
       INSERT INTO analytics_tool_observations (
         observation_registry_key, generation_id, tool_call_id, observation_kind,
         capture_subject_kind, capture_subject_key, root_session_id,
@@ -1597,7 +1672,7 @@ function applyTypedObservation(
       serialize(observation),
       revision,
     );
-    database.prepare(`
+    prepareWriterStatement(database, statements, 'typed.tool.state.upsert', `
       INSERT INTO analytics_tool_states (
         generation_id, tool_call_id, capture_subject_kind, capture_subject_key,
         root_session_id, tool_definition_id, outcome, started_at_ms,
@@ -1619,8 +1694,8 @@ function applyTypedObservation(
     return true;
   }
   if (observation.entityKind === 'activitySpan') {
-    const revision = nextProjectionRevision(database);
-    database.prepare(`
+    const revision = nextProjectionRevision(database, statements);
+    prepareWriterStatement(database, statements, 'typed.activity.observation.insert', `
       INSERT INTO analytics_activity_observations (
         observation_registry_key, generation_id, span_id, observation_kind,
         capture_subject_kind, capture_subject_key, root_session_id,
@@ -1637,7 +1712,7 @@ function applyTypedObservation(
       serialize(observation),
       revision,
     );
-    database.prepare(`
+    prepareWriterStatement(database, statements, 'typed.activity.state.upsert', `
       INSERT INTO analytics_activity_states (
         generation_id, span_id, capture_subject_kind, capture_subject_key,
         root_session_id, activity_kind, started_at_ms, ended_at_ms, duration_ms,
@@ -1660,8 +1735,8 @@ function applyTypedObservation(
     return true;
   }
   if (observation.entityKind === 'featureObservation') {
-    const revision = nextProjectionRevision(database);
-    database.prepare(`
+    const revision = nextProjectionRevision(database, statements);
+    prepareWriterStatement(database, statements, 'typed.feature.observation.insert', `
       INSERT INTO analytics_feature_observations (
         observation_registry_key, generation_id, feature_key,
         capture_subject_kind, capture_subject_key, root_session_id,
@@ -1690,10 +1765,10 @@ function applyTypedObservation(
     if (!branchId || observation.scope.branchId !== branchId) {
       throw new Error('Branch observation requires matching field and scope branchId.');
     }
-    const revision = nextProjectionRevision(database);
+    const revision = nextProjectionRevision(database, statements);
     const sourceSelectionId = optionalString(fields.sourceSelectionId);
     if (sourceSelectionId) {
-      database.prepare(`
+      prepareWriterStatement(database, statements, 'typed.branch.selection.insert', `
         INSERT INTO analytics_branch_selections (
           observation_registry_key, generation_id, branch_id, source_selection_id,
           capture_subject_kind, capture_subject_key, root_session_id,
@@ -1705,7 +1780,7 @@ function applyTypedObservation(
         observation.scope.rootSessionId ?? null,
         canonicalInt64(observation.observedAtMs), revision,
       );
-      database.prepare(`
+      prepareWriterStatement(database, statements, 'typed.branch.selection-current.upsert', `
         INSERT INTO analytics_current_branch_selections (
           generation_id, capture_subject_kind, capture_subject_key, root_session_id,
           branch_id, source_selection_id, observed_at_ms, observation_registry_key, projection_revision
@@ -1732,7 +1807,7 @@ function applyTypedObservation(
     const parentKnown = Object.prototype.hasOwnProperty.call(fields, 'parentBranchId');
     const parentBranchId = parentKnown ? optionalString(fields.parentBranchId) : null;
     const sourceEntryId = optionalString(fields.sourceEntryId);
-    const existingEdge = database.prepare(`
+    const existingEdge = prepareWriterStatement(database, statements, 'typed.branch.edge.lookup', `
       SELECT parent_branch_id, parent_known, source_entry_id
       FROM analytics_branch_edges WHERE generation_id = ? AND branch_id = ?
     `).get(observation.generationId, branchId) as {
@@ -1753,7 +1828,7 @@ function applyTypedObservation(
       while (ancestor !== null) {
         if (visited.has(ancestor)) throw new Error(`Cycle in analytics branch ancestry at ${ancestor}.`);
         visited.add(ancestor);
-        const edge = database.prepare(`
+        const edge = prepareWriterStatement(database, statements, 'typed.branch.edge.parent.lookup', `
           SELECT parent_branch_id, parent_known FROM analytics_branch_edges
           WHERE generation_id = ? AND branch_id = ?
         `).get(observation.generationId, ancestor) as {
@@ -1764,7 +1839,7 @@ function applyTypedObservation(
         ancestor = edge.parent_branch_id;
       }
     }
-    database.prepare(`
+    prepareWriterStatement(database, statements, 'typed.branch.edge.upsert', `
       INSERT INTO analytics_branch_edges (
         generation_id, branch_id, capture_subject_kind, capture_subject_key,
         root_session_id, parent_branch_id, parent_known, source_entry_id, projection_revision
@@ -1794,8 +1869,8 @@ function applyTypedObservation(
       || (coverage !== 'known' && coverage !== 'unknown')) {
       throw new Error('Copy observation requires destination, operation, and inheritance coverage.');
     }
-    const revision = nextProjectionRevision(database);
-    database.prepare(`
+    const revision = nextProjectionRevision(database, statements);
+    prepareWriterStatement(database, statements, 'typed.copy.insert', `
       INSERT INTO analytics_session_copies (
         generation_id, copy_root_session_id, capture_subject_kind, capture_subject_key,
         source_root_session_id, source_branch_id, operation_id,
@@ -1819,9 +1894,9 @@ function backfillV2(database: SqliteDatabase): void {
   for (const row of rows) {
     const observation = JSON.parse(row.payload_json) as AnalyticsObservation;
     assertValidAnalyticsObservation(observation);
-    recordSourceSequence(database, observation, row.registry_key, row.fingerprint, false);
-    applyProviderSettlement(database, observation, row.registry_key, row.fingerprint);
-    applyTypedObservation(database, observation, row.registry_key);
+    recordSourceSequence(database, undefined, observation, row.registry_key, row.fingerprint, false);
+    applyProviderSettlement(database, undefined, observation, row.registry_key, row.fingerprint);
+    applyTypedObservation(database, undefined, observation, row.registry_key);
   }
 }
 
@@ -1929,6 +2004,7 @@ function encodeQueryCell(value: unknown, maximumBytes: number): { value: unknown
 
 export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSink {
   private readonly database: SqliteDatabase;
+  private readonly writerStatements: WriterStatementCache;
   private readonly readOnly: boolean;
   private readonly stats: AnalyticsRecorderStats = {
     accepted: 0,
@@ -1942,17 +2018,19 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
   constructor(readonly databasePath: string, options: { readOnly?: boolean } = {}) {
     this.readOnly = options.readOnly === true;
     if (!this.readOnly) fs.mkdirSync(path.dirname(databasePath), { recursive: true });
-    this.database = new sqlite.DatabaseSync(databasePath, {
+    const database = new sqlite.DatabaseSync(databasePath, {
       timeout: BUSY_TIMEOUT_MS,
       readBigInts: true,
       readOnly: this.readOnly,
     });
     try {
-      initializeSchema(this.database, this.readOnly);
+      initializeSchema(database, this.readOnly);
     } catch (error) {
-      this.database.close();
+      database.close();
       throw error;
     }
+    this.database = database;
+    this.writerStatements = new WriterStatementCache(database);
   }
 
   submit<Fields extends object>(observation: SequencedAnalyticsObservation<Fields>): void {
@@ -1983,17 +2061,17 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
     }
     const fingerprint = captureFingerprint(capture);
     const outcome = this.transaction(() => {
-      const existing = this.database.prepare(
+      const existing = this.writerStatements.prepare('detail.payload.lookup',
         'SELECT fingerprint, manifest_json, logical_bytes FROM analytics_detail_payloads WHERE payload_id = ?',
       ).get(capture.payloadId) as PayloadRow | undefined;
       if (existing) {
         if (existing.fingerprint !== fingerprint) {
           throw new AnalyticsSourceConflictError(capture.payloadId, existing.fingerprint, fingerprint);
         }
-        incrementDeliveryAccounting(this.database, 'details', 'replayed');
+        incrementDeliveryAccounting(this.database, this.writerStatements, 'details', 'replayed');
         return 'duplicate' as const;
       }
-      const sourceExisting = this.database.prepare(`
+      const sourceExisting = this.writerStatements.prepare('detail.source.lookup', `
         SELECT payload_id, fingerprint, manifest_json, logical_bytes
         FROM analytics_detail_payloads
         WHERE generation_id = ? AND source_key = ?
@@ -2007,7 +2085,7 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
       }
       const resolvedSubject = this.resolveSubject(capture.captureSubject.kind, captureSubjectKey(capture));
       if (resolvedSubject.deleted) {
-        incrementDeliveryAccounting(this.database, 'details', 'deleted');
+        incrementDeliveryAccounting(this.database, this.writerStatements, 'details', 'deleted');
         return 'deleted' as const;
       }
 
@@ -2064,14 +2142,14 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
       };
       const manifest = encode(value);
 
-      const insertContent = this.database.prepare(`
+      const insertContent = this.writerStatements.prepare('detail.content.insert', `
         INSERT OR IGNORE INTO analytics_detail_content (digest, encoding, logical_bytes, body)
         VALUES (?, ?, ?, ?)
       `);
       for (const [digest, entry] of references) {
         insertContent.run(digest, entry.encoding, entry.bytes.byteLength, entry.bytes);
       }
-      this.database.prepare(`
+      this.writerStatements.prepare('detail.payload.insert', `
         INSERT INTO analytics_detail_payloads (
           payload_id, generation_id, source_key, fingerprint, observed_at_ms,
           committed_at_ms, capture_subject_kind, capture_subject_key,
@@ -2096,14 +2174,13 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
         optionalString(capture.metadata.sourceVersion),
         null,
       );
-      const insertReference = this.database.prepare(`
+      const insertReference = this.writerStatements.prepare('detail.reference.insert', `
         INSERT INTO analytics_detail_references (payload_id, digest) VALUES (?, ?)
       `);
       for (const digest of references.keys()) insertReference.run(capture.payloadId, digest);
-      this.database.prepare(`
-        INSERT OR IGNORE INTO analytics_generations (generation_id, first_observed_at_ms) VALUES (?, ?)
-      `).run(capture.generationId, canonicalInt64(capture.observedAtMs));
-      incrementDeliveryAccounting(this.database, 'details', 'accepted');
+      this.writerStatements.prepare('generation.insert', INSERT_GENERATION_SQL)
+        .run(capture.generationId, canonicalInt64(capture.observedAtMs));
+      incrementDeliveryAccounting(this.database, this.writerStatements, 'details', 'accepted');
       return 'accepted' as const;
     });
     if (outcome === 'accepted') this.stats.detailsAccepted += 1;
@@ -2119,15 +2196,15 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
   ): 'accepted' | 'duplicate' | 'deleted' {
     const registryKey = analyticsObservationRegistryKey(observation);
     const fingerprint = analyticsObservationFingerprint(observation);
-    const existing = this.database.prepare(
+    const existing = this.writerStatements.prepare('observation.registry.lookup',
       'SELECT fingerprint FROM analytics_observations WHERE registry_key = ?',
     ).get(registryKey) as RegistryRow | undefined;
     if (existing) {
       if (existing.fingerprint !== fingerprint) {
         throw new AnalyticsSourceConflictError(registryKey, existing.fingerprint, fingerprint);
       }
-      recordSourceSequence(this.database, observation, registryKey, fingerprint, true);
-      incrementDeliveryAccounting(this.database, 'observations', 'replayed');
+      recordSourceSequence(this.database, this.writerStatements, observation, registryKey, fingerprint, true);
+      incrementDeliveryAccounting(this.database, this.writerStatements, 'observations', 'replayed');
       return 'duplicate';
     }
 
@@ -2138,20 +2215,20 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
       const sourceRootSessionId = optionalString(fields.sourceSessionId);
       const copyRootSessionId = optionalString(fields.copySessionId);
       const operationId = optionalString(fields.operationId);
-      const sourceDeleted = sourceRootSessionId && Boolean(this.database.prepare(
+      const sourceDeleted = sourceRootSessionId && Boolean(this.writerStatements.prepare('subject.deleted.present',
         'SELECT 1 AS present FROM analytics_deleted_subjects WHERE root_session_id = ?',
       ).get(sourceRootSessionId));
       if (sourceDeleted) {
         if (!copyRootSessionId || !operationId) throw new Error('Copy observation identity is incomplete.');
-        const existingCopy = this.database.prepare(`
+        const existingCopy = this.writerStatements.prepare('copy.destination.lookup', `
           SELECT operation_id FROM analytics_session_copies
           WHERE generation_id = ? AND copy_root_session_id = ?
         `).get(observation.generationId, copyRootSessionId) as { operation_id: string } | undefined;
         if (existingCopy && existingCopy.operation_id !== operationId) {
           throw new Error(`Copy session ${copyRootSessionId} is already owned by another operation.`);
         }
-        const revision = nextProjectionRevision(this.database);
-        this.database.prepare(`
+        const revision = nextProjectionRevision(this.database, this.writerStatements);
+        this.writerStatements.prepare('copy.scrubbed.upsert', `
           INSERT INTO analytics_session_copies (
             generation_id, copy_root_session_id, capture_subject_kind, capture_subject_key,
             source_root_session_id, source_branch_id, operation_id,
@@ -2167,15 +2244,15 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
           observation.generationId, copyRootSessionId,
           observation.captureSubject.kind, subjectKey(observation), operationId, revision,
         );
-        recordSourceSequence(this.database, observation, registryKey, fingerprint, true);
-        incrementDeliveryAccounting(this.database, 'observations', 'deleted');
+        recordSourceSequence(this.database, this.writerStatements, observation, registryKey, fingerprint, true);
+        incrementDeliveryAccounting(this.database, this.writerStatements, 'observations', 'deleted');
         return 'deleted';
       }
     }
 
     if (resolvedSubject.deleted) {
-      recordSourceSequence(this.database, observation, registryKey, fingerprint, true);
-      incrementDeliveryAccounting(this.database, 'observations', 'deleted');
+      recordSourceSequence(this.database, this.writerStatements, observation, registryKey, fingerprint, true);
+      incrementDeliveryAccounting(this.database, this.writerStatements, 'observations', 'deleted');
       return 'deleted';
     }
     if (observation.captureSubject.kind === 'session'
@@ -2191,10 +2268,10 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
           captureSubject: { kind: 'session' as const, rootSessionId: resolvedSubject.key },
           scope: { ...observation.scope, rootSessionId: resolvedSubject.key },
         };
-    recordSourceSequence(this.database, observation, registryKey, fingerprint, false);
-    applyProviderSettlement(this.database, effectiveObservation, registryKey, fingerprint);
-    applyTypedObservation(this.database, effectiveObservation, registryKey);
-    this.database.prepare(`
+    recordSourceSequence(this.database, this.writerStatements, observation, registryKey, fingerprint, false);
+    applyProviderSettlement(this.database, this.writerStatements, effectiveObservation, registryKey, fingerprint);
+    applyTypedObservation(this.database, this.writerStatements, effectiveObservation, registryKey);
+    this.writerStatements.prepare('observation.insert', `
       INSERT INTO analytics_observations (
         generation_id, source_key, registry_key, idempotency_key, fingerprint,
         observed_at_ms, committed_at_ms, producer_kind, entity_kind, entity_key,
@@ -2219,10 +2296,9 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
       effectiveObservation.scope.invocationId ?? null,
       serialize(effectiveObservation),
     );
-    this.database.prepare(`
-      INSERT OR IGNORE INTO analytics_generations (generation_id, first_observed_at_ms) VALUES (?, ?)
-    `).run(effectiveObservation.generationId, canonicalInt64(effectiveObservation.observedAtMs));
-    incrementDeliveryAccounting(this.database, 'observations', 'accepted');
+    this.writerStatements.prepare('generation.insert', INSERT_GENERATION_SQL)
+      .run(effectiveObservation.generationId, canonicalInt64(effectiveObservation.observedAtMs));
+    incrementDeliveryAccounting(this.database, this.writerStatements, 'observations', 'accepted');
     return 'accepted';
   }
 
@@ -2230,7 +2306,7 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
     let resolvedKind = kind;
     let resolvedKey = key;
     if (kind === 'pendingCreate') {
-      const bound = this.database.prepare(`
+      const bound = this.writerStatements.prepare('subject.pending.lookup', `
         SELECT root_session_id FROM analytics_pending_subject_bindings
         WHERE pending_operation_id = ?
       `).get(key) as { root_session_id: string } | undefined;
@@ -2238,7 +2314,7 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
       resolvedKind = 'session';
       resolvedKey = bound.root_session_id;
     }
-    const deleted = resolvedKind === 'session' && Boolean(this.database.prepare(
+    const deleted = resolvedKind === 'session' && Boolean(this.writerStatements.prepare('subject.deleted.lookup',
       'SELECT root_session_id FROM analytics_deleted_subjects WHERE root_session_id = ?',
     ).get(resolvedKey));
     return { kind: resolvedKind, key: resolvedKey, deleted };
@@ -2248,7 +2324,7 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
     deletedObservationCount: number;
     deletedPayloadCount: number;
   } {
-    const revision = nextProjectionRevision(this.database);
+    const revision = nextProjectionRevision(this.database, this.writerStatements);
     const subjectFilter = `(
       capture_subject_kind = 'session' AND capture_subject_key = ?
     ) OR (
@@ -2265,7 +2341,7 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
       FROM analytics_provider_settlements WHERE ${subjectFilter}
     `).iterate(rootSessionId, rootSessionId) as Iterable<Record<string, unknown>>;
     for (const row of removedSettlements) {
-      updateProviderAccountingProjection(this.database, 'global', '*', revision, {
+      updateProviderAccountingProjection(this.database, this.writerStatements, 'global', '*', revision, {
         inputTokens: row.input_tokens === null ? null : String(row.input_tokens),
         outputTokens: row.output_tokens === null ? null : String(row.output_tokens),
         cacheReadTokens: row.cache_read_tokens === null ? null : String(row.cache_read_tokens),
@@ -2418,7 +2494,7 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
         };
       }
 
-      const revision = nextProjectionRevision(this.database);
+      const revision = nextProjectionRevision(this.database, this.writerStatements);
       const pendingSettlements = this.database.prepare(`
         SELECT normalized_base_input_tokens AS input_tokens,
           normalized_output_tokens AS output_tokens,
@@ -2429,7 +2505,7 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
         WHERE capture_subject_kind = 'pendingCreate' AND capture_subject_key = ?
       `).iterate(pendingOperationId) as Iterable<Record<string, unknown>>;
       for (const row of pendingSettlements) {
-        updateProviderAccountingProjection(this.database, 'session', rootSessionId, revision, {
+        updateProviderAccountingProjection(this.database, this.writerStatements, 'session', rootSessionId, revision, {
           inputTokens: row.input_tokens === null ? null : String(row.input_tokens),
           outputTokens: row.output_tokens === null ? null : String(row.output_tokens),
           cacheReadTokens: row.cache_read_tokens === null ? null : String(row.cache_read_tokens),
@@ -2483,7 +2559,13 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
         deletedSubject: false,
       };
     });
-    if (result.deletedSubject) this.completePrivacyScrub(rootSessionId);
+    if (result.deletedSubject) {
+      try {
+        this.completePrivacyScrub(rootSessionId);
+      } finally {
+        this.writerStatements.clear();
+      }
+    }
     return result;
   }
 
@@ -2496,84 +2578,91 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
     this.assertWritable();
     if (!rootSessionId || !deleteSourceKey) throw new Error('rootSessionId and deleteSourceKey are required.');
     const encodedDeletedAt = canonicalInt64(deletedAtMs);
-    const receipt = this.transaction(() => {
-      let addedPendingFence = false;
-      if (pendingOperationId) {
-        const binding = this.database.prepare(`
-          SELECT root_session_id FROM analytics_pending_subject_bindings
-          WHERE pending_operation_id = ?
-        `).get(pendingOperationId) as { root_session_id: string } | undefined;
-        if (binding && binding.root_session_id !== rootSessionId) {
-          throw new Error(`Pending-create subject ${pendingOperationId} is already bound to another session.`);
+    try {
+      const receipt = this.transaction(() => {
+        let addedPendingFence = false;
+        if (pendingOperationId) {
+          const binding = this.database.prepare(`
+            SELECT root_session_id FROM analytics_pending_subject_bindings
+            WHERE pending_operation_id = ?
+          `).get(pendingOperationId) as { root_session_id: string } | undefined;
+          if (binding && binding.root_session_id !== rootSessionId) {
+            throw new Error(`Pending-create subject ${pendingOperationId} is already bound to another session.`);
+          }
+          if (!binding) {
+            this.database.prepare(`
+              INSERT INTO analytics_pending_subject_bindings (
+                pending_operation_id, root_session_id, source_key, bound_at_ms
+              ) VALUES (?, ?, ?, ?)
+            `).run(pendingOperationId, rootSessionId, deleteSourceKey, encodedDeletedAt);
+            addedPendingFence = true;
+          }
         }
-        if (!binding) {
-          this.database.prepare(`
-            INSERT INTO analytics_pending_subject_bindings (
-              pending_operation_id, root_session_id, source_key, bound_at_ms
-            ) VALUES (?, ?, ?, ?)
-          `).run(pendingOperationId, rootSessionId, deleteSourceKey, encodedDeletedAt);
-          addedPendingFence = true;
+        const existing = this.database.prepare(`
+          SELECT deleted_count, deleted_payload_count, deleted_at_ms, scrub_state, scrub_error, delete_source_key
+          FROM analytics_deleted_subjects WHERE root_session_id = ?
+        `).get(rootSessionId) as (DeletedSubjectRow & {
+          deleted_payload_count: number | bigint;
+          delete_source_key: string;
+        }) | undefined;
+        if (existing) {
+          let deletedObservationCount = toNumber(existing.deleted_count);
+          let deletedPayloadCount = toNumber(existing.deleted_payload_count);
+          if (addedPendingFence) {
+            const deleted = this.removeRootAttributedData(rootSessionId);
+            deletedObservationCount += deleted.deletedObservationCount;
+            deletedPayloadCount += deleted.deletedPayloadCount;
+            this.database.prepare(`
+              UPDATE analytics_deleted_subjects
+              SET deleted_count = ?, deleted_payload_count = ?, scrub_state = 'pending', scrub_error = NULL
+              WHERE root_session_id = ?
+            `).run(deletedObservationCount, deletedPayloadCount, rootSessionId);
+          }
+          return {
+            receipt: {
+              rootSessionId,
+              deletedObservationCount,
+              deletedPayloadCount,
+              deletedAtMs: existing.deleted_at_ms,
+              duplicate: true,
+              scrubState: 'complete' as const,
+            },
+            scrub: addedPendingFence || existing.scrub_state !== 'complete',
+          };
         }
-      }
-      const existing = this.database.prepare(`
-        SELECT deleted_count, deleted_payload_count, deleted_at_ms, scrub_state, scrub_error, delete_source_key
-        FROM analytics_deleted_subjects WHERE root_session_id = ?
-      `).get(rootSessionId) as (DeletedSubjectRow & {
-        deleted_payload_count: number | bigint;
-        delete_source_key: string;
-      }) | undefined;
-      if (existing) {
-        let deletedObservationCount = toNumber(existing.deleted_count);
-        let deletedPayloadCount = toNumber(existing.deleted_payload_count);
-        if (addedPendingFence) {
-          const deleted = this.removeRootAttributedData(rootSessionId);
-          deletedObservationCount += deleted.deletedObservationCount;
-          deletedPayloadCount += deleted.deletedPayloadCount;
-          this.database.prepare(`
-            UPDATE analytics_deleted_subjects
-            SET deleted_count = ?, deleted_payload_count = ?, scrub_state = 'pending', scrub_error = NULL
-            WHERE root_session_id = ?
-          `).run(deletedObservationCount, deletedPayloadCount, rootSessionId);
-        }
+        // Commit a durable fence in the same transaction as logical deletion.
+        // Physical completion is recorded only after the WAL is truncated.
+        this.database.prepare(`
+          INSERT INTO analytics_deleted_subjects (
+            root_session_id, delete_source_key, deleted_count,
+            deleted_payload_count, deleted_at_ms, scrub_state, scrub_error
+          ) VALUES (?, ?, 0, 0, ?, 'pending', NULL)
+        `).run(rootSessionId, deleteSourceKey, encodedDeletedAt);
+        const deleted = this.removeRootAttributedData(rootSessionId);
+        this.database.prepare(`
+          UPDATE analytics_deleted_subjects
+          SET deleted_count = ?, deleted_payload_count = ?
+          WHERE root_session_id = ?
+        `).run(deleted.deletedObservationCount, deleted.deletedPayloadCount, rootSessionId);
         return {
           receipt: {
             rootSessionId,
-            deletedObservationCount,
-            deletedPayloadCount,
-            deletedAtMs: existing.deleted_at_ms,
-            duplicate: true,
+            ...deleted,
+            deletedAtMs: encodedDeletedAt,
+            duplicate: false,
             scrubState: 'complete' as const,
           },
-          scrub: addedPendingFence || existing.scrub_state !== 'complete',
+          scrub: true,
         };
-      }
-      // Commit a durable fence in the same transaction as logical deletion.
-      // Physical completion is recorded only after the WAL is truncated.
-      this.database.prepare(`
-        INSERT INTO analytics_deleted_subjects (
-          root_session_id, delete_source_key, deleted_count,
-          deleted_payload_count, deleted_at_ms, scrub_state, scrub_error
-        ) VALUES (?, ?, 0, 0, ?, 'pending', NULL)
-      `).run(rootSessionId, deleteSourceKey, encodedDeletedAt);
-      const deleted = this.removeRootAttributedData(rootSessionId);
-      this.database.prepare(`
-        UPDATE analytics_deleted_subjects
-        SET deleted_count = ?, deleted_payload_count = ?
-        WHERE root_session_id = ?
-      `).run(deleted.deletedObservationCount, deleted.deletedPayloadCount, rootSessionId);
-      return {
-        receipt: {
-          rootSessionId,
-          ...deleted,
-          deletedAtMs: encodedDeletedAt,
-          duplicate: false,
-          scrubState: 'complete' as const,
-        },
-        scrub: true,
-      };
-    });
-    if (receipt.scrub) this.completePrivacyScrub(rootSessionId);
-    return receipt.receipt;
+      });
+      if (receipt.scrub) this.completePrivacyScrub(rootSessionId);
+      return receipt.receipt;
+    } finally {
+      // StatementSync retains its last bound values after run/get reset on the
+      // pinned Node runtime. Drop every cached reference at the privacy fence
+      // so deleted payloads and identifiers are no longer cache-owned.
+      this.writerStatements.clear();
+    }
   }
 
   readSubjectBinding(pendingOperationId: string): AnalyticsSubjectBindingState | null {
@@ -3384,6 +3473,7 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    this.writerStatements.clear();
     this.database.close();
   }
 

@@ -1,7 +1,12 @@
 # Analytics rework: overnight execution runbook
 
-Status: execution preparation, 2026-09-11. The bounded P0 validation/qualification CLI is present;
-the full rework, complete qualification and activation helper remain unfinished and unqualified.
+Status: execution in progress, 2026-09-12. The bounded P0 validation/qualification CLI, the durable
+worker transport, the inactive recorder/query/capture/read-model sources and the P6 retirement
+milestone are implemented, committed and pushed; the dormant production bridge is accepted. The real
+P0 qualification is still incomplete (the selected 1M tier has not passed) and the activation helper
+is still unfinished and unqualified, so analytics/storage authority remains on the legacy path and no
+cutover has occurred. Durable progress, current file ownership and the next ready tasks are recorded in
+[the execution record](internal/ANALYTICS_REWORK_EXECUTION.md); resume from its latest checkpoint.
 
 ## Goal and authority
 

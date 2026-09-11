@@ -1981,3 +1981,133 @@ commit, requiring a fresh validation, attestation and 10k baseline before anothe
 publication, activation, session/data disposal, cutover and Pie UI validation remain incomplete. The
 four unrelated model/settings files, `stash@{0}` and all historical qualification artifacts remain
 preserved.
+
+### Checkpoint 25: interrupted-session recovery; uncommitted memory/statement-reuse milestone in flight
+
+This checkpoint was written at the start of a resumed session, after the previous long-running session
+was interrupted by usage exhaustion. Its purpose is to reconstruct durable state from the working tree
+and evidence directories, because the prior session's own record ended at Checkpoint 24 and the
+uncommitted work was never written into this file. Nothing here reinterprets accepted evidence.
+
+**Baseline at resume:** branch `master` @ `a2c6f75ff0a6d27183690cc75fd9087989a99c82` == `origin/master` ==
+live remote (`fix(analytics): summarize scale evidence without stack overflow`, the Checkpoint 24
+commit). Nine working-tree paths are dirty and no new commit was made by the interrupted session:
+
+| Path | State |
+|---|---|
+| `extension/src/analytics/sqlite-recorder.ts` | modified — writer statement cache |
+| `extension/test/analytics/sqlite-recorder-statement-reuse.test.ts` | untracked — new focused tests |
+| `extension/scripts/analytics-p0-capacity.mjs` | modified — memory topology sample plan/validator |
+| `extension/scripts/analytics-p0-qualification.mjs` | modified — report schema 5, harness v4 |
+| `scripts/test/analytics-p0-capacity.test.mjs` | modified — 4 new topology planning/validation tests |
+| `model-profiles.yaml`, `models.json`, `models.yaml`, `settings.json` | user-owned, preserved, not ours to commit |
+
+**In-flight unit A — recorder writer statement cache.** `SqliteAnalyticsRecorder` now prepares its
+explicitly named, static write-path statements once per connection through a bounded
+`WriterStatementCache` (40 fixed keys plus 12 `delivery.<kind>.<outcome>.<read|update>` combinations =
+52, hard-failed if that inventory changes, capped at 64 cached statements). Schema setup, PRAGMAs,
+iterators and read-only/ad-hoc queries still use the raw database. The new untracked test file covers
+connection reuse after a rolled-back conflicting batch, mixed fact/detail/fact generation inserts,
+ordinary private deletion, a late pending-create bind into a deleted root, and repeated
+accounting-projection settlements across a rollback. This is a memory/efficiency correction for the
+recorder write path, not an authority or activation change.
+
+**Cache-gap repair made during this checkpoint (resumed-session edit).** The interrupted session left
+the paired provider-accounting-projection `SELECT summary_json …` in `updateProviderAccountingProjection`
+uncached, so every settlement still prepared it per call — one of the two raw write-path prepares that
+remained. It is now the named `provider.accounting.lookup` key (inventory 39→40 fixed, 51→52 total), and
+the new fifth focused test exercises that lookup/upsert pair across repeated settlements and a
+mid-transaction rollback. This was the only such gap in the hot write path; the remaining uncached
+prepares are in `deleteSession`, `bindPendingCreate`, read-only queries, migrations and schema setup,
+which matches the intended boundary.
+
+**In-flight unit B — sampled memory-topology qualification evidence.** The harness now records
+`topologySamples` at fact batches, fact flush, bounded variable-detail batches and the nested-detail
+drain instead of a single terminal worker read. `planBoundedLoadBatches` splits the detail fixture into
+drains bounded by both record count and a quarter of the unchanged 64 MiB queue; the qualification
+runner drains each batch before admitting the next, leaving the measured synchronous submit interval
+untouched. `buildExpectedTopologySamplePlan` deterministically reconstructs the whole fact/detail/nested
+sample plan from the declared row count, and `validateMemoryTopologySamples` requires the exact sample
+count/order/phase, canonical monotonic timestamps, unique labels, stable per-phase worker identity sets,
+reconciled worker maxima/totals and a matching terminal lifecycle for every sampled worker instance.
+Report schema is now 5 and harness `p0-baseline-scale-v4-sampled-memory`; baseline admission requires
+the sample plan and the unchanged `matrix.bounds.maxQueueBytes === 64 MiB`. This is a measurement/
+admission change, so the harness fingerprint changes and a fresh validation/attestation/baseline cycle
+is required before any further 1M attempt.
+
+**Newest evidence (r04 cycle, still under the r03 harness — superseded by the in-flight change):** the
+r04 validation/attestation/baseline passed under fingerprint
+`75bdca70802e965f39ff171ee99e9897497f3bfbd1b53b5e2d25f4d65c747b3f` and coordinated build
+`de1d5a779ccbe3f676b4`. Scale run 236 was **not** the run that produced
+`pie-p0-inplace-scale-20260912-r04/scale.json`; that report is the newer in-flight attempt against
+`a2c6f75f` + build `de1d5a779ccbe3f676b4` (provenance `gitHead` matches this HEAD), and it failed with
+`AnalyticsCaptureCapacityError: Analytics prototype queue capacity exceeded (12135 records, 67112300
+bytes)` at the fact-load phase. It also recorded a failed `recorderWorkerRss` gate at 388,370,432 bytes
+against the 256 MiB ceiling. Handoff p99 (0.0474 ms) and the responsiveness proxy p95 (8.11 ms) passed;
+temporary footprint and reserved free disk passed; all later gates are unqualified because the run
+failed before them. The `a2c6f75f` source is the stack-overflow summarizer repair, confirmed present in
+the r04 report's stack evidence. Note the report's `provenance.fingerprint` is
+`75bdca…`, which is the pre-in-flight harness fingerprint, because the in-flight harness edits are
+still uncommitted and unbuilt.
+
+**Memory root-cause diagnostics (read-only, scratch-only).** Three 250k-row variants of the *built*
+`de1d5a779ccbe3f676b4` recorder ran under a bound runner: control 380,809,216 B final RSS, a `shrink()`
+variant 403,730,432 B, and the statement-cache variant 228,564,992 B (cache hits 140,158 of 140,181
+prepare calls at the 10k sample). This identifies repeated native `prepare()` allocation — not the
+queue, not schema, not V8 heap growth — as the dominant retained-memory driver, which is exactly what the
+in-flight unit A changes. A separate read-only 80 MiB pacing probe (`pie-detail-pacing-probe-20260912-r02`,
+nominal 40×2 MiB) measured peak queued bytes 33,566,016 and all 40 dispositions durable with zero
+backlog at the end, confirming the unchanged 64 MiB queue can be paced by bounded drains rather than
+raised.
+
+**Verification completed before interruption:** the in-flight tree passed capacity focused tests 17/18
+(1 conditional 10M test skipped), recorder-focused tests 42/42 (run 263), extension typecheck (run 262),
+lint (run 264), affected `npm test` selecting 3 packages with 4,586/4,586 pass, 0 fail, 19 skipped (run
+266), and a `--no-sync` validation build with coordinated host/webview identity `29c9ab7d05d679d452f1`
+(run 268). The cache-barrier r02 `before` snapshot (`pie-p0-cache-barrier-20260912-r02/before.json`)
+recorded the five intended candidate hashes plus the four user-owned protected paths and stashed the
+expected `stash@{0}`. The `after` snapshot was **not** written; the session ended during the barrier, so
+the milestone is unverified as a whole and no commit/push exists.
+
+**Barrier re-run completed during this checkpoint.** The r02 `before.json` was first honoured: all five
+of its candidate paths were confirmed byte-identical to the still-uncommitted tree, proving no drift
+during the interruption (the r02 script's hard-coded status simply no longer matched because this
+checkpoint added two documentation paths). A superseding r03 barrier
+(`pie-p0-cache-barrier-20260912-r03`) then captured the final candidate set, including the cache-gap fix
+and its new test, and passed with every invariant `true`: reference 259, branch, `HEAD`, `origin`,
+working-tree status, `stash@{0}`, all seven protected hashes and all five candidate hashes — twice, on
+both sides of the verification run. Final source barrier on the committed-to-be tree: `git diff --check`
+clean; `node --check` on the three changed `.mjs` files clean; all 17 typecheck projects pass; lint
+passes; capacity focused tests 17/18 (the conditional 10M case skipped); statement-reuse focused tests
+5/5; affected `npm test` selecting 3/3 package groups with **4,589 passed, 0 failed, 19 skipped**; and a
+`--no-sync` validation build with coordinated host/webview identity `03607185be5a983ec979`. Build
+identity is deterministic across repeated identical runs (verified by re-running `extension:build:validate`
+and reading an unchanged `extension/out/pie-build-id.txt`); run 268's different `29c9ab7d05d679d452f1`
+therefore reflected an earlier source revision, not nondeterminism.
+
+**Current HEAD, origin and live remote remain `a2c6f75f`; the in-flight milestone is verified in the
+working tree but still uncommitted.** P0 remains unqualified (now blocked by the in-flight admission
+change needing a fresh cycle), and the 1M tier, 10M tier, endurance/light, mixed-load,
+schema-v2/partial-write, matched UI/agent and memory gates all remain outstanding. Nothing has been
+published, activated, restarted, deleted or cut over. The four user-owned model/settings files,
+`stash@{0}` and all historical qualification artifacts remain preserved.
+
+**Immediate next actions (in order):**
+1. Independently review the statement-cache (incl. the cache-gap repair) and topology-sample changes
+   against the measured RSS root cause; the affected source barrier and the r03 cache barrier already
+   pass on the final tree.
+2. Commit and push the reviewed milestone as one unit: the five candidate paths plus this execution
+   record and the runbook status line, excluding the four user-owned files.
+3. Under the new fingerprint, run the validation, attestation and fresh 10k baseline cycle, plus a
+   validation-only 1M admission decision, before any 1M workload attempt.
+4. Only after the 1M tier is admitted and passed: proceed to the outstanding P0 follow-on workloads
+   (sustained 50 fact/s ×2 processes, two five-minute light runs, mixed/cancellation/backlog, real
+   nested producer, matched analytics-disabled/enabled agent and UI, memory gates, upgrade/partial-write)
+   and the outstanding P4/P7 cutover units listed at Checkpoint 21.
+
+**Deferred designs on disk (scratch-only, not implemented):** a closed P0 follow-on qualification
+driver design (`pie-p0-followon-driver-design-20260912-r01`), its draft load-driver/report-validator
+sources (`pie-p0-followon-load-driver-20260912-r01`,
+`pie-p0-followon-report-validator-20260912-r01`), and a P7a candidate activation design with an
+isolated matched host/browser trial contract (`pie-p7a-candidate-activation-design-20260912-r01`). These
+inform the remaining gates but do not change repository state.

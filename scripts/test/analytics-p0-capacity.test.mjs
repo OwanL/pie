@@ -9,6 +9,9 @@ import {
   validateTerminalWorkerEvidence,
   validateTerminalWorkerSummaries,
   summarizeTimingSamples,
+  planBoundedLoadBatches,
+  buildExpectedTopologySamplePlan,
+  validateMemoryTopologySamples,
 } from '../../extension/scripts/analytics-p0-capacity.mjs';
 
 const BASELINE_ROWS = 10_000;
@@ -28,6 +31,25 @@ test('summarizes one million timings without a variadic call-stack boundary', ()
   assert.deepEqual([...values.slice(0, 16), ...values.slice(-16)], originalEdges, 'source samples remain immutable');
 });
 
+test('plans a detail fixture larger than the queue as independently drainable batches', () => {
+  const sizes = [
+    ...Array.from({ length: 1_000 }, () => 2 * 1024),
+    ...Array.from({ length: 40 }, () => 2 * 1024 ** 2),
+  ];
+  assert.ok(sizes.reduce((sum, size) => sum + size, 0) > 64 * 1024 ** 2);
+  const batches = planBoundedLoadBatches(sizes, { maxRecords: 1_000, maxBytes: 16 * 1024 ** 2 });
+  assert.deepEqual(batches.map(({ start, end }) => sizes.slice(start, end)).flat(), sizes);
+  assert.equal(batches[0].records, 1_000);
+  assert.equal(batches.at(-1).records, 8);
+  for (const batch of batches) {
+    assert.ok(batch.records > 0 && batch.records <= 1_000);
+    assert.ok(batch.bytes > 0 && batch.bytes <= 16 * 1024 ** 2);
+    assert.equal(batch.bytes, sizes.slice(batch.start, batch.end).reduce((sum, size) => sum + size, 0));
+  }
+  assert.throws(() => planBoundedLoadBatches([16 * 1024 ** 2 + 1], { maxRecords: 1_000, maxBytes: 16 * 1024 ** 2 }), /exceeds/u);
+  assert.throws(() => planBoundedLoadBatches([0], { maxRecords: 1_000, maxBytes: 16 * 1024 ** 2 }), /positive/u);
+});
+
 test('summarizes the conditional ten-million timing tier without variadic arguments', {
   skip: process.env.PIE_ANALYTICS_P0_TEST_10M !== '1',
 }, () => {
@@ -45,6 +67,155 @@ test('summarizes the conditional ten-million timing tier without variadic argume
 test('rejects missing and malformed timing evidence', () => {
   for (const values of [[], new DataView(new ArrayBuffer(8)), [0, Number.NaN], [0, Number.POSITIVE_INFINITY], [0, -1], [0, '1']]) {
     assert.throws(() => summarizeTimingSamples(values), /timing sample/u);
+  }
+});
+
+function topologyWorker(instance, rssBytes) {
+  return {
+    identity: {
+      pid: 100 + instance,
+      spawnedAtMs: 1_780_000_000_000 + instance,
+      instanceId: `${String(instance).padStart(8, '0')}-1111-4111-8111-111111111111`,
+    },
+    rssBytes,
+  };
+}
+
+function topologySample(label, phase, observedAt, producerRssBytes, workers) {
+  const totalWorkerRssBytes = workers.reduce((sum, worker) => sum + worker.rssBytes, 0);
+  return {
+    label,
+    phase,
+    observedAt,
+    producerRssBytes,
+    workers,
+    totalWorkerRssBytes,
+    maxWorkerRssBytes: Math.max(...workers.map((worker) => worker.rssBytes)),
+    totalTopologyRssBytes: producerRssBytes + totalWorkerRssBytes,
+  };
+}
+
+function terminalWorkerSummary(identity) {
+  return {
+    identity: structuredClone(identity),
+    states: [
+      { state: 'spawned', code: null, signal: null },
+      { state: 'ready', code: null, signal: null },
+      { state: 'terminal', code: 0, signal: null },
+    ],
+  };
+}
+
+function validTopologyEvidence(rows = 10_000) {
+  const plan = buildExpectedTopologySamplePlan({ rows, maxQueueBytes: 64 * 1024 ** 2 });
+  const factWorkers = [1, 2, 3, 4].map((instance) => topologyWorker(instance, 100 * instance));
+  const detailWorker = topologyWorker(5, 300);
+  const nestedWorker = topologyWorker(6, 250);
+  const samples = plan.map((entry, index) => topologySample(
+    entry.label,
+    entry.phase,
+    new Date(Date.UTC(2026, 8, 12, 0, 0, index)).toISOString(),
+    1_000 + 100 * index,
+    entry.phase === 'facts' ? structuredClone(factWorkers)
+      : entry.phase === 'variable-details' ? [structuredClone(detailWorker)]
+        : [structuredClone(nestedWorker)],
+  ));
+  return {
+    plan,
+    samples,
+    recorderWorkers: [...factWorkers, detailWorker, nestedWorker]
+      .map((worker) => terminalWorkerSummary(worker.identity)),
+  };
+}
+
+test('recomputes the complete fact and detail topology RSS sample plan', () => {
+  const { plan, samples, recorderWorkers } = validTopologyEvidence();
+  assert.deepEqual(plan, [
+    { label: 'after-fact-flush', phase: 'facts', workerCount: 4 },
+    { label: 'after-detail-batch-1000', phase: 'variable-details', workerCount: 1 },
+    { label: 'after-nested-detail-drain', phase: 'nested-details', workerCount: 1 },
+  ]);
+  assert.deepEqual(validateMemoryTopologySamples(samples, { expectedPlan: plan, recorderWorkers }), {
+    valid: true,
+    errors: [],
+    sampleCount: 3,
+    maxWorkerRssBytes: 400,
+    maxTotalTopologyRssBytes: 2_000,
+    sampledWorkerCount: 6,
+  });
+  assert.throws(
+    () => buildExpectedTopologySamplePlan({ rows: 10_010_000, maxQueueBytes: 64 * 1024 ** 2 }),
+    /between 10000 and 10000000/u,
+  );
+});
+
+test('rejects omitted, reordered, malformed, and unreconciled topology evidence', () => {
+  const { plan, samples: valid, recorderWorkers } = validTopologyEvidence();
+  const cases = [
+    ['omitted sample', (samples) => { samples.pop(); }],
+    ['reordered sample', (samples) => { samples.reverse(); }],
+    ['extra field', (samples) => { samples[0].extra = true; }],
+    ['duplicate label', (samples) => { samples[1].label = samples[0].label; }],
+    ['noncanonical timestamp', (samples) => { samples[0].observedAt = '2026-09-12T00:00:00Z'; }],
+    ['reversed timestamp', (samples) => { samples[1].observedAt = '2026-09-11T23:59:59.000Z'; }],
+    ['wrong worker count', (samples) => { samples[0].workers.pop(); }],
+    ['duplicate sample worker', (samples) => { samples[0].workers[1] = structuredClone(samples[0].workers[0]); }],
+    ['changed worker identity', (samples) => { samples[0].workers[1].identity.instanceId = samples[0].workers[0].identity.instanceId; }],
+    ['cross-sample identity mutation', (samples) => { samples[1].workers[0].identity.instanceId = samples[0].workers[0].identity.instanceId; }],
+    ['invalid worker RSS', (samples) => { samples[0].workers[0].rssBytes = 0; }],
+    ['changed worker total', (samples) => { samples[0].totalWorkerRssBytes += 1; }],
+    ['changed worker maximum', (samples) => { samples[0].maxWorkerRssBytes += 1; }],
+    ['changed topology total', (samples) => { samples[0].totalTopologyRssBytes += 1; }],
+  ];
+  for (const [label, mutate] of cases) {
+    const samples = structuredClone(valid);
+    mutate(samples);
+    const result = validateMemoryTopologySamples(samples, { expectedPlan: plan, recorderWorkers });
+    assert.equal(result.valid, false, label);
+    assert.ok(result.errors.length > 0, label);
+  }
+});
+
+test('binds topology samples to terminal workers and stable phase identity sets', () => {
+  const evidence = validTopologyEvidence(20_000);
+  assert.equal(validateMemoryTopologySamples(evidence.samples, {
+    expectedPlan: evidence.plan,
+    recorderWorkers: evidence.recorderWorkers,
+  }).valid, true);
+
+  const cases = [
+    ['missing lifecycle', (samples, workers) => { workers.pop(); }],
+    ['reordered lifecycle states', (samples, workers) => { workers[0].states.reverse(); }],
+    ['unmatched sampled identity', (samples) => {
+      samples[0].workers[0].identity.instanceId = '99999999-9999-4999-8999-999999999999';
+    }],
+    ['substituted fact worker', (samples, workers) => {
+      const replacement = topologyWorker(7, samples[1].workers[0].rssBytes);
+      samples[1].workers[0] = replacement;
+      workers.push(terminalWorkerSummary(replacement.identity));
+    }],
+    ['detail worker changed between batches', (samples, workers) => {
+      const detailIndexes = samples.map((sample, index) => sample.phase === 'variable-details' ? index : -1).filter((index) => index >= 0);
+      const replacement = topologyWorker(8, samples[detailIndexes[1]].workers[0].rssBytes);
+      samples[detailIndexes[1]].workers[0] = replacement;
+      workers.push(terminalWorkerSummary(replacement.identity));
+    }],
+    ['nested worker reused from detail phase', (samples) => {
+      const detail = samples.find((sample) => sample.phase === 'variable-details');
+      const nested = samples.find((sample) => sample.phase === 'nested-details');
+      nested.workers[0].identity = structuredClone(detail.workers[0].identity);
+    }],
+  ];
+  for (const [label, mutate] of cases) {
+    const samples = structuredClone(evidence.samples);
+    const workers = structuredClone(evidence.recorderWorkers);
+    mutate(samples, workers);
+    const result = validateMemoryTopologySamples(samples, {
+      expectedPlan: evidence.plan,
+      recorderWorkers: workers,
+    });
+    assert.equal(result.valid, false, label);
+    assert.ok(result.errors.length > 0, label);
   }
 });
 

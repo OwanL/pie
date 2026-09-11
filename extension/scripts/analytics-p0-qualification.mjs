@@ -16,7 +16,10 @@ import {
   validateTerminalWorkerSummaries,
   validateCapacityCalibration,
   validateCapacitySnapshotInventory,
+  validateMemoryTopologySamples,
+  buildExpectedTopologySamplePlan,
   summarizeTimingSamples,
+  planBoundedLoadBatches,
 } from './analytics-p0-capacity.mjs';
 
 const extensionRoot = path.resolve(import.meta.dirname, '..');
@@ -24,8 +27,8 @@ const repositoryRoot = path.resolve(extensionRoot, '..');
 const outRoot = path.resolve(extensionRoot, 'out');
 const workerScript = path.join(outRoot, 'analytics-recorder-worker.js');
 const queryWorkerScript = path.join(outRoot, 'analytics-query-worker.js');
-const REPORT_SCHEMA_VERSION = 4;
-const HARNESS_VERSION = 'p0-baseline-scale-v3-in-place-fault';
+const REPORT_SCHEMA_VERSION = 5;
+const HARNESS_VERSION = 'p0-baseline-scale-v4-sampled-memory';
 let AnalyticsRecorderSupervisor;
 let AnalyticsCaptureCapacityError;
 let SqliteAnalyticsRecorder;
@@ -445,7 +448,7 @@ function readBaselineEvidence(currentProvenance) {
   const finalEnvelope = baseline.results?.resourceEnvelope?.samples?.at(-1);
   const physicalBytes = finalEnvelope?.physicalBytes;
   const memory = baseline.results?.memory;
-  const topologyPeakBytes = memory?.totalTopologyRssBytes;
+  let topologyPeakBytes;
   const capacityCalibration = baseline.results?.capacityCalibration;
   const calibrationValidation = validateCapacityCalibration(capacityCalibration, {
     baselineRows: 10_000,
@@ -456,6 +459,33 @@ function readBaselineEvidence(currentProvenance) {
   const prewriteChecks = baseline.results?.resourceEnvelope?.prewriteChecks;
   const destructiveFault = baseline.results?.destructiveFault;
   const calibrationReportConsistencyErrors = [];
+  if (baseline.configuration?.rows !== 10_000) {
+    calibrationReportConsistencyErrors.push('memory topology baseline row count must be exactly 10000');
+  } else {
+    try {
+      const expectedTopologyPlan = buildExpectedTopologySamplePlan({
+        rows: 10_000,
+        maxQueueBytes: 64 * 1024 ** 2,
+      });
+      const topologyValidation = validateMemoryTopologySamples(memory?.topologySamples, {
+        expectedPlan: expectedTopologyPlan,
+        recorderWorkers: destructiveFault?.recorderWorkers,
+      });
+      if (!topologyValidation.valid) {
+        calibrationReportConsistencyErrors.push(`memory topology evidence is invalid: ${topologyValidation.errors.join('; ')}`);
+      } else {
+        topologyPeakBytes = topologyValidation.maxTotalTopologyRssBytes;
+        if (memory?.maxWorkerRssBytes !== topologyValidation.maxWorkerRssBytes) {
+          calibrationReportConsistencyErrors.push('memory topology evidence does not match the reported worker RSS maximum');
+        }
+        if (memory?.totalTopologyRssBytes !== topologyValidation.maxTotalTopologyRssBytes) {
+          calibrationReportConsistencyErrors.push('memory topology evidence does not match the reported topology RSS maximum');
+        }
+      }
+    } catch (error) {
+      calibrationReportConsistencyErrors.push(`memory topology sample plan is invalid: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
   const capacitySnapshotLabels = {
     beforePrimaryFacts: 'before-primary-facts',
     afterPrimaryFacts: 'after-primary-facts',
@@ -528,7 +558,8 @@ function readBaselineEvidence(currentProvenance) {
   const matchingFixture = baseline.matrix?.detail?.total === 1_000
     && baseline.matrix?.detail?.sizes?.['2KiB'] === 950
     && baseline.matrix?.detail?.sizes?.['32KiB'] === 49
-    && baseline.matrix?.detail?.sizes?.['2MiB'] === 1;
+    && baseline.matrix?.detail?.sizes?.['2MiB'] === 1
+    && baseline.matrix?.bounds?.maxQueueBytes === 64 * 1024 ** 2;
   const accepted = baseline.schemaVersion === REPORT_SCHEMA_VERSION
     && baseline.harnessVersion === HARNESS_VERSION
     && baseline.configuration?.scenario === 'baseline'
@@ -1046,6 +1077,33 @@ try {
   const activeStartedAt = performance.now();
   const producerRssBefore = process.memoryUsage().rss;
   let producerRssPeak = producerRssBefore;
+  const topologySamples = [];
+  const captureTopologySample = async (label, phase, activeHosts) => {
+    producerRssPeak = Math.max(producerRssPeak, process.memoryUsage().rss);
+    const stats = await Promise.all(activeHosts.map((host) => host.workerStats()));
+    producerRssPeak = Math.max(producerRssPeak, process.memoryUsage().rss);
+    const workers = stats.map((entry) => ({
+      identity: {
+        pid: entry.process.workerIdentity.pid,
+        spawnedAtMs: entry.process.workerIdentity.spawnedAtMs,
+        instanceId: entry.process.workerIdentity.instanceId,
+      },
+      rssBytes: entry.process.rss,
+    }));
+    const totalWorkerRssBytes = workers.reduce((sum, worker) => sum + worker.rssBytes, 0);
+    const maxWorkerRssBytes = Math.max(...workers.map((worker) => worker.rssBytes));
+    topologySamples.push({
+      label,
+      phase,
+      observedAt: new Date().toISOString(),
+      producerRssBytes: producerRssPeak,
+      workers,
+      totalWorkerRssBytes,
+      maxWorkerRssBytes,
+      totalTopologyRssBytes: producerRssPeak + totalWorkerRssBytes,
+    });
+    return stats;
+  };
   for (let i = 0; i < matrix.facts.rows; i++) {
     const hostIndex = i % hosts.length;
     const started = performance.now();
@@ -1058,13 +1116,14 @@ try {
     if (i % 10_000 === 9_999 && i + 1 < matrix.facts.rows) {
       await Promise.all(hosts.map((host) => host.flush()));
       checkResourceEnvelope(`after-fact-batch-${i + 1}`);
+      await captureTopologySample(`after-fact-batch-${i + 1}`, 'facts', hosts);
     }
   }
   const factsFlushStarted = performance.now();
   await Promise.all(hosts.map((host) => host.flush()));
   const factsFlushMs = performance.now() - factsFlushStarted;
   checkResourceEnvelope('after-fact-flush');
-  const workerStats = await Promise.all(hosts.map((host) => host.workerStats()));
+  const workerStats = await captureTopologySample('after-fact-flush', 'facts', hosts);
   clearInterval(lagTimer);
   lagTimer = undefined;
   const activeElapsedMs = performance.now() - activeStartedAt;
@@ -1091,8 +1150,10 @@ try {
     producerRssGrowthBytes: producerRssPeak - producerRssBefore,
     workerRssBytes: workerStats.map((entry) => entry.process.rss),
     totalWorkerRssBytes: workerStats.reduce((sum, entry) => sum + entry.process.rss, 0),
-    maxWorkerRssBytes: Math.max(...workerStats.map((entry) => entry.process.rss)),
-    totalTopologyRssBytes: producerRssPeak + workerStats.reduce((sum, entry) => sum + entry.process.rss, 0),
+    maxWorkerRssBytes: Math.max(...topologySamples.flatMap((sample) => sample.workers.map((worker) => worker.rssBytes))),
+    totalTopologyRssBytes: Math.max(...topologySamples.map((sample) => sample.totalTopologyRssBytes)),
+    topologySamples,
+    topologyMetric: 'conservative maximum of observed post-drain boundaries; producer RSS is the maximum from finite producer samples accumulated through each drain',
   };
   await shutdownHelpers(hosts);
   checkResourceEnvelope('after-primary-facts');
@@ -1109,30 +1170,35 @@ try {
   });
   await detailHost.start();
   const handoffDurationsBySize = { '2KiB': [], '32KiB': [], '2MiB': [] };
+  const detailBatchFlushDurations = [];
   const detailPlan = [
     ...Array.from({ length: detailCounts['2KiB'] }, () => ['2KiB', 2 * 1024]),
     ...Array.from({ length: detailCounts['32KiB'] }, () => ['32KiB', 32 * 1024]),
     ...Array.from({ length: detailCounts['2MiB'] }, () => ['2MiB', 2 * 1024 ** 2]),
   ];
-  for (let i = 0; i < detailPlan.length; i++) {
-    if (i % 1_000 === 0) {
-      const plannedRawBytes = detailPlan
-        .slice(i, Math.min(detailPlan.length, i + 1_000))
-        .reduce((sum, [, plannedSize]) => sum + plannedSize, 0);
-      ensureAdditionalCapacity(`before-detail-batch-${i + 1}`, plannedRawBytes * 2);
+  // Keep nominal fixture bytes below one quarter of the unchanged 64 MiB
+  // queue, leaving a conservative allowance for framing and retained queue
+  // ownership. Each flush is outside the measured synchronous submit interval.
+  const detailBatches = planBoundedLoadBatches(detailPlan.map(([, size]) => size), {
+    maxRecords: 1_000,
+    maxBytes: matrix.bounds.maxQueueBytes / 4,
+  });
+  for (const batch of detailBatches) {
+    ensureAdditionalCapacity(`before-detail-batch-${batch.start + 1}`, batch.bytes * 2);
+    for (let i = batch.start; i < batch.end; i++) {
+      const [label, size] = detailPlan[i];
+      const started = performance.now();
+      const capture = detailCapture(`detail-${i}`, `detail-root-${i % 8}`, size);
+      detailHost.submitDetail(capture);
+      handoffDurationsBySize[label].push(performance.now() - started);
+      if (i % 20 === 19) await new Promise((resolve) => setImmediate(resolve));
     }
-    const [label, size] = detailPlan[i];
-    const started = performance.now();
-    const capture = detailCapture(`detail-${i}`, `detail-root-${i % 8}`, size);
-    detailHost.submitDetail(capture);
-    handoffDurationsBySize[label].push(performance.now() - started);
-    if (i % 20 === 19) await new Promise((resolve) => setImmediate(resolve));
-    if (i % 1_000 === 999) checkResourceEnvelope(`after-detail-batch-${i + 1}`);
+    const batchFlushStarted = performance.now();
+    await detailHost.flush();
+    detailBatchFlushDurations.push(performance.now() - batchFlushStarted);
+    checkResourceEnvelope(`after-detail-batch-${batch.end}`);
+    await captureTopologySample(`after-detail-batch-${batch.end}`, 'variable-details', [detailHost]);
   }
-
-  const detailFlushStarted = performance.now();
-  await detailHost.flush();
-  const detailFlushMs = performance.now() - detailFlushStarted;
   const detailStats = await detailHost.workerStats();
   const peakDetailBacklog = detailHost.backlog;
   await shutdownHelper(detailHost);
@@ -1153,6 +1219,7 @@ try {
   nestedDetailHost.submitDetail(sharedChildCapture);
   nestedDetailHost.submitDetail(sharedParentCapture);
   await nestedDetailHost.flush();
+  await captureTopologySample('after-nested-detail-drain', 'nested-details', [nestedDetailHost]);
   await shutdownHelper(nestedDetailHost);
   checkResourceEnvelope('after-detail-drain');
   report.results.detailHandoff = Object.fromEntries(
@@ -1163,7 +1230,17 @@ try {
       .filter(([, values]) => values.length > 0)
       .map(([label, values]) => [label, summarize(values)]),
   );
-  report.results.detailDrain = { flushMs: detailFlushMs, peakDetailBacklog, storage: detailStats.detailStorage };
+  report.results.detailDrain = {
+    flushMs: detailBatchFlushDurations.reduce((sum, duration) => sum + duration, 0),
+    batchCount: detailBatchFlushDurations.length,
+    batchFlush: summarize(detailBatchFlushDurations),
+    peakDetailBacklog,
+    storage: detailStats.detailStorage,
+  };
+  report.results.memory.producerRssPeak = producerRssPeak;
+  report.results.memory.producerRssGrowthBytes = producerRssPeak - producerRssBefore;
+  report.results.memory.maxWorkerRssBytes = Math.max(...topologySamples.flatMap((sample) => sample.workers.map((worker) => worker.rssBytes)));
+  report.results.memory.totalTopologyRssBytes = Math.max(...topologySamples.map((sample) => sample.totalTopologyRssBytes));
 
   const reader = openReader(databasePath);
   assert.equal(reader.countObservations(), matrix.facts.rows);
@@ -1455,6 +1532,17 @@ try {
   assert.equal(activeReaders.size, 0, 'all in-process readers must be closed before the destructive fault');
   const recorderTerminalEvidence = requireTerminalWorkerEvidence(recorderWorkerLifecycle, 'recorder');
   const queryTerminalEvidence = requireTerminalWorkerEvidence(queryWorkerLifecycle, 'query');
+  const topologyValidation = validateMemoryTopologySamples(topologySamples, {
+    expectedPlan: buildExpectedTopologySamplePlan({
+      rows: matrix.facts.rows,
+      maxQueueBytes: matrix.bounds.maxQueueBytes,
+    }),
+    recorderWorkers: recorderTerminalEvidence,
+  });
+  assert.equal(topologyValidation.valid, true, `memory topology evidence is invalid: ${topologyValidation.errors.join('; ')}`);
+  report.results.memory.maxWorkerRssBytes = topologyValidation.maxWorkerRssBytes;
+  report.results.memory.totalTopologyRssBytes = topologyValidation.maxTotalTopologyRssBytes;
+  report.results.memory.sampledWorkerCount = topologyValidation.sampledWorkerCount;
   const proofRootStat = lstatSync(root);
   const databaseStat = lstatSync(databasePath);
   assert.equal(proofRootStat.isSymbolicLink(), false, 'proof root must not be a symbolic link');
