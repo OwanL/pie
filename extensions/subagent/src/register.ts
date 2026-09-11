@@ -24,6 +24,7 @@ import { SubagentParams, prepareSubagentArguments } from "../schema.js";
 import { renderSubagentCall, renderSubagentResult } from "../render.js";
 import { execute } from "./execute.js";
 import type { OnUpdateCallback } from "../types.js";
+import { registerSubagentAnalyticsProviderHook } from "./analytics-provider-hook.js";
 
 /** Root of the pi-config repo, resolved from this extension's known position.
  *  Used as a stable fallback discovery cwd so the agent list is populated even
@@ -90,6 +91,13 @@ export default function (pi: ExtensionAPI) {
 		type: "boolean",
 		default: false,
 	});
+
+	// This supported SDK hook runs for every agent-loop provider request,
+	// including later turns after tools. The attempt state lives on the current
+	// AsyncLocalStorage context, so the root session and unrelated siblings are
+	// strict no-ops. Capture is synchronous and never modifies the provider
+	// payload or waits for recorder acknowledgement/persistence.
+	registerSubagentAnalyticsProviderHook(pi);
 
 	const isDisabledFn = isDisabled(pi);
 	const disabled = isDisabledFn();

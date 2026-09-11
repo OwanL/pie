@@ -40,6 +40,61 @@ export interface SubagentAnalyticsCaptureContext {
   resolveParentToolEntityId?: (toolCallId: string) => string;
 }
 
+export interface SubagentAnalyticsAttemptCaptureState {
+  readonly attemptId: string;
+  readonly childId: string;
+  readonly parentToolCallId?: string;
+  readonly startedAtMs: number;
+  factStatus: SubagentCaptureStatus;
+  lastSubmittedSequence: number;
+  error?: string;
+  readonly providerRequests: Array<{
+    invocationId: string;
+    canonicalInvocationId: string;
+    provider?: string;
+    model?: string;
+    thinkingLevel?: string;
+    startedAtMs: number;
+  }>;
+}
+
+export interface SubagentProviderDispatch {
+  provider?: string;
+  model?: string;
+  thinkingLevel?: string;
+  observedAtMs: number;
+}
+
+const ATTEMPT_CAPTURE_STATE = Symbol.for('pie.subagent.analytics-attempt-capture-state.v1');
+
+/** Attach attempt-local mutable capture state to the AsyncLocalStorage value
+ * without making it part of result lineage or any serialized payload. The
+ * global symbol is shared by the independently loaded nested extension copy. */
+export function bindSubagentAnalyticsAttemptState(
+  runtimeContext: object,
+  state: Pick<SubagentAnalyticsAttemptCaptureState, 'attemptId' | 'childId' | 'parentToolCallId' | 'startedAtMs'>,
+): SubagentAnalyticsAttemptCaptureState {
+  const captureState: SubagentAnalyticsAttemptCaptureState = {
+    ...state,
+    factStatus: 'disabled',
+    lastSubmittedSequence: 0,
+    providerRequests: [],
+  };
+  Object.defineProperty(runtimeContext, ATTEMPT_CAPTURE_STATE, {
+    configurable: false,
+    enumerable: false,
+    writable: false,
+    value: captureState,
+  });
+  return captureState;
+}
+
+export function readSubagentAnalyticsAttemptState(
+  runtimeContext: object,
+): SubagentAnalyticsAttemptCaptureState | undefined {
+  return (runtimeContext as { [ATTEMPT_CAPTURE_STATE]?: SubagentAnalyticsAttemptCaptureState })[ATTEMPT_CAPTURE_STATE];
+}
+
 function stableCaptureOrigin(
   generationId: string,
   subject: AnalyticsCaptureSubject,
@@ -202,6 +257,133 @@ function providerObservation(
 
 export type SubagentCaptureStatus = 'disabled' | 'submitted' | 'rejected';
 
+function captureError(error: unknown): string {
+  return redactSensitiveText(error instanceof Error ? error.message : String(error));
+}
+
+function observeAsynchronousSubmission(
+  result: void | Promise<void>,
+  state: SubagentAnalyticsAttemptCaptureState,
+): void {
+  if (!result || typeof (result as Promise<void>).then !== 'function') return;
+  void Promise.resolve(result).catch((error) => {
+    state.factStatus = 'rejected';
+    state.error = captureError(error);
+  });
+}
+
+function submitPredispatchFact<Fields extends object>(
+  context: SubagentAnalyticsCaptureContext,
+  state: SubagentAnalyticsAttemptCaptureState,
+  value: AnalyticsObservation<Fields>,
+): boolean {
+  if (!context.factSink) {
+    state.factStatus = 'disabled';
+    return false;
+  }
+  if (state.factStatus === 'rejected') return false;
+  try {
+    const submitted = context.factSink.submit(value);
+    state.factStatus = 'submitted';
+    state.lastSubmittedSequence = Number(value.sourceSequence);
+    observeAsynchronousSubmission(submitted, state);
+    return true;
+  } catch (error) {
+    state.factStatus = 'rejected';
+    state.error = captureError(error);
+    return false;
+  }
+}
+
+/** Observe one real SDK provider request at `before_provider_request`. This
+ * callback is deliberately synchronous: recorder queue ownership is handed
+ * off if available, but the provider request never waits for acknowledgement
+ * or persistence. A low-level adapter retry inside the same request is outside
+ * this supported hook and remains explicit unknown coverage. */
+export function captureSubagentProviderDispatch(
+  context: SubagentAnalyticsCaptureContext | undefined,
+  state: SubagentAnalyticsAttemptCaptureState | undefined,
+  dispatch: SubagentProviderDispatch,
+): void {
+  if (!context || !state) return;
+
+  const stableOriginId = stableCaptureOrigin(
+    context.generationId,
+    context.captureSubject,
+    state.parentToolCallId,
+    state.attemptId,
+  );
+  const parentToolEntityId = state.parentToolCallId
+    ? context.resolveParentToolEntityId?.(state.parentToolCallId) ?? state.parentToolCallId
+    : undefined;
+  const executionId = `${stableOriginId}:execution`;
+
+  if (state.providerRequests.length === 0 && state.factStatus !== 'rejected') {
+    submitPredispatchFact(context, state, observation<AnalyticsExecutionFields>({
+      context,
+      stableOriginId,
+      sourceSequence: 1,
+      sourceKey: `${stableOriginId}:execution:begin`,
+      entityKind: 'execution',
+      entityKey: executionId,
+      observationKind: 'begin',
+      observedAtMs: state.startedAtMs,
+      executionId,
+      childId: state.childId,
+      parentToolCallId: parentToolEntityId,
+      fields: {
+        childId: state.childId,
+        attemptId: state.attemptId,
+        parentToolCallId: parentToolEntityId,
+        operationKind: 'subagent-attempt',
+        source: 'subagent',
+        startedAtMs: state.startedAtMs,
+      },
+    }));
+  }
+
+  const ordinal = state.providerRequests.length + 1;
+  const invocationId = `${state.attemptId}:provider:${ordinal}`;
+  const canonicalInvocationId = canonicalProviderInvocationId(stableOriginId, invocationId);
+  state.providerRequests.push({
+    invocationId,
+    canonicalInvocationId,
+    ...(dispatch.provider ? { provider: dispatch.provider } : {}),
+    ...(dispatch.model ? { model: dispatch.model } : {}),
+    ...(dispatch.thinkingLevel ? { thinkingLevel: dispatch.thinkingLevel } : {}),
+    startedAtMs: dispatch.observedAtMs,
+  });
+  if (state.factStatus === 'rejected') return;
+
+  const sourceSequence = ordinal + 1;
+  submitPredispatchFact(context, state, observation<AnalyticsProviderCallFields>({
+    context,
+    stableOriginId,
+    sourceSequence,
+    sourceKey: `${stableOriginId}:provider:${invocationId}:dispatch`,
+    entityKind: 'providerCall',
+    entityKey: canonicalInvocationId,
+    observationKind: 'begin',
+    observedAtMs: dispatch.observedAtMs,
+    executionId,
+    childId: state.childId,
+    parentToolCallId: parentToolEntityId,
+    invocationId: canonicalInvocationId,
+    fields: {
+      invocationId: canonicalInvocationId,
+      sourceId: invocationId,
+      purpose: 'subagent',
+      provider: dispatch.provider,
+      dispatchedModel: dispatch.model,
+      thinkingLevel: dispatch.thinkingLevel,
+      retryGroupId: state.childId,
+      attemptId: state.attemptId,
+      startedAtMs: dispatch.observedAtMs,
+      coverage: 'unknown',
+    },
+  }));
+}
+
 /** Snapshot one terminal attempt into independently-owned bytes and submit the
  * attempt/provider facts under the same stable producer origin. Detail and fact
  * handoffs are independent: losing one never fabricates or suppresses the
@@ -210,6 +392,7 @@ export function captureSubagentTerminalResult(
   result: SingleResult,
   context: SubagentAnalyticsCaptureContext | undefined,
   parentToolCallId: string | undefined,
+  attemptState?: SubagentAnalyticsAttemptCaptureState,
 ): SubagentCaptureStatus {
   if (!context) return 'disabled';
 
@@ -237,6 +420,19 @@ export function captureSubagentTerminalResult(
     && result.analyticsCaptureReceipt.executionId === executionId
     ? result.analyticsCaptureReceipt
     : undefined;
+  const matchingAttemptState = attemptState?.attemptId === identity
+    && attemptState.parentToolCallId === parentToolCallId
+    ? attemptState
+    : undefined;
+  const predispatch = matchingAttemptState && matchingAttemptState.providerRequests.length > 0
+    ? {
+        factStatus: matchingAttemptState.factStatus,
+        providerRequestCount: matchingAttemptState.providerRequests.length,
+        providerRequestIds: matchingAttemptState.providerRequests.map((request) => request.invocationId),
+        lastSubmittedSequence: matchingAttemptState.lastSubmittedSequence,
+        internalRetryCoverage: 'unknown' as const,
+      }
+    : sealedReceipt?.predispatch;
   const producer = context.producer ?? {
     buildId: 'pie-subagent-capture-v2',
     processId: process.pid,
@@ -281,36 +477,40 @@ export function captureSubagentTerminalResult(
     detailError = redactSensitiveText(error instanceof Error ? error.message : String(error));
   }
 
-  let factStatus: SubagentCaptureStatus = context.factSink ? 'submitted' : 'disabled';
-  let lastSubmittedSequence = 0;
+  let factStatus: SubagentCaptureStatus = predispatch?.factStatus
+    ?? (context.factSink ? 'submitted' : 'disabled');
+  let lastSubmittedSequence = predispatch?.lastSubmittedSequence ?? 0;
   let factError: string | undefined;
-  if (context.factSink) {
+  if (matchingAttemptState?.error) factError = matchingAttemptState.error;
+  if (context.factSink && factStatus === 'submitted') {
     const observedEnd = terminalObservedAt;
     try {
-      const begin = observation<AnalyticsExecutionFields>({
-        context,
-        stableOriginId,
-        sourceSequence: 1,
-        sourceKey: `${stableOriginId}:execution:begin`,
-        entityKind: 'execution',
-        entityKey: executionId,
-        observationKind: 'begin',
-        observedAtMs: result.startedAt ?? observedEnd,
-        executionId,
-        childId,
-        parentToolCallId: parentToolEntityId,
-        fields: {
+      if (!predispatch) {
+        const begin = observation<AnalyticsExecutionFields>({
+          context,
+          stableOriginId,
+          sourceSequence: 1,
+          sourceKey: `${stableOriginId}:execution:begin`,
+          entityKind: 'execution',
+          entityKey: executionId,
+          observationKind: 'begin',
+          observedAtMs: result.startedAt ?? observedEnd,
+          executionId,
           childId,
-          attemptId,
           parentToolCallId: parentToolEntityId,
-          operationKind: 'subagent-attempt',
-          source: 'subagent',
-          startedAtMs: result.startedAt ?? null,
-        },
-      });
-      context.factSink.submit(begin);
-      lastSubmittedSequence = 1;
-      let sequence = 2;
+          fields: {
+            childId,
+            attemptId,
+            parentToolCallId: parentToolEntityId,
+            operationKind: 'subagent-attempt',
+            source: 'subagent',
+            startedAtMs: result.startedAt ?? null,
+          },
+        });
+        context.factSink.submit(begin);
+        lastSubmittedSequence = 1;
+      }
+      let sequence = lastSubmittedSequence + 1;
       for (const invocation of result.providerInvocations ?? []) {
         context.factSink.submit(providerObservation(
           context,
@@ -324,7 +524,15 @@ export function captureSubagentTerminalResult(
         lastSubmittedSequence = sequence;
         sequence += 1;
       }
-      const providerResponseObserved = (result.providerInvocations?.length ?? 0) > 0;
+      const providerResponseCount = result.providerInvocations?.length ?? 0;
+      const providerRequestCount = predispatch?.providerRequestCount;
+      const providerResponseIds = (result.providerInvocations ?? []).map((invocation) => invocation.invocationId);
+      const providerRequestIdsMatch = predispatch === undefined
+        || (predispatch.providerRequestIds.length === providerResponseIds.length
+          && predispatch.providerRequestIds.every((id, index) => id === providerResponseIds[index]));
+      const providerCoverageIncomplete = providerResponseCount === 0
+        || (providerRequestCount !== undefined && providerRequestCount !== providerResponseCount)
+        || !providerRequestIdsMatch;
       const end = observation<AnalyticsExecutionFields>({
         context,
         stableOriginId,
@@ -346,9 +554,13 @@ export function captureSubagentTerminalResult(
           endedAtMs: result.completedAt ?? null,
           outcome: result.exitCode === 0 ? 'succeeded'
             : result.stopReason === 'aborted' ? 'aborted' : 'failed',
-          ...(!providerResponseObserved ? {
+          ...(providerCoverageIncomplete ? {
             captureIncomplete: true,
-            reason: 'The dispatched child attempt ended without an observable provider response.',
+            reason: predispatch !== undefined && !providerRequestIdsMatch
+              ? 'Provider request/response identities did not pair exactly; unmatched calls remain unknown.'
+              : providerRequestCount !== undefined && providerRequestCount !== providerResponseCount
+              ? `Observed ${providerRequestCount} provider request(s) and ${providerResponseCount} terminal provider response(s); adapter-internal retries remain unknown.`
+              : 'The dispatched child attempt ended without an observable provider response.',
           } : {}),
           lastSubmittedSequence: sequence,
           terminalDetailPayloadId: detailPayloadId,
@@ -377,6 +589,7 @@ export function captureSubagentTerminalResult(
     }),
     terminalDetailComplete: sealedReceipt?.terminalDetailComplete
       ?? context.isDetailComplete?.(detailPayloadId) === true,
+    ...(predispatch ? { predispatch } : {}),
   };
   result.analyticsCaptureReceipt = receipt;
   const errors = [detailError, factError].filter((value): value is string => !!value);

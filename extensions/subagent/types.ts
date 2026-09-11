@@ -265,6 +265,17 @@ export interface SubagentAnalyticsCaptureReceipt {
 	lastSubmittedSequence: number;
 	lastAcknowledgedSequence?: number | string;
 	terminalDetailComplete: boolean;
+	/** Provider requests observed at the SDK's supported pre-request hook before
+	 * the terminal result existed. A synchronous submission failure is sealed as
+	 * rejected so terminal reconciliation cannot later present the attempt as a
+	 * complete producer handoff. Adapter-internal HTTP retries remain unknown. */
+	predispatch?: {
+		factStatus: "disabled" | "submitted" | "rejected";
+		providerRequestCount: number;
+		providerRequestIds: string[];
+		lastSubmittedSequence: number;
+		internalRetryCoverage: "unknown";
+	};
 }
 
 /** Per-attempt analytics persisted on the final subagent result. */

@@ -37,7 +37,13 @@ import { compactSingleResult } from "./result-compaction.js";
 import { textContent } from "./text-content.js";
 import { buildParentUserContext } from "./user-context.js";
 import { hashDelegatedPrompt, withRuntimeProvenance } from "./runtime-provenance.js";
-import { captureSubagentTerminalResult } from "./analytics-capture.js";
+import {
+	bindSubagentAnalyticsAttemptState,
+	captureSubagentProviderDispatch,
+	captureSubagentTerminalResult,
+	readSubagentAnalyticsAttemptState,
+	type SubagentProviderDispatch,
+} from "./analytics-capture.js";
 import {
 	readRetryPolicy,
 	parseRetryAfterMs,
@@ -94,6 +100,7 @@ interface RunWithModelRetryArgs {
 		resolved: Awaited<ReturnType<typeof resolveModel>>,
 		attemptId: string,
 		onAttemptUpdate?: OnUpdateCallback,
+		onProviderDispatch?: (dispatch: SubagentProviderDispatch) => void,
 	) => Promise<SingleResult>;
 }
 
@@ -253,8 +260,19 @@ async function runWithModelRetry(args: RunWithModelRetryArgs): Promise<SingleRes
 			}
 			: undefined;
 		const attemptStartedAt = clock.now();
+		const analyticsAttemptState = bindSubagentAnalyticsAttemptState(runtimeCtx, {
+			attemptId,
+			childId: identity.childId,
+			parentToolCallId: args.toolCallId,
+			startedAtMs: attemptStartedAt,
+		});
 		try {
-			result = await subagentRuntime.run(runtimeCtx, () => args.runAttempt(resolved, attemptId, onAttemptUpdate));
+			result = await subagentRuntime.run(runtimeCtx, () => args.runAttempt(
+				resolved,
+				attemptId,
+				onAttemptUpdate,
+				(dispatch) => captureSubagentProviderDispatch(runtimeCtx.analyticsCapture, analyticsAttemptState, dispatch),
+			));
 		} catch (error) {
 			const thrown = error as {
 				name?: string;
@@ -294,6 +312,7 @@ async function runWithModelRetry(args: RunWithModelRetryArgs): Promise<SingleRes
 			result,
 			runtimeCtx.analyticsCapture,
 			args.toolCallId,
+			readSubagentAnalyticsAttemptState(runtimeCtx),
 		);
 		attemptRecords.push(buildAttemptRecord(result, nextBackoffMs));
 		providerInvocations.push(...(result.providerInvocations ?? []));
@@ -389,6 +408,7 @@ export async function executeSingleTask(args: {
 			resolved: Awaited<ReturnType<typeof resolveModel>>,
 			attemptId: string,
 			onAttemptUpdate?: OnUpdateCallback,
+			onProviderDispatch?: (dispatch: SubagentProviderDispatch) => void,
 		) => Promise<SingleResult>;
 	};
 }): Promise<SingleResultEnvelope> {
@@ -447,7 +467,12 @@ export async function executeSingleTask(args: {
 			analyticsCapture: runtimeCtx.analyticsCapture,
 		}),
 		runAttempt: injectedRunAttempt
-			? (resolved, attemptId, onAttemptUpdate) => injectedRunAttempt(resolved, attemptId, onAttemptUpdate)
+			? (resolved, attemptId, onAttemptUpdate, onProviderDispatch) => injectedRunAttempt(
+				resolved,
+				attemptId,
+				onAttemptUpdate,
+				onProviderDispatch,
+			)
 			: (resolved, attemptId, onAttemptUpdate) => {
 				const selection = resolved.selection ?? {
 					modelId: resolved.modelOverride ?? ctx.model?.id ?? "",
