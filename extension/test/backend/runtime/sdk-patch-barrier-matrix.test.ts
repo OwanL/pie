@@ -15,8 +15,52 @@ import {
 } from '../../../src/backend/sdk-patch-barrier';
 import {
   hasSdkSessionOpenSingleReadMarkers,
+  transformSdkSessionOpenSingleRead,
 } from '../../../src/backend/sdk-session-open-patch';
+import {
+  reverseSdkSessionManagerOwnership,
+  transformSdkSessionManagerOwnership,
+} from '../../../src/backend/sdk-session-ownership-patch';
 test.after(async () => { await cleanupPristineTemplate(); });
+
+test('coordinator upgrades the exact supported v3 manager image to v4 and validates it', async () => {
+  await withFixture(async ({ sdkPath, lockRoot }) => {
+    const managerPath = path.join(sdkPath, 'dist', 'core', 'session-manager.js');
+    const v2Source = await fs.readFile(managerPath, 'utf8');
+    const v4 = transformSdkSessionManagerOwnership(v2Source);
+    assert.equal(v4.result, 'patched');
+    const v3Source = reverseSdkSessionManagerOwnership(v4.source);
+    assert.ok(v3Source, 'the current manager transform must reverse exactly to v3');
+    const deployedV3 = transformSdkSessionOpenSingleRead(v3Source);
+    assert.equal(deployedV3.result, 'patched');
+    await fs.writeFile(managerPath, deployedV3.source, 'utf8');
+
+    const identity = await ensureSdkPatchBarrier(sdkPath, { lockRoot });
+    assert.equal(identity.sessionOwnershipAdapter.patchVersion, 4);
+    const expectedV4 = transformSdkSessionOpenSingleRead(v4.source);
+    assert.equal(expectedV4.result, 'patched');
+    assert.equal(await fs.readFile(managerPath, 'utf8'), expectedV4.source);
+    await validateSdkPatchBarrier(sdkPath, identity);
+  });
+});
+
+test('coordinator rejects an SDK package version outside the explicit compatibility contract', async () => {
+  await withFixture(async ({ sdkPath, lockRoot }) => {
+    const managerPath = path.join(sdkPath, 'dist', 'core', 'session-manager.js');
+    const beforeManager = await fs.readFile(managerPath, 'utf8');
+    await fs.writeFile(path.join(sdkPath, 'package.json'), JSON.stringify({
+      name: '@earendil-works/pi-coding-agent',
+      version: '0.80.7',
+      type: 'module',
+    }), 'utf8');
+
+    await assert.rejects(
+      ensureSdkPatchBarrier(sdkPath, { lockRoot }),
+      /SDK 0\.80\.7 has no explicit supported semantic fingerprints/,
+    );
+    assert.equal(await fs.readFile(managerPath, 'utf8'), beforeManager);
+  });
+});
 
 test('coordinator fails closed without touching other targets when the pinned create seam changes', async () => {
   await withFixture(async ({ sdkPath, lockRoot }) => {

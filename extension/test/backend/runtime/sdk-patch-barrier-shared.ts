@@ -336,12 +336,17 @@ export async function runPinnedProductionFingerprintFixture(run: (sdkPath: strin
   const previousTrustedRoot = process.env.PIE_TRUSTED_SDK_ROOT;
   const previousFixtureFingerprints = process.env.PIE_SDK_PATCH_FIXTURE_FINGERPRINTS;
   try {
-    // Only the runtime target is mutated by this fixture; everything else can
-    // hardlink straight from the pinned install instead of a full copy.
+    // Keep every barrier-owned dist target private. A newly introduced patch
+    // layer can otherwise turn a previously final hardlink into a write target
+    // and mutate the shared pinned install while this fixture is running.
     await cloneTreeByHardlink(
       path.join(pinnedSdkPath, 'dist'),
       path.join(sdkPath, 'dist'),
-      ['core/agent-session-runtime.js'],
+      [
+        'core/agent-session.js',
+        'core/session-manager.js',
+        'core/agent-session-runtime.js',
+      ],
     );
     const retryPath = path.join('node_modules', '@earendil-works', 'pi-ai', 'dist', 'utils', 'retry.js');
     await fs.mkdir(path.join(sdkPath, path.dirname(retryPath)), { recursive: true });
