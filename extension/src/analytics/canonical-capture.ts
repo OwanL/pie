@@ -143,15 +143,18 @@ export class CanonicalAnalyticsCapture {
     rootSessionId: string,
     privacyMode: 'on' | 'off',
     observedAtMs = Date.now(),
-    pendingOperationId?: string,
+    pendingCreateOperationId?: string,
   ): Promise<void> {
     if (!this.enabled || privacyMode === 'off') return;
     if (!this.options.lifecycleSink) throw new Error('Canonical deletion sink is not configured.');
+    const pendingSubjectId = pendingCreateOperationId?.trim()
+      ? analyticsPendingOperationId(pendingCreateOperationId, '')
+      : undefined;
     await this.options.lifecycleSink.deleteSession(
       rootSessionId,
       `private-close:${rootSessionId}`,
       observedAtMs,
-      pendingOperationId?.trim() || undefined,
+      pendingSubjectId,
     );
   }
 

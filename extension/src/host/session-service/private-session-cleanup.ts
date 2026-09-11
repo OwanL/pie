@@ -14,9 +14,18 @@ type CleanupRequest = (
 
 export interface PrivateSessionCleanupOptions {
   requestForget: CleanupRequest;
+  /** Validate/freeze authoritative lifecycle privacy before irreversible analytics deletion. */
+  prepareForget?: (
+    sessionPath: string,
+  ) => Promise<{ rootSessionId: string; pendingCreateOperationId?: string } | void>;
   /** Scrub host-local analytics before the durable session deletion marker can
-   * be removed. This is the same StatsService seam used by SetPrivacyMode. */
-  forgetLocalAnalytics: (sessionPath: string) => Promise<void> | void;
+   * be removed. The optional identities are the persisted create/duplicate
+   * origin and stable root, never the cleanup operation that resumes the request. */
+  forgetLocalAnalytics: (
+    sessionPath: string,
+    pendingCreateOperationId?: string,
+    stableRootSessionId?: string,
+  ) => Promise<void> | void;
   clearPrivacyMarker: (sessionPath: string) => void;
   persistMarkers: (
     sessionPaths: readonly string[],
@@ -216,7 +225,12 @@ export class PrivateSessionCleanup {
         // effect before deleting the durable session. If either side fails,
         // this catch leaves the marker in place and privacy remains hydrated
         // on the next host start.
-        await this.options.forgetLocalAnalytics(sessionPath);
+        const lifecycle = await this.options.prepareForget?.(sessionPath);
+        await this.options.forgetLocalAnalytics(
+          sessionPath,
+          lifecycle?.pendingCreateOperationId,
+          lifecycle?.rootSessionId,
+        );
         // The local scrub is awaited before any backend request is admitted.
         // Recheck all lifecycle inputs after that await so disposal, a backend
         // replacement, or tab restoration cannot start a stale destructive

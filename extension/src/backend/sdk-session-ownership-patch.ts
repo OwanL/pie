@@ -1,4 +1,4 @@
-export const SDK_SESSION_OWNERSHIP_MANAGER_PATCH_VERSION = 3 as const;
+export const SDK_SESSION_OWNERSHIP_MANAGER_PATCH_VERSION = 4 as const;
 export const SDK_SESSION_REPLACEMENT_RUNTIME_PATCH_VERSION = 10 as const;
 export const SDK_SESSION_MANAGER_RELATIVE_PATH = 'dist/core/session-manager.js';
 export const SDK_SESSION_RUNTIME_RELATIVE_PATH = 'dist/core/agent-session-runtime.js';
@@ -84,7 +84,7 @@ const MANAGER_METHODS_ANCHOR = `    /**
      * Create a new session.
      * @param cwd Working directory (stored in session header)`;
 const PIE_MODEL_SETTINGS_METHOD = `    appendPieModelSettingsChange(provider, modelId, thinkingLevel) {
-        this._assertPieWriteLease("appendPieModelSettingsChange");
+        return this._runPieWriteMutation("appendPieModelSettingsChange", () => {
         if ((provider === undefined) !== (modelId === undefined)) {
             throw new Error("appendPieModelSettingsChange requires both provider and modelId.");
         }
@@ -187,6 +187,7 @@ const PIE_MODEL_SETTINGS_METHOD = `    appendPieModelSettingsChange(provider, mo
             modelChangeId: modelChange?.id,
             thinkingLevelChangeId: thinkingChange?.id,
         };
+        });
     }
 `;
 const MANAGER_METHODS_REPLACEMENT = `${PIE_MODEL_SETTINGS_METHOD}    attachPieWriteLease(adapter, lease) {
@@ -227,6 +228,13 @@ const MANAGER_METHODS_REPLACEMENT = `${PIE_MODEL_SETTINGS_METHOD}    attachPieWr
         }
         assertPieLeaseShape(this.pieWriteLease, sessionFile, seam);
         this.pieOwnershipAdapter.assertWriteLease(this.pieWriteLease, resolvePath(sessionFile), seam);
+    }
+    _runPieWriteMutation(seam, mutation) {
+        this._assertPieWriteLease(seam);
+        if (!this.pieOwnershipAdapter || typeof this.pieOwnershipAdapter.runWriteMutation !== "function")
+            return mutation();
+        const sessionFile = this.getSessionFile();
+        return this.pieOwnershipAdapter.runWriteMutation(this.pieWriteLease, resolvePath(sessionFile), seam, this.sessionId, mutation);
     }
     async activatePiePrepared(authorization) {
         if (!this.pieOwnershipAdapter || !this.piePreparedKind || this.pieWriteLease) {
@@ -362,7 +370,21 @@ const MANAGER_METHODS_REPLACEMENT = `${PIE_MODEL_SETTINGS_METHOD}    attachPieWr
 
 const MANAGER_IMPORT_V2 = `import { appendFileSync, closeSync, createReadStream, existsSync, fsyncSync, linkSync, mkdirSync, openSync, readdirSync, readSync, rmSync, statSync, writeFileSync, } from "fs";`;
 const MANAGER_IMPORT_REPLACEMENT = `import { appendFileSync, closeSync, createReadStream, existsSync, fsyncSync, linkSync, mkdirSync, openSync, readdirSync, readSync, renameSync, rmSync, statSync, writeFileSync, } from "fs";`;
-const MANAGER_METHODS_REPLACEMENT_V2 = MANAGER_METHODS_REPLACEMENT.replace(PIE_MODEL_SETTINGS_METHOD, '');
+const MANAGER_WRITE_MUTATION_METHOD = `    _runPieWriteMutation(seam, mutation) {
+        this._assertPieWriteLease(seam);
+        if (!this.pieOwnershipAdapter || typeof this.pieOwnershipAdapter.runWriteMutation !== "function")
+            return mutation();
+        const sessionFile = this.getSessionFile();
+        return this.pieOwnershipAdapter.runWriteMutation(this.pieWriteLease, resolvePath(sessionFile), seam, this.sessionId, mutation);
+    }
+`;
+const PIE_MODEL_SETTINGS_METHOD_V3 = PIE_MODEL_SETTINGS_METHOD
+  .replace(`        return this._runPieWriteMutation("appendPieModelSettingsChange", () => {\n`, `        this._assertPieWriteLease("appendPieModelSettingsChange");\n`)
+  .replace(`        };\n        });\n    }\n`, `        };\n    }\n`);
+const MANAGER_METHODS_REPLACEMENT_V2 = MANAGER_METHODS_REPLACEMENT.replace(PIE_MODEL_SETTINGS_METHOD, '').replace(MANAGER_WRITE_MUTATION_METHOD, '');
+const MANAGER_METHODS_REPLACEMENT_V3 = MANAGER_METHODS_REPLACEMENT
+  .replace(PIE_MODEL_SETTINGS_METHOD, PIE_MODEL_SETTINGS_METHOD_V3)
+  .replace(MANAGER_WRITE_MUTATION_METHOD, '');
 
 const MANAGER_SEAM_REPLACEMENTS: ReadonlyArray<readonly [string, string]> = [
   [`    setSessionFile(sessionFile) {\n        this.sessionFile = resolvePath(sessionFile);`, `    setSessionFile(sessionFile) {
@@ -376,15 +398,29 @@ const MANAGER_SEAM_REPLACEMENTS: ReadonlyArray<readonly [string, string]> = [
   [`    _rewriteFile() {\n        if (!this.persist || !this.sessionFile)\n            return;\n        const fd = openSync(this.sessionFile, "w");`, `    _rewriteFile() {
         if (!this.persist || !this.sessionFile)
             return;
-        this._assertPieWriteLease("_rewriteFile");
+        return this._runPieWriteMutation("_rewriteFile", () => {
         const fd = openSync(this.sessionFile, this.piePreparedWriteMode ?? "w");`],
+  [`            closeSync(fd);\n        }\n    }\n    isPersisted() {`, `            closeSync(fd);
+        }
+        });
+    }
+    isPersisted() {`],
   [`    _persist(entry) {\n        if (!this.persist || !this.sessionFile)\n            return;`, `    _persist(entry) {
         if (!this.persist || !this.sessionFile)
             return;
-        this._assertPieWriteLease("_persist");`],
+        return this._runPieWriteMutation("_persist", () => {`],
+  [`            appendFileSync(this.sessionFile, \`\${JSON.stringify(entry)}\\n\`);\n        }\n    }\n    _appendEntry(entry) {`, `            appendFileSync(this.sessionFile, \`\${JSON.stringify(entry)}\\n\`);
+        }
+        });
+    }
+    _appendEntry(entry) {`],
   [`    _appendEntry(entry) {\n        this.fileEntries.push(entry);`, `    _appendEntry(entry) {
-        this._assertPieWriteLease("_appendEntry");
+        return this._runPieWriteMutation("_appendEntry", () => {
         this.fileEntries.push(entry);`],
+  [`        this._persist(entry);\n    }\n    /** Append a message`, `        this._persist(entry);
+        });
+    }
+    /** Append a message`],
   [`    branch(branchFromId) {\n        if (!this.byId.has(branchFromId)) {`, `    branch(branchFromId) {
         this._assertPieWriteLease("branch");
         if (!this.byId.has(branchFromId)) {`],
@@ -400,10 +436,28 @@ const MANAGER_SEAM_REPLACEMENTS: ReadonlyArray<readonly [string, string]> = [
         const previousSessionFile = this.sessionFile;`],
 ];
 
+const MANAGER_SEAM_REPLACEMENTS_V3: ReadonlyArray<readonly [string, string]> = [
+  [MANAGER_SEAM_REPLACEMENTS[0]![0], MANAGER_SEAM_REPLACEMENTS[0]![1]],
+  [MANAGER_SEAM_REPLACEMENTS[1]![0], MANAGER_SEAM_REPLACEMENTS[1]![1]],
+  [MANAGER_SEAM_REPLACEMENTS[2]![0], `    _rewriteFile() {
+        if (!this.persist || !this.sessionFile)
+            return;
+        this._assertPieWriteLease("_rewriteFile");
+        const fd = openSync(this.sessionFile, this.piePreparedWriteMode ?? "w");`],
+  [MANAGER_SEAM_REPLACEMENTS[4]![0], `    _persist(entry) {
+        if (!this.persist || !this.sessionFile)
+            return;
+        this._assertPieWriteLease("_persist");`],
+  [MANAGER_SEAM_REPLACEMENTS[6]![0], `    _appendEntry(entry) {
+        this._assertPieWriteLease("_appendEntry");
+        this.fileEntries.push(entry);`],
+  ...MANAGER_SEAM_REPLACEMENTS.slice(8),
+];
+
 const MANAGER_REPLACEMENTS_V2: ReadonlyArray<readonly [string, string]> = [
   [MANAGER_HELPER_ANCHOR, MANAGER_HELPER_REPLACEMENT_V2],
   [MANAGER_METHODS_ANCHOR, MANAGER_METHODS_REPLACEMENT_V2],
-  ...MANAGER_SEAM_REPLACEMENTS,
+  ...MANAGER_SEAM_REPLACEMENTS_V3,
 ];
 
 const MANAGER_REPLACEMENTS: ReadonlyArray<readonly [string, string]> = [
@@ -416,7 +470,34 @@ const MANAGER_REPLACEMENTS: ReadonlyArray<readonly [string, string]> = [
 const MANAGER_V2_TO_V3_REPLACEMENTS: ReadonlyArray<readonly [string, string]> = [
   [MANAGER_IMPORT_V2, MANAGER_IMPORT_REPLACEMENT],
   [MANAGER_HELPER_REPLACEMENT_V2, MANAGER_HELPER_REPLACEMENT],
-  [MANAGER_METHODS_REPLACEMENT_V2, MANAGER_METHODS_REPLACEMENT],
+  [MANAGER_METHODS_REPLACEMENT_V2, MANAGER_METHODS_REPLACEMENT_V3],
+];
+
+const MANAGER_V3_TO_V4_SEAM_REPLACEMENTS: ReadonlyArray<readonly [string, string]> = [
+  [
+    `        if (preparedKind === "create") {\n            persistCreatedSessionHeader(this);`,
+    `        if (preparedKind === "create") {\n            this._runPieWriteMutation("activatePiePrepared.create", () => persistCreatedSessionHeader(this));`,
+  ],
+  [`        this._assertPieWriteLease("_rewriteFile");\n        const fd = openSync(this.sessionFile, this.piePreparedWriteMode ?? "w");`, `        return this._runPieWriteMutation("_rewriteFile", () => {
+        const fd = openSync(this.sessionFile, this.piePreparedWriteMode ?? "w");`],
+  [`            closeSync(fd);\n        }\n    }\n    isPersisted() {`, `            closeSync(fd);
+        }
+        });
+    }
+    isPersisted() {`],
+  [`        this._assertPieWriteLease("_persist");\n        const hasAssistant`, `        return this._runPieWriteMutation("_persist", () => {
+        const hasAssistant`],
+  [`            appendFileSync(this.sessionFile, \`\${JSON.stringify(entry)}\\n\`);\n        }\n    }\n    _appendEntry(entry) {`, `            appendFileSync(this.sessionFile, \`\${JSON.stringify(entry)}\\n\`);
+        }
+        });
+    }
+    _appendEntry(entry) {`],
+  [`        this._assertPieWriteLease("_appendEntry");\n        this.fileEntries.push(entry);`, `        return this._runPieWriteMutation("_appendEntry", () => {
+        this.fileEntries.push(entry);`],
+  [`        this._persist(entry);\n    }\n    /** Append a message`, `        this._persist(entry);
+        });
+    }
+    /** Append a message`],
 ];
 
 const SDK_SESSION_MANAGER_OWNERSHIP_V2_MARKERS = [
@@ -441,9 +522,24 @@ const SDK_SESSION_MANAGER_OWNERSHIP_V2_MARKERS = [
   'Worker branch destinations require preparePieBranched',
 ] as const;
 
-export const SDK_SESSION_MANAGER_OWNERSHIP_MARKERS = [
+const SDK_SESSION_MANAGER_OWNERSHIP_V3_MARKERS = [
   ...SDK_SESSION_MANAGER_OWNERSHIP_V2_MARKERS,
   'appendPieModelSettingsChange(provider, modelId, thinkingLevel)',
+  'copyPieSessionFile(sourcePath, destinationPath)',
+  'renameSync(temporaryPath, sessionFile)',
+] as const;
+
+export const SDK_SESSION_MANAGER_OWNERSHIP_MARKERS = [
+  ...SDK_SESSION_MANAGER_OWNERSHIP_V3_MARKERS.filter((marker) => ![
+    'this._assertPieWriteLease("_rewriteFile")',
+    'this._assertPieWriteLease("_persist")',
+    'this._assertPieWriteLease("_appendEntry")',
+  ].includes(marker)),
+  '_runPieWriteMutation(seam, mutation)',
+  'this._runPieWriteMutation("activatePiePrepared.create", () => persistCreatedSessionHeader(this))',
+  'this._runPieWriteMutation("_rewriteFile", () => {',
+  'this._runPieWriteMutation("_persist", () => {',
+  'this._runPieWriteMutation("_appendEntry", () => {',
   'copyPieSessionFile(sourcePath, destinationPath)',
   'renameSync(temporaryPath, sessionFile)',
 ] as const;
@@ -969,6 +1065,11 @@ function reverseReplacements(
 export function reverseSdkSessionManagerOwnership(source: string): string | undefined {
   let current = source;
   if (hasAll(current, SDK_SESSION_MANAGER_OWNERSHIP_MARKERS)) {
+    const withoutSeams = reverseReplacements(current, MANAGER_V3_TO_V4_SEAM_REPLACEMENTS);
+    if (!withoutSeams) return undefined;
+    return replaceExactlyOnce(withoutSeams, MANAGER_METHODS_REPLACEMENT, MANAGER_METHODS_REPLACEMENT_V3);
+  }
+  if (hasAll(current, SDK_SESSION_MANAGER_OWNERSHIP_V3_MARKERS)) {
     return reverseReplacements(current, MANAGER_V2_TO_V3_REPLACEMENTS);
   }
   if (current.includes(MANAGER_HELPER_REPLACEMENT_V1)) {
@@ -1032,17 +1133,27 @@ export function transformSdkSessionManagerOwnership(source: string): {
   if (hasAll(source, SDK_SESSION_MANAGER_OWNERSHIP_MARKERS)) {
     return { result: 'already-present', source };
   }
+  if (hasAll(source, SDK_SESSION_MANAGER_OWNERSHIP_V3_MARKERS)) {
+    let upgraded = replaceExactlyOnce(source, MANAGER_METHODS_REPLACEMENT_V3, MANAGER_METHODS_REPLACEMENT);
+    if (!upgraded) return { result: 'unsupported-shape', source };
+    upgraded = applyForwardReplacements(upgraded, MANAGER_V3_TO_V4_SEAM_REPLACEMENTS);
+    return upgraded && hasAll(upgraded, SDK_SESSION_MANAGER_OWNERSHIP_MARKERS)
+      ? { result: 'patched', source: upgraded }
+      : { result: 'unsupported-shape', source };
+  }
   if (hasAll(source, SDK_SESSION_MANAGER_OWNERSHIP_V2_MARKERS)) {
     let upgraded = source;
     for (const [needle, replacement] of [
       [MANAGER_IMPORT_V2, MANAGER_IMPORT_REPLACEMENT],
       [MANAGER_HELPER_REPLACEMENT_V2, MANAGER_HELPER_REPLACEMENT],
-      [MANAGER_METHODS_REPLACEMENT_V2, MANAGER_METHODS_REPLACEMENT],
+      [MANAGER_METHODS_REPLACEMENT_V2, MANAGER_METHODS_REPLACEMENT_V3],
     ] as ReadonlyArray<readonly [string, string]>) {
       const next = replaceExactlyOnce(upgraded, needle, replacement);
       if (next === undefined) return { result: 'unsupported-shape', source };
       upgraded = next;
     }
+    upgraded = replaceExactlyOnce(upgraded, MANAGER_METHODS_REPLACEMENT_V3, MANAGER_METHODS_REPLACEMENT) ?? upgraded;
+    upgraded = applyForwardReplacements(upgraded, MANAGER_V3_TO_V4_SEAM_REPLACEMENTS) ?? upgraded;
     return hasAll(upgraded, SDK_SESSION_MANAGER_OWNERSHIP_MARKERS)
       ? { result: 'patched', source: upgraded }
       : { result: 'unsupported-shape', source };

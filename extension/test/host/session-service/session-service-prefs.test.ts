@@ -349,8 +349,9 @@ test('private close does not reopen a deleted transcript when the final analytic
       ...NOOP_RUN_OBSERVER,
       setSessionPrivacy: async () => {
         privacyCalls += 1;
-        if (privacyCalls === 2) throw new Error('late analytics scrub failed');
+        throw new Error('late analytics scrub failed');
       },
+      closePrivateSessionAnalytics: async () => { privacyCalls += 1; },
     },
   );
   const tabCalls: string[] = [];
@@ -373,6 +374,58 @@ test('private close does not reopen a deleted transcript when the final analytic
   assert.equal(finalPersistence.cmd.operationId, 'close-private');
   assert.equal(finalPersistence.cmd.backendGeneration, 7);
   assert.deepEqual(finalPersistence.cmd.privateSessionPaths, []);
+});
+
+test('authorized private close transports the persisted create origin instead of the cleanup operation', async () => {
+  const previousAuthorization = process.env.PIE_STORAGE_CUTOFF_AUTHORIZATION;
+  process.env.PIE_STORAGE_CUTOFF_AUTHORIZATION = 'p7b-authorized-v1';
+  const context = createExtensionContext();
+  const archState = createInitialArchState();
+  const observerArguments: Array<[string | undefined, string | undefined]> = [];
+  const requests: Array<{ method: string; params: unknown }> = [];
+  const service = new SessionServiceCtor(
+    context,
+    {
+      request: async (method: string, params: unknown) => {
+        requests.push({ method, params });
+        return method === 'session.lifecycleClose'
+          ? { rootSessionId: 'actual-root-session', pendingCreateOperationId: 'actual-create-origin' }
+          : {};
+      },
+    } as any,
+    () => undefined,
+    () => undefined,
+    () => undefined,
+    () => archState,
+    undefined,
+    {
+      ...NOOP_RUN_OBSERVER,
+      closePrivateSessionAnalytics: async (_path, pendingCreateOperationId, stableRootSessionId) => {
+        observerArguments.push([pendingCreateOperationId, stableRootSessionId]);
+      },
+    },
+  );
+  const tabs = (service as unknown as { tabs: {
+    closeSession(path: string, nextPath: string | null): Promise<void>;
+  } }).tabs;
+  tabs.closeSession = async () => undefined;
+
+  try {
+    await service.closeSession('/sessions/private.jsonl', null, true, false, 'cleanup-close-operation');
+    assert.deepEqual(observerArguments, [['actual-create-origin', 'actual-root-session']]);
+    assert.deepEqual(requests.map((request) => request.method), [
+      'session.lifecycleClose',
+      'session.forget',
+    ]);
+    assert.equal(
+      (requests[0]?.params as { operationId?: string }).operationId,
+      'cleanup-close-operation',
+      'the cleanup identity remains confined to the filesystem lifecycle request',
+    );
+  } finally {
+    if (previousAuthorization === undefined) delete process.env.PIE_STORAGE_CUTOFF_AUTHORIZATION;
+    else process.env.PIE_STORAGE_CUTOFF_AUTHORIZATION = previousAuthorization;
+  }
 });
 
 test('private close retains its retry marker and reopens when backend deletion fails', async () => {

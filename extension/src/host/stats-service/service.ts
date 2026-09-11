@@ -63,6 +63,9 @@ export class StatsService implements RunObserver {
   private readonly now: () => Date;
   private readonly createId: () => string;
   private readonly canonicalCapture: CanonicalAnalyticsCapture | undefined;
+  /** Exact create/duplicate origin retained after the pending path is replaced.
+   * A close operation ID must never enter this map. */
+  private readonly pendingCreateOperationBySessionPath = new Map<string, string>();
   private startPromise: Promise<void> | null = null;
   private started = false;
   private disposed = false;
@@ -417,6 +420,26 @@ export class StatsService implements RunObserver {
   /** Enable/disable host-side privacy bookkeeping. Enabling immediately drops
    *  the current in-memory run and removes any already-written analytics for
    *  this session; the mode itself remains host-only. */
+  async closePrivateSessionAnalytics(
+    sessionPath: string,
+    pendingCreateOperationId?: string,
+    stableRootSessionId?: string,
+  ): Promise<void> {
+    if (this.canonicalCapture) {
+      const pendingOrigin = pendingCreateOperationId
+        ?? this.pendingCreateOperationBySessionPath.get(sessionPath);
+      await this.canonicalCapture.closeSession(
+        stableRootSessionId?.trim() || resolveSessionIdentity(sessionPath).sessionId,
+        'on',
+        this.now().getTime(),
+        pendingOrigin,
+      );
+      this.pendingCreateOperationBySessionPath.delete(sessionPath);
+      return;
+    }
+    await this.setSessionPrivacy(sessionPath, true);
+  }
+
   async setSessionPrivacy(sessionPath: string, enabled: boolean): Promise<void> {
     if (this.canonicalCapture) {
       // Canonical privacy remains queryable while open. P2b owns the explicit
@@ -796,10 +819,32 @@ export class StatsService implements RunObserver {
     this.accounting.onSessionClosed(sessionPath);
   }
 
-  replaceSessionPath(oldPath: string, newPath: string, stableSessionId?: string): void {
+  replaceSessionPath(
+    oldPath: string,
+    newPath: string,
+    stableSessionId?: string,
+    pendingCreateOperationId?: string,
+  ): void {
     this.workingTime.replaceSessionPath(oldPath, newPath);
     this.tracker.replaceSessionPath(oldPath, newPath, stableSessionId);
     this.accounting.replaceSessionPath(oldPath, newPath);
+    const pendingOrigin = pendingCreateOperationId
+      ?? this.pendingCreateOperationBySessionPath.get(oldPath);
+    if (!pendingOrigin) return;
+    this.pendingCreateOperationBySessionPath.delete(oldPath);
+    this.pendingCreateOperationBySessionPath.set(newPath, pendingOrigin);
+    if (!this.canonicalCapture) return;
+    const rootSessionId = stableSessionId?.trim() || resolveSessionIdentity(newPath).sessionId;
+    void this.canonicalCapture.bindPendingCreate(
+      oldPath,
+      rootSessionId,
+      this.now().getTime(),
+      pendingOrigin,
+    ).catch((error) => {
+      appendPieLog('warn', 'stats-service', 'canonical pending-create bind failed', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
   }
 
   startNewTask(sessionPath: string): void {

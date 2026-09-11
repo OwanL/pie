@@ -1111,3 +1111,60 @@ was skipped under the predeclared 16-GiB temporary bound because the 10k footpri
 P7a analytics activation, P7b storage cutoff/expiry activation, installation and host restart remain
 closed. `settings.json`, model/catalog changes, the preserved stash and legacy analytics data are not
 owned by this checkpoint.
+
+## Checkpoint 13 — inactive P2b filesystem lifecycle source (2026-09-11)
+
+This checkpoint adds the inactive filesystem lifecycle candidate without selecting P7b. A separate
+schema-v3 `state/session-lifecycle.sqlite` authority persists reversible open-session privacy, freezes
+the first close operation/disposition, increments durable write epochs, records only explicitly owned
+artifacts, and retains ordinary closes until the exact `closedAt + 24 hours` deadline. Its schema-v1
+upgrade rebuilds the prototype table transactionally so the old required privacy timestamp and
+cleanup-state constraint cannot invalidate current writes; schema-v2 upgrades add the unique durable
+`pending_create_operation_id` create/duplicate origin.
+
+The coordinator and isolated workers now share a per-session cross-process mutation barrier with
+stale-lock recovery. Authorized SDK transcript creation, append/rewrite/persist, model/thinking,
+cold truncate/duplicate, hot duplicate, prompt-toggle, and MCP override writes re-read lifecycle
+authority while holding the barrier. Private close revokes later writers before cleanup. Cleanup is
+registration-only, resumable per artifact, identity checked, and ordered so fallible review, prompt,
+MCP, computer-use, and Playwright artifacts precede transcript deletion. Missing owned targets are
+complete; replacement paths and identity mismatches block visibly. The scheduler arms exact retained
+deadlines, recovers due work at startup, polls only as a recovery backstop, and is awaited at shutdown.
+
+Close/privacy RPCs and host orchestration are present behind
+`PIE_STORAGE_CUTOFF_AUTHORIZATION=p7b-authorized-v1`. Canonical private analytics deletion is a
+prerequisite to backend forget, including startup-marker recovery; a backend-only private recovery
+without that adapter remains durably blocked rather than falsely completing. Canonical capture no
+longer mistakes the close operation ID for a pending-create subject ID. Creation and duplication
+register their exact operation origin, backend restart replay resolves the already-registered
+transcript instead of creating a second file, and lifecycle close returns the persisted root and
+create identities. Close RPCs reject caller-supplied pending identity and cleanup consumes only the
+registration-owned value. Ordinary privacy toggles remain reversible and do not suppress canonical
+capture while open. SDK patch version 4 covers the additional prepared-create publication seam and
+retains forward/reverse patch checks.
+
+Disposable evidence after the final repairs:
+
+- `npm run extension:typecheck`: passed;
+- final pending-create/lifecycle/recorder/backend/host focused gate: 150 passed, 0 failed;
+- `npm test`: all affected package groups passed (3/3); extension reported 4,549 passed, 0 failed, 19 skipped;
+- `git diff --check`: passed;
+- `npm run extension:build:validate -- --no-sync`: passed with only existing Zod annotation and chunk-size warnings.
+
+The single independent frontier review found two final issues: process-local create-ledger loss after
+durable registration and close-time caller injection of pending identity. Both were repaired. Durable
+lookup by unique create origin now replays the registered open transcript after restart; close and
+cleanup can only consume lifecycle-owned identity. The earlier pre-binding recorder race is also
+closed: close-before-bind installs the exact pending fence, a stale asynchronous bind to the deleted
+root is idempotent, and late observations cannot resurrect data. Deterministic fixtures cover both
+race orders, restart between origin persistence/deletion/bind, shared pending-path aliases, distinct
+roots, no unrelated deletion, schema-v2 migration and deleted-root replay.
+
+This is inactive candidate evidence, not accepted source or activation readiness. No existing-session
+cutoff pass is armed, no live session was closed, no live data was migrated/deleted, and no runtime was
+installed, activated, restarted, or published. The observed runtime distinction remains renderer
+`runtime84e4356f` / `renderer2674553cd8bc69e0ab53` versus backend `65349a2e`; this checkpoint does not
+change installed or staged artifacts. Cleanup still requires explicit user approval. P5 query, P6
+retirement and P7a/P7b activation APIs remain owned by their prior gates; P7b still requires explicit
+authorization plus a reviewed existing-session enumeration/cutoff plan, canonical single-root proof
+and the broader P0 qualification gates. P7a/P7b activation remains closed.

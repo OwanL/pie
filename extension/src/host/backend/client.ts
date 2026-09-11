@@ -312,7 +312,11 @@ export class BackendClient implements vscode.Disposable {
     delete backendEnv.PI_CODING_AGENT_DIR;
     delete backendEnv.PI_CODING_AGENT_SESSION_DIR;
     if (agentDirEnv) backendEnv.PI_CODING_AGENT_DIR = agentDirEnv;
-    if (sessionDirEnv) backendEnv.PI_CODING_AGENT_SESSION_DIR = sessionDirEnv;
+    if (process.env.PIE_STORAGE_CUTOFF_AUTHORIZATION === 'p7b-authorized-v1') {
+      backendEnv.PI_CODING_AGENT_SESSION_DIR = dataPaths.sessionsDir;
+    } else if (sessionDirEnv) {
+      backendEnv.PI_CODING_AGENT_SESSION_DIR = sessionDirEnv;
+    }
 
     // Allocate the host-authoritative backend generation before spawning so
     // the child can stamp every coordinator/worker/detail fence with the same

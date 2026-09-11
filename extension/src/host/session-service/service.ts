@@ -97,11 +97,37 @@ export class SessionService implements vscode.Disposable {
 
     this.state = new SessionServiceState(context, backend, scheduleRender, getArchState, dispatchArch);
     this.privateSessionCleanup = new PrivateSessionCleanup({
+      prepareForget: async (sessionPath) => {
+        if (process.env.PIE_STORAGE_CUTOFF_AUTHORIZATION !== 'p7b-authorized-v1') return;
+        return await this.backend.request<{
+          rootSessionId: string;
+          pendingCreateOperationId?: string;
+        }>(
+          'session.lifecycleClose',
+          {
+            sessionPath,
+            operationId: `private-recovery:${sessionPath}`,
+            privacyMode: true,
+          },
+        );
+      },
       // Keep startup cleanup on the same host-local analytics seam as the
       // interactive SetPrivacyMode effect. The marker is not committed until
       // this completes and the backend deletion also succeeds.
-      forgetLocalAnalytics: async (sessionPath) => {
-        await this.runObserver.setSessionPrivacy?.(sessionPath, true);
+      forgetLocalAnalytics: async (
+        sessionPath,
+        pendingCreateOperationId,
+        stableRootSessionId,
+      ) => {
+        if (this.runObserver.closePrivateSessionAnalytics) {
+          await this.runObserver.closePrivateSessionAnalytics(
+            sessionPath,
+            pendingCreateOperationId,
+            stableRootSessionId,
+          );
+        } else {
+          await this.runObserver.setSessionPrivacy?.(sessionPath, true);
+        }
       },
       requestForget: (sessionPath, timeoutMs, onTransportSettled) => this.backend.request(
         'session.forget',
@@ -415,7 +441,9 @@ export class SessionService implements vscode.Disposable {
 
   handleCreateOperationAcknowledged(selectionToken: string, operationId: string, sessionPath: string): void {
     const pendingPath = this.state.handleCreateOperationAcknowledged(selectionToken, operationId, sessionPath);
-    if (pendingPath) this.runObserver.replaceSessionPath(pendingPath, sessionPath, undefined);
+    if (pendingPath) {
+      this.runObserver.replaceSessionPath(pendingPath, sessionPath, undefined, operationId);
+    }
   }
 
   /** Re-arm a delayed create/duplicate with the same operation identity. */
@@ -465,20 +493,56 @@ export class SessionService implements vscode.Disposable {
     backendGeneration?: number,
   ): Promise<void> {
     this.clearDetailCacheForSession(sessionPath);
+    const filesystemLifecycleAuthorized = process.env.PIE_STORAGE_CUTOFF_AUTHORIZATION === 'p7b-authorized-v1';
+    if (filesystemLifecycleAuthorized && !privacyMode) {
+      await this.backend.request('session.lifecycleClose', {
+        sessionPath,
+        operationId: operationId?.trim() || `ordinary-close:${sessionPath}`,
+        privacyMode: false,
+      });
+    }
     if (privacyMode) {
       // The reducer evicts the privacy marker before this effect runs, so
       // explicitly scrub the observer before the ordinary close callback can
       // finalize anything. Reopen only while the transcript still exists: a
       // successful session.forget is the irreversible deletion boundary.
       try {
-        await this.runObserver.setSessionPrivacy?.(sessionPath, true);
-        await this.backend.request('session.forget', { sessionPath });
+        const closeOperationId = operationId?.trim() || `private-close:${sessionPath}`;
+        let pendingCreateOperationId: string | undefined;
+        let stableRootSessionId: string | undefined;
+        if (filesystemLifecycleAuthorized) {
+          // The lifecycle authority returns the create/duplicate origin it
+          // persisted at durable creation. The close operation is cleanup
+          // metadata and must never substitute for this analytics identity.
+          const lifecycle = await this.backend.request<{
+            rootSessionId: string;
+            pendingCreateOperationId?: string;
+          }>(
+            'session.lifecycleClose',
+            { sessionPath, operationId: closeOperationId, privacyMode: true },
+          );
+          pendingCreateOperationId = lifecycle.pendingCreateOperationId;
+          stableRootSessionId = lifecycle.rootSessionId;
+        }
+        if (this.runObserver.closePrivateSessionAnalytics) {
+          await this.runObserver.closePrivateSessionAnalytics(
+            sessionPath,
+            pendingCreateOperationId,
+            stableRootSessionId,
+          );
+        } else {
+          await this.runObserver.setSessionPrivacy?.(sessionPath, true);
+        }
+        await this.backend.request('session.forget', {
+          sessionPath,
+          ...(filesystemLifecycleAuthorized ? { operationId: closeOperationId } : {}),
+        });
       } catch (error) {
         this.dispatchArch({
           kind: 'Command',
           cmd: { kind: 'SetPrivacyMode', corrId: `privacy-retry:${Date.now()}`, sessionPath, enabled: true },
         });
-        this.tabs.openSession(sessionPath);
+        if (!filesystemLifecycleAuthorized) this.tabs.openSession(sessionPath);
         throw error;
       }
       // Runtime disposal may emit a final warm-bash/session summary. The first
@@ -699,6 +763,11 @@ export class SessionService implements vscode.Disposable {
       overrides,
       recycle,
     });
+  }
+
+  async setSessionLifecyclePrivacy(sessionPath: string, enabled: boolean): Promise<void> {
+    if (process.env.PIE_STORAGE_CUTOFF_AUTHORIZATION !== 'p7b-authorized-v1') return;
+    await this.backend.request('session.lifecyclePrivacy', { sessionPath, enabled });
   }
 
   /** Push the complete disabled-entry set for a session's system prompts to the

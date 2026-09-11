@@ -56,10 +56,11 @@ export interface BackendRequestHandlerDeps {
   /** Runtime-free coordinator operations. Production wires these to the one
    * generation-scoped ColdSessionStore and retains its process-local manager
    * handle for the first legacy promotion (or later isolated worker transfer). */
-  createColdSession?(cwd?: string): { sessionPath: string };
+  createColdSession?(cwd?: string, pendingCreateOperationId?: string): { sessionPath: string };
   duplicateColdSession?(
     sessionPath: string,
     publicRequestId: string,
+    pendingCreateOperationId?: string,
   ): { sessionPath: string } | Promise<{ sessionPath: string }>;
   truncateColdSessionAfter?(sessionPath: string, entryId: string): Promise<{ sessionPath: string }>;
   isSessionTransitionPending?(sessionPath: string): boolean;
@@ -140,8 +141,18 @@ export interface BackendRequestHandlerDeps {
   ): Promise<void>;
   /** Apply autonomous-mode tool exclusion to all live session runtimes. */
   setAutonomousMode(enabled: boolean): void;
+  /** Fence a coordinator-owned session artifact write under the authorized lifecycle. */
+  runSessionFilesystemMutation?<T>(sessionPath: string, seam: string, operation: () => Promise<T>): Promise<T>;
+  /** Persist a reversible authorized filesystem-lifecycle privacy setting. */
+  setSessionLifecyclePrivacy?(sessionPath: string, enabled: boolean): Promise<void>;
+  /** Durably resolve an authorized filesystem-lifecycle close before host teardown. */
+  closeSessionLifecycle?(
+    sessionPath: string,
+    operationId: string,
+    privacyMode: boolean,
+  ): Promise<{ rootSessionId: string; pendingCreateOperationId?: string } | void>;
   /** Retire a session runtime and delete its transcript/sidecars. */
-  forgetSession?(sessionPath: string): Promise<void>;
+  forgetSession?(sessionPath: string, operationId?: string): Promise<void>;
   loadTranscriptPage(
     sessionPath: string,
     direction: TranscriptPageDirection,

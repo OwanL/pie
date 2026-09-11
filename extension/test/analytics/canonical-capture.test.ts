@@ -216,6 +216,54 @@ test('canonical accounting seam is exclusive and never falls through to the lega
   }
 });
 
+test('pending bind and private close derive the same subject from the actual create origin', async () => {
+  const observations: AnalyticsObservation[] = [];
+  const binds: string[] = [];
+  const deletes: Array<string | undefined> = [];
+  const capture = new CanonicalAnalyticsCapture({
+    authority: 'canonical',
+    generationId: 'generation-pending-lifecycle',
+    workspaceId: 'workspace-pending-lifecycle',
+    buildId: 'build-pending-lifecycle',
+    processGeneration: 'process-pending-lifecycle',
+    sink: { submit: (observation) => { observations.push(observation); } },
+    detailSink: { submitDetail: () => undefined },
+    lifecycleSink: {
+      bindPendingCreate: async (pendingOperationId) => { binds.push(pendingOperationId); },
+      deleteSession: async (_root, _source, _timestamp, pendingOperationId) => {
+        deletes.push(pendingOperationId);
+      },
+    },
+  });
+
+  const createOperationId = 'actual-create-origin';
+  capture.captureExecution(
+    {
+      sessionId: null,
+      sessionPath: 'pending:reusable-alias',
+      runId: null,
+      operationId: createOperationId,
+    },
+    'execution-a',
+    'begin',
+    'pending-observation-a',
+    100,
+    { source: 'host' },
+  );
+  assert.equal(observations[0]?.captureSubject.kind, 'pendingCreate');
+  const pendingSubjectId = observations[0]?.captureSubject.kind === 'pendingCreate'
+    ? observations[0].captureSubject.operationId
+    : undefined;
+
+  await capture.bindPendingCreate('pending:reusable-alias', 'root-a', 101, createOperationId);
+  await capture.closeSession('root-a', 'on', 102, createOperationId);
+
+  assert.ok(pendingSubjectId);
+  assert.deepEqual(binds, [pendingSubjectId]);
+  assert.deepEqual(deletes, [pendingSubjectId]);
+  assert.notEqual(pendingSubjectId, createOperationId, 'the recorder key remains a derived analytics identity');
+});
+
 test('fallback root identity is stable and does not disclose the session path', () => {
   const pathA = 'C:/sensitive/workspace/session.jsonl';
   const first = analyticsRootSessionId(null, pathA);

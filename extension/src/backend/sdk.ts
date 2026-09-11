@@ -183,6 +183,16 @@ export interface SdkSessionOwnershipAdapter {
     canonicalDestinationPath: string,
   ): Promise<SdkSessionWriteLease>;
   assertWriteLease(lease: SdkSessionWriteLease, canonicalPath: string, seam: string): void;
+  /** Optional until the P7b storage cutoff is explicitly authorized. When
+   * installed, the patched SDK encloses the complete same-session mutation in
+   * this cross-process lifecycle critical section. */
+  runWriteMutation?<T>(
+    lease: SdkSessionWriteLease,
+    canonicalPath: string,
+    seam: string,
+    sessionId: string,
+    mutation: () => T,
+  ): T;
   runtimeReady(lease: SdkSessionWriteLease, canonicalPath: string): Promise<void>;
   failClosed(error: unknown): Promise<never>;
 }

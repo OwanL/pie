@@ -53,6 +53,7 @@ export function applySessionOpenedPayload(
       payload.replacesSessionPath,
       session.path,
       session.identityFallback === true ? undefined : session.sessionId?.trim() || undefined,
+      flags.createResolution?.operation.operationId,
     );
     deps.state.clearSessionScope(payload.replacesSessionPath, true);
   }
@@ -199,7 +200,12 @@ function handlePendingPathReplacement(
     newSessionPath: sessionPath,
   });
 
-  deps.runObserver.replaceSessionPath(pendingPath, sessionPath, stableSessionId);
+  deps.runObserver.replaceSessionPath(
+    pendingPath,
+    sessionPath,
+    stableSessionId,
+    operation.operationId,
+  );
   deps.state.clearSessionScope(pendingPath, true);
 }
 

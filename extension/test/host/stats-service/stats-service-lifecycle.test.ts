@@ -13,6 +13,7 @@ import {
 import { StatsService } from '../../../src/host/stats-service';
 import { workspaceHash } from '../../../src/host/stats-service/helpers';
 import { createInitialArchState, type ArchState } from '../../../src/host/core/arch-state';
+import { CanonicalAnalyticsCapture } from '../../../src/analytics/canonical-capture.js';
 
 async function withTempDir(run: (dir: string) => Promise<void>): Promise<void> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-stats-lifecycle-'));
@@ -102,6 +103,53 @@ async function pumpMacrotasks(ticks = 25): Promise<void> {
   }
   await new Promise<void>((resolve) => setTimeout(resolve, 25));
 }
+
+test('host replacement retains the exact pending-create origin through bind and private close', async () => {
+  await withTempDir(async (tempDir) => {
+    const state = createInitialArchState();
+    const boundSubjects: string[] = [];
+    const deletedSubjects: Array<string | undefined> = [];
+    const deletedRoots: string[] = [];
+    const capture = new CanonicalAnalyticsCapture({
+      authority: 'canonical',
+      generationId: 'generation-host-pending',
+      workspaceId: 'workspace-host-pending',
+      buildId: 'build-host-pending',
+      processGeneration: 'process-host-pending',
+      sink: { submit: () => undefined },
+      detailSink: { submitDetail: () => undefined },
+      lifecycleSink: {
+        bindPendingCreate: async (pendingOperationId) => { boundSubjects.push(pendingOperationId); },
+        deleteSession: async (root, _source, _timestamp, pendingOperationId) => {
+          deletedRoots.push(root);
+          deletedSubjects.push(pendingOperationId);
+        },
+      },
+    });
+    const stats = new StatsService({
+      ...optionsFor(path.join(tempDir, 'analytics'), tempDir, state, { renders: 0 }),
+      analyticsCapture: capture,
+    });
+
+    stats.replaceSessionPath(
+      'pending:shared-path-alias',
+      '/sessions/root-private.jsonl',
+      'root-private',
+      'actual-create-origin',
+    );
+    await stats.closePrivateSessionAnalytics(
+      '/sessions/root-private.jsonl',
+      undefined,
+      'root-private',
+    );
+
+    assert.deepEqual(deletedRoots, ['root-private']);
+    assert.equal(boundSubjects.length, 1);
+    assert.deepEqual(deletedSubjects, boundSubjects);
+    assert.notEqual(boundSubjects[0], 'actual-create-origin');
+    assert.notEqual(boundSubjects[0], 'cleanup-close-operation');
+  });
+});
 
 test('shutdown during historical migration stops writes and renders at the run boundary and blocks start reactivation', async () => {
   await withTempDir(async (tempDir) => {

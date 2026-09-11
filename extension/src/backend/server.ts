@@ -1,11 +1,14 @@
 import * as fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 
 import { sessionMcpOverridePath } from './mcp-session-config';
 import * as path from 'node:path';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
 
 import { BoundedEventLoopHistogram } from '../shared/live-pipeline-trace';
+import { resolveSessionIdentity } from '../shared/session-identity';
+import { resolvePieDataPaths } from '../../../shared/pie-data-root.js';
 import { attachJsonlLineReader, JSONL_MAX_LINE_BYTES } from '../shared/jsonl';
 import { toErrorMessage, parseJsonOrThrow } from '../shared/error-message';
 import { updateSettingsJsonObject } from '../shared/settings-json-update';
@@ -54,9 +57,17 @@ import {
   ensureReviewsDir,
   getReviewSidecarFingerprint,
   hasActiveReviewClosureActions,
+  forgetSessionReviewSidecars,
   startReviewWatcher,
 } from './session-review-store';
-import { forgetPrivateSessionArtifacts } from './private-session-artifacts';
+import { SessionLifecycleStore } from './session-lifecycle-store';
+import {
+  SessionExpiryScheduler,
+  SessionFilesystemMutationBarrier,
+  SessionLifecycleCleaner,
+  filesystemArtifactIdentity,
+  verifyFilesystemArtifactIdentity,
+} from './session-filesystem-lifecycle';
 import {
   isSystemPromptTogglePersistenceAvailable,
   writeSystemPromptTogglesForSession,
@@ -315,6 +326,10 @@ export class BackendServer {
   /** Paths currently being forgotten; prevents a racing open from installing
    *  a runtime after its transcript has been removed. */
   private readonly forgottenSessionPaths = new Set<string>();
+  /** P7b lifecycle authority is instantiated only under the explicit inactive-source authorization gate. */
+  private lifecycleStore?: SessionLifecycleStore;
+  private lifecycleBarrier?: SessionFilesystemMutationBarrier;
+  private lifecycleScheduler?: SessionExpiryScheduler;
   /** Disposer for the session-review sidecar watcher (see `startReviewWatcher`). */
   private stopReviewWatcher?: () => void;
   private sessionCatalogPollTimer?: ReturnType<typeof setInterval>;
@@ -478,12 +493,25 @@ export class BackendServer {
     this.coldSessionManagerHandles.set(key, { handle, creationReason });
   }
 
-  private async runColdSessionMutation<T>(sessionPath: string, operation: () => Promise<T>): Promise<T> {
+  private async runColdSessionMutation<T>(
+    sessionPath: string,
+    operation: () => Promise<T>,
+    lifecycleAdministrative = false,
+  ): Promise<T> {
     const key = this.coldManagerKey(sessionPath);
     if (this.pendingColdSessionMutations.has(key)) {
       throw new BackendError('SESSION_OWNERSHIP_CONFLICT', `A cold mutation is already active for ${sessionPath}.`);
     }
-    const pending = Promise.resolve().then(operation);
+    const pending = Promise.resolve().then(async () => {
+      if (process.env.PIE_STORAGE_CUTOFF_AUTHORIZATION !== 'p7b-authorized-v1' || !fsSync.existsSync(sessionPath)) {
+        return await operation();
+      }
+      const { barrier } = this.initializeFilesystemLifecycle();
+      const sessionId = resolveSessionIdentity(sessionPath).sessionId;
+      return lifecycleAdministrative
+        ? await barrier.runAdministrativeAsync(sessionId, 'coordinator-cold-mutation', operation)
+        : await barrier.runWriteMutationAsync(sessionId, 'coordinator-cold-mutation', operation);
+    });
     this.pendingColdSessionMutations.set(key, pending);
     try {
       return await pending;
@@ -591,6 +619,9 @@ export class BackendServer {
         this.agentDir = this.sdk.getAgentDir();
         this.getSessionDir();
         this.initializeColdSessionStore();
+        if (process.env.PIE_STORAGE_CUTOFF_AUTHORIZATION === 'p7b-authorized-v1') {
+          this.initializeFilesystemLifecycle();
+        }
       });
     } catch (error) {
       recordBackendLivePipelineTrace({
@@ -1620,11 +1651,16 @@ export class BackendServer {
   private async duplicateSessionFromCurrentOwner(
     sessionPath: string,
     publicRequestId: string,
+    pendingCreateOperationId?: string,
   ): Promise<{ sessionPath: string }> {
     const key = this.coldManagerKey(sessionPath);
     const predecessor = this.pendingSessionDuplicates.get(key) ?? Promise.resolve();
     const pending = predecessor.catch(() => undefined).then(async () => (
-      await this.executeDuplicateSessionFromCurrentOwner(sessionPath, publicRequestId)
+      await this.executeDuplicateSessionFromCurrentOwner(
+        sessionPath,
+        publicRequestId,
+        pendingCreateOperationId,
+      )
     ));
     this.pendingSessionDuplicates.set(key, pending);
     try {
@@ -1639,22 +1675,28 @@ export class BackendServer {
   private async executeDuplicateSessionFromCurrentOwner(
     sessionPath: string,
     publicRequestId: string,
+    pendingCreateOperationId?: string,
   ): Promise<{ sessionPath: string }> {
+    const replayPath = this.resolvePendingCreateReplay(pendingCreateOperationId);
+    if (replayPath) return { sessionPath: replayPath };
     const store = this.initializeColdSessionStore();
     for (let attempt = 0; attempt < 4; attempt += 1) {
       await this.waitForSessionBrowseAuthority(sessionPath);
       const router = this.workerRuntimeRouter;
       if (router?.hasHotOwner(sessionPath)) {
-        return await router.duplicateHotSession(sessionPath, { sessionPath }, publicRequestId);
+        const duplicated = await router.duplicateHotSession(sessionPath, { sessionPath }, publicRequestId);
+        this.registerNewSessionLifecycle(duplicated.sessionPath, pendingCreateOperationId);
+        return duplicated;
       }
       let handle: ColdSessionManagerHandle;
       try {
-        handle = store.duplicate(sessionPath);
+        handle = await this.runColdSessionMutation(sessionPath, async () => store.duplicate(sessionPath));
       } catch (error) {
         if (error instanceof StaleColdSessionLeaseError) continue;
         throw error;
       }
       this.retainColdSessionManager(handle, 'new');
+      this.registerNewSessionLifecycle(handle.sessionPath, pendingCreateOperationId);
       return { sessionPath: handle.sessionPath };
     }
     throw new BackendError(
@@ -2028,41 +2070,259 @@ export class BackendServer {
     }
   }
 
+  private initializeFilesystemLifecycle(): {
+    store: SessionLifecycleStore;
+    barrier: SessionFilesystemMutationBarrier;
+  } {
+    if (process.env.PIE_STORAGE_CUTOFF_AUTHORIZATION !== 'p7b-authorized-v1') {
+      throw new BackendError('UNAVAILABLE', 'Filesystem lifecycle cutoff is not authorized.');
+    }
+    if (!this.lifecycleStore || !this.lifecycleBarrier) {
+      const dataPaths = resolvePieDataPaths({ agentDir: this.agentDir });
+      this.lifecycleStore = new SessionLifecycleStore(path.join(dataPaths.stateDir, 'session-lifecycle.sqlite'));
+      this.lifecycleBarrier = new SessionFilesystemMutationBarrier({
+        store: this.lifecycleStore,
+        lockRoot: path.join(dataPaths.stateDir, 'session-mutation-locks'),
+      });
+      const cleaner = new SessionLifecycleCleaner({
+        store: this.lifecycleStore,
+        barrier: this.lifecycleBarrier,
+        roots: { sessions: dataPaths.sessionsDir, artifacts: dataPaths.artifactsDir },
+        cleanupExternalArtifact: async (artifact) => {
+          if (artifact.artifactId === 'review-sidecar-entry') {
+            forgetSessionReviewSidecars(artifact.location, artifact.sessionId);
+            return;
+          }
+          if (artifact.artifactId === 'prompt-setting-entry') {
+            await this.lifecycleBarrier!.runAdministrativeAsync(
+              '__aggregate_session_prompt_settings__',
+              'session.cleanup.prompt-setting-entry',
+              () => writeSystemPromptTogglesForSession(artifact.location, [], true),
+            );
+            return;
+          }
+          throw new Error(`Unsupported external lifecycle artifact: ${artifact.artifactId}`);
+        },
+      });
+      this.lifecycleScheduler = new SessionExpiryScheduler({
+        store: this.lifecycleStore,
+        cleaner,
+        onError: (error) => log(`session lifecycle expiry failed closed: ${toErrorMessage(error)}`),
+      });
+      this.lifecycleScheduler.start();
+    }
+    return { store: this.lifecycleStore, barrier: this.lifecycleBarrier };
+  }
+
+  private registerLifecycleArtifacts(store: SessionLifecycleStore, sessionId: string, sessionPath: string, nowMs: number): void {
+    const registered = new Set(store.listArtifacts(sessionId).map((artifact) => artifact.artifactId));
+    if (!registered.has('transcript')) {
+      store.registerArtifact({
+        sessionId,
+        artifactId: 'transcript',
+        kind: 'transcript',
+        locationKind: 'fixed_absolute',
+        location: path.resolve(sessionPath),
+      }, nowMs);
+    }
+    if (!registered.has('review-sidecar-entry')) {
+      store.registerArtifact({
+        sessionId, artifactId: 'review-sidecar-entry', kind: 'external_reference',
+        locationKind: 'external', location: sessionPath,
+      }, nowMs);
+    }
+    if (!registered.has('prompt-setting-entry')) {
+      store.registerArtifact({
+        sessionId, artifactId: 'prompt-setting-entry', kind: 'external_reference',
+        locationKind: 'external', location: sessionPath,
+      }, nowMs);
+    }
+    const mcpPath = sessionMcpOverridePath(sessionPath);
+    if (!registered.has('mcp-override') && fsSync.existsSync(mcpPath)) {
+      store.registerArtifact({
+        sessionId, artifactId: 'mcp-override', kind: 'session_sidecar',
+        locationKind: 'fixed_absolute', location: path.resolve(mcpPath),
+        identityJson: filesystemArtifactIdentity(mcpPath),
+      }, nowMs);
+    }
+    const canonicalPath = (() => {
+      try { return fsSync.realpathSync(sessionPath); } catch { return path.resolve(sessionPath); }
+    })();
+    const sanitize = (value: string) => value.replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80) || 'session';
+    const baseName = sanitize(path.basename(canonicalPath, path.extname(canonicalPath)));
+    const managedDirectories = [
+      ['computer-use-artifacts', path.join(path.dirname(canonicalPath), 'computer-use', baseName)],
+      [
+        'playwright-artifacts',
+        path.join(
+          path.dirname(canonicalPath),
+          'playwright',
+          `${baseName}-${createHash('sha256').update(canonicalPath).digest('hex').slice(0, 12)}`,
+        ),
+      ],
+    ] as const;
+    for (const [artifactId, artifactPath] of managedDirectories) {
+      if (registered.has(artifactId) || !fsSync.existsSync(artifactPath)) continue;
+      store.registerArtifact({
+        sessionId, artifactId, kind: 'managed_cache', locationKind: 'fixed_absolute',
+        location: artifactPath, identityJson: filesystemArtifactIdentity(artifactPath),
+      }, nowMs);
+    }
+  }
+
+  /** Recover a create/duplicate whose durable lifecycle registration committed
+   * before the process-local request ledger recorded its path. Never create a
+   * second transcript for an already-owned operation after backend restart. */
+  private resolvePendingCreateReplay(pendingCreateOperationId?: string): string | undefined {
+    if (
+      process.env.PIE_STORAGE_CUTOFF_AUTHORIZATION !== 'p7b-authorized-v1'
+      || !pendingCreateOperationId
+    ) return undefined;
+    const operationId = pendingCreateOperationId;
+    const { store } = this.initializeFilesystemLifecycle();
+    const existing = store.getByPendingCreateOperationId(operationId);
+    if (!existing) return undefined;
+    const transcriptRelativePath = existing.transcriptRelativePath;
+    if (!transcriptRelativePath || existing.cleanupState !== 'open') {
+      throw new Error(`Pending-create operation ${operationId} no longer has an open transcript.`);
+    }
+    const sessionRoot = path.resolve(this.getSessionDir()!);
+    const sessionPath = path.resolve(sessionRoot, transcriptRelativePath);
+    const relative = path.relative(sessionRoot, sessionPath);
+    if (relative.startsWith('..') || path.isAbsolute(relative)) {
+      throw new Error(`Pending-create operation ${operationId} has an invalid transcript path.`);
+    }
+    if (!fsSync.existsSync(sessionPath)) {
+      throw new Error(`Pending-create operation ${operationId} lost its registered transcript.`);
+    }
+    return sessionPath;
+  }
+
+  private registerNewSessionLifecycle(sessionPath: string, pendingCreateOperationId?: string): void {
+    if (process.env.PIE_STORAGE_CUTOFF_AUTHORIZATION !== 'p7b-authorized-v1') return;
+    const { store, barrier } = this.initializeFilesystemLifecycle();
+    const sessionId = resolveSessionIdentity(sessionPath).sessionId;
+    barrier.runAdministrative(sessionId, 'coordinator-create-register', () => {
+      const nowMs = Date.now();
+      this.registerLifecycleArtifacts(store, sessionId, sessionPath, nowMs);
+      if (pendingCreateOperationId) {
+        store.registerPendingCreateOperation(sessionId, pendingCreateOperationId, nowMs);
+      }
+      store.setPrivacyMode(sessionId, 'off', nowMs);
+    });
+  }
+
+  private async runSessionFilesystemMutation<T>(
+    sessionPath: string,
+    seam: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    if (process.env.PIE_STORAGE_CUTOFF_AUTHORIZATION !== 'p7b-authorized-v1') return await operation();
+    const { barrier } = this.initializeFilesystemLifecycle();
+    const sessionId = resolveSessionIdentity(sessionPath).sessionId;
+    return await barrier.runWriteMutationAsync(sessionId, seam, operation);
+  }
+
+  private async setSessionLifecyclePrivacy(sessionPath: string, enabled: boolean): Promise<void> {
+    const { store, barrier } = this.initializeFilesystemLifecycle();
+    const { sessionId } = resolveSessionIdentity(sessionPath);
+    await barrier.runAdministrativeAsync(sessionId, 'coordinator-privacy', async () => {
+      const nowMs = Date.now();
+      this.registerLifecycleArtifacts(store, sessionId, sessionPath, nowMs);
+      store.setPrivacyMode(sessionId, enabled ? 'on' : 'off', nowMs);
+    });
+  }
+
+  private async closeSessionLifecycle(
+    sessionPath: string,
+    operationId: string,
+    privacyMode: boolean,
+  ): Promise<{ rootSessionId: string; pendingCreateOperationId?: string }> {
+    const { store, barrier } = this.initializeFilesystemLifecycle();
+    const { sessionId } = resolveSessionIdentity(sessionPath);
+    await barrier.runAdministrativeAsync(sessionId, 'coordinator-close', async () => {
+      const nowMs = Date.now();
+      const existing = store.get(sessionId);
+      this.registerLifecycleArtifacts(store, sessionId, sessionPath, nowMs);
+      if (!existing) store.setPrivacyMode(sessionId, privacyMode ? 'on' : 'off', nowMs);
+      else if ((existing.privacyMode === 'on') !== privacyMode) {
+        throw new BackendError('SESSION_OWNERSHIP_CONFLICT', 'Close privacy setting is stale; retry from authoritative state.');
+      }
+      store.resolveClose(sessionId, operationId, nowMs, privacyMode ? 'private_close' : 'user_close');
+    });
+    this.lifecycleScheduler?.notifyDeadlineChanged();
+    const persistedPendingCreateOperationId = store.get(sessionId)?.pendingCreateOperationId;
+    return persistedPendingCreateOperationId
+      ? { rootSessionId: sessionId, pendingCreateOperationId: persistedPendingCreateOperationId }
+      : { rootSessionId: sessionId };
+  }
+
   /** Retire a private session runtime and remove every durable session-side
    *  artifact. Called only after the host has chosen privacy mode; ordinary
    *  tab closes intentionally keep sessions reopenable. */
-  private async forgetSession(sessionPath: string): Promise<void> {
+  private async forgetSession(sessionPath: string, operationId?: string): Promise<void> {
+    let lifecycle: { store: SessionLifecycleStore; sessionId: string; cleanupOperationId: string } | undefined;
+    if (process.env.PIE_STORAGE_CUTOFF_AUTHORIZATION === 'p7b-authorized-v1') {
+      const requestedOperationId = operationId?.trim() || `private-close:${resolveSessionIdentity(sessionPath).sessionId}`;
+      await this.closeSessionLifecycle(sessionPath, requestedOperationId, true);
+      const store = this.initializeFilesystemLifecycle().store;
+      const sessionId = resolveSessionIdentity(sessionPath).sessionId;
+      const cleanupOperationId = store.get(sessionId)?.cleanupOperationId ?? requestedOperationId;
+      store.claimCleanup(sessionId, cleanupOperationId, Date.now());
+      for (const artifact of store.listArtifacts(sessionId)) {
+        if (artifact.state !== 'deleted') {
+          store.markArtifactDeleting(sessionId, artifact.artifactId, cleanupOperationId, Date.now());
+        }
+      }
+      lifecycle = { store, sessionId, cleanupOperationId };
+    }
     this.forgottenSessionPaths.add(sessionPath);
     this.browsePreviousSessionFiles.delete(sessionPath);
     // A session-scoped MCP override artifact must not outlive its session.
-    await fs.rm(sessionMcpOverridePath(sessionPath), { force: true }).catch(() => undefined);
+    try {
+      if (lifecycle) await fs.rm(sessionMcpOverridePath(sessionPath), { force: true });
+      else await fs.rm(sessionMcpOverridePath(sessionPath), { force: true }).catch(() => undefined);
+    } catch (error) {
+      this.forgottenSessionPaths.delete(sessionPath);
+      lifecycle?.store.markCleanupBlocked(
+        lifecycle.sessionId, lifecycle.cleanupOperationId, toErrorMessage(error), Date.now(),
+      );
+      throw error;
+    }
     const store = this.initializeColdSessionStore();
     try {
+      // Registered managed trees are fallible and must be removed before
+      // ColdSessionStore.forget commits transcript deletion as the final
+      // filesystem boundary. A retry can therefore still recover the stable
+      // transcript identity after any earlier artifact failure.
+      for (const artifact of lifecycle?.store.listArtifacts(lifecycle.sessionId) ?? []) {
+        if (artifact.kind !== 'managed_cache' || artifact.locationKind !== 'fixed_absolute') continue;
+        if (!fsSync.existsSync(artifact.location)) continue;
+        verifyFilesystemArtifactIdentity(artifact, artifact.location);
+        fsSync.rmSync(artifact.location, { recursive: true, force: false });
+      }
       await this.runColdSessionMutation(sessionPath, async () => {
         store.leases.invalidate(sessionPath);
         this.coldSessionManagerHandles.delete(this.coldManagerKey(sessionPath));
         await store.forget(sessionPath);
-      });
+      }, true);
       if (this.viewedSessionPath === sessionPath) this.setViewedSessionPath(undefined);
     } catch (error) {
       this.forgottenSessionPaths.delete(sessionPath);
+      if (lifecycle) lifecycle.store.markCleanupBlocked(
+        lifecycle.sessionId, lifecycle.cleanupOperationId, toErrorMessage(error), Date.now(),
+      );
       throw error;
     }
-
-    let transcriptDeleted = false;
-    try {
-      // Review/system-prompt sidecars are fallible and must be removed before
-      // transcript deletion commits; otherwise a cleanup failure could leave a
-      // recoverable private transcript with its forget tombstone removed.
-      await forgetPrivateSessionArtifacts(sessionPath);
-      transcriptDeleted = true;
-      this.sessionCatalog.remove(sessionPath);
-      if (this.viewedSessionPath === sessionPath) this.setViewedSessionPath(undefined);
-    } catch (error) {
-      // Once transcript deletion commits the tombstone is permanent. There are
-      // deliberately no fallible operations after that boundary.
-      if (!transcriptDeleted) this.forgottenSessionPaths.delete(sessionPath);
-      throw error;
+    if (lifecycle) {
+      for (const artifact of lifecycle.store.listArtifacts(lifecycle.sessionId)) {
+        if (artifact.state !== 'deleted') {
+          lifecycle.store.markArtifactResult(
+            lifecycle.sessionId, artifact.artifactId, lifecycle.cleanupOperationId, 'deleted', Date.now(),
+          );
+        }
+      }
+      lifecycle.store.markDeleted(lifecycle.sessionId, Date.now(), lifecycle.cleanupOperationId);
     }
     // Keep the successful tombstone for the life of this backend process so a
     // queued session.open cannot recreate the deleted file after this RPC.
@@ -2529,13 +2789,20 @@ export class BackendServer {
         await runtimeRouter.retire(sessionPath, reason);
         return true;
       },
-      createColdSession: (cwd) => {
+      createColdSession: (cwd, pendingCreateOperationId) => {
+        const replayPath = this.resolvePendingCreateReplay(pendingCreateOperationId);
+        if (replayPath) return { sessionPath: replayPath };
         const handle = this.initializeColdSessionStore().create({ cwd });
         this.retainColdSessionManager(handle, 'new');
+        this.registerNewSessionLifecycle(handle.sessionPath, pendingCreateOperationId);
         return { sessionPath: handle.sessionPath };
       },
-      duplicateColdSession: async (sessionPath, publicRequestId) => {
-        return await this.duplicateSessionFromCurrentOwner(sessionPath, publicRequestId);
+      duplicateColdSession: async (sessionPath, publicRequestId, pendingCreateOperationId) => {
+        return await this.duplicateSessionFromCurrentOwner(
+          sessionPath,
+          publicRequestId,
+          pendingCreateOperationId,
+        );
       },
       truncateColdSessionAfter: async (sessionPath, entryId) => {
         const store = this.initializeColdSessionStore();
@@ -2572,7 +2839,15 @@ export class BackendServer {
           // A cold coordinator has no in-memory prompt state to fall back to,
           // so this write is strict: success means the choice will survive a
           // backend restart and be consumed when the worker is promoted.
-          await writeSystemPromptTogglesForSession(sessionPath, disabledEntries, true);
+          if (process.env.PIE_STORAGE_CUTOFF_AUTHORIZATION === 'p7b-authorized-v1') {
+            await this.initializeFilesystemLifecycle().barrier.runAdministrativeAsync(
+              '__aggregate_session_prompt_settings__',
+              'coordinator-prompt-toggles.aggregate',
+              () => writeSystemPromptTogglesForSession(sessionPath, disabledEntries, true),
+            );
+          } else {
+            await writeSystemPromptTogglesForSession(sessionPath, disabledEntries, true);
+          }
         });
       },
       isSessionTransitionPending: () => false,
@@ -2617,7 +2892,14 @@ export class BackendServer {
         throw new BackendError('ISOLATED_RUNTIME_ROUTING_UNAVAILABLE', 'System prompt toggles require a hot worker owner.');
       },
       setAutonomousMode: () => undefined,
-      forgetSession: (sessionPath) => this.forgetSession(sessionPath),
+      runSessionFilesystemMutation: (sessionPath, seam, operation) => (
+        this.runSessionFilesystemMutation(sessionPath, seam, operation)
+      ),
+      setSessionLifecyclePrivacy: (sessionPath, enabled) => this.setSessionLifecyclePrivacy(sessionPath, enabled),
+      closeSessionLifecycle: (sessionPath, operationId, privacyMode) => (
+        this.closeSessionLifecycle(sessionPath, operationId, privacyMode)
+      ),
+      forgetSession: (sessionPath, operationId) => this.forgetSession(sessionPath, operationId),
       loadTranscriptPage: (sessionPath, direction, loadedStart, loadedEnd, options) => (
         this.loadTranscriptPage(sessionPath, direction, loadedStart, loadedEnd, options)
       ),
@@ -2762,6 +3044,11 @@ export class BackendServer {
         log(`worker supervisor disposal failed closed: ${toErrorMessage(error)}`);
       }
     }
+    await this.lifecycleScheduler?.stop();
+    this.lifecycleScheduler = undefined;
+    this.lifecycleStore?.close();
+    this.lifecycleStore = undefined;
+    this.lifecycleBarrier = undefined;
     if (this.coldSessionStore) {
       // Keep coordinator-local reservations intact until every hot worker has
       // confirmed exit and runtime ownership reconciliation has released its

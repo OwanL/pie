@@ -18,6 +18,8 @@ const COORDINATOR_METHODS: ReadonlySet<string> = new Set([
   'session.viewed',
   'session.duplicate',
   'session.preload',
+  'session.lifecyclePrivacy',
+  'session.lifecycleClose',
   'session.forget',
   'session.loadTranscriptPage',
   'session.loadDetail',

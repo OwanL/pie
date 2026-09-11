@@ -88,6 +88,12 @@ import {
   type ProviderIncident,
 } from './provider-incident';
 import { observeProviderTransport, type ProviderTransportObservation } from './provider-progress-bus';
+import { resolvePieDataPaths } from '../../../shared/pie-data-root.js';
+import { SessionLifecycleStore } from './session-lifecycle-store.js';
+import { SessionFilesystemMutationBarrier } from './session-filesystem-lifecycle.js';
+
+export const PIE_STORAGE_CUTOFF_AUTHORIZATION_ENV = 'PIE_STORAGE_CUTOFF_AUTHORIZATION' as const;
+export const PIE_STORAGE_CUTOFF_AUTHORIZATION_VALUE = 'p7b-authorized-v1' as const;
 
 export interface WorkerRuntimePromotionPayload extends WorkerJsonObject {
   sdkPath: string;
@@ -173,6 +179,9 @@ export class WorkerRuntimeHost {
   private autonomousMode = false;
   private mcpEnabled = true;
   private readonly detailStore: WorkerLiveDetailStore;
+  private lifecycleStore?: SessionLifecycleStore;
+  private lifecycleBarrier?: SessionFilesystemMutationBarrier;
+  private lifecycleSessionsRoot?: string;
 
   constructor(private readonly options: WorkerRuntimeHostOptions) {
     this.detailStore = new WorkerLiveDetailStore({
@@ -250,21 +259,28 @@ export class WorkerRuntimeHost {
         }
         const sourceContext = this.context;
         const sourcePath = sourceContext.sessionPath;
-        const branch = sourceContext.session.sessionManager.getBranch();
-        const leaf = branch.at(-1) as { id?: unknown } | undefined;
-        this.suppressNextReplacementOpened = true;
-        try {
-          const result = typeof leaf?.id === 'string'
-            ? await sourceContext.runtime.fork?.(leaf.id, { position: 'at' })
-            : await sourceContext.runtime.newSession?.({ parentSession: sourcePath });
-          if (!result || result.cancelled) throw new Error('Hot session duplicate was cancelled before commit.');
-          if (sameSessionPath(this.context.sessionPath, sourcePath)) {
-            throw new Error('Hot session duplicate did not activate its destination.');
+        const duplicate = async () => {
+          const branch = sourceContext.session.sessionManager.getBranch();
+          const leaf = branch.at(-1) as { id?: unknown } | undefined;
+          this.suppressNextReplacementOpened = true;
+          try {
+            const result = typeof leaf?.id === 'string'
+              ? await sourceContext.runtime.fork?.(leaf.id, { position: 'at' })
+              : await sourceContext.runtime.newSession?.({ parentSession: sourcePath });
+            if (!result || result.cancelled) throw new Error('Hot session duplicate was cancelled before commit.');
+            const destinationContext = this.context;
+            if (!destinationContext || sameSessionPath(destinationContext.sessionPath, sourcePath)) {
+              throw new Error('Hot session duplicate did not activate its destination.');
+            }
+            return asWorkerJson({ sessionPath: destinationContext.sessionPath });
+          } finally {
+            this.suppressNextReplacementOpened = false;
           }
-          return asWorkerJson({ sessionPath: this.context.sessionPath });
-        } finally {
-          this.suppressNextReplacementOpened = false;
-        }
+        };
+        const sourceSessionId = sourceContext.session.sessionManager.getSessionId?.();
+        return this.lifecycleBarrier && typeof sourceSessionId === 'string' && sourceSessionId
+          ? await this.lifecycleBarrier.runWriteMutationAsync(sourceSessionId, 'session.duplicateHot', duplicate)
+          : await duplicate();
       }
       if (operation === 'session.snapshot') {
         const sessionPath = typeof params.sessionPath === 'string' ? params.sessionPath : undefined;
@@ -453,6 +469,9 @@ export class WorkerRuntimeHost {
     ProviderGate.uninstall();
     this.uninstallNetworkLease?.();
     this.uninstallNetworkLease = undefined;
+    this.lifecycleStore?.close();
+    this.lifecycleStore = undefined;
+    this.lifecycleBarrier = undefined;
   }
 
   private async promoteOnce(payload: WorkerRuntimePromotionPayload): Promise<void> {
@@ -466,6 +485,16 @@ export class WorkerRuntimeHost {
     };
     this.openedPayload = payload.openedPayload as unknown as SessionOpenedPayload;
     this.currentLease = payload.writeLease as unknown as SdkSessionWriteLease;
+
+    if (process.env[PIE_STORAGE_CUTOFF_AUTHORIZATION_ENV] === PIE_STORAGE_CUTOFF_AUTHORIZATION_VALUE) {
+      const dataPaths = resolvePieDataPaths({ agentDir: this.agentDir });
+      this.lifecycleStore = new SessionLifecycleStore(path.join(dataPaths.stateDir, 'session-lifecycle.sqlite'));
+      this.lifecycleBarrier = new SessionFilesystemMutationBarrier({
+        store: this.lifecycleStore,
+        lockRoot: path.join(dataPaths.stateDir, 'session-mutation-locks'),
+      });
+      this.lifecycleSessionsRoot = dataPaths.sessionsDir;
+    }
 
     this.uninstallNetworkLease = installWorkerProviderNetworkLease({
       acquire: async (requestId, request) => {
@@ -785,6 +814,33 @@ export class WorkerRuntimeHost {
           || !sameSessionPath(canonicalPath, this.currentLease.canonicalSessionPath)) {
           throw new Error(`Stale worker session write lease for ${canonicalPath}.`);
         }
+      },
+      runWriteMutation: (lease, canonicalPath, seam, sessionId, mutation) => {
+        if (!this.currentLease || lease.nonce !== this.currentLease.nonce
+          || !sameSessionPath(canonicalPath, this.currentLease.canonicalSessionPath)) {
+          throw new Error(`Stale worker session write lease for ${canonicalPath}.`);
+        }
+        if (!this.lifecycleStore || !this.lifecycleBarrier || !this.lifecycleSessionsRoot) return mutation();
+        const relativePath = path.relative(this.lifecycleSessionsRoot, canonicalPath);
+        if (!relativePath || relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
+          throw new Error(`Storage-cutoff worker path is outside the canonical sessions root: ${canonicalPath}`);
+        }
+        this.lifecycleStore.registerTranscript(sessionId, relativePath, Date.now());
+        return this.lifecycleBarrier.runWriteMutation(sessionId, seam, () => {
+          const result = mutation();
+          if (fsSync.existsSync(canonicalPath)
+            && !this.lifecycleStore!.listArtifacts(sessionId).some((artifact) => artifact.artifactId === 'transcript')) {
+            this.lifecycleStore!.registerArtifact({
+              sessionId,
+              artifactId: 'transcript',
+              kind: 'transcript',
+              locationKind: 'root_relative',
+              location: relativePath,
+              rootName: 'sessions',
+            }, Date.now());
+          }
+          return result;
+        });
       },
       runtimeReady: async (lease, canonicalPath) => {
         const response = await this.options.server.requestFrame(
@@ -1409,7 +1465,17 @@ export class WorkerRuntimeHost {
       context.systemPromptToolsBeforeDisable = undefined;
     }
     context.systemPromptDisabledEntries = next;
-    await writeSystemPromptTogglesForSession(context.sessionPath, next);
+    const persistPromptToggles = () => writeSystemPromptTogglesForSession(context.sessionPath, next);
+    const sessionId = context.session.sessionManager.getSessionId?.();
+    if (this.lifecycleBarrier && typeof sessionId === 'string' && sessionId) {
+      await this.lifecycleBarrier.runWriteMutationAsync(sessionId, 'system-prompt-toggles', async () => (
+        await this.lifecycleBarrier!.runAdministrativeAsync(
+          '__aggregate_session_prompt_settings__', 'system-prompt-toggles.aggregate', persistPromptToggles,
+        )
+      ));
+    } else {
+      await persistPromptToggles();
+    }
     if (this.openedPayload?.systemPrompts) {
       this.openedPayload = {
         ...this.openedPayload,

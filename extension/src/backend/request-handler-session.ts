@@ -82,8 +82,12 @@ function sessionManagerPath(manager: SdkSessionManager): string {
   return sessionPath;
 }
 
-function createColdSession(deps: BackendRequestHandlerDeps, cwd?: string): { sessionPath: string } {
-  if (deps.createColdSession) return deps.createColdSession(cwd);
+function createColdSession(
+  deps: BackendRequestHandlerDeps,
+  cwd?: string,
+  pendingCreateOperationId?: string,
+): { sessionPath: string } {
+  if (deps.createColdSession) return deps.createColdSession(cwd, pendingCreateOperationId);
   const manager = deps.sdk.SessionManager.create(cwd || deps.startupCwd, deps.sessionDir);
   return { sessionPath: sessionManagerPath(manager) };
 }
@@ -92,8 +96,11 @@ async function duplicateColdSession(
   deps: BackendRequestHandlerDeps,
   sourcePath: string,
   publicRequestId: string,
+  pendingCreateOperationId?: string,
 ): Promise<{ sessionPath: string }> {
-  if (deps.duplicateColdSession) return await deps.duplicateColdSession(sourcePath, publicRequestId);
+  if (deps.duplicateColdSession) {
+    return await deps.duplicateColdSession(sourcePath, publicRequestId, pendingCreateOperationId);
+  }
   const sourceCwd = deps.sdk.SessionManager.open(sourcePath).getCwd() || deps.startupCwd;
   return {
     sessionPath: sessionManagerPath(deps.sdk.SessionManager.forkFrom(sourcePath, sourceCwd, deps.sessionDir)),
@@ -118,7 +125,7 @@ async function handleSessionCreate(
         params.cwd || deps.startupCwd,
       ),
       execute: async (registerDurablePath) => {
-        const created = createColdSession(deps, params.cwd);
+        const created = createColdSession(deps, params.cwd, params.operationId);
         // The server callback installs the process-local manager handle before
         // returning. Only then may the ledger record the durable commit.
         registerDurablePath(created.sessionPath);
@@ -145,7 +152,7 @@ async function handleSessionCreate(
     });
     return { ok: true, sessionPath: result.sessionPath };
   }
-  const created = createColdSession(deps, params.cwd);
+  const created = createColdSession(deps, params.cwd, params.operationId);
   const result = await publishCreatedSession(deps, created.sessionPath, params, request.id);
   return { ok: true, sessionPath: result.sessionPath };
 }
@@ -218,7 +225,12 @@ async function handleSessionDuplicate(
       operationId: params.operationId,
       intentFingerprint: createOperationIntentFingerprint('session.duplicate', params.sessionPath),
       execute: async (registerDurablePath) => {
-        const duplicate = await duplicateColdSession(deps, params.sessionPath, request.id);
+        const duplicate = await duplicateColdSession(
+          deps,
+          params.sessionPath,
+          request.id,
+          params.operationId,
+        );
         registerDurablePath(duplicate.sessionPath);
         return await publishCreatedSession(deps, duplicate.sessionPath, params, request.id);
       },
@@ -243,7 +255,12 @@ async function handleSessionDuplicate(
     });
     return { ok: true, sessionPath: result.sessionPath };
   }
-  const duplicate = await duplicateColdSession(deps, params.sessionPath, request.id);
+  const duplicate = await duplicateColdSession(
+    deps,
+    params.sessionPath,
+    request.id,
+    params.operationId,
+  );
   const result = await publishCreatedSession(deps, duplicate.sessionPath, params, request.id);
   return { ok: true, sessionPath: result.sessionPath };
 }
@@ -262,14 +279,61 @@ async function handleSessionPreload(
   );
 }
 
+async function handleSessionLifecyclePrivacy(
+  deps: BackendRequestHandlerDeps,
+  request: RequestEnvelope,
+): Promise<unknown> {
+  if (!request.params || typeof request.params !== 'object' || Array.isArray(request.params)) {
+    throw new BackendError('INVALID_PARAMS', 'session.lifecyclePrivacy params must be an object.');
+  }
+  const params = request.params as Record<string, unknown>;
+  if (typeof params.sessionPath !== 'string' || typeof params.enabled !== 'boolean') {
+    throw new BackendError('INVALID_PARAMS', 'session.lifecyclePrivacy requires sessionPath and enabled.');
+  }
+  markRequestValidated(deps);
+  if (!deps.setSessionLifecyclePrivacy) throw new BackendError('UNAVAILABLE', 'Session lifecycle privacy is unavailable.');
+  await deps.setSessionLifecyclePrivacy(params.sessionPath, params.enabled);
+  return { sessionPath: params.sessionPath, enabled: params.enabled };
+}
+
+async function handleSessionLifecycleClose(
+  deps: BackendRequestHandlerDeps,
+  request: RequestEnvelope,
+): Promise<unknown> {
+  if (!request.params || typeof request.params !== 'object' || Array.isArray(request.params)) {
+    throw new BackendError('INVALID_PARAMS', 'session.lifecycleClose params must be an object.');
+  }
+  const params = request.params as Record<string, unknown>;
+  if (typeof params.sessionPath !== 'string' || typeof params.operationId !== 'string' || !params.operationId.trim()
+    || typeof params.privacyMode !== 'boolean'
+    || params.pendingCreateOperationId !== undefined) {
+    throw new BackendError(
+      'INVALID_PARAMS',
+      'session.lifecycleClose requires sessionPath, operationId, and privacyMode; pending-create identity is lifecycle-owned.',
+    );
+  }
+  markRequestValidated(deps);
+  if (!deps.closeSessionLifecycle) throw new BackendError('UNAVAILABLE', 'Session lifecycle close is unavailable.');
+  const lifecycle = await deps.closeSessionLifecycle(
+    params.sessionPath,
+    params.operationId,
+    params.privacyMode,
+  );
+  return { sessionPath: params.sessionPath, closed: true, ...(lifecycle ?? {}) };
+}
+
 async function handleSessionForget(
   deps: BackendRequestHandlerDeps,
   request: RequestEnvelope,
 ): Promise<unknown> {
   const params = validateSessionPath('session.forget', request.params);
+  const operationId = request.params && typeof request.params === 'object' && !Array.isArray(request.params)
+    && typeof (request.params as Record<string, unknown>).operationId === 'string'
+    ? (request.params as Record<string, string>).operationId
+    : undefined;
   markRequestValidated(deps);
   if (!deps.forgetSession) throw new BackendError('UNAVAILABLE', 'Session forget is unavailable.');
-  await deps.forgetSession(params.sessionPath);
+  await deps.forgetSession(params.sessionPath, operationId);
   await deps.emitSessionListChanged();
   return { sessionPath: params.sessionPath, forgotten: true };
 }
@@ -526,6 +590,8 @@ export const SESSION_REQUEST_HANDLERS: Readonly<Record<string, RequestHandler>> 
   'session.viewed': handleSessionViewed,
   'session.duplicate': handleSessionDuplicate,
   'session.preload': handleSessionPreload,
+  'session.lifecyclePrivacy': handleSessionLifecyclePrivacy,
+  'session.lifecycleClose': handleSessionLifecycleClose,
   'session.forget': handleSessionForget,
   'session.loadTranscriptPage': handleSessionLoadTranscriptPage,
   'session.loadDetail': handleSessionLoadDetail,

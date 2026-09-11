@@ -34,7 +34,7 @@ test('coordinator barrier patches both files and returns a closed, versioned ide
     assert.equal(identity.retryClassifier.patchVersion, 1);
     assert.equal(identity.coldCreateDurability.patchVersion, 2);
     assert.equal(identity.coldCreateDurability.relativePath, 'dist/core/session-manager.js');
-    assert.equal(identity.sessionOwnershipAdapter.patchVersion, 3);
+    assert.equal(identity.sessionOwnershipAdapter.patchVersion, 4);
     assert.equal(identity.sessionOwnershipAdapter.relativePath, 'dist/core/session-manager.js');
     assert.equal(identity.sessionReplacementAdapter.patchVersion, 10);
     assert.equal(identity.sessionReplacementAdapter.relativePath, 'dist/core/agent-session-runtime.js');

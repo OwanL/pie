@@ -122,6 +122,8 @@ export interface SessionServiceLike {
    *  backend (`systemPromptToggles.set`). Fire-and-forget: the backend re-emits
    *  `session.opened` to update host state, so no *Result event is expected. */
   setSystemPromptToggles(sessionPath: string, disabledEntries: readonly string[]): Promise<void>;
+  /** Persist reversible lifecycle privacy under the authorized filesystem gate. */
+  setSessionLifecyclePrivacy?(sessionPath: string, enabled: boolean): Promise<void>;
   /** Subscribe a renderer-owned detail key. The runner mints the
    *  `subscriptionId`; the service records the exact owner and routes the
    *  coordinator's stream imperatives for it. Fire-and-forget: failures
@@ -1093,10 +1095,10 @@ export class EffectRunner {
       });
     };
     try {
-      const operation = this.deps.statsService.setSessionPrivacy?.(effect.sessionPath, effect.enabled);
-      if (operation && typeof (operation as Promise<void>).then === 'function') {
-        void (operation as Promise<void>).catch(handleFailure);
-      }
+      const operation = Promise.resolve(
+        this.deps.service.setSessionLifecyclePrivacy?.(effect.sessionPath, effect.enabled),
+      ).then(() => this.deps.statsService.setSessionPrivacy?.(effect.sessionPath, effect.enabled));
+      void operation.catch(handleFailure);
     } catch (error) {
       handleFailure(error);
     }

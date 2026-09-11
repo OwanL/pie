@@ -15,6 +15,8 @@ const EXPECTED_SESSION_ROUTES = [
   'session.viewed',
   'session.duplicate',
   'session.preload',
+  'session.lifecyclePrivacy',
+  'session.lifecycleClose',
   'session.forget',
   'session.loadTranscriptPage',
   'session.loadDetail',

@@ -8,6 +8,7 @@ import test from 'node:test';
 import { BackendServer } from '../../../src/backend';
 import { ProviderGate } from '../../../src/backend/provider-gate';
 import { getReviewSidecarFingerprint, readReviews } from '../../../src/backend/session-review-store';
+import { SessionLifecycleStore } from '../../../src/backend/session-lifecycle-store';
 
 type PollingTestServer = {
   agentDir: string;
@@ -33,6 +34,38 @@ type PollingTestServer = {
   pollSessionCatalog(): Promise<void>;
   dispose(): Promise<void>;
 };
+
+test('pending-create replay resolves the already-registered transcript after process-local ledger loss', async () => {
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'pie-create-replay-'));
+  const sessions = path.join(root, 'sessions');
+  await fs.promises.mkdir(sessions);
+  const sessionPath = path.join(sessions, 'created.jsonl');
+  await fs.promises.writeFile(sessionPath, `${JSON.stringify({ type: 'session', id: 'durable-root' })}\n`);
+  const store = new SessionLifecycleStore(path.join(root, 'lifecycle.sqlite'));
+  const previousAuthorization = process.env.PIE_STORAGE_CUTOFF_AUTHORIZATION;
+  process.env.PIE_STORAGE_CUTOFF_AUTHORIZATION = 'p7b-authorized-v1';
+  try {
+    store.registerTranscript('durable-root', 'created.jsonl', 1);
+    store.registerPendingCreateOperation('durable-root', 'durable-create-origin', 2);
+    const server = new BackendServer({
+      workerEntryPath: '/worker-entry.js', sdkPath: '/unused', cwd: root,
+    }) as any;
+    server.sessionDir = sessions;
+    server.sessionDirResolved = true;
+    server.initializeFilesystemLifecycle = () => ({ store });
+
+    assert.equal(
+      server.resolvePendingCreateReplay('durable-create-origin'),
+      sessionPath,
+    );
+    assert.equal(server.resolvePendingCreateReplay('different-origin'), undefined);
+  } finally {
+    if (previousAuthorization === undefined) delete process.env.PIE_STORAGE_CUTOFF_AUTHORIZATION;
+    else process.env.PIE_STORAGE_CUTOFF_AUTHORIZATION = previousAuthorization;
+    store.close();
+    await fs.promises.rm(root, { recursive: true, force: true });
+  }
+});
 
 function createPollingTestServer(): PollingTestServer {
   const server = new BackendServer({ workerEntryPath: '/worker-entry.js', sdkPath: '/unused', cwd: '/workspace' }) as unknown as PollingTestServer;

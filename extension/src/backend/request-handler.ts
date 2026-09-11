@@ -98,11 +98,16 @@ async function handleMcpSetSessionServerEnabled(
 ): Promise<unknown> {
   const params = validateMcpSetSessionServerEnabled(request.params);
   markRequestValidated(deps);
-  await writeSessionMcpOverrides({
+  const writeOverrides = () => writeSessionMcpOverrides({
     sessionPath: params.sessionPath,
     agentDir: deps.agentDir,
     overrides: params.overrides,
   });
+  if (deps.runSessionFilesystemMutation) {
+    await deps.runSessionFilesystemMutation(params.sessionPath, 'mcp-session-override', writeOverrides);
+  } else {
+    await writeOverrides();
+  }
   let recycled = false;
   if (params.recycle) {
     try {

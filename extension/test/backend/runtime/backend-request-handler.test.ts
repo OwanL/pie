@@ -560,6 +560,77 @@ test('session.create returns a session from the configured backend session direc
   assert.equal(created.sessionPath, path.join(configuredDir, 'new-session.jsonl'));
 });
 
+test('create and duplicate transport their exact pending-create origin to durable registration', async () => {
+  const harness = createHarness();
+  const registered: Array<{ kind: string; pendingCreateOperationId?: string }> = [];
+  harness.deps.createColdSession = (_cwd, pendingCreateOperationId) => {
+    registered.push({ kind: 'create', pendingCreateOperationId });
+    return { sessionPath: '/repo/created-with-origin.jsonl' };
+  };
+  harness.deps.duplicateColdSession = (_source, _requestId, pendingCreateOperationId) => {
+    registered.push({ kind: 'duplicate', pendingCreateOperationId });
+    return { sessionPath: '/repo/duplicated-with-origin.jsonl' };
+  };
+
+  await handleBackendRequest(harness.deps, {
+    id: 'create-with-origin',
+    method: 'session.create',
+    params: { cwd: '/repo', operationId: 'create-origin-a' },
+  });
+  await handleBackendRequest(harness.deps, {
+    id: 'duplicate-with-origin',
+    method: 'session.duplicate',
+    params: { sessionPath: '/repo/source.jsonl', operationId: 'create-origin-b' },
+  });
+
+  assert.deepEqual(registered, [
+    { kind: 'create', pendingCreateOperationId: 'create-origin-a' },
+    { kind: 'duplicate', pendingCreateOperationId: 'create-origin-b' },
+  ]);
+});
+
+test('lifecycle close returns the persisted create origin independently of its cleanup operation', async () => {
+  const harness = createHarness();
+  const calls: unknown[][] = [];
+  harness.deps.closeSessionLifecycle = async (...args) => {
+    calls.push(args);
+    return { rootSessionId: 'persisted-root', pendingCreateOperationId: 'persisted-create-origin' };
+  };
+
+  const response = await handleBackendRequest(harness.deps, {
+    id: 'lifecycle-close-origin',
+    method: 'session.lifecycleClose',
+    params: {
+      sessionPath: '/repo/private.jsonl',
+      operationId: 'cleanup-operation',
+      privacyMode: true,
+    },
+  });
+
+  assert.deepEqual(calls, [[
+    '/repo/private.jsonl',
+    'cleanup-operation',
+    true,
+  ]]);
+  assert.deepEqual(response, {
+    sessionPath: '/repo/private.jsonl',
+    closed: true,
+    rootSessionId: 'persisted-root',
+    pendingCreateOperationId: 'persisted-create-origin',
+  });
+  await assert.rejects(handleBackendRequest(harness.deps, {
+    id: 'lifecycle-close-forged-origin',
+    method: 'session.lifecycleClose',
+    params: {
+      sessionPath: '/repo/private.jsonl',
+      operationId: 'cleanup-operation',
+      privacyMode: true,
+      pendingCreateOperationId: 'cleanup-operation',
+    },
+  }), /pending-create identity is lifecycle-owned/);
+  assert.equal(calls.length, 1, 'a caller cannot populate or replace lifecycle-owned create identity');
+});
+
 test('session.duplicate reads a cold source cwd without promoting the source runtime', async () => {
   const harness = createHarness();
   const sourcePath = '/other-workspace/source.jsonl';

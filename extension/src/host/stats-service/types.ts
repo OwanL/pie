@@ -85,9 +85,22 @@ export interface RunObserver {
   onModelConfigChanged(sessionPath: string, modelId: string | undefined, thinkingLevel: ThinkingLevel | undefined, provider?: string): void;
   onUnsupportedInputAttempt(sessionPath: string): void;
   onSessionClosed(sessionPath: string): void;
-  /** Scrub analytics when a session enters privacy mode. */
+  /** Persist reversible privacy behavior while the session remains open. */
   setSessionPrivacy?(sessionPath: string, enabled: boolean): Promise<void>;
-  replaceSessionPath(oldPath: string, newPath: string, stableSessionId?: string): void;
+  /** Commit the close-only canonical deletion barrier for a private session.
+   * The optional ID is the create/duplicate operation that owned the pending
+   * analytics subject; it is never the close cleanup operation. */
+  closePrivateSessionAnalytics?(
+    sessionPath: string,
+    pendingCreateOperationId?: string,
+    stableRootSessionId?: string,
+  ): Promise<void>;
+  replaceSessionPath(
+    oldPath: string,
+    newPath: string,
+    stableSessionId?: string,
+    pendingCreateOperationId?: string,
+  ): void;
 }
 
 export const NOOP_RUN_OBSERVER: RunObserver = {
@@ -112,6 +125,7 @@ export const NOOP_RUN_OBSERVER: RunObserver = {
   onUnsupportedInputAttempt: () => undefined,
   onSessionClosed: () => undefined,
   setSessionPrivacy: async () => undefined,
+  closePrivateSessionAnalytics: async () => undefined,
   replaceSessionPath: () => undefined,
 };
 

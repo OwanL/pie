@@ -737,8 +737,9 @@ type WebviewToHostMessagePayload =
    *  Never touches the global `.pi/mcp.json` layer — the global Controls
    *  live in Settings → MCP. */
   | { type: 'mcpSetServerEnabledForSession'; sessionPath: string; name: string; enabled: boolean }
-  /** Toggle the active session's ephemeral/privacy mode. The setting is host
-   *  state only and is deliberately not persisted. */
+  /** Toggle the active session's ephemeral/privacy mode. Under the authorized
+   *  filesystem lifecycle this is durably reversible until first close; the
+   *  host snapshot remains the UI source while that gate is inactive. */
   | { type: 'setPrivacyMode'; sessionPath: string; enabled: boolean }
   | { type: 'setPruningSettings'; settings: Partial<PruningSettings> }
   | { type: 'setToolResultPruningSettings'; settings: Partial<ToolResultPruningSettings> }

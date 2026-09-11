@@ -1981,7 +1981,16 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
         throw new Error(`Pending-create subject ${pendingOperationId} is already bound to another session.`);
       }
       if (existing && existing.source_key !== sourceKey) {
-        throw new Error(`Pending-create binding source conflict for ${pendingOperationId}.`);
+        // A private close can install the root-plus-pending fence before an
+        // already-issued bind reaches the recorder. Once that root is deleted,
+        // the late bind is policy replay, not a competing active attribution;
+        // retain the original deletion provenance and accept it idempotently.
+        const rootIsDeleted = Boolean(this.database.prepare(
+          'SELECT 1 AS present FROM analytics_deleted_subjects WHERE root_session_id = ?',
+        ).get(rootSessionId));
+        if (!rootIsDeleted) {
+          throw new Error(`Pending-create binding source conflict for ${pendingOperationId}.`);
+        }
       }
       if (!existing) {
         this.database.prepare(`
