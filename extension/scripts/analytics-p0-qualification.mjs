@@ -9,14 +9,20 @@ import { pathToFileURL } from 'node:url';
 import { deserialize, serialize } from 'node:v8';
 import { execFileSync } from 'node:child_process';
 import { performance } from 'node:perf_hooks';
+import {
+  buildCapacityCalibration,
+  projectCapacityFromCalibration,
+  validateCapacityCalibration,
+  validateCapacitySnapshotInventory,
+} from './analytics-p0-capacity.mjs';
 
 const extensionRoot = path.resolve(import.meta.dirname, '..');
 const repositoryRoot = path.resolve(extensionRoot, '..');
 const outRoot = path.resolve(extensionRoot, 'out');
 const workerScript = path.join(outRoot, 'analytics-recorder-worker.js');
 const queryWorkerScript = path.join(outRoot, 'analytics-query-worker.js');
-const REPORT_SCHEMA_VERSION = 2;
-const HARNESS_VERSION = 'p0-baseline-scale-v1';
+const REPORT_SCHEMA_VERSION = 3;
+const HARNESS_VERSION = 'p0-baseline-scale-v2';
 let AnalyticsRecorderSupervisor;
 let AnalyticsCaptureCapacityError;
 let SqliteAnalyticsRecorder;
@@ -307,6 +313,34 @@ function proofTreeBytes(directory) {
   return total;
 }
 
+function proofTreeInventory(directory, relativeDirectory = '') {
+  const files = [];
+  for (const entry of readdirSync(path.join(directory, relativeDirectory), { withFileTypes: true })) {
+    const relativePath = path.join(relativeDirectory, entry.name);
+    const entryPath = path.join(directory, relativePath);
+    if (entry.isDirectory()) files.push(...proofTreeInventory(directory, relativePath));
+    else if (entry.isFile()) {
+      files.push({ path: relativePath.replaceAll('\\', '/'), bytes: statSync(entryPath).size });
+    }
+  }
+  return files.sort((left, right) => left.path.localeCompare(right.path));
+}
+
+function captureCapacitySnapshot(name, label) {
+  const files = proofTreeInventory(root);
+  const mainName = path.basename(databasePath).replaceAll('\\', '/');
+  const mainFiles = files.filter((entry) => entry.path === mainName || entry.path === `${mainName}-wal` || entry.path === `${mainName}-shm`);
+  const snapshot = {
+    label,
+    treeBytes: files.reduce((sum, entry) => sum + entry.bytes, 0),
+    mainDatabaseBytes: mainFiles.reduce((sum, entry) => sum + entry.bytes, 0),
+    mainFileBytes: mainFiles.find((entry) => entry.path === mainName)?.bytes ?? 0,
+    files,
+  };
+  capacityComponentSnapshots[name] = snapshot;
+  return snapshot;
+}
+
 function nearestExistingDirectory(target) {
   let candidate = path.resolve(target);
   while (!existsSync(candidate)) {
@@ -346,6 +380,7 @@ function artifactProvenance() {
     ['extension/out/analytics-recorder-worker.js', workerScript],
     ['extension/out/analytics-query-worker.js', queryWorkerScript],
     ['extension/scripts/analytics-p0-qualification.mjs', path.join(extensionRoot, 'scripts', 'analytics-p0-qualification.mjs')],
+    ['extension/scripts/analytics-p0-capacity.mjs', path.join(extensionRoot, 'scripts', 'analytics-p0-capacity.mjs')],
     ['extension/scripts/analytics-real-producer-probe.ts', path.join(extensionRoot, 'scripts', 'analytics-real-producer-probe.ts')],
     ['extensions/subagent/src/analytics-capture.ts', path.join(repositoryRoot, 'extensions', 'subagent', 'src', 'analytics-capture.ts')],
     ['extensions/subagent/src/runtime-trace.ts', path.join(repositoryRoot, 'extensions', 'subagent', 'src', 'runtime-trace.ts')],
@@ -414,6 +449,58 @@ function readBaselineEvidence(currentProvenance) {
   const physicalBytes = finalEnvelope?.physicalBytes;
   const memory = baseline.results?.memory;
   const topologyPeakBytes = memory?.totalTopologyRssBytes;
+  const capacityCalibration = baseline.results?.capacityCalibration;
+  const calibrationValidation = validateCapacityCalibration(capacityCalibration, {
+    baselineRows: 10_000,
+    detailRows: 1_000,
+  });
+  const rawCapacitySnapshots = baseline.results?.capacityComponentSnapshots;
+  const resourceSamples = baseline.results?.resourceEnvelope?.samples;
+  const prewriteChecks = baseline.results?.resourceEnvelope?.prewriteChecks;
+  const calibrationReportConsistencyErrors = [];
+  const capacitySnapshotLabels = {
+    beforePrimaryFacts: 'before-primary-facts',
+    afterPrimaryFacts: 'after-primary-facts',
+    afterVariableDetails: 'after-variable-details',
+    finalBeforeCorruption: 'final-before-corruption',
+    afterCorruptionCopy: 'after-corruption-copy',
+  };
+  for (const [name, sampleLabel] of Object.entries(capacitySnapshotLabels)) {
+    const raw = rawCapacitySnapshots?.[name];
+    const calibrated = capacityCalibration?.snapshots?.[name];
+    const inventoryValidation = validateCapacitySnapshotInventory(raw, {
+      mainDatabaseFile: 'analytics.sqlite',
+      expectedLabel: sampleLabel,
+    });
+    if (!inventoryValidation.valid) {
+      calibrationReportConsistencyErrors.push(`capacity snapshot ${name} inventory is invalid: ${inventoryValidation.errors.join('; ')}`);
+    }
+    if (!raw || !calibrated
+      || raw.treeBytes !== calibrated.treeBytes
+      || raw.mainDatabaseBytes !== calibrated.mainDatabaseBytes
+      || raw.mainFileBytes !== calibrated.mainFileBytes) {
+      calibrationReportConsistencyErrors.push(`capacity snapshot ${name} does not match its calibrated values`);
+    }
+    const matchingSample = Array.isArray(resourceSamples)
+      ? resourceSamples.find((sample) => sample.label === sampleLabel)
+      : undefined;
+    if (!matchingSample || matchingSample.physicalBytes !== raw?.treeBytes) {
+      calibrationReportConsistencyErrors.push(`capacity snapshot ${name} does not match its resource sample`);
+    }
+  }
+  const sampledHighWaterBytes = Array.isArray(resourceSamples) && resourceSamples.length > 0
+    ? Math.max(...resourceSamples.map((sample) => sample.physicalBytes))
+    : undefined;
+  if (sampledHighWaterBytes !== capacityCalibration?.observedHighWaterBytes) {
+    calibrationReportConsistencyErrors.push('capacity calibration does not match the sampled proof-tree high-water');
+  }
+  const reportedPrewrites = Array.isArray(prewriteChecks)
+    ? prewriteChecks.map((entry) => entry.projectedTreeBytes)
+    : [];
+  if (reportedPrewrites.length === 0
+    || JSON.stringify(reportedPrewrites) !== JSON.stringify(capacityCalibration?.prewriteProjectedTreeBytes)) {
+    calibrationReportConsistencyErrors.push('capacity calibration does not match every prewrite projection');
+  }
   const exactCounts = baseline.results?.tableRows?.primaryFacts === 10_000
     && baseline.results?.tableRows?.detailPayloads === 1_003
     && baseline.gates?.exactPrimaryRows?.decision === 'passed'
@@ -438,13 +525,18 @@ function readBaselineEvidence(currentProvenance) {
     && finalEnvelope?.label === 'final'
     && Number.isFinite(fixtureBytes) && fixtureBytes > 0
     && Number.isFinite(physicalBytes) && physicalBytes > 0
-    && Number.isFinite(topologyPeakBytes) && topologyPeakBytes > 0;
+    && Number.isFinite(topologyPeakBytes) && topologyPeakBytes > 0
+    && calibrationValidation.valid
+    && calibrationReportConsistencyErrors.length === 0;
   return {
     accepted,
-    reason: accepted ? undefined : 'Baseline must be a completed, cleaned 10,000-row measurement from this exact harness/build/probe fingerprint with exact counts, byte units and peak-memory evidence.',
+    reason: accepted ? undefined : 'Baseline must be a completed, cleaned 10,000-row measurement from this exact harness/build/probe fingerprint with exact counts, byte units, peak-memory evidence and internally consistent component calibration.',
     fixtureBytes,
     physicalBytes,
     topologyPeakBytes,
+    capacityCalibration,
+    calibrationValidation,
+    calibrationReportConsistencyErrors,
     scenarioStatus: baseline.status,
     scenarioDecision: baseline.qualification?.decision,
     failedGates: baseline.qualification?.failedGates ?? [],
@@ -496,9 +588,12 @@ let provenance;
 let baselineEvidence;
 let baselineRowScale;
 let projectedPeakBytes;
+let calibratedCapacityProjection;
 let initialAvailableMemoryBytes;
 let projectedPeakMemoryBytes;
 let effectiveMemoryLimitBytes;
+const capacityComponentSnapshots = {};
+const prewriteCapacityChecks = [];
 const report = {
   schemaVersion: REPORT_SCHEMA_VERSION,
   harnessVersion: HARNESS_VERSION,
@@ -563,9 +658,14 @@ try {
   baselineRowScale = baselineEvidence?.accepted
     ? requestedRows / 10_000
     : undefined;
-  projectedPeakBytes = configuration.scenario === 'scale' && baselineRowScale !== undefined
-    ? Math.ceil(baselineEvidence.physicalBytes * baselineRowScale * 1.25)
-    : Math.ceil(capacityFixture.fixtureBytes * 2);
+  calibratedCapacityProjection = configuration.scenario === 'scale' && baselineRowScale !== undefined
+    ? projectCapacityFromCalibration(baselineEvidence.capacityCalibration, {
+      targetRows: requestedRows,
+      safetyFactor: 1.25,
+    })
+    : undefined;
+  projectedPeakBytes = calibratedCapacityProjection?.projectedPeakBytes
+    ?? Math.ceil(capacityFixture.fixtureBytes * 2);
   initialAvailableMemoryBytes = os.freemem();
   projectedPeakMemoryBytes = configuration.scenario === 'scale' && baselineEvidence?.accepted
     ? Math.ceil(Math.max(baselineEvidence.topologyPeakBytes * 1.25, process.memoryUsage().rss + 512 * 1024 ** 2))
@@ -591,11 +691,12 @@ try {
     sampleDetailBytes: capacityFixture.sampleDetailBytes,
     projectedPeakBytes,
     units: 'bytes',
-    projectionMethod: configuration.scenario === 'scale' && baselineRowScale !== undefined
-      ? 'completed baseline full-tree bytes multiplied by row ratio and 1.25 safety factor'
+    projectionMethod: calibratedCapacityProjection
+      ? 'versioned baseline component calibration: fact and variable-detail database-family increments scaled by row ratio and 1.25, fixed tree once, plus projected main database-family fault copy'
       : 'serialized fixture bytes multiplied by 2',
-    overheadFactor: configuration.scenario === 'scale' && baselineRowScale !== undefined ? 1.25 : 2,
+    overheadFactor: calibratedCapacityProjection ? 1.25 : 2,
     baselineReport: baselineEvidence,
+    calibratedProjection: calibratedCapacityProjection,
     projectedPeakMemoryBytes,
     decision: projectedPeakBytes <= matrix.bounds.effectiveTemporaryLimitBytes
       && projectedPeakMemoryBytes <= effectiveMemoryLimitBytes
@@ -703,6 +804,15 @@ function ensureAdditionalCapacity(label, additionalBytes) {
     freeBytes,
     projectedFreeBytes,
   };
+  prewriteCapacityChecks.push({
+    label,
+    physicalBytes,
+    additionalBytes,
+    projectedTreeBytes,
+    freeBytes,
+    projectedFreeBytes,
+  });
+  report.results.resourceEnvelope.prewriteChecks = prewriteCapacityChecks;
   if (projectedTreeBytes > matrix.bounds.effectiveTemporaryLimitBytes) {
     throw new Error(`${label}: planned write would exceed temporary proof-tree limit ${matrix.bounds.effectiveTemporaryLimitBytes} bytes`);
   }
@@ -737,7 +847,8 @@ if (configuration.validate) {
   };
   recordGate('provenanceComplete', provenance.valid, true, (value) => value === true, { errors: provenance.errors });
   recordGate('projectedCapacity', projectedPeakBytes, `<= ${matrix.bounds.effectiveTemporaryLimitBytes} bytes`, (value) => value <= matrix.bounds.effectiveTemporaryLimitBytes, {
-    fixtureDerived: true,
+    fixtureDerived: !calibratedCapacityProjection,
+    componentCalibrationDerived: Boolean(calibratedCapacityProjection),
     baselineRequiredForScale: configuration.scenario === 'scale',
   });
   recordGate('projectedPeakMemory', projectedPeakMemoryBytes, `<= ${effectiveMemoryLimitBytes} bytes (75% of currently available memory)`, (value) => value <= effectiveMemoryLimitBytes);
@@ -867,6 +978,9 @@ try {
     nestedDetailReconstructed: true,
   };
 
+  checkResourceEnvelope('before-primary-facts');
+  captureCapacitySnapshot('beforePrimaryFacts', 'before-primary-facts');
+
   const factCommitLatencies = [];
   const hosts = Array.from({ length: 4 }, () => supervisor(databasePath, {
     onDeliveryAcknowledged: (measurement) => factCommitLatencies.push(...measurement.latencyMs),
@@ -901,7 +1015,7 @@ try {
   const factsFlushStarted = performance.now();
   await Promise.all(hosts.map((host) => host.flush()));
   const factsFlushMs = performance.now() - factsFlushStarted;
-  checkResourceEnvelope('after-fact-drain');
+  checkResourceEnvelope('after-fact-flush');
   const workerStats = await Promise.all(hosts.map((host) => host.workerStats()));
   clearInterval(lagTimer);
   lagTimer = undefined;
@@ -933,6 +1047,8 @@ try {
     totalTopologyRssBytes: producerRssPeak + workerStats.reduce((sum, entry) => sum + entry.process.rss, 0),
   };
   await shutdownHelpers(hosts);
+  checkResourceEnvelope('after-primary-facts');
+  captureCapacitySnapshot('afterPrimaryFacts', 'after-primary-facts');
 
   const detailCommitLatenciesBySize = { '2KiB': [], '32KiB': [], '2MiB': [] };
   const detailHost = supervisor(databasePath, {
@@ -966,6 +1082,15 @@ try {
     if (i % 1_000 === 999) checkResourceEnvelope(`after-detail-batch-${i + 1}`);
   }
 
+  const detailFlushStarted = performance.now();
+  await detailHost.flush();
+  const detailFlushMs = performance.now() - detailFlushStarted;
+  const detailStats = await detailHost.workerStats();
+  const peakDetailBacklog = detailHost.backlog;
+  await shutdownHelper(detailHost);
+  checkResourceEnvelope('after-variable-details');
+  captureCapacitySnapshot('afterVariableDetails', 'after-variable-details');
+
   const sharedBody = 'shared-child-body '.repeat(65_536);
   const childValue = { childId: scopedId('shared-child'), messages: [{ role: 'assistant', content: sharedBody }] };
   const parentValue = {
@@ -975,15 +1100,13 @@ try {
   const sharedChildCapture = detailCapture('shared-child-payload', 'nested-root', 0, childValue);
   const sharedParentCapture = detailCapture('shared-parent-payload', 'nested-root', 0, parentValue);
   ensureAdditionalCapacity('before-shared-nested-detail', (sharedChildCapture.bytes.byteLength + sharedParentCapture.bytes.byteLength) * 2);
-  detailHost.submitDetail(sharedChildCapture);
-  detailHost.submitDetail(sharedParentCapture);
-  const detailFlushStarted = performance.now();
-  await detailHost.flush();
-  const detailFlushMs = performance.now() - detailFlushStarted;
-  const detailStats = await detailHost.workerStats();
+  const nestedDetailHost = supervisor(databasePath);
+  await nestedDetailHost.start();
+  nestedDetailHost.submitDetail(sharedChildCapture);
+  nestedDetailHost.submitDetail(sharedParentCapture);
+  await nestedDetailHost.flush();
+  await shutdownHelper(nestedDetailHost);
   checkResourceEnvelope('after-detail-drain');
-  const peakDetailBacklog = detailHost.backlog;
-  await shutdownHelper(detailHost);
   report.results.detailHandoff = Object.fromEntries(
     Object.entries(handoffDurationsBySize).map(([label, values]) => [label, summarize(values)]),
   );
@@ -1279,8 +1402,32 @@ try {
   }
 
   const corruptionPath = path.join(root, 'corrupt.sqlite');
+  checkResourceEnvelope('final-before-corruption');
+  captureCapacitySnapshot('finalBeforeCorruption', 'final-before-corruption');
   ensureAdditionalCapacity('before-corruption-copy', statSync(databasePath).size);
   copyFileSync(databasePath, corruptionPath);
+  checkResourceEnvelope('after-corruption-copy');
+  captureCapacitySnapshot('afterCorruptionCopy', 'after-corruption-copy');
+  report.results.capacityComponentSnapshots = capacityComponentSnapshots;
+  report.results.capacityCalibration = buildCapacityCalibration({
+    baselineRows: matrix.facts.rows,
+    detailRows: matrix.detail.total,
+    snapshots: capacityComponentSnapshots,
+    observedTreeBytes: report.results.resourceEnvelope.samples
+      .filter((sample) => sample.label !== 'after-corruption-copy')
+      .map((sample) => sample.physicalBytes),
+    prewriteProjectedTreeBytes: prewriteCapacityChecks.map((sample) => sample.projectedTreeBytes),
+  });
+  report.results.capacityProjection.calibration = report.results.capacityCalibration;
+  report.results.capacityProjection.measuredObservedHighWaterBytes = report.results.capacityCalibration.observedHighWaterBytes;
+  report.results.capacityProjection.measuredPrewriteHighWaterBytes = report.results.capacityCalibration.prewriteHighWaterBytes;
+  if (configuration.scenario === 'baseline') {
+    report.results.capacityProjection.projectedPeakBytes = Math.max(
+      report.results.capacityProjection.projectedPeakBytes,
+      report.results.capacityCalibration.conservativeHighWaterBytes,
+    );
+    report.results.capacityProjection.projectionMethod = 'serialized fixture preflight reconciled with observed and prewrite proof-tree high-water measurements';
+  }
   truncateSync(corruptionPath, 100);
   let corruptionError;
   try {
@@ -1322,6 +1469,9 @@ try {
   if (!recordGate('largeDetailQuery', report.results.queries?.twoMiBDetailMs, '<= 9000 ms', (value) => value <= 9000)) failedGates.push('largeDetailQuery');
   const envelope = report.results.resourceEnvelope?.samples?.at(-1);
   if (!recordGate('temporaryFootprint', envelope?.physicalBytes, `<= ${matrix.bounds.effectiveTemporaryLimitBytes} bytes`, (value) => value <= matrix.bounds.effectiveTemporaryLimitBytes)) failedGates.push('temporaryFootprint');
+  if (!recordGate('capacityCalibration', report.results.capacityCalibration?.eligible, true, (value) => value === true, {
+    errors: report.results.capacityCalibration?.errors ?? ['capacity calibration missing'],
+  })) failedGates.push('capacityCalibration');
   if (!recordGate('reservedFreeDisk', envelope?.freeBytes, `>= ${matrix.bounds.minUnusedDiskBytes} bytes`, (value) => value >= matrix.bounds.minUnusedDiskBytes)) failedGates.push('reservedFreeDisk');
   if (!recordGate('recorderWorkerRss', report.results.memory?.maxWorkerRssBytes, '<= 268435456 bytes per recorder/helper during ordinary ingestion', (value) => value <= 256 * 1024 ** 2)) failedGates.push('recorderWorkerRss');
   if (configuration.scenario === 'scale') {

@@ -1671,3 +1671,82 @@ the 10M/endurance/light/mixed-load/v2/partial-write, matched UI-agent, increment
 query-peak-memory evidence remains absent. No live runtime or renderer was published; no package or
 cache switch, activation, cutover, VS Code/backend restart, session close, helper arming or live data
 mutation occurred. The four user-owned model/settings files and `stash@{0}` remain preserved.
+
+### Checkpoint 20: provider-request evidence and component-calibrated P0 capacity
+
+The next bounded P4 unit observes the pinned SDK's `before_provider_request` hook once for every
+agent-loop provider request inside an attempt-scoped `AsyncLocalStorage` context. It emits stable
+execution/provider begin identities synchronously without awaiting persistence or modifying the
+provider payload. Terminal settlement pairs against those producer-issued request IDs and resumes
+after the sealed predispatch sequence on replay. A provider request without a response, abort, or
+request/response mismatch remains explicitly incomplete/unknown and creates no settlement; only an
+explicitly disabled sink permits the existing compatibility fallback. Synchronous and asynchronous
+sink rejection is redacted and sealed as rejected. Adapter-internal retries remain unknown. The unit
+does not activate a sink or change runtime authority; live sink/acknowledgement transport and the
+canonical parent-tool resolver remain P7 work. Shared/subagent typechecks passed, the focused suite
+passed 36/36, and independent review accepted the source. It was committed as `153b122d`
+(`Capture subagent provider dispatch evidence`).
+
+The P0 harness now records versioned component calibration instead of multiplying the entire proof
+tree by the row ratio. Stable snapshots occur after helper flush and terminal shutdown around the
+primary facts and the `rows / 10` variable-detail plan. Every snapshot stores a normalized,
+case-insensitively unique relative-file inventory whose safe byte values must sum exactly to the tree,
+the `analytics.sqlite`/WAL/SHM family, and the main database file. Stable inventory read failures are
+fatal. Later snapshots record the maximum coexisting fixed artifacts, the main database immediately
+before the corruption probe, and the actual full copy before truncation. Baseline admission ties raw
+inventories to their named resource samples, calibrated values, and every prewrite projection.
+Negative, missing, reversed, mislabeled or tampered evidence fails closed. The 1M projection scales
+fact and variable-detail increments separately by the exact 100x row ratio and 1.25 safety factor,
+counts the maximum fixed component once, and adds a conservatively scaled full main-database-family
+copy for the existing fault step. The pure calibration suite passed 8/8 and independent review
+accepted the arithmetic and evidence boundary.
+
+The combined frozen barrier passed: `git diff --check`, lint, and all 17 typecheck projects returned
+zero. Affected `npm test` selected 466 files across scripts, subagent and extension; 5,135 tests
+passed, zero failed or were cancelled, 20 skipped, and no runner retry occurred. Validation-only build
+selected `--no-sync` and retained coordinated host/webview identity `9ee578421974e14b2e2e`.
+Pre/post snapshots 128/134 matched for `HEAD`, `origin/master`, status, `stash@{0}` and all seven
+protected hashes.
+
+Validation-only report
+`C:\dev\scratch\pie-p0-calibration-validation-20260912-r01\baseline-validation.json` passed with
+schema 3, harness `p0-baseline-scale-v2`, build `9ee578421974e14b2e2e`, fingerprint
+`7fce7bfe087ad3356f1f63aa289282ca9c0396123d454398f40eea2ee4737a37`, no helper/database/proof
+root and overall P0 unqualified. A second validation correctly rejected the older r04 baseline because
+it lacks the current fingerprint and component calibration. Reviewed attestation
+`C:\dev\scratch\pie-p0-calibration-attestation-20260912-r01\attestation.json` bound the candidate,
+validation and snapshot before workload execution.
+
+The fresh calibrated baseline at
+`C:\dev\scratch\pie-p0-calibration-baseline-20260912-r01\baseline.json` completed on its single
+declared handle. It recorded exactly 10,000 primary facts and 1,003 details, passed all bounded
+scenario gates, stopped every helper without forced termination or cleanup failure, and removed its
+proof root. The raw evidence measured `72,433,664` bytes of fact growth, `9,555,968` bytes of
+variable-detail growth, `121,068,152` bytes of maximum coexisting fixed artifacts, an `85,639,168`-
+byte main database family, and a `288,071,680`-byte observed/prewrite high-water. Other bounded gates
+included handoff p99 `0.0660 ms`, standalone responsiveness proxy p95 `13.8622 ms`, indexed query
+`0.1498 ms`, 2 MiB detail query `2.6433 ms`, maximum worker RSS `91,348,992` bytes, and final observed
+tree size `202,432,612` bytes. This is a passing standalone 10k scenario, not matched UI/agent or
+overall P0 qualification.
+
+The accepted calibration projects 1M steady storage as `10,369,772,152` bytes: facts
+`9,054,208,000`, variable details `1,194,496,000`, and fixed artifacts `121,068,152`. The existing
+full-database fault copy adds `10,704,896,000`, producing a `21,074,668,152`-byte peak above the
+unchanged `17,179,869,184`-byte cap. Validation report
+`C:\dev\scratch\pie-p0-calibration-scale-validation-20260912-r01\scale-validation.json` therefore
+blocked before creating a helper, database or proof root; the matching baseline/provenance and memory
+gate passed, cleanup completed, and no 1M workload ran. Snapshots 139/141 remained identical to the
+accepted source/status/protected state. Any alternate fault workflow requires a new harness/report
+version, independent review and a fresh baseline; this report does not reinterpret r04 or the blocked
+calibration.
+
+Overall P0 remains unqualified, including the 1M tier and the previously listed endurance/light,
+mixed-load, upgrade/partial-write, matched UI-agent and memory evidence. P4 still needs bounded
+cross-host revision refresh. P7 still owns production sink/ack/parent resolution, writer fencing,
+activation/cutover and durable handoff receipts; final P6 legacy authority retirement waits for those
+replacement gates. On 2026-09-12 the user explicitly authorized completing the qualified cutover,
+including necessary publication, activation, restarts, Pie session/data disposal, and then headless
+Playwright validation of the Pie web UI and stability. That authorization supersedes the earlier
+operational hold only when the reviewed cutover gates are satisfied; none of those live actions has
+occurred at this checkpoint. The four unrelated user-owned model/settings files, `stash@{0}`, and all
+qualification evidence remain preserved.
