@@ -239,10 +239,11 @@ export function validateMemoryTopologySamples(samples, { expectedPlan, recorderW
         && worker.heapUsedBytes > worker.heapTotalBytes) {
         errors.push(`memory topology sample[${index}] worker[${workerIndex}] heapUsed exceeds heapTotal`);
       }
-      if (Number.isSafeInteger(worker.rssBytes) && Number.isSafeInteger(worker.heapTotalBytes)
-        && worker.heapTotalBytes > worker.rssBytes) {
-        errors.push(`memory topology sample[${index}] worker[${workerIndex}] heapTotal exceeds RSS`);
-      }
+      // No heapTotal <= RSS check. V8 reserves heap address space that need not be
+      // resident, so heapTotal legitimately exceeds RSS around collection
+      // boundaries: observed at 1M with heapTotal flat at ~137 MiB while RSS
+      // moved between 115 and 136 MiB. Requiring RSS to cover the reservation
+      // rejected valid samples.
       workerTotal += worker.rssBytes;
       workerMaximum = Math.max(workerMaximum, worker.rssBytes);
       if (!Number.isSafeInteger(workerTotal)) errors.push(`memory topology sample[${index}] worker RSS total exceeds safe integer range`);
