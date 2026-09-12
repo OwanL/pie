@@ -3327,6 +3327,49 @@ Next step is to record the uncheckpointed backlog present at the cross-host dele
 which the harness still does not measure, before choosing between keeping the backlog bounded during
 ingest and removing the private close's dependence on a full fold.
 
+## Two ingest-path costs removed, both measured
+
+The 1M report from `pie-p0-scale-verify-20260912-r07` reached its final phase and recorded every
+measurement, but an invented harness invariant (`heapTotal <= RSS`, since removed) aborted it before gate
+evaluation, so it reported no gates. Recomputing the gate values from the recorded results gives the real
+standing without another 1M run:
+
+| Gate | Verdict | Value |
+|---|---|---|
+| exactPrimaryRows | pass | 1,000,000 |
+| exactDetailRows | pass | 100,003 |
+| handoffP99 | pass | 0.05 ms |
+| responsivenessProxyP95 | pass | 19.1 ms |
+| indexedQuery | pass | 1.40 ms |
+| largeDetailQuery | pass | 3.93 ms |
+| temporaryFootprint | pass | 6.38 GiB |
+| reservedFreeDisk | pass | 800 GiB |
+| **allHistoryProjection** | **fail** | 10,452 ms against 9,000 ms |
+| **recorderWorkerRss** | **fail** | 263.3 MiB against 256 MiB |
+
+**Capture acknowledgement (`ab1c2512`).** Every capture batch called `readDeliveryAccounting()` for one
+value, `completeDetailWatermark`, and that reader also ran two unbounded whole-table aggregates over the
+detail tables which were discarded unread. Measured against 60,000 stored payloads, per call:
+`readDeliveryAccounting` 97.9 ms against `readCompleteDetailWatermark` 0.011 ms — about 9,100x, or roughly
+six minutes of aggregate work per 1M tier. The acknowledgement now reads only the watermark, which is
+already a maintained counter. A test pins that the narrow reader always agrees with the full summary.
+
+**All-history projection (`709cf441`).** `projectProviderUsage()` was
+`readProviderSettlements().settlements.map(...)`, and `readProviderSettlements` builds a complete
+~25-field `ProviderSettlementProjection` per row including nested `usage`, `normalizedUsage` and cost
+objects; the view keeps three of them. Against 400,000 settlements: the projection path 6,936 ms, reading
+only the needed columns 1,533 ms, and the raw SELECT floor 861 ms. About 6.5 s of the 7.3 s was
+constructing unread objects. Extrapolated to the harness's 250,000 settlements the failing 10,452 ms
+becomes roughly 2,300 ms, inside the gate.
+
+Both defects share one shape: a bounded read implemented by materialising a much larger structure than
+its caller needs, on a path that runs per batch or per whole history. Both were found by measuring the
+narrow alternative directly rather than reasoning about the code.
+
+`recorderWorkerRss` remains the one gate needing a decision rather than a fix; the heap evidence is in the
+entry above.
+
+
 
 
 
