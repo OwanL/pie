@@ -157,3 +157,23 @@ test('analyticsWorkspaceId is deterministic and fixed length', () => {
   assert.equal(first.length, 32);
   assert.notEqual(first, analyticsWorkspaceId('seed-b'));
 });
+
+test('the sink and reads accessors stay undefined until a helper is actually started', async () => {
+  const { root, runtime } = tempRuntime();
+  try {
+    // Before start, and under legacy authority afterwards, there is no helper to
+    // hand to capture. The host relies on this: it passes a forwarding sink that
+    // resolves the recorder lazily, and an early producer must fail loudly rather
+    // than have its record dropped into a helper that was never started.
+    assert.equal(runtime.sink, undefined, 'no sink before start');
+    assert.equal(runtime.reads, undefined, 'no reads before start');
+
+    await runtime.start();
+    assert.equal(runtime.getReadiness()?.authority, 'legacy');
+    assert.equal(runtime.sink, undefined, 'legacy authority must not expose a sink');
+    assert.equal(runtime.reads, undefined, 'legacy authority must not expose reads');
+  } finally {
+    await runtime.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
