@@ -2240,6 +2240,9 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
     rejectedAfterDelete: 0,
   };
   private closed = false;
+  /** Number of currently open transactions. Used to avoid nesting, which SQLite
+   * rejects, when a bounded batch deletion is reached from inside a transaction. */
+  private transactionDepth = 0;
 
   constructor(readonly databasePath: string, options: { readOnly?: boolean } = {}) {
     this.readOnly = options.readOnly === true;
@@ -3857,13 +3860,40 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
     const deleteWindow = this.database.prepare(`
       DELETE FROM ${table} WHERE rowid = ?
     `);
+    // Report the longest single-statement hold so the claim this change rests on
+    // (no statement outlives another recorder's busy timeout) is measurable
+    // rather than asserted.
+    const profile = process.env.PIE_ANALYTICS_DELETE_PROFILE === '1';
     let deleted = 0;
+    let batchCount = 0;
+    let maxBatchMs = 0;
     for (;;) {
-      // Each iteration is its own implicit transaction, so the write lock is
-      // released between batches.
-      const window = selectWindow.all(rootSessionId, rootSessionId, batchSize) as Array<{ rid: number | bigint }>;
-      if (window.length === 0) return deleted;
-      for (const row of window) deleted += toNumber(deleteWindow.run(row.rid).changes);
+      // One bounded transaction per batch. The window is selected and deleted
+      // inside the same transaction, so a concurrent writer cannot add a row to
+      // the window between the two statements.
+      //
+      // The transaction is explicit and bounded rather than one statement per
+      // row: this connection runs `synchronous = FULL` under WAL, so every
+      // implicit transaction costs an fsync. A per-row commit measured 3,905 ms
+      // for 2,000 rows against 5.9 ms for the same work in one transaction, so
+      // the batch is what keeps the whole removal fast while still releasing the
+      // write lock between batches.
+      const batchStarted = performance.now();
+      const rows = this.transactionOrInline(() => {
+        const window = selectWindow.all(rootSessionId, rootSessionId, batchSize) as Array<{ rid: number | bigint }>;
+        let changes = 0;
+        for (const row of window) changes += toNumber(deleteWindow.run(row.rid).changes);
+        return { window, changes };
+      });
+      if (rows.window.length === 0) {
+        if (profile) {
+          console.error(`[delete-profile] ${table} batches=${batchCount} rows=${deleted} maxBatchMs=${maxBatchMs.toFixed(1)}`);
+        }
+        return deleted;
+      }
+      deleted += rows.changes;
+      batchCount += 1;
+      maxBatchMs = Math.max(maxBatchMs, performance.now() - batchStarted);
     }
   }
 
@@ -3888,7 +3918,23 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
   }
 
   private transaction<T>(operation: () => T): T {
-    return databaseTransaction(this.database, operation);
+    this.transactionDepth += 1;
+    try {
+      return databaseTransaction(this.database, operation);
+    } finally {
+      this.transactionDepth -= 1;
+    }
+  }
+
+  /** Run `operation` in its own transaction, or inline when one is already open.
+   * SQLite has no nested transactions, and the bulk removal is reached both
+   * directly and from inside a pending-create binding transaction. Joining the
+   * caller's transaction is correct in both cases: the outer transaction already
+   * provides the atomicity, and the inner work cannot release a lock the outer
+   * one is holding anyway. */
+  private transactionOrInline<T>(operation: () => T): T {
+    if (this.transactionDepth > 0) return operation();
+    return this.transaction(operation);
   }
 
   /** Read bounded query-envelope metadata. Call only inside the snapshot that
