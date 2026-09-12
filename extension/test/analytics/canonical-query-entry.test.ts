@@ -98,7 +98,7 @@ function tempRoot(): string {
 }
 
 function assertSnapshotMetadata(result: AnalyticsQuerySnapshotMetadata): void {
-  assert.equal(result.databaseSchemaVersion, 9);
+  assert.equal(result.databaseSchemaVersion, 10);
   assert.equal(typeof result.projectionRevision === 'number' || typeof result.projectionRevision === 'string', true);
   assert.equal(typeof result.snapshotWatermark === 'number' || typeof result.snapshotWatermark === 'string', true);
   assert.equal(result.generationIds.length > 0, true);
@@ -218,7 +218,7 @@ test('canonical read model serves schema, bounded queries, settlements, accounti
   const query = await readModel.executeQuery({
     sql: 'SELECT invocation_id, provider, effective_cost_usd FROM analytics_provider_usage_v1 ORDER BY invocation_id',
   });
-  assert.equal(query.databaseSchemaVersion, 9);
+  assert.equal(query.databaseSchemaVersion, 10);
   assertSnapshotMetadata(query);
   assert.equal(query.returnedRows, 4);
   assert.deepEqual(query.truncation, { rowLimit: false, byteLimit: false, cellLimit: false });
@@ -250,6 +250,14 @@ test('canonical read model serves schema, bounded queries, settlements, accounti
   const sessionAccounting = await readModel.readProviderAccountingSummary('root-a');
   assert.equal(sessionAccounting.invocationCount, 2);
 
+  // Root execution counts are a separate maintained projection and remain
+  // known zero when this fixture contains provider settlements only.
+  const executionSummary = await readModel.readExecutionSummary();
+  assert.equal(executionSummary.executionCount, 0);
+  assert.equal(executionSummary.settledCount, 0);
+  assert.equal(executionSummary.lifecycleCoverage, 'known');
+  assert.equal(executionSummary.deliveryCoverage, 'complete');
+
   // Accounting and bounded provider/model/date groups share one recorder
   // snapshot and revision. The week end also proves the date bounds are not
   // silently widened to the current time.
@@ -262,6 +270,9 @@ test('canonical read model serves schema, bounded queries, settlements, accounti
   });
   assert.equal(aggregatePreparationCalls, 1, 'aggregate reads invoke the writer-owned preparation seam before forking the reader');
   assert.equal(String(aggregate.accounting.revision), String(aggregate.revision));
+  assert.equal(aggregate.executionSummary.executionCount, 0);
+  assert.equal(aggregate.executionSummary.lifecycleCoverage, 'known');
+  assert.equal(aggregate.executionSummary.deliveryCoverage, 'complete');
   assert.ok(BigInt(aggregate.snapshotWatermark) >= 4n);
   assert.deepEqual(aggregate.truncation, { rowLimit: false, byteLimit: false, cellLimit: false });
   assert.equal(aggregate.groups.length, 2);
@@ -288,7 +299,17 @@ test('canonical read model serves schema, bounded queries, settlements, accounti
 
   // Historical dimensions are durable membership, not synthesized aggregates.
   const dimensions = await readModel.readHistoricalDimensions();
+  assertSnapshotMetadata(dimensions);
+  assert.deepEqual(dimensions.scope, { kind: 'global' });
+  assert.equal(String(dimensions.revision), String(dimensions.projectionRevision));
   assert.ok((dimensions.providers as Array<{ provider?: string }>).some((row) => row.provider === 'anthropic'));
+  assert.equal(dimensions.maxRowsPerDimension, 200);
+  assert.equal(typeof dimensions.truncation.rowLimit, 'boolean');
+  const dimensionLimitedReader = new CanonicalAnalyticsReadModel({ databasePath, workerScript, execArgv, maxRows: 1 });
+  const limitedDimensions = await dimensionLimitedReader.readHistoricalDimensions();
+  assert.equal(limitedDimensions.maxRowsPerDimension, 1, 'dimension helper honors configured row limits');
+  assert.equal(limitedDimensions.providers.length, 1);
+  assert.equal(limitedDimensions.truncation.rowLimit, true);
 
   // Storage and delivery accounting expose pending-detail coverage.
   const storage = await readModel.readStorageSummary();

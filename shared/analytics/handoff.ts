@@ -1,4 +1,4 @@
-import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 
 export const ANALYTICS_HANDOFF_SCHEMA = 1 as const;
 export const ANALYTICS_HANDOFF_MAX_FRAME_BYTES = 64 * 1024;
@@ -24,7 +24,20 @@ export interface AnalyticsHandoffHostIdentity {
 export interface AnalyticsHandoffInventoryProof {
   kind: 'registered-hosts-only';
   complete: false;
-  reason: 'runtime-generation-and-process-reconciliation-unwired';
+  reason: 'runtime-generation-and-process-reconciliation-unwired'
+    | 'runtime-generation-and-process-reconciliation-incomplete';
+  /** Bounded read-only census evidence; these never authorize a cutoff. */
+  observedAtMs?: number;
+  registeredHostCount?: number;
+  reconciledHostCount?: number;
+  reasonCodes?: readonly string[];
+}
+
+/** A fresh capability for one host boot. It is intentionally never persisted
+ * or included in status responses; callers must distribute it through an
+ * authenticated launch/control channel owned outside this protocol. */
+export function createPerBootAnalyticsHandoffKey(): string {
+  return randomBytes(32).toString('base64url');
 }
 
 export interface AnalyticsHandoffStatus {

@@ -50,7 +50,7 @@ interface SessionOperationEffectControllerDeps {
     suppressNextCompletionNotificationFor(sessionPath: string): void;
   };
   statsService: {
-    prepareForSend(sessionPath: string, inputs: ComposerInput[], initialUserMessage?: string): void;
+    prepareForSend(sessionPath: string, inputs: ComposerInput[], initialUserMessage?: string, operationId?: string | null): void;
     onTruncatedAfter(sessionPath: string, messageId: string): void;
     onMessageEdited(sessionPath: string, messageId: string): void;
   };
@@ -126,7 +126,7 @@ export class SessionOperationEffectController {
       try {
         service.bumpSessionDataEpoch(effect.sessionPath);
         if (operationAttempt === 1) {
-          statsService.prepareForSend(effect.sessionPath, effect.inputs, effect.text);
+          statsService.prepareForSend(effect.sessionPath, effect.inputs, effect.text, effect.operationId);
         }
         const coldPromotion = service.isSessionRuntimeReady?.(effect.sessionPath) === false;
         const settleAcknowledgement = (settlement: CorrelatedBackendResponse<{
@@ -510,7 +510,12 @@ export class SessionOperationEffectController {
       if (operationAttempt === 1) {
         statsService.onTruncatedAfter(effect.sessionPath, effect.messageId);
         statsService.onMessageEdited(effect.sessionPath, effect.messageId);
-        statsService.prepareForSend(effect.sessionPath, effect.inputs, effect.composedText ?? effect.text);
+        statsService.prepareForSend(
+          effect.sessionPath,
+          effect.inputs,
+          effect.composedText ?? effect.text,
+          effect.operationId,
+        );
       }
     }
 

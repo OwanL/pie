@@ -41,6 +41,7 @@ export type AnalyticsEntityKind =
   | 'capabilityContextSet'
   | 'capabilityObservation'
   | 'featureObservation'
+  | 'contextObservation'
   | 'detailPayload'
   | 'branch'
   | 'copy'
@@ -178,6 +179,9 @@ export interface AnalyticsExecutionFields {
   lastSubmittedSequence?: Int64Value | null;
   terminalDetailPayloadId?: string | null;
   terminalDetailComplete?: boolean;
+  /** Optional measured latency facet for this execution. Missing components
+   * remain absent/null; the producer must never infer them from receipt time. */
+  latency?: AnalyticsLatencyFields;
   terminalWatermark?: {
     requestId: string;
     turnId: string;
@@ -218,7 +222,7 @@ export interface AnalyticsToolCallFields {
 export interface AnalyticsActivitySpanFields {
   spanId: string;
   kind: string;
-  startedAtMs: Int64Value;
+  startedAtMs: Int64Value | null;
   endedAtMs?: Int64Value | null;
   durationMs?: number | null;
   clockDomain: string;
@@ -296,21 +300,31 @@ export interface AnalyticsAttributionLinkFields {
 }
 
 export interface AnalyticsLatencyFields {
+  /** Last tool end (or first prompt send) to first output, not always request start. */
+  turnBoundaryToFirstOutputMs?: number | null;
+  /** SDK turn_start to first output; can include provider admission queueing. */
+  turnStartToFirstOutputMs?: number | null;
+  turnPreparationMs?: number | null;
+  providerQueueMs?: number | null;
   requestToFirstOutputMs?: number | null;
   providerHeaderWaitMs?: number | null;
   providerFirstOutputWaitMs?: number | null;
   fullOperationMs?: number | null;
+  /** `message_start` → `message_end`; excludes tool execution. */
+  generationDurationMs?: number | null;
   coverage: AnalyticsCoverage;
 }
 
 export interface AnalyticsContextObservationFields {
   source: 'provider' | 'initialEstimate' | 'recovered' | string;
   modelId?: string | null;
+  provider?: string | null;
   contextLimitTokens?: Int64Value | null;
   inputTokens?: Int64Value | null;
   outputTokens?: Int64Value | null;
   observedAtMs: Int64Value;
-  estimate: boolean;
+  /** null means the source supplied no provider/estimate provenance. */
+  estimate: boolean | null;
 }
 
 export interface AnalyticsConfigurationVersionFields {
@@ -633,6 +647,8 @@ const NON_NEGATIVE_FLOAT_FIELD_NAMES = new Set([
   'reportedCostUsd', 'calculatedCostUsd', 'durationMs', 'clockResolutionMs',
   'measuredSizeEffect', 'estimatedSizeEffect', 'requestToFirstOutputMs',
   'providerHeaderWaitMs', 'providerFirstOutputWaitMs', 'fullOperationMs',
+  'generationDurationMs',
+  'turnBoundaryToFirstOutputMs', 'turnStartToFirstOutputMs', 'turnPreparationMs', 'providerQueueMs',
   'inputUsdPerMillionTokens', 'outputUsdPerMillionTokens',
   'cacheReadUsdPerMillionTokens', 'cacheWriteUsdPerMillionTokens',
 ]);

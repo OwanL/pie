@@ -72,6 +72,11 @@ import { AnalyticsRuntime } from './analytics-runtime.js';
 import { HostAnalyticsTransport } from './analytics-transport.js';
 import type { AnalyticsDetailCapture, AnalyticsObservation } from '../../../shared/analytics/contracts.js';
 import { AnalyticsHandoffControl } from './analytics-handoff-control.js';
+import {
+  discoverAnalyticsHostWriters,
+  type RuntimeGenerationIdentity,
+} from './analytics-handoff-discovery.js';
+import { createPerBootAnalyticsHandoffKey } from '../../../shared/analytics/handoff.js';
 import { SessionLifecycleStore } from '../backend/session-lifecycle-store.js';
 
 
@@ -108,6 +113,19 @@ function getWorkspaceAnalyticsId(context: vscode.ExtensionContext): string {
     workspaceFile,
     noWorkspaceId,
   });
+}
+
+function getPieRuntimeIdentity(context: vscode.ExtensionContext): RuntimeGenerationIdentity | undefined {
+  const packageJson = context.extension?.packageJSON as Record<string, unknown> | undefined;
+  if (!packageJson) return undefined;
+  const publisher = packageJson.publisher;
+  const name = packageJson.name;
+  const version = packageJson.version;
+  if (typeof publisher !== 'string' || typeof name !== 'string' || typeof version !== 'string'
+    || publisher.length === 0 || name.length === 0 || version.length === 0) {
+    return undefined;
+  }
+  return { publisher, name, version };
 }
 
 function getLegacyWorkspaceAnalyticsIds(): string[] {
@@ -186,6 +204,18 @@ export class PieExtension implements vscode.Disposable {
     const activation = new ActivationStore({ stateDir: dataPaths.stateDir }).read();
     const analyticsWorkspaceId = getWorkspaceAnalyticsId(context);
     const analyticsProcessGeneration = crypto.randomUUID();
+    const runtimeIdentity = getPieRuntimeIdentity(context);
+    // The environment override is an explicit launch-channel capability. A
+    // normal host boot creates a fresh in-memory key so an old boot's signed
+    // requests cannot be replayed; the key is never persisted or returned by
+    // the status endpoint. Until a trusted controller receives that key from
+    // the launch channel, this endpoint is host-local evidence only and does
+    // not constitute an all-host handoff capability.
+    const analyticsHandoffKey = process.env.PIE_ANALYTICS_HANDOFF_KEY?.trim()
+      || createPerBootAnalyticsHandoffKey();
+    const activeAnalyticsGenerationId = activation.authority === 'canonical'
+      ? activation.manifest?.activeGeneration?.identity.generationId
+      : undefined;
     this.analyticsHandoffControl = new AnalyticsHandoffControl({
       registry: this.analyticsHandoffRegistry,
       identity: {
@@ -196,7 +226,38 @@ export class PieExtension implements vscode.Disposable {
         processId: process.pid,
         capabilities: ['host-discovery', 'host-status'],
       },
-      key: process.env.PIE_ANALYTICS_HANDOFF_KEY,
+      key: analyticsHandoffKey,
+      readInventory: async () => {
+        if (!runtimeIdentity) {
+          return {
+            kind: 'registered-hosts-only',
+            complete: false,
+            reason: 'runtime-generation-and-process-reconciliation-incomplete',
+            observedAtMs: Date.now(),
+            registeredHostCount: 0,
+            reconciledHostCount: 0,
+            reasonCodes: ['runtime-identity-unavailable'],
+          };
+        }
+        const discovery = await discoverAnalyticsHostWriters({
+          workspaceId: analyticsWorkspaceId,
+          registry: this.analyticsHandoffRegistry,
+          runtimeRootPath: path.join(context.extensionPath, 'pie-runtime'),
+          runtimeIdentity,
+          ...(activeAnalyticsGenerationId ? { analyticsGenerationId: activeAnalyticsGenerationId } : {}),
+        });
+        return {
+          kind: 'registered-hosts-only',
+          complete: false,
+          reason: discovery.complete
+            ? 'runtime-generation-and-process-reconciliation-unwired'
+            : 'runtime-generation-and-process-reconciliation-incomplete',
+          observedAtMs: discovery.observedAtMs,
+          registeredHostCount: discovery.hosts.length,
+          reconciledHostCount: discovery.hosts.filter(({ status }) => status === 'reconciled').length,
+          reasonCodes: [...new Set(discovery.reasons.map(({ code }) => code))].slice(0, 32),
+        };
+      },
       onError: (error, stage) => appendPieLog('warn', 'analytics-handoff', stage, { error: error.message }),
     });
     const canonicalActive = activation.authority === 'canonical'
@@ -245,6 +306,11 @@ export class PieExtension implements vscode.Disposable {
     // recorder and throws before that, so a record can never be silently dropped
     // if a producer runs before the helpers are ready.
     const runtimeSinks = {
+      preflightDetail: (value: unknown) => {
+        const sink = analyticsRuntime.sink;
+        if (!sink) throw new Error('Canonical detail sink is not ready; activation has not completed.');
+        sink.preflightDetail(value);
+      },
       submit: (observation: AnalyticsObservation<object>) => {
         const sink = analyticsRuntime.sink;
         if (!sink) throw new Error('Canonical capture sink is not ready; activation has not completed.');

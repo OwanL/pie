@@ -207,7 +207,7 @@ export interface SessionServiceLike {
 }
 
 export interface StatsServiceLike {
-  prepareForSend(sessionPath: string, inputs: ComposerInput[], initialUserMessage?: string): void;
+  prepareForSend(sessionPath: string, inputs: ComposerInput[], initialUserMessage?: string, operationId?: string | null): void;
   onTruncatedAfter(sessionPath: string, messageId: string): void;
   onMessageEdited(sessionPath: string, messageId: string): void;
   startNewTask(sessionPath: string): void;

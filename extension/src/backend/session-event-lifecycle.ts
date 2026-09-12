@@ -142,6 +142,10 @@ function finishRetryTiming(
     sessionPath: context.sessionPath,
     requestId: active.id,
     retryId: timing.retryId,
+    ...(active.operationId ? { operationId: active.operationId } : {}),
+    startedAt: timing.startedAt,
+    endedAt,
+    ...(timing.providerAttemptStartedAt === undefined ? {} : { providerAttemptStartedAt: timing.providerAttemptStartedAt }),
     ...(timing.providerAttemptStartedAt === undefined
       ? {}
       : { measuredDelayMs: Math.max(0, timing.providerAttemptStartedAt - timing.startedAt) }),
@@ -278,6 +282,10 @@ function handleLifecycleSessionEvent(
     }
 
     case 'agent_settled': {
+      // Capture the source boundary once. The host may receive this event
+      // after transport/reducer work, so it must use the backend observation
+      // time rather than inventing a later host receipt timestamp.
+      const settledAt = Date.now();
       const settledRequest = context.activeRequest;
       const requestId = context.activeRequest?.id;
       const operationId = context.activeRequest?.operationId;
@@ -369,6 +377,8 @@ function handleLifecycleSessionEvent(
       deps.emit('agent.settled', {
         sessionPath: context.sessionPath,
         capabilities,
+        occurredAt: settledAt,
+        endedAt: settledAt,
         ...(operationId ? { operationId } : {}),
         ...(requestId ? { requestId } : {}),
         ...(turnId ? { turnId } : {}),

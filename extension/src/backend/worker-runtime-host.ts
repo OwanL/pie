@@ -1,4 +1,5 @@
 import * as fsSync from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
@@ -31,7 +32,7 @@ import { deduplicateToolCallResultsForTransport } from '../shared/chat-message-p
 import { createOperationalIncident } from '../shared/incidents.js';
 import { compactDurableMessageForTransport, findDurableDetail } from '../shared/lazy-details';
 import { LIVE_PIPELINE_LIMITS } from '../shared/live-pipeline-protocol';
-import { deriveContextUsageFromBranch } from './context-usage';
+import { deriveContextUsageEvidenceFromBranch } from './context-usage';
 import { projectRegistryModels, resolveActiveModel } from './session-metadata';
 import { ExtensionUIBridge } from './extension-ui-bridge';
 import { installAuxiliaryLlmMeter } from './auxiliary-llm-meter';
@@ -1091,9 +1092,10 @@ export class WorkerRuntimeHost {
   private emitContextUsageChanged(context: SessionContext, estimated?: number): void {
     if (estimated !== undefined) context.postCompactionEstimatedTokens = estimated;
     const contextWindow = context.session.model?.contextWindow;
-    const measured = contextWindow
-      ? deriveContextUsageFromBranch(context.session.sessionManager.getBranch(), contextWindow)
+    const evidence = contextWindow
+      ? deriveContextUsageEvidenceFromBranch(context.session.sessionManager.getBranch(), contextWindow)
       : undefined;
+    const measured = evidence?.usage;
     const next = measured ?? (contextWindow && context.postCompactionEstimatedTokens !== undefined
       ? {
           tokens: context.postCompactionEstimatedTokens,
@@ -1102,7 +1104,17 @@ export class WorkerRuntimeHost {
         }
       : null);
     context.lastContextUsage = next;
-    this.emit('contextUsage.changed', { sessionPath: context.sessionPath, contextUsage: next });
+    this.emit('contextUsage.changed', {
+      sessionPath: context.sessionPath,
+      contextUsage: next,
+      observationId: randomUUID(),
+      observedAt: Date.now(),
+      source: evidence ? (evidence.promptFootprintTokens !== null ? 'provider' : 'unknown')
+        : next ? 'postCompactionEstimate' : 'unknown',
+      canonicalInputTokens: evidence ? evidence.promptFootprintTokens : next?.tokens ?? null,
+      modelId: context.session.model?.id,
+      provider: context.session.model?.provider,
+    });
   }
 
   private emit(event: string, payload?: unknown): void {

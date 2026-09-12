@@ -62,25 +62,33 @@ schema-version mismatch) as a hard stop — there is no legacy fallback.
 | Column | Meaning |
 |---|---|
 | `invocation_id` | stable billable-invocation identity |
-| `generation_id` | producing pie process generation |
+| `generation_id` | analytics activation generation; process identity is separate producer evidence |
 | `owning_root_session_id` | root session that owns the settlement (branch/copy work is attributed to the owning root) |
+| `execution_id`, `branch_id` | captured execution and entry-ancestry anchors; `NULL` means unavailable |
 | `provider`, `effective_model`, `purpose`, `outcome` | attribution dimensions |
 | `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, `reasoning_tokens`, `provider_total_tokens` | decimal strings; `NULL` = unknown channel |
 | `normalized_base_input_tokens`, `normalized_output_tokens`, `normalized_cache_read_tokens`, `normalized_cache_write_tokens`, `normalized_total_tokens`, `normalized_usage_complete`, `reasoning_included_in_output` | engine-normalized channels + completeness flag |
 | `reported_cost_usd`, `calculated_cost_usd`, `calculated_cost_complete`, `effective_cost_usd`, `effective_cost_source`, `effective_cost_coverage` | provider-reported vs catalog-calculated cost with explicit coverage |
-| `settled_at_ms` | settlement time, epoch ms decimal string |
+| `settled_at_ms` | source settlement time, epoch ms decimal string; `NULL` is undated, while `0` is a real epoch timestamp |
 | `projection_revision` | revision that committed this row |
 
-Scope semantics: every row is attributed to its **owning root session**
-(`owning_root_session_id`), so current-branch, inherited, and global scopes
-all read the same durable rows — branch/copy identifiers are not projected
-yet, so never synthesize branch-local totals; filter by
-`owning_root_session_id` instead. Copied/inherited work is counted by
-reference to the same settled rows and is not re-added as new global work.
+Scope semantics: global/root-session totals count each owning invocation once.
+Selected-branch scope follows `analytics_current_branch_selections` through
+`analytics_branch_edges`; filtering on one `branch_id` alone omits ancestors.
+`analytics_session_copies` links inherited source work without adding another
+global settlement. The host's `readScopedProviderSettlements` helper exposes
+`selectionCoverage` and `inheritanceCoverage`; missing/scrubbed ancestry stays
+unknown. Keep `expectedRevision` fixed when paging that helper. Raw SQL states
+its own scope and is never silently rewritten into a selected-branch query.
 
-Calendar semantics: bucket on local calendar days/weeks **with an explicit
-timezone** (IANA name, e.g. `UTC` when unsure), converting
-`settled_at_ms` in the query layer; the projection never stores local dates.
+Calendar semantics: state the IANA timezone. Today starts at local midnight;
+the live week includes today and the preceding six local dates, including DST
+boundaries. Canonical facts retain UTC source timestamps. Schema 9 maintains
+small provider/model/day summaries in `analytics_provider_model_daily`, keyed
+by the writer's active timezone/window in `analytics_provider_daily_state`;
+these are derived live summaries, not a complete historical calendar table.
+Arbitrary historical calendar queries use source `settled_at_ms` with explicit
+timezone-aware boundaries. Keep undated known usage in a separate bucket.
 
 ## Examples
 
@@ -89,11 +97,14 @@ Total effective cost and coverage by provider and model:
 ```sql
 SELECT provider, effective_model,
        COUNT(*) AS invocations,
-       SUM(CAST(effective_cost_usd AS REAL)) AS effective_cost_usd
+       COUNT(effective_cost_usd) AS known_cost_invocations,
+       COUNT(*) - COUNT(effective_cost_usd) AS unknown_cost_invocations,
+       COALESCE(SUM(effective_cost_usd), 0) AS known_cost_usd,
+       CASE WHEN COUNT(*) = COUNT(effective_cost_usd)
+            THEN SUM(effective_cost_usd) ELSE NULL END AS complete_cost_usd
 FROM analytics_provider_usage_v1
-WHERE effective_cost_coverage = 'known'
 GROUP BY provider, effective_model
-ORDER BY effective_cost_usd DESC;
+ORDER BY known_cost_usd DESC;
 ```
 
 One root session's channel coverage (unknown stays unknown):
@@ -123,6 +134,8 @@ say so instead of implying complete history coverage.
 
 - Trust truncation metadata: when `rowLimit`/`byteLimit`/`truncated` is set,
   page or refine the query; never silently widen bounds.
+- Historical dimension membership also has per-category row bounds and a shared
+  byte budget. Its truncated groups cannot establish complete membership/counts.
 - `detail` payloads are node-v8 representations of captured tool results and
   subagent results (`application/x-pie-tool-observation`,
   `application/x-pie-subagent-result`); `omission_reason` and `capture_stage`

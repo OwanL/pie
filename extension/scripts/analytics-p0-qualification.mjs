@@ -51,6 +51,16 @@ const ENDURANCE_HARNESS_VERSION = `${HARNESS_VERSION}-endurance-v1`;
 const MIXED_HARNESS_VERSION = `${HARNESS_VERSION}-mixed-v2-native-process-handle`;
 const MIN_RECORDER_HEAP_PROBE_MB = 64;
 const MAX_RECORDER_HEAP_PROBE_MB = 512;
+const MIXED_MEMORY_INITIAL_FLOOR_BYTES = 4 * 1024 ** 3;
+const MIXED_MEMORY_RESERVE_BYTES = 2 * 1024 ** 3;
+const MIXED_PROJECTION_TIME_ZONE = 'UTC';
+const MIXED_PROJECTION_WINDOW_DAYS = 7;
+// Smoke mode runs the largest declared endurance topology (four recorder
+// workers) only for short mechanical trials. Keep its preflight reservation
+// proportional to that topology; full endurance retains the larger gate
+// reservation below and is unchanged.
+const ENDURANCE_SMOKE_MEMORY_RESERVATION_BYTES = (4 * 128 + 256) * 1024 ** 2;
+const ENDURANCE_FULL_MEMORY_RESERVATION_BYTES = (4 * 256 + 512) * 1024 ** 2;
 let AnalyticsRecorderSupervisor;
 let AnalyticsCaptureCapacityError;
 let SqliteAnalyticsRecorder;
@@ -65,8 +75,24 @@ function parseRecorderHeapProbe(value) {
   return mb;
 }
 
+function parseMixedUtcDay(value) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    throw new Error('--mixed-utc-day must be an ISO UTC calendar day (YYYY-MM-DD)');
+  }
+  const [year, month, day] = value.split('-').map(Number);
+  if (year < 1970 || year > 9999) throw new Error('--mixed-utc-day must be between 1970 and 9999');
+  const startMs = Date.UTC(year, month - 1, day);
+  if (!Number.isSafeInteger(startMs) || new Date(startMs).toISOString().slice(0, 10) !== value) {
+    throw new Error('--mixed-utc-day is not a valid UTC calendar day');
+  }
+  const todayStartMs = startMs;
+  const windowStartMs = todayStartMs - (MIXED_PROJECTION_WINDOW_DAYS - 1) * 86_400_000;
+  const windowEndMs = todayStartMs + 86_400_000;
+  return Object.freeze({ day: value, todayStartMs, startMs: windowStartMs, endMs: windowEndMs });
+}
+
 function parseArguments(argv) {
-  const options = { scenario: 'baseline', rows: undefined, seed: undefined, report: undefined, baselineReport: undefined, recorderHeapProbeMb: undefined, validate: false, smoke: false };
+  const options = { scenario: 'baseline', rows: undefined, seed: undefined, report: undefined, baselineReport: undefined, recorderHeapProbeMb: undefined, mixedUtcDay: undefined, validate: false, smoke: false };
   const allowedScenarios = new Set(['baseline', 'scale', 'endurance', 'mixed']);
   const seen = new Set();
   for (let index = 0; index < argv.length; index++) {
@@ -83,7 +109,7 @@ function parseArguments(argv) {
       options.smoke = true;
       continue;
     }
-    if (argument === '--scenario' || argument === '--rows' || argument === '--seed' || argument === '--report' || argument === '--baseline-report' || argument === '--recorder-heap-probe-mb') {
+    if (argument === '--scenario' || argument === '--rows' || argument === '--seed' || argument === '--report' || argument === '--baseline-report' || argument === '--recorder-heap-probe-mb' || argument === '--mixed-utc-day') {
       if (seen.has(argument)) throw new Error(`Duplicate option: ${argument}`);
       seen.add(argument);
       const value = argv[++index];
@@ -94,12 +120,15 @@ function parseArguments(argv) {
       if (argument === '--report') options.report = value;
       if (argument === '--baseline-report') options.baselineReport = value;
       if (argument === '--recorder-heap-probe-mb') options.recorderHeapProbeMb = parseRecorderHeapProbe(value);
+      if (argument === '--mixed-utc-day') options.mixedUtcDay = parseMixedUtcDay(value);
       continue;
     }
     throw new Error(`Unsupported or ambiguous option: ${argument}`);
   }
   if (!allowedScenarios.has(options.scenario)) throw new Error(`Unsupported P0 scenario: ${options.scenario}; use baseline, scale, endurance, or mixed`);
   if (options.smoke && options.scenario !== 'endurance' && options.scenario !== 'mixed') throw new Error('--smoke is valid only for the endurance or mixed scenario');
+  if (options.mixedUtcDay !== undefined && options.scenario !== 'mixed') throw new Error('--mixed-utc-day is valid only for the mixed scenario');
+  if (options.scenario === 'mixed' && options.mixedUtcDay === undefined) throw new Error('mixed requires --mixed-utc-day so paired runs share an explicit UTC fixture window');
   if (options.scenario === 'endurance' && options.rows !== undefined) throw new Error('--rows is not valid for the endurance scenario');
   const environmentRows = process.env.PIE_ANALYTICS_P0_ROWS;
   const rowText = options.scenario === 'endurance' ? '10000' : options.rows ?? environmentRows ?? (options.scenario === 'scale' ? '1000000' : '10000');
@@ -146,6 +175,7 @@ function parseArguments(argv) {
     seed: options.seed,
     report: path.resolve(options.report),
     baselineReport: options.baselineReport,
+    ...(options.mixedUtcDay === undefined ? {} : { mixedUtcDay: options.mixedUtcDay }),
     ...(options.recorderHeapProbeMb === undefined ? {} : { recorderHeapProbeMb: options.recorderHeapProbeMb }),
     validate: options.validate,
     smoke: options.smoke,
@@ -166,6 +196,13 @@ const activeHarnessVersion = configuration.scenario === 'endurance'
   ? ENDURANCE_HARNESS_VERSION
   : configuration.scenario === 'mixed' ? MIXED_HARNESS_VERSION : HARNESS_VERSION;
 const requestedRows = configuration.rows;
+const mixedProjectionWindow = configuration.mixedUtcDay;
+const mixedObservationBaseMs = mixedProjectionWindow === undefined
+  ? 1_780_000_000_000
+  : mixedProjectionWindow.todayStartMs + 12 * 60 * 60 * 1_000;
+const detailObservationBaseMs = configuration.scenario === 'mixed'
+  ? mixedObservationBaseMs + 100_000
+  : 1_780_100_000_000;
 const scopedId = (value) => `${configuration.seed}-${value}`;
 const requestedDetail = Math.floor(requestedRows / 10);
 const detailCounts = {
@@ -234,6 +271,11 @@ function observation(i, host, sourceSequence = Math.floor(i / 4) + 1) {
     invocationId: scopedId(`invocation-${i}`),
     provider: scopedId(`provider-${i % 3}`),
     model: scopedId(`model-${i % 12}`),
+    // Provider daily projection uses source settlement time, not the recorder
+    // receipt time. Mixed runs explicitly place these dated settlements in
+    // their declared UTC preparation window so paced and burst writes update
+    // the maintained daily rows incrementally.
+    ...(configuration.scenario === 'mixed' ? { settledAtMs: mixedObservationBaseMs + i } : {}),
     inputTokens: i % 17 === 0 ? null : 100 + i,
     outputTokens: i % 19 === 0 ? null : 20,
     inputIncludesCache: false,
@@ -245,13 +287,13 @@ function observation(i, host, sourceSequence = Math.floor(i / 4) + 1) {
     toolCallId: entityKey,
     toolDefinitionId: i % 8 === 1 ? 'mcp' : 'bash',
     outcome: i % 29 === 0 ? 'failed' : 'completed',
-    startedAtMs: 1_780_000_000_000 + i - 5,
-    executionEndedAtMs: 1_780_000_000_000 + i,
+    startedAtMs: mixedObservationBaseMs + i - 5,
+    executionEndedAtMs: mixedObservationBaseMs + i,
   } : variant === 2 ? {
     spanId: entityKey,
     kind: i % 8 === 2 ? 'retryWait' : 'tool',
-    startedAtMs: 1_780_000_000_000 + i - 5,
-    endedAtMs: 1_780_000_000_000 + i,
+    startedAtMs: mixedObservationBaseMs + i - 5,
+    endedAtMs: mixedObservationBaseMs + i,
     durationMs: 5,
     coverage: 'observed',
   } : {
@@ -270,7 +312,7 @@ function observation(i, host, sourceSequence = Math.floor(i / 4) + 1) {
     entityKind,
     entityKey,
     observationKind,
-    observedAtMs: 1_780_000_000_000 + i,
+    observedAtMs: mixedObservationBaseMs + i,
     scope: {
       workspaceCoverage: 'known',
       workspaceId: scopedId(`workspace-${i % 4}`),
@@ -282,6 +324,23 @@ function observation(i, host, sourceSequence = Math.floor(i / 4) + 1) {
     fields,
     idempotencyKey: JSON.stringify([generationId, observationKind, sourceKey]),
   };
+}
+
+function countProviderFacts(offset, count) {
+  if (count <= 0) return 0;
+  const first = Math.ceil(offset / 4) * 4;
+  const last = offset + count - 1;
+  return first > last ? 0 : Math.floor((last - first) / 4) + 1;
+}
+
+function sumKnownProviderInputTokens(offset, count) {
+  let total = 0n;
+  const first = Math.ceil(offset / 4) * 4;
+  const last = offset + count - 1;
+  for (let index = first; index <= last; index += 4) {
+    if (index % 17 !== 0) total += BigInt(100 + index);
+  }
+  return total.toString();
 }
 
 function detailCapture(payloadId, rootSessionId, byteLength, valueOverride) {
@@ -298,7 +357,7 @@ function detailCapture(payloadId, rootSessionId, byteLength, valueOverride) {
     stableOriginId: scopedId(`detail:${rootSessionId}`),
     payloadId: namespacedPayloadId,
     sourceKey: namespacedPayloadId,
-    observedAtMs: 1_780_100_000_000,
+    observedAtMs: detailObservationBaseMs,
     captureSubject: { kind: 'session', rootSessionId: namespacedRootSessionId },
     mediaType: 'application/x-pie-subagent-result',
     encoding: 'node-v8',
@@ -791,6 +850,8 @@ async function runMixedScenario() {
   let queryTopology;
   let acceptedRowsBeforeDetail = 0;
   let acceptedBytesBeforeDetail = 0;
+  let dailyProjectionBeforePaced;
+  let dailyProjectionAfterBurst;
   let mixedFailure;
   let queryCleanupEvidence = { requested: 0, completed: true, timedOut: false };
   try {
@@ -926,6 +987,41 @@ async function runMixedScenario() {
     await sampleTopology('after-fixture');
     checkResourceEnvelope('mixed-after-fixture');
 
+    // Preparation is an explicit writer control. It rebuilds the fixture once;
+    // all paced and burst provider settlements below then exercise incremental
+    // updates to the maintained daily rows.
+    const projectionWindow = mixedProjectionWindow;
+    assert.ok(projectionWindow, 'mixed runs require an explicit UTC projection window');
+    await hosts[0].prepareProviderDailyProjection(
+      MIXED_PROJECTION_TIME_ZONE,
+      projectionWindow.startMs,
+      projectionWindow.endMs,
+    );
+    dailyProjectionBeforePaced = readMixedProjectionEvidence(database, projectionWindow);
+    const expectedFixtureProviderFacts = countProviderFacts(0, plan.fixtureRows);
+    const expectedFixtureInputTokens = sumKnownProviderInputTokens(0, plan.fixtureRows);
+    assert.equal(
+      dailyProjectionBeforePaced.sourceProviderSettlementRows,
+      expectedFixtureProviderFacts,
+      'projection preflight must see every dated fixture provider settlement',
+    );
+    assert.equal(
+      dailyProjectionBeforePaced.dailyOccurrenceCount,
+      String(expectedFixtureProviderFacts),
+      'projection preflight must contain the dated fixture occurrence count',
+    );
+    assert.equal(dailyProjectionBeforePaced.todayOccurrenceCount, String(expectedFixtureProviderFacts));
+    assert.equal(dailyProjectionBeforePaced.weekOccurrenceCount, String(expectedFixtureProviderFacts));
+    assert.equal(dailyProjectionBeforePaced.todayInputTokens, expectedFixtureInputTokens);
+    assert.equal(dailyProjectionBeforePaced.weekInputTokens, expectedFixtureInputTokens);
+    assert.ok(dailyProjectionBeforePaced.aggregateGroups > 0, 'prepared daily projection must expose fixture groups');
+    checkpoint('mixed-projection-prepared', {
+      timeZone: MIXED_PROJECTION_TIME_ZONE,
+      windowStartMs: projectionWindow.startMs,
+      windowEndMs: projectionWindow.endMs,
+      fixtureProviderFacts: expectedFixtureProviderFacts,
+    });
+
     const broadScan = timedQuery('broadScan', {
       type: 'query',
       sql: 'SELECT root_session_id, entity_kind, observed_at_ms FROM analytics_observations ORDER BY observed_at_ms DESC LIMIT 250',
@@ -955,6 +1051,33 @@ async function runMixedScenario() {
     const burst = await runMixedIngest(hosts, 'mixed-burst', plan.fixtureRows + 2_000_000, plan.burst.ratePerSecond, plan.burst.sampleCount, plan.burst.durationMs);
     await sampleTopology('after-burst');
     checkResourceEnvelope('mixed-after-burst');
+    dailyProjectionAfterBurst = readMixedProjectionEvidence(database, projectionWindow);
+    const expectedPostBurstProviderFacts = expectedFixtureProviderFacts
+      + countProviderFacts(plan.fixtureRows + 1_000_000, plan.paced.sampleCount)
+      + countProviderFacts(plan.fixtureRows + 2_000_000, plan.burst.sampleCount);
+    const expectedPostBurstInputTokens = [
+      [0, plan.fixtureRows],
+      [plan.fixtureRows + 1_000_000, plan.paced.sampleCount],
+      [plan.fixtureRows + 2_000_000, plan.burst.sampleCount],
+    ].reduce((total, [offset, count]) => total + BigInt(sumKnownProviderInputTokens(offset, count)), 0n).toString();
+    assert.equal(
+      dailyProjectionAfterBurst.sourceProviderSettlementRows,
+      expectedPostBurstProviderFacts,
+      'projection after burst must see every dated fixture, paced and burst provider settlement',
+    );
+    assert.equal(
+      dailyProjectionAfterBurst.dailyOccurrenceCount,
+      String(expectedPostBurstProviderFacts),
+      'paced and burst writes must increase the maintained daily occurrence count',
+    );
+    assert.equal(dailyProjectionAfterBurst.todayOccurrenceCount, String(expectedPostBurstProviderFacts));
+    assert.equal(dailyProjectionAfterBurst.weekOccurrenceCount, String(expectedPostBurstProviderFacts));
+    assert.equal(dailyProjectionAfterBurst.todayInputTokens, expectedPostBurstInputTokens);
+    assert.equal(dailyProjectionAfterBurst.weekInputTokens, expectedPostBurstInputTokens);
+    assert.ok(
+      BigInt(dailyProjectionAfterBurst.dailyOccurrenceCount) > BigInt(dailyProjectionBeforePaced.dailyOccurrenceCount),
+      'paced and burst writes must increase daily projection contributions',
+    );
     acceptedRowsBeforeDetail = delivery.rows;
     acceptedBytesBeforeDetail = delivery.bytes;
 
@@ -1098,6 +1221,16 @@ async function runMixedScenario() {
       acceptedRows: acceptedRowsBeforeDetail,
       endingBacklogRecords,
       endingBacklogBytes,
+      dailyProjection: {
+        writerPrepared: true,
+        preparedBeforePacedAndBurst: true,
+        timeZone: MIXED_PROJECTION_TIME_ZONE,
+        todayStartMs: mixedProjectionWindow.todayStartMs,
+        windowStartMs: mixedProjectionWindow.startMs,
+        windowEndMs: mixedProjectionWindow.endMs,
+        beforePaced: dailyProjectionBeforePaced,
+        afterBurst: dailyProjectionAfterBurst,
+      },
       broadScan: { completed: true, count: 1, returnedRows: broadResult.returnedRows, truncation: broadResult.truncation },
       indexedLookups: {
         count: indexedTimings.length,
@@ -1306,6 +1439,18 @@ async function runMixedScenario() {
         },
         recorderMemory: recorderMemory ?? { complete: false, sampleCount: 0, workers: [] },
         nativeProcessTelemetry: nativeProcessTelemetry ?? { complete: false, receipts: [], rejections: [] },
+        ...(dailyProjectionBeforePaced || dailyProjectionAfterBurst ? {
+          dailyProjection: {
+            writerPrepared: true,
+            preparedBeforePacedAndBurst: true,
+            timeZone: MIXED_PROJECTION_TIME_ZONE,
+            todayStartMs: mixedProjectionWindow?.todayStartMs ?? null,
+            windowStartMs: mixedProjectionWindow?.startMs ?? null,
+            windowEndMs: mixedProjectionWindow?.endMs ?? null,
+            beforePaced: dailyProjectionBeforePaced ?? null,
+            afterBurst: dailyProjectionAfterBurst ?? null,
+          },
+        } : {}),
         note: 'Partial evidence is retained for diagnosis only. Incomplete lifecycle, sampler, collector, queue or delivery evidence cannot satisfy a qualification gate.',
       };
       report.results.mixed = {
@@ -1685,6 +1830,64 @@ function openReader(databasePath) {
   return reader;
 }
 
+/** Read the maintained daily table through a read-only recorder handle. The
+ * private database handle is used only for this bounded harness diagnostic;
+ * production read APIs remain unchanged and no read path prepares or mutates
+ * the projection. */
+function readMixedProjectionEvidence(databasePath, window) {
+  const reader = new SqliteAnalyticsRecorder(databasePath, { readOnly: true });
+  try {
+    const aggregate = reader.readProviderAggregateSummary({
+      todayStartMs: window.todayStartMs,
+      todayEndMs: window.todayStartMs + 86_400_000,
+      weekStartMs: window.startMs,
+      weekEndMs: window.endMs,
+      timeZone: MIXED_PROJECTION_TIME_ZONE,
+      dailyWindowStartMs: window.startMs,
+      dailyWindowEndMs: window.endMs,
+      maxGroups: 64,
+    });
+    const rows = reader.database.prepare(`
+      SELECT local_day, summary_json
+      FROM analytics_provider_model_daily
+      WHERE time_zone = ? AND local_day <> 'undated'
+    `).all(MIXED_PROJECTION_TIME_ZONE);
+    let dailyOccurrenceCount = 0n;
+    let todayOccurrenceCount = 0n;
+    let weekOccurrenceCount = 0n;
+    let todayInputTokens = 0n;
+    let weekInputTokens = 0n;
+    for (const row of rows) {
+      const summary = JSON.parse(String(row.summary_json));
+      const occurrenceCount = BigInt(summary.occurrenceCount);
+      const inputTokens = BigInt(summary.channels.inputTokens.knownTotal);
+      dailyOccurrenceCount += occurrenceCount;
+      weekOccurrenceCount += occurrenceCount;
+      weekInputTokens += inputTokens;
+      if (row.local_day === window.day) {
+        todayOccurrenceCount += occurrenceCount;
+        todayInputTokens += inputTokens;
+      }
+    }
+    assert.equal(aggregate.truncation.rowLimit, false, 'mixed daily projection aggregate must not truncate groups');
+    assert.equal(aggregate.truncation.byteLimit, false, 'mixed daily projection aggregate must not truncate bytes');
+    assert.equal(aggregate.truncation.cellLimit, false, 'mixed daily projection aggregate must not truncate cells');
+    return {
+      sourceProviderSettlementRows: reader.countProviderSettlements(),
+      dailyRows: rows.length,
+      dailyOccurrenceCount: dailyOccurrenceCount.toString(),
+      todayOccurrenceCount: todayOccurrenceCount.toString(),
+      weekOccurrenceCount: weekOccurrenceCount.toString(),
+      todayInputTokens: todayInputTokens.toString(),
+      weekInputTokens: weekInputTokens.toString(),
+      aggregateGroups: aggregate.groups.length,
+      projectionRevision: String(aggregate.revision),
+    };
+  } finally {
+    reader.close();
+  }
+}
+
 function closeReader(reader) {
   reader.close();
   activeReaders.delete(reader);
@@ -1726,6 +1929,13 @@ const report = {
     rows: configuration.scenario === 'endurance' ? null : requestedRows,
     seed: configuration.seed,
     reportPath: configuration.report,
+    ...(configuration.mixedUtcDay === undefined ? {} : {
+      mixedUtcDay: configuration.mixedUtcDay.day,
+      mixedProjectionTimeZone: MIXED_PROJECTION_TIME_ZONE,
+      mixedProjectionTodayStartMs: configuration.mixedUtcDay.todayStartMs,
+      mixedProjectionWindowStartMs: configuration.mixedUtcDay.startMs,
+      mixedProjectionWindowEndMs: configuration.mixedUtcDay.endMs,
+    }),
     ...((configuration.scenario === 'endurance' || configuration.scenario === 'mixed') ? { mode: configuration.smoke ? 'smoke' : 'full' } : {}),
     ...(configuration.recorderHeapProbeMb === undefined ? {} : {
       recorderHeapProbeMb: configuration.recorderHeapProbeMb,
@@ -1808,6 +2018,10 @@ try {
     matrix.bounds.maxTemporaryBytes,
     initialFreeBytes - matrix.bounds.minUnusedDiskBytes,
   ));
+  if (configuration.scenario === 'mixed' && !configuration.smoke) {
+    matrix.bounds.minimumAvailableMemoryBytes = MIXED_MEMORY_RESERVE_BYTES;
+    matrix.bounds.initialAvailableMemoryFloorBytes = MIXED_MEMORY_INITIAL_FLOOR_BYTES;
+  }
   Object.freeze(matrix.bounds);
   Object.freeze(matrix);
   capacityFixture = fixtureCapacityEstimate();
@@ -1825,12 +2039,18 @@ try {
   projectedPeakBytes = calibratedCapacityProjection?.projectedPeakBytes
     ?? Math.ceil(capacityFixture.fixtureBytes * 2);
   initialAvailableMemoryBytes = os.freemem();
+  if (configuration.scenario === 'mixed' && !configuration.smoke
+    && initialAvailableMemoryBytes < MIXED_MEMORY_INITIAL_FLOOR_BYTES) {
+    throw new Error(`mixed paired trial requires at least ${MIXED_MEMORY_INITIAL_FLOOR_BYTES} bytes initially available; observed ${initialAvailableMemoryBytes}`);
+  }
   // The short mixed smoke has one recorder host and two query workers; keep
   // its preflight reservation bounded to that mechanical workload. It remains
   // function-only and never qualifies topology memory.
   const workloadMemoryReservationBytes = configuration.scenario === 'mixed' && configuration.smoke
     ? 256 * 1024 ** 2
-    : (4 * 256 + 512) * 1024 ** 2;
+    : configuration.scenario === 'endurance' && configuration.smoke
+      ? ENDURANCE_SMOKE_MEMORY_RESERVATION_BYTES
+      : ENDURANCE_FULL_MEMORY_RESERVATION_BYTES;
   projectedPeakMemoryBytes = configuration.scenario === 'scale' && baselineEvidence?.accepted
     ? Math.ceil(Math.max(baselineEvidence.topologyPeakBytes * 1.25, process.memoryUsage().rss + 512 * 1024 ** 2))
     : Math.ceil(process.memoryUsage().rss + workloadMemoryReservationBytes);
@@ -1844,7 +2064,12 @@ try {
     totalMemoryBytes: os.totalmem(),
     initialAvailableMemoryBytes,
     effectiveMemoryLimitBytes,
+    workloadMemoryReservationBytes,
     initialFreeBytes,
+    ...(configuration.scenario === 'mixed' && !configuration.smoke ? {
+      initialAvailableMemoryFloorBytes: MIXED_MEMORY_INITIAL_FLOOR_BYTES,
+      minimumAvailableMemoryBytes: MIXED_MEMORY_RESERVE_BYTES,
+    } : {}),
     sqlite: 'node:sqlite bundled with Node',
     // Recorded so the recorderWorkerRss evidence says which reservation the
     // measurement was taken under. Null means the runtime default.
@@ -2005,11 +2230,16 @@ function checkResourceEnvelope(label) {
   const physicalBytes = proofTreeBytes(root);
   const stats = statfsSync(root, { bigint: true });
   const freeBytes = Number(stats.bavail * stats.bsize);
+  const availableMemoryBytes = os.freemem();
   report.results.resourceEnvelope ??= { samples: [] };
-  report.results.resourceEnvelope.samples.push({ label, physicalBytes, freeBytes });
+  report.results.resourceEnvelope.samples.push({ label, physicalBytes, freeBytes, availableMemoryBytes });
   if (physicalBytes > matrix.bounds.effectiveTemporaryLimitBytes) throw new Error(`${label}: temporary proof tree exceeded ${matrix.bounds.effectiveTemporaryLimitBytes} bytes`);
   if (freeBytes < matrix.bounds.minUnusedDiskBytes) throw new Error(`${label}: free disk fell below reserved ${matrix.bounds.minUnusedDiskBytes} bytes`);
-  checkpoint(label, { temporaryBytes: physicalBytes, freeBytes });
+  if (configuration.scenario === 'mixed' && !configuration.smoke
+    && availableMemoryBytes < MIXED_MEMORY_RESERVE_BYTES) {
+    throw new Error(`${label}: available memory fell below the ${MIXED_MEMORY_RESERVE_BYTES}-byte mixed trial reserve (observed ${availableMemoryBytes})`);
+  }
+  checkpoint(label, { temporaryBytes: physicalBytes, freeBytes, availableMemoryBytes });
 }
 
 function ensureAdditionalCapacity(label, additionalBytes) {

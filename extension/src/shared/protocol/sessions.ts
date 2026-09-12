@@ -381,6 +381,10 @@ export interface MessageAbortedPayload {
 export interface AgentSettledPayload {
   sessionPath: string;
   capabilities: SessionCapabilities;
+  /** Epoch milliseconds sampled at the backend's agent_settled boundary. */
+  occurredAt?: number;
+  /** Epoch milliseconds when the backend observed the execution settle. */
+  endedAt?: number;
   operationId?: string;
   requestId?: string;
   turnId?: string;
@@ -404,6 +408,14 @@ export interface BusyChangedPayload {
 export interface ContextUsageChangedPayload {
   sessionPath: string;
   contextUsage: ContextWindowUsage | null;
+  /** Identity/time of this source observation, retained across transport replay. */
+  observationId?: string;
+  observedAt?: number;
+  source?: 'provider' | 'postCompactionEstimate' | 'unknown';
+  /** Qualified prompt footprint; the UI may separately use a total-token fallback. */
+  canonicalInputTokens?: number | null;
+  modelId?: string;
+  provider?: string;
 }
 
 export interface ErrorPayload {
@@ -516,6 +528,10 @@ export interface RetryMeasuredPayload {
   sessionPath: string;
   requestId: string;
   retryId: string;
+  operationId?: string;
+  startedAt?: number;
+  providerAttemptStartedAt?: number;
+  endedAt?: number;
   /** Observed scheduling→provider-attempt delay; absent for ungated providers. */
   measuredDelayMs?: number;
   /** Observed scheduling→attempt terminal/superseding boundary. */

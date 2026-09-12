@@ -30,6 +30,7 @@ export type AnalyticsQueryRequest =
       maxResultBytes?: number;
     }
   | { type: 'providerAccounting'; rootSessionId?: string; maxResultBytes?: number }
+  | { type: 'executionSummary'; rootSessionId?: string; maxResultBytes?: number }
   | {
       type: 'providerAggregate';
       todayStartMs: number;
@@ -42,7 +43,7 @@ export type AnalyticsQueryRequest =
       maxGroups?: number;
       maxResultBytes?: number;
     }
-  | { type: 'historicalDimensions'; maxResultBytes?: number }
+  | { type: 'historicalDimensions'; maxRowsPerDimension?: number; maxCellBytes?: number; maxResultBytes?: number }
   | { type: 'qualificationSpin'; iterations?: number; maxResultBytes?: number };
 
 export type AnalyticsQueryLifecyclePhase =

@@ -180,11 +180,144 @@ test('durable terminal evidence replays with an immutable canonical fingerprint'
       occurredAt: 1_800_000_000_007,
     };
 
-    stats.onAssistantTerminalWatermark(watermark);
-    stats.onAssistantTerminalWatermark(watermark);
+    stats.onAssistantTerminalWatermark(watermark, 'operation-replay');
+    stats.onAssistantTerminalWatermark(watermark, 'operation-replay');
 
     assert.equal(observations.length, 2);
     assert.deepEqual(observations[1], observations[0]);
+  });
+});
+
+test('execution lifecycle uses the accepted operation and settles only at agent.settled', async () => {
+  await withTempDir(async (tempDir) => {
+    const state = createInitialArchState();
+    const observations: AnalyticsObservation<object>[] = [];
+    const capture = new CanonicalAnalyticsCapture({
+      authority: 'canonical',
+      generationId: 'generation-execution-identity',
+      workspaceId: 'workspace-execution-identity',
+      buildId: 'build-execution-identity',
+      processGeneration: 'process-execution-identity',
+      sink: { submit: (observation) => { observations.push(observation); } },
+      detailSink: { submitDetail: () => undefined },
+      lifecycleSink: { bindPendingCreate: async () => undefined, deleteSession: async () => undefined },
+    });
+    const stats = new StatsService({
+      ...optionsFor(path.join(tempDir, 'analytics'), tempDir, state, { renders: 0 }),
+      analyticsCapture: capture,
+    });
+    const sessionPath = '/sessions/execution-identity.jsonl';
+    try {
+      const runId = stats.prepareForSend(sessionPath, [], 'prompt', 'operation-accepted');
+      stats.onAssistantTurnStarted(sessionPath, 'turn-accepted', {
+        operationId: 'operation-accepted', requestId: 'request-accepted', attemptId: 'attempt-accepted',
+      });
+      stats.onAssistantTurnEnded(sessionPath, 'turn-accepted', 25, undefined, 'completed', undefined, {
+        operationId: 'operation-accepted', requestId: 'request-accepted', attemptId: 'attempt-accepted',
+        occurredAt: '2026-01-01T00:00:01.000Z',
+      });
+
+      const beforeSettlement = observations.filter((observation) => observation.entityKind === 'execution');
+      assert.ok(beforeSettlement.every((observation) => observation.entityKey === 'operation-accepted'));
+      assert.equal(beforeSettlement.some((observation) => observation.observationKind === 'end'), false,
+        'turn phase/registry commit must not close the execution');
+
+      // A retry is a second assistant turn under the same accepted operation;
+      // it must not select a newer registry operation or create a second
+      // execution entity.
+      (state.operations as any)['newer-registry-operation'] = {
+        operationId: 'newer-registry-operation',
+        terminal: false,
+        session: { resolvedPath: sessionPath, pendingPath: undefined },
+      };
+      stats.onAssistantTurnStarted(sessionPath, 'turn-retry', {
+        operationId: 'operation-accepted', requestId: 'request-retry', attemptId: 'attempt-retry',
+      });
+      stats.onAssistantTurnEnded(sessionPath, 'turn-retry', 30, undefined, 'completed', undefined, {
+        operationId: 'operation-accepted', requestId: 'request-retry', attemptId: 'attempt-retry',
+        occurredAt: '2026-01-01T00:00:02.000Z',
+      });
+      assert.ok(
+        observations.filter((observation) => observation.entityKind === 'execution')
+          .every((observation) => observation.entityKey === 'operation-accepted'),
+        'retry phases remain bound to their source operation',
+      );
+
+      stats.onAgentSettled({
+        sessionPath,
+        operationId: 'operation-accepted',
+        requestId: 'request-retry',
+        turnId: 'turn-retry',
+        attemptId: 'attempt-retry',
+        capabilities: {} as never,
+      });
+      const ends = observations.filter((observation) => (
+        observation.entityKind === 'execution' && observation.observationKind === 'end'
+      ));
+      assert.equal(ends.length, 1);
+      assert.equal(ends[0]?.entityKey, 'operation-accepted');
+      assert.equal(ends[0]?.observedAtMs, 0, 'settlement without source time uses stable unknown envelope time');
+      assert.deepEqual(ends[0]?.fields, {
+        operationId: 'operation-accepted',
+        requestId: 'request-retry',
+        turnId: 'turn-retry',
+        attemptId: 'attempt-retry',
+        operationKind: 'agent-run',
+        source: 'backend-agent-settled',
+        outcome: 'unknown',
+      });
+      assert.notEqual(runId, 'operation-accepted', 'the local run remains a separate grouping identity');
+
+      // A settlement without its owning operation cannot close the current
+      // run, even if a stale registry operation happens to be visible.
+      stats.onAgentSettled({ sessionPath, capabilities: {} as never });
+      assert.equal(observations.filter((observation) => observation.observationKind === 'end').length, 1);
+    } finally {
+      await stats.shutdown();
+    }
+  });
+});
+
+test('execution lifecycle records one host start and the backend settlement time', async () => {
+  await withTempDir(async (tempDir) => {
+    const state = createInitialArchState();
+    const observations: AnalyticsObservation<object>[] = [];
+    const capture = new CanonicalAnalyticsCapture({
+      authority: 'canonical',
+      generationId: 'generation-execution-times',
+      workspaceId: 'workspace-execution-times',
+      buildId: 'build-execution-times',
+      processGeneration: 'process-execution-times',
+      sink: { submit: (observation) => { observations.push(observation); } },
+      detailSink: { submitDetail: () => undefined },
+      lifecycleSink: { bindPendingCreate: async () => undefined, deleteSession: async () => undefined },
+    });
+    const stats = new StatsService({
+      ...optionsFor(path.join(tempDir, 'analytics'), tempDir, state, { renders: 0 }),
+      analyticsCapture: capture,
+    });
+    try {
+      stats.prepareForSend('/sessions/execution-times.jsonl', [], 'prompt', 'operation-times');
+      const begin = observations.find((observation) => observation.observationKind === 'begin');
+      const beginFields = begin?.fields as { startedAtMs?: unknown } | undefined;
+      assert.equal(beginFields?.startedAtMs, begin?.observedAtMs,
+        'the canonical begin envelope and field share one source sample');
+
+      stats.onAgentSettled({
+        sessionPath: '/sessions/execution-times.jsonl',
+        operationId: 'operation-times',
+        capabilities: {} as never,
+        occurredAt: 1_800_000_000_100,
+        endedAt: 1_800_000_000_101,
+      });
+      const end = observations.find((observation) => observation.observationKind === 'end');
+      assert.equal(end?.observedAtMs, 1_800_000_000_101);
+      const endFields = end?.fields as { endedAtMs?: unknown; outcome?: unknown } | undefined;
+      assert.equal(endFields?.endedAtMs, 1_800_000_000_101);
+      assert.equal(endFields?.outcome, 'unknown');
+    } finally {
+      await stats.shutdown();
+    }
   });
 });
 

@@ -7,6 +7,7 @@ import test from 'node:test';
 
 import {
   createAnalyticsHandoffPipeName,
+  createPerBootAnalyticsHandoffKey,
   createSignedAnalyticsHandoffRequest,
   verifyAnalyticsHandoffResponse,
 } from '../../../shared/analytics/handoff.js';
@@ -46,12 +47,21 @@ test('authenticated host status is registered in lifecycle storage and rejects r
     capabilities: ['host-discovery', 'host-status'],
   } as const;
   const pipeName = createAnalyticsHandoffPipeName(identity.workspaceId, identity.hostInstanceId);
+  let inventoryReads = 0;
   const control = new AnalyticsHandoffControl({
     registry: temporary.store,
     identity,
     key,
     pipeName,
     now: () => 100,
+    readInventory: async () => {
+      inventoryReads += 1;
+      return {
+        kind: 'registered-hosts-only',
+        complete: false,
+        reason: 'runtime-generation-and-process-reconciliation-incomplete',
+      };
+    },
   });
   try {
     await control.start();
@@ -68,6 +78,8 @@ test('authenticated host status is registered in lifecycle storage and rejects r
     assert.equal(response.ok, true);
     const result = response.result as { inventoryProof?: { complete?: boolean }; allHostsHandoffAvailable?: boolean };
     assert.equal(result.inventoryProof?.complete, false);
+    assert.equal((result.inventoryProof as { reason?: string }).reason, 'runtime-generation-and-process-reconciliation-incomplete');
+    assert.equal(inventoryReads, 1);
     assert.equal(result.allHostsHandoffAvailable, false);
 
     for (const [index, hostInstanceId] of ['host-unit-1-a', 'host-unit-1-b'].entries()) {
@@ -91,6 +103,7 @@ test('authenticated host status is registered in lifecycle storage and rejects r
     assert.equal(page.hosts?.length, 1);
     assert.equal(page.truncated, true);
     assert.equal(typeof page.nextCursor, 'string');
+    assert.equal(inventoryReads, 1, 'status discovery is cached within its bounded freshness window');
 
     const replay = verifyAnalyticsHandoffResponse(await sendFrame(pipeName, request), key);
     assert.equal(replay.ok, false);
@@ -99,6 +112,119 @@ test('authenticated host status is registered in lifecycle storage and rejects r
     await control.stop();
     // Endpoint closure is not recorder/backend quiescence evidence.
     assert.equal(temporary.store.getAnalyticsHost(identity.hostInstanceId)?.state, 'stopping');
+    temporary.store.close();
+    rmSync(temporary.root, { recursive: true, force: true });
+  }
+});
+
+test('per-boot handoff keys are fresh, bounded capabilities', () => {
+  const first = createPerBootAnalyticsHandoffKey();
+  const second = createPerBootAnalyticsHandoffKey();
+  assert.notEqual(first, second);
+  assert.ok(first.length >= 32 && first.length <= 128);
+  assert.ok(second.length >= 32 && second.length <= 128);
+  assert.doesNotMatch(first, /[\r\n\u0000]/u);
+});
+
+test('inventory timeout is bounded while one unresolved census remains the single flight', async () => {
+  const temporary = temporaryStore();
+  const key = 'unit-test-handoff-key';
+  const identity = {
+    hostInstanceId: 'host-unit-inventory-timeout',
+    workspaceId: 'workspace-unit-inventory-timeout',
+    generationId: 'generation-unit-inventory-timeout',
+    buildId: 'build-unit-1',
+    processId: process.pid,
+    capabilities: ['host-discovery'],
+  } as const;
+  const pipeName = createAnalyticsHandoffPipeName(identity.workspaceId, identity.hostInstanceId);
+  let inventoryReads = 0;
+  let releaseInventory!: (proof: {
+    kind: 'registered-hosts-only'; complete: false;
+    reason: 'runtime-generation-and-process-reconciliation-incomplete';
+  }) => void;
+  const unresolved = new Promise<{
+    kind: 'registered-hosts-only'; complete: false;
+    reason: 'runtime-generation-and-process-reconciliation-incomplete';
+  }>((resolve) => { releaseInventory = resolve; });
+  const control = new AnalyticsHandoffControl({
+    registry: temporary.store,
+    identity,
+    key,
+    pipeName,
+    now: () => 100,
+    inventoryReadTimeoutMs: 25,
+    readInventory: async () => {
+      inventoryReads += 1;
+      return unresolved;
+    },
+  });
+  try {
+    await control.start();
+    const first = createSignedAnalyticsHandoffRequest('status', { workspaceId: identity.workspaceId }, key, {
+      requestId: 'request-inventory-timeout-1', nonce: 'nonce-inventory-timeout-1', issuedAtMs: 100, expiresAtMs: 5_000,
+    });
+    const second = createSignedAnalyticsHandoffRequest('status', { workspaceId: identity.workspaceId }, key, {
+      requestId: 'request-inventory-timeout-2', nonce: 'nonce-inventory-timeout-2', issuedAtMs: 100, expiresAtMs: 5_000,
+    });
+    const startedAt = Date.now();
+    const responses = await Promise.all([sendFrame(pipeName, first), sendFrame(pipeName, second)]);
+    assert.ok(Date.now() - startedAt < 1_000, 'callers receive bounded timeout responses');
+    for (const value of responses) {
+      const response = verifyAnalyticsHandoffResponse(value, key);
+      assert.equal(response.ok, true);
+      assert.deepEqual((response.result as { inventoryProof: { reasonCodes?: readonly string[] } }).inventoryProof.reasonCodes, ['inventory-discovery-timeout']);
+    }
+    assert.equal(inventoryReads, 1, 'an unresolved discovery cannot fan out per socket');
+    releaseInventory({
+      kind: 'registered-hosts-only', complete: false,
+      reason: 'runtime-generation-and-process-reconciliation-incomplete',
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const third = createSignedAnalyticsHandoffRequest('status', { workspaceId: identity.workspaceId }, key, {
+      requestId: 'request-inventory-timeout-3', nonce: 'nonce-inventory-timeout-3', issuedAtMs: 100, expiresAtMs: 5_000,
+    });
+    const thirdResponse = verifyAnalyticsHandoffResponse(await sendFrame(pipeName, third), key);
+    assert.equal(thirdResponse.ok, true);
+    assert.equal((thirdResponse.result as { inventoryProof: { reason: string } }).inventoryProof.reason, 'runtime-generation-and-process-reconciliation-incomplete');
+    assert.equal(inventoryReads, 1);
+  } finally {
+    await control.stop();
+    temporary.store.close();
+    rmSync(temporary.root, { recursive: true, force: true });
+  }
+});
+
+test('synchronous inventory reader failure returns structured incomplete status', async () => {
+  const temporary = temporaryStore();
+  const key = 'unit-test-handoff-key';
+  const identity = {
+    hostInstanceId: 'host-unit-inventory-error',
+    workspaceId: 'workspace-unit-inventory-error',
+    generationId: 'generation-unit-inventory-error',
+    buildId: 'build-unit-1',
+    processId: process.pid,
+    capabilities: ['host-discovery'],
+  } as const;
+  const pipeName = createAnalyticsHandoffPipeName(identity.workspaceId, identity.hostInstanceId);
+  const control = new AnalyticsHandoffControl({
+    registry: temporary.store,
+    identity,
+    key,
+    pipeName,
+    now: () => 100,
+    readInventory: () => { throw new Error('injected discovery failure'); },
+  });
+  try {
+    await control.start();
+    const request = createSignedAnalyticsHandoffRequest('status', { workspaceId: identity.workspaceId }, key, {
+      requestId: 'request-inventory-error', nonce: 'nonce-inventory-error', issuedAtMs: 100, expiresAtMs: 5_000,
+    });
+    const response = verifyAnalyticsHandoffResponse(await sendFrame(pipeName, request), key);
+    assert.equal(response.ok, true);
+    assert.deepEqual((response.result as { inventoryProof: { reasonCodes?: readonly string[] } }).inventoryProof.reasonCodes, ['inventory-discovery-error']);
+  } finally {
+    await control.stop();
     temporary.store.close();
     rmSync(temporary.root, { recursive: true, force: true });
   }

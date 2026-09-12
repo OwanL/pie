@@ -1506,7 +1506,7 @@ test('auto_retry_start emits retry.started with attempt/delay/error', () => {
 test('retry timing correlates scheduled delay with measured provider delay and duration', () => {
   const { deps, emitted } = createDeps();
   const context = createContext({
-    activeRequest: { id: 'req-retry', messageIndex: 1, aborted: false },
+    activeRequest: { id: 'req-retry', operationId: 'source-operation', messageIndex: 1, aborted: false },
   });
 
   handleSdkSessionEvent(deps, context, {
@@ -1532,6 +1532,11 @@ test('retry timing correlates scheduled delay with measured provider delay and d
   assert.equal((emitted[1]?.payload as any).retryId, 'req-retry:2');
   assert.equal((emitted[1]?.payload as any).measuredDelayMs, 0);
   assert.equal(typeof (emitted[1]?.payload as any).durationMs, 'number');
+  const measured = emitted[1]?.payload as import('../../../src/shared/protocol').RetryMeasuredPayload;
+  assert.equal(measured.operationId, 'source-operation');
+  assert.equal(measured.startedAt, started);
+  assert.equal(measured.providerAttemptStartedAt, started);
+  assert.equal(measured.endedAt! - measured.startedAt!, measured.durationMs);
 });
 
 test('auto_retry_end emits retry.ended with success/finalError', () => {

@@ -28,6 +28,7 @@ interface WorkerRuntimeHostInternals {
   handleSessionEvent: (context: SessionContext, event: SdkSessionEvent) => void;
   handleProviderIncident: (incident: ProviderIncident) => void;
   handleProviderProgress: (observation: ProviderTransportObservation) => void;
+  emitContextUsageChanged: (context: SessionContext, estimated?: number) => void;
   resolveNetworkProvider: (url: string, fallbackProvider?: string) => string | undefined;
   suppressNextReplacementOpened: boolean;
 }
@@ -102,6 +103,40 @@ function makeSessionEventContext(sessionPath: string): SessionContext {
 function waitForAsyncEvent(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
 }
+
+test('context source observations qualify prompt footprints separately from display fallbacks', () => {
+  const { host, sent } = makeHost();
+  const context = makeSessionEventContext('/sessions/context.jsonl');
+  let entries: unknown[] = [];
+  context.session = {
+    model: { id: 'source-model', provider: 'source-provider', contextWindow: 1000 },
+    sessionManager: { getBranch: () => entries },
+  } as unknown as SessionContext['session'];
+  const emit = () => getInternals(host).emitContextUsageChanged(context);
+  emit();
+  getInternals(host).emitContextUsageChanged(context, 200);
+  entries = [{ type: 'message', message: { role: 'assistant', usage: { total_tokens: 400 } } }];
+  emit();
+  entries = [{ type: 'message', message: { role: 'assistant', usage: { input: 10, cacheRead: 2, cacheWrite: 3, output: 4 } } }];
+  emit();
+  emit();
+  entries = [{ type: 'message', message: { role: 'assistant', usage: { input: 0, cacheRead: 0, cacheWrite: 0, output: 4 } } }];
+  emit();
+  const payloads = sent.filter((frame) => frame.event === 'contextUsage.changed')
+    .map((frame) => frame.payload as import('../../../src/shared/protocol').ContextUsageChangedPayload);
+  assert.deepEqual(payloads.map((payload) => [payload.source, payload.canonicalInputTokens]), [
+    ['unknown', null], ['postCompactionEstimate', 200], ['unknown', null],
+    ['provider', 15], ['provider', 15], ['provider', 0],
+  ]);
+  assert.equal(payloads[2]!.contextUsage!.tokens, 400, 'display fallback remains available');
+  assert.equal(payloads[5]!.contextUsage!.tokens, 4, 'display fallback is independent of a known zero prompt');
+  assert.equal(new Set(payloads.map((payload) => payload.observationId)).size, 6);
+  for (const payload of payloads) {
+    assert.ok(Number.isSafeInteger(payload.observedAt));
+    assert.equal(payload.modelId, 'source-model');
+    assert.equal(payload.provider, 'source-provider');
+  }
+});
 
 test('hot duplicate runs through the owning runtime replacement and suppresses its intermediate event', async () => {
   const { host } = makeHost();
@@ -363,7 +398,12 @@ test('agent_settled refreshes session.opened from the current session and preser
 
   assert.deepEqual(rebuildCalls, [[sessionPath, 'selection-1', 'operation-1', 3]]);
   const settledFrame = sent.find((frame) => frame.kind === 'runtime.event' && frame.event === 'agent.settled');
-  assert.deepEqual(settledFrame?.payload, {
+  const settledPayload = { ...(settledFrame?.payload as Record<string, unknown>) };
+  const occurredAt = settledPayload.occurredAt;
+  const endedAt = settledPayload.endedAt;
+  delete settledPayload.occurredAt;
+  delete settledPayload.endedAt;
+  assert.deepEqual(settledPayload, {
     sessionPath,
     capabilities: {
       billableActivity: false,
@@ -379,6 +419,8 @@ test('agent_settled refreshes session.opened from the current session and preser
     backendGeneration: 1,
     workerGeneration: 1,
   });
+  assert.equal(typeof occurredAt, 'number');
+  assert.equal(endedAt, occurredAt, 'source settlement timestamps share one sample');
   const openedFrames = sent.filter((frame) => frame.kind === 'runtime.event' && frame.event === 'session.opened');
   assert.equal(openedFrames.length, 1);
   const emittedPayload = openedFrames[0]!.payload as SessionOpenedPayload;

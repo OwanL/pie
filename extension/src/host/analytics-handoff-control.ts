@@ -13,6 +13,7 @@ import {
   type AnalyticsHandoffControlRequest,
   type AnalyticsHandoffControlResponse,
   type AnalyticsHandoffHostIdentity,
+  type AnalyticsHandoffInventoryProof,
   type AnalyticsHandoffStatus,
 } from '../../../shared/analytics/handoff.js';
 import {
@@ -26,6 +27,12 @@ export interface AnalyticsHandoffControlOptions {
   key?: string;
   pipeName?: string;
   now?: () => number;
+  /** Read-only reconciliation used to annotate status. It can never make
+   * `allHostsHandoffAvailable` true; an external producer still owns that
+   * decision and capability. */
+  readInventory?: () => Promise<AnalyticsHandoffInventoryProof>;
+  /** Test/diagnostic bound; production remains below the socket idle bound. */
+  inventoryReadTimeoutMs?: number;
   onError?: (error: Error, stage: string) => void;
 }
 
@@ -33,6 +40,8 @@ const MAX_SOCKET_IDLE_MS = 10_000;
 const MAX_SOCKET_LIFETIME_MS = ANALYTICS_HANDOFF_NONCE_WINDOW_MS;
 const MAX_SERVER_DRAIN_MS = 2_000;
 const MAX_OWNED_CONNECTIONS = 32;
+const INVENTORY_CACHE_MS = 1_000;
+const MAX_INVENTORY_READ_MS = MAX_SOCKET_IDLE_MS - 1_000;
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -87,12 +96,21 @@ export class AnalyticsHandoffControl {
   private available = false;
   private stopping = false;
   private stopPromise: Promise<void> | undefined;
+  private inventoryReadInFlight: Promise<AnalyticsHandoffInventoryProof> | undefined;
+  private inventoryCache: { expiresAtMs: number; proof: AnalyticsHandoffInventoryProof } | undefined;
+  private readonly inventoryReadTimeoutMs: number;
 
   constructor(private readonly options: AnalyticsHandoffControlOptions) {
     this.now = options.now ?? Date.now;
     this.key = options.key?.trim() || undefined;
     this.pipeName = options.pipeName
       ?? createAnalyticsHandoffPipeName(options.identity.workspaceId, options.identity.hostInstanceId);
+    this.inventoryReadTimeoutMs = Math.min(
+      MAX_INVENTORY_READ_MS,
+      options.inventoryReadTimeoutMs === undefined
+        ? MAX_INVENTORY_READ_MS
+        : Math.max(1, Math.floor(options.inventoryReadTimeoutMs)),
+    );
   }
 
   get endpointName(): string | undefined { return this.available ? this.pipeName : undefined; }
@@ -137,6 +155,7 @@ export class AnalyticsHandoffControl {
   private async performStop(): Promise<void> {
     this.stopping = true;
     this.available = false;
+    this.inventoryCache = undefined;
     try {
       const current = this.options.registry.getAnalyticsHost(this.options.identity.hostInstanceId);
       if (current && current.state !== 'stopped') {
@@ -201,7 +220,10 @@ export class AnalyticsHandoffControl {
 
   private listen(): Promise<void> {
     return new Promise((resolve, reject) => {
-      const server = createServer((socket) => {
+      // A caller may finish its request stream before asynchronous inventory
+      // work finishes. Keep the reply side open until handleFrame ends it;
+      // the existing idle/lifetime bounds still retire abandoned sockets.
+      const server = createServer({ allowHalfOpen: true }, (socket) => {
         if (this.ownedSockets.size >= MAX_OWNED_CONNECTIONS) {
           socket.destroy();
           return;
@@ -240,6 +262,7 @@ export class AnalyticsHandoffControl {
     const lifetimeTimer = setTimeout(() => socket.destroy(), MAX_SOCKET_LIFETIME_MS);
     lifetimeTimer.unref?.();
     socket.once('close', () => clearTimeout(lifetimeTimer));
+    socket.once('end', () => { if (!frameAccepted) socket.destroy(); });
     socket.on('data', (chunk: string) => {
       // A control connection carries exactly one request. Serializing a
       // second frame would race the first response's socket.end() and make
@@ -285,7 +308,7 @@ export class AnalyticsHandoffControl {
         throw new Error('handoff nonce capacity is exhausted; retry after expiry.');
       }
       this.seenNonces.set(request.nonce, request.expiresAtMs);
-      const result = this.handleRequest(request);
+      const result = await this.handleRequest(request);
       response = createSignedAnalyticsHandoffResponse(request.requestId, this.key, { ok: true, result });
     } catch (error) {
       try {
@@ -305,7 +328,59 @@ export class AnalyticsHandoffControl {
     }
   }
 
-  private handleRequest(request: AnalyticsHandoffControlRequest): AnalyticsHandoffStatus | { host: AnalyticsHandoffStatus['host'] } {
+  private async readInventoryProof(): Promise<AnalyticsHandoffInventoryProof> {
+    const fallback = (reasonCodes: readonly string[] = []): AnalyticsHandoffInventoryProof => ({
+      kind: 'registered-hosts-only',
+      complete: false,
+      reason: 'runtime-generation-and-process-reconciliation-unwired',
+      ...(reasonCodes.length > 0 ? { reasonCodes } : {}),
+    });
+    const reader = this.options.readInventory;
+    if (!reader) return fallback();
+    const now = this.now();
+    if (this.inventoryCache && this.inventoryCache.expiresAtMs > now) return this.inventoryCache.proof;
+    let read = this.inventoryReadInFlight;
+    if (!read) {
+      let underlying: Promise<AnalyticsHandoffInventoryProof>;
+      try {
+        underlying = Promise.resolve(reader());
+      } catch (error) {
+        this.options.onError?.(normalizeError(error), 'status.inventory');
+        return fallback(['inventory-discovery-error']);
+      }
+      let tracked: Promise<AnalyticsHandoffInventoryProof>;
+      tracked = underlying.then((proof) => {
+        if (this.inventoryReadInFlight === tracked) {
+          if (!this.stopping) {
+            this.inventoryCache = { expiresAtMs: this.now() + INVENTORY_CACHE_MS, proof };
+          }
+          this.inventoryReadInFlight = undefined;
+        }
+        return proof;
+      }, (error) => {
+        if (this.inventoryReadInFlight === tracked) this.inventoryReadInFlight = undefined;
+        this.options.onError?.(normalizeError(error), 'status.inventory');
+        return fallback(['inventory-discovery-error']);
+      });
+      this.inventoryReadInFlight = tracked;
+      read = tracked;
+    }
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    return await Promise.race([
+      read,
+      new Promise<AnalyticsHandoffInventoryProof>((_, reject) => {
+        timeout = setTimeout(() => reject(new Error('inventory discovery timed out.')), this.inventoryReadTimeoutMs);
+        timeout.unref?.();
+      }),
+    ]).catch((error): AnalyticsHandoffInventoryProof => {
+      this.options.onError?.(normalizeError(error), 'status.inventory');
+      return fallback(['inventory-discovery-timeout']);
+    }).finally(() => {
+      if (timeout) clearTimeout(timeout);
+    });
+  }
+
+  private async handleRequest(request: AnalyticsHandoffControlRequest): Promise<AnalyticsHandoffStatus | { host: AnalyticsHandoffStatus['host'] }> {
     if (request.operation === 'heartbeat') {
       const host = this.options.registry.heartbeatAnalyticsHost(
         this.options.identity.hostInstanceId,
@@ -328,8 +403,14 @@ export class AnalyticsHandoffControl {
       throw new Error('registered host identity is missing.');
     }
     const host = toStatusHost(currentRecord);
+    const inventoryProof = await this.readInventoryProof();
     // Keep the complete signed response comfortably below the frame limit.
-    while (hosts.length > 0 && Buffer.byteLength(JSON.stringify({ host, hosts }), 'utf8') > ANALYTICS_HANDOFF_MAX_STATUS_BYTES) {
+    while (hosts.length > 0 && Buffer.byteLength(JSON.stringify({
+      host,
+      hosts,
+      inventoryProof,
+      allHostsHandoffAvailable: false,
+    }), 'utf8') > ANALYTICS_HANDOFF_MAX_STATUS_BYTES) {
       hosts = hosts.slice(0, -1);
       truncated = true;
       nextCursor = hosts[hosts.length - 1]?.hostInstanceId;
@@ -339,11 +420,7 @@ export class AnalyticsHandoffControl {
       hosts,
       truncated,
       ...(truncated && nextCursor ? { nextCursor } : {}),
-      inventoryProof: {
-        kind: 'registered-hosts-only',
-        complete: false,
-        reason: 'runtime-generation-and-process-reconciliation-unwired',
-      },
+      inventoryProof,
       allHostsHandoffAvailable: false,
     };
   }

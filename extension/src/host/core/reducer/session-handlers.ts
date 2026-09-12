@@ -643,11 +643,11 @@ export function handleSessionNameDerived(state: ArchState, event: Extract<Event,
   return { state: nextState, effects: [] };
 }
 
-export function handleAgentSettled(state: ArchState, event: Extract<Event, { kind: 'AgentSettled' }>): ReducerResult {
+export function canAcceptAgentSettlement(state: ArchState, event: Extract<Event, { kind: 'AgentSettled' }>): boolean {
   if (event.backendGeneration !== undefined
     && event.currentBackendGeneration !== undefined
     && event.backendGeneration !== event.currentBackendGeneration) {
-    return { state, effects: [] };
+    return false;
   }
 
   const priorSettlement = state.sessions.settlementGenerationBySession[event.sessionPath];
@@ -655,7 +655,7 @@ export function handleAgentSettled(state: ArchState, event: Extract<Event, { kin
     && priorSettlement !== undefined
     && priorSettlement.backendGeneration === event.backendGeneration
     && event.workerGeneration < priorSettlement.workerGeneration) {
-    return { state, effects: [] };
+    return false;
   }
 
   const liveTurn = state.livePipeline.turnsBySession[event.sessionPath];
@@ -665,7 +665,7 @@ export function handleAgentSettled(state: ArchState, event: Extract<Event, { kin
       || event.attemptId !== liveTurn.attemptId
       || (liveTurn.operationId !== undefined && event.operationId !== liveTurn.operationId)))
     || (currentTurn && event.requestId !== currentTurn.requestId)) {
-    return { state, effects: [] };
+    return false;
   }
 
   const messageOperations = Object.values(state.operations).filter((candidate) =>
@@ -673,7 +673,7 @@ export function handleAgentSettled(state: ArchState, event: Extract<Event, { kin
     && (candidate.session.resolvedPath ?? candidate.session.pendingPath) === event.sessionPath,
   );
   const unresolvedMessageOperation = messageOperations.find((candidate) => !candidate.terminal);
-  if (event.operationId === undefined && unresolvedMessageOperation) return { state, effects: [] };
+  if (event.operationId === undefined && unresolvedMessageOperation) return false;
 
   if (event.operationId !== undefined) {
     const operation = state.operations[event.operationId];
@@ -685,7 +685,7 @@ export function handleAgentSettled(state: ArchState, event: Extract<Event, { kin
       || (operation.kind === 'message.send'
         ? event.operationAttempt !== operation.attempt
         : event.operationAttempt !== undefined && operation.attempt !== event.operationAttempt)) {
-      return { state, effects: [] };
+      return false;
     }
 
     // Registry insertion order is reducer-owned command order. Retain terminal
@@ -694,7 +694,7 @@ export function handleAgentSettled(state: ArchState, event: Extract<Event, { kin
     // capabilities established by a newer terminal operation.
     const latestMessageOperation = messageOperations.at(-1);
     if (latestMessageOperation && latestMessageOperation.operationId !== event.operationId) {
-      return { state, effects: [] };
+      return false;
     }
   }
 
@@ -706,23 +706,31 @@ export function handleAgentSettled(state: ArchState, event: Extract<Event, { kin
     if (priorSettlement.operationId !== undefined && !sameOperation) {
       const priorIndex = messageOperations.findIndex((candidate) => candidate.operationId === priorSettlement.operationId);
       const eventIndex = messageOperations.findIndex((candidate) => candidate.operationId === event.operationId);
-      if (eventIndex < 0 || (priorIndex >= 0 && eventIndex < priorIndex)) return { state, effects: [] };
+      if (eventIndex < 0 || (priorIndex >= 0 && eventIndex < priorIndex)) return false;
     }
     if (sameOperation) {
       if (priorSettlement.operationAttempt !== undefined
         && (event.operationAttempt === undefined
           || event.operationAttempt < priorSettlement.operationAttempt)) {
-        return { state, effects: [] };
+        return false;
       }
       if (event.operationAttempt === priorSettlement.operationAttempt
         && (event.requestId !== priorSettlement.requestId
           || event.turnId !== priorSettlement.turnId
           || event.attemptId !== priorSettlement.attemptId)) {
-        return { state, effects: [] };
+        return false;
       }
     } else if (event.operationId === undefined && priorSettlement.operationId !== undefined) {
-      return { state, effects: [] };
+      return false;
     }
+  }
+
+  return true;
+}
+
+export function handleAgentSettled(state: ArchState, event: Extract<Event, { kind: 'AgentSettled' }>): ReducerResult {
+  if (!canAcceptAgentSettlement(state, event)) {
+    return { state, effects: [] };
   }
 
   return {

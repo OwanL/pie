@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { rm as rmAsync } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -21,11 +22,18 @@ import {
   type AnalyticsWorkerLifecycleEvent,
 } from '../../src/analytics/recorder-supervisor.js';
 import { SqliteAnalyticsRecorder } from '../../src/analytics/sqlite-recorder.js';
+import { SQLITE_NATIVE_BUSY_TIMEOUT_MS } from '../../src/analytics/sqlite-lock-retry.js';
 
 const workerScript = fileURLToPath(new URL('./fixtures/recorder-supervisor-worker.cjs', import.meta.url));
 const lifecycleWorkerScript = fileURLToPath(new URL('./fixtures/recorder-supervisor-lifecycle-worker.cjs', import.meta.url));
 const sqliteWorkerScript = fileURLToPath(new URL('./fixtures/production-recorder-worker.mjs', import.meta.url));
 const sqliteWorkerExecArgv = [`--import=${new URL('../../node_modules/tsx/dist/loader.mjs', import.meta.url).href}`];
+const { DatabaseSync } = createRequire(process.execPath)('node:sqlite') as {
+  DatabaseSync: new (location: string, options?: { timeout?: number }) => {
+    exec(sql: string): void;
+    close(): void;
+  };
+};
 
 async function eventually(predicate: () => boolean, message: string, timeoutMs = 3_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
@@ -419,6 +427,107 @@ test('one, two, and four cold supervisors open one new SQLite database within on
     }
     if (primaryFailure !== undefined) throw primaryFailure;
     if (cleanupFailure !== undefined) throw cleanupFailure;
+  }
+});
+
+test('worker retries a capture transaction after the native busy window without dropping it', { timeout: 20_000 }, async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'pie-recorder-capture-lock-retry-'));
+  const databasePath = path.join(root, 'analytics.sqlite');
+  const supervisor = new AnalyticsRecorderSupervisor({
+    enabled: true,
+    workerScript: sqliteWorkerScript,
+    databasePath,
+    startupTimeoutMs: 10_000,
+    shutdownTimeoutMs: 10_000,
+    execArgv: sqliteWorkerExecArgv,
+    maxAutomaticRestarts: 0,
+  });
+  const blocker = new DatabaseSync(databasePath, { timeout: 100 });
+  let blockerClosed = false;
+  let releaseTimer: NodeJS.Timeout | undefined;
+  try {
+    await supervisor.start();
+    // Hold the write reservation beyond the recorder's existing 5 s native
+    // busy timeout. The worker must therefore receive SQLITE_BUSY once, yield,
+    // and retry the same idempotent transaction after this explicit release.
+    blocker.exec('BEGIN IMMEDIATE');
+    releaseTimer = setTimeout(() => {
+      try { blocker.exec('ROLLBACK'); } finally {
+        blocker.close();
+        blockerClosed = true;
+      }
+    }, SQLITE_NATIVE_BUSY_TIMEOUT_MS + 1_200);
+    supervisor.submit(observation(
+      'lock-retry-source',
+      { kind: 'session', rootSessionId: 'lock-retry-root' },
+      { stableOriginId: 'lock-retry-origin', processGeneration: 'lock-retry-process' },
+    ));
+    await supervisor.flush();
+    assert.equal(supervisor.backlog.deliveryFailures, 0, 'transient contention must not become a delivery failure');
+    assert.equal(supervisor.backlog.queuedRecords, 0, 'the retried capture must leave no retained ownership');
+    const workerStats = await supervisor.workerStats();
+    assert.equal(workerStats?.recorder.accepted, 1, 'the retried transaction must be accepted exactly once');
+    assert.equal(workerStats?.recorder.duplicates, 0, 'a lock retry must not replay a committed capture');
+    const delivery = workerStats?.delivery as {
+      observations?: { accepted?: number | string; replayed?: number | string };
+    } | undefined;
+    assert.equal(String(delivery?.observations?.accepted), '1');
+    assert.equal(String(delivery?.observations?.replayed), '0');
+    const reader = new SqliteAnalyticsRecorder(databasePath, { readOnly: true });
+    try {
+      assert.equal(reader.countTypedEntityObservations('execution', 'lock-retry-root'), 1);
+    } finally {
+      reader.close();
+    }
+    await supervisor.shutdown();
+  } finally {
+    if (releaseTimer) clearTimeout(releaseTimer);
+    if (!blockerClosed) {
+      try { blocker.exec('ROLLBACK'); } catch { /* preserve the primary failure */ }
+      blocker.close();
+    }
+    await supervisor.shutdown().catch(() => {});
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('worker exhausts the shared lock window and retains the failed batch for recovery', { timeout: 20_000 }, async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'pie-recorder-capture-lock-exhausted-'));
+  const databasePath = path.join(root, 'analytics.sqlite');
+  const supervisor = new AnalyticsRecorderSupervisor({
+    enabled: true,
+    workerScript: sqliteWorkerScript,
+    databasePath,
+    startupTimeoutMs: 10_000,
+    shutdownTimeoutMs: 10_000,
+    execArgv: sqliteWorkerExecArgv,
+    maxAutomaticRestarts: 0,
+  });
+  const blocker = new DatabaseSync(databasePath, { timeout: 100 });
+  try {
+    await supervisor.start();
+    blocker.exec('BEGIN IMMEDIATE');
+    supervisor.submit(observation(
+      'lock-exhausted-source',
+      { kind: 'session', rootSessionId: 'lock-exhausted-root' },
+      { stableOriginId: 'lock-exhausted-origin', processGeneration: 'lock-exhausted-process' },
+    ));
+    await eventually(
+      () => supervisor.lastDeliveryError instanceof AnalyticsRecorderWorkerRequestError,
+      'the exhausted worker lock window was not reported',
+      12_000,
+    );
+    const failure = supervisor.lastDeliveryError;
+    assert.ok(failure instanceof AnalyticsRecorderWorkerRequestError);
+    assert.equal(failure.code, 'database_locked');
+    assert.equal(failure.requestType, 'captureBatch');
+    assert.equal(supervisor.backlog.queuedRecords, 1, 'an exhausted lock retains the immutable capture');
+    assert.equal(supervisor.backlog.deliveryFailures, 1);
+  } finally {
+    try { blocker.exec('ROLLBACK'); } catch { /* preserve the primary failure */ }
+    blocker.close();
+    await supervisor.shutdown().catch(() => {});
+    rmSync(root, { recursive: true, force: true });
   }
 });
 

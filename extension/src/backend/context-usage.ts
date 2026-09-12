@@ -33,6 +33,14 @@ export function deriveContextUsageFromBranch(
   entries: SessionEntryLike[] | undefined,
   contextWindow: number | undefined,
 ): ContextWindowUsage | undefined {
+  return deriveContextUsageEvidenceFromBranch(entries, contextWindow)?.usage;
+}
+
+/** Preserve the display fallback while qualifying whether its prompt footprint is known. */
+export function deriveContextUsageEvidenceFromBranch(
+  entries: SessionEntryLike[] | undefined,
+  contextWindow: number | undefined,
+): { usage: ContextWindowUsage; promptFootprintTokens: number | null } | undefined {
   const normalizedContextWindow = normalizeContextWindow(contextWindow);
   if (!normalizedContextWindow || !entries || entries.length === 0) {
     return undefined;
@@ -60,11 +68,14 @@ export function deriveContextUsageFromBranch(
     const tokens = promptFootprint > 0 ? promptFootprint : usage.totalTokens;
     const percent = clampPercent((tokens / normalizedContextWindow) * 100);
 
-    return {
+    const presence = usage.tokenChannelPresence;
+    const promptFootprintKnown = !presence
+      || (presence.input && presence.cacheRead && presence.cacheWrite);
+    return { usage: {
       tokens,
       contextWindow: normalizedContextWindow,
       percent,
-    };
+    }, promptFootprintTokens: promptFootprintKnown ? promptFootprint : null };
   }
 
   return undefined;

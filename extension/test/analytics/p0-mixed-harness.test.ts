@@ -115,6 +115,32 @@ function validMixed(mode: 'full' | 'smoke' = 'full') {
     acceptedBytes: 10_000,
     endingBacklogRecords: 0,
     endingBacklogBytes: 0,
+    dailyProjection: {
+      writerPrepared: true,
+      preparedBeforePacedAndBurst: true,
+      timeZone: 'UTC',
+      todayStartMs: 1_780_000_000_000,
+      windowStartMs: 1_779_481_600_000,
+      windowEndMs: 1_780_086_400_000,
+      beforePaced: {
+        sourceProviderSettlementRows: 1,
+        dailyRows: 1,
+        dailyOccurrenceCount: '1',
+        todayOccurrenceCount: '1',
+        weekOccurrenceCount: '1',
+        todayInputTokens: '100',
+        weekInputTokens: '100',
+      },
+      afterBurst: {
+        sourceProviderSettlementRows: 2,
+        dailyRows: 1,
+        dailyOccurrenceCount: '2',
+        todayOccurrenceCount: '2',
+        weekOccurrenceCount: '2',
+        todayInputTokens: '200',
+        weekInputTokens: '200',
+      },
+    },
     pacedIngest: {
       sampleCount: plan.paced.sampleCount,
       ratePerSecond: plan.paced.ratePerSecond,
@@ -237,6 +263,7 @@ test('mixed setup failure writes partial evidence and retires owned helpers', { 
       scriptPath,
       '--scenario', 'mixed',
       '--smoke',
+      '--mixed-utc-day', '2026-09-13',
       '--seed', 'mixed-finally-failure-test',
       '--report', reportPath,
     ], {
@@ -259,6 +286,28 @@ test('mixed setup failure writes partial evidence and retires owned helpers', { 
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('mixed validation requires writer-prepared dated projection growth', () => {
+  const mixed = validMixed('full');
+  mixed.dailyProjection.afterBurst.dailyOccurrenceCount = '1';
+  const result = validateMixedEvidence(mixed, { mode: 'full' });
+  assert.equal(result.valid, false);
+  assert.match(result.errors.join('; '), /daily projection evidence/u);
+});
+
+test('mixed validation rejects an unprepared or stale projection window', () => {
+  const unprepared = validMixed('full');
+  unprepared.dailyProjection.writerPrepared = false;
+  const unpreparedResult = validateMixedEvidence(unprepared, { mode: 'full' });
+  assert.equal(unpreparedResult.valid, false);
+  assert.match(unpreparedResult.errors.join('; '), /writer preparation\/window/u);
+
+  const stale = validMixed('full');
+  stale.dailyProjection.windowStartMs += 86_400_000;
+  const staleResult = validateMixedEvidence(stale, { mode: 'full' });
+  assert.equal(staleResult.valid, false);
+  assert.match(staleResult.errors.join('; '), /writer preparation\/window/u);
 });
 
 test('mixed validation rejects unresolved saturation and a visible deleted refresh', () => {

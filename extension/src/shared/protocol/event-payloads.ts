@@ -367,6 +367,8 @@ export function isAgentSettledPayload(value: unknown): value is AgentSettledPayl
   return isObject(value)
     && isString(value.sessionPath)
     && isSessionCapabilities(value.capabilities)
+    && isOptionalFiniteNumber(value.occurredAt)
+    && isOptionalFiniteNumber(value.endedAt)
     && (value.operationId === undefined || isString(value.operationId))
     && (value.requestId === undefined || isString(value.requestId))
     && (value.turnId === undefined || isString(value.turnId))
@@ -391,6 +393,12 @@ export function isContextUsageChangedPayload(value: unknown): value is ContextUs
     isObject(value)
     && isString(value.sessionPath)
     && (value.contextUsage === null || isContextWindowUsage(value.contextUsage))
+    && isOptionalString(value.observationId)
+    && isOptionalFiniteNumber(value.observedAt)
+    && (value.source === undefined || value.source === 'provider' || value.source === 'postCompactionEstimate' || value.source === 'unknown')
+    && (value.canonicalInputTokens === null || isOptionalFiniteNumber(value.canonicalInputTokens))
+    && isOptionalString(value.modelId)
+    && isOptionalString(value.provider)
   );
 }
 
@@ -524,6 +532,10 @@ export function isRetryMeasuredPayload(value: unknown): value is RetryMeasuredPa
     && isString(value.sessionPath)
     && isString(value.requestId)
     && isString(value.retryId)
+    && isOptionalString(value.operationId)
+    && isOptionalFiniteNumber(value.startedAt)
+    && isOptionalFiniteNumber(value.providerAttemptStartedAt)
+    && isOptionalFiniteNumber(value.endedAt)
     && isOptionalFiniteNumber(value.measuredDelayMs)
     && isFiniteNumber(value.durationMs)
   );

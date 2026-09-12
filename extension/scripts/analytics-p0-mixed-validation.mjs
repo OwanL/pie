@@ -47,6 +47,11 @@ function isSafeNonNegativeInteger(value) {
   return Number.isSafeInteger(value) && value >= 0;
 }
 
+function isDecimalInteger(value) {
+  return (typeof value === 'string' && /^\d+$/.test(value))
+    || (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0);
+}
+
 function requireTimingSamples(values, label) {
   if (!Array.isArray(values) || values.length === 0) throw new Error(`${label} must be a non-empty timing array`);
   for (const [index, value] of values.entries()) {
@@ -357,6 +362,51 @@ export function validateMixedEvidence(mixed, { mode = 'full', recorderHeapProbeM
   if (mixed.acceptedRows !== expectedAcceptedRows) errors.push(`accepted rows must be ${expectedAcceptedRows}`);
   if (!isSafeNonNegativeInteger(mixed.acceptedBytes) || mixed.acceptedBytes <= 0) errors.push('accepted bytes must be a positive safe integer');
   if (mixed.endingBacklogRecords !== 0 || mixed.endingBacklogBytes !== 0) errors.push('mixed ending backlog must be empty');
+
+  const dailyProjection = mixed.dailyProjection;
+  const beforeProjection = dailyProjection?.beforePaced;
+  const afterProjection = dailyProjection?.afterBurst;
+  if (dailyProjection?.writerPrepared !== true
+    || dailyProjection.preparedBeforePacedAndBurst !== true
+    || dailyProjection.timeZone !== 'UTC'
+    || !Number.isSafeInteger(dailyProjection.todayStartMs)
+    || !Number.isSafeInteger(dailyProjection.windowStartMs)
+    || !Number.isSafeInteger(dailyProjection.windowEndMs)
+    || dailyProjection.windowStartMs >= dailyProjection.todayStartMs
+    || dailyProjection.todayStartMs >= dailyProjection.windowEndMs
+    || dailyProjection.todayStartMs - dailyProjection.windowStartMs !== 6 * 86_400_000
+    || dailyProjection.windowEndMs - dailyProjection.todayStartMs !== 86_400_000) {
+    errors.push('mixed daily projection writer preparation/window evidence is missing');
+  }
+  if (!beforeProjection || !afterProjection
+    || !isDecimalInteger(beforeProjection.sourceProviderSettlementRows)
+    || !isDecimalInteger(beforeProjection.dailyOccurrenceCount)
+    || !isDecimalInteger(beforeProjection.todayOccurrenceCount)
+    || !isDecimalInteger(beforeProjection.weekOccurrenceCount)
+    || !isDecimalInteger(beforeProjection.todayInputTokens)
+    || !isDecimalInteger(beforeProjection.weekInputTokens)
+    || !isDecimalInteger(afterProjection.sourceProviderSettlementRows)
+    || !isDecimalInteger(afterProjection.dailyOccurrenceCount)
+    || !isDecimalInteger(afterProjection.todayOccurrenceCount)
+    || !isDecimalInteger(afterProjection.weekOccurrenceCount)
+    || !isDecimalInteger(afterProjection.todayInputTokens)
+    || !isDecimalInteger(afterProjection.weekInputTokens)
+    || BigInt(String(beforeProjection.dailyOccurrenceCount)) <= 0n
+    || BigInt(String(afterProjection.dailyOccurrenceCount)) <= BigInt(String(beforeProjection.dailyOccurrenceCount))
+    || String(beforeProjection.sourceProviderSettlementRows) !== String(beforeProjection.dailyOccurrenceCount)
+    || String(afterProjection.sourceProviderSettlementRows) !== String(afterProjection.dailyOccurrenceCount)
+    || String(beforeProjection.todayOccurrenceCount) !== String(beforeProjection.dailyOccurrenceCount)
+    || String(afterProjection.todayOccurrenceCount) !== String(afterProjection.dailyOccurrenceCount)
+    || String(beforeProjection.todayOccurrenceCount) !== String(beforeProjection.weekOccurrenceCount)
+    || String(afterProjection.todayOccurrenceCount) !== String(afterProjection.weekOccurrenceCount)
+    || BigInt(String(beforeProjection.todayInputTokens)) <= 0n
+    || BigInt(String(afterProjection.todayInputTokens)) <= BigInt(String(beforeProjection.todayInputTokens))
+    || String(beforeProjection.todayInputTokens) !== String(beforeProjection.weekInputTokens)
+    || String(afterProjection.todayInputTokens) !== String(afterProjection.weekInputTokens)
+    || !isSafeNonNegativeInteger(beforeProjection.dailyRows) || beforeProjection.dailyRows <= 0
+    || !isSafeNonNegativeInteger(afterProjection.dailyRows) || afterProjection.dailyRows <= 0) {
+    errors.push('mixed daily projection evidence must show dated rows and an increased paced/burst occurrence count');
+  }
 
   const paced = mixed.pacedIngest;
   if (!paced || paced.sampleCount !== expected.paced.sampleCount || paced.ratePerSecond !== expected.paced.ratePerSecond) {

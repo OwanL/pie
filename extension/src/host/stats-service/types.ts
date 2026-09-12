@@ -1,4 +1,5 @@
 import type {
+  AgentSettledPayload,
   AssistantUsage,
   AuxiliaryLlmUsagePayload,
   ComposerInput,
@@ -36,8 +37,11 @@ export interface SessionRunState {
 }
 
 export interface RunObserver {
-  prepareForSend(sessionPath: string, inputs: ComposerInput[], initialUserMessage?: string): string;
-  onAssistantTurnStarted(sessionPath: string, turnId: string): void;
+  /** Optional null is an explicit identity miss: callers that have a
+   * protocol-owned turn must not fall back to an unrelated active operation.
+   * Omission retains the legacy adapter behavior for older direct callers. */
+  prepareForSend(sessionPath: string, inputs: ComposerInput[], initialUserMessage?: string, operationId?: string | null): string;
+  onAssistantTurnStarted(sessionPath: string, turnId: string, identity?: AssistantTurnIdentity): void;
   onSkillPruningUsage(
     sessionPath: string,
     messageId: string,
@@ -56,10 +60,16 @@ export interface RunObserver {
       provider?: string;
       occurredAt?: string;
       operationId?: string;
+      requestId?: string;
+      attemptId?: string;
       durableEntryId?: string;
+      generationDurationMs?: number;
     },
   ): void;
-  onAssistantTerminalWatermark?(watermark: LiveLifecycleWatermark): void;
+  onAssistantTerminalWatermark?(watermark: LiveLifecycleWatermark, operationId?: string | null): void;
+  /** Authoritative backend execution settlement. Registry mutation commits
+   * (including message-start acknowledgement) do not close this boundary. */
+  onAgentSettled?(payload: AgentSettledPayload): void;
   /** Transcript-derived usage is migration/rebuild input only. */
   onSessionUsageSnapshot(
     sessionPath: string,
@@ -98,11 +108,13 @@ export interface RunObserver {
     sourceId: string,
     measuredDelayMs: number | undefined,
     durationMs: number,
+    evidence?: Pick<import('../../shared/protocol').RetryMeasuredPayload, 'operationId' | 'startedAt' | 'providerAttemptStartedAt' | 'endedAt'>,
   ): void;
   onMessageEdited(sessionPath: string, messageId: string): void;
   onTruncatedAfter(sessionPath: string, messageId: string): void;
   onBackendError(sessionPath: string | undefined, code: string): void;
-  onContextUsageChanged(sessionPath: string, tokens: number | null, limit: number): void;
+  onContextUsageChanged(sessionPath: string, tokens: number | null, limit: number,
+    evidence?: Omit<import('../../shared/protocol').ContextUsageChangedPayload, 'sessionPath' | 'contextUsage'>): void;
   onBusyChanged(sessionPath: string, busy: boolean): void;
   onModelConfigChanged(sessionPath: string, modelId: string | undefined, thinkingLevel: ThinkingLevel | undefined, provider?: string): void;
   onUnsupportedInputAttempt(sessionPath: string): void;
@@ -125,12 +137,20 @@ export interface RunObserver {
   ): void;
 }
 
+export interface AssistantTurnIdentity {
+  operationId?: string | null;
+  requestId?: string;
+  attemptId?: string;
+  operationAttempt?: number;
+}
+
 export const NOOP_RUN_OBSERVER: RunObserver = {
   prepareForSend: () => 'noop-run',
   onAssistantTurnStarted: () => undefined,
   onSkillPruningUsage: () => undefined,
   onAssistantTurnEnded: () => undefined,
   onAssistantTerminalWatermark: () => undefined,
+  onAgentSettled: () => undefined,
   onSessionUsageSnapshot: () => undefined,
   onBranchObserved: () => undefined,
   onSessionDuplicated: () => undefined,

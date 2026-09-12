@@ -144,7 +144,11 @@ export function onMessageStarted(payload: MessageStartedPayload, deps: HandlerDe
 
   deps.state.bindRequestSessionPath(payload.requestId, sessionPath);
   reconcileServingModelConfig(sessionPath, payload.modelId, payload.thinkingLevel, payload.provider, deps);
-  deps.runObserver.onAssistantTurnStarted(sessionPath, payload.messageId);
+  deps.runObserver.onAssistantTurnStarted(sessionPath, payload.messageId, {
+    operationId: payload.operationId,
+    requestId: payload.requestId,
+    operationAttempt: payload.operationAttempt,
+  });
 
   deps.state.touchSessionTranscript(sessionPath);
 }
@@ -203,7 +207,9 @@ export function onMessageFinished(
       provider: message.provider,
       occurredAt: message.createdAt,
       operationId: payload.operationId,
+      requestId: payload.requestId,
       durableEntryId: message.durableEntryId,
+      generationDurationMs: message.durationMs,
     },
   );
   deps.state.unbindRequestSessionPath(payload.requestId);
@@ -295,6 +301,10 @@ export function onMessageAborted(
       undefined,
       'interrupted',
       undefined,
+      {
+        operationId: payload.operationId,
+        requestId: payload.requestId,
+      },
     );
   }
 
@@ -371,6 +381,7 @@ export function onRetryMeasured(payload: RetryMeasuredPayload, deps: HandlerDeps
     payload.retryId,
     payload.measuredDelayMs,
     payload.durationMs,
+    payload,
   );
 }
 

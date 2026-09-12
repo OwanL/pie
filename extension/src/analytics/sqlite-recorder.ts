@@ -44,6 +44,14 @@ import {
   type ProviderProjectionDatabase,
   type ProviderProjectionSettlement,
 } from './provider-model-projection.js';
+import {
+  applyExecutionSummaryDelta,
+  emptyExecutionSummary,
+  executionSummaryFromCounts,
+  type CanonicalExecutionSummary,
+  type ExecutionSummaryDeliveryCoverage,
+  type ExecutionSummaryScope,
+} from './execution-summary.js';
 
 interface SqliteRunResult {
   changes: number | bigint;
@@ -90,7 +98,9 @@ const FIXED_WRITER_STATEMENT_KEYS = [
   'projection.revision.read', 'projection.revision.update',
   'provider.accounting.lookup', 'provider.accounting.upsert',
   'provider.settlement.lookup', 'provider.settlement.insert',
-  'typed.execution.observation.insert', 'typed.execution.state.upsert',
+  'typed.execution.observation.insert', 'typed.execution.state.lookup',
+  'typed.execution.state.upsert', 'typed.execution.summary.lookup',
+  'typed.execution.summary.upsert', 'typed.execution.summary.delete',
   'typed.tool.observation.insert', 'typed.tool.state.upsert',
   'typed.activity.observation.insert', 'typed.activity.state.upsert',
   'typed.feature.observation.insert',
@@ -110,8 +120,8 @@ for (const kind of ['observations', 'details']) {
     WRITER_STATEMENT_KEYS.add(`delivery.${kind}.${outcome}.update`);
   }
 }
-// 42 fixed keys plus 12 delivery kind/outcome read/update combinations.
-if (WRITER_STATEMENT_KEYS.size !== 54) throw new Error('Analytics writer statement key inventory changed.');
+// 46 fixed keys plus 12 delivery kind/outcome read/update combinations.
+if (WRITER_STATEMENT_KEYS.size !== 58) throw new Error('Analytics writer statement key inventory changed.');
 const MAX_CACHED_WRITER_STATEMENTS = 64;
 const INSERT_GENERATION_SQL = `
   INSERT OR IGNORE INTO analytics_generations (generation_id, first_observed_at_ms) VALUES (?, ?)
@@ -155,7 +165,7 @@ function prepareWriterStatement(
 }
 
 const sqlite = createRequire(process.execPath)('node:sqlite') as SqliteModule;
-const DATABASE_SCHEMA_VERSION = 9;
+const DATABASE_SCHEMA_VERSION = 10;
 const BUSY_TIMEOUT_MS = 5_000;
 const MAX_PENDING_SEQUENCES_PER_PRODUCER = 4_096;
 const DEFAULT_QUERY_ROWS = 200;
@@ -309,12 +319,16 @@ export interface ScopedProviderSettlementPage {
   expectedRevision?: number | string;
 }
 
-export interface HistoricalDimensionSummary {
+export interface HistoricalDimensionSummary extends AnalyticsQuerySnapshotMetadata {
   revision: number | string;
+  scope: { kind: 'global' };
   providers: Array<Record<string, unknown>>;
   tools: Array<Record<string, unknown>>;
   activities: Array<Record<string, unknown>>;
   features: Array<Record<string, unknown>>;
+  /** Bounds apply before materialization, across one consistent snapshot. */
+  truncation: AnalyticsQueryTruncation;
+  maxRowsPerDimension: number;
 }
 
 export interface ProviderAccountingSummary {
@@ -350,6 +364,9 @@ export interface ProviderAggregateReadModel {
   revision: number | string;
   snapshotWatermark: number | string;
   accounting: ProviderAccountingSummary;
+  /** Captured root execution summary; lifecycle/timing coverage is scoped to
+   * retained rows and does not certify complete producer history. */
+  executionSummary: CanonicalExecutionSummary;
   groups: Array<Record<string, unknown>>;
   truncation: AnalyticsQueryTruncation;
 }
@@ -1188,6 +1205,190 @@ function migrateV8(database: SqliteDatabase): void {
   rebuildProviderProjection(database as unknown as ProviderProjectionDatabase);
 }
 
+/** Schema v9 -> v10: maintain the bounded root-agent execution summary.
+ *
+ * Execution state rows already contain the durable lifecycle identity.  The
+ * additive columns record which state transition settled it and the summary
+ * table keeps global/session counts out of the live aggregate read path.  The
+ * backfill joins the retained typed observation to its raw observation only
+ * to recover the original source key; it never invents a completion for a
+ * state that has no retained end observation.
+ */
+function migrateV9(database: SqliteDatabase): void {
+  const stateColumns = new Set((database.prepare('PRAGMA table_info(analytics_execution_states)').all() as Array<{ name: string }>)
+    .map((column) => column.name));
+  if (!stateColumns.has('settled')) {
+    database.exec(`ALTER TABLE analytics_execution_states
+      ADD COLUMN settled INTEGER NOT NULL DEFAULT 0 CHECK (settled IN (0, 1));`);
+  }
+  if (!stateColumns.has('settled_source_key')) {
+    database.exec('ALTER TABLE analytics_execution_states ADD COLUMN settled_source_key TEXT;');
+  }
+  if (!stateColumns.has('settled_revision')) {
+    database.exec('ALTER TABLE analytics_execution_states ADD COLUMN settled_revision TEXT;');
+  }
+  if (!stateColumns.has('began')) {
+    database.exec(`ALTER TABLE analytics_execution_states
+      ADD COLUMN began INTEGER NOT NULL DEFAULT 0 CHECK (began IN (0, 1));`);
+  }
+  if (!stateColumns.has('begin_source_key')) {
+    database.exec('ALTER TABLE analytics_execution_states ADD COLUMN begin_source_key TEXT;');
+  }
+  database.exec(`
+    DROP INDEX IF EXISTS analytics_execution_state_latest_idx;
+    CREATE INDEX IF NOT EXISTS analytics_execution_state_latest_global_idx
+      ON analytics_execution_states(
+        operation_kind, settled, CAST(settled_revision AS INTEGER), generation_id, execution_id
+      );
+    CREATE INDEX IF NOT EXISTS analytics_execution_state_latest_session_idx
+      ON analytics_execution_states(
+        root_session_id, operation_kind, settled,
+        CAST(settled_revision AS INTEGER), generation_id, execution_id
+      );
+    CREATE TABLE IF NOT EXISTS analytics_execution_summary (
+      scope_kind TEXT NOT NULL CHECK (scope_kind IN ('global', 'session')),
+      scope_key TEXT NOT NULL,
+      execution_count TEXT NOT NULL,
+      begun_count TEXT NOT NULL DEFAULT '0',
+      settled_count TEXT NOT NULL,
+      started_at_count TEXT NOT NULL DEFAULT '0',
+      ended_at_count TEXT NOT NULL DEFAULT '0',
+      projection_revision TEXT NOT NULL,
+      PRIMARY KEY(scope_kind, scope_key)
+    ) STRICT;
+  `);
+  const summaryColumns = new Set((database.prepare('PRAGMA table_info(analytics_execution_summary)').all() as Array<{ name: string }>)
+    .map((column) => column.name));
+  if (!summaryColumns.has('begun_count')) {
+    database.exec(`ALTER TABLE analytics_execution_summary
+      ADD COLUMN begun_count TEXT NOT NULL DEFAULT '0';`);
+  }
+  if (!summaryColumns.has('started_at_count')) {
+    database.exec(`ALTER TABLE analytics_execution_summary
+      ADD COLUMN started_at_count TEXT NOT NULL DEFAULT '0';`);
+  }
+  if (!summaryColumns.has('ended_at_count')) {
+    database.exec(`ALTER TABLE analytics_execution_summary
+      ADD COLUMN ended_at_count TEXT NOT NULL DEFAULT '0';`);
+  }
+  database.exec(`
+    DELETE FROM analytics_execution_summary;
+    UPDATE analytics_execution_states
+    SET operation_kind = 'agent-run'
+    WHERE EXISTS (
+      SELECT 1 FROM analytics_execution_observations typed
+      WHERE typed.generation_id = analytics_execution_states.generation_id
+        AND typed.execution_id = analytics_execution_states.execution_id
+        AND typed.operation_kind = 'agent-run'
+        AND typed.observation_kind IN ('begin', 'end')
+    );
+    UPDATE analytics_execution_states
+    SET started_at_ms = (
+          SELECT typed.started_at_ms
+          FROM analytics_execution_observations typed
+          WHERE typed.generation_id = analytics_execution_states.generation_id
+            AND typed.execution_id = analytics_execution_states.execution_id
+            AND typed.observation_kind = 'begin'
+            AND typed.operation_kind = 'agent-run'
+            AND typed.started_at_ms IS NOT NULL
+          ORDER BY CAST(typed.projection_revision AS INTEGER) ASC
+          LIMIT 1
+        ),
+        ended_at_ms = (
+          SELECT typed.ended_at_ms
+          FROM analytics_execution_observations typed
+          WHERE typed.generation_id = analytics_execution_states.generation_id
+            AND typed.execution_id = analytics_execution_states.execution_id
+            AND typed.observation_kind = 'end'
+            AND typed.operation_kind = 'agent-run'
+            AND typed.ended_at_ms IS NOT NULL
+          ORDER BY CAST(typed.projection_revision AS INTEGER) ASC
+          LIMIT 1
+        );
+    UPDATE analytics_execution_states
+    SET settled = 1,
+        settled_source_key = (
+          SELECT raw.source_key
+          FROM analytics_execution_observations typed
+          JOIN analytics_observations raw
+            ON raw.registry_key = typed.observation_registry_key
+          WHERE typed.generation_id = analytics_execution_states.generation_id
+            AND typed.execution_id = analytics_execution_states.execution_id
+            AND typed.observation_kind = 'end'
+            AND typed.operation_kind = 'agent-run'
+          ORDER BY CAST(typed.projection_revision AS INTEGER) DESC
+          LIMIT 1
+        ),
+        settled_revision = (
+          SELECT typed.projection_revision
+          FROM analytics_execution_observations typed
+          WHERE typed.generation_id = analytics_execution_states.generation_id
+            AND typed.execution_id = analytics_execution_states.execution_id
+            AND typed.observation_kind = 'end'
+            AND typed.operation_kind = 'agent-run'
+          ORDER BY CAST(typed.projection_revision AS INTEGER) DESC
+          LIMIT 1
+        )
+    WHERE EXISTS (
+      SELECT 1 FROM analytics_execution_observations typed
+      WHERE typed.generation_id = analytics_execution_states.generation_id
+        AND typed.execution_id = analytics_execution_states.execution_id
+        AND typed.observation_kind = 'end'
+        AND typed.operation_kind = 'agent-run'
+    );
+    UPDATE analytics_execution_states
+    SET began = 1,
+        begin_source_key = (
+          SELECT raw.source_key
+          FROM analytics_execution_observations typed
+          JOIN analytics_observations raw
+            ON raw.registry_key = typed.observation_registry_key
+          WHERE typed.generation_id = analytics_execution_states.generation_id
+            AND typed.execution_id = analytics_execution_states.execution_id
+            AND typed.observation_kind = 'begin'
+            AND typed.operation_kind = 'agent-run'
+          ORDER BY CAST(typed.projection_revision AS INTEGER) ASC
+          LIMIT 1
+        )
+    WHERE EXISTS (
+      SELECT 1 FROM analytics_execution_observations typed
+      WHERE typed.generation_id = analytics_execution_states.generation_id
+        AND typed.execution_id = analytics_execution_states.execution_id
+        AND typed.observation_kind = 'begin'
+        AND typed.operation_kind = 'agent-run'
+    );
+    INSERT INTO analytics_execution_summary (
+      scope_kind, scope_key, execution_count, begun_count, settled_count,
+      started_at_count, ended_at_count, projection_revision
+    ) VALUES ('global', '*',
+      CAST((SELECT COUNT(*) FROM analytics_execution_states
+        WHERE operation_kind = 'agent-run') AS TEXT),
+      CAST((SELECT COUNT(*) FROM analytics_execution_states
+        WHERE operation_kind = 'agent-run' AND began = 1) AS TEXT),
+      CAST((SELECT COUNT(*) FROM analytics_execution_states
+        WHERE operation_kind = 'agent-run' AND settled = 1) AS TEXT),
+      CAST((SELECT COUNT(*) FROM analytics_execution_states
+        WHERE operation_kind = 'agent-run' AND started_at_ms IS NOT NULL) AS TEXT),
+      CAST((SELECT COUNT(*) FROM analytics_execution_states
+        WHERE operation_kind = 'agent-run' AND ended_at_ms IS NOT NULL) AS TEXT),
+      COALESCE((SELECT revision FROM analytics_projection_state WHERE singleton = 1), '0'));
+    INSERT INTO analytics_execution_summary (
+      scope_kind, scope_key, execution_count, begun_count, settled_count,
+      started_at_count, ended_at_count, projection_revision
+    )
+    SELECT 'session', root_session_id,
+      CAST(COUNT(*) AS TEXT),
+      CAST(SUM(CASE WHEN began = 1 THEN 1 ELSE 0 END) AS TEXT),
+      CAST(SUM(CASE WHEN settled = 1 THEN 1 ELSE 0 END) AS TEXT),
+      CAST(SUM(CASE WHEN started_at_ms IS NOT NULL THEN 1 ELSE 0 END) AS TEXT),
+      CAST(SUM(CASE WHEN ended_at_ms IS NOT NULL THEN 1 ELSE 0 END) AS TEXT),
+      COALESCE((SELECT revision FROM analytics_projection_state WHERE singleton = 1), '0')
+    FROM analytics_execution_states
+    WHERE operation_kind = 'agent-run' AND root_session_id IS NOT NULL
+    GROUP BY root_session_id;
+  `);
+}
+
 function databaseTransaction<T>(database: SqliteDatabase, operation: () => T): T {
   database.exec('BEGIN IMMEDIATE');
   try {
@@ -1236,6 +1437,7 @@ function initializeSchema(database: SqliteDatabase, readOnly = false): void {
       migrateV6(database);
       migrateV7(database);
       migrateV8(database);
+      migrateV9(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
       return;
     }
@@ -1247,6 +1449,7 @@ function initializeSchema(database: SqliteDatabase, readOnly = false): void {
       migrateV6(database);
       migrateV7(database);
       migrateV8(database);
+      migrateV9(database);
       backfillV2(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
       return;
@@ -1258,6 +1461,7 @@ function initializeSchema(database: SqliteDatabase, readOnly = false): void {
       migrateV6(database);
       migrateV7(database);
       migrateV8(database);
+      migrateV9(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
       return;
     }
@@ -1267,6 +1471,7 @@ function initializeSchema(database: SqliteDatabase, readOnly = false): void {
       migrateV6(database);
       migrateV7(database);
       migrateV8(database);
+      migrateV9(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
       return;
     }
@@ -1275,6 +1480,7 @@ function initializeSchema(database: SqliteDatabase, readOnly = false): void {
       migrateV6(database);
       migrateV7(database);
       migrateV8(database);
+      migrateV9(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
       return;
     }
@@ -1283,6 +1489,7 @@ function initializeSchema(database: SqliteDatabase, readOnly = false): void {
       migrateV6(database);
       migrateV7(database);
       migrateV8(database);
+      migrateV9(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
       return;
     }
@@ -1290,17 +1497,25 @@ function initializeSchema(database: SqliteDatabase, readOnly = false): void {
       migrateV6(database);
       migrateV7(database);
       migrateV8(database);
+      migrateV9(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
       return;
     }
     if (version === 7) {
       migrateV7(database);
       migrateV8(database);
+      migrateV9(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
       return;
     }
     if (version === 8) {
       migrateV8(database);
+      migrateV9(database);
+      database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
+      return;
+    }
+    if (version === 9) {
+      migrateV9(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
     }
   });
@@ -1779,6 +1994,90 @@ function updateProviderAccountingProjection(
   `).run(subjectKind, subject, JSON.stringify(summary), revision);
 }
 
+interface StoredExecutionSummaryCounts {
+  execution_count: string | number | bigint;
+  begun_count: string | number | bigint;
+  settled_count: string | number | bigint;
+  started_at_count: string | number | bigint;
+  ended_at_count: string | number | bigint;
+}
+
+function safeExecutionSummaryCount(value: string | number | bigint, name: string): number {
+  let parsed: bigint;
+  try {
+    parsed = BigInt(value);
+  } catch {
+    throw new Error(`Canonical execution summary ${name} is not an integer.`);
+  }
+  if (parsed < 0n || parsed > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new Error(`Canonical execution summary ${name} is outside the safe range.`);
+  }
+  return Number(parsed);
+}
+
+/** Apply an incremental execution count to the one-row global/session
+ * projection. The read-modify-write is always performed by the caller's
+ * existing SQLite transaction, so retries cannot double-apply a deletion or
+ * pending-create bind. */
+function updateExecutionSummary(
+  database: SqliteDatabase,
+  statements: WriterStatementCache | undefined,
+  scopeKind: 'global' | 'session',
+  scopeKey: string,
+  revision: string,
+  delta: {
+    executionCount: number;
+    begunCount: number;
+    settledCount: number;
+    startedAtCount: number;
+    endedAtCount: number;
+  },
+): void {
+  if (!Number.isSafeInteger(delta.executionCount) || !Number.isSafeInteger(delta.settledCount)) {
+    throw new RangeError('Canonical execution summary delta must use safe integers.');
+  }
+  const row = prepareWriterStatement(database, statements, 'typed.execution.summary.lookup', `
+    SELECT execution_count, begun_count, settled_count, started_at_count, ended_at_count
+    FROM analytics_execution_summary WHERE scope_kind = ? AND scope_key = ?
+  `).get(scopeKind, scopeKey) as StoredExecutionSummaryCounts | undefined;
+  const current = row ? {
+    executionCount: safeExecutionSummaryCount(row.execution_count, 'execution_count'),
+    begunCount: safeExecutionSummaryCount(row.begun_count, 'begun_count'),
+    settledCount: safeExecutionSummaryCount(row.settled_count, 'settled_count'),
+    startedAtCount: safeExecutionSummaryCount(row.started_at_count, 'started_at_count'),
+    endedAtCount: safeExecutionSummaryCount(row.ended_at_count, 'ended_at_count'),
+  } : { executionCount: 0, begunCount: 0, settledCount: 0, startedAtCount: 0, endedAtCount: 0 };
+  const next = applyExecutionSummaryDelta(current, delta);
+  if (scopeKind === 'session' && next.executionCount === 0 && next.settledCount === 0) {
+    prepareWriterStatement(database, statements, 'typed.execution.summary.delete', `
+      DELETE FROM analytics_execution_summary WHERE scope_kind = ? AND scope_key = ?
+    `).run(scopeKind, scopeKey);
+    return;
+  }
+  prepareWriterStatement(database, statements, 'typed.execution.summary.upsert', `
+    INSERT INTO analytics_execution_summary (
+      scope_kind, scope_key, execution_count, begun_count, settled_count,
+      started_at_count, ended_at_count, projection_revision
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(scope_kind, scope_key) DO UPDATE SET
+      execution_count = excluded.execution_count,
+      begun_count = excluded.begun_count,
+      settled_count = excluded.settled_count,
+      started_at_count = excluded.started_at_count,
+      ended_at_count = excluded.ended_at_count,
+      projection_revision = excluded.projection_revision
+  `).run(
+    scopeKind,
+    scopeKey,
+    next.executionCount.toString(),
+    next.begunCount.toString(),
+    next.settledCount.toString(),
+    next.startedAtCount.toString(),
+    next.endedAtCount.toString(),
+    revision,
+  );
+}
+
 function applyProviderSettlement(
   database: SqliteDatabase,
   statements: WriterStatementCache | undefined,
@@ -1937,7 +2236,62 @@ function applyTypedObservation(
     observation.scope.rootSessionId ?? null,
   ] as const;
   if (observation.entityKind === 'execution') {
+    const operationKind = optionalString(fields.operationKind);
+    // Turn phases and transcript evidence are facets of the already-started
+    // agent execution. They must not replace its root kind in the durable
+    // state projection; only a lifecycle begin/end observation may establish
+    // or update that state-level classification.
+    const stateOperationKind = observation.observationKind === 'begin'
+      || observation.observationKind === 'end'
+      ? operationKind
+      : null;
+    // Facets are retained as observations, but cannot revise lifecycle state
+    // after the root execution has started or settled. In particular, a late
+    // assistant phase must not replace a terminal outcome or timing.
+    const stateOutcome = observation.observationKind === 'begin'
+      || observation.observationKind === 'end'
+      ? optionalString(fields.outcome)
+      : null;
+    const stateStartedAtMs = observation.observationKind === 'begin'
+      || observation.observationKind === 'end'
+      ? optionalTimestamp(fields.startedAtMs, 'fields.startedAtMs')
+      : null;
+    const stateEndedAtMs = observation.observationKind === 'begin'
+      || observation.observationKind === 'end'
+      ? optionalTimestamp(fields.endedAtMs, 'fields.endedAtMs')
+      : null;
+    const stateBegan = observation.observationKind === 'begin' ? 1 : 0;
+    const stateSettled = observation.observationKind === 'end' ? 1 : 0;
     const revision = nextProjectionRevision(database, statements);
+    const previousState = prepareWriterStatement(database, statements, 'typed.execution.state.lookup', `
+      SELECT operation_kind, began, settled, started_at_ms, ended_at_ms
+      FROM analytics_execution_states
+      WHERE generation_id = ? AND execution_id = ?
+    `).get(observation.generationId, observation.entityKey) as {
+      operation_kind: string | null;
+      began: number | bigint;
+      settled: number | bigint;
+      started_at_ms: string | null;
+      ended_at_ms: string | null;
+    } | undefined;
+    const previousOperationKind = previousState?.operation_kind ?? null;
+    const previousBegan = previousState ? Number(previousState.began) === 1 : false;
+    const previousSettled = previousState ? Number(previousState.settled) === 1 : false;
+    const previousStartedAt = previousState?.started_at_ms ?? null;
+    const previousEndedAt = previousState?.ended_at_ms ?? null;
+    const effectiveOperationKind = stateOperationKind ?? previousOperationKind;
+    const effectiveStartedAt = stateStartedAtMs ?? previousStartedAt;
+    const effectiveEndedAt = stateEndedAtMs ?? previousEndedAt;
+    const executionDelta = effectiveOperationKind === 'agent-run' && previousOperationKind !== 'agent-run'
+      ? 1 : 0;
+    const begunDelta = effectiveOperationKind === 'agent-run' && !previousBegan && stateBegan === 1
+      ? 1 : 0;
+    const settledDelta = effectiveOperationKind === 'agent-run' && !previousSettled && stateSettled === 1
+      ? 1 : 0;
+    const startedAtDelta = effectiveOperationKind === 'agent-run'
+      && previousStartedAt === null && effectiveStartedAt !== null ? 1 : 0;
+    const endedAtDelta = effectiveOperationKind === 'agent-run'
+      && previousEndedAt === null && effectiveEndedAt !== null ? 1 : 0;
     prepareWriterStatement(database, statements, 'typed.execution.observation.insert', `
       INSERT INTO analytics_execution_observations (
         observation_registry_key, generation_id, execution_id, observation_kind,
@@ -1946,7 +2300,7 @@ function applyTypedObservation(
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       ...common,
-      optionalString(fields.operationKind),
+      operationKind,
       optionalString(fields.outcome),
       optionalTimestamp(fields.startedAtMs, 'fields.startedAtMs'),
       optionalTimestamp(fields.endedAtMs, 'fields.endedAtMs'),
@@ -1956,21 +2310,49 @@ function applyTypedObservation(
     prepareWriterStatement(database, statements, 'typed.execution.state.upsert', `
       INSERT INTO analytics_execution_states (
         generation_id, execution_id, capture_subject_kind, capture_subject_key,
-        root_session_id, operation_kind, outcome, started_at_ms, ended_at_ms, projection_revision
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        root_session_id, operation_kind, outcome, started_at_ms, ended_at_ms,
+        began, begin_source_key, settled, settled_source_key, settled_revision, projection_revision
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(generation_id, execution_id) DO UPDATE SET
         operation_kind = COALESCE(excluded.operation_kind, operation_kind),
         outcome = COALESCE(excluded.outcome, outcome),
         started_at_ms = COALESCE(excluded.started_at_ms, started_at_ms),
         ended_at_ms = COALESCE(excluded.ended_at_ms, ended_at_ms),
+        began = MAX(began, excluded.began),
+        begin_source_key = COALESCE(begin_source_key, excluded.begin_source_key),
+        settled = MAX(settled, excluded.settled),
+        settled_source_key = COALESCE(excluded.settled_source_key, settled_source_key),
+        settled_revision = COALESCE(excluded.settled_revision, settled_revision),
         projection_revision = excluded.projection_revision
     `).run(
       observation.generationId, observation.entityKey, observation.captureSubject.kind,
       subjectKey(observation), observation.scope.rootSessionId ?? null,
-      optionalString(fields.operationKind), optionalString(fields.outcome),
-      optionalTimestamp(fields.startedAtMs, 'fields.startedAtMs'),
-      optionalTimestamp(fields.endedAtMs, 'fields.endedAtMs'), revision,
+      stateOperationKind, stateOutcome, stateStartedAtMs, stateEndedAtMs, stateBegan,
+      observation.observationKind === 'begin' ? observation.sourceKey : null,
+      stateSettled,
+      observation.observationKind === 'end' ? observation.sourceKey : null,
+      observation.observationKind === 'end' ? revision : null,
+      revision,
     );
+    if (executionDelta !== 0 || begunDelta !== 0 || settledDelta !== 0
+      || startedAtDelta !== 0 || endedAtDelta !== 0) {
+      updateExecutionSummary(database, statements, 'global', '*', revision, {
+        executionCount: executionDelta,
+        begunCount: begunDelta,
+        settledCount: settledDelta,
+        startedAtCount: startedAtDelta,
+        endedAtCount: endedAtDelta,
+      });
+      if (observation.captureSubject.kind === 'session' && observation.scope.rootSessionId) {
+        updateExecutionSummary(database, statements, 'session', observation.scope.rootSessionId, revision, {
+          executionCount: executionDelta,
+          begunCount: begunDelta,
+          settledCount: settledDelta,
+          startedAtCount: startedAtDelta,
+          endedAtCount: endedAtDelta,
+        });
+      }
+    }
     return true;
   }
   if (observation.entityKind === 'toolCall') {
@@ -2787,11 +3169,33 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
         AND json_extract(payload_json, '$.fields.sourceSessionId') = ?
     `).run(rootSessionId).changes);
     subtractFactBytes(this.database, this.writerStatements, sourceCopyBytes);
+    const removedExecutionRows = this.database.prepare(`
+      SELECT operation_kind, began, settled, started_at_ms, ended_at_ms
+      FROM analytics_execution_states WHERE ${subjectFilter}
+    `).all(rootSessionId, rootSessionId) as Array<{
+      operation_kind: string | null;
+      began: number | bigint;
+      settled: number | bigint;
+      started_at_ms: string | null;
+      ended_at_ms: string | null;
+    }>;
+    let removedExecutionCount = 0;
+    let removedBegunExecutionCount = 0;
+    let removedSettledExecutionCount = 0;
+    let removedStartedAtCount = 0;
+    let removedEndedAtCount = 0;
+    for (const row of removedExecutionRows) {
+      if (row.operation_kind !== 'agent-run') continue;
+      removedExecutionCount += 1;
+      if (Number(row.began) === 1) removedBegunExecutionCount += 1;
+      if (Number(row.settled) === 1) removedSettledExecutionCount += 1;
+      if (row.started_at_ms !== null) removedStartedAtCount += 1;
+      if (row.ended_at_ms !== null) removedEndedAtCount += 1;
+    }
     const tableDeletesStarted = performance.now();
     for (const table of [
       'analytics_provider_settlements',
       'analytics_execution_observations',
-      'analytics_execution_states',
       'analytics_tool_observations',
       'analytics_tool_states',
       'analytics_activity_observations',
@@ -2806,6 +3210,26 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
       this.database.prepare(`DELETE FROM ${table} WHERE ${subjectFilter}`).run(rootSessionId, rootSessionId);
       mark(`delete:${table}`, perTableStarted);
     }
+    if (removedExecutionCount > 0) {
+      updateExecutionSummary(this.database, this.writerStatements, 'global', '*', revision, {
+        executionCount: -removedExecutionCount,
+        begunCount: -removedBegunExecutionCount,
+        settledCount: -removedSettledExecutionCount,
+        startedAtCount: -removedStartedAtCount,
+        endedAtCount: -removedEndedAtCount,
+      });
+      updateExecutionSummary(this.database, this.writerStatements, 'session', rootSessionId, revision, {
+        executionCount: -removedExecutionCount,
+        begunCount: -removedBegunExecutionCount,
+        settledCount: -removedSettledExecutionCount,
+        startedAtCount: -removedStartedAtCount,
+        endedAtCount: -removedEndedAtCount,
+      });
+    }
+    const executionStateStarted = performance.now();
+    this.database.prepare(`DELETE FROM analytics_execution_states WHERE ${subjectFilter}`)
+      .run(rootSessionId, rootSessionId);
+    mark('delete:analytics_execution_states', executionStateStarted);
     mark('tableDeletesTotal', tableDeletesStarted);
     const subjectSumStarted = performance.now();
     const subjectBytes = BigInt((this.database.prepare(`
@@ -2932,6 +3356,22 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
       }
 
       const revision = nextProjectionRevision(this.database, this.writerStatements);
+      const pendingExecutionCounts = this.database.prepare(`
+        SELECT COUNT(*) AS execution_count,
+          COALESCE(SUM(CASE WHEN began = 1 THEN 1 ELSE 0 END), 0) AS begun_count,
+          COALESCE(SUM(CASE WHEN settled = 1 THEN 1 ELSE 0 END), 0) AS settled_count,
+          COALESCE(SUM(CASE WHEN started_at_ms IS NOT NULL THEN 1 ELSE 0 END), 0) AS started_at_count,
+          COALESCE(SUM(CASE WHEN ended_at_ms IS NOT NULL THEN 1 ELSE 0 END), 0) AS ended_at_count
+        FROM analytics_execution_states
+        WHERE capture_subject_kind = 'pendingCreate'
+          AND capture_subject_key = ? AND operation_kind = 'agent-run'
+      `).get(pendingOperationId) as {
+        execution_count: number | bigint;
+        begun_count: number | bigint;
+        settled_count: number | bigint;
+        started_at_count: number | bigint;
+        ended_at_count: number | bigint;
+      };
       const pendingSettlements = this.database.prepare(`
         SELECT normalized_base_input_tokens AS input_tokens,
           normalized_output_tokens AS output_tokens,
@@ -2978,6 +3418,17 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
           SET capture_subject_kind = 'session', capture_subject_key = ?, root_session_id = ?
           WHERE capture_subject_kind = 'pendingCreate' AND capture_subject_key = ?
         `).run(rootSessionId, rootSessionId, pendingOperationId);
+      }
+      const pendingExecutionCount = toNumber(pendingExecutionCounts.execution_count);
+      const pendingSettledCount = toNumber(pendingExecutionCounts.settled_count);
+      if (pendingExecutionCount > 0) {
+        updateExecutionSummary(this.database, this.writerStatements, 'session', rootSessionId, revision, {
+          executionCount: pendingExecutionCount,
+          begunCount: toNumber(pendingExecutionCounts.begun_count),
+          settledCount: pendingSettledCount,
+          startedAtCount: toNumber(pendingExecutionCounts.started_at_count),
+          endedAtCount: toNumber(pendingExecutionCounts.ended_at_count),
+        });
       }
       const movedObservationCount = toNumber(this.database.prepare(`
         UPDATE analytics_observations
@@ -3833,35 +4284,143 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
     });
   }
 
-  readHistoricalDimensionSummary(): HistoricalDimensionSummary {
+  readHistoricalDimensionSummary(
+    options: { maxRowsPerDimension?: number; maxBytes?: number; maxCellBytes?: number } = {},
+  ): HistoricalDimensionSummary {
     this.assertOpen();
-    return this.snapshot(() => ({
-      revision: this.getProjectionRevision(),
-      providers: this.database.prepare(`
+    const maxRowsPerDimension = boundedPositiveInteger(
+      options.maxRowsPerDimension, DEFAULT_QUERY_ROWS, MAX_QUERY_ROWS, 'dimension maxRowsPerDimension',
+    );
+    const maxBytes = boundedPositiveInteger(options.maxBytes, DEFAULT_QUERY_BYTES, MAX_QUERY_BYTES, 'dimension maxBytes');
+    const maxCellBytes = boundedPositiveInteger(options.maxCellBytes, Math.min(64 * 1024, maxBytes), maxBytes, 'dimension maxCellBytes');
+    return this.snapshot(() => {
+      const metadata = this.readQuerySnapshotMetadata();
+      const revision = metadata.projectionRevision;
+      const truncation: AnalyticsQueryTruncation = { rowLimit: false, byteLimit: false, cellLimit: false };
+      let resultBytes = 0;
+      // Historical membership can have unbounded cardinality. Stream capped
+      // groups instead of allocating the full result before the IPC size check.
+      // The byte budget is shared by all four dimensions, not renewed per query.
+      const readGroups = (sql: string): Array<Record<string, unknown>> => {
+        if (truncation.byteLimit) return [];
+        const rows: Array<Record<string, unknown>> = [];
+        for (const raw of this.database.prepare(`${sql} LIMIT ?`).iterate(maxRowsPerDimension + 1) as Iterable<Record<string, unknown>>) {
+          if (rows.length >= maxRowsPerDimension) {
+            truncation.rowLimit = true;
+            break;
+          }
+          const row: Record<string, unknown> = {};
+          for (const [key, value] of Object.entries(raw)) {
+            const encoded = encodeQueryCell(value, maxCellBytes);
+            row[key] = encoded.value;
+            if (encoded.truncated) truncation.cellLimit = true;
+          }
+          const rowBytes = Buffer.byteLength(serialize(row), 'utf8');
+          if (resultBytes + rowBytes > maxBytes) {
+            truncation.byteLimit = true;
+            break;
+          }
+          resultBytes += rowBytes;
+          rows.push(row);
+        }
+        return rows;
+      };
+      const providers = readGroups(`
         SELECT provider, effective_model, purpose, outcome, COUNT(*) AS occurrence_count
         FROM analytics_provider_settlements
         GROUP BY provider, effective_model, purpose, outcome
         ORDER BY provider, effective_model, purpose, outcome
-      `).all() as Array<Record<string, unknown>>,
-      tools: this.database.prepare(`
+      `);
+      const tools = readGroups(`
         SELECT tool_definition_id, outcome, COUNT(*) AS occurrence_count
         FROM analytics_tool_states
         GROUP BY tool_definition_id, outcome
         ORDER BY tool_definition_id, outcome
-      `).all() as Array<Record<string, unknown>>,
-      activities: this.database.prepare(`
+      `);
+      const activities = readGroups(`
         SELECT activity_kind, coverage, COUNT(*) AS occurrence_count
         FROM analytics_activity_states
         GROUP BY activity_kind, coverage
         ORDER BY activity_kind, coverage
-      `).all() as Array<Record<string, unknown>>,
-      features: this.database.prepare(`
+      `);
+      const features = readGroups(`
         SELECT feature, decision, rule_version, COUNT(*) AS occurrence_count
         FROM analytics_feature_observations
         GROUP BY feature, decision, rule_version
         ORDER BY feature, decision, rule_version
-      `).all() as Array<Record<string, unknown>>,
-    }));
+      `);
+      return { ...metadata, revision, scope: { kind: 'global' }, providers, tools, activities, features, truncation, maxRowsPerDimension };
+    });
+  }
+
+  /** Bounded maintained summary of root agent-run executions. It reads one
+   * summary row and at most one settled state from the same SQLite snapshot;
+   * provider invocation and assistant-turn rows are deliberately excluded. */
+  readExecutionSummary(rootSessionId?: string): CanonicalExecutionSummary {
+    this.assertOpen();
+    if (rootSessionId !== undefined && (!rootSessionId.trim() || rootSessionId.includes('\0'))) {
+      throw new Error('Canonical analytics rootSessionId must be a non-empty string without NUL.');
+    }
+    return this.snapshot(() => this.readExecutionSummaryInSnapshot(
+      rootSessionId,
+      this.getProjectionRevision(),
+    ));
+  }
+
+  private readExecutionSummaryInSnapshot(
+    rootSessionId: string | undefined,
+    revision: number | string,
+  ): CanonicalExecutionSummary {
+    const scope: ExecutionSummaryScope = rootSessionId === undefined
+      ? { kind: 'global' }
+      : { kind: 'session', rootSessionId };
+    const deliveryRow = this.database.prepare(`
+      SELECT delivery_history_coverage FROM analytics_delivery_accounting WHERE singleton = 1
+    `).get() as { delivery_history_coverage: string } | undefined;
+    const deliveryCoverage: ExecutionSummaryDeliveryCoverage = deliveryRow?.delivery_history_coverage === 'complete'
+      || deliveryRow?.delivery_history_coverage === 'retained_only'
+      ? deliveryRow.delivery_history_coverage
+      : 'unknown';
+    const row = this.database.prepare(`
+      SELECT execution_count, begun_count, settled_count, started_at_count, ended_at_count
+      FROM analytics_execution_summary WHERE scope_kind = ? AND scope_key = ?
+    `).get(scope.kind, rootSessionId ?? '*') as StoredExecutionSummaryCounts | undefined;
+    if (!row) return emptyExecutionSummary(revision, scope, deliveryCoverage);
+    const executionCount = safeExecutionSummaryCount(row.execution_count, 'execution_count');
+    const begunCount = safeExecutionSummaryCount(row.begun_count, 'begun_count');
+    const settledCount = safeExecutionSummaryCount(row.settled_count, 'settled_count');
+    const startedAtCount = safeExecutionSummaryCount(row.started_at_count, 'started_at_count');
+    const endedAtCount = safeExecutionSummaryCount(row.ended_at_count, 'ended_at_count');
+    const latestRow = this.database.prepare(`
+      SELECT generation_id, execution_id, settled_source_key, started_at_ms, ended_at_ms
+      FROM analytics_execution_states
+      WHERE operation_kind = 'agent-run' AND settled = 1
+        ${rootSessionId === undefined ? '' : 'AND root_session_id = ?'}
+      ORDER BY CAST(settled_revision AS INTEGER) DESC, generation_id DESC, execution_id DESC
+      LIMIT 1
+    `).get(...(rootSessionId === undefined ? [] : [rootSessionId])) as {
+      generation_id: string;
+      execution_id: string;
+      settled_source_key: string | null;
+      started_at_ms: string | null;
+      ended_at_ms: string | null;
+    } | undefined;
+    const decodeTimestamp = (value: string | null | undefined): number | string | null => (
+      value === null || value === undefined ? null : encodeInt64(value)
+    );
+    return executionSummaryFromCounts(revision, scope, {
+      executionCount,
+      begunCount,
+      settledCount,
+      startedAtCount,
+      endedAtCount,
+    }, latestRow ? {
+      generationId: latestRow.generation_id,
+      executionId: latestRow.execution_id,
+      sourceKey: latestRow.settled_source_key,
+      startedAtMs: decodeTimestamp(latestRow.started_at_ms),
+      endedAtMs: decodeTimestamp(latestRow.ended_at_ms),
+    } : null, deliveryCoverage);
   }
 
   /** Bounded global provider aggregate. Accounting, grouped dimensions, the
@@ -3891,6 +4450,7 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
     return this.snapshot(() => {
       const revision = this.getProjectionRevision();
       const accounting = this.readProviderAccountingSummaryInSnapshot(undefined, revision);
+      const executionSummary = this.readExecutionSummaryInSnapshot(undefined, revision);
       const projection = readProviderModelGroups(
         this.database as unknown as ProviderProjectionDatabase,
         {
@@ -3908,6 +4468,7 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
         revision,
         snapshotWatermark: this.readObservationWatermark(),
         accounting,
+        executionSummary,
         groups: truncated ? rows.slice(0, maxGroups) : rows,
         truncation: { rowLimit: truncated, byteLimit: false, cellLimit: false },
       };

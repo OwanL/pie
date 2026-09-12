@@ -17,6 +17,7 @@ import type {
   ProviderSettlementReadModel,
   ScopedProviderSettlementReadModel,
 } from './sqlite-recorder.js';
+import type { CanonicalExecutionSummary } from './execution-summary.js';
 
 /**
  * Canonical analytics filename inside the canonical `analytics/` data root.
@@ -322,6 +323,18 @@ export class CanonicalAnalyticsReadModel {
     }, signal);
   }
 
+  /** Bounded maintained root agent-run execution counts and latest settled
+   * identity. Provider calls and assistant-turn facets are excluded. */
+  readExecutionSummary(rootSessionId?: string, signal?: AbortSignal): Promise<CanonicalExecutionSummary> {
+    if (rootSessionId !== undefined && (!rootSessionId.trim() || rootSessionId.includes('\0'))) {
+      throw new Error('Canonical analytics rootSessionId must be a non-empty string without NUL.');
+    }
+    return this.client.query<CanonicalExecutionSummary>({
+      type: 'executionSummary',
+      rootSessionId,
+    }, signal);
+  }
+
   /** Accounting and bounded provider/model/date groups from one recorder
    * snapshot. The result revision is the authority for consumer freshness. */
   readProviderAggregateSummary(
@@ -370,9 +383,14 @@ export class CanonicalAnalyticsReadModel {
     })();
   }
 
-  /** Historical provider/tool/activity/feature dimension membership. */
+  /** Bounded historical membership. Inspect truncation; use explicit SQL for
+   * narrower scopes when these convenience groups exceed the display limits. */
   readHistoricalDimensions(signal?: AbortSignal): Promise<HistoricalDimensionSummary> {
-    return this.client.query<HistoricalDimensionSummary>({ type: 'historicalDimensions' }, signal);
+    return this.client.query<HistoricalDimensionSummary>({
+      type: 'historicalDimensions',
+      maxRowsPerDimension: this.maxRows,
+      maxResultBytes: this.maxResultBytes,
+    }, signal);
   }
 
   private delay(ms: number, signal?: AbortSignal): Promise<void> {

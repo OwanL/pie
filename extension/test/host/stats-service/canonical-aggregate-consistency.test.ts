@@ -21,7 +21,7 @@ function emptyCoverage() {
   };
 }
 
-function aggregateAt(revision: string): ProviderAggregateReadModel {
+function aggregateAt(revision: string, executionCount = 0): ProviderAggregateReadModel {
   return {
     revision,
     snapshotWatermark: '0',
@@ -39,6 +39,17 @@ function aggregateAt(revision: string): ProviderAggregateReadModel {
         reportedCount: 0,
         calculatedCount: 0,
       },
+    },
+    executionSummary: {
+      revision,
+      scope: { kind: 'global' },
+      executionCount,
+      begunCount: executionCount,
+      settledCount: executionCount,
+      lifecycleCoverage: 'known',
+      timingCoverage: 'known',
+      deliveryCoverage: 'complete',
+      latestSettled: null,
     },
     groups: [],
     truncation: { rowLimit: false, byteLimit: false, cellLimit: false },
@@ -112,7 +123,7 @@ test('canonical aggregate publishes after a live tick and does not launch a post
     readProviderAggregateSummary: async () => {
       readStarted();
       await readGate;
-      return aggregateAt('1');
+      return aggregateAt('1', 2);
     },
     readRevision: async () => {
       readRevisionCalls += 1;
@@ -154,6 +165,7 @@ test('canonical aggregate publishes after a live tick and does not launch a post
     const aggregate = service.getAggregateStats();
     assert.equal(aggregate.ready, true);
     assert.equal(aggregate.runningSessionCount, 1, 'the latest live session count must merge into the durable snapshot');
+    assert.equal(aggregate.runCount, 2, 'canonical aggregate runCount must use root execution summary');
     assert.equal(readRevisionCalls, 0);
     assert.equal(changed, 1);
   } finally {

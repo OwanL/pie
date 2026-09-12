@@ -11,6 +11,8 @@ import {
   type AnalyticsEntityKind,
   type AnalyticsExecutionFields,
   type AnalyticsFeatureObservationFields,
+  type AnalyticsContextObservationFields,
+  type AnalyticsLatencyFields,
   type AnalyticsObservation,
   type AnalyticsObservationKind,
   type AnalyticsProviderCallFields,
@@ -341,6 +343,69 @@ export class CanonicalAnalyticsCapture {
     });
   }
 
+  /** Capture the latest provider context footprint as a point observation.
+   * This is deliberately separate from provider settlements: input tokens are
+   * state at one observed boundary and must never be summed as historical
+   * usage. Equal values at different source observations remain distinct;
+   * replay uses the original source identity and timestamp. */
+  captureContextObservation(
+    context: AnalyticsSessionContext,
+    observationId: string,
+    observedAtMs: number,
+    fields: Omit<AnalyticsContextObservationFields, 'observedAtMs'>,
+  ): AnalyticsCaptureStatus {
+    const subjectId = analyticsRootSessionId(context.sessionId, context.sessionPath);
+    if (!observationId.trim()) return 'rejected';
+    const sourceKey = `context-observation:${createHash('sha256').update(JSON.stringify([
+      subjectId, observationId,
+    ])).digest('hex')}`;
+    const observationFields: AnalyticsContextObservationFields = {
+      ...fields,
+      observedAtMs,
+    };
+    return this.submit(
+      context,
+      'contextObservation',
+      `context:${subjectId}`,
+      'observation',
+      sourceKey,
+      observedAtMs,
+      observationFields,
+    );
+  }
+
+  /** Attach measured latency facets to one canonical assistant execution.
+   * Provider/header/full-operation boundaries remain independently nullable;
+   * callers must supply only timestamps measured by their owning source. */
+  captureLatency(
+    context: AnalyticsSessionContext,
+    executionId: string,
+    turnId: string | undefined,
+    sourceKey: string,
+    observedAtMs: number,
+    fields: AnalyticsLatencyFields,
+  ): AnalyticsCaptureStatus {
+    const normalizedExecutionId = executionId.trim();
+    if (!normalizedExecutionId || !sourceKey.trim()) return 'rejected';
+    return this.submit(
+      context,
+      'execution',
+      normalizedExecutionId,
+      'phase',
+      sourceKey,
+      observedAtMs,
+      {
+        operationId: normalizedExecutionId,
+        ...(context.runId ? { runId: context.runId } : {}),
+        ...(turnId?.trim() ? { turnId: turnId.trim() } : {}),
+        operationKind: 'assistant-turn',
+        source: 'host-latency',
+        latency: fields,
+      },
+      { executionId: normalizedExecutionId },
+    );
+  }
+
   captureTool(
     context: AnalyticsSessionContext,
     toolCall: ToolCall,
@@ -369,6 +434,19 @@ export class CanonicalAnalyticsCapture {
     if (!this.enabled || !this.options.detailSink) return factStatus;
     const stableSessionId = context.sessionId?.trim() || undefined;
     try {
+      const detail = {
+        phase,
+        toolDefinitionId: toolCall.name,
+        input: toolCall.input,
+        argumentsText: toolCall.argumentsText,
+        result: toolCall.result,
+        detailRef: toolCall.detailRef,
+        resultObserved: toolCall.result !== undefined,
+        status: toolCall.status,
+      };
+      // Reject an already over-capacity rich value before making sanitized
+      // and encoded copies. Ownership transfer still performs its final check.
+      this.options.detailSink.preflightDetail?.(detail);
       this.options.detailSink.submitDetail({
         schemaVersion: ANALYTICS_SCHEMA_VERSION,
         generationId: this.options.generationId!,
@@ -388,16 +466,7 @@ export class CanonicalAnalyticsCapture {
         mediaType: 'application/x-pie-tool-observation',
         encoding: 'node-v8',
         complete: true,
-        bytes: serialize(sanitizeAnalyticsDetail({
-          phase,
-          toolDefinitionId: toolCall.name,
-          input: toolCall.input,
-          argumentsText: toolCall.argumentsText,
-          result: toolCall.result,
-          detailRef: toolCall.detailRef,
-          resultObserved: toolCall.result !== undefined,
-          status: toolCall.status,
-        })),
+        bytes: serialize(sanitizeAnalyticsDetail(detail)),
         metadata: {
           parentToolCallId: scopedToolCallId,
           outcome: toolCall.status,
@@ -416,23 +485,68 @@ export class CanonicalAnalyticsCapture {
   }
 
   captureActivity(context: AnalyticsSessionContext, interval: ActivityIntervalRecord): AnalyticsCaptureStatus {
-    const startedAtMs = timestamp(interval.startedAt, 0);
-    const endedAtMs = interval.endedAt ? timestamp(interval.endedAt, startedAtMs) : null;
+    const startedAtMs = optionalTimestamp(interval.startedAt);
+    const hasEndEvidence = interval.endedAt !== undefined;
+    const endedAtMs = optionalTimestamp(interval.endedAt);
+    const orderedBounds = startedAtMs !== null && endedAtMs !== null && endedAtMs >= startedAtMs;
     const fields: AnalyticsActivitySpanFields = {
       spanId: interval.intervalId,
       kind: interval.kind,
       startedAtMs,
       endedAtMs,
-      durationMs: endedAtMs === null ? null : Math.max(0, endedAtMs - startedAtMs),
+      durationMs: orderedBounds ? endedAtMs - startedAtMs : null,
       clockDomain: 'wall-clock-utc',
-      coverage: 'observed',
+      coverage: startedAtMs !== null && (!hasEndEvidence || orderedBounds) ? 'observed' : 'unknown',
     };
-    return this.submit(context, 'activitySpan', interval.intervalId, interval.endedAt ? 'end' : 'begin',
-      `activity:${interval.intervalId}:${interval.endedAt ? 'end' : 'begin'}`,
-      endedAtMs ?? startedAtMs, fields, {
+    return this.submit(context, 'activitySpan', interval.intervalId, hasEndEvidence ? 'end' : 'begin',
+      `activity:${interval.intervalId}:${hasEndEvidence ? 'end' : 'begin'}`,
+      endedAtMs ?? startedAtMs ?? 0, fields, {
         invocationId: interval.invocationId ?? undefined,
         toolCallId: interval.toolId ?? undefined,
       });
+  }
+
+  /** Retry wait and full retry episode are different measured intervals. A
+   * terminal episode duration cannot fill a missing provider-attempt wait. */
+  captureRetryTiming(
+    context: AnalyticsSessionContext,
+    retryId: string,
+    timing: {
+      startedAt?: number;
+      providerAttemptStartedAt?: number;
+      endedAt?: number;
+      measuredDelayMs?: number;
+      durationMs: number;
+    },
+  ): AnalyticsCaptureStatus {
+    if (!retryId.trim()) return 'rejected';
+    const startedAtMs = optionalTimestamp(timing.startedAt);
+    const endedAtMs = optionalTimestamp(timing.endedAt);
+    const waitEndedAtMs = optionalTimestamp(timing.providerAttemptStartedAt);
+    const observedAtMs = endedAtMs ?? waitEndedAtMs ?? startedAtMs ?? 0;
+    const subjectId = analyticsRootSessionId(context.sessionId, context.sessionPath);
+    const retryKey = createHash('sha256').update(JSON.stringify([subjectId, retryId])).digest('hex');
+    let status: AnalyticsCaptureStatus = 'disabled';
+    for (const [kind, end, duration] of [
+      ['retry_wait', waitEndedAtMs, timing.measuredDelayMs],
+      ['retry_episode', endedAtMs, timing.durationMs],
+    ] as const) {
+      const reversed = startedAtMs !== null && end !== null && end < startedAtMs;
+      const durationMs = !reversed && typeof duration === 'number' && Number.isFinite(duration) && duration >= 0
+        ? duration : null;
+      const spanId = `activity:${kind}:${retryKey}`;
+      const result = this.submit(context, 'activitySpan', spanId, 'end', `${spanId}:end`, observedAtMs, {
+        spanId,
+        kind,
+        startedAtMs,
+        endedAtMs: end,
+        durationMs,
+        clockDomain: 'wall-clock-utc',
+        coverage: !reversed && startedAtMs !== null && end !== null && durationMs !== null ? 'observed' : 'unknown',
+      } satisfies AnalyticsActivitySpanFields);
+      if (status !== 'rejected') status = result;
+    }
+    return status;
   }
 
   captureFeature(

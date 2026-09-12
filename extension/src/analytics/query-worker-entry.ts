@@ -115,6 +115,8 @@ process.on('message', (raw: unknown) => {
       });
     } else if (message.type === 'providerAccounting') {
       result = recorder.readProviderAccountingSummary(message.rootSessionId);
+    } else if (message.type === 'executionSummary') {
+      result = recorder.readExecutionSummary(message.rootSessionId);
     } else if (message.type === 'providerAggregate') {
       const maxGroups = message.maxGroups === undefined
         ? undefined
@@ -130,7 +132,11 @@ process.on('message', (raw: unknown) => {
         maxGroups,
       });
     } else if (message.type === 'historicalDimensions') {
-      result = recorder.readHistoricalDimensionSummary();
+      result = recorder.readHistoricalDimensionSummary({
+        maxRowsPerDimension: message.maxRowsPerDimension,
+        maxCellBytes: message.maxCellBytes,
+        maxBytes: Math.max(1, maximum - 8 * 1024),
+      });
     } else if (message.type === 'qualificationSpin') {
       // Disposable cancellation seam. Production callers never issue this
       // request; it proves a CPU-bound query can be terminated independently.

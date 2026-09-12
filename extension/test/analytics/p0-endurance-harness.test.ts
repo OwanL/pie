@@ -143,11 +143,12 @@ test('smoke report labels a legacy environment heap ceiling as an override', () 
     });
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
     const evidence = JSON.parse(readFileSync(report, 'utf8')) as {
-      environment: { recorderHeapCeilingMb: number; recorderHeapMode: string };
+      environment: { recorderHeapCeilingMb: number; recorderHeapMode: string; workloadMemoryReservationBytes: number };
       qualification: { overallP0: string };
     };
     assert.equal(evidence.environment.recorderHeapCeilingMb, 128);
     assert.equal(evidence.environment.recorderHeapMode, 'legacy-smoke-override');
+    assert.equal(evidence.environment.workloadMemoryReservationBytes, (4 * 128 + 256) * 1024 ** 2);
     assert.equal(evidence.qualification.overallP0, 'unqualified');
   } finally {
     rmSync(directory, { recursive: true, force: true });
@@ -250,6 +251,7 @@ test('endurance smoke records independent condition results and mandatory memory
       configuration: { scenario: string; mode: string; rows: null; resolvedRowsFrom: string };
       qualification: { decision: string; overallP0: string };
       results: { endurance: { trials: EnduranceTrial[]; summary: { lightP99Pooled: unknown } } };
+      environment: { workloadMemoryReservationBytes: number };
       gates: Record<string, { decision: string }>;
       provenance: { fingerprint: string; gitHead: string };
       cleanup: { completed: boolean; rootRemoved: boolean };
@@ -265,6 +267,7 @@ test('endurance smoke records independent condition results and mandatory memory
     });
     assert.equal(evidence.qualification.decision, 'scenario-passed');
     assert.equal(evidence.qualification.overallP0, 'unqualified');
+    assert.equal(evidence.environment.workloadMemoryReservationBytes, (4 * 128 + 256) * 1024 ** 2);
     assert.equal(evidence.results.endurance.trials.length, 6);
     assert.equal(evidence.results.endurance.summary.lightP99Pooled, null);
     assert.match(evidence.provenance.fingerprint, /^[0-9a-f]{64}$/u);

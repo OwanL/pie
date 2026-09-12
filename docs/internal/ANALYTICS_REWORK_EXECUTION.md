@@ -14,6 +14,135 @@ Owning specifications: runbook; `docs/ANALYTICS_REWORK_PLAN.md` §§1, 11.6, 17;
 
 ---
 
+## Checkpoint 50 - 2026-09-12T17:27Z, continued audit with supervisor protected
+
+Reviewed milestone **fa418419** is committed and pushed to master. The live VS Code/Codex chain
+37056/26828/40940 remains protected under the user's latest instruction: no action that could
+interrupt this overnight session and leave it idle. No live restart, publication, activation or
+storage disposal has occurred. Compiled build **162085c90d5c3ce52dce** is frozen for a controlled
+paired mixed trial; current source edits are not present in that artifact.
+
+Root fixed an unbounded historical-dimension convenience query: each category now streams capped
+groups, shares a total byte budget, qualifies oversized cells, and returns explicit truncation.
+The query helper honors configured read-model limits. Recorder/query tests pass **35/35** and
+extension typecheck passes. Evidence: `pie-projection-integration-20260913-r01/dimension-tests-r02.log`
+and `dimension-typecheck-r01.log` under task scratch. An initial test incorrectly assumed the default
+row limit was two; the corrected fixture checks both default 200 and a separately configured limit.
+Tool-detail capture now invokes the existing capacity preflight before sanitization/serialization;
+its focused tests pass. This does **not** resolve synchronous rich-detail serialization in the host
+adapter and recorder supervisor; moving that work off the execution path remains a producer requirement.
+Activity capture also preserves nullable source bounds and qualifies invalid/reversed intervals as unknown,
+while retaining real epoch-zero durations and stable redelivery. Historical dimensions now include the
+same snapshot metadata and explicit global scope as other query helpers. The latest combined capture/
+timestamp/query checks pass **12/12** (`root-capture-query-tests-r03.log`). Discovery reconciliation has
+now been confirmed synthetic-registry-only and relabeled in
+`C:/dev/scratch/pie-discovery-corrections-actual-labeled-20260913.log`; its OS census and lease reads are real.
+
+Qualification review established that older mixed runs never prepared the daily projection and omitted
+source settlement dates, so they cannot qualify incremental daily-write overhead. The Luna qualification
+owner is preparing reproducible dated fixtures, actual writer preparation, before/after contribution
+oracles, and paired default/128-MiB-probe runs against the same frozen artifact. Each full run requires
+4 GiB initial available memory, a 2 GiB reserve, eight-minute owned deadline and terminal cleanup receipts.
+No cap is selected and P0 remains unqualified. Existing failed/partial reports are preserved.
+The corrected default trial is now terminal and failed at `mixed-burst-after-5000` with
+`database_locked` on `captureBatch` (worker 12988/host index 2/request 2764; host 3 also failed).
+Evidence: `C:/dev/scratch/pie-schema9-paired-1620-r01/default-r02/`, 17:29:17-17:32:57Z.
+Initial available memory was **4,432,412,672 bytes (4.13 GiB)**; reserve held. Fixture preparation
+proved 2,500 dated occurrences and exact today/week input totals. The 128-MiB probe was not launched.
+Brief root focused tests overlapped this diagnostic run, so it is not an uncontaminated performance
+comparison. Its original wrapper receipt has `exitCode: 0` and empty `ownedPids` despite a failed
+report; the qualification owner is reconciling those evidence defects without replacing the raw receipt,
+and implementing finite background writer contention recovery with idempotent partial-batch accounting.
+
+The execution owner is fixing attribution to actual operation/live-turn identity and true agent-settled
+completion. Root review requires no fabricated run-as-operation fallback, no assistant phase overwriting
+root execution state, stable source timestamps, and stale-owner rejection aligned with the reducer.
+The discovery owner fixed numeric Windows process birth parsing and bounded census/lease reads; its
+actual reconciliation evidence still needs clear distinction from injected registry fixtures. Default
+per-boot capability/discovery wiring is in progress with all-host availability still false. Idle/multiple
+backend topology, process birth binding, stopped registry entries and authenticated capability distribution
+remain explicit authority questions; one registry/install census is not proof of all-host quiescence.
+
+Canonical execution/activity metric projections, full qualification, qualified activation/cutover and
+actual new-build UI verification remain unfinished. Historical access is the contract's bounded raw SQL/
+detail CLI; the obsolete legacy full-run export command needs retirement/disposition under P6, not an
+assumed new full-history archive framework. Protected model/settings changes and lockfiles remain excluded.
+The goal stays active; this checkpoint is not completion.
+
+The query-analytics skill was corrected for actual branch/copy anchors, activation-vs-process identity,
+schema-v9 live day projections, undated usage and bounded historical dimension results. Its SQL example
+now reports unknown invocation counts and nullable complete cost instead of filtering missing costs out.
+The skill validator passes; the example was executed against known/unknown/explicit-zero SQLite rows.
+
+Further source review corrected context/retry provenance. Backend context observations now carry a
+source UUID/time, provider/model and provider-vs-post-compaction-estimate provenance. Equal readings
+are distinct observations; exact redelivery remains idempotent. The UI total-token fallback is retained,
+but canonical prompt footprints are independently nullable when input/cache channels are incomplete;
+an explicit zero remains zero. Retry wait and whole retry episode are separate spans with source bounds;
+an unmeasured wait no longer inherits the full retry duration. The source/host/recorder checks pass
+**84/84** (`context-provenance-tests-r03.log`), and all **17** TypeScript projects pass
+(`context-provenance-typecheck-r02.log`). A further latency wiring check passes **21/21**
+(`latency-wiring-tests-r01.log`): turn-boundary and SDK-turn-start measurements retain their actual
+meaning; request, response-header and complete-operation measurements remain null when not measured.
+Missing generation duration is not filled from the legacy adapter's default zero.
+
+The execution-summary source unit adds maintained root agent-run counters and same-snapshot aggregate
+consumption. Root review requires matching numeric-order global/session indexes and query-plan evidence;
+the initial text index cannot serve the CAST-based latest-settlement ordering. Schema migration and
+coverage review remain in progress. No build or admission claim is made for this source unit yet.
+The isolated canonical/legacy-private-session-comparison UI fixture is being prepared with synthetic
+activation identities, fresh scratch data, finite deadlines and exact owned-process cleanup. It has
+not launched. The private-session comparison is not a total analytics-disabled baseline.
+
+Root's second recovery-script review found unsafe/inaccurate draft assumptions before any new launch:
+PowerShell CIM CreationDate is already DateTime, descendant traversal must include grandchildren,
+cleanup must recheck process birth before each stop, and a failed census is unknown rather than absent.
+Both preparation owners are correcting those scripts and evidence claims. Legacy capture enabled and
+the Privacy toggle are not a total analytics-disabled baseline; the existing production host has no
+verified total-disable seam, so the matched gate remains unavailable pending an explicit honest
+rehearsal design. During this review available memory was
+about **3.55 GiB**, below the heavy-probe 4-GiB entry threshold; protected Code and unrelated processes
+remain untouched. Independent source review continues while large qualification work is deferred.
+
+The first frozen integration pass for the current 54 changed/untracked paths completed with
+**6,875 passed, zero remaining failures, 30 skipped**, but two extension test files passed only on
+rerun (`npm-test-r04.log`, `test-source-r04.json`; zero source-hash mismatches). This is not a clean
+first-pass result. The handoff timeout failure exposed a real half-close race: the default server
+closed its reply side when the client finished its request before asynchronous inventory returned.
+Root now keeps accepted-request reply streams open, while rejecting incomplete-ended frames and
+retaining existing socket deadlines. Focused checks pass **6/6**. Endurance smoke preflight failures
+under parallel load remain under diagnosis before repeating integrated validation.
+
+The corrected wrapper's exit0/exit7/timeout self-tests preserve natural-vs-forced terminal status;
+posthoc identities are absent without pretending that this establishes original exact exit codes.
+Raw first/second mixed reports and receipts remain unchanged. The previously underreported first
+`pie-schema9-paired-1620-r01/default/` trial was **scenario-passed**, 25,000 accepted load rows,
+zero ending backlog and 6,250 final dated occurrences. Its daily window was incorrectly anchored
+at today through seven days forward, prompting the corrected trailing-week r02 rerun. Its sampled
+recorder RSS reached **299,679,744 bytes**, above the 256-MiB gate; query terminal memory evidence
+was incomplete (14/16 runtime, 13/16 native). It therefore does not qualify production memory or the
+correct daily window. The r02 corrected-window trial failed on writer contention as recorded above.
+Audit adjunct: `pie-schema9-paired-1620-r01/default-r02/wrapper-posthoc-adjunct.json`.
+
+The second frozen integration pass is clean: **6,875 passed, zero failed, 30 skipped**, all seven
+package groups, no reruns (`npm-test-r05.log`). All **55** captured path hashes match
+(`test-hash-check-r05.json`). All 17 TypeScript projects passed after the latency and socket fixes
+(`all-typecheck-r04.log`). Endurance smoke now reserves 768 MiB for its small actual topology;
+full endurance retains 1.5 GiB. Controlled low-memory validation leaves full endurance blocked,
+and actual short smoke measured a 52,838,400-byte maximum recorder RSS. Neither smoke evidence
+qualifies full P0. Root additionally verified exact-birth protected-process timeout cleanup at
+`pie-wrapper-root-review-20260913-r01/hang`: wrapper 124, unknown child exit, all three observed
+owned identities absent. Live Code/Codex remain untouched.
+
+Before the next build/UI launch, activation review found pre-existing fail-closed gaps: an absent
+manifest with an ever-active tombstone returns legacy authority, and active cutoff-receipt validation
+is permissive. The activation owner is correcting these against the shared activation contract;
+normal startup must not silently re-enable legacy writes after activation evidence exists. The
+synthetic UI fixture is also being corrected to use the actual ActivationStore writer and explicit
+synthetic cutoff identity. No activation or live publication has occurred.
+
+---
+
 ## Checkpoint 49 - 2026-09-12T17:05Z, projection/private-close checkpoint validated
 
 The second frozen default affected run broadened to the full fast suite and passed all seven package

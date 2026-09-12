@@ -109,6 +109,247 @@ function tempDatabase(): { root: string; databasePath: string } {
   return { root, databasePath: path.join(root, 'analytics.sqlite') };
 }
 
+test('historical dimensions bound each category and preserve explicit truncation', () => {
+  const temp = tempDatabase();
+  const recorder = new SqliteAnalyticsRecorder(temp.databasePath);
+  try {
+    for (let index = 0; index < 4; index += 1) {
+      recorder.submit(observation({ sourceKey: `provider-${index}`, invocationId: `call-${index}`,
+        fields: { provider: `provider-${index}`, dispatchedModel: 'model', outcome: 'success' } }));
+      recorder.submit(observation({ sourceKey: `tool-${index}`, entityKind: 'toolCall',
+        fields: { toolDefinitionId: `tool-${index}`, outcome: 'success' } }));
+      recorder.submit(observation({ sourceKey: `activity-${index}`, entityKind: 'activitySpan',
+        fields: { kind: `activity-${index}`, coverage: 'known' } }));
+      recorder.submit(observation({ sourceKey: `feature-${index}`, entityKind: 'featureObservation',
+        fields: { feature: `feature-${index}`, decision: 'used', ruleVersion: '1' } }));
+    }
+    const bounded = recorder.readHistoricalDimensionSummary({ maxRowsPerDimension: 2 });
+    assert.equal(bounded.maxRowsPerDimension, 2);
+    assert.deepEqual(bounded.truncation, { rowLimit: true, byteLimit: false, cellLimit: false });
+    for (const category of ['providers', 'tools', 'activities', 'features'] as const) {
+      assert.equal(bounded[category].length, 2, category);
+      assert.ok(bounded[category].every((row) => row.occurrence_count === 1));
+    }
+    const exact = recorder.readHistoricalDimensionSummary({ maxRowsPerDimension: 4 });
+    assert.deepEqual(exact.truncation, { rowLimit: false, byteLimit: false, cellLimit: false });
+    assert.equal(String(exact.revision), String(bounded.revision));
+    assert.equal(exact.features.length, 4);
+    assert.throws(() => recorder.readHistoricalDimensionSummary({ maxRowsPerDimension: 0 }), /positive/iu);
+  } finally {
+    recorder.close();
+    rmSync(temp.root, { recursive: true, force: true });
+  }
+});
+
+test('execution state keeps the root operation kind while turn phases arrive', () => {
+  const temp = tempDatabase();
+  const recorder = new SqliteAnalyticsRecorder(temp.databasePath);
+  let database: TestDatabase | undefined;
+  try {
+    recorder.submit(observation({
+      sourceKey: 'execution-begin',
+      entityKey: 'operation-1',
+      observationKind: 'begin',
+      fields: { operationKind: 'agent-run', startedAtMs: 1_750_000_000_000 },
+    }));
+    recorder.submit(observation({
+      sourceKey: 'execution-turn-phase',
+      entityKey: 'operation-1',
+      observationKind: 'phase',
+      fields: { operationKind: 'assistant-turn', turnId: 'turn-1' },
+    }));
+
+    database = new DatabaseSync(temp.databasePath);
+    const row = database.prepare(
+      'SELECT operation_kind, started_at_ms, ended_at_ms FROM analytics_execution_states WHERE execution_id = ?',
+    ).get('operation-1') as { operation_kind: string | null; started_at_ms: string | null; ended_at_ms: string | null };
+    assert.deepEqual({ ...row }, {
+      operation_kind: 'agent-run',
+      started_at_ms: '1750000000000',
+      ended_at_ms: null,
+    });
+  } finally {
+    database?.close();
+    recorder.close();
+    rmSync(temp.root, { recursive: true, force: true });
+  }
+});
+
+test('execution lifecycle state ignores a delayed phase after the root has settled', () => {
+  const temp = tempDatabase();
+  const recorder = new SqliteAnalyticsRecorder(temp.databasePath);
+  let database: TestDatabase | undefined;
+  try {
+    recorder.submit(observation({
+      sourceKey: 'execution-root-begin',
+      entityKey: 'operation-late-phase',
+      observationKind: 'begin',
+      fields: { operationKind: 'agent-run', startedAtMs: 100 },
+    }));
+    recorder.submit(observation({
+      sourceKey: 'execution-root-end',
+      entityKey: 'operation-late-phase',
+      observationKind: 'end',
+      fields: { operationKind: 'agent-run', endedAtMs: 200, outcome: 'success' },
+    }));
+    recorder.submit(observation({
+      sourceKey: 'execution-delayed-phase',
+      entityKey: 'operation-late-phase',
+      observationKind: 'phase',
+      fields: {
+        operationKind: 'assistant-turn',
+        startedAtMs: 50,
+        endedAtMs: 300,
+        outcome: 'failed',
+      },
+    }));
+
+    database = new DatabaseSync(temp.databasePath);
+    const row = database.prepare(
+      'SELECT operation_kind, outcome, started_at_ms, ended_at_ms FROM analytics_execution_states WHERE execution_id = ?',
+    ).get('operation-late-phase') as {
+      operation_kind: string | null;
+      outcome: string | null;
+      started_at_ms: string | null;
+      ended_at_ms: string | null;
+    };
+    assert.deepEqual({ ...row }, {
+      operation_kind: 'agent-run',
+      outcome: 'success',
+      started_at_ms: '100',
+      ended_at_ms: '200',
+    });
+  } finally {
+    database?.close();
+    recorder.close();
+    rmSync(temp.root, { recursive: true, force: true });
+  }
+});
+
+test('maintained execution summary counts agent runs across bind and deletion', () => {
+  const temp = tempDatabase();
+  const recorder = new SqliteAnalyticsRecorder(temp.databasePath);
+  try {
+    recorder.submit(observation({
+      sourceKey: 'summary-root-begin',
+      rootSessionId: 'summary-root',
+      entityKey: 'summary-root-execution',
+      observationKind: 'begin',
+      fields: { operationKind: 'agent-run', startedAtMs: 100 },
+    }));
+    recorder.submit(observation({
+      sourceKey: 'summary-root-end',
+      rootSessionId: 'summary-root',
+      entityKey: 'summary-root-execution',
+      observationKind: 'end',
+      fields: { operationKind: 'agent-run', endedAtMs: 200, outcome: 'success' },
+    }));
+    let summary = recorder.readExecutionSummary();
+    assert.equal(summary.executionCount, 1);
+    assert.equal(summary.begunCount, 1);
+    assert.equal(summary.settledCount, 1);
+    assert.equal(summary.lifecycleCoverage, 'known');
+    assert.equal(summary.timingCoverage, 'known');
+    assert.equal(summary.deliveryCoverage, 'complete');
+    assert.deepEqual(summary.latestSettled, {
+      generationId: 'generation-1',
+      executionId: 'summary-root-execution',
+      sourceKey: 'summary-root-end',
+      startedAtMs: 100,
+      endedAtMs: 200,
+    });
+    assert.equal(recorder.readExecutionSummary('summary-root').executionCount, 1);
+    const globalPlan = recorder.executeReadOnlyQuery(`
+      EXPLAIN QUERY PLAN
+      SELECT generation_id, execution_id
+      FROM analytics_execution_states
+      WHERE operation_kind = 'agent-run' AND settled = 1
+      ORDER BY CAST(settled_revision AS INTEGER) DESC, generation_id DESC, execution_id DESC
+      LIMIT 1
+    `);
+    const globalPlanDetails = globalPlan.rows.map((row) => String(row.detail));
+    assert.ok(globalPlanDetails.some((detail) => detail.includes('analytics_execution_state_latest_global_idx')));
+    assert.ok(!globalPlanDetails.some((detail) => detail.includes('TEMP B-TREE')));
+    const sessionPlan = recorder.executeReadOnlyQuery(`
+      EXPLAIN QUERY PLAN
+      SELECT generation_id, execution_id
+      FROM analytics_execution_states
+      WHERE root_session_id = 'summary-root' AND operation_kind = 'agent-run' AND settled = 1
+      ORDER BY CAST(settled_revision AS INTEGER) DESC, generation_id DESC, execution_id DESC
+      LIMIT 1
+    `);
+    const sessionPlanDetails = sessionPlan.rows.map((row) => String(row.detail));
+    assert.ok(sessionPlanDetails.some((detail) => detail.includes('analytics_execution_state_latest_session_idx')));
+    assert.ok(!sessionPlanDetails.some((detail) => detail.includes('TEMP B-TREE')));
+
+    const pendingSubject = { kind: 'pendingCreate' as const, operationId: 'summary-pending' };
+    recorder.submit(observation({
+      sourceKey: 'summary-pending-begin',
+      entityKey: 'summary-pending-execution',
+      captureSubject: pendingSubject,
+      observationKind: 'begin',
+      fields: { operationKind: 'agent-run', startedAtMs: 300 },
+    }));
+    recorder.submit(observation({
+      sourceKey: 'summary-pending-end',
+      entityKey: 'summary-pending-execution',
+      captureSubject: pendingSubject,
+      observationKind: 'end',
+      fields: { operationKind: 'agent-run', endedAtMs: 400, outcome: 'success' },
+    }));
+    assert.equal(recorder.readExecutionSummary().executionCount, 2);
+    assert.equal(recorder.readExecutionSummary('summary-session').executionCount, 0);
+
+    recorder.bindPendingCreate('summary-pending', 'summary-session', 'summary-bind', 500);
+    summary = recorder.readExecutionSummary('summary-session');
+    assert.equal(summary.executionCount, 1);
+    assert.equal(summary.begunCount, 1);
+    assert.equal(summary.settledCount, 1);
+    assert.equal(summary.timingCoverage, 'known');
+    recorder.deleteSession('summary-session', 'summary-delete', 600);
+    assert.equal(recorder.readExecutionSummary('summary-session').executionCount, 0);
+    assert.equal(recorder.readExecutionSummary().executionCount, 1);
+
+    recorder.deleteSession('summary-root', 'summary-root-delete', 700);
+    summary = recorder.readExecutionSummary();
+    assert.equal(summary.executionCount, 0);
+    assert.equal(summary.settledCount, 0);
+    assert.equal(summary.latestSettled, null);
+  } finally {
+    recorder.close();
+    rmSync(temp.root, { recursive: true, force: true });
+  }
+});
+
+test('historical dimension bytes are shared across categories and oversized cells are qualified', () => {
+  const temp = tempDatabase();
+  const recorder = new SqliteAnalyticsRecorder(temp.databasePath);
+  try {
+    recorder.submit(observation({ sourceKey: 'provider', invocationId: 'call',
+      fields: { provider: 'provider', dispatchedModel: 'model', outcome: 'success' } }));
+    recorder.submit(observation({ sourceKey: 'tool', entityKind: 'toolCall',
+      fields: { toolDefinitionId: 'tool', outcome: 'success' } }));
+    recorder.submit(observation({ sourceKey: 'feature', entityKind: 'featureObservation',
+      fields: { feature: 'x'.repeat(1000), decision: 'used' } }));
+    const all = recorder.readHistoricalDimensionSummary();
+    const providerBytes = Buffer.byteLength(JSON.stringify(all.providers[0]), 'utf8');
+    const limited = recorder.readHistoricalDimensionSummary({ maxBytes: providerBytes });
+    assert.equal(limited.providers.length, 1);
+    assert.equal(limited.tools.length, 0);
+    assert.equal(limited.features.length, 0);
+    assert.equal(limited.truncation.byteLimit, true);
+    const cells = recorder.readHistoricalDimensionSummary({ maxCellBytes: 32 });
+    assert.equal(cells.truncation.cellLimit, true);
+    assert.deepEqual(cells.features[0]?.feature, {
+      type: 'text', encoding: 'utf8', data: 'x'.repeat(32), originalBytes: 1000,
+    });
+    assert.equal(cells.truncation.byteLimit, false);
+  } finally {
+    recorder.close();
+    rmSync(temp.root, { recursive: true, force: true });
+  }
+});
+
 test('SQLite recorder accepts exact redelivery and exposes conflicting source reuse', () => {
   const temp = tempDatabase();
   const recorder = new SqliteAnalyticsRecorder(temp.databasePath);
@@ -384,7 +625,7 @@ test('v1 upgrade retains facts, detail, deletion fences, accounting, and source 
     }
 
     recorder = new SqliteAnalyticsRecorder(temp.databasePath);
-    assert.equal(recorder.getDatabaseSchemaVersion(), 9);
+    assert.equal(recorder.getDatabaseSchemaVersion(), 10);
     assert.equal(recorder.readDeliveryAccounting().deliveryHistoryCoverage, 'retained_only');
     assert.equal(recorder.countObservations('root-retained'), 1);
     assert.deepEqual(recorder.reconstructDetail('legacy-detail'), { retained: true });
@@ -571,14 +812,14 @@ test('recorder rejects unsupported newer database schema versions', () => {
   try {
     // One beyond the current schema: an unversioned future database must fail
     // closed rather than be read with today's assumptions.
-    raw.exec('PRAGMA user_version = 10');
+    raw.exec('PRAGMA user_version = 11');
   } finally {
     raw.close();
   }
   try {
     assert.throws(
       () => new SqliteAnalyticsRecorder(temp.databasePath),
-      /Unsupported newer analytics database schema version 10/,
+      /Unsupported newer analytics database schema version 11/,
     );
   } finally {
     rmSync(temp.root, { recursive: true, force: true });
@@ -1201,7 +1442,7 @@ test('logical query surface is native read-only, bounded, and reports snapshot/d
       ['query-a'],
       { maxRows: 2, maxCellBytes: 32 },
     );
-    assert.equal(result.databaseSchemaVersion, 9);
+    assert.equal(result.databaseSchemaVersion, 10);
     assert.equal(result.snapshotWatermark, 3);
     assert.deepEqual(result.generationIds, ['generation-1']);
     assert.equal(result.returnedRows, 2);
@@ -1486,7 +1727,7 @@ test('schema v5 adds the projection-order index without changing stored settleme
 
     const upgraded = new SqliteAnalyticsRecorder(temp.databasePath);
     try {
-      assert.equal(upgraded.getDatabaseSchemaVersion(), 9);
+      assert.equal(upgraded.getDatabaseSchemaVersion(), 10);
       const after = upgraded.readProviderSettlements();
       assert.deepEqual(after.settlements, before.settlements);
       assert.equal(upgraded.readProviderAccountingSummary().inputTokens.knownTotal, knownTotalBefore);

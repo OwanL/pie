@@ -197,11 +197,12 @@ export function onContextUsageChanged(payload: ContextUsageChangedPayload, deps:
     sessionPath,
     contextUsage: payload.contextUsage ?? null,
   });
-  if (payload.contextUsage) {
+  if (payload.contextUsage || payload.observationId) {
     deps.runObserver.onContextUsageChanged(
       sessionPath,
-      payload.contextUsage.tokens,
-      payload.contextUsage.contextWindow,
+      payload.contextUsage?.tokens ?? null,
+      payload.contextUsage?.contextWindow ?? 0,
+      payload,
     );
   }
   deps.scheduleRender();

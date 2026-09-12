@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { onMessageAborted, onCompaction, onCompactionStarted, onMessageFinished } from '../../../../src/host/session-service/handlers/streaming';
+import { onMessageAborted, onCompaction, onCompactionStarted, onMessageFinished, onMessageStarted } from '../../../../src/host/session-service/handlers/streaming';
 import { createInitialArchState, type ArchState } from '../../../../src/host/core/arch-state';
 import { NOOP_RUN_OBSERVER } from '../../../../src/host/stats-service';
 import type { Event } from '../../../../src/host/core/events';
@@ -44,9 +44,9 @@ function createDeps(initialState?: ArchState) {
   };
 }
 
-test('onMessageFinished forwards exact durable transcript identity to accounting', () => {
+test('onMessageFinished forwards exact durable transcript and operation identity to accounting', () => {
   const { deps } = createDeps();
-  let billing: { durableEntryId?: string } | undefined;
+  let billing: { durableEntryId?: string; operationId?: string; requestId?: string; generationDurationMs?: number } | undefined;
   const observer = {
     ...NOOP_RUN_OBSERVER,
     onAssistantTurnEnded: (
@@ -56,11 +56,12 @@ test('onMessageFinished forwards exact durable transcript identity to accounting
       _usage: unknown,
       _status: unknown,
       _latency: unknown,
-      value: { durableEntryId?: string },
+      value: { durableEntryId?: string; operationId?: string; requestId?: string },
     ) => { billing = value; },
   };
   onMessageFinished({
     requestId: 'request-durable',
+    operationId: 'operation-durable',
     sessionPath: '/session-durable',
     message: {
       id: 'assistant-durable',
@@ -68,11 +69,44 @@ test('onMessageFinished forwards exact durable transcript identity to accounting
       content: [],
       createdAt: '2027-01-15T08:00:00.000Z',
       status: 'completed',
+      durationMs: 17,
       durableEntryId: 'entry-durable-1',
     },
   } as any, { ...deps, runObserver: observer } as any);
 
   assert.equal(billing?.durableEntryId, 'entry-durable-1');
+  assert.equal(billing?.operationId, 'operation-durable');
+  assert.equal(billing?.requestId, 'request-durable');
+  assert.equal(billing?.generationDurationMs, 17);
+});
+
+test('onMessageStarted forwards the accepted operation identity to the observer', () => {
+  const { deps } = createDeps();
+  let identity: { operationId?: string | null; requestId?: string; operationAttempt?: number } | undefined;
+  const observer = {
+    ...NOOP_RUN_OBSERVER,
+    onAssistantTurnStarted: (
+      _sessionPath: string,
+      _turnId: string,
+      value: { operationId?: string | null; requestId?: string; operationAttempt?: number },
+    ) => { identity = value; },
+  };
+  onMessageStarted({
+    requestId: 'request-started',
+    operationId: 'operation-started',
+    operationAttempt: 2,
+    messageId: 'message-started',
+    sessionPath: '/session-started',
+  }, { ...deps, runObserver: observer, state: {
+    ...deps.state,
+    bindRequestSessionPath: () => undefined,
+  } } as any);
+
+  assert.deepEqual(identity, {
+    operationId: 'operation-started',
+    requestId: 'request-started',
+    operationAttempt: 2,
+  });
 });
 
 test('onMessageAborted shows a notice for unexpected interruptions and sanitizes the reason', () => {

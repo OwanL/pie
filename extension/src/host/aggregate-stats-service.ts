@@ -430,7 +430,7 @@ export class AggregateStatsService {
     if (aggregate.truncation.rowLimit || aggregate.truncation.byteLimit || aggregate.truncation.cellLimit) {
       throw new Error('Canonical aggregate provider grouping exceeded its bounded read limit.');
     }
-    const { accounting, groups } = aggregate;
+    const { accounting, groups, executionSummary } = aggregate;
     const overlay = canonicalAccountingOverlay(accounting, groups);
     const sessionCount = groups.length === 0
       ? 0
@@ -442,9 +442,9 @@ export class AggregateStatsService {
       openTabCount,
       liveTokensPerSecond: rollingRate,
       activeGenerationTokensPerSecond: this.cached.activeGenerationTokensPerSecond,
-      // Canonical execution/activity summaries are a separate bounded metric
-      // projection. Do not count provider invocations as transcript runs.
-      runCount: 0,
+      // Count only maintained root agent-run execution identities. Provider
+      // invocations and assistant-turn facets are separate projections.
+      runCount: executionSummary.executionCount,
       sessionCount,
       ready: true,
       providerGate: this.cached.providerGate,

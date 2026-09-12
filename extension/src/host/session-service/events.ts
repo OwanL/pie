@@ -11,6 +11,7 @@ import { dispatchSessionBackendEvent } from '../core/event-dispatch';
 import type { OnSessionCompleted, ScheduleRender } from './types';
 import type { Event } from '../core/events';
 import type { ArchState } from '../core/arch-state';
+import { canAcceptAgentSettlement } from '../core/reducer/session-handlers';
 import type { CoordinatorToHostDetailMessage } from '../../shared/protocol/subagent-detail';
 import { SessionServiceState } from './state';
 import type { DeferredTriggerRegistry } from '../deferred-triggers/registry';
@@ -108,6 +109,9 @@ export class SessionServiceEvents {
     dispatchSessionBackendEvent(event, {
       onTurnSemantic: (envelope) => {
         const before = this.getArchState().livePipeline.turnsBySession[envelope.sessionPath];
+        const acceptedTurnOwner = before?.turnId === envelope.turnId
+          && before.attemptId === envelope.attemptId
+          && (before.operationId === undefined || before.operationId === envelope.operationId);
         if (before && before.turnId === envelope.turnId && before.attemptId === envelope.attemptId
           && envelope.seq > before.seq + 1 && isLivePipelineTraceEnabled()) {
           recordLivePipelineTrace({
@@ -132,7 +136,13 @@ export class SessionServiceEvents {
               envelope.provider,
               deps,
             );
-            this.runObserver.onAssistantTurnStarted(envelope.sessionPath, envelope.canonicalMessageId);
+            this.runObserver.onAssistantTurnStarted(envelope.sessionPath, envelope.canonicalMessageId, {
+              // The reducer accepted this exact live owner. Never let the
+              // observer re-select an unrelated active registry operation.
+              operationId: acceptedTurn.operationId,
+              requestId: acceptedTurn.requestId,
+              attemptId: acceptedTurn.attemptId,
+            });
             this.state.touchSessionTranscript(envelope.sessionPath);
           }
         } else if (envelope.kind === 'tool.started') {
@@ -147,14 +157,24 @@ export class SessionServiceEvents {
             parallelGroupId: envelope.parallelGroupId,
           }, deps, { skipTranscriptMutation: true });
         } else if (envelope.kind === 'turn.terminal') {
+          // The reducer applies the same owner fence. Do not mirror a stale
+          // terminal into accounting/canonical analytics after dispatchArch
+          // has ignored it; a delayed old attempt otherwise looks like a
+          // legitimate turn end.
+          if (!acceptedTurnOwner) {
+            this.scheduleRender();
+            return;
+          }
           onMessageFinished({
             requestId: envelope.requestId,
+            ...(envelope.operationId ? { operationId: envelope.operationId } : {}),
             sessionPath: envelope.sessionPath,
             message: { ...envelope.durableMessage },
           }, deps, { skipTranscriptMutation: true });
           if (envelope.terminalKind === 'interrupted') {
             onMessageAborted({
               requestId: envelope.requestId,
+              ...(envelope.operationId ? { operationId: envelope.operationId } : {}),
               sessionPath: envelope.sessionPath,
               messageId: envelope.durableMessage.id,
               userInitiated: envelope.userInitiated,
@@ -165,8 +185,15 @@ export class SessionServiceEvents {
         this.scheduleRender();
       },
       onLiveLifecycle: (watermark) => {
+        const liveTurn = this.getArchState().livePipeline.turnsBySession[watermark.sessionPath];
+        const operationId = liveTurn
+          && liveTurn.requestId === watermark.requestId
+          && liveTurn.turnId === watermark.turnId
+          && liveTurn.attemptId === watermark.attemptId
+          ? liveTurn.operationId ?? null
+          : null;
         this.dispatchArch({ kind: 'LiveLifecycleWatermarkReceived', watermark });
-        deps.runObserver.onAssistantTerminalWatermark?.(watermark);
+        deps.runObserver.onAssistantTerminalWatermark?.(watermark, operationId);
         this.scheduleRender();
       },
       onSessionOpened: (payload) => this.applySessionOpened(payload),
@@ -204,12 +231,22 @@ export class SessionServiceEvents {
       onAgentSettled: (payload) => {
         const sessionPath = this.requireEventSessionPath('agent.settled', payload.sessionPath);
         if (!sessionPath) return;
-        this.dispatchArch({
-          kind: 'AgentSettled',
+        const archState = this.getArchState();
+        const currentBackendGeneration = this.state.getBackendGeneration();
+        const agentSettledEvent = {
+          kind: 'AgentSettled' as const,
           ...payload,
           sessionPath,
-          currentBackendGeneration: this.state.getBackendGeneration(),
-        });
+          currentBackendGeneration,
+        };
+        // The reducer and observer must share one owner/generation fence. The
+        // observer is checked before dispatch because the reducer may ignore
+        // stale settlements while the callback would otherwise emit a fact.
+        if (!canAcceptAgentSettlement(archState, agentSettledEvent)) {
+          return;
+        }
+        this.dispatchArch(agentSettledEvent);
+        this.runObserver.onAgentSettled?.(payload);
         this.scheduleRender();
       },
       onBusyChanged: (payload) => this.onBusyChanged(payload),

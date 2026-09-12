@@ -125,8 +125,45 @@ function makeHarness(runObserver = NOOP_RUN_OBSERVER) {
     runObserver,
   );
 
-  return { context, backend, service, dispatched, getArchState };
+  return { context, backend, service, dispatched, archState, getArchState };
 }
+
+test('stale agent settlement owner is rejected before analytics observation', () => {
+  const settled: string[] = [];
+  const harness = makeHarness({
+    ...NOOP_RUN_OBSERVER,
+    onAgentSettled: (payload) => settled.push(payload.operationId ?? 'missing'),
+  });
+  const sessionPath = '/session-owner-fence.jsonl';
+  harness.archState.livePipeline.turnsBySession[sessionPath] = {
+    turnId: 'turn-current',
+    attemptId: 'attempt-current',
+    requestId: 'request-current',
+    operationId: 'operation-current',
+    sessionPath,
+  } as any;
+  (harness.archState.operations as any)['operation-current'] = {
+    operationId: 'operation-current',
+    kind: 'message.send',
+    phase: 'running',
+    attempt: 1,
+    terminal: false,
+    session: { resolvedPath: sessionPath },
+    backendGeneration: 0,
+  };
+
+  const capabilities = { billableActivity: true, canContinue: false, canInterrupt: true, canCompact: false };
+  const send = (payload: Record<string, unknown>) => (harness.service as any).events.handleBackendEvent({
+    event: 'agent.settled',
+    payload: { sessionPath, capabilities, ...payload },
+  });
+
+  send({ operationId: 'operation-old', operationAttempt: 1, requestId: 'request-old', turnId: 'turn-old', attemptId: 'attempt-old' });
+  assert.deepEqual(settled, [], 'a delayed old owner must not close/capture the current execution');
+  send({ operationId: 'operation-current', operationAttempt: 1, requestId: 'request-current', turnId: 'turn-current', attemptId: 'attempt-current' });
+  assert.deepEqual(settled, ['operation-current']);
+  harness.service.dispose();
+});
 
 test('correlated backend failures produce exactly one analytics record per request identity', () => {
   const backendErrors: Array<{ sessionPath?: string; code: string }> = [];

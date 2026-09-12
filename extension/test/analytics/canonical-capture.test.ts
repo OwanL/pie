@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { deserialize } from 'node:v8';
 
 import type { AnalyticsObservation } from '../../../shared/analytics/contracts.js';
 import {
@@ -14,6 +15,43 @@ import { BillableAccounting } from '../../src/host/billable-accounting/service.j
 function tempRoot(): string {
   return mkdtempSync(path.join(tmpdir(), 'pie-canonical-capture-'));
 }
+
+test('tool detail capacity is checked before traversing and encoding rich input', () => {
+  let inputReads = 0;
+  let submitted = 0;
+  let preflights = 0;
+  let rejected = true;
+  const errors: string[] = [];
+  const input = { get text(): string { inputReads += 1; return 'retained tool input'; } };
+  const capture = new CanonicalAnalyticsCapture({
+    authority: 'canonical', generationId: 'generation-a', workspaceId: 'workspace-a',
+    buildId: 'build-a', processGeneration: 'process-a',
+    sink: { submit: () => undefined },
+    detailSink: {
+      preflightDetail: (detail) => {
+        preflights += 1;
+        assert.equal((detail as { input: unknown }).input, input);
+        if (rejected) throw new Error('test capacity exhausted');
+      },
+      submitDetail: (detail) => {
+        submitted += 1;
+        assert.equal(deserialize(Buffer.from(detail.bytes)).input.text, 'retained tool input');
+      },
+    },
+    lifecycleSink: { bindPendingCreate: async () => undefined, deleteSession: async () => undefined },
+    onDetailCaptureError: (error) => { errors.push(error.message); },
+  });
+  const context = { sessionId: 'session-a', sessionPath: '/session-a', operationId: 'operation-a' };
+  const tool = { id: 'tool-a', name: 'bash', input, status: 'running' as const, startedAt: 100 };
+  assert.equal(capture.captureTool(context, tool, 'begin', 'tool-a:begin', 100), 'rejected');
+  assert.equal(inputReads, 0, 'rejected detail is not sanitized or serialized');
+  assert.equal(submitted, 0);
+  assert.deepEqual(errors, ['test capacity exhausted']);
+  rejected = false;
+  assert.equal(capture.captureTool(context, tool, 'begin', 'tool-a:begin', 100), 'submitted');
+  assert.equal(preflights, 2);
+  assert.equal(submitted, 1);
+});
 
 test('canonical provider adapter preserves exact accounting fields and assigns contiguous producer sequence', () => {
   const observations: AnalyticsObservation<object>[] = [];

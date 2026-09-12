@@ -2,6 +2,7 @@ import { appendPieLog } from '../util/pie-log';
 import type { RunAnalyticsExportPayload, RunAnalyticsQueryResult } from '../run-analytics/query';
 import type { RunSnapshot, TurnLatencyMeasurement, TurnThroughputStatus } from '../run-analytics';
 import type {
+  AgentSettledPayload,
   AssistantUsage,
   AuxiliaryLlmUsagePayload,
   ComposerInput,
@@ -12,7 +13,7 @@ import type {
 import type { BillableInvocationRecord } from '../../shared/billable-invocation';
 import { RunAnalyticsStorage } from './storage';
 import { SessionRunTracker } from './tracker';
-import type { RunObserver, StatsServiceOptions } from './types';
+import type { AssistantTurnIdentity, RunObserver, StatsServiceOptions } from './types';
 import { resolveSessionIdentity } from '../../shared/session-identity';
 import { defaultCreateId, defaultNow } from './helpers';
 import { WorkingTimeService } from '../working-time-service';
@@ -90,10 +91,10 @@ export interface StatsStartupStageMetric {
   timelineDelta?: Record<string, number>;
 }
 
-function stableEvidenceTime(value: string | undefined): number {
-  if (!value) return 0;
+function stableEvidenceTime(value: string | undefined): number | null {
+  if (!value) return null;
   const parsed = Date.parse(value);
-  return Number.isFinite(parsed) && parsed >= 0 ? Math.trunc(parsed) : 0;
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.trunc(parsed) : null;
 }
 
 /**
@@ -505,13 +506,18 @@ export class StatsService implements RunObserver {
     return this.tracker.getMostRelevantRun(sessionPath)?.runId ?? null;
   }
 
-  private analyticsContext(sessionPath: string): AnalyticsSessionContext {
+  private analyticsContext(sessionPath: string, operationIdOverride?: string | null): AnalyticsSessionContext {
     const identity = this.sessionIdentity(sessionPath);
     return {
       sessionId: identity.sessionId,
       sessionPath,
       runId: this.currentRunId(sessionPath),
-      operationId: this.activeOperationId(sessionPath),
+      // An explicit null is an identity miss from a protocol-owned event. It
+      // must not select whichever reducer operation happens to be active now;
+      // omission retains compatibility for older direct observer callers.
+      operationId: operationIdOverride === undefined
+        ? this.activeOperationId(sessionPath)
+        : operationIdOverride,
     };
   }
 
@@ -625,34 +631,61 @@ export class StatsService implements RunObserver {
     await this.storage.forgetSession(sessionPath, sessionId);
   }
 
-  prepareForSend(sessionPath: string, inputs: ComposerInput[], initialUserMessage = ''): string {
+  prepareForSend(
+    sessionPath: string,
+    inputs: ComposerInput[],
+    initialUserMessage = '',
+    operationId?: string | null,
+  ): string {
     if (this.isPrivateSession(sessionPath) && !this.canonicalCapture) return 'private-run';
     const runId = this.isCanonicalCloseActive(sessionPath)
       ? this.currentRunId(sessionPath) ?? this.createId()
       : this.tracker.prepareForSend(sessionPath, inputs, initialUserMessage);
-    this.canonicalCapture?.captureExecution(
-      this.analyticsContext(sessionPath),
-      runId,
-      'begin',
-      `execution:${runId}:begin`,
-      this.now().getTime(),
-      { operationId: this.activeOperationId(sessionPath) ?? undefined, runId, operationKind: 'agent-run', source: 'host' },
-    );
+    const context = this.analyticsContext(sessionPath, operationId ?? null);
+    // A host run ID is a local accounting grouping, not an execution entity.
+    // Protocol-owned sends without an operation ID remain unqualified rather
+    // than inventing a canonical operation from that local ID.
+    if (this.canonicalCapture && context.operationId) {
+      const startedAtMs = this.now().getTime();
+      this.canonicalCapture.captureExecution(
+        context,
+        context.operationId,
+        'begin',
+        `execution:${context.operationId}:begin`,
+        startedAtMs,
+        {
+          operationId: context.operationId,
+          runId,
+          operationKind: 'agent-run',
+          source: 'host',
+          startedAtMs,
+        },
+      );
+    }
     return runId;
   }
 
-  onAssistantTurnStarted(sessionPath: string, turnId: string): void {
+  onAssistantTurnStarted(sessionPath: string, turnId: string, identity?: AssistantTurnIdentity): void {
     if (!this.isCanonicalCloseActive(sessionPath)) this.accounting.observeAssistantTurnStarted(sessionPath);
-    const context = this.analyticsContext(sessionPath);
-    const executionId = context.runId ?? context.operationId ?? `turn:${turnId}`;
-    this.canonicalCapture?.captureExecution(
-      context,
-      executionId,
-      'phase',
-      `turn:${turnId}:begin`,
-      this.now().getTime(),
-      { runId: context.runId ?? undefined, turnId, operationKind: 'assistant-turn', source: 'host' },
-    );
+    const context = this.analyticsContext(sessionPath, identity?.operationId ?? null);
+    if (this.canonicalCapture && context.operationId) {
+      this.canonicalCapture.captureExecution(
+        context,
+        context.operationId,
+        'phase',
+        `turn:${turnId}:begin`,
+        this.now().getTime(),
+        {
+          operationId: context.operationId,
+          ...(identity?.requestId ? { requestId: identity.requestId } : {}),
+          ...(identity?.attemptId ? { attemptId: identity.attemptId } : {}),
+          runId: context.runId ?? undefined,
+          turnId,
+          operationKind: 'assistant-turn',
+          source: 'host',
+        },
+      );
+    }
     if (this.isPrivateSession(sessionPath) && !this.canonicalCapture) return;
     if (this.isCanonicalCloseActive(sessionPath)) return;
     this.tracker.onAssistantTurnStarted(sessionPath, turnId);
@@ -688,45 +721,79 @@ export class StatsService implements RunObserver {
     usage?: AssistantUsage,
     status?: TurnThroughputStatus,
     latency?: TurnLatencyMeasurement,
-    billing?: { modelId?: string; provider?: string; occurredAt?: string; operationId?: string; durableEntryId?: string },
+    billing?: {
+      modelId?: string;
+      provider?: string;
+      occurredAt?: string;
+      operationId?: string;
+      requestId?: string;
+      attemptId?: string;
+      durableEntryId?: string;
+      generationDurationMs?: number;
+    },
   ): void {
-    if (!this.isCanonicalCloseActive(sessionPath)) {
-      this.accounting.observeAssistantTurnEnded(sessionPath, turnId, durationMs, usage, status, billing);
-    }
-    const context = this.analyticsContext(sessionPath);
-    const executionId = context.runId ?? context.operationId ?? `turn:${turnId}`;
-    const observedAtMs = stableEvidenceTime(billing?.occurredAt);
-    this.canonicalCapture?.captureExecution(
-      context,
-      executionId,
-      'phase',
-      `turn:${turnId}:end`,
-      observedAtMs,
-      {
-        runId: context.runId ?? undefined,
-        turnId,
-        operationKind: 'assistant-turn',
-        source: 'host',
-        endedAtMs: observedAtMs,
-        outcome: status ?? 'unknown',
-      },
-    );
-    if (billing?.durableEntryId) {
-      this.canonicalCapture?.captureExecution(
+    if (this.isCanonicalCloseActive(sessionPath)) return;
+    this.accounting.observeAssistantTurnEnded(sessionPath, turnId, durationMs, usage, status, billing);
+    const context = this.analyticsContext(sessionPath, billing?.operationId ?? null);
+    const sourceOccurredAtMs = stableEvidenceTime(billing?.occurredAt);
+    const observedAtMs = sourceOccurredAtMs ?? 0;
+    const executionId = context.operationId;
+    if (this.canonicalCapture && executionId) {
+      const measured = (value: number | undefined): number | null => (
+        typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null
+      );
+      this.canonicalCapture.captureLatency(context, executionId, turnId,
+        `turn:${turnId}:latency`, sourceOccurredAtMs ?? 0, {
+          turnBoundaryToFirstOutputMs: measured(latency?.turnLatencyMs),
+          turnStartToFirstOutputMs: measured(latency?.providerLatencyMs),
+          turnPreparationMs: measured(latency?.overheadMs),
+          providerQueueMs: measured(latency?.providerQueueMs),
+          generationDurationMs: measured(billing?.generationDurationMs),
+          requestToFirstOutputMs: null,
+          providerFirstOutputWaitMs: null,
+          providerHeaderWaitMs: null,
+          fullOperationMs: null,
+          coverage: 'unknown',
+        });
+      this.canonicalCapture.captureExecution(
         context,
         executionId,
-        'transcriptEvidence',
-        `turn:${turnId}:transcript-evidence`,
+        'phase',
+        `turn:${turnId}:end`,
         observedAtMs,
         {
+          operationId: executionId,
+          ...(billing?.requestId ? { requestId: billing.requestId } : {}),
+          ...(billing?.attemptId ? { attemptId: billing.attemptId } : {}),
           runId: context.runId ?? undefined,
           turnId,
-          messageId: turnId,
           operationKind: 'assistant-turn',
-          source: 'transcript',
-          durableEntryId: billing.durableEntryId,
+          source: 'host',
+          // The message's createdAt is source evidence, not its terminal clock.
+          endedAtMs: null,
+          outcome: status ?? 'unknown',
         },
       );
+      if (billing?.durableEntryId) {
+        this.canonicalCapture.captureExecution(
+          context,
+          executionId,
+          'transcriptEvidence',
+          `turn:${turnId}:transcript-evidence`,
+          observedAtMs,
+          {
+            operationId: executionId,
+            ...(billing.requestId ? { requestId: billing.requestId } : {}),
+            ...(billing.attemptId ? { attemptId: billing.attemptId } : {}),
+            runId: context.runId ?? undefined,
+            turnId,
+            messageId: turnId,
+            operationKind: 'assistant-turn',
+            source: 'transcript',
+            durableEntryId: billing.durableEntryId,
+          },
+        );
+      }
     }
     if (this.isPrivateSession(sessionPath) && !this.canonicalCapture) return;
     if (this.isCanonicalCloseActive(sessionPath)) return;
@@ -734,33 +801,69 @@ export class StatsService implements RunObserver {
     this.syncWorkingTimeBreakdown(sessionPath);
   }
 
-  onAssistantTerminalWatermark(watermark: LiveLifecycleWatermark): void {
+  onAssistantTerminalWatermark(watermark: LiveLifecycleWatermark, operationId?: string | null): void {
     if (!watermark.durableEntryId) return;
-    const context = this.analyticsContext(watermark.sessionPath);
-    const executionId = context.runId ?? context.operationId ?? `turn:${watermark.turnId}`;
-    this.canonicalCapture?.captureExecution(
-      context,
-      executionId,
-      'phase',
-      `turn:${watermark.turnId}:terminal-watermark:${watermark.attemptId}`,
-      watermark.occurredAt,
-      {
-        runId: context.runId ?? undefined,
-        turnId: watermark.turnId,
-        requestId: watermark.requestId,
-        attemptId: watermark.attemptId,
-        operationKind: 'assistant-turn',
-        source: 'backend-live-lifecycle',
-        durableEntryId: watermark.durableEntryId,
-        terminalWatermark: {
-          requestId: watermark.requestId,
+    const context = this.analyticsContext(watermark.sessionPath, operationId ?? null);
+    if (this.canonicalCapture && context.operationId) {
+      this.canonicalCapture.captureExecution(
+        context,
+        context.operationId,
+        'phase',
+        `turn:${watermark.turnId}:terminal-watermark:${watermark.attemptId}`,
+        watermark.occurredAt,
+        {
+          operationId: context.operationId,
+          runId: context.runId ?? undefined,
           turnId: watermark.turnId,
+          requestId: watermark.requestId,
           attemptId: watermark.attemptId,
-          finalSequence: watermark.finalSeq,
-          terminalKind: watermark.terminalKind,
+          operationKind: 'assistant-turn',
+          source: 'backend-live-lifecycle',
           durableEntryId: watermark.durableEntryId,
-          occurredAt: watermark.occurredAt,
+          terminalWatermark: {
+            requestId: watermark.requestId,
+            turnId: watermark.turnId,
+            attemptId: watermark.attemptId,
+            finalSequence: watermark.finalSeq,
+            terminalKind: watermark.terminalKind,
+            durableEntryId: watermark.durableEntryId,
+            occurredAt: watermark.occurredAt,
+          },
         },
+      );
+    }
+  }
+
+  onAgentSettled(payload: AgentSettledPayload): void {
+    const operationId = payload.operationId?.trim();
+    // Settlement without the backend's operation identity cannot safely close
+    // a host run. In particular, never turn the local run ID into a guessed
+    // operation identity or attribute this receipt to a newer active send.
+    if (!operationId || !this.canonicalCapture || this.isCanonicalCloseActive(payload.sessionPath)) return;
+    const context = this.analyticsContext(payload.sessionPath, operationId);
+    const sourceEndedAtMs = typeof payload.endedAt === 'number' && Number.isFinite(payload.endedAt)
+      && payload.endedAt >= 0
+      ? Math.trunc(payload.endedAt)
+      : typeof payload.occurredAt === 'number' && Number.isFinite(payload.occurredAt) && payload.occurredAt >= 0
+        ? Math.trunc(payload.occurredAt)
+        : null;
+    this.canonicalCapture.captureExecution(
+      context,
+      operationId,
+      'end',
+      `execution:${operationId}:agent-settled`,
+      // Keep the required envelope timestamp stable across replay. Older
+      // backends omit source timing, so retain the explicit unknown sentinel.
+      sourceEndedAtMs ?? 0,
+      {
+        operationId,
+        ...(payload.requestId ? { requestId: payload.requestId } : {}),
+        ...(payload.turnId ? { turnId: payload.turnId } : {}),
+        ...(payload.attemptId ? { attemptId: payload.attemptId } : {}),
+        operationKind: 'agent-run',
+        source: 'backend-agent-settled',
+        ...(sourceEndedAtMs === null ? {} : { endedAtMs: sourceEndedAtMs }),
+        outcome: 'unknown',
       },
     );
   }
@@ -1000,15 +1103,34 @@ export class StatsService implements RunObserver {
     sourceId: string,
     measuredDelayMs: number | undefined,
     durationMs: number,
+    evidence?: Pick<import('../../shared/protocol').RetryMeasuredPayload, 'operationId' | 'startedAt' | 'providerAttemptStartedAt' | 'endedAt'>,
   ): void {
     if (this.isPrivateSession(sessionPath) && !this.canonicalCapture) return;
     if (this.isCanonicalCloseActive(sessionPath)) return;
     this.tracker.onAutoRetryMeasured(sessionPath, sourceId, measuredDelayMs, durationMs);
+    if (this.canonicalCapture) {
+      this.canonicalCapture.captureRetryTiming(this.analyticsContext(sessionPath, evidence?.operationId ?? null), sourceId, {
+        ...evidence, measuredDelayMs, durationMs,
+      });
+      this.syncWorkingTimeBreakdown(sessionPath);
+      return;
+    }
+    const measuredElapsedMs = measuredDelayMs !== undefined
+      && Number.isFinite(measuredDelayMs) && measuredDelayMs >= 0
+      ? Math.trunc(measuredDelayMs) : null;
+    const terminalElapsedMs = Number.isFinite(durationMs) && durationMs >= 0
+      ? Math.trunc(durationMs) : null;
+    const elapsed = measuredElapsedMs ?? terminalElapsedMs;
+    if (!sourceId.trim() || elapsed === null) {
+      this.syncWorkingTimeBreakdown(sessionPath);
+      return;
+    }
     const endedAtMs = this.now().getTime();
-    const elapsed = Math.max(0, measuredDelayMs ?? durationMs);
+    const ownerId = this.currentRunId(sessionPath)
+      ?? analyticsRootSessionId(this.sessionIdentity(sessionPath).sessionId, sessionPath);
     const interval: ActivityIntervalRecord = {
       schemaVersion: 1,
-      intervalId: `activity:retry-wait:${this.currentRunId(sessionPath) ?? sessionPath}:${sourceId}`,
+      intervalId: `activity:retry-wait:${ownerId}:${sourceId}`,
       sessionId: this.sessionIdentity(sessionPath).sessionId,
       sessionPath,
       parentRunId: this.currentRunId(sessionPath),
@@ -1020,11 +1142,8 @@ export class StatsService implements RunObserver {
       endedAt: new Date(endedAtMs).toISOString(),
       outcome: 'succeeded',
     };
-    if (this.canonicalCapture) this.canonicalCapture.captureActivity(this.analyticsContext(sessionPath), interval);
-    else {
-      this.accounting.activityTimeline.record(interval);
-      this.storage.markDerivedExportDirty();
-    }
+    this.accounting.activityTimeline.record(interval);
+    this.storage.markDerivedExportDirty();
     this.syncWorkingTimeBreakdown(sessionPath);
   }
 
@@ -1046,10 +1165,33 @@ export class StatsService implements RunObserver {
     this.tracker.onBackendError(sessionPath, code);
   }
 
-  onContextUsageChanged(sessionPath: string, tokens: number | null, limit: number): void {
+  onContextUsageChanged(sessionPath: string, tokens: number | null, limit: number,
+    evidence?: Omit<import('../../shared/protocol').ContextUsageChangedPayload, 'sessionPath' | 'contextUsage'>): void {
     if (this.isPrivateSession(sessionPath) && !this.canonicalCapture) return;
     if (this.isCanonicalCloseActive(sessionPath)) return;
-    this.tracker.onContextUsageChanged(sessionPath, tokens, limit);
+    if (Number.isFinite(limit) && limit > 0) this.tracker.onContextUsageChanged(sessionPath, tokens, limit);
+    if (this.canonicalCapture) {
+      const contextLimitTokens = Number.isSafeInteger(limit) && limit > 0 ? limit : null;
+      const qualifiedTokens = evidence?.canonicalInputTokens !== undefined ? evidence.canonicalInputTokens : tokens;
+      const inputTokens = qualifiedTokens === null
+        ? null
+        : Number.isSafeInteger(qualifiedTokens) && qualifiedTokens >= 0 ? qualifiedTokens : null;
+      this.canonicalCapture.captureContextObservation(
+        this.analyticsContext(sessionPath),
+        evidence?.observationId?.trim() || `host-context:${this.createId()}`,
+        typeof evidence?.observedAt === 'number' && Number.isSafeInteger(evidence.observedAt)
+          ? evidence.observedAt : this.now().getTime(),
+        {
+          source: evidence?.source ?? 'unknown',
+          modelId: evidence?.modelId ?? null,
+          provider: evidence?.provider ?? null,
+          contextLimitTokens,
+          inputTokens,
+          estimate: evidence?.source === 'provider' ? false
+            : evidence?.source === 'postCompactionEstimate' ? true : null,
+        },
+      );
+    }
   }
 
   onBusyChanged(sessionPath: string, busy: boolean): void {
@@ -1061,7 +1203,13 @@ export class StatsService implements RunObserver {
     if (busy && (this.activeBusyIntervalsBySession[sessionPath]?.size ?? 0) === 0) {
       const runId = this.currentRunId(sessionPath);
       const operationId = this.activeOperationId(sessionPath);
-      const intervalId = `activity:busy:${operationId ?? runId ?? `${sessionPath}:${nowIso}`}`;
+      const ownerId = operationId
+        ?? runId
+        ?? analyticsRootSessionId(this.sessionIdentity(sessionPath).sessionId, sessionPath);
+      // The operation can legitimately emit multiple bounded busy cycles.
+      // Allocate a transition identity only when opening a new interval so a
+      // repeated cycle cannot overwrite the previous operation span.
+      const intervalId = `activity:busy:${ownerId}:${this.createId()}`;
       (this.activeBusyIntervalsBySession[sessionPath] ??= new Set()).add(intervalId);
       this.activeBusyStartedAtByInterval[intervalId] = nowIso;
       const interval: ActivityIntervalRecord = {

@@ -6,6 +6,12 @@ import {
   type AnalyticsObservation,
 } from '../../../shared/analytics/contracts.js';
 import { AnalyticsPrivacyScrubPendingError, SqliteAnalyticsRecorder } from './sqlite-recorder.js';
+import {
+  createSqliteLockRetryBudget,
+  isSqliteLockContention,
+  retrySqliteLock,
+  type SqliteLockRetryBudget,
+} from './sqlite-lock-retry.js';
 
 type RecorderWorkerRequest = {
   type: 'captureBatch';
@@ -93,22 +99,6 @@ function deletedSubjectError(error: unknown): string | undefined {
 /** `node:sqlite` exposes BUSY/LOCKED through either SQLite errcodes or a
  * generic ERR_SQLITE_ERROR plus text. Retry only those transient ownership
  * races; schema, corruption, path, and configuration failures stay fatal. */
-function isSqliteLockContention(error: unknown): boolean {
-  if (!error || typeof error !== 'object') return false;
-  const candidate = error as { code?: unknown; errcode?: unknown; errstr?: unknown; message?: unknown };
-  const code = String(candidate.code ?? '');
-  const errcode = Number(candidate.errcode);
-  const detail = `${String(candidate.errstr ?? '')} ${String(candidate.message ?? '')}`.toLowerCase();
-  return errcode === 5
-    || errcode === 6
-    || code === 'EBUSY'
-    || code === 'SQLITE_BUSY'
-    || code === 'SQLITE_LOCKED'
-    || code.startsWith('SQLITE_BUSY_')
-    || code.startsWith('SQLITE_LOCKED_')
-    || /\bdatabase(?: table)?\b[^\n]*\b(?:busy|locked)\b/u.test(detail);
-}
-
 async function initializeRecorder(): Promise<{
   recorder: SqliteAnalyticsRecorder;
   startupPrivacyRecovery: ReturnType<SqliteAnalyticsRecorder['resumePendingPrivacyScrubs']>;
@@ -155,6 +145,7 @@ async function handle(raw: unknown): Promise<void> {
         if (captures.some((capture) => capture.kind !== firstKind)) {
           throw new Error('Mixed analytics capture batch is not supported.');
         }
+        const lockRetryBudget: SqliteLockRetryBudget = createSqliteLockRetryBudget();
         const rejections: Array<{ index: number; code: 'subject_deleted' | 'source_conflict'; error: string }> = [];
         if (firstKind === 'observation') {
           // Preserve global queue order while retaining batch transactions for
@@ -165,7 +156,9 @@ async function handle(raw: unknown): Promise<void> {
             let end = start + 1;
             while (end < captures.length && captures[end]!.subject === captures[start]!.subject) end += 1;
             try {
-              recorder.submitBatch(captures.slice(start, end).map((capture) => capture.value as AnalyticsObservation));
+              await retrySqliteLock(() => recorder.submitBatch(
+                captures.slice(start, end).map((capture) => capture.value as AnalyticsObservation),
+              ), lockRetryBudget);
             } catch (error) {
               const deleted = deletedSubjectError(error);
               if (deleted) {
@@ -178,7 +171,10 @@ async function handle(raw: unknown): Promise<void> {
                 // rejected and unrelated immutable facts still advance.
                 for (let index = start; index < end; index += 1) {
                   try {
-                    recorder.submit(captures[index]!.value as AnalyticsObservation);
+                    await retrySqliteLock(
+                      () => recorder.submit(captures[index]!.value as AnalyticsObservation),
+                      lockRetryBudget,
+                    );
                   } catch (recordError) {
                     const recordDeleted = deletedSubjectError(recordError);
                     if (recordDeleted) rejections.push({ index, code: 'subject_deleted', error: recordDeleted });
@@ -206,7 +202,7 @@ async function handle(raw: unknown): Promise<void> {
               // re-serialize hop was a proven byte-level fixed point (redaction
               // is idempotent and both producer and worker sanitize the same
               // value) and only added native v8 allocation per payload.
-              recorder.submitDetail(detail);
+              await retrySqliteLock(() => recorder.submitDetail(detail), lockRetryBudget);
             } catch (error) {
               const deleted = deletedSubjectError(error);
               if (deleted) rejections.push({ index, code: 'subject_deleted', error: deleted });
@@ -220,13 +216,16 @@ async function handle(raw: unknown): Promise<void> {
         // counter. Reading the full delivery accounting here also computed two
         // unbounded whole-table detail aggregates and discarded them, once per
         // ingested batch, which is quadratic in the tier.
-        const completeDetailWatermark = recorder.readCompleteDetailWatermark();
+        const completeDetailWatermark = await retrySqliteLock(
+          () => recorder.readCompleteDetailWatermark(),
+          lockRetryBudget,
+        );
         await acknowledge(request.requestId, {
           rejections,
           producerReconciliation: firstKind === 'observation'
-            ? recorder.readProducerAcknowledgements(
+            ? await retrySqliteLock(() => recorder.readProducerAcknowledgements(
                 captures.map((capture) => capture.value as AnalyticsObservation),
-              )
+              ), lockRetryBudget)
             : [],
           completeDetailWatermark,
         });
@@ -299,7 +298,7 @@ async function handle(raw: unknown): Promise<void> {
     if (message.startsWith('Analytics capture subject is deleted:')) errorCode = 'subject_deleted';
     else if (error instanceof AnalyticsPrivacyScrubPendingError) errorCode = 'privacy_scrub_pending';
     else if (error instanceof AnalyticsSourceConflictError) errorCode = 'source_conflict';
-    else if (/database is locked|\bdatabase table is locked\b/u.test(message)) errorCode = 'database_locked';
+    else if (isSqliteLockContention(error)) errorCode = 'database_locked';
     await send({
       type: 'error',
       requestId: request.requestId,

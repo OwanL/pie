@@ -9,6 +9,54 @@ import { CanonicalAnalyticsCapture } from '../../src/analytics/canonical-capture
 import { SqliteAnalyticsRecorder } from '../../src/analytics/sqlite-recorder.js';
 import { BillableAccounting } from '../../src/host/billable-accounting/service.js';
 
+test('activity capture retains missing and reversed source bounds without fabricated observed duration', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'pie-activity-timestamps-'));
+  const recorder = new SqliteAnalyticsRecorder(path.join(root, 'analytics.sqlite'));
+  const errors: Error[] = [];
+  const capture = new CanonicalAnalyticsCapture({
+    authority: 'canonical', generationId: 'activity-generation',
+    workspaceId: 'workspace', buildId: 'build', processGeneration: 'process',
+    sink: { submit: (observation) => recorder.submit(observation) },
+    detailSink: { submitDetail: () => undefined },
+    lifecycleSink: { bindPendingCreate: async () => undefined, deleteSession: async () => undefined },
+    onCaptureError: (error) => errors.push(error),
+  });
+  try {
+    const cases = [
+      { startedAt: 'invalid', endedAt: 'invalid' },
+      { startedAt: '1970-01-01T00:00:00Z', endedAt: 'invalid' },
+      { startedAt: '1970-01-01T00:00:02Z', endedAt: '1970-01-01T00:00:01Z' },
+      { startedAt: '1970-01-01T00:00:00Z', endedAt: '1970-01-01T00:00:00Z' },
+      { startedAt: '1970-01-01T00:00:00Z' },
+    ];
+    for (const [index, times] of cases.entries()) {
+      const interval = {
+        schemaVersion: 1 as const, intervalId: `span-${index}`, sessionId: 'session',
+        sessionPath: '/session', parentRunId: null, parentOperationId: 'operation',
+        invocationId: null, toolId: null, kind: 'busy' as const, ...times,
+      };
+      const context = { sessionId: 'session', sessionPath: '/session', operationId: 'operation' };
+      assert.equal(capture.captureActivity(context, interval), 'submitted');
+      assert.equal(capture.captureActivity(context, interval), 'submitted');
+    }
+    assert.deepEqual(errors, [], 'unchanged evidence is replayable without receipt-clock conflicts');
+    const rows = recorder.executeReadOnlyQuery(`
+      SELECT started_at_ms, ended_at_ms, duration_ms, coverage
+      FROM analytics_activity_states ORDER BY span_id
+    `).rows;
+    assert.deepEqual(rows.map((row) => Object.values(row)), [
+      [null, null, null, 'unknown'],
+      ['0', null, null, 'unknown'],
+      ['2000', '1000', null, 'unknown'],
+      ['0', '0', 0, 'observed'],
+      ['0', null, null, 'observed'],
+    ]);
+  } finally {
+    recorder.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('provider capture keeps unavailable source dates undated and preserves a real epoch settlement', () => {
   const root = mkdtempSync(path.join(tmpdir(), 'pie-capture-timestamps-'));
   const recorder = new SqliteAnalyticsRecorder(path.join(root, 'analytics.sqlite'));
