@@ -28,7 +28,7 @@ const outRoot = path.resolve(extensionRoot, 'out');
 const workerScript = path.join(outRoot, 'analytics-recorder-worker.js');
 const queryWorkerScript = path.join(outRoot, 'analytics-query-worker.js');
 const REPORT_SCHEMA_VERSION = 5;
-const HARNESS_VERSION = 'p0-baseline-scale-v4-sampled-memory';
+const HARNESS_VERSION = 'p0-baseline-scale-v5-fixture-identity-fix';
 let AnalyticsRecorderSupervisor;
 let AnalyticsCaptureCapacityError;
 let SqliteAnalyticsRecorder;
@@ -1488,11 +1488,20 @@ try {
   // Race the recorder-owned deletion marker against a late detail in another
   // helper. Either ordering is valid; the final state must be absent and the
   // late writer must be scrubbed or explicitly rejected.
+  //
+  // These observations must use fact indexes OUTSIDE the fixture range. The
+  // fixture submits observation(i, i % 4) for every i below the row target, and
+  // observation() derives entityKey, invocationId and the idempotency key from
+  // `i` alone, so an in-range index reuses a fixture identity. At 10k rows the
+  // old indexes (20000/20001/30000) happened to sit above the fixture and the
+  // race worked by luck; at 1M they are inside it, so the private fact was
+  // absorbed as an identity conflict and this whole section tested nothing. The
+  // positive control below now fails loudly if that ever recurs.
   const privacySentinel = 'PIE-PRIVATE-QUALIFICATION-SENTINEL-fdf9c37e';
   const deletionWriter = supervisor(databasePath);
   const lateWriter = supervisor(databasePath);
   await Promise.all([deletionWriter.start(), lateWriter.start()]);
-  const initialPrivateFact = observation(20_000, 0);
+  const initialPrivateFact = observation(90_100_000, 0);
   initialPrivateFact.fields.privateQualificationValue = privacySentinel;
   initialPrivateFact.scope.rootSessionId = scopedId('private-race-root');
   initialPrivateFact.captureSubject.rootSessionId = scopedId('private-race-root');
@@ -1504,10 +1513,26 @@ try {
     { privateQualificationValue: privacySentinel, body: privacySentinel.repeat(128) },
   ));
   await deletionWriter.flush();
+  // Positive control: the private data must actually be stored before the race,
+  // otherwise "no private bytes remain" is satisfied by having written none.
+  const privacyPrecondition = openReader(databasePath);
+  const privateFactsBeforeRace = privacyPrecondition.countObservations(scopedId('private-race-root'));
+  const privateDetailsBeforeRace = privacyPrecondition.countDetails(scopedId('private-race-root'));
+  closeReader(privacyPrecondition);
+  assert.equal(
+    privateFactsBeforeRace,
+    1,
+    'the private-race fact must be captured before the race; otherwise the privacy assertions are vacuous',
+  );
+  assert.equal(
+    privateDetailsBeforeRace,
+    1,
+    'the private-race detail must be captured before the race; otherwise the privacy assertions are vacuous',
+  );
   const raceResults = await Promise.allSettled([
     deletionWriter.deleteSession(scopedId('private-race-root'), scopedId('private-close'), 1_780_200_000_000),
     (async () => {
-      const lateFact = observation(20_001, 1);
+      const lateFact = observation(90_100_001, 1);
       lateFact.scope.rootSessionId = scopedId('private-race-root');
       lateFact.captureSubject.rootSessionId = scopedId('private-race-root');
       lateWriter.submit(lateFact);
@@ -1517,7 +1542,7 @@ try {
   ]);
   assert.ok(lateWriter.backlog.deliveryFailures >= 1, 'late private delivery rejection must be visible');
   const lateDeliveryError = lateWriter.lastDeliveryError?.message;
-  const unrelatedAfterDelete = observation(30_000, 1);
+  const unrelatedAfterDelete = observation(90_100_004, 1);
   unrelatedAfterDelete.scope.rootSessionId = scopedId('unrelated-after-private-delete');
   unrelatedAfterDelete.captureSubject.rootSessionId = scopedId('unrelated-after-private-delete');
   lateWriter.submit(unrelatedAfterDelete);
@@ -1528,27 +1553,47 @@ try {
   closeReader(privacyRecovery);
   assert.equal(privacyScrubRecovery.pending.length, 0);
   const privacyReader = openReader(databasePath);
-  assert.equal(privacyReader.countDetails(scopedId('private-race-root')), 0);
-  assert.equal(privacyReader.countObservations(scopedId('private-race-root')), 0);
-  assert.equal(privacyReader.countObservations(scopedId('unrelated-after-private-delete')), 1);
+  const raceRootDetailCount = privacyReader.countDetails(scopedId('private-race-root'));
+  const raceRootObservationCount = privacyReader.countObservations(scopedId('private-race-root'));
+  const unrelatedObservationCount = privacyReader.countObservations(scopedId('unrelated-after-private-delete'));
   const privacyAccounting = privacyReader.readDeliveryAccounting();
   closeReader(privacyReader);
+  // Record the full picture before asserting. A bare count mismatch does not say
+  // whether the unrelated write was rejected, dropped, or never drained, and the
+  // race outcome is needed to tell those apart.
+  report.results.privateDeleteRace = {
+    outcomes: raceResults.map((result) => (result.status === 'rejected'
+      ? `rejected:${result.reason instanceof Error ? result.reason.message : String(result.reason)}`
+      : 'fulfilled')),
+    lateDeliveryFailures: lateWriter.backlog.deliveryFailures,
+    lateDeliveryError,
+    lateDeliveryErrorCode: lateWriter.lastDeliveryError?.code,
+    lateWriterTerminalError: lateWriter.terminalError?.message ?? null,
+    lateWriterBacklog: lateWriter.backlog,
+    unrelatedObservationCount,
+    raceRootObservationCount,
+    raceRootDetailCount,
+    finalFactCount: raceRootObservationCount,
+    finalDetailCount: raceRootDetailCount,
+    physicalMainWalShmScrubbed: true,
+    durableDeliveryAccounting: privacyAccounting,
+    scrubRecovery: privacyScrubRecovery,
+  };
+  assert.equal(raceRootDetailCount, 0, `private-race-root details must be gone; race=${JSON.stringify(report.results.privateDeleteRace.outcomes)}`);
+  assert.equal(raceRootObservationCount, 0, `private-race-root facts must be gone; race=${JSON.stringify(report.results.privateDeleteRace.outcomes)}`);
+  assert.equal(
+    unrelatedObservationCount,
+    1,
+    `an unrelated write after a private close must land; race=${JSON.stringify(report.results.privateDeleteRace.outcomes)}`
+    + ` backlog=${JSON.stringify(lateWriter.backlog)}`
+    + ` lastDeliveryError=${lateDeliveryError ?? 'none'}`,
+  );
   for (const suffix of ['', '-wal', '-shm']) {
     const candidate = `${databasePath}${suffix}`;
     if (existsSync(candidate)) {
       assert.equal(readFileSync(candidate).includes(Buffer.from(privacySentinel)), false, `${suffix || 'main'} retained private bytes`);
     }
   }
-  report.results.privateDeleteRace = {
-    outcomes: raceResults.map((result) => result.status),
-    lateDeliveryFailures: lateWriter.backlog.deliveryFailures,
-    lateDeliveryError,
-    finalFactCount: 0,
-    finalDetailCount: 0,
-    physicalMainWalShmScrubbed: true,
-    durableDeliveryAccounting: privacyAccounting,
-    scrubRecovery: privacyScrubRecovery,
-  };
 
   // The rate conditions spawn up to four concurrent recorder helpers. On this
   // machine (15.3 GB RAM, measured ~3.5 GB available, effective limit 2.6 GB)
