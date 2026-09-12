@@ -1552,3 +1552,50 @@ test('the partial copy-scrub index serves the private-close predicate', () => {
     rmSync(temp.root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 });
+
+test('a flush checkpoint tolerates a concurrent writer instead of failing locked', () => {
+  const temp = tempDatabase();
+  // Two independent connections to the same database is the helper topology:
+  // one is mid-write while the other flushes.
+  const writer = new SqliteAnalyticsRecorder(temp.databasePath);
+  const flusher = new SqliteAnalyticsRecorder(temp.databasePath);
+  const raw = createRequire(process.execPath)('node:sqlite');
+  try {
+    writer.submit(observation({
+      sourceKey: 'flush-fact-a', sourceSequence: 1, stableOriginId: 'flush-origin',
+      invocationId: 'flush-invocation-a', fields: { invocationId: 'flush-invocation-a', outcome: 'success' },
+    }));
+    // Hold a write transaction open on another connection. A TRUNCATE
+    // checkpoint cannot complete while it is open, and previously surfaced
+    // through an ordinary flush as "database is locked".
+    const blocker = new raw.DatabaseSync(temp.databasePath, { timeout: 100 });
+    try {
+      blocker.exec('BEGIN IMMEDIATE');
+      blocker.prepare('INSERT INTO analytics_generations (generation_id, first_observed_at_ms) VALUES (?, ?)')
+        .run('flush-blocker-generation', '1');
+      // The flush barrier must remain usable under contention.
+      assert.doesNotThrow(() => flusher.checkpoint(), 'a passive flush must not require exclusive access');
+      // SQLite *reports* truncation contention rather than throwing, so the
+      // privacy scrub can keep its fence pending and retry instead of failing
+      // the whole close. Assert the documented contract: the result is a
+      // well-formed checkpoint row whose `busy` flag reflects contention.
+      const result = flusher.truncateWalAndRead();
+      assert.ok(
+        typeof result.busy === 'number' || typeof result.busy === 'bigint',
+        'truncation must report a busy flag',
+      );
+      assert.notEqual(
+        Number(result.busy),
+        0,
+        'a concurrently held write transaction must be reported as busy, never as success',
+      );
+    } finally {
+      blocker.exec('ROLLBACK');
+      blocker.close();
+    }
+  } finally {
+    writer.close();
+    flusher.close();
+    rmSync(temp.root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  }
+});

@@ -2617,7 +2617,7 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
 
   private completePrivacyScrub(rootSessionId: string): void {
     try {
-      const row = this.database.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get() as WalCheckpointRow;
+      const row = this.truncateWalAndRead() as WalCheckpointRow;
       const busy = toNumber(row.busy);
       if (busy !== 0) throw new Error(`WAL checkpoint is busy (${busy}).`);
       this.transaction(() => {
@@ -3680,9 +3680,36 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
     return { ...this.stats };
   }
 
+  /** Make committed writes durable.
+   *
+   * `TRUNCATE` demands exclusive access to the database and fails with
+   * "database is locked" whenever any other helper is mid-write, so using it as
+   * an ordinary flush barrier turned a routine concurrent `flush()` into a
+   * worker-visible failure. A PASSIVE checkpoint moves committed frames into the
+   * main database without blocking and without requiring exclusivity, which is
+   * what a flush actually needs; the blocking full truncation stays where it is
+   * genuinely required (private-close scrubbing). */
   checkpoint(): void {
     this.assertWritable();
+    this.database.exec('PRAGMA wal_checkpoint(PASSIVE)');
+  }
+
+  /** Truncate the WAL, requiring exclusive access.
+   *
+   * Used by the private-close scrub, which must physically remove private bytes
+   * from the WAL. A concurrent writer legitimately prevents this, so callers
+   * must tolerate failure and keep the fence pending for a later retry. */
+  truncateWal(): void {
+    this.assertWritable();
     this.database.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+  }
+
+  /** Truncate and report the checkpoint result so the caller can see `busy`.
+   * A concurrent writer legitimately makes this busy; that is a retryable
+   * condition for the privacy scrub, not a defect. */
+  truncateWalAndRead(): WalCheckpointRow {
+    this.assertWritable();
+    return this.database.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get() as WalCheckpointRow;
   }
 
   close(): void {
