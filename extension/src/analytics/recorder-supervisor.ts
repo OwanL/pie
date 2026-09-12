@@ -59,6 +59,23 @@ export interface AnalyticsRecorderSupervisorOptions {
   maxBatchSize?: number;
   maxQueueRecords?: number;
   maxQueueBytes?: number;
+  /** Optional V8 old-space ceiling for the recorder child, in MiB.
+   *
+   * Leave unset in production: the recorder deliberately inherits **no**
+   * `execArgv`, because an inherited loader/debug flag can turn the helper into
+   * a wrapper process and break the sole IPC ownership channel (see
+   * `recorder-supervisor-exec-argv.test.ts`). Setting this adds one owned
+   * memory flag and is therefore an explicit operator decision, not a default.
+   *
+   * Rationale for having the lever at all: an unbounded child reserves idle
+   * heap it never uses and reports it as RSS. Measured at 100,000 details the
+   * worker pinned `heapTotal` at ~137 MB while `heapUsed` repeatedly fell back
+   * to 6 MB, so the `recorderWorkerRss` gate was tracking V8's reservation
+   * rather than retained analytics state. In isolated runs a 128 MiB ceiling
+   * lowered the peak from 254 MB to 238 MB, but the evidence is **not**
+   * sufficient to adopt a production default: peaks oscillate around the
+   * gate and a 192 MiB ceiling measured worse (262 MB). */
+  maxOldSpaceMb?: number;
   /** One bounded helper replacement is the default normal failover policy.
    * Further outages stay visible and retain accepted capture for an owner. */
   maxAutomaticRestarts?: number;
@@ -118,6 +135,11 @@ interface ControlQueueItem {
 }
 
 type QueueItem = CaptureQueueItem | ControlQueueItem;
+
+/** Bounds for the optional recorder heap ceiling. No default is applied: the
+ * recorder's empty execArgv is a deliberate safety property. */
+const MIN_RECORDER_HEAP_MB = 64;
+const MAX_RECORDER_HEAP_MB = 512;
 
 const CAPTURE_IPC_RECORD_OVERHEAD = serialize({
   type: 'captureBatch',
@@ -744,12 +766,26 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
   private async startWorker(): Promise<void> {
     const spawnedAtMs = Date.now();
     const instanceId = randomUUID();
+    // Only add a memory flag when an operator explicitly asked for a ceiling.
+    // The recorder's empty-by-default execArgv is a deliberate safety property
+    // (an inherited loader/debug flag can turn the helper into a wrapper and
+    // break the sole IPC channel), so no default is applied here.
+    const execArgv = [...(this.options.execArgv ?? [])];
+    if (this.options.maxOldSpaceMb !== undefined) {
+      const configuredHeapMb = this.options.maxOldSpaceMb;
+      if (!Number.isSafeInteger(configuredHeapMb) || configuredHeapMb < MIN_RECORDER_HEAP_MB) {
+        throw new RangeError(
+          `Analytics recorder maxOldSpaceMb must be a safe integer of at least ${MIN_RECORDER_HEAP_MB}.`,
+        );
+      }
+      execArgv.push(`--max-old-space-size=${Math.min(MAX_RECORDER_HEAP_MB, configuredHeapMb)}`);
+    }
     const child = fork(this.options.workerScript, [], {
       // The recorder is a dedicated packaged-JS process (test loaders own
       // their own TS import). Inheriting Electron, debugger, or `node --test`
       // flags can turn it into a wrapper/grandchild and break the sole IPC
       // ownership channel.
-      execArgv: [...(this.options.execArgv ?? [])],
+      execArgv,
       env: {
         ...process.env,
         PIE_ANALYTICS_DATABASE_PATH: this.options.databasePath,

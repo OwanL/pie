@@ -482,3 +482,81 @@ test('an unconfirmed terminal exit keeps the stop fence latched until explicit c
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+const heapWorkerScript = fileURLToPath(new URL('./fixtures/recorder-heap-limit-worker.cjs', import.meta.url));
+
+test('leaves the recorder child execArgv empty unless a heap ceiling is requested', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'pie-recorder-heap-default-'));
+  const databasePath = path.join(root, 'heap-default.sqlite');
+  const supervisor = new AnalyticsRecorderSupervisor({
+    enabled: true,
+    workerScript: heapWorkerScript,
+    databasePath,
+  });
+  try {
+    await supervisor.start();
+    const stats = await supervisor.workerStats() as unknown as {
+      heap: { heapSizeLimitMb: number; flag: string | null; execArgv: string[] };
+    };
+    // The recorder deliberately inherits no parent flags, so no ceiling is
+    // applied by default and the limit stays at V8's unbounded ~4288 MiB.
+    assert.equal(stats.heap.flag, null, 'no ceiling flag may be added by default');
+    assert.deepEqual(stats.heap.execArgv, [], 'the recorder child must keep an empty execArgv');
+    assert.ok(
+      stats.heap.heapSizeLimitMb > 1_000,
+      `an unbounded child keeps the large default, got ${stats.heap.heapSizeLimitMb} MiB`,
+    );
+  } finally {
+    await supervisor.shutdown();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('applies an explicitly requested recorder heap ceiling and preserves caller execArgv', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'pie-recorder-heap-explicit-'));
+  const databasePath = path.join(root, 'heap-explicit.sqlite');
+  const supervisor = new AnalyticsRecorderSupervisor({
+    enabled: true,
+    workerScript: heapWorkerScript,
+    databasePath,
+    execArgv: ['--no-warnings'],
+    maxOldSpaceMb: 96,
+  });
+  try {
+    await supervisor.start();
+    const stats = await supervisor.workerStats() as unknown as {
+      heap: { heapSizeLimitMb: number; flag: string | null; execArgv: string[] };
+    };
+    assert.equal(stats.heap.flag, '--max-old-space-size=96');
+    assert.ok(
+      stats.heap.execArgv.includes('--no-warnings'),
+      'a caller-supplied execArgv entry must survive alongside the ceiling',
+    );
+    assert.ok(
+      stats.heap.heapSizeLimitMb < 1_000,
+      `expected a bounded ceiling well under the 4288 MiB default, got ${stats.heap.heapSizeLimitMb}`,
+    );
+  } finally {
+    await supervisor.shutdown();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('rejects a recorder heap ceiling below the supported floor', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'pie-recorder-heap-floor-'));
+  const supervisor = new AnalyticsRecorderSupervisor({
+    enabled: true,
+    workerScript: heapWorkerScript,
+    databasePath: path.join(root, 'heap-floor.sqlite'),
+    maxOldSpaceMb: 16,
+  });
+  try {
+    await assert.rejects(
+      supervisor.start(),
+      /maxOldSpaceMb must be a safe integer of at least 64/u,
+    );
+  } finally {
+    if (supervisor.workerPid) process.kill(supervisor.workerPid, 'SIGKILL');
+    rmSync(root, { recursive: true, force: true });
+  }
+});

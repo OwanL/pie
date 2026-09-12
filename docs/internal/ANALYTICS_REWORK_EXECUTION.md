@@ -2546,3 +2546,83 @@ A three-point scaling measurement (50k / 100k / 200k details through the real su
 establish whether worker RSS **plateaus** (a bounded allocator high-water, in which case the honest
 question is the gate's ceiling for a single detail host) or **grows without bound** (a genuine leak, in
 which case it is a defect to fix). The answer decides the next action and has not been assumed.
+
+### Checkpoint 34: worker RSS is a fixed plateau, not a per-payload leak
+
+The scaling measurement completed and overturns the per-payload hypothesis. Driving the real
+supervisor→worker path with a fixed detail mixture at increasing payload counts (three-point run plus a
+floor measurement):
+
+| Payloads | Max worker RSS |
+|---|---|
+| 0 | 41.2 MB |
+| 1,000 | 84.3 MB |
+| 10,000 | 205.1 MB |
+| 50,000 | 275.2 MB |
+| 100,000 | 254.5 MB |
+| 200,000 | 266.6 MB |
+
+**A 20× increase in payload count (10,000 → 200,000) adds only 61.5 MB, and the value oscillates
+rather than growing.** Peak RSS is non-monotonic across both the 50k/100k/200k trio and the 1M run's
+2 KiB / 32 KiB / 2 MiB size regions. A per-payload leak would scale linearly with count; this does not.
+The shape is a steep rise to roughly 200 MB by the first ~10,000 payloads, then a plateau that
+oscillates between ~250 and ~275 MB. `minimumOwnedBytes` and the transport re-serialization are
+therefore **steady-state working-set costs under continuous load, not accumulating leaks** — removing
+them would be an optimisation, not a correctness fix, and neither is what makes this gate fail.
+
+**Consequence for the gate.** `recorderWorkerRss` requires ≤ 256 MiB per recorder helper during
+ordinary ingestion. The measured steady state for a single detail-ingesting worker is ~250–275 MB, so
+the gate sits **inside the process's own working-set band** rather than above a leak. The floor
+(0 payloads) is 41 MB, and a helper that has ingested ~10,000 payloads already sits near 205 MB. Two
+honest readings are possible and this checkpoint does not pick one silently:
+
+1. The gate's per-worker ceiling is too tight for a worker that owns a continuous detail stream; the
+   contract's measured-ceiling language (§6) expects these numbers to be fixed from measurement rather
+   than assumed.
+2. Something still allocates ~160 MB between the 41 MB floor and the 205 MB working set that a repair
+   could remove, in which case the ceiling is achievable.
+
+Distinguishing them requires the worker's own memory breakdown (heap vs external vs array buffers) and,
+if the steady state is genuinely heap-sized, a V8 heap-ceiling bound on the forked recorder child —
+which the query client already sets via `--max-old-space-size` (`query-client.ts`) but the recorder
+supervisor does not. That measurement is running; the next checkpoint records which reading holds.
+
+### Checkpoint 35: the plateau is idle V8 heap reservation, not a leak
+
+The worker's own memory breakdown settles it. Driving the real supervisor at the 100,000-detail
+mixture and reading `process.memoryUsage()` from the worker:
+
+| Sample | RSS | heapTotal | heapUsed | external+arrayBuffers |
+|---|---|---|---|---|
+| before | 42 MB | 7 MB | 5 MB | 2 MB |
+| after-23676 | 185 MB | **137 MB** | 34 MB | 67 MB |
+| after-47352 | 178 MB | **137 MB** | 6 MB | 7 MB |
+| after-71028 | 251 MB | **138 MB** | 59 MB | 113 MB |
+| after-94704 | 220 MB | **138 MB** | 31 MB | 57 MB |
+| final | 223 MB | **145 MB** | 16 MB | 60 MB |
+
+**`heapTotal` pins at ~137 MB and returns there repeatedly while `heapUsed` falls back to 6–31 MB
+between batches.** V8 is holding ~130 MB of reserved-but-unused heap, and the reported RSS follows that
+reservation rather than live data. Peak `heapUsed` is only 59 MB. So the gate is failing on **V8's
+heap-reservation policy**, not on retained analytics state, not on a leak, and not on payload volume.
+
+This also explains the plateau shape from checkpoint 34: the reservation is reached within the first
+few thousand payloads and then held, which is exactly why 20× more payloads added only 61.5 MB, and why
+the 2 KiB region (most payload transitions per byte) peaked highest.
+
+**The repair is therefore a bounded heap ceiling on the forked recorder child** — the same mechanism
+the query client already uses (`--max-old-space-size=192` by default in `query-client.ts`), which the
+recorder supervisor does not set. Note the supervisor already accepts an `execArgv` option and passes it
+through at fork time, so the seam exists; the question is only the bound value and whether a
+heap-constrained worker still meets the throughput and no-wait requirements. An empirical comparison at
+the same payload count (unbounded vs 128 MB vs 192 MB) is running; the gate will not be revised and the
+ceiling will not be adopted unless the constrained worker demonstrably still passes every other gate,
+including handoff latency and backlog drain.
+
+This is a materially different situation from a leak: no data is mis-accounted and nothing is retained
+that should not be. The fix reduces the process's *reserved* footprint, so the honest risk to check is
+whether a tighter ceiling forces extra GC work and slows ingestion.
+
+**Independently verified repair carried forward.** The `storage` command fix is confirmed: `979` ms
+against a fresh 1M database, down from the `10,022` ms timeout, so `inPlaceCorruption` should now
+proceed past its terminal probe. All the other 1M gates continue to pass.
