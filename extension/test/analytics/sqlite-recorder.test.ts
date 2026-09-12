@@ -384,7 +384,7 @@ test('v1 upgrade retains facts, detail, deletion fences, accounting, and source 
     }
 
     recorder = new SqliteAnalyticsRecorder(temp.databasePath);
-    assert.equal(recorder.getDatabaseSchemaVersion(), 4);
+    assert.equal(recorder.getDatabaseSchemaVersion(), 5);
     assert.equal(recorder.readDeliveryAccounting().deliveryHistoryCoverage, 'retained_only');
     assert.equal(recorder.countObservations('root-retained'), 1);
     assert.deepEqual(recorder.reconstructDetail('legacy-detail'), { retained: true });
@@ -569,14 +569,16 @@ test('recorder rejects unsupported newer database schema versions', () => {
   recorder.close();
   const raw = new DatabaseSync(temp.databasePath);
   try {
-    raw.exec('PRAGMA user_version = 5');
+    // One beyond the current schema: an unversioned future database must fail
+    // closed rather than be read with today's assumptions.
+    raw.exec('PRAGMA user_version = 6');
   } finally {
     raw.close();
   }
   try {
     assert.throws(
       () => new SqliteAnalyticsRecorder(temp.databasePath),
-      /Unsupported newer analytics database schema version 5/,
+      /Unsupported newer analytics database schema version 6/,
     );
   } finally {
     rmSync(temp.root, { recursive: true, force: true });
@@ -1165,7 +1167,7 @@ test('logical query surface is native read-only, bounded, and reports snapshot/d
       ['query-a'],
       { maxRows: 2, maxCellBytes: 32 },
     );
-    assert.equal(result.databaseSchemaVersion, 4);
+    assert.equal(result.databaseSchemaVersion, 5);
     assert.equal(result.snapshotWatermark, 3);
     assert.deepEqual(result.generationIds, ['generation-1']);
     assert.equal(result.returnedRows, 2);
@@ -1349,5 +1351,132 @@ test('provider projection preserves missingness and signed-64-bit token strings 
   } finally {
     recorder.close();
     rmSync(temp.root, { recursive: true, force: true });
+  }
+});
+
+test('recording enforces the exclusion even when the producer skipped redaction', () => {
+  const temp = tempDatabase();
+  const recorder = new SqliteAnalyticsRecorder(temp.databasePath);
+  const secret = `sk-${'z'.repeat(48)}`;
+  try {
+    // A producer or transport that never sanitized must still not be able to
+    // persist private bytes: recording is the last durable boundary.
+    const unredacted = detail({
+      payloadId: 'unredacted-detail',
+      value: { messages: [{ role: 'assistant', content: [{ type: 'text', text: `token ${secret}` }] }] },
+    });
+    assert.ok(Buffer.from(unredacted.bytes).includes(Buffer.from(secret)), 'fixture must contain the secret');
+    recorder.submitDetail(unredacted);
+
+    const reconstructed = recorder.reconstructDetail('unredacted-detail') as {
+      messages: Array<{ content: Array<{ text: string }> }>;
+    };
+    const durableText = reconstructed.messages[0].content[0].text;
+    assert.ok(!durableText.includes(secret), 'the secret must not survive recording');
+    assert.match(durableText, /\[redacted\]|REDACTED|redacted/i);
+
+    // No content row may retain the raw secret either.
+    const raw = createRequire(process.execPath)('node:sqlite');
+    const db = new raw.DatabaseSync(temp.databasePath, { readOnly: true });
+    try {
+      const rows = db.prepare('SELECT body FROM analytics_detail_content').all() as Array<{ body: Uint8Array }>;
+      for (const row of rows) {
+        assert.ok(!Buffer.from(row.body).includes(Buffer.from(secret)), 'no stored content may contain the secret');
+      }
+    } finally {
+      db.close();
+    }
+  } finally {
+    recorder.close();
+    rmSync(temp.root, { recursive: true, force: true });
+  }
+});
+
+test('an already-sanitized detail is a byte-level fixed point through recording', () => {
+  const temp = tempDatabase();
+  const recorder = new SqliteAnalyticsRecorder(temp.databasePath);
+  try {
+    const value = { messages: [{ role: 'assistant', content: [{ type: 'text', text: 'plain content' }] }] };
+    const sanitized = serialize(sanitizeAnalyticsDetail(value));
+    const capture = { ...detail({ payloadId: 'fixed-point-detail', value }), bytes: sanitized };
+    recorder.submitDetail(capture);
+
+    // Exact replay of the same bytes must be an idempotent duplicate, which is
+    // only true if canonicalization returns the identical buffer.
+    assert.doesNotThrow(() => recorder.submitDetail(capture));
+    assert.deepEqual(recorder.getStats(), {
+      accepted: 0,
+      duplicates: 0,
+      detailsAccepted: 1,
+      detailDuplicates: 1,
+      rejectedAfterDelete: 0,
+    });
+    assert.deepEqual(recorder.reconstructDetail('fixed-point-detail'), value);
+  } finally {
+    recorder.close();
+    rmSync(temp.root, { recursive: true, force: true });
+  }
+});
+
+test('schema v5 adds the projection-order index without changing stored settlements', () => {
+  const temp = tempDatabase();
+  const recorder = new SqliteAnalyticsRecorder(temp.databasePath);
+  const fact = observation({
+    sourceKey: 'v5-fact',
+    sourceSequence: 1,
+    stableOriginId: 'v5-origin',
+    invocationId: 'v5-invocation',
+    fields: { invocationId: 'v5-invocation', outcome: 'success', inputTokens: 10, reportedCostUsd: 0.01 },
+  });
+  let before;
+  let knownTotalBefore;
+  try {
+    recorder.submit(fact);
+    before = recorder.readProviderSettlements();
+    knownTotalBefore = recorder.readProviderAccountingSummary().inputTokens.knownTotal;
+    assert.equal(before.settlements.length, 1);
+  } finally {
+    recorder.close();
+  }
+
+  try {
+    // Rewind to the previous schema and drop only the additive index, then
+    // reopen: the upgrade must recreate the index and preserve every row.
+    const raw = new DatabaseSync(temp.databasePath);
+    try {
+      raw.exec('DROP INDEX analytics_provider_settlement_projection_order_idx');
+      raw.exec('PRAGMA user_version = 4');
+    } finally {
+      raw.close();
+    }
+
+    const upgraded = new SqliteAnalyticsRecorder(temp.databasePath);
+    try {
+      assert.equal(upgraded.getDatabaseSchemaVersion(), 5);
+      const after = upgraded.readProviderSettlements();
+      assert.deepEqual(after.settlements, before.settlements);
+      assert.equal(upgraded.readProviderAccountingSummary().inputTokens.knownTotal, knownTotalBefore);
+      assert.equal(upgraded.countObservations(), 1);
+
+      // The index must now serve the projection ordering.
+      const plan = upgraded.executeReadOnlyQuery(
+        'EXPLAIN QUERY PLAN SELECT * FROM analytics_provider_settlements '
+        + 'ORDER BY CAST(projection_revision AS INTEGER), generation_id, invocation_id LIMIT 200',
+      );
+      const details = plan.rows.map((row) => String(row.detail));
+      assert.ok(
+        details.some((detail) => detail.includes('analytics_provider_settlement_projection_order_idx')),
+        `expected the projection-order index to serve the read, got ${JSON.stringify(details)}`,
+      );
+      assert.ok(
+        !details.some((detail) => detail.includes('TEMP B-TREE')),
+        `expected no temporary sort, got ${JSON.stringify(details)}`,
+      );
+    } finally {
+      upgraded.close();
+    }
+  } finally {
+    // Windows can briefly retain a handle after close; retry the cleanup.
+    rmSync(temp.root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 });

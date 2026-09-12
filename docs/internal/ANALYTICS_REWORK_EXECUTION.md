@@ -2367,3 +2367,46 @@ memory measurement.
 
 P0 remains unqualified; the 1M tier remains failed on `recorderWorkerRss` and the unresolved
 `inPlaceCorruption` timeout.
+
+### Checkpoint 30: exclusion moved to the durable boundary; a measurement-method correction
+
+**Correction to Checkpoints 28–29.** The in-process detail diagnostics
+(`pie-detail-rss-diagnostic-20260912-r01` and friends) called `submitDetail` **directly**, which is
+*not* the topology the `recorderWorkerRss` gate measures: the gate samples the recorder **worker
+process**, reached through `AnalyticsRecorderSupervisor`. Those numbers correctly identified that RSS
+scales with payload **count** and that v8 (de)serialization is the native driver, but they cannot
+quantify a repair to the worker hop, because they never exercised it. All subsequent RSS conclusions
+must come from a supervisor-driven measurement
+(`pie-worker-rss-20260912-r01/measure-worker.mjs`), which drives the real supervisor → worker → SQLite
+path and samples the worker's own RSS.
+
+**Repair implemented — single durable exclusion boundary.** The worker hop previously ran
+`sanitizeAnalyticsDetail(deserialize(detail.bytes))` followed by `serialize(...)`, and the recorder
+then deserialized the result a second time. Verified first, in
+`pie-redaction-fixedpoint-20260912-r01/check-fixed-point.mjs`, across ten value classes (plain text,
+`-0`/NaN/int32 boundaries, sparse arrays, unicode and NUL separators, secrets, bigint/Date, binary
+buffers, `__proto__` keys, and code-like text): the round-trip is a **byte-level fixed point** and
+`sanitizeAnalyticsDetail` is **idempotent** on the value. Removing the worker hop therefore cannot
+change a durable fingerprint, content digest or stored byte for already-sanitized input.
+
+To keep the exclusion guarantee rather than merely relocating it, enforcement now happens inside
+`SqliteAnalyticsRecorder.submitDetail`, in the same transaction that writes the manifest, content
+digest, payload and WAL record. `canonicalDetailCapture()` decodes once, re-sanitizes, re-encodes, and
+returns the canonical bytes **only when they differ** (so an already-canonical buffer is never
+re-allocated) together with the sanitized value — which the manifest builder now uses directly instead
+of performing its own second `deserialize`. A producer or transport that skipped redaction still cannot
+persist private bytes; the worker no longer pays a redundant round-trip.
+
+Focused tests added to `extension/test/analytics/sqlite-recorder.test.ts`: a producer that **skips**
+redaction still cannot persist a secret — asserted through both the reconstructed value and a raw
+scan of every `analytics_detail_content.body` — and an already-sanitized capture stays a byte-level
+fixed point, proven by exact-replay being an idempotent duplicate. Full recorder suite 25/25 and
+statement-reuse 5/5 pass; all 17 typecheck projects and lint pass.
+
+**Honest status of the memory outcome.** The repair removes one deserialize, one sanitize and one
+serialize per payload from the worker. On the direct-API path the canonical check additionally
+introduces one `serialize` (needed to detect whether the bytes were already canonical), so an
+in-process measurement is not evidence of improvement and may look worse; that path is not what the
+gate measures. The authoritative number is the supervisor-driven worker measurement, whose result is
+recorded in the next checkpoint. The repair has **not** been claimed as a gate pass on the strength of
+any in-process figure.

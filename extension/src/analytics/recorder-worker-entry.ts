@@ -1,11 +1,10 @@
-import { deserialize, serialize } from 'node:v8';
+import { deserialize } from 'node:v8';
 
 import {
   AnalyticsSourceConflictError,
   type AnalyticsDetailCapture,
   type AnalyticsObservation,
 } from '../../../shared/analytics/contracts.js';
-import { sanitizeAnalyticsDetail } from '../../../shared/sensitive-redaction.js';
 import { SqliteAnalyticsRecorder } from './sqlite-recorder.js';
 
 type RecorderWorkerRequest = {
@@ -190,11 +189,16 @@ async function handle(raw: unknown): Promise<void> {
           for (let index = 0; index < captures.length; index += 1) {
             const detail = captures[index]!.value as AnalyticsDetailCapture;
             try {
-              // Re-enforce the exclusion at the last off-producer boundary
-              // before any manifest, digest, SQLite page, or WAL record can see
-              // content.
-              const scrubbed = sanitizeAnalyticsDetail(deserialize(Buffer.from(detail.bytes)));
-              recorder.submitDetail({ ...detail, bytes: serialize(scrubbed) });
+              // The exclusion is enforced once, at the last off-producer
+              // boundary before any manifest, digest, SQLite page, or WAL record
+              // can see content. Recording enforces it inside the same
+              // transaction that writes those records, so a producer or
+              // transport that skipped redaction still cannot persist private
+              // bytes. The earlier worker-side deserialize/re-sanitize/
+              // re-serialize hop was a proven byte-level fixed point (redaction
+              // is idempotent and both producer and worker sanitize the same
+              // value) and only added native v8 allocation per payload.
+              recorder.submitDetail(detail);
             } catch (error) {
               const deleted = deletedSubjectError(error);
               if (deleted) rejections.push({ index, code: 'subject_deleted', error: deleted });

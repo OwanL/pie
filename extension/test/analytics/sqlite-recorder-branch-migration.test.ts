@@ -163,7 +163,7 @@ function createLegacyFixture(version: 2 | 3): { root: string; databasePath: stri
 }
 
 function assertPreservedLegacyUsage(recorder: SqliteAnalyticsRecorder): void {
-  assert.equal(recorder.getDatabaseSchemaVersion(), 4);
+  assert.equal(recorder.getDatabaseSchemaVersion(), 5);
   const read = recorder.readProviderSettlements();
   assert.equal(read.settlements.length, 1);
   assert.equal(read.settlements[0]?.invocationId, 'legacy-invocation');
@@ -202,11 +202,11 @@ for (const version of [2, 3] as const) {
   });
 }
 
-test('fresh v4 recorder creates branch and session-copy tables', () => {
+test('fresh recorder creates branch and session-copy tables', () => {
   const root = mkdtempSync(path.join(tmpdir(), 'pie-analytics-branch-migration-v4-'));
   const databasePath = path.join(root, 'analytics.sqlite');
   const recorder = new SqliteAnalyticsRecorder(databasePath);
-  assert.equal(recorder.getDatabaseSchemaVersion(), 4);
+  assert.equal(recorder.getDatabaseSchemaVersion(), 5);
   recorder.close();
   const raw = new DatabaseSync(databasePath);
   try {
@@ -222,6 +222,11 @@ test('fresh v4 recorder creates branch and session-copy tables', () => {
       ).get(name) as { name: string } | undefined;
       assert.equal(row?.name, name);
     }
+    // The v5 additive index must exist on a fresh database too.
+    const index = raw.prepare(
+      'SELECT name FROM sqlite_master WHERE type = \'index\' AND name = ?',
+    ).get('analytics_provider_settlement_projection_order_idx') as { name: string } | undefined;
+    assert.equal(index?.name, 'analytics_provider_settlement_projection_order_idx');
   } finally {
     raw.close();
     rmSync(root, { recursive: true, force: true });
