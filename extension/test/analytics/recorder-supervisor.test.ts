@@ -560,3 +560,55 @@ test('rejects a recorder heap ceiling below the supported floor', async () => {
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+const slowAckWorkerScript = fileURLToPath(new URL('./fixtures/recorder-slow-ack-worker.cjs', import.meta.url));
+
+test('a control timeout reports why the worker was killed, not a bare SIGTERM', { timeout: 15_000 }, async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'pie-recorder-control-timeout-'));
+  const databasePath = path.join(root, 'control-timeout.sqlite');
+  const supervisor = new AnalyticsRecorderSupervisor({
+    enabled: true,
+    workerScript: slowAckWorkerScript,
+    databasePath,
+    // The fixture never acknowledges within this window, so the supervisor must
+    // escalate exactly as it would in production after 30 seconds.
+    controlRequestTimeoutMs: 200,
+    rehearsalAcknowledgementDelayMs: 5_000,
+  });
+  try {
+    await supervisor.start();
+    const error = await supervisor.workerStats().then(
+      () => undefined,
+      (reason: unknown) => reason,
+    );
+    assert.ok(error instanceof Error, 'the control request must reject');
+    assert.match(
+      error.message,
+      /exceeded 200 ms/u,
+      'the timeout message must name the bound that was exceeded',
+    );
+    // Give the exit event a moment to convert the kill into a terminal failure,
+    // then read it through the public surface: any later command must report the
+    // same reason the worker died for.
+    await new Promise<void>((resolve) => setTimeout(resolve, 500));
+    const terminalError = await supervisor.flush().then(
+      () => undefined,
+      (reason: unknown) => reason,
+    );
+    assert.ok(terminalError instanceof Error, 'a dead worker must reject further commands');
+    assert.match(
+      `${error.message}\n${terminalError.message}`,
+      /exceeded 200 ms/u,
+      'the deliberate cause must survive into the terminal failure',
+    );
+    assert.doesNotMatch(
+      terminalError.message,
+      /^Analytics recorder worker exited \(SIGTERM\)\.$/u,
+      'a bare SIGTERM must never be the whole explanation for a deliberate kill',
+    );
+  } finally {
+    await supervisor.shutdown().catch(() => {});
+    if (supervisor.workerPid) process.kill(supervisor.workerPid, 'SIGKILL');
+    rmSync(root, { recursive: true, force: true });
+  }
+});

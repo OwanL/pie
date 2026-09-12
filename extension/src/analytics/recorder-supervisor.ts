@@ -56,6 +56,10 @@ export interface AnalyticsRecorderSupervisorOptions {
   databasePath: string;
   startupTimeoutMs?: number;
   shutdownTimeoutMs?: number;
+  /** Bound on a single IPC control request before the supervisor treats the
+   * worker as unresponsive and kills it. Configurable so qualification can
+   * exercise that escalation quickly; production keeps the 30s default. */
+  controlRequestTimeoutMs?: number;
   maxBatchSize?: number;
   maxQueueRecords?: number;
   maxQueueBytes?: number;
@@ -272,6 +276,14 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
   private recovery: Promise<void> | undefined;
   private lastRejectedDelivery: Error | undefined;
   private workerStderr = '';
+  /** Why the current child was deliberately killed by this supervisor.
+   *
+   * `child.kill()` on Windows is SIGTERM, so an intentional local kill is
+   * otherwise indistinguishable from an external/OS termination: both surface
+   * through `onExit` as "worker exited (SIGTERM)". Recording the cause here lets
+   * the terminal error name the real reason (for example an IPC request timeout)
+   * instead of reporting a bare signal. */
+  private deliberateKillReason: string | undefined;
   private acknowledgedWatermarks: AnalyticsRecorderDeliveryWatermarks = {
     producerReconciliation: [],
     completeDetailWatermark: 0,
@@ -598,7 +610,7 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
 
   private enqueueControl(
     command: Record<string, unknown>,
-    timeoutMs = 30_000,
+    timeoutMs = this.options.controlRequestTimeoutMs ?? 30_000,
     allowWhileStopping = false,
   ): Promise<unknown> {
     if ((!this.accepting && !allowWhileStopping) || this.failure) {
@@ -805,6 +817,7 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
     this.child = child;
     this.workerReady = false;
     this.workerStderr = '';
+    this.deliberateKillReason = undefined;
     child.stderr?.on('data', (chunk: Buffer | string) => {
       this.workerStderr = `${this.workerStderr}${String(chunk)}`.slice(-8_192);
     });
@@ -873,8 +886,11 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
       const timeout = setTimeout(() => {
         if (!this.pending.delete(requestId)) return;
         const error = new AnalyticsRecorderTransportError(`Analytics recorder request ${requestId} timed out.`);
+        if (this.child === child) {
+          this.deliberateKillReason = `supervisor killed the worker after request ${requestId} (${String(message.type)}) exceeded ${timeoutMs} ms`;
+          child.kill();
+        }
         reject(error);
-        if (this.child === child) child.kill();
       }, timeoutMs);
       this.pending.set(requestId, {
         stopsWorker: message.type === 'shutdown',
@@ -903,7 +919,10 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
         const pending = this.pending.get(requestId);
         this.pending.delete(requestId);
         pending?.reject(new AnalyticsRecorderTransportError(sendError.message));
-        if (this.child === child) child.kill();
+        if (this.child === child) {
+          this.deliberateKillReason = `supervisor killed the worker after an IPC send failure (${sendError.message})`;
+          child.kill();
+        }
       });
       synchronousMs = Math.max(0, performance.now() - sendStartedAt);
     });
@@ -936,8 +955,16 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
     this.workerReady = false;
     if (!this.shutdownAcknowledged) {
       const diagnostic = this.workerStderr.trim();
+      const deliberate = this.deliberateKillReason;
+      this.deliberateKillReason = undefined;
+      // Prefer the supervisor's own recorded cause: a bare "(SIGTERM)" hides an
+      // intentional local kill (for example an IPC timeout) behind what looks
+      // like an external termination.
+      const detail = [deliberate, diagnostic].filter(Boolean).join('; ');
       this.onFailure(new AnalyticsRecorderTransportError(
-        `Analytics recorder worker exited (${code ?? signal ?? 'unknown'})${diagnostic ? `: ${diagnostic}` : '.'}`,
+        deliberate
+          ? `${deliberate}; worker then exited (${code ?? signal ?? 'unknown'}).`
+          : `Analytics recorder worker exited (${code ?? signal ?? 'unknown'})${detail ? `: ${detail}` : '.'}`,
       ));
     }
   }
