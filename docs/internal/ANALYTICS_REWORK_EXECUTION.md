@@ -3079,6 +3079,49 @@ other 1M gates continue to pass.
 
 No gate has been relaxed, nothing is activated, and the milestone is not claimed fixed.
 
+### Checkpoint 48: the residual lock is a long write transaction, and it is now bounded
+
+**The measurement answered the question directly.** `pie-scrub-lock-20260912-r01` built a real 1M-fact /
+100,000-detail database, then held a write lock and timed how long a concurrent writer must wait:
+
+| Measure | Result |
+|---|---|
+| WAL truncation (the scrub's checkpoint) | **2.6 ms** — not the cost |
+| concurrent writer against a held write lock | waited **5,534 ms**, then failed `database is locked` |
+| shipped `BUSY_TIMEOUT_MS` | 5,000 ms |
+
+So the delete holds **one write transaction spanning the entire bulk removal** (~10–21 s), while every
+other recorder tolerates only 5 s. A concurrent writer cannot even *reach* the deleted-subject check, so
+it fails as "database is locked" instead of being rejected as `subject_deleted` — which is exactly what
+`privateDeleteRace` asserts. Both earlier candidates (truncation, and the payload delete my index fixed)
+are therefore not the mechanism here; the mechanism is the **transaction's duration**, which also
+matches the unchanged 21 s `crossHostDeleteVisibleMs`.
+
+**Repair — fence first, then remove (contract-aligned).** `deleteSession` no longer wraps the whole
+operation in one transaction:
+
+1. **Phase 1** commits the deletion fence (`analytics_deleted_subjects` row, plus a late pending-create
+   binding when applicable) in a short transaction. This is what the contract documents: the marker is
+   authoritative and *every* later write transaction checks it.
+2. **Phase 2** performs the bulk removal outside that long transaction. A writer arriving during removal
+   is rejected by the committed fence rather than blocked behind it, so it gets the intended
+   `subject_deleted` outcome.
+3. Counts are persisted to the fence after removal, and a duplicate/retry delete still reports the
+   **original** counts (the fence's recorded totals are authoritative), preserving the existing
+   semantics that two tests assert.
+4. An interrupted removal still records partial progress, so it remains visibly incomplete rather than
+   appearing complete.
+
+**Regression caught and fixed by the existing tests.** The first restructure returned the duplicate
+receipt early and lost the recorded counts; `delete intent atomically removes facts and details…`
+failed with `deletedObservationCount: 0` instead of `1`. That is the existing suite doing its job, and
+the ordering now persists counts before any early return. Recorder suite 30/30, full affected suite 2/2
+packages, lint clean, build `7526e322096e5827c5b4`.
+
+**Verification in progress.** The same 1M lock measurement is re-running against the fence-first delete
+to confirm a concurrent writer now succeeds (or is rejected as deleted) instead of timing out. The
+milestone is not claimed fixed until that returns.
+
 **Independently verified repair carried forward.** The `storage` command fix is confirmed: `979` ms
 against a fresh 1M database, down from the `10,022` ms timeout, so `inPlaceCorruption` should now
 proceed past its terminal probe. All the other 1M gates continue to pass.

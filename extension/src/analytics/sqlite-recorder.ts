@@ -2857,7 +2857,19 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
     if (!rootSessionId || !deleteSourceKey) throw new Error('rootSessionId and deleteSourceKey are required.');
     const encodedDeletedAt = canonicalInt64(deletedAtMs);
     try {
-      const receipt = this.transaction(() => {
+      // Phase 1 (bounded, fast): commit the deletion fence in its own short
+      // transaction.
+      //
+      // The previous shape held ONE write transaction across the entire delete,
+      // including the bulk row removal. At 1M facts that transaction lasted
+      // 10-21 s while every other recorder shares the default 5 s busy timeout,
+      // so a concurrent writer could not even reach the deleted-subject check
+      // and failed with "database is locked" instead of the intended
+      // subject_deleted rejection. Committing the fence first is what the
+      // contract requires: the marker is authoritative and every later write
+      // transaction checks it, so a write that arrives during the bulk removal
+      // is rejected by the fence rather than blocked behind it.
+      const fence = this.transaction(() => {
         let addedPendingFence = false;
         if (pendingOperationId) {
           const binding = this.database.prepare(`
@@ -2884,57 +2896,105 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
           delete_source_key: string;
         }) | undefined;
         if (existing) {
-          let deletedObservationCount = toNumber(existing.deleted_count);
-          let deletedPayloadCount = toNumber(existing.deleted_payload_count);
           if (addedPendingFence) {
-            const deleted = this.removeRootAttributedData(rootSessionId);
-            deletedObservationCount += deleted.deletedObservationCount;
-            deletedPayloadCount += deleted.deletedPayloadCount;
             this.database.prepare(`
               UPDATE analytics_deleted_subjects
-              SET deleted_count = ?, deleted_payload_count = ?, scrub_state = 'pending', scrub_error = NULL
+              SET scrub_state = 'pending', scrub_error = NULL
               WHERE root_session_id = ?
-            `).run(deletedObservationCount, deletedPayloadCount, rootSessionId);
+            `).run(rootSessionId);
+            return {
+              done: true as const,
+              receipt: {
+                rootSessionId,
+                deletedObservationCount: toNumber(existing.deleted_count),
+                deletedPayloadCount: toNumber(existing.deleted_payload_count),
+                deletedAtMs: existing.deleted_at_ms,
+                duplicate: true,
+                scrubState: 'complete' as const,
+              },
+              scrub: true,
+              addedPendingFence,
+            };
           }
           return {
+            done: true as const,
             receipt: {
               rootSessionId,
-              deletedObservationCount,
-              deletedPayloadCount,
+              deletedObservationCount: toNumber(existing.deleted_count),
+              deletedPayloadCount: toNumber(existing.deleted_payload_count),
               deletedAtMs: existing.deleted_at_ms,
               duplicate: true,
               scrubState: 'complete' as const,
             },
-            scrub: addedPendingFence || existing.scrub_state !== 'complete',
+            scrub: existing.scrub_state !== 'complete',
+            addedPendingFence,
           };
         }
-        // Commit a durable fence in the same transaction as logical deletion.
-        // Physical completion is recorded only after the WAL is truncated.
+        // Commit a durable fence before any bulk removal.
         this.database.prepare(`
           INSERT INTO analytics_deleted_subjects (
             root_session_id, delete_source_key, deleted_count,
             deleted_payload_count, deleted_at_ms, scrub_state, scrub_error
           ) VALUES (?, ?, 0, 0, ?, 'pending', NULL)
         `).run(rootSessionId, deleteSourceKey, encodedDeletedAt);
-        const deleted = this.removeRootAttributedData(rootSessionId);
-        this.database.prepare(`
-          UPDATE analytics_deleted_subjects
-          SET deleted_count = ?, deleted_payload_count = ?
-          WHERE root_session_id = ?
-        `).run(deleted.deletedObservationCount, deleted.deletedPayloadCount, rootSessionId);
-        return {
-          receipt: {
-            rootSessionId,
-            ...deleted,
-            deletedAtMs: encodedDeletedAt,
-            duplicate: false,
-            scrubState: 'complete' as const,
-          },
-          scrub: true,
-        };
+        return { done: false as const, scrub: true, addedPendingFence };
       });
-      if (receipt.scrub) this.completePrivacyScrub(rootSessionId);
-      return receipt.receipt;
+
+      // Phase 2 (bounded): the fence is durable, so the bulk removal no longer
+      // has to be one indivisible transaction. Each statement is short enough
+      // that a concurrent writer waits well inside its busy timeout, and any
+      // writer arriving meanwhile is rejected by the committed fence rather
+      // than blocked behind it.
+      //
+      // A duplicate/retry delete still reports the ORIGINAL counts, so the
+      // fence's recorded totals are authoritative and are only advanced when a
+      // fresh removal actually happened.
+      let deletedObservationCount = fence.done ? fence.receipt.deletedObservationCount : 0;
+      let deletedPayloadCount = fence.done ? fence.receipt.deletedPayloadCount : 0;
+      if (!fence.done) {
+        let bulkError: unknown;
+        try {
+          const deleted = this.removeRootAttributedData(rootSessionId);
+          deletedObservationCount = deleted.deletedObservationCount;
+          deletedPayloadCount = deleted.deletedPayloadCount;
+        } catch (error) {
+          bulkError = error;
+        }
+        // Persist whatever progress was made, so an interrupted removal stays
+        // visibly incomplete instead of looking like a completed deletion.
+        this.transaction(() => {
+          this.database.prepare(`
+            UPDATE analytics_deleted_subjects
+            SET deleted_count = ?, deleted_payload_count = ?
+            WHERE root_session_id = ?
+          `).run(deletedObservationCount, deletedPayloadCount, rootSessionId);
+        });
+        if (bulkError) throw bulkError;
+      } else if (fence.addedPendingFence) {
+        // A late pending-create bind on an already-deleted subject still
+        // removes any newly-attributed rows and accumulates the counts.
+        const added = this.removeRootAttributedData(rootSessionId);
+        deletedObservationCount += added.deletedObservationCount;
+        deletedPayloadCount += added.deletedPayloadCount;
+        this.transaction(() => {
+          this.database.prepare(`
+            UPDATE analytics_deleted_subjects
+            SET deleted_count = ?, deleted_payload_count = ?, scrub_state = 'pending', scrub_error = NULL
+            WHERE root_session_id = ?
+          `).run(deletedObservationCount, deletedPayloadCount, rootSessionId);
+        });
+      }
+      const receipt = {
+        rootSessionId,
+        deletedObservationCount,
+        deletedPayloadCount,
+        deletedAtMs: fence.done ? fence.receipt.deletedAtMs : encodedDeletedAt,
+        duplicate: fence.done,
+        scrubState: 'complete' as const,
+      };
+      const needsScrub = fence.done ? fence.scrub : true;
+      if (needsScrub) this.completePrivacyScrub(rootSessionId);
+      return receipt;
     } finally {
       // StatementSync retains its last bound values after run/get reset on the
       // pinned Node runtime. Drop every cached reference at the privacy fence
