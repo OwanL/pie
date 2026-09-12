@@ -2741,6 +2741,46 @@ the burst conditions are recorded as a separate, explicitly unqualified memory-b
 in its own bounded pass. This is a machine-capacity statement, and it does not relax any numeric gate:
 `recorderWorkerRss` still passes only when the worker actually stays under 256 MiB.
 
+### Checkpoint 39: three hypotheses disproved; the SIGTERM message was hiding the cause
+
+A second deferred 1M run failed at the same phase with the same
+`Analytics recorder worker exited (SIGTERM)`, so the failure is deterministic rather than a random
+memory event. Section-presence analysis localised it exactly: every section through `queryIsolation`
+is present and the run dies in the `crossHostRefresh` block, immediately after the full query suite
+(which includes the now-fixed `storage` command).
+
+Three plausible mechanisms were measured and **all three are disproved**:
+- **Shutdown checkpoint too slow.** The worker runs `PRAGMA wal_checkpoint(TRUNCATE)` on shutdown and
+  the supervisor waits only 10 s. Measured at scale: **1.27 ms** with a 31 MB WAL
+  (`pie-checkpoint-timing-20260912-r01`). Not the cause.
+- **Private-close delete too slow.** `deleteSession` scans for copy-sourced observations with a JSON
+  predicate. Measured at 250,000 observations: copy-scrub scan **693 ms**, full `deleteSession`
+  **1,748 ms** (`pie-delete-cost-20260912-r01`). Not the cause.
+- **Cold worker startup too slow.** The supervisor kills a worker that misses `startupTimeoutMs`
+  (10 s). Measured three cold starts against a 2 GB database: **47–59 ms**
+  (`pie-worker-startup-20260912-r01`). Not the cause.
+
+**The reporting was the actual defect.** `child.kill()` on Windows is SIGTERM, so a *deliberate local
+kill* was indistinguishable from an external termination: both surfaced through `onExit` as
+"worker exited (SIGTERM)". The supervisor deliberately kills its worker when an IPC request exceeds its
+bound (`requestRaw`'s timeout, 30 s by default) or a send fails — and that informative cause was being
+overwritten by the generic exit message. The bare signal cost three wrong hypotheses.
+
+**Repair.** The supervisor now records *why* it killed the current child and the terminal error names
+that cause instead of a bare signal; the reason is cleared when a replacement worker starts so it cannot
+leak across restarts. `controlRequestTimeoutMs` is exposed (default unchanged at 30 s) so the escalation
+can be exercised quickly, and a focused test with a deliberately slow-acknowledging fixture proves the
+reported failure names the request and the bound. That test fails against the previous message. Recorder
+supervisor suite 16/16.
+
+**Re-run in progress.** A fresh cycle under the new fingerprint
+`d335d7ac25184dc6596e717cb92e94dd408915def0fbe5ffd1b6404904ac9b5a` / build `eb98e63572c11aea6a01`:
+validation `validated` (root-free), 10k baseline `scenario-passed` with **zero failed gates and the rate
+conditions in-line** (4.75 GB available this time, so the separate-pass workaround was not needed and
+`crossHostRefresh` ran), and a 1M admission `validated` at projected peak `10,340,352,000` bytes and
+`583,188,480` bytes memory. The 1M workload is running; with the diagnostic in place its failure — if it
+recurs — will name the request and the bound rather than reporting a signal.
+
 **Independently verified repair carried forward.** The `storage` command fix is confirmed: `979` ms
 against a fresh 1M database, down from the `10,022` ms timeout, so `inPlaceCorruption` should now
 proceed past its terminal probe. All the other 1M gates continue to pass.
