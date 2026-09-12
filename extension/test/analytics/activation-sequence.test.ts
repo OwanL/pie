@@ -176,3 +176,40 @@ test('malformed activation evidence is rejected before any write', async () => {
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('a supplied cutoff receipt is recorded and a malformed one is refused', async () => {
+  const { root, store } = tempStore();
+  const receiptSha = 'd'.repeat(64);
+  try {
+    // Analytics activation and storage cutoff are separate ordered gates, so the
+    // link is optional but must be a real hash when present - otherwise the
+    // manifest would claim a cutoff it cannot be checked against.
+    for (const malformed of ['not-a-hash', 'D'.repeat(64), receiptSha.slice(0, 63)]) {
+      await assert.rejects(
+        () => activateGeneration(store, request({ cutoffReceiptSha256: malformed })),
+        ActivationManifestError,
+      );
+    }
+    assert.equal(store.read().authority, 'legacy', 'no refused request may activate');
+
+    const outcome = await activateGeneration(store, request({ cutoffReceiptSha256: receiptSha }));
+    assert.equal(outcome.alreadyActive, false);
+    assert.equal(store.read().manifest?.activeGeneration?.cutoffReceiptSha256, receiptSha);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('activation without a cutoff records null rather than inventing a receipt', async () => {
+  const { root, store } = tempStore();
+  try {
+    await activateGeneration(store, request());
+    assert.equal(
+      store.read().manifest?.activeGeneration?.cutoffReceiptSha256,
+      null,
+      'a generation activated before any cutoff must not name one',
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

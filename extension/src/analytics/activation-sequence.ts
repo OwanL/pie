@@ -21,6 +21,14 @@ export interface ActivationRequest {
   trialSha256: string;
   /** Canonical ISO instant the generation became active. */
   activatedAt: string;
+  /** sha256 of the storage-cutoff receipt this generation was activated against.
+   *
+   * The manifest's `cutoffReceiptSha256` exists to tie an active generation to
+   * the cutoff that preceded it. It is optional because analytics activation and
+   * storage cutoff are separate, ordered gates: a generation may be activated
+   * without a cutoff having run, and the manifest then records null rather than
+   * inventing a receipt. */
+  cutoffReceiptSha256?: string | null;
 }
 
 export interface ActivationOutcome {
@@ -162,7 +170,7 @@ export async function activateGeneration(
     activatedAt: request.activatedAt,
     retiredAt: null,
     predecessorGenerationId: null,
-    cutoffReceiptSha256: null,
+    cutoffReceiptSha256: cutoffReceiptSha256(request),
   };
   const result = await store.update((previous, previousSha256) => {
     if (!previous) throw new ActivationManifestError('Manifest disappeared between steps.');
@@ -187,4 +195,18 @@ function candidateEvidence(identity: ActivationGenerationIdentity): ActivationEv
     predecessorGenerationId: null,
     cutoffReceiptSha256: null,
   };
+}
+
+/** Validate an optional cutoff receipt hash.
+ *
+ * Present must mean a real sha256: a caller passing a path or a truncated value
+ * would otherwise record an unverifiable link between the generation and the
+ * cutoff it claims to follow. */
+function cutoffReceiptSha256(request: ActivationRequest): string | null {
+  const value = request.cutoffReceiptSha256;
+  if (value === undefined || value === null) return null;
+  if (!/^[0-9a-f]{64}$/u.test(value)) {
+    throw new ActivationManifestError('cutoffReceiptSha256 must be a lowercase sha256 when provided.');
+  }
+  return value;
 }
