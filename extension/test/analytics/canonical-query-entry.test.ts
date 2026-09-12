@@ -98,7 +98,7 @@ function tempRoot(): string {
 }
 
 function assertSnapshotMetadata(result: AnalyticsQuerySnapshotMetadata): void {
-  assert.equal(result.databaseSchemaVersion, 7);
+  assert.equal(result.databaseSchemaVersion, 8);
   assert.equal(typeof result.projectionRevision === 'number' || typeof result.projectionRevision === 'string', true);
   assert.equal(typeof result.snapshotWatermark === 'number' || typeof result.snapshotWatermark === 'string', true);
   assert.equal(result.generationIds.length > 0, true);
@@ -212,7 +212,7 @@ test('canonical read model serves schema, bounded queries, settlements, accounti
   const query = await readModel.executeQuery({
     sql: 'SELECT invocation_id, provider, effective_cost_usd FROM analytics_provider_usage_v1 ORDER BY invocation_id',
   });
-  assert.equal(query.databaseSchemaVersion, 7);
+  assert.equal(query.databaseSchemaVersion, 8);
   assertSnapshotMetadata(query);
   assert.equal(query.returnedRows, 4);
   assert.deepEqual(query.truncation, { rowLimit: false, byteLimit: false, cellLimit: false });

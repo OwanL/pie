@@ -3000,6 +3000,43 @@ for subject resolution, the observation/payload deletes, the accounting updates 
 repair whichever phase dominates. Guessing at a 139-second cost from the outside has now failed four
 times; the next measurement must come from inside the operation.
 
+### Checkpoint 46: internal profiling found the real cost — an unindexed trigger lookup
+
+**Instrumenting from inside worked.** Opt-in phase timings (`PIE_ANALYTICS_DELETE_PROFILE=1`, reported
+through the worker's stderr capture) attributed a 128,675 ms delete exactly:
+
+| Phase | Time |
+|---|---|
+| `nextProjectionRevision` | 0.07 ms |
+| `providerAccountingLoop(100000 rows)` | 1,641 ms |
+| `deleteSessionProjections` | 0.04 ms |
+| `delete:analytics_provider_settlements` | 1,663 ms |
+| `subjectByteSum` | 393 ms |
+| `deleteSubjectObservations` | 3,931 ms |
+| **`deleteSubjectPayloads`** | **119,382 ms** |
+
+**93% of the delete is one statement.** Deleting ~10,000 detail payloads takes 119 seconds. The cause:
+`analytics_detail_references` is keyed `(payload_id, digest)`, so its primary key cannot serve a lookup
+by `digest` alone — and the last-owner cleanup trigger runs
+`SELECT 1 FROM analytics_detail_references WHERE digest = OLD.digest` **once per deleted reference row**,
+scanning the entire reference table each time. Cascade delete of N payloads therefore costs O(N ×
+references), which is why the cost explodes with detail volume and why it exceeded the 30 s bound at 1M.
+
+**Repair — schema v8 reference-digest index.** An isolated probe of the exact trigger pattern measured
+**9,359 ms → 60 ms** with `digest` indexed (**155×**), with identical outcomes, and a focused test now
+asserts the trigger lookup uses the index while preserving the shared-content semantics. Recorder suite
+33/33; migration chain v5→v8 wired with the v7 branch added.
+
+**Two prior attributions corrected.** The copy-scrub index (v7) and the per-row accounting loop were
+both plausible and both measured small at this scale (1,663 ms and 1,641 ms). Only the trigger scan
+explains the magnitude. The pattern here is worth recording: four externally-derived hypotheses were
+disproved (lock hold, checkpoint, delete scan, `secure_delete`), and the answer came only from
+instrumenting the operation itself.
+
+**Verification in progress.** The same profiled measurement is being re-run against the rebuilt code to
+confirm `deleteSubjectPayloads` collapses. Its result is the next checkpoint, and the milestone is not
+claimed fixed until that measurement returns.
+
 **Independently verified repair carried forward.** The `storage` command fix is confirmed: `979` ms
 against a fresh 1M database, down from the `10,022` ms timeout, so `inPlaceCorruption` should now
 proceed past its terminal probe. All the other 1M gates continue to pass.

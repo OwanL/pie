@@ -384,7 +384,7 @@ test('v1 upgrade retains facts, detail, deletion fences, accounting, and source 
     }
 
     recorder = new SqliteAnalyticsRecorder(temp.databasePath);
-    assert.equal(recorder.getDatabaseSchemaVersion(), 7);
+    assert.equal(recorder.getDatabaseSchemaVersion(), 8);
     assert.equal(recorder.readDeliveryAccounting().deliveryHistoryCoverage, 'retained_only');
     assert.equal(recorder.countObservations('root-retained'), 1);
     assert.deepEqual(recorder.reconstructDetail('legacy-detail'), { retained: true });
@@ -571,14 +571,14 @@ test('recorder rejects unsupported newer database schema versions', () => {
   try {
     // One beyond the current schema: an unversioned future database must fail
     // closed rather than be read with today's assumptions.
-    raw.exec('PRAGMA user_version = 8');
+    raw.exec('PRAGMA user_version = 9');
   } finally {
     raw.close();
   }
   try {
     assert.throws(
       () => new SqliteAnalyticsRecorder(temp.databasePath),
-      /Unsupported newer analytics database schema version 8/,
+      /Unsupported newer analytics database schema version 9/,
     );
   } finally {
     rmSync(temp.root, { recursive: true, force: true });
@@ -1167,7 +1167,7 @@ test('logical query surface is native read-only, bounded, and reports snapshot/d
       ['query-a'],
       { maxRows: 2, maxCellBytes: 32 },
     );
-    assert.equal(result.databaseSchemaVersion, 7);
+    assert.equal(result.databaseSchemaVersion, 8);
     assert.equal(result.snapshotWatermark, 3);
     assert.deepEqual(result.generationIds, ['generation-1']);
     assert.equal(result.returnedRows, 2);
@@ -1452,7 +1452,7 @@ test('schema v5 adds the projection-order index without changing stored settleme
 
     const upgraded = new SqliteAnalyticsRecorder(temp.databasePath);
     try {
-      assert.equal(upgraded.getDatabaseSchemaVersion(), 7);
+      assert.equal(upgraded.getDatabaseSchemaVersion(), 8);
       const after = upgraded.readProviderSettlements();
       assert.deepEqual(after.settlements, before.settlements);
       assert.equal(upgraded.readProviderAccountingSummary().inputTokens.knownTotal, knownTotalBefore);
@@ -1596,6 +1596,36 @@ test('a flush checkpoint tolerates a concurrent writer instead of failing locked
   } finally {
     writer.close();
     flusher.close();
+    rmSync(temp.root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  }
+});
+
+test('the reference-digest index serves the last-owner cleanup trigger', () => {
+  const temp = tempDatabase();
+  const recorder = new SqliteAnalyticsRecorder(temp.databasePath);
+  try {
+    // Two payloads sharing one content digest: removing the first must not
+    // delete the shared content, which is what the trigger decides.
+    const shared = { messages: [{ role: 'assistant', content: [{ type: 'text', text: 'shared-body' }] }] };
+    recorder.submitDetail(detail({ payloadId: 'ref-shared-a', value: shared }));
+    recorder.submitDetail(detail({ payloadId: 'ref-shared-b', value: shared }));
+    recorder.submitDetail(detail({ payloadId: 'ref-unique', value: { unique: true } }));
+
+    const plan = recorder.executeReadOnlyQuery(
+      "EXPLAIN QUERY PLAN SELECT 1 FROM analytics_detail_references WHERE digest = 'anything'",
+    );
+    const details = plan.rows.map((row) => String(row.detail));
+    assert.ok(
+      details.some((detail) => detail.includes('analytics_detail_reference_digest_idx')),
+      `expected the digest index to serve the trigger lookup, got ${JSON.stringify(details)}`,
+    );
+
+    // The trigger's decision must still be correct: deleting one owner keeps
+    // the shared content, deleting the last owner removes it.
+    recorder.deleteSession('root-a', 'ref-close', 1_800);
+    assert.equal(recorder.countDetails(), 0);
+  } finally {
+    recorder.close();
     rmSync(temp.root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 });

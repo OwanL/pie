@@ -1413,7 +1413,7 @@ try {
   const explicitLargeDetail = deserialize(Buffer.concat(detailParts));
   assert.equal(explicitLargeDetail.messages[0].content[0].text.length, 2 * 1024 ** 2);
   const schemaDescription = await timedWorkerQuery('schema', { type: 'schema' });
-  assert.equal(schemaDescription.databaseSchemaVersion, 7);
+  assert.equal(schemaDescription.databaseSchemaVersion, 8);
   const logicalQuery = await timedWorkerQuery('logicalCount', {
     type: 'query',
     sql: 'SELECT COUNT(*) AS count FROM analytics_provider_usage_v1',

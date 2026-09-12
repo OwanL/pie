@@ -140,7 +140,7 @@ function prepareWriterStatement(
 }
 
 const sqlite = createRequire(process.execPath)('node:sqlite') as SqliteModule;
-const DATABASE_SCHEMA_VERSION = 7;
+const DATABASE_SCHEMA_VERSION = 8;
 const BUSY_TIMEOUT_MS = 5_000;
 const MAX_PENDING_SEQUENCES_PER_PRODUCER = 4_096;
 const DEFAULT_QUERY_ROWS = 200;
@@ -1003,6 +1003,23 @@ function migrateV4(database: SqliteDatabase): void {
  * 250,000 settlements: the bounded read dropped from 30.7 ms to 0.8 ms once the
  * matching expression index existed, and the temp B-tree disappeared. This is
  * an additive index only; no stored value or ordering semantics change. */
+/** Index the reference-cleanup trigger's digest lookup.
+ *
+ * `analytics_detail_references` is keyed `(payload_id, digest)`, so its primary
+ * key cannot serve a lookup by `digest` alone. The last-owner cleanup trigger
+ * runs `SELECT 1 FROM analytics_detail_references WHERE digest = OLD.digest`
+ * **once per deleted reference row**, which therefore scanned the whole
+ * reference table each time. Internal phase profiling attributed 119,382 ms of a
+ * 128,675 ms private delete to the payload delete that cascades into this
+ * trigger, and an isolated probe measured the pattern dropping from 9,359 ms to
+ * 60 ms once `digest` was indexed, with identical results. Additive only. */
+function ensureReferenceDigestIndex(database: SqliteDatabase): void {
+  database.exec(`
+    CREATE INDEX IF NOT EXISTS analytics_detail_reference_digest_idx
+      ON analytics_detail_references(digest);
+  `);
+}
+
 /** Serve the private-close copy-scrub predicate from a partial index.
  *
  * `deleteSession` locates copy-sourced observations with
@@ -1097,6 +1114,12 @@ function migrateV6(database: SqliteDatabase): void {
   ensureCopyScrubIndex(database);
 }
 
+/** Schema v7 -> v8: the reference-digest index described on
+ * {@link ensureReferenceDigestIndex}. Additive only. */
+function migrateV7(database: SqliteDatabase): void {
+  ensureReferenceDigestIndex(database);
+}
+
 function databaseTransaction<T>(database: SqliteDatabase, operation: () => T): T {
   database.exec('BEGIN IMMEDIATE');
   try {
@@ -1143,6 +1166,7 @@ function initializeSchema(database: SqliteDatabase, readOnly = false): void {
       migrateV4(database);
       migrateV5(database);
       migrateV6(database);
+      migrateV7(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
       return;
     }
@@ -1152,6 +1176,7 @@ function initializeSchema(database: SqliteDatabase, readOnly = false): void {
       migrateV4(database);
       migrateV5(database);
       migrateV6(database);
+      migrateV7(database);
       backfillV2(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
       return;
@@ -1161,6 +1186,7 @@ function initializeSchema(database: SqliteDatabase, readOnly = false): void {
       migrateV4(database);
       migrateV5(database);
       migrateV6(database);
+      migrateV7(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
       return;
     }
@@ -1168,23 +1194,32 @@ function initializeSchema(database: SqliteDatabase, readOnly = false): void {
       migrateV4(database);
       migrateV5(database);
       migrateV6(database);
+      migrateV7(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
       return;
     }
     if (version === 4) {
       migrateV5(database);
       migrateV6(database);
+      migrateV7(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
       return;
     }
     if (version === 5) {
       migrateV5(database);
       migrateV6(database);
+      migrateV7(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
       return;
     }
     if (version === 6) {
       migrateV6(database);
+      migrateV7(database);
+      database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
+      return;
+    }
+    if (version === 7) {
+      migrateV7(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
     }
   });
@@ -2523,7 +2558,18 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
     deletedObservationCount: number;
     deletedPayloadCount: number;
   } {
+    // Opt-in phase attribution. Externally-derived guesses about this
+    // operation's cost were wrong four times, so the operation measures itself
+    // when PIE_ANALYTICS_DELETE_PROFILE=1 and reports through the console, which
+    // the recorder worker's stderr capture surfaces to the harness.
+    const profile = process.env.PIE_ANALYTICS_DELETE_PROFILE === '1';
+    const marks: Array<[string, number]> = [];
+    const mark = (label: string, startedAt: number): void => {
+      if (profile) marks.push([label, performance.now() - startedAt]);
+    };
+    const traceStarted = performance.now();
     const revision = nextProjectionRevision(this.database, this.writerStatements);
+    mark('nextProjectionRevision', traceStarted);
     const subjectFilter = `(
       capture_subject_kind = 'session' AND capture_subject_key = ?
     ) OR (
@@ -2531,6 +2577,7 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
         SELECT pending_operation_id FROM analytics_pending_subject_bindings WHERE root_session_id = ?
       )
     )`;
+    const settlementsStarted = performance.now();
     const removedSettlements = this.database.prepare(`
       SELECT normalized_base_input_tokens AS input_tokens,
         normalized_output_tokens AS output_tokens,
@@ -2539,7 +2586,9 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
         reasoning_tokens, provider_total_tokens, effective_cost_usd, effective_cost_source
       FROM analytics_provider_settlements WHERE ${subjectFilter}
     `).iterate(rootSessionId, rootSessionId) as Iterable<Record<string, unknown>>;
+    let settlementRows = 0;
     for (const row of removedSettlements) {
+      settlementRows += 1;
       updateProviderAccountingProjection(this.database, this.writerStatements, 'global', '*', revision, {
         inputTokens: row.input_tokens === null ? null : String(row.input_tokens),
         outputTokens: row.output_tokens === null ? null : String(row.output_tokens),
@@ -2553,10 +2602,13 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
           : row.effective_cost_source as 'reported' | 'calculated',
       }, -1);
     }
+    mark(`providerAccountingLoop(${settlementRows} rows)`, settlementsStarted);
+    const projectionsStarted = performance.now();
     this.database.prepare(`
       DELETE FROM analytics_provider_accounting_projections
       WHERE subject_kind = 'session' AND subject_key = ?
     `).run(rootSessionId);
+    mark('deleteSessionProjections', projectionsStarted);
     // A retained duplicate must not preserve its privately deleted source
     // identity. Keep only a destination-owned coverage tombstone so its own
     // later work remains queryable without presenting inheritance as zero.
@@ -2582,6 +2634,7 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
         AND json_extract(payload_json, '$.fields.sourceSessionId') = ?
     `).run(rootSessionId).changes);
     subtractFactBytes(this.database, this.writerStatements, sourceCopyBytes);
+    const tableDeletesStarted = performance.now();
     for (const table of [
       'analytics_provider_settlements',
       'analytics_execution_observations',
@@ -2596,22 +2649,35 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
       'analytics_current_branch_selections',
       'analytics_session_copies',
     ]) {
+      const perTableStarted = performance.now();
       this.database.prepare(`DELETE FROM ${table} WHERE ${subjectFilter}`).run(rootSessionId, rootSessionId);
+      mark(`delete:${table}`, perTableStarted);
     }
+    mark('tableDeletesTotal', tableDeletesStarted);
+    const subjectSumStarted = performance.now();
     const subjectBytes = BigInt((this.database.prepare(`
       SELECT COALESCE(SUM(LENGTH(payload_json)), 0) AS bytes FROM analytics_observations
       WHERE ${subjectFilter}
     `).get(rootSessionId, rootSessionId) as { bytes: number | bigint }).bytes);
+    mark('subjectByteSum', subjectSumStarted);
+    const observationDeleteStarted = performance.now();
     const deletedObservationCount = deletedSourceCopyObservations + toNumber(this.database.prepare(`
       DELETE FROM analytics_observations WHERE ${subjectFilter}
     `).run(rootSessionId, rootSessionId).changes);
+    mark('deleteSubjectObservations', observationDeleteStarted);
     subtractFactBytes(this.database, this.writerStatements, subjectBytes);
+    const payloadDeleteStarted = performance.now();
     const deletedPayloadCount = toNumber(this.database.prepare(`
       DELETE FROM analytics_detail_payloads WHERE ${subjectFilter}
     `).run(rootSessionId, rootSessionId).changes);
+    mark('deleteSubjectPayloads', payloadDeleteStarted);
     // The reference cleanup trigger deletes content exactly when its last owner
     // is removed, atomically with these payload deletes. No history sweep is
     // needed and a concurrently committed legitimate owner cannot be lost.
+    if (profile) {
+      const total = marks.reduce((sum, [, ms]) => sum + ms, 0);
+      console.error(`[delete-profile] ${JSON.stringify({ rootSessionId, settlementRows, totalMs: total, marks })}`);
+    }
     return { deletedObservationCount, deletedPayloadCount };
   }
 
