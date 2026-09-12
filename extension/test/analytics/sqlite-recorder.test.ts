@@ -1145,6 +1145,37 @@ test('durable delivery accounting separates accepted replayed deleted and retain
       retainedDetailLogicalBytes: 0,
       retainedDetailStoredBytes: 0,
     });
+    // The capture acknowledgement reads only the watermark, which is a separate
+    // narrow reader so it does not scan the detail tables once per ingested
+    // batch. It must always agree with the full summary.
+    assert.equal(recorder.readCompleteDetailWatermark(), recorder.readDeliveryAccounting().completeDetailWatermark);
+  } finally {
+    recorder.close();
+    rmSync(temp.root, { recursive: true, force: true });
+  }
+});
+
+test('the narrow acknowledgement watermark tracks detail ingestion and deletion', () => {
+  const temp = tempDatabase();
+  const recorder = new SqliteAnalyticsRecorder(temp.databasePath);
+  try {
+    assert.equal(recorder.readCompleteDetailWatermark(), 0);
+    recorder.submitDetail(detail({ payloadId: 'watermark-a', value: { body: 'a' } }));
+    assert.equal(recorder.readCompleteDetailWatermark(), 1);
+    // A replay is not newly accepted detail, so the watermark must not advance.
+    recorder.submitDetail(detail({ payloadId: 'watermark-a', value: { body: 'a' } }));
+    assert.equal(recorder.readCompleteDetailWatermark(), 1);
+    recorder.submitDetail(detail({ payloadId: 'watermark-b', value: { body: 'b' } }));
+    assert.equal(recorder.readCompleteDetailWatermark(), 2);
+    // The watermark is an acceptance count, so deletion does not rewind it.
+    recorder.deleteSession('root-a', 'watermark-close', 900);
+    assert.equal(recorder.readCompleteDetailWatermark(), recorder.readDeliveryAccounting().completeDetailWatermark);
+    // A refused delivery is not accepted detail either.
+    assert.throws(
+      () => recorder.submitDetail({ ...detail({ payloadId: 'watermark-late' }), captureSubject: { kind: 'session', rootSessionId: 'root-a' } }),
+      /capture subject is deleted/,
+    );
+    assert.equal(recorder.readCompleteDetailWatermark(), recorder.readDeliveryAccounting().completeDetailWatermark);
   } finally {
     recorder.close();
     rmSync(temp.root, { recursive: true, force: true });

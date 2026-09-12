@@ -3291,6 +3291,31 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
     });
   }
 
+  /** Read only the complete-detail watermark.
+   *
+   * The capture acknowledgement needs exactly this value, and only this value.
+   * It previously called {@link readDeliveryAccounting}, which additionally runs
+   * `detailStorageStats()`: two unbounded `COUNT(*)`/`SUM(logical_bytes)`
+   * aggregates over `analytics_detail_payloads` and `analytics_detail_content`.
+   * One acknowledgement is issued per ingested batch, so at 1M facts in
+   * 256-record batches that is roughly 3,900 acknowledgements, each scanning a
+   * table that grows as the tier proceeds — cost O(batches x rows), quadratic in
+   * the tier, and the aggregates were then discarded unread.
+   *
+   * The watermark itself is an already-maintained counter (`details_accepted` on
+   * the singleton accounting row), so this reader is a single indexed point read.
+   * The full summary stays available through {@link readDeliveryAccounting} and
+   * {@link detailStorageStats} for the explicit storage/summary commands, where
+   * an exact aggregate is the point and the call is rare. */
+  readCompleteDetailWatermark(): number | string {
+    this.assertOpen();
+    const row = this.database.prepare(`
+      SELECT details_accepted AS accepted FROM analytics_delivery_accounting WHERE singleton = 1
+    `).get() as { accepted: string } | undefined;
+    if (!row) throw new Error('Analytics delivery accounting row is missing.');
+    return encodeInt64(row.accepted);
+  }
+
   readDeliveryAccounting(): AnalyticsDeliveryAccounting {
     this.assertOpen();
     const row = this.database.prepare(`SELECT * FROM analytics_delivery_accounting WHERE singleton = 1`).get() as Record<string, string>;

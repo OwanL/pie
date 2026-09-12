@@ -209,7 +209,11 @@ async function handle(raw: unknown): Promise<void> {
             }
           }
         }
-        const delivery = recorder.readDeliveryAccounting();
+        // Only the watermark is needed here, and it is an already-maintained
+        // counter. Reading the full delivery accounting here also computed two
+        // unbounded whole-table detail aggregates and discarded them, once per
+        // ingested batch, which is quadratic in the tier.
+        const completeDetailWatermark = recorder.readCompleteDetailWatermark();
         await acknowledge(request.requestId, {
           rejections,
           producerReconciliation: firstKind === 'observation'
@@ -217,7 +221,7 @@ async function handle(raw: unknown): Promise<void> {
                 captures.map((capture) => capture.value as AnalyticsObservation),
               )
             : [],
-          completeDetailWatermark: delivery.completeDetailWatermark,
+          completeDetailWatermark,
         });
         return;
       }
