@@ -128,7 +128,8 @@ async function initializeRecorder(): Promise<{
 function decodeCaptures(items: readonly Uint8Array[]): SerializedCaptureEnvelope[] {
   return items.map((item) => {
     if (!(item instanceof Uint8Array)) throw new Error('Invalid serialized analytics capture.');
-    const envelope = deserialize(Buffer.from(item)) as SerializedCaptureEnvelope;
+    // `deserialize` accepts the Uint8Array view directly; no copy is needed.
+    const envelope = deserialize(item) as SerializedCaptureEnvelope;
     if (!envelope || (envelope.kind !== 'observation' && envelope.kind !== 'detail')) {
       throw new Error('Invalid analytics capture envelope.');
     }

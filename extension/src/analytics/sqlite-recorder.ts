@@ -478,11 +478,13 @@ function contentDigest(encoding: 'utf8' | 'binary', bytes: Uint8Array): string {
  * deserialize, and the canonical buffer is only produced when it differs from
  * the input. */
 function canonicalDetailCapture(bytes: Uint8Array): { bytes: Uint8Array; value: unknown } {
-  const value = deserialize(Buffer.from(bytes));
+  // `deserialize` and `Buffer.compare` both accept a Uint8Array view directly,
+  // so the bytes are never copied onto the per-payload hot path.
+  const value = deserialize(bytes);
   const scrubbed = sanitizeAnalyticsDetail(value);
   const canonical = serializeV8(scrubbed);
   return {
-    bytes: Buffer.compare(Buffer.from(bytes), Buffer.from(canonical)) === 0 ? bytes : canonical,
+    bytes: Buffer.compare(bytes, canonical) === 0 ? bytes : canonical,
     value: scrubbed,
   };
 }
