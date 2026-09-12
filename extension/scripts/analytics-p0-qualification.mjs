@@ -1550,11 +1550,29 @@ try {
     scrubRecovery: privacyScrubRecovery,
   };
 
-  report.results.rateConditions = [
-    await runRateCondition(root, 'burst-1000ps-1host', 1_000, 5_000, 1),
-    await runRateCondition(root, 'burst-1000ps-2hosts', 1_000, 5_000, 2),
-    await runRateCondition(root, 'burst-1000ps-4hosts', 1_000, 5_000, 4),
-  ];
+  // The rate conditions spawn up to four concurrent recorder helpers. On this
+  // machine (15.3 GB RAM, measured ~3.5 GB available, effective limit 2.6 GB)
+  // stacking them behind the resident 1M producer exhausts host memory and the
+  // OS terminates a worker with SIGTERM, which is an environment failure rather
+  // than a qualification result. They therefore run in their own bounded pass
+  // once the scale workload has released its producer, unless explicitly
+  // coupled with PIE_ANALYTICS_P0_RATE_CONDITIONS=inline.
+  const runRateConditionsHere = process.env.PIE_ANALYTICS_P0_RATE_CONDITIONS !== 'deferred';
+  if (runRateConditionsHere) {
+    report.results.rateConditions = [
+      await runRateCondition(root, 'burst-1000ps-1host', 1_000, 5_000, 1),
+      await runRateCondition(root, 'burst-1000ps-2hosts', 1_000, 5_000, 2),
+      await runRateCondition(root, 'burst-1000ps-4hosts', 1_000, 5_000, 4),
+    ];
+  } else {
+    report.results.rateConditions = null;
+    report.results.rateConditionsDeferred = {
+      reason: 'host memory: four concurrent recorder helpers cannot share the machine with the resident 1M producer',
+      conditions: ['burst-1000ps-1host', 'burst-1000ps-2hosts', 'burst-1000ps-4hosts'],
+      measuredAvailableMemoryBytes: report.environment.initialAvailableMemoryBytes,
+      effectiveMemoryLimitBytes: report.environment.effectiveMemoryLimitBytes,
+    };
+  }
   if (process.env.PIE_ANALYTICS_P0_ENDURANCE === '1') {
     report.results.rateConditions.push(
       await runRateCondition(root, 'sustained-50ps-repeat-a', 50, 10_000, 1),
@@ -1732,6 +1750,9 @@ try {
     ['matchedAgentUi', 'The standalone proxy is not a UI or agent baseline.'],
     ['incrementalHostMemory', 'No matched analytics-disabled host baseline was executed.'],
     ['queryPeakMemory', 'The bounded query helper reports process behavior, but this unit does not isolate an additional-RSS baseline.'],
+    ['rateConditions', report.results.rateConditionsDeferred
+      ? 'Deferred in this pass: four concurrent recorder helpers cannot share this host with the resident 1M producer.'
+      : 'Executed in-line; no deferral was requested.'],
   ]) recordUnqualified(name, reason);
   report.qualification = { scenario: configuration.scenario, decision: failedGates.length === 0 ? 'scenario-passed' : 'scenario-failed', failedGates, overallP0: 'unqualified' };
   if (failedGates.length > 0) throw new Error(`numeric qualification gates failed: ${failedGates.join(', ')}`);
