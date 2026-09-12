@@ -2822,6 +2822,40 @@ were failing under parallel suite load; they now await the observable condition 
 a leak or per-payload cost — see checkpoint 35). A fresh cycle is required because the schema version
 moved again.
 
+### Checkpoint 41: two operator errors corrected; the v7 fix re-verified in an isolated measurement
+
+**Error 1 — concurrency violation.** The 1M run under the v7 build failed with `database is locked`.
+That was **not** a product defect: a 1M-scale delete-cost measurement was running in parallel, violating
+the runbook's explicit rule against two simultaneous scale probes. It is recorded here rather than
+attributed to the product, and the qualification was re-run with the machine quiesced (verified: zero
+`node.exe` processes before launch).
+
+**Error 2 — a fixture that could not test its own claim.** The corrected delete-cost fixture initially
+still failed to reproduce the failure, because it created **no `entity_kind='copy'` rows at all**. The
+scrub predicate is `entity_kind = 'copy' AND json_extract(...) = ?`, so a fixture without copy rows can
+never select the partial index under test, and measured only the residual filter. The fixture now writes
+10,000 copy observations, of which every 50th names the deleted source session, matching the shape
+`deleteSession` actually scrubs.
+
+**What the isolated measurement did establish.** With 1,000,000 observations and real copy rows, the
+pre-fix behaviour is catastrophic: `copyScrubSumMs` `16,628` ms and `copyScrubCountMs` `17,136` ms for a
+single pass each, and a full `deleteSession` of **`900,974` ms (15 minutes)**. That is more than enough
+to exceed the supervisor's 30 s IPC bound and explains the kill precisely. The fixture is also *heavier*
+than the real harness — it writes 1M provider settlements where the harness writes 250,000 — so its
+absolute numbers are an upper bound, not a harness-equivalent figure. The probe on the real schema
+shape (1,000,000 rows, ~1% copy) showed the index repair moving the scrub scan from `222` ms to `39` ms
+with the plan changing from `SCAN` to `SEARCH ... USING INDEX`. The authoritative post-fix number is the
+qualification run, not this microbenchmark.
+
+**Standing rules added to session memory.** Never run a heavy database job alongside a qualification run;
+never hold a qualification report open while the harness publishes it; and always build an evidence
+fixture at the harness's real scale and shape, then sanity-check its magnitude against production
+evidence. Both errors in this checkpoint came from violating the third rule, and one from the first.
+
+**Re-run in progress.** The 1M qualification is running with exclusive machine access under build
+`c8525f8c120387d69783`, using the accepted baseline from the v7 cycle. Its outcome is the next
+checkpoint.
+
 **Independently verified repair carried forward.** The `storage` command fix is confirmed: `979` ms
 against a fresh 1M database, down from the `10,022` ms timeout, so `inPlaceCorruption` should now
 proceed past its terminal probe. All the other 1M gates continue to pass.
