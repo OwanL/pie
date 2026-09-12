@@ -68,6 +68,8 @@ import { isPendingTabPath } from '../shared/tab-behavior';
 import { appendPieLog } from './util/pie-log';
 import { CanonicalAnalyticsCapture } from '../analytics/canonical-capture.js';
 import { ActivationStore } from '../analytics/activation-store.js';
+import { AnalyticsRuntime } from './analytics-runtime.js';
+import type { AnalyticsDetailCapture, AnalyticsObservation } from '../../../shared/analytics/contracts.js';
 
 
 export const SIDEBAR_VIEW_TYPE = 'pie.sessionsView';
@@ -145,6 +147,9 @@ export class PieExtension implements vscode.Disposable {
    *  started in `start()` after the host can build a valid initial
    *  `ViewState`, stopped in `shutdown()` before the service/backend order. */
   private readonly browserServer: BrowserServer;
+  /** Owns the canonical recorder/query helpers once an activation is recorded.
+   * Dormant under legacy authority: start() spawns nothing. */
+  private readonly analyticsRuntime: AnalyticsRuntime;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -166,14 +171,76 @@ export class PieExtension implements vscode.Disposable {
       agentDir: process.env.PI_CODING_AGENT_DIR,
     });
     const activation = new ActivationStore({ stateDir: dataPaths.stateDir }).read();
+    // Under canonical authority the capture requires a generation id and fact,
+    // detail and lifecycle sinks, and throws without them. Those sinks come from
+    // the canonical helpers, which only exist once AnalyticsRuntime.start() has
+    // succeeded, so the runtime is created here and started in start() below.
+    const analyticsRuntime = new AnalyticsRuntime({
+      stateDir: dataPaths.stateDir,
+      analyticsDir: dataPaths.analyticsDir,
+      recorderWorkerScript: path.join(runtimeOutputDirectory(context), 'analytics-recorder-worker.js'),
+      queryWorkerScript: path.join(runtimeOutputDirectory(context), 'analytics-query-worker.js'),
+      buildId: `pie-${String(context.extension.packageJSON.version ?? 'unknown')}`,
+      workspaceId: getWorkspaceAnalyticsId(context),
+      processGeneration: crypto.randomUUID(),
+      onError: (error, stage) => {
+        appendPieLog('error', 'analytics', `canonical analytics ${stage} failed`, {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      },
+    });
+    this.analyticsRuntime = analyticsRuntime;
+    const canonicalActive = activation.manifest?.activeGeneration !== undefined
+      && activation.manifest?.activeGeneration !== null;
+    // Under canonical authority the capture requires fact, detail and lifecycle
+    // sinks, and throws without them. Those sinks are the canonical recorder,
+    // which only exists after AnalyticsRuntime.start() succeeds. This holder is
+    // therefore the sink now: it forwards once the runtime has attached the real
+    // recorder and throws before that, so a record can never be silently dropped
+    // if a producer runs before the helpers are ready.
+    const runtimeSinks = {
+      submit: (observation: AnalyticsObservation<object>) => {
+        const sink = analyticsRuntime.sink;
+        if (!sink) throw new Error('Canonical capture sink is not ready; activation has not completed.');
+        return sink.submit(observation);
+      },
+      submitDetail: (capture: AnalyticsDetailCapture) => {
+        const sink = analyticsRuntime.sink;
+        if (!sink) throw new Error('Canonical detail sink is not ready; activation has not completed.');
+        return sink.submitDetail(capture);
+      },
+      bindPendingCreate: (
+        pendingOperationId: string,
+        rootSessionId: string,
+        sourceKey: string,
+        timestampMs: number | string | bigint,
+      ) => {
+        const sink = analyticsRuntime.sink;
+        if (!sink) throw new Error('Canonical lifecycle sink is not ready; activation has not completed.');
+        return sink.bindPendingCreate(pendingOperationId, rootSessionId, sourceKey, timestampMs);
+      },
+      deleteSession: (
+        rootSessionId: string,
+        sourceKey: string,
+        timestampMs: number | string | bigint,
+        pendingOperationId?: string,
+      ) => {
+        const sink = analyticsRuntime.sink;
+        if (!sink) throw new Error('Canonical lifecycle sink is not ready; activation has not completed.');
+        return sink.deleteSession(rootSessionId, sourceKey, timestampMs, pendingOperationId);
+      },
+    };
     const analyticsCapture = new CanonicalAnalyticsCapture({
-      authority: activation.manifest?.activeGeneration ? 'canonical' : 'legacy',
-      ...(activation.manifest?.activeGeneration
-        ? { generationId: activation.manifest.activeGeneration.identity.generationId }
+      authority: canonicalActive ? 'canonical' : 'legacy',
+      ...(canonicalActive
+        ? { generationId: activation.manifest!.activeGeneration!.identity.generationId }
         : {}),
       workspaceId: getWorkspaceAnalyticsId(context),
       buildId: `pie-${String(context.extension.packageJSON.version ?? 'unknown')}`,
       processGeneration: crypto.randomUUID(),
+      ...(canonicalActive
+        ? { sink: runtimeSinks, detailSink: runtimeSinks, lifecycleSink: runtimeSinks }
+        : {}),
     });
 
     // P5 durable read model: path-only resolution until a consumer queries it
@@ -477,6 +544,13 @@ export class PieExtension implements vscode.Disposable {
     this.hydratePrivacyMarkers();
     this.tokenRateService.start();
     this.aggregateStatsService.start();
+    // Start canonical helpers before any capture can be produced. Under legacy
+    // authority this spawns nothing and returns the legacy readiness snapshot;
+    // under an active manifest it spawns the recorder and proves the read path
+    // with a disposable query. A failure here throws before the services start,
+    // so the host fails closed rather than capturing into an authority it cannot
+    // read back.
+    await this.analyticsRuntime.start();
     await this.statsService.start();
     await this.service.start();
     // M2 (§7.2): start the browser server only after the host can build a
@@ -1092,7 +1166,11 @@ export class PieExtension implements vscode.Disposable {
       this.tokenRateService.dispose();
       this.aggregateStatsService.dispose();
 
+      // Stop capture and drain the recorder before anything else that can
+      // produce a capture: statsService owns the capture sink, so its shutdown
+      // must complete first, then the canonical helpers are released.
       await this.statsService.shutdown();
+      await this.analyticsRuntime.stop();
       this.service.dispose();
       this.sidebarProvider.dispose();
       // Bootstrap releases this window's runtime lease after shutdown resolves.

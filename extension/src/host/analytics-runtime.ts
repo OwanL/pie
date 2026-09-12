@@ -181,6 +181,23 @@ export class AnalyticsRuntime {
     return this.readiness;
   }
 
+  /** The started recorder, usable as the capture's fact/detail/lifecycle sink.
+   *
+   * Exposed so the host can hand the canonical recorder to
+   * `CanonicalAnalyticsCapture` after a successful activation. `undefined` under
+   * legacy authority and before `start()`, so a host that wires this cannot
+   * accidentally capture into a helper that was never started. The supervisor's
+   * `submit`, `submitDetail`, `bindPendingCreate` and `deleteSession` already
+   * match the sink interfaces, so no adapter is needed. */
+  get sink(): AnalyticsRecorderSupervisor | undefined {
+    return this.recorder;
+  }
+
+  /** The started query client, for canonical reads after activation. */
+  get reads(): AnalyticsQueryClient | undefined {
+    return this.queryClient;
+  }
+
   /** Identity used for the backend's activation descriptor echo. Null under
    * legacy authority, where the backend carries no canonical descriptor. */
   backendDescriptorArguments(): string[] {
