@@ -1042,11 +1042,17 @@ export class StatsService implements RunObserver {
     return this.storage.getStorageDir();
   }
 
-  /** Durable canonical read model (P5). Present whenever the host wired it;
-   * its queries are read-only and fail explicitly when the canonical
-   * database is absent. Consumers must gate on canonical authority until the
-   * P7a cutover. */
+  /** Durable canonical read model (P5), available only under canonical authority.
+   *
+   * Returns `undefined` under legacy authority even though the host wires the
+   * model at startup, so no consumer can read canonical data before the P7a
+   * cutover. The check lives here rather than in each consumer: it was previously
+   * an unenforced convention documented on this accessor, and a single consumer
+   * that forgot it would silently read the canonical database under legacy
+   * authority. Queries are read-only and fail explicitly when the canonical
+   * database is absent. */
   getAnalyticsReadModel(): CanonicalAnalyticsReadModel | undefined {
+    if (!this.canonicalCapture) return undefined;
     return this.analyticsReadModel;
   }
 

@@ -105,6 +105,49 @@ async function pumpMacrotasks(ticks = 25): Promise<void> {
   await new Promise<void>((resolve) => setTimeout(resolve, 25));
 }
 
+test('the canonical read model is withheld unless canonical authority is active', async () => {
+  await withTempDir(async (tempDir) => {
+    const state = createInitialArchState();
+    // The host wires a read model at startup regardless of authority, so the
+    // accessor is what has to withhold it. A consumer that read canonical data
+    // under legacy authority would be reading a store nothing is writing.
+    const readModel = {} as NonNullable<ReturnType<StatsService['getAnalyticsReadModel']>>;
+    const legacyStats = new StatsService({
+      ...optionsFor(path.join(tempDir, 'analytics-legacy'), tempDir, state, { renders: 0 }),
+      analyticsReadModel: readModel,
+    });
+    try {
+      assert.equal(legacyStats.getAnalyticsReadModel(), undefined, 'legacy authority must not expose canonical reads');
+    } finally {
+      await legacyStats.shutdown();
+    }
+
+    const capture = new CanonicalAnalyticsCapture({
+      authority: 'canonical',
+      generationId: 'generation-read-model',
+      workspaceId: 'workspace-read-model',
+      buildId: 'build-read-model',
+      processGeneration: 'process-read-model',
+      sink: { submit: () => undefined },
+      detailSink: { submitDetail: () => undefined },
+      lifecycleSink: {
+        bindPendingCreate: async () => undefined,
+        deleteSession: async () => undefined,
+      },
+    });
+    const canonicalStats = new StatsService({
+      ...optionsFor(path.join(tempDir, 'analytics-canonical'), tempDir, state, { renders: 0 }),
+      analyticsCapture: capture,
+      analyticsReadModel: readModel,
+    });
+    try {
+      assert.equal(canonicalStats.getAnalyticsReadModel(), readModel, 'canonical authority must expose the wired model');
+    } finally {
+      await canonicalStats.shutdown();
+    }
+  });
+});
+
 test('durable terminal evidence replays with an immutable canonical fingerprint', async () => {
   await withTempDir(async (tempDir) => {
     const state = createInitialArchState();
