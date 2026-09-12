@@ -3305,9 +3305,28 @@ This also explains why a *300k* database with an empty WAL deletes in 38.9 ms: t
 outstanding WAL bytes, not stored rows. It is the same `TRUNCATE`-under-contention behaviour recorded
 earlier, now measured from the delete's side rather than the flush's.
 
-Next step is to measure the WAL size present at the cross-host delete during a real 1M run, which the
-harness does not currently record, before choosing between bounding the WAL during ingest and making the
-private-close scrub not depend on a full truncation.
+**Refinement after a second probe.** The first figure — "roughly 2.5 s per GiB of WAL" — is too crude,
+and a later probe contradicts a naive reading of it. That probe held four concurrent connections open so
+the WAL survived the writer's disconnect, reached a peak of 150.2 MiB, and the same one-fact delete took
+only 44.5 ms. The first probe had explicitly disabled autocheckpoint with
+`PRAGMA wal_autocheckpoint = 0`, so its WAL was entirely *uncheckpointed* frames, whereas the later probe
+left autocheckpoint on and most frames had already been written into the main database even though the
+file remained large.
+
+So the quantity the `TRUNCATE` cost follows is the **uncheckpointed frame backlog**, not the WAL file
+size. That distinction matters for the fix: simply capping the WAL file with `journal_size_limit` did not
+help (150.2 MiB either way, 44.5 vs 37.0 ms), because the file size was never the problem once frames
+were checkpointed.
+
+This sharpens the diagnosis of the harness case. Its flush checkpoints `TRUNCATE` first and falls back to
+`PASSIVE` when busy, and with four concurrent helpers the truncation is frequently busy, so frames
+accumulate uncheckpointed. That is the backlog the private close must then fold in, and it is why the
+delete reaches 18.8 s at 1M while a quiet database deletes in tens of milliseconds.
+
+Next step is to record the uncheckpointed backlog present at the cross-host delete during a real 1M run,
+which the harness still does not measure, before choosing between keeping the backlog bounded during
+ingest and removing the private close's dependence on a full fold.
+
 
 
 
