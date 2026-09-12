@@ -2856,6 +2856,46 @@ evidence. Both errors in this checkpoint came from violating the third rule, and
 `c8525f8c120387d69783`, using the accepted baseline from the v7 cycle. Its outcome is the next
 checkpoint.
 
+### Checkpoint 42: the index fix worked; the next blocker was an exclusive flush checkpoint
+
+The quiesced re-run (`pie-p0-v7b-20260912-r08`; machine verified clear before launch) made real progress
+and revealed a **second, independent defect**.
+
+**The copy-scrub index fix is confirmed at scale.** `crossHostRefresh` — the step that had died three
+times with the 30 s `deleteSession` kill — **completed**:
+`crossHostCommitVisibleMs` `398.5` ms and `crossHostDeleteVisibleMs` `21,205` ms. The delete now
+finishes inside the IPC bound instead of being killed. `capacity` completed too.
+
+**The run then failed with `database is locked` in `privateDeleteRace`** — a *different* error from a
+*different* cause, and not the earlier timeout.
+
+**Root cause.** Every worker `flush()` called `recorder.checkpoint()`, which ran
+`PRAGMA wal_checkpoint(TRUNCATE)`. TRUNCATE requires **exclusive** access to the database, so a routine
+flush failed whenever any other helper was mid-write. `privateDeleteRace` deliberately races a delete
+against a live writer, which is exactly when that happens. A flush only needs to make committed writes
+durable, and a **PASSIVE** checkpoint does that without requiring exclusivity.
+
+**Repair.** `checkpoint()` now issues `wal_checkpoint(PASSIVE)`. The blocking truncation is retained as
+`truncateWal()` / `truncateWalAndRead()` for the private-close scrub, which genuinely must remove private
+bytes from the WAL. Critically, SQLite **reports** contention there as a `busy` flag rather than
+throwing (verified directly: a held `BEGIN IMMEDIATE` on another connection yields
+`{busy: 1, log: 3, checkpointed: 3}`), which is precisely what lets the scrub keep `scrub_state='pending'`
+and retry instead of failing the close. A focused test holds a write transaction open on another
+connection and asserts a passive flush does not throw while truncation reports busy; recorder suite
+29/29.
+
+A third fixture error was caught and corrected while writing that test: `truncateWal` was assumed to
+*throw* on contention, but SQLite returns a busy flag. The assertion now tests the real contract.
+
+**Barrier.** 17 typecheck projects and lint pass; affected suite 2/2 packages; coordinated build
+`9a4aa63006bfb3340392`. Committed and pushed as `ca82a57d`.
+
+**Full cycle in progress.** Under fingerprint
+`54936d078da59f0a7ff7fe4787990084a0db89c58e9c831340bb5b6b46d961db` / build `9a4aa63006bfb3340392`:
+validation `validated`, 10k baseline `scenario-passed` with zero failed gates and the rate conditions
+in-line, and a 1M admission `validated` at projected peak `10,112,000,000` bytes. The 1M workload is
+running with the machine quiesced; its outcome is the next checkpoint.
+
 **Independently verified repair carried forward.** The `storage` command fix is confirmed: `979` ms
 against a fresh 1M database, down from the `10,022` ms timeout, so `inPlaceCorruption` should now
 proceed past its terminal probe. All the other 1M gates continue to pass.
