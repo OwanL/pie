@@ -3273,7 +3273,41 @@ before any 1M tier was attempted.
 
 `crossHostDeleteVisibleMs` measured a `deleteSession` *plus* a following query, and only the sum was
 recorded. The 1M figure of 18.9 s against 97 ms at baseline could not be attributed between the two.
-The harness now reports `deleteOnlyMs` and `deleteObservationQueryMs` separately. At baseline the split
-is 41 ms and 58 ms.
+The harness now reports `deleteOnlyMs` and `deleteObservationQueryMs` separately.
+
+The split refutes the conflation hypothesis that was recorded here before it was measured. At 1M:
+
+| | baseline (10k) | 1M |
+|---|---|---|
+| `deleteOnlyMs` | 41 ms | **18,814 ms** |
+| `deleteObservationQueryMs` | 58 ms | **67 ms** |
+
+The observing query is fine. The delete itself is slow, and the deleted subject holds **one** fact, so
+per-row work cannot explain it.
+
+**The cause is WAL size, not row count.** `deleteSession` calls `completePrivacyScrub`, which runs
+`PRAGMA wal_checkpoint(TRUNCATE)`, and that cost scales with the WAL rather than with the subject. A
+focused probe (`pie-delete-cost-20260912-r02`) deletes a one-fact subject from a 200k-row database:
+
+| WAL before delete | delete wall time | recorder's internal removal |
+|---|---|---|
+| 0 (empty) | 38.9 ms | ~22 ms |
+| 257.6 MiB | 656 ms | 26 ms |
+| 268.7 MiB | 736 ms | 26 ms |
+
+The recorder's own opt-in phase profile attributes only ~26 ms to `removeRootAttributedData` at every
+WAL size, so essentially the whole difference is the checkpoint, which is not instrumented. The
+relationship is roughly 2.5 s per GiB of WAL, so the 18.8 s figure implies a WAL of several gigabytes —
+plausible for a four-host ingest where a `TRUNCATE` checkpoint reports busy often enough to leave the
+WAL large.
+
+This also explains why a *300k* database with an empty WAL deletes in 38.9 ms: the cost follows
+outstanding WAL bytes, not stored rows. It is the same `TRUNCATE`-under-contention behaviour recorded
+earlier, now measured from the delete's side rather than the flush's.
+
+Next step is to measure the WAL size present at the cross-host delete during a real 1M run, which the
+harness does not currently record, before choosing between bounding the WAL during ingest and making the
+private-close scrub not depend on a full truncation.
+
 
 
