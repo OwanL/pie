@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
 
 import {
   ActivationManifestError,
@@ -8,6 +10,11 @@ import { canonicalAnalyticsDatabasePath } from '../analytics/query-entry.js';
 import { AnalyticsRecorderSupervisor } from '../analytics/recorder-supervisor.js';
 import { AnalyticsQueryClient } from '../analytics/query-client.js';
 import { ActivationStore } from '../analytics/activation-store.js';
+
+/** Written by a host that completed canonical readiness, so post-restart
+ * evidence can show which generation is loaded rather than only which one the
+ * manifest records. */
+export const LOADED_GENERATION_FILENAME = 'analytics-loaded-generation-v1.json';
 
 /** Explicit per-extension paths the runtime needs. Everything is derived, never
  * searched for: the whole point of the authority switch is that there is exactly
@@ -179,6 +186,43 @@ export class AnalyticsRuntime {
 
   getReadiness(): AnalyticsRuntimeReadiness | undefined {
     return this.readiness;
+  }
+
+  /** Record that this host process loaded and passed its readiness probe.
+   *
+   * The manifest says which generation *should* be running; this says which one
+   * actually is. They are different claims, and the runbook requires the
+   * post-restart evidence to distinguish them, so the loaded state is written to
+   * a separate file rather than inferred from the manifest. Only written under
+   * canonical authority, and only after the helpers reached readiness, so its
+   * presence is itself evidence that the loaded build agreed with the manifest.
+   *
+   * A best-effort diagnostic: a failure to write it must not fail startup, since
+   * capture readiness is the functional requirement and this file exists only to
+   * make the load observable. */
+  recordLoadedGeneration(): void {
+    if (this.readiness?.authority !== 'canonical') return;
+    try {
+      const descriptor = this.activeDescriptor();
+      const payload = {
+        schemaVersion: 1,
+        generationId: descriptor.generationId,
+        buildId: descriptor.buildId,
+        manifestRevision: descriptor.manifestRevision,
+        manifestSha256: descriptor.manifestSha256,
+        workspaceId: descriptor.workspaceId,
+        hostInstanceId: descriptor.hostInstanceId,
+        loadedAt: new Date().toISOString(),
+      };
+      mkdirSync(this.options.stateDir, { recursive: true });
+      writeFileSync(
+        path.join(this.options.stateDir, LOADED_GENERATION_FILENAME),
+        `${JSON.stringify(payload, null, 2)}\n`,
+        'utf8',
+      );
+    } catch {
+      // Diagnostic only. Never fail a working activation over this record.
+    }
   }
 
   /** The started recorder, usable as the capture's fact/detail/lifecycle sink.

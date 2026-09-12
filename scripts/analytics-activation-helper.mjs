@@ -227,6 +227,19 @@ async function main() {
   const verification = (() => {
     const read = store.read();
     const active = read.manifest?.activeGeneration ?? null;
+    // A host writes this after it reaches canonical readiness, so its presence
+    // distinguishes "the manifest records a generation" from "a host loaded that
+    // generation and passed its readiness probe". Both are needed before the
+    // activation can be called live.
+    const loadedPath = path.join(plan.stateDir, 'analytics-loaded-generation-v1.json');
+    let loaded = null;
+    if (existsSync(loadedPath)) {
+      try {
+        loaded = JSON.parse(readFileSync(loadedPath, 'utf8'));
+      } catch (error) {
+        loaded = { unreadable: error instanceof Error ? error.message : String(error) };
+      }
+    }
     return {
       authority: read.authority,
       manifestRevision: read.manifest?.revision ?? null,
@@ -234,6 +247,9 @@ async function main() {
       activeBuildId: active?.identity.buildId ?? null,
       generationMatchesPlan: active?.identity.generationId === plan.generationId,
       tombstonePresent: read.tombstonePresent,
+      loadedGenerationId: loaded?.generationId ?? null,
+      loadedBuildId: loaded?.buildId ?? null,
+      loadedGenerationMatchesPlan: loaded?.generationId === plan.generationId,
     };
   })();
   if (!hasCompleted(plan.stateDir, 'verify')) {
@@ -254,9 +270,10 @@ async function main() {
     verification,
     phases,
     // Stated explicitly so a manifest read is never presented as proof that the
-    // loaded host generation changed. Verifying the running host needs a
-    // post-restart probe, which this helper records as a requirement.
-    postRestartProbeRequired: plan.restartCommand !== undefined,
+    // loaded host generation changed. `loadedGenerationMatchesPlan` is the field
+    // that answers that, and it is null until a host has actually started under
+    // the new authority.
+    postRestartProbeRequired: plan.restartCommand !== undefined && verification.loadedGenerationMatchesPlan !== true,
   };
   mkdirSync(path.dirname(plan.reportPath), { recursive: true });
   writeFileSync(plan.reportPath, `${JSON.stringify(report, null, 2)}\n`, 'utf8');

@@ -551,6 +551,10 @@ export class PieExtension implements vscode.Disposable {
     // so the host fails closed rather than capturing into an authority it cannot
     // read back.
     await this.analyticsRuntime.start();
+    // Record that this process actually reached canonical readiness, so
+    // post-restart evidence can distinguish "the manifest records a generation"
+    // from "a host loaded and passed readiness for it".
+    this.analyticsRuntime.recordLoadedGeneration();
     await this.statsService.start();
     await this.service.start();
     // M2 (§7.2): start the browser server only after the host can build a
