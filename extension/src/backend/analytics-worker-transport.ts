@@ -38,6 +38,44 @@ export type AnalyticsTransportFrameSettlement =
   | { status: 'rejected'; reason: string; detail: string }
   | { status: 'failed'; error: Error };
 
+export interface AnalyticsFactShutdownReport {
+  /** The writer admitted these fact frames before the transport was fenced. */
+  admitted: number;
+  /** A stream write callback ran; this is not recorder durability. */
+  writerSent: number;
+  /** The writer synchronously rejected admission. */
+  rejected: number;
+  /** The writer failed after admission or the sender threw. */
+  failed: number;
+  /** Admitted frames whose writer callback did not settle before disposal. */
+  unsettledTimeout: number;
+  /** Durable ACKs observed before the transport was fenced. */
+  durableAcksObserved: number;
+}
+
+export interface AnalyticsTransportDisposalReport {
+  /** `timed-out` means at least one detail or fact writer remained unsettled. */
+  status: 'drained' | 'timed-out';
+  facts: AnalyticsFactShutdownReport;
+}
+
+interface PendingFactFrame {
+  deliveryId: string;
+  pendingDelivery: PendingDelivery;
+  sendReturned: boolean;
+  accepted: boolean;
+  earlySettlement?: AnalyticsTransportFrameSettlement;
+  ignored: boolean;
+}
+
+interface PendingDelivery {
+  kind: 'fact' | 'detail';
+  payloadId?: string;
+  bytes?: number;
+  producerIdentity?: string;
+  retainAcknowledgement: boolean;
+}
+
 interface PendingDetailSend {
   packets: Generator<AnalyticsTransportPacket, void>;
   start: AnalyticsTransportDetailStartPacket;
@@ -48,6 +86,17 @@ interface PendingDetailSend {
 const MAX_ACKNOWLEDGEMENT_STATE = 8_192;
 const DISPOSAL_SETTLEMENT_TIMEOUT_MS = 1_000;
 
+function emptyFactShutdownReport(): AnalyticsFactShutdownReport {
+  return {
+    admitted: 0,
+    writerSent: 0,
+    rejected: 0,
+    failed: 0,
+    unsettledTimeout: 0,
+    durableAcksObserved: 0,
+  };
+}
+
 function greaterInt64(left: number | string, right: number | string | undefined): boolean {
   return right === undefined || BigInt(left) > BigInt(right);
 }
@@ -57,20 +106,22 @@ function greaterInt64(left: number | string, right: number | string | undefined)
 export class AnalyticsWorkerTransport {
   private readonly factWatermarks = new Map<string, number | string>();
   private readonly completeDetails = new Set<string>();
-  private readonly pendingDeliveries = new Map<string, {
-    kind: 'fact' | 'detail'; payloadId?: string; bytes?: number; producerIdentity?: string;
-    retainAcknowledgement: boolean;
-  }>();
+  private readonly pendingDeliveries = new Map<string, PendingDelivery[]>();
+  private pendingDeliveryCount = 0;
   private readonly factDeliveriesByProducer = new Map<string, Set<string>>();
   private readonly detailDeliveriesByPayload = new Map<string, string>();
   private readonly detailSendQueue: PendingDetailSend[] = [];
+  private readonly pendingFactFrames = new Map<string, Set<PendingFactFrame>>();
+  private readonly factShutdownReport = emptyFactShutdownReport();
   private pendingDetailBytes = 0;
   private pumpingDetail = false;
   private activeDetailFrame: { job: PendingDetailSend } | undefined;
-  private disposalPromise?: Promise<void>;
-  private resolveDisposal?: () => void;
+  private pendingDetailAbort = false;
+  private disposalPromise?: Promise<AnalyticsTransportDisposalReport>;
+  private resolveDisposal?: (report: AnalyticsTransportDisposalReport) => void;
   private disposalTimer?: ReturnType<typeof setTimeout>;
   private disposalExpired = false;
+  private disposalReport?: AnalyticsTransportDisposalReport;
   private readonly bridge: InstalledAnalyticsRuntimeBridge;
   private installed = false;
   private captureSubject: AnalyticsCaptureSubject;
@@ -107,12 +158,13 @@ export class AnalyticsWorkerTransport {
         this.completeDetails.delete(payloadId);
         const factDeliveryIds = this.factDeliveriesByProducer.get(producerIdentity);
         for (const deliveryId of factDeliveryIds ?? []) {
-          const factDelivery = this.pendingDeliveries.get(deliveryId);
-          if (factDelivery?.kind === 'fact') factDelivery.retainAcknowledgement = false;
+          for (const factDelivery of this.pendingDeliveries.get(deliveryId) ?? []) {
+            if (factDelivery.kind === 'fact') factDelivery.retainAcknowledgement = false;
+          }
         }
         this.factDeliveriesByProducer.delete(producerIdentity);
         const detailDeliveryId = this.detailDeliveriesByPayload.get(payloadId);
-        const detailDelivery = detailDeliveryId ? this.pendingDeliveries.get(detailDeliveryId) : undefined;
+        const detailDelivery = detailDeliveryId ? this.pendingDeliveries.get(detailDeliveryId)?.[0] : undefined;
         if (detailDelivery?.kind === 'detail') detailDelivery.retainAcknowledgement = false;
         this.detailDeliveriesByPayload.delete(payloadId);
       },
@@ -160,20 +212,26 @@ export class AnalyticsWorkerTransport {
   }
 
   /**
-   * Fence the bridge immediately, then give one frame already admitted to the
-   * bounded IPC writer a chance to settle.  The abort is emitted from that
-   * writer settlement callback, before the writer pumps its next frame.  This
-   * preserves detail-frame order without adding a writer-wide cancellation
-   * API; jobs that have only reached this local queue never need an abort.
+   * Fence the bridge immediately, then give admitted fact frames and one
+   * detail frame already accepted by the bounded IPC writer a finite chance
+   * to settle. The report deliberately distinguishes a stream write from a
+   * recorder-durable ACK; the latter can arrive only through a later host
+   * acknowledgement and is never inferred during disposal.
    */
-  dispose(): Promise<void> {
+  dispose(): Promise<AnalyticsTransportDisposalReport> {
     if (this.disposalPromise) return this.disposalPromise;
-    if (!this.installed) return Promise.resolve();
-    this.disposalPromise = new Promise<void>((resolve) => {
+    if (!this.installed) {
+      return Promise.resolve(this.disposalReport ?? {
+        status: 'drained',
+        facts: { ...this.factShutdownReport },
+      });
+    }
+    this.disposalPromise = new Promise<AnalyticsTransportDisposalReport>((resolve) => {
       this.resolveDisposal = resolve;
       this.disposalTimer = setTimeout(() => {
         this.disposalExpired = true;
-        this.finishDisposal();
+        this.expirePendingFactFrames();
+        this.finishDisposal('timed-out');
       }, DISPOSAL_SETTLEMENT_TIMEOUT_MS);
       this.disposalTimer.unref?.();
     });
@@ -188,6 +246,7 @@ export class AnalyticsWorkerTransport {
     this.factWatermarks.clear();
     this.completeDetails.clear();
     this.pendingDeliveries.clear();
+    this.pendingDeliveryCount = 0;
     this.factDeliveriesByProducer.clear();
     this.detailDeliveriesByPayload.clear();
     for (const job of this.detailSendQueue) {
@@ -199,14 +258,14 @@ export class AnalyticsWorkerTransport {
     this.pumpingDetail = false;
     this.captureSubjectRevision += 1;
     this.captureSubjectState = 'disabled';
-    if (!activeJob) this.finishDisposal();
+    this.maybeFinishDisposal();
     return this.disposalPromise;
   }
 
   acknowledge(value: unknown): void {
     const acknowledgement = parseAnalyticsTransportAcknowledgement(value);
     if (acknowledgement.generationId !== this.activation.generationId) return;
-    const pending = this.pendingDeliveries.get(acknowledgement.deliveryId);
+    const pending = this.pendingDeliveries.get(acknowledgement.deliveryId)?.[0];
     if (!pending) return;
     if (acknowledgement.status !== 'durable') {
       this.releasePendingDelivery(acknowledgement.deliveryId);
@@ -217,6 +276,9 @@ export class AnalyticsWorkerTransport {
       (entry) => entry.producerIdentity !== pending.producerIdentity,
     )) return;
     if (pending.kind === 'detail' && acknowledgement.completeDetailPayloadId !== pending.payloadId) return;
+    if (pending.kind === 'fact' && acknowledgement.status === 'durable') {
+      this.factShutdownReport.durableAcksObserved += 1;
+    }
     this.releasePendingDelivery(acknowledgement.deliveryId);
     if (pending.kind === 'fact' && pending.producerIdentity) {
       const entry = acknowledgement.producerReconciliation?.find((candidate) => candidate.producerIdentity === pending.producerIdentity);
@@ -241,10 +303,14 @@ export class AnalyticsWorkerTransport {
     const producerIdentity = observation.stableOriginId
       ? analyticsProducerIdentity(observation.generationId, observation.producerKind, observation.stableOriginId)
       : undefined;
-    this.pendingDeliveries.set(packet.deliveryId, {
+    const pendingDelivery: PendingDelivery = {
       kind: 'fact', retainAcknowledgement: true,
       ...(producerIdentity ? { producerIdentity } : {}),
-    });
+    };
+    const deliveriesForId = this.pendingDeliveries.get(packet.deliveryId) ?? [];
+    deliveriesForId.push(pendingDelivery);
+    this.pendingDeliveries.set(packet.deliveryId, deliveriesForId);
+    this.pendingDeliveryCount += 1;
     if (producerIdentity) {
       const deliveries = this.factDeliveriesByProducer.get(producerIdentity) ?? new Set<string>();
       deliveries.add(packet.deliveryId);
@@ -252,8 +318,8 @@ export class AnalyticsWorkerTransport {
     }
     // The sender may settle synchronously. Register ownership before sending
     // so an immediate durable ACK is not lost; rejected admission rolls it back.
-    try { this.send(packet); } catch (error) {
-      this.releasePendingDelivery(packet.deliveryId);
+    try { this.sendFactFrame(packet, pendingDelivery); } catch (error) {
+      this.releasePendingDelivery(packet.deliveryId, pendingDelivery);
       throw error;
     }
   }
@@ -273,13 +339,72 @@ export class AnalyticsWorkerTransport {
     // Admission precedes byte copying, hashing and metadata normalization. The
     // accepted job retains detached bytes and generates only one frame at a time.
     const { start, packets } = createAnalyticsDetailPacketSequence(capture);
-    this.pendingDeliveries.set(start.deliveryId, {
+    this.pendingDeliveries.set(start.deliveryId, [{
       kind: 'detail', payloadId: capture.payloadId, bytes: retainedTransportBytes, retainAcknowledgement: true,
-    });
+    }]);
+    this.pendingDeliveryCount += 1;
     this.detailDeliveriesByPayload.set(capture.payloadId, start.deliveryId);
     this.pendingDetailBytes += retainedTransportBytes;
     this.detailSendQueue.push({ packets, start, finished: false });
     this.pumpDetailQueue();
+  }
+
+  private sendFactFrame(packet: AnalyticsTransportPacket, pendingDelivery: PendingDelivery): void {
+    if (!this.installed) throw new Error('Analytics worker transport is not installed.');
+    const frame: PendingFactFrame = {
+      deliveryId: packet.deliveryId,
+      pendingDelivery,
+      sendReturned: false,
+      accepted: false,
+      ignored: false,
+    };
+    const framesForId = this.pendingFactFrames.get(packet.deliveryId) ?? new Set<PendingFactFrame>();
+    framesForId.add(frame);
+    this.pendingFactFrames.set(packet.deliveryId, framesForId);
+    try {
+      frame.accepted = this.sender.sendAnalyticsFrame(packet, (settlement) => {
+        if (!frame.sendReturned) {
+          frame.earlySettlement = settlement;
+          return;
+        }
+        this.settleFactFrame(frame, settlement);
+      });
+    } catch (error) {
+      frame.sendReturned = true;
+      this.settleFactFrame(frame, {
+        status: 'failed',
+        error: error instanceof Error ? error : new Error(String(error)),
+      });
+      throw error;
+    }
+    frame.sendReturned = true;
+    if (!frame.accepted) {
+      this.settleFactFrame(frame, frame.earlySettlement ?? {
+        status: 'rejected',
+        reason: 'unavailable',
+        detail: `Analytics transport rejected fact ${packet.deliveryId}.`,
+      });
+      throw new Error(`Analytics transport rejected fact for ${packet.deliveryId}.`);
+    }
+    this.factShutdownReport.admitted += 1;
+    if (frame.earlySettlement) this.settleFactFrame(frame, frame.earlySettlement);
+  }
+
+  private settleFactFrame(frame: PendingFactFrame, settlement: AnalyticsTransportFrameSettlement): void {
+    const framesForId = this.pendingFactFrames.get(frame.deliveryId);
+    if (frame.ignored || !framesForId?.has(frame)) return;
+    frame.ignored = true;
+    framesForId.delete(frame);
+    if (framesForId.size === 0) this.pendingFactFrames.delete(frame.deliveryId);
+    if (settlement.status === 'sent') this.factShutdownReport.writerSent += 1;
+    else if (settlement.status === 'rejected') {
+      this.factShutdownReport.rejected += 1;
+      this.releasePendingDelivery(frame.deliveryId, frame.pendingDelivery);
+    } else {
+      this.factShutdownReport.failed += 1;
+      this.releasePendingDelivery(frame.deliveryId, frame.pendingDelivery);
+    }
+    this.maybeFinishDisposal();
   }
 
   private send(packet: AnalyticsTransportPacket): void {
@@ -354,7 +479,7 @@ export class AnalyticsWorkerTransport {
     this.activeDetailFrame = undefined;
     this.pumpingDetail = false;
     if (this.disposalExpired || settlement.status !== 'sent') {
-      this.finishDisposal();
+      this.maybeFinishDisposal();
       return;
     }
     const abort = createAnalyticsDetailAbortPacket(
@@ -362,22 +487,65 @@ export class AnalyticsWorkerTransport {
       'transport_shutdown',
       'Analytics worker transport closed before detail delivery completed.',
     );
+    this.pendingDetailAbort = true;
+    let abortSendReturned = false;
+    let abortSettlementArrived = false;
+    const settleAbort = (): void => {
+      if (!abortSendReturned) {
+        abortSettlementArrived = true;
+        return;
+      }
+      this.pendingDetailAbort = false;
+      this.maybeFinishDisposal();
+    };
     let accepted = false;
     try {
-      accepted = this.sender.sendAnalyticsFrame(abort, () => this.finishDisposal());
+      accepted = this.sender.sendAnalyticsFrame(abort, settleAbort);
     } catch {
       // A failed descriptor is covered by route-scoped host cleanup after the
       // worker exit; never keep shutdown waiting for an impossible ACK.
+      this.pendingDetailAbort = false;
     }
-    if (!accepted) this.finishDisposal();
+    abortSendReturned = true;
+    if (!accepted || abortSettlementArrived) this.pendingDetailAbort = false;
+    this.maybeFinishDisposal();
   }
 
-  private finishDisposal(): void {
+  private maybeFinishDisposal(): void {
+    if (!this.disposalPromise || this.disposalReport || this.disposalExpired) return;
+    if (this.activeDetailFrame || this.pendingDetailAbort || this.pendingFactFrameCount() > 0) return;
+    this.finishDisposal('drained');
+  }
+
+  private expirePendingFactFrames(): void {
+    if (this.pendingFactFrames.size === 0) return;
+    for (const frames of this.pendingFactFrames.values()) {
+      this.factShutdownReport.unsettledTimeout += frames.size;
+      for (const frame of frames) {
+        frame.ignored = true;
+        this.releasePendingDelivery(frame.deliveryId, frame.pendingDelivery);
+      }
+    }
+    this.pendingFactFrames.clear();
+  }
+
+  private pendingFactFrameCount(): number {
+    let count = 0;
+    for (const frames of this.pendingFactFrames.values()) count += frames.size;
+    return count;
+  }
+
+  private finishDisposal(status: AnalyticsTransportDisposalReport['status']): void {
+    if (this.disposalReport) return;
     if (this.disposalTimer) clearTimeout(this.disposalTimer);
     this.disposalTimer = undefined;
+    this.disposalReport = {
+      status,
+      facts: { ...this.factShutdownReport },
+    };
     const resolve = this.resolveDisposal;
     this.resolveDisposal = undefined;
-    resolve?.();
+    resolve?.(this.disposalReport);
   }
 
   private finishDetailSend(job: PendingDetailSend): void {
@@ -404,13 +572,18 @@ export class AnalyticsWorkerTransport {
     this.pumpDetailQueue();
   }
 
-  private releasePendingDelivery(deliveryId: string): void {
-    const pending = this.pendingDeliveries.get(deliveryId);
+  private releasePendingDelivery(deliveryId: string, expected?: PendingDelivery): void {
+    const pendingForId = this.pendingDeliveries.get(deliveryId);
+    if (!pendingForId || pendingForId.length === 0) return;
+    const pendingIndex = expected ? pendingForId.indexOf(expected) : 0;
+    if (pendingIndex < 0) return;
+    const [pending] = pendingForId.splice(pendingIndex, 1);
     if (!pending) return;
-    this.pendingDeliveries.delete(deliveryId);
+    this.pendingDeliveryCount = Math.max(0, this.pendingDeliveryCount - 1);
+    if (pendingForId.length === 0) this.pendingDeliveries.delete(deliveryId);
     if (pending.kind === 'fact' && pending.producerIdentity) {
       const deliveries = this.factDeliveriesByProducer.get(pending.producerIdentity);
-      deliveries?.delete(deliveryId);
+      if (pendingForId.length === 0) deliveries?.delete(deliveryId);
       if (deliveries?.size === 0) this.factDeliveriesByProducer.delete(pending.producerIdentity);
     }
     if (pending.kind === 'detail') {
@@ -456,7 +629,7 @@ export class AnalyticsWorkerTransport {
   }
 
   private assertAcknowledgementCapacity(): void {
-    const retained = this.pendingDeliveries.size + this.factWatermarks.size + this.completeDetails.size;
+    const retained = this.pendingDeliveryCount + this.factWatermarks.size + this.completeDetails.size;
     if (retained >= MAX_ACKNOWLEDGEMENT_STATE) {
       throw new Error('Analytics worker acknowledgement capacity exceeded.');
     }

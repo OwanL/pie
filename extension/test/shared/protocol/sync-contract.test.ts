@@ -35,7 +35,18 @@ test('runtime lease release stays behind awaited production backend shutdown', a
   // and must not substitute for BackendClient.stop() at this lifecycle boundary.
   const host = await readFile(new URL('../../../src/host/extension-host.ts', import.meta.url), 'utf8');
   const entry = await readFile(new URL('../../../src/extension.ts', import.meta.url), 'utf8');
-  assert.match(host, /await this\.backend\.stop\(\);\s*this\.backend\.dispose\(\);/u);
+  // Analytics ingress remains open while the backend drains. Its transport is
+  // fenced from the finally block even when stop rejects, and only then may
+  // the backend/runtime leases be released.
+  assert.match(host, /try\s*\{\s*await this\.backend\.stop\(\);\s*\}\s*finally\s*\{\s*await this\.analyticsTransport\?\.shutdown\(\);\s*\}/u);
+  const backendStop = host.indexOf('await this.backend.stop();');
+  const transportShutdown = host.indexOf('await this.analyticsTransport?.shutdown();', backendStop);
+  const backendDispose = host.indexOf('this.backend.dispose();', transportShutdown);
+  const runtimeStop = host.indexOf('await this.analyticsRuntime.stop();', backendDispose);
+  assert.ok(backendStop >= 0, 'production shutdown must await backend stop');
+  assert.ok(transportShutdown > backendStop, 'analytics ingress must settle after backend stop');
+  assert.ok(backendDispose > transportShutdown, 'backend disposal must follow transport settlement');
+  assert.ok(runtimeStop > backendDispose, 'analytics runtime stop must follow backend disposal');
   assert.match(entry, /await extension\?\.shutdown\(\)/u);
 });
 

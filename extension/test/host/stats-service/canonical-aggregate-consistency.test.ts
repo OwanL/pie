@@ -51,6 +51,7 @@ function aggregateAt(revision: string, executionCount = 0): ProviderAggregateRea
       deliveryCoverage: 'complete',
       latestSettled: null,
     },
+    latestRun: null,
     groups: [],
     truncation: { rowLimit: false, byteLimit: false, cellLimit: false },
   };

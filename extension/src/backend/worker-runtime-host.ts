@@ -94,6 +94,7 @@ import { SessionLifecycleStore } from './session-lifecycle-store.js';
 import { SessionFilesystemMutationBarrier } from './session-filesystem-lifecycle.js';
 import {
   AnalyticsWorkerTransport,
+  type AnalyticsTransportDisposalReport,
   type WorkerAnalyticsActivation,
 } from './analytics-worker-transport.js';
 
@@ -189,6 +190,7 @@ export class WorkerRuntimeHost {
   private lifecycleBarrier?: SessionFilesystemMutationBarrier;
   private lifecycleSessionsRoot?: string;
   private analyticsTransport?: AnalyticsWorkerTransport;
+  private disposalPromise?: Promise<AnalyticsTransportDisposalReport | undefined>;
 
   constructor(private readonly options: WorkerRuntimeHostOptions) {
     this.detailStore = new WorkerLiveDetailStore({
@@ -451,16 +453,25 @@ export class WorkerRuntimeHost {
     return { interrupted: true, settled: true };
   }
 
-  async dispose(): Promise<void> {
-    if (this.disposed) return;
+  async dispose(): Promise<AnalyticsTransportDisposalReport | undefined> {
+    if (this.disposalPromise) return await this.disposalPromise;
+    this.disposalPromise = this.disposeOnce();
+    return await this.disposalPromise;
+  }
+
+  private async disposeOnce(): Promise<AnalyticsTransportDisposalReport | undefined> {
     this.disposed = true;
     this.gate.dispose();
     // Fence the process-global producer bridge before disposing the SDK. The
-    // transport waits only for one already-admitted detail frame and emits its
-    // ordered abort before worker-server queues the shutdown response.
+    // transport waits for already-admitted fact/detail writer callbacks and
+    // emits any ordered detail abort before worker-server queues the shutdown
+    // response. A timed-out report is retained by the lifecycle caller as an
+    // explicit incomplete handoff; a stream write is never treated as a
+    // recorder-durable acknowledgement.
     const analyticsTransport = this.analyticsTransport;
     this.analyticsTransport = undefined;
-    await analyticsTransport?.dispose();
+    const analyticsDisposalPromise = analyticsTransport?.dispose() ?? Promise.resolve(undefined);
+    const analyticsDisposalReport = await analyticsDisposalPromise;
     const context = this.context;
     this.context = undefined;
     if (context) {
@@ -482,6 +493,7 @@ export class WorkerRuntimeHost {
     this.lifecycleStore?.close();
     this.lifecycleStore = undefined;
     this.lifecycleBarrier = undefined;
+    return analyticsDisposalReport;
   }
 
   private async promoteOnce(payload: WorkerRuntimePromotionPayload): Promise<void> {

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -11,6 +11,7 @@ import {
   validateAnalyticsLoadedGenerationReceipt,
 } from '../../../shared/analytics/activation.js';
 import { ActivationStore } from '../../src/analytics/activation-store.js';
+import { activateGeneration } from '../../src/analytics/activation-sequence.js';
 import {
   AnalyticsRuntime,
   analyticsWorkspaceId,
@@ -47,6 +48,57 @@ async function writeManifest(stateDir: string, manifest: unknown): Promise<void>
   const store = new ActivationStore({ stateDir });
   await store.update(() => manifest as never, { expectedSha256: null });
 }
+
+test('canonical runtime reaches readiness with real recorder and query workers', { timeout: 30_000 }, async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'pie-analytics-runtime-real-'));
+  const stateDir = path.join(root, 'state');
+  const loaderUrl = new URL('../../node_modules/tsx/dist/loader.mjs', import.meta.url).href;
+  const workerPath = (kind: 'recorder' | 'query'): string => {
+    const target = path.join(root, `${kind}-worker.mjs`);
+    const sourceUrl = new URL(`../../src/analytics/${kind}-worker-entry.ts`, import.meta.url).href;
+    // Real production entry points, loaded independently of extension/out.
+    writeFileSync(target, `await import(${JSON.stringify(loaderUrl)});\nawait import(${JSON.stringify(sourceUrl)});\n`, 'utf8');
+    return target;
+  };
+  const runtime = new AnalyticsRuntime({
+    stateDir,
+    analyticsDir: path.join(root, 'analytics'),
+    recorderWorkerScript: workerPath('recorder'),
+    queryWorkerScript: workerPath('query'),
+    buildId: 'build-1',
+    workspaceId: 'workspace-real',
+    processGeneration: 'process-real',
+    restartNonce: 'real-runtime-test',
+    timeZone: 'UTC',
+  });
+  try {
+    await activateGeneration(new ActivationStore({ stateDir }), {
+      generationId: GENERATION_ID,
+      buildId: 'build-1',
+      qualificationSha256: SHA,
+      trialSha256: SHA_B,
+      activatedAt: ACTIVATED_AT,
+      cutoffReceiptSha256: null,
+    });
+    const readiness = await runtime.start();
+    assert.equal(readiness.authority, 'canonical');
+    assert.equal(readiness.recorderReady, true);
+    assert.equal(readiness.queryReady, true, 'independent query schema probe must agree with recorder stats');
+    assert.ok(Number.isSafeInteger(readiness.recorderSchemaVersion) && readiness.recorderSchemaVersion! > 0);
+    assert.equal(readiness.projectionRevision, '0');
+    const stats = await runtime.sink!.workerStats();
+    assert.equal(stats?.recorder.databaseSchemaVersion, readiness.recorderSchemaVersion);
+    assert.equal(runtime.backendDescriptor()?.generationId, GENERATION_ID);
+    runtime.recordLoadedGeneration();
+    const receipt = validateAnalyticsLoadedGenerationReceipt(JSON.parse(readFileSync(path.join(stateDir, LOADED_GENERATION_FILENAME), 'utf8')));
+    assert.equal(receipt.generationId, GENERATION_ID);
+    assert.equal(receipt.restartNonce, 'real-runtime-test');
+  } finally {
+    await runtime.stop();
+    assert.equal(runtime.isStopped, true);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test('under legacy authority the runtime starts no helper and creates no database', async () => {
   const { root, runtime, analyticsDir } = tempRuntime();

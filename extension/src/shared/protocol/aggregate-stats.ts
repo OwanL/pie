@@ -269,24 +269,34 @@ export const EMPTY_SUBAGENT_LIFECYCLE_STATS: AggregateSubagentLifecycleStats = {
 };
 
 export interface AggregateLastRun {
-  /** Cost (USD) of the run, derived from its tokens × pricing. */
-  cost: number;
-  /** Wall-clock busy duration in ms (the run's `busyDurationMs`). */
-  durationMs: number;
+  /** Exact canonical identity when supplied by the durable execution projection. */
+  generationId?: string;
+  executionId?: string;
+  rootSessionId?: string | null;
+  sourceKey?: string | null;
+  outcome?: string | null;
+  /** Effective cost (USD) across this retained run's provider settlements. */
+  cost: number | null;
+  /** Source-measured duration from the canonical execution start to end. */
+  durationMs: number | null;
   /** Model id used for the run (null when unrecorded). */
   modelId: string | null;
-  /** Resolved provider name (or `'unknown'`). */
-  provider: string;
-  /** ISO timestamp the run started. */
-  startedAt: string;
-  /** ISO timestamp the run ended (finalizedAt, falling back to updatedAt). */
-  endedAt: string;
-  /** Input tokens reported across the run's assistant turns. */
-  inputTokens: number;
-  /** Output tokens reported across the run's assistant turns. */
-  outputTokens: number;
-  /** Per-turn output tokens for the run (sparkline), ascending by time. */
+  /** Resolved provider name when all retained settlements agree. */
+  provider: string | null;
+  /** ISO source timestamp the execution started, when captured. */
+  startedAt: string | null;
+  /** ISO source timestamp the execution ended, when captured. */
+  endedAt: string | null;
+  /** Known input tokens across this run's retained provider settlements. */
+  inputTokens: number | string | null;
+  /** Known output tokens across this run's retained provider settlements. */
+  outputTokens: number | string | null;
+  /** Per-turn output tokens when a canonical turn identity is available. */
   turnSeries: AggregateLastRunTurn[];
+  /** Canonical source coverage; omitted by legacy run-history projections. */
+  usageCoverage?: 'complete' | 'partial' | 'unknown' | 'unavailable';
+  attributionCoverage?: 'single' | 'mixed' | 'unknown';
+  turnSeriesCoverage?: 'complete' | 'partial' | 'unavailable';
 }
 
 /** Live per-provider concurrency-gate metrics, reported by the backend's

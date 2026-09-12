@@ -1343,19 +1343,20 @@ export class PieExtension implements vscode.Disposable {
       this.tokenRateService.dispose();
       this.aggregateStatsService.dispose();
 
-      // Stop host-side producers first. The transport then fences new backend
-      // ingress and gives partial detail assemblies a bounded terminal
-      // rejection while the backend channel is still available.
+      // Stop host-side producers first. Keep backend analytics ingress open
+      // while the backend workers perform their bounded writer drain; closing
+      // it here would drop facts that the workers have already admitted.
       await this.statsService.shutdown();
-      await this.analyticsTransport?.shutdown();
       // Closing stdin fences the coordinator and all worker producers. Keep the
-      // recorder alive until the backend has confirmed exit so accepted queue
-      // work still drains without allowing late backend traffic into a torn
-      // down transport. Release the backend client's event/lease ownership
-      // immediately after its process confirms exit; host-local analytics
-      // teardown below does not use this client because ingress is fenced and
-      // acknowledgments were settled above.
-      await this.backend.stop();
+      // host transport receiving until the backend has confirmed exit so
+      // admitted worker facts can reach the recorder. Its final shutdown then
+      // fences late ingress and records any ACKs that could not return before
+      // coordinator exit; this is not an all-host durability claim.
+      try {
+        await this.backend.stop();
+      } finally {
+        await this.analyticsTransport?.shutdown();
+      }
       this.backend.dispose();
       await this.analyticsRuntime.stop();
       this.analyticsTransport?.dispose();

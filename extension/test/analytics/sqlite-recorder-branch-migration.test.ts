@@ -75,6 +75,7 @@ function downgradeV4ToV3(raw: RawDatabase): void {
     DROP TABLE analytics_branch_selections;
     DROP TABLE analytics_current_branch_selections;
     DROP TABLE analytics_session_copies;
+    DROP INDEX IF EXISTS analytics_provider_settlement_execution_idx;
     ALTER TABLE analytics_provider_settlements DROP COLUMN execution_id;
     ALTER TABLE analytics_provider_settlements DROP COLUMN branch_id;
     CREATE VIEW analytics_provider_usage_v1 AS
@@ -163,7 +164,7 @@ function createLegacyFixture(version: 2 | 3): { root: string; databasePath: stri
 }
 
 function assertPreservedLegacyUsage(recorder: SqliteAnalyticsRecorder): void {
-  assert.equal(recorder.getDatabaseSchemaVersion(), 10);
+  assert.equal(recorder.getDatabaseSchemaVersion(), 11);
   const read = recorder.readProviderSettlements();
   assert.equal(read.settlements.length, 1);
   assert.equal(read.settlements[0]?.invocationId, 'legacy-invocation');
@@ -206,7 +207,7 @@ test('fresh recorder creates branch and session-copy tables', () => {
   const root = mkdtempSync(path.join(tmpdir(), 'pie-analytics-branch-migration-v4-'));
   const databasePath = path.join(root, 'analytics.sqlite');
   const recorder = new SqliteAnalyticsRecorder(databasePath);
-  assert.equal(recorder.getDatabaseSchemaVersion(), 10);
+  assert.equal(recorder.getDatabaseSchemaVersion(), 11);
   recorder.close();
   const raw = new DatabaseSync(databasePath);
   try {

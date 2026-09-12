@@ -46,6 +46,7 @@ import {
 } from './provider-model-projection.js';
 import {
   applyExecutionSummaryDelta,
+  type CanonicalExecutionLatestRun,
   emptyExecutionSummary,
   executionSummaryFromCounts,
   type CanonicalExecutionSummary,
@@ -165,7 +166,7 @@ function prepareWriterStatement(
 }
 
 const sqlite = createRequire(process.execPath)('node:sqlite') as SqliteModule;
-const DATABASE_SCHEMA_VERSION = 10;
+const DATABASE_SCHEMA_VERSION = 11;
 const BUSY_TIMEOUT_MS = 5_000;
 const MAX_PENDING_SEQUENCES_PER_PRODUCER = 4_096;
 const DEFAULT_QUERY_ROWS = 200;
@@ -367,6 +368,8 @@ export interface ProviderAggregateReadModel {
   /** Captured root execution summary; lifecycle/timing coverage is scoped to
    * retained rows and does not certify complete producer history. */
   executionSummary: CanonicalExecutionSummary;
+  /** Source-chronological latest completed root execution. */
+  latestRun: CanonicalExecutionLatestRun | null;
   groups: Array<Record<string, unknown>>;
   truncation: AnalyticsQueryTruncation;
 }
@@ -1389,6 +1392,29 @@ function migrateV9(database: SqliteDatabase): void {
   `);
 }
 
+/** Schema v10 -> v11: add source-time and exact execution lookup indexes for
+ * the bounded canonical latest-run projection. Delivery revision remains the
+ * ordering used by the diagnostic latestSettled field. */
+function migrateV10(database: SqliteDatabase): void {
+  database.exec(`
+    CREATE INDEX IF NOT EXISTS analytics_execution_state_source_end_global_idx
+      ON analytics_execution_states(
+        operation_kind, settled, CAST(ended_at_ms AS INTEGER) DESC,
+        generation_id DESC, execution_id DESC
+      )
+      WHERE ended_at_ms IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS analytics_execution_state_source_end_session_idx
+      ON analytics_execution_states(
+        root_session_id, operation_kind, settled,
+        CAST(ended_at_ms AS INTEGER) DESC, generation_id DESC, execution_id DESC
+      )
+      WHERE ended_at_ms IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS analytics_provider_settlement_execution_idx
+      ON analytics_provider_settlements(generation_id, execution_id, invocation_id)
+      WHERE execution_id IS NOT NULL;
+  `);
+}
+
 function databaseTransaction<T>(database: SqliteDatabase, operation: () => T): T {
   database.exec('BEGIN IMMEDIATE');
   try {
@@ -1438,6 +1464,7 @@ function initializeSchema(database: SqliteDatabase, readOnly = false): void {
       migrateV7(database);
       migrateV8(database);
       migrateV9(database);
+      migrateV10(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
       return;
     }
@@ -1450,6 +1477,7 @@ function initializeSchema(database: SqliteDatabase, readOnly = false): void {
       migrateV7(database);
       migrateV8(database);
       migrateV9(database);
+      migrateV10(database);
       backfillV2(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
       return;
@@ -1462,6 +1490,7 @@ function initializeSchema(database: SqliteDatabase, readOnly = false): void {
       migrateV7(database);
       migrateV8(database);
       migrateV9(database);
+      migrateV10(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
       return;
     }
@@ -1472,6 +1501,7 @@ function initializeSchema(database: SqliteDatabase, readOnly = false): void {
       migrateV7(database);
       migrateV8(database);
       migrateV9(database);
+      migrateV10(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
       return;
     }
@@ -1481,6 +1511,7 @@ function initializeSchema(database: SqliteDatabase, readOnly = false): void {
       migrateV7(database);
       migrateV8(database);
       migrateV9(database);
+      migrateV10(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
       return;
     }
@@ -1490,6 +1521,7 @@ function initializeSchema(database: SqliteDatabase, readOnly = false): void {
       migrateV7(database);
       migrateV8(database);
       migrateV9(database);
+      migrateV10(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
       return;
     }
@@ -1498,6 +1530,7 @@ function initializeSchema(database: SqliteDatabase, readOnly = false): void {
       migrateV7(database);
       migrateV8(database);
       migrateV9(database);
+      migrateV10(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
       return;
     }
@@ -1505,17 +1538,25 @@ function initializeSchema(database: SqliteDatabase, readOnly = false): void {
       migrateV7(database);
       migrateV8(database);
       migrateV9(database);
+      migrateV10(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
       return;
     }
     if (version === 8) {
       migrateV8(database);
       migrateV9(database);
+      migrateV10(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
       return;
     }
     if (version === 9) {
       migrateV9(database);
+      migrateV10(database);
+      database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
+      return;
+    }
+    if (version === 10) {
+      migrateV10(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
     }
   });
@@ -1869,6 +1910,14 @@ interface StoredProviderAccounting {
     calculatedCount: string;
     knownTotal: number;
   };
+}
+
+function encodeAggregateTotal(value: string): number | string {
+  if (!/^(?:0|[1-9][0-9]*)$/.test(value)) {
+    throw new Error('Stored provider accounting total is malformed.');
+  }
+  const parsed = BigInt(value);
+  return parsed <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(parsed) : parsed.toString();
 }
 
 function emptyStoredProviderAccounting(): StoredProviderAccounting {
@@ -3122,7 +3171,11 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
         cacheReadTokens: row.cache_read_tokens === null ? null : String(row.cache_read_tokens),
         cacheWriteTokens: row.cache_write_tokens === null ? null : String(row.cache_write_tokens),
         reasoningTokens: row.reasoning_tokens === null ? null : String(row.reasoning_tokens),
-        providerTotalTokens: row.provider_total_tokens === null ? null : String(row.provider_total_tokens),
+        // Accounting projections are built from normalized channels. The raw
+        // provider total is still retained for provenance, but using it here
+        // would subtract a value that was counted as unknown whenever the
+        // normalization contract could not prove the total.
+        providerTotalTokens: row.normalized_total_tokens === null ? null : String(row.normalized_total_tokens),
         effectiveCost: row.effective_cost_usd === null ? null : Number(row.effective_cost_usd),
         effectiveSource: row.effective_cost_source === null
           ? null
@@ -4423,6 +4476,143 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
     } : null, deliveryCoverage);
   }
 
+  /** Select and summarize one source-chronological completed execution while
+   * the caller's read snapshot is open. The execution identity is always the
+   * stored generation/id pair; provider rows from another execution or
+   * generation cannot enter this result. */
+  private readLatestRunInSnapshot(): CanonicalExecutionLatestRun | null {
+    const latestRow = this.database.prepare(`
+      SELECT generation_id, execution_id, root_session_id, settled_source_key,
+        outcome, started_at_ms, ended_at_ms
+      FROM analytics_execution_states
+      WHERE operation_kind = 'agent-run' AND settled = 1
+        AND ended_at_ms IS NOT NULL
+        AND ended_at_ms = CAST(CAST(ended_at_ms AS INTEGER) AS TEXT)
+      ORDER BY CAST(ended_at_ms AS INTEGER) DESC, generation_id DESC, execution_id DESC
+      LIMIT 1
+    `).get() as {
+      generation_id: string;
+      execution_id: string;
+      root_session_id: string | null;
+      settled_source_key: string | null;
+      outcome: string | null;
+      started_at_ms: string | null;
+      ended_at_ms: string | null;
+    } | undefined;
+    if (!latestRow) return null;
+    let endedAtMs: number | string;
+    try {
+      if (latestRow.ended_at_ms === null) return null;
+      endedAtMs = encodeInt64(latestRow.ended_at_ms);
+    } catch {
+      // A malformed persisted source timestamp is unavailable evidence, not
+      // a reason to substitute receipt time or claim a different run.
+      return null;
+    }
+    const decodeOptionalTimestamp = (value: string | null): number | string | null => {
+      if (value === null) return null;
+      try { return encodeInt64(value); } catch { return null; }
+    };
+
+    let invocationCount = 0;
+    let inputTokens = 0n;
+    let outputTokens = 0n;
+    let inputUnknown = false;
+    let outputUnknown = false;
+    let costUsd = 0;
+    let costUnknown = false;
+    let provider: string | null = null;
+    let modelId: string | null = null;
+    let providerKnown = false;
+    let modelKnown = false;
+    let providerUnknown = false;
+    let modelUnknown = false;
+    let providerMixed = false;
+    let modelMixed = false;
+    for (const row of this.database.prepare(`
+      SELECT provider, effective_model, normalized_base_input_tokens,
+        normalized_output_tokens, effective_cost_usd, effective_cost_coverage
+      FROM analytics_provider_settlements
+      WHERE generation_id = ? AND execution_id = ?
+      ORDER BY invocation_id
+    `).iterate(latestRow.generation_id, latestRow.execution_id) as Iterable<Record<string, unknown>>) {
+      invocationCount += 1;
+      const rowProvider = typeof row.provider === 'string' && row.provider.length > 0 ? row.provider : null;
+      if (rowProvider === null) providerUnknown = true;
+      else if (!providerKnown) { provider = rowProvider; providerKnown = true; }
+      else if (provider !== rowProvider) providerMixed = true;
+      const rowModel = typeof row.effective_model === 'string' && row.effective_model.length > 0
+        ? row.effective_model : null;
+      if (rowModel === null) modelUnknown = true;
+      else if (!modelKnown) { modelId = rowModel; modelKnown = true; }
+      else if (modelId !== rowModel) modelMixed = true;
+
+      const addToken = (value: unknown, name: 'input' | 'output'): void => {
+        if (value === null || value === undefined) {
+          if (name === 'input') inputUnknown = true;
+          else outputUnknown = true;
+          return;
+        }
+        try {
+          const parsed = parseNonNegativeInt64(value, `lastRun.${name}Tokens`);
+          if (name === 'input') inputTokens += parsed;
+          else outputTokens += parsed;
+        } catch {
+          if (name === 'input') inputUnknown = true;
+          else outputUnknown = true;
+        }
+      };
+      addToken(row.normalized_base_input_tokens, 'input');
+      addToken(row.normalized_output_tokens, 'output');
+      if (row.effective_cost_usd === null || row.effective_cost_usd === undefined
+        || row.effective_cost_coverage !== 'known') {
+        costUnknown = true;
+      } else {
+        const value = Number(row.effective_cost_usd);
+        if (!Number.isFinite(value) || value < 0) costUnknown = true;
+        else {
+          const nextCost = costUsd + value;
+          if (!Number.isFinite(nextCost)) costUnknown = true;
+          else costUsd = nextCost;
+        }
+      }
+    }
+    let encodedInputTokens: number | string | null = null;
+    if (invocationCount > 0 && !inputUnknown) {
+      try { encodedInputTokens = encodeInt64(inputTokens); } catch { inputUnknown = true; }
+    }
+    let encodedOutputTokens: number | string | null = null;
+    if (invocationCount > 0 && !outputUnknown) {
+      try { encodedOutputTokens = encodeInt64(outputTokens); } catch { outputUnknown = true; }
+    }
+    const usageCoverage = invocationCount === 0
+      ? 'unavailable'
+      : inputUnknown || outputUnknown || costUnknown ? 'partial' : 'complete';
+    const attributionCoverage = invocationCount === 0 || (!providerKnown && !modelKnown)
+      ? 'unknown'
+      : providerUnknown || modelUnknown || !providerKnown || !modelKnown
+        ? 'unknown'
+        : providerMixed || modelMixed ? 'mixed' : 'single';
+    return {
+      generationId: latestRow.generation_id,
+      executionId: latestRow.execution_id,
+      rootSessionId: latestRow.root_session_id,
+      sourceKey: latestRow.settled_source_key,
+      outcome: latestRow.outcome,
+      startedAtMs: decodeOptionalTimestamp(latestRow.started_at_ms),
+      endedAtMs,
+      costUsd: invocationCount === 0 || costUnknown ? null : costUsd,
+      inputTokens: encodedInputTokens,
+      outputTokens: encodedOutputTokens,
+      usageCoverage,
+      provider: attributionCoverage === 'single' ? provider : null,
+      modelId: attributionCoverage === 'single' ? modelId : null,
+      attributionCoverage,
+      turnSeries: [],
+      turnSeriesCoverage: 'unavailable',
+    };
+  }
+
   /** Bounded global provider aggregate. Accounting, grouped dimensions, the
    * projection revision, and the observation watermark are all read while one
    * SQLite read transaction is open. Only aggregate rows (plus one sentinel
@@ -4451,6 +4641,7 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
       const revision = this.getProjectionRevision();
       const accounting = this.readProviderAccountingSummaryInSnapshot(undefined, revision);
       const executionSummary = this.readExecutionSummaryInSnapshot(undefined, revision);
+      const latestRun = this.readLatestRunInSnapshot();
       const projection = readProviderModelGroups(
         this.database as unknown as ProviderProjectionDatabase,
         {
@@ -4469,6 +4660,7 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
         snapshotWatermark: this.readObservationWatermark(),
         accounting,
         executionSummary,
+        latestRun,
         groups: truncated ? rows.slice(0, maxGroups) : rows,
         truncation: { rowLimit: truncated, byteLimit: false, cellLimit: false },
       };
@@ -4500,7 +4692,11 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
       const value = stored.channels[name];
       const knownCount = Number(value.knownCount);
       const unknownCount = Number(value.unknownCount);
-      const knownTotal = encodeInt64(value.knownTotal);
+      // A maintained aggregate may exceed signed int64 even though every
+      // individual observation is bounded by it. Preserve that exact decimal
+      // total for the aggregate reader; the per-run projection separately
+      // marks an overflowing selected channel partial rather than throwing.
+      const knownTotal = encodeAggregateTotal(value.knownTotal);
       return {
         occurrenceCount: invocationCount,
         knownCount,

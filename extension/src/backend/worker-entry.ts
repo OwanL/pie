@@ -102,7 +102,17 @@ function main(): void {
       throw new Error(`Unsupported Phase 4 worker frame ${frame.kind}.`);
     },
     onInterrupt: async () => { await host?.interrupt(); },
-    onShutdown: async () => { await host?.dispose(); },
+    onShutdown: async () => {
+      const report = await host?.dispose();
+      if (report?.status === 'timed-out') {
+        const facts = report.facts;
+        throw new Error(
+          `Analytics worker shutdown did not settle admitted frames (admitted=${facts.admitted}, `
+          + `writerSent=${facts.writerSent}, rejected=${facts.rejected}, failed=${facts.failed}, `
+          + `unsettled=${facts.unsettledTimeout}, durableAcks=${facts.durableAcksObserved}).`,
+        );
+      }
+    },
   });
   server.start();
 }

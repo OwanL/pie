@@ -715,7 +715,7 @@ test('computeAggregateStats: parent, subagent, and pruning usage reconcile acros
   assert.equal(finalTokenPoint.byModel.reduce((sum, entry) => sum + entry.value, 0), 650_000);
   assert.equal(stats.tokensPerSecondByProvider.reduce((sum, entry) => sum + entry.sampleCount, 0), 2,
     'auxiliary usage must not create duplicate throughput samples');
-  assertClose(stats.lastRun?.cost, 7.3);
+  assertClose(stats.lastRun?.cost ?? undefined, 7.3);
   assert.equal(stats.lastRun?.inputTokens, 1_300_000);
   assert.equal(stats.lastRun?.outputTokens, 650_000);
   assert.equal(stats.lastRun?.turnSeries.reduce((sum, entry) => sum + entry.outputTokens, 0), 650_000);

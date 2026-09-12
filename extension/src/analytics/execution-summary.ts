@@ -13,6 +13,8 @@ export type ExecutionSummaryScope =
 export type ExecutionSummaryCoverage = 'known' | 'partial' | 'unknown';
 export type ExecutionSummaryTimingCoverage = 'known' | 'partial' | 'unknown';
 export type ExecutionSummaryDeliveryCoverage = 'complete' | 'retained_only' | 'unknown';
+export type ExecutionSummaryRunCoverage = 'complete' | 'partial' | 'unknown' | 'unavailable';
+export type ExecutionSummaryAttributionCoverage = 'single' | 'mixed' | 'unknown';
 
 export interface ExecutionSummaryLatest {
   generationId: string;
@@ -20,6 +22,30 @@ export interface ExecutionSummaryLatest {
   sourceKey: string | null;
   startedAtMs: number | string | null;
   endedAtMs: number | string | null;
+}
+
+/** Source-chronological usage summary for one retained root execution. This
+ * is intentionally separate from latestSettled, whose ordering is the
+ * recorder delivery revision and remains useful as a diagnostic. */
+export interface CanonicalExecutionLatestRun {
+  generationId: string;
+  executionId: string;
+  rootSessionId: string | null;
+  sourceKey: string | null;
+  outcome: string | null;
+  startedAtMs: number | string | null;
+  endedAtMs: number | string;
+  costUsd: number | null;
+  inputTokens: number | string | null;
+  outputTokens: number | string | null;
+  /** Coverage of known channels among retained provider settlements only. */
+  usageCoverage: ExecutionSummaryRunCoverage;
+  provider: string | null;
+  modelId: string | null;
+  attributionCoverage: ExecutionSummaryAttributionCoverage;
+  /** Provider settlements currently carry no canonical turn identity. */
+  turnSeries: [];
+  turnSeriesCoverage: 'unavailable';
 }
 
 export interface CanonicalExecutionSummary {

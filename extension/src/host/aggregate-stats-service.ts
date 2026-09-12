@@ -1,5 +1,6 @@
 import {
   EMPTY_AGGREGATE_STATS,
+  type AggregateLastRun,
   type AggregateProviderCost,
   type AggregateStats,
   type ProviderGateStats,
@@ -33,6 +34,7 @@ import { AggregatePricingCache } from './aggregate-pricing-cache';
 import { CompletedHistoryCache, type CompletedHistoryMtimeFn } from './completed-history-cache';
 import type { CanonicalAnalyticsReadModel } from '../analytics/query-entry.js';
 import type { ProviderAccountingSummary } from '../analytics/sqlite-recorder.js';
+import type { CanonicalExecutionLatestRun } from '../analytics/execution-summary.js';
 
 /**
  * Measures aggregate usage stats across ALL sessions host-side — total + per-
@@ -385,11 +387,10 @@ export class AggregateStatsService {
     }
   }
 
-  /** Canonical authority has durable provider settlements but no RunSnapshot
-   * transcript replay. Use the maintained accounting summary plus bounded SQL
-   * provider/model groups; leave run-only fields at their explicit empty values
-   * until a canonical run summary projection exists. A truncated group result
-   * is rejected so an apparently plausible partial history never reaches UI. */
+  /** Canonical authority has durable provider settlements and a bounded root
+   * execution summary, but no RunSnapshot transcript replay. Provider/model
+   * groups and latest-run fields are read from the same SQLite snapshot. A
+   * truncated group result is rejected so partial history never reaches UI. */
   private async recomputeCanonical(
     readModel: CanonicalAnalyticsReadModel,
     nowMs: number,
@@ -451,6 +452,7 @@ export class AggregateStatsService {
       // invocations and assistant-turn facets are separate projections.
       runCount: executionSummary.executionCount,
       sessionCount,
+      lastRun: canonicalLastRunToAggregate(aggregate.latestRun),
       ready: true,
       providerGate: this.cached.providerGate,
     }, overlay);
@@ -547,6 +549,48 @@ export class AggregateStatsService {
     for (const run of pendingCompletedRuns) effectiveOpenById.set(run.runId, run);
     return accumulateAggregateStats([...effectiveOpenById.values()], pricing);
   }
+}
+
+function canonicalLastRunToAggregate(run: CanonicalExecutionLatestRun | null): AggregateLastRun | null {
+  if (!run) return null;
+  const parseMillis = (value: number | string | null): bigint | null => {
+    if (value === null) return null;
+    try { return BigInt(value); } catch { return null; }
+  };
+  const toIso = (value: number | string | null): string | null => {
+    const millis = parseMillis(value);
+    if (millis === null) return null;
+    const numeric = Number(millis);
+    if (!Number.isSafeInteger(numeric)) return null;
+    const date = new Date(numeric);
+    return Number.isNaN(date.getTime()) ? null : date.toISOString();
+  };
+  const started = parseMillis(run.startedAtMs);
+  const ended = parseMillis(run.endedAtMs);
+  let durationMs: number | null = null;
+  if (started !== null && ended !== null) {
+    const duration = ended - started;
+    if (duration >= 0n && duration <= BigInt(Number.MAX_SAFE_INTEGER)) durationMs = Number(duration);
+  }
+  return {
+    generationId: run.generationId,
+    executionId: run.executionId,
+    rootSessionId: run.rootSessionId,
+    sourceKey: run.sourceKey,
+    outcome: run.outcome,
+    cost: run.costUsd,
+    durationMs,
+    modelId: run.modelId,
+    provider: run.provider,
+    startedAt: toIso(run.startedAtMs),
+    endedAt: toIso(run.endedAtMs),
+    inputTokens: run.inputTokens,
+    outputTokens: run.outputTokens,
+    turnSeries: [],
+    usageCoverage: run.usageCoverage,
+    attributionCoverage: run.attributionCoverage,
+    turnSeriesCoverage: run.turnSeriesCoverage,
+  };
 }
 
 const CANONICAL_AGGREGATE_MAX_GROUP_ROWS = 10_000;

@@ -105,6 +105,50 @@ test('worker server admits soft interrupt on the priority path while a runtime c
   }
 });
 
+test('worker server does not publish successful shutdown when the lifecycle hook reports an incomplete drain', async () => {
+  const inbound = new PassThrough();
+  const outbound = new PassThrough();
+  const frames: WorkerIpcFrame[] = [];
+  let buffered = '';
+  outbound.setEncoding('utf8');
+  outbound.on('data', (chunk: string) => {
+    buffered += chunk;
+    while (buffered.includes('\n')) {
+      const newline = buffered.indexOf('\n');
+      frames.push(JSON.parse(buffered.slice(0, newline)) as WorkerIpcFrame);
+      buffered = buffered.slice(newline + 1);
+    }
+  });
+  const server = new WorkerServer(identity, {
+    pid: frameBase.workerPid,
+    exit: () => undefined as never,
+  }, { readable: inbound, writable: outbound }, {
+    validateBootstrap: () => undefined,
+    onShutdown: async () => {
+      throw new Error('Analytics worker shutdown did not settle admitted frames (unsettled=1).');
+    },
+  });
+  server.start();
+  const send = (seq: number, body: Record<string, unknown>): void => {
+    inbound.write(`${JSON.stringify({ ...frameBase, seq, ...body })}\n`);
+  };
+  try {
+    send(1, { kind: 'bootstrap', heartbeatIntervalMs: 60_000, sdkPatchIdentity });
+    await waitUntil(() => frames.some((frame) => frame.kind === 'ready'));
+    send(2, { kind: 'shutdown', requestId: 'shutdown-incomplete', reason: 'test incomplete drain' });
+    await waitUntil(() => frames.some((frame) => frame.kind === 'fatal'));
+    assert.equal(frames.some((frame) => frame.kind === 'response'
+      && frame.requestId === 'shutdown-incomplete'), false,
+    'an incomplete analytics drain cannot receive the normal shutting-down response');
+    const fatal = frames.find((frame) => frame.kind === 'fatal');
+    assert.ok(fatal?.kind === 'fatal');
+    assert.match(fatal.error.message, /did not settle admitted frames/);
+  } finally {
+    inbound.destroy();
+    outbound.destroy();
+  }
+});
+
 test('worker server joins an exact equal-revision sync retry and applies it once', async () => {
   const inbound = new PassThrough();
   const outbound = new PassThrough();

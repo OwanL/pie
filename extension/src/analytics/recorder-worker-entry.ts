@@ -243,7 +243,10 @@ async function handle(raw: unknown): Promise<void> {
             cpuUsage: process.cpuUsage(),
             workerIdentity,
           },
-          recorder: recorder.getStats(),
+          recorder: {
+            ...recorder.getStats(),
+            databaseSchemaVersion: recorder.getDatabaseSchemaVersion(),
+          },
           detailStorage: recorder.detailStorageStats(),
           delivery: recorder.readDeliveryAccounting(),
           startupPrivacyRecovery,

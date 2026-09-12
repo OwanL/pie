@@ -14,6 +14,71 @@ Owning specifications: runbook; `docs/ANALYTICS_REWORK_PLAN.md` §§1, 11.6, 17;
 
 ---
 
+## Checkpoint 54 - 2026-09-13T20:08Z, corrected three-unit integration barrier
+
+The frozen three-unit candidate was reviewed at checkout `f9853478ef4ffa2024557f1e7ad0f1f3e77212d3`.
+The first serialized affected run (`C:\dev\scratch\pie-projection-integration-20260913-r01\npm-test-r09.log`)
+completed **4,821 passed, 2 failed, 19 skipped**. One failure exposed a real canonical deletion defect:
+the private-session reverse path subtracted raw `provider_total_tokens` even when accounting had counted
+the normalized total as unknown, leaving negative persisted projection counts/totals. The bounded fix in
+`extension/src/analytics/sqlite-recorder.ts` subtracts `normalized_total_tokens`, preserving raw provider
+values only as provenance. The other failure was the stale static shutdown assertion in
+`extension/test/shared/protocol/sync-contract.test.ts`; it now checks the production `backend.stop` then
+transport `shutdown` in `finally`, followed by backend disposal and analytics-runtime stop.
+
+The focused correction run passed **32/32** (`r09-correction-focused.json`). The corrected extension fast
+suite passed **4,823, 0 failed, 19 skipped** (`extension-fast-r09-correction.json`), all 17 TypeScript
+projects passed (`all-typecheck-r09.json`), and lint passed (`lint-r09.json`). These durable receipts and
+logs are under `C:\dev\scratch\pie-projection-integration-20260913-r01`. The full affected matrix was not
+repeated after the bounded correction; its initial failure remains recorded rather than being overwritten.
+
+P6 mapping remains unchanged: the standalone dashboard/site pipeline is retired, the analysis package
+retains explicit offline `--export` input and DuckDB staging, and the legacy extension export/privacy
+boundary remains fail-closed under canonical authority until the separately gated P7 replacement. No
+runtime publication, activation, restart, live data mutation, or build has occurred. The four user-owned
+model/settings files remain outside the reviewed allowlist.
+
+## Checkpoint 53 - 2026-09-12T19:46Z, actual canonical launch exposes missing recorder schema status
+
+Reviewed milestone **f9853478ef4ffa2024557f1e7ad0f1f3e77212d3** is committed and pushed
+to master. Validation-only build **cbbd2f606fc63d7866a1** completed with matching host/renderer
+identities. Its 41-file output tree SHA-256 is
+`76e66fc93b70b155ded03bba17029cfd1198510286a849d40b737db3fce1f30c`; committed tree
+`77de5435b8481ac403343490967bbb1fa3038ef1`. The output was copied and independently hashed
+into canonical and disabled fixtures. Nothing was published to the live extension.
+
+The canonical cycle `pie-canonical-ui-20260913-r01/cycles/cbbd-canonical-r01` failed startup
+before serving port 2997. The actual extension log reports **Canonical recorder did not report
+a schema version**. Root confirmed a production contract mismatch: AnalyticsRuntime reads
+`stats.recorder.databaseSchemaVersion`, while the real worker status response forwarded only
+`recorder.getStats()`, which does not include that field. Existing runtime tests exercised legacy
+and failure paths but never successful canonical startup. Root added the schema version to the
+worker response and a real recorder/query helper startup regression. All 12 runtime tests now
+pass (`runtime-real-startup-r04.log`), including schema agreement, canonical readiness, backend
+descriptor and actual loaded-generation receipt. The first three test attempts failed in the new
+test loader setup; the final test imports the same tsx loader used by the established helper tests.
+The production fix is still uncommitted and absent from cbbd.
+
+The canonical wrapper enforced its 60-second deadline and cleaned the isolated Code tree;
+the outer cleanup then reported already-exited. Live PIDs 37056/26828/40940 and port 1997
+remained intact. This is an observed automatic fixture failure/cleanup path, not proof that the
+supervising Codex process can recover from a live VS Code restart.
+
+Disabled cycle r01 refused launch because its 4 GiB entry memory requirement was unmet.
+After memory recovered, cycle r02 started the real disabled host on port 2996. All scenarios
+failed in prepared driver logic: the fresh landing page has no composer before New Session,
+and an undefined evidence-path variable obscured the first three scenario results. Root inspected
+the screenshot, corrected the missing variable, and delegated actual driver repair/reruns. No
+successful UI flow is claimed. The cycle cleaned up automatically. Failed receipts/screenshots
+remain under `pie-total-disabled-ui-20260913-r01/cycles/cbbd-disabled-r02` and its runs directory.
+
+A fresh canonical r02 template has been prepared with the landing-page flow corrected and no
+old authority, database, auth or build receipts copied. The next build must include the recorder
+status fix. Delegated source work continues on schema-11 source-chronological lastRun and the
+ordinary-fact shutdown fence. Keep compiled cbbd immutable while the disabled browser owner
+finishes its controlled checks. Full qualification, production activation/storage cutoff and
+completion remain outstanding; continue the active goal.
+
 ## Checkpoint 52 - 2026-09-12T19:24Z, bounded transport shutdown and disabled baseline integration
 
 The current milestone remains uncommitted and unbuilt. Root reviewed the real writer-lane

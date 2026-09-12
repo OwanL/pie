@@ -46,6 +46,7 @@ function observation(options: {
   observationKind?: AnalyticsObservation['observationKind'];
   observedAtMs?: number | string | bigint;
   sourceSequence?: number | string | bigint;
+  generationId?: string;
   fields?: Record<string, unknown>;
   captureSubject?: AnalyticsObservation['captureSubject'];
   stableOriginId?: string;
@@ -55,7 +56,7 @@ function observation(options: {
   const captureSubject = options.captureSubject ?? { kind: 'session' as const, rootSessionId };
   const base = {
     schemaVersion: ANALYTICS_SCHEMA_VERSION,
-    generationId: 'generation-1',
+    generationId: options.generationId ?? 'generation-1',
     producerKind: 'test',
     stableOriginId: options.stableOriginId,
     sourceKey: options.sourceKey,
@@ -315,6 +316,274 @@ test('maintained execution summary counts agent runs across bind and deletion', 
     assert.equal(summary.executionCount, 0);
     assert.equal(summary.settledCount, 0);
     assert.equal(summary.latestSettled, null);
+  } finally {
+    recorder.close();
+    rmSync(temp.root, { recursive: true, force: true });
+  }
+});
+
+test('canonical latest run follows source completion and exact execution identity', () => {
+  const temp = tempDatabase();
+  const recorder = new SqliteAnalyticsRecorder(temp.databasePath);
+  const windowStart = 1_700_000_000_000;
+  const windowEnd = 1_900_000_000_000;
+  const submitRun = (generationId: string, rootSessionId: string, endedAtMs: number): void => {
+    recorder.submit(observation({
+      sourceKey: `${generationId}-begin`, generationId, rootSessionId,
+      entityKey: 'same-execution', observationKind: 'begin',
+      fields: { operationKind: 'agent-run', startedAtMs: endedAtMs - 100 },
+    }));
+    recorder.submit(observation({
+      sourceKey: `${generationId}-end`, generationId, rootSessionId,
+      entityKey: 'same-execution', observationKind: 'end',
+      fields: { operationKind: 'agent-run', endedAtMs, outcome: 'success' },
+    }));
+  };
+  const submitSettlement = (
+    generationId: string,
+    rootSessionId: string,
+    invocationId: string,
+    provider: string,
+    inputTokens: number,
+    outputTokens: number,
+    reportedCostUsd: number,
+  ): void => {
+    recorder.submit(observation({
+      sourceKey: `${generationId}-${invocationId}`,
+      generationId,
+      rootSessionId,
+      invocationId,
+      executionId: 'same-execution',
+      fields: {
+        invocationId,
+        provider,
+        dispatchedModel: `${provider}-model`,
+        purpose: 'conversation',
+        outcome: 'success',
+        inputTokens,
+        outputTokens,
+        inputIncludesCache: false,
+        outputIncludesReasoning: true,
+        cacheChannelsOmittedAsZero: true,
+        reportedCostUsd,
+        coverage: 'known',
+      },
+    }));
+  };
+  try {
+    recorder.prepareProviderDailyProjection('UTC', windowStart, windowEnd);
+    // The newer source completion is delivered first; the older completion is
+    // delivered later, so delivery revision order would select the wrong run.
+    submitRun('generation-new', 'run-new', windowStart + 300);
+    submitSettlement('generation-new', 'run-new', 'new-call', 'new-provider', 0, 5, 0);
+    submitRun('generation-old', 'run-old', windowStart + 200);
+    submitSettlement('generation-old', 'run-old', 'old-call', 'old-provider', 90, 4, 9);
+
+    const aggregate = recorder.readProviderAggregateSummary({
+      todayStartMs: windowStart,
+      todayEndMs: windowEnd,
+      weekStartMs: windowStart,
+      weekEndMs: windowEnd,
+      timeZone: 'UTC',
+      dailyWindowStartMs: windowStart,
+      dailyWindowEndMs: windowEnd,
+    });
+    assert.deepEqual(aggregate.latestRun, {
+      generationId: 'generation-new',
+      executionId: 'same-execution',
+      rootSessionId: 'run-new',
+      sourceKey: 'generation-new-end',
+      outcome: 'success',
+      startedAtMs: windowStart + 200,
+      endedAtMs: windowStart + 300,
+      costUsd: 0,
+      inputTokens: 0,
+      outputTokens: 5,
+      usageCoverage: 'complete',
+      provider: 'new-provider',
+      modelId: 'new-provider-model',
+      attributionCoverage: 'single',
+      turnSeries: [],
+      turnSeriesCoverage: 'unavailable',
+    });
+    const sourcePlan = recorder.executeReadOnlyQuery(`
+      EXPLAIN QUERY PLAN
+      SELECT generation_id, execution_id
+      FROM analytics_execution_states
+      WHERE operation_kind = 'agent-run' AND settled = 1 AND ended_at_ms IS NOT NULL
+      ORDER BY CAST(ended_at_ms AS INTEGER) DESC, generation_id DESC, execution_id DESC
+      LIMIT 1
+    `);
+    const sourceDetails = sourcePlan.rows.map((row) => String(row.detail));
+    assert.ok(sourceDetails.some((detail) => detail.includes('analytics_execution_state_source_end_global_idx')));
+    assert.ok(!sourceDetails.some((detail) => detail.includes('TEMP B-TREE')));
+    const sessionPlan = recorder.executeReadOnlyQuery(`
+      EXPLAIN QUERY PLAN
+      SELECT generation_id, execution_id
+      FROM analytics_execution_states
+      WHERE root_session_id = 'run-new' AND operation_kind = 'agent-run'
+        AND settled = 1 AND ended_at_ms IS NOT NULL
+      ORDER BY CAST(ended_at_ms AS INTEGER) DESC, generation_id DESC, execution_id DESC
+      LIMIT 1
+    `);
+    const sessionDetails = sessionPlan.rows.map((row) => String(row.detail));
+    assert.ok(sessionDetails.some((detail) => detail.includes('analytics_execution_state_source_end_session_idx')));
+    assert.ok(!sessionDetails.some((detail) => detail.includes('TEMP B-TREE')));
+    const providerPlan = recorder.executeReadOnlyQuery(`
+      EXPLAIN QUERY PLAN
+      SELECT provider, normalized_base_input_tokens
+      FROM analytics_provider_settlements
+      WHERE generation_id = 'generation-new' AND execution_id = 'same-execution'
+    `);
+    assert.ok(providerPlan.rows.some((row) => String(row.detail).includes('analytics_provider_settlement_execution_idx')));
+
+    // A private close removes the selected state and its exact provider rows;
+    // the next source-chronological retained run becomes visible.
+    recorder.deleteSession('run-new', 'delete-new-run', windowStart + 500);
+    const afterDelete = recorder.readProviderAggregateSummary({
+      todayStartMs: windowStart,
+      todayEndMs: windowEnd,
+      weekStartMs: windowStart,
+      weekEndMs: windowEnd,
+      timeZone: 'UTC',
+      dailyWindowStartMs: windowStart,
+      dailyWindowEndMs: windowEnd,
+    });
+    assert.equal(afterDelete.latestRun?.generationId, 'generation-old');
+    assert.equal(afterDelete.latestRun?.executionId, 'same-execution');
+    assert.equal(afterDelete.latestRun?.provider, 'old-provider');
+  } finally {
+    recorder.close();
+    rmSync(temp.root, { recursive: true, force: true });
+  }
+});
+
+test('schema v10 to v11 adds source-time and exact execution indexes', () => {
+  const temp = tempDatabase();
+  const recorder = new SqliteAnalyticsRecorder(temp.databasePath);
+  recorder.close();
+  const raw = new DatabaseSync(temp.databasePath);
+  try {
+    raw.exec(`
+      DROP INDEX analytics_execution_state_source_end_global_idx;
+      DROP INDEX analytics_execution_state_source_end_session_idx;
+      DROP INDEX analytics_provider_settlement_execution_idx;
+      PRAGMA user_version = 10;
+    `);
+  } finally {
+    raw.close();
+  }
+
+  let upgraded: SqliteAnalyticsRecorder | undefined;
+  try {
+    upgraded = new SqliteAnalyticsRecorder(temp.databasePath);
+    assert.equal(upgraded.getDatabaseSchemaVersion(), 11);
+    const indexNames = new Set(
+      upgraded.executeReadOnlyQuery(
+        "SELECT name FROM sqlite_master WHERE type = 'index' AND name IN ('analytics_execution_state_source_end_global_idx', 'analytics_execution_state_source_end_session_idx', 'analytics_provider_settlement_execution_idx')",
+      ).rows.map((row) => String(row.name)),
+    );
+    assert.deepEqual(indexNames, new Set([
+      'analytics_execution_state_source_end_global_idx',
+      'analytics_execution_state_source_end_session_idx',
+      'analytics_provider_settlement_execution_idx',
+    ]));
+  } finally {
+    upgraded?.close();
+    rmSync(temp.root, { recursive: true, force: true });
+  }
+});
+
+test('canonical latest run reports unavailable usage when no exact provider rows exist', () => {
+  const temp = tempDatabase();
+  const recorder = new SqliteAnalyticsRecorder(temp.databasePath);
+  try {
+    recorder.prepareProviderDailyProjection('UTC', 1_700_000_000_000, 1_900_000_000_000);
+    recorder.submit(observation({
+      sourceKey: 'run-without-provider-end',
+      generationId: 'generation-no-provider',
+      rootSessionId: 'root-no-provider',
+      entityKey: 'execution-no-provider',
+      observationKind: 'end',
+      fields: { operationKind: 'agent-run', outcome: 'failed', endedAtMs: 1_800_000_000_000 },
+    }));
+    const aggregate = recorder.readProviderAggregateSummary({
+      todayStartMs: 1_700_000_000_000,
+      todayEndMs: 1_900_000_000_000,
+      weekStartMs: 1_700_000_000_000,
+      weekEndMs: 1_900_000_000_000,
+      timeZone: 'UTC',
+      dailyWindowStartMs: 1_700_000_000_000,
+      dailyWindowEndMs: 1_900_000_000_000,
+    });
+    assert.deepEqual(aggregate.latestRun, {
+      generationId: 'generation-no-provider',
+      executionId: 'execution-no-provider',
+      rootSessionId: 'root-no-provider',
+      sourceKey: 'run-without-provider-end',
+      outcome: 'failed',
+      startedAtMs: null,
+      endedAtMs: 1_800_000_000_000,
+      costUsd: null,
+      inputTokens: null,
+      outputTokens: null,
+      usageCoverage: 'unavailable',
+      provider: null,
+      modelId: null,
+      attributionCoverage: 'unknown',
+      turnSeries: [],
+      turnSeriesCoverage: 'unavailable',
+    });
+  } finally {
+    recorder.close();
+    rmSync(temp.root, { recursive: true, force: true });
+  }
+});
+
+test('canonical latest run marks summed channels partial when an int64 sum overflows', () => {
+  const temp = tempDatabase();
+  const recorder = new SqliteAnalyticsRecorder(temp.databasePath);
+  const maxInt64 = '9223372036854775807';
+  const request = {
+    todayStartMs: 1_700_000_000_000,
+    todayEndMs: 1_900_000_000_000,
+    weekStartMs: 1_700_000_000_000,
+    weekEndMs: 1_900_000_000_000,
+    timeZone: 'UTC',
+    dailyWindowStartMs: 1_700_000_000_000,
+    dailyWindowEndMs: 1_900_000_000_000,
+  };
+  try {
+    recorder.prepareProviderDailyProjection('UTC', request.dailyWindowStartMs, request.dailyWindowEndMs);
+    recorder.submit(observation({
+      sourceKey: 'overflow-run-begin', generationId: 'generation-overflow',
+      rootSessionId: 'root-overflow', entityKey: 'execution-overflow', observationKind: 'begin',
+      fields: { operationKind: 'agent-run', startedAtMs: 1_799_999_999_900 },
+    }));
+    recorder.submit(observation({
+      sourceKey: 'overflow-run-end', generationId: 'generation-overflow',
+      rootSessionId: 'root-overflow', entityKey: 'execution-overflow', observationKind: 'end',
+      fields: { operationKind: 'agent-run', endedAtMs: 1_800_000_000_000, outcome: 'success' },
+    }));
+    for (const invocationId of ['overflow-a', 'overflow-b']) {
+      recorder.submit(observation({
+        sourceKey: `${invocationId}-source`, generationId: 'generation-overflow',
+        rootSessionId: 'root-overflow', invocationId, executionId: 'execution-overflow',
+        fields: {
+          invocationId, provider: 'overflow-provider', dispatchedModel: 'overflow-model',
+          purpose: 'conversation', outcome: 'success', inputTokens: maxInt64, outputTokens: 0,
+          inputIncludesCache: false, outputIncludesReasoning: true,
+          cacheChannelsOmittedAsZero: true, reportedCostUsd: 0,
+        },
+      }));
+    }
+    const latestRun = recorder.readProviderAggregateSummary(request).latestRun;
+    assert.equal(latestRun?.inputTokens, null);
+    assert.equal(latestRun?.outputTokens, 0);
+    assert.equal(latestRun?.costUsd, 0);
+    assert.equal(latestRun?.usageCoverage, 'partial');
+    assert.equal(latestRun?.provider, 'overflow-provider');
+    assert.equal(latestRun?.modelId, 'overflow-model');
   } finally {
     recorder.close();
     rmSync(temp.root, { recursive: true, force: true });
@@ -625,7 +894,7 @@ test('v1 upgrade retains facts, detail, deletion fences, accounting, and source 
     }
 
     recorder = new SqliteAnalyticsRecorder(temp.databasePath);
-    assert.equal(recorder.getDatabaseSchemaVersion(), 10);
+    assert.equal(recorder.getDatabaseSchemaVersion(), 11);
     assert.equal(recorder.readDeliveryAccounting().deliveryHistoryCoverage, 'retained_only');
     assert.equal(recorder.countObservations('root-retained'), 1);
     assert.deepEqual(recorder.reconstructDetail('legacy-detail'), { retained: true });
@@ -812,14 +1081,14 @@ test('recorder rejects unsupported newer database schema versions', () => {
   try {
     // One beyond the current schema: an unversioned future database must fail
     // closed rather than be read with today's assumptions.
-    raw.exec('PRAGMA user_version = 11');
+    raw.exec('PRAGMA user_version = 12');
   } finally {
     raw.close();
   }
   try {
     assert.throws(
       () => new SqliteAnalyticsRecorder(temp.databasePath),
-      /Unsupported newer analytics database schema version 11/,
+      /Unsupported newer analytics database schema version 12/,
     );
   } finally {
     rmSync(temp.root, { recursive: true, force: true });
@@ -1442,7 +1711,7 @@ test('logical query surface is native read-only, bounded, and reports snapshot/d
       ['query-a'],
       { maxRows: 2, maxCellBytes: 32 },
     );
-    assert.equal(result.databaseSchemaVersion, 10);
+    assert.equal(result.databaseSchemaVersion, 11);
     assert.equal(result.snapshotWatermark, 3);
     assert.deepEqual(result.generationIds, ['generation-1']);
     assert.equal(result.returnedRows, 2);
@@ -1727,7 +1996,7 @@ test('schema v5 adds the projection-order index without changing stored settleme
 
     const upgraded = new SqliteAnalyticsRecorder(temp.databasePath);
     try {
-      assert.equal(upgraded.getDatabaseSchemaVersion(), 10);
+      assert.equal(upgraded.getDatabaseSchemaVersion(), 11);
       const after = upgraded.readProviderSettlements();
       assert.deepEqual(after.settlements, before.settlements);
       assert.equal(upgraded.readProviderAccountingSummary().inputTokens.knownTotal, knownTotalBefore);

@@ -305,6 +305,21 @@ test('aggregate memo signature includes interior redistribution and new token/we
     aggregateStatsSignature({ ...base, lastRun: { ...lastRun, turnSeries: [{ ms: 1, outputTokens: 5 }, { ms: 2, outputTokens: 9 }] } }),
     'last-run sparkline interior turn values must participate in the memo signature',
   );
+  assert.notEqual(
+    aggregateStatsSignature({ ...base, lastRun: { ...lastRun, usageCoverage: 'partial' } }),
+    aggregateStatsSignature({ ...base, lastRun: { ...lastRun, usageCoverage: undefined } }),
+    'last-run usage coverage changes must participate in the memo signature',
+  );
+  assert.notEqual(
+    aggregateStatsSignature({ ...base, lastRun: { ...lastRun, attributionCoverage: 'mixed' } }),
+    aggregateStatsSignature({ ...base, lastRun: { ...lastRun, attributionCoverage: undefined } }),
+    'last-run attribution coverage changes must participate in the memo signature',
+  );
+  assert.notEqual(
+    aggregateStatsSignature({ ...base, lastRun: { ...lastRun, turnSeriesCoverage: 'unavailable' } }),
+    aggregateStatsSignature({ ...base, lastRun: { ...lastRun, turnSeriesCoverage: undefined } }),
+    'last-run turn coverage changes must participate in the memo signature',
+  );
 });
 
 test('aggregate memo signature includes the work trend and productivity summaries', () => {

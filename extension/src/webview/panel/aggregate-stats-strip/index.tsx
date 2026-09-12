@@ -135,10 +135,10 @@ function AggregateStatsStripView({ stats, deferredTriggers, onOpenDeferredMenu }
             <span
               class="aggregate-strip-seg"
               tabIndex={0}
-              aria-label={`Latest completed run across all sessions: cost ${formatCostAdaptive(lastRun.cost)}, duration ${formatDuration(lastRun.durationMs)}. Focus for model, token, and timing details.`}
+              aria-label={`Latest completed run across all sessions: cost ${formatLastRunCost(lastRun.cost)}, duration ${formatLastRunDuration(lastRun.durationMs)}. Focus for model, token, and timing details.`}
             >
-              last <Num value={lastRun.cost} format={formatCostAdaptive} width={8} class="aggregate-strip-cost" />
-              <Num value={lastRun.durationMs} format={formatDuration} width={4} class="aggregate-strip-dur" />
+              last <span class="aggregate-strip-num aggregate-strip-cost">{formatLastRunCost(lastRun.cost)}</span>
+              <span class="aggregate-strip-num aggregate-strip-dur">{formatLastRunDuration(lastRun.durationMs)}</span>
             </span>
           </Tooltip>
         </>
@@ -319,7 +319,7 @@ export function aggregateStatsSignature(s: AggregateStats): string {
     seriesSignature(s.weekCostSeries),
     s.tokensPerSecondByProvider.map((p) => `${p.provider}:${p.tokensPerSecond}`).join(','),
     s.todayTokensPerSecondByProvider.map((p) => `${p.provider}:${p.tokensPerSecond}`).join(','),
-    s.lastRun ? `${s.lastRun.cost}:${s.lastRun.durationMs}:${s.lastRun.startedAt}:${s.lastRun.endedAt}:${s.lastRun.modelId}:${s.lastRun.provider}:${s.lastRun.inputTokens}:${s.lastRun.outputTokens}:${s.lastRun.turnSeries.map((t) => `${t.ms}:${t.outputTokens}`).join(',')}` : '',
+    s.lastRun ? `${s.lastRun.generationId ?? ''}:${s.lastRun.executionId ?? ''}:${s.lastRun.rootSessionId ?? ''}:${s.lastRun.sourceKey ?? ''}:${s.lastRun.outcome ?? ''}:${s.lastRun.cost}:${s.lastRun.durationMs}:${s.lastRun.startedAt}:${s.lastRun.endedAt}:${s.lastRun.modelId}:${s.lastRun.provider}:${s.lastRun.inputTokens}:${s.lastRun.outputTokens}:${s.lastRun.usageCoverage ?? ''}:${s.lastRun.attributionCoverage ?? ''}:${s.lastRun.turnSeriesCoverage ?? ''}:${s.lastRun.turnSeries.map((t) => `${t.ms}:${t.outputTokens}`).join(',')}` : '',
     s.providerGate.enabled,
     s.providerGate.providers.map((p) => `${p.provider}:${p.activeRequests}:${p.queuedRequests}:${p.maxConcurrentRequests}:${p.afterburnSeconds}:${p.queueWaitSeconds ?? ''}:${p.paused}:${p.pausedUntilMs}:${p.strikeCount}`).join(','),
   ].join('|');
@@ -375,6 +375,26 @@ function formatDuration(ms: number): string {
   if (min < 60) return `${trimDec(min)}m`;
   const hr = min / 60;
   return `${trimDec(hr)}h`;
+}
+
+function formatLastRunCost(cost: number | null): string {
+  return cost === null ? '—' : formatCostAdaptive(cost);
+}
+
+function formatLastRunDuration(durationMs: number | null): string {
+  return durationMs === null ? '—' : formatDuration(durationMs);
+}
+
+function formatLastRunTokens(tokens: number | string | null): string {
+  if (tokens === null) return '—';
+  if (typeof tokens === 'number') return formatCompactTokens(tokens);
+  try {
+    const parsed = BigInt(tokens);
+    const safe = Number(parsed);
+    return Number.isSafeInteger(safe) ? formatCompactTokens(safe) : parsed.toString();
+  } catch {
+    return '—';
+  }
 }
 
 function trimDec(n: number): string {
@@ -677,16 +697,26 @@ export function throughputTooltipNode(s: AggregateStats, source: 'active' | 'rol
 }
 
 function lastRunTooltipNode(r: AggregateLastRun): JSX.Element {
-  const modelLine = r.modelId ? `${r.modelId}  (${r.provider})` : `Provider: ${r.provider}`;
+  const modelLine = r.modelId
+    ? `${r.modelId}  (${r.provider ?? 'provider unavailable'})`
+    : `Provider: ${r.provider ?? 'unavailable'}`;
+  const coverageLine = [
+    r.usageCoverage ? `usage ${r.usageCoverage}` : null,
+    r.attributionCoverage ? `attribution ${r.attributionCoverage}` : null,
+    r.turnSeriesCoverage === 'unavailable' ? 'turn series unavailable' : null,
+  ].filter((line): line is string => line !== null).join(' · ');
+  const sourceBounds = [r.startedAt, r.endedAt].every((value) => value !== null)
+    ? `${r.startedAt} → ${r.endedAt}`
+    : 'source timing unavailable';
   return (
     <div class="rich-tooltip">
       <div class="rich-tooltip-head">
         <span>Latest completed run · all sessions</span>
-        <span class="rich-tooltip-head-value">{formatCostAdaptive(r.cost)}</span>
+        <span class="rich-tooltip-head-value">{formatLastRunCost(r.cost)}</span>
       </div>
-      <div class="rich-tooltip-sub">{formatDuration(r.durationMs)}  ·  ↓{formatCompactTokens(r.inputTokens)} in  ↑{formatCompactTokens(r.outputTokens)} out</div>
-      <Sparkline data={r.turnSeries.map((t) => ({ ms: t.ms, value: t.outputTokens }))} />
-      <div class="rich-tooltip-sub">{[modelLine, `${r.startedAt} → ${r.endedAt}`].join('\n')}</div>
+      <div class="rich-tooltip-sub">{formatLastRunDuration(r.durationMs)}  ·  ↓{formatLastRunTokens(r.inputTokens)} in  ↑{formatLastRunTokens(r.outputTokens)} out</div>
+      {r.turnSeries.length > 0 && <Sparkline data={r.turnSeries.map((t) => ({ ms: t.ms, value: t.outputTokens }))} />}
+      <div class="rich-tooltip-sub">{[modelLine, sourceBounds, coverageLine].filter(Boolean).join('\n')}</div>
     </div>
   );
 }

@@ -501,6 +501,154 @@ test('synchronous fact acknowledgement sees pending ownership registered before 
   } finally { transport.dispose(); }
 });
 
+test('fact disposal reports writer settlement separately from recorder durability', async () => {
+  const sent: AnalyticsTransportPacket[] = [];
+  let settleFact!: (settlement: AnalyticsTransportFrameSettlement) => void;
+  const transport = new AnalyticsWorkerTransport({
+    sendAnalyticsFrame: (packet, onSettled) => {
+      sent.push(packet);
+      if (packet.kind === 'fact' && onSettled) settleFact = onSettled;
+      return true;
+    },
+    requestAnalyticsSubjectRebind: async (subject) => subject,
+  }, {
+    generationId: 'generation-1', captureSubject: { kind: 'session', rootSessionId: 'root-1' }, buildId: 'build-1',
+  }, 'worker-1:1');
+  transport.install();
+  try {
+    const bridge = (globalThis as unknown as Record<PropertyKey, unknown>)[ANALYTICS_RUNTIME_BRIDGE_KEY] as InstalledAnalyticsRuntimeBridge;
+    bridge.submitObservation(observation('root-1'));
+    const disposal = transport.dispose();
+    settleFact({ status: 'sent' });
+    const report = await disposal;
+    assert.equal(sent[0]?.kind, 'fact');
+    assert.deepEqual(report, {
+      status: 'drained',
+      facts: {
+        admitted: 1,
+        writerSent: 1,
+        rejected: 0,
+        failed: 0,
+        unsettledTimeout: 0,
+        durableAcksObserved: 0,
+      },
+    }, 'writer settlement must not be reported as recorder durability');
+  } finally {
+    await transport.dispose();
+  }
+});
+
+test('fact disposal keeps duplicate delivery IDs as independent writer admissions', async () => {
+  const sent: AnalyticsTransportPacket[] = [];
+  const callbacks: Array<(settlement: AnalyticsTransportFrameSettlement) => void> = [];
+  const transport = new AnalyticsWorkerTransport({
+    sendAnalyticsFrame: (packet, onSettled) => {
+      sent.push(packet);
+      if (packet.kind === 'fact' && onSettled) callbacks.push(onSettled);
+      return true;
+    },
+    requestAnalyticsSubjectRebind: async (subject) => subject,
+  }, {
+    generationId: 'generation-1', captureSubject: { kind: 'session', rootSessionId: 'root-1' }, buildId: 'build-1',
+  }, 'worker-1:1');
+  transport.install();
+  try {
+    const bridge = (globalThis as unknown as Record<PropertyKey, unknown>)[ANALYTICS_RUNTIME_BRIDGE_KEY] as InstalledAnalyticsRuntimeBridge;
+    bridge.submitObservation(observation('root-1'));
+    bridge.submitObservation(observation('root-1'));
+    assert.equal(callbacks.length, 2, 'replayed facts must retain two writer callback tokens');
+    callbacks[0]!({ status: 'sent' });
+    callbacks[1]!({ status: 'sent' });
+    for (const packet of sent) {
+      assert.equal(packet.kind, 'fact');
+      transport.acknowledge({
+        version: ANALYTICS_TRANSPORT_VERSION,
+        deliveryId: packet.deliveryId,
+        generationId: packet.generationId,
+        status: 'durable',
+        producerReconciliation: [{
+          producerIdentity: analyticsProducerIdentity('generation-1', 'subagent', 'origin-1'),
+          contiguousWatermark: 1,
+          highestObservedSequence: 1,
+          visibleGaps: [],
+          pendingReceiptCount: 0,
+        }],
+      });
+    }
+    assert.equal(sent.length, 2);
+    const disposal = transport.dispose();
+    const report = await disposal;
+    assert.equal(report.status, 'drained');
+    assert.equal(report.facts.admitted, 2);
+    assert.equal(report.facts.writerSent, 2);
+    assert.equal(report.facts.durableAcksObserved, 2, 'each duplicate delivery receives its own durable ACK');
+    assert.equal(report.facts.unsettledTimeout, 0);
+  } finally {
+    await transport.dispose();
+  }
+});
+
+test('fact disposal reports an explicit timeout and ignores a late writer callback', async () => {
+  const callbacks: Array<(settlement: AnalyticsTransportFrameSettlement) => void> = [];
+  const originalSetTimeout = globalThis.setTimeout;
+  let deadlineCallback: (() => void) | undefined;
+  globalThis.setTimeout = ((callback: (...args: any[]) => void, delay?: number) => {
+    assert.equal(delay, 1_000, 'fact disposal must use a finite bounded deadline');
+    deadlineCallback = callback as () => void;
+    return 0 as unknown as ReturnType<typeof setTimeout>;
+  }) as typeof setTimeout;
+  const transport = new AnalyticsWorkerTransport({
+    sendAnalyticsFrame: (packet, onSettled) => {
+      if (packet.kind === 'fact' && onSettled) callbacks.push(onSettled);
+      return true;
+    },
+    requestAnalyticsSubjectRebind: async (subject) => subject,
+  }, {
+    generationId: 'generation-1', captureSubject: { kind: 'session', rootSessionId: 'root-1' }, buildId: 'build-1',
+  }, 'worker-1:1');
+  transport.install();
+  try {
+    const bridge = (globalThis as unknown as Record<PropertyKey, unknown>)[ANALYTICS_RUNTIME_BRIDGE_KEY] as InstalledAnalyticsRuntimeBridge;
+    bridge.submitObservation(observation('root-1'));
+    const disposal = transport.dispose();
+    assert.ok(deadlineCallback, 'fact disposal must install a deadline');
+    deadlineCallback!();
+    const report = await disposal;
+    assert.equal(report.status, 'timed-out');
+    assert.equal(report.facts.admitted, 1);
+    assert.equal(report.facts.writerSent, 0);
+    assert.equal(report.facts.unsettledTimeout, 1);
+    callbacks[0]!({ status: 'sent' });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(report.facts.writerSent, 0, 'late callbacks cannot mutate the terminal report');
+  } finally {
+    deadlineCallback?.();
+    globalThis.setTimeout = originalSetTimeout;
+    await transport.dispose();
+  }
+});
+
+test('fact disposal records explicit writer admission rejection', async () => {
+  const transport = new AnalyticsWorkerTransport({
+    sendAnalyticsFrame: () => false,
+    requestAnalyticsSubjectRebind: async (subject) => subject,
+  }, {
+    generationId: 'generation-1', captureSubject: { kind: 'session', rootSessionId: 'root-1' }, buildId: 'build-1',
+  }, 'worker-1:1');
+  transport.install();
+  try {
+    const bridge = (globalThis as unknown as Record<PropertyKey, unknown>)[ANALYTICS_RUNTIME_BRIDGE_KEY] as InstalledAnalyticsRuntimeBridge;
+    assert.throws(() => bridge.submitObservation(observation('root-1')), /rejected fact/);
+    const report = await transport.dispose();
+    assert.equal(report.status, 'drained');
+    assert.equal(report.facts.admitted, 0);
+    assert.equal(report.facts.rejected, 1);
+    assert.equal(report.facts.unsettledTimeout, 0);
+  } finally {
+    await transport.dispose();
+  }
+});
+
 test('a sender that throws even for abort does not retain failed detail admission', () => {
   const transport = new AnalyticsWorkerTransport({
     sendAnalyticsFrame: () => { throw new Error('transport unavailable'); },
@@ -664,6 +812,7 @@ test('disposal abort follows a queued detail start in the real writer lane order
   try {
     const bridge = (globalThis as unknown as Record<PropertyKey, unknown>)[ANALYTICS_RUNTIME_BRIDGE_KEY] as InstalledAnalyticsRuntimeBridge;
     bridge.submitDetail(detail('root-1'));
+    bridge.submitObservation(observation('root-1', 'mixed-fact', 'mixed-origin'));
     assert.deepEqual(target.frames.map((frame) => frame.kind), ['response'], 'detail start is queued behind the active writer frame');
 
     const disposed = transport.dispose();
@@ -675,7 +824,15 @@ test('disposal abort follows a queued detail start in the real writer lane order
     assert.deepEqual(target.frames.map((frame) => frame.kind), ['response', 'analytics.capture', 'analytics.capture']);
     assert.equal((target.frames[2]!.packet as { kind: string }).kind, 'detail.abort');
     target.callbacks.shift()!(null);
-    await disposed;
+    assert.deepEqual(target.frames.map((frame) => frame.kind), [
+      'response', 'analytics.capture', 'analytics.capture', 'analytics.capture',
+    ]);
+    assert.equal((target.frames[3]!.packet as { kind: string }).kind, 'fact');
+    target.callbacks.shift()!(null);
+    const report = await disposed;
+    assert.equal(report.status, 'drained');
+    assert.equal(report.facts.admitted, 1);
+    assert.equal(report.facts.writerSent, 1);
     writer.enqueue({
       ...frameBase,
       kind: 'response',
@@ -684,7 +841,7 @@ test('disposal abort follows a queued detail start in the real writer lane order
       result: { kind: 'shutting-down' },
     } as never);
     assert.deepEqual(target.frames.map((frame) => frame.kind), [
-      'response', 'analytics.capture', 'analytics.capture', 'response',
+      'response', 'analytics.capture', 'analytics.capture', 'analytics.capture', 'response',
     ], 'shutdown response is admitted only after the ordered abort settles');
   } finally {
     await transport.dispose();
