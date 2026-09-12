@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statfsSync, statSync, truncateSync, writeFileSync } from 'node:fs';
+import { createReadStream, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statfsSync, statSync, truncateSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import os from 'node:os';
 import path from 'node:path';
@@ -339,6 +339,27 @@ function captureCapacitySnapshot(name, label) {
   };
   capacityComponentSnapshots[name] = snapshot;
   return snapshot;
+}
+
+/** Report whether `filePath` contains `needle`, streamed in bounded chunks.
+ *
+ * The 1M database family is several gigabytes, past Node's 2 GiB Buffer ceiling,
+ * so a whole-file readFileSync throws RangeError instead of performing the
+ * check. Chunks overlap by `needle.length - 1` bytes so a sentinel straddling a
+ * chunk boundary is still found. */
+async function fileContainsBytes(filePath, needle) {
+  const overlap = Math.max(0, needle.length - 1);
+  const stream = createReadStream(filePath, { highWaterMark: 4 * 1024 * 1024 });
+  let carry = Buffer.alloc(0);
+  for await (const chunk of stream) {
+    const window = carry.length > 0 ? Buffer.concat([carry, chunk]) : chunk;
+    if (window.includes(needle)) {
+      stream.destroy();
+      return true;
+    }
+    carry = overlap > 0 ? window.subarray(Math.max(0, window.length - overlap)) : Buffer.alloc(0);
+  }
+  return false;
 }
 
 function nearestExistingDirectory(target) {
@@ -1588,11 +1609,15 @@ try {
     + ` backlog=${JSON.stringify(lateWriter.backlog)}`
     + ` lastDeliveryError=${lateDeliveryError ?? 'none'}`,
   );
+  const sentinelBytes = Buffer.from(privacySentinel);
   for (const suffix of ['', '-wal', '-shm']) {
     const candidate = `${databasePath}${suffix}`;
-    if (existsSync(candidate)) {
-      assert.equal(readFileSync(candidate).includes(Buffer.from(privacySentinel)), false, `${suffix || 'main'} retained private bytes`);
-    }
+    if (!existsSync(candidate)) continue;
+    // Bounded streaming scan, not readFileSync: the 1M database family exceeds
+    // Node's 2 GiB Buffer ceiling, which made this assertion throw RangeError
+    // instead of checking for retained private bytes.
+    const retained = await fileContainsBytes(candidate, sentinelBytes);
+    assert.equal(retained, false, `${suffix || 'main'} retained private bytes`);
   }
 
   // The rate conditions spawn up to four concurrent recorder helpers. On this
