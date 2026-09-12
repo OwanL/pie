@@ -140,7 +140,7 @@ function prepareWriterStatement(
 }
 
 const sqlite = createRequire(process.execPath)('node:sqlite') as SqliteModule;
-const DATABASE_SCHEMA_VERSION = 6;
+const DATABASE_SCHEMA_VERSION = 7;
 const BUSY_TIMEOUT_MS = 5_000;
 const MAX_PENDING_SEQUENCES_PER_PRODUCER = 4_096;
 const DEFAULT_QUERY_ROWS = 200;
@@ -1003,6 +1003,29 @@ function migrateV4(database: SqliteDatabase): void {
  * 250,000 settlements: the bounded read dropped from 30.7 ms to 0.8 ms once the
  * matching expression index existed, and the temp B-tree disappeared. This is
  * an additive index only; no stored value or ordering semantics change. */
+/** Serve the private-close copy-scrub predicate from a partial index.
+ *
+ * `deleteSession` locates copy-sourced observations with
+ * `entity_kind = 'copy' AND json_extract(payload_json, '$.fields.sourceSessionId') = ?`
+ * and runs it **twice** — once to sum the removed payload bytes for the
+ * maintained counter, then again as the DELETE. `entity_kind` had no index, so
+ * both were full scans of every observation. At 1M facts the two scans plus the
+ * surrounding work exceeded the supervisor's 30 s IPC bound, which killed the
+ * worker mid-delete (the real cause surfaced only after the supervisor stopped
+ * reporting a bare SIGTERM).
+ *
+ * The predicate can never match a non-copy row, so the index is **partial** and
+ * stays a small fraction of the table regardless of total history.
+ * `json_extract` remains a residual filter within the copy rows, which are few.
+ * Additive only: no stored value, row count or ordering changes. */
+function ensureCopyScrubIndex(database: SqliteDatabase): void {
+  database.exec(`
+    CREATE INDEX IF NOT EXISTS analytics_copy_scrub_idx
+      ON analytics_observations(entity_kind, root_session_id)
+      WHERE entity_kind = 'copy';
+  `);
+}
+
 /** Maintain a running total of stored fact payload bytes.
  *
  * `readStorageSummary` reported `factsLogicalBytes` by running
@@ -1068,6 +1091,12 @@ function migrateV5(database: SqliteDatabase): void {
   ensureFactByteCounter(database);
 }
 
+/** Schema v6 -> v7: the partial copy-scrub index described on
+ * {@link ensureCopyScrubIndex}. Additive only. */
+function migrateV6(database: SqliteDatabase): void {
+  ensureCopyScrubIndex(database);
+}
+
 function databaseTransaction<T>(database: SqliteDatabase, operation: () => T): T {
   database.exec('BEGIN IMMEDIATE');
   try {
@@ -1113,6 +1142,7 @@ function initializeSchema(database: SqliteDatabase, readOnly = false): void {
       migrateV3(database, 'complete');
       migrateV4(database);
       migrateV5(database);
+      migrateV6(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
       return;
     }
@@ -1121,6 +1151,7 @@ function initializeSchema(database: SqliteDatabase, readOnly = false): void {
       migrateV3(database, 'retained_only');
       migrateV4(database);
       migrateV5(database);
+      migrateV6(database);
       backfillV2(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
       return;
@@ -1129,22 +1160,31 @@ function initializeSchema(database: SqliteDatabase, readOnly = false): void {
       migrateV3(database, 'retained_only');
       migrateV4(database);
       migrateV5(database);
+      migrateV6(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
       return;
     }
     if (version === 3) {
       migrateV4(database);
       migrateV5(database);
+      migrateV6(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
       return;
     }
     if (version === 4) {
       migrateV5(database);
+      migrateV6(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
       return;
     }
     if (version === 5) {
       migrateV5(database);
+      migrateV6(database);
+      database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
+      return;
+    }
+    if (version === 6) {
+      migrateV6(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
     }
   });

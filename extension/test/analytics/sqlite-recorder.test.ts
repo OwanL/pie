@@ -384,7 +384,7 @@ test('v1 upgrade retains facts, detail, deletion fences, accounting, and source 
     }
 
     recorder = new SqliteAnalyticsRecorder(temp.databasePath);
-    assert.equal(recorder.getDatabaseSchemaVersion(), 6);
+    assert.equal(recorder.getDatabaseSchemaVersion(), 7);
     assert.equal(recorder.readDeliveryAccounting().deliveryHistoryCoverage, 'retained_only');
     assert.equal(recorder.countObservations('root-retained'), 1);
     assert.deepEqual(recorder.reconstructDetail('legacy-detail'), { retained: true });
@@ -571,14 +571,14 @@ test('recorder rejects unsupported newer database schema versions', () => {
   try {
     // One beyond the current schema: an unversioned future database must fail
     // closed rather than be read with today's assumptions.
-    raw.exec('PRAGMA user_version = 7');
+    raw.exec('PRAGMA user_version = 8');
   } finally {
     raw.close();
   }
   try {
     assert.throws(
       () => new SqliteAnalyticsRecorder(temp.databasePath),
-      /Unsupported newer analytics database schema version 7/,
+      /Unsupported newer analytics database schema version 8/,
     );
   } finally {
     rmSync(temp.root, { recursive: true, force: true });
@@ -1167,7 +1167,7 @@ test('logical query surface is native read-only, bounded, and reports snapshot/d
       ['query-a'],
       { maxRows: 2, maxCellBytes: 32 },
     );
-    assert.equal(result.databaseSchemaVersion, 6);
+    assert.equal(result.databaseSchemaVersion, 7);
     assert.equal(result.snapshotWatermark, 3);
     assert.deepEqual(result.generationIds, ['generation-1']);
     assert.equal(result.returnedRows, 2);
@@ -1452,7 +1452,7 @@ test('schema v5 adds the projection-order index without changing stored settleme
 
     const upgraded = new SqliteAnalyticsRecorder(temp.databasePath);
     try {
-      assert.equal(upgraded.getDatabaseSchemaVersion(), 6);
+      assert.equal(upgraded.getDatabaseSchemaVersion(), 7);
       const after = upgraded.readProviderSettlements();
       assert.deepEqual(after.settlements, before.settlements);
       assert.equal(upgraded.readProviderAccountingSummary().inputTokens.knownTotal, knownTotalBefore);
@@ -1508,6 +1508,46 @@ test('the maintained fact-byte counter equals the full-table aggregate across in
     assert.equal(recorder.countObservations(), 2);
   } finally {
     raw.close();
+    recorder.close();
+    rmSync(temp.root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  }
+});
+
+test('the partial copy-scrub index serves the private-close predicate', () => {
+  const temp = tempDatabase();
+  const recorder = new SqliteAnalyticsRecorder(temp.databasePath);
+  try {
+    // A copy observation naming a source session is what deleteSession scrubs.
+    recorder.submit(observation({
+      sourceKey: 'copy:operation-scrub',
+      rootSessionId: 'copy-root',
+      entityKind: 'copy',
+      entityKey: 'copy-root',
+      observationKind: 'observation',
+      fields: {
+        copySessionId: 'copy-root',
+        sourceSessionId: 'scrubbed-source-root',
+        sourceBranchId: 'source:B',
+        operationId: 'operation-scrub',
+        inheritanceCoverage: 'known',
+      },
+    }));
+
+    const predicate = "entity_kind = 'copy' AND json_extract(payload_json, '$.fields.sourceSessionId') = 'scrubbed-source-root'";
+    const plan = recorder.executeReadOnlyQuery(
+      `EXPLAIN QUERY PLAN SELECT COALESCE(SUM(LENGTH(payload_json)), 0) AS bytes `
+      + `FROM analytics_observations WHERE ${predicate}`,
+    );
+    const details = plan.rows.map((row) => String(row.detail));
+    assert.ok(
+      details.some((detail) => detail.includes('analytics_copy_scrub_idx')),
+      `expected the partial copy index to serve the scrub scan, got ${JSON.stringify(details)}`,
+    );
+    assert.ok(
+      !details.some((detail) => detail.includes('SCAN analytics_observations')),
+      `expected no full-table scan, got ${JSON.stringify(details)}`,
+    );
+  } finally {
     recorder.close();
     rmSync(temp.root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }

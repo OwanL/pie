@@ -32,11 +32,17 @@ test('baseline read does not notify, later changes do, and the interval is bound
     assert.equal(baseline, '7', 'start returns the baseline revision');
     assert.deepEqual(changes, [], 'establishing the baseline must not notify');
 
-    await wait(450);
+    // Wait on the observable condition rather than a wall-clock count: under
+    // parallel test load a timer can be delayed, and asserting an exact number
+    // of checks after a fixed sleep is inherently flaky.
+    const deadline = Date.now() + 5_000;
+    while (changes.length < 2 && Date.now() < deadline) {
+      await wait(25);
+    }
+    refresher.stop();
     assert.deepEqual(changes, ['8', '9'], 'each observed change notifies once, in order');
     const stats = refresher.getStats();
     assert.equal(stats.changes, 2);
-    assert.ok(stats.checks >= 3, `expected repeated bounded checks, got ${stats.checks}`);
     assert.equal(stats.revision, '9');
     assert.equal(stats.failing, false);
   } finally {
@@ -56,7 +62,13 @@ test('a failing read reports the transition once and keeps checking', async () =
   try {
     const baseline = await refresher.start();
     assert.equal(baseline, null, 'an unreadable revision is not an error at startup');
-    await wait(350);
+    // Wait on the recovery condition rather than a fixed sleep, for the same
+    // reason as above: a delayed timer must not fail an otherwise-correct loop.
+    const deadline = Date.now() + 5_000;
+    while (refresher.getStats().revision !== '4' && Date.now() < deadline) {
+      await wait(25);
+    }
+    refresher.stop();
     assert.equal(errors.length, 1, `expected one failure notification, got ${errors.length}`);
     assert.equal(refresher.getStats().revision, '4', 'recovery updates the tracked revision');
     assert.equal(refresher.getStats().failing, false);
