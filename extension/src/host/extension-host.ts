@@ -67,6 +67,7 @@ import { deriveSessionNameFromText } from '../shared/session-name';
 import { isPendingTabPath } from '../shared/tab-behavior';
 import { appendPieLog } from './util/pie-log';
 import { CanonicalAnalyticsCapture } from '../analytics/canonical-capture.js';
+import { ActivationStore } from '../analytics/activation-store.js';
 
 
 export const SIDEBAR_VIEW_TYPE = 'pie.sessionsView';
@@ -154,11 +155,22 @@ export class PieExtension implements vscode.Disposable {
       context.globalStorageUri.fsPath,
     );
 
-    // Production producer seams are always constructed, but the canonical
-    // authority remains deliberately disabled until the P2b/P5/P7 cutover
-    // gates provide a generation and recorder sink.
+    // Production producer seams are always constructed. The authority is read
+    // from the validated activation manifest rather than hardcoded, so a
+    // recorded activation takes effect on the next host start and an absent
+    // manifest stays legacy. A malformed manifest throws out of this
+    // constructor, which fails host startup closed instead of capturing into an
+    // authority the host cannot read back.
+    const dataPaths = resolvePieDataPaths({
+      dataDir: process.env.PIE_DATA_DIR,
+      agentDir: process.env.PI_CODING_AGENT_DIR,
+    });
+    const activation = new ActivationStore({ stateDir: dataPaths.stateDir }).read();
     const analyticsCapture = new CanonicalAnalyticsCapture({
-      authority: 'legacy',
+      authority: activation.manifest?.activeGeneration ? 'canonical' : 'legacy',
+      ...(activation.manifest?.activeGeneration
+        ? { generationId: activation.manifest.activeGeneration.identity.generationId }
+        : {}),
       workspaceId: getWorkspaceAnalyticsId(context),
       buildId: `pie-${String(context.extension.packageJSON.version ?? 'unknown')}`,
       processGeneration: crypto.randomUUID(),
@@ -168,10 +180,8 @@ export class PieExtension implements vscode.Disposable {
     // (one disposable helper fork per query). The canonical data root shares
     // the backend's explicit-failure resolution; queries against an absent
     // database fail explicitly instead of falling back to legacy stores.
-    const dataPaths = resolvePieDataPaths({
-      dataDir: process.env.PIE_DATA_DIR,
-      agentDir: process.env.PI_CODING_AGENT_DIR,
-    });
+    // Construction is unconditional; StatsService withholds the model unless
+    // canonical authority is active, so no consumer can read it early.
     const analyticsReadModel = new CanonicalAnalyticsReadModel({
       databasePath: canonicalAnalyticsDatabasePath(dataPaths.analyticsDir),
       workerScript: path.join(runtimeOutputDirectory(context), 'analytics-query-worker.js'),
