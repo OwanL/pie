@@ -49,6 +49,7 @@ export type AnalyticsDiscoveryReasonCode =
   | 'host-state-unsupported'
   | 'host-state-stopped'
   | 'host-process-missing'
+  | 'host-process-ambiguous'
   | 'host-runtime-lease-missing'
   | 'host-runtime-lease-ambiguous'
   | 'runtime-lease-process-missing'
@@ -63,7 +64,9 @@ export type AnalyticsDiscoveryReasonCode =
   | 'backend-analytics-host-mismatch'
   | 'backend-analytics-generation-unavailable'
   | 'backend-analytics-generation-mismatch'
-  | 'backend-owner-identity-invalid';
+  | 'backend-owner-identity-invalid'
+  | 'backend-process-ambiguous'
+  | 'process-pid-ambiguous';
 
 export interface AnalyticsDiscoveryReason {
   code: AnalyticsDiscoveryReasonCode;
@@ -161,6 +164,20 @@ function boundedIdentity(value: unknown): RuntimeGenerationIdentity | undefined 
 
 function sameRuntimeIdentity(left: RuntimeGenerationIdentity, right: RuntimeGenerationIdentity): boolean {
   return left.publisher === right.publisher && left.name === right.name && left.version === right.version;
+}
+
+function duplicateProcessIds<T>(
+  entries: readonly T[],
+  processIdOf: (entry: T) => number,
+): Set<number> {
+  const seen = new Set<number>();
+  const duplicates = new Set<number>();
+  for (const entry of entries) {
+    const processId = processIdOf(entry);
+    if (seen.has(processId)) duplicates.add(processId);
+    else seen.add(processId);
+  }
+  return duplicates;
 }
 
 function parseSafeArgument(commandLine: string, name: string): string | undefined {
@@ -307,7 +324,6 @@ export function parseWindowsProcessOwnerRows(rows: readonly unknown[]): ProcessO
   const selectedRows = rows.slice(0, MAX_PROCESS_ROWS) as RawWindowsProcessRecord[];
   if (rows.length > MAX_PROCESS_ROWS) reasons.push(reason('process-census-truncated'));
   const processes: ProcessBirthEvidence[] = [];
-  const byPid = new Map<number, ProcessBirthEvidence>();
   for (const row of selectedRows) {
     const processId = Number(row?.ProcessId);
     if (!isPositivePid(processId)) continue;
@@ -318,13 +334,25 @@ export function parseWindowsProcessOwnerRows(rows: readonly unknown[]): ProcessO
       : parseWindowsProcessCreationDate(row.CreationDate);
     const evidence = { processId, processCreatedAtMs };
     processes.push(evidence);
-    byPid.set(processId, evidence);
   }
+  const ambiguousProcessPids = duplicateProcessIds(processes, (entry) => entry.processId);
+  for (const processId of ambiguousProcessPids) {
+    reasons.push(reason('process-pid-ambiguous', { processId }));
+  }
+  // Do not let a duplicate PID select whichever census row happened to be
+  // visited last. Ambiguous rows remain returned as evidence, but are not
+  // eligible to corroborate a backend owner.
+  const byPid = new Map(
+    processes
+      .filter((entry) => !ambiguousProcessPids.has(entry.processId))
+      .map((entry) => [entry.processId, entry] as const),
+  );
   const backendOwners: BackendProcessOwnerEvidence[] = [];
   for (const row of selectedRows) {
     const processId = Number(row?.ProcessId);
     const commandLine = typeof row?.CommandLine === 'string' ? row.CommandLine : undefined;
     if (!isPositivePid(processId) || !commandLine || !isBackendCommand(commandLine)) continue;
+    if (ambiguousProcessPids.has(processId)) continue;
     const hostProcessId = parsePositiveArgument(commandLine, '--hostPid');
     const backendGeneration = parsePositiveArgument(commandLine, '--backendGeneration');
     if (!hostProcessId || !backendGeneration) {
@@ -446,11 +474,20 @@ export async function discoverAnalyticsHostWriters(
     ...leaseResult.reasons,
     ...processResult.reasons,
   ];
+  const ambiguousHostPids = duplicateProcessIds(registryResult.hosts, (entry) => entry.processId);
+  for (const processId of ambiguousHostPids) {
+    reasons.push(reason('host-process-ambiguous', { processId }));
+  }
   const hostsByPid = new Map<number, AnalyticsHostRecord>();
-  for (const host of registryResult.hosts) hostsByPid.set(host.processId, host);
+  for (const host of registryResult.hosts) {
+    if (!ambiguousHostPids.has(host.processId)) hostsByPid.set(host.processId, host);
+  }
   const leasesByPid = new Map<number, RuntimeLeaseEvidence[]>();
   for (const lease of leaseResult.leases) {
     if (!sameRuntimeIdentity(lease.identity, options.runtimeIdentity)) {
+      reasons.push(reason('runtime-lease-identity-mismatch', {
+        processId: lease.processId, runtimeGeneration: lease.runtimeGeneration,
+      }));
       continue;
     }
     const existing = leasesByPid.get(lease.processId) ?? [];
@@ -462,9 +499,32 @@ export async function discoverAnalyticsHostWriters(
       }));
     }
   }
-  const processesByPid = new Map(processResult.processes.map((entry) => [entry.processId, entry]));
+  const ambiguousProcessPids = duplicateProcessIds(processResult.processes, (entry) => entry.processId);
+  for (const processId of ambiguousProcessPids) {
+    reasons.push(reason('process-pid-ambiguous', { processId }));
+  }
+  const processesByPid = new Map(
+    processResult.processes
+      .filter((entry) => !ambiguousProcessPids.has(entry.processId))
+      .map((entry) => [entry.processId, entry] as const),
+  );
+  const ambiguousBackendPids = duplicateProcessIds(
+    processResult.backendOwners,
+    (entry) => entry.backendProcessId,
+  );
+  const ambiguousBackendPidsByHost = new Map<number, Set<number>>();
+  for (const backend of processResult.backendOwners) {
+    if (!ambiguousBackendPids.has(backend.backendProcessId)) continue;
+    const processIds = ambiguousBackendPidsByHost.get(backend.hostProcessId) ?? new Set<number>();
+    processIds.add(backend.backendProcessId);
+    ambiguousBackendPidsByHost.set(backend.hostProcessId, processIds);
+  }
+  for (const processId of ambiguousBackendPids) {
+    reasons.push(reason('backend-process-ambiguous', { processId }));
+  }
   const backendsByHostPid = new Map<number, BackendProcessOwnerEvidence[]>();
   for (const backend of processResult.backendOwners) {
+    if (ambiguousBackendPids.has(backend.backendProcessId)) continue;
     const existing = backendsByHostPid.get(backend.hostProcessId) ?? [];
     existing.push(backend);
     backendsByHostPid.set(backend.hostProcessId, existing);
@@ -484,9 +544,14 @@ export async function discoverAnalyticsHostWriters(
     if (host.state === 'stopping') addHostReason(reason('host-state-stopping'));
     if (host.state === 'unsupported') addHostReason(reason('host-state-unsupported'));
     if (host.state === 'stopped') addHostReason(reason('host-state-stopped'));
+    if (ambiguousHostPids.has(host.processId)) {
+      addHostReason(reason('host-process-ambiguous', { processId: host.processId }));
+    }
 
     const process = processesByPid.get(host.processId);
-    if (!process) addHostReason(reason('host-process-missing', { processId: host.processId }));
+    if (ambiguousProcessPids.has(host.processId)) {
+      addHostReason(reason('process-pid-ambiguous', { processId: host.processId }));
+    } else if (!process) addHostReason(reason('host-process-missing', { processId: host.processId }));
     else if (process.processCreatedAtMs === null) addHostReason(reason('process-birth-unavailable', { processId: host.processId }));
 
     const leases = leasesByPid.get(host.processId) ?? [];
@@ -501,7 +566,13 @@ export async function discoverAnalyticsHostWriters(
     }
 
     const backends = backendsByHostPid.get(host.processId) ?? [];
-    if (backends.length === 0) addHostReason(reason('host-backend-owner-missing', { processId: host.processId }));
+    const ambiguousBackendIds = ambiguousBackendPidsByHost.get(host.processId) ?? new Set<number>();
+    for (const processId of ambiguousBackendIds) {
+      addHostReason(reason('backend-process-ambiguous', { processId }));
+    }
+    if (backends.length === 0 && ambiguousBackendIds.size === 0) {
+      addHostReason(reason('host-backend-owner-missing', { processId: host.processId }));
+    }
     if (backends.length > 1) addHostReason(reason('host-backend-owner-ambiguous', { processId: host.processId }));
     const backend = backends.length === 1 ? backends[0] : undefined;
     if (backend) {

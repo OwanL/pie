@@ -135,6 +135,20 @@ test('buildCurrentSummary falls back to startup cwd and normalizes thinking leve
   assert.equal(summary.thinkingLevel, 'max');
 });
 
+test('buildCurrentSummary forwards the stable SDK session identity', () => {
+  const summary = buildCurrentSummary(makeContext({
+    session: {
+      ...makeContext().session,
+      sessionManager: {
+        ...makeContext().session.sessionManager,
+        getSessionId: () => '  stable-session-id  ',
+      },
+    },
+  }), '/startup');
+
+  assert.equal(summary.sessionId, 'stable-session-id');
+});
+
 test('listAvailableModels derives input kinds and tolerates missing or failing registries', () => {
   assert.deepEqual(listAvailableModels(undefined), []);
 

@@ -4221,3 +4221,18 @@ baseline hashes are unchanged; the two additional observed lockfiles are recorde
 manifest. The post-freeze `query-client-lifecycle.test.ts` terminal-state guard is a TypeScript
 narrowing-only test change; build/type validation passed and runtime behavior is unchanged. No
 authority cutover or publication is implied by this checkpoint.
+
+## Release recovery checkpoint: activity projection deferred
+
+The full analytics rework remains incomplete. The current user priority is a
+usable release build before the available work quota is exhausted; manual UI
+rehearsal is skipped and the resulting build still requires user validation.
+The unfinished schema-12 activity projection unit was removed from the release
+candidate after review found six defects. Its exact working-tree files and
+binary diff are preserved at
+`C:\dev\scratch\pie-deferred-activity-20260913-r01\receipt.json` and
+`C:\dev\scratch\pie-deferred-activity-20260913-r01\activity.diff`.
+
+P7 activation and all-host handoff gates remain closed. No canonical activation,
+live Code/Codex restart, storage cutoff, or authority cutover is implied by this
+recovery build.

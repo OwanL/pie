@@ -453,6 +453,7 @@ export function buildCurrentSummary(
 ): SessionSummary {
   const messageCount = context.session.messages.length ?? 0;
   const { name, isPlaceholder } = deriveSessionName(context);
+  const sessionId = context.session.sessionManager.getSessionId?.()?.trim();
   const summary: SessionSummary = {
     path: context.sessionPath,
     cwd: context.session.sessionManager.getCwd() ?? startupCwd,
@@ -463,6 +464,7 @@ export function buildCurrentSummary(
     modelId: context.session.model?.id,
     provider: resolveActiveModel(context).provider,
     thinkingLevel: normalizeThinkingLevel(context.session.thinkingLevel),
+    ...(sessionId ? { sessionId } : {}),
   };
   return summary;
 }

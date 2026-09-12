@@ -159,6 +159,88 @@ test('discovery reconciles two host leases and backend owners with true process 
   ]);
 });
 
+test('discovery rejects duplicate process birth rows instead of selecting the last PID row', async () => {
+  const registered = host('host-reused-pid', 501, 'process-generation-reused');
+  const result = await discoverAnalyticsHostWriters({
+    workspaceId: 'workspace-discovery',
+    registry: registryReader([registered]),
+    runtimeRootPath: 'unused-injected-root',
+    runtimeIdentity: IDENTITY,
+    analyticsGenerationId: 'analytics-generation',
+    readRuntimeLeases: async () => ({
+      leases: [lease(501, RUNTIME_GENERATION_A, 1_500)],
+      complete: true,
+      reasons: [],
+    }),
+    readProcessOwners: async () => ({
+      processes: [
+        { processId: 501, processCreatedAtMs: 1_000 },
+        // A reused PID with conflicting birth evidence must not overwrite the
+        // first row and accidentally make the host look reconciled.
+        { processId: 501, processCreatedAtMs: 2_000 },
+        { processId: 601, processCreatedAtMs: 1_100 },
+      ],
+      backendOwners: [backend(601, 501, 1_000, 1_100, 'host-reused-pid', 'analytics-generation')],
+      complete: true,
+      reasons: [],
+    }),
+  });
+
+  assert.equal(result.complete, false);
+  assert.equal(result.hosts[0]?.status, 'unknown');
+  assert.ok(result.reasons.some(({ code, processId }) => (
+    code === 'process-pid-ambiguous' && processId === 501
+  )));
+  assert.ok(result.hosts[0]?.reasons.some(({ code }) => code === 'process-pid-ambiguous'));
+  assert.ok(!result.hosts[0]?.reasons.some(({ code }) => code === 'runtime-lease-birth-after-lease-write'));
+});
+
+test('discovery rejects duplicate host and backend PIDs before map construction', async () => {
+  const hosts = [
+    host('host-a', 501, 'process-generation-a'),
+    host('host-b', 501, 'process-generation-b'),
+  ];
+  const duplicateBackend = backend(601, 501, 10_000, 11_000, 'host-a', 'analytics-generation');
+  const result = await discoverAnalyticsHostWriters({
+    workspaceId: 'workspace-discovery',
+    registry: registryReader(hosts),
+    runtimeRootPath: 'unused-injected-root',
+    runtimeIdentity: IDENTITY,
+    analyticsGenerationId: 'analytics-generation',
+    readRuntimeLeases: async () => ({
+      leases: [lease(501, RUNTIME_GENERATION_A)],
+      complete: true,
+      reasons: [],
+    }),
+    readProcessOwners: async () => ({
+      processes: [
+        { processId: 501, processCreatedAtMs: 10_000 },
+        { processId: 601, processCreatedAtMs: 11_000 },
+      ],
+      backendOwners: [
+        duplicateBackend,
+        { ...duplicateBackend, analyticsHostInstanceId: 'host-b' },
+      ],
+      complete: true,
+      reasons: [],
+    }),
+  });
+
+  assert.equal(result.complete, false);
+  assert.deepEqual(result.hosts.map(({ hostInstanceId, status }) => ({ hostInstanceId, status })), [
+    { hostInstanceId: 'host-a', status: 'unknown' },
+    { hostInstanceId: 'host-b', status: 'unknown' },
+  ]);
+  assert.ok(result.reasons.some(({ code, processId }) => (
+    code === 'host-process-ambiguous' && processId === 501
+  )));
+  assert.ok(result.reasons.some(({ code, processId }) => (
+    code === 'backend-process-ambiguous' && processId === 601
+  )));
+  assert.ok(result.hosts.every((record) => record.reasons.some(({ code }) => code === 'host-process-ambiguous')));
+  assert.ok(result.hosts.every((record) => record.reasons.some(({ code }) => code === 'backend-process-ambiguous')));
+});
+
 test('old unregistered runtime leases and backend owners remain explicit unsupported evidence', async () => {
   const registered = host('host-current', 501, 'process-generation-current');
   const oldLease = lease(26828, RUNTIME_GENERATION_B);
@@ -223,6 +305,25 @@ test('Windows process birth parser accepts WMI DMTF and rejects unavailable valu
   assert.equal(parseWindowsProcessCreationDate('20260913120000.000000+000'), Date.UTC(2026, 8, 13, 12));
   assert.equal(parseWindowsProcessCreationDate('not-a-creation-date'), null);
   assert.equal(parseWindowsProcessCreationDate(null), null);
+});
+
+test('process census parser rejects duplicate PID evidence before backend ownership parsing', () => {
+  const result = parseWindowsProcessOwnerRows([
+    {
+      ProcessId: 9001,
+      ProcessCreatedAtMs: 1_000,
+      CommandLine: 'node backend.js --sdkPath C:\\pie --hostPid 9000 --backendGeneration 1',
+    },
+    {
+      ProcessId: 9001,
+      ProcessCreatedAtMs: 2_000,
+      CommandLine: 'node backend.js --sdkPath D:\\other-pie --hostPid 9000 --backendGeneration 2',
+    },
+  ]);
+
+  assert.equal(result.complete, false);
+  assert.deepEqual(result.reasons, [{ code: 'process-pid-ambiguous', processId: 9001 }]);
+  assert.deepEqual(result.backendOwners, []);
 });
 
 test('recognized backend with incomplete ownership is incomplete and never emitted', () => {
