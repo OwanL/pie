@@ -3192,3 +3192,60 @@ heap reservation rather than a leak. The 1M topology samples contradict that: re
 ingested* (about 69 MiB at 10k facts, ~200 MiB by 500k, peaking as high as 287 MiB), so it is not a flat
 idle reservation. The cause is not yet proven and the gate remains open.
 
+## A confirmed quadratic defect on the ingest acknowledgement path
+
+`recorder-worker-entry.ts` calls `recorder.readDeliveryAccounting()` after **every** capture batch, and
+uses exactly one field from it: `completeDetailWatermark`. That field is already an O(1) counter
+(`details_accepted` on `analytics_delivery_accounting`). But `readDeliveryAccounting()` also computes
+`detailStorageStats()`, which runs two unbounded whole-table aggregates:
+
+```sql
+SELECT COUNT(*), COALESCE(SUM(logical_bytes), 0) FROM analytics_detail_payloads
+SELECT COUNT(*), COALESCE(SUM(logical_bytes), 0) FROM analytics_detail_content
+```
+
+At 1M facts delivered in 256-record batches there are roughly 3,900 acknowledgements, each scanning a
+table that grows as the tier proceeds, so the cost is O(batches x rows) — quadratic. Both aggregates are
+computed per batch and then discarded, because the worker only reads the watermark.
+
+This is the same defect class as the previously documented `storage` command, which exceeded the query
+client's 10-second default with a full-table `SUM(LENGTH(payload_json))` until `facts_payload_bytes`
+became a maintained counter. The planned fix is the same shape and stays deliberately narrow: give the
+acknowledgement path a reader that fetches only the watermark from the accounting row, and leave
+`detailStorageStats()` as the whole-table aggregate for the explicit `storage`/summary commands, which
+are called rarely and where an exact aggregate is the point.
+
+**Rejected approach, recorded so it is not retried.** Maintaining the detail totals with SQLite triggers
+looked attractive because triggers see what a write actually did, which correctly handles `INSERT OR
+IGNORE` on shared content, the last-owner content cleanup, and `ON DELETE CASCADE`. It fails the upgrade
+tests: the v1-upgrade fixture drops `analytics_delivery_accounting` and rebuilds
+`analytics_detail_payloads` through `ALTER TABLE ... DROP COLUMN`, and SQLite's copy-and-rename during
+that rebuild fires the trigger against the dropped table —
+`error in trigger analytics_detail_payload_count_insert: no such table: main.analytics_delivery_accounting`.
+Schema-version churn plus trigger lifetime is more fragile than the narrow reader.
+
+**Operator error worth recording.** A qualification run was invalidated by rebuilding `extension/out`
+while it was in flight. The run spawns recorder helpers from that directory as it progresses, so helpers
+started after the rebuild loaded half-finished recorder code and the run died with
+`no such column: detail_payload_count`. A run's recorded provenance and build identity only describe what
+was true when it started; the tree must stay frozen for the whole run.
+
+## Topology samples now carry heap detail
+
+The memory topology samples previously recorded only `rssBytes`. RSS cannot distinguish a retained heap
+from V8 reserving address space, which is exactly the open question behind `recorderWorkerRss`, so
+samples now also record `heapTotalBytes`, `heapUsedBytes`, `externalBytes` and `arrayBuffersBytes`. The
+validator requires the original keys exactly, allows these optionally, and checks
+`heapUsed <= heapTotal <= RSS` when present, so a nonsense sample fails rather than being filed as
+evidence. The first attempt recorded the fields without relaxing the validator's exact key-set
+comparison, so every worker was rejected as "an invalid shape"; that was caught by the baseline run
+before any 1M tier was attempted.
+
+## The cross-host delete figure is now attributed
+
+`crossHostDeleteVisibleMs` measured a `deleteSession` *plus* a following query, and only the sum was
+recorded. The 1M figure of 18.9 s against 97 ms at baseline could not be attributed between the two.
+The harness now reports `deleteOnlyMs` and `deleteObservationQueryMs` separately. At baseline the split
+is 41 ms and 58 ms.
+
+
