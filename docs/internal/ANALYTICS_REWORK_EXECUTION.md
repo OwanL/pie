@@ -3187,10 +3187,38 @@ needle, and a missing file (which throws `ENOENT` rather than silently reporting
 correctly invalidates the baseline and costs one fresh baseline run plus one full 1M run. Harness
 changes should therefore be batched rather than made one at a time.
 
-**Correction to an earlier entry.** The `recorderWorkerRss` gate was previously recorded as a V8 idle
-heap reservation rather than a leak. The 1M topology samples contradict that: recorder RSS *tracks rows
-ingested* (about 69 MiB at 10k facts, ~200 MiB by 500k, peaking as high as 287 MiB), so it is not a flat
-idle reservation. The cause is not yet proven and the gate remains open.
+**Correction to an earlier entry, and to the correction itself.** This gate has now been mis-explained
+twice, in both directions, so the reasoning is recorded rather than just the conclusion.
+
+The original entry said the gate was a V8 idle heap reservation rather than a leak. That was then
+"corrected" to say the topology samples contradicted it, because RSS clearly tracks rows ingested
+(about 69 MiB at 10k facts, ~200 MiB by 500k, peaking as high as 287 MiB) and so could not be a flat
+idle reservation. That correction was itself wrong: it reasoned from RSS alone, which cannot separate a
+retained heap from reserved address space — the exact question at issue.
+
+Topology samples now record the heap breakdown, and at 1M they are unambiguous:
+
+| Facts ingested | rss (MiB) | heapTotal (MiB) | heapUsed (MiB) |
+|---|---|---|---|
+| 10,000 | 69.0 | 25.5 | 12.7 |
+| 310,000 | 187.1 | 141.5 | 24.9 |
+| 510,000 | 199.2 | 139.5 | 55.5 |
+| 910,000 | 198.8 | 141.5 | 17.9 |
+
+`heapUsed` **falls** from 55.5 to 17.9 MiB between the last two samples while rows only increase. A leak
+accumulating with rows cannot shrink; only garbage collection can produce that, which means the live
+heap is small and bounded. Throughout the run `heapUsed` stays around 12–25 MiB while `heapTotal` climbs
+to and then plateaus at ~141 MiB, and RSS sits roughly 60 MiB above `heapTotal`.
+
+So the original idle-reservation explanation was right and the correction was the error: this is V8
+reserving heap as the per-batch allocation churn proceeds, not retained data. RSS tracking rows ingested
+is consistent with that, because reservation grows with allocation volume, not with live set.
+
+The consequence for the gate is unchanged and still needs a decision: the measured peaks (268–287 MiB)
+sit just above the 256 MiB ceiling, and the live heap is a small fraction of that. The opt-in
+`maxOldSpaceMb` ceiling already exists; bounding the reservation is the lever, and it must not be adopted
+silently or used to redefine the gate without full-run evidence.
+
 
 ## A confirmed quadratic defect on the ingest acknowledgement path
 
