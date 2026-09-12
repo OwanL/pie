@@ -215,6 +215,25 @@ export function validateMemoryTopologySamples(samples, { expectedPlan, recorderW
         errors.push(`memory topology sample[${index}] worker[${workerIndex}] RSS is invalid`);
         continue;
       }
+      // Optional heap detail. RSS alone cannot distinguish a retained heap from
+      // V8 reserving address space, which is the open question behind the
+      // recorderWorkerRss gate, so record it and validate its internal
+      // consistency when present.
+      for (const field of ['heapTotalBytes', 'heapUsedBytes', 'externalBytes', 'arrayBuffersBytes']) {
+        const value = worker[field];
+        if (value === undefined) continue;
+        if (!Number.isSafeInteger(value) || value < 0) {
+          errors.push(`memory topology sample[${index}] worker[${workerIndex}] ${field} is invalid`);
+        }
+      }
+      if (Number.isSafeInteger(worker.heapUsedBytes) && Number.isSafeInteger(worker.heapTotalBytes)
+        && worker.heapUsedBytes > worker.heapTotalBytes) {
+        errors.push(`memory topology sample[${index}] worker[${workerIndex}] heapUsed exceeds heapTotal`);
+      }
+      if (Number.isSafeInteger(worker.rssBytes) && Number.isSafeInteger(worker.heapTotalBytes)
+        && worker.heapTotalBytes > worker.rssBytes) {
+        errors.push(`memory topology sample[${index}] worker[${workerIndex}] heapTotal exceeds RSS`);
+      }
       workerTotal += worker.rssBytes;
       workerMaximum = Math.max(workerMaximum, worker.rssBytes);
       if (!Number.isSafeInteger(workerTotal)) errors.push(`memory topology sample[${index}] worker RSS total exceeds safe integer range`);

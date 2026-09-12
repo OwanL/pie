@@ -28,7 +28,7 @@ const outRoot = path.resolve(extensionRoot, 'out');
 const workerScript = path.join(outRoot, 'analytics-recorder-worker.js');
 const queryWorkerScript = path.join(outRoot, 'analytics-query-worker.js');
 const REPORT_SCHEMA_VERSION = 5;
-const HARNESS_VERSION = 'p0-baseline-scale-v5-fixture-identity-fix';
+const HARNESS_VERSION = 'p0-baseline-scale-v6-heap-and-delete-attribution';
 let AnalyticsRecorderSupervisor;
 let AnalyticsCaptureCapacityError;
 let SqliteAnalyticsRecorder;
@@ -1139,6 +1139,13 @@ try {
         instanceId: entry.process.workerIdentity.instanceId,
       },
       rssBytes: entry.process.rss,
+      // Heap detail alongside RSS. Separating a retained heap from V8 reserving
+      // address space is the open question behind the recorderWorkerRss gate, and
+      // RSS alone cannot answer it. The validator checks these when present.
+      heapTotalBytes: entry.process.heapTotal,
+      heapUsedBytes: entry.process.heapUsed,
+      externalBytes: entry.process.external,
+      arrayBuffersBytes: entry.process.arrayBuffers,
     }));
     const totalWorkerRssBytes = workers.reduce((sum, worker) => sum + worker.rssBytes, 0);
     const maxWorkerRssBytes = Math.max(...workers.map((worker) => worker.rssBytes));
@@ -1492,11 +1499,22 @@ try {
   assert.equal(refreshVisible.settlements.length, 1);
   const deleteStarted = performance.now();
   await refreshWriter.deleteSession(scopedId('cross-host-refresh-root'), scopedId('cross-host-delete'), 1_780_300_000_000);
+  const deleteOnlyMs = performance.now() - deleteStarted;
   const refreshDeleted = await queryClient.query({ type: 'providerSettlements', rootSessionId: scopedId('cross-host-refresh-root') });
   const crossHostDeleteVisibleMs = performance.now() - deleteStarted;
   assert.equal(refreshDeleted.settlements.length, 0);
   await shutdownHelper(refreshWriter);
-  report.results.crossHostRefresh = { crossHostCommitVisibleMs, crossHostDeleteVisibleMs, replayedHistory: false };
+  // Report the delete and the following query separately. The combined figure
+  // was the only number previously recorded, and at 1M it was 18.9 s against
+  // 97 ms at baseline, which cannot be attributed without this split: the delete
+  // itself and the observing query are different costs with different fixes.
+  report.results.crossHostRefresh = {
+    crossHostCommitVisibleMs,
+    crossHostDeleteVisibleMs,
+    deleteOnlyMs,
+    deleteObservationQueryMs: crossHostDeleteVisibleMs - deleteOnlyMs,
+    replayedHistory: false,
+  };
 
   // Queue overflow is visible and bounded, not silently dropped or converted
   // into a production outage policy.
